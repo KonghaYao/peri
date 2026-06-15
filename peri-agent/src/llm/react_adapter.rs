@@ -46,6 +46,32 @@ impl BaseModelReactLLM {
         self.session_id = Some(session_id.into());
         self
     }
+
+    /// 将 LLM 响应的元数据（stop_reason / source_message / usage / model / streamed）
+    /// 应用到已构造的 [`Reasoning`] 上，返回最终结果。
+    ///
+    /// Extract Method：`generate_reasoning` 中三个分支（ToolUse、has_tool_calls 防御、
+    /// 最终答案）都重复设置同样 5 个字段，统一在此完成。`response` 以 destructure
+    /// 方式消费，避免 move 后部分访问的借用错误。
+    fn finalize_reasoning(
+        mut reasoning: Reasoning,
+        response: crate::llm::types::LlmResponse,
+        model: String,
+        streamed: bool,
+        usage: Option<crate::llm::types::TokenUsage>,
+    ) -> Reasoning {
+        let crate::llm::types::LlmResponse {
+            stop_reason,
+            message,
+            ..
+        } = response;
+        reasoning.stop_reason = stop_reason;
+        reasoning.source_message = Some(message);
+        reasoning.usage = usage;
+        reasoning.model = model;
+        reasoning.streamed = streamed;
+        reasoning
+    }
 }
 
 #[async_trait]
@@ -132,13 +158,10 @@ impl ReactLLM for BaseModelReactLLM {
                 .collect();
 
             if !calls.is_empty() {
-                let mut r = Reasoning::with_tools(thought, calls);
-                r.stop_reason = response.stop_reason.clone();
-                r.source_message = Some(response.message);
-                r.usage = usage;
-                r.model = model_name;
-                r.streamed = streamed;
-                return Ok(r);
+                let r = Reasoning::with_tools(thought, calls);
+                return Ok(Self::finalize_reasoning(
+                    r, response, model_name, streamed, usage,
+                ));
             }
 
             // fallback：从 tool_calls() 读（兼容旧路径）
@@ -155,21 +178,15 @@ impl ReactLLM for BaseModelReactLLM {
                 } else {
                     thought
                 };
-                let mut r = Reasoning::with_answer("", text);
-                r.stop_reason = response.stop_reason.clone();
-                r.source_message = Some(response.message);
-                r.usage = usage;
-                r.model = model_name;
-                r.streamed = streamed;
-                return Ok(r);
+                let r = Reasoning::with_answer("", text);
+                return Ok(Self::finalize_reasoning(
+                    r, response, model_name, streamed, usage,
+                ));
             }
-            let mut r = Reasoning::with_tools(thought, calls);
-            r.stop_reason = response.stop_reason.clone();
-            r.source_message = Some(response.message);
-            r.usage = usage;
-            r.model = model_name;
-            r.streamed = streamed;
-            Ok(r)
+            let r = Reasoning::with_tools(thought, calls);
+            Ok(Self::finalize_reasoning(
+                r, response, model_name, streamed, usage,
+            ))
         } else if response.message.has_tool_calls() {
             // 防御：某些 provider（如 DeepSeek）可能返回 stop_reason != ToolUse
             // 但响应内容含 tool_use blocks。此时必须按工具调用处理，
@@ -186,13 +203,10 @@ impl ReactLLM for BaseModelReactLLM {
                 "stop_reason 与内容不一致：响应含 tool_use 但 stop_reason 非 ToolUse，按工具调用处理"
             );
             let text = response.message.content();
-            let mut r = Reasoning::with_tools(text, calls);
-            r.stop_reason = response.stop_reason.clone();
-            r.source_message = Some(response.message);
-            r.usage = usage;
-            r.model = model_name;
-            r.streamed = streamed;
-            Ok(r)
+            let r = Reasoning::with_tools(text, calls);
+            Ok(Self::finalize_reasoning(
+                r, response, model_name, streamed, usage,
+            ))
         } else {
             // 最终答案：text_content() 提取所有文字（跳过 reasoning block）
             let mut text = response.message.content();
@@ -200,13 +214,10 @@ impl ReactLLM for BaseModelReactLLM {
                 tracing::warn!("LLM 输出因 max_tokens 截断，回答可能不完整");
                 text.push_str("\n\n[⚠ 回答因输出长度限制被截断]");
             }
-            let mut r = Reasoning::with_answer("", text);
-            r.stop_reason = response.stop_reason.clone();
-            r.source_message = Some(response.message);
-            r.usage = usage;
-            r.model = model_name;
-            r.streamed = streamed;
-            Ok(r)
+            let r = Reasoning::with_answer("", text);
+            Ok(Self::finalize_reasoning(
+                r, response, model_name, streamed, usage,
+            ))
         }
     }
 

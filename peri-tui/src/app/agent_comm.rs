@@ -22,6 +22,49 @@ pub struct RetryStatus {
 /// 后台任务结构化结果（供 auto-continuation 注入合成 tool_use + tool_result）
 pub type BgTaskResult = peri_agent::agent::events::BackgroundTaskResult;
 
+/// 后台任务（Background Agent）相关状态。
+///
+/// 4 个字段总是一起重置（用户主动发起新一轮时），集中到 `reset_for_new_round()`
+/// 避免散落重置语句遗漏导致跨轮次状态污染。
+#[derive(Debug, Default)]
+pub struct BgTaskState {
+    /// 后台任务全部完成后的待提交 continuation（结构化结果，用于注入合成 tool_use + tool_result）
+    pub pending_continuation: Option<Vec<BgTaskResult>>,
+    /// Agent 已完成（Done/Error）但仍有后台任务在运行
+    pub agent_done_pending: bool,
+    /// Agent 尚未 Done 但后台任务已完成的通知缓存（显示文本，供 pre-Done 路径使用）
+    pub pre_done_completions: Vec<String>,
+    /// Agent 尚未 Done 但后台任务已完成的结构化结果缓存（供 auto-continuation 路径使用）
+    pub pre_done_results: Vec<BgTaskResult>,
+}
+
+impl BgTaskState {
+    /// 用户主动发起新一轮提交时清理后台任务 continuation 状态
+    /// （覆盖自动 continuation，避免 stale 数据注入）。
+    pub fn reset_for_new_round(&mut self) {
+        self.pending_continuation = None;
+        self.agent_done_pending = false;
+        self.pre_done_completions.clear();
+        self.pre_done_results.clear();
+    }
+}
+
+/// LSP 诊断计数（errors / warnings / files_with_errors 总是一起重置）。
+#[derive(Debug, Default)]
+pub struct LspDiagnostics {
+    pub errors: usize,
+    pub warnings: usize,
+    pub files_with_errors: usize,
+}
+
+impl LspDiagnostics {
+    pub fn reset(&mut self) {
+        self.errors = 0;
+        self.warnings = 0;
+        self.files_with_errors = 0;
+    }
+}
+
 /// Agent 通信状态：事件接收、交互弹窗、取消/计时
 pub struct AgentComm {
     /// ACP notification receiver (new path, replaces agent_rx)
@@ -57,22 +100,14 @@ pub struct AgentComm {
     pub session_start_time: Option<std::time::Instant>,
     /// 会话级工具调用次数（统计 ToolStart 事件数）
     pub tool_call_count: u32,
-    /// 后台任务全部完成后的待提交 continuation（结构化结果，用于注入合成 tool_use + tool_result）
-    pub pending_bg_continuation: Option<Vec<BgTaskResult>>,
-    /// Agent 已完成（Done/Error）但仍有后台任务在运行
-    pub agent_done_pending_bg: bool,
-    /// Agent 尚未 Done 但后台任务已完成的通知缓存（显示文本，供 pre-Done 路径使用）
-    pub pre_done_bg_completions: Vec<String>,
-    /// Agent 尚未 Done 但后台任务已完成的结构化结果缓存（供 auto-continuation 路径使用）
-    pub pre_done_bg_results: Vec<BgTaskResult>,
+    /// 后台任务（Background Agent）相关状态：continuation + pre-Done 缓存
+    pub bg_task_state: BgTaskState,
     /// 本轮 agent 是否已产生回复（收到 TextChunk/ToolStart/AssistantChunk）
     pub agent_replied: bool,
     /// 标记 Interrupted/Error 处理器已完成 reconcile，Done 到达时应跳过重复 reconcile
     pub reconcile_already_done: bool,
     /// LSP 诊断计数（由 LspDiagnostics 事件更新）
-    pub lsp_errors: usize,
-    pub lsp_warnings: usize,
-    pub lsp_files_with_errors: usize,
+    pub lsp_diagnostics: LspDiagnostics,
     /// 会话级 ToolSearch 索引（跨 submit 复用，缓存 deferred tools 提示词）
     pub tool_search_index: Option<std::sync::Arc<peri_middlewares::tool_search::ToolSearchIndex>>,
     /// 会话级共享工具注册表（跨 submit 复用）
@@ -105,15 +140,10 @@ impl Default for AgentComm {
             subagent_depth: 0,
             session_start_time: None,
             tool_call_count: 0,
-            pending_bg_continuation: None,
-            agent_done_pending_bg: false,
-            pre_done_bg_completions: Vec::new(),
-            pre_done_bg_results: Vec::new(),
+            bg_task_state: BgTaskState::default(),
             agent_replied: false,
             reconcile_already_done: false,
-            lsp_errors: 0,
-            lsp_warnings: 0,
-            lsp_files_with_errors: 0,
+            lsp_diagnostics: LspDiagnostics::default(),
             tool_search_index: None,
             shared_tools: None,
             pending_acp_request_id: None,

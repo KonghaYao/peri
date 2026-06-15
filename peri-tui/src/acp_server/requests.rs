@@ -75,15 +75,13 @@ pub(crate) async fn handle_request(
             );
 
             // ── Freeze system prompt data at session creation ──
-            let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
-            let frozen_language = cfg.peri_config.read().config.language.clone();
-
-            let frozen_data = peri_acp::session::frozen::build_frozen_session_data(
+            // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
+            // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
+            cfg.session_manager.ensure_session(&session_id, &cwd);
+            let frozen_data = cfg.session_manager.build_frozen_data(
                 &cwd,
-                frozen_language.as_deref(),
                 &cfg.plugin_skill_dirs,
                 &cfg.plugin_agent_dirs,
-                &frozen_date,
             );
 
             let state = sessions.get_mut(&session_id).unwrap();
@@ -250,14 +248,11 @@ pub(crate) async fn handle_request(
             }
 
             // ── Freeze session data at load time ──
-            let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
-            let frozen_language = cfg.peri_config.read().config.language.clone();
-            let frozen_data = peri_acp::session::frozen::build_frozen_session_data(
+            cfg.session_manager.ensure_session(req_session_id, cwd);
+            let frozen_data = cfg.session_manager.build_frozen_data(
                 cwd,
-                frozen_language.as_deref(),
                 &cfg.plugin_skill_dirs,
                 &cfg.plugin_agent_dirs,
-                &frozen_date,
             );
             if let Some(s) = sessions.get_mut(req_session_id) {
                 s.frozen = Some(frozen_data);
@@ -334,6 +329,8 @@ pub(crate) async fn handle_request(
                 }
                 info!(session_id = %req_session_id, "Session closed");
             }
+            // 同步从 SessionManager 移除 AcpSession 记录（取消所有 cascade 子 agent）
+            let _ = cfg.session_manager.close_session(req_session_id).await;
             let resp = CloseSessionResponse::new();
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
@@ -366,14 +363,11 @@ pub(crate) async fn handle_request(
             }
 
             // ── Freeze session data at resume time ──
-            let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
-            let frozen_language = cfg.peri_config.read().config.language.clone();
-            let frozen_data = peri_acp::session::frozen::build_frozen_session_data(
+            cfg.session_manager.ensure_session(req_session_id, cwd);
+            let frozen_data = cfg.session_manager.build_frozen_data(
                 cwd,
-                frozen_language.as_deref(),
                 &cfg.plugin_skill_dirs,
                 &cfg.plugin_agent_dirs,
-                &frozen_date,
             );
             if let Some(s) = sessions.get_mut(req_session_id) {
                 s.frozen = Some(frozen_data);
@@ -401,7 +395,7 @@ pub(crate) async fn handle_request(
             let (new_thread_id, copied_history) =
                 dispatch::fork_session(cfg.thread_store.as_ref(), source_id, &source_history, cwd)
                     .await
-                    .map_err(|e| AcpError::new(-32603, e))?;
+                    .map_err(|e| AcpError::new(-32603, format!("{e}")))?;
 
             let new_session_id = new_thread_id.clone();
             sessions.insert(
@@ -419,14 +413,11 @@ pub(crate) async fn handle_request(
             );
 
             // ── Freeze session data at fork time ──
-            let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
-            let frozen_language = cfg.peri_config.read().config.language.clone();
-            let frozen_data = peri_acp::session::frozen::build_frozen_session_data(
+            cfg.session_manager.ensure_session(&new_session_id, cwd);
+            let frozen_data = cfg.session_manager.build_frozen_data(
                 cwd,
-                frozen_language.as_deref(),
                 &cfg.plugin_skill_dirs,
                 &cfg.plugin_agent_dirs,
-                &frozen_date,
             );
             if let Some(s) = sessions.get_mut(&new_session_id) {
                 s.frozen = Some(frozen_data);

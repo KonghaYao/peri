@@ -308,7 +308,7 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
     // LSP 诊断计数（瞬时事件）
     {
         let agent = &app.session_mgr.current().agent;
-        if agent.lsp_errors > 0 || agent.lsp_warnings > 0 {
+        if agent.lsp_diagnostics.errors > 0 || agent.lsp_diagnostics.warnings > 0 {
             if has_content {
                 left_spans.push(Span::styled(" · ", Style::default().fg(theme::MUTED)));
             }
@@ -316,8 +316,14 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
                 lc.tr_args(
                     "statusbar-lsp-diag",
                     &[
-                        ("errors".into(), (agent.lsp_errors as i64).into()),
-                        ("warnings".into(), (agent.lsp_warnings as i64).into()),
+                        (
+                            "errors".into(),
+                            (agent.lsp_diagnostics.errors as i64).into(),
+                        ),
+                        (
+                            "warnings".into(),
+                            (agent.lsp_diagnostics.warnings as i64).into(),
+                        ),
                     ],
                 ),
                 Style::default().fg(theme::MUTED),

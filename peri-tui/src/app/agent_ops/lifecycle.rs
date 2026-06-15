@@ -97,7 +97,11 @@ impl App {
         }
         // 后台任务：保持通道存活
         if !self.session_mgr.current_mut().background_agents.is_empty() {
-            self.session_mgr.current_mut().agent.agent_done_pending_bg = true;
+            self.session_mgr
+                .current_mut()
+                .agent
+                .bg_task_state
+                .agent_done_pending = true;
             tracing::info!(
                 count = self.session_mgr.current_mut().background_agents.len(),
                 "agent done but background tasks still running, keeping channel alive"
@@ -108,27 +112,34 @@ impl App {
                 .session_mgr
                 .current_mut()
                 .agent
-                .pre_done_bg_results
+                .bg_task_state
+                .pre_done_results
                 .is_empty()
             {
                 let results: Vec<_> = self
                     .session_mgr
                     .current_mut()
                     .agent
-                    .pre_done_bg_results
+                    .bg_task_state
+                    .pre_done_results
                     .drain(..)
                     .collect();
                 tracing::info!(
                     count = results.len(),
                     "Done: processing pre-done background task completions, setting continuation"
                 );
-                self.session_mgr.current_mut().agent.pending_bg_continuation = Some(results);
+                self.session_mgr
+                    .current_mut()
+                    .agent
+                    .bg_task_state
+                    .pending_continuation = Some(results);
             }
             // 清理显示文本缓存
             self.session_mgr
                 .current_mut()
                 .agent
-                .pre_done_bg_completions
+                .bg_task_state
+                .pre_done_completions
                 .clear();
         }
         self.cleanup_agent_state(None);
@@ -322,33 +333,44 @@ impl App {
         self.session_mgr.current_mut().agent.reconcile_already_done = true;
         // 后台任务：保持通道存活
         if !self.session_mgr.current_mut().background_agents.is_empty() {
-            self.session_mgr.current_mut().agent.agent_done_pending_bg = true;
+            self.session_mgr
+                .current_mut()
+                .agent
+                .bg_task_state
+                .agent_done_pending = true;
         } else {
             if !self
                 .session_mgr
                 .current_mut()
                 .agent
-                .pre_done_bg_results
+                .bg_task_state
+                .pre_done_results
                 .is_empty()
             {
                 let results: Vec<_> = self
                     .session_mgr
                     .current_mut()
                     .agent
-                    .pre_done_bg_results
+                    .bg_task_state
+                    .pre_done_results
                     .drain(..)
                     .collect();
                 tracing::info!(
                     count = results.len(),
                     "Error: processing pre-done background task completions, setting continuation"
                 );
-                self.session_mgr.current_mut().agent.pending_bg_continuation = Some(results);
+                self.session_mgr
+                    .current_mut()
+                    .agent
+                    .bg_task_state
+                    .pending_continuation = Some(results);
             }
             // 清理显示文本缓存
             self.session_mgr
                 .current_mut()
                 .agent
-                .pre_done_bg_completions
+                .bg_task_state
+                .pre_done_completions
                 .clear();
         }
         let err_label = format!("ERROR: {}", error_msg);

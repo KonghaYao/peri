@@ -3,13 +3,10 @@ use super::*;
 impl App {
     /// 打开 /betas 面板
     pub fn open_betas_panel(&mut self) {
-        let cfg = self
-            .services
-            .peri_config
-            .as_ref()
-            .cloned()
-            .unwrap_or_default();
-        let panel = crate::app::betas_panel::BetasPanel::from_config(&cfg);
+        let panel = {
+            let cfg_guard = self.services.peri_config.read();
+            crate::app::betas_panel::BetasPanel::from_config(&cfg_guard)
+        };
         self.open_panel(PanelState::Betas(panel));
     }
 

@@ -58,36 +58,36 @@ pub(crate) async fn run(params: PromptExecParams) {
     let provider_snapshot = ctx.provider.read().clone();
     let peri_config_snapshot = Arc::new(ctx.peri_config.read().clone());
 
-    let result = executor::execute_prompt(
-        &provider_snapshot,
-        peri_config_snapshot,
-        &agent_cwd,
+    let result = executor::execute_prompt(executor::PromptExecutionContext {
+        provider: provider_snapshot,
+        peri_config: peri_config_snapshot,
+        cwd: agent_cwd,
+        session_id: sid.clone(),
+        cancel,
+        event_sink,
+        broker,
+        permission_mode: ctx.permission_mode.clone(),
         content,
         frozen,
         history,
-        vec![], // incoming_recalls
+        incoming_recalls: vec![],
         is_empty_history,
-        ctx.permission_mode.clone(),
-        event_sink,
-        cancel,
-        broker,
-        ctx.plugin_skill_dirs.clone(),
-        ctx.plugin_agent_dirs.clone(),
-        ctx.hook_groups.clone(),
-        Some(ctx.cron_scheduler.clone()),
-        sid.clone(),
-        ctx.mcp_pool.clone(),
-        ctx.channel_state.clone(),
-        ctx.tool_search_index.clone(),
-        ctx.shared_tools.clone(),
-        ctx.plugin_lsp_servers.clone(),
-        ctx.langfuse_session.clone(),
-        pool.clone(),
-        Some(Arc::clone(&ctx.thread_store)),
-        Some(thread_id.clone()),
-        None,   // session_manager（stdio 使用自定义 SessionInfo，不走 SessionManager）
-        vec![], // bg_results（stdio 无后台任务）
-    )
+        bg_results: vec![], // stdio 无后台任务
+        plugin_skill_dirs: ctx.plugin_skill_dirs.clone(),
+        plugin_agent_dirs: ctx.plugin_agent_dirs.clone(),
+        hook_groups: ctx.hook_groups.clone(),
+        cron_scheduler: Some(ctx.cron_scheduler.clone()),
+        mcp_pool: ctx.mcp_pool.clone(),
+        channel_state: ctx.channel_state.clone(),
+        tool_search_index: ctx.tool_search_index.clone(),
+        shared_tools: ctx.shared_tools.clone(),
+        lsp_servers: ctx.plugin_lsp_servers.clone(),
+        langfuse_session: ctx.langfuse_session.clone(),
+        pool: pool.clone(),
+        thread_store: Some(Arc::clone(&ctx.thread_store)),
+        thread_id: Some(thread_id.clone()),
+        session_manager: Some(ctx.session_manager.clone()),
+    })
     .await;
 
     // Restore AgentPool back into session

@@ -56,6 +56,12 @@ pub(super) struct StdioContext {
     pub(super) sessions: RwLock<HashMap<String, SessionInfo>>,
     pub(super) thread_store: Arc<dyn ThreadStore>,
     pub(super) langfuse_session: Option<Arc<LangfuseSession>>,
+    /// 共享 SessionManager：用于支撑 cascade cancel 子 agent 与 goal_state。
+    ///
+    /// stdio 本地仍维护 SessionInfo（history/frozen/agent_pool 等），但 SubAgent
+    /// 注册/注销与 goal_state 通过 SessionManager 中的 AcpSession 记录管理，
+    /// 保证 `execute_prompt` 接收 `Some(session_manager)` 时 cascade cancel 生效。
+    pub(super) session_manager: peri_acp::session::SessionManager,
 }
 
 /// Stdio 模式下的简化 Broker：直接 approve 所有权限请求，questions 返回空答案。

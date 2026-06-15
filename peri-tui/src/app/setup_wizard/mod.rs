@@ -253,6 +253,11 @@ pub struct SetupWizardPanel {
     pub submit_error: Option<String>,
     /// 连通性测试结果（bool=成功, String=描述信息）
     pub connectivity_result: Option<(bool, String)>,
+    /// 测试用 home_dir 覆盖（None 时走 `dirs_next::home_dir()` 全局查找）。
+    ///
+    /// Constructor Injection：避免测试依赖全局 `~/.claude/settings.json`，
+    /// 单元测试用 TempDir 隔离即可覆盖迁移路径。
+    pub home_dir_override: Option<std::path::PathBuf>,
 }
 
 impl Default for SetupWizardPanel {
@@ -277,6 +282,7 @@ impl SetupWizardPanel {
             from_command: false,
             submit_error: None,
             connectivity_result: None,
+            home_dir_override: None,
         }
     }
 
@@ -315,9 +321,12 @@ impl SetupWizardPanel {
     ///
     /// CODEX 前缀使用与 OPENAI 相同的默认 provider_id（"openai"）和 key 名检测逻辑。
     pub fn migrate_from_claude_code(&mut self) -> bool {
-        let claude_dir = dirs_next::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".claude");
+        let home = self
+            .home_dir_override
+            .clone()
+            .or_else(dirs_next::home_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let claude_dir = home.join(".claude");
         let settings_path = claude_dir.join("settings.json");
         if !settings_path.exists() {
             return false;

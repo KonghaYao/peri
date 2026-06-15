@@ -67,6 +67,12 @@ pub struct AcpServerConfig {
     pub thread_store: Arc<dyn peri_agent::thread::ThreadStore>,
     pub langfuse_session: Option<Arc<peri_acp::langfuse::LangfuseSession>>,
     pub config_path: std::path::PathBuf,
+    /// 共享 SessionManager：用于支撑 cascade cancel 子 agent 与 goal_state。
+    ///
+    /// TUI 本地仍维护 SessionState（history/frozen/agent_pool 等），但 SubAgent
+    /// 注册/注销与 goal_state 通过 SessionManager 中的 AcpSession 记录管理，
+    /// 保证 `execute_prompt` 接收 `Some(session_manager)` 时 cascade cancel 生效。
+    pub session_manager: peri_acp::session::SessionManager,
 }
 
 // ── Main server loop ────────────────────────────────────────────────────────
@@ -110,6 +116,7 @@ pub async fn run_acp_server(
                     let thread_store = cfg.thread_store.clone();
                     let prompt_session_id = extract_session_id(&params, "").to_string();
                     let langfuse_session = cfg.langfuse_session.clone();
+                    let session_manager = cfg.session_manager.clone();
 
                     // Extract AgentPool from session, wrap in Arc<Mutex> for
                     // in-place modification inside executor.
@@ -158,6 +165,7 @@ pub async fn run_acp_server(
                             &thread_store,
                             langfuse_session,
                             pool_arc.clone(),
+                            session_manager,
                         )
                         .await;
 
@@ -202,66 +210,17 @@ pub async fn run_acp_server(
                                 let llm_provider = pred_provider.read().clone();
                                 tracing::debug!("Prediction: LLM provider ready");
 
-                                let base_llm = peri_agent::llm::BaseModelReactLLM::new(
-                                    llm_provider.into_model(),
-                                );
-                                let llm = peri_agent::llm::RetryableLLM::new(
-                                    base_llm,
-                                    peri_agent::llm::RetryConfig::default(),
-                                );
-
-                                // 构建最小 agent（1 轮、无工具、无中间件）
-                                let directive =
-                                    peri_middlewares::subagent::build_prediction_directive();
-                                let agent = peri_agent::agent::executor::ReActAgent::new(llm)
-                                    .max_iterations(1)
-                                    .with_system_prompt(directive);
-
-                                // 构造 state，注入对话历史
-                                let mut state = peri_agent::agent::state::AgentState::new(&cwd);
-                                for msg in &recent {
-                                    state.add_message(msg.clone());
-                                }
-
-                                tracing::debug!("Prediction: calling LLM");
-                                // 30 秒超时（首次冷启动可能较慢）
-                                let result = tokio::time::timeout(
-                                    std::time::Duration::from_secs(30),
-                                    agent.execute(
-                                        peri_agent::agent::react::AgentInput::text(
-                                            "请根据以上对话预测用户下一步输入",
-                                        ),
-                                        &mut state,
-                                        None,
-                                    ),
+                                // Facade：agent 构建与执行统一由 peri-acp executor 承担，
+                                // TUI 层不再直接构建 ReActAgent（遵守 CLAUDE.md [TRAP]）。
+                                let result = peri_acp::session::executor::execute_prediction(
+                                    llm_provider,
+                                    recent,
+                                    &cwd,
                                 )
                                 .await;
 
                                 match result {
-                                    Ok(Ok(_output)) => {
-                                        // 提取最后一条 AI 消息文本
-                                        let text = state
-                                            .messages()
-                                            .iter()
-                                            .rev()
-                                            .find_map(|m| {
-                                                if matches!(
-                                                    m,
-                                                    peri_agent::messages::BaseMessage::Ai { .. }
-                                                ) {
-                                                    let t = m.content();
-                                                    let trimmed = t.trim();
-                                                    if trimmed.is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(trimmed.to_string())
-                                                    }
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                            .unwrap_or_default();
-
+                                    Ok(text) => {
                                         if !text.is_empty() {
                                             tracing::debug!(%text, "Prediction ready, sending notification");
                                             let _ = pred_transport
@@ -277,10 +236,12 @@ pub async fn run_acp_server(
                                             tracing::debug!("Prediction: LLM returned empty text");
                                         }
                                     }
-                                    Ok(Err(e)) => {
+                                    Err(peri_acp::session::executor::PredictionError::Failed(
+                                        e,
+                                    )) => {
                                         tracing::debug!(error = %e, "Prediction fork failed");
                                     }
-                                    Err(_) => {
+                                    Err(peri_acp::session::executor::PredictionError::Timeout) => {
                                         tracing::debug!("Prediction fork timed out (30s)");
                                     }
                                 }

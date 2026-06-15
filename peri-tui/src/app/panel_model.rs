@@ -3,11 +3,10 @@ use super::*;
 impl App {
     /// 打开 /model 面板
     pub fn open_model_panel(&mut self) {
-        let cfg = self
-            .services
-            .peri_config
-            .get_or_insert_with(PeriConfig::default);
-        let panel = ModelPanel::from_config(cfg);
+        let panel = {
+            let cfg_guard = self.services.peri_config.read();
+            ModelPanel::from_config(&cfg_guard)
+        };
         self.open_panel(PanelState::Model(panel));
     }
 
@@ -34,10 +33,8 @@ impl App {
             };
             alias_label = panel.active_tab.label().to_string();
             effort = panel.buf_thinking_effort.clone();
-            let Some(cfg) = self.services.peri_config.as_mut() else {
-                return;
-            };
-            panel.apply_to_config(cfg);
+            let mut cfg_guard = self.services.peri_config.write();
+            panel.apply_to_config(&mut cfg_guard);
         }
         let effort_display = match effort.as_str() {
             "low" => "Low",
@@ -57,8 +54,10 @@ impl App {
                 ],
             ));
         {
-            let cfg = self.services.peri_config.as_ref().unwrap();
-            if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
+            let cfg_guard = self.services.peri_config.read();
+            if let Err(e) =
+                Self::save_config(&cfg_guard, self.services.config_path_override.as_deref())
+            {
                 self.session_mgr
                     .current_mut()
                     .messages
@@ -67,7 +66,7 @@ impl App {
                         &[("error".into(), e.to_string().into())],
                     ));
             }
-            if let Some(p) = agent::LlmProvider::from_config(cfg) {
+            if let Some(p) = agent::LlmProvider::from_config(&cfg_guard) {
                 self.services.provider_name = p.display_name().to_string();
                 self.services.model_name = p.model_name().to_string();
             }

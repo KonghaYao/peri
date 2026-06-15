@@ -3,9 +3,10 @@
 //! `before_model` 钩子: 每轮 LLM 调用前检查 token 阈值，超过时执行
 //! micro/full compact。compact 后不改变控制流，ReAct 循环自然继续。
 
+use parking_lot::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 
 use async_trait::async_trait;
@@ -100,7 +101,7 @@ impl CompactMiddleware {
     }
 
     fn send_event(&self, event: ExecutorEvent) {
-        if let Some(tx) = self.event_tx.lock().unwrap().as_ref() {
+        if let Some(tx) = self.event_tx.lock().as_ref() {
             let _ = tx.send(event);
         }
     }

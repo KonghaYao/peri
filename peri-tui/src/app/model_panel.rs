@@ -356,10 +356,9 @@ impl ModelPanel {
         let alias_label = panel.active_tab.label().to_string();
         let effort = panel.buf_thinking_effort.clone();
 
-        let Some(cfg) = ctx.services.peri_config.as_mut() else {
-            return;
-        };
-        panel.apply_to_config(cfg);
+        let cfg_arc = ctx.services.peri_config.clone();
+        let mut cfg = cfg_arc.write();
+        panel.apply_to_config(&mut cfg);
 
         let effort_display = match effort.as_str() {
             "low" => "Low",
@@ -380,7 +379,7 @@ impl ModelPanel {
                 ],
             ));
 
-        if let Err(e) = App::save_config(cfg, ctx.services.config_path_override.as_deref()) {
+        if let Err(e) = App::save_config(&cfg, ctx.services.config_path_override.as_deref()) {
             ctx.session_mgr
                 .current_mut()
                 .messages
@@ -390,7 +389,7 @@ impl ModelPanel {
                 ));
         }
 
-        if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
+        if let Some(p) = crate::app::agent::LlmProvider::from_config(&cfg) {
             ctx.services.provider_name = p.display_name().to_string();
             ctx.services.model_name = p.model_name().to_string();
 
@@ -405,14 +404,10 @@ impl ModelPanel {
         }
 
         // 通过 ACP 协议同步到 Server
+        let alias = cfg.config.active_alias.clone();
+        drop(cfg);
         if let Some(ref acp_client) = ctx.acp_client {
             let acp = acp_client.clone();
-            let alias = ctx
-                .services
-                .peri_config
-                .as_ref()
-                .map(|c| c.config.active_alias.clone())
-                .unwrap_or_default();
             let effort = panel.buf_thinking_effort.clone();
             let context_1m_val = panel.buf_context_1m.to_string();
             tokio::spawn(async move {
@@ -425,9 +420,8 @@ impl ModelPanel {
 
     /// 即时应用 1M 上下文开关（不关闭面板）
     fn apply_1m_context(panel: &ModelPanel, ctx: &mut PanelContext<'_>) {
-        let Some(cfg) = ctx.services.peri_config.as_mut() else {
-            return;
-        };
+        let cfg_arc = ctx.services.peri_config.clone();
+        let mut cfg = cfg_arc.write();
         cfg.config.context_1m = Some(panel.buf_context_1m);
 
         if panel.buf_context_1m {
@@ -437,7 +431,7 @@ impl ModelPanel {
                 .push_system_note(ctx.services.lc.tr("app-1m-context-enabled"));
         }
 
-        if let Err(e) = App::save_config(cfg, ctx.services.config_path_override.as_deref()) {
+        if let Err(e) = App::save_config(&cfg, ctx.services.config_path_override.as_deref()) {
             ctx.session_mgr
                 .current_mut()
                 .messages
@@ -448,7 +442,7 @@ impl ModelPanel {
         }
 
         // 同步 context_window 到 TUI 状态
-        if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
+        if let Some(p) = crate::app::agent::LlmProvider::from_config(&cfg) {
             let mut cw = p.context_window();
             if panel.buf_context_1m {
                 cw = 1_000_000;

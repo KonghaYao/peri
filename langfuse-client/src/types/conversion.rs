@@ -2,6 +2,17 @@ use super::{otlp::*, ObservationLevel};
 
 // ─── IngestionEvent → OTLP Spans ───────────────────────
 
+/// Strip dashes from a Langfuse observation/trace ID to derive an
+/// OTel-compatible span/trace ID.
+///
+/// OTel span/trace IDs must be lowercase hex without dashes; Langfuse IDs
+/// are UUID-like strings with dashes. Caller controls Optionality:
+/// `id.as_deref().unwrap_or("")` for required IDs, `.map(build_span_id)`
+/// for optional parent IDs.
+fn build_span_id(id: &str) -> String {
+    id.replace('-', "")
+}
+
 /// Convert a batch of IngestionEvents into an OTLP trace export request.
 ///
 /// Mapping strategy:
@@ -54,7 +65,7 @@ pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> Otel
                     attrs.push(OtelAttribute::string("langfuse.trace.name", name));
                 }
                 // trace.id becomes spanId for the root span; traceId is also set
-                let span_id = body.id.as_deref().unwrap_or("").replace('-', "");
+                let span_id = build_span_id(body.id.as_deref().unwrap_or(""));
                 spans.push(OtelSpan {
                     trace_id: Some(span_id.clone()),
                     span_id: Some(span_id),
@@ -87,12 +98,9 @@ pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> Otel
                     ));
                 }
 
-                let trace_id = body.trace_id.as_deref().unwrap_or("").replace('-', "");
-                let span_id = body.id.as_deref().unwrap_or("").replace('-', "");
-                let parent_span_id = body
-                    .parent_observation_id
-                    .as_deref()
-                    .map(|s| s.replace('-', ""));
+                let trace_id = build_span_id(body.trace_id.as_deref().unwrap_or(""));
+                let span_id = build_span_id(body.id.as_deref().unwrap_or(""));
+                let parent_span_id = body.parent_observation_id.as_deref().map(build_span_id);
 
                 spans.push(OtelSpan {
                     trace_id: Some(trace_id),
@@ -121,12 +129,9 @@ pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> Otel
                     body.environment.as_ref(),
                 );
 
-                let trace_id = body.trace_id.as_deref().unwrap_or("").replace('-', "");
-                let span_id = body.id.as_deref().unwrap_or("").replace('-', "");
-                let parent_span_id = body
-                    .parent_observation_id
-                    .as_deref()
-                    .map(|s| s.replace('-', ""));
+                let trace_id = build_span_id(body.trace_id.as_deref().unwrap_or(""));
+                let span_id = build_span_id(body.id.as_deref().unwrap_or(""));
+                let parent_span_id = body.parent_observation_id.as_deref().map(build_span_id);
 
                 spans.push(OtelSpan {
                     trace_id: Some(trace_id),
@@ -207,12 +212,9 @@ pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> Otel
                     attrs.push(OtelAttribute::string("langfuse.session.id", session_id));
                 }
 
-                let trace_id = body.trace_id.as_deref().unwrap_or("").replace('-', "");
-                let span_id = body.id.as_deref().unwrap_or("").replace('-', "");
-                let parent_span_id = body
-                    .parent_observation_id
-                    .as_deref()
-                    .map(|s| s.replace('-', ""));
+                let trace_id = build_span_id(body.trace_id.as_deref().unwrap_or(""));
+                let span_id = build_span_id(body.id.as_deref().unwrap_or(""));
+                let parent_span_id = body.parent_observation_id.as_deref().map(build_span_id);
 
                 spans.push(OtelSpan {
                     trace_id: Some(trace_id),
@@ -257,12 +259,9 @@ pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> Otel
                     attrs.push(OtelAttribute::string("langfuse.session.id", session_id));
                 }
 
-                let trace_id = body.trace_id.as_deref().unwrap_or("").replace('-', "");
-                let span_id = body.id.as_deref().unwrap_or("").replace('-', "");
-                let parent_span_id = body
-                    .parent_observation_id
-                    .as_deref()
-                    .map(|s| s.replace('-', ""));
+                let trace_id = build_span_id(body.trace_id.as_deref().unwrap_or(""));
+                let span_id = build_span_id(body.id.as_deref().unwrap_or(""));
+                let parent_span_id = body.parent_observation_id.as_deref().map(build_span_id);
 
                 spans.push(OtelSpan {
                     trace_id: Some(trace_id),
@@ -287,12 +286,9 @@ pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> Otel
                     body.environment.as_ref(),
                 );
 
-                let trace_id = body.trace_id.as_deref().unwrap_or("").replace('-', "");
-                let span_id = body.id.as_deref().unwrap_or("").replace('-', "");
-                let parent_span_id = body
-                    .parent_observation_id
-                    .as_deref()
-                    .map(|s| s.replace('-', ""));
+                let trace_id = build_span_id(body.trace_id.as_deref().unwrap_or(""));
+                let span_id = build_span_id(body.id.as_deref().unwrap_or(""));
+                let parent_span_id = body.parent_observation_id.as_deref().map(build_span_id);
 
                 spans.push(OtelSpan {
                     trace_id: Some(trace_id),
@@ -339,12 +335,9 @@ pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> Otel
                     attrs.push(OtelAttribute::string("langfuse.session.id", session_id));
                 }
 
-                let trace_id = body.trace_id.as_deref().unwrap_or("").replace('-', "");
-                let span_id = body.id.as_deref().unwrap_or("").replace('-', "");
-                let parent_span_id = body
-                    .parent_observation_id
-                    .as_deref()
-                    .map(|s| s.replace('-', ""));
+                let trace_id = build_span_id(body.trace_id.as_deref().unwrap_or(""));
+                let span_id = build_span_id(body.id.as_deref().unwrap_or(""));
+                let parent_span_id = body.parent_observation_id.as_deref().map(build_span_id);
 
                 spans.push(OtelSpan {
                     trace_id: Some(trace_id),
@@ -379,12 +372,9 @@ pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> Otel
                     attrs.push(OtelAttribute::string("langfuse.session.id", session_id));
                 }
 
-                let trace_id = body.trace_id.as_deref().unwrap_or("").replace('-', "");
-                let span_id = body.id.as_deref().unwrap_or("").replace('-', "");
-                let parent_span_id = body
-                    .parent_observation_id
-                    .as_deref()
-                    .map(|s| s.replace('-', ""));
+                let trace_id = build_span_id(body.trace_id.as_deref().unwrap_or(""));
+                let span_id = build_span_id(body.id.as_deref().unwrap_or(""));
+                let parent_span_id = body.parent_observation_id.as_deref().map(build_span_id);
 
                 spans.push(OtelSpan {
                     trace_id: Some(trace_id),
@@ -430,13 +420,13 @@ pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> Otel
                     attrs.push(OtelAttribute::string("langfuse.observation.id", obs_id));
                 }
 
-                let span_id = body.id.as_deref().unwrap_or("").replace('-', "");
-                let trace_id = body.trace_id.as_deref().unwrap_or("").replace('-', "");
+                let span_id = build_span_id(body.id.as_deref().unwrap_or(""));
+                let trace_id = build_span_id(body.trace_id.as_deref().unwrap_or(""));
 
                 spans.push(OtelSpan {
                     trace_id: Some(trace_id),
                     span_id: Some(span_id),
-                    parent_span_id: body.observation_id.as_deref().map(|s| s.replace('-', "")),
+                    parent_span_id: body.observation_id.as_deref().map(build_span_id),
                     name: Some(format!("score:{}", body.name)),
                     kind: Some(1),
                     start_time_unix_nano: None,

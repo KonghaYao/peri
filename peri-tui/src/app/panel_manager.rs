@@ -149,10 +149,33 @@ pub enum PanelState {
     Betas(BetasPanel),
 }
 
-impl PanelState {
-    /// 获取面板类型
-    pub fn kind(&self) -> PanelKind {
-        match self {
+// ─── panel_dispatch! 宏 ────────────────────────────────────────────────────
+//
+// 13 变体 × 13 方法 = ~169 个 match arm 的样板代码由宏统一展开。
+//
+// 设计要点：
+// - `PanelState::*` 变体中部分内部是 `Box<T>`（Login/Config/ThreadBrowser/Mcp/Plugin），
+//   其余是裸 `T`。两类处理差异：
+//     * 方法调用（trait method）→ `Box<T>: Deref<Target=T>` 自动穿透，`$body` 对所有
+//       变体统一可用
+//     * `&dyn Any` 强转 → deref coercion 不会发生（unsize 优先于 deref），
+//       `&Box<T> as &dyn Any` 得到 `TypeId::of::<Box<T>>()`，downcast 会失败。
+//       必须对 Box 变体显式 `.as_ref()` / `.as_mut()` 解引用后再强转。
+//   因此 `any:ref` / `any:mut` 分支对裸变体和 Box 变体使用不同表达式。
+// - 穷举所有 13 个变体，新增 PanelState 变体时编译器会强制更新宏的每一个展开点
+//   （enum 穷举保证不丢失）。
+//
+// 宏分支：
+//   1. `kind`      — 对应 `PanelState::kind()`，每个 arm 返回对应的 `PanelKind` 常量
+//   2. `any:ref`   — 对应 `as_any_ref()`，Box 变体用 `.as_ref()`，裸变体直接强转
+//   3. `any:mut`   — 对应 `as_any_mut()`，Box 变体用 `.as_mut()`，裸变体直接强转
+//   4. 通用 `$body` — trait 方法调用分发，所有 arm 共用同一表达式
+//
+// 调用约定：调用方负责 `use super::panel_component::PanelComponent;` 引入 trait。
+macro_rules! panel_dispatch {
+    // kind()：每个变体返回固定 PanelKind 常量
+    (kind: $state:expr) => {
+        match $state {
             PanelState::Model(_) => PanelKind::Model,
             PanelState::Login(_) => PanelKind::Login,
             PanelState::Agent(_) => PanelKind::Agent,
@@ -167,11 +190,10 @@ impl PanelState {
             PanelState::Tasks(_) => PanelKind::Tasks,
             PanelState::Betas(_) => PanelKind::Betas,
         }
-    }
-
-    /// Any downcast（不可变引用）
-    pub fn as_any_ref(&self) -> &dyn Any {
-        match self {
+    };
+    // as_any_ref()：Box 变体用 .as_ref() 显式解引用，避免 TypeId 记成 Box<T>
+    (any:ref $state:expr) => {
+        match $state {
             PanelState::Model(p) => p as &dyn Any,
             PanelState::Login(p) => p.as_ref() as &dyn Any,
             PanelState::Agent(p) => p as &dyn Any,
@@ -186,11 +208,10 @@ impl PanelState {
             PanelState::Tasks(p) => p as &dyn Any,
             PanelState::Betas(p) => p as &dyn Any,
         }
-    }
-
-    /// Any downcast（可变引用）
-    pub fn as_any_mut(&mut self) -> &mut dyn Any {
-        match self {
+    };
+    // as_any_mut()：Box 变体用 .as_mut() 显式解引用
+    (any:mut $state:expr) => {
+        match $state {
             PanelState::Model(p) => p as &mut dyn Any,
             PanelState::Login(p) => p.as_mut() as &mut dyn Any,
             PanelState::Agent(p) => p as &mut dyn Any,
@@ -205,66 +226,62 @@ impl PanelState {
             PanelState::Tasks(p) => p as &mut dyn Any,
             PanelState::Betas(p) => p as &mut dyn Any,
         }
+    };
+    // 通用方法分发：所有变体共用 $body（$p 为绑定名）
+    ($state:expr, $p:ident, $body:expr) => {
+        match $state {
+            PanelState::Model($p) => $body,
+            PanelState::Login($p) => $body,
+            PanelState::Agent($p) => $body,
+            PanelState::Hooks($p) => $body,
+            PanelState::Config($p) => $body,
+            PanelState::ThreadBrowser($p) => $body,
+            PanelState::Mcp($p) => $body,
+            PanelState::Plugin($p) => $body,
+            PanelState::Cron($p) => $body,
+            PanelState::Status($p) => $body,
+            PanelState::Memory($p) => $body,
+            PanelState::Tasks($p) => $body,
+            PanelState::Betas($p) => $body,
+        }
+    };
+}
+
+impl PanelState {
+    /// 获取面板类型
+    pub fn kind(&self) -> PanelKind {
+        panel_dispatch!(kind: self)
+    }
+
+    /// Any downcast（不可变引用）
+    ///
+    /// 注意：Box 变体必须经 `.as_ref()` 解引用后再强转，否则 TypeId 会记成 `Box<T>`
+    /// 而非 `T`，导致 `downcast_ref::<T>()` 失败。
+    pub fn as_any_ref(&self) -> &dyn Any {
+        panel_dispatch!(any:ref self)
+    }
+
+    /// Any downcast（可变引用）
+    pub fn as_any_mut(&mut self) -> &mut dyn Any {
+        panel_dispatch!(any:mut self)
     }
 
     /// 委托渲染到对应面板组件
     pub fn render(&mut self, f: &mut Frame, app: &mut super::App, area: Rect) {
         use super::panel_component::PanelComponent;
-        match self {
-            PanelState::Model(p) => p.render(f, app, area),
-            PanelState::Login(p) => p.render(f, app, area),
-            PanelState::Agent(p) => p.render(f, app, area),
-            PanelState::Hooks(p) => p.render(f, app, area),
-            PanelState::Config(p) => p.render(f, app, area),
-            PanelState::ThreadBrowser(p) => p.render(f, app, area),
-            PanelState::Mcp(p) => p.render(f, app, area),
-            PanelState::Plugin(p) => p.render(f, app, area),
-            PanelState::Cron(p) => p.render(f, app, area),
-            PanelState::Status(p) => p.render(f, app, area),
-            PanelState::Memory(p) => p.render(f, app, area),
-            PanelState::Tasks(p) => p.render(f, app, area),
-            PanelState::Betas(p) => p.render(f, app, area),
-        }
+        panel_dispatch!(self, p, p.render(f, app, area))
     }
 
     /// 委托获取期望面板高度
     pub fn desired_height(&self, screen_height: u16, screen_width: u16) -> u16 {
         use super::panel_component::PanelComponent;
-        match self {
-            PanelState::Model(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Login(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Agent(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Hooks(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Config(p) => p.desired_height(screen_height, screen_width),
-            PanelState::ThreadBrowser(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Mcp(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Plugin(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Cron(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Status(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Memory(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Tasks(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Betas(p) => p.desired_height(screen_height, screen_width),
-        }
+        panel_dispatch!(self, p, p.desired_height(screen_height, screen_width))
     }
 
     /// 委托获取快捷键提示
     pub fn status_bar_hints(&self, lc: &crate::i18n::LcRegistry) -> Vec<(String, String)> {
         use super::panel_component::PanelComponent;
-        match self {
-            PanelState::Model(p) => p.status_bar_hints(lc),
-            PanelState::Login(p) => p.status_bar_hints(lc),
-            PanelState::Agent(p) => p.status_bar_hints(lc),
-            PanelState::Hooks(p) => p.status_bar_hints(lc),
-            PanelState::Config(p) => p.status_bar_hints(lc),
-            PanelState::ThreadBrowser(p) => p.status_bar_hints(lc),
-            PanelState::Mcp(p) => p.status_bar_hints(lc),
-            PanelState::Plugin(p) => p.status_bar_hints(lc),
-            PanelState::Cron(p) => p.status_bar_hints(lc),
-            PanelState::Status(p) => p.status_bar_hints(lc),
-            PanelState::Memory(p) => p.status_bar_hints(lc),
-            PanelState::Tasks(p) => p.status_bar_hints(lc),
-            PanelState::Betas(p) => p.status_bar_hints(lc),
-        }
+        panel_dispatch!(self, p, p.status_bar_hints(lc))
     }
 }
 
@@ -278,29 +295,8 @@ pub struct PanelContext<'a> {
 }
 
 impl PanelContext<'_> {
-    /// 同步等待 ACP Server 更新完整配置，确保 provider 在内存中已更新。
-    pub fn sync_acp_config(&self) {
-        let Some(ref acp_client) = self.acp_client else {
-            return;
-        };
-        let cfg = match self.services.peri_config.as_ref() {
-            Some(c) => c.clone(),
-            None => return,
-        };
-        let acp = acp_client.clone();
-        tracing::debug!(
-            active_provider = %cfg.config.active_provider_id,
-            active_alias = %cfg.config.active_alias,
-            "sync_acp_config: sending update_config"
-        );
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                if let Err(e) = acp.update_config(&cfg).await {
-                    tracing::error!(error = %e, "sync_acp_config: update_config failed");
-                }
-            });
-        });
-    }
+    // `sync_acp_config` 已移除：TUI 与 ACP Server 共享同一 `Arc<RwLock<PeriConfig>>`，
+    // 写入即时传播，无需手动同步。
 }
 
 // ─── PanelManager ───────────────────────────────────────────────────────────
@@ -385,21 +381,7 @@ impl PanelManager {
         let Some(state) = self.active.as_mut() else {
             return EventResult::NotConsumed;
         };
-        match state {
-            PanelState::Model(p) => p.handle_key(input, ctx),
-            PanelState::Agent(p) => p.handle_key(input, ctx),
-            PanelState::Hooks(p) => p.handle_key(input, ctx),
-            PanelState::Status(p) => p.handle_key(input, ctx),
-            PanelState::Memory(p) => p.handle_key(input, ctx),
-            PanelState::Login(p) => p.handle_key(input, ctx),
-            PanelState::Config(p) => p.handle_key(input, ctx),
-            PanelState::ThreadBrowser(p) => p.handle_key(input, ctx),
-            PanelState::Mcp(p) => p.handle_key(input, ctx),
-            PanelState::Cron(p) => p.handle_key(input, ctx),
-            PanelState::Plugin(p) => p.handle_key(input, ctx),
-            PanelState::Tasks(p) => p.handle_key(input, ctx),
-            PanelState::Betas(p) => p.handle_key(input, ctx),
-        }
+        panel_dispatch!(state, p, p.handle_key(input, ctx))
     }
 
     /// 分发粘贴事件到当前激活面板
@@ -408,21 +390,7 @@ impl PanelManager {
         let Some(state) = self.active.as_mut() else {
             return EventResult::NotConsumed;
         };
-        match state {
-            PanelState::Model(p) => p.handle_paste(text, ctx),
-            PanelState::Agent(p) => p.handle_paste(text, ctx),
-            PanelState::Hooks(p) => p.handle_paste(text, ctx),
-            PanelState::Status(p) => p.handle_paste(text, ctx),
-            PanelState::Memory(p) => p.handle_paste(text, ctx),
-            PanelState::Login(p) => p.handle_paste(text, ctx),
-            PanelState::Config(p) => p.handle_paste(text, ctx),
-            PanelState::ThreadBrowser(p) => p.handle_paste(text, ctx),
-            PanelState::Mcp(p) => p.handle_paste(text, ctx),
-            PanelState::Cron(p) => p.handle_paste(text, ctx),
-            PanelState::Plugin(p) => p.handle_paste(text, ctx),
-            PanelState::Tasks(p) => p.handle_paste(text, ctx),
-            PanelState::Betas(p) => p.handle_paste(text, ctx),
-        }
+        panel_dispatch!(state, p, p.handle_paste(text, ctx))
     }
 
     /// 分发滚动事件到当前激活面板
@@ -431,21 +399,7 @@ impl PanelManager {
         let Some(state) = self.active.as_mut() else {
             return EventResult::NotConsumed;
         };
-        match state {
-            PanelState::Model(p) => p.handle_scroll(lines, ctx),
-            PanelState::Agent(p) => p.handle_scroll(lines, ctx),
-            PanelState::Hooks(p) => p.handle_scroll(lines, ctx),
-            PanelState::Status(p) => p.handle_scroll(lines, ctx),
-            PanelState::Memory(p) => p.handle_scroll(lines, ctx),
-            PanelState::Login(p) => p.handle_scroll(lines, ctx),
-            PanelState::Config(p) => p.handle_scroll(lines, ctx),
-            PanelState::ThreadBrowser(p) => p.handle_scroll(lines, ctx),
-            PanelState::Mcp(p) => p.handle_scroll(lines, ctx),
-            PanelState::Cron(p) => p.handle_scroll(lines, ctx),
-            PanelState::Plugin(p) => p.handle_scroll(lines, ctx),
-            PanelState::Tasks(p) => p.handle_scroll(lines, ctx),
-            PanelState::Betas(p) => p.handle_scroll(lines, ctx),
-        }
+        panel_dispatch!(state, p, p.handle_scroll(lines, ctx))
     }
 
     /// 分发鼠标事件到当前激活面板
@@ -459,21 +413,7 @@ impl PanelManager {
         let Some(state) = self.active.as_mut() else {
             return EventResult::NotConsumed;
         };
-        match state {
-            PanelState::Model(p) => p.handle_mouse(mouse, area, ctx),
-            PanelState::Agent(p) => p.handle_mouse(mouse, area, ctx),
-            PanelState::Hooks(p) => p.handle_mouse(mouse, area, ctx),
-            PanelState::Status(p) => p.handle_mouse(mouse, area, ctx),
-            PanelState::Memory(p) => p.handle_mouse(mouse, area, ctx),
-            PanelState::Login(p) => p.handle_mouse(mouse, area, ctx),
-            PanelState::Config(p) => p.handle_mouse(mouse, area, ctx),
-            PanelState::ThreadBrowser(p) => p.handle_mouse(mouse, area, ctx),
-            PanelState::Mcp(p) => p.handle_mouse(mouse, area, ctx),
-            PanelState::Cron(p) => p.handle_mouse(mouse, area, ctx),
-            PanelState::Plugin(p) => p.handle_mouse(mouse, area, ctx),
-            PanelState::Tasks(p) => p.handle_mouse(mouse, area, ctx),
-            PanelState::Betas(p) => p.handle_mouse(mouse, area, ctx),
-        }
+        panel_dispatch!(state, p, p.handle_mouse(mouse, area, ctx))
     }
 
     /// 获取当前激活面板的快捷键提示
@@ -482,42 +422,20 @@ impl PanelManager {
         let Some(state) = self.active.as_ref() else {
             return Vec::new();
         };
-        match state {
-            PanelState::Model(p) => p.status_bar_hints(lc),
-            PanelState::Agent(p) => p.status_bar_hints(lc),
-            PanelState::Hooks(p) => p.status_bar_hints(lc),
-            PanelState::Status(p) => p.status_bar_hints(lc),
-            PanelState::Memory(p) => p.status_bar_hints(lc),
-            PanelState::Login(p) => p.status_bar_hints(lc),
-            PanelState::Config(p) => p.status_bar_hints(lc),
-            PanelState::ThreadBrowser(p) => p.status_bar_hints(lc),
-            PanelState::Mcp(p) => p.status_bar_hints(lc),
-            PanelState::Cron(p) => p.status_bar_hints(lc),
-            PanelState::Plugin(p) => p.status_bar_hints(lc),
-            PanelState::Tasks(p) => p.status_bar_hints(lc),
-            PanelState::Betas(p) => p.status_bar_hints(lc),
-        }
+        panel_dispatch!(state, p, p.status_bar_hints(lc))
     }
 
     /// 查询当前激活面板的期望高度
+    ///
+    /// `Some(match state { ... })` 形态：宏展开后表达式被 `Some()` 包裹。
     pub fn dispatch_desired_height(&self, screen_height: u16, screen_width: u16) -> Option<u16> {
         use super::panel_component::PanelComponent;
         let state = self.active.as_ref()?;
-        Some(match state {
-            PanelState::Model(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Agent(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Hooks(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Status(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Memory(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Login(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Config(p) => p.desired_height(screen_height, screen_width),
-            PanelState::ThreadBrowser(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Mcp(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Cron(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Plugin(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Tasks(p) => p.desired_height(screen_height, screen_width),
-            PanelState::Betas(p) => p.desired_height(screen_height, screen_width),
-        })
+        Some(panel_dispatch!(
+            state,
+            p,
+            p.desired_height(screen_height, screen_width)
+        ))
     }
 
     /// 分发绝对滚动偏移到当前激活面板（滚动条拖拽）
@@ -526,21 +444,7 @@ impl PanelManager {
         let Some(state) = self.active.as_mut() else {
             return;
         };
-        match state {
-            PanelState::Model(p) => p.set_scroll_offset(offset),
-            PanelState::Agent(p) => p.set_scroll_offset(offset),
-            PanelState::Hooks(p) => p.set_scroll_offset(offset),
-            PanelState::Status(p) => p.set_scroll_offset(offset),
-            PanelState::Memory(p) => p.set_scroll_offset(offset),
-            PanelState::Login(p) => p.set_scroll_offset(offset),
-            PanelState::Config(p) => p.set_scroll_offset(offset),
-            PanelState::ThreadBrowser(p) => p.set_scroll_offset(offset),
-            PanelState::Mcp(p) => p.set_scroll_offset(offset),
-            PanelState::Cron(p) => p.set_scroll_offset(offset),
-            PanelState::Plugin(p) => p.set_scroll_offset(offset),
-            PanelState::Tasks(p) => p.set_scroll_offset(offset),
-            PanelState::Betas(p) => p.set_scroll_offset(offset),
-        }
+        panel_dispatch!(state, p, p.set_scroll_offset(offset))
     }
 }
 

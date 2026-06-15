@@ -18,12 +18,10 @@ impl Command for ModelCommand {
         let alias = args.trim().to_lowercase();
         match alias.as_str() {
             "opus" | "sonnet" | "haiku" => {
-                let cfg = app
-                    .services
-                    .peri_config
-                    .get_or_insert_with(Default::default);
+                let cfg_arc = app.services.peri_config.clone();
+                let mut cfg = cfg_arc.write();
                 cfg.config.active_alias = alias.clone();
-                if let Err(e) = App::save_config(cfg, app.services.config_path_override.as_deref())
+                if let Err(e) = App::save_config(&cfg, app.services.config_path_override.as_deref())
                 {
                     app.session_mgr
                         .current_mut()
@@ -31,7 +29,7 @@ impl Command for ModelCommand {
                         .view_messages
                         .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
                 }
-                if let Some(p) = agent::LlmProvider::from_config(cfg) {
+                if let Some(p) = agent::LlmProvider::from_config(&cfg) {
                     app.services.provider_name = p.display_name().to_string();
                     app.services.model_name = p.model_name().to_string();
                 }

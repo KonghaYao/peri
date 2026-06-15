@@ -1,8 +1,125 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
+use thiserror::Error;
 
 /// Thread 唯一标识符（UUID v7，按时间排序）
 pub type ThreadId = String;
+
+/// agent 取消策略（强类型枚举，杜绝非法字符串）
+///
+/// Making Illegal States Unrepresentable：原 String 字段允许任意字符串，
+/// 现在使用强类型枚举约束取值集合。持久化层（SQLite）以 `as_str()` 输出
+/// 的字符串为准，读取时通过 `FromStr` 解析，遇到非法值直接报错（不静默 fallback）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CancelPolicy {
+    /// 同步子 agent：跟随父 agent 取消
+    #[default]
+    Cascade,
+    /// Background 子 agent：仅跟随 session 根取消
+    Independent,
+}
+
+impl CancelPolicy {
+    /// 序列化为稳定的小写字符串，用于 SQLite 列值
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cascade => "cascade",
+            Self::Independent => "independent",
+        }
+    }
+}
+
+impl fmt::Display for CancelPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for CancelPolicy {
+    type Err = ThreadMetaParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "cascade" => Ok(Self::Cascade),
+            "independent" => Ok(Self::Independent),
+            other => Err(ThreadMetaParseError::invalid_cancel_policy(other)),
+        }
+    }
+}
+
+/// agent 运行时状态（强类型枚举，杜绝非法字符串）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentStatus {
+    #[default]
+    Active,
+    Done,
+    Cancelled,
+    Error,
+}
+
+impl AgentStatus {
+    /// 序列化为稳定的小写字符串，用于 SQLite 列值
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Done => "done",
+            Self::Cancelled => "cancelled",
+            Self::Error => "error",
+        }
+    }
+
+    /// 是否仍处于活跃状态
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Active)
+    }
+}
+
+impl fmt::Display for AgentStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for AgentStatus {
+    type Err = ThreadMetaParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "done" => Ok(Self::Done),
+            "cancelled" => Ok(Self::Cancelled),
+            "error" => Ok(Self::Error),
+            other => Err(ThreadMetaParseError::invalid_agent_status(other)),
+        }
+    }
+}
+
+/// 强类型枚举解析失败错误
+///
+/// 关键约束：禁止 `_ => default` 静默 fallback。任何来自 DB / 外部字符串
+/// 的非法值必须以错误形式上抛，由调用方决定处理策略。
+#[derive(Debug, Error)]
+pub enum ThreadMetaParseError {
+    #[error("非法 cancel_policy 值: {0:?}（合法值: cascade / independent）")]
+    InvalidCancelPolicy(String),
+
+    #[error("非法 agent_status 值: {0:?}（合法值: active / done / cancelled / error）")]
+    InvalidAgentStatus(String),
+}
+
+impl ThreadMetaParseError {
+    pub fn invalid_cancel_policy(s: impl Into<String>) -> Self {
+        Self::InvalidCancelPolicy(s.into())
+    }
+
+    pub fn invalid_agent_status(s: impl Into<String>) -> Self {
+        Self::InvalidAgentStatus(s.into())
+    }
+}
 
 /// Thread 元数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,26 +144,18 @@ pub struct ThreadMeta {
     /// true = 子 agent，不显示在主列表
     #[serde(default)]
     pub hidden: bool,
-    /// cascade / independent
-    #[serde(default = "default_cancel_policy")]
-    pub cancel_policy: String,
+    /// 取消策略（强类型，旧 JSON 缺失时默认 Cascade）
+    #[serde(default)]
+    pub cancel_policy: CancelPolicy,
     /// JSON 完整配置快照
     #[serde(default)]
     pub config: Option<String>,
     /// 物化缓存
     #[serde(default)]
     pub cached_context: Option<String>,
-    /// active / done / cancelled / error
-    #[serde(default = "default_agent_status")]
-    pub agent_status: String,
-}
-
-fn default_cancel_policy() -> String {
-    "cascade".to_string()
-}
-
-fn default_agent_status() -> String {
-    "active".to_string()
+    /// agent 运行状态（强类型，旧 JSON 缺失时默认 Active）
+    #[serde(default)]
+    pub agent_status: AgentStatus,
 }
 
 impl ThreadMeta {
@@ -63,10 +172,10 @@ impl ThreadMeta {
             parent_thread_id: None,
             snapshot_at_message_id: None,
             hidden: false,
-            cancel_policy: default_cancel_policy(),
+            cancel_policy: CancelPolicy::default(),
             config: None,
             cached_context: None,
-            agent_status: default_agent_status(),
+            agent_status: AgentStatus::default(),
         }
     }
 
@@ -88,54 +197,14 @@ impl ThreadMeta {
             parent_thread_id: None,
             snapshot_at_message_id: None,
             hidden: false,
-            cancel_policy: default_cancel_policy(),
+            cancel_policy: CancelPolicy::default(),
             config: None,
             cached_context: None,
-            agent_status: default_agent_status(),
+            agent_status: AgentStatus::default(),
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_thread_meta_default_values() {
-        // new() 创建的根线程应具有正确的默认值
-        let meta = ThreadMeta::new("/tmp/test");
-        assert_eq!(meta.parent_thread_id, None);
-        assert_eq!(meta.snapshot_at_message_id, None);
-        assert!(!meta.hidden);
-        assert_eq!(meta.cancel_policy, "cascade");
-        assert_eq!(meta.config, None);
-        assert_eq!(meta.cached_context, None);
-        assert_eq!(meta.agent_status, "active");
-        assert!(meta.is_root());
-    }
-
-    #[test]
-    fn test_thread_meta_is_root() {
-        // parent_thread_id 为 None 时是根 agent
-        let mut meta = ThreadMeta::new("/tmp/test");
-        assert!(meta.is_root());
-
-        // 设置 parent_thread_id 后不是根 agent
-        meta.parent_thread_id = Some("parent-uuid".to_string());
-        assert!(!meta.is_root());
-    }
-
-    #[test]
-    fn test_thread_meta_deserialize_defaults() {
-        // 反序列化旧格式 JSON 时新字段应使用默认值
-        let json = r#"{"id":"test-id","title":null,"cwd":"/tmp","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","message_count":0,"content_size":0}"#;
-        let meta: ThreadMeta = serde_json::from_str(json).unwrap();
-        assert_eq!(meta.parent_thread_id, None);
-        assert_eq!(meta.snapshot_at_message_id, None);
-        assert!(!meta.hidden);
-        assert_eq!(meta.cancel_policy, "cascade");
-        assert_eq!(meta.config, None);
-        assert_eq!(meta.cached_context, None);
-        assert_eq!(meta.agent_status, "active");
-    }
-}
+#[path = "types_test.rs"]
+mod tests;

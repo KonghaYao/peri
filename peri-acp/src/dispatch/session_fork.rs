@@ -1,5 +1,6 @@
 //! Fork a session: create a new thread and copy messages from source.
 
+use anyhow::{Context, Result};
 use peri_agent::{
     messages::BaseMessage,
     thread::{ThreadId, ThreadMeta, ThreadStore},
@@ -14,12 +15,12 @@ pub async fn fork_session(
     source_thread_id: &str,
     source_messages: &[BaseMessage],
     cwd: &str,
-) -> Result<(String, Vec<BaseMessage>), String> {
+) -> Result<(String, Vec<BaseMessage>)> {
     let meta = ThreadMeta::new(cwd);
     let new_thread_id = thread_store
         .create_thread(meta)
         .await
-        .map_err(|e| format!("Thread creation failed: {e}"))?;
+        .context("Thread creation failed")?;
 
     if !source_messages.is_empty() {
         if let Err(e) = thread_store

@@ -75,18 +75,18 @@ pub struct CompactConfig {
 impl Default for CompactConfig {
     fn default() -> Self {
         Self {
-            auto_compact_enabled: true,
-            auto_compact_threshold: 0.85,
-            micro_compact_threshold: 0.70,
-            micro_compact_stale_steps: 5,
+            auto_compact_enabled: default_true(),
+            auto_compact_threshold: default_threshold_085(),
+            micro_compact_threshold: default_threshold_070(),
+            micro_compact_stale_steps: default_stale_steps(),
             micro_compactable_tools: default_compactable_tools(),
-            summary_max_tokens: 16000,
-            re_inject_max_files: 5,
-            re_inject_max_tokens_per_file: 5000,
-            re_inject_file_budget: 25000,
-            re_inject_skills_budget: 25000,
-            max_consecutive_failures: 3,
-            ptl_max_retries: 3,
+            summary_max_tokens: default_summary_max_tokens(),
+            re_inject_max_files: default_re_inject_max_files(),
+            re_inject_max_tokens_per_file: default_re_inject_max_tokens_per_file(),
+            re_inject_file_budget: default_re_inject_file_budget(),
+            re_inject_skills_budget: default_re_inject_skills_budget(),
+            max_consecutive_failures: default_max_consecutive_failures(),
+            ptl_max_retries: default_ptl_max_retries(),
         }
     }
 }

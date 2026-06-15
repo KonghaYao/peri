@@ -194,34 +194,36 @@ pub async fn run_print(
 
     // execute_prompt 是同步函数（返回 PromptResult，不是 async）
     let result = peri_acp::session::executor::execute_prompt(
-        &provider,
-        peri_config_arc,
-        &cwd,
-        peri_agent::messages::MessageContent::text(prompt_text),
-        None, // no frozen data
-        vec![],
-        vec![], // incoming_recalls
-        true,
-        shared_permission,
-        event_sink,
-        cancel,
-        broker,
-        plugin_skill_dirs,
-        plugin_agent_dirs,
-        hook_groups,
-        Some(cron_scheduler),
-        String::new(), // session_id（print 模式不需要）
-        mcp_pool,
-        None, // channel_state
-        tool_search_index,
-        shared_tools,
-        plugin_lsp_servers,
-        None, // langfuse_session（print 模式暂不启用）
-        pool,
-        None,   // thread_store（print 模式不需要持久化）
-        None,   // parent_thread_id
-        None,   // session_manager（print 模式不需要 cancel 级联）
-        vec![], // bg_results（print 模式无后台任务）
+        peri_acp::session::executor::PromptExecutionContext {
+            provider,
+            peri_config: peri_config_arc,
+            cwd,
+            session_id: String::new(), // print 模式不需要
+            cancel,
+            event_sink,
+            broker,
+            permission_mode: shared_permission,
+            content: peri_agent::messages::MessageContent::text(prompt_text),
+            frozen: None, // no frozen data
+            history: vec![],
+            incoming_recalls: vec![],
+            is_empty_history: true,
+            bg_results: vec![], // print 模式无后台任务
+            plugin_skill_dirs,
+            plugin_agent_dirs,
+            hook_groups,
+            cron_scheduler: Some(cron_scheduler),
+            mcp_pool,
+            channel_state: None,
+            tool_search_index,
+            shared_tools,
+            lsp_servers: plugin_lsp_servers,
+            langfuse_session: None, // print 模式暂不启用
+            pool,
+            thread_store: None,    // print 模式不需要持久化
+            thread_id: None,       // parent_thread_id
+            session_manager: None, // print 模式不需要 cancel 级联
+        },
     )
     .await;
     let c = collector.lock().unwrap();

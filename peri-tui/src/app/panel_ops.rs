@@ -105,7 +105,9 @@ impl App {
         let app = App {
             session_mgr: super::SessionManager::new(session),
             services: super::ServiceRegistry {
-                peri_config: None,
+                peri_config: std::sync::Arc::new(parking_lot::RwLock::new(
+                    crate::config::PeriConfig::default(),
+                )),
                 cwd: "/tmp".to_string(),
                 provider_name: "test".to_string(),
                 model_name: "test-model".to_string(),

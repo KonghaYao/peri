@@ -63,7 +63,10 @@ impl super::SubAgentTool {
             child_meta.id = child_thread_id.clone();
             child_meta.parent_thread_id = self.parent_thread_id.clone();
             child_meta.hidden = true;
-            child_meta.cancel_policy = cancel_policy_str;
+            // 强类型枚举赋值：经 FromStr 解析本地的 cancel_policy 字符串
+            child_meta.cancel_policy = cancel_policy_str
+                .parse()
+                .expect("cancel_policy_str 由本枚举构造，解析不会失败");
             child_meta.title = Some(agent_name.to_string());
             store
                 .create_thread(child_meta)

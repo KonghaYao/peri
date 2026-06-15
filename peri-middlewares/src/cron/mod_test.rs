@@ -24,7 +24,7 @@ fn test_register_invalid_expression() {
     let (mut sched, _rx) = new_scheduler();
     let result = sched.register("invalid", "test");
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("cron 表达式无效"));
+    assert!(result.unwrap_err().to_string().contains("cron 表达式无效"));
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn test_max_tasks() {
     }
     let result = sched.register("* * * * *", "overflow");
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("上限"));
+    assert!(result.unwrap_err().to_string().contains("上限"));
 }
 
 #[test]

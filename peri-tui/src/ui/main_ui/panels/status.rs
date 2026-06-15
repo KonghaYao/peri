@@ -159,12 +159,8 @@ fn format_number(n: u64) -> String {
 /// 基于模型 alias 的简化费用估算
 fn estimate_cost(app: &App) -> f64 {
     let tracker = &app.session_mgr.current().agent.session_token_tracker;
-    let alias = app
-        .services
-        .peri_config
-        .as_ref()
-        .map(|c| c.config.active_alias.as_str())
-        .unwrap_or("sonnet");
+    let alias_owned = app.services.peri_config.read().config.active_alias.clone();
+    let alias = alias_owned.as_str();
 
     let (input_price, output_price) = match alias {
         "opus" => (15.0, 75.0),

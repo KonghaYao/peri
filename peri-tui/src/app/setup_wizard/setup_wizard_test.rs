@@ -85,11 +85,17 @@ fn test_migrated_provider_is_complete() {
 fn test_migrate_from_claude_code_no_file() {
     let mut wizard = SetupWizardPanel::new();
     wizard.source = SetupSource::MigrateClaudeCode;
-    // 使用不存在的路径
+    // 用 TempDir 隔离：home_dir_override 指向空目录，settings.json 不存在
+    let temp_dir =
+        std::env::temp_dir().join(format!("zen-migrate-nofile-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    wizard.home_dir_override = Some(temp_dir.clone());
+
     let result = wizard.migrate_from_claude_code();
-    // 不应该 panic，返回 false 或 true 取决于是否有 ~/.claude/settings.json
-    // 只要不 panic 就行
-    let _ = result;
+    // settings.json 不存在，必须返回 false（不再依赖全局 ~/.claude/）
+    assert!(!result, "无 settings.json 时应返回 false");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
@@ -115,13 +121,20 @@ fn test_migrate_syncs_all_fields() {
     });
     std::fs::write(claude_dir.join("settings.json"), settings.to_string()).unwrap();
 
-    // 临时修改 home_dir 指向 temp_dir
-    // 由于 migrate_from_claude_code 用 dirs_next::home_dir，
-    // 我们无法直接 mock，所以用真实路径测试
-    // 改为直接调用测试函数
-    let env = settings["env"].as_object().unwrap().clone();
+    // 通过 home_dir_override 注入 TempDir，迁移逻辑读取 temp_dir/.claude/settings.json
+    let mut wizard = SetupWizardPanel::new();
+    wizard.home_dir_override = Some(temp_dir.clone());
+    let migrated = wizard.migrate_from_claude_code();
+    assert!(migrated, "存在合法 settings.json 时应成功迁移");
+    // 验证迁移出的 provider 数量（Anthropic + OpenAI 兼容）
+    assert!(
+        wizard.providers.len() >= 2,
+        "应至少迁移出 Anthropic + OpenAI 两个 provider，实际：{}",
+        wizard.providers.len()
+    );
 
     // 验证 env_get 辅助函数
+    let env = settings["env"].as_object().unwrap().clone();
     assert_eq!(env_get(&env, "ANTHROPIC_API_KEY"), "sk-ant-123");
     assert_eq!(
         env_get(&env, "ANTHROPIC_BASE_URL"),

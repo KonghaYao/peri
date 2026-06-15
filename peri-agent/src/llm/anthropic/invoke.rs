@@ -610,6 +610,10 @@ impl BaseModel for super::ChatAnthropic {
         200_000
     }
 
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
     async fn invoke_streaming(
         &self,
         request: LlmRequest,

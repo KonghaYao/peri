@@ -17,10 +17,8 @@ impl Command for EffortCommand {
         let arg = args.trim().to_lowercase();
         match arg.as_str() {
             "low" | "medium" | "high" | "xhigh" | "max" => {
-                let cfg = app
-                    .services
-                    .peri_config
-                    .get_or_insert_with(Default::default);
+                let cfg_arc = app.services.peri_config.clone();
+                let mut cfg = cfg_arc.write();
                 cfg.config.thinking = Some(ThinkingConfig {
                     enabled: cfg.config.thinking.as_ref().is_none_or(|t| t.enabled),
                     budget_tokens: cfg
@@ -31,7 +29,7 @@ impl Command for EffortCommand {
                     effort: arg.clone(),
                     max_tokens: cfg.config.thinking.as_ref().map_or(32000, |t| t.max_tokens),
                 });
-                if let Err(e) = App::save_config(cfg, app.services.config_path_override.as_deref())
+                if let Err(e) = App::save_config(&cfg, app.services.config_path_override.as_deref())
                 {
                     let vm = MessageViewModel::system(format!("配置保存失败: {}", e));
                     app.session_mgr
@@ -57,13 +55,16 @@ impl Command for EffortCommand {
                 app.render_rebuild();
             }
             _ => {
-                let current = app
+                let current_owned = app
                     .services
                     .peri_config
+                    .read()
+                    .config
+                    .thinking
                     .as_ref()
-                    .and_then(|c| c.config.thinking.as_ref())
-                    .map(|t| t.effort.as_str())
-                    .unwrap_or("high");
+                    .map(|t| t.effort.clone())
+                    .unwrap_or_else(|| "high".to_string());
+                let current = current_owned.as_str();
                 let vm = MessageViewModel::system(format!(
                     "当前推理力度: {}\n用法: /effort low|medium|high|xhigh|max",
                     current

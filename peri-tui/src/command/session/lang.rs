@@ -44,9 +44,11 @@ impl Command for LangCommand {
 
         match app.services.lc.switch(lang) {
             Ok(()) => {
-                if let Some(cfg) = app.services.peri_config.as_mut() {
-                    cfg.config.language = Some(lang.to_string());
-                    let _ = App::save_config(cfg, app.services.config_path_override.as_deref());
+                {
+                    let mut cfg_guard = app.services.peri_config.write();
+                    cfg_guard.config.language = Some(lang.to_string());
+                    let _ =
+                        App::save_config(&cfg_guard, app.services.config_path_override.as_deref());
                 }
                 app.request_rebuild();
                 let msg = app

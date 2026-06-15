@@ -33,7 +33,7 @@ impl super::SubAgentTool {
             child_meta.parent_thread_id = self.parent_thread_id.clone();
             child_meta.snapshot_at_message_id = snapshot_id;
             child_meta.hidden = true;
-            child_meta.cancel_policy = "cascade".to_string();
+            child_meta.cancel_policy = "cascade".parse().expect("合法 cancel_policy 字符串");
             child_meta.title = Some("fork".to_string());
             store
                 .create_thread(child_meta)

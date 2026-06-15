@@ -1,7 +1,8 @@
 //! Shared frozen-data construction for session/new.
 //!
 //! Both TUI and Stdio paths build identical frozen data at session creation.
-//! This module provides a single entry point to eliminate duplication.
+//! 实际构造已内聚为 [`crate::session::executor::FrozenSessionData::build`]，
+//! 此模块仅保留薄包装，维持既有 import 路径稳定。
 
 use std::path::PathBuf;
 
@@ -9,8 +10,8 @@ use crate::session::executor::FrozenSessionData;
 
 /// Build frozen session data from the given parameters.
 ///
-/// Called once at session/new, capturing date/language/CLAUDE.md/skills/system_prompt.
-/// `language` should be the user's configured language (`None` → auto-detect).
+/// 委托给 [`FrozenSessionData::build`]（Immutable Value Object 的唯一构造入口）。
+/// 保留此自由函数以兼容既有调用点；新代码请优先使用关联函数。
 pub fn build_frozen_session_data(
     cwd: &str,
     language: Option<&str>,
@@ -18,31 +19,11 @@ pub fn build_frozen_session_data(
     plugin_agent_dirs: &[PathBuf],
     frozen_date: &str,
 ) -> FrozenSessionData {
-    let (frozen_claude_md, frozen_claude_local_md) =
-        peri_middlewares::AgentsMdMiddleware::read_frozen_content(cwd);
-
-    let frozen_skill_summary =
-        peri_middlewares::SkillsMiddleware::build_frozen_summary(cwd, plugin_skill_dirs);
-
-    let features = crate::prompt::PromptFeatures::detect();
-    let frozen_system_prompt = crate::prompt::build_system_prompt(
-        None,
+    FrozenSessionData::build(
         cwd,
-        features,
-        plugin_agent_dirs,
-        Some(frozen_date),
         language,
-    );
-
-    let is_git_repo = std::path::Path::new(cwd).join(".git").exists();
-
-    FrozenSessionData {
-        system_prompt: frozen_system_prompt,
-        claude_md: frozen_claude_md,
-        claude_local_md: frozen_claude_local_md,
-        skill_summary: frozen_skill_summary,
-        date: frozen_date.to_string(),
-        is_git_repo,
-        language: language.map(|s| s.to_string()),
-    }
+        plugin_skill_dirs,
+        plugin_agent_dirs,
+        frozen_date,
+    )
 }

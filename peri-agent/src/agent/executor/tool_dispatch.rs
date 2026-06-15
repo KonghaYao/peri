@@ -105,15 +105,6 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
 
     // 阶段 A：收集所有工具调用结果（不写 state）
     // 返回 Err 仅在 before_tool 错误路径（此时 state 干净，无 AI 消息）
-    tracing::debug!(
-        "[DEADLOCK] dispatch_tools: {} tool calls to dispatch, names={:?}",
-        reasoning.tool_calls.len(),
-        reasoning
-            .tool_calls
-            .iter()
-            .map(|tc| tc.name.as_str())
-            .collect::<Vec<_>>()
-    );
     let (results, was_cancelled, deferred_error) = collect_tool_results(
         agent,
         state,
@@ -123,11 +114,6 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
         ai_msg_id,
     )
     .await?;
-
-    tracing::debug!(
-        "[DEADLOCK] dispatch_tools: collect_tool_results done, {} results, was_cancelled={}, deferred={}",
-        results.len(), was_cancelled, deferred_error.is_some()
-    );
 
     // 阶段 B：一次性写入 state（Cancel / deferred_error 路径也写入，保证 state 一致）
     agent.emit(AgentEvent::MessageAdded(ai_msg.clone()));
@@ -170,24 +156,17 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
 
     // 写入完成后再返回错误
     if was_cancelled {
-        tracing::warn!("[DEADLOCK] dispatch_tools: returning Interrupted (was_cancelled)");
+        tracing::warn!("dispatch_tools: returning Interrupted (was_cancelled)");
         return Err(AgentError::Interrupted);
     }
     if let Some(msg) = deferred_error {
-        tracing::warn!(
-            "[DEADLOCK] dispatch_tools: returning MiddlewareError: {}",
-            msg
-        );
+        tracing::warn!("dispatch_tools: returning MiddlewareError: {}", msg);
         return Err(AgentError::MiddlewareError {
             middleware: "chain".to_string(),
             reason: msg,
         });
     }
 
-    tracing::debug!(
-        "[DEADLOCK] dispatch_tools: complete, {} results",
-        results.len()
-    );
     Ok(results)
 }
 
@@ -384,7 +363,6 @@ async fn collect_tool_results<L: ReactLLM, S: State>(
                     "tool_call_id": modified_call.id,
                     "error": result.output,
                     "input_summary": input_summary,
-                    "duration_ms": (),
                     "step": state.current_step(),
                 }),
                 state.get_context("session_id"),
@@ -400,12 +378,6 @@ async fn collect_tool_results<L: ReactLLM, S: State>(
             source_agent_id: None,
         });
 
-        if modified_call.name == "Agent" {
-            tracing::debug!(
-                "[DEADLOCK] dispatch: about to run_after_tool for Agent, call_id={}",
-                modified_call.id
-            );
-        }
         if let Err(e) = agent
             .chain
             .run_after_tool(state, &modified_call, &result)
@@ -413,12 +385,6 @@ async fn collect_tool_results<L: ReactLLM, S: State>(
         {
             let _ = agent.chain.run_on_error(state, &e).await;
             deferred_error = deferred_error.or(Some(e.to_string()));
-        }
-        if modified_call.name == "Agent" {
-            tracing::debug!(
-                "[DEADLOCK] dispatch: run_after_tool for Agent completed, call_id={}",
-                modified_call.id
-            );
         }
 
         exec_results.push((modified_call, result));

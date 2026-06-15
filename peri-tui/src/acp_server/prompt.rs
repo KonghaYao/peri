@@ -41,6 +41,7 @@ pub(crate) async fn execute_prompt(
     thread_store: &Arc<dyn peri_agent::thread::ThreadStore>,
     langfuse_session: Option<Arc<LangfuseSession>>,
     pool: Arc<parking_lot::Mutex<peri_acp::session::agent_pool::AgentPool>>,
+    session_manager: peri_acp::session::SessionManager,
 ) -> Result<Value, AcpError> {
     let session_id = params
         .get("sessionId")
@@ -103,36 +104,36 @@ pub(crate) async fn execute_prompt(
     // Track first history message ID for cancel-with-progress path (history is moved below)
     // Uses Option<MessageId> (16 bytes) instead of cloning the entire history.
     let first_history_id = history.first().map(|m| m.id());
-    let result = executor::execute_prompt(
-        &provider_snapshot,
-        peri_config_snapshot,
-        &cwd,
+    let result = executor::execute_prompt(executor::PromptExecutionContext {
+        provider: provider_snapshot,
+        peri_config: peri_config_snapshot,
+        cwd,
+        session_id: session_id.clone(),
+        cancel,
+        event_sink,
+        broker,
+        permission_mode: permission_mode.clone(),
         content,
         frozen,
         history,
         incoming_recalls,
-        is_empty,
-        permission_mode.clone(),
-        event_sink,
-        cancel,
-        broker,
-        plugin_skill_dirs.to_vec(),
-        plugin_agent_dirs.to_vec(),
-        hook_groups.to_vec(),
+        is_empty_history: is_empty,
+        bg_results,
+        plugin_skill_dirs: plugin_skill_dirs.to_vec(),
+        plugin_agent_dirs: plugin_agent_dirs.to_vec(),
+        hook_groups: hook_groups.to_vec(),
         cron_scheduler,
-        session_id.clone(),
         mcp_pool,
         channel_state,
         tool_search_index,
         shared_tools,
-        plugin_lsp_servers.to_vec(),
+        lsp_servers: plugin_lsp_servers.to_vec(),
         langfuse_session,
         pool,
-        Some(Arc::clone(thread_store)),
-        Some(thread_id.clone()),
-        None, // session_manager（TUI 使用 SharedSessions，不走 SessionManager）
-        bg_results,
-    )
+        thread_store: Some(Arc::clone(thread_store)),
+        thread_id: Some(thread_id.clone()),
+        session_manager: Some(session_manager),
+    })
     .await;
 
     // Persist new messages to ThreadStore and update in-memory state.

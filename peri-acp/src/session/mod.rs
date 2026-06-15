@@ -240,6 +240,63 @@ impl SessionManager {
     pub fn agent_overrides(&self) -> Option<&AgentOverrides> {
         self.inner.agent_overrides.as_ref()
     }
+
+    /// 构建会话级 frozen 数据（统一构造入口，消除 TUI/stdio 重复 5 处）。
+    ///
+    /// 封装 [`crate::session::frozen::build_frozen_session_data`]，
+    /// 使用 manager 内部捕获的 `peri_config.language` 和当前日期。
+    pub fn build_frozen_data(
+        &self,
+        cwd: &str,
+        plugin_skill_dirs: &[std::path::PathBuf],
+        plugin_agent_dirs: &[std::path::PathBuf],
+    ) -> crate::session::executor::FrozenSessionData {
+        let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let frozen_language = self.inner.peri_config.config.language.clone();
+        crate::session::frozen::build_frozen_session_data(
+            cwd,
+            frozen_language.as_deref(),
+            plugin_skill_dirs,
+            plugin_agent_dirs,
+            &frozen_date,
+        )
+    }
+
+    /// 确保指定 session 在 SessionManager 中存在 AcpSession 记录，
+    /// 用于支撑 cascade cancel 子 agent 与 goal_state 跨 prompt 共享。
+    ///
+    /// 如果 session 已存在则 no-op；否则插入一个空 history 的 AcpSession。
+    /// TUI/stdio 调用方仍自行维护 history/frozen/agent_pool 等字段，
+    /// SessionManager 只负责 active_agents / goal_state 维度。
+    pub fn ensure_session(&self, session_id: &str, cwd: &str) {
+        if self.inner.sessions.contains_key(session_id) {
+            return;
+        }
+        let thread_id = ThreadId::from(session_id.to_string());
+        let session = self.build_session(session_id, thread_id, cwd);
+        self.inner.sessions.insert(session_id.to_string(), session);
+    }
+
+    /// 取指定 session 的 goal_state 句柄（用于 TUI/stdio 注入到 middleware 链）。
+    ///
+    /// 调用方应先调用 [`ensure_session`] 保证记录存在。
+    /// 不存在时返回 None。
+    pub fn goal_state_for(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::session::goal_state::GoalState> {
+        self.inner
+            .sessions
+            .get(session_id)
+            .map(|s| s.goal_state.clone())
+    }
+
+    /// 取消指定 session 的所有 cascade 子 agent（暴露给 TUI/stdio 用于 session/cancel）。
+    pub fn cancel_cascade_children_for(&self, session_id: &str) {
+        if let Some(session) = self.inner.sessions.get(session_id) {
+            session.cancel_cascade_children();
+        }
+    }
 }
 
 impl AcpSession {
@@ -259,3 +316,7 @@ impl AcpSession {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;

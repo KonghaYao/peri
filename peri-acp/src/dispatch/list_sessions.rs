@@ -1,6 +1,7 @@
 //! List sessions via [`ThreadStore`], returning ACP [`SessionInfo`] entries.
 
 use agent_client_protocol_schema::{SessionId, SessionInfo};
+use anyhow::{Context, Result};
 use peri_agent::thread::ThreadStore;
 
 /// Query all sessions from persistent storage, convert to ACP
@@ -8,11 +9,11 @@ use peri_agent::thread::ThreadStore;
 pub async fn list_sessions_as_info(
     thread_store: &dyn ThreadStore,
     cwd_filter: Option<&str>,
-) -> Result<Vec<SessionInfo>, String> {
+) -> Result<Vec<SessionInfo>> {
     let threads = thread_store
         .list_threads()
         .await
-        .map_err(|e| format!("Failed to list sessions: {e}"))?;
+        .context("Failed to list sessions")?;
     Ok(threads
         .into_iter()
         .filter(|t| {

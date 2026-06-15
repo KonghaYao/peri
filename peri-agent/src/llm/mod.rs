@@ -30,6 +30,16 @@ pub trait BaseModel: Send + Sync {
         200_000
     }
 
+    /// 是否原生支持流式调用。
+    ///
+    /// Capability Query：调用方据此决定是直接请求 SSE 流，
+    /// 还是要走 [`invoke_streaming`](Self::invoke_streaming) 默认实现的
+    /// "invoke + 一次性返回" 降级路径。默认 `false`，
+    /// 由 [`ChatOpenAI`] / [`ChatAnthropic`] override 返回 `true`。
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
     /// 流式调用。默认实现回退到非流式 invoke()。
     /// 仅 ChatOpenAI 和 ChatAnthropic override 此方法实现 SSE 流式。
     async fn invoke_streaming(
@@ -37,6 +47,11 @@ pub trait BaseModel: Send + Sync {
         request: LlmRequest,
         _ctx: StreamingContext,
     ) -> AgentResult<LlmResponse> {
+        tracing::debug!(
+            provider = self.provider_name(),
+            model = self.model_id(),
+            "LLM 未声明 supports_streaming，invoke_streaming 降级为非流式 invoke"
+        );
         self.invoke(request).await
     }
 }

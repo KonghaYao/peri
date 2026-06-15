@@ -249,13 +249,12 @@ fn revert_files(changes: &[FileChange], cwd: &str, warnings: &mut Vec<String>) {
                 match std::fs::read_to_string(&full_path) {
                     Ok(content) => {
                         // 只替换第一次出现（与 Edit 工具行为一致）
-                        if let Some(idx) = content.find(new_string) {
-                            let reverted = format!(
-                                "{}{}{}",
-                                &content[..idx],
-                                old_string,
-                                &content[idx + new_string.len()..]
-                            );
+                        // 字符级操作：用 replacen 避免字节切片的 UTF-8 边界 panic。
+                        // new_string 可能跨多字节 CJK 字符，content.find() 返回字节索引，
+                        // &content[..idx] 虽在 char boundary 上技术上安全，但 replacen
+                        // 是更稳健且与 filesystem/edit.rs 同构的写法。
+                        if content.contains(new_string) {
+                            let reverted = content.replacen(new_string, old_string, 1);
                             if let Err(e) = std::fs::write(&full_path, reverted) {
                                 warnings.push(format!("Edit 恢复写入失败 {path}: {e}"));
                             }
@@ -342,3 +341,7 @@ fn validate_tool_pairing(messages: &[BaseMessage]) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "rewind_test.rs"]
+mod tests;

@@ -80,12 +80,13 @@ pub(super) fn handle_panels(app: &mut App, input: &Input) -> Option<Action> {
                 {
                     // Beta 切换后即时保存
                     if let Some(panel) = pm.get::<BetasPanel>() {
-                        if let Some(ref mut cfg) = ctx.services.peri_config {
-                            panel.apply_to_config(cfg);
-                            let _ =
-                                App::save_config(cfg, ctx.services.config_path_override.as_deref());
-                            ctx.sync_acp_config();
-                        }
+                        let cfg = ctx.services.peri_config.clone();
+                        let mut cfg_guard = cfg.write();
+                        panel.apply_to_config(&mut cfg_guard);
+                        let _ = App::save_config(
+                            &cfg_guard,
+                            ctx.services.config_path_override.as_deref(),
+                        );
                     }
                 }
                 _ => {}

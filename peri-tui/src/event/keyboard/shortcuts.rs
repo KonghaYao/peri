@@ -42,20 +42,22 @@ pub(super) fn handle_shortcuts(
 
     // Ctrl+T / Alt+M: cycle model aliases
     if SHORTCUT_CTRL_CYCLE_MODE.matches(key_event) || SHORTCUT_CYCLE_MODE.matches(key_event) {
-        if let Some(cfg) = app.services.peri_config.as_mut() {
+        {
+            let cfg_arc = app.services.peri_config.clone();
+            let mut cfg = cfg_arc.write();
             let aliases = ["opus", "sonnet", "haiku"];
             let current = cfg.config.active_alias.as_str();
             let idx = aliases.iter().position(|&a| a == current).unwrap_or(0);
             let next = aliases[(idx + 1) % aliases.len()];
             cfg.config.active_alias = next.to_string();
-            if let Err(e) = App::save_config(cfg, app.services.config_path_override.as_deref()) {
+            if let Err(e) = App::save_config(&cfg, app.services.config_path_override.as_deref()) {
                 app.session_mgr
                     .current_mut()
                     .messages
                     .view_messages
                     .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
             }
-            if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
+            if let Some(p) = crate::app::agent::LlmProvider::from_config(&cfg) {
                 app.services.provider_name = p.display_name().to_string();
                 app.services.model_name = p.model_name().to_string();
             }
@@ -75,22 +77,27 @@ pub(super) fn handle_shortcuts(
     // Ctrl+Shift+T / Alt+Shift+M: cycle providers
     if SHORTCUT_CTRL_CYCLE_PROVIDER.matches(key_event) || SHORTCUT_CYCLE_PROVIDER.matches(key_event)
     {
-        if let Some(cfg) = app.services.peri_config.as_mut() {
-            let providers = &cfg.config.providers;
-            if providers.len() > 1 {
+        {
+            let cfg_arc = app.services.peri_config.clone();
+            let mut cfg = cfg_arc.write();
+            let providers_len = cfg.config.providers.len();
+            if providers_len > 1 {
                 let current_id = cfg.config.active_provider_id.as_str();
-                let idx = providers
-                    .iter()
-                    .position(|p| p.id == current_id)
-                    .unwrap_or(0);
-                let next_idx = (idx + 1) % providers.len();
-                let next_provider = &providers[next_idx];
-                cfg.config.active_provider_id = next_provider.id.clone();
-                if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
+                let next_id = {
+                    let providers = &cfg.config.providers;
+                    let idx = providers
+                        .iter()
+                        .position(|p| p.id == current_id)
+                        .unwrap_or(0);
+                    let next_idx = (idx + 1) % providers.len();
+                    providers[next_idx].id.clone()
+                };
+                cfg.config.active_provider_id = next_id;
+                if let Some(p) = crate::app::agent::LlmProvider::from_config(&cfg) {
                     app.services.provider_name = p.display_name().to_string();
                     app.services.model_name = p.model_name().to_string();
                 }
-                if let Err(e) = App::save_config(cfg, app.services.config_path_override.as_deref())
+                if let Err(e) = App::save_config(&cfg, app.services.config_path_override.as_deref())
                 {
                     app.session_mgr
                         .current_mut()
@@ -98,7 +105,6 @@ pub(super) fn handle_shortcuts(
                         .view_messages
                         .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
                 }
-                app.sync_acp_config();
                 app.global_ui.provider_highlight_until =
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(2000));
             }

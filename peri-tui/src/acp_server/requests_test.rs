@@ -62,6 +62,14 @@ fn make_server_config(
     tmp: &tempfile::TempDir,
 ) -> AcpServerConfig {
     let thread_store = FilesystemThreadStore::new(tmp.path().join("threads"));
+    let arc_thread_store: Arc<dyn peri_agent::thread::ThreadStore> = Arc::new(thread_store);
+    let session_manager = peri_acp::session::SessionManager::new(
+        arc_thread_store.clone(),
+        provider.clone(),
+        Arc::new(peri_config.clone()),
+        SharedPermissionMode::new(PermissionMode::Bypass),
+        None,
+    );
     AcpServerConfig {
         provider: Arc::new(parking_lot::RwLock::new(provider)),
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
@@ -76,9 +84,10 @@ fn make_server_config(
         plugin_lsp_servers: Vec::new(),
         tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
         shared_tools: Arc::new(parking_lot::RwLock::new(HashMap::new())),
-        thread_store: Arc::new(thread_store),
+        thread_store: arc_thread_store,
         langfuse_session: None,
         config_path: tmp.path().join("test_config.json"),
+        session_manager,
     }
 }
 

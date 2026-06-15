@@ -252,7 +252,9 @@ impl App {
         );
         let channel_state = peri_agent::interaction::ChannelState::new();
         let services = ServiceRegistry {
-            peri_config: peri_config.clone(),
+            peri_config: std::sync::Arc::new(parking_lot::RwLock::new(
+                peri_config.clone().unwrap_or_default(),
+            )),
             cwd: cwd.clone(),
             provider_name: provider_name.clone(),
             model_name: model_name.clone(),
@@ -332,8 +334,10 @@ impl App {
         let streaming_mode = self
             .services
             .peri_config
-            .as_ref()
-            .and_then(|c| c.config.streaming_mode.clone());
+            .read()
+            .config
+            .streaming_mode
+            .clone();
         let session = ChatSession::new(
             self.services.cwd.clone(),
             command_registry,
@@ -565,43 +569,27 @@ impl App {
         self.session_mgr.current_mut().session_panels.close();
     }
 
-    /// Setup 向导保存后刷新内存中的 Provider 状态
+    /// Setup 向导保存后刷新内存中的 Provider 状态。
+    ///
+    /// 配置写入共享的 `Arc<RwLock<PeriConfig>>`，ACP Server 持有同一 `Arc`，
+    /// 因此无需再调用 `sync_acp_config`。
     pub fn refresh_after_setup(&mut self, cfg: crate::config::PeriConfig) {
-        self.services.peri_config = Some(cfg);
-        let cfg_ref = self.services.peri_config.as_ref().unwrap();
-        if let Some(p) = agent::LlmProvider::from_config(cfg_ref) {
+        *self.services.peri_config.write() = cfg;
+        let cfg_ref = self.services.peri_config.read();
+        if let Some(p) = agent::LlmProvider::from_config(&cfg_ref) {
             self.services.provider_name = p.display_name().to_string();
             self.services.model_name = p.model_name().to_string();
         }
-        self.sync_acp_config();
-    }
-
-    /// 同步等待 ACP Server 更新完整配置，确保 provider 在内存中已更新。
-    /// 使用 block_in_place + block_on 避免 tokio runtime 死锁。
-    pub(crate) fn sync_acp_config(&self) {
-        let Some(ref acp_client) = self.acp_client else {
-            return;
-        };
-        let cfg = match self.services.peri_config.as_ref() {
-            Some(c) => c.clone(),
-            None => return,
-        };
-        let acp = acp_client.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                if let Err(e) = acp.update_config(&cfg).await {
-                    tracing::error!(error = %e, "sync_acp_config: update_config failed");
-                }
-            });
-        });
     }
 
     pub fn get_compact_config(&self) -> peri_agent::agent::CompactConfig {
         let mut config = self
             .services
             .peri_config
-            .as_ref()
-            .and_then(|zc| zc.config.compact.clone())
+            .read()
+            .config
+            .compact
+            .clone()
             .unwrap_or_default();
         config.apply_env_overrides();
         config

@@ -117,7 +117,7 @@ pub async fn run_acp_stdio(cwd: String) -> anyhow::Result<()> {
             {
                 let ctx = ctx_clone.clone();
                 async move |req: CloseSessionRequest, responder, _cx: ConnectionTo<Client>| {
-                    session::control::handle_close(&ctx, &req.session_id.0);
+                    session::control::handle_close(&ctx, &req.session_id.0).await;
                     let _ = responder.respond(CloseSessionResponse::new());
                     Ok(())
                 }

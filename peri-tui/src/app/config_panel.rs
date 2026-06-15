@@ -86,14 +86,13 @@ fn screen_to_logical_row(screen_line: usize) -> Option<usize> {
 }
 
 fn save_config_now(panel: &mut ConfigPanel, ctx: &mut PanelContext<'_>) {
-    let Some(cfg) = ctx.services.peri_config.as_mut() else {
-        return;
-    };
-    if panel.apply_edit(cfg, &ctx.services.lc).is_ok() {
-        if let Some(ref lang) = cfg.config.language {
+    let cfg_arc = ctx.services.peri_config.clone();
+    let mut cfg = cfg_arc.write();
+    if panel.apply_edit(&mut cfg, &ctx.services.lc).is_ok() {
+        if let Some(ref lang) = cfg.config.language.clone() {
             let _ = ctx.services.lc.switch(lang);
         }
-        let _ = App::save_config(cfg, ctx.services.config_path_override.as_deref());
+        let _ = App::save_config(&cfg, ctx.services.config_path_override.as_deref());
     }
 }
 

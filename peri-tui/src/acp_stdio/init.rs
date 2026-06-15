@@ -125,6 +125,21 @@ pub(super) async fn init_stdio_context(cwd: String) -> anyhow::Result<Arc<StdioC
         tracing::info!("Langfuse tracing enabled (stdio mode)");
     }
 
+    // 构建 SessionManager：支撑 SubAgent cascade cancel 与 goal_state 跨 prompt 共享。
+    // stdio 本地仍维护 SessionInfo（history/frozen/agent_pool 等），SessionManager
+    // 只持有 AcpSession 元数据 + active_agents + goal_state。
+    let session_manager = {
+        let peri_config_snapshot = peri_config.clone();
+        let provider_snapshot = provider.clone();
+        peri_acp::session::SessionManager::new(
+            thread_store.clone(),
+            provider_snapshot,
+            Arc::new(peri_config_snapshot),
+            permission_mode.clone(),
+            None,
+        )
+    };
+
     // 构建共享的 ServerContext，所有请求处理器通过 Arc 共享
     Ok(Arc::new(StdioContext {
         provider: RwLock::new(provider),
@@ -142,5 +157,6 @@ pub(super) async fn init_stdio_context(cwd: String) -> anyhow::Result<Arc<StdioC
         sessions: RwLock::new(HashMap::new()),
         thread_store,
         langfuse_session,
+        session_manager,
     }))
 }

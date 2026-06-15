@@ -229,7 +229,7 @@ impl AcpTuiClient {
     ///
     /// Closes the previous session (if any) to release its history, AgentPool,
     /// and FrozenSessionData from the server-side sessions HashMap.
-    pub async fn new_session(&self, cwd: &str, model: Option<&str>) -> Result<String, String> {
+    pub async fn new_session(&self, cwd: &str, model: Option<&str>) -> Result<String, AcpError> {
         // Close previous session to free server-side memory
         let old_id = self.current_session_id.lock().unwrap().take();
         if let Some(ref old_sid) = old_id {
@@ -240,17 +240,13 @@ impl AcpTuiClient {
         }
 
         let params = json!({ "cwd": cwd, "model": model });
-        let result = self
-            .transport
-            .send_request("session/new", params)
-            .await
-            .map_err(|e| e.to_string())?;
+        let result = self.transport.send_request("session/new", params).await?;
         // ACP protocol uses camelCase: {"sessionId": "..."}
         let session_id = result
             .get("sessionId")
             .or_else(|| result.get("session_id"))
             .and_then(|v| v.as_str())
-            .ok_or("no session_id in response")?
+            .ok_or_else(|| AcpError::new(-32603, "no session_id in response"))?
             .to_string();
         *self.current_session_id.lock().unwrap() = Some(session_id.clone());
         Ok(session_id)
@@ -265,7 +261,7 @@ impl AcpTuiClient {
         session_id: &str,
         cwd: &str,
         model: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, AcpError> {
         // Close previous session (if different from the one being loaded)
         let old_id = self.current_session_id.lock().unwrap().take();
         if let Some(ref old_sid) = old_id {
@@ -278,11 +274,7 @@ impl AcpTuiClient {
         }
 
         let params = json!({ "sessionId": session_id, "cwd": cwd, "model": model });
-        let _ = self
-            .transport
-            .send_request("session/load", params)
-            .await
-            .map_err(|e| e.to_string())?;
+        let _ = self.transport.send_request("session/load", params).await?;
         *self.current_session_id.lock().unwrap() = Some(session_id.to_string());
         Ok(session_id.to_string())
     }
@@ -293,13 +285,13 @@ impl AcpTuiClient {
     pub async fn prompt(
         &self,
         content: &peri_agent::messages::MessageContent,
-    ) -> Result<(), String> {
+    ) -> Result<(), AcpError> {
         let session_id = self
             .current_session_id
             .lock()
             .unwrap()
             .clone()
-            .ok_or("no active session")?;
+            .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let params = json!({
             "sessionId": session_id,
             "message": { "role": "user", "content": content },
@@ -308,7 +300,6 @@ impl AcpTuiClient {
             .send_request("session/prompt", params)
             .await
             .map(|_| ())
-            .map_err(|e| e.to_string())
     }
 
     /// Submit background task results as synthetic tool_use + tool_result pairs.
@@ -316,13 +307,13 @@ impl AcpTuiClient {
     pub async fn prompt_with_bg_results(
         &self,
         bg_results: Vec<peri_agent::agent::events::BackgroundTaskResult>,
-    ) -> Result<(), String> {
+    ) -> Result<(), AcpError> {
         let session_id = self
             .current_session_id
             .lock()
             .unwrap()
             .clone()
-            .ok_or("no active session")?;
+            .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let params = json!({
             "sessionId": session_id,
             "message": { "role": "user", "content": "Background agents completed. Please review the results." },
@@ -332,47 +323,44 @@ impl AcpTuiClient {
             .send_request("session/prompt", params)
             .await
             .map(|_| ())
-            .map_err(|e| e.to_string())
     }
 
     /// Change the model for the current session.
-    pub async fn set_model(&self, alias: &str) -> Result<(), String> {
+    pub async fn set_model(&self, alias: &str) -> Result<(), AcpError> {
         let session_id = self
             .current_session_id
             .lock()
             .unwrap()
             .clone()
-            .ok_or("no active session")?;
+            .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let params = json!({ "sessionId": session_id, "modelId": alias });
         let _ = self
             .transport
             .send_request("session/set_model", params)
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
         Ok(())
     }
 
     /// Change the permission mode for the current session.
-    pub async fn set_mode(&self, mode: &str) -> Result<(), String> {
+    pub async fn set_mode(&self, mode: &str) -> Result<(), AcpError> {
         let session_id = self
             .current_session_id
             .lock()
             .unwrap()
             .clone()
-            .ok_or("no active session")?;
+            .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let params = json!({ "sessionId": session_id, "modeId": mode });
         let _ = self
             .transport
             .send_request("session/set_mode", params)
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
         Ok(())
     }
 
     /// Set a config option (mode/model/thought_level) via the unified config API.
     /// Silently returns Ok if no session exists yet — uses notification to
     /// update ACP server state directly without requiring a session.
-    pub async fn set_config_option(&self, config_id: &str, value: &str) -> Result<(), String> {
+    pub async fn set_config_option(&self, config_id: &str, value: &str) -> Result<(), AcpError> {
         let session_id = {
             let guard = self.current_session_id.lock().unwrap();
             guard.clone()
@@ -384,8 +372,7 @@ impl AcpTuiClient {
                 let _ = self
                     .transport
                     .send_request("session/set_config_option", params)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                    .await?;
             }
             None => {
                 // No session yet — send via notification so ACP server updates its
@@ -393,8 +380,7 @@ impl AcpTuiClient {
                 let params = json!({ "configId": config_id, "value": value });
                 self.transport
                     .send_notification("session/config_update", params)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                    .await?;
             }
         }
         Ok(())
@@ -402,7 +388,7 @@ impl AcpTuiClient {
 
     /// Update the full PeriConfig on the ACP server (for Login panel CRUD).
     /// When no session exists, uses notification to update server state directly.
-    pub async fn update_config(&self, config: &crate::config::PeriConfig) -> Result<(), String> {
+    pub async fn update_config(&self, config: &crate::config::PeriConfig) -> Result<(), AcpError> {
         let session_id = {
             let guard = self.current_session_id.lock().unwrap();
             guard.clone()
@@ -416,8 +402,7 @@ impl AcpTuiClient {
                 let _ = self
                     .transport
                     .send_request("session/update_config", params)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                    .await?;
             }
             None => {
                 // No session yet — send via notification so ACP server updates
@@ -428,26 +413,24 @@ impl AcpTuiClient {
                 });
                 self.transport
                     .send_notification("session/config_update", params)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                    .await?;
             }
         }
         Ok(())
     }
 
     /// Cancel the currently running prompt.
-    pub async fn cancel(&self) -> Result<(), String> {
+    pub async fn cancel(&self) -> Result<(), AcpError> {
         let session_id = self
             .current_session_id
             .lock()
             .unwrap()
             .clone()
-            .ok_or("no active session")?;
+            .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let params = json!({ "sessionId": session_id });
         self.transport
             .send_notification("session/cancel", params)
             .await
-            .map_err(|e| e.to_string())
     }
 
     /// Send a response to a server-initiated request (e.g. HITL approval).
@@ -455,10 +438,7 @@ impl AcpTuiClient {
         &self,
         id: RequestId,
         result: Result<Value, AcpError>,
-    ) -> Result<(), String> {
-        self.transport
-            .send_response(id, result)
-            .await
-            .map_err(|e| e.to_string())
+    ) -> Result<(), AcpError> {
+        self.transport.send_response(id, result).await
     }
 }

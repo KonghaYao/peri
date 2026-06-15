@@ -3,11 +3,10 @@ use super::*;
 impl App {
     /// 打开 /login 面板
     pub fn open_login_panel(&mut self) {
-        let cfg = self
-            .services
-            .peri_config
-            .get_or_insert_with(PeriConfig::default);
-        let panel = login_panel::LoginPanel::from_config(cfg);
+        let panel = {
+            let cfg_guard = self.services.peri_config.read();
+            login_panel::LoginPanel::from_config(&cfg_guard)
+        };
         self.open_panel(PanelState::Login(Box::new(panel)));
     }
 
@@ -34,10 +33,9 @@ impl App {
             .get(panel.cursor())
             .map(|p| p.display_name().to_string())
             .unwrap_or_default();
-        let Some(cfg) = self.services.peri_config.as_mut() else {
-            return;
-        };
-        panel.select_provider(cfg);
+        let cfg = self.services.peri_config.clone();
+        let mut cfg_guard = cfg.write();
+        panel.select_provider(&mut cfg_guard);
         if !selected_name.is_empty() {
             self.session_mgr
                 .current_mut()
@@ -47,7 +45,8 @@ impl App {
                     &[("name".into(), selected_name.into())],
                 ));
         }
-        if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
+        if let Err(e) = Self::save_config(&cfg_guard, self.services.config_path_override.as_deref())
+        {
             self.session_mgr
                 .current_mut()
                 .messages
@@ -56,11 +55,10 @@ impl App {
                     &[("error".into(), e.to_string().into())],
                 ));
         }
-        if let Some(p) = agent::LlmProvider::from_config(cfg) {
+        if let Some(p) = agent::LlmProvider::from_config(&cfg_guard) {
             self.services.provider_name = p.display_name().to_string();
             self.services.model_name = p.model_name().to_string();
         }
-        self.sync_acp_config();
         self.close_login_panel();
     }
 
@@ -76,10 +74,9 @@ impl App {
         };
         let edit_name = panel.field_name.value();
         let is_new = matches!(panel.mode, login_panel::LoginPanelMode::New);
-        let Some(cfg) = self.services.peri_config.as_mut() else {
-            return;
-        };
-        if !panel.apply_edit(cfg) {
+        let cfg = self.services.peri_config.clone();
+        let mut cfg_guard = cfg.write();
+        if !panel.apply_edit(&mut cfg_guard) {
             self.session_mgr
                 .current_mut()
                 .messages
@@ -95,7 +92,7 @@ impl App {
             edit_name
         };
         // 自动激活保存的 provider
-        panel.select_provider(cfg);
+        panel.select_provider(&mut cfg_guard);
         let key = if is_new {
             "app-provider-created"
         } else {
@@ -110,7 +107,8 @@ impl App {
                     .lc
                     .tr_args(key, &[("name".into(), display.into())]),
             ));
-        if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
+        if let Err(e) = Self::save_config(&cfg_guard, self.services.config_path_override.as_deref())
+        {
             self.session_mgr
                 .current_mut()
                 .messages
@@ -120,11 +118,10 @@ impl App {
                     &[("error".into(), e.to_string().into())],
                 )));
         }
-        if let Some(p) = agent::LlmProvider::from_config(cfg) {
+        if let Some(p) = agent::LlmProvider::from_config(&cfg_guard) {
             self.services.provider_name = p.display_name().to_string();
             self.services.model_name = p.model_name().to_string();
         }
-        self.sync_acp_config();
         self.close_login_panel();
     }
 
@@ -138,15 +135,14 @@ impl App {
         else {
             return;
         };
-        let Some(cfg) = self.services.peri_config.as_mut() else {
-            return;
-        };
+        let cfg = self.services.peri_config.clone();
+        let mut cfg_guard = cfg.write();
         let deleted_name = panel
             .providers
             .get(panel.cursor())
             .map(|p| p.display_name().to_string())
             .unwrap_or_default();
-        panel.confirm_delete(cfg);
+        panel.confirm_delete(&mut cfg_guard);
         if !deleted_name.is_empty() {
             self.session_mgr
                 .current_mut()
@@ -157,7 +153,8 @@ impl App {
                     &[("name".into(), deleted_name.into())],
                 )));
         }
-        if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
+        if let Err(e) = Self::save_config(&cfg_guard, self.services.config_path_override.as_deref())
+        {
             self.session_mgr
                 .current_mut()
                 .messages
@@ -167,10 +164,9 @@ impl App {
                     &[("error".into(), e.to_string().into())],
                 )));
         }
-        if let Some(p) = agent::LlmProvider::from_config(cfg) {
+        if let Some(p) = agent::LlmProvider::from_config(&cfg_guard) {
             self.services.provider_name = p.display_name().to_string();
             self.services.model_name = p.model_name().to_string();
         }
-        self.sync_acp_config();
     }
 }

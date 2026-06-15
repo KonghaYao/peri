@@ -559,6 +559,10 @@ impl BaseModel for ChatOpenAI {
         self.context_window_inner()
     }
 
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
     async fn invoke_streaming(
         &self,
         request: LlmRequest,

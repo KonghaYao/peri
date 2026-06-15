@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -10,7 +11,7 @@ use sqlx::{
 
 use crate::{
     messages::BaseMessage,
-    thread::{ThreadId, ThreadMeta, ThreadStore},
+    thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta, ThreadStore},
 };
 
 /// SELECT 所有 thread 列的统一常量（含 cached_context，仅 load_context 等需要完整数据的场景使用）
@@ -223,6 +224,11 @@ fn meta_from_row(
     cached_context: Option<String>,
     agent_status: String,
 ) -> Result<ThreadMeta> {
+    // 关键约束：DB 字符串必须经 FromStr 解析为强类型枚举；非法值不静默 fallback
+    let cancel_policy = CancelPolicy::from_str(&cancel_policy)
+        .with_context(|| format!("解析 cancel_policy 失败（thread_id={}）", id))?;
+    let agent_status = AgentStatus::from_str(&agent_status)
+        .with_context(|| format!("解析 agent_status 失败（thread_id={}）", id))?;
     Ok(ThreadMeta {
         id,
         title,
@@ -290,10 +296,10 @@ impl ThreadStore for SqliteThreadStore {
         .bind(&meta.parent_thread_id)
         .bind(&meta.snapshot_at_message_id)
         .bind(meta.hidden)
-        .bind(&meta.cancel_policy)
+        .bind(meta.cancel_policy.as_str())
         .bind(&meta.config)
         .bind(&meta.cached_context)
-        .bind(&meta.agent_status)
+        .bind(meta.agent_status.as_str())
         .execute(&self.pool)
         .await?;
         Ok(id)
@@ -396,10 +402,10 @@ impl ThreadStore for SqliteThreadStore {
         .bind(&meta.parent_thread_id)
         .bind(&meta.snapshot_at_message_id)
         .bind(meta.hidden)
-        .bind(&meta.cancel_policy)
+        .bind(meta.cancel_policy.as_str())
         .bind(&meta.config)
         .bind(&meta.cached_context)
-        .bind(&meta.agent_status)
+        .bind(meta.agent_status.as_str())
         .bind(id.as_str())
         .execute(&self.pool)
         .await?;
@@ -585,9 +591,12 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn update_thread_status(&self, id: &ThreadId, status: &str) -> Result<()> {
+        // 关键约束：参数字符串必须经 FromStr 解析，非法值直接返回错误，不静默 fallback
+        let status = AgentStatus::from_str(status)
+            .with_context(|| format!("非法 agent_status 值: {status:?}"))?;
         let now = Utc::now().to_rfc3339();
         sqlx::query("UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3")
-            .bind(status)
+            .bind(status.as_str())
             .bind(&now)
             .bind(id.as_str())
             .execute(&self.pool)

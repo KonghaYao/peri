@@ -43,12 +43,14 @@ pub(crate) fn render_login_panel(f: &mut Frame, panel: &mut LoginPanel, app: &mu
 
     app.session_mgr.current_mut().ui.panel_area = Some(inner);
 
-    let active_provider_id = app
+    let active_provider_id_owned = app
         .services
         .peri_config
-        .as_ref()
-        .map(|c| c.config.active_provider_id.as_str())
-        .unwrap_or("");
+        .read()
+        .config
+        .active_provider_id
+        .clone();
+    let active_provider_id = active_provider_id_owned.as_str();
 
     match panel.mode {
         LoginPanelMode::Browse => {

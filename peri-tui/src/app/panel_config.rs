@@ -3,11 +3,10 @@ use super::*;
 impl App {
     /// 打开 /config 面板
     pub fn open_config_panel(&mut self) {
-        let cfg = self
-            .services
-            .peri_config
-            .get_or_insert_with(PeriConfig::default);
-        let panel = config_panel::ConfigPanel::from_config(cfg);
+        let panel = {
+            let cfg_guard = self.services.peri_config.read();
+            config_panel::ConfigPanel::from_config(&cfg_guard)
+        };
         self.open_panel(PanelState::Config(Box::new(panel)));
     }
 
@@ -29,10 +28,9 @@ impl App {
         else {
             return;
         };
-        let Some(cfg) = self.services.peri_config.as_mut() else {
-            return;
-        };
-        if let Err(err_msg) = panel.apply_edit(cfg, &self.services.lc) {
+        let cfg = self.services.peri_config.clone();
+        let mut cfg_guard = cfg.write();
+        if let Err(err_msg) = panel.apply_edit(&mut cfg_guard, &self.services.lc) {
             self.session_mgr
                 .current_mut()
                 .messages
@@ -40,10 +38,11 @@ impl App {
                 .push(MessageViewModel::system(err_msg));
             return;
         }
-        if let Some(ref lang) = cfg.config.language {
+        if let Some(ref lang) = cfg_guard.config.language.clone() {
             let _ = self.services.lc.switch(lang);
         }
-        if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
+        if let Err(e) = Self::save_config(&cfg_guard, self.services.config_path_override.as_deref())
+        {
             self.session_mgr
                 .current_mut()
                 .messages

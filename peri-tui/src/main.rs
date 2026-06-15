@@ -589,12 +589,11 @@ async fn run_app(
 
     // --model 覆盖
     if let Some(ref model_str) = tui_opts.model {
-        if let Some(ref config) = app.services.peri_config {
-            if let Some(new_provider) =
-                peri_tui::app::agent::LlmProvider::from_config_for_alias(config, model_str)
-            {
-                tracing::info!(model = %new_provider.model_name(), "CLI --model 覆盖生效");
-            }
+        let config = app.services.peri_config.read();
+        if let Some(new_provider) =
+            peri_tui::app::agent::LlmProvider::from_config_for_alias(&config, model_str)
+        {
+            tracing::info!(model = %new_provider.model_name(), "CLI --model 覆盖生效");
         }
     }
 
@@ -620,13 +619,12 @@ async fn run_app(
     }
 
     // 检测是否需要 Setup 向导
-    if let Some(ref cfg) = app.services.peri_config {
+    {
+        let cfg = app.services.peri_config.read();
         if peri_tui::app::setup_wizard::needs_setup(&cfg.config) {
             app.global_ui.setup_wizard = Some(peri_tui::app::SetupWizardPanel::new());
         }
-    } else if peri_tui::app::LlmProvider::from_env().is_none() {
-        // 无配置文件且无法从环境变量获取 provider → 需要 setup
-        app.global_ui.setup_wizard = Some(peri_tui::app::SetupWizardPanel::new());
+
     }
 
     // 后台初始化 MCP 连接池（不阻塞 UI）
@@ -676,12 +674,11 @@ async fn run_app(
 
     // ── Step 6-a: Setup ACP Server + Client ──────────────────────────────
     {
-        let provider = app
-            .services
-            .peri_config
-            .as_ref()
-            .and_then(peri_tui::app::LlmProvider::from_config)
-            .or_else(peri_tui::app::LlmProvider::from_env);
+        let provider = {
+            let cfg_guard = app.services.peri_config.read();
+            peri_tui::app::LlmProvider::from_config(&cfg_guard)
+        }
+        .or_else(peri_tui::app::LlmProvider::from_env);
 
         if let Some(provider) = provider {
             // Gather plugin configs
@@ -737,11 +734,29 @@ async fn run_app(
             let tool_search_index = Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
             let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
 
+            // 构建 SessionManager：支撑 SubAgent cascade cancel 与 goal_state 跨 prompt 共享。
+            // TUI 本地仍维护 SessionState（history/frozen/agent_pool 等），SessionManager
+            // 只持有 AcpSession 元数据 + active_agents + goal_state。
+            //
+            // 关键：session_manager 与 server_config 共享同一 `Arc<RwLock<PeriConfig>>`，
+            // 与 ServiceRegistry.peri_config 也是同一 Arc —— Single Source of Truth。
+            let shared_peri_config = app.services.peri_config.clone();
+            // SessionManager 接收 `Arc<PeriConfig>`（frozen 快照），与 AcpServerConfig
+            // 的 `Arc<RwLock<PeriConfig>>` 不同：SessionManager 仅用于 cascade cancel
+            // 与 goal_state，不参与热更新，故传一份快照。
+            let session_manager_peri_config_snapshot =
+                Arc::new(app.services.peri_config.read().clone());
+            let session_manager = peri_acp::session::SessionManager::new(
+                app.services.thread_store.clone(),
+                provider.clone(),
+                session_manager_peri_config_snapshot,
+                app.services.permission_mode.clone(),
+                None,
+            );
+
             let server_config = AcpServerConfig {
                 provider: Arc::new(parking_lot::RwLock::new(provider.clone())),
-                peri_config: Arc::new(parking_lot::RwLock::new(
-                    app.services.peri_config.clone().unwrap_or_default(),
-                )),
+                peri_config: shared_peri_config,
                 permission_mode: app.services.permission_mode.clone(),
                 cron_scheduler: Some(app.services.cron.scheduler.clone()),
                 mcp_pool: app.services.mcp_pool.clone(),
@@ -765,6 +780,7 @@ async fn run_app(
                     }
                 },
                 config_path: peri_tui::config::config_path(),
+                session_manager,
             };
 
             let (client_transport, server_transport) = mpsc_transport_pair();

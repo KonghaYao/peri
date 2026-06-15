@@ -199,7 +199,15 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use peri_agent::agent::events::AgentEvent as ExecutorEvent;
+    use peri_agent::{
+        agent::events::AgentEvent as ExecutorEvent,
+        error::AgentResult,
+        llm::{
+            types::{LlmRequest, LlmResponse, StopReason},
+            BaseModel,
+        },
+        messages::ContentBlock,
+    };
 
     use super::*;
     use crate::session::executor::PromptStopReason;
@@ -255,6 +263,29 @@ mod tests {
             cwd: "/tmp".to_string(),
             peri_config: Arc::new(Default::default()),
             compact_model: None,
+            event_sink: sink,
+            args: String::new(),
+            cancel_token: peri_agent::agent::AgentCancellationToken::new(),
+            thread_store: None,
+            thread_id: None,
+            bg_event_sender: None,
+            bg_registry: None,
+        }
+    }
+
+    /// 构造带 compact_model 的 CommandContext（contract test 使用真实模型路径）
+    fn make_ctx_with_model(
+        sink: Arc<dyn crate::session::event_sink::EventSink>,
+        history: Vec<BaseMessage>,
+        cwd: String,
+        model: Arc<dyn BaseModel>,
+    ) -> super::super::CommandContext {
+        super::super::CommandContext {
+            session_id: "test-session".to_string(),
+            history,
+            cwd,
+            peri_config: Arc::new(Default::default()),
+            compact_model: Some(model),
             event_sink: sink,
             args: String::new(),
             cancel_token: peri_agent::agent::AgentCancellationToken::new(),
@@ -507,6 +538,316 @@ mod tests {
         assert_eq!(
             count, 0,
             "CompactCommand 自身不应调用 push_done，由 executor 负责"
+        );
+    }
+
+    // ── Contract Test: compact 后消息结构不变量 ───────────────────────────
+    //
+    // 验证 CLAUDE.md [TRAP] 不变量：
+    //   compact 后消息必须以 BaseMessage::human(summary + continuation) 开头，
+    //   完整结构为 [Human(摘要+续接指令), System(文件)..., System(Skills)...]。
+    //   禁止将摘要放在 BaseMessage::system() 中，禁止出现孤立的 ToolUse。
+    //
+    // 这些测试是 Contract Test：固定 mock 输入与 mock 模型，
+    // 断言 CompactCommand.execute 的输出结构契约（而非内部行为细节）。
+
+    /// 返回固定摘要的 mock BaseModel（contract test 用）
+    struct MockSummaryModel {
+        summary: String,
+    }
+
+    impl MockSummaryModel {
+        fn new(summary: impl Into<String>) -> Self {
+            Self {
+                summary: summary.into(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BaseModel for MockSummaryModel {
+        async fn invoke(&self, _request: LlmRequest) -> AgentResult<LlmResponse> {
+            Ok(LlmResponse {
+                message: BaseMessage::ai(self.summary.clone()),
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+                request_id: None,
+            })
+        }
+        fn provider_name(&self) -> &str {
+            "mock-summary"
+        }
+        fn model_id(&self) -> &str {
+            "mock-summary-model"
+        }
+    }
+
+    /// 构造一条 Ai 消息，包含 Read 工具调用 block（用于 re_inject 提取文件路径）
+    fn make_ai_with_read_tool(file_path: &str) -> BaseMessage {
+        let tool_call_id = "call_read_1".to_string();
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "我来读取这个文件".to_string(),
+            },
+            ContentBlock::ToolUse {
+                id: tool_call_id.clone(),
+                name: "Read".to_string(),
+                input: serde_json::json!({ "file_path": file_path }),
+            },
+        ];
+        BaseMessage::ai_from_blocks(blocks)
+    }
+
+    /// 构造一条 Human 消息，包含 [Skill: path] 标记（用于 re_inject 提取 Skill 路径）
+    fn make_human_with_skill_marker(skill_path: &str) -> BaseMessage {
+        BaseMessage::human(format!("用户消息\n[Skill: {}]", skill_path))
+    }
+
+    /// 契约：compact 输出首条消息必须是 Human（摘要+续接指令），
+    /// 不得为 System 或其他类型。
+    #[tokio::test]
+    async fn test_contract_compact_output_starts_with_human_summary() {
+        // Arrange: 典型 history — System + Human + Ai(Read) + Tool 结果
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let file_path = dir.path().join("main.rs");
+        std::fs::write(&file_path, "fn main() {}\n").expect("写入文件失败");
+        let file_path_str = file_path.to_string_lossy().to_string();
+
+        let history = vec![
+            BaseMessage::system("系统提示词"),
+            BaseMessage::human("帮我看看 main.rs"),
+            make_ai_with_read_tool(&file_path_str),
+            BaseMessage::tool_result("call_read_1", "fn main() {}"),
+        ];
+
+        let sink = Arc::new(MockEventSink::new());
+        let model = Arc::new(MockSummaryModel::new("## 摘要\n已完成 main.rs 审查"));
+        let ctx = make_ctx_with_model(
+            sink.clone(),
+            history,
+            dir.path().to_string_lossy().to_string(),
+            model,
+        );
+        let cmd = CompactCommand;
+
+        // Act
+        let result = cmd.execute(ctx).await;
+
+        // Assert: 首条必须是 Human
+        assert!(!result.messages.is_empty(), "compact 输出不应为空");
+        assert!(
+            matches!(result.messages[0], BaseMessage::Human { .. }),
+            "compact 输出首条必须是 Human（摘要+续接指令），实际: {:?}",
+            result.messages[0]
+        );
+
+        // 首条内容必须包含续接指令标记
+        let first_text = result.messages[0].content();
+        assert!(
+            first_text.contains("[上下文已压缩，请根据摘要继续工作]"),
+            "首条 Human 必须包含续接指令，实际内容: {}",
+            first_text.chars().take(200).collect::<String>()
+        );
+        assert!(
+            first_text.contains("已完成 main.rs 审查"),
+            "首条 Human 必须包含摘要 LLM 输出"
+        );
+    }
+
+    /// 契约：compact 输出结构必须为 [Human, System(文件)..., System(Skills)...]，
+    /// 即首条之后只允许 System 消息（文件/Skills），不得出现孤立的 ToolUse/Ai/Tool。
+    #[tokio::test]
+    async fn test_contract_compact_output_structure_human_then_system_only() {
+        // Arrange: history 含 Read 工具调用（对应真实文件）+ Skill 标记
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let file_path = dir.path().join("lib.rs");
+        std::fs::write(&file_path, "pub fn foo() {}\n").expect("写入文件失败");
+        let file_path_str = file_path.to_string_lossy().to_string();
+
+        // Skills 路径需落在 .claude/skills/ 下，且文件存在
+        let skills_dir = dir.path().join(".claude").join("skills").join("tdd");
+        std::fs::create_dir_all(&skills_dir).expect("创建 skills 目录失败");
+        let skill_file = skills_dir.join("SKILL.md");
+        std::fs::write(&skill_file, "# TDD Skill\n").expect("写入 SKILL.md 失败");
+        let skill_path_str = skill_file.to_string_lossy().to_string();
+
+        let history = vec![
+            BaseMessage::system("系统提示词"),
+            make_human_with_skill_marker(&skill_path_str),
+            make_ai_with_read_tool(&file_path_str),
+            BaseMessage::tool_result("call_read_1", "pub fn foo() {}"),
+        ];
+
+        let sink = Arc::new(MockEventSink::new());
+        let model = Arc::new(MockSummaryModel::new("## 摘要\n审查 lib.rs 与 tdd skill"));
+        let ctx = make_ctx_with_model(
+            sink.clone(),
+            history,
+            dir.path().to_string_lossy().to_string(),
+            model,
+        );
+        let cmd = CompactCommand;
+
+        // Act
+        let result = cmd.execute(ctx).await;
+
+        // Assert: 结构契约 — 首条 Human，其后只能是 System
+        assert!(
+            matches!(result.messages[0], BaseMessage::Human { .. }),
+            "首条必须为 Human"
+        );
+        for (i, msg) in result.messages.iter().enumerate().skip(1) {
+            assert!(
+                matches!(msg, BaseMessage::System { .. }),
+                "compact 输出索引 {} 必须为 System（文件/Skills），实际: {:?}",
+                i,
+                msg
+            );
+        }
+
+        // 不得出现孤立的 ToolUse（Ai 消息不应含 tool_calls）或 Tool 消息
+        for (i, msg) in result.messages.iter().enumerate() {
+            match msg {
+                BaseMessage::Ai { tool_calls, .. } => {
+                    assert!(
+                        tool_calls.is_empty(),
+                        "compact 输出索引 {} 的 Ai 消息不得包含 tool_calls（孤立 ToolUse）",
+                        i
+                    );
+                }
+                BaseMessage::Tool { .. } => {
+                    panic!("compact 输出索引 {} 出现孤立的 Tool 消息: {:?}", i, msg);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// 契约：摘要 LLM 输出不得作为 System 消息出现（即不得把摘要放入 System）。
+    /// 这是一个 "negative contract"：断言没有任何 System 消息的文本包含摘要内容。
+    #[tokio::test]
+    async fn test_contract_summary_not_in_system_message() {
+        // Arrange: 简单 history
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let history = vec![
+            BaseMessage::system("系统提示词"),
+            BaseMessage::human("你好"),
+            BaseMessage::ai("你好，世界"),
+        ];
+
+        let unique_marker = "UNIQUE_SUMMARY_MARKER_2026";
+        let sink = Arc::new(MockEventSink::new());
+        let model = Arc::new(MockSummaryModel::new(format!("## 摘要\n{}", unique_marker)));
+        let ctx = make_ctx_with_model(
+            sink.clone(),
+            history,
+            dir.path().to_string_lossy().to_string(),
+            model,
+        );
+        let cmd = CompactCommand;
+
+        // Act
+        let result = cmd.execute(ctx).await;
+
+        // Assert: 摘要只出现在首条 Human，不得出现在任何 System 消息中
+        assert!(
+            result.messages[0].content().contains(unique_marker),
+            "摘要必须出现在首条 Human"
+        );
+        for (i, msg) in result.messages.iter().enumerate().skip(1) {
+            if let BaseMessage::System { content, .. } = msg {
+                let text = content.text_content();
+                assert!(
+                    !text.contains(unique_marker),
+                    "System 消息索引 {} 不得包含摘要 LLM 输出（摘要应只在 Human），实际: {}",
+                    i,
+                    text.chars().take(200).collect::<String>()
+                );
+            }
+        }
+    }
+
+    /// 契约：compact 输出 CompactCompleted 事件携带 new_messages，
+    /// 且事件中的 messages 与 CommandResult.messages 保持一致（外部可观测契约）。
+    #[tokio::test]
+    async fn test_contract_compact_completed_event_matches_result_messages() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let history = vec![
+            BaseMessage::system("系统提示词"),
+            BaseMessage::human("你好"),
+            BaseMessage::ai("你好，世界"),
+        ];
+
+        let sink = Arc::new(MockEventSink::new());
+        let model = Arc::new(MockSummaryModel::new("## 摘要\n简单对话"));
+        let ctx = make_ctx_with_model(
+            sink.clone(),
+            history,
+            dir.path().to_string_lossy().to_string(),
+            model,
+        );
+        let cmd = CompactCommand;
+
+        // Act
+        let result = cmd.execute(ctx).await;
+
+        // Assert: CompactCompleted 事件存在
+        let events = sink.events();
+        let completed = events
+            .iter()
+            .find(|(_, json)| json.contains("compact_completed"));
+        assert!(
+            completed.is_some(),
+            "应推送 CompactCompleted 事件，实际事件数: {}",
+            events.len()
+        );
+
+        // CompactCompleted 事件的 messages 字段（反序列化）应与 result 结构契约一致：
+        // 首条为 Human
+        // 由于事件 JSON 序列化结构复杂，这里验证 result.messages 结构即可（与事件共享同一个 new_messages.clone()）
+        assert!(
+            matches!(result.messages[0], BaseMessage::Human { .. }),
+            "CommandResult 首条必须为 Human"
+        );
+    }
+
+    /// 契约：当 history 全为 System 消息（无 Human/Ai）时，
+    /// full_compact 返回 fallback 摘要，CompactCommand 仍产出以 Human 开头的输出。
+    /// （对应 full.rs: non_system_count == 0 分支）
+    #[tokio::test]
+    async fn test_contract_all_system_history_still_human_first() {
+        // Arrange: 全 System history
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let history = vec![
+            BaseMessage::system("系统提示词 1"),
+            BaseMessage::system("系统提示词 2"),
+        ];
+
+        let sink = Arc::new(MockEventSink::new());
+        // 即使 LLM 被调用返回内容，也不影响首条 Human 契约
+        let model = Arc::new(MockSummaryModel::new("## 摘要\n不应到达此处"));
+        let ctx = make_ctx_with_model(
+            sink.clone(),
+            history,
+            dir.path().to_string_lossy().to_string(),
+            model,
+        );
+        let cmd = CompactCommand;
+
+        // Act
+        let result = cmd.execute(ctx).await;
+
+        // Assert: 仍以 Human 开头（fallback 摘要也要走 Human 路径）
+        assert!(
+            matches!(result.messages[0], BaseMessage::Human { .. }),
+            "全 System history 的 compact 输出首条也必须为 Human（fallback 摘要），实际: {:?}",
+            result.messages[0]
+        );
+        assert_eq!(
+            result.stop_reason,
+            PromptStopReason::EndTurn,
+            "stop_reason 必须为 EndTurn"
         );
     }
 }

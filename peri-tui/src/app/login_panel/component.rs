@@ -38,10 +38,9 @@ impl PanelComponent for LoginPanel {
                         .get(self.cursor())
                         .map(|p| p.display_name().to_string())
                         .unwrap_or_default();
-                    let Some(cfg) = ctx.services.peri_config.as_mut() else {
-                        return EventResult::Consumed;
-                    };
-                    self.select_provider(cfg);
+                    let cfg_arc = ctx.services.peri_config.clone();
+                    let mut cfg = cfg_arc.write();
+                    self.select_provider(&mut cfg);
                     if !selected_name.is_empty() {
                         ctx.session_mgr.current_mut().messages.push_system_note(
                             ctx.services.lc.tr_args(
@@ -51,7 +50,7 @@ impl PanelComponent for LoginPanel {
                         );
                     }
                     if let Err(e) =
-                        App::save_config(cfg, ctx.services.config_path_override.as_deref())
+                        App::save_config(&cfg, ctx.services.config_path_override.as_deref())
                     {
                         ctx.session_mgr.current_mut().messages.push_system_note(
                             ctx.services.lc.tr_args(
@@ -60,11 +59,10 @@ impl PanelComponent for LoginPanel {
                             ),
                         );
                     }
-                    if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
+                    if let Some(p) = crate::app::agent::LlmProvider::from_config(&cfg) {
                         ctx.services.provider_name = p.display_name().to_string();
                         ctx.services.model_name = p.model_name().to_string();
                     }
-                    ctx.sync_acp_config();
                     EventResult::ClosePanel
                 }
                 Input {
@@ -164,10 +162,9 @@ impl PanelComponent for LoginPanel {
                     } => {
                         let edit_name = self.field_name.value();
                         let is_new = self.mode == LoginPanelMode::New;
-                        let Some(cfg) = ctx.services.peri_config.as_mut() else {
-                            return EventResult::Consumed;
-                        };
-                        if !self.apply_edit(cfg) {
+                        let cfg_arc = ctx.services.peri_config.clone();
+                        let mut cfg = cfg_arc.write();
+                        if !self.apply_edit(&mut cfg) {
                             ctx.session_mgr
                                 .current_mut()
                                 .messages
@@ -179,7 +176,7 @@ impl PanelComponent for LoginPanel {
                         } else {
                             edit_name
                         };
-                        self.select_provider(cfg);
+                        self.select_provider(&mut cfg);
                         let key = if is_new {
                             "app-provider-created"
                         } else {
@@ -191,7 +188,7 @@ impl PanelComponent for LoginPanel {
                                 .tr_args(key, &[("name".into(), display.into())]),
                         );
                         if let Err(e) =
-                            App::save_config(cfg, ctx.services.config_path_override.as_deref())
+                            App::save_config(&cfg, ctx.services.config_path_override.as_deref())
                         {
                             ctx.session_mgr.current_mut().messages.push_system_note(
                                 ctx.services.lc.tr_args(
@@ -200,11 +197,10 @@ impl PanelComponent for LoginPanel {
                                 ),
                             );
                         }
-                        if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
+                        if let Some(p) = crate::app::agent::LlmProvider::from_config(&cfg) {
                             ctx.services.provider_name = p.display_name().to_string();
                             ctx.services.model_name = p.model_name().to_string();
                         }
-                        ctx.sync_acp_config();
                         EventResult::ClosePanel
                     }
                     _ => {
@@ -221,15 +217,14 @@ impl PanelComponent for LoginPanel {
                 Input {
                     key: Key::Enter, ..
                 } => {
-                    let Some(cfg) = ctx.services.peri_config.as_mut() else {
-                        return EventResult::Consumed;
-                    };
+                    let cfg_arc = ctx.services.peri_config.clone();
+                    let mut cfg = cfg_arc.write();
                     let deleted_name = self
                         .providers
                         .get(self.cursor())
                         .map(|p| p.display_name().to_string())
                         .unwrap_or_default();
-                    self.confirm_delete(cfg);
+                    self.confirm_delete(&mut cfg);
                     if !deleted_name.is_empty() {
                         ctx.session_mgr.current_mut().messages.push_system_note(
                             ctx.services.lc.tr_args(
@@ -239,7 +234,7 @@ impl PanelComponent for LoginPanel {
                         );
                     }
                     if let Err(e) =
-                        App::save_config(cfg, ctx.services.config_path_override.as_deref())
+                        App::save_config(&cfg, ctx.services.config_path_override.as_deref())
                     {
                         ctx.session_mgr.current_mut().messages.push_system_note(
                             ctx.services.lc.tr_args(
@@ -248,11 +243,10 @@ impl PanelComponent for LoginPanel {
                             ),
                         );
                     }
-                    if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
+                    if let Some(p) = crate::app::agent::LlmProvider::from_config(&cfg) {
                         ctx.services.provider_name = p.display_name().to_string();
                         ctx.services.model_name = p.model_name().to_string();
                     }
-                    ctx.sync_acp_config();
                     EventResult::Consumed
                 }
                 Input { key: Key::Esc, .. } => {

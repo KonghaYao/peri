@@ -7,6 +7,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 pub use middleware::CronMiddleware;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio::sync::mpsc;
 pub use tools::{CronListTool, CronRegisterTool, CronRemoveTool};
 use tracing::warn;
@@ -14,6 +15,18 @@ use uuid::Uuid;
 
 /// 定时任务最大数量限制
 pub const MAX_CRON_TASKS: usize = 20;
+
+/// Cron 注册表错误（结构化，取代 String 错误）
+///
+/// 参考已有 `lsp/tool.rs:LspToolError` 模式：实现 `std::error::Error`，
+/// 调用方可通过 `?` 自动转 `Box<dyn Error>` / `anyhow::Error`。
+#[derive(Debug, Error)]
+pub enum CronError {
+    #[error("cron 表达式无效: {0}")]
+    InvalidExpression(String),
+    #[error("已达到定时任务上限（{0}）")]
+    TaskLimitReached(usize),
+}
 
 /// 定时任务
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,14 +60,14 @@ impl CronScheduler {
     }
 
     /// 注册新任务
-    pub fn register(&mut self, expression: &str, prompt: &str) -> Result<String, String> {
+    pub fn register(&mut self, expression: &str, prompt: &str) -> Result<String, CronError> {
         // 解析 cron 表达式（验证）
-        let _cron =
-            croner::Cron::from_str(expression).map_err(|e| format!("cron 表达式无效: {}", e))?;
+        let _cron = croner::Cron::from_str(expression)
+            .map_err(|e| CronError::InvalidExpression(e.to_string()))?;
 
         // 检查上限
         if self.tasks.len() >= MAX_CRON_TASKS {
-            return Err(format!("已达到定时任务上限（{}）", MAX_CRON_TASKS));
+            return Err(CronError::TaskLimitReached(MAX_CRON_TASKS));
         }
 
         let id = Uuid::now_v7().to_string();

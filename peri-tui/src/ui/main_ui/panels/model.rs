@@ -30,23 +30,15 @@ pub(crate) fn render_model_panel(f: &mut Frame, panel: &ModelPanel, app: &mut Ap
 
     app.session_mgr.current_mut().ui.panel_area = Some(inner);
 
-    let active_alias = app
-        .services
-        .peri_config
-        .as_ref()
-        .map(|c| c.config.active_alias.as_str())
-        .unwrap_or("opus");
-
-    let models = app
-        .services
-        .peri_config
-        .as_ref()
-        .and_then(|c| {
-            c.config
-                .providers
-                .iter()
-                .find(|p| p.id == c.config.active_provider_id)
-        })
+    let cfg_guard = app.services.peri_config.read();
+    let active_alias_owned = cfg_guard.config.active_alias.clone();
+    let active_alias = active_alias_owned.as_str();
+    let active_provider_id_owned = cfg_guard.config.active_provider_id.clone();
+    let models_ref = cfg_guard
+        .config
+        .providers
+        .iter()
+        .find(|p| p.id == active_provider_id_owned)
         .map(|p| &p.models);
 
     let mut lines: Vec<Line> = Vec::new();
@@ -68,7 +60,7 @@ pub(crate) fn render_model_panel(f: &mut Frame, panel: &ModelPanel, app: &mut Ap
     for (row_idx, alias, label, num) in &rows {
         let is_active = alias.to_key() == active_alias;
         let is_cursor = panel.cursor() == *row_idx;
-        let model_name = models
+        let model_name = models_ref
             .and_then(|m| m.get_model(alias.to_key()))
             .unwrap_or("");
 

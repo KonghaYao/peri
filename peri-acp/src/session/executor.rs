@@ -29,7 +29,7 @@ use crate::{
     prompt::{build_system_prompt, PromptFeatures},
     provider::LlmProvider,
     session::{
-        agent_pool::AgentPool,
+        agent_pool::{AgentPool, CachedLlmInstances},
         agent_runtime::{AgentRuntime, CancelPolicy},
         event_sink::EventSink,
         SessionManager,
@@ -64,76 +64,268 @@ pub struct PromptResult {
 /// Populated at session creation time by `session/new`, passed through to
 /// every turn's agent build to guarantee the system prompt never changes
 /// within a session.
+///
+/// # Immutable Value Object
+///
+/// 唯一构造路径是 [`FrozenSessionData::build`]；字段对外不可变，只通过
+/// accessor 方法读取。String 字段以 `Arc<str>` 存储，clone 零成本——
+/// frozen 数据每轮被 `AcpAgentConfig` clone 一次，共享底层数据避免拷贝。
+/// 会话内一旦构造完成即不再可变（系统提示词稳定性第一优先级）。
 #[derive(Clone)]
 pub struct FrozenSessionData {
     /// Full system prompt string built at session creation.
-    pub system_prompt: String,
+    system_prompt: Arc<str>,
     /// Frozen content of CLAUDE.md (with resolved `@import`), None if no file.
-    pub claude_md: Option<String>,
+    claude_md: Option<Arc<str>>,
     /// Frozen content of CLAUDE.local.md, None if no file.
-    pub claude_local_md: Option<String>,
+    claude_local_md: Option<Arc<str>>,
     /// Frozen skills summary string, None if no skills.
-    pub skill_summary: Option<String>,
+    skill_summary: Option<Arc<str>>,
     /// Session creation date in YYYY-MM-DD format.
-    pub date: String,
+    date: Arc<str>,
     /// Whether cwd was a git repo at session creation time.
-    pub is_git_repo: bool,
+    is_git_repo: bool,
     /// Session creation language preference (e.g. "zh-CN", "en").
     /// None = auto-detect from user input (no explicit instruction).
-    pub language: Option<String>,
+    language: Option<Arc<str>>,
+}
+
+impl FrozenSessionData {
+    /// 唯一构造入口：在 `session/new` 时调用，捕获 cwd/language/CLAUDE.md/
+    /// skills/system_prompt/date。
+    ///
+    /// 吸收原 `crate::session::frozen::build_frozen_session_data` 的全部逻辑，
+    /// 保证任何构造路径都经过此方法（Immutable Value Object 构造约束）。
+    /// `language` 为 `None` 时由 LLM 自行从用户输入 auto-detect。
+    pub fn build(
+        cwd: &str,
+        language: Option<&str>,
+        plugin_skill_dirs: &[std::path::PathBuf],
+        plugin_agent_dirs: &[std::path::PathBuf],
+        frozen_date: &str,
+    ) -> Self {
+        let (claude_md, claude_local_md) =
+            peri_middlewares::AgentsMdMiddleware::read_frozen_content(cwd);
+
+        let skill_summary =
+            peri_middlewares::SkillsMiddleware::build_frozen_summary(cwd, plugin_skill_dirs);
+
+        let features = crate::prompt::PromptFeatures::detect();
+        let system_prompt = crate::prompt::build_system_prompt(
+            None,
+            cwd,
+            features,
+            plugin_agent_dirs,
+            Some(frozen_date),
+            language,
+        );
+
+        let is_git_repo = std::path::Path::new(cwd).join(".git").exists();
+
+        Self {
+            system_prompt: Arc::from(system_prompt),
+            claude_md: claude_md.map(Arc::from),
+            claude_local_md: claude_local_md.map(Arc::from),
+            skill_summary: skill_summary.map(Arc::from),
+            date: Arc::from(frozen_date),
+            is_git_repo,
+            language: language.map(Arc::from),
+        }
+    }
+
+    /// 会话内冻结的完整 system prompt 字符串。
+    pub fn system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+
+    /// 冻结的 CLAUDE.md 内容（已解析 `@import`），无文件时为 None。
+    pub fn claude_md(&self) -> Option<&str> {
+        self.claude_md.as_deref()
+    }
+
+    /// 冻结的 CLAUDE.local.md 内容，无文件时为 None。
+    pub fn claude_local_md(&self) -> Option<&str> {
+        self.claude_local_md.as_deref()
+    }
+
+    /// 冻结的 skills summary 字符串，无 skills 时为 None。
+    pub fn skill_summary(&self) -> Option<&str> {
+        self.skill_summary.as_deref()
+    }
+
+    /// 会话创建日期（YYYY-MM-DD 格式）。
+    pub fn date(&self) -> &str {
+        &self.date
+    }
+
+    /// 会话创建时 cwd 是否为 git 仓库。
+    pub fn is_git_repo(&self) -> bool {
+        self.is_git_repo
+    }
+
+    /// 会话创建时的语言偏好（如 "zh-CN"、"en"）。None 表示 auto-detect。
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
+    }
+}
+
+/// Parameter Object for [`execute_prompt`].
+///
+/// Groups 30 positional parameters into a single struct to eliminate
+/// `#[allow(clippy::too_many_arguments)]` and reduce call-site placeholder
+/// noise. Construction uses named-field syntax; default values are explicit
+/// at each call site (no builder hiding required state).
+///
+/// # Fields by concern
+/// - **Session-level identity & transport**：`provider` / `peri_config` / `cwd`
+///   / `session_id` / `cancel` / `event_sink` / `broker` / `permission_mode`
+/// - **Per-turn content**：`content` / `frozen` / `history` / `incoming_recalls`
+///   / `is_empty_history` / `bg_results`
+/// - **Middleware chain resources**：`plugin_skill_dirs` / `plugin_agent_dirs`
+///   / `hook_groups` / `cron_scheduler` / `mcp_pool` / `channel_state`
+///   / `tool_search_index` / `shared_tools` / `lsp_servers` / `langfuse_session`
+/// - **Session-scoped caches & persistence**：`pool` / `thread_store` / `thread_id`
+///   / `session_manager`
+pub struct PromptExecutionContext {
+    // ── Session-level identity & transport ───────────────────────────────────
+    /// 当前激活的 LLM provider（snapshot，每轮从 `Arc<RwLock<>>` 克隆）。
+    pub provider: LlmProvider,
+    /// 全局 peri 配置（snapshot，每轮从 `Arc<RwLock<>>` 克隆）。
+    pub peri_config: Arc<crate::provider::PeriConfig>,
+    /// 会话工作目录。
+    pub cwd: String,
+    /// 会话 ID（用于事件路由、SessionManager 查询、Langfuse trace）。
+    pub session_id: String,
+    /// 取消令牌（由 SessionManager 管理，clone 后传入 executor）。
+    pub cancel: AgentCancellationToken,
+    /// 事件出口（TUI 用 TransportEventSink，stdio 用 StdioEventSink）。
+    pub event_sink: Arc<dyn EventSink>,
+    /// 用户交互 broker（HITL/AskUser 通道）。
+    pub broker: Arc<dyn UserInteractionBroker>,
+    /// 权限模式共享句柄。
+    pub permission_mode: Arc<peri_middlewares::prelude::SharedPermissionMode>,
+
+    // ── Per-turn content ──────────────────────────────────────────────────────
+    /// 用户本轮输入。
+    pub content: MessageContent,
+    /// 会话级 frozen 数据（system prompt 稳定性锚点）。
+    pub frozen: Option<FrozenSessionData>,
+    /// 现有历史消息（执行前）。
+    pub history: Vec<BaseMessage>,
+    /// 上一轮 recall 注入项。
+    pub incoming_recalls: Vec<String>,
+    /// 历史是否为空（决定 hook_session_start）。
+    pub is_empty_history: bool,
+    /// 后台任务结果（注入合成的 AgentResult tool_use/tool_result）。
+    pub bg_results: Vec<peri_agent::agent::events::BackgroundTaskResult>,
+
+    // ── Middleware chain resources ────────────────────────────────────────────
+    /// 插件 skill 目录列表。
+    pub plugin_skill_dirs: Vec<std::path::PathBuf>,
+    /// 插件 agent 目录列表。
+    pub plugin_agent_dirs: Vec<std::path::PathBuf>,
+    /// Hook 组（按全局/项目/本地分层）。
+    pub hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>>,
+    /// Cron 调度器（共享，跨轮次复用）。
+    pub cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
+    /// MCP client 池。
+    pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
+    /// Channel broker 共享状态（AskUser 走 channel 时使用）。
+    pub channel_state: Option<Arc<ChannelState>>,
+    /// 工具搜索索引（Deferred Tools 发现）。
+    pub tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
+    /// 共享工具表（运行时动态注册的工具）。
+    pub shared_tools: Arc<
+        parking_lot::RwLock<
+            std::collections::HashMap<String, Arc<dyn peri_agent::tools::BaseTool>>,
+        >,
+    >,
+    /// LSP server 配置。
+    pub lsp_servers: Vec<peri_lsp::config::LspServerConfig>,
+    /// Langfuse 会话级句柄（None 表示禁用遥测）。
+    pub langfuse_session: Option<Arc<LangfuseSession>>,
+
+    // ── Session-scoped caches & persistence ───────────────────────────────────
+    /// AgentPool（LLM/Compact model 缓存，session 级）。
+    pub pool: Arc<parking_lot::Mutex<AgentPool>>,
+    /// 持久化存储（None 表示 print 模式不持久化）。
+    pub thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
+    /// 当前 thread ID（持久化 + SubAgent 注册）。
+    pub thread_id: Option<String>,
+    /// SessionManager（用于 cascade cancel 子 agent + register/deregister runtime）。
+    pub session_manager: Option<SessionManager>,
+}
+
+/// Per-turn computed configuration derived from `PromptExecutionContext`.
+///
+/// Built once at the top of [`execute_prompt`], passed by reference to
+/// [`build_and_execute_agent`] to avoid recomputing and to keep the agent
+/// builder function signature manageable.
+struct TurnConfig<'a> {
+    provider: &'a LlmProvider,
+    peri_config: &'a Arc<crate::provider::PeriConfig>,
+    cwd: &'a str,
+    frozen: Option<&'a FrozenSessionData>,
+    language: Option<String>,
+    cancel: &'a AgentCancellationToken,
+    permission_mode: &'a Arc<peri_middlewares::prelude::SharedPermissionMode>,
+    broker: &'a Arc<dyn UserInteractionBroker>,
+    is_empty_history: bool,
+    compact_config: peri_agent::agent::compact::CompactConfig,
+    disable_compact: bool,
+    budget: ContextBudget,
+    compact_model: Option<Arc<dyn peri_agent::llm::BaseModel>>,
+    effective_context_window: u32,
 }
 
 /// Shared agent execution pipeline with auto-compact support.
 ///
-/// This function encapsulates steps 2-7 of the prompt execution flow:
-/// 1. Create event channel + cancel token
-/// 2. Build agent via [`build_system_prompt`] + [`builder::build_agent`]
-/// 3. Spawn background event pump using the provided [`EventSink`]
-/// 4. Execute agent
-/// 5. Auto-compact handled by CompactMiddleware (before_model hook)
-/// 6. Wait for pump to drain
-/// 7. Return updated messages
+/// This is the orchestrator. The actual work is split across four private
+/// helpers:
+/// - [`intercept_immediate_command`]：slash 命令拦截（Immediate 直接返回，不构建 agent）
+/// - [`spawn_event_pump`]：后台事件泵 + Langfuse tracer
+/// - [`build_and_execute_agent`]：agent 构建 + 执行 + 状态收集
+/// - [`collect_result`]：close channel + 等待 pump drain + recall 提取
 ///
 /// The caller is responsible for:
 /// - Session management (storing/retrieving cwd, history, cancel_token)
 /// - Choosing the broker (HITL/AskUser handler)
 /// - Providing the correct `EventSink` implementation
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_prompt(
-    provider: &LlmProvider,
-    peri_config: Arc<crate::provider::PeriConfig>,
-    cwd: &str,
-    content: MessageContent,
-    frozen: Option<FrozenSessionData>,
-    history: Vec<BaseMessage>,
-    incoming_recalls: Vec<String>,
-    is_empty_history: bool,
-    permission_mode: Arc<peri_middlewares::prelude::SharedPermissionMode>,
-    event_sink: Arc<dyn EventSink>,
-    cancel: AgentCancellationToken,
-    broker: Arc<dyn UserInteractionBroker>,
-    plugin_skill_dirs: Vec<std::path::PathBuf>,
-    plugin_agent_dirs: Vec<std::path::PathBuf>,
-    hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>>,
-    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
-    session_id: String,
-    mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
-    channel_state: Option<Arc<ChannelState>>,
-    tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
-    shared_tools: Arc<
-        parking_lot::RwLock<
-            std::collections::HashMap<String, Arc<dyn peri_agent::tools::BaseTool>>,
-        >,
-    >,
-    lsp_servers: Vec<peri_lsp::config::LspServerConfig>,
-    langfuse_session: Option<Arc<LangfuseSession>>,
-    pool: Arc<parking_lot::Mutex<AgentPool>>,
-    thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
-    thread_id: Option<String>,
-    session_manager: Option<SessionManager>,
-    bg_results: Vec<peri_agent::agent::events::BackgroundTaskResult>,
-) -> PromptResult {
-    // Inject synthetic AgentResult tool_use + tool_result messages when bg_results present
+pub async fn execute_prompt(ctx: PromptExecutionContext) -> PromptResult {
+    // 解构 ctx：所有字段一次性 move，避免后续部分 move 导致的借用冲突。
+    // 注意：history/content/bg_results 在 move 前先用引用读取（compact_config 等不需要 move）。
+    let PromptExecutionContext {
+        provider,
+        peri_config,
+        cwd,
+        session_id,
+        cancel,
+        event_sink,
+        broker,
+        permission_mode,
+        content,
+        frozen,
+        history,
+        incoming_recalls,
+        is_empty_history,
+        bg_results,
+        plugin_skill_dirs,
+        plugin_agent_dirs,
+        hook_groups,
+        cron_scheduler,
+        mcp_pool,
+        channel_state,
+        tool_search_index,
+        shared_tools,
+        lsp_servers,
+        langfuse_session,
+        pool,
+        thread_store,
+        thread_id,
+        session_manager,
+    } = ctx;
+
+    // bg_results 注入合成的 AgentResult tool_use/tool_result 消息
     let (history, content) = if !bg_results.is_empty() {
         inject_bg_result_messages(history, content, &bg_results)
     } else {
@@ -150,7 +342,7 @@ pub async fn execute_prompt(
     // Compact model — reuse AgentPool cache if available, otherwise create fresh.
     let cached_llm = {
         let pool_guard = pool.lock();
-        if pool_guard.has_valid_cache(provider) {
+        if pool_guard.has_valid_cache(&provider) {
             pool_guard.get_cached_llm().cloned()
         } else {
             None
@@ -198,60 +390,29 @@ pub async fn execute_prompt(
     }
 
     // Command interception — check if content is a slash command before building agent.
-    if let Some(text) = content.text_content().strip_prefix('/') {
-        if !text.is_empty() {
-            let command_registry = crate::session::command::default_command_registry();
-            if let Some((cmd, args)) = command_registry.find(&content.text_content()) {
-                if cmd.kind() == crate::session::command::CommandKind::Immediate {
-                    tracing::debug!(
-                        command = %cmd.name(),
-                        history_len = history.len(),
-                        "Immediate command intercepted"
-                    );
-                    let ctx = crate::session::command::CommandContext {
-                        session_id: session_id.clone(),
-                        history: history.clone(),
-                        cwd: cwd.to_string(),
-                        peri_config: Arc::new(peri_config.as_ref().clone()),
-                        compact_model: compact_model.clone(),
-                        event_sink: event_sink.clone(),
-                        args: args.to_string(),
-                        cancel_token: cancel.clone(),
-                        thread_store: thread_store.clone(),
-                        thread_id: thread_id.clone(),
-                        bg_event_sender: Some(bg_event_tx_for_cmd.clone()),
-                        bg_registry: Some(bg_registry_for_cmd.clone()),
-                    };
-                    let result = tokio::select! {
-                        r = cmd.execute(ctx) => r,
-                        _ = cancel.cancelled() => {
-                            tracing::info!(session_id = %session_id, "Immediate command cancelled");
-                            crate::session::command::CommandResult {
-                                messages: history,
-                                stop_reason: PromptStopReason::Cancelled,
-                            }
-                        }
-                    };
-                    // Immediate 命令跳过 agent event pump，必须手动发送 push_done
-                    // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
-                    event_sink.push_done(&session_id).await;
-                    return PromptResult {
-                        messages: result.messages,
-                        ok: true,
-                        stop_reason: result.stop_reason,
-                        recall_items: Vec::new(),
-                    };
-                }
-                // Passthrough/Transform → fall through to normal agent flow
-            }
-        }
+    if let Some(immediate) = intercept_immediate_command(InterceptRequest {
+        content: &content,
+        history: &history,
+        cwd: &cwd,
+        session_id: &session_id,
+        cancel: &cancel,
+        peri_config: &peri_config,
+        event_sink: &event_sink,
+        compact_model: &compact_model,
+        thread_store: thread_store.clone(),
+        thread_id: thread_id.clone(),
+        bg_event_tx: &bg_event_tx_for_cmd,
+        bg_registry: &bg_registry_for_cmd,
+    })
+    .await
+    {
+        return immediate;
     }
 
     let trace_input = content.text_content();
     let agent_input = if incoming_recalls.is_empty() {
         peri_agent::agent::react::AgentInput::blocks(content)
     } else {
-        use peri_agent::messages::ContentBlock;
         let reminder_text = format!(
             "<system-reminder>\n{}\n</system-reminder>",
             incoming_recalls.join("\n")
@@ -267,25 +428,202 @@ pub async fn execute_prompt(
         .with_warning_threshold(compact_config.micro_compact_threshold);
 
     // Event channel (lives for entire execute_prompt lifetime)
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
-    let event_tx = Arc::new(std::sync::Mutex::new(Some(event_tx)));
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
+    let event_tx = Arc::new(parking_lot::Mutex::new(Some(event_tx)));
+
+    // 将会 move 进 BuildAgentRequest 的 middleware resources（无法借用，必须 move）。
+    // turn 仍以引用形式借用 provider/peri_config/cwd/cancel/permission_mode/broker。
+    let turn = TurnConfig {
+        provider: &provider,
+        peri_config: &peri_config,
+        cwd: &cwd,
+        frozen: frozen.as_ref(),
+        language: frozen
+            .as_ref()
+            .and_then(|f| f.language().map(|s| s.to_string()))
+            .or_else(|| peri_config.config.language.clone()),
+        cancel: &cancel,
+        permission_mode: &permission_mode,
+        broker: &broker,
+        is_empty_history,
+        compact_config: compact_config.clone(),
+        disable_compact,
+        budget,
+        compact_model: compact_model.clone(),
+        effective_context_window,
+    };
 
     // Main event pump
-    let sink = event_sink;
-    let bg_sink = Arc::clone(&sink);
-    let sid = session_id.clone();
-    let (pump_done_tx, pump_done_rx) = oneshot::channel();
-    let pump_cw = effective_context_window;
+    let pump_handle = spawn_event_pump(SpawnPumpRequest {
+        event_rx,
+        sink: Arc::clone(&event_sink),
+        session_id: session_id.clone(),
+        effective_context_window,
+        langfuse_session: langfuse_session.clone(),
+        trace_input: trace_input.to_string(),
+        provider_display_name: provider.display_name().to_string(),
+    });
 
-    // Langfuse per-turn tracer
+    // 把会 move 的资源打包成 struct，turn + event_tx + cached_llm 仍借用。
+    // 由于 prompt builder 需要的所有资源都在这里 move 进 BuildAgentRequest，
+    // 调用方后续不再访问这些字段（session_id 在 collect_result 借用，
+    // 此时 BuildAgentRequest 已 drop）。
+    let exec_outcome = build_and_execute_agent(BuildAgentRequest {
+        turn: &turn,
+        agent_input,
+        history,
+        plugin_skill_dirs,
+        plugin_agent_dirs,
+        hook_groups,
+        cron_scheduler,
+        mcp_pool,
+        channel_state,
+        tool_search_index,
+        shared_tools,
+        lsp_servers,
+        langfuse_session,
+        pool,
+        thread_store,
+        thread_id,
+        session_manager,
+        event_sink: &event_sink,
+        session_id: &session_id,
+        event_tx: &event_tx,
+        cached_llm: cached_llm.as_ref(),
+    })
+    .await;
+
+    collect_result(CollectRequest {
+        event_tx: &event_tx,
+        pump_handle,
+        session_id: &session_id,
+        exec_outcome,
+    })
+    .await
+}
+
+// ── Intercept Request parameter object ─────────────────────────────────────
+
+/// 命令拦截请求（参数对象，避免 12 个位置参数）。
+struct InterceptRequest<'a> {
+    content: &'a MessageContent,
+    history: &'a [BaseMessage],
+    cwd: &'a str,
+    session_id: &'a str,
+    cancel: &'a AgentCancellationToken,
+    peri_config: &'a Arc<crate::provider::PeriConfig>,
+    event_sink: &'a Arc<dyn EventSink>,
+    compact_model: &'a Option<Arc<dyn peri_agent::llm::BaseModel>>,
+    thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
+    thread_id: Option<String>,
+    bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+    bg_registry: &'a Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
+}
+
+/// 命令拦截：检查 content 是否为 Immediate 类型 slash 命令。
+///
+/// 返回 `Some(PromptResult)` 表示已处理（agent 不构建）；
+/// 返回 `None` 表示继续走 agent 管线。
+///
+/// [TRAP] Immediate 命令路径绕过 agent event pump，必须手动调用 `sink.push_done()`。
+/// 否则 TUI 界面永久卡在 loading 状态（issue_2026-05-29-immediate-command-missing-push-done）。
+async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<PromptResult> {
+    let text = req.content.text_content();
+    let stripped = text.strip_prefix('/')?;
+    if stripped.is_empty() {
+        return None;
+    }
+
+    let command_registry = crate::session::command::default_command_registry();
+    let (cmd, args) = command_registry.find(&text)?;
+    if cmd.kind() != crate::session::command::CommandKind::Immediate {
+        // Passthrough/Transform → fall through to normal agent flow
+        return None;
+    }
+
+    tracing::debug!(
+        command = %cmd.name(),
+        history_len = req.history.len(),
+        "Immediate command intercepted"
+    );
+    let ctx = crate::session::command::CommandContext {
+        session_id: req.session_id.to_string(),
+        history: req.history.to_vec(),
+        cwd: req.cwd.to_string(),
+        peri_config: Arc::new(req.peri_config.as_ref().clone()),
+        compact_model: req.compact_model.clone(),
+        event_sink: req.event_sink.clone(),
+        args: args.to_string(),
+        cancel_token: req.cancel.clone(),
+        thread_store: req.thread_store,
+        thread_id: req.thread_id,
+        bg_event_sender: Some(req.bg_event_tx.clone()),
+        bg_registry: Some(req.bg_registry.clone()),
+    };
+    let result = tokio::select! {
+        r = cmd.execute(ctx) => r,
+        _ = req.cancel.cancelled() => {
+            tracing::info!(session_id = %req.session_id, "Immediate command cancelled");
+            crate::session::command::CommandResult {
+                messages: req.history.to_vec(),
+                stop_reason: PromptStopReason::Cancelled,
+            }
+        }
+    };
+    // Immediate 命令跳过 agent event pump，必须手动发送 push_done
+    // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
+    req.event_sink.push_done(req.session_id).await;
+    Some(PromptResult {
+        messages: result.messages,
+        ok: true,
+        stop_reason: result.stop_reason,
+        recall_items: Vec::new(),
+    })
+}
+
+// ── Spawn Pump Request parameter object ─────────────────────────────────────
+
+/// 事件泵启动请求（参数对象）。
+struct SpawnPumpRequest {
+    event_rx: tokio::sync::mpsc::UnboundedReceiver<ExecutorEvent>,
+    sink: Arc<dyn EventSink>,
+    session_id: String,
+    effective_context_window: u32,
+    langfuse_session: Option<Arc<LangfuseSession>>,
+    trace_input: String,
+    provider_display_name: String,
+}
+
+/// 后台事件泵句柄，通过 oneshot channel 与 pump_done_rx 配对。
+struct PumpHandle {
+    pump_done_rx: oneshot::Receiver<()>,
+}
+
+/// 启动主事件泵任务。
+///
+/// 任务循环：
+/// 1. trace_start → recv events → forward to sink
+/// 2. trace_end + push_done → signal pump completion（在 Langfuse flush 之前）
+/// 3. Langfuse flush（fire-and-forget，不得阻塞管线）
+fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
+    let SpawnPumpRequest {
+        mut event_rx,
+        sink,
+        session_id,
+        effective_context_window,
+        langfuse_session,
+        trace_input,
+        provider_display_name,
+    } = req;
+
+    let (pump_done_tx, pump_done_rx) = oneshot::channel();
+
     let langfuse_tracer = langfuse_session
         .as_ref()
         .map(|s| parking_lot::Mutex::new(LangfuseTracer::new(Arc::clone(s), session_id.clone())));
     if langfuse_tracer.is_some() {
         debug!(session_id = %session_id, "Langfuse tracer created for turn");
     }
-
-    let provider_display_name = provider.display_name().to_string();
 
     tokio::spawn(async move {
         // Start Langfuse trace
@@ -296,85 +634,11 @@ pub async fn execute_prompt(
         while let Some(exec_event) = event_rx.recv().await {
             // Langfuse tracing
             if let Some(ref tracer) = langfuse_tracer {
-                match &exec_event {
-                    ExecutorEvent::LlmCallStart {
-                        step,
-                        messages,
-                        tools,
-                    } => {
-                        tracer.lock().on_llm_start(*step, messages, tools);
-                    }
-                    ExecutorEvent::LlmCallEnd {
-                        step,
-                        model,
-                        output,
-                        usage,
-                        stop_reason: _,
-                    } => {
-                        tracer.lock().on_llm_end(
-                            *step,
-                            model,
-                            &provider_display_name,
-                            output,
-                            usage.as_ref(),
-                        );
-                    }
-                    ExecutorEvent::ToolStart {
-                        tool_call_id,
-                        name,
-                        input,
-                        ..
-                    } => {
-                        tracer.lock().on_tool_start(tool_call_id, name, input);
-                    }
-                    ExecutorEvent::ToolEnd {
-                        tool_call_id,
-                        output,
-                        is_error,
-                        ..
-                    } => {
-                        tracer.lock().on_tool_end(tool_call_id, output, *is_error);
-                    }
-                    ExecutorEvent::TextChunk { chunk, .. } => {
-                        tracer.lock().on_text_chunk(chunk);
-                    }
-                    ExecutorEvent::LlmRetrying {
-                        attempt,
-                        max_attempts,
-                        delay_ms,
-                        error,
-                    } => {
-                        tracer
-                            .lock()
-                            .on_llm_retrying(*attempt, *max_attempts, *delay_ms, error);
-                    }
-                    ExecutorEvent::CompactStarted => {
-                        tracer.lock().on_compact_start();
-                    }
-                    ExecutorEvent::CompactCompleted {
-                        summary,
-                        files,
-                        skills,
-                        micro_cleared,
-                        ..
-                    } => {
-                        tracer.lock().on_compact_end(
-                            summary,
-                            files.len(),
-                            skills.len(),
-                            *micro_cleared,
-                            false,
-                            "",
-                        );
-                    }
-                    ExecutorEvent::CompactError { message } => {
-                        tracer.lock().on_compact_end("", 0, 0, 0, true, message);
-                    }
-                    _ => {}
-                }
+                forward_langfuse_event(tracer, &exec_event, &provider_display_name);
             }
 
-            sink.push_event(&sid, &exec_event, pump_cw).await;
+            sink.push_event(&session_id, &exec_event, effective_context_window)
+                .await;
         }
 
         // End Langfuse trace and flush
@@ -385,7 +649,7 @@ pub async fn execute_prompt(
             None
         };
 
-        sink.push_done(&sid).await;
+        sink.push_done(&session_id).await;
 
         // Signal pump completion BEFORE Langfuse flush.
         // Langfuse is telemetry — it must never block the execution pipeline.
@@ -403,21 +667,164 @@ pub async fn execute_prompt(
         drop(langfuse_flush);
     });
 
-    // 单次 Agent 执行（compact 由 CompactMiddleware 在循环内处理）
-    let event_handler: Arc<dyn AgentEventHandler> =
-        Arc::new(peri_agent::agent::events::FnEventHandler({
-            let tx = event_tx.clone();
-            move |event: ExecutorEvent| {
-                if let Some(tx) = tx.lock().unwrap().as_ref() {
-                    let _ = tx.send(event);
-                }
-            }
-        }));
+    PumpHandle { pump_done_rx }
+}
 
-    let language = frozen
-        .as_ref()
-        .and_then(|f| f.language.clone())
-        .or_else(|| peri_config.config.language.clone());
+/// 转发单个 executor 事件到 Langfuse tracer（pump 内的纯函数，便于测试）。
+fn forward_langfuse_event(
+    tracer: &parking_lot::Mutex<LangfuseTracer>,
+    exec_event: &ExecutorEvent,
+    provider_display_name: &str,
+) {
+    match exec_event {
+        ExecutorEvent::LlmCallStart {
+            step,
+            messages,
+            tools,
+        } => {
+            tracer.lock().on_llm_start(*step, messages, tools);
+        }
+        ExecutorEvent::LlmCallEnd {
+            step,
+            model,
+            output,
+            usage,
+            stop_reason: _,
+        } => {
+            tracer
+                .lock()
+                .on_llm_end(*step, model, provider_display_name, output, usage.as_ref());
+        }
+        ExecutorEvent::ToolStart {
+            tool_call_id,
+            name,
+            input,
+            ..
+        } => {
+            tracer.lock().on_tool_start(tool_call_id, name, input);
+        }
+        ExecutorEvent::ToolEnd {
+            tool_call_id,
+            output,
+            is_error,
+            ..
+        } => {
+            tracer.lock().on_tool_end(tool_call_id, output, *is_error);
+        }
+        ExecutorEvent::TextChunk { chunk, .. } => {
+            tracer.lock().on_text_chunk(chunk);
+        }
+        ExecutorEvent::LlmRetrying {
+            attempt,
+            max_attempts,
+            delay_ms,
+            error,
+        } => {
+            tracer
+                .lock()
+                .on_llm_retrying(*attempt, *max_attempts, *delay_ms, error);
+        }
+        ExecutorEvent::CompactStarted => {
+            tracer.lock().on_compact_start();
+        }
+        ExecutorEvent::CompactCompleted {
+            summary,
+            files,
+            skills,
+            micro_cleared,
+            ..
+        } => {
+            tracer.lock().on_compact_end(
+                summary,
+                files.len(),
+                skills.len(),
+                *micro_cleared,
+                false,
+                "",
+            );
+        }
+        ExecutorEvent::CompactError { message } => {
+            tracer.lock().on_compact_end("", 0, 0, 0, true, message);
+        }
+        _ => {}
+    }
+}
+
+// ── Build Agent Request parameter object ────────────────────────────────────
+
+/// Agent 构建请求（参数对象）。
+///
+/// `turn` 携带本轮计算出的紧凑配置（provider/config/compact 等），
+/// 其余字段是中间件链所需的所有共享资源。
+struct BuildAgentRequest<'a> {
+    turn: &'a TurnConfig<'a>,
+    agent_input: peri_agent::agent::react::AgentInput,
+    history: Vec<BaseMessage>,
+    // ── 会 move 的中间件资源 ────────────────────────────────────────────────
+    plugin_skill_dirs: Vec<std::path::PathBuf>,
+    plugin_agent_dirs: Vec<std::path::PathBuf>,
+    hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>>,
+    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
+    mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
+    channel_state: Option<Arc<ChannelState>>,
+    tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
+    shared_tools: Arc<
+        parking_lot::RwLock<
+            std::collections::HashMap<String, Arc<dyn peri_agent::tools::BaseTool>>,
+        >,
+    >,
+    lsp_servers: Vec<peri_lsp::config::LspServerConfig>,
+    langfuse_session: Option<Arc<LangfuseSession>>,
+    pool: Arc<parking_lot::Mutex<AgentPool>>,
+    thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
+    thread_id: Option<String>,
+    session_manager: Option<SessionManager>,
+    // ── 借用的引用 ──────────────────────────────────────────────────────────
+    event_sink: &'a Arc<dyn EventSink>,
+    session_id: &'a str,
+    event_tx:
+        &'a Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>,
+    cached_llm: Option<&'a CachedLlmInstances>,
+}
+
+/// Agent 执行后的最终输出（state + 停止原因）。
+struct ExecOutcome {
+    ok: bool,
+    stop_reason: PromptStopReason,
+    agent_state: AgentState,
+}
+
+/// 构建 + 执行 agent。包含：
+/// - system prompt 解析（frozen 或 legacy 重建）
+/// - SubAgentMiddleware register/deregister 闭包
+/// - `build_agent` 调用 + AgentPool 缓存回写
+/// - bg event pump + todo 转发 pump 启动
+/// - agent.execute + 错误事件转发
+/// - cancel cascade 子 agent
+async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
+    let BuildAgentRequest {
+        turn,
+        agent_input,
+        history,
+        plugin_skill_dirs,
+        plugin_agent_dirs,
+        hook_groups,
+        cron_scheduler,
+        mcp_pool,
+        channel_state,
+        tool_search_index,
+        shared_tools,
+        lsp_servers,
+        langfuse_session: _langfuse_session,
+        pool,
+        thread_store,
+        thread_id,
+        session_manager,
+        event_sink,
+        session_id,
+        event_tx,
+        cached_llm,
+    } = req;
 
     let (
         system_prompt,
@@ -425,32 +832,32 @@ pub async fn execute_prompt(
         frozen_claude_local_md,
         frozen_skill_summary,
         frozen_date,
-    ) = if let Some(ref f) = frozen {
+    ) = if let Some(f) = turn.frozen {
         // 使用 session 创建时冻结的数据，跳过重建
         (
-            f.system_prompt.clone(),
-            f.claude_md.clone(),
-            f.claude_local_md.clone(),
-            f.skill_summary.clone(),
-            Some(f.date.clone()),
+            f.system_prompt().to_string(),
+            f.claude_md().map(|s| s.to_string()),
+            f.claude_local_md().map(|s| s.to_string()),
+            f.skill_summary().map(|s| s.to_string()),
+            Some(f.date().to_string()),
         )
     } else {
         // Legacy: per-turn rebuild（子 Agent 等场景未提供 frozen 数据时使用）
         let features = PromptFeatures::detect();
         let sp = build_system_prompt(
             None,
-            cwd,
+            turn.cwd,
             features,
             &plugin_agent_dirs,
             None,
-            language.as_deref(),
+            turn.language.as_deref(),
         );
         (sp, None, None, None, None)
     };
 
     // Build register/deregister closures for SubAgentMiddleware
     let register_runtime = session_manager.clone().map(|sm| {
-        let sid = session_id.clone();
+        let sid = session_id.to_string();
         Arc::new(
             move |thread_id: String, cancel_token: AgentCancellationToken, policy: String| {
                 if let Some(mut session) = sm.get_session_mut(&sid) {
@@ -469,7 +876,7 @@ pub async fn execute_prompt(
         ) as crate::agent::builder::RegisterRuntimeFn
     });
     let deregister_runtime = session_manager.clone().map(|sm| {
-        let sid = session_id.clone();
+        let sid = session_id.to_string();
         Arc::new(move |thread_id: &str| {
             if let Some(mut session) = sm.get_session_mut(&sid) {
                 session.active_agents.remove(thread_id);
@@ -477,48 +884,68 @@ pub async fn execute_prompt(
         }) as crate::agent::builder::DeregisterRuntimeFn
     });
 
+    let event_handler: Arc<dyn AgentEventHandler> =
+        Arc::new(peri_agent::agent::events::FnEventHandler({
+            let tx = event_tx.clone();
+            move |event: ExecutorEvent| {
+                if let Some(tx) = tx.lock().as_ref() {
+                    let _ = tx.send(event);
+                }
+            }
+        }));
+
     let (agent_output, new_cache) = builder::build_agent(
         AcpAgentConfig {
-            provider: provider.clone(),
-            cwd: cwd.to_string(),
+            provider: turn.provider.clone(),
+            cwd: turn.cwd.to_string(),
             system_prompt,
-            frozen_claude_md,
-            frozen_claude_local_md,
-            frozen_skill_summary,
-            frozen_date,
+            frozen: builder::FrozenData {
+                claude_md: frozen_claude_md,
+                claude_local_md: frozen_claude_local_md,
+                skill_summary: frozen_skill_summary,
+                date: frozen_date,
+            },
             event_handler,
-            cancel: cancel.clone(),
-            permission_mode: permission_mode.clone(),
-            peri_config: Arc::new(peri_config.as_ref().clone()),
-            cron_scheduler: cron_scheduler.clone(),
+            cancel: turn.cancel.clone(),
+            permission_mode: turn.permission_mode.clone(),
+            peri_config: Arc::new(turn.peri_config.as_ref().clone()),
+            cron_scheduler,
             agent_overrides: None,
             preload_skills: Vec::new(),
-            session_id: Some(session_id.clone()),
-            broker: broker.clone(),
-            plugin_skill_dirs: plugin_skill_dirs.clone(),
-            plugin_agent_dirs: plugin_agent_dirs.clone(),
-            hook_groups: hook_groups.clone(),
-            hook_session_start: is_empty_history,
-            mcp_pool: mcp_pool.clone(),
-            channel_state: channel_state.clone(),
-            tool_search_index: tool_search_index.clone(),
-            shared_tools: shared_tools.clone(),
+            session_id: Some(session_id.to_string()),
+            broker: turn.broker.clone(),
+            plugin_skill_dirs,
+            plugin_agent_dirs,
+            hook_groups,
+            hook_session_start: turn.is_empty_history,
+            mcp_pool,
+            channel_state,
+            tool_search_index,
+            shared_tools,
             child_handler_factory: None,
-            lsp_servers: lsp_servers.clone(),
-            compact_config: if disable_compact {
-                None
-            } else {
-                Some(compact_config)
+            lsp_servers,
+            compact: builder::CompactSettings {
+                config: if turn.disable_compact {
+                    None
+                } else {
+                    Some(turn.compact_config.clone())
+                },
+                budget: if turn.disable_compact {
+                    None
+                } else {
+                    Some(turn.budget.clone())
+                },
+                model: turn.compact_model.clone(),
+                event_tx: Some(event_tx.clone()),
             },
-            compact_budget: if disable_compact { None } else { Some(budget) },
-            compact_model, // already Option<Arc<dyn BaseModel>> from pool/fresh logic
-            compact_event_tx: Some(event_tx.clone()),
-            thread_store,
-            parent_thread_id: thread_id,
-            register_runtime,
-            deregister_runtime,
+            thread_persistence: builder::ThreadPersistence {
+                store: thread_store,
+                parent_thread_id: thread_id,
+                register_runtime,
+                deregister_runtime,
+            },
         },
-        cached_llm.as_ref(),
+        cached_llm,
         &pool,
     );
 
@@ -532,8 +959,9 @@ pub async fn execute_prompt(
     // exits when all bg spawn closures finish and drop their senders.
     {
         let mut bg_event_rx = agent_output.bg_event_rx;
-        let bg_session_id = session_id.clone();
-        let bg_cw = effective_context_window;
+        let bg_session_id = session_id.to_string();
+        let bg_sink = Arc::clone(event_sink);
+        let bg_cw = turn.effective_context_window;
         tokio::spawn(async move {
             let mut bg_event_count: u64 = 0;
             while let Some(bg_event) = bg_event_rx.recv().await {
@@ -576,33 +1004,33 @@ pub async fn execute_prompt(
                     },
                 })
                 .collect();
-            if let Some(tx) = tx_for_todo.lock().unwrap().as_ref() {
+            if let Some(tx) = tx_for_todo.lock().as_ref() {
                 let _ = tx.send(ExecutorEvent::TodoUpdate(entries));
             }
         }
     });
 
     // Execute agent
-    let mut agent_state = AgentState::with_messages(cwd.to_string(), history);
-    agent_state.set_context("session_id", &session_id);
+    let mut agent_state = AgentState::with_messages(turn.cwd.to_string(), history);
+    agent_state.set_context("session_id", session_id);
     agent_state.set_context("run_id", uuid::Uuid::now_v7().to_string());
     let result = agent_output
         .executor
-        .execute(agent_input.clone(), &mut agent_state, Some(cancel.clone()))
+        .execute(agent_input, &mut agent_state, Some(turn.cancel.clone()))
         .await;
     drop(agent_output.executor);
 
     let ok = result.is_ok();
     if let Err(e) = &result {
         error!(session_id = %session_id, error = %e, "Agent execution failed");
-        if let Some(tx) = event_tx.lock().unwrap().as_ref() {
+        if let Some(tx) = event_tx.lock().as_ref() {
             let _ = tx.send(ExecutorEvent::AgentExecutionFailed {
                 message: e.to_string(),
             });
         }
     }
 
-    let stop_reason = if cancel.is_cancelled() {
+    let stop_reason = if turn.cancel.is_cancelled() {
         PromptStopReason::Cancelled
     } else if matches!(&result, Err(AgentError::MaxIterationsExceeded(_))) {
         PromptStopReason::MaxTurnRequests
@@ -615,28 +1043,57 @@ pub async fn execute_prompt(
     // Cancel cascade children when this agent is cancelled
     if stop_reason == PromptStopReason::Cancelled {
         if let Some(ref sm) = session_manager {
-            if let Some(session) = sm.get_session(&session_id) {
+            if let Some(session) = sm.get_session(session_id) {
                 session.cancel_cascade_children();
             }
         }
     }
 
-    close_channel(&event_tx);
-    wait_for_pump(pump_done_rx, &session_id).await;
-
-    let recall_items = agent_state.drain_recall();
-    PromptResult {
-        messages: agent_state.into_messages(),
+    ExecOutcome {
         ok,
         stop_reason,
+        agent_state,
+    }
+}
+
+// ── Collect Result Request parameter object ─────────────────────────────────
+
+/// 结果收集请求（参数对象）。
+struct CollectRequest<'a> {
+    event_tx:
+        &'a Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>,
+    pump_handle: PumpHandle,
+    session_id: &'a str,
+    exec_outcome: ExecOutcome,
+}
+
+/// 最终结果收集：close channel → 等待 pump drain → 提取 recall items。
+///
+/// 顺序约束：必须先 close event_tx，pump 才能退出 recv 循环；然后等待 pump_done。
+async fn collect_result(req: CollectRequest<'_>) -> PromptResult {
+    let CollectRequest {
+        event_tx,
+        pump_handle,
+        session_id,
+        mut exec_outcome,
+    } = req;
+
+    close_channel(event_tx);
+    wait_for_pump(pump_handle.pump_done_rx, session_id).await;
+
+    let recall_items = exec_outcome.agent_state.drain_recall();
+    PromptResult {
+        messages: exec_outcome.agent_state.into_messages(),
+        ok: exec_outcome.ok,
+        stop_reason: exec_outcome.stop_reason,
         recall_items,
     }
 }
 
 fn close_channel(
-    event_tx: &Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>,
+    event_tx: &Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>,
 ) {
-    let mut tx_guard = event_tx.lock().unwrap();
+    let mut tx_guard = event_tx.lock();
     *tx_guard = None;
 }
 
@@ -704,3 +1161,117 @@ fn inject_bg_result_messages(
 
     (history, user_content)
 }
+
+// ── Prediction facade ───────────────────────────────────────────────────────
+
+/// 预测失败原因，用于决定是否发送通知及日志级别。
+#[derive(Debug)]
+pub enum PredictionError {
+    /// 30s 超时（首次冷启动可能较慢）。
+    Timeout,
+    /// Agent 执行返回错误。
+    Failed(String),
+}
+
+/// Facade：基于现有对话历史预测用户下一步输入。
+///
+/// 此函数封装了 TUI 之前在 `acp_server/mod.rs` 内联的 Prediction 构造逻辑
+/// （`BaseModelReactLLM::new` + `RetryableLLM::new` + `ReActAgent::new`），
+/// 避免违反 CLAUDE.md [TRAP]：
+///
+/// > Agent 构建和执行统一通过 `peri_acp::session::executor::execute_prompt()`。
+/// > 禁止在 TUI 层直接构建 ReActAgent。
+///
+/// 构建一个 1 轮、无工具、无中间件的最小 agent，注入 `history`（应已过滤 System
+/// 消息并限制条数），30 秒超时后返回文本或 [`PredictionError`]。
+///
+/// 调用方负责发送 `peri/prediction_ready` 通知（保留在 TUI 层以便复用 transport）。
+pub async fn execute_prediction(
+    provider: crate::provider::LlmProvider,
+    history: Vec<BaseMessage>,
+    cwd: &str,
+) -> Result<String, PredictionError> {
+    debug!(
+        msg_count = history.len(),
+        cwd, "Prediction facade: starting"
+    );
+
+    // 直接复用已构建的 LlmProvider（绕过 from_config）
+    let base_llm = peri_agent::llm::BaseModelReactLLM::new(provider.into_model());
+    let llm = peri_agent::llm::RetryableLLM::new(base_llm, peri_agent::llm::RetryConfig::default());
+
+    // 构建最小 agent（1 轮、无工具、无中间件）
+    let directive = peri_middlewares::subagent::build_prediction_directive();
+    let agent = peri_agent::agent::executor::ReActAgent::new(llm)
+        .max_iterations(1)
+        .with_system_prompt(directive);
+
+    // 构造 state，注入对话历史
+    let mut state = peri_agent::agent::state::AgentState::new(cwd);
+    for msg in &history {
+        state.add_message(msg.clone());
+    }
+
+    debug!("Prediction facade: calling LLM");
+    // 30 秒超时（首次冷启动可能较慢）
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        agent.execute(
+            peri_agent::agent::react::AgentInput::text("请根据以上对话预测用户下一步输入"),
+            &mut state,
+            None,
+        ),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(_output)) => {
+            let text = extract_prediction_text(state.messages());
+            if text.is_empty() {
+                debug!("Prediction facade: LLM returned empty text");
+            } else {
+                debug!(%text, "Prediction facade: ready");
+            }
+            Ok(text)
+        }
+        Ok(Err(e)) => {
+            debug!(error = %e, "Prediction facade: agent failed");
+            Err(PredictionError::Failed(e.to_string()))
+        }
+        Err(_) => {
+            debug!("Prediction facade: timed out (30s)");
+            Err(PredictionError::Timeout)
+        }
+    }
+}
+
+/// 从 agent 执行后的 state 中提取最后一条非空 AI 消息文本。
+///
+/// 纯函数（不持有 lock、不 await），便于单元测试。文本两侧空白会被裁剪。
+pub fn extract_prediction_text(messages: &[BaseMessage]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find_map(|m| {
+            if matches!(m, BaseMessage::Ai { .. }) {
+                let t = m.content();
+                let trimmed = t.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+#[path = "executor_test.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "executor_prediction_test.rs"]
+mod prediction_tests;

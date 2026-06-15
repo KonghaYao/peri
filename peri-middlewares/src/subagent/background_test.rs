@@ -36,7 +36,7 @@
 
         let result = registry.register(make_task("bg-4"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Maximum 3"));
+        assert!(result.unwrap_err().to_string().contains("Maximum 3"));
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
+use parking_lot::RwLock;
 use peri_agent::interaction::ChannelState;
 use peri_middlewares::{
     mcp::{McpClientPool, McpInitStatus},
@@ -9,6 +10,12 @@ use peri_middlewares::{
 
 use super::{cron_state::CronState, events::AgentEvent};
 use crate::{config::PeriConfig, thread::ThreadStore};
+
+/// `ServiceRegistry` 中共享的配置类型：单一来源（Single Source of Truth）。
+///
+/// TUI 与 ACP Server 共享同一个 `Arc<RwLock<PeriConfig>>`，写入会即时传播，
+/// 无需手动调用 `sync_acp_config`。
+pub type SharedPeriConfig = Arc<RwLock<PeriConfig>>;
 
 /// 进程资源采样器：每 2 秒采样一次当前进程的 CPU 和内存
 pub struct ProcessResourceMonitor {
@@ -60,7 +67,8 @@ impl ProcessResourceMonitor {
 
 /// 全局服务/状态聚合：跨 session 共享的服务字段。
 pub struct ServiceRegistry {
-    pub peri_config: Option<PeriConfig>,
+    /// 共享配置：TUI 与 ACP Server 持有同一 `Arc`，写入即时传播。
+    pub peri_config: SharedPeriConfig,
     pub cwd: String,
     pub provider_name: String,
     pub model_name: String,

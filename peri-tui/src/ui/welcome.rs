@@ -95,12 +95,7 @@ pub(crate) fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
     ]));
 
     // ── 首次使用引导（未配置 Provider 时显示）───────────────────────────
-    let has_provider = app
-        .services
-        .peri_config
-        .as_ref()
-        .map(|c| !c.config.providers.is_empty())
-        .unwrap_or(false);
+    let has_provider = !app.services.peri_config.read().config.providers.is_empty();
     if !has_provider {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![

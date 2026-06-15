@@ -80,13 +80,11 @@ impl App {
                 Some(std::time::Instant::now());
         }
 
-        let provider = match self
-            .services
-            .peri_config
-            .as_ref()
-            .and_then(agent::LlmProvider::from_config)
-            .or_else(agent::LlmProvider::from_env)
-        {
+        let provider = {
+            let cfg_guard = self.services.peri_config.read();
+            agent::LlmProvider::from_config(&cfg_guard)
+        };
+        let provider = match provider.or_else(agent::LlmProvider::from_env) {
             Some(p) => p,
             None => {
                 self.apply_pipeline_action(PipelineAction::AddMessage(MessageViewModel::system(
@@ -104,8 +102,9 @@ impl App {
             if self
                 .services
                 .peri_config
-                .as_ref()
-                .map(|c| c.config.context_1m.unwrap_or(false))
+                .read()
+                .config
+                .context_1m
                 .unwrap_or(false)
             {
                 model_cw = 1_000_000;
@@ -126,22 +125,13 @@ impl App {
         self.session_mgr.current_mut().agent.agent_replied = false;
         self.session_mgr.current_mut().agent.reconcile_already_done = false;
         // 清理后台任务 continuation 状态（用户主动发消息时覆盖自动 continuation）
-        self.session_mgr.current_mut().agent.agent_done_pending_bg = false;
-        self.session_mgr.current_mut().agent.pending_bg_continuation = None;
         self.session_mgr
             .current_mut()
             .agent
-            .pre_done_bg_completions
-            .clear();
-        self.session_mgr
-            .current_mut()
-            .agent
-            .pre_done_bg_results
-            .clear();
+            .bg_task_state
+            .reset_for_new_round();
         // 重置 LSP 诊断计数
-        self.session_mgr.current_mut().agent.lsp_errors = 0;
-        self.session_mgr.current_mut().agent.lsp_warnings = 0;
-        self.session_mgr.current_mut().agent.lsp_files_with_errors = 0;
+        self.session_mgr.current_mut().agent.lsp_diagnostics.reset();
 
         // ── ACP-based agent submission (replaces direct run_universal_agent spawn) ──
         let cwd = self.services.cwd.clone();
@@ -279,9 +269,7 @@ impl App {
         self.session_mgr.current_mut().agent.subagent_depth = 0;
         self.session_mgr.current_mut().agent.agent_replied = false;
         self.session_mgr.current_mut().agent.reconcile_already_done = false;
-        self.session_mgr.current_mut().agent.lsp_errors = 0;
-        self.session_mgr.current_mut().agent.lsp_warnings = 0;
-        self.session_mgr.current_mut().agent.lsp_files_with_errors = 0;
+        self.session_mgr.current_mut().agent.lsp_diagnostics.reset();
 
         // 通过 ACP client 提交 bg continuation
         if let Some(ref acp_client) = self.acp_client {

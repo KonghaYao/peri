@@ -30,6 +30,9 @@ pub type DeregisterRuntimeFn = Arc<dyn Fn(&str) + Send + Sync>;
 pub type SystemPromptBuilder = Arc<
     dyn Fn(Option<&peri_middlewares::agent_define::AgentOverrides>, &str) -> String + Send + Sync,
 >;
+/// CompactMiddleware 事件发送端类型（CompactSettings 复用，简化字段签名）
+pub type CompactEventSender =
+    Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>;
 use peri_agent::{
     agent::{state::AgentState, AgentCancellationToken, ReActAgent},
     interaction::{ChannelBroker, ChannelState, MultiplexBroker, UserInteractionBroker},
@@ -48,19 +51,61 @@ use crate::{
 
 // ── 共享 Agent 构建（ACP 和 TUI 共用）─────────────────────────────────────────
 
+/// 会话级冻结数据（session/new 一次性捕获，后续轮次直接复用）。
+///
+/// 零跨依赖分组：四个字段在 `build_agent` 内部独立使用，
+/// 不与其它字段共享 mutable state。详见 CLAUDE.md "Frozen Data Flow"。
+pub struct FrozenData {
+    /// Frozen CLAUDE.md content (None = read from disk each turn, legacy).
+    pub claude_md: Option<String>,
+    /// Frozen CLAUDE.local.md content.
+    pub claude_local_md: Option<String>,
+    /// Frozen skills summary (None = scan each turn).
+    pub skill_summary: Option<String>,
+    /// Frozen session date in YYYY-MM-DD (None = compute fresh each turn).
+    pub date: Option<String>,
+}
+
+/// CompactMiddleware 配置分组（零跨依赖）。
+///
+/// 当且仅当四字段均为 `Some` 时中间件才会注册；
+/// 其它字段不影响此判定。
+pub struct CompactSettings {
+    /// Compact 中间件配置（None = 不启用自动 compact）
+    pub config: Option<CompactConfig>,
+    /// 上下文窗口预算（CompactMiddleware 需要）
+    pub budget: Option<ContextBudget>,
+    /// LLM 模型（CompactMiddleware 用于 full compact 摘要生成）
+    pub model: Option<Arc<dyn BaseModel>>,
+    /// 事件通道（CompactMiddleware 发送 compact 事件）
+    pub event_tx: Option<CompactEventSender>,
+}
+
+/// 子 Agent 线程持久化分组（零跨依赖）。
+///
+/// 全部为 `Option`，`build_agent` 内仅用于 SubAgentMiddleware 的链式 `with_*` 调用，
+/// 无跨字段约束。
+pub struct ThreadPersistence {
+    /// Thread persistence store for child thread creation (None = non-persistent)
+    pub store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
+    /// Parent thread ID for child thread hierarchy (None = top-level agent)
+    pub parent_thread_id: Option<String>,
+    /// Register callback: called when a child agent starts executing.
+    pub register_runtime: Option<RegisterRuntimeFn>,
+    /// Deregister callback: called when a child agent finishes.
+    pub deregister_runtime: Option<DeregisterRuntimeFn>,
+}
+
 /// 共享 Agent 构建配置（ACP 和 TUI 共用）
+///
+/// **结构稳定性**：中间件添加顺序是 `[TRAP]` 守护契约，禁止重排。
+/// 本结构仅做字段分组，`build_agent` 函数体保持单体。
 pub struct AcpAgentConfig {
     pub provider: LlmProvider,
     pub cwd: String,
     pub system_prompt: String,
-    /// Frozen CLAUDE.md content (None = read from disk each turn, legacy).
-    pub frozen_claude_md: Option<String>,
-    /// Frozen CLAUDE.local.md content.
-    pub frozen_claude_local_md: Option<String>,
-    /// Frozen skills summary (None = scan each turn).
-    pub frozen_skill_summary: Option<String>,
-    /// Frozen session date in YYYY-MM-DD (None = compute fresh each turn).
-    pub frozen_date: Option<String>,
+    /// Frozen 会话数据（FrozenData 分组，零跨依赖）
+    pub frozen: FrozenData,
     pub event_handler: Arc<dyn AgentEventHandler>,
     pub cancel: AgentCancellationToken,
     pub permission_mode: Arc<SharedPermissionMode>,
@@ -83,23 +128,10 @@ pub struct AcpAgentConfig {
     pub child_handler_factory: Option<ChildHandlerFactory>,
     /// LSP 服务器配置（由调用方从 settings.json + 插件配置组装）
     pub lsp_servers: Vec<peri_lsp::config::LspServerConfig>,
-    /// Compact 中间件配置（None = 不启用自动 compact）
-    pub compact_config: Option<CompactConfig>,
-    /// 上下文窗口预算（CompactMiddleware 需要）
-    pub compact_budget: Option<ContextBudget>,
-    /// LLM 模型（CompactMiddleware 用于 full compact 摘要生成）
-    pub compact_model: Option<Arc<dyn BaseModel>>,
-    /// 事件通道（CompactMiddleware 发送 compact 事件）
-    pub compact_event_tx:
-        Option<Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>>,
-    /// Thread persistence store for child thread creation (None = non-persistent)
-    pub thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
-    /// Parent thread ID for child thread hierarchy (None = top-level agent)
-    pub parent_thread_id: Option<String>,
-    /// Register callback: called when a child agent starts executing.
-    pub register_runtime: Option<RegisterRuntimeFn>,
-    /// Deregister callback: called when a child agent finishes.
-    pub deregister_runtime: Option<DeregisterRuntimeFn>,
+    /// Compact 配置分组（CompactSettings 分组，零跨依赖）
+    pub compact: CompactSettings,
+    /// 子 Agent 线程持久化分组（ThreadPersistence 分组，零跨依赖）
+    pub thread_persistence: ThreadPersistence,
 }
 
 pub struct AcpAgentOutput {
@@ -130,10 +162,13 @@ pub fn build_agent(
         provider,
         cwd,
         system_prompt,
-        frozen_claude_md,
-        frozen_claude_local_md,
-        frozen_skill_summary,
-        frozen_date,
+        frozen:
+            FrozenData {
+                claude_md: frozen_claude_md,
+                claude_local_md: frozen_claude_local_md,
+                skill_summary: frozen_skill_summary,
+                date: frozen_date,
+            },
         event_handler,
         cancel,
         permission_mode,
@@ -153,14 +188,20 @@ pub fn build_agent(
         shared_tools,
         child_handler_factory,
         lsp_servers,
-        compact_config: mw_compact_config,
-        compact_budget: mw_compact_budget,
-        compact_model: mw_compact_model,
-        compact_event_tx: mw_compact_event_tx,
-        thread_store,
-        parent_thread_id,
-        register_runtime,
-        deregister_runtime,
+        compact:
+            CompactSettings {
+                config: mw_compact_config,
+                budget: mw_compact_budget,
+                model: mw_compact_model,
+                event_tx: mw_compact_event_tx,
+            },
+        thread_persistence:
+            ThreadPersistence {
+                store: thread_store,
+                parent_thread_id,
+                register_runtime,
+                deregister_runtime,
+            },
     } = cfg;
 
     // 应用 agent overrides 到系统提示词

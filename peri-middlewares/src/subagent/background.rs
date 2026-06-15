@@ -1,7 +1,20 @@
 use std::collections::HashMap;
 
 use peri_agent::agent::BackgroundTaskResult;
+use thiserror::Error;
 use tracing::warn;
+
+/// 后台任务注册表错误（结构化，取代 String 错误）
+///
+/// 参考已有 `lsp/tool.rs:LspToolError` 模式：实现 `std::error::Error`，
+/// 调用方可通过 `?` 自动转 `Box<dyn Error>` / `anyhow::Error`。
+#[derive(Debug, Error)]
+pub enum BackgroundRegistryError {
+    #[error("Maximum {0} concurrent background tasks reached")]
+    ConcurrentLimit(usize),
+    #[error("Task {0} not found")]
+    TaskNotFound(String),
+}
 
 /// 后台任务状态
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -49,16 +62,15 @@ impl BackgroundTaskRegistry {
 
     /// 注册新任务，超出上限返回 Err。
     /// 单次持锁完成计数检查 + 插入，消除 concurrent register 的 TOCTOU 窗口。
-    pub fn register(&self, task: BackgroundTask) -> Result<(), String> {
+    pub fn register(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
         let mut tasks = self.tasks.lock();
         let active = tasks
             .values()
             .filter(|t| matches!(t.status, BackgroundTaskStatus::Running))
             .count();
         if active >= self.max_concurrent {
-            return Err(format!(
-                "Maximum {} concurrent background tasks reached",
-                self.max_concurrent
+            return Err(BackgroundRegistryError::ConcurrentLimit(
+                self.max_concurrent,
             ));
         }
         tasks.insert(task.id.clone(), task);
@@ -97,13 +109,13 @@ impl BackgroundTaskRegistry {
     }
 
     /// 取消指定任务
-    pub fn cancel(&self, task_id: &str) -> Result<(), String> {
+    pub fn cancel(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
         let mut tasks = self.tasks.lock();
         if let Some(task) = tasks.remove(task_id) {
             task.abort_handle.abort();
             Ok(())
         } else {
-            Err(format!("Task {} not found", task_id))
+            Err(BackgroundRegistryError::TaskNotFound(task_id.to_string()))
         }
     }
 

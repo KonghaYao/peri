@@ -118,7 +118,7 @@ impl App {
             success = success,
             bg_count_before = self.session_mgr.current_mut().background_agents.len() + 1,
             bg_count_after = self.session_mgr.current_mut().background_agents.len(),
-            agent_done_pending = self.session_mgr.current_mut().agent.agent_done_pending_bg,
+            agent_done_pending = self.session_mgr.current_mut().agent.bg_task_state.agent_done_pending,
             "[bg-diag] TUI: handle_background_task_completed called"
         );
 
@@ -147,10 +147,16 @@ impl App {
         };
 
         // 将通知加入 origin_messages，使下一轮 agent 执行可见。
-        // 仅在 executor 已结束（agent_done_pending_bg）时直接 push 作为兜底；
+        // 仅在 executor 已结束（bg_task_state.agent_done_pending）时直接 push 作为兜底；
         // executor 运行期间的通知由 drain_notifications → StateSnapshot 路径写入，
         // 此处 push 会导致 origin_messages 中出现重复消息。
-        if self.session_mgr.current_mut().agent.agent_done_pending_bg {
+        if self
+            .session_mgr
+            .current_mut()
+            .agent
+            .bg_task_state
+            .agent_done_pending
+        {
             self.session_mgr.current_mut().agent.origin_messages.push(
                 peri_agent::messages::BaseMessage::human(state_notification.as_str()),
             );
@@ -308,12 +314,12 @@ impl App {
                 subagent_count_in_view = subagent_count,
                 frozen_count,
                 background_agents_count = self.session_mgr.current_mut().background_agents.len(),
-                agent_done_pending_bg = self.session_mgr.current_mut().agent.agent_done_pending_bg,
+                bg_task_state.agent_done_pending = self.session_mgr.current_mut().agent.bg_task_state.agent_done_pending,
                 "[bg-diag] after BackgroundTaskCompleted"
             );
         }
 
-        // 累积当前完成通知到 pre_done_bg_completions（显示文本）
+        // 累积当前完成通知到 bg_task_state.pre_done_completions（显示文本）
         let display_notification = build_bg_display_notification(
             &task_id,
             &agent_name,
@@ -326,14 +332,16 @@ impl App {
         self.session_mgr
             .current_mut()
             .agent
-            .pre_done_bg_completions
+            .bg_task_state
+            .pre_done_completions
             .push(display_notification);
 
-        // 累积结构化结果到 pre_done_bg_results（供 auto-continuation 注入合成消息）
+        // 累积结构化结果到 bg_task_state.pre_done_results（供 auto-continuation 注入合成消息）
         self.session_mgr
             .current_mut()
             .agent
-            .pre_done_bg_results
+            .bg_task_state
+            .pre_done_results
             .push(peri_agent::agent::events::BackgroundTaskResult {
                 task_id: task_id.clone(),
                 agent_name: agent_name.clone(),
@@ -346,27 +354,46 @@ impl App {
             });
 
         // 如果 agent 已完成（Done）且所有后台任务都已完成，关闭通道并自动提交 continuation
-        if self.session_mgr.current_mut().agent.agent_done_pending_bg
+        if self
+            .session_mgr
+            .current_mut()
+            .agent
+            .bg_task_state
+            .agent_done_pending
             && self.session_mgr.current_mut().background_agents.is_empty()
         {
             tracing::info!("all background tasks completed, auto-submitting continuation");
-            self.session_mgr.current_mut().agent.agent_done_pending_bg = false;
+            self.session_mgr
+                .current_mut()
+                .agent
+                .bg_task_state
+                .agent_done_pending = false;
             // 使用结构化结果（而非显示文本）驱动 continuation
             let all_results: Vec<_> = self
                 .session_mgr
                 .current_mut()
                 .agent
-                .pre_done_bg_results
+                .bg_task_state
+                .pre_done_results
                 .drain(..)
                 .collect();
-            self.session_mgr.current_mut().agent.pending_bg_continuation = Some(all_results);
+            self.session_mgr
+                .current_mut()
+                .agent
+                .bg_task_state
+                .pending_continuation = Some(all_results);
 
             return (true, false, true);
-        } else if !self.session_mgr.current_mut().agent.agent_done_pending_bg
+        } else if !self
+            .session_mgr
+            .current_mut()
+            .agent
+            .bg_task_state
+            .agent_done_pending
             && self.session_mgr.current_mut().background_agents.is_empty()
         {
             // 竞态修复：agent 尚未 Done，但所有后台任务已完成。
-            // 暂存通知已在上方 push，待 Done 处理时检查此字段并设置 pending_bg_continuation。
+            // 暂存通知已在上方 push，待 Done 处理时检查此字段并设置 bg_task_state.pending_continuation。
             tracing::info!(
                 "background task completed before Done, buffering notification for deferred continuation"
             );

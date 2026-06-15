@@ -39,6 +39,9 @@ pub(crate) async fn handle_new(
     };
     let sid = thread_id.clone();
     // ── Freeze system prompt data at session creation ──
+    // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
+    // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
+    ctx.session_manager.ensure_session(&sid, &cwd_str);
     let frozen_data = freeze::build(ctx, &cwd_str);
 
     {
@@ -95,6 +98,8 @@ pub(crate) async fn handle_load(
     let cwd = req.cwd.to_string_lossy().to_string();
     let cwd_for_skills = cwd.clone();
 
+    // 登记到 SessionManager 以支撑 cascade cancel / goal_state
+    ctx.session_manager.ensure_session(&sid, &cwd);
     // Build frozen data for session
     let frozen_data = freeze::build(ctx, &cwd);
 
@@ -160,6 +165,8 @@ pub(crate) async fn handle_resume(
 ) -> Result<(), agent_client_protocol::Error> {
     let sid = req.session_id.0.to_string();
     let cwd = req.cwd.to_string_lossy().to_string();
+    // 登记到 SessionManager 以支撑 cascade cancel / goal_state
+    ctx.session_manager.ensure_session(&sid, &cwd);
     // Build frozen data for session
     let frozen_data = freeze::build(ctx, &cwd);
     let mut sessions = ctx.sessions.write();
@@ -235,6 +242,9 @@ pub(crate) async fn handle_fork(
 
     // Insert new session
     let new_session_id = new_thread_id.clone();
+    // 登记到 SessionManager 以支撑 cascade cancel / goal_state
+    ctx.session_manager
+        .ensure_session(&new_session_id, &cwd_str);
     // Build frozen data for forked session
     let frozen_data = freeze::build(ctx, &cwd_str);
     {

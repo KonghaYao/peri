@@ -14,6 +14,108 @@ use crate::{
     tools::BaseTool,
 };
 
+// ─── Test Fixture Factory ───────────────────────────────────────────────
+// 共享 Mock 工具与 LLM，消除原本散布在各测试函数内的重复定义。
+
+/// EchoTool：按传入名称返回 "<name> done"。
+pub struct MockEchoTool {
+    name_str: &'static str,
+}
+#[async_trait::async_trait]
+impl BaseTool for MockEchoTool {
+    fn name(&self) -> &str {
+        self.name_str
+    }
+    fn description(&self) -> &str {
+        "echo"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+    async fn invoke(
+        &self,
+        _: serde_json::Value,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(format!("{} done", self.name_str))
+    }
+}
+
+/// 工厂函数：创建名为 `name` 的 EchoTool。
+fn make_echo_tool(name: &'static str) -> MockEchoTool {
+    MockEchoTool { name_str: name }
+}
+
+/// ThreeToolLLM：首轮发起 id1/id2/id3 三个工具调用，
+/// 看到任意 tool_result 后回传最终答案 `final_answer`。
+pub struct MockThreeToolLLM {
+    final_answer: &'static str,
+}
+#[async_trait::async_trait]
+impl ReactLLM for MockThreeToolLLM {
+    async fn generate_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        _tools: &[&dyn BaseTool],
+        _streaming: Option<crate::llm::types::StreamingContext>,
+    ) -> AgentResult<Reasoning> {
+        let has_tool_result = messages
+            .iter()
+            .any(|m| matches!(m, BaseMessage::Tool { .. }));
+        if !has_tool_result {
+            Ok(Reasoning::with_tools(
+                "call three tools",
+                vec![
+                    ToolCall::new("id1", "tool_a", serde_json::json!({})),
+                    ToolCall::new("id2", "tool_b", serde_json::json!({})),
+                    ToolCall::new("id3", "tool_c", serde_json::json!({})),
+                ],
+            ))
+        } else {
+            Ok(Reasoning::with_answer("done", self.final_answer))
+        }
+    }
+}
+
+/// 工厂函数：创建最终答案为 `final_answer` 的 ThreeToolLLM。
+fn make_three_tool_llm(final_answer: &'static str) -> MockThreeToolLLM {
+    MockThreeToolLLM { final_answer }
+}
+
+/// TwoToolLLM：首轮发起 id1/id2 两个工具调用，
+/// 看到任意 tool_result 后回传最终答案 `final_answer`。
+pub struct MockTwoToolLLM {
+    final_answer: &'static str,
+}
+#[async_trait::async_trait]
+impl ReactLLM for MockTwoToolLLM {
+    async fn generate_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        _tools: &[&dyn BaseTool],
+        _streaming: Option<crate::llm::types::StreamingContext>,
+    ) -> AgentResult<Reasoning> {
+        let has_tool_result = messages
+            .iter()
+            .any(|m| matches!(m, BaseMessage::Tool { .. }));
+        if !has_tool_result {
+            Ok(Reasoning::with_tools(
+                "call two tools",
+                vec![
+                    ToolCall::new("id1", "tool_a", serde_json::json!({})),
+                    ToolCall::new("id2", "tool_b", serde_json::json!({})),
+                ],
+            ))
+        } else {
+            Ok(Reasoning::with_answer("done", self.final_answer))
+        }
+    }
+}
+
+/// 工厂函数：创建最终答案为 `final_answer` 的 TwoToolLLM。
+fn make_two_tool_llm(final_answer: &'static str) -> MockTwoToolLLM {
+    MockTwoToolLLM { final_answer }
+}
+
 /// 通用不变量：state 中每个 tool_use 必须有对应 tool_result。
 fn assert_no_orphaned_tool_uses(state: &AgentState) {
     let mut ai_tool_ids: Vec<String> = Vec::new();
@@ -72,60 +174,11 @@ async fn test_concurrent_partial_failure_all_results_written() {
         }
     }
 
-    struct EchoTool {
-        name_str: &'static str,
-    }
-    #[async_trait::async_trait]
-    impl BaseTool for EchoTool {
-        fn name(&self) -> &str {
-            self.name_str
-        }
-        fn description(&self) -> &str {
-            "echo"
-        }
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({})
-        }
-        async fn invoke(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-            Ok(format!("{} done", self.name_str))
-        }
-    }
-
-    struct ThreeToolLLM;
-    #[async_trait::async_trait]
-    impl ReactLLM for ThreeToolLLM {
-        async fn generate_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<crate::llm::types::StreamingContext>,
-        ) -> AgentResult<Reasoning> {
-            let has_tool_result = messages
-                .iter()
-                .any(|m| matches!(m, BaseMessage::Tool { .. }));
-            if !has_tool_result {
-                Ok(Reasoning::with_tools(
-                    "call three tools",
-                    vec![
-                        ToolCall::new("id1", "tool_a", serde_json::json!({})),
-                        ToolCall::new("id2", "tool_b", serde_json::json!({})),
-                        ToolCall::new("id3", "tool_c", serde_json::json!({})),
-                    ],
-                ))
-            } else {
-                Ok(Reasoning::with_answer("done", "all results processed"))
-            }
-        }
-    }
-
-    let agent = ReActAgent::new(ThreeToolLLM)
+    let agent = ReActAgent::new(make_three_tool_llm("all results processed"))
         .max_iterations(5)
-        .register_tool(Box::new(EchoTool { name_str: "tool_a" }))
+        .register_tool(Box::new(make_echo_tool("tool_a")))
         .register_tool(Box::new(FailToolB))
-        .register_tool(Box::new(EchoTool { name_str: "tool_c" }));
+        .register_tool(Box::new(make_echo_tool("tool_c")));
 
     let mut state = AgentState::new("/tmp");
     let result = agent
@@ -166,63 +219,14 @@ async fn test_p3_error_flushes_modified_calls_no_orphaned_tool_use() {
         }
     }
 
-    struct ThreeToolLLM;
-    #[async_trait::async_trait]
-    impl ReactLLM for ThreeToolLLM {
-        async fn generate_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<crate::llm::types::StreamingContext>,
-        ) -> AgentResult<Reasoning> {
-            let has_tool_result = messages
-                .iter()
-                .any(|m| matches!(m, BaseMessage::Tool { .. }));
-            if !has_tool_result {
-                Ok(Reasoning::with_tools(
-                    "call three tools",
-                    vec![
-                        ToolCall::new("id1", "tool_a", serde_json::json!({})),
-                        ToolCall::new("id2", "tool_b", serde_json::json!({})),
-                        ToolCall::new("id3", "tool_c", serde_json::json!({})),
-                    ],
-                ))
-            } else {
-                Ok(Reasoning::with_answer("done", "all results received"))
-            }
-        }
-    }
-
-    struct EchoTool {
-        name_str: &'static str,
-    }
-    #[async_trait::async_trait]
-    impl BaseTool for EchoTool {
-        fn name(&self) -> &str {
-            self.name_str
-        }
-        fn description(&self) -> &str {
-            "echo"
-        }
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({})
-        }
-        async fn invoke(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-            Ok(format!("{} done", self.name_str))
-        }
-    }
-
     let events: Arc<Mutex<Vec<AgentEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let events_clone = events.clone();
 
-    let agent = ReActAgent::new(ThreeToolLLM)
+    let agent = ReActAgent::new(make_three_tool_llm("all results received"))
         .max_iterations(5)
-        .register_tool(Box::new(EchoTool { name_str: "tool_a" }))
-        .register_tool(Box::new(EchoTool { name_str: "tool_b" }))
-        .register_tool(Box::new(EchoTool { name_str: "tool_c" }))
+        .register_tool(Box::new(make_echo_tool("tool_a")))
+        .register_tool(Box::new(make_echo_tool("tool_b")))
+        .register_tool(Box::new(make_echo_tool("tool_c")))
         .add_middleware(Box::new(PartialFailMiddleware))
         .with_event_handler(Arc::new(FnEventHandler(move |event| {
             events_clone.lock().unwrap().push(event);
@@ -409,60 +413,11 @@ async fn test_mixed_ok_rejected_error_all_tool_results_written() {
         }
     }
 
-    struct ThreeToolLLM;
-    #[async_trait::async_trait]
-    impl ReactLLM for ThreeToolLLM {
-        async fn generate_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<crate::llm::types::StreamingContext>,
-        ) -> AgentResult<Reasoning> {
-            let has_tool_result = messages
-                .iter()
-                .any(|m| matches!(m, BaseMessage::Tool { .. }));
-            if !has_tool_result {
-                Ok(Reasoning::with_tools(
-                    "call three tools",
-                    vec![
-                        ToolCall::new("id1", "tool_a", serde_json::json!({})),
-                        ToolCall::new("id2", "tool_b", serde_json::json!({})),
-                        ToolCall::new("id3", "tool_c", serde_json::json!({})),
-                    ],
-                ))
-            } else {
-                Ok(Reasoning::with_answer("done", "all results received"))
-            }
-        }
-    }
-
-    struct EchoTool {
-        name_str: &'static str,
-    }
-    #[async_trait::async_trait]
-    impl BaseTool for EchoTool {
-        fn name(&self) -> &str {
-            self.name_str
-        }
-        fn description(&self) -> &str {
-            "echo"
-        }
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({})
-        }
-        async fn invoke(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-            Ok(format!("{} done", self.name_str))
-        }
-    }
-
-    let agent = ReActAgent::new(ThreeToolLLM)
+    let agent = ReActAgent::new(make_three_tool_llm("all results received"))
         .max_iterations(5)
-        .register_tool(Box::new(EchoTool { name_str: "tool_a" }))
-        .register_tool(Box::new(EchoTool { name_str: "tool_b" }))
-        .register_tool(Box::new(EchoTool { name_str: "tool_c" }))
+        .register_tool(Box::new(make_echo_tool("tool_a")))
+        .register_tool(Box::new(make_echo_tool("tool_b")))
+        .register_tool(Box::new(make_echo_tool("tool_c")))
         .add_middleware(Box::new(MixedResultMiddleware));
 
     let mut state = AgentState::new("/tmp");
@@ -914,58 +869,10 @@ async fn test_after_tool_error_still_writes_result() {
         }
     }
 
-    struct EchoTool {
-        name_str: &'static str,
-    }
-    #[async_trait::async_trait]
-    impl BaseTool for EchoTool {
-        fn name(&self) -> &str {
-            self.name_str
-        }
-        fn description(&self) -> &str {
-            "echo"
-        }
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({})
-        }
-        async fn invoke(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-            Ok(format!("{} done", self.name_str))
-        }
-    }
-
-    struct TwoToolLLM;
-    #[async_trait::async_trait]
-    impl ReactLLM for TwoToolLLM {
-        async fn generate_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<crate::llm::types::StreamingContext>,
-        ) -> AgentResult<Reasoning> {
-            let has_tool_result = messages
-                .iter()
-                .any(|m| matches!(m, BaseMessage::Tool { .. }));
-            if !has_tool_result {
-                Ok(Reasoning::with_tools(
-                    "call two",
-                    vec![
-                        ToolCall::new("id1", "tool_a", serde_json::json!({})),
-                        ToolCall::new("id2", "tool_b", serde_json::json!({})),
-                    ],
-                ))
-            } else {
-                Ok(Reasoning::with_answer("done", "all done"))
-            }
-        }
-    }
-
-    let agent = ReActAgent::new(TwoToolLLM)
+    let agent = ReActAgent::new(make_two_tool_llm("all done"))
         .max_iterations(5)
-        .register_tool(Box::new(EchoTool { name_str: "tool_a" }))
-        .register_tool(Box::new(EchoTool { name_str: "tool_b" }))
+        .register_tool(Box::new(make_echo_tool("tool_a")))
+        .register_tool(Box::new(make_echo_tool("tool_b")))
         .add_middleware(Box::new(AfterToolFailMiddleware));
 
     let mut state = AgentState::new("/tmp");

@@ -341,9 +341,17 @@ impl App {
                 warnings,
                 files_with_errors,
             } => {
-                self.session_mgr.current_mut().agent.lsp_errors = errors;
-                self.session_mgr.current_mut().agent.lsp_warnings = warnings;
-                self.session_mgr.current_mut().agent.lsp_files_with_errors = files_with_errors;
+                self.session_mgr.current_mut().agent.lsp_diagnostics.errors = errors;
+                self.session_mgr
+                    .current_mut()
+                    .agent
+                    .lsp_diagnostics
+                    .warnings = warnings;
+                self.session_mgr
+                    .current_mut()
+                    .agent
+                    .lsp_diagnostics
+                    .files_with_errors = files_with_errors;
                 (true, false, false)
             }
             AgentEvent::BgToolStep { child_thread_id } => {

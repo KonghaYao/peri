@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -7,7 +8,7 @@ use tokio::{fs, io::AsyncWriteExt};
 
 use crate::{
     messages::BaseMessage,
-    thread::{ThreadId, ThreadMeta, ThreadStore},
+    thread::{AgentStatus, ThreadId, ThreadMeta, ThreadStore},
 };
 
 /// 基于文件系统的 ThreadStore 实现
@@ -231,8 +232,11 @@ impl ThreadStore for FilesystemThreadStore {
     }
 
     async fn update_thread_status(&self, id: &ThreadId, status: &str) -> Result<()> {
+        // 关键约束：参数字符串必须经 FromStr 解析，非法值直接返回错误，不静默 fallback
+        let status = AgentStatus::from_str(status)
+            .with_context(|| format!("非法 agent_status 值: {status:?}"))?;
         let mut meta = self.load_meta(id).await?;
-        meta.agent_status = status.to_string();
+        meta.agent_status = status;
         meta.updated_at = Utc::now();
         self.update_meta(id, meta).await
     }

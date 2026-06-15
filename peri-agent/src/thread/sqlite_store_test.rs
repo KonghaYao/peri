@@ -190,22 +190,35 @@
 
     #[tokio::test]
     async fn test_update_thread_status() {
+        use crate::thread::AgentStatus;
         let (store, _dir) = make_store().await;
         let id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
 
         // 默认 active
         let meta = store.load_meta(&id).await.unwrap();
-        assert_eq!(meta.agent_status, "active");
+        assert_eq!(meta.agent_status, AgentStatus::Active);
 
         // 更新为 done
         store.update_thread_status(&id, "done").await.unwrap();
         let meta = store.load_meta(&id).await.unwrap();
-        assert_eq!(meta.agent_status, "done");
+        assert_eq!(meta.agent_status, AgentStatus::Done);
 
         // 更新为 error
         store.update_thread_status(&id, "error").await.unwrap();
         let meta = store.load_meta(&id).await.unwrap();
-        assert_eq!(meta.agent_status, "error");
+        assert_eq!(meta.agent_status, AgentStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn test_update_thread_status_rejects_illegal_string() {
+        // 关键约束：非法状态字符串不应静默 fallback，必须返回错误
+        let (store, _dir) = make_store().await;
+        let id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+        let result = store.update_thread_status(&id, "running").await;
+        assert!(result.is_err(), "非法 agent_status 字符串应被拒绝");
+        // 状态保持不变（active）
+        let meta = store.load_meta(&id).await.unwrap();
+        assert_eq!(meta.agent_status, crate::thread::AgentStatus::Active);
     }
 
     #[tokio::test]

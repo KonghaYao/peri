@@ -26,7 +26,8 @@ impl App {
                 .session_mgr
                 .current_mut()
                 .agent
-                .pending_bg_continuation
+                .bg_task_state
+                .pending_continuation
                 .take()
             {
                 tracing::info!("auto-submitting background task continuation with tool results");
