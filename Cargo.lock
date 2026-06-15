@@ -3433,6 +3433,7 @@ dependencies = [
  "peri-agent",
  "peri-lsp",
  "peri-middlewares",
+ "peri-web-pty",
  "peri-widgets",
  "png",
  "ratatui",
@@ -3455,6 +3456,24 @@ dependencies = [
  "unicode-width",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "peri-web-pty"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3806,23 +3825,6 @@ dependencies = [
  "tokio",
  "tracing",
  "windows",
-]
-
-[[package]]
-name = "pty-server"
-version = "0.2.0"
-dependencies = [
- "axum",
- "clap",
- "futures",
- "portable-pty",
- "serde",
- "serde_json",
- "serial_test",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

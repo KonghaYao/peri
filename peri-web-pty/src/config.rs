@@ -2,10 +2,10 @@ use clap::Parser;
 
 /// PTY server 启动配置。
 #[derive(Debug, Clone, Parser)]
-#[command(name = "pty-server", about = "Web PTY terminal server")]
+#[command(name = "peri-web-pty", about = "Web PTY terminal server")]
 pub struct Config {
-    /// 监听端口（默认 3000）
-    #[arg(long, env = "PORT", default_value_t = 3000)]
+    /// 监听端口（默认 0 = 随机分配）
+    #[arg(long, env = "PORT", default_value_t = 0)]
     pub port: u16,
 
     /// 默认 shell（默认 $SHELL 或 /bin/bash）
@@ -33,6 +33,24 @@ impl Config {
     /// 从 CLI args / 环境变量构造配置。
     pub fn from_args() -> Self {
         Parser::parse()
+    }
+
+    /// 仅从环境变量构造配置（不解析 CLI args），供 `peri web` 等嵌入式场景使用。
+    /// 默认 initial_cmd 为 "peri"（自动进入 Peri 对话）。
+    pub fn from_env() -> Self {
+        Self {
+            port: std::env::var("PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0),
+            shell: std::env::var("SHELL").ok(),
+            cwd: std::env::var("CWD").ok(),
+            initial_cmd: std::env::var("CMD")
+                .ok()
+                .or_else(|| Some("peri".to_string())),
+            default_cols: 80,
+            default_rows: 24,
+        }
     }
 
     #[cfg(test)]

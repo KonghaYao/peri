@@ -6,9 +6,9 @@ use axum::{routing::get, Router};
 use futures::StreamExt;
 use tokio_tungstenite::tungstenite::Message;
 
-use pty_server::http_routes;
-use pty_server::session_state::SessionState;
-use pty_server::ws_handler;
+use peri_web_pty::http_routes;
+use peri_web_pty::session_state::SessionState;
+use peri_web_pty::ws_handler;
 
 fn build_app() -> Router {
     Router::new()

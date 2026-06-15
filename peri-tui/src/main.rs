@@ -191,6 +191,8 @@ enum Commands {
         #[command(subcommand)]
         action: PluginAction,
     },
+    /// 启动 Web PTY 终端服务
+    Web,
 }
 
 #[derive(Subcommand)]
@@ -447,6 +449,20 @@ fn main() -> Result<()> {
                         cli_plugin::run_plugin_uninstall(&plugin, scope.as_deref()).await
                     }
                 }
+            })
+        }
+        Some(Commands::Web) => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(4 * 1024 * 1024)
+                .enable_all()
+                .build()?;
+            rt.block_on(async {
+                peri_web_pty::start_server(peri_web_pty::config::Config::from_env()).await
+            })
+            .map_err(|e| {
+                eprintln!("Web PTY server error: {e:#}");
+                std::process::exit(1);
             })
         }
     }

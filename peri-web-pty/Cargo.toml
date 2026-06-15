@@ -1,28 +1,28 @@
 [package]
-name = "pty-server"
+name = "peri-web-pty"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "pty_server"
+name = "peri_web_pty"
 path = "src/lib.rs"
 
 [[bin]]
-name = "pty-server"
+name = "peri-web-pty"
 path = "src/main.rs"
 
 [dependencies]
 tokio = { workspace = true }
-futures = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 axum = { workspace = true }
-tokio-tungstenite = { workspace = true }
 portable-pty = { workspace = true }
 clap = { workspace = true }
+anyhow = { workspace = true }
 
 [dev-dependencies]
+futures = { workspace = true }
 tokio-tungstenite = { workspace = true }
 serial_test = { workspace = true }

@@ -38,6 +38,7 @@ png = "0.18"
 base64 = { version = "0.22", features = ["alloc"] }
 peri-widgets = { path = "../peri-widgets", features = ["markdown-highlight"] }
 peri-acp = { path = "../peri-acp" }
+peri-web-pty = { path = "../peri-web-pty" }
 agent-client-protocol = { version = "0.14", features = ["unstable"] }
 agent-client-protocol-schema = { version = "0.13", features = ["unstable_elicitation"] }
 unicode-width = "0.2"
