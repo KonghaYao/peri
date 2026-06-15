@@ -13,9 +13,8 @@ peri-agent = { path = "../peri-agent" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-lsp = { path = "../peri-lsp" }
 langfuse-client = { path = "../langfuse-client" }
-agent-client-protocol = { version = "0.11", features = ["unstable"] }
-agent-client-protocol-schema = { version = "0.12", features = ["unstable_elicitation"] }
-agent-client-protocol-tokio = { version = "0.11" }
+agent-client-protocol = { version = "0.14", features = ["unstable"] }
+agent-client-protocol-schema = { version = "0.13", features = ["unstable_elicitation"] }
 tokio.workspace = true
 async-trait.workspace = true
 serde.workspace = true

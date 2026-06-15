@@ -33,7 +33,7 @@ impl super::repo::GitRepo {
                 .ok()
                 .and_then(|c| c.parent(0).ok())
                 .map(|p| p.id())
-                .unwrap_or(Oid::zero());
+                .unwrap_or(Oid::ZERO_SHA1);
             stashes.push(StashInfo {
                 index,
                 oid,

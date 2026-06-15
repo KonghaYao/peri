@@ -33,10 +33,17 @@ impl HeadlessHandle {
             .content
             .chunks(width)
             .map(|row| {
-                // skip=true 的 cell 是宽字符的占位填充，直接跳过
+                // diff_option == Skip 的 cell 是宽字符的占位填充，直接跳过
                 let line: String = row
                     .iter()
-                    .filter_map(|cell| if cell.skip { None } else { Some(cell.symbol()) })
+                    .filter_map(|cell| {
+                        use ratatui::buffer::CellDiffOption;
+                        if matches!(cell.diff_option, CellDiffOption::Skip) {
+                            None
+                        } else {
+                            Some(cell.symbol())
+                        }
+                    })
                     .collect();
                 line.trim_end().to_string()
             })

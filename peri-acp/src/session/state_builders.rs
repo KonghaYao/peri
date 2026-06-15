@@ -4,9 +4,8 @@
 //! (modes, models, config options) for `session/new` and `session/set_*` responses.
 
 pub use agent_client_protocol_schema::{
-    ModelId, ModelInfo, SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionMode,
-    SessionModeId, SessionModeState, SessionModelState,
+    SessionConfigId, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionMode, SessionModeId, SessionModeState,
 };
 use parking_lot::RwLock;
 use peri_middlewares::prelude::{PermissionMode, SharedPermissionMode};
@@ -59,38 +58,6 @@ pub fn build_mode_state(pm: &SharedPermissionMode) -> SessionModeState {
         SessionMode::new(SessionModeId::new("bypass"), "Bypass").description("Allow everything"),
     ];
     SessionModeState::new(SessionModeId::new(current_id), all_modes)
-}
-
-/// Build ACP `SessionModelState` from provider and config.
-pub fn build_model_state(provider: &LlmProvider, peri_config: &PeriConfig) -> SessionModelState {
-    let active_alias = peri_config.config.active_alias.clone();
-
-    let active_provider = peri_config.config.providers.iter().find(|prov| {
-        prov.id == peri_config.config.active_provider_id
-            || peri_config.config.active_provider_id.is_empty()
-    });
-
-    let mut available = Vec::new();
-    if let Some(prov) = active_provider {
-        for alias in ["opus", "sonnet", "haiku"] {
-            if let Some(model_name) = prov.models.get_model(alias) {
-                if !model_name.is_empty() {
-                    available.push(ModelInfo::new(
-                        ModelId::new(alias.to_string()),
-                        format!("{} ({})", alias, model_name),
-                    ));
-                }
-            }
-        }
-    }
-    if available.is_empty() {
-        available.push(ModelInfo::new(
-            ModelId::new("current".to_string()),
-            provider.model_name().to_string(),
-        ));
-    }
-
-    SessionModelState::new(ModelId::new(active_alias), available)
 }
 
 /// Build ACP `SessionConfigOption` list from config.

@@ -90,5 +90,5 @@ sha2 = "0.10"
 # --- PTY server ---
 axum = { version = "0.7", features = ["ws"] }
 portable-pty = "0.9"
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 serial_test = "3"

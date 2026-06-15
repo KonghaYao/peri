@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
-use agent_client_protocol::{schema::InitializeRequest, Client, ConnectionTo, Responder};
-use agent_client_protocol_tokio::LineDirection;
+use agent_client_protocol::{
+    schema::InitializeRequest, Client, ConnectionTo, LineDirection, Responder,
+};
 use peri_acp::dispatch;
 
 use super::context::StdioContext;

@@ -21,9 +21,8 @@ pub async fn run_acp_stdio(cwd: String) -> anyhow::Result<()> {
             PromptRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
             SetSessionModeRequest,
         },
-        Agent, Client, ConnectionTo,
+        Agent, Client, ConnectionTo, Stdio,
     };
-    use agent_client_protocol_tokio::Stdio;
 
     let ctx_clone = ctx.clone();
 

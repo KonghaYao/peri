@@ -143,7 +143,7 @@ impl GitRepo {
     pub fn head_branch(&self) -> Option<String> {
         let head = self.repo.head().ok()?;
         if head.is_branch() {
-            head.shorthand().map(|s| s.to_string())
+            head.shorthand().ok().map(|s| s.to_string())
         } else {
             None
         }
@@ -178,7 +178,7 @@ impl GitRepo {
     #[allow(dead_code)]
     pub fn remote_head_branch(&self) -> Option<String> {
         let remote_head = self.repo.find_reference("refs/remotes/origin/HEAD").ok()?;
-        let target = remote_head.symbolic_target()?;
+        let target = remote_head.symbolic_target().ok().flatten()?;
         // target 格式: "refs/remotes/origin/main"
         target.rsplit('/').next().map(|s| s.to_string())
     }
@@ -234,13 +234,18 @@ impl GitRepo {
 
     pub fn tag_map(&self) -> Result<HashMap<Oid, Vec<String>>> {
         let mut map: HashMap<Oid, Vec<String>> = HashMap::new();
-        for name in (&self.repo.tag_names(None)?).into_iter().flatten() {
+        for name in (&self.repo.tag_names(None)?)
+            .into_iter()
+            .filter_map(Result::ok)
+            .flatten()
+        {
+            let name = name.to_string();
             if let Ok(ref_name) = self.repo.refname_to_id(&format!("refs/tags/{}", name)) {
                 if let Ok(commit) = self.repo.find_commit(ref_name) {
-                    map.entry(commit.id()).or_default().push(name.to_string());
+                    map.entry(commit.id()).or_default().push(name);
                 } else if let Ok(tag_obj) = self.repo.find_tag(ref_name) {
                     let target_oid = tag_obj.target_id();
-                    map.entry(target_oid).or_default().push(name.to_string());
+                    map.entry(target_oid).or_default().push(name);
                 }
             }
         }
@@ -263,7 +268,13 @@ impl GitRepo {
 
     pub fn tag_names_list(&self) -> Result<Vec<String>> {
         let mut names = Vec::new();
-        for name in self.repo.tag_names(None)?.iter().flatten() {
+        for name in self
+            .repo
+            .tag_names(None)?
+            .iter()
+            .filter_map(Result::ok)
+            .flatten()
+        {
             names.push(name.to_string());
         }
         Ok(names)

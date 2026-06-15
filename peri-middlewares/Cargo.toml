@@ -42,7 +42,6 @@ shellexpand = "3"
 ipnet = "2.10"
 peri-lsp = { path = "../peri-lsp" }
 lsp-types.workspace = true
-similar = "3"
 
 
 [dev-dependencies]
