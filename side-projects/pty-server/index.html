@@ -4,78 +4,19 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PTY Terminal</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
+  <link rel="stylesheet" href="xterm/css/xterm.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; background: #1a1a2e; }
-    #terminal { width: 100%; height: 100%; padding: 8px; }
+    #terminal { width: 100%; height: 100%; overflow: hidden; }
     .xterm { height: 100%; }
+    .xterm-viewport::-webkit-scrollbar { display: none; }
+    .xterm-viewport { scrollbar-width: none; }
   </style>
 </head>
 <body>
   <div id="terminal"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.js"></script>
-  <script>
-    const params = new URLSearchParams(location.search);
-    const shell = params.get('shell') || '';
-
-    const term = new Terminal({
-      cursorBlink: true,
-      fontSize: 14,
-      fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, monospace',
-      theme: {
-        background: '#1a1a2e',
-        foreground: '#e0e0e0',
-        cursor: '#e0e0e0',
-        selectionBackground: 'rgba(100, 100, 255, 0.3)',
-        black: '#1a1a2e',
-        red: '#ff6b6b',
-        green: '#51cf66',
-        yellow: '#ffd43b',
-        blue: '#74c0fc',
-        magenta: '#da77f2',
-        cyan: '#63e6be',
-        white: '#e0e0e0',
-      },
-    });
-
-    const fitAddon = new FitAddon.FitAddon();
-    const webLinksAddon = new WebLinksAddon.WebLinksAddon();
-    term.loadAddon(fitAddon);
-    term.loadAddon(webLinksAddon);
-    term.open(document.getElementById('terminal'));
-    fitAddon.fit();
-
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${location.host}/ws?shell=${encodeURIComponent(shell)}&cols=${term.cols}&rows=${term.rows}`;
-    const ws = new WebSocket(wsUrl);
-    ws.binaryType = 'arraybuffer';
-
-    term.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(data);
-      }
-    });
-
-    ws.onmessage = (event) => {
-      if (typeof event.data === 'string') {
-        term.write(event.data);
-      }
-    };
-
-    ws.onclose = () => {
-      term.write('\r\n\x1b[33m[connection closed]\x1b[0m\r\n');
-    };
-
-    window.addEventListener('resize', () => {
-      fitAddon.fit();
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-      }
-    });
-  </script>
+  <script type="module" src="./terminal.ts"></script>
 </body>
 </html>
