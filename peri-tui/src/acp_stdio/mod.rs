@@ -19,7 +19,7 @@ pub async fn run_acp_stdio(cwd: String) -> anyhow::Result<()> {
             CancelNotification, CloseSessionRequest, CloseSessionResponse, ForkSessionRequest,
             InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
             PromptRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
-            SetSessionModeRequest, SetSessionModelRequest,
+            SetSessionModeRequest,
         },
         Agent, Client, ConnectionTo,
     };
@@ -75,16 +75,6 @@ pub async fn run_acp_stdio(cwd: String) -> anyhow::Result<()> {
                 let ctx = ctx_clone.clone();
                 async move |req: SetSessionModeRequest, responder, cx: ConnectionTo<Client>| {
                     session::config::handle_set_mode(&ctx, req, responder, cx).await
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        // ── session/set_model ──
-        .on_receive_request(
-            {
-                let ctx = ctx_clone.clone();
-                async move |req: SetSessionModelRequest, responder, cx: ConnectionTo<Client>| {
-                    session::config::handle_set_model(&ctx, req, responder, cx).await
                 }
             },
             agent_client_protocol::on_receive_request!(),

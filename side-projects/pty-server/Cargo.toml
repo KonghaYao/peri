@@ -1,0 +1,30 @@
+[package]
+name = "pty-server"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "pty_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pty-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+tokio-tungstenite = { workspace = true }
+portable-pty = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+tokio-tungstenite = { workspace = true }
+serial_test = { workspace = true }

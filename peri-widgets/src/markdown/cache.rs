@@ -7,15 +7,15 @@ use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 
 use lru::LruCache;
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use ratatui::text::Text;
+use std::sync::LazyLock;
 
 /// 缓存容量上限
 const CACHE_CAPACITY: usize = 256;
 
 /// 全局 Markdown 缓存单例
-static MARKDOWN_CACHE: Lazy<MarkdownCache> = Lazy::new(MarkdownCache::new);
+static MARKDOWN_CACHE: LazyLock<MarkdownCache> = LazyLock::new(MarkdownCache::new);
 
 /// Markdown 解析结果 LRU 缓存
 ///

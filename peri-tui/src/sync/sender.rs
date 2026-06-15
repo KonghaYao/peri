@@ -21,7 +21,7 @@ pub async fn run_sync_sender(server_url: &str) -> Result<()> {
         .context("Failed to connect to relay server")?;
 
     let msg = serde_json::to_string(&WsMessage::RequestPair)?;
-    ws.send(Message::Text(msg)).await?;
+    ws.send(Message::Text(msg.into())).await?;
 
     let pair_code = loop {
         match ws.next().await {
@@ -101,7 +101,8 @@ pub async fn run_sync_sender(server_url: &str) -> Result<()> {
             seq: chunk.seq,
             data: chunk.data.clone(),
         };
-        ws.send(Message::Text(serde_json::to_string(&msg)?)).await?;
+        ws.send(Message::Text(serde_json::to_string(&msg)?.into()))
+            .await?;
         pb.update(i as u64 + 1);
     }
 
@@ -113,7 +114,8 @@ pub async fn run_sync_sender(server_url: &str) -> Result<()> {
         packer::compute_checksum(&all)
     };
     let msg = WsMessage::TransferComplete { checksum };
-    ws.send(Message::Text(serde_json::to_string(&msg)?)).await?;
+    ws.send(Message::Text(serde_json::to_string(&msg)?.into()))
+        .await?;
 
     pb.finish();
     println_overwrite("Transfer complete!");

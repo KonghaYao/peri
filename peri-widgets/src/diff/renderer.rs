@@ -1,11 +1,10 @@
 use std::{
     hash::{Hash, Hasher},
     num::NonZeroUsize,
-    sync::Mutex,
+    sync::{LazyLock, Mutex},
 };
 
 use lru::LruCache;
-use once_cell::sync::Lazy;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -18,11 +17,12 @@ use crate::theme::Theme;
 const RENDER_CACHE_CAPACITY: usize = 64;
 
 /// 全局渲染结果缓存（单例）
-static RENDER_CACHE: Lazy<Mutex<LruCache<RenderCacheKey, Vec<Line<'static>>>>> = Lazy::new(|| {
-    Mutex::new(LruCache::new(
-        NonZeroUsize::new(RENDER_CACHE_CAPACITY).unwrap(),
-    ))
-});
+static RENDER_CACHE: LazyLock<Mutex<LruCache<RenderCacheKey, Vec<Line<'static>>>>> =
+    LazyLock::new(|| {
+        Mutex::new(LruCache::new(
+            NonZeroUsize::new(RENDER_CACHE_CAPACITY).unwrap(),
+        ))
+    });
 
 /// 渲染缓存 key
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]

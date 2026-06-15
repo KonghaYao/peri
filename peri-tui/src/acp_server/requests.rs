@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use agent_client_protocol::schema::{
     CloseSessionResponse, ForkSessionResponse, ListSessionsResponse, LoadSessionResponse,
     NewSessionResponse, ResumeSessionResponse, SessionId, SessionInfo,
-    SetSessionConfigOptionResponse, SetSessionModeResponse, SetSessionModelResponse,
+    SetSessionConfigOptionResponse, SetSessionModeResponse,
 };
 use peri_acp::dispatch::config_update::make_config_options;
 use peri_acp::{dispatch, transport::types::AcpError};
@@ -15,7 +15,7 @@ use serde_json::Value;
 use tracing::{debug, info};
 
 use super::{
-    apply_thinking_effort, build_mode_state, build_model_state,
+    apply_thinking_effort, build_mode_state,
     notify::{extract_session_id, send_available_commands_update, send_config_option_update},
     parse_permission_mode, AcpServerConfig, SessionState,
 };
@@ -88,11 +88,6 @@ pub(crate) async fn handle_request(
             state.frozen = Some(frozen_data);
             info!(session_id = %session_id, "ACP session created with ThreadStore");
             let modes = build_mode_state(&cfg.permission_mode);
-            let models = {
-                let p = cfg.provider.read();
-                let c = cfg.peri_config.read();
-                build_model_state(&p, &c)
-            };
             let config_options = {
                 let c = cfg.peri_config.read();
                 let p = cfg.provider.read();
@@ -100,7 +95,6 @@ pub(crate) async fn handle_request(
             };
             let resp = NewSessionResponse::new(SessionId::new(&*session_id))
                 .modes(modes)
-                .models(models)
                 .config_options(config_options);
             // Scan skills for AvailableCommands
             let skill_dirs = peri_middlewares::SkillsMiddleware::resolve_dirs_static(
@@ -109,32 +103,6 @@ pub(crate) async fn handle_request(
             );
             let skills = peri_middlewares::skills::list_skills(&skill_dirs);
             send_available_commands_update(transport, &session_id, &skills).await;
-            serde_json::to_value(resp)
-                .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
-        }
-
-        "session/set_model" => {
-            let model_id = params.get("modelId").and_then(|v| v.as_str()).unwrap_or("");
-            let session_id = extract_session_id(params, "");
-            {
-                let mut c = cfg.peri_config.write();
-                c.config.active_alias = model_id.to_string();
-            }
-            let new_provider = {
-                let c = cfg.peri_config.read();
-                LlmProvider::from_config_for_alias(&c, model_id)
-            };
-            if let Some(new_provider) = new_provider {
-                info!(model_id = %model_id, model = %new_provider.model_name(), "Model changed");
-                *cfg.provider.write() = new_provider;
-            }
-            // Model switch → invalidate cached LLM instances (Main Agent + SubAgent)
-            if let Some(s) = sessions.get_mut(session_id) {
-                s.agent_pool.invalidate();
-            }
-            persist_config(cfg);
-            let resp = SetSessionModelResponse::new();
-            send_config_option_update(transport, session_id, cfg).await;
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -259,11 +227,6 @@ pub(crate) async fn handle_request(
             }
 
             let modes = build_mode_state(&cfg.permission_mode);
-            let models = {
-                let p = cfg.provider.read();
-                let c = cfg.peri_config.read();
-                build_model_state(&p, &c)
-            };
             let config_options = {
                 let c = cfg.peri_config.read();
                 let p = cfg.provider.read();
@@ -271,7 +234,6 @@ pub(crate) async fn handle_request(
             };
             let resp = LoadSessionResponse::new()
                 .modes(modes)
-                .models(models)
                 .config_options(config_options);
             // Scan skills for AvailableCommands (same as session/new)
             let skill_dirs = peri_middlewares::SkillsMiddleware::resolve_dirs_static(

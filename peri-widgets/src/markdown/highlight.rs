@@ -1,12 +1,12 @@
-use once_cell::sync::Lazy;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
+use std::sync::LazyLock;
 use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet};
 
-pub static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
-pub static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
+pub static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+pub static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
 /// 对多行代码块进行语法高亮，返回着色后的 Line 列表。
 /// 当语言标签未识别时返回 None，调用方应回退到统一颜色渲染。

@@ -1,10 +1,9 @@
-//! 会话配置：set_mode / set_model / set_config_option / update_config。
+//! 会话配置：set_mode / set_config_option / update_config。
 
 use agent_client_protocol::{
     schema::{
         SessionId, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-        SetSessionModeRequest, SetSessionModeResponse, SetSessionModelRequest,
-        SetSessionModelResponse,
+        SetSessionModeRequest, SetSessionModeResponse,
     },
     Client, ConnectionTo, Error, Handled, Responder, UntypedMessage,
 };
@@ -25,19 +24,6 @@ pub(crate) async fn handle_set_mode(
     tracing::info!(mode_id = %mode_id, "Permission mode changed");
     let _config_options = notification::send_config_update(ctx, &req.session_id, &cx);
     responder.respond(SetSessionModeResponse::new())
-}
-
-/// 处理 session/set_model
-pub(crate) async fn handle_set_model(
-    ctx: &StdioContext,
-    req: SetSessionModelRequest,
-    responder: Responder<SetSessionModelResponse>,
-    cx: ConnectionTo<Client>,
-) -> Result<(), Error> {
-    let model_id = req.model_id.0.to_string();
-    let _ = model::switch_model(ctx, req.session_id.0.as_ref(), &model_id);
-    let _config_options = notification::send_config_update(ctx, &req.session_id, &cx);
-    responder.respond(SetSessionModelResponse::new())
 }
 
 /// 处理 session/set_config_option

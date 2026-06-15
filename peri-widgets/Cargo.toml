@@ -10,11 +10,10 @@ pulldown-cmark = { version = "0.13", optional = true }
 syntect = { version = "5", default-features = false, features = [
     "default-fancy",
 ], optional = true }
-once_cell = "1"
 unicode-width = "0.2"
 rand = "0.10"
-similar = "2"
-lru = "0.12"
+similar = "3"
+lru.workspace = true
 parking_lot.workspace = true
 
 [features]

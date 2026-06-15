@@ -1,10 +1,9 @@
 use std::{
     hash::{Hash, Hasher},
-    sync::Mutex,
+    sync::{LazyLock, Mutex},
 };
 
 use lru::LruCache;
-use once_cell::sync::Lazy;
 use ratatui::text::Line;
 use similar::{ChangeTag, TextDiff};
 
@@ -19,7 +18,7 @@ const MAX_DIFF_SIZE_BYTES: usize = 1_000_000; // 1 MB
 const DIFF_CACHE_CAPACITY: usize = 64;
 
 /// 全局 diff 计算缓存（单例）
-static DIFF_CACHE: Lazy<Mutex<LruCache<DiffCacheKey, DiffResult>>> = Lazy::new(|| {
+static DIFF_CACHE: LazyLock<Mutex<LruCache<DiffCacheKey, DiffResult>>> = LazyLock::new(|| {
     Mutex::new(LruCache::new(
         std::num::NonZeroUsize::new(DIFF_CACHE_CAPACITY).unwrap(),
     ))

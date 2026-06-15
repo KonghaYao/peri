@@ -12,8 +12,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 pub use peri_acp::session::state_builders::{
-    apply_thinking_effort, build_config_options, build_mode_state, build_model_state,
-    parse_permission_mode,
+    apply_thinking_effort, build_config_options, build_mode_state, parse_permission_mode,
 };
 use peri_acp::transport::types::IncomingMessage;
 use peri_agent::{agent::AgentCancellationToken, interaction::ChannelState, messages::BaseMessage};

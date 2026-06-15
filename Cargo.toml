@@ -8,6 +8,7 @@ members = [
     "peri-widgets",
     "peri-lsp",
     "side-projects/git-graph",
+    "side-projects/pty-server",
     "agm",
 ]
 resolver = "2"
@@ -82,6 +83,12 @@ tikv-jemallocator = "0.6"
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
 tikv-jemalloc-sys = "0.6"
 
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 semver = "1"
 sha2 = "0.10"
+
+# --- PTY server ---
+axum = { version = "0.7", features = ["ws"] }
+portable-pty = "0.9"
+tokio-tungstenite = "0.24"
+serial_test = "3"

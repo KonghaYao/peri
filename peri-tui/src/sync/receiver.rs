@@ -36,7 +36,8 @@ pub async fn run_sync_receiver(server_url: &str) -> Result<()> {
     let msg = WsMessage::JoinPair {
         pair_code: pair_code.clone(),
     };
-    ws.send(Message::Text(serde_json::to_string(&msg)?)).await?;
+    ws.send(Message::Text(serde_json::to_string(&msg)?.into()))
+        .await?;
 
     loop {
         match ws.next().await {
@@ -71,7 +72,8 @@ pub async fn run_sync_receiver(server_url: &str) -> Result<()> {
     }
 
     let msg = WsMessage::SyncConfig { items: selected };
-    ws.send(Message::Text(serde_json::to_string(&msg)?)).await?;
+    ws.send(Message::Text(serde_json::to_string(&msg)?.into()))
+        .await?;
 
     let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
     let mut received = 0u64;

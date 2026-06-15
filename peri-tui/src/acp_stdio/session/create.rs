@@ -8,10 +8,7 @@ use agent_client_protocol::{
     },
     Client, ConnectionTo, Responder,
 };
-use peri_acp::{
-    dispatch,
-    session::state_builders::{build_mode_state, build_model_state},
-};
+use peri_acp::{dispatch, session::state_builders::build_mode_state};
 
 use super::super::{
     commands,
@@ -61,11 +58,6 @@ pub(crate) async fn handle_new(
     }
     tracing::info!(session_id = %sid, "ACP session created with ThreadStore");
     let modes = build_mode_state(&ctx.permission_mode);
-    let models = {
-        let p = ctx.provider.read();
-        let c = ctx.peri_config.read();
-        build_model_state(&p, &c)
-    };
     let config_options = {
         let c = ctx.peri_config.read();
         let p = ctx.provider.read();
@@ -74,7 +66,6 @@ pub(crate) async fn handle_new(
     let _ = responder.respond(
         NewSessionResponse::new(SessionId::new(&*sid))
             .modes(modes)
-            .models(models)
             .config_options(config_options),
     );
     // Push AvailableCommandsUpdate notification
@@ -130,11 +121,6 @@ pub(crate) async fn handle_load(
     }
 
     let modes = build_mode_state(&ctx.permission_mode);
-    let models = {
-        let p = ctx.provider.read();
-        let c = ctx.peri_config.read();
-        build_model_state(&p, &c)
-    };
     let config_options = {
         let c = ctx.peri_config.read();
         let p = ctx.provider.read();
@@ -142,7 +128,6 @@ pub(crate) async fn handle_load(
     };
     let resp = LoadSessionResponse::new()
         .modes(modes)
-        .models(models)
         .config_options(config_options);
     let _ = responder.respond(resp);
 
