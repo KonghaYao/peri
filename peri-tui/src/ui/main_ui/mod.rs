@@ -14,7 +14,10 @@ use ratatui::{
     Frame,
 };
 
-use crate::{app::App, ui::theme};
+use crate::{
+    app::{textarea_cursor_pos, App},
+    ui::theme,
+};
 
 pub fn render(f: &mut Frame, app: &mut App) {
     // Setup 向导：全屏覆盖，优先于所有正常界面
@@ -247,17 +250,33 @@ fn render_session_column(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // 输入框渲染
-    let textarea_ref = &app.session_mgr.current_mut().ui.textarea;
     // 应用失焦时隐藏光标
     let should_hide_cursor = !app.focused;
     if should_hide_cursor {
-        let mut ta = textarea_ref.clone();
+        let mut ta = app.session_mgr.current_mut().ui.textarea.clone();
         ta.set_cursor_style(Style::default().fg(theme::DIM));
         f.render_widget(&ta, chunks[5]);
     } else {
-        f.render_widget(textarea_ref, chunks[5]);
+        f.render_widget(&app.session_mgr.current_mut().ui.textarea, chunks[5]);
     }
     app.session_mgr.current_mut().ui.textarea_area = Some(chunks[5]);
+    // 通过 textarea 的 Block 计算 inner 区域，避免硬编码 padding/border 偏移
+    // （padding 改动会自动同步，无失配风险）
+    let inner = app
+        .session_mgr
+        .current()
+        .ui
+        .textarea
+        .block()
+        .map(|b| b.inner(chunks[5]))
+        .unwrap_or(chunks[5]);
+    // 将终端光标定位到输入框光标处，使 IME 合成窗口跟随输入位置
+    // 仅在聚焦时设置（失焦时终端光标由 ratatui 自动隐藏）
+    if app.focused {
+        if let Some((cx, cy)) = textarea_cursor_pos(&app.session_mgr.current().ui.textarea, inner) {
+            f.set_cursor_position((cx, cy));
+        }
+    }
 
     // Prediction placeholder 叠加（textarea 为空 + 有 prediction 时显示）
     if let Some(ref pred) = app.session_mgr.current().ui.prediction {
@@ -270,11 +289,10 @@ fn render_session_column(f: &mut Frame, app: &mut App, area: Rect) {
             .iter()
             .all(|l| l.is_empty());
         if textarea_empty {
-            let area = chunks[5];
             let pred_area = ratatui::layout::Rect {
-                x: area.x + 2,
-                y: area.y + 1,
-                width: area.width.saturating_sub(2),
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
                 height: 1,
             };
             let pred_text = ratatui::text::Line::from(ratatui::text::Span::styled(
@@ -285,12 +303,10 @@ fn render_session_column(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    // ❯ 前缀
-    let prompt_x = chunks[5].x;
-    let prompt_y = chunks[5].y + 1;
+    // ❯ 前缀（x 位于 Block 的 left padding 区域，y 与文本第一行对齐）
     let prompt_area = Rect {
-        x: prompt_x,
-        y: prompt_y,
+        x: chunks[5].x,
+        y: inner.y,
         width: 2,
         height: 1,
     };
