@@ -1,4 +1,34 @@
 use crate::installer::remove_package_symlinks;
+use std::path::Path;
+
+/// Create a directory symlink.  On Windows, returns `Err(1314)` when the
+/// required privilege is not held (no Admin / Developer Mode).
+fn symlink_dir_or_err(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, dst)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(src, dst)
+    }
+}
+
+/// If symlink creation failed because of missing privilege on Windows,
+/// skip the test (it requires symlink support).
+macro_rules! symlink_or_skip {
+    ($src:expr, $dst:expr) => {
+        match symlink_dir_or_err($src, $dst) {
+            Ok(()) => {}
+            #[cfg(windows)]
+            Err(e) if e.raw_os_error() == Some(1314) => {
+                eprintln!("skipping: symlink privilege not available");
+                return;
+            }
+            Err(e) => panic!("symlink_dir failed: {}", e),
+        }
+    };
+}
 
 #[test]
 fn test_remove_package_symlinks_removes_links_into_store() {
@@ -9,14 +39,7 @@ fn test_remove_package_symlinks_removes_links_into_store() {
     std::fs::create_dir_all(&store_path).unwrap();
 
     let link_path = target_dir.join("skill-a");
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&store_path, &link_path).unwrap();
-    }
-    #[cfg(windows)]
-    {
-        std::os::windows::fs::symlink_dir(&store_path, &link_path).unwrap();
-    }
+    symlink_or_skip!(&store_path, &link_path);
 
     remove_package_symlinks(&target_dir, store_path.parent().unwrap()).unwrap();
 
@@ -34,14 +57,7 @@ fn test_remove_package_symlinks_keeps_unrelated_entries() {
     std::fs::create_dir_all(&other_path).unwrap();
 
     let unrelated_link = target_dir.join("unrelated");
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&other_path, &unrelated_link).unwrap();
-    }
-    #[cfg(windows)]
-    {
-        std::os::windows::fs::symlink_dir(&other_path, &unrelated_link).unwrap();
-    }
+    symlink_or_skip!(&other_path, &unrelated_link);
 
     let regular_file = target_dir.join("regular.txt");
     std::fs::write(&regular_file, "hello").unwrap();
@@ -67,24 +83,10 @@ fn test_remove_package_symlinks_uses_canonical_paths() {
     // different path (e.g. via the parent). The canonicalized comparison should
     // still identify the link as belonging to the store.
     let store_alias = tmp.path().join("store_alias");
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(tmp.path().join("store"), &store_alias).unwrap();
-    }
-    #[cfg(windows)]
-    {
-        std::os::windows::fs::symlink_dir(tmp.path().join("store"), &store_alias).unwrap();
-    }
+    symlink_or_skip!(&tmp.path().join("store"), &store_alias);
 
     let link_path = target_dir.join("skill-a");
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&real_store, &link_path).unwrap();
-    }
-    #[cfg(windows)]
-    {
-        std::os::windows::fs::symlink_dir(&real_store, &link_path).unwrap();
-    }
+    symlink_or_skip!(&real_store, &link_path);
 
     remove_package_symlinks(&target_dir, &store_alias.join("pkg@1.0.0")).unwrap();
 
@@ -103,7 +105,7 @@ fn test_remove_package_symlinks_dir_symlink_does_not_follow_target() {
     std::fs::write(&protected_file, "keep me").unwrap();
 
     let link_path = target_dir.join("skill-a");
-    std::os::windows::fs::symlink_dir(&store_path, &link_path).unwrap();
+    symlink_or_skip!(&store_path, &link_path);
 
     remove_package_symlinks(&target_dir, store_path.parent().unwrap()).unwrap();
 

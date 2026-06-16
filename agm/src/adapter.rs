@@ -1,7 +1,10 @@
 use crate::error::Result;
-use crate::fs_util::{paths_equal, remove_symlink_or_dir};
+use crate::fs_util::{copy_dir_all, paths_equal, remove_symlink_or_dir};
 use crate::resolver::PackageType;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static WARNED_SYMLINK_PERMISSION: AtomicBool = AtomicBool::new(false);
 
 /// Tool adapter trait
 pub trait ToolAdapter: Send + Sync {
@@ -19,7 +22,11 @@ pub trait ToolAdapter: Send + Sync {
         project_root.join(dot_dir).join(subdir)
     }
 
-    /// Install: create symlink from store to tool directory
+    /// Install: create symlink from store to tool directory.
+    ///
+    /// On Windows, falls back to copying when symlink permission is not held
+    /// (neither Admin nor Developer Mode).  The copy is a one-time snapshot —
+    /// re-running `agm install` will refresh it.
     fn install(&self, store_path: &Path, target_dir: &Path, pkg_name: &str) -> Result<()> {
         std::fs::create_dir_all(target_dir)?;
 
@@ -40,16 +47,38 @@ pub trait ToolAdapter: Send + Sync {
             remove_symlink_or_dir(&link_path)?;
         }
 
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(store_path, &link_path)?;
-        }
-        #[cfg(windows)]
-        {
-            if store_path.is_dir() {
-                std::os::windows::fs::symlink_dir(store_path, &link_path)?;
-            } else {
-                std::os::windows::fs::symlink_file(store_path, &link_path)?;
+        match try_symlink(store_path, &link_path) {
+            Ok(()) => {}
+            Err(e) => {
+                #[cfg(windows)]
+                {
+                    if e.raw_os_error() == Some(1314) {
+                        // ERROR_PRIVILEGE_NOT_HELD — symlink requires Admin or Developer Mode
+                        if !WARNED_SYMLINK_PERMISSION.swap(true, Ordering::Relaxed) {
+                            eprintln!(
+                                "warning: symlink permission not available — falling back to copy\n\
+                                 (enable Developer Mode in Windows Settings for faster symlink installs)"
+                            );
+                        }
+                        if store_path.is_dir() {
+                            copy_dir_all(store_path, &link_path).map_err(|e| {
+                                std::io::Error::new(
+                                    e.kind(),
+                                    format!("copy fallback failed for {}: {}", pkg_name, e),
+                                )
+                            })?;
+                        } else {
+                            std::fs::copy(store_path, &link_path).map_err(|e| {
+                                std::io::Error::new(
+                                    e.kind(),
+                                    format!("copy fallback failed for {}: {}", pkg_name, e),
+                                )
+                            })?;
+                        }
+                        return Ok(());
+                    }
+                }
+                return Err(e.into());
             }
         }
 
@@ -68,6 +97,23 @@ pub trait ToolAdapter: Send + Sync {
             remove_symlink_or_dir(&link_path)?;
         }
         Ok(())
+    }
+}
+
+/// Try to create a symlink.  Kept as a small helper so the #[cfg] gates are
+/// localized.
+fn try_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, dst)
+    }
+    #[cfg(windows)]
+    {
+        if src.is_dir() {
+            std::os::windows::fs::symlink_dir(src, dst)
+        } else {
+            std::os::windows::fs::symlink_file(src, dst)
+        }
     }
 }
 

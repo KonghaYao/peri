@@ -24,6 +24,33 @@ pub(crate) fn remove_symlink_or_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Recursively copy a directory tree from src to dst.
+///
+/// dst must not already exist (the caller should remove it first).
+/// Symlinks are followed — their targets are copied as regular files/directories.
+pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else if file_type.is_symlink() {
+            let target = std::fs::read_link(&src_path)?;
+            if target.is_dir() {
+                copy_dir_all(&target, &dst_path)?;
+            } else {
+                std::fs::copy(&target, &dst_path)?;
+            }
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Check whether two paths refer to the same location, using canonicalization
 /// when possible to tolerate Windows short/long path variants and symlink
 /// indirection.
