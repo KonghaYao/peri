@@ -79,6 +79,7 @@ fn make_intercept_request<'a>(
         thread_id: None,
         bg_event_tx,
         bg_registry,
+        frozen: None,
     }
 }
 

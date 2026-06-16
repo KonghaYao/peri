@@ -1016,3 +1016,74 @@ fn test_build_middleware_顺序固定() {
         ]
     );
 }
+
+// ─── frozen 数据传递测试 ──────────────────────────────────────────────────
+
+use peri_agent::agent::state::AgentState;
+use peri_agent::agent::State as _;
+use tempfile::TempDir;
+
+/// 验证：传入 frozen CLAUDE.md 内容时，SubAgent 中间件链的 AgentsMdMiddleware
+/// 应直接 prepend frozen 内容，跳过磁盘读取。
+///
+/// 这是 SC#2 修复的核心契约：SubAgent 必须复用 main agent 捕获的 frozen 数据，
+/// 不能在 spawn 时重新读盘。
+#[tokio::test]
+async fn test_subagent_中间件链_注入_frozen_claude_md() {
+    // Arrange: 空白 tempdir（无 CLAUDE.md），但提供 frozen 内容
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_string();
+    let frozen_content =
+        "# FROZEN TEST CLAUDE.md\nThis content must be injected verbatim.".to_string();
+
+    let config = SubAgentMiddlewareConfig::for_fork(&cwd).with_frozen(
+        Some(frozen_content.clone()),
+        None,
+        None,
+    );
+
+    // Act: 构造中间件链，模拟 SubAgent spawn
+    let middlewares = build_subagent_middlewares(config);
+    let mut state = AgentState::new(&cwd);
+
+    // 找到 AgentsMdMiddleware 并执行 before_agent
+    let agents_md = middlewares
+        .iter()
+        .find(|m| m.name() == "AgentsMdMiddleware")
+        .expect("AgentsMdMiddleware 必须在链首");
+    agents_md.before_agent(&mut state).await.unwrap();
+
+    // Assert: state.messages 头部应有 System(frozen_content)
+    let head = state.messages().first().expect("应有 frozen 注入的消息");
+    assert!(head.is_system(), "frozen CLAUDE.md 应以 System 消息注入");
+    assert!(
+        head.content().contains("FROZEN TEST CLAUDE.md"),
+        "frozen 内容应原样注入，实际：{}",
+        head.content()
+    );
+}
+
+/// 验证：未提供 frozen 数据时（遗留/测试场景），中间件回退到磁盘读取。
+/// 在空白 tempdir 中不注入任何 System 消息。
+#[tokio::test]
+async fn test_subagent_中间件链_无_frozen_回退磁盘() {
+    // Arrange: 空白 tempdir，无 frozen 数据
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_string();
+
+    let config = SubAgentMiddlewareConfig::for_fork(&cwd);
+    let middlewares = build_subagent_middlewares(config);
+    let mut state = AgentState::new(&cwd);
+
+    let agents_md = middlewares
+        .iter()
+        .find(|m| m.name() == "AgentsMdMiddleware")
+        .unwrap();
+    agents_md.before_agent(&mut state).await.unwrap();
+
+    // Assert: 没有 CLAUDE.md 时，不注入任何 System 消息
+    assert!(
+        state.messages().is_empty(),
+        "无 frozen + 无磁盘文件时不应注入消息"
+    );
+}

@@ -132,10 +132,14 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
                     "连续 {} 次相同错误，注入纠正消息",
                     count
                 );
-                state.add_message(BaseMessage::system(format!(
-                    "Warning: Tool '{}' has failed {} consecutive times with the same error. \
+                // [TRAP] 必须用 Human + <system-reminder> 注入，禁止 BaseMessage::system。
+                // System 消息会被 anthropic/openai invoke hoist 到 system prompt 顶部，
+                // 违反 frozen_system_prompt 稳定性（第一优先级）。
+                // （与 goal_middleware.rs / compact_middleware.rs 注入路径一致）
+                state.add_message(BaseMessage::human(format!(
+                    "<system-reminder>\nWarning: Tool '{}' has failed {} consecutive times with the same error. \
                      Stop retrying and analyze the root cause. Consider using a different approach \
-                     or asking the user for guidance.",
+                     or asking the user for guidance.\n</system-reminder>",
                     result.tool_name, count
                 )));
             }

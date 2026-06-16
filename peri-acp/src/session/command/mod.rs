@@ -54,6 +54,12 @@ pub struct CommandContext {
     /// 后台任务注册中心（BgCommand 等 Immediate 命令依赖）。
     /// Option 因为非 bg 命令路径不需要。BgCommand 总是 expect 它是 Some。
     pub bg_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
+    /// Frozen CLAUDE.md main content（会话级捕获，BgCommand 透传到 fork agent）。
+    pub frozen_claude_md: Option<Arc<String>>,
+    /// Frozen CLAUDE.local.md content
+    pub frozen_claude_local_md: Option<Arc<String>>,
+    /// Frozen skills summary
+    pub frozen_skill_summary: Option<Arc<String>>,
 }
 
 /// 命令执行结果。

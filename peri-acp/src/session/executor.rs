@@ -404,6 +404,7 @@ pub async fn execute_prompt(ctx: PromptExecutionContext) -> PromptResult {
         thread_id: thread_id.clone(),
         bg_event_tx: &bg_event_tx_for_cmd,
         bg_registry: &bg_registry_for_cmd,
+        frozen: frozen.as_ref(),
     })
     .await
     {
@@ -519,6 +520,7 @@ struct InterceptRequest<'a> {
     thread_id: Option<String>,
     bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
     bg_registry: &'a Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
+    frozen: Option<&'a FrozenSessionData>,
 }
 
 /// 命令拦截：检查 content 是否为 Immediate 类型 slash 命令。
@@ -560,6 +562,18 @@ async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<Prompt
         thread_id: req.thread_id,
         bg_event_sender: Some(req.bg_event_tx.clone()),
         bg_registry: Some(req.bg_registry.clone()),
+        frozen_claude_md: req
+            .frozen
+            .as_ref()
+            .and_then(|f| f.claude_md().map(|s| Arc::new(s.to_string()))),
+        frozen_claude_local_md: req
+            .frozen
+            .as_ref()
+            .and_then(|f| f.claude_local_md().map(|s| Arc::new(s.to_string()))),
+        frozen_skill_summary: req
+            .frozen
+            .as_ref()
+            .and_then(|f| f.skill_summary().map(|s| Arc::new(s.to_string()))),
     };
     let result = tokio::select! {
         r = cmd.execute(ctx) => r,
@@ -843,7 +857,19 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
             Some(f.date().to_string()),
         )
     } else {
-        // Legacy: per-turn rebuild（子 Agent 等场景未提供 frozen 数据时使用）
+        // Legacy 路径：未提供 frozen 数据时每轮重建 system prompt。
+        //
+        // [TRAP] 当前仅 print mode (`-p`, cli_print.rs:207 `frozen: None`) 进入此分支，
+        // 单轮执行后退出，因此 "per-turn rebuild" 实际不会发生。
+        // SubAgent 不走此路径——它们的 system prompt 由 builder.rs:356-366 的
+        // system_builder closure 独立构造。
+        //
+        // 加 warn! 提升可观测性：如果未来有新调用方忘记传 frozen 数据，
+        // 日志会立刻暴露（违反 frozen 不变量 = 第一优先级）。
+        tracing::warn!(
+            cwd = %turn.cwd,
+            "execute_prompt: frozen data 未提供，回退到 per-turn rebuild 路径（仅 print mode 合法）"
+        );
         let features = PromptFeatures::detect();
         let sp = build_system_prompt(
             None,

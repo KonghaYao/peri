@@ -131,6 +131,9 @@ impl AgentCommand for BgCommand {
                 bg_event_sender,
                 bg_registry,
                 fork_directive_kind: peri_middlewares::subagent::spawner::BgForkDirectiveKind::Bg,
+                frozen_claude_md: ctx.frozen_claude_md.clone(),
+                frozen_claude_local_md: ctx.frozen_claude_local_md.clone(),
+                frozen_skill_summary: ctx.frozen_skill_summary.clone(),
             },
         )
         .await

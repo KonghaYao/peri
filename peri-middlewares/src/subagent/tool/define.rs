@@ -112,6 +112,13 @@ pub struct SubAgentTool {
         Option<Arc<dyn Fn(String, AgentCancellationToken, String) + Send + Sync>>,
     /// Deregister callback: removes from active_agents map by thread_id
     pub(crate) deregister_runtime: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// Frozen CLAUDE.md/AGENTS.md main content（session/new 时捕获，Arc 共享避免每轮 clone）。
+    /// None 表示未配置（遗留/测试路径），SubAgent 会从磁盘读取——非生产路径。
+    pub(crate) frozen_claude_md: Option<Arc<String>>,
+    /// Frozen CLAUDE.local.md content。
+    pub(crate) frozen_claude_local_md: Option<Arc<String>>,
+    /// Frozen skills summary。
+    pub(crate) frozen_skill_summary: Option<Arc<String>>,
 }
 
 impl SubAgentTool {
@@ -138,6 +145,9 @@ impl SubAgentTool {
             parent_thread_id: None,
             register_runtime: None,
             deregister_runtime: None,
+            frozen_claude_md: None,
+            frozen_claude_local_md: None,
+            frozen_skill_summary: None,
         }
     }
 
@@ -208,6 +218,20 @@ impl SubAgentTool {
 
     pub fn with_deregister_runtime(mut self, cb: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
         self.deregister_runtime = Some(cb);
+        self
+    }
+
+    /// 注入 main agent 捕获的 frozen CLAUDE.md/Skills 数据。
+    /// Arc 共享，build_tool 每轮仅 Arc::clone（无大字符串 clone）。
+    pub fn with_frozen_data(
+        mut self,
+        claude_md: Option<Arc<String>>,
+        claude_local_md: Option<Arc<String>>,
+        skill_summary: Option<Arc<String>>,
+    ) -> Self {
+        self.frozen_claude_md = claude_md;
+        self.frozen_claude_local_md = claude_local_md;
+        self.frozen_skill_summary = skill_summary;
         self
     }
 

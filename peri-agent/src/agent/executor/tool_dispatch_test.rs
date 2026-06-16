@@ -568,7 +568,8 @@ async fn test_tool_name_alias_fallback() {
     assert!(!has_error_result, "不应有 ToolNotFound 错误结果");
 }
 
-/// 连续 5 次同工具+同错误后注入系统纠正消息
+/// 连续 5 次同工具+同错误后注入纠正消息（Human + system-reminder，
+/// 不能用 System role 以免污染 frozen system prompt——SC#1）
 #[tokio::test]
 async fn test_consecutive_failure_injects_correction() {
     struct AlwaysFailRead;
@@ -600,8 +601,9 @@ async fn test_consecutive_failure_injects_correction() {
             _tools: &[&dyn BaseTool],
             _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> AgentResult<Reasoning> {
+            // [SC#1] 纠正消息以 Human + <system-reminder> 注入（非 System role）
             let has_correction = messages.iter().any(|m| {
-                matches!(m, BaseMessage::System { content, .. }
+                matches!(m, BaseMessage::Human { content, .. }
                     if content.text_content().contains("5 consecutive times"))
             });
             if has_correction {
@@ -629,10 +631,19 @@ async fn test_consecutive_failure_injects_correction() {
 
     assert!(result.is_ok(), "Agent 应正常完成，实际: {:?}", result);
     let has_correction = state.messages().iter().any(|m| {
+        matches!(m, BaseMessage::Human { content, .. }
+            if content.text_content().contains("5 consecutive times"))
+    });
+    assert!(has_correction, "应注入 Human system-reminder 纠正消息");
+    // [SC#1] 防回归：禁止以 System role 注入（会污染 frozen system prompt）
+    let no_system_leak = !state.messages().iter().any(|m| {
         matches!(m, BaseMessage::System { content, .. }
             if content.text_content().contains("5 consecutive times"))
     });
-    assert!(has_correction, "应注入连续失败纠正消息");
+    assert!(
+        no_system_leak,
+        "连续失败纠正消息禁止以 System role 注入（违反 frozen prompt 稳定性）"
+    );
 }
 
 #[test]

@@ -824,12 +824,23 @@ async fn test_stop_block_continue_sets_block_continue_field() {
             // If command exits 0 (Allow), block_continue should be None
             // Either outcome is valid depending on the hook executor behavior
             if o.block_continue.is_some() {
-                // System message should have been injected
-                let has_feedback = state
+                // 应以 Human + <system-reminder> 注入，禁止 System（避免污染 frozen system prompt）
+                let has_feedback = state.messages().iter().any(|m| {
+                    matches!(m, peri_agent::messages::BaseMessage::Human { .. })
+                        && m.content().contains("stop_hook_feedback")
+                });
+                assert!(
+                    has_feedback,
+                    "Block should inject Human system-reminder message"
+                );
+                let no_system_leak = !state
                     .messages()
                     .iter()
                     .any(|m| m.is_system() && m.content().contains("stop_hook_feedback"));
-                assert!(has_feedback, "Block should inject system feedback message");
+                assert!(
+                    no_system_leak,
+                    "stop_hook_feedback must not be injected as System role"
+                );
             }
         }
         Err(_) => {

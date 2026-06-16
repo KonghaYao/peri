@@ -78,8 +78,22 @@ pub(crate) fn build_subagent_middlewares(
     config: SubAgentMiddlewareConfig,
 ) -> Vec<Box<dyn Middleware<AgentState>>> {
     let mut middlewares: Vec<Box<dyn Middleware<AgentState>>> = Vec::new();
-    middlewares.push(Box::new(AgentsMdMiddleware::new()));
-    middlewares.push(Box::new(SkillsMiddleware::new().with_global_config()));
+
+    // [TRAP] SubAgent 复用 main agent 在 session/new 时捕获的 frozen CLAUDE.md，
+    // 避免文件中途变更导致 system prompt 漂移（第一优先级不变量）。
+    let mut agents_md = AgentsMdMiddleware::new();
+    if let Some(main) = config.frozen_claude_md {
+        agents_md = agents_md.with_frozen_content(main, config.frozen_claude_local_md);
+    }
+    middlewares.push(Box::new(agents_md));
+
+    // [TRAP] 同上：SubAgent 复用 frozen skill summary。
+    let mut skills = SkillsMiddleware::new().with_global_config();
+    if let Some(summary) = config.frozen_skill_summary {
+        skills = skills.with_frozen_summary(summary);
+    }
+    middlewares.push(Box::new(skills));
+
     if !config.skill_names.is_empty() {
         middlewares.push(Box::new(SkillPreloadMiddleware::new(
             config.skill_names,

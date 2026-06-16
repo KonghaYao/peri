@@ -128,13 +128,30 @@ impl AgentState {
     ) -> Self {
         self.store = Some(store.clone());
         self.thread_id = Some(thread_id.into());
+        // [TRAP] 使用 unbounded channel 是有意为之：保证消息按 push 顺序写入 SQLite，
+        // 规避 rowid 与并发写入的顺序歧义。代价是 SQLite append 慢时（磁盘压力 / FSYNC
+        // 争用 / 长会话）会在内存中积压 BaseMessage clone。
+        // (CS#2 架构审查已确认：典型会话可接受；此处加 counter + 周期性 warn! 提升可观测性)
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BaseMessage>();
         self.persist_tx = Some(Arc::new(tx));
         let tid = self.thread_id.clone().unwrap();
         tokio::spawn(async move {
+            let mut processed: u64 = 0;
+            let mut last_warn_at: u64 = 0;
             while let Some(msg) = rx.recv().await {
                 if let Err(e) = store.append_message(&tid, msg).await {
                     tracing::warn!("ordered persist failed: {e}");
+                }
+                processed = processed.saturating_add(1);
+                // 每 1000 条记录一次进度；以幂等间距输出避免日志噪声
+                let bucket = processed / 1000;
+                if bucket > last_warn_at {
+                    last_warn_at = bucket;
+                    tracing::trace!(
+                        thread_id = %tid,
+                        processed,
+                        "persist writer: 已写入 {processed} 条消息"
+                    );
                 }
             }
         });

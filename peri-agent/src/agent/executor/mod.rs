@@ -429,11 +429,18 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
 
     /// 移除 execute() 开头通过 before_agent + with_system_prompt prepend 的临时 system 消息。
     /// compact 发生时这些 ID 已不存在于 state 中，retain 无操作。
+    ///
+    /// [TRAP] 额外检查 `m.is_system()` 是防御性加固：prepended_ids 来自 take_while(System)，
+    /// 仅头部 System 消息进入此集合（mod.rs:275）。当前实现依赖 UUIDv7 唯一性保证
+    /// retain 不会误删非 prepended 消息。增加 role 检查可防止未来若引入确定性/测试 ID
+    /// 时的潜在误删——SC#5 加固。
     fn cleanup_prepended(state: &mut S, ids: &[MessageId]) {
         if ids.is_empty() {
             return;
         }
-        state.messages_mut().retain(|m| !ids.contains(&m.id()));
+        state
+            .messages_mut()
+            .retain(|m| !(ids.contains(&m.id()) && m.is_system()));
     }
 }
 

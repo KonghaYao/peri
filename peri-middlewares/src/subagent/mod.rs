@@ -23,6 +23,14 @@ pub(crate) struct SubAgentMiddlewareConfig {
     pub skill_names: Vec<String>,
     /// 工作目录，用于解析 skill 文件路径
     pub cwd: String,
+    /// Frozen CLAUDE.md/AGENTS.md main content (with @import resolved)。
+    /// None 时从磁盘读取（违反 session 内 frozen 不变性，仅遗留/测试场景使用）。
+    /// 由 main agent 在 session/new 时捕获并透传。
+    pub frozen_claude_md: Option<String>,
+    /// Frozen CLAUDE.local.md content（与 `frozen_claude_md` 配对）。
+    pub frozen_claude_local_md: Option<String>,
+    /// Frozen skills summary。None 时从磁盘读取。
+    pub frozen_skill_summary: Option<String>,
 }
 
 impl SubAgentMiddlewareConfig {
@@ -31,6 +39,9 @@ impl SubAgentMiddlewareConfig {
         Self {
             skill_names: Vec::new(),
             cwd: cwd.to_string(),
+            frozen_claude_md: None,
+            frozen_claude_local_md: None,
+            frozen_skill_summary: None,
         }
     }
     /// Agent 定义路径配置
@@ -40,7 +51,26 @@ impl SubAgentMiddlewareConfig {
         Self {
             skill_names: skills,
             cwd: cwd.to_string(),
+            frozen_claude_md: None,
+            frozen_claude_local_md: None,
+            frozen_skill_summary: None,
         }
+    }
+    /// 注入 main agent 在 session/new 时捕获的 frozen 数据。
+    ///
+    /// [TRAP] SubAgent 必须复用 main agent 的 frozen CLAUDE.md/Skills，
+    /// 否则文件在会话中被修改会导致 SubAgent 与 main agent 行为漂移，
+    /// 违反 "系统提示词稳定性是第一优先级" 不变量。
+    pub fn with_frozen(
+        mut self,
+        claude_md: Option<String>,
+        claude_local_md: Option<String>,
+        skill_summary: Option<String>,
+    ) -> Self {
+        self.frozen_claude_md = claude_md;
+        self.frozen_claude_local_md = claude_local_md;
+        self.frozen_skill_summary = skill_summary;
+        self
     }
 }
 use std::{
@@ -123,6 +153,13 @@ pub struct SubAgentMiddleware {
     register_runtime: Option<Arc<dyn Fn(String, AgentCancellationToken, String) + Send + Sync>>,
     /// Deregister callback: removes from active_agents map by thread_id
     deregister_runtime: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// Frozen CLAUDE.md/AGENTS.md main content（session/new 时捕获，Arc 共享）。
+    /// 透传到 SubAgentMiddleware，确保 SubAgent 与 main agent 看到一致的 CLAUDE.md。
+    frozen_claude_md: Option<Arc<String>>,
+    /// Frozen CLAUDE.local.md content
+    frozen_claude_local_md: Option<Arc<String>>,
+    /// Frozen skills summary
+    frozen_skill_summary: Option<Arc<String>>,
 }
 
 impl SubAgentMiddleware {
@@ -151,6 +188,9 @@ impl SubAgentMiddleware {
             parent_thread_id: None,
             register_runtime: None,
             deregister_runtime: None,
+            frozen_claude_md: None,
+            frozen_claude_local_md: None,
+            frozen_skill_summary: None,
         }
     }
 
@@ -245,6 +285,21 @@ impl SubAgentMiddleware {
         self
     }
 
+    /// 注入 main agent 在 session/new 时捕获的 frozen CLAUDE.md/Skills 数据。
+    /// 透传给 SubAgentTool，确保所有 SubAgent 调用复用同一份 frozen 数据，
+    /// 避免文件中途变更导致 SubAgent 行为漂移（违反第一优先级不变量）。
+    pub fn with_frozen_data(
+        mut self,
+        claude_md: Option<Arc<String>>,
+        claude_local_md: Option<Arc<String>>,
+        skill_summary: Option<Arc<String>>,
+    ) -> Self {
+        self.frozen_claude_md = claude_md;
+        self.frozen_claude_local_md = claude_local_md;
+        self.frozen_skill_summary = skill_summary;
+        self
+    }
+
     /// Build SubAgentTool instance (clone Arc fields, do not transfer ownership)
     pub fn build_tool(&self, cwd: &str) -> SubAgentTool {
         let mut tool = SubAgentTool::new(
@@ -285,6 +340,18 @@ impl SubAgentMiddleware {
         }
         if let Some(ref deregister) = self.deregister_runtime {
             tool = tool.with_deregister_runtime(Arc::clone(deregister));
+        }
+        // [TRAP] 透传 frozen 数据到 SubAgentTool，避免每轮 build_tool clone 大字符串。
+        // Arc::clone 廉价，spawn 时再提取为 String 注入 SubAgentMiddlewareConfig。
+        if self.frozen_claude_md.is_some()
+            || self.frozen_claude_local_md.is_some()
+            || self.frozen_skill_summary.is_some()
+        {
+            tool = tool.with_frozen_data(
+                self.frozen_claude_md.clone(),
+                self.frozen_claude_local_md.clone(),
+                self.frozen_skill_summary.clone(),
+            );
         }
         tool
     }

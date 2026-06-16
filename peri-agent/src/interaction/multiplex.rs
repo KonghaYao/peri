@@ -27,7 +27,14 @@ impl UserInteractionBroker for MultiplexBroker {
             return self.brokers[0].1.request(ctx).await;
         }
 
-        // Spawn all brokers in parallel, race via mpsc channel
+        // Spawn all brokers in parallel, race via mpsc channel.
+        //
+        // [TRAP] Orphan task 行为：首个 broker 响应后，其他 spawned task 继续后台运行
+        // 直到完成或 ChannelBroker 的 5 分钟超时（channel_broker.rs:101）。
+        // 响应会发送到已无人读取的 mpsc channel，最终随 `tx` drop 而丢弃。
+        // ChannelBroker 自身会在成功/超时两条路径清理 pending_permissions（channel_broker.rs:103-107），
+        // 因此最坏情况是 5 分钟的"幽灵等待"，无永久资源泄漏。
+        // （CS#1 架构审查已确认：影响有限，加注释说明已知行为；未来可加 CancellationToken 提前取消）
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         for (name, broker) in &self.brokers {
             let ctx = ctx.clone();

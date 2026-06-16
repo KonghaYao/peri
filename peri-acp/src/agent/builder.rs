@@ -385,6 +385,13 @@ pub fn build_agent(
         .unwrap_or_default();
 
     // SubAgent middleware
+    // [TRAP] SubAgent 复用 main agent 在 session/new 时捕获的 frozen CLAUDE.md/Skills，
+    // 否则文件中途变更会让 SubAgent 看到不同内容，违反第一优先级不变量。
+    // Arc<String> 共享：main agent 这里 clone 一份 String 给 SubAgent 的 Arc，
+    // 避免每轮 build_tool 重复 clone 大字符串。
+    let sub_frozen_claude_md = frozen_claude_md.as_ref().map(|s| Arc::new(s.clone()));
+    let sub_frozen_claude_local_md = frozen_claude_local_md.as_ref().map(|s| Arc::new(s.clone()));
+    let sub_frozen_skill_summary = frozen_skill_summary.as_ref().map(|s| Arc::new(s.clone()));
     let mut subagent = SubAgentMiddleware::new(
         parent_tools,
         Some(Arc::clone(&event_handler) as Arc<dyn AgentEventHandler>),
@@ -395,7 +402,12 @@ pub fn build_agent(
     .with_parent_messages(parent_messages)
     .with_background_registry(Arc::clone(&background_registry))
     .with_bg_event_sender(bg_event_tx)
-    .with_registered_hooks(vec![]);
+    .with_registered_hooks(vec![])
+    .with_frozen_data(
+        sub_frozen_claude_md,
+        sub_frozen_claude_local_md,
+        sub_frozen_skill_summary,
+    );
     if let Some(ts) = thread_store {
         subagent = subagent.with_thread_store(ts);
     }

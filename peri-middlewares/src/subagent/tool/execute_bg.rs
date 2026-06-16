@@ -284,6 +284,9 @@ impl super::SubAgentTool {
             bg_event_sender: bg_sender,
             bg_registry: Arc::clone(registry),
             fork_directive_kind: crate::subagent::spawner::BgForkDirectiveKind::Fork,
+            frozen_claude_md: self.frozen_claude_md.clone(),
+            frozen_claude_local_md: self.frozen_claude_local_md.clone(),
+            frozen_skill_summary: self.frozen_skill_summary.clone(),
         };
 
         let spawned = crate::subagent::spawner::spawn_background_fork(config).await?;

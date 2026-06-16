@@ -70,6 +70,12 @@ pub struct BgForkConfig {
     pub bg_registry: Arc<BackgroundTaskRegistry>,
     /// Fork 指令类型：BGFork 使用中文 bg-fork directive，普通使用英文 fork directive
     pub fork_directive_kind: BgForkDirectiveKind,
+    /// Frozen CLAUDE.md main content（session/new 时捕获，SubAgent 复用以避免漂移）
+    pub frozen_claude_md: Option<Arc<String>>,
+    /// Frozen CLAUDE.local.md content
+    pub frozen_claude_local_md: Option<Arc<String>>,
+    /// Frozen skills summary
+    pub frozen_skill_summary: Option<Arc<String>>,
 }
 
 /// 后台 fork agent spawn 结果
@@ -139,7 +145,21 @@ pub async fn spawn_background_fork(
     let llm =
         peri_agent::llm::RetryableLLM::new(config.llm, peri_agent::llm::RetryConfig::default());
     let mut agent_builder = ReActAgent::new(llm).max_iterations(config.max_iterations);
-    for mw in build_subagent_middlewares(SubAgentMiddlewareConfig::for_fork(&cwd)) {
+    let mw_config = SubAgentMiddlewareConfig::for_fork(&cwd).with_frozen(
+        config
+            .frozen_claude_md
+            .as_deref()
+            .map(|s| s.as_str().to_string()),
+        config
+            .frozen_claude_local_md
+            .as_deref()
+            .map(|s| s.as_str().to_string()),
+        config
+            .frozen_skill_summary
+            .as_deref()
+            .map(|s| s.as_str().to_string()),
+    );
+    for mw in build_subagent_middlewares(mw_config) {
         agent_builder = agent_builder.add_middleware(mw);
     }
 

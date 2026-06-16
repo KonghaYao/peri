@@ -638,10 +638,14 @@ impl<S: State> Middleware<S> for HookMiddleware {
                 tracing::info!(
                     count = *count,
                     reason = %reason,
-                    "Stop hook blocked: injecting reason as system message and continuing"
+                    "Stop hook blocked: injecting reason as system-reminder (Human) and continuing"
                 );
-                state.add_message(BaseMessage::system(format!(
-                    "<stop_hook_feedback>\nThe Stop hook blocked because: {}\nPlease address this feedback and continue your work.\n(Block {}/8)\n</stop_hook_feedback>",
+                // [TRAP] 必须用 Human + <system-reminder> 注入，禁止 BaseMessage::system。
+                // System 消息会被 anthropic/openai invoke hoist 到 system prompt 顶部，
+                // 违反 frozen_system_prompt 稳定性（第一优先级）。
+                // （与 goal_middleware.rs / compact_middleware.rs 注入路径一致）
+                state.add_message(BaseMessage::human(format!(
+                    "<system-reminder>\n<stop_hook_feedback>\nThe Stop hook blocked because: {}\nPlease address this feedback and continue your work.\n(Block {}/8)\n</stop_hook_feedback>\n</system-reminder>",
                     reason, *count
                 )));
                 let mut output = output.clone();

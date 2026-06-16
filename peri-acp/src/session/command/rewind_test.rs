@@ -131,6 +131,9 @@ fn make_ctx(
         thread_id: None,
         bg_event_sender: None,
         bg_registry: None,
+        frozen_claude_md: None,
+        frozen_claude_local_md: None,
+        frozen_skill_summary: None,
     }
 }
 
