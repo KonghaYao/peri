@@ -24,9 +24,10 @@ Usage:
 - For long running commands, consider using a timeout to avoid waiting indefinitely
 
 Platform behavior:
-- Windows: uses cmd /C to execute commands
+- Windows: uses powershell -NoProfile -NoLogo -NonInteractive -Command to execute commands
 - Unix/macOS: uses bash -c to execute commands
 - On Unix, child processes run in their own process group; timeout kills the entire process tree
+- On Windows, timeout only terminates the PowerShell wrapper; child processes (including peri) are NOT killed
 
 Output handling:
 - Output exceeding 2000 lines is truncated (head + tail preserved)
@@ -151,7 +152,10 @@ impl BaseTool for BashTool {
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(120_000)
-            .clamp(1, 600_000);
+            .clamp(
+                if cfg!(target_os = "windows") { 5000 } else { 1 },
+                600_000,
+            );
         let _description = input["description"].as_str();
         let _run_in_background = input["run_in_background"].as_bool().unwrap_or(false);
 

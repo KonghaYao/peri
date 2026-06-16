@@ -1,4 +1,6 @@
 use super::pty_session::PtySession;
+#[cfg(target_os = "windows")]
+use super::pty_session::normalize_crlf;
 use std::io::Read;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -6,7 +8,7 @@ use std::time::Duration;
 /// 跨平台获取测试用 shell。
 fn test_shell() -> &'static str {
     if cfg!(target_os = "windows") {
-        "cmd.exe"
+        "powershell.exe"
     } else {
         std::env::var("SHELL")
             .unwrap_or_else(|_| "/bin/bash".to_string())
@@ -55,9 +57,9 @@ fn test_pty_session_spawn_returns_handles() {
 
 #[test]
 fn test_pty_session_read_receives_echo_output() {
-    // Unix: bash -c 'echo hello'，Windows: cmd /c echo hello
+    // Windows: powershell -NoProfile -NoLogo -NonInteractive -Command "echo hello"
     let (shell, args): (&str, Vec<&str>) = if cfg!(target_os = "windows") {
-        ("cmd.exe", vec!["/c", "echo hello"])
+        ("powershell.exe", vec!["-NoProfile", "-NoLogo", "-NonInteractive", "-Command", "echo hello"])
     } else {
         ("bash", vec!["-c", "echo hello"])
     };
@@ -78,9 +80,9 @@ fn test_pty_session_read_receives_echo_output() {
 
 #[test]
 fn test_pty_session_write_feeds_stdin() {
-    // 用 cat / cmd 交互式回显
+    // 用 cat / powershell 交互式回显
     let (shell, args): (&str, Vec<&str>) = if cfg!(target_os = "windows") {
-        ("cmd.exe", vec![])
+        ("powershell.exe", vec!["-NoProfile", "-NoLogo"])
     } else {
         ("cat", vec![])
     };
@@ -116,7 +118,7 @@ fn test_pty_session_spawn_uses_cwd() {
         .expect("temp_dir 应有 file_name");
 
     let (shell, args): (&str, Vec<&str>) = if cfg!(target_os = "windows") {
-        ("cmd.exe", vec!["/c", "cd"])
+        ("powershell.exe", vec!["-NoProfile", "-NoLogo", "-NonInteractive", "-Command", "Get-Location"])
     } else {
         ("bash", vec!["-c", "pwd"])
     };
@@ -133,4 +135,58 @@ fn test_pty_session_spawn_uses_cwd() {
 
     std::thread::sleep(Duration::from_millis(300));
     drop(session);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_normalize_crlf_bare_r_becomes_rn() {
+    assert_eq!(normalize_crlf(b"peri\r"), b"peri\r\n");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_normalize_crlf_rn_unchanged() {
+    assert_eq!(normalize_crlf(b"peri\r\n"), b"peri\r\n");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_normalize_crlf_bare_n_becomes_rn() {
+    assert_eq!(normalize_crlf(b"peri\n"), b"peri\r\n");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_normalize_crlf_multiple_bare_r() {
+    assert_eq!(normalize_crlf(b"a\rb\rc\r"), b"a\r\nb\r\nc\r\n");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_normalize_crlf_multiple_bare_n() {
+    assert_eq!(normalize_crlf(b"a\nb\n"), b"a\r\nb\r\n");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_normalize_crlf_mixed_r_and_rn() {
+    assert_eq!(normalize_crlf(b"a\rb\r\nc\r"), b"a\r\nb\r\nc\r\n");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_normalize_crlf_mixed_n_and_rn() {
+    assert_eq!(normalize_crlf(b"a\nb\r\nc\r"), b"a\r\nb\r\nc\r\n");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_normalize_crlf_no_cr_or_n_unchanged() {
+    assert_eq!(normalize_crlf(b"hello world"), b"hello world");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_normalize_crlf_empty() {
+    assert!(normalize_crlf(b"").is_empty());
 }

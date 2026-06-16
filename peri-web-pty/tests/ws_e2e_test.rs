@@ -29,12 +29,9 @@ async fn spawn_server() -> u16 {
 }
 
 /// 跨平台获取测试 shell + 退出命令。
-///
-/// 注意：args 中不能含空格——ws_handler 使用 split_whitespace() 解析，
-/// 且 URL 中字面空格是 InvalidUriChar。`exit`（无参）在 bash/cmd 下都合法。
 fn exit_shell() -> (&'static str, Vec<&'static str>) {
     if cfg!(target_os = "windows") {
-        ("cmd.exe", vec!["/c", "exit"])
+        ("powershell.exe", vec!["-NoProfile", "-NoLogo", "-NonInteractive", "-Command", "exit"])
     } else {
         ("bash", vec!["-c", "exit"])
     }

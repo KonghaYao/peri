@@ -284,5 +284,5 @@ session/new → frozen_date → frozen_claude_md + frozen_claude_local_md
 - **`CommandRegistry::dispatch` 借用限制 [TRAP]**：`&self` + `&mut App` 冲突，当前用 `std::mem::take` + put-back 解决。
 - **`ServiceRegistry` 与 `GlobalUiState`**：`App` 状态拆分为 `ServiceRegistry`（跨会话共享）和 `GlobalUiState`（纯 UI 临时状态）。面板 dispatch 宏位于 `event/macros.rs`。
 - **`app/mod.rs` 模块组织**：使用标准 `mod`/`pub mod` 声明按功能类别分组。
-- **跨平台 spawn [TRAP]**：所有子进程 spawn 必须通过 `shell_command()` 统一 wrapper，Windows 用 `cmd /C`、Unix 用 `bash -c`。新增 spawn 时必须复用。
+- **跨平台 spawn [TRAP]**：所有子进程 spawn 必须通过 `shell_command()` 统一 wrapper，Windows 用 powershell `-NoProfile -NonInteractive -NoLogo -Command`、Unix 用 `bash -c`。新增 spawn 时必须复用。
 - **MultiplexBroker 竞速 [TRAP]**：ChannelBroker 不支持 Questions 交互类型，不应与 TUI broker 参与竞速。（详见 spec/global/domains/agent.md#issue_2026-05-29-ask-user-tool-auto-complete）

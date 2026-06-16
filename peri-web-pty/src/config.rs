@@ -66,7 +66,7 @@ impl Config {
 
 pub fn default_shell() -> String {
     if cfg!(target_os = "windows") {
-        "cmd.exe".to_string()
+        "powershell.exe".to_string()
     } else {
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
     }

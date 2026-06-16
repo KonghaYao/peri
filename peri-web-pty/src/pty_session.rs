@@ -17,8 +17,46 @@ pub struct PtySession {
     /// 对象句柄，提前 drop 会破坏引用计数，导致 `try_clone_reader` 拿到的
     /// read pipe 进入未连接状态，read 永久阻塞（wez/wezterm#4206、#1396）。
     /// Unix 上 slave 在 `spawn` 中立即 drop（见该函数注释）。
+    ///
+    /// 包装为 `Option` 以支持 `close_slave()` 显式关闭 pseudoconsole，
+    /// 用于子进程退出后 unblock 读管道（Windows 上 ConPTY 在子进程退出后
+    /// 不一定立即产生 EOF，需主动 drop slave）。
     #[cfg(target_os = "windows")]
-    _slave: Box<dyn SlavePty + Send>,
+    _slave: Option<Box<dyn SlavePty + Send>>,
+}
+
+/// 将输入中的行结束符统一归一化为 `\r\n`。
+///
+/// Windows 上 xterm.js 发来的 Enter 是 `\r`（0x0D），auto-injected 命令
+/// 用 `\n`，但 PowerShell 的 PSReadLine 只认 `\r\n` 作为命令行终止符。
+/// 因此将所有裸 `\r` 和裸 `\n` 都转为 `\r\n`（已有的 `\r\n` 保持不变）。
+#[cfg(target_os = "windows")]
+pub(super) fn normalize_crlf(data: &[u8]) -> Vec<u8> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(data.len() + 16);
+    let mut i = 0;
+    while i < data.len() {
+        match data[i] {
+            b'\r' => {
+                // \r 开头 → 输出 \r\n，跳过后续 \n（如果存在）
+                out.extend_from_slice(b"\r\n");
+                if i + 1 < data.len() && data[i + 1] == b'\n' {
+                    i += 1; // skip \n in \r\n
+                }
+            }
+            b'\n' => {
+                // 裸 \n → \r\n
+                out.extend_from_slice(b"\r\n");
+            }
+            b => {
+                out.push(b);
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 impl PtySession {
@@ -71,15 +109,25 @@ impl PtySession {
                 writer,
                 child,
                 #[cfg(target_os = "windows")]
-                _slave: pair.slave,
+                _slave: Some(pair.slave),
             },
             reader,
         ))
     }
 
     /// 写 stdin 到 PTY。
+    ///
+    /// Windows 上将行结束符归一化为 `\r\n`（`normalize_crlf`），因为
+    /// PowerShell 的 PSReadLine 只认 `\r\n` 作为命令行终止符。
     pub fn write(&mut self, data: &[u8]) -> io::Result<()> {
-        self.writer.write_all(data)
+        #[cfg(target_os = "windows")]
+        {
+            self.writer.write_all(&normalize_crlf(data))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.writer.write_all(data)
+        }
     }
 
     /// 调整 PTY 尺寸。
@@ -111,6 +159,16 @@ impl PtySession {
             Err(e) if e.kind() == io::ErrorKind::Other => Ok(()),
             Err(e) => Err(e),
         }
+    }
+
+    /// 关闭 pseudoconsole slave（仅 Windows）。
+    ///
+    /// 在子进程退出后调用，drop slave 句柄使 ConPTY 关闭，
+    /// unblock 读管道让它返回 EOF。提前调用（子进程仍在运行时）可能
+    /// 导致 read pipe 进入未连接状态，见 `_slave` 字段注释。
+    #[cfg(target_os = "windows")]
+    pub fn close_slave(&mut self) {
+        drop(self._slave.take());
     }
 }
 
