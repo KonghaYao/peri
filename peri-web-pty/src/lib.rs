@@ -20,12 +20,6 @@ mod pty_session_test;
 #[cfg(test)]
 mod ws_handler_test;
 
-// 供 `#[cfg(test)] mod xxx_test` 中 `use super::*` 找到顶层类型
-#[cfg(test)]
-use pty_session::PtySession;
-#[cfg(test)]
-use ws_handler::WsQuery;
-
 /// 启动 Web PTY 终端服务。
 pub async fn start_server(config: Config) -> anyhow::Result<()> {
     let cwd = config.cwd.clone().unwrap_or_else(|| {
@@ -48,7 +42,6 @@ pub async fn start_server(config: Config) -> anyhow::Result<()> {
     let url = format!("http://localhost:{}", actual_port);
 
     tracing::info!("Web PTY server: {}", url);
-    println!("Web PTY server: {}", url);
 
     // 尝试自动打开浏览器
     open_browser(&url);

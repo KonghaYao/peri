@@ -1,4 +1,4 @@
-use super::*;
+use super::pty_session::PtySession;
 use std::io::Read;
 use std::sync::mpsc;
 use std::time::Duration;

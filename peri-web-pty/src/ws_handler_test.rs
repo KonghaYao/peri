@@ -1,4 +1,4 @@
-use super::*;
+use super::ws_handler::WsQuery;
 
 #[test]
 fn test_ws_query_parses_shell_and_dimensions() {

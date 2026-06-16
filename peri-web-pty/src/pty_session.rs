@@ -1,23 +1,23 @@
 use std::io::{self, Read, Write};
 
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize, SlavePty};
+#[cfg(target_os = "windows")]
+use portable_pty::SlavePty;
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 /// PTY 会话封装。
 ///
-/// 持有 master（用于 resize）、writer（用于 write）、slave（保活，见 `_slave` 注释）、
-/// child（用于 kill/wait）。reader 在 `spawn` 时返回给调用方，由调用方在
-/// `spawn_blocking` 中读取。
+/// 持有 master（用于 resize）、writer（用于 write）、child（用于 kill/wait）。
+/// Windows 上额外持有 slave 避免 ConPTY 引用计数 bug（见 `_slave` 字段注释）。
+/// reader 在 `spawn` 时返回给调用方，由调用方在 `spawn_blocking` 中读取。
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
-    /// slave 必须持有到 session 结束，禁止提前 drop。
-    ///
-    /// Windows ConPTY 上 slave 是 pseudoconsole 对象句柄，提前 drop 会破坏
-    /// 引用计数，导致 `try_clone_reader` 拿到的 read pipe 进入未连接状态，
-    /// read 永久阻塞读不到任何字节（wez/wezterm#4206、#1396）。
-    /// Unix 上 `spawn_command` 内部已 close 底层 slave fd（child 退出即 EOF），
-    /// 此处持有的 `Box<dyn SlavePty>` 只是上层 wrapper，不影响 EOF 行为。
+    /// Windows 上必须保活到 session 结束。ConPTY 的 slave 是 pseudoconsole
+    /// 对象句柄，提前 drop 会破坏引用计数，导致 `try_clone_reader` 拿到的
+    /// read pipe 进入未连接状态，read 永久阻塞（wez/wezterm#4206、#1396）。
+    /// Unix 上 slave 在 `spawn` 中立即 drop（见该函数注释）。
+    #[cfg(target_os = "windows")]
     _slave: Box<dyn SlavePty + Send>,
 }
 
@@ -50,16 +50,27 @@ impl PtySession {
         }
 
         let child = pair.slave.spawn_command(cmd).map_err(io_err)?;
-        // 不要 drop slave：见 struct `_slave` 字段注释（wez/wezterm#4206）。
 
         let reader = pair.master.try_clone_reader().map_err(io_err)?;
         let writer = pair.master.take_writer().map_err(io_err)?;
+
+        // slave 生命周期平台差异：
+        //
+        // Unix：portable-pty 的 `spawn_command` 只关 `Child` 继承的 stdin/stdout/stderr
+        // （见 portable-pty src/unix.rs:288），`UnixSlavePty` 自身仍持有 slave fd。
+        // 必须显式 drop，否则 slave fd 持有导致 master read 永远不返回 EOF。
+        //
+        // Windows：slave 必须保活到 session 结束。提前 drop 会破坏 ConPTY 引用计数，
+        // 导致 `try_clone_reader` 拿到的 read pipe 进入未连接状态（wez/wezterm#4206、#1396）。
+        #[cfg(not(target_os = "windows"))]
+        drop(pair.slave);
 
         Ok((
             Self {
                 master: pair.master,
                 writer,
                 child,
+                #[cfg(target_os = "windows")]
                 _slave: pair.slave,
             },
             reader,
