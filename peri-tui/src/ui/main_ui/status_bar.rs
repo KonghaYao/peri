@@ -251,6 +251,8 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
         use peri_middlewares::mcp::McpInitStatus;
         match status {
             McpInitStatus::Initializing { connected, total } => {
+                // 重置失败提示计时器：进入 Initializing 说明正在重试
+                app.global_ui.mcp_failed_shown_until.set(None);
                 if has_content {
                     left_spans.push(Span::styled(" · ", Style::default().fg(theme::MUTED)));
                 }
@@ -267,6 +269,8 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
                 has_content = true;
             }
             McpInitStatus::Ready { total } if total > 0 => {
+                // 重置失败提示计时器：Ready 说明连接已恢复
+                app.global_ui.mcp_failed_shown_until.set(None);
                 if app.global_ui.mcp_ready_shown_until.get().is_none() {
                     app.global_ui.mcp_ready_shown_until.set(Some(
                         std::time::Instant::now() + std::time::Duration::from_secs(3),
@@ -289,17 +293,27 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
                 }
             }
             McpInitStatus::Failed(ref msg) => {
-                if has_content {
-                    left_spans.push(Span::styled(" · ", Style::default().fg(theme::MUTED)));
+                // 自消失计时器：首次显示后 10 秒自动消失
+                if app.global_ui.mcp_failed_shown_until.get().is_none() {
+                    app.global_ui.mcp_failed_shown_until.set(Some(
+                        std::time::Instant::now() + std::time::Duration::from_secs(10),
+                    ));
                 }
-                left_spans.push(Span::styled(
-                    lc.tr_args(
-                        "statusbar-mcp-failed",
-                        &[("msg".into(), msg.clone().into())],
-                    ),
-                    Style::default().fg(theme::ERROR),
-                ));
-                has_content = true;
+                if let Some(until) = app.global_ui.mcp_failed_shown_until.get() {
+                    if std::time::Instant::now() < until {
+                        if has_content {
+                            left_spans.push(Span::styled(" · ", Style::default().fg(theme::MUTED)));
+                        }
+                        left_spans.push(Span::styled(
+                            lc.tr_args(
+                                "statusbar-mcp-failed",
+                                &[("msg".into(), msg.clone().into())],
+                            ),
+                            Style::default().fg(theme::ERROR),
+                        ));
+                        has_content = true;
+                    }
+                }
             }
             McpInitStatus::Pending | McpInitStatus::Ready { .. } => {}
         }
