@@ -44,13 +44,10 @@ pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 fn copy_dir_all_depth(src: &Path, dst: &Path, depth: usize) -> std::io::Result<()> {
     if depth > MAX_COPY_DEPTH {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!(
-                "recursion depth {} exceeded MAX_COPY_DEPTH ({}) — possible symlink loop",
-                depth, MAX_COPY_DEPTH,
-            ),
-        ));
+        return Err(std::io::Error::other(format!(
+            "recursion depth {} exceeded MAX_COPY_DEPTH ({}) — possible symlink loop",
+            depth, MAX_COPY_DEPTH,
+        )));
     }
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
