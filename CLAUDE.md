@@ -87,6 +87,10 @@ scripts/start-tui.sh                 # 启动 TUI（RELAY_PORT=3001）
 
 唯一例外是 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 边界标记之后动态区域内的占位符值变化（如日期、cwd），但即使是动态区域，其**结构/模板/段落数量**也必须在会话内保持不变。新增中间件在 `before_agent` 阶段注入 System 消息时，必须确保注入内容和位置跨轮次稳定。
 
+**[TRAP]** 中途纠正/警告消息（工具连续失败提示、`<stop_hook_feedback>`、goal steering、compact 续接等）必须用 `BaseMessage::human("<system-reminder>...</system-reminder>")` 注入，**禁止** `BaseMessage::system(...)`。`anthropic/invoke.rs` 和 `openai/invoke.rs` 会遍历整个 `messages` 数组，把**所有** `BaseMessage::System` 消息（不分位置）hoist 到顶层 system prompt，导致 frozen system prompt 被污染、Prompt Cache 失效。已采用此模式的实现：`goal_middleware.rs`、`compact_middleware.rs`、`tool_dispatch.rs`（连续失败警告）、`hooks/middleware.rs`（stop_hook_feedback）。新增中途纠正路径必须复用同一模式。（详见 spec/global/domains/system-prompt.md#issue_2026-06-17-mid-conversation-system-message-breaks-frozen-prompt）
+
+**[TRAP]** SubAgent 中间件链必须复用 main agent 在 `session/new` 时捕获的 frozen CLAUDE.md/Skills 数据，禁止重新读盘。否则会话中 CLAUDE.md/skills 文件变更会让 SubAgent 看到与 main agent 不同的内容，违反第一优先级不变量。frozen 数据通过 `SubAgentMiddleware::with_frozen_data` → `SubAgentTool::with_frozen_data` → `SubAgentMiddlewareConfig::with_frozen` → `build_subagent_middlewares` 透传，最终调用 `AgentsMdMiddleware::with_frozen_content` / `SkillsMiddleware::with_frozen_summary`。`Option<Arc<String>>` 共享避免每轮 `build_tool` 重复 clone 大字符串。（详见 spec/global/domains/system-prompt.md#issue_2026-06-17-subagent-ignores-frozen-claude-md）
+
 ## Tool Search 延迟加载
 
 工具分三层：**Core（12 个）**——Read/Write/Edit/Glob/Grep/folder_operations/Bash/WebFetch/WebSearch/Agent/AskUserQuestion/TodoWrite，始终对 LLM 可见；**Meta（2 个）**——`SearchExtraTools`/`ExecuteExtraTool`，始终可见，用于按需发现和执行 deferred tools；**Deferred（其余）**——Cron*、MCP 工具、LspTool 等，LLM 不直接可见，通过 Meta 工具桥接。核心工具定义以 `tool_search/core_tools.rs` 中的 `CORE_TOOLS` 为准。新增工具优先配置为 deferred tool，避免膨胀核心工具列表。

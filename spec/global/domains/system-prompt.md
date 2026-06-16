@@ -144,6 +144,30 @@ build_system_prompt(overrides, cwd, features)
 
 ---
 
+### issue_2026-06-17-mid-conversation-system-message-breaks-frozen-prompt
+**摘要:** 中途通过 `add_message(BaseMessage::system(...))` 注入的工具失败警告和 stop_hook_feedback 被 LLM adapter hoist 到顶层 system prompt，破坏 frozen_system_prompt 稳定性（第一优先级）
+**状态:** Fixed
+**归档日期:** 2026-06-17
+**关键词:** mid-conversation correction, system-reminder, frozen prompt stability, invoke hoisting, prompt cache
+**问题本质:** `anthropic/invoke.rs` 和 `openai/invoke.rs` 在构造请求时遍历整个 `messages` 数组，把所有 `BaseMessage::System` 消息（不分位置）合并到顶层 system prompt。中途用 `add_message(System)` 注入"工具连续失败警告"或"stop_hook_feedback"会让这些内容被 hoist 进 system prompt，每轮都变化，导致 Prompt Cache 失效、模型行为漂移。
+**通用模式:** 中途纠正/警告类消息（工具失败提示、hook 反馈、goal steering、compact 续接）必须用 `BaseMessage::human("<system-reminder>...</system-reminder>")` 注入，禁止 `BaseMessage::system(...)`。Human 消息进入对话历史，LLM 可见但不污染 system prompt 缓存前缀。已采用此模式的实现：`goal_middleware.rs`、`compact_middleware.rs`、`tool_dispatch.rs`、`hooks/middleware.rs`。
+**涉及文件:** peri-agent/src/agent/executor/tool_dispatch.rs, peri-middlewares/src/hooks/middleware.rs, peri-agent/src/llm/anthropic/invoke.rs, peri-agent/src/llm/openai/invoke.rs
+**CLAUDE.md 链接:** true
+
+---
+
+### issue_2026-06-17-subagent-ignores-frozen-claude-md
+**摘要:** SubAgent 中间件链不复用 main agent 在 session/new 时捕获的 frozen CLAUDE.md/Skills，每次 spawn 重新读盘，会话中文件变更导致 SubAgent 与 main agent 行为漂移
+**状态:** Fixed
+**归档日期:** 2026-06-17
+**关键词:** SubAgent, frozen data, CLAUDE.md, skill summary, prompt drift, defense in depth
+**问题本质:** `build_subagent_middlewares` 直接 `AgentsMdMiddleware::new()` 和 `SkillsMiddleware::new().with_global_config()`，未调用 `with_frozen_content` / `with_frozen_summary`。SubAgent spawn 时从磁盘重新读取 CLAUDE.md/skills 文件——若文件中途被修改（用户编辑、hook 改写、git checkout），SubAgent 看到与 main agent 不同的内容。
+**通用模式:** session/new 时冻结的所有内容（CLAUDE.md、CLAUDE.local.md、skill summary、system prompt、date、language）必须沿调用链显式透传到所有子 Agent 构建路径。冻结值不能依赖磁盘重读。`Option<Arc<String>>` 共享避免高频路径（如 `build_tool`）的字符串 clone 开销。
+**涉及文件:** peri-middlewares/src/subagent/mod.rs, peri-middlewares/src/subagent/tool/mod.rs, peri-middlewares/src/subagent/tool/define.rs, peri-middlewares/src/subagent/tool/build_agent.rs, peri-middlewares/src/subagent/tool/execute_fork.rs, peri-middlewares/src/subagent/tool/execute_bg.rs, peri-middlewares/src/subagent/spawner.rs, peri-acp/src/agent/builder.rs, peri-acp/src/session/executor.rs, peri-acp/src/session/command/mod.rs, peri-acp/src/session/command/bg.rs
+**CLAUDE.md 链接:** true
+
+---
+
 ## 相关 Feature
 - → [agent.md](./agent.md) — ReActAgent.with_system_prompt() 注入
 - → [tui.md](./tui.md) — TUI 层 build_system_prompt() 调用
