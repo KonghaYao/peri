@@ -272,7 +272,9 @@ pub(crate) fn render_config_panel(
                 let value_style = Style::default().fg(theme::TEXT);
                 let desc_style = Style::default().fg(theme::MUTED);
 
-                let value_display = if !is_active && field.is_empty() {
+                let value_display = if is_active {
+                    String::new()
+                } else if field.is_empty() {
                     "-".to_string()
                 } else {
                     field.value()

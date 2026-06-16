@@ -126,6 +126,22 @@ pub(crate) fn render_login_panel(f: &mut Frame, panel: &mut LoginPanel, app: &mu
         LoginPanelMode::Edit | LoginPanelMode::New => {
             let mut lines: Vec<Line> = vec![Line::from("")];
 
+            // Type 字段的展示值（始终在 Paragraph 中渲染，不用 overlay）
+            let type_display = {
+                let types = ["openai", "anthropic"];
+                types
+                    .iter()
+                    .map(|t| {
+                        if *t == panel.buf_type {
+                            format!("[{}]", t)
+                        } else {
+                            t.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("  ")
+            };
+
             let fields: &[(LoginEditField, &str)] = &[
                 (LoginEditField::Name, "Name        "),
                 (LoginEditField::Type, "Type        "),
@@ -136,42 +152,35 @@ pub(crate) fn render_login_panel(f: &mut Frame, panel: &mut LoginPanel, app: &mu
                 (LoginEditField::HaikuModel, "Haiku Model "),
             ];
 
+            let mut active_overlay: Option<u16> = None;
+
             for (field, label) in fields {
                 let is_active = *field == panel.edit_field;
-                let value = match field {
-                    LoginEditField::Type => {
-                        let types = ["openai", "anthropic"];
-                        types
-                            .iter()
-                            .map(|t| {
-                                if *t == panel.buf_type {
-                                    format!("[{}]", t)
-                                } else {
-                                    t.to_string()
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("  ")
-                    }
+                let is_text_field = *field != LoginEditField::Type;
+
+                let raw_value = match field {
+                    LoginEditField::Type => type_display.clone(),
                     LoginEditField::Name => panel.field_name.value(),
                     LoginEditField::BaseUrl => panel.field_base_url.value(),
-                    LoginEditField::ApiKey => {
-                        if is_active {
-                            panel.field_api_key.value()
-                        } else {
-                            mask_api_key(&panel.field_api_key.value())
-                        }
-                    }
+                    LoginEditField::ApiKey => panel.field_api_key.value(),
                     LoginEditField::OpusModel => panel.field_opus_model.value(),
                     LoginEditField::SonnetModel => panel.field_sonnet_model.value(),
                     LoginEditField::HaikuModel => panel.field_haiku_model.value(),
                 };
 
-                let value_display = if is_active {
-                    format!("{}█", value)
+                // 活跃的文本字段：不渲染静态值，由 overlay textarea 覆盖
+                let value_display = if is_active && is_text_field {
+                    String::new()
+                } else if *field == LoginEditField::ApiKey {
+                    mask_api_key(&raw_value)
                 } else {
-                    value
+                    raw_value
                 };
+
+                // 记录活跃文本字段的 overlay 行索引
+                if is_active && is_text_field {
+                    active_overlay = Some(lines.len() as u16);
+                }
 
                 let (label_style, value_style) = if is_active {
                     (
@@ -195,6 +204,24 @@ pub(crate) fn render_login_panel(f: &mut Frame, panel: &mut LoginPanel, app: &mu
 
             lines.truncate(inner.height as usize);
             f.render_widget(Paragraph::new(Text::from(lines)), inner);
+
+            // overlay 渲染活跃的 textarea
+            if let Some(line_idx) = active_overlay {
+                if line_idx < inner.height {
+                    let label_width: u16 = 15; // "  " + 12-char label + " "
+                    let value_area = Rect {
+                        x: inner.x + label_width,
+                        y: inner.y + line_idx,
+                        width: inner.width.saturating_sub(label_width),
+                        height: 1,
+                    };
+                    if value_area.width > 0 {
+                        if let Some(field) = panel.active_field() {
+                            field.render(f, value_area);
+                        }
+                    }
+                }
+            }
         }
 
         LoginPanelMode::ConfirmDelete => {

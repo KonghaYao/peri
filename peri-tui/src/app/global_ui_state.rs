@@ -15,6 +15,8 @@ pub struct GlobalUiState {
     pub model_highlight_until: Option<Instant>,
     pub provider_highlight_until: Option<Instant>,
     pub mcp_ready_shown_until: Cell<Option<Instant>>,
+    /// MCP 失败提示自动消失计时器（首次显示后 10 秒消失）
+    pub mcp_failed_shown_until: Cell<Option<Instant>>,
     pub quit_pending_since: Option<Instant>,
     /// 双击 ESC 检测时间戳（rewind 弹窗触发）
     pub rewind_pending_since: Option<Instant>,
@@ -38,6 +40,7 @@ impl GlobalUiState {
             model_highlight_until: None,
             provider_highlight_until: None,
             mcp_ready_shown_until: Cell::new(None),
+            mcp_failed_shown_until: Cell::new(None),
             quit_pending_since: None,
             rewind_pending_since: None,
             rewind_busy_hint_until: None,

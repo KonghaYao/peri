@@ -12,11 +12,16 @@ pub struct FieldTextarea {
     max_lines: u16,
 }
 
-/// 公共样式配置：无边框、无光标行高亮、主题文字色
+/// 公共样式配置：无边框、无光标行高亮、主题文字色 + 纯黑背景
+///
+/// 透明背景（Color::Reset）在 form overlay 场景中会让底层静态文字穿透。
+/// 若 textarea 因光标位置触发水平滚动（top_col > 0），文字起始列偏离底层
+/// 静态文字位置，两个文字不同步但都可见，形成双重影。
+/// 不透明背景（POPUP_BG = #000000）确保 textarea 渲染区域完全覆盖底层。
 fn configure_style(inner: &mut TextArea<'static>) {
     inner.set_block(Block::default().borders(Borders::NONE));
     inner.set_cursor_line_style(Style::default());
-    inner.set_style(Style::default().fg(theme::TEXT));
+    inner.set_style(Style::default().fg(theme::TEXT).bg(theme::POPUP_BG));
 }
 
 impl FieldTextarea {

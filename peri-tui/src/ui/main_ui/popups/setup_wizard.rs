@@ -340,7 +340,11 @@ fn render_form_edit(
         &lc.tr("setup-field-id"),
         4,
         FormField::ProviderId,
-        mp.field_provider_id.value(),
+        if wizard.form_focus == FormField::ProviderId {
+            String::new()
+        } else {
+            mp.field_provider_id.value()
+        },
         wizard.form_focus,
     ));
     if wizard.form_focus == FormField::ProviderId {
@@ -351,7 +355,11 @@ fn render_form_edit(
         &lc.tr("setup-field-base-url"),
         4,
         FormField::BaseUrl,
-        mp.field_base_url.value(),
+        if wizard.form_focus == FormField::BaseUrl {
+            String::new()
+        } else {
+            mp.field_base_url.value()
+        },
         wizard.form_focus,
     ));
     if wizard.form_focus == FormField::BaseUrl {
@@ -396,7 +404,11 @@ fn render_form_edit(
         &lc.tr("setup-field-api-key"),
         4,
         FormField::ApiKey,
-        key_display,
+        if wizard.form_focus == FormField::ApiKey {
+            String::new()
+        } else {
+            key_display
+        },
         wizard.form_focus,
     ));
     if wizard.form_focus == FormField::ApiKey {
@@ -421,7 +433,11 @@ fn render_form_edit(
             &alias_prefix,
             alias_label_width,
             field,
-            mp.aliases[ai].field_model_id.value(),
+            if wizard.form_focus == field {
+                String::new()
+            } else {
+                mp.aliases[ai].field_model_id.value()
+            },
             wizard.form_focus,
         ));
         if wizard.form_focus == field {
