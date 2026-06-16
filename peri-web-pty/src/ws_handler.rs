@@ -1,4 +1,5 @@
 use std::io::Read;
+use std::time::Duration;
 
 use axum::{
     extract::{
@@ -14,6 +15,13 @@ use tracing::{debug, info, warn};
 use crate::config::default_shell;
 use crate::pty_session::PtySession;
 use crate::session_state::SessionState;
+
+/// 子进程退出轮询间隔。
+///
+/// Windows ConPTY 上 child 退出后 reader.read 永久阻塞不发 EOF（pty handle
+/// 与 IO handle 生命周期不绑定），必须主动 try_wait。100ms 足够低延迟，
+/// 同时 CPU 开销可忽略（try_wait 是 syscall 但很轻）。
+const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// WebSocket 查询参数。
 #[derive(Debug, Deserialize)]
@@ -130,7 +138,7 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
         }
     });
 
-    // pump_task：select! { ws.recv() | rx.recv() }
+    // pump_task：select! { ws.recv() | rx.recv() | child 退出轮询 }
     loop {
         tokio::select! {
             msg = socket.recv() => {
@@ -178,16 +186,22 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
                         }
                     }
                     Some(None) => {
-                        // PTY EOF：子进程退出
-                        let code = session.try_wait_exit().ok().flatten();
-                        let display = code
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        let msg = format!("\r\n[process exited with code {display}]\r\n");
-                        let _ = socket.send(Message::Text(msg)).await;
+                        // reader EOF：Unix 上几乎等同 child 已退出。
+                        // Windows ConPTY 上 child 退出后 reader 不一定返回 EOF
+                        // （pty handle 与 IO handle 生命周期不绑定），所以这条
+                        // 路径在 Windows 上几乎不会触发，主要靠下面的 polling。
+                        send_exit_message(&mut socket, &mut session).await;
                         break;
                     }
                     None => break, // read_task 退出
+                }
+            }
+            _ = tokio::time::sleep(CHILD_EXIT_POLL_INTERVAL) => {
+                // Windows ConPTY 上 child 退出后 reader.read 永久阻塞不发 EOF，
+                // 必须主动轮询 try_wait。Unix 上作为兜底（reader EOF 通常先到）。
+                if session.try_wait_exit().ok().flatten().is_some() {
+                    send_exit_message(&mut socket, &mut session).await;
+                    break;
                 }
             }
         }
@@ -220,4 +234,14 @@ fn try_handle_resize(text: &str, session: &mut PtySession) -> bool {
             true // resize 失败也消耗掉这条消息，不当作 stdin
         }
     }
+}
+
+/// 发送 `[process exited with code N]` 给 client。退出码未知时显示 "unknown"。
+async fn send_exit_message(socket: &mut WebSocket, session: &mut PtySession) {
+    let code = session.try_wait_exit().ok().flatten();
+    let display = code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let msg = format!("\r\n[process exited with code {display}]\r\n");
+    let _ = socket.send(Message::Text(msg)).await;
 }
