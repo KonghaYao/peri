@@ -119,7 +119,7 @@ cleanup_old_versions() {
         exec 3<&0
     fi
 
-    echo -e "${YELLOW}[WARN]${NC}  Delete old versions? [y/N] " >&2
+    echo -e "${YELLOW}[WARN]${NC}  Delete old versions? [y/N] " >/dev/tty
     local answer
     read -r answer <&3
     exec 3<&-
