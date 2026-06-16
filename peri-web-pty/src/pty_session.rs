@@ -33,9 +33,6 @@ impl PtySession {
             })
             .map_err(io_err)?;
 
-        // reader 必须在 slave spawn 之前 clone，否则 race
-        let reader = pair.master.try_clone_reader().map_err(io_err)?;
-
         let mut cmd = CommandBuilder::new(shell);
         cmd.args(args);
         cmd.env("TERM", "xterm-256color");
@@ -46,6 +43,12 @@ impl PtySession {
         let child = pair.slave.spawn_command(cmd).map_err(io_err)?;
         // 释放 slave：portable-pty 要求 slave drop 后 master 才能在子进程退出时 EOF
         drop(pair.slave);
+
+        // reader 必须在 spawn 之后 clone：按 portable-pty 官方示例顺序。
+        // Windows ConPTY 上若在 spawn 之前 DuplicateHandle，clone 出来的 pipe
+        // handle 处于"未连接"状态，后续 read 会永久阻塞读不到任何字节。
+        // Unix 用 dup 复制 fd 共享同一 PTY 流，顺序不敏感。
+        let reader = pair.master.try_clone_reader().map_err(io_err)?;
 
         let writer = pair.master.take_writer().map_err(io_err)?;
 
