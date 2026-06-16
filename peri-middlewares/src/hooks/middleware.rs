@@ -723,6 +723,7 @@ impl<S: State> Middleware<S> for HookMiddleware {
 ///
 /// The HookMiddleware instance is owned by the agent task and not accessible
 /// from these code paths, so we dispatch hooks directly.
+#[allow(clippy::too_many_arguments)]
 pub async fn fire_standalone_lifecycle_hooks(
     registered_hooks: &[RegisteredHook],
     event: HookEvent,
