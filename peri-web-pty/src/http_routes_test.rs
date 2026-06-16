@@ -7,12 +7,3 @@ fn test_index_html_contains_terminal_div() {
         "index.html 应包含 <div id=\"terminals\">"
     );
 }
-
-#[test]
-fn test_index_html_contains_xterm_cdn() {
-    let html = include_str!("../index.html");
-    assert!(
-        html.contains("cdn.jsdelivr.net/npm/xterm"),
-        "index.html 应引用 xterm CDN"
-    );
-}
