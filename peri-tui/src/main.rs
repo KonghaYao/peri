@@ -909,6 +909,7 @@ async fn run_app(
                         "",
                         &provider_name,
                         None,
+                        Some("prompt_input_exit"),
                     )
                     .await;
                 })

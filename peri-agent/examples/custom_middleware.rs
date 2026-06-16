@@ -45,6 +45,7 @@ impl Middleware<AgentState> for ContextInjectorMiddleware {
             steps: output.steps,
             tool_calls: output.tool_calls.clone(),
             stop_reason: output.stop_reason.clone(),
+            block_continue: output.block_continue.clone(),
         })
     }
 }

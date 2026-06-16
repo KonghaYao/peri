@@ -115,6 +115,7 @@ impl CompactMiddleware {
             "",
             &self.provider_name,
             Some(msg_count),
+            None,
         )
         .await
     }

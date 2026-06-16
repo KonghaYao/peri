@@ -207,7 +207,7 @@ pub async fn run_print(
             frozen: None, // no frozen data
             history: vec![],
             incoming_recalls: vec![],
-            is_empty_history: true,
+            session_start_source: Some("startup".to_string()),
             bg_results: vec![], // print 模式无后台任务
             plugin_skill_dirs,
             plugin_agent_dirs,

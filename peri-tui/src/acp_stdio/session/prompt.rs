@@ -53,13 +53,17 @@ pub(crate) async fn handle_prompt(
     };
 
     // --- capture session-scoped data under the read lock ---
-    let (agent_cwd, history, is_empty_history, thread_id, frozen) = {
+    let (agent_cwd, history, session_start_source, thread_id, frozen) = {
         let sessions = ctx.sessions.read();
         match sessions.get(&sid) {
             Some(s) => (
                 s.cwd.clone(),
                 s.history.clone(),
-                s.history.is_empty(),
+                if s.history.is_empty() {
+                    Some("startup".to_string())
+                } else {
+                    None
+                },
                 s.thread_id.clone(),
                 s.frozen.clone(),
             ),
@@ -112,7 +116,7 @@ pub(crate) async fn handle_prompt(
             content,
             frozen,
             history,
-            is_empty_history,
+            session_start_source,
             history_len,
             cancel,
             pool: pool_arc,

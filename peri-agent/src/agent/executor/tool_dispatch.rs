@@ -154,6 +154,9 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
         agent.emit(AgentEvent::MessageAdded(tool_msg_clone));
     }
 
+    // 阶段 C：所有 tool_result 写入完成，触发 PostToolBatch hook
+    agent.chain.run_after_tools_batch(state, &results).await?;
+
     // 写入完成后再返回错误
     if was_cancelled {
         tracing::warn!("dispatch_tools: returning Interrupted (was_cancelled)");

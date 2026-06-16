@@ -125,6 +125,7 @@ pub(crate) async fn handle_final_answer<L: ReactLLM, S: State>(
         steps: step + 1,
         tool_calls: all_tool_calls,
         stop_reason: None,
+        block_continue: None,
     };
 
     tracing::info!(

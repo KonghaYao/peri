@@ -180,7 +180,7 @@ impl FrozenSessionData {
 /// - **Session-level identity & transport**：`provider` / `peri_config` / `cwd`
 ///   / `session_id` / `cancel` / `event_sink` / `broker` / `permission_mode`
 /// - **Per-turn content**：`content` / `frozen` / `history` / `incoming_recalls`
-///   / `is_empty_history` / `bg_results`
+///   / `session_start_source` / `bg_results`
 /// - **Middleware chain resources**：`plugin_skill_dirs` / `plugin_agent_dirs`
 ///   / `hook_groups` / `cron_scheduler` / `mcp_pool` / `channel_state`
 ///   / `tool_search_index` / `shared_tools` / `lsp_servers` / `langfuse_session`
@@ -214,8 +214,9 @@ pub struct PromptExecutionContext {
     pub history: Vec<BaseMessage>,
     /// 上一轮 recall 注入项。
     pub incoming_recalls: Vec<String>,
-    /// 历史是否为空（决定 hook_session_start）。
-    pub is_empty_history: bool,
+    /// SessionStart matcher：startup / resume / clear / compact。
+    /// None 表示不触发 SessionStart。
+    pub session_start_source: Option<String>,
     /// 后台任务结果（注入合成的 AgentResult tool_use/tool_result）。
     pub bg_results: Vec<peri_agent::agent::events::BackgroundTaskResult>,
 
@@ -270,7 +271,7 @@ struct TurnConfig<'a> {
     cancel: &'a AgentCancellationToken,
     permission_mode: &'a Arc<peri_middlewares::prelude::SharedPermissionMode>,
     broker: &'a Arc<dyn UserInteractionBroker>,
-    is_empty_history: bool,
+    session_start_source: Option<String>,
     compact_config: peri_agent::agent::compact::CompactConfig,
     disable_compact: bool,
     budget: ContextBudget,
@@ -307,7 +308,7 @@ pub async fn execute_prompt(ctx: PromptExecutionContext) -> PromptResult {
         frozen,
         history,
         incoming_recalls,
-        is_empty_history,
+        session_start_source,
         bg_results,
         plugin_skill_dirs,
         plugin_agent_dirs,
@@ -445,7 +446,7 @@ pub async fn execute_prompt(ctx: PromptExecutionContext) -> PromptResult {
         cancel: &cancel,
         permission_mode: &permission_mode,
         broker: &broker,
-        is_empty_history,
+        session_start_source,
         compact_config: compact_config.clone(),
         disable_compact,
         budget,
@@ -917,7 +918,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
             plugin_skill_dirs,
             plugin_agent_dirs,
             hook_groups,
-            hook_session_start: turn.is_empty_history,
+            session_start_source: turn.session_start_source.clone(),
             mcp_pool,
             channel_state,
             tool_search_index,

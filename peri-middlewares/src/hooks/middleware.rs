@@ -34,12 +34,15 @@ pub struct HookMiddleware {
     permission_mode: Arc<SharedPermissionMode>,
     current_model: String,
     once_fired: Arc<Mutex<HashSet<String>>>,
-    /// Whether this is the first message of a new session (triggers SessionStart).
-    is_session_start: bool,
+    /// SessionStart 的 source 值（"startup"/"resume"/"clear"/"compact"）。
+    /// None 表示不触发 SessionStart。
+    session_start_source: Option<String>,
     /// 判断工具是否需要用户审批。用于 PermissionRequest hook 门控。
     /// 默认使用 [`crate::hitl::default_requires_approval`]，
     /// 可通过 `with_requires_approval` 覆盖。
     requires_approval: fn(&str) -> bool,
+    /// Stop hook block 连续次数计数器（最多 8 次，超过后忽略）
+    stop_block_count: Arc<Mutex<u32>>,
 }
 
 impl HookMiddleware {
@@ -60,7 +63,7 @@ impl HookMiddleware {
             transcript_path,
             permission_mode,
             current_model,
-            false,
+            None,
         )
     }
 
@@ -73,7 +76,7 @@ impl HookMiddleware {
         transcript_path: impl Into<String>,
         permission_mode: Arc<SharedPermissionMode>,
         current_model: impl Into<String>,
-        is_session_start: bool,
+        session_start_source: Option<String>,
     ) -> Self {
         let mut map: HashMap<HookEvent, Vec<RegisteredHook>> = HashMap::new();
         for hook in registered_hooks {
@@ -84,7 +87,7 @@ impl HookMiddleware {
         tracing::info!(
             total_hooks,
             event_count,
-            is_session_start,
+            session_start = session_start_source.is_some(),
             "HookMiddleware created with registered hooks"
         );
         Self {
@@ -96,8 +99,9 @@ impl HookMiddleware {
             permission_mode,
             current_model: current_model.into(),
             once_fired: Arc::new(Mutex::new(HashSet::new())),
-            is_session_start,
+            session_start_source,
             requires_approval: crate::hitl::default_requires_approval,
+            stop_block_count: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -275,6 +279,56 @@ impl HookMiddleware {
         final_action
     }
 
+    /// 在一批并行工具调用全部完成后触发 PostToolBatch hook。
+    /// 由 dispatch_tools 在所有 tool_result 写入后调用。
+    pub async fn fire_post_tool_batch<S: State>(&self, state: &mut S) -> AgentResult<()> {
+        let prompt_text = state
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| matches!(m, BaseMessage::Human { .. }))
+            .map(|m| m.content())
+            .unwrap_or_default();
+
+        let input = HookInput {
+            session_id: self.session_id.clone(),
+            transcript_path: self.transcript_path.clone(),
+            cwd: self.cwd.clone(),
+            permission_mode: Some(format!("{:?}", self.permission_mode.load())),
+            agent_id: None,
+            agent_type: None,
+            hook_event_name: HookEvent::PostToolBatch,
+            tool_name: None,
+            tool_input: None,
+            tool_use_id: None,
+            tool_output: None,
+            prompt: Some(prompt_text),
+            source: None,
+            model: Some(self.current_model.clone()),
+            subagent_name: None,
+            subagent_result: None,
+            message_count: Some(state.messages().len()),
+        };
+
+        let action = self
+            .fire_event(HookEvent::PostToolBatch, &input, None, None)
+            .await;
+
+        match &action {
+            HookAction::Block { reason } => Err(AgentError::ToolRejected {
+                tool: "PostToolBatch".to_string(),
+                reason: reason.clone(),
+            }),
+            HookAction::PreventContinuation { stop_reason } => Err(AgentError::ToolRejected {
+                tool: "PostToolBatch".to_string(),
+                reason: stop_reason
+                    .clone()
+                    .unwrap_or_else(|| "PostToolBatch hook prevented continuation".to_string()),
+            }),
+            _ => Ok(()),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Helper methods
     // -----------------------------------------------------------------------
@@ -319,13 +373,13 @@ impl<S: State> Middleware<S> for HookMiddleware {
             .map(|m| m.content())
             .unwrap_or_default();
 
-        // SessionStart: only when is_session_start is true (first message of a new session)
-        if self.is_session_start {
+        // SessionStart: only when session_start_source is Some
+        if let Some(ref source) = self.session_start_source {
             let input = HookInput::session_start(
                 &self.session_id,
                 &self.transcript_path,
                 &self.cwd,
-                "startup",
+                source,
                 &self.current_model,
             );
             let action = self
@@ -532,7 +586,15 @@ impl<S: State> Middleware<S> for HookMiddleware {
         Ok(())
     }
 
-    async fn after_agent(&self, _state: &mut S, output: &AgentOutput) -> AgentResult<AgentOutput> {
+    async fn after_tools_batch(
+        &self,
+        state: &mut S,
+        _results: &[(ToolCall, ToolResult)],
+    ) -> AgentResult<()> {
+        self.fire_post_tool_batch(state).await
+    }
+
+    async fn after_agent(&self, state: &mut S, output: &AgentOutput) -> AgentResult<AgentOutput> {
         // 构造 Stop hook 的 HookInput。
         // subagent_result 携带 agent 最终输出（截断到 500 字符），
         // source 携带 stop_reason（若存在）标识结束原因。
@@ -559,7 +621,46 @@ impl<S: State> Middleware<S> for HookMiddleware {
             message_count: None,
         };
 
-        let _action = self.fire_event(HookEvent::Stop, &input, None, None).await;
+        let action = self.fire_event(HookEvent::Stop, &input, None, None).await;
+
+        match &action {
+            HookAction::Block { reason } => {
+                let mut count = self.stop_block_count.lock();
+                *count += 1;
+                if *count > 8 {
+                    tracing::warn!(
+                        count = *count,
+                        "Stop hook block 连续超过 8 次，忽略 block 正常结束"
+                    );
+                    // Reset counter and let agent finish normally
+                    return Ok(output.clone());
+                }
+                tracing::info!(
+                    count = *count,
+                    reason = %reason,
+                    "Stop hook blocked: injecting reason as system message and continuing"
+                );
+                state.add_message(BaseMessage::system(format!(
+                    "<stop_hook_feedback>\nThe Stop hook blocked because: {}\nPlease address this feedback and continue your work.\n(Block {}/8)\n</stop_hook_feedback>",
+                    reason, *count
+                )));
+                let mut output = output.clone();
+                output.block_continue = Some(reason.clone());
+                return Ok(output);
+            }
+            HookAction::PreventContinuation { stop_reason } => {
+                return Err(AgentError::ToolRejected {
+                    tool: "Stop".to_string(),
+                    reason: stop_reason
+                        .clone()
+                        .unwrap_or_else(|| "Stop hook prevented continuation".to_string()),
+                });
+            }
+            _ => {
+                // 非 block 时重置计数器
+                *self.stop_block_count.lock() = 0;
+            }
+        }
 
         // Fire Notification (agent done, waiting for user input)
         self.fire_event(HookEvent::Notification, &input, None, None)
@@ -568,14 +669,23 @@ impl<S: State> Middleware<S> for HookMiddleware {
         Ok(output.clone())
     }
 
-    async fn on_error(
-        &self,
-        _state: &mut S,
-        error: &peri_agent::error::AgentError,
-    ) -> AgentResult<()> {
-        // 当 agent 因错误退出时触发 StopFailure hook。
-        // 这覆盖了 Interrupted、MaxIterationsExceeded、LLM 调用失败等场景，
-        // 这些路径不经过 after_agent（直接返回 Err），因此需要在此处单独触发。
+    async fn on_error(&self, _state: &mut S, error: &AgentError) -> AgentResult<()> {
+        // StopFailure 仅在 API/LLM 调用失败时触发，
+        // 跳过 Interrupted、MaxIterationsExceeded、ToolRejected 等非 API 错误。
+        let should_fire = matches!(
+            error,
+            AgentError::LlmError(_)
+                | AgentError::LlmHttpError { .. }
+                | AgentError::MiddlewareError { .. }
+        );
+
+        if !should_fire {
+            return Ok(());
+        }
+
+        // 当 agent 因 API/LLM 错误退出时触发 StopFailure hook。
+        // 非 API 错误（Interrupted / MaxIterationsExceeded / ToolRejected 等）
+        // 已在 guard 中过滤。
         let error_description = format!("{:?}", error);
         let input = HookInput {
             session_id: self.session_id.clone(),
@@ -621,6 +731,7 @@ pub async fn fire_standalone_lifecycle_hooks(
     transcript_path: &str,
     current_model: &str,
     message_count: Option<usize>,
+    reason: Option<&str>,
 ) {
     // Filter hooks matching the event
     let matching: Vec<&RegisteredHook> = registered_hooks
@@ -646,7 +757,7 @@ pub async fn fire_standalone_lifecycle_hooks(
             tool_use_id: None,
             tool_output: None,
             prompt: None,
-            source: None,
+            source: reason.map(|r| r.to_string()),
             model: Some(current_model.to_string()),
             subagent_name: None,
             subagent_result: None,

@@ -117,7 +117,11 @@ pub(crate) async fn execute_prompt(
         frozen,
         history,
         incoming_recalls,
-        is_empty_history: is_empty,
+        session_start_source: if is_empty {
+            Some("startup".to_string())
+        } else {
+            None
+        },
         bg_results,
         plugin_skill_dirs: plugin_skill_dirs.to_vec(),
         plugin_agent_dirs: plugin_agent_dirs.to_vec(),

@@ -229,3 +229,12 @@ fn test_permission_decision_deser() {
     let d4: PermissionDecision = serde_json::from_str("\"passthrough\"").unwrap();
     assert_eq!(d4, PermissionDecision::Passthrough);
 }
+
+#[test]
+fn test_post_tool_batch_serialization() {
+    let json = "\"PostToolBatch\"";
+    let event: HookEvent = serde_json::from_str(json).unwrap();
+    assert_eq!(event, HookEvent::PostToolBatch);
+    let back = serde_json::to_string(&event).unwrap();
+    assert_eq!(back, json);
+}

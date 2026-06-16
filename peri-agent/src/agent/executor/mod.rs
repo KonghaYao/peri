@@ -356,6 +356,21 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
                     .await,
                     loop_error
                 );
+                if let Some(reason) = &output.block_continue {
+                    tracing::info!(
+                        reason = %reason,
+                        step = step + 1,
+                        "Stop hook block_continue: resuming agent loop"
+                    );
+                    // 发出快照 + 消费通知后再继续循环
+                    self::final_answer::emit_snapshot_and_drain_notifications(
+                        self,
+                        state,
+                        &mut snapshot_anchor,
+                    )
+                    .await;
+                    continue;
+                }
                 final_result = Some(output);
                 break;
             }

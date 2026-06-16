@@ -229,6 +229,7 @@ impl App {
                         "",
                         &provider_name,
                         None,
+                        Some("clear"),
                     )
                     .await;
                 });

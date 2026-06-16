@@ -82,6 +82,17 @@ pub trait Middleware<S: State>: Send + Sync {
         Ok(())
     }
 
+    /// 一批并行工具调用全部写入 state 后触发（每个 batch 一次）。
+    /// 可用于聚合检查、批量日志等。
+    async fn after_tools_batch(
+        &self,
+        _state: &mut S,
+        _results: &[(ToolCall, ToolResult)],
+    ) -> AgentResult<()> {
+        let _ = (_state, _results);
+        Ok(())
+    }
+
     /// LLM 调用前调用（在每轮 ReAct 循环的 call_llm 之前）
     ///
     /// 可用于上下文压缩、token 预算检查等预处理操作。

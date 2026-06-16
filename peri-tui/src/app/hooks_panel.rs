@@ -58,6 +58,11 @@ fn build_event_table() -> Vec<HookEventInfo> {
             "When agent stops with failure",
         ),
         (
+            HookEvent::PostToolBatch,
+            "PostToolBatch",
+            "When all parallel tools complete",
+        ),
+        (
             HookEvent::SubagentStart,
             "SubagentStart",
             "When a subagent starts",

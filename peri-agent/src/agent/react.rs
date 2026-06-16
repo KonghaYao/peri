@@ -54,6 +54,10 @@ pub struct AgentOutput {
     /// 目前仅正常完成时为 None，未来可扩展更多 reason。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
+    /// Stop hook block 继续原因。Some 表示 hook 要求 agent 继续工作。
+    /// 由 HookMiddleware::after_agent 设置，executor 检测后跳过 Done 继续循环。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_continue: Option<String>,
 }
 
 impl AgentOutput {
@@ -63,6 +67,7 @@ impl AgentOutput {
             steps,
             tool_calls: Vec::new(),
             stop_reason: None,
+            block_continue: None,
         }
     }
 }
