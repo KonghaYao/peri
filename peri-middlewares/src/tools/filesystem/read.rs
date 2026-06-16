@@ -2,6 +2,8 @@ use peri_agent::tools::BaseTool;
 use serde_json::Value;
 
 use super::resolve_path;
+use crate::tools::output_persist::persist_truncated_output;
+use crate::tools::output_truncate::truncate_bytes;
 
 /// Read tool - 与 TypeScript read_tool 对齐
 pub struct ReadFileTool {
@@ -17,6 +19,10 @@ impl ReadFileTool {
 const MAX_LINES: usize = 2000;
 /// 最大允许读取的文件大小（32 MB）
 const MAX_FILE_SIZE: u64 = 32 * 1024 * 1024;
+/// 单行最大字符数（超过则截断）
+const MAX_CHARS_PER_LINE: usize = 65536;
+/// 输出最大字节数（兜底）
+const MAX_OUTPUT_CHARS: usize = 100_000;
 
 const READ_FILE_DESCRIPTION: &str = r#"Reads a file from the local filesystem. You can access any file directly by using this tool.
 Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
@@ -182,13 +188,35 @@ impl BaseTool for ReadFileTool {
         let end = (start + limit).min(lines.len());
         let selected = &lines[start..end];
 
-        let numbered: Vec<String> = selected
-            .iter()
-            .enumerate()
-            .map(|(i, line)| format!("{:>6}\t{}", start + i + 1, line))
-            .collect();
+        let mut numbered: Vec<String> = Vec::new();
+        for (i, line) in selected.iter().enumerate() {
+            let line_num = start + i + 1;
+            // 单行超长按字符截断（与工具描述一致）
+            let content = if line.chars().count() > MAX_CHARS_PER_LINE {
+                format!(
+                    "{}... [line truncated at {} characters]",
+                    line.chars().take(MAX_CHARS_PER_LINE).collect::<String>(),
+                    MAX_CHARS_PER_LINE
+                )
+            } else {
+                (*line).to_string()
+            };
+            numbered.push(format!("{:>6}\t{}", line_num, content));
+        }
 
-        Ok(numbered.join("\n"))
+        let mut output = numbered.join("\n");
+
+        // 字节级兜底：总输出超过上限时截断 + 落盘
+        if output.len() > MAX_OUTPUT_CHARS {
+            let persist_hint = persist_truncated_output(&output);
+            output = truncate_bytes(&output, MAX_OUTPUT_CHARS);
+            output.push_str(&format!(
+                "\n[Output truncated: exceeds {} byte limit]{persist_hint}",
+                MAX_OUTPUT_CHARS
+            ));
+        }
+
+        Ok(output)
     }
 }
 

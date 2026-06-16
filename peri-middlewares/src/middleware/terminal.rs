@@ -6,6 +6,7 @@ use serde_json::Value;
 use tokio::time::{timeout, Duration};
 
 use crate::tools::output_persist::persist_truncated_output;
+use crate::tools::output_truncate::truncate_bytes;
 
 /// BashTool - 终端命令执行工具，与 TypeScript TerminalMiddleware 对齐
 const BASH_DESCRIPTION: &str = r#"Executes a given shell command and returns its output.
@@ -48,18 +49,6 @@ impl BashTool {
 const MAX_OUTPUT_CHARS: usize = 100_000;
 /// 输出最大行数（在第 N 行截断后，若还有行数超过上限再截字节）
 const MAX_OUTPUT_LINES: usize = 2_000;
-
-/// 按字节截断字符串，确保不拆分 UTF-8 字符
-fn truncate_bytes(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].to_string()
-}
 
 fn truncate_output(output: &str) -> String {
     let lines: Vec<&str> = output.split('\n').collect();

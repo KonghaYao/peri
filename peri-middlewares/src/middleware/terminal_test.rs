@@ -200,44 +200,6 @@ async fn test_bash_description_and_run_in_background_parsed() {
 }
 
 #[test]
-fn test_truncate_bytes_ascii() {
-    let s = "hello world";
-    assert_eq!(truncate_bytes(s, 5), "hello");
-}
-
-#[test]
-fn test_truncate_bytes_within_limit() {
-    let s = "hello";
-    assert_eq!(truncate_bytes(s, 100), "hello");
-}
-
-#[test]
-fn test_truncate_bytes_utf8_safe() {
-    // 中文字符每个占 3 字节，在字节 7 处截断（是字符边界）
-    let s = "你好世界";
-    assert_eq!(truncate_bytes(s, 6), "你好");
-}
-
-#[test]
-fn test_truncate_bytes_utf8_mid_character() {
-    // "你好" = 6 bytes, 在字节 5 处截断（不是字符边界）
-    // 应回退到字节 3 处（"你" 的末尾）
-    let s = "你好世界";
-    let result = truncate_bytes(s, 5);
-    assert_eq!(result, "你", "应在字符边界截断，实际: {}", result);
-}
-
-#[test]
-fn test_truncate_bytes_empty_string() {
-    assert_eq!(truncate_bytes("", 10), "");
-}
-
-#[test]
-fn test_truncate_bytes_zero_max() {
-    assert_eq!(truncate_bytes("hello", 0), "");
-}
-
-#[test]
 fn test_truncate_output_persists_full_content_on_lines_truncation() {
     let lines: Vec<String> = (0..3000).map(|i| format!("line {}", i)).collect();
     let input = lines.join("\n");
