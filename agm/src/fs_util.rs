@@ -24,11 +24,34 @@ pub(crate) fn remove_symlink_or_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Maximum recursion depth for `copy_dir_all` to prevent stack overflow
+/// from symbolic link cycles. 20 levels is generous for typical package trees.
+#[cfg(windows)]
+const MAX_COPY_DEPTH: usize = 20;
+
 /// Recursively copy a directory tree from src to dst.
 ///
 /// dst must not already exist (the caller should remove it first).
 /// Symlinks are followed — their targets are copied as regular files/directories.
+/// Dangling symlinks (target does not exist) are skipped with a warning to stderr.
+///
+/// Recursion is bounded to [`MAX_COPY_DEPTH`] levels to guard against symlink loops.
+#[cfg(windows)]
 pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    copy_dir_all_depth(src, dst, 0)
+}
+
+#[cfg(windows)]
+fn copy_dir_all_depth(src: &Path, dst: &Path, depth: usize) -> std::io::Result<()> {
+    if depth > MAX_COPY_DEPTH {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "recursion depth {} exceeded MAX_COPY_DEPTH ({}) — possible symlink loop",
+                depth, MAX_COPY_DEPTH,
+            ),
+        ));
+    }
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -36,11 +59,20 @@ pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         if file_type.is_dir() {
-            copy_dir_all(&src_path, &dst_path)?;
+            copy_dir_all_depth(&src_path, &dst_path, depth + 1)?;
         } else if file_type.is_symlink() {
             let target = std::fs::read_link(&src_path)?;
+            if !target.exists() {
+                // Dangling symlink — skip with warning
+                eprintln!(
+                    "warning: skipping dangling symlink {} -> {}",
+                    src_path.display(),
+                    target.display()
+                );
+                continue;
+            }
             if target.is_dir() {
-                copy_dir_all(&target, &dst_path)?;
+                copy_dir_all_depth(&target, &dst_path, depth + 1)?;
             } else {
                 std::fs::copy(&target, &dst_path)?;
             }

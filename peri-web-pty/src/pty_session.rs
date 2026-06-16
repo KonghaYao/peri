@@ -161,13 +161,15 @@ impl PtySession {
         }
     }
 
-    /// 关闭 pseudoconsole slave（仅 Windows）。
+    /// 关闭 pseudoconsole slave 句柄。
     ///
     /// 在子进程退出后调用，drop slave 句柄使 ConPTY 关闭，
     /// unblock 读管道让它返回 EOF。提前调用（子进程仍在运行时）可能
     /// 导致 read pipe 进入未连接状态，见 `_slave` 字段注释。
-    #[cfg(target_os = "windows")]
+    ///
+    /// Unix 上为 no-op（slave 已在 spawn 中 drop）。
     pub fn close_slave(&mut self) {
+        #[cfg(target_os = "windows")]
         drop(self._slave.take());
     }
 }

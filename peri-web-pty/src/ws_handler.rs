@@ -191,6 +191,7 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
                         // Windows ConPTY 上 child 退出后 reader 不一定返回 EOF
                         // （pty handle 与 IO handle 生命周期不绑定），所以这条
                         // 路径在 Windows 上几乎不会触发，主要靠下面的 polling。
+                        session.close_slave();
                         send_exit_message(&mut socket, &mut session).await;
                         break;
                     }
@@ -201,6 +202,7 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
                 // Windows ConPTY 上 child 退出后 reader.read 永久阻塞不发 EOF，
                 // 必须主动轮询 try_wait。Unix 上作为兜底（reader EOF 通常先到）。
                 if session.try_wait_exit().ok().flatten().is_some() {
+                    session.close_slave();
                     send_exit_message(&mut socket, &mut session).await;
                     break;
                 }

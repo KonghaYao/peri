@@ -31,7 +31,16 @@ async fn spawn_server() -> u16 {
 /// 跨平台获取测试 shell + 退出命令。
 fn exit_shell() -> (&'static str, Vec<&'static str>) {
     if cfg!(target_os = "windows") {
-        ("powershell.exe", vec!["-NoProfile", "-NoLogo", "-NonInteractive", "-Command", "exit"])
+        (
+            "powershell.exe",
+            vec![
+                "-NoProfile",
+                "-NoLogo",
+                "-NonInteractive",
+                "-Command",
+                "exit",
+            ],
+        )
     } else {
         ("bash", vec!["-c", "exit"])
     }

@@ -10,7 +10,9 @@ mod macros;
 pub mod mouse;
 
 use std::cell::RefCell;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "windows")]
+use std::time::Instant;
 
 use anyhow::Result;
 use ratatui::crossterm::event::{
@@ -72,9 +74,17 @@ pub async fn next_event(app: &mut App) -> Result<Option<Action>> {
         }
     }
 
+    // 关键修复：函数开头消费 stash。早期实现把 take 放在内层 loop 开头，
+    // 晚于 poll(50ms) 超时返回 Ok(None) 路径——stash 有事件但队列为空时会
+    // 反复超时返回，stash 一直挂着，导致后续用户按键被旧 stashed 事件
+    // 抢先处理，主输入框光标位置与实际编辑位置不同步（按一次 ← 左移两次）。
+    // UI 计时（quit/rewind）优先级高于事件，已在上面先于 stash take 处理。
+    let stashed = EVENT_STASH.with(|s| s.borrow_mut().take());
+
     // Mouse-availability probe: on first user input after startup, determine
-    // whether the terminal supports mouse events.
-    if app.global_ui.mouse_available.is_none() {
+    // whether the terminal supports mouse events. probe 仅启动时跑一次，
+    // stash 此时不可能有值；保留 stash 短路以防御性避免 stash 事件被探测路径吞掉。
+    if app.global_ui.mouse_available.is_none() && stashed.is_none() {
         // Wait for the first event (up to 1 s); this is not counted as normal poll timeout
         if event::poll(Duration::from_secs(1))? {
             let ev = event::read()?;
@@ -94,31 +104,33 @@ pub async fn next_event(app: &mut App) -> Result<Option<Action>> {
         }
     }
 
-    if !event::poll(Duration::from_millis(50))? {
-        return Ok(None);
-    }
+    // stash 有事件时跳过 poll 直接用 stashed，避免 poll 超时返回 Ok(None)
+    // 跳过 stash 消费。stash 为空时保持原 poll 超时行为。
+    let ev = if let Some(stashed) = stashed {
+        // stash 事件来源（coalesce_mouse_events 或 Windows filter）已过
+        // 一次处理，不再重新走 Windows filter——filter 的 peek 路径在
+        // stash 命中时队列状态不确定，可能引入不必要的延迟或丢失。
+        stashed
+    } else {
+        if !event::poll(Duration::from_millis(50))? {
+            return Ok(None);
+        }
+        loop {
+            let ev = event::read()?;
 
-    // Check stash first: a previous coalesce may have stashed a non-scroll
-    // event that should be processed before reading new events.
-    let ev = loop {
-        let ev = if let Some(stashed) = EVENT_STASH.with(|s| s.borrow_mut().take()) {
-            stashed
-        } else {
-            event::read()?
-        };
+            // On Windows, mouse wheel movement may generate spurious Key(Up/Down)
+            // events alongside MouseScroll events. Filter these out before coalescing
+            // so that scroll events are handled correctly.
+            #[cfg(target_os = "windows")]
+            let ev = match filter_mouse_wheel_keys(ev) {
+                Some(ev) => ev,
+                // Spurious wheel-generated Key(Up/Down) discarded — loop to get
+                // the next real event from the queue.
+                None => continue,
+            };
 
-        // On Windows, mouse wheel movement may generate spurious Key(Up/Down)
-        // events alongside MouseScroll events. Filter these out before coalescing
-        // so that scroll events are handled correctly.
-        #[cfg(target_os = "windows")]
-        let ev = match filter_mouse_wheel_keys(ev) {
-            Some(ev) => ev,
-            // Spurious wheel-generated Key(Up/Down) discarded — loop to get
-            // the next real event from the queue.
-            None => continue,
-        };
-
-        break ev;
+            break ev;
+        }
     };
 
     // Scroll/Drag event coalescing: drain queued mouse events to avoid

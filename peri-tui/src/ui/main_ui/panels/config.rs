@@ -18,6 +18,7 @@ use crate::{
     },
     ui::theme,
 };
+use unicode_width::UnicodeWidthStr;
 
 /// 行号 → i18n 字段标签键
 fn field_label_key(row: usize) -> &'static str {
@@ -68,6 +69,22 @@ pub(crate) fn render_config_panel(
     let mut lines: Vec<Line> = Vec::new();
     let mut active_textarea_overlay: Option<u16> = None;
 
+    // 动态计算所有字段 label 的最大显示列宽度（替代硬编码 14）。
+    // Rust format! 的 width 参数按字符数填充，CJK 字符 1 char = 2 显示列，
+    // 必须以显示列为准计算 overlay x 偏移，避免文本错位。
+    let label_display_widths: Vec<usize> = (0..ROW_COUNT)
+        .filter_map(|row| {
+            let key = field_label_key(row);
+            if key == "???" {
+                None
+            } else {
+                Some(UnicodeWidthStr::width(lc.tr(key).as_str()))
+            }
+        })
+        .collect();
+    let max_label_display_width = label_display_widths.iter().max().copied().unwrap_or(14);
+    let label_column_width = max_label_display_width; // 用于 format!("{:<width$}")
+
     for row in 0..ROW_COUNT {
         match row {
             ROW_GENERAL_HEADER => {
@@ -111,7 +128,14 @@ pub(crate) fn render_config_panel(
 
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(format!("{:<14}", lc.tr(field_label_key(row))), label_style),
+                    Span::styled(
+                        format!(
+                            "{:<width$}",
+                            lc.tr(field_label_key(row)),
+                            width = label_column_width
+                        ),
+                        label_style,
+                    ),
                     on_span,
                     Span::styled("  ", Style::default()),
                     off_span,
@@ -147,7 +171,14 @@ pub(crate) fn render_config_panel(
                 }
                 let mut line_spans = vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(format!("{:<14}", lc.tr(field_label_key(row))), label_style),
+                    Span::styled(
+                        format!(
+                            "{:<width$}",
+                            lc.tr(field_label_key(row)),
+                            width = label_column_width
+                        ),
+                        label_style,
+                    ),
                 ];
                 line_spans.extend(value_spans);
                 lines.push(Line::from(line_spans));
@@ -178,7 +209,14 @@ pub(crate) fn render_config_panel(
 
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(format!("{:<14}", lc.tr(field_label_key(row))), label_style),
+                    Span::styled(
+                        format!(
+                            "{:<width$}",
+                            lc.tr(field_label_key(row)),
+                            width = label_column_width
+                        ),
+                        label_style,
+                    ),
                     on_span,
                     Span::styled("  ", Style::default()),
                     off_span,
@@ -211,7 +249,14 @@ pub(crate) fn render_config_panel(
                 }
                 let mut line_spans = vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(format!("{:<14}", lc.tr(field_label_key(row))), label_style),
+                    Span::styled(
+                        format!(
+                            "{:<width$}",
+                            lc.tr(field_label_key(row)),
+                            width = label_column_width
+                        ),
+                        label_style,
+                    ),
                 ];
                 line_spans.extend(value_spans);
                 lines.push(Line::from(line_spans));
@@ -243,7 +288,14 @@ pub(crate) fn render_config_panel(
                 }
                 let mut line_spans = vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(format!("{:<14}", lc.tr(field_label_key(row))), label_style),
+                    Span::styled(
+                        format!(
+                            "{:<width$}",
+                            lc.tr(field_label_key(row)),
+                            width = label_column_width
+                        ),
+                        label_style,
+                    ),
                 ];
                 line_spans.extend(value_spans);
                 lines.push(Line::from(line_spans));
@@ -282,7 +334,14 @@ pub(crate) fn render_config_panel(
 
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(format!("{:<14}", lc.tr(field_label_key(row))), label_style),
+                    Span::styled(
+                        format!(
+                            "{:<width$}",
+                            lc.tr(field_label_key(row)),
+                            width = label_column_width
+                        ),
+                        label_style,
+                    ),
                     Span::styled(" ", Style::default()),
                     Span::styled(value_display, value_style),
                 ]));
@@ -307,7 +366,8 @@ pub(crate) fn render_config_panel(
     // overlay 活跃 textarea
     if let Some(line_idx) = active_textarea_overlay {
         if line_idx < inner.height {
-            let label_width: u16 = 17; // "  " + 14-char label + " "
+            // "  " (2 cols) + label (display cols) + " " (1 col)
+            let label_width: u16 = (2 + label_column_width + 1) as u16;
             let value_area = Rect {
                 x: inner.x + label_width,
                 y: inner.y + line_idx,

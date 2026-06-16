@@ -1,6 +1,6 @@
-use super::pty_session::PtySession;
 #[cfg(target_os = "windows")]
 use super::pty_session::normalize_crlf;
+use super::pty_session::PtySession;
 use std::io::Read;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -59,7 +59,16 @@ fn test_pty_session_spawn_returns_handles() {
 fn test_pty_session_read_receives_echo_output() {
     // Windows: powershell -NoProfile -NoLogo -NonInteractive -Command "echo hello"
     let (shell, args): (&str, Vec<&str>) = if cfg!(target_os = "windows") {
-        ("powershell.exe", vec!["-NoProfile", "-NoLogo", "-NonInteractive", "-Command", "echo hello"])
+        (
+            "powershell.exe",
+            vec![
+                "-NoProfile",
+                "-NoLogo",
+                "-NonInteractive",
+                "-Command",
+                "echo hello",
+            ],
+        )
     } else {
         ("bash", vec!["-c", "echo hello"])
     };
@@ -118,7 +127,16 @@ fn test_pty_session_spawn_uses_cwd() {
         .expect("temp_dir 应有 file_name");
 
     let (shell, args): (&str, Vec<&str>) = if cfg!(target_os = "windows") {
-        ("powershell.exe", vec!["-NoProfile", "-NoLogo", "-NonInteractive", "-Command", "Get-Location"])
+        (
+            "powershell.exe",
+            vec![
+                "-NoProfile",
+                "-NoLogo",
+                "-NonInteractive",
+                "-Command",
+                "Get-Location",
+            ],
+        )
     } else {
         ("bash", vec!["-c", "pwd"])
     };

@@ -324,13 +324,27 @@ fn render_form_edit(
 
     let mut lines: Vec<Line> = vec![Line::from("")];
 
-    // 记录活跃文本字段行索引和 x 偏移，用于 overlay textarea
-    let label_prefix_width: usize = 2 + 4 + 1; // "❯ " + label(4 cols) + " "
+    // 动态计算标准字段 label 的最大显示列宽（替代硬编码 4），
+    // 确保 overlay x 偏移与底层 Paragraph 中 label 的实际渲染宽度一致。
+    // pad_display_columns 不截断——只用 max 保证较短 label 被填充到相同宽度，
+    // 超长 label 的宽度会自然成为新 max。
+    let standard_labels = [
+        lc.tr("setup-field-type"),
+        lc.tr("setup-field-id"),
+        lc.tr("setup-field-base-url"),
+        lc.tr("setup-field-api-key"),
+    ];
+    let max_standard_label_width: usize = standard_labels
+        .iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.as_str()))
+        .max()
+        .unwrap_or(4);
+    let label_prefix_width: usize = 2 + max_standard_label_width + 1; // "❯ " + label + " "
     let mut overlay_line: Option<(usize, usize)> = None;
 
     lines.push(render_field_line(
         &lc.tr("setup-field-type"),
-        4,
+        max_standard_label_width,
         FormField::ProviderType,
         format!("[{}]", mp.provider_type.label(lc)),
         wizard.form_focus,
@@ -338,7 +352,7 @@ fn render_form_edit(
 
     lines.push(render_field_line(
         &lc.tr("setup-field-id"),
-        4,
+        max_standard_label_width,
         FormField::ProviderId,
         if wizard.form_focus == FormField::ProviderId {
             String::new()
@@ -353,7 +367,7 @@ fn render_form_edit(
 
     lines.push(render_field_line(
         &lc.tr("setup-field-base-url"),
-        4,
+        max_standard_label_width,
         FormField::BaseUrl,
         if wizard.form_focus == FormField::BaseUrl {
             String::new()
@@ -402,7 +416,7 @@ fn render_form_edit(
     };
     lines.push(render_field_line(
         &lc.tr("setup-field-api-key"),
-        4,
+        max_standard_label_width,
         FormField::ApiKey,
         if wizard.form_focus == FormField::ApiKey {
             String::new()
@@ -472,26 +486,28 @@ fn render_form_edit(
 
     // Overlay textarea on the active field line
     if let Some((line_idx, x_offset)) = overlay_line {
-        let mp = &mut wizard.providers[wizard.active_provider];
-        let field: Option<&mut crate::app::FieldTextarea> = match wizard.form_focus {
-            FormField::ProviderId => Some(&mut mp.field_provider_id),
-            FormField::BaseUrl => Some(&mut mp.field_base_url),
-            FormField::ApiKey => Some(&mut mp.field_api_key),
-            FormField::OpusModel => Some(&mut mp.aliases[0].field_model_id),
-            FormField::SonnetModel => Some(&mut mp.aliases[1].field_model_id),
-            FormField::HaikuModel => Some(&mut mp.aliases[2].field_model_id),
-            _ => None,
-        };
-        if let Some(field) = field {
-            let y = inner.y + line_idx as u16;
-            let x = inner.x + x_offset as u16;
-            let textarea_area = Rect {
-                x,
-                y,
-                width: inner.width.saturating_sub(x_offset as u16),
-                height: 1,
+        if (line_idx as u16) < inner.height {
+            let mp = &mut wizard.providers[wizard.active_provider];
+            let field: Option<&mut crate::app::FieldTextarea> = match wizard.form_focus {
+                FormField::ProviderId => Some(&mut mp.field_provider_id),
+                FormField::BaseUrl => Some(&mut mp.field_base_url),
+                FormField::ApiKey => Some(&mut mp.field_api_key),
+                FormField::OpusModel => Some(&mut mp.aliases[0].field_model_id),
+                FormField::SonnetModel => Some(&mut mp.aliases[1].field_model_id),
+                FormField::HaikuModel => Some(&mut mp.aliases[2].field_model_id),
+                _ => None,
             };
-            field.render(f, textarea_area);
+            if let Some(field) = field {
+                let y = inner.y + line_idx as u16;
+                let x = inner.x + x_offset as u16;
+                let textarea_area = Rect {
+                    x,
+                    y,
+                    width: inner.width.saturating_sub(x_offset as u16),
+                    height: 1,
+                };
+                field.render(f, textarea_area);
+            }
         }
     }
 }

@@ -152,10 +152,7 @@ impl BaseTool for BashTool {
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(120_000)
-            .clamp(
-                if cfg!(target_os = "windows") { 5000 } else { 1 },
-                600_000,
-            );
+            .clamp(if cfg!(target_os = "windows") { 5000 } else { 1 }, 600_000);
         let _description = input["description"].as_str();
         let _run_in_background = input["run_in_background"].as_bool().unwrap_or(false);
 

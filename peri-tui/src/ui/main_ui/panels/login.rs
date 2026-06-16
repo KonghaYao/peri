@@ -198,7 +198,8 @@ pub(crate) fn render_login_panel(f: &mut Frame, panel: &mut LoginPanel, app: &mu
 
                 lines.push(Line::from(vec![
                     Span::styled(format!("  {} ", label), label_style),
-                    Span::styled(format!(" {}", value_display), value_style),
+                    Span::styled(" ", Style::default()),
+                    Span::styled(value_display, value_style),
                 ]));
             }
 

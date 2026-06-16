@@ -1,9 +1,14 @@
 use crate::error::Result;
-use crate::fs_util::{copy_dir_all, paths_equal, remove_symlink_or_dir};
+use crate::fs_util::{paths_equal, remove_symlink_or_dir};
 use crate::resolver::PackageType;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use {
+    crate::fs_util::copy_dir_all,
+    std::sync::atomic::{AtomicBool, Ordering},
+};
 
+#[cfg(windows)]
 static WARNED_SYMLINK_PERMISSION: AtomicBool = AtomicBool::new(false);
 
 /// Tool adapter trait
