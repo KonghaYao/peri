@@ -115,22 +115,22 @@ pub async fn next_event(app: &mut App) -> Result<Option<Action>> {
         if !event::poll(Duration::from_millis(50))? {
             return Ok(None);
         }
-        loop {
-            let ev = event::read()?;
-
-            // On Windows, mouse wheel movement may generate spurious Key(Up/Down)
-            // events alongside MouseScroll events. Filter these out before coalescing
-            // so that scroll events are handled correctly.
-            #[cfg(target_os = "windows")]
-            let ev = match filter_mouse_wheel_keys(ev) {
-                Some(ev) => ev,
-                // Spurious wheel-generated Key(Up/Down) discarded — loop to get
-                // the next real event from the queue.
-                None => continue,
-            };
-
-            break ev;
+        // Windows: mouse wheel movement may generate spurious Key(Up/Down)
+        // events alongside MouseScroll events. Filter these out before
+        // coalescing so that scroll events are handled correctly. When the
+        // filter discards a spurious Key, loop to read the next real event.
+        #[cfg(target_os = "windows")]
+        {
+            loop {
+                let ev = event::read()?;
+                if let Some(ev) = filter_mouse_wheel_keys(ev) {
+                    break ev;
+                }
+            }
         }
+        // Non-Windows: no filter needed, read directly.
+        #[cfg(not(target_os = "windows"))]
+        event::read()?
     };
 
     // Scroll/Drag event coalescing: drain queued mouse events to avoid
