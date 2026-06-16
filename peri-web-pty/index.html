@@ -236,6 +236,7 @@ https://unpkg.com/jetbrains-mono@1.0.6/css/jetbrains-mono.css
         <script src="https://unpkg.com/xterm@5.3.0/lib/xterm.js"></script>
         <script src="https://unpkg.com/@xterm/addon-fit@0.11.0/lib/addon-fit.js"></script>
         <script src="https://unpkg.com/@xterm/addon-web-links@0.12.0/lib/addon-web-links.js"></script>
+
         <!-- 1. 全局状态 -->
         <script>
             const terminals = new Map();
@@ -364,11 +365,20 @@ https://unpkg.com/jetbrains-mono@1.0.6/css/jetbrains-mono.css
                 });
 
                 // xterm 实例
+                // CJK 优化要点：
+                // 1. fontFamily 优先 CJK 等宽字体，避免浏览器回退字体破坏对齐
+                // 2. rescaleOverlappingGlyphs 防止模糊宽度字符（如罗马数字）挤压相邻单元格
+                // 3. letterSpacing=0 确保 CJK 双宽字符精确占 2 格
+                // 4. drawBoldTextInBrightColors=false 避免加粗 CJK 文字使用亮色导致可读性差
                 const term = new Terminal({
                     cursorBlink: true,
                     fontSize: 14,
                     fontFamily:
-                        '"JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, monospace',
+                        '"JetBrains Mono", "Fira Code", "Cascadia Code", "Noto Sans Mono CJK SC", "PingFang SC", "Microsoft YaHei", Menlo, monospace',
+                    letterSpacing: 0,
+                    lineHeight: 1,
+                    drawBoldTextInBrightColors: false,
+                    rescaleOverlappingGlyphs: true,
                     theme: {
                         background: "#1a1a2e",
                         foreground: "#e0e0e0",
@@ -388,10 +398,16 @@ https://unpkg.com/jetbrains-mono@1.0.6/css/jetbrains-mono.css
                 const webLinksAddon = new WebLinksAddon.WebLinksAddon();
                 term.loadAddon(fitAddon);
                 term.loadAddon(webLinksAddon);
+
                 term.open(container);
 
                 container.addEventListener("mousedown", () => {
                     lastFocusedId = id;
+                });
+
+                // 拦截右键默认菜单，但保留事件传递给 xterm（粘贴等）
+                container.addEventListener("contextmenu", (e) => {
+                    e.preventDefault();
                 });
 
                 // WebSocket 连接

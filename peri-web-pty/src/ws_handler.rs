@@ -121,18 +121,59 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
     let (tx, mut rx) = mpsc::channel::<Option<Vec<u8>>>(16);
 
     // read_task：spawn_blocking 阻塞读 PTY。reader 直接 move 进闭包，无需 Arc<Mutex>
+    // 跨读边界 UTF-8 残字节缓冲：多字节字符（中文/CJK、emoji、box-drawing）
+    // 可能被 4096 字节缓冲区边界截断，from_utf8_lossy 会产生 �。此处将
+    // 不完整尾部字节保存到 leftover，下次 read 时前拼。
     let read_task = tokio::task::spawn_blocking(move || {
         let mut reader = reader;
         let mut buf = [0u8; 4096];
+        let mut leftover: Vec<u8> = Vec::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => {
+                    // EOF：如果有残字节，最后一次发送（lossy 兜底）
+                    if !leftover.is_empty() {
+                        let text = String::from_utf8_lossy(&leftover).into_owned();
+                        let _ = tx.blocking_send(Some(text.into_bytes()));
+                    }
                     let _ = tx.blocking_send(None);
                     break;
                 }
                 Ok(n) => {
-                    if tx.blocking_send(Some(buf[..n].to_vec())).is_err() {
-                        break; // pump_task 已退出
+                    let data = if leftover.is_empty() {
+                        buf[..n].to_vec()
+                    } else {
+                        let mut v = Vec::with_capacity(leftover.len() + n);
+                        v.append(&mut leftover);
+                        v.extend_from_slice(&buf[..n]);
+                        v
+                    };
+                    match std::str::from_utf8(&data) {
+                        Ok(_) => {
+                            if tx.blocking_send(Some(data)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let valid_up_to = e.valid_up_to();
+                            if e.error_len().is_some() {
+                                // 中间出现非法字节序列（PTY 输出极少发生），用 lossy 兜底
+                                let text = String::from_utf8_lossy(&data).into_owned();
+                                if tx.blocking_send(Some(text.into_bytes())).is_err() {
+                                    break;
+                                }
+                            } else {
+                                // 尾部不完整 UTF-8，保存到 leftover 等下次拼
+                                if valid_up_to > 0
+                                    && tx
+                                        .blocking_send(Some(data[..valid_up_to].to_vec()))
+                                        .is_err()
+                                {
+                                    break;
+                                }
+                                leftover.extend_from_slice(&data[valid_up_to..]);
+                            }
+                        }
                     }
                 }
             }
