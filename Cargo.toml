@@ -89,6 +89,8 @@ sha2 = "0.10"
 
 # --- PTY server ---
 axum = { version = "0.7", features = ["ws"] }
-portable-pty = "0.9"
+# Pin 到 0.8.1：0.9.0 在 Windows ConPTY 上 reader 读不到 PTY child 输出（短命令场景），
+# 0.8.1 据报告在该场景工作正常。详见 docs/review/2026-06-16-peri-web-pty-windows-conpty-bug.md
+portable-pty = "=0.8.1"
 tokio-tungstenite = "0.29"
 serial_test = "3"
