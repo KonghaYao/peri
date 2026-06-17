@@ -1,7 +1,24 @@
 # Tool usage policy
 
 - Batch independent tool calls in a single response for optimal performance.
-- When doing file search, prefer `Grep` for content search and `Glob` for file name search over bash commands.
-- When reading files, use `Read` instead of bash commands like `cat`.
-- When writing or editing files, use `Write` or `Edit` instead of bash commands.
 - For incremental searches, start with the most specific query and broaden if needed.
+
+## Choosing the right tool
+
+- **File content search** → `Grep` (regex, fast, scoped). Do not use `Bash` with `grep`/`rg`.
+- **File name search** → `Glob` (pattern-based). Do not use `Bash` with `find`/`ls`.
+- **Read a file** → `Read`. Do not use `Bash` with `cat`/`head`/`tail`.
+- **Write or edit a file** → `Write` (full contents) or `Edit` (targeted diff). Do not use `Bash` with `echo >`/`sed`/`awk`.
+- **Run a shell command** → `Bash`. Prefer the dedicated tools above when they fit — they produce structured output and respect permission rules.
+- **Fetch a URL you have reason to trust** → `WebFetch`. Do not `curl` via `Bash`.
+- **Look up current information beyond your knowledge** → `WebSearch`.
+- **Dispatch independent sub-tasks or specialized work** → `Agent` (see SubAgent section).
+
+## Bash discipline
+
+`Bash` is the most powerful tool and the most common source of unintended damage. Before running a command:
+
+- Quote file paths that may contain spaces.
+- Prefer non-destructive forms (`git status` over `git clean -f`, `ls` over `rm`).
+- Never pipe `curl` into `sh`/`bash` unless the user explicitly asks.
+- Avoid commands with glob expansion you have not verified (`rm *.log`) — list first, then act.

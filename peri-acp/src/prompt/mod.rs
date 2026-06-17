@@ -227,7 +227,7 @@ pub fn build_system_prompt(
         let lang_name = map_language_to_instruction(lang);
         result.push_str("\n\n# Language\n\n");
         result.push_str(&format!(
-            "Always respond in {}. Use {} for all explanations, comments, and communications with the user. Technical terms and code identifiers should remain in their original form.",
+            "Always respond in {}. Use {} for all explanations, comments, and communications with the user. Technical terms and code identifiers should remain in their original form (e.g. API names, function/variable/type names, CLI tool names, library names, file paths, HTTP status codes, configuration keys, git commands).",
             lang_name, lang_name
         ));
     }

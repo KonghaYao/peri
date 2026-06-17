@@ -17,28 +17,21 @@ Each agent entry shows `[model_tier]` (haiku=fastest/cheapest, sonnet=balanced, 
 
 ## Agent Selection Guide
 
-**Default: pick a specialized agent. `general-purpose` is a fallback, not a default.** When you find yourself reaching for `general-purpose`, stop and scan the list below first — a specialized agent almost always fits, and real usage shows `general-purpose` is over-chosen (it costs more tokens and fails more often than the specialized agent that fits the task).
+**Default: pick a specialized agent. `general-purpose` is a fallback, not a default.** When you find yourself reaching for `general-purpose`, stop and scan the list below first — real usage shows `general-purpose` is over-chosen; it costs more tokens and fails more often than the specialized agent that fits the task.
 
-Specialized agents are smaller, faster, and less error-prone than `general-purpose`. Using `general-purpose` for a task a specialized agent handles is wasteful.
-
-- **Code implementation / editing / refactoring / migration** → **`coder`** (NOT general-purpose). Coder has built-in memory discipline that prevents search loops and context waste. It is more efficient than general-purpose for any task that produces file changes.
-- **Code search / codebase exploration / finding patterns** → `explore` (NOT general-purpose). Explore is optimized for read-only search — it cannot edit files, keeping its context clean and focused.
+- **Code implementation / editing / refactoring / migration** → **`coder`** (NOT general-purpose). Built-in memory discipline prevents search loops and context waste.
+- **Code search / codebase exploration / finding patterns** → `explore` (NOT general-purpose). Read-only, context stays clean.
 - **Architecture design / implementation planning** → `plan`
 - **Code review / quality check** → `code-reviewer`
 - **Web research / documentation lookup** → `web-researcher`
-- **None of the above match** → `general-purpose` — **fallback only**, last resort when no specialized agent fits. If you reach for it twice in a row for similar tasks, the second call is a signal you missed a specialized agent — switch.
+- **None of the above match** → `general-purpose` — **fallback only**. If you reach for it twice in a row for similar tasks, switch to the specialized agent you missed.
 
-## Common Agent Patterns
-
-These are the standard pipelines for different task types. Follow them — they exist because specialized agents significantly outperform general-purpose for their target tasks.
-
+**Standard pipelines** — follow these instead of inventing your own:
 - **Research**: `explore` (find code) → `plan` (design solution)
 - **Implementation**: `coder` (write code) → `code-reviewer` (review for issues)
-- **Web research**: `web-researcher` for any task requiring web search or fetching
+- **Web**: `web-researcher`
 
-These pipelines are not optional suggestions. Using general-purpose for implementation is wasteful — coder has built-in memory discipline that prevents the most common failure modes (search loops, context waste, re-reading).
-
-**Parallelization rule**: `[readonly]` agents (explore, plan, code-reviewer) can run concurrently. `[writes]` agents (coder) must be sequenced — never run two `[writes]` agents concurrently on the same codebase, and never run a `[writes]` agent in parallel with a background agent.
+**Parallelization**: `[readonly]` agents (explore, plan, code-reviewer) run concurrently. `[writes]` agents (coder) must be sequenced — never run two `[writes]` agents concurrently on the same codebase, and never run a `[writes]` agent in parallel with a background agent.
 
 ## Writing the prompt
 
@@ -54,15 +47,13 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 - Inherits full conversation history, system prompt, and tool set from parent
 - The `prompt` is a directive within existing context, not a standalone briefing
 - Output format: **Scope**, **Result**, **Key files**, **Files changed**
-- Do NOT set `subagent_type` when using fork mode — they are mutually exclusive
-- Usage: `Agent(fork: true, prompt: "...")` — fork is a boolean parameter, NOT an agent type name
+- `fork` is a boolean parameter, NOT an agent type name. Use `Agent(fork: true, prompt: "...")`. Do NOT set `subagent_type: "fork"` — wrong. `subagent_type` and `fork` are mutually exclusive.
 
 ## Usage notes
 
 - Always include a short `description` (3-5 words) for UI display and logging
 - Summarize sub-agent results for the user — they are not directly visible
 - Launch multiple sub-agents in parallel by including multiple `tool_use` blocks in a single message
-- **Common mistake**: `subagent_type: "fork"` is WRONG. Use `fork: true` instead. `fork` is a separate boolean parameter, not a subagent_type value.
 
 ## Background Tasks
 

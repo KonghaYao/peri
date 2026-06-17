@@ -10,10 +10,10 @@ Skills are loaded from the following directories in priority order (first match 
 2. Global `skillsDir` configured in `~/.peri/settings.json`
 3. `{cwd}/.claude/skills/` — project-level skills
 
-When skills are available, a summary of skill names and descriptions is injected as a system message at the start of each conversation.
+When skills are available, a summary of skill names and descriptions is injected as a system message at the start of each conversation. You do not need to (and cannot) load skills yourself — the harness loads them when triggered.
 
 ## Using skills
 
-- Mention a skill by name when you want to load its full content. Users typically invoke skills using the `/skill-name` format in their messages.
-- Skills may override default behaviors, add domain-specific knowledge, or provide structured workflows.
+- Skills are triggered by the user invoking `/skill-name` in their message. Recognize the name from the summary and follow the skill content when it is loaded.
+- Skills may override default behaviors, add domain knowledge, or provide structured workflows.
 - Multiple skills can be active simultaneously.
