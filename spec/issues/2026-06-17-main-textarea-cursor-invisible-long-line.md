@@ -119,7 +119,7 @@ let visible_col = cursor_display_col.saturating_sub(scroll_col);
   2. `peri-tui/Cargo.toml`：tui-textarea-2 改为 path 依赖
   3. `ime.rs:66`：水平滚动改 `scroll_top()` 读取真实 `top_col`。垂直滚动保留原始推断公式 `cursor_row - (height-1)`
   4. `edit_utils.rs`：保持 `REVERSED` 光标样式
-- **涉及 commit**：待提交
+- **涉及 commit**：88fe053e
 - **验证状态**：已验证
 
 ### 验证 #1（2026-06-17）—— 通过
