@@ -65,7 +65,12 @@ pub fn textarea_cursor_pos(textarea: &TextArea, textarea_area: Rect) -> Option<(
     let cursor_display_col = display_width_before(cursor_line, cursor_col);
     let (_top_row, top_col) = textarea.scroll_top();
     let scroll_col = top_col as usize;
-    let visible_col = cursor_display_col.saturating_sub(scroll_col);
+    // Clamp to visible area: cursor must not be placed outside the inner rect.
+    // Otherwise terminal emulators may ignore the cursor move, leaving a "ghost"
+    // at the previous position — seen as residual cursor after deletion.
+    let visible_col = cursor_display_col
+        .saturating_sub(scroll_col)
+        .min(visible_width.saturating_sub(1));
 
     // 使用 saturating_add 防御 u16 溢出（实际终端尺寸远小于 u16 上限，
     // 但作为坐标计算 API 加 saturating 保护更稳健）
@@ -130,20 +135,21 @@ mod tests {
     #[test]
     fn test_cursor_pos_horizontal_scroll() {
         // 长行超过视口宽度。由于 textarea 未渲染，viewport top_col 初始为 0，
-        // cursor_display_col=50, top_col=0, visible_col=50
+        // cursor_display_col=50, top_col=0, visible_col=min(50, 10-1)=9
         let mut ta = TextArea::default();
         ta.insert_str("a".repeat(50).as_str());
         let pos = textarea_cursor_pos(&ta, Rect::new(0, 0, 10, 1));
-        assert_eq!(pos, Some((50, 0)));
+        assert_eq!(pos, Some((9, 0)));
     }
 
     #[test]
     fn test_cursor_pos_horizontal_scroll_with_offset() {
         // 验证当 tui-textarea 渲染后有真实 top_col 时的行为
+        // 未渲染时 top_col=0，visible_col=min(100, 80-1)=79
         let mut ta = TextArea::default();
         ta.insert_str("a".repeat(100).as_str());
         let pos = textarea_cursor_pos(&ta, Rect::new(0, 0, 80, 1));
-        assert_eq!(pos, Some((100, 0)));
+        assert_eq!(pos, Some((79, 0)));
     }
 
     #[test]

@@ -1,8 +1,9 @@
 # 主输入框长行行尾终端光标消失
 
-**状态**：Verified
+**状态**：Reopen
 **优先级**：高
 **创建日期**：2026-06-17
+**Reopen 日期**：2026-06-17
 
 ## 问题描述
 
@@ -107,6 +108,7 @@ let visible_col = cursor_display_col.saturating_sub(scroll_col);
 | 2026-06-17 | — | Open | agent | 创建 |
 | 2026-06-17 | Open | Open | agent | 追加调研记录：根因确认为 `ime.rs:65-66` 水平滚动推断公式始终把光标钉在视口最右列，导致终端最右列光标裁剪/消失 |
 | 2026-06-17 | Open | Verified | agent | 用户验证通过：vendor tui-textarea-2 + scroll_top()。水平滚动用真实 viewport 偏移，垂直滚动保留原始公式。CJK 正常，无残影。 |
+| 2026-06-17 | Verified | Reopen | agent | 用户反馈删除/换行时仍有残影光标。根因：tui-textarea `cursor_at_end` REVERSED 空格帧间残留。修复：移除 cursor_at_end 空格 + visible_col 钳位。 |
 
 ## 修复记录
 
@@ -120,8 +122,26 @@ let visible_col = cursor_display_col.saturating_sub(scroll_col);
   3. `ime.rs:66`：水平滚动改 `scroll_top()` 读取真实 `top_col`。垂直滚动保留原始推断公式 `cursor_row - (height-1)`
   4. `edit_utils.rs`：保持 `REVERSED` 光标样式
 - **涉及 commit**：88fe053e
-- **验证状态**：已验证
+- **验证状态**：部分验证（删除时有残影回归）
+
+### 修复 #2（2026-06-17）
+
+- **操作人**：agent
+- **用户原意**：删除字符时不应留下残影光标（换行和 Backspace/Delete 后的残留 REVERSED 空格）
+- **修复内容**：
+  1. `peri-tui/vendor/tui-textarea-2/src/highlight.rs`：移除 `cursor_at_end` 的 REVERSED 空格渲染（`into_spans` 中两处）。光标可视化改由终端光标（`Frame::set_cursor_position`）全权负责，消除 tui-textarea 内部残留问题。
+  2. `peri-tui/src/app/ime.rs`：`visible_col` 添加 `.min(visible_width.saturating_sub(1))` 钳位，防止坐标超出 inner 区域导致终端忽略光标移动、产生定位残留。
+- **涉及 commit**：待提交
+- **验证状态**：待验证
 
 ### 验证 #1（2026-06-17）—— 通过
 
 用户反馈：光标位置正确，CJK 正常显示反色，换行/删除无残影。
+
+### 验证 #2（2026-06-17）—— 失败（部分回归）
+
+用户反馈：在删除字符时，仍会留下残影光标。具体表现：
+- 换行（Enter）后，前一行行尾残留一个光标块
+- 删除（Backspace/Delete）后，旧光标位置残留一个光标块
+
+根因分析：tui-textarea-2 的 `LineHighlighter::into_spans()` 在 `cursor_at_end=true` 时渲染一个 REVERSED 空格。该空格在帧间移动时，前帧的 REVERSED 空格位置在 ratatui diff 中可能未被正确清除，导致终端上显示为「残影」。

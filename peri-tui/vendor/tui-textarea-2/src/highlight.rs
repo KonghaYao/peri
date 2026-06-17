@@ -247,8 +247,8 @@ impl<'a> LineHighlighter<'a> {
             mut boundaries,
             tab_len,
             style_begin,
-            cursor_style,
-            cursor_at_end,
+            cursor_style: _,
+            cursor_at_end: _,
             mask,
             select_at_end,
             select_style,
@@ -260,9 +260,8 @@ impl<'a> LineHighlighter<'a> {
             if !built.is_empty() {
                 spans.push(Span::styled(built, style_begin));
             }
-            if cursor_at_end {
-                spans.push(Span::styled(" ", cursor_style));
-            } else if select_at_end {
+            // cursor_at_end 空格已移除（见下文注释）
+            if select_at_end {
                 spans.push(Span::styled(" ", select_style));
             }
             return Line::from(spans);
@@ -295,11 +294,10 @@ impl<'a> LineHighlighter<'a> {
             spans.push(Span::styled(builder.build(&line[start..]), style));
         }
 
-        // cursor_at_end 空格已移除：光标显示由外部渲染层（main_ui 中的光标覆盖层）
-        // 处理，避免换行/删除后在 textarea 内部遗留残影光标。
-        if cursor_at_end {
-            spans.push(Span::styled(" ", cursor_style));
-        } else if select_at_end {
+        // cursor_at_end 空格已移除：光标显示由终端光标（Frame::set_cursor_position）
+        // 处理。tui-textarea 自身不渲染行尾光标，避免换行/删除后在 textarea 内部
+        // 遗留残影光标（REVERSED 空格与前帧 diff 清理不彻底）。
+        if select_at_end {
             spans.push(Span::styled(" ", select_style));
         }
 
@@ -440,9 +438,10 @@ mod tests {
     #[test]
     fn into_spans_cursor_line() {
         let tests = [
-            ("", 0, &[(" ", CUR)][..]),
+            // cursor_at_end spaces removed: cursor display handled by terminal cursor
+            ("", 0, &[][..]),
             ("a", 0, &[("a", CUR)][..]),
-            ("a", 1, &[("a", LINE), (" ", CUR)][..]),
+            ("a", 1, &[("a", LINE)][..]),
             ("あいう", 0, &[("あ", CUR), ("いう", LINE)][..]),
             ("あいう", 1, &[("あ", LINE), ("い", CUR), ("う", LINE)][..]),
             ("あいう", 2, &[("あい", LINE), ("う", CUR)][..]),
@@ -611,14 +610,14 @@ mod tests {
                 ][..],
             ),
             (
-                "selection + cursor at end",
+                "selection + cursor at end (no cursor_at_end space)",
                 {
                     let mut lh = LineHighlighter::new("ab", CUR, 4, None, SEL);
                     lh.cursor_line(2, LINE);
                     lh.selection(0, 0, 1, 2, 0);
                     lh
                 },
-                &[("a", LINE), ("b", SEL), (" ", CUR)][..],
+                &[("a", LINE), ("b", SEL)][..],
             ),
             (
                 "cursor at start of selection",
