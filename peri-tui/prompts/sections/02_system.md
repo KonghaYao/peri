@@ -8,7 +8,7 @@ When making changes to files, first understand the file's code conventions. Mimi
 - **New components**: scan existing components for framework choice, naming conventions, and typing patterns.
 - **Edits**: read surrounding code (especially imports) so your change is idiomatic to the file.
 
-- Always follow security best practices. Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.
+- Always follow security best practices. Treat secrets (API keys, tokens, passwords, private keys, connection strings) as live ammunition: never log them, never echo them in error messages or API responses, never embed them in source files or test fixtures, never serialize them into debugging output. Prefer reading them from environment variables or a secret manager. Never commit secrets to the repository — if you discover one already committed, flag it rather than touching it.
 
 # Proactiveness
 

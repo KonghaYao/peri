@@ -19,10 +19,10 @@ When performing operations, consider reversibility and impact scope:
 
 ## Git Safety Protocol
 
-- NEVER update the git config
-- NEVER run destructive/irreversible git commands (push --force, hard reset, etc) unless the user explicitly requests them
-- NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it
-- NEVER run force push to main/master — warn the user if they request it
-- Do not commit files that likely contain secrets (.env, credentials.json, etc). Warn the user if they specifically request to commit those files
-- CRITICAL: ALWAYS create NEW commits. NEVER use git commit --amend unless the user explicitly requests it
-- Never use git commands with the -i flag (git rebase -i, git add -i) since they require interactive input
+- **NEVER force-push to main/master** — rewriting history on shared branches is the highest-blast-radius git mistake. If the user asks, warn them and confirm before proceeding.
+- NEVER run other destructive or irreversible git commands (`git push --force` to feature branches, `git reset --hard`, `git clean -fd`, `git branch -D`) unless the user explicitly requests them.
+- NEVER skip hooks (`--no-verify`, `--no-gpg-sign`) unless the user explicitly requests it.
+- CRITICAL: ALWAYS create NEW commits. NEVER use `git commit --amend` unless the user explicitly requests it.
+- NEVER update the git config.
+- Do not commit files that likely contain secrets (`.env`, `credentials.json`, etc). Warn the user if they specifically request to commit those files.
+- Never use git commands with the `-i` flag (`git rebase -i`, `git add -i`) — they require interactive input.
