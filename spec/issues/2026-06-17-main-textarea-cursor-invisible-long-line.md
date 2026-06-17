@@ -1,6 +1,6 @@
 # 主输入框长行行尾终端光标消失
 
-**状态**：Verified（IME 模块彻底移除后根治）
+**状态**：Verified（IME 模块彻底移除后根治）；**Follow-up**：IME 候选窗跟随光标能力丢失，未来需重新引入
 **优先级**：高
 **创建日期**：2026-06-17
 **最终修复日期**：2026-06-17（修复 #4：删除 IME 模块，回到 buffer 级 REVERSED 光标）
@@ -112,6 +112,7 @@ let visible_col = cursor_display_col.saturating_sub(scroll_col);
 | 2026-06-17 | Reopen | Verified | agent | 用户验证通过。修复 #2 移除 cursor_at_end REVERSED 空格后，删除/换行无残影。 |
 | 2026-06-17 | Verified | Reopen | agent | 用户决定完全移除 vendor/tui-textarea-2（避免仓库维护过多上游代码）。Cargo.toml 改回上游 `tui-textarea-2 = "0.11"`，`ime.rs` 回滚到 vendor 前的推断公式，`edit_utils.rs` 回滚到 `Style::default()`。修复 #1 与 #2 同时失效，bug 复发（长行行尾光标不可见 + 删除/换行残影）。用户明确接受复发。 |
 | 2026-06-17 | Reopen | Verified | agent | **彻底根治**：用户确认 PR #34 前没有此 bug，根因是 PR #34 引入的 IME 模块（`set_cursor_style(Style::default())` 关闭 buffer 级光标 + `set_cursor_position` 改用终端光标）。删除 `peri-tui/src/app/ime.rs` 整个模块、移除 `main_ui/mod.rs` 中的 `set_cursor_position` 调用、`edit_utils.rs` 不再调 `set_cursor_style`，回到 tui-textarea 默认 REVERSED buffer 级光标。代价：中文输入法候选窗不再跟随光标。 |
+| 2026-06-17 | Verified | Verified (Follow-up) | agent | 补充 IME 模块历史与未来恢复路径章节：记录 PR #34 当初要解决的 Windows IME 候选窗定位问题、为什么留下 bug、修复 #4 后的实际损失，以及未来恢复 IME 支持的三种方案（推荐 UI state 跨帧 sticky `last_scroll_col`）和重新引入前的 6 项检查清单。状态保持 Verified，但标记 Follow-up：IME 候选窗跟随光标能力丢失，未来需重新引入。 |
 
 ## 修复记录
 
@@ -182,4 +183,81 @@ let visible_col = cursor_display_col.saturating_sub(scroll_col);
   4. `peri-tui/src/app/edit_utils.rs`：移除 `ta.set_cursor_style(Style::default());`，让 tui-textarea 用默认 REVERSED buffer 级光标
 - **代价**：中文输入法（IME）候选窗不再跟随光标位置（会停在终端左上角或上次位置）。用户明确接受。
 - **验证状态**：待用户手动验证。预期：长行行尾、删除、换行场景光标始终以反色块形式可见。
+
+## IME 模块历史与未来恢复路径（Follow-up）
+
+### PR #34 当初要解决的问题
+
+PR #34（commit `9026879f`，2026-06-16，作者 wuxiaoweisjz/xiao）标题为 `fix(tui): Windows terminal cursor positioning for IME and config import`，核心动机是 **Windows 终端的中文输入法（IME）候选窗定位**：
+
+- 在 Windows 终端（以及部分 Linux 终端）上，IME 候选词框的位置由**终端光标**坐标决定，不是 ratatui buffer 里的"虚拟光标"。
+- 如果不主动调用 `Frame::set_cursor_position`，终端光标会停在 `(0, 0)`（屏幕左上角）。
+- 结果：打中文时候选词框跑到屏幕左上角，离输入框十万八千里，用户体验极差。
+- macOS 上症状较轻（macOS 终端 IME 行为较好），Windows 上特别明显。
+
+### 当时的修复方案（两步）
+
+1. `set_cursor_style(Style::default())` —— 关掉 tui-textarea 默认的 REVERSED buffer 级反色块光标，不然会同时存在 buffer 光标和终端光标，看到两个光标。
+2. 每帧调用 `Frame::set_cursor_position()` 把终端光标移到 textarea 光标的实际位置 —— IME 候选窗就会跟着来。
+
+### 为什么会留下 bug
+
+- tui-textarea 0.11 的 `Viewport::scroll_top()` 虽然是 `pub`，但 `TextArea::viewport` 字段是 `pub(crate)`——外部拿不到真实水平滚动偏移。
+- 只好用公式推断：`scroll_col = cursor_display_col - (visible_width - 1)`。
+- 这个公式在 textarea 内部"sticky scroll"时（光标在视口中部移动，`top_col` 不变）算错（见上面"调研记录"的数值推演表）。
+- 长行行尾光标算偏 → 终端光标跑到屏幕最右列 → 终端模拟器在最右列裁剪光标 → 用户看不到光标。
+- 因为 buffer 级光标被关了，没有 fallback，bug 直接显形。
+
+### 相关时间线
+
+- 同一天稍晚 commit `ebbc205c`（"清理 PR #34 的 FFI/算法/架构问题"）专门修了 PR #34 的一些遗留问题，但 IME 水平滚动推断 bug 没被处理掉。
+- 当天又合并了 `c3204bd6`（`fix/windows-pty-and-crlf` 分支），又引入了另一个**完全独立的**光标 bug（`spec/issues/2026-06-16-main-textarea-cursor-position-mismatch.md`，"显示位置与实际编辑位置不同步"，状态仍 Partial）—— 那个跟 IME 无关，是 event/mouse 逻辑改动引入的。
+
+### 修复 #4 后的实际损失
+
+- macOS 用户基本无感（macOS 终端 IME 行为较好）。
+- **Windows 用户输入中文时候选词框会回到屏幕左上角**。
+- 换来的是：buffer 级 REVERSED 光标在任何场景下都正确显示，两个老 bug（长行行尾光标不可见 + 删除/换行残影）同时根治。
+
+### 未来恢复 IME 支持的正确方向（避免重蹈覆辙）
+
+如果以后真要恢复 IME 候选窗跟随光标能力，**禁止**重新采用 PR #34 的简单推断公式。正确方向有三种：
+
+| 方案 | 评估 | 复杂度 |
+|------|------|--------|
+| **A. UI state 维护跨帧 `last_scroll_col`，用 `next_scroll_top` 逻辑更新** | 完全模拟 textarea 行为，准确；上游 `widget.rs:81-87` 的 `next_scroll_top` 逻辑就是规则 | 中（需要状态字段 + 跨帧更新） |
+| **B. 同时保留 buffer 级 REVERSED 光标和终端光标** | 不调 `set_cursor_style`，保留默认 REVERSED；同时调 `set_cursor_position` 算错了也有 fallback，用户仍能看到 buffer 光标 | 低（最小改动，但两个光标可能视觉重叠/错位） |
+| **C. Fork/vendor tui-textarea-2，加 `pub fn scroll_top(&self) -> (u16, u16)` getter** | 最准确；但仓库不希望维护 vendor 代码（见修复 #3 决策） | 高（vendor 维护成本） |
+
+**推荐方案 A**：在 UI state（如 `ChatSession.ui` 或 `GlobalUiState`）中新增 `textarea_last_scroll_col: u16` 字段，每帧渲染时按上游 `next_scroll_top` 规则更新：
+
+```rust
+// 上游 widget.rs:81-87 的等价逻辑
+fn next_scroll_top(prev_top: u16, cursor: u16, len: u16) -> u16 {
+    if cursor < prev_top {
+        cursor
+    } else if prev_top + len <= cursor {
+        cursor + 1 - len
+    } else {
+        prev_top  // 关键：sticky，保持不变
+    }
+}
+```
+
+关键差异：当 cursor 在视口内（`prev_top ≤ cursor < prev_top + len`）时，**保持 `prev_top` 不变**——这正是 PR #34 推断公式忽略的情况，导致光标被错误钉在视口最右列。
+
+**最低风险方案 B**：如果不愿引入跨帧状态，至少采用方案 B 作为兜底——不调 `set_cursor_style`，保留 REVERSED buffer 光标作为 fallback，避免再次出现"终端光标算错就完全看不到光标"的灾难性表现。代价是 IME 候选窗位置可能轻微偏移（buffer 光标和终端光标位置差异）。
+
+### 重新引入前的检查清单
+
+恢复 IME 模块时必须验证：
+
+1. **长行行尾光标可见**：输入超过视口宽度的 ASCII 长行，光标在行尾仍可见
+2. **CJK 长行光标可见**：同上，但用 CJK 字符（每字符占 2 列）
+3. **删除/换行无残影**：Backspace/Delete/Enter 后前一位置无残留光标块
+4. **`←`/`→` 视觉响应**：长行中按 ← 一次，光标视觉立即左移一格（非 24 次后才动）
+5. **IME 候选窗跟随**（Windows 验证）：中文输入时候选词框出现在输入框附近，而非屏幕左上角
+6. **跨帧 sticky 行为**：光标在视口中部移动时，水平滚动不抖动
+
+满足以上 6 条才算合格的 IME 恢复方案。
 
