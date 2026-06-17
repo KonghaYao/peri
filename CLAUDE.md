@@ -108,6 +108,21 @@ scripts/start-tui.sh                 # 启动 TUI（RELAY_PORT=3001）
 
 **[TRAP]** `prepend_message` 的 `insert(0)` 右移导致 StateSnapshot 快照范围扩大，泄露 System 消息到 `agent_state_messages`。StateSnapshot 应始终 `.filter(|m| !m.is_system())`。（详见 spec/global/domains/system-prompt.md#issue_2026-05-13-system-prompt-dynamic-parts-duplicated-in-consecutive-calls）
 
+### 新增/删除 Core 工具检查清单
+
+新增或删除 Core 工具时，必须同步更新以下触点（漏改任一项都会导致 LLM 工具列表与文档/MCP/HITL 不一致）：
+
+1. `peri-middlewares/src/tool_search/core_tools.rs` —— `CORE_TOOLS` HashSet + 对应 `TOOL_*` 常量
+2. `peri-middlewares/src/tool_search/search_tool.rs` & `execute_tool.rs` —— 已改为通过 `core_tools_sorted_csv()` 动态生成（P1-1），无需手改，但需确认 description 内容正确
+3. `peri-tui/prompts/sections/05_using_tools.md` —— 用户可见的"选择正确工具"指引，必须列出该工具
+4. `peri-middlewares/src/hitl/mod.rs` —— `is_edit_tool()` 与默认审批列表（如工具涉及文件修改/命令执行）
+5. `peri-acp/src/event/mapper.rs`（或对应路径）—— `ToolKind` 映射，决定 TUI 图标显示
+6. `peri-tui/src/tool_display.rs` —— TUI 简称/全称映射
+7. `core_tools_test.rs` —— 更新"动态生成 CSV 包含所有工具"的断言列表
+8. 若是 Edit/Write 类工具，额外检查 `GitAttributionMiddleware` 的 before_tool/after_tool 钩子是否需要追踪
+
+删除 Core 工具时反向操作，且必须 grep 全仓库确认无残留引用。
+
 ## 中间件链执行顺序
 
 详见 `peri-middlewares/CLAUDE.md`。18 个中间件按固定顺序组成链，末尾 `[ReActAgent.with_system_prompt()]` prepend。
@@ -139,7 +154,8 @@ session/new → frozen_date → frozen_claude_md + frozen_claude_local_md
 - `DISABLE_COMPACT` / `DISABLE_AUTO_COMPACT` / `COMPACT_THRESHOLD`：每轮读取 env
 - `peri_config`、Provider Snapshot、context_window：每轮从 `Arc<RwLock<>>` 克隆快照
 - 整个中间件链、AgentState、Cancel Token、Langfuse Tracer：每轮全新构造
-- **[TRAP]** `PromptFeatures::detect()` 仍每轮重新读取 `YOLO_MODE`，`is_git_repo` 也每轮重新检查——两者未随 frozen 数据传递，可能导致 SubAgent 与 Main Agent 行为不一致。（详见 spec/global/domains/system-prompt.md#issue_2026-05-27-language-injection-subagent-drift-cache-isolation）
+
+**[TRAP]** `PromptFeatures::detect()` 与 SubAgent 漂移：`PromptFeatures::detect()` 仍每轮重新读取 `YOLO_MODE`，`is_git_repo` 也每轮重新检查——两者未随 frozen 数据传递。这违反"系统提示词稳定性第一优先级"的派生不变量：SubAgent 在会话进行中可能因 env 变化或 git 状态变化而看到与 Main Agent 不同的 `PromptFeatures`，从而注入不同的 prompt 段落。新增依赖 `PromptFeatures` 的中间件时必须明确：（1）该特征应否被 frozen；（2）若不 frozen，SubAgent 链路是否会因此与 Main Agent 漂移；（3）漂移是否会破坏 prompt cache 前缀。详见 spec/global/domains/system-prompt.md#issue_2026-05-27-language-injection-subagent-drift-cache-isolation。
 
 **ACP Slash Commands**（符合 agentclientprotocol.com）：
 - `CommandKind`（`Immediate`/`Passthrough`/`Transform`）分类执行

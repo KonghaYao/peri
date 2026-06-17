@@ -99,6 +99,16 @@ pub fn is_deferred_tool(tool_name: &str) -> bool {
     !CORE_TOOLS.contains(tool_name) && !META_TOOLS.contains(tool_name)
 }
 
+/// 返回 CORE_TOOLS 按字典序排序后的逗号分隔字符串（含空格）。
+///
+/// 用于动态生成 Meta 工具 description 中的 Core 列表，确保跨调用稳定（CORE_TOOLS
+/// 是 HashSet 迭代序不稳定，必须排序以保护 prompt cache 前缀，P1-1）。
+pub fn core_tools_sorted_csv() -> String {
+    let mut names: Vec<&str> = CORE_TOOLS.iter().copied().collect();
+    names.sort_unstable();
+    names.join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

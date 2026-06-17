@@ -98,6 +98,79 @@ fn format_tool_call_summary(tc: &crate::messages::ToolCallRequest) -> String {
     }
 }
 
+/// 工具结果摘要：保留首行 + 关键路径/错误信息，丢弃冗长堆栈/调试输出。
+///
+/// 策略：
+/// - 标记 `[error]`/`[ok]` 状态（从 is_error 字段读取）
+/// - 保留前 `first_lines` 行（首行通常是错误摘要/路径，价值密度最高）
+/// - 启发式提取文件路径（绝对路径或 Unix 相对路径），避免摘要 LLM 丢失操作目标
+/// - 全部输出做最终 `max_chars` 截断
+fn format_tool_result_summary(
+    tool_call_id: &str,
+    content: &MessageContent,
+    is_error: bool,
+    first_lines: usize,
+    max_chars: usize,
+) -> String {
+    let status = if is_error { "error" } else { "ok" };
+    let raw = match content
+        .content_blocks()
+        .iter()
+        .map(|b| match b {
+            ContentBlock::Text { text } => text.clone(),
+            ContentBlock::ToolUse { name, input, .. } => {
+                format!("调用 {}({})", name, input)
+            }
+            ContentBlock::Reasoning { text, .. } => text.clone(),
+            _ => format!("{:?}", b),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+    {
+        s if !s.is_empty() => s,
+        _ => return format!("[ToolResult:{}][{}]", tool_call_id, status),
+    };
+
+    // 取前 N 行（首行价值密度最高：错误摘要/路径/状态码）
+    let head: String = raw
+        .lines()
+        .take(first_lines)
+        .collect::<Vec<&str>>()
+        .join(" | ");
+
+    // 启发式提取路径：匹配常见路径模式（绝对路径、./相对路径、~/家目录）
+    // 让摘要 LLM 能保留操作目标，避免 P1-4 描述的"操作哪个文件"丢失问题
+    let mut paths: Vec<String> = Vec::new();
+    for line in raw.lines() {
+        for token in line.split_whitespace() {
+            let trimmed = token.trim_matches(|c: char| {
+                c == '"' || c == '\'' || c == '`' || c == ',' || c == ';' || c == ':'
+            });
+            // 匹配 /abs/path, ./rel/path, ~/home/path 三种模式
+            let is_path_like = trimmed.starts_with('/')
+                || trimmed.starts_with("./")
+                || trimmed.starts_with("~/")
+                || (trimmed.starts_with('.') && trimmed.contains('/'));
+            if is_path_like && trimmed.len() > 2 && !paths.contains(&trimmed.to_string()) {
+                paths.push(trimmed.to_string());
+                if paths.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        if paths.len() >= 3 {
+            break;
+        }
+    }
+
+    let mut out = format!("[ToolResult:{}][{}]", tool_call_id, status);
+    out.push_str(&format!(" {}", head));
+    if !paths.is_empty() {
+        out.push_str(&format!(" paths=[{}]", paths.join(", ")));
+    }
+    truncate_str(&out, max_chars)
+}
+
 /// 预处理消息：跳过 System、替换 Image block 为 [image]、截断每条消息
 fn preprocess_messages(messages: &[BaseMessage], truncate_chars: usize) -> Vec<String> {
     let mut lines = Vec::new();
@@ -123,9 +196,19 @@ fn preprocess_messages(messages: &[BaseMessage], truncate_chars: usize) -> Vec<S
                 };
                 lines.push(line);
             }
-            BaseMessage::Tool { tool_call_id, .. } => {
-                let content = replace_images_and_truncate(msg.message_content(), truncate_chars);
-                lines.push(format!("[ToolResult:{}] {}", tool_call_id, content));
+            BaseMessage::Tool {
+                tool_call_id,
+                is_error,
+                ..
+            } => {
+                let content = msg.message_content();
+                lines.push(format_tool_result_summary(
+                    tool_call_id,
+                    content,
+                    *is_error,
+                    3,
+                    truncate_chars,
+                ));
             }
         }
     }

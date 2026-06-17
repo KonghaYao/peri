@@ -7,7 +7,9 @@ use parking_lot::RwLock;
 use peri_agent::tools::BaseTool;
 use serde_json::{json, Value};
 
-use super::core_tools::{EXECUTE_EXTRA_TOOL_NAME, EXTRA_TOOL_NAME_FIELD, EXTRA_TOOL_PARAMS_FIELD};
+use super::core_tools::{
+    core_tools_sorted_csv, EXECUTE_EXTRA_TOOL_NAME, EXTRA_TOOL_NAME_FIELD, EXTRA_TOOL_PARAMS_FIELD,
+};
 
 /// 代理执行延迟加载工具的元工具
 ///
@@ -16,11 +18,20 @@ use super::core_tools::{EXECUTE_EXTRA_TOOL_NAME, EXTRA_TOOL_NAME_FIELD, EXTRA_TO
 pub struct ExecuteExtraTool {
     /// 共享工具注册表（由 executor 在工具收集后填充）
     shared_tools: Arc<RwLock<HashMap<String, Arc<dyn BaseTool>>>>,
+    /// description 含动态生成的 Core 工具列表，构造时一次性生成（P1-1）。
+    description: String,
 }
 
 impl ExecuteExtraTool {
     pub fn new(shared_tools: Arc<RwLock<HashMap<String, Arc<dyn BaseTool>>>>) -> Self {
-        Self { shared_tools }
+        let description = format!(
+            "ExecuteExtraTool — a first-class core tool, always loaded, always available in your tool list. Runs locally with full permissions — NOT a remote or external tool. You do NOT need to search for it.\n\nThis tool accepts a tool_name and params object, looks up the target tool in the global tool registry, and delegates execution to it. The target tool runs with the same permissions and capabilities as if it were called directly.\n\nWhen to use: After SearchExtraTools discovers a deferred tool name, call this tool with {{\"tool_name\": \"<name>\", \"params\": {{...}}}} to invoke it immediately.\nWhen NOT to use: For core tools already in your tool list ({}, etc.) — call those directly.",
+            core_tools_sorted_csv()
+        );
+        Self {
+            shared_tools,
+            description,
+        }
     }
 }
 
@@ -31,7 +42,7 @@ impl BaseTool for ExecuteExtraTool {
     }
 
     fn description(&self) -> &str {
-        "ExecuteExtraTool — a first-class core tool, always loaded, always available in your tool list. Runs locally with full permissions — NOT a remote or external tool. You do NOT need to search for it.\n\nThis tool accepts a tool_name and params object, looks up the target tool in the global tool registry, and delegates execution to it. The target tool runs with the same permissions and capabilities as if it were called directly.\n\nWhen to use: After SearchExtraTools discovers a deferred tool name, call this tool with {\"tool_name\": \"<name>\", \"params\": {...}} to invoke it immediately.\nWhen NOT to use: For core tools already in your tool list (Read, Edit, Write, Bash, Glob, Grep, Agent, WebFetch, WebSearch, AskUserQuestion, TodoWrite, folder_operations, etc.) — call those directly."
+        &self.description
     }
 
     fn parameters(&self) -> Value {

@@ -153,6 +153,72 @@ fn test_preprocess_formats_tool_result() {
     assert_eq!(result.len(), 1);
     assert!(result[0].contains("[ToolResult:tc1]"));
     assert!(result[0].contains("output text"));
+    // P1-4: status 标记应被保留
+    assert!(
+        result[0].contains("[ok]"),
+        "成功结果应带 [ok] 标记: {}",
+        result[0]
+    );
+}
+
+#[test]
+fn test_preprocess_preserves_tool_error_summary() {
+    // P1-4: 工具错误结果应保留首行错误摘要 + is_error 标记
+    let error_text = "Error: File not found: /Users/dev/project/src/missing.rs\nstack trace:\nframe1\nframe2\nframe3";
+    let msgs = vec![BaseMessage::tool_error("tc_err", error_text)];
+    let result = preprocess_messages(&msgs, 2000);
+    assert_eq!(result.len(), 1);
+    let line = &result[0];
+    assert!(
+        line.contains("[ToolResult:tc_err][error]"),
+        "错误结果应带 [error] 标记: {}",
+        line
+    );
+    assert!(
+        line.contains("File not found"),
+        "首行错误摘要应被保留: {}",
+        line
+    );
+    assert!(
+        line.contains("/Users/dev/project/src/missing.rs"),
+        "文件路径应被保留: {}",
+        line
+    );
+    // 冗长的堆栈后续行可以丢弃，但首行错误必须保留
+    assert!(
+        !line.contains("frame3"),
+        "frame3 不应在首3行外被保留: {}",
+        line
+    );
+}
+
+#[test]
+fn test_preprocess_tool_result_preserves_paths() {
+    // P1-4: 工具结果中的路径应被启发式提取，避免摘要 LLM 丢失操作目标
+    let output = "Wrote 3 files:\n- /abs/path/file1.rs updated\n- /abs/path/file2.rs skipped\n- ./relative/file3.rs created\nDone";
+    let msgs = vec![BaseMessage::tool_result("tc_paths", output)];
+    let result = preprocess_messages(&msgs, 2000);
+    let line = &result[0];
+    assert!(
+        line.contains("/abs/path/file1.rs") || line.contains("paths=["),
+        "应提取路径: {}",
+        line
+    );
+}
+
+#[test]
+fn test_preprocess_tool_result_truncates_long_output() {
+    // P1-4: 长输出应被截断（首行很长时）
+    let long_first_line: String = "x".repeat(500);
+    let msgs = vec![BaseMessage::tool_result("tc_long", long_first_line)];
+    let result = preprocess_messages(&msgs, 50);
+    assert_eq!(result.len(), 1);
+    // 截断后应包含 truncated 标记
+    assert!(
+        result[0].contains("truncated"),
+        "长输出应被截断: {}",
+        result[0].len()
+    );
 }
 
 #[test]

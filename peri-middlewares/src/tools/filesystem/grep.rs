@@ -287,23 +287,43 @@ impl BaseTool for GrepTool {
                 },
                 "-i": {
                     "type": "boolean",
-                    "description": "Enable case-insensitive search (default: false)"
+                    "description": "Enable case-insensitive search (default: false). Alias of case_insensitive"
+                },
+                "case_insensitive": {
+                    "type": "boolean",
+                    "description": "Enable case-insensitive search (default: false). Semantic alias of -i"
                 },
                 "-C": {
                     "type": "number",
-                    "description": "Number of context lines to show before and after each match"
+                    "description": "Number of context lines to show before and after each match. Alias of context"
+                },
+                "context": {
+                    "type": "number",
+                    "description": "Number of context lines to show before and after each match. Semantic alias of -C"
                 },
                 "-A": {
                     "type": "number",
-                    "description": "Number of context lines to show after each match (takes priority over -C)"
+                    "description": "Number of context lines to show after each match (takes priority over -C). Alias of after_context"
+                },
+                "after_context": {
+                    "type": "number",
+                    "description": "Number of context lines to show after each match (takes priority over context). Semantic alias of -A"
                 },
                 "-B": {
                     "type": "number",
-                    "description": "Number of context lines to show before each match (takes priority over -C)"
+                    "description": "Number of context lines to show before each match (takes priority over -C). Alias of before_context"
+                },
+                "before_context": {
+                    "type": "number",
+                    "description": "Number of context lines to show before each match (takes priority over context). Semantic alias of -B"
                 },
                 "-n": {
                     "type": "boolean",
-                    "description": "Show line numbers (default: true)"
+                    "description": "Show line numbers (default: true). Alias of show_line_numbers"
+                },
+                "show_line_numbers": {
+                    "type": "boolean",
+                    "description": "Show line numbers (default: true). Semantic alias of -n"
                 },
                 "multiline": {
                     "type": "boolean",
@@ -365,11 +385,31 @@ impl BaseTool for GrepTool {
                 .get("output_mode")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            case_insensitive: input.get("-i").and_then(|v| v.as_bool()).unwrap_or(false),
-            context: input.get("-C").and_then(|v| v.as_u64()).map(|n| n as usize),
-            before_context: input.get("-B").and_then(|v| v.as_u64()).map(|n| n as usize),
-            after_context: input.get("-A").and_then(|v| v.as_u64()).map(|n| n as usize),
-            line_number: input.get("-n").and_then(|v| v.as_bool()).unwrap_or(true),
+            case_insensitive: input
+                .get("case_insensitive")
+                .or_else(|| input.get("-i"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            context: input
+                .get("context")
+                .or_else(|| input.get("-C"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize),
+            before_context: input
+                .get("before_context")
+                .or_else(|| input.get("-B"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize),
+            after_context: input
+                .get("after_context")
+                .or_else(|| input.get("-A"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize),
+            line_number: input
+                .get("show_line_numbers")
+                .or_else(|| input.get("-n"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
             multiline: input
                 .get("multiline")
                 .and_then(|v| v.as_bool())
