@@ -1,0 +1,59 @@
+[package]
+edition = "2024"
+rust-version = "1.85.0"
+name = "tui-textarea-2"
+version = "0.11.0"
+authors = [
+    "Simon Peter Rothgang <simonrothgang@icloud.com>",
+    "rhysd <lin90162@yahoo.co.jp>",
+]
+description = "tui-textarea is a simple yet powerful text editor widget for ratatui."
+homepage = "https://github.com/srothgan/tui-textarea#readme"
+documentation = "https://docs.rs/tui-textarea-2/latest/tui_textarea/"
+license = "MIT"
+repository = "https://github.com/srothgan/tui-textarea"
+
+[features]
+arbitrary = ["dep:arbitrary"]
+crossterm = [
+    "ratatui",
+    "dep:crossterm",
+]
+crossterm_0_28 = [
+    "ratatui",
+    "dep:crossterm-028",
+]
+default = ["crossterm"]
+no-backend = ["ratatui"]
+ratatui = [
+    "dep:ratatui-core",
+    "dep:ratatui-widgets",
+]
+search = ["dep:regex"]
+serde = ["dep:serde"]
+termion = [
+    "ratatui",
+    "dep:termion",
+]
+termwiz = [
+    "ratatui",
+    "dep:termwiz",
+]
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"], optional = true }
+crossterm = { package = "crossterm", version = "0.29", optional = true }
+crossterm-028 = { package = "crossterm", version = "0.28", optional = true }
+portable-atomic = "1.11.1"
+ratatui-core = { version = "0.1.0", optional = true, default-features = false }
+ratatui-widgets = { version = "0.3.0", optional = true, default-features = false }
+regex = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+termion = { version = "4.0", optional = true }
+termwiz = { version = "0.23.0", optional = true }
+unicode-segmentation = "1.10.1"
+unicode-width = "0.2.0"
+
+[lib]
+name = "tui_textarea"
+path = "src/lib.rs"

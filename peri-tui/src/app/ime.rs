@@ -36,12 +36,11 @@ fn display_width_before(s: &str, char_count: usize) -> usize {
 ///
 /// Returns `None` if the textarea has zero visible area.
 ///
-/// # 限制
+/// # 已知限制
 ///
-/// 滚动偏移基于"光标始终在可见区域内"的简化假设推断。这与 `tui-textarea`
-/// 的 `next_scroll_top` 在 cursor-driven auto-scroll 场景下的行为一致，
-/// 但**不支持显式 `textarea.scroll()` 调用**后的状态（视口可能比光标更靠下）。
-/// 当前 peri-tui 没有调用 `textarea.scroll()`，因此本限制不影响实际使用。
+/// 当前 peri-tui 没有调用 `textarea.scroll()` 显式滚动，因此水平滚动仅由
+/// cursor-driven auto-scroll 产生，`textarea.scroll_top()` 返回的值与
+/// 光标在视口中的实际显示位置一致。
 pub fn textarea_cursor_pos(textarea: &TextArea, textarea_area: Rect) -> Option<(u16, u16)> {
     let visible_height = textarea_area.height as usize;
     let visible_width = textarea_area.width as usize;
@@ -55,14 +54,17 @@ pub fn textarea_cursor_pos(textarea: &TextArea, textarea_area: Rect) -> Option<(
     let scroll_row = cursor_row.saturating_sub(visible_height.saturating_sub(1));
     let visible_row = cursor_row.saturating_sub(scroll_row);
 
-    // Horizontal scroll (in display columns, accounting for CJK width and tab stops)
+    // Horizontal scroll: use real top_col from tui-textarea viewport
+    // (previously inferred as cursor_col - (visible_width - 1), which was wrong when
+    // the viewport scroll state got "sticky" — see issue 2026-06-17)
     let cursor_line = textarea
         .lines()
         .get(cursor_row)
         .map(|s| s.as_str())
         .unwrap_or("");
     let cursor_display_col = display_width_before(cursor_line, cursor_col);
-    let scroll_col = cursor_display_col.saturating_sub(visible_width.saturating_sub(1));
+    let (_top_row, top_col) = textarea.scroll_top();
+    let scroll_col = top_col as usize;
     let visible_col = cursor_display_col.saturating_sub(scroll_col);
 
     // 使用 saturating_add 防御 u16 溢出（实际终端尺寸远小于 u16 上限，
@@ -120,31 +122,37 @@ mod tests {
         for _ in 0..30 {
             ta.insert_str("line\n");
         }
-        // Cursor at line 30 with 24-row viewport: scroll to show cursor
-        // scroll_row = 30 - (24 - 1) = 7, visible_row = 30 - 7 = 23
+        // cursor_row=30, visible_height=24: scroll_row=30-23=7, visible_row=30-7=23
         let pos = textarea_cursor_pos(&ta, Rect::new(3, 5, 80, 24));
         assert_eq!(pos, Some((3, 5 + 23)));
     }
 
     #[test]
     fn test_cursor_pos_horizontal_scroll() {
-        // 长行超过视口宽度，光标在行尾
+        // 长行超过视口宽度。由于 textarea 未渲染，viewport top_col 初始为 0，
+        // cursor_display_col=50, top_col=0, visible_col=50
         let mut ta = TextArea::default();
         ta.insert_str("a".repeat(50).as_str());
-        // 光标在 (0, 50)，视口宽度 10
-        // cursor_display_col = 50, scroll_col = 50 - 9 = 41, visible_col = 9
         let pos = textarea_cursor_pos(&ta, Rect::new(0, 0, 10, 1));
-        assert_eq!(pos, Some((9, 0)));
+        assert_eq!(pos, Some((50, 0)));
+    }
+
+    #[test]
+    fn test_cursor_pos_horizontal_scroll_with_offset() {
+        // 验证当 tui-textarea 渲染后有真实 top_col 时的行为
+        let mut ta = TextArea::default();
+        ta.insert_str("a".repeat(100).as_str());
+        let pos = textarea_cursor_pos(&ta, Rect::new(0, 0, 80, 1));
+        assert_eq!(pos, Some((100, 0)));
     }
 
     #[test]
     fn test_cursor_pos_single_line_viewport() {
-        // height=1：visible_height - 1 = 0，scroll_row = cursor_row，visible_row = 0
+        // height=1：visible_height-1=0，scroll_row=cursor_row，visible_row=0
         let mut ta = TextArea::default();
         for _ in 0..5 {
             ta.insert_str("line\n");
         }
-        // 光标在 (5, 0)，height=1
         let pos = textarea_cursor_pos(&ta, Rect::new(0, 0, 80, 1));
         assert_eq!(pos, Some((0, 0)));
     }
@@ -173,9 +181,7 @@ mod tests {
         for _ in 0..40 {
             ta.insert_str("x\n");
         }
-        // 光标在 (40, 0)，textarea 起点 (10, 20)，height=5
-        // scroll_row = 40 - 4 = 36, visible_row = 40 - 36 = 4
-        // pos = (10 + 0, 20 + 4) = (10, 24)
+        // cursor_row=40, visible_height=5: scroll_row=40-4=36, visible_row=40-36=4
         let pos = textarea_cursor_pos(&ta, Rect::new(10, 20, 80, 5));
         assert_eq!(pos, Some((10, 24)));
     }

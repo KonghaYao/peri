@@ -31,7 +31,7 @@ serde_json.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 dirs-next.workspace = true
-tui-textarea-2 = "0.11"
+tui-textarea-2 = { path = "vendor/tui-textarea-2" }
 parking_lot.workspace = true
 arboard = "3"
 png = "0.18"

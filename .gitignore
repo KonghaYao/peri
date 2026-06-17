@@ -178,6 +178,7 @@ deploy/peri-arm32-v0.1.0/lib/
 deploy/peri-arm32-*.tar.gz
 
 vendor/
+!peri-tui/vendor/
 
 .claude/skills/*-workspace
 .wrangler.worktrees/
