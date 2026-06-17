@@ -75,7 +75,7 @@ fn truncate_content(content: &str, max_lines: usize) -> String {
         let truncated: String = lines[..max_lines].join("\n");
         let persist_hint = persist_truncated_output(content);
         let mut result = format!(
-            "{truncated}\n[内容已截断，原始内容共 {} 行]{persist_hint}",
+            "{truncated}\n[Content truncated: original had {} lines]{persist_hint}",
             lines.len()
         );
         // 行截断后仍可能字节超限（截断后的头部 + 提示信息）
@@ -93,7 +93,7 @@ fn truncate_content(content: &str, max_lines: usize) -> String {
         let persist_hint = persist_truncated_output(content);
         let byte_truncated = truncate_bytes(content, MAX_CONTENT_CHARS);
         return format!(
-            "{byte_truncated}\n[内容已截断：超过 {} 字节上限]{persist_hint}",
+            "{byte_truncated}\n[Content truncated: exceeds {} byte limit]{persist_hint}",
             MAX_CONTENT_CHARS
         );
     }
@@ -116,11 +116,11 @@ impl BaseTool for WebFetchTool {
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "要抓取的完整 URL（http/https）"
+                    "description": "The full URL to fetch (http/https)"
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "可选。提取内容的指导提示，附在结果前供 LLM 参考"
+                    "description": "Optional. Guidance prompt for how to use the fetched content, prepended to the result for the LLM"
                 }
             },
             "required": ["url"]
@@ -187,7 +187,7 @@ impl BaseTool for WebFetchTool {
         let truncated = truncate_content(raw_content, MAX_CONTENT_LINES);
 
         let result = match prompt {
-            Some(p) => format!("{WEB_CREDIBILITY_WARNING}提示: {p}\n\n{truncated}"),
+            Some(p) => format!("{WEB_CREDIBILITY_WARNING}Prompt: {p}\n\n{truncated}"),
             None => format!("{WEB_CREDIBILITY_WARNING}{truncated}"),
         };
 

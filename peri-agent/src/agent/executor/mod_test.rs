@@ -1359,7 +1359,10 @@ async fn test_set_event_handler() {
     );
 }
 
-/// 验证 set_system_prompt 在 &mut agent 上更新系统提示词
+/// 验证 set_system_prompt 在 &mut agent 上设置系统提示词（仅可调用一次）
+///
+/// 系统提示词稳定性是第一优先级不变量：session/new 时一次性冻结，
+/// 多次调用 set_system_prompt 会触发 debug_assert panic。
 #[tokio::test]
 async fn test_set_system_prompt() {
     struct AnswerLLM;
@@ -1384,8 +1387,8 @@ async fn test_set_system_prompt() {
         .await
         .unwrap();
 
-    // set_system_prompt
-    agent.set_system_prompt("updated system prompt");
+    // set_system_prompt（首次调用，合法）
+    agent.set_system_prompt("frozen system prompt");
     agent
         .execute(AgentInput::text("second"), &mut state, None)
         .await
@@ -1396,19 +1399,6 @@ async fn test_set_system_prompt() {
     assert_eq!(
         system_count, 0,
         "set_system_prompt 后 system 消息不应累积，实际有 {system_count} 条"
-    );
-
-    // 再次更新 system prompt，确认可重复调用
-    agent.set_system_prompt("another prompt");
-    agent
-        .execute(AgentInput::text("third"), &mut state, None)
-        .await
-        .unwrap();
-
-    let system_count = state.messages().iter().filter(|m| m.is_system()).count();
-    assert_eq!(
-        system_count, 0,
-        "重复 set_system_prompt 后 system 消息不应累积，实际有 {system_count} 条"
     );
 }
 

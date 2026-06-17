@@ -155,7 +155,20 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
     }
 
     /// 更新系统提示词（用于同一 agent 实例的新轮次）
+    ///
+    /// **[TRAP]** 系统提示词应在 `session/new` 时一次性冻结（第一优先级不变量）。
+    /// 多次调用会触发 warning + debug_assert，防止误用破坏 prompt cache。
+    /// 不返回 `Result` 以保持调用方签名简洁（误用非致命，但有调试断言）。
     pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
+        if self.system_prompt.is_some() {
+            tracing::warn!(
+                "set_system_prompt called more than once — system prompt should be frozen at session/new"
+            );
+            debug_assert!(
+                false,
+                "set_system_prompt called more than once — violates prompt stability invariant"
+            );
+        }
         self.system_prompt = Some(prompt.into());
     }
 

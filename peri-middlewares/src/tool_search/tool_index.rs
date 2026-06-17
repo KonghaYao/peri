@@ -1,6 +1,12 @@
 //! TF-IDF 搜索索引 — 工具索引构建、混合搜索（TF-IDF + 关键词）、工具查找
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use parking_lot::RwLock;
 use peri_agent::tools::BaseTool;
@@ -145,6 +151,25 @@ pub struct ToolSearchIndex {
     tfidf_index: RwLock<TfIdfIndex>,
     /// 缓存首次生成的 deferred tools 提示词，后续不再重新生成
     cached_prompt: RwLock<Option<String>>,
+    /// 内容版本号（每次 `build()` 全量重建递增）
+    ///
+    /// **[P2-2]** 用于检测"同 count 但不同 content"场景——例如 MCP 重连后
+    /// 工具数量相同但内容变了（描述/schema 更新），仅靠 `total_count()` 比对
+    /// 会漏掉这种情况。版本号保证全量重建必然递增，触发 cache 失效重建。
+    ///
+    /// 用 `AtomicU64` 而非 `RwLock<u64>`——u64 是 Copy，无需 RwLock 的互斥语义，
+    /// 且原子操作避免了 read/write 双重加锁的死锁风险（同一线程在
+    /// `*lock.write() = lock.read()...` 表达式中会自死锁）。
+    content_version: AtomicU64,
+    /// cached_prompt 生成时对应的 content_version
+    ///
+    /// cached_prompt 可能落后于实际内容（set_cached_prompt 后又有 build）。
+    /// 中间件比对 `content_version()` 与 `cached_prompt_version()`，若不一致
+    /// 则 cached_prompt 已 stale，需要重建。
+    ///
+    /// 用 `RwLock<Option<u64>>` 因为读取时需要返回 owned u64（Copy OK），
+    /// 但 Option 不便用 atomic 表示；写少读多场景 RwLock 足够。
+    cached_prompt_version: RwLock<Option<u64>>,
 }
 
 impl ToolSearchIndex {
@@ -156,6 +181,8 @@ impl ToolSearchIndex {
                 doc_vectors: HashMap::new(),
             }),
             cached_prompt: RwLock::new(None),
+            content_version: AtomicU64::new(0),
+            cached_prompt_version: RwLock::new(None),
         }
     }
 
@@ -170,6 +197,11 @@ impl ToolSearchIndex {
 
         // 将已有工具重新纳入索引
         *self.tfidf_index.write() = tfidf;
+
+        // 内容版本递增——任何全量重建都视为内容变化
+        // （即使工具数量相同，描述/schema 可能已变）
+        // AtomicU64::fetch_add 原子地完成读-改-写，无双重加锁风险
+        self.content_version.fetch_add(1, Ordering::SeqCst);
     }
 
     /// 混合搜索
@@ -326,9 +358,27 @@ impl ToolSearchIndex {
         self.cached_prompt.read().clone()
     }
 
-    /// 缓存提示词（首次生成后调用）
+    /// 缓存提示词（首次生成后调用），同时记录当前 content_version
+    ///
+    /// 后续可通过比对 `content_version()` 与 `cached_prompt_version()`
+    /// 判断 cached_prompt 是否落后于实际内容（stale）。
     pub fn set_cached_prompt(&self, prompt: String) {
+        let version = self.content_version.load(Ordering::SeqCst);
         *self.cached_prompt.write() = Some(prompt);
+        *self.cached_prompt_version.write() = Some(version);
+    }
+
+    /// 返回当前内容版本号（每次 `build()` 递增）
+    pub fn content_version(&self) -> u64 {
+        self.content_version.load(Ordering::SeqCst)
+    }
+
+    /// 返回 cached_prompt 生成时对应的 content_version
+    ///
+    /// `None` 表示尚未生成过 cached_prompt；与 `content_version()` 不一致
+    /// 表示 cached_prompt 已 stale，需要重建。
+    pub fn cached_prompt_version(&self) -> Option<u64> {
+        *self.cached_prompt_version.read()
     }
 }
 

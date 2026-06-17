@@ -61,10 +61,21 @@ impl<S: State> Middleware<S> for ToolSearchMiddleware {
             .collect();
         drop(tools);
 
+        // P2-2: 用 content_version 比对取代简单 count 比对
+        //
+        // count 比对的盲区：MCP 重连/工具热更新场景，工具数量相同但内容
+        // （description / parameters）已变化。仅靠 count 比对会漏判，让 stale
+        // cached_prompt 继续注入到 system prompt，违反"系统提示词稳定性"派生
+        // 的"工具列表随实际工具同步"要求。
+        //
+        // 版本号语义：每次 `build()` 全量重建必然递增，content_version 永远
+        // 反映"最近一次构建"。cached_prompt_version 是 set_cached_prompt 时
+        // 记录的版本号，二者不一致即 stale。
+        let current_version = self.tool_search_index.content_version();
+        let cached_version = self.tool_search_index.cached_prompt_version();
         let old_count = self.tool_search_index.total_count();
         let should_rebuild = !deferred_arcs.is_empty()
-            && (self.tool_search_index.cached_prompt().is_none()
-                || old_count != deferred_arcs.len());
+            && (cached_version.is_none() || old_count != deferred_arcs.len());
 
         if should_rebuild {
             self.tool_search_index.build(deferred_arcs);
@@ -75,6 +86,14 @@ impl<S: State> Middleware<S> for ToolSearchMiddleware {
                     new_count, old_count
                 ));
             }
+            let list = self.tool_search_index.format_deferred_list();
+            if !list.is_empty() {
+                self.tool_search_index.set_cached_prompt(list);
+            }
+        } else if cached_version != Some(current_version) && !deferred_arcs.is_empty() {
+            // P2-2: 同 count 但 content_version 已变（例如 cached_prompt 在前次
+            // build 之前生成），重新构建以确保 cached_prompt 与实际内容一致。
+            self.tool_search_index.build(deferred_arcs);
             let list = self.tool_search_index.format_deferred_list();
             if !list.is_empty() {
                 self.tool_search_index.set_cached_prompt(list);
