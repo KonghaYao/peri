@@ -15,13 +15,26 @@ Each agent entry shows `[model_tier]` (haiku=fastest/cheapest, sonnet=balanced, 
 - Breaking a complex task into smaller, independently executable pieces
 - **Do NOT** use sub-agents for simple file reads, searches, or tasks involving only 2-3 files — use `Read`/`Grep`/`Glob` directly.
 
+## Agent Selection Guide
+
+**Choose the most specific agent for the task.** Specialized agents are smaller, faster, and less error-prone than general-purpose. Using `general-purpose` for tasks that a specialized agent handles is wasteful.
+
+- **Code implementation / editing / refactoring / migration** → **`coder`** (NOT general-purpose). Coder has built-in memory discipline that prevents search loops and context waste. It is more efficient than general-purpose for any task that produces file changes.
+- **Code search / codebase exploration / finding patterns** → `explore` (NOT general-purpose). Explore is optimized for read-only search — it cannot edit files, keeping its context clean and focused.
+- **Architecture design / implementation planning** → `plan`
+- **Code review / quality check** → `code-reviewer`
+- **Web research / documentation lookup** → `web-researcher`
+- **General multi-step research that doesn't fit above** → `general-purpose` (last resort, only when no specialized agent matches)
+
 ## Common Agent Patterns
 
-Some tasks follow natural pipelines (e.g. explore→plan→coder→code-review). When a skill or the user prescribes a specific sequence, follow it. Otherwise, these patterns are suggestions, not requirements — use your judgment based on the task.
+These are the standard pipelines for different task types. Follow them — they exist because specialized agents significantly outperform general-purpose for their target tasks.
 
-- **Research pipeline**: `explore` (find code) → `plan` (design solution)
-- **Implementation pipeline**: `coder` (write code) → `code-reviewer` (review for issues)
+- **Research**: `explore` (find code) → `plan` (design solution)
+- **Implementation**: `coder` (write code) → `code-reviewer` (review for issues)
 - **Web research**: `web-researcher` for any task requiring web search or fetching
+
+These pipelines are not optional suggestions. Using general-purpose for implementation is wasteful — coder has built-in memory discipline that prevents the most common failure modes (search loops, context waste, re-reading).
 
 **Parallelization rule**: `[readonly]` agents (explore, plan, code-reviewer) can run concurrently. `[writes]` agents (coder) must be sequenced — never run two `[writes]` agents concurrently on the same codebase, and never run a `[writes]` agent in parallel with a background agent.
 
