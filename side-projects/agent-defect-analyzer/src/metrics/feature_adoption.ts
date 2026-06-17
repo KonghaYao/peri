@@ -1,6 +1,7 @@
 //! 场景四：功能采纳分析。
 //!
-//! 5 项指标：LineEdit 使用率、LineEdit 成功率、Skill 调用频率、Skill 链深度、工具使用多样性。
+//! 3 项指标：Skill 调用频率、Skill 链深度、工具使用多样性。
+//! 注：LineEdit 使用率/成功率指标已随 LineEdit 移除而废弃。
 //!
 //! 用法：bun run src/metrics/feature_adoption.ts [--since 24]
 
@@ -22,19 +23,13 @@ printHeader("场景四：功能采纳");
 
 printMetric("可见会话数", threads.length);
 
-// 1. LineEdit 使用率
-analyzeLineEditUsage(loader, threads);
-
-// 2. LineEdit 成功率
-analyzeLineEditSuccess(loader, threads);
-
-// 3. Skill 调用频率（两维度）
+// 1. Skill 调用频率（两维度）
 analyzeSkillFrequency(loader, threads);
 
-// 4. Skill 链深度
+// 2. Skill 链深度
 analyzeSkillChainDepth(loader, threads);
 
-// 5. 工具使用多样性
+// 3. 工具使用多样性
 analyzeToolDiversity(loader, threads);
 
 loader.close();
@@ -56,146 +51,11 @@ function extractText(parsed: ParsedMessage): string {
 }
 
 // ═══════════════════════════════════════════════════
-// 指标 1：LineEdit 使用率
-// ═══════════════════════════════════════════════════
-
-function analyzeLineEditUsage(loader: DataLoader, threads: ThreadRow[]): void {
-  printSection("1. LineEdit 使用率");
-
-  let lineEditCount = 0;
-  let editCount = 0;
-  const sessionUsage = new Map<string, { le: number; edit: number }>();
-
-  for (const thread of threads) {
-    const messages = loader.loadMessages(thread.id);
-    let le = 0;
-    let ed = 0;
-
-    for (const msg of messages) {
-      if (msg.role !== "assistant") continue;
-      const parsed = DataLoader.parseContent(msg.content);
-      if (!parsed) continue;
-      const toolCalls = DataLoader.extractToolCalls(parsed);
-      for (const tc of toolCalls) {
-        if (tc.name === "LineEdit") le++;
-        if (tc.name === "Edit") ed++;
-      }
-    }
-
-    if (le > 0 || ed > 0) {
-      sessionUsage.set(thread.id, { le, ed });
-    }
-    lineEditCount += le;
-    editCount += ed;
-  }
-
-  const total = lineEditCount + editCount;
-  printMetric("LineEdit 调用数", lineEditCount);
-  printMetric("Edit 调用数", editCount);
-  printMetric("LineEdit 占比", total > 0 ? pct(lineEditCount, total) : "-");
-  printMetric("使用 LineEdit 的会话数", `${sessionUsage.size} / ${threads.length}`);
-
-  // 按会话分布
-  if (sessionUsage.size > 0) {
-    const ratios: number[] = [];
-    for (const { le, ed } of sessionUsage.values()) {
-      const total = le + ed;
-      if (total > 0) ratios.push(le / total);
-    }
-    ratios.sort((a, b) => a - b);
-    printMetric("会话级 LineEdit 占比 P50", ratios.length > 0 ? pct(p50(ratios), 1) : "-");
-    printMetric("会话级 LineEdit 占比 P95", ratios.length > 0 ? pct(p95(ratios), 1) : "-");
-
-    printBar("总体 LineEdit 使用率", total > 0 ? lineEditCount / total : 0);
-  }
-}
-
-// ═══════════════════════════════════════════════════
-// 指标 2：LineEdit 成功率
-// ═══════════════════════════════════════════════════
-
-function analyzeLineEditSuccess(loader: DataLoader, threads: ThreadRow[]): void {
-  printSection("2. LineEdit 成功率");
-
-  let totalCalls = 0;
-  let errorCount = 0;
-  const errorReasons: Record<string, number> = {
-    param_parse: 0,
-    old_string_not_found: 0,
-    other: 0,
-  };
-
-  for (const thread of threads) {
-    const messages = loader.loadMessages(thread.id);
-
-    // 收集 assistant 中的 LineEdit tool_use（callId → 存在标记）
-    const leCalls = new Set<string>();
-    for (const msg of messages) {
-      if (msg.role !== "assistant") continue;
-      const parsed = DataLoader.parseContent(msg.content);
-      if (!parsed) continue;
-      const toolCalls = DataLoader.extractToolCalls(parsed);
-      for (const tc of toolCalls) {
-        if (tc.name === "LineEdit") {
-          leCalls.add(tc.id);
-          totalCalls++;
-        }
-      }
-    }
-
-    // 收集 tool 消息中匹配的 LineEdit 结果
-    for (const msg of messages) {
-      if (msg.role !== "tool") continue;
-      const parsed = DataLoader.parseContent(msg.content);
-      if (!parsed) continue;
-      const toolResult = DataLoader.parseToolError(parsed);
-      if (!toolResult || !leCalls.has(toolResult.toolCallId)) continue;
-
-      if (toolResult.isError) {
-        errorCount++;
-        const reason = classifyLineEditError(toolResult.content);
-        errorReasons[reason]++;
-      }
-    }
-  }
-
-  printMetric("LineEdit 总调用数", totalCalls);
-  printMetric("is_error 数", errorCount);
-  printMetric("成功率", totalCalls > 0 ? pct(totalCalls - errorCount, totalCalls) : "-");
-  printMetric("失败率", totalCalls > 0 ? pct(errorCount, totalCalls) : "-");
-
-  // 错误原因分类
-  printSection("  错误原因分类");
-  if (errorCount > 0) {
-    const errRows = Object.entries(errorReasons)
-      .filter(([, c]) => c > 0)
-      .sort((a, b) => b[1] - a[1])
-      .map(([reason, count]) => [
-        reason === "param_parse" ? "参数解析失败" :
-        reason === "old_string_not_found" ? "old_string 未匹配" :
-        "其他",
-        String(count),
-        pct(count, errorCount),
-      ]);
-    printTable(["原因", "次数", "占比"], errRows);
-  } else {
-    console.log("  无错误");
-  }
-}
-
-function classifyLineEditError(content: string): "param_parse" | "old_string_not_found" | "other" {
-  const lower = content.toLowerCase();
-  if (/param.*(parse|invalid|malformed)/i.test(lower)) return "param_parse";
-  if (/old_string.*not\s*found/i.test(lower) || /unified diff.*invalid/i.test(lower)) return "old_string_not_found";
-  return "other";
-}
-
-// ═══════════════════════════════════════════════════
-// 指标 3：Skill 调用频率（两维度）
+// 指标 1：Skill 调用频率（两维度）
 // ═══════════════════════════════════════════════════
 
 function analyzeSkillFrequency(loader: DataLoader, threads: ThreadRow[]): void {
-  printSection("3. Skill 调用频率");
+  printSection("1. Skill 调用频率");
 
   // ── 维度一：System 消息中的 skill 加载标记 ──
   const skillLoadCounts: Record<string, number> = {};
@@ -275,11 +135,11 @@ function analyzeSkillFrequency(loader: DataLoader, threads: ThreadRow[]): void {
 }
 
 // ═══════════════════════════════════════════════════
-// 指标 4：Skill 链深度
+// 指标 2：Skill 链深度
 // ═══════════════════════════════════════════════════
 
 function analyzeSkillChainDepth(loader: DataLoader, threads: ThreadRow[]): void {
-  printSection("4. Skill 链深度");
+  printSection("2. Skill 链深度");
 
   // 获取主会话（parent_thread_id IS NULL 且可见）
   const mainThreads = sinceHours
@@ -348,11 +208,11 @@ function computeChainDepth(loader: DataLoader, threadId: string, currentDepth: n
 }
 
 // ═══════════════════════════════════════════════════
-// 指标 5：工具使用多样性
+// 指标 3：工具使用多样性
 // ═══════════════════════════════════════════════════
 
 function analyzeToolDiversity(loader: DataLoader, threads: ThreadRow[]): void {
-  printSection("5. 工具使用多样性");
+  printSection("3. 工具使用多样性");
 
   const sessionDiversity: { threadId: string; uniqueTools: number; totalCalls: number }[] = [];
 

@@ -367,13 +367,13 @@ function analyzeRedundantReads(data: ThreadData[]): void {
   const redundantFiles = new Map<string, number>();
 
   for (const td of data) {
-    // 收集该线程的所有 Read 和 Edit/Write/LineEdit
+    // 收集该线程的所有 Read 和 Write
     const reads: FileRead[] = [];
     const edits = new Map<string, number[]>(); // filePath → msgIndex[]
 
     for (const am of td.assistantMsgs) {
       for (const tu of am.toolUses) {
-        const isEdit = ["Write", "Edit", "LineEdit"].includes(tu.name);
+        const isEdit = tu.name === "Write";
         if (isEdit && tu.input.file_path) {
           const fp = String(tu.input.file_path);
           if (!edits.has(fp)) edits.set(fp, []);

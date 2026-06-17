@@ -23,8 +23,6 @@ const TOP_N = 15;
 const ERROR_PARAM = /missing field|invalid|parse error|out of range|timeout|参数/i;
 const ERROR_MATCH = /not found|not unique|does not exist|ENOENT|no such/i;
 const ERROR_SYSTEM = /interrupted|tool.*not found|subagent.*error|cancel|truncated/i;
-const EDIT_OLD_STRING = /old_string.*not found|old_string.*did not match/i;
-const EDIT_NOT_UNIQUE = /not unique/i;
 
 // ── Local Types ──
 
@@ -37,7 +35,6 @@ interface ToolEvent {
 interface ThreadToolData {
   threadId: string;
   toolEvents: ToolEvent[];
-  editEvents: { isError: boolean; errorContent: string }[];
   grepPatterns: string[];
 }
 
@@ -58,7 +55,6 @@ const allThreadData = collectThreadData(threads, loader);
 analyzeToolFailureRate(allThreadData);
 analyzeErrorDistribution(allThreadData);
 analyzeConsecutiveFailures(allThreadData);
-analyzeEditSuccessRate(allThreadData);
 analyzeGrepRepeatRate(allThreadData);
 
 loader.close();
@@ -73,7 +69,6 @@ function collectThreadData(
     const messages = loader.loadMessages(t.id);
     const toolUseMap = new Map<string, string>(); // tool_use_id → tool_name
     const toolEvents: ToolEvent[] = [];
-    const editEvents: { isError: boolean; errorContent: string }[] = [];
     const grepPatterns: string[] = [];
 
     for (const msg of messages) {
@@ -109,17 +104,12 @@ function collectThreadData(
           errorContent,
         };
         toolEvents.push(event);
-
-        if (toolName === "Edit") {
-          editEvents.push({ isError: tc.is_error, errorContent });
-        }
       }
     }
 
     return {
       threadId: t.id,
       toolEvents,
-      editEvents,
       grepPatterns,
     };
   });
@@ -291,71 +281,10 @@ function analyzeConsecutiveFailures(data: ThreadToolData[]): void {
   printMetric("连续失败段总数", runLengths.length);
 }
 
-// ── Metric 4: Edit 执行成功率 ──
-
-function analyzeEditSuccessRate(data: ThreadToolData[]): void {
-  printSection("4. Edit 执行成功率");
-
-  const allEditEvents = data.flatMap((td) => td.editEvents);
-  const total = allEditEvents.length;
-
-  if (total === 0) {
-    printWarning("无 Edit 调用", "未找到 Edit 工具的使用记录");
-    return;
-  }
-
-  const errors = allEditEvents.filter((e) => e.isError);
-  const success = total - errors.length;
-
-  printMetric("Edit 总调用数", total);
-  printMetric("成功数", success);
-  printMetric("失败数", errors.length);
-  printMetric("成功率", pct(success, total));
-  printBar("  Edit 成功率", total > 0 ? success / total : 0, 40);
-
-  // 错误原因分布
-  let oldStringNotFound = 0;
-  let notUnique = 0;
-  let otherEditErr = 0;
-
-  for (const e of errors) {
-    if (EDIT_OLD_STRING.test(e.errorContent)) {
-      oldStringNotFound++;
-    } else if (EDIT_NOT_UNIQUE.test(e.errorContent)) {
-      notUnique++;
-    } else {
-      otherEditErr++;
-    }
-  }
-
-  if (errors.length > 0) {
-    printSeparator();
-    printMetric("错误原因分布", "");
-    const errRows = [
-      [
-        "old_string 未找到",
-        String(oldStringNotFound),
-        pct(oldStringNotFound, errors.length),
-      ],
-      [
-        "old_string 不唯一",
-        String(notUnique),
-        pct(notUnique, errors.length),
-      ],
-      [
-        "其他",
-        String(otherEditErr),
-        pct(otherEditErr, errors.length),
-      ],
-    ];
-    printTable(["错误原因", "数量", "占比"], errRows);
-  }
-}
-
-// ── Metric 5: Grep 重复搜索率 ──
+// ── Metric 4: Grep 重复搜索率 ──
 
 function analyzeGrepRepeatRate(data: ThreadToolData[]): void {
-  printSection("5. Grep 重复搜索率");
+  printSection("4. Grep 重复搜索率");
 
   // 按 session 统计 pattern 重复
   const allGrepCalls = data.flatMap((td) => td.grepPatterns);

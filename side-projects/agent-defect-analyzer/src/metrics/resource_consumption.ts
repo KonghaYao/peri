@@ -1,6 +1,7 @@
 //! 场景三：资源消耗分析。
 //!
 //! 5 项指标：编辑工具入参大小、出参大小、超大入参检测、超大出参检测、手动 Compact 触发频率。
+//! 注：当前仅剩 Write 作为编辑工具（Edit/LineEdit/HashlineEdit 已移除）。
 //!
 //! 用法：bun run src/metrics/resource_consumption.ts [--since 24]
 
@@ -9,12 +10,10 @@ import { avg, median, p50, p95, pct, formatSize, formatDuration, parseSinceArg, 
 
 // ── 常量 ──
 
-const EDIT_TOOLS = ["LineEdit", "Edit", "Write"] as const;
+const EDIT_TOOLS = ["Write"] as const;
 
 /** 超大入参阈值（字节） */
 const OVERSIZED_INPUT_THRESHOLDS: Record<string, number> = {
-  LineEdit: 10 * 1024,  // 10KB
-  Edit: 15 * 1024,       // 15KB
   Write: 50 * 1024,      // 50KB
 };
 
@@ -225,8 +224,8 @@ function analyzeOversizedInput(records: EditRecord[]): void {
   }
 
   printMetric("超大入参总数", oversized.length);
-  const tt = { LineEdit: "10KB", Edit: "15KB", Write: "50KB" };
-  printMetric("阈值说明", `LineEdit>${tt.LineEdit}  Edit>${tt.Edit}  Write>${tt.Write}`);
+  const tt = { Write: "50KB" };
+  printMetric("阈值说明", `Write>${tt.Write}`);
 
   oversized.sort((a, b) => b.inputSize - a.inputSize);
   const rows = oversized.map((r) => [
@@ -242,19 +241,9 @@ function analyzeOversizedInput(records: EditRecord[]): void {
 function extractFilePath(toolName: string, inputJson: string): string {
   try {
     const input = JSON.parse(inputJson);
-    // LineEdit 新版：patches
-    if (toolName === "LineEdit" && Array.isArray(input.patches) && input.patches.length > 0) {
-      const fp = input.patches[0].file_path;
-      if (fp) return String(fp);
-    }
-    // LineEdit 旧版：edits
-    if (toolName === "LineEdit" && Array.isArray(input.edits) && input.edits.length > 0) {
-      const fp = input.edits[0].file_path;
-      if (fp) return String(fp);
-    }
     // 通用 file_path
     if (input.file_path) return String(input.file_path);
-    // 回退：diff header 正则
+    // diff header 正则
     if (input.diff && typeof input.diff === "string") {
       const m = input.diff.match(/\+\+\+ b\/(.+)$/m);
       if (m) return m[1];

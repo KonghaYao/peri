@@ -11,7 +11,7 @@ import chalk from "chalk";
 // 常量
 // ═══════════════════════════════════════════════════
 
-const EDIT_OUTPUT_TOOLS = new Set(["LineEdit", "Edit", "Write"]);
+const EDIT_OUTPUT_TOOLS = new Set(["Write"]);
 
 /** 非编辑型 SubAgent 类型：这些 agent 的本职工作就不是编辑文件 */
 const NON_EDITING_TYPES = new Set([
@@ -657,7 +657,7 @@ function analyzeGeneralPurposeResearch(
 
   for (const inst of instances) {
     const hasEdit = inst.tools.some((t) =>
-      ["Write", "Edit", "LineEdit", "HashlineEdit"].includes(t),
+      ["Write"].includes(t),
     );
     const hasSearch = inst.tools.some((t) => SEARCH_TOOLS.has(t));
     if (hasEdit && hasSearch) searchEditors.push(inst);
@@ -790,7 +790,7 @@ function analyzeGeneralPurposeResearch(
     usedTools.map(([tool, count]) => {
       const use = count / (editTotal || 1);
       const keep =
-        ["Read", "Grep", "Glob", "Bash", "LineEdit", "Write", "Edit", "TodoWrite"].includes(tool);
+        ["Read", "Grep", "Glob", "Bash", "Write", "TodoWrite"].includes(tool);
       const reason = use === 0
         ? "从未使用"
         : use < 0.005
@@ -810,13 +810,12 @@ function analyzeGeneralPurposeResearch(
 
   console.log("");
   console.log(chalk.bold("  Coder Agent 定义:"));
-  console.log(chalk.green("  工具集 (7个):"));
+  console.log(chalk.green("  工具集 (6个):"));
   console.log(chalk.dim("    Read   — 必读源码，理解上下文"));
   console.log(chalk.dim("    Grep   — 查找引用，确认影响面"));
   console.log(chalk.dim("    Glob   — 文件发现，目录结构"));
   console.log(chalk.dim("    Bash   — 目录探索 + 构建/测试验证"));
-  console.log(chalk.dim("    LineEdit — 主力编辑（成功率 98.1%）"));
-  console.log(chalk.dim("    Write  — 创建新文件"));
+  console.log(chalk.dim("    Write  — 文件写入"));
   console.log(chalk.dim("    TodoWrite — 多步骤任务追踪"));
   console.log(chalk.red("  移除:"));
   console.log(

@@ -1,6 +1,7 @@
 //! 场景五：编辑质量
 //!
-//! 4 项指标：纯验证重读率、编辑链重读率、连续编辑能力、Write 文件大小。
+//! 3 项指标：纯验证重读率、编辑链重读率、Write 文件大小。
+//! 注：仅剩 Write 作为编辑工具（Edit/LineEdit/HashlineEdit 已移除），LineEdit 连续编辑链指标已废弃。
 //! 用法：bun run src/metrics/edit_quality.ts --since 24
 
 import { DataLoader, type ThreadRow, type MessageRow, type ParsedMessage, type AiContent, type ContentBlock } from "../data/loader.js";
@@ -10,8 +11,8 @@ import { avg, median, p50, p95, pct, formatSize, parseSinceArg, printHeader, pri
 // 常量
 // ═══════════════════════════════════════════════════
 
-const EDIT_TOOLS = new Set(["LineEdit", "Edit", "Write"]);
-const EDIT_READ_TOOLS = new Set(["LineEdit", "Edit", "Write", "Read"]);
+const EDIT_TOOLS = new Set(["Write"]);
+const EDIT_READ_TOOLS = new Set(["Write", "Read"]);
 const REREAD_WINDOW = 5;
 
 // ═══════════════════════════════════════════════════
@@ -41,18 +42,6 @@ interface ByToolReread {
 // ═══════════════════════════════════════════════════
 
 function extractFilePath(callName: string, input: any): string {
-  if (callName === "LineEdit") {
-    const patches = input?.patches;
-    if (Array.isArray(patches) && patches.length > 0) {
-      if (patches[0]?.file_path) return patches[0].file_path;
-      const diff: string = patches[0]?.diff || "";
-      const m = diff.match(/^\+\+\+ b\/(.+)$/m);
-      if (m) return m[1];
-    }
-    const edits = input?.edits;
-    if (Array.isArray(edits) && edits[0]?.file_path) return edits[0].file_path;
-    return "";
-  }
   return input?.file_path || input?.path || "";
 }
 
@@ -210,7 +199,7 @@ function printRereadAnalysis(eventSeq: Map<string, EditEvent[]>, windowSize: num
   const rereadTotal = result.pureVerify + result.editChain;
 
   // 纯验证重读表格
-  const toolNames = ["LineEdit", "Edit", "Write"];
+  const toolNames = ["Write"];
   const pureRows: string[][] = [];
   for (const name of toolNames) {
     const ts = result.byTool.get(name);
@@ -335,99 +324,7 @@ function printRereadByError(eventSeq: Map<string, EditEvent[]>, windowSize: numb
 }
 
 // ═══════════════════════════════════════════════════
-// 指标 3：连续编辑能力
-// ═══════════════════════════════════════════════════
-
-function analyzeLineEditChains(eventSeq: Map<string, EditEvent[]>): void {
-  printSection("LineEdit 连续编辑链");
-
-  const allChains: number[] = [];
-
-  for (const [, events] of eventSeq) {
-    const lineEdits = events.filter((e) => e.toolName === "LineEdit");
-    if (lineEdits.length === 0) continue;
-
-    let currentFile = "";
-    let currentLen = 0;
-
-    for (const ev of lineEdits) {
-      if (ev.filePath === currentFile) {
-        currentLen++;
-      } else {
-        if (currentLen > 0) allChains.push(currentLen);
-        currentFile = ev.filePath;
-        currentLen = 1;
-      }
-    }
-    if (currentLen > 0) allChains.push(currentLen);
-  }
-
-  if (allChains.length === 0) {
-    printWarning("无 LineEdit 链", "未检测到任何 LineEdit 调用");
-    return;
-  }
-
-  const maxChain = Math.max(...allChains);
-  const avgChain = avg(allChains);
-  const totalLineEdits = allChains.reduce((s, c) => s + c, 0);
-
-  printMetric("总 LineEdit 调用数", totalLineEdits);
-  printMetric("检测到的编辑链数", allChains.length);
-  printMetric("最长链长", maxChain);
-  printMetric("平均链长", avgChain.toFixed(1));
-
-  // 分布
-  const buckets: Record<string, number> = { "1": 0, "2": 0, "3-5": 0, "6+": 0 };
-  for (const len of allChains) {
-    if (len === 1) buckets["1"]++;
-    else if (len === 2) buckets["2"]++;
-    else if (len <= 5) buckets["3-5"]++;
-    else buckets["6+"]++;
-  }
-
-  console.log("");
-  printTable(
-    ["链长", "链数", "占比", "分布"],
-    Object.entries(buckets).map(([label, count]) => [
-      label,
-      String(count),
-      pct(count, allChains.length),
-      "█".repeat(Math.round((count / allChains.length) * 40)),
-    ]),
-  );
-
-  // 按 session 的 Top 10 最长链
-  const perSession: { threadId: string; maxChain: number }[] = [];
-  for (const [tid, events] of eventSeq) {
-    const lineEdits = events.filter((e) => e.toolName === "LineEdit");
-    if (lineEdits.length < 2) continue;
-
-    const chains: number[] = [];
-    let cf = "";
-    let cl = 0;
-    for (const ev of lineEdits) {
-      if (ev.filePath === cf) { cl++; }
-      else { if (cl > 0) chains.push(cl); cf = ev.filePath; cl = 1; }
-    }
-    if (cl > 0) chains.push(cl);
-    if (chains.length > 0) {
-      perSession.push({ threadId: tid, maxChain: Math.max(...chains) });
-    }
-  }
-  perSession.sort((a, b) => b.maxChain - a.maxChain);
-  const top10 = perSession.slice(0, 10);
-
-  if (top10.length > 0) {
-    console.log("");
-    printTable(
-      ["Session ID", "最长链长"],
-      top10.map((s) => [s.threadId.slice(0, 12) + "...", String(s.maxChain)]),
-    );
-  }
-}
-
-// ═══════════════════════════════════════════════════
-// 指标 4：Write 文件大小
+// 指标 2：Write 文件大小
 // ═══════════════════════════════════════════════════
 
 function analyzeWriteSizes(threads: ThreadRow[], loader: DataLoader): void {
@@ -547,12 +444,7 @@ function main(): void {
   // 按成功/失败
   printRereadByError(eventSeq, REREAD_WINDOW);
 
-  // ── 指标 2：编辑链重读率已在上面一起输出 ──
-
-  // ── 指标 3：连续编辑能力 ──
-  analyzeLineEditChains(eventSeq);
-
-  // ── 指标 4：Write 文件大小 ──
+  // ── 指标 2：Write 文件大小 ──
   analyzeWriteSizes(threads, loader);
 
   loader.close();
