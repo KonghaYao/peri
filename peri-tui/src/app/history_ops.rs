@@ -81,22 +81,23 @@ impl App {
                 .get(idx)
                 .cloned()
             {
-                self.session_mgr.current_mut().ui.textarea =
-                    build_textarea(self.session_mgr.current_mut().ui.loading);
-                self.session_mgr.current_mut().ui.textarea.insert_str(&text);
+                let textarea = &mut self.session_mgr.current_mut().ui.textarea;
+                // 复用同一实例（clear + insert_str），避免整体替换 textarea 导致
+                // ratatui buffer diff 无法清理前一帧 cursor_at_end 的 REVERSED 空格，
+                // 在文本末尾留下残影光标块。
+                textarea.clear();
+                textarea.insert_str(&text);
             }
         }
     }
 
     fn restore_draft(&mut self) {
-        self.session_mgr.current_mut().ui.textarea =
-            build_textarea(self.session_mgr.current_mut().ui.loading);
-        if let Some(draft) = self.session_mgr.current_mut().ui.draft_input.take() {
-            self.session_mgr
-                .current_mut()
-                .ui
-                .textarea
-                .insert_str(&draft);
+        let draft = self.session_mgr.current_mut().ui.draft_input.take();
+        let textarea = &mut self.session_mgr.current_mut().ui.textarea;
+        // 同上：复用同一实例避免残影
+        textarea.clear();
+        if let Some(draft) = draft {
+            textarea.insert_str(&draft);
         }
     }
 }
