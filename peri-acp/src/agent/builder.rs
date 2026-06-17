@@ -439,7 +439,7 @@ pub fn build_agent(
     // 将 Git Attribution 追加到系统提示词末尾（动态区域，不影响缓存前缀）
     let attribution = peri_middlewares::GitAttributionMiddleware::attribution_text(&model_name);
     let system_prompt = format!(
-        "{}\n\n## Git Attribution\n\nWhen creating git commits, append the following line to the commit message:\n\n```\n{}\n```\n\nThis tracks AI contributions and should always be included in commit messages for code you authored.",
+        "{}\n\n## Git Attribution\n\nWhen the user asks you to commit, append the following line to the commit message:\n\n```\n{}\n```\n\nThis tracks AI contributions for code you authored. Only include it when you are already creating a commit at the user's request.",
         system_prompt, attribution
     );
 

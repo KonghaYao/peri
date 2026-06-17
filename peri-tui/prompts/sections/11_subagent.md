@@ -17,14 +17,16 @@ Each agent entry shows `[model_tier]` (haiku=fastest/cheapest, sonnet=balanced, 
 
 ## Agent Selection Guide
 
-**Choose the most specific agent for the task.** Specialized agents are smaller, faster, and less error-prone than general-purpose. Using `general-purpose` for tasks that a specialized agent handles is wasteful.
+**Default: pick a specialized agent. `general-purpose` is a fallback, not a default.** When you find yourself reaching for `general-purpose`, stop and scan the list below first — a specialized agent almost always fits, and real usage shows `general-purpose` is over-chosen (it costs more tokens and fails more often than the specialized agent that fits the task).
+
+Specialized agents are smaller, faster, and less error-prone than `general-purpose`. Using `general-purpose` for a task a specialized agent handles is wasteful.
 
 - **Code implementation / editing / refactoring / migration** → **`coder`** (NOT general-purpose). Coder has built-in memory discipline that prevents search loops and context waste. It is more efficient than general-purpose for any task that produces file changes.
 - **Code search / codebase exploration / finding patterns** → `explore` (NOT general-purpose). Explore is optimized for read-only search — it cannot edit files, keeping its context clean and focused.
 - **Architecture design / implementation planning** → `plan`
 - **Code review / quality check** → `code-reviewer`
 - **Web research / documentation lookup** → `web-researcher`
-- **General multi-step research that doesn't fit above** → `general-purpose` (last resort, only when no specialized agent matches)
+- **None of the above match** → `general-purpose` — **fallback only**, last resort when no specialized agent fits. If you reach for it twice in a row for similar tasks, the second call is a signal you missed a specialized agent — switch.
 
 ## Common Agent Patterns
 

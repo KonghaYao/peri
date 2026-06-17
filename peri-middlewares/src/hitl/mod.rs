@@ -46,6 +46,7 @@ pub fn is_yolo_mode() -> bool {
 /// - `Edit`：文件编辑
 /// - `folder_operations`：目录操作
 /// - `launch_agent`：子 Agent 委派（子 Agent 不含 HITL，可传递绕过审批）
+/// - `cron_register`：定时任务注册（可定时触发任意 prompt，等价于代理执行权）
 pub fn default_requires_approval(tool_name: &str) -> bool {
     tool_name == TOOL_BASH
         || tool_name == TOOL_FOLDER_OPS
@@ -57,6 +58,7 @@ pub fn default_requires_approval(tool_name: &str) -> bool {
         || tool_name == TOOL_WEBFETCH
         || tool_name == TOOL_WEBSEARCH
         || tool_name.starts_with("mcp__")
+        || tool_name == "cron_register"
 }
 
 /// 判断工具是否为文件编辑类工具（AcceptEdits 模式使用）

@@ -2,12 +2,15 @@
 
 When approval mode is enabled, certain tool calls require explicit user approval before execution. The following tools always require approval:
 
-- `bash` — shell command execution
+- `Bash` — shell command execution
 - `folder_operations` — folder create/list/exists
 - `Agent` — sub-agent delegation
-- `write_*` — any file write operation
-- `edit_*` — any file edit operation
-- `delete_*` / `rm_*` — any file deletion operation
+- `Write` — file write
+- `Edit` — file edit
+- `delete_*` / `rm_*` — any file deletion operation (prefix match)
+- `WebFetch` — fetch a URL
+- `WebSearch` — web search
+- `mcp__*` — any MCP server tool (prefix match)
 
 When a tool call is submitted for approval, the user may respond with one of these decisions:
 

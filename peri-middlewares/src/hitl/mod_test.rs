@@ -105,6 +105,12 @@ fn test_default_requires_approval() {
     assert!(default_requires_approval("WebFetch"));
     assert!(default_requires_approval("WebSearch"));
 
+    // cron_register 可定时触发任意 prompt，等价代理执行权，需审批
+    assert!(default_requires_approval("cron_register"));
+    // cron_list / cron_remove 仅查询/撤销，不拦截
+    assert!(!default_requires_approval("cron_list"));
+    assert!(!default_requires_approval("cron_remove"));
+
     assert!(!default_requires_approval("Read"));
     assert!(!default_requires_approval("Glob"));
     assert!(!default_requires_approval("Grep"));
