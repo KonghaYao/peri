@@ -28,7 +28,6 @@ fn build_textarea_with_hint(_disabled: bool, hint: &str) -> TextArea<'static> {
     let border_color = theme::MUTED;
 
     ta.set_cursor_line_style(Style::default());
-    ta.set_cursor_style(Style::default());
     ta.set_style(Style::default().fg(theme::TEXT));
     let mut block = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::TOP | ratatui::widgets::Borders::BOTTOM)

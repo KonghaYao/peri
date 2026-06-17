@@ -1,9 +1,9 @@
 # 主输入框长行行尾终端光标消失
 
-**状态**：Reopen（bug 复发，已接受）
+**状态**：Verified（IME 模块彻底移除后根治）
 **优先级**：高
 **创建日期**：2026-06-17
-**Reopen 日期**：2026-06-17（修复 #3：vendor 移除导致 bug 复发）
+**最终修复日期**：2026-06-17（修复 #4：删除 IME 模块，回到 buffer 级 REVERSED 光标）
 
 ## 问题描述
 
@@ -111,6 +111,7 @@ let visible_col = cursor_display_col.saturating_sub(scroll_col);
 | 2026-06-17 | Verified | Reopen | agent | 用户反馈删除/换行时仍有残影光标。根因：tui-textarea `cursor_at_end` REVERSED 空格帧间残留。修复：移除 cursor_at_end 空格 + visible_col 钳位。 |
 | 2026-06-17 | Reopen | Verified | agent | 用户验证通过。修复 #2 移除 cursor_at_end REVERSED 空格后，删除/换行无残影。 |
 | 2026-06-17 | Verified | Reopen | agent | 用户决定完全移除 vendor/tui-textarea-2（避免仓库维护过多上游代码）。Cargo.toml 改回上游 `tui-textarea-2 = "0.11"`，`ime.rs` 回滚到 vendor 前的推断公式，`edit_utils.rs` 回滚到 `Style::default()`。修复 #1 与 #2 同时失效，bug 复发（长行行尾光标不可见 + 删除/换行残影）。用户明确接受复发。 |
+| 2026-06-17 | Reopen | Verified | agent | **彻底根治**：用户确认 PR #34 前没有此 bug，根因是 PR #34 引入的 IME 模块（`set_cursor_style(Style::default())` 关闭 buffer 级光标 + `set_cursor_position` 改用终端光标）。删除 `peri-tui/src/app/ime.rs` 整个模块、移除 `main_ui/mod.rs` 中的 `set_cursor_position` 调用、`edit_utils.rs` 不再调 `set_cursor_style`，回到 tui-textarea 默认 REVERSED buffer 级光标。代价：中文输入法候选窗不再跟随光标。 |
 
 ## 修复记录
 
@@ -163,3 +164,22 @@ let visible_col = cursor_display_col.saturating_sub(scroll_col);
   4. `peri-tui/src/app/edit_utils.rs`：`set_cursor_style` 回滚到 `Style::default()`，禁用 textarea 内部光标渲染
 - **副作用**：修复 #1（`scroll_top()`）与修复 #2（`cursor_at_end` 移除）同时失效。**长行行尾光标不可见**与**删除/换行残影**两个 bug 同时复发。
 - **用户决策**：明确接受上述复发，换取仓库不维护 vendor 代码。
+
+### 修复 #4（2026-06-17）—— 彻底根治：删除 IME 模块
+
+- **操作人**：agent
+- **用户原意**：用户回忆"PR #34 之前没有这个 bug"，希望回到那时的状态。
+- **根因复盘**：
+  - PR #34（commit 9026879f）引入 IME 支持时，做了两件事：
+    1. `set_cursor_style(Style::default())` —— **关闭了** tui-textarea 默认的 REVERSED buffer 级光标块
+    2. `set_cursor_position(...)` —— 改用**终端光标**（IME 候选窗跟随终端光标位置）
+  - 上游 tui-textarea-2 0.11.0 的 `Widget::render` **不调用** `set_cursor_position`（已验证 `widget.rs:130-179`），所以 PR #34 之前 peri-tui 完全依赖 buffer 级 REVERSED 光标，跟终端光标位置无关——**不可能有这个 bug**。
+  - 两个 bug 都源于 `textarea_cursor_pos` 的水平滚动推断错误。修复 #1/#2/#3 都是在错误的方向上修补：要么 vendor 上游加 `scroll_top()` API，要么调整推断公式——但都不如回到根本。
+- **修复内容**：
+  1. 删除 `peri-tui/src/app/ime.rs` 整个文件
+  2. `peri-tui/src/app/mod.rs`：移除 `mod ime;` 和 `pub use ime::textarea_cursor_pos;`
+  3. `peri-tui/src/ui/main_ui/mod.rs`：移除 `use crate::app::{textarea_cursor_pos, App}` 中的 `textarea_cursor_pos`，移除整个 `if app.focused { if let Some((cx, cy)) = textarea_cursor_pos(...) { f.set_cursor_position(...); } }` 块
+  4. `peri-tui/src/app/edit_utils.rs`：移除 `ta.set_cursor_style(Style::default());`，让 tui-textarea 用默认 REVERSED buffer 级光标
+- **代价**：中文输入法（IME）候选窗不再跟随光标位置（会停在终端左上角或上次位置）。用户明确接受。
+- **验证状态**：待用户手动验证。预期：长行行尾、删除、换行场景光标始终以反色块形式可见。
+

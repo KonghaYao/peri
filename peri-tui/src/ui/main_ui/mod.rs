@@ -14,10 +14,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::{
-    app::{textarea_cursor_pos, App},
-    ui::theme,
-};
+use crate::{app::App, ui::theme};
 
 pub fn render(f: &mut Frame, app: &mut App) {
     // Setup 向导：全屏覆盖，优先于所有正常界面
@@ -270,13 +267,6 @@ fn render_session_column(f: &mut Frame, app: &mut App, area: Rect) {
         .block()
         .map(|b| b.inner(chunks[5]))
         .unwrap_or(chunks[5]);
-    // 将终端光标定位到输入框光标处，使 IME 合成窗口跟随输入位置
-    // 仅在聚焦时设置（失焦时终端光标由 ratatui 自动隐藏）
-    if app.focused {
-        if let Some((cx, cy)) = textarea_cursor_pos(&app.session_mgr.current().ui.textarea, inner) {
-            f.set_cursor_position((cx, cy));
-        }
-    }
 
     // Prediction placeholder 叠加（textarea 为空 + 有 prediction 时显示）
     if let Some(ref pred) = app.session_mgr.current().ui.prediction {
