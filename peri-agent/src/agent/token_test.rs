@@ -470,3 +470,96 @@ fn test_request_history_capped_at_1000() {
     // last_usage 应为最后一次调用
     assert_eq!(tracker.estimated_context_tokens(), Some(1499));
 }
+
+// ─── P0-5: 工具结果 token 估算测试 ───────────────────────────────────────
+
+#[test]
+fn test_add_estimated_tool_tokens_accumulates_chars_div_4() {
+    let mut tracker = TokenTracker::default();
+    tracker.accumulate(&make_usage(1000, 100, None, None));
+    // 初始无工具结果
+    assert_eq!(tracker.estimated_tool_tokens_since_last_llm, 0);
+    assert_eq!(tracker.estimated_context_tokens(), Some(1000));
+
+    // 400 字符 → 100 token
+    tracker.add_estimated_tool_tokens(&"a".repeat(400));
+    assert_eq!(tracker.estimated_tool_tokens_since_last_llm, 100);
+    // estimated_context_tokens 应包含工具结果估算
+    assert_eq!(tracker.estimated_context_tokens(), Some(1100));
+
+    // 再加 800 字符 → +200 token（累计 300）
+    tracker.add_estimated_tool_tokens(&"b".repeat(800));
+    assert_eq!(tracker.estimated_tool_tokens_since_last_llm, 300);
+    assert_eq!(tracker.estimated_context_tokens(), Some(1300));
+}
+
+#[test]
+fn test_add_estimated_tool_tokens_cjk_uses_chars_not_bytes() {
+    let mut tracker = TokenTracker::default();
+    tracker.accumulate(&make_usage(1000, 100, None, None));
+    // 4 个中文字符 = 12 字节 UTF-8，但 chars().count() = 4 → 1 token
+    tracker.add_estimated_tool_tokens("你好世界");
+    assert_eq!(
+        tracker.estimated_tool_tokens_since_last_llm, 1,
+        "CJK 应按字符数（4/4=1）而非字节数（12/4=3）"
+    );
+}
+
+#[test]
+fn test_accumulate_clears_estimated_tool_tokens() {
+    // 工具结果 token 在下次 LLM accumulate 时已被 input_tokens 包含，必须清零避免双计
+    let mut tracker = TokenTracker::default();
+    tracker.accumulate(&make_usage(1000, 100, None, None));
+    tracker.add_estimated_tool_tokens(&"x".repeat(400));
+    assert_eq!(tracker.estimated_tool_tokens_since_last_llm, 100);
+
+    // 模拟下一轮 LLM 调用——tool_result 已被包含进新的 input_tokens
+    tracker.accumulate(&make_usage(1500, 100, None, None));
+    assert_eq!(
+        tracker.estimated_tool_tokens_since_last_llm, 0,
+        "LLM accumulate 后 estimated_tool_tokens 应清零（避免双计）"
+    );
+    assert_eq!(
+        tracker.estimated_context_tokens(),
+        Some(1500),
+        "estimated_context_tokens 不应包含已清零的工具估算"
+    );
+}
+
+#[test]
+fn test_reset_clears_estimated_tool_tokens() {
+    let mut tracker = TokenTracker::default();
+    tracker.accumulate(&make_usage(1000, 100, None, None));
+    tracker.add_estimated_tool_tokens(&"x".repeat(400));
+    tracker.reset();
+    assert_eq!(
+        tracker.estimated_tool_tokens_since_last_llm, 0,
+        "reset 应清零 estimated_tool_tokens"
+    );
+}
+
+#[test]
+fn test_estimated_tool_tokens_enables_early_compact_warning() {
+    // 场景：input=120K（60%），未达 compact 阈值（85%）。
+    // 但本轮工具结果注入了 ~800K 字符（~200K token），下一轮将 overflow。
+    // 修复后：estimated_context_tokens 应感知到这点，触发 compact。
+    let budget = ContextBudget::new(200_000);
+    let mut tracker = TokenTracker::default();
+    tracker.accumulate(&make_usage(120_000, 100, None, None));
+    assert!(
+        !budget.should_auto_compact(&tracker),
+        "120K/200K = 60% 不应触发 compact"
+    );
+
+    // 工具结果 ~800K 字符 ≈ 200K token
+    tracker.add_estimated_tool_tokens(&"x".repeat(800_000));
+    let estimated = tracker.estimated_context_tokens().unwrap();
+    assert!(
+        estimated >= 300_000,
+        "估算应 ≥ 300K（120K input + 200K 工具估算），实际 {estimated}"
+    );
+    assert!(
+        budget.should_auto_compact(&tracker),
+        "工具结果 + input 已超 85%，应触发 compact 预警"
+    );
+}

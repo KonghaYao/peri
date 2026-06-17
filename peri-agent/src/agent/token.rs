@@ -20,6 +20,13 @@ pub struct TokenTracker {
     /// 每次 LLM 请求的 token 用量历史（仅内存，不持久化）
     #[serde(skip)]
     pub request_history: Vec<RequestRecord>,
+    /// 自上次 LLM 调用以来累积的工具结果 token 估算（P0-5）
+    ///
+    /// 工具结果在两次 LLM 调用之间被静默注入，Tracker 通过 LLM usage 无法感知。
+    /// 此字段单独累积工具结果的字符级估算（chars / 4），用于上下文预算预警。
+    /// **不可污染 `last_usage`**（那是 LLM API 的精确值，混入估算会破坏显示精度）。
+    /// 每次 LLM `accumulate` 时清零（工具结果已被下一轮 input_tokens 包含）。
+    pub estimated_tool_tokens_since_last_llm: u64,
 }
 
 impl TokenTracker {
@@ -45,6 +52,20 @@ impl TokenTracker {
         }
         self.llm_call_count += 1;
         self.last_request_id = usage.request_id.clone();
+        // 工具结果 token 已被本轮 input_tokens 包含（作为 tool_result 消息），清零避免双计
+        self.estimated_tool_tokens_since_last_llm = 0;
+    }
+
+    /// 累积工具结果 token 估算（P0-5）。
+    ///
+    /// 在 `dispatch_tools` 写入 tool_result 后调用，用 `chars().count() / 4` 近似估算。
+    /// 不能与 LLM usage 混用——这是字符级估算，仅用于预算预警。
+    pub fn add_estimated_tool_tokens(&mut self, tool_output: &str) {
+        // 经验估算：英文 ~4 字符/token，CJK 略多但保守取 4
+        let estimated = (tool_output.chars().count() / 4) as u64;
+        self.estimated_tool_tokens_since_last_llm = self
+            .estimated_tool_tokens_since_last_llm
+            .saturating_add(estimated);
     }
 
     pub fn estimated_context_tokens(&self) -> Option<u64> {
@@ -52,7 +73,10 @@ impl TokenTracker {
         // 即当前 prompt 的实际大小，直接反映上下文窗口占用。
         // 不加 output_tokens：output 会在下一轮 API 调用中包含进 input_tokens，
         // 相加会导致双重计算，使显示用量约为实际的 2 倍。
-        self.last_usage.as_ref().map(|u| u.input_tokens as u64)
+        // 加上 estimated_tool_tokens_since_last_llm：本轮已写入但尚未被 LLM 感知的工具结果（P0-5）
+        self.last_usage
+            .as_ref()
+            .map(|u| u.input_tokens as u64 + self.estimated_tool_tokens_since_last_llm)
     }
 
     pub fn context_usage_percent(&self, context_window: u32) -> Option<f64> {

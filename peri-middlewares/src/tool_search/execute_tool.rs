@@ -31,7 +31,7 @@ impl BaseTool for ExecuteExtraTool {
     }
 
     fn description(&self) -> &str {
-        "ExecuteExtraTool — a first-class core tool, always loaded, always available in your tool list. Runs locally with full permissions — NOT a remote or external tool. You do NOT need to search for it.\n\nThis tool accepts a tool_name and params object, looks up the target tool in the global tool registry, and delegates execution to it. The target tool runs with the same permissions and capabilities as if it were called directly.\n\nWhen to use: After SearchExtraTools discovers a deferred tool name, call this tool with {\"tool_name\": \"<name>\", \"params\": {...}} to invoke it immediately.\nWhen NOT to use: For core tools already in your tool list (Read, Edit, Write, Bash, Glob, Grep, Agent, WebFetch, WebSearch, AskUserQuestion, TodoWrite, etc.) — call those directly."
+        "ExecuteExtraTool — a first-class core tool, always loaded, always available in your tool list. Runs locally with full permissions — NOT a remote or external tool. You do NOT need to search for it.\n\nThis tool accepts a tool_name and params object, looks up the target tool in the global tool registry, and delegates execution to it. The target tool runs with the same permissions and capabilities as if it were called directly.\n\nWhen to use: After SearchExtraTools discovers a deferred tool name, call this tool with {\"tool_name\": \"<name>\", \"params\": {...}} to invoke it immediately.\nWhen NOT to use: For core tools already in your tool list (Read, Edit, Write, Bash, Glob, Grep, Agent, WebFetch, WebSearch, AskUserQuestion, TodoWrite, folder_operations, etc.) — call those directly."
     }
 
     fn parameters(&self) -> Value {

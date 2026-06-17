@@ -1531,3 +1531,98 @@ async fn test_llm_error_cleanup_prepended_behavior() {
         "LLM 错误路径下 system 消息应被清理，实际有 {system_count} 条"
     );
 }
+
+// ─── P0-2: shared_tools 每轮 clear 测试 ──────────────────────────────────
+
+/// 验证 shared_tools 在每轮 execute 开始时被 clear，已断开工具不会永久残留。
+#[tokio::test]
+async fn test_shared_tools_clears_between_turns() {
+    use crate::middleware::r#trait::Middleware;
+
+    struct AnswerLLM;
+    #[async_trait::async_trait]
+    impl ReactLLM for AnswerLLM {
+        async fn generate_reasoning(
+            &self,
+            _messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
+        ) -> crate::error::AgentResult<Reasoning> {
+            Ok(Reasoning::with_answer("", "ok"))
+        }
+    }
+
+    struct GhostTool;
+    #[async_trait::async_trait]
+    impl BaseTool for GhostTool {
+        fn name(&self) -> &str {
+            "ghost_tool_from_prev_turn"
+        }
+        fn description(&self) -> &str {
+            "ghost"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok("ok".to_string())
+        }
+    }
+
+    /// 提供当前轮工具的中间件（shared_tools 通过 middleware_tools 写入，不走 self.tools）
+    struct CurrentTurnMiddleware;
+    #[async_trait::async_trait]
+    impl<S: crate::agent::state::State> Middleware<S> for CurrentTurnMiddleware {
+        fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
+            vec![Box::new(GhostTool) as Box<dyn BaseTool>]
+        }
+        fn name(&self) -> &str {
+            "CurrentTurnMiddleware"
+        }
+    }
+
+    let shared_tools: Arc<parking_lot::RwLock<HashMap<String, Arc<dyn BaseTool>>>> =
+        Arc::new(parking_lot::RwLock::new(HashMap::new()));
+
+    // 第一轮：CurrentTurnMiddleware 提供 ghost_tool，写入 shared_tools
+    let agent_v1 = ReActAgent::new(AnswerLLM)
+        .max_iterations(1)
+        .add_middleware(Box::new(CurrentTurnMiddleware))
+        .with_shared_tools(Arc::clone(&shared_tools));
+
+    let mut state = AgentState::new("/tmp");
+    agent_v1
+        .execute(AgentInput::text("turn1"), &mut state, None)
+        .await
+        .unwrap();
+    {
+        let map = shared_tools.read();
+        assert!(
+            map.contains_key("ghost_tool_from_prev_turn"),
+            "第一轮后 ghost_tool 应在 shared_tools 中，keys: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // 第二轮：去掉 CurrentTurnMiddleware（模拟 MCP 断开），ghost_tool 不再由 collect_tools 返回
+    // 若没有 clear，ghost_tool 会永久残留
+    let agent_v2 = ReActAgent::new(AnswerLLM)
+        .max_iterations(1)
+        .with_shared_tools(Arc::clone(&shared_tools));
+
+    agent_v2
+        .execute(AgentInput::text("turn2"), &mut state, None)
+        .await
+        .unwrap();
+    {
+        let map = shared_tools.read();
+        assert!(
+            !map.contains_key("ghost_tool_from_prev_turn"),
+            "P0-2 修复：第二轮 clear 后 ghost_tool 应被清除，实际 keys: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+}

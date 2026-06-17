@@ -1049,3 +1049,117 @@ async fn test_all_concurrent_tools_fail() {
         );
     }
 }
+
+// ─── P0-1: 连续失败检测 key 稳定化测试 ───────────────────────────────────
+
+#[test]
+fn test_classify_failure_kind_covers_common_errors() {
+    // not_found 类
+    assert_eq!(
+        classify_failure_kind("Error: ToolNotFound: foo"),
+        "not_found"
+    );
+    assert_eq!(
+        classify_failure_kind("No such file or directory"),
+        "not_found"
+    );
+    assert_eq!(
+        classify_failure_kind("Path /tmp/x does not exist"),
+        "not_found"
+    );
+    // timeout 类
+    assert_eq!(
+        classify_failure_kind("Command timed out after 30s"),
+        "timeout"
+    );
+    assert_eq!(classify_failure_kind("Error: timeout of 5000ms"), "timeout");
+    // rejected 类
+    assert_eq!(
+        classify_failure_kind("Permission denied: operation was blocked"),
+        "rejected"
+    );
+    assert_eq!(classify_failure_kind("Not approved by user"), "rejected");
+    // missing_input 类
+    assert_eq!(
+        classify_failure_kind("Missing required parameter: command"),
+        "missing_input"
+    );
+    // invalid_input 类
+    assert_eq!(
+        classify_failure_kind("Invalid JSON: malformed input"),
+        "invalid_input"
+    );
+    // exec_failed 类（含 Exit code）
+    assert_eq!(
+        classify_failure_kind("[stderr]\npanic!\n[Exit code: 134]"),
+        "exec_failed"
+    );
+    // other 类（兜底）
+    assert_eq!(classify_failure_kind("some weird error"), "other");
+}
+
+#[test]
+fn test_make_failure_key_normalizes_dynamic_content() {
+    // P0-1 核心：同种错误但 path/UUID 不同，应归一化为同一 key
+    let key1 = make_failure_key(
+        "Bash",
+        "Error: No such file or directory: '/tmp/abc-12345/data.json'",
+    );
+    let key2 = make_failure_key(
+        "Bash",
+        "Error: No such file or directory: '/tmp/xyz-98765/config.yaml'",
+    );
+    assert_eq!(
+        key1, key2,
+        "同种错误（not_found）不同路径应归一化为同一 key，实际: {key1} vs {key2}"
+    );
+
+    // 不同错误类型应分开（避免误合并）
+    let key_not_found = make_failure_key("Bash", "No such file or directory");
+    let key_timeout = make_failure_key("Bash", "Command timed out");
+    assert_ne!(
+        key_not_found, key_timeout,
+        "不同错误类型应有不同 key，避免误合并"
+    );
+
+    // 不同工具应分开
+    let key_grep = make_failure_key("Grep", "No such file or directory");
+    assert_ne!(key_grep, key_not_found, "不同工具应有不同 key");
+
+    // key 保留 `tool_name:` 前缀（供 retain 重置使用）
+    assert!(
+        key1.starts_with("Bash:"),
+        "key 应保留 `Bash:` 前缀结构，实际: {key1}"
+    );
+}
+
+#[test]
+fn test_consecutive_failure_accumulates_same_kind() {
+    // 模拟连续 5 次 not_found 错误，应累计计数
+    let mut consecutive: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for _ in 0..5 {
+        // 每次 path 不同（动态内容），但错误类型相同
+        let key = make_failure_key(
+            "Bash",
+            "Error: No such file or directory: '/tmp/uuid-XYZ/dynamic-path'",
+        );
+        let count = consecutive.entry(key).or_insert(0);
+        *count += 1;
+    }
+
+    // 应有 1 个 entry，count=5（不是 5 个 entry 各 count=1）
+    assert_eq!(consecutive.len(), 1, "同种错误应归一化为单个 entry");
+    let total: usize = consecutive.values().sum();
+    assert_eq!(total, 5, "应累计计数到 5");
+
+    // 重置逻辑：按工具名前缀 retain
+    let tool_name = "Bash";
+    consecutive.retain(|k, _| !k.starts_with(&format!("{}:", tool_name)));
+    assert!(
+        consecutive.is_empty(),
+        "retain 应清除该工具所有 entry，实际: {:?}",
+        consecutive
+    );
+}

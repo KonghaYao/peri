@@ -116,14 +116,6 @@ impl BaseTool for BashTool {
                 "timeout": {
                     "type": "number",
                     "description": "Optional timeout in milliseconds (default 120000, max 600000). If the command takes longer than this, it will be killed and a timeout error returned"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "A clear, concise description of what this command does in active voice. Never use words like 'complex' or 'risk' in the description — just describe what it does"
-                },
-                "run_in_background": {
-                    "type": "boolean",
-                    "description": "Set to true to run this command in the background. Only use this if you don't need the result immediately and are OK being notified when the command completes later"
                 }
             },
             "required": ["command"]
@@ -142,8 +134,6 @@ impl BaseTool for BashTool {
             .as_u64()
             .unwrap_or(120_000)
             .clamp(if cfg!(target_os = "windows") { 5000 } else { 1 }, 600_000);
-        let _description = input["description"].as_str();
-        let _run_in_background = input["run_in_background"].as_bool().unwrap_or(false);
 
         let result = timeout(Duration::from_millis(timeout_ms), {
             let mut cmd = crate::process::shell_command(command, &[]);

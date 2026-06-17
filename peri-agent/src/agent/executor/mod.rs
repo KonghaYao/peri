@@ -218,8 +218,10 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
             .collect();
 
         // 将所有工具写入共享注册表（供 ExecuteExtraTool 代理执行使用）
+        // 每轮 clear 防止已断开的 MCP/SubAgent 工具永久残留（P0-2）
         if let Some(ref shared) = self.shared_tools {
             let mut map = shared.write();
+            map.clear();
             for arc in &tool_arcs {
                 map.insert(arc.name().to_string(), Arc::clone(arc));
             }
