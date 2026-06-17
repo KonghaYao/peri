@@ -35,12 +35,6 @@ fn display_width_before(s: &str, char_count: usize) -> usize {
 /// Calculate the terminal-grid position of the visible textarea cursor.
 ///
 /// Returns `None` if the textarea has zero visible area.
-///
-/// # 已知限制
-///
-/// 当前 peri-tui 没有调用 `textarea.scroll()` 显式滚动，因此水平滚动仅由
-/// cursor-driven auto-scroll 产生，`textarea.scroll_top()` 返回的值与
-/// 光标在视口中的实际显示位置一致。
 pub fn textarea_cursor_pos(textarea: &TextArea, textarea_area: Rect) -> Option<(u16, u16)> {
     let visible_height = textarea_area.height as usize;
     let visible_width = textarea_area.width as usize;
@@ -54,17 +48,16 @@ pub fn textarea_cursor_pos(textarea: &TextArea, textarea_area: Rect) -> Option<(
     let scroll_row = cursor_row.saturating_sub(visible_height.saturating_sub(1));
     let visible_row = cursor_row.saturating_sub(scroll_row);
 
-    // Horizontal scroll: use real top_col from tui-textarea viewport
-    // (previously inferred as cursor_col - (visible_width - 1), which was wrong when
-    // the viewport scroll state got "sticky" — see issue 2026-06-17)
+    // Horizontal scroll: infer scroll offset from cursor position.
+    // tui-textarea keeps cursor within the visible area, so the leftmost scrolled
+    // column is cursor_col - (visible_width - 1).
     let cursor_line = textarea
         .lines()
         .get(cursor_row)
         .map(|s| s.as_str())
         .unwrap_or("");
     let cursor_display_col = display_width_before(cursor_line, cursor_col);
-    let (_top_row, top_col) = textarea.scroll_top();
-    let scroll_col = top_col as usize;
+    let scroll_col = cursor_display_col.saturating_sub(visible_width.saturating_sub(1));
     // Clamp to visible area: cursor must not be placed outside the inner rect.
     // Otherwise terminal emulators may ignore the cursor move, leaving a "ghost"
     // at the previous position — seen as residual cursor after deletion.

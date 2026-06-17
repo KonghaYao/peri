@@ -1,9 +1,9 @@
 # 主输入框长行行尾终端光标消失
 
-**状态**：Verified
+**状态**：Reopen（bug 复发，已接受）
 **优先级**：高
 **创建日期**：2026-06-17
-**Reopen 日期**：2026-06-17
+**Reopen 日期**：2026-06-17（修复 #3：vendor 移除导致 bug 复发）
 
 ## 问题描述
 
@@ -110,6 +110,7 @@ let visible_col = cursor_display_col.saturating_sub(scroll_col);
 | 2026-06-17 | Open | Verified | agent | 用户验证通过：vendor tui-textarea-2 + scroll_top()。水平滚动用真实 viewport 偏移，垂直滚动保留原始公式。CJK 正常，无残影。 |
 | 2026-06-17 | Verified | Reopen | agent | 用户反馈删除/换行时仍有残影光标。根因：tui-textarea `cursor_at_end` REVERSED 空格帧间残留。修复：移除 cursor_at_end 空格 + visible_col 钳位。 |
 | 2026-06-17 | Reopen | Verified | agent | 用户验证通过。修复 #2 移除 cursor_at_end REVERSED 空格后，删除/换行无残影。 |
+| 2026-06-17 | Verified | Reopen | agent | 用户决定完全移除 vendor/tui-textarea-2（避免仓库维护过多上游代码）。Cargo.toml 改回上游 `tui-textarea-2 = "0.11"`，`ime.rs` 回滚到 vendor 前的推断公式，`edit_utils.rs` 回滚到 `Style::default()`。修复 #1 与 #2 同时失效，bug 复发（长行行尾光标不可见 + 删除/换行残影）。用户明确接受复发。 |
 
 ## 修复记录
 
@@ -150,3 +151,15 @@ let visible_col = cursor_display_col.saturating_sub(scroll_col);
 - 删除（Backspace/Delete）后，旧光标位置残留一个光标块
 
 根因分析：tui-textarea-2 的 `LineHighlighter::into_spans()` 在 `cursor_at_end=true` 时渲染一个 REVERSED 空格。该空格在帧间移动时，前帧的 REVERSED 空格位置在 ratatui diff 中可能未被正确清除，导致终端上显示为「残影」。
+
+### 修复 #3（2026-06-17）—— 回滚至 vendor 前
+
+- **操作人**：agent
+- **用户原意**：完全移除 vendor，接受 bug 复发（避免在仓库中维护大量上游代码）。
+- **修复内容**：
+  1. `peri-tui/Cargo.toml`：`tui-textarea-2 = { path = "vendor/tui-textarea-2" }` 改回 `tui-textarea-2 = "0.11"`
+  2. 删除 `peri-tui/vendor/tui-textarea-2/` 整个目录
+  3. `peri-tui/src/app/ime.rs`：回滚到 vendor 前的水平滚动推断公式 `scroll_col = cursor_display_col - (visible_width - 1)`，仅保留 `.min(visible_width.saturating_sub(1))` 钳位（防止越界产生 ghost）
+  4. `peri-tui/src/app/edit_utils.rs`：`set_cursor_style` 回滚到 `Style::default()`，禁用 textarea 内部光标渲染
+- **副作用**：修复 #1（`scroll_top()`）与修复 #2（`cursor_at_end` 移除）同时失效。**长行行尾光标不可见**与**删除/换行残影**两个 bug 同时复发。
+- **用户决策**：明确接受上述复发，换取仓库不维护 vendor 代码。
