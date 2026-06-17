@@ -1,9 +1,9 @@
 # 主输入框长行行尾终端光标消失
 
-**状态**：Verified（IME 模块彻底移除后根治）；**Follow-up**：IME 候选窗跟随光标能力丢失，未来需重新引入
+**状态**：Verified（macOS/Linux 用 buffer 级 REVERSED 光标根治；Windows 用 cfg 启用 IME 模块，接受推断公式缺陷）
 **优先级**：高
 **创建日期**：2026-06-17
-**最终修复日期**：2026-06-17（修复 #4：删除 IME 模块，回到 buffer 级 REVERSED 光标）
+**最终修复日期**：2026-06-17（修复 #5：Windows-only IME 模块）
 
 ## 问题描述
 
@@ -113,6 +113,7 @@ let visible_col = cursor_display_col.saturating_sub(scroll_col);
 | 2026-06-17 | Verified | Reopen | agent | 用户决定完全移除 vendor/tui-textarea-2（避免仓库维护过多上游代码）。Cargo.toml 改回上游 `tui-textarea-2 = "0.11"`，`ime.rs` 回滚到 vendor 前的推断公式，`edit_utils.rs` 回滚到 `Style::default()`。修复 #1 与 #2 同时失效，bug 复发（长行行尾光标不可见 + 删除/换行残影）。用户明确接受复发。 |
 | 2026-06-17 | Reopen | Verified | agent | **彻底根治**：用户确认 PR #34 前没有此 bug，根因是 PR #34 引入的 IME 模块（`set_cursor_style(Style::default())` 关闭 buffer 级光标 + `set_cursor_position` 改用终端光标）。删除 `peri-tui/src/app/ime.rs` 整个模块、移除 `main_ui/mod.rs` 中的 `set_cursor_position` 调用、`edit_utils.rs` 不再调 `set_cursor_style`，回到 tui-textarea 默认 REVERSED buffer 级光标。代价：中文输入法候选窗不再跟随光标。 |
 | 2026-06-17 | Verified | Verified (Follow-up) | agent | 补充 IME 模块历史与未来恢复路径章节：记录 PR #34 当初要解决的 Windows IME 候选窗定位问题、为什么留下 bug、修复 #4 后的实际损失，以及未来恢复 IME 支持的三种方案（推荐 UI state 跨帧 sticky `last_scroll_col`）和重新引入前的 6 项检查清单。状态保持 Verified，但标记 Follow-up：IME 候选窗跟随光标能力丢失，未来需重新引入。 |
+| 2026-06-17 | Verified (Follow-up) | Verified (Windows-only IME) | agent | **修复 #5**：用户提出 Windows-only 折中——用 `#[cfg(target_os = "windows")]` 条件编译，只在 Windows 下启用 IME 模块（`textarea_cursor_pos` + `set_cursor_style(Style::default())` + `set_cursor_position`），macOS/Linux 保留 buffer 级 REVERSED 光标。Trade-off：Windows 用户承受长行行尾光标算偏 bug 换取 IME 候选窗跟随；macOS/Linux 用户既无 bug 也无 IME 跟随（但 macOS 终端 IME 行为本身较好，损失可接受）。 |
 
 ## 修复记录
 
@@ -248,9 +249,24 @@ fn next_scroll_top(prev_top: u16, cursor: u16, len: u16) -> u16 {
 
 **最低风险方案 B**：如果不愿引入跨帧状态，至少采用方案 B 作为兜底——不调 `set_cursor_style`，保留 REVERSED buffer 光标作为 fallback，避免再次出现"终端光标算错就完全看不到光标"的灾难性表现。代价是 IME 候选窗位置可能轻微偏移（buffer 光标和终端光标位置差异）。
 
-### 重新引入前的检查清单
+### 修复 #5（2026-06-17）—— Windows-only 折中
 
-恢复 IME 模块时必须验证：
+- **操作人**：agent
+- **用户原意**：用户提出折中方案——只在 Windows 下启用 IME 模块，macOS/Linux 不启用。
+- **修复内容**：
+  1. 恢复 `peri-tui/src/app/ime.rs`（带 `#![cfg(target_os = "windows")]`，整个模块 Windows-only）
+  2. `peri-tui/src/app/mod.rs`：`#[cfg(target_os = "windows")] mod ime;` + `pub use`
+  3. `peri-tui/src/app/edit_utils.rs`：`#[cfg(target_os = "windows")] ta.set_cursor_style(Style::default());`（Windows 下禁用 buffer 光标）
+  4. `peri-tui/src/ui/main_ui/mod.rs`：`#[cfg(target_os = "windows")]` 包裹 `set_cursor_position` 块
+- **平台行为差异**：
+  - **macOS/Linux**：保留 tui-textarea 默认 REVERSED buffer 级光标。无 bug（长行行尾光标可见、删除/换行无残影）。无 IME 候选窗跟随（但 macOS 终端 IME 行为本身较好，损失可接受）。
+  - **Windows**：禁用 buffer 光标 + 启用终端光标。IME 候选窗跟随光标。但 `textarea_cursor_pos` 的推断公式 (`cursor - (width-1)`) 与 sticky scroll 不一致，长行行尾光标可能算偏（见上面"调研记录"）。Windows 用户接受此 trade-off。
+- **后续优化方向**：如果 Windows 用户反馈光标算偏影响体验，可升级到方案 A（UI state 维护跨帧 sticky `last_scroll_col`）。
+- **验证状态**：macOS 全 643 测试通过（ime 模块被 cfg 排除）。Windows 编译未在本地验证（依赖 aws-lc-sys 需要 Windows SDK），但 cfg 是语法级条件编译，预期 Windows 上能正常编译运行。
+
+### 重新引入前的检查清单（用于未来升级到方案 A 时验证）
+
+升级 IME 模块（消除推断公式缺陷）时必须验证：
 
 1. **长行行尾光标可见**：输入超过视口宽度的 ASCII 长行，光标在行尾仍可见
 2. **CJK 长行光标可见**：同上，但用 CJK 字符（每字符占 2 列）
@@ -259,5 +275,5 @@ fn next_scroll_top(prev_top: u16, cursor: u16, len: u16) -> u16 {
 5. **IME 候选窗跟随**（Windows 验证）：中文输入时候选词框出现在输入框附近，而非屏幕左上角
 6. **跨帧 sticky 行为**：光标在视口中部移动时，水平滚动不抖动
 
-满足以上 6 条才算合格的 IME 恢复方案。
+满足以上 6 条才算合格的 IME 恢复方案。当前的修复 #5 在 Windows 上只满足第 5 条（IME 跟随），其他 5 条存在已知缺陷。
 
