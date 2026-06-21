@@ -133,6 +133,8 @@ pub struct AcpAgentConfig {
     pub compact: CompactSettings,
     /// 子 Agent 线程持久化分组（ThreadPersistence 分组，零跨依赖）
     pub thread_persistence: ThreadPersistence,
+    /// Goal controller（None = 不启用 goal 功能）
+    pub goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>>,
 }
 
 pub struct AcpAgentOutput {
@@ -147,7 +149,7 @@ pub struct AcpAgentOutput {
 /// 迁移自 peri-tui/src/app/agent.rs:build_bare_agent()。
 /// 中间件链和 builder 配置与原函数完全一致。
 ///
-/// `cached_llm` 允许跨 prompt 复用 LLM 实例（compact_model、auto_classifier_model），
+/// `cached_llm` 允许跨 prompt 复用 LLM 实例（auxiliary_model、auto_classifier_model），
 /// 避免每轮重建 reqwest::Client（~1-2 MB/实例）。首次调用传 `None`，
 /// 后续调用传上一次返回的 `Some(CachedLlmInstances)`。
 ///
@@ -193,7 +195,7 @@ pub fn build_agent(
             CompactSettings {
                 config: mw_compact_config,
                 budget: mw_compact_budget,
-                model: mw_compact_model,
+                model: mw_auxiliary_model,
                 event_tx: mw_compact_event_tx,
             },
         thread_persistence:
@@ -203,6 +205,7 @@ pub fn build_agent(
                 register_runtime,
                 deregister_runtime,
             },
+        goal_controller,
     } = cfg;
 
     // 应用 agent overrides 到系统提示词
@@ -592,12 +595,12 @@ pub fn build_agent(
     };
 
     // CompactMiddleware（条件注册，当 compact 配置+模型+事件通道均可用时）
-    // 注意：mw_compact_model 可能来自 cache（通过 executor.rs），此时复用同一 Arc
-    let compact_model_for_cache: Option<Arc<dyn BaseModel>> = mw_compact_model.clone();
+    // 注意：mw_auxiliary_model 可能来自 cache（通过 executor.rs），此时复用同一 Arc
+    let auxiliary_model_for_cache: Option<Arc<dyn BaseModel>> = mw_auxiliary_model.clone();
     let executor = if let (Some(config), Some(budget), Some(model), Some(event_tx)) = (
         mw_compact_config,
         mw_compact_budget,
-        mw_compact_model,
+        mw_auxiliary_model,
         mw_compact_event_tx,
     ) {
         let compact_mw = CompactMiddleware::new(
@@ -616,9 +619,21 @@ pub fn build_agent(
         executor
     };
 
+    // GoalMiddleware（链最后，在 CompactMiddleware 之后）
+    // goal active 时注入递增紧迫感 steering + 设 block_continue 让 agent 自驱续跑
+    let executor = if let Some(controller) = &goal_controller {
+        let goal_mw = peri_middlewares::GoalMiddleware::new(
+            Arc::clone(controller),
+            auxiliary_model_for_cache.clone(),
+        );
+        executor.add_middleware(Box::new(goal_mw))
+    } else {
+        executor
+    };
+
     // 构建 CachedLlmInstances 供跨 prompt 复用
-    let new_cache = compact_model_for_cache.map(|model| CachedLlmInstances {
-        compact_model: model,
+    let new_cache = auxiliary_model_for_cache.map(|model| CachedLlmInstances {
+        auxiliary_model: model,
         auto_classifier_model,
         fingerprint: format!("{}:{}", provider_name, model_name),
     });

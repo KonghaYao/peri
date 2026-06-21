@@ -24,8 +24,9 @@ pub(crate) fn box_to_arc(tool: Box<dyn BaseTool>) -> Arc<dyn BaseTool> {
         async fn invoke(
             &self,
             input: serde_json::Value,
+            ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-            self.0.invoke(input).await
+            self.0.invoke(input, ctx).await
         }
     }
 

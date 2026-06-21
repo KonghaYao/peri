@@ -29,6 +29,7 @@ impl BaseTool for CounterTool {
     async fn invoke(
         &self,
         _input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let mut c = self.count.lock().unwrap();
         *c += 1;

@@ -3,7 +3,7 @@
         let dir = tempfile::tempdir().unwrap();
         let tool = FolderOperationsTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"operation": "create", "folder_path": "newdir"}))
+            .invoke(serde_json::json!({"operation": "create", "folder_path": "newdir"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(
@@ -17,7 +17,7 @@
     async fn test_folder_create_recursive() {
         let dir = tempfile::tempdir().unwrap();
         let tool = FolderOperationsTool::new(dir.path().to_str().unwrap());
-        tool.invoke(serde_json::json!({"operation": "create", "folder_path": "a/b/c"}))
+        tool.invoke(serde_json::json!({"operation": "create", "folder_path": "a/b/c"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(dir.path().join("a/b/c").is_dir());
@@ -29,7 +29,7 @@
         std::fs::create_dir(dir.path().join("existing")).unwrap();
         let tool = FolderOperationsTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"operation": "exists", "folder_path": "existing"}))
+            .invoke(serde_json::json!({"operation": "exists", "folder_path": "existing"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(
@@ -43,7 +43,7 @@
         let dir = tempfile::tempdir().unwrap();
         let tool = FolderOperationsTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"operation": "exists", "folder_path": "ghost"}))
+            .invoke(serde_json::json!({"operation": "exists", "folder_path": "ghost"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(
@@ -60,7 +60,7 @@
         std::fs::write(subdir.join("file.txt"), "hello").unwrap();
         let tool = FolderOperationsTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"operation": "list", "folder_path": "listed"}))
+            .invoke(serde_json::json!({"operation": "list", "folder_path": "listed"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(
@@ -84,7 +84,7 @@
         }
         let tool = FolderOperationsTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"operation": "list", "folder_path": "bigdir"}))
+            .invoke(serde_json::json!({"operation": "list", "folder_path": "bigdir"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         // 文件不应被全部丢弃
@@ -106,7 +106,7 @@
             .invoke(serde_json::json!({
                 "operation": "list",
                 "folder_path": dir.path().to_str().unwrap()
-            }))
+            }), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(result.contains("Output truncated"), "应显示截断信息: {result}");

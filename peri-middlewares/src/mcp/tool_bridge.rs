@@ -96,6 +96,7 @@ impl BaseTool for McpToolBridge {
     async fn invoke(
         &self,
         input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // 1. 检查连接状态
         match &self.client.peer {

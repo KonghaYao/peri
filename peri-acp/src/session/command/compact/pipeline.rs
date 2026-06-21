@@ -4,7 +4,7 @@
 //! 编排层（`compact.rs::execute`）只做组合。
 //!
 //! 阶段顺序：
-//!   validate_inputs → resolve_compact_model → (emit_started)
+//!   validate_inputs → resolve_auxiliary_model → (emit_started)
 //!   → run_full_compact_with_cancel → re_inject_phase → assemble_compact_messages
 //!   → (emit_completed)
 //!
@@ -94,7 +94,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         history,
         cwd,
         peri_config,
-        compact_model,
+        auxiliary_model,
         event_sink,
         cancel_token,
         ..
@@ -115,8 +115,8 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     // 阶段 2: 加载 compact 配置
     let compact_config = load_compact_config(&peri_config);
 
-    // 阶段 3: 解析 compact model
-    let compact_model: Arc<dyn BaseModel> = match compact_model {
+    // 阶段 3: 解析 auxiliary model
+    let auxiliary_model: Arc<dyn BaseModel> = match auxiliary_model {
         Some(m) => m,
         None => {
             warn!("compact: 无可用模型");
@@ -134,7 +134,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     // 阶段 5: 执行 full_compact（支持 Ctrl+C 取消）
     let compact_result = match run_full_compact_with_cancel(
         &history,
-        compact_model.as_ref(),
+        auxiliary_model.as_ref(),
         &compact_config,
         &cwd,
         &cancel_token,

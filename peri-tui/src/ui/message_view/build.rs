@@ -91,16 +91,22 @@ impl MessageViewModel {
         match msg {
             BaseMessage::Human { content, .. } => {
                 let raw = content.text_content();
-                let (display_text, system_reminder) = if raw.contains("<system-reminder>") {
-                    let cleaned = raw
-                        .replacen("<system-reminder>\n", "", 1)
-                        .replacen("\n</system-reminder>", "", 1)
-                        .trim()
-                        .to_string();
-                    (cleaned, true)
-                } else {
-                    (raw, false)
-                };
+                // 精确识别 compact 摘要：<system-reminder> 标签 + [上下文已压缩] 续接指令。
+                // 单独的 <system-reminder> 标签也用于 goal steering、tool_dispatch 连续失败警告、
+                // hooks stop_hook_feedback 等中途纠正消息（CLAUDE.md TRAP），不应误识别为 compact。
+                // COMPACT_HINT 与 peri-acp/src/session/command/compact/invariant.rs::CONTINUATION_HINT 对应。
+                const COMPACT_HINT: &str = "[上下文已压缩";
+                let (display_text, system_reminder) =
+                    if raw.contains("<system-reminder>") && raw.contains(COMPACT_HINT) {
+                        let cleaned = raw
+                            .replacen("<system-reminder>\n", "", 1)
+                            .replacen("\n</system-reminder>", "", 1)
+                            .trim()
+                            .to_string();
+                        (cleaned, true)
+                    } else {
+                        (raw, false)
+                    };
                 let rendered = parse_markdown_default(&display_text);
                 let mut vm = MessageViewModel::UserBubble {
                     content: display_text,

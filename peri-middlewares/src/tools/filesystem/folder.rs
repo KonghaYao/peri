@@ -164,6 +164,7 @@ impl BaseTool for FolderOperationsTool {
     async fn invoke(
         &self,
         input: Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let operation = input["operation"]
             .as_str()

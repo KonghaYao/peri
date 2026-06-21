@@ -281,7 +281,7 @@ struct TurnConfig<'a> {
     compact_config: peri_agent::agent::compact::CompactConfig,
     disable_compact: bool,
     budget: ContextBudget,
-    compact_model: Option<Arc<dyn peri_agent::llm::BaseModel>>,
+    auxiliary_model: Option<Arc<dyn peri_agent::llm::BaseModel>>,
     effective_context_window: u32,
 }
 
@@ -346,7 +346,8 @@ pub async fn execute_prompt(ctx: PromptExecutionContext) -> PromptResult {
         || std::env::var("DISABLE_AUTO_COMPACT").is_ok()
         || !compact_config.auto_compact_enabled;
 
-    // Compact model — reuse AgentPool cache if available, otherwise create fresh.
+    // Auxiliary model — reuse AgentPool cache if available, otherwise create fresh.
+    // 共享于 CompactMiddleware（摘要）与 Goal 工具（完成度验证）。
     let cached_llm = {
         let pool_guard = pool.lock();
         if pool_guard.has_valid_cache(&provider) {
@@ -355,12 +356,12 @@ pub async fn execute_prompt(ctx: PromptExecutionContext) -> PromptResult {
             None
         }
     };
-    let compact_model: Option<Arc<dyn peri_agent::llm::BaseModel>> = if disable_compact {
+    let auxiliary_model: Option<Arc<dyn peri_agent::llm::BaseModel>> = if disable_compact {
         None
     } else {
         cached_llm
             .as_ref()
-            .map(|c| c.compact_model.clone())
+            .map(|c| c.auxiliary_model.clone())
             .or_else(|| Some(provider.clone().into_model().into()))
     };
 
@@ -405,7 +406,7 @@ pub async fn execute_prompt(ctx: PromptExecutionContext) -> PromptResult {
         cancel: &cancel,
         peri_config: &peri_config,
         event_sink: &event_sink,
-        compact_model: &compact_model,
+        auxiliary_model: &auxiliary_model,
         thread_store: thread_store.clone(),
         thread_id: thread_id.clone(),
         bg_event_tx: &bg_event_tx_for_cmd,
@@ -457,7 +458,7 @@ pub async fn execute_prompt(ctx: PromptExecutionContext) -> PromptResult {
         compact_config: compact_config.clone(),
         disable_compact,
         budget,
-        compact_model: compact_model.clone(),
+        auxiliary_model: auxiliary_model.clone(),
         effective_context_window,
     };
 
@@ -521,7 +522,7 @@ struct InterceptRequest<'a> {
     cancel: &'a AgentCancellationToken,
     peri_config: &'a Arc<crate::provider::PeriConfig>,
     event_sink: &'a Arc<dyn EventSink>,
-    compact_model: &'a Option<Arc<dyn peri_agent::llm::BaseModel>>,
+    auxiliary_model: &'a Option<Arc<dyn peri_agent::llm::BaseModel>>,
     thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
     thread_id: Option<String>,
     bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
@@ -560,7 +561,7 @@ async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<Prompt
         history: req.history.to_vec(),
         cwd: req.cwd.to_string(),
         peri_config: Arc::new(req.peri_config.as_ref().clone()),
-        compact_model: req.compact_model.clone(),
+        auxiliary_model: req.auxiliary_model.clone(),
         event_sink: req.event_sink.clone(),
         args: args.to_string(),
         cancel_token: req.cancel.clone(),
@@ -927,6 +928,12 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
             }
         }));
 
+    // 从 session_manager 获取 goal_state（实现 GoalController trait）
+    let goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>> = session_manager
+        .as_ref()
+        .and_then(|sm| sm.goal_state_for(session_id))
+        .map(|gs| Arc::new(gs) as Arc<dyn peri_agent::goal::GoalController>);
+
     let (agent_output, new_cache) = builder::build_agent(
         AcpAgentConfig {
             provider: turn.provider.clone(),
@@ -968,7 +975,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
                 } else {
                     Some(turn.budget.clone())
                 },
-                model: turn.compact_model.clone(),
+                model: turn.auxiliary_model.clone(),
                 event_tx: Some(event_tx.clone()),
             },
             thread_persistence: builder::ThreadPersistence {
@@ -977,6 +984,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
                 register_runtime,
                 deregister_runtime,
             },
+            goal_controller,
         },
         cached_llm,
         &pool,

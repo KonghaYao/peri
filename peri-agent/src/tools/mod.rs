@@ -9,6 +9,23 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
+/// 工具只读上下文（借用 state，零 clone）
+///
+/// 通过 `BaseTool::invoke` 的第二个参数传入。工具可读取 messages 和 cwd，
+/// 但不能修改 state（避免绕过 dispatch_tools 统一写入语义）。
+pub struct ToolContext<'a> {
+    /// 当前对话历史（只读引用，借用 state.messages）
+    pub messages: &'a [crate::messages::BaseMessage],
+    /// 当前工作目录
+    pub cwd: &'a str,
+}
+
+impl<'a> ToolContext<'a> {
+    pub fn new(messages: &'a [crate::messages::BaseMessage], cwd: &'a str) -> Self {
+        Self { messages, cwd }
+    }
+}
+
 /// BaseTool trait - 对齐 LangChain Python BaseTool
 ///
 /// 所有工具必须实现此 trait，不再依赖 langchain-rust::tools::Tool。
@@ -31,5 +48,6 @@ pub trait BaseTool: Send + Sync {
     async fn invoke(
         &self,
         input: serde_json::Value,
+        ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
 }

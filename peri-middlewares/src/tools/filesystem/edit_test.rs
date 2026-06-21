@@ -6,7 +6,7 @@
         let result = tool
             .invoke(
                 serde_json::json!({"file_path": "f.txt", "old_string": "foo", "new_string": "bar"}),
-            )
+             peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         // "foo" → "bar": same line count, one occurrence
@@ -24,7 +24,7 @@
         std::fs::write(dir.path().join("f.txt"), "hello world").unwrap();
         let tool = EditFileTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"file_path": "f.txt", "old_string": "missing", "new_string": "x"}))
+            .invoke(serde_json::json!({"file_path": "f.txt", "old_string": "missing", "new_string": "x"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await;
         let err = result.unwrap_err();
         assert!(
@@ -43,7 +43,7 @@
             "old_string": "x",
             "new_string": "y",
             "replace_all": true
-        }))
+        }), peri_agent::tools::ToolContext::new(&[], "."))
         .await
         .unwrap();
         let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
@@ -58,7 +58,7 @@
         let result = tool
             .invoke(
                 serde_json::json!({"file_path": "f.txt", "old_string": "foo", "new_string": "bar"}),
-            )
+             peri_agent::tools::ToolContext::new(&[], "."))
             .await;
         let err = result.unwrap_err();
         assert!(
@@ -74,7 +74,7 @@
         let result = tool
             .invoke(
                 serde_json::json!({"file_path": "ghost.txt", "old_string": "x", "new_string": "y"}),
-            )
+             peri_agent::tools::ToolContext::new(&[], "."))
             .await;
         let err = result.unwrap_err();
         assert!(
@@ -89,7 +89,7 @@
         std::fs::write(dir.path().join("f.txt"), "hello world").unwrap();
         let tool = EditFileTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"file_path": "f.txt", "old_string": "", "new_string": "x", "replace_all": true}))
+            .invoke(serde_json::json!({"file_path": "f.txt", "old_string": "", "new_string": "x", "replace_all": true}), peri_agent::tools::ToolContext::new(&[], "."))
             .await;
         let err = result.unwrap_err();
         assert!(
@@ -134,7 +134,7 @@
                 "file_path": "f.txt",
                 "old_string": "a\nb\nc\nd\ne\nDIFFERENT\nextra\n",
                 "new_string": "x"
-            }))
+            }), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -163,7 +163,7 @@
                 "file_path": "f.txt",
                 "old_string": "line1\nline2\nline3\n",
                 "new_string": "x"
-            }))
+            }), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -187,7 +187,7 @@
                 "file_path": "f.txt",
                 "old_string": giant_old,
                 "new_string": "x"
-            }))
+            }), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -211,7 +211,7 @@
                 "file_path": "f.txt",
                 "old_string": "foo",
                 "new_string": "bar"
-            }))
+            }), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -235,7 +235,7 @@
                 "file_path": "f.txt",
                 "old_string": "x",
                 "new_string": "y"
-            }))
+            }), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap_err();
         let msg = err.to_string();

@@ -52,7 +52,7 @@ impl EventSink for MockEventSink {
 
 // ── Helper 工厂函数 ─────────────────────────────────────────────────────────
 
-/// 构造最小 InterceptRequest（compact_model / thread_store 等均为 None）。
+/// 构造最小 InterceptRequest（auxiliary_model / thread_store 等均为 None）。
 ///
 /// 8 个参数全部是测试所需的引用——测试构造函数不强制参数对象化。
 #[allow(clippy::too_many_arguments)]
@@ -74,7 +74,7 @@ fn make_intercept_request<'a>(
         cancel,
         peri_config,
         event_sink,
-        compact_model: &None,
+        auxiliary_model: &None,
         thread_store: None,
         thread_id: None,
         bg_event_tx,

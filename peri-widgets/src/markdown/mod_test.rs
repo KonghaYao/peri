@@ -483,3 +483,97 @@ fn parse_markdown_empty_not_cached() {
         "空字符串应返回空结果"
     );
 }
+
+// ── HTML 块处理测试 ──────────────────────────────────────────
+
+/// system-reminder 包裹的文本不应被丢弃。
+///
+/// pulldown-cmark 启用 ENABLE_HTML 后，`<system-reminder>...</system-reminder>`
+/// 被解析为 HTML 块。如果 RenderState::handle_event 不处理 Event::Html，
+/// 整个块（包括内部文本）会被 `_ => {}` 静默丢弃，导致 goal steering
+/// 消息在 TUI 中"消失"。
+#[test]
+fn system_reminder_inner_text_not_dropped() {
+    let md =
+        "<system-reminder>\n[Goal Steering] 目标: 完成重构\n请决策下一步...\n</system-reminder>";
+    let text = parse_markdown(md, &default_theme(), 80);
+
+    let all_content: String = text
+        .lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+        .collect();
+
+    assert!(
+        all_content.contains("Goal Steering") || all_content.contains("目标"),
+        "system-reminder 内部文本不应被丢弃，实际渲染: {:?}",
+        all_content
+    );
+}
+
+/// 连续失败注入的 system-reminder 也不应被丢弃。
+#[test]
+fn system_reminder_consecutive_failure_text_visible() {
+    let md = "<system-reminder>\nWarning: Tool 'Read' has failed 5 consecutive times.\nStop retrying.\n</system-reminder>";
+    let text = parse_markdown(md, &default_theme(), 80);
+
+    let all_content: String = text
+        .lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+        .collect();
+
+    assert!(
+        all_content.contains("failed 5 consecutive") || all_content.contains("Stop retrying"),
+        "连续失败警告文本不应被丢弃，实际渲染: {:?}",
+        all_content
+    );
+}
+
+/// HTML 标签本身不应出现在输出中（标签被剥离，文本保留）。
+#[test]
+fn html_tags_stripped_from_output() {
+    let md = "<system-reminder>\nhello world\n</system-reminder>";
+    let text = parse_markdown(md, &default_theme(), 80);
+
+    let all_content: String = text
+        .lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+        .collect();
+
+    assert!(
+        !all_content.contains("<system-reminder>"),
+        "HTML 标签不应出现在渲染输出中，实际: {:?}",
+        all_content
+    );
+    assert!(
+        all_content.contains("hello world"),
+        "内部文本应保留，实际: {:?}",
+        all_content
+    );
+}
+
+/// goal-message 标签也应被正确剥离（GoalMiddleware 使用此标签）
+#[test]
+fn goal_message_tag_stripped_text_visible() {
+    let md = "<goal-message>\n[Goal Steering] 目标: 完成重构\n请决策下一步...\n</goal-message>";
+    let text = parse_markdown(md, &default_theme(), 80);
+
+    let all_content: String = text
+        .lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+        .collect();
+
+    assert!(
+        !all_content.contains("<goal-message>"),
+        "goal-message 标签不应出现在渲染输出中，实际: {:?}",
+        all_content
+    );
+    assert!(
+        all_content.contains("Goal Steering") && all_content.contains("完成重构"),
+        "goal-message 内部文本应保留，实际: {:?}",
+        all_content
+    );
+}

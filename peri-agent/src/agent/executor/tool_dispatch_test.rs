@@ -35,6 +35,7 @@ impl BaseTool for MockEchoTool {
     async fn invoke(
         &self,
         _: serde_json::Value,
+        _ctx: crate::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Ok(format!("{} done", self.name_str))
     }
@@ -169,6 +170,7 @@ async fn test_concurrent_partial_failure_all_results_written() {
         async fn invoke(
             &self,
             _: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Err("tool_b 执行失败".into())
         }
@@ -270,6 +272,7 @@ async fn test_cancel_at_i_gt_0_flushes_modified_calls() {
         async fn invoke(
             &self,
             _: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             tokio::time::sleep(Duration::from_secs(60)).await;
             Ok("never".to_string())
@@ -456,6 +459,7 @@ async fn test_tool_name_case_insensitive_fallback() {
         async fn invoke(
             &self,
             _: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok("shell done".to_string())
         }
@@ -522,6 +526,7 @@ async fn test_tool_name_alias_fallback() {
         async fn invoke(
             &self,
             _: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok("agent done".to_string())
         }
@@ -587,6 +592,7 @@ async fn test_consecutive_failure_injects_correction() {
         async fn invoke(
             &self,
             _: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Err("The 'file_path' parameter is required for the Read tool.".into())
         }
@@ -721,6 +727,7 @@ async fn test_cancel_during_execution_partial_completion() {
         async fn invoke(
             &self,
             _: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok("fast done".to_string())
         }
@@ -744,6 +751,7 @@ async fn test_cancel_during_execution_partial_completion() {
         async fn invoke(
             &self,
             _: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             tokio::time::sleep(Duration::from_secs(60)).await;
             Ok("never".to_string())
@@ -949,6 +957,7 @@ async fn test_all_concurrent_tools_fail() {
         async fn invoke(
             &self,
             _: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Err(self.err_msg.into())
         }
@@ -1243,4 +1252,105 @@ fn test_apply_error_suggestion_skips_when_no_match() {
         output = format_suggestion(&output, &sug);
     }
     assert_eq!(output, original, "无建议时 output 必须保持原值");
+}
+
+// ─── ToolContext.messages 视图测试 ─────────────────────────────────────
+// 验证延迟写入 TRAP 下，工具仍能看到本轮 AI 消息。
+// 修复前：ctx.messages 来自 state.messages()，不含本轮 AI 消息（延迟写入）。
+// 修复后：在 snapshot 末尾附加本轮 AI 消息的只读视图。
+
+/// 验证工具调用时 ctx.messages 包含本轮 AI 消息。
+/// GoalTool 等需要本轮上下文做验证的工具依赖此行为。
+#[tokio::test]
+async fn test_tool_context_includes_current_turn_ai_message() {
+    use std::sync::Mutex;
+
+    // CaptureTool：记录 ctx.messages 的最后一条消息类型和内容
+    struct CaptureTool {
+        captured: Arc<Mutex<Option<(String, String)>>>,
+    }
+    #[async_trait::async_trait]
+    impl BaseTool for CaptureTool {
+        fn name(&self) -> &str {
+            "capture"
+        }
+        fn description(&self) -> &str {
+            "captures last message from ctx"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+            ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            let last = ctx
+                .messages
+                .last()
+                .expect("ctx.messages 应非空（含附加的本轮 AI 消息）");
+            let role = match last {
+                BaseMessage::Ai { .. } => "ai",
+                BaseMessage::Human { .. } => "human",
+                BaseMessage::System { .. } => "system",
+                BaseMessage::Tool { .. } => "tool",
+            };
+            let content = last.content();
+            *self.captured.lock().unwrap() = Some((role.to_string(), content));
+            Ok("captured".to_string())
+        }
+    }
+
+    // MockLLM：首轮发起 capture 工具调用（thought="本轮 AI 回答"）
+    struct CaptureMockLLM;
+    #[async_trait::async_trait]
+    impl ReactLLM for CaptureMockLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
+        ) -> AgentResult<Reasoning> {
+            let has_tool_result = messages
+                .iter()
+                .any(|m| matches!(m, BaseMessage::Tool { .. }));
+            if !has_tool_result {
+                Ok(Reasoning::with_tools(
+                    "本轮 AI 回答",
+                    vec![ToolCall::new("cap1", "capture", serde_json::json!({}))],
+                ))
+            } else {
+                Ok(Reasoning::with_answer("done", "final"))
+            }
+        }
+    }
+
+    let captured = Arc::new(Mutex::new(None));
+    let agent = ReActAgent::new(CaptureMockLLM)
+        .max_iterations(5)
+        .register_tool(Box::new(CaptureTool {
+            captured: captured.clone(),
+        }));
+
+    let mut state = AgentState::new("/tmp");
+    let result = agent
+        .execute(AgentInput::text("go"), &mut state, None)
+        .await;
+    assert!(result.is_ok(), "Agent 应正常完成: {:?}", result);
+
+    let (role, content) = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("应捕获到 ctx.messages 最后一条");
+    assert_eq!(
+        role, "ai",
+        "修复后：工具看到的最后一条应为本轮 AI 消息，实际: {}",
+        role
+    );
+    assert!(
+        content.contains("本轮 AI 回答"),
+        "工具应看到本轮 AI thought，实际内容: {}",
+        content
+    );
 }

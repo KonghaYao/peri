@@ -54,7 +54,7 @@ fn make_ctx(sink: Arc<dyn crate::session::event_sink::EventSink>, args: &str) ->
         history: vec![],
         cwd: "/tmp".to_string(),
         peri_config: Arc::new(Default::default()),
-        compact_model: None,
+        auxiliary_model: None,
         event_sink: sink,
         args: args.to_string(),
         cancel_token: peri_agent::agent::AgentCancellationToken::new(),

@@ -1,5 +1,3 @@
-use peri_agent::messages::BaseMessage;
-
 use super::MessagePipeline;
 pub use crate::ui::message_view::aggregate_batch_groups;
 use crate::{
@@ -136,21 +134,22 @@ impl MessagePipeline {
 
         if self.has_snapshot_this_round {
             let start = self.completed_len_at_round_start.min(self.completed.len());
-            let round_completed = &self.completed[start..];
-            let last_human_offset = round_completed
-                .iter()
-                .rposition(|msg| matches!(msg, BaseMessage::Human { .. }))
-                .map(|idx| idx + start)
-                .unwrap_or(start);
-            tail_vms =
-                Self::messages_to_view_models(&self.completed[last_human_offset..], &self.cwd);
+            // 直接从 round 起点渲染全部消息。
+            //
+            // 不需要 rposition(Human) 找截断点：
+            // - 正常会话：start 指向用户提交前的位置，completed[start..] 就是本轮全部消息
+            // - compact 后：restore_completed 已将 start 设到 compact 消息之后，
+            //   completed[start..] 只含新会话消息
+            // - goal steering 注入的 Human 消息也在 completed[start..] 内，不会被跳过
+            //
+            // 之前的 rposition(Human) 会跳到注入的 <goal-message>，导致 AI 回复丢失。
+            tail_vms = Self::messages_to_view_models(&self.completed[start..], &self.cwd);
             let reconcile_subagent_count =
                 tail_vms.iter().filter(|vm| vm.is_subagent_group()).count();
             tracing::debug!(
                 has_snapshot = true,
                 completed_len = self.completed.len(),
                 start_offset = start,
-                last_human_offset,
                 reconcile_total = tail_vms.len(),
                 reconcile_subagent_count,
                 frozen_count = self.frozen_subagent_vms.len(),

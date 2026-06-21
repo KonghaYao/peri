@@ -1,11 +1,13 @@
-//! GoalMiddleware — goal steering 注入骨架。
+//! GoalMiddleware — after_agent 钩子注入递增紧迫感 steering。
 //!
-//! before_model 钩子检查 objective_just_updated 标志，注入 set/updated 模板。
-//! 本 Task 仅实现 T1（set/objective_updated）注入，T2-T6 在 Plan 1c 实现。
+//! goal active 时每轮注入提示 + 设 block_continue，executor 自动续跑。
+//! agent 必须调 goal(complete) 或 goal(block) 才能终止循环。
 //!
-//! 注入路径：add_message(Human, <system-reminder>) 尾部追加。
-//! 绝不破坏 frozen_system_prompt（注入在 frozen 边界之外）。
+//! 注入路径：add_message(Human, <goal-message>) 尾部追加。
+//! 绝不破坏 frozen_system_prompt。使用 <goal-message> 而非 <system-reminder>，
+//! 避免与 compact 摘要检测、14_system_reminder prompt 混淆。
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -13,31 +15,49 @@ use peri_agent::{
     agent::state::State, error::AgentResult, messages::BaseMessage, middleware::r#trait::Middleware,
 };
 
-/// Goal steering 注入中间件
+use crate::goal::GoalTool;
+
+/// Goal steering 注入中间件（链最后）
 pub struct GoalMiddleware {
-    goal_state: Arc<dyn peri_agent::goal::GoalStateView>,
+    controller: Arc<dyn peri_agent::goal::GoalController>,
+    /// 辅助 LLM（complete 验证用），None 时跳过验证
+    auxiliary_model: Option<Arc<dyn peri_agent::llm::BaseModel>>,
+    /// 连续 after_agent 注入次数（递增紧迫感用）
+    pending_rounds: AtomicUsize,
 }
 
 impl GoalMiddleware {
-    pub fn new(goal_state: Arc<dyn peri_agent::goal::GoalStateView>) -> Self {
-        Self { goal_state }
+    pub fn new(
+        controller: Arc<dyn peri_agent::goal::GoalController>,
+        auxiliary_model: Option<Arc<dyn peri_agent::llm::BaseModel>>,
+    ) -> Self {
+        Self {
+            controller,
+            auxiliary_model,
+            pending_rounds: AtomicUsize::new(0),
+        }
     }
 
-    /// 渲染 set/objective_updated 模板
-    fn render_set_template(objective: &str, token_budget: Option<u64>, tokens_used: u64) -> String {
-        let budget_line = match token_budget {
-            Some(b) => format!("\n预算: {} tokens（已用 {}）", b, tokens_used),
-            None => "\n预算: 无上限".to_string(),
+    /// 渲染递增紧迫感模板
+    fn render_steering(objective: &str, round: usize) -> String {
+        let urgency = match round {
+            1 => {
+                "你刚才给出了回答但未声明目标完成。请决策：\n\
+                  - 已达成 → goal(complete)\n\
+                  - 遇到阻塞 → goal(block, reason)\n\
+                  - 还需继续 → 执行下一步"
+            }
+            2 => {
+                "目标尚未完成。你必须调用 goal(complete) 或 goal(block) 来结束，或继续执行下一步。"
+            }
+            _ => "注意：目标仍未完成。请立即决策——继续工作或声明终态。",
         };
         format!(
-            "<system-reminder>\n\
+            "<goal-message>\n\
              [Goal Steering]\n\
-             当前目标: {objective}\n\
-             {budget_line}\n\
-             \n\
-             请围绕此目标持续推进。完成时用 update_goal(Complete) 声明；\
-             遇到阻塞用 update_goal(Blocked, reason) 声明。\n\
-             </system-reminder>"
+             目标: {objective}\n\
+             {urgency}\n\
+             </goal-message>"
         )
     }
 }
@@ -48,26 +68,49 @@ impl<S: State> Middleware<S> for GoalMiddleware {
         "GoalMiddleware"
     }
 
-    async fn before_model(&self, state: &mut S) -> AgentResult<()> {
-        // T1: set / objective_updated 事件性注入
-        if !self.goal_state.consume_objective_updated() {
-            return Ok(());
+    fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn peri_agent::tools::BaseTool>> {
+        // Goal 工具通过 collect_tools 注册到 shared_tools（executor 每轮 clear + repopulate）
+        // is_deferred_tool 过滤器会将其从 LLM 可见列表移除，仅通过 SearchExtraTools → ExecuteExtraTool 访问
+        vec![Box::new(GoalTool::new(
+            Arc::clone(&self.controller),
+            self.auxiliary_model.clone(),
+        ))]
+    }
+
+    async fn after_agent(
+        &self,
+        state: &mut S,
+        output: &peri_agent::agent::react::AgentOutput,
+    ) -> AgentResult<peri_agent::agent::react::AgentOutput> {
+        // 1. 前面已有 block_continue（如 HookMiddleware stop block）→ 不干预
+        if output.block_continue.is_some() {
+            return Ok(output.clone());
         }
 
-        let snap = self.goal_state.snapshot();
-        let objective = match snap.objective.as_deref() {
-            Some(o) => o,
-            None => return Ok(()),
-        };
+        // 2. 检查 goal 状态
+        let snap = self.controller.snapshot();
+        if !peri_agent::goal::is_goal_active(&snap) {
+            // 无 goal 或终态 → 重置计数器 + 放行
+            self.pending_rounds.store(0, Ordering::Relaxed);
+            return Ok(output.clone());
+        }
 
-        let template = Self::render_set_template(objective, snap.token_budget, snap.tokens_used);
+        // 3. goal active → 注入递增紧迫感 steering
+        let round = self.pending_rounds.fetch_add(1, Ordering::Relaxed) + 1;
+        let objective = snap.objective.as_deref().unwrap_or("(未知)");
+        let template = Self::render_steering(objective, round);
         state.add_message(BaseMessage::human(template));
+
         tracing::debug!(
             objective = %objective,
-            "GoalMiddleware: 注入 set/objective_updated steering"
+            round = round,
+            "GoalMiddleware: 注入 after_agent steering"
         );
 
-        Ok(())
+        // 4. 设 block_continue，executor 自动续跑
+        let mut output = output.clone();
+        output.block_continue = Some("goal_active".to_string());
+        Ok(output)
     }
 }
 

@@ -32,6 +32,7 @@ impl BaseTool for MockTool {
     async fn invoke(
         &self,
         _input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Ok("mock".to_string())
     }

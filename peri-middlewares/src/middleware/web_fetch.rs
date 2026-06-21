@@ -130,6 +130,7 @@ impl BaseTool for WebFetchTool {
     async fn invoke(
         &self,
         input: Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = input["url"].as_str().ok_or("Missing url parameter")?;
         let prompt = input["prompt"].as_str();

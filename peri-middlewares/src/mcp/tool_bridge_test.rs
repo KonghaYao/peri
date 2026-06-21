@@ -88,7 +88,12 @@ async fn test_invoke_not_connected() {
     let tool = make_tool("read_file", None);
     let handle = make_disconnected_handle("fs");
     let bridge = McpToolBridge::new("fs", &tool, handle);
-    let result = bridge.invoke(serde_json::json!({})).await;
+    let result = bridge
+        .invoke(
+            serde_json::json!({}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("未连接"));

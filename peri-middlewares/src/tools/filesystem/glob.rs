@@ -149,6 +149,7 @@ impl BaseTool for GlobFilesTool {
     async fn invoke(
         &self,
         input: Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let pattern = input["pattern"]
             .as_str()

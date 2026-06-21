@@ -397,7 +397,49 @@ impl<'a> RenderState<'a> {
                 self.flush_line();
             }
 
+            // ── HTML 块 / 行内 HTML ──────────────────────────────────────────
+            //
+            // pulldown-cmark 启用 ENABLE_HTML 后，`<system-reminder>...</system-reminder>`
+            // 等自定义标签被解析为 HTML 块（Event::Html）或行内 HTML（Event::InlineHtml）。
+            // 整个块（包括内部文本）以 Event::Html 事件到达。
+            //
+            // [BUGFIX] 之前 `_ => {}` 静默丢弃这些事件，导致 goal steering、连续失败
+            // 警告等 `<system-reminder>` 包裹的消息在 TUI 中渲染为空白——用户看到
+            // "消息消失"。现在剥离 HTML 标签后渲染内部文本。
+            Event::Html(html) | Event::InlineHtml(html) => {
+                let raw = html.into_string();
+                let stripped = strip_html_tags(&raw);
+                if !stripped.trim().is_empty() {
+                    for line in stripped.lines() {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            self.push_span(trimmed.to_string(), Style::default());
+                            self.flush_line();
+                        }
+                    }
+                }
+            }
+
             _ => {}
         }
     }
+}
+
+/// 剥离 HTML 标签，保留标签之间的文本内容。
+///
+/// 例：`"<system-reminder>\nHello\n</system-reminder>"` → `"\nHello\n"`
+///
+/// 简单状态机：在 `>` 和 `<` 之间的内容为可见文本。
+fn strip_html_tags(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+    result
 }

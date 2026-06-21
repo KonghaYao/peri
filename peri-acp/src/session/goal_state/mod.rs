@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use parking_lot::RwLock;
 use peri_agent::goal::{GoalStatus, GoalStore, ThreadGoal};
 
@@ -250,6 +251,42 @@ impl peri_agent::goal::GoalStateView for GoalState {
 
     fn consume_objective_updated(&self) -> bool {
         self.consume_objective_updated()
+    }
+}
+
+#[async_trait]
+impl peri_agent::goal::GoalController for GoalState {
+    async fn create_goal(&self, objective: String) -> Result<(), String> {
+        // 原子化：检查 + 插入在同一写锁内，消除 TOCTOU 竞态窗口
+        let new_goal = ThreadGoal::new(objective, None);
+        let (thread_id, store) = {
+            let mut guard = self.inner.write();
+            if guard.goal.is_some() {
+                return Err("goal 已存在，请先 clear 后重建".to_string());
+            }
+            guard.goal = Some(new_goal.clone());
+            guard.objective_just_updated = true;
+            (guard.thread_id.clone(), guard.store.clone())
+        };
+        // best-effort store 写入（短锁已释放）
+        if let Err(e) = store.save(&thread_id, new_goal).await {
+            tracing::warn!(error = %e, "GoalState: store save 失败，退化为纯内存模式");
+            return Err(e.to_string());
+        }
+        Ok(())
+    }
+
+    async fn complete_goal(&self) -> Result<(), String> {
+        self.set_status(GoalStatus::Complete).await
+    }
+
+    async fn block_goal(&self, reason: String) -> Result<(), String> {
+        self.set_status_with_reason(GoalStatus::Blocked, reason)
+            .await
+    }
+
+    fn snapshot(&self) -> peri_agent::goal::GoalViewSnapshot {
+        peri_agent::goal::GoalStateView::snapshot(self)
     }
 }
 

@@ -82,6 +82,7 @@ impl BaseTool for McpResourceTool {
     async fn invoke(
         &self,
         input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // 1. 提取参数
         let server_name = input

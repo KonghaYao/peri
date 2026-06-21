@@ -2,7 +2,7 @@
     async fn test_write_file_creates_new() {
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
-        tool.invoke(serde_json::json!({"file_path": "new.txt", "content": "hello"}))
+        tool.invoke(serde_json::json!({"file_path": "new.txt", "content": "hello"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         let content = std::fs::read_to_string(dir.path().join("new.txt")).unwrap();
@@ -14,7 +14,7 @@
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), "old").unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
-        tool.invoke(serde_json::json!({"file_path": "f.txt", "content": "new"}))
+        tool.invoke(serde_json::json!({"file_path": "f.txt", "content": "new"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
@@ -25,7 +25,7 @@
     async fn test_write_file_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
-        tool.invoke(serde_json::json!({"file_path": "sub/dir/file.txt", "content": "deep"}))
+        tool.invoke(serde_json::json!({"file_path": "sub/dir/file.txt", "content": "deep"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(dir.path().join("sub/dir/file.txt").exists());
@@ -35,7 +35,7 @@
     async fn test_write_file_missing_content_param() {
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
-        let result = tool.invoke(serde_json::json!({"file_path": "f.txt"})).await;
+        let result = tool.invoke(serde_json::json!({"file_path": "f.txt"}), peri_agent::tools::ToolContext::new(&[], ".")).await;
         assert!(result.is_err(), "missing content should return Err");
     }
 
@@ -44,7 +44,7 @@
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"file_path": "msg.txt", "content": "x"}))
+            .invoke(serde_json::json!({"file_path": "msg.txt", "content": "x"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(
@@ -58,7 +58,7 @@
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"file_path": "multi.txt", "content": "a\nb\nc"}))
+            .invoke(serde_json::json!({"file_path": "multi.txt", "content": "a\nb\nc"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(
@@ -71,7 +71,7 @@
     async fn test_write_file_no_tmp_residual() {
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
-        tool.invoke(serde_json::json!({"file_path": "clean.txt", "content": "data"}))
+        tool.invoke(serde_json::json!({"file_path": "clean.txt", "content": "data"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         // 原子写入后不应残留任何 .tmp.* 临时文件
@@ -98,7 +98,7 @@
         }
         let tool = WriteFileTool::new(readonly_dir.to_str().unwrap());
         let _result = tool
-            .invoke(serde_json::json!({"file_path": "sub/nope.txt", "content": "x"}))
+            .invoke(serde_json::json!({"file_path": "sub/nope.txt", "content": "x"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await;
         #[cfg(unix)]
         assert!(_result.is_err(), "写入只读目录应返回 Err");
@@ -126,7 +126,7 @@
         std::fs::write(dir.path().join("log.txt"), "line1\n").unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"file_path": "log.txt", "content": "line2\n", "append": true}))
+            .invoke(serde_json::json!({"file_path": "log.txt", "content": "line2\n", "append": true}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         let content = std::fs::read_to_string(dir.path().join("log.txt")).unwrap();
@@ -139,7 +139,7 @@
     async fn test_write_append_creates_new_file() {
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
-        tool.invoke(serde_json::json!({"file_path": "new_append.txt", "content": "first line\n", "append": true}))
+        tool.invoke(serde_json::json!({"file_path": "new_append.txt", "content": "first line\n", "append": true}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         let content = std::fs::read_to_string(dir.path().join("new_append.txt")).unwrap();
@@ -152,7 +152,7 @@
         std::fs::write(dir.path().join("f.txt"), "a\n").unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"file_path": "f.txt", "content": "b\nc\nd\n", "append": true}))
+            .invoke(serde_json::json!({"file_path": "f.txt", "content": "b\nc\nd\n", "append": true}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
@@ -166,7 +166,7 @@
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), "old content").unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
-        tool.invoke(serde_json::json!({"file_path": "f.txt", "content": "new", "append": false}))
+        tool.invoke(serde_json::json!({"file_path": "f.txt", "content": "new", "append": false}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
@@ -177,13 +177,13 @@
     async fn test_write_append_sequential_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
-        tool.invoke(serde_json::json!({"file_path": "chunked.txt", "content": "chunk1\n"}))
+        tool.invoke(serde_json::json!({"file_path": "chunked.txt", "content": "chunk1\n"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
-        tool.invoke(serde_json::json!({"file_path": "chunked.txt", "content": "chunk2\n", "append": true}))
+        tool.invoke(serde_json::json!({"file_path": "chunked.txt", "content": "chunk2\n", "append": true}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
-        tool.invoke(serde_json::json!({"file_path": "chunked.txt", "content": "chunk3\n", "append": true}))
+        tool.invoke(serde_json::json!({"file_path": "chunked.txt", "content": "chunk3\n", "append": true}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         let content = std::fs::read_to_string(dir.path().join("chunked.txt")).unwrap();
@@ -194,7 +194,7 @@
     async fn test_write_append_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool::new(dir.path().to_str().unwrap());
-        tool.invoke(serde_json::json!({"file_path": "sub/dir/file.txt", "content": "deep\n", "append": true}))
+        tool.invoke(serde_json::json!({"file_path": "sub/dir/file.txt", "content": "deep\n", "append": true}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         let content = std::fs::read_to_string(dir.path().join("sub/dir/file.txt")).unwrap();

@@ -47,6 +47,7 @@ fn make_tool(name: &'static str) -> Arc<dyn BaseTool> {
         async fn invoke(
             &self,
             _input: serde_json::Value,
+            _ctx: peri_agent::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok(format!("{} result", self.0))
         }
@@ -95,10 +96,13 @@ async fn test_agent_prompt_missing_returns_error() {
 
     let t = make_subagent_tool(vec![]);
     let result = t
-        .invoke(serde_json::json!({
-            "subagent_type": "test-agent",
-            "cwd": dir.path().to_str().unwrap()
-        }))
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -113,9 +117,12 @@ async fn test_agent_prompt_missing_returns_error() {
 async fn test_agent_subagent_type_missing_returns_error() {
     let t = make_subagent_tool(vec![]);
     let result = t
-        .invoke(serde_json::json!({
-            "prompt": "do something"
-        }))
+        .invoke(
+            serde_json::json!({
+                "prompt": "do something"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -141,10 +148,13 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
 
     // subagent_type: "fork" should trigger fork mode, NOT try to load an agent named "fork"
     let result = t
-        .invoke(serde_json::json!({
-            "subagent_type": "fork",
-            "prompt": "do something"
-        }))
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "fork",
+                "prompt": "do something"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -158,11 +168,14 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
 async fn test_tool_agent_not_found() {
     let t = make_subagent_tool(vec![]);
     let result = t
-        .invoke(serde_json::json!({
-            "subagent_type": "nonexistent-agent",
-            "prompt": "do something",
-            "cwd": "/tmp"
-        }))
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "nonexistent-agent",
+                "prompt": "do something",
+                "cwd": "/tmp"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -308,11 +321,14 @@ async fn test_tool_executes_with_valid_agent_file() {
 
     let t = make_subagent_tool(vec![]);
     let result = t
-        .invoke(serde_json::json!({
-            "subagent_type": "test-agent",
-            "prompt": "hello",
-            "cwd": dir.path().to_str().unwrap()
-        }))
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "prompt": "hello",
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     // EchoLLM returns echo: hello
@@ -337,15 +353,18 @@ async fn test_agent_reserved_fields_parsed() {
 
     let t = make_subagent_tool(vec![]);
     let result = t
-        .invoke(serde_json::json!({
-            "prompt": "hello",
-            "subagent_type": "test-agent",
-            "description": "test desc",
-            "name": "test-alias",
-            "isolation": "worktree",
-            "run_in_background": true,
-            "cwd": dir.path().to_str().unwrap()
-        }))
+        .invoke(
+            serde_json::json!({
+                "prompt": "hello",
+                "subagent_type": "test-agent",
+                "description": "test desc",
+                "name": "test-alias",
+                "isolation": "worktree",
+                "run_in_background": true,
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     // Reserved fields don't affect execution, should still return normal result
@@ -485,11 +504,14 @@ async fn test_system_builder_injects_system_message() {
     .with_system_builder(Arc::new(|_overrides, _cwd| "tone: be concise".to_string()));
 
     let result = t
-        .invoke(serde_json::json!({
-            "subagent_type": "tone-test",
-            "prompt": "hello",
-            "cwd": dir.path().to_str().unwrap()
-        }))
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "tone-test",
+                "prompt": "hello",
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -555,11 +577,14 @@ async fn test_skill_preload_registered() {
     );
 
     let result = t
-        .invoke(serde_json::json!({
-            "subagent_type": "skill-user",
-            "prompt": "test task",
-            "cwd": dir.path().to_str().unwrap()
-        }))
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "skill-user",
+                "prompt": "test task",
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
 
@@ -678,11 +703,14 @@ async fn test_cancel_token_interrupts_subagent() {
     .with_cancel(cancel);
 
     let result = t
-        .invoke(serde_json::json!({
-            "subagent_type": "forever",
-            "prompt": "run",
-            "cwd": dir.path().to_str().unwrap()
-        }))
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "forever",
+                "prompt": "run",
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -733,10 +761,13 @@ async fn test_fork_inherits_parent_messages() {
     .with_parent_messages(Arc::clone(&parent_messages));
 
     let result = t
-        .invoke(serde_json::json!({
-            "fork": true,
-            "prompt": "do the thing"
-        }))
+        .invoke(
+            serde_json::json!({
+                "fork": true,
+                "prompt": "do the thing"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
 
@@ -793,10 +824,13 @@ async fn test_fork_registers_all_tools_including_agent() {
     )
     .with_parent_messages(parent_messages);
 
-    t.invoke(serde_json::json!({
-        "fork": true,
-        "prompt": "check tools"
-    }))
+    t.invoke(
+        serde_json::json!({
+            "fork": true,
+            "prompt": "check tools"
+        }),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
     .await
     .unwrap();
 
@@ -819,10 +853,13 @@ async fn test_fork_without_parent_messages_returns_error() {
     let t = make_subagent_tool(vec![]);
 
     let result = t
-        .invoke(serde_json::json!({
-            "fork": true,
-            "prompt": "do something"
-        }))
+        .invoke(
+            serde_json::json!({
+                "fork": true,
+                "prompt": "do something"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
 
     let err_msg = result.unwrap_err().to_string();
@@ -876,10 +913,13 @@ async fn test_fork_system_prompt_consistent() {
     .with_parent_messages(parent_messages)
     .with_system_builder(Arc::new(|_ov, _cwd| "FORK-TEST-SYSTEM".to_string()));
 
-    t.invoke(serde_json::json!({
-        "fork": true,
-        "prompt": "check system"
-    }))
+    t.invoke(
+        serde_json::json!({
+            "fork": true,
+            "prompt": "check system"
+        }),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
     .await
     .unwrap();
 
@@ -929,10 +969,13 @@ async fn test_fork_directive_includes_rules() {
     )
     .with_parent_messages(parent_messages);
 
-    t.invoke(serde_json::json!({
-        "fork": true,
-        "prompt": "my directive task"
-    }))
+    t.invoke(
+        serde_json::json!({
+            "fork": true,
+            "prompt": "my directive task"
+        }),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
     .await
     .unwrap();
 

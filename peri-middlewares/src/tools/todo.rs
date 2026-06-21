@@ -161,6 +161,7 @@ impl BaseTool for TodoWriteTool {
     async fn invoke(
         &self,
         input: Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let items: Vec<TodoItem> = serde_json::from_value(input["todos"].clone())
             .map_err(|e| format!("TodoWrite: invalid input: {e}"))?;

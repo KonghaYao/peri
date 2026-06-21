@@ -39,6 +39,7 @@ impl BaseTool for OverrideEchoTool {
     async fn invoke(
         &self,
         input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Ok(format!(
             "override: {}",
@@ -63,6 +64,7 @@ impl BaseTool for EchoTool {
     async fn invoke(
         &self,
         input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Ok(format!("echo: {}", input["text"].as_str().unwrap_or("")))
     }
@@ -84,6 +86,7 @@ impl BaseTool for FailingTool {
     async fn invoke(
         &self,
         _input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Err("intentional failure".into())
     }

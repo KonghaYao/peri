@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
@@ -143,6 +144,8 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
 
     // 阶段 A：收集所有工具调用结果（不写 state）
     // 返回 Err 仅在 before_tool 错误路径（此时 state 干净，无 AI 消息）
+    // 传入 ai_msg 让工具的 ToolContext.messages 能看到本轮 AI 回答（延迟写入 TRAP 下
+    // state 不含本轮 AI 消息，但 GoalTool 等需要本轮上下文做验证）。
     let (results, was_cancelled, deferred_error) = collect_tool_results(
         agent,
         state,
@@ -150,6 +153,7 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
         all_tools,
         cancel,
         ai_msg_id,
+        &ai_msg,
     )
     .await?;
 
@@ -242,6 +246,7 @@ async fn collect_tool_results<L: ReactLLM, S: State>(
     all_tools: &HashMap<String, &dyn BaseTool>,
     cancel: &CancellationToken,
     ai_msg_id: MessageId,
+    ai_msg: &BaseMessage,
 ) -> AgentResult<(Vec<(ToolCall, ToolResult)>, bool, Option<String>)> {
     let mut ready_calls: Vec<ToolCall> = Vec::with_capacity(original_calls.len());
     let mut settled_results: Vec<(ToolCall, ToolResult)> = Vec::new();
@@ -321,6 +326,19 @@ async fn collect_tool_results<L: ReactLLM, S: State>(
     // 阶段二：所有工具并发执行。
     // SubAgent 通过 child_handler_factory 的独立 event handler 避免
     // 共享 Langfuse Mutex 的锁竞争，LLM 流式支持取消令牌中断。
+    //
+    // 在闭包前提取 messages/cwd，避免在 async move 闭包中借用 state。
+    //
+    // [TRAP] 延迟写入：此时 state 不含本轮 AI 消息（dispatch_tools 阶段 B 才写入）。
+    // 但某些工具（如 GoalTool.complete 的 LLM 验证）需要看到本轮 agent 的回答。
+    // 解决：在 snapshot 末尾附加本轮 AI 消息的只读视图——不写入 state，不影响 TRAP。
+    // 用 Arc 共享，避免每个并发闭包都 clone 完整 messages 数组。
+    let messages_snapshot: Arc<Vec<BaseMessage>> = {
+        let mut msgs: Vec<BaseMessage> = state.messages().to_vec();
+        msgs.push(ai_msg.clone());
+        Arc::new(msgs)
+    };
+    let cwd_snapshot = state.cwd().to_owned();
     let tool_results: Vec<Result<String, AgentError>> = {
         let futures: Vec<_> = ready_calls
             .iter()
@@ -331,6 +349,8 @@ async fn collect_tool_results<L: ReactLLM, S: State>(
                 let input = normalize_params(input); // 新增：参数名归一化
                 let tool = resolve_tool(&call.name, all_tools);
                 let cancel = cancel.clone();
+                let messages = Arc::clone(&messages_snapshot);
+                let cwd = cwd_snapshot.clone();
                 async move {
                     let span = tracing::info_span!(
                         "agent.tool_call",
@@ -338,18 +358,18 @@ async fn collect_tool_results<L: ReactLLM, S: State>(
                         tool.call_id = %call_id,
                     );
                     let _enter = span.enter();
-                    let invoke_fut =
-                        async {
-                            match tool {
-                                Some(t) => t.invoke(input).await.map_err(|e| {
-                                    AgentError::ToolExecutionFailed {
-                                        tool: tool_name.clone(),
-                                        reason: e.to_string(),
-                                    }
-                                }),
-                                None => Err(AgentError::ToolNotFound(tool_name.clone())),
-                            }
-                        };
+                    let invoke_fut = async {
+                        let ctx = crate::tools::ToolContext::new(&messages, &cwd);
+                        match tool {
+                            Some(t) => t.invoke(input, ctx).await.map_err(|e| {
+                                AgentError::ToolExecutionFailed {
+                                    tool: tool_name.clone(),
+                                    reason: e.to_string(),
+                                }
+                            }),
+                            None => Err(AgentError::ToolNotFound(tool_name.clone())),
+                        }
+                    };
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => {

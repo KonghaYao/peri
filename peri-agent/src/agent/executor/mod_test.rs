@@ -59,6 +59,7 @@ impl BaseTool for SlowTool {
     async fn invoke(
         &self,
         _input: serde_json::Value,
+        _ctx: crate::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(format!("{} done", self.tool_name))
@@ -112,6 +113,7 @@ async fn test_cancel_during_tool_execution() {
         async fn invoke(
             &self,
             _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             tokio::time::sleep(Duration::from_secs(60)).await;
             Ok("never".to_string())
@@ -348,6 +350,7 @@ async fn test_tool_message_id() {
         async fn invoke(
             &self,
             _: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok("echo".to_string())
         }
@@ -726,6 +729,7 @@ async fn test_max_iterations_exceeded() {
         async fn invoke(
             &self,
             _: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok("echo".to_string())
         }
@@ -795,6 +799,7 @@ async fn test_batch_before_tools_execution() {
         async fn invoke(
             &self,
             _: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok(format!("{} done", self.name_str))
         }
@@ -1144,6 +1149,7 @@ async fn test_state_snapshot_no_overlap() {
         async fn invoke(
             &self,
             _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok("echo result".to_string())
         }
@@ -1557,6 +1563,7 @@ async fn test_shared_tools_clears_between_turns() {
         async fn invoke(
             &self,
             _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok("ok".to_string())
         }

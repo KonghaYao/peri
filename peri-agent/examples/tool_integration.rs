@@ -37,6 +37,7 @@ impl BaseTool for CalculatorTool {
     async fn invoke(
         &self,
         input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let op = input["operation"].as_str().unwrap_or("add");
         let a = input["a"].as_f64().unwrap_or(0.0);

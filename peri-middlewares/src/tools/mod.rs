@@ -43,8 +43,9 @@ impl BaseTool for BoxToolWrapper {
     async fn invoke(
         &self,
         input: serde_json::Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        self.0.invoke(input).await
+        self.0.invoke(input, ctx).await
     }
 }
 
@@ -65,7 +66,8 @@ impl BaseTool for ArcToolWrapper {
     async fn invoke(
         &self,
         input: serde_json::Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        self.0.invoke(input).await
+        self.0.invoke(input, ctx).await
     }
 }

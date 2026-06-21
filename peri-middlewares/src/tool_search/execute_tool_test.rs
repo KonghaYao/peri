@@ -36,6 +36,7 @@
         async fn invoke(
             &self,
             _input: Value,
+            _ctx: peri_agent::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             if self.should_fail {
                 Err("mock tool error".into())
@@ -94,7 +95,7 @@
         let tool = ExecuteExtraTool::new(registry);
 
         let result = tool
-            .invoke(json!({"tool_name": "CronRegister", "params": {"expression": "* * * * *", "prompt": "test"}}))
+            .invoke(json!({"tool_name": "CronRegister", "params": {"expression": "* * * * *", "prompt": "test"}}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert_eq!(result, "CronRegister executed");
@@ -106,7 +107,7 @@
         let tool = ExecuteExtraTool::new(registry);
 
         let result = tool
-            .invoke(json!({"tool_name": "UnknownTool", "params": {}}))
+            .invoke(json!({"tool_name": "UnknownTool", "params": {}}), peri_agent::tools::ToolContext::new(&[], "."))
             .await;
         assert!(result.is_err());
         assert!(result
@@ -120,7 +121,7 @@
         let registry = build_test_registry();
         let tool = ExecuteExtraTool::new(registry);
 
-        let result = tool.invoke(json!({"params": {}})).await;
+        let result = tool.invoke(json!({"params": {}}), peri_agent::tools::ToolContext::new(&[], ".")).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -133,7 +134,7 @@
         let registry = build_test_registry();
         let tool = ExecuteExtraTool::new(registry);
 
-        let result = tool.invoke(json!({"tool_name": "CronRegister"})).await;
+        let result = tool.invoke(json!({"tool_name": "CronRegister"}), peri_agent::tools::ToolContext::new(&[], ".")).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -147,7 +148,7 @@
         let tool = ExecuteExtraTool::new(registry);
 
         let result = tool
-            .invoke(json!({"tool_name": "FailingTool", "params": {}}))
+            .invoke(json!({"tool_name": "FailingTool", "params": {}}), peri_agent::tools::ToolContext::new(&[], "."))
             .await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "mock tool error");

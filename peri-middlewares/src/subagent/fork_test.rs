@@ -19,6 +19,7 @@ fn make_tool(name: &'static str) -> Arc<dyn BaseTool> {
         async fn invoke(
             &self,
             _input: serde_json::Value,
+            _ctx: peri_agent::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok(format!("{} result", self.0))
         }

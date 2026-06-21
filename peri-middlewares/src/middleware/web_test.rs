@@ -92,7 +92,12 @@ fn test_format_search_results_no_content() {
 #[tokio::test]
 async fn test_websearch_missing_query() {
     let tool = WebSearchTool::new();
-    let result = tool.invoke(serde_json::json!({})).await;
+    let result = tool
+        .invoke(
+            serde_json::json!({}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
     let err = result.unwrap_err();
     assert!(
         err.to_string()
@@ -104,7 +109,12 @@ async fn test_websearch_missing_query() {
 #[tokio::test]
 async fn test_webfetch_missing_url() {
     let tool = WebFetchTool::new();
-    let result = tool.invoke(serde_json::json!({})).await;
+    let result = tool
+        .invoke(
+            serde_json::json!({}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
     let err = result.unwrap_err();
     assert!(
         err.to_string().contains("Missing url parameter"),

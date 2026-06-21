@@ -125,6 +125,7 @@ impl BaseTool for BashTool {
     async fn invoke(
         &self,
         input: Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let command = input["command"]
             .as_str()

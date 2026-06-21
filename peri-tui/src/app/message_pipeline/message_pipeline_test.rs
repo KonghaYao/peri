@@ -556,8 +556,9 @@ fn test_build_tail_vms_with_snapshot() {
     pipeline.completed_len_at_round_start = 0;
 
     let tail_vms = pipeline.build_tail_vms();
+    // 不再用 rposition 截断——从 start 渲染全部消息
     let expected =
-        MessagePipeline::messages_to_view_models(&pipeline.completed[2..], &pipeline.cwd);
+        MessagePipeline::messages_to_view_models(&pipeline.completed[0..], &pipeline.cwd);
     assert_eq!(format!("{:?}", tail_vms), format!("{:?}", expected));
 }
 
@@ -591,6 +592,48 @@ fn test_build_tail_vms_case1_no_snapshot() {
         )),
         "Case 1 应包含 streaming bubble"
     );
+}
+
+/// goal steering 注入的 <goal-message> Human 消息不应跳过前面的 AI 回复。
+///
+/// 场景：用户发消息 → AI 回复 "1" → GoalMiddleware 注入 steering → AI 回复 "2"
+/// 修复前（rposition 不过滤注入消息）：tail_vms 从 steering 开始 → AI "1" 丢失
+/// 修复后（rposition 过滤 < 开头的注入消息）：tail_vms 从用户消息开始 → 完整渲染
+#[test]
+fn test_build_tail_vms_goal_steering_injected_skipped() {
+    let mut pipeline = MessagePipeline::new("/tmp".to_string());
+    pipeline.completed = vec![
+        BaseMessage::human("count to 3"),
+        BaseMessage::ai("1"),
+        BaseMessage::human("<goal-message>\n[Goal Steering]\n目标: 数到 3\n</goal-message>"),
+        BaseMessage::ai("2\n3"),
+    ];
+    pipeline.has_snapshot_this_round = true;
+    pipeline.completed_len_at_round_start = 0;
+
+    let tail_vms = pipeline.build_tail_vms();
+
+    // tail_vms 应包含完整对话：user → AI "1" → steering → AI "2,3"
+    let has_ai_1 = tail_vms.iter().any(|vm| match vm {
+        MessageViewModel::AssistantBubble { blocks, .. } => blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlockView::Text { raw, .. } if raw.contains("1"))),
+        _ => false,
+    });
+    assert!(
+        has_ai_1,
+        "tail_vms 应包含 AI 回复 '1'，实际: {:?}",
+        tail_vms
+    );
+
+    // 也应包含 steering 消息
+    let has_steering = tail_vms.iter().any(|vm| {
+        matches!(vm,
+            MessageViewModel::UserBubble { content, .. }
+            if content.contains("Goal Steering")
+        )
+    });
+    assert!(has_steering, "tail_vms 应包含 steering 消息");
 }
 
 /// 场景3: 空 completed + 无 streaming → 空 tail
@@ -785,14 +828,9 @@ fn test_build_tail_vms_consistency() {
 
     let tail_vms = pipeline.build_tail_vms();
 
-    // tail_vms 应等于从最后一条 Human 消息开始重建的 VMs
-    let last_human_idx = pipeline
-        .completed_messages()
-        .iter()
-        .rposition(|msg| matches!(msg, BaseMessage::Human { .. }))
-        .unwrap_or(0);
+    // tail_vms 应等于从 start（completed_len_at_round_start）开始重建的全部 VMs
     let expected_tail = MessagePipeline::messages_to_view_models(
-        &pipeline.completed_messages()[last_human_idx..],
+        &pipeline.completed_messages()[0..],
         &pipeline.cwd,
     );
 

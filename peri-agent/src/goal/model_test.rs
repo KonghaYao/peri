@@ -27,15 +27,23 @@ fn test_thread_goal_serde_roundtrip() {
 }
 
 #[test]
-fn test_goal_status_转换合法() {
+fn test_status_transitions() {
     use GoalStatus::*;
-    // Active 可以 → Paused / Complete / Blocked / BudgetLimited
-    assert!(Active.can_transition_to(&Paused));
+    // Active → Complete / Blocked
     assert!(Active.can_transition_to(&Complete));
     assert!(Active.can_transition_to(&Blocked));
-    assert!(Active.can_transition_to(&BudgetLimited));
-    // Paused 可以 → Active
-    assert!(Paused.can_transition_to(&Active));
-    // Complete 是终态，不能转换
+    assert!(!Active.can_transition_to(&Active));
+    // 终态不可转
     assert!(!Complete.can_transition_to(&Active));
+    assert!(!Complete.can_transition_to(&Blocked));
+    assert!(!Blocked.can_transition_to(&Active));
+    assert!(!Blocked.can_transition_to(&Complete));
+}
+
+#[test]
+fn test_is_terminal() {
+    use GoalStatus::*;
+    assert!(!Active.is_terminal());
+    assert!(Complete.is_terminal());
+    assert!(Blocked.is_terminal());
 }

@@ -21,6 +21,7 @@ pub mod agent_define;
 pub mod agents_md;
 pub mod claude_agent_parser;
 pub mod compact_middleware;
+pub mod goal;
 pub mod goal_middleware;
 pub mod subagent;
 pub use claude_agent_parser::{

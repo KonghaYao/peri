@@ -48,6 +48,7 @@ impl BaseTool for AgentResultTool {
     async fn invoke(
         &self,
         _input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Ok("No results yet. Background tasks will notify you on completion — do not call this tool again until notified."
             .to_string())

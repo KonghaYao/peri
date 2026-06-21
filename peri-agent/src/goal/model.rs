@@ -13,14 +13,10 @@ use serde::{Deserialize, Serialize};
 pub enum GoalStatus {
     /// 活跃，continuation 可运行
     Active,
-    /// 用户暂停
-    Paused,
     /// Agent 宣告完成
     Complete,
     /// Agent 宣告阻塞（必须附带 reason）
     Blocked,
-    /// 预算耗尽
-    BudgetLimited,
 }
 
 impl GoalStatus {
@@ -29,20 +25,17 @@ impl GoalStatus {
         use GoalStatus::*;
         match (self, target) {
             // 终态不可转换
-            (Complete, _) | (Blocked, _) | (BudgetLimited, _) => false,
-            // Active → 任意非 Active
-            (Active, Paused | Complete | Blocked | BudgetLimited) => true,
+            (Complete, _) | (Blocked, _) => false,
+            // Active → Complete / Blocked
+            (Active, Complete | Blocked) => true,
             (Active, Active) => false,
-            // Paused → Active（resume）
-            (Paused, Active) => true,
-            (Paused, _) => false,
         }
     }
 
     /// 是否是终态（continuation 应停止）
     pub fn is_terminal(&self) -> bool {
         use GoalStatus::*;
-        matches!(self, Complete | Blocked | BudgetLimited)
+        matches!(self, Complete | Blocked)
     }
 }
 
@@ -51,10 +44,8 @@ impl std::fmt::Display for GoalStatus {
         use GoalStatus::*;
         match self {
             Active => write!(f, "active"),
-            Paused => write!(f, "paused"),
             Complete => write!(f, "complete"),
             Blocked => write!(f, "blocked"),
-            BudgetLimited => write!(f, "budget_limited"),
         }
     }
 }

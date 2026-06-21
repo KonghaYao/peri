@@ -7,7 +7,7 @@
 //! ### Cached entries
 //! | Cache | Key | Entry | Lifetime |
 //! |-------|-----|-------|----------|
-//! | `cached_llm` | `"provider:model"` fingerprint | `compact_model` + `auto_classifier_model` | Validated per-prompt via `has_valid_cache()` |
+//! | `cached_llm` | `"provider:model"` fingerprint | `auxiliary_model` + `auto_classifier_model` | Validated per-prompt via `has_valid_cache()` |
 //! | `subagent_llm_cache` | `"provider:model"` fingerprint | `Arc<dyn BaseModel>` (shared `reqwest::Client`) | Held until `invalidate()` or session close |
 
 use std::{collections::HashMap, sync::Arc};
@@ -22,9 +22,9 @@ use crate::provider::LlmProvider;
 /// Reusing across prompts eliminates transient per-turn allocations.
 #[derive(Clone)]
 pub struct CachedLlmInstances {
-    /// compact_model LLM (used by CompactMiddleware for full compact).
+    /// 辅助 LLM（CompactMiddleware 摘要 + Goal 工具验证共用）。
     /// Contains reqwest Client with connection pool.
-    pub compact_model: Arc<dyn BaseModel>,
+    pub auxiliary_model: Arc<dyn BaseModel>,
     /// auto_classifier LLM (used by HITL HumanInTheLoopMiddleware).
     /// Contains a second reqwest Client.
     pub auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn BaseModel>>>,

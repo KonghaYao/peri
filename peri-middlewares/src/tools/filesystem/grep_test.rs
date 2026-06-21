@@ -10,7 +10,10 @@ async fn test_grep_hit() {
     .unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"pattern": "needle", "output_mode": "content", "path": "./"}))
+        .invoke(
+            serde_json::json!({"pattern": "needle", "output_mode": "content", "path": "./"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("needle"), "should find needle: {result}");
@@ -24,6 +27,7 @@ async fn test_grep_no_match() {
     let result = tool
         .invoke(
             serde_json::json!({"pattern": "zzz_not_here", "output_mode": "content", "path": "./"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
         .unwrap();
@@ -37,7 +41,12 @@ async fn test_grep_no_match() {
 async fn test_grep_missing_pattern() {
     let dir = tempfile::tempdir().unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
-    let result = tool.invoke(serde_json::json!({})).await;
+    let result = tool
+        .invoke(
+            serde_json::json!({}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("Missing required parameter 'pattern'"),
@@ -53,6 +62,7 @@ async fn test_grep_regex() {
     let result = tool
         .invoke(
             serde_json::json!({"pattern": "needle[0-9]+", "output_mode": "content", "path": "./"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
         .unwrap();
@@ -79,7 +89,7 @@ async fn test_grep_files_only() {
     std::fs::write(dir.path().join("c.txt"), "needle again").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-            .invoke(serde_json::json!({"pattern": "needle", "output_mode": "files_with_matches", "path": "./"}))
+            .invoke(serde_json::json!({"pattern": "needle", "output_mode": "files_with_matches", "path": "./"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
     assert!(result.contains("a.txt"), "should find a.txt: {result}");
@@ -97,7 +107,10 @@ async fn test_grep_count() {
     std::fs::write(dir.path().join("b.txt"), "needle once").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"pattern": "needle", "output_mode": "count", "path": "./"}))
+        .invoke(
+            serde_json::json!({"pattern": "needle", "output_mode": "count", "path": "./"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -116,7 +129,7 @@ async fn test_grep_case_insensitive() {
     std::fs::write(dir.path().join("test.txt"), "NEEDLE\nneedle\nNeedle").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-            .invoke(serde_json::json!({"pattern": "NEEDLE", "output_mode": "content", "-i": true, "path": "./"}))
+            .invoke(serde_json::json!({"pattern": "NEEDLE", "output_mode": "content", "-i": true, "path": "./"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
     assert!(
@@ -140,7 +153,7 @@ async fn test_grep_glob_filter() {
     std::fs::write(dir.path().join("test.rs"), "needle in rs").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-            .invoke(serde_json::json!({"pattern": "needle", "output_mode": "content", "glob": "*.txt", "path": "./"}))
+            .invoke(serde_json::json!({"pattern": "needle", "output_mode": "content", "glob": "*.txt", "path": "./"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
     assert!(result.contains("test.txt"), "should find in .txt: {result}");
@@ -157,12 +170,15 @@ async fn test_grep_type_filter() {
     std::fs::write(dir.path().join("test.rs"), "needle in rs").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "needle",
-            "output_mode": "content",
-            "type": "rust",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "needle",
+                "output_mode": "content",
+                "type": "rust",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("test.rs"), "should find in .rs: {result}");
@@ -183,10 +199,13 @@ async fn test_grep_invalid_output_mode() {
     let dir = tempfile::tempdir().unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "needle",
-            "output_mode": "invalid_mode"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "needle",
+                "output_mode": "invalid_mode"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -202,12 +221,15 @@ async fn test_grep_offset() {
     std::fs::write(dir.path().join("test.txt"), lines.join("\n")).unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "needle",
-            "output_mode": "content",
-            "path": "./",
-            "offset": 5
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "needle",
+                "output_mode": "content",
+                "path": "./",
+                "offset": 5
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -228,12 +250,15 @@ async fn test_grep_multiline() {
     std::fs::write(dir.path().join("test.txt"), "foo\nbar\nbaz").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "foo.*bar",
-            "multiline": true,
-            "output_mode": "content",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "foo.*bar",
+                "multiline": true,
+                "output_mode": "content",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("foo"), "multiline 应匹配跨行模式: {result}");
@@ -245,12 +270,15 @@ async fn test_grep_line_number_off() {
     std::fs::write(dir.path().join("test.txt"), "needle here").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "needle",
-            "-n": false,
-            "output_mode": "content",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "needle",
+                "-n": false,
+                "output_mode": "content",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     // line_number=false 格式为 "path: content"（无行号），不含 "path:num: content" 的双冒号模式
@@ -267,12 +295,15 @@ async fn test_grep_whole_word() {
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     // whole_word=true 应只匹配独立单词 "test"
     let result_word = tool
-        .invoke(serde_json::json!({
-            "pattern": "test",
-            "whole_word": true,
-            "output_mode": "content",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "test",
+                "whole_word": true,
+                "output_mode": "content",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -281,12 +312,15 @@ async fn test_grep_whole_word() {
     );
     // whole_word=false 时同一行也应匹配
     let result_no_word = tool
-        .invoke(serde_json::json!({
-            "pattern": "test",
-            "whole_word": false,
-            "output_mode": "content",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "test",
+                "whole_word": false,
+                "output_mode": "content",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -301,12 +335,15 @@ async fn test_grep_invert_match() {
     std::fs::write(dir.path().join("test.txt"), "foo\nbar\nbaz\nfoo2").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "foo",
-            "invert_match": true,
-            "output_mode": "content",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "foo",
+                "invert_match": true,
+                "output_mode": "content",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -325,12 +362,15 @@ async fn test_grep_fixed_strings() {
     std::fs::write(dir.path().join("test.txt"), "[ERROR] something\n[INFO] ok").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "[ERROR]",
-            "fixed_strings": true,
-            "output_mode": "content",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "[ERROR]",
+                "fixed_strings": true,
+                "output_mode": "content",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -355,13 +395,16 @@ async fn test_grep_asymmetric_context() {
     std::fs::write(dir.path().join("test.txt"), lines.join("")).unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "needle",
-            "-B": 2,
-            "-A": 0,
-            "output_mode": "content",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "needle",
+                "-B": 2,
+                "-A": 0,
+                "output_mode": "content",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -381,11 +424,14 @@ async fn test_grep_files_without_matches() {
     std::fs::write(dir.path().join("b.txt"), "no match here").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "needle",
-            "output_mode": "files_without_matches",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "needle",
+                "output_mode": "files_without_matches",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("b.txt"), "应列出无匹配的文件: {result}");
@@ -398,10 +444,13 @@ async fn test_grep_output_mode_default() {
     std::fs::write(dir.path().join("test.txt"), "needle here").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "needle",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "needle",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -419,13 +468,16 @@ async fn test_grep_multiline_with_invert_match() {
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     // multi_line + invert_match: 跨行模式匹配 foo.*baz，反转后应输出不包含跨行匹配的文件
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "foo.*baz",
-            "multiline": true,
-            "invert_match": true,
-            "output_mode": "content",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "foo.*baz",
+                "multiline": true,
+                "invert_match": true,
+                "output_mode": "content",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     // foo.*baz 跨行匹配整个文件内容，反转后应为空
@@ -442,13 +494,16 @@ async fn test_grep_multiline_with_context() {
     std::fs::write(dir.path().join("test.txt"), lines.join("")).unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "START.*END",
-            "multiline": true,
-            "-A": 1,
-            "output_mode": "content",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "START.*END",
+                "multiline": true,
+                "-A": 1,
+                "output_mode": "content",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -470,12 +525,15 @@ async fn test_grep_max_depth() {
     std::fs::write(sub.join("deep.txt"), "needle").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "needle",
-            "max_depth": 1,
-            "output_mode": "files_with_matches",
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "needle",
+                "max_depth": 1,
+                "output_mode": "files_with_matches",
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -495,12 +553,15 @@ async fn test_grep_truncation_persists_full_output() {
     std::fs::write(dir.path().join("test.txt"), lines.join("\n")).unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "needle",
-            "output_mode": "content",
-            "path": "./",
-            "head_limit": 3
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "needle",
+                "output_mode": "content",
+                "path": "./",
+                "head_limit": 3
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -526,13 +587,16 @@ async fn test_invoke_accepts_semantic_aliases() {
     std::fs::write(dir.path().join("test.txt"), "NEEDLE\nneedle\nNeedle").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "NEEDLE",
-            "output_mode": "content",
-            "case_insensitive": true,
-            "show_line_numbers": false,
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "NEEDLE",
+                "output_mode": "content",
+                "case_insensitive": true,
+                "show_line_numbers": false,
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("NEEDLE"), "应匹配大写: {result}");
@@ -551,14 +615,17 @@ async fn test_invoke_still_accepts_cli_style_params() {
     .unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "NEEDLE",
-            "output_mode": "content",
-            "-i": true,
-            "-C": 1,
-            "-n": true,
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "NEEDLE",
+                "output_mode": "content",
+                "-i": true,
+                "-C": 1,
+                "-n": true,
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     // 上下文行应被包含
@@ -574,13 +641,16 @@ async fn test_invoke_semantic_alias_takes_priority_over_cli() {
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     // 两个 key 都给值，case_insensitive=false 应优先（不进行大小写不敏感搜索）
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "NEEDLE",
-            "output_mode": "content",
-            "case_insensitive": false,
-            "-i": true,
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "NEEDLE",
+                "output_mode": "content",
+                "case_insensitive": false,
+                "-i": true,
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("NEEDLE2"), "应仍能匹配原大小写: {result}");
@@ -598,12 +668,15 @@ async fn test_invoke_context_alias() {
     std::fs::write(dir.path().join("test.txt"), "before\nNEEDLE\nafter\nafter2").unwrap();
     let tool = GrepTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "NEEDLE",
-            "output_mode": "content",
-            "context": 2,
-            "path": "./"
-        }))
+        .invoke(
+            serde_json::json!({
+                "pattern": "NEEDLE",
+                "output_mode": "content",
+                "context": 2,
+                "path": "./"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(

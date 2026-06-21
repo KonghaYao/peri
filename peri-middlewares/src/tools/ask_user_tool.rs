@@ -94,6 +94,7 @@ impl BaseTool for AskUserTool {
     async fn invoke(
         &self,
         input: Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let questions = parse_questions(input)?;
         let headers: Vec<String> = questions.iter().map(|q| q.header.clone()).collect();

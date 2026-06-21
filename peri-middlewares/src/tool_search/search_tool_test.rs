@@ -26,6 +26,7 @@
         async fn invoke(
             &self,
             _input: Value,
+            _ctx: peri_agent::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok("mock".to_string())
         }
@@ -74,7 +75,7 @@
         let tool = SearchExtraTools::new(index);
 
         let result = tool
-            .invoke(json!({"query": "slack message"}))
+            .invoke(json!({"query": "slack message"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
@@ -92,7 +93,7 @@
         let tool = SearchExtraTools::new(index);
 
         let result = tool
-            .invoke(json!({"query": "nonexistent_tool_xyz"}))
+            .invoke(json!({"query": "nonexistent_tool_xyz"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
@@ -106,7 +107,7 @@
         let index = build_test_index();
         let tool = SearchExtraTools::new(index);
 
-        let result = tool.invoke(json!({})).await;
+        let result = tool.invoke(json!({}), peri_agent::tools::ToolContext::new(&[], ".")).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()

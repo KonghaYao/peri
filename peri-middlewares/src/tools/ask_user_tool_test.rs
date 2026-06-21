@@ -39,21 +39,21 @@
     #[tokio::test]
     async fn test_invalid_json_returns_err() {
         let tool = make_tool(make_answer(&[], None));
-        let result = tool.invoke(serde_json::Value::Null).await;
+        let result = tool.invoke(serde_json::Value::Null, peri_agent::tools::ToolContext::new(&[], ".")).await;
         assert!(result.is_err(), "null input should return Err");
     }
 
     #[tokio::test]
     async fn test_missing_questions_key_returns_err() {
         let tool = make_tool(make_answer(&[], None));
-        let result = tool.invoke(serde_json::json!({})).await;
+        let result = tool.invoke(serde_json::json!({}), peri_agent::tools::ToolContext::new(&[], ".")).await;
         assert!(result.is_err(), "missing questions key should return Err");
     }
 
     #[tokio::test]
     async fn test_valid_single_question_parsed() {
         let tool = make_tool(make_answer(&["选项A"], None));
-        let result = tool.invoke(single_question_input()).await.unwrap();
+        let result = tool.invoke(single_question_input(), peri_agent::tools::ToolContext::new(&[], ".")).await.unwrap();
         assert_eq!(result, "[问: H1]\n回答: 选项A");
     }
 
@@ -62,21 +62,21 @@
     #[tokio::test]
     async fn test_single_question_selected_answer() {
         let tool = make_tool(make_answer(&["选项A"], None));
-        let result = tool.invoke(single_question_input()).await.unwrap();
+        let result = tool.invoke(single_question_input(), peri_agent::tools::ToolContext::new(&[], ".")).await.unwrap();
         assert_eq!(result, "[问: H1]\n回答: 选项A");
     }
 
     #[tokio::test]
     async fn test_single_question_text_input() {
         let tool = make_tool(make_answer(&[], Some("自定义输入")));
-        let result = tool.invoke(single_question_input()).await.unwrap();
+        let result = tool.invoke(single_question_input(), peri_agent::tools::ToolContext::new(&[], ".")).await.unwrap();
         assert_eq!(result, "[问: H1]\n回答: 自定义输入");
     }
 
     #[tokio::test]
     async fn test_single_question_text_priority_over_selected() {
         let tool = make_tool(make_answer(&["选项A"], Some("自定义")));
-        let result = tool.invoke(single_question_input()).await.unwrap();
+        let result = tool.invoke(single_question_input(), peri_agent::tools::ToolContext::new(&[], ".")).await.unwrap();
         assert_eq!(
             result, "[问: H1]\n回答: 自定义",
             "non-empty text should take priority over selected"
@@ -86,7 +86,7 @@
     #[tokio::test]
     async fn test_single_question_empty_selected() {
         let tool = make_tool(make_answer(&[], None));
-        let result = tool.invoke(single_question_input()).await.unwrap();
+        let result = tool.invoke(single_question_input(), peri_agent::tools::ToolContext::new(&[], ".")).await.unwrap();
         assert_eq!(
             result, "[问: H1]\n回答: ",
             "empty selected and no text should return empty answer"
@@ -116,7 +116,7 @@
                     {"question": "Q1?", "header": "H1", "options": [{"label": "v1"}]},
                     {"question": "Q2?", "header": "H2", "options": [{"label": "v2"}]}
                 ]
-            }))
+            }), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert_eq!(result, "[问: H1]\n回答: v1\n\n[问: H2]\n回答: v2");
@@ -139,7 +139,7 @@
                     "multi_select": true,
                     "options": [{"label": "A"}, {"label": "B"}]
                 }]
-            }))
+            }), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert_eq!(result, "[问: H1]\n回答: A, B");
@@ -152,7 +152,7 @@
         use peri_agent::interaction::ApprovalDecision;
         let response = InteractionResponse::Decisions(vec![ApprovalDecision::Approve { source: None }]);
         let tool = make_tool(response);
-        let result = tool.invoke(single_question_input()).await;
+        let result = tool.invoke(single_question_input(), peri_agent::tools::ToolContext::new(&[], ".")).await;
         assert!(result.is_err(), "non-Answers response should return Err");
     }
 
@@ -174,7 +174,7 @@
                     "multiSelect": true,
                     "options": [{"label": "A"}, {"label": "B"}]
                 }]
-            }))
+            }), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert_eq!(
@@ -193,7 +193,7 @@
                     "header": "H1",
                     "options": [{"label": "选项A", "preview": "some preview"}]
                 }]
-            }))
+            }), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert_eq!(

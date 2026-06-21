@@ -36,8 +36,8 @@ pub struct CommandContext {
     pub history: Vec<BaseMessage>,
     pub cwd: String,
     pub peri_config: Arc<PeriConfig>,
-    /// 用于 compact 等需要 LLM 调用的命令。由 executor 从 provider 构造后传入。
-    pub compact_model: Option<Arc<dyn BaseModel>>,
+    /// 辅助 LLM（CompactMiddleware 摘要 + Goal 工具验证共用）。由 executor 从 provider 构造后传入。
+    pub auxiliary_model: Option<Arc<dyn BaseModel>>,
     pub event_sink: Arc<dyn EventSink>,
     /// 命令参数（命令名之后的文本）。
     pub args: String,

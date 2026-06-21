@@ -123,7 +123,7 @@ fn make_ctx(
         history,
         cwd,
         peri_config: Arc::new(Default::default()),
-        compact_model: None,
+        auxiliary_model: None,
         event_sink: sink,
         args,
         cancel_token: peri_agent::agent::AgentCancellationToken::new(),

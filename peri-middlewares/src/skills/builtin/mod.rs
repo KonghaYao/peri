@@ -25,7 +25,10 @@ pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[
         name: "use-artifacts",
         content: include_str!("skills/use-artifacts/SKILL.md"),
     },
-    // 后续 PR 在此追加 entry
+    BuiltinSkill {
+        name: "goal",
+        content: include_str!("skills/goal/SKILL.md"),
+    },
 ];
 
 /// 从 SKILL.md 全文解析 frontmatter，返回 `(name, description)`。

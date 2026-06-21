@@ -81,7 +81,7 @@ fn make_ctx(
         history,
         cwd: "/tmp".to_string(),
         peri_config: Arc::new(Default::default()),
-        compact_model: None,
+        auxiliary_model: None,
         event_sink: sink,
         args: String::new(),
         cancel_token: peri_agent::agent::AgentCancellationToken::new(),
@@ -95,7 +95,7 @@ fn make_ctx(
     }
 }
 
-/// 构造带 compact_model 的 CommandContext（contract test 使用真实模型路径）
+/// 构造带 auxiliary_model 的 CommandContext（contract test 使用真实模型路径）
 fn make_ctx_with_model(
     sink: Arc<dyn crate::session::event_sink::EventSink>,
     history: Vec<BaseMessage>,
@@ -107,7 +107,7 @@ fn make_ctx_with_model(
         history,
         cwd,
         peri_config: Arc::new(Default::default()),
-        compact_model: Some(model),
+        auxiliary_model: Some(model),
         event_sink: sink,
         args: String::new(),
         cancel_token: peri_agent::agent::AgentCancellationToken::new(),
@@ -311,7 +311,7 @@ async fn test_compact_empty_history_returns_original_with_error_event() {
 
 #[tokio::test]
 async fn test_compact_no_model_returns_original_with_error_event() {
-    // Arrange: 有历史但无 compact_model（默认 None）
+    // Arrange: 有历史但无 auxiliary_model（默认 None）
     let sink = Arc::new(MockEventSink::new());
     let history = vec![BaseMessage::human("你好"), BaseMessage::ai("世界")];
     let ctx = make_ctx(sink.clone(), history.clone());

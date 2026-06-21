@@ -6,7 +6,7 @@
         std::fs::write(dir.path().join("c.txt"), "").unwrap();
         let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"pattern": "*.rs"}))
+            .invoke(serde_json::json!({"pattern": "*.rs"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(result.contains("a.rs"), "should find a.rs: {result}");
@@ -20,7 +20,7 @@
         std::fs::write(dir.path().join("a.rs"), "").unwrap();
         let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"pattern": "*.go"}))
+            .invoke(serde_json::json!({"pattern": "*.go"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert_eq!(result, "No files found.");
@@ -33,7 +33,7 @@
         std::fs::write(dir.path().join("sub/d.rs"), "").unwrap();
         let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"pattern": "**/*.rs"}))
+            .invoke(serde_json::json!({"pattern": "**/*.rs"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(result.contains("d.rs"), "should find nested d.rs: {result}");
@@ -44,7 +44,7 @@
         let dir = tempfile::tempdir().unwrap();
         let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"pattern": "*.rs", "path": "nonexistent_dir"}))
+            .invoke(serde_json::json!({"pattern": "*.rs", "path": "nonexistent_dir"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await;
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -80,7 +80,7 @@
         }
         let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"pattern": "*.rs"}))
+            .invoke(serde_json::json!({"pattern": "*.rs"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(
@@ -166,7 +166,7 @@
         }
         let tool = GlobFilesTool::new(base.to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"pattern": "**/*.rs"}))
+            .invoke(serde_json::json!({"pattern": "**/*.rs"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(
@@ -186,7 +186,7 @@
         std::fs::write(dir.path().join("a.rs"), "").unwrap();
         let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"pattern": "*"}))
+            .invoke(serde_json::json!({"pattern": "*"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         assert!(
@@ -216,7 +216,7 @@
             .invoke(serde_json::json!({
                 "pattern": "src/**/*.rs",
                 "path": ".claude/worktrees/fake-branch",
-            }))
+            }), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .expect("显式 path 进 worktree 应正常执行，不报错");
         assert!(
@@ -242,7 +242,7 @@
         std::fs::write(worktree_copy.join("extra.rs"), "").unwrap();
         let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
         let result = tool
-            .invoke(serde_json::json!({"pattern": "**/*.rs"}))
+            .invoke(serde_json::json!({"pattern": "**/*.rs"}), peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
         // Windows 绝对路径使用 \ 分隔符，统一规范化为 / 再断言
@@ -270,7 +270,7 @@
             "pattern": "[unclosed",
             "path": ".",
         });
-        let result = tool.invoke(input).await;
+        let result = tool.invoke(input, peri_agent::tools::ToolContext::new(&[], ".")).await;
         assert!(result.is_err(), "语法错误应该返回 Err");
         let err = result.unwrap_err().to_string();
         assert!(

@@ -114,6 +114,7 @@ async fn test_manual_tool_overrides_filesystem_middleware() {
         async fn invoke(
             &self,
             _: serde_json::Value,
+            _ctx: peri_agent::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok("mocked content".to_string())
         }

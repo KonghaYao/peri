@@ -191,6 +191,10 @@ pub(crate) async fn handle_final_answer<L: ReactLLM, S: State>(
                 .collect();
             if !msgs_after.is_empty() {
                 agent.emit(AgentEvent::StateSnapshot(msgs_after));
+                // 必须更新 snapshot_anchor，否则 block_continue 路径的
+                // emit_snapshot_and_drain_notifications 会用过期锚点重新
+                // 发射相同的消息（如 GoalMiddleware 的 steering 消息重复）。
+                *snapshot_anchor = state.messages().last().expect("messages non-empty").id();
             }
             Ok(o)
         }

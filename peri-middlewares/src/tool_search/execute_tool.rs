@@ -65,6 +65,7 @@ impl BaseTool for ExecuteExtraTool {
     async fn invoke(
         &self,
         input: Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let tool_name = input
             .get(EXTRA_TOOL_NAME_FIELD)
@@ -90,7 +91,7 @@ impl BaseTool for ExecuteExtraTool {
             ))?
         };
 
-        let result = tool.invoke(params).await?;
+        let result = tool.invoke(params, ctx).await?;
         Ok(result)
     }
 }

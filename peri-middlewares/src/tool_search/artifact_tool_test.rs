@@ -38,7 +38,7 @@ fn test_artifact_tool_parameters_schema() {
 async fn test_invoke_file_not_found() {
     let tool = ArtifactTool::new("/tmp".into());
     let result = tool
-        .invoke(serde_json::json!({"file_path": "/nonexistent/file.html", "ttl": "7d"}))
+        .invoke(serde_json::json!({"file_path": "/nonexistent/file.html", "ttl": "7d"}), peri_agent::tools::ToolContext::new(&[], "."))
         .await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -55,7 +55,7 @@ async fn test_invoke_non_html_extension() {
 
     let tool = ArtifactTool::new(dir.path().to_string_lossy().to_string());
     let result = tool
-        .invoke(serde_json::json!({"file_path": file_path.to_string_lossy(), "ttl": "7d"}))
+        .invoke(serde_json::json!({"file_path": file_path.to_string_lossy(), "ttl": "7d"}), peri_agent::tools::ToolContext::new(&[], "."))
         .await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -76,7 +76,7 @@ async fn test_invoke_file_too_large() {
 
     let tool = ArtifactTool::new(dir.path().to_string_lossy().to_string());
     let result = tool
-        .invoke(serde_json::json!({"file_path": file_path.to_string_lossy(), "ttl": "7d"}))
+        .invoke(serde_json::json!({"file_path": file_path.to_string_lossy(), "ttl": "7d"}), peri_agent::tools::ToolContext::new(&[], "."))
         .await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();

@@ -8,7 +8,10 @@ use super::*;
 async fn test_bash_normal_command() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"command": "echo hello"}))
+        .invoke(
+            serde_json::json!({"command": "echo hello"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("hello"));
@@ -18,7 +21,10 @@ async fn test_bash_normal_command() {
 async fn test_bash_nonzero_exit_code() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"command": "exit 42"}))
+        .invoke(
+            serde_json::json!({"command": "exit 42"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("42"), "应包含退出码: {result}");
@@ -38,10 +44,13 @@ async fn test_bash_timeout_returns_quickly() {
     };
 
     let result = tool
-        .invoke(serde_json::json!({
-            "command": sleep_cmd,
-            "timeout": timeout_ms
-        }))
+        .invoke(
+            serde_json::json!({
+                "command": sleep_cmd,
+                "timeout": timeout_ms
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err_msg = result.unwrap_err().to_string();
     let elapsed = start.elapsed();
@@ -62,7 +71,10 @@ async fn test_bash_timeout_returns_quickly() {
 async fn test_bash_stderr_captured() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"command": "echo err >&2"}))
+        .invoke(
+            serde_json::json!({"command": "echo err >&2"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("err"), "stderr 应被捕获: {result}");
@@ -137,10 +149,13 @@ async fn test_bash_timeout_clamped_to_minimum() {
     let start = Instant::now();
     // timeout = 2000 → clamp 不生效，echo quick 应正常完成（PowerShell 冷启动较慢）
     let result = tool
-        .invoke(serde_json::json!({
-            "command": "echo quick",
-            "timeout": 5000
-        }))
+        .invoke(
+            serde_json::json!({
+                "command": "echo quick",
+                "timeout": 5000
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     let elapsed = start.elapsed();
@@ -157,10 +172,13 @@ async fn test_bash_timeout_clamped_to_minimum() {
 async fn test_bash_timeout_maximum_accepted() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "command": "echo ok",
-            "timeout": 600000
-        }))
+        .invoke(
+            serde_json::json!({
+                "command": "echo ok",
+                "timeout": 600000
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("ok"));
@@ -178,7 +196,10 @@ async fn test_bash_default_timeout_is_120_seconds() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     // 不传 timeout → 默认 120000ms = 120s
     let result = tool
-        .invoke(serde_json::json!({"command": "echo ok"}))
+        .invoke(
+            serde_json::json!({"command": "echo ok"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("ok"));
@@ -189,11 +210,14 @@ async fn test_bash_legacy_params_ignored() {
     // P0-3: schema 已移除 description/run_in_background，旧 tool_call 中残留字段应被静默忽略
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "command": "echo ok",
-            "description": "test description",
-            "run_in_background": true
-        }))
+        .invoke(
+            serde_json::json!({
+                "command": "echo ok",
+                "description": "test description",
+                "run_in_background": true
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("ok"));
