@@ -11,8 +11,6 @@ pub enum PermissionMode {
     /// 所有敏感工具弹窗审批（默认）
     #[default]
     Default = 0,
-    /// 默认不允许所有 bash
-    DontAsk = 1,
     /// 允许文件系统的编辑
     AcceptEdit = 2,
     /// 大模型自动判断允不允许
@@ -22,11 +20,10 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
-    /// 循环切换到下一个模式：Default → DontAsk → AcceptEdit → AutoMode → Bypass → Default
+    /// 循环切换到下一个模式：Default → AcceptEdit → AutoMode → Bypass → Default
     pub fn next(self) -> Self {
         match self {
-            Self::Default => Self::DontAsk,
-            Self::DontAsk => Self::AcceptEdit,
+            Self::Default => Self::AcceptEdit,
             Self::AcceptEdit => Self::AutoMode,
             Self::AutoMode => Self::Bypass,
             Self::Bypass => Self::Default,
@@ -37,7 +34,6 @@ impl PermissionMode {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Default => "",
-            Self::DontAsk => "Don't Ask",
             Self::AcceptEdit => "Accept Edit",
             Self::AutoMode => "Auto Mode",
             Self::Bypass => "Bypass",
@@ -45,13 +41,13 @@ impl PermissionMode {
     }
 }
 
-/// TryFrom<u8> 实现：异常值（>4）回退到 Default
+/// TryFrom<u8> 实现：异常值（>4）回退到 Default。
+/// 值 1 保留为历史 DontAsk 的占位（已删除），映射到 Default 以保证向前兼容。
 #[allow(clippy::fallible_impl_from)]
 impl From<u8> for PermissionMode {
     fn from(value: u8) -> Self {
         match value {
             0 => Self::Default,
-            1 => Self::DontAsk,
             2 => Self::AcceptEdit,
             3 => Self::AutoMode,
             4 => Self::Bypass,

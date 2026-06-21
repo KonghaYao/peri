@@ -36,7 +36,6 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
         let mode = app.services.permission_mode.load();
         let (label, color) = match mode {
             PermissionMode::Default => ("", theme::TEXT),
-            PermissionMode::DontAsk => ("Don't Ask", theme::WARNING),
             PermissionMode::AcceptEdit => ("Accept Edit", theme::THINKING),
             PermissionMode::AutoMode => ("Auto Mode", theme::WARNING),
             PermissionMode::Bypass => ("Bypass", theme::ERROR),

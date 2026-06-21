@@ -255,15 +255,6 @@ async fn test_bypass_permissions_allows_all() {
 }
 
 #[tokio::test]
-async fn test_dont_ask_rejects_all() {
-    let mw = make_mw_with_mode(PermissionMode::DontAsk, None);
-    let mut state = AgentState::new("/tmp");
-    let tc = make_tool_call("Bash");
-    let result = mw.before_tool(&mut state, &tc).await;
-    assert!(matches!(result, Err(AgentError::ToolRejected { .. })));
-}
-
-#[tokio::test]
 async fn test_accept_edits_allows_write_file() {
     let mw = make_mw_with_mode(PermissionMode::AcceptEdit, None);
     let mut state = AgentState::new("/tmp");
@@ -346,16 +337,6 @@ async fn test_process_batch_bypass_permissions() {
     let results = mw.process_batch(&calls).await;
     assert_eq!(results.len(), 3);
     assert!(results.iter().all(|r| r.is_ok()));
-}
-
-#[tokio::test]
-async fn test_process_batch_dont_ask_rejects_sensitive() {
-    let mw = make_mw_with_mode(PermissionMode::DontAsk, None);
-    let calls = vec![make_tool_call("Bash"), make_tool_call("Read")];
-    let results = mw.process_batch(&calls).await;
-    assert_eq!(results.len(), 2);
-    assert!(results[0].is_err(), "bash 应被拒绝");
-    assert!(results[1].is_ok(), "read_file 应放行");
 }
 
 #[tokio::test]

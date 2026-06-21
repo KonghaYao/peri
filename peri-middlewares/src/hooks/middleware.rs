@@ -295,7 +295,7 @@ impl<S: State> Middleware<S> for HookMiddleware {
         // PermissionRequest 门控：仅对敏感工具 + 权限对话框即将展示时触发。
         //
         // Claude Code 行为：PermissionRequest 仅在权限对话框即将展示给用户时触发。
-        // Bypass/AutoMode(DontAsk 的 auto-allow 路径) 不展示对话框，因此不触发。
+        // Bypass 不展示对话框，因此不触发。
         //
         // 使用 hitl::default_requires_approval 判断工具是否需要审批（Bash/Write/Edit/Agent/
         // mcp__*/WebFetch/WebSearch 等）。非敏感工具（Read/Glob/Grep 等）不触发。

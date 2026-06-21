@@ -258,10 +258,6 @@ impl HumanInTheLoopMiddleware {
     ) -> AgentResult<ToolCall> {
         match mode.load() {
             PermissionMode::Bypass => Ok(tool_call.clone()),
-            PermissionMode::DontAsk => Err(AgentError::ToolRejected {
-                tool: tool_call.name.clone(),
-                reason: "Don't Ask 模式：自动拒绝".to_string(),
-            }),
             PermissionMode::AcceptEdit => {
                 if is_edit_tool(&tool_call.name) {
                     Ok(tool_call.clone())

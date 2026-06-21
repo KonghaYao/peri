@@ -100,7 +100,6 @@ pub async fn run_print(
         match mode_str.as_str() {
             "bypass" => peri_middlewares::prelude::PermissionMode::Bypass,
             "default" => peri_middlewares::prelude::PermissionMode::Default,
-            "dont-ask" => peri_middlewares::prelude::PermissionMode::DontAsk,
             "accept-edit" => peri_middlewares::prelude::PermissionMode::AcceptEdit,
             "auto-mode" => peri_middlewares::prelude::PermissionMode::AutoMode,
             _ => peri_middlewares::prelude::PermissionMode::Bypass,

@@ -113,7 +113,7 @@ struct Cli {
     bare: bool,
 
     // ── 权限与安全 ──
-    /// 权限模式：bypass / default / dont-ask / accept-edit / auto-mode
+    /// 权限模式：bypass / default / accept-edit / auto-mode
     #[arg(long = "permission-mode", visible_alias = "permissionMode")]
     permission_mode: Option<String>,
     /// 绕过所有权限检查（仅限沙箱环境）
@@ -576,7 +576,6 @@ async fn run_app(
             match mode_str.as_str() {
                 "bypass" => PermissionMode::Bypass,
                 "default" => PermissionMode::Default,
-                "dont-ask" => PermissionMode::DontAsk,
                 "accept-edit" => PermissionMode::AcceptEdit,
                 "auto-mode" => PermissionMode::AutoMode,
                 _ => {

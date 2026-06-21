@@ -4,8 +4,7 @@ use super::*;
 
 #[test]
 fn test_next_cycle() {
-    assert_eq!(PermissionMode::Default.next(), PermissionMode::DontAsk);
-    assert_eq!(PermissionMode::DontAsk.next(), PermissionMode::AcceptEdit);
+    assert_eq!(PermissionMode::Default.next(), PermissionMode::AcceptEdit);
     assert_eq!(PermissionMode::AcceptEdit.next(), PermissionMode::AutoMode);
     assert_eq!(PermissionMode::AutoMode.next(), PermissionMode::Bypass);
     assert_eq!(PermissionMode::Bypass.next(), PermissionMode::Default);
@@ -19,7 +18,6 @@ fn test_default() {
 #[test]
 fn test_display_name() {
     assert_eq!(PermissionMode::Default.display_name(), "");
-    assert_eq!(PermissionMode::DontAsk.display_name(), "Don't Ask");
     assert_eq!(PermissionMode::AcceptEdit.display_name(), "Accept Edit");
     assert_eq!(PermissionMode::AutoMode.display_name(), "Auto Mode");
     assert_eq!(PermissionMode::Bypass.display_name(), "Bypass");
@@ -28,7 +26,6 @@ fn test_display_name() {
 #[test]
 fn test_from_u8_valid() {
     assert_eq!(PermissionMode::from(0u8), PermissionMode::Default);
-    assert_eq!(PermissionMode::from(1u8), PermissionMode::DontAsk);
     assert_eq!(PermissionMode::from(2u8), PermissionMode::AcceptEdit);
     assert_eq!(PermissionMode::from(3u8), PermissionMode::AutoMode);
     assert_eq!(PermissionMode::from(4u8), PermissionMode::Bypass);
@@ -36,7 +33,10 @@ fn test_from_u8_valid() {
 
 #[test]
 fn test_from_u8_invalid() {
+    // 值 1 为已删除的 DontAsk 历史占位，现在映射到 Default
+    assert_eq!(PermissionMode::from(1u8), PermissionMode::Default);
     assert_eq!(PermissionMode::from(5u8), PermissionMode::Default);
+    assert_eq!(PermissionMode::from(6u8), PermissionMode::Default);
     assert_eq!(PermissionMode::from(255u8), PermissionMode::Default);
 }
 
@@ -56,7 +56,6 @@ fn test_shared_store_and_load() {
 #[test]
 fn test_shared_cycle_single_thread() {
     let shared = SharedPermissionMode::new(PermissionMode::Default);
-    assert_eq!(shared.cycle(), PermissionMode::DontAsk);
     assert_eq!(shared.cycle(), PermissionMode::AcceptEdit);
     assert_eq!(shared.cycle(), PermissionMode::AutoMode);
     assert_eq!(shared.cycle(), PermissionMode::Bypass);
@@ -90,7 +89,6 @@ fn test_shared_cycle_concurrent() {
     assert!(matches!(
         final_mode,
         PermissionMode::Default
-            | PermissionMode::DontAsk
             | PermissionMode::AcceptEdit
             | PermissionMode::AutoMode
             | PermissionMode::Bypass

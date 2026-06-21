@@ -7,7 +7,6 @@
 //!
 //! 对齐 Claude Code：PermissionRequest 仅在权限对话框即将展示给用户时触发。
 //! - Bypass: 所有工具直接放行，无对话框
-//! - DontAsk: 直接拒绝敏感工具，无对话框
 //! - AcceptEdit: 编辑工具放行，其他弹窗
 //! - AutoMode: 分类器决定；为避免 hook 系统依赖分类器，AutoMode 下始终触发
 //! - Default: 敏感工具始终弹窗
@@ -23,8 +22,6 @@ pub fn needs_permission_dialog(mode: PermissionMode, tool_name: &str) -> bool {
     match mode {
         // Bypass: 所有工具直接放行，无对话框
         PermissionMode::Bypass => false,
-        // DontAsk: 直接拒绝敏感工具，无对话框
-        PermissionMode::DontAsk => false,
         // AcceptEdit: 编辑工具放行，其他弹窗
         PermissionMode::AcceptEdit => !crate::hitl::is_edit_tool(tool_name),
         // AutoMode: 分类器决定；简化处理——当无分类器或 Unsure 时弹窗

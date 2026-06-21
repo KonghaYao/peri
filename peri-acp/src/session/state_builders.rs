@@ -15,7 +15,6 @@ use crate::provider::{LlmProvider, PeriConfig, ThinkingConfig};
 /// Parse a mode ID string into a `PermissionMode`.
 pub fn parse_permission_mode(mode_id: &str) -> PermissionMode {
     match mode_id {
-        "dont_ask" => PermissionMode::DontAsk,
         "accept_edit" => PermissionMode::AcceptEdit,
         "auto" => PermissionMode::AutoMode,
         "bypass" => PermissionMode::Bypass,
@@ -41,7 +40,6 @@ pub fn build_mode_state(pm: &SharedPermissionMode) -> SessionModeState {
     let current = pm.load();
     let current_id = match current {
         PermissionMode::Default => "default",
-        PermissionMode::DontAsk => "dont_ask",
         PermissionMode::AcceptEdit => "accept_edit",
         PermissionMode::AutoMode => "auto",
         PermissionMode::Bypass => "bypass",
@@ -49,8 +47,6 @@ pub fn build_mode_state(pm: &SharedPermissionMode) -> SessionModeState {
     let all_modes = vec![
         SessionMode::new(SessionModeId::new("default"), "Default")
             .description("All sensitive tools require approval"),
-        SessionMode::new(SessionModeId::new("dont_ask"), "Don't Ask")
-            .description("Default deny all bash"),
         SessionMode::new(SessionModeId::new("accept_edit"), "Accept Edit")
             .description("Allow filesystem edits"),
         SessionMode::new(SessionModeId::new("auto"), "Auto Mode")
@@ -74,14 +70,12 @@ pub fn build_config_options(
     // ── Mode (category: mode) ──
     let current_mode_id = match current_mode {
         PermissionMode::Default => "default",
-        PermissionMode::DontAsk => "dont_ask",
         PermissionMode::AcceptEdit => "accept_edit",
         PermissionMode::AutoMode => "auto",
         PermissionMode::Bypass => "bypass",
     };
     let mode_options = vec![
         SessionConfigSelectOption::new(SessionConfigValueId::new("default"), "Default"),
-        SessionConfigSelectOption::new(SessionConfigValueId::new("dont_ask"), "Don't Ask"),
         SessionConfigSelectOption::new(SessionConfigValueId::new("accept_edit"), "Accept Edit"),
         SessionConfigSelectOption::new(SessionConfigValueId::new("auto"), "Auto Mode"),
         SessionConfigSelectOption::new(SessionConfigValueId::new("bypass"), "Bypass"),
