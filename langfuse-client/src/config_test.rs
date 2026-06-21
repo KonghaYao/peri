@@ -46,6 +46,7 @@
             [
                 ("LANGFUSE_PUBLIC_KEY", Some("pk")),
                 ("LANGFUSE_SECRET_KEY", Some("sk")),
+                ("LANGFUSE_BASE_URL", None),
             ],
             || {
                 let config = ClientConfig::from_env().unwrap();
