@@ -473,13 +473,17 @@ async fn test_contract_compact_output_starts_with_human_summary() {
     // 首条内容必须包含续接指令标记
     let first_text = result.messages[0].content();
     assert!(
-        first_text.contains("[上下文已压缩，请根据摘要继续工作]"),
+        first_text.contains(peri_agent::agent::compact::CONTINUATION_HINT),
         "首条 Human 必须包含续接指令，实际内容: {}",
         first_text.chars().take(200).collect::<String>()
     );
     assert!(
         first_text.contains("已完成 main.rs 审查"),
         "首条 Human 必须包含摘要 LLM 输出"
+    );
+    assert!(
+        first_text.contains("<system-reminder>"),
+        "首条 Human 必须包裹 <system-reminder> 标签以触发 TUI 折叠"
     );
 }
 

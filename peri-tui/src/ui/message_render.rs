@@ -172,9 +172,9 @@ pub fn render_view_model(
             ..
         } => {
             if *system_reminder {
-                // 系统提醒：渲染一行简略提示
+                // 系统提醒：渲染一行简略提示（与 locales/{en,zh-CN}/main.ftl::render-compacted-hint 对齐）
                 let hint = Span::styled(
-                    "\u{1f4cb} 上下文已压缩",
+                    "\u{1f4cb} Context compacted",
                     Style::default()
                         .fg(theme::DIM)
                         .add_modifier(Modifier::ITALIC),

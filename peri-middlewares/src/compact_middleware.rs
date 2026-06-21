@@ -225,9 +225,16 @@ impl CompactMiddleware {
         // 原因：LLM 适配器将 System 消息提取到 system 字段，不进入 messages 数组。
         // 若摘要为 System 类型，compact 后 messages 数组可能只有 system 角色消息，
         // DeepSeek/OpenAI 兼容 API 要求至少一条 user/assistant 消息，否则返回 400。
+        //
+        // `<system-reminder>` 包裹 + CONTINUATION_HINT 让 TUI 折叠为单行提示
+        // （spec/superpowers/specs/2026-06-02-system-reminder-compact-summary-design.md）。
+        // CONTINUATION_HINT 来自 peri-agent::agent::compact，与 /compact 命令路径
+        // （peri-acp/src/session/command/compact/invariant.rs）和 TUI 识别层
+        // （peri-tui/src/ui/message_view/build.rs::COMPACT_HINT）三方共享。
         let summary_content = format!(
-            "<system-reminder>\n{}\n\n[上下文已压缩，请根据摘要继续工作]\n</system-reminder>",
-            compact_result.summary
+            "<system-reminder>\n{}\n\n{}\n</system-reminder>",
+            compact_result.summary,
+            peri_agent::agent::compact::CONTINUATION_HINT
         );
         let mut new_messages = vec![BaseMessage::human(summary_content)];
         new_messages.extend(re_inject_result.messages.clone());

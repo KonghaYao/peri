@@ -266,7 +266,7 @@
         let lines = render_view_model(&vm, Some(1), 80, false);
         assert_eq!(lines.len(), 1, "系统提醒应只渲染一行");
         let text: String = lines[0].spans.iter().map(|s| s.content.clone()).collect();
-        assert!(text.contains("上下文已压缩"), "应显示压缩提示文字，实际: {}", text);
+        assert!(text.contains("Context compacted"), "应显示压缩提示文字，实际: {}", text);
     }
 
     #[test]

@@ -252,7 +252,11 @@ fn test_do_full_compact_preserves_system_prefix() {
 
     // 模拟 compact 产出的 new_messages（不含 system prefix）
     let compact_summary = "此会话讨论了文件列表";
-    let summary_content = format!("{}\n\n[上下文已压缩，请根据摘要继续工作]", compact_summary);
+    let summary_content = format!(
+        "{}\n\n{}",
+        compact_summary,
+        peri_agent::agent::compact::CONTINUATION_HINT
+    );
     let mut new_messages = vec![BaseMessage::human(vec![ContentBlock::text(
         &summary_content,
     )])];

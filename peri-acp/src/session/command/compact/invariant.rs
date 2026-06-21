@@ -13,17 +13,20 @@
 
 use peri_agent::messages::BaseMessage;
 
-/// 续接指令标记（与原 compact.rs 实现保持一致，TUI/LLM 对此文本有约定）。
-const CONTINUATION_HINT: &str =
-    "[Context has been compacted. Continue working based on the summary above.]";
-
 /// 构造 compact 输出的首条 Human 消息（摘要 + 续接指令）。
 ///
 /// 集中 [TRAP] "摘要必须作为 Human 消息" 约束，供 pipeline 与 auto-compact 路径共享。
 /// 任何把摘要放入 System 的尝试都会破坏 Prompt Cache 前缀稳定性 + frozen_system_prompt
 /// 不变量——见 CLAUDE.md `system-prompt.md#issue_2026-06-17-mid-conversation-system-message-breaks-frozen-prompt`。
+///
+/// `<system-reminder>` 包裹与 auto-compact 路径（`peri-middlewares/src/compact_middleware.rs`）
+/// 完全对齐，让 TUI 能折叠显示为 `📋 Context compacted`。
 pub fn build_summary_human_message(summary: &str) -> BaseMessage {
-    let summary_content = format!("{}\n\n{}", summary, CONTINUATION_HINT);
+    let summary_content = format!(
+        "<system-reminder>\n{}\n\n{}\n</system-reminder>",
+        summary,
+        peri_agent::agent::compact::CONTINUATION_HINT
+    );
     BaseMessage::human(summary_content)
 }
 
@@ -50,8 +53,12 @@ mod tests {
             "首条 Human 必须包含摘要内容"
         );
         assert!(
-            text.contains(CONTINUATION_HINT),
+            text.contains(peri_agent::agent::compact::CONTINUATION_HINT),
             "首条 Human 必须包含续接指令标记"
+        );
+        assert!(
+            text.contains("<system-reminder>"),
+            "首条 Human 必须包裹 <system-reminder> 标签以触发 TUI 折叠"
         );
     }
 }
