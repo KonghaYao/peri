@@ -572,7 +572,6 @@ render-tool-uses = · { $count } tool uses
 render-user-answered = User answered Peri's questions:
 render-thought-for = Thought for { $count } chars
 render-agent-header = Agent
-render-compacted-hint = 📋 Context compacted
 
 # ---- Message Area Spinner ----
 

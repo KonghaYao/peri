@@ -3,6 +3,11 @@
 **日期**: 2026-06-02
 **对应 Issue**: `spec/issues/2026-06-02-system-reminder-compact-summary.md`
 
+> **注（2026-06-21 更新）**：本文档示例中出现的中文 CONTINUATION_HINT 文本
+> （如 `[上下文已压缩，请根据摘要继续工作]`）和中文渲染提示（`📋 上下文已压缩`）
+> 已统一迁移为英文。单一事实源为 `peri_agent::agent::compact::CONTINUATION_HINT`
+> 共享常量，由 `/compact` 命令、自动 compact、TUI 识别层三方引用。设计原理不变。
+
 ## 1. 概述
 
 Compact 后的对话摘要作为 Human 消息注入消息列表，TUI 以完整 UserBubble 渲染，占用大量空间。将其包裹在 `<system-reminder>` 标签内，使其能被 TUI 识别并简化为一行提示。

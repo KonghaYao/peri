@@ -172,7 +172,9 @@ pub fn render_view_model(
             ..
         } => {
             if *system_reminder {
-                // 系统提醒：渲染一行简略提示（与 locales/{en,zh-CN}/main.ftl::render-compacted-hint 对齐）
+                // 系统提醒：渲染一行简略提示（文案与 en locale 保持一致；
+                // zh-CN locale 因 TUI 未接入 i18n handler 而硬编码，详见
+                // spec/superpowers/specs/2026-06-02-system-reminder-compact-summary-design.md）
                 let hint = Span::styled(
                     "\u{1f4cb} Context compacted",
                     Style::default()

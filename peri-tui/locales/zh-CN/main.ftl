@@ -571,7 +571,6 @@ render-tool-uses = · { $count } 次工具调用
 render-user-answered = 用户回答了 Peri 的问题：
 render-thought-for = 思考了 { $count } 字符
 render-agent-header = Agent
-render-compacted-hint = 📋 上下文已压缩
 
 # ---- 消息区 Spinner ----
 
