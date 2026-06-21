@@ -403,7 +403,7 @@ async fn collect_tool_results<L: ReactLLM, S: State>(
                 ToolResult::error(
                     &modified_call.id,
                     &modified_call.name,
-                    format!("工具 '{}' 不存在", name),
+                    format!("Tool '{}' not found", name),
                 )
             }
             Err(ref e) => {

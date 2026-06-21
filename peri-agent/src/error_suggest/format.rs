@@ -24,8 +24,8 @@ pub fn format_candidates(candidates: &[String]) -> String {
 /// "Did you mean" 风格的 summary
 pub fn did_you_mean_summary(resource_kind: &str, candidates: &[String]) -> String {
     if candidates.is_empty() {
-        return format!("未找到相近的 {resource_kind}。");
+        return format!("No similar {resource_kind} found.");
     }
     let bullet = format_candidates(candidates);
-    format!("建议改用以下 {resource_kind} 之一：\n{bullet}")
+    format!("Did you mean one of these {resource_kind}?\n{bullet}")
 }

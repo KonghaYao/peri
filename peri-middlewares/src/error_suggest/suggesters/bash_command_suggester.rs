@@ -32,11 +32,11 @@ impl ErrorSuggester for BashCommandSuggester {
 
         if top3.is_empty() {
             return Some(Suggestion::new(format!(
-                "命令 {cmd_name:?} 不在 PATH 中。请确认是否安装，或检查拼写。"
+                "Command {cmd_name:?} not found in PATH. Verify it is installed or check for typos."
             )));
         }
 
-        let summary = did_you_mean_summary("命令", &top3);
+        let summary = did_you_mean_summary("command", &top3);
         Some(Suggestion::new(summary))
     }
 }

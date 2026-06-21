@@ -69,7 +69,7 @@ impl ErrorSuggester for PathSuggester {
             return None;
         }
 
-        let summary = did_you_mean_summary("路径", &top3);
+        let summary = did_you_mean_summary("path", &top3);
         Some(Suggestion::new(summary))
     }
 }

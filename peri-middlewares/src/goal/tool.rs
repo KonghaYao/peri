@@ -30,11 +30,12 @@ impl GoalTool {
         }
     }
 
-    const DESCRIPTION: &'static str = "长程目标跟踪工具。通过 action 参数区分操作：\n\
-- create: 创建目标（objective 必填）。单个会话只能有一个 goal。\n\
-- complete: 声明目标完成（经 LLM 验证，未通过会返回原因）\n\
-- block: 声明遇到无法解决的阻塞（reason 必填）\n\
-- get: 查询当前目标状态";
+    const DESCRIPTION: &'static str =
+        "Long-running goal tracking tool. Use the action parameter to select an operation:\n\
+- create: Create a goal (objective required). Only one goal per session.\n\
+- complete: Declare the goal complete (verified by an auxiliary LLM; returns reason if not met)\n\
+- block: Declare an unsolvable blocker (reason required)\n\
+- get: Query current goal status";
 
     async fn handle_create(
         objective: &str,
@@ -45,13 +46,13 @@ impl GoalTool {
             .await
             .map(|()| {
                 format!(
-                    "目标已创建: {objective}\n\n\
-                     请围绕此目标持续推进。完成时调用 goal(complete)，\
-                     遇到阻塞时调用 goal(block, reason)。"
+                    "Goal created: {objective}\n\n\
+                     Keep working toward this goal. Call goal(complete) when done, \
+                     or goal(block, reason) if blocked."
                 )
             })
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                format!("goal: 创建失败：{e}").into()
+                format!("goal: failed to create: {e}").into()
             })
     }
 
@@ -62,7 +63,7 @@ impl GoalTool {
         let snap = self.controller.snapshot();
         let objective = match &snap.objective {
             Some(o) => o.clone(),
-            None => return Ok("无活跃 goal，无法 complete".to_string()),
+            None => return Ok("No active goal to complete".to_string()),
         };
 
         // auxiliary_model 为 None 时跳过验证
@@ -78,16 +79,22 @@ impl GoalTool {
             let verdict = Self::parse_verdict(&raw);
             if !verdict.achieved {
                 // 验证失败：goal 保持 Active
-                return Ok(format!("目标未达成: {}\n请继续工作。", verdict.missing));
+                return Ok(format!(
+                    "Goal not yet achieved: {}\nKeep working.",
+                    verdict.missing
+                ));
             }
             // 验证通过：尝试转换状态。若期间状态已漂移到终态（如被 block），
             // 不作为 error 传播——LLM 验证已通过，agent 无需重试 complete
             match self.controller.complete_goal().await {
-                Ok(()) => Ok(format!("目标已完成。验证证据: {}", verdict.evidence)),
+                Ok(()) => Ok(format!(
+                    "Goal completed. Verification evidence: {}",
+                    verdict.evidence
+                )),
                 Err(e) => {
                     tracing::warn!(error = %e, "goal complete: 状态漂移到终态");
                     Ok(format!(
-                        "目标已处于终态（{e}），无需再次 complete。验证证据: {}",
+                        "Goal is already in a terminal state ({e}). Verification evidence: {}",
                         verdict.evidence
                     ))
                 }
@@ -95,10 +102,13 @@ impl GoalTool {
         } else {
             // 无 auxiliary_model，跳过验证直接完成
             match self.controller.complete_goal().await {
-                Ok(()) => Ok("目标已完成（跳过验证，未配置辅助 LLM）。".to_string()),
+                Ok(()) => Ok(
+                    "Goal completed (verification skipped, no auxiliary LLM configured)."
+                        .to_string(),
+                ),
                 Err(e) => {
                     tracing::warn!(error = %e, "goal complete: 状态漂移到终态");
-                    Ok(format!("目标已处于终态（{e}），无需再次 complete。"))
+                    Ok(format!("Goal is already in a terminal state ({e})."))
                 }
             }
         }
@@ -112,7 +122,7 @@ impl GoalTool {
             .block_goal(reason.to_string())
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-        Ok(format!("目标已标记为阻塞: {reason}"))
+        Ok(format!("Goal marked as blocked: {reason}"))
     }
 
     fn handle_get(controller: &dyn GoalController) -> String {
@@ -120,19 +130,19 @@ impl GoalTool {
         match (&snap.objective, snap.status) {
             (Some(obj), Some(status)) => {
                 format!(
-                    "目标: {obj}\n状态: {status}\n已用: {} tokens",
+                    "Objective: {obj}\nStatus: {status}\nTokens used: {}",
                     snap.tokens_used
                 )
             }
-            _ => "当前无目标。".to_string(),
+            _ => "No active goal.".to_string(),
         }
     }
 
     const VERIFY_SYSTEM_PROMPT: &'static str =
-        "你是目标完成度评估器。判断 agent 是否达成了用户设定的目标。\n\
-严格评估——只有确凿证据表明目标已达成才判 true。\n\n\
-请输出 JSON 格式:\n\
-{\"achieved\": true/false, \"evidence\": \"支撑判断的证据\", \"missing\": \"如未达成，还缺什么\"}";
+        "You are a goal completion evaluator. Determine whether the agent has achieved the user's goal.\n\
+        Be strict — only return true if there is concrete evidence the goal was met.\n\n\
+        Output JSON in this format:\n\
+        {\"achieved\": true/false, \"evidence\": \"evidence supporting the judgment\", \"missing\": \"if not achieved, what is still missing\"}";
 
     fn role_label(msg: &BaseMessage) -> &'static str {
         match msg {
@@ -163,7 +173,7 @@ impl GoalTool {
             .map(|m| format!("[{}] {}", Self::role_label(m), m.content()))
             .collect();
         format!(
-            "目标: {objective}\n\n对话历史（最近 {} 条）:\n{}\n\n请判断目标是否已达成。",
+            "Objective: {objective}\n\nConversation history (most recent {} messages):\n{}\n\nDetermine whether the objective has been achieved.",
             recent.len(),
             transcript.join("\n")
         )
@@ -185,7 +195,7 @@ impl GoalTool {
                     missing: v
                         .get("missing")
                         .and_then(|m| m.as_str())
-                        .unwrap_or("未提供原因")
+                        .unwrap_or("no reason provided")
                         .to_string(),
                 };
             }
@@ -194,7 +204,7 @@ impl GoalTool {
         GoalVerdict {
             achieved: false,
             evidence: String::new(),
-            missing: "验证 LLM 输出解析失败".to_string(),
+            missing: "Failed to parse verifier LLM output".to_string(),
         }
     }
 }
@@ -222,15 +232,15 @@ impl BaseTool for GoalTool {
                 "action": {
                     "type": "string",
                     "enum": ["create", "complete", "block", "get"],
-                    "description": "操作类型"
+                    "description": "Operation type"
                 },
                 "objective": {
                     "type": "string",
-                    "description": "create 时必填。目标描述，需具体可验证。"
+                    "description": "Required for create. The goal description — must be specific and verifiable."
                 },
                 "reason": {
                     "type": "string",
-                    "description": "block 时必填。阻塞原因。"
+                    "description": "Required for block. The reason the goal cannot be completed."
                 }
             },
             "required": ["action"]

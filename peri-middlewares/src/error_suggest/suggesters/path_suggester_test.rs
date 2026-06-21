@@ -68,7 +68,7 @@ fn test_path_suggester_returns_candidates_for_not_found() {
     let result = PathSuggester.suggest(&ctx);
     assert!(result.is_some(), "应该返回建议");
     let sug = result.unwrap();
-    assert!(sug.summary.contains("建议改用以下"));
+    assert!(sug.summary.contains("Did you mean"));
     assert!(
         sug.summary.contains("main.rs"),
         "maiin.rs 的最佳候选应该是 main.rs（编辑距离最近），实际：{}",

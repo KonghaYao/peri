@@ -148,7 +148,7 @@ async fn test_agent_tool_not_found() {
         output.tool_calls[0].1.is_error,
         "ToolNotFound 应产生错误结果"
     );
-    assert!(output.tool_calls[0].1.output.contains("不存在"));
+    assert!(output.tool_calls[0].1.output.contains("not found"));
 }
 
 #[tokio::test]

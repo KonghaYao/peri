@@ -176,9 +176,9 @@ impl BaseTool for CronRemoveTool {
         let mut scheduler = self.scheduler.lock();
 
         if scheduler.remove(id) {
-            Ok(format!("已删除定时任务 {}", id))
+            Ok(format!("Deleted scheduled task {}", id))
         } else {
-            Err(format!("定时任务 {} 不存在", id).into())
+            Err(format!("Scheduled task {} not found", id).into())
         }
     }
 }

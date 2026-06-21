@@ -45,13 +45,13 @@ fn make_complete_snapshot() -> GoalViewSnapshot {
 #[test]
 fn test_render_steering_escalates() {
     let r1 = GoalMiddleware::render_steering("目标", 1);
-    assert!(r1.contains("请决策"));
+    assert!(r1.contains("Decide"));
 
     let r2 = GoalMiddleware::render_steering("目标", 2);
-    assert!(r2.contains("必须"));
+    assert!(r2.contains("must call"));
 
     let r3 = GoalMiddleware::render_steering("目标", 3);
-    assert!(r3.contains("注意"));
+    assert!(r3.contains("Attention"));
 }
 
 #[test]
@@ -173,7 +173,7 @@ async fn test_after_agent_terminal_重置_pending_rounds() {
         .unwrap()
         .content()
         .lines()
-        .filter(|l| l.contains("请决策") || l.contains("必须") || l.contains("注意"))
+        .filter(|l| l.contains("Decide") || l.contains("must call") || l.contains("Attention"))
         .collect();
 
     // 转入终态（Complete）
@@ -199,7 +199,7 @@ async fn test_after_agent_terminal_重置_pending_rounds() {
         .unwrap()
         .content()
         .lines()
-        .filter(|l| l.contains("请决策") || l.contains("必须") || l.contains("注意"))
+        .filter(|l| l.contains("Decide") || l.contains("must call") || l.contains("Attention"))
         .collect();
 
     assert_eq!(

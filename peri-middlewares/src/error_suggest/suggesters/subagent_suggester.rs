@@ -26,7 +26,7 @@ impl ErrorSuggester for SubagentSuggester {
         if is_missing {
             if known.is_empty() {
                 return Some(Suggestion::new(
-                    "缺少 subagent_type 参数。请显式提供 agent 类型。",
+                    "Missing subagent_type parameter. Please provide the agent type explicitly.",
                 ));
             }
             let bullet = known
@@ -35,7 +35,7 @@ impl ErrorSuggester for SubagentSuggester {
                 .collect::<Vec<_>>()
                 .join("\n");
             return Some(Suggestion::new(format!(
-                "缺少 subagent_type 参数。可选值：\n{bullet}"
+                "Missing subagent_type parameter. Available values:\n{bullet}"
             )));
         }
 
@@ -55,7 +55,7 @@ impl ErrorSuggester for SubagentSuggester {
                 .collect::<Vec<_>>()
                 .join("\n");
             return Some(Suggestion::new(format!(
-                "未找到匹配的 subagent。已知类型：\n{bullet}"
+                "No matching subagent found. Known types:\n{bullet}"
             )));
         }
 

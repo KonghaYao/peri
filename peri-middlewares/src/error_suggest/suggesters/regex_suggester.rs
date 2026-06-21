@@ -21,7 +21,7 @@ impl ErrorSuggester for RegexSuggester {
         }
 
         Some(Suggestion::new(
-            "正则表达式语法有误。常见问题：\n  • 括号必须闭合：() [] {}\n  • 特殊字符需转义：\\ . \\* \\+\n  • 如需字面匹配，可以用 fixed_strings: true 参数关闭正则模式\n  • 复杂模式建议先用工具（如 regex101）验证",
+            "Invalid regex syntax. Common issues:\n  • Brackets must be closed: () [] {}\n  • Special characters need escaping: \\ . \\* \\+\n  • For literal matching, use fixed_strings: true to disable regex mode\n  • For complex patterns, validate with a tool like regex101 first",
         ))
     }
 }

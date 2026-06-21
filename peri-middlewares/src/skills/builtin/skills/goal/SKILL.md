@@ -1,31 +1,32 @@
 ---
 name: goal
 description: >
-  长程目标跟踪。当用户给出需要多步骤完成的复杂任务时使用。
-  触发词："goal"、"目标"、"持续执行直到完成"、"直到 X 为止"。
+  Long-running goal tracking. Use when the user gives a complex task requiring
+  multiple steps to complete.
+  Triggers: "goal", "keep going until done", "don't stop until X".
 userInvocable: true
 argumentHint: "[objective description]"
 ---
 
-# Goal 模式
+# Goal Mode
 
-## 何时使用
+## When to Use
 
-- 用户给出复杂任务，需要多轮执行才能完成
-- 用户说"持续执行直到完成"、"不要中途停下"、"直到 X 为止"
+- The user gives a complex task that requires multiple rounds to complete
+- The user says "keep going until done", "don't stop midway", "until X"
 
-## 如何使用
+## How to Use
 
-1. 调用 `goal` 工具，action=create，objective 设为具体可验证的目标描述
-2. 持续工作，直到目标达成
-3. 达成 → `goal` 工具，action=complete
-4. 遇到无法解决的阻塞 → `goal` 工具，action=block，reason 填写阻塞原因
-5. 随时可用 action=get 查询当前目标状态
+1. Call the `goal` tool with action=create and a specific, verifiable objective
+2. Work continuously until the goal is achieved
+3. Achieved → `goal` tool, action=complete
+4. Blocked by something unsolvable → `goal` tool, action=block, reason=why you're blocked
+5. Check current goal status anytime with action=get
 
-## 重要约束
+## Important Constraints
 
-- **目标必须具体可验证**："优化代码"不好，"将测试覆盖率提到 80%"好
-- **complete 会经验证**：系统会用辅助 LLM 判断你是否真的达成了目标，未通过会返回原因
-- **block 是求救信号**：只在真正无法继续时使用（如缺权限、缺依赖）
-- **创建后自驱**：goal 创建后，每轮结束时会收到提醒，你必须决策：继续/完成/阻塞
-- **单例**：同一时间只能有一个 goal，创建新 goal 前需先 clear
+- **Objectives must be specific and verifiable**: "improve code" is bad, "raise test coverage to 80%" is good
+- **complete is verified**: The system uses an auxiliary LLM to check if you actually achieved the goal. If verification fails, you'll get the reason back
+- **block is a distress signal**: Only use when truly unable to continue (missing permissions, missing dependencies)
+- **Self-driven after creation**: Once a goal is created, you'll receive a reminder after each turn. You must decide: continue / complete / block
+- **Singleton**: Only one goal at a time. Clear the existing goal before creating a new one

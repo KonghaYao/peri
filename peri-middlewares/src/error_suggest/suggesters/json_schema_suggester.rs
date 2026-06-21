@@ -25,7 +25,7 @@ impl ErrorSuggester for JsonSchemaSuggester {
                 .or_else(|| caps.get(4))?
                 .as_str();
             return Some(Suggestion::new(format!(
-                "缺少必需参数 {field:?}。请检查工具 schema，补全该字段后重试。"
+                "Missing required parameter {field:?}. Check the tool schema and provide this field."
             )));
         }
 
@@ -47,7 +47,7 @@ impl ErrorSuggester for JsonSchemaSuggester {
             });
         if let Some(hint) = hint {
             return Some(Suggestion::new(format!(
-                "参数类型错误。期望类型：{hint}。请检查对应字段应该是字符串还是数字。"
+                "Parameter type error. Expected type: {hint}. Check whether the field should be a string or a number."
             )));
         }
 

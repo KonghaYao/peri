@@ -62,7 +62,7 @@ async fn test_goal_create() {
     let input = json!({"action": "create", "objective": "测试目标"});
     let ctx = ToolContext::new(&[], ".");
     let result = tool.invoke(input, ctx).await.unwrap();
-    assert!(result.contains("目标已创建"));
+    assert!(result.contains("Goal created"));
 }
 
 #[tokio::test]
@@ -79,7 +79,7 @@ async fn test_goal_create_duplicate() {
         .invoke(input, ToolContext::new(&[], "."))
         .await
         .expect_err("重复 create 应返回 error");
-    assert!(err.to_string().contains("创建失败"));
+    assert!(err.to_string().contains("failed to create"));
 }
 
 #[tokio::test]
@@ -90,7 +90,7 @@ async fn test_goal_get_no_goal() {
     let input = json!({"action": "get"});
     let ctx = ToolContext::new(&[], ".");
     let result = tool.invoke(input, ctx).await.unwrap();
-    assert!(result.contains("无目标"));
+    assert!(result.contains("No active goal"));
 }
 
 #[tokio::test]
@@ -113,7 +113,7 @@ async fn test_goal_block() {
         )
         .await
         .unwrap();
-    assert!(result.contains("阻塞"));
+    assert!(result.contains("blocked"));
 }
 
 #[tokio::test]
@@ -132,7 +132,7 @@ async fn test_goal_complete_no_model_skips_verification() {
         .invoke(json!({"action": "complete"}), ToolContext::new(&[], "."))
         .await
         .unwrap();
-    assert!(result.contains("跳过验证"));
+    assert!(result.contains("verification skipped"));
 }
 
 // ===== MockBaseModel：用于 LLM 验证路径测试 =====
@@ -212,7 +212,7 @@ async fn test_goal_complete_with_model_验证通过() {
         .await
         .unwrap();
     assert!(
-        result.contains("目标已完成"),
+        result.contains("Goal completed"),
         "验证通过应返回完成消息，实际：{result}"
     );
     assert!(
@@ -240,7 +240,7 @@ async fn test_goal_complete_with_model_验证失败() {
         .unwrap();
     // 验证失败：goal 保持 Active，返回"未达成"提示
     assert!(
-        result.contains("目标未达成"),
+        result.contains("Goal not yet achieved"),
         "验证失败应返回未达成提示，实际：{result}"
     );
     assert!(
@@ -267,11 +267,11 @@ async fn test_goal_complete_model_返回非法_json_默认未达成() {
         .await
         .unwrap();
     assert!(
-        result.contains("目标未达成"),
+        result.contains("Goal not yet achieved"),
         "非法 JSON 应默认判未达成（fail-safe），实际：{result}"
     );
     assert!(
-        result.contains("验证 LLM 输出解析失败"),
+        result.contains("Failed to parse verifier LLM output"),
         "应提示解析失败原因，实际：{result}"
     );
 }
@@ -309,7 +309,7 @@ async fn test_goal_complete_无_goal_返回提示() {
         .await
         .unwrap();
     assert!(
-        result.contains("无活跃 goal"),
+        result.contains("No active goal"),
         "未 create 直接 complete 应返回提示，实际：{result}"
     );
 }
@@ -359,5 +359,5 @@ fn test_parse_verdict_缺_achieved_字段_默认_false() {
 fn test_parse_verdict_非法输入_默认未达成() {
     let v = GoalTool::parse_verdict("完全不是 JSON 的纯文本");
     assert!(!v.achieved);
-    assert!(v.missing.contains("解析失败"));
+    assert!(v.missing.contains("Failed to parse"));
 }

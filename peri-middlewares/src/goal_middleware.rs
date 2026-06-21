@@ -42,20 +42,20 @@ impl GoalMiddleware {
     fn render_steering(objective: &str, round: usize) -> String {
         let urgency = match round {
             1 => {
-                "你刚才给出了回答但未声明目标完成。请决策：\n\
-                  - 已达成 → goal(complete)\n\
-                  - 遇到阻塞 → goal(block, reason)\n\
-                  - 还需继续 → 执行下一步"
+                "You gave a response without declaring the goal complete. Decide:\n\
+                  - Achieved → goal(complete)\n\
+                  - Blocked → goal(block, reason)\n\
+                  - Need to continue → proceed with the next step"
             }
             2 => {
-                "目标尚未完成。你必须调用 goal(complete) 或 goal(block) 来结束，或继续执行下一步。"
+                "The goal is not yet complete. You must call goal(complete) or goal(block) to end, or continue with the next step."
             }
-            _ => "注意：目标仍未完成。请立即决策——继续工作或声明终态。",
+            _ => "Attention: the goal is still not complete. Decide immediately — keep working or declare a terminal state.",
         };
         format!(
             "<goal-message>\n\
              [Goal Steering]\n\
-             目标: {objective}\n\
+             Objective: {objective}\n\
              {urgency}\n\
              </goal-message>"
         )
@@ -97,7 +97,7 @@ impl<S: State> Middleware<S> for GoalMiddleware {
 
         // 3. goal active → 注入递增紧迫感 steering
         let round = self.pending_rounds.fetch_add(1, Ordering::Relaxed) + 1;
-        let objective = snap.objective.as_deref().unwrap_or("(未知)");
+        let objective = snap.objective.as_deref().unwrap_or("(unknown)");
         let template = Self::render_steering(objective, round);
         state.add_message(BaseMessage::human(template));
 

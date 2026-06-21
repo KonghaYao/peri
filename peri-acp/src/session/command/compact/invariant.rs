@@ -14,7 +14,8 @@
 use peri_agent::messages::BaseMessage;
 
 /// 续接指令标记（与原 compact.rs 实现保持一致，TUI/LLM 对此文本有约定）。
-const CONTINUATION_HINT: &str = "[上下文已压缩，请根据摘要继续工作]";
+const CONTINUATION_HINT: &str =
+    "[Context has been compacted. Continue working based on the summary above.]";
 
 /// 构造 compact 输出的首条 Human 消息（摘要 + 续接指令）。
 ///
@@ -32,7 +33,7 @@ mod tests {
 
     #[test]
     fn test_build_summary_human_message_returns_human_variant() {
-        let msg = build_summary_human_message("## 摘要\n完成 main.rs 审查");
+        let msg = build_summary_human_message("## Summary\nCompleted main.rs review");
         assert!(
             matches!(msg, BaseMessage::Human { .. }),
             "摘要必须封装为 Human 消息，实际: {:?}",

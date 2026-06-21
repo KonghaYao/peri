@@ -106,13 +106,13 @@ impl LlmAutoClassifier {
     /// 调用 LLM 进行分类
     async fn call_llm(&self, tool_name: &str, tool_input: &serde_json::Value) -> Classification {
         let prompt = format!(
-            "判断以下工具调用是否安全。工具: {}, 输入: {}\n只回答 ALLOW / DENY / UNSURE，不要解释。",
+            "Determine whether the following tool call is safe. Tool: {}, Input: {}\nAnswer with exactly one word: ALLOW, DENY, or UNSURE. Do not explain.",
             tool_name,
             serde_json::to_string(tool_input).unwrap_or_default(),
         );
 
         let request = LlmRequest::new(vec![BaseMessage::human(prompt)])
-            .with_system("你是一个工具调用安全分类器。只回答 ALLOW、DENY 或 UNSURE 中的一个词。")
+            .with_system("You are a tool call safety classifier. Respond with exactly one word: ALLOW, DENY, or UNSURE.")
             .with_max_tokens(32);
 
         let response = {

@@ -47,9 +47,9 @@ fn test_bash_recognizes_command_not_found() {
     let sug = result.unwrap();
     // git 应该是候选之一（如果在 PATH 中）
     assert!(
-        sug.summary.contains("建议")
+        sug.summary.contains("Did you mean")
             || sug.summary.contains("git")
-            || sug.summary.contains("未找到"),
+            || sug.summary.contains("not found"),
         "实际：{}",
         sug.summary
     );
