@@ -229,7 +229,6 @@ session/new → frozen_date → frozen_claude_md + frozen_claude_local_md
 | `docs/blogs/` | 技术博客（streaming-render、compact-mechanism、prompt-cache 等 31+ 篇） |
 | `.claude/skills/blog-writer/SKILL.md` | 博客写作风格指南，写博客时触发 blog-writer skill |
 | `docs/superpowers/specs/` | Superpowers 插件设计规范 |
-| `docs/superpowers/plans/` | Superpowers 插件实现计划 |
 | `docs/acp/` | ACP 协议文档（实现报告、协议差距分析） |
 
 ## 环境变量
