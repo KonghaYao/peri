@@ -304,10 +304,15 @@ impl AcpTuiClient {
             .map(|_| ())
     }
 
-    /// Submit background task results as synthetic tool_use + tool_result pairs.
-    /// The executor injects AgentResult tool calls with the results before the user message.
+    /// Submit a user message with background task results attached.
+    ///
+    /// The server-side executor injects the bg_results as Defer messages into the v2
+    /// MessageQueue (see `peri-acp/src/session/executor.rs`), so they will be consumed
+    /// by the next iteration's Receive/End stages. The user content is delivered as
+    /// the user message of the new turn.
     pub async fn prompt_with_bg_results(
         &self,
+        content: &peri_agent::messages::MessageContent,
         bg_results: Vec<peri_agent::agent::events::BackgroundTaskResult>,
     ) -> Result<(), AcpError> {
         let session_id = self
@@ -318,7 +323,7 @@ impl AcpTuiClient {
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let params = json!({
             "sessionId": session_id,
-            "message": { "role": "user", "content": "Background agents completed. Please review the results." },
+            "message": { "role": "user", "content": content },
             "bgResults": bg_results,
         });
         self.transport

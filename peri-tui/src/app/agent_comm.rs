@@ -24,8 +24,11 @@ pub type BgTaskResult = peri_agent::agent::events::BackgroundTaskResult;
 
 /// 后台任务（Background Agent）相关状态。
 ///
-/// 4 个字段总是一起重置（用户主动发起新一轮时），集中到 `reset_for_new_round()`
-/// 避免散落重置语句遗漏导致跨轮次状态污染。
+/// 用户主动 submit 时通过 `reset_for_new_round()` 清理 transient 字段
+/// （pending_continuation / agent_done_pending / pre_done_completions）。
+/// `pre_done_results` 不在 reset 范围内——由 `submit_message` 开头显式
+/// `drain` 合并到本轮 bgResults 参数（避免用户输入与 polling take 之间的
+/// race 丢失已完成的 bg 结果）。
 #[derive(Debug, Default)]
 pub struct BgTaskState {
     /// 后台任务全部完成后的待提交 continuation（结构化结果，用于注入合成 tool_use + tool_result）
@@ -34,18 +37,20 @@ pub struct BgTaskState {
     pub agent_done_pending: bool,
     /// Agent 尚未 Done 但后台任务已完成的通知缓存（显示文本，供 pre-Done 路径使用）
     pub pre_done_completions: Vec<String>,
-    /// Agent 尚未 Done 但后台任务已完成的结构化结果缓存（供 auto-continuation 路径使用）
+    /// Agent 尚未 Done 但后台任务已完成的结构化结果缓存。
+    /// 跨轮次保留——`submit_message` 开头 drain 合并到本轮 bgResults，
+    /// `reset_for_new_round` 不清空此字段。
     pub pre_done_results: Vec<BgTaskResult>,
 }
 
 impl BgTaskState {
-    /// 用户主动发起新一轮提交时清理后台任务 continuation 状态
-    /// （覆盖自动 continuation，避免 stale 数据注入）。
+    /// 用户主动发起新一轮提交时清理 transient continuation 状态。
+    /// **不清空 `pre_done_results`**——由 `submit_message` 开头 drain 消费，
+    /// 避免用户输入与 polling take 之间的 race 丢失已完成的 bg 结果。
     pub fn reset_for_new_round(&mut self) {
         self.pending_continuation = None;
         self.agent_done_pending = false;
         self.pre_done_completions.clear();
-        self.pre_done_results.clear();
     }
 }
 

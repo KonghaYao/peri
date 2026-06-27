@@ -124,6 +124,17 @@ impl App {
         self.session_mgr.current_mut().agent.subagent_depth = 0;
         self.session_mgr.current_mut().agent.agent_replied = false;
         self.session_mgr.current_mut().agent.reconcile_already_done = false;
+        // take 待消费的 bg 结果（agent loading 期间 bg 完成时累积在 pre_done_results，
+        // 由本轮主动 submit 合并到 bgResults 参数）。必须在 reset_for_new_round 之前 take
+        // ——reset 不清空 pre_done_results，但显式 drain 保证本轮独占消费，避免跨轮累积。
+        let pending_bg_results: Vec<crate::app::agent_comm::BgTaskResult> = self
+            .session_mgr
+            .current_mut()
+            .agent
+            .bg_task_state
+            .pre_done_results
+            .drain(..)
+            .collect();
         // 清理后台任务 continuation 状态（用户主动发消息时覆盖自动 continuation）
         self.session_mgr
             .current_mut()
@@ -146,6 +157,7 @@ impl App {
 
             // 用户主动输入通过 ACP prompt 协议传输；cron/channel 异步触发通过
             // v2_queue_for_current() 注入共享 v2 MessageQueue（见 polling.rs）。
+            // 若本轮 take 到待消费 bg 结果，走 prompt_with_bg_results 携带 bgResults。
 
             // Spawn the ACP calls as a background task — NEVER block the TUI event loop.
             // Events will arrive via acp_notification_rx and be processed by poll_agent().
@@ -179,10 +191,29 @@ impl App {
                         }
                     }
                 }
-                tracing::info!("ACP submit: calling prompt...");
-                match client.prompt(&message_content_clone).await {
-                    Ok(()) => tracing::info!("ACP submit: prompt completed"),
-                    Err(e) => tracing::error!(error = %e, "ACP submit: prompt FAILED"),
+                if pending_bg_results.is_empty() {
+                    tracing::info!("ACP submit: calling prompt...");
+                    match client.prompt(&message_content_clone).await {
+                        Ok(()) => tracing::info!("ACP submit: prompt completed"),
+                        Err(e) => tracing::error!(error = %e, "ACP submit: prompt FAILED"),
+                    }
+                } else {
+                    tracing::info!(
+                        count = pending_bg_results.len(),
+                        "ACP submit: calling prompt_with_bg_results (merging pre_done_results)"
+                    );
+                    match client
+                        .prompt_with_bg_results(&message_content_clone, pending_bg_results)
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!("ACP submit: prompt_with_bg_results completed")
+                        }
+                        Err(e) => tracing::error!(
+                            error = %e,
+                            "ACP submit: prompt_with_bg_results FAILED"
+                        ),
+                    }
                 }
             });
         } else {
@@ -286,7 +317,8 @@ impl App {
             .reset_for_new_round();
         self.session_mgr.current_mut().agent.lsp_diagnostics.reset();
 
-        // ACP 调用：走 prompt_with_bg_results（携带 bgResults 参数）
+        // ACP 调用：走 prompt_with_bg_results（携带 bgResults 参数）。
+        // 自动续跑无用户输入，构造固定 content 作为新一轮 user message。
         if let Some(ref acp_client) = self.acp_client {
             let acp_client_clone = acp_client.clone();
             let model_clone = self.services.model_name.clone();
@@ -294,6 +326,9 @@ impl App {
             // 防御：bg 续跑到达时 session 必然已存在（先有 submit_message → Done → bg 完成
             // → continuation）。但保留 load_session 包装以应对边缘时序。
             let existing_thread_id = self.session_mgr.current_mut().current_thread_id.clone();
+            let continuation_content = peri_agent::messages::MessageContent::text(
+                "Background agents completed. Please review the results.",
+            );
             tokio::spawn(async move {
                 let client = acp_client_clone;
                 if !client.has_session() {
@@ -317,7 +352,10 @@ impl App {
                     }
                 }
                 tracing::info!("ACP bg-continuation: calling prompt_with_bg_results...");
-                match client.prompt_with_bg_results(results).await {
+                match client
+                    .prompt_with_bg_results(&continuation_content, results)
+                    .await
+                {
                     Ok(()) => {
                         tracing::info!("ACP bg-continuation: prompt_with_bg_results completed")
                     }
