@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Peri Terminal</title>
+        <link
+            rel="stylesheet"
+            href="https://unpkg.com/xterm@5.3.0/css/xterm.css"
+        />
+        <link
+            href="
+https://unpkg.com/jetbrains-mono@1.0.6/css/jetbrains-mono.css
+"
+            rel="stylesheet"
+        />
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            html,
+            body {
+                height: 100%;
+                background: #1a1a2e;
+                overflow: hidden;
+            }
+            #app {
+                display: flex;
+                flex-direction: column;
+                height: 100%;
+            }
+            #toolbar {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                padding: 4px 8px;
+                background: #16213e;
+                flex-shrink: 0;
+                border-bottom: 1px solid #2a2a4a;
+                font-family: system-ui, sans-serif;
+                font-size: 13px;
+                color: #e0e0e0;
+                user-select: none;
+            }
+            #toolbar button {
+                background: #2a2a4a;
+                color: #e0e0e0;
+                border: 1px solid #3a3a5a;
+                border-radius: 4px;
+                padding: 2px 8px;
+                cursor: pointer;
+                font-size: 13px;
+                line-height: 1;
+            }
+            #toolbar button:hover {
+                background: #3a3a5a;
+            }
+
+            #terminals {
+                flex: 1;
+                display: flex;
+                min-height: 0;
+                min-width: 0;
+                overflow: hidden;
+            }
+
+            /* 递归分屏容器 */
+            .split-h,
+            .split-v {
+                position: absolute;
+                inset: 0;
+                display: flex;
+                min-width: 0;
+                min-height: 0;
+            }
+            .split-h {
+                flex-direction: row;
+            }
+            .split-v {
+                flex-direction: column;
+            }
+
+            .pane-child {
+                min-width: 0;
+                min-height: 0;
+                position: relative;
+                overflow: hidden;
+            }
+
+            /* 分割条 */
+            .divider {
+                flex-shrink: 0;
+                background: #2a2a4a;
+                transition: background 0.15s;
+                z-index: 20;
+            }
+            .split-h .divider {
+                width: 4px;
+                cursor: col-resize;
+                align-self: stretch;
+            }
+            .split-v .divider {
+                height: 4px;
+                cursor: row-resize;
+                width: 100%;
+            }
+            .divider:hover,
+            .divider.active {
+                background: #74c0fc;
+            }
+
+            /* 终端容器 */
+            .terminal-container {
+                position: absolute;
+                inset: 0;
+                background: #0d0d1a;
+                overflow: hidden;
+            }
+            .terminal-container .close-btn {
+                position: absolute;
+                top: 2px;
+                right: 2px;
+                background: #2a2a4a;
+                color: #888;
+                border: none;
+                border-radius: 3px;
+                width: 20px;
+                height: 20px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 14px;
+                cursor: pointer;
+                opacity: 0;
+                transition: opacity 0.2s;
+                z-index: 10;
+            }
+            .terminal-container:hover .close-btn {
+                opacity: 1;
+            }
+
+            /* 边缘分割热区：贴边窄条，hover 显示小按钮 */
+            .edge-zone {
+                position: absolute;
+                z-index: 5;
+                cursor: pointer;
+            }
+            .edge-zone::after {
+                content: "";
+                position: absolute;
+                background: rgba(116, 192, 252, 0);
+                border-radius: 2px;
+                transition: background 0.15s;
+            }
+            .edge-zone:hover::after {
+                background: rgba(116, 192, 252, 0.6);
+            }
+            /* 上 */
+            .edge-top {
+                top: 0;
+                left: 10%;
+                right: 10%;
+                height: 10px;
+            }
+            .edge-top::after {
+                bottom: 2px;
+                left: 50%;
+                transform: translateX(-50%);
+                width: 18px;
+                height: 2px;
+            }
+            /* 下 */
+            .edge-bottom {
+                bottom: 0;
+                left: 10%;
+                right: 10%;
+                height: 10px;
+            }
+            .edge-bottom::after {
+                top: 2px;
+                left: 50%;
+                transform: translateX(-50%);
+                width: 18px;
+                height: 2px;
+            }
+            /* 左 */
+            .edge-left {
+                left: 0;
+                top: 10%;
+                bottom: 10%;
+                width: 10px;
+            }
+            .edge-left::after {
+                right: 2px;
+                top: 50%;
+                transform: translateY(-50%);
+                width: 2px;
+                height: 18px;
+            }
+            /* 右 */
+            .edge-right {
+                right: 0;
+                top: 10%;
+                bottom: 10%;
+                width: 10px;
+            }
+            .edge-right::after {
+                left: 2px;
+                top: 50%;
+                transform: translateY(-50%);
+                width: 2px;
+                height: 18px;
+            }
+
+            .xterm {
+                height: 100%;
+            }
+            .xterm-viewport::-webkit-scrollbar {
+                display: none;
+            }
+            .xterm-viewport {
+                scrollbar-width: none;
+            }
+        </style>
+        <script>
+            // 主题函数 — 从父页面同步
+            function getXtermDark() {
+                return {
+                    background: "#0d1117", foreground: "#e6edf3", cursor: "#e6edf3",
+                    selectionBackground: "rgba(88,166,255,0.3)",
+                    black: "#161b22", red: "#f85149", green: "#3fb950",
+                    yellow: "#d29922", blue: "#58a6ff", magenta: "#a371f7",
+                    cyan: "#39c5cf", white: "#8b949e",
+                };
+            }
+            function getXtermLight() {
+                return {
+                    background: "#ffffff", foreground: "#1f2328", cursor: "#1f2328",
+                    selectionBackground: "rgba(9,105,218,0.2)",
+                    black: "#24292f", red: "#cf222e", green: "#1a7f37",
+                    yellow: "#9a6700", blue: "#0969da", magenta: "#8250df",
+                    cyan: "#1b7c83", white: "#57606a",
+                };
+            }
+            var _terminals = [];
+            window._registerTerminal = function(t) { _terminals.push(t); };
+
+            function syncTheme() {
+                try {
+                    var t = window.parent.document.documentElement.dataset.theme || "dark";
+                    document.documentElement.dataset.theme = t;
+                    var theme = t === "light" ? getXtermLight() : getXtermDark();
+                    _terminals.forEach(function(term) { term.options.theme = theme; });
+                } catch(e) {}
+            }
+            syncTheme();
+            try {
+                new MutationObserver(syncTheme).observe(
+                    window.parent.document.documentElement,
+                    { attributes: true, attributeFilter: ["data-theme"] }
+                );
+            } catch(e) {}
+        </script>
+    </head>
+    <body>
+        <div id="app">
+            <div id="toolbar">
+                <button id="btn-add" title="新建终端">+</button>
+            </div>
+            <div id="terminals"></div>
+        </div>
+
+        <script src="https://unpkg.com/xterm@5.3.0/lib/xterm.js"></script>
+        <script src="https://unpkg.com/@xterm/addon-fit@0.11.0/lib/addon-fit.js"></script>
+        <script src="https://unpkg.com/@xterm/addon-web-links@0.12.0/lib/addon-web-links.js"></script>
+
+        <!-- 1. 全局状态 -->
+        <script>
+            const terminals = new Map();
+            let nextId = 1;
+            let lastFocusedId = null;
+            let layout = null;
+            let splitCounter = 0;
+
+            function resizeTerminal(entry) {
+                entry.fitAddon.fit();
+                if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
+                    entry.ws.send(
+                        JSON.stringify({
+                            type: "resize",
+                            cols: entry.term.cols,
+                            rows: entry.term.rows,
+                        }),
+                    );
+                }
+            }
+        </script>
+
+        <!-- 2. 布局树操作：leaf 节点 = 终端，split 节点 = 分割容器 -->
+        <script>
+            function findAndReplace(node, targetId, replacement) {
+                if (node.type === "leaf")
+                    return node.id === targetId ? replacement : node;
+                return {
+                    ...node,
+                    first: findAndReplace(node.first, targetId, replacement),
+                    second: findAndReplace(node.second, targetId, replacement),
+                };
+            }
+
+            function findAndRemoveLeaf(node, targetId) {
+                if (node.type === "leaf")
+                    return node.id === targetId ? null : node;
+                const nf = findAndRemoveLeaf(node.first, targetId);
+                if (nf === null) return node.second;
+                const ns = findAndRemoveLeaf(node.second, targetId);
+                if (ns === null) return node.first;
+                return { ...node, first: nf, second: ns };
+            }
+
+            function collectLeaves(node) {
+                if (!node) return [];
+                if (node.type === "leaf") return [node.id];
+                return [
+                    ...collectLeaves(node.first),
+                    ...collectLeaves(node.second),
+                ];
+            }
+        </script>
+
+        <!-- 3. 分屏 / 关闭 pane -->
+        <script>
+            function splitLeaf(leafId, direction, before) {
+                const newId = nextId++;
+                const newLeaf = { type: "leaf", id: newId };
+                const existing = { type: "leaf", id: leafId };
+                const replacement = {
+                    type: "split",
+                    id: "s" + splitCounter++,
+                    direction,
+                    first: before ? newLeaf : existing,
+                    second: before ? existing : newLeaf,
+                    ratio: 0.5,
+                };
+                layout = findAndReplace(layout, leafId, replacement);
+                createTerminalInstance(newId);
+                renderLayout();
+            }
+
+            function removeTerminal(id) {
+                const entry = terminals.get(id);
+                if (!entry) return;
+                entry._ro.disconnect();
+                if (entry.ws && entry.ws.readyState === WebSocket.OPEN) entry.ws.close();
+                terminals.delete(id);
+                if (lastFocusedId === id) lastFocusedId = null;
+
+                const newLayout = findAndRemoveLeaf(layout, id);
+                if (!newLayout) {
+                    const nid = nextId++;
+                    layout = { type: "leaf", id: nid };
+                    createTerminalInstance(nid);
+                } else {
+                    layout = newLayout;
+                    if (!lastFocusedId)
+                        lastFocusedId = collectLeaves(layout)[0] || null;
+                }
+                entry.container.remove();
+                renderLayout();
+            }
+        </script>
+
+        <!-- 4. 创建终端实例（xterm + WebSocket + 边缘热区） -->
+        <script>
+            function createTerminalInstance(id) {
+                const container = document.createElement("div");
+                container.className = "terminal-container";
+                container.dataset.id = id;
+
+                // 关闭按钮
+                const closeBtn = document.createElement("button");
+                closeBtn.className = "close-btn";
+                closeBtn.textContent = "\u00d7";
+                closeBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    removeTerminal(id);
+                };
+                container.appendChild(closeBtn);
+
+                // 四边分割热区：hover 靠近边缘出现蓝色指示条，点击分屏
+                ["top", "bottom", "left", "right"].forEach((side) => {
+                    const zone = document.createElement("div");
+                    zone.className = "edge-zone edge-" + side;
+                    zone.onclick = (e) => {
+                        e.stopPropagation();
+                        const dir =
+                            side === "left" || side === "right" ? "h" : "v";
+                        const before = side === "left" || side === "top";
+                        splitLeaf(id, dir, before);
+                    };
+                    container.appendChild(zone);
+                });
+
+                // xterm 实例 — 从父页面继承主题
+                const term = new Terminal({
+                    cursorBlink: true,
+                    fontSize: 14,
+                    fontFamily:
+                        '"JetBrains Mono", "Fira Code", "Cascadia Code", "Noto Sans Mono CJK SC", "PingFang SC", "Microsoft YaHei", Menlo, monospace',
+                    letterSpacing: 0,
+                    lineHeight: 1,
+                    drawBoldTextInBrightColors: false,
+                    rescaleOverlappingGlyphs: true,
+                    theme: document.documentElement.dataset.theme === "light"
+                        ? getXtermLight() : getXtermDark(),
+                });
+                window._registerTerminal(term);
+                const fitAddon = new FitAddon.FitAddon();
+                const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+                term.loadAddon(fitAddon);
+                term.loadAddon(webLinksAddon);
+
+                term.open(container);
+
+                container.addEventListener("mousedown", () => {
+                    lastFocusedId = id;
+                });
+
+                // 拦截右键默认菜单
+                container.addEventListener("contextmenu", (e) => {
+                    e.preventDefault();
+                });
+
+                const entry = { term, fitAddon, container };
+                terminals.set(id, entry);
+                lastFocusedId = id;
+
+                // 延迟 WebSocket 连接：等 container 进入 DOM 并有实际尺寸
+                entry._connect = () => {
+                    fitAddon.fit();
+                    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+                    const savedSession = sessionStorage.getItem("terminal-session");
+                    const sessionParam = savedSession ? "&session=" + savedSession : "";
+                    const wsUrl =
+                        protocol + "//" + location.host +
+                        "/ws?cols=" + term.cols + "&rows=" + term.rows +
+                        sessionParam;
+                    const ws = new WebSocket(wsUrl);
+
+                    term.onData((data) => {
+                        if (ws.readyState === WebSocket.OPEN) ws.send(data);
+                    });
+                    ws.onmessage = (event) => {
+                        if (typeof event.data !== "string") return;
+                        try {
+                            const meta = JSON.parse(event.data);
+                            if (meta.type === "session" && meta.id) {
+                                sessionStorage.setItem("terminal-session", meta.id);
+                                return;
+                            }
+                        } catch {}
+                        term.write(event.data);
+                    };
+                    ws.onclose = () => {
+                        term.write("\r\n\x1b[33m[connection closed]\x1b[0m\r\n");
+                    };
+
+                    entry.ws = ws;
+                };
+
+                const ro = new ResizeObserver(() => resizeTerminal(entry));
+                ro.observe(container);
+                entry._ro = ro;
+            }
+        </script>
+
+        <!-- 5. 渲染布局树到 DOM -->
+        <script>
+            function renderLayout() {
+                const container = document.getElementById("terminals");
+                container.innerHTML = "";
+                renderNode(layout, container);
+                // 双帧延迟确保 container 有实际尺寸后再连接 WebSocket
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        terminals.forEach((e) => {
+                            if (e._connect) { e._connect(); delete e._connect; }
+                            resizeTerminal(e);
+                        });
+                    });
+                });
+            }
+
+            function renderNode(node, parentEl) {
+                if (node.type === "leaf") {
+                    const entry = terminals.get(node.id);
+                    if (entry) parentEl.appendChild(entry.container);
+                    return;
+                }
+                const wrapper = document.createElement("div");
+                wrapper.className = "split-" + node.direction;
+
+                const firstPane = document.createElement("div");
+                firstPane.className = "pane-child";
+                firstPane.style.flex = node.ratio + " 0 0";
+                renderNode(node.first, firstPane);
+                wrapper.appendChild(firstPane);
+
+                const divider = document.createElement("div");
+                divider.className = "divider";
+                setupDivider(divider, node, wrapper);
+                wrapper.appendChild(divider);
+
+                const secondPane = document.createElement("div");
+                secondPane.className = "pane-child";
+                secondPane.style.flex = 1 - node.ratio + " 0 0";
+                renderNode(node.second, secondPane);
+                wrapper.appendChild(secondPane);
+
+                parentEl.appendChild(wrapper);
+            }
+        </script>
+
+        <!-- 6. 拖动分割条 -->
+        <script>
+            function setupDivider(el, splitNode, containerEl) {
+                el.addEventListener("mousedown", (e) => {
+                    e.preventDefault();
+                    el.classList.add("active");
+                    const isH = splitNode.direction === "h";
+                    document.body.style.cursor = isH
+                        ? "col-resize"
+                        : "row-resize";
+                    document.body.style.userSelect = "none";
+
+                    const paneA = containerEl.children[0];
+                    const paneB = containerEl.children[2];
+
+                    const onMove = (e) => {
+                        const rect = containerEl.getBoundingClientRect();
+                        const pos = isH
+                            ? e.clientX - rect.left
+                            : e.clientY - rect.top;
+                        const total = isH ? rect.width : rect.height;
+                        const minPx = 80;
+                        splitNode.ratio =
+                            Math.max(minPx, Math.min(total - 4 - minPx, pos)) /
+                            total;
+                        paneA.style.flex = splitNode.ratio + " 0 0";
+                        paneB.style.flex = 1 - splitNode.ratio + " 0 0";
+                    };
+
+                    const onUp = () => {
+                        el.classList.remove("active");
+                        document.body.style.cursor = "";
+                        document.body.style.userSelect = "";
+                        document.removeEventListener("mousemove", onMove);
+                        document.removeEventListener("mouseup", onUp);
+                        terminals.forEach((entry) => resizeTerminal(entry));
+                    };
+
+                    document.addEventListener("mousemove", onMove);
+                    document.addEventListener("mouseup", onUp);
+                });
+            }
+        </script>
+
+        <!-- 7. 工具栏 + 启动 -->
+        <script>
+            document.getElementById("btn-add").onclick = () => {
+                const id = lastFocusedId || collectLeaves(layout)[0];
+                if (id != null) splitLeaf(id, "h", false);
+            };
+
+            (function init() {
+                const firstId = nextId++;
+                layout = { type: "leaf", id: firstId };
+                createTerminalInstance(firstId);
+                renderLayout();
+            })();
+        </script>
+    </body>
+</html>

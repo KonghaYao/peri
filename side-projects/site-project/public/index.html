@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Site Preview</title>
+  <link rel="stylesheet" href="https://unpkg.com/highlight.js@11.11.1/styles/github.min.css">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="layout.css">
+</head>
+<body>
+  <div id="app">
+    <div id="main-row">
+      <!-- 侧边栏 -->
+      <aside id="sidebar">
+        <div id="sidebar-header">
+          <h2>📁 文件</h2>
+          <div>
+            <button id="clear-cache" title="清除缓存">🗑</button>
+            <button id="collapse-all" title="折叠全部">◀▶</button>
+          </div>
+        </div>
+        <div id="file-tree"></div>
+
+        <!-- SCM 水平分割线 -->
+        <div id="scm-resizer"></div>
+
+        <!-- SCM 面板 -->
+        <div id="scm-panel">
+          <div id="scm-header">
+            <div id="scm-tabs">
+              <button id="scm-tab-changes" class="scm-tab active">Changes</button>
+              <button id="scm-tab-graph" class="scm-tab">Graph</button>
+            </div>
+            <div id="scm-header-actions">
+              <button id="scm-view-toggle" title="切换到树视图">☰</button>
+              <button id="scm-refresh" title="刷新">⟳</button>
+            </div>
+          </div>
+          <div id="scm-content-changes">
+            <div id="scm-list">
+              <div id="scm-empty">
+                <div class="scm-empty-icon">✓</div>
+                <div>没有更改</div>
+              </div>
+            </div>
+            <div id="scm-commit-area">
+              <textarea id="scm-message" placeholder="输入提交信息，按 Ctrl+Enter 提交" rows="3"></textarea>
+              <button id="scm-commit-btn" disabled>提交</button>
+            </div>
+          </div>
+        </div>
+
+      </aside>
+
+      <div id="sidebar-resizer"></div>
+
+      <!-- 主区域：终端 + 预览 -->
+      <div id="center-area">
+        <!-- 终端面板（始终可见） -->
+        <div id="terminal-panel">
+          <div id="terminal-header">
+            <span class="terminal-title">>_ Terminal</span>
+          </div>
+          <div id="terminal-container"></div>
+        </div>
+
+        <!-- 终端/预览分割线 -->
+        <div id="center-resizer"></div>
+
+        <!-- 预览面板（有文件选中才显示，可关闭） -->
+        <div id="preview-wrapper" class="preview-hidden">
+          <div id="preview-header">
+            <span id="preview-filename"></span>
+            <button id="preview-close" title="关闭预览">✕</button>
+          </div>
+          <main id="preview">
+            <div id="preview-empty">
+              <div class="empty-hint">
+                <p>👈 从左侧选择文件开始预览</p>
+              </div>
+            </div>
+          </main>
+        </div>
+      </div>
+    </div>
+
+    <!-- 底部状态栏 -->
+    <div id="statusbar">
+      <div id="statusbar-left">
+        <span id="statusbar-branch" class="statusbar-item" title="切换分支">
+          <span class="branch-icon">⎇</span>
+          <span id="branch-name"></span>
+        </span>
+        <span id="statusbar-git-stats" class="statusbar-item">
+          <span id="git-ahead"></span>
+          <span id="git-behind"></span>
+          <span id="git-stats-text"></span>
+        </span>
+      </div>
+      <div id="statusbar-right">
+        <span id="statusbar-file" class="statusbar-item"></span>
+        <span id="statusbar-theme" class="statusbar-item" title="切换主题" style="cursor:pointer;">🌙</span>
+        <span id="statusbar-getman" class="statusbar-item" title="API 测试 (Ctrl+K)" style="cursor:pointer;">⚡ Getman</span>
+      </div>
+    </div>
+
+    <!-- Branch 切换下拉菜单 -->
+    <div id="branch-dropdown" class="dropdown-hidden">
+      <div class="dropdown-list" id="branch-list"></div>
+    </div>
+
+    <!-- Getman - API 测试面板 -->
+    <div id="getman-overlay" style="display:none">
+      <div class="getman-overlay-backdrop"></div>
+      <div class="getman-overlay-panel" id="getman-overlay-panel">
+        <div class="getman-overlay-header" id="getman-overlay-header">
+          <span class="getman-overlay-title">⚡ Getman</span>
+          <div class="getman-overlay-actions">
+            <button id="getman-import-btn" title="Import cURL (Ctrl+I)">↓</button>
+            <button id="getman-history-toggle" title="历史请求 (Ctrl+H)">☰</button>
+            <button id="getman-save" title="保存到历史">💾</button>
+            <button id="getman-overlay-close" title="关闭 (Esc)">✕</button>
+          </div>
+        </div>
+        <div class="getman-overlay-body">
+          <!-- 历史侧栏 -->
+          <div id="getman-history-panel">
+            <div class="getman-history-header">
+              <span>历史记录</span>
+            </div>
+            <div id="getman-history-list"></div>
+          </div>
+
+          <!-- 主内容 -->
+          <div class="getman-main">
+            <!-- Import cURL 面板 -->
+            <div id="getman-import-panel" class="getman-import-panel" style="display:none">
+              <div class="getman-import-header">
+                <span>Import cURL</span>
+                <button id="getman-import-cancel" title="取消">✕</button>
+              </div>
+              <textarea id="getman-import-textarea" class="getman-import-textarea"
+                placeholder="粘贴 curl 命令，例如：&#10;curl -X POST https://api.example.com/v1/users \&#10;  -H &quot;Authorization: Bearer tok_xxx&quot; \&#10;  -H &quot;Content-Type: application/json&quot; \&#10;  -d '{&quot;name&quot;: &quot;John&quot;}'"
+                spellcheck="false"></textarea>
+              <div class="getman-import-footer">
+                <button id="getman-import-parse" class="getman-import-parse-btn">Parse &amp; Import</button>
+              </div>
+              <div id="getman-import-result"></div>
+            </div>
+
+            <!-- 请求栏 -->
+            <div class="getman-request-bar">
+              <select id="getman-method" class="getman-method-select"></select>
+              <input id="getman-url" class="getman-url-input"
+                placeholder="https://api.example.com/endpoint" autocomplete="off" spellcheck="false">
+              <button id="getman-send" class="getman-send-btn">Send</button>
+            </div>
+
+            <!-- Tabs -->
+            <div class="getman-tabs" id="getman-tabs">
+              <button class="getman-tab active" data-tab="params">Params</button>
+              <button class="getman-tab" data-tab="headers">Headers</button>
+              <button class="getman-tab" data-tab="body">Body</button>
+              <button class="getman-tab" data-tab="auth">Auth</button>
+            </div>
+
+            <!-- Tab 内容 -->
+            <div class="getman-tab-content">
+              <div id="getman-tab-params" class="getman-tab-panel">
+                <div class="getman-kv-container" id="getman-kv-params"></div>
+              </div>
+              <div id="getman-tab-headers" class="getman-tab-panel" style="display:none">
+                <div class="getman-kv-container" id="getman-kv-headers"></div>
+              </div>
+              <div id="getman-tab-body" class="getman-tab-panel" style="display:none">
+                <div class="getman-body-bar">
+                  <select id="getman-body-type" class="getman-body-type-select"></select>
+                </div>
+                <textarea id="getman-body-raw" class="getman-body-raw"
+                  placeholder='{"key": "value"}' spellcheck="false"></textarea>
+                <div id="getman-body-form-editor" style="display:none">
+                  <div class="getman-kv-container" id="getman-kv-form"></div>
+                </div>
+              </div>
+              <div id="getman-tab-auth" class="getman-tab-panel" style="display:none">
+                <div class="getman-auth-bar">
+                  <label>Type:</label>
+                  <select id="getman-auth-type">
+                    <option value="none">No Auth</option>
+                    <option value="bearer">Bearer Token</option>
+                    <option value="basic">Basic Auth</option>
+                  </select>
+                </div>
+                <div id="getman-auth-bearer-row" style="display:none; padding: 8px 0;">
+                  <label>Token:</label>
+                  <input id="getman-auth-bearer" class="getman-auth-input" placeholder="eyJ...">
+                </div>
+                <div id="getman-auth-basic-row" style="display:none; padding: 8px 0;">
+                  <label>Username:</label>
+                  <input id="getman-auth-basic-user" class="getman-auth-input" placeholder="admin">
+                  <label style="margin-top:8px;">Password:</label>
+                  <input id="getman-auth-basic-pass" class="getman-auth-input" type="password" placeholder="••••">
+                </div>
+              </div>
+            </div>
+
+            <!-- 响应区 -->
+            <div id="getman-response" class="getman-response" style="display:none">
+              <div class="getman-res-bar">
+                <span class="getman-res-status-val" id="getman-res-status"></span>
+                <span class="getman-res-meta">
+                  <span id="getman-res-time">0ms</span>
+                  <span id="getman-res-size">0 B</span>
+                </span>
+                <div class="getman-res-tabs">
+                  <button class="getman-res-tab active" data-restab="body">Body</button>
+                  <button class="getman-res-tab" data-restab="headers">Headers</button>
+                </div>
+              </div>
+              <div id="getman-res-body-panel" class="getman-res-panel">
+                <div class="getman-res-body-content" id="getman-res-body"></div>
+              </div>
+              <div id="getman-res-headers-panel" class="getman-res-panel" style="display:none">
+                <div id="getman-res-headers"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="getman-overlay-resize" id="getman-overlay-resize"></div>
+      </div>
+    </div>
+
+    <!-- Git Graph 浮动面板 -->
+    <div id="graph-overlay" style="display:none">
+      <div class="graph-overlay-backdrop"></div>
+      <div class="graph-overlay-panel" id="graph-overlay-panel">
+        <div class="graph-overlay-header" id="graph-overlay-header">
+          <span class="graph-overlay-title">Git Graph</span>
+          <div class="graph-overlay-actions">
+            <button id="graph-align-toggle" title="文本对齐到 Graph 节点">≡</button>
+            <button id="graph-fetch-btn" title="Fetch (git fetch --prune)">↓</button>
+            <button id="graph-overlay-refresh" title="刷新">⟳</button>
+            <button id="graph-overlay-close" title="关闭 (Esc)">✕</button>
+          </div>
+        </div>
+        <div class="graph-overlay-body">
+          <div id="graph-container" class="graph-container">
+            <div class="graph-inner">
+              <canvas id="graph-canvas"></canvas>
+              <div id="graph-commits"></div>
+            </div>
+          </div>
+        </div>
+        <div class="graph-overlay-resize" id="graph-overlay-resize"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CDN 依赖 -->
+  <script src="https://unpkg.com/marked@15.0.9/marked.min.js"></script>
+  <script src="https://unpkg.com/mermaid@11.6.0/dist/mermaid.min.js"></script>
+  <script src="https://unpkg.com/@highlightjs/cdn-assets@11.11.1/highlight.min.js"></script>
+  <!-- diff2html CSS + JS（核心库，导出 window.Diff2Html）-->
+  <link rel="stylesheet" href="https://unpkg.com/diff2html@3.4.47/bundles/css/diff2html.min.css">
+  <script src="https://unpkg.com/diff2html@3.4.47/bundles/js/diff2html.min.js"></script>
+
+  <!-- 应用模块 -->
+  <script src="cache.js"></script>
+  <script src="tree.js"></script>
+  <script src="preview.js"></script>
+  <script src="scm.js"></script>
+  <script src="graph-layout.js"></script>
+  <script src="graph.js"></script>
+  <script src="getman.js"></script>
+  <script src="statusbar.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

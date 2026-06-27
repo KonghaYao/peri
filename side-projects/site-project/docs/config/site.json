@@ -1,0 +1,22 @@
+{
+  "project": "site-project",
+  "version": "1.0.0",
+  "settings": {
+    "port": 3000,
+    "docsDir": "./docs",
+    "publicDir": "./public",
+    "features": {
+      "mermaid": true,
+      "codeHighlight": true,
+      "imagePreview": true
+    }
+  },
+  "textExtensions": [
+    ".md", ".txt", ".json", ".xml", ".yml", ".yaml",
+    ".js", ".ts", ".jsx", ".tsx", ".html", ".css",
+    ".py", ".rb", ".go", ".rs", ".java", ".sql"
+  ],
+  "imageExtensions": [
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"
+  ]
+}
