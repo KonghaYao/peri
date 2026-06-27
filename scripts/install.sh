@@ -281,6 +281,23 @@ main() {
     # Offer to clean up old versions
     cleanup_old_versions "${INSTALL_DIR}" "${VERSION_TAG}"
 
+    # --- Workflow dependency check ---
+    echo ""
+    step "Checking workflow runner..."
+    if command -v peri-workflow &>/dev/null; then
+        local wf_version
+        wf_version=$(peri-workflow --version 2>/dev/null || echo "installed")
+        info "Workflow runner found: ${wf_version}"
+    else
+        warn "peri-workflow not found. Install for multi-agent workflow support:"
+        echo "    npm install -g @peri-code/workflow"
+        if ! command -v node &>/dev/null; then
+            echo ""
+            warn "Node.js is also required. Install it from https://nodejs.org/"
+        fi
+        echo ""
+    fi
+
     echo ""
     info "Installation complete! Version: ${VERSION_TAG}"
     echo ""

@@ -72,6 +72,7 @@ analyzeDeadLoops(allThreadData);
 analyzeSessionDuration(threads);
 analyzeRedundantReads(allThreadData);
 analyzeSearchToReadLinkage(allThreadData);
+analyzeShortSessionAbandon(threads, allThreadData);
 
 loader.close();
 
@@ -646,4 +647,40 @@ function analyzeSearchToReadLinkage(data: ThreadData[]): void {
     grandTotal > 0 ? totalLinked / grandTotal : 0,
     40,
   );
+}
+
+// ── Metric 7: 极短会话（放弃信号）──
+
+function analyzeShortSessionAbandon(
+  threads: ThreadRow[],
+  data: ThreadData[],
+): void {
+  printSection("7. 极短会话（放弃信号）");
+
+  const SHORT_THRESHOLD = 3;
+  let shortCount = 0;
+  let shortNoToolCount = 0;
+
+  for (let i = 0; i < threads.length; i++) {
+    if (threads[i].message_count <= SHORT_THRESHOLD) {
+      shortCount++;
+      const hasTool = data[i].assistantMsgs.some(
+        (m) => m.toolUses.length > 0,
+      );
+      if (!hasTool) shortNoToolCount++;
+    }
+  }
+
+  printMetric("极短阈值", `≤${SHORT_THRESHOLD} 消息`);
+  printMetric("极短会话数", `${shortCount} / ${threads.length}`);
+  printMetric("极短会话占比", pct(shortCount, threads.length));
+  printMetric(
+    "其中无工具调用",
+    `${shortNoToolCount} (${pct(shortNoToolCount, Math.max(shortCount, 1))})`,
+  );
+  printMetric(
+    "放弃信号率（极短 + 无工具）",
+    pct(shortNoToolCount, threads.length),
+  );
+  printBar("  放弃信号率", threads.length > 0 ? shortNoToolCount / threads.length : 0, 40);
 }

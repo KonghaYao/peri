@@ -253,6 +253,22 @@ function Main {
     # Offer to clean up old versions
     Clean-OldVersions -InstallDir $InstallDir -CurrentVersion $VersionTag
 
+    # --- Workflow dependency check ---
+    Write-Host ""
+    step "Checking workflow runner..."
+    $wfCmd = Get-Command peri-workflow -ErrorAction SilentlyContinue
+    if ($wfCmd) {
+        info "Workflow runner found: $($wfCmd.Source)"
+    } else {
+        warn "peri-workflow not found. Install for multi-agent workflow support:"
+        Write-Host "    npm install -g @peri-code/workflow"
+        if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+            Write-Host ""
+            warn "Node.js is also required. Install it from https://nodejs.org/"
+        }
+        Write-Host ""
+    }
+
     Write-Host ""
     info "Installation complete! Version: $VersionTag"
     Write-Host ""
