@@ -132,9 +132,13 @@ impl App {
                 lc: crate::i18n::LcRegistry::default(),
                 channel_state: None,
                 panic_notify_rx: None,
+                acp_session_manager: None,
             },
             global_panels: PanelManager::new(),
             global_ui: super::GlobalUiState::new(),
+            workflow_poll_rx: None,
+            workflow_poll_kill: None,
+            workflow_polling_active: false,
             focused: true,
             acp_client: None,
         };

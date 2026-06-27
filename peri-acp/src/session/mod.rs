@@ -2,6 +2,10 @@
 //!
 //! Manages ACP session creation, loading, resumption, and closure.
 //! Each session owns a ThreadStore entry, an Agent instance, and associated state.
+//!
+//! v2 迁移：AcpSession 瘦身为外部句柄，核心状态委托给
+//! `peri_agent::session::Session`。保留 ACP 特有字段（provider_id、
+//! model_alias、thinking、active_agents、goal_state）。
 
 pub mod agent_pool;
 pub mod agent_runtime;
@@ -53,6 +57,19 @@ pub struct AcpSession {
     pub active_agents: HashMap<ThreadId, AgentRuntime>,
     /// Goal steering 状态（session 级，跨 prompt 共享）
     pub goal_state: crate::session::goal_state::GoalState,
+    /// v2 统一收件箱（session 级共享，所有路径用；P5 后 v1 已删，无回退）
+    ///
+    /// v2 stages 使用独立类型
+    /// `peri_agent::session::MessageQueue`（富类型，带 Kind/Source）。
+    /// 每轮 v2 路径调用 `build_stage_context` 时传入此实例的 clone，
+    /// 让 main agent 与 SubAgent / Hook / GoalSteering 互可见彼此的
+    /// deferred / info 消息。
+    ///
+    /// 内部 `Arc<Mutex<VecDeque>> + Arc<Notify>`，clone 共享底层。
+    pub v2_message_queue: peri_agent::session::MessageQueue,
+    /// peri-agent Session（核心实体聚合）
+    /// None 表示尚未初始化，session/new 时创建。
+    pub v2_session: Option<Arc<peri_agent::session::Session>>,
 }
 
 struct SessionManagerInner {
@@ -144,6 +161,8 @@ impl SessionManager {
                 Arc::new(peri_agent::goal::InMemoryGoalStore::new()),
                 session_id.clone(),
             ),
+            v2_message_queue: peri_agent::session::MessageQueue::new(),
+            v2_session: None,
         };
 
         self.inner.sessions.insert(session_id.clone(), session);
@@ -167,6 +186,8 @@ impl SessionManager {
                 Arc::new(peri_agent::goal::InMemoryGoalStore::new()),
                 session_id.to_string(),
             ),
+            v2_message_queue: peri_agent::session::MessageQueue::new(),
+            v2_session: None,
         }
     }
 
@@ -289,6 +310,15 @@ impl SessionManager {
             .sessions
             .get(session_id)
             .map(|s| s.goal_state.clone())
+    }
+
+    /// 获取指定 session 的共享 v2 MessageQueue（用于 TUI 侧 cron/channel 异步触发注入）。
+    /// 内部 Arc 共享，clone 廉价。session 不存在时返回 None。
+    pub fn v2_queue_for(&self, session_id: &str) -> Option<peri_agent::session::MessageQueue> {
+        self.inner
+            .sessions
+            .get(session_id)
+            .map(|s| s.v2_message_queue.clone())
     }
 
     /// 取消指定 session 的所有 cascade 子 agent（暴露给 TUI/stdio 用于 session/cancel）。

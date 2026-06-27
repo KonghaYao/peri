@@ -4,11 +4,11 @@
 //! Reproduces the bug described in
 //! spec/issues/2026-05-24-concurrent-bg-agent-only-one-completion.md
 
-use peri_agent::agent::events::{AgentEvent, BackgroundTaskResult};
+use peri_agent::agent::events::{BackgroundTaskResult, ExecutorEvent};
 
 #[tokio::test]
 async fn test_concurrent_bg_tasks_all_emit_completion() {
-    let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     let task_count = 3usize;
 
     // Spawn N senders concurrently, each sending one BackgroundTaskCompleted
@@ -31,7 +31,7 @@ async fn test_concurrent_bg_tasks_all_emit_completion() {
                     duration_ms: 100 + i as u64 * 10,
                     child_thread_id: None,
                 };
-                let _ = tx.send(AgentEvent::BackgroundTaskCompleted(result));
+                let _ = tx.send(ExecutorEvent::BackgroundTaskCompleted(result));
             })
         })
         .collect();
@@ -43,14 +43,14 @@ async fn test_concurrent_bg_tasks_all_emit_completion() {
     drop(bg_tx);
 
     // Collect all received events
-    let mut received: Vec<AgentEvent> = Vec::new();
+    let mut received: Vec<ExecutorEvent> = Vec::new();
     while let Some(event) = bg_rx.recv().await {
         received.push(event);
     }
 
     let bg_completions: Vec<_> = received
         .iter()
-        .filter(|e| matches!(e, AgentEvent::BackgroundTaskCompleted(_)))
+        .filter(|e| matches!(e, ExecutorEvent::BackgroundTaskCompleted(_)))
         .collect();
     assert_eq!(
         bg_completions.len(),
@@ -64,7 +64,7 @@ async fn test_concurrent_bg_tasks_all_emit_completion() {
     let task_ids: std::collections::HashSet<_> = bg_completions
         .iter()
         .filter_map(|e| {
-            if let AgentEvent::BackgroundTaskCompleted(r) = e {
+            if let ExecutorEvent::BackgroundTaskCompleted(r) = e {
                 Some(r.task_id.clone())
             } else {
                 None
@@ -94,7 +94,7 @@ async fn test_bg_event_pump_receives_all_completions() {
 
     let (client_transport, server_transport) = mpsc_transport_pair();
     let sink = Arc::new(TransportEventSink::new(Arc::new(server_transport)));
-    let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
 
     let session_id = "test-session".to_string();
     let context_window = 200_000u32;
@@ -126,7 +126,7 @@ async fn test_bg_event_pump_receives_all_completions() {
                     duration_ms: 100,
                     child_thread_id: None,
                 };
-                let _ = tx.send(AgentEvent::BackgroundTaskCompleted(result));
+                let _ = tx.send(ExecutorEvent::BackgroundTaskCompleted(result));
             })
         })
         .collect();

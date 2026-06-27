@@ -1,46 +1,78 @@
 # peri-agent
 
-Rust Agent 框架，实现 ReAct 循环与可组合中间件系统。与 TypeScript 端的 `@langgraph-js/standard-agent` 在概念上对齐。
+Rust Agent 框架，实现 v2 `run_react_loop`（ReAct 循环 + EventBus 三层事件 + MessageTranscript 持久化）与可组合中间件系统。
+
+## v2 架构概览
+
+```
+run_react_loop（peri-agent::agent::stages）
+  └─ 每轮：Compact → Receive → Reason → Act → End
+       ├─ Reason: before_model → LLM → after_model
+       ├─ Act:    before_tools_batch → 并发 invoke → after_tool × N → after_tools_batch
+       └─ End:    检查 MessageQueue 是否有待处理 Prompt/Defer，决定是否续跑下一轮
+```
+
+主入口：
+
+- `peri_agent::agent::stages::run_react_loop(context: StageContext, max_iterations: usize)` —— v2 单路径 ReAct 循环
+- `StageContext` —— 持有 `llm` / `shared_tools` / `middleware_chain` / `transcript` / `event_bus` / `compact_config` 等
+- `EventBus` —— 三层事件（Render / State / Observe），订阅者按需消费
+- `MessageTranscript` —— 会话级权威消息存储，标记代替删除（truncated / excluded）
 
 ## 快速开始
 
 ```rust
 use peri_agent::prelude::*;
+use peri_agent::agent::stages::{run_react_loop, StageContext};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _guard = peri_agent::telemetry::init_tracing("my-agent").await;
 
-    let agent = ReActAgent::new(MockLLM::always_answer("任务完成"))
-        .max_iterations(10)
-        .add_middleware(Box::new(LoggingMiddleware::new().verbose()));
+    // 1. 构造 LLM（BaseModel → ReactLLM 适配）
+    let llm: Arc<dyn ReactLLM + Send + Sync> = Arc::new(BaseModelReactLLM::new(
+        Box::new(MockLLM::always_answer("任务完成")),
+    ));
 
-    let mut state = AgentState::new("/workspace");
-    let output = agent.execute(AgentInput::text("请帮我完成这个任务"), &mut state).await?;
+    // 2. 构造 middleware chain（示例：仅 LoggingMiddleware）
+    let mut chain = MiddlewareChain::new();
+    chain.push(Box::new(LoggingMiddleware::new().verbose()));
 
-    println!("回答：{}", output.text);
-    println!("步骤：{}", output.steps);
+    // 3. 构造 TurnContext + 共享 transcript/queue，通过 StageContext::builder 装配
+    let ctx: StageContext = StageContext::builder(
+        turn_context,
+        Arc::new(RwLock::new(MessageTranscript::new())),
+        MessageQueue::new(),
+    )
+        .with_llm(llm)
+        .with_middleware_chain(Arc::new(chain))
+        .build();
+
+    // 4. 进入 v2 循环
+    let result = run_react_loop(ctx, 10).await;
+
+    println!("完成");
     Ok(())
 }
 ```
 
 ## 核心概念
 
-### ReActAgent
+### StageContext 与 run_react_loop
 
-ReAct 循环的执行器，管理 LLM 推理 → 工具调用 → 结果反馈的完整流程。
+`StageContext` 是 v2 单路径循环的运行时上下文。`run_react_loop` 接管整个 ReAct 循环：
 
-```rust
-let agent = ReActAgent::new(llm)
-    .max_iterations(20)             // 最大循环步数，默认 10
-    .register_tool(Box::new(my_tool))
-    .add_middleware(Box::new(LoggingMiddleware::new()))
-    .with_event_handler(Arc::new(handler));
-```
+- **Compact 阶段**：检查 `ContextBudget`，按需触发 micro / full compact（`compact_v2::run_compact`）
+- **Receive 阶段**：从 `MessageQueue` 取出 Prompt + Info 消息，写入 `MessageTranscript`
+- **Reason 阶段**：`before_model` → 调 LLM → `after_model`，emit `LlmCallStart` / `LlmCallEnd`
+- **Act 阶段**：工具分发（`before_tools_batch` → 并发 invoke → `after_tool` × N → `after_tools_batch`）
+- **End 阶段**：检查 `MessageQueue` 是否有 Defer/Prompt，决定是否续跑下一轮
 
 ### 中间件（Middleware）
 
-通过实现 `Middleware<S>` trait 在 Agent 生命周期各节点插入逻辑。
+通过实现 `Middleware` trait 在 Agent 生命周期各节点插入逻辑。v2 中间件接收 `&MiddlewareContext`（只读）或 `&mut MiddlewareContextMut`（可变），不再泛型于 `<S: State>`。
 
 ```rust
 use async_trait::async_trait;
@@ -49,32 +81,32 @@ use peri_agent::prelude::*;
 struct MyMiddleware;
 
 #[async_trait]
-impl Middleware<AgentState> for MyMiddleware {
+impl Middleware for MyMiddleware {
     fn name(&self) -> &str { "my-middleware" }
 
-    async fn before_agent(&self, state: &mut AgentState) -> AgentResult<()> {
-        // Agent 开始前执行
+    async fn before_agent(&self, ctx: &MiddlewareContext<'_>) -> AgentResult<()> {
+        // Agent 开始前执行（只读观察）
         Ok(())
     }
 
-    async fn before_tool(&self, _: &mut AgentState, call: &ToolCall) -> AgentResult<ToolCall> {
+    async fn before_model(&self, ctx: &mut MiddlewareContextMut<'_>) -> AgentResult<()> {
+        // 每轮 LLM 调用前执行（可变）
+        Ok(())
+    }
+
+    async fn before_tool(&self, ctx: &mut MiddlewareContextMut<'_>, call: &ToolCall) -> AgentResult<ToolCall> {
         // 工具调用前执行，可修改调用参数
         Ok(call.clone())
     }
 
-    async fn after_tool(&self, _: &mut AgentState, _: &ToolCall, _: &ToolResult) -> AgentResult<()> {
+    async fn after_tool(&self, ctx: &mut MiddlewareContextMut<'_>, _: &ToolCall, _: &ToolResult) -> AgentResult<()> {
         // 工具调用后执行
         Ok(())
-    }
-
-    async fn after_agent(&self, _: &mut AgentState, output: &AgentOutput) -> AgentResult<AgentOutput> {
-        // Agent 完成后执行，可修改最终输出
-        Ok(output.clone())
     }
 }
 ```
 
-生命周期钩子执行顺序：`before_agent` → (每步) `before_tool` → `after_tool` → `after_agent`，出错时触发 `on_error`。
+生命周期钩子执行顺序：`before_agent` → 每轮（`before_model` → `after_model` → `before_tools_batch` → `after_tool` × N → `after_tools_batch`）→ `after_agent`，出错时触发 `on_error`。
 
 ### 自定义工具（Tool）
 
@@ -104,23 +136,26 @@ impl BaseTool for EchoTool {
 }
 ```
 
-### 事件回调（EventHandler）
+### 事件回调（EventBus / ExecutorEvent）
 
-在不修改中间件的情况下监听关键事件：
+v2 通过 `EventBus` 发出三层事件：
+
+- **RenderEvent** —— LLM 调用 / 工具调用（UI 渲染层消费）
+- **StateEvent** —— 消息追加 / 状态变更 / Todo / MessagesCompacted（持久化层消费）
+- **ObserveEvent** —— 可观测性事件（langfuse / metrics）
+
+历史兼容的 `ExecutorEvent` 仍保留（`peri_agent::agent::events::ExecutorEvent`），由上层 mapper 从 v2 事件桥接而来。通过 `AgentEventHandler` / `FnEventHandler` 消费：
 
 ```rust
 use std::sync::Arc;
 use peri_agent::prelude::*;
 
 let handler = FnEventHandler(|event| match event {
-    AgentEvent::ToolStart { name, .. } => println!("开始调用工具: {name}"),
-    AgentEvent::ToolEnd { name, is_error, .. } => println!("工具 {name} 完成，错误={is_error}"),
-    AgentEvent::TextChunk(text) => println!("回答: {text}"),
-    AgentEvent::StepDone { step } => println!("步骤 {step} 完成"),
+    ExecutorEvent::ToolStart { name, .. } => println!("开始调用工具: {name}"),
+    ExecutorEvent::ToolEnd { name, is_error, .. } => println!("工具 {name} 完成，错误={is_error}"),
+    ExecutorEvent::TextChunk(text) => println!("回答: {text}"),
+    _ => {}
 });
-
-let agent = ReActAgent::new(llm)
-    .with_event_handler(Arc::new(handler));
 ```
 
 ## Telemetry（可观测性）
@@ -191,7 +226,7 @@ peri-agent = { version = "*", features = ["otel"] }
 | 配置了变量但未开 feature | `OTEL_EXPORTER_OTLP_ENDPOINT`（无 feature）       | 打印 warn，降级为 stdout    |
 | OTLP 初始化失败          | 网络不通等                                        | 打印 warn，自动降级，不崩溃 |
 
-`ReActAgent::execute()`、每次工具调用均已自动埋点，无需额外代码。
+`run_react_loop` 内的 LLM 调用、每次工具调用均已自动埋点，无需额外代码。
 
 ## Cargo Features
 

@@ -1,6 +1,6 @@
 //! `/clear` 命令 — 清空对话历史。
 
-use peri_agent::agent::events::AgentEvent as ExecutorEvent;
+use peri_agent::agent::events::ExecutorEvent;
 
 use super::{AgentCommand, CommandContext, CommandKind, CommandResult};
 use crate::session::executor::PromptStopReason;

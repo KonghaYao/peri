@@ -4,7 +4,7 @@ use peri_agent::messages::ToolCallRequest;
 
 use crate::ui::message_view::{instance_hash, parse_bg_hash, MessageViewModel};
 
-use super::{BatchInfo, CompletedTool, PendingTool, SubAgentState};
+use super::{state::PendingTool, BatchInfo, SubAgentState};
 
 impl super::MessagePipeline {
     /// 工具调用开始（内部版本，只更新状态，不返回 PipelineAction）
@@ -16,7 +16,9 @@ impl super::MessagePipeline {
         is_background: bool,
     ) {
         self.finalize_current_ai();
-        self.current_ai_tool_calls
+        let partial = self.partial_mut();
+        partial
+            .tool_calls
             .push(ToolCallRequest::new(tool_call_id, name, input.clone()));
 
         if name == "Agent" {
@@ -55,7 +57,8 @@ impl super::MessagePipeline {
             self.active_batch = None;
         }
 
-        self.pending_tools.insert(
+        let partial = self.partial_mut();
+        partial.pending_tools.insert(
             tool_call_id.to_string(),
             PendingTool {
                 tool_call_id: tool_call_id.to_string(),
@@ -73,13 +76,20 @@ impl super::MessagePipeline {
         output: &str,
         is_error: bool,
     ) {
-        let pending = self.pending_tools.remove(tool_call_id);
-        let input = pending
-            .as_ref()
-            .map(|p| p.input.clone())
-            .unwrap_or(serde_json::Value::Null);
+        let (pending_input_opt, is_agent) = {
+            let partial = match self.partial.as_mut() {
+                Some(p) => p,
+                None => return, // 无 partial 时无 pending_tools 可清理
+            };
+            let pending = partial.pending_tools.remove(tool_call_id);
+            let input = pending
+                .as_ref()
+                .map(|p| p.input.clone())
+                .unwrap_or(serde_json::Value::Null);
+            (input, name == "Agent")
+        };
 
-        if name == "Agent" {
+        if is_agent {
             // tool_call_id 现在就是 instance_id，直接精确匹配
             if let Some(sub) = self
                 .subagent_stack
@@ -112,7 +122,7 @@ impl super::MessagePipeline {
                     };
                     vm.recompute_hash();
                     sub.finalized_vm = Some(vm.clone());
-                    // 立即冻结：RebuildAll 可能在下一个 StateSnapshot 前触发
+                    // 立即冻结：RebuildAll 可能在下一个 TurnCommitted 前触发
                     self.frozen_subagent_vms.push(vm);
                 }
             }
@@ -121,11 +131,13 @@ impl super::MessagePipeline {
                 batch.completed += 1;
             }
         } else {
-            // 非 SubAgent 工具：保存到 completed_tools，在 StateSnapshot 到达前显示
-            self.completed_tools.push(CompletedTool {
+            // 非 SubAgent 工具：保存到 partial.completed_tools，在 TurnCommitted 到达前显示
+            use super::state::CompletedTool;
+            let partial = self.partial_mut();
+            partial.completed_tools.push(CompletedTool {
                 tool_call_id: tool_call_id.to_string(),
                 name: name.to_string(),
-                input,
+                input: pending_input_opt,
                 output: output.to_string(),
                 is_error,
             });

@@ -1,9 +1,8 @@
 use async_trait::async_trait;
 use peri_agent::{
-    agent::state::State,
     error::AgentResult,
     messages::{BaseMessage, ContentBlock},
-    middleware::r#trait::Middleware,
+    middleware::{r#trait::Middleware, state::MiddlewareState},
 };
 
 use crate::skills::{loader::resolve_skill_roots, scan_skill_roots, SkillRoot};
@@ -87,12 +86,12 @@ impl SkillPreloadMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for SkillPreloadMiddleware {
+impl Middleware for SkillPreloadMiddleware {
     fn name(&self) -> &str {
         "SkillPreloadMiddleware"
     }
 
-    async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // 确定要预加载的 skill 名称列表
         let skill_names = if !self.skill_names.is_empty() {
             // SubAgent 路径：使用构造时传入的显式列表

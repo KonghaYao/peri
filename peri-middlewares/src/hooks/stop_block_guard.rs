@@ -82,13 +82,21 @@ impl Default for StopBlockGuard {
 /// [TRAP] 必须用 Human + `<system-reminder>` 注入，禁止 `BaseMessage::system`。
 /// System 消息会被 anthropic/openai invoke hoist 到 system prompt 顶部，
 /// 违反 frozen_system_prompt 稳定性（第一优先级）。
-/// （与 goal_middleware.rs / compact_middleware.rs 注入路径一致）
+/// （与 goal_middleware.rs / compact_v2.rs::re_inject_v2 注入路径一致）
 ///
 /// middleware trait 方法负责把这个文本通过
 /// `state.add_message(BaseMessage::human(...))` 注入，guard 不接触 state。
 pub fn format_stop_block_feedback(reason: &str, count: u32) -> String {
     format!(
         "<system-reminder>\n<stop_hook_feedback>\nThe Stop hook blocked because: {}\nPlease address this feedback and continue your work.\n(Block {}/8)\n</stop_hook_feedback>\n</system-reminder>",
+        reason, count
+    )
+}
+
+/// 停止阻止反馈文本（无 system-reminder 外层，由 MessageQueue 统一添加）
+pub fn format_stop_block_feedback_no_wrapper(reason: &str, count: u32) -> String {
+    format!(
+        "<stop_hook_feedback>\nThe Stop hook blocked because: {}\nPlease address this feedback and continue your work.\n(Block {}/8)\n</stop_hook_feedback>",
         reason, count
     )
 }

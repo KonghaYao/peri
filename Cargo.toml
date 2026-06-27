@@ -9,6 +9,7 @@ members = [
     "peri-lsp",
     "peri-web-pty",
     "agm",
+    "peri-workflow",
 ]
 resolver = "2"
 

@@ -174,6 +174,31 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
         has_content = true;
     }
 
+    // Workflow 运行计数（polling 拉取的 server 端 progress_store 快照）
+    // 仅在用户曾打开过 /workflows 面板后才有数据（polling 在 open_workflows_panel 启动）。
+    // 格式：⚡runs/agents，如 ⚡2/5 = 2 个 run / 5 个 agent。runs=0 时隐藏。
+    {
+        let snaps = app.global_ui.workflow_tracker.snapshots();
+        if !snaps.is_empty() {
+            let total_agents: usize = snaps.iter().map(|r| r.agents.len()).sum();
+            if has_content {
+                left_spans.push(Span::styled(" · ", Style::default().fg(theme::MUTED)));
+            }
+            // 有 running 状态时用 WARNING 色，否则 MUTED
+            let any_running = snaps.iter().any(|r| r.status == "running");
+            let color = if any_running {
+                theme::WARNING
+            } else {
+                theme::MUTED
+            };
+            left_spans.push(Span::styled(
+                format!("⚡{}/{}", snaps.len(), total_agents),
+                Style::default().fg(color),
+            ));
+            has_content = true;
+        }
+    }
+
     // Agent 面板信息（仅面板激活时）
     if let Some(panel) = app.session_mgr.current().session_panels.get::<AgentPanel>() {
         if has_content {

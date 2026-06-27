@@ -1,5 +1,5 @@
 use peri_agent::agent::events::{
-    AgentEvent as ExecutorEvent, BackgroundTaskResult, CompactFileInfo, TodoEntry, TodoStatus,
+    BackgroundTaskResult, CompactFileInfo, ExecutorEvent, TodoEntry, TodoStatus,
 };
 use peri_agent::llm::types::{StopReason, TokenUsage};
 use peri_agent::messages::{BaseMessage, MessageId};
@@ -384,6 +384,55 @@ fn assert_tui_only(event: &ExecutorEvent, label: &str) {
 #[test]
 fn test_state_snapshot_is_tui_only() {
     assert_tui_only(&ExecutorEvent::StateSnapshot(vec![]), "StateSnapshot");
+}
+
+#[test]
+fn test_state_snapshot_meta_is_tui_only() {
+    // v2 路径的轻量级元数据快照应走 TUI-only 路由（不生成 SessionUpdate）
+    assert_tui_only(
+        &ExecutorEvent::StateSnapshotMeta {
+            message_count: 5,
+            total_tokens: 0,
+            current_step: 2,
+            consecutive_failures: 0,
+            budget_pct: Some(0.42),
+            context_total_tokens: Some(200_000),
+        },
+        "StateSnapshotMeta",
+    );
+}
+
+#[test]
+fn test_state_snapshot_meta_maps_to_acp_dto() {
+    // 验证元数据字段完整透传到 AcpEvent DTO（不丢字段）
+    let event = ExecutorEvent::StateSnapshotMeta {
+        message_count: 7,
+        total_tokens: 1234,
+        current_step: 3,
+        consecutive_failures: 1,
+        budget_pct: Some(0.55),
+        context_total_tokens: Some(100_000),
+    };
+    let acp =
+        crate::event::executor_event_to_acp(&event).expect("StateSnapshotMeta 应映射到 AcpEvent");
+    match acp {
+        crate::event::AcpEvent::StateSnapshotMeta {
+            message_count,
+            total_tokens,
+            current_step,
+            consecutive_failures,
+            budget_pct,
+            context_total_tokens,
+        } => {
+            assert_eq!(message_count, 7);
+            assert_eq!(total_tokens, 1234);
+            assert_eq!(current_step, 3);
+            assert_eq!(consecutive_failures, 1);
+            assert_eq!(budget_pct, Some(0.55));
+            assert_eq!(context_total_tokens, Some(100_000));
+        }
+        other => panic!("应为 StateSnapshotMeta，实际 {:?}", other),
+    }
 }
 
 #[test]

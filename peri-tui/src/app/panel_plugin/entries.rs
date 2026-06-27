@@ -180,4 +180,115 @@ impl crate::app::App {
         self.global_panels
             .close_if(crate::app::panel_manager::PanelKind::Plugin);
     }
+
+    // ── Workflows 面板入口 ──────────────────────────────────────────────────
+
+    /// 打开 Workflows 面板（always opens, starts ACP polling for live updates）
+    pub fn open_workflows_panel(&mut self) {
+        // Always open the panel (even with empty state).
+        let runs = self.global_ui.workflow_tracker.snapshots();
+        let panel = crate::app::workflow_panel::WorkflowPanel::new(runs);
+        self.open_panel(crate::app::panel_manager::PanelState::Workflow(Box::new(
+            panel,
+        )));
+
+        // Start ACP polling (1s interval) to pull progress_store data.
+        // Kill existing poll if re-opening.
+        self.workflow_poll_kill = None; // drop old kill switch → old task exits via send error
+        let (poll_tx, poll_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (kill_tx, mut kill_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        self.workflow_poll_rx = Some(poll_rx);
+        self.workflow_poll_kill = Some(kill_tx);
+        self.workflow_polling_active = true;
+
+        if let Some(ref acp_client) = self.acp_client {
+            let acp = acp_client.clone();
+            let session_id = acp_client.current_session_id().unwrap_or_default();
+            tokio::spawn(async move {
+                loop {
+                    let params = serde_json::json!({ "sessionId": session_id });
+                    let result = acp.send_raw_request("workflow/list_runs", params).await;
+                    if let Ok(resp) = result {
+                        if let Some(runs) = resp.get("runs").and_then(|v| v.as_array()) {
+                            let snapshots: Vec<crate::app::workflow_panel::WorkflowRunSnapshot> =
+                                runs.iter().map(deserialize_snapshot).collect();
+                            if poll_tx.send(snapshots).is_err() {
+                                break;
+                            }
+                        }
+                    }
+
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                        _ = kill_rx.recv() => break,
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// Deserialize a RunProgress JSON value into WorkflowRunSnapshot.
+fn deserialize_snapshot(v: &serde_json::Value) -> crate::app::workflow_panel::WorkflowRunSnapshot {
+    crate::app::workflow_panel::WorkflowRunSnapshot {
+        run_id: v["run_id"].as_str().unwrap_or("?").to_string(),
+        workflow_name: v["workflow_name"].as_str().unwrap_or("?").to_string(),
+        status: v["status"]
+            .as_str()
+            .map(|s| match s {
+                "running" => "running",
+                "completed" => "completed",
+                "failed" => "failed",
+                "killed" => "killed",
+                _ => "running",
+            })
+            .unwrap_or("running")
+            .to_string(),
+        phases: v["phases"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|p| crate::app::workflow_panel::WorkflowPhaseSnapshot {
+                        title: p["title"].as_str().unwrap_or("?").to_string(),
+                        status: p["status"]
+                            .as_str()
+                            .map(|s| match s {
+                                "pending" => "pending",
+                                "active" => "active",
+                                "done" => "done",
+                                _ => "pending",
+                            })
+                            .unwrap_or("pending")
+                            .to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        agents: v["agents"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|a| crate::app::workflow_panel::WorkflowAgentSnapshot {
+                        agent_id: a["agent_id"].as_u64().unwrap_or(0),
+                        label: a["label"].as_str().map(|s| s.to_string()),
+                        phase: a["phase"].as_str().map(|s| s.to_string()),
+                        status: a["status"]
+                            .as_str()
+                            .map(|s| match s {
+                                "pending" => "pending",
+                                "running" => "running",
+                                "done" => "done",
+                                "dead" => "dead",
+                                "skipped" => "skipped",
+                                _ => "pending",
+                            })
+                            .unwrap_or("pending")
+                            .to_string(),
+                        token_count: a["token_count"].as_u64(),
+                        tool_count: a["tool_count"].as_u64(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
 }

@@ -19,7 +19,7 @@ use peri_agent::messages::BaseMessage;
 /// 任何把摘要放入 System 的尝试都会破坏 Prompt Cache 前缀稳定性 + frozen_system_prompt
 /// 不变量——见 CLAUDE.md `system-prompt.md#issue_2026-06-17-mid-conversation-system-message-breaks-frozen-prompt`。
 ///
-/// `<system-reminder>` 包裹与 auto-compact 路径（`peri-middlewares/src/compact_middleware.rs`）
+/// `<system-reminder>` 包裹与 v2 auto-compact 路径（`peri-agent::agent::compact_v2::re_inject_v2`）
 /// 完全对齐，让 TUI 能折叠显示为 `📋 Context compacted`。
 pub fn build_summary_human_message(summary: &str) -> BaseMessage {
     let summary_content = format!(

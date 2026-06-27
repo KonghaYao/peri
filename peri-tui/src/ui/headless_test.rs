@@ -1105,7 +1105,7 @@ fn make_compact_done_event(summary: &str, re_inject_parts: &[&str]) -> AgentEven
             let path = rest.lines().next().unwrap_or("");
             let line_count = rest.lines().count().saturating_sub(1);
             if !path.is_empty() {
-                files.push(peri_agent::agent::events::CompactFileInfo {
+                files.push(peri_acp::event::CompactFileInfoDto {
                     path: path.to_string(),
                     lines: line_count,
                 });
@@ -1330,11 +1330,12 @@ async fn test_messages_accumulate_across_turns() {
         chunk: "answer2".into(),
         source_agent_id: None,
     });
-    // StateSnapshot 是增量的：只携带本轮新增消息（snapshot_anchor 之后），
-    // 不是整段 history。set_completed() 用 extend 累加，详见
-    // peri-agent/src/agent/executor/final_answer.rs::emit_snapshot_and_drain_notifications
-    // 与本文件 test_state_snapshot_is_incremental 回归。
+    // v2 架构：StateSnapshot / TurnCommitted 携带全量 transcript（替换语义），
+    // 不是增量。详见 plan gleaming-leaping-beacon.md。
+    // 旧路径（v1 StateSnapshot 增量）已废弃。
     app.push_agent_event(AgentEvent::StateSnapshot(vec![
+        BaseMessage::human("turn1"),
+        BaseMessage::ai("answer1"),
         BaseMessage::human("turn2"),
         BaseMessage::ai("answer2"),
     ]));
@@ -1395,7 +1396,12 @@ async fn test_done_does_not_duplicate_ai_message() {
     );
 }
 
-/// 回归：StateSnapshot 是增量的，不应覆盖之前已完成的消息
+/// 回归：v2 架构下 StateSnapshot / TurnCommitted 携带全量 transcript（替换语义）
+///
+/// 设计动机：v2 stages 在每次迭代边界 emit `StateEvent::TurnCompleted` 携带
+/// `finalized_messages: Arc<Vec<BaseMessage>>`（全量快照），TUI 用「替换」吸收。
+/// 旧的 v1 增量 extend 语义已废弃（会导致多迭代文本渲染在工具之前的 bug，
+/// 详见 plan gleaming-leaping-beacon.md）。
 #[test]
 fn test_state_snapshot_is_incremental() {
     use peri_agent::messages::{BaseMessage, MessageContent, MessageId};
@@ -1404,23 +1410,27 @@ fn test_state_snapshot_is_incremental() {
 
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
 
-    // 第一次 snapshot：Human + Ai
+    // 第一次 commit：Human + Ai
     pipeline.set_completed(vec![BaseMessage::human("hello"), BaseMessage::ai("world")]);
     assert_eq!(pipeline.completed_messages().len(), 2);
 
-    // 第二次 snapshot（增量）：Tool result
-    pipeline.set_completed(vec![BaseMessage::Tool {
-        id: MessageId::new(),
-        tool_call_id: "tc1".into(),
-        content: MessageContent::text("result"),
-        is_error: false,
-    }]);
+    // 第二次 commit：v2 携带全量 transcript（含上一轮 + 工具结果）
+    pipeline.set_completed(vec![
+        BaseMessage::human("hello"),
+        BaseMessage::ai("world"),
+        BaseMessage::Tool {
+            id: MessageId::new(),
+            tool_call_id: "tc1".into(),
+            content: MessageContent::text("result"),
+            is_error: false,
+        },
+    ]);
 
-    // 应累积到 3 条，不是只剩 1 条
+    // 替换语义：transcript 反映最新 commit 的全量，不会无限累积也不会丢失
     assert_eq!(
         pipeline.completed_messages().len(),
         3,
-        "StateSnapshot 应增量追加，不应覆盖，实际: {}",
+        "v2 替换语义：transcript 应反映最新全量 commit，实际: {}",
         pipeline.completed_messages().len()
     );
 }

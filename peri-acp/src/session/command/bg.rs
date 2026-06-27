@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_agent::agent::events::AgentEvent as ExecutorEvent;
+use peri_agent::agent::events::ExecutorEvent;
 use peri_agent::messages::MessageId;
 use peri_middlewares::prelude::*;
 use peri_middlewares::tools::BoxToolWrapper;

@@ -8,6 +8,7 @@ pub mod memory;
 pub mod model;
 pub mod plugin;
 pub mod tasks;
+pub mod workflows;
 
 pub use agents::{AgentItem, AgentsCommand};
 pub use betas::BetasCommand;

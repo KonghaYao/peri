@@ -10,7 +10,7 @@ use super::{
     cron_state::CronPanel, hooks_panel::HooksPanel, login_panel::LoginPanel, mcp_panel::McpPanel,
     memory_panel::MemoryPanel, model_panel::ModelPanel, plugin_panel::PluginPanel,
     service_registry::ServiceRegistry, session_manager::SessionManager, status_panel::StatusPanel,
-    tasks_panel::TasksPanel,
+    tasks_panel::TasksPanel, workflow_panel::WorkflowPanel,
 };
 use crate::thread::ThreadBrowser;
 
@@ -58,6 +58,7 @@ pub enum PanelKind {
     Memory,
     Tasks,
     Betas,
+    Workflow,
 }
 
 impl PanelKind {
@@ -77,6 +78,7 @@ impl PanelKind {
             PanelKind::Memory => 10,
             PanelKind::Tasks => 11,
             PanelKind::Betas => 12,
+            PanelKind::Workflow => 13,
         }
     }
 
@@ -85,9 +87,11 @@ impl PanelKind {
         match self {
             PanelKind::Model | PanelKind::Login | PanelKind::Config => MutexGroup::Settings,
             PanelKind::Agent | PanelKind::Hooks => MutexGroup::Agent,
-            PanelKind::Mcp | PanelKind::Plugin | PanelKind::Cron | PanelKind::Tasks => {
-                MutexGroup::Tools
-            }
+            PanelKind::Mcp
+            | PanelKind::Plugin
+            | PanelKind::Cron
+            | PanelKind::Tasks
+            | PanelKind::Workflow => MutexGroup::Tools,
             PanelKind::Status | PanelKind::Memory | PanelKind::Betas => MutexGroup::Info,
             PanelKind::ThreadBrowser => MutexGroup::Thread,
         }
@@ -108,7 +112,8 @@ impl PanelKind {
             | PanelKind::Status
             | PanelKind::Memory
             | PanelKind::Tasks
-            | PanelKind::Betas => PanelScope::Global,
+            | PanelKind::Betas
+            | PanelKind::Workflow => PanelScope::Global,
         }
     }
 }
@@ -147,11 +152,12 @@ pub enum PanelState {
     Memory(MemoryPanel),
     Tasks(TasksPanel),
     Betas(BetasPanel),
+    Workflow(Box<WorkflowPanel>),
 }
 
 // ─── panel_dispatch! 宏 ────────────────────────────────────────────────────
 //
-// 13 变体 × 13 方法 = ~169 个 match arm 的样板代码由宏统一展开。
+// 14 变体 × 13 方法 = ~182 个 match arm 的样板代码由宏统一展开。
 //
 // 设计要点：
 // - `PanelState::*` 变体中部分内部是 `Box<T>`（Login/Config/ThreadBrowser/Mcp/Plugin），
@@ -189,6 +195,7 @@ macro_rules! panel_dispatch {
             PanelState::Memory(_) => PanelKind::Memory,
             PanelState::Tasks(_) => PanelKind::Tasks,
             PanelState::Betas(_) => PanelKind::Betas,
+            PanelState::Workflow(_) => PanelKind::Workflow,
         }
     };
     // as_any_ref()：Box 变体用 .as_ref() 显式解引用，避免 TypeId 记成 Box<T>
@@ -207,6 +214,7 @@ macro_rules! panel_dispatch {
             PanelState::Memory(p) => p as &dyn Any,
             PanelState::Tasks(p) => p as &dyn Any,
             PanelState::Betas(p) => p as &dyn Any,
+            PanelState::Workflow(p) => p.as_ref() as &dyn Any,
         }
     };
     // as_any_mut()：Box 变体用 .as_mut() 显式解引用
@@ -225,6 +233,7 @@ macro_rules! panel_dispatch {
             PanelState::Memory(p) => p as &mut dyn Any,
             PanelState::Tasks(p) => p as &mut dyn Any,
             PanelState::Betas(p) => p as &mut dyn Any,
+            PanelState::Workflow(p) => p.as_mut() as &mut dyn Any,
         }
     };
     // 通用方法分发：所有变体共用 $body（$p 为绑定名）
@@ -243,6 +252,7 @@ macro_rules! panel_dispatch {
             PanelState::Memory($p) => $body,
             PanelState::Tasks($p) => $body,
             PanelState::Betas($p) => $body,
+            PanelState::Workflow($p) => $body,
         }
     };
 }

@@ -5,6 +5,11 @@
 //   macros.rs  — panel dispatch macros (with_global_panels!, with_session_panels!)
 //   mod.rs     — Action, event loop, dispatcher, OAuth handling
 
+// [TRAP] 终端 UI 鼠标坐标转换
+// 鼠标事件坐标是显示列（unicode-width），光标位置是字符索引，需逐字符累加转换。
+// 详见 spec/global/domains/tui.md#issue_2026-05-12-textarea-mouse-click-cursor-misposition-cjk
+//
+// [TRAP] coalesce_mouse_events 对连续 Scroll/Drag 事件做非阻塞 drain 合并，只保留最后一个。
 pub mod keyboard;
 mod macros;
 pub mod mouse;

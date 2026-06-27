@@ -181,6 +181,9 @@ vendor/
 !peri-tui/vendor/
 
 .claude/skills/*-workspace
+
+# site-project workspace state (per-developer)
+side-projects/site-project/workspace.json
 .wrangler.worktrees/
 .worktrees/
 

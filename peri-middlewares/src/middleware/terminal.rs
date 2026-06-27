@@ -1,7 +1,7 @@
 use std::process::Stdio;
 
 use async_trait::async_trait;
-use peri_agent::{agent::state::State, middleware::r#trait::Middleware, tools::BaseTool};
+use peri_agent::{middleware::r#trait::Middleware, tools::BaseTool};
 use serde_json::Value;
 use tokio::time::{timeout, Duration};
 
@@ -185,6 +185,10 @@ impl BaseTool for BashTool {
             }
         }
     }
+
+    fn output_char_limit(&self) -> Option<usize> {
+        Some(10000)
+    }
 }
 
 /// TerminalMiddleware - 与 TypeScript TerminalMiddleware 对齐
@@ -211,7 +215,7 @@ impl Default for TerminalMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for TerminalMiddleware {
+impl Middleware for TerminalMiddleware {
     fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
         Self::build_tools(cwd)
     }

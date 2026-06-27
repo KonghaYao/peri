@@ -8,6 +8,7 @@ use agent_client_protocol::{
     Client, ConnectionTo, Error, Handled, Responder, UntypedMessage,
 };
 use peri_acp::session::state_builders::{apply_thinking_effort, parse_permission_mode};
+use peri_tui::app::agent::LlmProvider;
 
 use super::super::{context::StdioContext, model, notification};
 
@@ -34,6 +35,7 @@ pub(crate) async fn handle_set_config_option(
     cx: ConnectionTo<Client>,
 ) -> Result<(), Error> {
     let config_id = req.config_id.0.as_ref();
+    let session_id = req.session_id.0.as_ref();
     match &req.value {
         agent_client_protocol_schema::SessionConfigOptionValue::ValueId { value } => {
             let v = value.0.as_ref();
@@ -48,7 +50,27 @@ pub(crate) async fn handle_set_config_option(
                 }
                 "thinking_effort" => {
                     apply_thinking_effort(&ctx.peri_config, v);
+                    // 同步更新 LlmProvider（thinking 变更需要重建 provider）
+                    let new_provider = {
+                        let c = ctx.peri_config.read();
+                        LlmProvider::from_config(&c)
+                    };
+                    if let Some(new_provider) = new_provider {
+                        *ctx.provider.write() = new_provider;
+                    }
+                    // Thinking 变更 → invalidate cached LLM 实例
+                    if !session_id.is_empty() {
+                        let mut sessions = ctx.sessions.write();
+                        if let Some(s) = sessions.get_mut(session_id) {
+                            s.agent_pool.invalidate();
+                        }
+                    }
                     tracing::info!(effort = %v, "Thinking effort changed via configOption");
+                }
+                "context_1m" => {
+                    let enabled = v == "true" || v == "1";
+                    ctx.peri_config.write().config.context_1m = Some(enabled);
+                    tracing::info!(enabled = %enabled, "Context 1M changed via configOption");
                 }
                 _ => {
                     tracing::debug!(config_id = %config_id, "Unknown config option");

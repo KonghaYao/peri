@@ -14,6 +14,8 @@ pub(super) fn switch_model(ctx: &StdioContext, sid: &str, model_id: &str) -> Opt
     if let Some(p) = new_provider {
         tracing::info!(model_id = %model_id, model = %p.model_name(), "Model changed");
         *ctx.provider.write() = p;
+        // 回写 active_alias，确保 ConfigOptionUpdate 通知显示正确模型
+        ctx.peri_config.write().config.active_alias = model_id.to_string();
     }
     let mut sessions = ctx.sessions.write();
     if let Some(s) = sessions.get_mut(sid) {

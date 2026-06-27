@@ -587,3 +587,47 @@ fn test_non_thinking_still_has_reasoning_content() {
         "无 reasoning 内容时应为空字符串"
     );
 }
+
+/// BaseModel::build_request_body 返回 OpenAI Provider-native 请求体
+/// （含 `{type:"function", function:{name,description,parameters}}` 工具格式
+/// 和合并后的 system messages[0]）—— Langfuse Generation input 关键不变量。
+#[test]
+fn test_base_model_build_request_body_returns_provider_native_openai_format() {
+    use crate::llm::types::LlmRequest;
+    use crate::llm::BaseModel;
+    use crate::tools::ToolDefinition;
+
+    let llm = ChatOpenAI::new("sk-test", "gpt-4o");
+    let tool_def = ToolDefinition {
+        name: "Read".to_string(),
+        description: "read a file".to_string(),
+        parameters: serde_json::json!({"type":"object"}),
+    };
+    let request = LlmRequest::new(vec![BaseMessage::human(MessageContent::text("hi"))])
+        .with_system("SYSTEM_PROMPT".to_string())
+        .with_tools(vec![tool_def]);
+
+    let body = llm
+        .build_request_body(&request)
+        .expect("ChatOpenAI 应 override build_request_body 返回 Some");
+    // 工具格式：OpenAI-native（type:function + function 嵌套）
+    let tools = body["tools"].as_array().expect("tools 应是 array");
+    assert_eq!(
+        tools[0]["type"], "function",
+        "OpenAI tool 必须是 type:function"
+    );
+    assert!(
+        tools[0]["function"].is_object(),
+        "OpenAI tool 必须有 function 嵌套对象"
+    );
+    assert_eq!(tools[0]["function"]["name"], "Read");
+    // system 应在 messages[0]
+    let messages = body["messages"].as_array().expect("messages 应是 array");
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "SYSTEM_PROMPT");
+    // 不应是抽象格式 {name, parameters}（顶层）
+    assert!(
+        tools[0].get("parameters").is_none(),
+        "OpenAI 工具 parameters 应在 function 内，不应在顶层"
+    );
+}

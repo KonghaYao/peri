@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use peri_agent::{agent::state::State, error::AgentResult, middleware::r#trait::Middleware};
+use peri_agent::{
+    error::AgentResult,
+    middleware::{r#trait::Middleware, state::MiddlewareState},
+};
 
 use crate::parse_agent_file;
 
@@ -133,12 +136,12 @@ impl Default for AgentDefineMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for AgentDefineMiddleware {
+impl Middleware for AgentDefineMiddleware {
     fn name(&self) -> &str {
         "AgentDefineMiddleware"
     }
 
-    async fn before_agent(&self, _state: &mut S) -> AgentResult<()> {
+    async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // 覆盖注入已在构建 LLM 时通过 build_system_prompt(overrides, cwd) 完成，
         // 中间件层无需再操作消息列表。
         Ok(())

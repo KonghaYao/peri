@@ -90,4 +90,8 @@ pub struct ServiceRegistry {
     pub channel_state: Option<Arc<ChannelState>>,
     /// panic hook 通知 receiver（TUI 模式专用，由 main.rs init_panic_notify 初始化）
     pub panic_notify_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    /// ACP SessionManager 句柄（Arc 共享，clone 廉价）。
+    /// 由 main.rs 构建 ACP server 时注入；None 时（如未启动 ACP server）降级为无 v2 queue 注入。
+    /// 用于 TUI 侧 cron/channel 异步触发 push 到共享 v2 MessageQueue。
+    pub acp_session_manager: Option<peri_acp::session::SessionManager>,
 }

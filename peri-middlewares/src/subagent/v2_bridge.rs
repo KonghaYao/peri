@@ -1,0 +1,129 @@
+//! v2 stages 桥接 helper：把 SubAgent 装配产物（LLM + middlewares + tools + system_prompt）
+//! 构造为可直接 `run_react_loop` 的 v2 `StageContext`。
+//!
+//! 设计：避免每个 SubAgent 调用点（define / execute_bg / execute_fork / spawner）
+//! 重复写 60+ 行 v2 装配代码。
+
+use std::sync::Arc;
+
+use parking_lot::RwLock;
+use peri_agent::{
+    agent::{
+        events_v2::{EventBus, EventBusConfig, EventHandles},
+        react::ReactLLM,
+        stages::{SharedToolMap, StageContext},
+    },
+    error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot},
+    group::pipeline::AgentId,
+    messages::BaseMessage,
+    middleware::chain::MiddlewareChain,
+    session::{FrozenContext, MessageQueue, Session as V2Session},
+    tools::BaseTool,
+};
+use tokio_util::sync::CancellationToken;
+
+/// SubAgent v2 上下文产物
+pub struct V2SubagentContext {
+    /// v2 StageContext（传给 run_react_loop）
+    pub context: StageContext,
+    /// v2 Session（调用方持有以读取 transcript）
+    pub session: Arc<V2Session>,
+    /// EventBus 消费端（调用方 spawn forwarder 用）
+    pub event_handles: EventHandles,
+}
+
+/// 构造 SubAgent v2 上下文（不经过 AcpAgentConfig / build_agent）
+///
+/// 参数：
+/// - `llm`：SubAgent LLM（RetryableLLM 包装或裸 LLM）
+/// - `chain`：已组装的中间件链
+/// - `tools`：工具列表（Arc<Vec<Arc<dyn BaseTool>>>，可来自 parent_tools）
+/// - `cwd`：工作目录
+/// - `cancel_token`：CancellationToken（Cascade = parent.child_token()，Independent = new）
+/// - `parent_messages`：fork 路径注入的父消息（非 fork 路径传空 Vec）
+/// - `system_prompt`：SubAgent system prompt
+/// - `shared_tools`：deferred tools 注册表（可选）
+/// - `error_suggest_registry`：错误感知建议（可选）
+/// - `tool_registry_snapshot`：工具注册表快照（None 用 default）
+/// - `compact_config` / `context_budget`：可选配置
+#[allow(clippy::too_many_arguments)]
+pub fn build_v2_subagent_context(
+    llm: Box<dyn ReactLLM + Send + Sync>,
+    chain: MiddlewareChain,
+    tools: Vec<Arc<dyn BaseTool>>,
+    cwd: &str,
+    cancel_token: CancellationToken,
+    parent_messages: Vec<BaseMessage>,
+    system_prompt: Option<String>,
+    shared_tools: Option<SharedToolMap>,
+    error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
+    tool_registry_snapshot: Option<ToolRegistrySnapshot>,
+) -> V2SubagentContext {
+    let cwd_arc: Arc<str> = Arc::from(cwd);
+    let frozen = FrozenContext::builder().build();
+    let cancel_arc = Arc::new(cancel_token);
+    // SubAgent 独立 MessageQueue（不与 main agent 共享）
+    let queue = MessageQueue::new();
+    let session = V2Session::new_with_cancel_and_queue(cwd_arc, frozen, None, cancel_arc, queue);
+
+    let turn = session.start_turn();
+    let transcript = session.transcript();
+    let queue_clone = session.queue().clone();
+
+    // fork 路径：把 parent_messages 注入 transcript（让子 agent 看到父会话上下文）
+    if !parent_messages.is_empty() {
+        let mut tx = transcript.write();
+        for msg in parent_messages {
+            tx.append(msg);
+        }
+    }
+
+    // tools → SharedToolMap（即使外部传 shared_tools，本地 tools 也合并进去）
+    let mut tools_map: std::collections::HashMap<String, Arc<dyn BaseTool>> =
+        std::collections::HashMap::new();
+    for tool in tools {
+        tools_map.insert(tool.name().to_string(), tool);
+    }
+    let combined_shared_tools: SharedToolMap = if let Some(shared) = shared_tools {
+        // 合并：外部 deferred tools 写入到合并 map
+        let external = shared.read();
+        for (k, v) in external.iter() {
+            tools_map.entry(k.clone()).or_insert_with(|| Arc::clone(v));
+        }
+        drop(external);
+        Arc::new(RwLock::new(tools_map))
+    } else {
+        Arc::new(RwLock::new(tools_map))
+    };
+
+    let (event_bus, event_handles) = EventBus::new(EventBusConfig::default());
+
+    let session_context = Arc::new(RwLock::new(std::collections::HashMap::new()));
+    let v2_llm: Arc<dyn ReactLLM + Send + Sync> = Arc::from(llm);
+
+    let snapshot = tool_registry_snapshot.unwrap_or_default();
+
+    let mut builder = StageContext::builder(turn, transcript, queue_clone)
+        .with_agent_id(AgentId::new())
+        .with_llm(v2_llm)
+        .with_tools(combined_shared_tools)
+        .with_middleware_chain(Arc::new(chain))
+        .with_event_bus(Arc::new(event_bus))
+        .with_session_context(session_context)
+        .with_tool_registry_snapshot(snapshot);
+
+    if let Some(reg) = error_suggest_registry {
+        builder = builder.with_error_suggest_registry(reg);
+    }
+    if let Some(sp) = system_prompt {
+        builder = builder.with_system_prompt(sp);
+    }
+
+    let context = builder.build();
+
+    V2SubagentContext {
+        context,
+        session,
+        event_handles,
+    }
+}

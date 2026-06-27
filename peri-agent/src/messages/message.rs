@@ -222,6 +222,50 @@ impl BaseMessage {
     pub fn is_system(&self) -> bool {
         matches!(self, Self::System { .. })
     }
+
+    /// 克隆消息但替换 content 字段
+    pub fn clone_with_content(&self, content: MessageContent) -> Self {
+        match self {
+            Self::Human { id, .. } => Self::Human { id: *id, content },
+            Self::Ai { id, tool_calls, .. } => Self::Ai {
+                id: *id,
+                content,
+                tool_calls: tool_calls.clone(),
+            },
+            Self::System { id, .. } => Self::System { id: *id, content },
+            Self::Tool {
+                id,
+                tool_call_id,
+                is_error,
+                ..
+            } => Self::Tool {
+                id: *id,
+                tool_call_id: tool_call_id.clone(),
+                content,
+                is_error: *is_error,
+            },
+        }
+    }
+
+    /// 为 Micro Compact 截断场景生成截断后消息
+    ///
+    /// 保留前 `max_chars` 字符 + truncation note。
+    /// 若内容为纯文本且长度超过阈值则返回截断后消息，否则返回 `None`。
+    pub fn truncated_content(&self, max_chars: usize) -> Option<BaseMessage> {
+        let text = match self.message_content() {
+            MessageContent::Text(t) => t.clone(),
+            _ => return None,
+        };
+        if text.chars().count() <= max_chars {
+            return None;
+        }
+        let truncated: String = text.chars().take(max_chars).collect();
+        let truncated_with_note = format!(
+            "{}\n\n[truncated: content shortened by Micro Compact]",
+            truncated
+        );
+        Some(self.clone_with_content(MessageContent::Text(truncated_with_note)))
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

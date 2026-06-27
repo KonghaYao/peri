@@ -15,6 +15,8 @@ pub mod plugin_panel;
 pub mod setup_wizard;
 pub mod status_panel;
 pub mod tasks_panel;
+pub mod workflow_panel;
+pub mod workflow_tracker;
 
 // Panel private modules
 mod panel_agent;
@@ -128,6 +130,9 @@ use peri_agent::messages::BaseMessage;
 use peri_middlewares::prelude::HitlDecision;
 pub use setup_wizard::SetupWizardPanel;
 pub use tasks_panel::TasksPanel;
+pub use workflow_panel::{
+    WorkflowAgentSnapshot, WorkflowPanel, WorkflowPhaseSnapshot, WorkflowRunSnapshot,
+};
 
 use crate::acp_client::{AcpNotification, AcpTuiClient};
 // Re-export MessageViewModel from ui::message_view
@@ -158,6 +163,15 @@ pub struct App {
     /// Initialized after App construction in run_app(); None until `set_acp_client` is called.
     /// Added in Step 6-a; fully integrated in Steps 6-c..6-h.
     pub acp_client: Option<AcpTuiClient>,
+
+    // ── Workflow 面板轮询状态 ────────────────────────────────────────
+    /// Receiver for workflow polling results (ACP workflow/list_runs responses).
+    pub workflow_poll_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<Vec<workflow_panel::WorkflowRunSnapshot>>>,
+    /// Kill switch for the workflow polling task.
+    pub workflow_poll_kill: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    /// 标志位：是否 workflow 面板正在轮询。关闭后设为 false，跳过 poll_workflow_runs() 调用。
+    pub workflow_polling_active: bool,
 }
 
 impl App {
@@ -211,7 +225,12 @@ impl App {
         };
 
         // 预计算命令帮助列表
-        let command_registry = crate::command::default_registry();
+        let mut command_registry = crate::command::default_registry();
+        // 注册命名 Workflow 命令（GAP-09：扫描 .claude/workflows/）
+        crate::command::session::workflow_cmd::register_named_workflow_commands(
+            &cwd,
+            &mut command_registry,
+        );
         // 复用 loader::resolve_skill_roots 作为 single source of truth，
         // 与 new_session() / ACP session/new 保持一致，确保 Builtin skills 被扫描
         let skills = {
@@ -273,6 +292,7 @@ impl App {
             lc,
             channel_state: Some(channel_state.clone()),
             panic_notify_rx: None,
+            acp_session_manager: None,
         };
 
         Self {
@@ -282,6 +302,9 @@ impl App {
             global_panels: panel_manager::PanelManager::new(),
             focused: true,
             acp_client: None,
+            workflow_poll_rx: None,
+            workflow_poll_kill: None,
+            workflow_polling_active: false,
         }
     }
 
@@ -297,6 +320,20 @@ impl App {
         self.session_mgr.current_mut()
     }
 
+    /// 获取当前 session 的共享 v2 MessageQueue（用于异步触发注入）。
+    /// 返回 None 的场景：未注入 ACP SessionManager / session_id 在 ACP 侧不存在
+    /// （如 ACP new_session 尚未完成）。
+    ///
+    /// 用 `&self` 借用，允许调用方持 `&mut App` 时也能调用，
+    /// 避免 polling 循环里与 `&mut self.session_mgr` 借用冲突。
+    pub(crate) fn v2_queue_for_current(&self) -> Option<peri_agent::session::MessageQueue> {
+        let sid = self.session_mgr.current().metadata.session_id.to_string();
+        self.services
+            .acp_session_manager
+            .as_ref()
+            .and_then(|sm| sm.v2_queue_for(&sid))
+    }
+
     /// 创建新 session 并替换当前 session（用于 /clear）
     pub fn new_session(&mut self) {
         // 取消旧 session 的 agent
@@ -304,6 +341,11 @@ impl App {
             token.cancel();
         }
         let mut command_registry = crate::command::default_registry();
+        // 注册命名 Workflow 命令（GAP-09：扫描 .claude/workflows/）
+        crate::command::session::workflow_cmd::register_named_workflow_commands(
+            &self.services.cwd,
+            &mut command_registry,
+        );
         // 复用 loader::resolve_skill_roots 作为 single source of truth，
         // 避免与 SkillsMiddleware 的根顺序逻辑漂移
         let plugin_skill_roots = self
@@ -490,6 +532,7 @@ impl App {
                 let mut ta = build_textarea(false);
                 ta.insert_str(text.clone());
                 self.session_mgr.current_mut().ui.textarea = ta;
+                // 清除 loading 期间缓存的 pending_messages（中断恢复后使用恢复文本替代）
                 self.session_mgr
                     .current_mut()
                     .messages
@@ -525,9 +568,14 @@ impl App {
         }
     }
 
-    /// 重建输入框（pending_messages 现在由 UI 层直接渲染，不再使用 textarea title）
+    /// 重建输入框（pending_messages 是 loading 期间用户输入缓存，长期保留）。
+    /// 异步事件触发（cron/channel/workflow/bg_results）由 polling.rs 的
+    /// v2 queue drain 路径独立处理，与 pending_messages 机制无关。
+    /// textarea title 当前显示 pending_messages.len()
+    /// （见 ui/main_ui/mod.rs:48）。
     pub fn update_textarea_hint(&mut self) {
-        // 不再需要更新 textarea title，pending_messages 在输入框上方渲染
+        // 当前 textarea title 由 main_ui 直接读取 pending_messages.len() 渲染，
+        // 此函数保留为后续 hint 联动的占位入口。
     }
 
     /// 设置当前 Agent 的 ID（用于 AgentDefineMiddleware）

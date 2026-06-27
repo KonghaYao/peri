@@ -12,19 +12,19 @@ impl App {
     pub(crate) fn handle_acp_notification(&mut self, notif: AcpNotification) -> (bool, bool, bool) {
         match notif {
             AcpNotification::AgentEvent { event, session_id } => {
-                // Convert peri-agent ExecutorEvent → TUI AgentEvent via map_executor_event
+                // Convert AcpEvent DTO → TUI AgentEvent via map_acp_event
                 if let Some(agent_event) =
-                    super::super::agent::map_executor_event(event, &self.services.cwd)
+                    super::super::agent::map_acp_event(event, &self.services.cwd)
                 {
                     debug!(
                         session_id = %session_id,
-                        "ACP→TUI: AgentEvent dispatched to handle_agent_event"
+                        "ACP→TUI: AcpEvent dispatched to handle_agent_event"
                     );
                     return self.handle_agent_event(agent_event);
                 }
                 debug!(
                     session_id = %session_id,
-                    "ACP→TUI: ExecutorEvent filtered by map_executor_event (internal event)"
+                    "ACP→TUI: AcpEvent filtered by map_acp_event (internal event)"
                 );
                 (false, false, false)
             }
@@ -214,11 +214,11 @@ impl App {
                             .and_then(|v| v.as_str())
                             .unwrap_or("pending");
                         let status = match status_str {
-                            "in_progress" => peri_middlewares::tools::todo::TodoStatus::InProgress,
-                            "completed" => peri_middlewares::tools::todo::TodoStatus::Completed,
-                            _ => peri_middlewares::tools::todo::TodoStatus::Pending,
+                            "in_progress" => peri_acp::event::TodoStatusDto::InProgress,
+                            "completed" => peri_acp::event::TodoStatusDto::Completed,
+                            _ => peri_acp::event::TodoStatusDto::Pending,
                         };
-                        todos.push(peri_middlewares::tools::todo::TodoItem {
+                        todos.push(peri_acp::event::TodoItemDto {
                             content,
                             status,
                             active_form: None,
@@ -246,6 +246,10 @@ impl App {
                     .and_then(|m| m.get("cacheReadTokens"))
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u32);
+                let request_id = meta
+                    .and_then(|m| m.get("requestId"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 let model = meta
                     .and_then(|m| m.get("model"))
                     .and_then(|v| v.as_str())
@@ -254,14 +258,21 @@ impl App {
                 let stop_reason = meta
                     .and_then(|m| m.get("stopReason"))
                     .and_then(|v| v.as_str())
-                    .map(peri_agent::llm::types::StopReason::from_display);
+                    .map(|s| match s {
+                        "end_turn" => peri_acp::event::StopReasonDto::EndTurn,
+                        "tool_use" => peri_acp::event::StopReasonDto::ToolUse,
+                        "max_tokens" => peri_acp::event::StopReasonDto::MaxTokens,
+                        other => peri_acp::event::StopReasonDto::Other {
+                            value: other.to_string(),
+                        },
+                    });
 
-                let usage = peri_agent::llm::types::TokenUsage {
+                let usage = peri_acp::event::TokenUsageDto {
                     input_tokens,
                     output_tokens,
                     cache_creation_input_tokens,
                     cache_read_input_tokens,
-                    request_id: None,
+                    request_id,
                 };
 
                 self.handle_agent_event(super::super::AgentEvent::TokenUsageUpdate {

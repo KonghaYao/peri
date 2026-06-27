@@ -3,6 +3,9 @@
 //! Converts internal agent state into ACP protocol types
 //! (modes, models, config options) for `session/new` and `session/set_*` responses.
 
+// [TRAP] build_config_options 必须按优先级顺序返回（mode → model → thinking_effort）
+// Session Config Options 覆盖旧的 Session Modes API，顺序错乱会导致 UI 显示异常。
+
 pub use agent_client_protocol_schema::{
     SessionConfigId, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     SessionConfigSelectOptions, SessionConfigValueId, SessionMode, SessionModeId, SessionModeState,

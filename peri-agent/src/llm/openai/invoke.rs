@@ -1,3 +1,10 @@
+// [TRAP] Reasoning 序列化 / Provider 特定处理
+// - 不要把 Reasoning 序列化为 {"type":"thinking"} 发给不支持的 provider（DeepSeek 报 unknown variant）
+// - 过滤 Reasoning 时必须同时作为顶层 reasoning_content 字段回传
+// - messages_to_json 中 reasoning 字段已移除，仅回传 reasoning_content
+// - stream_options.include_usage 仅 Qwen 发送
+// - Kimi：thinking_enabled 时移除 reasoning_effort
+// 详见 spec/global/domains/agent.md#issue_2026-05-12-thinking-reasoning-dataflow-issues
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -569,5 +576,12 @@ impl BaseModel for ChatOpenAI {
         ctx: StreamingContext,
     ) -> AgentResult<LlmResponse> {
         super::stream::do_invoke_streaming(self, request, ctx).await
+    }
+
+    /// Langfuse Generation input：返回 OpenAI Provider-native 请求体
+    /// （含 `{type:"function", function:{name,description,parameters}}` 工具格式
+    /// 和合并后的 system messages[0]）。streaming 参数固定 false（Langfuse 不关心）。
+    fn build_request_body(&self, request: &LlmRequest) -> Option<serde_json::Value> {
+        Some(build_request_body(self, request, false))
     }
 }

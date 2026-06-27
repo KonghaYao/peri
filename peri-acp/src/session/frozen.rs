@@ -3,6 +3,9 @@
 //! Both TUI and Stdio paths build identical frozen data at session creation.
 //! 实际构造已内聚为 [`crate::session::executor::FrozenSessionData::build`]，
 //! 此模块仅保留薄包装，维持既有 import 路径稳定。
+//!
+//! v2 迁移：构造同时产出 `peri_agent::session::FrozenContext`，
+//! 可通过 `FrozenSessionData::v2_frozen()` 访问。
 
 use std::path::PathBuf;
 

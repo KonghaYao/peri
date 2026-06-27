@@ -254,6 +254,25 @@ impl ThreadStore for FilesystemThreadStore {
     ) -> Result<()> {
         Ok(())
     }
+
+    async fn update_message_flags(
+        &self,
+        _message_id: &crate::messages::MessageId,
+        _truncated: bool,
+        _excluded: bool,
+    ) -> Result<()> {
+        // TODO: 实现 JSONL 文件的标记更新（需重写 messages.jsonl 文件）
+        Ok(())
+    }
+
+    async fn delete_messages_since(
+        &self,
+        _thread_id: &ThreadId,
+        _message_id: &crate::messages::MessageId,
+    ) -> Result<()> {
+        // TODO: 实现 JSONL 文件的截断（需重写 messages.jsonl 文件）
+        Ok(())
+    }
 }
 
 /// 从消息列表中提取标题（取第一条 Human 消息的前 50 字符）

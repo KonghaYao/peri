@@ -7,19 +7,28 @@ use crate::app::{message_pipeline::PipelineAction, App};
 impl App {
     pub(super) fn handle_token_usage_update(
         &mut self,
-        usage: peri_agent::llm::types::TokenUsage,
+        usage: peri_acp::event::TokenUsageDto,
     ) -> (bool, bool, bool) {
         // SubAgent 的 TokenUsageUpdate 不应污染父 agent 的 tracker
         if self.session_mgr.current_mut().agent.subagent_depth > 0 {
             return (true, false, false);
         }
 
+        // 转回 peri_agent 类型供 tracker 使用（短期：tracker 接口与 peri_agent 强绑定）
+        let pa_usage = peri_agent::llm::types::TokenUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            request_id: usage.request_id.clone(),
+        };
+
         // 累积到会话追踪器
         self.session_mgr
             .current_mut()
             .agent
             .session_token_tracker
-            .accumulate(&usage);
+            .accumulate(&pa_usage);
 
         // 缓存率检查：当次命中率低于 80% 时显示黄色提示
         let rate = self
@@ -68,7 +77,7 @@ impl App {
             }
         }
         // 更新 spinner 的 token 显示（仅当次调用的 token，不累计）
-        let current_tokens = usage.input_tokens as usize + usage.output_tokens as usize;
+        let current_tokens = pa_usage.input_tokens as usize + pa_usage.output_tokens as usize;
         self.session_mgr
             .current_mut()
             .spinner_state

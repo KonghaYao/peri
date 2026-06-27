@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use peri_agent::{agent::state::State, middleware::r#trait::Middleware, tools::BaseTool};
+use peri_agent::{middleware::r#trait::Middleware, tools::BaseTool};
 use tokio::sync::mpsc;
 
 use crate::tools::todo::{TodoItem, TodoWriteTool};
@@ -16,7 +16,7 @@ impl TodoMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for TodoMiddleware {
+impl Middleware for TodoMiddleware {
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
         vec![Box::new(TodoWriteTool::new(self.notify_tx.clone()))]
     }

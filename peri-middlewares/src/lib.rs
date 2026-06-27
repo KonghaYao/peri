@@ -20,7 +20,6 @@
 pub mod agent_define;
 pub mod agents_md;
 pub mod claude_agent_parser;
-pub mod compact_middleware;
 pub mod goal;
 pub mod goal_middleware;
 pub mod subagent;
@@ -50,6 +49,7 @@ pub mod at_mention;
 pub mod skills;
 pub mod tool_search;
 pub mod tools;
+pub mod workflow;
 
 pub use agent_define::{AgentDefineMiddleware, AgentOverrides};
 pub use agents_md::AgentsMdMiddleware;

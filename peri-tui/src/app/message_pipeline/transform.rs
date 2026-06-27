@@ -10,38 +10,40 @@ use crate::{
 };
 
 impl MessagePipeline {
-    /// 构建当前流式 AI 消息的 AssistantBubble ViewModel。
+    /// 构建当前迭代 partial 的 AssistantBubble ViewModel。
     ///
     /// 包含 Reasoning block + 已输出的文本 + 已完成的 tool_use blocks。
     /// 不包含 pending tools——它们在 build_tail_vms 中另行处理。
     pub fn build_streaming_bubble(&self) -> MessageViewModel {
         let mut blocks: Vec<ContentBlockView> = Vec::new();
-        if !self.current_ai_reasoning.is_empty() {
-            blocks.push(ContentBlockView::Reasoning {
-                char_count: self.current_ai_reasoning.chars().count(),
-                text: self.current_ai_reasoning.clone(),
-                tail_lines: None,
-            });
-        }
-        if !self.current_ai_text.trim().is_empty() {
-            let rendered = parse_markdown_default(&self.current_ai_text);
-            let rendered_prefix_lines = rendered.lines.len();
-            let mut scanner = crate::ui::markdown::TableHoldbackScanner::new();
-            scanner.set_streaming(true);
-            blocks.push(ContentBlockView::Text {
-                raw: self.current_ai_text.clone(),
-                rendered,
-                dirty: false,
-                rendered_prefix_len: self.current_ai_text.len(),
-                rendered_prefix_lines,
-                holdback_scanner: scanner,
-            });
-        }
-        for tc in &self.current_ai_tool_calls {
-            if !self.pending_tools.contains_key(&tc.id) {
-                blocks.push(ContentBlockView::ToolUse {
-                    name: tc.name.clone(),
+        if let Some(partial) = self.partial.as_ref() {
+            if !partial.reasoning.is_empty() {
+                blocks.push(ContentBlockView::Reasoning {
+                    char_count: partial.reasoning.chars().count(),
+                    text: partial.reasoning.clone(),
+                    tail_lines: None,
                 });
+            }
+            if !partial.text.trim().is_empty() {
+                let rendered = parse_markdown_default(&partial.text);
+                let rendered_prefix_lines = rendered.lines.len();
+                let mut scanner = crate::ui::markdown::TableHoldbackScanner::new();
+                scanner.set_streaming(true);
+                blocks.push(ContentBlockView::Text {
+                    raw: partial.text.clone(),
+                    rendered,
+                    dirty: false,
+                    rendered_prefix_len: partial.text.len(),
+                    rendered_prefix_lines,
+                    holdback_scanner: scanner,
+                });
+            }
+            for tc in &partial.tool_calls {
+                if !partial.pending_tools.contains_key(&tc.id) {
+                    blocks.push(ContentBlockView::ToolUse {
+                        name: tc.name.clone(),
+                    });
+                }
             }
         }
         let mut vm = MessageViewModel::AssistantBubble {
@@ -93,28 +95,22 @@ impl MessagePipeline {
         vms
     }
 
-    /// Reconcile：从当前 completed 状态重建完整的 view_models。
+    /// Reconcile：从当前 transcript 状态重建完整的 view_models。
     ///
     /// 在 "finalize 边界"（ToolStart / Done）调用，确保流式最终状态
     /// 与 restore 路径 `messages_to_view_models()` 完全一致。
     pub fn reconcile(&self) -> Vec<MessageViewModel> {
-        Self::messages_to_view_models(&self.completed, &self.cwd)
+        Self::messages_to_view_models(&self.transcript, &self.cwd)
     }
 
-    /// Finalize 当前 AI 消息：将流式状态转为 BaseMessage 加入 completed
+    /// Finalize 当前迭代的 partial（标记 finalized）。
+    /// 真正写入 transcript 由 `commit_iteration` 在 TurnCommitted 到达时完成。
     pub(crate) fn finalize_current_ai(&mut self) {
-        if self.current_ai_finalized {
-            return;
+        if let Some(partial) = self.partial.as_mut() {
+            if partial.has_any_content() {
+                partial.finalize();
+            }
         }
-        let has_content = !self.current_ai_text.trim().is_empty()
-            || !self.current_ai_reasoning.is_empty()
-            || !self.current_ai_tool_calls.is_empty();
-
-        if !has_content {
-            return;
-        }
-
-        self.current_ai_finalized = true;
     }
 
     /// 构建 ToolStart 的 ToolBlock VM（与 from_base_message_with_cwd 的 Tool 路径一致）

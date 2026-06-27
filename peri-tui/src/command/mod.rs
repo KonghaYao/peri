@@ -1,3 +1,5 @@
+// [TRAP] CommandRegistry::dispatch 借用限制
+// &self + &mut App 冲突，当前用 std::mem::take + put-back 解决。修改 dispatch 时保留此模式。
 pub mod core;
 pub mod panel;
 pub mod session;
@@ -24,6 +26,7 @@ pub fn default_registry() -> CommandRegistry {
     r.register(Box::new(panel::login::LoginCommand));
     r.register(Box::new(panel::tasks::TasksCommand));
     r.register(Box::new(panel::betas::BetasCommand));
+    r.register(Box::new(panel::workflows::WorkflowsCommand));
     r.register(Box::new(session::rename::RenameCommand));
     r.register(Box::new(session::channel::ChannelCommand));
     r.register(Box::new(session::context_cmd::ContextCommand));

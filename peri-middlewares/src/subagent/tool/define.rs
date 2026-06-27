@@ -1,17 +1,20 @@
+#![allow(unused_variables, unreachable_code)]
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
+// P5.1 TODO: v1 AgentCancellationToken 已随 executor 一并移除，这里以 tokio_util 原生
+// 类型别名保持结构体字段 / 方法签名兼容（人工迁移到 v2 时再决定是否重命名）。
 use peri_agent::{
     agent::{
-        events::{AgentEvent, AgentEventHandler},
-        react::{AgentInput, ReactLLM},
-        AgentCancellationToken,
+        events::{AgentEventHandler, ExecutorEvent},
+        react::ReactLLM,
     },
     messages::BaseMessage,
     thread::ThreadStore,
     tools::BaseTool,
 };
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::{
     build_agent::CancelPolicy, fire_subagent_lifecycle_hooks_static, format_subagent_result,
@@ -101,7 +104,7 @@ pub struct SubAgentTool {
         Option<Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>>,
     /// 后台任务完成事件的独立发送通道（不随 executor 生命周期销毁）
     pub(crate) bg_event_sender:
-        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::AgentEvent>>,
+        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>>,
     /// Thread persistence store for child threads
     pub(crate) thread_store: Option<Arc<dyn ThreadStore>>,
     /// Parent thread ID for child thread hierarchy
@@ -191,7 +194,7 @@ impl SubAgentTool {
 
     pub fn with_bg_event_sender(
         mut self,
-        sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::AgentEvent>,
+        sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>,
     ) -> Self {
         self.bg_event_sender = Some(sender);
         self
@@ -374,14 +377,27 @@ impl BaseTool for SubAgentTool {
         let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
             || subagent_type.as_deref() == Some("fork");
 
+        // 从 ToolContext 获取当前消息历史（fork 子 agent 需要看到完整上下文）。
+        // 剪掉最后一条含 tool_calls 的 AI 消息——它包含未完成的 tool_use block（如 Agent 工具本身），
+        // 缺少 tool_result 会导致 LLM API 400 错误。
+        let current_messages: Vec<peri_agent::messages::BaseMessage> = {
+            let mut msgs: Vec<peri_agent::messages::BaseMessage> = _ctx.messages.to_vec();
+            if let Some(last) = msgs.last() {
+                if last.has_tool_calls() {
+                    msgs.pop();
+                }
+            }
+            msgs
+        };
+
         if run_in_background && self.background_registry.is_some() {
             return self
-                .invoke_background(prompt, subagent_type, cwd, is_fork)
+                .invoke_background(prompt, subagent_type, cwd, is_fork, current_messages)
                 .await;
         }
 
         if is_fork {
-            return self.invoke_fork(&prompt, &cwd).await;
+            return self.invoke_fork(&prompt, &cwd, current_messages).await;
         }
 
         let agent_id = match &subagent_type {
@@ -410,67 +426,115 @@ impl BaseTool for SubAgentTool {
             )
             .await?;
 
-        let agent_builder = build_result.builder;
-        let mut state = build_result.state;
-        let child_thread_id = build_result.child_thread_id;
+        let child_thread_id = build_result.child_thread_id.clone();
         let instance_id = child_thread_id.clone();
-        let child_cancel = build_result.cancel_token.unwrap_or_default();
+        let max_iterations = build_result.max_iterations;
 
-        // Register AgentRuntime: only when thread_store is present (non-legacy path)
-        // Panic-safe: DeregisterGuard ensures deregister runs on drop (panic or early return)
-        //
-        // child_cancel is linked to parent via child_token(): parent cancel → child_cancel fires.
-        // The same child_cancel is passed to execute(), so cascade cancel works correctly.
-        let _deregister_guard = if self.thread_store.is_some() {
-            if let Some(ref register) = self.register_runtime {
-                register(
-                    child_thread_id.clone(),
-                    child_cancel.clone(),
-                    "cascade".to_string(),
-                );
+        // 注册到 active_agents（cancel_policy=cascade）
+        if let Some(register) = &self.register_runtime {
+            if let Some(ct) = &build_result.cancel_token {
+                register(child_thread_id.clone(), ct.clone(), "cascade".into());
             }
-            DeregisterGuard {
-                thread_id: child_thread_id.clone(),
-                deregister: self.deregister_runtime.clone(),
+        }
+
+        // RAII guard：scope 退出时自动 deregister
+        let _deregister_guard = DeregisterGuard {
+            thread_id: child_thread_id.clone(),
+            deregister: self.deregister_runtime.clone(),
+        };
+
+        // 组装 MiddlewareChain
+        let mut chain = peri_agent::middleware::chain::MiddlewareChain::new();
+        for mw in build_result.middlewares {
+            chain.add(mw);
+        }
+
+        // tools: Vec<Box<dyn BaseTool>> → Vec<Arc<dyn BaseTool>>
+        let tools: Vec<Arc<dyn BaseTool>> = build_result
+            .tools
+            .into_iter()
+            .map(|t| Arc::from(t) as Arc<dyn BaseTool>)
+            .collect();
+
+        // cancel_token（Cascade 路径必存在）
+        let cancel_token = build_result
+            .cancel_token
+            .clone()
+            .unwrap_or_else(tokio_util::sync::CancellationToken::new);
+
+        // 构造 v2 StageContext（同步 SubAgent 不注入 parent_messages）
+        // 注入 event_handler，使 SubAgent 内 RetryableLLM 的重试事件能被父级 Langfuse 追踪
+        let mut llm = build_result.llm;
+        llm.inject_event_handler(self.event_handler.clone());
+        let v2_ctx = crate::subagent::v2_bridge::build_v2_subagent_context(
+            llm,
+            chain,
+            tools,
+            &cwd,
+            cancel_token,
+            Vec::new(),
+            build_result.system_prompt,
+            None,
+            None,
+            None,
+        );
+
+        // 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
+        // 后转发到父 Agent 的事件处理器。让 TUI 能看到 SubAgent 内的工具调用 / AI 文本。
+        // 必须在 run_react_loop 之前取出 event_handles（之后 v2_ctx.context 被 move）。
+        let _forwarder_handle =
+            peri_agent::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+                v2_ctx.event_handles,
+                self.event_handler.clone(),
+                child_thread_id.clone(),
+            );
+
+        // push prompt 到 queue（Receive 阶段消费）
+        v2_ctx
+            .context
+            .queue
+            .push(peri_agent::session::queue::QueuedMessage::new(
+                peri_agent::session::queue::MessageKind::Prompt,
+                peri_agent::session::queue::MessageSource::UserInput,
+                BaseMessage::human(prompt.to_string()),
+            ));
+
+        // 运行 before_agent middleware hooks
+        if let Err(e) =
+            peri_agent::agent::stages::middleware_runner::run_before_agent(&v2_ctx.context).await
+        {
+            tracing::warn!(error = %e, "[subagent:define] before_agent hook failed");
+        }
+
+        // 运行 v2 ReAct 循环
+        let loop_result =
+            peri_agent::agent::stages::run_react_loop(v2_ctx.context, max_iterations).await;
+
+        let (final_text, interrupted) = match loop_result {
+            peri_agent::agent::stages::LoopResult::Completed => {
+                let text = extract_last_ai_text(&v2_ctx.session);
+                (text, false)
             }
-        } else {
-            DeregisterGuard {
-                thread_id: child_thread_id.clone(),
-                deregister: None,
+            peri_agent::agent::stages::LoopResult::Interrupted => (String::new(), true),
+            peri_agent::agent::stages::LoopResult::Error(e) => {
+                if let Some(ref store) = self.thread_store {
+                    let _ = store.update_thread_status(&child_thread_id, "error").await;
+                }
+                return Err(format!("Sub-agent execution failed: {}", e).into());
             }
         };
 
-        tracing::info!(
-            "[DEADLOCK] SubAgentTool: START child execute, agent_id={}, prompt_len={}",
-            agent_id,
-            prompt.len()
-        );
-        let exec_start = std::time::Instant::now();
-        let exec_result = agent_builder
-            .execute(AgentInput::text(prompt), &mut state, Some(child_cancel))
-            .await;
-        tracing::info!(
-            "[DEADLOCK] SubAgentTool: END child execute ({:.1?}), agent_id={}, is_ok={}",
-            exec_start.elapsed(),
-            agent_id,
-            exec_result.is_ok()
-        );
-
-        let (output_summary, stopped_is_error) = match &exec_result {
-            Ok(output) => (output.text.chars().take(500).collect::<String>(), false),
-            Err(e) => (
-                format!("Error: {}", e)
-                    .chars()
-                    .take(500)
-                    .collect::<String>(),
-                true,
-            ),
+        // SubagentStopped 事件 + lifecycle hook
+        let output_summary: String = if interrupted {
+            "interrupted".to_string()
+        } else {
+            final_text.chars().take(500).collect()
         };
         if let Some(ref handler) = self.event_handler {
-            handler.on_event(AgentEvent::SubagentStopped {
+            handler.on_event(ExecutorEvent::SubagentStopped {
                 agent_name: agent_id.clone(),
                 result: output_summary.clone(),
-                is_error: stopped_is_error,
+                is_error: interrupted,
                 instance_id: instance_id.clone(),
             });
         }
@@ -482,37 +546,60 @@ impl BaseTool for SubAgentTool {
         )
         .await;
 
-        match exec_result {
-            Ok(output) => {
-                if let Some(ref store) = self.thread_store {
-                    let _ = store.update_thread_status(&child_thread_id, "done").await;
-                }
-                let result_text = format_subagent_result(&output);
-                if self.thread_store.is_some() {
-                    Ok(format!(
-                        "child_thread_id: {}
+        // thread_store 状态更新 + 返回
+        if interrupted {
+            if let Some(ref store) = self.thread_store {
+                let _ = store
+                    .update_thread_status(&child_thread_id, "cancelled")
+                    .await;
+            }
+            return Ok("Sub-agent execution was interrupted".to_string());
+        }
+
+        if let Some(ref store) = self.thread_store {
+            let _ = store.update_thread_status(&child_thread_id, "done").await;
+        }
+
+        // 复用 format_subagent_result 的格式（构造 AgentOutput）
+        let output = peri_agent::agent::react::AgentOutput {
+            text: final_text,
+            steps: 0,
+            tool_calls: Vec::new(),
+            stop_reason: None,
+            block_continue: None,
+        };
+        let result_text = format_subagent_result(&output);
+        if self.thread_store.is_some() {
+            Ok(format!(
+                "child_thread_id: {}
 {}",
-                        child_thread_id, result_text
-                    ))
-                } else {
-                    Ok(result_text)
-                }
-            }
-            Err(peri_agent::error::AgentError::Interrupted) => {
-                if let Some(ref store) = self.thread_store {
-                    let _ = store
-                        .update_thread_status(&child_thread_id, "cancelled")
-                        .await;
-                }
-                Ok("Sub-agent execution was interrupted".to_string())
-            }
-            Err(e) => {
-                if let Some(ref store) = self.thread_store {
-                    let _ = store.update_thread_status(&child_thread_id, "error").await;
-                }
-                let msg = format!("Sub-agent execution failed: {}", e);
-                Err(msg.into())
-            }
+                child_thread_id, result_text
+            ))
+        } else {
+            Ok(result_text)
         }
     }
+}
+
+/// 从 session transcript 提取最后一条非空 AI 消息文本
+fn extract_last_ai_text(session: &Arc<peri_agent::session::Session>) -> String {
+    let transcript = session.transcript();
+    let tx = transcript.read();
+    tx.visible_messages()
+        .iter()
+        .rev()
+        .find_map(|m| {
+            if matches!(m, BaseMessage::Ai { .. }) {
+                let t = m.content();
+                let trimmed = t.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
 }

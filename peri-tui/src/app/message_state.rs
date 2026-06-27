@@ -19,7 +19,6 @@ pub struct MessageState {
     pub render_cache: Arc<RwLock<RenderCache>>,
     pub render_notify: Arc<Notify>,
     pub last_render_version: u64,
-    pub pending_messages: Vec<String>,
     /// 最近一次提交的用户文本（用于 Ctrl+C 中断时恢复到输入框）
     pub last_submitted_text: Option<String>,
     /// 临时系统通知（不在 BaseMessage[] 中），记录 (锚点索引, VM)。
@@ -29,6 +28,12 @@ pub struct MessageState {
     pub last_resize_width: Option<u16>,
     /// Channel 消息通知接收端
     pub channel_notification_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChannelNotification>>,
+    /// Loading 期间用户缓存的消息（Agent 任务完成后自动提交）。
+    ///
+    /// 异步事件触发的自动续跑（cron/channel/workflow/bg_results）已由
+    /// `polling.rs` 的 v2 queue drain 路径独立处理，与本字段无关 ——
+    /// 本字段仅服务用户输入缓存需求。
+    pub pending_messages: Vec<String>,
 }
 
 impl MessageState {
@@ -46,11 +51,11 @@ impl MessageState {
             render_cache,
             render_notify,
             last_render_version: 0,
-            pending_messages: Vec::new(),
             last_submitted_text: None,
             ephemeral_notes: Vec::new(),
             last_resize_width: None,
             channel_notification_rx: None,
+            pending_messages: Vec::new(),
         }
     }
 

@@ -276,6 +276,36 @@ impl App {
                 self.request_rebuild();
                 (true, false, false)
             }
+            AgentEvent::TurnCommitted { messages, steps } => {
+                tracing::debug!(
+                    committed_msgs = messages.len(),
+                    steps,
+                    origin_msgs_before = self.session_mgr.current().agent.origin_messages.len(),
+                    "TurnCommitted received in TUI (v2 iteration boundary)"
+                );
+                // 子 Agent 的 TurnCommitted 不应污染父 Agent 的 origin_messages
+                if self.session_mgr.current_mut().agent.subagent_depth > 0 {
+                    return (true, false, false);
+                }
+                // commit_iteration 在 pipeline 内部是「替换」语义，但 origin_messages
+                // 历史上是 append 累积——保留 extend 行为以兼容持久化路径
+                self.session_mgr
+                    .current_mut()
+                    .agent
+                    .origin_messages
+                    .extend(messages.clone());
+                let actions = self
+                    .session_mgr
+                    .current_mut()
+                    .messages
+                    .pipeline
+                    .handle_event(AgentEvent::TurnCommitted { messages, steps });
+                for action in actions {
+                    self.apply_pipeline_action(action);
+                }
+                self.request_rebuild();
+                (true, false, false)
+            }
             AgentEvent::CompactCompleted {
                 summary,
                 files,
@@ -356,6 +386,38 @@ impl App {
             }
             AgentEvent::BgToolStep { child_thread_id } => {
                 self.handle_bg_tool_step(&child_thread_id);
+                (true, false, false)
+            }
+            AgentEvent::WorkflowProgress(payload) => {
+                self.global_ui.workflow_tracker.apply(&payload);
+                if self
+                    .global_panels
+                    .is_active(crate::app::panel_manager::PanelKind::Workflow)
+                {
+                    let snapshots = self.global_ui.workflow_tracker.snapshots();
+                    if let Some(panel) = self
+                        .global_panels
+                        .get_mut::<crate::app::workflow_panel::WorkflowPanel>()
+                    {
+                        panel.update_runs(snapshots);
+                    }
+                }
+                (true, false, false)
+            }
+            AgentEvent::StateSnapshotMeta {
+                message_count,
+                current_step,
+                budget_pct,
+                ..
+            } => {
+                // v2 轻量级元数据快照：仅日志观测，不触发 UI 状态变更。
+                // budget_pct / context_total_tokens 后续可用于状态栏上下文使用率刷新。
+                tracing::debug!(
+                    message_count,
+                    current_step,
+                    budget_pct = ?budget_pct,
+                    "[v2] StateSnapshotMeta received"
+                );
                 (true, false, false)
             }
         }

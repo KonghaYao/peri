@@ -18,7 +18,7 @@
 //! - `trace_lifecycle.rs`：on_trace_start / on_trace_end（async flush）。
 //!
 //! 持有对 LangfuseSession 的引用，复用 client/batcher。
-//! 生命周期：从 execute_prompt 开始 → AgentEvent::Done/Error 时结束。
+//! 生命周期：从 execute_prompt 开始 → ExecutorEvent::Done/Error 时结束。
 //!
 //! 所有事件通过 `batcher.try_add()` 同步入队，保证事件顺序与调用顺序一致，
 //! 确保 Langfuse 层级关系正确（父 span 先于子 span 入队）。
@@ -34,11 +34,11 @@ mod usage;
 
 use std::collections::HashMap;
 
-use peri_agent::{messages::BaseMessage, tools::ToolDefinition};
-
 use super::session::LangfuseSession;
 // 重新导出数据结构，便于测试通过 super::* 访问（保持向后兼容）
-pub(crate) use context::{CompactSpanContext, PendingTool, RetryAttempt, SubAgentContext};
+pub(crate) use context::{
+    CompactSpanContext, GenerationCached, PendingTool, RetryAttempt, SubAgentContext,
+};
 
 pub struct LangfuseTracer {
     pub(crate) session: std::sync::Arc<LangfuseSession>,
@@ -51,9 +51,12 @@ pub struct LangfuseTracer {
     pub(crate) trace_id: String,
     /// 主 Agent Observation 的 ID
     pub(crate) agent_observation_id: String,
-    /// step → (generation_id, input_messages, tools, start_time_rfc3339)
-    pub(crate) generation_data:
-        HashMap<usize, (String, Vec<BaseMessage>, Vec<ToolDefinition>, String)>,
+    /// step → GenerationCached（gen_id / messages / tools / start_time / raw_body）
+    ///
+    /// raw_body 字段由 on_llm_request_payload 写入（紧随 on_llm_start 之后）；
+    /// on_llm_end 时优先用 raw_body 作为 Generation input，fallback 到
+    /// messages+tools 抽象序列化。
+    pub(crate) generation_data: HashMap<usize, GenerationCached>,
     /// 工具调用缓冲数据：tool_call_id → PendingTool
     pub(crate) pending_tools: HashMap<String, PendingTool>,
     /// 当前批次工具组 Span ID

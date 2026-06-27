@@ -14,12 +14,12 @@
     }
 
     #[async_trait]
-    impl Middleware<AgentState> for OrderRecorder {
+    impl Middleware for OrderRecorder {
         fn name(&self) -> &str {
             &self.name
         }
 
-        async fn before_agent(&self, _state: &mut AgentState) -> AgentResult<()> {
+        async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
             self.log
                 .lock()
                 .unwrap()
@@ -29,7 +29,7 @@
 
         async fn before_tool(
             &self,
-            _state: &mut AgentState,
+            _state: &mut dyn MiddlewareState,
             tool_call: &ToolCall,
         ) -> AgentResult<ToolCall> {
             self.log
@@ -41,7 +41,7 @@
 
         async fn after_tool(
             &self,
-            _state: &mut AgentState,
+            _state: &mut dyn MiddlewareState,
             _tool_call: &ToolCall,
             _result: &ToolResult,
         ) -> AgentResult<()> {
@@ -59,14 +59,14 @@
     }
 
     #[async_trait]
-    impl Middleware<AgentState> for InputModifier {
+    impl Middleware for InputModifier {
         fn name(&self) -> &str {
             "InputModifier"
         }
 
         async fn before_tool(
             &self,
-            _state: &mut AgentState,
+            _state: &mut dyn MiddlewareState,
             tool_call: &ToolCall,
         ) -> AgentResult<ToolCall> {
             let mut modified = tool_call.clone();
@@ -80,12 +80,12 @@
     struct FailMiddleware;
 
     #[async_trait]
-    impl Middleware<AgentState> for FailMiddleware {
+    impl Middleware for FailMiddleware {
         fn name(&self) -> &str {
             "FailMiddleware"
         }
 
-        async fn before_agent(&self, _state: &mut AgentState) -> AgentResult<()> {
+        async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
             Err(AgentError::MiddlewareError {
                 middleware: "FailMiddleware".to_string(),
                 reason: "intentional failure".to_string(),
@@ -96,7 +96,7 @@
     #[tokio::test]
     async fn test_multiple_middlewares_sequential_order() {
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
         chain.add(Box::new(OrderRecorder::new("A", Arc::clone(&log))));
         chain.add(Box::new(OrderRecorder::new("B", Arc::clone(&log))));
         chain.add(Box::new(OrderRecorder::new("C", Arc::clone(&log))));
@@ -114,7 +114,7 @@
     #[tokio::test]
     async fn test_error_short_circuits_chain() {
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
         chain.add(Box::new(OrderRecorder::new("A", Arc::clone(&log))));
         chain.add(Box::new(FailMiddleware));
         chain.add(Box::new(OrderRecorder::new("B", Arc::clone(&log))));
@@ -130,7 +130,7 @@
 
     #[tokio::test]
     async fn test_before_tool_modification_propagates() {
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
         chain.add(Box::new(InputModifier {
             suffix: "_modified".to_string(),
         }));
@@ -144,7 +144,7 @@
 
     #[tokio::test]
     async fn test_before_tool_chained_modifications() {
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
         chain.add(Box::new(InputModifier {
             suffix: "_a".to_string(),
         }));
@@ -161,7 +161,7 @@
 
     #[tokio::test]
     async fn test_empty_chain_runs_ok() {
-        let chain = MiddlewareChain::<AgentState>::new();
+        let chain = MiddlewareChain::new();
         let mut state = AgentState::new("/tmp");
         chain.run_before_agent(&mut state).await.unwrap();
 
@@ -176,7 +176,7 @@
     #[tokio::test]
     async fn test_after_tool_sequential_order() {
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
         chain.add(Box::new(OrderRecorder::new("A", Arc::clone(&log))));
         chain.add(Box::new(OrderRecorder::new("B", Arc::clone(&log))));
 
@@ -203,13 +203,13 @@
         // 第一个中间件：所有工具加 _a 后缀
         struct SuffixA;
         #[async_trait]
-        impl Middleware<AgentState> for SuffixA {
+        impl Middleware for SuffixA {
             fn name(&self) -> &str {
                 "SuffixA"
             }
             async fn before_tool(
                 &self,
-                _state: &mut AgentState,
+                _state: &mut dyn MiddlewareState,
                 tc: &ToolCall,
             ) -> AgentResult<ToolCall> {
                 let mut m = tc.clone();
@@ -221,13 +221,13 @@
         // 第二个中间件：第二个工具调用返回 ToolRejected，第一个和第三个放行
         struct RejectSecond;
         #[async_trait]
-        impl Middleware<AgentState> for RejectSecond {
+        impl Middleware for RejectSecond {
             fn name(&self) -> &str {
                 "RejectSecond"
             }
             async fn before_tools_batch(
                 &self,
-                _state: &mut AgentState,
+                _state: &mut dyn MiddlewareState,
                 calls: &[ToolCall],
             ) -> Vec<AgentResult<ToolCall>> {
                 calls
@@ -247,7 +247,7 @@
             }
         }
 
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
         chain.add(Box::new(SuffixA));
         chain.add(Box::new(RejectSecond));
         let mut state = AgentState::new("/tmp");
@@ -277,13 +277,13 @@
     async fn test_before_tools_batch_equivalent_to_individual() {
         struct SuffixX;
         #[async_trait]
-        impl Middleware<AgentState> for SuffixX {
+        impl Middleware for SuffixX {
             fn name(&self) -> &str {
                 "SuffixX"
             }
             async fn before_tool(
                 &self,
-                _state: &mut AgentState,
+                _state: &mut dyn MiddlewareState,
                 tc: &ToolCall,
             ) -> AgentResult<ToolCall> {
                 let mut m = tc.clone();
@@ -292,7 +292,7 @@
             }
         }
 
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
         chain.add(Box::new(SuffixX));
         let mut state = AgentState::new("/tmp");
 
@@ -314,18 +314,18 @@
     #[tokio::test]
     async fn test_before_model_sequential_order() {
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
 
         struct BeforeModelRecorder {
             name: String,
             log: Arc<Mutex<Vec<String>>>,
         }
         #[async_trait]
-        impl Middleware<AgentState> for BeforeModelRecorder {
+        impl Middleware for BeforeModelRecorder {
             fn name(&self) -> &str {
                 &self.name
             }
-            async fn before_model(&self, _state: &mut AgentState) -> AgentResult<()> {
+            async fn before_model(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
                 self.log
                     .lock()
                     .unwrap()
@@ -360,11 +360,11 @@
     async fn test_before_model_error_short_circuits() {
         struct FailBeforeModel;
         #[async_trait]
-        impl Middleware<AgentState> for FailBeforeModel {
+        impl Middleware for FailBeforeModel {
             fn name(&self) -> &str {
                 "FailBeforeModel"
             }
-            async fn before_model(&self, _state: &mut AgentState) -> AgentResult<()> {
+            async fn before_model(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
                 Err(AgentError::MiddlewareError {
                     middleware: "FailBeforeModel".to_string(),
                     reason: "intentional failure".to_string(),
@@ -373,18 +373,18 @@
         }
 
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
 
         struct Recorder {
             name: String,
             log: Arc<Mutex<Vec<String>>>,
         }
         #[async_trait]
-        impl Middleware<AgentState> for Recorder {
+        impl Middleware for Recorder {
             fn name(&self) -> &str {
                 &self.name
             }
-            async fn before_model(&self, _state: &mut AgentState) -> AgentResult<()> {
+            async fn before_model(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
                 self.log
                     .lock()
                     .unwrap()
@@ -413,20 +413,20 @@
     #[tokio::test]
     async fn test_after_model_sequential_order() {
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
 
         struct AfterModelRecorder {
             name: String,
             log: Arc<Mutex<Vec<String>>>,
         }
         #[async_trait]
-        impl Middleware<AgentState> for AfterModelRecorder {
+        impl Middleware for AfterModelRecorder {
             fn name(&self) -> &str {
                 &self.name
             }
             async fn after_model(
                 &self,
-                _state: &mut AgentState,
+                _state: &mut dyn MiddlewareState,
                 _reasoning: &Reasoning,
             ) -> AgentResult<()> {
                 self.log
@@ -472,13 +472,13 @@
     async fn test_after_model_error_short_circuits() {
         struct FailAfterModel;
         #[async_trait]
-        impl Middleware<AgentState> for FailAfterModel {
+        impl Middleware for FailAfterModel {
             fn name(&self) -> &str {
                 "FailAfterModel"
             }
             async fn after_model(
                 &self,
-                _state: &mut AgentState,
+                _state: &mut dyn MiddlewareState,
                 _reasoning: &Reasoning,
             ) -> AgentResult<()> {
                 Err(AgentError::MiddlewareError {
@@ -489,20 +489,20 @@
         }
 
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
 
         struct Recorder {
             name: String,
             log: Arc<Mutex<Vec<String>>>,
         }
         #[async_trait]
-        impl Middleware<AgentState> for Recorder {
+        impl Middleware for Recorder {
             fn name(&self) -> &str {
                 &self.name
             }
             async fn after_model(
                 &self,
-                _state: &mut AgentState,
+                _state: &mut dyn MiddlewareState,
                 _reasoning: &Reasoning,
             ) -> AgentResult<()> {
                 self.log
@@ -542,14 +542,14 @@
 
     #[tokio::test]
     async fn test_before_model_empty_chain_ok() {
-        let chain = MiddlewareChain::<AgentState>::new();
+        let chain = MiddlewareChain::new();
         let mut state = AgentState::new("/tmp");
         assert!(chain.run_before_model(&mut state).await.is_ok());
     }
 
     #[tokio::test]
     async fn test_after_model_empty_chain_ok() {
-        let chain = MiddlewareChain::<AgentState>::new();
+        let chain = MiddlewareChain::new();
         let mut state = AgentState::new("/tmp");
         let reasoning = Reasoning {
             thought: String::new(),
@@ -567,7 +567,7 @@
     #[tokio::test]
     async fn test_new_hooks_default_noop() {
         // NoopMiddleware 的 before_model/after_model 默认实现不应报错
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
         chain.add(Box::new(NoopMiddleware::new("noop")));
         let mut state = AgentState::new("/tmp");
 
@@ -602,17 +602,17 @@
             log: Arc<Mutex<Vec<String>>>,
         }
         #[async_trait]
-        impl Middleware<AgentState> for BothHooks {
+        impl Middleware for BothHooks {
             fn name(&self) -> &str {
                 "A"
             }
-            async fn before_model(&self, _state: &mut AgentState) -> AgentResult<()> {
+            async fn before_model(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
                 self.log.lock().unwrap().push("A.before_model".into());
                 Ok(())
             }
             async fn after_model(
                 &self,
-                _state: &mut AgentState,
+                _state: &mut dyn MiddlewareState,
                 _r: &Reasoning,
             ) -> AgentResult<()> {
                 self.log.lock().unwrap().push("A.after_model".into());
@@ -625,11 +625,11 @@
             log: Arc<Mutex<Vec<String>>>,
         }
         #[async_trait]
-        impl Middleware<AgentState> for BeforeOnly {
+        impl Middleware for BeforeOnly {
             fn name(&self) -> &str {
                 "B"
             }
-            async fn before_model(&self, _state: &mut AgentState) -> AgentResult<()> {
+            async fn before_model(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
                 self.log.lock().unwrap().push("B.before_model".into());
                 Ok(())
             }
@@ -640,13 +640,13 @@
             log: Arc<Mutex<Vec<String>>>,
         }
         #[async_trait]
-        impl Middleware<AgentState> for AfterOnly {
+        impl Middleware for AfterOnly {
             fn name(&self) -> &str {
                 "C"
             }
             async fn after_model(
                 &self,
-                _state: &mut AgentState,
+                _state: &mut dyn MiddlewareState,
                 _r: &Reasoning,
             ) -> AgentResult<()> {
                 self.log.lock().unwrap().push("C.after_model".into());
@@ -654,7 +654,7 @@
             }
         }
 
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
         chain.add(Box::new(BothHooks {
             log: Arc::clone(&log),
         }));
@@ -706,11 +706,11 @@
             marker_id: Arc<Mutex<Option<MessageId>>>,
         }
         #[async_trait]
-        impl Middleware<AgentState> for Writer {
+        impl Middleware for Writer {
             fn name(&self) -> &str {
                 "Writer"
             }
-            async fn before_model(&self, state: &mut AgentState) -> AgentResult<()> {
+            async fn before_model(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
                 let msg = BaseMessage::system(vec![ContentBlock::text(
                     "marker written by before_model",
                 )]);
@@ -725,13 +725,13 @@
             marker_id: Arc<Mutex<Option<MessageId>>>,
         }
         #[async_trait]
-        impl Middleware<AgentState> for Reader {
+        impl Middleware for Reader {
             fn name(&self) -> &str {
                 "Reader"
             }
             async fn after_model(
                 &self,
-                state: &mut AgentState,
+                state: &mut dyn MiddlewareState,
                 _r: &Reasoning,
             ) -> AgentResult<()> {
                 let expected_id = self.marker_id.lock().unwrap().unwrap();
@@ -747,7 +747,7 @@
             }
         }
 
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
         chain.add(Box::new(Writer {
             marker_id: Arc::clone(&marker_id),
         }));
@@ -783,13 +783,13 @@
             log: Arc<Mutex<Vec<String>>>,
         }
         #[async_trait]
-        impl Middleware<AgentState> for Inspector {
+        impl Middleware for Inspector {
             fn name(&self) -> &str {
                 "Inspector"
             }
             async fn after_model(
                 &self,
-                _state: &mut AgentState,
+                _state: &mut dyn MiddlewareState,
                 r: &Reasoning,
             ) -> AgentResult<()> {
                 self.log
@@ -804,7 +804,7 @@
             }
         }
 
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
         chain.add(Box::new(Inspector {
             log: Arc::clone(&log),
         }));
@@ -840,7 +840,7 @@
         // OrderRecorder 仅覆盖 name()、before_tool()、after_tool()
         // 其 before_model/after_model 使用默认空实现
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
-        let mut chain = MiddlewareChain::<AgentState>::new();
+        let mut chain = MiddlewareChain::new();
         chain.add(Box::new(OrderRecorder::new("A", Arc::clone(&log))));
         chain.add(Box::new(OrderRecorder::new("B", Arc::clone(&log))));
 

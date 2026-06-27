@@ -50,4 +50,14 @@ pub trait BaseTool: Send + Sync {
         input: serde_json::Value,
         ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// 工具输出的默认截断长度（字符数）。None 表示不截断。
+    fn output_char_limit(&self) -> Option<usize> {
+        None
+    }
+
+    /// 工具输出是否偏向落盘而非内联返回。
+    fn prefers_persist(&self) -> bool {
+        false
+    }
 }

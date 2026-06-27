@@ -54,6 +54,21 @@ pub trait BaseModel: Send + Sync {
         );
         self.invoke(request).await
     }
+
+    /// 构造 Provider 实际请求体（raw body）。
+    ///
+    /// 用于 Langfuse Generation input 上传——返回的 JSON 与 invoke() 实际发往
+    /// Provider 的请求体完全一致（含 Provider-native 工具格式 / system 位置）。
+    ///
+    /// 默认返回 None，Langfuse tracer 自动 fallback 到 messages+tools 序列化
+    /// （内部抽象格式）。Provider 适配器（ChatOpenAI / ChatAnthropic）应 override
+    /// 本方法，返回本 module 已有的 `pub(super) fn build_request_body` 结果。
+    ///
+    /// `streaming` 参数固定为 `false`（Langfuse 不关心 stream:true/false 差异，
+    /// 仅用于 body 结构中是否含 `stream` 字段——该字段不影响 Generation input 可读性）。
+    fn build_request_body(&self, _request: &LlmRequest) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 pub use adapter::MockLLM;

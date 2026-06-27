@@ -42,7 +42,7 @@ impl Command for ChannelCommand {
         }
 
         let usage = lc.tr("command-channel-usage").to_string();
-        app.active_mut().messages.pending_messages.push(usage);
+        app.push_system_note(usage);
     }
 }
 
@@ -160,10 +160,8 @@ impl ChannelCommand {
     }
 
     fn add_note(&self, app: &mut App, msg: &str) {
-        app.active_mut()
-            .messages
-            .pending_messages
-            .push(msg.to_string());
+        // UI 反馈：走 ephemeral SystemNote VM 路径，不污染 BaseMessage[] / Prompt Cache。
+        app.push_system_note(msg.to_string());
     }
 }
 

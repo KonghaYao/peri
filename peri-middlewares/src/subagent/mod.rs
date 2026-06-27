@@ -1,3 +1,23 @@
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use async_trait::async_trait;
+use peri_agent::thread::ThreadStore;
+use peri_agent::{
+    agent::{events::AgentEventHandler, react::ReactLLM, AgentCancellationToken},
+    error::AgentResult,
+    messages::BaseMessage,
+    middleware::{r#trait::Middleware, state::MiddlewareState},
+    tools::BaseTool,
+};
+
+use crate::{
+    agent_define::AgentOverrides, claude_agent_parser::ClaudeAgentFrontmatter, parse_agent_file,
+    tools::BoxToolWrapper,
+};
+
 mod agent_result;
 mod background;
 mod built_in_agents;
@@ -5,6 +25,7 @@ mod fork;
 mod skill_preload;
 pub mod spawner;
 mod tool;
+pub mod v2_bridge;
 pub use agent_result::AgentResultTool;
 pub use background::{BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus};
 pub use built_in_agents::{
@@ -20,7 +41,7 @@ pub use tool::SubAgentTool;
 ///
 /// 中间件链顺序固定: AgentsMd -> Skills -> [SkillPreload] -> Todo
 /// 仅 `skill_names` 在不同执行路径间变化
-pub(crate) struct SubAgentMiddlewareConfig {
+pub struct SubAgentMiddlewareConfig {
     /// 需要预加载的 skill 名称列表，为空时跳过 SkillPreloadMiddleware
     pub skill_names: Vec<String>,
     /// 工作目录，用于解析 skill 文件路径
@@ -75,25 +96,6 @@ impl SubAgentMiddlewareConfig {
         self
     }
 }
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
-
-use async_trait::async_trait;
-use peri_agent::thread::ThreadStore;
-use peri_agent::{
-    agent::{events::AgentEventHandler, react::ReactLLM, state::State, AgentCancellationToken},
-    error::AgentResult,
-    messages::BaseMessage,
-    middleware::r#trait::Middleware,
-    tools::BaseTool,
-};
-
-use crate::{
-    agent_define::AgentOverrides, claude_agent_parser::ClaudeAgentFrontmatter, parse_agent_file,
-    tools::BoxToolWrapper,
-};
 
 /// SubAgentMiddleware - injects `Agent` tool into the parent agent
 ///
@@ -115,7 +117,7 @@ use crate::{
 /// });
 /// let middleware = SubAgentMiddleware::new(parent_tools, Some(event_handler), llm_factory)
 ///     .with_system_builder(system_builder);
-/// let agent = ReActAgent::new(llm).add_middleware(Box::new(middleware));
+/// // 注册到 middleware chain，由 v2 stages 自动 collect_tools 收集 SubAgentTool
 /// ```
 pub struct SubAgentMiddleware {
     /// Parent agent tool set (Arc shared, passed to child agent for use)
@@ -145,7 +147,7 @@ pub struct SubAgentMiddleware {
     child_handler_factory: Option<Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>>,
     /// 后台任务完成事件的���立发送通道（不随 executor 生命周期销毁）
     bg_event_sender:
-        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::AgentEvent>>,
+        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>>,
     /// Thread persistence store for child threads
     thread_store: Option<Arc<dyn ThreadStore>>,
     /// Parent thread ID for child thread hierarchy
@@ -251,7 +253,7 @@ impl SubAgentMiddleware {
     /// even after the main agent finishes.
     pub fn with_bg_event_sender(
         mut self,
-        sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::AgentEvent>,
+        sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>,
     ) -> Self {
         self.bg_event_sender = Some(sender);
         self
@@ -645,7 +647,7 @@ pub fn scan_agents_detailed(
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for SubAgentMiddleware {
+impl Middleware for SubAgentMiddleware {
     fn name(&self) -> &str {
         "SubAgentMiddleware"
     }
@@ -658,7 +660,7 @@ impl<S: State> Middleware<S> for SubAgentMiddleware {
         tools
     }
 
-    async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // Snapshot current state.messages to shared reference for Fork child agent inheritance
         if let Some(ref pm) = self.parent_messages {
             *pm.write() = state.messages().to_vec();

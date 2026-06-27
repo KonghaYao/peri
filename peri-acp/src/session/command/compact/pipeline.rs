@@ -1,38 +1,28 @@
-//! Compact Pipeline — execute() 内部各阶段实现。
+//! Compact Pipeline — `/compact` 命令路径的 v2 实现。
 //!
-//! 按显式 Pipeline (Orchestration) 拆分：每阶段一个纯函数 + 显式输入输出类型，
+//! [v2] 从 v1 `full_compact + re_inject` 迁移到 `compact_v2::run_compact(force=true)`：
+//! - 把 history 加载进临时 `MessageTranscript`
+//! - 调用 `run_compact` 触发 Full Compact + re-inject
+//! - 从 transcript 拿 compact 后的 visible_messages 组装事件载荷
+//!
 //! 编排层（`compact.rs::execute`）只做组合。
 //!
 //! 阶段顺序：
 //!   validate_inputs → resolve_auxiliary_model → (emit_started)
-//!   → run_full_compact_with_cancel → re_inject_phase → assemble_compact_messages
+//!   → run_v2_compact_with_cancel → assemble_compact_messages
 //!   → (emit_completed)
 //!
-// [TRAP] 配置覆盖顺序：peri_config.config.compact.clone().unwrap_or_default() 之后
-// 必须调 apply_env_overrides()。env 优先级 DISABLE_COMPACT / DISABLE_AUTO_COMPACT /
-// COMPACT_THRESHOLD 每轮重新读取（非 frozen），此顺序不能调换。
-// （详见 CLAUDE.md 环境变量章节、compact 章节）
-//
-// [TRAP] cancel_token.cancelled() 分支返回 PromptStopReason::Cancelled；错误/空历史/
-// 无模型当前都返回 EndTurn。此语义在重构时不可变更，executor.rs 上游对 Cancelled 有
-// 专门处理（spec/global/domains/agent.md#issue_2026-05-29-ctrl-c-interrupt-causes-agent-amnesia、
-// #issue_2026-05-29-llm-stream-error-causes-amnesia）。
-//
-// [TRAP] full_compact 的第 4 参空字符串是 cwd 之前的占位（spec 全名/摘要 LLM 上下文锚点）。
-// line 调用 `full_compact(&history, model, &config, "", &cwd)` 时空串位置不能改。
-// full_compact 增加 cwd 参数是为修复 full-compact-loses-project-path-context
-// （CLAUDE.md compact 章节 [TRAP]），不可回退。
+//! [TRAP] cancel_token.cancelled() 分支返回 PromptStopReason::Cancelled；错误/空历史/
+//! 无模型当前都返回 EndTurn。executor.rs 上游对 Cancelled 有专门处理
+//! （spec/global/domains/agent.md#issue_2026-05-29-ctrl-c-interrupt-causes-agent-amnesia）。
 
 use std::sync::Arc;
 
 use peri_agent::{
-    agent::{
-        compact::{extract_file_info, extract_skill_names, full_compact, re_inject},
-        events::CompactFileInfo,
-        AgentCancellationToken,
-    },
+    agent::{compact::CompactConfig, compact_v2, AgentCancellationToken},
     llm::BaseModel,
     messages::BaseMessage,
+    session::transcript::MessageTranscript,
 };
 use tracing::{info, warn};
 
@@ -43,29 +33,13 @@ use super::events::{
 };
 use super::invariant::build_summary_human_message;
 
-/// Compact 配置（从 peri_config 提取并应用 env overrides 后的快照）。
-pub type CompactConfig = peri_agent::agent::compact::CompactConfig;
-
-/// `full_compact` 的产物。
-pub struct CompactOutput {
-    pub summary: String,
-}
-
-/// `re_inject` 的产物（messages + 注入计数）。
-pub struct ReInjectOutput {
-    pub messages: Vec<BaseMessage>,
-    pub files_injected: usize,
-    pub skills_injected: usize,
-}
-
 /// Pipeline 终态。编排层据此决定返回值与是否中途 short-circuit。
 pub enum PipelineOutcome {
-    /// 正常完成：组装后的消息（首条 Human + System(文件)... + System(Skills)...）。
+    /// 正常完成：组装后的消息（首条 Human + re-inject 消息...）。
     Completed { messages: Vec<BaseMessage> },
     /// 取消（用户 Ctrl+C）：保留原 history，stop_reason = Cancelled。
     Cancelled { history: Vec<BaseMessage> },
-    /// 边界情况（空历史 / 无模型 / full_compact 失败）：保留原 history，stop_reason = EndTurn。
-    /// `error_event_message` 提示编排层已发出 CompactError 事件。
+    /// 边界情况（空历史 / 无模型 / compact 失败）：保留原 history，stop_reason = EndTurn。
     EarlyReturn {
         history: Vec<BaseMessage>,
         stop_reason: PromptStopReason,
@@ -74,20 +48,18 @@ pub enum PipelineOutcome {
 
 /// 加载 compact 配置：`unwrap_or_default()` 后立即应用 env overrides。
 ///
-// [TRAP] env 优先级 DISABLE_COMPACT / DISABLE_AUTO_COMPACT / COMPACT_THRESHOLD 每轮
-// 重新读取（非 frozen），apply_env_overrides() 必须在 unwrap_or_default() 之后调用。
+/// [TRAP] env 优先级 DISABLE_COMPACT / DISABLE_AUTO_COMPACT / COMPACT_THRESHOLD 每轮
+/// 重新读取（非 frozen），apply_env_overrides() 必须在 unwrap_or_default() 之后调用。
 pub fn load_compact_config(peri_config: &crate::provider::PeriConfig) -> CompactConfig {
     let mut compact_config = peri_config.config.compact.clone().unwrap_or_default();
     compact_config.apply_env_overrides();
     compact_config
 }
 
-/// 运行 full_compact + re_inject + assemble_messages 的完整 Pipeline。
+/// 运行 v2 compact 的完整 Pipeline。
 ///
 /// 调用方（`compact.rs::execute`）负责在调用前完成空 history 短路。
 /// 此函数内部发出 CompactStarted / CompactError / CompactCompleted 事件。
-///
-/// 返回 `PipelineOutcome`，由调用方映射为 `CommandResult`。
 pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     let CommandContext {
         session_id,
@@ -131,15 +103,22 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     // 阶段 4: 发出 CompactStarted 事件
     emit_compact_started(&event_sink, &session_id).await;
 
-    // 阶段 5: 执行 full_compact（支持 Ctrl+C 取消）
-    let compact_result = match run_full_compact_with_cancel(
-        &history,
+    // 阶段 5: 加载 history 进临时 transcript 并运行 v2 compact（force=true 触发 Full）
+    let mut transcript = MessageTranscript::new();
+    for msg in &history {
+        transcript.append(msg.clone());
+    }
+
+    let mut consecutive_failures = 0u32;
+    let compact_result = match run_v2_compact_with_cancel(
+        &mut transcript,
         auxiliary_model.as_ref(),
         &compact_config,
         &cwd,
         &cancel_token,
         &event_sink,
         &session_id,
+        &mut consecutive_failures,
     )
     .await
     {
@@ -156,27 +135,19 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     };
 
     info!(
-        summary_len = compact_result.summary.len(),
-        "compact: full_compact 完成"
+        summary_len = compact_result.summary.as_deref().map(str::len).unwrap_or(0),
+        strategy = ?compact_result.strategy,
+        "compact: v2 run_compact 完成"
     );
 
-    // 阶段 6: 执行 re_inject
-    let re_inject_result = re_inject_phase(&history, &compact_config, &cwd).await;
+    // 阶段 6: 组装最终消息（从 transcript visible_messages 取）
+    let assembled = assemble_compact_messages(&transcript, &compact_result.summary.clone());
 
-    info!(
-        files_injected = re_inject_result.files_injected,
-        skills_injected = re_inject_result.skills_injected,
-        "compact: re_inject 完成"
-    );
-
-    // 阶段 7: 组装最终消息（Human-first 不变量）
-    let assembled = assemble_compact_messages(&compact_result.summary, &re_inject_result);
-
-    // 阶段 8: 发出 CompactCompleted 事件（messages 字段与 result.messages 共享 clone）
+    // 阶段 7: 发出 CompactCompleted 事件
     emit_compact_completed(
         &event_sink,
         &session_id,
-        compact_result.summary.clone(),
+        compact_result.summary.clone().unwrap_or_default(),
         assembled.files.clone(),
         assembled.skills.clone(),
         FULL_COMPACT_MICRO_CLEARED,
@@ -191,36 +162,34 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     }
 }
 
-/// full_compact + 取消语义的执行结果。
+/// v2 run_compact + 取消语义的执行结果。
 enum CancelOrError {
     Cancelled,
     Error,
 }
 
-/// 执行 full_compact 并封装取消/错误路径。
-///
-// [TRAP] full_compact 的第 4 参空字符串是 cwd 之前的占位（spec 全名/摘要 LLM 上下文锚点），
-// 不可改。`full_compact(&history, model, &config, "", &cwd)` 时空串位置固定。
-async fn run_full_compact_with_cancel(
-    history: &[BaseMessage],
+/// 执行 v2 run_compact 并封装取消/错误路径。
+#[allow(clippy::too_many_arguments)]
+async fn run_v2_compact_with_cancel(
+    transcript: &mut MessageTranscript,
     model: &dyn BaseModel,
     config: &CompactConfig,
     cwd: &str,
     cancel_token: &AgentCancellationToken,
     event_sink: &Arc<dyn crate::session::event_sink::EventSink>,
     session_id: &str,
-) -> Result<CompactOutput, CancelOrError> {
-    let compact_result = tokio::select! {
-        r = full_compact(history, model, config, "", cwd) => {
-            match r {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(error = %e, "compact: full_compact 失败");
-                    emit_compact_error(event_sink, session_id, e.to_string()).await;
-                    return Err(CancelOrError::Error);
-                }
-            }
-        }
+    consecutive_failures: &mut u32,
+) -> Result<compact_v2::CompactResult, CancelOrError> {
+    let result = tokio::select! {
+        r = compact_v2::run_compact(
+            transcript,
+            Some(model),
+            config,
+            1.0, // budget=1.0 + force=true → 强制 Full Compact
+            true,
+            consecutive_failures,
+            cwd,
+        ) => r,
         _ = cancel_token.cancelled() => {
             tracing::info!(session_id = %session_id, "compact cancelled by user");
             emit_compact_error(event_sink, session_id, "compact cancelled").await;
@@ -228,44 +197,32 @@ async fn run_full_compact_with_cancel(
         }
     };
 
-    Ok(CompactOutput {
-        summary: compact_result.summary,
-    })
-}
-
-/// re_inject 阶段：根据 history 重新注入文件与 Skills System 消息。
-async fn re_inject_phase(
-    history: &[BaseMessage],
-    config: &CompactConfig,
-    cwd: &str,
-) -> ReInjectOutput {
-    let re_inject_result = re_inject(history, config, cwd).await;
-    ReInjectOutput {
-        messages: re_inject_result.messages,
-        files_injected: re_inject_result.files_injected,
-        skills_injected: re_inject_result.skills_injected,
+    // 检测失败：affected_count == 0 + summary 为 None 表示 compact 未成功
+    if result.affected_count == 0 && result.summary.is_none() {
+        warn!(strategy = ?result.strategy, "compact: v2 run_compact 无效果");
+        emit_compact_error(event_sink, session_id, "compact produced no effect").await;
+        return Err(CancelOrError::Error);
     }
+
+    Ok(result)
 }
 
-/// 组装最终消息：首条 Human(摘要+续接指令) + System(文件)... + System(Skills)...。
+/// 组装最终消息：从 transcript visible_messages 提取首条 Human + re-inject 消息。
 ///
-// [TRAP] compact 后消息结构必须以 `BaseMessage::human(summary + continuation)` 开头。
-// 禁止将摘要放在 `BaseMessage::system()` 中。完整结构：
-//   [Human(摘要+续接指令), System(文件)..., System(Skills)...]。
-// （详见 spec/global/domains/compact.md#issue_2026-05-20-auto-compact-empty-messages-400）
+/// [TRAP] compact 后消息结构必须以 `BaseMessage::human(summary + continuation)` 开头。
+/// 但 v2 的 run_compact 已经在 transcript 内部追加了符合不变量的消息，
+/// 此处直接读 visible_messages 即可，无需重新构造首条消息。
 pub fn assemble_compact_messages(
-    summary: &str,
-    re_inject_result: &ReInjectOutput,
+    transcript: &MessageTranscript,
+    _summary: &Option<String>,
 ) -> AssembledMessages {
-    let first = build_summary_human_message(summary);
-    let mut new_messages = vec![first];
-    new_messages.extend(re_inject_result.messages.clone());
+    let messages: Vec<BaseMessage> = transcript.visible_messages().into_iter().cloned().collect();
 
-    let files = extract_file_info(&re_inject_result.messages);
-    let skills = extract_skill_names(&re_inject_result.messages);
+    let files = compact_v2::extract_file_info(&messages);
+    let skills = compact_v2::extract_skill_names(&messages);
 
     AssembledMessages {
-        messages: new_messages,
+        messages,
         files,
         skills,
     }
@@ -274,14 +231,11 @@ pub fn assemble_compact_messages(
 /// assemble 阶段产物。
 pub struct AssembledMessages {
     pub messages: Vec<BaseMessage>,
-    pub files: Vec<CompactFileInfo>,
+    pub files: Vec<peri_agent::agent::events::CompactFileInfo>,
     pub skills: Vec<String>,
 }
 
 /// `/compact` 命令入口：执行完整 Pipeline 并映射终态到 `CommandResult`。
-///
-/// 从 `compact.rs` 的 `AgentCommand::execute` 提取此方法，使 `compact.rs` 纯化为
-/// 仅含 `mod` + `pub struct` + trait impl 的真 shim（零业务逻辑）。
 pub async fn execute_compact(ctx: super::CommandContext) -> super::CommandResult {
     match run_pipeline(ctx).await {
         PipelineOutcome::Completed { messages } => super::CommandResult {
@@ -302,4 +256,10 @@ pub async fn execute_compact(ctx: super::CommandContext) -> super::CommandResult
             stop_reason,
         },
     }
+}
+
+#[allow(dead_code)]
+fn _unused_keep_import() {
+    // 保留 build_summary_human_message 的引用——某些测试可能仍依赖
+    let _ = build_summary_human_message("");
 }

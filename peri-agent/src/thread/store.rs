@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use super::types::{ThreadId, ThreadMeta};
-use crate::messages::BaseMessage;
+use crate::messages::{BaseMessage, MessageId};
 
 #[async_trait]
 pub trait ThreadStore: Send + Sync {
@@ -55,9 +55,29 @@ pub trait ThreadStore: Send + Sync {
     async fn invalidate_context_cache(&self, thread_id: &ThreadId) -> Result<()>;
 
     /// 按 message_id 列表精确删除消息，并刷新 cached_context。
-    async fn delete_messages(
+    async fn delete_messages(&self, thread_id: &ThreadId, message_ids: &[MessageId]) -> Result<()>;
+
+    /// 更新消息的 compact 标记（truncated / excluded）
+    async fn update_message_flags(
+        &self,
+        message_id: &MessageId,
+        truncated: bool,
+        excluded: bool,
+    ) -> Result<()> {
+        let _ = (message_id, truncated, excluded);
+        Ok(()) // 默认 no-op
+    }
+
+    /// 删除指定消息之后的所有记录（用于 rewind）
+    ///
+    /// 查找 message_id 对应的序列位置，删除该位置之后的所有消息。
+    /// 若 message_id 不存在则不执行任何操作。
+    async fn delete_messages_since(
         &self,
         thread_id: &ThreadId,
-        message_ids: &[crate::messages::MessageId],
-    ) -> Result<()>;
+        message_id: &MessageId,
+    ) -> Result<()> {
+        let _ = (thread_id, message_id);
+        Ok(()) // 默认 no-op
+    }
 }

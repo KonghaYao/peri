@@ -10,7 +10,7 @@ pub use agent_client_protocol::{
     Client, ConnectionTo,
 };
 use async_trait::async_trait;
-use peri_agent::agent::events::AgentEvent as ExecutorEvent;
+use peri_agent::agent::events::ExecutorEvent;
 use serde_json::json;
 use tracing::{debug, error};
 
@@ -48,7 +48,7 @@ impl EventSink for TransportEventSink {
         let mapped = map_event(event, context_window);
 
         for m in mapped {
-            // 1. session/update — standard ACP notifications
+            // 1. session/update — 标准 ACP 通知（Category ①）
             for update in m.updates {
                 let update_value = match serde_json::to_value(&update) {
                     Ok(p) => p,
@@ -75,26 +75,49 @@ impl EventSink for TransportEventSink {
                     .await;
             }
 
-            // 2. peri/agent_event — TUI-specific events (categories ②③)
+            // 2. peri/agent_event — TUI 专用事件（Category ③）
+            // Convert ExecutorEvent → AcpEvent DTO before serialization.
             if m.forward_to_tui {
-                let event_json = match serde_json::to_string(event) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!(error = %e, "EventSink: serialize ExecutorEvent failed");
-                        continue;
+                if let Some(acp_event) = crate::event::executor_event_to_acp(event) {
+                    let event_json = match serde_json::to_string(&acp_event) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!(error = %e, "EventSink: serialize AcpEvent failed");
+                            continue;
+                        }
+                    };
+                    let agent_event_params = json!({
+                        "sessionId": session_id,
+                        "event_json": event_json,
+                    });
+                    if let Err(e) = self
+                        .transport
+                        .send_notification("peri/agent_event", agent_event_params)
+                        .await
+                    {
+                        error!(error = %e, "EventSink: send peri/agent_event failed");
                     }
-                };
-                let agent_event_params = json!({
-                    "sessionId": session_id,
-                    "event_json": event_json,
-                });
-                if let Err(e) = self
-                    .transport
-                    .send_notification("peri/agent_event", agent_event_params)
-                    .await
-                {
-                    error!(error = %e, "EventSink: send peri/agent_event failed");
                 }
+            }
+
+            // 3. peri/hitl_pending — HITL 审批事件（Category ②）
+            // 预留：当前 HITL 通过 UserInteractionBroker 直接交互，
+            // 未来 ExecutorEvent 扩展 HitlPending 时启用此通道。
+            if m.hitl_pending {
+                let _ = self
+                    .transport
+                    .send_notification("peri/hitl_pending", json!({ "sessionId": session_id }))
+                    .await;
+            }
+
+            // 4. peri/observable — 观测层事件（Category ④）
+            // 预留：当前无外部订阅者，未来通过 broadcast channel 分发。
+            if m.observable {
+                tracing::trace!(
+                    session_id = %session_id,
+                    event = ?event,
+                    "EventSink: observable event (no subscribers yet)"
+                );
             }
         }
     }

@@ -194,6 +194,10 @@ impl BaseTool for WebFetchTool {
 
         Ok(result)
     }
+
+    fn output_char_limit(&self) -> Option<usize> {
+        Some(2000)
+    }
 }
 
 #[cfg(test)]

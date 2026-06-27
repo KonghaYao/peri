@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use peri_agent::{agent::state::State, middleware::r#trait::Middleware, tools::BaseTool};
+use peri_agent::{middleware::r#trait::Middleware, tools::BaseTool};
 
 use super::{web_fetch::WebFetchTool, web_search::WebSearchTool};
 
@@ -27,7 +27,7 @@ impl Default for WebMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for WebMiddleware {
+impl Middleware for WebMiddleware {
     fn name(&self) -> &str {
         "WebMiddleware"
     }

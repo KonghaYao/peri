@@ -22,6 +22,7 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
 
         // ESC: no longer quits main window; only clears buffer while loading
         Input { key: Key::Esc, .. } if app.session_mgr.current_mut().ui.loading => {
+            // 清除 loading 期间缓存的 pending_messages
             if !app
                 .session_mgr
                 .current_mut()
@@ -74,7 +75,7 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
 
         // Ctrl+V: try pasting clipboard image first, fallback to text paste
         // Loading 时同样允许——粘贴的文本/图片会进入 textarea / pending_attachments，
-        // 后续 Enter 把消息 push 到 pending_messages 队列。
+        // 后续 Enter 把消息 push 到 MessageQueue。
         Input {
             key: Key::Char('v'),
             ctrl: true,
@@ -137,14 +138,13 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
             let text = text.trim().to_string();
             if !text.is_empty() {
                 if app.session_mgr.current_mut().ui.loading {
-                    // Loading state: buffer message
+                    // Loading state: buffer to pending_messages（Agent 完成后自动提交）
                     app.session_mgr
                         .current_mut()
                         .messages
                         .pending_messages
                         .push(text);
                     app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
-                    app.update_textarea_hint();
                 } else if text.starts_with('/') {
                     app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
                     // SAFETY: command_registry is nested inside App; dispatch needs &mut App

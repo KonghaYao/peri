@@ -4,6 +4,7 @@
         let mut state = AgentState::new("/nonexistent/path");
         let result = mw.before_agent(&mut state).await;
         assert!(result.is_ok());
+        assert!(contribution(&mw).is_none());
         assert_eq!(state.messages().len(), 0);
     }
 
@@ -18,9 +19,9 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        assert_eq!(state.messages().len(), 1);
-        assert!(state.messages()[0].is_system());
-        assert!(state.messages()[0].content().contains("Project Guide"));
+        assert_eq!(state.messages().len(), 0, "before_agent 不应再 prepend 消息");
+        let contribution = contribution(&mw).unwrap();
+        assert!(contribution.contains("Project Guide"));
     }
 
     #[tokio::test]
@@ -34,12 +35,12 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        assert_eq!(state.messages().len(), 1);
-        assert!(state.messages()[0].content().contains("agents content"));
+        let contribution = contribution(&mw).unwrap();
+        assert!(contribution.contains("agents content"));
     }
 
     #[tokio::test]
-    async fn test_prepends_before_existing_messages() {
+    async fn test_contribution_not_prepended_to_state() {
         use tempfile::tempdir;
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("AGENTS.md"), "system instructions").unwrap();
@@ -49,10 +50,11 @@
         state.add_message(BaseMessage::human("user question"));
         mw.before_agent(&mut state).await.unwrap();
 
-        // 系统消息应在 human 消息之前
-        assert_eq!(state.messages().len(), 2);
-        assert!(state.messages()[0].is_system());
-        assert!(matches!(state.messages()[1], BaseMessage::Human { .. }));
+        // before_agent 不应向 state 写入消息，只缓存到 prompt_contribution
+        assert_eq!(state.messages().len(), 1);
+        assert!(matches!(state.messages()[0], BaseMessage::Human { .. }));
+        let contribution = contribution(&mw).unwrap();
+        assert!(contribution.contains("system instructions"));
     }
 
     #[tokio::test]
@@ -66,9 +68,8 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        assert_eq!(
-            state.messages().len(),
-            0,
+        assert!(
+            contribution(&mw).is_none(),
             "excluded file should not be loaded"
         );
     }
@@ -83,8 +84,8 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        assert_eq!(state.messages().len(), 1);
-        assert!(state.messages()[0].content().contains("should be loaded"));
+        let contribution = contribution(&mw).unwrap();
+        assert!(contribution.contains("should be loaded"));
     }
 
     // ── CLAUDE.local.md tests ──────────────────────────────────────────────
@@ -99,8 +100,8 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        assert_eq!(state.messages().len(), 1);
-        assert!(state.messages()[0].content().contains("local only content"));
+        let contribution = contribution(&mw).unwrap();
+        assert!(contribution.contains("local only content"));
     }
 
     #[tokio::test]
@@ -114,10 +115,9 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        assert_eq!(state.messages().len(), 1);
-        let content = state.messages()[0].content();
-        assert!(content.contains("main content"));
-        assert!(content.contains("local content"));
+        let contribution = contribution(&mw).unwrap();
+        assert!(contribution.contains("main content"));
+        assert!(contribution.contains("local content"));
     }
 
     #[tokio::test]
@@ -131,10 +131,9 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        assert_eq!(state.messages().len(), 1);
-        let content = state.messages()[0].content();
-        assert!(content.contains("main content"));
-        assert!(!content.contains("local"));
+        let contribution = contribution(&mw).unwrap();
+        assert!(contribution.contains("main content"));
+        assert!(!contribution.contains("local"));
     }
 
     // ── @import tests ──────────────────────────────────────────────────────
@@ -155,7 +154,7 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        let content = state.messages()[0].content();
+        let content = contribution(&mw).unwrap();
         assert!(content.contains("header"));
         assert!(content.contains("imported rules"));
         assert!(content.contains("footer"));
@@ -178,7 +177,7 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        let content = state.messages()[0].content();
+        let content = contribution(&mw).unwrap();
         assert!(content.contains("inner content"));
     }
 

@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use peri_agent::{messages::BaseMessage, tools::ToolDefinition};
+
 /// 工具调用的中间缓冲数据（start 时存储，end 时取出组合成完整 span-create）
 pub(crate) struct PendingTool {
     pub(crate) span_id: String,
@@ -13,6 +15,26 @@ pub(crate) struct PendingTool {
     pub(crate) start_time: String,
     /// 父 span ID（= 所属批次的 tools_batch_span_id）
     pub(crate) parent_span_id: String,
+}
+
+/// LLM Generation 缓存数据（on_llm_start 写入，on_llm_request_payload 补充 raw_body，
+/// on_llm_end 取出生成 GenerationCreate 事件）。
+///
+/// 取代旧元组 `(String, Vec<BaseMessage>, Vec<ToolDefinition>, String)`，
+/// 具名字段降低新增字段时的漏改风险（validate agent 风险点 #1）。
+#[derive(Default)]
+pub(crate) struct GenerationCached {
+    /// Langfuse Generation ID（new_uuid）
+    pub(crate) gen_id: Option<String>,
+    /// LLM 输入消息快照（fallback 序列化用）
+    pub(crate) messages: Vec<BaseMessage>,
+    /// LLM 工具定义快照（fallback 序列化用）
+    pub(crate) tools: Vec<ToolDefinition>,
+    /// RFC3339 开始时间戳
+    pub(crate) start_time: Option<String>,
+    /// Provider 实际请求体（on_llm_request_payload 写入；on_llm_end 优先用此字段，
+    /// fallback 到 messages+tools 抽象序列化）
+    pub(crate) raw_body: Option<serde_json::Value>,
 }
 
 /// SubAgent 追踪上下文

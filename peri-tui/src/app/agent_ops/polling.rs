@@ -18,23 +18,6 @@ impl App {
                 return true;
             }
         }
-        // 优先处理延迟的后台任务 continuation（由 BackgroundTaskCompleted 处理器设置）
-        // 只有在 loading=false 时才 take()，避免 loading=true（如 compact 中）时
-        // continuation 被消费但未使用而永久丢失
-        if !self.session_mgr.current_mut().ui.loading {
-            if let Some(results) = self
-                .session_mgr
-                .current_mut()
-                .agent
-                .bg_task_state
-                .pending_continuation
-                .take()
-            {
-                tracing::info!("auto-submitting background task continuation with tool results");
-                self.submit_bg_continuation(results);
-                return true;
-            }
-        }
 
         // Check for events from ACP notification channel (primary path)
         let has_acp = self
@@ -62,6 +45,56 @@ impl App {
             {
                 self.apply_pipeline_action(action);
                 updated = true;
+            }
+        }
+
+        // Agent 空闲时，优先消费 pending_messages（用户输入缓存 + Workflow 完成
+        // 通知；二者都需 agent review 语义，与异步事件优先级不同）。
+        // cron/channel/bg_results 等纯异步事件由下方 v2 queue drain 路径处理。
+        // 优先级：bg continuation（pending_continuation）已由 handle_done/handle_error
+        // 中的 flush 路径处理，此处只处理 idle 时的 pending_messages。
+        if !self.session_mgr.current().ui.loading
+            && !self
+                .session_mgr
+                .current()
+                .messages
+                .pending_messages
+                .is_empty()
+        {
+            self.flush_pending_messages();
+            return true;
+        }
+
+        // Agent 空闲且无 pending 用户输入时，drain 共享 v2 MessageQueue 的
+        // Prompt/Defer 消息（cron/channel 等异步事件），合并文本调 submit_message
+        // 触发新一轮（接收方主动续跑）。stages 内部 drain_for_receive 只在 agent
+        // 运行时（loading=true）执行，与本处的 idle-only drain 互斥，无冲突。
+        // submit_message 同步执行，会立即 set_loading(true)，故 return true 后下一帧
+        // !loading 检查自然失败，避免重入。
+        if !self.session_mgr.current().ui.loading {
+            if let Some(queue) = self.v2_queue_for_current() {
+                if let Some(awakened) = queue.drain_for_end() {
+                    let combined: String = awakened
+                        .iter()
+                        .map(|m| m.message.content())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    if !combined.is_empty() {
+                        tracing::info!(
+                            count = awakened.len(),
+                            sources = ?awakened.iter().map(|m| &m.source).collect::<Vec<_>>(),
+                            "v2 queue drained, submitting as new prompt"
+                        );
+                        self.submit_message(combined);
+                        return true;
+                    } else {
+                        tracing::warn!(
+                            count = awakened.len(),
+                            "v2 queue drained but combined text empty; messages dropped"
+                        );
+                    }
+                }
             }
         }
 
@@ -103,12 +136,10 @@ impl App {
         updated
     }
 
-    /// 每帧调用：消费 channel 消息通知，agent 空闲时直接提交，
-    /// agent 运行中时缓冲到 pending_messages。
+    /// 每帧调用：消费 channel 消息通知。
+    /// 异步触发通过 v2_queue_for_current() 注入共享 v2 MessageQueue（Defer kind）。
+    /// ACP session 未就绪时 graceful drop。
     fn poll_channel_notifications(&mut self) {
-        const MAX_PENDING: usize = 10;
-
-        // Drain notifications from channel receiver first (no self borrow across submit)
         let mut channel_notifications = Vec::new();
         {
             let session = &mut self.session_mgr.current_mut();
@@ -120,25 +151,31 @@ impl App {
         }
 
         for notif in channel_notifications {
-            let xml = format!(
-                r#"<channel source="{}" chat_id="{}">{}</channel>"#,
-                notif.source, notif.chat_id, notif.text
-            );
-
-            let loading = self.session_mgr.current_mut().ui.loading;
-            if !loading {
-                // Agent is idle: submit immediately
-                self.submit_message(xml);
-            } else {
-                let pending_messages =
-                    &mut self.session_mgr.current_mut().messages.pending_messages;
-                if pending_messages.len() < MAX_PENDING {
-                    tracing::debug!(source = %notif.source, "channel 消息排队（agent 运行中）");
-                    pending_messages.push(xml);
-                } else {
-                    tracing::warn!(
-                        "pending_messages 已达上限 {}，丢弃 channel 消息",
-                        MAX_PENDING
+            // 异步到达，用 Defer kind：本轮 Receive 跳过，End 阶段唤醒新 turn
+            // （与 executor.rs 的 bg_results 注入语义一致）
+            match self.v2_queue_for_current() {
+                Some(queue) => {
+                    let payload = format!(
+                        "<system-reminder><channel source=\"{}\" chat_id=\"{}\">{}</channel></system-reminder>",
+                        notif.source, notif.chat_id, notif.text
+                    );
+                    queue.push(peri_agent::session::queue::QueuedMessage::defer(
+                        peri_agent::session::queue::MessageSource::ChannelMessage,
+                        peri_agent::messages::BaseMessage::human(
+                            peri_agent::messages::MessageContent::text(payload),
+                        ),
+                    ));
+                    tracing::info!(
+                        source = %notif.source,
+                        chat_id = %notif.chat_id,
+                        "channel notification injected to v2 queue"
+                    );
+                }
+                None => {
+                    // ACP session 尚未建立，drain 以避免背压，丢弃
+                    tracing::debug!(
+                        source = %notif.source,
+                        "channel notification dropped (no v2 queue; ACP session not ready)"
                     );
                 }
             }
@@ -207,7 +244,9 @@ impl App {
         updated
     }
 
-    /// 每帧调用：检查 cron 触发事件，空闲时自动提交 prompt
+    /// 每帧调用：检查 cron 触发事件。
+    /// 异步触发通过 v2_queue_for_current() 注入共享 v2 MessageQueue（Defer kind）。
+    /// ACP session 未就绪时 graceful drop。
     pub fn poll_cron_triggers(&mut self) {
         let cron_triggers: Vec<_> = self
             .services
@@ -223,27 +262,29 @@ impl App {
             })
             .unwrap_or_default();
         for trigger in cron_triggers {
-            if !self.session_mgr.current_mut().ui.loading {
-                self.submit_message(trigger.prompt);
-            } else {
-                // Agent 正在执行，缓冲触发事件等待 Done 后自动发送
-                const MAX_PENDING: usize = 10;
-                if self
-                    .session_mgr
-                    .current_mut()
-                    .messages
-                    .pending_messages
-                    .len()
-                    < MAX_PENDING
-                {
-                    tracing::debug!(prompt = %trigger.prompt, "cron trigger buffered (agent busy)");
-                    self.session_mgr
-                        .current_mut()
-                        .messages
-                        .pending_messages
-                        .push(trigger.prompt);
-                } else {
-                    tracing::warn!("pending_messages 已达上限 {}，丢弃 cron 触发", MAX_PENDING);
+            // Cron 是用户预设的主动触发，用 goal steering 语义（<goal-message>）
+            match self.v2_queue_for_current() {
+                Some(queue) => {
+                    let payload = format!(
+                        "<goal-message>Cron triggered: {}</goal-message>",
+                        trigger.prompt
+                    );
+                    queue.push(peri_agent::session::queue::QueuedMessage::defer(
+                        peri_agent::session::queue::MessageSource::CronTrigger,
+                        peri_agent::messages::BaseMessage::human(
+                            peri_agent::messages::MessageContent::text(payload),
+                        ),
+                    ));
+                    tracing::info!(
+                        prompt = %trigger.prompt,
+                        "cron trigger injected to v2 queue"
+                    );
+                }
+                None => {
+                    tracing::debug!(
+                        prompt = %trigger.prompt,
+                        "cron trigger dropped (no v2 queue; ACP session not ready)"
+                    );
                 }
             }
         }
@@ -252,5 +293,32 @@ impl App {
     /// 每帧调用：@ mention 已改为同步刷新，此处为 no-op（保留接口兼容）
     pub fn poll_at_mention(&mut self) -> bool {
         false
+    }
+
+    /// 排空 workflow 轮询通道，更新 tracker（状态栏读）与 panel（若打开）。
+    ///
+    /// polling 生命周期跟 panel 解耦：panel 关闭不停止 polling，
+    /// 这样状态栏的 workflow 计数仍能持续刷新。
+    /// polling 在 open_workflows_panel 首次打开后启动，session 切换时由
+    /// `workflow_poll_kill` 被 drop 而自然退出。
+    pub fn poll_workflow_runs(&mut self) -> bool {
+        let mut updated = false;
+        if let Some(ref mut rx) = self.workflow_poll_rx {
+            while let Ok(snapshots) = rx.try_recv() {
+                // 先写 tracker（状态栏源），保证 panel 未打开时也有数据
+                self.global_ui
+                    .workflow_tracker
+                    .replace_runs(snapshots.clone());
+                // panel 打开则同步刷新
+                if let Some(panel) = self
+                    .global_panels
+                    .get_mut::<crate::app::workflow_panel::WorkflowPanel>()
+                {
+                    panel.update_runs(snapshots);
+                }
+                updated = true;
+            }
+        }
+        updated
     }
 }

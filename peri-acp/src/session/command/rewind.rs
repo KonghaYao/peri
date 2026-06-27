@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use peri_agent::agent::events::AgentEvent as ExecutorEvent;
+use peri_agent::agent::events::ExecutorEvent;
 use peri_agent::messages::{BaseMessage, ContentBlock, MessageId};
 use tracing::{debug, warn};
 

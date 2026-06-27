@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use peri_agent::{agent::state::State, middleware::r#trait::Middleware, tools::BaseTool};
+use peri_agent::{middleware::r#trait::Middleware, tools::BaseTool};
 
 use super::{
     tools::{CronListTool, CronRegisterTool, CronRemoveTool},
@@ -21,7 +21,7 @@ impl CronMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for CronMiddleware {
+impl Middleware for CronMiddleware {
     fn name(&self) -> &str {
         "CronMiddleware"
     }

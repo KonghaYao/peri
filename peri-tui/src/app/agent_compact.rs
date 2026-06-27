@@ -1,4 +1,4 @@
-use peri_agent::{agent::events::CompactFileInfo, messages::BaseMessage};
+use peri_agent::messages::BaseMessage;
 
 use super::{message_pipeline::PipelineAction, *};
 
@@ -21,7 +21,7 @@ impl App {
     pub(crate) fn handle_compact_completed(
         &mut self,
         _summary: String,
-        files: Vec<CompactFileInfo>,
+        files: Vec<peri_acp::event::CompactFileInfoDto>,
         skills: Vec<String>,
         micro_cleared: usize,
         messages: Vec<BaseMessage>,

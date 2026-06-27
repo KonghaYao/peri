@@ -37,6 +37,8 @@ pub(super) struct SessionInfo {
     pub(super) frozen: Option<FrozenSessionData>,
     /// Session-scoped agent pool for LLM instance reuse.
     pub(super) agent_pool: AgentPool,
+    /// Session 级 WorkflowMiddleware。
+    pub(super) workflow_middleware: Option<Arc<peri_middlewares::workflow::WorkflowMiddleware>>,
 }
 
 /// Stdio 传输环境的共享上下文

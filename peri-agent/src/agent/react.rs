@@ -196,9 +196,34 @@ pub trait ReactLLM: Send + Sync {
     fn context_window(&self) -> u32 {
         200_000
     }
+
+    /// 注入事件处理器（用于 RetryableLLM 等装饰器转发 LlmRetrying 等事件）。
+    /// 默认空实现——非 RetryableLLM 的 LLM 无需此能力。
+    fn inject_event_handler(
+        &mut self,
+        _handler: Option<std::sync::Arc<dyn crate::agent::events::AgentEventHandler>>,
+    ) {
+    }
+
+    /// 构造 Provider 实际请求体（raw body），用于 Langfuse Generation input 上传。
+    ///
+    /// 默认返回 None，Langfuse tracer fallback 到 messages+tools 抽象序列化。
+    /// Provider 适配器包装（[`crate::llm::BaseModelReactLLM`]）override 本方法，
+    /// 委托给 `BaseModel::build_request_body`，返回 Provider-native 完整请求体
+    /// （含正确工具格式和 system 位置）。
+    ///
+    /// `messages` / `tools` 与 `generate_reasoning` 同源——caller 在 reason stage
+    /// 同时调用两者，确保 raw body 与实际 invoke 请求体完全一致。
+    fn build_provider_request_body(
+        &self,
+        _messages: &[BaseMessage],
+        _tools: &[&dyn BaseTool],
+    ) -> Option<serde_json::Value> {
+        None
+    }
 }
 
-/// Blanket impl：允许将 Box<dyn ReactLLM + Send + Sync> 直接用于 ReActAgent
+/// Blanket impl：允许将 Box<dyn ReactLLM + Send + Sync> 直接用于 v2 stages
 #[async_trait::async_trait]
 impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
     async fn generate_reasoning(
@@ -218,5 +243,20 @@ impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
 
     fn context_window(&self) -> u32 {
         (**self).context_window()
+    }
+
+    fn inject_event_handler(
+        &mut self,
+        handler: Option<std::sync::Arc<dyn crate::agent::events::AgentEventHandler>>,
+    ) {
+        (**self).inject_event_handler(handler);
+    }
+
+    fn build_provider_request_body(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+    ) -> Option<serde_json::Value> {
+        (**self).build_provider_request_body(messages, tools)
     }
 }

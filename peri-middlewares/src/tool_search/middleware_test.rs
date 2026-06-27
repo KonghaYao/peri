@@ -59,9 +59,7 @@
     fn test_collect_tools_returns_meta_tools() {
         let (index, shared) = build_test_components();
         let mw = ToolSearchMiddleware::new(index, shared);
-        let tools = <ToolSearchMiddleware as Middleware<
-            peri_agent::agent::state::AgentState,
-        >>::collect_tools(&mw, "/tmp");
+        let tools = <ToolSearchMiddleware as Middleware>::collect_tools(&mw, "/tmp");
 
         assert!(tools.len() >= 3, "expected at least 3 tools (meta + deferred)");
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
@@ -71,45 +69,40 @@
     }
 
     #[tokio::test]
-    async fn test_before_agent_injects_system_prompt() {
+    async fn test_before_agent_caches_prompt_contribution() {
         let (index, shared) = build_test_components();
         let mw = ToolSearchMiddleware::new(index, shared);
 
         let mut state = peri_agent::agent::state::AgentState::new("/tmp");
         mw.before_agent(&mut state).await.unwrap();
 
-        let messages = state.messages();
-        assert!(!messages.is_empty(), "before_agent 应注入 system 消息");
-        let first = messages.first().unwrap();
         assert!(
-            matches!(first, BaseMessage::System { .. }),
-            "第一条消息应为 System"
+            contribution(&mw).is_some(),
+            "before_agent 应缓存 prompt 贡献"
         );
+        let contribution = contribution(&mw).unwrap();
         assert!(
-            first.content().contains("CronRegister"),
-            "system 消息应包含延迟工具列表"
+            contribution.contains("CronRegister"),
+            "prompt 贡献应包含延迟工具列表"
         );
+        // before_agent 不应再向 state 写入消息
+        assert_eq!(state.messages().len(), 0);
     }
 
     #[tokio::test]
-    async fn test_second_before_agent_injects_same_cached_prompt() {
+    async fn test_second_before_agent_caches_same_contribution() {
         let (index, shared) = build_test_components();
         let mw = ToolSearchMiddleware::new(index, shared);
 
         let mut state1 = peri_agent::agent::state::AgentState::new("/tmp");
         mw.before_agent(&mut state1).await.unwrap();
-        let first_content = state1.messages()[0].content().to_string();
+        let first_content = contribution(&mw).unwrap();
 
         let mut state2 = peri_agent::agent::state::AgentState::new("/tmp");
         mw.before_agent(&mut state2).await.unwrap();
         assert_eq!(
-            state2.messages().len(),
-            1,
-            "每轮都应注入 system 消息（System 消息被过滤后需重新注入）"
-        );
-        assert_eq!(
-            state2.messages()[0].content(),
+            contribution(&mw).unwrap(),
             first_content,
-            "第二轮注入的内容应与首轮完全一致（缓存）"
+            "第二轮缓存的贡献应与首轮完全一致"
         );
     }

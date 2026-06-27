@@ -1,53 +1,79 @@
 use async_trait::async_trait;
 
 use crate::{
-    agent::{
-        react::{AgentOutput, Reasoning, ToolCall, ToolResult},
-        state::State,
-    },
+    agent::react::{AgentOutput, Reasoning, ToolCall, ToolResult},
     error::{AgentError, AgentResult},
+    hitl::BatchItem,
+    middleware::state::MiddlewareState,
     tools::BaseTool,
 };
 
-/// 中间件 trait - 与 TypeScript AgentMiddleware 对齐
+/// 中间件 trait - 与 TypeScript AgentMiddleware 对齐（v2 扩展）
 ///
-/// 生命周期钩子执行顺序：
+/// 所有钩子用 `&mut dyn MiddlewareState`，MiddlewareChain 不泛型，v2 stages 直接调用。
+///
+/// ## 生命周期钩子执行顺序
+///
+/// ── Session 级 ──
+/// 1.  on_session_start       - Session 创建时
+/// 17. on_session_end         - Session 销毁时
+///
+/// ── 用户输入 ──
+/// 2.  on_user_prompt         - 用户提交 prompt 时
+///
 /// ── Agent 生命周期级 ──
-/// 1. before_agent  - Agent 开始执行前
+/// 3.  before_agent           - Agent 开始执行前
 ///
 /// ── 每轮 ReAct 迭代 ──
-/// 2. before_model  - 每轮 LLM 调用前（在 call_llm 之前）
-/// 3. after_model   - 每轮 LLM 调用后（call_llm 返回后、工具分发/最终答案前）
-/// 4. before_tool   - 每次工具调用前（可修改工具调用参数）
-/// 5. after_tool    - 每次工具调用后
+/// 4.  before_model           - 每轮 LLM 调用前
+/// 5.  after_model            - 每轮 LLM 调用后
+/// 6.  before_tools_batch     - 批量工具调用前
+/// 7.  before_tool            - 每次工具调用前
+/// 8.  after_tool             - 每次工具调用后
+/// 9.  after_tools_batch      - 批量结果写入后
 /// ── 每轮 ReAct 迭代 ──
 ///
-/// 6. after_agent   - Agent 完成后（可修改最终输出）
-/// 7. on_error      - 发生错误时
+/// 10. after_agent            - Agent 完成后
+/// 11. on_turn_end            - 每轮 ReAct 结束时
+///
+/// ── Compact（before_model 之前的条件性步骤）──
+/// 12. before_compact          - Compact 启动前
+/// 13. after_compact           - Compact 完成后
+///
+/// ── 观测层 ──
+/// 14. on_permission_request   - 权限审批请求时（只读）
+/// 15. on_subagent_start       - SubAgent 启动时
+/// 16. on_subagent_stop        - SubAgent 结束时
+/// 17. on_notification         - 通知事件
+///
+/// ── 错误 ──
+/// 18. on_error                - 发生错误时
 #[async_trait]
-pub trait Middleware<S: State>: Send + Sync {
+pub trait Middleware: Send + Sync {
     /// 中间件名称（用于日志和调试）
     fn name(&self) -> &str;
 
     /// 声明此中间件提供的工具列表（根据工作目录动态生成）
     ///
     /// 默认返回空列表（无工具的中间件无需实现）。
-    /// `ReActAgent` 在 `execute` 开始时自动收集所有中间件的工具并合并到工具表。
+    /// v2 stages 在 `build_stage_context` 入口自动收集所有中间件的工具并合并到 `shared_tools`。
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
         vec![]
     }
 
     /// Agent 执行前调用
     /// 可用于初始化状态、注入上下文等
-    async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
-        let _ = state;
+    async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
         Ok(())
     }
 
     /// 工具调用前调用
     /// 返回可能被修改的 ToolCall（用于参数注入、权限检查等）
-    async fn before_tool(&self, state: &mut S, tool_call: &ToolCall) -> AgentResult<ToolCall> {
-        let _ = state;
+    async fn before_tool(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        tool_call: &ToolCall,
+    ) -> AgentResult<ToolCall> {
         Ok(tool_call.clone())
     }
 
@@ -60,7 +86,7 @@ pub trait Middleware<S: State>: Send + Sync {
     /// 返回的错误可以是 `ToolRejected`（不中断流程）或其它错误（中断流程）。
     async fn before_tools_batch(
         &self,
-        state: &mut S,
+        state: &mut dyn MiddlewareState,
         calls: &[ToolCall],
     ) -> Vec<AgentResult<ToolCall>> {
         let mut results = Vec::with_capacity(calls.len());
@@ -74,11 +100,10 @@ pub trait Middleware<S: State>: Send + Sync {
     /// 可用于日志记录、结果转换等
     async fn after_tool(
         &self,
-        state: &mut S,
-        tool_call: &ToolCall,
-        result: &ToolResult,
+        _state: &mut dyn MiddlewareState,
+        _tool_call: &ToolCall,
+        _result: &ToolResult,
     ) -> AgentResult<()> {
-        let _ = (state, tool_call, result);
         Ok(())
     }
 
@@ -86,10 +111,9 @@ pub trait Middleware<S: State>: Send + Sync {
     /// 可用于聚合检查、批量日志等。
     async fn after_tools_batch(
         &self,
-        _state: &mut S,
+        _state: &mut dyn MiddlewareState,
         _results: &[(ToolCall, ToolResult)],
     ) -> AgentResult<()> {
-        let _ = (_state, _results);
         Ok(())
     }
 
@@ -97,8 +121,7 @@ pub trait Middleware<S: State>: Send + Sync {
     ///
     /// 可用于上下文压缩、token 预算检查等预处理操作。
     /// 默认空实现。
-    async fn before_model(&self, state: &mut S) -> AgentResult<()> {
-        let _ = state;
+    async fn before_model(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
         Ok(())
     }
 
@@ -107,22 +130,148 @@ pub trait Middleware<S: State>: Send + Sync {
     /// `reasoning` 包含模型的完整响应（思考文本、工具调用列表、最终答案）。
     /// 可用于响应后处理、token 累积校验、日志记录等。
     /// 默认空实现。
-    async fn after_model(&self, state: &mut S, reasoning: &Reasoning) -> AgentResult<()> {
-        let _ = (state, reasoning);
+    async fn after_model(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        _reasoning: &Reasoning,
+    ) -> AgentResult<()> {
         Ok(())
     }
 
     /// Agent 执行后调用
     /// 返回可能被修改的 AgentOutput（用于后处理、格式化等）
-    async fn after_agent(&self, state: &mut S, output: &AgentOutput) -> AgentResult<AgentOutput> {
-        let _ = state;
+    async fn after_agent(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        output: &AgentOutput,
+    ) -> AgentResult<AgentOutput> {
         Ok(output.clone())
     }
 
     /// 错误处理
     /// 可用于记录错误、触发告警等
-    async fn on_error(&self, state: &mut S, error: &AgentError) -> AgentResult<()> {
-        let _ = (state, error);
+    async fn on_error(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        _error: &AgentError,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+
+    // ── 声明式 Prompt 贡献 ──
+
+    /// 声明此中间件对 System Prompt 的文本贡献。
+    ///
+    /// Executor 在 `before_agent` 完成后收集所有中间件的贡献，
+    /// 拼接后追加到 frozen system prompt 之后。
+    /// 不再通过 `prepend_message` 注入——保持 prompt cache 前缀稳定。
+    fn prompt_contribution(&self) -> Option<String> {
+        None
+    }
+
+    // ── Session 生命周期 ──
+
+    /// Session 创建时触发（`session/new` 完成后、ReAct 循环启动前）。
+    ///
+    /// 可用于初始化会话级状态、注册一次性资源等。
+    async fn on_session_start(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        Ok(())
+    }
+
+    /// Session 销毁时触发。
+    ///
+    /// 可用于资源释放、孤儿 Agent 清理等。
+    async fn on_session_end(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        Ok(())
+    }
+
+    // ── 用户输入 ──
+
+    /// 用户提交 prompt 时触发。
+    ///
+    /// 可用于 prompt 预处理、意图识别、上下文注入等。
+    async fn on_user_prompt(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        _prompt: &str,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+
+    // ── Compact（before_model 之前的条件性步骤）──
+
+    /// Compact 启动前触发（观测层）。
+    ///
+    /// 可用于外部监听压缩开始事件，不修改 State。
+    async fn before_compact(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        Ok(())
+    }
+
+    /// Compact 完成后触发（观测层）。
+    ///
+    /// 可用于外部监听压缩结束事件、验证压缩结果等。
+    async fn after_compact(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        Ok(())
+    }
+
+    // ── 权限审批（观测层）──
+
+    /// 权限审批请求时触发（观测层，只读）。
+    ///
+    /// 可用于审计日志、审批遥测上报等。
+    async fn on_permission_request(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        _request: &BatchItem,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+
+    // ── SubAgent 生命周期 ──
+
+    /// SubAgent 启动时触发（观测层）。
+    ///
+    /// 可用于子 Agent 生命周期追踪、资源分配等。
+    async fn on_subagent_start(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        _agent_id: &str,
+        _name: &str,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+
+    /// SubAgent 结束时触发（观测层）。
+    ///
+    /// `reason` 描述子 Agent 的退出原因（正常完成/错误/中断等）。
+    async fn on_subagent_stop(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        _agent_id: &str,
+        _reason: &str,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+
+    // ── Turn 结束 ──
+
+    /// 每轮 ReAct 迭代结束时触发（在 `after_agent` 之后）。
+    ///
+    /// 可用于 turn 边界标记、Langfuse 遥测上报等。
+    async fn on_turn_end(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        Ok(())
+    }
+
+    // ── 通知 ──
+
+    /// 通知事件触发（外部通知、系统消息等）。
+    ///
+    /// 可用于将外部事件桥接到 Agent 上下文。
+    async fn on_notification(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        _message: &str,
+    ) -> AgentResult<()> {
         Ok(())
     }
 }
@@ -139,7 +288,7 @@ impl NoopMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for NoopMiddleware {
+impl Middleware for NoopMiddleware {
     fn name(&self) -> &str {
         &self.name
     }

@@ -72,6 +72,30 @@ impl BaseModelReactLLM {
         reasoning.streamed = streamed;
         reasoning
     }
+
+    /// 构造完整的 [`LlmRequest`]——`generate_reasoning` 与
+    /// `build_provider_request_body` 共享同一份构造逻辑，避免分叉导致 raw body
+    /// 与实际 invoke 请求体不一致（validate agent 风险点 #3）。
+    ///
+    /// 字段来源：messages（caller 传入）、tools（caller 传入的 `&dyn BaseTool`
+    /// 转 `ToolDefinition`）、system（`self.system`）、session_id（`self.session_id`）。
+    /// 不读 `LlmRequest` 默认字段（max_tokens/temperature 等）——这些由 Provider
+    /// 适配器在 `build_request_body` 内部从 adapter 配置补齐，与 invoke 路径同源。
+    fn build_full_llm_request(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+    ) -> LlmRequest {
+        let tool_defs = tools.iter().map(|t| t.definition()).collect();
+        let mut request = LlmRequest::new(messages.to_vec()).with_tools(tool_defs);
+        if let Some(system) = &self.system {
+            request = request.with_system(system.clone());
+        }
+        if let Some(ref sid) = self.session_id {
+            request = request.with_session_id(sid.clone());
+        }
+        request
+    }
 }
 
 #[async_trait]
@@ -82,17 +106,8 @@ impl ReactLLM for BaseModelReactLLM {
         tools: &[&dyn BaseTool],
         streaming: Option<StreamingContext>,
     ) -> AgentResult<Reasoning> {
-        let tool_defs = tools.iter().map(|t| t.definition()).collect();
-
-        let mut request = LlmRequest::new(messages.to_vec()).with_tools(tool_defs);
-
-        if let Some(system) = &self.system {
-            request = request.with_system(system.clone());
-        }
-
-        if let Some(ref sid) = self.session_id {
-            request = request.with_session_id(sid.clone());
-        }
+        // 共享 build_full_llm_request，与 build_provider_request_body 同源
+        let request = self.build_full_llm_request(messages, tools);
 
         let model_name = self.model.model_id().to_string();
         let provider = self.model.provider_name();
@@ -228,6 +243,17 @@ impl ReactLLM for BaseModelReactLLM {
     fn context_window(&self) -> u32 {
         // 委托给 BaseModel 实现，每个模型提供自己的准确上下文窗口
         self.model.context_window()
+    }
+
+    fn build_provider_request_body(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+    ) -> Option<serde_json::Value> {
+        // 与 generate_reasoning 共享 build_full_llm_request，保证 raw body 与
+        // 实际 invoke 请求体完全一致（含 system / tools / session_id 同源）。
+        let request = self.build_full_llm_request(messages, tools);
+        self.model.build_request_body(&request)
     }
 }
 

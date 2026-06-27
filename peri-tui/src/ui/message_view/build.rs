@@ -95,8 +95,8 @@ impl MessageViewModel {
                 // 单独的 <system-reminder> 标签也用于 goal steering、tool_dispatch 连续失败警告、
                 // hooks stop_hook_feedback 等中途纠正消息（CLAUDE.md TRAP），不应误识别为 compact。
                 // CONTINUATION_HINT 与 peri-agent::agent::compact::CONTINUATION_HINT 共享——
-                // /compact 命令路径（peri-acp invariant.rs）与 auto-compact 路径
-                // （peri-middlewares compact_middleware.rs）都注入此标记。
+                // /compact 命令路径（peri-acp invariant.rs）与 v2 auto-compact 路径
+                // （peri-agent compact_v2.rs::re_inject_v2）都注入此标记。
                 let hint = peri_agent::agent::compact::CONTINUATION_HINT;
                 let (display_text, system_reminder) =
                     if raw.contains("<system-reminder>") && raw.contains(hint) {

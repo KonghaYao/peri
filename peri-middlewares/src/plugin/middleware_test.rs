@@ -17,7 +17,7 @@
     #[test]
     fn test_middleware_name() {
         let mw = PluginMiddleware::new(vec![]);
-        assert_eq!(Middleware::<AgentState>::name(&mw), "PluginMiddleware");
+        assert_eq!(Middleware::name(&mw), "PluginMiddleware");
     }
 
     #[tokio::test]

@@ -768,6 +768,12 @@ async fn run_app(
                 None,
             );
 
+            // 注入 SessionManager clone 到 TUI ServiceRegistry：用于 TUI 侧
+            // cron/channel/gc 等异步触发 push 到共享 v2 MessageQueue。
+            // SessionManager 仅 `Arc<SessionManagerInner>`，clone 零成本；注入后
+            // 再把 session_manager move 进 server_config，不会冲突。
+            app.services.acp_session_manager = Some(session_manager.clone());
+
             let server_config = AcpServerConfig {
                 provider: Arc::new(parking_lot::RwLock::new(provider.clone())),
                 peri_config: shared_peri_config,
@@ -835,6 +841,10 @@ async fn run_app(
         let panic_updated = app.poll_panic_notifications();
         // 检查 cron 定时触发
         app.poll_cron_triggers();
+        // 轮询 workflow 面板数据（ACP workflow/list_runs）
+        if app.workflow_polling_active {
+            app.poll_workflow_runs();
+        }
 
         match event::next_event(&mut app).await? {
             Some(action) => match action {

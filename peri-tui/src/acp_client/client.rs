@@ -5,6 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use peri_acp::event::AcpEvent;
 use peri_acp::transport::{
     mpsc::MpscClientTransport,
     types::{AcpError, IncomingMessage, RequestId},
@@ -16,12 +17,9 @@ use tracing::{debug, error, warn};
 
 /// Notification events dispatched from the background pump to the TUI event loop.
 pub enum AcpNotification {
-    /// A `notifications/agent_event` notification carrying a peri-agent ExecutorEvent.
-    /// The TUI converts this to its own AgentEvent via `map_executor_event`.
-    AgentEvent {
-        session_id: String,
-        event: peri_agent::agent::events::AgentEvent,
-    },
+    /// A `notifications/agent_event` notification carrying an AcpEvent DTO.
+    /// The TUI converts this to its own AgentEvent via `map_acp_event`.
+    AgentEvent { session_id: String, event: AcpEvent },
     /// A `notifications/session_update` notification from the ACP server.
     SessionUpdate { session_id: String, params: Value },
     /// A `RequestPermission` request requiring HITL interaction.
@@ -58,6 +56,17 @@ impl AcpTuiClient {
     /// Check whether a session has been created.
     pub fn has_session(&self) -> bool {
         self.current_session_id.lock().unwrap().is_some()
+    }
+
+    /// Get the current session ID, if any.
+    pub fn current_session_id(&self) -> Option<String> {
+        self.current_session_id.lock().unwrap().clone()
+    }
+
+    /// Send a raw ACP request and return the response.
+    /// Used for custom RPC methods like `workflow/list_runs`.
+    pub async fn send_raw_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
+        self.transport.send_request(method, params).await
     }
 
     /// Create a new client wrapping an existing `MpscClientTransport`.
@@ -109,11 +118,9 @@ impl AcpTuiClient {
                         let event_result = if let Some(event_str) =
                             params.get("event_json").and_then(|v| v.as_str())
                         {
-                            serde_json::from_str::<peri_agent::agent::events::AgentEvent>(event_str)
+                            serde_json::from_str::<AcpEvent>(event_str)
                         } else if let Some(event_value) = params.get("event") {
-                            serde_json::from_value::<peri_agent::agent::events::AgentEvent>(
-                                event_value.clone(),
-                            )
+                            serde_json::from_value::<AcpEvent>(event_value.clone())
                         } else {
                             warn!("ACP client pump: agent_event notification missing 'event_json' or 'event' field");
                             continue;
@@ -125,12 +132,7 @@ impl AcpTuiClient {
                                     session_id = %session_id,
                                     "ACP client pump: received agent_event"
                                 );
-                                if matches!(
-                                    &event,
-                                    peri_agent::agent::events::AgentEvent::BackgroundTaskCompleted(
-                                        _
-                                    )
-                                ) {
+                                if matches!(&event, AcpEvent::BackgroundTaskCompleted { .. }) {
                                     tracing::info!(
                                         event_count = event_count,
                                         "[bg-diag] client-pump: deserialized BackgroundTaskCompleted, sending to TUI"
@@ -143,10 +145,10 @@ impl AcpTuiClient {
                                 error!(
                                     event_count = event_count,
                                     error = %e,
-                                    "ACP client pump: failed to parse AgentEvent — event LOST"
+                                    "ACP client pump: failed to parse AcpEvent — event LOST"
                                 );
                                 let _ = notification_tx.send(AcpNotification::Other {
-                                    msg: format!("failed to parse AgentEvent: {e}"),
+                                    msg: format!("failed to parse AcpEvent: {e}"),
                                 });
                             }
                         }

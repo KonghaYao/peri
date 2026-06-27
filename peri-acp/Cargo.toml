@@ -12,6 +12,7 @@ path = "src/lib.rs"
 peri-agent = { path = "../peri-agent" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-lsp = { path = "../peri-lsp" }
+peri-workflow = { path = "../peri-workflow" }
 langfuse-client = { path = "../langfuse-client" }
 agent-client-protocol = { version = "0.14", features = ["unstable"] }
 agent-client-protocol-schema = { version = "0.13", features = ["unstable_elicitation"] }

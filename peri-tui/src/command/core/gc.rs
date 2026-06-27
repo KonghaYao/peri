@@ -165,10 +165,8 @@ impl Command for GcCommand {
             ));
         }
 
-        app.active_mut()
-            .messages
-            .pending_messages
-            .push(lines.join("\n"));
+        // UI 反馈：走 ephemeral SystemNote VM 路径，不污染 BaseMessage[] / Prompt Cache。
+        app.push_system_note(lines.join("\n"));
     }
 }
 

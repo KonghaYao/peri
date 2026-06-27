@@ -9,6 +9,7 @@ pub mod once_tracker;
 pub mod output_parser;
 pub mod permission_gate;
 pub mod ssrf_guard;
+pub mod stage_firing;
 pub mod stop_block_guard;
 pub mod types;
 pub mod variables;

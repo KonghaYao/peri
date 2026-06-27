@@ -479,6 +479,20 @@ hooks-readonly-hint = 此面板为只读。要添加或修改 hook，请编辑�
 hooks-no-hooks =   未配置 hook。
 hooks-no-hooks-hint =   Hook 可通过插件 hooks/hooks.json 添加。
 
+# ---- 主题面板 ----
+
+theme-desc = 切换配色主题
+theme-title = 主题
+theme-preview = 预览
+theme-list = 主题列表
+theme-confirm = 确认
+theme-cancel = 取消
+theme-current = 当前
+theme-source-builtin = 内置
+theme-source-file = 文件
+theme-switched = 主题已切换
+theme-navigate = 浏览
+
 # ---- 历史浏览器 ----
 
 thread-browser-title =  恢复会话 ({ $cursor }/{ $total }) 

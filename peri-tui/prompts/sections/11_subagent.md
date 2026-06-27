@@ -20,18 +20,18 @@ Each agent entry shows `[model_tier]` (haiku=fastest/cheapest, sonnet=balanced, 
 **Default: pick a specialized agent. `general-purpose` is a fallback, not a default.** When you find yourself reaching for `general-purpose`, stop and scan the list below first — real usage shows `general-purpose` is over-chosen; it costs more tokens and fails more often than the specialized agent that fits the task.
 
 - **Code implementation / editing / refactoring / migration** → **`coder`** (NOT general-purpose). Built-in memory discipline prevents search loops and context waste.
-- **Code search / codebase exploration / finding patterns** → `explore` (NOT general-purpose). Read-only, context stays clean.
+- **Code search / codebase exploration / finding patterns** → `explorer` (NOT general-purpose). Read-only, context stays clean.
 - **Architecture design / implementation planning** → `plan`
 - **Code review / quality check** → `code-reviewer`
 - **Web research / documentation lookup** → `web-researcher`
 - **None of the above match** → `general-purpose` — **fallback only**. If you reach for it twice in a row for similar tasks, switch to the specialized agent you missed.
 
 **Standard pipelines** — follow these instead of inventing your own:
-- **Research**: `explore` (find code) → `plan` (design solution)
+- **Research**: `explorer` (find code) → `plan` (design solution)
 - **Implementation**: `coder` (write code) → `code-reviewer` (review for issues)
 - **Web**: `web-researcher`
 
-**Parallelization**: `[readonly]` agents (explore, plan, code-reviewer) run concurrently. `[writes]` agents (coder) must be sequenced — never run two `[writes]` agents concurrently on the same codebase, and never run a `[writes]` agent in parallel with a background agent.
+**Parallelization**: `[readonly]` agents (explorer, plan, code-reviewer) run concurrently. `[writes]` agents (coder) must be sequenced — never run two `[writes]` agents concurrently on the same codebase, and never run a `[writes]` agent in parallel with a background agent.
 
 ## Writing the prompt
 

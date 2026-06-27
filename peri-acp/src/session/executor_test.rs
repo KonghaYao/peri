@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use peri_agent::{
-    agent::{events::AgentEvent as ExecutorEvent, AgentCancellationToken},
+    agent::{events::ExecutorEvent, AgentCancellationToken},
     messages::{BaseMessage, MessageContent},
 };
 

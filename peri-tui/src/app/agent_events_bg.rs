@@ -319,6 +319,39 @@ impl App {
             );
         }
 
+        // Workflow 完成 → 走 pending_messages 路径（用户输入缓存机制）。
+        // Workflow 完成通知与用户主动输入语义更接近（都需 agent review
+        // state.json），且优先级排序明确，因此走 pending_messages 而非 v2 queue。
+        //
+        // 异步事件（cron/channel/bg_results 等）由 polling.rs 的 poll_agent 在
+        // agent idle 时 drain 共享 v2 MessageQueue 统一处理（接收方主动续跑），
+        // 与本路径互不干扰。
+        //
+        // 若 agent 空闲（loading=false），return (true, false, true) 退出事件循环，
+        // poll_agent 下一帧检查 pending_messages 并触发 flush → submit_message。
+        // 若 agent 运行中（loading=true），pending_messages 由 handle_done → flush_pending_messages 消费。
+        if agent_name.starts_with("workflow:") {
+            let workflow_name = agent_name.strip_prefix("workflow:").unwrap_or(&agent_name);
+            let continuation_text = format!(
+                "<system-reminder>\nWorkflow '{}' has completed. Please review the results from \
+                 .claude/workflow-runs/{}/state.json.\n</system-reminder>",
+                workflow_name, task_id,
+            );
+
+            let loading = self.session_mgr.current().ui.loading;
+            self.session_mgr
+                .current_mut()
+                .messages
+                .pending_messages
+                .push(continuation_text);
+
+            if !loading {
+                return (true, false, true);
+            }
+            // Agent 运行中：pending_messages 由 handle_done → flush_pending_messages 消费。
+            return (true, false, false);
+        }
+
         // 累积当前完成通知到 bg_task_state.pre_done_completions（显示文本）
         let display_notification = build_bg_display_notification(
             &task_id,

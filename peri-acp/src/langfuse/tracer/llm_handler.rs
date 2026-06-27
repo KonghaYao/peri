@@ -6,7 +6,7 @@ use langfuse_client::{GenerationBody, IngestionEvent};
 
 use peri_agent::{llm::types::TokenUsage, messages::BaseMessage, tools::ToolDefinition};
 
-use super::context::RetryAttempt;
+use super::context::{GenerationCached, RetryAttempt};
 use super::event_builder::{new_uuid, now_rfc3339, try_add_or_warn, VERSION};
 use super::usage::{build_retry_metadata, build_usage_details};
 use super::LangfuseTracer;
@@ -24,10 +24,28 @@ impl LangfuseTracer {
         let start_time = now_rfc3339();
         self.generation_data.insert(
             step,
-            (gen_id, messages.to_vec(), tools.to_vec(), start_time),
+            GenerationCached {
+                gen_id: Some(gen_id),
+                messages: messages.to_vec(),
+                tools: tools.to_vec(),
+                start_time: Some(start_time),
+                raw_body: None,
+            },
         );
         self.active_step = Some(step);
         self.retry_attempts.clear();
+    }
+
+    /// LLM 请求体接收：紧随 on_llm_start 之后，缓存 Provider 实际请求体。
+    ///
+    /// on_llm_end 时优先用 raw_body 作为 Generation input（Provider-native 完整请求体，
+    /// 含正确工具格式与 system 位置），fallback 到 messages+tools 抽象序列化。
+    ///
+    /// 时序约束：必须 on_llm_start 先到（建 generation_data 缓存），否则本方法 no-op。
+    pub fn on_llm_request_payload(&mut self, step: usize, body: std::sync::Arc<serde_json::Value>) {
+        if let Some(cached) = self.generation_data.get_mut(&step) {
+            cached.raw_body = Some((*body).clone());
+        }
     }
 
     /// LLM 调用结束：同步创建 Generation 事件
@@ -39,23 +57,28 @@ impl LangfuseTracer {
         output: &str,
         usage: Option<&TokenUsage>,
     ) {
-        let Some((gen_id, messages, tools, start_time)) = self.generation_data.remove(&step) else {
+        let Some(cached) = self.generation_data.remove(&step) else {
             return;
         };
         let end_time = now_rfc3339();
 
-        let messages_val = serde_json::to_value(&messages).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, trace_id = %self.trace_id, "langfuse: messages 序列化失败");
-            serde_json::json!({ "error": "serialization failed", "detail": e.to_string() })
-        });
-        let tools_val = serde_json::to_value(&tools).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, trace_id = %self.trace_id, "langfuse: tools 序列化失败");
-            serde_json::json!({ "error": "serialization failed", "detail": e.to_string() })
-        });
-        let input_json = serde_json::json!({
-            "messages": messages_val,
-            "tools": tools_val,
-        });
+        // 优先用 raw_body（Provider 实际请求体）；fallback 到 messages+tools 抽象序列化
+        let input_json = if let Some(body) = cached.raw_body {
+            body
+        } else {
+            let messages_val = serde_json::to_value(&cached.messages).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, trace_id = %self.trace_id, "langfuse: messages 序列化失败");
+                serde_json::json!({ "error": "serialization failed", "detail": e.to_string() })
+            });
+            let tools_val = serde_json::to_value(&cached.tools).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, trace_id = %self.trace_id, "langfuse: tools 序列化失败");
+                serde_json::json!({ "error": "serialization failed", "detail": e.to_string() })
+            });
+            serde_json::json!({
+                "messages": messages_val,
+                "tools": tools_val,
+            })
+        };
 
         let langfuse_usage_details = usage.map(build_usage_details);
 
@@ -63,6 +86,8 @@ impl LangfuseTracer {
         self.active_step = None;
         self.retry_attempts.clear();
 
+        let gen_id = cached.gen_id.unwrap_or_default();
+        let start_time = cached.start_time.unwrap_or_default();
         let body = GenerationBody {
             id: Some(gen_id.clone()),
             trace_id: Some(self.trace_id.clone()),

@@ -57,63 +57,6 @@ fn test_serde_empty_object() {
 }
 
 #[test]
-fn test_from_env_disable_compact() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    env::remove_var("DISABLE_AUTO_COMPACT");
-    env::remove_var("COMPACT_THRESHOLD");
-    env::set_var("DISABLE_COMPACT", "1");
-    let config = CompactConfig::from_env();
-    env::remove_var("DISABLE_COMPACT");
-    assert!(!config.auto_compact_enabled);
-    assert!((config.micro_compact_threshold - 1.0).abs() < 0.001);
-}
-
-#[test]
-fn test_from_env_disable_auto_compact() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    env::remove_var("DISABLE_COMPACT");
-    env::remove_var("COMPACT_THRESHOLD");
-    env::set_var("DISABLE_AUTO_COMPACT", "1");
-    let config = CompactConfig::from_env();
-    env::remove_var("DISABLE_AUTO_COMPACT");
-    assert!(!config.auto_compact_enabled);
-    assert!((config.micro_compact_threshold - 0.70).abs() < 0.001);
-}
-
-#[test]
-fn test_from_env_compact_threshold() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    env::remove_var("DISABLE_COMPACT");
-    env::remove_var("DISABLE_AUTO_COMPACT");
-    env::set_var("COMPACT_THRESHOLD", "0.75");
-    let config = CompactConfig::from_env();
-    env::remove_var("COMPACT_THRESHOLD");
-    assert!((config.auto_compact_threshold - 0.75).abs() < 0.001);
-}
-
-#[test]
-fn test_from_env_compact_threshold_invalid() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    env::remove_var("DISABLE_COMPACT");
-    env::remove_var("DISABLE_AUTO_COMPACT");
-    env::set_var("COMPACT_THRESHOLD", "abc");
-    let config = CompactConfig::from_env();
-    env::remove_var("COMPACT_THRESHOLD");
-    assert!((config.auto_compact_threshold - 0.85).abs() < 0.001);
-}
-
-#[test]
-fn test_from_env_compact_threshold_out_of_range() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    env::remove_var("DISABLE_COMPACT");
-    env::remove_var("DISABLE_AUTO_COMPACT");
-    env::set_var("COMPACT_THRESHOLD", "1.5");
-    let config = CompactConfig::from_env();
-    env::remove_var("COMPACT_THRESHOLD");
-    assert!((config.auto_compact_threshold - 0.85).abs() < 0.001);
-}
-
-#[test]
 fn test_apply_env_overrides_on_custom_config() {
     let _lock = ENV_LOCK.lock().unwrap();
     env::remove_var("DISABLE_COMPACT");

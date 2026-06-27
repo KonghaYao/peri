@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use peri_agent::{
-    agent::events::{AgentEvent as ExecutorEvent, CompactFileInfo},
+    agent::events::{CompactFileInfo, ExecutorEvent},
     messages::BaseMessage,
 };
 

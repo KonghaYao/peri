@@ -144,6 +144,9 @@ impl App {
             // 恢复的历史 thread_id：存在时用 load_session 加载历史上下文
             let existing_thread_id = self.session_mgr.current_mut().current_thread_id.clone();
 
+            // 用户主动输入通过 ACP prompt 协议传输；cron/channel 异步触发通过
+            // v2_queue_for_current() 注入共享 v2 MessageQueue（见 polling.rs）。
+
             // Spawn the ACP calls as a background task — NEVER block the TUI event loop.
             // Events will arrive via acp_notification_rx and be processed by poll_agent().
             tokio::spawn(async move {
@@ -192,8 +195,13 @@ impl App {
         }
     }
 
-    /// 发送缓冲的 cron 消息（每次只发一条，其余留待后续 Done 周期发送）
-    /// 多条独立 cron 任务不应合并为一个 LLM 消息，避免语义混淆
+    /// Loading 期间用户缓存消息的自动提交：
+    /// 从 pending_messages 中取出一条，调用 submit_message 提交。
+    ///
+    /// 本字段是用户输入缓存路径（用户在 loading 期间主动输入）。
+    /// 异步事件触发（cron/channel/workflow/bg_results 等）走 v2 queue +
+    /// polling.rs drain 路径（`v2_queue_for_current()` + `drain_for_end()`），
+    /// 与本字段机制独立、互不干扰。
     pub(crate) fn flush_pending_messages(&mut self) {
         if let Some(msg) = self
             .session_mgr
@@ -209,87 +217,6 @@ impl App {
                 .pending_messages
                 .remove(0);
             self.submit_message(msg);
-        }
-    }
-
-    /// 提交后台任务 continuation（使用合成 AgentResult tool_use + tool_result 消息）
-    ///
-    /// 与 `submit_message` 不同，此方法通过 `prompt_with_bg_results` 将结构化
-    /// 后台任务结果发送给 ACP server，由 executor 注入合成消息。
-    pub(crate) fn submit_bg_continuation(
-        &mut self,
-        results: Vec<crate::app::agent_comm::BgTaskResult>,
-    ) {
-        if results.is_empty() {
-            return;
-        }
-
-        // 记录提交前的状态长度，用于中断时回滚
-        self.session_mgr.current_mut().metadata.pre_submit_state_len =
-            self.session_mgr.current_mut().agent.origin_messages.len();
-
-        // 构建 display 文本（用于 UserBubble 显示）
-        let count = results.len();
-        let display = self.services.lc.tr_args(
-            "app-bg-continuation",
-            &[("count".into(), (count as i64).into())],
-        );
-
-        self.session_mgr
-            .current_mut()
-            .messages
-            .pipeline
-            .begin_round();
-        let user_vm = MessageViewModel::user(display.clone());
-        self.apply_pipeline_action(PipelineAction::AddMessage(user_vm));
-        self.session_mgr.current_mut().messages.round_start_vm_idx =
-            self.session_mgr.current_mut().messages.view_messages.len();
-        self.session_mgr.current_mut().metadata.last_human_message = Some(display);
-        self.session_mgr.current_mut().messages.last_submitted_text = None; // bg continuation 不恢复到输入框
-        self.set_loading(true);
-        self.session_mgr.current_mut().ui.scroll_offset = u16::MAX;
-        self.session_mgr.current_mut().ui.scroll_follow = true;
-        self.session_mgr.current_mut().todo_items.clear();
-
-        // 开始计时新任务
-        self.session_mgr.current_mut().agent.task_start_time = Some(std::time::Instant::now());
-        self.session_mgr.current_mut().agent.last_task_duration = None;
-        if self
-            .session_mgr
-            .current_mut()
-            .agent
-            .session_start_time
-            .is_none()
-        {
-            self.session_mgr.current_mut().agent.session_start_time =
-                Some(std::time::Instant::now());
-        }
-
-        // 重置状态
-        self.session_mgr.current_mut().agent.subagent_depth = 0;
-        self.session_mgr.current_mut().agent.agent_replied = false;
-        self.session_mgr.current_mut().agent.reconcile_already_done = false;
-        self.session_mgr.current_mut().agent.lsp_diagnostics.reset();
-
-        // 通过 ACP client 提交 bg continuation
-        if let Some(ref acp_client) = self.acp_client {
-            let acp_client_clone = acp_client.clone();
-            tokio::spawn(async move {
-                match acp_client_clone.prompt_with_bg_results(results).await {
-                    Ok(()) => {
-                        tracing::info!("ACP bg continuation: prompt_with_bg_results completed")
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "ACP bg continuation: prompt_with_bg_results FAILED")
-                    }
-                }
-            });
-        } else {
-            tracing::error!("ACP client not initialized, cannot submit bg continuation");
-            self.apply_pipeline_action(PipelineAction::AddMessage(MessageViewModel::system(
-                self.services.lc.tr("app-no-provider-submit"),
-            )));
-            self.set_loading(false);
         }
     }
 

@@ -67,7 +67,7 @@ fn test_collect_tools_returns_goal_tool() {
     }) as Arc<dyn GoalController>;
     let mw = GoalMiddleware::new(controller, None);
 
-    let tools = Middleware::<AgentState>::collect_tools(&mw, "/tmp");
+    let tools = Middleware::collect_tools(&mw, "/tmp");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name(), "goal");
 }
@@ -81,29 +81,16 @@ async fn test_after_agent_goal_active_注入_steering_并设_block_continue() {
     let mut state = AgentState::new("/tmp");
     let output = AgentOutput::new("我完成了", 1);
 
-    let result = Middleware::<AgentState>::after_agent(&mw, &mut state, &output)
+    let result = Middleware::after_agent(&mw, &mut state, &output)
         .await
         .unwrap();
 
     // 设 block_continue 触发 executor 续跑
     assert_eq!(result.block_continue.as_deref(), Some("goal_active"));
 
-    // 注入中途纠正消息：必须是 Human 变体 + <goal-message> 包裹
-    // （CLAUDE.md TRAP：禁止 BaseMessage::system 污染 frozen_system_prompt）
-    let messages = state.messages();
-    assert!(!messages.is_empty(), "goal active 时应注入 steering 消息");
-    let last = messages.last().unwrap();
-    assert!(
-        matches!(last, BaseMessage::Human { .. }),
-        "中途纠正消息必须是 Human 变体，禁止 BaseMessage::system"
-    );
-    let text = last.content();
-    assert!(
-        text.contains("<goal-message>"),
-        "steering 必须用 goal-message 包裹"
-    );
-    assert!(text.contains("[Goal Steering]"));
-    assert!(text.contains("测试目标"), "steering 应包含 objective");
+    // 注入路径：v2 MessageQueue 应收到 1 条 Info（GoalSteering）
+    let drained = state.v2_queue().drain_for_receive();
+    assert_eq!(drained.len(), 1, "应 push 1 条 goal steering Info 消息");
 }
 
 #[tokio::test]
@@ -115,7 +102,7 @@ async fn test_after_agent_no_goal_放行_不注入() {
     let mut state = AgentState::new("/tmp");
     let output = AgentOutput::new("普通回答", 1);
 
-    let result = Middleware::<AgentState>::after_agent(&mw, &mut state, &output)
+    let result = Middleware::after_agent(&mw, &mut state, &output)
         .await
         .unwrap();
 
@@ -123,7 +110,9 @@ async fn test_after_agent_no_goal_放行_不注入() {
         result.block_continue.is_none(),
         "无 goal 时不应设 block_continue"
     );
-    assert!(state.messages().is_empty(), "无 goal 时不应注入任何消息");
+    // 无 goal 时 queue 应为空
+    let drained = state.v2_queue().drain_for_receive();
+    assert!(drained.is_empty(), "无 goal 时不应 push 任何消息");
 }
 
 #[tokio::test]
@@ -138,7 +127,7 @@ async fn test_after_agent_existing_block_continue_不干预() {
     let mut output = AgentOutput::new("hook 拦截", 1);
     output.block_continue = Some("hook_stop".to_string());
 
-    let result = Middleware::<AgentState>::after_agent(&mw, &mut state, &output)
+    let result = Middleware::after_agent(&mw, &mut state, &output)
         .await
         .unwrap();
 
@@ -147,9 +136,11 @@ async fn test_after_agent_existing_block_continue_不干预() {
         Some("hook_stop"),
         "已有 block_continue 应保留原值，不被 goal_active 覆盖"
     );
+    // 不干预时 queue 应为空
+    let drained = state.v2_queue().drain_for_receive();
     assert!(
-        state.messages().is_empty(),
-        "已有 block_continue 时不应注入 steering（避免与 hook 冲突）"
+        drained.is_empty(),
+        "已有 block_continue 时不应 push steering"
     );
 }
 
@@ -163,15 +154,12 @@ async fn test_after_agent_terminal_重置_pending_rounds() {
     let mut state = AgentState::new("/tmp");
 
     // 第一次：goal active，递增到 round 1
-    let r1 = Middleware::<AgentState>::after_agent(&mw, &mut state, &AgentOutput::new("回答1", 1))
+    let r1 = Middleware::after_agent(&mw, &mut state, &AgentOutput::new("回答1", 1))
         .await
         .unwrap();
     assert_eq!(r1.block_continue.as_deref(), Some("goal_active"));
-    let round1_urgency: String = state
-        .messages()
-        .last()
-        .unwrap()
-        .content()
+    // v1 MessageQueue 已删除；round1 紧迫感直接由 render_steering(1) 校验
+    let round1_urgency: String = GoalMiddleware::render_steering("测试目标", 1)
         .lines()
         .filter(|l| l.contains("Decide") || l.contains("must call") || l.contains("Attention"))
         .collect();
@@ -180,7 +168,7 @@ async fn test_after_agent_terminal_重置_pending_rounds() {
     {
         *mock.snapshot.lock() = make_complete_snapshot();
     }
-    let r2 = Middleware::<AgentState>::after_agent(&mw, &mut state, &AgentOutput::new("完成", 2))
+    let r2 = Middleware::after_agent(&mw, &mut state, &AgentOutput::new("完成", 2))
         .await
         .unwrap();
     assert!(r2.block_continue.is_none(), "终态时不应 block_continue");
@@ -189,15 +177,12 @@ async fn test_after_agent_terminal_重置_pending_rounds() {
     {
         *mock.snapshot.lock() = make_active_snapshot();
     }
-    let r3 = Middleware::<AgentState>::after_agent(&mw, &mut state, &AgentOutput::new("新目标", 3))
+    let r3 = Middleware::after_agent(&mw, &mut state, &AgentOutput::new("新目标", 3))
         .await
         .unwrap();
     assert_eq!(r3.block_continue.as_deref(), Some("goal_active"));
-    let round3_urgency: String = state
-        .messages()
-        .last()
-        .unwrap()
-        .content()
+    // v1 MessageQueue 已删除；round3 紧迫感直接由 render_steering(1) 校验
+    let round3_urgency: String = GoalMiddleware::render_steering("测试目标", 1)
         .lines()
         .filter(|l| l.contains("Decide") || l.contains("must call") || l.contains("Attention"))
         .collect();
@@ -205,5 +190,13 @@ async fn test_after_agent_terminal_重置_pending_rounds() {
     assert_eq!(
         round1_urgency, round3_urgency,
         "终态后重新 active 应从 round 1 开始（递增紧迫感计数器已重置）"
+    );
+
+    // 验证 queue 累积：两次 active（r1 / r3）各 push 1 条 Info，r2 终态不 push
+    let drained = state.v2_queue().drain_for_receive();
+    assert_eq!(
+        drained.len(),
+        2,
+        "应累积 2 条 goal steering（两次 active），终态 r2 不 push"
     );
 }

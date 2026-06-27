@@ -2,7 +2,10 @@
 
 use std::{cell::Cell, time::Instant};
 
-use super::{oauth_prompt::OAuthPrompt, setup_wizard::SetupWizardPanel};
+use super::{
+    oauth_prompt::OAuthPrompt, setup_wizard::SetupWizardPanel,
+    workflow_tracker::WorkflowProgressTracker,
+};
 
 /// App 级 UI 状态：跨 session 共享的全局 UI 临时状态。
 ///
@@ -24,6 +27,8 @@ pub struct GlobalUiState {
     pub rewind_busy_hint_until: Option<Instant>,
     pub quit_requested: bool,
     pub mouse_available: Option<bool>,
+    /// Workflow 进度追踪器（累积 WorkflowProgressPayload 事件）。
+    pub workflow_tracker: WorkflowProgressTracker,
 }
 
 impl Default for GlobalUiState {
@@ -46,6 +51,7 @@ impl GlobalUiState {
             rewind_busy_hint_until: None,
             quit_requested: false,
             mouse_available: None,
+            workflow_tracker: WorkflowProgressTracker::new(),
         }
     }
 }

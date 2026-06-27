@@ -1,3 +1,6 @@
+// [TRAP] Path::strip_prefix() + to_string_lossy() 在 Windows 上产生 \ 分隔符
+// sync 协议要求 /。构造 FileEntry.path 时必须 .replace('\\', "/")。
+// 详见 spec/global/domains/sync.md#issue_2026-05-20-windows-path-separator-breaks-tests
 use std::{fs, path::Path};
 
 use crate::sync::protocol::{FileEntry, FilesItem, McpItem, SettingsItem, SyncItems, SyncPackage};

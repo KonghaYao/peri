@@ -480,6 +480,20 @@ hooks-readonly-hint = This panel is read-only. To add or modify hooks, edit plug
 hooks-no-hooks =   No hooks configured.
 hooks-no-hooks-hint =   Hooks can be added via plugin hooks/hooks.json.
 
+# ---- Theme Panel ----
+
+theme-desc = Switch color theme
+theme-title = Theme
+theme-preview = Preview
+theme-list = Theme List
+theme-confirm = Confirm
+theme-cancel = Cancel
+theme-current = Current
+theme-source-builtin = Builtin
+theme-source-file = File
+theme-switched = Theme switched
+theme-navigate = Navigate
+
 # ---- Thread Browser ----
 
 thread-browser-title =  Resume Session ({ $cursor }/{ $total }) 

@@ -143,10 +143,9 @@ impl App {
                 .clear();
         }
         self.cleanup_agent_state(None);
-        // 检查缓冲消息，合并发送
         if !self
             .session_mgr
-            .current_mut()
+            .current()
             .messages
             .pending_messages
             .is_empty()
@@ -271,7 +270,7 @@ impl App {
             let mut ta = crate::app::build_textarea(false);
             ta.insert_str(text.clone());
             self.session_mgr.current_mut().ui.textarea = ta;
-            // 清除 pending 缓冲
+            // 清除 loading 期间缓存的 pending_messages（中断恢复后使用恢复文本替代）
             self.session_mgr
                 .current_mut()
                 .messages
@@ -295,6 +294,16 @@ impl App {
         }
         // 标记 reconcile 已完成，防止后续 Done 事件重复 RebuildAll 覆盖通知消息
         self.session_mgr.current_mut().agent.reconcile_already_done = true;
+        // 自动提交 loading 期间缓存的 pending_messages
+        if !self
+            .session_mgr
+            .current()
+            .messages
+            .pending_messages
+            .is_empty()
+        {
+            self.flush_pending_messages();
+        }
         (true, false, false)
     }
 
@@ -375,10 +384,9 @@ impl App {
         }
         let err_label = format!("ERROR: {}", error_msg);
         self.cleanup_agent_state(Some(&err_label));
-        // 检查缓冲消息，合并发送
         if !self
             .session_mgr
-            .current_mut()
+            .current()
             .messages
             .pending_messages
             .is_empty()

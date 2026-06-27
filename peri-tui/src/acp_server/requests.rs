@@ -2,6 +2,7 @@
 //! Extracted from original acp_server.rs (2026-05-20 split).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use agent_client_protocol::schema::{
     CloseSessionResponse, ForkSessionResponse, ListSessionsResponse, LoadSessionResponse,
@@ -12,7 +13,7 @@ use peri_acp::dispatch::config_update::make_config_options;
 use peri_acp::{dispatch, transport::types::AcpError};
 use peri_agent::thread::ThreadMeta;
 use serde_json::Value;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::{
     apply_thinking_effort, build_mode_state,
@@ -60,6 +61,56 @@ pub(crate) async fn handle_request(
                 .await
                 .map_err(|e| AcpError::new(-32603, format!("Thread creation failed: {e}")))?;
             let session_id = thread_id.clone();
+
+            // ── Freeze system prompt data at session creation ──
+            // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
+            // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
+            // GAP-05: frozen data 在 WorkflowMiddleware 创建前构建，注入到 executor。
+            cfg.session_manager.ensure_session(&session_id, &cwd);
+            let frozen_data = cfg.session_manager.build_frozen_data(
+                &cwd,
+                &cfg.plugin_skill_roots,
+                &cfg.plugin_agent_dirs,
+            );
+
+            // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
+            let workflow_middleware = {
+                let provider_snap = cfg.provider.read().clone();
+                let mut compact_config = peri_agent::agent::compact::CompactConfig::default();
+                compact_config.apply_env_overrides();
+                let wf_executor = peri_acp::agent::workflow_agent::create_executor(
+                    peri_acp::agent::workflow_agent::WorkflowAgentContext {
+                        provider: provider_snap,
+                        cwd: cwd.clone(),
+                        frozen_claude_md: frozen_data.claude_md().map(|s| s.to_string()),
+                        frozen_claude_local_md: frozen_data
+                            .claude_local_md()
+                            .map(|s| s.to_string()),
+                        frozen_skill_summary: frozen_data.skill_summary().map(|s| s.to_string()),
+                        session_id: Some(session_id.clone()),
+                        compact_config: Some(compact_config),
+                        cancel: None,
+                        system_prompt: Some(frozen_data.system_prompt().to_string()),
+                        broker: None,
+                        permission_mode: None,
+                        frozen_date: Some(frozen_data.date().to_string()),
+                        frozen_language: frozen_data.language().map(|s| s.to_string()),
+                        agent_pool: None,
+                        langfuse_session: None,
+                        thread_store: None,
+                        peri_config: Some(Arc::new(cfg.peri_config.read().clone())),
+                    },
+                );
+                let (notification_tx, _) = tokio::sync::broadcast::channel(32);
+                Some(Arc::new(
+                    peri_middlewares::workflow::WorkflowMiddleware::new(
+                        wf_executor,
+                        &cwd,
+                        notification_tx,
+                    ),
+                ))
+            };
+
             sessions.insert(
                 session_id.clone(),
                 SessionState {
@@ -68,24 +119,13 @@ pub(crate) async fn handle_request(
                     cwd: cwd.clone(),
                     history: Vec::new(),
                     cancel_token: None,
-                    frozen: None,
+                    frozen: Some(frozen_data),
                     recall_items: Vec::new(),
                     agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                    workflow_middleware,
                 },
             );
 
-            // ── Freeze system prompt data at session creation ──
-            // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
-            // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
-            cfg.session_manager.ensure_session(&session_id, &cwd);
-            let frozen_data = cfg.session_manager.build_frozen_data(
-                &cwd,
-                &cfg.plugin_skill_roots,
-                &cfg.plugin_agent_dirs,
-            );
-
-            let state = sessions.get_mut(&session_id).unwrap();
-            state.frozen = Some(frozen_data);
             info!(session_id = %session_id, "ACP session created with ThreadStore");
             let modes = build_mode_state(&cfg.permission_mode);
             let config_options = {
@@ -158,8 +198,20 @@ pub(crate) async fn handle_request(
                 }
                 "thinking_effort" => {
                     apply_thinking_effort(&cfg.peri_config, value);
+                    // 同步更新 LlmProvider（thinking 变更需要重建 provider）
+                    let new_provider = {
+                        let c = cfg.peri_config.read();
+                        LlmProvider::from_config(&c)
+                    };
+                    if let Some(new_provider) = new_provider {
+                        *cfg.provider.write() = new_provider;
+                    }
+                    // Thinking 变更 → invalidate cached LLM 实例
+                    if let Some(s) = sessions.get_mut(session_id) {
+                        s.agent_pool.invalidate();
+                    }
                     persist_config(cfg);
-                    info!(effort = %value, "Thinking effort changed via configOption (persisted)");
+                    info!(effort = %value, "Thinking effort changed via configOption");
                 }
                 "context_1m" => {
                     let enabled = value == "true" || value == "1";
@@ -213,6 +265,7 @@ pub(crate) async fn handle_request(
                         frozen: None,
                         recall_items: Vec::new(),
                         agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                        workflow_middleware: None,
                     },
                 );
             }
@@ -283,6 +336,95 @@ pub(crate) async fn handle_request(
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
 
+        "workflow/list_runs" => {
+            let req_session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+
+            let runs = sessions
+                .get(req_session_id)
+                .and_then(|s| s.workflow_middleware.as_ref())
+                .map(|mw| mw.progress_store().get_all_runs_snapshot())
+                .unwrap_or_default();
+
+            let resp = serde_json::json!({ "runs": runs });
+            Ok(resp)
+        }
+
+        "workflow/kill_agent" => {
+            let run_id = params
+                .get("runId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing runId"))?;
+            let agent_id = params
+                .get("agentId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| AcpError::new(-32602, "missing agentId"))?;
+
+            let killed = if let Some(mw) = sessions
+                .values()
+                .find_map(|s| s.workflow_middleware.as_ref())
+            {
+                mw.runner().kill_agent(run_id, agent_id).await
+            } else {
+                false
+            };
+
+            if killed {
+                info!(run_id, agent_id, "Workflow agent killed via ACP");
+            } else {
+                warn!(run_id, agent_id, "Workflow agent kill failed (not found)");
+            }
+            Ok(serde_json::json!({ "killed": killed }))
+        }
+
+        "workflow/kill_run" => {
+            let run_id = params
+                .get("runId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing runId"))?;
+
+            let killed = if let Some(mw) = sessions
+                .values()
+                .find_map(|s| s.workflow_middleware.as_ref())
+            {
+                mw.registry().kill(run_id).is_ok()
+            } else {
+                false
+            };
+
+            if killed {
+                info!(run_id, "Workflow run killed via ACP");
+            } else {
+                warn!(run_id, "Workflow run kill failed (not found)");
+            }
+            Ok(serde_json::json!({ "killed": killed }))
+        }
+
+        "workflow/resume" => {
+            let run_id = params
+                .get("runId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing runId"))?;
+
+            let mw = sessions
+                .values()
+                .find_map(|s| s.workflow_middleware.as_ref())
+                .ok_or_else(|| AcpError::new(-32602, "no workflow middleware found"))?;
+
+            let new_run_id = mw
+                .resume_workflow(run_id)
+                .await
+                .map_err(|e| AcpError::new(-32603, e))?;
+
+            info!(old_run = %run_id, new_run = %new_run_id, "Workflow resumed via ACP");
+            Ok(serde_json::json!({
+                "runId": new_run_id,
+                "resumedFrom": run_id
+            }))
+        }
+
         "session/close" => {
             let req_session_id = params
                 .get("sessionId")
@@ -321,6 +463,7 @@ pub(crate) async fn handle_request(
                         frozen: None,
                         recall_items: Vec::new(),
                         agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                        workflow_middleware: None,
                     },
                 );
                 info!(session_id = %req_session_id, "Session resumed (new)");
@@ -375,6 +518,7 @@ pub(crate) async fn handle_request(
                     frozen: None,
                     recall_items: Vec::new(),
                     agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                    workflow_middleware: None,
                 },
             );
 

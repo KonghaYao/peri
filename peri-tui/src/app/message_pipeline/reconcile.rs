@@ -124,31 +124,36 @@ impl MessagePipeline {
         }
     }
 
-    /// 从 pipeline 规范状态构建尾部 VMs。
+    /// 从 pipeline 规范状态（transcript + partial）构建尾部 VMs。
     ///
-    /// 两种情况：
-    /// - has_snapshot_this_round == true：从 completed[last_human..] reconcile + streaming + pending tools
-    /// - has_snapshot_this_round == false（Case 1）：跳过 reconcile，只输出 streaming + pending tools
+    /// 单一数据源架构：transcript 是规范历史，partial 是当前迭代增量。
+    /// - 若 `has_committed_this_round == true`：本轮已收到过 TurnCommitted，
+    ///   transcript 含本轮全部已提交消息；从 `transcript_len_at_round_start` 切片
+    ///   reconcile。partial（若有）追加为 streaming bubble + pending tools。
+    /// - 若 `has_committed_this_round == false`（首轮提交前）：跳过 transcript 切片，
+    ///   只输出 partial（streaming + pending tools）。
     pub(crate) fn build_tail_vms(&self) -> Vec<MessageViewModel> {
         let mut tail_vms = Vec::new();
 
-        if self.has_snapshot_this_round {
-            let start = self.completed_len_at_round_start.min(self.completed.len());
-            // 直接从 round 起点渲染全部消息。
+        if self.has_committed_this_round {
+            let start = self
+                .transcript_len_at_round_start
+                .min(self.transcript.len());
+            // 直接从 round 起点渲染全部已提交消息。
             //
             // 不需要 rposition(Human) 找截断点：
-            // - 正常会话：start 指向用户提交前的位置，completed[start..] 就是本轮全部消息
+            // - 正常会话：start 指向用户提交前的位置，transcript[start..] 就是本轮全部已提交消息
             // - compact 后：restore_completed 已将 start 设到 compact 消息之后，
-            //   completed[start..] 只含新会话消息
-            // - goal steering 注入的 Human 消息也在 completed[start..] 内，不会被跳过
+            //   transcript[start..] 只含新会话消息
+            // - goal steering 注入的 Human 消息也在 transcript[start..] 内，不会被跳过
             //
             // 之前的 rposition(Human) 会跳到注入的 <goal-message>，导致 AI 回复丢失。
-            tail_vms = Self::messages_to_view_models(&self.completed[start..], &self.cwd);
+            tail_vms = Self::messages_to_view_models(&self.transcript[start..], &self.cwd);
             let reconcile_subagent_count =
                 tail_vms.iter().filter(|vm| vm.is_subagent_group()).count();
             tracing::debug!(
-                has_snapshot = true,
-                completed_len = self.completed.len(),
+                has_committed = true,
+                transcript_len = self.transcript.len(),
                 start_offset = start,
                 reconcile_total = tail_vms.len(),
                 reconcile_subagent_count,
@@ -157,30 +162,74 @@ impl MessagePipeline {
             );
         }
 
-        // 追加流式 AssistantBubble（当前 AI 正在输出的文本）
-        if self.has_streaming_content() {
-            tail_vms.push(self.build_streaming_bubble());
-        }
-
-        // 追加工具调用：按 current_ai_tool_calls 的顺序迭代，同时处理 pending 和
-        // completed 状态。这保证了工具调用在消息流中的时间线顺序一致——较早开始
-        //（因此也更早完成）的工具始终排在后续工具之前，避免已完成工具被新 pending
-        // 工具挤到下方造成的"位置偏移"问题。
-        use std::collections::HashSet;
-        let mut completed_ids: HashSet<String> = HashSet::with_capacity(self.completed_tools.len());
-        for tc in &self.current_ai_tool_calls {
-            if let Some(pending) = self.pending_tools.get(&tc.id) {
-                if pending.name != "Agent" {
-                    tail_vms.push(self.build_tool_start_vm(&tc.id, &pending.name, &pending.input));
-                }
-                continue;
+        // 当前迭代 partial：流式 AssistantBubble + 工具调用
+        // 关键架构改进：partial 只含当前迭代的状态，不会跨迭代累积——
+        // 每次迭代结束时 commit_iteration 整体清空 partial。
+        // 因此 partial 的内容始终位于 transcript 中已提交消息之后，
+        // 自然保持时序正确（修复 v2 文本渲染在工具调用之前的 bug）。
+        if let Some(partial) = self.partial.as_ref() {
+            // 流式 AssistantBubble（当前迭代正在输出的文本/推理）
+            if partial.has_streaming_content() {
+                tail_vms.push(self.build_streaming_bubble());
             }
-            // 工具已结束但 StateSnapshot 尚未到达：从 completed_tools 查找结果
-            if let Some(ct) = self
-                .completed_tools
-                .iter()
-                .find(|ct| ct.tool_call_id == tc.id)
-            {
+
+            // 当前迭代的工具调用：按 tool_calls 时间线顺序迭代
+            use std::collections::HashSet;
+            let mut completed_ids: HashSet<String> =
+                HashSet::with_capacity(partial.completed_tools.len());
+            for tc in &partial.tool_calls {
+                if let Some(pending) = partial.pending_tools.get(&tc.id) {
+                    if pending.name != "Agent" {
+                        tail_vms.push(self.build_tool_start_vm(
+                            &tc.id,
+                            &pending.name,
+                            &pending.input,
+                        ));
+                    }
+                    continue;
+                }
+                // 工具已结束但 TurnCommitted 尚未到达：从 completed_tools 查找结果
+                if let Some(ct) = partial
+                    .completed_tools
+                    .iter()
+                    .find(|ct| ct.tool_call_id == tc.id)
+                {
+                    let display = tool_display::format_tool_name(&ct.name);
+                    let args = tool_display::format_tool_args(&ct.name, &ct.input, Some(&self.cwd));
+                    let diff_lines = if !ct.is_error {
+                        crate::ui::message_view::build_diff_lines(&ct.name, &ct.input)
+                    } else {
+                        None
+                    };
+                    let auto_expand = tool_display::should_auto_expand_tool(&ct.name, ct.is_error);
+                    let mut vm = MessageViewModel::ToolBlock {
+                        tool_name: ct.name.clone(),
+                        tool_call_id: ct.tool_call_id.clone(),
+                        display_name: display,
+                        args_display: args,
+                        content: ct.output.clone(),
+                        is_error: ct.is_error,
+                        collapsed: !auto_expand,
+                        color: if ct.is_error {
+                            theme::ERROR
+                        } else {
+                            tool_color(&ct.name)
+                        },
+                        diff_lines,
+                        content_hash: 0,
+                    };
+                    vm.recompute_hash();
+                    tail_vms.push(vm);
+                    completed_ids.insert(ct.tool_call_id.clone());
+                }
+            }
+
+            // 防御性追加：completed_tools 中不在 tool_calls 的残余条目
+            // （理论上 commit_iteration 会清空 partial，此处保留兜底）
+            for ct in &partial.completed_tools {
+                if completed_ids.contains(&ct.tool_call_id) {
+                    continue;
+                }
                 let display = tool_display::format_tool_name(&ct.name);
                 let args = tool_display::format_tool_args(&ct.name, &ct.input, Some(&self.cwd));
                 let diff_lines = if !ct.is_error {
@@ -207,46 +256,11 @@ impl MessagePipeline {
                 };
                 vm.recompute_hash();
                 tail_vms.push(vm);
-                completed_ids.insert(ct.tool_call_id.clone());
             }
-        }
-
-        // 防御性追加：completed_tools 中不在 current_ai_tool_calls 的残余条目
-        // （例如 StateSnapshot 清理了 current_ai_tool_calls 但 completed_tools 仍有残留）
-        for ct in &self.completed_tools {
-            if completed_ids.contains(&ct.tool_call_id) {
-                continue;
-            }
-            let display = tool_display::format_tool_name(&ct.name);
-            let args = tool_display::format_tool_args(&ct.name, &ct.input, Some(&self.cwd));
-            let diff_lines = if !ct.is_error {
-                crate::ui::message_view::build_diff_lines(&ct.name, &ct.input)
-            } else {
-                None
-            };
-            let auto_expand = tool_display::should_auto_expand_tool(&ct.name, ct.is_error);
-            let mut vm = MessageViewModel::ToolBlock {
-                tool_name: ct.name.clone(),
-                tool_call_id: ct.tool_call_id.clone(),
-                display_name: display,
-                args_display: args,
-                content: ct.output.clone(),
-                is_error: ct.is_error,
-                collapsed: !auto_expand,
-                color: if ct.is_error {
-                    theme::ERROR
-                } else {
-                    tool_color(&ct.name)
-                },
-                diff_lines,
-                content_hash: 0,
-            };
-            vm.recompute_hash();
-            tail_vms.push(vm);
         }
 
         // SubAgentGroup VMs
-        if self.has_snapshot_this_round {
+        if self.has_committed_this_round {
             let unmatched = merge_frozen_subagents(&self.frozen_subagent_vms, &mut tail_vms);
             // 将未匹配的冻结 VM（reconcile 中没有对应 SubAgentGroup 的后台 agent）
             // 直接追加到 tail_vms，防止后台 agent 从视图中消失。
@@ -305,7 +319,11 @@ impl MessagePipeline {
 
         aggregate_tool_groups(&mut tail_vms);
 
-        if !self.has_streaming_content() && self.current_ai_tool_calls.is_empty() {
+        let has_partial_activity = self
+            .partial
+            .as_ref()
+            .is_some_and(|p| p.has_streaming_content() || !p.tool_calls.is_empty());
+        if !has_partial_activity {
             aggregate_batch_groups(&mut tail_vms);
         }
 

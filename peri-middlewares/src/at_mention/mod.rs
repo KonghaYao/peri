@@ -6,10 +6,9 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 pub use file_reader::FileContent;
 use peri_agent::{
-    agent::state::State,
     error::AgentResult,
     messages::{BaseMessage, ContentBlock},
-    middleware::r#trait::Middleware,
+    middleware::{r#trait::Middleware, state::MiddlewareState},
 };
 
 use crate::tool_search::core_tools::TOOL_READ;
@@ -37,12 +36,12 @@ impl AtMentionMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for AtMentionMiddleware {
+impl Middleware for AtMentionMiddleware {
     fn name(&self) -> &str {
         "AtMentionMiddleware"
     }
 
-    async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // 取最后一条 Human 消息
         let last_human = state
             .messages()

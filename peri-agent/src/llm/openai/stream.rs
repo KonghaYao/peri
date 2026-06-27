@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::invoke::{build_request_body, extract_openai_usage};
 use crate::{
-    agent::events::AgentEvent,
+    agent::events::ExecutorEvent,
     error::{AgentError, AgentResult},
     llm::{
         sse::SseParser,
@@ -143,7 +143,7 @@ pub(super) async fn do_invoke_streaming(
             {
                 if !r.is_empty() {
                     ctx.event_handler
-                        .on_event(AgentEvent::AiReasoning(r.to_string()));
+                        .on_event(ExecutorEvent::AiReasoning(r.to_string()));
                     reasoning_text.push_str(r);
                 }
             }
@@ -151,7 +151,7 @@ pub(super) async fn do_invoke_streaming(
             // Text delta
             if let Some(c) = delta["content"].as_str() {
                 if !c.is_empty() {
-                    ctx.event_handler.on_event(AgentEvent::TextChunk {
+                    ctx.event_handler.on_event(ExecutorEvent::TextChunk {
                         message_id: ctx.message_id,
                         chunk: c.to_string(),
                         source_agent_id: None,

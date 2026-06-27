@@ -1,30 +1,34 @@
+//! SubAgent 同步 Fork 路径：v2 stages 实现
+//!
+//! Fork 语义：子 agent 继承父会话消息历史（parent_messages），用 prompt 继续执行。
+//! Cancel policy = Cascade（父 cancel 传播到子）。无 agent_def（fork 是直接调用）。
+
 use std::sync::Arc;
 
 use peri_agent::{
-    agent::{events::AgentEvent, react::AgentInput, state::AgentState, ReActAgent, State as _},
+    agent::{
+        events::ExecutorEvent,
+        stages::{run_react_loop, LoopResult},
+    },
     messages::BaseMessage,
+    middleware::chain::MiddlewareChain,
     thread::ThreadMeta,
-    tools::BaseTool,
 };
+use tokio_util::sync::CancellationToken;
 
-use super::{build_subagent_middlewares, format_subagent_result, SourceAgentIdHandler};
-use crate::{subagent::SubAgentMiddlewareConfig, tools::ArcToolWrapper};
+use super::format_subagent_result;
+use crate::subagent::{v2_bridge::build_v2_subagent_context, SubAgentMiddlewareConfig};
 
 impl super::SubAgentTool {
     pub(crate) async fn invoke_fork(
         &self,
         prompt: &str,
         cwd: &str,
+        parent_messages: Vec<BaseMessage>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let parent_msgs: Vec<BaseMessage> = match &self.parent_messages {
-            Some(pm) => pm.read().clone(),
-            None => return Err(
-                "Error: Fork path requires parent message history, but parent_messages is not set"
-                    .into(),
-            ),
-        };
+        let parent_msgs = parent_messages;
 
-        // Create child thread for fork mode
+        // 1. 创建子线程（cancel_policy=cascade）
         let child_thread_id = uuid::Uuid::now_v7().to_string();
         if let Some(ref store) = self.thread_store {
             let snapshot_id = parent_msgs.last().map(|m| m.id().as_uuid().to_string());
@@ -41,59 +45,56 @@ impl super::SubAgentTool {
                 .map_err(|e| format!("Failed to create child thread: {}", e))?;
         }
 
-        let fork_directive = crate::subagent::fork::build_fork_directive(prompt);
-        let mut fork_state = if let Some(ref store) = self.thread_store {
-            AgentState::new(cwd).with_persistence(Arc::clone(store), child_thread_id.clone())
-        } else {
-            AgentState::new(cwd)
-        };
-        // For immediate execution, inject parent messages into state
-        for msg in parent_msgs {
-            fork_state.add_message(msg);
+        // 2. Cascade cancel token：父 cancel 传播到子
+        let cancel_token: CancellationToken = self
+            .cancel
+            .as_ref()
+            .map(|t| t.child_token())
+            .unwrap_or_default();
+
+        // 3. 中间件链（复用 build_subagent_middlewares）
+        let mw_config = SubAgentMiddlewareConfig::for_agent_def(Vec::new(), cwd).with_frozen(
+            self.frozen_claude_md
+                .as_deref()
+                .map(|s| s.as_str().to_string()),
+            self.frozen_claude_local_md
+                .as_deref()
+                .map(|s| s.as_str().to_string()),
+            self.frozen_skill_summary
+                .as_deref()
+                .map(|s| s.as_str().to_string()),
+        );
+        let middlewares = super::build_subagent_middlewares(mw_config);
+        let mut chain = MiddlewareChain::new();
+        for mw in middlewares {
+            chain.add(mw);
         }
-        let llm = (self.llm_factory)(None);
-        let mut agent_builder = ReActAgent::new(llm).max_iterations(200);
-        // instance_id 统一使用 child_thread_id（UUID v7，持久化线程标识）
+
+        // 4. system prompt（fork 无 agent_def，无 overrides）
+        let system_prompt = self.system_builder.as_ref().map(|b| b(None, cwd));
+
+        // 5. 工具集：父工具 clone 为 Vec<Arc<dyn BaseTool>>
+        let tools: Vec<Arc<dyn peri_agent::tools::BaseTool>> =
+            self.parent_tools.iter().cloned().collect();
+
+        // 6. LLM（fork 用默认 provider，无 model alias）
+        let mut llm = (self.llm_factory)(None);
+        // 注入 event_handler，使 SubAgent 内 RetryableLLM 的重试事件能被父级 Langfuse 追踪
+        llm.inject_event_handler(self.event_handler.clone());
+
+        // 7. 注册到 active_agents（register_runtime）
+        if let Some(register) = &self.register_runtime {
+            register(
+                child_thread_id.clone(),
+                cancel_token.clone(),
+                "cascade".into(),
+            );
+        }
+
+        // 8. SubagentStarted 事件 + lifecycle hook
         let instance_id = child_thread_id.clone();
-
-        for mw in build_subagent_middlewares(
-            SubAgentMiddlewareConfig::for_fork(cwd).with_frozen(
-                self.frozen_claude_md
-                    .as_deref()
-                    .map(|s| s.as_str().to_string()),
-                self.frozen_claude_local_md
-                    .as_deref()
-                    .map(|s| s.as_str().to_string()),
-                self.frozen_skill_summary
-                    .as_deref()
-                    .map(|s| s.as_str().to_string()),
-            ),
-        ) {
-            agent_builder = agent_builder.add_middleware(mw);
-        }
-
-        if let Some(ref builder) = self.system_builder {
-            let system_content = builder(None, cwd);
-            agent_builder = agent_builder.with_system_prompt(system_content);
-        }
-
-        for tool in self.parent_tools.iter() {
-            agent_builder = agent_builder
-                .register_tool(Box::new(ArcToolWrapper(Arc::clone(tool))) as Box<dyn BaseTool>);
-        }
-
-        if let Some(ref factory) = self.child_handler_factory {
-            agent_builder = agent_builder.with_event_handler(factory(instance_id.clone()));
-        } else if let Some(handler) = &self.event_handler {
-            let tagged = Arc::new(SourceAgentIdHandler::new(
-                Arc::clone(handler),
-                instance_id.clone(),
-            ));
-            agent_builder = agent_builder.with_event_handler(tagged);
-        }
-
         if let Some(ref handler) = self.event_handler {
-            handler.on_event(AgentEvent::SubagentStarted {
+            handler.on_event(ExecutorEvent::SubagentStarted {
                 agent_name: "fork".to_string(),
                 instance_id: instance_id.clone(),
                 is_background: false,
@@ -107,58 +108,87 @@ impl super::SubAgentTool {
         )
         .await;
 
-        // Register AgentRuntime: only when thread_store is present (non-legacy path)
-        // Panic-safe: DeregisterGuard ensures deregister runs on drop (panic or early return)
-        //
-        // child_cancel is linked to parent via child_token(): parent cancel → child_cancel fires.
-        // The same child_cancel is passed to execute(), so cascade cancel works correctly.
-        let child_cancel = self
-            .cancel
-            .as_ref()
-            .map(|t| t.child_token())
-            .unwrap_or_default();
-        let _deregister_guard = if self.thread_store.is_some() {
-            if let Some(ref register) = self.register_runtime {
-                register(
-                    child_thread_id.clone(),
-                    child_cancel.clone(),
-                    "cascade".to_string(),
-                );
+        // 9. 构造 v2 StageContext（fork 注入 parent_msgs 到 transcript）
+        let v2_ctx = build_v2_subagent_context(
+            llm,
+            chain,
+            tools,
+            cwd,
+            cancel_token,
+            parent_msgs,
+            system_prompt,
+            None,
+            None,
+            None,
+        );
+
+        // 9.5. 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
+        // 后转发到父 Agent 的事件处理器。让 TUI 能看到 SubAgent 内的工具调用 / AI 文本 /
+        // 推理内容（否则 SubAgent 拥有独立 EventBus，事件全部丢弃）。
+        // 必须在 run_react_loop 之前取出 event_handles（之后 v2_ctx.context 被 move）。
+        let _forwarder_handle =
+            peri_agent::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+                v2_ctx.event_handles,
+                self.event_handler.clone(),
+                child_thread_id.clone(),
+            );
+
+        // 10. push prompt 到 queue（Receive 阶段消费）
+        v2_ctx
+            .context
+            .queue
+            .push(peri_agent::session::queue::QueuedMessage::new(
+                peri_agent::session::queue::MessageKind::Prompt,
+                peri_agent::session::queue::MessageSource::UserInput,
+                BaseMessage::human(prompt.to_string()),
+            ));
+
+        // 11. 运行 before_agent middleware hooks
+        if let Err(e) =
+            peri_agent::agent::stages::middleware_runner::run_before_agent(&v2_ctx.context).await
+        {
+            tracing::warn!(error = %e, "[subagent:fork] before_agent hook failed");
+        }
+
+        // 12. 运行 v2 ReAct 循环
+        let max_iterations = 200;
+        let loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
+
+        // 13. 从 transcript 提取最终 AI 文本
+        let (final_text, interrupted) = match loop_result {
+            LoopResult::Completed => {
+                let text = extract_last_ai_text(&v2_ctx.session);
+                (text, false)
             }
-            super::define::DeregisterGuard {
-                thread_id: child_thread_id.clone(),
-                deregister: self.deregister_runtime.clone(),
-            }
-        } else {
-            super::define::DeregisterGuard {
-                thread_id: child_thread_id.clone(),
-                deregister: None,
+            LoopResult::Interrupted => (String::new(), true),
+            LoopResult::Error(e) => {
+                // deregister before error return
+                if let Some(deregister) = &self.deregister_runtime {
+                    deregister(&child_thread_id);
+                }
+                if let Some(ref store) = self.thread_store {
+                    let _ = store.update_thread_status(&child_thread_id, "error").await;
+                }
+                return Err(format!("Fork sub-agent execution failed: {}", e).into());
             }
         };
 
-        let fork_result = agent_builder
-            .execute(
-                AgentInput::text(fork_directive),
-                &mut fork_state,
-                Some(child_cancel),
-            )
-            .await;
+        // 13. deregister
+        if let Some(deregister) = &self.deregister_runtime {
+            deregister(&child_thread_id);
+        }
 
-        let (output_summary, stopped_is_error) = match &fork_result {
-            Ok(output) => (output.text.chars().take(500).collect::<String>(), false),
-            Err(e) => (
-                format!("Error: {}", e)
-                    .chars()
-                    .take(500)
-                    .collect::<String>(),
-                true,
-            ),
+        // 14. SubagentStopped 事件 + lifecycle hook
+        let output_summary: String = if interrupted {
+            "interrupted".to_string()
+        } else {
+            final_text.chars().take(500).collect()
         };
         if let Some(ref handler) = self.event_handler {
-            handler.on_event(AgentEvent::SubagentStopped {
+            handler.on_event(ExecutorEvent::SubagentStopped {
                 agent_name: "fork".to_string(),
                 result: output_summary.clone(),
-                is_error: stopped_is_error,
+                is_error: interrupted,
                 instance_id: instance_id.clone(),
             });
         }
@@ -170,36 +200,65 @@ impl super::SubAgentTool {
         )
         .await;
 
-        match fork_result {
-            Ok(output) => {
-                if let Some(ref store) = self.thread_store {
-                    let _ = store.update_thread_status(&child_thread_id, "done").await;
-                }
-                let result_text = format_subagent_result(&output);
-                if self.thread_store.is_some() {
-                    Ok(format!(
-                        "child_thread_id: {}\n{}",
-                        child_thread_id, result_text
-                    ))
-                } else {
-                    Ok(result_text)
-                }
+        // 15. thread_store 状态 + 返回
+        if interrupted {
+            if let Some(ref store) = self.thread_store {
+                let _ = store
+                    .update_thread_status(&child_thread_id, "cancelled")
+                    .await;
             }
-            Err(peri_agent::error::AgentError::Interrupted) => {
-                if let Some(ref store) = self.thread_store {
-                    let _ = store
-                        .update_thread_status(&child_thread_id, "cancelled")
-                        .await;
-                }
-                Ok("Fork sub-agent execution was interrupted".to_string())
-            }
-            Err(e) => {
-                if let Some(ref store) = self.thread_store {
-                    let _ = store.update_thread_status(&child_thread_id, "error").await;
-                }
-                let msg = format!("Fork sub-agent execution failed: {}", e);
-                Err(msg.into())
-            }
+            return Ok("Fork sub-agent execution was interrupted".to_string());
+        }
+
+        if let Some(ref store) = self.thread_store {
+            let _ = store.update_thread_status(&child_thread_id, "done").await;
+        }
+
+        // 复用 format_subagent_result 的格式（构造 AgentOutput）
+        let output = peri_agent::agent::react::AgentOutput {
+            text: final_text,
+            steps: 0,
+            tool_calls: Vec::new(),
+            stop_reason: None,
+            block_continue: None,
+        };
+        let result_text = format_subagent_result(&output);
+        if self.thread_store.is_some() {
+            Ok(format!(
+                "child_thread_id: {}\n{}",
+                child_thread_id, result_text
+            ))
+        } else {
+            Ok(result_text)
         }
     }
 }
+
+/// 从 session transcript 提取最后一条非空 AI 消息文本
+fn extract_last_ai_text(session: &std::sync::Arc<peri_agent::session::Session>) -> String {
+    let transcript = session.transcript();
+    let tx = transcript.read();
+    tx.visible_messages()
+        .iter()
+        .rev()
+        .find_map(|m| {
+            if matches!(m, BaseMessage::Ai { .. }) {
+                let t = m.content();
+                let trimmed = t.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+// 抑制 v1 残余 imports 的 dead_code warning（待 P5.5 完全清理后删除）
+#[allow(unused_imports)]
+use crate::subagent::SubAgentMiddlewareConfig as _UnusedSubAgentMiddlewareConfig;
+#[allow(unused_imports)]
+use peri_agent::{agent::react::AgentInput, tools::BaseTool as _UnusedBaseTool};

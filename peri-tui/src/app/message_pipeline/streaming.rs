@@ -17,7 +17,8 @@ impl super::MessagePipeline {
     pub(crate) fn push_chunk(&mut self, chunk: &str) {
         match self.streaming_mode {
             StreamingMode::Streaming => {
-                self.current_ai_text.push_str(chunk);
+                let partial = self.partial_mut();
+                partial.text.push_str(chunk);
                 self.adaptive_policy.on_chunk(chunk);
             }
             StreamingMode::Block => {
@@ -26,14 +27,16 @@ impl super::MessagePipeline {
                 }
             }
             StreamingMode::None => {
-                self.current_ai_text.push_str(chunk);
+                let partial = self.partial_mut();
+                partial.text.push_str(chunk);
             }
         }
     }
 
     /// 追加推理 chunk
     pub(crate) fn push_reasoning(&mut self, text: &str) {
-        self.current_ai_reasoning.push_str(text);
+        let partial = self.partial_mut();
+        partial.reasoning.push_str(text);
         self.adaptive_policy.on_reasoning_chunk();
     }
 
@@ -75,8 +78,10 @@ impl super::MessagePipeline {
 
     fn flush_block_buffer(&mut self) {
         if !self.block_buffer.is_empty() {
-            self.current_ai_text.push_str(&self.block_buffer);
-            self.block_buffer.clear();
+            // 先 take 出 buffer 内容，避免 &mut self.partial 与 &self.block_buffer 借用冲突
+            let buffered = std::mem::take(&mut self.block_buffer);
+            let partial = self.partial_mut();
+            partial.text.push_str(&buffered);
             self.block_pending_flush = true;
         }
     }

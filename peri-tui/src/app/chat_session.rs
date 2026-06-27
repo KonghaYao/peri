@@ -1,6 +1,7 @@
 use std::time::Instant;
 
-use peri_middlewares::prelude::{SkillMetadata, TodoItem};
+use peri_acp::event::TodoItemDto;
+use peri_middlewares::prelude::SkillMetadata;
 
 use super::{
     langfuse_state::LangfuseState, AgentComm, CommandSystem, MessageState, SessionMetadata, UiState,
@@ -27,7 +28,7 @@ pub struct ChatSession {
     pub agent: AgentComm,
     pub current_thread_id: Option<ThreadId>,
     pub langfuse: LangfuseState,
-    pub todo_items: Vec<TodoItem>,
+    pub todo_items: Vec<TodoItemDto>,
     pub background_agents: Vec<RunningBgAgent>,
     pub focused_instance_id: Option<String>,
     pub spinner_state: peri_widgets::SpinnerState,

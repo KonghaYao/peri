@@ -8,6 +8,7 @@ pub mod loop_cmd;
 pub mod plugin_command;
 pub mod rename;
 pub mod setup;
+pub mod workflow_cmd;
 pub use context_cmd::ContextCommand;
 pub use cost::CostCommand;
 pub use effort::EffortCommand;

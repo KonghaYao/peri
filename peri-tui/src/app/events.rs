@@ -1,6 +1,5 @@
 use peri_agent::interaction::{InteractionContext, InteractionResponse};
 pub use peri_middlewares::mcp::OAuthCallbackResult;
-use peri_middlewares::prelude::TodoItem;
 use tokio::sync::oneshot;
 
 /// TUI 与后台 Agent 任务之间的通信事件（通过 mpsc channel 传递）
@@ -38,15 +37,36 @@ pub enum AgentEvent {
         response_tx: oneshot::Sender<InteractionResponse>,
     },
     /// Todo 列表更新
-    TodoUpdate(Vec<TodoItem>),
+    TodoUpdate(Vec<peri_acp::event::TodoItemDto>),
     /// Agent 执行结束后的消息快照（用于多轮对话续接）
     StateSnapshot(Vec<peri_agent::messages::BaseMessage>),
+    /// 单次 ReAct 迭代提交信号（v2 路径专用）
+    ///
+    /// 每个 Act 阶段结束时由 v2 stages 触发，携带当前 transcript 全量快照。
+    /// Pipeline 据此调用 `commit_iteration(messages)`：将 `transcript` 替换为
+    /// 权威快照、清空 `partial`，从而消除多迭代场景下文本/工具顺序错乱。
+    TurnCommitted {
+        messages: Vec<peri_agent::messages::BaseMessage>,
+        steps: usize,
+    },
+    /// 轻量级状态快照元数据（v2 路径专用）
+    ///
+    /// v2 `StateEvent::StateSnapshot` 经 ACP 桥接投递。**不应**清空 MessagePipeline 状态，
+    /// 仅用于刷新上下文使用率、步数等元数据。
+    StateSnapshotMeta {
+        message_count: usize,
+        total_tokens: u64,
+        current_step: usize,
+        consecutive_failures: u32,
+        budget_pct: Option<f64>,
+        context_total_tokens: Option<u64>,
+    },
     /// Compact 开始（来自 executor 或手动 /compact）
     CompactStarted,
     /// 上下文压缩完成，携带摘要、保留的文件和 skill 信息
     CompactCompleted {
         summary: String,
-        files: Vec<peri_agent::agent::events::CompactFileInfo>,
+        files: Vec<peri_acp::event::CompactFileInfoDto>,
         skills: Vec<String>,
         micro_cleared: usize,
         /// 压缩后的新消息列表
@@ -85,10 +105,10 @@ pub enum AgentEvent {
     },
     /// Token 使用量更新（从 enriched UsageUpdate _meta 解析而来）
     TokenUsageUpdate {
-        usage: peri_agent::llm::types::TokenUsage,
+        usage: peri_acp::event::TokenUsageDto,
         model: String,
         /// LLM 响应停止原因
-        stop_reason: Option<peri_agent::llm::types::StopReason>,
+        stop_reason: Option<peri_acp::event::StopReasonDto>,
     },
     /// LLM 调用重试中（从核心层 LlmRetrying 映射而来）
     LlmRetrying {
@@ -154,4 +174,6 @@ pub enum AgentEvent {
     BgToolStep {
         child_thread_id: String,
     },
+    /// Workflow 进度更新（WorkflowRunner 发出，用于 WorkflowPanel 渲染）
+    WorkflowProgress(peri_acp::event::WorkflowProgressDto),
 }

@@ -191,8 +191,8 @@ pub async fn run_print(
         peri_acp::session::agent_pool::AgentPool::new(),
     ));
 
-    // execute_prompt 是同步函数（返回 PromptResult，不是 async）
-    let result = peri_acp::session::executor::execute_prompt(
+    // run_session_loop 是 async 函数（返回 PromptResult）
+    let result = peri_acp::session::executor::run_session_loop(
         peri_acp::session::executor::PromptExecutionContext {
             provider,
             peri_config: peri_config_arc,
@@ -222,6 +222,8 @@ pub async fn run_print(
             thread_store: None,    // print 模式不需要持久化
             thread_id: None,       // parent_thread_id
             session_manager: None, // print 模式不需要 cancel 级联
+            workflow_executor: None,
+            workflow_middleware: None,
         },
     )
     .await;

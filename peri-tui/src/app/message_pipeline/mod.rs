@@ -3,22 +3,27 @@
 //! 核心设计：所有 `MessageViewModel` 的产生都经过单一转换函数
 //! `messages_to_view_models(base_messages, cwd)`。
 //!
-//! # 两条路径
+//! # 单一数据源架构（v3 重构）
+//!
+//! Pipeline 持有两类状态：
+//! - **规范源 `transcript: Vec<BaseMessage>`**：会话级权威消息历史，由 v2 stages
+//!   在每个 ReAct 迭代边界（`TurnCommitted` 事件）整体替换。
+//! - **当前迭代增量 `partial: Option<PartialAiMessage>`**：流式 LLM 输出与
+//!   工具调用状态，懒初始化于第一个流式事件，在 `commit_iteration` 整体丢弃。
+//!
+//! 视图派生是纯函数：`view = messages_to_view_models(transcript) ⊕ partial_bubble`。
+//! 历史恢复与流式渲染走同一路径（`restore_completed` 等价于一次 `commit_iteration`）。
+//!
+//! # 两条路径统一
 //!
 //! ```text
-//!   流式事件 ──→ 增量更新 BaseMessage[] ──→ reconcile ──→ MessageViewModel[]
-//!   历史恢复 ──→ BaseMessage[]            ──→ 直接转换  ──→ MessageViewModel[]
-//!                                    ↑
-//!                      同一个 messages_to_view_models()
+//!   流式事件 ──→ partial（增量）     ─┐
+//!                                       ├─→ build_tail_vms ──→ MessageViewModel[]
+//!   TurnCommitted ──→ transcript（全量）─┘
+//!   历史恢复 ──→ restore_completed ──→ transcript = msgs, partial = None
 //! ```
-//!
-//! # 流式 UX 优化
-//!
-//! `AssistantChunk` 使用 `AppendChunk` 直接操作渲染层（避免每字符重做 markdown），
-//! 但在 "finalize 边界"（ToolStart / ToolEnd / Done）会 reconcile 最后的
-//! AssistantBubble，确保最终状态与 restore 路径完全一致。
 
-use std::{collections::HashMap, time::Instant};
+use std::time::Instant;
 
 use peri_agent::messages::{BaseMessage, ToolCallRequest};
 
@@ -27,6 +32,7 @@ use crate::ui::message_view::MessageViewModel;
 
 mod lifecycle;
 mod reconcile;
+mod state;
 mod streaming;
 mod subagent;
 mod throttle;
@@ -40,78 +46,56 @@ use reconcile::{extract_tail_lines, merge_frozen_subagents};
 #[allow(unused_imports)]
 pub(crate) use throttle::{AdaptiveChunkingPolicy, ChunkingMode, DrainPlan};
 
+#[allow(unused_imports)]
+pub(crate) use state::CompletedTool;
+pub(crate) use state::{PartialAiMessage, PendingTool};
 pub(crate) use streaming::StreamingMode;
 
 pub use crate::ui::message_view::aggregate_batch_groups;
 
-// ─── 管线内部状态 ────────────────────────────────────────────────────────────
-
-/// 已开始但未结束的工具调用
-pub(crate) struct PendingTool {
-    #[allow(dead_code)] // 用于工具调用匹配，reconcile 阶段读取
-    tool_call_id: String,
-    name: String,
-    input: serde_json::Value,
-}
-
-/// ToolEnd 后、StateSnapshot 前的工具结果（用于在 reconcile gap 期间显示）
-pub(crate) struct CompletedTool {
-    tool_call_id: String,
-    name: String,
-    input: serde_json::Value,
-    output: String,
-    is_error: bool,
-}
+// ─── 管线内部状态（SubAgent / Batch） ────────────────────────────────────────
 
 /// 活跃 SubAgent 执行状态
 pub(crate) struct SubAgentState {
     /// subagent_type，仅用于显示
-    agent_id: String,
+    pub agent_id: String,
     /// 唯一实例标识符，用于路由
-    instance_id: String,
-    task_preview: String,
-    total_steps: usize,
+    pub instance_id: String,
+    pub task_preview: String,
+    pub total_steps: usize,
     /// 流式期间的内部消息（不持久化）
-    recent_messages: Vec<MessageViewModel>,
-    is_running: bool,
+    pub recent_messages: Vec<MessageViewModel>,
+    pub is_running: bool,
     /// SubAgentEnd 时固化的完整 VM（含 recent_messages、final_result 等）
-    finalized_vm: Option<MessageViewModel>,
+    pub finalized_vm: Option<MessageViewModel>,
     /// 是否为后台 agent
-    is_background: bool,
+    pub is_background: bool,
     /// Agent 实例的短显示标识符（6 位十六进制）
-    bg_hash: Option<String>,
+    pub bg_hash: Option<String>,
 }
 
 /// 批次检测状态：跟踪连续的 SubAgentStart/SubAgentEnd
-struct BatchInfo {
+pub(crate) struct BatchInfo {
     /// 已开始的 agent 数
-    started: usize,
+    pub started: usize,
     /// 已完成的 agent 数
-    completed: usize,
+    pub completed: usize,
 }
 
 // ─── MessagePipeline ─────────────────────────────────────────────────────────
 
 /// 统一消息渲染管线。
 ///
-/// 维护规范 `BaseMessage[]` 状态，通过单一转换函数 `messages_to_view_models()`
-/// 产生 `MessageViewModel`。流式和恢复共享同一个转换路径。
+/// 维护规范 `transcript: Vec<BaseMessage>`（全量会话历史）与
+/// `partial: Option<PartialAiMessage>`（当前迭代增量）两类状态，
+/// 通过单一转换函数 `messages_to_view_models()` 产生 `MessageViewModel`。
 pub struct MessagePipeline {
     cwd: String,
-    /// 已完成的 BaseMessages（规范状态，可用于持久化）
-    completed: Vec<BaseMessage>,
-    /// 当前正在流式构建的 AI 文本
-    current_ai_text: String,
-    /// 当前正在流式构建的 AI 推理内容
-    current_ai_reasoning: String,
-    /// 当前 AI 消息中的 tool_calls（由 ToolStart 事件积累）
-    current_ai_tool_calls: Vec<ToolCallRequest>,
-    /// 当前 AI 消息是否已 finalize（ToolStart 到达后 finalize）
-    current_ai_finalized: bool,
-    /// 已开始但未结束的工具调用
-    pending_tools: HashMap<String, PendingTool>,
-    /// ToolEnd 后、StateSnapshot 前的工具结果（在 reconcile gap 期间显示）
-    completed_tools: Vec<CompletedTool>,
+    /// 规范状态：会话级权威 BaseMessage 列表，由 `commit_iteration` 整体替换。
+    transcript: Vec<BaseMessage>,
+    /// 当前 ReAct 迭代进行中的增量（流式文本/推理/工具调用）。
+    /// `None` = 无进行中迭代；`Some(..)` = 流式事件已懒初始化。
+    partial: Option<PartialAiMessage>,
     /// SubAgent 栈
     subagent_stack: Vec<SubAgentState>,
     /// 冻结的 SubAgentGroup VMs（SubAgentEnd 时构建，done() 时收集）
@@ -134,23 +118,18 @@ pub struct MessagePipeline {
     /// Block 模式下是否有待 flush 的内容
     block_pending_flush: bool,
     // ── 轮次追踪 ──
-    /// 本轮开始时 completed 的长度（用于区分首轮 StateSnapshot 前/后）
-    completed_len_at_round_start: usize,
-    /// 本轮是否收到过 StateSnapshot
-    has_snapshot_this_round: bool,
+    /// 本轮开始时 transcript 的长度（用于派生 prefix_len）
+    transcript_len_at_round_start: usize,
+    /// 本轮是否已收到过 TurnCommitted / set_completed 提交信号
+    has_committed_this_round: bool,
 }
 
 impl MessagePipeline {
     pub fn new(cwd: String) -> Self {
         Self {
             cwd,
-            completed: Vec::new(),
-            current_ai_text: String::new(),
-            current_ai_reasoning: String::new(),
-            current_ai_tool_calls: Vec::new(),
-            current_ai_finalized: false,
-            pending_tools: HashMap::new(),
-            completed_tools: Vec::new(),
+            transcript: Vec::new(),
+            partial: None,
             subagent_stack: Vec::new(),
             frozen_subagent_vms: Vec::new(),
             active_batch: None,
@@ -160,13 +139,61 @@ impl MessagePipeline {
             block_buffer: String::new(),
             inside_code_fence: false,
             block_pending_flush: false,
-            completed_len_at_round_start: 0,
-            has_snapshot_this_round: false,
+            transcript_len_at_round_start: 0,
+            has_committed_this_round: false,
         }
     }
 
     pub fn cwd(&self) -> &str {
         &self.cwd
+    }
+
+    /// 获取或初始化 partial（流式事件到达时调用）。
+    pub(crate) fn partial_mut(&mut self) -> &mut PartialAiMessage {
+        self.partial.get_or_insert_with(Default::default)
+    }
+
+    /// 不可变访问 partial（若存在）。
+    #[cfg(test)]
+    pub(crate) fn partial_ref(&self) -> Option<&PartialAiMessage> {
+        self.partial.as_ref()
+    }
+
+    // ── 流式状态访问（测试兼容层） ────────────────────────────────────────────
+    // 生产代码通过 `partial.as_ref()/as_mut()` 直接访问，这些方法仅为旧测试保留。
+
+    /// 当前迭代流式文本（无 partial 时返回空字符串切片）
+    #[cfg(test)]
+    pub(crate) fn current_ai_text(&self) -> &str {
+        self.partial.as_ref().map(|p| p.text.as_str()).unwrap_or("")
+    }
+
+    /// 当前迭代的 tool_calls
+    #[cfg(test)]
+    pub(crate) fn current_ai_tool_calls(&self) -> &[ToolCallRequest] {
+        self.partial
+            .as_ref()
+            .map(|p| p.tool_calls.as_slice())
+            .unwrap_or(&[])
+    }
+
+    // ── 测试友好访问（partial 内部状态） ─────────────────────────────────────
+
+    /// 当前迭代 pending_tools 是否包含指定 tool_call_id（无 partial 时返回 false）
+    #[cfg(test)]
+    pub(crate) fn pending_tools_contains(&self, id: &str) -> bool {
+        self.partial
+            .as_ref()
+            .is_some_and(|p| p.pending_tools.contains_key(id))
+    }
+
+    /// 当前迭代 completed_tools 是否为空（无 partial 时视为空）
+    #[cfg(test)]
+    pub(crate) fn completed_tools_is_empty(&self) -> bool {
+        self.partial
+            .as_ref()
+            .map(|p| p.completed_tools.is_empty())
+            .unwrap_or(true)
     }
 
     /// 统一事件处理入口：将 AgentEvent 转换为 PipelineAction 列表。
@@ -241,12 +268,13 @@ impl MessagePipeline {
                     // 不创建 SubAgentState（SubAgentStart 事件会处理）。
                     // 避免与 SubAgentStart 的 tool_start_internal 产生重复条目。
                     self.finalize_current_ai();
-                    self.current_ai_tool_calls.push(ToolCallRequest::new(
+                    let partial = self.partial_mut();
+                    partial.tool_calls.push(ToolCallRequest::new(
                         &tool_call_id,
                         &name,
                         input.clone(),
                     ));
-                    self.pending_tools.insert(
+                    partial.pending_tools.insert(
                         tool_call_id.to_string(),
                         PendingTool {
                             tool_call_id: tool_call_id.to_string(),
@@ -337,20 +365,35 @@ impl MessagePipeline {
                     vec![PipelineAction::None]
                 }
             }
-            AgentEvent::StateSnapshot(msgs) => {
+            AgentEvent::TurnCommitted { messages, .. } => {
                 if self.in_subagent() {
-                    // 子 Agent 的 StateSnapshot 不应修改父 Agent 的 completed 列表，
+                    // 子 Agent 的 TurnCommitted 不应修改父 Agent 的 transcript，
                     // 否则子 Agent 的全部内部消息会污染父 Agent 的消息历史。
                     vec![PipelineAction::None]
                 } else {
                     self.force_flush_block();
-                    self.set_completed(msgs);
+                    self.commit_iteration(messages);
+                    vec![PipelineAction::None]
+                }
+            }
+            AgentEvent::StateSnapshot(msgs) => {
+                // v1 残留路径（v2 不再 emit）。保留以兼容旧 executor 路径与持久化场景。
+                if self.in_subagent() {
+                    vec![PipelineAction::None]
+                } else {
+                    self.force_flush_block();
+                    self.commit_iteration(msgs);
                     vec![PipelineAction::None]
                 }
             }
             AgentEvent::SubagentLifecycle { .. } => {
                 // SubagentLifecycle 仅由 agent_ops 处理（spinner + request_rebuild），
                 // Pipeline 不修改状态，直接返回 None
+                vec![PipelineAction::None]
+            }
+            AgentEvent::StateSnapshotMeta { .. } => {
+                // v2 轻量级元数据快照：不携带消息列表，Pipeline 不修改 transcript 状态。
+                // 元数据（context 使用率/步数）由 agent_ops 自行消费（如未来需要）。
                 vec![PipelineAction::None]
             }
             // 以下事件由 agent_ops 直接处理，Pipeline 返回 None
@@ -371,7 +414,8 @@ impl MessagePipeline {
             | AgentEvent::McpActionCompleted { .. }
             | AgentEvent::PluginActionCompleted { .. }
             | AgentEvent::LspDiagnostics { .. }
-            | AgentEvent::BgToolStep { .. } => {
+            | AgentEvent::BgToolStep { .. }
+            | AgentEvent::WorkflowProgress(_) => {
                 vec![PipelineAction::None]
             }
         }

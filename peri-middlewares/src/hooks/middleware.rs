@@ -22,13 +22,11 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use peri_agent::{
-    agent::{
-        react::{AgentOutput, ReactLLM, ToolCall, ToolResult},
-        state::State,
-    },
+    agent::react::{AgentOutput, ReactLLM, ToolCall, ToolResult},
     error::{AgentError, AgentResult},
-    messages::BaseMessage,
-    middleware::Middleware,
+    messages::{BaseMessage, MessageContent},
+    middleware::{r#trait::Middleware, state::MiddlewareState},
+    session::{MessageKind, MessageSource, QueuedMessage},
 };
 
 use crate::hitl::SharedPermissionMode;
@@ -40,7 +38,7 @@ use crate::hooks::{
     input_builder,
     once_tracker::OnceTracker,
     permission_gate,
-    stop_block_guard::{format_stop_block_feedback, GuardDecision, StopBlockGuard},
+    stop_block_guard::{format_stop_block_feedback_no_wrapper, GuardDecision, StopBlockGuard},
     types::{HookAction, HookEvent, HookInput, HookType, RegisteredHook},
 };
 
@@ -159,7 +157,7 @@ impl HookMiddleware {
 
     /// 在一批并行工具调用全部完成后触发 PostToolBatch hook。
     /// 由 dispatch_tools 在所有 tool_result 写入后调用。
-    pub async fn fire_post_tool_batch<S: State>(&self, state: &mut S) -> AgentResult<()> {
+    pub async fn fire_post_tool_batch(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         let prompt_text = state
             .messages()
             .iter()
@@ -187,12 +185,12 @@ impl HookMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for HookMiddleware {
+impl Middleware for HookMiddleware {
     fn name(&self) -> &str {
         "HookMiddleware"
     }
 
-    async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // Extract the latest human message as prompt text
         let prompt = state
             .messages()
@@ -253,7 +251,11 @@ impl<S: State> Middleware<S> for HookMiddleware {
         Ok(())
     }
 
-    async fn before_tool(&self, _state: &mut S, tool_call: &ToolCall) -> AgentResult<ToolCall> {
+    async fn before_tool(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        tool_call: &ToolCall,
+    ) -> AgentResult<ToolCall> {
         let permission_mode_str = format!("{:?}", self.permission_mode.load());
         let input = HookInput::tool_call(
             &self.session_id,
@@ -336,7 +338,7 @@ impl<S: State> Middleware<S> for HookMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut S,
+        _state: &mut dyn MiddlewareState,
         tool_call: &ToolCall,
         result: &ToolResult,
     ) -> AgentResult<()> {
@@ -367,13 +369,17 @@ impl<S: State> Middleware<S> for HookMiddleware {
 
     async fn after_tools_batch(
         &self,
-        state: &mut S,
+        state: &mut dyn MiddlewareState,
         _results: &[(ToolCall, ToolResult)],
     ) -> AgentResult<()> {
         self.fire_post_tool_batch(state).await
     }
 
-    async fn after_agent(&self, state: &mut S, output: &AgentOutput) -> AgentResult<AgentOutput> {
+    async fn after_agent(
+        &self,
+        state: &mut dyn MiddlewareState,
+        output: &AgentOutput,
+    ) -> AgentResult<AgentOutput> {
         let input = input_builder::stop(
             &self.session_id,
             &self.transcript_path,
@@ -392,12 +398,17 @@ impl<S: State> Middleware<S> for HookMiddleware {
                 }
                 GuardDecision::Block { count, reason } => {
                     // [TRAP] 必须用 Human + <system-reminder> 注入，禁止 BaseMessage::system。
-                    // System 消息会被 anthropic/openai invoke hoist 到 system prompt 顶部，
+                    // System 消息会被 anthropic/openai invoke hoist 到 system prompt 顶部,
                     // 违反 frozen_system_prompt 稳定性（第一优先级）。
-                    // （与 goal_middleware.rs / compact_middleware.rs 注入路径一致）
-                    state.add_message(BaseMessage::human(format_stop_block_feedback(
-                        &reason, count,
-                    )));
+                    // （与 goal_middleware.rs / compact_v2.rs::re_inject_v2 注入路径一致）
+                    // 走 v2 MessageQueue Info kind → Receive 阶段统一消费。
+                    let feedback = format_stop_block_feedback_no_wrapper(&reason, count);
+                    let reminder = format!("<system-reminder>\n{}\n</system-reminder>", feedback);
+                    state.v2_queue().push(QueuedMessage::new(
+                        MessageKind::Info,
+                        MessageSource::StopHookFeedback,
+                        BaseMessage::human(MessageContent::text(reminder)),
+                    ));
                     let mut output = output.clone();
                     output.block_continue = Some(reason);
                     return Ok(output);
@@ -425,7 +436,11 @@ impl<S: State> Middleware<S> for HookMiddleware {
         Ok(output.clone())
     }
 
-    async fn on_error(&self, _state: &mut S, error: &AgentError) -> AgentResult<()> {
+    async fn on_error(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        error: &AgentError,
+    ) -> AgentResult<()> {
         // StopFailure 仅在 API/LLM 调用失败时触发，
         // 跳过 Interrupted、MaxIterationsExceeded、ToolRejected 等非 API 错误。
         let should_fire = matches!(

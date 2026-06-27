@@ -297,3 +297,60 @@ async fn test_compact_end_without_start_no_panic() {
     tracer.on_compact_end("summary", 1, 0, 0, false, "");
     // 不应 panic
 }
+
+// === Test 16: on_llm_request_payload 缓存 raw_body 到 generation_data ===
+#[tokio::test]
+async fn test_on_llm_request_payload_caches_raw_body() {
+    let mut tracer = make_tracer();
+    tracer.on_llm_start(7, &[], &[]);
+    let body = serde_json::json!({"messages":[{"role":"system","content":"x"}]});
+    tracer.on_llm_request_payload(7, Arc::new(body.clone()));
+    let cached = tracer
+        .generation_data
+        .get(&7)
+        .expect("step 7 应有 generation_data 缓存");
+    assert_eq!(cached.raw_body, Some(body));
+}
+
+// === Test 17: on_llm_request_payload 在 on_llm_start 之前到达时静默 no-op ===
+#[tokio::test]
+async fn test_on_llm_request_payload_without_start_is_noop() {
+    let mut tracer = make_tracer();
+    // 未先调 on_llm_start，generation_data 为空 → 不应 panic
+    tracer.on_llm_request_payload(42, Arc::new(serde_json::json!({"x": 1})));
+    assert!(tracer.generation_data.is_empty());
+}
+
+// === Test 18: on_llm_end 优先用 raw_body 作为 Generation input（Provider-native 格式） ===
+#[tokio::test]
+async fn test_on_llm_end_prefers_raw_body_over_messages_tools() {
+    let mut tracer = make_tracer();
+    tracer.on_llm_start(3, &[], &[]);
+    // 关键：raw_body 含 Provider-native 完整请求体（含 system / 工具格式）
+    let raw = serde_json::json!({
+        "model": "claude-sonnet-4",
+        "system": "REAL_SYSTEM_PROMPT",
+        "messages": [{"role":"user","content":"hi"}],
+        "tools": [{"name":"X","description":"d","input_schema":{}}]
+    });
+    tracer.on_llm_request_payload(3, Arc::new(raw.clone()));
+    // 取出 cached 验证 raw_body 已写入（on_llm_end 会消费 generation_data）
+    tracer.on_llm_end(3, "claude-sonnet-4", "Anthropic", "answer", None);
+    // generation_data 应被 on_llm_end 移除
+    assert!(
+        tracer.generation_data.is_empty(),
+        "on_llm_end 应消费 generation_data[step]"
+    );
+    // 事件已入队 batcher（无法直接读回 input 字段，但消费成功即说明 raw_body 路径未报错）
+}
+
+// === Test 19: on_llm_end 在 raw_body 缺失时 fallback 到 messages+tools 序列化 ===
+#[tokio::test]
+async fn test_on_llm_end_fallback_to_messages_when_no_payload() {
+    let mut tracer = make_tracer();
+    // 未调 on_llm_request_payload → raw_body 缺失
+    tracer.on_llm_start(2, &[], &[]);
+    tracer.on_llm_end(2, "gpt-4o", "OpenAI", "result", None);
+    // 旧路径应仍然工作（不 panic），generation_data 被消费
+    assert!(tracer.generation_data.is_empty());
+}

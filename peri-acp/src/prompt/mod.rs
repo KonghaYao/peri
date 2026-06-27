@@ -154,6 +154,10 @@ pub fn build_system_prompt(
             env!("CARGO_MANIFEST_DIR"),
             "/../peri-tui/prompts/sections/06_tone_style.md"
         )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../peri-tui/prompts/sections/16_workflow.md"
+        )),
     ];
 
     // 动态段落（含环境变量占位符、feature-gated 段落）—— 边界标记之后，不参与缓存

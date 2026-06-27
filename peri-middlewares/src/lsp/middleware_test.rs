@@ -23,7 +23,7 @@
         };
         let mw = LspMiddleware::new("/tmp".to_string(), config);
         assert_eq!(
-            <LspMiddleware as Middleware<AgentState>>::name(&mw),
+            <LspMiddleware as Middleware>::name(&mw),
             "LspMiddleware"
         );
     }
@@ -34,7 +34,7 @@
             lsp_servers: HashMap::new(),
         };
         let mw = LspMiddleware::new("/tmp".to_string(), config);
-        let tools = <LspMiddleware as Middleware<AgentState>>::collect_tools(&mw, "/tmp");
+        let tools = <LspMiddleware as Middleware>::collect_tools(&mw, "/tmp");
         assert!(tools.is_empty());
     }
 
@@ -49,7 +49,7 @@
             lsp_servers: servers,
         };
         let mw = LspMiddleware::new("/tmp".to_string(), config);
-        let tools = <LspMiddleware as Middleware<AgentState>>::collect_tools(&mw, "/tmp");
+        let tools = <LspMiddleware as Middleware>::collect_tools(&mw, "/tmp");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name(), "LSP");
     }
@@ -74,7 +74,7 @@
         let configs = vec![make_config("rust-analyzer", vec![(".rs", "rust")])];
         let mw = LspMiddleware::from_configs("/tmp".to_string(), configs);
         assert_eq!(
-            <LspMiddleware as Middleware<AgentState>>::name(&mw),
+            <LspMiddleware as Middleware>::name(&mw),
             "LspMiddleware"
         );
         assert!(mw.pool.has_servers());

@@ -119,6 +119,13 @@ impl BaseTool for WriteFileTool {
                 if let Err(e) = std::fs::write(&tmp_path, content) {
                     return Err(format!("Error writing file: {e}").into());
                 }
+                // 恢复原文件的 Unix 权限位（含可执行位），防止原子写入后 +x 丢失
+                if let Ok(metadata) = std::fs::metadata(&resolved) {
+                    #[cfg(unix)]
+                    {
+                        let _ = std::fs::set_permissions(&tmp_path, metadata.permissions());
+                    }
+                }
                 match std::fs::rename(&tmp_path, &resolved) {
                     Ok(_) => {
                         let rel = resolved

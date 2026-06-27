@@ -1,3 +1,10 @@
+// [TRAP] 终端光标 vs Buffer 光标
+// 禁用 tui-textarea 默认 REVERSED buffer 级光标改用终端光标时，必须有准确的 textarea 水平
+// 滚动偏移读数。tui-textarea-2 的 Viewport::scroll_top() 是 pub(crate)，外部无法读取真实 top_col。
+// 推断公式在 sticky scroll 场景下会算错，导致光标被钉在视口最右列→完全消失。
+// 当前用 buffer 后处理方案（扫描 REVERSED 空格，移除 REVERSED + 设 bg=TEXT）等效还原光标。
+// 未来恢复 IME 终端光标时必须用方案 A（UI state 跨帧 sticky），禁止复刻 PR #34 的简单推断公式。
+// 详见 spec/global/domains/tui.md#issue_2026-06-17-main-textarea-cursor-invisible-long-line
 mod attachment;
 pub(crate) mod bg_agent_bar;
 pub(crate) mod message_area;
@@ -38,13 +45,8 @@ fn render_session_column(f: &mut Frame, app: &mut App, area: Rect) {
     let line_count = app.session_mgr.current_mut().ui.textarea.lines().len() as u16;
     let input_height = (line_count + 2).min(area.height * 2 / 5).max(3);
 
-    // 缓冲消息高度（loading 时在输入框上方显示待发送消息）
-    let pending_count = app
-        .session_mgr
-        .current_mut()
-        .messages
-        .pending_messages
-        .len();
+    // 缓冲消息区域（pending_messages：loading 期间用户输入的缓存，Agent 完成后自动提交）
+    let pending_count = app.session_mgr.current().messages.pending_messages.len();
     let queued_height: u16 = if pending_count > 0 && app.session_mgr.current_mut().ui.loading {
         (pending_count as u16).min(3)
     } else {
@@ -152,47 +154,6 @@ fn render_session_column(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    // 缓冲消息预览（loading 时在输入框上方显示待发送消息）
-    if queued_height > 0 {
-        let queued_area = chunks[4];
-        let msgs = &app.session_mgr.current_mut().messages.pending_messages;
-        let visible_count = (pending_count).min(queued_height as usize);
-        let pending_style = Style::default().fg(theme::MUTED).bg(theme::USER_BG);
-        for (i, msg) in msgs.iter().take(visible_count).enumerate() {
-            let line_area = Rect {
-                x: queued_area.x + 2,
-                y: queued_area.y + i as u16,
-                width: queued_area.width.saturating_sub(2),
-                height: 1,
-            };
-            // 截断到可用宽度（字符级安全）
-            let max_chars = line_area.width as usize;
-            let display: String = msg.chars().take(max_chars.saturating_sub(3)).collect();
-            let suffix = if msg.chars().count() > max_chars.saturating_sub(3) {
-                "…"
-            } else {
-                ""
-            };
-            f.render_widget(
-                Paragraph::new(format!("{}{}", display, suffix)).style(pending_style),
-                line_area,
-            );
-        }
-        if pending_count > visible_count {
-            let more_area = Rect {
-                x: queued_area.x + 2,
-                y: queued_area.y + visible_count as u16,
-                width: queued_area.width.saturating_sub(2),
-                height: 1,
-            };
-            f.render_widget(
-                Paragraph::new(format!("… +{} more", pending_count - visible_count))
-                    .style(pending_style),
-                more_area,
-            );
-        }
-    }
-
     // 输入框样式：Bar 焦点变暗 / 聚焦只读模式 / 正常模式
     let bar_focused = app.session_mgr.current_mut().ui.bg_bar_cursor.is_some();
     let focused_id = app.session_mgr.current_mut().focused_instance_id.clone();
@@ -249,6 +210,39 @@ fn render_session_column(f: &mut Frame, app: &mut App, area: Rect) {
             .ui
             .textarea
             .set_style(ratatui::style::Style::default().fg(theme::TEXT));
+    }
+
+    // 缓冲消息渲染（pending_messages：loading 期间缓存，Agent 完成后自动提交）
+    if queued_height > 0 {
+        let queued_area = chunks[4];
+        let msgs = &app.session_mgr.current().messages.pending_messages;
+        let visible_count = (pending_count).min(queued_height as usize);
+        let pending_style = Style::default().fg(theme::MUTED).bg(theme::USER_BG);
+        for (i, msg) in msgs.iter().take(visible_count).enumerate() {
+            let line_area = Rect {
+                x: queued_area.x + 2,
+                y: queued_area.y + i as u16,
+                width: queued_area.width.saturating_sub(2),
+                height: 1,
+            };
+            // 截断到可用宽度（字符级安全）
+            let max_chars = line_area.width as usize;
+            let display: String = msg.chars().take(max_chars.saturating_sub(3)).collect();
+            f.render_widget(Paragraph::new(display).style(pending_style), line_area);
+        }
+        if pending_count > visible_count {
+            let more_line = Rect {
+                x: queued_area.x + 2,
+                y: queued_area.y + visible_count as u16,
+                width: queued_area.width.saturating_sub(2),
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(format!("… +{} more", pending_count - visible_count))
+                    .style(pending_style),
+                more_line,
+            );
+        }
     }
 
     // 输入框渲染

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use peri_agent::{agent::state::State, middleware::r#trait::Middleware};
+use peri_agent::middleware::{r#trait::Middleware, state::MiddlewareState};
 
 use crate::plugin::loader::LoadedPlugin;
 
@@ -21,12 +21,15 @@ impl PluginMiddleware {
 }
 
 #[async_trait::async_trait]
-impl<S: State> Middleware<S> for PluginMiddleware {
+impl Middleware for PluginMiddleware {
     fn name(&self) -> &str {
         "PluginMiddleware"
     }
 
-    async fn before_agent(&self, _state: &mut S) -> peri_agent::error::AgentResult<()> {
+    async fn before_agent(
+        &self,
+        _state: &mut dyn MiddlewareState,
+    ) -> peri_agent::error::AgentResult<()> {
         Ok(())
     }
 }

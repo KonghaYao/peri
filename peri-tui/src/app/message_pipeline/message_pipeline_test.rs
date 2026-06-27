@@ -196,7 +196,7 @@ fn test_handle_event_assistant_chunk() {
     });
     assert_eq!(actions.len(), 1);
     assert!(matches!(actions[0], PipelineAction::None));
-    assert_eq!(pipeline.current_ai_text, "hello");
+    assert_eq!(pipeline.current_ai_text(), "hello");
     assert!(
         pipeline.adaptive_policy.pending_lines > 0,
         "AssistantChunk 应通过策略跟踪积压"
@@ -231,7 +231,7 @@ fn test_handle_event_tool_lifecycle() {
     assert_eq!(actions.len(), 1);
     assert!(matches!(actions[0], PipelineAction::None));
     assert!(
-        pipeline.pending_tools.contains_key("tc1"),
+        pipeline.pending_tools_contains("tc1"),
         "ToolStart 后 pending_tools 应包含 tc1"
     );
     // ToolEnd → None，pending_tools 移除
@@ -245,7 +245,7 @@ fn test_handle_event_tool_lifecycle() {
     assert_eq!(actions.len(), 1);
     assert!(matches!(actions[0], PipelineAction::None));
     assert!(
-        !pipeline.pending_tools.contains_key("tc1"),
+        !pipeline.pending_tools_contains("tc1"),
         "ToolEnd 后 pending_tools 应不包含 tc1"
     );
     // Done → None
@@ -546,19 +546,19 @@ fn test_subagent_source_agent_id_none_fallback_to_last_mut() {
 #[test]
 fn test_build_tail_vms_with_snapshot() {
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
-    pipeline.completed = vec![
+    pipeline.transcript = vec![
         BaseMessage::human("q1"),
         BaseMessage::ai("a1"),
         BaseMessage::human("q2"),
         BaseMessage::ai("a2"),
     ];
-    pipeline.has_snapshot_this_round = true;
-    pipeline.completed_len_at_round_start = 0;
+    pipeline.has_committed_this_round = true;
+    pipeline.transcript_len_at_round_start = 0;
 
     let tail_vms = pipeline.build_tail_vms();
     // 不再用 rposition 截断——从 start 渲染全部消息
     let expected =
-        MessagePipeline::messages_to_view_models(&pipeline.completed[0..], &pipeline.cwd);
+        MessagePipeline::messages_to_view_models(&pipeline.transcript[0..], &pipeline.cwd);
     assert_eq!(format!("{:?}", tail_vms), format!("{:?}", expected));
 }
 
@@ -566,9 +566,9 @@ fn test_build_tail_vms_with_snapshot() {
 #[test]
 fn test_build_tail_vms_case1_no_snapshot() {
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
-    pipeline.completed = vec![BaseMessage::human("old q"), BaseMessage::ai("old a")];
-    pipeline.has_snapshot_this_round = false;
-    pipeline.completed_len_at_round_start = 2;
+    pipeline.transcript = vec![BaseMessage::human("old q"), BaseMessage::ai("old a")];
+    pipeline.has_committed_this_round = false;
+    pipeline.transcript_len_at_round_start = 2;
 
     // 有流式内容
     pipeline.push_chunk("streaming text");
@@ -602,14 +602,14 @@ fn test_build_tail_vms_case1_no_snapshot() {
 #[test]
 fn test_build_tail_vms_goal_steering_injected_skipped() {
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
-    pipeline.completed = vec![
+    pipeline.transcript = vec![
         BaseMessage::human("count to 3"),
         BaseMessage::ai("1"),
         BaseMessage::human("<goal-message>\n[Goal Steering]\n目标: 数到 3\n</goal-message>"),
         BaseMessage::ai("2\n3"),
     ];
-    pipeline.has_snapshot_this_round = true;
-    pipeline.completed_len_at_round_start = 0;
+    pipeline.has_committed_this_round = true;
+    pipeline.transcript_len_at_round_start = 0;
 
     let tail_vms = pipeline.build_tail_vms();
 
@@ -823,8 +823,8 @@ fn test_build_tail_vms_consistency() {
         BaseMessage::human("q2"),
         BaseMessage::ai("a2"),
     ]);
-    pipeline.has_snapshot_this_round = true;
-    pipeline.completed_len_at_round_start = 0;
+    pipeline.has_committed_this_round = true;
+    pipeline.transcript_len_at_round_start = 0;
 
     let tail_vms = pipeline.build_tail_vms();
 
@@ -850,8 +850,8 @@ fn test_build_tail_vms_with_tools() {
         }]),
         BaseMessage::tool_result("tc1", "file content here"),
     ]);
-    pipeline.has_snapshot_this_round = true;
-    pipeline.completed_len_at_round_start = 0;
+    pipeline.has_committed_this_round = true;
+    pipeline.transcript_len_at_round_start = 0;
 
     let tail_vms = pipeline.build_tail_vms();
 
@@ -866,9 +866,9 @@ fn test_build_tail_vms_with_tools() {
 #[test]
 fn test_build_tail_vms_with_pending_tools() {
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
-    pipeline.has_snapshot_this_round = true;
-    pipeline.completed_len_at_round_start = 0;
-    pipeline.completed = vec![BaseMessage::human("hi")];
+    pipeline.has_committed_this_round = true;
+    pipeline.transcript_len_at_round_start = 0;
+    pipeline.transcript = vec![BaseMessage::human("hi")];
 
     // 模拟 ToolStart（通过 handle_event）
     let _ = pipeline.handle_event(AgentEvent::ToolStart {
@@ -907,14 +907,14 @@ fn test_set_completed_clears_pending_tools() {
         input: serde_json::json!({"file_path": "/tmp/test.rs"}),
         source_agent_id: None,
     });
-    assert!(pipeline.pending_tools.contains_key("tc1"));
+    assert!(pipeline.pending_tools_contains("tc1"));
 
     pipeline.set_completed(vec![BaseMessage::human("hi"), BaseMessage::ai("result")]);
     assert!(
-        !pipeline.pending_tools.contains_key("tc1"),
+        !pipeline.pending_tools_contains("tc1"),
         "set_completed 应清除 pending_tools"
     );
-    assert!(pipeline.has_snapshot_this_round);
+    assert!(pipeline.has_committed_this_round);
 }
 
 /// 验证 Interrupted 后 build_tail_vms 产生一致结果（可用于后续 RebuildAll）
@@ -924,8 +924,8 @@ fn test_set_completed_clears_pending_tools() {
 #[test]
 fn test_build_tail_vms_interrupted_then_done_consistency() {
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
-    pipeline.has_snapshot_this_round = true;
-    pipeline.completed_len_at_round_start = 0;
+    pipeline.has_committed_this_round = true;
+    pipeline.transcript_len_at_round_start = 0;
 
     // 模拟流式：用户发送消息，agent 回复了文本，然后开始工具调用
     pipeline.push_chunk("I'll read the file");
@@ -988,12 +988,81 @@ fn test_build_tail_vms_interrupted_then_done_consistency() {
     }
 }
 
+/// 验证 v2 路径下（无携带消息列表的完整 StateSnapshot）Done 后工具调用仍然显示。
+///
+/// 回归 bug：v2 stages 只发轻量级 `StateSnapshotMeta`（无消息列表），工具显示
+/// 完全依赖 `current_ai_tool_calls` + `completed_tools`。原版 `done()` 错误地清空
+/// `completed_tools`，导致 Done 触发的 `build_tail_vms` 找不到工具数据，
+/// 最终 view_messages 中工具消失（但 resume 路径正常，因为消息从 ThreadStore 加载）。
+#[test]
+fn test_done_preserves_tools_without_state_snapshot_v2() {
+    let mut pipeline = MessagePipeline::new("/tmp".to_string());
+    // v2 路径：has_snapshot_this_round 永远为 false（无完整 StateSnapshot）
+    pipeline.has_committed_this_round = false;
+    pipeline.transcript_len_at_round_start = 0;
+
+    // 模拟事件序列：AssistantChunk → ToolStart → ToolEnd → Done
+    pipeline.push_chunk("I'll read the file");
+    let _ = pipeline.handle_event(AgentEvent::ToolStart {
+        tool_call_id: "tc_v2_1".into(),
+        name: "Read".into(),
+        display: "ReadFile".into(),
+        args: "test.rs".into(),
+        input: json!({"file_path": "/tmp/test.rs"}),
+        source_agent_id: None,
+    });
+    let _ = pipeline.handle_event(AgentEvent::ToolEnd {
+        tool_call_id: "tc_v2_1".into(),
+        name: "Read".into(),
+        output: "file content".into(),
+        is_error: false,
+        source_agent_id: None,
+    });
+
+    // Done 触发 pipeline.done()
+    let _ = pipeline.handle_event(AgentEvent::Done);
+
+    // Done 后 build_tail_vms 仍应包含 ToolBlock / ToolCallGroup
+    let action = pipeline.build_rebuild_all(0);
+    let tail_vms = match action {
+        PipelineAction::RebuildAll { tail_vms, .. } => tail_vms,
+        _ => panic!("Expected RebuildAll"),
+    };
+
+    let has_tool = tail_vms.iter().any(|vm| {
+        matches!(
+            vm,
+            MessageViewModel::ToolBlock { .. } | MessageViewModel::ToolCallGroup { .. }
+        )
+    });
+    assert!(
+        has_tool,
+        "v2 路径 Done 后 tail_vms 应包含工具 VM，实际: {:?}",
+        tail_vms.iter().collect::<Vec<_>>()
+    );
+
+    // 同时验证 begin_round 会清空残留，避免上一轮工具混入新一轮
+    pipeline.begin_round();
+    assert!(
+        pipeline.current_ai_tool_calls().is_empty(),
+        "begin_round 应清空 current_ai_tool_calls"
+    );
+    assert!(
+        pipeline.completed_tools_is_empty(),
+        "begin_round 应清空 completed_tools"
+    );
+    assert!(
+        !pipeline.has_streaming_content(),
+        "begin_round 应清空 current_ai_text"
+    );
+}
+
 /// 验证 Done 后 pipeline.done() 是幂等的（不改变 build_tail_vms 结果）
 #[test]
 fn test_done_idempotent_build_tail_vms() {
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
-    pipeline.has_snapshot_this_round = true;
-    pipeline.completed_len_at_round_start = 0;
+    pipeline.has_committed_this_round = true;
+    pipeline.transcript_len_at_round_start = 0;
 
     pipeline.push_chunk("Hello world");
     pipeline.set_completed(vec![
@@ -1245,8 +1314,8 @@ fn test_extract_tail_lines_single_line() {
 #[test]
 fn test_frozen_subagent_vms_cleared_on_begin_round() {
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
-    pipeline.has_snapshot_this_round = true;
-    pipeline.completed_len_at_round_start = 0;
+    pipeline.has_committed_this_round = true;
+    pipeline.transcript_len_at_round_start = 0;
 
     // ── 轮次 1：并发 2 个 SubAgent ──
     pipeline.handle_event(AgentEvent::SubAgentStart {
@@ -1382,7 +1451,7 @@ fn test_no_duplicate_subagent_state_on_tool_start_plus_subagent_start() {
         "ToolStart(Agent) 不应创建 SubAgentState"
     );
     assert!(
-        pipeline.pending_tools.contains_key("call_abc123"),
+        pipeline.pending_tools_contains("call_abc123"),
         "ToolStart 应注册 pending_tool"
     );
 
@@ -1431,7 +1500,7 @@ fn test_no_duplicate_subagent_state_on_tool_start_plus_subagent_start() {
     });
 
     assert!(
-        !pipeline.pending_tools.contains_key("call_abc123"),
+        !pipeline.pending_tools_contains("call_abc123"),
         "ToolEnd 应清理 pending_tool"
     );
     // frozen_count 不应增加
@@ -1945,7 +2014,7 @@ fn test_push_chunk_streaming_updates_policy() {
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
     pipeline.set_streaming_mode(StreamingMode::Streaming);
     pipeline.push_chunk("hello");
-    assert_eq!(pipeline.current_ai_text, "hello");
+    assert_eq!(pipeline.current_ai_text(), "hello");
     assert!(pipeline.adaptive_policy.pending_lines > 0);
 }
 
@@ -1954,7 +2023,7 @@ fn test_push_chunk_none_only_accumulates() {
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
     pipeline.set_streaming_mode(StreamingMode::None);
     pipeline.push_chunk("hello");
-    assert_eq!(pipeline.current_ai_text, "hello");
+    assert_eq!(pipeline.current_ai_text(), "hello");
     assert_eq!(pipeline.adaptive_policy.pending_lines, 0);
 }
 
@@ -1963,7 +2032,7 @@ fn test_push_chunk_block_buffering() {
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
     pipeline.set_streaming_mode(StreamingMode::Block);
     pipeline.push_chunk("hello");
-    assert_eq!(pipeline.current_ai_text, "");
+    assert_eq!(pipeline.current_ai_text(), "");
     assert_eq!(pipeline.block_buffer, "hello");
 }
 
@@ -1972,7 +2041,7 @@ fn test_push_chunk_block_flush_on_double_newline() {
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
     pipeline.set_streaming_mode(StreamingMode::Block);
     pipeline.push_chunk("paragraph one\n\n");
-    assert_eq!(pipeline.current_ai_text, "paragraph one\n\n");
+    assert_eq!(pipeline.current_ai_text(), "paragraph one\n\n");
     assert!(pipeline.block_buffer.is_empty());
     assert!(pipeline.block_pending_flush);
 }
@@ -1983,12 +2052,12 @@ fn test_push_chunk_block_code_fence() {
     pipeline.set_streaming_mode(StreamingMode::Block);
     pipeline.push_chunk("```rust\n");
     assert!(pipeline.inside_code_fence);
-    assert_eq!(pipeline.current_ai_text, "");
+    assert_eq!(pipeline.current_ai_text(), "");
     pipeline.push_chunk("fn main() {}\n");
-    assert_eq!(pipeline.current_ai_text, "");
+    assert_eq!(pipeline.current_ai_text(), "");
     pipeline.push_chunk("```\n");
     assert!(!pipeline.inside_code_fence);
-    assert_eq!(pipeline.current_ai_text, "```rust\nfn main() {}\n```\n");
+    assert_eq!(pipeline.current_ai_text(), "```rust\nfn main() {}\n```\n");
     assert!(pipeline.block_pending_flush);
 }
 
@@ -2029,9 +2098,9 @@ fn test_set_streaming_mode_flushes_on_exit_block() {
     let mut pipeline = MessagePipeline::new("/tmp".to_string());
     pipeline.set_streaming_mode(StreamingMode::Block);
     pipeline.push_chunk("unflushed content");
-    assert_eq!(pipeline.current_ai_text, "");
+    assert_eq!(pipeline.current_ai_text(), "");
     pipeline.set_streaming_mode(StreamingMode::Streaming);
-    assert_eq!(pipeline.current_ai_text, "unflushed content");
+    assert_eq!(pipeline.current_ai_text(), "unflushed content");
     assert!(pipeline.block_buffer.is_empty());
 }
 
@@ -2043,8 +2112,231 @@ fn test_done_flushes_block_buffer() {
         chunk: "hello".into(),
         source_agent_id: None,
     });
-    assert_eq!(pipeline.current_ai_text, "");
+    assert_eq!(pipeline.current_ai_text(), "");
     pipeline.done();
     // done() calls finalize_current_ai() which clears current_ai_text, but block_buffer was flushed
     assert!(pipeline.block_buffer.is_empty());
+}
+
+// ─── v2 多迭代顺序回归测试（gleaming-leaping-beacon.md） ────────────────────
+//
+// 这组测试验证重构的核心目标：单次 turn 内多次 ReAct 迭代的文本和工具调用
+// 按时序正确渲染（修复"所有文本渲染在所有工具之前"的 bug）。
+
+/// 验证多迭代场景下文本-工具-文本-工具的时序正确。
+///
+/// 场景：iter1 (text + Read) → commit → iter2 (text + Edit) → commit → final text
+/// 断言：tail_vms 中 iter1 文本在 iter1 工具前，iter1 工具在 iter2 文本前。
+#[test]
+fn test_multi_iteration_text_then_tool_order_preserved() {
+    let cwd = "/tmp";
+    let mut pipeline = MessagePipeline::new(cwd.to_string());
+    pipeline.has_committed_this_round = true;
+    pipeline.transcript_len_at_round_start = 0;
+
+    // === 迭代 1：流式文本 + 工具调用 + TurnCommitted ===
+    pipeline.push_chunk("I'll read the file first.");
+    pipeline.handle_event(AgentEvent::ToolStart {
+        tool_call_id: "tc1".into(),
+        name: "Read".into(),
+        display: "ReadFile".into(),
+        args: "/tmp/a.txt".into(),
+        input: json!({"file_path": "/tmp/a.txt"}),
+        source_agent_id: None,
+    });
+    pipeline.handle_event(AgentEvent::ToolEnd {
+        tool_call_id: "tc1".into(),
+        name: "Read".into(),
+        output: "content".into(),
+        is_error: false,
+        source_agent_id: None,
+    });
+
+    // 第一次 commit：iter1 的全量 transcript（Human + AI[text+tool_use] + Tool result）
+    let iter1_msgs = vec![
+        BaseMessage::human("question"),
+        BaseMessage::ai_from_blocks(vec![
+            ContentBlock::text("I'll read the file first."),
+            ContentBlock::tool_use("tc1", "Read", json!({"file_path": "/tmp/a.txt"})),
+        ]),
+        BaseMessage::tool_result("tc1", "content"),
+    ];
+    pipeline.handle_event(AgentEvent::TurnCommitted {
+        messages: iter1_msgs.clone(),
+        steps: 1,
+    });
+
+    // === 迭代 2：流式文本 + 工具调用 + TurnCommitted ===
+    pipeline.push_chunk("Now I'll edit it.");
+    pipeline.handle_event(AgentEvent::ToolStart {
+        tool_call_id: "tc2".into(),
+        name: "Edit".into(),
+        display: "EditFile".into(),
+        args: "/tmp/a.txt".into(),
+        input: json!({"file_path": "/tmp/a.txt"}),
+        source_agent_id: None,
+    });
+    pipeline.handle_event(AgentEvent::ToolEnd {
+        tool_call_id: "tc2".into(),
+        name: "Edit".into(),
+        output: "ok".into(),
+        is_error: false,
+        source_agent_id: None,
+    });
+
+    // 第二次 commit：iter1 + iter2 的全量 transcript（v2 替换语义）
+    let iter2_msgs = vec![
+        BaseMessage::human("question"),
+        BaseMessage::ai_from_blocks(vec![
+            ContentBlock::text("I'll read the file first."),
+            ContentBlock::tool_use("tc1", "Read", json!({"file_path": "/tmp/a.txt"})),
+        ]),
+        BaseMessage::tool_result("tc1", "content"),
+        BaseMessage::ai_from_blocks(vec![
+            ContentBlock::text("Now I'll edit it."),
+            ContentBlock::tool_use("tc2", "Edit", json!({"file_path": "/tmp/a.txt"})),
+        ]),
+        BaseMessage::tool_result("tc2", "ok"),
+    ];
+    pipeline.handle_event(AgentEvent::TurnCommitted {
+        messages: iter2_msgs.clone(),
+        steps: 2,
+    });
+
+    let tail = pipeline.build_tail_vms();
+
+    // 定位关键 VM 的位置
+    let find_text = |needle: &str| {
+        tail.iter().position(|vm| match vm {
+            MessageViewModel::AssistantBubble { blocks, .. } => blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlockView::Text { raw, .. } if raw.contains(needle))),
+            _ => false,
+        })
+    };
+    let find_tool = |name: &str| {
+        tail.iter().position(|vm| match vm {
+            MessageViewModel::ToolBlock { tool_name, .. } => tool_name == name,
+            MessageViewModel::ToolCallGroup { tools, .. } => {
+                tools.iter().any(|t| t.tool_name == name)
+            }
+            _ => false,
+        })
+    };
+
+    let text1 = find_text("read the file").expect("iter1 文本应存在");
+    let tool1 = find_tool("Read").expect("Read 工具应存在");
+    let text2 = find_text("edit it").expect("iter2 文本应存在");
+    let tool2 = find_tool("Edit").expect("Edit 工具应存在");
+
+    assert!(
+        text1 < tool1,
+        "iter1 文本 ({}) 应在 Read 工具 ({}) 之前",
+        text1,
+        tool1
+    );
+    assert!(
+        tool1 < text2,
+        "Read 工具 ({}) 应在 iter2 文本 ({}) 之前",
+        tool1,
+        text2
+    );
+    assert!(
+        text2 < tool2,
+        "iter2 文本 ({}) 应在 Edit 工具 ({}) 之前",
+        text2,
+        tool2
+    );
+}
+
+/// 验证历史恢复后开始新一轮流式时，transcript 切片与 partial 共存且时序正确。
+#[test]
+fn test_history_restore_then_streaming_unified_path() {
+    let cwd = "/tmp";
+    let mut pipeline = MessagePipeline::new(cwd.to_string());
+
+    // 历史恢复：3 条已提交消息
+    let history = vec![
+        BaseMessage::human("past question"),
+        BaseMessage::ai("past answer"),
+        BaseMessage::tool_result("old_tc", "old result"),
+    ];
+    pipeline.restore_completed(history.clone());
+    pipeline.has_committed_this_round = true;
+    pipeline.transcript_len_at_round_start = 0;
+
+    // 新一轮流式：partial 与 transcript 共存
+    pipeline.push_chunk("new response");
+    pipeline.handle_event(AgentEvent::ToolStart {
+        tool_call_id: "new_tc".into(),
+        name: "Bash".into(),
+        display: "Bash".into(),
+        args: "ls".into(),
+        input: json!({"command": "ls"}),
+        source_agent_id: None,
+    });
+
+    let tail = pipeline.build_tail_vms();
+
+    // 历史消息在前（Human + Assistant）
+    let has_history_human = tail
+        .iter()
+        .any(|vm| matches!(vm, MessageViewModel::UserBubble { .. }));
+    assert!(has_history_human, "历史 Human 消息应渲染");
+
+    // 流式气泡出现在历史之后，工具调用在最末
+    let streaming_pos = tail.iter().position(|vm| matches!(vm,
+        MessageViewModel::AssistantBubble { blocks, .. }
+        if blocks.iter().any(|b| matches!(b, ContentBlockView::Text { raw, .. } if raw.contains("new response")))
+    ));
+    let tool_pos = tail.iter().position(|vm| {
+        matches!(vm,
+        MessageViewModel::ToolBlock { tool_name, .. } if tool_name == "Bash")
+    });
+
+    assert!(streaming_pos.is_some(), "流式气泡应存在");
+    assert!(tool_pos.is_some(), "Bash 工具应存在");
+    assert!(
+        streaming_pos.unwrap() < tool_pos.unwrap(),
+        "流式文本应在 Bash 工具之前（修复 v2 文本工具顺序 bug）"
+    );
+}
+
+/// 防回归：连续两次 commit_iteration 不应让 transcript 翻倍（替换 vs extend）。
+#[test]
+fn test_commit_iteration_replaces_not_extends() {
+    let mut pipeline = MessagePipeline::new("/tmp".to_string());
+
+    let msgs_v1 = vec![BaseMessage::human("hello"), BaseMessage::ai("world")];
+    pipeline.handle_event(AgentEvent::TurnCommitted {
+        messages: msgs_v1,
+        steps: 1,
+    });
+    assert_eq!(
+        pipeline.completed_messages().len(),
+        2,
+        "首次 commit 后应有 2 条消息"
+    );
+
+    // 第二次 commit：v2 携带全量 transcript（追加 1 条工具结果 = 3 条总）
+    let msgs_v2 = vec![
+        BaseMessage::human("hello"),
+        BaseMessage::ai("world"),
+        BaseMessage::tool_result("tc1", "result"),
+    ];
+    pipeline.handle_event(AgentEvent::TurnCommitted {
+        messages: msgs_v2,
+        steps: 2,
+    });
+    assert_eq!(
+        pipeline.completed_messages().len(),
+        3,
+        "v2 替换语义：transcript 应反映最新全量 commit (3 条)，不应翻倍到 5 条"
+    );
+
+    // partial 应在每次 commit 后清空
+    assert!(
+        pipeline.partial_ref().is_none(),
+        "commit_iteration 应清空 partial"
+    );
 }

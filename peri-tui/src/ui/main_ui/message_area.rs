@@ -1,4 +1,4 @@
-use peri_middlewares::prelude::TodoStatus;
+use peri_acp::event::TodoStatusDto;
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -295,28 +295,28 @@ fn viewport_clip(
                 lines.push(Line::from(""));
                 for item in &app.session_mgr.current().todo_items {
                     let (icon, icon_style, text_style) = match item.status {
-                        TodoStatus::InProgress => (
+                        TodoStatusDto::InProgress => (
                             "  ◼  ",
                             Style::default()
                                 .fg(theme::ACCENT)
                                 .add_modifier(Modifier::BOLD),
                             Style::default().fg(theme::TEXT),
                         ),
-                        TodoStatus::Completed => (
+                        TodoStatusDto::Completed => (
                             "  ✔  ",
                             Style::default().fg(theme::SAGE),
                             Style::default()
                                 .fg(theme::MUTED)
                                 .add_modifier(Modifier::CROSSED_OUT),
                         ),
-                        TodoStatus::Pending => (
+                        TodoStatusDto::Pending => (
                             "  ◻  ",
                             Style::default().fg(theme::MUTED),
                             Style::default().fg(theme::MUTED),
                         ),
                     };
                     let hint = match item.status {
-                        TodoStatus::Pending => Some("可开始"),
+                        TodoStatusDto::Pending => Some("可开始"),
                         _ => None,
                     };
                     let mut spans = vec![

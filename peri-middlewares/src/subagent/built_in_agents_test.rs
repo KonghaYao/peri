@@ -32,7 +32,7 @@ fn test_built_in_agent_ids_unique() {
 
 #[test]
 fn test_get_built_in_agent_found() {
-    assert!(get_built_in_agent("explore").is_some());
+    assert!(get_built_in_agent("explorer").is_some());
     assert!(get_built_in_agent("plan").is_some());
     assert!(get_built_in_agent("general-purpose").is_some());
     assert!(get_built_in_agent("verification").is_some());
@@ -48,7 +48,7 @@ fn test_get_built_in_agent_not_found() {
 
 #[test]
 fn test_explore_agent_disallows_write_tools() {
-    let agent = get_built_in_agent("explore").unwrap();
+    let agent = get_built_in_agent("explorer").unwrap();
     let parsed = parse_agent_file(agent.content).unwrap();
     let disallowed = parsed.disallowed_tools();
     assert!(
