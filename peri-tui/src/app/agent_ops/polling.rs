@@ -48,11 +48,33 @@ impl App {
             }
         }
 
+        // Agent 空闲时，优先消费 pending_continuation（后台任务完成后的结构化结果）。
+        // 必须排在 pending_messages 之前——submit_message 的 reset_for_new_round 会
+        // 清空 pending_continuation，若 pending_messages 先 flush 会丢失待续跑的 bg 结果。
+        // take 后立即 return true，避免同一帧被 v2 queue drain 路径二次触发。
+        if !self.session_mgr.current().ui.loading {
+            if let Some(results) = self
+                .session_mgr
+                .current_mut()
+                .agent
+                .bg_task_state
+                .pending_continuation
+                .take()
+            {
+                if !results.is_empty() {
+                    tracing::info!(
+                        count = results.len(),
+                        "pending_continuation drained, submitting as bg_results"
+                    );
+                    self.submit_continuation_with_bg_results(results);
+                    return true;
+                }
+            }
+        }
+
         // Agent 空闲时，优先消费 pending_messages（用户输入缓存 + Workflow 完成
         // 通知；二者都需 agent review 语义，与异步事件优先级不同）。
-        // cron/channel/bg_results 等纯异步事件由下方 v2 queue drain 路径处理。
-        // 优先级：bg continuation（pending_continuation）已由 handle_done/handle_error
-        // 中的 flush 路径处理，此处只处理 idle 时的 pending_messages。
+        // cron/channel 等纯异步事件由下方 v2 queue drain 路径处理。
         if !self.session_mgr.current().ui.loading
             && !self
                 .session_mgr

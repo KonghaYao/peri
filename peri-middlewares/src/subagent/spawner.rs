@@ -198,6 +198,14 @@ pub async fn spawn_background_fork(
         register(child_thread_id.clone(), cancel_token, "independent".into());
     }
 
+    // 发射 SubagentStarted（is_background=true），让 TUI 注册 RunningBgAgent + push
+    // SubAgentGroup VM。必须在 bg_event_sender move 到 tokio::spawn 之前发射。
+    let _ = config.bg_event_sender.send(ExecutorEvent::SubagentStarted {
+        agent_name: agent_name.clone(),
+        instance_id: child_thread_id.clone(),
+        is_background: true,
+    });
+
     // 11. 捕获 spawn 资源
     let thread_store = config.thread_store.clone();
     let deregister_runtime = config.deregister_runtime.clone();
@@ -238,6 +246,14 @@ pub async fn spawn_background_fork(
                         .update_thread_status(&child_thread_id_clone, "error")
                         .await;
                 }
+                // 错误分支也必须发射 SubagentStopped（is_error=true），保证 depth 配对减 1。
+                // 必须在 BackgroundTaskResult 构造之前发射——后者会 move output。
+                let _ = bg_event_sender.send(ExecutorEvent::SubagentStopped {
+                    agent_name: agent_name_clone.clone(),
+                    result: output.clone(),
+                    is_error: true,
+                    instance_id: child_thread_id_clone.clone(),
+                });
                 let result = peri_agent::agent::events::BackgroundTaskResult {
                     task_id: task_id_clone.clone(),
                     agent_name: agent_name_clone.clone(),
@@ -294,6 +310,14 @@ pub async fn spawn_background_fork(
             duration_ms: started_at.elapsed().as_millis() as u64,
             child_thread_id: Some(child_thread_id_clone.clone()),
         };
+        // 先发射 SubagentStopped（与 SubagentStarted 配对），让 TUI 把 subagent_depth
+        // 减 1（mod.rs SubAgentEnd 处理），避免 depth 永久累积导致 token tracker 失效。
+        let _ = bg_event_sender.send(ExecutorEvent::SubagentStopped {
+            agent_name: agent_name_clone.clone(),
+            result: output_summary.clone(),
+            is_error: interrupted,
+            instance_id: child_thread_id_clone.clone(),
+        });
         if let Err(e) = bg_event_sender.send(ExecutorEvent::BackgroundTaskCompleted(result.clone()))
         {
             tracing::warn!(error = ?e, "bg fork: failed to send completion event");
