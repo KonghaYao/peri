@@ -36,6 +36,7 @@ use crate::{
     session::{
         agent_pool::{AgentPool, CachedLlmInstances},
         agent_runtime::{AgentRuntime, CancelPolicy},
+        async_router::AsyncRouter,
         event_sink::EventSink,
         SessionManager,
     },
@@ -371,20 +372,43 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         .map(|s| s.v2_message_queue.clone())
         .unwrap_or_else(peri_agent::session::MessageQueue::new);
 
-    // bg_results 通过 v2 MessageQueue push（Defer kind）。
+    // 解析 session-level SessionInbox（await-wake wrapper）。
+    // 用于：(1) executor idle 期间 await_wake 阻塞等待异步事件，
+    // (2) AsyncRouter 推送 bg_results/workflow 事件时触发 wake。
+    // None 表示不支持 async wake（如 print mode），保持向后兼容。
+    let session_inbox = session_manager
+        .as_ref()
+        .and_then(|sm| sm.session_inbox_for(&session_id));
+
+    // 构建 AsyncRouter（统一异步事件路由到 inbox）。
+    // 通过 InboxHandle 推送 Defer 消息并触发 wake Notify，
+    // 替代 executor 的直接 v2_message_queue.push（raw，无 wake）。
+    let async_router = session_inbox
+        .as_ref()
+        .map(|inbox| AsyncRouter::new(inbox.handle()));
+
+    // bg_results 通过 AsyncRouter（或回退到 v2 MessageQueue）push（Defer kind）。
     //
     // Defer 是异步延迟结果的正确语义：本轮 Receive 跳过保留，End 阶段 drain
     // 唤醒新 turn，并由 `mod.rs::run_react_loop` 写入 transcript（包裹
     // `<system-reminder>`）。与 WorkflowComplete / cron 等其他异步唤醒路径
     // 走同一套机制——见 `append_messages_to_transcript`。
     if !bg_results.is_empty() {
-        use peri_agent::session::queue::{MessageKind as V2Kind, MessageSource as V2Src};
-        for result in &bg_results {
-            v2_message_queue.push(QueuedMessage::new(
-                V2Kind::Defer,
-                V2Src::SubAgentComplete,
-                BaseMessage::human(MessageContent::text(result.to_notification())),
-            ));
+        if let Some(ref router) = async_router {
+            // v2 路径：通过 AsyncRouter → InboxHandle → push_defer（触发 wake）
+            for result in &bg_results {
+                router.route_bg_result(result);
+            }
+        } else {
+            // 回退路径：直接 push（无 wake，兼容 print mode / 无 SessionManager）
+            use peri_agent::session::queue::{MessageKind as V2Kind, MessageSource as V2Src};
+            for result in &bg_results {
+                v2_message_queue.push(QueuedMessage::new(
+                    V2Kind::Defer,
+                    V2Src::SubAgentComplete,
+                    BaseMessage::human(MessageContent::text(result.to_notification())),
+                ));
+            }
         }
     }
 
@@ -538,6 +562,7 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         event_tx: &event_tx,
         cached_llm: cached_llm.as_ref(),
         v2_message_queue: &v2_message_queue,
+        async_router: async_router.clone(),
     })
     .await;
 
@@ -549,16 +574,31 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     })
     .await;
 
-    // 注意：此处**不**做 Notify-driven 续跑循环。
+    // await_wake：agent idle 期间阻塞等待异步事件（bg_results / workflow / cron）。
     //
     // agent 执行期间 push 到 v2 queue 的消息由 stages/end.rs → drain_for_receive
     // 自动消费续跑（同一 run_session_loop 内）。agent 完全退出后（idle 期间）
-    // push 的异步消息（cron/channel/workflow/bg_results）改由 **TUI 接收方主动
-    // 续跑**：TUI 的 poll_agent 在 idle 时 drain_for_end 取出消息并 submit_message
-    // 发起新一轮（详见 peri-tui/src/app/agent_ops/polling.rs）。
+    // push 的异步消息通过 AsyncRouter → InboxHandle → push_defer 触发 wake Notify，
+    // 此处 await_wake 返回后 TUI 的 poll_agent 负责发起新一轮。
     //
-    // [TRAP] 若在此处加循环 drain_for_end 而不续跑，被取出的消息会物理丢失
-    // （drain_for_end 是 destructive）。见 S6 回归修复说明。
+    // await_wake 是 NON-DESTRUCTIVE：不 drain 消息，仅等待 wake 信号。
+    // 实际消费仍由 TUI poll_agent 的 drain_for_end 完成。
+    //
+    // [TRAP] 此处**不**做 drain_for_end 循环——drain 是 destructive，
+    // 取出后不续跑消息会物理丢失（见 S6 回归修复）。
+    if let Some(ref inbox) = session_inbox {
+        if !cancel.is_cancelled() {
+            debug!(
+                session_id = %session_id,
+                "run_session_loop: agent idle, awaiting wake via SessionInbox"
+            );
+            inbox.await_wake().await;
+            debug!(
+                session_id = %session_id,
+                "run_session_loop: woken by async event"
+            );
+        }
+    }
 
     result
 }
@@ -869,6 +909,9 @@ struct BuildAgentRequest<'a> {
     /// 会话级共享 v2 MessageQueue（run_session_loop 解析后透传，
     /// 避免 build_and_execute_agent 重复解析；MessageQueue 内部 Arc 共享）。
     v2_message_queue: &'a peri_agent::session::MessageQueue,
+    /// AsyncRouter（统一异步事件路由到 inbox，触发 wake）。
+    /// None 表示无 inbox（print mode / 无 SessionManager），回退到直接 push。
+    async_router: Option<AsyncRouter>,
 }
 
 /// Agent 执行后的最终输出（state + 停止原因）。
@@ -911,6 +954,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         event_tx,
         cached_llm,
         v2_message_queue,
+        async_router,
     } = req;
 
     let (
@@ -996,7 +1040,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
     // Session 级 workflow 完成通知消费者（单次 spawn）。
     // 双路径：
     //   Path A (TUI): 通过 EventSink 直推 BackgroundTaskCompleted → 通知条
-    //   Path B (Agent): 通过 v2 MessageQueue push（Defer kind）→ End 阶段唤醒新 turn
+    //   Path B (Agent): 通过 AsyncRouter → InboxHandle → push_defer（Defer kind）→ End 阶段唤醒新 turn
     //
     // [NOTE] 自动 continuation 需 TUI 侧处理 BackgroundTaskCompleted 事件（参考 bg task auto-continuation）。
     if let Some(wf_mw) = workflow_middleware {
@@ -1008,32 +1052,44 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
             let notify_sink = Arc::clone(event_sink);
             let notify_sid = session_id.to_string();
             let notify_cw = turn.effective_context_window;
-            // clone v2 queue handle（Arc 共享底层数据）
-            let notify_queue = v2_message_queue.clone();
+            // AsyncRouter（v2 路径：push_defer + wake Notify）
+            // 或回退 v2 queue clone（无 inbox 时直接 push，无 wake）
+            let wf_router = async_router.clone();
+            let fallback_queue = v2_message_queue.clone();
             tokio::spawn(async move {
                 let mut rx = wf_mw_for_notify.subscribe_notifications();
                 loop {
                     match rx.recv().await {
                         Ok(task_result) => {
-                            let short_id = &task_result.run_id[..8.min(task_result.run_id.len())];
-                            // Path B: push 到 v2 MessageQueue（Defer kind）。
-                            // Defer 唤醒新 turn，由 `run_react_loop` 的 End 阶段
-                            // drain 后写入 transcript（<system-reminder> 由
-                            // `append_messages_to_transcript` 统一包裹，这里
-                            // 只给纯文本）。
-                            let notif_text = format!(
-                                "[后台任务 {} 已完成] {} ({}ms, {} agents, {} tool calls)",
-                                short_id,
-                                task_result.workflow_name,
-                                task_result.duration_ms,
-                                task_result.agent_count,
-                                task_result.tool_calls_count,
-                            );
-                            notify_queue.push(QueuedMessage::new(
-                                peri_agent::session::queue::MessageKind::Defer,
-                                peri_agent::session::queue::MessageSource::WorkflowComplete,
-                                BaseMessage::human(MessageContent::text(notif_text)),
-                            ));
+                            // Path B: 通过 AsyncRouter（或回退 v2 queue）push Defer。
+                            // AsyncRouter → InboxHandle → push_defer 触发 wake Notify，
+                            // 替代直接 notify_queue.push（raw，无 wake）。
+                            if let Some(ref router) = wf_router {
+                                router.route_workflow_event(
+                                    &task_result.run_id,
+                                    &task_result.workflow_name,
+                                    task_result.duration_ms,
+                                    task_result.agent_count,
+                                    task_result.tool_calls_count,
+                                );
+                            } else {
+                                // 回退：直接 push（无 wake，兼容无 inbox 场景）
+                                let short_id =
+                                    &task_result.run_id[..8.min(task_result.run_id.len())];
+                                let notif_text = format!(
+                                    "[后台任务 {} 已完成] {} ({}ms, {} agents, {} tool calls)",
+                                    short_id,
+                                    task_result.workflow_name,
+                                    task_result.duration_ms,
+                                    task_result.agent_count,
+                                    task_result.tool_calls_count,
+                                );
+                                fallback_queue.push(QueuedMessage::new(
+                                    peri_agent::session::queue::MessageKind::Defer,
+                                    peri_agent::session::queue::MessageSource::WorkflowComplete,
+                                    BaseMessage::human(MessageContent::text(notif_text)),
+                                ));
+                            }
 
                             // Path A: 发 TUI 通知
                             let bg = BackgroundTaskResult {
@@ -1134,6 +1190,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         event_sink,
         session_manager,
         v2_message_queue,
+        async_router,
     )
     .await;
 }
@@ -1163,6 +1220,7 @@ async fn build_and_execute_agent_v2(
     event_sink: &Arc<dyn EventSink>,
     session_manager: Option<SessionManager>,
     v2_queue: &peri_agent::session::MessageQueue,
+    _async_router: Option<AsyncRouter>,
 ) -> ExecOutcome {
     use peri_agent::agent::stages::{run_react_loop, LoopResult};
     use peri_agent::session::queue::{

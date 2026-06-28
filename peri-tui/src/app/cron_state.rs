@@ -1,13 +1,12 @@
 use std::{any::Any, sync::Arc, time::Duration};
 
 use parking_lot::Mutex;
-use peri_middlewares::cron::{CronScheduler, CronTask, CronTrigger};
+use peri_middlewares::cron::{CronScheduler, CronTask};
 use ratatui::{
     crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
     layout::Rect,
     Frame,
 };
-use tokio::sync::mpsc;
 use tui_textarea::Input;
 
 use super::{
@@ -204,18 +203,15 @@ impl CronPanel {
 /// Cron 状态（App 子结构体）
 pub struct CronState {
     pub scheduler: Arc<Mutex<CronScheduler>>,
-    pub trigger_rx: Option<mpsc::UnboundedReceiver<CronTrigger>>,
 }
 
 impl CronState {
     pub fn new() -> (Self, Arc<Mutex<CronScheduler>>) {
-        let (trigger_tx, trigger_rx) = mpsc::unbounded_channel();
-        let scheduler = CronScheduler::new(trigger_tx);
+        let scheduler = CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0);
         let scheduler = Arc::new(Mutex::new(scheduler));
 
         let state = Self {
             scheduler: scheduler.clone(),
-            trigger_rx: Some(trigger_rx),
         };
         (state, scheduler)
     }

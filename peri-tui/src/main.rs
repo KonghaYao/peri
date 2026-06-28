@@ -1,7 +1,3 @@
-use std::io;
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use peri_acp::transport::mpsc::mpsc_transport_pair;
@@ -9,7 +5,7 @@ use peri_tui::{
     acp_client::AcpTuiClient,
     acp_server::{run_acp_server, AcpServerConfig},
     app::App,
-    event, ui,
+    runtime, ui,
 };
 use ratatui::{
     crossterm::{
@@ -22,6 +18,9 @@ use ratatui::{
     },
     prelude::*,
 };
+use std::io;
+use std::sync::{Arc, OnceLock};
+use tokio_util::sync::CancellationToken;
 
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
@@ -687,7 +686,8 @@ async fn run_app(
     }
 
     // ── Step 6-a: Setup ACP Server + Client ──────────────────────────────
-    {
+    // Collect the ACP client + notification_rx for wiring into the runtime event channel.
+    let acp_client = {
         let provider = {
             let cfg_guard = app.services.peri_config.read();
             peri_tui::app::LlmProvider::from_config(&cfg_guard)
@@ -809,88 +809,65 @@ async fn run_app(
             });
 
             let (acp_client, notification_rx) = AcpTuiClient::new(client_transport);
-            // Spawn notification pump
+            // Spawn notification pump (transport → notification_rx)
             acp_client.spawn_pump();
-            // Wire notification receiver to active session's AgentComm
-            app.session_mgr.current_mut().agent.acp_notification_rx = Some(notification_rx);
-            app.acp_client = Some(acp_client);
-        }
-    }
 
-    // Spinner tick 驱动：每次渲染前推进一帧
+            // Store acp_client in App for legacy code paths that access it directly.
+            app.acp_client = Some(acp_client.clone());
+
+            Some((acp_client, notification_rx))
+        } else {
+            None
+        }
+    };
+
+    // ── v2 Runtime: event channel + background collectors ──────────────────
+    let shutdown = CancellationToken::new();
+    let (tx, rx) = runtime::event_channel::channel();
+
+    // Spawn keyboard collector (crossterm poll → TuiEvent::Key/Mouse/Paste/Resize/Tick)
+    runtime::keyboard_collector::spawn(tx.clone(), shutdown.clone());
+
+    // Spinner tick 驱动 + 初始全量绘制（before ApplyContext borrows terminal）
     app.session_mgr.current_mut().spinner_state.advance_tick();
-
-    // 初始全量绘制一次
     terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
-    let mut last_render = Instant::now();
 
-    /// loading 动画帧率限制间隔（约 30 FPS）。
-    /// 仅在 loading=true 且无用户事件的 poll 超时路径生效，
-    /// 用户交互（键盘/鼠标/resize）始终立即渲染。
-    const TARGET_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+    // Spawn ACP notifier (AcpNotification → TuiEvent::AcpEvent)
+    if let Some((acp_client, notification_rx)) = acp_client {
+        runtime::acp_notifier::spawn(tx.clone(), notification_rx, shutdown.clone());
+        // Construct ApplyContext with terminal + acp_client
+        let mut ctx = runtime::apply_context::ApplyContext::new(terminal, acp_client);
 
-    'event_loop: loop {
-        // 推进 Spinner 动画帧
-        app.session_mgr.current_mut().spinner_state.advance_tick();
-        // 轮询 agent 结果
-        let mut agent_updated = false;
-        agent_updated |= app.poll_agent();
-        // 轮询后台事件（MCP OAuth 等）
-        let bg_updated = app.poll_background_events();
-        // 轮询 panic hook 通知
-        let panic_updated = app.poll_panic_notifications();
-        // 检查 cron 定时触发
-        app.poll_cron_triggers();
-        // 轮询 workflow 面板数据（ACP workflow/list_runs）
-        if app.workflow_polling_active {
-            app.poll_workflow_runs();
-        }
+        // Run the v2 main loop
+        let result = runtime::main_loop::run(rx, &mut ctx, &mut app).await;
 
-        match event::next_event(&mut app).await? {
-            Some(action) => match action {
-                event::Action::Quit => break 'event_loop,
-                event::Action::Submit(input) => {
-                    app.submit_message(input);
-                    terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
-                    last_render = Instant::now();
-                }
-                event::Action::Redraw => {
-                    // 有用户交互（键盘/鼠标/resize）→ 始终重绘
-                    terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
-                    last_render = Instant::now();
-                }
+        // Signal shutdown to background tasks
+        shutdown.cancel();
+
+        result
+    } else {
+        // No ACP provider available — fall back to a minimal loop that only
+        // processes keyboard events (no agent functionality).
+        let mut ctx = runtime::apply_context::ApplyContext::new(
+            terminal,
+            // Construct a dummy AcpTuiClient — this path is extremely rare
+            // (no provider configured at all).  The AcpTuiClient is Clone + Arc
+            // internally, so we create one via a no-op transport pair.
+            {
+                let (client_transport, server_transport) = mpsc_transport_pair();
+                // Drop the server side immediately — no ACP server will ever read.
+                drop(server_transport);
+                let (client, _notification_rx) = AcpTuiClient::new(client_transport);
+                client
             },
-            None => {
-                // 无用户事件（poll 超时）：在阻塞结束后重新读取缓存版本
-                // 这样能捕获渲染线程在等待期间发出的更新
-                let cache_version = app
-                    .session_mgr
-                    .current_mut()
-                    .messages
-                    .render_cache
-                    .read()
-                    .version;
-                let cache_updated =
-                    cache_version != app.session_mgr.current_mut().messages.last_render_version;
-                let loading = app.session_mgr.current_mut().ui.loading;
-                let should_render =
-                    cache_updated || agent_updated || bg_updated || panic_updated || loading;
-                if should_render {
-                    let now = Instant::now();
-                    // loading 路径：限制帧率到 TARGET_FRAME_INTERVAL，降低 CPU 开销
-                    // 非 loading 路径（cache_updated/agent_updated/bg_updated）始终立即渲染
-                    if !loading || now.duration_since(last_render) >= TARGET_FRAME_INTERVAL {
-                        terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
-                        last_render = now;
-                    }
-                }
-            }
-        }
-        // /exit 或 /quit 命令设置的退出标志
-        if app.global_ui.quit_requested {
-            break 'event_loop;
-        }
-    }
+        );
+
+        let result = runtime::main_loop::run(rx, &mut ctx, &mut app).await;
+
+        shutdown.cancel();
+
+        result
+    }?;
 
     // Fire SessionEnd hooks before shutdown
     {

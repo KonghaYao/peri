@@ -14,7 +14,7 @@ use peri_agent::agent::events::ExecutorEvent;
 use serde_json::json;
 use tracing::{debug, error};
 
-use crate::{event::map_event, transport::AcpTransport};
+use crate::{event::map_event, event::router, transport::AcpTransport};
 
 /// Receives [`ExecutorEvent`]s produced during agent execution and routes them
 /// to the appropriate transport.
@@ -32,13 +32,44 @@ pub trait EventSink: Send + Sync {
 /// [`EventSink`] backed by an [`AcpTransport`]. Sends two notification types:
 /// - `session/update` — standard ACP SessionUpdate (with `_peri` metadata for TUI)
 /// - `peri/agent_event` — raw serialized ExecutorEvent (for TUI-only events, categories ②③)
+///
+/// Additionally, each event is routed through the event router to emit
+/// `peri/unstable-event` notifications for new-protocol consumers.
 pub struct TransportEventSink {
     transport: std::sync::Arc<dyn AcpTransport>,
+    /// Caching ViewMapper for the event router (interior mutability for async context).
+    view_mapper: parking_lot::Mutex<crate::event::ViewMapperImpl>,
 }
 
 impl TransportEventSink {
     pub fn new(transport: std::sync::Arc<dyn AcpTransport>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            view_mapper: parking_lot::Mutex::new(crate::event::ViewMapperImpl::new()),
+        }
+    }
+
+    /// Push a `{event, data}` custom event through `peri/unstable-event` channel.
+    ///
+    /// Used by the event router to emit new-protocol events alongside the
+    /// existing `peri/agent_event` path. The envelope is a JSON-RPC notification:
+    /// ```json
+    /// {"jsonrpc":"2.0","method":"peri/unstable-event","params":{"event":"...","data":{...}}}
+    /// ```
+    pub async fn push_unstable_event(
+        &self,
+        session_id: &str,
+        event: String,
+        data: serde_json::Value,
+    ) -> Result<(), crate::transport::types::AcpError> {
+        let payload = json!({
+            "sessionId": session_id,
+            "event": event,
+            "data": data,
+        });
+        self.transport
+            .send_notification("peri/unstable-event", payload)
+            .await
     }
 }
 
@@ -118,6 +149,27 @@ impl EventSink for TransportEventSink {
                     event = ?event,
                     "EventSink: observable event (no subscribers yet)"
                 );
+            }
+
+            // 5. peri/unstable-event — new-protocol event routing (Category ⑤)
+            // Route each ExecutorEvent through the event router. Events that
+            // map to a RoutingOutput are forwarded as unstable events; discarded
+            // events return None and are silently dropped.
+            let routing_out = {
+                let mut vm = self.view_mapper.lock();
+                router::route(event, &mut *vm)
+            };
+            if let Some(out) = routing_out {
+                if let Err(e) = self
+                    .push_unstable_event(session_id, out.event_name, out.data)
+                    .await
+                {
+                    tracing::trace!(
+                        session_id = %session_id,
+                        error = %e,
+                        "EventSink: peri/unstable-event send failed (non-critical)"
+                    );
+                }
             }
         }
     }

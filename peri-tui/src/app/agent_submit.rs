@@ -155,8 +155,8 @@ impl App {
             // 恢复的历史 thread_id：存在时用 load_session 加载历史上下文
             let existing_thread_id = self.session_mgr.current_mut().current_thread_id.clone();
 
-            // 用户主动输入通过 ACP prompt 协议传输；cron/channel 异步触发通过
-            // v2_queue_for_current() 注入共享 v2 MessageQueue（见 polling.rs）。
+            // 用户主动输入通过 ACP prompt 协议传输；cron/channel 异步触发由
+            // Agent 侧 stages/end.rs 统一处理。
             // 若本轮 take 到待消费 bg 结果，走 prompt_with_bg_results 携带 bgResults。
 
             // Spawn the ACP calls as a background task — NEVER block the TUI event loop.
@@ -226,159 +226,12 @@ impl App {
         }
     }
 
-    /// 后台任务完成后的自动续跑入口。
-    ///
-    /// 与 `submit_message` 的关键差异：
-    /// - **不构造用户消息**：bg 续跑无用户输入，不 push UserBubble、不写
-    ///   input_history、不处理 attachments。
-    /// - **走 ACP `prompt_with_bg_results`**：携带结构化 `bgResults` 参数，让 server
-    ///   端 `executor.rs` 把结果 push 到 v2 MessageQueue（Defer kind）。
-    ///
-    /// 状态管理与 submit_message 对齐（pipeline.begin_round、set_loading(true)、
-    /// subagent_depth=0、agent_replied=false、reconcile_already_done=false、
-    /// bg_task_state.reset_for_new_round、lsp_diagnostics.reset）。
-    ///
-    /// 调用方（polling.rs）必须先 `take()` `pending_continuation` 再调用本方法——
-    /// reset_for_new_round 会清空 pending_continuation。
-    pub fn submit_continuation_with_bg_results(
-        &mut self,
-        results: Vec<crate::app::agent_comm::BgTaskResult>,
-    ) {
-        if results.is_empty() {
-            tracing::warn!("submit_continuation_with_bg_results called with empty results");
-            return;
-        }
-
-        // 标记新一轮开始（不 push UserBubble——这是自动续跑，无用户输入）。
-        // round_start_vm_idx = 当前 view_messages.len()，rebuild 时 prefix_len 即此值。
-        self.session_mgr
-            .current_mut()
-            .messages
-            .pipeline
-            .begin_round();
-        self.session_mgr.current_mut().messages.round_start_vm_idx =
-            self.session_mgr.current_mut().messages.view_messages.len();
-        self.set_loading(true);
-
-        // 任务计时
-        self.session_mgr.current_mut().agent.task_start_time = Some(std::time::Instant::now());
-        self.session_mgr.current_mut().agent.last_task_duration = None;
-        if self
-            .session_mgr
-            .current_mut()
-            .agent
-            .session_start_time
-            .is_none()
-        {
-            self.session_mgr.current_mut().agent.session_start_time =
-                Some(std::time::Instant::now());
-        }
-
-        let provider = {
-            let cfg_guard = self.services.peri_config.read();
-            agent::LlmProvider::from_config(&cfg_guard)
-        };
-        let provider = match provider.or_else(agent::LlmProvider::from_env) {
-            Some(p) => p,
-            None => {
-                self.apply_pipeline_action(PipelineAction::AddMessage(MessageViewModel::system(
-                    self.services.lc.tr("app-no-provider-submit"),
-                )));
-                self.set_loading(false);
-                return;
-            }
-        };
-
-        // context_window 同步（防止漂移）
-        {
-            let mut model_cw = provider.context_window();
-            if self
-                .services
-                .peri_config
-                .read()
-                .config
-                .context_1m
-                .unwrap_or(false)
-            {
-                model_cw = 1_000_000;
-            }
-            if model_cw > 0 && self.session_mgr.current_mut().agent.context_window != model_cw {
-                self.session_mgr.current_mut().agent.context_window = model_cw;
-            }
-        }
-
-        // 状态重置（与 submit_message 一致）
-        self.session_mgr.current_mut().agent.subagent_depth = 0;
-        self.session_mgr.current_mut().agent.agent_replied = false;
-        self.session_mgr.current_mut().agent.reconcile_already_done = false;
-        self.session_mgr
-            .current_mut()
-            .agent
-            .bg_task_state
-            .reset_for_new_round();
-        self.session_mgr.current_mut().agent.lsp_diagnostics.reset();
-
-        // ACP 调用：走 prompt_with_bg_results（携带 bgResults 参数）。
-        // 自动续跑无用户输入，构造固定 content 作为新一轮 user message。
-        if let Some(ref acp_client) = self.acp_client {
-            let acp_client_clone = acp_client.clone();
-            let model_clone = self.services.model_name.clone();
-            let cwd_clone = self.services.cwd.clone();
-            // 防御：bg 续跑到达时 session 必然已存在（先有 submit_message → Done → bg 完成
-            // → continuation）。但保留 load_session 包装以应对边缘时序。
-            let existing_thread_id = self.session_mgr.current_mut().current_thread_id.clone();
-            let continuation_content = peri_agent::messages::MessageContent::text(
-                "Background agents completed. Please review the results.",
-            );
-            tokio::spawn(async move {
-                let client = acp_client_clone;
-                if !client.has_session() {
-                    if let Some(ref tid) = existing_thread_id {
-                        tracing::info!(
-                            thread_id = %tid,
-                            "ACP bg-continuation: loading existing session..."
-                        );
-                        if let Err(e) = client
-                            .load_session(tid, &cwd_clone, Some(&model_clone))
-                            .await
-                        {
-                            tracing::error!(error = %e, "ACP bg-continuation: load_session FAILED");
-                            return;
-                        }
-                    } else {
-                        tracing::error!(
-                            "ACP bg-continuation: no session and no thread_id — cannot proceed"
-                        );
-                        return;
-                    }
-                }
-                tracing::info!("ACP bg-continuation: calling prompt_with_bg_results...");
-                match client
-                    .prompt_with_bg_results(&continuation_content, results)
-                    .await
-                {
-                    Ok(()) => {
-                        tracing::info!("ACP bg-continuation: prompt_with_bg_results completed")
-                    }
-                    Err(e) => tracing::error!(
-                        error = %e,
-                        "ACP bg-continuation: prompt_with_bg_results FAILED"
-                    ),
-                }
-            });
-        } else {
-            tracing::error!("ACP client not initialized, cannot submit bg continuation");
-            self.set_loading(false);
-        }
-    }
-
     /// Loading 期间用户缓存消息的自动提交：
     /// 从 pending_messages 中取出一条，调用 submit_message 提交。
     ///
     /// 本字段是用户输入缓存路径（用户在 loading 期间主动输入）。
-    /// 异步事件触发（cron/channel/workflow/bg_results 等）走 v2 queue +
-    /// polling.rs drain 路径（`v2_queue_for_current()` + `drain_for_end()`），
-    /// 与本字段机制独立、互不干扰。
+    /// 异步事件触发（cron/channel/workflow/bg_results 等）由 Agent 侧
+    /// stages/end.rs 统一处理，与本字段机制独立、互不干扰。
     pub(crate) fn flush_pending_messages(&mut self) {
         if let Some(msg) = self
             .session_mgr

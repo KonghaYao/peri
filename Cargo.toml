@@ -1,9 +1,10 @@
 [workspace]
 members = [
+    "peri-acp",
+    "peri-acp-types",
     "peri-agent",
     "peri-middlewares",
     "peri-tui",
-    "peri-acp",
     "langfuse-client",
     "peri-widgets",
     "peri-lsp",

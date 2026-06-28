@@ -1,6 +1,19 @@
 # CLAUDE.md
 
-## v2 架构状态（2026-06-27）
+## v2 架构状态（2026-06-29）
+
+**当前状态**：**v2 stages 单路径架构（完全清理 + 异步事件回路打通 + TUI MessagePipeline 单一数据源 + ACP/TUI 三层契约就绪 + TUI 状态机骨架就位）**。v1 `ReActAgent` / `executor/` 目录 / `State` trait / `CompactMiddleware` / v1 `MessageQueue` 已物理删除，所有执行路径（main agent / SubAgent / Hook / Workflow）统一通过 v2 `run_react_loop` 驱动。异步事件（cron/channel/workflow/bg_results）通过共享 v2 MessageQueue + TUI polling 接收方主动续跑形成完整回路。TUI MessagePipeline 重构为 `transcript + Option<PartialAiMessage>` 单一数据源架构，v2 stages 在迭代边界 emit `TurnCompleted` 携带全量 transcript 快照，commit_iteration 用替换语义吸收——修复多迭代场景下文本渲染在工具之前的顺序 bug（详见 `docs/design/peri-tui-message-pipeline-v2.md`）。
+
+### 已完成（ultracode v2 重构批次：Workflow A/B1/B2/B3）
+
+通过 5 个并行 workflow 完成 ACP/TUI 三层契约 + TUI 状态机骨架。**3049 测试全过，0 失败，19 ignored**。
+
+- ✅ **Workflow A（P0 + P4a foundation）**：创建 `peri-acp-types` 纯 DTO crate（仅依赖 serde）—— 7 变体 ViewModel + 22 个 event_data 结构 + 16 个 summary 类型；ACP `event/router.rs`（740 行，16+ ExecutorEvent 变体映射到 `{event, data}`）+ `event/view_mapper.rs`（1114 行，含增量缓存 + DiffBlock Hunk/HunkLine 细粒度渲染）；`dispatch/execute_command.rs` + `dispatch/prompt.rs` slash 命令单入口。DTO 重导出兼容层保留至 P4b 完整切换。
+- ✅ **Workflow B1（P1 event loop skeleton）**：TUI `runtime/` 模块（event_channel + keyboard_collector + acp_notifier + main_loop + effect + apply_context）—— 单一 unbounded channel 合并 5 类输入源（Key/Mouse/Paste/Resize/Tick/AcpEvent/AcpDisconnected/SessionLoaded/Shutdown），双后台 task（crossterm poll + ACP 通知）→ main_loop；`main.rs` 启动序列切换至 `runtime::main_loop::run`；polling.rs 从 9 队列删至 1（仅保留 ACP notification 接收）。
+- ✅ **Workflow B2（P1.5 async migration）**：Agent-owned async—— `SessionInbox` + `await_wake`（**非破坏性**，仅 wake.notified + has_wake_up 重检，不 drain）+ `CronOwner` / `ChannelOwner` / `AsyncRouter`；Session 持有 inbox + owners；ACP executor 末尾**不**加 drain_for_end 循环（S6 trap 规避）。TUI 侧 `drain_for_end` / `channel_notification_rx` / `pending_continuation` 全部删除（grep 0 结果）。
+- ✅ **Workflow B3（P2 state machine 核心）**：TUI `state_machine/` 模块 4576 行—— State 4 变体（Idle/Streaming/Modal/Switching）+ Event 9 变体（含 AcpEventData 22 子变体 + Unknown 兜底 + decode 函数）+ ViewStore（**替换语义** commit，非 extend）+ CurrentTurn（流式累积 text/reasoning/tool_cards/spinner）+ InputState（buffer+cursor+history+at_mention+slash+attachments）+ 4 个 transitions（idle/streaming/modal/switching）+ Handler trait + 4 个 handler stubs（hitl/ask_user/rewind/oauth）+ PanelState/PanelEffect/PanelReadContext trait 基础设施。**84 个 state_machine 测试全过**，纯函数 `(State, Event) → (State, Vec<Effect>)` 零 I/O。
+
+### 已完成（P1–P5 + 完全清理 + P2-B + P2-C）
 
 **当前状态**：**v2 stages 单路径架构（完全清理 + 异步事件回路打通 + TUI MessagePipeline 单一数据源）**。v1 `ReActAgent` / `executor/` 目录 / `State` trait / `CompactMiddleware` / v1 `MessageQueue` 已物理删除，所有执行路径（main agent / SubAgent / Hook / Workflow）统一通过 v2 `run_react_loop` 驱动。异步事件（cron/channel/workflow/bg_results）通过共享 v2 MessageQueue + TUI polling 接收方主动续跑形成完整回路。TUI MessagePipeline 重构为 `transcript + Option<PartialAiMessage>` 单一数据源架构，v2 stages 在迭代边界 emit `TurnCompleted` 携带全量 transcript 快照，commit_iteration 用替换语义吸收——修复多迭代场景下文本渲染在工具之前的顺序 bug（详见 `docs/design/peri-tui-message-pipeline-v2.md`）。
 
@@ -17,7 +30,15 @@
 - ✅ **完全清理**（commit c49db28b + 后续）：删除 `trait State` / `AgentState` 的 State trait 残留 / `CompactConfig::from_env` 死代码 / `AgentEvent → ExecutorEvent` 重命名 / v1 `MessageQueue` / `CompactMiddleware`（自动 compact 改由 `stages/compact.rs` 统一处理） / `compact/{full,micro,re_inject,invariant}.rs` v1 实现物理删除 / 注释残留全部反映 v2 单路径
 - ✅ **P2-B（异步事件回路）**：S3 push v2 queue + polling.rs drain 形成完整回路。cron/channel/workflow/bg_results 等异步事件通过共享 v2 `MessageQueue` 注入；TUI 的 `poll_agent` 在 agent idle 时 `drain_for_end` 取出 Prompt/Defer 并 `submit_message` 发起新一轮（接收方主动续跑）。撤销了 S6 在 ACP executor 内引入的 drain-only 循环回归（该循环只 drain 不续跑，导致 idle 期间到达的消息被物理丢弃）
 - ✅ **P2-C（TUI MessagePipeline 单一数据源）**（commit 42a60a1a）：删除 `completed: Vec<BaseMessage>` + 5 个 `current_ai_*` 字段双状态，重构为 `transcript + Option<PartialAiMessage>`。v2 stages 在 `act.rs` 双路径（工具路径 + 最终回答路径）emit `StateEvent::TurnCompleted` 携带 `finalized_messages: Arc<Vec<BaseMessage>>`，跨四层（peri-agent `ExecutorEvent::TurnCommitted` → peri-acp `AcpEvent::TurnCommitted` → peri-tui `AgentEvent::TurnCommitted`）透传。`commit_iteration` 用**替换**语义（非 extend）吸收全量快照，`build_tail_vms` 重构为纯函数——流式渲染与历史恢复走同一路径（`restore_completed` ≡ `commit_iteration`）。修复多迭代场景下文本渲染在所有工具之前的顺序 bug（详见 `docs/design/peri-tui-message-pipeline-v2.md`）
-- ✅ 2772 测试全过，`cargo build --workspace` 绿，clippy 零 warning，`grep -r 'ReActAgent'` 零结果
+- ✅ 3049 测试全过，`cargo build --workspace` 绿，`grep -r 'ReActAgent'` 零结果
+
+### ultracode 未完成（按优先级）
+
+- ⏳ **B3 Cutover（最高优先级）**：`main_loop::run` 仍用 P1 `thin_handle` glue，未接入 `state_machine::handle`。84 测试覆盖核心逻辑，风险中，工作量中。建议**渐进式 4 阶段**：shadow mode 对比 → 切渲染数据源 → 删 thin_handle（Modal 委托 legacy）→ 稳定期。
+- ⏳ **B3 MigrateInput**：`UiState.textarea` 等输入字段未迁到 `State::Idle.input`。
+- ⏳ **Workflow C（P3 面板重写）**：15 个 PanelComponent 实现（agent/cron/status/tasks/betas/config/memory/plugin/mcp/hooks/workflow/login/model + thread_browser）需重写为 PanelState trait（签名：`handle_key(key, &PanelReadContext) -> Vec<PanelEffect>`）。工作量大（3000-7500 行），建议分批迁移。
+- ⏳ **Workflow D（P4b 类型隔离）**：TUI 30+ 文件 138 处 `use peri_agent::/peri_middlewares::`，需改 ACP 查询或 DTO 替换。`scripts/check-tui-imports.sh` pre-commit 钩子未启用。
+- ⏳ **Workflow E（P5 渲染重写）**：`message_pipeline/` 18KB + 82KB 测试未删；双线程渲染 + RenderCache + AdaptiveChunkingPolicy 未删；渲染入口未切换到 `State.view + current_turn`。工作量大，风险高。
 
 ### v2 单路径架构
 

@@ -284,9 +284,8 @@ impl App {
         // Workflow 完成通知与用户主动输入语义更接近（都需 agent review
         // state.json），且优先级排序明确，因此走 pending_messages 而非 v2 queue。
         //
-        // 异步事件（cron/channel/bg_results 等）由 polling.rs 的 poll_agent 在
-        // agent idle 时 drain 共享 v2 MessageQueue 统一处理（接收方主动续跑），
-        // 与本路径互不干扰。
+        // 异步事件（cron/channel/bg_results 等）由 Agent 侧 stages/end.rs
+        // 统一处理，与本路径互不干扰。
         //
         // 若 agent 空闲（loading=false），return (true, false, true) 退出事件循环，
         // poll_agent 下一帧检查 pending_messages 并触发 flush → submit_message。
@@ -356,14 +355,14 @@ impl App {
             .agent_done_pending
             && self.session_mgr.current_mut().background_agents.is_empty()
         {
-            tracing::info!("all background tasks completed, auto-submitting continuation");
+            tracing::info!("all background tasks completed, draining pre_done_results");
             self.session_mgr
                 .current_mut()
                 .agent
                 .bg_task_state
                 .agent_done_pending = false;
             // 使用结构化结果（而非显示文本）驱动 continuation
-            let all_results: Vec<_> = self
+            let _all_results: Vec<_> = self
                 .session_mgr
                 .current_mut()
                 .agent
@@ -371,11 +370,6 @@ impl App {
                 .pre_done_results
                 .drain(..)
                 .collect();
-            self.session_mgr
-                .current_mut()
-                .agent
-                .bg_task_state
-                .pending_continuation = Some(all_results);
 
             return (true, false, true);
         } else if !self
@@ -387,7 +381,7 @@ impl App {
             && self.session_mgr.current_mut().background_agents.is_empty()
         {
             // 竞态修复：agent 尚未 Done，但所有后台任务已完成。
-            // 暂存通知已在上方 push，待 Done 处理时检查此字段并设置 bg_task_state.pending_continuation。
+            // 暂存通知已在上方 push，待 Done 处理时检查此字段并处理。
             tracing::info!(
                 "background task completed before Done, buffering notification for deferred continuation"
             );

@@ -7,14 +7,17 @@
 
 pub mod commands;
 pub mod config_update;
+pub mod execute_command;
 pub mod init;
 pub mod list_sessions;
+pub mod prompt;
 pub mod session_fork;
 pub mod session_load;
 
 pub use commands::build_available_commands;
 pub use init::build_initialize_response;
 pub use list_sessions::list_sessions_as_info;
+pub use prompt::{extract_prompt_params, handle_prompt};
 pub use session_fork::fork_session;
 pub use session_load::load_session_messages;
 

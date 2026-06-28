@@ -9,6 +9,7 @@ name = "peri_acp"
 path = "src/lib.rs"
 
 [dependencies]
+peri-acp-types = { path = "../peri-acp-types" }
 peri-agent = { path = "../peri-agent" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-lsp = { path = "../peri-lsp" }

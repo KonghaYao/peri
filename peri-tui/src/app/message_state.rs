@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use peri_agent::interaction::channel_types::ChannelNotification;
 use tokio::sync::{mpsc, Notify};
 
 use super::message_pipeline::MessagePipeline;
@@ -26,8 +25,6 @@ pub struct MessageState {
     pub ephemeral_notes: Vec<(usize, MessageViewModel)>,
     /// 最近一次发送给渲染线程的 resize 宽度（用于去抖，避免每帧重复发送）
     pub last_resize_width: Option<u16>,
-    /// Channel 消息通知接收端
-    pub channel_notification_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChannelNotification>>,
     /// Loading 期间用户缓存的消息（Agent 任务完成后自动提交）。
     ///
     /// 异步事件触发的自动续跑（cron/channel/workflow/bg_results）已由
@@ -54,7 +51,6 @@ impl MessageState {
             last_submitted_text: None,
             ephemeral_notes: Vec::new(),
             last_resize_width: None,
-            channel_notification_rx: None,
             pending_messages: Vec::new(),
         }
     }

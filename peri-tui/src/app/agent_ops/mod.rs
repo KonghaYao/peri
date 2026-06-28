@@ -4,7 +4,7 @@
 //!   acp_bridge.rs — ACP notification bridge
 //!   lifecycle.rs — cleanup, done, interrupted, error
 //!   subagent.rs  — token usage, subagent start
-//!   polling.rs   — poll_agent, poll_background_events, poll_cron_triggers
+//!   polling.rs   — poll_agent, poll_panic_notifications, poll_workflow_runs
 
 use super::{agent_events_bg::BackgroundTaskResult, *};
 mod acp_bridge;
@@ -423,7 +423,7 @@ impl App {
         }
     }
 
-    // poll_agent/poll_background_events/poll_cron_triggers are in polling.rs
+    // poll_agent/poll_panic_notifications/poll_workflow_runs are in polling.rs
 }
 
 #[cfg(test)]

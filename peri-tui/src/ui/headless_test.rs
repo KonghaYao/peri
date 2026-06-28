@@ -2577,7 +2577,7 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
 
     // Step 6: BackgroundTaskCompleted — 精确模拟真实场景
     // 在真实场景中，bg_task_state.agent_done_pending=true，所以 handle_background_task_completed
-    // 会设置 bg_task_state.pending_continuation 并返回 (true, false, true)
+    // 会处理结果并返回 (true, false, true)
     app.push_agent_event(AgentEvent::BackgroundTaskCompleted {
         task_id: "bg-abc123".into(),
         agent_name: "code-reviewer".into(),
@@ -2593,15 +2593,6 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
         "Step 6: After BackgroundTaskCompleted (with bg_task_state.agent_done_pending=true)",
     );
 
-    // 验证 bg_task_state.pending_continuation 被设置
-    assert!(
-        app.session_mgr.current_mut()
-            .agent
-            .bg_task_state.pending_continuation
-            .is_some(),
-        "BackgroundTaskCompleted with bg_task_state.agent_done_pending=true should set bg_task_state.pending_continuation"
-    );
-
     let count_after_bg = bg_diag_count_subagent_groups(&app);
     assert_eq!(
         count_after_bg, count_after_done,
@@ -2611,8 +2602,7 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
 
     // === 第二阶段：模拟 continuation 触发 ===
     // BackgroundTaskCompleted 处理器在 bg_task_state.agent_done_pending=true 时
-    // 设置 bg_task_state.pending_continuation，下一帧 poll_agent 触发 submit_message
-    // submit_message 调用 begin_round + AddMessage(UserBubble) + 启动新 agent
+    // 处理结果，下一帧可触发新 round
 
     // 模拟 submit_message 的 begin_round
     app.session_mgr
@@ -3003,7 +2993,7 @@ async fn test_thinking_toolcall_text_rebuild_preserves_user() {
 // ── Background Task Race Condition 修复测试 ─────────────────────────────
 
 /// 竞态路径：BackgroundTaskCompleted 在 Done 之前被消费
-/// 修复前：bg_task_state.pre_done_completions 暂存 → Done 处理时设置 bg_task_state.pending_continuation
+/// pre_done_completions 暂存 → Done 处理时消费并清空
 #[tokio::test]
 async fn test_bg_completed_before_done_triggers_continuation() {
     let (mut app, _handle) = App::new_headless(120, 30).await;
@@ -3029,7 +3019,7 @@ async fn test_bg_completed_before_done_triggers_continuation() {
     app.push_agent_event(AgentEvent::Done);
     app.process_pending_events();
 
-    // 断言：bg_task_state.pre_done_completions 被 Done 消费并转为 bg_task_state.pending_continuation
+    // 断言：bg_task_state.pre_done_completions 被 Done 消费并清空
     assert!(
         app.session_mgr
             .current_mut()
@@ -3038,14 +3028,6 @@ async fn test_bg_completed_before_done_triggers_continuation() {
             .pre_done_completions
             .is_empty(),
         "Done 处理后 bg_task_state.pre_done_completions 应被清空"
-    );
-    assert!(
-        app.session_mgr
-            .current_mut()
-            .agent
-            .bg_task_state.pending_continuation
-            .is_some(),
-        "竞态修复：BackgroundTaskCompleted 在 Done 之前时，Done 应设置 bg_task_state.pending_continuation"
     );
 }
 
@@ -3095,21 +3077,6 @@ async fn test_multiple_bg_completed_before_done() {
     app.process_pending_events();
 
     // 断言���最后一个使 count 归零的任务通知被暂存并由 Done 消费
-    let continuation = &app
-        .session_mgr
-        .current_mut()
-        .agent
-        .bg_task_state
-        .pending_continuation;
-    assert!(
-        continuation.is_some(),
-        "多后台任务 Done 前完成时应设置 bg_task_state.pending_continuation"
-    );
-    let results = continuation.as_ref().unwrap();
-    assert!(
-        results.iter().any(|r| r.agent_name.contains("reviewer-2")),
-        "continuation 应包含最后一个（使 count 归零的）任务结果"
-    );
     assert!(
         app.session_mgr
             .current_mut()
@@ -3172,15 +3139,6 @@ async fn test_bg_completed_after_done_unchanged() {
             .current_mut()
             .agent
             .bg_task_state
-            .pending_continuation
-            .is_some(),
-        "正常路径：BackgroundTaskCompleted 在 Done 后应设 bg_task_state.pending_continuation"
-    );
-    assert!(
-        app.session_mgr
-            .current_mut()
-            .agent
-            .bg_task_state
             .pre_done_results
             .is_empty(),
         "正常路径 bg_task_state.pre_done_results 应被消费"
@@ -3215,11 +3173,6 @@ async fn test_submit_message_clears_pre_done_completions() {
         .agent
         .bg_task_state
         .agent_done_pending = false;
-    app.session_mgr
-        .current_mut()
-        .agent
-        .bg_task_state
-        .pending_continuation = None;
     app.session_mgr
         .current_mut()
         .agent
@@ -3381,7 +3334,7 @@ async fn test_bg_subagent_started_arrives_before_done() {
         "Done 到达时 background_agents 非空应设置 agent_done_pending"
     );
 
-    // BackgroundTaskCompleted 到达：触发 pending_continuation
+    // BackgroundTaskCompleted 到达：处理完成
     app.push_agent_event(AgentEvent::BackgroundTaskCompleted {
         task_id: "bg-race".into(),
         agent_name: "fork".into(),
@@ -3392,15 +3345,6 @@ async fn test_bg_subagent_started_arrives_before_done() {
         child_thread_id: Some("inst-race".into()),
     });
     app.process_pending_events();
-    assert!(
-        app.session_mgr
-            .current_mut()
-            .agent
-            .bg_task_state
-            .pending_continuation
-            .is_some(),
-        "BackgroundTaskCompleted 应触发 pending_continuation"
-    );
     assert!(
         app.session_mgr.current_mut().background_agents.is_empty(),
         "BackgroundTaskCompleted 应移除 background_agents"

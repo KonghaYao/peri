@@ -4,6 +4,7 @@ pub mod events;
 pub mod events_v2;
 pub mod events_v2_mapper;
 pub mod react;
+pub mod session;
 pub mod stages;
 pub mod state;
 pub mod subagent_event_forwarder;

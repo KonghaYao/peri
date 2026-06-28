@@ -3215,6 +3215,7 @@ dependencies = [
  "dirs-next",
  "langfuse-client",
  "parking_lot",
+ "peri-acp-types",
  "peri-agent",
  "peri-lsp",
  "peri-middlewares",
@@ -3226,6 +3227,14 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "peri-acp-types"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3332,6 +3341,7 @@ dependencies = [
  "mimalloc",
  "parking_lot",
  "peri-acp",
+ "peri-acp-types",
  "peri-agent",
  "peri-lsp",
  "peri-middlewares",
@@ -3351,6 +3361,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-tungstenite 0.29.0",
+ "tokio-util",
  "tracing",
  "tui-textarea-2",
  "unic-langid",

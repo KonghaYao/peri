@@ -7,6 +7,8 @@
 pub mod dto;
 pub mod mapper;
 pub mod mapper_v2;
+pub mod router;
+pub mod view_mapper;
 pub use dto::{
     CompactFileInfoDto, StopReasonDto, TodoItemDto, TodoStatusDto, TokenUsageDto,
     WorkflowProgressDto,
@@ -15,6 +17,8 @@ pub use mapper::{executor_event_to_acp, map_event, MappedEvent};
 pub use mapper_v2::{
     observe_event_to_executor, render_event_to_executor, state_event_to_executor, V2Event,
 };
+pub use router::{route, RoutingOutput, ViewMapper};
+pub use view_mapper::ViewMapperImpl;
 
 use serde::{Deserialize, Serialize};
 

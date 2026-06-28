@@ -320,20 +320,6 @@ impl App {
         self.session_mgr.current_mut()
     }
 
-    /// 获取当前 session 的共享 v2 MessageQueue（用于异步触发注入）。
-    /// 返回 None 的场景：未注入 ACP SessionManager / session_id 在 ACP 侧不存在
-    /// （如 ACP new_session 尚未完成）。
-    ///
-    /// 用 `&self` 借用，允许调用方持 `&mut App` 时也能调用，
-    /// 避免 polling 循环里与 `&mut self.session_mgr` 借用冲突。
-    pub(crate) fn v2_queue_for_current(&self) -> Option<peri_agent::session::MessageQueue> {
-        let sid = self.session_mgr.current().metadata.session_id.to_string();
-        self.services
-            .acp_session_manager
-            .as_ref()
-            .and_then(|sm| sm.v2_queue_for(&sid))
-    }
-
     /// 创建新 session 并替换当前 session（用于 /clear）
     pub fn new_session(&mut self) {
         // 取消旧 session 的 agent

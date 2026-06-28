@@ -92,12 +92,8 @@ impl ChannelCommand {
             .metadata
             .session_id
             .to_string();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         channel_state.register_session(session_id, tx);
-        app.session_mgr
-            .current_mut()
-            .messages
-            .channel_notification_rx = Some(rx);
 
         self.add_note(
             app,
@@ -112,10 +108,6 @@ impl ChannelCommand {
         let lc = &app.services.lc;
         if let Some(cs) = &app.services.channel_state {
             cs.close_all();
-            app.session_mgr
-                .current_mut()
-                .messages
-                .channel_notification_rx = None;
             self.add_note(app, &lc.tr("command-channel-all-closed"));
         }
     }

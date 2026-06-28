@@ -8,6 +8,17 @@
 //! - [`TurnContext`]：单次 turn 上下文，turn 结束即销毁
 //!
 //! 外部通过 `Session::new()` 创建，按需访问五个实体，通过 `start_turn()` 启动新 turn。
+//!
+//! ## 异步 Owner（v2 新增）
+//!
+//! Session 可选地持有三个异步 owner：
+//! - [`SessionInbox`](crate::agent::session::SessionInbox)：await-wake 包装器，用于 idle 期间阻塞唤醒
+//! - [`CronOwner`](crate::agent::session::CronOwner)：cron trigger → inbox 桥接
+//! - [`ChannelOwner`](crate::agent::session::ChannelOwner)：channel notification → inbox 桥接
+//!
+//! 这些 owner 在 `peri-acp` 层通过 `set_async_owners` 注入。持有 owner 后，
+//! cron/channel 事件直接通过 inbox 唤醒 executor，无需 TUI 轮询。
+//! 不设置 owner 时，TUI 轮询路径仍然有效（向后兼容）。
 
 pub mod config;
 pub mod queue;
@@ -25,12 +36,26 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use crate::agent::session::{
+    channel_owner::ChannelOwner, cron_owner::CronOwner, inbox::SessionInbox,
+};
 use crate::thread::ThreadId;
+
+/// 异步 owner 容器（set-once，RwLock 保护）
+#[allow(dead_code)]
+pub struct AsyncOwners {
+    inbox: SessionInbox,
+    cron_owner: Option<CronOwner>,
+    channel_owner: Option<ChannelOwner>,
+}
 
 /// Session — 会话统一入口
 ///
 /// 聚合五个核心实体，提供统一的创建和访问 API。
 /// 通过 `Arc<Self>` 共享，外部通过 `Session::new()` 创建。
+///
+/// 可选持有异步 owner（inbox / cron / channel），用于直接桥接
+/// 异步事件到 executor 的 idle-wake 机制。
 pub struct Session {
     /// 会话生命周期数据（不可变）
     store: Arc<SessionStore>,
@@ -40,6 +65,10 @@ pub struct Session {
     queue: MessageQueue,
     /// 可变配置（Arc 共享，外部写入，循环读取）
     config: Arc<SessionConfig>,
+    /// 异步 owner 容器（set-once，RwLock 保护）。
+    /// None 表示未启用 async owner 路径（TUI polling 路径仍有效）。
+    /// Some(rwlock) 表示 v2 路径已启用，可后续通过 set_async_owners 注入。
+    async_owners: Option<parking_lot::RwLock<Option<AsyncOwners>>>,
 }
 
 impl Session {
@@ -58,6 +87,7 @@ impl Session {
             transcript,
             queue,
             config,
+            async_owners: None,
         })
     }
 
@@ -83,6 +113,7 @@ impl Session {
             transcript,
             queue,
             config,
+            async_owners: None,
         })
     }
 
@@ -116,6 +147,8 @@ impl Session {
             transcript,
             queue,
             config,
+            // v2 路径启用 async owner 容器（RwLock，允许后续 set_async_owners 注入）
+            async_owners: Some(parking_lot::RwLock::new(None)),
         })
     }
 
@@ -144,6 +177,76 @@ impl Session {
     /// 共享 cwd 和 cancel token，turn 内 step 从 0 开始。
     pub fn start_turn(&self) -> TurnContext {
         TurnContext::new(self.store.cwd.clone(), self.config.cancel_token.clone())
+    }
+
+    /// Session-level inbox（await-wake wrapper）。
+    ///
+    /// 返回 `None` 表示未启用 async owner 路径。
+    /// 启用后，ACP executor 的 `run_session_loop` 可在 idle 期间调用
+    /// `inbox.await_wake()` 阻塞直到新消息到达。
+    ///
+    /// 返回 `RwLockReadGuard`，调用者通过 guard 访问 `SessionInbox`。
+    /// guard drop 后释放读锁。
+    pub fn session_inbox_guard(
+        &self,
+    ) -> Option<parking_lot::RwLockReadGuard<'_, Option<AsyncOwners>>> {
+        self.async_owners.as_ref().map(|m| m.read())
+    }
+
+    /// Async owners 读守卫。
+    ///
+    /// 返回 `RwLockReadGuard<Option<AsyncOwners>>`，调用者可访问
+    /// `.inbox` / `.cron_owner` / `.channel_owner`。
+    pub fn async_owners_guard(
+        &self,
+    ) -> Option<parking_lot::RwLockReadGuard<'_, Option<AsyncOwners>>> {
+        self.async_owners.as_ref().map(|m| m.read())
+    }
+
+    /// 注入异步 owner（SessionInbox + CronOwner + ChannelOwner）。
+    ///
+    /// 由 `peri-acp` 层在构建 v2 session 后调用，将 cron/channel
+    /// 事件直接桥接到 inbox，绕过 TUI 轮询。
+    ///
+    /// 每个 owner 的 `start()` 方法在此调用前应已执行（background task 已 spawn）。
+    /// 此方法仅设置引用，不启动 background task。
+    ///
+    /// 传入 `None` 的 owner 表示该路径仍由 TUI 轮询处理。
+    ///
+    /// `inbox` 参数为 `Some` 时必须提供——它是 async owner 路径的核心。
+    /// 如果不需要 async owner 路径，不要调用此方法。
+    ///
+    /// Returns `true` if owners were set successfully, `false` if already set or
+    /// no `async_owners` cell was initialized.
+    pub fn set_async_owners(
+        &self,
+        inbox: SessionInbox,
+        cron: Option<CronOwner>,
+        channel: Option<ChannelOwner>,
+    ) -> bool {
+        if let Some(rwlock) = &self.async_owners {
+            let mut guard = rwlock.write();
+            if guard.is_some() {
+                tracing::warn!("set_async_owners: already set, ignoring duplicate call");
+                return false;
+            }
+            *guard = Some(AsyncOwners {
+                inbox,
+                cron_owner: cron,
+                channel_owner: channel,
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 检查 async owner 是否已初始化。
+    pub fn has_async_owners(&self) -> bool {
+        self.async_owners
+            .as_ref()
+            .map(|m| m.read().is_some())
+            .unwrap_or(false)
     }
 }
 

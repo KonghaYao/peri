@@ -9,6 +9,7 @@
 
 pub mod agent_pool;
 pub mod agent_runtime;
+pub mod async_router;
 pub mod command;
 pub mod event_sink;
 pub mod executor;
@@ -70,6 +71,15 @@ pub struct AcpSession {
     /// peri-agent Session（核心实体聚合）
     /// None 表示尚未初始化，session/new 时创建。
     pub v2_session: Option<Arc<peri_agent::session::Session>>,
+    /// Session-level inbox (await-wake wrapper around v2_message_queue).
+    ///
+    /// Created lazily on first access via `SessionManager::session_inbox_for`.
+    /// Used by the executor to block during idle (`await_wake`) and by
+    /// `AsyncRouter` to push bg_results/workflow events with wake notification.
+    ///
+    /// `None` means the session doesn't support async wake (e.g., print mode
+    /// without a SessionManager). The executor falls back to direct return.
+    pub session_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
 }
 
 struct SessionManagerInner {
@@ -163,6 +173,7 @@ impl SessionManager {
             ),
             v2_message_queue: peri_agent::session::MessageQueue::new(),
             v2_session: None,
+            session_inbox: None,
         };
 
         self.inner.sessions.insert(session_id.clone(), session);
@@ -188,6 +199,7 @@ impl SessionManager {
             ),
             v2_message_queue: peri_agent::session::MessageQueue::new(),
             v2_session: None,
+            session_inbox: None,
         }
     }
 
@@ -319,6 +331,32 @@ impl SessionManager {
             .sessions
             .get(session_id)
             .map(|s| s.v2_message_queue.clone())
+    }
+
+    /// 获取指定 session 的 SessionInbox（await-wake wrapper）。
+    ///
+    /// Lazy-init：首次调用时创建 `SessionInbox` 包装该 session 的
+    /// `v2_message_queue`，存入 `AcpSession.session_inbox` 后续调用直接返回。
+    /// session 不存在时返回 None。
+    pub fn session_inbox_for(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<peri_agent::agent::session::SessionInbox>> {
+        // Fast path: already initialized
+        if let Some(session) = self.inner.sessions.get(session_id) {
+            if let Some(ref inbox) = session.session_inbox {
+                return Some(Arc::clone(inbox));
+            }
+        }
+        // Slow path: lazy init
+        if let Some(mut session) = self.inner.sessions.get_mut(session_id) {
+            let queue_arc = Arc::new(session.v2_message_queue.clone());
+            let inbox = Arc::new(peri_agent::agent::session::SessionInbox::new(queue_arc));
+            session.session_inbox = Some(Arc::clone(&inbox));
+            Some(inbox)
+        } else {
+            None
+        }
     }
 
     /// 取消指定 session 的所有 cascade 子 agent（暴露给 TUI/stdio 用于 session/cancel）。

@@ -10,6 +10,15 @@
 //! `chain.collect_tools(cwd)` 把 middleware 提供的工具 + `register_tool` 注册的
 //! `AskUserQuestion` 一次性 merge 到 `shared_tools`（已存在的同名工具不覆盖，
 //! 保留 deferred / 外部注册版本）。
+//!
+//! ## Async Owners
+//!
+//! 当 `AcpAgentConfig.cron_scheduler` 为 `Some` 时，本模块：
+//! 1. 创建 `SessionInbox`（await-wake wrapper around shared_queue）。
+//! 2. 从 `CronScheduler` 订阅 trigger_rx（通过 `subscribe()`）。
+//! 3. 启动 CronTrigger→String 桥接任务。
+//! 4. 创建并启动 `CronOwner`（trigger_rx → inbox）。
+//! 5. 通过 `Session::set_async_owners` 注入到 Session。
 
 use std::sync::Arc;
 
@@ -19,6 +28,7 @@ use peri_agent::{
         events::ExecutorEvent,
         events_v2::{EventBus, EventBusConfig, EventHandles},
         react::ReactLLM,
+        session::{cron_owner::CronOwner, inbox::SessionInbox},
         stages::{SharedToolMap, StageContext},
     },
     group::pipeline::AgentId,
@@ -77,6 +87,11 @@ pub fn build_stage_context(
     let hook_model = cfg.provider.model_name().to_string();
     let hook_session_id = session_id.clone().unwrap_or_default();
 
+    // ── 提取 cron_scheduler（在 cfg 被 build_agent 消费前）─────────────────
+    // CronScheduler 由 TUI 创建并通过 AcpAgentConfig 传递。
+    // 通过 subscribe() 获取额外的 trigger_rx，用于 CronOwner 桥接。
+    let cron_scheduler = cfg.cron_scheduler.clone();
+
     // 调用 build_agent 构造完整 agent（含中间件链 + LLM）
     let (agent_output, new_cached) = build_agent(cfg, cached_llm, pool);
 
@@ -120,9 +135,72 @@ pub fn build_stage_context(
         cwd_arc,
         frozen,
         None,
-        cancel_arc,
+        cancel_arc.clone(),
         shared_queue.clone(),
     );
+
+    // ── Async Owners（SessionInbox + CronOwner）─────────────────────────────
+    // 创建 SessionInbox 包装 shared_queue，提供 await-wake 能力。
+    // 然后：
+    // - 如果有 cron_scheduler，从 CronScheduler subscribe() 获取 trigger_rx，
+    //   启动 CronTrigger→String 桥接任务，创建并启动 CronOwner。
+    // - 通过 set_async_owners 注入到 Session。
+    //
+    // ChannelOwner 暂不在此构建（channel rx 由 TUI /channel open 动态创建）。
+    {
+        let shared_queue_arc = Arc::new(shared_queue.clone());
+        let session_inbox = SessionInbox::new(shared_queue_arc);
+        let inbox_handle = session_inbox.handle();
+
+        // CronOwner：从 CronScheduler 订阅 trigger_rx，桥接到 inbox
+        let mut cron_owner = None;
+        if let Some(ref scheduler) = cron_scheduler {
+            // subscribe() 创建额外的 UnboundedSender，CronScheduler.tick() 会向
+            // 所有 sender 发送 CronTrigger（主 sender 仍由 TUI poll_cron_triggers 消费）。
+            let mut trigger_rx = {
+                let mut sched = scheduler.lock();
+                sched.subscribe()
+            };
+
+            // 桥接任务：CronTrigger → String（peri-agent 的 CronOwner 不依赖
+            // peri-middlewares::cron::CronTrigger 类型，只接收 String prompt）。
+            let (prompt_tx, prompt_rx) = tokio::sync::mpsc::unbounded_channel();
+            let shutdown = cancel_arc.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => {
+                            tracing::debug!("cron-bridge: shutdown");
+                            break;
+                        }
+                        trigger = trigger_rx.recv() => {
+                            match trigger {
+                                Some(t) => {
+                                    if prompt_tx.send(t.prompt).is_err() {
+                                        tracing::debug!("cron-bridge: prompt_tx closed, stopping");
+                                        break;
+                                    }
+                                }
+                                None => {
+                                    tracing::debug!("cron-bridge: trigger_rx closed, stopping");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            let mut owner = CronOwner::new();
+            owner.start(prompt_rx, inbox_handle, cancel_arc.clone());
+            cron_owner = Some(owner);
+            tracing::info!("CronOwner started (ACP bridge path)");
+        }
+
+        // 注入到 Session
+        session.set_async_owners(session_inbox, cron_owner, None);
+    }
 
     let turn = session.start_turn();
     let transcript = session.transcript();

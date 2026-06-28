@@ -116,7 +116,7 @@ impl App {
                 .pre_done_results
                 .is_empty()
             {
-                let results: Vec<_> = self
+                let _results: Vec<_> = self
                     .session_mgr
                     .current_mut()
                     .agent
@@ -125,14 +125,9 @@ impl App {
                     .drain(..)
                     .collect();
                 tracing::info!(
-                    count = results.len(),
-                    "Done: processing pre-done background task completions, setting continuation"
+                    count = _results.len(),
+                    "Done: processing pre-done background task completions"
                 );
-                self.session_mgr
-                    .current_mut()
-                    .agent
-                    .bg_task_state
-                    .pending_continuation = Some(results);
             }
             // 清理显示文本缓存
             self.session_mgr
@@ -356,7 +351,7 @@ impl App {
                 .pre_done_results
                 .is_empty()
             {
-                let results: Vec<_> = self
+                let _results: Vec<_> = self
                     .session_mgr
                     .current_mut()
                     .agent
@@ -365,14 +360,9 @@ impl App {
                     .drain(..)
                     .collect();
                 tracing::info!(
-                    count = results.len(),
-                    "Error: processing pre-done background task completions, setting continuation"
+                    count = _results.len(),
+                    "Error: processing pre-done background task completions"
                 );
-                self.session_mgr
-                    .current_mut()
-                    .agent
-                    .bg_task_state
-                    .pending_continuation = Some(results);
             }
             // 清理显示文本缓存
             self.session_mgr
