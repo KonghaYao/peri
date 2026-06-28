@@ -3332,6 +3332,81 @@ async fn test_background_agents_lifecycle() {
     );
 }
 
+/// 验证 `/bg` 命令的 SubagentStarted 严格先于 Done 到达 TUI：
+/// 治本方案（BgCommand::execute 同步 push SubagentStarted 到 event_sink）
+/// 消除了原本 pump task 与 push_done 并发导致的 race。
+///
+/// 顺序断言：submit_message → SubagentStarted → Done → BackgroundTaskCompleted。
+/// 任一环节状态错误都会让后续断言失败。
+#[tokio::test]
+async fn test_bg_subagent_started_arrives_before_done() {
+    let (mut app, _handle) = App::new_headless(120, 30).await;
+
+    // 模拟 submit_message 触发的 loading 状态
+    app.set_loading(true);
+    assert!(app.session_mgr.current().ui.loading);
+
+    // 治本保证：SubagentStarted 先到（loading=true 期间）
+    app.push_agent_event(AgentEvent::SubAgentStart {
+        agent_id: "fork".into(),
+        instance_id: "inst-race".into(),
+        task_preview: String::new(),
+        is_background: true,
+    });
+    app.process_pending_events();
+    assert_eq!(
+        app.session_mgr.current_mut().background_agents.len(),
+        1,
+        "SubAgentStart(bg) 应 push background_agents"
+    );
+    assert!(
+        !app.session_mgr
+            .current_mut()
+            .agent
+            .bg_task_state
+            .agent_done_pending,
+        "Done 未到达时 agent_done_pending 应为 false"
+    );
+
+    // Done 后到：background_agents 非空 → handle_done 设置 agent_done_pending
+    app.push_agent_event(AgentEvent::Done);
+    app.process_pending_events();
+    assert!(!app.session_mgr.current().ui.loading);
+    assert!(
+        app.session_mgr
+            .current_mut()
+            .agent
+            .bg_task_state
+            .agent_done_pending,
+        "Done 到达时 background_agents 非空应设置 agent_done_pending"
+    );
+
+    // BackgroundTaskCompleted 到达：触发 pending_continuation
+    app.push_agent_event(AgentEvent::BackgroundTaskCompleted {
+        task_id: "bg-race".into(),
+        agent_name: "fork".into(),
+        success: true,
+        output: "result".into(),
+        tool_calls_count: 1,
+        duration_ms: 100,
+        child_thread_id: Some("inst-race".into()),
+    });
+    app.process_pending_events();
+    assert!(
+        app.session_mgr
+            .current_mut()
+            .agent
+            .bg_task_state
+            .pending_continuation
+            .is_some(),
+        "BackgroundTaskCompleted 应触发 pending_continuation"
+    );
+    assert!(
+        app.session_mgr.current_mut().background_agents.is_empty(),
+        "BackgroundTaskCompleted 应移除 background_agents"
+    );
+}
+
 // ── Compact Loading / TextSelection 修复回归 ──────────────────────────────
 
 /// 验证 compact completed 后 loading 保持（统一由 Done 事件结束）

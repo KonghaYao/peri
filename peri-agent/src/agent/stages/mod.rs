@@ -441,6 +441,37 @@ pub struct EndOutput {
     pub awakened_messages: Vec<QueuedMessage>,
 }
 
+// ─── 工具函数 ────────────────────────────────────────────────────────────────
+
+/// 把 drained 队列消息写入 transcript。
+///
+/// - `Prompt`：message 原样 append（用户输入）
+/// - `Defer` / `Info`：content 用 `<system-reminder>` 包裹后 append（系统注入）
+///
+/// Defer 与 Info 在 transcript 中的渲染一致（都是 system-injected 数据），
+/// 差异仅在队列行为（drain 时机）——见 `MessageQueue::drain_for_receive`
+/// 与 `MessageQueue::drain_for_end`。
+pub fn append_messages_to_transcript(
+    transcript: &mut MessageTranscript,
+    messages: Vec<QueuedMessage>,
+) {
+    use crate::messages::{BaseMessage, MessageContent};
+    use crate::session::MessageKind;
+    for msg in messages {
+        let content = match msg.kind {
+            MessageKind::Prompt => msg.message,
+            MessageKind::Info | MessageKind::Defer => {
+                let text = msg.message.content().to_string();
+                BaseMessage::human(MessageContent::text(format!(
+                    "<system-reminder>\n{}\n</system-reminder>",
+                    text
+                )))
+            }
+        };
+        transcript.append(content);
+    }
+}
+
 // ─── 控制流编排 ──────────────────────────────────────────────────────────────
 
 /// 运行 ReAct v2 五阶段循环
@@ -518,12 +549,16 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         });
 
         if end_out.should_continue {
-            // 有新消息唤醒新 turn → 回 Compact
+            // End 阶段 drain 出的 Prompt / Defer 必须写入 transcript——
+            // drain_for_end 是 destructive，不写入会物理丢失。
+            // Defer（bg_results / WorkflowComplete / cron）用 <system-reminder>
+            // 包裹，符合 CLAUDE.md "中途纠正消息必须用 human + reminder" 约定。
+            if !end_out.awakened_messages.is_empty() {
+                let mut transcript = context.transcript.write();
+                append_messages_to_transcript(&mut transcript, end_out.awakened_messages);
+            }
             has_tool_calls = false;
-            tracing::debug!(
-                awakened = end_out.awakened_messages.len(),
-                "End 阶段有新消息，开始新 turn"
-            );
+            tracing::debug!("End 阶段有新消息，写入 transcript，开始新 turn");
             continue;
         }
 
@@ -832,6 +867,121 @@ mod tests {
         assert!(
             visible.iter().any(|m| matches!(m, BaseMessage::Ai { .. })),
             "expected at least one AI message"
+        );
+    }
+
+    // ── append_messages_to_transcript helper 测试 ──
+
+    #[test]
+    fn test_append_messages_prompt_kept_as_is() {
+        // Prompt 消息应原样 append（用户输入不包裹 reminder）
+        let ctx = make_stage_context();
+        let msgs = vec![QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human(MessageContent::text("hello user")),
+        )];
+        {
+            let mut transcript = ctx.transcript.write();
+            append_messages_to_transcript(&mut transcript, msgs);
+        }
+        let transcript = ctx.transcript.read();
+        assert_eq!(transcript.len(), 1);
+        let content = transcript.entries()[0].message.content();
+        assert_eq!(content, "hello user");
+    }
+
+    #[test]
+    fn test_append_messages_info_wrapped_in_reminder() {
+        // Info 消息应用 <system-reminder> 包裹
+        let ctx = make_stage_context();
+        let msgs = vec![QueuedMessage::info(
+            MessageSource::SystemInjected,
+            BaseMessage::human(MessageContent::text("system info")),
+        )];
+        {
+            let mut transcript = ctx.transcript.write();
+            append_messages_to_transcript(&mut transcript, msgs);
+        }
+        let transcript = ctx.transcript.read();
+        assert_eq!(transcript.len(), 1);
+        let content = transcript.entries()[0].message.content();
+        assert!(content.contains("<system-reminder>"));
+        assert!(content.contains("system info"));
+    }
+
+    #[test]
+    fn test_append_messages_defer_wrapped_in_reminder() {
+        // Defer 消息（bg_results / WorkflowComplete）应用 <system-reminder> 包裹
+        // —— 这是本次修复的关键断言：mod.rs:520-528 把 awakened_messages 写入
+        // transcript 时，Defer 走 reminder 包裹路径（与 Info 一致）。
+        let ctx = make_stage_context();
+        let msgs = vec![QueuedMessage::defer(
+            MessageSource::SubAgentComplete,
+            BaseMessage::human(MessageContent::text("bg-result-payload")),
+        )];
+        {
+            let mut transcript = ctx.transcript.write();
+            append_messages_to_transcript(&mut transcript, msgs);
+        }
+        let transcript = ctx.transcript.read();
+        assert_eq!(transcript.len(), 1);
+        let content = transcript.entries()[0].message.content();
+        assert!(
+            content.contains("<system-reminder>"),
+            "Defer 应被 reminder 包裹, got: {}",
+            content
+        );
+        assert!(
+            content.contains("bg-result-payload"),
+            "Defer 内容应在 transcript 中, got: {}",
+            content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_e2e_defer_written_to_transcript_when_end_awakens() {
+        // e2e：push Defer → run_react_loop → 第一轮 End drain Defer →
+        // mod.rs:520-528 把 awakened_messages 写入 transcript（reminder 包裹）→
+        // 第二轮循环正常退出。
+        //
+        // 回归保护：修复前 awakened_messages 被 drop，Defer 内容物理丢失。
+        let cwd: Arc<str> = Arc::from("/tmp/e2e-defer");
+        let frozen = FrozenContext::builder().build();
+        let session = Session::new(cwd, frozen, None);
+        let turn = session.start_turn();
+        let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+            .with_llm(Arc::new(FinalAnswerLLM { answer: "ok" }))
+            .build();
+
+        ctx.queue.push(QueuedMessage::defer(
+            MessageSource::SubAgentComplete,
+            BaseMessage::human(MessageContent::text("bg-result-payload")),
+        ));
+
+        let result = run_react_loop(ctx.clone(), 5).await;
+        assert!(
+            matches!(result, LoopResult::Completed),
+            "expected Completed, got {:?}",
+            result
+        );
+
+        // transcript 应包含 Defer 内容（reminder 包裹）
+        let transcript = ctx.transcript.read();
+        let combined: String = transcript
+            .visible_messages()
+            .iter()
+            .map(|m| m.content().to_string())
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        assert!(
+            combined.contains("<system-reminder>"),
+            "Defer 应被 reminder 包裹写入 transcript, got: {}",
+            combined
+        );
+        assert!(
+            combined.contains("bg-result-payload"),
+            "Defer 内容应在 transcript 中, got: {}",
+            combined
         );
     }
 }

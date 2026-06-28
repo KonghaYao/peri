@@ -111,17 +111,6 @@ impl App {
             self.request_rebuild();
         }
 
-        tracing::info!(
-            task_id = %task_id,
-            agent_name = %agent_name,
-            child_thread_id = ?child_thread_id,
-            success = success,
-            bg_count_before = self.session_mgr.current_mut().background_agents.len() + 1,
-            bg_count_after = self.session_mgr.current_mut().background_agents.len(),
-            agent_done_pending = self.session_mgr.current_mut().agent.bg_task_state.agent_done_pending,
-            "[bg-diag] TUI: handle_background_task_completed called"
-        );
-
         // 用于 LLM 上下文的纯文本通知
         let short_id = &task_id[..8.min(task_id.len())];
         let state_notification = if success {
@@ -289,34 +278,6 @@ impl App {
                 vm.recompute_hash();
             }
             self.apply_pipeline_action(PipelineAction::AddMessage(vm));
-        }
-
-        // 诊断日志：记录 BackgroundTaskCompleted 处理后的 view_messages 中 SubAgentGroup 数量
-        {
-            let subagent_count = self
-                .session_mgr
-                .current_mut()
-                .messages
-                .view_messages
-                .iter()
-                .filter(|vm| vm.is_subagent_group())
-                .count();
-            let frozen_count = self
-                .session_mgr
-                .current_mut()
-                .messages
-                .pipeline
-                .frozen_subagent_vms_count();
-            tracing::debug!(
-                task_id = %&task_id[..8.min(task_id.len())],
-                agent_name = %agent_name,
-                child_thread_id = ?child_thread_id,
-                subagent_count_in_view = subagent_count,
-                frozen_count,
-                background_agents_count = self.session_mgr.current_mut().background_agents.len(),
-                bg_task_state.agent_done_pending = self.session_mgr.current_mut().agent.bg_task_state.agent_done_pending,
-                "[bg-diag] after BackgroundTaskCompleted"
-            );
         }
 
         // Workflow 完成 → 走 pending_messages 路径（用户输入缓存机制）。

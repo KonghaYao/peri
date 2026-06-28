@@ -245,6 +245,7 @@ impl App {
         results: Vec<crate::app::agent_comm::BgTaskResult>,
     ) {
         if results.is_empty() {
+            tracing::warn!("submit_continuation_with_bg_results called with empty results");
             return;
         }
 

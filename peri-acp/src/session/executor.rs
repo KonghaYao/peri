@@ -373,10 +373,10 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
 
     // bg_results 通过 v2 MessageQueue push（Defer kind）。
     //
-    // **必须 Defer 而非 Info**：bg_results 是异步到达的延迟结果，本轮 Receive
-    // 阶段不应消费（避免污染当前 turn 的 prompt）；End 阶段若循环已退出，
-    // Defer 可唤醒新 turn。Info 只在 Receive 消费、不唤醒——对 bg continuation
-    // 语义错误。
+    // Defer 是异步延迟结果的正确语义：本轮 Receive 跳过保留，End 阶段 drain
+    // 唤醒新 turn，并由 `mod.rs::run_react_loop` 写入 transcript（包裹
+    // `<system-reminder>`）。与 WorkflowComplete / cron 等其他异步唤醒路径
+    // 走同一套机制——见 `append_messages_to_transcript`。
     if !bg_results.is_empty() {
         use peri_agent::session::queue::{MessageKind as V2Kind, MessageSource as V2Src};
         for result in &bg_results {
@@ -1017,10 +1017,12 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
                         Ok(task_result) => {
                             let short_id = &task_result.run_id[..8.min(task_result.run_id.len())];
                             // Path B: push 到 v2 MessageQueue（Defer kind）。
-                            // Defer 唤醒新 turn，让 agent 感知 workflow 完成。
-                            // content 用 <system-reminder> 包裹（与 v1 一致）。
+                            // Defer 唤醒新 turn，由 `run_react_loop` 的 End 阶段
+                            // drain 后写入 transcript（<system-reminder> 由
+                            // `append_messages_to_transcript` 统一包裹，这里
+                            // 只给纯文本）。
                             let notif_text = format!(
-                                "<system-reminder>\n[后台任务 {} 已完成] {} ({}ms, {} agents, {} tool calls)\n</system-reminder>",
+                                "[后台任务 {} 已完成] {} ({}ms, {} agents, {} tool calls)",
                                 short_id,
                                 task_result.workflow_name,
                                 task_result.duration_ms,
@@ -1184,14 +1186,12 @@ async fn build_and_execute_agent_v2(
             let mut bg_event_count: u64 = 0;
             while let Some(bg_event) = bg_event_rx.recv().await {
                 bg_event_count += 1;
-                if matches!(&bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
-                    tracing::info!(
-                        count = bg_event_count,
-                        "[v2][bg-diag] bg-event-pump: received BackgroundTaskCompleted"
-                    );
-                }
                 bg_sink.push_event(&bg_session_id, &bg_event, bg_cw).await;
             }
+            tracing::debug!(
+                total = bg_event_count,
+                "bg-event-pump: all senders dropped, exiting"
+            );
         });
     }
 

@@ -88,6 +88,13 @@ pub struct BgForkSpawned {
     pub task_id: String,
     /// 子线程 ID（uuid v7）
     pub child_thread_id: String,
+    /// SubagentStarted 事件（构造好但**未发送**，由调用方决定推送路径）。
+    ///
+    /// - `/bg` 命令（BgCommand）：通过 `event_sink.push_event` 同步推送，保证
+    ///   TUI 在 Done 之前收到（避免 race condition）
+    /// - Agent 工具路径（SubAgentTool）：通过 `bg_event_sender` 异步推送
+    ///   （主 agent 在跑 `loading=true`，无 race）
+    pub started_event: ExecutorEvent,
 }
 
 /// 启动后台 fork agent（v2 stages）
@@ -198,13 +205,13 @@ pub async fn spawn_background_fork(
         register(child_thread_id.clone(), cancel_token, "independent".into());
     }
 
-    // 发射 SubagentStarted（is_background=true），让 TUI 注册 RunningBgAgent + push
-    // SubAgentGroup VM。必须在 bg_event_sender move 到 tokio::spawn 之前发射。
-    let _ = config.bg_event_sender.send(ExecutorEvent::SubagentStarted {
+    // 构造 SubagentStarted 事件（不发送——由调用方决定推送路径）。
+    // 见 BgForkSpawned::started_event 字段注释。
+    let started_event = ExecutorEvent::SubagentStarted {
         agent_name: agent_name.clone(),
         instance_id: child_thread_id.clone(),
         is_background: true,
-    });
+    };
 
     // 11. 捕获 spawn 资源
     let thread_store = config.thread_store.clone();
@@ -332,7 +339,7 @@ pub async fn spawn_background_fork(
     // 13. 注册到 BackgroundTaskRegistry
     let bg_task = BackgroundTask {
         id: task_id.clone(),
-        agent_name,
+        agent_name: agent_name.clone(),
         prompt_summary,
         status: BackgroundTaskStatus::Running,
         started_at: std::time::Instant::now(),
@@ -345,6 +352,7 @@ pub async fn spawn_background_fork(
     Ok(BgForkSpawned {
         task_id,
         child_thread_id,
+        started_event,
     })
 }
 

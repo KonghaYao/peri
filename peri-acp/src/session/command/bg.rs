@@ -158,6 +158,19 @@ impl AgentCommand for BgCommand {
             }
         };
 
+        // 同步推送 SubagentStarted 到 ACP transport——必须在 push_done 之前
+        // 完成（本命令是 CommandKind::Immediate，execute 返回后立即 push_done）。
+        // 走 event_sink 直接入 TransportEventSink channel（in-memory mpsc），
+        // 保证 TUI 端按 FIFO 顺序处理：SubagentStarted 必先先于 Done 到达，
+        // handle_subagent_start 先注册 background_agents，handle_done 才能正确
+        // 设置 agent_done_pending。
+        //
+        // 不走 bg_event_sender（pump task 异步推送）——pump 与 push_done 并发，
+        // 事件到达 TUI 的顺序无保证（race condition 已通过此同步路径根治）。
+        ctx.event_sink
+            .push_event(&ctx.session_id, &spawned.started_event, 0)
+            .await;
+
         // 确认消息（CJK-safe truncation: chars().take(80)）
         let truncated: String = prompt.chars().take(80).collect();
         ctx.event_sink
@@ -171,12 +184,6 @@ impl AgentCommand for BgCommand {
                 0,
             )
             .await;
-
-        tracing::info!(
-            task_id = %spawned.task_id,
-            child_thread_id = %spawned.child_thread_id,
-            "[bg-diag] BgCommand spawned background agent"
-        );
 
         CommandResult {
             messages: ctx.history,

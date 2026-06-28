@@ -134,12 +134,22 @@ impl super::SubAgentTool {
             ));
 
         // SubagentStarted 事件 + lifecycle hook（is_background=true）
-        if let Some(ref handler) = self.event_handler {
-            handler.on_event(ExecutorEvent::SubagentStarted {
+        // [arch-align] 通过 bg_event_sender（BG pump，独立通道）发送，与 fork 路径（spawner.rs:203）
+        // 对齐。避免主 pump（event_handler → event_tx）在主 agent 结束后被 close_channel 关闭
+        // 导致的时序风险——SubagentStopped 在 spawn task 内发送时主 agent 已结束，event_tx 已 None。
+        // BG pump 独立运行，直到所有 bg_event_tx clones drop（即所有 bg task 完成）。
+        if let Some(ref sender) = self.bg_event_sender {
+            let _ = sender.send(ExecutorEvent::SubagentStarted {
                 agent_name: agent_id.clone(),
                 instance_id: instance_id.clone(),
                 is_background: true,
             });
+        } else {
+            tracing::warn!(
+                agent = %agent_id,
+                instance_id = %instance_id,
+                "bg_event_sender unavailable, SubagentStarted event dropped"
+            );
         }
         self.fire_subagent_lifecycle_hook(HookEvent::SubagentStart, &cwd, &agent_id, None)
             .await;
@@ -204,6 +214,17 @@ impl super::SubAgentTool {
                             .update_thread_status(&child_thread_id_clone, "error")
                             .await;
                     }
+                    // [arch-align] 错误分支也必须发射 SubagentStopped（is_error=true），
+                    // 保证 subagent_depth 配对减 1（参考 fork 路径 spawner.rs:251-256）。
+                    // 必须在 BackgroundTaskResult 构造之前发射——后者会 move output。
+                    if let Some(ref sender) = bg_event_sender {
+                        let _ = sender.send(ExecutorEvent::SubagentStopped {
+                            agent_name: agent_name_clone.clone(),
+                            result: output.clone(),
+                            is_error: true,
+                            instance_id: child_thread_id_clone.clone(),
+                        });
+                    }
                     let result = peri_agent::agent::events::BackgroundTaskResult {
                         task_id: task_id_clone.clone(),
                         agent_name: agent_name_clone.clone(),
@@ -229,8 +250,10 @@ impl super::SubAgentTool {
             };
 
             // SubagentStopped 事件 + lifecycle hook
-            if let Some(ref handler) = event_handler {
-                handler.on_event(ExecutorEvent::SubagentStopped {
+            // [arch-align] 通过 bg_event_sender（BG pump）发送，与 fork 路径（spawner.rs:315）对齐。
+            // 保证 subagent_depth 配对递减（handle_subagent_stop 处理）。
+            if let Some(ref sender) = bg_event_sender {
+                let _ = sender.send(ExecutorEvent::SubagentStopped {
                     agent_name: agent_name_clone.clone(),
                     result: output_summary.clone(),
                     is_error: interrupted,
@@ -271,6 +294,11 @@ impl super::SubAgentTool {
             };
             if let Some(ref sender) = bg_event_sender {
                 let _ = sender.send(ExecutorEvent::BackgroundTaskCompleted(result.clone()));
+            } else {
+                tracing::warn!(
+                    task_id = %task_id_clone,
+                    "bg_event_sender unavailable, BackgroundTaskCompleted event dropped"
+                );
             }
             registry_spawn.complete(&task_id_clone, result);
 
@@ -325,6 +353,8 @@ impl super::SubAgentTool {
             .bg_event_sender
             .clone()
             .ok_or("Error: bg_event_sender not set for background fork")?;
+        // 保留一份 clone 用于发 started_event（bg_sender 自身会被 move 到 config → spawn 闭包）
+        let bg_sender_for_started = bg_sender.clone();
 
         let config = crate::subagent::spawner::BgForkConfig {
             prompt: prompt.clone(),
@@ -347,6 +377,11 @@ impl super::SubAgentTool {
         };
 
         let spawned = crate::subagent::spawner::spawn_background_fork(config).await?;
+
+        // 发送 SubagentStarted（异步走 pump task）。
+        // Agent 工具路径下主 agent 在跑（loading=true），无 race condition——
+        // 不需要像 /bg 命令那样同步推送。
+        let _ = bg_sender_for_started.send(spawned.started_event);
 
         if self.thread_store.is_some() {
             Ok(format!(

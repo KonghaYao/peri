@@ -3,34 +3,22 @@
 //! 从 MessageQueue 中取出 Prompt + Info 消息，写入 Transcript。
 //! Defer 消息保留在队列中，等待 End 阶段或下个 turn。
 
-use crate::agent::stages::{ReceiveInput, ReceiveOutput};
-use crate::messages::{BaseMessage, MessageContent};
+use crate::agent::stages::{append_messages_to_transcript, ReceiveInput, ReceiveOutput};
 #[cfg(test)]
 use crate::session::QueuedMessage;
 
 /// 运行 Receive 阶段
 ///
-/// 调用 `drain_for_receive()` 消费 Prompt + Info，将消息内容写入 Transcript。
+/// 调用 `drain_for_receive()` 消费 Prompt + Info，将消息内容写入 Transcript
+/// （通过共享 helper `append_messages_to_transcript`，与 End 阶段的 Defer 写入
+/// 保持一致的包裹语义）。
 pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<ReceiveOutput> {
     let consumed = input.context.queue.drain_for_receive();
     let count = consumed.len();
 
     if count > 0 {
         let mut transcript = input.context.transcript.write();
-        for msg in consumed {
-            let content = match msg.kind {
-                crate::session::MessageKind::Info => {
-                    // Info 消息用 <system-reminder> 包裹
-                    let text = msg.message.content().to_string();
-                    BaseMessage::human(MessageContent::text(format!(
-                        "<system-reminder>\n{}\n</system-reminder>",
-                        text
-                    )))
-                }
-                _ => msg.message,
-            };
-            transcript.append(content);
-        }
+        append_messages_to_transcript(&mut transcript, consumed);
         tracing::debug!(
             turn_id = %input.context.turn.turn_id,
             count,
@@ -49,7 +37,7 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
 mod tests {
     use super::*;
     use crate::agent::stages::StageContext;
-    use crate::messages::BaseMessage;
+    use crate::messages::{BaseMessage, MessageContent};
     use crate::session::queue::MessageSource;
     use crate::session::store::FrozenContext;
     use crate::session::Session;

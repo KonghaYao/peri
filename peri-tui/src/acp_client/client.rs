@@ -132,12 +132,6 @@ impl AcpTuiClient {
                                     session_id = %session_id,
                                     "ACP client pump: received agent_event"
                                 );
-                                if matches!(&event, AcpEvent::BackgroundTaskCompleted { .. }) {
-                                    tracing::info!(
-                                        event_count = event_count,
-                                        "[bg-diag] client-pump: deserialized BackgroundTaskCompleted, sending to TUI"
-                                    );
-                                }
                                 let _ = notification_tx
                                     .send(AcpNotification::AgentEvent { session_id, event });
                             }
@@ -306,10 +300,11 @@ impl AcpTuiClient {
 
     /// Submit a user message with background task results attached.
     ///
-    /// The server-side executor injects the bg_results as Defer messages into the v2
-    /// MessageQueue (see `peri-acp/src/session/executor.rs`), so they will be consumed
-    /// by the next iteration's Receive/End stages. The user content is delivered as
-    /// the user message of the new turn.
+    /// The server-side executor injects the bg_results as `Defer` messages into the
+    /// v2 MessageQueue (see `peri-acp/src/session/executor.rs`). Defer is the
+    /// correct semantic for async-delayed results: Receive skips them, End drains
+    /// and awakens a new turn, and `run_react_loop` writes them to the transcript
+    /// wrapped in `<system-reminder>` (see `append_messages_to_transcript`).
     pub async fn prompt_with_bg_results(
         &self,
         content: &peri_agent::messages::MessageContent,

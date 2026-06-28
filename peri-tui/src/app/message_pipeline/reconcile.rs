@@ -149,17 +149,6 @@ impl MessagePipeline {
             //
             // 之前的 rposition(Human) 会跳到注入的 <goal-message>，导致 AI 回复丢失。
             tail_vms = Self::messages_to_view_models(&self.transcript[start..], &self.cwd);
-            let reconcile_subagent_count =
-                tail_vms.iter().filter(|vm| vm.is_subagent_group()).count();
-            tracing::debug!(
-                has_committed = true,
-                transcript_len = self.transcript.len(),
-                start_offset = start,
-                reconcile_total = tail_vms.len(),
-                reconcile_subagent_count,
-                frozen_count = self.frozen_subagent_vms.len(),
-                "[bg-diag] build_tail_vms reconcile"
-            );
         }
 
         // 当前迭代 partial：流式 AssistantBubble + 工具调用

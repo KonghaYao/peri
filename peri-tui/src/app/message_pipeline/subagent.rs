@@ -184,17 +184,12 @@ impl super::MessagePipeline {
             vm.recompute_hash();
             sub.finalized_vm = Some(vm.clone());
             self.frozen_subagent_vms.push(vm);
-            tracing::debug!(
-                instance_id = %sub.instance_id,
-                agent_name = %agent_name,
-                "[bg-diag] notify_bg_completed: updated SubAgentState + pushed frozen VM"
-            );
         }
 
         // 2. 更新 frozen_subagent_vms 中已冻结但 is_running=true 的 VM
         //    （Done → drain_subagent_stack 先于 BG Complete 的情况）
         //    两遍匹配：优先 instance_id 精确匹配，回退 agent_name
-        if let Some(ref iid) = instance_id {
+        if let Some(iid) = instance_id {
             for vm in &mut self.frozen_subagent_vms {
                 match vm {
                     MessageViewModel::SubAgentGroup {
@@ -205,16 +200,12 @@ impl super::MessagePipeline {
                         is_error,
                         total_steps,
                         ..
-                    } if *is_running && *is_background && vm_iid == *iid => {
+                    } if *is_running && *is_background && vm_iid == iid => {
                         *is_running = false;
                         *final_result = Some(output.to_string());
                         *is_error = !success;
                         *total_steps = steps;
                         vm.recompute_hash();
-                        tracing::debug!(
-                            iid,
-                            "[bg-diag] notify_bg_completed: updated frozen VM by instance_id"
-                        );
                         return;
                     }
                     _ => {}
@@ -238,10 +229,6 @@ impl super::MessagePipeline {
                     *is_error = !success;
                     *total_steps = steps;
                     vm.recompute_hash();
-                    tracing::debug!(
-                        agent_name,
-                        "[bg-diag] notify_bg_completed: updated frozen VM by agent_name"
-                    );
                     break;
                 }
                 _ => {}
