@@ -1,32 +1,6 @@
 use super::cron_state::CronPanel;
 
 impl crate::app::App {
-    /// CronPanel: 光标上移
-    pub fn cron_panel_move_up(&mut self) {
-        if let Some(panel) = self.global_panels.get_mut::<CronPanel>() {
-            panel.list.move_cursor(-1);
-        }
-    }
-
-    /// CronPanel: 光标下移
-    pub fn cron_panel_move_down(&mut self) {
-        if let Some(panel) = self.global_panels.get_mut::<CronPanel>() {
-            panel.list.move_cursor(1);
-        }
-    }
-
-    /// CronPanel: 切换当前任务的 enabled 状态
-    pub fn cron_panel_toggle(&mut self) {
-        if let Some(panel) = self.global_panels.get_mut::<CronPanel>() {
-            let idx = panel.cursor();
-            if idx < panel.tasks().len() {
-                let id = panel.tasks()[idx].id.clone();
-                self.services.cron.scheduler.lock().toggle(&id);
-                panel.refresh(&self.services.cron.scheduler);
-            }
-        }
-    }
-
     /// CronPanel: 请求删除当前任务（进入确认状态）
     pub fn cron_panel_request_delete(&mut self) {
         if let Some(panel) = self.global_panels.get_mut::<CronPanel>() {
@@ -68,10 +42,5 @@ impl crate::app::App {
         if let Some(panel) = self.global_panels.get_mut::<CronPanel>() {
             panel.confirm_delete = false;
         }
-    }
-
-    /// CronPanel: 关闭面板
-    pub fn cron_panel_close(&mut self) {
-        self.global_panels.close();
     }
 }
