@@ -12,6 +12,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::super::current_turn::CurrentTurn;
 use super::super::event::{AcpEventData, Event};
+use super::super::input::{CursorPos, InputEdit};
 use super::super::state::{DoubleEscTracker, IdleState, State, StreamingState};
 use crate::runtime::effect::Effect;
 
@@ -150,13 +151,41 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
         }
 
         // -- Printable character --------------------------------------------
-        KeyCode::Char(c) => {
-            // Filter out Ctrl+<char> shortcuts -- they are not buffer input.
-            // Plain Char or Shift+Char go into the buffer.
-            if key.modifiers.intersects(KeyModifiers::CONTROL) {
-                // P3 will dispatch Ctrl+ shortcuts (Ctrl+T, Ctrl+L, ...).
-                return (State::Idle(state), Vec::new());
+        // Ctrl+<char> shortcuts are intercepted BEFORE the general Char arm.
+        KeyCode::Char(c) if key.modifiers.intersects(KeyModifiers::CONTROL) => {
+            match c {
+                'c' => {
+                    // Ctrl+C: quit. If there's a selection, do nothing (copy
+                    // is handled via other paths for now).
+                    if state.input.selection.is_some() {
+                        (State::Idle(state), vec![Effect::Render])
+                    } else {
+                        (State::Idle(state), vec![Effect::Quit])
+                    }
+                }
+                'a' => {
+                    use crate::state_machine::input::InputEdit;
+                    state.input.select_all();
+                    (State::Idle(state), vec![Effect::Render])
+                }
+                'u' => {
+                    use crate::state_machine::input::InputEdit;
+                    state.input.delete_line_by_head();
+                    state.input.prediction = None;
+                    (State::Idle(state), vec![Effect::Render])
+                }
+                'w' => {
+                    use crate::state_machine::input::InputEdit;
+                    state.input.delete_word();
+                    state.input.prediction = None;
+                    (State::Idle(state), vec![Effect::Render])
+                }
+                // Other Ctrl+<char> combos pass through (P3 will dispatch more).
+                _ => (State::Idle(state), Vec::new()),
             }
+        }
+
+        KeyCode::Char(c) => {
             state.input.insert_str(&c.to_string());
             // Typing invalidates the prediction.
             state.input.prediction = None;
@@ -177,21 +206,72 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
 
         // -- Left / Right arrow: move cursor (char-level) -------------------
         KeyCode::Left => {
-            use crate::state_machine::input::InputEdit;
             state.input.move_cursor_left(false);
             (State::Idle(state), vec![Effect::Render])
         }
 
         KeyCode::Right => {
-            use crate::state_machine::input::InputEdit;
             state.input.move_cursor_right(false);
             (State::Idle(state), vec![Effect::Render])
         }
 
-        // -- Up / Down: history navigation (P3 stub) -----------------------
-        KeyCode::Up | KeyCode::Down => {
-            // P3 will wire full history navigation. For P2 we just re-render.
-            (State::Idle(state), Vec::new())
+        // -- Home / End: line navigation -----------------------------------
+        KeyCode::Home => {
+            state
+                .input
+                .move_cursor_home(key.modifiers.intersects(KeyModifiers::SHIFT));
+            (State::Idle(state), vec![Effect::Render])
+        }
+
+        KeyCode::End => {
+            state
+                .input
+                .move_cursor_end(key.modifiers.intersects(KeyModifiers::SHIFT));
+            (State::Idle(state), vec![Effect::Render])
+        }
+
+        // -- Delete: forward delete -----------------------------------------
+        KeyCode::Delete => {
+            use crate::state_machine::input::InputEdit;
+            // Simulate forward-delete: move right, then backspace.
+            state.input.move_cursor_right(false);
+            state.input.backspace();
+            state.input.prediction = None;
+            (State::Idle(state), vec![Effect::Render])
+        }
+
+        // -- Up / Down: history navigation ----------------------------------
+        KeyCode::Up => {
+            if state.input.history.is_empty() {
+                return (State::Idle(state), Vec::new());
+            }
+            let idx = match state.history_index {
+                Some(i) if i > 0 => i - 1,
+                Some(_) => 0,
+                None => state.input.history.len().saturating_sub(1),
+            };
+            state.history_index = Some(idx);
+            state.input.lines = vec![state.input.history[idx].clone()];
+            state.input.cursor = CursorPos::new(0, state.input.lines[0].len());
+            (State::Idle(state), vec![Effect::Render])
+        }
+
+        KeyCode::Down => {
+            let idx = match state.history_index {
+                Some(i) if i + 1 < state.input.history.len() => i + 1,
+                Some(_) => {
+                    // Past the newest entry: restore original (empty).
+                    state.history_index = None;
+                    state.input.lines = vec![String::new()];
+                    state.input.cursor = CursorPos::default();
+                    return (State::Idle(state), vec![Effect::Render]);
+                }
+                None => return (State::Idle(state), Vec::new()),
+            };
+            state.history_index = Some(idx);
+            state.input.lines = vec![state.input.history[idx].clone()];
+            state.input.cursor = CursorPos::new(0, state.input.lines[0].len());
+            (State::Idle(state), vec![Effect::Render])
         }
 
         // -- Everything else -------------------------------------------------
