@@ -85,19 +85,21 @@ impl super::PanelState for PanelStateStub {
 pub fn create_panel(kind: PanelKind) -> Box<dyn super::PanelState> {
     match kind {
         PanelKind::Model => Box::new(super::panels::model::ModelPanel::empty()),
-        PanelKind::Login => Box::new(PanelStateStub::new(kind)),
+        PanelKind::Login => Box::new(super::panels::login::LoginPanel::empty()),
         PanelKind::Agent => Box::new(super::panels::agent::AgentPanel::empty()),
         PanelKind::Hooks => Box::new(super::panels::hooks::HooksPanel::empty()),
         PanelKind::Config => Box::new(super::panels::config::ConfigPanel::empty()),
-        PanelKind::ThreadBrowser => Box::new(PanelStateStub::new(kind)),
-        PanelKind::Mcp => Box::new(PanelStateStub::new(kind)),
-        PanelKind::Plugin => Box::new(PanelStateStub::new(kind)),
-        PanelKind::Cron => Box::new(PanelStateStub::new(kind)),
+        PanelKind::ThreadBrowser => {
+            Box::new(super::panels::thread_browser::ThreadBrowserPanel::empty())
+        }
+        PanelKind::Mcp => Box::new(super::panels::mcp::McpPanel::empty()),
+        PanelKind::Plugin => Box::new(super::panels::plugin::PluginPanel::empty()),
+        PanelKind::Cron => Box::new(super::panels::cron::CronPanel::empty()),
         PanelKind::Status => Box::new(super::panels::status::StatusPanel::empty()),
         PanelKind::Memory => Box::new(super::panels::memory::MemoryPanel::empty()),
         PanelKind::Tasks => Box::new(super::panels::tasks::TasksPanel::empty()),
         PanelKind::Betas => Box::new(super::panels::betas::BetasPanel::empty()),
-        PanelKind::Workflow => Box::new(PanelStateStub::new(kind)),
+        PanelKind::Workflow => Box::new(super::panels::workflow::WorkflowPanel::empty()),
     }
 }
 
