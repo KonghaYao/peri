@@ -4,3 +4,5 @@
 //! 通过 `super::registry::create_panel` 工厂接入。
 
 pub mod agent;
+pub mod memory;
+pub mod status;
