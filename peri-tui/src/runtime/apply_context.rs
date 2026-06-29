@@ -9,7 +9,9 @@
 //! Design: `peri-tui-architecture.md` §8.3 -- ApplyContext holds terminal +
 //! acp_client + clipboard.  Stateless -- all state lives in the state machine.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
+use std::sync::LazyLock;
 use std::time::Instant;
 
 use ratatui::prelude::{CrosstermBackend, Terminal};
@@ -17,7 +19,9 @@ use tracing::warn;
 
 use crate::acp_client::AcpTuiClient;
 use crate::app::App;
+use crate::panel::read_context::ServiceRegistrySnapshot;
 use crate::runtime::effect::Effect;
+use crate::state_machine::state::PanelReadContext;
 use crate::ui;
 
 /// Outcome of applying a single effect.
@@ -194,24 +198,67 @@ impl<'a> ApplyContext<'a> {
 
     /// Perform a terminal draw if the throttle interval has elapsed.
     ///
-    /// This mirrors the legacy loop's throttled render logic:
-    /// - Always draw if the interval has elapsed.
-    /// - Updates `last_render` to the current time after drawing.
-    pub fn draw_if_needed(&mut self, app: &mut App, last_render: &mut Instant) {
+    /// Throttled variant of [`draw_now`]; see its doc for v2 panel rendering.
+    pub fn draw_if_needed(
+        &mut self,
+        app: &mut App,
+        last_render: &mut Instant,
+        state: &mut crate::state_machine::State,
+    ) {
         let now = Instant::now();
         if now.duration_since(*last_render) >= std::time::Duration::from_millis(33) {
-            if let Err(e) = self.terminal.draw(|f| ui::main_ui::render(f, app)) {
-                warn!(error = %e, "terminal draw failed");
-            }
-            *last_render = now;
+            self.draw_now(app, last_render, state);
         }
     }
 
     /// Unconditionally perform a terminal draw and reset the render timer.
-    pub fn draw_now(&mut self, app: &mut App, last_render: &mut Instant) {
-        if let Err(e) = self.terminal.draw(|f| ui::main_ui::render(f, app)) {
+    ///
+    /// If `state` is [`State::Modal(ModalState::Panel(...))`], renders the v2
+    /// panel on top of the standard UI (legacy panel area is empty since the
+    /// legacy PanelManager has no active panel).
+    pub fn draw_now(
+        &mut self,
+        app: &mut App,
+        last_render: &mut Instant,
+        state: &mut crate::state_machine::State,
+    ) {
+        use crate::state_machine::{ModalState, State};
+        if let Err(e) = self.terminal.draw(|f| {
+            ui::main_ui::render(f, app);
+            // v2 Modal panel overlay: render when state machine has an active panel.
+            if let State::Modal(ModalState::Panel(panel)) = state {
+                let area = app
+                    .session_mgr
+                    .current()
+                    .ui
+                    .panel_area
+                    .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24));
+                panel.render(f, area, &build_v2_panel_read_context(app));
+            }
+        }) {
             warn!(error = %e, "terminal draw failed");
         }
         *last_render = Instant::now();
+    }
+}
+
+/// Build a [`PanelReadContext`] for v2 panel rendering from live App data.
+fn build_v2_panel_read_context<'a>(app: &'a App) -> PanelReadContext<'a> {
+    static EMPTY_SNAPSHOT: LazyLock<ServiceRegistrySnapshot> =
+        LazyLock::new(ServiceRegistrySnapshot::new);
+    static EMPTY_CACHE: LazyLock<HashMap<String, serde_json::Value>> = LazyLock::new(HashMap::new);
+
+    let session = app.session_mgr.current();
+
+    PanelReadContext {
+        services: &EMPTY_SNAPSHOT,
+        view_models: &[],
+        scroll_offset: session.ui.scroll_offset,
+        area: session
+            .ui
+            .panel_area
+            .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24)),
+        lc: &app.services.lc,
+        acp_query_cache: &EMPTY_CACHE,
     }
 }

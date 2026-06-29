@@ -397,10 +397,10 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
             if is_tick {
                 let now = std::time::Instant::now();
                 if now.duration_since(last_render) >= TARGET_FRAME_INTERVAL {
-                    ctx.draw_now(app, &mut last_render);
+                    ctx.draw_now(app, &mut last_render, &mut state);
                 }
             } else {
-                ctx.draw_now(app, &mut last_render);
+                ctx.draw_now(app, &mut last_render, &mut state);
             }
         }
     }
