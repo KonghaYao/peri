@@ -102,6 +102,11 @@ impl InputState {
         let right_part: String = self.lines[row].drain(col_byte..).collect();
         self.lines[row].push_str(parts[0]);
 
+        if parts.len() == 1 {
+            // Single-line insert: append the right part back.
+            self.lines[row].push_str(&right_part);
+        }
+
         for (i, part) in parts.iter().enumerate().skip(1) {
             let mut new_line = String::new();
             new_line.push_str(part);
