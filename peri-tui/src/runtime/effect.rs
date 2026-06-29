@@ -76,6 +76,10 @@ pub enum Effect {
     },
     /// Switch to another session.
     SwitchSession(String),
+    /// Open a v2 panel via state machine transition: Idle → Modal(Panel).
+    OpenPanel(crate::app::panel_manager::PanelKind),
+    /// Close the current v2 Modal panel: Modal(Panel) → Idle.
+    ClosePanel,
 
     // ── App-level state mutations ────────────────────────────────────────
     /// Cycle to the next model alias (opus → sonnet → haiku → opus).

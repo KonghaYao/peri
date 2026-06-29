@@ -134,7 +134,9 @@ impl<'a> ApplyContext<'a> {
             | Effect::InterruptAgent
             | Effect::ClearPendingMessages
             | Effect::ClearTextSelection
-            | Effect::OpenRewindPrompt => ApplyOutcome::Ok,
+            | Effect::OpenRewindPrompt
+            | Effect::OpenPanel(_)
+            | Effect::ClosePanel => ApplyOutcome::Ok,
         }
     }
 

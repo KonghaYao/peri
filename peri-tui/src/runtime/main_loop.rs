@@ -26,7 +26,9 @@ use crate::event::Action;
 use crate::runtime::apply_context::{ApplyContext, ApplyOutcome};
 use crate::runtime::effect::Effect;
 use crate::runtime::event_channel::{EventRx, TuiEvent};
-use crate::state_machine::{handle as state_machine_handle, Event as SmEvent, IdleState, State};
+use crate::state_machine::{
+    handle as state_machine_handle, Event as SmEvent, IdleState, ModalState, State,
+};
 
 /// Target frame interval for loading-spinner animation (~30 FPS).
 const TARGET_FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -45,6 +47,9 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
 
     // v2 state machine state. Persists across events. Initial = Idle.
     let mut state: State = State::Idle(IdleState::default());
+
+    // Saved IdleState before entering Modal(Panel). Restored on panel close.
+    let mut saved_idle: Option<IdleState> = None;
 
     while let Some(event) = rx.recv().await {
         let is_tick = matches!(event, TuiEvent::Tick);
@@ -210,6 +215,21 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 Effect::SwitchSession(session_id) => {
                     tracing::info!(session_id = %session_id, "SwitchSession");
                     needs_render = true;
+                }
+                Effect::OpenPanel(kind) => {
+                    if let State::Idle(idle) = state {
+                        saved_idle = Some(idle);
+                        let panel = crate::panel::registry::create_panel(kind);
+                        state = State::Modal(ModalState::Panel(panel));
+                        needs_render = true;
+                    }
+                }
+                Effect::ClosePanel => {
+                    if matches!(state, State::Modal(_)) {
+                        let idle = saved_idle.take().unwrap_or_default();
+                        state = State::Idle(idle);
+                        needs_render = true;
+                    }
                 }
                 // ── App state mutations ────────────────────────────
                 Effect::CycleModel => {
