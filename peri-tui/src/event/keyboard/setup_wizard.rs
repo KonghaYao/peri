@@ -1,4 +1,3 @@
-use peri_agent::messages::BaseMessage;
 use tui_textarea::{Input, Key};
 
 use super::super::Action;
@@ -49,10 +48,7 @@ pub(super) fn handle_setup_wizard(app: &mut App, input: &Input) -> Option<Action
                                 "config-save-failed",
                                 &[("error".into(), e.to_string().into())],
                             );
-                            let msg = MessageViewModel::from_base_message(
-                                &BaseMessage::system(msg_text),
-                                &[],
-                            );
+                            let msg = MessageViewModel::system(msg_text);
                             app.session_mgr
                                 .current_mut()
                                 .messages

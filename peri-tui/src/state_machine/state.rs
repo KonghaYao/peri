@@ -200,7 +200,7 @@ pub enum State {
 
 /// State when the agent is not running and the user is interacting with the
 /// input box.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct IdleState {
     /// Input box state (buffer, cursor, at-mention, slash-completion,
     /// attachments, prediction).

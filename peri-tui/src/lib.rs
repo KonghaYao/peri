@@ -19,6 +19,7 @@ pub mod command;
 pub mod config;
 pub mod event;
 pub mod i18n;
+pub mod render;
 pub mod runtime;
 pub mod state_machine;
 pub mod sync;

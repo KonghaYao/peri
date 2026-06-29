@@ -1,13 +1,19 @@
-//! Main loop: recv event → thin_handle (delegates to legacy App) → apply effects → loop.
+//! Main loop: recv event → state_machine::handle (pure) + thin_handle (legacy) → apply effects → loop.
 //!
-//! P1 thin-shell: `run()` consumes events from the unified channel, calls
-//! `thin_handle()` which translates each [`TuiEvent`] into the appropriate
-//! legacy `App` method calls, and returns a list of [`Effect`]s.  The caller
-//! then executes those effects via [`ApplyContext::apply`].
+//! P2 Cutover state: the loop **simultaneously** drives the new pure
+//! state machine ([`crate::state_machine::handle`]) and the legacy
+//! [`thin_handle`] glue. Effects from both paths are merged (Render
+//! de-duplicated) before execution.
 //!
-//! This is GLUE CODE — `thin_handle` maps the new event-channel architecture
-//! onto the existing `App` surface without rewriting any App internals.
-//! P2 replaces this with a pure state machine.
+//! - The state machine is the **future** authoritative path. Its `State`
+//!   persists across events; `ViewStore` accumulates view-commits; transitions
+//!   are pure functions with zero I/O.
+//! - `thin_handle` is the **current** source of truth for rendering (reads
+//!   `message_pipeline`) and for any behavior not yet ported to the state
+//!   machine (panels, interaction popups, mouse selection).
+//!
+//! Once P3 (panels) and P5 (rendering rewrite) land, `thin_handle` will be
+//! deleted and the state machine becomes the sole driver.
 
 use std::time::Duration;
 
@@ -20,6 +26,7 @@ use crate::event::Action;
 use crate::runtime::apply_context::{ApplyContext, ApplyOutcome};
 use crate::runtime::effect::Effect;
 use crate::runtime::event_channel::{EventRx, TuiEvent};
+use crate::state_machine::{handle as state_machine_handle, Event as SmEvent, IdleState, State};
 
 /// Target frame interval for loading-spinner animation (~30 FPS).
 const TARGET_FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -30,16 +37,35 @@ const TARGET_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 ///
 /// The loop is the **only** place that reads from the event channel and the
 /// **only** place that performs I/O (terminal draw, ACP send, clipboard).
-/// `thin_handle` is pure delegation — it mutates `App` and returns effects,
-/// but performs no I/O itself.
+///
+/// P2 Cutover: drives both the pure state machine and the legacy
+/// [`thin_handle`] glue. Effects are merged; `Render` is de-duplicated.
 pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> anyhow::Result<()> {
     let mut last_render = std::time::Instant::now();
+
+    // v2 state machine state. Persists across events. Initial = Idle.
+    let mut state: State = State::Idle(IdleState::default());
 
     while let Some(event) = rx.recv().await {
         let is_tick = matches!(event, TuiEvent::Tick);
 
-        // ── 1. Translate TuiEvent → legacy App calls, collect effects ───
-        let effects = thin_handle(app, event);
+        // ── 1a. Drive the pure state machine ────────────────────────────
+        // Convert TuiEvent → SmEvent (decode ACP {event, data} into typed
+        // AcpEventData variants) and dispatch to the transition function.
+        let sm_event: SmEvent = event.clone().into();
+        let (new_state, sm_effects) = state_machine_handle(state, sm_event);
+        state = new_state;
+
+        // ── 1b. Drive legacy thin_handle (fallback for unported paths) ──
+        let legacy_effects = thin_handle(app, event);
+
+        // ── 1c. Merge effects (Render de-duplicated) ────────────────────
+        let mut effects: Vec<Effect> = sm_effects;
+        for e in legacy_effects {
+            if !effects.contains(&e) {
+                effects.push(e);
+            }
+        }
 
         // ── 2. Execute effects ─────────────────────────────────────────
         let mut quit = false;
@@ -248,48 +274,48 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
                 _ => unreachable!(),
             }
         }
-        MouseEventKind::Down(MouseButton::Left) => {
+        MouseEventKind::Down(MouseButton::Left)
             // Textarea selection start
-            if !app.is_interaction_popup_active() {
-                if let Some(area) = app.session_mgr.current_mut().ui.textarea_area {
-                    if mouse.row >= area.y
-                        && mouse.row < area.y + area.height
-                        && mouse.column >= area.x
-                        && mouse.column < area.x + area.width
-                    {
-                        let session = &app.session_mgr.current();
-                        let (row, col) = crate::event::mouse::textarea_mouse_to_cursor(
-                            &session.ui.textarea,
-                            area,
-                            &mouse,
-                        );
-                        app.session_mgr
-                            .current_mut()
-                            .ui
-                            .textarea
-                            .move_cursor(tui_textarea::CursorMove::Jump(row as u16, col as u16));
-                        app.session_mgr.current_mut().ui.textarea.start_selection();
-                    }
+            if !app.is_interaction_popup_active() =>
+        {
+            if let Some(area) = app.session_mgr.current_mut().ui.textarea_area {
+                if mouse.row >= area.y
+                    && mouse.row < area.y + area.height
+                    && mouse.column >= area.x
+                    && mouse.column < area.x + area.width
+                {
+                    let session = &app.session_mgr.current();
+                    let (row, col) = crate::event::mouse::textarea_mouse_to_cursor(
+                        &session.ui.textarea,
+                        area,
+                        &mouse,
+                    );
+                    app.session_mgr
+                        .current_mut()
+                        .ui
+                        .textarea
+                        .move_cursor(tui_textarea::CursorMove::Jump(row as u16, col as u16));
+                    app.session_mgr.current_mut().ui.textarea.start_selection();
                 }
             }
         }
-        MouseEventKind::Drag(MouseButton::Left) => {
+        MouseEventKind::Drag(MouseButton::Left)
             // Textarea selection extend
-            if app.session_mgr.current_mut().ui.textarea.is_selecting() {
-                if let Some(area) = app.session_mgr.current_mut().ui.textarea_area {
-                    if mouse.row >= area.y && mouse.row < area.y + area.height {
-                        let session = &app.session_mgr.current();
-                        let (row, col) = crate::event::mouse::textarea_mouse_to_cursor(
-                            &session.ui.textarea,
-                            area,
-                            &mouse,
-                        );
-                        app.session_mgr
-                            .current_mut()
-                            .ui
-                            .textarea
-                            .move_cursor(tui_textarea::CursorMove::Jump(row as u16, col as u16));
-                    }
+            if app.session_mgr.current_mut().ui.textarea.is_selecting() =>
+        {
+            if let Some(area) = app.session_mgr.current_mut().ui.textarea_area {
+                if mouse.row >= area.y && mouse.row < area.y + area.height {
+                    let session = &app.session_mgr.current();
+                    let (row, col) = crate::event::mouse::textarea_mouse_to_cursor(
+                        &session.ui.textarea,
+                        area,
+                        &mouse,
+                    );
+                    app.session_mgr
+                        .current_mut()
+                        .ui
+                        .textarea
+                        .move_cursor(tui_textarea::CursorMove::Jump(row as u16, col as u16));
                 }
             }
         }
