@@ -80,13 +80,15 @@ fn transition_to_idle_with_effects(effects: Vec<Effect>) -> (State, Vec<Effect>)
     (State::Idle(idle), all_effects)
 }
 
-/// Dispatch a single key to the active panel / handler.
+/// Dispatch a single key to the active panel / handler, using TLS stubs.
 ///
 /// Returns `(panel_effects, should_close)`. `should_close=true` when the panel
 /// produced `PanelEffect::Close` -- caller transitions to Idle.
+///
+/// **Production code should use [`dispatch_key_with_ctx`] instead**, providing
+/// a real [`PanelReadContext`] constructed from App data. This function exists
+/// only for test compatibility (tests don't have access to App).
 fn dispatch_key(state: &mut ModalState, key: KeyEvent) -> (Vec<PanelEffect>, bool) {
-    // P2 stub: build an empty context from thread-local storage.
-    // P3 Integration: construct from real state machine data (App snapshot).
     thread_local! {
         static STUB_SNAPSHOT: ServiceRegistrySnapshot = ServiceRegistrySnapshot::new();
         static STUB_VMS: Vec<peri_acp_types::view_model::ViewModel> = const { Vec::new() };
@@ -105,31 +107,80 @@ fn dispatch_key(state: &mut ModalState, key: KeyEvent) -> (Vec<PanelEffect>, boo
                         lc,
                         acp_query_cache: cache,
                     };
-                    match state {
-                        ModalState::Panel(panel) => {
-                            let panel_effects = panel.handle_key(Input::from(key), &ctx);
-                            let should_close = panel_effects
-                                .iter()
-                                .any(|pe| matches!(pe, PanelEffect::Close));
-                            (panel_effects, should_close)
-                        }
-                        ModalState::Interaction(handler) => {
-                            if let KeyCode::Char(c) = key.code {
-                                match handler.handle_key(c) {
-                                    HandlerOutput::Nothing => (Vec::new(), false),
-                                    HandlerOutput::Submit(_) | HandlerOutput::Dismiss => {
-                                        (Vec::new(), true)
-                                    }
-                                }
-                            } else {
-                                (Vec::new(), false)
-                            }
-                        }
-                    }
+                    dispatch_key_with_ctx(state, key, &ctx)
                 })
             })
         })
     })
+}
+
+/// Dispatch a single key to the active panel / handler with a real context.
+///
+/// **Production path** -- `ctx` is constructed by main_loop from `&App` data.
+/// Returns `(panel_effects, should_close)`.
+fn dispatch_key_with_ctx(
+    state: &mut ModalState,
+    key: KeyEvent,
+    ctx: &PanelReadContext,
+) -> (Vec<PanelEffect>, bool) {
+    match state {
+        ModalState::Panel(panel) => {
+            let panel_effects = panel.handle_key(Input::from(key), ctx);
+            let should_close = panel_effects
+                .iter()
+                .any(|pe| matches!(pe, PanelEffect::Close));
+            (panel_effects, should_close)
+        }
+        ModalState::Interaction(handler) => {
+            if let KeyCode::Char(c) = key.code {
+                match handler.handle_key(c) {
+                    HandlerOutput::Nothing => (Vec::new(), false),
+                    HandlerOutput::Submit(_) | HandlerOutput::Dismiss => (Vec::new(), true),
+                }
+            } else {
+                (Vec::new(), false)
+            }
+        }
+    }
+}
+
+/// Modal handler that accepts an external [`PanelReadContext`].
+///
+/// **Production path** -- called by main_loop when state is `State::Modal(...)`.
+/// Uses the provided `ctx` (built from `&App`) instead of TLS stubs.
+pub fn handle_with_context(
+    mut state: ModalState,
+    event: Event,
+    ctx: &PanelReadContext,
+) -> (State, Vec<Effect>) {
+    match event {
+        // -- Esc: dismiss popup -> back to Idle ------------------------------
+        Event::Key(KeyEvent {
+            code: KeyCode::Esc, ..
+        }) => transition_to_idle(),
+
+        // -- Other key events: delegate to the panel/handler -----------------
+        Event::Key(key) => {
+            let (panel_effects, should_close) = dispatch_key_with_ctx(&mut state, key, ctx);
+            let effects = map_panel_effects(panel_effects);
+            if should_close {
+                transition_to_idle_with_effects(effects)
+            } else {
+                (State::Modal(state), effects)
+            }
+        }
+
+        // -- Mouse / Resize: re-render so the popup lays out correctly -------
+        Event::Mouse(_) | Event::Resize { .. } => (State::Modal(state), vec![Effect::Render]),
+
+        // -- Everything else: keep Modal, no effect --------------------------
+        Event::Tick
+        | Event::Paste(_)
+        | Event::AcpEvent(_)
+        | Event::AcpDisconnected
+        | Event::SessionLoaded { .. }
+        | Event::Shutdown => (State::Modal(state), Vec::new()),
+    }
 }
 
 /// Map `PanelEffect`s to top-level `Effect`s.

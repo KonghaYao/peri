@@ -15,6 +15,8 @@
 //! Once P3 (panels) and P5 (rendering rewrite) land, `thin_handle` will be
 //! deleted and the state machine becomes the sole driver.
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -23,11 +25,14 @@ use tracing::debug;
 use crate::app::App;
 use crate::event::keyboard;
 use crate::event::Action;
+use crate::panel::read_context::ServiceRegistrySnapshot;
 use crate::runtime::apply_context::{ApplyContext, ApplyOutcome};
 use crate::runtime::effect::Effect;
 use crate::runtime::event_channel::{EventRx, TuiEvent};
+use crate::state_machine::state::PanelReadContext;
 use crate::state_machine::{
-    handle as state_machine_handle, Event as SmEvent, IdleState, ModalState, State,
+    handle as state_machine_handle, transitions::modal, Event as SmEvent, IdleState, ModalState,
+    State,
 };
 
 /// Target frame interval for loading-spinner animation (~30 FPS).
@@ -57,8 +62,24 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // ── 1a. Drive the pure state machine ────────────────────────────
         // Convert TuiEvent → SmEvent (decode ACP {event, data} into typed
         // AcpEventData variants) and dispatch to the transition function.
+        // When state is Modal, use handle_with_context() with real App data
+        // so panels have access to i18n, scroll offset, panel area, etc.
         let sm_event: SmEvent = event.clone().into();
-        let (new_state, sm_effects) = state_machine_handle(state, sm_event);
+        let new_state: State;
+        let sm_effects: Vec<Effect>;
+        match state {
+            State::Modal(modal_state) => {
+                let ctx = build_panel_read_context(app);
+                let (ns, fx) = modal::handle_with_context(modal_state, sm_event, &ctx);
+                new_state = ns;
+                sm_effects = fx;
+            }
+            _ => {
+                let (ns, fx) = state_machine_handle(state, sm_event);
+                new_state = ns;
+                sm_effects = fx;
+            }
+        }
         state = new_state;
 
         // ── 1b. Legacy keyboard + ACP event dispatch ─────────────────
@@ -559,5 +580,40 @@ fn is_sm_handled_shortcut(key: &ratatui::crossterm::event::KeyEvent) -> bool {
         KeyCode::Char('o') if ctrl => true,          // Ctrl+O: toggle diff
         KeyCode::Char('p') if ctrl => true,          // Ctrl+P: open Model panel
         _ => false,
+    }
+}
+
+/// Build a [`PanelReadContext`] from live App data.
+///
+/// Called once per event when the state machine is in [`State::Modal`],
+/// giving v2 panels access to i18n, scroll offset, panel area, etc.
+/// The returned context borrows from `app` — it is consumed within the
+/// same event iteration and never escapes the main loop tick.
+fn build_panel_read_context<'a>(app: &'a App) -> PanelReadContext<'a> {
+    // ServiceRegistrySnapshot: empty for now — panels get data via internal
+    // state populated by ACP notifications, not from services snapshot.
+    static EMPTY_SNAPSHOT: LazyLock<ServiceRegistrySnapshot> =
+        LazyLock::new(ServiceRegistrySnapshot::new);
+
+    // View models: empty slice — panels don't use this yet (it's a
+    // forward-looking field for panels that may need message context).
+    let vms: &[peri_acp_types::view_model::ViewModel] = &[];
+
+    // ACP query cache: panels use this to store/retrieve ACP query results.
+    // Currently not populated in ServiceRegistry; use a static empty map.
+    static EMPTY_CACHE: LazyLock<HashMap<String, serde_json::Value>> = LazyLock::new(HashMap::new);
+
+    let session = app.session_mgr.current();
+
+    PanelReadContext {
+        services: &EMPTY_SNAPSHOT,
+        view_models: vms,
+        scroll_offset: session.ui.scroll_offset,
+        area: session
+            .ui
+            .panel_area
+            .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24)),
+        lc: &app.services.lc,
+        acp_query_cache: &EMPTY_CACHE,
     }
 }
