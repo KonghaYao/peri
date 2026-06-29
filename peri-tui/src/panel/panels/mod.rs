@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod betas;
+pub mod config;
 pub mod memory;
 pub mod model;
 pub mod status;
