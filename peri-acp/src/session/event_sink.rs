@@ -25,6 +25,19 @@ pub trait EventSink: Send + Sync {
 
     /// Signal that the agent execution stream has ended (no more events).
     async fn push_done(&self, session_id: &str);
+
+    /// Push an unstable event (peri/unstable-event) directly to the transport.
+    ///
+    /// Used to inject terminal signals (e.g. "turn-done") that don't originate
+    /// from an ExecutorEvent variant. Default: no-op (for non-TUI sinks like
+    /// StdioEventSink that don't support the unstable-event channel).
+    async fn push_unstable_event(
+        &self,
+        _session_id: &str,
+        _event: String,
+        _data: serde_json::Value,
+    ) {
+    }
 }
 
 // ── TUI transport-backed EventSink ──────────────────────────────────────────
@@ -182,6 +195,17 @@ impl EventSink for TransportEventSink {
             .await
         {
             error!(session_id = %session_id, error = %e, "EventSink: agent_event_done send failed")
+        }
+    }
+
+    async fn push_unstable_event(&self, session_id: &str, event: String, data: serde_json::Value) {
+        if let Err(e) = TransportEventSink::push_unstable_event(self, session_id, event, data).await
+        {
+            tracing::trace!(
+                session_id = %session_id,
+                error = %e,
+                "EventSink: push_unstable_event failed (non-critical)"
+            );
         }
     }
 }

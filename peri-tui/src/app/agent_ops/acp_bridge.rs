@@ -64,6 +64,11 @@ impl App {
                 }
                 (true, false, false)
             }
+            AcpNotification::UnstableEvent { event, .. } => {
+                // Handled by the v2 state machine (path 1a). Legacy path is no-op.
+                tracing::trace!(%event, "ACP→TUI: UnstableEvent (state machine path)");
+                (false, false, false)
+            }
             AcpNotification::Other { msg } => {
                 tracing::warn!(%msg, "Unhandled ACP notification");
                 (false, false, false)

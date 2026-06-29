@@ -763,6 +763,11 @@ fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
             None
         };
 
+        // Emit turn-done as an unstable event so the TUI v2 state machine
+        // can transition Streaming → Idle. Must come before push_done so
+        // TurnDone arrives before AgentDone in the notification channel.
+        sink.push_unstable_event(&session_id, "turn-done".into(), serde_json::json!({}))
+            .await;
         sink.push_done(&session_id).await;
 
         // Signal pump completion BEFORE Langfuse flush.

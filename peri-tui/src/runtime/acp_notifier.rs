@@ -127,6 +127,21 @@ fn handle_notification(tx: &EventTx, n: AcpNotification) {
             });
         }
 
+        AcpNotification::UnstableEvent {
+            session_id,
+            event,
+            data,
+        } => {
+            let mut payload = data;
+            if let serde_json::Value::Object(ref mut map) = payload {
+                map.insert("sessionId".to_string(), serde_json::json!(session_id));
+            }
+            let _ = tx.send(TuiEvent::AcpEvent {
+                event,
+                data: payload,
+            });
+        }
+
         AcpNotification::Other { msg } => {
             // Unrecognised notifications are still forwarded so the state
             // machine can log or display them.

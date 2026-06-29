@@ -38,6 +38,13 @@ pub enum AcpNotification {
         method: String,
         params: Value,
     },
+    /// A `peri/unstable-event` notification carrying v2 state machine events
+    /// (text-chunk, tool-started, view-commit, turn-done, etc.).
+    UnstableEvent {
+        session_id: String,
+        event: String,
+        data: Value,
+    },
 }
 
 /// TUI-side client that owns the ACP transport and routes notifications.
@@ -154,6 +161,28 @@ impl AcpTuiClient {
                             .to_string();
                         let _ = notification_tx
                             .send(AcpNotification::SessionUpdate { session_id, params });
+                    } else if method == "peri/unstable-event" {
+                        let session_id = params
+                            .get("sessionId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let event = params
+                            .get("event")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let data = params.get("data").cloned().unwrap_or(Value::Null);
+                        debug!(
+                            session_id = %session_id,
+                            event = %event,
+                            "ACP client pump: received unstable-event"
+                        );
+                        let _ = notification_tx.send(AcpNotification::UnstableEvent {
+                            session_id,
+                            event,
+                            data,
+                        });
                     } else if method == "peri/agent_event_done" {
                         let session_id = params
                             .get("sessionId")
