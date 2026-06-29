@@ -10,3 +10,4 @@ pub mod hooks;
 pub mod memory;
 pub mod model;
 pub mod status;
+pub mod tasks;
