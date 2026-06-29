@@ -41,9 +41,21 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
         // -- Mouse / Resize: re-render so the popup lays out correctly -------
         Event::Mouse(_) | Event::Resize { .. } => (State::Modal(state), vec![Effect::Render]),
 
+        // -- Tick: keep background processes alive while Modal is open --------
+        // PollAgent keeps ACP event consumption flowing; AdvanceSpinner keeps
+        // the loading animation running; Render ensures the panel redraws.
+        Event::Tick => (
+            State::Modal(state),
+            vec![
+                Effect::AdvanceSpinner,
+                Effect::PollAgent,
+                Effect::PollWorkflow,
+                Effect::Render,
+            ],
+        ),
+
         // -- Everything else: keep Modal, no effect --------------------------
-        Event::Tick
-        | Event::Paste(_)
+        Event::Paste(_)
         | Event::AcpEvent(_)
         | Event::AcpDisconnected
         | Event::SessionLoaded { .. }
@@ -173,9 +185,19 @@ pub fn handle_with_context(
         // -- Mouse / Resize: re-render so the popup lays out correctly -------
         Event::Mouse(_) | Event::Resize { .. } => (State::Modal(state), vec![Effect::Render]),
 
+        // -- Tick: keep background processes alive while Modal is open --------
+        Event::Tick => (
+            State::Modal(state),
+            vec![
+                Effect::AdvanceSpinner,
+                Effect::PollAgent,
+                Effect::PollWorkflow,
+                Effect::Render,
+            ],
+        ),
+
         // -- Everything else: keep Modal, no effect --------------------------
-        Event::Tick
-        | Event::Paste(_)
+        Event::Paste(_)
         | Event::AcpEvent(_)
         | Event::AcpDisconnected
         | Event::SessionLoaded { .. }
@@ -249,11 +271,15 @@ mod tests {
     }
 
     #[test]
-    fn test_tick_is_noop_in_modal() {
+    fn test_tick_keeps_background_processes_alive_in_modal() {
+        // Tick 在 Modal 期间必须保持 PollAgent + AdvanceSpinner + Render，
+        // 否则 ACP 事件消费停止、loading 动画冻结、面板不再重绘。
         let modal = ModalState::Interaction(Box::new(NoopHandler));
         let (next, effects) = handle(modal, Event::Tick);
         assert!(matches!(next, State::Modal(_)));
-        assert!(effects.is_empty());
+        assert!(effects.iter().any(|e| matches!(e, Effect::PollAgent)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::AdvanceSpinner)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
     #[test]
@@ -296,8 +322,8 @@ mod tests {
     }
 
     #[test]
-    fn test_all_14_panels_tick_is_noop() {
-        // Tick 不应该改变面板状态或产生 effects（除非面板主动产生副作用）。
+    fn test_all_14_panels_tick_keeps_background_alive() {
+        // Tick 在面板打开期间必须保持后台进程活跃（PollAgent/AdvanceSpinner/Render）。
         for kind in ALL_PANEL_KINDS {
             let panel = create_panel(kind);
             let modal = ModalState::Panel(panel);
@@ -306,10 +332,17 @@ mod tests {
                 matches!(next, State::Modal(_)),
                 "Tick on {kind:?} should keep Modal state, got {next:?}"
             );
-            // Tick 期间面板不应该主动触发副作用（避免每个 tick 都发送 ACP 请求）。
             assert!(
-                effects.is_empty(),
-                "Tick on {kind:?} should emit no effects, got {effects:?}"
+                effects.iter().any(|e| matches!(e, Effect::PollAgent)),
+                "Tick on {kind:?} should emit PollAgent"
+            );
+            assert!(
+                effects.iter().any(|e| matches!(e, Effect::AdvanceSpinner)),
+                "Tick on {kind:?} should emit AdvanceSpinner"
+            );
+            assert!(
+                effects.iter().any(|e| matches!(e, Effect::Render)),
+                "Tick on {kind:?} should emit Render"
             );
         }
     }

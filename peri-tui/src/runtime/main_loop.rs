@@ -87,7 +87,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // state machine. Keyboard dispatch is filtered to avoid double-
         // executing shortcuts the state machine already owns.
         let legacy_effects = match &event {
-            TuiEvent::Key(key) if !is_sm_handled_shortcut(key) => {
+            TuiEvent::Key(key) if !is_sm_handled_shortcut(key, &state) => {
                 match keyboard::handle_key_event(app, *key) {
                     Ok(Some(Action::Quit)) => vec![Effect::Quit],
                     Ok(Some(Action::Submit(input))) => {
@@ -560,9 +560,18 @@ fn handle_acp_event(app: &mut App, event_name: &str, data: &serde_json::Value) -
     }
 }
 
-/// Returns `true` if the state machine (idle.rs) already handles this shortcut,
+/// Returns `true` if the state machine already handles this shortcut,
 /// so the legacy keyboard handler should be skipped to avoid double-execution.
-fn is_sm_handled_shortcut(key: &ratatui::crossterm::event::KeyEvent) -> bool {
+///
+/// When the state machine is in [`State::Modal`], ALL keys are intercepted —
+/// the state machine dispatches every key to the active v2 panel/handler,
+/// and the legacy keyboard handler must not also process them.
+fn is_sm_handled_shortcut(key: &ratatui::crossterm::event::KeyEvent, state: &State) -> bool {
+    // Modal: state machine handles EVERY key (dispatches to panel/handler).
+    if matches!(state, State::Modal(_)) {
+        return true;
+    }
+
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
     // BackTab: cycle permission mode
