@@ -8,7 +8,7 @@
 //!
 //! Reference: `docs/design/peri-tui-architecture.md` section 8.6.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 
 use super::super::current_turn::CurrentTurn;
 use super::super::event::{AcpEventData, Event};
@@ -34,8 +34,14 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
             vec![Effect::AdvanceSpinner, Effect::PollAgent, Effect::Render],
         ),
 
-        // -- Mouse / Resize: re-render ---------------------------------------
-        Event::Mouse(_) | Event::Resize { .. } => (State::Idle(state), vec![Effect::Render]),
+        // -- Mouse / Resize --------------------------------------------------
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollDown => (State::Idle(state), vec![Effect::Scroll { delta: 3 }]),
+            MouseEventKind::ScrollUp => (State::Idle(state), vec![Effect::Scroll { delta: -3 }]),
+            // Other mouse events (click, drag, move): request re-render.
+            _ => (State::Idle(state), vec![Effect::Render]),
+        },
+        Event::Resize { .. } => (State::Idle(state), vec![Effect::Render]),
 
         // -- ACP events ------------------------------------------------------
         Event::AcpEvent(AcpEventData::ViewCommit(vc)) => {
