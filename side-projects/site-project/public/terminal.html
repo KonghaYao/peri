@@ -117,6 +117,7 @@ https://unpkg.com/jetbrains-mono@1.0.6/css/jetbrains-mono.css
                 inset: 0;
                 background: #0d0d1a;
                 overflow: hidden;
+                padding-bottom: 22px;
             }
             .terminal-container .close-btn {
                 position: absolute;
@@ -223,6 +224,63 @@ https://unpkg.com/jetbrains-mono@1.0.6/css/jetbrains-mono.css
             .xterm-viewport {
                 scrollbar-width: none;
             }
+
+            /* 浮动监控条 */
+            .stats-bar {
+                position: absolute;
+                bottom: 0; left: 0; right: 0;
+                height: 22px;
+                background: rgba(22, 33, 62, 0.85);
+                backdrop-filter: blur(4px);
+                border-top: 1px solid rgba(42, 42, 74, 0.6);
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 0 10px;
+                font-family: "JetBrains Mono", "Fira Code", monospace;
+                font-size: 11px;
+                color: #8b949e;
+                z-index: 15;
+                pointer-events: none;
+                user-select: none;
+            }
+            .stats-bar .stat-item {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+            }
+            .stats-bar .stat-label {
+                color: #6e7681;
+            }
+            .stats-bar .stat-value {
+                color: #e6edf3;
+                font-weight: 600;
+            }
+            .stats-bar .stat-value.cpu-high {
+                color: #f85149;
+            }
+            .stats-bar .stat-value.mem-high {
+                color: #d29922;
+            }
+
+            /* 亮色主题 */
+            [data-theme="light"] .stats-bar {
+                background: rgba(255, 255, 255, 0.88);
+                border-top: 1px solid rgba(208, 215, 222, 0.6);
+                color: #656d76;
+            }
+            [data-theme="light"] .stats-bar .stat-label {
+                color: #8b949e;
+            }
+            [data-theme="light"] .stats-bar .stat-value {
+                color: #1f2328;
+            }
+            [data-theme="light"] .stats-bar .stat-value.cpu-high {
+                color: #cf222e;
+            }
+            [data-theme="light"] .stats-bar .stat-value.mem-high {
+                color: #9a6700;
+            }
         </style>
         <script>
             // 主题函数 — 从父页面同步
@@ -283,6 +341,26 @@ https://unpkg.com/jetbrains-mono@1.0.6/css/jetbrains-mono.css
             let lastFocusedId = null;
             let layout = null;
             let splitCounter = 0;
+
+            function updateStatsBar(container, cpu, memKB) {
+                const cpuEl = container.querySelector('[data-stat="cpu"]');
+                const memEl = container.querySelector('[data-stat="mem"]');
+                if (cpuEl) {
+                    cpuEl.textContent = cpu != null ? cpu.toFixed(1) : "--";
+                    cpuEl.className = "stat-value" + (cpu > 80 ? " cpu-high" : "");
+                }
+                if (memEl) {
+                    if (memKB != null) {
+                        const mb = memKB / 1024;
+                        memEl.textContent = mb >= 1024
+                            ? (mb / 1024).toFixed(1) + " GB"
+                            : mb.toFixed(1) + " MB";
+                        memEl.className = "stat-value" + (mb > 512 ? " mem-high" : "");
+                    } else {
+                        memEl.textContent = "--";
+                    }
+                }
+            }
 
             function resizeTerminal(entry) {
                 entry.fitAddon.fit();
@@ -403,6 +481,14 @@ https://unpkg.com/jetbrains-mono@1.0.6/css/jetbrains-mono.css
                     container.appendChild(zone);
                 });
 
+                // 浮动监控条
+                const statsBar = document.createElement("div");
+                statsBar.className = "stats-bar";
+                statsBar.innerHTML =
+                    '<span class="stat-item"><span class="stat-label">CPU</span><span class="stat-value" data-stat="cpu">--</span><span class="stat-label">%</span></span>' +
+                    '<span class="stat-item"><span class="stat-label">MEM</span><span class="stat-value" data-stat="mem">--</span></span>';
+                container.appendChild(statsBar);
+
                 // xterm 实例 — 从父页面继承主题
                 const term = new Terminal({
                     cursorBlink: true,
@@ -458,6 +544,10 @@ https://unpkg.com/jetbrains-mono@1.0.6/css/jetbrains-mono.css
                             const meta = JSON.parse(event.data);
                             if (meta.type === "session" && meta.id) {
                                 sessionStorage.setItem("terminal-session", meta.id);
+                                return;
+                            }
+                            if (meta.type === "stats") {
+                                updateStatsBar(container, meta.cpu, meta.memKB);
                                 return;
                             }
                         } catch {}
