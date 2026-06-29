@@ -87,7 +87,7 @@ pub fn create_panel(kind: PanelKind) -> Box<dyn super::PanelState> {
         PanelKind::Model => Box::new(super::panels::model::ModelPanel::empty()),
         PanelKind::Login => Box::new(PanelStateStub::new(kind)),
         PanelKind::Agent => Box::new(super::panels::agent::AgentPanel::empty()),
-        PanelKind::Hooks => Box::new(PanelStateStub::new(kind)),
+        PanelKind::Hooks => Box::new(super::panels::hooks::HooksPanel::empty()),
         PanelKind::Config => Box::new(super::panels::config::ConfigPanel::empty()),
         PanelKind::ThreadBrowser => Box::new(PanelStateStub::new(kind)),
         PanelKind::Mcp => Box::new(PanelStateStub::new(kind)),
