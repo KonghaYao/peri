@@ -34,9 +34,11 @@
 
 ### ultracode 未完成（按优先级）
 
-- ⏳ **B3 Cutover（最高优先级）**：`main_loop::run` 仍用 P1 `thin_handle` glue，未接入 `state_machine::handle`。84 测试覆盖核心逻辑，风险中，工作量中。建议**渐进式 4 阶段**：shadow mode 对比 → 切渲染数据源 → 删 thin_handle（Modal 委托 legacy）→ 稳定期。
+### ultracode 未完成（按优先级）
+
+- ⏳ **B3 Cutover（最高优先级）**：`main_loop::run` 仍用 P1 `thin_handle` glue，未接入 `state_machine::handle`。85 测试覆盖核心逻辑，风险中，工作量中。建议**渐进式 4 阶段**：shadow mode 对比 → 切渲染数据源 → 删 thin_handle（Modal 委托 legacy）→ 稳定期。
 - ⏳ **B3 MigrateInput**：`UiState.textarea` 等输入字段未迁到 `State::Idle.input`。
-- ⏳ **Workflow C（P3 面板重写）**：15 个 PanelComponent 实现（agent/cron/status/tasks/betas/config/memory/plugin/mcp/hooks/workflow/login/model + thread_browser）需重写为 PanelState trait（签名：`handle_key(key, &PanelReadContext) -> Vec<PanelEffect>`）。工作量大（3000-7500 行），建议分批迁移。
+- ✅ **Workflow C（P3 面板重写）**：**14/14 PanelState 迁移完成**（commit 4cd631bd）。全部 14 个面板从 legacy `PanelComponent` trait 迁移到 v2 `PanelState` trait，完全脱离 `peri_middlewares::*` / `crate::config::*` 运行时依赖（改用本地 DTO + `acp_query_cache`）。`registry::create_panel()` 工厂 0 stub。**剩 P3 Integration**：legacy `app/*_panel.rs` + `ui/main_ui/panels/*.rs` + `PanelComponent` trait + `PanelManager` 仍未删除（依赖 ~55 文件），需 B3 Cutover 完成 + 数据注入到 `ServiceRegistrySnapshot` 才能安全清理。`Effect` 枚举已扩展 3 个变体（ShowNotification / UpdateConfig / SwitchSession），`modal.rs::map_panel_effects` 全 6 个 PanelEffect 变体映射就绪。
 - ⏳ **Workflow D（P4b 类型隔离）**：TUI 30+ 文件 138 处 `use peri_agent::/peri_middlewares::`，需改 ACP 查询或 DTO 替换。`scripts/check-tui-imports.sh` pre-commit 钩子未启用。
 - ⏳ **Workflow E（P5 渲染重写）**：`message_pipeline/` 18KB + 82KB 测试未删；双线程渲染 + RenderCache + AdaptiveChunkingPolicy 未删；渲染入口未切换到 `State.view + current_turn`。工作量大，风险高。
 

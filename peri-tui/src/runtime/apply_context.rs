@@ -105,6 +105,14 @@ impl<'a> ApplyContext<'a> {
             }
 
             Effect::Quit => ApplyOutcome::Quit,
+
+            // App-level effects are handled by main_loop (need &mut App).
+            // ApplyContext only carries I/O handles; reaching these arms means
+            // the effect was passed via the "other" path, which shouldn't happen
+            // because main_loop intercepts them first. Defensive no-op if it does.
+            Effect::ShowNotification(_)
+            | Effect::UpdateConfig { .. }
+            | Effect::SwitchSession(_) => ApplyOutcome::Ok,
         }
     }
 

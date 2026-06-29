@@ -77,6 +77,25 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     quit = true;
                     break;
                 }
+                // App-level effects produced by v2 panels (need &mut App).
+                // These are emitted by PanelEffect mapping in state_machine/transitions/modal.rs.
+                // Until B3 Cutover completes, the state machine never enters Modal::Panel,
+                // so these arms are effectively dead code -- but they must be exhaustive.
+                Effect::ShowNotification(text) => {
+                    tracing::info!(notification = %text, "ShowNotification effect (P3 Integration: App-level handler pending)");
+                    needs_render = true;
+                }
+                Effect::UpdateConfig { key, value } => {
+                    tracing::info!(key = %key, value = %value, "UpdateConfig effect (P3 Integration: persist + ACP sync pending)");
+                    // TODO(P3 Integration): persist via App::save_config + sync to ACP Server.
+                    needs_render = true;
+                }
+                Effect::SwitchSession(session_id) => {
+                    tracing::info!(session_id = %session_id, "SwitchSession effect (P3 Integration: App session switch pending)");
+                    // TODO(P3 Integration): app.session_mgr.switch_to(session_id).
+                    needs_render = true;
+                }
+                // I/O effects handled by ApplyContext (terminal / ACP / clipboard).
                 other => match ctx.apply(other).await {
                     ApplyOutcome::Quit => {
                         quit = true;
