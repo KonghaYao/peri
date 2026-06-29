@@ -1041,7 +1041,7 @@ mod tests {
             ],
         )];
         let mut panel = WorkflowPanel::new(runs);
-        let ctx = make_ctx();
+        let _ctx = make_ctx();
 
         // Focus on phases, initial phase_cursor=0
         panel.focus = FocusZone::Phases;

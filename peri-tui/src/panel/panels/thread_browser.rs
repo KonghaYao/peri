@@ -1090,7 +1090,7 @@ mod tests {
         let threads = vec![make_thread("t1", Some("First"), 60)];
         let mut panel = ThreadBrowserPanel::new(threads, None, None);
         // exit search
-        let ctx = make_ctx();
+        let _ctx = make_ctx();
         panel.search_focused = false;
 
         let lc = crate::i18n::LcRegistry::default();

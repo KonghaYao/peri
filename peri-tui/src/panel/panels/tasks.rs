@@ -716,7 +716,7 @@ mod tests {
     #[test]
     fn test_prompt_summary_truncation() {
         let tasks = vec![make_task("t1", "*/5 * * * *", &"x".repeat(60), true)];
-        let panel = TasksPanel::new(tasks);
+        let _panel = TasksPanel::new(tasks);
         // 渲染不 panic，prompt 被截断到 40 chars + "..."
         // (验证 truncate_chars 在 render 中生效)
     }
