@@ -32,12 +32,11 @@ pub struct CurrentTurn {
     /// Whether the turn is actively streaming (any text / tool event arrived).
     pub active: bool,
 
-    /// Placeholder: incremental ViewModels derived from streaming events.
+    /// Cached ViewModels built from streaming data (populated by `build_view_models`).
     ///
-    /// P5 will replace this with real ViewModel construction from accumulated
-    /// text chunks + tool cards. For now it stays empty so the
-    /// `view_models()` accessor has a real backing list.
-    pub _view_models: Vec<ViewModel>,
+    /// Cleared whenever new streaming data arrives (text/reasoning/tool events),
+    /// and rebuilt on the next call to `view_models()`.
+    cached_view_models: Vec<ViewModel>,
 }
 
 impl CurrentTurn {
@@ -46,22 +45,30 @@ impl CurrentTurn {
         Self::default()
     }
 
+    /// Invalidate the cached ViewModels (call after any streaming data mutation).
+    fn invalidate_cache(&mut self) {
+        self.cached_view_models.clear();
+    }
+
     /// Append a text chunk from `"text-chunk"`.
     pub fn append_text(&mut self, t: &str) {
         self.text.push_str(t);
         self.active = true;
+        self.invalidate_cache();
     }
 
     /// Append a reasoning chunk from `"reasoning-chunk"`.
     pub fn append_reasoning(&mut self, t: &str) {
         self.reasoning.push_str(t);
         self.active = true;
+        self.invalidate_cache();
     }
 
     /// Begin a new tool card from `"tool-started"`.
     pub fn start_tool(&mut self, tool: ToolCardAccumulator) {
         self.tool_cards.push(tool);
         self.active = true;
+        self.invalidate_cache();
     }
 
     /// Finalise an existing tool card from `"tool-ended"`.
@@ -71,6 +78,7 @@ impl CurrentTurn {
         if let Some(t) = self.tool_cards.iter_mut().find(|t| t.tool_id == tool_id) {
             t.output_summary = Some(output);
             t.is_error = is_error;
+            self.invalidate_cache();
         }
     }
 
@@ -84,14 +92,73 @@ impl CurrentTurn {
         self.active = false;
     }
 
-    /// Render-time accessor: references to the incremental ViewModels.
+    /// Accessor: returns cached ViewModels, building them on first call.
     ///
-    /// P5 will derive real ViewModels from `text` + `tool_cards`. For now this
-    /// returns references into the placeholder `_view_models` list so callers
-    /// that already concatenate `view_store + current_turn.view_models()` keep
-    /// working.
-    pub fn view_models(&self) -> Vec<&ViewModel> {
-        self._view_models.iter().collect()
+    /// The cache is invalidated whenever streaming data changes (text/reasoning/
+    /// tool events), so this always reflects the current turn state.
+    pub fn view_models(&mut self) -> &[ViewModel] {
+        if self.cached_view_models.is_empty()
+            && (self.active
+                || !self.text.is_empty()
+                || !self.reasoning.is_empty()
+                || !self.tool_cards.is_empty())
+        {
+            self.build_view_models();
+        }
+        &self.cached_view_models
+    }
+
+    /// Build incremental ViewModels from accumulated streaming data into cache.
+    ///
+    /// Produces a sequence of ViewModels that should be appended after the
+    /// base `State.view` for rendering:
+    ///
+    /// - **Reasoning** → `AssistantBubble` with reasoning block (if present).
+    /// - **Text** → `AssistantBubble` with markdown text (if present).
+    /// - **Tool cards** → `ToolCard` entries, linked via `tool_card_ids`.
+    ///
+    /// When neither text nor reasoning are present, tool cards are rendered
+    /// as stand-alone entries without a parent bubble.
+    fn build_view_models(&mut self) {
+        use peri_acp_types::view_model::{AssistantBubbleData, ReasoningBlock, ToolCardData};
+
+        let mut vms: Vec<ViewModel> = Vec::new();
+
+        // Collect tool card IDs for the assistant bubble reference.
+        let tool_ids: Vec<String> = self.tool_cards.iter().map(|t| t.tool_id.clone()).collect();
+
+        let has_content = !self.text.is_empty() || !self.reasoning.is_empty();
+
+        if has_content {
+            let reasoning = if self.reasoning.is_empty() {
+                None
+            } else {
+                Some(ReasoningBlock {
+                    text: self.reasoning.clone(),
+                    collapsed: false,
+                })
+            };
+
+            vms.push(ViewModel::AssistantBubble(AssistantBubbleData {
+                text: self.text.clone(),
+                reasoning,
+                tool_card_ids: tool_ids.clone(),
+            }));
+        }
+
+        // Tool cards follow the assistant bubble (or stand alone if no text).
+        for t in &self.tool_cards {
+            vms.push(ViewModel::ToolCard(ToolCardData {
+                tool_id: t.tool_id.clone(),
+                tool_name: t.tool_name.clone(),
+                input_summary: t.input_summary.clone(),
+                output_summary: t.output_summary.clone().unwrap_or_default(),
+                is_error: t.is_error,
+                diff: None,
+            }));
+        }
+
+        self.cached_view_models = vms;
     }
 }
 
@@ -136,7 +203,7 @@ mod tests {
 
     #[test]
     fn test_default_empty() {
-        let ct = CurrentTurn::default();
+        let mut ct = CurrentTurn::default();
         assert!(ct.text.is_empty());
         assert!(ct.reasoning.is_empty());
         assert!(ct.tool_cards.is_empty());

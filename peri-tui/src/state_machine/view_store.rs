@@ -59,10 +59,14 @@ impl ViewStore {
     /// ```text
     ///   view_models (committed) + current_turn.view_models() (in-progress)
     /// ```
-    pub fn for_render<'a>(&'a self, current_turn: Option<&'a CurrentTurn>) -> Vec<&'a ViewModel> {
+    pub fn for_render<'a>(
+        &'a self,
+        current_turn: Option<&'a mut CurrentTurn>,
+    ) -> Vec<&'a ViewModel> {
         let mut out: Vec<&ViewModel> = self.view_models.iter().collect();
         if let Some(ct) = current_turn {
-            out.extend(ct.view_models());
+            let ct_vms = ct.view_models();
+            out.extend(ct_vms.iter());
         }
         out
     }
@@ -76,14 +80,6 @@ impl ViewStore {
 mod tests {
     use super::*;
     use peri_acp_types::view_model::{DividerData, UserBubbleData, ViewModel};
-
-    /// Helper to create a CurrentTurn with placeholder ViewModels populated.
-    fn make_current_turn(vms: Vec<ViewModel>) -> CurrentTurn {
-        CurrentTurn {
-            _view_models: vms,
-            ..Default::default()
-        }
-    }
 
     #[test]
     fn test_default_is_empty() {
@@ -150,16 +146,15 @@ mod tests {
             label: Some("base".into()),
         })]);
 
-        let current_turn = make_current_turn(vec![ViewModel::UserBubble(UserBubbleData {
-            text: "streaming".into(),
-        })]);
+        let mut current_turn = CurrentTurn::new();
+        current_turn.append_text("streaming");
 
-        let rendered = store.for_render(Some(&current_turn));
+        let rendered = store.for_render(Some(&mut current_turn));
         assert_eq!(rendered.len(), 2);
         // First item is from committed base
         assert!(matches!(rendered[0], ViewModel::Divider(_)));
         // Second item is from current turn
-        assert!(matches!(rendered[1], ViewModel::UserBubble(_)));
+        assert!(matches!(rendered[1], ViewModel::AssistantBubble(_)));
     }
 
     #[test]

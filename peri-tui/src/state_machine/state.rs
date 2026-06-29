@@ -279,11 +279,9 @@ mod tests {
 
     #[test]
     fn test_streaming_state_fields() {
-        let current_turn = CurrentTurn {
-            text: "hello".into(),
-            active: true,
-            ..Default::default()
-        };
+        let mut current_turn = CurrentTurn::new();
+        current_turn.text = "hello".into();
+        current_turn.active = true;
         let streaming = StreamingState {
             current_turn,
             input: InputState::default(),
