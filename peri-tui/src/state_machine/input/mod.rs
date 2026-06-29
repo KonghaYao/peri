@@ -32,20 +32,18 @@ pub use sync::{from_textarea, to_textarea};
 
 /// Aggregated input-box state.
 ///
-/// Holds the raw buffer, cursor position, history navigation, prediction text
-/// (grey placeholder), at-mention / slash-completion popup state, and the list
-/// of attachments (images / files).
-#[derive(Debug, Clone, Default)]
+/// Holds multi-line buffer, cursor position, selection, history navigation,
+/// prediction text, at-mention / slash-completion popup state, and attachments.
+#[derive(Debug, Clone)]
 pub struct InputState {
-    /// Raw text buffer content.
-    pub buffer: String,
+    /// Multi-line text buffer (always >= 1 line; empty buffer is `vec![String::new()]`).
+    pub lines: Vec<String>,
 
-    /// Byte-offset cursor position within the buffer.
-    ///
-    /// Byte offset (not char offset) for parity with `tui_textarea`. The
-    /// transitions layer must keep this within `buffer.len()`; CJK safety is
-    /// the caller's responsibility (CLAUDE.md "字符串截断用字符级" rule).
-    pub cursor: usize,
+    /// Cursor position (row, col_byte).
+    pub cursor: CursorPos,
+
+    /// Current selection range, if any. Triggered by mouse drag / Shift+arrows / Ctrl+A.
+    pub selection: Option<Selection>,
 
     /// Previously submitted input strings (newest at the back).
     pub history: Vec<String>,
@@ -69,20 +67,86 @@ pub struct InputState {
     pub attachments: Vec<Attachment>,
 }
 
+impl Default for InputState {
+    fn default() -> Self {
+        Self {
+            lines: vec![String::new()],
+            cursor: CursorPos::default(),
+            selection: None,
+            history: Vec::new(),
+            history_index: None,
+            prediction: None,
+            at_mention: None,
+            slash_completion: None,
+            attachments: Vec::new(),
+        }
+    }
+}
+
 impl InputState {
     /// Create a new empty input state.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Reset the buffer + cursor + prediction after submission.
-    ///
-    /// History and attachments are intentionally NOT cleared by this method:
-    /// the transitions layer decides whether to push the submitted text into
-    /// history, and attachments are flushed separately.
+    /// Full buffer text (lines joined by '\n').
+    pub fn text(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    /// Insert a string at the cursor position (supports '\n' for multi-line).
+    pub fn insert_str(&mut self, s: &str) {
+        let parts: Vec<&str> = s.split('\n').collect();
+        let CursorPos { row, col_byte } = self.cursor;
+
+        let right_part: String = self.lines[row].drain(col_byte..).collect();
+        self.lines[row].push_str(parts[0]);
+
+        for (i, part) in parts.iter().enumerate().skip(1) {
+            let mut new_line = String::new();
+            new_line.push_str(part);
+            if i == parts.len() - 1 {
+                new_line.push_str(&right_part);
+            }
+            self.lines.insert(row + i, new_line);
+        }
+
+        // Update cursor.
+        let new_row = row + parts.len() - 1;
+        let new_col = if parts.len() == 1 {
+            col_byte + parts[0].len()
+        } else {
+            parts.last().unwrap().len()
+        };
+        self.cursor = CursorPos::new(new_row, new_col);
+    }
+
+    /// Backspace. At line start, merges with the previous line.
+    pub fn backspace(&mut self) {
+        let CursorPos { row, col_byte } = self.cursor;
+        if col_byte == 0 {
+            if row > 0 {
+                let prev_len = self.lines[row - 1].len();
+                let current = self.lines.remove(row);
+                self.lines[row - 1].push_str(&current);
+                self.cursor = CursorPos::new(row - 1, prev_len);
+            }
+            return;
+        }
+        // CJK-safe delete: find previous char boundary.
+        let line = &mut self.lines[row];
+        let chars_before: Vec<(usize, char)> = line[..col_byte].char_indices().collect();
+        if let Some(&(prev_byte, _)) = chars_before.last() {
+            line.replace_range(prev_byte..col_byte, "");
+            self.cursor = CursorPos::new(row, prev_byte);
+        }
+    }
+
+    /// Clear buffer to empty single-line state.
     pub fn clear_buffer(&mut self) {
-        self.buffer.clear();
-        self.cursor = 0;
+        self.lines = vec![String::new()];
+        self.cursor = CursorPos::default();
+        self.selection = None;
         self.prediction = None;
         self.at_mention = None;
         self.slash_completion = None;
@@ -127,8 +191,9 @@ mod tests {
     #[test]
     fn test_default_empty() {
         let s = InputState::default();
-        assert!(s.buffer.is_empty());
-        assert_eq!(s.cursor, 0);
+        assert_eq!(s.lines.len(), 1);
+        assert!(s.lines[0].is_empty());
+        assert_eq!(s.cursor, CursorPos::default());
         assert!(s.history.is_empty());
         assert!(s.history_index.is_none());
         assert!(s.prediction.is_none());
@@ -141,15 +206,15 @@ mod tests {
     fn test_new_equals_default() {
         let a = InputState::new();
         let b = InputState::default();
-        assert_eq!(a.buffer, b.buffer);
+        assert_eq!(a.lines, b.lines);
         assert_eq!(a.cursor, b.cursor);
     }
 
     #[test]
     fn test_clear_buffer_resets_transient_fields() {
         let mut s = InputState {
-            buffer: "hello".into(),
-            cursor: 3,
+            lines: vec!["hello".to_string()],
+            cursor: CursorPos::new(0, 3),
             prediction: Some("world".into()),
             at_mention: Some(AtMentionState {
                 candidates: vec!["a".into()],
@@ -163,8 +228,9 @@ mod tests {
         };
 
         s.clear_buffer();
-        assert!(s.buffer.is_empty());
-        assert_eq!(s.cursor, 0);
+        assert_eq!(s.lines.len(), 1);
+        assert!(s.lines[0].is_empty());
+        assert_eq!(s.cursor, CursorPos::default());
         assert!(s.prediction.is_none());
         assert!(s.at_mention.is_none());
         assert!(s.slash_completion.is_none());

@@ -23,11 +23,7 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
 
         // -- Paste: append at cursor, re-render ------------------------------
         Event::Paste(text) => {
-            // Simple insertion at the byte cursor. (CJK-safe editing is the
-            // responsibility of the future tui_textarea integration in P3.)
-            let insert_pos = state.input.cursor.min(state.input.buffer.len());
-            state.input.buffer.insert_str(insert_pos, &text);
-            state.input.cursor += text.len();
+            state.input.insert_str(&text);
             (State::Idle(state), vec![Effect::Render])
         }
 
@@ -100,11 +96,8 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
                 .modifiers
                 .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
         {
-            let text = std::mem::take(&mut state.input.buffer);
-            state.input.cursor = 0;
-            state.input.prediction = None;
-            state.input.at_mention = None;
-            state.input.slash_completion = None;
+            let text = state.input.text();
+            state.input.clear_buffer();
 
             if text.trim().is_empty() {
                 // Empty submit -- no-op, stay Idle.
@@ -161,9 +154,7 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
                 // P3 will dispatch Ctrl+ shortcuts (Ctrl+T, Ctrl+L, ...).
                 return (State::Idle(state), Vec::new());
             }
-            let insert_pos = state.input.cursor.min(state.input.buffer.len());
-            state.input.buffer.insert(insert_pos, c);
-            state.input.cursor += c.len_utf8();
+            state.input.insert_str(&c.to_string());
             // Typing invalidates the prediction.
             state.input.prediction = None;
             (State::Idle(state), vec![Effect::Render])
@@ -171,54 +162,26 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
 
         // -- Backspace -------------------------------------------------------
         KeyCode::Backspace => {
-            if state.input.cursor > 0 && !state.input.buffer.is_empty() {
-                // Char-level delete (CLAUDE.md: 字符串截断用字符级).
-                let before = &state.input.buffer[..state.input.cursor];
-                let chars_before: Vec<char> = before.chars().collect();
-                if let Some(last_char_len) = chars_before.last().map(|c| c.len_utf8()) {
-                    // Truncate one char from the cursor position.
-                    let new_cursor = state.input.cursor - last_char_len;
-                    state
-                        .input
-                        .buffer
-                        .replace_range(new_cursor..state.input.cursor, "");
-                    state.input.cursor = new_cursor;
-                    state.input.prediction = None;
-                    return (State::Idle(state), vec![Effect::Render]);
-                }
+            let before_len = state.input.text().len();
+            state.input.backspace();
+            let after_len = state.input.text().len();
+            if after_len < before_len {
+                state.input.prediction = None;
+                return (State::Idle(state), vec![Effect::Render]);
             }
             (State::Idle(state), Vec::new())
         }
 
         // -- Left / Right arrow: move cursor (char-level) -------------------
         KeyCode::Left => {
-            if state.input.cursor > 0 {
-                let before = &state.input.buffer[..state.input.cursor];
-                let char_count = before.chars().count();
-                if char_count > 0 {
-                    // Move back to the start of the previous char.
-                    let target_char_idx = char_count - 1;
-                    state.input.cursor = before
-                        .char_indices()
-                        .nth(target_char_idx)
-                        .map(|(b, _)| b)
-                        .unwrap_or(0);
-                }
-            }
+            use crate::state_machine::input::InputEdit;
+            state.input.move_cursor_left(false);
             (State::Idle(state), vec![Effect::Render])
         }
 
         KeyCode::Right => {
-            let total_chars = state.input.buffer.chars().count();
-            let before_chars = state.input.buffer[..state.input.cursor].chars().count();
-            if before_chars < total_chars {
-                // Advance by the length of the next char.
-                let next_char = state.input.buffer[state.input.cursor..]
-                    .chars()
-                    .next()
-                    .unwrap_or(' ');
-                state.input.cursor += next_char.len_utf8();
-            }
+            use crate::state_machine::input::InputEdit;
+            state.input.move_cursor_right(false);
             (State::Idle(state), vec![Effect::Render])
         }
 
@@ -240,7 +203,7 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state_machine::input::InputState;
+    use crate::state_machine::input::{CursorPos, InputState};
 
     fn make_state() -> IdleState {
         IdleState {
@@ -262,8 +225,8 @@ mod tests {
         let (next, _effects) = handle(state, Event::Key(char_key('a')));
         match next {
             State::Idle(idle) => {
-                assert_eq!(idle.input.buffer, "a");
-                assert_eq!(idle.input.cursor, 1);
+                assert_eq!(idle.input.text(), "a");
+                assert_eq!(idle.input.cursor, CursorPos::new(0, 1));
             }
             _ => panic!("expected Idle"),
         }
@@ -301,8 +264,7 @@ mod tests {
     #[test]
     fn test_enter_submits_and_transitions_to_streaming() {
         let mut state = make_state();
-        state.input.buffer = "hello world".into();
-        state.input.cursor = state.input.buffer.len();
+        state.input.insert_str("hello world");
         let (next, effects) = handle(
             state,
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -351,16 +313,15 @@ mod tests {
     #[test]
     fn test_backspace_deletes_one_char() {
         let mut state = make_state();
-        state.input.buffer = "abc".into();
-        state.input.cursor = 3; // at end
+        state.input.insert_str("abc");
         let (next, _effects) = handle(
             state,
             Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
         );
         match next {
             State::Idle(idle) => {
-                assert_eq!(idle.input.buffer, "ab");
-                assert_eq!(idle.input.cursor, 2);
+                assert_eq!(idle.input.text(), "ab");
+                assert_eq!(idle.input.cursor, CursorPos::new(0, 2));
             }
             _ => panic!("expected Idle"),
         }
@@ -369,13 +330,13 @@ mod tests {
     #[test]
     fn test_paste_inserts_at_cursor() {
         let mut state = make_state();
-        state.input.buffer = "hello".into();
-        state.input.cursor = 2; // between 'e' and 'l'
+        state.input.insert_str("hello");
+        state.input.cursor = CursorPos::new(0, 2); // between 'e' and 'l'
         let (next, _effects) = handle(state, Event::Paste("XX".into()));
         match next {
             State::Idle(idle) => {
-                assert_eq!(idle.input.buffer, "heXXllo");
-                assert_eq!(idle.input.cursor, 4);
+                assert_eq!(idle.input.text(), "heXXllo");
+                assert_eq!(idle.input.cursor, CursorPos::new(0, 4));
             }
             _ => panic!("expected Idle"),
         }
@@ -410,7 +371,7 @@ mod tests {
         match next {
             State::Idle(idle) => {
                 // Buffer unchanged.
-                assert!(idle.input.buffer.is_empty());
+                assert!(idle.input.text().is_empty());
             }
             _ => panic!("expected Idle"),
         }

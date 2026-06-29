@@ -1,4 +1,4 @@
-use super::selection::{Selection, SelectionRange};
+use super::selection::Selection;
 
 #[test]
 fn test_selection_normal_anchor_le_cursor() {

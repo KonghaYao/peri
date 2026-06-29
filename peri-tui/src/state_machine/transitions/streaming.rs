@@ -208,12 +208,12 @@ mod tests {
     #[test]
     fn test_turn_done_transitions_to_idle() {
         let mut state = make_state();
-        state.input.buffer = "typed during streaming".into();
+        state.input.insert_str("typed during streaming");
         let (next, _effects) = handle(state, Event::AcpEvent(AcpEventData::TurnDone));
         match next {
             State::Idle(idle) => {
                 // Input is preserved across Streaming -> Idle.
-                assert_eq!(idle.input.buffer, "typed during streaming");
+                assert_eq!(idle.input.text(), "typed during streaming");
             }
             _ => panic!("expected Idle after TurnDone"),
         }

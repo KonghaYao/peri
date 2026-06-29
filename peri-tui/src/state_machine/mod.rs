@@ -19,6 +19,9 @@ pub mod state;
 pub mod transitions;
 pub mod view_store;
 
+#[cfg(test)]
+mod input_test;
+
 // Re-export the primary types at the state_machine level.
 pub use current_turn::CurrentTurn;
 pub use event::{AcpEventData, Event};

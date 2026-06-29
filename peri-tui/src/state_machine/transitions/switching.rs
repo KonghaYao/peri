@@ -83,7 +83,7 @@ mod tests {
         match next {
             State::Idle(idle) => {
                 assert_eq!(idle.view.len(), 1);
-                assert!(idle.input.buffer.is_empty());
+                assert!(idle.input.text().is_empty());
             }
             _ => panic!("expected Idle after ViewCommit"),
         }
