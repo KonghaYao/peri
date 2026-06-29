@@ -130,7 +130,8 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
                 Effect::Render,
             ],
         ),
-        Event::SessionLoaded { .. } | Event::Shutdown => (State::Idle(state), Vec::new()),
+        Event::SessionLoaded { .. } => (State::Idle(state), Vec::new()),
+        Event::Shutdown => (State::Idle(state), vec![Effect::Quit]),
     }
 }
 

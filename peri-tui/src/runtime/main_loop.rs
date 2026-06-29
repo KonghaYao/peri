@@ -56,8 +56,32 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         let (new_state, sm_effects) = state_machine_handle(state, sm_event);
         state = new_state;
 
-        // ── 1b. Drive legacy thin_handle (fallback for unported paths) ──
-        let legacy_effects = thin_handle(app, event);
+        // ── 1b. Legacy keyboard + ACP event dispatch ─────────────────
+        // These are the only remaining paths not yet handled by the pure
+        // state machine. Keyboard dispatch is filtered to avoid double-
+        // executing shortcuts the state machine already owns.
+        let legacy_effects = match &event {
+            TuiEvent::Key(key) if !is_sm_handled_shortcut(key) => {
+                match keyboard::handle_key_event(app, *key) {
+                    Ok(Some(Action::Quit)) => vec![Effect::Quit],
+                    Ok(Some(Action::Submit(input))) => {
+                        app.submit_message(input);
+                        vec![Effect::Render]
+                    }
+                    Ok(Some(Action::Redraw)) | Ok(None) => vec![Effect::Render],
+                    Err(e) => {
+                        tracing::warn!(error = %e, "keyboard handler error");
+                        vec![Effect::Render]
+                    }
+                }
+            }
+            TuiEvent::AcpEvent { event, data } => handle_acp_event(app, event, data),
+            TuiEvent::SessionLoaded { session_id } => {
+                debug!(session_id = %session_id, "SessionLoaded event");
+                vec![Effect::Render]
+            }
+            _ => vec![Effect::Render],
+        };
 
         // ── 1c. Merge effects (Render de-duplicated) ────────────────────
         let mut effects: Vec<Effect> = sm_effects;
@@ -343,85 +367,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
     Ok(())
 }
 
-// ── Thin-shell state machine (P1 glue) ─────────────────────────────────────
-
-/// Map a single [`TuiEvent`] to legacy `App` method calls, returning a list of
-/// [`Effect`]s to be executed by the main loop.
-///
-/// Key invariants:
-/// - **Never skips events**: every event is dispatched to the appropriate App
-///   method.  Unknown AcpEvent JSON is logged but still returns `[Render]`.
-/// - **Always returns at least one effect** (typically `Render`) so the caller
-///   never has a no-op iteration.
-/// - **`submit_message` sets loading=true synchronously** before returning,
-///   so any subsequent drain in the same tick naturally short-circuits.
-fn thin_handle(app: &mut App, event: TuiEvent) -> Vec<Effect> {
-    // ── Periodic tick ─────────────────────────────────────────────────
-    match event {
-        TuiEvent::Tick => {
-            // Spinner, poll agent, poll workflow are now handled by the
-            // state machine (idle.rs Tick → AdvanceSpinner/PollAgent/PollWorkflow).
-            // Legacy Tick is a no-op; Render is de-duplicated by the caller.
-            vec![Effect::Render]
-        }
-
-        // ── User input: key press ───────────────────────────────────────
-        TuiEvent::Key(key_event) => {
-            // Shortcuts now handled by the state machine (idle.rs).
-            // Skip legacy dispatch to avoid double-execution.
-            if is_sm_handled_shortcut(&key_event) {
-                return vec![Effect::Render];
-            }
-            // Delegate to the existing keyboard handler.
-            match keyboard::handle_key_event(app, key_event) {
-                Ok(Some(Action::Quit)) => vec![Effect::Quit],
-                Ok(Some(Action::Submit(input))) => {
-                    app.submit_message(input);
-                    vec![Effect::Render]
-                }
-                Ok(Some(Action::Redraw)) => vec![Effect::Render],
-                Ok(None) => vec![Effect::Render],
-                Err(e) => {
-                    tracing::warn!(error = %e, "keyboard handler returned error");
-                    vec![Effect::Render]
-                }
-            }
-        }
-
-        // ── User input: mouse ───────────────────────────────────────────
-        // State machine handles all mouse events now (idle.rs emits
-        // MouseTextareaClick / MouseTextareaDrag / MouseRelease effects).
-        TuiEvent::Mouse(_mouse) => vec![Effect::Render],
-
-        // ── User input: paste ──────────────────────────────────────────
-        // State machine produces PasteText + Render now; thin_handle is no-op.
-        TuiEvent::Paste(_text) => vec![Effect::Render],
-
-        // ── User input: resize ──────────────────────────────────────────
-        TuiEvent::Resize(..) => vec![Effect::Render],
-
-        // ── ACP notification (converted from AcpNotification) ───────────
-        TuiEvent::AcpEvent {
-            ref event,
-            ref data,
-        } => handle_acp_event(app, event, data),
-
-        // ── ACP transport disconnected ──────────────────────────────────
-        // The state machine produces PushSystemNote + Render for this.
-        TuiEvent::AcpDisconnected => vec![Effect::Render],
-
-        // ── Session loaded (future: session switching transition) ────────
-        TuiEvent::SessionLoaded { session_id } => {
-            debug!(session_id = %session_id, "SessionLoaded event (no-op in P1)");
-            vec![Effect::Render]
-        }
-
-        // ── Shutdown signal ─────────────────────────────────────────────
-        TuiEvent::Shutdown => vec![Effect::Quit],
-    }
-}
-
-// ── Legacy event delegation helpers ──────────────────────────────────────────
+// ── Legacy ACP event bridge ──────────────────────────────────────────────────
 
 /// Handle an ACP event that arrived through the unified event channel.
 ///
