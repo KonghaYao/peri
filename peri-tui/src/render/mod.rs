@@ -9,16 +9,18 @@
 //! - **Idle 省电**：Idle 状态下 `Tick` 不触发渲染（无 spinner 需要动画）。
 //! - **block_mode 内部细节**：Markdown 围栏缓冲作为渲染层内部实现，不暴露给状态机。
 //!
-//! ## 当前状态（P5 骨架）
+//! ## 当前状态（P5 进行中）
 //!
 //! 本模块提供：
 //! - [`Throttle`]：16ms 帧率节流器（含 force_render 旁路）。
 //! - [`render`]：同步渲染入口（目前委托给 legacy `App::draw`，后续替换为
 //!   `State` 驱动的派生）。
 //!
-//! **message_pipeline 暂时保留**作为渲染数据源（P5 完整切换前的过渡）。
-//! 当 P3 面板迁移完成、`ViewStore` 在状态机内积累足够数据后，本模块切换为
-//! 从 `State.view + current_turn` 派生最终视图。
+//! **message_pipeline 已删除**，但渲染入口尚未切换到 `State.view + current_turn`。
+//! 当前渲染路径：`main_loop → ctx.draw_now() → terminal.draw() → ui::main_ui::render()`
+//! → 从 `app.session_mgr.current().messages.view_messages` 读取数据。
+//! 状态机的 `ViewStore::for_render()` + `CurrentTurn::view_models()` 已就绪，
+//! 待连接到渲染路径。
 
 pub mod block_mode;
 pub mod throttle;

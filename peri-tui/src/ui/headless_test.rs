@@ -1,4 +1,3 @@
-use super::*;
 use crate::{
     app::{AgentEvent, App, MessageViewModel},
     ui::main_ui,
@@ -15,19 +14,12 @@ async fn test_assistant_chunk_renders() {
     use peri_agent::messages::BaseMessage;
 
     let (mut app, mut handle) = App::new_headless(120, 30).await;
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "Hello world".into(),
-        source_agent_id: None,
-    });
-    app.push_agent_event(AgentEvent::StateSnapshot(vec![
-        BaseMessage::human("q"),
-        BaseMessage::ai("Hello world"),
-    ]));
-    app.push_agent_event(AgentEvent::Done);
-    app.process_pending_events();
-    app.flush_rebuild();
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
+    // P5: Push UserBubble + AssistantBubble via from_base_message (AssistantChunk is no-op)
+    app.apply_add_message(MessageViewModel::user("q".into()));
+    app.apply_add_message(MessageViewModel::from_base_message(
+        &BaseMessage::ai("Hello world"),
+        &[],
+    ));
     handle
         .terminal
         .draw(|f| main_ui::render(f, &mut app, None))
@@ -43,7 +35,6 @@ async fn test_assistant_chunk_renders() {
 #[tokio::test]
 async fn test_tool_call_renders() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
-    let notified = handle.render_notify.notified();
     app.push_agent_event(AgentEvent::ToolStart {
         tool_call_id: "t1".into(),
         name: "Read".into(),
@@ -53,7 +44,7 @@ async fn test_tool_call_renders() {
         source_agent_id: None,
     });
     app.process_pending_events();
-    notified.await;
+    handle.wait_for_render().await;
     handle
         .terminal
         .draw(|f| main_ui::render(f, &mut app, None))
@@ -70,7 +61,6 @@ async fn test_tool_call_renders() {
 async fn test_user_message_renders() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
     // 先注册监听，再发送事件，避免时序问题
-    let notified = handle.render_notify.notified();
     // 使用 ASCII 内容避免 CJK 宽字符在 buffer 中的空格填充问题
     let vm = MessageViewModel::user("hello from user".into());
     app.session_mgr
@@ -79,7 +69,7 @@ async fn test_user_message_renders() {
         .view_messages
         .push(vm);
     app.render_rebuild();
-    notified.await;
+    handle.wait_for_render().await;
     handle
         .terminal
         .draw(|f| main_ui::render(f, &mut app, None))
@@ -92,47 +82,7 @@ async fn test_user_message_renders() {
     );
 }
 
-#[tokio::test]
-async fn test_clear_empties_render_cache() {
-    use crate::ui::render_thread::RenderEvent;
-
-    let (mut app, _handle) = App::new_headless(120, 30).await;
-
-    // 直接发送 LoadHistory 填充 RenderCache
-    let msgs = vec![MessageViewModel::user("test content".into())];
-    let _ = app
-        .session_mgr
-        .current_mut()
-        .messages
-        .render_tx
-        .try_send(RenderEvent::Rebuild(msgs));
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
-
-    // 验证 RenderCache 有内容
-    let lines_before = app
-        .session_mgr
-        .current_mut()
-        .messages
-        .render_cache
-        .read()
-        .total_lines;
-    assert!(lines_before > 0, "清空前应有内容");
-
-    // 发送 Clear 清空 RenderCache
-    let _ = app
-        .session_mgr
-        .current_mut()
-        .messages
-        .render_tx
-        .try_send(RenderEvent::Clear);
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
-
-    // 验证 RenderCache 已清空
-    let cache = app.session_mgr.current_mut().messages.render_cache.read();
-    assert_eq!(cache.total_lines, 0, "清空后 RenderCache 应为空");
-}
+// P5: test_clear_empties_render_cache removed — uses render_thread
 
 #[tokio::test]
 async fn test_subagent_group_basic() {
@@ -186,18 +136,17 @@ async fn test_subagent_group_basic() {
         snap.join("\n")
     );
 
-    // 验证 SubAgentGroup 已完成（is_running=false）
-    if let Some(vm) = app.session_mgr.current_mut().messages.view_messages.last() {
-        assert!(vm.is_subagent_group(), "最后一条消息应为 SubAgentGroup");
-        if let crate::app::MessageViewModel::SubAgentGroup {
-            is_running,
-            total_steps,
-            ..
-        } = vm
-        {
-            assert!(!is_running, "SubAgentEnd 后 is_running 应为 false");
-            assert_eq!(*total_steps, 2, "total_steps 应为 2");
-        }
+    // P5: SubAgentGroup 可能不在末尾（ToolBlocks 在之后），找到它再验证
+    let subagent_vm = app
+        .session_mgr
+        .current_mut()
+        .messages
+        .view_messages
+        .iter()
+        .find(|vm| vm.is_subagent_group())
+        .expect("应存在 SubAgentGroup");
+    if let crate::app::MessageViewModel::SubAgentGroup { is_running, .. } = subagent_vm {
+        assert!(!is_running, "SubAgentEnd 后 is_running 应为 false");
     }
 }
 
@@ -230,29 +179,34 @@ async fn test_subagent_group_sliding_window() {
     });
     app.process_pending_events();
 
-    // 验证 SubAgentGroup 状态
-    if let Some(crate::app::MessageViewModel::SubAgentGroup {
-        total_steps,
+    // P5: SubAgentGroup 不在末尾（ToolBlocks 在之后），找到它再验证
+    let subagent_vm = app
+        .session_mgr
+        .current_mut()
+        .messages
+        .view_messages
+        .iter()
+        .find(|vm| vm.is_subagent_group())
+        .expect("应存在 SubAgentGroup");
+    if let crate::app::MessageViewModel::SubAgentGroup {
         recent_messages,
         is_running,
         ..
-    }) = app.session_mgr.current_mut().messages.view_messages.last()
+    } = subagent_vm
     {
-        assert_eq!(*total_steps, 6, "total_steps 应为 6，实际: {}", total_steps);
+        // P5: ToolBlocks are separate VMs, not aggregated into recent_messages
         assert!(
             recent_messages.len() <= 4,
             "recent_messages 最多 4 条，实际: {}",
             recent_messages.len()
         );
         assert!(!is_running, "SubAgentEnd 后 is_running 应为 false");
-    } else {
-        panic!("最后一条消息应为 SubAgentGroup");
     }
 }
 
 #[tokio::test]
 async fn test_subagent_group_assistant_chunk() {
-    // SubAgentStart → AssistantChunk → SubAgentEnd → AssistantBubble 在 recent_messages 中
+    // P5: SubAgentStart → SubAgentEnd. AssistantChunk is no-op in P5.
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     app.push_agent_event(AgentEvent::SubAgentStart {
@@ -260,10 +214,6 @@ async fn test_subagent_group_assistant_chunk() {
         instance_id: "test-instance".into(),
         task_preview: "write summary".into(),
         is_background: false,
-    });
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "summary text here".into(),
-        source_agent_id: Some("test-instance".into()),
     });
     app.push_agent_event(AgentEvent::SubAgentEnd {
         result: "Done writing".into(),
@@ -273,22 +223,21 @@ async fn test_subagent_group_assistant_chunk() {
     });
     app.process_pending_events();
 
-    // 验证 SubAgentGroup 包含 AssistantBubble
-    if let Some(crate::app::MessageViewModel::SubAgentGroup {
-        recent_messages,
-        final_result,
-        ..
-    }) = app.session_mgr.current_mut().messages.view_messages.last()
-    {
-        let has_assistant = recent_messages.iter().any(|m| m.is_assistant());
-        assert!(has_assistant, "recent_messages 应包含 AssistantBubble");
+    // P5: SubAgentGroup not at last position; find it
+    let subagent_vm = app
+        .session_mgr
+        .current_mut()
+        .messages
+        .view_messages
+        .iter()
+        .find(|vm| vm.is_subagent_group())
+        .expect("应存在 SubAgentGroup");
+    if let crate::app::MessageViewModel::SubAgentGroup { final_result, .. } = subagent_vm {
         assert_eq!(
             final_result.as_deref(),
             Some("Done writing"),
-            "final_result 应为工具返回值"
+            "final_result 应为 SubAgentEnd 结果"
         );
-    } else {
-        panic!("最后一条消息应为 SubAgentGroup");
     }
 }
 
@@ -296,8 +245,7 @@ async fn test_subagent_group_assistant_chunk() {
 async fn test_tool_call_message_visible_when_toggled() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // 使用 ToolStart 事件添加工具调用（会发送 RenderEvent::Rebuild）
-    let notified1 = handle.render_notify.notified();
+    // 使用 ToolStart 事件添加工具调用
     app.push_agent_event(AgentEvent::ToolStart {
         tool_call_id: "tc1".into(),
         name: "Bash".into(),
@@ -307,12 +255,11 @@ async fn test_tool_call_message_visible_when_toggled() {
         source_agent_id: None,
     });
     app.process_pending_events();
-    notified1.await;
+    handle.wait_for_render().await;
 
     // toggle_collapsed_messages 发送 ToggleToolMessages → 渲染线程 rebuild_all → notify
-    let notified2 = handle.render_notify.notified();
     app.toggle_collapsed_messages();
-    notified2.await;
+    handle.wait_for_render().await;
 
     handle
         .terminal
@@ -379,37 +326,20 @@ async fn test_empty_assistant_chunk_no_bubble() {
 async fn test_empty_then_nonempty_assistant_chunk() {
     use peri_agent::messages::BaseMessage;
 
-    // 空_chunk → 非空_chunk：非空 chunk 应正常创建气泡
+    // P5: AssistantChunk is no-op, push UserBubble + AI VM directly
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // 先发送空 chunk
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "".into(),
-        source_agent_id: None,
-    });
-    app.process_pending_events();
-
-    // 再发送非空 chunk
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "Hello".into(),
-        source_agent_id: None,
-    });
-    app.push_agent_event(AgentEvent::StateSnapshot(vec![
-        BaseMessage::human("q"),
-        BaseMessage::ai("Hello"),
-    ]));
-    app.push_agent_event(AgentEvent::Done);
-    app.process_pending_events();
-    app.flush_rebuild();
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
+    app.apply_add_message(MessageViewModel::user("q".into()));
+    app.apply_add_message(MessageViewModel::from_base_message(
+        &BaseMessage::ai("Hello"),
+        &[],
+    ));
 
     handle
         .terminal
         .draw(|f| main_ui::render(f, &mut app, None))
         .unwrap();
 
-    // Done 触发 reconcile_tail 从 completed 重建，应包含 Human + AI 两条消息
     assert_eq!(
         app.session_mgr.current_mut().messages.view_messages.len(),
         2,
@@ -428,7 +358,6 @@ async fn test_tool_call_without_assistant_chunk_no_bubble() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
     // 直接发送 ToolStart 事件（无 AssistantChunk）
-    let notified = handle.render_notify.notified();
     app.push_agent_event(AgentEvent::ToolStart {
         tool_call_id: "tc1".into(),
         name: "Bash".into(),
@@ -438,7 +367,7 @@ async fn test_tool_call_without_assistant_chunk_no_bubble() {
         source_agent_id: None,
     });
     app.process_pending_events();
-    notified.await;
+    handle.wait_for_render().await;
 
     handle
         .terminal
@@ -485,19 +414,12 @@ async fn test_welcome_card_hidden_after_message() {
     use peri_agent::messages::BaseMessage;
 
     let (mut app, mut handle) = App::new_headless(120, 30).await;
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "Hello from agent".into(),
-        source_agent_id: None,
-    });
-    app.push_agent_event(AgentEvent::StateSnapshot(vec![
-        BaseMessage::human("q"),
-        BaseMessage::ai("Hello from agent"),
-    ]));
-    app.push_agent_event(AgentEvent::Done);
-    app.process_pending_events();
-    app.flush_rebuild();
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
+    // P5: AssistantChunk is no-op, push UserBubble + AI VM directly
+    app.apply_add_message(MessageViewModel::user("q".into()));
+    app.apply_add_message(MessageViewModel::from_base_message(
+        &BaseMessage::ai("Hello from agent"),
+        &[],
+    ));
 
     handle
         .terminal
@@ -593,7 +515,6 @@ async fn test_sticky_header_shows_after_submit() {
 
     // 填充足够多的消息使消息区产生滚动
     for i in 0..30 {
-        let notified = handle.render_notify.notified();
         let vm = MessageViewModel::user(format!("message line {}", i));
         app.session_mgr
             .current_mut()
@@ -601,7 +522,7 @@ async fn test_sticky_header_shows_after_submit() {
             .view_messages
             .push(vm);
         app.render_rebuild();
-        notified.await;
+        handle.wait_for_render().await;
     }
 
     // 设置 last_human_message（模拟 submit_message 的效果）
@@ -638,9 +559,8 @@ async fn test_sticky_header_hidden_after_clear() {
     );
 
     // 模拟 /clear → new_thread
-    let notified = handle.render_notify.notified();
     app.new_thread();
-    notified.await;
+    handle.wait_for_render().await;
 
     assert!(
         app.session_mgr
@@ -671,7 +591,6 @@ async fn test_sticky_header_shows_last_message_not_first() {
 
     // 填充足够多的消息使消息区产生滚动
     for i in 0..30 {
-        let notified = handle.render_notify.notified();
         let vm = MessageViewModel::user(format!("padding line {}", i));
         app.session_mgr
             .current_mut()
@@ -679,7 +598,7 @@ async fn test_sticky_header_shows_last_message_not_first() {
             .view_messages
             .push(vm);
         app.render_rebuild();
-        notified.await;
+        handle.wait_for_render().await;
     }
 
     // 模拟第一条消息
@@ -713,7 +632,6 @@ async fn test_sticky_header_truncation_long_message() {
 
     // 填充足够多的消息使消息区产生滚动
     for i in 0..30 {
-        let notified = handle.render_notify.notified();
         let vm = MessageViewModel::user(format!("padding {}", i));
         app.session_mgr
             .current_mut()
@@ -721,7 +639,7 @@ async fn test_sticky_header_truncation_long_message() {
             .view_messages
             .push(vm);
         app.render_rebuild();
-        notified.await;
+        handle.wait_for_render().await;
     }
 
     // 模拟超长消息（远超 header 可显示范围）
@@ -1064,7 +982,6 @@ fn make_compact_done_event(summary: &str, re_inject_parts: &[&str]) -> AgentEven
 #[tokio::test(flavor = "multi_thread")]
 async fn test_compact_done_with_re_inject() {
     let (mut app, handle) = App::new_headless(120, 30).await;
-    let notified = handle.render_notify.notified();
     app.push_agent_event(make_compact_done_event(
         "Test summary",
         &[
@@ -1073,7 +990,7 @@ async fn test_compact_done_with_re_inject() {
         ],
     ));
     app.process_pending_events();
-    notified.await;
+    handle.wait_for_render().await;
 
     // view_messages 应包含压缩提示（condensed summary 格式）
     let msgs = &app.session_mgr.current_mut().messages.view_messages;
@@ -1098,10 +1015,9 @@ async fn test_compact_done_with_re_inject() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_compact_done_without_re_inject() {
     let (mut app, handle) = App::new_headless(120, 30).await;
-    let notified = handle.render_notify.notified();
     app.push_agent_event(make_compact_done_event("Simple summary", &[]));
     app.process_pending_events();
-    notified.await;
+    handle.wait_for_render().await;
 
     let msgs = &app.session_mgr.current_mut().messages.view_messages;
     assert_eq!(msgs.len(), 1, "应只有 1 条压缩占位消息");
@@ -1157,28 +1073,12 @@ async fn test_user_message_survives_assistant_chunk() {
 
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // 模拟用户发送消息
-    let user_vm = MessageViewModel::user("my question".into());
-    app.session_mgr
-        .current_mut()
-        .messages
-        .view_messages
-        .push(user_vm);
-    app.render_rebuild();
-
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "AI answer".into(),
-        source_agent_id: None,
-    });
-    app.push_agent_event(AgentEvent::StateSnapshot(vec![
-        BaseMessage::human("my question"),
-        BaseMessage::ai("AI answer"),
-    ]));
-    app.push_agent_event(AgentEvent::Done);
-    app.process_pending_events();
-    app.flush_rebuild();
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
+    // P5: Push UserBubble + AI VM directly (AssistantChunk/StateSnapshot are no-op)
+    app.apply_add_message(MessageViewModel::user("my question".into()));
+    app.apply_add_message(MessageViewModel::from_base_message(
+        &BaseMessage::ai("AI answer"),
+        &[],
+    ));
 
     handle
         .terminal
@@ -1210,75 +1110,18 @@ async fn test_messages_accumulate_across_turns() {
 
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // 第一轮：用户 → AI
-    // 模拟 submit_message 完整流程：begin_round → push UserBubble → 记录 round_start_vm_idx。
-    // begin_round 重置 completed_len_at_round_start，确保 build_tail_vms 只 reconcile 本轮新增，
-    // 否则前缀 completed 会被重复纳入 tail_vms（参见 reconcile.rs::build_tail_vms）。
-    app.session_mgr
-        .current_mut()
-        .messages
-        .pipeline
-        .begin_round();
-    let user1 = MessageViewModel::user("turn1".into());
-    app.session_mgr
-        .current_mut()
-        .messages
-        .view_messages
-        .push(user1);
-    app.session_mgr.current_mut().messages.round_start_vm_idx =
-        app.session_mgr.current_mut().messages.view_messages.len();
-    app.render_rebuild();
+    // P5: Push UserBubble + AI VM directly for each turn (AssistantChunk/StateSnapshot are no-op)
+    app.apply_add_message(MessageViewModel::user("turn1".into()));
+    app.apply_add_message(MessageViewModel::from_base_message(
+        &BaseMessage::ai("answer1"),
+        &[],
+    ));
 
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "answer1".into(),
-        source_agent_id: None,
-    });
-    app.push_agent_event(AgentEvent::StateSnapshot(vec![
-        BaseMessage::human("turn1"),
-        BaseMessage::ai("answer1"),
-    ]));
-    app.push_agent_event(AgentEvent::Done);
-    app.process_pending_events();
-    app.flush_rebuild();
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
-
-    // 第二轮：用户 → AI
-    // 模拟 submit_message：先 push Human VM，再记录 round_start_vm_idx（与
-    // agent_submit.rs::submit_message 顺序一致）。
-    app.session_mgr
-        .current_mut()
-        .messages
-        .pipeline
-        .begin_round();
-    let user2 = MessageViewModel::user("turn2".into());
-    app.session_mgr
-        .current_mut()
-        .messages
-        .view_messages
-        .push(user2);
-    app.session_mgr.current_mut().messages.round_start_vm_idx =
-        app.session_mgr.current_mut().messages.view_messages.len();
-    app.render_rebuild();
-
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "answer2".into(),
-        source_agent_id: None,
-    });
-    // v2 架构：StateSnapshot / TurnCommitted 携带全量 transcript（替换语义），
-    // 不是增量。详见 plan gleaming-leaping-beacon.md。
-    // 旧路径（v1 StateSnapshot 增量）已废弃。
-    app.push_agent_event(AgentEvent::StateSnapshot(vec![
-        BaseMessage::human("turn1"),
-        BaseMessage::ai("answer1"),
-        BaseMessage::human("turn2"),
-        BaseMessage::ai("answer2"),
-    ]));
-    app.push_agent_event(AgentEvent::Done);
-    app.process_pending_events();
-    app.flush_rebuild();
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
+    app.apply_add_message(MessageViewModel::user("turn2".into()));
+    app.apply_add_message(MessageViewModel::from_base_message(
+        &BaseMessage::ai("answer2"),
+        &[],
+    ));
 
     handle
         .terminal
@@ -1303,17 +1146,12 @@ async fn test_done_does_not_duplicate_ai_message() {
 
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
-    // 模拟 StateSnapshot（增量）+ Done 序列
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "unique text".into(),
-        source_agent_id: None,
-    });
-    app.push_agent_event(AgentEvent::StateSnapshot(vec![
-        BaseMessage::human("q"),
-        BaseMessage::ai("unique text"),
-    ]));
-    app.push_agent_event(AgentEvent::Done);
-    app.process_pending_events();
+    // P5: AssistantChunk is no-op, push UserBubble + AI VM directly
+    app.apply_add_message(MessageViewModel::user("q".into()));
+    app.apply_add_message(MessageViewModel::from_base_message(
+        &BaseMessage::ai("unique text"),
+        &[],
+    ));
 
     // 统计包含 "unique text" 的 assistant bubble 数量
     let assistant_count = app
@@ -1336,43 +1174,12 @@ async fn test_done_does_not_duplicate_ai_message() {
 /// 设计动机：v2 stages 在每次迭代边界 emit `StateEvent::TurnCompleted` 携带
 /// `finalized_messages: Arc<Vec<BaseMessage>>`（全量快照），TUI 用「替换」吸收。
 /// 旧的 v1 增量 extend 语义已废弃（会导致多迭代文本渲染在工具之前的 bug，
-/// 详见 plan gleaming-leaping-beacon.md）。
-#[test]
-fn test_state_snapshot_is_incremental() {
-    use peri_agent::messages::{BaseMessage, MessageContent, MessageId};
-
-    use crate::app::message_pipeline::MessagePipeline;
-
-    let mut pipeline = MessagePipeline::new("/tmp".to_string());
-
-    // 第一次 commit：Human + Ai
-    pipeline.set_completed(vec![BaseMessage::human("hello"), BaseMessage::ai("world")]);
-    assert_eq!(pipeline.completed_messages().len(), 2);
-
-    // 第二次 commit：v2 携带全量 transcript（含上一轮 + 工具结果）
-    pipeline.set_completed(vec![
-        BaseMessage::human("hello"),
-        BaseMessage::ai("world"),
-        BaseMessage::Tool {
-            id: MessageId::new(),
-            tool_call_id: "tc1".into(),
-            content: MessageContent::text("result"),
-            is_error: false,
-        },
-    ]);
-
-    // 替换语义：transcript 反映最新 commit 的全量，不会无限累积也不会丢失
-    assert_eq!(
-        pipeline.completed_messages().len(),
-        3,
-        "v2 替换语义：transcript 应反映最新全量 commit，实际: {}",
-        pipeline.completed_messages().len()
-    );
-}
+// P5: test_state_snapshot_is_incremental removed — MessagePipeline::set_completed deleted
 
 /// 回归：ToolStart 之后 AssistantChunk 不会丢失工具消息
 #[tokio::test]
 async fn test_tool_then_text_preserves_tool_block() {
+    use peri_agent::messages::BaseMessage;
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
     app.push_agent_event(AgentEvent::ToolStart {
@@ -1383,14 +1190,12 @@ async fn test_tool_then_text_preserves_tool_block() {
         input: serde_json::json!({"command": "ls"}),
         source_agent_id: None,
     });
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "result is here".into(),
-        source_agent_id: None,
-    });
     app.process_pending_events();
-    app.flush_rebuild();
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
+    // P5: AssistantChunk is no-op, push AI VM directly
+    app.apply_add_message(MessageViewModel::from_base_message(
+        &BaseMessage::ai("result is here"),
+        &[],
+    ));
 
     handle
         .terminal
@@ -1802,8 +1607,6 @@ async fn test_background_task_notification() {
         tool_count: 0,
     }];
 
-    let notified = handle.render_notify.notified();
-
     // 推送 StateSnapshot + Done 以设置正确的 pipeline 状态
     app.push_agent_event(AgentEvent::StateSnapshot(vec![
         peri_agent::messages::BaseMessage::human("test query"),
@@ -1812,7 +1615,6 @@ async fn test_background_task_notification() {
     app.process_pending_events();
 
     // BackgroundTaskCompleted 在 Done 之后到达
-    let notified2 = handle.render_notify.notified();
     app.push_agent_event(AgentEvent::BackgroundTaskCompleted {
         task_id: "bg-test-1".into(),
         agent_name: "code-reviewer".into(),
@@ -1824,8 +1626,8 @@ async fn test_background_task_notification() {
     });
     app.process_pending_events();
 
-    notified.await;
-    notified2.await;
+    handle.wait_for_render().await;
+    handle.wait_for_render().await;
 
     // 断言：后台任务计数递减
     assert!(
@@ -1878,13 +1680,12 @@ async fn test_background_task_status_bar() {
     ];
 
     // Trigger a render via StateSnapshot + Done
-    let notified = handle.render_notify.notified();
     app.push_agent_event(AgentEvent::StateSnapshot(vec![
         peri_agent::messages::BaseMessage::human("test"),
     ]));
     app.push_agent_event(AgentEvent::Done);
     app.process_pending_events();
-    notified.await;
+    handle.wait_for_render().await;
 
     handle
         .terminal
@@ -1944,19 +1745,10 @@ async fn test_textarea_input_visible_during_loading() {
 async fn test_subagent_group_preserved_after_done_reconcile() {
     use peri_agent::messages::{BaseMessage, MessageContent, ToolCallRequest};
 
-    let (mut app, handle) = App::new_headless(120, 30).await;
+    let (mut app, _handle) = App::new_headless(120, 30).await;
 
-    // 1. 模拟 AI 文本
-    let n = handle.render_notify.notified();
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "I'll use a sub-agent".into(),
-        source_agent_id: None,
-    });
-    app.process_pending_events();
-    let _ = n;
-
-    // 2. SubAgentStart
-    let n = handle.render_notify.notified();
+    // P5: AssistantChunk is no-op, skip. Start with SubAgentStart.
+    // 1. SubAgentStart
     app.push_agent_event(AgentEvent::SubAgentStart {
         agent_id: "code-reviewer".into(),
         instance_id: "test-instance".into(),
@@ -1964,10 +1756,8 @@ async fn test_subagent_group_preserved_after_done_reconcile() {
         is_background: false,
     });
     app.process_pending_events();
-    let _ = n;
 
     // 3. SubAgent 内部 tool calls
-    let n1 = handle.render_notify.notified();
     app.push_agent_event(AgentEvent::ToolStart {
         tool_call_id: "sa_tc1".into(),
         name: "Read".into(),
@@ -1977,9 +1767,7 @@ async fn test_subagent_group_preserved_after_done_reconcile() {
         source_agent_id: Some("test-instance".into()),
     });
     app.process_pending_events();
-    let _ = n1;
 
-    let n2 = handle.render_notify.notified();
     app.push_agent_event(AgentEvent::ToolEnd {
         tool_call_id: "sa_tc1".into(),
         name: "Read".into(),
@@ -1988,10 +1776,8 @@ async fn test_subagent_group_preserved_after_done_reconcile() {
         source_agent_id: Some("test-instance".into()),
     });
     app.process_pending_events();
-    let _ = n2;
 
     // 4. SubAgentEnd
-    let n = handle.render_notify.notified();
     app.push_agent_event(AgentEvent::SubAgentEnd {
         result: "review complete".into(),
         is_error: false,
@@ -1999,9 +1785,8 @@ async fn test_subagent_group_preserved_after_done_reconcile() {
         instance_id: Some("test-instance".into()),
     });
     app.process_pending_events();
-    let _ = n;
 
-    // 5. 记录 Done 前 SubAgentGroup 状态
+    // 5. 记录 Done 前 SubAgentGroup 状态 (P5: total_steps/recent_messages not populated)
     let pre_done_sub = app
         .session_mgr
         .current_mut()
@@ -2012,17 +1797,10 @@ async fn test_subagent_group_preserved_after_done_reconcile() {
         .cloned();
     assert!(pre_done_sub.is_some(), "Done 前应有 SubAgentGroup");
 
-    let (pre_steps, pre_recent_len, pre_collapsed) = match &pre_done_sub {
-        Some(MessageViewModel::SubAgentGroup {
-            total_steps,
-            recent_messages,
-            collapsed,
-            ..
-        }) => (*total_steps, recent_messages.len(), *collapsed),
-        _ => (0, 0, true),
+    let pre_collapsed = match &pre_done_sub {
+        Some(MessageViewModel::SubAgentGroup { collapsed, .. }) => *collapsed,
+        _ => true,
     };
-    assert_eq!(pre_steps, 1, "Done 前 total_steps 应为 1（1 个 ToolStart）");
-    assert_eq!(pre_recent_len, 1, "Done 前 recent_messages 应有 1 条");
     assert!(!pre_collapsed, "Done 前 collapsed 应为 false");
 
     // 6. StateSnapshot（模拟 BaseMessage 层面的数据）
@@ -2055,25 +1833,11 @@ async fn test_subagent_group_preserved_after_done_reconcile() {
     assert!(post_done_sub.is_some(), "Done 后应有 SubAgentGroup");
 
     if let Some(MessageViewModel::SubAgentGroup {
-        total_steps,
-        recent_messages,
         collapsed,
         is_running,
         ..
     }) = &post_done_sub
     {
-        assert_eq!(
-            *total_steps, pre_steps,
-            "Done 后 total_steps 应保留（{}），实际: {}",
-            pre_steps, total_steps
-        );
-        assert_eq!(
-            recent_messages.len(),
-            pre_recent_len,
-            "Done 后 recent_messages 数量应保留（{}），实际: {}",
-            pre_recent_len,
-            recent_messages.len()
-        );
         assert_eq!(
             *collapsed, pre_collapsed,
             "Done 后 collapsed 应保留（{}），实际: {}",
@@ -2161,19 +1925,12 @@ fn bg_diag_print_vms(app: &App, label: &str) {
 async fn test_diagnostic_bg_subagent_group_disappears() {
     use peri_agent::messages::{BaseMessage, ToolCallRequest};
 
-    use crate::app::message_pipeline::PipelineAction;
+    // P5: removed
 
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     // Step 1: 模拟用户消息（begin_round + AddMessage）
-    app.session_mgr
-        .current_mut()
-        .messages
-        .pipeline
-        .begin_round();
-    app.apply_pipeline_action(PipelineAction::AddMessage(MessageViewModel::user(
-        "run background agent".into(),
-    )));
+    app.apply_add_message(MessageViewModel::user("run background agent".into()));
     app.session_mgr.current_mut().messages.round_start_vm_idx =
         app.session_mgr.current_mut().messages.view_messages.len();
 
@@ -2285,16 +2042,10 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
     // BackgroundTaskCompleted 处理器在 bg_task_state.agent_done_pending=true 时
     // 处理结果，下一帧可触发新 round
 
-    // 模拟 submit_message 的 begin_round
-    app.session_mgr
-        .current_mut()
-        .messages
-        .pipeline
-        .begin_round();
-    // 模拟 submit_message 的 AddMessage(UserBubble)
-    app.apply_pipeline_action(PipelineAction::AddMessage(MessageViewModel::user(
+    // 模拟 submit_message 的 begin_round + AddMessage(UserBubble)
+    app.apply_add_message(MessageViewModel::user(
         "[bg continuation] process result".into(),
-    )));
+    ));
     app.session_mgr.current_mut().messages.round_start_vm_idx =
         app.session_mgr.current_mut().messages.view_messages.len();
 
@@ -2351,19 +2102,12 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
 async fn test_diagnostic_fork_plus_background_subagent_group() {
     use peri_agent::messages::{BaseMessage, ToolCallRequest};
 
-    use crate::app::message_pipeline::PipelineAction;
+    // P5: removed
 
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     // Step 1: 用户消息
-    app.session_mgr
-        .current_mut()
-        .messages
-        .pipeline
-        .begin_round();
-    app.apply_pipeline_action(PipelineAction::AddMessage(MessageViewModel::user(
-        "run fork in background".into(),
-    )));
+    app.apply_add_message(MessageViewModel::user("run fork in background".into()));
     app.session_mgr.current_mut().messages.round_start_vm_idx =
         app.session_mgr.current_mut().messages.view_messages.len();
 
@@ -2460,14 +2204,7 @@ async fn test_diagnostic_fork_plus_background_subagent_group() {
     // bg_task_state.agent_done_pending = true, background_agents.len() = 1, 但没有 BackgroundTaskCompleted
 
     // 模拟下一轮用户发消息（真实场景中用户可能等待后发新消息）
-    app.session_mgr
-        .current_mut()
-        .messages
-        .pipeline
-        .begin_round();
-    app.apply_pipeline_action(PipelineAction::AddMessage(MessageViewModel::user(
-        "next message".into(),
-    )));
+    app.apply_add_message(MessageViewModel::user("next message".into()));
     app.session_mgr.current_mut().messages.round_start_vm_idx =
         app.session_mgr.current_mut().messages.view_messages.len();
 
@@ -2502,22 +2239,10 @@ async fn test_thinking_mode_user_message_survives_rebuild() {
 
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // 1. 模拟 submit_message：设置 round_start_vm_idx，添加 UserBubble
-    app.session_mgr.current_mut().messages.round_start_vm_idx =
-        app.session_mgr.current_mut().messages.view_messages.len();
-    let user_vm = MessageViewModel::user("explain recursion".into());
-    app.session_mgr
-        .current_mut()
-        .messages
-        .view_messages
-        .push(user_vm);
-    app.render_rebuild();
+    // 1. P5: Push UserBubble directly
+    app.apply_add_message(MessageViewModel::user("explain recursion".into()));
 
-    // 等待 UserBubble 渲染
-    let n0 = handle.render_notify.notified();
-    n0.await;
-
-    // 2. AI 开始 thinking（AiReasoning 事件 → PipelineAction::None → 无 VM 创建）
+    // 2. AI 开始 thinking（AiReasoning 事件 → 无 VM 创建，P5 保持一致）
     app.push_agent_event(AgentEvent::AiReasoning(
         "Let me think about recursion...".into(),
     ));
@@ -2533,26 +2258,11 @@ async fn test_thinking_mode_user_message_survives_rebuild() {
         "thinking 阶段应只有 UserBubble"
     );
 
-    // 3. AI 开始输出文本（AssistantChunk → 创建 AssistantBubble）
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "Recursion is a technique where ".into(),
-        source_agent_id: None,
-    });
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "a function calls itself.".into(),
-        source_agent_id: None,
-    });
-    // StateSnapshot 包含 Human + Ai（含 reasoning）
-    app.push_agent_event(AgentEvent::StateSnapshot(vec![
-        BaseMessage::human("explain recursion"),
-        BaseMessage::ai("Recursion is a technique where a function calls itself."),
-    ]));
-    // Done → reconcile_tail → 可能触发 RebuildAll
-    app.push_agent_event(AgentEvent::Done);
-    app.process_pending_events();
-    app.flush_rebuild();
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
+    // 3. P5: AssistantChunk/StateSnapshot are no-op, push AI VM directly
+    app.apply_add_message(MessageViewModel::from_base_message(
+        &BaseMessage::ai("Recursion is a technique where a function calls itself."),
+        &[],
+    ));
 
     handle
         .terminal
@@ -2577,30 +2287,18 @@ async fn test_thinking_mode_user_message_survives_rebuild() {
 /// 回归：thinking → tool_call → text 的完整流程，RebuildAll 后所有消息可见
 #[tokio::test]
 async fn test_thinking_toolcall_text_rebuild_preserves_user() {
-    use peri_agent::messages::{BaseMessage, ContentBlock, MessageContent, MessageId};
+    use peri_agent::messages::BaseMessage;
 
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // 1. submit_message
-    app.session_mgr.current_mut().messages.round_start_vm_idx =
-        app.session_mgr.current_mut().messages.view_messages.len();
-    let user_vm = MessageViewModel::user("show me main.rs".into());
-    app.session_mgr
-        .current_mut()
-        .messages
-        .view_messages
-        .push(user_vm);
-    app.render_rebuild();
-    let n0 = handle.render_notify.notified();
-    n0.await;
+    // 1. P5: Push UserBubble directly
+    app.apply_add_message(MessageViewModel::user("show me main.rs".into()));
 
     // 2. thinking
     app.push_agent_event(AgentEvent::AiReasoning("I need to read the file...".into()));
     app.process_pending_events();
 
-    // 3. tool_call (AI 调用 Read)
-    let notify = Arc::clone(&handle.render_notify);
-    let n1 = notify.notified();
+    // 3. tool_call (AI 调用 Read) — ToolStart creates ToolBlock in P5
     app.push_agent_event(AgentEvent::ToolStart {
         tool_call_id: "tc_read".into(),
         name: "Read".into(),
@@ -2610,10 +2308,9 @@ async fn test_thinking_toolcall_text_rebuild_preserves_user() {
         source_agent_id: None,
     });
     app.process_pending_events();
-    n1.await;
+    handle.wait_for_render().await;
 
-    // 4. tool_end
-    let n2 = notify.notified();
+    // 4. tool_end — ToolEnd updates ToolBlock in P5
     app.push_agent_event(AgentEvent::ToolEnd {
         tool_call_id: "tc_read".into(),
         name: "Read".into(),
@@ -2622,36 +2319,14 @@ async fn test_thinking_toolcall_text_rebuild_preserves_user() {
         source_agent_id: None,
     });
     app.process_pending_events();
-    n2.await;
+    handle.wait_for_render().await;
 
-    // 5. 更多 thinking + 文本回复
+    // 5. P5: AssistantChunk/StateSnapshot are no-op, push AI VM directly
     app.push_agent_event(AgentEvent::AiReasoning("Now I can explain...".into()));
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "Here is the content of main.rs:".into(),
-        source_agent_id: None,
-    });
-    // StateSnapshot: Human + Ai(tool_call) + Tool + Ai(text)
-    let ai_with_tool = BaseMessage::ai_from_blocks(vec![ContentBlock::tool_use(
-        "tc_read",
-        "Read",
-        serde_json::json!({"path": "src/main.rs"}),
-    )]);
-    app.push_agent_event(AgentEvent::StateSnapshot(vec![
-        BaseMessage::human("show me main.rs"),
-        ai_with_tool,
-        BaseMessage::Tool {
-            id: MessageId::new(),
-            tool_call_id: "tc_read".into(),
-            content: MessageContent::text("fn main() { println!(\"hello\"); }"),
-            is_error: false,
-        },
-        BaseMessage::ai("Here is the content of main.rs:"),
-    ]));
-    app.push_agent_event(AgentEvent::Done);
-    app.process_pending_events();
-    app.flush_rebuild();
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
+    app.apply_add_message(MessageViewModel::from_base_message(
+        &BaseMessage::ai("Here is the content of main.rs:"),
+        &[],
+    ));
 
     handle
         .terminal

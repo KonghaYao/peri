@@ -24,15 +24,12 @@
 //! handle.assert_contains("Available commands", "应显示命令列表");
 //! ```
 
-use std::sync::Arc;
-
 use anyhow::Result;
 use ratatui::{
     backend::TestBackend,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     Terminal,
 };
-use tokio::sync::Notify;
 
 use crate::{
     app::App,
@@ -40,10 +37,10 @@ use crate::{
     ui::main_ui,
 };
 
-/// Headless 测试句柄，包含 TestBackend Terminal 和渲染通知
+/// Headless 测试句柄，包含 TestBackend Terminal
+/// P5: render_notify removed — sync rendering from state machine
 pub struct HeadlessHandle {
     pub terminal: Terminal<TestBackend>,
-    pub render_notify: Arc<Notify>,
 }
 
 impl HeadlessHandle {
@@ -79,9 +76,10 @@ impl HeadlessHandle {
         self.snapshot().iter().any(|line| line.contains(text))
     }
 
-    /// 等待渲染线程完成一次渲染（内部 notify.notified().await，无 sleep）
+    /// P5: Yield to allow pending tasks to complete (sync rendering, no render thread)
     pub async fn wait_for_render(&self) {
-        self.render_notify.notified().await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
     }
 
     /// 等待渲染 + 绘制到 TestBackend（便捷组合）

@@ -21,7 +21,7 @@ pub use ui_state::UiState;
 pub(crate) mod at_mention;
 pub use at_mention::AtMentionState;
 
-mod message_state;
+pub(crate) mod message_state;
 pub use message_state::MessageState;
 
 // ── Agent Communication ──────────────────────────────────────────────────────
@@ -70,7 +70,8 @@ mod thread_ops;
 // ── Other Modules ─────────────────────────────────────────────────────────────
 pub mod agent;
 pub mod events;
-pub mod message_pipeline;
+mod message_convert;
+pub use message_convert::messages_to_view_models;
 mod provider;
 pub mod text_selection;
 pub mod tool_display;
@@ -94,8 +95,8 @@ pub use cron_state::CronState;
 pub use field_textarea::FieldTextarea;
 pub use langfuse_state::LangfuseState;
 pub use panel_types::{MutexGroup, PanelKind, PanelScope};
-use peri_agent::messages::BaseMessage;
-use peri_middlewares::prelude::HitlDecision;
+use peri_agent::messages::BaseMessage; // P4b: type-dependency
+use peri_middlewares::prelude::HitlDecision; // P4b: type-dependency
 pub use setup_wizard::SetupWizardPanel;
 
 use crate::acp_client::{AcpNotification, AcpTuiClient};
@@ -104,7 +105,6 @@ pub use crate::ui::message_view::{
     aggregate_tail_tool_groups, aggregate_tool_groups, ContentBlockView, MessageViewModel,
     ToolCategory,
 };
-use crate::ui::render_thread::RenderEvent;
 use crate::{
     config::PeriConfig,
     thread::{SqliteThreadStore, ThreadId, ThreadStore},
@@ -456,20 +456,7 @@ impl App {
                     .messages
                     .ephemeral_notes
                     .retain(|(a, _)| *a < user_msg_idx);
-                {
-                    let remaining = self
-                        .session_mgr
-                        .current_mut()
-                        .messages
-                        .view_messages
-                        .clone();
-                    let _ = self
-                        .session_mgr
-                        .current_mut()
-                        .messages
-                        .render_tx
-                        .try_send(RenderEvent::Rebuild(remaining));
-                }
+                // P5: No render_tx, no pipeline — truncate origin_messages only
                 // 截断 origin_messages（回滚 StateSnapshot 扩展的内容）
                 let pre_len = self.session_mgr.current_mut().metadata.pre_submit_state_len;
                 self.session_mgr
@@ -477,14 +464,6 @@ impl App {
                     .agent
                     .origin_messages
                     .truncate(pre_len);
-                // 清除 pipeline 状态
-                self.session_mgr.current_mut().messages.pipeline.done();
-                let restored = self.session_mgr.current_mut().agent.origin_messages.clone();
-                self.session_mgr
-                    .current_mut()
-                    .messages
-                    .pipeline
-                    .restore_completed(restored);
                 let mut ta = build_textarea(false);
                 ta.insert_str(text.clone());
                 self.session_mgr.current_mut().ui.textarea = ta;

@@ -1,5 +1,6 @@
 use super::*;
 use crate::thread::ThreadBrowser;
+use crate::ui::message_view::aggregate_batch_groups;
 
 impl App {
     pub fn scroll_up(&mut self) {
@@ -22,46 +23,28 @@ impl App {
         self.session_mgr.current_mut().ui.scroll_follow = false;
     }
 
-    /// 滚动到底部（恢复 follow 模式）
     pub fn scroll_to_bottom(&mut self) {
         self.session_mgr.current_mut().ui.scroll_offset = u16::MAX;
         self.session_mgr.current_mut().ui.scroll_follow = true;
     }
 
-    /// 滚动到顶部
     pub fn scroll_to_top(&mut self) {
         self.session_mgr.current_mut().ui.scroll_offset = 0;
         self.session_mgr.current_mut().ui.scroll_follow = false;
     }
 
-    /// 展开/折叠所有工具调用消息
     pub fn toggle_collapsed_messages(&mut self) {
         self.session_mgr.current_mut().ui.show_tool_messages =
             !self.session_mgr.current_mut().ui.show_tool_messages;
-        let show_tool_messages = self.session_mgr.current().ui.show_tool_messages;
-        let _ = self
-            .session_mgr
-            .current_mut()
-            .messages
-            .render_tx
-            .try_send(RenderEvent::ToggleToolMessages(show_tool_messages));
+        // P5: sync rendering, no render_tx needed — toggled by draw()
     }
 
-    /// 切换 Write/Edit 工具结果内联 diff 的显隐
     pub fn toggle_diff(&mut self) {
-        let new_visible = !self.session_mgr.current_mut().ui.diff_visible;
-        self.session_mgr.current_mut().ui.diff_visible = new_visible;
-
-        // ToggleDiff 会清空 hash 缓存并触发全量重渲染
-        let _ = self
-            .session_mgr
-            .current()
-            .messages
-            .render_tx
-            .try_send(RenderEvent::ToggleDiff(new_visible));
+        self.session_mgr.current_mut().ui.diff_visible =
+            !self.session_mgr.current_mut().ui.diff_visible;
+        // P5: sync rendering, diff visibility toggled by draw()
     }
 
-    /// 添加一个图片附件到待发送列表
     pub fn add_pending_attachment(&mut self, att: PendingAttachment) {
         self.session_mgr
             .current_mut()
@@ -70,7 +53,6 @@ impl App {
             .push(att);
     }
 
-    /// 删除最后一个图片附件
     pub fn pop_pending_attachment(&mut self) {
         self.session_mgr
             .current_mut()
@@ -81,8 +63,6 @@ impl App {
 
     // ─── Thread 操作 ──────────────────────────────────────────────────────────
 
-    /// 重置 AgentComm 会话状态（token tracker、重试、subagent 等）
-    /// 在 open_thread / new_thread 时调用，确保切换 thread 后上下文干净
     fn reset_agent_session(&mut self) {
         self.session_mgr
             .current_mut()
@@ -102,7 +82,6 @@ impl App {
         self.session_mgr.current_mut().spinner_state.reset();
     }
 
-    /// 恢复历史 thread：加载消息，关闭 browser
     pub fn open_thread(&mut self, thread_id: ThreadId) {
         let store = self.services.thread_store.clone();
         let tid = thread_id.clone();
@@ -123,27 +102,13 @@ impl App {
             .clear();
         self.session_mgr.current_mut().agent.origin_messages = base_msgs.clone();
 
-        // 使用统一管线转换：与流式路径共享同一个 messages_to_view_models()
-        let mut view_msgs = message_pipeline::MessagePipeline::messages_to_view_models(
-            &base_msgs,
-            &self.services.cwd,
-        );
+        let mut view_msgs = super::messages_to_view_models(&base_msgs, &self.services.cwd);
         // 历史恢复时聚合连续的已完成 SubAgentGroup 为批次汇总
-        message_pipeline::aggregate_batch_groups(&mut view_msgs);
+        aggregate_batch_groups(&mut view_msgs);
         self.session_mgr.current_mut().messages.view_messages = view_msgs;
-
-        // 同步 Pipeline 内部状态，确保后续流式事件能正确续接
-        self.session_mgr.current_mut().messages.pipeline.clear();
-        self.session_mgr
-            .current_mut()
-            .messages
-            .pipeline
-            .restore_completed(base_msgs.clone());
 
         let thread_id_str = thread_id.to_string();
         self.session_mgr.current_mut().current_thread_id = Some(thread_id);
-        // 同步 ACP 服务器端 session 状态：确保 state.history 包含当前 thread 的消息，
-        // 这样 /compact 命令和后续 prompt 能正确读到完整历史
         if let Some(ref acp_client) = self.acp_client {
             let client = acp_client.clone();
             let cwd = self.services.cwd.clone();
@@ -157,7 +122,6 @@ impl App {
                 })
             });
         }
-        // v2: ThreadBrowser panel close handled by state machine
         self.session_mgr
             .current_mut()
             .metadata
@@ -167,10 +131,8 @@ impl App {
         self.session_mgr.current_mut().todo_items.clear();
 
         self.reset_agent_session();
-        // 回收释放的内存给 OS
         crate::alloc_config::alloc_collect();
 
-        // 恢复 sticky header：找到 thread 中最后一条 Human 消息
         self.session_mgr.current_mut().metadata.last_human_message = base_msgs
             .iter()
             .filter_map(|m| {
@@ -187,23 +149,14 @@ impl App {
             })
             .next_back();
 
-        // 通知渲染线程加载历史消息
-        let vms = self.session_mgr.current().messages.view_messages.clone();
-        let _ = self
-            .session_mgr
-            .current_mut()
-            .messages
-            .render_tx
-            .try_send(RenderEvent::Rebuild(vms));
+        // P5: sync rendering, no render_tx needed
     }
 
     pub fn open_thread_with_feedback(&mut self, thread_id: ThreadId) {
         self.open_thread(thread_id);
     }
 
-    /// 新建 thread：清空消息，关闭 browser（thread id 在首次发送时创建）
     pub fn new_thread(&mut self) {
-        // Fire SessionEnd hooks before clearing session state
         {
             let mut hooks = self
                 .services
@@ -255,12 +208,6 @@ impl App {
             .agent
             .origin_messages
             .shrink_to_fit();
-        self.session_mgr.current_mut().messages.pipeline.clear();
-        self.session_mgr
-            .current_mut()
-            .messages
-            .pipeline
-            .shrink_to_fit();
         self.session_mgr.current_mut().current_thread_id = None;
         self.session_mgr.current_mut().todo_items.clear();
         self.session_mgr
@@ -268,7 +215,6 @@ impl App {
             .metadata
             .pending_attachments
             .clear();
-        // v2: ThreadBrowser panel close handled by state machine
         self.session_mgr.current_mut().langfuse.langfuse_session = None;
         self.session_mgr.current_mut().metadata.last_human_message = None;
         self.session_mgr.current_mut().messages.last_submitted_text = None;
@@ -276,7 +222,6 @@ impl App {
 
         self.reset_agent_session();
 
-        // 通过 ACP 协议创建新 session，清空 server 端 history
         if let Some(ref acp_client) = self.acp_client {
             let client = acp_client.clone();
             let cwd = self.services.cwd.clone();
@@ -290,21 +235,12 @@ impl App {
                 })
             });
         }
-        // 回收释放的内存给 OS
         crate::alloc_config::alloc_collect();
 
-        let _ = self
-            .session_mgr
-            .current_mut()
-            .messages
-            .render_tx
-            .try_send(RenderEvent::Clear);
-
-        // 归还已释放内存页给 OS
+        // P5: sync rendering, no render_tx Clear needed
         crate::alloc_config::alloc_collect();
     }
 
-    /// 打开 thread 浏览面板（通过命令触发）
     pub fn open_thread_browser(&mut self) {
         let store = self.services.thread_store.clone();
         let cwd = self.services.cwd.clone();
@@ -315,7 +251,6 @@ impl App {
         });
         let filtered: Vec<_> = threads.into_iter().filter(|t| t.cwd == cwd).collect();
 
-        // 检测当前 cwd 的 git 分支
         let branch = std::process::Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(&self.services.cwd)
@@ -325,12 +260,6 @@ impl App {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty());
 
-        // v2: ThreadBrowser panel is now managed by the state machine.
-        // Legacy open_panel() has been removed; use Effect::OpenPanel(PanelKind::ThreadBrowser).
-        // The /history command triggers this via normal_command_dispatch which
-        // goes through the keyboard path → SlashHintState → CommandSystem → eventually
-        // triggers the panel open via the legacy keyboard dispatch path.
-        // For now, push a system note indicating this panel needs v2 state machine access.
         let _browser = ThreadBrowser::new(filtered, self.services.thread_store.clone(), branch);
         self.session_mgr.current_mut().messages.push_system_note(
             "Thread browser panel: use /history via v2 state machine".to_string(),

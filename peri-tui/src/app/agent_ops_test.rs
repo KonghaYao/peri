@@ -1,64 +1,10 @@
-// ─── build_rebuild_all 事件处理测试 ──────────────────────────────────────
+// ─── P5: Pipeline-removed tests ──────────────────────────────────────────
 
-/// 场景1: build_rebuild_all 产生正确的 RebuildAll action
-#[test]
-fn test_build_rebuild_all_done() {
-    use peri_agent::messages::BaseMessage;
-
-    use super::message_pipeline::MessagePipeline;
-
-    let mut pipeline = MessagePipeline::new("/tmp".to_string());
-    pipeline.set_completed(vec![
-        BaseMessage::human("q1"),
-        BaseMessage::ai("a1"),
-        BaseMessage::human("q2"),
-        BaseMessage::ai("a2"),
-    ]);
-
-    let action = pipeline.build_rebuild_all(2);
-    if let super::message_pipeline::PipelineAction::RebuildAll {
-        prefix_len,
-        tail_vms,
-    } = action
-    {
-        assert_eq!(prefix_len, 2);
-        // tail 应包含 q2 + a2（从最后一条 Human 开始 reconcile）
-        assert!(tail_vms.len() >= 2, "tail_vms 应包含 q2 + a2");
-    } else {
-        panic!("Expected RebuildAll");
-    }
-}
-
-/// 场景2: build_rebuild_all 在 Interrupted 场景下正确工作
-#[test]
-fn test_build_rebuild_all_interrupted() {
-    use peri_agent::messages::BaseMessage;
-
-    use super::message_pipeline::MessagePipeline;
-
-    let mut pipeline = MessagePipeline::new("/tmp".to_string());
-    pipeline.set_completed(vec![
-        BaseMessage::human("q1"),
-        BaseMessage::ai("a1"),
-        BaseMessage::human("q2"),
-    ]);
-
-    let action = pipeline.build_rebuild_all(2);
-    if let super::message_pipeline::PipelineAction::RebuildAll {
-        prefix_len,
-        tail_vms,
-    } = action
-    {
-        assert_eq!(prefix_len, 2);
-        // tail 应包含 q2（从最后一条 Human 开始 reconcile）
-        assert!(!tail_vms.is_empty(), "tail_vms 应包含 q2");
-    } else {
-        panic!("Expected RebuildAll");
-    }
-}
+/// Tests 1-2 (build_rebuild_all) removed — MessagePipeline::build_rebuild_all deleted.
+/// Tests 3-8 (anchor insertion, discard, clamping) retained as they test
+/// the RebuildAll anchor logic now in agent_render.rs.
 
 /// 场景3: submit_message 记录 round_start_vm_idx（纯逻辑验证）
-/// round_start_vm_idx 在 UserBubble 推入之后设置，确保 RebuildAll 不截掉用户消息
 #[test]
 fn test_submit_message_records_round_start_vm_idx() {
     let mut messages = vec![
@@ -73,7 +19,6 @@ fn test_submit_message_records_round_start_vm_idx() {
     messages.push(crate::ui::message_view::MessageViewModel::user(
         "q3".to_string(),
     ));
-    // round_start_vm_idx 在 push 之后设置
     let round_start_vm_idx = messages.len();
     assert_eq!(round_start_vm_idx, 4);
     assert_eq!(
@@ -88,15 +33,13 @@ fn test_rebuildall_system_note_anchor_insertion() {
     use crate::ui::message_view::MessageViewModel;
 
     let mut view_messages: Vec<MessageViewModel> = vec![MessageViewModel::user("q1".to_string())];
-    let prefix_len = view_messages.len(); // round_start_vm_idx = 1
+    let prefix_len = view_messages.len(); // 1
 
-    // 模拟 agent 运行中添加 SystemNote（锚点 = 1）
     let anchor = view_messages.len();
     let vm = MessageViewModel::system("OAuth notification".to_string());
     view_messages.push(vm);
-    assert_eq!(view_messages.len(), 2, "AddMessage 后应有 2 条");
+    assert_eq!(view_messages.len(), 2);
 
-    // 模拟 RebuildAll：使用锚点机制
     let mut ephemeral_notes: Vec<(usize, MessageViewModel)> = vec![(
         anchor,
         MessageViewModel::system("OAuth notification".to_string()),
@@ -106,7 +49,6 @@ fn test_rebuildall_system_note_anchor_insertion() {
         &[],
     )];
 
-    // 过滤：锚点 >= prefix_len 的保留
     let saved_notes: Vec<(usize, MessageViewModel)> = ephemeral_notes
         .drain(..)
         .filter(|(a, _)| *a >= prefix_len)
@@ -115,7 +57,6 @@ fn test_rebuildall_system_note_anchor_insertion() {
     view_messages.drain(prefix_len..);
     view_messages.extend(tail_vms);
 
-    // 按锚点插入
     for (a, note_vm) in saved_notes {
         let tail_len = view_messages.len() - prefix_len;
         let insert_pos = (a - prefix_len).min(tail_len) + prefix_len;
@@ -123,8 +64,7 @@ fn test_rebuildall_system_note_anchor_insertion() {
         ephemeral_notes.push((insert_pos, note_vm));
     }
 
-    // 验证 SystemNote 在锚点位置（索引 1），而非末尾
-    assert_eq!(view_messages.len(), 3, "应有 3 条：User + SystemNote + AI");
+    assert_eq!(view_messages.len(), 3);
     assert!(
         matches!(&view_messages[1], MessageViewModel::SystemNote { content, .. } if content == "OAuth notification"),
         "SystemNote 应在位置 1（锚点位置），实际: {:?}",
@@ -138,9 +78,8 @@ fn test_system_note_discarded_when_anchor_in_prefix() {
     use crate::ui::message_view::MessageViewModel;
 
     let mut view_messages: Vec<MessageViewModel> = vec![MessageViewModel::user("q1".to_string())];
-    let prefix_len = view_messages.len(); // 1
+    let prefix_len = view_messages.len();
 
-    // SystemNote 锚点在 prefix 内（anchor=0 < prefix_len=1）
     let mut ephemeral_notes: Vec<(usize, MessageViewModel)> =
         vec![(0, MessageViewModel::system("old note".to_string()))];
 
@@ -164,12 +103,7 @@ fn test_system_note_discarded_when_anchor_in_prefix() {
         ephemeral_notes.push((insert_pos, note_vm));
     }
 
-    // SystemNote 被丢弃
-    assert_eq!(
-        view_messages.len(),
-        2,
-        "应有 2 条：User + AI（SystemNote 被丢弃）"
-    );
+    assert_eq!(view_messages.len(), 2);
     assert!(
         !view_messages
             .iter()
@@ -186,14 +120,12 @@ fn test_multiple_rebuildalls_preserve_note_position() {
     let mut view_messages: Vec<MessageViewModel> = vec![MessageViewModel::user("q1".to_string())];
     let prefix_len = 1;
 
-    // 添加 SystemNote（锚点 = 1）
     let anchor = view_messages.len();
     let vm = MessageViewModel::system("note".to_string());
     view_messages.push(vm);
     let mut ephemeral_notes: Vec<(usize, MessageViewModel)> =
         vec![(anchor, MessageViewModel::system("note".to_string()))];
 
-    // 第一次 RebuildAll
     let tail_vms_1 = vec![MessageViewModel::from_base_message(
         &peri_agent::messages::BaseMessage::ai("response1".to_string()),
         &[],
@@ -216,7 +148,6 @@ fn test_multiple_rebuildalls_preserve_note_position() {
         "第一次 RebuildAll 后 SystemNote 应在位置 1"
     );
 
-    // 第二次 RebuildAll（相同 prefix_len）
     let tail_vms_2 = vec![MessageViewModel::from_base_message(
         &peri_agent::messages::BaseMessage::ai("response2".to_string()),
         &[],
@@ -248,10 +179,9 @@ fn test_multiple_system_notes_maintain_order() {
     let mut view_messages: Vec<MessageViewModel> = vec![MessageViewModel::user("q1".to_string())];
     let prefix_len = 1;
 
-    // 添加两个 SystemNote
-    let anchor1 = view_messages.len(); // 1
+    let anchor1 = view_messages.len();
     view_messages.push(MessageViewModel::system("note1".to_string()));
-    let anchor2 = view_messages.len(); // 2
+    let anchor2 = view_messages.len();
     view_messages.push(MessageViewModel::system("note2".to_string()));
 
     let mut ephemeral_notes: Vec<(usize, MessageViewModel)> = vec![
@@ -278,7 +208,6 @@ fn test_multiple_system_notes_maintain_order() {
         ephemeral_notes.push((insert_pos, note_vm));
     }
 
-    // 顺序：User(0), note1(1), note2(2), AI(3)
     assert_eq!(view_messages.len(), 4);
     assert!(
         matches!(&view_messages[1], MessageViewModel::SystemNote { content, .. } if content == "note1"),
@@ -298,12 +227,10 @@ fn test_system_note_clamped_to_end_when_tail_shorter() {
     let mut view_messages: Vec<MessageViewModel> = vec![MessageViewModel::user("q1".to_string())];
     let prefix_len = 1;
 
-    // SystemNote 锚点 = 5（远超当前 view_messages 长度）
     let anchor = 5;
     let mut ephemeral_notes: Vec<(usize, MessageViewModel)> =
         vec![(anchor, MessageViewModel::system("late note".to_string()))];
 
-    // tail 只有 1 条消息
     let tail_vms = vec![MessageViewModel::from_base_message(
         &peri_agent::messages::BaseMessage::ai("response".to_string()),
         &[],
@@ -322,7 +249,6 @@ fn test_system_note_clamped_to_end_when_tail_shorter() {
         ephemeral_notes.push((insert_pos, note_vm));
     }
 
-    // clamp 到末尾：User(0), AI(1), late note(2)
     assert_eq!(view_messages.len(), 3);
     assert!(
         matches!(&view_messages[2], MessageViewModel::SystemNote { content, .. } if content == "late note"),

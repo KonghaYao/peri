@@ -1,4 +1,4 @@
-use super::{message_pipeline::PipelineAction, *};
+use super::*;
 use crate::ui::message_view::MessageViewModel;
 
 /// 后台任务完成的事件参数
@@ -12,7 +12,6 @@ pub(crate) struct BackgroundTaskResult {
     pub child_thread_id: Option<String>,
 }
 
-/// 构建后台任务完成的显示通知文本（截断版，供 UI 展示）
 fn build_bg_display_notification(
     task_id: &str,
     agent_name: &str,
@@ -24,18 +23,13 @@ fn build_bg_display_notification(
 ) -> String {
     let short_id = &task_id[..8.min(task_id.len())];
     if success {
-        let output_preview: String = output
+        let _output_preview: String = output
             .lines()
             .next()
             .unwrap_or("")
             .chars()
             .take(80)
             .collect();
-        let _preview = if output.chars().count() > 80 || output.lines().count() > 1 {
-            format!("{}...", output_preview)
-        } else {
-            output_preview
-        };
         lc.tr_args(
             "app-bg-task-done",
             &[
@@ -72,7 +66,7 @@ impl App {
             duration_ms,
             child_thread_id,
         } = result;
-        // 优先按 child_thread_id 匹配 background_agents，回退到 agent_name
+
         if let Some(ref ctid) = child_thread_id {
             if let Some(pos) = self
                 .session_mgr
@@ -84,7 +78,6 @@ impl App {
                 self.session_mgr.current_mut().background_agents.remove(pos);
             }
         } else {
-            // 回退：按 agent_name 匹配
             if let Some(pos) = self
                 .session_mgr
                 .current_mut()
@@ -96,7 +89,6 @@ impl App {
             }
         }
 
-        // 聚焦检查：用 child_thread_id 直接比较 focused_instance_id
         let was_focused = child_thread_id.as_deref()
             == self
                 .session_mgr
@@ -104,20 +96,18 @@ impl App {
                 .focused_instance_id
                 .as_deref();
 
-        // 聚焦检查：如果被移除的是当前聚焦的 agent，退出聚焦
         if was_focused {
             self.session_mgr.current_mut().focused_instance_id = None;
             self.session_mgr.current_mut().ui.bg_bar_cursor = None;
             self.request_rebuild();
         }
 
-        // 用于 LLM 上下文的纯文本通知
-        let short_id = &task_id[..8.min(task_id.len())];
+        let short_id_state = &task_id[..8.min(task_id.len())];
         let state_notification = if success {
             self.services.lc.tr_args(
                 "app-bg-task-done-with-result",
                 &[
-                    ("id".into(), short_id.into()),
+                    ("id".into(), short_id_state.into()),
                     ("agent".into(), agent_name.clone().into()),
                     ("tools".into(), (tool_calls_count as i64).into()),
                     ("duration".into(), (duration_ms as i64).into()),
@@ -128,17 +118,13 @@ impl App {
             self.services.lc.tr_args(
                 "app-bg-task-failed-with-error",
                 &[
-                    ("id".into(), short_id.into()),
+                    ("id".into(), short_id_state.into()),
                     ("agent".into(), agent_name.clone().into()),
                     ("error".into(), output.clone().into()),
                 ],
             )
         };
 
-        // 将通知加入 origin_messages，使下一轮 agent 执行可见。
-        // 仅在 executor 已结束（bg_task_state.agent_done_pending）时直接 push 作为兜底；
-        // executor 运行期间的通知由 drain_notifications → StateSnapshot 路径写入，
-        // 此处 push 会导致 origin_messages 中出现重复消息。
         if self
             .session_mgr
             .current_mut()
@@ -151,12 +137,10 @@ impl App {
             );
         }
 
-        // 尝试在 view_messages 中找到匹配的 SubAgentGroup 并更新。
         let short_id = &task_id[..8.min(task_id.len())];
         let mut found_and_updated = false;
         let session = &mut self.session_mgr.current_mut();
 
-        // 第一遍：按 instance_id 精确匹配（child_thread_id → SubAgentGroup.instance_id）
         if let Some(ref ctid) = child_thread_id {
             for vm in &mut session.messages.view_messages {
                 if let MessageViewModel::SubAgentGroup {
@@ -186,9 +170,6 @@ impl App {
             }
         }
 
-        // 第二遍（兜底）：按 agent_name 匹配 is_running 的 SubAgentGroup
-        // 同名并发场景：优先匹配 final_result 为空的 group（尚未被更新），
-        // 防止多个同名 bg agent 的 completion 事件反复匹配同一个 group。
         if !found_and_updated {
             let mut best_idx: Option<usize> = None;
             for (idx, vm) in session.messages.view_messages.iter().enumerate() {
@@ -203,9 +184,8 @@ impl App {
                     if *is_background && *is_running && agent_id == &agent_name {
                         if final_result.is_none() {
                             best_idx = Some(idx);
-                            break; // 精确匹配：尚未被更新的 group
+                            break;
                         }
-                        // 兜底：group 正在运行但已被更新（不应发生）
                         if best_idx.is_none() {
                             best_idx = Some(idx);
                         }
@@ -232,28 +212,12 @@ impl App {
             }
         }
 
-        // 同步更新管线状态（SubAgentState + frozen VM），
-        // 确保 reconcile/rebuild 产生的 SubAgentGroup 携带完成状态。
-        // 不依赖 child_thread_id——无则用 agent_name 兜底匹配。
-        self.session_mgr
-            .current_mut()
-            .messages
-            .pipeline
-            .notify_bg_completed(
-                child_thread_id.as_deref(),
-                &agent_name,
-                &output,
-                success,
-                tool_calls_count,
-            );
+        // P5: No pipeline.notify_bg_completed() — SubAgentGroup state updated directly above
 
         if found_and_updated {
-            // 成功更新 SubAgentGroup，触发 RebuildAll
             self.request_rebuild();
         } else {
-            // 未找到匹配的 SubAgentGroup，回退到创建 ToolBlock（兼容现有行为）
             let display_name = format!("bg:{}", agent_name);
-            // 输出截断为单行（取第一行，再截取前 80 字符）
             let first_line = output.lines().next().unwrap_or("");
             let one_line = if first_line.chars().count() > 80 {
                 let truncated: String = first_line.chars().take(80).collect();
@@ -274,22 +238,12 @@ impl App {
             let mut vm =
                 MessageViewModel::tool_block(display_name.clone(), header_info, None, !success);
             if let MessageViewModel::ToolBlock { collapsed, .. } = &mut vm {
-                *collapsed = true; // 始终折叠，摘要已在 header 中
+                *collapsed = true;
                 vm.recompute_hash();
             }
-            self.apply_pipeline_action(PipelineAction::AddMessage(vm));
+            self.apply_add_message(vm);
         }
 
-        // Workflow 完成 → 走 pending_messages 路径（用户输入缓存机制）。
-        // Workflow 完成通知与用户主动输入语义更接近（都需 agent review
-        // state.json），且优先级排序明确，因此走 pending_messages 而非 v2 queue。
-        //
-        // 异步事件（cron/channel/bg_results 等）由 Agent 侧 stages/end.rs
-        // 统一处理，与本路径互不干扰。
-        //
-        // 若 agent 空闲（loading=false），return (true, false, true) 退出事件循环，
-        // poll_agent 下一帧检查 pending_messages 并触发 flush → submit_message。
-        // 若 agent 运行中（loading=true），pending_messages 由 handle_done → flush_pending_messages 消费。
         if agent_name.starts_with("workflow:") {
             let workflow_name = agent_name.strip_prefix("workflow:").unwrap_or(&agent_name);
             let continuation_text = format!(
@@ -308,11 +262,9 @@ impl App {
             if !loading {
                 return (true, false, true);
             }
-            // Agent 运行中：pending_messages 由 handle_done → flush_pending_messages 消费。
             return (true, false, false);
         }
 
-        // 累积当前完成通知到 bg_task_state.pre_done_completions（显示文本）
         let display_notification = build_bg_display_notification(
             &task_id,
             &agent_name,
@@ -329,7 +281,6 @@ impl App {
             .pre_done_completions
             .push(display_notification);
 
-        // 累积结构化结果到 bg_task_state.pre_done_results（供 auto-continuation 注入合成消息）
         self.session_mgr
             .current_mut()
             .agent
@@ -346,7 +297,6 @@ impl App {
                 child_thread_id: child_thread_id.clone(),
             });
 
-        // 如果 agent 已完成（Done）且所有后台任务都已完成，关闭通道并自动提交 continuation
         if self
             .session_mgr
             .current_mut()
@@ -355,13 +305,11 @@ impl App {
             .agent_done_pending
             && self.session_mgr.current_mut().background_agents.is_empty()
         {
-            tracing::info!("all background tasks completed, draining pre_done_results");
             self.session_mgr
                 .current_mut()
                 .agent
                 .bg_task_state
                 .agent_done_pending = false;
-            // 使用结构化结果（而非显示文本）驱动 continuation
             let _all_results: Vec<_> = self
                 .session_mgr
                 .current_mut()
@@ -380,8 +328,6 @@ impl App {
             .agent_done_pending
             && self.session_mgr.current_mut().background_agents.is_empty()
         {
-            // 竞态修复：agent 尚未 Done，但所有后台任务已完成。
-            // 暂存通知已在上方 push，待 Done 处理时检查此字段并处理。
             tracing::info!(
                 "background task completed before Done, buffering notification for deferred continuation"
             );
@@ -390,8 +336,6 @@ impl App {
         (true, false, false)
     }
 
-    /// 后台 agent 工具调用进度更新（BgToolStep 事件）
-    /// 递增 RunningBgAgent.tool_count，用于 bg_agent_bar 实时显示
     pub(crate) fn handle_bg_tool_step(&mut self, child_thread_id: &str) {
         let session = self.session_mgr.current_mut();
         if let Some(agent) = session

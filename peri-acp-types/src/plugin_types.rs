@@ -22,6 +22,7 @@ pub enum MarketplaceSourceDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CommandEntryDto {
     pub name: String,
+    pub description: String,
     pub source: CommandSourceDto,
 }
 

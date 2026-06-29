@@ -1,5 +1,5 @@
 use peri_acp::transport::types::RequestId;
-use peri_middlewares::hitl::BatchItem;
+use peri_middlewares::hitl::BatchItem; // P4b: type-dependency, oneshot channels
 
 use super::*;
 

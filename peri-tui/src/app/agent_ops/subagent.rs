@@ -2,19 +2,16 @@
 //! Extracted from original agent_ops.rs (2026-05-20 split).
 
 use super::super::*;
-use crate::app::{message_pipeline::PipelineAction, App};
 
 impl App {
     pub(super) fn handle_token_usage_update(
         &mut self,
         usage: peri_acp::event::TokenUsageDto,
     ) -> (bool, bool, bool) {
-        // SubAgent 的 TokenUsageUpdate 不应污染父 agent 的 tracker
         if self.session_mgr.current_mut().agent.subagent_depth > 0 {
             return (true, false, false);
         }
 
-        // 转回 peri_agent 类型供 tracker 使用（短期：tracker 接口与 peri_agent 强绑定）
         let pa_usage = peri_agent::llm::types::TokenUsage {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
@@ -23,14 +20,12 @@ impl App {
             request_id: usage.request_id.clone(),
         };
 
-        // 累积到会话追踪器
         self.session_mgr
             .current_mut()
             .agent
             .session_token_tracker
             .accumulate(&pa_usage);
 
-        // 缓存率检查：当次命中率低于 80% 时显示黄色提示
         let rate = self
             .session_mgr
             .current_mut()
@@ -58,7 +53,6 @@ impl App {
                 Some(&sid),
                 None,
             );
-            // 检查配置：show_cache_warning 为 false 时跳过消息流展示
             if self.services.peri_config.read().config.show_cache_warning {
                 let percentage = (rate * 100.0) as u32;
                 let req_id = tracker.last_request_id.as_deref().unwrap_or("-");
@@ -73,10 +67,9 @@ impl App {
                     )
                 );
                 let vm = MessageViewModel::system(msg);
-                self.apply_pipeline_action(PipelineAction::AddMessage(vm));
+                self.apply_add_message(vm);
             }
         }
-        // 更新 spinner 的 token 显示（仅当次调用的 token，不累计）
         let current_tokens = pa_usage.input_tokens as usize + pa_usage.output_tokens as usize;
         self.session_mgr
             .current_mut()
@@ -103,23 +96,30 @@ impl App {
                     started_at: std::time::Instant::now(),
                     tool_count: 0,
                 });
+            // P5: Background subagents don't increment subagent_depth
+            // (they run in parallel, not nested within the main agent flow)
+        } else {
+            self.session_mgr.current_mut().agent.subagent_depth += 1;
         }
-        self.session_mgr.current_mut().agent.subagent_depth += 1;
-        // Pipeline：创建 SubAgentGroup VM
-        let actions = self
-            .session_mgr
-            .current_mut()
-            .messages
-            .pipeline
-            .handle_event(AgentEvent::SubAgentStart {
-                agent_id,
-                instance_id,
-                task_preview,
-                is_background,
-            });
-        for action in actions {
-            self.apply_pipeline_action(action);
-        }
+
+        // P5: Create SubAgentGroup VM directly instead of through pipeline
+        let vm = MessageViewModel::SubAgentGroup {
+            agent_id: agent_id.clone(),
+            instance_id: Some(instance_id.clone()),
+            task_preview: task_preview.clone(),
+            is_running: true,
+            is_background,
+            total_steps: 0,
+            recent_messages: Vec::new(),
+            collapsed: false,
+            bg_hash: None,
+            final_result: None,
+            is_error: false,
+            batch_agents: Vec::new(),
+            content_hash: 0,
+        };
+        self.apply_add_message(vm);
+
         self.request_rebuild();
         (true, false, false)
     }

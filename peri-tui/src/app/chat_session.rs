@@ -40,23 +40,12 @@ impl ChatSession {
         skills: Vec<SkillMetadataDto>,
         lc: &crate::i18n::LcRegistry,
         diff_enabled: bool,
-        streaming_mode: Option<String>,
+        _streaming_mode: Option<String>,
     ) -> Self {
-        let (render_tx, render_cache, render_notify) =
-            crate::ui::render_thread::spawn_render_thread(80);
         let commands = CommandSystem::new(command_registry, skills.clone(), lc);
-        let mut messages = MessageState::new(
-            cwd.clone(),
-            render_tx.clone(),
-            std::sync::Arc::clone(&render_cache),
-            std::sync::Arc::clone(&render_notify),
-        );
-        if let Some(ref mode) = streaming_mode {
-            messages.pipeline.init_streaming_mode_from_config(mode);
-        }
         Self {
             ui: UiState::new(super::build_textarea(false), &cwd, diff_enabled),
-            messages,
+            messages: MessageState::new(),
             commands,
             metadata: SessionMetadata::new(),
             agent: AgentComm::default(),

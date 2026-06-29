@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use parking_lot::RwLock;
-use peri_agent::interaction::ChannelState;
+use peri_agent::interaction::ChannelState; // P4b: runtime dependency
 use peri_middlewares::{
     mcp::{McpClientPool, McpInitStatus},
     plugin::PluginLoadResult,

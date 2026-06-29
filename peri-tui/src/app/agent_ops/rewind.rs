@@ -3,7 +3,7 @@
 //! 用户双击 ESC 触发 rewind 选择器，可选择回退到历史中的某个用户消息节点。
 //! 回退通过向 ACP server 发送 `/rewind` 命令实现。
 
-use peri_agent::messages::{BaseMessage, ContentBlock};
+use peri_agent::messages::{BaseMessage, ContentBlock}; // P4b: type-dependency
 
 use super::*;
 use crate::app::{rewind_prompt::RewindMode, InteractionPrompt};

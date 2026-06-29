@@ -144,7 +144,7 @@ fn format_input_preview(input: &serde_json::Value, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use peri_middlewares::hitl::BatchItem;
+    use peri_middlewares::hitl::BatchItem; // P4b: runtime dependency, input: Value field
 
     use crate::app::{App, HitlBatchPrompt, InteractionPrompt};
     include!("hitl_test.rs");

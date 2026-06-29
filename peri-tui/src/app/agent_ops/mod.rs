@@ -75,20 +75,68 @@ impl App {
                         .spinner_state
                         .set_verb(Some("思考中…"));
                 }
-                // Pipeline：更新 SubAgentGroup（is_running=false, final_result）
-                let actions = self
-                    .session_mgr
-                    .current_mut()
-                    .messages
-                    .pipeline
-                    .handle_event(AgentEvent::SubAgentEnd {
-                        result,
-                        is_error,
-                        agent_id,
-                        instance_id,
-                    });
-                for action in actions {
-                    self.apply_pipeline_action(action);
+                // P5: Update SubAgentGroup directly instead of through pipeline
+                let session = self.session_mgr.current_mut();
+                let mut found = false;
+                let instance_id_ref = instance_id.as_deref();
+                for vm in &mut session.messages.view_messages {
+                    if let MessageViewModel::SubAgentGroup {
+                        instance_id: vm_instance_id,
+                        is_running,
+                        final_result,
+                        is_error: vm_is_error,
+                        ..
+                    } = vm
+                    {
+                        if *is_running
+                            && vm_instance_id.as_deref() == instance_id_ref
+                            && instance_id_ref.is_some()
+                        {
+                            *is_running = false;
+                            *final_result = Some(result.clone());
+                            *vm_is_error = is_error;
+                            vm.recompute_hash();
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    let agent_id_ref = agent_id.as_deref();
+                    for vm in &mut session.messages.view_messages {
+                        if let MessageViewModel::SubAgentGroup {
+                            agent_id: vm_agent_id,
+                            is_running,
+                            final_result,
+                            is_error: vm_is_error,
+                            instance_id: vm_instance_id,
+                            ..
+                        } = vm
+                        {
+                            if *is_running
+                                && vm_agent_id.as_str() == agent_id_ref.unwrap_or("")
+                                && vm_instance_id.is_none()
+                            {
+                                *is_running = false;
+                                *final_result = Some(result.clone());
+                                *vm_is_error = is_error;
+                                vm.recompute_hash();
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                let _ = session;
+                if !found {
+                    let display_name = format!("Agent({})", agent_id.as_deref().unwrap_or("?"));
+                    let mut vm =
+                        MessageViewModel::tool_block(display_name, result.clone(), None, is_error);
+                    if let MessageViewModel::ToolBlock { collapsed, .. } = &mut vm {
+                        *collapsed = false;
+                        vm.recompute_hash();
+                    }
+                    self.apply_add_message(vm);
                 }
                 self.request_rebuild();
                 (true, false, false)
@@ -157,12 +205,12 @@ impl App {
                 stop_reason: _,
             } => self.handle_token_usage_update(usage),
             AgentEvent::ToolStart {
-                tool_call_id,
+                tool_call_id: _,
                 name,
                 display,
                 args,
-                input,
-                source_agent_id,
+                input: _,
+                source_agent_id: _,
             } => {
                 self.session_mgr.current_mut().agent.retry_status = None;
                 self.session_mgr.current_mut().agent.agent_replied = true;
@@ -182,23 +230,10 @@ impl App {
                     .current_mut()
                     .spinner_state
                     .set_verb(Some(&verb_text));
-                // Pipeline：创建 ToolBlock / 路由进 SubAgentGroup
-                let actions = self
-                    .session_mgr
-                    .current_mut()
-                    .messages
-                    .pipeline
-                    .handle_event(AgentEvent::ToolStart {
-                        tool_call_id,
-                        name,
-                        display,
-                        args,
-                        input,
-                        source_agent_id,
-                    });
-                for action in actions {
-                    self.apply_pipeline_action(action);
-                }
+                // P5: No pipeline — create ToolBlock directly
+                let header = format!("{} {}", display, args);
+                let tool_vm = MessageViewModel::tool_block(name.clone(), header, None, false);
+                self.apply_add_message(tool_vm);
                 self.request_rebuild();
                 (true, false, false)
             }
@@ -207,50 +242,51 @@ impl App {
                 name,
                 output,
                 is_error,
-                source_agent_id,
+                source_agent_id: _,
             } => {
-                let actions = self
-                    .session_mgr
-                    .current_mut()
-                    .messages
-                    .pipeline
-                    .handle_event(AgentEvent::ToolEnd {
-                        tool_call_id,
-                        name,
-                        output,
-                        is_error,
-                        source_agent_id,
-                    });
-                for action in actions {
-                    self.apply_pipeline_action(action);
+                // P5: Update ToolBlock directly in view_messages
+                let session = self.session_mgr.current_mut();
+                let mut found = false;
+                for vm in &mut session.messages.view_messages {
+                    if let MessageViewModel::ToolBlock {
+                        tool_call_id: vm_tc_id,
+                        content,
+                        collapsed,
+                        is_error: vm_is_error,
+                        ..
+                    } = vm
+                    {
+                        if vm_tc_id == &tool_call_id {
+                            *content = output.clone();
+                            *collapsed = false; // auto-expand on completion
+                            *vm_is_error = is_error;
+                            vm.recompute_hash();
+                            found = true;
+                            break;
+                        }
+                    }
                 }
+                if !found {
+                    let mut vm =
+                        MessageViewModel::tool_block(name.clone(), output.clone(), None, is_error);
+                    vm.recompute_hash();
+                    session.messages.view_messages.push(vm);
+                }
+                let _ = session;
                 self.request_rebuild();
                 (true, false, false)
             }
             AgentEvent::AssistantChunk {
-                chunk,
-                source_agent_id,
+                chunk: _,
+                source_agent_id: _,
             } => {
                 self.session_mgr.current_mut().agent.retry_status = None;
                 self.session_mgr.current_mut().agent.agent_replied = true;
-                // 跨切面：spinner
                 self.session_mgr
                     .current_mut()
                     .spinner_state
                     .set_mode(peri_widgets::SpinnerMode::Responding);
-                // Pipeline：路由到 SubAgentGroup 或父 Agent AssistantBubble
-                let actions = self
-                    .session_mgr
-                    .current_mut()
-                    .messages
-                    .pipeline
-                    .handle_event(AgentEvent::AssistantChunk {
-                        chunk,
-                        source_agent_id,
-                    });
-                for action in actions {
-                    self.apply_pipeline_action(action);
-                }
+                // P5: No pipeline — streaming chunks handled by sync rendering
                 (true, false, false)
             }
             AgentEvent::Done => self.handle_done(),
@@ -279,15 +315,7 @@ impl App {
                     .agent
                     .origin_messages
                     .extend(msgs.clone());
-                let actions = self
-                    .session_mgr
-                    .current_mut()
-                    .messages
-                    .pipeline
-                    .handle_event(AgentEvent::StateSnapshot(msgs));
-                for action in actions {
-                    self.apply_pipeline_action(action);
-                }
+                // P5: No pipeline — StateSnapshot updates origin_messages only
                 self.request_rebuild();
                 (true, false, false)
             }
@@ -298,27 +326,23 @@ impl App {
                     origin_msgs_before = self.session_mgr.current().agent.origin_messages.len(),
                     "TurnCommitted received in TUI (v2 iteration boundary)"
                 );
-                // 子 Agent 的 TurnCommitted 不应污染父 Agent 的 origin_messages
                 if self.session_mgr.current_mut().agent.subagent_depth > 0 {
                     return (true, false, false);
                 }
-                // commit_iteration 在 pipeline 内部是「替换」语义，但 origin_messages
-                // 历史上是 append 累积——保留 extend 行为以兼容持久化路径
                 self.session_mgr
                     .current_mut()
                     .agent
                     .origin_messages
                     .extend(messages.clone());
-                let actions = self
-                    .session_mgr
-                    .current_mut()
-                    .messages
-                    .pipeline
-                    .handle_event(AgentEvent::TurnCommitted { messages, steps });
-                for action in actions {
-                    self.apply_pipeline_action(action);
-                }
-                self.request_rebuild();
+                // P5: No pipeline — TurnCommitted updates origin_messages then rebuilds
+                // Convert origin_messages to view_messages for sync rendering
+                let cwd = self.services.cwd.clone();
+                let view_msgs = super::messages_to_view_models(
+                    &self.session_mgr.current().agent.origin_messages,
+                    &cwd,
+                );
+                let prefix_len = self.session_mgr.current().messages.round_start_vm_idx;
+                self.apply_rebuild_all(prefix_len, view_msgs);
                 (true, false, false)
             }
             AgentEvent::CompactCompleted {
@@ -352,16 +376,8 @@ impl App {
                     });
                 (true, false, false)
             }
-            AgentEvent::AiReasoning(text) => {
-                let actions = self
-                    .session_mgr
-                    .current_mut()
-                    .messages
-                    .pipeline
-                    .handle_event(AgentEvent::AiReasoning(text));
-                for action in actions {
-                    self.apply_pipeline_action(action);
-                }
+            AgentEvent::AiReasoning(_text) => {
+                // P5: No pipeline — reasoning displayed in final message render
                 (true, false, false)
             }
             AgentEvent::BackgroundTaskCompleted {

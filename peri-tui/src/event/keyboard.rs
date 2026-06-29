@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::KeyEventKind;
 use tui_textarea::Input;
 
 use super::Action;
@@ -10,97 +10,14 @@ mod bar_focus;
 mod normal_keys;
 mod popups;
 mod setup_wizard;
-mod shortcuts;
+// NOTE (B3 Gap 1): shortcuts.rs deleted — all its shortcuts (BackTab,
+// Ctrl+T/Shift+T, Ctrl+B, Ctrl+O, Alt+M, Alt+Shift+M) are now dispatched by
+// the state machine (idle.rs). is_sm_handled_shortcut() prevents
+// double-execution.
 
-// ---------------------------------------------------------------------------
-// macOS key-binding compatibility layer
-// ---------------------------------------------------------------------------
-// On macOS, the Option (Alt) key acts as a character compose modifier.
-// Terminals emit a composed Unicode character *without* any modifier flags.
-// We maintain a central mapping table so each shortcut only needs to be
-// defined once, keeping the macOS workaround auditable.
-// ---------------------------------------------------------------------------
-
-/// A cross-platform key-binding definition that accounts for macOS Option-key
-/// character composition.
-pub(super) struct KeyBinding {
-    /// Human-readable label (for status bar / docs).
-    label: &'static str,
-    /// Character produced on macOS when Option (+ optional Shift) is held.
-    macos_char: Option<char>,
-    /// Required modifiers on non-macOS terminals (Linux/Windows).
-    modifiers: KeyModifiers,
-    /// The primary key code (ignoring macOS compose).
-    key: KeyCode,
-}
-
-impl KeyBinding {
-    /// Returns `true` if `key_event` matches this binding on *any* platform.
-    pub(super) fn matches(&self, key_event: &ratatui::crossterm::event::KeyEvent) -> bool {
-        // macOS path: terminal emits a composed char with no modifiers.
-        if let Some(ch) = self.macos_char {
-            if matches!(key_event.code, KeyCode::Char(c) if c == ch) {
-                return true;
-            }
-        }
-        // Standard path: check modifiers + key code.
-        let mods_ok = key_event.modifiers.contains(self.resolved_modifiers());
-        let key_ok = match (&self.key, &key_event.code) {
-            (KeyCode::Char(a), KeyCode::Char(b)) => a.eq_ignore_ascii_case(b),
-            (a, b) => a == b,
-        };
-        mods_ok && key_ok
-    }
-
-    /// Resolve the actual modifiers needed. bitflags `|` is not const,
-    /// so multi-flag bindings store `KeyModifiers::empty()` and reconstruct here.
-    fn resolved_modifiers(&self) -> KeyModifiers {
-        match self.label {
-            "Alt+Shift+M" => KeyModifiers::ALT | KeyModifiers::SHIFT,
-            "Ctrl+Shift+T" => KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            _ => self.modifiers,
-        }
-    }
-}
-
-/// Central shortcut registry.  Add new shortcuts here — the `matches()` call
-/// in each handler block is the only site that needs updating.
-pub(super) static SHORTCUT_CYCLE_MODE: KeyBinding = KeyBinding {
-    label: "Alt+M",
-    macos_char: Some('µ'),
-    modifiers: KeyModifiers::ALT,
-    key: KeyCode::Char('m'),
-};
-
-pub(super) static SHORTCUT_CYCLE_PROVIDER: KeyBinding = KeyBinding {
-    label: "Alt+Shift+M",
-    macos_char: Some('Â'),
-    modifiers: KeyModifiers::empty(), // resolved_modifiers() returns ALT|SHIFT
-    key: KeyCode::Char('m'),
-};
-
-// Ctrl+T / Ctrl+Shift+T: cross-platform model/provider cycling.
-// Ctrl combos have no macOS composition issue, so macos_char is None.
-pub(super) static SHORTCUT_CTRL_CYCLE_MODE: KeyBinding = KeyBinding {
-    label: "Ctrl+T",
-    macos_char: None,
-    modifiers: KeyModifiers::CONTROL,
-    key: KeyCode::Char('t'),
-};
-
-pub(super) static SHORTCUT_CTRL_CYCLE_PROVIDER: KeyBinding = KeyBinding {
-    label: "Ctrl+Shift+T",
-    macos_char: None,
-    modifiers: KeyModifiers::empty(), // resolved_modifiers() returns CONTROL|SHIFT
-    key: KeyCode::Char('t'),
-};
-
-pub(super) static SHORTCUT_BG_BAR: KeyBinding = KeyBinding {
-    label: "Ctrl+B",
-    macos_char: None,
-    modifiers: KeyModifiers::CONTROL,
-    key: KeyCode::Char('b'),
-};
+// NOTE (B3 Gap 1): KeyBinding struct and all SHORTCUT_* statics deleted —
+// macOS Option-key composed characters are now handled directly in
+// idle.rs (Char('\u{b5}') → CycleModel, Char('\u{c2}') → CycleProvider).
 
 /// Returns the platform-appropriate label for the model-cycling shortcut.
 pub fn cycle_model_label() -> &'static str {
@@ -129,11 +46,6 @@ pub fn handle_key_event(
         return Ok(Some(action));
     }
     if let Some(action) = bar_focus::handle_focused_only(app, &key_event) {
-        return Ok(Some(action));
-    }
-
-    // Stage 3-6: Shortcuts (BackTab, Ctrl+B, Ctrl+T, Ctrl+Shift+T)
-    if let Some(action) = shortcuts::handle_shortcuts(app, &key_event) {
         return Ok(Some(action));
     }
 

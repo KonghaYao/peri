@@ -668,14 +668,18 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                             .messages_area
                             .map(|a| a.width.saturating_sub(1))
                             .unwrap_or(0);
-                        let cache = app.session_mgr.current_mut().messages.render_cache.read();
-                        let text = crate::app::text_selection::extract_selected_text(
-                            start,
-                            end,
-                            &cache.wrap_map,
-                            usable_width,
-                        );
-                        drop(cache);
+                        let text = if let Some(ref cache) =
+                            app.session_mgr.current().messages.message_cache
+                        {
+                            crate::app::text_selection::extract_selected_text(
+                                start,
+                                end,
+                                &cache.wrap_map,
+                                usable_width,
+                            )
+                        } else {
+                            None
+                        };
                         app.session_mgr
                             .current_mut()
                             .ui

@@ -21,7 +21,7 @@ use ratatui::Frame;
 use tui_textarea::Input;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use peri_agent::thread::ThreadMeta;
+use peri_agent::thread::ThreadMeta; // P4b: type-dependency, full runtime fields
 use peri_widgets::BorderedPanel;
 
 use crate::app::panel_types::PanelKind;

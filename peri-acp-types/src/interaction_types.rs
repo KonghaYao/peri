@@ -21,7 +21,10 @@ pub enum HitlDecisionDto {
 /// AskUser 问题数据（对齐 peri_middlewares::ask_user::AskUserQuestionData）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AskUserQuestionDataDto {
+    pub tool_call_id: String,
     pub question: String,
+    pub header: String,
+    pub multi_select: bool,
     pub options: Vec<AskUserOptionDto>,
 }
 

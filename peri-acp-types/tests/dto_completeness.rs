@@ -72,6 +72,7 @@ fn test_plugin_dto_set() {
     let _src = plugin_types::MarketplaceSourceDto::Git { url: "x".into() };
     let _cmd = plugin_types::CommandEntryDto {
         name: "c1".into(),
+        description: "desc".into(),
         source: plugin_types::CommandSourceDto::Builtin,
     };
 }
@@ -111,7 +112,10 @@ fn test_hitl_and_ask_user_dtos() {
     };
     let _decision = interaction_types::HitlDecisionDto::Accept;
     let _q = interaction_types::AskUserQuestionDataDto {
+        tool_call_id: "tc_q".into(),
         question: "q?".into(),
+        header: "hdr".into(),
+        multi_select: false,
         options: vec![],
     };
     let _thread = interaction_types::ThreadMetaDto {

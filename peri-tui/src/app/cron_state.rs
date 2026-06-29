@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use parking_lot::Mutex;
-use peri_middlewares::cron::CronScheduler;
+use peri_middlewares::cron::CronScheduler; // P4b: runtime dependency
 
 /// Cron 状态（App 子结构体）
 pub struct CronState {

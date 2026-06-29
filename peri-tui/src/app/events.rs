@@ -1,4 +1,4 @@
-use peri_agent::interaction::{InteractionContext, InteractionResponse};
+use peri_agent::interaction::{InteractionContext, InteractionResponse}; // P4b: type-dependency, oneshot channels
 use tokio::sync::oneshot;
 
 // P4b: re-export DTO 替代 peri_middlewares::mcp::OAuthCallbackResult

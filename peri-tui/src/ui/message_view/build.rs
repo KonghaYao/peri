@@ -82,7 +82,7 @@ impl MessageViewModel {
     /// 从 BaseMessage 转换为视图模型（带 cwd 上下文，统一管线入口）
     ///
     /// `cwd` 用于工具参数路径缩短，确保流式和恢复路径产生一致的显示。
-    /// 这是统一管线的核心转换函数——`MessagePipeline::messages_to_view_models()` 调用此方法。
+    /// 这是统一管线的核心转换函数——`message_convert::messages_to_view_models()` 调用此方法。
     pub fn from_base_message_with_cwd(
         msg: &BaseMessage,
         prev_ai_tool_calls: &[(String, String, serde_json::Value)],

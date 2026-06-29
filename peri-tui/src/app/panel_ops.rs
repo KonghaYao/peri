@@ -21,17 +21,9 @@ impl App {
             .push(event);
     }
 
-    /// 强制从 pipeline 规范状态重建 view_messages 并发送 RenderEvent。
-    /// 用于 headless 测试：确保流式缓冲区内容（throttle 未触发的 chunk）也被渲染。
+    /// P5: No-op — sync rendering replaces pipeline rebuild
     pub fn flush_rebuild(&mut self) {
-        let prefix_len = self.session_mgr.current_mut().messages.round_start_vm_idx;
-        let action = self
-            .session_mgr
-            .current_mut()
-            .messages
-            .pipeline
-            .build_rebuild_all(prefix_len);
-        self.apply_pipeline_action(action);
+        self.request_rebuild();
     }
 
     /// 批量处理队列中所有待处理事件，复用 handle_agent_event 逻辑
@@ -58,9 +50,7 @@ impl App {
         let backend = TestBackend::new(width, height);
         let terminal = Terminal::new(backend).expect("TestBackend should never fail");
 
-        // 启动渲染线程
-        let (render_tx, render_cache, render_notify) =
-            crate::ui::render_thread::spawn_render_thread(width);
+        // P5: No render thread — sync rendering
 
         // 使用唯一临时 SQLite 存储，避免测试并发时文件锁冲突
         let db_name = format!("zen-threads-test-{}.db", uuid::Uuid::now_v7());
@@ -84,12 +74,7 @@ impl App {
 
         let session = super::ChatSession {
             ui: super::UiState::new(super::build_textarea(false), "/tmp", false),
-            messages: super::MessageState::new(
-                "/tmp".to_string(),
-                render_tx.clone(),
-                std::sync::Arc::clone(&render_cache),
-                std::sync::Arc::clone(&render_notify),
-            ),
+            messages: super::MessageState::new(),
             commands,
             metadata: super::SessionMetadata::new(),
             agent: super::AgentComm::default(),
@@ -141,10 +126,7 @@ impl App {
             acp_client: None,
         };
 
-        let handle = crate::ui::headless::HeadlessHandle {
-            terminal,
-            render_notify,
-        };
+        let handle = crate::ui::headless::HeadlessHandle { terminal };
 
         (app, handle)
     }

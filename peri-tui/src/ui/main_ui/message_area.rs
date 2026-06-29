@@ -6,11 +6,15 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
     Frame,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::sticky_header;
 use crate::{
-    app::App,
-    ui::{render_thread::RenderEvent, theme, welcome},
+    app::{
+        message_state::{MessageRenderCache, WrappedLineInfo},
+        App,
+    },
+    ui::{message_render::render_view_model, theme, welcome},
 };
 
 /// 视口裁剪结果
@@ -19,6 +23,81 @@ struct ViewportClip {
     lines: Vec<Line<'static>>,
     /// 裁剪后的局部滚动偏移（相对于 lines[0] 的视觉行偏移）
     local_offset: u16,
+}
+
+/// P5: Build render cache synchronously from view_messages.
+pub fn build_sync_render_cache(
+    view_messages: &[crate::ui::message_view::MessageViewModel],
+    diff_visible: bool,
+    width: u16,
+    prev_cache: Option<&MessageRenderCache>,
+) -> MessageRenderCache {
+    if width == 0 || view_messages.is_empty() {
+        return MessageRenderCache {
+            lines: Vec::new(),
+            wrap_map: Vec::new(),
+            total_lines: 0,
+            version: 0,
+            width,
+        };
+    }
+
+    // Render all VMs to lines
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for vm in view_messages {
+        let vm_lines = render_view_model(vm, None, width as usize, diff_visible);
+        lines.extend(vm_lines);
+    }
+
+    // Build wrap_map
+    let (total_lines, wrap_map) = build_wrap_map(&lines, width);
+
+    let version = prev_cache.map_or(1, |c| c.version.wrapping_add(1));
+
+    MessageRenderCache {
+        lines,
+        wrap_map,
+        total_lines,
+        version,
+        width,
+    }
+}
+
+/// Build wrap_map: maps each logical line to its visual row span.
+fn build_wrap_map(lines: &[Line<'static>], width: u16) -> (usize, Vec<WrappedLineInfo>) {
+    if width == 0 || lines.is_empty() {
+        return (0, Vec::new());
+    }
+    let mut wrap_map = Vec::with_capacity(lines.len());
+    let mut visual_row: u16 = 0;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let plain_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let char_widths: Vec<u8> = plain_text
+            .graphemes(true)
+            .map(|g| unicode_width::UnicodeWidthStr::width(g) as u8)
+            .collect();
+
+        let visual_count = if plain_text.is_empty() {
+            1
+        } else {
+            let text = ratatui::text::Text::from(line.clone());
+            let count = Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .line_count(width);
+            count.max(1) as u16
+        };
+
+        wrap_map.push(WrappedLineInfo {
+            line_idx: idx,
+            visual_row_start: visual_row,
+            visual_row_end: visual_row + visual_count,
+            plain_text,
+            char_widths,
+        });
+        visual_row += visual_count;
+    }
+    (visual_row as usize, wrap_map)
 }
 
 pub(crate) fn render_messages(
@@ -37,8 +116,23 @@ pub(crate) fn render_messages(
     app.session_mgr.current_mut().ui.messages_area = Some(inner);
     let visible_height = inner.height;
 
-    // 计算 loading spinner 行（Claude Code 风格：✻ verb (Xm Xs · ↓ X.Xk tokens)）
-    // compact 时紫色，其余橙色；loading 结束后显示总结行：✻ Brewed for Xm Xs
+    // Build sync render cache
+    let text_area_width = inner.width.saturating_sub(1);
+    let diff_visible = app.session_mgr.current().ui.diff_visible;
+    {
+        let needs_rebuild = match app.session_mgr.current().messages.message_cache.as_ref() {
+            Some(cache) => cache.width != text_area_width,
+            None => true,
+        };
+        if needs_rebuild {
+            let vms = app.session_mgr.current().messages.view_messages.clone();
+            let prev = app.session_mgr.current().messages.message_cache.as_ref();
+            let cache = build_sync_render_cache(&vms, diff_visible, text_area_width, prev);
+            app.session_mgr.current_mut().messages.message_cache = Some(cache);
+        }
+    }
+
+    // 计算 loading spinner 行
     let spinner_line: Option<Line<'static>> = if app.session_mgr.current().ui.loading {
         let session = app.session_mgr.current();
         let frame = peri_widgets::spinner::animation::tick_to_frame(session.spinner_state.tick());
@@ -85,37 +179,19 @@ pub(crate) fn render_messages(
         None
     };
 
-    // 渲染驱动宽度同步：用 last_resize_width 去抖——宽度未变时跳过重复发送，
-    // 避免每秒 N 次 resize 事件导致渲染线程队列积压和 CPU 暴涨
-    // （参见 spec/issues/2026-05-14-streaming-resize-cpu-spike）。
-    {
-        let text_area_width = inner.width.saturating_sub(1);
-        let cache_width = app.session_mgr.current().messages.render_cache.read().width;
-        let last_resize = app.session_mgr.current().messages.last_resize_width;
-        if last_resize != Some(text_area_width)
-            && cache_width != text_area_width
-            && text_area_width > 0
-        {
-            app.session_mgr.current_mut().messages.last_resize_width = Some(text_area_width);
-            let _ = app
-                .session_mgr
-                .current_mut()
-                .messages
-                .render_tx
-                .try_send(RenderEvent::Resize(text_area_width));
-        }
-    }
-
-    // ── 从 RenderCache 读取并计算滚动参数 ──────────────────────────────────
+    // ── 从 message_cache 读取并计算滚动参数 ──────────────────────────────────
     let spinner_extra: u16 = if spinner_line.is_some() {
         spinner_extra_count(app)
     } else {
         0
     };
     let (max_scroll, offset) = {
-        let cache = app.session_mgr.current().messages.render_cache.read();
+        let cache = app.session_mgr.current().messages.message_cache.as_ref();
+        let (total_lines, _version, render_width) = match cache {
+            Some(c) => (c.total_lines, c.version, c.width),
+            None => (0, 0u64, 0u16),
+        };
 
-        let total_lines = cache.total_lines;
         let visual_total = (total_lines as u16).saturating_add(spinner_extra);
         let max_scroll = visual_total.saturating_sub(visible_height);
         let scroll_follow = app.session_mgr.current().ui.scroll_follow;
@@ -128,13 +204,18 @@ pub(crate) fn render_messages(
             (new_follow, off)
         };
 
-        let version = cache.version;
-        drop(cache);
-
-        app.session_mgr.current_mut().messages.last_render_version = version;
         app.session_mgr.current_mut().ui.scroll_follow = new_follow;
         app.session_mgr.current_mut().ui.scroll_offset = off;
         app.session_mgr.current_mut().ui.scrollbar_max_offset = max_scroll;
+
+        if render_width != text_area_width {
+            // 宽度未匹配：重新构建缓存
+            let vms = app.session_mgr.current().messages.view_messages.clone();
+            let diff = app.session_mgr.current().ui.diff_visible;
+            let prev = app.session_mgr.current().messages.message_cache.as_ref();
+            let new_cache = build_sync_render_cache(&vms, diff, text_area_width, prev);
+            app.session_mgr.current_mut().messages.message_cache = Some(new_cache);
+        }
 
         (max_scroll, off)
     };
@@ -151,9 +232,6 @@ pub(crate) fn render_messages(
     };
 
     // ── 视口裁剪 ──────────────────────────────────────────────────────────
-    // 利用 wrap_map 定位可见的逻辑行范围，只传递视口内的行给 Paragraph，
-    // 避免 ratatui Paragraph::render 内部 O(offset) 的 WordWrapper 遍历导致 CPU 暴涨。
-    // （ratatui 即使设了 scroll(offset)，仍会对 offset 之前的所有行做 grapheme 分割 + wrap 计算）
     let clip = viewport_clip(app, offset, visible_height, &spinner_line);
 
     let paragraph = Paragraph::new(Text::from(clip.lines))
@@ -175,11 +253,10 @@ pub(crate) fn render_messages(
             offset,
             max_scroll,
             Style::default().fg(theme::MUTED),
-            None,  // max_thumb_len
-            false, // show_arrows: 箭头由下面手动渲染
+            None,
+            false,
         );
 
-        // 滚动到底按钮（当用户滚离底部时显示）
         if offset < max_scroll {
             let btn_area = Rect {
                 x: inner.right().saturating_sub(1),
@@ -196,7 +273,6 @@ pub(crate) fn render_messages(
             f.render_widget(arrow, btn_area);
         }
 
-        // 滚动到顶按钮（当用户滚离顶部时显示）
         if offset > 0 {
             let btn_area = Rect {
                 x: inner.right().saturating_sub(1),
@@ -216,73 +292,60 @@ pub(crate) fn render_messages(
 }
 
 /// 基于视口裁剪提取可见行。
-///
-/// 策略：
-/// 1. 从 RenderCache 的 wrap_map 用二分查找定位 [vis_start, vis_end) 视觉行范围
-///    对应的逻辑行 [first_visible, last_visible]
-/// 2. 只克隆这些逻辑行（O(visible) 而非 O(total)）
-/// 3. 计算局部滚动偏移（local_offset = vis_start - first_visible.visual_row_start）
-/// 4. 检查 spinner 行是否在视口范围内（spinner 在底部，visual 行号 > cache.total_lines）
-/// 5. 如果有文本选区，在裁剪后的行上做高亮
 fn viewport_clip(
     app: &App,
     offset: u16,
     visible_height: u16,
     spinner_line: &Option<Line<'static>>,
 ) -> ViewportClip {
-    // ── 阶段 1：从 cache 提取可见行（cache guard 在 block 结束时 drop） ──
+    // ── 阶段 1：从 message_cache 提取可见行 ──
     let (mut lines, local_offset, first_idx, total_lines) = {
-        let cache = app.session_mgr.current().messages.render_cache.read();
+        let cache = app.session_mgr.current().messages.message_cache.as_ref();
+        let (cache_lines, wrap_map, cache_total_lines) = match cache {
+            Some(c) => (&c.lines, &c.wrap_map, c.total_lines),
+            None => {
+                return ViewportClip {
+                    lines: Vec::new(),
+                    local_offset: 0,
+                }
+            }
+        };
 
         let vis_start = offset as usize;
-        // +1 给 wrap 行留余量
-        let vis_end = (offset as usize + visible_height as usize + 1).min(cache.total_lines);
+        let vis_end = (offset as usize + visible_height as usize + 1).min(cache_total_lines);
 
-        // wrap_map 按 visual_row_start 升序排列
-        // 二分找第一个 visual_row_end > vis_start 的行（即首个与视口相交的行）
-        let first_visible = cache
-            .wrap_map
-            .partition_point(|info| info.visual_row_end as usize <= vis_start);
-        // 二分找最后一个 visual_row_start < vis_end 的行
-        let last_visible = cache
-            .wrap_map
+        let first_visible =
+            wrap_map.partition_point(|info| info.visual_row_end as usize <= vis_start);
+        let last_visible = wrap_map
             .partition_point(|info| (info.visual_row_start as usize) < vis_end)
             .saturating_sub(1);
 
-        let total_lines = cache.total_lines;
+        let total_lines = cache_total_lines;
 
         let (lines, local_offset, first_idx) =
-            if first_visible < cache.wrap_map.len() && first_visible <= last_visible {
-                let first_visual = cache.wrap_map[first_visible].visual_row_start as usize;
+            if first_visible < wrap_map.len() && first_visible <= last_visible {
+                let first_visual = wrap_map[first_visible].visual_row_start as usize;
                 let local_offset = vis_start.saturating_sub(first_visual) as u16;
-                let lines = cache.lines[first_visible..=last_visible].to_vec();
+                let lines = cache_lines[first_visible..=last_visible].to_vec();
                 (lines, local_offset, first_visible)
             } else {
-                // 空内容或视口超出范围
-                (Vec::new(), 0u16, cache.lines.len())
+                (Vec::new(), 0u16, cache_lines.len())
             };
 
         (lines, local_offset, first_idx, total_lines)
-    }; // cache guard dropped here
+    };
 
-    // ── 阶段 2：Spinner 行追加（无需 cache） ──
-    // spinner 行在视觉上排在 cache.total_lines 之后。
-    // 检查视口是否覆盖到 spinner 区域
+    // ── 阶段 2：Spinner 行追加 ──
     if let Some(line) = spinner_line {
         let spinner_visual_start = total_lines;
         let spinner_extra = spinner_extra_count(app);
         let spinner_visual_end = spinner_visual_start + spinner_extra as usize;
         let vis_start = offset as usize;
-        // 视口底边不截断到 total_lines——spinner 在 total_lines 之外，
-        // 必须用完整的视口范围才能正确检测交集
         let viewport_bottom = offset as usize + visible_height as usize;
 
-        // 视口与 spinner 区域有交集
         if vis_start < spinner_visual_end && viewport_bottom > spinner_visual_start {
-            // 追加 spinner 分隔空行 + spinner line
             lines.push(Line::from(""));
             lines.push(line.clone());
-            // Tip + TODO
             if app.session_mgr.current().ui.loading {
                 let tip = crate::ui::tips::pick_tip(
                     app.session_mgr.current().spinner_state.raw_tick(),
@@ -342,13 +405,10 @@ fn viewport_clip(
         }
     }
 
-    // ── 阶段 3：字符级选区高亮（需要再次读 cache 获取 wrap_map） ──
-    // 只在裁剪后的可见行上做高亮（减少工作量）
+    // ── 阶段 3：字符级选区高亮 ──
     if app.session_mgr.current().ui.text_selection.is_active() {
         let ts = &app.session_mgr.current().ui.text_selection;
         if let (Some(start), Some(end)) = (ts.start, ts.end) {
-            let cache = app.session_mgr.current().messages.render_cache.read();
-            let wrap_map = &cache.wrap_map;
             let usable_width = app
                 .session_mgr
                 .current()
@@ -356,6 +416,16 @@ fn viewport_clip(
                 .messages_area
                 .map(|a| a.width.saturating_sub(1))
                 .unwrap_or(0);
+
+            let empty_wrap: Vec<WrappedLineInfo> = Vec::new();
+            let wrap_map = app
+                .session_mgr
+                .current()
+                .messages
+                .message_cache
+                .as_ref()
+                .map(|c| &c.wrap_map)
+                .unwrap_or(&empty_wrap);
 
             let ((sr, sc), (er, ec)) = if start <= end {
                 (start, end)
@@ -370,8 +440,6 @@ fn viewport_clip(
             if let (Some((start_line, start_char)), Some((end_line, end_char))) =
                 (logical_start, logical_end)
             {
-                // lines 中的第 i 行对应 cache.lines 中的 first_idx + i
-                // 只处理 [start_line, end_line] ∩ [first_idx, first_idx + lines.len()) 的行
                 let clip_start = start_line.max(first_idx);
                 let clip_end = end_line.min(first_idx + lines.len().saturating_sub(1));
 
@@ -402,36 +470,29 @@ fn viewport_clip(
 /// 计算 spinner 区域的额外逻辑行数
 fn spinner_extra_count(app: &App) -> u16 {
     if app.session_mgr.current().ui.loading {
-        // 空行(1) + spinner(1) + tip(1) + 空行(1) + todo_items(N) + trailing(3) = 7 + N
         let base = 7u16;
         base + app.session_mgr.current().todo_items.len() as u16
     } else {
-        // 空行(1) + spinner(1) + trailing(3) = 5
         5
     }
 }
 
 /// 对一行的 spans 做字符级选区高亮。
-/// `char_start` / `char_end` 是该行 plain_text 的字符偏移（非 byte 索引）。
-/// 将 spans 中对应范围的字符的 style 追加淡蓝色背景（深色主题选区色），范围外的 span 保持原样。
-/// 使用 char_indices() 保证 unicode 安全切割。
 pub(crate) fn highlight_line_spans<'a>(
     spans: Vec<Span<'a>>,
     char_start: usize,
     char_end: usize,
 ) -> Vec<Span<'a>> {
     let mut result = Vec::new();
-    let mut cursor: usize = 0; // 当前在 plain_text 中的字符位置
+    let mut cursor: usize = 0;
     for span in spans {
         let span_char_len = span.content.chars().count();
         let span_start = cursor;
         let span_end = cursor + span_char_len;
 
         if span_end <= char_start || span_start >= char_end {
-            // 完全在选区外 → 保持原样
             result.push(span);
         } else if span_start >= char_start && span_end <= char_end {
-            // 完全在选区内 → 淡蓝色背景（强制覆盖原有 bg）
             result.push(Span::styled(
                 span.content,
                 Style {
@@ -443,8 +504,6 @@ pub(crate) fn highlight_line_spans<'a>(
                 },
             ));
         } else {
-            // 部分重叠 → 拆分为 2~3 个子 span
-            // 左段（选区外）
             if span_start < char_start {
                 let skip = char_start - span_start;
                 let byte_cut = span
@@ -458,7 +517,6 @@ pub(crate) fn highlight_line_spans<'a>(
                     span.style,
                 ));
             }
-            // 中段（选区内，淡蓝色背景）
             let hl_char_start = span_start.max(char_start) - span_start;
             let hl_char_end = span_end.min(char_end) - span_start;
             let byte_start = span
@@ -483,7 +541,6 @@ pub(crate) fn highlight_line_spans<'a>(
                     sub_modifier: span.style.sub_modifier,
                 },
             ));
-            // 右段（选区外）
             if span_end > char_end {
                 let skip = char_end - span_start;
                 let byte_cut = span

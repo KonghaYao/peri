@@ -1,17 +1,37 @@
 use super::events::OAuthCallbackResult;
 use crate::app::FieldTextarea;
 
-/// OAuth 授权弹窗状态
+// P4b: inline parse_code_from_url replaces peri_middlewares::mcp::parse_code_from_url
+fn parse_code_from_url(raw: &str) -> Result<(String, String), String> {
+    let query_start = raw.find('?').unwrap_or(raw.len());
+    let query = if query_start < raw.len() {
+        &raw[query_start + 1..]
+    } else {
+        ""
+    };
+    let mut code: Option<String> = None;
+    let mut state: Option<String> = None;
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or("");
+        let value = parts.next().unwrap_or("");
+        let decoded = value.replace('+', " ").replace("%20", " ");
+        match key {
+            "code" => code = Some(decoded),
+            "state" => state = Some(decoded),
+            _ => {}
+        }
+    }
+    let code = code.ok_or_else(|| "URL 缺少 code 参数".to_string())?;
+    let state = state.ok_or_else(|| "URL 缺少 state 参数".to_string())?;
+    Ok((code, state))
+}
+
 pub struct OAuthPrompt {
-    /// 服务器名称
     pub server_name: String,
-    /// 浏览器授权 URL
     pub authorization_url: String,
-    /// 用户手动粘贴的回调 URL（或含 code 的文本）
     pub field: FieldTextarea,
-    /// 回调通道（传回后台 OAuth 流程）
     pub callback_tx: Option<tokio::sync::oneshot::Sender<OAuthCallbackResult>>,
-    /// 错误提示信息（粘贴内容解析失败时显示）
     pub error_message: Option<String>,
 }
 
@@ -30,9 +50,7 @@ impl OAuthPrompt {
         }
     }
 
-    /// 提交用户输入的回调 URL，返回 true 表示成功发送
     pub fn submit(&mut self) -> bool {
-        use peri_middlewares::mcp::parse_code_from_url;
         match parse_code_from_url(&self.field.value()) {
             Ok((code, state)) => {
                 if let Some(tx) = self.callback_tx.take() {
@@ -41,7 +59,7 @@ impl OAuthPrompt {
                 true
             }
             Err(e) => {
-                self.error_message = Some(format!("无法解析回调 URL: {}", e));
+                self.error_message = Some(format!("Unable to parse callback URL: {}", e));
                 false
             }
         }

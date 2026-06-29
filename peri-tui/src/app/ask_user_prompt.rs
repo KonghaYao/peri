@@ -1,4 +1,4 @@
-use peri_middlewares::ask_user::{AskUserBatchRequest, AskUserQuestionData};
+use peri_middlewares::ask_user::{AskUserBatchRequest, AskUserQuestionData}; // P4b: type-dependency, oneshot channels
 
 use crate::app::FieldTextarea;
 

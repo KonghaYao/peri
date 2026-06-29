@@ -62,12 +62,12 @@ fn make_wrap_map_entry(
     start: u16,
     end: u16,
     text: &str,
-) -> crate::ui::render_thread::WrappedLineInfo {
+) -> crate::app::message_state::WrappedLineInfo {
     let char_widths: Vec<u8> = text
         .chars()
         .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as u8)
         .collect();
-    crate::ui::render_thread::WrappedLineInfo {
+    crate::app::message_state::WrappedLineInfo {
         line_idx,
         visual_row_start: start,
         visual_row_end: end,

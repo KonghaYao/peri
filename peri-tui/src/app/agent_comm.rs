@@ -1,4 +1,4 @@
-use peri_agent::{agent::AgentCancellationToken, messages::BaseMessage};
+use peri_agent::{agent::AgentCancellationToken, messages::BaseMessage}; // P4b: type-dependency
 use tokio::sync::mpsc;
 
 use super::{events::AgentEvent, InteractionPrompt};

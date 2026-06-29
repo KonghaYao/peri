@@ -136,7 +136,7 @@ pub fn aggregate_batch_groups(messages: &mut Vec<MessageViewModel>) {
                 }
             }
             // 容忍 Agent ToolBlock 出现在连续的 SubAgentGroup 之间
-            // （transform.rs 中 messages_to_view_models 会为每个 Agent 工具
+            // （message_convert.rs 中 messages_to_view_models 会为每个 Agent 工具
             //   同时产出 ToolBlock+SubAgentGroup，ToolBlock 不应打断聚合）
             if let MessageViewModel::ToolBlock { tool_name, .. } = &messages[i] {
                 if tool_name == "Agent" {

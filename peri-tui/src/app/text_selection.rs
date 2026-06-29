@@ -269,7 +269,7 @@ fn char_col_to_offset(
 pub fn visual_to_logical(
     visual_row: u16,
     visual_col: u16,
-    wrap_map: &[crate::ui::render_thread::WrappedLineInfo],
+    wrap_map: &[crate::app::message_state::WrappedLineInfo],
     usable_width: u16,
 ) -> Option<(usize, usize)> {
     let idx = wrap_map.partition_point(|info| info.visual_row_end <= visual_row);
@@ -302,7 +302,7 @@ fn grapheme_to_byte_idx(text: &str, grapheme_idx: usize) -> usize {
 pub fn extract_selected_text(
     start: (u16, u16),
     end: (u16, u16),
-    wrap_map: &[crate::ui::render_thread::WrappedLineInfo],
+    wrap_map: &[crate::app::message_state::WrappedLineInfo],
     usable_width: u16,
 ) -> Option<String> {
     let ((start_row, start_col), (end_row, end_col)) = if start <= end {

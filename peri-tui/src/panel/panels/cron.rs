@@ -70,7 +70,7 @@ impl CronPanel {
 
     /// Construct a panel from the live `App` state, reading cron tasks.
     pub fn from_app(app: &crate::app::App) -> Self {
-        use peri_middlewares::cron::CronTask;
+        use peri_middlewares::cron::CronTask; // P4b: runtime dependency, conversion to DTO
         let tasks: Vec<CronTaskDto> = app
             .services
             .cron

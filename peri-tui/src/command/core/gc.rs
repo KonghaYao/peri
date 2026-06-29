@@ -1,4 +1,4 @@
-use peri_agent::messages::{BaseMessage, ContentBlock, MessageContent};
+use peri_agent::messages::{BaseMessage, ContentBlock, MessageContent}; // P4b: type-dependency
 
 use crate::{app::App, command::Command, runtime::effect::Effect};
 
@@ -25,7 +25,9 @@ impl Command for GcCommand {
         let active = app.active();
         let origin_count = active.agent.origin_messages.len();
         let origin_bytes = estimate_messages_heap(&active.agent.origin_messages);
-        let (completed_count, completed_bytes) = active.messages.pipeline.completed_stats();
+        // P5: No pipeline — completed stats not available
+        let completed_count = 0usize;
+        let completed_bytes = 0usize;
         let vm_count = active.messages.view_messages.len();
 
         // ── Markdown/Diff 缓存诊断 ──

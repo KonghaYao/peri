@@ -12,9 +12,7 @@ mod tools;
 mod utils;
 
 pub use aggregate::{aggregate_batch_groups, aggregate_tail_tool_groups, aggregate_tool_groups};
-pub(crate) use build::build_diff_lines;
 pub use tools::{tool_color, AgentSummary, ToolCategory, ToolEntry};
-pub(crate) use utils::{instance_hash, parse_bg_hash};
 
 /// 渲染层的视图模型，从 BaseMessage/AgentEvent 转换而来
 #[derive(Debug, Clone)]

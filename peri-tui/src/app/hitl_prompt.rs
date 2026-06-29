@@ -1,4 +1,4 @@
-use peri_middlewares::prelude::{BatchItem, HitlDecision};
+use peri_middlewares::prelude::{BatchItem, HitlDecision}; // P4b: type-dependency, oneshot channels
 
 // ─── PendingAttachment ────────────────────────────────────────────────────────
 

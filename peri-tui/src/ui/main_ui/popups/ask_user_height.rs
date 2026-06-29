@@ -1,4 +1,4 @@
-use peri_middlewares::ask_user::AskUserQuestionData;
+use peri_middlewares::ask_user::AskUserQuestionData; // P4b: type-dependency
 
 /// 编号数字的十进制宽度
 fn digit_width(n: usize) -> u16 {

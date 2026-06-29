@@ -1,4 +1,4 @@
-use super::{events::OAuthCallbackResult, message_pipeline::PipelineAction, *};
+use super::{events::OAuthCallbackResult, *};
 
 impl App {
     pub(crate) fn handle_oauth_needed(
@@ -7,7 +7,6 @@ impl App {
         authorization_url: String,
         callback_tx: tokio::sync::oneshot::Sender<OAuthCallbackResult>,
     ) -> (bool, bool, bool) {
-        // v2: MCP panel managed by state machine, no explicit close needed
         self.global_ui.oauth_prompt = Some(OAuthPrompt::new(
             server_name,
             authorization_url,
@@ -18,12 +17,11 @@ impl App {
 
     pub(crate) fn handle_oauth_completed(&mut self, server_name: String) -> (bool, bool, bool) {
         self.global_ui.oauth_prompt = None;
-        // v2: MCP panel refresh handled by PanelReadContext
         let vm = MessageViewModel::system(self.services.lc.tr_args(
             "mcp-oauth-completed",
             &[("server".into(), server_name.into())],
         ));
-        self.apply_pipeline_action(PipelineAction::AddMessage(vm));
+        self.apply_add_message(vm);
         (true, false, false)
     }
 
@@ -33,7 +31,6 @@ impl App {
         error: String,
     ) -> (bool, bool, bool) {
         self.global_ui.oauth_prompt = None;
-        // v2: MCP panel refresh handled by PanelReadContext
         let vm = MessageViewModel::system(self.services.lc.tr_args(
             "mcp-oauth-failed",
             &[
@@ -41,7 +38,7 @@ impl App {
                 ("error".into(), error.into()),
             ],
         ));
-        self.apply_pipeline_action(PipelineAction::AddMessage(vm));
+        self.apply_add_message(vm);
         (true, false, false)
     }
 
@@ -51,7 +48,6 @@ impl App {
         action: String,
         success: bool,
     ) -> (bool, bool, bool) {
-        // v2: MCP panel refresh handled by PanelReadContext
         let msg = match (action.as_str(), success) {
             ("clear_auth", true) => self.services.lc.tr_args(
                 "mcp-clear-auth-ok",
@@ -71,7 +67,7 @@ impl App {
             ),
         };
         let vm = MessageViewModel::system(msg);
-        self.apply_pipeline_action(PipelineAction::AddMessage(vm));
+        self.apply_add_message(vm);
         (true, false, false)
     }
 }
