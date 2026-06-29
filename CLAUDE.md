@@ -2,7 +2,7 @@
 
 ## v2 架构状态（2026-06-29）
 
-**当前状态**：**v2 stages 单路径架构（完全清理 + 异步事件回路打通 + TUI MessagePipeline 单一数据源 + ACP/TUI 三层契约就绪 + TUI 状态机骨架就位）**。v1 `ReActAgent` / `executor/` 目录 / `State` trait / `CompactMiddleware` / v1 `MessageQueue` 已物理删除，所有执行路径（main agent / SubAgent / Hook / Workflow）统一通过 v2 `run_react_loop` 驱动。异步事件（cron/channel/workflow/bg_results）通过共享 v2 MessageQueue + TUI polling 接收方主动续跑形成完整回路。TUI MessagePipeline 重构为 `transcript + Option<PartialAiMessage>` 单一数据源架构，v2 stages 在迭代边界 emit `TurnCompleted` 携带全量 transcript 快照，commit_iteration 用替换语义吸收——修复多迭代场景下文本渲染在工具之前的顺序 bug（详见 `docs/design/peri-tui-message-pipeline-v2.md`）。
+**当前状态**：**v2 stages 单路径架构（完全清理 + 异步事件回路打通 + TUI MessagePipeline 单一数据源 + ACP/TUI 三层契约就绪 + TUI 状态机骨架就位 + B3 Cutover 完成）**。v1 `ReActAgent` / `executor/` 目录 / `State` trait / `CompactMiddleware` / v1 `MessageQueue` 已物理删除，所有执行路径（main agent / SubAgent / Hook / Workflow）统一通过 v2 `run_react_loop` 驱动。异步事件（cron/channel/workflow/bg_results）通过共享 v2 MessageQueue + TUI polling 接收方主动续跑形成完整回路。TUI MessagePipeline 重构为 `transcript + Option<PartialAiMessage>` 单一数据源架构，v2 stages 在迭代边界 emit `TurnCompleted` 携带全量 transcript 快照，commit_iteration 用替换语义吸收——修复多迭代场景下文本渲染在工具之前的顺序 bug（详见 `docs/design/peri-tui-message-pipeline-v2.md`）。
 
 ### 已完成（ultracode v2 重构批次：Workflow A/B1/B2/B3）
 
@@ -30,15 +30,21 @@
 - ✅ **完全清理**（commit c49db28b + 后续）：删除 `trait State` / `AgentState` 的 State trait 残留 / `CompactConfig::from_env` 死代码 / `AgentEvent → ExecutorEvent` 重命名 / v1 `MessageQueue` / `CompactMiddleware`（自动 compact 改由 `stages/compact.rs` 统一处理） / `compact/{full,micro,re_inject,invariant}.rs` v1 实现物理删除 / 注释残留全部反映 v2 单路径
 - ✅ **P2-B（异步事件回路）**：S3 push v2 queue + polling.rs drain 形成完整回路。cron/channel/workflow/bg_results 等异步事件通过共享 v2 `MessageQueue` 注入；TUI 的 `poll_agent` 在 agent idle 时 `drain_for_end` 取出 Prompt/Defer 并 `submit_message` 发起新一轮（接收方主动续跑）。撤销了 S6 在 ACP executor 内引入的 drain-only 循环回归（该循环只 drain 不续跑，导致 idle 期间到达的消息被物理丢弃）
 - ✅ **P2-C（TUI MessagePipeline 单一数据源）**（commit 42a60a1a）：删除 `completed: Vec<BaseMessage>` + 5 个 `current_ai_*` 字段双状态，重构为 `transcript + Option<PartialAiMessage>`。v2 stages 在 `act.rs` 双路径（工具路径 + 最终回答路径）emit `StateEvent::TurnCompleted` 携带 `finalized_messages: Arc<Vec<BaseMessage>>`，跨四层（peri-agent `ExecutorEvent::TurnCommitted` → peri-acp `AcpEvent::TurnCommitted` → peri-tui `AgentEvent::TurnCommitted`）透传。`commit_iteration` 用**替换**语义（非 extend）吸收全量快照，`build_tail_vms` 重构为纯函数——流式渲染与历史恢复走同一路径（`restore_completed` ≡ `commit_iteration`）。修复多迭代场景下文本渲染在所有工具之前的顺序 bug（详见 `docs/design/peri-tui-message-pipeline-v2.md`）
-- ✅ 3049 测试全过，`cargo build --workspace` 绿，`grep -r 'ReActAgent'` 零结果
+- ✅ **B3 Cutover（v2 事件分发单路径化）**：**`thin_handle` 函数物理删除**（原 376 行 glue code → 0 行）。`main_loop::run` 采用双路径架构：
+  - **1a. 纯状态机路径**：`TuiEvent → SmEvent → state_machine::handle → (State, Vec<Effect>)`，处理所有可纯函数化的事件（Key 快捷键/BackTab/Enter/Esc、Mouse、Paste、Tick、Resize、AcpDisconnected、Shutdown）。
+  - **1b. Legacy 键盘兜底**：`keyboard::handle_key_event` 仅处理状态机未覆盖的复杂 UI 交互（panel 分发、popup、setup wizard、textarea 输入、@mention/slash hint、history）。`is_sm_handled_shortcut()` 过滤 BackTab/Ctrl+T/Ctrl+Shift+T/Ctrl+B/Ctrl+O 防止双重执行。
+  - **1c. 合并去重**：Render 效应去重后统一执行。**键盘模块已是最后剩余 `&mut App` 消费者**，隔离良好——完整 Effect-ization 需 50+ 新变体，暂不推进。
+  - `Effect` 枚举从 15 扩展到 25 变体（新增：MouseTextareaClick/Drag、MouseRelease、PasteText、InterruptAgent、ClearPendingMessages、PushSystemNote、OpenThreadWithFeedback、MemoryPanelOpenEditor、CycleModel、CycleProvider、CyclePermissionMode、FocusBgBar、ToggleDiff、PollWorkflow、ClearTextSelection、OpenRewindPrompt）。
+  - `idle.rs` 测试从 84 扩展到 130（新增 46 个测试覆盖全部新 key/mouse/paste/tick/resize/disconnected 分支）。
+  - `apply_context.rs` 防御性 no-op 分支随 Effect 扩展同步更新。
+- ✅ **B3 Additional（Setup Wizard/Bar Focus/Popups/AcpEvent 完整保留）**：`setup_wizard.rs`（82 行）、`bar_focus.rs`（89 行）、`popups.rs`（138 行）、`handle_acp_event`（~120 行）全部保留——这些路径本质上是 UI 状态转换（非纯函数），通过 keyboard dispatch 或 direct call 执行，与状态机互不干扰。
+- ✅ 3049→3349 测试全过，`cargo build --workspace` 绿，`grep -r 'ReActAgent'` 零结果
 
 ### ultracode 未完成（按优先级）
 
-### ultracode 未完成（按优先级）
-
-- ⏳ **B3 Cutover（最高优先级）**：`main_loop::run` 仍用 P1 `thin_handle` glue，未接入 `state_machine::handle`。85 测试覆盖核心逻辑，风险中，工作量中。建议**渐进式 4 阶段**：shadow mode 对比 → 切渲染数据源 → 删 thin_handle（Modal 委托 legacy）→ 稳定期。
-- ⏳ **B3 MigrateInput**：`UiState.textarea` 等输入字段未迁到 `State::Idle.input`。
-- ✅ **Workflow C（P3 面板重写）**：**14/14 PanelState 迁移完成**（commit 4cd631bd）。全部 14 个面板从 legacy `PanelComponent` trait 迁移到 v2 `PanelState` trait，完全脱离 `peri_middlewares::*` / `crate::config::*` 运行时依赖（改用本地 DTO + `acp_query_cache`）。`registry::create_panel()` 工厂 0 stub。**P3 Integration 已完成**（commit 0b69d271 + 50c5624c）：`Effect` 枚举扩展 3 个变体（ShowNotification / UpdateConfig / SwitchSession），`modal.rs::map_panel_effects` 全 6 个 PanelEffect 变体映射就绪；19 个集成测试覆盖 14 面板 × 6 事件全量回归 + 完整 PanelEffect→Effect 映射，证明 state machine → panel → effect mapping 端到端工作。**剩 legacy 删除被 B3 Cutover 阻塞**：`app/*_panel.rs` + `ui/main_ui/panels/*.rs` + `PanelComponent` trait + `PanelManager` 依赖 ~55 文件，需 main_loop 切换到 `state_machine::handle` + 数据注入到 `ServiceRegistrySnapshot` 才能安全清理。
+- ✅ **B3 Cutover（最高优先级）**：**已完成** — `thin_handle` 物理删除，状态机 + keyboard 双路径架构就位。`is_sm_handled_shortcut()` 防止双重执行。键盘模块完整保留（6 文件，~1200 行）作为复杂 UI 交互兜底。
+- ⏳ **B3 MigrateInput**：`UiState.textarea` 等输入字段未迁到 `State::Idle.input`。依赖 keyboard 模块 Effect-ization（文本框每击键都需 Effect 通路），风险高，延后至 P5 渲染重写阶段。
+- ✅ **Workflow C（P3 面板重写）**：**14/14 PanelState 迁移完成**（commit 4cd631bd）。全部 14 个面板从 legacy `PanelComponent` trait 迁移到 v2 `PanelState` trait，完全脱离 `peri_middlewares::*` / `crate::config::*` 运行时依赖（改用本地 DTO + `acp_query_cache`）。`registry::create_panel()` 工厂 0 stub。**P3 Integration 已完成**（commit 0b69d271 + 50c5624c）：`Effect` 枚举扩展 3 个变体（ShowNotification / UpdateConfig / SwitchSession），`modal.rs::map_panel_effects` 全 6 个 PanelEffect 变体映射就绪；19 个集成测试覆盖 14 面板 × 6 事件全量回归 + 完整 PanelEffect→Effect 映射，证明 state machine → panel → effect mapping 端到端工作。**剩 legacy 删除被 B3 Cutover 阻塞** → **阻塞已解除**：`app/*_panel.rs` + `ui/main_ui/panels/*.rs` + `PanelComponent` trait + `PanelManager` 依赖 ~55 文件，需渲染切换到 `State.view + current_turn`（P5）才能安全清理。
 - ⏳ **Workflow D（P4b 类型隔离）**：TUI 30+ 文件 138 处 `use peri_agent::/peri_middlewares::`，需改 ACP 查询或 DTO 替换。`scripts/check-tui-imports.sh` pre-commit 钩子未启用。
 - ⏳ **Workflow E（P5 渲染重写）**：`message_pipeline/` 18KB + 82KB 测试未删；双线程渲染 + RenderCache + AdaptiveChunkingPolicy 未删；渲染入口未切换到 `State.view + current_turn`。工作量大，风险高。
 
@@ -79,6 +85,34 @@ TUI 渲染管线的核心架构。规范状态 `transcript: Vec<BaseMessage>` + 
 **[TRAP]** Pipeline `handle_event` **永远不返回 `RebuildAll`**——Pipeline 不持有 VM 索引维度（`round_start_vm_idx`）。重建由 `agent_ops` 通过 `build_rebuild_all(prefix_len)` 显式触发，避免 BaseMessage 维度与 VM 维度混淆。
 
 **[TRAP]** `TurnCommitted` / `StateSnapshot` 在 `in_subagent() == true` 时**必须直接返回 None**——子 Agent 的迭代提交不应污染父 Agent 的 transcript（否则子 Agent 全部内部消息会混入父 Agent 历史）。
+
+### TUI 双路径事件分发（B3 Cutover）
+
+`main_loop::run` 的 3 阶段事件处理：
+
+```
+TuiEvent → 1a. state_machine::handle (纯函数) → (State, Vec<Effect>)
+        → 1b. keyboard::handle_key_event (兜底) | handle_acp_event (桥接) → Vec<Effect>
+        → 1c. 合并去重 (Render 唯一化)
+        → 2. 执行 Effects (I/O + App mutation)
+        → 3. 渲染 (Tick 节流 33ms, 其余立即绘制)
+```
+
+**1a. 状态机路径**（`state_machine::handle`）：纯函数 `(State, Event) → (State, Vec<Effect>)`。处理：
+- 快捷键：BackTab/Ctrl+T/Ctrl+Shift+T/Ctrl+B/Ctrl+O → Effect::CyclePermissionMode/CycleModel/CycleProvider/FocusBgBar/ToggleDiff
+- 文本操作：Ctrl+A/Ctrl+U/Ctrl+W → InputState 方法 → Effect::Render
+- 输入：Enter（提交）→ Effect::SubmitMessage, Esc（Rewind）→ Effect::OpenRewindPrompt
+- Mouse：Scroll → Effect::Scroll, Click/Drag/Release → Effect::MouseTextarea*
+- Paste：→ Effect::PasteText
+- Tick：→ Effect::AdvanceSpinner + PollAgent + PollWorkflow + Render
+- Resize：→ Effect::ClearTextSelection + Render
+- AcpDisconnected/Shutdown：→ Effect::PushSystemNote / Quit
+
+**1b. Legacy 兜底**：`is_sm_handled_shortcut()` 过滤已由状态机覆盖的快捷键，剩余事件走：
+- `keyboard::handle_key_event(app, key)`：6 文件 ~1200 行，处理 panel 分发/popup/setup wizard/textarea 输入/@mention/slash hint/history
+- `handle_acp_event(app, event, data)`：JSON → AcpNotification 桥接，委托 `app.handle_acp_notification()`
+
+**[TRAP]** `is_sm_handled_shortcut()` 必须与 `idle.rs` 的 Ctrl+Char 分支保持同步——增删快捷键时两边都要更新。
 
 ### 关键架构点
 
