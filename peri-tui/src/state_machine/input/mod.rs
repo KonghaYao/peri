@@ -1,4 +1,4 @@
-//! Aggregated input state -- textarea buffer + cursor + at-mention popup +
+//! Aggregated input state -- textarea buffer + cursor + selection + at-mention popup +
 //! slash-completion popup + attachments + prediction.
 //!
 //! This is a pure data structure: the `transitions::idle` module mutates it in
@@ -6,6 +6,29 @@
 //! to draw the input area.
 //!
 //! Reference: `docs/design/peri-tui-architecture.md` section 8.5.
+
+pub mod clipboard;
+pub mod cursor;
+pub mod edit;
+pub mod selection;
+pub mod sync;
+
+#[cfg(test)]
+mod clipboard_test;
+#[cfg(test)]
+mod cursor_test;
+#[cfg(test)]
+mod edit_test;
+#[cfg(test)]
+mod selection_test;
+#[cfg(test)]
+mod sync_test;
+
+pub use clipboard::InputClipboard;
+pub use cursor::CursorPos;
+pub use edit::InputEdit;
+pub use selection::{Selection, SelectionRange};
+pub use sync::{from_textarea, to_textarea};
 
 /// Aggregated input-box state.
 ///
