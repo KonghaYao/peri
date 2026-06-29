@@ -66,10 +66,6 @@ impl TextField {
         self.text.clone()
     }
 
-    fn is_empty(&self) -> bool {
-        self.text.is_empty()
-    }
-
     fn insert_char(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
@@ -168,7 +164,6 @@ struct ProviderEntry {
     name: String,
     provider_type: String,
     base_url: String,
-    api_key_masked: String,
     opus_model: String,
     sonnet_model: String,
     haiku_model: String,
@@ -210,17 +205,6 @@ enum LoginField {
 }
 
 impl LoginField {
-    /// All fields in display order.
-    const ALL: [LoginField; 7] = [
-        LoginField::Name,
-        LoginField::Type,
-        LoginField::BaseUrl,
-        LoginField::ApiKey,
-        LoginField::OpusModel,
-        LoginField::SonnetModel,
-        LoginField::HaikuModel,
-    ];
-
     fn next(&self) -> Self {
         match self {
             Self::Name => Self::Type,
@@ -242,18 +226,6 @@ impl LoginField {
             Self::OpusModel => Self::ApiKey,
             Self::SonnetModel => Self::OpusModel,
             Self::HaikuModel => Self::SonnetModel,
-        }
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Name => "Name",
-            Self::Type => "Type",
-            Self::BaseUrl => "Base URL",
-            Self::ApiKey => "API Key",
-            Self::OpusModel => "Opus Model",
-            Self::SonnetModel => "Sonnet Model",
-            Self::HaikuModel => "Haiku Model",
         }
     }
 }
@@ -333,27 +305,13 @@ impl LoginPanel {
             .config
             .providers
             .iter()
-            .map(|p| {
-                let api_key_masked = if p.api_key.is_empty() {
-                    String::new()
-                } else if p.api_key.len() <= 4 {
-                    "***".to_string()
-                } else {
-                    format!(
-                        "{}***{}",
-                        &p.api_key[..2],
-                        &p.api_key[p.api_key.len() - 2..]
-                    )
-                };
-                ProviderEntry {
-                    name: p.name.clone().unwrap_or_default(),
-                    provider_type: p.provider_type.clone(),
-                    base_url: p.base_url.clone(),
-                    api_key_masked,
-                    opus_model: p.models.opus.clone(),
-                    sonnet_model: p.models.sonnet.clone(),
-                    haiku_model: p.models.haiku.clone(),
-                }
+            .map(|p| ProviderEntry {
+                name: p.name.clone().unwrap_or_default(),
+                provider_type: p.provider_type.clone(),
+                base_url: p.base_url.clone(),
+                opus_model: p.models.opus.clone(),
+                sonnet_model: p.models.sonnet.clone(),
+                haiku_model: p.models.haiku.clone(),
             })
             .collect();
         let mut panel = Self::empty();
@@ -922,6 +880,7 @@ fn render_browse(f: &mut Frame, area: Rect, providers: &[ProviderEntry], cursor:
     f.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_edit(
     f: &mut Frame,
     area: Rect,
@@ -1214,7 +1173,6 @@ mod tests {
                 name: "Anthropic".to_string(),
                 provider_type: "anthropic".to_string(),
                 base_url: "https://api.anthropic.com".to_string(),
-                api_key_masked: "sk-a****ntic".to_string(),
                 opus_model: "claude-opus-4-7".to_string(),
                 sonnet_model: "claude-sonnet-4-6".to_string(),
                 haiku_model: "claude-haiku-4-5".to_string(),
@@ -1223,7 +1181,6 @@ mod tests {
                 name: "OpenAI".to_string(),
                 provider_type: "openai".to_string(),
                 base_url: "https://api.openai.com".to_string(),
-                api_key_masked: "sk-o****pen".to_string(),
                 opus_model: "gpt-4o".to_string(),
                 sonnet_model: "gpt-4o-mini".to_string(),
                 haiku_model: "gpt-3.5-turbo".to_string(),
@@ -1288,7 +1245,7 @@ mod tests {
                 field: LoginField::Name
             }
         ));
-        assert!(panel.buf_name.is_empty());
+        assert!(panel.buf_name.text.is_empty());
         assert_eq!(panel.buf_type, "openai");
     }
 
@@ -1415,7 +1372,7 @@ mod tests {
             .any(|e| matches!(e, PanelEffect::UpdateConfig { .. }));
         assert!(has_update_config, "Enter should emit UpdateConfig effects");
 
-        let has_close = effects.iter().any(|e| *e == PanelEffect::Close);
+        let has_close = effects.contains(&PanelEffect::Close);
         assert!(has_close, "Enter should emit Close");
     }
 

@@ -1272,39 +1272,40 @@ impl PanelState for PluginPanel {
 impl PluginPanel {
     fn render_confirm_delete(&self, f: &mut Frame, area: Rect) {
         let name = self.confirm_delete.as_deref().unwrap_or("?");
-        let mut lines: Vec<Line<'_>> = Vec::new();
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "  Confirm uninstall ".to_string(),
-                Style::default().fg(theme::TEXT),
-            ),
-            Span::styled(
-                name.to_string(),
-                Style::default()
-                    .fg(theme::THINKING)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" ?", Style::default().fg(theme::TEXT)),
-        ]));
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("  Press ", Style::default().fg(theme::MUTED)),
-            Span::styled(
-                "Enter",
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" to confirm, ", Style::default().fg(theme::MUTED)),
-            Span::styled(
-                "Esc",
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" to cancel", Style::default().fg(theme::MUTED)),
-        ]));
+        let lines: Vec<Line<'_>> = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    "  Confirm uninstall ".to_string(),
+                    Style::default().fg(theme::TEXT),
+                ),
+                Span::styled(
+                    name.to_string(),
+                    Style::default()
+                        .fg(theme::THINKING)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ?", Style::default().fg(theme::TEXT)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Press ", Style::default().fg(theme::MUTED)),
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to confirm, ", Style::default().fg(theme::MUTED)),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to cancel", Style::default().fg(theme::MUTED)),
+            ]),
+        ];
 
         let inner = BorderedPanel::new(Span::styled(
             " Plugins ",

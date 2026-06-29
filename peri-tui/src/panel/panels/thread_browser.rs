@@ -186,13 +186,6 @@ impl ThreadBrowserPanel {
             self.scroll_offset = cursor_line - visible_lines + 1;
         }
     }
-
-    /// Total content lines.
-    fn total_content_lines(&self) -> u16 {
-        let header: u16 = 1; // search hint
-        let entry_lines: u16 = self.total_filtered() as u16 * 3;
-        header + entry_lines
-    }
 }
 
 /// 截断字符串到最大显示宽度（CJK 安全，基于 unicode-width）。
