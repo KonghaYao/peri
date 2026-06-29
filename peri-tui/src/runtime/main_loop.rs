@@ -293,26 +293,19 @@ fn thin_handle(app: &mut App, event: TuiEvent) -> Vec<Effect> {
     // ── Periodic tick ─────────────────────────────────────────────────
     match event {
         TuiEvent::Tick => {
-            // Advance spinner animation frame (every tick).
-            app.session_mgr.current_mut().spinner_state.advance_tick();
-
-            // Poll agent: drain ACP notifications, v2 queue.
-            app.poll_agent();
-
-            // TODO(P1.5): poll_background_events removed in P1, replaced by main_loop background event drain.
-            // TODO(P1.5): poll_panic_notifications removed in P1, replaced by main_loop panic drain.
-
-            // Poll workflow panel data.
-            if app.workflow_polling_active {
-                app.poll_workflow_runs();
-            }
-
-            // Always render on tick (caller throttles via TARGET_FRAME_INTERVAL).
+            // Spinner, poll agent, poll workflow are now handled by the
+            // state machine (idle.rs Tick → AdvanceSpinner/PollAgent/PollWorkflow).
+            // Legacy Tick is a no-op; Render is de-duplicated by the caller.
             vec![Effect::Render]
         }
 
         // ── User input: key press ───────────────────────────────────────
         TuiEvent::Key(key_event) => {
+            // Shortcuts now handled by the state machine (idle.rs).
+            // Skip legacy dispatch to avoid double-execution.
+            if is_sm_handled_shortcut(&key_event) {
+                return vec![Effect::Render];
+            }
             // Delegate to the existing keyboard handler.
             match keyboard::handle_key_event(app, key_event) {
                 Ok(Some(Action::Quit)) => vec![Effect::Quit],
@@ -652,16 +645,32 @@ fn handle_acp_event(app: &mut App, event_name: &str, data: &serde_json::Value) -
     // Delegate to the legacy App handler.
     let (updated, _should_break, should_return) = app.handle_acp_notification(notif);
     if should_return {
-        // The handler requested an immediate return (e.g. after submit_message).
-        // In the legacy loop this causes `poll_agent` to return `true`,
-        // which triggers a redraw.  Here we emit Render to achieve the same.
         vec![Effect::Render]
     } else if updated {
         vec![Effect::Render]
     } else {
-        // No UI update, but we still return Render so the loop never
-        // has a no-op iteration (the caller's throttle logic decides
-        // whether to actually draw).
         vec![Effect::Render]
+    }
+}
+
+/// Returns `true` if the state machine (idle.rs) already handles this shortcut,
+/// so the legacy keyboard handler should be skipped to avoid double-execution.
+fn is_sm_handled_shortcut(key: &ratatui::crossterm::event::KeyEvent) -> bool {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    // BackTab: cycle permission mode
+    if matches!(key.code, KeyCode::BackTab) {
+        return true;
+    }
+
+    let ctrl = key.modifiers.intersects(KeyModifiers::CONTROL);
+    let shift = key.modifiers.intersects(KeyModifiers::SHIFT);
+
+    match key.code {
+        KeyCode::Char('t') if ctrl && shift => true, // Ctrl+Shift+T: cycle provider
+        KeyCode::Char('t') if ctrl => true,          // Ctrl+T: cycle model
+        KeyCode::Char('b') if ctrl => true,          // Ctrl+B: focus bg bar
+        KeyCode::Char('o') if ctrl => true,          // Ctrl+O: toggle diff
+        _ => false,
     }
 }
