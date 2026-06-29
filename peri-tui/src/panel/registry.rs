@@ -84,7 +84,7 @@ impl super::PanelState for PanelStateStub {
 /// each arm is replaced with the concrete panel implementation.
 pub fn create_panel(kind: PanelKind) -> Box<dyn super::PanelState> {
     match kind {
-        PanelKind::Model => Box::new(PanelStateStub::new(kind)),
+        PanelKind::Model => Box::new(super::panels::model::ModelPanel::empty()),
         PanelKind::Login => Box::new(PanelStateStub::new(kind)),
         PanelKind::Agent => Box::new(super::panels::agent::AgentPanel::empty()),
         PanelKind::Hooks => Box::new(PanelStateStub::new(kind)),
