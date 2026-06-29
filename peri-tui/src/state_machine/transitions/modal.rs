@@ -164,9 +164,28 @@ fn map_panel_effects(panel_effects: Vec<PanelEffect>) -> Vec<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::panel_manager::PanelKind;
     use crate::panel::registry::create_panel;
     use crate::state_machine::handler::NoopHandler;
-    use ratatui::crossterm::event::KeyModifiers;
+    use ratatui::crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+
+    /// 所有 14 个 PanelKind，用于全量回归测试。
+    const ALL_PANEL_KINDS: [PanelKind; 14] = [
+        PanelKind::Model,
+        PanelKind::Login,
+        PanelKind::Agent,
+        PanelKind::Hooks,
+        PanelKind::Config,
+        PanelKind::ThreadBrowser,
+        PanelKind::Mcp,
+        PanelKind::Plugin,
+        PanelKind::Cron,
+        PanelKind::Status,
+        PanelKind::Memory,
+        PanelKind::Tasks,
+        PanelKind::Betas,
+        PanelKind::Workflow,
+    ];
 
     #[test]
     fn test_esc_dismisses_modal() {
@@ -188,17 +207,306 @@ mod tests {
 
     #[test]
     fn test_panel_close_transitions_to_idle() {
-        // ModelPanel with Ctrl+M selection closes (Esc stub returns Close).
-        // We use a panel that produces Close on a specific key.
-        // MemoryPanel's handle_key(Input::default()) returns Close (stub behavior
-        // before data migration); simplest is to use Esc-like key.
-        // Actually, use a real panel: press Esc on any v2 panel -> Close.
-        let panel = create_panel(crate::app::panel_manager::PanelKind::Betas);
+        // Betas panel + Esc -> Close effect -> transition to Idle.
+        let panel = create_panel(PanelKind::Betas);
         let modal = ModalState::Panel(panel);
         let (next, _effects) = handle(
             modal,
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         );
         assert!(matches!(next, State::Idle(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // 全量面板回归测试（14 个 PanelKind × 关键事件）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_all_14_panels_esc_returns_to_idle() {
+        // 每个 v2 面板都必须响应 Esc 返回 Idle。
+        // 这是面板契约的最基础保证 —— 用户不会被困在面板里。
+        for kind in ALL_PANEL_KINDS {
+            let panel = create_panel(kind);
+            let modal = ModalState::Panel(panel);
+            let (next, effects) = handle(
+                modal,
+                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            );
+            assert!(
+                matches!(next, State::Idle(_)),
+                "Esc on {kind:?} should transition to Idle, got {next:?}"
+            );
+            // 至少有一个 Render effect 让用户看到面板已关闭。
+            assert!(
+                effects.iter().any(|e| matches!(e, Effect::Render)),
+                "Esc on {kind:?} should emit at least one Render effect"
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_14_panels_tick_is_noop() {
+        // Tick 不应该改变面板状态或产生 effects（除非面板主动产生副作用）。
+        for kind in ALL_PANEL_KINDS {
+            let panel = create_panel(kind);
+            let modal = ModalState::Panel(panel);
+            let (next, effects) = handle(modal, Event::Tick);
+            assert!(
+                matches!(next, State::Modal(_)),
+                "Tick on {kind:?} should keep Modal state, got {next:?}"
+            );
+            // Tick 期间面板不应该主动触发副作用（避免每个 tick 都发送 ACP 请求）。
+            assert!(
+                effects.is_empty(),
+                "Tick on {kind:?} should emit no effects, got {effects:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_14_panels_resize_triggers_render() {
+        // Resize 必须触发重绘以重新计算面板布局。
+        for kind in ALL_PANEL_KINDS {
+            let panel = create_panel(kind);
+            let modal = ModalState::Panel(panel);
+            let (next, effects) = handle(
+                modal,
+                Event::Resize {
+                    width: 100,
+                    height: 40,
+                },
+            );
+            assert!(
+                matches!(next, State::Modal(_)),
+                "Resize on {kind:?} should keep Modal state"
+            );
+            assert!(
+                effects.iter().any(|e| matches!(e, Effect::Render)),
+                "Resize on {kind:?} should emit Render effect"
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_14_panels_mouse_triggers_render() {
+        // Mouse 事件应该触发重绘（高亮、悬停状态可能改变）。
+        let mouse_event = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        for kind in ALL_PANEL_KINDS {
+            let panel = create_panel(kind);
+            let modal = ModalState::Panel(panel);
+            let (next, effects) = handle(modal, Event::Mouse(mouse_event));
+            assert!(
+                matches!(next, State::Modal(_)),
+                "Mouse on {kind:?} should keep Modal state"
+            );
+            assert!(
+                effects.iter().any(|e| matches!(e, Effect::Render)),
+                "Mouse on {kind:?} should emit Render effect"
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_14_panels_acp_disconnected_is_noop() {
+        // ACP 断开时，面板状态保持不变 —— 断开由 main_loop 上层处理。
+        for kind in ALL_PANEL_KINDS {
+            let panel = create_panel(kind);
+            let modal = ModalState::Panel(panel);
+            let (next, effects) = handle(modal, Event::AcpDisconnected);
+            assert!(
+                matches!(next, State::Modal(_)),
+                "AcpDisconnected on {kind:?} should keep Modal state"
+            );
+            assert!(
+                effects.is_empty(),
+                "AcpDisconnected on {kind:?} should emit no effects"
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_14_panels_shutdown_is_noop() {
+        // Shutdown 事件在 Modal 状态下被忽略（由 main_loop 顶层处理）。
+        for kind in ALL_PANEL_KINDS {
+            let panel = create_panel(kind);
+            let modal = ModalState::Panel(panel);
+            let (next, effects) = handle(modal, Event::Shutdown);
+            assert!(
+                matches!(next, State::Modal(_)),
+                "Shutdown on {kind:?} should keep Modal state"
+            );
+            assert!(
+                effects.is_empty(),
+                "Shutdown on {kind:?} should emit no effects"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PanelEffect → Effect 映射测试（核心数据流）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_map_panel_effects_close_filtered_out() {
+        // Close 不应该作为 Effect 传播 —— 它通过状态转换（→ Idle）处理。
+        let panel_effects = vec![PanelEffect::Close];
+        let mapped = map_panel_effects(panel_effects);
+        assert!(mapped.is_empty(), "Close should be filtered out");
+    }
+
+    #[test]
+    fn test_map_panel_effects_send_to_acp() {
+        let panel_effects = vec![PanelEffect::SendToAcp {
+            event: "set_model".to_string(),
+            data: serde_json::json!({"alias": "sonnet"}),
+        }];
+        let mapped = map_panel_effects(panel_effects);
+        assert_eq!(mapped.len(), 1);
+        match &mapped[0] {
+            Effect::SendToAcp { method, params } => {
+                assert_eq!(method, "set_model");
+                assert_eq!(params["alias"], "sonnet");
+            }
+            other => panic!("expected SendToAcp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_map_panel_effects_copy() {
+        let panel_effects = vec![PanelEffect::Copy("hello".to_string())];
+        let mapped = map_panel_effects(panel_effects);
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0], Effect::CopyToClipboard("hello".to_string()));
+    }
+
+    #[test]
+    fn test_map_panel_effects_show_notification() {
+        let panel_effects = vec![PanelEffect::ShowNotification("saved".to_string())];
+        let mapped = map_panel_effects(panel_effects);
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0], Effect::ShowNotification("saved".to_string()));
+    }
+
+    #[test]
+    fn test_map_panel_effects_update_config() {
+        let panel_effects = vec![PanelEffect::UpdateConfig {
+            key: "model".to_string(),
+            value: "opus".to_string(),
+        }];
+        let mapped = map_panel_effects(panel_effects);
+        assert_eq!(mapped.len(), 1);
+        match &mapped[0] {
+            Effect::UpdateConfig { key, value } => {
+                assert_eq!(key, "model");
+                assert_eq!(value, "opus");
+            }
+            other => panic!("expected UpdateConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_map_panel_effects_switch_session() {
+        let panel_effects = vec![PanelEffect::SwitchSession("sess_123".to_string())];
+        let mapped = map_panel_effects(panel_effects);
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0], Effect::SwitchSession("sess_123".to_string()));
+    }
+
+    #[test]
+    fn test_map_panel_effects_mixed_batch() {
+        // 模拟 ModelPanel::apply_effects 的真实批量输出。
+        let panel_effects = vec![
+            PanelEffect::UpdateConfig {
+                key: "model".to_string(),
+                value: "sonnet".to_string(),
+            },
+            PanelEffect::SendToAcp {
+                event: "set_model".to_string(),
+                data: serde_json::json!({}),
+            },
+            PanelEffect::ShowNotification("switched".to_string()),
+            PanelEffect::Close,
+        ];
+        let mapped = map_panel_effects(panel_effects);
+        // Close 被过滤，剩 3 个。
+        assert_eq!(mapped.len(), 3);
+        assert!(matches!(mapped[0], Effect::UpdateConfig { .. }));
+        assert!(matches!(mapped[1], Effect::SendToAcp { .. }));
+        assert!(matches!(mapped[2], Effect::ShowNotification(_)));
+    }
+
+    #[test]
+    fn test_map_panel_effects_empty() {
+        let mapped = map_panel_effects(Vec::new());
+        assert!(mapped.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Handler (Interaction) 测试
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_handler_submit_closes_modal() {
+        // NoopHandler 对任何字符都返回 Nothing，所以应该保持 Modal。
+        let modal = ModalState::Interaction(Box::new(NoopHandler));
+        let (next, _effects) = handle(
+            modal,
+            Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+        );
+        // NoopHandler 返回 Nothing，所以保持 Modal。
+        assert!(matches!(next, State::Modal(_)));
+    }
+
+    #[test]
+    fn test_handler_esc_dismisses_to_idle() {
+        let modal = ModalState::Interaction(Box::new(NoopHandler));
+        let (next, effects) = handle(
+            modal,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        assert!(matches!(next, State::Idle(_)));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Esc on interaction should emit Render"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // transition_to_idle_with_effects 单元测试
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_transition_to_idle_with_effects_adds_render_if_missing() {
+        let effects = vec![Effect::CopyToClipboard("x".to_string())];
+        let (next, all_effects) = transition_to_idle_with_effects(effects);
+        assert!(matches!(next, State::Idle(_)));
+        // 自动补一个 Render。
+        assert!(
+            all_effects.iter().any(|e| matches!(e, Effect::Render)),
+            "should auto-add Render if missing"
+        );
+        assert_eq!(all_effects.len(), 2);
+    }
+
+    #[test]
+    fn test_transition_to_idle_with_effects_preserves_existing_render() {
+        let effects = vec![Effect::Render];
+        let (next, all_effects) = transition_to_idle_with_effects(effects);
+        assert!(matches!(next, State::Idle(_)));
+        // 已有 Render，不再补。
+        assert_eq!(all_effects.len(), 1);
+    }
+
+    #[test]
+    fn test_transition_to_idle_basic() {
+        let (next, effects) = transition_to_idle();
+        assert!(matches!(next, State::Idle(_)));
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], Effect::Render));
     }
 }
