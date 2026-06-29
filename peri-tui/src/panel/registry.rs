@@ -96,7 +96,7 @@ pub fn create_panel(kind: PanelKind) -> Box<dyn super::PanelState> {
         PanelKind::Status => Box::new(super::panels::status::StatusPanel::empty()),
         PanelKind::Memory => Box::new(super::panels::memory::MemoryPanel::empty()),
         PanelKind::Tasks => Box::new(PanelStateStub::new(kind)),
-        PanelKind::Betas => Box::new(PanelStateStub::new(kind)),
+        PanelKind::Betas => Box::new(super::panels::betas::BetasPanel::empty()),
         PanelKind::Workflow => Box::new(PanelStateStub::new(kind)),
     }
 }
