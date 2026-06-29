@@ -21,66 +21,16 @@ pub use crate::state_machine::current_turn::CurrentTurn;
 pub use crate::state_machine::input::InputState;
 
 // ---------------------------------------------------------------------------
-// Panel / Interaction traits (stubs -- refined in Phase 3)
+// Re-exports from the panel module (Phase 3 infrastructure)
 // ---------------------------------------------------------------------------
 
-/// Read-only snapshot injected into a panel before each key event.
+/// v2 `PanelState` trait, `PanelReadContext`, and `PanelEffect`.
 ///
-/// Panels never hold mutable references to session state. They receive a
-/// snapshot and produce a list of `PanelEffect` instructions that the state
-/// machine maps to standard `Effect`s.
-///
-/// Defined fully in Phase 3 (panel migration).
-pub struct PanelReadContext {
-    /// Current ViewModel list (read-only).
-    pub view_models: Vec<ViewModel>,
-    /// Current scroll offset in the message area.
-    pub scroll_offset: u16,
-    /// Panel area dimensions (width, height).
-    pub area_size: (u16, u16),
-}
-
-/// Restricted set of side-effects a panel can produce.
-///
-/// The state machine maps each variant to a standard `Effect` before the
-/// main loop executes it. Panels never touch terminal, network, or clipboard
-/// directly.
-///
-/// Defined fully in Phase 3 (panel migration).
-#[derive(Debug, Clone, PartialEq)]
-pub enum PanelEffect {
-    /// Inject a system notification text into the message area.
-    ShowNotification(String),
-    /// Send a command/query to the ACP layer.
-    SendToAcp(String),
-    /// Close this panel.
-    Close,
-    /// Switch to another session.
-    SwitchSession(String),
-    /// Copy text to the system clipboard.
-    Copy(String),
-    /// Update a configuration item (persisted + synced to ACP Server).
-    UpdateConfig(String, String),
-}
-
-/// Interface implemented by every panel (14 variants in v1, open-ended in v2).
-///
-/// New panels only need to implement this trait -- no changes to the state
-/// machine core.
-///
-/// Signatures are simplified stubs; refined in Phase 3.
-pub trait PanelState: Send + std::fmt::Debug {
-    /// Render the panel into the given area.
-    ///
-    /// The concrete signature will accept a `ratatui::Frame` and a
-    /// `Rect` once rendering types are wired.
-    fn render(&self, area: (u16, u16));
-
-    /// Handle a single key event, returning zero or more effects.
-    ///
-    /// `ctx` is a read-only snapshot of the current TUI state.
-    fn handle_key(&mut self, key: char, ctx: &PanelReadContext) -> Vec<PanelEffect>;
-}
+/// These types are defined in `crate::panel` and re-exported here so that
+/// the state machine's `ModalState::Panel(Box<dyn PanelState>)` and the
+/// `transitions::modal` module can reference them without reaching across
+/// the crate.
+pub use crate::panel::{PanelEffect, PanelReadContext, PanelState};
 
 /// Interface implemented by every interaction handler (HITL / AskUser / Rewind /
 /// OAuth).
