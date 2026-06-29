@@ -30,8 +30,10 @@ use crate::runtime::effect::Effect;
 use crate::runtime::event_channel::{EventRx, TuiEvent};
 use crate::state_machine::state::PanelReadContext;
 use crate::state_machine::{
-    handle as state_machine_handle, transitions::modal, Event as SmEvent, IdleState, ModalState,
-    State,
+    handle as state_machine_handle,
+    input::sync::{from_textarea, to_textarea},
+    transitions::modal,
+    Event as SmEvent, IdleState, ModalState, State,
 };
 
 /// Target frame interval for loading-spinner animation (~30 FPS).
@@ -383,6 +385,20 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
             break;
         }
 
+        // ── 2b. Sync TextArea → state machine InputState ───────────────
+        // The keyboard module and effects (paste, mouse click) mutate the
+        // TextArea widget directly. After all mutations are done, extract
+        // the new input state back into the state machine so it stays in sync.
+        {
+            let ta = &app.session_mgr.current().ui.textarea;
+            let input_snapshot = from_textarea(ta);
+            match &mut state {
+                State::Idle(idle) => idle.input = input_snapshot,
+                State::Streaming(s) => s.input = input_snapshot,
+                _ => {}
+            }
+        }
+
         // ── 3. Check App-level quit flag (/exit, /quit commands) ────────
         if app.global_ui.quit_requested {
             break;
@@ -393,6 +409,18 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // trigger an immediate redraw.  Tick events are throttled to
         // TARGET_FRAME_INTERVAL to cap the spinner animation at ~30 FPS.
         if needs_render {
+            // Sync state machine InputState → TextArea before rendering,
+            // so that state-machine-originated changes (history restore,
+            // rewind, prediction) are reflected in the widget.
+            match &state {
+                State::Idle(idle) => {
+                    to_textarea(&idle.input, &mut app.session_mgr.current_mut().ui.textarea);
+                }
+                State::Streaming(s) => {
+                    to_textarea(&s.input, &mut app.session_mgr.current_mut().ui.textarea);
+                }
+                _ => {}
+            }
             if is_tick {
                 let now = std::time::Instant::now();
                 if now.duration_since(last_render) >= TARGET_FRAME_INTERVAL {
