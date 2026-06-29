@@ -17,7 +17,7 @@
 
 use std::time::Duration;
 
-use ratatui::crossterm::event::MouseEvent;
+use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tracing::debug;
 
 use crate::app::App;
@@ -96,6 +96,72 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 },
                 Effect::AskUserScroll { delta } => {
                     app.ask_user_scroll(delta as i16);
+                }
+                // ── Mouse textarea interaction ───────────────────────────
+                Effect::MouseTextareaClick { row, column } => {
+                    if !app.is_interaction_popup_active() {
+                        if let Some(area) = app.session_mgr.current_mut().ui.textarea_area {
+                            if row >= area.y
+                                && row < area.y + area.height
+                                && column >= area.x
+                                && column < area.x + area.width
+                            {
+                                let (r, c) = crate::event::mouse::textarea_mouse_to_cursor(
+                                    &app.session_mgr.current().ui.textarea,
+                                    area,
+                                    &MouseEvent {
+                                        kind: MouseEventKind::Down(MouseButton::Left),
+                                        column,
+                                        row,
+                                        modifiers: KeyModifiers::NONE,
+                                    },
+                                );
+                                app.session_mgr.current_mut().ui.textarea.move_cursor(
+                                    tui_textarea::CursorMove::Jump(r as u16, c as u16),
+                                );
+                                app.session_mgr.current_mut().ui.textarea.start_selection();
+                            }
+                        }
+                    }
+                    needs_render = true;
+                }
+                Effect::MouseTextareaDrag { row, column } => {
+                    if app.session_mgr.current_mut().ui.textarea.is_selecting() {
+                        if let Some(area) = app.session_mgr.current_mut().ui.textarea_area {
+                            if row >= area.y && row < area.y + area.height {
+                                let (r, c) = crate::event::mouse::textarea_mouse_to_cursor(
+                                    &app.session_mgr.current().ui.textarea,
+                                    area,
+                                    &MouseEvent {
+                                        kind: MouseEventKind::Drag(MouseButton::Left),
+                                        column,
+                                        row,
+                                        modifiers: KeyModifiers::NONE,
+                                    },
+                                );
+                                app.session_mgr.current_mut().ui.textarea.move_cursor(
+                                    tui_textarea::CursorMove::Jump(r as u16, c as u16),
+                                );
+                            }
+                        }
+                    }
+                    needs_render = true;
+                }
+                Effect::MouseRelease => {
+                    app.session_mgr.current_mut().ui.scrollbar_dragging = false;
+                    app.session_mgr.current_mut().ui.panel_scrollbar_dragging = false;
+                    needs_render = true;
+                }
+                // ── Paste routing ───────────────────────────────────
+                Effect::PasteText { text } => {
+                    if let Some(wizard) = &mut app.global_ui.setup_wizard {
+                        wizard.paste_text(&text);
+                    } else if app.is_interaction_popup_active() {
+                        app.paste_to_interaction_popup(&text);
+                    } else {
+                        app.session_mgr.current_mut().ui.textarea.insert_str(&text);
+                    }
+                    needs_render = true;
                 }
                 // ── Agent control ─────────────────────────────────
                 Effect::InterruptAgent => {
@@ -323,25 +389,16 @@ fn thin_handle(app: &mut App, event: TuiEvent) -> Vec<Effect> {
         }
 
         // ── User input: mouse ───────────────────────────────────────────
-        TuiEvent::Mouse(mouse_event) => {
-            // Delegate to the legacy mouse handling inside `handle_event`.
-            // We call the inner logic directly to avoid going through the
-            // crossterm poll path.
-            handle_mouse_event(app, mouse_event);
-            vec![Effect::Render]
-        }
+        // State machine handles all mouse events now (idle.rs emits
+        // MouseTextareaClick / MouseTextareaDrag / MouseRelease effects).
+        TuiEvent::Mouse(_mouse) => vec![Effect::Render],
 
         // ── User input: paste ──────────────────────────────────────────
-        TuiEvent::Paste(text) => {
-            handle_paste_event(app, &text);
-            vec![Effect::Render]
-        }
+        // State machine produces PasteText + Render now; thin_handle is no-op.
+        TuiEvent::Paste(_text) => vec![Effect::Render],
 
         // ── User input: resize ──────────────────────────────────────────
-        TuiEvent::Resize(_cols, _rows) => {
-            app.session_mgr.current_mut().ui.text_selection.clear();
-            vec![Effect::Render]
-        }
+        TuiEvent::Resize(..) => vec![Effect::Render],
 
         // ── ACP notification (converted from AcpNotification) ───────────
         TuiEvent::AcpEvent {
@@ -350,17 +407,8 @@ fn thin_handle(app: &mut App, event: TuiEvent) -> Vec<Effect> {
         } => handle_acp_event(app, event, data),
 
         // ── ACP transport disconnected ──────────────────────────────────
-        TuiEvent::AcpDisconnected => {
-            // Transport drop — notify user but keep the loop running.
-            // The legacy code does not have explicit handling for this
-            // either; the ACP server crash is observed implicitly via
-            // missing Done events.
-            tracing::warn!("ACP transport disconnected");
-            app.push_system_note(
-                "ACP connection lost. Agent responses may not arrive.".to_string(),
-            );
-            vec![Effect::Render]
-        }
+        // The state machine produces PushSystemNote + Render for this.
+        TuiEvent::AcpDisconnected => vec![Effect::Render],
 
         // ── Session loaded (future: session switching transition) ────────
         TuiEvent::SessionLoaded { session_id } => {
@@ -374,134 +422,6 @@ fn thin_handle(app: &mut App, event: TuiEvent) -> Vec<Effect> {
 }
 
 // ── Legacy event delegation helpers ──────────────────────────────────────────
-//
-// These functions replicate the relevant branches of the legacy
-// `handle_event()` in `event/mod.rs`, calling the same `App` methods.
-// They are intentionally verbose rather than trying to reconstruct a
-// `CrosstermEvent` and calling `handle_event()` directly, because the
-// latter function calls `event::poll()` internally (for mouse coalescing
-// etc.) which we cannot invoke from the v2 loop.
-
-fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
-    // Minimal P1 dispatch: delegate to the existing mouse handling logic.
-    // The full mouse handling (scroll, click, drag, selection, clipboard)
-    // lives in event/mod.rs::handle_event's Mouse branch.
-    // For P1, we reconstruct a CrosstermEvent::Mouse and call a
-    // dedicated helper that contains just the mouse dispatch logic.
-    //
-    // NOTE: The legacy code uses EVENT_STASH for mouse coalescing.
-    // In the v2 architecture, mouse coalescing happens in the
-    // keyboard_collector (it does NOT — the collector only filters
-    // FocusGained/FocusLost).  Mouse coalescing is deferred to P2
-    // when the keyboard collector is enhanced, or we add coalescing
-    // here as a follow-up.
-    //
-    // For P1, we directly call the legacy mouse handler by
-    // constructing a CrosstermEvent and delegating.  Since we cannot
-    // call `event::handle_event` (it calls `event::poll()`), we
-    // replicate the mouse branch inline.
-
-    use ratatui::crossterm::event::MouseButton;
-    use ratatui::crossterm::event::MouseEventKind;
-
-    match mouse.kind {
-        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-            // AskUser popup scroll takes priority
-            if let Some(crate::app::InteractionPrompt::Questions(_)) =
-                app.session_mgr.current_mut().agent.interaction_prompt
-            {
-                if let Some(area) = app.session_mgr.current_mut().ui.panel_area {
-                    use crate::event::mouse;
-                    if mouse::mouse_in_rect(&mouse, area) {
-                        let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                            -3
-                        } else {
-                            3
-                        };
-                        app.ask_user_scroll(delta);
-                        return;
-                    }
-                }
-            }
-
-            match mouse.kind {
-                MouseEventKind::ScrollUp => app.scroll_up(),
-                MouseEventKind::ScrollDown => app.scroll_down(),
-                _ => unreachable!(),
-            }
-        }
-        MouseEventKind::Down(MouseButton::Left)
-            // Textarea selection start
-            if !app.is_interaction_popup_active() =>
-        {
-            if let Some(area) = app.session_mgr.current_mut().ui.textarea_area {
-                if mouse.row >= area.y
-                    && mouse.row < area.y + area.height
-                    && mouse.column >= area.x
-                    && mouse.column < area.x + area.width
-                {
-                    let session = &app.session_mgr.current();
-                    let (row, col) = crate::event::mouse::textarea_mouse_to_cursor(
-                        &session.ui.textarea,
-                        area,
-                        &mouse,
-                    );
-                    app.session_mgr
-                        .current_mut()
-                        .ui
-                        .textarea
-                        .move_cursor(tui_textarea::CursorMove::Jump(row as u16, col as u16));
-                    app.session_mgr.current_mut().ui.textarea.start_selection();
-                }
-            }
-        }
-        MouseEventKind::Drag(MouseButton::Left)
-            // Textarea selection extend
-            if app.session_mgr.current_mut().ui.textarea.is_selecting() =>
-        {
-            if let Some(area) = app.session_mgr.current_mut().ui.textarea_area {
-                if mouse.row >= area.y && mouse.row < area.y + area.height {
-                    let session = &app.session_mgr.current();
-                    let (row, col) = crate::event::mouse::textarea_mouse_to_cursor(
-                        &session.ui.textarea,
-                        area,
-                        &mouse,
-                    );
-                    app.session_mgr
-                        .current_mut()
-                        .ui
-                        .textarea
-                        .move_cursor(tui_textarea::CursorMove::Jump(row as u16, col as u16));
-                }
-            }
-        }
-        MouseEventKind::Up(MouseButton::Left) => {
-            // End scrollbar drag / textarea selection
-            app.session_mgr.current_mut().ui.scrollbar_dragging = false;
-            app.session_mgr.current_mut().ui.panel_scrollbar_dragging = false;
-        }
-        _ => {}
-    }
-}
-
-fn handle_paste_event(app: &mut App, text: &str) {
-    // Setup wizard open -- paste into active field
-    if let Some(wizard) = &mut app.global_ui.setup_wizard {
-        wizard.paste_text(text);
-        return;
-    }
-
-    // Interaction popup routing
-    if app.is_interaction_popup_active() {
-        app.paste_to_interaction_popup(text);
-        return;
-    }
-
-    // Fallback: paste into textarea
-    if !app.is_interaction_popup_active() {
-        app.session_mgr.current_mut().ui.textarea.insert_str(text);
-    }
-}
 
 /// Handle an ACP event that arrived through the unified event channel.
 ///

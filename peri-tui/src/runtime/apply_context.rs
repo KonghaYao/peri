@@ -118,6 +118,10 @@ impl<'a> ApplyContext<'a> {
             | Effect::AdvanceSpinner
             | Effect::Scroll { .. }
             | Effect::AskUserScroll { .. }
+            | Effect::MouseTextareaClick { .. }
+            | Effect::MouseTextareaDrag { .. }
+            | Effect::MouseRelease
+            | Effect::PasteText { .. }
             | Effect::PushSystemNote(_)
             | Effect::OpenThreadWithFeedback { .. }
             | Effect::MemoryPanelOpenEditor

@@ -29,6 +29,20 @@ pub enum Effect {
         delta: i32,
     },
 
+    // ── Mouse textarea interaction ────────────────────────────────────────
+    /// Left-click on textarea: set cursor position and start selection.
+    MouseTextareaClick {
+        row: u16,
+        column: u16,
+    },
+    /// Drag on textarea: extend selection while dragging.
+    MouseTextareaDrag {
+        row: u16,
+        column: u16,
+    },
+    /// Left button up: release scrollbar drag / textarea selection.
+    MouseRelease,
+
     // ── ACP protocol ─────────────────────────────────────────────────────
     /// Send an ACP method call or custom event.
     SendToAcp {
@@ -38,6 +52,13 @@ pub enum Effect {
 
     // ── Clipboard ────────────────────────────────────────────────────────
     CopyToClipboard(String),
+
+    // ── Paste routing (setup wizard → interaction popup → textarea) ──────
+    /// Paste text routed by the main loop to setup wizard, interaction popup,
+    /// or legacy textarea (fallback).
+    PasteText {
+        text: String,
+    },
 
     // ── Agent control ────────────────────────────────────────────────────
     /// Interrupt the currently running agent.

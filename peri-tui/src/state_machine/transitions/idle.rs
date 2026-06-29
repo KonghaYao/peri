@@ -8,7 +8,7 @@
 //!
 //! Reference: `docs/design/peri-tui-architecture.md` section 8.6.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::super::current_turn::CurrentTurn;
 use super::super::event::{AcpEventData, Event};
@@ -22,11 +22,13 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
         // -- Key events -------------------------------------------------------
         Event::Key(key) => handle_key(state, key),
 
-        // -- Paste: append at cursor, re-render ------------------------------
-        Event::Paste(text) => {
-            state.input.insert_str(&text);
-            (State::Idle(state), vec![Effect::Render])
-        }
+        // -- Paste: routed by main_loop (setup wizard → interaction popup
+        //    → legacy textarea). State machine emits PasteText + Render;
+        //    main_loop handles the routing to App-level state.
+        Event::Paste(text) => (
+            State::Idle(state),
+            vec![Effect::PasteText { text }, Effect::Render],
+        ),
 
         // -- Tick: advance spinner + poll agent + poll workflow + render. --
         Event::Tick => (
@@ -43,10 +45,36 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollDown => (State::Idle(state), vec![Effect::Scroll { delta: 3 }]),
             MouseEventKind::ScrollUp => (State::Idle(state), vec![Effect::Scroll { delta: -3 }]),
-            // Other mouse events (click, drag, move): request re-render.
+            MouseEventKind::Down(MouseButton::Left) => (
+                State::Idle(state),
+                vec![
+                    Effect::MouseTextareaClick {
+                        row: mouse.row,
+                        column: mouse.column,
+                    },
+                    Effect::Render,
+                ],
+            ),
+            MouseEventKind::Drag(MouseButton::Left) => (
+                State::Idle(state),
+                vec![
+                    Effect::MouseTextareaDrag {
+                        row: mouse.row,
+                        column: mouse.column,
+                    },
+                    Effect::Render,
+                ],
+            ),
+            MouseEventKind::Up(MouseButton::Left) => (
+                State::Idle(state),
+                vec![Effect::MouseRelease, Effect::Render],
+            ),
             _ => (State::Idle(state), vec![Effect::Render]),
         },
-        Event::Resize { .. } => (State::Idle(state), vec![Effect::Render]),
+        Event::Resize { .. } => (
+            State::Idle(state),
+            vec![Effect::ClearTextSelection, Effect::Render],
+        ),
 
         // -- ACP events ------------------------------------------------------
         Event::AcpEvent(AcpEventData::ViewCommit(vc)) => {
@@ -92,10 +120,17 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
             (State::Idle(state), Vec::new())
         }
 
-        // -- System signals (no Idle-specific handling in P2) ----------------
-        Event::AcpDisconnected | Event::SessionLoaded { .. } | Event::Shutdown => {
-            (State::Idle(state), Vec::new())
-        }
+        // -- System signals ---------------------------------------------------
+        Event::AcpDisconnected => (
+            State::Idle(state),
+            vec![
+                Effect::PushSystemNote(
+                    "ACP connection lost. Agent responses may not arrive.".to_string(),
+                ),
+                Effect::Render,
+            ],
+        ),
+        Event::SessionLoaded { .. } | Event::Shutdown => (State::Idle(state), Vec::new()),
     }
 }
 
@@ -450,18 +485,28 @@ mod tests {
     }
 
     #[test]
-    fn test_paste_inserts_at_cursor() {
+    fn test_paste_emits_paste_text_effect() {
         let mut state = make_state();
         state.input.insert_str("hello");
         state.input.cursor = CursorPos::new(0, 2); // between 'e' and 'l'
-        let (next, _effects) = handle(state, Event::Paste("XX".into()));
+        let (next, effects) = handle(state, Event::Paste("XX".into()));
+        // State machine no longer inserts paste into its own buffer; routing
+        // is delegated to main_loop via PasteText effect.
         match next {
             State::Idle(idle) => {
-                assert_eq!(idle.input.text(), "heXXllo");
-                assert_eq!(idle.input.cursor, CursorPos::new(0, 4));
+                // Input is unchanged — paste routing is handled by main_loop.
+                assert_eq!(idle.input.text(), "hello");
+                assert_eq!(idle.input.cursor, CursorPos::new(0, 2));
             }
             _ => panic!("expected Idle"),
         }
+        // Verify PasteText effect is emitted with the correct text.
+        let paste_eff = effects.iter().find_map(|e| match e {
+            Effect::PasteText { text } => Some(text.as_str()),
+            _ => None,
+        });
+        assert_eq!(paste_eff, Some("XX"), "PasteText effect should carry 'XX'");
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
     #[test]
@@ -557,5 +602,107 @@ mod tests {
         );
         assert!(effects.iter().any(|e| matches!(e, Effect::ToggleDiff)));
         assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
+    }
+
+    #[test]
+    fn test_resize_clears_text_selection() {
+        let state = make_state();
+        let (_next, effects) = handle(
+            state,
+            Event::Resize {
+                width: 80,
+                height: 24,
+            },
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ClearTextSelection)),
+            "Resize in Idle should emit ClearTextSelection"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Resize in Idle should emit Render"
+        );
+    }
+
+    #[test]
+    fn test_acp_disconnected_pushes_system_note() {
+        let state = make_state();
+        let (_next, effects) = handle(state, Event::AcpDisconnected);
+        assert!(
+            effects.iter().any(
+                |e| matches!(e, Effect::PushSystemNote(msg) if msg.contains("ACP connection lost"))
+            ),
+            "AcpDisconnected in Idle should push a system note about lost connection"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "AcpDisconnected in Idle should emit Render"
+        );
+    }
+
+    // ── Mouse tests ──────────────────────────────────────────────────────
+
+    fn make_mouse(
+        kind: MouseEventKind,
+        row: u16,
+        column: u16,
+    ) -> ratatui::crossterm::event::MouseEvent {
+        ratatui::crossterm::event::MouseEvent {
+            kind,
+            row,
+            column,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn test_mouse_left_click_emits_textarea_click() {
+        let state = make_state();
+        let mouse = make_mouse(MouseEventKind::Down(MouseButton::Left), 10, 5);
+        let (_next, effects) = handle(state, Event::Mouse(mouse));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::MouseTextareaClick { row: 10, column: 5 })),
+            "Left click should emit MouseTextareaClick with coordinates"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Left click should also emit Render"
+        );
+    }
+
+    #[test]
+    fn test_mouse_drag_emits_textarea_drag() {
+        let state = make_state();
+        let mouse = make_mouse(MouseEventKind::Drag(MouseButton::Left), 12, 8);
+        let (_next, effects) = handle(state, Event::Mouse(mouse));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::MouseTextareaDrag { row: 12, column: 8 })),
+            "Left drag should emit MouseTextareaDrag with coordinates"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Left drag should also emit Render"
+        );
+    }
+
+    #[test]
+    fn test_mouse_up_emits_release() {
+        let state = make_state();
+        let mouse = make_mouse(MouseEventKind::Up(MouseButton::Left), 10, 5);
+        let (_next, effects) = handle(state, Event::Mouse(mouse));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::MouseRelease)),
+            "Mouse up should emit MouseRelease"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Mouse up should also emit Render"
+        );
     }
 }
