@@ -47,7 +47,7 @@ pub trait ViewMapper {
 /// - `LlmCallEnd` without usage -- filtered
 /// - `BackgroundTaskCompleted` / `BgToolStep` -- handled via separate TUI polling
 /// - `WorkflowProgress` -- handled via dedicated panel
-/// - `AgentExecutionFailed` -- mapped from `ObserveEvent::TurnError`, handled separately
+/// - `AgentExecutionFailed` -- routed as `"turn-interrupted"` so the v2 state machine can exit Streaming
 pub fn route(ev: &ExecutorEvent, view_mapper: &mut dyn ViewMapper) -> Option<RoutingOutput> {
     match ev {
         // ── §4.1 Streaming events ───────────────────────────────────────────
@@ -221,8 +221,16 @@ pub fn route(ev: &ExecutorEvent, view_mapper: &mut dyn ViewMapper) -> Option<Rou
         | ExecutorEvent::BackgroundTaskCompleted(_)
         | ExecutorEvent::BgToolStep { .. }
         | ExecutorEvent::WorkflowProgress(_)
-        | ExecutorEvent::AgentExecutionFailed { .. }
         | ExecutorEvent::TodoUpdate(_) => None,
+
+        // ── §4.6 Terminal events ────────────────────────────────────────────
+        ExecutorEvent::AgentExecutionFailed { message } => Some(RoutingOutput {
+            event_name: "turn-interrupted".into(),
+            data: serde_json::to_value(TurnInterrupted {
+                reason: message.clone(),
+            })
+            .unwrap_or(serde_json::json!({ "reason": message })),
+        }),
     }
 }
 
@@ -644,12 +652,15 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_execution_failed_discarded() {
+    fn test_agent_execution_failed_routes_to_turn_interrupted() {
         let ev = ExecutorEvent::AgentExecutionFailed {
             message: "oom".into(),
         };
         let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        let output = route(&ev, &mut mapper).expect("AgentExecutionFailed should route");
+        assert_eq!(output.event_name, "turn-interrupted");
+        let reason = output.data["reason"].as_str().unwrap();
+        assert_eq!(reason, "oom");
     }
 
     #[test]
