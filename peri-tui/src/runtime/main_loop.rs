@@ -557,6 +557,7 @@ fn is_sm_handled_shortcut(key: &ratatui::crossterm::event::KeyEvent) -> bool {
         KeyCode::Char('t') if ctrl => true,          // Ctrl+T: cycle model
         KeyCode::Char('b') if ctrl => true,          // Ctrl+B: focus bg bar
         KeyCode::Char('o') if ctrl => true,          // Ctrl+O: toggle diff
+        KeyCode::Char('p') if ctrl => true,          // Ctrl+P: open Model panel
         _ => false,
     }
 }

@@ -14,6 +14,7 @@ use super::super::current_turn::CurrentTurn;
 use super::super::event::{AcpEventData, Event};
 use super::super::input::{CursorPos, InputEdit};
 use super::super::state::{DoubleEscTracker, IdleState, State, StreamingState};
+use crate::app::panel_manager::PanelKind;
 use crate::runtime::effect::Effect;
 
 /// Idle-state transition entry point.
@@ -251,6 +252,13 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
                 'o' => {
                     // Ctrl+O: toggle inline diff.
                     (State::Idle(state), vec![Effect::ToggleDiff, Effect::Render])
+                }
+                'p' => {
+                    // Ctrl+P: open Model panel (P5 proof of concept).
+                    (
+                        State::Idle(state),
+                        vec![Effect::OpenPanel(PanelKind::Model), Effect::Render],
+                    )
                 }
                 // Other Ctrl+<char> combos pass through (P3 will dispatch more).
                 _ => (State::Idle(state), Vec::new()),
@@ -602,6 +610,19 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
         );
         assert!(effects.iter().any(|e| matches!(e, Effect::ToggleDiff)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
+    }
+
+    #[test]
+    fn test_ctrl_p_opens_model_panel() {
+        let state = make_state();
+        let (_next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+        );
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::OpenPanel(PanelKind::Model))));
         assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
