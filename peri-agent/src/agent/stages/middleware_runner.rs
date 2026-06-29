@@ -223,13 +223,6 @@ pub async fn run_on_error(
     result
 }
 
-// ─── 测试辅助：避免 unused 警告 ──────────────────────────────────────────────
-
-#[allow(dead_code)]
-fn _silence_unused() {
-    // 占位：原 PhantomData 引用已随 import 清理移除
-}
-
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

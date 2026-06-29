@@ -256,9 +256,3 @@ fn extract_last_ai_text(session: &std::sync::Arc<peri_agent::session::Session>) 
         })
         .unwrap_or_default()
 }
-
-// 抑制 v1 残余 imports 的 dead_code warning（待 P5.5 完全清理后删除）
-#[allow(unused_imports)]
-use crate::subagent::SubAgentMiddlewareConfig as _UnusedSubAgentMiddlewareConfig;
-#[allow(unused_imports)]
-use peri_agent::{agent::react::AgentInput, tools::BaseTool as _UnusedBaseTool};

@@ -173,9 +173,3 @@ impl super::SubAgentTool {
         })
     }
 }
-
-// 抑制 v1 残余 imports 的 dead_code warning（待 P5.5 完全清理后删除）
-#[allow(unused_imports)]
-use crate::{
-    hooks::types::HookEvent as _UnusedHE, subagent::SubAgentMiddlewareConfig as _UnusedSAMC,
-};

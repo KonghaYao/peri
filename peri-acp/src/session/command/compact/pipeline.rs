@@ -31,7 +31,6 @@ use crate::session::{command::CommandContext, executor::PromptStopReason};
 use super::events::{
     emit_compact_completed, emit_compact_error, emit_compact_started, FULL_COMPACT_MICRO_CLEARED,
 };
-use super::invariant::build_summary_human_message;
 
 /// Pipeline 终态。编排层据此决定返回值与是否中途 short-circuit。
 pub enum PipelineOutcome {
@@ -256,10 +255,4 @@ pub async fn execute_compact(ctx: super::CommandContext) -> super::CommandResult
             stop_reason,
         },
     }
-}
-
-#[allow(dead_code)]
-fn _unused_keep_import() {
-    // 保留 build_summary_human_message 的引用——某些测试可能仍依赖
-    let _ = build_summary_human_message("");
 }

@@ -13,7 +13,7 @@
 //! | `OAuthCallbackResult` | `OAuthCallbackResultDto` | ✅ 1:1 |
 //! | `ConfigSource` | `ConfigSourceDto` | ✅ tuple→struct variant + PathBuf→String |
 //! | `ServerInfo` | `ServerInfoDto` | ✅ 复合转换（含上述所有 DTO） |
-//! | `PermissionMode` | `PermissionModeDto` | ❌ 变体完全不同 |
+//! | `PermissionMode` | `PermissionModeDto` | ✅ 1:1 |
 //! | `InstallScope` | `InstallScopeDto` | ✅ DTO 已同步 Local 变体 |
 //! | `MarketplaceSource` | `MarketplaceSourceDto` | ❌ DTO 与运行时完全不同（Git/Local/Registry vs GitHub/Git/Url/File/Directory/Npm） |
 //! | `RegisteredHook` | `RegisteredHookDto` | ❌ 结构完全不同 |
@@ -25,6 +25,7 @@ use peri_acp_types::mcp_types::{
     ClientStatusDto, ConfigSourceDto, McpInitStatusDto, OAuthCallbackResultDto, OAuthStatusDto,
     ServerInfoDto,
 };
+use peri_acp_types::permission::PermissionModeDto;
 use peri_acp_types::plugin_types::InstallScopeDto;
 use peri_acp_types::skill::{SkillMetadataDto, SkillSourceDto};
 
@@ -138,6 +139,17 @@ pub fn skill_metadata_dto(s: peri_middlewares::skills::loader::SkillMetadata) ->
         source: skill_source_dto(s.source),
         plugin_name: s.plugin_name,
         disabled: false,
+    }
+}
+
+// ── Permission 类型 ──────────────────────────────────────────────────
+
+pub fn permission_mode_dto(m: peri_middlewares::prelude::PermissionMode) -> PermissionModeDto {
+    match m {
+        peri_middlewares::prelude::PermissionMode::Default => PermissionModeDto::Default,
+        peri_middlewares::prelude::PermissionMode::AcceptEdit => PermissionModeDto::AcceptEdit,
+        peri_middlewares::prelude::PermissionMode::AutoMode => PermissionModeDto::AutoMode,
+        peri_middlewares::prelude::PermissionMode::Bypass => PermissionModeDto::Bypass,
     }
 }
 
@@ -321,6 +333,41 @@ mod tests {
         assert_eq!(
             install_scope_dto(peri_middlewares::plugin::InstallScope::Local),
             InstallScopeDto::Local
+        );
+    }
+
+    #[test]
+    fn test_permission_mode_all_variants() {
+        use peri_middlewares::prelude::PermissionMode;
+        // 验证全部 4 个运行时变体都能转换
+        for m in [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdit,
+            PermissionMode::AutoMode,
+            PermissionMode::Bypass,
+        ] {
+            let _ = permission_mode_dto(m);
+        }
+    }
+
+    #[test]
+    fn test_permission_mode_dto_mapping() {
+        use peri_middlewares::prelude::PermissionMode;
+        assert_eq!(
+            permission_mode_dto(PermissionMode::Default),
+            PermissionModeDto::Default
+        );
+        assert_eq!(
+            permission_mode_dto(PermissionMode::AcceptEdit),
+            PermissionModeDto::AcceptEdit
+        );
+        assert_eq!(
+            permission_mode_dto(PermissionMode::AutoMode),
+            PermissionModeDto::AutoMode
+        );
+        assert_eq!(
+            permission_mode_dto(PermissionMode::Bypass),
+            PermissionModeDto::Bypass
         );
     }
 }

@@ -92,9 +92,9 @@ fn test_skill_metadata_dto() {
 fn test_permission_mode_dto() {
     for m in &[
         permission::PermissionModeDto::Default,
-        permission::PermissionModeDto::AcceptEdits,
-        permission::PermissionModeDto::Plan,
-        permission::PermissionModeDto::Yolo,
+        permission::PermissionModeDto::AcceptEdit,
+        permission::PermissionModeDto::AutoMode,
+        permission::PermissionModeDto::Bypass,
     ] {
         let j = serde_json::to_value(m).unwrap();
         let back: permission::PermissionModeDto = serde_json::from_value(j).unwrap();

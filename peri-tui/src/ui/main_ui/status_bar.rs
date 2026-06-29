@@ -32,13 +32,14 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
 
     // 权限模式标签
     {
-        use peri_middlewares::prelude::PermissionMode;
-        let mode = app.services.permission_mode.load();
+        use crate::dto_convert::permission_mode_dto;
+        use peri_acp_types::permission::PermissionModeDto;
+        let mode = permission_mode_dto(app.services.permission_mode.load());
         let (label, color) = match mode {
-            PermissionMode::Default => ("", theme::TEXT),
-            PermissionMode::AcceptEdit => ("Accept Edit", theme::THINKING),
-            PermissionMode::AutoMode => ("Auto Mode", theme::WARNING),
-            PermissionMode::Bypass => ("Bypass", theme::ERROR),
+            PermissionModeDto::Default => ("", theme::TEXT),
+            PermissionModeDto::AcceptEdit => ("Accept Edit", theme::THINKING),
+            PermissionModeDto::AutoMode => ("Auto Mode", theme::WARNING),
+            PermissionModeDto::Bypass => ("Bypass", theme::ERROR),
         };
 
         // Default 模式不显示标签

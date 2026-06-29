@@ -89,10 +89,6 @@ pub fn init_panic_notify() -> tokio::sync::mpsc::UnboundedReceiver<String> {
 #[derive(Parser)]
 #[command(name = "peri", version, about = "Peri AI Agent")]
 struct Cli {
-    // ── 向后兼容 ──
-    /// 向后兼容，无操作（YOLO 已是默认行为）
-    #[arg(short = 'y', long = "yolo")]
-    yolo: bool,
     /// 启用 HITL 审批模式（等同 --permission-mode default）
     #[arg(short = 'a', long = "approve")]
     approve: bool,
