@@ -256,10 +256,10 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
 
     // MCP 初始化进度（瞬时事件）
     if let Some(ref rx) = app.services.mcp_init_rx {
-        let status = rx.borrow().clone();
-        use peri_middlewares::mcp::McpInitStatus;
+        let status = crate::dto_convert::mcp_init_status_dto(rx.borrow().clone());
+        use peri_acp_types::mcp_types::McpInitStatusDto;
         match status {
-            McpInitStatus::Initializing { connected, total } => {
+            McpInitStatusDto::Initializing { connected, total } => {
                 // 重置失败提示计时器：进入 Initializing 说明正在重试
                 app.global_ui.mcp_failed_shown_until.set(None);
                 if has_content {
@@ -277,7 +277,7 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
                 ));
                 has_content = true;
             }
-            McpInitStatus::Ready { total } if total > 0 => {
+            McpInitStatusDto::Ready { total } if total > 0 => {
                 // 重置失败提示计时器：Ready 说明连接已恢复
                 app.global_ui.mcp_failed_shown_until.set(None);
                 if app.global_ui.mcp_ready_shown_until.get().is_none() {
@@ -301,7 +301,7 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
                     }
                 }
             }
-            McpInitStatus::Failed(ref msg) => {
+            McpInitStatusDto::Failed(ref msg) => {
                 // 自消失计时器：首次显示后 10 秒自动消失
                 if app.global_ui.mcp_failed_shown_until.get().is_none() {
                     app.global_ui.mcp_failed_shown_until.set(Some(
@@ -324,7 +324,7 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
                     }
                 }
             }
-            McpInitStatus::Pending | McpInitStatus::Ready { .. } => {}
+            McpInitStatusDto::Pending | McpInitStatusDto::Ready { .. } => {}
         }
     }
 
