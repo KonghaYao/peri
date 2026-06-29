@@ -144,6 +144,21 @@ pub enum State {
     Switching(SwitchingState),
 }
 
+impl State {
+    /// Extract the current ViewModel list from whichever variant is active.
+    ///
+    /// Returns the last committed snapshot for Idle/Streaming/Switching states,
+    /// and an empty slice for Modal (panels don't need message data during modal).
+    pub fn view_models(&self) -> &[ViewModel] {
+        match self {
+            State::Idle(s) => &s.view,
+            State::Streaming(s) => &s.view,
+            State::Modal(_) => &[],
+            State::Switching(s) => &s.view,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Idle
 // ---------------------------------------------------------------------------

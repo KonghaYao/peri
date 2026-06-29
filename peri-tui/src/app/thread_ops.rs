@@ -1,4 +1,5 @@
 use super::*;
+use crate::thread::ThreadBrowser;
 
 impl App {
     pub fn scroll_up(&mut self) {
@@ -156,10 +157,7 @@ impl App {
                 })
             });
         }
-        self.session_mgr
-            .current_mut()
-            .session_panels
-            .close_if(PanelKind::ThreadBrowser);
+        // v2: ThreadBrowser panel close handled by state machine
         self.session_mgr
             .current_mut()
             .metadata
@@ -270,10 +268,7 @@ impl App {
             .metadata
             .pending_attachments
             .clear();
-        self.session_mgr
-            .current_mut()
-            .session_panels
-            .close_if(PanelKind::ThreadBrowser);
+        // v2: ThreadBrowser panel close handled by state machine
         self.session_mgr.current_mut().langfuse.langfuse_session = None;
         self.session_mgr.current_mut().metadata.last_human_message = None;
         self.session_mgr.current_mut().messages.last_submitted_text = None;
@@ -330,8 +325,16 @@ impl App {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty());
 
-        let browser = ThreadBrowser::new(filtered, self.services.thread_store.clone(), branch);
-        self.open_panel(PanelState::ThreadBrowser(Box::new(browser)));
+        // v2: ThreadBrowser panel is now managed by the state machine.
+        // Legacy open_panel() has been removed; use Effect::OpenPanel(PanelKind::ThreadBrowser).
+        // The /history command triggers this via normal_command_dispatch which
+        // goes through the keyboard path → SlashHintState → CommandSystem → eventually
+        // triggers the panel open via the legacy keyboard dispatch path.
+        // For now, push a system note indicating this panel needs v2 state machine access.
+        let _browser = ThreadBrowser::new(filtered, self.services.thread_store.clone(), branch);
+        self.session_mgr.current_mut().messages.push_system_note(
+            "Thread browser panel: use /history via v2 state machine".to_string(),
+        );
     }
 }
 

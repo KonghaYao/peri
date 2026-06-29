@@ -1,5 +1,6 @@
 use crate::app::{App, MessageViewModel};
 use crate::command::Command;
+use crate::runtime::effect::Effect;
 
 pub struct AgentCommand;
 
@@ -12,7 +13,7 @@ impl Command for AgentCommand {
         _lc.tr("command-agent-description").into()
     }
 
-    fn execute(&self, app: &mut App, args: &str) {
+    fn execute(&self, app: &mut App, args: &str) -> Vec<Effect> {
         let lc = &app.services.lc;
         let id = args.trim();
         if id.is_empty() {
@@ -34,5 +35,6 @@ impl Command for AgentCommand {
                 ),
             ));
         }
+        vec![]
     }
 }

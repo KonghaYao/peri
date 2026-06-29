@@ -7,7 +7,33 @@ use std::collections::HashMap;
 
 use peri_acp::event::WorkflowProgressDto;
 
-use super::workflow_panel::{WorkflowAgentSnapshot, WorkflowPhaseSnapshot, WorkflowRunSnapshot};
+/// Workflow agent 快照（单个 agent 的状态）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowAgentSnapshot {
+    pub agent_id: u64,
+    pub label: Option<String>,
+    pub phase: Option<String>,
+    pub status: String,
+    pub token_count: Option<u64>,
+    pub tool_count: Option<u64>,
+}
+
+/// Workflow phase 快照（单个 phase 的状态）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowPhaseSnapshot {
+    pub title: String,
+    pub status: String,
+}
+
+/// Workflow run 快照（一个 workflow 运行的整体状态）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowRunSnapshot {
+    pub run_id: String,
+    pub workflow_name: String,
+    pub status: String,
+    pub phases: Vec<WorkflowPhaseSnapshot>,
+    pub agents: Vec<WorkflowAgentSnapshot>,
+}
 
 /// TUI 侧 workflow 进度追踪器。
 pub struct WorkflowProgressTracker {

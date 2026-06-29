@@ -1,7 +1,4 @@
-use crate::{
-    app::{status_panel::STATUS_TAB_CONTEXT, App},
-    command::Command,
-};
+use crate::{app::App, command::Command, runtime::effect::Effect};
 
 pub struct ContextCommand;
 
@@ -14,7 +11,7 @@ impl Command for ContextCommand {
         _lc.tr("command-context-description")
     }
 
-    fn execute(&self, app: &mut App, _args: &str) {
-        app.open_status_panel(STATUS_TAB_CONTEXT);
+    fn execute(&self, _app: &mut App, _args: &str) -> Vec<Effect> {
+        vec![]
     }
 }

@@ -1,3 +1,4 @@
+use crate::runtime::effect::Effect;
 use crate::{app::App, command::Command};
 
 pub struct LangCommand;
@@ -11,7 +12,7 @@ impl Command for LangCommand {
         lc.tr("command-lang-description")
     }
 
-    fn execute(&self, app: &mut App, args: &str) {
+    fn execute(&self, app: &mut App, args: &str) -> Vec<Effect> {
         let lang = args.trim();
         if lang.is_empty() {
             let available = app.services.lc.available_langs();
@@ -43,7 +44,7 @@ impl Command for LangCommand {
                     .join("\n")
             );
             app.active_mut().messages.push_system_note(msg);
-            return;
+            return vec![];
         }
 
         match app.services.lc.switch(lang) {
@@ -69,5 +70,6 @@ impl Command for LangCommand {
                 app.active_mut().messages.push_system_note(msg);
             }
         }
+        vec![]
     }
 }

@@ -1,4 +1,4 @@
-use crate::{app::App, command::Command};
+use crate::{app::App, command::Command, runtime::effect::Effect};
 
 pub struct ExitCommand;
 
@@ -15,7 +15,8 @@ impl Command for ExitCommand {
         vec!["quit"]
     }
 
-    fn execute(&self, app: &mut App, _args: &str) {
+    fn execute(&self, app: &mut App, _args: &str) -> Vec<Effect> {
         app.global_ui.quit_requested = true;
+        vec![]
     }
 }

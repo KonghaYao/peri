@@ -1,4 +1,8 @@
-use crate::{app::App, command::Command};
+use crate::{
+    app::{App, PanelKind},
+    command::Command,
+    runtime::effect::Effect,
+};
 
 pub struct McpCommand;
 
@@ -11,7 +15,7 @@ impl Command for McpCommand {
         _lc.tr("command-mcp-description")
     }
 
-    fn execute(&self, app: &mut App, _args: &str) {
-        app.open_mcp_panel();
+    fn execute(&self, _app: &mut App, _args: &str) -> Vec<Effect> {
+        vec![Effect::OpenPanel(PanelKind::Mcp)]
     }
 }

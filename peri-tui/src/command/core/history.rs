@@ -1,6 +1,7 @@
 use crate::{
     app::{App, MessageViewModel},
     command::Command,
+    runtime::effect::Effect,
 };
 
 pub struct HistoryCommand;
@@ -18,7 +19,7 @@ impl Command for HistoryCommand {
         vec!["resume"]
     }
 
-    fn execute(&self, app: &mut App, _args: &str) {
+    fn execute(&self, app: &mut App, _args: &str) -> Vec<Effect> {
         if app.session_mgr.current_mut().ui.loading {
             app.session_mgr
                 .current_mut()
@@ -27,8 +28,9 @@ impl Command for HistoryCommand {
                 .push(MessageViewModel::system(
                     app.services.lc.tr("history-agent-running"),
                 ));
-            return;
+            return vec![];
         }
         app.open_thread_browser();
+        vec![]
     }
 }

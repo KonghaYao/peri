@@ -1,4 +1,8 @@
-use crate::{app::App, command::Command};
+use crate::{
+    app::{App, PanelKind},
+    command::Command,
+    runtime::effect::Effect,
+};
 
 pub struct WorkflowsCommand;
 
@@ -11,7 +15,7 @@ impl Command for WorkflowsCommand {
         "Show workflow runs and progress".to_string()
     }
 
-    fn execute(&self, app: &mut App, _args: &str) {
-        app.open_workflows_panel();
+    fn execute(&self, _app: &mut App, _args: &str) -> Vec<Effect> {
+        vec![Effect::OpenPanel(PanelKind::Workflow)]
     }
 }

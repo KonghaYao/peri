@@ -11,7 +11,6 @@
 //
 // [TRAP] coalesce_mouse_events 对连续 Scroll/Drag 事件做非阻塞 drain 合并，只保留最后一个。
 pub mod keyboard;
-mod macros;
 pub mod mouse;
 
 use std::cell::RefCell;
@@ -25,11 +24,7 @@ use ratatui::crossterm::event::{
 };
 use tui_textarea::{Input, Key};
 
-use crate::app::{
-    panel_manager::{EventResult, PanelKind},
-    App,
-};
-use crate::{with_global_panels, with_session_panels};
+use crate::app::App;
 
 // ── Event stash ──────────────────────────────────────────────────────────────
 
@@ -57,6 +52,8 @@ pub enum Action {
     Quit,
     Submit(String),
     Redraw,
+    /// v2 state machine effects from command dispatch (e.g. OpenPanel)
+    Effects(Vec<crate::runtime::effect::Effect>),
 }
 
 // ── Event loop ──────────────────────────────────────────────────────────────
@@ -439,40 +436,7 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                 return Ok(Some(Action::Redraw));
             }
 
-            // ─── PanelManager paste dispatch ────────────────────────────
-            {
-                // Session panels: Model, Agent, Hooks, Login, Config, ThreadBrowser
-                let session_kind = app.session_mgr.current_mut().session_panels.active_kind();
-                if matches!(
-                    session_kind,
-                    Some(PanelKind::Model)
-                        | Some(PanelKind::Agent)
-                        | Some(PanelKind::Hooks)
-                        | Some(PanelKind::Login)
-                        | Some(PanelKind::Config)
-                        | Some(PanelKind::ThreadBrowser)
-                ) {
-                    with_session_panels!(app, |sp, ctx| sp.dispatch_paste(&text, &mut ctx));
-                    return Ok(Some(Action::Redraw));
-                }
-
-                // Global panels: Status, Memory, Mcp, Cron, Plugin, Betas
-                let global_kind = app.global_panels.active_kind();
-                if matches!(
-                    global_kind,
-                    Some(PanelKind::Status)
-                        | Some(PanelKind::Memory)
-                        | Some(PanelKind::Mcp)
-                        | Some(PanelKind::Cron)
-                        | Some(PanelKind::Plugin)
-                        | Some(PanelKind::Betas)
-                ) {
-                    with_global_panels!(app, |pm, ctx| pm.dispatch_paste(&text, &mut ctx));
-                    return Ok(Some(Action::Redraw));
-                }
-            }
-
-            // Fallback: paste into textarea
+            // Paste into textarea
             // 弹窗激活时不写入 textarea——用户应通过弹窗 UI 交互
             if !app.is_interaction_popup_active() {
                 app.session_mgr.current_mut().ui.textarea.insert_str(&text);
@@ -501,57 +465,9 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                 // 正常滚动处理
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
-                        let panel_area = app.session_mgr.current_mut().ui.panel_area;
-                        if let Some(area) = panel_area {
-                            if mouse::mouse_in_rect(&mouse, area) {
-                                // Session panel takes priority
-                                let sp = &app.session_mgr.current_mut().session_panels;
-                                if sp.is_any_open() {
-                                    let result = with_session_panels!(app, |sp, ctx| {
-                                        sp.dispatch_scroll(-3, &mut ctx)
-                                    });
-                                    if result == EventResult::Consumed {
-                                        return Ok(Some(Action::Redraw));
-                                    }
-                                }
-                                // Global panel
-                                if app.global_panels.is_any_open() {
-                                    let result = with_global_panels!(app, |pm, ctx| {
-                                        pm.dispatch_scroll(-3, &mut ctx)
-                                    });
-                                    if result == EventResult::Consumed {
-                                        return Ok(Some(Action::Redraw));
-                                    }
-                                }
-                            }
-                        }
                         app.scroll_up();
                     }
                     MouseEventKind::ScrollDown => {
-                        let panel_area = app.session_mgr.current_mut().ui.panel_area;
-                        if let Some(area) = panel_area {
-                            if mouse::mouse_in_rect(&mouse, area) {
-                                // Session panel takes priority
-                                let sp = &app.session_mgr.current_mut().session_panels;
-                                if sp.is_any_open() {
-                                    let result = with_session_panels!(app, |sp, ctx| {
-                                        sp.dispatch_scroll(3, &mut ctx)
-                                    });
-                                    if result == EventResult::Consumed {
-                                        return Ok(Some(Action::Redraw));
-                                    }
-                                }
-                                // Global panel
-                                if app.global_panels.is_any_open() {
-                                    let result = with_global_panels!(app, |pm, ctx| {
-                                        pm.dispatch_scroll(3, &mut ctx)
-                                    });
-                                    if result == EventResult::Consumed {
-                                        return Ok(Some(Action::Redraw));
-                                    }
-                                }
-                            }
-                        }
                         app.scroll_down();
                     }
                     _ => unreachable!(),
@@ -591,110 +507,6 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                                 return Ok(Some(Action::Redraw));
                             }
                         }
-                    }
-                }
-                // Panel scrollbar: ▲/▼ buttons and bar click/drag
-                // Must be checked BEFORE dispatch_mouse so scrollbar clicks
-                // aren't consumed by panel content area handlers.
-                {
-                    let session = &mut app.session_mgr.current_mut();
-                    if let Some(ref metrics) = session.ui.panel_scrollbar_metrics {
-                        // ▼ button click (scroll to bottom)
-                        if let Some(btn) = metrics.down_btn_area {
-                            if mouse.column >= btn.x
-                                && mouse.column < btn.x + btn.width
-                                && mouse.row >= btn.y
-                                && mouse.row < btn.y + btn.height
-                            {
-                                session
-                                    .session_panels
-                                    .dispatch_set_scroll_offset(metrics.max_offset);
-                                session.ui.panel_scroll_offset = metrics.max_offset;
-                                return Ok(Some(Action::Redraw));
-                            }
-                        }
-                        // ▲ button click (scroll to top)
-                        if let Some(btn) = metrics.up_btn_area {
-                            if mouse.column >= btn.x
-                                && mouse.column < btn.x + btn.width
-                                && mouse.row >= btn.y
-                                && mouse.row < btn.y + btn.height
-                            {
-                                session.session_panels.dispatch_set_scroll_offset(0);
-                                session.ui.panel_scroll_offset = 0;
-                                return Ok(Some(Action::Redraw));
-                            }
-                        }
-                        // Scrollbar bar click (proportional jump + start drag)
-                        if mouse.column == metrics.bar_area.x
-                            && mouse.row >= metrics.bar_area.y
-                            && mouse.row < metrics.bar_area.bottom()
-                            && metrics.max_offset > 0
-                        {
-                            let bar_inner_height = metrics.bar_area.height.saturating_sub(2);
-                            if bar_inner_height > 0 {
-                                let rel_y = (mouse.row.saturating_sub(metrics.bar_area.y + 1))
-                                    .min(bar_inner_height);
-                                let new_offset = ((rel_y as f64 / bar_inner_height as f64)
-                                    * metrics.max_offset as f64)
-                                    as u16;
-                                let new_offset = new_offset.min(metrics.max_offset);
-                                session
-                                    .session_panels
-                                    .dispatch_set_scroll_offset(new_offset);
-                                session.ui.panel_scroll_offset = new_offset;
-                                session.ui.panel_scrollbar_dragging = true;
-                            }
-                            return Ok(Some(Action::Redraw));
-                        }
-                    }
-                }
-                // Panel area: dispatch mouse click to panel content
-                let panel_area = app.session_mgr.current_mut().ui.panel_area;
-                let mut click_consumed = false;
-                if let Some(area) = panel_area {
-                    if mouse::mouse_in_rect(&mouse, area) {
-                        // Session panels
-                        {
-                            let sp = &app.session_mgr.current_mut().session_panels;
-                            if sp.is_any_open() {
-                                let result = with_session_panels!(app, |sp, ctx| {
-                                    sp.dispatch_mouse(mouse, area, &mut ctx)
-                                });
-                                if result == EventResult::Consumed {
-                                    click_consumed = true;
-                                }
-                            }
-                        }
-                        // Global panels
-                        if !click_consumed && app.global_panels.is_any_open() {
-                            let result = with_global_panels!(app, |pm, ctx| {
-                                pm.dispatch_mouse(mouse, area, &mut ctx)
-                            });
-                            if result == EventResult::Consumed {
-                                click_consumed = true;
-                            }
-                        }
-                    }
-                }
-                if click_consumed {
-                    return Ok(Some(Action::Redraw));
-                }
-                // Panel area: start panel selection
-                let panel_area = app.session_mgr.current_mut().ui.panel_area;
-                if let Some(area) = panel_area {
-                    if mouse::mouse_in_rect(&mouse, area) {
-                        let content_row = mouse.row - area.y
-                            + app.session_mgr.current_mut().ui.panel_scroll_offset;
-                        let col = mouse.column - area.x;
-                        app.session_mgr
-                            .current_mut()
-                            .ui
-                            .panel_selection
-                            .start_drag(content_row, col);
-                        app.session_mgr.current_mut().ui.text_selection.clear();
-                        // Don't process other-area selections
-                        return Ok(Some(Action::Redraw));
                     }
                 }
                 if let Some(area) = app.session_mgr.current_mut().ui.messages_area {
@@ -814,43 +626,6 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                         }
                     }
                 }
-                // Panel scrollbar drag: update panel scroll offset from mouse Y
-                {
-                    let session = &mut app.session_mgr.current_mut();
-                    if session.ui.panel_scrollbar_dragging {
-                        if let Some(ref metrics) = session.ui.panel_scrollbar_metrics {
-                            let bar_inner_height = metrics.bar_area.height.saturating_sub(2);
-                            if bar_inner_height > 0 {
-                                let rel_y = (mouse.row.saturating_sub(metrics.bar_area.y + 1))
-                                    .min(bar_inner_height);
-                                let new_offset = ((rel_y as f64 / bar_inner_height as f64)
-                                    * metrics.max_offset as f64)
-                                    as u16;
-                                let new_offset = new_offset.min(metrics.max_offset);
-                                session
-                                    .session_panels
-                                    .dispatch_set_scroll_offset(new_offset);
-                                session.ui.panel_scroll_offset = new_offset;
-                            }
-                        }
-                        return Ok(Some(Action::Redraw));
-                    }
-                }
-                // Panel selection drag
-                if app.session_mgr.current_mut().ui.panel_selection.dragging {
-                    if let Some(area) = app.session_mgr.current_mut().ui.panel_area {
-                        let content_row = mouse
-                            .row
-                            .saturating_sub(area.y)
-                            .saturating_add(app.session_mgr.current_mut().ui.panel_scroll_offset);
-                        let col = mouse.column.saturating_sub(area.x);
-                        app.session_mgr
-                            .current_mut()
-                            .ui
-                            .panel_selection
-                            .update_drag(content_row, col);
-                    }
-                }
                 if app.session_mgr.current_mut().ui.text_selection.dragging {
                     if let Some(area) = app.session_mgr.current_mut().ui.messages_area {
                         let visual_row = mouse
@@ -882,26 +657,6 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
             MouseEventKind::Up(MouseButton::Left) => {
                 // End scrollbar drag
                 app.session_mgr.current_mut().ui.scrollbar_dragging = false;
-                // End panel scrollbar drag
-                app.session_mgr.current_mut().ui.panel_scrollbar_dragging = false;
-                // Panel selection released
-                if app.session_mgr.current_mut().ui.panel_selection.dragging {
-                    app.session_mgr.current_mut().ui.panel_selection.end_drag();
-                    let sel = &app.session_mgr.current_mut().ui.panel_selection;
-                    if let (Some(start), Some(end)) = (sel.start, sel.end) {
-                        let text = crate::app::text_selection::extract_panel_text(
-                            start,
-                            end,
-                            &app.session_mgr.current_mut().ui.panel_plain_lines,
-                        );
-                        app.session_mgr
-                            .current_mut()
-                            .ui
-                            .panel_selection
-                            .set_selected_text(text);
-                    }
-                    mouse::copy_panel_selection_to_clipboard(app);
-                }
                 if app.session_mgr.current_mut().ui.text_selection.dragging {
                     app.session_mgr.current_mut().ui.text_selection.end_drag();
                     let ts = &app.session_mgr.current_mut().ui.text_selection;

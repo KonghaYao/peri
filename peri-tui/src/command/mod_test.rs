@@ -19,9 +19,10 @@
         fn aliases(&self) -> Vec<&str> {
             self.aliases_vec.clone()
         }
-        fn execute(&self, _app: &mut App, args: &str) {
+        fn execute(&self, _app: &mut App, args: &str) -> Vec<Effect> {
             self.called.store(true, Ordering::Relaxed);
             *self.last_args.lock() = args.to_string();
+            vec![]
         }
     }
 
@@ -74,8 +75,8 @@
         r.register(Box::new(stub));
         let mut app = headless_app().await;
         assert!(
-            r.dispatch(&mut app, "/model"),
-            "exact match should return true"
+            r.dispatch(&mut app, "/model").is_some(),
+            "exact match should return Some"
         );
         assert!(called.load(Ordering::Relaxed), "command should be called");
     }
@@ -87,8 +88,8 @@
         r.register(Box::new(stub));
         let mut app = headless_app().await;
         assert!(
-            !r.dispatch(&mut app, "/unknown"),
-            "unknown command should return false"
+            r.dispatch(&mut app, "/unknown").is_none(),
+            "unknown command should return None"
         );
     }
 
@@ -101,8 +102,8 @@
         r.register(Box::new(stub));
         let mut app = headless_app().await;
         assert!(
-            r.dispatch(&mut app, "/mo"),
-            "unique prefix should return true"
+            r.dispatch(&mut app, "/mo").is_some(),
+            "unique prefix should return Some"
         );
         assert!(
             called.load(Ordering::Relaxed),
@@ -119,8 +120,8 @@
         r.register(Box::new(stub2));
         let mut app = headless_app().await;
         assert!(
-            !r.dispatch(&mut app, "/m"),
-            "ambiguous prefix should return false"
+            r.dispatch(&mut app, "/m").is_none(),
+            "ambiguous prefix should return None"
         );
         assert!(!called1.load(Ordering::Relaxed));
         assert!(!called2.load(Ordering::Relaxed));
@@ -175,8 +176,8 @@
         let mut app = headless_app().await;
         // "/" → empty name, all commands match → ambiguous → false
         assert!(
-            !r.dispatch(&mut app, "/"),
-            "empty prefix should return false when ambiguous"
+            r.dispatch(&mut app, "/").is_none(),
+            "empty prefix should return None when ambiguous"
         );
     }
 
@@ -189,8 +190,8 @@
         r.register(Box::new(stub));
         let mut app = headless_app().await;
         assert!(
-            r.dispatch(&mut app, "/reset"),
-            "alias exact match should return true"
+            r.dispatch(&mut app, "/reset").is_some(),
+            "alias exact match should return Some"
         );
         assert!(called.load(Ordering::Relaxed));
     }
@@ -202,8 +203,8 @@
         r.register(Box::new(stub));
         let mut app = headless_app().await;
         assert!(
-            !r.dispatch(&mut app, "/reset"),
-            "no alias should return false"
+            r.dispatch(&mut app, "/reset").is_none(),
+            "no alias should return None"
         );
     }
 
@@ -215,7 +216,7 @@
         r.register(Box::new(s1));
         r.register(Box::new(s2));
         let mut app = headless_app().await;
-        assert!(r.dispatch(&mut app, "/reset"));
+        assert!(r.dispatch(&mut app, "/reset").is_some());
         assert!(called1.load(Ordering::Relaxed), "name exact should win");
         assert!(!called2.load(Ordering::Relaxed));
     }
@@ -227,8 +228,8 @@
         r.register(Box::new(stub));
         let mut app = headless_app().await;
         assert!(
-            r.dispatch(&mut app, "/res"),
-            "alias prefix unique match should return true"
+            r.dispatch(&mut app, "/res").is_some(),
+            "alias prefix unique match should return Some"
         );
         assert!(called.load(Ordering::Relaxed));
     }
@@ -242,8 +243,8 @@
         r.register(Box::new(s2));
         let mut app = headless_app().await;
         assert!(
-            !r.dispatch(&mut app, "/re"),
-            "ambiguous alias prefix should return false"
+            r.dispatch(&mut app, "/re").is_none(),
+            "ambiguous alias prefix should return None"
         );
         assert!(!called1.load(Ordering::Relaxed));
         assert!(!called2.load(Ordering::Relaxed));

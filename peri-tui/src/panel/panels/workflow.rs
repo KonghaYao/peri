@@ -22,7 +22,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 use tui_textarea::Input;
 
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
 use crate::panel::PanelState;
@@ -116,6 +116,15 @@ impl WorkflowPanel {
             focus: FocusZone::Agents,
             cached_tab_labels: Vec::new(),
         }
+    }
+
+    /// Construct a panel from the live `App` state.
+    ///
+    /// Returns an empty panel since workflow data arrives asynchronously
+    /// via the polling channel. Runs are populated later via `set_runs()`
+    /// when polling results arrive.
+    pub fn from_app(_app: &crate::app::App) -> Self {
+        Self::empty()
     }
 
     /// Create a panel from a list of run entries.

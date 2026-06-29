@@ -167,6 +167,9 @@ impl HeadlessHandle {
     fn apply_action(app: &mut App, action: Action) {
         match action {
             Action::Submit(text) => app.submit_message(text),
+            Action::Effects(_effects) => {
+                // v2 effects from command dispatch — not wired in headless mode
+            }
             Action::Quit | Action::Redraw => {}
         }
     }

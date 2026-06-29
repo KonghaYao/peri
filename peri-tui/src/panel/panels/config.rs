@@ -26,7 +26,7 @@ use tui_textarea::Input;
 
 use peri_widgets::BorderedPanel;
 
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
 use crate::panel::PanelState;
@@ -303,6 +303,44 @@ impl ConfigPanel {
             field_persona: TextField::new(""),
             field_tone: TextField::new(""),
         }
+    }
+
+    /// Construct a panel from a `PeriConfig` reference.
+    pub fn from_config(cfg: &crate::config::PeriConfig) -> Self {
+        let app_config = &cfg.config;
+        let autocompact = app_config
+            .compact
+            .as_ref()
+            .map(|c| c.auto_compact_enabled)
+            .unwrap_or(true);
+        let show_cache_warning = app_config.show_cache_warning;
+        let threshold = app_config
+            .compact
+            .as_ref()
+            .map(|c| format!("{:.0}", c.auto_compact_threshold * 100.0))
+            .unwrap_or_else(|| "85".to_string());
+        let language = app_config.language.as_deref().unwrap_or("");
+        let diff_enabled = app_config.diff_enabled;
+        let streaming_mode = app_config.streaming_mode.as_deref().unwrap_or("streaming");
+        let proactiveness = app_config.proactiveness.as_deref().unwrap_or("medium");
+        let persona = app_config.persona.as_deref().unwrap_or("");
+        let tone = app_config.tone.as_deref().unwrap_or("");
+        Self::new(
+            autocompact,
+            show_cache_warning,
+            &threshold,
+            language,
+            diff_enabled,
+            streaming_mode,
+            proactiveness,
+            persona,
+            tone,
+        )
+    }
+
+    /// Construct a panel from the live `App` state.
+    pub fn from_app(app: &crate::app::App) -> Self {
+        Self::from_config(&app.services.peri_config.read())
     }
 
     /// Construct a panel from initial config values.

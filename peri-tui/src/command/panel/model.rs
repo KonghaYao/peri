@@ -1,6 +1,7 @@
 use crate::{
-    app::{agent, App, MessageViewModel},
+    app::{agent, App, MessageViewModel, PanelKind},
     command::Command,
+    runtime::effect::Effect,
 };
 
 pub struct ModelCommand;
@@ -14,7 +15,7 @@ impl Command for ModelCommand {
         _lc.tr("command-model-description")
     }
 
-    fn execute(&self, app: &mut App, args: &str) {
+    fn execute(&self, app: &mut App, args: &str) -> Vec<Effect> {
         let alias = args.trim().to_lowercase();
         match alias.as_str() {
             "opus" | "sonnet" | "haiku" => {
@@ -41,9 +42,10 @@ impl Command for ModelCommand {
                         let _ = acp.set_config_option("model", &alias_val).await;
                     });
                 }
+                vec![Effect::Render]
             }
             _ => {
-                app.open_model_panel();
+                vec![Effect::OpenPanel(PanelKind::Model)]
             }
         }
     }

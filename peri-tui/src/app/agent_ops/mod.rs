@@ -135,7 +135,22 @@ impl App {
                 action,
                 success,
                 message,
-            } => self.handle_plugin_action_completed(plugin_id, action, success, message),
+            } => {
+                // v2: PluginPanel 暂未迁移，改为推送系统通知
+                let note = if success {
+                    format!("Plugin action completed: {} ({})", plugin_id, action)
+                } else {
+                    format!(
+                        "Plugin action failed: {} ({}): {}",
+                        plugin_id, action, message
+                    )
+                };
+                self.session_mgr
+                    .current_mut()
+                    .messages
+                    .push_system_note(note);
+                (true, false, false)
+            }
             AgentEvent::TokenUsageUpdate {
                 usage,
                 model: _model,
@@ -390,18 +405,7 @@ impl App {
             }
             AgentEvent::WorkflowProgress(payload) => {
                 self.global_ui.workflow_tracker.apply(&payload);
-                if self
-                    .global_panels
-                    .is_active(crate::app::panel_manager::PanelKind::Workflow)
-                {
-                    let snapshots = self.global_ui.workflow_tracker.snapshots();
-                    if let Some(panel) = self
-                        .global_panels
-                        .get_mut::<crate::app::workflow_panel::WorkflowPanel>()
-                    {
-                        panel.update_runs(snapshots);
-                    }
-                }
+                // v2: Workflow panel refresh handled by state machine via PanelReadContext
                 (true, false, false)
             }
             AgentEvent::StateSnapshotMeta {

@@ -1,3 +1,4 @@
+use crate::runtime::effect::Effect;
 use crate::{app::App, command::Command, ui::message_view::MessageViewModel};
 
 pub struct BgCommand;
@@ -15,7 +16,7 @@ impl Command for BgCommand {
         vec!["background"]
     }
 
-    fn execute(&self, app: &mut App, args: &str) {
+    fn execute(&self, app: &mut App, args: &str) -> Vec<Effect> {
         let lc = &app.services.lc;
         let args = args.trim();
         if args.is_empty() {
@@ -26,10 +27,11 @@ impl Command for BgCommand {
                 .view_messages
                 .push(vm);
             app.render_rebuild();
-            return;
+            return vec![];
         }
         // Pass through to executor — keep /bg prefix so ACP executor intercepts it
         app.submit_message(format!("/bg {}", args));
+        vec![]
     }
 }
 

@@ -1,6 +1,10 @@
 use std::{collections::HashSet, path::Path};
 
-use crate::{app::App, command::Command};
+use crate::{
+    app::{App, PanelKind},
+    command::Command,
+    runtime::effect::Effect,
+};
 
 /// /agents 命令：打开 agent 选择弹窗
 pub struct AgentsCommand;
@@ -14,10 +18,8 @@ impl Command for AgentsCommand {
         _lc.tr("command-agents-description")
     }
 
-    fn execute(&self, app: &mut App, _args: &str) {
-        // 扫描可用的 agent 文件
-        let agents = list_available_agents(&app.services.cwd);
-        app.open_agent_panel(agents);
+    fn execute(&self, _app: &mut App, _args: &str) -> Vec<Effect> {
+        vec![Effect::OpenPanel(PanelKind::Agent)]
     }
 }
 
@@ -59,7 +61,6 @@ fn scan_dir_for_agents(dir: &Path, agents: &mut Vec<AgentItem>, seen: &mut HashS
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            // 目录格式: {id}/agent.md
             let agent_md = path.join("agent.md");
             if agent_md.is_file() {
                 if let Some(id) = path.file_name().and_then(|n| n.to_str()) {
@@ -74,7 +75,6 @@ fn scan_dir_for_agents(dir: &Path, agents: &mut Vec<AgentItem>, seen: &mut HashS
                 }
             }
         } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            // 文件格式: {id}.md
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                 if seen.insert(stem.to_string()) {
                     let (name, description) = parse_agent_info(&path, stem);
@@ -89,7 +89,6 @@ fn scan_dir_for_agents(dir: &Path, agents: &mut Vec<AgentItem>, seen: &mut HashS
     }
 }
 
-/// 格式化 id 为友好名称
 fn parse_agent_info(path: &Path, fallback_id: &str) -> (String, String) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -101,12 +100,10 @@ fn parse_agent_info(path: &Path, fallback_id: &str) -> (String, String) {
         }
     };
 
-    // 尝试解析 YAML frontmatter
     if let Some(agent) = peri_middlewares::parse_agent_file(&content) {
         return (agent.frontmatter.name, agent.frontmatter.description);
     }
 
-    // 没有有效 frontmatter，返回格式化的 id 和空描述
     (
         peri_middlewares::format_agent_id(fallback_id),
         String::new(),

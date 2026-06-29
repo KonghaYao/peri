@@ -24,7 +24,7 @@ use tui_textarea::Input;
 
 use peri_widgets::BorderedPanel;
 
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
 use crate::panel::PanelState;
@@ -325,6 +325,45 @@ impl LoginPanel {
             buf_sonnet_model: TextField::new(""),
             buf_haiku_model: TextField::new(""),
         }
+    }
+
+    /// Construct a panel from a `PeriConfig` reference, reading provider list.
+    pub fn from_config(cfg: &crate::config::PeriConfig) -> Self {
+        let providers: Vec<ProviderEntry> = cfg
+            .config
+            .providers
+            .iter()
+            .map(|p| {
+                let api_key_masked = if p.api_key.is_empty() {
+                    String::new()
+                } else if p.api_key.len() <= 4 {
+                    "***".to_string()
+                } else {
+                    format!(
+                        "{}***{}",
+                        &p.api_key[..2],
+                        &p.api_key[p.api_key.len() - 2..]
+                    )
+                };
+                ProviderEntry {
+                    name: p.name.clone().unwrap_or_default(),
+                    provider_type: p.provider_type.clone(),
+                    base_url: p.base_url.clone(),
+                    api_key_masked,
+                    opus_model: p.models.opus.clone(),
+                    sonnet_model: p.models.sonnet.clone(),
+                    haiku_model: p.models.haiku.clone(),
+                }
+            })
+            .collect();
+        let mut panel = Self::empty();
+        panel.providers = providers;
+        panel
+    }
+
+    /// Construct a panel from the live `App` state.
+    pub fn from_app(app: &crate::app::App) -> Self {
+        Self::from_config(&app.services.peri_config.read())
     }
 
     /// Create with initial provider entries for testing.

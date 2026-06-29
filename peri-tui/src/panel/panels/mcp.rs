@@ -23,7 +23,7 @@ use tui_textarea::Input;
 
 use peri_widgets::BorderedPanel;
 
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
 use crate::panel::PanelState;
@@ -156,6 +156,15 @@ impl McpPanel {
             scroll_offset: 0,
             confirm_delete: None,
         }
+    }
+
+    /// Construct a panel from the live `App` state.
+    ///
+    /// Returns an empty panel since MCP server data is not readily
+    /// extractable from `McpClientPool` at construction time. Servers
+    /// are populated later via `set_servers()` after ACP query results arrive.
+    pub fn from_app(_app: &crate::app::App) -> Self {
+        Self::empty()
     }
 
     /// Create a panel from a list of `McpServerEntry`.

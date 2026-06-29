@@ -20,7 +20,7 @@ use tui_textarea::Input;
 use peri_acp_types::summary::HookDto;
 use peri_widgets::BorderedPanel;
 
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
 use crate::panel::PanelState;

@@ -14,7 +14,7 @@ use super::super::current_turn::CurrentTurn;
 use super::super::event::{AcpEventData, Event};
 use super::super::input::{CursorPos, InputEdit};
 use super::super::state::{DoubleEscTracker, IdleState, State, StreamingState};
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::runtime::effect::Effect;
 
 /// Idle-state transition entry point.

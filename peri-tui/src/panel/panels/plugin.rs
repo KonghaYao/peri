@@ -29,7 +29,7 @@ use tui_textarea::Input;
 
 use peri_widgets::BorderedPanel;
 
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::i18n::LcRegistry;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
@@ -284,6 +284,16 @@ impl PluginPanel {
             search_field: TextField::new(""),
             discover_entries: Vec::new(),
         }
+    }
+
+    /// Construct a panel from the live `App` state.
+    ///
+    /// Returns an empty panel since plugin runtime data (enabled status,
+    /// update availability) is not directly extractable from
+    /// `PluginLoadResult` at construction time. Entries are populated
+    /// later via `set_entries()` when ACP query results arrive.
+    pub fn from_app(_app: &crate::app::App) -> Self {
+        Self::empty()
     }
 
     /// Create a panel pre-populated with installed entries.

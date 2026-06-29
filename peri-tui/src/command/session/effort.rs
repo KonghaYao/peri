@@ -1,3 +1,4 @@
+use crate::runtime::effect::Effect;
 use crate::{
     app::App, command::Command, config::ThinkingConfig, ui::message_view::MessageViewModel,
 };
@@ -13,7 +14,7 @@ impl Command for EffortCommand {
         _lc.tr("command-effort-description")
     }
 
-    fn execute(&self, app: &mut App, args: &str) {
+    fn execute(&self, app: &mut App, args: &str) -> Vec<Effect> {
         let lc = &app.services.lc;
         let arg = args.trim().to_lowercase();
         match arg.as_str() {
@@ -41,7 +42,7 @@ impl Command for EffortCommand {
                         .messages
                         .view_messages
                         .push(vm);
-                    return;
+                    return vec![];
                 }
                 let vm = MessageViewModel::system(
                     lc.tr_args("effort-set", &[("effort".into(), arg.clone().into())]),
@@ -59,6 +60,7 @@ impl Command for EffortCommand {
                     });
                 }
                 app.render_rebuild();
+                vec![]
             }
             _ => {
                 let current_owned = app
@@ -85,6 +87,7 @@ impl Command for EffortCommand {
                     .view_messages
                     .push(vm);
                 app.render_rebuild();
+                vec![]
             }
         }
     }

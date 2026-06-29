@@ -1,3 +1,4 @@
+use crate::runtime::effect::Effect;
 use std::sync::Arc;
 
 use crate::{app::App, command::Command, i18n::LcRegistry};
@@ -17,32 +18,33 @@ impl Command for ChannelCommand {
         vec!["ch"]
     }
 
-    fn execute(&self, app: &mut App, args: &str) {
+    fn execute(&self, app: &mut App, args: &str) -> Vec<Effect> {
         let lc = &app.services.lc;
         let args = args.trim();
 
         if args.is_empty() || args == "status" {
             self.show_status(app);
-            return;
+            return vec![];
         }
 
         if args == "close" {
             self.close_all(app);
-            return;
+            return vec![];
         }
 
         if let Some(source) = args.strip_prefix("open ") {
             self.open_channel(app, source.trim());
-            return;
+            return vec![];
         }
 
         if let Some(server_name) = args.strip_prefix("close ") {
             self.close_one(app, server_name.trim());
-            return;
+            return vec![];
         }
 
         let usage = lc.tr("command-channel-usage").to_string();
         app.push_system_note(usage);
+        vec![]
     }
 }
 

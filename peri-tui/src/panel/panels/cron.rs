@@ -24,7 +24,7 @@ use tui_textarea::Input;
 use peri_acp_types::summary::CronTaskDto;
 use peri_widgets::BorderedPanel;
 
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
 use crate::panel::PanelState;
@@ -65,6 +65,31 @@ impl CronPanel {
             cursor: 0,
             scroll_offset: 0,
             confirm_delete: false,
+        }
+    }
+
+    /// Construct a panel from the live `App` state, reading cron tasks.
+    pub fn from_app(app: &crate::app::App) -> Self {
+        use peri_middlewares::cron::CronTask;
+        let tasks: Vec<CronTaskDto> = app
+            .services
+            .cron
+            .scheduler
+            .lock()
+            .list_tasks()
+            .into_iter()
+            .map(|t: &CronTask| CronTaskDto {
+                id: t.id.clone(),
+                schedule: t.expression.clone(),
+                prompt: t.prompt.clone(),
+                next_fire: t.next_fire.map(|dt| dt.to_rfc3339()),
+                enabled: t.enabled,
+            })
+            .collect();
+        if tasks.is_empty() {
+            Self::empty()
+        } else {
+            Self::new(tasks)
         }
     }
 

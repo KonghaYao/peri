@@ -1,33 +1,10 @@
 // ── Panel Modules ────────────────────────────────────────────────────────────
-pub mod agent_panel;
-pub mod betas_panel;
-pub mod config_panel;
-pub mod hooks_panel;
-pub mod login_panel;
-pub mod mcp_panel;
-pub mod memory_panel;
-pub mod model_panel;
-pub mod panel_component;
-pub mod panel_list;
-pub mod panel_manager;
-pub mod panel_plugin;
-pub mod plugin_panel;
+pub mod panel_types;
 pub mod setup_wizard;
-pub mod status_panel;
-pub mod tasks_panel;
-pub mod workflow_panel;
 pub mod workflow_tracker;
 
 // Panel private modules
-mod panel_agent;
-mod panel_betas;
-mod panel_config;
-mod panel_hooks;
-mod panel_login;
-mod panel_memory;
-mod panel_model;
 mod panel_ops;
-mod panel_status;
 
 // ── State Management ─────────────────────────────────────────────────────────
 mod global_ui_state;
@@ -52,7 +29,6 @@ mod agent_comm;
 mod agent_compact;
 mod agent_events_bg;
 mod agent_events_oauth;
-mod agent_events_plugin;
 mod agent_ops;
 mod agent_ops_interaction;
 mod agent_render;
@@ -113,30 +89,17 @@ mod field_textarea;
 use std::sync::Arc;
 
 pub use agent::LlmProvider;
-// Re-export sub-structs
 pub use agent_comm::{AgentComm, RetryStatus};
-pub use agent_panel::AgentPanel;
-pub use cron_state::{CronPanel, CronState};
+pub use cron_state::CronState;
 pub use field_textarea::FieldTextarea;
-pub use hooks_panel::HooksPanel;
 pub use langfuse_state::LangfuseState;
-pub use mcp_panel::{DetailAction, McpPanel, McpPanelView};
-pub use model_panel::ModelPanel;
-pub use panel_component::PanelComponent;
-pub use panel_manager::{
-    EventResult, MutexGroup, PanelContext, PanelKind, PanelManager, PanelScope, PanelState,
-};
+pub use panel_types::{MutexGroup, PanelKind, PanelScope};
 use peri_agent::messages::BaseMessage;
 use peri_middlewares::prelude::HitlDecision;
 pub use setup_wizard::SetupWizardPanel;
-pub use tasks_panel::TasksPanel;
-pub use workflow_panel::{
-    WorkflowAgentSnapshot, WorkflowPanel, WorkflowPhaseSnapshot, WorkflowRunSnapshot,
-};
 
 use crate::acp_client::{AcpNotification, AcpTuiClient};
 // Re-export MessageViewModel from ui::message_view
-use crate::command::agents::AgentItem;
 pub use crate::ui::message_view::{
     aggregate_tail_tool_groups, aggregate_tool_groups, ContentBlockView, MessageViewModel,
     ToolCategory,
@@ -144,7 +107,7 @@ pub use crate::ui::message_view::{
 use crate::ui::render_thread::RenderEvent;
 use crate::{
     config::PeriConfig,
-    thread::{SqliteThreadStore, ThreadBrowser, ThreadId, ThreadStore},
+    thread::{SqliteThreadStore, ThreadId, ThreadStore},
 };
 
 // ─── App ──────────────────────────────────────────────────────────────────────
@@ -156,7 +119,6 @@ pub struct App {
     pub services: ServiceRegistry,
     /// 跨 session 全局 UI 临时状态
     pub global_ui: GlobalUiState,
-    pub global_panels: panel_manager::PanelManager,
     /// 应用焦点状态（true=聚焦，false=失焦）
     pub focused: bool,
     /// ACP client — communicates with the ACP server via in-memory transport.
@@ -167,7 +129,7 @@ pub struct App {
     // ── Workflow 面板轮询状态 ────────────────────────────────────────
     /// Receiver for workflow polling results (ACP workflow/list_runs responses).
     pub workflow_poll_rx:
-        Option<tokio::sync::mpsc::UnboundedReceiver<Vec<workflow_panel::WorkflowRunSnapshot>>>,
+        Option<tokio::sync::mpsc::UnboundedReceiver<Vec<workflow_tracker::WorkflowRunSnapshot>>>,
     /// Kill switch for the workflow polling task.
     pub workflow_poll_kill: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     /// 标志位：是否 workflow 面板正在轮询。关闭后设为 false，跳过 poll_workflow_runs() 调用。
@@ -302,7 +264,6 @@ impl App {
             session_mgr,
             services,
             global_ui: GlobalUiState::new(),
-            global_panels: panel_manager::PanelManager::new(),
             focused: true,
             acp_client: None,
             workflow_poll_rx: None,
@@ -583,28 +544,6 @@ impl App {
         self.session_mgr.current().agent.agent_id.as_ref()
     }
 
-    /// 打开面板（统一处理跨作用域互斥）：关闭所有 manager 中的面板后，放入正确的 manager
-    pub fn open_panel(&mut self, state: panel_manager::PanelState) {
-        match state.kind().scope() {
-            panel_manager::PanelScope::Session => {
-                self.global_panels.close();
-                self.session_mgr.current_mut().session_panels.close();
-                self.session_mgr.current_mut().session_panels.open(state);
-            }
-            panel_manager::PanelScope::Global => {
-                self.global_panels.close();
-                self.session_mgr.current_mut().session_panels.close();
-                self.global_panels.open(state);
-            }
-        }
-    }
-
-    /// 关闭所有面板（跨所有作用域）
-    pub fn close_all_panels(&mut self) {
-        self.global_panels.close();
-        self.session_mgr.current_mut().session_panels.close();
-    }
-
     /// Setup 向导保存后刷新内存中的 Provider 状态。
     ///
     /// 配置写入共享的 `Arc<RwLock<PeriConfig>>`，ACP Server 持有同一 `Arc`，
@@ -658,5 +597,11 @@ impl App {
             q.custom_input.insert_text(text);
             q.in_custom_input = true;
         }
+    }
+
+    /// 打开 setup 向导（全屏覆盖）
+    pub fn open_setup_wizard(&mut self) {
+        self.global_ui.setup_wizard =
+            Some(crate::app::setup_wizard::SetupWizardPanel::new_from_command());
     }
 }

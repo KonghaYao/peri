@@ -8,7 +8,6 @@ use crate::app::App;
 // ── Submodule declarations ─────────────────────────────────────────────────
 mod bar_focus;
 mod normal_keys;
-mod panels;
 mod popups;
 mod setup_wizard;
 mod shortcuts;
@@ -145,12 +144,7 @@ pub fn handle_key_event(
         return Ok(Some(action));
     }
 
-    // Stage 8-9: Panels
-    if let Some(action) = panels::handle_panels(app, &input) {
-        return Ok(Some(action));
-    }
-
-    // Stage 10-12: Popups (OAuth > AskUser > HITL)
+    // Stage 9: Popups (OAuth > AskUser > HITL)
     if let Some(action) = popups::handle_popups(app, &input) {
         return Ok(Some(action));
     }

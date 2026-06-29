@@ -1,4 +1,8 @@
-use crate::{app::App, command::Command};
+use crate::{
+    app::{App, PanelKind},
+    command::Command,
+    runtime::effect::Effect,
+};
 
 /// /hooks 命令：打开 Hooks 查看面板
 pub struct HooksCommand;
@@ -12,7 +16,7 @@ impl Command for HooksCommand {
         _lc.tr("command-hooks-description")
     }
 
-    fn execute(&self, app: &mut App, _args: &str) {
-        app.open_hooks_panel();
+    fn execute(&self, _app: &mut App, _args: &str) -> Vec<Effect> {
+        vec![Effect::OpenPanel(PanelKind::Hooks)]
     }
 }

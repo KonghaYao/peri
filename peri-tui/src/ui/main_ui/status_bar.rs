@@ -6,10 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::{
-    app::{AgentPanel, App},
-    ui::theme,
-};
+use crate::{app::App, ui::theme};
 
 pub(crate) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::default()
@@ -200,23 +197,8 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Agent 面板信息（仅面板激活时）
-    if let Some(panel) = app.session_mgr.current().session_panels.get::<AgentPanel>() {
-        if has_content {
-            left_spans.push(Span::styled(" · ", Style::default().fg(theme::MUTED)));
-        }
-        if let Some(agent) = panel.current_agent() {
-            left_spans.push(Span::styled(
-                format!(" {}", agent.name),
-                Style::default().fg(theme::MUTED),
-            ));
-        } else {
-            left_spans.push(Span::styled(
-                format!(" {}", lc.tr("statusbar-no-agent")),
-                Style::default().fg(theme::MUTED),
-            ));
-        }
-    } else if let Some(id) = app.get_agent_id() {
+    // Agent ID 信息（v2: 不再依赖 AgentPanel，直接使用 get_agent_id()）
+    if let Some(id) = app.get_agent_id() {
         if has_content {
             left_spans.push(Span::styled(" · ", Style::default().fg(theme::MUTED)));
         }
@@ -445,14 +427,7 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
         None => {
             let no_mouse = app.global_ui.mouse_available == Some(false);
             let lc = &app.services.lc;
-            let hints = if app.session_mgr.current().session_panels.is_any_open() {
-                app.session_mgr
-                    .current()
-                    .session_panels
-                    .status_bar_hints(lc)
-            } else if app.global_panels.is_any_open() {
-                app.global_panels.status_bar_hints(lc)
-            } else if app.global_ui.rewind_pending_since.is_some() {
+            let hints = if app.global_ui.rewind_pending_since.is_some() {
                 vec![
                     ("Esc".to_string(), lc.tr("statusbar-rewind-action")),
                     (

@@ -19,7 +19,7 @@ use tui_textarea::Input;
 
 use peri_widgets::BorderedPanel;
 
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
 use crate::panel::PanelState;
@@ -122,6 +122,28 @@ impl ModelPanel {
             buf_context_1m: false,
             cursor: ROW_OPUS,
         }
+    }
+
+    /// Construct a panel from a `PeriConfig` reference.
+    pub fn from_config(cfg: &crate::config::PeriConfig) -> Self {
+        let app_config = &cfg.config;
+        let effort = app_config
+            .thinking
+            .as_ref()
+            .map(|t| t.effort.as_str())
+            .unwrap_or("high");
+        let max_tokens = app_config
+            .thinking
+            .as_ref()
+            .map(|t| t.max_tokens)
+            .unwrap_or(32000);
+        let context_1m = app_config.context_1m.unwrap_or(false);
+        Self::new(&app_config.active_alias, effort, max_tokens, context_1m)
+    }
+
+    /// Construct a panel from the live `App` state.
+    pub fn from_app(app: &crate::app::App) -> Self {
+        Self::from_config(&app.services.peri_config.read())
     }
 
     /// Construct a panel from initial config values.

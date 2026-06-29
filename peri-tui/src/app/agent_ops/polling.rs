@@ -103,17 +103,10 @@ impl App {
         let mut updated = false;
         if let Some(ref mut rx) = self.workflow_poll_rx {
             while let Ok(snapshots) = rx.try_recv() {
-                // 先写 tracker（状态栏源），保证 panel 未打开时也有数据
+                // v2: Workflow panel refresh handled by state machine via PanelReadContext
                 self.global_ui
                     .workflow_tracker
                     .replace_runs(snapshots.clone());
-                // panel 打开则同步刷新
-                if let Some(panel) = self
-                    .global_panels
-                    .get_mut::<crate::app::workflow_panel::WorkflowPanel>()
-                {
-                    panel.update_runs(snapshots);
-                }
                 updated = true;
             }
         }

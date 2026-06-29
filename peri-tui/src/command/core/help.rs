@@ -1,6 +1,7 @@
 use crate::{
     app::{App, MessageViewModel},
     command::Command,
+    runtime::effect::Effect,
 };
 
 pub struct HelpCommand;
@@ -14,7 +15,7 @@ impl Command for HelpCommand {
         _lc.tr("command-help-description")
     }
 
-    fn execute(&self, app: &mut App, _args: &str) {
+    fn execute(&self, app: &mut App, _args: &str) -> Vec<Effect> {
         let lc = &app.services.lc;
         // 使用启动时预计算的列表（command_registry 在 dispatch 时已被 std::mem::take 取出）
         let mut lines = vec![lc.tr("help-available-commands")];
@@ -59,5 +60,6 @@ impl Command for HelpCommand {
             .view_messages
             .push(vm);
         app.render_rebuild();
+        vec![]
     }
 }

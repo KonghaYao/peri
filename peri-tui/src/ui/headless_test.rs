@@ -747,73 +747,8 @@ async fn test_sticky_header_truncation_long_message() {
     // （多行内容在 max_lines 行后被截断）
 }
 
-#[tokio::test]
-async fn test_cron_panel_render() {
-    let (mut app, mut handle) = App::new_headless(120, 30).await;
-
-    // Register a cron task
-    app.services
-        .cron
-        .scheduler
-        .lock()
-        .register("* * * * *", "hello cron test")
-        .unwrap();
-    let tasks: Vec<_> = app
-        .services
-        .cron
-        .scheduler
-        .lock()
-        .list_tasks()
-        .into_iter()
-        .cloned()
-        .collect();
-    app.global_panels
-        .open(crate::app::panel_manager::PanelState::Cron(
-            crate::app::CronPanel::new(tasks),
-        ));
-
-    let notified = handle.render_notify.notified();
-    drop(notified);
-
-    handle
-        .terminal
-        .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
-        .unwrap();
-    let snap = handle.snapshot();
-    eprintln!("SNAPSHOT:");
-    for (i, line) in snap.iter().enumerate() {
-        if !line.is_empty() {
-            eprintln!("{:3}: {}", i, line);
-        }
-    }
-    assert!(
-        handle.contains("hello cron test"),
-        "should contain task prompt"
-    );
-    assert!(
-        handle.contains("* * * * *"),
-        "should contain cron expression"
-    );
-}
-
-#[tokio::test]
-async fn test_bordered_panel_integration() {
-    // BorderedPanel 集成冒烟测试：渲染 agent panel 验证无 panic 且输出正确
-    let (mut app, mut handle) = App::new_headless(120, 30).await;
-
-    app.session_mgr.current_mut().session_panels.open(
-        crate::app::panel_manager::PanelState::Agent(crate::app::AgentPanel::new(vec![], None)),
-    );
-
-    handle
-        .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
-        .unwrap();
-    assert!(
-        handle.contains("Agent"),
-        "BorderedPanel integration should render agent panel title"
-    );
-}
+// Phase E: test_cron_panel_render removed — legacy PanelManager/global_panels deleted.
+// Phase E: test_bordered_panel_integration removed — legacy PanelManager/session_panels deleted.
 
 #[tokio::test]
 async fn test_tab_bar_integration() {
@@ -1677,7 +1612,7 @@ async fn test_enter_skill_name_submits_message() {
     let registry = std::mem::take(&mut app.session_mgr.current_mut().commands.command_registry);
     let known = registry.dispatch(&mut app, &text);
     app.session_mgr.current_mut().commands.command_registry = registry;
-    assert!(!known, "review 不应是已知命令");
+    assert!(known.is_none(), "review 不应是已知命令");
 
     // 验证 Skill 匹配
     let skill_name: String = text
@@ -1713,7 +1648,7 @@ async fn test_enter_unknown_command_shows_error() {
     let registry = std::mem::take(&mut app.session_mgr.current_mut().commands.command_registry);
     let known = registry.dispatch(&mut app, &text);
     app.session_mgr.current_mut().commands.command_registry = registry;
-    assert!(!known, "nonexistent 不应是已知命令");
+    assert!(known.is_none(), "nonexistent 不应是已知命令");
 
     // Skill fallback 也应失败
     let skill_name: String = text
@@ -1754,7 +1689,7 @@ async fn test_enter_known_command_no_skill_fallback() {
     let registry = std::mem::take(&mut app.session_mgr.current_mut().commands.command_registry);
     let known = registry.dispatch(&mut app, "/help");
     app.session_mgr.current_mut().commands.command_registry = registry;
-    assert!(known, "/help 应是已知命令，优先于同名 Skill");
+    assert!(known.is_some(), "/help 应是已知命令，优先于同名 Skill");
 }
 
 // ── Input Placeholder Hint ──────────────────────────────────────────────
@@ -1806,288 +1741,22 @@ async fn test_ambiguous_command_shows_candidates() {
     let registry = std::mem::take(&mut app.session_mgr.current_mut().commands.command_registry);
     let known = registry.dispatch(&mut app, "/c");
     app.session_mgr.current_mut().commands.command_registry = registry;
-    assert!(!known, "歧义前缀 dispatch 应返回 false");
+    assert!(known.is_none(), "歧义前缀 dispatch 应返回 None");
 }
 
 // ─── Design Review 第22轮：Model 面板 Space 键 + Cron 确认删除 + 面板 Paste 拦截 ────
 
-/// Model 面板 Space 键在模型行应选中对应模型（而非静默无响应）
-#[tokio::test]
-async fn test_model_panel_space_selects_model() {
-    use crate::{
-        app::model_panel::{AliasTab, ModelPanel, ROW_SONNET},
-        config::{AppConfig, PeriConfig, ProviderConfig, ThinkingConfig},
-    };
+// Phase E: test_model_panel_space_selects_model removed — legacy model_panel deleted.
 
-    let cfg = PeriConfig {
-        schema: None,
-        config: AppConfig {
-            active_alias: "opus".to_string(),
-            active_provider_id: "test".to_string(),
-            providers: vec![ProviderConfig {
-                id: "test".to_string(),
-                name: Some("TestProvider".to_string()),
-                ..Default::default()
-            }],
-            thinking: Some(ThinkingConfig {
-                enabled: false,
-                budget_tokens: 8000,
-                effort: "medium".to_string(),
-                max_tokens: 32000,
-            }),
-            ..Default::default()
-        },
-    };
+// Phase E: test_cron_panel_delete_confirmation removed — legacy PanelManager/global_panels deleted.
 
-    let mut panel = ModelPanel::from_config(&cfg);
-    // 光标移到 Sonnet 行
-    panel.cursor = ROW_SONNET;
-    assert_eq!(panel.active_tab, AliasTab::Opus);
-
-    // 直接验证 Space 的实际处理逻辑：应设置 active_tab
-    // （event.rs 中 Space 在 ROW_SONNET 会设置 active_tab = Sonnet）
-    panel.active_tab = AliasTab::Sonnet;
-    assert_eq!(
-        panel.active_tab,
-        AliasTab::Sonnet,
-        "Space 应能选中 Sonnet 模型"
-    );
-}
-
-/// Cron 面板删除确认：Ctrl+D 应进入确认状态而非立即删除
-#[tokio::test]
-async fn test_cron_panel_delete_confirmation() {
-    use chrono::Utc;
-    use peri_middlewares::cron::CronTask;
-
-    use crate::app::CronPanel;
-
-    let (mut app, _handle) = App::new_headless(120, 30).await;
-
-    // 手动构造一个 cron 任务
-    let task = CronTask {
-        id: "test-job-1".to_string(),
-        expression: "*/5 * * * *".to_string(),
-        prompt: "test prompt".to_string(),
-        enabled: true,
-        next_fire: Some(Utc::now() + chrono::Duration::seconds(60)),
-    };
-    app.global_panels
-        .open(crate::app::panel_manager::PanelState::Cron(CronPanel::new(
-            vec![task],
-        )));
-    assert_eq!(
-        app.global_panels.get::<CronPanel>().unwrap().tasks().len(),
-        1
-    );
-    assert!(!app.global_panels.get::<CronPanel>().unwrap().confirm_delete);
-
-    // Ctrl+D → 进入确认状态
-    app.cron_panel_request_delete();
-    assert!(
-        app.global_panels.get::<CronPanel>().unwrap().confirm_delete,
-        "Ctrl+D 应设置 confirm_delete = true"
-    );
-    assert_eq!(
-        app.global_panels.get::<CronPanel>().unwrap().tasks().len(),
-        1,
-        "确认前不应删除任务"
-    );
-
-    // Esc / 其他键 → 取消确认
-    app.cron_panel_cancel_delete();
-    assert!(
-        !app.global_panels.get::<CronPanel>().unwrap().confirm_delete,
-        "取消后 confirm_delete 应为 false"
-    );
-    assert_eq!(
-        app.global_panels.get::<CronPanel>().unwrap().tasks().len(),
-        1,
-        "取消后任务应仍存在"
-    );
-
-    // 再次进入确认，然后 Enter 确认删除
-    app.cron_panel_request_delete();
-    assert!(app.global_panels.get::<CronPanel>().unwrap().confirm_delete);
-    app.cron_panel_confirm_delete();
-    // 面板为空时自动关闭
-    assert!(
-        !app.global_panels.is_any_open(),
-        "删除最后一个任务后面板应关闭"
-    );
-}
-
-/// Cron 面板确认删除时渲染显示确认提示
-#[tokio::test]
-async fn test_cron_panel_confirm_delete_renders() {
-    use chrono::Utc;
-    use peri_middlewares::cron::CronTask;
-
-    use crate::app::CronPanel;
-
-    let (mut app, mut handle) = App::new_headless(120, 30).await;
-    let task = CronTask {
-        id: "job-1".to_string(),
-        expression: "*/5 * * * *".to_string(),
-        prompt: "test".to_string(),
-        enabled: true,
-        next_fire: Some(Utc::now() + chrono::Duration::seconds(60)),
-    };
-    app.global_panels
-        .open(crate::app::panel_manager::PanelState::Cron(CronPanel::new(
-            vec![task],
-        )));
-    app.global_panels
-        .get_mut::<CronPanel>()
-        .unwrap()
-        .confirm_delete = true;
-
-    handle
-        .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
-        .unwrap();
-    let snap = handle.snapshot();
-    // 使用 ASCII 内容断言（避免 CJK 宽字符问题），确认面板渲染了 Enter 提示
-    let _all_text = snap.join("");
-    // 面板应该渲染了包含 "Enter" 的帮助行（确认模式提示）
-    let has_enter = snap.iter().any(|l| l.contains("Enter"));
-    assert!(
-        has_enter,
-        "Cron 面板确认删除模式应渲染 Enter 快捷键提示，实际:\n{}",
-        snap.join("\n")
-    );
-}
+// Phase E: test_cron_panel_confirm_delete_renders removed — legacy PanelManager/global_panels deleted.
 
 // ─── Design Review 第23轮：面板操作成功反馈 ────
 
-/// Model 面板确认选择后应显示"模型已切换为"反馈消息
-#[tokio::test]
-async fn test_model_panel_confirm_shows_feedback() {
-    use crate::{
-        app::model_panel::{AliasTab, ModelPanel},
-        config::{AppConfig, PeriConfig, ProviderConfig, ThinkingConfig},
-    };
+// Phase E: test_model_panel_confirm_shows_feedback removed — legacy model_panel/session_panels deleted.
 
-    let (mut app, _handle) = App::new_headless(120, 30).await;
-    let cfg = PeriConfig {
-        schema: None,
-        config: AppConfig {
-            active_alias: "opus".to_string(),
-            active_provider_id: "test".to_string(),
-            providers: vec![ProviderConfig {
-                id: "test".to_string(),
-                name: Some("TestProvider".to_string()),
-                ..Default::default()
-            }],
-            thinking: Some(ThinkingConfig {
-                enabled: false,
-                budget_tokens: 8000,
-                effort: "medium".to_string(),
-                max_tokens: 32000,
-            }),
-            ..Default::default()
-        },
-    };
-    app.services.peri_config = std::sync::Arc::new(parking_lot::RwLock::new(cfg));
-    app.session_mgr.current_mut().session_panels.open(
-        crate::app::panel_manager::PanelState::Model(ModelPanel::from_config(
-            &app.services.peri_config.read(),
-        )),
-    );
-    app.session_mgr
-        .current_mut()
-        .session_panels
-        .get_mut::<ModelPanel>()
-        .unwrap()
-        .active_tab = AliasTab::Sonnet;
-
-    app.model_panel_confirm();
-
-    let last_msg = app.session_mgr.current_mut().messages.view_messages.last();
-    assert!(last_msg.is_some(), "Model 面板确认后应有反馈消息");
-    let msg_text = match last_msg.unwrap() {
-        MessageViewModel::SystemNote { content, .. } => content.clone(),
-        _ => String::new(),
-    };
-    assert!(
-        msg_text.contains("Sonnet"),
-        "反馈消息应包含模型名 'Sonnet'，实际: {}",
-        msg_text
-    );
-    assert!(
-        !app.session_mgr
-            .current_mut()
-            .session_panels
-            .is_active(crate::app::PanelKind::Model),
-        "确认后面板应关闭"
-    );
-}
-
-/// Login 面板激活 Provider 后应显示"已激活"反馈消息
-#[tokio::test]
-async fn test_login_select_provider_shows_feedback() {
-    use crate::{
-        app::login_panel::LoginPanel,
-        config::{AppConfig, PeriConfig, ProviderConfig},
-    };
-
-    let (mut app, _handle) = App::new_headless(120, 30).await;
-    let cfg = PeriConfig {
-        schema: None,
-        config: AppConfig {
-            active_alias: "opus".to_string(),
-            active_provider_id: "test1".to_string(),
-            providers: vec![
-                ProviderConfig {
-                    id: "test1".to_string(),
-                    name: Some("Provider1".to_string()),
-                    ..Default::default()
-                },
-                ProviderConfig {
-                    id: "test2".to_string(),
-                    name: Some("Provider2".to_string()),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        },
-    };
-    app.services.peri_config = std::sync::Arc::new(parking_lot::RwLock::new(cfg));
-    app.session_mgr.current_mut().session_panels.open(
-        crate::app::panel_manager::PanelState::Login(Box::new(LoginPanel::from_config(
-            &app.services.peri_config.read(),
-        ))),
-    );
-    // 光标移到第二个 Provider
-    app.session_mgr
-        .current_mut()
-        .session_panels
-        .get_mut::<LoginPanel>()
-        .unwrap()
-        .browse_list
-        .move_cursor_to(1);
-
-    app.login_panel_select_provider();
-
-    let last_msg = app.session_mgr.current_mut().messages.view_messages.last();
-    assert!(last_msg.is_some(), "Login 面板激活后应有反馈消息");
-    let msg_text = match last_msg.unwrap() {
-        MessageViewModel::SystemNote { content, .. } => content.clone(),
-        _ => String::new(),
-    };
-    assert!(
-        msg_text.contains("Provider2"),
-        "反馈消息应包含 Provider 名 'Provider2'，实际: {}",
-        msg_text
-    );
-    assert!(
-        !app.session_mgr
-            .current_mut()
-            .session_panels
-            .is_active(crate::app::PanelKind::Login),
-        "激活后面板应关闭"
-    );
-}
+// Phase E: test_login_select_provider_shows_feedback removed — legacy login_panel/session_panels deleted.
 
 // ─── Design Review 第24轮：Welcome Card 模型信息 + Thread Browser 消息数 ────
 

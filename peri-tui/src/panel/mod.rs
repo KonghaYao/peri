@@ -23,7 +23,7 @@ use ratatui::layout::Rect;
 use ratatui::Frame;
 use tui_textarea::Input;
 
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::i18n::LcRegistry;
 
 /// Interface implemented by every v2 panel.

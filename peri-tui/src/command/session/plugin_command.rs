@@ -1,3 +1,4 @@
+use crate::runtime::effect::Effect;
 use peri_middlewares::plugin::CommandEntry;
 
 use crate::{app::App, command::Command};
@@ -20,7 +21,7 @@ impl Command for PluginCommandAdapter {
     fn description(&self, _lc: &crate::i18n::LcRegistry) -> String {
         self.entry.description.clone()
     }
-    fn execute(&self, app: &mut App, args: &str) {
+    fn execute(&self, app: &mut App, args: &str) -> Vec<Effect> {
         // 插件命令的行为是触发对应的 skill 预加载。
         // 保持用户原始输入（含命名空间前缀），让 SkillPreloadMiddleware 识别。
         let message = if args.is_empty() {
@@ -30,6 +31,7 @@ impl Command for PluginCommandAdapter {
         };
 
         app.submit_message(message);
+        vec![]
     }
 }
 

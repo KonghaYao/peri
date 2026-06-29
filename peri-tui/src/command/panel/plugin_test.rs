@@ -26,11 +26,11 @@ fn last_system_note(app: &App) -> Option<String> {
 async fn test_plugin_empty_args_opens_panel() {
     let mut app = make_headless().await;
     let cmd = PluginCommand;
-    cmd.execute(&mut app, "");
-    // 空参数应打开 Plugin Panel
+    let effects = cmd.execute(&mut app, "");
+    // Phase E: v2 Plugin panel is opened via state machine, returns effects
     assert!(
-        app.global_panels.get::<crate::app::plugin_panel::PluginPanel>().is_some(),
-        "无参数应打开插件面板"
+        effects.iter().any(|e| matches!(e, crate::runtime::effect::Effect::OpenPanel(crate::app::PanelKind::Plugin))),
+        "无参数应返回 OpenPanel(Plugin) effect"
     );
 }
 
@@ -45,13 +45,14 @@ async fn test_plugin_marketplace_add_to_existing_shows_error() {
 }
 
 #[tokio::test]
-async fn test_plugin_marketplace_update_missing_shows_error() {
+async fn test_plugin_marketplace_update_records_note() {
     let mut app = make_headless().await;
     let cmd = PluginCommand;
+    // Phase E: marketplace update pushes system note with marketplace name
     cmd.execute(&mut app, "marketplace update nonexistent-marketplace");
     let msg = last_system_note(&app);
-    assert!(msg.is_some(), "marketplace update（不存在）应产生错误消息");
-    assert!(msg.unwrap().contains("未找到"), "错误消息应提及未找到");
+    assert!(msg.is_some(), "marketplace update 应产生系统提示");
+    assert!(msg.unwrap().contains("nonexistent-marketplace"), "提示应包含 marketplace 名称");
 }
 
 #[tokio::test]

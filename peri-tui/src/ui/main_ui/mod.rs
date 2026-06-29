@@ -8,12 +8,10 @@
 mod attachment;
 pub(crate) mod bg_agent_bar;
 pub(crate) mod message_area;
-pub(crate) mod panels;
 mod popups;
 mod status_bar;
 mod sticky_header;
 
-pub(crate) use message_area::highlight_line_spans;
 #[cfg(not(target_os = "windows"))]
 use ratatui::buffer::CellDiffOption;
 use ratatui::{
@@ -121,36 +119,6 @@ fn render_session_column(f: &mut Frame, app: &mut App, area: Rect, v2_panel_heig
         }
         if app.global_ui.oauth_prompt.is_some() {
             popups::oauth::render_oauth_popup(f, app, panel_area);
-        }
-        // PanelManager 统一渲染分发：session 面板优先，global 面板次之
-        if app
-            .session_mgr
-            .current_mut()
-            .agent
-            .interaction_prompt
-            .is_none()
-            && app.global_ui.oauth_prompt.is_none()
-        {
-            if app.session_mgr.current_mut().session_panels.is_any_open() {
-                let mut state = app
-                    .session_mgr
-                    .current_mut()
-                    .session_panels
-                    .take_active()
-                    .expect("is_any_open was true");
-                state.render(f, app, panel_area);
-                app.session_mgr
-                    .current_mut()
-                    .session_panels
-                    .put_active(state);
-            } else if app.global_panels.is_any_open() {
-                let mut state = app
-                    .global_panels
-                    .take_active()
-                    .expect("is_any_open was true");
-                state.render(f, app, panel_area);
-                app.global_panels.put_active(state);
-            }
         }
         // v2 Modal: 存储 panel_area 供 draw_now 中的 overlay 渲染使用。
         // Legacy 渲染器会在内部设 inner rect，v2 面板使用完整的布局区域。
@@ -385,32 +353,17 @@ fn active_panel_height(
         return h.min(screen_height * 3 / 5).max(1);
     }
 
-    // plugin 面板可以占 70%，AskUser 弹窗允许 75%（选项多/文字长需要更多空间），其他最多 60%
-    let is_plugin_panel = app.global_panels.is_active(crate::app::PanelKind::Plugin);
+    // Interaction popups (no longer depend on PanelManager)
     let has_ask_user = matches!(
         &app.session_mgr.current().agent.interaction_prompt,
         Some(crate::app::InteractionPrompt::Questions(_))
     );
-    let max_h = if is_plugin_panel {
-        screen_height * 70 / 100
-    } else if has_ask_user {
+    let max_h = if has_ask_user {
         screen_height * 3 / 4
     } else {
         screen_height * 3 / 5
     };
-    let raw = if let Some(h) = app
-        .session_mgr
-        .current()
-        .session_panels
-        .dispatch_desired_height(screen_height, screen_width)
-    {
-        h
-    } else if let Some(h) = app
-        .global_panels
-        .dispatch_desired_height(screen_height, screen_width)
-    {
-        h
-    } else if let Some(crate::app::InteractionPrompt::Approval(p)) =
+    let raw = if let Some(crate::app::InteractionPrompt::Approval(p)) =
         &app.session_mgr.current().agent.interaction_prompt
     {
         (p.items.len() as u16 * 2 + 5).max(5)
@@ -420,7 +373,6 @@ fn active_panel_height(
         &app.session_mgr.current().agent.interaction_prompt
     {
         let cur = &p.questions[p.active_tab];
-        // BorderedPanel 无左右边框，内容区宽度 = screen_width；滚动条占 1 列
         let panel_width = screen_width.saturating_sub(1) as usize;
         popups::ask_user_height::ask_user_content_height(&cur.data, panel_width).max(8)
     } else if let Some(crate::app::InteractionPrompt::Rewind(p)) =

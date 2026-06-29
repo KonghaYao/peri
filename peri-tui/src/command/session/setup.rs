@@ -1,4 +1,4 @@
-use crate::{app::App, command::Command};
+use crate::{app::App, command::Command, runtime::effect::Effect};
 
 /// /setup 命令 —— 打开 Setup 向导全屏面板
 pub struct SetupCommand;
@@ -12,7 +12,8 @@ impl Command for SetupCommand {
         lc.tr("command-setup-description")
     }
 
-    fn execute(&self, app: &mut App, _args: &str) {
+    fn execute(&self, app: &mut App, _args: &str) -> Vec<Effect> {
         app.open_setup_wizard();
+        vec![]
     }
 }

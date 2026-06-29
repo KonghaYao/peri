@@ -1,6 +1,6 @@
 use peri_agent::messages::{BaseMessage, ContentBlock, MessageContent};
 
-use crate::{app::App, command::Command};
+use crate::{app::App, command::Command, runtime::effect::Effect};
 
 pub struct GcCommand;
 
@@ -17,7 +17,7 @@ impl Command for GcCommand {
         vec![]
     }
 
-    fn execute(&self, app: &mut App, _args: &str) {
+    fn execute(&self, app: &mut App, _args: &str) -> Vec<Effect> {
         let stats_before = crate::alloc_config::query_stats();
         let os_rss_before = crate::alloc_config::os_rss_mb();
 
@@ -167,6 +167,7 @@ impl Command for GcCommand {
 
         // UI 反馈：走 ephemeral SystemNote VM 路径，不污染 BaseMessage[] / Prompt Cache。
         app.push_system_note(lines.join("\n"));
+        vec![]
     }
 }
 

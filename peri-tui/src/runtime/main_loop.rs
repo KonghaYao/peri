@@ -16,7 +16,6 @@
 //! deleted and the state machine becomes the sole driver.
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -67,10 +66,11 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         let sm_event: SmEvent = event.clone().into();
         let new_state: State;
         let sm_effects: Vec<Effect>;
+        let view_models: Vec<peri_acp_types::view_model::ViewModel> = state.view_models().to_vec();
+        let panel_ctx = build_panel_read_context(app, &view_models);
         match state {
             State::Modal(modal_state) => {
-                let ctx = build_panel_read_context(app);
-                let (ns, fx) = modal::handle_with_context(modal_state, sm_event, &ctx);
+                let (ns, fx) = modal::handle_with_context(modal_state, sm_event, &panel_ctx);
                 new_state = ns;
                 sm_effects = fx;
             }
@@ -94,6 +94,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                         app.submit_message(input);
                         vec![Effect::Render]
                     }
+                    Ok(Some(Action::Effects(effects))) => effects,
                     Ok(Some(Action::Redraw)) | Ok(None) => vec![Effect::Render],
                     Err(e) => {
                         tracing::warn!(error = %e, "keyboard handler error");
@@ -240,7 +241,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 Effect::OpenPanel(kind) => {
                     if let State::Idle(idle) = state {
                         saved_idle = Some(idle);
-                        let panel = crate::panel::registry::create_panel(kind);
+                        let panel = crate::panel::registry::create_panel(kind, app);
                         state = State::Modal(ModalState::Panel(panel));
                         needs_render = true;
                     }
@@ -365,9 +366,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     needs_render = true;
                 }
                 Effect::MemoryPanelOpenEditor => {
-                    if let Err(e) = app.memory_panel_open_editor() {
-                        tracing::warn!(error = %e, "MemoryPanelOpenEditor failed");
-                    }
+                    // v2: Memory panel editor is managed by state machine
                     needs_render = true;
                 }
                 // I/O effects handled by ApplyContext (terminal / ACP / clipboard).
@@ -598,25 +597,29 @@ fn is_sm_handled_shortcut(key: &ratatui::crossterm::event::KeyEvent, state: &Sta
 /// giving v2 panels access to i18n, scroll offset, panel area, etc.
 /// The returned context borrows from `app` — it is consumed within the
 /// same event iteration and never escapes the main loop tick.
-fn build_panel_read_context<'a>(app: &'a App) -> PanelReadContext<'a> {
-    // ServiceRegistrySnapshot: empty for now — panels get data via internal
-    // state populated by ACP notifications, not from services snapshot.
-    static EMPTY_SNAPSHOT: LazyLock<ServiceRegistrySnapshot> =
-        LazyLock::new(ServiceRegistrySnapshot::new);
+fn build_panel_read_context<'a>(
+    app: &'a App,
+    view_models: &'a [peri_acp_types::view_model::ViewModel],
+) -> PanelReadContext<'a> {
+    use std::sync::LazyLock;
 
-    // View models: empty slice — panels don't use this yet (it's a
-    // forward-looking field for panels that may need message context).
-    let vms: &[peri_acp_types::view_model::ViewModel] = &[];
-
-    // ACP query cache: panels use this to store/retrieve ACP query results.
-    // Currently not populated in ServiceRegistry; use a static empty map.
+    // Thread-local for ServiceRegistrySnapshot (same pattern as apply_context.rs).
+    std::thread_local! {
+        static SNAPSHOT: std::cell::RefCell<ServiceRegistrySnapshot> =
+            std::cell::RefCell::new(ServiceRegistrySnapshot::new());
+    }
     static EMPTY_CACHE: LazyLock<HashMap<String, serde_json::Value>> = LazyLock::new(HashMap::new);
 
     let session = app.session_mgr.current();
 
+    let services: &ServiceRegistrySnapshot = SNAPSHOT.with(|cell| {
+        *cell.borrow_mut() = ServiceRegistrySnapshot::from_app(app);
+        unsafe { &*cell.as_ptr() }
+    });
+
     PanelReadContext {
-        services: &EMPTY_SNAPSHOT,
-        view_models: vms,
+        services,
+        view_models,
         scroll_offset: session.ui.scroll_offset,
         area: session
             .ui

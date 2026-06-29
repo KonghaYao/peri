@@ -24,7 +24,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use peri_agent::thread::ThreadMeta;
 use peri_widgets::BorderedPanel;
 
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
 use crate::panel::PanelState;
@@ -420,7 +420,7 @@ impl PanelState for ThreadBrowserPanel {
         f.render_widget(Paragraph::new(Text::from(lines)), inner);
     }
 
-    fn handle_key(&mut self, input: Input, ctx: &PanelReadContext) -> Vec<PanelEffect> {
+    fn handle_key(&mut self, input: Input, _ctx: &PanelReadContext) -> Vec<PanelEffect> {
         use tui_textarea::Key;
 
         // confirm_delete mode

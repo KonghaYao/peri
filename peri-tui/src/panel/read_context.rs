@@ -18,22 +18,39 @@ use crate::i18n::LcRegistry;
 
 /// A lightweight, read-only subset of `ServiceRegistry` for panel injection.
 ///
-/// Intentionally empty during P3 infrastructure scaffolding. Fields will be
-/// added incrementally as each panel migration requires them (e.g. MCP server
-/// list, cron tasks, config snapshot).
+/// Populated once per render/key event from live `App` data. Panels that don't
+/// store their own local state (e.g. status, mcp) can read from this snapshot.
 #[derive(Debug, Clone)]
 pub struct ServiceRegistrySnapshot {
-    // Future fields (added per-panel as needed):
-    // pub config: Arc<PeriConfig>,
-    // pub mcp_servers: Vec<McpServerDto>,
-    // pub cron_tasks: Vec<CronTaskDto>,
-    // pub hooks: Vec<HookDto>,
+    /// Working directory path.
+    pub cwd: String,
+    /// Active model alias ("opus" / "sonnet" / "haiku").
+    pub model_alias: String,
+    /// Active provider display name.
+    pub provider_name: String,
+    /// Active permission mode display string.
+    pub permission_mode: String,
 }
 
 impl ServiceRegistrySnapshot {
-    /// Create an empty snapshot. All fields are placeholder stubs for P3.
+    /// Create an empty snapshot with sensible defaults.
     pub fn new() -> Self {
-        Self {}
+        Self {
+            cwd: String::new(),
+            model_alias: String::new(),
+            provider_name: String::new(),
+            permission_mode: String::new(),
+        }
+    }
+
+    /// Create a populated snapshot from live `App` data.
+    pub fn from_app(app: &crate::app::App) -> Self {
+        Self {
+            cwd: app.services.cwd.clone(),
+            model_alias: app.services.model_name.clone(),
+            provider_name: app.services.provider_name.clone(),
+            permission_mode: format!("{:?}", app.services.permission_mode.load()),
+        }
     }
 }
 

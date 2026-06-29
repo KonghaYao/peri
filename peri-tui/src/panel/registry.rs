@@ -10,7 +10,7 @@ use ratatui::Frame;
 use tui_textarea::Input;
 
 use super::{PanelEffect, PanelReadContext};
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::i18n::LcRegistry;
 
 // ---------------------------------------------------------------------------
@@ -80,26 +80,26 @@ impl super::PanelState for PanelStateStub {
 
 /// Create a `Box<dyn PanelState>` for the given `PanelKind`.
 ///
-/// All 14 arms currently return `PanelStateStub`. During P3 migration,
-/// each arm is replaced with the concrete panel implementation.
-pub fn create_panel(kind: PanelKind) -> Box<dyn super::PanelState> {
+/// Accepts `&App` so panels can be initialized with live data from
+/// `ServiceRegistry` (MCP servers, cron tasks, config, etc.).
+pub fn create_panel(kind: PanelKind, app: &crate::app::App) -> Box<dyn super::PanelState> {
     match kind {
-        PanelKind::Model => Box::new(super::panels::model::ModelPanel::empty()),
-        PanelKind::Login => Box::new(super::panels::login::LoginPanel::empty()),
+        PanelKind::Model => Box::new(super::panels::model::ModelPanel::from_app(app)),
+        PanelKind::Login => Box::new(super::panels::login::LoginPanel::from_app(app)),
         PanelKind::Agent => Box::new(super::panels::agent::AgentPanel::empty()),
         PanelKind::Hooks => Box::new(super::panels::hooks::HooksPanel::empty()),
-        PanelKind::Config => Box::new(super::panels::config::ConfigPanel::empty()),
+        PanelKind::Config => Box::new(super::panels::config::ConfigPanel::from_app(app)),
         PanelKind::ThreadBrowser => {
             Box::new(super::panels::thread_browser::ThreadBrowserPanel::empty())
         }
-        PanelKind::Mcp => Box::new(super::panels::mcp::McpPanel::empty()),
-        PanelKind::Plugin => Box::new(super::panels::plugin::PluginPanel::empty()),
-        PanelKind::Cron => Box::new(super::panels::cron::CronPanel::empty()),
-        PanelKind::Status => Box::new(super::panels::status::StatusPanel::empty()),
+        PanelKind::Mcp => Box::new(super::panels::mcp::McpPanel::from_app(app)),
+        PanelKind::Plugin => Box::new(super::panels::plugin::PluginPanel::from_app(app)),
+        PanelKind::Cron => Box::new(super::panels::cron::CronPanel::from_app(app)),
+        PanelKind::Status => Box::new(super::panels::status::StatusPanel::from_app(app)),
         PanelKind::Memory => Box::new(super::panels::memory::MemoryPanel::empty()),
         PanelKind::Tasks => Box::new(super::panels::tasks::TasksPanel::empty()),
         PanelKind::Betas => Box::new(super::panels::betas::BetasPanel::empty()),
-        PanelKind::Workflow => Box::new(super::panels::workflow::WorkflowPanel::empty()),
+        PanelKind::Workflow => Box::new(super::panels::workflow::WorkflowPanel::from_app(app)),
     }
 }
 
@@ -117,6 +117,8 @@ mod tests {
 
     #[test]
     fn test_create_panel_returns_correct_kind() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let app = rt.block_on(async { crate::app::App::new_headless(80, 24).await.0 });
         for kind in &[
             PanelKind::Model,
             PanelKind::Login,
@@ -133,7 +135,7 @@ mod tests {
             PanelKind::Betas,
             PanelKind::Workflow,
         ] {
-            let panel = create_panel(*kind);
+            let panel = create_panel(*kind, &app);
             assert_eq!(
                 panel.kind(),
                 *kind,

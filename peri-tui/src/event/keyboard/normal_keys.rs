@@ -151,10 +151,14 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
                     let registry = std::mem::take(
                         &mut app.session_mgr.current_mut().commands.command_registry,
                     );
-                    let known = registry.dispatch(app, &text);
+                    let result = registry.dispatch(app, &text);
                     app.session_mgr.current_mut().commands.command_registry = registry;
-                    if known {
-                        // Command matched, done
+                    if let Some(effects) = result {
+                        if effects.is_empty() {
+                            // Command matched, no effects needed
+                        } else {
+                            return Ok(Some(Action::Effects(effects)));
+                        }
                     } else {
                         // Command not matched, try Skill matching
                         let skill_name: String = text

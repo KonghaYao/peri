@@ -40,6 +40,7 @@ pub fn default_registry() -> CommandRegistry {
 }
 
 use crate::app::App;
+use crate::runtime::effect::Effect;
 
 // ─── Command trait ────────────────────────────────────────────────────────────
 
@@ -52,8 +53,9 @@ pub trait Command: Send + Sync {
     fn aliases(&self) -> Vec<&str> {
         vec![]
     }
-    /// 执行命令，args 是命令名之后的参数字符串（已 trim）
-    fn execute(&self, app: &mut App, args: &str);
+    /// 执行命令，args 是命令名之后的参数字符串（已 trim）。
+    /// 返回副作用列表，由 main_loop 统一执行。
+    fn execute(&self, app: &mut App, args: &str) -> Vec<Effect>;
 }
 
 // ─── CommandRegistry ──────────────────────────────────────────────────────────
@@ -87,8 +89,8 @@ impl CommandRegistry {
     /// 解析并执行命令。
     /// 输入格式："/name args..."
     /// 匹配优先级：精确匹配 > 别名精确匹配 > 前缀唯一匹配（支持 /m → /model）
-    /// 返回 true 表示找到命令并执行，false 表示未知命令或有歧义。
-    pub fn dispatch(&self, app: &mut App, input: &str) -> bool {
+    /// 返回 Some(effects) 表示找到命令并执行，None 表示未知命令或有歧义。
+    pub fn dispatch(&self, app: &mut App, input: &str) -> Option<Vec<Effect>> {
         let input = input.trim_start_matches('/');
         let (name, args) = match input.split_once(' ') {
             Some((n, a)) => (n.trim(), a.trim()),
@@ -97,14 +99,12 @@ impl CommandRegistry {
 
         // 1. 精确匹配
         if let Some(cmd) = self.commands.iter().find(|c| c.name() == name) {
-            cmd.execute(app, args);
-            return true;
+            return Some(cmd.execute(app, args));
         }
 
         // 2. 别名精确匹配
         if let Some(cmd) = self.commands.iter().find(|c| c.aliases().contains(&name)) {
-            cmd.execute(app, args);
-            return true;
+            return Some(cmd.execute(app, args));
         }
 
         // 3. 前缀唯一匹配（同时对 name 和 aliases）
@@ -116,11 +116,10 @@ impl CommandRegistry {
             })
             .collect();
         if matches.len() == 1 {
-            matches[0].execute(app, args);
-            return true;
+            return Some(matches[0].execute(app, args));
         }
 
-        false
+        None
     }
 
     /// 返回所有已注册命令的 (name, description, aliases) 列表

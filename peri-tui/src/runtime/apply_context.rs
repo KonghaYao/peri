@@ -11,7 +11,6 @@
 
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::sync::LazyLock;
 use std::time::Instant;
 
 use ratatui::prelude::{CrosstermBackend, Terminal};
@@ -223,6 +222,10 @@ impl<'a> ApplyContext<'a> {
         state: &mut crate::state_machine::State,
     ) {
         use crate::state_machine::{ModalState, State};
+        // Clone view_models before the mutable borrow in the draw closure,
+        // so we can pass them to build_v2_panel_read_context without
+        // conflicting with the `if let State::Modal(..) = state` borrow.
+        let view_models: Vec<peri_acp_types::view_model::ViewModel> = state.view_models().to_vec();
         if let Err(e) = self.terminal.draw(|f| {
             // Pre-compute v2 panel height so legacy layout reserves space.
             let v2_panel_height = if let State::Modal(ModalState::Panel(panel)) = &*state {
@@ -240,7 +243,7 @@ impl<'a> ApplyContext<'a> {
                     .ui
                     .panel_area
                     .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24));
-                panel.render(f, area, &build_v2_panel_read_context(app));
+                panel.render(f, area, &build_v2_panel_read_context(app, &view_models));
             }
         }) {
             warn!(error = %e, "terminal draw failed");
@@ -250,16 +253,41 @@ impl<'a> ApplyContext<'a> {
 }
 
 /// Build a [`PanelReadContext`] for v2 panel rendering from live App data.
-fn build_v2_panel_read_context<'a>(app: &'a App) -> PanelReadContext<'a> {
-    static EMPTY_SNAPSHOT: LazyLock<ServiceRegistrySnapshot> =
-        LazyLock::new(ServiceRegistrySnapshot::new);
+///
+/// `view_models` is a pre-cloned snapshot from `state.view_models()` — cloned
+/// before the `terminal.draw()` closure to avoid borrow conflicts with the
+/// `if let State::Modal(..) = state` mutable borrow inside the closure.
+fn build_v2_panel_read_context<'a>(
+    app: &'a App,
+    view_models: &'a [peri_acp_types::view_model::ViewModel],
+) -> PanelReadContext<'a> {
+    use std::sync::LazyLock;
+
     static EMPTY_CACHE: LazyLock<HashMap<String, serde_json::Value>> = LazyLock::new(HashMap::new);
+
+    // Thread-local snapshot store. Updated each draw tick; referenced within
+    // the terminal.draw() closure via unsafe lifetime extension. Safe because
+    // draws are single-threaded and the reference never escapes the closure.
+    std::thread_local! {
+        static SNAPSHOT: std::cell::RefCell<ServiceRegistrySnapshot> =
+            std::cell::RefCell::new(ServiceRegistrySnapshot::new());
+    }
 
     let session = app.session_mgr.current();
 
+    // Leak the snapshot into the thread-local so it has 'static lifetime.
+    // SAFETY: SNAPSHOT lives for the lifetime of the main thread. We borrow
+    // it here and the reference does not escape this function's call stack.
+    let services: &'a ServiceRegistrySnapshot = SNAPSHOT.with(|cell| {
+        *cell.borrow_mut() = ServiceRegistrySnapshot::from_app(app);
+        // SAFETY: the reference is valid for the duration of terminal.draw().
+        // We never retain it beyond this function call.
+        unsafe { &*cell.as_ptr() }
+    });
+
     PanelReadContext {
-        services: &EMPTY_SNAPSHOT,
-        view_models: &[],
+        services,
+        view_models,
         scroll_offset: session.ui.scroll_offset,
         area: session
             .ui

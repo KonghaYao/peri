@@ -1,4 +1,8 @@
-use crate::{app::App, command::Command};
+use crate::{
+    app::{App, PanelKind},
+    command::Command,
+    runtime::effect::Effect,
+};
 
 pub struct PluginCommand;
 
@@ -9,22 +13,26 @@ impl Command for PluginCommand {
     fn description(&self, _lc: &crate::i18n::LcRegistry) -> String {
         _lc.tr("command-plugin-description")
     }
-    fn execute(&self, app: &mut App, args: &str) {
+    fn execute(&self, app: &mut App, args: &str) -> Vec<Effect> {
         let parts: Vec<&str> = args.split_whitespace().collect();
         match parts.as_slice() {
-            // /plugin（无参数）→ 打开面板（现有行为）
-            [] => app.open_plugin_panel(),
+            // /plugin（无参数）→ v2: PluginPanel managed by state machine
+            [] => {
+                vec![Effect::OpenPanel(PanelKind::Plugin), Effect::Render]
+            }
 
             // /plugin marketplace add <url>
             ["marketplace", "add", rest @ ..] if !rest.is_empty() => {
                 let input = rest.join(" ");
-                if let Err(e) = app.marketplace_add_and_save(&input) {
-                    let msg = app.services.lc.tr_args(
-                        "command-plugin-add-failed-detail",
-                        &[("error".into(), e.to_string().into())],
-                    );
-                    app.session_mgr.current_mut().messages.push_system_note(msg);
-                }
+                // v2: marketplace operations deferred until PluginPanel v2 is wired
+                app.session_mgr
+                    .current_mut()
+                    .messages
+                    .push_system_note(format!(
+                        "Marketplace add: {} (v2 plugin panel pending)",
+                        input
+                    ));
+                vec![Effect::Render]
             }
 
             // /plugin install <name@marketplace>
@@ -32,24 +40,26 @@ impl Command for PluginCommand {
                 let (name, marketplace) = name_at_marketplace
                     .split_once('@')
                     .unwrap_or((name_at_marketplace, "claude-plugins-official"));
-                if let Err(e) = app.plugin_install_by_marketplace(name, marketplace) {
-                    let msg = app.services.lc.tr_args(
-                        "command-plugin-install-failed",
-                        &[("error".into(), e.to_string().into())],
-                    );
-                    app.session_mgr.current_mut().messages.push_system_note(msg);
-                }
+                app.session_mgr
+                    .current_mut()
+                    .messages
+                    .push_system_note(format!(
+                        "Plugin install: {}@{} (v2 plugin panel pending)",
+                        name, marketplace
+                    ));
+                vec![Effect::Render]
             }
 
             // /plugin marketplace update <name>
             ["marketplace", "update", name] => {
-                if let Err(e) = app.marketplace_update_and_refresh(name) {
-                    let msg = app.services.lc.tr_args(
-                        "command-plugin-update-failed",
-                        &[("error".into(), e.to_string().into())],
-                    );
-                    app.session_mgr.current_mut().messages.push_system_note(msg);
-                }
+                app.session_mgr
+                    .current_mut()
+                    .messages
+                    .push_system_note(format!(
+                        "Marketplace update: {} (v2 plugin panel pending)",
+                        name
+                    ));
+                vec![Effect::Render]
             }
 
             // 未知用法 → 显示帮助
@@ -59,6 +69,7 @@ impl Command for PluginCommand {
                     .current_mut()
                     .messages
                     .push_system_note(help.to_string());
+                vec![Effect::Render]
             }
         }
     }

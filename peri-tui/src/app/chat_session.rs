@@ -22,7 +22,6 @@ pub struct RunningBgAgent {
 pub struct ChatSession {
     pub ui: UiState,
     pub messages: MessageState,
-    pub session_panels: super::panel_manager::PanelManager,
     pub commands: CommandSystem,
     pub metadata: SessionMetadata,
     pub agent: AgentComm,
@@ -58,7 +57,6 @@ impl ChatSession {
         Self {
             ui: UiState::new(super::build_textarea(false), &cwd, diff_enabled),
             messages,
-            session_panels: super::panel_manager::PanelManager::new(),
             commands,
             metadata: SessionMetadata::new(),
             agent: AgentComm::default(),

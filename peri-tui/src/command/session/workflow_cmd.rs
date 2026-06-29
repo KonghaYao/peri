@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use crate::runtime::effect::Effect;
 use crate::{app::App, command::Command, ui::message_view::MessageViewModel};
 
 /// 扫描 `.claude/workflows/` 目录，返回 `(name, path)` 列表（按 name 排序）。
@@ -58,7 +59,7 @@ impl Command for NamedWorkflowCommand {
         format!("Run the '{}' workflow", self.name)
     }
 
-    fn execute(&self, app: &mut App, args: &str) {
+    fn execute(&self, app: &mut App, args: &str) -> Vec<Effect> {
         let script = match std::fs::read_to_string(&self.path) {
             Ok(content) => content,
             Err(e) => {
@@ -73,7 +74,7 @@ impl Command for NamedWorkflowCommand {
                     .view_messages
                     .push(vm);
                 app.render_rebuild();
-                return;
+                return vec![];
             }
         };
 
@@ -97,6 +98,7 @@ impl Command for NamedWorkflowCommand {
         };
 
         app.submit_message(prompt);
+        vec![]
     }
 }
 

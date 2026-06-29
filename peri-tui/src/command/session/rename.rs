@@ -1,3 +1,4 @@
+use crate::runtime::effect::Effect;
 use crate::{app::App, command::Command, ui::message_view::MessageViewModel};
 
 pub struct RenameCommand;
@@ -11,7 +12,7 @@ impl Command for RenameCommand {
         _lc.tr("command-rename-description")
     }
 
-    fn execute(&self, app: &mut App, args: &str) {
+    fn execute(&self, app: &mut App, args: &str) -> Vec<Effect> {
         let lc = &app.services.lc;
         let name = args.trim();
         let thread_id = app.session_mgr.current_mut().current_thread_id.clone();
@@ -24,7 +25,7 @@ impl Command for RenameCommand {
                 .view_messages
                 .push(vm);
             app.render_rebuild();
-            return;
+            return vec![];
         };
 
         if name.is_empty() {
@@ -77,5 +78,6 @@ impl Command for RenameCommand {
             }
             app.render_rebuild();
         }
+        vec![]
     }
 }

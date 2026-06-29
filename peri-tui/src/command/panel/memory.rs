@@ -1,4 +1,8 @@
-use crate::{app::App, command::Command};
+use crate::{
+    app::{App, PanelKind},
+    command::Command,
+    runtime::effect::Effect,
+};
 
 pub struct MemoryCommand;
 
@@ -11,7 +15,7 @@ impl Command for MemoryCommand {
         _lc.tr("command-memory-description")
     }
 
-    fn execute(&self, app: &mut App, _args: &str) {
-        app.open_memory_panel();
+    fn execute(&self, _app: &mut App, _args: &str) -> Vec<Effect> {
+        vec![Effect::OpenPanel(PanelKind::Memory)]
     }
 }

@@ -17,7 +17,7 @@ use tui_textarea::Input;
 
 use peri_widgets::BorderedPanel;
 
-use crate::app::panel_manager::PanelKind;
+use crate::app::panel_types::PanelKind;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
 use crate::panel::PanelState;
@@ -36,14 +36,31 @@ const TAB_CONTEXT: usize = 1;
 pub struct StatusPanel {
     /// Currently active tab (0 = Cost, 1 = Context).
     active_tab: usize,
+    /// Provider name from app services (stored for future render use).
+    #[allow(dead_code)]
+    provider_name: String,
+    /// Model name from app services (stored for future render use).
+    #[allow(dead_code)]
+    model_name: String,
 }
 
 impl StatusPanel {
     /// Construct an empty panel for the registry factory.
-    /// Defaults to the Cost tab.
+    /// Defaults to the Cost tab with empty provider/model names.
     pub fn empty() -> Self {
         Self {
             active_tab: TAB_COST,
+            provider_name: String::new(),
+            model_name: String::new(),
+        }
+    }
+
+    /// Construct a panel from the live `App` state.
+    pub fn from_app(app: &crate::app::App) -> Self {
+        Self {
+            active_tab: TAB_COST,
+            provider_name: app.services.provider_name.clone(),
+            model_name: app.services.model_name.clone(),
         }
     }
 }
@@ -104,20 +121,56 @@ impl PanelState for StatusPanel {
 
         match self.active_tab {
             TAB_COST => {
-                // TODO: Inject token tracker data via PanelReadContext.
-                // Currently renders a placeholder until ServiceRegistrySnapshot
-                // gains session status fields.
-                let lines = vec![Line::from(Span::styled(
+                let mut lines: Vec<Line> = Vec::new();
+
+                // Current model info (from App's ServiceRegistry).
+                let model_label = format!(
+                    "{}: {} / {}",
+                    lc.tr("status-label-current-model"),
+                    self.provider_name,
+                    self.model_name,
+                );
+                lines.push(Line::from(Span::styled(
+                    model_label,
+                    Style::default()
+                        .fg(theme::TEXT)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+
+                // Per-session token stats require token tracker data
+                // injected via PanelReadContext (future P5 enhancement).
+                lines.push(Line::from(Span::styled(
                     lc.tr("status-empty-data"),
                     Style::default().fg(theme::MUTED),
-                ))];
+                )));
                 f.render_widget(Paragraph::new(lines), content_area);
             }
             TAB_CONTEXT => {
-                let lines = vec![Line::from(Span::styled(
+                let mut lines: Vec<Line> = Vec::new();
+
+                // Model context window info.
+                let context_info =
+                    if self.model_name.contains("1m") || self.model_name.contains("1M") {
+                        "1M tokens (extended)"
+                    } else {
+                        "200K tokens (standard)"
+                    };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{}: ", lc.tr("status-label-context")),
+                        Style::default().fg(theme::MUTED),
+                    ),
+                    Span::styled(context_info, Style::default().fg(theme::TEXT)),
+                ]));
+                lines.push(Line::from(""));
+
+                // Per-session context usage requires live session data
+                // injected via PanelReadContext (future P5 enhancement).
+                lines.push(Line::from(Span::styled(
                     lc.tr("status-empty-data"),
                     Style::default().fg(theme::MUTED),
-                ))];
+                )));
                 f.render_widget(Paragraph::new(lines), content_area);
             }
             _ => {}

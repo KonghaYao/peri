@@ -7,8 +7,7 @@ impl App {
         authorization_url: String,
         callback_tx: tokio::sync::oneshot::Sender<OAuthCallbackResult>,
     ) -> (bool, bool, bool) {
-        // 关闭 MCP 面板，避免与 OAuth 面板渲染冲突
-        self.global_panels.close_if(PanelKind::Mcp);
+        // v2: MCP panel managed by state machine, no explicit close needed
         self.global_ui.oauth_prompt = Some(OAuthPrompt::new(
             server_name,
             authorization_url,
@@ -19,15 +18,7 @@ impl App {
 
     pub(crate) fn handle_oauth_completed(&mut self, server_name: String) -> (bool, bool, bool) {
         self.global_ui.oauth_prompt = None;
-        // 刷新 MCP 面板的服务器列表以反映新的连接状态
-        if let Some(ref mut panel) = self.global_panels.get_mut::<McpPanel>() {
-            panel.servers = self
-                .services
-                .mcp_pool
-                .as_ref()
-                .map(|p| p.all_server_infos())
-                .unwrap_or_default();
-        }
+        // v2: MCP panel refresh handled by PanelReadContext
         let vm = MessageViewModel::system(self.services.lc.tr_args(
             "mcp-oauth-completed",
             &[("server".into(), server_name.into())],
@@ -42,15 +33,7 @@ impl App {
         error: String,
     ) -> (bool, bool, bool) {
         self.global_ui.oauth_prompt = None;
-        // 刷新 MCP 面板的服务器列表（可能仍是 Failed 状态但信息已更新）
-        if let Some(ref mut panel) = self.global_panels.get_mut::<McpPanel>() {
-            panel.servers = self
-                .services
-                .mcp_pool
-                .as_ref()
-                .map(|p| p.all_server_infos())
-                .unwrap_or_default();
-        }
+        // v2: MCP panel refresh handled by PanelReadContext
         let vm = MessageViewModel::system(self.services.lc.tr_args(
             "mcp-oauth-failed",
             &[
@@ -68,14 +51,7 @@ impl App {
         action: String,
         success: bool,
     ) -> (bool, bool, bool) {
-        if let Some(ref mut panel) = self.global_panels.get_mut::<McpPanel>() {
-            panel.servers = self
-                .services
-                .mcp_pool
-                .as_ref()
-                .map(|p| p.all_server_infos())
-                .unwrap_or_default();
-        }
+        // v2: MCP panel refresh handled by PanelReadContext
         let msg = match (action.as_str(), success) {
             ("clear_auth", true) => self.services.lc.tr_args(
                 "mcp-clear-auth-ok",

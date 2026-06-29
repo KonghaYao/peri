@@ -371,9 +371,10 @@ fn map_panel_effects(panel_effects: Vec<PanelEffect>) -> Vec<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::panel_manager::PanelKind;
-    use crate::panel::registry::create_panel;
+    use crate::app::panel_types::PanelKind;
+    use crate::panel::registry::PanelStateStub;
     use crate::state_machine::handler::NoopHandler;
+    use crate::state_machine::PanelState;
     use ratatui::crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
 
     /// 所有 14 个 PanelKind，用于全量回归测试。
@@ -419,7 +420,7 @@ mod tests {
     #[test]
     fn test_panel_close_transitions_to_idle() {
         // Betas panel + Esc -> Close effect -> transition to Idle.
-        let panel = create_panel(PanelKind::Betas);
+        let panel = Box::new(PanelStateStub::new(PanelKind::Betas)) as Box<dyn PanelState>;
         let modal = ModalState::Panel(panel);
         let (next, _effects) = handle(
             modal,
@@ -437,7 +438,7 @@ mod tests {
         // 每个 v2 面板都必须响应 Esc 返回 Idle。
         // 这是面板契约的最基础保证 —— 用户不会被困在面板里。
         for kind in ALL_PANEL_KINDS {
-            let panel = create_panel(kind);
+            let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
             let modal = ModalState::Panel(panel);
             let (next, effects) = handle(
                 modal,
@@ -459,7 +460,7 @@ mod tests {
     fn test_all_14_panels_tick_keeps_background_alive() {
         // Tick 在面板打开期间必须保持后台进程活跃（PollAgent/AdvanceSpinner/Render）。
         for kind in ALL_PANEL_KINDS {
-            let panel = create_panel(kind);
+            let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
             let modal = ModalState::Panel(panel);
             let (next, effects) = handle(modal, Event::Tick);
             assert!(
@@ -485,7 +486,7 @@ mod tests {
     fn test_all_14_panels_resize_triggers_render() {
         // Resize 必须触发重绘以重新计算面板布局。
         for kind in ALL_PANEL_KINDS {
-            let panel = create_panel(kind);
+            let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
             let modal = ModalState::Panel(panel);
             let (next, effects) = handle(
                 modal,
@@ -515,7 +516,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         for kind in ALL_PANEL_KINDS {
-            let panel = create_panel(kind);
+            let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
             let modal = ModalState::Panel(panel);
             let (next, effects) = handle(modal, Event::Mouse(mouse_event));
             assert!(
@@ -533,7 +534,7 @@ mod tests {
     fn test_all_14_panels_acp_disconnected_is_noop() {
         // ACP 断开时，面板状态保持不变 —— 断开由 main_loop 上层处理。
         for kind in ALL_PANEL_KINDS {
-            let panel = create_panel(kind);
+            let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
             let modal = ModalState::Panel(panel);
             let (next, effects) = handle(modal, Event::AcpDisconnected);
             assert!(
@@ -551,7 +552,7 @@ mod tests {
     fn test_all_14_panels_shutdown_is_noop() {
         // Shutdown 事件在 Modal 状态下被忽略（由 main_loop 顶层处理）。
         for kind in ALL_PANEL_KINDS {
-            let panel = create_panel(kind);
+            let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
             let modal = ModalState::Panel(panel);
             let (next, effects) = handle(modal, Event::Shutdown);
             assert!(
