@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum InstallScopeDto {
     User,
     Project,
+    Local,
 }
 
 /// Marketplace 来源（对齐 peri_middlewares::plugin::MarketplaceSource）

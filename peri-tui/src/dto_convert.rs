@@ -14,8 +14,8 @@
 //! | `ConfigSource` | `ConfigSourceDto` | ✅ tuple→struct variant + PathBuf→String |
 //! | `ServerInfo` | `ServerInfoDto` | ✅ 复合转换（含上述所有 DTO） |
 //! | `PermissionMode` | `PermissionModeDto` | ❌ 变体完全不同 |
-//! | `InstallScope` | `InstallScopeDto` | ❌ DTO 缺少 Local 变体 |
-//! | `MarketplaceSource` | `MarketplaceSourceDto` | ❌ 变体完全不同 |
+//! | `InstallScope` | `InstallScopeDto` | ✅ DTO 已同步 Local 变体 |
+//! | `MarketplaceSource` | `MarketplaceSourceDto` | ❌ DTO 与运行时完全不同（Git/Local/Registry vs GitHub/Git/Url/File/Directory/Npm） |
 //! | `RegisteredHook` | `RegisteredHookDto` | ❌ 结构完全不同 |
 //! | `HookEvent` / `HookType` | DTO 对应 | ❌ 变体子集 |
 
@@ -23,6 +23,7 @@ use peri_acp_types::mcp_types::{
     ClientStatusDto, ConfigSourceDto, McpInitStatusDto, OAuthCallbackResultDto, OAuthStatusDto,
     ServerInfoDto,
 };
+use peri_acp_types::plugin_types::InstallScopeDto;
 
 // ── MCP 类型（1:1 兼容）──────────────────────────────────────────────
 
@@ -112,6 +113,16 @@ pub fn bridge_oauth_callback(
         }
     });
     dto_tx
+}
+
+// ── Plugin 类型 ─────────────────────────────────────────────────────
+
+pub fn install_scope_dto(s: peri_middlewares::plugin::InstallScope) -> InstallScopeDto {
+    match s {
+        peri_middlewares::plugin::InstallScope::User => InstallScopeDto::User,
+        peri_middlewares::plugin::InstallScope::Project => InstallScopeDto::Project,
+        peri_middlewares::plugin::InstallScope::Local => InstallScopeDto::Local,
+    }
 }
 
 #[cfg(test)]
@@ -220,5 +231,21 @@ mod tests {
         assert!(dto.source.is_none());
         assert_eq!(dto.url, Some("http://localhost:8080".into()));
         assert_eq!(dto.plugin_source, Some("test@marketplace".into()));
+    }
+
+    #[test]
+    fn test_install_scope_conversion() {
+        assert_eq!(
+            install_scope_dto(peri_middlewares::plugin::InstallScope::User),
+            InstallScopeDto::User
+        );
+        assert_eq!(
+            install_scope_dto(peri_middlewares::plugin::InstallScope::Project),
+            InstallScopeDto::Project
+        );
+        assert_eq!(
+            install_scope_dto(peri_middlewares::plugin::InstallScope::Local),
+            InstallScopeDto::Local
+        );
     }
 }
