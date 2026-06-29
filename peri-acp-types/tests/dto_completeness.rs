@@ -49,7 +49,8 @@ fn test_mcp_dto_set() {
         source: Some(mcp_types::ConfigSourceDto::Project {
             path: "/tmp".into(),
         }),
-        server_url: None,
+        url: None,
+        plugin_source: None,
     };
     let _oauth = mcp_types::OAuthStatusDto::Authorized;
     let _init = mcp_types::McpInitStatusDto::Ready { total: 3 };

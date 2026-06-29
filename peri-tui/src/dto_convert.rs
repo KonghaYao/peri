@@ -5,24 +5,24 @@
 //!
 //! ## 当前兼容性
 //!
-//! 仅 MCP 的 ClientStatus / OAuthStatus / McpInitStatus 是 1:1 对应的。
-//! 其他类型的 DTO 与运行时类型已有差异（变体/字段不同），
-//! 需先同步 DTO 定义后才能添加转换函数。
-//!
 //! | 运行时类型 | DTO 对应 | 状态 |
 //! |---|---|---|
 //! | `ClientStatus` | `ClientStatusDto` | ✅ 1:1（tuple→struct variant 差异已处理） |
 //! | `OAuthStatus` | `OAuthStatusDto` | ✅ 1:1 |
 //! | `McpInitStatus` | `McpInitStatusDto` | ✅ 1:1 |
+//! | `OAuthCallbackResult` | `OAuthCallbackResultDto` | ✅ 1:1 |
+//! | `ConfigSource` | `ConfigSourceDto` | ✅ tuple→struct variant + PathBuf→String |
+//! | `ServerInfo` | `ServerInfoDto` | ✅ 复合转换（含上述所有 DTO） |
 //! | `PermissionMode` | `PermissionModeDto` | ❌ 变体完全不同 |
 //! | `InstallScope` | `InstallScopeDto` | ❌ DTO 缺少 Local 变体 |
-//! | `ConfigSource` | `ConfigSourceDto` | ❌ tuple→struct variant + PathBuf→String |
-//! | `ServerInfo` | `ServerInfoDto` | ❌ 字段重命名 + 缺失 |
 //! | `MarketplaceSource` | `MarketplaceSourceDto` | ❌ 变体完全不同 |
 //! | `RegisteredHook` | `RegisteredHookDto` | ❌ 结构完全不同 |
 //! | `HookEvent` / `HookType` | DTO 对应 | ❌ 变体子集 |
 
-use peri_acp_types::mcp_types::{ClientStatusDto, McpInitStatusDto, OAuthStatusDto};
+use peri_acp_types::mcp_types::{
+    ClientStatusDto, ConfigSourceDto, McpInitStatusDto, OAuthCallbackResultDto, OAuthStatusDto,
+    ServerInfoDto,
+};
 
 // ── MCP 类型（1:1 兼容）──────────────────────────────────────────────
 
@@ -54,6 +54,41 @@ pub fn mcp_init_status_dto(s: peri_middlewares::mcp::McpInitStatus) -> McpInitSt
         }
         peri_middlewares::mcp::McpInitStatus::Ready { total } => McpInitStatusDto::Ready { total },
         peri_middlewares::mcp::McpInitStatus::Failed(e) => McpInitStatusDto::Failed(e),
+    }
+}
+
+pub fn oauth_callback_result_dto(
+    r: peri_middlewares::mcp::OAuthCallbackResult,
+) -> OAuthCallbackResultDto {
+    OAuthCallbackResultDto {
+        code: r.code,
+        state: r.state,
+    }
+}
+
+pub fn config_source_dto(s: peri_middlewares::mcp::ConfigSource) -> ConfigSourceDto {
+    match s {
+        peri_middlewares::mcp::ConfigSource::Project(p) => ConfigSourceDto::Project {
+            path: p.to_string_lossy().into_owned(),
+        },
+        peri_middlewares::mcp::ConfigSource::Global(p) => ConfigSourceDto::Global {
+            path: p.to_string_lossy().into_owned(),
+        },
+        peri_middlewares::mcp::ConfigSource::Plugin => ConfigSourceDto::Plugin,
+    }
+}
+
+pub fn server_info_dto(s: peri_middlewares::mcp::ServerInfo) -> ServerInfoDto {
+    ServerInfoDto {
+        name: s.name,
+        transport_type: s.transport_type,
+        status: client_status_dto(s.status),
+        tool_count: s.tool_count,
+        resource_count: s.resource_count,
+        oauth_status: oauth_status_dto(s.oauth_status),
+        source: s.source.map(config_source_dto),
+        url: s.url,
+        plugin_source: s.plugin_source,
     }
 }
 
@@ -100,5 +135,68 @@ mod tests {
                 total: 5
             }
         );
+    }
+
+    #[test]
+    fn test_oauth_callback_result_conversion() {
+        let dto = oauth_callback_result_dto(peri_middlewares::mcp::OAuthCallbackResult {
+            code: "abc".into(),
+            state: "xyz".into(),
+        });
+        assert_eq!(dto.code, "abc");
+        assert_eq!(dto.state, "xyz");
+    }
+
+    #[test]
+    fn test_config_source_all_variants() {
+        use std::path::PathBuf;
+        // Project
+        let dto = config_source_dto(peri_middlewares::mcp::ConfigSource::Project(PathBuf::from(
+            "/tmp/.mcp.json",
+        )));
+        assert_eq!(
+            dto,
+            ConfigSourceDto::Project {
+                path: "/tmp/.mcp.json".into()
+            }
+        );
+        // Global
+        let dto = config_source_dto(peri_middlewares::mcp::ConfigSource::Global(PathBuf::from(
+            "/home/user/settings.json",
+        )));
+        assert_eq!(
+            dto,
+            ConfigSourceDto::Global {
+                path: "/home/user/settings.json".into()
+            }
+        );
+        // Plugin
+        let dto = config_source_dto(peri_middlewares::mcp::ConfigSource::Plugin);
+        assert_eq!(dto, ConfigSourceDto::Plugin);
+    }
+
+    #[test]
+    fn test_server_info_full_conversion() {
+        let info = peri_middlewares::mcp::ServerInfo {
+            name: "test-server".into(),
+            transport_type: "stdio".into(),
+            status: peri_middlewares::mcp::ClientStatus::Connected,
+            tool_count: 5,
+            resource_count: 3,
+            oauth_status: peri_middlewares::mcp::OAuthStatus::Authorized,
+            source: None,
+            url: Some("http://localhost:8080".into()),
+            plugin_source: Some("test@marketplace".into()),
+        };
+        let dto = server_info_dto(info);
+        assert_eq!(dto.name, "test-server");
+        assert_eq!(dto.transport_type, "stdio");
+        assert_eq!(dto.status, ClientStatusDto::Connected);
+        assert_eq!(dto.tool_count, 5);
+        assert_eq!(dto.resource_count, 3);
+        assert_eq!(dto.oauth_status, OAuthStatusDto::Authorized);
+        assert!(dto.source.is_none());
+        assert_eq!(dto.url, Some("http://localhost:8080".into()));
+        assert_eq!(dto.plugin_source, Some("test@marketplace".into()));
     }
 }

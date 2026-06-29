@@ -45,7 +45,9 @@ pub struct ServerInfoDto {
     pub resource_count: usize,
     pub oauth_status: OAuthStatusDto,
     pub source: Option<ConfigSourceDto>,
-    pub server_url: Option<String>,
+    pub url: Option<String>,
+    /// 插件来源标识（`"name@marketplace"`），非插件 server 为 None
+    pub plugin_source: Option<String>,
 }
 
 /// MCP 初始化进度（对齐 peri_middlewares::mcp::McpInitStatus）
