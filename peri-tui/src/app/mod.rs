@@ -391,10 +391,12 @@ impl App {
                     callback_tx,
                 } = ev
                 {
+                    // P4b: 桥接 runtime channel → DTO channel
+                    let dto_tx = crate::dto_convert::bridge_oauth_callback(callback_tx);
                     let _ = tx.try_send(events::AgentEvent::OAuthAuthorizationNeeded {
                         server_name,
                         authorization_url,
-                        callback_tx,
+                        callback_tx: dto_tx,
                     });
                 }
             });

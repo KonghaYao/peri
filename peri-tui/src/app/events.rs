@@ -1,6 +1,8 @@
 use peri_agent::interaction::{InteractionContext, InteractionResponse};
-pub use peri_middlewares::mcp::OAuthCallbackResult;
 use tokio::sync::oneshot;
+
+// P4b: re-export DTO 替代 peri_middlewares::mcp::OAuthCallbackResult
+pub use peri_acp_types::mcp_types::OAuthCallbackResultDto as OAuthCallbackResult;
 
 /// TUI 与后台 Agent 任务之间的通信事件（通过 mpsc channel 传递）
 pub enum AgentEvent {

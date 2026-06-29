@@ -354,10 +354,11 @@ impl McpPanel {
                         callback_tx,
                     } = ev
                     {
+                        let dto_tx = crate::dto_convert::bridge_oauth_callback(callback_tx);
                         let _ = tx2.try_send(super::AgentEvent::OAuthAuthorizationNeeded {
                             server_name,
                             authorization_url,
-                            callback_tx,
+                            callback_tx: dto_tx,
                         });
                     }
                 });
@@ -481,10 +482,11 @@ impl McpPanel {
                                 callback_tx,
                             } = ev
                             {
+                                let dto_tx = crate::dto_convert::bridge_oauth_callback(callback_tx);
                                 let _ = tx.try_send(super::AgentEvent::OAuthAuthorizationNeeded {
                                     server_name,
                                     authorization_url,
-                                    callback_tx,
+                                    callback_tx: dto_tx,
                                 });
                             }
                         }),
@@ -533,10 +535,11 @@ impl McpPanel {
                             callback_tx,
                         } = ev
                         {
+                            let dto_tx = crate::dto_convert::bridge_oauth_callback(callback_tx);
                             let _ = tx2.try_send(super::AgentEvent::OAuthAuthorizationNeeded {
                                 server_name,
                                 authorization_url,
-                                callback_tx,
+                                callback_tx: dto_tx,
                             });
                         }
                     });

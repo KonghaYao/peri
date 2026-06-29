@@ -92,6 +92,28 @@ pub fn server_info_dto(s: peri_middlewares::mcp::ServerInfo) -> ServerInfoDto {
     }
 }
 
+// ── OAuth 回调桥接 ──────────────────────────────────────────────────
+
+/// 桥接 OAuth 回调 channel：runtime `Sender<OAuthCallbackResult>` →
+/// DTO `Sender<OAuthCallbackResultDto>`。
+///
+/// spawn 一个后台 task，在 DTO 结果到达时转换回 runtime 类型并转发到原 channel。
+/// OAuth 流程是低频事件，per-call spawn 开销可忽略。
+pub fn bridge_oauth_callback(
+    runtime_tx: tokio::sync::oneshot::Sender<peri_middlewares::mcp::OAuthCallbackResult>,
+) -> tokio::sync::oneshot::Sender<OAuthCallbackResultDto> {
+    let (dto_tx, dto_rx) = tokio::sync::oneshot::channel::<OAuthCallbackResultDto>();
+    tokio::spawn(async move {
+        if let Ok(dto) = dto_rx.await {
+            let _ = runtime_tx.send(peri_middlewares::mcp::OAuthCallbackResult {
+                code: dto.code,
+                state: dto.state,
+            });
+        }
+    });
+    dto_tx
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
