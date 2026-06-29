@@ -28,10 +28,15 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
             (State::Idle(state), vec![Effect::Render])
         }
 
-        // -- Tick: advance spinner + poll agent (for async event loop). -----
+        // -- Tick: advance spinner + poll agent + poll workflow + render. --
         Event::Tick => (
             State::Idle(state),
-            vec![Effect::AdvanceSpinner, Effect::PollAgent, Effect::Render],
+            vec![
+                Effect::AdvanceSpinner,
+                Effect::PollAgent,
+                Effect::PollWorkflow,
+                Effect::Render,
+            ],
         ),
 
         // -- Mouse / Resize --------------------------------------------------
@@ -156,9 +161,22 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
             }
         }
 
+        // -- BackTab: cycle permission mode ---------------------------------
+        KeyCode::BackTab => (
+            State::Idle(state),
+            vec![Effect::CyclePermissionMode, Effect::Render],
+        ),
+
         // -- Printable character --------------------------------------------
         // Ctrl+<char> shortcuts are intercepted BEFORE the general Char arm.
         KeyCode::Char(c) if key.modifiers.intersects(KeyModifiers::CONTROL) => {
+            // Ctrl+Shift+T: cycle provider (check SHIFT before per-char match).
+            if c == 't' && key.modifiers.intersects(KeyModifiers::SHIFT) {
+                return (
+                    State::Idle(state),
+                    vec![Effect::CycleProvider, Effect::Render],
+                );
+            }
             match c {
                 'c' => {
                     // Ctrl+C: quit. If there's a selection, do nothing (copy
@@ -185,6 +203,18 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
                     state.input.delete_word();
                     state.input.prediction = None;
                     (State::Idle(state), vec![Effect::Render])
+                }
+                't' => {
+                    // Ctrl+T: cycle model alias (without Shift, handled above).
+                    (State::Idle(state), vec![Effect::CycleModel, Effect::Render])
+                }
+                'b' => {
+                    // Ctrl+B: focus background agent bar.
+                    (State::Idle(state), vec![Effect::FocusBgBar, Effect::Render])
+                }
+                'o' => {
+                    // Ctrl+O: toggle inline diff.
+                    (State::Idle(state), vec![Effect::ToggleDiff, Effect::Render])
                 }
                 // Other Ctrl+<char> combos pass through (P3 will dispatch more).
                 _ => (State::Idle(state), Vec::new()),
@@ -333,11 +363,12 @@ mod tests {
     }
 
     #[test]
-    fn test_tick_produces_spinner_and_poll_in_idle() {
+    fn test_tick_produces_spinner_poll_and_workflow_in_idle() {
         let state = make_state();
         let (_next, effects) = handle(state, Event::Tick);
         assert!(effects.iter().any(|e| matches!(e, Effect::AdvanceSpinner)));
         assert!(effects.iter().any(|e| matches!(e, Effect::PollAgent)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::PollWorkflow)));
         assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
@@ -454,17 +485,77 @@ mod tests {
 
     #[test]
     fn test_ctrl_char_is_not_buffer_input() {
+        // Use Ctrl+P (unhandled) — buffer stays empty.
         let state = make_state();
         let (next, _effects) = handle(
             state,
-            Event::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
         );
         match next {
             State::Idle(idle) => {
-                // Buffer unchanged.
                 assert!(idle.input.text().is_empty());
             }
             _ => panic!("expected Idle"),
         }
+    }
+
+    #[test]
+    fn test_backtab_cycles_permission_mode() {
+        let state = make_state();
+        let (_next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)),
+        );
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::CyclePermissionMode)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
+    }
+
+    #[test]
+    fn test_ctrl_t_cycles_model() {
+        let state = make_state();
+        let (_next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+        );
+        assert!(effects.iter().any(|e| matches!(e, Effect::CycleModel)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
+    }
+
+    #[test]
+    fn test_ctrl_shift_t_cycles_provider() {
+        let state = make_state();
+        let (_next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(
+                KeyCode::Char('t'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+        );
+        assert!(effects.iter().any(|e| matches!(e, Effect::CycleProvider)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
+    }
+
+    #[test]
+    fn test_ctrl_b_focuses_bg_bar() {
+        let state = make_state();
+        let (_next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+        );
+        assert!(effects.iter().any(|e| matches!(e, Effect::FocusBgBar)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
+    }
+
+    #[test]
+    fn test_ctrl_o_toggles_diff() {
+        let state = make_state();
+        let (_next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+        );
+        assert!(effects.iter().any(|e| matches!(e, Effect::ToggleDiff)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 }

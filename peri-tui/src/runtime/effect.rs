@@ -39,6 +39,12 @@ pub enum Effect {
     // ── Clipboard ────────────────────────────────────────────────────────
     CopyToClipboard(String),
 
+    // ── Agent control ────────────────────────────────────────────────────
+    /// Interrupt the currently running agent.
+    InterruptAgent,
+    /// Clear pending messages buffer (used when Esc during loading).
+    ClearPendingMessages,
+
     // ── Panel / interaction side-effects ─────────────────────────────────
     /// Show a transient notification.
     ShowNotification(String),
@@ -49,6 +55,24 @@ pub enum Effect {
     },
     /// Switch to another session.
     SwitchSession(String),
+
+    // ── App-level state mutations ────────────────────────────────────────
+    /// Cycle to the next model alias (opus → sonnet → haiku → opus).
+    CycleModel,
+    /// Cycle to the next provider.
+    CycleProvider,
+    /// Cycle permission mode (default → acceptEdits → bypassPermissions → ...).
+    CyclePermissionMode,
+    /// Focus the background agent bar.
+    FocusBgBar,
+    /// Toggle inline diff rendering.
+    ToggleDiff,
+    /// Poll workflow runs for the workflow panel.
+    PollWorkflow,
+    /// Clear text selection (on terminal resize).
+    ClearTextSelection,
+    /// Open the rewind prompt selector.
+    OpenRewindPrompt,
 
     // ── System notes ─────────────────────────────────────────────────────
     /// Push a system note (model switch, compact, etc.) into the view.

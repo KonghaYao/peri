@@ -97,6 +97,17 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 Effect::AskUserScroll { delta } => {
                     app.ask_user_scroll(delta as i16);
                 }
+                // ── Agent control ─────────────────────────────────
+                Effect::InterruptAgent => {
+                    app.interrupt();
+                }
+                Effect::ClearPendingMessages => {
+                    app.session_mgr
+                        .current_mut()
+                        .messages
+                        .pending_messages
+                        .clear();
+                }
                 // ── App-level effects (P3 Integration) ─────────────
                 Effect::ShowNotification(text) => {
                     tracing::info!(notification = %text, "ShowNotification");
@@ -108,6 +119,109 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 }
                 Effect::SwitchSession(session_id) => {
                     tracing::info!(session_id = %session_id, "SwitchSession");
+                    needs_render = true;
+                }
+                // ── App state mutations ────────────────────────────
+                Effect::CycleModel => {
+                    let cfg_arc = app.services.peri_config.clone();
+                    let mut cfg = cfg_arc.write();
+                    let aliases = ["opus", "sonnet", "haiku"];
+                    let current = cfg.config.active_alias.as_str();
+                    let idx = aliases.iter().position(|&a| a == current).unwrap_or(0);
+                    let next = aliases[(idx + 1) % aliases.len()];
+                    cfg.config.active_alias = next.to_string();
+                    if let Err(e) = crate::app::App::save_config(
+                        &cfg,
+                        app.services.config_path_override.as_deref(),
+                    ) {
+                        use crate::app::MessageViewModel;
+                        app.session_mgr.current_mut().messages.view_messages.push(
+                            MessageViewModel::system(app.services.lc.tr_args(
+                                "config-save-failed",
+                                &[("error".into(), e.to_string().into())],
+                            )),
+                        );
+                    }
+                    if let Some(p) = crate::app::agent::LlmProvider::from_config(&cfg) {
+                        app.services.provider_name = p.display_name().to_string();
+                        app.services.model_name = p.model_name().to_string();
+                    }
+                    if let Some(ref acp_client) = app.acp_client {
+                        let acp = acp_client.clone();
+                        tokio::spawn(async move {
+                            let _ = acp.set_config_option("model", next).await;
+                        });
+                    }
+                    app.global_ui.model_highlight_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
+                    needs_render = true;
+                }
+                Effect::CycleProvider => {
+                    let cfg_arc = app.services.peri_config.clone();
+                    let mut cfg = cfg_arc.write();
+                    let providers_len = cfg.config.providers.len();
+                    if providers_len > 1 {
+                        let current_id = cfg.config.active_provider_id.as_str();
+                        let next_id = {
+                            let providers = &cfg.config.providers;
+                            let idx = providers
+                                .iter()
+                                .position(|p| p.id == current_id)
+                                .unwrap_or(0);
+                            let next_idx = (idx + 1) % providers.len();
+                            providers[next_idx].id.clone()
+                        };
+                        cfg.config.active_provider_id = next_id;
+                        if let Some(p) = crate::app::agent::LlmProvider::from_config(&cfg) {
+                            app.services.provider_name = p.display_name().to_string();
+                            app.services.model_name = p.model_name().to_string();
+                        }
+                        if let Err(e) = crate::app::App::save_config(
+                            &cfg,
+                            app.services.config_path_override.as_deref(),
+                        ) {
+                            use crate::app::MessageViewModel;
+                            app.session_mgr.current_mut().messages.view_messages.push(
+                                MessageViewModel::system(app.services.lc.tr_args(
+                                    "config-save-failed",
+                                    &[("error".into(), e.to_string().into())],
+                                )),
+                            );
+                        }
+                        app.global_ui.provider_highlight_until = Some(
+                            std::time::Instant::now() + std::time::Duration::from_millis(2000),
+                        );
+                    }
+                    needs_render = true;
+                }
+                Effect::CyclePermissionMode => {
+                    app.services.permission_mode.cycle();
+                    app.global_ui.mode_highlight_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
+                    needs_render = true;
+                }
+                Effect::FocusBgBar => {
+                    if !app.session_mgr.current_mut().background_agents.is_empty() {
+                        app.session_mgr.current_mut().ui.bg_bar_cursor = Some(0);
+                    }
+                    needs_render = true;
+                }
+                Effect::ToggleDiff => {
+                    if app.global_ui.oauth_prompt.is_none() {
+                        app.toggle_diff();
+                    }
+                    needs_render = true;
+                }
+                Effect::PollWorkflow => {
+                    if app.workflow_polling_active {
+                        app.poll_workflow_runs();
+                    }
+                }
+                Effect::ClearTextSelection => {
+                    app.session_mgr.current_mut().ui.text_selection.clear();
+                }
+                Effect::OpenRewindPrompt => {
+                    app.open_rewind_prompt();
                     needs_render = true;
                 }
                 // ── System / Thread / Memory ───────────────────────

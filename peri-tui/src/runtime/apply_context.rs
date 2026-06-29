@@ -120,7 +120,17 @@ impl<'a> ApplyContext<'a> {
             | Effect::AskUserScroll { .. }
             | Effect::PushSystemNote(_)
             | Effect::OpenThreadWithFeedback { .. }
-            | Effect::MemoryPanelOpenEditor => ApplyOutcome::Ok,
+            | Effect::MemoryPanelOpenEditor
+            | Effect::CycleModel
+            | Effect::CycleProvider
+            | Effect::CyclePermissionMode
+            | Effect::FocusBgBar
+            | Effect::ToggleDiff
+            | Effect::PollWorkflow
+            | Effect::InterruptAgent
+            | Effect::ClearPendingMessages
+            | Effect::ClearTextSelection
+            | Effect::OpenRewindPrompt => ApplyOutcome::Ok,
         }
     }
 
