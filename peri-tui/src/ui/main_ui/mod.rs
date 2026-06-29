@@ -28,7 +28,7 @@ use crate::app::textarea_cursor_pos;
 
 use crate::{app::App, ui::theme};
 
-pub fn render(f: &mut Frame, app: &mut App) {
+pub fn render(f: &mut Frame, app: &mut App, v2_panel_height: Option<u16>) {
     // Setup 向导：全屏覆盖，优先于所有正常界面
     if app.global_ui.setup_wizard.is_some() {
         popups::setup_wizard::render_setup_wizard(f, app);
@@ -36,11 +36,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
 
     let area = f.area();
-    render_session_column(f, app, area);
+    render_session_column(f, app, area, v2_panel_height);
 }
 
 /// 渲染单个 session 列（含垂直布局拆分）
-fn render_session_column(f: &mut Frame, app: &mut App, area: Rect) {
+fn render_session_column(f: &mut Frame, app: &mut App, area: Rect, v2_panel_height: Option<u16>) {
     // 动态输入框高度
     let line_count = app.session_mgr.current_mut().ui.textarea.lines().len() as u16;
     let input_height = (line_count + 2).min(area.height * 2 / 5).max(3);
@@ -67,7 +67,7 @@ fn render_session_column(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     // 底部展开区高度
-    let panel_height = active_panel_height(app, area.height, area.width);
+    let panel_height = active_panel_height(app, area.height, area.width, v2_panel_height);
 
     // Sticky header 高度
     let sticky_header_height: u16 = app
@@ -151,6 +151,11 @@ fn render_session_column(f: &mut Frame, app: &mut App, area: Rect) {
                 state.render(f, app, panel_area);
                 app.global_panels.put_active(state);
             }
+        }
+        // v2 Modal: 存储 panel_area 供 draw_now 中的 overlay 渲染使用。
+        // Legacy 渲染器会在内部设 inner rect，v2 面板使用完整的布局区域。
+        if v2_panel_height.is_some() {
+            app.session_mgr.current_mut().ui.panel_area = Some(panel_area);
         }
     }
 
@@ -369,7 +374,17 @@ fn render_session_column(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// 计算底部展开区所需高度（无激活面板时返回 0）
-fn active_panel_height(app: &App, screen_height: u16, screen_width: u16) -> u16 {
+fn active_panel_height(
+    app: &App,
+    screen_height: u16,
+    screen_width: u16,
+    v2_panel_height: Option<u16>,
+) -> u16 {
+    // v2 Modal 面板：用 PanelState::desired_height 的结果，受 60% 上限约束。
+    if let Some(h) = v2_panel_height {
+        return h.min(screen_height * 3 / 5).max(1);
+    }
+
     // plugin 面板可以占 70%，AskUser 弹窗允许 75%（选项多/文字长需要更多空间），其他最多 60%
     let is_plugin_panel = app.global_panels.is_active(crate::app::PanelKind::Plugin);
     let has_ask_user = matches!(

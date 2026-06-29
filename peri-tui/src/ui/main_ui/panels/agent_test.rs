@@ -9,7 +9,7 @@
             .open(crate::app::panel_manager::PanelState::Agent(panel));
         handle
             .terminal
-            .draw(|f| crate::ui::main_ui::render(f, &mut app))
+            .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
             .unwrap();
         (app, handle)
     }

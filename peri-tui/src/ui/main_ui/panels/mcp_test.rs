@@ -21,7 +21,7 @@
             .open(crate::app::panel_manager::PanelState::Mcp(Box::new(panel)));
         handle
             .terminal
-            .draw(|f| crate::ui::main_ui::render(f, &mut app))
+            .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
             .unwrap();
         handle
     }
@@ -70,7 +70,7 @@
 
         handle
             .terminal
-            .draw(|f| crate::ui::main_ui::render(f, &mut app))
+            .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
             .unwrap();
         let snap = handle.snapshot().join("\n");
         assert!(snap.contains("test-srv"), "详情页应显示服务器名");
@@ -127,7 +127,7 @@
         // Render the detail view
         handle
             .terminal
-            .draw(|f| crate::ui::main_ui::render(f, &mut app))
+            .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
             .unwrap();
         let snap = handle.snapshot().join("\n");
         assert!(
@@ -172,7 +172,7 @@
         // 渲染并验证显示的是 server-b 的数据
         handle
             .terminal
-            .draw(|f| crate::ui::main_ui::render(f, &mut app))
+            .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
             .unwrap();
         let snap = handle.snapshot().join("\n");
         assert!(snap.contains("server-b"), "详情页标题应显示 server-b");
@@ -223,7 +223,7 @@
         // 渲染并验证
         handle
             .terminal
-            .draw(|f| crate::ui::main_ui::render(f, &mut app))
+            .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
             .unwrap();
         let snap = handle.snapshot().join("\n");
         assert!(snap.contains("new-server"), "详情页标题应显示 new-server");

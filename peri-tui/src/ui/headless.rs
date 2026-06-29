@@ -86,10 +86,10 @@ impl HeadlessHandle {
 
     /// 等待渲染 + 绘制到 TestBackend（便捷组合）
     ///
-    /// 等效于 `handle.wait_for_render().await; handle.terminal.draw(|f| main_ui::render(f, &mut app))`。
+    /// 等效于 `handle.wait_for_render().await; handle.terminal.draw(|f| main_ui::render(f, &mut app, None))`。
     pub async fn render(&mut self, app: &mut App) -> Result<()> {
         self.wait_for_render().await;
-        self.terminal.draw(|f| main_ui::render(f, app))?;
+        self.terminal.draw(|f| main_ui::render(f, app, None))?;
         Ok(())
     }
 

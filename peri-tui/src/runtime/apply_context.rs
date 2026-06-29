@@ -213,9 +213,9 @@ impl<'a> ApplyContext<'a> {
 
     /// Unconditionally perform a terminal draw and reset the render timer.
     ///
-    /// If `state` is [`State::Modal(ModalState::Panel(...))`], renders the v2
-    /// panel on top of the standard UI (legacy panel area is empty since the
-    /// legacy PanelManager has no active panel).
+    /// If `state` is [`State::Modal(ModalState::Panel(...))`], pre-computes the
+    /// v2 panel height so the legacy layout reserves space, then renders the v2
+    /// panel overlay in that reserved area.
     pub fn draw_now(
         &mut self,
         app: &mut App,
@@ -224,9 +224,16 @@ impl<'a> ApplyContext<'a> {
     ) {
         use crate::state_machine::{ModalState, State};
         if let Err(e) = self.terminal.draw(|f| {
-            ui::main_ui::render(f, app);
-            // v2 Modal panel overlay: render when state machine has an active panel.
+            // Pre-compute v2 panel height so legacy layout reserves space.
+            let v2_panel_height = if let State::Modal(ModalState::Panel(panel)) = &*state {
+                Some(panel.desired_height(f.area().height, f.area().width))
+            } else {
+                None
+            };
+            ui::main_ui::render(f, app, v2_panel_height);
+            // v2 Modal panel overlay: render in the area reserved by the layout.
             if let State::Modal(ModalState::Panel(panel)) = state {
+                // panel_area was set by render_session_column for v2 panels.
                 let area = app
                     .session_mgr
                     .current()

@@ -38,8 +38,32 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
             }
         }
 
-        // -- Mouse / Resize: re-render so the popup lays out correctly -------
-        Event::Mouse(_) | Event::Resize { .. } => (State::Modal(state), vec![Effect::Render]),
+        // -- Mouse: dispatch scroll/click/hover to the panel (TLS context) ----
+        Event::Mouse(mouse) => {
+            let (panel_effects, should_close) = dispatch_mouse_tls(&mut state, mouse);
+            let mut effects = map_panel_effects(panel_effects);
+            effects.push(Effect::Render);
+            if should_close {
+                transition_to_idle_with_effects(effects)
+            } else {
+                (State::Modal(state), effects)
+            }
+        }
+
+        // -- Paste: dispatch text to the panel (TLS context) ------------------
+        Event::Paste(text) => {
+            let (panel_effects, should_close) = dispatch_paste_tls(&mut state, &text);
+            let mut effects = map_panel_effects(panel_effects);
+            effects.push(Effect::Render);
+            if should_close {
+                transition_to_idle_with_effects(effects)
+            } else {
+                (State::Modal(state), effects)
+            }
+        }
+
+        // -- Resize: re-render so the popup lays out correctly ---------------
+        Event::Resize { .. } => (State::Modal(state), vec![Effect::Render]),
 
         // -- Tick: keep background processes alive while Modal is open --------
         // PollAgent keeps ACP event consumption flowing; AdvanceSpinner keeps
@@ -55,8 +79,7 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
         ),
 
         // -- Everything else: keep Modal, no effect --------------------------
-        Event::Paste(_)
-        | Event::AcpEvent(_)
+        Event::AcpEvent(_)
         | Event::AcpDisconnected
         | Event::SessionLoaded { .. }
         | Event::Shutdown => (State::Modal(state), Vec::new()),
@@ -101,12 +124,6 @@ fn transition_to_idle_with_effects(effects: Vec<Effect>) -> (State, Vec<Effect>)
 /// a real [`PanelReadContext`] constructed from App data. This function exists
 /// only for test compatibility (tests don't have access to App).
 fn dispatch_key(state: &mut ModalState, key: KeyEvent) -> (Vec<PanelEffect>, bool) {
-    thread_local! {
-        static STUB_SNAPSHOT: ServiceRegistrySnapshot = ServiceRegistrySnapshot::new();
-        static STUB_VMS: Vec<peri_acp_types::view_model::ViewModel> = const { Vec::new() };
-        static STUB_CACHE: HashMap<String, serde_json::Value> = HashMap::new();
-        static STUB_LC: crate::i18n::LcRegistry = crate::i18n::LcRegistry::default();
-    }
     STUB_SNAPSHOT.with(|snapshot| {
         STUB_VMS.with(|vms| {
             STUB_CACHE.with(|cache| {
@@ -126,10 +143,104 @@ fn dispatch_key(state: &mut ModalState, key: KeyEvent) -> (Vec<PanelEffect>, boo
     })
 }
 
+/// Dispatch a mouse event using TLS stubs (test-only path).
+fn dispatch_mouse_tls(
+    state: &mut ModalState,
+    mouse: ratatui::crossterm::event::MouseEvent,
+) -> (Vec<PanelEffect>, bool) {
+    STUB_SNAPSHOT.with(|snapshot| {
+        STUB_VMS.with(|vms| {
+            STUB_CACHE.with(|cache| {
+                STUB_LC.with(|lc| {
+                    let ctx = PanelReadContext {
+                        services: snapshot,
+                        view_models: vms,
+                        scroll_offset: 0,
+                        area: ratatui::layout::Rect::new(0, 0, 0, 0),
+                        lc,
+                        acp_query_cache: cache,
+                    };
+                    dispatch_mouse(state, mouse, &ctx)
+                })
+            })
+        })
+    })
+}
+
+/// Dispatch a paste event using TLS stubs (test-only path).
+fn dispatch_paste_tls(state: &mut ModalState, text: &str) -> (Vec<PanelEffect>, bool) {
+    STUB_SNAPSHOT.with(|snapshot| {
+        STUB_VMS.with(|vms| {
+            STUB_CACHE.with(|cache| {
+                STUB_LC.with(|lc| {
+                    let ctx = PanelReadContext {
+                        services: snapshot,
+                        view_models: vms,
+                        scroll_offset: 0,
+                        area: ratatui::layout::Rect::new(0, 0, 0, 0),
+                        lc,
+                        acp_query_cache: cache,
+                    };
+                    dispatch_paste(state, text, &ctx)
+                })
+            })
+        })
+    })
+}
+
+// TLS stubs shared by the test-only dispatch wrappers.
+thread_local! {
+    static STUB_SNAPSHOT: ServiceRegistrySnapshot = ServiceRegistrySnapshot::new();
+    static STUB_VMS: Vec<peri_acp_types::view_model::ViewModel> = const { Vec::new() };
+    static STUB_CACHE: HashMap<String, serde_json::Value> = HashMap::new();
+    static STUB_LC: crate::i18n::LcRegistry = crate::i18n::LcRegistry::default();
+}
+
 /// Dispatch a single key to the active panel / handler with a real context.
 ///
 /// **Production path** -- `ctx` is constructed by main_loop from `&App` data.
 /// Returns `(panel_effects, should_close)`.
+/// Dispatch a mouse event to the active panel / handler with a real context.
+///
+/// For `ScrollUp`/`ScrollDown`, calls [`PanelState::handle_scroll`] with
+/// ±3 lines (matching the legacy convention). All other mouse events
+/// (`Moved`, `Down`, `Drag`, etc.) are forwarded to [`PanelState::handle_mouse`].
+fn dispatch_mouse(
+    state: &mut ModalState,
+    mouse: ratatui::crossterm::event::MouseEvent,
+    ctx: &PanelReadContext,
+) -> (Vec<PanelEffect>, bool) {
+    use ratatui::crossterm::event::MouseEventKind;
+    match state {
+        ModalState::Panel(panel) => {
+            let effects = match mouse.kind {
+                MouseEventKind::ScrollUp => panel.handle_scroll(-3, ctx),
+                MouseEventKind::ScrollDown => panel.handle_scroll(3, ctx),
+                _ => panel.handle_mouse(mouse, ctx.area, ctx),
+            };
+            let should_close = effects.iter().any(|pe| matches!(pe, PanelEffect::Close));
+            (effects, should_close)
+        }
+        ModalState::Interaction(_) => (Vec::new(), false),
+    }
+}
+
+/// Dispatch a paste event to the active panel / handler with a real context.
+fn dispatch_paste(
+    state: &mut ModalState,
+    text: &str,
+    ctx: &PanelReadContext,
+) -> (Vec<PanelEffect>, bool) {
+    match state {
+        ModalState::Panel(panel) => {
+            let effects = panel.handle_paste(text, ctx);
+            let should_close = effects.iter().any(|pe| matches!(pe, PanelEffect::Close));
+            (effects, should_close)
+        }
+        ModalState::Interaction(_) => (Vec::new(), false),
+    }
+}
+
 fn dispatch_key_with_ctx(
     state: &mut ModalState,
     key: KeyEvent,
@@ -182,8 +293,32 @@ pub fn handle_with_context(
             }
         }
 
-        // -- Mouse / Resize: re-render so the popup lays out correctly -------
-        Event::Mouse(_) | Event::Resize { .. } => (State::Modal(state), vec![Effect::Render]),
+        // -- Mouse: dispatch scroll/click/hover to the panel -----------------
+        Event::Mouse(mouse) => {
+            let (panel_effects, should_close) = dispatch_mouse(&mut state, mouse, ctx);
+            let mut effects = map_panel_effects(panel_effects);
+            effects.push(Effect::Render);
+            if should_close {
+                transition_to_idle_with_effects(effects)
+            } else {
+                (State::Modal(state), effects)
+            }
+        }
+
+        // -- Paste: dispatch text to the panel -------------------------------
+        Event::Paste(text) => {
+            let (panel_effects, should_close) = dispatch_paste(&mut state, &text, ctx);
+            let mut effects = map_panel_effects(panel_effects);
+            effects.push(Effect::Render);
+            if should_close {
+                transition_to_idle_with_effects(effects)
+            } else {
+                (State::Modal(state), effects)
+            }
+        }
+
+        // -- Resize: re-render so the popup lays out correctly ---------------
+        Event::Resize { .. } => (State::Modal(state), vec![Effect::Render]),
 
         // -- Tick: keep background processes alive while Modal is open --------
         Event::Tick => (
@@ -197,8 +332,7 @@ pub fn handle_with_context(
         ),
 
         // -- Everything else: keep Modal, no effect --------------------------
-        Event::Paste(_)
-        | Event::AcpEvent(_)
+        Event::AcpEvent(_)
         | Event::AcpDisconnected
         | Event::SessionLoaded { .. }
         | Event::Shutdown => (State::Modal(state), Vec::new()),
