@@ -9,6 +9,7 @@
 //! in the factory switches from `PanelStateStub` to the real implementation.
 
 pub mod effect;
+pub mod panels;
 pub mod read_context;
 pub mod registry;
 
