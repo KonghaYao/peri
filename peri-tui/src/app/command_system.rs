@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use peri_middlewares::prelude::SkillMetadata;
+use peri_acp_types::skill::SkillMetadataDto;
 
 use crate::command::CommandRegistry;
 
@@ -11,7 +11,7 @@ use crate::command::CommandRegistry;
 pub struct CommandSystem {
     pub command_registry: CommandRegistry,
     pub command_help_list: Vec<(String, String, Vec<String>)>,
-    pub skills: Vec<SkillMetadata>,
+    pub skills: Vec<SkillMetadataDto>,
     /// 从 ACP AvailableCommandsUpdate 学习到的 Agent 命令名集合（不含 `/` 前缀）。
     pub agent_commands: HashSet<String>,
 }
@@ -19,7 +19,7 @@ pub struct CommandSystem {
 impl CommandSystem {
     pub fn new(
         command_registry: CommandRegistry,
-        skills: Vec<SkillMetadata>,
+        skills: Vec<SkillMetadataDto>,
         lc: &crate::i18n::LcRegistry,
     ) -> Self {
         let command_help_list = command_registry.list(lc);
@@ -52,16 +52,17 @@ impl CommandSystem {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
+    use peri_acp_types::skill::SkillSourceDto;
 
-    fn make_metadata(name: &str, desc: &str) -> SkillMetadata {
-        SkillMetadata {
+    fn make_metadata(name: &str, desc: &str) -> SkillMetadataDto {
+        SkillMetadataDto {
             name: name.to_string(),
             description: desc.to_string(),
-            path: PathBuf::from(format!("/fake/{name}/SKILL.md")),
-            ..Default::default()
+            path: format!("/fake/{name}/SKILL.md"),
+            source: SkillSourceDto::User,
+            plugin_name: None,
+            disabled: false,
         }
     }
 

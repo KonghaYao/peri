@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 pub struct SkillMetadataDto {
     pub name: String,
     pub description: String,
+    pub path: String,
     pub source: SkillSourceDto,
+    pub plugin_name: Option<String>,
+    /// TUI 侧额外字段：插件是否禁用（运行时无此字段，默认 false）
+    #[serde(default)]
     pub disabled: bool,
 }
 
@@ -16,7 +20,9 @@ pub struct SkillMetadataDto {
 pub enum SkillSourceDto {
     Builtin,
     User,
+    Global,
     Project,
-    Plugin { plugin_name: String },
+    Plugin,
+    /// AGM 包管理器来源（仅 DTO 侧，运行时暂无对应）
     Agm,
 }

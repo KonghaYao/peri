@@ -233,11 +233,14 @@ impl App {
         );
         // 复用 loader::resolve_skill_roots 作为 single source of truth，
         // 与 new_session() / ACP session/new 保持一致，确保 Builtin skills 被扫描
-        let skills = {
+        let skills: Vec<peri_acp_types::skill::SkillMetadataDto> = {
             let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
             let skill_roots =
                 peri_middlewares::skills::resolve_skill_roots(&cwd, vec![], disable_bundled);
             peri_middlewares::skills::scan_skill_roots(&skill_roots)
+                .into_iter()
+                .map(crate::dto_convert::skill_metadata_dto)
+                .collect()
         };
 
         // 初始化 cron state + spawn tick task
@@ -346,7 +349,11 @@ impl App {
             plugin_skill_roots,
             disable_bundled, // TUI 侧仅用于显示
         );
-        let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
+        let skills: Vec<peri_acp_types::skill::SkillMetadataDto> =
+            peri_middlewares::skills::scan_skill_roots(&skill_roots)
+                .into_iter()
+                .map(crate::dto_convert::skill_metadata_dto)
+                .collect();
         // 追加插件 commands
         if let Some(pd) = &self.services.plugin_data {
             command_registry.register_plugin_commands(pd.all_commands.clone());

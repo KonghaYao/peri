@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use peri_acp::event::TodoItemDto;
-use peri_middlewares::prelude::SkillMetadata;
+use peri_acp_types::skill::SkillMetadataDto;
 
 use super::{
     langfuse_state::LangfuseState, AgentComm, CommandSystem, MessageState, SessionMetadata, UiState,
@@ -38,7 +38,7 @@ impl ChatSession {
     pub fn new(
         cwd: String,
         command_registry: CommandRegistry,
-        skills: Vec<SkillMetadata>,
+        skills: Vec<SkillMetadataDto>,
         lc: &crate::i18n::LcRegistry,
         diff_enabled: bool,
         streaming_mode: Option<String>,

@@ -1486,7 +1486,7 @@ async fn test_tool_then_text_preserves_tool_block() {
 
 #[tokio::test]
 async fn test_unified_hint_shows_commands_and_skills() {
-    use peri_middlewares::skills::loader::SkillMetadata;
+    use peri_acp_types::skill::{SkillMetadataDto, SkillSourceDto};
     let (mut app, mut handle) = App::new_headless(120, 50).await;
 
     // 设置输入框内容为 /
@@ -1503,21 +1503,25 @@ async fn test_unified_hint_shows_commands_and_skills() {
         .current_mut()
         .commands
         .skills
-        .push(SkillMetadata {
+        .push(SkillMetadataDto {
             name: "commit".into(),
             description: "commit changes".into(),
             path: "/tmp/commit.md".into(),
-            ..Default::default()
+            source: SkillSourceDto::User,
+            plugin_name: None,
+            disabled: false,
         });
     app.session_mgr
         .current_mut()
         .commands
         .skills
-        .push(SkillMetadata {
+        .push(SkillMetadataDto {
             name: "review".into(),
             description: "review code".into(),
             path: "/tmp/review.md".into(),
-            ..Default::default()
+            source: SkillSourceDto::User,
+            plugin_name: None,
+            disabled: false,
         });
 
     // 候选列表应包含命令和 Skills
@@ -1553,7 +1557,7 @@ async fn test_unified_hint_shows_commands_and_skills() {
 
 #[tokio::test]
 async fn test_unified_hint_filters_by_prefix() {
-    use peri_middlewares::skills::loader::SkillMetadata;
+    use peri_acp_types::skill::{SkillMetadataDto, SkillSourceDto};
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
     app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
@@ -1568,11 +1572,13 @@ async fn test_unified_hint_filters_by_prefix() {
         .current_mut()
         .commands
         .skills
-        .push(SkillMetadata {
+        .push(SkillMetadataDto {
             name: "commit".into(),
             description: "commit changes".into(),
             path: "/tmp/commit.md".into(),
-            ..Default::default()
+            source: SkillSourceDto::User,
+            plugin_name: None,
+            disabled: false,
         });
 
     handle
@@ -1598,7 +1604,7 @@ async fn test_unified_hint_filters_by_prefix() {
 
 #[tokio::test]
 async fn test_unified_hint_no_result_for_hash() {
-    use peri_middlewares::skills::loader::SkillMetadata;
+    use peri_acp_types::skill::{SkillMetadataDto, SkillSourceDto};
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
     app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
@@ -1612,11 +1618,13 @@ async fn test_unified_hint_no_result_for_hash() {
         .current_mut()
         .commands
         .skills
-        .push(SkillMetadata {
+        .push(SkillMetadataDto {
             name: "skill".into(),
             description: "a skill".into(),
             path: "/tmp/skill.md".into(),
-            ..Default::default()
+            source: SkillSourceDto::User,
+            plugin_name: None,
+            disabled: false,
         });
 
     handle
@@ -1638,7 +1646,7 @@ async fn test_unified_hint_no_result_for_hash() {
 
 #[tokio::test]
 async fn test_enter_skill_name_submits_message() {
-    use peri_middlewares::skills::loader::SkillMetadata;
+    use peri_acp_types::skill::{SkillMetadataDto, SkillSourceDto};
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
@@ -1651,11 +1659,13 @@ async fn test_enter_skill_name_submits_message() {
         .current_mut()
         .commands
         .skills
-        .push(SkillMetadata {
+        .push(SkillMetadataDto {
             name: "review".into(),
             description: "code review".into(),
             path: "/tmp/review.md".into(),
-            ..Default::default()
+            source: SkillSourceDto::User,
+            plugin_name: None,
+            disabled: false,
         });
 
     // 模拟 Enter 事件处理
@@ -1723,7 +1733,7 @@ async fn test_enter_unknown_command_shows_error() {
 
 #[tokio::test]
 async fn test_enter_known_command_no_skill_fallback() {
-    use peri_middlewares::skills::loader::SkillMetadata;
+    use peri_acp_types::skill::{SkillMetadataDto, SkillSourceDto};
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     // 注入名为 help 的 Skill
@@ -1731,11 +1741,13 @@ async fn test_enter_known_command_no_skill_fallback() {
         .current_mut()
         .commands
         .skills
-        .push(SkillMetadata {
+        .push(SkillMetadataDto {
             name: "help".into(),
             description: "help skill".into(),
             path: "/tmp/help.md".into(),
-            ..Default::default()
+            source: SkillSourceDto::User,
+            plugin_name: None,
+            disabled: false,
         });
 
     // /help 应被命令 dispatch 拦截，不走 Skill fallback

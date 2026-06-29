@@ -18,12 +18,15 @@
 //! | `MarketplaceSource` | `MarketplaceSourceDto` | ❌ DTO 与运行时完全不同（Git/Local/Registry vs GitHub/Git/Url/File/Directory/Npm） |
 //! | `RegisteredHook` | `RegisteredHookDto` | ❌ 结构完全不同 |
 //! | `HookEvent` / `HookType` | DTO 对应 | ❌ 变体子集 |
+//! | `SkillMetadata` | `SkillMetadataDto` | ✅ 1:1（PathBuf→String + SkillSource→SkillSourceDto） |
+//! | `SkillSource` | `SkillSourceDto` | ✅ 1:1（含 Global + Agm 扩展） |
 
 use peri_acp_types::mcp_types::{
     ClientStatusDto, ConfigSourceDto, McpInitStatusDto, OAuthCallbackResultDto, OAuthStatusDto,
     ServerInfoDto,
 };
 use peri_acp_types::plugin_types::InstallScopeDto;
+use peri_acp_types::skill::{SkillMetadataDto, SkillSourceDto};
 
 // ── MCP 类型（1:1 兼容）──────────────────────────────────────────────
 
@@ -113,6 +116,29 @@ pub fn bridge_oauth_callback(
         }
     });
     dto_tx
+}
+
+// ── Skill 类型 ──────────────────────────────────────────────────────
+
+fn skill_source_dto(s: peri_middlewares::skills::loader::SkillSource) -> SkillSourceDto {
+    match s {
+        peri_middlewares::skills::loader::SkillSource::User => SkillSourceDto::User,
+        peri_middlewares::skills::loader::SkillSource::Global => SkillSourceDto::Global,
+        peri_middlewares::skills::loader::SkillSource::Project => SkillSourceDto::Project,
+        peri_middlewares::skills::loader::SkillSource::Plugin => SkillSourceDto::Plugin,
+        peri_middlewares::skills::loader::SkillSource::Builtin => SkillSourceDto::Builtin,
+    }
+}
+
+pub fn skill_metadata_dto(s: peri_middlewares::skills::loader::SkillMetadata) -> SkillMetadataDto {
+    SkillMetadataDto {
+        name: s.name,
+        description: s.description,
+        path: s.path.to_string_lossy().into_owned(),
+        source: skill_source_dto(s.source),
+        plugin_name: s.plugin_name,
+        disabled: false,
+    }
 }
 
 // ── Plugin 类型 ─────────────────────────────────────────────────────
@@ -231,6 +257,55 @@ mod tests {
         assert!(dto.source.is_none());
         assert_eq!(dto.url, Some("http://localhost:8080".into()));
         assert_eq!(dto.plugin_source, Some("test@marketplace".into()));
+    }
+
+    #[test]
+    fn test_skill_metadata_conversion() {
+        use peri_middlewares::skills::loader::{SkillMetadata, SkillSource};
+        let s = SkillMetadata {
+            name: "writer".into(),
+            description: "A writing skill".into(),
+            path: std::path::PathBuf::from("/home/user/.claude/skills/writer/SKILL.md"),
+            source: SkillSource::User,
+            plugin_name: None,
+        };
+        let dto = skill_metadata_dto(s);
+        assert_eq!(dto.name, "writer");
+        assert_eq!(dto.description, "A writing skill");
+        assert_eq!(dto.path, "/home/user/.claude/skills/writer/SKILL.md");
+        assert_eq!(dto.source, SkillSourceDto::User);
+        assert_eq!(dto.plugin_name, None);
+        assert!(!dto.disabled);
+    }
+
+    #[test]
+    fn test_skill_source_all_variants() {
+        use peri_middlewares::skills::loader::SkillSource;
+        // 验证全部 5 个运行时变体都能转换
+        for s in [
+            SkillSource::User,
+            SkillSource::Global,
+            SkillSource::Project,
+            SkillSource::Plugin,
+            SkillSource::Builtin,
+        ] {
+            let _ = skill_source_dto(s);
+        }
+    }
+
+    #[test]
+    fn test_skill_metadata_with_plugin() {
+        use peri_middlewares::skills::loader::{SkillMetadata, SkillSource};
+        let s = SkillMetadata {
+            name: "tdd".into(),
+            description: "TDD skill".into(),
+            path: std::path::PathBuf::from("/tmp/plugins/tdd/SKILL.md"),
+            source: SkillSource::Plugin,
+            plugin_name: Some("tdd-plugin".into()),
+        };
+        let dto = skill_metadata_dto(s);
+        assert_eq!(dto.source, SkillSourceDto::Plugin);
+        assert_eq!(dto.plugin_name, Some("tdd-plugin".into()));
     }
 
     #[test]

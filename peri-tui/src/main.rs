@@ -665,7 +665,11 @@ async fn run_app(
             .as_ref()
             .map(|pd| pd.all_skill_roots.clone())
             .unwrap_or_default();
-        let plugin_skills = peri_middlewares::skills::scan_skill_roots(&plugin_skill_roots);
+        let plugin_skills: Vec<peri_acp_types::skill::SkillMetadataDto> =
+            peri_middlewares::skills::scan_skill_roots(&plugin_skill_roots)
+                .into_iter()
+                .map(peri_tui::dto_convert::skill_metadata_dto)
+                .collect();
         app.session_mgr
             .current_mut()
             .commands

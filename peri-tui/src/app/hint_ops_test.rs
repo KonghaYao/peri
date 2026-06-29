@@ -70,12 +70,14 @@
         }
     }
 
-    fn make_skill(name: &str) -> SkillMetadata {
-        SkillMetadata {
+    fn make_skill(name: &str) -> SkillMetadataDto {
+        SkillMetadataDto {
             name: name.to_string(),
             description: format!("{} skill", name),
-            path: std::path::PathBuf::from(format!("/tmp/{}.md", name)),
-            ..Default::default()
+            path: format!("/tmp/{}.md", name),
+            source: SkillSourceDto::User,
+            plugin_name: None,
+            disabled: false,
         }
     }
 

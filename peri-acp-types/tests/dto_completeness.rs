@@ -81,7 +81,9 @@ fn test_skill_metadata_dto() {
     let _s = skill::SkillMetadataDto {
         name: "writer".into(),
         description: "...".into(),
+        path: "/fake/writer/SKILL.md".into(),
         source: skill::SkillSourceDto::Builtin,
+        plugin_name: None,
         disabled: false,
     };
 }
