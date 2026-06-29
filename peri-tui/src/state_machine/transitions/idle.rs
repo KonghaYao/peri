@@ -27,8 +27,11 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
             (State::Idle(state), vec![Effect::Render])
         }
 
-        // -- Tick: Idle doesn't animate. No effect (power-save). -------------
-        Event::Tick => (State::Idle(state), Vec::new()),
+        // -- Tick: advance spinner + poll agent (for async event loop). -----
+        Event::Tick => (
+            State::Idle(state),
+            vec![Effect::AdvanceSpinner, Effect::PollAgent, Effect::Render],
+        ),
 
         // -- Mouse / Resize: re-render ---------------------------------------
         Event::Mouse(_) | Event::Resize { .. } => (State::Idle(state), vec![Effect::Render]),
@@ -244,10 +247,12 @@ mod tests {
     }
 
     #[test]
-    fn test_tick_does_not_render_in_idle() {
+    fn test_tick_produces_spinner_and_poll_in_idle() {
         let state = make_state();
         let (_next, effects) = handle(state, Event::Tick);
-        assert!(effects.is_empty());
+        assert!(effects.iter().any(|e| matches!(e, Effect::AdvanceSpinner)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::PollAgent)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
     #[test]

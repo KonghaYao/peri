@@ -112,7 +112,15 @@ impl<'a> ApplyContext<'a> {
             // because main_loop intercepts them first. Defensive no-op if it does.
             Effect::ShowNotification(_)
             | Effect::UpdateConfig { .. }
-            | Effect::SwitchSession(_) => ApplyOutcome::Ok,
+            | Effect::SwitchSession(_)
+            | Effect::SubmitMessage { .. }
+            | Effect::PollAgent
+            | Effect::AdvanceSpinner
+            | Effect::Scroll { .. }
+            | Effect::AskUserScroll { .. }
+            | Effect::PushSystemNote(_)
+            | Effect::OpenThreadWithFeedback { .. }
+            | Effect::MemoryPanelOpenEditor => ApplyOutcome::Ok,
         }
     }
 

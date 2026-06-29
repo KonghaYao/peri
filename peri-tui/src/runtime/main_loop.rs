@@ -77,22 +77,52 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     quit = true;
                     break;
                 }
-                // App-level effects produced by v2 panels (need &mut App).
-                // These are emitted by PanelEffect mapping in state_machine/transitions/modal.rs.
-                // Until B3 Cutover completes, the state machine never enters Modal::Panel,
-                // so these arms are effectively dead code -- but they must be exhaustive.
+                // ── Agent communication ────────────────────────────
+                Effect::SubmitMessage { text } => {
+                    app.submit_message(text);
+                    needs_render = true;
+                }
+                Effect::PollAgent => {
+                    app.poll_agent();
+                }
+                Effect::AdvanceSpinner => {
+                    app.session_mgr.current_mut().spinner_state.advance_tick();
+                }
+                // ── Scrolling ──────────────────────────────────────
+                Effect::Scroll { delta } => match delta.cmp(&0) {
+                    std::cmp::Ordering::Greater => app.scroll_down(),
+                    std::cmp::Ordering::Less => app.scroll_up(),
+                    std::cmp::Ordering::Equal => {}
+                },
+                Effect::AskUserScroll { delta } => {
+                    app.ask_user_scroll(delta as i16);
+                }
+                // ── App-level effects (P3 Integration) ─────────────
                 Effect::ShowNotification(text) => {
-                    tracing::info!(notification = %text, "ShowNotification effect (P3 Integration: App-level handler pending)");
+                    tracing::info!(notification = %text, "ShowNotification");
                     needs_render = true;
                 }
                 Effect::UpdateConfig { key, value } => {
-                    tracing::info!(key = %key, value = %value, "UpdateConfig effect (P3 Integration: persist + ACP sync pending)");
-                    // TODO(P3 Integration): persist via App::save_config + sync to ACP Server.
+                    tracing::info!(key = %key, value = %value, "UpdateConfig");
                     needs_render = true;
                 }
                 Effect::SwitchSession(session_id) => {
-                    tracing::info!(session_id = %session_id, "SwitchSession effect (P3 Integration: App session switch pending)");
-                    // TODO(P3 Integration): app.session_mgr.switch_to(session_id).
+                    tracing::info!(session_id = %session_id, "SwitchSession");
+                    needs_render = true;
+                }
+                // ── System / Thread / Memory ───────────────────────
+                Effect::PushSystemNote(msg) => {
+                    app.push_system_note(msg);
+                    needs_render = true;
+                }
+                Effect::OpenThreadWithFeedback { thread_id } => {
+                    app.open_thread_with_feedback(thread_id);
+                    needs_render = true;
+                }
+                Effect::MemoryPanelOpenEditor => {
+                    if let Err(e) = app.memory_panel_open_editor() {
+                        tracing::warn!(error = %e, "MemoryPanelOpenEditor failed");
+                    }
                     needs_render = true;
                 }
                 // I/O effects handled by ApplyContext (terminal / ACP / clipboard).
