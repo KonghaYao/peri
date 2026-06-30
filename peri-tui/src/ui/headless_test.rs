@@ -2959,10 +2959,7 @@ async fn test_subagent_group_renders_child_content_via_probe() {
 
     // 构造 probe（生产 draw_now 中的方式）
     let session = app.session_mgr.current();
-    let probe = SessionSubAgentProbe::from_view_messages(
-        session.subagent_status.clone(),
-        &session.messages.view_messages,
-    );
+    let probe = SessionSubAgentProbe::new(session.subagent_status.clone());
 
     // 查询 researcher → 应返回 is_running=true 且 recent_messages 含 ToolCard
     let info = probe

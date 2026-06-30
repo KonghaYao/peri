@@ -400,70 +400,37 @@ impl SubAgentStatusProbe for SubAgentStatusMap {
 // SessionSubAgentProbe — 状态 + 子内容复合 probe
 // ---------------------------------------------------------------------------
 
-/// 复合 probe：包装 [`SubAgentStatusMap`] + v1 view_messages 兼容缓存。
+/// 复合 probe：包装 [`SubAgentStatusMap`]，注入 v2 子内容到 render。
 ///
-/// **子内容优先级**（Phase 2.6 双源策略）：
-/// 1. **权威源**：`SubAgentStatus.child_messages` — 由 `source_agent_id` 路由的
-///    ToolStart/ToolEnd 实时累积。这是 v2 路径的目标数据源。
-/// 2. **兼容源**：v1 `view_messages` 中的 `SubAgentGroup.recent_messages` —
-///    生产中永久为空 Vec（v1 设计如此），仅在测试或历史路径下可能有值。
+/// **数据源**（Phase 2.6 step 4 已退役 legacy 兼容源）：
+/// - 唯一权威源：`SubAgentStatus.child_messages` — 由 `source_agent_id`
+///   路由的 ToolStart/ToolEnd/AssistantChunk 实时累积
 ///
-/// 当权威源非空时优先返回；否则返回兼容源（可能为空）。
-/// Phase 2.6 完整退役 `view_messages` 后，兼容源路径删除。
+/// Phase 2.5 之前曾维护 v1 `view_messages` 中的 `SubAgentGroup.recent_messages`
+/// 作为兼容源，但因生产中永久为空 Vec（v1 设计如此）且 child_messages
+/// 已完整覆盖（文本+工具+未来扩展），该路径已删除。
 #[derive(Clone)]
 pub struct SessionSubAgentProbe {
     /// 运行时状态（含 `child_messages` 权威源）
     pub status: SubAgentStatusMap,
-    /// 兼容源：agent_id → v2 子内容（从 v1 view_messages 提取）
-    pub legacy_children: HashMap<String, Vec<ViewModel>>,
 }
 
 impl SessionSubAgentProbe {
-    /// 从 `SubAgentStatusMap` + v1 `view_messages` 构建 probe。
-    ///
-    /// `legacy_children` 仅在 `SubAgentStatus.child_messages` 为空时使用。
-    /// 同名 agent_id 多次出现时，**后一个覆盖前一个**（v1 追加语义）。
-    pub fn from_view_messages(
-        status: SubAgentStatusMap,
-        view_messages: &[crate::ui::message_view::MessageViewModel],
-    ) -> Self {
-        let mut legacy_children: HashMap<String, Vec<ViewModel>> = HashMap::new();
-        for vm in view_messages {
-            if let crate::ui::message_view::MessageViewModel::SubAgentGroup {
-                agent_id,
-                recent_messages,
-                ..
-            } = vm
-            {
-                let v2 = crate::render::vm_convert::message_view_models_to_v2(recent_messages);
-                legacy_children.insert(agent_id.clone(), v2);
-            }
-        }
-        Self {
-            status,
-            legacy_children,
-        }
+    /// 从 `SubAgentStatusMap` 构建 probe。
+    pub fn new(status: SubAgentStatusMap) -> Self {
+        Self { status }
     }
 }
 
 impl SubAgentStatusProbe for SessionSubAgentProbe {
     fn lookup_by_agent_id(&self, agent_id: &str) -> Option<SubAgentRenderInfo> {
         SubAgentStatusProbe::lookup_by_agent_id(&self.status, agent_id).map(|mut info| {
-            // 1. 权威源：SubAgentStatus.child_messages（按 agent_id 通过 status map 查询）
+            // 唯一权威源：SubAgentStatus.child_messages（按 agent_id 通过 status map 查询）
             // 注意：info 中没有 instance_id 字段，只能通过 agent_id 回退匹配。
-            // find_owner_mut 在 &self 上无法调用，改为预先查询（用 inherent lookup_by_agent_id）。
-            let authoritative = self.status.lookup_by_agent_id(agent_id).and_then(|s| {
-                if s.child_messages.is_empty() {
-                    None
-                } else {
-                    Some(s.child_messages.clone())
+            if let Some(s) = self.status.lookup_by_agent_id(agent_id) {
+                if !s.child_messages.is_empty() {
+                    info.recent_messages = s.child_messages.clone();
                 }
-            });
-            if let Some(vms) = authoritative {
-                info.recent_messages = vms;
-            } else if let Some(vms) = self.legacy_children.get(agent_id) {
-                // 2. 兼容源：v1 view_messages 提取（仅当权威源为空）
-                info.recent_messages = vms.clone();
             }
             info
         })
@@ -768,57 +735,15 @@ mod tests {
 
     // --- SessionSubAgentProbe 测试 ---
 
+    /// Phase 2.6 step 4：probe 仅包装 status map，权威源 = child_messages
     #[test]
-    fn test_session_probe_injects_children_from_view_messages() {
+    fn test_session_probe_injects_child_messages_from_authoritative_source() {
         use crate::render::view_render::SubAgentStatusProbe;
-        use crate::ui::message_view::MessageViewModel;
         use peri_acp_types::view_model::ViewModel;
 
         let mut map = SubAgentStatusMap::new();
         map.start("inst-1".into(), "fork".into(), "task".into(), false);
-
-        // 构造一个含子内容的 SubAgentGroup v1 视图（兼容源）
-        let child_vm = MessageViewModel::user("hello from child".into());
-        let parent = MessageViewModel::SubAgentGroup {
-            agent_id: "fork".into(),
-            instance_id: Some("inst-1".into()),
-            task_preview: "task".into(),
-            is_running: true,
-            is_background: false,
-            total_steps: 0,
-            recent_messages: vec![child_vm],
-            collapsed: false,
-            bg_hash: None,
-            final_result: None,
-            is_error: false,
-            batch_agents: Vec::new(),
-            content_hash: 0,
-        };
-
-        let probe = SessionSubAgentProbe::from_view_messages(map, std::slice::from_ref(&parent));
-        let info = probe
-            .lookup_by_agent_id("fork")
-            .expect("应找到 fork 的运行时状态");
-
-        assert!(info.is_running);
-        assert_eq!(
-            info.recent_messages.len(),
-            1,
-            "应注入 1 个子内容（UserBubble）— 来自 legacy 兼容源"
-        );
-        assert!(
-            matches!(info.recent_messages[0], ViewModel::UserBubble(_)),
-            "子内容应为 UserBubble（vm_convert 转换后）"
-        );
-    }
-
-    #[test]
-    fn test_session_probe_authoritative_child_messages_overrides_legacy() {
-        use crate::render::view_render::SubAgentStatusProbe;
-
-        let mut map = SubAgentStatusMap::new();
-        map.start("inst-1".into(), "fork".into(), "task".into(), false);
-        // 权威源：累积一个 ToolCard
+        // 通过 source_agent_id 路由累积权威源
         let tool_vm = ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
             tool_id: "tc-1".into(),
             tool_name: "Read".into(),
@@ -829,97 +754,33 @@ mod tests {
         });
         map.append_child_message("fork", tool_vm);
 
-        // 兼容源：构造一个含不同子内容的 v1 view
-        let legacy_child = crate::ui::message_view::MessageViewModel::user("legacy".into());
-        let parent = crate::ui::message_view::MessageViewModel::SubAgentGroup {
-            agent_id: "fork".into(),
-            instance_id: Some("inst-1".into()),
-            task_preview: "task".into(),
-            is_running: true,
-            is_background: false,
-            total_steps: 0,
-            recent_messages: vec![legacy_child],
-            collapsed: false,
-            bg_hash: None,
-            final_result: None,
-            is_error: false,
-            batch_agents: Vec::new(),
-            content_hash: 0,
-        };
-        let probe = SessionSubAgentProbe::from_view_messages(map, std::slice::from_ref(&parent));
-        let info = probe.lookup_by_agent_id("fork").expect("应找到");
+        let probe = SessionSubAgentProbe::new(map);
+        let info = probe
+            .lookup_by_agent_id("fork")
+            .expect("应找到 fork 的运行时状态");
 
-        // 权威源（ToolCard）应优先于兼容源（UserBubble "legacy"）
-        assert_eq!(info.recent_messages.len(), 1);
+        assert!(info.is_running);
+        assert_eq!(
+            info.recent_messages.len(),
+            1,
+            "应注入 1 个子内容（ToolCard）— 来自权威源 child_messages"
+        );
         assert!(
             matches!(info.recent_messages[0], ViewModel::ToolCard(_)),
-            "权威源 child_messages 应优先于 legacy view_messages"
+            "子内容应为 ToolCard"
         );
     }
 
     #[test]
-    fn test_session_probe_recent_messages_empty_when_no_match() {
+    fn test_session_probe_recent_messages_empty_when_child_messages_empty() {
         use crate::render::view_render::SubAgentStatusProbe;
 
         let mut map = SubAgentStatusMap::new();
         map.start("inst-1".into(), "fork".into(), "task".into(), false);
-
-        // 没有 SubAgentGroup view → children 为空，但 status 仍能查到
-        let probe = SessionSubAgentProbe::from_view_messages(map, &[]);
+        // child_messages 为空 → recent_messages 应为空 Vec
+        let probe = SessionSubAgentProbe::new(map);
         let info = probe.lookup_by_agent_id("fork").expect("status 应能找到");
         assert!(info.recent_messages.is_empty(), "无子内容时应为空 Vec");
-    }
-
-    #[test]
-    fn test_session_probe_later_agent_overrides_earlier() {
-        use crate::render::view_render::SubAgentStatusProbe;
-        use crate::ui::message_view::MessageViewModel;
-
-        let mut map = SubAgentStatusMap::new();
-        map.start("inst-1".into(), "fork".into(), "first".into(), false);
-
-        // 两个同名 agent_id 的 SubAgentGroup，后者应覆盖前者
-        let first = MessageViewModel::SubAgentGroup {
-            agent_id: "fork".into(),
-            instance_id: Some("inst-1".into()),
-            task_preview: "first".into(),
-            is_running: false,
-            is_background: false,
-            total_steps: 0,
-            recent_messages: vec![MessageViewModel::user("from first".into())],
-            collapsed: false,
-            bg_hash: None,
-            final_result: None,
-            is_error: false,
-            batch_agents: Vec::new(),
-            content_hash: 0,
-        };
-        let second = MessageViewModel::SubAgentGroup {
-            agent_id: "fork".into(),
-            instance_id: Some("inst-2".into()),
-            task_preview: "second".into(),
-            is_running: true,
-            is_background: false,
-            total_steps: 0,
-            recent_messages: vec![MessageViewModel::user("from second".into())],
-            collapsed: false,
-            bg_hash: None,
-            final_result: None,
-            is_error: false,
-            batch_agents: Vec::new(),
-            content_hash: 0,
-        };
-
-        let probe = SessionSubAgentProbe::from_view_messages(map, &[first, second]);
-        let info = probe.lookup_by_agent_id("fork").expect("应找到");
-
-        // 后者覆盖前者 — recent_messages 应来自 second
-        assert_eq!(info.recent_messages.len(), 1);
-        if let peri_acp_types::view_model::ViewModel::UserBubble(d) = &info.recent_messages[0] {
-            assert_eq!(d.text, "from second", "后一个 SubAgentGroup 应覆盖");
-        } else {
-            panic!("应为 UserBubble");
-        }
     }
 
     #[test]
@@ -927,7 +788,7 @@ mod tests {
         use crate::render::view_render::SubAgentStatusProbe;
 
         let map = SubAgentStatusMap::new();
-        let probe = SessionSubAgentProbe::from_view_messages(map, &[]);
+        let probe = SessionSubAgentProbe::new(map);
         assert!(
             probe.lookup_by_agent_id("unknown").is_none(),
             "未知 agent_id 应返回 None"

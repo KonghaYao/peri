@@ -231,18 +231,14 @@ impl<'a> ApplyContext<'a> {
             }
         }
         let v2_vms_ref: &[peri_acp_types::view_model::ViewModel] = &v2_vms;
-        // Phase 2.3 step 8 + Phase 2.6 桥接：构造复合 probe，同时注入：
+        // Phase 2.3 step 8 + Phase 2.6：构造 probe 注入：
         // 1. SubAgent 运行时状态（is_running / total_steps / final_result / ...）
-        // 2. 子内容（recent_messages 从 v1 view_messages 通过 vm_convert 转换）
-        // 这样 v2 render_subagent_group 即使遇到 ACP 层生成的空 placeholder DTO
-        // 也能从 v1 数据源渲染子内容（Phase 2.6 切换前的过渡方案）。
+        // 2. 子内容（child_messages — 由 source_agent_id 路由实时累积）
+        // 子 Agent 文本/工具/未来扩展全部通过 child_messages 权威源注入。
         let session = app.session_mgr.current();
-        let compound_probe = crate::app::SessionSubAgentProbe::from_view_messages(
-            session.subagent_status.clone(),
-            &session.messages.view_messages,
-        );
+        let probe = crate::app::SessionSubAgentProbe::new(session.subagent_status.clone());
         let status_probe: std::rc::Rc<dyn crate::render::view_render::SubAgentStatusProbe> =
-            std::rc::Rc::new(compound_probe);
+            std::rc::Rc::new(probe);
         let draw_result = crate::render::view_render::with_status_probe(status_probe, || {
             self.terminal.draw(|f| {
                 // Pre-compute v2 modal height (Panel or Interaction) so legacy

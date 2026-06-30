@@ -99,12 +99,9 @@ impl HeadlessHandle {
                 &app.session_mgr.current().messages.view_messages,
             );
         let session = app.session_mgr.current();
-        let compound_probe = crate::app::SessionSubAgentProbe::from_view_messages(
-            session.subagent_status.clone(),
-            &session.messages.view_messages,
-        );
+        let probe = crate::app::SessionSubAgentProbe::new(session.subagent_status.clone());
         let status_probe: std::rc::Rc<dyn crate::render::view_render::SubAgentStatusProbe> =
-            std::rc::Rc::new(compound_probe);
+            std::rc::Rc::new(probe);
         crate::render::view_render::with_status_probe(status_probe, || {
             self.terminal
                 .draw(|f| main_ui::render(f, app, None, Some(&v2_vms)))
