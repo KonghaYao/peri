@@ -81,9 +81,16 @@
 - streaming.rs §4.3 实现 status 事件（TokenUsage → status bar，WorkflowProgress → tracker）
 
 ### Phase 2：消息源单一化 ⏳
-- 删除 `agent_ops/mod.rs` handle_agent_event 中的 origin_messages/view_messages 维护
-- 所有渲染从 `state.view + current_turn` 取
-- 删除 `app.global_ui.v2_view_models` 桥接（直接用 state）
+
+**完整迁移计划**：详见 `docs/refactor/phase2-migration-plan.md`（2026-07-01 cron #9 起草）。
+
+拆分 6 个子阶段（每子阶段独立 cron 窗口）：
+- **Phase 2.1**（task #15）：测试 helper 包装 / 标记 legacy fallback deprecated。`message_area.rs:189-206` legacy 路径在测试活跃（`main_ui::render` 被 headless_test/popups_test 直接调用），生产环境死代码。
+- **Phase 2.2**（task #16）：扩展 `render` 签名为 `render(f, app, state, panel_height)`，删除 `app.global_ui.v2_view_models` 桥接字段。
+- **Phase 2.3**（task #17）：SubAgent 流式状态扩展。`agent_events_bg.rs:175-196` 就地 mutation 模式无法用不可变 ViewModel 替代，方案 B：App 层 `HashMap<agent_id, SubAgentStatus>` + render_v2_vm 合并。
+- **Phase 2.4**（task #18）：新增 `Event::PushSystemNote(String)` + state_machine append 到 `state.view`。迁移 4 个 v1 命令通知点。
+- **Phase 2.5**（task #19）：手动验证 Rewind/Compact/Interrupted 后 v2 state.view 重建，删除 `apply_rebuild_all` + `ephemeral_notes`。
+- **Phase 2.6**（task #20）：删除 `MessageState.view_messages / round_start_vm_idx / message_cache / ephemeral_notes` 字段。
 
 ### Phase 3：死 Effect 清理 + Switching 完善 ⏳
 - 11 个无人 emit 的 Effect：接通或在枚举中删除
@@ -143,3 +150,20 @@
 **修正**：缺陷 #15 从 P0 降为 P2。原判断「v2 死代码」过度悲观，实际只有 4 个 Interaction Handler 死代码（不影响生产），流式路径完全工作。progress.html 同步修正。
 
 **Phase 2 调研结论**：v2 状态机的 `state.view` 在生产上通过 `peri/unstable-event` 的 `view-commit` 事件正常更新（acp_notifier.rs:130 直接转发 method 名，acp_bridge.rs:67 v1 no-op 让 v2 独占）。生产渲染走 V2 path（draw_now 总是设置 `v2_view_models = Some(...)`）。v1 `view_messages` 仅被 v1 path 的 TurnCommitted/StateSnapshot/Compact 事件维护，**渲染时不读**（render_messages V2 path 不读 view_messages）。
+
+### 2026-07-01 cron #9 — Phase 2 计划起草 + 子阶段拆分
+
+**完成**：
+- 深度调研 Phase 2 范围（Explore agent 报告 + 关键文件核实）
+- 发现 legacy fallback 在测试活跃（`message_area.rs:189-206` 被 headless_test/popups_test 直接调用的 ~30+ 测试覆盖）→ 不能直接删
+- 发现 SubAgent 流式状态（`agent_events_bg.rs:175-196`）是最大阻塞 → 方案 B：App 层 status map
+- 拆分 6 个子阶段，每个独立可提交、可回滚
+- 起草 `docs/refactor/phase2-migration-plan.md`
+- TaskCreate #15-#20 子任务 + blocks 依赖关系
+- 看板 + 主计划文档同步更新
+
+**未完成**：
+- 子阶段未启动（本窗口仅规划）
+- 测试 helper 设计未细化
+
+**下一步**：cron #10 启动 Phase 2.1（task #15）

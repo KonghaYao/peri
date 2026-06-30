@@ -64,7 +64,7 @@
     <tr><td>1.4</td><td>实现 Handler.render() + 删除 v1 popup</td><td class="status s-done">完成（4/4 Handlers）</td><td>1.4-rewind：Handler trait 加 desired_height；draw_now 打通 ModalKind::Interaction 渲染入口；RewindHandler 实现 render + desired_height（commit <code>654d5999</code>）。1.4-hitl：HitlHandler 实现 render（BorderedPanel + 工具项 + cursor 高亮 + 输入预览）+ truncate_chars/format_input_preview（commit <code>daba127d</code>）。1.4-ask_user：AskUserHandler 实现 render（BorderedPanel + Tab 头部 ☐/✔ + 编号选项 ❯ ● + 描述行 + 差异化 hint）+ is_selected/render_tab_header 辅助（commit <code>89738a7e</code>）。1.4-oauth：OauthHandler 实现 render（BorderedPanel THINKING 色 + URL 高亮 SAGE/DarkGray + url_opened 状态反馈 ✓ Opened + 紧凑 8 行布局）+ 10 个新测试（commit <code>ee9fe41c</code>）。4 个 Handler 全部接入 desired_height，draw_now 中 v2_panel_height match 双分支（Panel/Interaction）。998 测试全过。</td></tr>
     <tr><td>1.5</td><td>修复 Modal 期间 AcpEvent 丢弃</td><td class="status s-done">完成</td><td>1.5a：ModalState 改 struct 持 saved_view/saved_input/saved_*/kind ✓；1.5b：modal.rs handle() 处理 AcpEvent（ViewCommit 更新 saved_view，TextChunk 等更新 saved_current_turn，TurnDone 清空）✓；1.5c：Streaming→Modal 可达 + saved_current_turn 恢复（commit <code>fa8d68c5</code>）</td></tr>
     <tr><td>1.6</td><td>Streaming→Modal 可达 + Status 事件</td><td class="status s-done">1.6a 完成</td><td>1.6a：streaming.rs handle_key 镜像 Idle 的 Ctrl 快捷键（Ctrl+P/T/B/O/Shift+T/BackTab），main_loop OpenPanel 接受 Streaming 入口，ClosePanel 检测 saved_current_turn 恢复 Streaming ✓；1.6b：§4.3 status 事件（TokenUsage/ToolCount/Progress）状态栏渲染（推迟到状态栏重构）</td></tr>
-    <tr><td>2</td><td>消息源单一化</td><td class="status s-pending">待开始</td><td>删 origin_messages/view_messages，统一 state.view + current_turn</td></tr>
+    <tr><td>2</td><td>消息源单一化</td><td class="status s-active">Phase 2 调研完成，拆 6 个子阶段</td><td>2.1 测试 helper/deprecated · 2.2 删 v2_view_models 桥接 · 2.3 SubAgent status map（最大阻塞） · 2.4 命令通知走 Event · 2.5 apply_rebuild_all 退役 · 2.6 删 view_messages 字段。详见 <code>docs/refactor/phase2-migration-plan.md</code></td></tr>
     <tr><td>3</td><td>清理死 Effect + Switching</td><td class="status s-active">Phase 3a/3b 完成</td><td>3a：5 个真死 Effect 删除 ✓；3b：modal.rs TLS stubs → #[cfg(test)] ✓（handle/dispatch_key/dispatch_mouse_tls/dispatch_paste_tls/transition_to_idle*/TLS statics 全部 test-only，state_machine::handle Modal arm 改为生产 no-op + 测试 dispatch）；3c：State::Switching 完善（推迟到独立窗口）</td></tr>
     <tr><td>4</td><td>CLAUDE.md 同步</td><td class="status s-done">完成</td><td>peri-tui/CLAUDE.md 重写（删 message_pipeline/RenderThread/ephemeral_notes + 加 v2 架构说明 + 双轨弹窗系统 + v2 PanelState trait 14 面板）· 根 CLAUDE.md Effect 数 32 → 26（全变体列表）+ Phase 1.3-1.4 进度引用 + 测试 891 → 998（commit <code>b3191bed</code>）</td></tr>
   </tbody>
@@ -90,7 +90,7 @@
     <tr class="p2"><td>12</td><td><span class="tag tag-p2">P2</span></td><td>transition_to_idle_with_effects 死代码</td><td>标 #[allow(dead_code)]</td></tr>
     <tr class="p3"><td>13</td><td><span class="tag tag-p3">P3</span></td><td>peri-tui/CLAUDE.md 大量过时</td><td>message_pipeline/RenderThread/ephemeral_notes 已删</td></tr>
     <tr class="p3"><td>14</td><td><span class="tag tag-p3">P3</span></td><td>根 CLAUDE.md 数字错误</td><td>Effect 数 32 实际 27；Alt+M 不存在</td></tr>
-    <tr class="p2"><td>15</td><td><span class="tag tag-p2">P2 (修正)</span></td><td>v2 Interaction Handler 路径生产死代码（仅 4 个 Handler，不影响流式）</td><td><strong>修正</strong>：v2 流式事件路径（TextChunk/ViewCommit 等）通过 <code>peri/unstable-event</code> JSON-RPC notification 正常工作（acp_notifier.rs:130 直接转发 method 名，acp_bridge.rs:67 v1 路径 no-op 让 v2 独占）。仅 HitlPending/AskUser/RewindPreview/OauthNeeded 4 个 AcpEvent 在 ACP 层不 emit（mapper.rs:265 注释），HITL 实际走 v1 RequestPermission JSON-RPC。Phase 1.3/1.4 的 4 个 Handler 作为前端预留接口等 ACP 层扩展后启用</td></tr>
+    <tr class="p2"><td>15</td><td><span class="tag tag-p2">P2 (修正)</span></td><td>v2 Interaction Handler 路径生产死代码（仅 4 个 Handler，不影响流式）</td><td><strong>修正</strong>：v2 流式事件路径（TextChunk/ViewCommit 等）通过 <code>peri/unstable-event</code> JSON-RPC notification 正常工作（acp_notifier.rs:130 直接转发 method 名，acp_bridge.rs:67 v1 路径 no-op 让 v2 独占）。仅 HitlPending/AskUser/RewindPreview/OauthNeeded 4 个 AcpEvent 在 ACP 层不 emit（router.rs:149-152 注释），HITL 实际走 v1 RequestPermission JSON-RPC。Phase 1.3/1.4 的 4 个 Handler 作为前端预留接口等 ACP 层扩展后启用</td></tr>
   </tbody>
 </table>
 
@@ -103,9 +103,9 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #7（Phase 1.4 全部完成 + Phase 4 CLAUDE.md 同步 + 缺陷 #15 发现）<br>
-  <strong>本窗口成果</strong>：5 个本地 commit（<code>89738a7e</code> ask_user + <code>ff319251</code> ask_user cleanup + <code>ee9fe41c</code> oauth + <code>17932367</code> oauth cleanup + <code>a90d0272</code> 看板 + <code>b3191bed</code> Phase 4，均不 push）· Phase 1.4-ask_user/oauth render + desired_height · Phase 4 重写 peri-tui/CLAUDE.md（删除 message_pipeline/RenderThread/ephemeral_notes 等过时引用）+ 根 CLAUDE.md Effect 数 32 → 26 · <strong>发现 P0 缺陷 #15</strong>：v2 Interaction Handler 路径生产仍是死代码（ACP 层无 AcpEvent::HitlPending 变体，mapper.rs:265 注释）· 998 测试全过<br>
-  <strong>下一步</strong>：① Phase 2 消息源单一化（删 view_messages，统一 state.view + current_turn，受缺陷 #15 影响需先评估）② 缺陷 #15 跨层修复（需 ACP 层扩展 ExecutorEvent + mapper Category ②，超出 TUI 重构范围）③ Phase 3c State::Switching 完善（推迟到独立窗口）
+  <strong>最后更新</strong>：2026-07-01 cron #9（缺陷 #15 P0→P2 修正 + Phase 2 调研与拆分）<br>
+  <strong>本窗口成果</strong>：1 个 commit（<code>a407a771</code> doc 缺陷 #15 修正）· 起草 <code>docs/refactor/phase2-migration-plan.md</code>（Phase 2 拆 6 个子阶段，每子阶段独立可提交）· TaskCreate 6 个子任务（#15-#20）并设置 blocks 依赖 · 深度调研发现：(a) legacy fallback 在测试活跃（不能直接删）；(b) SubAgent 流式状态是最大阻塞（需 App 层 status map）；(c) v2_view_models 桥接可通过扩展 render 签名删除<br>
+  <strong>下一步</strong>：① Phase 2.1（task #15）：测试 helper 包装或加 deprecated 注释 ② Phase 2.2（task #16）：render 签名扩展 + 删 v2_view_models 桥接 ③ Phase 2.3（task #17）：SubAgent status map 设计（最大阻塞）
 </div>
 
 </body>
