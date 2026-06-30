@@ -28,9 +28,14 @@ impl App {
     }
 
     /// P5: Direct view_messages rebuild without PipelineAction indirection.
-    /// Preserves UserBubble deduplication. SystemNote anchor tracking was
-    /// retired in Phase 2.5 — v2 state.view (production render source)
-    /// handles SystemNote via `pending_v2_notes → Event::PushSystemNote`.
+    /// SystemNote anchor tracking was retired in Phase 2.5 — v2 state.view
+    /// (production render source) handles SystemNote via `pending_v2_notes
+    /// → Event::PushSystemNote`.
+    ///
+    /// Phase 2.6 step 7a：删除 UserBubble 去重分支（死代码）。所有 4 个调用点
+    /// 要么传 `prefix_len=0`（agent_compact ×2、agent_ops::mod ×1）要么传空
+    /// tail（agent_ops::lifecycle::handle_interrupted），dedup 条件
+    /// `prefix_len > 0 && !tail.is_empty()` 永远为 false。
     pub(crate) fn apply_rebuild_all(&mut self, prefix_len: usize, tail_vms: Vec<MessageViewModel>) {
         let session = self.session_mgr.current_mut();
         let view_len = session.messages.view_messages.len();
@@ -46,31 +51,9 @@ impl App {
             prefix_len
         };
 
-        // drain 尾部
-        session.messages.view_messages.drain(prefix_len..);
-
-        // 去重：UserBubble 在不同路径重复创建时去重
-        let mut tail = tail_vms;
-        if prefix_len > 0 && !tail.is_empty() {
-            let prefix_last = session.messages.view_messages.get(prefix_len - 1);
-            if let Some(MessageViewModel::UserBubble {
-                content: prefix_content,
-                ..
-            }) = prefix_last
-            {
-                if let Some(MessageViewModel::UserBubble {
-                    content: tail_content,
-                    ..
-                }) = tail.first()
-                {
-                    if prefix_content == tail_content {
-                        tail.remove(0);
-                    }
-                }
-            }
-        }
-
-        session.messages.view_messages.extend(tail);
+        // drain 尾部 + 追加新 tail
+        session.messages.view_messages.truncate(prefix_len);
+        session.messages.view_messages.extend(tail_vms);
 
         // Invalidate render cache: view_messages was modified (drain + extend).
         // Without this, render_messages() reuses stale cache because needs_rebuild
