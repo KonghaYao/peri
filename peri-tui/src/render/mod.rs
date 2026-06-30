@@ -25,6 +25,7 @@
 pub mod block_mode;
 pub mod throttle;
 pub mod view_render;
+pub mod vm_convert;
 
 pub use throttle::{RenderReason, Throttle};
 
