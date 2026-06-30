@@ -167,3 +167,47 @@
 - 测试 helper 设计未细化
 
 **下一步**：cron #10 启动 Phase 2.1（task #15）
+
+### 2026-07-01 cron #18 — Phase 2.6 step 6 完成（SubAgentGroup view_messages 全退役）
+
+**完成**：commit `b5db7dbe` + dashboard 同步 `aed80e81`。净减 832 行。
+
+**变更范围**：
+- `agent_ops/subagent.rs`：删除 `handle_subagent_start` 中 `apply_add_message(SubAgentGroup)` 推送
+- `agent_ops/mod.rs`：删除 `SubAgentEnd` 的 `iter_mut` 突变 + ToolBlock 回退（~60 行）
+- `agent_events_bg.rs`：删除 `BackgroundTaskCompleted` 的 `iter_mut` 突变 + ToolBlock 回退（~100 行）
+- `headless.rs`：`HeadlessHandle::render` 从 `subagent_status` 合成 v2 `SubAgentGroupData` 占位符（headless 路径无 ACP ViewCommit，需手动注入让 probe 流经）
+- `headless_test.rs`：退役 7 个 v1 测试（`test_subagent_group_basic/sliding_window/assistant_chunk`、`test_background_task_notification`、`test_subagent_group_preserved_after_done_reconcile`、`test_diagnostic_bg_subagent_group_disappears`、`test_diagnostic_fork_plus_background_subagent_group`）+ 2 个诊断辅助函数（`bg_diag_count_subagent_groups`、`bg_diag_print_vms`）
+
+**关键突破**：SubAgentGroup 渲染路径完全脱离 view_messages 写入侧。`SubAgentStatusMap` 是唯一权威源（`start` / `complete_foreground` / `complete_background` / `incr_tool_step` / `append_child_text`）。生产渲染完全通过 `SessionSubAgentProbe` 读取。
+
+**测试覆盖**：1041 passed, 0 failed。覆盖路径：
+- `subagent_status.rs` 单元测试（start / complete_foreground / complete_background / TTL / 容量）
+- `test_subagent_group_renders_child_content_via_probe`（e2e v2）
+- `test_subagent_child_tool_renders_on_screen`（e2e v2）
+- `test_bg_completed_before_done_triggers_continuation`（pre_done_completions 路径）
+
+### Phase 2.6 step 7 规划（下一个 cron 窗口）
+
+**目标**：退役 `apply_add_message` 的 UserBubble 路径（`agent_submit.rs:47`）。
+
+**复杂度**：高。UserBubble 写入 view_messages 后被以下读者依赖：
+- `handle_done`（`lifecycle.rs:50-61`）：查找最后一个 VM 设置 `AssistantBubble.is_streaming = false`
+- `handle_interrupted`（`lifecycle.rs:128-154`）：`rposition UserBubble` + 检查其后是否有 ToolCallGroup/ToolBlock 决定中断后行为
+- `apply_rebuild_all`（`agent_render.rs:34`）：UserBubble 去重逻辑
+- `thread_ops.rs`：线程切换时复制 view_messages
+- `ask_user_ops.rs`：AskUser 提示查找
+- `command/core/gc.rs`：统计 VM 数
+
+**前置依赖**：v2 ViewStore 需要提供：
+1. `last_user_bubble_index()` → `Option<usize>`
+2. `last_assistant_bubble_mut()` → 可变引用（设置 `is_streaming = false`）
+3. `has_tool_calls_after(idx)` → `bool`
+
+或更激进：彻底放弃「在 view_messages 上标记 is_streaming」+「rposition UserBubble」这类索引型 API，改为：
+1. `handle_done` 通过 Effect::MarkStreamingDone 通知状态机更新 `current_turn.is_streaming`
+2. `handle_interrupted` 通过 Effect::CheckInterruptHasProgress 查询 v2 ViewStore
+
+**风险**：触及核心控制流，可能引入回归。**建议**：先用 Explore agent 全面调研所有 view_messages 读者，再做架构决策（workflow：survey → design → execute）。
+
+**估算**：1 个完整 cron 窗口（15min）调研 + 设计；1 个窗口执行 + 测试。
