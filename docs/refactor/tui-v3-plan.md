@@ -115,22 +115,31 @@
 
 **完成内容**：Phase 1.4-ask_user（commit `89738a7e`）+ Phase 1.4-oauth（commit `ee9fe41c`）+ 清理（commit `17932367`）。4 个 v2 Interaction Handlers 的 render + desired_height 全部就位，draw_now 渲染入口打通。
 
-**关键调研结论（新发现的 P0 缺陷 #15）**：v2 Interaction Handler 路径在生产环境**仍是死代码**。根因：
-1. **ACP 层不 emit HitlPending/AskUser/RewindPreview/OauthNeeded AcpEvent**：`peri-acp/src/event/mapper.rs:265-268` 明确注释「当前 ExecutorEvent 中无专门的 HitlPending 变体，HITL 审批通过 UserInteractionBroker 的 ask/confirm 直接交互，不经过事件管道」。
-2. **AcpEvent 枚举本身没有这些变体**：`peri-acp/src/event/mod.rs` 的 `pub enum AcpEvent` 仅含 StateSnapshot/TextChunk/ReasoningChunk 等流式事件，无 HitlPending/AskUser/Rewind/OAuth 变体。
-3. **生产路径走 v1 JSON-RPC**：HITL 经 `RequestPermission` 请求 → `app.handle_acp_request_permission` → 设置 `InteractionPrompt::Approval` → v1 popup 渲染。AskUser 经 `Elicitation` 请求 → `handle_acp_elicitation`。
-4. **acp_notifier 包装层**：发送 `TuiEvent::AcpEvent { event: "agent-event", data: { ..., event: <AcpEvent DTO> } }`。v2 状态机的 `AcpEventData::decode("agent-event", ...)` 落入 `_ => Unknown` 分支，HitlPending 路径完全不会触发。
-5. **`grep -r 'AcpEvent::HitlPending'` 零结果**：全代码库无任何位置构造这 4 个 AcpEvent 变体（仅 `peri-acp-types/src/event_data.rs` 中定义了 DTO struct）。
+**关键调研结论（缺陷 #15，原 P0 → 修正为 P2）**：
 
-**影响评估**：
-- ✅ **不影响生产**：v1 路径完整运行，HITL/AskUser/Rewind/OAuth 通过 v1 popup 正常工作
-- ✅ **Phase 1.3/1.4 代码有价值**：v2 路径作为前端预留接口，等 ACP 层未来扩展 ExecutorEvent::HitlPending 等变体并 emit 后立即可用
-- ❌ **Phase 1.3 描述误导**：progress.html 之前说「启用 v2 Interaction Handlers」实际只是「代码路径就位」，真实启用需 ACP 层配合
+**最初误判**：以为「v2 状态机路径生产死代码」（基于 acp_notifier 发送 "agent-event" 包装的判断）。
+
+**修正后的真相**：v2 路径**部分**死代码。具体区分：
+
+1. ✅ **v2 流式事件路径（生产活跃）**：ACP server 通过 `peri/unstable-event` JSON-RPC notification 发送 `{ event: "view-commit" / "text-chunk" / ... }`（见 `peri-acp/src/session/event_sink.rs:167-186`）。acp_notifier 对 `UnstableEvent` 直接转发 method 名（不包装为 "agent-event"，见 `acp_notifier.rs:130-143`）。v2 状态机 decode 成功，正确更新 state.view / state.current_turn。**v1 路径 no-op**（`acp_bridge.rs:67` 注释「Handled by the v2 state machine (path 1a). Legacy path is no-op.」）。
+
+2. ❌ **v2 Interaction Handler 路径（死代码）**：4 个 Handler（HitlPending/AskUser/RewindPreview/OauthNeeded）期望 ACP 层 emit 对应的 `peri/unstable-event`，但 `peri-acp/src/event/router.rs:149-152` 明确注释「ExecutorEvent has no dedicated HitlPending variant. HITL approval is handled via a separate channel (UserInteractionBroker). Skipped here.」。
+
+3. **生产交互路径**：
+   - HITL：JSON-RPC `session/requestPermission` 请求 → `app.handle_acp_request_permission` → 设置 `InteractionPrompt::Approval` → v1 popup
+   - AskUser：JSON-RPC `session/elicitation`（CreateElicitation）请求 → `handle_acp_elicitation` → 设置 `InteractionPrompt::Questions`
+   - Rewind：双击 Esc 触发，v1 路径（不通过 AcpEvent）
+   - OAuth：v1 `GlobalUiState.oauth_prompt`
 
 **真正的启用条件**（不在 TUI 重构范围内）：
 - ACP 层扩展 `ExecutorEvent` 添加 HitlPending/AskUser/RewindPreview/OauthNeeded 变体
-- `event/router.rs` 把这些变体映射到对应的 AcpEvent DTO
-- `event/mapper.rs` 添加 Category ② 路由位（已预留，见 mapper.rs:264-268）
+- `event/router.rs` 添加路由（已预留位置，见 router.rs:149-152）
 - 决定是否废弃 JSON-RPC `RequestPermission`/`Elicitation` 路径（双轨切换）
 
-**当前窗口决策**：不做架构改动（风险高 + 用户睡眠），仅记录此发现。继续推进安全的 Phase 4 CLAUDE.md 同步。Phase 2 消息源单一化也受此影响 — 在 ACP 层切换前，v2 view_models 实际上是空的，UI 仍依赖 v1 view_messages。
+**对 Phase 2 的影响**：可以推进！v2 状态机的 `state.view` + `current_turn` 在生产上实际工作（通过 unstable-event），是渲染源。v1 `view_messages` 由 TurnCommitted/StateSnapshot/Compact 等 AcpEvent 维护（通过 v1 路径的 handle_agent_event），但 render_messages 走 V2 path 不读它。所以 Phase 2 删除 view_messages 是可行的，但需谨慎处理 v1 依赖。
+
+### 2026-07-01 cron #8 — 缺陷 #15 严重性修正 + Phase 2 调研
+
+**修正**：缺陷 #15 从 P0 降为 P2。原判断「v2 死代码」过度悲观，实际只有 4 个 Interaction Handler 死代码（不影响生产），流式路径完全工作。progress.html 同步修正。
+
+**Phase 2 调研结论**：v2 状态机的 `state.view` 在生产上通过 `peri/unstable-event` 的 `view-commit` 事件正常更新（acp_notifier.rs:130 直接转发 method 名，acp_bridge.rs:67 v1 no-op 让 v2 独占）。生产渲染走 V2 path（draw_now 总是设置 `v2_view_models = Some(...)`）。v1 `view_messages` 仅被 v1 path 的 TurnCommitted/StateSnapshot/Compact 事件维护，**渲染时不读**（render_messages V2 path 不读 view_messages）。
