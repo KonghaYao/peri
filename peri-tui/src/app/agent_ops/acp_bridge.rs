@@ -108,8 +108,31 @@ impl App {
             .unwrap_or("");
 
         match update_type {
-            "agent_message_chunk" => self
-                .handle_agent_event(super::super::AgentEvent::AssistantChunk { source_agent_id }),
+            "agent_message_chunk" => {
+                // Phase 2.6 step 3：解析 content.text，子 Agent chunk 累积到 child_messages
+                let text = update
+                    .get("content")
+                    .and_then(|c| c.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                if !text.is_empty() {
+                    if let Some(src) = source_agent_id.as_deref() {
+                        let routed = self
+                            .session_mgr
+                            .current_mut()
+                            .subagent_status
+                            .append_child_text(src, text);
+                        if routed {
+                            self.request_rebuild();
+                            return (true, false, false);
+                        }
+                        // source 匹配失败 → fallback 主路径（保留原有 AssistantChunk 信号语义）
+                    }
+                }
+                self.handle_agent_event(super::super::AgentEvent::AssistantChunk {
+                    source_agent_id,
+                })
+            }
             "tool_call" => {
                 let tool_call_id = update
                     .get("toolCallId")

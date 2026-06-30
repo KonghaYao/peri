@@ -250,6 +250,35 @@ impl SubAgentStatusMap {
         }
     }
 
+    /// Phase 2.6：路由子 Agent 流式文本 chunk 到 child_messages。
+    ///
+    /// 在 `source_id` 匹配的 owner 中：
+    /// - 若最后一个 VM 是 AssistantBubble，append text（同一轮回复累积）
+    /// - 否则新建 AssistantBubble push（新一轮回复开始）
+    ///
+    /// 返回 `true` 表示成功路由。返回 `false` 表示无匹配 owner。
+    pub fn append_child_text(&mut self, source_id: &str, text: &str) -> bool {
+        if let Some(s) = self.find_owner_mut(source_id) {
+            match s.child_messages.last_mut() {
+                Some(ViewModel::AssistantBubble(d)) => {
+                    d.text.push_str(text);
+                }
+                _ => {
+                    s.child_messages.push(ViewModel::AssistantBubble(
+                        peri_acp_types::view_model::AssistantBubbleData {
+                            text: text.to_string(),
+                            reasoning: None,
+                            tool_card_ids: Vec::new(),
+                        },
+                    ));
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     /// Phase 2.6：更新子 Agent ToolCard 的 output（ToolEnd 路由）。
     ///
     /// 在 `source_id` 匹配的 owner child_messages 中查找 `tool_id == tool_call_id`
@@ -903,5 +932,83 @@ mod tests {
             probe.lookup_by_agent_id("unknown").is_none(),
             "未知 agent_id 应返回 None"
         );
+    }
+
+    /// Phase 2.6 step 3：append_child_text 第一次 chunk 创建 AssistantBubble
+    #[test]
+    fn test_append_child_text_creates_new_bubble() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
+        let routed = map.append_child_text("inst-1", "Hello");
+        assert!(routed);
+        let s = map.lookup("inst-1").expect("entry exists");
+        assert_eq!(s.child_messages.len(), 1);
+        match &s.child_messages[0] {
+            ViewModel::AssistantBubble(d) => assert_eq!(d.text, "Hello"),
+            other => panic!("expected AssistantBubble, got {:?}", other),
+        }
+    }
+
+    /// Phase 2.6 step 3：连续 chunk 累积到同一个 AssistantBubble
+    #[test]
+    fn test_append_child_text_accumulates_into_existing_bubble() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
+        map.append_child_text("inst-1", "Hello");
+        map.append_child_text("inst-1", " world");
+        map.append_child_text("inst-1", "!");
+        let s = map.lookup("inst-1").expect("entry exists");
+        assert_eq!(s.child_messages.len(), 1, "三个 chunk 应累积到同一 bubble");
+        match &s.child_messages[0] {
+            ViewModel::AssistantBubble(d) => assert_eq!(d.text, "Hello world!"),
+            other => panic!("expected AssistantBubble, got {:?}", other),
+        }
+    }
+
+    /// Phase 2.6 step 3：ToolCard 后的 chunk 应创建新 bubble（不混入工具卡）
+    #[test]
+    fn test_append_child_text_after_toolcard_creates_new_bubble() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
+        // 模拟先有文本，再有工具，再有文本
+        map.append_child_text("inst-1", "first ");
+        map.append_child_message(
+            "inst-1",
+            ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
+                tool_id: "t1".into(),
+                tool_name: "Read".into(),
+                input_summary: "foo.rs".into(),
+                output_summary: String::new(),
+                is_error: false,
+                diff: None,
+            }),
+        );
+        map.append_child_text("inst-1", "second");
+        let s = map.lookup("inst-1").expect("entry exists");
+        assert_eq!(s.child_messages.len(), 3, "bubble + toolcard + new bubble");
+        match &s.child_messages[2] {
+            ViewModel::AssistantBubble(d) => assert_eq!(d.text, "second"),
+            other => panic!("expected new bubble, got {:?}", other),
+        }
+    }
+
+    /// Phase 2.6 step 3：未知 source_id 返回 false
+    #[test]
+    fn test_append_child_text_unknown_source_returns_false() {
+        let mut map = SubAgentStatusMap::new();
+        let routed = map.append_child_text("unknown", "text");
+        assert!(!routed);
+    }
+
+    /// Phase 2.6 step 3：通过 agent_id 回退匹配也能累积
+    #[test]
+    fn test_append_child_text_falls_back_to_agent_id() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "researcher".into(), "task".into(), false);
+        // 使用 agent_id（"researcher"）而非 instance_id（"inst-1"）
+        let routed = map.append_child_text("researcher", "fallback text");
+        assert!(routed, "agent_id 回退应匹配");
+        let s = map.lookup("inst-1").expect("entry exists");
+        assert_eq!(s.child_messages.len(), 1);
     }
 }
