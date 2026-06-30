@@ -28,7 +28,7 @@ use crate::runtime::event_channel::{EventRx, TuiEvent};
 use crate::state_machine::state::PanelReadContext;
 use crate::state_machine::{
     handle as state_machine_handle, input::sync::to_textarea, transitions::modal, Event as SmEvent,
-    IdleState, ModalState, State,
+    IdleState, ModalKind, ModalState, State,
 };
 
 /// Target frame interval for loading-spinner animation (~30 FPS).
@@ -48,9 +48,6 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
 
     // v2 state machine state. Persists across events. Initial = Idle.
     let mut state: State = State::Idle(IdleState::default());
-
-    // Saved IdleState before entering Modal(Panel). Restored on panel close.
-    let mut saved_idle: Option<IdleState> = None;
 
     while let Some(event) = rx.recv().await {
         let is_tick = matches!(event, TuiEvent::Tick);
@@ -331,48 +328,56 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     tracing::info!(session_id = %session_id, "SwitchSession");
                     app.open_thread(session_id);
                     // Close the panel so the user sees the loaded thread.
-                    if matches!(state, State::Modal(_)) {
-                        let idle = saved_idle.take().unwrap_or_else(|| {
-                            let input_snapshot = crate::state_machine::input::sync::from_textarea(
-                                &app.session_mgr.current().ui.textarea,
-                            );
-                            IdleState {
-                                input: input_snapshot,
-                                scroll_offset: app.session_mgr.current().ui.scroll_offset,
-                                view: vec![],
-                                double_esc_timer: None,
-                                history_index: None,
-                            }
-                        });
+                    if let State::Modal(modal) = state {
+                        let idle = IdleState {
+                            input: modal.saved_input,
+                            scroll_offset: modal.saved_scroll_offset,
+                            view: modal.saved_view,
+                            double_esc_timer: modal.saved_double_esc_timer,
+                            history_index: modal.saved_history_index,
+                        };
                         state = State::Idle(idle);
                     }
                     needs_render = true;
                 }
                 Effect::OpenPanel(kind) => {
                     if let State::Idle(idle) = state {
-                        saved_idle = Some(idle);
+                        // Save the entire Idle into ModalState.saved_* so that
+                        // view_models() returns the saved view (panels can
+                        // render the underlying message area) and ClosePanel
+                        // can restore it without a side-channel.
                         let panel = crate::panel::registry::create_panel(kind, app);
-                        state = State::Modal(ModalState::Panel(panel));
+                        state = State::Modal(ModalState {
+                            saved_view: idle.view,
+                            saved_current_turn: None,
+                            saved_input: idle.input,
+                            saved_scroll_offset: idle.scroll_offset,
+                            saved_history_index: idle.history_index,
+                            saved_double_esc_timer: idle.double_esc_timer,
+                            kind: ModalKind::Panel(panel),
+                        });
                         needs_render = true;
                     }
                 }
                 Effect::ClosePanel => {
-                    if matches!(state, State::Modal(_)) {
-                        let idle = saved_idle.take().unwrap_or_else(|| {
-                            // Fallback: when saved_idle is None (panel opened
-                            // via fallback path), extract current input state
-                            // from TextArea so keyboard buffer isn't lost.
-                            let input_snapshot = crate::state_machine::input::sync::from_textarea(
+                    if let State::Modal(modal) = state {
+                        // Restore Idle from ModalState.saved_*. Falls back to
+                        // TextArea snapshot when saved_input is empty (panel
+                        // opened via legacy fallback path).
+                        let input = if modal.saved_input.text().is_empty() {
+                            crate::state_machine::input::sync::from_textarea(
                                 &app.session_mgr.current().ui.textarea,
-                            );
-                            IdleState {
-                                input: input_snapshot,
-                                scroll_offset: app.session_mgr.current().ui.scroll_offset,
-                                view: vec![],
-                                double_esc_timer: None,
-                                history_index: None,
-                            }
-                        });
+                            )
+                        } else {
+                            modal.saved_input
+                        };
+                        let idle = IdleState {
+                            input,
+                            scroll_offset: modal.saved_scroll_offset,
+                            view: modal.saved_view,
+                            double_esc_timer: modal.saved_double_esc_timer,
+                            history_index: modal.saved_history_index,
+                        };
                         state = State::Idle(idle);
                         needs_render = true;
                     }

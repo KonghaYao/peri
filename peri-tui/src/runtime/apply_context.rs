@@ -216,7 +216,7 @@ impl<'a> ApplyContext<'a> {
         last_render: &mut Instant,
         state: &mut crate::state_machine::State,
     ) {
-        use crate::state_machine::{ModalState, State};
+        use crate::state_machine::{ModalKind, ModalState, State};
         // Clone view_models before the mutable borrow in the draw closure,
         // so we can pass them to build_v2_panel_read_context without
         // conflicting with the `if let State::Modal(..) = state` borrow.
@@ -233,14 +233,22 @@ impl<'a> ApplyContext<'a> {
         app.global_ui.v2_view_models = Some(v2_vms);
         if let Err(e) = self.terminal.draw(|f| {
             // Pre-compute v2 panel height so legacy layout reserves space.
-            let v2_panel_height = if let State::Modal(ModalState::Panel(panel)) = &*state {
+            let v2_panel_height = if let State::Modal(ModalState {
+                kind: ModalKind::Panel(panel),
+                ..
+            }) = &*state
+            {
                 Some(panel.desired_height(f.area().height, f.area().width))
             } else {
                 None
             };
             ui::main_ui::render(f, app, v2_panel_height);
             // v2 Modal panel overlay: render in the area reserved by the layout.
-            if let State::Modal(ModalState::Panel(panel)) = state {
+            if let State::Modal(ModalState {
+                kind: ModalKind::Panel(panel),
+                ..
+            }) = state
+            {
                 // panel_area was set by render_session_column for v2 panels.
                 let area = app
                     .session_mgr

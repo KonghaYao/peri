@@ -147,13 +147,14 @@ pub enum State {
 impl State {
     /// Extract the current ViewModel list from whichever variant is active.
     ///
-    /// Returns the last committed snapshot for Idle/Streaming/Switching states,
-    /// and an empty slice for Modal (panels don't need message data during modal).
+    /// Returns the last committed snapshot for Idle/Streaming/Switching/Modal.
+    /// Modal holds a saved_view snapshot from before the popup opened, so
+    /// panels and interactions can render the underlying message area.
     pub fn view_models(&self) -> &[ViewModel] {
         match self {
             State::Idle(s) => &s.view,
             State::Streaming(s) => &s.view,
-            State::Modal(_) => &[],
+            State::Modal(s) => &s.saved_view,
             State::Switching(s) => &s.view,
         }
     }
@@ -242,10 +243,41 @@ pub struct StreamingState {
 /// (HITL approval, AskUser, Rewind, OAuth). They are centered popups
 /// that fully overlay the message area.
 ///
+/// `saved_*` fields preserve the underlying Idle/Streaming state so that
+/// (a) `view_models()` can render the message area behind the popup, and
+/// (b) closing the popup restores the prior state without losing context.
+///
 /// Entering Modal from Streaming must preserve `CurrentTurn` so that
 /// streaming progress is not lost when the popup closes.
 #[derive(Debug)]
-pub enum ModalState {
+pub struct ModalState {
+    /// Saved ViewModel snapshot from before the popup opened.
+    /// Returned by `State::view_models()` so the message area renders.
+    pub saved_view: Vec<ViewModel>,
+
+    /// Saved `CurrentTurn` — `Some` when modal opened from Streaming,
+    /// `None` when opened from Idle. Used to restore streaming progress.
+    pub saved_current_turn: Option<CurrentTurn>,
+
+    /// Saved input state — preserves user's typed-but-unsubmitted text.
+    pub saved_input: InputState,
+
+    /// Saved vertical scroll offset.
+    pub saved_scroll_offset: u16,
+
+    /// Saved input-history navigation index.
+    pub saved_history_index: Option<usize>,
+
+    /// Saved double-Esc quit tracker.
+    pub saved_double_esc_timer: Option<DoubleEscTracker>,
+
+    /// The modal content: panel or interaction handler.
+    pub kind: ModalKind,
+}
+
+/// The active modal content (panel vs. interaction popup).
+#[derive(Debug)]
+pub enum ModalKind {
     /// A user-initiated panel (config, model selector, etc.).
     Panel(Box<dyn PanelState>),
 
@@ -309,8 +341,8 @@ mod tests {
     fn test_modal_state_panel_variant() {
         // We can't construct a real PanelState without a concrete impl,
         // but we can verify the variant exists by matching.
-        fn _assert_variant(state: &ModalState) -> bool {
-            matches!(state, ModalState::Panel(_))
+        fn _assert_variant(kind: &ModalKind) -> bool {
+            matches!(kind, ModalKind::Panel(_))
         }
         // Compile-time check only.
         let _ = _assert_variant;
@@ -318,8 +350,8 @@ mod tests {
 
     #[test]
     fn test_modal_state_interaction_variant() {
-        fn _assert_variant(state: &ModalState) -> bool {
-            matches!(state, ModalState::Interaction(_))
+        fn _assert_variant(kind: &ModalKind) -> bool {
+            matches!(kind, ModalKind::Interaction(_))
         }
         let _ = _assert_variant;
     }

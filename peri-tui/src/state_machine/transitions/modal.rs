@@ -13,7 +13,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use tui_textarea::Input;
 
 use super::super::event::Event;
-use super::super::state::{HandlerOutput, ModalState, PanelReadContext, State};
+use super::super::state::{HandlerOutput, ModalKind, ModalState, PanelReadContext, State};
 #[cfg(test)]
 use super::super::state::{IdleState, InputState};
 use crate::panel::effect::PanelEffect;
@@ -256,8 +256,8 @@ fn dispatch_mouse(
     ctx: &PanelReadContext,
 ) -> DispatchResult {
     use ratatui::crossterm::event::MouseEventKind;
-    match state {
-        ModalState::Panel(panel) => {
+    match &mut state.kind {
+        ModalKind::Panel(panel) => {
             let effects = match mouse.kind {
                 MouseEventKind::ScrollUp => panel.handle_scroll(-3, ctx),
                 MouseEventKind::ScrollDown => panel.handle_scroll(3, ctx),
@@ -270,7 +270,7 @@ fn dispatch_mouse(
                 handler_submit: None,
             }
         }
-        ModalState::Interaction(_) => DispatchResult {
+        ModalKind::Interaction(_) => DispatchResult {
             panel_effects: Vec::new(),
             should_close: false,
             handler_submit: None,
@@ -280,8 +280,8 @@ fn dispatch_mouse(
 
 /// Dispatch a paste event to the active panel / handler with a real context.
 fn dispatch_paste(state: &mut ModalState, text: &str, ctx: &PanelReadContext) -> DispatchResult {
-    match state {
-        ModalState::Panel(panel) => {
+    match &mut state.kind {
+        ModalKind::Panel(panel) => {
             let effects = panel.handle_paste(text, ctx);
             let should_close = effects.iter().any(|pe| matches!(pe, PanelEffect::Close));
             DispatchResult {
@@ -290,7 +290,7 @@ fn dispatch_paste(state: &mut ModalState, text: &str, ctx: &PanelReadContext) ->
                 handler_submit: None,
             }
         }
-        ModalState::Interaction(_) => DispatchResult {
+        ModalKind::Interaction(_) => DispatchResult {
             panel_effects: Vec::new(),
             should_close: false,
             handler_submit: None,
@@ -303,8 +303,8 @@ fn dispatch_key_with_ctx(
     key: KeyEvent,
     ctx: &PanelReadContext,
 ) -> DispatchResult {
-    match state {
-        ModalState::Panel(panel) => {
+    match &mut state.kind {
+        ModalKind::Panel(panel) => {
             let panel_effects = panel.handle_key(Input::from(key), ctx);
             let should_close = panel_effects
                 .iter()
@@ -315,7 +315,7 @@ fn dispatch_key_with_ctx(
                 handler_submit: None,
             }
         }
-        ModalState::Interaction(handler) => {
+        ModalKind::Interaction(handler) => {
             if let KeyCode::Char(c) = key.code {
                 match handler.handle_key(c) {
                     HandlerOutput::Nothing => DispatchResult {
@@ -472,6 +472,35 @@ mod tests {
     use crate::app::panel_types::PanelKind;
     use crate::panel::registry::PanelStateStub;
     use crate::state_machine::handler::NoopHandler;
+    use crate::state_machine::input::InputState;
+
+    /// Build a ModalState for an interaction handler, with empty saved state.
+    fn make_interaction_modal(
+        handler: Box<dyn crate::state_machine::state::Handler>,
+    ) -> ModalState {
+        ModalState {
+            saved_view: Vec::new(),
+            saved_current_turn: None,
+            saved_input: InputState::default(),
+            saved_scroll_offset: 0,
+            saved_history_index: None,
+            saved_double_esc_timer: None,
+            kind: ModalKind::Interaction(handler),
+        }
+    }
+
+    /// Build a ModalState for a panel, with empty saved state.
+    fn make_panel_modal(panel: Box<dyn PanelState>) -> ModalState {
+        ModalState {
+            saved_view: Vec::new(),
+            saved_current_turn: None,
+            saved_input: InputState::default(),
+            saved_scroll_offset: 0,
+            saved_history_index: None,
+            saved_double_esc_timer: None,
+            kind: ModalKind::Panel(panel),
+        }
+    }
     use crate::state_machine::PanelState;
     use ratatui::crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
 
@@ -498,7 +527,7 @@ mod tests {
         // Esc in Modal now emits ClosePanel effect instead of directly
         // transitioning to Idle. The main_loop handles the transition
         // via saved_idle restoration, which preserves message history.
-        let modal = ModalState::Interaction(Box::new(NoopHandler));
+        let modal = make_interaction_modal(Box::new(NoopHandler));
         let (next, effects) = handle(
             modal,
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -519,7 +548,7 @@ mod tests {
     fn test_tick_keeps_background_processes_alive_in_modal() {
         // Tick 在 Modal 期间必须保持 PollAgent + AdvanceSpinner + Render，
         // 否则 ACP 事件消费停止、loading 动画冻结、面板不再重绘。
-        let modal = ModalState::Interaction(Box::new(NoopHandler));
+        let modal = make_interaction_modal(Box::new(NoopHandler));
         let (next, effects) = handle(modal, Event::Tick);
         assert!(matches!(next, State::Modal(_)));
         assert!(effects.iter().any(|e| matches!(e, Effect::PollAgent)));
@@ -532,7 +561,7 @@ mod tests {
         // Betas panel + Esc -> ClosePanel effect (not direct Idle transition).
         // main_loop restores saved_idle to preserve message history.
         let panel = Box::new(PanelStateStub::new(PanelKind::Betas)) as Box<dyn PanelState>;
-        let modal = ModalState::Panel(panel);
+        let modal = make_panel_modal(panel);
         let (next, effects) = handle(
             modal,
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -553,7 +582,7 @@ mod tests {
         // 这是面板关闭契约的基础保证 —— 用户不会丢失消息数据。
         for kind in ALL_PANEL_KINDS {
             let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
-            let modal = ModalState::Panel(panel);
+            let modal = make_panel_modal(panel);
             let (next, effects) = handle(
                 modal,
                 Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -578,7 +607,7 @@ mod tests {
         // Tick 在面板打开期间必须保持后台进程活跃（PollAgent/AdvanceSpinner/Render）。
         for kind in ALL_PANEL_KINDS {
             let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
-            let modal = ModalState::Panel(panel);
+            let modal = make_panel_modal(panel);
             let (next, effects) = handle(modal, Event::Tick);
             assert!(
                 matches!(next, State::Modal(_)),
@@ -604,7 +633,7 @@ mod tests {
         // Resize 必须触发重绘以重新计算面板布局。
         for kind in ALL_PANEL_KINDS {
             let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
-            let modal = ModalState::Panel(panel);
+            let modal = make_panel_modal(panel);
             let (next, effects) = handle(
                 modal,
                 Event::Resize {
@@ -634,7 +663,7 @@ mod tests {
         };
         for kind in ALL_PANEL_KINDS {
             let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
-            let modal = ModalState::Panel(panel);
+            let modal = make_panel_modal(panel);
             let (next, effects) = handle(modal, Event::Mouse(mouse_event));
             assert!(
                 matches!(next, State::Modal(_)),
@@ -652,7 +681,7 @@ mod tests {
         // ACP 断开时，面板状态保持不变 —— 断开由 main_loop 上层处理。
         for kind in ALL_PANEL_KINDS {
             let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
-            let modal = ModalState::Panel(panel);
+            let modal = make_panel_modal(panel);
             let (next, effects) = handle(modal, Event::AcpDisconnected);
             assert!(
                 matches!(next, State::Modal(_)),
@@ -670,7 +699,7 @@ mod tests {
         // Shutdown 在 Modal 状态下必须 emit Quit，确保用户 Ctrl+C 时可以退出。
         for kind in ALL_PANEL_KINDS {
             let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
-            let modal = ModalState::Panel(panel);
+            let modal = make_panel_modal(panel);
             let (next, effects) = handle(modal, Event::Shutdown);
             assert!(
                 matches!(next, State::Modal(_)),
@@ -789,7 +818,7 @@ mod tests {
     #[test]
     fn test_handler_submit_closes_modal() {
         // NoopHandler 对任何字符都返回 Nothing，所以应该保持 Modal。
-        let modal = ModalState::Interaction(Box::new(NoopHandler));
+        let modal = make_interaction_modal(Box::new(NoopHandler));
         let (next, _effects) = handle(
             modal,
             Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
@@ -800,7 +829,7 @@ mod tests {
 
     #[test]
     fn test_handler_esc_emits_close_panel() {
-        let modal = ModalState::Interaction(Box::new(NoopHandler));
+        let modal = make_interaction_modal(Box::new(NoopHandler));
         let (next, effects) = handle(
             modal,
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
