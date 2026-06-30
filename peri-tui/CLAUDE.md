@@ -88,14 +88,13 @@ TUI 输入 → AcpTuiClient.new_session() / .prompt()
 **v1 view_messages 的当前作用**：
 - SessionSubAgentProbe 提取 SubAgentGroup 头部 + recent_messages（生产中 recent_messages 永远为空 Vec，因 v1 不累积子 Agent 内部消息 — 设计如此，"子 agent 内部消息不持久化"）
 - 兼容性测试路径（`main_ui::render(f, app, None, None)`，~36 个测试，主要集中在 `headless_test.rs`）
-- ephemeral_notes 锚点管理（`apply_rebuild_all` 在 TurnCommitted 时重建）
 
 **vm_convert 模块**（`render/vm_convert.rs`）：
 - 纯函数 `message_view_model_to_v2(vm) -> Option<ViewModel>` + 批量 `message_view_models_to_v2(vms) -> Vec<ViewModel>`
 - 6 变体映射：UserBubble / AssistantBubble（Text + Reasoning 提取）/ ToolBlock / SystemNote / CacheWarning / ToolCallGroup 扁平化 / SubAgentGroup 不嵌套（返回 None）
 - 用于：① SessionSubAgentProbe 子内容注入 ② HeadlessHandle::render 测试路径统一走 v2
 
-**[INFO]** `MessageState.view_messages` 仍由 `handle_agent_event` 维护（`apply_add_message` / `apply_rebuild_all`），但生产渲染不再读它。Phase 2.6 完整切换需要：① 扩展 `SubAgentStatus` 加 `child_messages` 字段（事件流累积） ② 让 SessionSubAgentProbe 完全脱离 view_messages ③ 退役 `apply_rebuild_all` / `ephemeral_notes`。当前状态：基础设施就位，仅差累积逻辑迁移。
+**[INFO]** `MessageState.view_messages` 仍由 `handle_agent_event` 维护（`apply_add_message` / `apply_rebuild_all`），但生产渲染不再读它。**Phase 2.5 已退役 `ephemeral_notes` 锚点管理**（SystemNote 通过 `pending_v2_notes → Event::PushSystemNote` 独立路由）。**Phase 2.6 完整退役 view_messages 剩余工作**：① 让 SessionSubAgentProbe 完全脱离 view_messages（删除 `legacy_children` 兼容源） ② 删除 `handle_subagent_start` 中 `apply_add_message(SubAgentGroup)` 推送 ③ 移除 `view_messages` 字段（涉及 88+ 测试更新）。
 
 **[TRAP]** BaseMessage vs MessageViewModel 维度混淆：`completed_len_at_round_start` 是 BaseMessage 长度，`prefix_len` 是 VM 索引，两者非 1:1。`prefix_len` 必须用 `round_start_vm_idx`，`drain` 必须钳位。
 
