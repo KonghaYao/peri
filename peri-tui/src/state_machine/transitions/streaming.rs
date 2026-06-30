@@ -7,10 +7,12 @@
 //! Reference: `docs/design/peri-tui-architecture.md` section 8.6.
 
 use peri_acp_types::event_data::{TextChunk, ToolEnded, ToolStarted};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::super::current_turn::ToolCardAccumulator;
 use super::super::event::{AcpEventData, Event};
 use super::super::state::{IdleState, State, StreamingState};
+use crate::app::panel_types::PanelKind;
 use crate::runtime::effect::Effect;
 
 /// Streaming-state transition entry point.
@@ -128,11 +130,15 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
         // -- Other terminal events -------------------------------------------
         Event::Resize { .. } | Event::Mouse(_) => (State::Streaming(state), vec![Effect::Render]),
 
-        // -- Key events: process in the streaming state (user can type ------
-        //    while agent is running). Keys are handled by the legacy keyboard
-        //    module which also handles input editing; state machine re-renders
-        //    so typed text is visible.
-        Event::Key(_) | Event::Paste(_) => (State::Streaming(state), vec![Effect::Render]),
+        // -- Key events: Ctrl-shortcuts mirror Idle (panels/global toggles
+        //    remain accessible while the agent streams). Plain chars and
+        //    navigation keys fall through to the keyboard fallback (textarea
+        //    remains the single source of truth for input editing).
+        Event::Key(key) => handle_key(state, key),
+
+        // -- Paste: routed by main_loop. Streaming re-renders to show the
+        //    pasted text in the input box.
+        Event::Paste(_) => (State::Streaming(state), vec![Effect::Render]),
 
         // -- System events --------------------------------------------------
         Event::AcpDisconnected | Event::SessionLoaded { .. } => {
@@ -153,6 +159,74 @@ impl StreamingState {
             view: self.view,
             double_esc_timer: None,
             history_index: None,
+        }
+    }
+}
+
+/// Key dispatch for the Streaming state.
+///
+/// Mirrors the Idle Ctrl-shortcut set (panels + global toggles) so users can
+/// open the Model panel, cycle provider/model, focus the bg bar, toggle diff,
+/// or cycle permission mode while the agent is producing output. The SM
+/// emits the same `Effect`s as Idle; `main_loop` decides state transitions
+/// (e.g. `Effect::OpenPanel` from Streaming enters Modal with
+/// `saved_current_turn = Some(...)` so streaming progress is preserved).
+///
+/// Plain chars, navigation keys, and Backspace/Delete are NOT handled here —
+/// they flow through `is_sm_handled_shortcut` (returns false for them) to the
+/// keyboard fallback, which mutates the textarea widget. The 2b sync then
+/// reflects textarea state back into `StreamingState.input`.
+fn handle_key(state: StreamingState, key: KeyEvent) -> (State, Vec<Effect>) {
+    // Ctrl+Char: global shortcuts (same set as Idle).
+    if key.modifiers.intersects(KeyModifiers::CONTROL) {
+        if let KeyCode::Char(c) = key.code {
+            // Ctrl+Shift+T: cycle provider (check SHIFT before per-char match).
+            if c == 't' && key.modifiers.intersects(KeyModifiers::SHIFT) {
+                return (
+                    State::Streaming(state),
+                    vec![Effect::CycleProvider, Effect::Render],
+                );
+            }
+            match c {
+                // Ctrl+T: cycle model alias.
+                't' => (
+                    State::Streaming(state),
+                    vec![Effect::CycleModel, Effect::Render],
+                ),
+                // Ctrl+B: focus background agent bar.
+                'b' => (
+                    State::Streaming(state),
+                    vec![Effect::FocusBgBar, Effect::Render],
+                ),
+                // Ctrl+O: toggle inline diff.
+                'o' => (
+                    State::Streaming(state),
+                    vec![Effect::ToggleDiff, Effect::Render],
+                ),
+                // Ctrl+P: open Model panel.
+                'p' => (
+                    State::Streaming(state),
+                    vec![Effect::OpenPanel(PanelKind::Model), Effect::Render],
+                ),
+                // Other Ctrl+<char>: render-only (typing handled by keyboard
+                // fallback when is_sm_handled_shortcut returns false).
+                _ => (State::Streaming(state), vec![Effect::Render]),
+            }
+        } else {
+            // Ctrl+non-Char (e.g. Ctrl+Arrow): render-only.
+            (State::Streaming(state), vec![Effect::Render])
+        }
+    } else {
+        match key.code {
+            // BackTab: cycle permission mode.
+            KeyCode::BackTab => (
+                State::Streaming(state),
+                vec![Effect::CyclePermissionMode, Effect::Render],
+            ),
+            // All other keys (plain chars, navigation, Backspace, Enter, Esc):
+            // keyboard fallback owns textarea editing; SM re-renders to make
+            // typed text visible.
+            _ => (State::Streaming(state), vec![Effect::Render]),
         }
     }
 }
@@ -289,5 +363,106 @@ mod tests {
             effects.iter().any(|e| matches!(e, Effect::Render)),
             "AcpDisconnected in Streaming should emit Render"
         );
+    }
+
+    // ── Ctrl-shortcut parity with Idle (panels/toggles reachable) ────────
+
+    #[test]
+    fn test_ctrl_p_opens_model_panel_in_streaming() {
+        // 用户在 agent 流式输出期间也应能打开 Model 面板查看当前模型。
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+        );
+        assert!(matches!(next, State::Streaming(_)));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::OpenPanel(PanelKind::Model))));
+    }
+
+    #[test]
+    fn test_ctrl_t_cycles_model_in_streaming() {
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+        );
+        assert!(matches!(next, State::Streaming(_)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::CycleModel)));
+    }
+
+    #[test]
+    fn test_ctrl_shift_t_cycles_provider_in_streaming() {
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(
+                KeyCode::Char('t'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+        );
+        assert!(matches!(next, State::Streaming(_)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::CycleProvider)));
+    }
+
+    #[test]
+    fn test_ctrl_b_focuses_bg_bar_in_streaming() {
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+        );
+        assert!(matches!(next, State::Streaming(_)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::FocusBgBar)));
+    }
+
+    #[test]
+    fn test_ctrl_o_toggles_diff_in_streaming() {
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+        );
+        assert!(matches!(next, State::Streaming(_)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::ToggleDiff)));
+    }
+
+    #[test]
+    fn test_backtab_cycles_permission_mode_in_streaming() {
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)),
+        );
+        assert!(matches!(next, State::Streaming(_)));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::CyclePermissionMode)));
+    }
+
+    #[test]
+    fn test_plain_char_in_streaming_only_renders() {
+        // 普通 Char 键由 keyboard fallback 处理（textarea 编辑）；
+        // SM 仅触发重绘，不修改 InputState。
+        let mut state = make_state();
+        state.input.insert_str("existing");
+        let (next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+        );
+        match next {
+            State::Streaming(s) => {
+                // SM 不修改 InputState —— textarea 是输入的唯一权威。
+                assert_eq!(s.input.text(), "existing");
+            }
+            _ => panic!("expected Streaming"),
+        }
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Plain char in Streaming should emit Render"
+        );
+        // 不应该有副作用消费方误以为 SM 已处理输入。
+        assert!(effects.iter().all(|e| matches!(e, Effect::Render)));
     }
 }

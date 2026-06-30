@@ -727,6 +727,59 @@ mod tests {
     }
 
     #[test]
+    fn test_text_chunk_appends_to_saved_turn_in_modal() {
+        // Modal 从 Streaming 进入（saved_current_turn = Some）时，TextChunk
+        // 必须追加到 saved_current_turn，而不是丢弃。这保证用户打开 Model
+        // 面板查看配置期间，agent 流式输出仍然累积，ClosePanel 后能恢复。
+        use crate::state_machine::current_turn::CurrentTurn;
+        use peri_acp_types::event_data::TextChunk;
+        let mut turn = CurrentTurn::new();
+        turn.append_text("streaming-so-far");
+        let mut modal = make_interaction_modal(Box::new(NoopHandler));
+        modal.saved_current_turn = Some(turn);
+        let (next, effects) = handle(
+            modal,
+            Event::AcpEvent(AcpEventData::TextChunk(TextChunk {
+                text: " +more".into(),
+                agent_id: None,
+            })),
+        );
+        match next {
+            State::Modal(m) => {
+                let turn = m.saved_current_turn.expect("saved_current_turn preserved");
+                assert_eq!(turn.text, "streaming-so-far +more");
+            }
+            _ => panic!("expected Modal"),
+        }
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "TextChunk with saved_current_turn should emit Render"
+        );
+    }
+
+    #[test]
+    fn test_turn_done_clears_saved_turn_in_modal() {
+        // Modal 期间 agent 完成（TurnDone）：saved_current_turn 应被清空，
+        // 这样 ClosePanel 时 main_loop 检测到 saved_current_turn = None，
+        // 恢复到 Idle 而非 Streaming（与 agent 已完成的事实一致）。
+        use crate::state_machine::current_turn::CurrentTurn;
+        let mut turn = CurrentTurn::new();
+        turn.append_text("finishing");
+        let mut modal = make_interaction_modal(Box::new(NoopHandler));
+        modal.saved_current_turn = Some(turn);
+        let (next, _effects) = handle(modal, Event::AcpEvent(AcpEventData::TurnDone));
+        match next {
+            State::Modal(m) => {
+                assert!(
+                    m.saved_current_turn.is_none(),
+                    "TurnDone in Modal must clear saved_current_turn"
+                );
+            }
+            _ => panic!("expected Modal"),
+        }
+    }
+
+    #[test]
     fn test_panel_close_emits_close_panel_effect() {
         // Betas panel + Esc -> ClosePanel effect (not direct Idle transition).
         // main_loop restores saved_idle to preserve message history.

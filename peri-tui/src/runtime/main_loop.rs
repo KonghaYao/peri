@@ -28,7 +28,7 @@ use crate::runtime::event_channel::{EventRx, TuiEvent};
 use crate::state_machine::state::PanelReadContext;
 use crate::state_machine::{
     handle as state_machine_handle, input::sync::to_textarea, transitions::modal, Event as SmEvent,
-    IdleState, ModalKind, ModalState, State,
+    IdleState, ModalKind, ModalState, State, StreamingState,
 };
 
 /// Target frame interval for loading-spinner animation (~30 FPS).
@@ -328,42 +328,10 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     tracing::info!(session_id = %session_id, "SwitchSession");
                     app.open_thread(session_id);
                     // Close the panel so the user sees the loaded thread.
+                    // SwitchSession always lands in Idle — the new session
+                    // starts fresh even if we were Streaming when the modal
+                    // opened, so saved_current_turn is intentionally dropped.
                     if let State::Modal(modal) = state {
-                        let idle = IdleState {
-                            input: modal.saved_input,
-                            scroll_offset: modal.saved_scroll_offset,
-                            view: modal.saved_view,
-                            double_esc_timer: modal.saved_double_esc_timer,
-                            history_index: modal.saved_history_index,
-                        };
-                        state = State::Idle(idle);
-                    }
-                    needs_render = true;
-                }
-                Effect::OpenPanel(kind) => {
-                    if let State::Idle(idle) = state {
-                        // Save the entire Idle into ModalState.saved_* so that
-                        // view_models() returns the saved view (panels can
-                        // render the underlying message area) and ClosePanel
-                        // can restore it without a side-channel.
-                        let panel = crate::panel::registry::create_panel(kind, app);
-                        state = State::Modal(ModalState {
-                            saved_view: idle.view,
-                            saved_current_turn: None,
-                            saved_input: idle.input,
-                            saved_scroll_offset: idle.scroll_offset,
-                            saved_history_index: idle.history_index,
-                            saved_double_esc_timer: idle.double_esc_timer,
-                            kind: ModalKind::Panel(panel),
-                        });
-                        needs_render = true;
-                    }
-                }
-                Effect::ClosePanel => {
-                    if let State::Modal(modal) = state {
-                        // Restore Idle from ModalState.saved_*. Falls back to
-                        // TextArea snapshot when saved_input is empty (panel
-                        // opened via legacy fallback path).
                         let input = if modal.saved_input.text().is_empty() {
                             crate::state_machine::input::sync::from_textarea(
                                 &app.session_mgr.current().ui.textarea,
@@ -379,6 +347,69 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                             history_index: modal.saved_history_index,
                         };
                         state = State::Idle(idle);
+                    }
+                    needs_render = true;
+                }
+                Effect::OpenPanel(kind) => {
+                    // Open Modal from Idle OR Streaming. When opened from
+                    // Streaming, saved_current_turn = Some(...) preserves
+                    // in-progress streaming data so ClosePanel can restore
+                    // Streaming instead of dropping the agent's output.
+                    let panel = crate::panel::registry::create_panel(kind, app);
+                    if let State::Idle(idle) = state {
+                        state = State::Modal(ModalState {
+                            saved_view: idle.view,
+                            saved_current_turn: None,
+                            saved_input: idle.input,
+                            saved_scroll_offset: idle.scroll_offset,
+                            saved_history_index: idle.history_index,
+                            saved_double_esc_timer: idle.double_esc_timer,
+                            kind: ModalKind::Panel(panel),
+                        });
+                        needs_render = true;
+                    } else if let State::Streaming(s) = state {
+                        state = State::Modal(ModalState {
+                            saved_view: s.view,
+                            saved_current_turn: Some(s.current_turn),
+                            saved_input: s.input,
+                            saved_scroll_offset: s.scroll_offset,
+                            saved_history_index: None,
+                            saved_double_esc_timer: None,
+                            kind: ModalKind::Panel(panel),
+                        });
+                        needs_render = true;
+                    }
+                }
+                Effect::ClosePanel => {
+                    if let State::Modal(modal) = state {
+                        // Restore Idle/Streaming from ModalState.saved_*.
+                        // Falls back to TextArea snapshot when saved_input is
+                        // empty (panel opened via legacy fallback path).
+                        let input = if modal.saved_input.text().is_empty() {
+                            crate::state_machine::input::sync::from_textarea(
+                                &app.session_mgr.current().ui.textarea,
+                            )
+                        } else {
+                            modal.saved_input
+                        };
+                        state = if let Some(turn) = modal.saved_current_turn {
+                            // Modal was opened from Streaming — restore it so
+                            // accumulated streaming progress is preserved.
+                            State::Streaming(StreamingState {
+                                current_turn: turn,
+                                input,
+                                view: modal.saved_view,
+                                scroll_offset: modal.saved_scroll_offset,
+                            })
+                        } else {
+                            State::Idle(IdleState {
+                                input,
+                                scroll_offset: modal.saved_scroll_offset,
+                                view: modal.saved_view,
+                                double_esc_timer: modal.saved_double_esc_timer,
+                                history_index: modal.saved_history_index,
+                            })
+                        };
                         needs_render = true;
                     }
                 }
