@@ -231,3 +231,29 @@
 - step 7c（下窗口）：迁移 `handle_interrupted`（lifecycle.rs:128-179）+ `app/mod.rs` 中断路径（443-455）到 v2 ViewStore helpers。需将 `&State` 或 `&[ViewModel]` 传入处理器（当前只有 `&mut App`）。
 - step 7d（未来）：SM Enter 推送 UserBubble 到 `state.view` + 退役 `agent_submit.rs:47` apply_add_message(user_vm)
 - step 7e（未来）：退役 ~20 个 headless_test 中 `apply_add_message(MessageViewModel::user(...))` 直接 push 模式 → 删除 `view_messages` 字段
+
+---
+
+### cron #20 — 2026-07-01 — step 7d 调研 + 保守实施
+
+**调研工作流 `wjdz1xyqm`**（4 agent：3 trace + 1 synthesize）：
+- trace:handle_interrupted — 调用链 `main_loop → handle_acp_event → handle_acp_notification → handle_agent_event → handle_interrupted`。state 是 main_loop 局部变量（line 50），不传入 dispatch。
+- trace:interrupt_fallback — `interrupt` fallback 路径（app/mod.rs:424-486）**在生产是死代码**（acp_client 始终 Some，line 419 提前返回）。仅测试触发。
+- trace:state_flow — 3 个方案：A 传参 / B App 快照（architecturally regressive）/ C Effect::InterruptRecovery（~50 行，太大）。推荐 A。
+- synthesize:plan — **颠倒依赖顺序确认**：7d 必须先于 7c。理由：若 7c 先做，submit 后第一次 ViewCommit 之前 state.view 无 UserBubble，rposition 返回 None → unwrap_or(0) → 整个视图被清空（regression）。
+
+**step 7d 实施 `745a7020`**（保守版本）：
+- idle.rs Enter 转换（line 252-266）：在构造 StreamingState 前 push `ViewModel::UserBubble(UserBubbleData { text: text.clone() })` 到 `state.view`
+- **保留** `agent_submit.rs:47` 的 `apply_add_message(user_vm)`（不退役）—— 避免中断路径在 7c 完成前回归（view_messages 仍需 UserBubble）
+- 4 个新测试：`test_enter_pushes_userbubble_to_state_view` / `test_enter_does_not_push_userbubble_for_slash_commands` / `test_empty_enter_does_not_push_userbubble` / `test_enter_preserves_prior_view_when_pushing_userbubble`
+- 1053 测试全过（1049 + 4 新）
+
+**ACP view_mapper 验证**：`view_mapper.rs:186` 确认 ACP 层在 ViewCommit 中**会**生成 UserBubble，因此 SM 推送的 raw-text placeholder 会在第一次 ViewCommit 时被 wholesale 替换为 canonical UserBubble（含附件格式化）。短暂闪烁与 v1 view_messages 现有行为一致。
+
+**step 7c 详细执行计划**（cron #21+）：
+- 方案 A（传 `&[ViewModel]` 参数）~30-40 行，触及 7 文件
+- 关键风险 1：ToolCard (v2) vs ToolCallGroup|ToolBlock (v1) 语义匹配验证（view_mapper 已扁平化 ToolCallGroup 为多个 ToolCard，应该匹配）
+- 关键风险 2：current_turn 数据丢失 —— 早期中断期间 current_turn 中的 ToolCard 未包含在 state.view_models()（仅 committed base），需用 for_render() 复合切片（committed + current_turn）
+- 关键风险 3：interrupt fallback 是死代码 —— 工作流建议直接删除（acp_client 始终 Some）
+
+---

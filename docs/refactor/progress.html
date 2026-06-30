@@ -114,13 +114,14 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #18（Phase 2.6 step 6 — SubAgentGroup view_messages 路径全部退役）<br>
-  <strong>本窗口成果</strong>：1 个本地 commit（不 push）：<br>
-  · <code>b5db7dbe</code> <strong>refactor：Phase 2.6 step 6 — SubAgentGroup view_messages 路径全部退役</strong>。删除 handle_subagent_start / SubAgentEnd / BackgroundTaskCompleted 三个写位点 + ToolBlock 回退路径（净减 832 行）。生产渲染完全通过 <code>SessionSubAgentProbe</code> 从 <code>SubAgentStatusMap</code> 读取运行时状态（is_running / total_steps / final_result / child_messages）。7 个 v1 测试退役（test_subagent_group_basic/sliding_window/assistant_chunk、test_background_task_notification、test_subagent_group_preserved_after_done_reconcile、test_diagnostic_bg/fork_plus_background_*）+ bg_diag_count_subagent_groups/bg_diag_print_vms 辅助函数。<code>HeadlessHandle::render</code> 从 subagent_status 合成 v2 SubAgentGroup 占位符（headless 路径无 ACP ViewCommit，需手动注入让 probe 流经）。1041 测试全过<br>
-  <strong>关键突破</strong>：SubAgentGroup 渲染路径完全脱离 view_messages。view_messages 对 SubAgentGroup 完全只读（生产）/不写（任何路径）。所有 SubAgent 状态变更（start / foreground complete / background complete / step / text accumulation）统一写入 <code>SubAgentStatusMap</code> 权威源<br>
-  <strong>当前状态</strong>：1041 测试全过 · SystemNote / SubAgentGroup 渲染路径均已脱离 view_messages 写入侧 · 待办：剩余 UserBubble / AssistantBubble / ToolBlock 仍在写 view_messages（3 处 <code>apply_add_message</code> 调用 + <code>apply_rebuild_all</code>）<br>
-  <strong>已知限制</strong>：① <code>handle_done</code> / <code>handle_interrupted</code> 仍读 view_messages 找 UserBubble 索引（需迁移到 v2 ViewStore）② <code>apply_add_message</code> 仍由 agent_submit（UserBubble）/ agent_ops::mod（ToolBlock）/ agent_ops::lifecycle（AssistantBubble）调用 ③ <code>apply_rebuild_all</code> 仍直接写 view_messages（Phase 5 退役）<br>
-  <strong>下一步</strong>：① Phase 2.6 step 7 — 退役 <code>apply_add_message</code>（UserBubble 改为 submit 时 push 到 v2 ViewStore）② Phase 2.6 step 8 — 退役 <code>apply_rebuild_all</code>（ViewCommit 替换语义已就绪）③ Phase 2.6 step 9 — 删除 <code>view_messages</code> 字段 + <code>handle_done/interrupted</code> 改读 v2 ViewStore
+  <strong>最后更新</strong>：2026-07-01 cron #20（Phase 2.6 step 7d — SM Enter 推送 UserBubble 到 state.view）<br>
+  <strong>本窗口成果</strong>：调研工作流 + 1 个本地 commit（不 push）：<br>
+  · 工作流 <code>wjdz1xyqm</code>（4 agent：3 trace call chain + 1 synthesize design）。<strong>关键决策</strong>：颠倒依赖顺序 — 7d 必须先于 7c（否则 submit 后第一次 ViewCommit 之前 state.view 无 UserBubble → 早期中断清空整个视图，regression）。<br>
+  · <code>745a7020</code> <strong>feat：Phase 2.6 step 7d（保守版本）— SM Enter 推送 UserBubble 到 state.view</strong>。idle.rs Enter 转换（line 252-266）在构造 StreamingState 前 push <code>ViewModel::UserBubble(UserBubbleData { text: text.clone() })</code>。<strong>保留</strong> <code>agent_submit.rs:47</code> v1 推送（避免破坏中断路径直到 7c 完成）。4 个新测试：test_enter_pushes_userbubble_to_state_view / test_enter_does_not_push_userbubble_for_slash_commands / test_empty_enter_does_not_push_userbubble / test_enter_preserves_prior_view_when_pushing_userbubble。1053 测试全过（1049 + 4 新）<br>
+  <strong>关键突破</strong>：v2 SM Enter 关闭了 cron #19 文档记录的潜在 bug —— state.view 在 submit 立即包含 UserBubble，不再等待第一次 ACP ViewCommit 回声。生产渲染立即显示用户消息。<br>
+  <strong>当前状态</strong>：1053 测试全过 · state.view 包含 UserBubble（v2 路径就绪）· view_messages 仍包含 UserBubble（v1 中断路径兼容）<br>
+  <strong>已知限制</strong>：① <code>handle_interrupted</code> / <code>app/mod.rs interrupt fallback</code> 仍扫描 view_messages 找 UserBubble（step 7c 待迁移）② <code>agent_submit.rs:47</code> 仍推送 UserBubble 到 view_messages（step 7c 完成后退役）③ <code>app/mod.rs:424-486 interrupt fallback</code> 是生产死代码（acp_client 始终 Some）— step 7c 建议直接删除<br>
+  <strong>下一步</strong>：① Phase 2.6 step 7c（cron #21+）— 工作流 wjdz1xyqm 已敲定方案 A（传 <code>&[ViewModel]</code> 参数）<code>main_loop → handle_acp_event → handle_acp_notification → handle_agent_event → handle_interrupted</code>（~30-40 行，7 文件）。关键风险：ToolCard (v2) vs ToolCallGroup|ToolBlock (v1) 语义匹配验证 + current_turn 数据丢失（需 for_render() 复合切片 committed + current_turn）+ interrupt fallback 是死代码（建议删除）② Phase 2.6 step 7c-after — 退役 <code>agent_submit.rs:47</code> apply_add_message(user_vm) + 重算 round_start_vm_idx ③ Phase 2.6 step 7e — 退役 ~20 个 headless_test 中 apply_add_message 直接 push 模式 → 删除 view_messages 字段
 </div>
 
 </body>
