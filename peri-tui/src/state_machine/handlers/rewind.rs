@@ -1,8 +1,7 @@
 //! Rewind preview handler.
 //!
-//! Wraps a [`peri_acp_types::event_data::RewindPreview`] payload. The P2 stub
-//! implements [`crate::state_machine::state::Handler`] with no real key
-//! dispatch -- the actual rewind-confirmation UI logic lands in P3.
+//! Wraps a [`peri_acp_types::event_data::RewindPreview`] payload and
+//! dispatches confirm/cancel keys (Enter/y = submit, Esc/n/q = dismiss).
 
 use peri_acp_types::event_data::RewindPreview;
 
@@ -25,9 +24,14 @@ impl RewindHandler {
 impl Handler for RewindHandler {
     fn render(&self, _area: (u16, u16)) {}
 
-    fn handle_key(&mut self, _key: char) -> HandlerOutput {
-        // P3 will dispatch Enter / Esc for confirm / cancel.
-        HandlerOutput::Nothing
+    fn handle_key(&mut self, key: char) -> HandlerOutput {
+        match key {
+            // Enter, y, Y → confirm rewind
+            '\n' | '\r' | 'y' | 'Y' => HandlerOutput::Submit("confirmed".to_string()),
+            // Esc, n, N, q, Q → dismiss
+            '\x1b' | 'n' | 'N' | 'q' | 'Q' => HandlerOutput::Dismiss,
+            _ => HandlerOutput::Nothing,
+        }
     }
 }
 
@@ -49,8 +53,38 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_key_returns_nothing() {
+    fn test_handle_key_enter_confirms() {
         let mut h = RewindHandler::new(make_preview());
-        assert_eq!(h.handle_key('\n'), HandlerOutput::Nothing);
+        assert_eq!(
+            h.handle_key('\n'),
+            HandlerOutput::Submit("confirmed".to_string())
+        );
+    }
+
+    #[test]
+    fn test_handle_key_y_confirms() {
+        let mut h = RewindHandler::new(make_preview());
+        assert_eq!(
+            h.handle_key('y'),
+            HandlerOutput::Submit("confirmed".to_string())
+        );
+    }
+
+    #[test]
+    fn test_handle_key_esc_dismisses() {
+        let mut h = RewindHandler::new(make_preview());
+        assert_eq!(h.handle_key('\x1b'), HandlerOutput::Dismiss);
+    }
+
+    #[test]
+    fn test_handle_key_n_dismisses() {
+        let mut h = RewindHandler::new(make_preview());
+        assert_eq!(h.handle_key('n'), HandlerOutput::Dismiss);
+    }
+
+    #[test]
+    fn test_handle_key_other_is_nothing() {
+        let mut h = RewindHandler::new(make_preview());
+        assert_eq!(h.handle_key('x'), HandlerOutput::Nothing);
     }
 }
