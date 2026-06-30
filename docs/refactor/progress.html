@@ -75,7 +75,7 @@
     <tr><td>1.4</td><td>实现 Handler.render() + 删除 v1 popup</td><td class="status s-done">完成（4/4 Handlers）</td><td>1.4-rewind：Handler trait 加 desired_height；draw_now 打通 ModalKind::Interaction 渲染入口；RewindHandler 实现 render + desired_height（commit <code>654d5999</code>）。1.4-hitl：HitlHandler 实现 render（BorderedPanel + 工具项 + cursor 高亮 + 输入预览）+ truncate_chars/format_input_preview（commit <code>daba127d</code>）。1.4-ask_user：AskUserHandler 实现 render（BorderedPanel + Tab 头部 ☐/✔ + 编号选项 ❯ ● + 描述行 + 差异化 hint）+ is_selected/render_tab_header 辅助（commit <code>89738a7e</code>）。1.4-oauth：OauthHandler 实现 render（BorderedPanel THINKING 色 + URL 高亮 SAGE/DarkGray + url_opened 状态反馈 ✓ Opened + 紧凑 8 行布局）+ 10 个新测试（commit <code>ee9fe41c</code>）。4 个 Handler 全部接入 desired_height，draw_now 中 v2_panel_height match 双分支（Panel/Interaction）。998 测试全过。</td></tr>
     <tr><td>1.5</td><td>修复 Modal 期间 AcpEvent 丢弃</td><td class="status s-done">完成</td><td>1.5a：ModalState 改 struct 持 saved_view/saved_input/saved_*/kind ✓；1.5b：modal.rs handle() 处理 AcpEvent（ViewCommit 更新 saved_view，TextChunk 等更新 saved_current_turn，TurnDone 清空）✓；1.5c：Streaming→Modal 可达 + saved_current_turn 恢复（commit <code>fa8d68c5</code>）</td></tr>
     <tr><td>1.6</td><td>Streaming→Modal 可达 + Status 事件</td><td class="status s-done">1.6a 完成</td><td>1.6a：streaming.rs handle_key 镜像 Idle 的 Ctrl 快捷键（Ctrl+P/T/B/O/Shift+T/BackTab），main_loop OpenPanel 接受 Streaming 入口，ClosePanel 检测 saved_current_turn 恢复 Streaming ✓；1.6b：§4.3 status 事件（TokenUsage/ToolCount/Progress）状态栏渲染（推迟到状态栏重构）</td></tr>
-    <tr><td>2</td><td>消息源单一化</td><td class="status s-active">2.1-2.5 完成 / 2.3 完整 / 2.6 待开始</td><td>2.1 ✓ · 2.2 ✓ render 签名扩展 · 2.3 ✓ 基础设施（<code>ac07ba40</code>）+ 渲染注入（<code>68a991da</code>，thread-local probe） · 2.4 ✓ Event::PushSystemNote · 2.5 ✓ ViewCommit SystemNote 保留（<code>cbe303db</code>）+ App-method drain（<code>72d2f8db</code>） · 2.6 删 view_messages 字段（最终目标，需 v2 渲染切换）。详见 <code>docs/refactor/phase2-migration-plan.md</code></td></tr>
+    <tr><td>2</td><td>消息源单一化</td><td class="status s-active">2.1-2.5 完成 / 2.6 step 1-5 完成</td><td>2.1 ✓ · 2.2 ✓ render 签名扩展 · 2.3 ✓ 基础设施（<code>ac07ba40</code>）+ 渲染注入（<code>68a991da</code>，thread-local probe） · 2.4 ✓ Event::PushSystemNote · 2.5 ✓ ViewCommit SystemNote 保留（<code>cbe303db</code>）+ App-method drain（<code>72d2f8db</code>） · 2.6 step 1-4 ✓ SubAgent 子内容路由到 child_messages + legacy_children 退役（<code>ad2bc477</code>）· 2.6 step 5 ✓ SystemNote 推送统一到 push_system_note（<code>2ccaf550</code>，view_messages.push 分支删除）。剩余：step 6 删 SubAgentGroup 推送 + Phase 5 apply_rebuild_all 退役 → view_messages 字段最终删除</td></tr>
     <tr><td>3</td><td>清理死 Effect + Switching</td><td class="status s-active">Phase 3a/3b 完成</td><td>3a：5 个真死 Effect 删除 ✓；3b：modal.rs TLS stubs → #[cfg(test)] ✓（handle/dispatch_key/dispatch_mouse_tls/dispatch_paste_tls/transition_to_idle*/TLS statics 全部 test-only，state_machine::handle Modal arm 改为生产 no-op + 测试 dispatch）；3c：State::Switching 完善（推迟到独立窗口）</td></tr>
     <tr><td>4</td><td>CLAUDE.md 同步</td><td class="status s-done">完成</td><td>peri-tui/CLAUDE.md 重写（删 message_pipeline/RenderThread/ephemeral_notes + 加 v2 架构说明 + 双轨弹窗系统 + v2 PanelState trait 14 面板）· 根 CLAUDE.md Effect 数 32 → 26（全变体列表）+ Phase 1.3-1.4 进度引用 + 测试 891 → 998（commit <code>b3191bed</code>）</td></tr>
   </tbody>
@@ -114,18 +114,19 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #16（Phase 2.6 step 4 — legacy_children 兼容源退役）<br>
-  <strong>本窗口成果</strong>：6 个本地 commit（均不 push）：<br>
+  <strong>最后更新</strong>：2026-07-01 cron #17（Phase 2.6 step 5 — SystemNote 推送统一到 push_system_note）<br>
+  <strong>本窗口成果</strong>：7 个本地 commit（均不 push）：<br>
   · <code>e5baf086</code> feat：AssistantChunk 变为 struct 变体携带 <code>source_agent_id</code><br>
   · <code>0b2a9d2c</code> <strong>refactor：Phase 2.5 完成 — ephemeral_notes 锚点退役</strong>（净减 281 行）<br>
   · <code>4f209bb8</code> docs：Phase 2.5 dashboard 同步<br>
   · <code>7fb164a5</code> <strong>feat：Phase 2.6 step 3 — 子 Agent 文本流路由</strong>。新增 <code>SubAgentStatusMap::append_child_text</code> + acp_bridge 解析 <code>content.text</code><br>
   · <code>334d8168</code> docs：Phase 2.6 step 3 dashboard<br>
   · <code>ad2bc477</code> <strong>refactor：Phase 2.6 step 4 — legacy_children 兼容源退役</strong>。Phase 2.6 step 1-3 已完成子 Agent 内容流完整路由（工具+文本）到 <code>child_messages</code> 权威源。legacy_children（从 v1 view_messages.SubAgentGroup.recent_messages 提取）在生产中永久为空（v1 设计如此），从未实际被读取。变更：① 删除 <code>SessionSubAgentProbe.legacy_children</code> 字段 ② 删除 <code>from_view_messages</code> 方法，新增 <code>new(status)</code> 简单构造 ③ 简化 <code>SubAgentStatusProbe</code> impl 仅读 <code>child_messages</code> ④ 3 个调用点同步（runtime/apply_context + ui/headless + headless_test）⑤ 5 个 legacy 测试重写为 3 个权威源测试。净减 149 行<br>
-  <strong>关键突破</strong>：<code>SessionSubAgentProbe</code> 现在是单字段包装（仅 <code>status: SubAgentStatusMap</code>），子内容来源<strong>唯一权威源</strong> = <code>child_messages</code>。v1 <code>view_messages</code> 在 SubAgent 渲染路径中完全切断<br>
-  <strong>当前状态</strong>：1048 测试全过 · v2 SubAgent 渲染路径完全脱离 view_messages · workflow 调研 view_messages 完整退役剩余工作运行中<br>
-  <strong>已知限制</strong>：① view_messages 中 SubAgentGroup 头部仍由 v1 <code>handle_subagent_start</code> 创建（待 workflow 调研后制定退役计划）② AiReasoning 子 Agent 流式不可见（需 ACP 层 mapper 携带 source_agent_id）<br>
-  <strong>下一步</strong>：① workflow 调研完成后，按计划逐步退役 view_messages 字段（预计 3-5 个 phase）② 删除 <code>handle_subagent_start</code> 的 <code>apply_add_message(SubAgentGroup)</code> 推送 ③ view_messages 完全删除
+  · <code>2ccaf550</code> <strong>refactor：Phase 2.6 step 5 — SystemNote 推送统一到 push_system_note</strong>。15 处推送点统一改为 <code>push_system_note</code> 调用（agent_submit ×2 / agent_compact ×3 / agent_events_oauth ×3 / agent_ops::lifecycle ×3 / agent_ops::subagent ×1 / main_loop ×2 / setup_wizard ×1）。<code>MessageState::push_system_note</code> 删除 <code>view_messages.push</code> 分支，仅入 <code>pending_v2_notes</code> 队列。SystemNote 不再写 view_messages，全部通过 <code>pending_v2_notes → Event::PushSystemNote → state.view</code> 单一路径到达生产渲染源。净减 26 行<br>
+  <strong>关键突破</strong>：SystemNote 渲染路径完全脱离 view_messages。view_messages 对 SystemNote 完全只读，SystemNote 仅由 v2 <code>state.view</code> 单一路径渲染<br>
+  <strong>当前状态</strong>：1048 测试全过 · SystemNote / SubAgent 子内容渲染路径均已脱离 view_messages · 待办：剩余 UserBubble/AssistantBubble/ToolBlock 仍在写 view_messages（需等 apply_rebuild_all 退役）<br>
+  <strong>已知限制</strong>：① view_messages 中 SubAgentGroup 头部仍由 v1 <code>handle_subagent_start</code> 创建 ② <code>handle_done</code> / <code>handle_interrupted</code> 仍读 view_messages 找 UserBubble 索引（需迁移到 v2 ViewStore）③ <code>apply_rebuild_all</code> 仍直接写 view_messages（Phase 5 退役）<br>
+  <strong>下一步</strong>：① Phase 2.6 step 6 — 删除 <code>handle_subagent_start</code> 的 <code>apply_add_message(SubAgentGroup)</code> 推送 ② Phase 3 — SubAgentGroup 突变迁移到 SubAgentStatusMap ③ Phase 5 — <code>apply_rebuild_all</code> 退役 + view_messages 字段最终删除
 </div>
 
 </body>
