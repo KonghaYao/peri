@@ -84,11 +84,18 @@ impl HeadlessHandle {
 
     /// 等待渲染 + 绘制到 TestBackend（便捷组合）
     ///
-    /// 等效于 `handle.wait_for_render().await; handle.terminal.draw(|f| main_ui::render(f, &mut app, None, None))`。
+    /// 从 `app.session_mgr.current().messages.view_messages` 通过 `vm_convert`
+    /// 构造 v2 ViewModels，让测试走与生产一致的 v2 渲染路径（而非 legacy
+    /// `None` fallback）。这样 headless 测试也覆盖 vm_convert + v2 render
+    /// 的完整链路。
     pub async fn render(&mut self, app: &mut App) -> Result<()> {
         self.wait_for_render().await;
+        let v2_vms: Vec<peri_acp_types::view_model::ViewModel> =
+            crate::render::vm_convert::message_view_models_to_v2(
+                &app.session_mgr.current().messages.view_messages,
+            );
         self.terminal
-            .draw(|f| main_ui::render(f, app, None, None))?;
+            .draw(|f| main_ui::render(f, app, None, Some(&v2_vms)))?;
         Ok(())
     }
 
