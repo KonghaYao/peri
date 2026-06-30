@@ -231,41 +231,49 @@ impl<'a> ApplyContext<'a> {
             }
         }
         let v2_vms_ref: &[peri_acp_types::view_model::ViewModel] = &v2_vms;
-        if let Err(e) = self.terminal.draw(|f| {
-            // Pre-compute v2 modal height (Panel or Interaction) so legacy
-            // layout reserves space. Both kinds expose `desired_height`.
-            let v2_panel_height = match &*state {
-                State::Modal(ModalState {
-                    kind: ModalKind::Panel(panel),
-                    ..
-                }) => Some(panel.desired_height(f.area().height, f.area().width)),
-                State::Modal(ModalState {
-                    kind: ModalKind::Interaction(handler),
-                    ..
-                }) => Some(handler.desired_height(f.area().height, f.area().width)),
-                _ => None,
-            };
-            ui::main_ui::render(f, app, v2_panel_height, Some(v2_vms_ref));
-            // v2 Modal overlay: render in the area reserved by the layout.
-            // Both Panel and Interaction variants read panel_area (set by
-            // render_session_column when v2_panel_height is Some).
-            if let State::Modal(ModalState { kind, .. }) = state {
-                let area = app
-                    .session_mgr
-                    .current()
-                    .ui
-                    .panel_area
-                    .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24));
-                match kind {
-                    ModalKind::Panel(panel) => {
-                        panel.render(f, area, &build_v2_panel_read_context(app, &view_models));
-                    }
-                    ModalKind::Interaction(handler) => {
-                        handler.render(f, area);
+        // Phase 2.3 step 8: 构造 SubAgent status probe 快照，让 v2 render_subagent_group
+        // 通过 agent_id 查询运行时状态（DTO 缺失字段由此注入）。
+        // Clone 避免 lifetime 与 &mut App 冲突；HashMap 通常几十 entry，开销可接受。
+        let status_probe: std::rc::Rc<dyn crate::render::view_render::SubAgentStatusProbe> =
+            std::rc::Rc::new(app.session_mgr.current().subagent_status.clone());
+        let draw_result = crate::render::view_render::with_status_probe(status_probe, || {
+            self.terminal.draw(|f| {
+                // Pre-compute v2 modal height (Panel or Interaction) so legacy
+                // layout reserves space. Both kinds expose `desired_height`.
+                let v2_panel_height = match &*state {
+                    State::Modal(ModalState {
+                        kind: ModalKind::Panel(panel),
+                        ..
+                    }) => Some(panel.desired_height(f.area().height, f.area().width)),
+                    State::Modal(ModalState {
+                        kind: ModalKind::Interaction(handler),
+                        ..
+                    }) => Some(handler.desired_height(f.area().height, f.area().width)),
+                    _ => None,
+                };
+                ui::main_ui::render(f, app, v2_panel_height, Some(v2_vms_ref));
+                // v2 Modal overlay: render in the area reserved by the layout.
+                // Both Panel and Interaction variants read panel_area (set by
+                // render_session_column when v2_panel_height is Some).
+                if let State::Modal(ModalState { kind, .. }) = state {
+                    let area = app
+                        .session_mgr
+                        .current()
+                        .ui
+                        .panel_area
+                        .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24));
+                    match kind {
+                        ModalKind::Panel(panel) => {
+                            panel.render(f, area, &build_v2_panel_read_context(app, &view_models));
+                        }
+                        ModalKind::Interaction(handler) => {
+                            handler.render(f, area);
+                        }
                     }
                 }
-            }
-        }) {
+            })
+        });
+        if let Err(e) = draw_result {
             warn!(error = %e, "terminal draw failed");
         }
         *last_render = Instant::now();

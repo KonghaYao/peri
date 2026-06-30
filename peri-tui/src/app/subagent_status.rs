@@ -27,7 +27,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// SubAgent 运行时状态（7 字段）。由 TUI 事件实时维护，独立于 ACP ViewCommit。
+use crate::render::view_render::{SubAgentRenderInfo, SubAgentStatusProbe};
+
+/// SubAgent 运行时状态（8 字段）。由 TUI 事件实时维护，独立于 ACP ViewCommit。
 #[derive(Clone, Debug)]
 pub struct SubAgentStatus {
     /// 是否仍在运行（false = 已完成或取消）
@@ -40,8 +42,12 @@ pub struct SubAgentStatus {
     pub total_steps: usize,
     /// 是否为后台 agent（影响 UI 折叠行为）
     pub is_background: bool,
-    /// 任务预览（启动时携带，用于回退路径匹配）
+    /// 任务预览（启动时携带）
     pub task_preview: String,
+    /// Subagent 类型（"fork" / "researcher" 等；对应 v2 DTO 的 agent_id）。
+    /// v2 ViewCommit 中 SubAgentGroupData 没有 instance_id 字段，
+    /// 渲染时需要通过 agent_id 查询运行时状态（按 started_at 倒序匹配）。
+    pub agent_id: String,
     /// 启动时间（用于 TTL + 回退路径排序）
     pub started_at: Instant,
     /// 完成时间（None = 仍在运行或被取消）
@@ -62,6 +68,7 @@ impl SubAgentStatus {
 ///
 /// key = `instance_id`（SubAgentStart 携带的唯一标识）。
 /// 回退路径用 `agent_id` 匹配，按 `started_at` 倒序。
+#[derive(Clone)]
 pub struct SubAgentStatusMap {
     inner: HashMap<String, SubAgentStatus>,
     max_capacity: usize,
@@ -97,7 +104,13 @@ impl SubAgentStatusMap {
     /// 启动一个 SubAgent —— 注册新 entry，标记 is_running = true。
     ///
     /// 若 `instance_id` 已存在（罕见：重启同一 id），覆盖旧 entry。
-    pub fn start(&mut self, instance_id: String, task_preview: String, is_background: bool) {
+    pub fn start(
+        &mut self,
+        instance_id: String,
+        agent_id: String,
+        task_preview: String,
+        is_background: bool,
+    ) {
         if self.inner.len() >= self.max_capacity && !self.inner.contains_key(&instance_id) {
             self.evict_expired();
             // 仍超容量 → 丢弃最早完成的 entry（保留运行中的）
@@ -114,6 +127,7 @@ impl SubAgentStatusMap {
                 total_steps: 0,
                 is_background,
                 task_preview,
+                agent_id,
                 started_at: Instant::now(),
                 completed_at: None,
             },
@@ -172,18 +186,37 @@ impl SubAgentStatusMap {
 
     /// 回退路径：只有 agent_id 时，按 `started_at` 倒序返回最近匹配的 entry。
     ///
-    /// 优先返回仍在运行的；若全部完成，返回最近完成的。
-    /// 用于 `BackgroundTaskCompleted` 找不到 `instance_id`（child_thread_id）
-    /// 时按 `agent_name` 回退匹配的场景。
-    pub fn lookup_by_agent_id_fallback(&self, _agent_id: &str) -> Option<&SubAgentStatus> {
-        // SubAgentStatus 当前不存 agent_id（key 是 instance_id），故此回退路径
-        // 由调用方在外部维护的 view_messages 上做（保留 handle_background_task_completed
-        // 既有逻辑）。本方法保留为占位以明确 API 边界。
-        //
-        // 设计权衡：将 agent_id 加入 SubAgentStatus 会引入歧义（同名 agent 多实例），
-        // 而回退路径在生产中极罕见（child_thread_id 几乎总存在）。保留 view_messages
-        // 上的 O(N) 扫描比污染本映射的语义更合理。
-        None
+    /// 优先返回仍在运行的；若全部完成，返回最近完成的。用于：
+    /// - v2 渲染：DTO 只有 agent_id（无 instance_id），需要通过 agent_id 查询运行时状态
+    /// - BackgroundTaskCompleted 找不到 instance_id（child_thread_id）时按 agent_name 回退
+    ///
+    /// **歧义容忍**：同名 agent 多实例时返回最近启动的（仍在运行优先）。
+    pub fn lookup_by_agent_id(&self, agent_id: &str) -> Option<&SubAgentStatus> {
+        let mut best: Option<&SubAgentStatus> = None;
+        for s in self.inner.values() {
+            if s.agent_id != agent_id {
+                continue;
+            }
+            best = Some(match best {
+                None => s,
+                Some(prev) => {
+                    // 优先仍在运行
+                    if s.is_running && !prev.is_running {
+                        s
+                    } else if s.is_running == prev.is_running {
+                        // 同状态 → 比较启动时间，新的优先
+                        if s.started_at > prev.started_at {
+                            s
+                        } else {
+                            prev
+                        }
+                    } else {
+                        prev
+                    }
+                }
+            });
+        }
+        best
     }
 
     /// 清理所有过期 entry（completed_at + TTL < now）。
@@ -223,6 +256,25 @@ impl SubAgentStatusMap {
 }
 
 // ---------------------------------------------------------------------------
+// SubAgentStatusProbe 实现（供 v2 render_subagent_group 通过 agent_id 查询）
+// ---------------------------------------------------------------------------
+
+impl SubAgentStatusProbe for SubAgentStatusMap {
+    fn lookup_by_agent_id(&self, agent_id: &str) -> Option<SubAgentRenderInfo> {
+        // 先清理过期项（轻量查询时也触发 evict，避免缓存陈旧）
+        // 注：lookup 是 &self，无法直接调 evict_expired（&mut self）。
+        // 改为返回结果时由调用方周期性 evict（draw_now 中不调，但 main_loop
+        // 每帧 cleanup_agent_state 时调）。这里直接查询即可。
+        SubAgentStatusMap::lookup_by_agent_id(self, agent_id).map(|s| SubAgentRenderInfo {
+            is_running: s.is_running,
+            is_error: s.is_error,
+            total_steps: s.total_steps,
+            final_result: s.final_result.clone(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -233,7 +285,7 @@ mod tests {
     #[test]
     fn test_start_registers_running_entry() {
         let mut map = SubAgentStatusMap::new();
-        map.start("inst-1".into(), "do thing".into(), false);
+        map.start("inst-1".into(), "fork".into(), "do thing".into(), false);
         let s = map.lookup("inst-1").expect("entry should exist");
         assert!(s.is_running);
         assert!(!s.is_background);
@@ -245,7 +297,7 @@ mod tests {
     #[test]
     fn test_complete_foreground_marks_done() {
         let mut map = SubAgentStatusMap::new();
-        map.start("inst-1".into(), "task".into(), false);
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
         map.complete_foreground("inst-1", "ok".into(), false);
         let s = map.lookup("inst-1").expect("entry exists");
         assert!(!s.is_running);
@@ -257,7 +309,7 @@ mod tests {
     #[test]
     fn test_complete_background_sets_total_steps() {
         let mut map = SubAgentStatusMap::new();
-        map.start("bg-1".into(), "bg task".into(), true);
+        map.start("bg-1".into(), "fork".into(), "bg task".into(), true);
         // 后台期间通过 incr_tool_step 累积（可选）
         map.incr_tool_step("bg-1");
         map.incr_tool_step("bg-1");
@@ -272,7 +324,7 @@ mod tests {
     #[test]
     fn test_mark_cancelled_not_error() {
         let mut map = SubAgentStatusMap::new();
-        map.start("inst-1".into(), "task".into(), false);
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
         map.mark_cancelled("inst-1");
         let s = map.lookup("inst-1").expect("entry exists");
         assert!(!s.is_running);
@@ -285,7 +337,7 @@ mod tests {
         let mut map = SubAgentStatusMap::new();
         map.ttl = Duration::from_millis(10);
 
-        map.start("inst-1".into(), "task".into(), false);
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
         map.complete_foreground("inst-1", "ok".into(), false);
         // 等待过期
         std::thread::sleep(Duration::from_millis(20));
@@ -299,7 +351,7 @@ mod tests {
         let mut map = SubAgentStatusMap::new();
         map.ttl = Duration::from_millis(10);
 
-        map.start("running-1".into(), "task".into(), false);
+        map.start("running-1".into(), "fork".into(), "task".into(), false);
         std::thread::sleep(Duration::from_millis(20));
         let evicted = map.evict_expired();
         assert_eq!(evicted, 0, "运行中的 entry 不应过期");
@@ -311,15 +363,15 @@ mod tests {
         let mut map = SubAgentStatusMap::new();
         map.max_capacity = 2;
 
-        map.start("a".into(), "task a".into(), false);
+        map.start("a".into(), "fork".into(), "task a".into(), false);
         map.complete_foreground("a", "done a".into(), false);
         // 给 a 一个明显早的 completed_at
         if let Some(s) = map.inner.get_mut("a") {
             s.completed_at = Some(Instant::now() - Duration::from_secs(100));
         }
 
-        map.start("b".into(), "task b".into(), false);
-        map.start("c".into(), "task c".into(), false);
+        map.start("b".into(), "fork".into(), "task b".into(), false);
+        map.start("c".into(), "fork".into(), "task c".into(), false);
 
         // 触发 evict —— a 应被丢弃（最早完成的）
         assert!(map.lookup("a").is_none(), "最早完成的应被丢弃");
@@ -330,8 +382,8 @@ mod tests {
     #[test]
     fn test_clear_removes_all() {
         let mut map = SubAgentStatusMap::new();
-        map.start("a".into(), "task a".into(), false);
-        map.start("b".into(), "task b".into(), true);
+        map.start("a".into(), "fork".into(), "task a".into(), false);
+        map.start("b".into(), "fork".into(), "task b".into(), true);
         assert_eq!(map.len(), 2);
 
         map.clear();
@@ -355,12 +407,12 @@ mod tests {
     #[test]
     fn test_start_overwrites_existing() {
         let mut map = SubAgentStatusMap::new();
-        map.start("inst-1".into(), "first".into(), false);
+        map.start("inst-1".into(), "fork".into(), "first".into(), false);
         map.complete_foreground("inst-1", "first done".into(), false);
         assert_eq!(map.lookup("inst-1").unwrap().task_preview, "first");
 
         // 重启同一 instance_id（罕见，但需优雅处理）
-        map.start("inst-1".into(), "second".into(), true);
+        map.start("inst-1".into(), "fork".into(), "second".into(), true);
         let s = map.lookup("inst-1").unwrap();
         assert_eq!(s.task_preview, "second");
         assert!(s.is_running, "重启后应标记为运行中");
@@ -370,9 +422,66 @@ mod tests {
     #[test]
     fn test_iter_visits_all() {
         let mut map = SubAgentStatusMap::new();
-        map.start("a".into(), "task a".into(), false);
-        map.start("b".into(), "task b".into(), true);
+        map.start("a".into(), "fork".into(), "task a".into(), false);
+        map.start("b".into(), "fork".into(), "task b".into(), true);
         let count = map.iter().count();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_lookup_by_agent_id_returns_running_priority() {
+        let mut map = SubAgentStatusMap::new();
+        // a-1 已完成
+        map.start("a-1".into(), "fork".into(), "first".into(), false);
+        map.complete_foreground("a-1", "done".into(), false);
+        // a-2 仍在运行
+        map.start("a-2".into(), "fork".into(), "second".into(), false);
+
+        // 按 agent_id="fork" 查询 → 优先返回运行中的 a-2
+        let s = map.lookup_by_agent_id("fork").expect("应找到匹配");
+        assert!(s.is_running, "应优先返回运行中的");
+        assert_eq!(s.task_preview, "second");
+    }
+
+    #[test]
+    fn test_lookup_by_agent_id_returns_most_recent_when_all_done() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("a-1".into(), "fork".into(), "first".into(), false);
+        map.complete_foreground("a-1", "done-1".into(), false);
+        // 短暂延迟保证 started_at 不同
+        std::thread::sleep(Duration::from_millis(2));
+        map.start("a-2".into(), "fork".into(), "second".into(), false);
+        map.complete_foreground("a-2", "done-2".into(), false);
+
+        // 全部完成 → 返回最近完成的 a-2
+        let s = map.lookup_by_agent_id("fork").expect("应找到匹配");
+        assert!(!s.is_running);
+        assert_eq!(s.task_preview, "second", "应返回最近启动的");
+    }
+
+    #[test]
+    fn test_lookup_by_agent_id_missing_returns_none() {
+        let map = SubAgentStatusMap::new();
+        assert!(map.lookup_by_agent_id("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_lookup_by_agent_id_distinct_types() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("a".into(), "fork".into(), "fork task".into(), false);
+        map.start(
+            "b".into(),
+            "researcher".into(),
+            "research task".into(),
+            false,
+        );
+
+        let fork = map.lookup_by_agent_id("fork").expect("fork 应匹配");
+        assert_eq!(fork.task_preview, "fork task");
+
+        let researcher = map
+            .lookup_by_agent_id("researcher")
+            .expect("researcher 应匹配");
+        assert_eq!(researcher.task_preview, "research task");
     }
 }

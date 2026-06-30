@@ -4,6 +4,9 @@
 //! 处理全部 7 种 `peri_acp_types::view_model::ViewModel` 变体。
 //! 零副作用，不持有缓存——markdown 每帧重新解析。
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -15,6 +18,54 @@ use peri_acp_types::view_model::{
 };
 
 use crate::ui::theme;
+
+// ── SubAgent 运行时状态探针（thread-local） ─────────────────────────────────
+
+/// V2 SubAgentGroup 渲染所需的运行时状态（用于显示 running/done/failed + total_steps）。
+///
+/// 由 app 层通过 [`with_status_probe`] 注入；render_subagent_group 通过
+/// agent_id 查询。对应 v2 DTO `SubAgentGroupData` 缺失的运行时字段。
+#[derive(Clone, Debug, Default)]
+pub struct SubAgentRenderInfo {
+    pub is_running: bool,
+    pub is_error: bool,
+    pub total_steps: usize,
+    pub final_result: Option<String>,
+}
+
+/// V2 SubAgentGroup 状态查询接口。app 层实现并通过 [`with_status_probe`] 设置。
+///
+/// 实现者通常是 `SubAgentStatusMap` 的快照或借用包装。
+pub trait SubAgentStatusProbe {
+    fn lookup_by_agent_id(&self, agent_id: &str) -> Option<SubAgentRenderInfo>;
+}
+
+thread_local! {
+    /// 当前线程的 status probe。draw_now 在调用 terminal.draw 前设置，
+    /// render_subagent_group 通过 lookup_subagent_status 查询。
+    static STATUS_PROBE: RefCell<Option<Rc<dyn SubAgentStatusProbe>>> = const { RefCell::new(None) };
+}
+
+/// 在 closure 内设置 status probe，closure 结束后自动恢复（支持嵌套）。
+///
+/// 典型用法：`draw_now` 中 `with_status_probe(probe, || self.terminal.draw(...))`。
+pub fn with_status_probe<R>(probe: Rc<dyn SubAgentStatusProbe>, f: impl FnOnce() -> R) -> R {
+    let prev = STATUS_PROBE.with(|cell| cell.replace(Some(probe)));
+    let result = f();
+    STATUS_PROBE.with(|cell| {
+        let _ = cell.replace(prev);
+    });
+    result
+}
+
+/// render_subagent_group 内部使用：按 agent_id 查询运行时状态。
+fn lookup_subagent_status(agent_id: &str) -> Option<SubAgentRenderInfo> {
+    STATUS_PROBE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|probe| probe.lookup_by_agent_id(agent_id))
+    })
+}
 
 // ── 公开入口 ──────────────────────────────────────────────────────────────
 
@@ -236,7 +287,10 @@ fn render_subagent_group(
     let agent_color = theme::SAGE;
     let arrow_color = theme::LOADING;
 
-    let mut lines = vec![Line::from(vec![
+    // 查询运行时状态（v2 DTO 缺失字段由 status probe 注入）
+    let status = lookup_subagent_status(&data.agent_id);
+
+    let mut header_spans = vec![
         Span::styled("❯ ", Style::default().fg(arrow_color)),
         Span::styled(
             "Agent".to_string(),
@@ -248,14 +302,45 @@ fn render_subagent_group(
             format!("({})", data.agent_name),
             Style::default().fg(theme::MUTED),
         ),
-    ])];
+    ];
+
+    // 运行时状态指示器
+    if let Some(ref s) = status {
+        if s.is_running {
+            header_spans.push(Span::styled(
+                " · running",
+                Style::default().fg(theme::LOADING),
+            ));
+            if s.total_steps > 0 {
+                header_spans.push(Span::styled(
+                    format!(" · {} steps", s.total_steps),
+                    Style::default().fg(theme::MUTED),
+                ));
+            }
+        } else if s.is_error {
+            header_spans.push(Span::styled(" · failed", Style::default().fg(theme::ERROR)));
+        } else {
+            header_spans.push(Span::styled(" · done", Style::default().fg(theme::SAGE)));
+        }
+    } else if data.view_models.is_empty() {
+        // DTO placeholder（ACP 层 view_mapper 生成的空 SubAgentGroup），
+        // 没有 status probe 或 probe 未命中 → 显示通用 running 提示
+        header_spans.push(Span::styled(
+            " · running...",
+            Style::default().fg(theme::MUTED),
+        ));
+    }
+
+    let mut lines = vec![Line::from(header_spans)];
 
     if data.collapsed {
         let count = data.view_models.len();
-        lines.push(Line::from(vec![Span::styled(
-            format!("  {} items", count),
-            Style::default().fg(theme::MUTED),
-        )]));
+        if count > 0 {
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {} items", count),
+                Style::default().fg(theme::MUTED),
+            )]));
+        }
     } else {
         for inner_vm in &data.view_models {
             let inner_lines = render_v2_vm(inner_vm, width, diff_visible);
@@ -266,6 +351,32 @@ fn render_subagent_group(
                 let mut new_spans = vec![Span::raw("  ")];
                 new_spans.extend(line.spans);
                 lines.push(Line::from(new_spans));
+            }
+        }
+    }
+
+    // 显示 final_result 摘要（如果完成且有结果）
+    if let Some(ref s) = status {
+        if !s.is_running {
+            if let Some(ref result) = s.final_result {
+                let preview: String = result
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(120)
+                    .collect();
+                if !preview.is_empty() {
+                    let color = if s.is_error {
+                        theme::ERROR
+                    } else {
+                        theme::MUTED
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(format!("→ {}", preview), Style::default().fg(color)),
+                    ]));
+                }
             }
         }
     }
@@ -491,6 +602,113 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert!(!lines.is_empty());
+    }
+
+    /// 测试辅助：一个最小 SubAgentStatusProbe，返回固定 SubAgentRenderInfo。
+    struct StaticProbe {
+        info: Option<SubAgentRenderInfo>,
+    }
+    impl SubAgentStatusProbe for StaticProbe {
+        fn lookup_by_agent_id(&self, _agent_id: &str) -> Option<SubAgentRenderInfo> {
+            self.info.clone()
+        }
+    }
+
+    fn collect_text(lines: &[Line]) -> String {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.clone())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[test]
+    fn test_subagent_group_with_running_probe_shows_running() {
+        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+            agent_id: "fork".into(),
+            agent_name: "Agent".into(),
+            view_models: Vec::new(),
+            collapsed: false,
+        });
+        let probe = std::rc::Rc::new(StaticProbe {
+            info: Some(SubAgentRenderInfo {
+                is_running: true,
+                is_error: false,
+                total_steps: 5,
+                final_result: None,
+            }),
+        });
+        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
+        let text = collect_text(&lines);
+        assert!(text.contains("running"), "应显示 running：{}", text);
+        assert!(text.contains("5 steps"), "应显示步数：{}", text);
+    }
+
+    #[test]
+    fn test_subagent_group_with_done_probe_shows_final_result() {
+        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+            agent_id: "fork".into(),
+            agent_name: "Agent".into(),
+            view_models: Vec::new(),
+            collapsed: false,
+        });
+        let probe = std::rc::Rc::new(StaticProbe {
+            info: Some(SubAgentRenderInfo {
+                is_running: false,
+                is_error: false,
+                total_steps: 3,
+                final_result: Some("completed task successfully".into()),
+            }),
+        });
+        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
+        let text = collect_text(&lines);
+        assert!(text.contains("done"), "应显示 done：{}", text);
+        assert!(
+            text.contains("→ completed task"),
+            "应显示结果预览：{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_subagent_group_with_error_probe_shows_failed() {
+        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+            agent_id: "fork".into(),
+            agent_name: "Agent".into(),
+            view_models: Vec::new(),
+            collapsed: false,
+        });
+        let probe = std::rc::Rc::new(StaticProbe {
+            info: Some(SubAgentRenderInfo {
+                is_running: false,
+                is_error: true,
+                total_steps: 2,
+                final_result: Some("Error: tool failed".into()),
+            }),
+        });
+        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
+        let text = collect_text(&lines);
+        assert!(text.contains("failed"), "应显示 failed：{}", text);
+        assert!(text.contains("→ Error"), "应显示错误结果：{}", text);
+    }
+
+    #[test]
+    fn test_subagent_group_without_probe_shows_running_hint() {
+        // 不设置 probe → DTO placeholder 显示 "running..."（无 probe 命中）
+        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+            agent_id: "fork".into(),
+            agent_name: "Agent".into(),
+            view_models: Vec::new(),
+            collapsed: false,
+        });
+        let lines = render_v2_vm(&vm, 80, false);
+        let text = collect_text(&lines);
+        assert!(
+            text.contains("running"),
+            "无 probe 时应显示 running 提示：{}",
+            text
+        );
     }
 
     #[test]

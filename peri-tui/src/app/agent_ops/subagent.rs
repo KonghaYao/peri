@@ -105,6 +105,7 @@ impl App {
         // Phase 2.3: 同步注册到 SubAgentStatusMap（v2 渲染时覆盖 DTO 静态字段）
         self.session_mgr.current_mut().subagent_status.start(
             instance_id.clone(),
+            agent_id.clone(),
             task_preview.clone(),
             is_background,
         );
