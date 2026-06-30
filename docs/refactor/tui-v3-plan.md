@@ -211,3 +211,23 @@
 **风险**：触及核心控制流，可能引入回归。**建议**：先用 Explore agent 全面调研所有 view_messages 读者，再做架构决策（workflow：survey → design → execute）。
 
 **估算**：1 个完整 cron 窗口（15min）调研 + 设计；1 个窗口执行 + 测试。
+
+### 2026-07-01 cron #19 — Phase 2.6 step 7a + 7b 完成
+
+**workflow 调研**：启动 `phase-2-6-step-7-survey` workflow（4 个并行 Explore agent + 1 个 Plan agent 综合设计）。结论：step 7 不能在单一窗口完成（agent_submit.rs:47 的 UserBubble 写入与 handle_interrupted rposition / app/mod.rs 中断 truncate / round_start_vm_idx 不变量紧耦合），建议拆为 7a/7b/7c/7d 四个窗口。
+
+**完成**（2 个本地 commit，均不 push）：
+- `6959003a` refactor：**Phase 2.6 step 7a** — 删除 `apply_rebuild_all` 中 UserBubble 去重分支（死代码）。所有 4 个调用点（agent_compact ×2 / agent_ops::mod ×1 / agent_ops::lifecycle ×1）要么传 `prefix_len=0` 要么传空 tail，dedup 条件 `prefix_len > 0 && !tail.is_empty()` 永远为 false。净减 17 行，零行为变更。1041 测试全过。
+- `8c931318` feat：**Phase 2.6 step 7b** — v2 ViewStore 添加 query helpers。两个 free function（`last_user_bubble_index(view)` / `has_tool_cards_after(view, idx)`）+ 两个 ViewStore method（包装 free function）。8 个新单元测试覆盖 empty / no UserBubble / 多 UserBubble / idx 越界 / 无 ToolCard / 有 ToolCard / 嵌套组忽略 / method 入口。leaf addition 无行为变更。1049 测试全过（+8）。
+
+**设计要点**：
+- free function 形式让调用方可传 `ViewStore.view_models` 或 `state.view_models()`（含 current_turn）任意切片
+- 顶层扫描（与 v1 `view_messages.iter().skip()` 语义一致），不递归到 `SubAgentGroup` / `CollapsedGroup` 内嵌 ToolCard（嵌套组由 `SubAgentStatusMap` 独立管理）
+- 暴露 v2 ViewStore API 的存在：未来 step 7c 可直接 `state.view.last_user_bubble_index()` 替代 v1 `view_messages.iter().rposition()`
+
+**关键发现**：v2 SM Enter transition（`idle.rs:252-266`）**不**推送 UserBubble 到 `state.view`，意味着生产渲染当前在 ACP view-commit 回声到达前不显示用户消息（latent 行为，非 step 7 引入）。step 7d 必须先修复这个 SM 缺口再退役 `apply_add_message(user_vm)`。
+
+**下一步**：
+- step 7c（下窗口）：迁移 `handle_interrupted`（lifecycle.rs:128-179）+ `app/mod.rs` 中断路径（443-455）到 v2 ViewStore helpers。需将 `&State` 或 `&[ViewModel]` 传入处理器（当前只有 `&mut App`）。
+- step 7d（未来）：SM Enter 推送 UserBubble 到 `state.view` + 退役 `agent_submit.rs:47` apply_add_message(user_vm)
+- step 7e（未来）：退役 ~20 个 headless_test 中 `apply_add_message(MessageViewModel::user(...))` 直接 push 模式 → 删除 `view_messages` 字段
