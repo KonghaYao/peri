@@ -75,6 +75,13 @@ impl App {
                         .spinner_state
                         .set_verb(Some("思考中…"));
                 }
+                // Phase 2.3: 同步完成状态到 SubAgentStatusMap
+                if let Some(inst) = instance_id.as_deref() {
+                    self.session_mgr
+                        .current_mut()
+                        .subagent_status
+                        .complete_foreground(inst, result.clone(), is_error);
+                }
                 // P5: Update SubAgentGroup directly instead of through pipeline
                 let session = self.session_mgr.current_mut();
                 let mut found = false;

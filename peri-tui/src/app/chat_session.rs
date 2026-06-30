@@ -4,7 +4,8 @@ use peri_acp::event::TodoItemDto;
 use peri_acp_types::skill::SkillMetadataDto;
 
 use super::{
-    langfuse_state::LangfuseState, AgentComm, CommandSystem, MessageState, SessionMetadata, UiState,
+    langfuse_state::LangfuseState, AgentComm, CommandSystem, MessageState, SessionMetadata,
+    SubAgentStatusMap, UiState,
 };
 use crate::{command::CommandRegistry, thread::ThreadId};
 
@@ -31,6 +32,10 @@ pub struct ChatSession {
     pub background_agents: Vec<RunningBgAgent>,
     pub focused_instance_id: Option<String>,
     pub spinner_state: peri_widgets::SpinnerState,
+    /// Phase 2.3: SubAgent 运行时状态映射，独立于 v2 ViewCommit 替换语义。
+    /// 由 SubAgentStart / SubAgentEnd / BackgroundTaskCompleted / BgToolStep
+    /// 事件实时维护；渲染时通过 `lookup(instance_id)` 覆盖 DTO 的静态字段。
+    pub subagent_status: SubAgentStatusMap,
 }
 
 impl ChatSession {
@@ -55,6 +60,7 @@ impl ChatSession {
             background_agents: Vec::new(),
             focused_instance_id: None,
             spinner_state: peri_widgets::SpinnerState::new(peri_widgets::SpinnerMode::Idle),
+            subagent_status: SubAgentStatusMap::new(),
         }
     }
 }

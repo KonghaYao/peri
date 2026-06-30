@@ -102,6 +102,20 @@ impl App {
             self.request_rebuild();
         }
 
+        // Phase 2.3: 同步完成状态到 SubAgentStatusMap（v2 渲染时覆盖 DTO）
+        {
+            let key = child_thread_id
+                .as_deref()
+                .or(Some(task_id.as_str()))
+                .filter(|s| !s.is_empty());
+            if let Some(inst) = key {
+                self.session_mgr
+                    .current_mut()
+                    .subagent_status
+                    .complete_background(inst, output.clone(), !success, tool_calls_count);
+            }
+        }
+
         let short_id_state = &task_id[..8.min(task_id.len())];
         let state_notification = if success {
             self.services.lc.tr_args(
@@ -345,5 +359,7 @@ impl App {
         {
             agent.tool_count += 1;
         }
+        // Phase 2.3: 同步到 SubAgentStatusMap（供 v2 渲染覆盖）
+        session.subagent_status.incr_tool_step(child_thread_id);
     }
 }

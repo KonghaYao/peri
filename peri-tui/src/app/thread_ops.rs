@@ -220,6 +220,8 @@ impl App {
         self.session_mgr.current_mut().metadata.last_human_message = None;
         self.session_mgr.current_mut().messages.last_submitted_text = None;
         self.session_mgr.current_mut().metadata.pre_submit_state_len = 0;
+        // Phase 2.3: 清空 SubAgent 运行时状态映射（与 view_messages.clear 同步）
+        self.session_mgr.current_mut().subagent_status.clear();
 
         self.reset_agent_session();
 

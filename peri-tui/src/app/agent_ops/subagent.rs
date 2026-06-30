@@ -102,6 +102,13 @@ impl App {
             self.session_mgr.current_mut().agent.subagent_depth += 1;
         }
 
+        // Phase 2.3: 同步注册到 SubAgentStatusMap（v2 渲染时覆盖 DTO 静态字段）
+        self.session_mgr.current_mut().subagent_status.start(
+            instance_id.clone(),
+            task_preview.clone(),
+            is_background,
+        );
+
         // P5: Create SubAgentGroup VM directly instead of through pipeline
         let vm = MessageViewModel::SubAgentGroup {
             agent_id: agent_id.clone(),

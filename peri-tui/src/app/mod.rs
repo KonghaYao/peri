@@ -65,6 +65,8 @@ pub use session_metadata::SessionMetadata;
 mod langfuse_state;
 mod oauth_prompt;
 pub use oauth_prompt::OAuthPrompt;
+mod subagent_status;
+pub use subagent_status::{SubAgentStatus, SubAgentStatusMap};
 mod thread_ops;
 
 // ── Other Modules ─────────────────────────────────────────────────────────────

@@ -84,6 +84,7 @@ impl App {
             background_agents: Vec::new(),
             focused_instance_id: None,
             spinner_state: peri_widgets::SpinnerState::new(peri_widgets::SpinnerMode::Idle),
+            subagent_status: super::SubAgentStatusMap::new(),
         };
 
         let app = App {

@@ -25,6 +25,9 @@ impl App {
             if let Some(start) = s.agent.task_start_time {
                 s.agent.last_task_duration = Some(start.elapsed());
             }
+
+            // Phase 2.3: 清理过期的 SubAgentStatus entry（TTL 5 分钟）
+            s.subagent_status.evict_expired();
         }
         self.set_loading(false);
     }
