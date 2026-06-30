@@ -232,31 +232,38 @@ impl<'a> ApplyContext<'a> {
         }
         app.global_ui.v2_view_models = Some(v2_vms);
         if let Err(e) = self.terminal.draw(|f| {
-            // Pre-compute v2 panel height so legacy layout reserves space.
-            let v2_panel_height = if let State::Modal(ModalState {
-                kind: ModalKind::Panel(panel),
-                ..
-            }) = &*state
-            {
-                Some(panel.desired_height(f.area().height, f.area().width))
-            } else {
-                None
+            // Pre-compute v2 modal height (Panel or Interaction) so legacy
+            // layout reserves space. Both kinds expose `desired_height`.
+            let v2_panel_height = match &*state {
+                State::Modal(ModalState {
+                    kind: ModalKind::Panel(panel),
+                    ..
+                }) => Some(panel.desired_height(f.area().height, f.area().width)),
+                State::Modal(ModalState {
+                    kind: ModalKind::Interaction(handler),
+                    ..
+                }) => Some(handler.desired_height(f.area().height, f.area().width)),
+                _ => None,
             };
             ui::main_ui::render(f, app, v2_panel_height);
-            // v2 Modal panel overlay: render in the area reserved by the layout.
-            if let State::Modal(ModalState {
-                kind: ModalKind::Panel(panel),
-                ..
-            }) = state
-            {
-                // panel_area was set by render_session_column for v2 panels.
+            // v2 Modal overlay: render in the area reserved by the layout.
+            // Both Panel and Interaction variants read panel_area (set by
+            // render_session_column when v2_panel_height is Some).
+            if let State::Modal(ModalState { kind, .. }) = state {
                 let area = app
                     .session_mgr
                     .current()
                     .ui
                     .panel_area
                     .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24));
-                panel.render(f, area, &build_v2_panel_read_context(app, &view_models));
+                match kind {
+                    ModalKind::Panel(panel) => {
+                        panel.render(f, area, &build_v2_panel_read_context(app, &view_models));
+                    }
+                    ModalKind::Interaction(handler) => {
+                        handler.render(f, area);
+                    }
+                }
             }
         }) {
             warn!(error = %e, "terminal draw failed");

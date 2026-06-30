@@ -43,7 +43,11 @@ pub use crate::panel::{PanelEffect, PanelReadContext, PanelState};
 /// can draw directly (Phase 1.3 will wire this into the modal render path);
 /// `handle_key` takes a full `KeyEvent` so handlers can match on `KeyCode`
 /// (Esc / arrows / BackTab) and modifiers (Ctrl+Enter, Shift+Tab) instead of
-/// the lossy `char` projection.
+/// the lossy `char` projections.
+///
+/// Phase 1.4 adds `desired_height` so `draw_now` can pre-compute the popup's
+/// vertical footprint (mirroring `PanelState::desired_height`) and reserve
+/// space in the main layout before the overlay is drawn.
 pub trait Handler: Send + std::fmt::Debug {
     /// Render the interaction popup directly into the provided frame area.
     fn render(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect);
@@ -51,6 +55,15 @@ pub trait Handler: Send + std::fmt::Debug {
     /// Handle a key event. Returns the handler's output which the state
     /// machine translates to standard effects.
     fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> HandlerOutput;
+
+    /// Preferred popup height for the current payload, given the screen
+    /// size. The main layout uses this to reserve vertical space before
+    /// the overlay renders. Default returns a compact 12-row popup; concrete
+    /// handlers override to size to their content (e.g. HITL batch size,
+    /// AskUser question list length, Rewind files/messages count).
+    fn desired_height(&self, _screen_height: u16, _screen_width: u16) -> u16 {
+        12
+    }
 }
 
 /// Result of a handler key-press. Simplified stub.

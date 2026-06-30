@@ -40,7 +40,7 @@
 
 <h1>Peri TUI v3 重构进度</h1>
 <div class="meta">
-  <strong>启动</strong>：2026-06-30 · <strong>触发</strong>：cron <code>*/15 * * * *</code>（job <code>6a33bfff</code>，每 15min 自动推进）<br>
+  <strong>启动</strong>：2026-06-30 · <strong>触发</strong>：cron <code>*/15 * * * *</code>（job <code>6a33bfff</code>，每 15min 自动推进） · <strong>同步</strong>：本地 commit only（用户掌控 push）<br>
   <strong>范围</strong>：仅 TUI；ACP 层不动 · <strong>计划文档</strong>：<code>docs/refactor/tui-v3-plan.md</code>
 </div>
 
@@ -96,7 +96,7 @@
 <h2>执行原则</h2>
 <ul class="findings">
   <li>每个 cron 窗口（15 分钟）一个 Phase——避免半成品</li>
-  <li>每 Phase 完成立即 git commit + push——保证可恢复</li>
+  <li>每 Phase 完成立即本地 git commit——远程 push 由用户掌控</li>
   <li>测试驱动：每 Phase 后跑 <code>cargo test -p peri-tui --lib</code></li>
   <li>遇到设计岔路启动 Design Review workflow——多视角 PK</li>
 </ul>
