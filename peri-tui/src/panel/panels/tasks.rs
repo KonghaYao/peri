@@ -1,7 +1,6 @@
 //! v2 TasksPanel -- Cron tasks display panel (PanelState trait implementation).
 //!
-//! Displays a list of cron scheduled tasks with toggle/delete actions.
-//! The panel is a simplified v2 version of the legacy `app/tasks_panel.rs`,
+//! Displays a list of cron scheduled tasks with toggle/delete actions,
 //! focusing on the CronTasks tab only (AgentThreads is a separate concern).
 //!
 //! Navigation: Up/Down to move cursor between tasks; scroll follows cursor.

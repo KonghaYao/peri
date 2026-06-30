@@ -37,8 +37,9 @@ pub use view_store::ViewStore;
 /// (`transitions::idle`, `transitions::streaming`, ...). Each transition is
 /// itself a pure function `(XState, Event) -> (State, Vec<Effect>)`.
 ///
-/// **Note**: This entry is currently additive -- the v1 `App` still drives the
-/// UI. The v2 main loop will switch to this function in a later phase.
+/// The v2 main loop (`runtime::main_loop::run`) drives this as the primary
+/// event handler (path 1a), with keyboard fallback (path 1b) for complex UI
+/// interactions not yet ported to pure transitions.
 pub fn handle(state: State, event: Event) -> (State, Vec<crate::runtime::effect::Effect>) {
     match state {
         State::Idle(s) => transitions::idle::handle(s, event),

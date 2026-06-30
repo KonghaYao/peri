@@ -92,10 +92,8 @@ const ROW_COUNT: usize = 6;
 /// v2 Model selection panel.
 ///
 /// UI-local state only (cursor, active_tab, effort, max_tokens, context_1m).
-/// Provider/model data is not needed at render time because the legacy render
-/// only uses it for a secondary label which can be omitted. Side-effects
-/// (select model, update config, sync to ACP) are returned as `PanelEffect`
-/// values.
+/// Side-effects (select model, update config, sync to ACP) are returned as
+/// `PanelEffect` values.
 #[derive(Debug)]
 pub struct ModelPanel {
     /// Currently active model alias.

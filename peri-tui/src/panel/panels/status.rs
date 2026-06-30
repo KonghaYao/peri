@@ -1,12 +1,6 @@
 //! v2 StatusPanel -- Cost & Context status display panel (PanelState trait implementation).
 //!
 //! Displays token usage, cost estimates, and context charts in two tabs (Cost / Context).
-//!
-//! **NOTE (P3 migration)**: The legacy render reads session-level data (token tracker,
-//! session start time, model name, context_window) from `App` which is not available
-//! through `PanelReadContext`. Once `ServiceRegistrySnapshot` gains session snapshot
-//! fields (e.g. `SessionStatusDto`), the render method should be updated to display
-//! real data instead of the placeholder text.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -23,7 +17,7 @@ use crate::panel::read_context::PanelReadContext;
 use crate::panel::PanelState;
 use crate::ui::theme;
 
-/// Tab index constants (matching legacy STATUS_TAB_COST / STATUS_TAB_CONTEXT).
+/// Tab index constants.
 const TAB_COST: usize = 0;
 const TAB_CONTEXT: usize = 1;
 
@@ -36,11 +30,9 @@ const TAB_CONTEXT: usize = 1;
 pub struct StatusPanel {
     /// Currently active tab (0 = Cost, 1 = Context).
     active_tab: usize,
-    /// Provider name from app services (stored for future render use).
-    #[allow(dead_code)]
+    /// Provider name from app services.
     provider_name: String,
-    /// Model name from app services (stored for future render use).
-    #[allow(dead_code)]
+    /// Model name from app services.
     model_name: String,
 }
 

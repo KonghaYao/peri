@@ -19,7 +19,6 @@ pub use tools::{tool_color, AgentSummary, ToolCategory, ToolEntry};
 pub enum MessageViewModel {
     /// 用户输入
     UserBubble {
-        #[allow(dead_code)]
         content: String,
         rendered: Text<'static>,
         /// 预计算的语义 hash（构造/变更时更新，rebuild 直接读取避免重算）
@@ -38,7 +37,6 @@ pub enum MessageViewModel {
     },
     /// 工具调用结果
     ToolBlock {
-        #[allow(dead_code)]
         tool_name: String,
         tool_call_id: String,
         display_name: String,
@@ -426,21 +424,6 @@ impl MessageViewModel {
                 holdback_scanner: Default::default(),
             });
             self.recompute_hash();
-        }
-    }
-
-    /// 切换折叠状态（对 ToolBlock、AssistantBubble、SubAgentGroup、ToolCallGroup 生效）
-    #[allow(dead_code)]
-    pub fn toggle_collapse(&mut self) {
-        match self {
-            MessageViewModel::ToolBlock { collapsed, .. }
-            | MessageViewModel::AssistantBubble { collapsed, .. }
-            | MessageViewModel::SubAgentGroup { collapsed, .. }
-            | MessageViewModel::ToolCallGroup { collapsed, .. } => {
-                *collapsed = !*collapsed;
-                self.recompute_hash();
-            }
-            _ => {}
         }
     }
 

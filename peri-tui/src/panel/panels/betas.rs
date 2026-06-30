@@ -26,8 +26,6 @@ use crate::ui::theme;
 /// A single beta feature toggle entry.
 #[derive(Debug, Clone)]
 struct BetaEntry {
-    #[allow(dead_code)]
-    key: String,
     label: String,
     description: String,
     enabled: bool,
@@ -58,7 +56,6 @@ impl BetasPanel {
         let entries = BETA_KEYS
             .iter()
             .map(|&key| BetaEntry {
-                key: key.to_string(),
                 label: key.to_string(),
                 description: String::new(),
                 enabled: false,

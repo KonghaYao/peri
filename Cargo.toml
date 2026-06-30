@@ -78,8 +78,6 @@ lru = "0.18"
 tempfile = "3"
 
 # --- Allocator ---
-mimalloc = "0.1"
-libmimalloc-sys = { version = "0.1", features = ["extended"] }
 tikv-jemallocator = "0.6"
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
 tikv-jemalloc-sys = "0.6"

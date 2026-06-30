@@ -1,8 +1,7 @@
 //! v2 ThreadBrowserPanel -- Thread (session) browser panel (PanelState trait implementation).
 //!
 //! Displays a list of threads (conversations) with search, navigation,
-//! session switching, and deletion. This is a pure v2 panel migration from
-//! the legacy `thread::ThreadBrowser` + `ui::main_ui::panels::thread_browser`.
+//! session switching, and deletion.
 //!
 //! Navigation: Up/Down to move cursor; Enter to switch session; "/" to enter
 //! search; Ctrl+D to confirm delete; Esc to close.

@@ -173,11 +173,6 @@ impl TextField {
         &self.text
     }
 
-    #[allow(dead_code)]
-    fn is_empty(&self) -> bool {
-        self.text.is_empty()
-    }
-
     fn insert_char(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
@@ -234,13 +229,6 @@ impl TextField {
 
     fn move_end(&mut self) {
         self.cursor = self.text.len();
-    }
-
-    /// Clear all text and reset cursor.
-    #[allow(dead_code)]
-    fn clear(&mut self) {
-        self.text.clear();
-        self.cursor = 0;
     }
 }
 

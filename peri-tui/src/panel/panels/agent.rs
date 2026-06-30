@@ -21,8 +21,7 @@ use crate::panel::PanelState;
 use crate::ui::theme;
 
 // ---------------------------------------------------------------------------
-// Minimal scroll/cursor helper (avoids importing old PanelList which is tightly
-// coupled to the v1 PanelComponent trait).
+// Minimal scroll/cursor helper for the agent panel.
 // ---------------------------------------------------------------------------
 
 /// Lightweight list navigator for the agent panel.
@@ -102,9 +101,8 @@ impl ListNav {
 /// v2 Agent selection panel.
 ///
 /// UI-local state only (cursor, scroll). Agent data is injected at
-/// construction time (matching the v1 pattern where `AgentPanel::new()` receives
-/// the list). Side-effects (selecting an agent, closing the panel) are returned
-/// as `PanelEffect` values.
+/// construction time. Side-effects (selecting an agent, closing the panel)
+/// are returned as `PanelEffect` values.
 #[derive(Debug)]
 pub struct AgentPanel {
     /// Available agents (scanned from disk).

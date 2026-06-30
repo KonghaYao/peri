@@ -1,9 +1,7 @@
 //! v2 CronPanel -- Cron schedule management panel (PanelState trait implementation).
 //!
-//! Displays cron scheduled tasks with toggle/delete actions.  The panel is the v2
-//! counterpart of the legacy `app/cron_state.rs` `CronPanel`, using
-//! `CronTaskDto` from `peri-acp-types` instead of `peri_middlewares::cron`
-//! runtime types.
+//! Displays cron scheduled tasks with toggle/delete actions,
+//! using `CronTaskDto` from `peri-acp-types`.
 //!
 //! Navigation: Up/Down to move cursor between tasks; scroll follows cursor.
 //! Toggle: Enter/Space on a task to enable/disable it.
