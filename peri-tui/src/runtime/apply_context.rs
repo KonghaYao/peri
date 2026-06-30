@@ -230,7 +230,7 @@ impl<'a> ApplyContext<'a> {
                 v2_vms.extend(turn_vms);
             }
         }
-        app.global_ui.v2_view_models = Some(v2_vms);
+        let v2_vms_ref: &[peri_acp_types::view_model::ViewModel] = &v2_vms;
         if let Err(e) = self.terminal.draw(|f| {
             // Pre-compute v2 modal height (Panel or Interaction) so legacy
             // layout reserves space. Both kinds expose `desired_height`.
@@ -245,7 +245,7 @@ impl<'a> ApplyContext<'a> {
                 }) => Some(handler.desired_height(f.area().height, f.area().width)),
                 _ => None,
             };
-            ui::main_ui::render(f, app, v2_panel_height);
+            ui::main_ui::render(f, app, v2_panel_height, Some(v2_vms_ref));
             // v2 Modal overlay: render in the area reserved by the layout.
             // Both Panel and Interaction variants read panel_area (set by
             // render_session_column when v2_panel_height is Some).
@@ -268,7 +268,6 @@ impl<'a> ApplyContext<'a> {
         }) {
             warn!(error = %e, "terminal draw failed");
         }
-        app.global_ui.v2_view_models = None;
         *last_render = Instant::now();
     }
 }

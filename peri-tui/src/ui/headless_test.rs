@@ -22,7 +22,7 @@ async fn test_assistant_chunk_renders() {
     ));
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     assert!(
@@ -47,7 +47,7 @@ async fn test_tool_call_renders() {
     handle.wait_for_render().await;
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     // ToolStart 通过 Pipeline 创建 ToolBlock，display_name 为 format_tool_name 的结果
@@ -72,7 +72,7 @@ async fn test_user_message_renders() {
     handle.wait_for_render().await;
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     assert!(
@@ -124,7 +124,7 @@ async fn test_subagent_group_basic() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
 
@@ -263,7 +263,7 @@ async fn test_tool_call_message_visible_when_toggled() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
 
     let snap = handle.snapshot();
@@ -327,7 +327,7 @@ async fn test_empty_then_nonempty_assistant_chunk() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
 
     assert_eq!(
@@ -361,7 +361,7 @@ async fn test_tool_call_without_assistant_chunk_no_bubble() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
 
     // 应该有 1 个 ToolBlock，不应有空白 AssistantBubble
@@ -383,7 +383,7 @@ async fn test_welcome_card_renders_when_empty() {
     // 默认 view_messages 为空，应显示 Welcome Card
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -413,7 +413,7 @@ async fn test_welcome_card_hidden_after_message() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -434,7 +434,7 @@ async fn test_welcome_card_narrow_screen() {
     let (mut app, mut handle) = App::new_headless(40, 24).await;
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -459,7 +459,7 @@ async fn test_welcome_card_shows_login_guide_when_no_provider() {
     // peri_config 默认为 None，无 provider
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -486,7 +486,7 @@ async fn test_sticky_header_hidden_when_no_messages() {
     );
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -520,7 +520,7 @@ async fn test_sticky_header_shows_after_submit() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -563,7 +563,7 @@ async fn test_sticky_header_hidden_after_clear() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -598,7 +598,7 @@ async fn test_sticky_header_shows_last_message_not_first() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -640,7 +640,7 @@ async fn test_sticky_header_truncation_long_message() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -701,7 +701,7 @@ async fn test_tab_bar_integration() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     // TabBar should render the tab labels
@@ -768,7 +768,7 @@ async fn test_status_bar_shows_permission_mode() {
     // 默认 Bypass → 应显示 "Bypass"
     handle
         .terminal
-        .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
+        .draw(|f| crate::ui::main_ui::render(f, &mut app, None, None))
         .unwrap();
     assert!(
         handle.contains("Bypass"),
@@ -785,7 +785,7 @@ async fn test_status_bar_updates_after_mode_switch() {
     app.services.permission_mode.store(PermissionMode::Default);
     handle
         .terminal
-        .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
+        .draw(|f| crate::ui::main_ui::render(f, &mut app, None, None))
         .unwrap();
     assert!(
         !handle.contains("DEFAULT"),
@@ -799,7 +799,7 @@ async fn test_status_bar_updates_after_mode_switch() {
         .store(PermissionMode::AcceptEdit);
     handle
         .terminal
-        .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
+        .draw(|f| crate::ui::main_ui::render(f, &mut app, None, None))
         .unwrap();
     assert!(
         handle.contains("Accept Edit"),
@@ -811,7 +811,7 @@ async fn test_status_bar_updates_after_mode_switch() {
     app.services.permission_mode.store(PermissionMode::AutoMode);
     handle
         .terminal
-        .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
+        .draw(|f| crate::ui::main_ui::render(f, &mut app, None, None))
         .unwrap();
     assert!(
         handle.contains("Auto Mode"),
@@ -875,7 +875,7 @@ async fn test_spinner_shows_verb_in_status_bar() {
 
     handle
         .terminal
-        .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
+        .draw(|f| crate::ui::main_ui::render(f, &mut app, None, None))
         .unwrap();
     assert!(
         handle.contains("Searching code"),
@@ -927,7 +927,7 @@ async fn test_retry_status_shows_in_status_bar() {
 
     handle
         .terminal
-        .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
+        .draw(|f| crate::ui::main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     assert!(
@@ -1072,7 +1072,7 @@ async fn test_user_message_survives_assistant_chunk() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
 
     // view_messages 应包含用户消息 + AI 消息
@@ -1115,7 +1115,7 @@ async fn test_messages_accumulate_across_turns() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
 
     // 应累积 4 条消息
@@ -1189,7 +1189,7 @@ async fn test_tool_then_text_preserves_tool_block() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
 
     // ToolBlock 和 AssistantBubble 都应存在
@@ -1273,7 +1273,7 @@ async fn test_unified_hint_shows_commands_and_skills() {
     // 渲染后应显示命令（视口 MAX_VIEWPORT=10，命令优先排序）
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -1313,7 +1313,7 @@ async fn test_unified_hint_filters_by_prefix() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -1359,7 +1359,7 @@ async fn test_unified_hint_no_result_for_hash() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -1494,7 +1494,7 @@ async fn test_textarea_shows_placeholder_hint() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -1512,7 +1512,7 @@ async fn test_welcome_card_shows_alt_enter_hint() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     let snap_text = snap.join("\n");
@@ -1562,7 +1562,7 @@ async fn test_welcome_shows_model_info() {
     // App 默认有 provider_name="test" 和 model_name="test-model"
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot().join("\n");
     // 验证 Welcome Card 包含 provider/model 信息
@@ -1679,7 +1679,7 @@ async fn test_background_task_status_bar() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot().join("\n");
 
@@ -1717,7 +1717,7 @@ async fn test_textarea_input_visible_during_loading() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
     assert!(
@@ -2250,7 +2250,7 @@ async fn test_thinking_mode_user_message_survives_rebuild() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
 
     let snap = handle.snapshot();
@@ -2312,7 +2312,7 @@ async fn test_thinking_toolcall_text_rebuild_preserves_user() {
 
     handle
         .terminal
-        .draw(|f| main_ui::render(f, &mut app, None))
+        .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
 
     let snap = handle.snapshot();

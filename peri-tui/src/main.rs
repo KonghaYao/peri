@@ -830,7 +830,7 @@ async fn run_app(
 
     // Spinner tick 驱动 + 初始全量绘制（before ApplyContext borrows terminal）
     app.session_mgr.current_mut().spinner_state.advance_tick();
-    terminal.draw(|f| ui::main_ui::render(f, &mut app, None))?;
+    terminal.draw(|f| ui::main_ui::render(f, &mut app, None, None))?;
 
     // Spawn ACP notifier (AcpNotification → TuiEvent::AcpEvent)
     if let Some((acp_client, notification_rx)) = acp_client {

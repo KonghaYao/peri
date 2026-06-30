@@ -29,10 +29,6 @@ pub struct GlobalUiState {
     pub mouse_available: Option<bool>,
     /// Workflow 进度追踪器（累积 WorkflowProgressPayload 事件）。
     pub workflow_tracker: WorkflowProgressTracker,
-    /// V2 ViewModels for current-frame rendering. Set by `draw_now()` from
-    /// state machine data (committed view + current_turn), consumed by
-    /// `message_area::render_messages()`. `None` = use legacy render path.
-    pub v2_view_models: Option<Vec<peri_acp_types::view_model::ViewModel>>,
 }
 
 impl Default for GlobalUiState {
@@ -56,7 +52,6 @@ impl GlobalUiState {
             quit_requested: false,
             mouse_available: None,
             workflow_tracker: WorkflowProgressTracker::new(),
-            v2_view_models: None,
         }
     }
 }

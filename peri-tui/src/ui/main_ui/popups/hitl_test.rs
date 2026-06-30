@@ -11,7 +11,7 @@
             .interaction_prompt = Some(InteractionPrompt::Approval(prompt));
         handle
             .terminal
-            .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
+            .draw(|f| crate::ui::main_ui::render(f, &mut app, None, None))
             .unwrap();
         (app, handle)
     }
@@ -36,7 +36,7 @@
         // 通过 main_ui::render 渲染完整布局，确保面板高度正确
         handle
             .terminal
-            .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
+            .draw(|f| crate::ui::main_ui::render(f, &mut app, None, None))
             .unwrap();
         (app, handle)
     }

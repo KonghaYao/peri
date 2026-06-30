@@ -26,7 +26,12 @@ use crate::app::textarea_cursor_pos;
 
 use crate::{app::App, ui::theme};
 
-pub fn render(f: &mut Frame, app: &mut App, v2_panel_height: Option<u16>) {
+pub fn render(
+    f: &mut Frame,
+    app: &mut App,
+    v2_panel_height: Option<u16>,
+    v2_view_models: Option<&[peri_acp_types::view_model::ViewModel]>,
+) {
     // Setup 向导：全屏覆盖，优先于所有正常界面
     if app.global_ui.setup_wizard.is_some() {
         popups::setup_wizard::render_setup_wizard(f, app);
@@ -34,11 +39,17 @@ pub fn render(f: &mut Frame, app: &mut App, v2_panel_height: Option<u16>) {
     }
 
     let area = f.area();
-    render_session_column(f, app, area, v2_panel_height);
+    render_session_column(f, app, area, v2_panel_height, v2_view_models);
 }
 
 /// 渲染单个 session 列（含垂直布局拆分）
-fn render_session_column(f: &mut Frame, app: &mut App, area: Rect, v2_panel_height: Option<u16>) {
+fn render_session_column(
+    f: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    v2_panel_height: Option<u16>,
+    v2_view_models: Option<&[peri_acp_types::view_model::ViewModel]>,
+) {
     // 动态输入框高度
     let line_count = app.session_mgr.current_mut().ui.textarea.lines().len() as u16;
     let input_height = (line_count + 2).min(area.height * 2 / 5).max(3);
@@ -99,7 +110,7 @@ fn render_session_column(f: &mut Frame, app: &mut App, area: Rect, v2_panel_heig
         ])
         .split(area);
 
-    message_area::render_messages(f, app, chunks[0], chunks[1]);
+    message_area::render_messages(f, app, v2_view_models, chunks[0], chunks[1]);
     attachment::render_attachment_bar(f, app, chunks[2]);
 
     // 底部展开区

@@ -12,7 +12,7 @@
         app.global_ui.setup_wizard = Some(wizard);
         handle
             .terminal
-            .draw(|f| crate::ui::main_ui::render(f, &mut app, None))
+            .draw(|f| crate::ui::main_ui::render(f, &mut app, None, None))
             .unwrap();
         (app, handle)
     }
