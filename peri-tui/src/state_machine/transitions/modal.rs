@@ -141,6 +141,17 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
                 ));
             (State::Modal(state), Vec::new())
         }
+
+        // -- Cron #24 P1 #2: push user bubble into saved_view (v2 source) --
+        // Modal 期间到达的 AskUser 答案路由到 saved_view（ClosePanel 后恢复时可见）。
+        Event::PushUserBubble(text) => {
+            state
+                .saved_view
+                .push(peri_acp_types::view_model::ViewModel::UserBubble(
+                    peri_acp_types::view_model::UserBubbleData { text },
+                ));
+            (State::Modal(state), Vec::new())
+        }
     }
 }
 
@@ -468,6 +479,17 @@ pub fn handle_with_context(
                 ));
             (State::Modal(state), Vec::new())
         }
+
+        // -- Cron #24 P1 #2: push user bubble into saved_view (v2 source) --
+        // Modal 期间到达的 AskUser 答案路由到 saved_view（ClosePanel 后恢复时可见）。
+        Event::PushUserBubble(text) => {
+            state
+                .saved_view
+                .push(peri_acp_types::view_model::ViewModel::UserBubble(
+                    peri_acp_types::view_model::UserBubbleData { text },
+                ));
+            (State::Modal(state), Vec::new())
+        }
     }
 }
 
@@ -744,6 +766,53 @@ mod tests {
             effects.is_empty(),
             "Status events in Modal should produce no effects"
         );
+    }
+
+    // ── Cron #24 P1 #2: PushUserBubble 推送到 saved_view ─────────────────
+
+    #[test]
+    fn test_push_userbubble_adds_to_saved_view_in_modal() {
+        // Cron #24 P1 #2: Modal 期间到达的 AskUser 答案必须追加到
+        // saved_view（ClosePanel 后恢复时可见），不 emit Render（modal
+        // 已通过其它路径重绘）。
+        use peri_acp_types::view_model::ViewModel;
+        let modal = make_interaction_modal(Box::new(NoopHandler));
+        let (next, effects) = handle(modal, Event::PushUserBubble("yes".into()));
+        match next {
+            State::Modal(m) => {
+                assert_eq!(m.saved_view.len(), 1);
+                match &m.saved_view[0] {
+                    ViewModel::UserBubble(d) => {
+                        assert_eq!(d.text, "yes");
+                    }
+                    other => panic!("expected UserBubble, got {other:?}"),
+                }
+            }
+            other => panic!("expected Modal, got {other:?}"),
+        }
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Render)),
+            "PushUserBubble in Modal should not emit Render (mirrors PushSystemNote)"
+        );
+    }
+
+    #[test]
+    fn test_push_userbubble_preserves_prior_saved_view_in_modal() {
+        // 已有 saved_view 时，PushUserBubble 应在末尾追加而非替换。
+        use peri_acp_types::view_model::{UserBubbleData, ViewModel};
+        let mut modal = make_interaction_modal(Box::new(NoopHandler));
+        modal.saved_view = vec![ViewModel::UserBubble(UserBubbleData {
+            text: "prior".into(),
+        })];
+        let (next, _) = handle(modal, Event::PushUserBubble("new".into()));
+        match next {
+            State::Modal(m) => {
+                assert_eq!(m.saved_view.len(), 2);
+                assert!(matches!(m.saved_view[0], ViewModel::UserBubble(_)));
+                assert!(matches!(m.saved_view[1], ViewModel::UserBubble(_)));
+            }
+            other => panic!("expected Modal, got {other:?}"),
+        }
     }
 
     #[test]

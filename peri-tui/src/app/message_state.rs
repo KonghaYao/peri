@@ -17,6 +17,14 @@ pub struct MessageState {
     /// state machine (`Event::PushSystemNote`), so they reach `state.view`
     /// (the production render source) instead of being silently dropped.
     pub pending_v2_notes: Vec<String>,
+
+    /// Cron #24 P1 #2 — AskUser 答案由 `ask_user_confirm` 推送到此队列，
+    /// `main_loop` 取出后通过 `Event::PushUserBubble` 路由到 v2 `state.view`。
+    ///
+    /// 历史 bug：原代码直接 `view_messages.push(UserBubble)`，但 v2 渲染路径
+    /// 只读 `state.view`，导致用户回答后答案在生产渲染中消失。镜像
+    /// `pending_v2_notes` 的 queue-and-drain 模式修复。
+    pub pending_v2_user_bubbles: Vec<String>,
 }
 
 /// 渲染换行信息：每个逻辑行在渲染后的视觉行范围。
@@ -53,6 +61,7 @@ impl MessageState {
             pending_messages: Vec::new(),
             message_cache: None,
             pending_v2_notes: Vec::new(),
+            pending_v2_user_bubbles: Vec::new(),
         }
     }
 
@@ -69,5 +78,19 @@ impl MessageState {
     /// 取出所有待路由到 v2 状态机的系统通知（清空队列）。
     pub fn drain_pending_v2_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_v2_notes)
+    }
+
+    /// Cron #24 P1 #2 — 入队一条 UserBubble 文本到 v2 状态机渲染源。
+    ///
+    /// 由 `ask_user_confirm` 调用，将用户的回答格式化后入队。`main_loop`
+    /// 取出后通过 `Event::PushUserBubble` 路由到 `state.view`，确保
+    /// 答案在生产渲染路径中可见。
+    pub fn push_user_bubble(&mut self, text: String) {
+        self.pending_v2_user_bubbles.push(text);
+    }
+
+    /// 取出所有待路由到 v2 状态机的 UserBubble 文本（清空队列）。
+    pub fn drain_pending_v2_user_bubbles(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_v2_user_bubbles)
     }
 }

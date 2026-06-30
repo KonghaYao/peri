@@ -215,6 +215,18 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
                 ));
             (State::Idle(state), vec![Effect::Render])
         }
+
+        // -- Cron #24 P1 #2: push user bubble into state.view (v2 source) ----
+        // AskUser 答案由 ask_user_confirm 通过 pending_v2_user_bubbles 队列路由，
+        // main_loop 取出后通过此事件送入 SM，确保答案在生产渲染路径中可见。
+        Event::PushUserBubble(text) => {
+            state
+                .view
+                .push(peri_acp_types::view_model::ViewModel::UserBubble(
+                    peri_acp_types::view_model::UserBubbleData { text },
+                ));
+            (State::Idle(state), vec![Effect::Render])
+        }
     }
 }
 
@@ -869,6 +881,55 @@ mod tests {
             effects.iter().any(|e| matches!(e, Effect::Render)),
             "AcpDisconnected in Idle should emit Render"
         );
+    }
+
+    // ── Cron #24 P1 #2: PushUserBubble 推送到 state.view ─────────────────
+
+    #[test]
+    fn test_push_userbubble_adds_to_state_view_in_idle() {
+        // Cron #24 P1 #2: AskUser 答案由 ask_user_confirm 通过队列路由，
+        // main_loop 取出后通过 Event::PushUserBubble 送入 SM。Idle 状态下
+        // 必须把 UserBubble 追加到 state.view 并 emit Render，否则答案
+        // 在生产渲染路径中不可见（v1 view_messages 路径已退役）。
+        let state = make_state();
+        let (next, effects) = handle(state, Event::PushUserBubble("yes".into()));
+        match next {
+            State::Idle(idle) => {
+                assert_eq!(idle.view.len(), 1);
+                match &idle.view[0] {
+                    peri_acp_types::view_model::ViewModel::UserBubble(d) => {
+                        assert_eq!(d.text, "yes");
+                    }
+                    other => panic!("expected UserBubble, got {other:?}"),
+                }
+            }
+            other => panic!("expected Idle, got {other:?}"),
+        }
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "PushUserBubble in Idle should emit Render"
+        );
+    }
+
+    #[test]
+    fn test_push_userbubble_preserves_prior_view_in_idle() {
+        // 已有历史 view 时，PushUserBubble 应在末尾追加而非替换。
+        use peri_acp_types::view_model::{AssistantBubbleData, ViewModel};
+        let mut state = make_state();
+        state.view = vec![ViewModel::AssistantBubble(AssistantBubbleData {
+            text: "prior reply".into(),
+            reasoning: None,
+            tool_card_ids: vec![],
+        })];
+        let (next, _) = handle(state, Event::PushUserBubble("answer".into()));
+        match next {
+            State::Idle(idle) => {
+                assert_eq!(idle.view.len(), 2);
+                assert!(matches!(idle.view[0], ViewModel::AssistantBubble(_)));
+                assert!(matches!(idle.view[1], ViewModel::UserBubble(_)));
+            }
+            other => panic!("expected Idle, got {other:?}"),
+        }
     }
 
     // ── Mouse tests ──────────────────────────────────────────────────────

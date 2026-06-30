@@ -53,6 +53,18 @@ pub fn handle(mut state: SwitchingState, event: Event) -> (State, Vec<Effect>) {
             (State::Switching(state), vec![Effect::Render])
         }
 
+        // -- Cron #24 P1 #2: push user bubble into state.view (v2 source) ----
+        // 切换会话期间到达的 AskUser 答案路由到 state.view（虽然实际场景罕见，
+        // 但保持 4 个状态变体的 PushUserBubble 处理一致）。
+        Event::PushUserBubble(text) => {
+            state
+                .view
+                .push(peri_acp_types::view_model::ViewModel::UserBubble(
+                    peri_acp_types::view_model::UserBubbleData { text },
+                ));
+            (State::Switching(state), vec![Effect::Render])
+        }
+
         // -- Drop everything else --------------------------------------------
         Event::Key(_) | Event::Paste(_) | Event::AcpEvent(_) => {
             (State::Switching(state), Vec::new())
@@ -150,6 +162,32 @@ mod tests {
         assert!(
             effects.iter().any(|e| matches!(e, Effect::Render)),
             "AcpDisconnected in Switching should emit Render"
+        );
+    }
+
+    // ── Cron #24 P1 #2: PushUserBubble 推送到 state.view ─────────────────
+
+    #[test]
+    fn test_push_userbubble_adds_to_state_view_in_switching() {
+        // Cron #24 P1 #2: 切换会话期间到达的 AskUser 答案（罕见但保持 4 状态
+        // 处理一致性）必须追加到 state.view 并 emit Render。
+        let state = SwitchingState { view: vec![] };
+        let (next, effects) = handle(state, Event::PushUserBubble("answer".into()));
+        match next {
+            State::Switching(s) => {
+                assert_eq!(s.view.len(), 1);
+                match &s.view[0] {
+                    ViewModel::UserBubble(d) => {
+                        assert_eq!(d.text, "answer");
+                    }
+                    other => panic!("expected UserBubble, got {other:?}"),
+                }
+            }
+            other => panic!("expected Switching, got {other:?}"),
+        }
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "PushUserBubble in Switching should emit Render"
         );
     }
 }

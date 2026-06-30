@@ -198,6 +198,26 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
             }
         }
 
+        // Cron #24 P1 #2 — drain AskUser 用户回答队列，路由到 v2 state.view。
+        // 与 pending_v2_notes 同构（queue-and-drain via SM Event）。
+        {
+            let user_bubbles = app
+                .session_mgr
+                .current_mut()
+                .messages
+                .drain_pending_v2_user_bubbles();
+            if !user_bubbles.is_empty() {
+                for text in user_bubbles {
+                    let (new_state, _) = crate::state_machine::handle(
+                        state,
+                        crate::state_machine::event::Event::PushUserBubble(text),
+                    );
+                    state = new_state;
+                }
+                needs_render = true;
+            }
+        }
+
         // Cron #23 P1 fix — 应用 handle_interrupted 请求的 state.view 截断。
         //
         // handle_interrupted 分支 2（无工具调用，回滚路径）已通过 apply_rebuild_all

@@ -139,13 +139,13 @@ impl App {
                     .iter()
                     .map(|(header, answer)| format!("[{}] {}", header, answer))
                     .collect();
-                let vm = MessageViewModel::user(answer_lines.join("\n"));
+                // Cron #24 P1 #2: 路由到 v2 state.view（之前直接 push 到
+                // view_messages 导致生产渲染不可见）。main_loop 会在下一帧
+                // 通过 Event::PushUserBubble 将此文本送入 SM。
                 self.session_mgr
                     .current_mut()
                     .messages
-                    .view_messages
-                    .push(vm);
-                self.render_rebuild();
+                    .push_user_bubble(answer_lines.join("\n"));
 
                 // ACP 模式：通过 transport 回传结构化响应
                 let acp_request_id = self

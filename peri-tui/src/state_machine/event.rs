@@ -60,6 +60,14 @@ pub enum Event {
     /// the note lands in `state.view` (v2 source of truth) instead of the
     /// legacy `view_messages` Vec.
     PushSystemNote(String),
+
+    /// Cron #24 P1 #2 — Push a user-submitted bubble into `state.view`.
+    ///
+    /// Used by `ask_user_confirm` to surface the user's answers in the message
+    /// flow. Without this, answers were pushed only to v1 `view_messages`
+    /// (which v2 render path doesn't read) and silently disappeared after the
+    /// popup closed. Mirrors the `PushSystemNote` queue-and-drain pattern.
+    PushUserBubble(String),
 }
 
 // ---------------------------------------------------------------------------

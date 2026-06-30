@@ -191,6 +191,17 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
                 ));
             (State::Streaming(state), vec![Effect::Render])
         }
+
+        // -- Cron #24 P1 #2: push user bubble into state.view (v2 source) ----
+        // AskUser 答案路由（同 Idle 的 PushUserBubble）。
+        Event::PushUserBubble(text) => {
+            state
+                .view
+                .push(peri_acp_types::view_model::ViewModel::UserBubble(
+                    peri_acp_types::view_model::UserBubbleData { text },
+                ));
+            (State::Streaming(state), vec![Effect::Render])
+        }
     }
 }
 
@@ -519,6 +530,48 @@ mod tests {
             effects.iter().any(|e| matches!(e, Effect::Render)),
             "AcpDisconnected in Streaming should emit Render"
         );
+    }
+
+    // ── Cron #24 P1 #2: PushUserBubble 推送到 state.view ─────────────────
+
+    #[test]
+    fn test_push_userbubble_adds_to_state_view_in_streaming() {
+        // Cron #24 P1 #2: Streaming 期间到达的 AskUser 答案（罕见但可能：
+        // 用户在 agent 流式输出期间确认弹窗）必须追加到 state.view，让
+        // 后续 ViewCommit 替换时仍可见。
+        let state = make_state();
+        let (next, effects) = handle(state, Event::PushUserBubble("yes".into()));
+        match next {
+            State::Streaming(s) => {
+                assert_eq!(s.view.len(), 1);
+                match &s.view[0] {
+                    peri_acp_types::view_model::ViewModel::UserBubble(d) => {
+                        assert_eq!(d.text, "yes");
+                    }
+                    other => panic!("expected UserBubble, got {other:?}"),
+                }
+            }
+            other => panic!("expected Streaming, got {other:?}"),
+        }
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "PushUserBubble in Streaming should emit Render"
+        );
+    }
+
+    #[test]
+    fn test_push_userbubble_does_not_disturb_current_turn_in_streaming() {
+        // PushUserBubble 不应清空或影响 current_turn（流式进度保留）。
+        let mut state = make_state();
+        state.current_turn.append_text("streaming-so-far");
+        let (next, _) = handle(state, Event::PushUserBubble("answer".into()));
+        match next {
+            State::Streaming(s) => {
+                assert_eq!(s.current_turn.text, "streaming-so-far");
+                assert_eq!(s.view.len(), 1);
+            }
+            other => panic!("expected Streaming, got {other:?}"),
+        }
     }
 
     // ── Ctrl-shortcut parity with Idle (panels/toggles reachable) ────────
