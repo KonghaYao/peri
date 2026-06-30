@@ -488,7 +488,13 @@ fn apply_acp_event_to_saved(state: &mut ModalState, event: &AcpEventData) -> Opt
     match event {
         AcpEventData::ViewCommit(vc) => {
             // Replace saved_view with the new snapshot (替换语义, per P2-C).
-            state.saved_view = vc.view_models.clone();
+            //
+            // Phase 2.5 — preserve TUI-only SystemNote (see streaming.rs
+            // ViewCommit handler for rationale).
+            state.saved_view = super::super::view_store::merge_preserving_local_notes(
+                &state.saved_view,
+                vc.view_models.clone(),
+            );
             state.saved_current_turn = None;
             Some(vec![Effect::Render])
         }

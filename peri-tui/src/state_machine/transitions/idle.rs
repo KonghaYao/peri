@@ -102,7 +102,10 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
 
         // -- ACP events ------------------------------------------------------
         Event::AcpEvent(AcpEventData::ViewCommit(vc)) => {
-            state.view = vc.view_models;
+            // Phase 2.5 — preserve TUI-only SystemNote (see streaming.rs
+            // ViewCommit handler for rationale).
+            state.view =
+                super::super::view_store::merge_preserving_local_notes(&state.view, vc.view_models);
             (State::Idle(state), vec![Effect::Render])
         }
 

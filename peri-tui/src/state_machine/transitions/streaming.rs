@@ -61,7 +61,13 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
         Event::AcpEvent(AcpEventData::ViewCommit(vc)) => {
             // Full-snapshot replacement semantics (CLAUDE.md P2-C):
             // base view becomes the committed list, current_turn is reset.
-            state.view = vc.view_models;
+            //
+            // Phase 2.5 — preserve TUI-only SystemNote (added via
+            // Event::PushSystemNote) that is NOT in the ACP-provided
+            // snapshot. Without this, /lang switch notifications, /agent
+            // toggle notes, etc. would vanish on every iteration boundary.
+            state.view =
+                super::super::view_store::merge_preserving_local_notes(&state.view, vc.view_models);
             state.current_turn = Default::default();
             (State::Streaming(state), vec![Effect::Render])
         }

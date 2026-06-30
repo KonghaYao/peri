@@ -73,6 +73,51 @@ impl ViewStore {
 }
 
 // ---------------------------------------------------------------------------
+// Free-function helpers (used by transitions/* without a ViewStore instance)
+// ---------------------------------------------------------------------------
+
+/// 在 ViewCommit 替换语义下保留前一轮的 TUI-only ViewModel（本地 SystemNote）。
+///
+/// v2 commit 是替换语义（`state.view = vc.view_models`），但 TUI 通过
+/// `Event::PushSystemNote` 添加的 SystemNote **不在 ACP transcript 中**，
+/// 纯替换会丢失它们。本函数：
+/// 1. 收集 new_view 中已有的 SystemNote 文本（避免重复）
+/// 2. 追加前一轮中不在 new_view 的 SystemNote
+///
+/// 只处理 SystemNote——其他 ViewModel 变体（UserBubble / AssistantBubble /
+/// ToolCard / CacheWarning / ToolCallGroup / SubAgentGroup）由 ACP 层
+/// view_mapper.rs 完整生成，不存在 TUI-only 的版本。
+pub fn merge_preserving_local_notes(
+    old_view: &[ViewModel],
+    new_view: Vec<ViewModel>,
+) -> Vec<ViewModel> {
+    use std::collections::HashSet;
+
+    let mut result = new_view;
+
+    let existing_notes: HashSet<String> = result
+        .iter()
+        .filter_map(|vm| {
+            if let ViewModel::SystemNote(d) = vm {
+                Some(d.text.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for vm in old_view {
+        if let ViewModel::SystemNote(d) = vm {
+            if !existing_notes.contains(&d.text) {
+                result.push(vm.clone());
+            }
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -163,5 +208,90 @@ mod tests {
         // None current_turn should not panic
         let rendered = store.for_render(None);
         assert!(rendered.is_empty());
+    }
+
+    // -- merge_preserving_local_notes (Phase 2.5) ----------------------------
+
+    use super::merge_preserving_local_notes;
+    use peri_acp_types::view_model::{NoteLevel, SystemNoteData};
+
+    #[test]
+    fn test_merge_preserves_tui_only_system_note() {
+        // 旧 view 含 TUI-only SystemNote
+        let old_view = vec![
+            ViewModel::SystemNote(SystemNoteData {
+                text: "/lang 切换到 en".into(),
+                level: NoteLevel::Info,
+            }),
+            ViewModel::UserBubble(UserBubbleData {
+                text: "hello".into(),
+            }),
+        ];
+        // ACP 新快照只有 UserBubble（不含 SystemNote）
+        let new_view = vec![ViewModel::UserBubble(UserBubbleData {
+            text: "hello".into(),
+        })];
+
+        let merged = merge_preserving_local_notes(&old_view, new_view);
+        // UserBubble 来自 new_view，SystemNote 从 old_view 保留
+        assert_eq!(merged.len(), 2);
+        assert!(matches!(merged[0], ViewModel::UserBubble(_)));
+        assert!(matches!(merged[1], ViewModel::SystemNote(_)));
+    }
+
+    #[test]
+    fn test_merge_dedupes_system_notes_by_text() {
+        // 旧 view 和新 view 都含相同文本的 SystemNote → 不应重复
+        let old_view = vec![ViewModel::SystemNote(SystemNoteData {
+            text: "same".into(),
+            level: NoteLevel::Info,
+        })];
+        let new_view = vec![ViewModel::SystemNote(SystemNoteData {
+            text: "same".into(),
+            level: NoteLevel::Info,
+        })];
+
+        let merged = merge_preserving_local_notes(&old_view, new_view);
+        assert_eq!(merged.len(), 1, "相同文本 SystemNote 不应重复");
+    }
+
+    #[test]
+    fn test_merge_preserves_distinct_notes() {
+        // 旧 view 有 2 条不同 SystemNote，新 view 有 1 条 → 合并后 3 条
+        let old_view = vec![
+            ViewModel::SystemNote(SystemNoteData {
+                text: "old-1".into(),
+                level: NoteLevel::Info,
+            }),
+            ViewModel::SystemNote(SystemNoteData {
+                text: "old-2".into(),
+                level: NoteLevel::Info,
+            }),
+        ];
+        let new_view = vec![ViewModel::SystemNote(SystemNoteData {
+            text: "new-1".into(),
+            level: NoteLevel::Info,
+        })];
+
+        let merged = merge_preserving_local_notes(&old_view, new_view);
+        assert_eq!(merged.len(), 3);
+    }
+
+    #[test]
+    fn test_merge_does_not_preserve_other_variants() {
+        // 旧 view 的 UserBubble / AssistantBubble 等不应保留（ACP 完整生成）
+        let old_view = vec![
+            ViewModel::UserBubble(UserBubbleData {
+                text: "stale".into(),
+            }),
+            ViewModel::Divider(DividerData { label: None }),
+        ];
+        let new_view = vec![ViewModel::UserBubble(UserBubbleData {
+            text: "fresh".into(),
+        })];
+
+        let merged = merge_preserving_local_notes(&old_view, new_view);
+        assert_eq!(merged.len(), 1, "非 SystemNote 不应保留");
+        assert!(matches!(merged[0], ViewModel::UserBubble(_)));
     }
 }
