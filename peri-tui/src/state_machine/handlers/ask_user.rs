@@ -137,8 +137,6 @@ impl Handler for AskUserHandler {
             for (i, opt) in q.options.iter().enumerate() {
                 let is_selected = self.is_selected(i);
                 let num = i + 1;
-                let cursor_mark = "❯";
-                let space_mark = " ";
 
                 let row_style = if is_selected {
                     Style::default().fg(theme::SAGE)
@@ -146,12 +144,10 @@ impl Handler for AskUserHandler {
                     Style::default().fg(theme::TEXT)
                 };
 
-                // Note: v2 AskUserHandler does not track an option cursor
-                // (only `question_idx` for tab navigation). Selection state
-                // is the only per-option signal we render. Mark all rows
-                // with the space marker; selected rows get the visual cue
-                // via the ● check icon (multi) or row color (single).
-                let mark = space_mark;
+                // v2 AskUserHandler tracks only `question_idx` for tab
+                // navigation — no per-option cursor. Selection is the only
+                // per-option signal: ●/○ (multi) or row color (single).
+                let mark = " ";
 
                 if multi {
                     let check = if is_selected { "●" } else { "○" };
