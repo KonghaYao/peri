@@ -65,7 +65,7 @@
     <tr><td>1.5</td><td>修复 Modal 期间 AcpEvent 丢弃</td><td class="status s-pending">待开始</td><td>Modal 持有 saved_view，view_models() 不返回 &[]</td></tr>
     <tr><td>1.6</td><td>Streaming→Modal 可达 + Status 事件</td><td class="status s-pending">待开始</td><td>OpenPanel 在 Streaming 也触发；实现 §4.3 status 事件</td></tr>
     <tr><td>2</td><td>消息源单一化</td><td class="status s-pending">待开始</td><td>删 origin_messages/view_messages，统一 state.view + current_turn</td></tr>
-    <tr><td>3</td><td>清理死 Effect + Switching</td><td class="status s-active">Phase 3a 完成</td><td>3a：5 个真死 Effect 删除（AskUserScroll/ClearPendingMessages/InterruptAgent/OpenRewindPrompt/OpenThreadWithFeedback）；3b：modal.rs TLS stubs → #[cfg(test)]（推迟到下个窗口）；3c：State::Switching 完善（推迟）</td></tr>
+    <tr><td>3</td><td>清理死 Effect + Switching</td><td class="status s-active">Phase 3a/3b 完成</td><td>3a：5 个真死 Effect 删除 ✓；3b：modal.rs TLS stubs → #[cfg(test)] ✓（handle/dispatch_key/dispatch_mouse_tls/dispatch_paste_tls/transition_to_idle*/TLS statics 全部 test-only，state_machine::handle Modal arm 改为生产 no-op + 测试 dispatch）；3c：State::Switching 完善（推迟到独立窗口）</td></tr>
     <tr><td>4</td><td>CLAUDE.md 同步</td><td class="status s-pending">待开始</td><td>peri-tui + 根 CLAUDE.md 删除过时引用</td></tr>
   </tbody>
 </table>
@@ -102,9 +102,9 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-06-30 cron #2（Phase 1.1 + Phase 3a 完成 → Phase 3b/c 待续）<br>
-  <strong>本窗口成果</strong>：commit <code>0da30e87</code>（Phase 1.1）+ 待提交（Phase 3a：5 个死 Effect 删除）· 948 测试全过<br>
-  <strong>下一步</strong>：Phase 3b（modal.rs TLS stubs → #[cfg(test)]，需重写 state_machine::handle Modal arm）+ Phase 3c（State::Switching 完善）→ Phase 1.5（Modal 期间 AcpEvent 修复）
+  <strong>最后更新</strong>：2026-06-30 cron #2（Phase 1.1 + 3a + 3b 完成）<br>
+  <strong>本窗口成果</strong>：commit <code>0da30e87</code>（Phase 1.1）+ <code>20c0135c</code>（Phase 3a）+ 待提交（Phase 3b）· 948 测试全过 · 生产构建无 warning<br>
+  <strong>下一步</strong>：Phase 3c（State::Switching 完善）或 Phase 1.5（Modal 期间 AcpEvent 修复）
 </div>
 
 </body>

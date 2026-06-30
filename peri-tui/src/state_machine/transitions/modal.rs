@@ -6,16 +6,18 @@
 //!
 //! Reference: `docs/design/peri-tui-architecture.md` section 8.6.
 
+#[cfg(test)]
 use std::collections::HashMap;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use tui_textarea::Input;
 
 use super::super::event::Event;
-use super::super::state::{
-    HandlerOutput, IdleState, InputState, ModalState, PanelReadContext, State,
-};
+use super::super::state::{HandlerOutput, ModalState, PanelReadContext, State};
+#[cfg(test)]
+use super::super::state::{IdleState, InputState};
 use crate::panel::effect::PanelEffect;
+#[cfg(test)]
 use crate::panel::read_context::ServiceRegistrySnapshot;
 use crate::runtime::effect::Effect;
 
@@ -29,7 +31,14 @@ struct DispatchResult {
     handler_submit: Option<String>,
 }
 
-/// Modal-state transition entry point.
+/// Modal-state transition entry point (test-only).
+///
+/// Production code uses [`handle_with_context`] instead, providing a real
+/// [`PanelReadContext`] built from `&App`. This test-only entry uses TLS
+/// stub snapshots and is reachable only when tests call `state_machine::handle`
+/// with a `State::Modal(..)` (production main_loop routes Modal directly to
+/// `handle_with_context`).
+#[cfg(test)]
 pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
     match event {
         // -- Esc: dismiss popup via ClosePanel effect ------------------------
@@ -116,7 +125,7 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
 }
 
 /// Build a fresh Idle state with a Render effect (used when dismissing modal).
-#[allow(dead_code)]
+#[cfg(test)]
 fn transition_to_idle() -> (State, Vec<Effect>) {
     let idle = IdleState {
         input: InputState::default(),
@@ -129,7 +138,7 @@ fn transition_to_idle() -> (State, Vec<Effect>) {
 }
 
 /// Build a fresh Idle state, preserving the given effects (e.g., ShowNotification).
-#[allow(dead_code)]
+#[cfg(test)]
 fn transition_to_idle_with_effects(effects: Vec<Effect>) -> (State, Vec<Effect>) {
     let idle = IdleState {
         input: InputState::default(),
@@ -152,9 +161,10 @@ fn transition_to_idle_with_effects(effects: Vec<Effect>) -> (State, Vec<Effect>)
 /// `PanelEffect::Close` or the handler returned `Submit`/`Dismiss`.
 /// `handler_submit` carries the payload when an Interaction handler returns `Submit`.
 ///
-/// **Production code should use [`dispatch_key_with_ctx`] instead**, providing
+/// **Production code uses [`dispatch_key_with_ctx`] instead**, providing
 /// a real [`PanelReadContext`] constructed from App data. This function exists
 /// only for test compatibility (tests don't have access to App).
+#[cfg(test)]
 fn dispatch_key(state: &mut ModalState, key: KeyEvent) -> DispatchResult {
     STUB_SNAPSHOT.with(|snapshot| {
         STUB_VMS.with(|vms| {
@@ -176,6 +186,7 @@ fn dispatch_key(state: &mut ModalState, key: KeyEvent) -> DispatchResult {
 }
 
 /// Dispatch a mouse event using TLS stubs (test-only path).
+#[cfg(test)]
 fn dispatch_mouse_tls(
     state: &mut ModalState,
     mouse: ratatui::crossterm::event::MouseEvent,
@@ -200,6 +211,7 @@ fn dispatch_mouse_tls(
 }
 
 /// Dispatch a paste event using TLS stubs (test-only path).
+#[cfg(test)]
 fn dispatch_paste_tls(state: &mut ModalState, text: &str) -> DispatchResult {
     STUB_SNAPSHOT.with(|snapshot| {
         STUB_VMS.with(|vms| {
@@ -221,6 +233,7 @@ fn dispatch_paste_tls(state: &mut ModalState, text: &str) -> DispatchResult {
 }
 
 // TLS stubs shared by the test-only dispatch wrappers.
+#[cfg(test)]
 thread_local! {
     static STUB_SNAPSHOT: ServiceRegistrySnapshot = ServiceRegistrySnapshot::new();
     static STUB_VMS: Vec<peri_acp_types::view_model::ViewModel> = const { Vec::new() };

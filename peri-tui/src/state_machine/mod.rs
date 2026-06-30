@@ -40,11 +40,32 @@ pub use view_store::ViewStore;
 /// The v2 main loop (`runtime::main_loop::run`) drives this as the primary
 /// event handler (path 1a), with keyboard fallback (path 1b) for complex UI
 /// interactions not yet ported to pure transitions.
+///
+/// **Modal arm**: production main_loop routes `State::Modal(..)` directly to
+/// [`transitions::modal::handle_with_context`] (which needs a `&App`-built
+/// context). This entry point's Modal arm exists only for tests, which call
+/// it via `state_machine::handle(State::Modal(..), event)`. In production
+/// builds the Modal arm is a defensive no-op that returns Modal unchanged.
 pub fn handle(state: State, event: Event) -> (State, Vec<crate::runtime::effect::Effect>) {
     match state {
         State::Idle(s) => transitions::idle::handle(s, event),
         State::Streaming(s) => transitions::streaming::handle(s, event),
-        State::Modal(s) => transitions::modal::handle(s, event),
+        State::Modal(s) => {
+            // Production never reaches here — main_loop calls
+            // `modal::handle_with_context` directly when state is Modal.
+            #[cfg(test)]
+            {
+                transitions::modal::handle(s, event)
+            }
+            #[cfg(not(test))]
+            {
+                let _ = event;
+                (
+                    State::Modal(s),
+                    vec![crate::runtime::effect::Effect::Render],
+                )
+            }
+        }
         State::Switching(s) => transitions::switching::handle(s, event),
     }
 }
