@@ -44,15 +44,11 @@ pub fn message_view_model_to_v2(vm: &MessageViewModel) -> Option<ViewModel> {
             let mut reasoning_parts: Vec<String> = Vec::new();
             for block in blocks {
                 match block {
-                    ContentBlockView::Text { raw, .. } => {
-                        if !raw.is_empty() {
-                            text_parts.push(raw.clone());
-                        }
+                    ContentBlockView::Text { raw, .. } if !raw.is_empty() => {
+                        text_parts.push(raw.clone());
                     }
-                    ContentBlockView::Reasoning { text, .. } => {
-                        if !text.is_empty() {
-                            reasoning_parts.push(text.clone());
-                        }
+                    ContentBlockView::Reasoning { text, .. } if !text.is_empty() => {
+                        reasoning_parts.push(text.clone());
                     }
                     _ => {} // ToolUse 在 v2 中是 sibling ToolCard，不是子内容
                 }
