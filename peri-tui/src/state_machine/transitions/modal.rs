@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use tui_textarea::Input;
 
-use super::super::event::Event;
+use super::super::event::{AcpEventData, Event};
 use super::super::state::{HandlerOutput, ModalKind, ModalState, PanelReadContext, State};
 #[cfg(test)]
 use super::super::state::{IdleState, InputState};
@@ -114,10 +114,17 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
             ],
         ),
 
-        // -- Everything else: keep Modal, no effect --------------------------
-        Event::AcpEvent(_) | Event::AcpDisconnected | Event::SessionLoaded { .. } => {
-            (State::Modal(state), Vec::new())
+        // -- AcpEvent: apply to saved_* (don't drop!) ------------------------
+        // The agent keeps producing output while the popup is open. Apply
+        // each event to saved_view / saved_current_turn so closing the
+        // popup restores the latest state, not a stale snapshot.
+        Event::AcpEvent(acp_event) => {
+            let effects = apply_acp_event_to_saved(&mut state, &acp_event);
+            (State::Modal(state), effects.unwrap_or_default())
         }
+
+        // -- Everything else: keep Modal, no effect --------------------------
+        Event::AcpDisconnected | Event::SessionLoaded { .. } => (State::Modal(state), Vec::new()),
 
         // -- Shutdown: propagate to main_loop so app can quit ----------------
         Event::Shutdown => (State::Modal(state), vec![Effect::Quit]),
@@ -426,13 +433,99 @@ pub fn handle_with_context(
             ],
         ),
 
-        // -- Everything else: keep Modal, no effect --------------------------
-        Event::AcpEvent(_) | Event::AcpDisconnected | Event::SessionLoaded { .. } => {
-            (State::Modal(state), Vec::new())
+        // -- AcpEvent: apply to saved_* (don't drop!) ------------------------
+        // The agent keeps producing output while the popup is open. Apply
+        // each event to saved_view / saved_current_turn so closing the
+        // popup restores the latest state, not a stale snapshot.
+        Event::AcpEvent(acp_event) => {
+            let effects = apply_acp_event_to_saved(&mut state, &acp_event);
+            (State::Modal(state), effects.unwrap_or_default())
         }
+
+        // -- Everything else: keep Modal, no effect --------------------------
+        Event::AcpDisconnected | Event::SessionLoaded { .. } => (State::Modal(state), Vec::new()),
 
         // -- Shutdown: propagate to main_loop so app can quit ----------------
         Event::Shutdown => (State::Modal(state), vec![Effect::Quit]),
+    }
+}
+
+/// Apply an `AcpEventData` to the ModalState's saved_* fields.
+///
+/// While a modal popup is open, ACP events that mutate the underlying
+/// agent state (view snapshot, streaming chunks, turn boundaries) must
+/// still be applied to `saved_view` / `saved_current_turn` so that when
+/// the popup closes, the restored state reflects progress made during
+/// the modal session. Without this, closing the popup would rewind the
+/// UI to whatever state was captured when the modal opened.
+///
+/// Returns `Some(effects)` if the event was handled (always includes
+/// `Effect::Render`), or `None` if the event is a silent no-op (status
+/// events, interaction requests, unknown events).
+fn apply_acp_event_to_saved(state: &mut ModalState, event: &AcpEventData) -> Option<Vec<Effect>> {
+    use super::super::current_turn::ToolCardAccumulator;
+    match event {
+        AcpEventData::ViewCommit(vc) => {
+            // Replace saved_view with the new snapshot (替换语义, per P2-C).
+            state.saved_view = vc.view_models.clone();
+            state.saved_current_turn = None;
+            Some(vec![Effect::Render])
+        }
+
+        AcpEventData::TextChunk(tc) => {
+            if let Some(turn) = state.saved_current_turn.as_mut() {
+                turn.append_text(&tc.text);
+                Some(vec![Effect::Render])
+            } else {
+                None
+            }
+        }
+
+        AcpEventData::ReasoningChunk(rc) => {
+            if let Some(turn) = state.saved_current_turn.as_mut() {
+                turn.append_reasoning(&rc.text);
+                Some(vec![Effect::Render])
+            } else {
+                None
+            }
+        }
+
+        AcpEventData::ToolStarted(ts) => {
+            if let Some(turn) = state.saved_current_turn.as_mut() {
+                turn.start_tool(ToolCardAccumulator::new(
+                    ts.tool_id.clone(),
+                    ts.tool_name.clone(),
+                    ts.input_summary.clone(),
+                ));
+                Some(vec![Effect::Render])
+            } else {
+                None
+            }
+        }
+
+        AcpEventData::ToolEnded(te) => {
+            if let Some(turn) = state.saved_current_turn.as_mut() {
+                turn.end_tool(&te.tool_id, te.output_summary.clone(), te.is_error);
+                Some(vec![Effect::Render])
+            } else {
+                None
+            }
+        }
+
+        AcpEventData::TurnDone | AcpEventData::TurnInterrupted(_) => {
+            // Turn ended while modal was open — clear saved_current_turn
+            // so ClosePanel restores to Idle (not Streaming).
+            if let Some(turn) = state.saved_current_turn.as_mut() {
+                turn.deactivate();
+            }
+            state.saved_current_turn = None;
+            None
+        }
+
+        // Status events / interaction requests / unknown — silently drop.
+        // Status bar will display these separately; interaction requests
+        // would replace the current modal (Phase 1.4 territory).
+        _ => None,
     }
 }
 
@@ -554,6 +647,83 @@ mod tests {
         assert!(effects.iter().any(|e| matches!(e, Effect::PollAgent)));
         assert!(effects.iter().any(|e| matches!(e, Effect::AdvanceSpinner)));
         assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
+    }
+
+    #[test]
+    fn test_view_commit_updates_saved_view_in_modal() {
+        // ViewCommit 在 Modal 期间必须更新 saved_view，否则关闭 popup
+        // 时会回退到打开前的旧快照，丢失 agent 在 Modal 期间产出的消息。
+        use peri_acp_types::event_data::ViewCommit;
+        use peri_acp_types::view_model::{UserBubbleData, ViewModel};
+        let mut modal = make_interaction_modal(Box::new(NoopHandler));
+        modal.saved_view = vec![ViewModel::UserBubble(UserBubbleData {
+            text: "old snapshot".into(),
+        })];
+        let new_view = vec![ViewModel::UserBubble(UserBubbleData {
+            text: "new snapshot during modal".into(),
+        })];
+        let (next, effects) = handle(
+            modal,
+            Event::AcpEvent(AcpEventData::ViewCommit(ViewCommit {
+                view_models: new_view.clone(),
+            })),
+        );
+        match next {
+            State::Modal(m) => {
+                assert_eq!(m.saved_view.len(), 1);
+                match &m.saved_view[0] {
+                    ViewModel::UserBubble(data) => {
+                        assert_eq!(data.text, "new snapshot during modal");
+                    }
+                    _ => panic!("expected UserBubble"),
+                }
+                assert!(m.saved_current_turn.is_none(), "ViewCommit clears turn");
+            }
+            _ => panic!("expected Modal"),
+        }
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "ViewCommit in Modal should emit Render"
+        );
+    }
+
+    #[test]
+    fn test_status_events_silently_dropped_in_modal() {
+        // TokenUsage 等状态事件在 Modal 期间不应更新 saved_view，
+        // 由 status bar 独立显示。
+        use peri_acp_types::event_data::TokenUsage;
+        let modal = make_interaction_modal(Box::new(NoopHandler));
+        let (next, effects) = handle(
+            modal,
+            Event::AcpEvent(AcpEventData::TokenUsage(TokenUsage {
+                input: 100,
+                output: 50,
+            })),
+        );
+        assert!(matches!(next, State::Modal(_)));
+        assert!(
+            effects.is_empty(),
+            "Status events in Modal should produce no effects"
+        );
+    }
+
+    #[test]
+    fn test_text_chunk_without_saved_turn_is_dropped() {
+        // 没有 saved_current_turn（Modal 从 Idle 打开）时，TextChunk 应静默丢弃。
+        use peri_acp_types::event_data::TextChunk;
+        let modal = make_interaction_modal(Box::new(NoopHandler));
+        let (next, effects) = handle(
+            modal,
+            Event::AcpEvent(AcpEventData::TextChunk(TextChunk {
+                text: "ignored".into(),
+                agent_id: None,
+            })),
+        );
+        assert!(matches!(next, State::Modal(_)));
+        assert!(
+            effects.is_empty(),
+            "TextChunk without saved_current_turn should be dropped"
+        );
     }
 
     #[test]
