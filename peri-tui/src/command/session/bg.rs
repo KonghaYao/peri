@@ -25,7 +25,13 @@ impl Command for BgCommand {
             )];
         }
         // Pass through to executor — keep /bg prefix so ACP executor intercepts it
-        app.submit_message(format!("/bg {}", args));
+        // Cron #26 step 7e.7: UserBubble 路由到 v2 state.view。
+        let prompt = format!("/bg {}", args);
+        app.session_mgr
+            .current_mut()
+            .messages
+            .push_user_bubble(prompt.clone());
+        app.submit_message(prompt);
         vec![]
     }
 }

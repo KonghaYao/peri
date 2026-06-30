@@ -250,6 +250,19 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
             if text.starts_with('/') {
                 return (State::Idle(state), Vec::new());
             }
+            // Defense-in-depth: when an inline hint (at_mention popup or
+            // slash_completion) is registered on the SM InputState, Enter
+            // must never submit — the keyboard fallback owns these to inject
+            // the selected path / complete the hint. is_sm_handled_shortcut
+            // already returns false for these, but should the routing change
+            // this guard keeps the raw `@query` text from being submitted.
+            // Note: InputState.at_mention is currently always None in
+            // production (the App-side at_mention is the source of truth and
+            // is checked via is_sm_handled_shortcut), so this is a future-
+            // proofing net mirroring the slash-command guard above.
+            if state.input.at_mention.is_some() || state.input.slash_completion.is_some() {
+                return (State::Idle(state), Vec::new());
+            }
             state.input.clear_buffer();
 
             if text.trim().is_empty() {
@@ -559,6 +572,80 @@ mod tests {
                 );
             }
             other => panic!("expected Idle for slash command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_enter_with_at_mention_does_not_submit() {
+        // Defense-in-depth: 当 SM InputState 上挂有 at_mention 状态时，
+        // Enter 不应提交——交由键盘 fallback 注入选中路径。这与 slash
+        // 命令的短路返回 Idle 模式一致。生产中 InputState.at_mention 通常
+        // 为 None（App 层 at_mention 是真实源，is_sm_handled_shortcut
+        // 负责路由），但 SM 仍应防御性地拒绝提交。
+        use crate::state_machine::input::AtMentionState;
+        let mut state = make_state();
+        state.input.insert_str("@src/main.rs");
+        state.input.at_mention = Some(AtMentionState {
+            candidates: vec!["src/main.rs".into()],
+            selected: 0,
+        });
+        let (next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        match next {
+            State::Idle(idle) => {
+                // InputState 应保持不变（buffer 未清空，仍含 @src/main.rs）
+                assert_eq!(
+                    idle.input.text(),
+                    "@src/main.rs",
+                    "Enter with at_mention must not clear input"
+                );
+                assert!(
+                    effects
+                        .iter()
+                        .all(|e| !matches!(e, Effect::SubmitMessage { .. })),
+                    "Enter with at_mention must not emit SubmitMessage"
+                );
+                assert!(
+                    idle.view.is_empty(),
+                    "Enter with at_mention must not push UserBubble"
+                );
+            }
+            other => panic!("expected Idle for at_mention Enter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_enter_with_slash_completion_does_not_submit() {
+        // 同样的防御性 guard：slash_completion 激活时 Enter 不提交。
+        // 覆盖行中 / token（如 "review /code"）场景。
+        use crate::state_machine::input::SlashCompletionState;
+        let mut state = make_state();
+        state.input.insert_str("review /code");
+        state.input.slash_completion = Some(SlashCompletionState {
+            candidates: vec!["/codereview".into()],
+            selected: 0,
+        });
+        let (next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        match next {
+            State::Idle(idle) => {
+                assert_eq!(
+                    idle.input.text(),
+                    "review /code",
+                    "Enter with slash_completion must not clear input"
+                );
+                assert!(
+                    effects
+                        .iter()
+                        .all(|e| !matches!(e, Effect::SubmitMessage { .. })),
+                    "Enter with slash_completion must not emit SubmitMessage"
+                );
+            }
+            other => panic!("expected Idle for slash_completion Enter, got {other:?}"),
         }
     }
 

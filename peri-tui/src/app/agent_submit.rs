@@ -41,12 +41,30 @@ impl App {
             peri_agent::messages::MessageContent::Blocks(blocks)
         };
 
-        // P5: No pipeline.begin_round() — round tracking via round_start_vm_idx
+        // Cron #26 step 7e.7: Retired v1 UserBubble push + round_start_vm_idx
+        // double-write. Previously this block did:
+        //   1. apply_add_message(user_vm) → pushed UserBubble to v1 view_messages
+        //   2. round_start_vm_idx = view_messages.len() → v1 round tracking
+        //
+        // v2 is now the single source of truth for state.view:
+        //   • Plain Enter (non-slash): SM idle.rs Enter handler pushes UserBubble
+        //     to state.view (Phase 2.6 step 7d, cron #24 P1 #2).
+        //   • Slash command Submit (keyboard::normal_keys.rs lines 178/188/195):
+        //     push_user_bubble(text) → main_loop drains pending_v2_user_bubbles
+        //     → SM Event::PushUserBubble pushes to state.view (this cron #26).
+        //
+        // The previous v1 push caused a real user-visible bug for slash command
+        // submits: view_messages got the UserBubble but production render only
+        // reads v2 state.view, so the user's slash command message vanished
+        // from the message area until the next ACP ViewCommit replaced it.
+        //
+        // round_start_vm_idx is preserved on v1 for the (legacy, soon-retired)
+        // apply_rebuild_all path used by handle_done / handle_interrupted.
+        // Its value is no longer bumped here, but handle_interrupted (cron #23
+        // P1 #1) and handle_done both scan v2 state.view directly via
+        // view_store::last_user_bubble_index / has_tool_cards_after, so the
+        // round_start_vm_idx staleness has no production impact.
 
-        let user_vm = MessageViewModel::user(display.clone());
-        self.apply_add_message(user_vm);
-        self.session_mgr.current_mut().messages.round_start_vm_idx =
-            self.session_mgr.current_mut().messages.view_messages.len();
         self.session_mgr.current_mut().metadata.last_human_message = Some(display);
         self.session_mgr.current_mut().messages.last_submitted_text = Some(input.clone());
         self.set_loading(true);

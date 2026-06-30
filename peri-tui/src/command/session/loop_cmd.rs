@@ -31,6 +31,12 @@ impl Command for LoopCommand {
             args
         );
 
+        // Cron #26 step 7e.7: UserBubble 通过 push_user_bubble 队列路由到
+        // v2 state.view（submit_message 不再直接写 v1 view_messages）。
+        app.session_mgr
+            .current_mut()
+            .messages
+            .push_user_bubble(prompt.clone());
         app.submit_message(prompt);
         vec![]
     }

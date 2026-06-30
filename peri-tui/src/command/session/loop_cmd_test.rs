@@ -42,33 +42,24 @@
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_loop_cmd_valid_args_submits_message() {
+        // Cron #26 step 7e.7: submit_message 不再写 v1 view_messages。
+        // UserBubble 通过 push_user_bubble 入队到 pending_v2_user_bubbles，
+        // 由 main_loop 通过 Event::PushUserBubble 路由到 v2 state.view。
         let mut app = headless_app().await;
-        let initial_len = app.session_mgr.current_mut()
-            .messages
-            .view_messages
-            .len();
         let cmd = LoopCommand;
         cmd.execute(&mut app, "每隔5分钟提醒我喝水");
-        // submit_message 会添加一条 user 消息到 view_messages
-        assert!(
-            app.session_mgr.current_mut()
-                .messages
-                .view_messages
-                .len()
-                > initial_len,
-            "有参数时应提交消息给 Agent"
+        // pending_v2_user_bubbles 应包含提交的 prompt
+        let pending = &app.session_mgr.current().messages.pending_v2_user_bubbles;
+        assert_eq!(
+            pending.len(),
+            1,
+            "/loop 命令应入队 1 个 UserBubble 到 pending_v2_user_bubbles"
         );
         // 检查提交的消息包含 cron_register 指令
-        let text = format!(
-            "{:?}",
-            app.session_mgr.current_mut()
-                .messages
-                .view_messages
-        );
         assert!(
-            text.contains("cron_register"),
+            pending[0].contains("cron_register"),
             "提交的消息应包含 cron_register 指令，实际: {}",
-            text
+            pending[0]
         );
     }
 

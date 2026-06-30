@@ -81,6 +81,17 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // before the SM clears the input buffer on Enter.
         let is_slash_command =
             matches!(&state, State::Idle(idle) if idle.input.text().starts_with('/'));
+        // Inline-hint active flags: when the @mention popup or the slash
+        // hint overlay is active on the App's textarea, Enter must reach the
+        // keyboard fallback (which injects the selected path / completes the
+        // hint) instead of being claimed by the SM as a message submit.
+        // These live on the App (not in InputState) and are mutually
+        // exclusive (keyboard.rs deactivates slash_hint when at_mention is
+        // active), so either flag independently defers Enter to fallback.
+        let (at_mention_active, slash_hint_active) = {
+            let ui = &app.session_mgr.current().ui;
+            (ui.at_mention.active, ui.slash_hint.active)
+        };
         // Cron #25 unified popup-guard: when a v1 popup is active
         // (AskUser / HITL / OAuth / Rewind), the keyboard fallback owns
         // all key dispatch. Letting the SM also run would double-execute
@@ -142,6 +153,8 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     was_idle,
                     is_slash_command,
                     popup_active,
+                    at_mention_active,
+                    slash_hint_active,
                 ) =>
             {
                 keyboard_did_run = true;
@@ -973,6 +986,8 @@ fn is_sm_handled_shortcut(
     was_idle: bool,
     is_slash_command: bool,
     popup_active: bool,
+    at_mention_active: bool,
+    slash_hint_active: bool,
 ) -> bool {
     // Modal: state machine handles EVERY key (dispatches to panel/handler).
     if matches!(state, State::Modal(_)) {
@@ -998,8 +1013,12 @@ fn is_sm_handled_shortcut(
     }
 
     // Enter (no Shift/Alt): state machine handles submission,
-    // EXCEPT for slash commands — those must go through the keyboard
-    // fallback so CommandRegistry::dispatch can route them.
+    // EXCEPT when an inline hint owns the key:
+    //   - slash commands (`/...`) → CommandRegistry::dispatch in fallback
+    //   - @mention popup active   → inject_at_mention_path in fallback
+    //   - slash hint active       → hint_complete in fallback (covers
+    //     mid-line `/token` after whitespace, where `is_slash_command`
+    //     is false but `slash_hint.active` is true)
     // Use pre-transition flags: is_slash_command was captured before the
     // SM transition consumed the state (Idle → Streaming on Enter).
     if matches!(key.code, KeyCode::Enter)
@@ -1008,7 +1027,7 @@ fn is_sm_handled_shortcut(
             .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
         && (was_idle || matches!(state, State::Idle(_)))
     {
-        if is_slash_command {
+        if is_slash_command || at_mention_active || slash_hint_active {
             return false;
         }
         return true;
@@ -1108,12 +1127,12 @@ mod tests {
         let state = idle_state();
         let key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
         assert!(
-            !is_sm_handled_shortcut(&key, &state, true, false, true),
+            !is_sm_handled_shortcut(&key, &state, true, false, true, false, false),
             "BackTab with popup active must return false so popup gets prev-tab"
         );
         // 同键无 popup → 仍 true（SM 切权限模式）
         assert!(
-            is_sm_handled_shortcut(&key, &state, true, false, false),
+            is_sm_handled_shortcut(&key, &state, true, false, false, false, false),
             "BackTab without popup must return true (SM cycles permission)"
         );
     }
@@ -1125,11 +1144,11 @@ mod tests {
         for c in ['t', 'b', 'o', 'p'] {
             let key = ctrl(c);
             assert!(
-                !is_sm_handled_shortcut(&key, &state, true, false, true),
+                !is_sm_handled_shortcut(&key, &state, true, false, true, false, false),
                 "Ctrl+{c} with popup active must return false"
             );
             assert!(
-                is_sm_handled_shortcut(&key, &state, true, false, false),
+                is_sm_handled_shortcut(&key, &state, true, false, false, false, false),
                 "Ctrl+{c} without popup must return true"
             );
         }
@@ -1144,7 +1163,7 @@ mod tests {
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         );
         assert!(
-            !is_sm_handled_shortcut(&key, &state, true, false, true),
+            !is_sm_handled_shortcut(&key, &state, true, false, true, false, false),
             "Ctrl+Shift+T with popup active must return false"
         );
     }
@@ -1157,12 +1176,12 @@ mod tests {
         let state = idle_state();
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert!(
-            !is_sm_handled_shortcut(&key, &state, true, false, true),
+            !is_sm_handled_shortcut(&key, &state, true, false, true, false, false),
             "Enter with popup active must return false so popup confirms"
         );
         // 非 popup 时仍 true（提交消息）
         assert!(
-            is_sm_handled_shortcut(&key, &state, true, false, false),
+            is_sm_handled_shortcut(&key, &state, true, false, false, false, false),
             "Enter without popup must return true (submit)"
         );
     }
@@ -1173,7 +1192,7 @@ mod tests {
         let state = idle_state();
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert!(
-            !is_sm_handled_shortcut(&key, &state, true, true, true),
+            !is_sm_handled_shortcut(&key, &state, true, true, true, false, false),
             "Enter (slash) with popup active must return false"
         );
     }
@@ -1184,12 +1203,12 @@ mod tests {
         let state = idle_state();
         let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         assert!(
-            !is_sm_handled_shortcut(&key, &state, true, false, true),
+            !is_sm_handled_shortcut(&key, &state, true, false, true, false, false),
             "Plain char with popup active must return false"
         );
         // 普通 Char 无 popup → 也是 false（键盘 fallback 处理 textarea 输入）
         assert!(
-            !is_sm_handled_shortcut(&key, &state, true, false, false),
+            !is_sm_handled_shortcut(&key, &state, true, false, false, false, false),
             "Plain char without popup must return false (keyboard owns)"
         );
     }
@@ -1201,8 +1220,105 @@ mod tests {
         let state = idle_state();
         let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert!(
-            !is_sm_handled_shortcut(&key, &state, true, false, true),
+            !is_sm_handled_shortcut(&key, &state, true, false, true, false, false),
             "Esc with popup active must return false so popup closes (not quit)"
+        );
+    }
+
+    // ── @mention / slash-hint Enter routing regression tests ────────────
+    //
+    // 背景：当 @mention 弹窗或 slash hint overlay 激活时，Enter 必须由
+    // 键盘 fallback 处理（inject_at_mention_path / hint_complete），而
+    // 不是被 SM 当作 submit。此前 is_sm_handled_shortcut 对 Enter 在非
+    // slash 命令时始终返回 true，导致 SM 抢先提交原始 @文本（P0 bug）。
+    //
+    // 修复：is_sm_handled_shortcut 接收 at_mention_active / slash_hint_active
+    // 标志，任一为 true 时对 Enter 返回 false，让 fallback 接管。
+
+    #[test]
+    fn test_at_mention_active_enter_returns_false() {
+        // @mention 弹窗激活时按 Enter → false（让 fallback 注入选中路径）
+        // 核心场景：用户输入 @src/main.rs、看到弹窗、按 Enter 选文件，
+        // 应当注入路径而非提交原始 @query 文本。
+        let state = idle_state();
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            !is_sm_handled_shortcut(&key, &state, true, false, false, true, false),
+            "Enter with @mention active must return false so path gets injected"
+        );
+        // 关闭 @mention 后仍 true（正常提交）
+        assert!(
+            is_sm_handled_shortcut(&key, &state, true, false, false, false, false),
+            "Enter without @mention must return true (submit)"
+        );
+    }
+
+    #[test]
+    fn test_slash_hint_active_enter_returns_false() {
+        // slash hint overlay 激活时按 Enter → false（让 fallback 完成 hint）
+        // 覆盖两类场景：
+        //   (a) 行首 / 命令（is_slash_command=true，原本就走 fallback）
+        //   (b) 行中 / token（如 "review /code"，is_slash_command=false 但
+        //       slash_hint.active=true）—— 这是本修复的关键场景
+        let state = idle_state();
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        // 行中 slash token：is_slash_command=false，slash_hint_active=true
+        assert!(
+            !is_sm_handled_shortcut(&key, &state, true, false, false, false, true),
+            "Enter with slash_hint active (mid-line token) must return false so hint completes"
+        );
+        // 无 hint 时仍 true（提交消息）
+        assert!(
+            is_sm_handled_shortcut(&key, &state, true, false, false, false, false),
+            "Enter without slash_hint must return true (submit)"
+        );
+    }
+
+    #[test]
+    fn test_at_mention_and_slash_hint_mutually_defer_enter() {
+        // 互斥验证：两个标志不应同时为 true（keyboard.rs 在 at_mention
+        // 激活时 deactivate slash_hint），但任一为 true 都应让 Enter 走 fallback。
+        let state = idle_state();
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        // at_mention only
+        assert!(!is_sm_handled_shortcut(
+            &key, &state, true, false, false, true, false
+        ));
+        // slash_hint only
+        assert!(!is_sm_handled_shortcut(
+            &key, &state, true, false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn test_at_mention_active_other_keys_unaffected() {
+        // @mention 激活时 BackTab / Ctrl+T / 普通字符应不受影响——只有 Enter
+        // 路由改变。BackTab 仍由 SM 处理（切权限模式），普通字符仍走 fallback。
+        let state = idle_state();
+        // BackTab + at_mention → true（SM 处理，与之前一致）
+        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
+        assert!(
+            is_sm_handled_shortcut(&backtab, &state, true, false, false, true, false),
+            "BackTab with @mention must still return true (SM cycles permission)"
+        );
+        // 普通字符 + at_mention → false（键盘 fallback 处理 textarea 输入）
+        let char_key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(
+            !is_sm_handled_shortcut(&char_key, &state, true, false, false, true, false),
+            "Plain char with @mention must return false (keyboard owns textarea)"
+        );
+    }
+
+    #[test]
+    fn test_popup_active_dominates_at_mention() {
+        // 当 v1 popup（如 HITL）激活时，即使 @mention 也激活，popup 优先。
+        // popup_active 分支在 at_mention 检查之前返回 false，所以结果一致
+        // （都走 fallback），但语义上 popup 的按键分发优先。
+        let state = idle_state();
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            !is_sm_handled_shortcut(&key, &state, true, false, true, true, false),
+            "Enter with popup_active + at_mention must return false (popup owns)"
         );
     }
 
@@ -1224,7 +1340,7 @@ mod tests {
         });
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert!(
-            is_sm_handled_shortcut(&key, &modal_state, false, false, true),
+            is_sm_handled_shortcut(&key, &modal_state, false, false, true, false, false),
             "Modal state must override popup_active (SM owns all keys in Modal)"
         );
     }

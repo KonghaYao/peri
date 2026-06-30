@@ -30,6 +30,11 @@ impl Command for PluginCommandAdapter {
             format!("/{} {}", self.entry.name, args)
         };
 
+        // Cron #26 step 7e.7: UserBubble 路由到 v2 state.view。
+        app.session_mgr
+            .current_mut()
+            .messages
+            .push_user_bubble(message.clone());
         app.submit_message(message);
         vec![]
     }

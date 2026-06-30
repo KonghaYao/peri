@@ -90,7 +90,12 @@ impl Command for NamedWorkflowCommand {
             )
         };
 
-        app.submit_message(prompt);
+        app.submit_message(prompt.clone());
+        // Cron #26 step 7e.7: UserBubble 路由到 v2 state.view。
+        app.session_mgr
+            .current_mut()
+            .messages
+            .push_user_bubble(prompt);
         vec![]
     }
 }

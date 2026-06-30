@@ -174,7 +174,18 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
                             .iter()
                             .find(|s| s.name == skill_name)
                         {
-                            // Skill matched: submit full message to agent
+                            // Skill matched: submit full message to agent.
+                            // Cron #26 step 7e.7: route UserBubble through
+                            // push_user_bubble → main_loop → SM Event::PushUserBubble
+                            // so it lands in v2 state.view (the production render
+                            // source). Previously submit_message's v1 apply_add_message
+                            // pushed to view_messages only, making the user's slash
+                            // command message invisible in v2 render until the next
+                            // ACP ViewCommit replaced state.view.
+                            app.session_mgr
+                                .current_mut()
+                                .messages
+                                .push_user_bubble(text.clone());
                             return Ok(Some(Action::Submit(text)));
                         } else if app
                             .session_mgr
@@ -185,6 +196,10 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
                         {
                             // Agent command matched (from ACP AvailableCommandsUpdate): submit to agent
                             tracing::debug!(skill_name, "Matched agent command, submitting to ACP");
+                            app.session_mgr
+                                .current_mut()
+                                .messages
+                                .push_user_bubble(text.clone());
                             return Ok(Some(Action::Submit(text)));
                         } else {
                             // 未知命令/Skill：作为普通输入提交给 Agent
@@ -192,6 +207,10 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
                                 skill_name,
                                 "Unknown slash command, submitting as normal input"
                             );
+                            app.session_mgr
+                                .current_mut()
+                                .messages
+                                .push_user_bubble(text.clone());
                             return Ok(Some(Action::Submit(text)));
                         }
                     }
@@ -548,5 +567,78 @@ mod tests {
             app.global_ui.quit_pending_since.is_none(),
             "清空输入框应重置 quit-pending"
         );
+    }
+
+    // ── Cron #26 step 7e.7: slash command submit routes UserBubble to v2 ──
+
+    /// Slash command（未知命令）提交时应将 UserBubble 文本入队到
+    /// `pending_v2_user_bubbles`，让 main_loop 通过 Event::PushUserBubble
+    /// 路由到 v2 state.view。这是修复"slash command 提交后用户消息在生产
+    /// 渲染路径下不可见"bug 的核心测试。
+    #[tokio::test]
+    async fn test_unknown_slash_command_submit_enqueues_user_bubble() {
+        let mut app = make_app().await;
+        app.session_mgr.current_mut().ui.textarea = build_textarea(false);
+        app.session_mgr
+            .current_mut()
+            .ui
+            .textarea
+            .insert_str("/unknown-cmd arg1");
+
+        let result = handle_normal_keys(
+            &mut app,
+            Input {
+                key: Key::Enter,
+                ctrl: false,
+                alt: false,
+                shift: false,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result, Some(Action::Submit(_))),
+            "未知 slash command 应返回 Action::Submit"
+        );
+        let pending = &app.session_mgr.current().messages.pending_v2_user_bubbles;
+        assert_eq!(
+            pending.len(),
+            1,
+            "slash command submit 应入队 1 个 UserBubble 到 pending_v2_user_bubbles"
+        );
+        assert_eq!(pending[0], "/unknown-cmd arg1");
+    }
+
+    /// Agent command（ACP AvailableCommandsUpdate 注册的命令）提交时也应入队。
+    #[tokio::test]
+    async fn test_agent_command_submit_enqueues_user_bubble() {
+        let mut app = make_app().await;
+        app.session_mgr.current_mut().ui.textarea = build_textarea(false);
+        app.session_mgr
+            .current_mut()
+            .commands
+            .agent_commands
+            .insert("my-agent-cmd".to_string());
+        app.session_mgr
+            .current_mut()
+            .ui
+            .textarea
+            .insert_str("/my-agent-cmd");
+
+        let result = handle_normal_keys(
+            &mut app,
+            Input {
+                key: Key::Enter,
+                ctrl: false,
+                alt: false,
+                shift: false,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(result, Some(Action::Submit(_))));
+        let pending = &app.session_mgr.current().messages.pending_v2_user_bubbles;
+        assert_eq!(pending.len(), 1, "agent command submit 应入队 UserBubble");
+        assert_eq!(pending[0], "/my-agent-cmd");
     }
 }
