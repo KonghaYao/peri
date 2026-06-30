@@ -204,7 +204,7 @@ impl SubAgentStatusMap {
     /// （运行中优先 + 最近启动优先）。返回 `&mut` 供调用方修改 child_messages。
     pub fn find_owner_mut(&mut self, source_id: &str) -> Option<&mut SubAgentStatus> {
         // 1. 精确匹配 instance_id
-        if self.inner.get(source_id).is_some() {
+        if self.inner.contains_key(source_id) {
             return self.inner.get_mut(source_id);
         }
         // 2. 回退：按 agent_id 找最近匹配的 key（不能直接返回 &mut，需先定 key）

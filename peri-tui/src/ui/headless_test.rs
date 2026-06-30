@@ -2757,3 +2757,222 @@ async fn test_compact_clears_text_selection() {
         "text_selection 应在 compact_completed 时被清理"
     );
 }
+
+// ============================================================================
+// Phase 2.6 step 1: source_agent_id 路由端到端测试
+// ============================================================================
+
+#[tokio::test]
+async fn test_source_agent_id_routes_tool_to_child_messages() {
+    // SubAgentStart + ToolStart(source_agent_id) → ToolCard 应进入
+    // SubAgentStatus.child_messages（v2 权威源），不污染主消息流
+    let (mut app, _handle) = App::new_headless(120, 30).await;
+
+    app.push_agent_event(AgentEvent::SubAgentStart {
+        agent_id: "code-reviewer".into(),
+        instance_id: "test-inst-1".into(),
+        task_preview: "review".into(),
+        is_background: false,
+    });
+    app.push_agent_event(AgentEvent::ToolStart {
+        tool_call_id: "tc-1".into(),
+        name: "Read".into(),
+        display: "ReadFile".into(),
+        args: "src/main.rs".into(),
+        input: serde_json::json!({"path": "src/main.rs"}),
+        source_agent_id: Some("test-inst-1".into()),
+    });
+    app.process_pending_events();
+
+    // 验证 1：主消息流 view_messages 中不应有 ToolBlock（被路由走了）
+    let view_messages = &app.session_mgr.current().messages.view_messages;
+    let has_tool_block_in_main = view_messages
+        .iter()
+        .any(|vm| matches!(vm, MessageViewModel::ToolBlock { .. }));
+    assert!(
+        !has_tool_block_in_main,
+        "source_agent_id 匹配的 ToolStart 不应出现在 view_messages 主消息流"
+    );
+
+    // 验证 2：SubAgentStatus.child_messages 应有 1 个 ToolCard
+    let status_map = &app.session_mgr.current().subagent_status;
+    let status = status_map
+        .lookup("test-inst-1")
+        .expect("SubAgentStatus 应通过 instance_id 查到");
+    assert_eq!(
+        status.child_messages.len(),
+        1,
+        "child_messages 应累积 1 个 ToolCard"
+    );
+    assert!(
+        matches!(
+            &status.child_messages[0],
+            peri_acp_types::view_model::ViewModel::ToolCard(d) if d.tool_id == "tc-1"
+        ),
+        "child_messages[0] 应为 ToolCard，tool_id = tc-1"
+    );
+}
+
+#[tokio::test]
+async fn test_source_agent_id_none_falls_back_to_main_stream() {
+    // source_agent_id = None（主 Agent）→ ToolBlock 应进入 view_messages 主消息流
+    let (mut app, _handle) = App::new_headless(120, 30).await;
+
+    app.push_agent_event(AgentEvent::ToolStart {
+        tool_call_id: "tc-main".into(),
+        name: "Bash".into(),
+        display: "Bash".into(),
+        args: "ls".into(),
+        input: serde_json::json!({"command": "ls"}),
+        source_agent_id: None,
+    });
+    app.process_pending_events();
+
+    let view_messages = &app.session_mgr.current().messages.view_messages;
+    let has_tool_block = view_messages
+        .iter()
+        .any(|vm| matches!(vm, MessageViewModel::ToolBlock { .. }));
+    assert!(
+        has_tool_block,
+        "source_agent_id=None 的 ToolStart 应进入 view_messages 主消息流"
+    );
+
+    // 同时，SubAgentStatusMap 应为空（无 SubAgent 启动）
+    assert!(
+        app.session_mgr.current().subagent_status.is_empty(),
+        "无 SubAgent 启动时 status map 应为空"
+    );
+}
+
+#[tokio::test]
+async fn test_source_agent_id_unknown_falls_back_to_main_stream() {
+    // source_agent_id 不匹配任何已启动的 SubAgent → fallback 到主消息流
+    // （避免事件到达顺序异常导致 tool 永远丢失）
+    let (mut app, _handle) = App::new_headless(120, 30).await;
+
+    app.push_agent_event(AgentEvent::ToolStart {
+        tool_call_id: "tc-orphan".into(),
+        name: "Read".into(),
+        display: "ReadFile".into(),
+        args: "src/lib.rs".into(),
+        input: serde_json::json!({"path": "src/lib.rs"}),
+        source_agent_id: Some("nonexistent-inst".into()),
+    });
+    app.process_pending_events();
+
+    let view_messages = &app.session_mgr.current().messages.view_messages;
+    let has_tool_block = view_messages
+        .iter()
+        .any(|vm| matches!(vm, MessageViewModel::ToolBlock { .. }));
+    assert!(
+        has_tool_block,
+        "source_agent_id 不匹配时 ToolStart 应 fallback 到主消息流"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_end_updates_child_tool_card_output() {
+    // SubAgentStart + ToolStart(src) + ToolEnd(src) → child_messages 中
+    // 的 ToolCard output_summary 应被更新（而非新建一个 ToolBlock）
+    let (mut app, _handle) = App::new_headless(120, 30).await;
+
+    app.push_agent_event(AgentEvent::SubAgentStart {
+        agent_id: "analyzer".into(),
+        instance_id: "test-inst-2".into(),
+        task_preview: "analyze".into(),
+        is_background: false,
+    });
+    app.push_agent_event(AgentEvent::ToolStart {
+        tool_call_id: "tc-2".into(),
+        name: "Read".into(),
+        display: "ReadFile".into(),
+        args: "config.toml".into(),
+        input: serde_json::json!({"path": "config.toml"}),
+        source_agent_id: Some("test-inst-2".into()),
+    });
+    app.push_agent_event(AgentEvent::ToolEnd {
+        tool_call_id: "tc-2".into(),
+        name: "Read".into(),
+        output: "file contents here".into(),
+        is_error: false,
+        source_agent_id: Some("test-inst-2".into()),
+    });
+    app.process_pending_events();
+
+    let status_map = &app.session_mgr.current().subagent_status;
+    let status = status_map
+        .lookup("test-inst-2")
+        .expect("SubAgentStatus 应存在");
+    assert_eq!(
+        status.child_messages.len(),
+        1,
+        "ToolEnd 应原地更新 ToolCard，不应新增"
+    );
+    if let peri_acp_types::view_model::ViewModel::ToolCard(d) = &status.child_messages[0] {
+        assert_eq!(d.output_summary, "file contents here");
+        assert!(!d.is_error);
+    } else {
+        panic!("child_messages[0] 应为 ToolCard");
+    }
+
+    // 同时主消息流仍无 ToolBlock
+    let view_messages = &app.session_mgr.current().messages.view_messages;
+    let has_tool_block = view_messages
+        .iter()
+        .any(|vm| matches!(vm, MessageViewModel::ToolBlock { .. }));
+    assert!(
+        !has_tool_block,
+        "source_agent_id 匹配时 ToolEnd 也不应污染主消息流"
+    );
+}
+
+#[tokio::test]
+async fn test_subagent_group_renders_child_content_via_probe() {
+    // 端到端：SubAgentStart + ToolStart(src) + ToolEnd(src) + 渲染
+    // → SessionSubAgentProbe 应从 child_messages 读取并注入到 SubAgentRenderInfo
+    use crate::app::SessionSubAgentProbe;
+    use crate::render::view_render::SubAgentStatusProbe;
+
+    let (mut app, _handle) = App::new_headless(120, 30).await;
+
+    app.push_agent_event(AgentEvent::SubAgentStart {
+        agent_id: "researcher".into(),
+        instance_id: "test-inst-3".into(),
+        task_preview: "research".into(),
+        is_background: false,
+    });
+    app.push_agent_event(AgentEvent::ToolStart {
+        tool_call_id: "tc-3".into(),
+        name: "WebSearch".into(),
+        display: "WebSearch".into(),
+        args: "rust async".into(),
+        input: serde_json::json!({"q": "rust async"}),
+        source_agent_id: Some("test-inst-3".into()),
+    });
+    app.process_pending_events();
+
+    // 构造 probe（生产 draw_now 中的方式）
+    let session = app.session_mgr.current();
+    let probe = SessionSubAgentProbe::from_view_messages(
+        session.subagent_status.clone(),
+        &session.messages.view_messages,
+    );
+
+    // 查询 researcher → 应返回 is_running=true 且 recent_messages 含 ToolCard
+    let info = probe
+        .lookup_by_agent_id("researcher")
+        .expect("应通过 agent_id 查到 SubAgent");
+    assert!(info.is_running);
+    assert_eq!(
+        info.recent_messages.len(),
+        1,
+        "probe 应从权威源 child_messages 读取 1 个 ToolCard"
+    );
+    assert!(
+        matches!(
+            info.recent_messages[0],
+            peri_acp_types::view_model::ViewModel::ToolCard(_)
+        ),
+        "recent_messages 应来自 SubAgentStatus.child_messages"
+    );
+}
