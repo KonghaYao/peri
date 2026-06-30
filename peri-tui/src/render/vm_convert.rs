@@ -23,8 +23,8 @@
 //!   final_result 摘要即可
 
 use peri_acp_types::view_model::{
-    AssistantBubbleData, NoteLevel, ReasoningBlock, SystemNoteData, ToolCardData, UserBubbleData,
-    ViewModel,
+    AssistantBubbleData, NoteLevel, ReasoningBlock, SubAgentGroupData, SystemNoteData,
+    ToolCardData, UserBubbleData, ViewModel,
 };
 
 use crate::ui::message_view::{ContentBlockView, MessageViewModel};
@@ -105,10 +105,41 @@ pub fn message_view_model_to_v2(vm: &MessageViewModel) -> Option<ViewModel> {
             let _ = tools;
             None
         }
-        MessageViewModel::SubAgentGroup { .. } => {
-            // 不嵌套（避免递归爆炸）。外层 SubAgentGroup 的 final_result
-            // 摘要已足够表达子 Agent 结果。
-            None
+        MessageViewModel::SubAgentGroup {
+            agent_id,
+            task_preview,
+            is_running,
+            is_error,
+            final_result,
+            collapsed,
+            instance_id,
+            ..
+        } => {
+            // SubAgentGroup 头部转换为 v2 SubAgentGroupData。
+            // view_models 永久为空（运行时由 SessionSubAgentProbe 通过
+            // recent_messages 字段注入，参见 render_subagent_group）。
+            // 不递归展开 recent_messages（避免递归爆炸；外层 final_result
+            // 摘要 + probe 子内容注入已足够）。
+            //
+            // 关键字段映射：
+            // - agent_id → v2 DTO agent_id（也是 probe 查询 key）
+            // - agent_name 也用 agent_id（v1 渲染显示 `(agent_id)`，保持一致）
+            //   task_preview 留给 probe 在运行时显示（当前未用）
+            // - is_running / is_error / final_result 不在 DTO 静态字段中，
+            //   由 probe 在运行时注入到 SubAgentRenderInfo
+            let _ = (
+                task_preview,
+                is_running,
+                is_error,
+                final_result,
+                instance_id,
+            );
+            Some(ViewModel::SubAgentGroup(SubAgentGroupData {
+                agent_id: agent_id.clone(),
+                agent_name: agent_id.clone(),
+                view_models: Vec::new(),
+                collapsed: *collapsed,
+            }))
         }
     }
 }
@@ -177,15 +208,15 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_subagent_group_returns_none() {
-        // SubAgentGroup 不嵌套
+    fn test_convert_subagent_group_to_v2_dto() {
+        // SubAgentGroup 头部应转换为 v2 SubAgentGroupData（不含子内容）
         let vm = MessageViewModel::SubAgentGroup {
             agent_id: "fork".into(),
             instance_id: None,
-            task_preview: "task".into(),
-            is_running: false,
+            task_preview: "review code".into(),
+            is_running: true,
             is_background: false,
-            total_steps: 0,
+            total_steps: 5,
             recent_messages: Vec::new(),
             collapsed: false,
             bg_hash: None,
@@ -194,7 +225,18 @@ mod tests {
             batch_agents: Vec::new(),
             content_hash: 0,
         };
-        assert!(message_view_model_to_v2(&vm).is_none());
+        let v2 = message_view_model_to_v2(&vm).expect("SubAgentGroup 应转换为 DTO");
+        match v2 {
+            ViewModel::SubAgentGroup(d) => {
+                assert_eq!(d.agent_id, "fork");
+                assert_eq!(d.agent_name, "fork", "agent_name 用 agent_id（v1 兼容）");
+                assert!(
+                    d.view_models.is_empty(),
+                    "view_models 永久为空（probe 注入）"
+                );
+            }
+            _ => panic!("expected SubAgentGroup, got {:?}", v2),
+        }
     }
 
     #[test]

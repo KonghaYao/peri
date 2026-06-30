@@ -14,7 +14,7 @@ use crate::{
         message_state::{MessageRenderCache, WrappedLineInfo},
         App,
     },
-    ui::{message_render::render_view_model, theme, welcome},
+    ui::{theme, welcome},
 };
 
 /// 视口裁剪结果
@@ -23,49 +23,6 @@ struct ViewportClip {
     lines: Vec<Line<'static>>,
     /// 裁剪后的局部滚动偏移（相对于 lines[0] 的视觉行偏移）
     local_offset: u16,
-}
-
-/// P5: Build render cache synchronously from view_messages.
-pub fn build_sync_render_cache(
-    view_messages: &[crate::ui::message_view::MessageViewModel],
-    diff_visible: bool,
-    width: u16,
-    prev_cache: Option<&MessageRenderCache>,
-) -> MessageRenderCache {
-    if width == 0 || view_messages.is_empty() {
-        return MessageRenderCache {
-            lines: Vec::new(),
-            wrap_map: Vec::new(),
-            total_lines: 0,
-            version: 0,
-            width,
-        };
-    }
-
-    // Render all VMs to lines, with blank line separator between messages
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for vm in view_messages {
-        let vm_lines = render_view_model(vm, None, width as usize, diff_visible);
-        lines.extend(vm_lines);
-        // 每条消息后追加空行分隔符，确保消息间距一致
-        lines.push(Line::from(""));
-    }
-
-    // 去重连续空行 + 移除尾部多余空行
-    let lines = dedup_blank_lines(lines);
-
-    // Build wrap_map
-    let (total_lines, wrap_map) = build_wrap_map(&lines, width);
-
-    let version = prev_cache.map_or(1, |c| c.version.wrapping_add(1));
-
-    MessageRenderCache {
-        lines,
-        wrap_map,
-        total_lines,
-        version,
-        width,
-    }
 }
 
 /// V2 render cache builder: converts V2 ViewModels to Lines and builds the wrap map.
@@ -184,37 +141,29 @@ pub(crate) fn render_messages(
     // unreachable in production.
     // Tests: ~30+ tests in `headless_test.rs` / `popups/*_test.rs` call
     // `main_ui::render(f, &mut app, None, None)` directly without going
-    // through `draw_now`, so they hit this legacy fallback. Until Phase 2.1
-    // introduces a test helper that constructs v2_view_models, this branch
-    // must be preserved.
-    // See `docs/refactor/phase2-migration-plan.md` Phase 2.1 for details.
-    if let Some(v2_vms) = v2_view_models {
-        if v2_vms.is_empty() {
-            welcome::render_welcome(f, app, messages_area);
-            return;
-        }
-
-        // V2 ViewModels change every frame during streaming; always rebuild.
-        let cache = build_sync_render_cache_v2(v2_vms, diff_visible, text_area_width);
-        app.session_mgr.current_mut().messages.message_cache = Some(cache);
-    } else {
-        // Legacy path — see [LEGACY FALLBACK] note above.
-        if app.session_mgr.current().messages.view_messages.is_empty() {
-            welcome::render_welcome(f, app, messages_area);
-            return;
-        }
-
-        let needs_rebuild = match app.session_mgr.current().messages.message_cache.as_ref() {
-            Some(cache) => cache.width != text_area_width,
-            None => true,
+    // through `draw_now`, so they hit this legacy fallback.
+    //
+    // Phase 2.6: legacy fallback 也通过 vm_convert 走 v2 渲染路径，
+    // 让测试覆盖 vm_convert + v2 render 完整链路（build_sync_render_cache
+    // 的 v1 路径仅 scrollbar 重建使用，待 Phase 2.6 完成后退役）。
+    // See `docs/refactor/phase2-migration-plan.md` for details.
+    let effective_v2: Vec<peri_acp_types::view_model::ViewModel> =
+        if let Some(v2_vms) = v2_view_models {
+            v2_vms.to_vec()
+        } else {
+            crate::render::vm_convert::message_view_models_to_v2(
+                &app.session_mgr.current().messages.view_messages,
+            )
         };
-        if needs_rebuild {
-            let vms = app.session_mgr.current().messages.view_messages.clone();
-            let prev = app.session_mgr.current().messages.message_cache.as_ref();
-            let cache = build_sync_render_cache(&vms, diff_visible, text_area_width, prev);
-            app.session_mgr.current_mut().messages.message_cache = Some(cache);
-        }
+
+    if effective_v2.is_empty() {
+        welcome::render_welcome(f, app, messages_area);
+        return;
     }
+
+    // V2 ViewModels change every frame during streaming; always rebuild.
+    let cache = build_sync_render_cache_v2(&effective_v2, diff_visible, text_area_width);
+    app.session_mgr.current_mut().messages.message_cache = Some(cache);
 
     // 计算 loading spinner 行
     let spinner_line: Option<Line<'static>> = if app.session_mgr.current().ui.loading {
@@ -293,12 +242,21 @@ pub(crate) fn render_messages(
         app.session_mgr.current_mut().ui.scrollbar_max_offset = max_scroll;
 
         if render_width != text_area_width {
-            // 宽度未匹配：重新构建缓存
+            // 宽度未匹配：重新构建缓存（走 vm_convert + v2 路径）
             let vms = app.session_mgr.current().messages.view_messages.clone();
+            let v2_vms = crate::render::vm_convert::message_view_models_to_v2(&vms);
             let diff = app.session_mgr.current().ui.diff_visible;
             let prev = app.session_mgr.current().messages.message_cache.as_ref();
-            let new_cache = build_sync_render_cache(&vms, diff, text_area_width, prev);
-            app.session_mgr.current_mut().messages.message_cache = Some(new_cache);
+            let new_cache = build_sync_render_cache_v2(&v2_vms, diff, text_area_width);
+            // 保持版本递增（与 v1 路径行为一致）
+            let version = prev.map_or(1, |c| c.version.wrapping_add(1));
+            app.session_mgr.current_mut().messages.message_cache = Some(MessageRenderCache {
+                lines: new_cache.lines,
+                wrap_map: new_cache.wrap_map,
+                total_lines: new_cache.total_lines,
+                version,
+                width: new_cache.width,
+            });
         }
 
         (max_scroll, off)
