@@ -128,7 +128,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::message_view::MessageViewModel;
 
     /// 构造一个 headless App，模拟 "用户在会话中" 的状态。
     async fn make_app() -> App {
