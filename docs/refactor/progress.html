@@ -51,6 +51,17 @@
   <div class="stat pending"><span class="num">15</span><span class="label">已识别缺陷</span></div>
 </div>
 
+<h2>Phase 2.6 桥接进展（本窗口）</h2>
+<div class="meta">
+<strong>关键突破</strong>：v2 渲染路径已具备完整数据源 — 用户体验不变，但 v2 不再依赖 v1 view_messages 直接渲染。
+<ul class="findings">
+<li><code>vm_convert.rs</code>（commit <code>1d3d6536</code>）：v1 MessageViewModel → v2 ViewModel 纯函数转换器，6 个变体映射 + 扁平化 ToolCallGroup</li>
+<li>子内容注入（commit <code>d45f4eeb</code>）：<code>SessionSubAgentProbe</code> 复合 probe 一次性从 v1 view_messages 解析所有 SubAgentGroup.recent_messages（vm_convert 转换），按 agent_id 缓存。render_subagent_group 子内容优先级：<code>DTO.view_models &gt; probe.recent_messages &gt; 空</code></li>
+<li>6 个新测试（1034 全过）：覆盖转换 / 注入 / 优先级 / 回退路径</li>
+</ul>
+<strong>当前状态</strong>：v2 渲染已是生产路径（draw_now 构造 v2_vms）。view_messages 仅用于 SessionSubAgentProbe 提取子内容。下一步可安全删除 view_messages 字段（前提：将子内容累积迁移到 SubAgentStatusMap 或 v2 ViewStore）。
+</div>
+
 <h2>Phase 进度</h2>
 <table>
   <thead>
@@ -103,15 +114,14 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #12（Phase 2.3 完整完成 — 基础设施 + 渲染注入）<br>
-  <strong>本窗口成果</strong>：4 个本地 commit（均不 push）：<br>
-  · <code>cbe303db</code> Phase 2.5：修复 ViewCommit 替换语义丢失 TUI-only SystemNote。新增 <code>merge_preserving_local_notes</code> 辅助函数（dedupe by text），4 个 transitions 接入。1002 测试全过<br>
-  · <code>ac07ba40</code> Phase 2.3 step 1-7：新建 <code>SubAgentStatusMap</code>（~300 行，8 字段 SubAgentStatus + 32 容量 + 5min TTL）+ 12 单元测试。挂载到 ChatSession。入口迁移（双写 view_messages + status map）：SubAgentStart / SubAgentEnd / BackgroundTaskCompleted / BgToolStep / cleanup_agent_state / new_thread<br>
-  · <code>54913d1b</code> docs dashboard 更新（Phase 2.3 step 1-7）<br>
-  · <code>68a991da</code> Phase 2.3 step 8-9：<strong>v2 SubAgentGroup 渲染增强</strong>。view_render.rs 新增 SubAgentStatusProbe trait + thread_local（避免 unsafe）。SubAgentStatus 加 agent_id 字段 + lookup_by_agent_id 方法（按 started_at 倒序，运行中优先）。render_subagent_group 头部显示 <code>· running · N steps</code> / <code>· done</code> / <code>· failed</code>，完成时显示 final_result 首行预览。SubAgentStatusMap 实现 trait，draw_now 用 <code>with_status_probe</code> 包装 <code>terminal.draw</code>。8 个新测试（4 lookup_by_agent_id + 4 render probe）。1022 全过<br>
-  <strong>关键发现</strong>：生产渲染已走 v2 路径（<code>draw_now</code> 构造 v2_vms 传给 main_ui::render）。ACP 层 view_mapper 生成 SubAgentGroup DTO 时 <code>view_models=空</code> 永久 placeholder，缺运行时字段。step 8-9 通过 thread-local probe 注入修复<br>
-  <strong>当前状态</strong>：1022 测试全过 · v2 SubAgentGroup 渲染已具备完整运行时状态显示 · SubAgentStatusMap 双写就位（view_messages + status map）· 仍待 Phase 2.6 切换渲染源 / 删除 view_messages<br>
-  <strong>下一步</strong>：① Phase 2.6（task #20）：切换渲染源到 v2 state.view + 删除 view_messages 字段（最大风险点）② 子内容注入（v1 view_messages 中 SubAgentGroup 的子内容如何呈现到 v2 渲染中，与 Phase 2.6 联合）③ Phase 2.5 退役 apply_rebuild_all / ephemeral_notes（依赖 Phase 2.6）
+  <strong>最后更新</strong>：2026-07-01 cron #13（Phase 2.6 桥接 — 子内容注入完成）<br>
+  <strong>本窗口成果</strong>：3 个本地 commit（均不 push）：<br>
+  · <code>1d3d6536</code> Phase 2.6 桥接 step 1：<code>render/vm_convert.rs</code> 新模块（261 行）— v1 MessageViewModel → v2 ViewModel 纯函数转换器。6 变体映射（UserBubble/AssistantBubble/ToolBlock/SystemNote/CacheWarning/ToolCallGroup 扁平化/SubAgentGroup 返回 None）。6 单元测试。1028 全过<br>
+  · <code>977ecc3b</code> style：vm_convert clippy 修复（match guard 替代嵌套 if）<br>
+  · <code>d45f4eeb</code> Phase 2.6 桥接 step 2：<strong>子内容注入</strong>。SubAgentRenderInfo 扩展 <code>recent_messages: Vec&lt;ViewModel&gt;</code>。新增 <code>SessionSubAgentProbe</code> 复合 probe（SubAgentStatusMap + HashMap&lt;agent_id, v2 VMs&gt;），<code>from_view_messages</code> 一次性解析。render_subagent_group 优先级 <code>DTO.view_models &gt; probe.recent_messages &gt; 空</code>。draw_now 切换到复合 probe。4 + 2 = 6 个新测试（基础/空/覆盖/未知 + DTO fallback/DTO 优先）。1034 全过<br>
+  <strong>关键突破</strong>：v2 渲染路径已具备完整数据源。生产渲染（<code>draw_now</code>）构造 v2_vms 走 v2 路径，SessionSubAgentProbe 通过 agent_id 查询时同时返回运行时状态 + 子内容（vm_convert 转换）。ACP 层 view_mapper 永久 placeholder 的 SubAgentGroupData.view_models 不再阻塞渲染<br>
+  <strong>当前状态</strong>：1034 测试全过 · v2 渲染已是生产路径 · view_messages 仅用于 probe 提取子内容 · 仍待 Phase 2.6 真正切换（将子内容累积迁移到 SubAgentStatusMap 后删除 view_messages 字段）<br>
+  <strong>下一步</strong>：① Phase 2.6 完整切换：扩展 <code>SubAgentStatus</code> 增加 <code>child_messages: Vec&lt;MessageViewModel&gt;</code>（由事件实时维护），SessionSubAgentProbe 从 status 直接读取 → view_messages 字段可删除 ② Phase 2.5 退役 apply_rebuild_all / ephemeral_notes ③ 评估剩余缺陷清单（#7 Streaming→Modal 可达已修，#8 Status 事件 drop 待修）
 </div>
 
 </body>
