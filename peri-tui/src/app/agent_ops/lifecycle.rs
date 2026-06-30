@@ -166,6 +166,12 @@ impl App {
             .take()
         {
             self.apply_rebuild_all(user_msg_idx, vec![]);
+            // Cron #23 P1 fix: 请求 main_loop 截断 v2 state.view 到 user_msg_idx，
+            // 与 v1 view_messages 的截断保持一致。否则 stale UserBubble + 部分
+            // AssistantBubble 会持续存在直到下一个 view-commit（用户感知为
+            // "按 Esc 回滚后消息还在"）。main_loop 在 handle_acp_event 返回后
+            // 消费此 flag，仅对 Idle/Streaming 生效（Modal/Switching 跳过）。
+            self.global_ui.pending_view_rewind_to = Some(user_msg_idx);
             let pre_len = self.session_mgr.current_mut().metadata.pre_submit_state_len;
             self.session_mgr
                 .current_mut()
@@ -269,5 +275,178 @@ impl App {
             self.flush_pending_messages();
         }
         (true, false, true)
+    }
+}
+
+// ── Cron #23 P1 fix regression tests ─────────────────────────────────────────
+//
+// 验证 handle_interrupted 分支 2（无工具调用，回滚路径）请求 main_loop 截断
+// v2 state.view 到 user_msg_idx。完整的 end-to-end 测试在 main_loop 中较难
+// 模拟（需要 channel + ApplyContext），所以这里只验证 flag 被正确设置——
+// main_loop 端的应用逻辑通过纯函数 truncate(idx) 直接验证（Vec::truncate 是
+// stdlib，无需测试）。
+//
+// 重点测试场景：
+// 1. 分支 2（无工具，回滚）设置 flag = Some(user_msg_idx)
+// 2. 分支 1（有工具，保留）不设置 flag（保持 None）
+// 3. 没有 last_submitted_text 的回滚路径也设置 flag
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::message_view::MessageViewModel;
+    use peri_acp_types::view_model::{
+        AssistantBubbleData, ToolCardData, UserBubbleData, ViewModel,
+    };
+
+    /// 构造一个 headless App，模拟 "用户提交后正在流式中" 的状态。
+    async fn make_app_with_active_turn() -> App {
+        let (mut app, _handle) = App::new_headless(80, 24).await;
+
+        // 模拟用户提交 "hello" —— 复刻 agent_submit.rs 的关键字段
+        let user_vm = MessageViewModel::user("hello".to_string());
+        app.apply_add_message(user_vm);
+        app.session_mgr.current_mut().messages.round_start_vm_idx = 1;
+        app.session_mgr.current_mut().messages.last_submitted_text = Some("hello".to_string());
+        app.session_mgr.current_mut().metadata.pre_submit_state_len = 0;
+        app.set_loading(true);
+
+        app
+    }
+
+    #[tokio::test]
+    async fn test_handle_interrupted_branch2_sets_pending_view_rewind() {
+        // 分支 2：view_slice 只有 UserBubble（无 ToolCard）→ 应触发回滚 + 设置 flag
+        let mut app = make_app_with_active_turn().await;
+
+        // view_slice 模拟 v2 state.view（来自 SM 的 UserBubble 推送）
+        let view_slice: Vec<ViewModel> = vec![ViewModel::UserBubble(UserBubbleData {
+            text: "hello".into(),
+        })];
+
+        let _ = app.handle_interrupted(&view_slice);
+
+        // 核心断言：flag 已设置，值为 user_msg_idx（UserBubble 在 idx 0）
+        assert_eq!(
+            app.global_ui.pending_view_rewind_to,
+            Some(0),
+            "分支 2（回滚）必须设置 pending_view_rewind_to = Some(user_msg_idx)"
+        );
+
+        // v1 view_messages 也应被截断
+        assert_eq!(
+            app.session_mgr.current().messages.view_messages.len(),
+            0,
+            "v1 view_messages 应被 apply_rebuild_all(0, []) 截断为 0"
+        );
+
+        // last_submitted_text 应被还原到 textarea
+        let textarea_text: String = app
+            .session_mgr
+            .current()
+            .ui
+            .textarea
+            .lines()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            textarea_text.contains("hello"),
+            "用户文本应被还原到 textarea，实际: {:?}",
+            textarea_text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_interrupted_branch1_does_not_set_pending_view_rewind() {
+        // 分支 1：view_slice 有 ToolCard（agent 已做工作）→ 应保留，不触发回滚
+        let mut app = make_app_with_active_turn().await;
+
+        // view_slice 包含 UserBubble + ToolCard → has_tool_cards_after 返回 true
+        let view_slice: Vec<ViewModel> = vec![
+            ViewModel::UserBubble(UserBubbleData {
+                text: "hello".into(),
+            }),
+            ViewModel::ToolCard(ToolCardData {
+                tool_id: "t1".into(),
+                tool_name: "Bash".into(),
+                input_summary: "ls".into(),
+                output_summary: "files".into(),
+                is_error: false,
+                diff: None,
+            }),
+        ];
+
+        let _ = app.handle_interrupted(&view_slice);
+
+        // 分支 1：不应设置 flag（main_loop 不会截断 state.view）
+        assert_eq!(
+            app.global_ui.pending_view_rewind_to, None,
+            "分支 1（保留工具进度）不应设置 pending_view_rewind_to"
+        );
+
+        // v1 view_messages 不应被截断（保留 UserBubble + 后续工作）
+        assert_eq!(
+            app.session_mgr.current().messages.view_messages.len(),
+            1,
+            "分支 1 应保留 UserBubble 在 view_messages 中"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_interrupted_branch2_with_assistant_bubble_also_sets_flag() {
+        // 边界场景：view_slice 有 UserBubble + AssistantBubble（流式文本）
+        // 但没有 ToolCard。仍然应进入分支 2（回滚），设置 flag。
+        let mut app = make_app_with_active_turn().await;
+
+        let view_slice: Vec<ViewModel> = vec![
+            ViewModel::UserBubble(UserBubbleData {
+                text: "hello".into(),
+            }),
+            ViewModel::AssistantBubble(AssistantBubbleData {
+                text: "partial reply".into(),
+                reasoning: None,
+                tool_card_ids: vec![],
+            }),
+        ];
+
+        let _ = app.handle_interrupted(&view_slice);
+
+        // UserBubble 在 idx 0 → flag 应为 Some(0)
+        assert_eq!(
+            app.global_ui.pending_view_rewind_to,
+            Some(0),
+            "AssistantBubble 不算 tool 进度，应进入分支 2 设置 flag"
+        );
+
+        // v1 view_messages 也应被截断
+        assert_eq!(
+            app.session_mgr.current().messages.view_messages.len(),
+            0,
+            "v1 view_messages 应被截断（包括 AssistantBubble 也被移除）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_interrupted_no_last_submitted_text_no_flag() {
+        // 边界场景：用户没有 last_submitted_text（例如 setup 期间被中断）。
+        // 分支 2 的回滚代码块不执行，flag 不应被设置。
+        let mut app = make_app_with_active_turn().await;
+        // 清除 last_submitted_text
+        app.session_mgr.current_mut().messages.last_submitted_text = None;
+
+        let view_slice: Vec<ViewModel> = vec![ViewModel::UserBubble(UserBubbleData {
+            text: "hello".into(),
+        })];
+
+        let _ = app.handle_interrupted(&view_slice);
+
+        // 没有 last_submitted_text → 走 else 分支（push_system_note "interrupt-done"）
+        // → flag 不应被设置
+        assert_eq!(
+            app.global_ui.pending_view_rewind_to, None,
+            "无 last_submitted_text 时不应设置 pending_view_rewind_to"
+        );
     }
 }

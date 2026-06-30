@@ -198,6 +198,46 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
             }
         }
 
+        // Cron #23 P1 fix — 应用 handle_interrupted 请求的 state.view 截断。
+        //
+        // handle_interrupted 分支 2（无工具调用，回滚路径）已通过 apply_rebuild_all
+        // 截断 v1 view_messages，但 v2 state.view 由状态机拥有。App 通过
+        // `global_ui.pending_view_rewind_to` 请求 main_loop 应用同样的截断。
+        //
+        // 仅对 Idle/Streaming 生效：Modal 保存的是 saved_view（不应被回滚操作触碰），
+        // Switching 是过渡态。这两个状态跳过截断，与 v1 路径的现有不一致行为保持一致
+        // （pre-existing，本修复不引入回归）。
+        //
+        // 在 effects 循环之前执行，确保 Effect::Render 触发重绘时 state.view 已截断。
+        if let Some(idx) = app.global_ui.pending_view_rewind_to.take() {
+            match &mut state {
+                State::Idle(idle) => {
+                    idle.view.truncate(idx);
+                    needs_render = true;
+                    tracing::debug!(
+                        idx,
+                        new_len = idle.view.len(),
+                        "main_loop: applied pending_view_rewind_to to Idle.view"
+                    );
+                }
+                State::Streaming(s) => {
+                    s.view.truncate(idx);
+                    needs_render = true;
+                    tracing::debug!(
+                        idx,
+                        new_len = s.view.len(),
+                        "main_loop: applied pending_view_rewind_to to Streaming.view"
+                    );
+                }
+                State::Modal(_) | State::Switching(_) => {
+                    tracing::warn!(
+                        idx,
+                        "pending_view_rewind_to set during Modal/Switching state — ignoring truncate"
+                    );
+                }
+            }
+        }
+
         for effect in effects {
             match effect {
                 Effect::Render => needs_render = true,
