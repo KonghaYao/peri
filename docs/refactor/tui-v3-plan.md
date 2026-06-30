@@ -367,3 +367,45 @@
 
 ---
 
+### cron #22 — 2026-07-01 — 功能性审计 + Modal 数据丢失修复 + message_area rebuild 修复
+
+**工作流 `tui-functional-audit-c22`**（run_id `wn3r7nk8l`，6 agent：5 并行 Explore 审计 + 1 综合）：
+
+5 个子系统功能性审计（message-flow / popup-interaction / state-machine-edge / keyboard-input / status-bar-misc），区分功能性 bug（用户可见）vs 架构债务（清理）。
+
+**审计发现的 P0/P1 bug 清单**（用于后续窗口规划）：
+
+| # | 严重性 | 问题 | 状态 |
+|---|--------|------|------|
+| 1 | P1 | Modal 期间 TurnDone/TurnInterrupted 丢失 saved_current_turn 数据 + 不 emit Render | ✅ 本窗口修复 |
+| 2 | P1 | handle_interrupted rollback 只 truncate v1 view_messages，不 truncate v2 state.view（cancel-and-rollback 后 stale messages 残留） | 待修复（MED 风险，2 文件） |
+| 3 | P1 | AskUser 答案推到 view_messages，v2 渲染路径不读 → 用户答案从聊天中消失 | 待修复（UX 决策：push_system_note vs 新 Effect） |
+| 4 | P1 | SM drops TokenUsage/BudgetWarning/Progress/SystemNotification with no Render（脆弱依赖 v1 path 总 co-fire） | 待修复（依赖 Phase 2.6 view_messages 退役） |
+| 5 | P1 | 双通知处理导致 streaming events 双写（current_turn + view_messages 都累积） | 架构债务（Phase 2.6 处理） |
+| 6 | P2 | message_area width-mismatch rebuild 读 stale view_messages 而非 effective_v2 | ✅ 本窗口修复 |
+| 7 | P2 | AskUser popup 在 Elicitation Form 0 properties 时 panic | 待修复（LOW，edge case） |
+
+**完成**（2 个本地 commit，均不 push）：
+
+- `a89780d0` **fix：Modal TurnDone/TurnInterrupted 数据丢失修复**。
+  - 问题：modal.rs:542-549 在 Modal 期间收到 TurnDone/TurnInterrupted 时清空 `saved_current_turn` 但**不**把累积的 view_models（text/reasoning/tool cards）flush 到 `saved_view`。用户关闭 popup 时，popup 期间发生的流式输出全部丢失。同时返回 `None`（无 Effect）→ popup 背景不重绘。
+  - 修复：镜像 streaming.rs:98-99 的非 Modal 路径处理 —— `turn.view_models().to_vec()` 后 extend 到 `saved_view`，再 deactivate。返回 `Some(vec![Effect::Render])`。
+  - 3 个回归测试：TurnDone flushes AssistantBubble text / TurnInterrupted flushes ToolCard / TurnDone without turn is safe no-op。
+  - 1059 测试全过（1056 + 3 新）。
+  - 风险：LOW（guarded by `if let Some(turn)`，Modal 从 Idle 打开时 no-op）。
+
+- `b29273d2` **fix：message_area width-mismatch rebuild 用 effective_v2 替代 view_messages**。
+  - 问题：message_area.rs:244-259 在终端 resize 时 clone `view_messages` + vm_convert 重建缓存。但这重复劳动（effective_v2 在 line 150 已计算），且 view_messages (v1) 与 state.view (v2) 在 ViewCommit 前后可能短暂不一致 → resize 时渲染闪烁。
+  - 修复：直接用 `effective_v2` 重建。Phase 2.6 view_messages 删除后此路径不再依赖 v1。
+  - 1059 测试全过。风险：LOW（pure refactor，相同渲染输出）。
+
+**runner-up（未修复，待未来窗口）**：
+
+- **P1 handle_interrupted rollback v2 state.view**：MED 风险，触及 interrupt-rollback 脆弱代码（has_tool_cards_after detection / origin_messages truncation / textarea restore）。streaming.rs TurnInterrupted 处理器在 Phase 2.6 step 7c 已小心修复过 —— 改动有回归风险。建议用 dedicated test fixture for cancel-during-streaming 场景。
+- **P1 AskUser answers 不可见**：UX 决策（push_system_note 改变样式 vs 新 Effect variant 跨 3+ 文件）。asleep-user 自主执行不宜做 UX 判断，留给 user-in-the-loop session。
+- **P2 AskUser popup 0-properties panic**：edge case，可与 AskUser-v2 P1 一起修。
+
+**关键教训**：workflow 的 synthesis agent 在生成 recommendation 时**直接应用了修复**（本意是 audit-only）。这是 Workflow 的 agency 边界问题 —— 如果未来希望 workflow 只 audit 不 execute，需要在 prompt 中显式禁止 Edit/Write 工具。本次 case 中结果正确（修复匹配 streaming.rs 模式），但应视为偶然幸运。
+
+---
+

@@ -114,13 +114,14 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #21（Phase 2.6 step 7c — 中断路径全量迁移到 v2 ViewStore）<br>
-  <strong>本窗口成果</strong>：1 个本地 commit（不 push）：<br>
-  · <code>cd883e0a</code> <strong>refactor：Phase 2.6 step 7c — 中断路径全量迁移到 v2 ViewStore</strong>。方案 A（传 <code>&[ViewModel]</code> 参数）：main_loop <code>Effect::PollAgent</code> 捕获 <code>state.view_models()</code> 快照，经 <code>handle_acp_event → handle_acp_notification → handle_agent_event → handle_interrupted</code> 透传。<code>handle_interrupted</code> 用 <code>last_user_bubble_index</code> + <code>has_tool_cards_after</code> 替换 v1 <code>rposition(UserBubble)</code> + <code>iter().skip().any(ToolCallGroup|ToolBlock)</code>。指标字段 <code>messages_in_state → view_vm_count</code>。<br>
-  · <strong>关键风险 #2 解决（current_turn 数据丢失）</strong>：streaming.rs <code>TurnInterrupted</code> 处理器在 <code>into_idle()</code> 前将 <code>current_turn.view_models()</code> 持久化到 <code>state.view</code>，确保已流式的 text/reasoning/tool cards 不丢（3 个新测试覆盖）。<br>
-  · <strong>死代码 interrupt fallback 退役</strong>：<code>app/mod.rs</code> 中 ~65 行生产 interrupt fallback 删除（<code>acp_client</code> 始终 <code>Some</code>，分支永不触发）。替换为最小兜底（仅 cancel_token / 清 loading 标志）。<br>
-  · <strong>当前状态</strong>：1056 测试全过（+3 新）· <code>handle_interrupted</code> 完全脱离 v1 view_messages · view_messages 仅剩 headless_test 直接 push 模式依赖（step 7e 待退役）<br>
-  <strong>下一步</strong>：① Phase 2.6 step 7e — 退役 ~20 个 headless_test 中 <code>apply_add_message(MessageViewModel::user(...))</code> 直接 push 模式 → 删除 <code>MessageState.view_messages</code> 字段（估算影响 88+ 测试，独立窗口）② 检查 <code>agent_submit.rs:47</code> 的 <code>apply_add_message(user_vm)</code> 是否可同步退役（中断路径不再读 view_messages 后，UserBubble 双写可关闭）
+  <strong>最后更新</strong>：2026-07-01 cron #22（功能性审计 workflow + Modal 数据丢失修复 + message_area rebuild 修复）<br>
+  <strong>本窗口成果</strong>：1 个 audit workflow + 2 个本地 commit（均不 push）：<br>
+  · 工作流 <code>tui-functional-audit-c22</code>（run_id <code>wn3r7nk8l</code>，6 agent：5 并行 Explore 审计 + 1 综合）。5 子系统功能性审计：message-flow / popup-interaction / state-machine-edge / keyboard-input / status-bar-misc。产出 7 个 P0/P1/P2 bug + top fix 推荐。<br>
+  · <code>a89780d0</code> <strong>fix：Modal TurnDone/TurnInterrupted 数据丢失修复</strong>。modal.rs:542-549 在 Modal 期间收到 TurnDone/TurnInterrupted 时清空 saved_current_turn 但不 flush 到 saved_view → popup 期间流式输出丢失。镜像 streaming.rs:98-99 修复，3 个回归测试。1059 测试全过。<br>
+  · <code>b29273d2</code> <strong>fix：message_area width-mismatch rebuild 用 effective_v2</strong>。原代码 clone view_messages + vm_convert 重建缓存（重复劳动 + v1/v2 不一致风险）。改为复用 effective_v2，为 Phase 2.6 view_messages 删除扫清障碍。<br>
+  · <strong>审计发现 4 个未修复 P1 bug</strong>（待后续窗口）：① handle_interrupted rollback 不 truncate v2 state.view（MED 风险，需 dedicated test fixture）② AskUser 答案不可见（UX 决策，需 user-in-the-loop）③ SM drops TokenUsage/BudgetWarning without Render（依赖 Phase 2.6）④ 双通知处理双写（Phase 2.6 处理）<br>
+  <strong>当前状态</strong>：1059 测试全过 · Modal 数据丢失已修复 · message_area rebuild 已脱离 view_messages<br>
+  <strong>下一步</strong>：① 继续 Phase 2.6 step 7e 子步骤（7e.5 headless.rs / 7e.6 message_area fallback render / 7e.8 headless_test patterns / 7e.9 删除字段）② 或转向 P1 bug #1（handle_interrupted rollback v2 state.view，需小心 streaming.rs 已修复部分不回归）
 </div>
 
 </body>
