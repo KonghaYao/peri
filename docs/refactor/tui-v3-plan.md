@@ -110,3 +110,27 @@
 - ✅ TaskCreate 9 个 Phase
 - ⏳ Phase 0 进行中：plan 文档（本文件）+ artifact + PROGRESS
 - ⏭ 下一步：启动 Design Review workflow 评估 Phase 1.1 方向
+
+### 2026-07-01 cron #7 — Phase 1.4 全部完成 + 死代码路径确认
+
+**完成内容**：Phase 1.4-ask_user（commit `89738a7e`）+ Phase 1.4-oauth（commit `ee9fe41c`）+ 清理（commit `17932367`）。4 个 v2 Interaction Handlers 的 render + desired_height 全部就位，draw_now 渲染入口打通。
+
+**关键调研结论（新发现的 P0 缺陷 #15）**：v2 Interaction Handler 路径在生产环境**仍是死代码**。根因：
+1. **ACP 层不 emit HitlPending/AskUser/RewindPreview/OauthNeeded AcpEvent**：`peri-acp/src/event/mapper.rs:265-268` 明确注释「当前 ExecutorEvent 中无专门的 HitlPending 变体，HITL 审批通过 UserInteractionBroker 的 ask/confirm 直接交互，不经过事件管道」。
+2. **AcpEvent 枚举本身没有这些变体**：`peri-acp/src/event/mod.rs` 的 `pub enum AcpEvent` 仅含 StateSnapshot/TextChunk/ReasoningChunk 等流式事件，无 HitlPending/AskUser/Rewind/OAuth 变体。
+3. **生产路径走 v1 JSON-RPC**：HITL 经 `RequestPermission` 请求 → `app.handle_acp_request_permission` → 设置 `InteractionPrompt::Approval` → v1 popup 渲染。AskUser 经 `Elicitation` 请求 → `handle_acp_elicitation`。
+4. **acp_notifier 包装层**：发送 `TuiEvent::AcpEvent { event: "agent-event", data: { ..., event: <AcpEvent DTO> } }`。v2 状态机的 `AcpEventData::decode("agent-event", ...)` 落入 `_ => Unknown` 分支，HitlPending 路径完全不会触发。
+5. **`grep -r 'AcpEvent::HitlPending'` 零结果**：全代码库无任何位置构造这 4 个 AcpEvent 变体（仅 `peri-acp-types/src/event_data.rs` 中定义了 DTO struct）。
+
+**影响评估**：
+- ✅ **不影响生产**：v1 路径完整运行，HITL/AskUser/Rewind/OAuth 通过 v1 popup 正常工作
+- ✅ **Phase 1.3/1.4 代码有价值**：v2 路径作为前端预留接口，等 ACP 层未来扩展 ExecutorEvent::HitlPending 等变体并 emit 后立即可用
+- ❌ **Phase 1.3 描述误导**：progress.html 之前说「启用 v2 Interaction Handlers」实际只是「代码路径就位」，真实启用需 ACP 层配合
+
+**真正的启用条件**（不在 TUI 重构范围内）：
+- ACP 层扩展 `ExecutorEvent` 添加 HitlPending/AskUser/RewindPreview/OauthNeeded 变体
+- `event/router.rs` 把这些变体映射到对应的 AcpEvent DTO
+- `event/mapper.rs` 添加 Category ② 路由位（已预留，见 mapper.rs:264-268）
+- 决定是否废弃 JSON-RPC `RequestPermission`/`Elicitation` 路径（双轨切换）
+
+**当前窗口决策**：不做架构改动（风险高 + 用户睡眠），仅记录此发现。继续推进安全的 Phase 4 CLAUDE.md 同步。Phase 2 消息源单一化也受此影响 — 在 ACP 层切换前，v2 view_models 实际上是空的，UI 仍依赖 v1 view_messages。

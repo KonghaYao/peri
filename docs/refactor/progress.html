@@ -48,7 +48,7 @@
   <div class="stat done"><span class="num">9</span><span class="label">Phase 已完成</span></div>
   <div class="stat active"><span class="num">0</span><span class="label">Phase 进行中</span></div>
   <div class="stat pending"><span class="num">2</span><span class="label">Phase 待开始</span></div>
-  <div class="stat pending"><span class="num">14</span><span class="label">已识别缺陷</span></div>
+  <div class="stat pending"><span class="num">15</span><span class="label">已识别缺陷</span></div>
 </div>
 
 <h2>Phase 进度</h2>
@@ -90,6 +90,7 @@
     <tr class="p2"><td>12</td><td><span class="tag tag-p2">P2</span></td><td>transition_to_idle_with_effects 死代码</td><td>标 #[allow(dead_code)]</td></tr>
     <tr class="p3"><td>13</td><td><span class="tag tag-p3">P3</span></td><td>peri-tui/CLAUDE.md 大量过时</td><td>message_pipeline/RenderThread/ephemeral_notes 已删</td></tr>
     <tr class="p3"><td>14</td><td><span class="tag tag-p3">P3</span></td><td>根 CLAUDE.md 数字错误</td><td>Effect 数 32 实际 27；Alt+M 不存在</td></tr>
+    <tr class="p0"><td>15</td><td><span class="tag tag-p0">P0 (新发现)</span></td><td>v2 Interaction Handler 路径生产仍是死代码</td><td>ACP 层无 AcpEvent::HitlPending/AskUser/Rewind/OAuth 变体（mapper.rs:265 注释）；acp_notifier 发 "agent-event" 包装，decode 落入 Unknown 分支；HITL 实际走 v1 RequestPermission JSON-RPC。详见 <code>docs/refactor/tui-v3-plan.md</code> 2026-07-01 cron #7 调研结论</td></tr>
   </tbody>
 </table>
 
