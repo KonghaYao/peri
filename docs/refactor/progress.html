@@ -45,9 +45,9 @@
 </div>
 
 <div class="summary">
-  <div class="stat done"><span class="num">6</span><span class="label">Phase 已完成</span></div>
-  <div class="stat active"><span class="num">1</span><span class="label">Phase 1.6b 进行中</span></div>
-  <div class="stat pending"><span class="num">3</span><span class="label">Phase 待开始</span></div>
+  <div class="stat done"><span class="num">7</span><span class="label">Phase 已完成</span></div>
+  <div class="stat active"><span class="num">1</span><span class="label">Phase 1.3 进行中</span></div>
+  <div class="stat pending"><span class="num">2</span><span class="label">Phase 待开始</span></div>
   <div class="stat pending"><span class="num">14</span><span class="label">已识别缺陷</span></div>
 </div>
 
@@ -59,7 +59,7 @@
   <tbody>
     <tr><td>0</td><td>建立进度跟踪基础设施</td><td class="status s-done">完成</td><td>plan 文档 + artifact 看板 + TaskCreate 9 个任务（commit 8301b39f）</td></tr>
     <tr><td>1.1</td><td>修复键盘双重执行</td><td class="status s-done">完成</td><td>方案 A：删 SM 编辑 arm（Ctrl+A/U/W/Backspace/Delete/Home/End/Left/Right），2b 同步条件化（keyboard_did_run），prediction 清零改用文本长度对比（commit <code>0da30e87</code>，949 测试全过）</td></tr>
-    <tr><td>1.2</td><td>重构 Handler trait 签名</td><td class="status s-pending">待开始</td><td>render 接收 Frame；handle_key 接收 KeyEvent</td></tr>
+    <tr><td>1.2</td><td>重构 Handler trait 签名</td><td class="status s-done">完成</td><td>render(&self, frame: &mut Frame, area: Rect)；handle_key(&mut self, key: KeyEvent) → HandlerOutput（commit <code>b5bbadb3</code>）。4 个 handler + NoopHandler + modal.rs dispatch 全部迁移。新增 4 个测试辅助 key()/key_enter()/key_tab()/key_esc()。959 测试全过。</td></tr>
     <tr><td>1.3</td><td>启用 v2 Interaction Handlers</td><td class="status s-pending">待开始</td><td>main_loop 接收 HITL/AskUser/Rewind/OAuth 时构造 Handler 进入 Modal</td></tr>
     <tr><td>1.4</td><td>实现 Handler.render() + 删除 v1 popup</td><td class="status s-pending">待开始</td><td>迁移 popups/{hitl,ask_user,rewind,oauth}.rs 渲染到 Handler</td></tr>
     <tr><td>1.5</td><td>修复 Modal 期间 AcpEvent 丢弃</td><td class="status s-done">完成</td><td>1.5a：ModalState 改 struct 持 saved_view/saved_input/saved_*/kind ✓；1.5b：modal.rs handle() 处理 AcpEvent（ViewCommit 更新 saved_view，TextChunk 等更新 saved_current_turn，TurnDone 清空）✓；1.5c：Streaming→Modal 可达 + saved_current_turn 恢复（commit <code>fa8d68c5</code>）</td></tr>
@@ -102,9 +102,9 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-06-30 cron #3（Phase 1.5c + 1.6a 完成）<br>
-  <strong>本窗口成果</strong>：1 个 commit (<code>fa8d68c5</code>) · Streaming→Modal 可达（Ctrl+P/T/B/O/Shift+T/BackTab 在 Streaming 也工作）· saved_current_turn 恢复（关闭面板时无缝回到 Streaming，不丢失流式输出）· 960 测试全过（+9 新测试）<br>
-  <strong>下一步</strong>：Phase 1.2（Handler trait 签名重构：render 接收 Frame，handle_key 接收 KeyEvent）+ Phase 1.3（启用 v2 Interaction Handlers）
+  <strong>最后更新</strong>：2026-06-30 cron #3（Phase 1.5c + 1.6a + 1.2 完成）<br>
+  <strong>本窗口成果</strong>：3 个 commit (<code>fa8d68c5</code> + <code>cdf25aa2</code> + <code>b5bbadb3</code>) · Streaming→Modal 可达（Ctrl+P/T/B/O/Shift+T/BackTab 在 Streaming 也工作）· saved_current_turn 恢复 · Handler trait 签名重构（render 接收 Frame，handle_key 接收 KeyEvent）· 959 测试全过<br>
+  <strong>下一步</strong>：Phase 1.3（启用 v2 Interaction Handlers —— main_loop 接收 HITL/AskUser/Rewind/OAuth 时构造 Handler 进入 Modal）
 </div>
 
 </body>
