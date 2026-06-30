@@ -242,12 +242,14 @@ pub(crate) fn render_messages(
         app.session_mgr.current_mut().ui.scrollbar_max_offset = max_scroll;
 
         if render_width != text_area_width {
-            // 宽度未匹配：重新构建缓存（走 vm_convert + v2 路径）
-            let vms = app.session_mgr.current().messages.view_messages.clone();
-            let v2_vms = crate::render::vm_convert::message_view_models_to_v2(&vms);
+            // 宽度未匹配：用已计算好的 effective_v2 重建缓存。
+            // Phase 2.6 step 7e.6-pre: 之前从 view_messages clone + vm_convert，
+            // 但 effective_v2 已经在 line 150 计算完毕（生产路径来自 state.view_models()）。
+            // 复用避免：(1) view_messages 在 Phase 2.6 后将被删除；(2) 终端 resize 时
+            // view_messages 与 state.view 可能短暂不一致导致渲染闪烁。
             let diff = app.session_mgr.current().ui.diff_visible;
             let prev = app.session_mgr.current().messages.message_cache.as_ref();
-            let new_cache = build_sync_render_cache_v2(&v2_vms, diff, text_area_width);
+            let new_cache = build_sync_render_cache_v2(&effective_v2, diff, text_area_width);
             // 保持版本递增（与 v1 路径行为一致）
             let version = prev.map_or(1, |c| c.version.wrapping_add(1));
             app.session_mgr.current_mut().messages.message_cache = Some(MessageRenderCache {
