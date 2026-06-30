@@ -103,9 +103,14 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #9（缺陷 #15 P0→P2 修正 + Phase 2 调研与拆分 + Phase 2.1 完成）<br>
-  <strong>本窗口成果</strong>：3 个本地 commit（<code>a407a771</code> 缺陷 #15 修正 + <code>0b326aee</code> Phase 2 计划起草 + <code>7c9e09f2</code> Phase 2.1 legacy 标记，均不 push）· 起草 <code>docs/refactor/phase2-migration-plan.md</code>（6 子阶段迁移计划）· TaskCreate #15-#20 子任务 + blocks 依赖 · Phase 2.1（task #15）完成：在 <code>message_area.rs:177-189</code> 添加 [LEGACY FALLBACK] 注释说明生产不可达 / 测试专用 / 引用迁移计划 · 深度调研发现：(a) legacy fallback 在测试活跃（不能直接删）；(b) SubAgent 流式状态是最大阻塞（需 App 层 status map）；(c) v2_view_models 桥接可通过扩展 render 签名删除 · 998 测试全过<br>
-  <strong>下一步</strong>：① Phase 2.2（task #16）：render 签名扩展 <code>render(f, app, state, panel_height)</code> + 删 <code>v2_view_models</code> 桥接 ② Phase 2.3（task #17）：SubAgent status map 设计（最大阻塞） ③ Phase 2.4（task #18）：Event::PushSystemNote 走 v2 事件流
+  <strong>最后更新</strong>：2026-07-01 cron #11（Phase 2.2 + Phase 2.4 完成 + App-method drain 机制）<br>
+  <strong>本窗口成果</strong>：4 个本地 commit（均不 push）：<br>
+  · <code>52849802</code> Phase 2.2：扩展 <code>render(f, app, panel_height, v2_view_models)</code> 签名，删除 <code>App.global_ui.v2_view_models</code> 桥接字段<br>
+  · <code>bb8e2517</code> + <code>79790603</code> Phase 2.4：迁移 13 个 slash command 到 <code>Effect::PushSystemNote</code>（agent / model / help / history / effort / rename / workflow_cmd / bg / loop_cmd / lang / channel / gc / plugin）· 添加 <code>Event::PushSystemNote</code> 变体 + 4 个 transitions（idle/streaming/modal/switching）<br>
+  · <code>e94d9a81</code> 修复 <code>Effect::ShowNotification</code> 静默丢失（之前只写 v1 view_messages，生产渲染从 v2 state.view 读，note 永远不显示）<br>
+  · <code>72d2f8db</code> App-method drain 机制：<code>MessageState.push_system_note</code> 现在也加入 <code>pending_v2_notes</code> 队列；main_loop 每次迭代 drain 并通过 <code>state_machine::handle(Event::PushSystemNote)</code> 路由到 v2 state.view——修复 thread_ops / agent_ops / rewind / polling 等 App-method 路径的静默丢失<br>
+  <strong>当前状态</strong>：998 测试全过 · v1 view_messages 与 v2 state.view 保持双写一致 · 所有 push_system_note 入口（command / Effect / App-method）现在都能到达 v2 state.view（生产渲染源）<br>
+  <strong>下一步</strong>：① Phase 2.3（task #17）：SubAgent status map 设计（最大阻塞，需 App 层 status map） ② Phase 2.5（task #19）：apply_rebuild_all / ephemeral_notes 退役 ③ Phase 2.6（task #20）：删除 view_messages 字段（最终目标，需先完成 2.3 + 2.5）
 </div>
 
 </body>
