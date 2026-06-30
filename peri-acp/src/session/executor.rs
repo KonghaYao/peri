@@ -574,32 +574,6 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     })
     .await;
 
-    // await_wake：agent idle 期间阻塞等待异步事件（bg_results / workflow / cron）。
-    //
-    // agent 执行期间 push 到 v2 queue 的消息由 stages/end.rs → drain_for_receive
-    // 自动消费续跑（同一 run_session_loop 内）。agent 完全退出后（idle 期间）
-    // push 的异步消息通过 AsyncRouter → InboxHandle → push_defer 触发 wake Notify，
-    // 此处 await_wake 返回后 TUI 的 poll_agent 负责发起新一轮。
-    //
-    // await_wake 是 NON-DESTRUCTIVE：不 drain 消息，仅等待 wake 信号。
-    // 实际消费仍由 TUI poll_agent 的 drain_for_end 完成。
-    //
-    // [TRAP] 此处**不**做 drain_for_end 循环——drain 是 destructive，
-    // 取出后不续跑消息会物理丢失（见 S6 回归修复）。
-    if let Some(ref inbox) = session_inbox {
-        if !cancel.is_cancelled() {
-            debug!(
-                session_id = %session_id,
-                "run_session_loop: agent idle, awaiting wake via SessionInbox"
-            );
-            inbox.await_wake().await;
-            debug!(
-                session_id = %session_id,
-                "run_session_loop: woken by async event"
-            );
-        }
-    }
-
     result
 }
 

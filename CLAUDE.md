@@ -72,6 +72,8 @@
 
 **[TRAP]** ACP executor 末尾**禁止**加 `drain_for_end` 循环：`drain_for_end` 是 destructive，取出后若不续跑消息会物理丢失。idle 期续跑必须由 TUI 接收方负责（见 S6 回归修复）。
 
+**[TRAP]** `run_session_loop` 末尾**禁止**加 `await_wake` 阻塞。ReAct 循环的 End 阶段已经在 queue 为空时正确退出（`stages/end.rs`），executor 拿到 `LoopResult` 后职责已结束，应立即 return `PromptResult`。加 `await_wake` 会导致 stdio/IDE 路径的 `responder.respond(PromptResponse)` 永远不执行，客户端（如 Zed）收不到完成响应而一直 loading（见 2026-06-30 await_wake 删除）。
+
 ### TUI MessagePipeline 单一数据源（P2-C）
 
 TUI 渲染管线的核心架构。规范状态 `transcript: Vec<BaseMessage>` + 当前迭代增量 `partial: Option<PartialAiMessage>` 两类状态，视图派生是纯函数 `view = messages_to_view_models(transcript) ⊕ partial_bubble`。

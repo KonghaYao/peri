@@ -139,6 +139,8 @@ AgentGroup（会话级）
     - 队列有 Prompt 或 Defer → 回到 Compact
     - 队列空或仅有 Info → 退出，emit TurnCompleted
 
+**边界约束**：End 阶段退出意味着本轮 ReAct 循环已终结。循环外部（`run_session_loop` / executor）**禁止**在 ReAct 循环返回后再加阻塞等待——`LoopResult` 返回后应立即产出 `PromptResult`，由调用方（TUI / stdio）决定是否发起新一轮。在 executor 层加 `await_wake` 等阻塞点会破坏协议响应性（stdio 路径的 `responder.respond()` 永远不执行，IDE 客户端无限 loading）。
+
 ### 2.5 Hook 系统
 
 统一的钩子体系，Middleware trait 和 HookEvent 合并为一套。按 ReAct 阶段和 Agent 生命周期触发。不在 Hook 系统内的走 MessageQueue 注入。
