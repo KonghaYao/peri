@@ -46,19 +46,12 @@ impl App {
         }
         self.session_mgr.current_mut().agent.retry_status = None;
 
-        // P5: No Pipeline::handle_event — mark streaming as done directly
-        if let Some(vm) = self
-            .session_mgr
-            .current_mut()
-            .messages
-            .view_messages
-            .last_mut()
-        {
-            if let MessageViewModel::AssistantBubble { is_streaming, .. } = vm {
-                *is_streaming = false;
-            }
-            vm.recompute_hash();
-        }
+        // Phase 2.6 step 7e.1: Retired the v1 is_streaming=false mutation
+        // on the last AssistantBubble. Confirmed dead in production:
+        // vm_convert.rs:293 always emits is_streaming: false when bridging
+        // v1 → v2, so v2 rendering never reads the v1 flag. The v1 fallback
+        // render path (message_area.rs:155) is only triggered by tests;
+        // production always passes v2_view_models=Some.
 
         if !self.session_mgr.current_mut().agent.reconcile_already_done {
             let prefix_len = self.session_mgr.current_mut().messages.round_start_vm_idx;
