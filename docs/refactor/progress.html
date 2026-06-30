@@ -61,7 +61,7 @@
     <tr><td>1.1</td><td>修复键盘双重执行</td><td class="status s-done">完成</td><td>方案 A：删 SM 编辑 arm（Ctrl+A/U/W/Backspace/Delete/Home/End/Left/Right），2b 同步条件化（keyboard_did_run），prediction 清零改用文本长度对比（commit <code>0da30e87</code>，949 测试全过）</td></tr>
     <tr><td>1.2</td><td>重构 Handler trait 签名</td><td class="status s-done">完成</td><td>render(&self, frame: &mut Frame, area: Rect)；handle_key(&mut self, key: KeyEvent) → HandlerOutput（commit <code>b5bbadb3</code>）。4 个 handler + NoopHandler + modal.rs dispatch 全部迁移。新增 4 个测试辅助 key()/key_enter()/key_tab()/key_esc()。959 测试全过。</td></tr>
     <tr><td>1.3</td><td>启用 v2 Interaction Handlers</td><td class="status s-done">完成</td><td>设计选择 (c)：在 transitions 内部直接构造 Handler 进入 Modal，绕过 Effect 通道（避免与 Effect 的 Debug/Clone/PartialEq derives 冲突）。新增 enter_modal_from_idle / enter_modal_from_streaming 共享 helper。idle.rs + streaming.rs 各 4 个 interaction 事件分支（Hitl/AskUser/Rewind/OAuth）转换到 Modal(Interaction)。10 个新测试覆盖。commit <code>da9bce2a</code>，969 测试全过</td></tr>
-    <tr><td>1.4</td><td>实现 Handler.render() + 删除 v1 popup</td><td class="status s-active">1.4-rewind 完成</td><td>1.4-rewind：Handler trait 加 desired_height；draw_now 打通 ModalKind::Interaction 渲染入口（match Panel/Interaction）；RewindHandler 实现 render + desired_height（commit <code>654d5999</code>）。1.4-hitl/ask_user/oauth 待做。</td></tr>
+    <tr><td>1.4</td><td>实现 Handler.render() + 删除 v1 popup</td><td class="status s-active">1.4-rewind + 1.4-hitl 完成</td><td>1.4-rewind：Handler trait 加 desired_height；draw_now 打通 ModalKind::Interaction 渲染入口；RewindHandler 实现 render + desired_height（commit <code>654d5999</code>）。1.4-hitl：HitlHandler 实现 render（BorderedPanel + 工具项 + cursor 高亮 + 输入预览）+ desired_height + truncate_chars/format_input_preview（commit <code>daba127d</code>）。1.4-ask_user/oauth 待做。</td></tr>
     <tr><td>1.5</td><td>修复 Modal 期间 AcpEvent 丢弃</td><td class="status s-done">完成</td><td>1.5a：ModalState 改 struct 持 saved_view/saved_input/saved_*/kind ✓；1.5b：modal.rs handle() 处理 AcpEvent（ViewCommit 更新 saved_view，TextChunk 等更新 saved_current_turn，TurnDone 清空）✓；1.5c：Streaming→Modal 可达 + saved_current_turn 恢复（commit <code>fa8d68c5</code>）</td></tr>
     <tr><td>1.6</td><td>Streaming→Modal 可达 + Status 事件</td><td class="status s-done">1.6a 完成</td><td>1.6a：streaming.rs handle_key 镜像 Idle 的 Ctrl 快捷键（Ctrl+P/T/B/O/Shift+T/BackTab），main_loop OpenPanel 接受 Streaming 入口，ClosePanel 检测 saved_current_turn 恢复 Streaming ✓；1.6b：§4.3 status 事件（TokenUsage/ToolCount/Progress）状态栏渲染（推迟到状态栏重构）</td></tr>
     <tr><td>2</td><td>消息源单一化</td><td class="status s-pending">待开始</td><td>删 origin_messages/view_messages，统一 state.view + current_turn</td></tr>
@@ -102,9 +102,9 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-06-30 cron #5（Phase 1.4-rewind 完成）<br>
-  <strong>本窗口成果</strong>：1 个本地 commit (<code>654d5999</code>, 不 push) · Phase 1.3 启用 v2 Interaction Handlers（4 个事件分支转换到 Modal）· Phase 1.4-rewind 实现 RewindHandler.render + desired_height · 打通 ModalKind::Interaction 渲染入口（draw_now 双 arm 计算 v2_panel_height + overlay 分发）· 973 测试全过<br>
-  <strong>下一步</strong>：Phase 1.4 后续 —— HitlHandler / AskUserHandler / OauthHandler 各自实现 render + desired_height（弹窗渲染最小可用化，逐个迁移）
+  <strong>最后更新</strong>：2026-06-30 cron #6（Phase 1.4-hitl 完成）<br>
+  <strong>本窗口成果</strong>：1 个本地 commit (<code>daba127d</code>, 不 push) · Phase 1.4-hitl 实现 HitlHandler.render（BorderedPanel + 工具项列表 + cursor 高亮 + format_input_preview/truncate_chars 工具函数）+ desired_height · 7 个新测试（含 TestBackend 实际绘制）· 980 测试全过<br>
+  <strong>下一步</strong>：Phase 1.4-ask_user / Phase 1.4-oauth（两个剩余 Handler 的 render + desired_height 实现）
 </div>
 
 </body>
