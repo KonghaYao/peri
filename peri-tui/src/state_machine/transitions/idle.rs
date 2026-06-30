@@ -249,6 +249,22 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
             state.input.history.push(text.clone());
             state.history_index = None;
 
+            // Phase 2.6 step 7d: Push UserBubble to state.view so v2 readers
+            // (interrupt paths migrated in step 7c, production render) can
+            // locate the user's message immediately after submit — without
+            // waiting for the first ACP ViewCommit echo. Cron #19 workflow
+            // wjdz1xyqm confirmed: SM Enter did NOT push UserBubble, leaving
+            // a window where state.view_models() had no UserBubble until the
+            // ACP server's view_mapper emitted one in the next ViewCommit.
+            // The ACP ViewCommit later replaces state.view wholesale, so the
+            // canonical UserBubble (with attachment formatting) overwrites
+            // this raw-text placeholder safely.
+            state
+                .view
+                .push(peri_acp_types::view_model::ViewModel::UserBubble(
+                    peri_acp_types::view_model::UserBubbleData { text: text.clone() },
+                ));
+
             // SubmitMessage routes through main_loop → app.submit_message(),
             // which sends to ACP AND clears the TextArea. Using raw SendToAcp
             // would bypass TextArea cleanup, causing submitted text to reappear.
@@ -478,6 +494,110 @@ mod tests {
                 assert_eq!(text, "hello world");
             }
             _ => panic!("expected SubmitMessage effect"),
+        }
+    }
+
+    // -- Phase 2.6 step 7d: UserBubble 推送到 state.view ---------------------
+
+    #[test]
+    fn test_enter_pushes_userbubble_to_state_view() {
+        // Phase 2.6 step 7d: SM Enter 必须把 UserBubble 推到 state.view，
+        // 让中断路径和生产渲染在第一次 ACP ViewCommit 之前就能定位到
+        // 用户消息。此前是 cron #19 文档记录的潜在 bug。
+        let mut state = make_state();
+        state.input.insert_str("hello world");
+        let (next, _effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        match next {
+            State::Streaming(s) => {
+                // view 中应包含恰好一个 UserBubble，文本与提交的输入一致。
+                assert_eq!(
+                    s.view.len(),
+                    1,
+                    "StreamingState.view should contain exactly the pushed UserBubble"
+                );
+                match &s.view[0] {
+                    peri_acp_types::view_model::ViewModel::UserBubble(d) => {
+                        assert_eq!(d.text, "hello world");
+                    }
+                    other => panic!("expected UserBubble, got {other:?}"),
+                }
+            }
+            other => panic!("expected Streaming, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_enter_does_not_push_userbubble_for_slash_commands() {
+        // Slash 命令（如 /history, /model）在 idle.rs:238-240 短路返回 Idle，
+        // 不进入 Enter 提交分支。UserBubble 不应被推送。
+        let mut state = make_state();
+        state.input.insert_str("/help");
+        let (next, _effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        match next {
+            State::Idle(idle) => {
+                assert!(
+                    idle.view.is_empty(),
+                    "Slash command must not push UserBubble to view"
+                );
+            }
+            other => panic!("expected Idle for slash command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_empty_enter_does_not_push_userbubble() {
+        // 空白输入（trim 后为空）应在 idle.rs:243-246 提前返回 Idle，
+        // 不推送 UserBubble。
+        let mut state = make_state();
+        state.input.insert_str("   "); // 仅空白
+        let (next, _effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        match next {
+            State::Idle(idle) => {
+                assert!(
+                    idle.view.is_empty(),
+                    "Empty submit must not push UserBubble to view"
+                );
+            }
+            other => panic!("expected Idle for empty submit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_enter_preserves_prior_view_when_pushing_userbubble() {
+        // 已有历史 view（例如上一轮对话）时，Enter 应在末尾追加 UserBubble，
+        // 而不是替换整个 view。
+        use peri_acp_types::view_model::{AssistantBubbleData, ViewModel};
+        let mut state = make_state();
+        state.view = vec![ViewModel::AssistantBubble(AssistantBubbleData {
+            text: "prior reply".into(),
+            reasoning: None,
+            tool_card_ids: vec![],
+        })];
+        state.input.insert_str("next question");
+        let (next, _effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        match next {
+            State::Streaming(s) => {
+                assert_eq!(
+                    s.view.len(),
+                    2,
+                    "Prior view must be preserved, UserBubble appended"
+                );
+                assert!(matches!(s.view[0], ViewModel::AssistantBubble(_)));
+                assert!(matches!(s.view[1], ViewModel::UserBubble(_)));
+            }
+            other => panic!("expected Streaming, got {other:?}"),
         }
     }
 
