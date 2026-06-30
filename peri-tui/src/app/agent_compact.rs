@@ -8,8 +8,7 @@ impl App {
         self.session_mgr.current_mut().ui.bg_bar_cursor = None;
         self.session_mgr.current_mut().ui.text_selection.clear();
         self.set_loading(true);
-        let vm = MessageViewModel::system(self.services.lc.tr("app-compact-started"));
-        self.apply_add_message(vm);
+        self.push_system_note(self.services.lc.tr("app-compact-started"));
         (true, false, false)
     }
 
@@ -23,11 +22,10 @@ impl App {
     ) -> (bool, bool, bool) {
         if micro_cleared > 0 {
             self.session_mgr.current_mut().agent.origin_messages = messages;
-            let vm = MessageViewModel::system(self.services.lc.tr_args(
+            self.push_system_note(self.services.lc.tr_args(
                 "app-compact-auto-cleared",
                 &[("count".into(), (micro_cleared as i64).into())],
             ));
-            self.apply_add_message(vm);
             return (true, false, false);
         }
 
@@ -54,12 +52,11 @@ impl App {
 
     pub(crate) fn handle_compact_error(&mut self, msg: String) -> (bool, bool, bool) {
         self.set_loading(false);
-        let vm = MessageViewModel::system(
+        self.push_system_note(
             self.services
                 .lc
                 .tr_args("app-compact-failed", &[("error".into(), msg.into())]),
         );
-        self.apply_add_message(vm);
 
         (true, false, false)
     }

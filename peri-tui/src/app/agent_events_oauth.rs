@@ -17,11 +17,10 @@ impl App {
 
     pub(crate) fn handle_oauth_completed(&mut self, server_name: String) -> (bool, bool, bool) {
         self.global_ui.oauth_prompt = None;
-        let vm = MessageViewModel::system(self.services.lc.tr_args(
+        self.push_system_note(self.services.lc.tr_args(
             "mcp-oauth-completed",
             &[("server".into(), server_name.into())],
         ));
-        self.apply_add_message(vm);
         (true, false, false)
     }
 
@@ -31,14 +30,13 @@ impl App {
         error: String,
     ) -> (bool, bool, bool) {
         self.global_ui.oauth_prompt = None;
-        let vm = MessageViewModel::system(self.services.lc.tr_args(
+        self.push_system_note(self.services.lc.tr_args(
             "mcp-oauth-failed",
             &[
                 ("server".into(), server_name.into()),
                 ("error".into(), error.into()),
             ],
         ));
-        self.apply_add_message(vm);
         (true, false, false)
     }
 
@@ -66,8 +64,7 @@ impl App {
                 &[("server".into(), server_name.clone().into())],
             ),
         };
-        let vm = MessageViewModel::system(msg);
-        self.apply_add_message(vm);
+        self.push_system_note(msg);
         (true, false, false)
     }
 }

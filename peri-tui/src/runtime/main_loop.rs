@@ -466,15 +466,11 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                         &cfg,
                         app.services.config_path_override.as_deref(),
                     ) {
-                        use crate::app::MessageViewModel;
                         let session = app.session_mgr.current_mut();
-                        session
-                            .messages
-                            .view_messages
-                            .push(MessageViewModel::system(app.services.lc.tr_args(
-                                "config-save-failed",
-                                &[("error".into(), e.to_string().into())],
-                            )));
+                        session.messages.push_system_note(app.services.lc.tr_args(
+                            "config-save-failed",
+                            &[("error".into(), e.to_string().into())],
+                        ));
                         session.messages.message_cache = None;
                     }
                     if let Some(p) = crate::app::agent::LlmProvider::from_config(&cfg) {
@@ -515,15 +511,11 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                             &cfg,
                             app.services.config_path_override.as_deref(),
                         ) {
-                            use crate::app::MessageViewModel;
                             let session = app.session_mgr.current_mut();
-                            session
-                                .messages
-                                .view_messages
-                                .push(MessageViewModel::system(app.services.lc.tr_args(
-                                    "config-save-failed",
-                                    &[("error".into(), e.to_string().into())],
-                                )));
+                            session.messages.push_system_note(app.services.lc.tr_args(
+                                "config-save-failed",
+                                &[("error".into(), e.to_string().into())],
+                            ));
                             session.messages.message_cache = None;
                         }
                         app.global_ui.provider_highlight_until = Some(

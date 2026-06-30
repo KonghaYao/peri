@@ -66,8 +66,7 @@ impl App {
                         ]
                     )
                 );
-                let vm = MessageViewModel::system(msg);
-                self.apply_add_message(vm);
+                self.push_system_note(msg);
             }
         }
         let current_tokens = pa_usage.input_tokens as usize + pa_usage.output_tokens as usize;

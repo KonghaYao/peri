@@ -74,9 +74,7 @@ impl App {
         let provider = match provider.or_else(agent::LlmProvider::from_env) {
             Some(p) => p,
             None => {
-                self.apply_add_message(MessageViewModel::system(
-                    self.services.lc.tr("app-no-provider-submit"),
-                ));
+                self.push_system_note(self.services.lc.tr("app-no-provider-submit"));
                 self.set_loading(false);
                 return;
             }
@@ -176,9 +174,7 @@ impl App {
             });
         } else {
             tracing::error!("ACP client not initialized, cannot submit agent");
-            self.apply_add_message(MessageViewModel::system(
-                self.services.lc.tr("app-no-provider-submit"),
-            ));
+            self.push_system_note(self.services.lc.tr("app-no-provider-submit"));
             self.set_loading(false);
         }
     }

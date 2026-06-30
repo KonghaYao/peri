@@ -1,7 +1,7 @@
 use tui_textarea::{Input, Key};
 
 use super::super::Action;
-use crate::app::{App, MessageViewModel};
+use crate::app::App;
 
 /// Setup wizard 模式下拦截所有按键
 pub(super) fn handle_setup_wizard(app: &mut App, input: &Input) -> Option<Action> {
@@ -48,12 +48,10 @@ pub(super) fn handle_setup_wizard(app: &mut App, input: &Input) -> Option<Action
                                 "config-save-failed",
                                 &[("error".into(), e.to_string().into())],
                             );
-                            let msg = MessageViewModel::system(msg_text);
                             app.session_mgr
                                 .current_mut()
                                 .messages
-                                .view_messages
-                                .push(msg);
+                                .push_system_note(msg_text);
                             app.render_rebuild();
                         }
                     }

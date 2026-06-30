@@ -56,15 +56,13 @@ impl MessageState {
         }
     }
 
-    /// 添加系统通知到 view_messages + pending_v2_notes 队列。
+    /// 入队一条系统通知到 v2 状态机渲染源。
     ///
-    /// `pending_v2_notes` 由 `main_loop` 取出并通过
+    /// Phase 2.6 step 5 — `view_messages.push` 分支已删除。SystemNote
+    /// 仅入 `pending_v2_notes` 队列，由 `main_loop` 取出并通过
     /// `state_machine::handle(Event::PushSystemNote)` 路由到
-    /// `state.view`（生产渲染源）。view_messages 维护仅用于 legacy
-    /// 兼容（测试路径），生产渲染已切换到 v2 state.view。
+    /// `state.view`（生产渲染源）。
     pub fn push_system_note(&mut self, content: String) {
-        let vm = MessageViewModel::system(content.clone());
-        self.view_messages.push(vm);
         self.pending_v2_notes.push(content);
     }
 

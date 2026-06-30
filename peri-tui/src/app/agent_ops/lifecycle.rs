@@ -154,8 +154,7 @@ impl App {
             });
 
         if has_tool_calls {
-            let vm = MessageViewModel::system(self.services.lc.tr("app-interrupt-done"));
-            self.apply_add_message(vm);
+            self.push_system_note(self.services.lc.tr("app-interrupt-done"));
             self.session_mgr.current_mut().agent.reconcile_already_done = true;
             peri_agent::metrics::emit(
                 "trap.cancel_interrupt",
@@ -194,11 +193,9 @@ impl App {
                 .clear();
             self.session_mgr.current_mut().metadata.last_human_message = None;
             // P5: No pipeline.done()/restore_completed()
-            let vm = MessageViewModel::system(self.services.lc.tr("app-interrupted-resumed"));
-            self.apply_add_message(vm);
+            self.push_system_note(self.services.lc.tr("app-interrupted-resumed"));
         } else {
-            let vm = MessageViewModel::system(self.services.lc.tr("app-interrupt-done"));
-            self.apply_add_message(vm);
+            self.push_system_note(self.services.lc.tr("app-interrupt-done"));
         }
         self.session_mgr.current_mut().agent.reconcile_already_done = true;
         if !self
