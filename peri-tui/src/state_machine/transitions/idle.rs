@@ -305,13 +305,6 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
             }
         }
 
-        KeyCode::Char(c) => {
-            state.input.insert_str(&c.to_string());
-            // Typing invalidates the prediction.
-            state.input.prediction = None;
-            (State::Idle(state), vec![Effect::Render])
-        }
-
         // -- Backspace -------------------------------------------------------
         KeyCode::Backspace => {
             let before_len = state.input.text().len();
@@ -423,25 +416,34 @@ mod tests {
     }
 
     #[test]
-    fn test_char_key_appends_to_buffer() {
+    fn test_char_key_is_ignored_by_sm() {
+        // Plain Char keys are handled by the keyboard fallback, not the SM.
+        // The SM must stay in Idle without modifying InputState, so the
+        // keyboard fallback can handle the key and step 2b can sync the
+        // TextArea changes back to InputState.
         let state = make_state();
-        let (next, _effects) = handle(state, Event::Key(char_key('a')));
+        let (next, effects) = handle(state, Event::Key(char_key('a')));
         match next {
             State::Idle(idle) => {
-                assert_eq!(idle.input.text(), "a");
-                assert_eq!(idle.input.cursor, CursorPos::new(0, 1));
+                // SM should NOT have inserted 'a' — keyboard fallback owns typing.
+                assert_eq!(idle.input.text(), "");
+                assert_eq!(idle.input.cursor, CursorPos::default());
             }
             _ => panic!("expected Idle"),
         }
+        // SM produces no effects for plain Char — keyboard fallback provides Render.
+        assert!(effects.is_empty());
     }
 
     #[test]
-    fn test_typing_clears_prediction() {
+    fn test_typing_via_sm_does_not_clear_prediction() {
+        // Prediction clearing is handled by the keyboard fallback path,
+        // not the SM. The SM just passes through plain Char keys.
         let mut state = make_state();
         state.input.prediction = Some("ghost".into());
         let (next, _effects) = handle(state, Event::Key(char_key('x')));
         match next {
-            State::Idle(idle) => assert!(idle.input.prediction.is_none()),
+            State::Idle(idle) => assert!(idle.input.prediction.is_some()),
             _ => panic!("expected Idle"),
         }
     }

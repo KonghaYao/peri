@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Peri TUI v3 重构进度</title>
+<style>
+  body { font: 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1.5rem; color: #1a1a1a; background: #fafafa; }
+  h1 { color: #1a1a1a; border-bottom: 2px solid #444; padding-bottom: 0.3rem; }
+  h2 { color: #333; margin-top: 2rem; }
+  .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.8rem; margin: 1.5rem 0; }
+  .stat { background: white; border-left: 4px solid #888; padding: 0.8rem 1rem; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+  .stat .num { font-size: 1.8rem; font-weight: 600; display: block; }
+  .stat .label { color: #666; font-size: 0.85rem; }
+  .stat.done { border-color: #2c8a3c; }
+  .stat.active { border-color: #c47f0e; background: #fff8e6; }
+  .stat.pending { border-color: #999; }
+  table { border-collapse: collapse; width: 100%; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+  th, td { border: 1px solid #e0e0e0; padding: 8px 10px; text-align: left; }
+  th { background: #f0f0f0; font-weight: 600; }
+  td.status { font-weight: 600; text-align: center; width: 70px; }
+  .s-done { color: #2c8a3c; }
+  .s-active { color: #c47f0e; background: #fff8e6; }
+  .s-pending { color: #888; }
+  .p0 { background: #fde8e8; }
+  .p1 { background: #fff3e0; }
+  .p2 { background: #fffde7; }
+  .p3 { background: #e3f2fd; }
+  code { background: #f4f4f4; padding: 1px 5px; border-radius: 3px; font-size: 0.88em; color: #b83227; }
+  .meta { color: #666; font-size: 0.88rem; margin-top: 2rem; padding: 0.6rem; background: white; border-left: 3px solid #888; }
+  .tag { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.78rem; font-weight: 600; }
+  .tag-p0 { background: #fde8e8; color: #b83227; }
+  .tag-p1 { background: #fff3e0; color: #c47f0e; }
+  .tag-p2 { background: #fffde7; color: #8a6d00; }
+  .tag-p3 { background: #e3f2fd; color: #1565c0; }
+  ul.findings { padding-left: 1.2rem; }
+  ul.findings li { margin: 0.3rem 0; }
+</style>
+</head>
+<body>
+
+<h1>Peri TUI v3 重构进度</h1>
+<div class="meta">
+  <strong>启动</strong>：2026-06-30 · <strong>触发</strong>：cron <code>*/15 * * * *</code>（job <code>6a33bfff</code>，每 15min 自动推进）<br>
+  <strong>范围</strong>：仅 TUI；ACP 层不动 · <strong>计划文档</strong>：<code>docs/refactor/tui-v3-plan.md</code>
+</div>
+
+<div class="summary">
+  <div class="stat done"><span class="num">1</span><span class="label">Phase 已完成</span></div>
+  <div class="stat active"><span class="num">1</span><span class="label">Phase 进行中</span></div>
+  <div class="stat pending"><span class="num">7</span><span class="label">Phase 待开始</span></div>
+  <div class="stat pending"><span class="num">14</span><span class="label">已识别缺陷</span></div>
+</div>
+
+<h2>Phase 进度</h2>
+<table>
+  <thead>
+    <tr><th>#</th><th>Phase</th><th>状态</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>0</td><td>建立进度跟踪基础设施</td><td class="status s-active">进行中</td><td>plan 文档 + artifact 看板 + TaskCreate 9 个任务</td></tr>
+    <tr><td>1.1</td><td>修复键盘双重执行</td><td class="status s-pending">待开始</td><td>is_sm_handled_shortcut + 2b 同步顺序冲突，需 Design Review</td></tr>
+    <tr><td>1.2</td><td>重构 Handler trait 签名</td><td class="status s-pending">待开始</td><td>render 接收 Frame；handle_key 接收 KeyEvent</td></tr>
+    <tr><td>1.3</td><td>启用 v2 Interaction Handlers</td><td class="status s-pending">待开始</td><td>main_loop 接收 HITL/AskUser/Rewind/OAuth 时构造 Handler 进入 Modal</td></tr>
+    <tr><td>1.4</td><td>实现 Handler.render() + 删除 v1 popup</td><td class="status s-pending">待开始</td><td>迁移 popups/{hitl,ask_user,rewind,oauth}.rs 渲染到 Handler</td></tr>
+    <tr><td>1.5</td><td>修复 Modal 期间 AcpEvent 丢弃</td><td class="status s-pending">待开始</td><td>Modal 持有 saved_view，view_models() 不返回 &[]</td></tr>
+    <tr><td>1.6</td><td>Streaming→Modal 可达 + Status 事件</td><td class="status s-pending">待开始</td><td>OpenPanel 在 Streaming 也触发；实现 §4.3 status 事件</td></tr>
+    <tr><td>2</td><td>消息源单一化</td><td class="status s-pending">待开始</td><td>删 origin_messages/view_messages，统一 state.view + current_turn</td></tr>
+    <tr><td>3</td><td>清理死 Effect + Switching</td><td class="status s-pending">待开始</td><td>11 个无人 emit 的 Effect；modal.rs TLS stubs；State::Switching</td></tr>
+    <tr><td>4</td><td>CLAUDE.md 同步</td><td class="status s-pending">待开始</td><td>peri-tui + 根 CLAUDE.md 删除过时引用</td></tr>
+  </tbody>
+</table>
+
+<h2>已识别缺陷清单</h2>
+<table>
+  <thead>
+    <tr><th>#</th><th>严重性</th><th>问题</th><th>根因位置</th></tr>
+  </thead>
+  <tbody>
+    <tr class="p0"><td>1</td><td><span class="tag tag-p0">P0</span></td><td>消息流双源冲突</td><td>state.current_turn vs view_messages 同时累积</td></tr>
+    <tr class="p0"><td>2</td><td><span class="tag tag-p0">P0</span></td><td>键盘双重执行 + 同步覆盖</td><td>is_sm_handled_shortcut 漏 Ctrl+A/U/W/编辑键；2b 同步覆盖 SM 修改 → Backspace 失效</td></tr>
+    <tr class="p0"><td>3</td><td><span class="tag tag-p0">P0</span></td><td>v2 Interaction Handlers 全死代码</td><td>HitlHandler 等 4 个完整但从未被实例化</td></tr>
+    <tr class="p0"><td>4</td><td><span class="tag tag-p0">P0</span></td><td>Handler trait 签名根本错误</td><td>render 无 Frame；handle_key 仅 char</td></tr>
+    <tr class="p0"><td>5</td><td><span class="tag tag-p0">P0</span></td><td>HandlerOutput → 杜撰 ACP 方法</td><td>"interaction/submit" 不在 ACP 协议</td></tr>
+    <tr class="p0"><td>6</td><td><span class="tag tag-p0">P0</span></td><td>Modal 期间 AcpEvent 全丢</td><td>modal.rs:109/417 + state.rs:156 view_models()=&[]</td></tr>
+    <tr class="p1"><td>7</td><td><span class="tag tag-p1">P1</span></td><td>Streaming → Modal 不可达</td><td>OpenPanel 仅 Idle 触发（main_loop.rs:340）</td></tr>
+    <tr class="p1"><td>8</td><td><span class="tag tag-p1">P1</span></td><td>Status 事件全 drop</td><td>streaming.rs:79 + idle.rs:141</td></tr>
+    <tr class="p1"><td>9</td><td><span class="tag tag-p1">P1</span></td><td>State::Switching 简陋</td><td>丢 Key/Paste/AcpEvent，AcpDisconnected 不恢复</td></tr>
+    <tr class="p2"><td>10</td><td><span class="tag tag-p2">P2</span></td><td>11 个 Effect 无人 emit</td><td>CopyToClipboard/InterruptAgent/ShowNotification 等</td></tr>
+    <tr class="p2"><td>11</td><td><span class="tag tag-p2">P2</span></td><td>modal.rs TLS stubs 非测试引用</td><td>dispatch_key/dispatch_mouse_tls/dispatch_paste_tls</td></tr>
+    <tr class="p2"><td>12</td><td><span class="tag tag-p2">P2</span></td><td>transition_to_idle_with_effects 死代码</td><td>标 #[allow(dead_code)]</td></tr>
+    <tr class="p3"><td>13</td><td><span class="tag tag-p3">P3</span></td><td>peri-tui/CLAUDE.md 大量过时</td><td>message_pipeline/RenderThread/ephemeral_notes 已删</td></tr>
+    <tr class="p3"><td>14</td><td><span class="tag tag-p3">P3</span></td><td>根 CLAUDE.md 数字错误</td><td>Effect 数 32 实际 27；Alt+M 不存在</td></tr>
+  </tbody>
+</table>
+
+<h2>执行原则</h2>
+<ul class="findings">
+  <li>每个 cron 窗口（15 分钟）一个 Phase——避免半成品</li>
+  <li>每 Phase 完成立即 git commit + push——保证可恢复</li>
+  <li>测试驱动：每 Phase 后跑 <code>cargo test -p peri-tui --lib</code></li>
+  <li>遇到设计岔路启动 Design Review workflow——多视角 PK</li>
+</ul>
+
+<div class="meta" id="footer">
+  <strong>最后更新</strong>：2026-06-30 cron #1（Phase 0 进行中）<br>
+  <strong>下一步</strong>：启动 Design Review workflow 评估 Phase 1.1 双向同步冲突方案
+</div>
+
+</body>
+</html>
