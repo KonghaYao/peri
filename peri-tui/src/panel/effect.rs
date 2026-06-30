@@ -13,6 +13,9 @@ pub enum PanelEffect {
     /// Inject a system notification text into the message area.
     ShowNotification(String),
 
+    /// Open a file in the system editor.
+    OpenEditor { path: std::path::PathBuf },
+
     /// Send a command/query to the ACP layer.
     SendToAcp {
         /// Event name (e.g. "query_cron_tasks").

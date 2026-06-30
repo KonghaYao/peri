@@ -253,7 +253,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 }
                 // ── App-level effects (P3 Integration) ─────────────
                 Effect::ShowNotification(text) => {
-                    tracing::info!(notification = %text, "ShowNotification");
+                    app.push_system_note(text);
                     needs_render = true;
                 }
                 Effect::UpdateConfig { key, value } => {
@@ -483,8 +483,40 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     app.open_thread_with_feedback(thread_id);
                     needs_render = true;
                 }
-                Effect::MemoryPanelOpenEditor => {
-                    // v2: Memory panel editor is managed by state machine
+                Effect::MemoryPanelOpenEditor { ref path } => {
+                    let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+                        if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+                            "vim".to_string()
+                        } else {
+                            "notepad".to_string()
+                        }
+                    });
+                    let path_clone = path.clone();
+                    tokio::task::spawn_blocking(move || {
+                        use std::process::Command;
+                        let result = Command::new(&editor).arg(&path_clone).spawn();
+                        match result {
+                            Ok(mut child) => {
+                                let _ = child.wait();
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    editor = %editor,
+                                    path = %path_clone.display(),
+                                    error = %e,
+                                    "MemoryPanelOpenEditor: failed to spawn editor"
+                                );
+                                // Fallback: try nano
+                                if editor != "nano" {
+                                    if let Ok(mut child) =
+                                        Command::new("nano").arg(&path_clone).spawn()
+                                    {
+                                        let _ = child.wait();
+                                    }
+                                }
+                            }
+                        }
+                    });
                     needs_render = true;
                 }
                 // I/O effects handled by ApplyContext (terminal / ACP / clipboard).

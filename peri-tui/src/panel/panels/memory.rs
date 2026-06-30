@@ -265,13 +265,21 @@ impl PanelState for MemoryPanel {
                 self.nav.ensure_visible(10);
                 vec![]
             }
-            // Enter: open editor (TODO: spawn external editor)
+            // Enter: open editor
             Input {
                 key: Key::Enter, ..
             } => {
-                // TODO: spawn external editor for the file at self.entries[self.cursor()].path
-                // For now, just close the panel as a no-op placeholder.
-                vec![PanelEffect::Close]
+                if let Some(entry) = self.entries.get(self.nav.cursor) {
+                    if entry.exists {
+                        vec![PanelEffect::OpenEditor {
+                            path: entry.path.clone(),
+                        }]
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
             }
             // All other keys: consumed (no-op)
             _ => vec![],
@@ -451,7 +459,9 @@ mod tests {
     }
 
     #[test]
-    fn test_enter_returns_close_placeholder() {
+    fn test_enter_on_nonexistent_entry_returns_empty() {
+        // MemoryPanel::empty() creates entries with exists=false.
+        // Enter on a non-existent entry should return no effects.
         let mut panel = MemoryPanel::empty();
         let ctx = make_ctx();
         let effects = panel.handle_key(
@@ -463,10 +473,36 @@ mod tests {
             },
             &ctx,
         );
-        // TODO: Once editor spawning is implemented, this should produce
-        // a different effect. For now it closes as a placeholder.
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn test_enter_on_existing_entry_returns_open_editor() {
+        // Create a temp file so the entry exists.
+        let dir = tempfile::tempdir().unwrap();
+        let md_path = dir.path().join("CLAUDE.md");
+        std::fs::write(&md_path, "# test").unwrap();
+        let mut panel = MemoryPanel::new(dir.path().to_string_lossy().to_string(), None);
+        // The first entry (Project) should now exist.
+        assert!(panel.entries[0].exists);
+        // Navigate to first entry (already at 0).
+        let ctx = make_ctx();
+        let effects = panel.handle_key(
+            Input {
+                key: Key::Enter,
+                ctrl: false,
+                alt: false,
+                shift: false,
+            },
+            &ctx,
+        );
         assert_eq!(effects.len(), 1);
-        assert_eq!(effects[0], PanelEffect::Close);
+        match &effects[0] {
+            PanelEffect::OpenEditor { path } => {
+                assert_eq!(path, &md_path);
+            }
+            other => panic!("expected OpenEditor, got {other:?}"),
+        }
     }
 
     #[test]
