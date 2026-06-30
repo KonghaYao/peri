@@ -290,4 +290,80 @@
 - 删除 `MessageState.view_messages` / `round_start_vm_idx` 字段
 - 估算影响 88+ 测试，需独立窗口
 
+### cron #22 prep — step 7e 执行计划（细化拆分）
+
+**完整读者清单**（来自 cron #21 末尾 Explore agent 调研）：
+
+**生产 WRITES**（8 处）：
+- `app/agent_render.rs:25` — `apply_add_message` push（核心 helper）
+- `app/agent_render.rs:55-56` — `apply_rebuild_all` truncate+extend（已退役 dedup，但 truncate 仍被 handle_interrupted 调用）
+- `app/agent_ops/mod.rs:240` — ToolEnd iter-mut patch ToolBlock
+- `app/agent_ops/mod.rs:283` — ToolEnd orphan push
+- `app/thread_ops.rs:96,103,189-195` — thread switch clear/assign
+- `app/ask_user_ops.rs:146` — user answer push
+- `app/agent_submit.rs:47` — UserBubble push（step 7c-after 目标）
+
+**生产 READS**（10 处）：
+- `app/agent_ops/lifecycle.rs:54` — `handle_done` last_mut() 找 AssistantBubble 设 is_streaming=false（**已确认 dead**：vm_convert.rs:293 总设 false，v2 渲染不读此字段）
+- `app/agent_ops/lifecycle.rs:64` — `handle_done` 读 round_start_vm_idx 做 prefix_len
+- `app/agent_render.rs:41,46` — `apply_rebuild_all` clamp
+- `app/agent_ops/mod.rs:240` — `handle_tool_end` iter-mut 找匹配 ToolBlock
+- `app/agent_submit.rs:49` — 读 len() 设 round_start_vm_idx
+- `command/core/gc.rs:31` — gc_status 读 len() 展示
+- `ui/main_ui/message_area.rs:155` — v1 fallback render 转换到 v2（仅测试触发，生产 draw_now 总传 v2_view_models=Some）
+- `ui/main_ui/message_area.rs:246` — width-mismatch rebuild clone+convert
+- `ui/headless.rs:105` — headless render（编译进 non-test binary，实际测试调用）
+
+**step 7e 子拆分**（每个独立可提交）：
+
+1. **step 7e.1** — 退役 `handle_done` 的 is_streaming 突变（dead code，最安全）
+   - lifecycle.rs:50-61 整块删除
+   - `recompute_hash()` 调用一并删除
+   - 理由：vm_convert 总设 is_streaming=false，v2 渲染不读 v1 字段
+   - 测试影响：可能影响 headless_test 中验证 is_streaming 状态的测试
+
+2. **step 7e.2** — 退役 `handle_tool_end` 直接 mutation（mod.rs:240, 283）
+   - v2 路径：ACP view-commit 已扁平化 ToolCallGroup 为多个 ToolCard，tool end 状态由 view_mapper 处理
+   - 需验证：生产中是否还有 ToolEnd 走 v1 path（即 ACP 不 emit 对应 unstable-event）
+   - 风险：高（涉及工具状态一致性）
+
+3. **step 7e.3** — 退役 `ask_user_ops.rs:146` 推送
+   - 用户答案通过 v2 AcpEvent 流入 state.view（需确认 mapper 是否处理）
+   - 风险：中
+
+4. **step 7e.4** — 退役 `thread_ops.rs` 的 clear/assign（3 处）
+   - thread switch 时 v2 state.view 也需重置（需 State::clear() 或类似 API）
+   - 可能需新增 ViewStore method
+   - 风险：中
+
+5. **step 7e.5** — 退役 `headless.rs:105` v1 路径
+   - 改为从 SubAgentStatusMap + 空白 view 合成（已有部分合成在 headless 中）
+   - 风险：低（仅影响测试 binary）
+
+6. **step 7e.6** — 退役 `message_area.rs:155, 246` v1 fallback render
+   - 全部 caller 已传 v2_view_models=Some，fallback 路径死代码
+   - 同步删除 vm_convert 调用
+   - 风险：低（删除死代码）
+
+7. **step 7e.7** — 退役 `agent_submit.rs:47` UserBubble push + 重算 round_start_vm_idx
+   - 依赖：上述所有 reader 已迁移
+   - round_start_vm_idx 可改为基于 state.view 计算（或彻底废弃，因为 handle_done 不再用它）
+   - 风险：中
+
+8. **step 7e.8** — 迁移 ~20 个 headless_test 中 `apply_add_message` 直接 push 模式
+   - 改为通过 v2 ViewCommit 注入（或新增测试 helper）
+   - 风险：低（仅测试）
+
+9. **step 7e.9** — 删除 `MessageState.view_messages` + `round_start_vm_idx` 字段
+   - 删除 `apply_add_message` / `apply_rebuild_all` / `push_system_note` v1 分支
+   - 风险：低（清理）
+
+**关键不变量**：
+- vm_convert.rs 是 v1→v2 单向桥，v1 字段变化不影响 v2 渲染（除非 vm_convert 读取该字段）
+- v2 ViewStore 的 commit/clear 是 wholesale 替换语义，不依赖 v1 增量 push
+- ACP view_mapper 是 state.view 的唯一 canonical source（除 SM Enter 的 UserBubble placeholder）
+
+**估算**：9 个子步骤 × 1-2 窗口/步 = 9-18 个 cron 窗口。建议优先做 .1 / .6 / .8 / .9（低风险），中风险 (.3/.4/.5/.7) 视调研深度决定，高风险 (.2) 单独窗口 + workflow 调研。
+
 ---
+
