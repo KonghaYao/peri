@@ -102,14 +102,20 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
             (State::Idle(idle), Vec::new())
         }
 
-        // -- §4.3 Status (no message-area change -- drop in P2 stub) --------
+        // -- §4.3 Status (no message-area change) ----------------------------
+        //
+        // 这些事件由 status bar 消费（CPU/MEM/context usage / progress）。
+        // 当前 v1 handle_acp_event 总是 emit Render 兜底，但 Phase 2.6
+        // 退役 v1 路径后，SM 必须自己 emit Render 否则 status bar 不会更新。
+        //
+        // Cron #27: 显式 emit Effect::Render（重复 Render 由 main_loop 去重）。
         Event::AcpEvent(AcpEventData::TokenUsage(_))
         | Event::AcpEvent(AcpEventData::ToolCount(_))
         | Event::AcpEvent(AcpEventData::Progress(_))
         | Event::AcpEvent(AcpEventData::BudgetWarning(_))
         | Event::AcpEvent(AcpEventData::SystemNotification(_)) => {
-            // Status-bar only -- no Streaming-state mutation in P2.
-            (State::Streaming(state), Vec::new())
+            // Status-bar only -- no Streaming-state mutation.
+            (State::Streaming(state), vec![Effect::Render])
         }
 
         // -- §4.4 Input assist ----------------------------------------------
@@ -477,7 +483,11 @@ mod tests {
     }
 
     #[test]
-    fn test_status_events_are_silent() {
+    fn test_status_events_emit_render() {
+        // Cron #27: status-bar events (TokenUsage/Progress/BudgetWarning/...)
+        // 必须触发 Render，否则 status bar 不会更新（CPU/MEM/context usage 等）。
+        // 当前由 v1 handle_acp_event 兜底，但 Phase 2.6 退役 v1 路径后 SM 是
+        // 唯一来源——必须自己 emit Render。
         use peri_acp_types::event_data::TokenUsage;
         let state = make_state();
         let (next, effects) = handle(
@@ -488,7 +498,10 @@ mod tests {
             })),
         );
         assert!(matches!(next, State::Streaming(_)));
-        assert!(effects.is_empty());
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Status events (TokenUsage) must emit Render so status bar updates"
+        );
     }
 
     // ── New tests for streaming key/system events ──────────────────────────

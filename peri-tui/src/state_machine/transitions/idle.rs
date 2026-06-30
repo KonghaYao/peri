@@ -163,7 +163,13 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
             (State::Idle(state), Vec::new())
         }
 
-        // -- §4.3 Status: drop silently in Idle (no active turn) --------------
+        // -- §4.3 Status: no state mutation, but emit Render ----------------
+        //
+        // 这些事件由 status bar 消费（CPU/MEM/context usage 等）。当前 v1
+        // handle_acp_event 总是 emit Render 兜底，但 Phase 2.6 退役 v1 路径
+        // 后，SM 必须自己 emit Render 否则 status bar 不会更新。
+        //
+        // Cron #27: 显式 emit Effect::Render（重复 Render 由 main_loop 去重）。
         Event::AcpEvent(AcpEventData::TokenUsage(_))
         | Event::AcpEvent(AcpEventData::ToolCount(_))
         | Event::AcpEvent(AcpEventData::Progress(_))
@@ -171,7 +177,9 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
         | Event::AcpEvent(AcpEventData::SystemNotification(_))
         | Event::AcpEvent(AcpEventData::SubagentStarted(_))
         | Event::AcpEvent(AcpEventData::SubagentStopped(_))
-        | Event::AcpEvent(AcpEventData::Unknown { .. }) => (State::Idle(state), Vec::new()),
+        | Event::AcpEvent(AcpEventData::Unknown { .. }) => {
+            (State::Idle(state), vec![Effect::Render])
+        }
 
         // Interaction requests: construct the matching Handler and enter
         // Modal. The handler is wrapped in `ModalKind::Interaction` and
@@ -1163,6 +1171,27 @@ mod tests {
         let (next, effects) = handle(state, Event::AcpEvent(AcpEventData::TurnDone));
         assert!(matches!(next, State::Idle(_)));
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn test_status_events_in_idle_emit_render() {
+        // Cron #27: status-bar events (TokenUsage/Progress/BudgetWarning/...)
+        // 必须触发 Render，否则 status bar 不会更新。当前由 v1 handle_acp_event
+        // 兜底，但 Phase 2.6 退役 v1 路径后 SM 是唯一来源——必须自己 emit Render。
+        use peri_acp_types::event_data::TokenUsage;
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::TokenUsage(TokenUsage {
+                input: 10,
+                output: 5,
+            })),
+        );
+        assert!(matches!(next, State::Idle(_)));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Status events (TokenUsage) must emit Render so status bar updates"
+        );
     }
 
     // ── Phase 1.3: Agent-initiated interaction requests enter Modal ──
