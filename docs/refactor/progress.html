@@ -114,14 +114,13 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #22（功能性审计 workflow + Modal 数据丢失修复 + message_area rebuild 修复）<br>
-  <strong>本窗口成果</strong>：1 个 audit workflow + 2 个本地 commit（均不 push）：<br>
-  · 工作流 <code>tui-functional-audit-c22</code>（run_id <code>wn3r7nk8l</code>，6 agent：5 并行 Explore 审计 + 1 综合）。5 子系统功能性审计：message-flow / popup-interaction / state-machine-edge / keyboard-input / status-bar-misc。产出 7 个 P0/P1/P2 bug + top fix 推荐。<br>
-  · <code>a89780d0</code> <strong>fix：Modal TurnDone/TurnInterrupted 数据丢失修复</strong>。modal.rs:542-549 在 Modal 期间收到 TurnDone/TurnInterrupted 时清空 saved_current_turn 但不 flush 到 saved_view → popup 期间流式输出丢失。镜像 streaming.rs:98-99 修复，3 个回归测试。1059 测试全过。<br>
-  · <code>b29273d2</code> <strong>fix：message_area width-mismatch rebuild 用 effective_v2</strong>。原代码 clone view_messages + vm_convert 重建缓存（重复劳动 + v1/v2 不一致风险）。改为复用 effective_v2，为 Phase 2.6 view_messages 删除扫清障碍。<br>
-  · <strong>审计发现 4 个未修复 P1 bug</strong>（待后续窗口）：① handle_interrupted rollback 不 truncate v2 state.view（MED 风险，需 dedicated test fixture）② AskUser 答案不可见（UX 决策，需 user-in-the-loop）③ SM drops TokenUsage/BudgetWarning without Render（依赖 Phase 2.6）④ 双通知处理双写（Phase 2.6 处理）<br>
-  <strong>当前状态</strong>：1059 测试全过 · Modal 数据丢失已修复 · message_area rebuild 已脱离 view_messages<br>
-  <strong>下一步</strong>：① 继续 Phase 2.6 step 7e 子步骤（7e.5 headless.rs / 7e.6 message_area fallback render / 7e.8 headless_test patterns / 7e.9 删除字段）② 或转向 P1 bug #1（handle_interrupted rollback v2 state.view，需小心 streaming.rs 已修复部分不回归）
+  <strong>最后更新</strong>：2026-07-01 cron #23（P1 #1 修复：handle_interrupted rollback 截断 v2 state.view）<br>
+  <strong>本窗口成果</strong>：2 个本地 commit（均不 push）：<br>
+  · <code>ca122ed5</code> <strong>fix：handle_interrupted 分支 2 截断 v2 state.view</strong>。原代码只截断 v1 view_messages，v2 state.view 仍保留 stale UserBubble + 部分 AssistantBubble（用户感知为"按 Esc 回滚后消息还在"）。设计：不修改 streaming.rs 第 7c 步代码（cron #22 修复太脆弱有回归风险），改用 side-channel pattern：<code>GlobalUiState.pending_view_rewind_to</code> flag，handle_interrupted 设置 → main_loop 消费 → 对 Idle/Streaming.view 执行 truncate。4 个回归测试覆盖：分支 2 设置 flag / 分支 1 不设置 / AssistantBubble-only 也设置 / 无 last_submitted_text 不设置。1063 测试全过（1059 + 4 新增）。<br>
+  · <code>10e0d373</code> <strong>style：clippy nitpick cleanup</strong>。test 中 <code>iter().cloned().collect()</code> 改为 <code>to_vec()</code>。<br>
+  · <strong>3 个未修复 P1 bug 仍待处理</strong>：① AskUser 答案不可见（UX 决策，需 user-in-the-loop）② SM drops TokenUsage/BudgetWarning/Progress/SystemNotification without Render（MED — 需在 State 上存储数据，非仅 emit Render）③ 双通知处理双写（Phase 2.6 债务）<br>
+  <strong>当前状态</strong>：1063 测试全过 · 用户可见的回滚 bug 已修复 · v1/v2 状态一致性进一步收敛<br>
+  <strong>下一步</strong>：① 继续 Phase 2.6 step 7e 子步骤（7e.5 headless.rs / 7e.6 message_area fallback render / 7e.8 headless_test patterns / 7e.9 删除字段）② 或 P1 #3（SM drops status events，需设计 State 上的 status 字段）③ 或 P1 #2（AskUser UX 决策，建议等用户回来）
 </div>
 
 </body>
