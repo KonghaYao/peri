@@ -295,7 +295,6 @@ impl<'a> Widget for InputWidget<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Color;
     use ratatui::widgets::{Borders, Padding};
 
     fn make_input(text: &str) -> InputState {
