@@ -14,6 +14,12 @@ pub struct MessageState {
     pub pending_messages: Vec<String>,
     /// P5: Synchronous render cache — rebuilt in draw() when messages or width change.
     pub message_cache: Option<MessageRenderCache>,
+    /// Phase 2.4 — App-method paths (thread_ops, agent_ops, rewind, etc.)
+    /// call `push_system_note` directly without an Effect return path.
+    /// These notes are queued here for `main_loop` to drain into the v2
+    /// state machine (`Event::PushSystemNote`), so they reach `state.view`
+    /// (the production render source) instead of being silently dropped.
+    pub pending_v2_notes: Vec<String>,
 }
 
 /// 渲染换行信息：每个逻辑行在渲染后的视觉行范围。
@@ -50,14 +56,26 @@ impl MessageState {
             ephemeral_notes: Vec::new(),
             pending_messages: Vec::new(),
             message_cache: None,
+            pending_v2_notes: Vec::new(),
         }
     }
 
     /// 添加系统通知并记录锚点位置。
+    ///
+    /// 同时将通知文本加入 `pending_v2_notes` 队列——`main_loop` 在下一次
+    /// 迭代中会取出并通过 `state_machine::handle(Event::PushSystemNote)`
+    /// 路由到 `state.view`（生产渲染源）。Phase 2.6 删除 view_messages
+    /// 后，本方法可直接由 Effect::PushSystemNote 取代。
     pub fn push_system_note(&mut self, content: String) {
         let anchor = self.view_messages.len();
-        let vm = MessageViewModel::system(content);
+        let vm = MessageViewModel::system(content.clone());
         self.ephemeral_notes.push((anchor, vm.clone()));
         self.view_messages.push(vm);
+        self.pending_v2_notes.push(content);
+    }
+
+    /// 取出所有待路由到 v2 状态机的系统通知（清空队列）。
+    pub fn drain_pending_v2_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_v2_notes)
     }
 }

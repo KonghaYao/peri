@@ -158,9 +158,41 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
             }
         }
 
+        // Phase 2.4 — drain pending v2 notes pushed by App-method paths
+        // (thread_ops, agent_ops, rewind, polling, etc.) that don't return
+        // Vec<Effect>. These notes were pushed to view_messages (v1 cache)
+        // AND queued in pending_v2_notes; we route them through the state
+        // machine here so they reach state.view (production render source).
+        // We do NOT emit Effect::PushSystemNote here — that handler would
+        // re-push to view_messages (already done by the original call),
+        // causing duplicate notes. The state-machine route alone is enough
+        // to keep state.view in sync.
+        //
+        // (Drain happens after `needs_render` is declared below.)
+
         // ── 2. Execute effects ─────────────────────────────────────────
         let mut quit = false;
         let mut needs_render = false;
+
+        // Phase 2.4 — drain (see note above).
+        {
+            let notes = app
+                .session_mgr
+                .current_mut()
+                .messages
+                .drain_pending_v2_notes();
+            if !notes.is_empty() {
+                for note in notes {
+                    let (new_state, _) = crate::state_machine::handle(
+                        state,
+                        crate::state_machine::event::Event::PushSystemNote(note),
+                    );
+                    state = new_state;
+                }
+                needs_render = true;
+            }
+        }
+
         for effect in effects {
             match effect {
                 Effect::Render => needs_render = true,
