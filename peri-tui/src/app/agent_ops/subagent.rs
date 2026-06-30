@@ -109,25 +109,11 @@ impl App {
             is_background,
         );
 
-        // P5: Create SubAgentGroup VM directly instead of through pipeline
-        let vm = MessageViewModel::SubAgentGroup {
-            agent_id: agent_id.clone(),
-            instance_id: Some(instance_id.clone()),
-            task_preview: task_preview.clone(),
-            is_running: true,
-            is_background,
-            total_steps: 0,
-            recent_messages: Vec::new(),
-            collapsed: false,
-            bg_hash: None,
-            final_result: None,
-            is_error: false,
-            batch_agents: Vec::new(),
-            content_hash: 0,
-        };
-        self.apply_add_message(vm);
-
-        self.request_rebuild();
+        // Phase 2.6 step 6 — 删除 apply_add_message(SubAgentGroup) 推送。
+        // v2 渲染完全通过 SessionSubAgentProbe 从 SubAgentStatusMap 读取
+        // 运行时状态（is_running / total_steps / final_result / child_messages），
+        // 不再依赖 view_messages 中的 SubAgentGroup 占位符。ACP 层 view_mapper
+        // 在 ViewCommit 时生成 DTO 层的 SubAgentGroupData 占位符供渲染插槽使用。
         (true, false, false)
     }
 }

@@ -1,5 +1,4 @@
 use super::*;
-use crate::ui::message_view::MessageViewModel;
 
 /// 后台任务完成的事件参数
 pub(crate) struct BackgroundTaskResult {
@@ -151,112 +150,18 @@ impl App {
             );
         }
 
-        let short_id = &task_id[..8.min(task_id.len())];
-        let mut found_and_updated = false;
-        let session = &mut self.session_mgr.current_mut();
-
-        if let Some(ref ctid) = child_thread_id {
-            for vm in &mut session.messages.view_messages {
-                if let MessageViewModel::SubAgentGroup {
-                    instance_id,
-                    is_running,
-                    is_background,
-                    total_steps,
-                    bg_hash: _,
-                    final_result,
-                    is_error,
-                    ..
-                } = vm
-                {
-                    if *is_background
-                        && *is_running
-                        && instance_id.as_deref() == Some(ctid.as_str())
-                    {
-                        *is_running = false;
-                        *final_result = Some(output.clone());
-                        *is_error = !success;
-                        *total_steps = tool_calls_count;
-                        vm.recompute_hash();
-                        found_and_updated = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if !found_and_updated {
-            let mut best_idx: Option<usize> = None;
-            for (idx, vm) in session.messages.view_messages.iter().enumerate() {
-                if let MessageViewModel::SubAgentGroup {
-                    agent_id,
-                    is_running,
-                    is_background,
-                    final_result,
-                    ..
-                } = vm
-                {
-                    if *is_background && *is_running && agent_id == &agent_name {
-                        if final_result.is_none() {
-                            best_idx = Some(idx);
-                            break;
-                        }
-                        if best_idx.is_none() {
-                            best_idx = Some(idx);
-                        }
-                    }
-                }
-            }
-            if let Some(idx) = best_idx {
-                let vm = &mut session.messages.view_messages[idx];
-                if let MessageViewModel::SubAgentGroup {
-                    is_running,
-                    total_steps,
-                    final_result,
-                    is_error,
-                    ..
-                } = vm
-                {
-                    *is_running = false;
-                    *final_result = Some(output.clone());
-                    *is_error = !success;
-                    *total_steps = tool_calls_count;
-                    vm.recompute_hash();
-                    found_and_updated = true;
-                }
-            }
-        }
-
-        // P5: No pipeline.notify_bg_completed() — SubAgentGroup state updated directly above
-
-        if found_and_updated {
-            self.request_rebuild();
-        } else {
-            let display_name = format!("bg:{}", agent_name);
-            let first_line = output.lines().next().unwrap_or("");
-            let one_line = if first_line.chars().count() > 80 {
-                let truncated: String = first_line.chars().take(80).collect();
-                format!("{}...", truncated)
-            } else if first_line.is_empty() && !output.is_empty() {
-                String::from("(empty)")
-            } else {
-                first_line.to_string()
-            };
-            let header_info = if success {
-                format!(
-                    "{} completed ({} calls, {}ms): {}",
-                    short_id, tool_calls_count, duration_ms, one_line
-                )
-            } else {
-                format!("{} failed: {}", short_id, one_line)
-            };
-            let mut vm =
-                MessageViewModel::tool_block(display_name.clone(), header_info, None, !success);
-            if let MessageViewModel::ToolBlock { collapsed, .. } = &mut vm {
-                *collapsed = true;
-                vm.recompute_hash();
-            }
-            self.apply_add_message(vm);
-        }
+        // Phase 2.6 step 6 — 删除 view_messages.SubAgentGroup iter_mut 突变 +
+        // ToolBlock fallback。生产渲染完全通过 SubAgentStatusMap +
+        // SessionSubAgentProbe 读取 bg 完成状态，不依赖 view_messages。
+        // 上方 subagent_status.complete_background() 已是权威路径。
+        let _ = (
+            &task_id,
+            &agent_name,
+            success,
+            &output,
+            tool_calls_count,
+            duration_ms,
+        );
 
         if agent_name.starts_with("workflow:") {
             let workflow_name = agent_name.strip_prefix("workflow:").unwrap_or(&agent_name);

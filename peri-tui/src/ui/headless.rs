@@ -92,13 +92,31 @@ impl HeadlessHandle {
     /// Phase 2.6 step 1：同时构造 `SessionSubAgentProbe` 并通过 thread-local
     /// 注入，让测试覆盖与生产 `draw_now` 完全一致的 SubAgent 渲染路径
     /// （包括 child_messages 权威源注入）。
+    ///
+    /// Phase 2.6 step 6：headless 路径不经过 ACP ViewCommit，因此
+    /// SubAgentGroup 占位符不会由 view_mapper 自动产生。这里从
+    /// `subagent_status` 合成 v2 SubAgentGroupData 占位符并追加到 v2_vms，
+    /// 模拟生产中 ACP 层对 "Agent" 工具调用的处理，让
+    /// `render_subagent_group` 能找到插槽并通过 probe 注入 child_messages。
     pub async fn render(&mut self, app: &mut App) -> Result<()> {
         self.wait_for_render().await;
-        let v2_vms: Vec<peri_acp_types::view_model::ViewModel> =
+        let mut v2_vms: Vec<peri_acp_types::view_model::ViewModel> =
             crate::render::vm_convert::message_view_models_to_v2(
                 &app.session_mgr.current().messages.view_messages,
             );
+        // 合成 SubAgentGroup 占位符（headless 路径无 ACP ViewCommit）
         let session = app.session_mgr.current();
+        for (instance_id, status) in session.subagent_status.iter() {
+            v2_vms.push(peri_acp_types::view_model::ViewModel::SubAgentGroup(
+                peri_acp_types::view_model::SubAgentGroupData {
+                    agent_id: status.agent_id.clone(),
+                    agent_name: status.agent_id.clone(),
+                    view_models: Vec::new(),
+                    collapsed: !status.is_error && !status.is_running,
+                },
+            ));
+            let _ = instance_id;
+        }
         let probe = crate::app::SessionSubAgentProbe::new(session.subagent_status.clone());
         let status_probe: std::rc::Rc<dyn crate::render::view_render::SubAgentStatusProbe> =
             std::rc::Rc::new(probe);

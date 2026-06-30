@@ -55,7 +55,7 @@ impl App {
             AgentEvent::SubAgentEnd {
                 result,
                 is_error,
-                agent_id,
+                agent_id: _,
                 instance_id,
             } => {
                 self.session_mgr.current_mut().agent.subagent_depth = self
@@ -75,77 +75,16 @@ impl App {
                         .spinner_state
                         .set_verb(Some("思考中…"));
                 }
-                // Phase 2.3: 同步完成状态到 SubAgentStatusMap
+                // Phase 2.3: 同步完成状态到 SubAgentStatusMap（v2 渲染权威源）
                 if let Some(inst) = instance_id.as_deref() {
                     self.session_mgr
                         .current_mut()
                         .subagent_status
                         .complete_foreground(inst, result.clone(), is_error);
                 }
-                // P5: Update SubAgentGroup directly instead of through pipeline
-                let session = self.session_mgr.current_mut();
-                let mut found = false;
-                let instance_id_ref = instance_id.as_deref();
-                for vm in &mut session.messages.view_messages {
-                    if let MessageViewModel::SubAgentGroup {
-                        instance_id: vm_instance_id,
-                        is_running,
-                        final_result,
-                        is_error: vm_is_error,
-                        ..
-                    } = vm
-                    {
-                        if *is_running
-                            && vm_instance_id.as_deref() == instance_id_ref
-                            && instance_id_ref.is_some()
-                        {
-                            *is_running = false;
-                            *final_result = Some(result.clone());
-                            *vm_is_error = is_error;
-                            vm.recompute_hash();
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-                if !found {
-                    let agent_id_ref = agent_id.as_deref();
-                    for vm in &mut session.messages.view_messages {
-                        if let MessageViewModel::SubAgentGroup {
-                            agent_id: vm_agent_id,
-                            is_running,
-                            final_result,
-                            is_error: vm_is_error,
-                            instance_id: vm_instance_id,
-                            ..
-                        } = vm
-                        {
-                            if *is_running
-                                && vm_agent_id.as_str() == agent_id_ref.unwrap_or("")
-                                && vm_instance_id.is_none()
-                            {
-                                *is_running = false;
-                                *final_result = Some(result.clone());
-                                *vm_is_error = is_error;
-                                vm.recompute_hash();
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                let _ = session;
-                if !found {
-                    let display_name = format!("Agent({})", agent_id.as_deref().unwrap_or("?"));
-                    let mut vm =
-                        MessageViewModel::tool_block(display_name, result.clone(), None, is_error);
-                    if let MessageViewModel::ToolBlock { collapsed, .. } = &mut vm {
-                        *collapsed = false;
-                        vm.recompute_hash();
-                    }
-                    self.apply_add_message(vm);
-                }
-                self.request_rebuild();
+                // Phase 2.6 step 6 — 删除 view_messages.SubAgentGroup iter_mut 突变
+                // + ToolBlock fallback。生产渲染完全通过 SubAgentStatusMap +
+                // SessionSubAgentProbe 读取完成状态，不依赖 view_messages。
                 (true, false, false)
             }
             AgentEvent::ContextWarning {
