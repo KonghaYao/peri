@@ -1001,9 +1001,25 @@ fn is_sm_handled_shortcut(
     at_mention_active: bool,
     slash_hint_active: bool,
 ) -> bool {
-    // Modal: state machine handles EVERY key (dispatches to panel/handler).
+    // Modal: state machine handles EVERY key EXCEPT Ctrl+C.
+    //
+    // Cron #29 P2 fix (workflow weo7g6w2n): without this carve-out, Ctrl+C
+    // was silently swallowed in Modal state — modal.rs handle_key only
+    // dispatches Ctrl+T/B/O/P + Ctrl+Shift+T, falling through to a
+    // render-only arm for everything else. The keyboard fallback (which
+    // owns `app.interrupt()` via normal_keys.rs Ctrl+C handler) was
+    // blocked by this `return true`, so users could not cancel a running
+    // agent while any v2 panel/popup was open (Model/Login/Config/Mcp/
+    // Cron/etc., or HITL/AskUser/Rewind/OAuth handler). They had to
+    // close the popup first, then press Ctrl+C — a UX regression from
+    // v1 where popups::handle_popups always had a chance to route Ctrl+C.
+    //
+    // Fix: return false for Ctrl+C so keyboard fallback runs the interrupt.
     if matches!(state, State::Modal(_)) {
-        return true;
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let is_ctrl_c = matches!(key.code, KeyCode::Char('c'))
+            && key.modifiers.intersects(KeyModifiers::CONTROL);
+        return !is_ctrl_c;
     }
 
     // Cron #25 unified popup-guard: when a v1 popup is active (AskUser / HITL
@@ -1353,7 +1369,85 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert!(
             is_sm_handled_shortcut(&key, &modal_state, false, false, true, false, false),
-            "Modal state must override popup_active (SM owns all keys in Modal)"
+            "Modal state must override popup_active (SM owns all keys in Modal except Ctrl+C)"
+        );
+    }
+
+    // ── Cron #29 P2 fix: Ctrl+C in Modal must reach keyboard fallback ────
+    //
+    // 背景：Modal 状态下 is_sm_handled_shortcut 原本对 ALL keys 返回 true。
+    // modal.rs handle_key 只 dispatch Ctrl+T/B/O/P + Ctrl+Shift+T，其他按键
+    // 落入 "_ => render-only" arm 被 drop。后果：用户在 v2 面板/弹窗打开时
+    // （Model/Login/Config/Mcp/Cron 等，或 HITL/AskUser/Rewind/OAuth handler）
+    // 按下 Ctrl+C 无法取消正在运行的 agent——必须先 Esc 关闭 popup 再按
+    // Ctrl+C。这是相对 v1 的 UX 回归（v1 popups::handle_popups 始终能路由
+    // Ctrl+C）。
+    //
+    // 修复：is_sm_handled_shortcut 在 Modal 状态对 Ctrl+C 返回 false，让
+    // 键盘 fallback 跑 normal_keys.rs 的 app.interrupt()。
+
+    #[test]
+    fn test_modal_ctrl_c_returns_false_so_fallback_can_interrupt() {
+        // Ctrl+C + Modal → false（让 keyboard fallback 跑 app.interrupt()）
+        use crate::state_machine::handler::NoopHandler;
+        use crate::state_machine::state::{ModalKind, ModalState};
+        let modal_state = State::Modal(ModalState {
+            saved_view: Vec::new(),
+            saved_current_turn: None,
+            saved_input: InputState::default(),
+            saved_scroll_offset: 0,
+            saved_history_index: None,
+            saved_double_esc_timer: None,
+            kind: ModalKind::Interaction(Box::new(NoopHandler)),
+        });
+        let ctrl_c = ctrl('c');
+        assert!(
+            !is_sm_handled_shortcut(&ctrl_c, &modal_state, false, false, false, false, false),
+            "Ctrl+C in Modal must return false so keyboard fallback runs app.interrupt()"
+        );
+    }
+
+    #[test]
+    fn test_modal_ctrl_t_still_returns_true_after_cron29() {
+        // Ctrl+T + Modal → true（SM 仍独占 cycle model dispatch）
+        // 验证 Ctrl+C carve-out 没有意外影响其他 Ctrl+Char 快捷键。
+        use crate::state_machine::handler::NoopHandler;
+        use crate::state_machine::state::{ModalKind, ModalState};
+        let modal_state = State::Modal(ModalState {
+            saved_view: Vec::new(),
+            saved_current_turn: None,
+            saved_input: InputState::default(),
+            saved_scroll_offset: 0,
+            saved_history_index: None,
+            saved_double_esc_timer: None,
+            kind: ModalKind::Interaction(Box::new(NoopHandler)),
+        });
+        let ctrl_t = ctrl('t');
+        assert!(
+            is_sm_handled_shortcut(&ctrl_t, &modal_state, false, false, false, false, false),
+            "Ctrl+T in Modal must still return true (SM handles cycle model)"
+        );
+    }
+
+    #[test]
+    fn test_modal_plain_char_still_returns_true_after_cron29() {
+        // 普通 char + Modal → true（panel/interaction handler 通过 SM 接收）
+        // 确保 Ctrl+C carve-out 只针对 Ctrl+C，不影响 panel 文本输入。
+        use crate::state_machine::handler::NoopHandler;
+        use crate::state_machine::state::{ModalKind, ModalState};
+        let modal_state = State::Modal(ModalState {
+            saved_view: Vec::new(),
+            saved_current_turn: None,
+            saved_input: InputState::default(),
+            saved_scroll_offset: 0,
+            saved_history_index: None,
+            saved_double_esc_timer: None,
+            kind: ModalKind::Interaction(Box::new(NoopHandler)),
+        });
+        let plain_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(
+            is_sm_handled_shortcut(&plain_x, &modal_state, false, false, false, false, false),
+            "Plain char in Modal must still return true (panel dispatch via SM)"
         );
     }
 
