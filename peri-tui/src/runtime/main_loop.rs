@@ -81,6 +81,14 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // before the SM clears the input buffer on Enter.
         let is_slash_command =
             matches!(&state, State::Idle(idle) if idle.input.text().starts_with('/'));
+        // Cron #25 unified popup-guard: when a v1 popup is active
+        // (AskUser / HITL / OAuth / Rewind), the keyboard fallback owns
+        // all key dispatch. Letting the SM also run would double-execute
+        // (e.g., Ctrl+T cycles model AND popup ignores it; Esc advances
+        // DoubleEscTracker AND popup closes; BackTab cycles permission AND
+        // popup expected prev-question). SM still processes Tick/AcpEvent/
+        // Paste/Mouse/Resize — only Key dispatch is suppressed.
+        let popup_active = app.is_interaction_popup_active();
 
         let sm_event: SmEvent = event.clone().into();
         let new_state: State;
@@ -92,6 +100,19 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 let (ns, fx) = modal::handle_with_context(modal_state, sm_event, &panel_ctx);
                 new_state = ns;
                 sm_effects = fx;
+            }
+            _ if popup_active && matches!(event, TuiEvent::Key(_)) => {
+                // Cron #25: SM no-op for Key events while popup is active.
+                // The keyboard fallback will handle the key (popups::handle_popups
+                // routes to the active popup). Returning the original state
+                // unchanged preserves InputState / view / double_esc_timer.
+                new_state = match state {
+                    State::Idle(s) => State::Idle(s),
+                    State::Streaming(s) => State::Streaming(s),
+                    State::Switching(s) => State::Switching(s),
+                    State::Modal(s) => State::Modal(s),
+                };
+                sm_effects = Vec::new();
             }
             _ => {
                 let (ns, fx) = state_machine_handle(state, sm_event);
@@ -115,7 +136,13 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         let mut keyboard_did_run = false;
         let fallback_effects = match &event {
             TuiEvent::Key(key)
-                if !is_sm_handled_shortcut(key, &state, was_idle, is_slash_command) =>
+                if !is_sm_handled_shortcut(
+                    key,
+                    &state,
+                    was_idle,
+                    is_slash_command,
+                    popup_active,
+                ) =>
             {
                 keyboard_did_run = true;
                 match keyboard::handle_key_event(app, *key) {
@@ -165,13 +192,13 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
 
         // Phase 2.4 — drain pending v2 notes pushed by App-method paths
         // (thread_ops, agent_ops, rewind, polling, etc.) that don't return
-        // Vec<Effect>. These notes were pushed to view_messages (v1 cache)
-        // AND queued in pending_v2_notes; we route them through the state
-        // machine here so they reach state.view (production render source).
-        // We do NOT emit Effect::PushSystemNote here — that handler would
-        // re-push to view_messages (already done by the original call),
-        // causing duplicate notes. The state-machine route alone is enough
-        // to keep state.view in sync.
+        // Vec<Effect>. These paths call `app.push_system_note(...)` which
+        // only enqueues into `pending_v2_notes` (Phase 2.6 step 5 retired
+        // the legacy view_messages push). We drain here and route through
+        // the state machine so they reach `state.view` (production render
+        // source). The `Effect::ShowNotification` / `Effect::PushSystemNote`
+        // handlers do NOT use this queue — they call the SM directly to
+        // avoid a duplicate note on the next-tick drain.
         //
         // (Drain happens after `needs_render` is declared below.)
 
@@ -363,10 +390,15 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 // keyboard handles Ctrl+C / Esc-during-loading directly.)
                 // ── App-level effects (P3 Integration) ─────────────
                 Effect::ShowNotification(text) => {
-                    // v1 path: legacy view_messages (will be removed in Phase 2.6).
-                    app.push_system_note(text.clone());
-                    // v2 path: route through state machine so state.view is
-                    // the single source of truth (Phase 2.4).
+                    // v2 path: route directly through the state machine so the
+                    // note lands in `state.view` (production render source) on
+                    // this frame. We deliberately do NOT call
+                    // `app.push_system_note(text)` here — that would enqueue
+                    // the note into `pending_v2_notes`, which the next-tick
+                    // drain block would feed back into the SM a second time
+                    // (duplicate SystemNote). The queue-and-drain pattern is
+                    // only for App-method paths (agent_ops, thread_ops, etc.)
+                    // that have no Effect return path.
                     let (new_state, _) = crate::state_machine::handle(
                         state,
                         crate::state_machine::event::Event::PushSystemNote(text),
@@ -622,10 +654,15 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 // (OpenRewindPrompt removed — legacy keyboard handles Esc.)
                 // ── System / Thread / Memory ───────────────────────
                 Effect::PushSystemNote(msg) => {
-                    // v1 path: legacy view_messages (will be removed in Phase 2.6).
-                    app.push_system_note(msg.clone());
-                    // v2 path: route through state machine so state.view is
-                    // the single source of truth (Phase 2.4).
+                    // v2 path: route directly through the state machine so the
+                    // note lands in `state.view` (production render source) on
+                    // this frame. We deliberately do NOT call
+                    // `app.push_system_note(msg)` here — that would enqueue
+                    // the note into `pending_v2_notes`, which the next-tick
+                    // drain block would feed back into the SM a second time
+                    // (duplicate SystemNote). The queue-and-drain pattern is
+                    // only for App-method paths (agent_ops, thread_ops, etc.)
+                    // that have no Effect return path.
                     let (new_state, _) = crate::state_machine::handle(
                         state,
                         crate::state_machine::event::Event::PushSystemNote(msg),
@@ -935,10 +972,22 @@ fn is_sm_handled_shortcut(
     state: &State,
     was_idle: bool,
     is_slash_command: bool,
+    popup_active: bool,
 ) -> bool {
     // Modal: state machine handles EVERY key (dispatches to panel/handler).
     if matches!(state, State::Modal(_)) {
         return true;
+    }
+
+    // Cron #25 unified popup-guard: when a v1 popup is active (AskUser / HITL
+    // / OAuth / Rewind), the keyboard fallback owns all key dispatch. This
+    // prevents the SM from double-executing: BackTab cycles permission AND
+    // popup expects prev-question; Ctrl+T cycles model AND popup ignores;
+    // Esc advances DoubleEscTracker AND popup expects to close. Returning
+    // false here lets the keyboard fallback (popups::handle_popups) route
+    // the key to the active popup exclusively.
+    if popup_active {
+        return false;
     }
 
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
@@ -1014,5 +1063,169 @@ fn build_panel_read_context<'a>(
             .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24)),
         lc: &app.services.lc,
         acp_query_cache: &EMPTY_CACHE,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state_machine::input::InputState;
+    use crate::state_machine::state::{IdleState, State};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn idle_state() -> State {
+        State::Idle(IdleState {
+            input: InputState::default(),
+            scroll_offset: 0,
+            view: vec![],
+            double_esc_timer: None,
+            history_index: None,
+        })
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    // ── Cron #25 unified popup-guard regression tests ────────────────────
+    //
+    // 背景：当 v1 popup 激活（AskUser / HITL / OAuth / Rewind）时，键盘
+    // fallback 应独占按键分发。此前 is_sm_handled_shortcut 对 BackTab /
+    // Ctrl+T/B/O/P 始终返回 true，对 Enter 也返回 true（非 slash），导致
+    // SM 与 popup 双重执行：BackTab 既切权限模式又切不到上一问题，
+    // Ctrl+T 切走模型，Enter 直接提交而非确认 popup。
+    //
+    // 修复：popup_active 时 is_sm_handled_shortcut 返回 false，让键盘
+    // fallback 独占。
+
+    #[test]
+    fn test_popup_active_backtab_returns_false() {
+        // BackTab + popup active → false（让 popup 收到 prev-tab）
+        let state = idle_state();
+        let key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
+        assert!(
+            !is_sm_handled_shortcut(&key, &state, true, false, true),
+            "BackTab with popup active must return false so popup gets prev-tab"
+        );
+        // 同键无 popup → 仍 true（SM 切权限模式）
+        assert!(
+            is_sm_handled_shortcut(&key, &state, true, false, false),
+            "BackTab without popup must return true (SM cycles permission)"
+        );
+    }
+
+    #[test]
+    fn test_popup_active_ctrl_shortcuts_return_false() {
+        // Ctrl+T/B/O/P + popup active → false（让 popup 决定）
+        let state = idle_state();
+        for c in ['t', 'b', 'o', 'p'] {
+            let key = ctrl(c);
+            assert!(
+                !is_sm_handled_shortcut(&key, &state, true, false, true),
+                "Ctrl+{c} with popup active must return false"
+            );
+            assert!(
+                is_sm_handled_shortcut(&key, &state, true, false, false),
+                "Ctrl+{c} without popup must return true"
+            );
+        }
+    }
+
+    #[test]
+    fn test_popup_active_ctrl_shift_t_returns_false() {
+        // Ctrl+Shift+T + popup active → false
+        let state = idle_state();
+        let key = KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert!(
+            !is_sm_handled_shortcut(&key, &state, true, false, true),
+            "Ctrl+Shift+T with popup active must return false"
+        );
+    }
+
+    #[test]
+    fn test_popup_active_enter_returns_false() {
+        // Enter + popup active → false（让 popup 收到 confirm）
+        // 关键场景：Rewind popup 打开时按 Enter 应确认 rewind，
+        // 而非触发 SM 的 submit_message。
+        let state = idle_state();
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            !is_sm_handled_shortcut(&key, &state, true, false, true),
+            "Enter with popup active must return false so popup confirms"
+        );
+        // 非 popup 时仍 true（提交消息）
+        assert!(
+            is_sm_handled_shortcut(&key, &state, true, false, false),
+            "Enter without popup must return true (submit)"
+        );
+    }
+
+    #[test]
+    fn test_popup_active_enter_with_slash_command_still_false() {
+        // Slash 命令 + popup active → false（popup 决定，slash 不应触发）
+        let state = idle_state();
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            !is_sm_handled_shortcut(&key, &state, true, true, true),
+            "Enter (slash) with popup active must return false"
+        );
+    }
+
+    #[test]
+    fn test_popup_active_plain_char_returns_false() {
+        // 普通 Char（无修饰键）+ popup active → false（让 popup 收到字符输入）
+        let state = idle_state();
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(
+            !is_sm_handled_shortcut(&key, &state, true, false, true),
+            "Plain char with popup active must return false"
+        );
+        // 普通 Char 无 popup → 也是 false（键盘 fallback 处理 textarea 输入）
+        assert!(
+            !is_sm_handled_shortcut(&key, &state, true, false, false),
+            "Plain char without popup must return false (keyboard owns)"
+        );
+    }
+
+    #[test]
+    fn test_popup_active_esc_returns_false() {
+        // Esc + popup active → false（让 popup 关闭，而非推进 DoubleEscTracker）
+        // 这是 cron #25 审计 P0 bug 的核心：双击 Esc 不应退出 app。
+        let state = idle_state();
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(
+            !is_sm_handled_shortcut(&key, &state, true, false, true),
+            "Esc with popup active must return false so popup closes (not quit)"
+        );
+    }
+
+    #[test]
+    fn test_modal_state_overrides_popup_active() {
+        // 当 SM 已在 Modal 状态（v2 Panel/Interaction）时，SM 独占所有按键，
+        // popup_active 检查不应绕过 Modal。这条路径覆盖 v2 Modal 进入后
+        // popup_active 仍为 true 的边角场景（罕见但需防御）。
+        use crate::state_machine::handler::NoopHandler;
+        use crate::state_machine::state::{ModalKind, ModalState};
+        let modal_state = State::Modal(ModalState {
+            saved_view: Vec::new(),
+            saved_current_turn: None,
+            saved_input: InputState::default(),
+            saved_scroll_offset: 0,
+            saved_history_index: None,
+            saved_double_esc_timer: None,
+            kind: ModalKind::Interaction(Box::new(NoopHandler)),
+        });
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            is_sm_handled_shortcut(&key, &modal_state, false, false, true),
+            "Modal state must override popup_active (SM owns all keys in Modal)"
+        );
     }
 }
