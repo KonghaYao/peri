@@ -498,8 +498,8 @@ impl PanelState for McpPanel {
                     let relative_y = mouse.row.saturating_sub(area.y);
                     // border_top=1, header_lines=2 (count + blank), section_header=1
                     let header = 3u16;
-                    if relative_y >= area.y + header && relative_y < area.y + area.height {
-                        let clicked = (relative_y - area.y - header) as usize;
+                    if relative_y >= header && relative_y < area.height {
+                        let clicked = (relative_y - header) as usize;
                         if clicked < self.servers.len() {
                             self.cursor = clicked;
                         }
@@ -509,8 +509,8 @@ impl PanelState for McpPanel {
                     // Detail: actions start after metadata lines
                     let inner_y = mouse.row.saturating_sub(area.y);
                     let meta_lines: u16 = 7; // Status + Auth + URL + Config + Capabilities + Tools + blank
-                    if inner_y > area.y + meta_lines {
-                        let clicked = (inner_y - area.y - meta_lines) as usize;
+                    if inner_y > meta_lines {
+                        let clicked = (inner_y - meta_lines) as usize;
                         if clicked < actions.len() {
                             self.detail_cursor = clicked;
                         }
