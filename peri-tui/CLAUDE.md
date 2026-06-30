@@ -33,6 +33,8 @@ pub trait Handler: Send + std::fmt::Debug {
 
 | 文件 | 职责 |
 |------|------|
+| `src/render/vm_convert.rs` | v1 MessageViewModel → v2 ViewModel 转换器（Phase 2.6 桥接） |
+| `src/app/subagent_status.rs` | SubAgentStatusMap + SessionSubAgentProbe（运行时状态 + 子内容注入） |
 | `src/runtime/main_loop.rs` | 主事件循环（双路径分发 + Effect 执行） |
 | `src/runtime/event_channel.rs` | 统一 unbounded channel（5 类输入源合并） |
 | `src/runtime/acp_notifier.rs` | ACP notification → TuiEvent 桥接（后台 task） |
@@ -69,13 +71,31 @@ TUI 输入 → AcpTuiClient.new_session() / .prompt()
 
 **[TRAP]** `keyboard_collector.rs` 禁止用 `tokio::select!` 同时竞态 `spawn_blocking`（crossterm poll）和 tick interval——会导致事件丢失。必须用持久化 spawn_blocking → mpsc channel → select 从 recv() 读取（见根 CLAUDE.md `keyboard_collector.rs` 重写）。
 
-## 消息渲染（双源 — Phase 2 待单一化）
+## 消息渲染（v2 已是生产路径 — Phase 2.6 桥接完成）
 
-**当前双源**：
-- v1：`MessageState.view_messages`（Vec<MessageViewModel>）由 `handle_agent_event` 维护，是当前生产渲染源
-- v2：`State.view`（Vec<ViewModel>）+ `current_turn`，v2 状态机维护，目前仅 panel 渲染使用
+**生产渲染路径**：v2 单源
+- `runtime::apply_context::draw_now` 从 `state.view_models()` + 流式 `current_turn` 派生 `v2_vms`
+- `v2_vms` 通过 `ui::main_ui::render(f, app, panel_height, Some(&v2_vms))` 传入
+- `message_area::render_messages` 走 v2 分支（`build_sync_render_cache_v2`）
 
-`App.global_ui.v2_view_models` 是临时桥接字段，在 `draw_now` 中从 `state.view_models()` + 流式 `current_turn` 派生，供消息区渲染。
+**SubAgent 子内容桥接**（Phase 2.6 关键）：
+- ACP 层 `view_mapper` 生成 `SubAgentGroupData` 时 `view_models` 永久为空 placeholder
+- `app/subagent_status.rs::SessionSubAgentProbe` 复合 probe 在 `draw_now` 时构造：
+  1. 包装 `SubAgentStatusMap`（运行时状态：is_running / total_steps / final_result / ...）
+  2. 从 `view_messages` 通过 `render/vm_convert::message_view_models_to_v2` 解析所有 `SubAgentGroup.recent_messages`（按 agent_id 缓存）
+- `render/view_render.rs::render_subagent_group` 子内容优先级：`DTO.view_models > probe.recent_messages > 空`
+
+**v1 view_messages 的当前作用**：
+- SessionSubAgentProbe 提取 SubAgentGroup 头部 + recent_messages（生产中 recent_messages 永远为空 Vec，因 v1 不累积子 Agent 内部消息 — 设计如此，"子 agent 内部消息不持久化"）
+- 兼容性测试路径（`main_ui::render(f, app, None, None)`，~36 个测试，主要集中在 `headless_test.rs`）
+- ephemeral_notes 锚点管理（`apply_rebuild_all` 在 TurnCommitted 时重建）
+
+**vm_convert 模块**（`render/vm_convert.rs`）：
+- 纯函数 `message_view_model_to_v2(vm) -> Option<ViewModel>` + 批量 `message_view_models_to_v2(vms) -> Vec<ViewModel>`
+- 6 变体映射：UserBubble / AssistantBubble（Text + Reasoning 提取）/ ToolBlock / SystemNote / CacheWarning / ToolCallGroup 扁平化 / SubAgentGroup 不嵌套（返回 None）
+- 用于：① SessionSubAgentProbe 子内容注入 ② HeadlessHandle::render 测试路径统一走 v2
+
+**[INFO]** `MessageState.view_messages` 仍由 `handle_agent_event` 维护（`apply_add_message` / `apply_rebuild_all`），但生产渲染不再读它。Phase 2.6 完整切换需要：① 扩展 `SubAgentStatus` 加 `child_messages` 字段（事件流累积） ② 让 SessionSubAgentProbe 完全脱离 view_messages ③ 退役 `apply_rebuild_all` / `ephemeral_notes`。当前状态：基础设施就位，仅差累积逻辑迁移。
 
 **[TRAP]** BaseMessage vs MessageViewModel 维度混淆：`completed_len_at_round_start` 是 BaseMessage 长度，`prefix_len` 是 VM 索引，两者非 1:1。`prefix_len` 必须用 `round_start_vm_idx`，`drain` 必须钳位。
 
