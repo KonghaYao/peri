@@ -17,9 +17,22 @@ use super::cursor::CursorPos;
 /// Copies text content and cursor position. Selection, prediction, at-mention,
 /// slash-completion, history, and attachments are **not** read from TextArea —
 /// they are managed independently by the state machine.
+///
+/// **Important**: `tui_textarea::cursor()` returns (row, col) where col is a
+/// **character index** (0-based). `CursorPos.col_byte` is a **byte offset**.
+/// The conversion: sum `len_utf8()` of chars up to col.
 pub fn from_textarea(ta: &tui_textarea::TextArea) -> super::InputState {
     let lines: Vec<String> = ta.lines().to_vec();
-    let (row, col_byte) = ta.cursor();
+    let (row, col_char) = ta.cursor();
+    let col_byte = lines
+        .get(row)
+        .map(|line| {
+            line.chars()
+                .take(col_char)
+                .map(|c| c.len_utf8())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
     super::InputState {
         lines,
         cursor: CursorPos::new(row, col_byte),
@@ -32,6 +45,10 @@ pub fn from_textarea(ta: &tui_textarea::TextArea) -> super::InputState {
 /// Replaces text content and cursor position. Does **not** touch selection,
 /// prediction, at-mention, slash-completion, history, or attachments — those
 /// are consumed by the rendering layer independently.
+///
+/// **Important**: `CursorPos.col_byte` is a **byte offset**, but
+/// `tui_textarea::CursorMove::Jump` expects a **character index**.
+/// The conversion: `chars().count()` on the byte prefix.
 pub fn to_textarea(state: &super::InputState, ta: &mut tui_textarea::TextArea) {
     // Avoid clearing if content hasn't changed (preserves scroll position).
     let current_lines = ta.lines();
@@ -58,11 +75,20 @@ pub fn to_textarea(state: &super::InputState, ta: &mut tui_textarea::TextArea) {
         }
     }
     // Always sync cursor position (cheap, idempotent).
+    // Convert byte offset → character index for tui_textarea.
+    let col_char = state
+        .lines
+        .get(state.cursor.row)
+        .map(|line| {
+            let safe_byte = state.cursor.col_byte.min(line.len());
+            line[..safe_byte].chars().count()
+        })
+        .unwrap_or(0);
     let (current_row, current_col) = ta.cursor();
-    if current_row != state.cursor.row || current_col != state.cursor.col_byte {
+    if current_row != state.cursor.row || current_col != col_char {
         ta.move_cursor(tui_textarea::CursorMove::Jump(
             state.cursor.row as u16,
-            state.cursor.col_byte as u16,
+            col_char as u16,
         ));
     }
 }
@@ -166,11 +192,31 @@ mod tests {
     #[test]
     fn test_roundtrip_cjk() {
         let mut ta = make_textarea("你好世界\n中文测试");
-        ta.move_cursor(tui_textarea::CursorMove::Jump(0, 6)); // mid-CJK
+        // Jump(0, 2) = char index 2 = third char '世'
+        ta.move_cursor(tui_textarea::CursorMove::Jump(0, 2));
         let state = from_textarea(&ta);
+        // col_byte: '你'(3) + '好'(3) = 6
+        assert_eq!(state.cursor.row, 0);
+        assert_eq!(state.cursor.col_byte, 6);
 
         let mut ta2 = make_textarea("");
         to_textarea(&state, &mut ta2);
         assert_eq!(ta2.lines(), ["你好世界", "中文测试"]);
+        assert_eq!(ta2.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn test_roundtrip_cjk_cursor_preserved() {
+        let mut ta = make_textarea("abc你好");
+        // Jump(0, 4) = char index 4 = first char of '你好' = '好'
+        ta.move_cursor(tui_textarea::CursorMove::Jump(0, 4));
+        let state = from_textarea(&ta);
+        // col_byte: 'a'(1)+'b'(1)+'c'(1)+'好'(3) = 6
+        assert_eq!(state.cursor.col_byte, 6);
+
+        let mut ta2 = make_textarea("");
+        to_textarea(&state, &mut ta2);
+        assert_eq!(ta2.lines(), ["abc你好"]);
+        assert_eq!(ta2.cursor(), (0, 4));
     }
 }

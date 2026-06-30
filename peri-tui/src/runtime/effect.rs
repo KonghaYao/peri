@@ -111,6 +111,12 @@ pub enum Effect {
     /// Open the memory panel with system editor.
     MemoryPanelOpenEditor,
 
+    // ── Streaming control ──────────────────────────────────────────────────
+    /// Resume streaming after a ViewCommit resets current_turn.
+    /// Lifts the streaming_suppressed flag so that TextChunks from the
+    /// next iteration are rendered.
+    ResumeStreaming,
+
     // ── App lifecycle ────────────────────────────────────────────────────
     /// Exit the app.
     Quit,

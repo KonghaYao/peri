@@ -109,31 +109,7 @@ impl App {
 
         match update_type {
             "agent_message_chunk" => {
-                let chunk = update
-                    .get("content")
-                    .and_then(|c| c.get("text"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if !chunk.is_empty() {
-                    self.handle_agent_event(super::super::AgentEvent::AssistantChunk {
-                        chunk: chunk.to_string(),
-                        source_agent_id,
-                    })
-                } else {
-                    (false, false, false)
-                }
-            }
-            "agent_thought_chunk" => {
-                let text = update
-                    .get("content")
-                    .and_then(|c| c.get("text"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if !text.is_empty() {
-                    self.handle_agent_event(super::super::AgentEvent::AiReasoning(text.to_string()))
-                } else {
-                    (false, false, false)
-                }
+                self.handle_agent_event(super::super::AgentEvent::AssistantChunk)
             }
             "tool_call" => {
                 let tool_call_id = update

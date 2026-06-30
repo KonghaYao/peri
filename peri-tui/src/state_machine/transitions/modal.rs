@@ -22,17 +22,27 @@ use crate::runtime::effect::Effect;
 /// Modal-state transition entry point.
 pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
     match event {
-        // -- Esc: dismiss popup -> back to Idle ------------------------------
+        // -- Esc: dismiss popup via ClosePanel effect ------------------------
+        // Emits ClosePanel so main_loop restores saved_idle (preserving
+        // message history, scroll, input). Direct transition_to_idle() would
+        // create a fresh empty state, losing all context.
         Event::Key(KeyEvent {
             code: KeyCode::Esc, ..
-        }) => transition_to_idle(),
+        }) => (
+            State::Modal(state),
+            vec![Effect::ClosePanel, Effect::Render],
+        ),
 
         // -- Other key events: delegate to the panel/handler -----------------
         Event::Key(key) => {
             let (panel_effects, should_close) = dispatch_key(&mut state, key);
             let effects = map_panel_effects(panel_effects);
             if should_close {
-                transition_to_idle_with_effects(effects)
+                // ClosePanel effect so main_loop restores saved_idle.
+                let mut all_effects = effects;
+                all_effects.push(Effect::ClosePanel);
+                all_effects.push(Effect::Render);
+                (State::Modal(state), all_effects)
             } else {
                 (State::Modal(state), effects)
             }
@@ -44,7 +54,8 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
             let mut effects = map_panel_effects(panel_effects);
             effects.push(Effect::Render);
             if should_close {
-                transition_to_idle_with_effects(effects)
+                effects.push(Effect::ClosePanel);
+                (State::Modal(state), effects)
             } else {
                 (State::Modal(state), effects)
             }
@@ -56,7 +67,8 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
             let mut effects = map_panel_effects(panel_effects);
             effects.push(Effect::Render);
             if should_close {
-                transition_to_idle_with_effects(effects)
+                effects.push(Effect::ClosePanel);
+                (State::Modal(state), effects)
             } else {
                 (State::Modal(state), effects)
             }
@@ -79,14 +91,17 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
         ),
 
         // -- Everything else: keep Modal, no effect --------------------------
-        Event::AcpEvent(_)
-        | Event::AcpDisconnected
-        | Event::SessionLoaded { .. }
-        | Event::Shutdown => (State::Modal(state), Vec::new()),
+        Event::AcpEvent(_) | Event::AcpDisconnected | Event::SessionLoaded { .. } => {
+            (State::Modal(state), Vec::new())
+        }
+
+        // -- Shutdown: propagate to main_loop so app can quit ----------------
+        Event::Shutdown => (State::Modal(state), vec![Effect::Quit]),
     }
 }
 
 /// Build a fresh Idle state with a Render effect (used when dismissing modal).
+#[allow(dead_code)]
 fn transition_to_idle() -> (State, Vec<Effect>) {
     let idle = IdleState {
         input: InputState::default(),
@@ -99,6 +114,7 @@ fn transition_to_idle() -> (State, Vec<Effect>) {
 }
 
 /// Build a fresh Idle state, preserving the given effects (e.g., ShowNotification).
+#[allow(dead_code)]
 fn transition_to_idle_with_effects(effects: Vec<Effect>) -> (State, Vec<Effect>) {
     let idle = IdleState {
         input: InputState::default(),
@@ -277,17 +293,27 @@ pub fn handle_with_context(
     ctx: &PanelReadContext,
 ) -> (State, Vec<Effect>) {
     match event {
-        // -- Esc: dismiss popup -> back to Idle ------------------------------
+        // -- Esc: dismiss popup via ClosePanel effect ------------------------
+        // Emits ClosePanel so main_loop restores saved_idle (preserving
+        // message history, scroll, input). Direct transition_to_idle() would
+        // create a fresh empty state, losing all context.
         Event::Key(KeyEvent {
             code: KeyCode::Esc, ..
-        }) => transition_to_idle(),
+        }) => (
+            State::Modal(state),
+            vec![Effect::ClosePanel, Effect::Render],
+        ),
 
         // -- Other key events: delegate to the panel/handler -----------------
         Event::Key(key) => {
             let (panel_effects, should_close) = dispatch_key_with_ctx(&mut state, key, ctx);
             let effects = map_panel_effects(panel_effects);
             if should_close {
-                transition_to_idle_with_effects(effects)
+                // ClosePanel effect so main_loop restores saved_idle.
+                let mut all_effects = effects;
+                all_effects.push(Effect::ClosePanel);
+                all_effects.push(Effect::Render);
+                (State::Modal(state), all_effects)
             } else {
                 (State::Modal(state), effects)
             }
@@ -299,7 +325,8 @@ pub fn handle_with_context(
             let mut effects = map_panel_effects(panel_effects);
             effects.push(Effect::Render);
             if should_close {
-                transition_to_idle_with_effects(effects)
+                effects.push(Effect::ClosePanel);
+                (State::Modal(state), effects)
             } else {
                 (State::Modal(state), effects)
             }
@@ -311,7 +338,8 @@ pub fn handle_with_context(
             let mut effects = map_panel_effects(panel_effects);
             effects.push(Effect::Render);
             if should_close {
-                transition_to_idle_with_effects(effects)
+                effects.push(Effect::ClosePanel);
+                (State::Modal(state), effects)
             } else {
                 (State::Modal(state), effects)
             }
@@ -332,10 +360,12 @@ pub fn handle_with_context(
         ),
 
         // -- Everything else: keep Modal, no effect --------------------------
-        Event::AcpEvent(_)
-        | Event::AcpDisconnected
-        | Event::SessionLoaded { .. }
-        | Event::Shutdown => (State::Modal(state), Vec::new()),
+        Event::AcpEvent(_) | Event::AcpDisconnected | Event::SessionLoaded { .. } => {
+            (State::Modal(state), Vec::new())
+        }
+
+        // -- Shutdown: propagate to main_loop so app can quit ----------------
+        Event::Shutdown => (State::Modal(state), vec![Effect::Quit]),
     }
 }
 
@@ -396,13 +426,25 @@ mod tests {
     ];
 
     #[test]
-    fn test_esc_dismisses_modal() {
+    fn test_esc_emits_close_panel() {
+        // Esc in Modal now emits ClosePanel effect instead of directly
+        // transitioning to Idle. The main_loop handles the transition
+        // via saved_idle restoration, which preserves message history.
         let modal = ModalState::Interaction(Box::new(NoopHandler));
-        let (next, _effects) = handle(
+        let (next, effects) = handle(
             modal,
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         );
-        assert!(matches!(next, State::Idle(_)));
+        // State stays Modal; main_loop processes ClosePanel to restore saved_idle.
+        assert!(matches!(next, State::Modal(_)));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::ClosePanel)),
+            "Esc should emit ClosePanel effect"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Esc should emit Render effect"
+        );
     }
 
     #[test]
@@ -418,15 +460,18 @@ mod tests {
     }
 
     #[test]
-    fn test_panel_close_transitions_to_idle() {
-        // Betas panel + Esc -> Close effect -> transition to Idle.
+    fn test_panel_close_emits_close_panel_effect() {
+        // Betas panel + Esc -> ClosePanel effect (not direct Idle transition).
+        // main_loop restores saved_idle to preserve message history.
         let panel = Box::new(PanelStateStub::new(PanelKind::Betas)) as Box<dyn PanelState>;
         let modal = ModalState::Panel(panel);
-        let (next, _effects) = handle(
+        let (next, effects) = handle(
             modal,
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         );
-        assert!(matches!(next, State::Idle(_)));
+        assert!(matches!(next, State::Modal(_)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::ClosePanel)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
     // -----------------------------------------------------------------------
@@ -434,9 +479,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_all_14_panels_esc_returns_to_idle() {
-        // 每个 v2 面板都必须响应 Esc 返回 Idle。
-        // 这是面板契约的最基础保证 —— 用户不会被困在面板里。
+    fn test_all_14_panels_esc_emits_close_panel() {
+        // 每个 v2 面板按 Esc 必须 emit ClosePanel 效果（而非直接 Idle 转换），
+        // 这样 main_loop 才能通过 saved_idle 恢复消息历史。
+        // 这是面板关闭契约的基础保证 —— 用户不会丢失消息数据。
         for kind in ALL_PANEL_KINDS {
             let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
             let modal = ModalState::Panel(panel);
@@ -445,13 +491,16 @@ mod tests {
                 Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             );
             assert!(
-                matches!(next, State::Idle(_)),
-                "Esc on {kind:?} should transition to Idle, got {next:?}"
+                matches!(next, State::Modal(_)),
+                "Esc on {kind:?} should keep Modal state, got {next:?}"
             );
-            // 至少有一个 Render effect 让用户看到面板已关闭。
+            assert!(
+                effects.iter().any(|e| matches!(e, Effect::ClosePanel)),
+                "Esc on {kind:?} should emit ClosePanel effect"
+            );
             assert!(
                 effects.iter().any(|e| matches!(e, Effect::Render)),
-                "Esc on {kind:?} should emit at least one Render effect"
+                "Esc on {kind:?} should emit Render effect"
             );
         }
     }
@@ -549,8 +598,8 @@ mod tests {
     }
 
     #[test]
-    fn test_all_14_panels_shutdown_is_noop() {
-        // Shutdown 事件在 Modal 状态下被忽略（由 main_loop 顶层处理）。
+    fn test_all_14_panels_shutdown_emits_quit() {
+        // Shutdown 在 Modal 状态下必须 emit Quit，确保用户 Ctrl+C 时可以退出。
         for kind in ALL_PANEL_KINDS {
             let panel = Box::new(PanelStateStub::new(kind)) as Box<dyn PanelState>;
             let modal = ModalState::Panel(panel);
@@ -560,8 +609,8 @@ mod tests {
                 "Shutdown on {kind:?} should keep Modal state"
             );
             assert!(
-                effects.is_empty(),
-                "Shutdown on {kind:?} should emit no effects"
+                effects.iter().any(|e| matches!(e, Effect::Quit)),
+                "Shutdown on {kind:?} should emit Quit effect"
             );
         }
     }
@@ -682,13 +731,17 @@ mod tests {
     }
 
     #[test]
-    fn test_handler_esc_dismisses_to_idle() {
+    fn test_handler_esc_emits_close_panel() {
         let modal = ModalState::Interaction(Box::new(NoopHandler));
         let (next, effects) = handle(
             modal,
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         );
-        assert!(matches!(next, State::Idle(_)));
+        assert!(matches!(next, State::Modal(_)));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::ClosePanel)),
+            "Esc on interaction should emit ClosePanel"
+        );
         assert!(
             effects.iter().any(|e| matches!(e, Effect::Render)),
             "Esc on interaction should emit Render"

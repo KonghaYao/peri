@@ -1,4 +1,10 @@
 //! Cursor position (row, col_byte). col_byte is byte offset (CJK safety guaranteed by caller).
+//!
+//! # Char boundary invariant
+//!
+//! `col_byte` MUST always be on a UTF-8 character boundary. Methods that move the
+//! cursor across lines must snap to the nearest valid boundary on the destination
+//! line — see `snap_col_to_char_boundary`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CursorPos {
@@ -9,6 +15,25 @@ pub struct CursorPos {
 impl CursorPos {
     pub fn new(row: usize, col_byte: usize) -> Self {
         Self { row, col_byte }
+    }
+
+    /// Snap a column byte position to the nearest char boundary at or before it.
+    ///
+    /// When moving the cursor vertically (up/down), the current line's `col_byte`
+    /// may fall inside a multi-byte character on the destination line. This snaps
+    /// it back to the previous char boundary.
+    ///
+    /// Example: `col_byte=4` on "你好" (boundaries 0,3,6) → snaps to 3.
+    pub fn snap_col_to_char_boundary(line: &str, col_byte: usize) -> usize {
+        let pos = col_byte.min(line.len());
+        if line.is_char_boundary(pos) {
+            return pos;
+        }
+        line.char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i < pos)
+            .last()
+            .unwrap_or(0)
     }
 
     /// Derive (row, col) from a global buffer byte offset.
@@ -46,12 +71,13 @@ impl CursorPos {
         offset
     }
 
-    /// Clamp to a valid position within lines.
+    /// Clamp to a valid position within lines (char-boundary safe).
     pub fn clamped(&self, lines: &[String]) -> Self {
         let row = self.row.min(lines.len().saturating_sub(1));
-        let col_byte = self
-            .col_byte
-            .min(lines.get(row).map(|s| s.len()).unwrap_or(0));
+        let col_byte = Self::snap_col_to_char_boundary(
+            lines.get(row).map(|s| s.as_str()).unwrap_or(""),
+            self.col_byte,
+        );
         Self { row, col_byte }
     }
 }

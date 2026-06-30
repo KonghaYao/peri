@@ -57,9 +57,14 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
         Event::AcpEvent(AcpEventData::ViewCommit(vc)) => {
             // Full-snapshot replacement semantics (CLAUDE.md P2-C):
             // base view becomes the committed list, current_turn is reset.
+            // ResumeStreaming lifts streaming_suppressed so that TextChunks
+            // from subsequent iterations are rendered.
             state.view = vc.view_models;
             state.current_turn = Default::default();
-            (State::Streaming(state), vec![Effect::Render])
+            (
+                State::Streaming(state),
+                vec![Effect::ResumeStreaming, Effect::Render],
+            )
         }
 
         Event::AcpEvent(AcpEventData::TurnDone) => {
@@ -128,16 +133,18 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
         // -- Other terminal events -------------------------------------------
         Event::Resize { .. } | Event::Mouse(_) => (State::Streaming(state), vec![Effect::Render]),
 
-        Event::Key(_) | Event::Paste(_) => {
-            // P3 will fully wire input editing. For P2 we accept and re-render
-            // so the user can see typed text (input is preserved as-is).
-            (State::Streaming(state), Vec::new())
+        // -- Key events: process in the streaming state (user can type ------
+        //    while agent is running). Keys are handled by the legacy keyboard
+        //    module which also handles input editing; state machine re-renders
+        //    so typed text is visible.
+        Event::Key(_) | Event::Paste(_) => (State::Streaming(state), vec![Effect::Render]),
+
+        // -- System events --------------------------------------------------
+        Event::AcpDisconnected | Event::SessionLoaded { .. } => {
+            (State::Streaming(state), vec![Effect::Render])
         }
 
-        Event::AcpDisconnected | Event::SessionLoaded { .. } | Event::Shutdown => {
-            // System signals handled by main loop; Streaming state unchanged.
-            (State::Streaming(state), Vec::new())
-        }
+        Event::Shutdown => (State::Streaming(state), vec![Effect::Quit]),
     }
 }
 
@@ -246,5 +253,46 @@ mod tests {
         );
         assert!(matches!(next, State::Streaming(_)));
         assert!(effects.is_empty());
+    }
+
+    // ── New tests for streaming key/system events ──────────────────────────
+
+    #[test]
+    fn test_key_event_emits_render_in_streaming() {
+        // 用户在 agent 运行期间可以打字；streaming 状态应触发重绘以显示输入。
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+        );
+        assert!(matches!(next, State::Streaming(_)));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Key in Streaming should emit Render"
+        );
+    }
+
+    #[test]
+    fn test_shutdown_emits_quit_in_streaming() {
+        // 用户 Ctrl+C 时即使正在流式输出也应能退出。
+        let state = make_state();
+        let (next, effects) = handle(state, Event::Shutdown);
+        assert!(matches!(next, State::Streaming(_)));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Quit)),
+            "Shutdown in Streaming should emit Quit"
+        );
+    }
+
+    #[test]
+    fn test_acp_disconnected_emits_render_in_streaming() {
+        let state = make_state();
+        let (next, effects) = handle(state, Event::AcpDisconnected);
+        assert!(matches!(next, State::Streaming(_)));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "AcpDisconnected in Streaming should emit Render"
+        );
     }
 }

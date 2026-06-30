@@ -187,6 +187,19 @@ pub struct IdleState {
     pub history_index: Option<usize>,
 }
 
+impl IdleState {
+    /// Transition helper: collapse Idle into Streaming, carrying over the
+    /// input buffer / view / scroll so streaming events can be accumulated.
+    pub fn into_streaming(self) -> StreamingState {
+        StreamingState {
+            current_turn: super::current_turn::CurrentTurn::new(),
+            input: self.input,
+            view: self.view,
+            scroll_offset: self.scroll_offset,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Streaming
 // ---------------------------------------------------------------------------

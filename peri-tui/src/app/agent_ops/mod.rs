@@ -271,22 +271,20 @@ impl App {
                         MessageViewModel::tool_block(name.clone(), output.clone(), None, is_error);
                     vm.recompute_hash();
                     session.messages.view_messages.push(vm);
+                    // Invalidate render cache — view_messages mutated.
+                    session.messages.message_cache = None;
                 }
                 let _ = session;
                 self.request_rebuild();
                 (true, false, false)
             }
-            AgentEvent::AssistantChunk {
-                chunk: _,
-                source_agent_id: _,
-            } => {
+            AgentEvent::AssistantChunk => {
                 self.session_mgr.current_mut().agent.retry_status = None;
                 self.session_mgr.current_mut().agent.agent_replied = true;
                 self.session_mgr
                     .current_mut()
                     .spinner_state
                     .set_mode(peri_widgets::SpinnerMode::Responding);
-                // P5: No pipeline — streaming chunks handled by sync rendering
                 (true, false, false)
             }
             AgentEvent::Done => self.handle_done(),
@@ -316,6 +314,9 @@ impl App {
                     .origin_messages
                     .extend(msgs.clone());
                 // P5: No pipeline — StateSnapshot updates origin_messages only
+                // NOTE: extend semantics are correct here — StateSnapshot(msgs)
+                // is a legacy v1 event carrying incremental messages, not a
+                // full transcript snapshot.
                 self.request_rebuild();
                 (true, false, false)
             }
@@ -329,20 +330,28 @@ impl App {
                 if self.session_mgr.current_mut().agent.subagent_depth > 0 {
                     return (true, false, false);
                 }
-                self.session_mgr
-                    .current_mut()
-                    .agent
-                    .origin_messages
-                    .extend(messages.clone());
-                // P5: No pipeline — TurnCommitted updates origin_messages then rebuilds
-                // Convert origin_messages to view_messages for sync rendering
+                // P5: TurnCommitted carries the FULL transcript snapshot from v2 stages.
+                // Use replacement semantics (not extend) — finalized_messages is a
+                // complete snapshot, not incremental. extend would double the history
+                // on each turn (see CLAUDE.md TRAP re: commit_iteration).
+                self.session_mgr.current_mut().agent.origin_messages = messages;
+                // Convert origin_messages to view_messages for sync rendering.
+                // prefix_len = 0: full rebuild from complete transcript snapshot —
+                // origin_messages is the full history (replacement semantics), and
+                // messages_to_view_models returns ALL VMs. Using round_start_vm_idx
+                // would duplicate prefix VMs in the tail (same messages appear twice).
                 let cwd = self.services.cwd.clone();
                 let view_msgs = super::messages_to_view_models(
                     &self.session_mgr.current().agent.origin_messages,
                     &cwd,
                 );
-                let prefix_len = self.session_mgr.current().messages.round_start_vm_idx;
-                self.apply_rebuild_all(prefix_len, view_msgs);
+                self.apply_rebuild_all(0, view_msgs);
+                // Suppress streaming bridge: view_messages now contains the
+                // committed content. If turn-done hasn't arrived yet (state still
+                // Streaming), main_loop step 4 would re-populate streaming fields
+                // from current_turn.text/reasoning. The flag tells step 4 to clear
+                // instead of populate — preventing duplicate bubbles.
+                self.session_mgr.current_mut().messages.streaming_suppressed = true;
                 (true, false, false)
             }
             AgentEvent::CompactCompleted {
@@ -374,10 +383,6 @@ impl App {
                         delay_ms,
                         error,
                     });
-                (true, false, false)
-            }
-            AgentEvent::AiReasoning(_text) => {
-                // P5: No pipeline — reasoning displayed in final message render
                 (true, false, false)
             }
             AgentEvent::BackgroundTaskCompleted {

@@ -14,7 +14,7 @@ use crate::{
         message_state::{MessageRenderCache, WrappedLineInfo},
         App,
     },
-    ui::{message_render::render_view_model, theme, welcome},
+    ui::{markdown::parse_markdown_default, message_render::render_view_model, theme, welcome},
 };
 
 /// 视口裁剪结果
@@ -42,12 +42,17 @@ pub fn build_sync_render_cache(
         };
     }
 
-    // Render all VMs to lines
+    // Render all VMs to lines, with blank line separator between messages
     let mut lines: Vec<Line<'static>> = Vec::new();
     for vm in view_messages {
         let vm_lines = render_view_model(vm, None, width as usize, diff_visible);
         lines.extend(vm_lines);
+        // 每条消息后追加空行分隔符，确保消息间距一致
+        lines.push(Line::from(""));
     }
+
+    // 去重连续空行 + 移除尾部多余空行
+    let lines = dedup_blank_lines(lines);
 
     // Build wrap_map
     let (total_lines, wrap_map) = build_wrap_map(&lines, width);
@@ -61,6 +66,28 @@ pub fn build_sync_render_cache(
         version,
         width,
     }
+}
+
+/// 去重连续空行并移除尾部多余空行。
+fn dedup_blank_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    let mut result: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    let mut prev_empty = false;
+    for line in lines {
+        let is_empty =
+            line.spans.is_empty() || (line.spans.len() == 1 && line.spans[0].content.is_empty());
+        if is_empty && prev_empty {
+            continue;
+        }
+        prev_empty = is_empty;
+        result.push(line);
+    }
+    // 移除末尾多余空行
+    while result.last().is_some_and(|l| {
+        l.spans.is_empty() || (l.spans.len() == 1 && l.spans[0].content.is_empty())
+    }) {
+        result.pop();
+    }
+    result
 }
 
 /// Build wrap_map: maps each logical line to its visual row span.
@@ -116,16 +143,68 @@ pub(crate) fn render_messages(
     app.session_mgr.current_mut().ui.messages_area = Some(inner);
     let visible_height = inner.height;
 
-    // Build sync render cache
+    // Build sync render cache.
+    // P5 bridge: when streaming_text/streaming_reasoning is non-empty (populated
+    // by main_loop from state machine's current_turn), build an AssistantBubble
+    // and append it to the view for cache construction. The streaming fields are
+    // consumed here so the next frame starts fresh.
     let text_area_width = inner.width.saturating_sub(1);
     let diff_visible = app.session_mgr.current().ui.diff_visible;
+    let has_streaming = !app.session_mgr.current().messages.streaming_text.is_empty()
+        || !app
+            .session_mgr
+            .current()
+            .messages
+            .streaming_reasoning
+            .is_empty();
     {
-        let needs_rebuild = match app.session_mgr.current().messages.message_cache.as_ref() {
-            Some(cache) => cache.width != text_area_width,
-            None => true,
-        };
+        let needs_rebuild = has_streaming
+            || match app.session_mgr.current().messages.message_cache.as_ref() {
+                Some(cache) => cache.width != text_area_width,
+                None => true,
+            };
         if needs_rebuild {
-            let vms = app.session_mgr.current().messages.view_messages.clone();
+            let mut vms = app.session_mgr.current().messages.view_messages.clone();
+
+            // P5 bridge: inject streaming assistant from state machine
+            if has_streaming {
+                use crate::ui::message_view::{ContentBlockView, MessageViewModel};
+                let st = std::mem::take(&mut app.session_mgr.current_mut().messages.streaming_text);
+                let sr =
+                    std::mem::take(&mut app.session_mgr.current_mut().messages.streaming_reasoning);
+                let mut blocks: Vec<ContentBlockView> = Vec::new();
+                if !sr.is_empty() {
+                    blocks.push(ContentBlockView::Reasoning {
+                        char_count: sr.chars().count(),
+                        text: sr,
+                        tail_lines: None,
+                    });
+                }
+                if !st.is_empty() {
+                    let len = st.len();
+                    let rendered = parse_markdown_default(&st);
+                    let rendered_lines = rendered.lines.len();
+                    blocks.push(ContentBlockView::Text {
+                        raw: st,
+                        rendered,
+                        dirty: false,
+                        rendered_prefix_len: len,
+                        rendered_prefix_lines: rendered_lines,
+                        holdback_scanner: Default::default(),
+                    });
+                }
+                if !blocks.is_empty() {
+                    let mut bubble = MessageViewModel::AssistantBubble {
+                        blocks,
+                        is_streaming: true,
+                        collapsed: false,
+                        content_hash: 0,
+                    };
+                    bubble.recompute_hash();
+                    vms.push(bubble);
+                }
+            }
+
             let prev = app.session_mgr.current().messages.message_cache.as_ref();
             let cache = build_sync_render_cache(&vms, diff_visible, text_area_width, prev);
             app.session_mgr.current_mut().messages.message_cache = Some(cache);

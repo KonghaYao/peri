@@ -5,7 +5,21 @@
 //! This task is the **only** place in the codebase that touches crossterm's
 //! blocking `event::poll` / `event::read` API.
 //!
-//! Design: <https://github.com/user/perihelion/blob/main/docs/design/peri-tui-architecture.md#71-from-input-to-event>
+//! ## Event-loss fix (2026-06-30)
+//!
+//! The original implementation used `tokio::select!` with a `spawn_blocking`
+//! future racing against a tick interval. Both had 50 ms timeouts, so they
+//! resolved simultaneously. `select!` (non-biased) picks one at random --
+//! when tick won, the `JoinHandle` was dropped. Dropping a `JoinHandle`
+//! **detaches** the task (it keeps running), the detached task called
+//! `event::read()` and consumed the crossterm event, but the result was lost.
+//!
+//! The fix: a persistent `spawn_blocking` task that continuously polls
+//! crossterm and pushes events through an mpsc channel. The async loop
+//! reads from this channel with `tokio::select!` -- the channel's `recv()`
+//! future is poll-based (no detached task), so dropping it is safe.
+//!
+//! Design: `docs/design/peri-tui-architecture.md` §7.1
 
 use std::time::Duration;
 
@@ -14,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::event_channel::{EventTx, TuiEvent};
 
-/// Poll timeout used for crossterm event polling.
+/// Poll timeout used for crossterm event polling in the background task.
 const POLL_TIMEOUT_MS: u64 = 50;
 
 /// Interval between periodic [`TuiEvent::Tick`] pushes.
@@ -22,62 +36,57 @@ const TICK_INTERVAL: Duration = Duration::from_millis(POLL_TIMEOUT_MS);
 
 /// Spawn the keyboard collector background task.
 ///
-/// The task runs an internal loop that:
+/// Architecture:
 ///
-/// 1. Polls crossterm with a 50 ms timeout.
-/// 2. On poll success, reads the event and converts it to [`TuiEvent`].
-/// 3. Maintains a 50 ms interval timer that pushes [`TuiEvent::Tick`].
-/// 4. Exits cleanly when `shutdown` is cancelled.
-///
-/// The task performs **no state mutation** -- pure conversion + channel push.
+/// 1. A **persistent** `spawn_blocking` task continuously polls crossterm
+///    and pushes raw `CrosstermEvent`s into an unbounded mpsc channel.
+///    This task is never cancelled mid-poll, so events cannot be lost.
+/// 2. An async task reads from the mpsc channel and the tick interval
+///    via `tokio::select!`. The channel `recv()` is poll-based -- no
+///    detached task means no event loss when another branch wins.
+/// 3. Both tasks exit when `shutdown` is cancelled.
 pub fn spawn(tx: EventTx, shutdown: CancellationToken) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move { run(tx, shutdown).await })
-}
+    let (ct_tx, mut ct_rx) = tokio::sync::mpsc::unbounded_channel::<CrosstermEvent>();
 
-async fn run(tx: EventTx, shutdown: CancellationToken) {
-    let mut tick_interval = tokio::time::interval(TICK_INTERVAL);
-
-    loop {
-        tokio::select! {
-            // Shutdown signal takes priority.
-            _ = shutdown.cancelled() => {
-                break;
-            }
-
-            // Periodic tick.
-            _ = tick_interval.tick() => {
-                let _ = tx.send(TuiEvent::Tick);
-            }
-
-            // Crossterm poll (blocking, but short -- 50 ms).  Spawn on
-            // `spawn_blocking` so we don't hold up the async runtime.
-            result = tokio::task::spawn_blocking(move || {
-                if event::poll(Duration::from_millis(POLL_TIMEOUT_MS))
-                    .unwrap_or(false)
-                {
-                    event::read().ok()
-                } else {
-                    None
+    // Persistent crossterm poller. Runs on the blocking thread pool and
+    // is NEVER cancelled mid-read -- the while-loop only exits when the
+    // shutdown token is cancelled.
+    let ct_shutdown = shutdown.clone();
+    tokio::task::spawn_blocking(move || {
+        while !ct_shutdown.is_cancelled() {
+            if event::poll(Duration::from_millis(POLL_TIMEOUT_MS)).unwrap_or(false) {
+                if let Ok(ev) = event::read() {
+                    // Send is best-effort; if the channel is closed the
+                    // async task has already dropped its receiver.
+                    let _ = ct_tx.send(ev);
                 }
-            }) => {
-                match result {
-                    Ok(Some(crossterm_ev)) => {
-                        if let Some(tui_ev) = convert_crossterm_event(crossterm_ev) {
-                            let _ = tx.send(tui_ev);
-                        }
-                    }
-                    Ok(None) => {
-                        // Poll timed out, no event available.
-                    }
-                    Err(_) => {
-                        // spawn_blocking task panicked or was cancelled.
-                        // Treat as shutdown to avoid spinning.
-                        break;
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        let mut tick_interval = tokio::time::interval(TICK_INTERVAL);
+        // Suppress the initial immediate tick burst.
+        tick_interval.reset_after(TICK_INTERVAL);
+
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    break;
+                }
+
+                _ = tick_interval.tick() => {
+                    let _ = tx.send(TuiEvent::Tick);
+                }
+
+                Some(crossterm_ev) = ct_rx.recv() => {
+                    if let Some(tui_ev) = convert_crossterm_event(crossterm_ev) {
+                        let _ = tx.send(tui_ev);
                     }
                 }
             }
         }
-    }
+    })
 }
 
 /// Convert a crossterm [`CrosstermEvent`] into a [`TuiEvent`], returning `None`

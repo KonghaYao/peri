@@ -1,19 +1,16 @@
-//! Main loop: recv event → state_machine::handle (pure) + thin_handle (legacy) → apply effects → loop.
+//! Main loop: recv event → state machine (pure) + keyboard fallback → merge effects → loop.
 //!
-//! P2 Cutover state: the loop **simultaneously** drives the new pure
-//! state machine ([`crate::state_machine::handle`]) and the legacy
-//! [`thin_handle`] glue. Effects from both paths are merged (Render
-//! de-duplicated) before execution.
+//! The loop drives both the v2 state machine and the keyboard fallback handler:
 //!
-//! - The state machine is the **future** authoritative path. Its `State`
-//!   persists across events; `ViewStore` accumulates view-commits; transitions
-//!   are pure functions with zero I/O.
-//! - `thin_handle` is the **current** source of truth for rendering (reads
-//!   `message_pipeline`) and for any behavior not yet ported to the state
-//!   machine (panels, interaction popups, mouse selection).
+//! - **1a. State machine** ([`crate::state_machine::handle`]): pure `(State, Event) → (State, Vec<Effect>)`.
+//!   Handles shortcuts, mouse, paste, tick, resize, AcpDisconnected, Shutdown.
+//! - **1b. Keyboard fallback**: [`crate::event::keyboard`] handles complex UI interactions
+//!   (panel dispatch, popups, setup wizard, textarea input, @mention/slash hints, history).
+//!   Shortcuts already covered by the state machine are filtered via `is_sm_handled_shortcut()`.
+//! - **1c. Merge**: Effects from both paths are merged; `Render` is de-duplicated.
 //!
-//! Once P3 (panels) and P5 (rendering rewrite) land, `thin_handle` will be
-//! deleted and the state machine becomes the sole driver.
+//! The state machine is the authoritative path. Its `State` persists across events;
+//! `ViewStore` accumulates view-commits; transitions are pure functions with zero I/O.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -30,10 +27,8 @@ use crate::runtime::effect::Effect;
 use crate::runtime::event_channel::{EventRx, TuiEvent};
 use crate::state_machine::state::PanelReadContext;
 use crate::state_machine::{
-    handle as state_machine_handle,
-    input::sync::{from_textarea, to_textarea},
-    transitions::modal,
-    Event as SmEvent, IdleState, ModalState, State,
+    handle as state_machine_handle, input::sync::to_textarea, transitions::modal, Event as SmEvent,
+    IdleState, ModalState, State,
 };
 
 /// Target frame interval for loading-spinner animation (~30 FPS).
@@ -46,8 +41,8 @@ const TARGET_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// The loop is the **only** place that reads from the event channel and the
 /// **only** place that performs I/O (terminal draw, ACP send, clipboard).
 ///
-/// P2 Cutover: drives both the pure state machine and the legacy
-/// [`thin_handle`] glue. Effects are merged; `Render` is de-duplicated.
+/// Uses the dual-path architecture: state machine (1a) + keyboard fallback (1b),
+/// with effects merged and Render de-duplicated.
 pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> anyhow::Result<()> {
     let mut last_render = std::time::Instant::now();
 
@@ -65,6 +60,12 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // AcpEventData variants) and dispatch to the transition function.
         // When state is Modal, use handle_with_context() with real App data
         // so panels have access to i18n, scroll offset, panel area, etc.
+        // ── Pre-transition snapshot for Enter guard ───────────────────
+        // Must be captured BEFORE the SM transition consumes `state`, so
+        // `is_sm_handled_shortcut` can still filter Enter when the SM
+        // transitions Idle → Streaming in the same frame.
+        let was_idle = matches!(&state, State::Idle(_));
+
         let sm_event: SmEvent = event.clone().into();
         let new_state: State;
         let sm_effects: Vec<Effect>;
@@ -84,12 +85,12 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         }
         state = new_state;
 
-        // ── 1b. Legacy keyboard + ACP event dispatch ─────────────────
+        // ── 1b. Keyboard fallback + ACP event dispatch ─────────────────
         // These are the only remaining paths not yet handled by the pure
         // state machine. Keyboard dispatch is filtered to avoid double-
         // executing shortcuts the state machine already owns.
-        let legacy_effects = match &event {
-            TuiEvent::Key(key) if !is_sm_handled_shortcut(key, &state) => {
+        let fallback_effects = match &event {
+            TuiEvent::Key(key) if !is_sm_handled_shortcut(key, &state, was_idle) => {
                 match keyboard::handle_key_event(app, *key) {
                     Ok(Some(Action::Quit)) => vec![Effect::Quit],
                     Ok(Some(Action::Submit(input))) => {
@@ -109,12 +110,22 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 debug!(session_id = %session_id, "SessionLoaded event");
                 vec![Effect::Render]
             }
+            // ── Mouse: handler for message-area text selection / copy ─
+            // The state machine handles textarea mouse interaction (click/drag
+            // mapped to MouseTextareaClick/Drag/Release effects).  Message-area
+            // text selection, scrollbar drag, and clipboard copy live in the
+            // mouse handler which is NOT covered by the SM.  Call it here
+            // to prevent the copy feature from being silently dropped.
+            TuiEvent::Mouse(ref mouse) => {
+                crate::event::mouse::handle_mouse_event(app, mouse);
+                vec![Effect::Render]
+            }
             _ => vec![Effect::Render],
         };
 
         // ── 1c. Merge effects (Render de-duplicated) ────────────────────
         let mut effects: Vec<Effect> = sm_effects;
-        for e in legacy_effects {
+        for e in fallback_effects {
             if !effects.contains(&e) {
                 effects.push(e);
             }
@@ -133,6 +144,12 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 // ── Agent communication ────────────────────────────
                 Effect::SubmitMessage { text } => {
                     app.submit_message(text);
+                    // Transition Idle → Streaming so that incoming
+                    // TextChunk / ReasoningChunk / ToolStarted events
+                    // accumulate in current_turn instead of being dropped.
+                    if let State::Idle(idle) = state {
+                        state = State::Streaming(idle.into_streaming());
+                    }
                     needs_render = true;
                 }
                 Effect::PollAgent => {
@@ -220,6 +237,11 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 Effect::InterruptAgent => {
                     app.interrupt();
                 }
+                Effect::ResumeStreaming => {
+                    // ViewCommit has reset current_turn; new TextChunks
+                    // from the next iteration should be rendered.
+                    app.session_mgr.current_mut().messages.streaming_suppressed = false;
+                }
                 Effect::ClearPendingMessages => {
                     app.session_mgr
                         .current_mut()
@@ -250,7 +272,21 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 }
                 Effect::ClosePanel => {
                     if matches!(state, State::Modal(_)) {
-                        let idle = saved_idle.take().unwrap_or_default();
+                        let idle = saved_idle.take().unwrap_or_else(|| {
+                            // Fallback: when saved_idle is None (panel opened
+                            // via fallback path), extract current input state
+                            // from TextArea so keyboard buffer isn't lost.
+                            let input_snapshot = crate::state_machine::input::sync::from_textarea(
+                                &app.session_mgr.current().ui.textarea,
+                            );
+                            IdleState {
+                                input: input_snapshot,
+                                scroll_offset: app.session_mgr.current().ui.scroll_offset,
+                                view: vec![],
+                                double_esc_timer: None,
+                                history_index: None,
+                            }
+                        });
                         state = State::Idle(idle);
                         needs_render = true;
                     }
@@ -269,12 +305,15 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                         app.services.config_path_override.as_deref(),
                     ) {
                         use crate::app::MessageViewModel;
-                        app.session_mgr.current_mut().messages.view_messages.push(
-                            MessageViewModel::system(app.services.lc.tr_args(
+                        let session = app.session_mgr.current_mut();
+                        session
+                            .messages
+                            .view_messages
+                            .push(MessageViewModel::system(app.services.lc.tr_args(
                                 "config-save-failed",
                                 &[("error".into(), e.to_string().into())],
-                            )),
-                        );
+                            )));
+                        session.messages.message_cache = None;
                     }
                     if let Some(p) = crate::app::agent::LlmProvider::from_config(&cfg) {
                         app.services.provider_name = p.display_name().to_string();
@@ -315,12 +354,15 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                             app.services.config_path_override.as_deref(),
                         ) {
                             use crate::app::MessageViewModel;
-                            app.session_mgr.current_mut().messages.view_messages.push(
-                                MessageViewModel::system(app.services.lc.tr_args(
+                            let session = app.session_mgr.current_mut();
+                            session
+                                .messages
+                                .view_messages
+                                .push(MessageViewModel::system(app.services.lc.tr_args(
                                     "config-save-failed",
                                     &[("error".into(), e.to_string().into())],
-                                )),
-                            );
+                                )));
+                            session.messages.message_cache = None;
                         }
                         app.global_ui.provider_highlight_until = Some(
                             std::time::Instant::now() + std::time::Duration::from_millis(2000),
@@ -388,13 +430,32 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // ── 2b. Sync TextArea → state machine InputState ───────────────
         // The keyboard module and effects (paste, mouse click) mutate the
         // TextArea widget directly. After all mutations are done, extract
-        // the new input state back into the state machine so it stays in sync.
+        // the new text/cursor into the state machine.
+        //
+        // Only lines + cursor are synced from TextArea. Semantic fields
+        // (prediction, at_mention, slash_completion, history, attachments)
+        // are managed independently by the state machine and must NOT be
+        // overwritten by the TextArea snapshot.
         {
             let ta = &app.session_mgr.current().ui.textarea;
-            let input_snapshot = from_textarea(ta);
+            let lines: Vec<String> = ta.lines().to_vec();
+            let (row, col_char) = ta.cursor();
+            // tui_textarea::cursor() returns a CHARACTER index, but
+            // CursorPos.col_byte is a BYTE offset. Convert here.
+            let col_byte: usize = lines
+                .get(row)
+                .map(|line| line.chars().take(col_char).map(|c| c.len_utf8()).sum())
+                .unwrap_or(0);
+            let cursor = crate::state_machine::input::CursorPos::new(row, col_byte);
             match &mut state {
-                State::Idle(idle) => idle.input = input_snapshot,
-                State::Streaming(s) => s.input = input_snapshot,
+                State::Idle(idle) => {
+                    idle.input.lines = lines;
+                    idle.input.cursor = cursor;
+                }
+                State::Streaming(s) => {
+                    s.input.lines = lines;
+                    s.input.cursor = cursor;
+                }
                 _ => {}
             }
         }
@@ -415,11 +476,46 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
             match &state {
                 State::Idle(idle) => {
                     to_textarea(&idle.input, &mut app.session_mgr.current_mut().ui.textarea);
+                    // Clear streaming fields when idle — no streaming data to show.
+                    let msgs = &mut app.session_mgr.current_mut().messages;
+                    msgs.streaming_text.clear();
+                    msgs.streaming_reasoning.clear();
+                    msgs.streaming_suppressed = false;
                 }
                 State::Streaming(s) => {
                     to_textarea(&s.input, &mut app.session_mgr.current_mut().ui.textarea);
+                    // P5 bridge: sync streaming text/reasoning from state
+                    // machine to legacy MessageState, so render_messages
+                    // can include it in the view. Consumed by the next
+                    // render_messages call.
+                    //
+                    // streaming_suppressed guard: TurnCommitted already rebuilt
+                    // view_messages with committed content, but turn-done may
+                    // not have arrived yet (state still Streaming). Without this
+                    // guard, current_turn.text would be copied again and
+                    // render_messages would produce a duplicate bubble.
+                    // The flag persists until Idle (turn-done) resets it —
+                    // do NOT reset here, or the next tick would re-populate.
+                    let msgs = &mut app.session_mgr.current_mut().messages;
+                    if msgs.streaming_suppressed {
+                        msgs.streaming_text.clear();
+                        msgs.streaming_reasoning.clear();
+                    } else {
+                        msgs.streaming_text = s.current_turn.text.clone();
+                        msgs.streaming_reasoning = s.current_turn.reasoning.clone();
+                    }
                 }
-                _ => {}
+                _ => {
+                    // Reset streaming_suppressed if we're in a non-Streaming state
+                    // (e.g., Modal, Switching) — prevents stale flag from
+                    // suppressing the first frame of the next streaming session.
+                    let msgs = &mut app.session_mgr.current_mut().messages;
+                    if msgs.streaming_suppressed {
+                        msgs.streaming_text.clear();
+                        msgs.streaming_reasoning.clear();
+                        msgs.streaming_suppressed = false;
+                    }
+                }
             }
             if is_tick {
                 let now = std::time::Instant::now();
@@ -435,18 +531,14 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
     Ok(())
 }
 
-// ── Legacy ACP event bridge ──────────────────────────────────────────────────
+// ── ACP event bridge ──────────────────────────────────────────────────────────
 
 /// Handle an ACP event that arrived through the unified event channel.
 ///
-/// In P1, the AcpNotifier task already converted `AcpNotification` into
+/// The AcpNotifier task converts `AcpNotification` into
 /// `TuiEvent::AcpEvent { event, data }`.  Here we reverse that translation
-/// back into the legacy `AcpNotification` and delegate to
+/// back into `AcpNotification` and delegate to
 /// `App::handle_acp_notification`.
-///
-/// This double-conversion is intentional P1 glue — it avoids rewriting
-/// the AcpNotifier task or the App's notification handler.  P2 will
-/// eliminate the intermediate JSON round-trip.
 fn handle_acp_event(app: &mut App, event_name: &str, data: &serde_json::Value) -> Vec<Effect> {
     use crate::acp_client::AcpNotification;
     use peri_acp::event::AcpEvent;
@@ -576,7 +668,7 @@ fn handle_acp_event(app: &mut App, event_name: &str, data: &serde_json::Value) -
         }
     };
 
-    // Delegate to the legacy App handler.
+    // Delegate to the App handler.
     let (updated, _should_break, should_return) = app.handle_acp_notification(notif);
     if should_return {
         vec![Effect::Render]
@@ -588,12 +680,16 @@ fn handle_acp_event(app: &mut App, event_name: &str, data: &serde_json::Value) -
 }
 
 /// Returns `true` if the state machine already handles this shortcut,
-/// so the legacy keyboard handler should be skipped to avoid double-execution.
+/// so the keyboard fallback handler should be skipped to avoid double-execution.
 ///
 /// When the state machine is in [`State::Modal`], ALL keys are intercepted —
 /// the state machine dispatches every key to the active v2 panel/handler,
-/// and the legacy keyboard handler must not also process them.
-fn is_sm_handled_shortcut(key: &ratatui::crossterm::event::KeyEvent, state: &State) -> bool {
+/// and the keyboard fallback handler must not also process them.
+fn is_sm_handled_shortcut(
+    key: &ratatui::crossterm::event::KeyEvent,
+    state: &State,
+    was_idle: bool,
+) -> bool {
     // Modal: state machine handles EVERY key (dispatches to panel/handler).
     if matches!(state, State::Modal(_)) {
         return true;
@@ -603,6 +699,19 @@ fn is_sm_handled_shortcut(key: &ratatui::crossterm::event::KeyEvent, state: &Sta
 
     // BackTab: cycle permission mode
     if matches!(key.code, KeyCode::BackTab) {
+        return true;
+    }
+
+    // Enter (no Shift/Alt): state machine handles submission.
+    // Use pre-transition idle flag: when SM transitioned Idle → Streaming
+    // in this frame, the Enter still counts as handled by the SM.
+    // Keyboard fallback must NOT re-submit what the SM already submitted.
+    if matches!(key.code, KeyCode::Enter)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+        && (was_idle || matches!(state, State::Idle(_)))
+    {
         return true;
     }
 

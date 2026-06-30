@@ -106,6 +106,7 @@ impl App {
         // 历史恢复时聚合连续的已完成 SubAgentGroup 为批次汇总
         aggregate_batch_groups(&mut view_msgs);
         self.session_mgr.current_mut().messages.view_messages = view_msgs;
+        self.session_mgr.current_mut().messages.message_cache = None;
 
         let thread_id_str = thread_id.to_string();
         self.session_mgr.current_mut().current_thread_id = Some(thread_id);

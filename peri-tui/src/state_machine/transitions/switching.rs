@@ -28,12 +28,22 @@ pub fn handle(state: SwitchingState, event: Event) -> (State, Vec<Effect>) {
         // -- Mouse / Resize: re-render ---------------------------------------
         Event::Mouse(_) | Event::Resize { .. } => (State::Switching(state), vec![Effect::Render]),
 
+        // -- System signals ---------------------------------------------------
+        Event::AcpDisconnected => (
+            State::Switching(state),
+            vec![
+                Effect::PushSystemNote(
+                    "ACP connection lost during session switch. The UI may be stale.".to_string(),
+                ),
+                Effect::Render,
+            ],
+        ),
+        Event::Shutdown => (State::Switching(state), vec![Effect::Quit]),
+
         // -- Drop everything else --------------------------------------------
-        Event::Key(_)
-        | Event::Paste(_)
-        | Event::AcpEvent(_)
-        | Event::AcpDisconnected
-        | Event::Shutdown => (State::Switching(state), Vec::new()),
+        Event::Key(_) | Event::Paste(_) | Event::AcpEvent(_) => {
+            (State::Switching(state), Vec::new())
+        }
     }
 }
 
@@ -99,5 +109,34 @@ mod tests {
         );
         assert!(matches!(next, State::Switching(_)));
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn test_shutdown_emits_quit_in_switching() {
+        // 用户会话切换期间 Ctrl+C 应能退出，之前会静默丢弃。
+        let state = SwitchingState { view: vec![] };
+        let (next, effects) = handle(state, Event::Shutdown);
+        assert!(matches!(next, State::Switching(_)));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Quit)),
+            "Shutdown in Switching should emit Quit"
+        );
+    }
+
+    #[test]
+    fn test_acp_disconnected_emits_system_note_in_switching() {
+        let state = SwitchingState { view: vec![] };
+        let (next, effects) = handle(state, Event::AcpDisconnected);
+        assert!(matches!(next, State::Switching(_)));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::PushSystemNote(_))),
+            "AcpDisconnected in Switching should emit PushSystemNote"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "AcpDisconnected in Switching should emit Render"
+        );
     }
 }

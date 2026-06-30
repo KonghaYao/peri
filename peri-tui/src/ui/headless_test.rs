@@ -280,14 +280,10 @@ async fn test_tool_call_message_visible_when_toggled() {
 
 #[tokio::test]
 async fn test_empty_assistant_chunk_no_bubble() {
-    // 空 AssistantChunk 不应创建空白的 AssistantBubble
+    // AssistantChunk 仅更新 spinner/retry 状态，不应创建 AssistantBubble
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
-    // 发送空 chunk，不应创建 AssistantBubble
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "".into(),
-        source_agent_id: None,
-    });
+    app.push_agent_event(AgentEvent::AssistantChunk);
     app.process_pending_events();
 
     // view_messages 应为空（没有创建空白气泡）
@@ -297,19 +293,13 @@ async fn test_empty_assistant_chunk_no_bubble() {
             .messages
             .view_messages
             .is_empty(),
-        "空 AssistantChunk 不应创建 AssistantBubble，实际: {:?}",
+        "AssistantChunk 不应创建 AssistantBubble，实际: {:?}",
         app.session_mgr.current_mut().messages.view_messages.len()
     );
 
-    // 发送多个空 chunk，仍不应创建气泡
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "".into(),
-        source_agent_id: None,
-    });
-    app.push_agent_event(AgentEvent::AssistantChunk {
-        chunk: "".into(),
-        source_agent_id: None,
-    });
+    // 发送多次 AssistantChunk，仍不应创建气泡
+    app.push_agent_event(AgentEvent::AssistantChunk);
+    app.push_agent_event(AgentEvent::AssistantChunk);
     app.process_pending_events();
 
     assert!(
@@ -2242,16 +2232,10 @@ async fn test_thinking_mode_user_message_survives_rebuild() {
     // 1. P5: Push UserBubble directly
     app.apply_add_message(MessageViewModel::user("explain recursion".into()));
 
-    // 2. AI 开始 thinking（AiReasoning 事件 → 无 VM 创建，P5 保持一致）
-    app.push_agent_event(AgentEvent::AiReasoning(
-        "Let me think about recursion...".into(),
-    ));
-    app.push_agent_event(AgentEvent::AiReasoning(
-        "Recursion is when a function calls itself...".into(),
-    ));
+    // 2. Reasoning 已通过 state machine streaming_reasoning bridge 渲染，不再有 AiReasoning 事件
     app.process_pending_events();
 
-    // 此时 view_messages 应只有 UserBubble（reasoning 不创建 VM）
+    // 此时 view_messages 应只有 UserBubble
     assert_eq!(
         app.session_mgr.current_mut().messages.view_messages.len(),
         1,
@@ -2294,8 +2278,7 @@ async fn test_thinking_toolcall_text_rebuild_preserves_user() {
     // 1. P5: Push UserBubble directly
     app.apply_add_message(MessageViewModel::user("show me main.rs".into()));
 
-    // 2. thinking
-    app.push_agent_event(AgentEvent::AiReasoning("I need to read the file...".into()));
+    // 2. Reasoning via state machine streaming_reasoning bridge (was AiReasoning no-op)
     app.process_pending_events();
 
     // 3. tool_call (AI 调用 Read) — ToolStart creates ToolBlock in P5
@@ -2321,8 +2304,7 @@ async fn test_thinking_toolcall_text_rebuild_preserves_user() {
     app.process_pending_events();
     handle.wait_for_render().await;
 
-    // 5. P5: AssistantChunk/StateSnapshot are no-op, push AI VM directly
-    app.push_agent_event(AgentEvent::AiReasoning("Now I can explain...".into()));
+    // 5. Reasoning via state machine bridge, push AI VM directly
     app.apply_add_message(MessageViewModel::from_base_message(
         &BaseMessage::ai("Here is the content of main.rs:"),
         &[],

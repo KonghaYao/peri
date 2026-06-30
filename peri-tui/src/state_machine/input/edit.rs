@@ -138,7 +138,8 @@ impl InputEdit for InputState {
     fn move_cursor_up(&mut self, extend_selection: bool) {
         if self.cursor.row > 0 {
             let new_row = self.cursor.row - 1;
-            let col = self.cursor.col_byte.min(self.lines[new_row].len());
+            let col =
+                CursorPos::snap_col_to_char_boundary(&self.lines[new_row], self.cursor.col_byte);
             self.cursor = CursorPos::new(new_row, col);
         }
         if extend_selection {
@@ -151,7 +152,8 @@ impl InputEdit for InputState {
     fn move_cursor_down(&mut self, extend_selection: bool) {
         if self.cursor.row + 1 < self.lines.len() {
             let new_row = self.cursor.row + 1;
-            let col = self.cursor.col_byte.min(self.lines[new_row].len());
+            let col =
+                CursorPos::snap_col_to_char_boundary(&self.lines[new_row], self.cursor.col_byte);
             self.cursor = CursorPos::new(new_row, col);
         }
         if extend_selection {

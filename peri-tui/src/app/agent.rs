@@ -1,6 +1,7 @@
 // ── Live code retained after unified event mapping ──
 // map_acp_event: handles categories ②③ only
-// Category ① events now come through session/update → handle_session_update_peri()
+// Category ① events (TextChunk) now come through session/update → handle_session_update_peri()
+// Note: AiReasoning removed — reasoning rendered via state machine streaming_reasoning bridge (P5)
 
 use peri_acp::event::AcpEvent;
 
@@ -10,7 +11,7 @@ use super::AgentEvent;
 /// 将 AcpEvent DTO 映射为 TUI AgentEvent。
 ///
 /// 仅处理 session/update 无法映射的事件（类别②③）。
-/// 类别①事件（TextChunk, AiReasoning, ToolStart, ToolEnd, TodoUpdate）
+/// 类别①事件（TextChunk, ToolStart, ToolEnd, TodoUpdate）
 /// 已通过 session/update → handle_session_update_peri() 处理，此处返回 None。
 pub(crate) fn map_acp_event(event: AcpEvent, _cwd: &str) -> Option<AgentEvent> {
     Some(match event {

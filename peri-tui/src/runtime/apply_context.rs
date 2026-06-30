@@ -139,7 +139,8 @@ impl<'a> ApplyContext<'a> {
             | Effect::ClearTextSelection
             | Effect::OpenRewindPrompt
             | Effect::OpenPanel(_)
-            | Effect::ClosePanel => ApplyOutcome::Ok,
+            | Effect::ClosePanel
+            | Effect::ResumeStreaming => ApplyOutcome::Ok,
         }
     }
 

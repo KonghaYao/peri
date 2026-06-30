@@ -1,8 +1,8 @@
 # CLAUDE.md
 
-## v2 架构状态（2026-06-29）
+## v2 架构状态（2026-06-30）
 
-**当前状态**：**v2 stages 单路径架构（完全清理 + 异步事件回路打通 + TUI MessagePipeline 单一数据源 + ACP/TUI 三层契约就绪 + TUI 状态机骨架就位 + B3 Cutover 完成）**。v1 `ReActAgent` / `executor/` 目录 / `State` trait / `CompactMiddleware` / v1 `MessageQueue` 已物理删除，所有执行路径（main agent / SubAgent / Hook / Workflow）统一通过 v2 `run_react_loop` 驱动。异步事件（cron/channel/workflow/bg_results）通过共享 v2 MessageQueue + TUI polling 接收方主动续跑形成完整回路。TUI MessagePipeline 重构为 `transcript + Option<PartialAiMessage>` 单一数据源架构，v2 stages 在迭代边界 emit `TurnCompleted` 携带全量 transcript 快照，commit_iteration 用替换语义吸收——修复多迭代场景下文本渲染在工具之前的顺序 bug（详见 `docs/design/peri-tui-message-pipeline-v2.md`）。
+**当前状态**：**v2 stages 单路径架构（完全清理 + 异步事件回路打通 + TUI MessagePipeline 单一数据源 + ACP/TUI 三层契约就绪 + TUI 状态机骨架就位 + B3 Cutover 完成 + 流式输出/复制修复）**。v1 `ReActAgent` / `executor/` 目录 / `State` trait / `CompactMiddleware` / v1 `MessageQueue` 已物理删除，所有执行路径（main agent / SubAgent / Hook / Workflow）统一通过 v2 `run_react_loop` 驱动。异步事件（cron/channel/workflow/bg_results）通过共享 v2 MessageQueue + TUI polling 接收方主动续跑形成完整回路。TUI MessagePipeline 重构为 `transcript + Option<PartialAiMessage>` 单一数据源架构，v2 stages 在迭代边界 emit `TurnCompleted` 携带全量 transcript 快照，commit_iteration 用替换语义吸收——修复多迭代场景下文本渲染在工具之前的顺序 bug（详见 `docs/design/peri-tui-message-pipeline-v2.md`）。
 
 ### 已完成（ultracode v2 重构批次：Workflow A/B1/B2/B3）
 
@@ -34,11 +34,13 @@
   - **1a. 纯状态机路径**：`TuiEvent → SmEvent → state_machine::handle → (State, Vec<Effect>)`，处理所有可纯函数化的事件（Key 快捷键/BackTab/Enter/Esc、Mouse、Paste、Tick、Resize、AcpDisconnected、Shutdown）。
   - **1b. Legacy 键盘兜底**：`keyboard::handle_key_event` 仅处理状态机未覆盖的复杂 UI 交互（panel 分发、popup、setup wizard、textarea 输入、@mention/slash hint、history）。`is_sm_handled_shortcut()` 过滤 BackTab/Ctrl+T/Ctrl+Shift+T/Ctrl+B/Ctrl+O 防止双重执行。
   - **1c. 合并去重**：Render 效应去重后统一执行。**键盘模块已是最后剩余 `&mut App` 消费者**，隔离良好——完整 Effect-ization 需 50+ 新变体，暂不推进。
-  - `Effect` 枚举从 15 扩展到 25 变体（新增：MouseTextareaClick/Drag、MouseRelease、PasteText、InterruptAgent、ClearPendingMessages、PushSystemNote、OpenThreadWithFeedback、MemoryPanelOpenEditor、CycleModel、CycleProvider、CyclePermissionMode、FocusBgBar、ToggleDiff、PollWorkflow、ClearTextSelection、OpenRewindPrompt）。
-  - `idle.rs` 测试从 84 扩展到 130（新增 46 个测试覆盖全部新 key/mouse/paste/tick/resize/disconnected 分支）。
+  - `Effect` 枚举从 15 扩展到 32 变体（新增：MouseTextareaClick/Drag、MouseRelease、PasteText、InterruptAgent、ClearPendingMessages、PushSystemNote、OpenThreadWithFeedback、MemoryPanelOpenEditor、CycleModel、CycleProvider、CyclePermissionMode、FocusBgBar、ToggleDiff、PollWorkflow、ClearTextSelection、OpenRewindPrompt）。
+  - `idle.rs` 26 测试 + `streaming.rs` 8 测试 + `switching.rs` 5 测试 + `modal.rs` 22 测试。SM transitions 合计 162 测试全过。
   - `apply_context.rs` 防御性 no-op 分支随 Effect 扩展同步更新。
 - ✅ **B3 Additional（Setup Wizard/Bar Focus/Popups/AcpEvent 完整保留）**：`setup_wizard.rs`（82 行）、`bar_focus.rs`（89 行）、`popups.rs`（138 行）、`handle_acp_event`（~120 行）全部保留——这些路径本质上是 UI 状态转换（非纯函数），通过 keyboard dispatch 或 direct call 执行，与状态机互不干扰。
-- ✅ 3049→3349 测试全过，`cargo build --workspace` 绿，`grep -r 'ReActAgent'` 零结果
+- ✅ peri-tui 891 测试全过，`cargo build --workspace` 绿，`grep -r 'ReActAgent'` 零结果
+- ✅ **Bug Fix：流式输出不显示（多轮迭代）**：v2 多轮 ReAct 循环中，`streaming_suppressed` 在 TurnCommitted 后设为 `true`，仅 TurnDone→Idle 时重置。但 ViewCommit 在迭代间会重置 `current_turn`，下一轮 TextChunk 到达时 `streaming_suppressed` 仍为 `true`，P5 桥接因此清空流式文本而非填充。**修复**：新增 `Effect::ResumeStreaming`，ViewCommit 处理器发出此 effect → main_loop 重置 `streaming_suppressed = false`（`streaming.rs` / `main_loop.rs` / `effect.rs` / `apply_context.rs`）。
+- ✅ **Bug Fix：复制功能偶发失败（~50% 概率）**：`keyboard_collector.rs` 中 `tokio::select!` 竞态条件——`spawn_blocking`（crossterm poll 50ms）和 `tick_interval.tick()`（50ms）同时就绪时 `select!` 随机选一个。tick 分支获胜时 `JoinHandle` 被丢弃，但后台任务继续运行并调用 `event::read()` 消费了 crossterm 事件，结果无人接收 → 事件永久丢失。MouseUp 事件丢失导致 `copy_selection_to_clipboard` 从未被调用。**修复**：重构为持久化 `spawn_blocking` 任务（独立轮询 crossterm → mpsc channel），异步循环通过 `select!` 从 poll-based `recv()` 读取——不再有 detached task（`keyboard_collector.rs` 重写）。
 
 ### ultracode 未完成（按优先级）
 
@@ -115,6 +117,8 @@ TuiEvent → 1a. state_machine::handle (纯函数) → (State, Vec<Effect>)
 - `handle_acp_event(app, event, data)`：JSON → AcpNotification 桥接，委托 `app.handle_acp_notification()`
 
 **[TRAP]** `is_sm_handled_shortcut()` 必须与 `idle.rs` 的 Ctrl+Char 分支保持同步——增删快捷键时两边都要更新。
+
+**[TRAP]** `keyboard_collector.rs` **禁止用 `tokio::select!` 同时竞态 `spawn_blocking`（crossterm poll）和 tick interval**。两者都是 50ms 就绪，`select!` 随机选一个。tick 分支获胜时 `JoinHandle` 被丢弃但后台任务继续运行——它调用 `event::read()` 消费事件，结果无人接收，事件永久丢失。修复方案：持久化 `spawn_blocking` 任务 → mpsc channel → `select!` 从 poll-based `recv()` 读取（见 2026-06-30 修复）。
 
 ### 关键架构点
 

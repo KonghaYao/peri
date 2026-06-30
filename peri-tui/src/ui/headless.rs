@@ -7,7 +7,7 @@
 //!
 //! ```rust,ignore
 //! let (mut app, mut handle) = App::new_headless(120, 30).await;
-//! app.push_agent_event(AgentEvent::AssistantChunk { chunk: "Hello".into(), source_agent_id: None });
+//! app.push_agent_event(AgentEvent::AssistantChunk);
 //! app.process_pending_events();
 //! handle.render(&mut app).await.unwrap();
 //! assert!(handle.contains("Hello"));

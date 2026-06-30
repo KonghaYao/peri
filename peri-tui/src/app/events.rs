@@ -23,12 +23,8 @@ pub enum AgentEvent {
         is_error: bool,
         source_agent_id: Option<String>,
     },
-    AssistantChunk {
-        chunk: String,
-        source_agent_id: Option<String>,
-    },
-    /// AI 推理/思考内容（与文本内容分开）
-    AiReasoning(String),
+    /// Agent 开始回复信号（触发 spinner 状态切换，清除重试状态）
+    AssistantChunk,
     Done,
     Error(String),
     /// 用户中断（Ctrl+C），工具已以 error 结尾，消息已持久化

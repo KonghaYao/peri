@@ -97,27 +97,63 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
             (State::Idle(state), vec![Effect::Render])
         }
 
-        // Interaction requests: P3 will enter Modal here.
-        Event::AcpEvent(AcpEventData::HitlPending(_))
-        | Event::AcpEvent(AcpEventData::AskUser(_))
-        | Event::AcpEvent(AcpEventData::RewindPreview(_))
-        | Event::AcpEvent(AcpEventData::OauthNeeded(_))
-        | Event::AcpEvent(AcpEventData::TextChunk(_))
-        | Event::AcpEvent(AcpEventData::ReasoningChunk(_))
-        | Event::AcpEvent(AcpEventData::ToolStarted(_))
-        | Event::AcpEvent(AcpEventData::ToolEnded(_))
-        | Event::AcpEvent(AcpEventData::TurnDone)
-        | Event::AcpEvent(AcpEventData::TurnInterrupted(_))
-        | Event::AcpEvent(AcpEventData::TokenUsage(_))
+        // -- §4.1 Streaming events: transition Idle → Streaming --------------
+        // Arrives when agent starts producing output (out-of-band or after
+        // SubmitMessage). Transition to Streaming so incremental data can
+        // accumulate in current_turn.
+        Event::AcpEvent(AcpEventData::TextChunk(tc)) => {
+            let mut streaming = state.into_streaming();
+            streaming.current_turn.append_text(&tc.text);
+            (State::Streaming(streaming), vec![Effect::Render])
+        }
+        Event::AcpEvent(AcpEventData::ReasoningChunk(rc)) => {
+            let mut streaming = state.into_streaming();
+            streaming.current_turn.append_reasoning(&rc.text);
+            (State::Streaming(streaming), vec![Effect::Render])
+        }
+        Event::AcpEvent(AcpEventData::ToolStarted(ts)) => {
+            let mut streaming = state.into_streaming();
+            streaming.current_turn.start_tool(
+                super::super::current_turn::ToolCardAccumulator::new(
+                    ts.tool_id,
+                    ts.tool_name,
+                    ts.input_summary,
+                ),
+            );
+            (State::Streaming(streaming), vec![Effect::Render])
+        }
+        Event::AcpEvent(AcpEventData::ToolEnded(te)) => {
+            let mut streaming = state.into_streaming();
+            streaming
+                .current_turn
+                .end_tool(&te.tool_id, te.output_summary, te.is_error);
+            (State::Streaming(streaming), vec![Effect::Render])
+        }
+
+        // -- §4.2 Boundary events in Idle (race / delayed) --------------------
+        Event::AcpEvent(AcpEventData::TurnDone)
+        | Event::AcpEvent(AcpEventData::TurnInterrupted(_)) => {
+            // Agent finished but we're already Idle — no-op.
+            (State::Idle(state), Vec::new())
+        }
+
+        // -- §4.3 Status: drop silently in Idle (no active turn) --------------
+        Event::AcpEvent(AcpEventData::TokenUsage(_))
         | Event::AcpEvent(AcpEventData::ToolCount(_))
         | Event::AcpEvent(AcpEventData::Progress(_))
         | Event::AcpEvent(AcpEventData::BudgetWarning(_))
         | Event::AcpEvent(AcpEventData::SystemNotification(_))
         | Event::AcpEvent(AcpEventData::SubagentStarted(_))
         | Event::AcpEvent(AcpEventData::SubagentStopped(_))
-        | Event::AcpEvent(AcpEventData::Unknown { .. }) => {
-            // Either out-of-band (Agent resumed on its own -> should have
-            // transitioned to Streaming via main loop) or irrelevant in Idle.
+        | Event::AcpEvent(AcpEventData::Unknown { .. }) => (State::Idle(state), Vec::new()),
+
+        // Interaction requests: P3 will enter Modal here.
+        Event::AcpEvent(AcpEventData::HitlPending(_))
+        | Event::AcpEvent(AcpEventData::AskUser(_))
+        | Event::AcpEvent(AcpEventData::RewindPreview(_))
+        | Event::AcpEvent(AcpEventData::OauthNeeded(_)) => {
+            // P3 will build a real Handler from the payload and enter Modal.
+            // For P2 we just stay Idle.
             (State::Idle(state), Vec::new())
         }
 
@@ -160,11 +196,10 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
             state.input.history.push(text.clone());
             state.history_index = None;
 
-            let params = serde_json::json!({ "text": text });
-            let effects = vec![Effect::SendToAcp {
-                method: "session/prompt".into(),
-                params,
-            }];
+            // SubmitMessage routes through main_loop → app.submit_message(),
+            // which sends to ACP AND clears the TextArea. Using raw SendToAcp
+            // would bypass TextArea cleanup, causing submitted text to reappear.
+            let effects = vec![Effect::SubmitMessage { text }];
 
             // Enter Streaming -- empty current_turn, preserved view+input.
             let streaming = StreamingState {
@@ -438,11 +473,10 @@ mod tests {
         assert!(matches!(next, State::Streaming(_)));
         assert_eq!(effects.len(), 1);
         match &effects[0] {
-            Effect::SendToAcp { method, params } => {
-                assert_eq!(method, "session/prompt");
-                assert_eq!(params["text"], "hello world");
+            Effect::SubmitMessage { text } => {
+                assert_eq!(text, "hello world");
             }
-            _ => panic!("expected SendToAcp effect"),
+            _ => panic!("expected SubmitMessage effect"),
         }
     }
 
@@ -726,5 +760,87 @@ mod tests {
             effects.iter().any(|e| matches!(e, Effect::Render)),
             "Mouse up should also emit Render"
         );
+    }
+
+    // ── Streaming events during Idle → transition to Streaming ──────────
+
+    #[test]
+    fn test_text_chunk_in_idle_transitions_to_streaming() {
+        // 第一个流式事件到达时，Idle 应转换到 Streaming 并累积数据。
+        use peri_acp_types::event_data::TextChunk;
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::TextChunk(TextChunk {
+                text: "hello streaming".into(),
+                agent_id: None,
+            })),
+        );
+        match next {
+            State::Streaming(s) => {
+                assert_eq!(s.current_turn.text, "hello streaming");
+                assert!(s.current_turn.active);
+            }
+            other => panic!(
+                "expected Streaming after TextChunk in Idle, got {:?}",
+                other
+            ),
+        }
+        assert_eq!(effects, vec![Effect::Render]);
+    }
+
+    #[test]
+    fn test_reasoning_chunk_in_idle_transitions_to_streaming() {
+        use peri_acp_types::event_data::ReasoningChunk;
+        let state = make_state();
+        let (next, _effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::ReasoningChunk(ReasoningChunk {
+                text: "thinking...".into(),
+                agent_id: None,
+            })),
+        );
+        match next {
+            State::Streaming(s) => {
+                assert_eq!(s.current_turn.reasoning, "thinking...");
+            }
+            other => panic!(
+                "expected Streaming after ReasoningChunk in Idle, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_tool_started_in_idle_transitions_to_streaming() {
+        use peri_acp_types::event_data::ToolStarted;
+        let state = make_state();
+        let (next, _effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::ToolStarted(ToolStarted {
+                tool_id: "t1".into(),
+                tool_name: "Read".into(),
+                input_summary: "path: foo.rs".into(),
+                agent_id: None,
+            })),
+        );
+        match next {
+            State::Streaming(s) => {
+                assert!(!s.current_turn.tool_cards.is_empty());
+            }
+            other => panic!(
+                "expected Streaming after ToolStarted in Idle, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_turn_done_in_idle_is_noop() {
+        // TurnDone 在 Idle 是 race/delayed，保持 Idle。
+        let state = make_state();
+        let (next, effects) = handle(state, Event::AcpEvent(AcpEventData::TurnDone));
+        assert!(matches!(next, State::Idle(_)));
+        assert!(effects.is_empty());
     }
 }

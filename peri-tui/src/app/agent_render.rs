@@ -14,10 +14,9 @@ impl App {
 
     /// 添加系统通知并记录锚点位置。
     pub(crate) fn push_system_note(&mut self, content: String) {
-        self.session_mgr
-            .current_mut()
-            .messages
-            .push_system_note(content);
+        let session = self.session_mgr.current_mut();
+        session.messages.push_system_note(content);
+        session.messages.message_cache = None;
     }
 
     /// P5: Direct VM push without PipelineAction indirection.
@@ -26,6 +25,8 @@ impl App {
         let anchor = session.messages.view_messages.len();
         session.messages.ephemeral_notes.push((anchor, vm.clone()));
         session.messages.view_messages.push(vm);
+        // Invalidate render cache — view_messages mutated.
+        session.messages.message_cache = None;
     }
 
     /// P5: Direct view_messages rebuild without PipelineAction indirection.
@@ -91,5 +92,10 @@ impl App {
                 .insert(insert_pos, vm.clone());
             session.messages.ephemeral_notes.push((insert_pos, vm));
         }
+
+        // Invalidate render cache: view_messages was modified (drain + extend).
+        // Without this, render_messages() reuses stale cache because needs_rebuild
+        // only checks width changes, not view_messages mutations.
+        session.messages.message_cache = None;
     }
 }
