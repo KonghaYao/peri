@@ -257,3 +257,37 @@
 - 关键风险 3：interrupt fallback 是死代码 —— 工作流建议直接删除（acp_client 始终 Some）
 
 ---
+
+### cron #21 — 2026-07-01 — step 7c 完成（中断路径全量迁移到 v2 ViewStore）
+
+**完成**（commit `cd883e0a`，1056 测试全过 +3）：
+
+**方案 A 实施**（workflow `wjdz1xyqm` 设计）—— 通过调用链传 `&[ViewModel]` 切片：
+- `Effect::PollAgent` 处理器在 main_loop 捕获 `state.view_models()` 快照一次
+- 参数透传链：`main_loop::handle_acp_event` → `handle_acp_notification` → `handle_agent_event` → `handle_interrupted`
+- `handle_interrupted` 全量切换到 v2 ViewStore helpers：
+  - `last_user_bubble_index(view_slice)` 替换 v1 `view_messages.iter().rposition(UserBubble)`
+  - `has_tool_cards_after(view_slice, idx)` 替换 v1 `view_messages.iter().skip().any(ToolCallGroup|ToolBlock)`
+  - 指标字段重命名 `messages_in_state` → `view_vm_count`（用 `view_slice.len()`）
+
+**关键风险 #2 解决（current_turn 数据丢失）**：
+- 问题：`StreamingState::into_idle()` 丢弃 `current_turn`，中断时已流式产出的 text/reasoning/tool cards 会消失
+- 修复：streaming.rs `TurnInterrupted` 处理器在 `into_idle()` 前**先**将 `current_turn.view_models()` 持久化到 `state.view`，确保 `handle_interrupted` 的 `has_tool_cards_after` 正确检测工具进展（匹配 v1 语义）
+- 3 个新测试覆盖：persist tool cards / persist streaming text / empty current_turn extends nothing
+
+**死代码 interrupt fallback 退役**（关键发现 #3）：
+- `app/mod.rs` 中生产 interrupt fallback（原 421-487 行，~65 行）确认为死代码
+- 生产环境 `acp_client` 始终为 `Some`（`main.rs:816` 启动时设置），该分支永不触发
+- 安全删除：view_messages.rposition / truncate / textarea-restore 逻辑全清
+- 替换为最小兜底（仅 cancel_token / 清 loading 标志）
+
+**关键不变量验证**：
+- v1 `ToolCallGroup|ToolBlock` 在 v2 已扁平化为多个 `ToolCard`（view_mapper.rs 处理），`has_tool_cards_after` 顶层扫描语义匹配
+- 中断后清理路径仍能识别工具进展（已 commit 的 tool cards 在 state.view 中，未 commit 的在 current_turn 中已被持久化）
+
+**剩余 Phase 2.6 工作**（step 7e）：
+- 退役 ~20 个 headless_test 中 `apply_add_message(MessageViewModel::user(...))` 直接 push 模式
+- 删除 `MessageState.view_messages` / `round_start_vm_idx` 字段
+- 估算影响 88+ 测试，需独立窗口
+
+---
