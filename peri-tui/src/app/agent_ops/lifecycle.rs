@@ -347,9 +347,7 @@ mod tests {
             .ui
             .textarea
             .lines()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
+            .to_vec()
             .join("\n");
         assert!(
             textarea_text.contains("hello"),
