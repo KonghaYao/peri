@@ -1,4 +1,8 @@
-use crate::{app::App, command::Command, runtime::effect::Effect};
+use crate::{
+    app::{App, PanelKind},
+    command::Command,
+    runtime::effect::Effect,
+};
 
 pub struct CostCommand;
 
@@ -12,6 +16,6 @@ impl Command for CostCommand {
     }
 
     fn execute(&self, _app: &mut App, _args: &str) -> Vec<Effect> {
-        vec![]
+        vec![Effect::OpenPanel(PanelKind::Status)]
     }
 }
