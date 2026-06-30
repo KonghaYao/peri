@@ -104,7 +104,22 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         let sm_event: SmEvent = event.clone().into();
         let new_state: State;
         let sm_effects: Vec<Effect>;
-        let view_models: Vec<peri_acp_types::view_model::ViewModel> = state.view_models().to_vec();
+        // Cron #28: Composite view_slice = state.view + current_turn's incremental VMs.
+        //
+        // Pre-fix: view_slice came only from state.view_models() (committed snapshot).
+        // handle_interrupted scanned it for ToolCards to decide branch 1 (keep progress)
+        // vs branch 2 (rollback). But current_turn's ToolCards (not yet committed by
+        // ViewCommit) were invisible → branch 2 was chosen incorrectly → user's
+        // submitted message got rolled back even when tools had run.
+        //
+        // Fix: include current_turn's VMs in the slice. Now handle_interrupted sees
+        // the FULL picture (committed + streaming-in-progress) and picks branch 1
+        // correctly when tools are mid-flight.
+        let mut view_models: Vec<peri_acp_types::view_model::ViewModel> =
+            state.view_models().to_vec();
+        if let State::Streaming(s) = &mut state {
+            view_models.extend(s.current_turn.view_models().to_vec());
+        }
         let panel_ctx = build_panel_read_context(app, &view_models);
         match state {
             State::Modal(modal_state) => {

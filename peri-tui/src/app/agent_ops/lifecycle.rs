@@ -230,6 +230,14 @@ impl App {
             vm.recompute_hash();
         }
         self.apply_add_message(vm);
+        // Cron #28: route error message through v2 state.view via
+        // push_system_note (mirrors cron #24/cron #26 queue-and-drain pattern).
+        // Without this, production render (which reads v2 state.view
+        // exclusively) shows NOTHING when the agent errors out — the
+        // error ToolBlock above only reaches v1 view_messages, which is
+        // not on the production render path. Phase 2.6 will retire the
+        // v1 push above; this v2 routing is the load-bearing path.
+        self.push_system_note(format!("⚠️ Agent Error: {}", error_msg));
         self.session_mgr.current_mut().agent.reconcile_already_done = true;
 
         if !self.session_mgr.current_mut().background_agents.is_empty() {
@@ -445,6 +453,33 @@ mod tests {
         assert_eq!(
             app.global_ui.pending_view_rewind_to, None,
             "无 last_submitted_text 时不应设置 pending_view_rewind_to"
+        );
+    }
+
+    /// Cron #28: handle_error 必须把错误消息路由到 v2 state.view
+    /// （通过 push_system_note → pending_v2_notes → SM Event::PushSystemNote）。
+    ///
+    /// 历史 bug：handle_error 只调 apply_add_message(vm) 写到 v1 view_messages，
+    /// 但生产渲染独占读 v2 state.view → 用户在 agent 出错时（API 失败、rate limit
+    /// 等）什么都看不到。修复镜像 cron #24/cron #26 queue-and-drain 模式。
+    #[tokio::test]
+    async fn test_handle_error_routes_to_v2_state_view() {
+        let mut app = make_app_with_active_turn().await;
+
+        let _ = app.handle_error("provider rate limited");
+
+        // 验证 push_system_note 入队到 pending_v2_notes（由 main_loop drain）
+        let pending = &app.session_mgr.current().messages.pending_v2_notes;
+        assert_eq!(
+            pending.len(),
+            1,
+            "handle_error must enqueue error message to pending_v2_notes"
+        );
+        // 验证消息文本包含原始 error_msg
+        assert!(
+            pending[0].contains("provider rate limited"),
+            "enqueued note must contain original error message, got: {}",
+            pending[0]
         );
     }
 }
