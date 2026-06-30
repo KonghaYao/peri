@@ -257,7 +257,61 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     needs_render = true;
                 }
                 Effect::UpdateConfig { key, value } => {
-                    tracing::info!(key = %key, value = %value, "UpdateConfig");
+                    let cfg_arc = app.services.peri_config.clone();
+                    let mut cfg = cfg_arc.write();
+                    let parts: Vec<&str> = key.splitn(3, '.').collect();
+                    match parts.as_slice() {
+                        ["active_provider_id"] => {
+                            cfg.config.active_provider_id = value.clone();
+                        }
+                        ["provider", id, field] => {
+                            let provider = cfg.config.providers.iter_mut().find(|p| p.id == *id);
+                            if let Some(p) = provider {
+                                match *field {
+                                    "name" => p.name = Some(value.clone()),
+                                    "type" => p.provider_type = value.clone(),
+                                    "base_url" => p.base_url = value.clone(),
+                                    "api_key" => p.api_key = value.clone(),
+                                    "opus_model" => p.models.opus = value.clone(),
+                                    "sonnet_model" => p.models.sonnet = value.clone(),
+                                    "haiku_model" => p.models.haiku = value.clone(),
+                                    _ => {}
+                                }
+                            } else if !value.is_empty() {
+                                let mut new_provider =
+                                    peri_acp::provider::config::ProviderConfig::default();
+                                new_provider.id = id.to_string();
+                                match *field {
+                                    "name" => new_provider.name = Some(value.clone()),
+                                    "type" => new_provider.provider_type = value.clone(),
+                                    "base_url" => new_provider.base_url = value.clone(),
+                                    "api_key" => new_provider.api_key = value.clone(),
+                                    "opus_model" => new_provider.models.opus = value.clone(),
+                                    "sonnet_model" => new_provider.models.sonnet = value.clone(),
+                                    "haiku_model" => new_provider.models.haiku = value.clone(),
+                                    _ => {}
+                                }
+                                cfg.config.providers.push(new_provider);
+                            }
+                        }
+                        _ => {
+                            tracing::warn!(
+                                key = %key,
+                                value = %value,
+                                "UpdateConfig: unknown key path"
+                            );
+                        }
+                    }
+                    let _ = App::save_config(&cfg, app.services.config_path_override.as_deref());
+                    drop(cfg);
+                    if let Some(ref acp_client) = app.acp_client {
+                        let acp = acp_client.clone();
+                        let k = key.clone();
+                        let v = value.clone();
+                        tokio::spawn(async move {
+                            let _ = acp.set_config_option(&k, &v).await;
+                        });
+                    }
                     needs_render = true;
                 }
                 Effect::SwitchSession(session_id) => {

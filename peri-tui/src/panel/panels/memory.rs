@@ -126,6 +126,15 @@ impl MemoryPanel {
         Self::new(String::new(), None)
     }
 
+    /// Construct a panel from live App data.
+    ///
+    /// Reads `cwd` from `app.services` and resolves the user's home
+    /// directory for project-level and global CLAUDE.md paths.
+    pub fn from_app(app: &crate::app::App) -> Self {
+        let home_dir = dirs_next::home_dir();
+        Self::new(app.services.cwd.clone(), home_dir)
+    }
+
     /// Construct a new memory panel.
     ///
     /// `cwd` is the project working directory (used to locate project-level

@@ -94,6 +94,15 @@ impl HooksPanel {
         }
     }
 
+    /// Construct a panel from live App data.
+    ///
+    /// Hook data arrives asynchronously via ACP queries. Currently
+    /// delegates to `empty()` with data populated later via
+    /// `set_hooks()` when ACP results arrive.
+    pub fn from_app(_app: &crate::app::App) -> Self {
+        Self::empty()
+    }
+
     /// Create a panel from a list of `HookDto`.
     ///
     /// Entries are sorted by event name for consistent display.

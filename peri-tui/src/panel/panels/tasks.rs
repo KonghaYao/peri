@@ -66,6 +66,34 @@ impl TasksPanel {
         }
     }
 
+    /// Construct a panel from live App data.
+    ///
+    /// Reads cron tasks from `app.services.cron.scheduler` and converts
+    /// `CronTask` runtime types to panel-local `CronTaskDto` DTOs.
+    pub fn from_app(app: &crate::app::App) -> Self {
+        use peri_middlewares::cron::CronTask; // P4b: runtime dependency, conversion to DTO
+        let tasks: Vec<CronTaskDto> = app
+            .services
+            .cron
+            .scheduler
+            .lock()
+            .list_tasks()
+            .into_iter()
+            .map(|t: &CronTask| CronTaskDto {
+                id: t.id.clone(),
+                schedule: t.expression.clone(),
+                prompt: t.prompt.clone(),
+                next_fire: t.next_fire.map(|dt| dt.to_rfc3339()),
+                enabled: t.enabled,
+            })
+            .collect();
+        if tasks.is_empty() {
+            Self::empty()
+        } else {
+            Self::new(tasks)
+        }
+    }
+
     /// Create a panel from a list of `CronTaskDto`.
     pub fn new(tasks: Vec<CronTaskDto>) -> Self {
         Self {

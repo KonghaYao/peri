@@ -86,8 +86,8 @@ pub fn create_panel(kind: PanelKind, app: &crate::app::App) -> Box<dyn super::Pa
     match kind {
         PanelKind::Model => Box::new(super::panels::model::ModelPanel::from_app(app)),
         PanelKind::Login => Box::new(super::panels::login::LoginPanel::from_app(app)),
-        PanelKind::Agent => Box::new(super::panels::agent::AgentPanel::empty()),
-        PanelKind::Hooks => Box::new(super::panels::hooks::HooksPanel::empty()),
+        PanelKind::Agent => Box::new(super::panels::agent::AgentPanel::from_app(app)),
+        PanelKind::Hooks => Box::new(super::panels::hooks::HooksPanel::from_app(app)),
         PanelKind::Config => Box::new(super::panels::config::ConfigPanel::from_app(app)),
         PanelKind::ThreadBrowser => Box::new(
             super::panels::thread_browser::ThreadBrowserPanel::from_app(app),
@@ -96,9 +96,9 @@ pub fn create_panel(kind: PanelKind, app: &crate::app::App) -> Box<dyn super::Pa
         PanelKind::Plugin => Box::new(super::panels::plugin::PluginPanel::from_app(app)),
         PanelKind::Cron => Box::new(super::panels::cron::CronPanel::from_app(app)),
         PanelKind::Status => Box::new(super::panels::status::StatusPanel::from_app(app)),
-        PanelKind::Memory => Box::new(super::panels::memory::MemoryPanel::empty()),
-        PanelKind::Tasks => Box::new(super::panels::tasks::TasksPanel::empty()),
-        PanelKind::Betas => Box::new(super::panels::betas::BetasPanel::empty()),
+        PanelKind::Memory => Box::new(super::panels::memory::MemoryPanel::from_app(app)),
+        PanelKind::Tasks => Box::new(super::panels::tasks::TasksPanel::from_app(app)),
+        PanelKind::Betas => Box::new(super::panels::betas::BetasPanel::from_app(app)),
         PanelKind::Workflow => Box::new(super::panels::workflow::WorkflowPanel::from_app(app)),
     }
 }

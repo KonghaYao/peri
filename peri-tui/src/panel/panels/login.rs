@@ -642,6 +642,12 @@ impl PanelState for LoginPanel {
                     ctrl: false,
                     alt: false,
                     shift: false,
+                }
+                | Input {
+                    key: Key::Enter,
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
                 } => {
                     self.enter_edit();
                     vec![]
@@ -1227,6 +1233,27 @@ mod tests {
             }
         ));
         // Verify fields are populated from selected provider
+        assert_eq!(panel.buf_name.value(), "Anthropic");
+        assert_eq!(panel.buf_type, "anthropic");
+    }
+
+    #[test]
+    #[test]
+    fn test_enter_enters_edit_mode() {
+        let mut panel = LoginPanel::with_providers(sample_providers());
+        let ctx = make_ctx();
+        assert!(matches!(panel.mode, LoginMode::Browse));
+
+        panel.handle_key(enter_input(), &ctx);
+        assert!(
+            matches!(
+                panel.mode,
+                LoginMode::Edit {
+                    field: LoginField::Name
+                }
+            ),
+            "Enter should enter edit mode on selected provider"
+        );
         assert_eq!(panel.buf_name.value(), "Anthropic");
         assert_eq!(panel.buf_type, "anthropic");
     }

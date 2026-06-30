@@ -120,6 +120,15 @@ impl AgentPanel {
         Self::new(Vec::new(), None)
     }
 
+    /// Construct a panel from live App data.
+    ///
+    /// Agent data arrives asynchronously via ACP queries (scan results
+    /// from `.claude/agents/`). Currently delegates to `empty()` with
+    /// data populated later via `set_agents()` when ACP results arrive.
+    pub fn from_app(_app: &crate::app::App) -> Self {
+        Self::empty()
+    }
+
     /// Construct a new agent panel.
     ///
     /// `agents` is the list of available agents. `current_id` is the currently

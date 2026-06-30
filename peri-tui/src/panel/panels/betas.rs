@@ -65,6 +65,15 @@ impl BetasPanel {
         Self { entries, cursor: 0 }
     }
 
+    /// Construct a panel from live App data.
+    ///
+    /// Currently delegates to `empty()` since there are no active beta
+    /// features. When beta keys are added to `BETA_KEYS`, this can read
+    /// their actual enabled state from `app.services.peri_config`.
+    pub fn from_app(_app: &crate::app::App) -> Self {
+        Self::empty()
+    }
+
     /// Toggle the entry at the current cursor position.
     fn toggle_current(&mut self) {
         if let Some(entry) = self.entries.get_mut(self.cursor) {
