@@ -45,9 +45,9 @@
 </div>
 
 <div class="summary">
-  <div class="stat done"><span class="num">9</span><span class="label">Phase 已完成</span></div>
+  <div class="stat done"><span class="num">10</span><span class="label">Phase 已完成</span></div>
   <div class="stat active"><span class="num">0</span><span class="label">Phase 进行中</span></div>
-  <div class="stat pending"><span class="num">2</span><span class="label">Phase 待开始</span></div>
+  <div class="stat pending"><span class="num">1</span><span class="label">Phase 待开始</span></div>
   <div class="stat pending"><span class="num">15</span><span class="label">已识别缺陷</span></div>
 </div>
 
@@ -66,7 +66,7 @@
     <tr><td>1.6</td><td>Streaming→Modal 可达 + Status 事件</td><td class="status s-done">1.6a 完成</td><td>1.6a：streaming.rs handle_key 镜像 Idle 的 Ctrl 快捷键（Ctrl+P/T/B/O/Shift+T/BackTab），main_loop OpenPanel 接受 Streaming 入口，ClosePanel 检测 saved_current_turn 恢复 Streaming ✓；1.6b：§4.3 status 事件（TokenUsage/ToolCount/Progress）状态栏渲染（推迟到状态栏重构）</td></tr>
     <tr><td>2</td><td>消息源单一化</td><td class="status s-pending">待开始</td><td>删 origin_messages/view_messages，统一 state.view + current_turn</td></tr>
     <tr><td>3</td><td>清理死 Effect + Switching</td><td class="status s-active">Phase 3a/3b 完成</td><td>3a：5 个真死 Effect 删除 ✓；3b：modal.rs TLS stubs → #[cfg(test)] ✓（handle/dispatch_key/dispatch_mouse_tls/dispatch_paste_tls/transition_to_idle*/TLS statics 全部 test-only，state_machine::handle Modal arm 改为生产 no-op + 测试 dispatch）；3c：State::Switching 完善（推迟到独立窗口）</td></tr>
-    <tr><td>4</td><td>CLAUDE.md 同步</td><td class="status s-pending">待开始</td><td>peri-tui + 根 CLAUDE.md 删除过时引用</td></tr>
+    <tr><td>4</td><td>CLAUDE.md 同步</td><td class="status s-done">完成</td><td>peri-tui/CLAUDE.md 重写（删 message_pipeline/RenderThread/ephemeral_notes + 加 v2 架构说明 + 双轨弹窗系统 + v2 PanelState trait 14 面板）· 根 CLAUDE.md Effect 数 32 → 26（全变体列表）+ Phase 1.3-1.4 进度引用 + 测试 891 → 998（commit <code>b3191bed</code>）</td></tr>
   </tbody>
 </table>
 
@@ -103,9 +103,9 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #7（Phase 1.4 全部完成）<br>
-  <strong>本窗口成果</strong>：3 个本地 commit（<code>89738a7e</code> ask_user + <code>ee9fe41c</code> oauth + <code>17932367</code> clippy cleanup，均不 push）· Phase 1.4-ask_user 实现 AskUserHandler.render（Tab 头部 ☐/✔ + 编号选项 ❯ ● + 描述行 + 差异化 hint）· Phase 1.4-oauth 实现 OauthHandler.render（URL 高亮 + url_opened 反馈）· 18 个新测试（含 TestBackend 实际绘制）· 998 测试全过<br>
-  <strong>下一步</strong>：Phase 2 消息源单一化（删 origin_messages/view_messages，统一 state.view + current_turn） · Phase 4 CLAUDE.md 同步。也可调研 v1/v2 双路径冲突（agent_ops_interaction 仍在设置 InteractionPrompt 字段）
+  <strong>最后更新</strong>：2026-07-01 cron #7（Phase 1.4 全部完成 + Phase 4 CLAUDE.md 同步 + 缺陷 #15 发现）<br>
+  <strong>本窗口成果</strong>：5 个本地 commit（<code>89738a7e</code> ask_user + <code>ff319251</code> ask_user cleanup + <code>ee9fe41c</code> oauth + <code>17932367</code> oauth cleanup + <code>a90d0272</code> 看板 + <code>b3191bed</code> Phase 4，均不 push）· Phase 1.4-ask_user/oauth render + desired_height · Phase 4 重写 peri-tui/CLAUDE.md（删除 message_pipeline/RenderThread/ephemeral_notes 等过时引用）+ 根 CLAUDE.md Effect 数 32 → 26 · <strong>发现 P0 缺陷 #15</strong>：v2 Interaction Handler 路径生产仍是死代码（ACP 层无 AcpEvent::HitlPending 变体，mapper.rs:265 注释）· 998 测试全过<br>
+  <strong>下一步</strong>：① Phase 2 消息源单一化（删 view_messages，统一 state.view + current_turn，受缺陷 #15 影响需先评估）② 缺陷 #15 跨层修复（需 ACP 层扩展 ExecutorEvent + mapper Category ②，超出 TUI 重构范围）③ Phase 3c State::Switching 完善（推迟到独立窗口）
 </div>
 
 </body>
