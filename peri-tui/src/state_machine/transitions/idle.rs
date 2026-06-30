@@ -7,12 +7,33 @@
 //! transition to Modal in P3; for P2 they are accepted as no-ops.
 //!
 //! Reference: `docs/design/peri-tui-architecture.md` section 8.6.
+//!
+//! # Input editing — textarea is the single source of truth
+//!
+//! The SM **does not** handle text-editing keys (Backspace/Delete/Home/End/
+//! Left/Right/Ctrl+A/U/W/普通 Char). These are owned exclusively by the
+//! keyboard fallback path (`event::keyboard::normal_keys`), which mutates
+//! the `tui_textarea::TextArea` widget directly. The main loop's 2b sync
+//! (TextArea → InputState, conditional on `keyboard_did_run`) then reflects
+//! the widget state back into `InputState` for read-only use by SM branches
+//! like Enter/Up/Down.
+//!
+//! Rationale: handling these keys in the SM caused two bugs:
+//! 1. **Double-execution** — both SM and keyboard fallback processed the
+//!    same key, diverging `InputState` and `TextArea`.
+//! 2. **2b sync revert** — even with double-execution filtered, the
+//!    unconditional 2b sync overwrote SM's `InputState` edit with the
+//!    stale `TextArea` value, so Backspace silently failed.
+//!
+//! Prediction clearing (a side-effect previously attached to Backspace/
+//! Ctrl+U/Ctrl+W) is now done in the 2b sync layer by comparing text
+//! length before/after.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::super::current_turn::CurrentTurn;
 use super::super::event::{AcpEventData, Event};
-use super::super::input::{CursorPos, InputEdit};
+use super::super::input::CursorPos;
 use super::super::state::{DoubleEscTracker, IdleState, State, StreamingState};
 use crate::app::panel_types::PanelKind;
 use crate::runtime::effect::Effect;
@@ -264,23 +285,12 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
                     // acknowledges the key with a re-render.
                     (State::Idle(state), vec![Effect::Render])
                 }
-                'a' => {
-                    use crate::state_machine::input::InputEdit;
-                    state.input.select_all();
-                    (State::Idle(state), vec![Effect::Render])
-                }
-                'u' => {
-                    use crate::state_machine::input::InputEdit;
-                    state.input.delete_line_by_head();
-                    state.input.prediction = None;
-                    (State::Idle(state), vec![Effect::Render])
-                }
-                'w' => {
-                    use crate::state_machine::input::InputEdit;
-                    state.input.delete_word();
-                    state.input.prediction = None;
-                    (State::Idle(state), vec![Effect::Render])
-                }
+                // Ctrl+A/U/W + Backspace/Delete/Home/End/Left/Right are
+                // intentionally NOT handled by the SM — keyboard fallback
+                // owns textarea editing (textarea is the single source of
+                // truth for input). See module-level note above. SM handling
+                // these would double-execute against keyboard fallback and
+                // get reverted by the 2b sync (TextArea → InputState).
                 't' => {
                     // Ctrl+T: cycle model alias (without Shift, handled above).
                     (State::Idle(state), vec![Effect::CycleModel, Effect::Render])
@@ -305,53 +315,12 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
             }
         }
 
-        // -- Backspace -------------------------------------------------------
-        KeyCode::Backspace => {
-            let before_len = state.input.text().len();
-            state.input.backspace();
-            let after_len = state.input.text().len();
-            if after_len < before_len {
-                state.input.prediction = None;
-                return (State::Idle(state), vec![Effect::Render]);
-            }
-            (State::Idle(state), Vec::new())
-        }
-
-        // -- Left / Right arrow: move cursor (char-level) -------------------
-        KeyCode::Left => {
-            state.input.move_cursor_left(false);
-            (State::Idle(state), vec![Effect::Render])
-        }
-
-        KeyCode::Right => {
-            state.input.move_cursor_right(false);
-            (State::Idle(state), vec![Effect::Render])
-        }
-
-        // -- Home / End: line navigation -----------------------------------
-        KeyCode::Home => {
-            state
-                .input
-                .move_cursor_home(key.modifiers.intersects(KeyModifiers::SHIFT));
-            (State::Idle(state), vec![Effect::Render])
-        }
-
-        KeyCode::End => {
-            state
-                .input
-                .move_cursor_end(key.modifiers.intersects(KeyModifiers::SHIFT));
-            (State::Idle(state), vec![Effect::Render])
-        }
-
-        // -- Delete: forward delete -----------------------------------------
-        KeyCode::Delete => {
-            use crate::state_machine::input::InputEdit;
-            // Simulate forward-delete: move right, then backspace.
-            state.input.move_cursor_right(false);
-            state.input.backspace();
-            state.input.prediction = None;
-            (State::Idle(state), vec![Effect::Render])
-        }
+        // -- Backspace/Delete/Home/End/Left/Right: NOT handled by SM -------
+        // These editing keys are owned by the keyboard fallback (textarea
+        // widget is the single source of truth). See module-level note.
+        // SM handling would cause double-execution and get reverted by 2b
+        // sync (TextArea → InputState) — visible as Backspace silently
+        // failing.
 
         // -- Up / Down: history navigation ----------------------------------
         KeyCode::Up => {
@@ -518,19 +487,71 @@ mod tests {
     }
 
     #[test]
-    fn test_backspace_deletes_one_char() {
+    fn test_backspace_is_noop_in_sm() {
+        // SM 不处理 Backspace —— textarea 是 Idle 输入的唯一编辑权威。
+        // Backspace 由 keyboard fallback 处理（修改 textarea widget），
+        // 之后 main_loop 的 2b 同步把结果反映回 InputState。
+        // 参见模块顶部"Input editing"注释。
         let mut state = make_state();
         state.input.insert_str("abc");
-        let (next, _effects) = handle(
+        let (next, effects) = handle(
             state,
             Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
         );
         match next {
             State::Idle(idle) => {
-                assert_eq!(idle.input.text(), "ab");
-                assert_eq!(idle.input.cursor, CursorPos::new(0, 2));
+                // SM 不修改 InputState，文本应保持原样。
+                assert_eq!(idle.input.text(), "abc");
             }
             _ => panic!("expected Idle"),
+        }
+        // SM 也不 emit effects —— keyboard fallback 负责 Render。
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn test_ctrl_a_u_w_are_noop_in_sm() {
+        // Ctrl+A/U/W 同样由 keyboard fallback 独占（select_all /
+        // delete_line_by_head / delete_word 走 textarea widget）。
+        for c in ['a', 'u', 'w'] {
+            let mut state = make_state();
+            state.input.insert_str("hello world");
+            let (next, effects) = handle(
+                state,
+                Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)),
+            );
+            match next {
+                State::Idle(idle) => {
+                    // SM 不修改 InputState。
+                    assert_eq!(idle.input.text(), "hello world", "Ctrl+{c} should be no-op");
+                }
+                _ => panic!("expected Idle"),
+            }
+            assert!(effects.is_empty(), "Ctrl+{c} should emit no effects");
+        }
+    }
+
+    #[test]
+    fn test_navigation_keys_are_noop_in_sm() {
+        // Left/Right/Home/End/Delete 同样由 keyboard fallback 独占。
+        for code in [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Delete,
+        ] {
+            let mut state = make_state();
+            state.input.insert_str("abc");
+            let (next, effects) =
+                handle(state, Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+            match next {
+                State::Idle(idle) => {
+                    assert_eq!(idle.input.text(), "abc", "{code:?} should be no-op");
+                }
+                _ => panic!("expected Idle"),
+            }
+            assert!(effects.is_empty(), "{code:?} should emit no effects");
         }
     }
 

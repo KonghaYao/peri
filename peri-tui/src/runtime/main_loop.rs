@@ -55,6 +55,20 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
     while let Some(event) = rx.recv().await {
         let is_tick = matches!(event, TuiEvent::Tick);
 
+        // ── Pre-event snapshot: textarea text length, used by 2b sync to
+        // clear InputState.prediction when the keyboard fallback shrunk
+        // the buffer (Backspace/Ctrl+U/Ctrl+W). Captured before any event
+        // processing mutates the widget.
+        let old_text_len: usize = app
+            .session_mgr
+            .current()
+            .ui
+            .textarea
+            .lines()
+            .iter()
+            .map(|l| l.chars().count())
+            .sum();
+
         // ── 1a. Drive the pure state machine ────────────────────────────
         // Convert TuiEvent → SmEvent (decode ACP {event, data} into typed
         // AcpEventData variants) and dispatch to the transition function.
@@ -94,10 +108,19 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // These are the only remaining paths not yet handled by the pure
         // state machine. Keyboard dispatch is filtered to avoid double-
         // executing shortcuts the state machine already owns.
+        //
+        // Track whether keyboard fallback actually ran for this event.
+        // The 2b sync (TextArea → InputState) runs ONLY when keyboard
+        // fallback executed — otherwise it would overwrite SM-owned
+        // state changes (e.g. SM clearing InputState on Enter) with the
+        // stale TextArea snapshot. See idle.rs module doc for the full
+        // rationale on textarea being the single source of truth.
+        let mut keyboard_did_run = false;
         let fallback_effects = match &event {
             TuiEvent::Key(key)
                 if !is_sm_handled_shortcut(key, &state, was_idle, is_slash_command) =>
             {
+                keyboard_did_run = true;
                 match keyboard::handle_key_event(app, *key) {
                     Ok(Some(Action::Quit)) => vec![Effect::Quit],
                     Ok(Some(Action::Submit(input))) => {
@@ -534,15 +557,23 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         }
 
         // ── 2b. Sync TextArea → state machine InputState ───────────────
-        // The keyboard module and effects (paste, mouse click) mutate the
-        // TextArea widget directly. After all mutations are done, extract
-        // the new text/cursor into the state machine.
+        // The keyboard module mutates the TextArea widget directly. When it
+        // runs (keyboard_did_run=true), pull the widget's lines+cursor back
+        // into InputState so SM-owned branches (Enter, Up/Down history) see
+        // the latest text. SM-owned state changes (Enter clearing buffer,
+        // history navigation) are NOT overwritten because keyboard_did_run
+        // is false for those events (is_sm_handled_shortcut filters them).
         //
-        // Only lines + cursor are synced from TextArea. Semantic fields
-        // (prediction, at_mention, slash_completion, history, attachments)
-        // are managed independently by the state machine and must NOT be
-        // overwritten by the TextArea snapshot.
-        {
+        // Prediction clearing: previously attached to SM's Backspace/Ctrl+U/
+        // Ctrl+W arms (now deleted). Reimplemented here by comparing text
+        // length before/after — any shrink clears prediction. This catches
+        // all edit paths that reduce text, regardless of which key triggered
+        // it (Backspace, Ctrl+W word-delete, Ctrl+U line-delete, etc.).
+        //
+        // Semantic fields (at_mention, slash_completion, history, attachments)
+        // remain managed independently by the state machine — only lines +
+        // cursor are synced, plus the prediction side-effect on shrink.
+        if keyboard_did_run {
             let ta = &app.session_mgr.current().ui.textarea;
             let lines: Vec<String> = ta.lines().to_vec();
             let (row, col_char) = ta.cursor();
@@ -553,14 +584,22 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 .map(|line| line.chars().take(col_char).map(|c| c.len_utf8()).sum())
                 .unwrap_or(0);
             let cursor = crate::state_machine::input::CursorPos::new(row, col_byte);
+            let new_text_len: usize = lines.iter().map(|l| l.chars().count()).sum();
+            let text_shrunk = new_text_len < old_text_len;
             match &mut state {
                 State::Idle(idle) => {
                     idle.input.lines = lines;
                     idle.input.cursor = cursor;
+                    if text_shrunk {
+                        idle.input.prediction = None;
+                    }
                 }
                 State::Streaming(s) => {
                     s.input.lines = lines;
                     s.input.cursor = cursor;
+                    if text_shrunk {
+                        s.input.prediction = None;
+                    }
                 }
                 _ => {}
             }
