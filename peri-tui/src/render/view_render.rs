@@ -31,6 +31,14 @@ pub struct SubAgentRenderInfo {
     pub is_error: bool,
     pub total_steps: usize,
     pub final_result: Option<String>,
+    /// 子 Agent 的最近消息（v2 ViewModel 形式）。
+    ///
+    /// 当 v2 DTO `SubAgentGroupData.view_models` 为空（ACP 层 view_mapper
+    /// 生成的 placeholder）时，渲染层从此字段取子内容。app 层通过
+    /// [`crate::render::vm_convert::message_view_models_to_v2`] 把 v1
+    /// `MessageViewModel::SubAgentGroup.recent_messages` 转换为 v2 VMs
+    /// 后填充此字段。
+    pub recent_messages: Vec<ViewModel>,
 }
 
 /// V2 SubAgentGroup 状态查询接口。app 层实现并通过 [`with_status_probe`] 设置。
@@ -333,8 +341,20 @@ fn render_subagent_group(
 
     let mut lines = vec![Line::from(header_spans)];
 
+    // 子内容来源优先级：
+    // 1. v2 DTO `view_models`（ACP 层填充，当前永久为空 placeholder）
+    // 2. status probe 的 `recent_messages`（app 层从 v1 view_messages
+    //    通过 vm_convert 注入；Phase 2.6 完成前的过渡期使用）
+    let children: Vec<ViewModel> = if !data.view_models.is_empty() {
+        data.view_models.clone()
+    } else if let Some(ref s) = status {
+        s.recent_messages.clone()
+    } else {
+        Vec::new()
+    };
+
     if data.collapsed {
-        let count = data.view_models.len();
+        let count = children.len();
         if count > 0 {
             lines.push(Line::from(vec![Span::styled(
                 format!("  {} items", count),
@@ -342,7 +362,7 @@ fn render_subagent_group(
             )]));
         }
     } else {
-        for inner_vm in &data.view_models {
+        for inner_vm in &children {
             let inner_lines = render_v2_vm(inner_vm, width, diff_visible);
             if inner_lines.is_empty() {
                 continue;
@@ -637,6 +657,7 @@ mod tests {
                 is_error: false,
                 total_steps: 5,
                 final_result: None,
+                recent_messages: Vec::new(),
             }),
         });
         let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
@@ -659,6 +680,7 @@ mod tests {
                 is_error: false,
                 total_steps: 3,
                 final_result: Some("completed task successfully".into()),
+                recent_messages: Vec::new(),
             }),
         });
         let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
@@ -685,6 +707,7 @@ mod tests {
                 is_error: true,
                 total_steps: 2,
                 final_result: Some("Error: tool failed".into()),
+                recent_messages: Vec::new(),
             }),
         });
         let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
@@ -707,6 +730,73 @@ mod tests {
         assert!(
             text.contains("running"),
             "无 probe 时应显示 running 提示：{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_subagent_group_falls_back_to_probe_recent_messages() {
+        // DTO.view_models 为空 placeholder，但 probe 提供 recent_messages
+        // → 渲染应回退到 probe 的子内容（Phase 2.6 桥接核心路径）
+        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+            agent_id: "fork".into(),
+            agent_name: "Agent".into(),
+            view_models: Vec::new(), // 空占位符
+            collapsed: false,
+        });
+        let probe = std::rc::Rc::new(StaticProbe {
+            info: Some(SubAgentRenderInfo {
+                is_running: true,
+                is_error: false,
+                total_steps: 1,
+                final_result: None,
+                recent_messages: vec![ViewModel::UserBubble(UserBubbleData {
+                    text: "child content from probe".into(),
+                })],
+            }),
+        });
+        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
+        let text = collect_text(&lines);
+        assert!(
+            text.contains("child content from probe"),
+            "应从 probe.recent_messages 渲染子内容：{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_subagent_group_dto_view_models_takes_priority_over_probe() {
+        // 当 DTO.view_models 非空时，应优先使用 DTO（ACP 层填充的真实子内容）
+        // 而非 probe.recent_messages（v1 fallback）
+        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+            agent_id: "fork".into(),
+            agent_name: "Agent".into(),
+            view_models: vec![ViewModel::UserBubble(UserBubbleData {
+                text: "dto child".into(),
+            })],
+            collapsed: false,
+        });
+        let probe = std::rc::Rc::new(StaticProbe {
+            info: Some(SubAgentRenderInfo {
+                is_running: false,
+                is_error: false,
+                total_steps: 0,
+                final_result: None,
+                recent_messages: vec![ViewModel::UserBubble(UserBubbleData {
+                    text: "probe child (should not appear)".into(),
+                })],
+            }),
+        });
+        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
+        let text = collect_text(&lines);
+        assert!(
+            text.contains("dto child"),
+            "应优先 DTO.view_models：{}",
+            text
+        );
+        assert!(
+            !text.contains("should not appear"),
+            "probe.recent_messages 在 DTO 非空时应被忽略：{}",
             text
         );
     }
