@@ -88,14 +88,27 @@ impl HeadlessHandle {
     /// 构造 v2 ViewModels，让测试走与生产一致的 v2 渲染路径（而非 legacy
     /// `None` fallback）。这样 headless 测试也覆盖 vm_convert + v2 render
     /// 的完整链路。
+    ///
+    /// Phase 2.6 step 1：同时构造 `SessionSubAgentProbe` 并通过 thread-local
+    /// 注入，让测试覆盖与生产 `draw_now` 完全一致的 SubAgent 渲染路径
+    /// （包括 child_messages 权威源注入）。
     pub async fn render(&mut self, app: &mut App) -> Result<()> {
         self.wait_for_render().await;
         let v2_vms: Vec<peri_acp_types::view_model::ViewModel> =
             crate::render::vm_convert::message_view_models_to_v2(
                 &app.session_mgr.current().messages.view_messages,
             );
-        self.terminal
-            .draw(|f| main_ui::render(f, app, None, Some(&v2_vms)))?;
+        let session = app.session_mgr.current();
+        let compound_probe = crate::app::SessionSubAgentProbe::from_view_messages(
+            session.subagent_status.clone(),
+            &session.messages.view_messages,
+        );
+        let status_probe: std::rc::Rc<dyn crate::render::view_render::SubAgentStatusProbe> =
+            std::rc::Rc::new(compound_probe);
+        crate::render::view_render::with_status_probe(status_probe, || {
+            self.terminal
+                .draw(|f| main_ui::render(f, app, None, Some(&v2_vms)))
+        })?;
         Ok(())
     }
 

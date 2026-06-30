@@ -2976,3 +2976,58 @@ async fn test_subagent_group_renders_child_content_via_probe() {
         "recent_messages 应来自 SubAgentStatus.child_messages"
     );
 }
+
+#[tokio::test]
+async fn test_subagent_child_tool_renders_on_screen() {
+    // Phase 2.6 step 1 端到端渲染验证：
+    // SubAgentStart + ToolStart(src) → HeadlessHandle::render 应通过
+    // SessionSubAgentProbe 把 child_messages 注入到 SubAgentGroup 渲染，
+    // 屏幕上可见 ToolCard（而非主消息流平铺）。
+    let (mut app, mut handle) = App::new_headless(120, 30).await;
+
+    app.push_agent_event(AgentEvent::SubAgentStart {
+        agent_id: "code-reviewer".into(),
+        instance_id: "test-inst-render".into(),
+        task_preview: "review the code".into(),
+        is_background: false,
+    });
+    app.push_agent_event(AgentEvent::ToolStart {
+        tool_call_id: "tc-render".into(),
+        name: "Read".into(),
+        display: "ReadFile".into(),
+        args: "src/lib.rs".into(),
+        input: serde_json::json!({"path": "src/lib.rs"}),
+        source_agent_id: Some("test-inst-render".into()),
+    });
+    app.process_pending_events();
+    handle.render(&mut app).await.unwrap();
+
+    let snap = handle.snapshot();
+    let joined = snap.join("\n");
+
+    // 1. SubAgentGroup 头部应可见
+    assert!(
+        joined.contains("code-reviewer"),
+        "SubAgentGroup 头部应渲染，实际:\n{}",
+        joined
+    );
+
+    // 2. ToolCard 的 tool_name（ReadFile 或 Read）应在屏幕某处可见
+    //    （通过 SessionSubAgentProbe → render_subagent_group 注入）
+    let has_tool = joined.contains("ReadFile") || joined.contains("Read");
+    assert!(
+        has_tool,
+        "子 Agent 的 ToolCard 应通过 probe 注入到渲染，实际:\n{}",
+        joined
+    );
+
+    // 3. 验证 view_messages 中没有 ToolBlock（路由走了 child_messages）
+    let view_messages = &app.session_mgr.current().messages.view_messages;
+    let has_tool_block_in_main = view_messages
+        .iter()
+        .any(|vm| matches!(vm, MessageViewModel::ToolBlock { .. }));
+    assert!(
+        !has_tool_block_in_main,
+        "ToolCard 不应出现在 view_messages 主消息流"
+    );
+}
