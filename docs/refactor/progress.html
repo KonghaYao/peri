@@ -46,8 +46,8 @@
 
 <div class="summary">
   <div class="stat done"><span class="num">10</span><span class="label">Phase 已完成</span></div>
-  <div class="stat active"><span class="num">0</span><span class="label">Phase 进行中</span></div>
-  <div class="stat pending"><span class="num">1</span><span class="label">Phase 待开始</span></div>
+  <div class="stat active"><span class="num">2</span><span class="label">Phase 进行中</span></div>
+  <div class="stat pending"><span class="num">0</span><span class="label">Phase 待开始</span></div>
   <div class="stat pending"><span class="num">15</span><span class="label">已识别缺陷</span></div>
 </div>
 
@@ -64,7 +64,7 @@
     <tr><td>1.4</td><td>实现 Handler.render() + 删除 v1 popup</td><td class="status s-done">完成（4/4 Handlers）</td><td>1.4-rewind：Handler trait 加 desired_height；draw_now 打通 ModalKind::Interaction 渲染入口；RewindHandler 实现 render + desired_height（commit <code>654d5999</code>）。1.4-hitl：HitlHandler 实现 render（BorderedPanel + 工具项 + cursor 高亮 + 输入预览）+ truncate_chars/format_input_preview（commit <code>daba127d</code>）。1.4-ask_user：AskUserHandler 实现 render（BorderedPanel + Tab 头部 ☐/✔ + 编号选项 ❯ ● + 描述行 + 差异化 hint）+ is_selected/render_tab_header 辅助（commit <code>89738a7e</code>）。1.4-oauth：OauthHandler 实现 render（BorderedPanel THINKING 色 + URL 高亮 SAGE/DarkGray + url_opened 状态反馈 ✓ Opened + 紧凑 8 行布局）+ 10 个新测试（commit <code>ee9fe41c</code>）。4 个 Handler 全部接入 desired_height，draw_now 中 v2_panel_height match 双分支（Panel/Interaction）。998 测试全过。</td></tr>
     <tr><td>1.5</td><td>修复 Modal 期间 AcpEvent 丢弃</td><td class="status s-done">完成</td><td>1.5a：ModalState 改 struct 持 saved_view/saved_input/saved_*/kind ✓；1.5b：modal.rs handle() 处理 AcpEvent（ViewCommit 更新 saved_view，TextChunk 等更新 saved_current_turn，TurnDone 清空）✓；1.5c：Streaming→Modal 可达 + saved_current_turn 恢复（commit <code>fa8d68c5</code>）</td></tr>
     <tr><td>1.6</td><td>Streaming→Modal 可达 + Status 事件</td><td class="status s-done">1.6a 完成</td><td>1.6a：streaming.rs handle_key 镜像 Idle 的 Ctrl 快捷键（Ctrl+P/T/B/O/Shift+T/BackTab），main_loop OpenPanel 接受 Streaming 入口，ClosePanel 检测 saved_current_turn 恢复 Streaming ✓；1.6b：§4.3 status 事件（TokenUsage/ToolCount/Progress）状态栏渲染（推迟到状态栏重构）</td></tr>
-    <tr><td>2</td><td>消息源单一化</td><td class="status s-active">2.1 完成 / 2.2-2.6 待开始</td><td>2.1 ✓ 标记 legacy fallback 为测试专用（commit <code>7c9e09f2</code>，998 测试全过） · 2.2 删 v2_view_models 桥接（render 签名扩展） · 2.3 SubAgent status map（最大阻塞） · 2.4 Event::PushSystemNote · 2.5 apply_rebuild_all 退役 · 2.6 删 view_messages 字段。详见 <code>docs/refactor/phase2-migration-plan.md</code></td></tr>
+    <tr><td>2</td><td>消息源单一化</td><td class="status s-active">2.1-2.5 完成 / 2.6 待开始</td><td>2.1 ✓ · 2.2 ✓ render 签名扩展 · 2.3 ✓ SubAgentStatusMap 基础设施 + 入口迁移（commit <code>ac07ba40</code>） · 2.4 ✓ Event::PushSystemNote · 2.5 ✓ ViewCommit SystemNote 保留（commit <code>cbe303db</code>）+ App-method drain 机制（commit <code>72d2f8db</code>） · 2.6 删 view_messages 字段（最终目标，需 v2 渲染切换）。详见 <code>docs/refactor/phase2-migration-plan.md</code></td></tr>
     <tr><td>3</td><td>清理死 Effect + Switching</td><td class="status s-active">Phase 3a/3b 完成</td><td>3a：5 个真死 Effect 删除 ✓；3b：modal.rs TLS stubs → #[cfg(test)] ✓（handle/dispatch_key/dispatch_mouse_tls/dispatch_paste_tls/transition_to_idle*/TLS statics 全部 test-only，state_machine::handle Modal arm 改为生产 no-op + 测试 dispatch）；3c：State::Switching 完善（推迟到独立窗口）</td></tr>
     <tr><td>4</td><td>CLAUDE.md 同步</td><td class="status s-done">完成</td><td>peri-tui/CLAUDE.md 重写（删 message_pipeline/RenderThread/ephemeral_notes + 加 v2 架构说明 + 双轨弹窗系统 + v2 PanelState trait 14 面板）· 根 CLAUDE.md Effect 数 32 → 26（全变体列表）+ Phase 1.3-1.4 进度引用 + 测试 891 → 998（commit <code>b3191bed</code>）</td></tr>
   </tbody>
@@ -103,14 +103,12 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #11（Phase 2.2 + Phase 2.4 完成 + App-method drain 机制）<br>
-  <strong>本窗口成果</strong>：4 个本地 commit（均不 push）：<br>
-  · <code>52849802</code> Phase 2.2：扩展 <code>render(f, app, panel_height, v2_view_models)</code> 签名，删除 <code>App.global_ui.v2_view_models</code> 桥接字段<br>
-  · <code>bb8e2517</code> + <code>79790603</code> Phase 2.4：迁移 13 个 slash command 到 <code>Effect::PushSystemNote</code>（agent / model / help / history / effort / rename / workflow_cmd / bg / loop_cmd / lang / channel / gc / plugin）· 添加 <code>Event::PushSystemNote</code> 变体 + 4 个 transitions（idle/streaming/modal/switching）<br>
-  · <code>e94d9a81</code> 修复 <code>Effect::ShowNotification</code> 静默丢失（之前只写 v1 view_messages，生产渲染从 v2 state.view 读，note 永远不显示）<br>
-  · <code>72d2f8db</code> App-method drain 机制：<code>MessageState.push_system_note</code> 现在也加入 <code>pending_v2_notes</code> 队列；main_loop 每次迭代 drain 并通过 <code>state_machine::handle(Event::PushSystemNote)</code> 路由到 v2 state.view——修复 thread_ops / agent_ops / rewind / polling 等 App-method 路径的静默丢失<br>
-  <strong>当前状态</strong>：998 测试全过 · v1 view_messages 与 v2 state.view 保持双写一致 · 所有 push_system_note 入口（command / Effect / App-method）现在都能到达 v2 state.view（生产渲染源）<br>
-  <strong>下一步</strong>：① Phase 2.3（task #17）：SubAgent status map 设计（最大阻塞，需 App 层 status map） ② Phase 2.5（task #19）：apply_rebuild_all / ephemeral_notes 退役 ③ Phase 2.6（task #20）：删除 view_messages 字段（最终目标，需先完成 2.3 + 2.5）
+  <strong>最后更新</strong>：2026-07-01 cron #12（Phase 2.3 基础设施 + 入口迁移完成）<br>
+  <strong>本窗口成果</strong>：2 个本地 commit（均不 push）：<br>
+  · <code>cbe303db</code> Phase 2.5：修复 ViewCommit 替换语义丢失 TUI-only SystemNote（v2 commit 是替换 <code>state.view = vc.view_models</code>，TUI 通过 <code>Event::PushSystemNote</code> 添加的 SystemNote 不在 ACP transcript 中会丢失）。新增 <code>merge_preserving_local_notes</code> 辅助函数（dedupe by text），4 个 transitions（idle/streaming/modal/switching）接入。1002 测试全过<br>
+  · <code>ac07ba40</code> Phase 2.3 step 1-7：新建 <code>SubAgentStatusMap</code>（~300 行，7 字段 SubAgentStatus + 32 容量 + 5min TTL）+ 12 单元测试。挂载到 ChatSession。入口迁移（双写 view_messages + status map）：SubAgentStart / SubAgentEnd / BackgroundTaskCompleted / BgToolStep / cleanup_agent_state / new_thread。为 Phase 2.6 切换渲染源到 v2 state.view 做好准备<br>
+  <strong>当前状态</strong>：1014 测试全过 · v1 view_messages 仍是生产渲染源（v1 events 直接维护 SubAgentGroup 运行时字段）· v2 state.view 中的 SubAgentGroup DTO 缺运行时字段，Phase 2.6 切换渲染源时由 SubAgentStatusMap 覆盖<br>
+  <strong>下一步</strong>：① Phase 2.6（task #20）：切换渲染源到 v2 state.view + 删除 view_messages 字段（最大风险点，需谨慎） ② Phase 2.3 step 8-9：渲染注入（v2 augment_subagent_groups，依赖 Phase 2.6 完成） ③ 工作流设计 D-R-G（设计/评审/指导）已完成 13 步骤实施清单，剩余步骤依赖 Phase 2.6
 </div>
 
 </body>
