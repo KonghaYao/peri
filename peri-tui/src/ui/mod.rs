@@ -1,5 +1,6 @@
 #[cfg(any(test, feature = "headless"))]
 pub mod headless;
+pub mod input_widget;
 pub mod main_ui;
 pub mod markdown;
 pub mod message_render;

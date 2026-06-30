@@ -89,6 +89,34 @@ impl ThreadBrowserPanel {
         }
     }
 
+    /// Create a panel from live App data (thread_store + CWD).
+    pub fn from_app(app: &crate::app::App) -> Self {
+        let store = app.services.thread_store.clone();
+        let cwd = app.services.cwd.clone();
+        // Load threads synchronously. In the TUI main loop this is called
+        // from a non-tokio thread, so use block_in_place + block_on.
+        // Falls back to empty if no tokio runtime is available (tests).
+        let threads: Vec<peri_agent::thread::ThreadMeta> = tokio::runtime::Handle::try_current()
+            .ok()
+            .map(|handle| {
+                tokio::task::block_in_place(|| {
+                    handle.block_on(store.list_threads()).unwrap_or_default()
+                })
+            })
+            .unwrap_or_default();
+        let filtered: Vec<_> = threads.into_iter().filter(|t| t.cwd == cwd).collect();
+        let branch = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&app.services.cwd)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        let current_thread_id = app.session_mgr.current().current_thread_id.as_deref();
+        Self::new(filtered, current_thread_id, branch)
+    }
+
     /// Create a panel from a list of `ThreadMeta`.
     ///
     /// `current_thread_id` marks which thread is currently active.

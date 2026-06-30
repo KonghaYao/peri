@@ -57,14 +57,9 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
         Event::AcpEvent(AcpEventData::ViewCommit(vc)) => {
             // Full-snapshot replacement semantics (CLAUDE.md P2-C):
             // base view becomes the committed list, current_turn is reset.
-            // ResumeStreaming lifts streaming_suppressed so that TextChunks
-            // from subsequent iterations are rendered.
             state.view = vc.view_models;
             state.current_turn = Default::default();
-            (
-                State::Streaming(state),
-                vec![Effect::ResumeStreaming, Effect::Render],
-            )
+            (State::Streaming(state), vec![Effect::Render])
         }
 
         Event::AcpEvent(AcpEventData::TurnDone) => {

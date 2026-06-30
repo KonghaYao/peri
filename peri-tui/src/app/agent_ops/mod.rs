@@ -346,12 +346,6 @@ impl App {
                     &cwd,
                 );
                 self.apply_rebuild_all(0, view_msgs);
-                // Suppress streaming bridge: view_messages now contains the
-                // committed content. If turn-done hasn't arrived yet (state still
-                // Streaming), main_loop step 4 would re-populate streaming fields
-                // from current_turn.text/reasoning. The flag tells step 4 to clear
-                // instead of populate — preventing duplicate bubbles.
-                self.session_mgr.current_mut().messages.streaming_suppressed = true;
                 (true, false, false)
             }
             AgentEvent::CompactCompleted {

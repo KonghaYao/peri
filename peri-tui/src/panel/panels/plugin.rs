@@ -12,8 +12,7 @@
 //! Data is provided as `Vec<PluginEntry>` (local DTOs). No direct dependency
 //! on `peri_middlewares::plugin` runtime types.
 //!
-//! **Data source**: pending P3 Integration phase -- will be injected from
-//! `ServiceRegistrySnapshot` once the snapshot carries plugin data.
+//! **Data source**: `app.services.plugin_data` via `from_app()` — P3 Integration 已完成。
 //!
 //! **Deferred views** (postponed to P3 Integration):
 //! - Marketplace management (add/remove marketplace entries)
@@ -44,7 +43,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// Display-friendly installed plugin entry.
 ///
 /// Fields mirror `peri_middlewares::plugin::PluginEntry` at the rendering layer.
-/// TODO(P3 Integration): populate from `ServiceRegistrySnapshot`.
+/// P3 Integration: populated from `PluginLoadResult.plugins` via `from_app()`.
 #[derive(Debug, Clone)]
 pub struct PluginEntry {
     /// Plugin display name.
@@ -276,12 +275,33 @@ impl PluginPanel {
 
     /// Construct a panel from the live `App` state.
     ///
-    /// Returns an empty panel since plugin runtime data (enabled status,
-    /// update availability) is not directly extractable from
-    /// `PluginLoadResult` at construction time. Entries are populated
-    /// later via `set_entries()` when ACP query results arrive.
-    pub fn from_app(_app: &crate::app::App) -> Self {
-        Self::empty()
+    /// Reads loaded plugin data from `app.services.plugin_data` (if available)
+    /// and converts `LoadedPlugin` runtime types to panel-local `PluginEntry` DTOs.
+    pub fn from_app(app: &crate::app::App) -> Self {
+        let entries = match &app.services.plugin_data {
+            Some(data) => data
+                .plugins
+                .iter()
+                .map(|p| PluginEntry {
+                    name: p.name.clone(),
+                    version: p.version.clone(),
+                    description: p.manifest.description.clone(),
+                    source: if p.marketplace.is_empty() {
+                        "local".to_string()
+                    } else {
+                        format!("marketplace:{}", p.marketplace)
+                    },
+                    enabled: true,
+                    has_update: false,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        if entries.is_empty() {
+            Self::empty()
+        } else {
+            Self::new(entries)
+        }
     }
 
     /// Create a panel pre-populated with installed entries.

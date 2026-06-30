@@ -185,6 +185,13 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
                 .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
         {
             let text = state.input.text();
+            // Slash commands (/history, /model, etc.) are routed through the
+            // keyboard fallback for CommandRegistry::dispatch. The SM stays
+            // in Idle with no effects; is_sm_handled_shortcut returns false
+            // for slash commands so the fallback takes over.
+            if text.starts_with('/') {
+                return (State::Idle(state), Vec::new());
+            }
             state.input.clear_buffer();
 
             if text.trim().is_empty() {
@@ -251,13 +258,11 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
             }
             match c {
                 'c' => {
-                    // Ctrl+C: quit. If there's a selection, do nothing (copy
-                    // is handled via other paths for now).
-                    if state.input.selection.is_some() {
-                        (State::Idle(state), vec![Effect::Render])
-                    } else {
-                        (State::Idle(state), vec![Effect::Quit])
-                    }
+                    // Ctrl+C: keyboard fallback (normal_keys::handle_ctrl_c)
+                    // owns the full 3-level priority logic (clear input →
+                    // interrupt agent → double-tap quit).  The SM just
+                    // acknowledges the key with a re-render.
+                    (State::Idle(state), vec![Effect::Render])
                 }
                 'a' => {
                     use crate::state_machine::input::InputEdit;

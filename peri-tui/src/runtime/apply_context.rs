@@ -139,8 +139,7 @@ impl<'a> ApplyContext<'a> {
             | Effect::ClearTextSelection
             | Effect::OpenRewindPrompt
             | Effect::OpenPanel(_)
-            | Effect::ClosePanel
-            | Effect::ResumeStreaming => ApplyOutcome::Ok,
+            | Effect::ClosePanel => ApplyOutcome::Ok,
         }
     }
 
@@ -227,6 +226,16 @@ impl<'a> ApplyContext<'a> {
         // so we can pass them to build_v2_panel_read_context without
         // conflicting with the `if let State::Modal(..) = state` borrow.
         let view_models: Vec<peri_acp_types::view_model::ViewModel> = state.view_models().to_vec();
+        // Collect V2 ViewModels for message area rendering:
+        // committed view + current_turn (if streaming).
+        let mut v2_vms: Vec<peri_acp_types::view_model::ViewModel> = view_models.clone();
+        if let State::Streaming(s) = &mut *state {
+            let turn_vms = s.current_turn.view_models().to_vec();
+            if !turn_vms.is_empty() {
+                v2_vms.extend(turn_vms);
+            }
+        }
+        app.global_ui.v2_view_models = Some(v2_vms);
         if let Err(e) = self.terminal.draw(|f| {
             // Pre-compute v2 panel height so legacy layout reserves space.
             let v2_panel_height = if let State::Modal(ModalState::Panel(panel)) = &*state {
@@ -249,6 +258,7 @@ impl<'a> ApplyContext<'a> {
         }) {
             warn!(error = %e, "terminal draw failed");
         }
+        app.global_ui.v2_view_models = None;
         *last_render = Instant::now();
     }
 }

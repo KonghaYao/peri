@@ -24,6 +24,7 @@
 
 pub mod block_mode;
 pub mod throttle;
+pub mod view_render;
 
 pub use throttle::{RenderReason, Throttle};
 

@@ -12,8 +12,7 @@
 //! Text fields use a lightweight `TextField` (String + cursor) instead of
 //! `tui_textarea::TextArea` to satisfy the `Send` bound required by `PanelState`.
 //!
-//! Data source: 待 P3 Integration 阶段从 ServiceRegistrySnapshot 注入。
-//! 当前使用本地 DTO（empty 数据），不依赖 crate::config::PeriConfig / ProviderConfig。
+//! Data source: `app.services.peri_config.read()` via `from_app()` — P3 Integration 已完成。
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};

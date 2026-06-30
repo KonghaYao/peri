@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, MessageViewModel},
+    app::{App, PanelKind},
     command::Command,
     runtime::effect::Effect,
 };
@@ -21,6 +21,7 @@ impl Command for HistoryCommand {
 
     fn execute(&self, app: &mut App, _args: &str) -> Vec<Effect> {
         if app.session_mgr.current_mut().ui.loading {
+            use crate::app::MessageViewModel;
             app.session_mgr
                 .current_mut()
                 .messages
@@ -30,7 +31,6 @@ impl Command for HistoryCommand {
                 ));
             return vec![];
         }
-        app.open_thread_browser();
-        vec![]
+        vec![Effect::OpenPanel(PanelKind::ThreadBrowser)]
     }
 }

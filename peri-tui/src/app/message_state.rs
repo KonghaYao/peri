@@ -14,18 +14,6 @@ pub struct MessageState {
     pub pending_messages: Vec<String>,
     /// P5: Synchronous render cache — rebuilt in draw() when messages or width change.
     pub message_cache: Option<MessageRenderCache>,
-    /// P5 bridge: streaming text from state machine's current_turn, populated by
-    /// main_loop before each draw. Rendered as an AssistantBubble appended to the
-    /// view. Cleared by render_messages after consumption.
-    /// TODO: remove when P5 rendering rewrite switches to State.view + current_turn.
-    pub streaming_text: String,
-    /// P5 bridge: streaming reasoning from state machine's current_turn.
-    pub streaming_reasoning: String,
-    /// P5 bridge: set by TurnCommitted handler when view_messages has been
-    /// rebuilt with committed content. Prevents main_loop step 4 from
-    /// re-populating streaming fields from current_turn (which still has
-    /// the same text — turn-done may not have arrived yet).
-    pub streaming_suppressed: bool,
 }
 
 /// 渲染换行信息：每个逻辑行在渲染后的视觉行范围。
@@ -62,9 +50,6 @@ impl MessageState {
             ephemeral_notes: Vec::new(),
             pending_messages: Vec::new(),
             message_cache: None,
-            streaming_text: String::new(),
-            streaming_reasoning: String::new(),
-            streaming_suppressed: false,
         }
     }
 

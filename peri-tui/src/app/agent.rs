@@ -1,7 +1,6 @@
 // ── Live code retained after unified event mapping ──
 // map_acp_event: handles categories ②③ only
 // Category ① events (TextChunk) now come through session/update → handle_session_update_peri()
-// Note: AiReasoning removed — reasoning rendered via state machine streaming_reasoning bridge (P5)
 
 use peri_acp::event::AcpEvent;
 

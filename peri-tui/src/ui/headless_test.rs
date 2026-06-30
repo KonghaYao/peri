@@ -2232,7 +2232,7 @@ async fn test_thinking_mode_user_message_survives_rebuild() {
     // 1. P5: Push UserBubble directly
     app.apply_add_message(MessageViewModel::user("explain recursion".into()));
 
-    // 2. Reasoning 已通过 state machine streaming_reasoning bridge 渲染，不再有 AiReasoning 事件
+    // 2. Reasoning 已通过 state machine 渲染，不再有 AiReasoning 事件
     app.process_pending_events();
 
     // 此时 view_messages 应只有 UserBubble
@@ -2278,7 +2278,7 @@ async fn test_thinking_toolcall_text_rebuild_preserves_user() {
     // 1. P5: Push UserBubble directly
     app.apply_add_message(MessageViewModel::user("show me main.rs".into()));
 
-    // 2. Reasoning via state machine streaming_reasoning bridge (was AiReasoning no-op)
+    // 2. Reasoning via state machine (was AiReasoning no-op)
     app.process_pending_events();
 
     // 3. tool_call (AI 调用 Read) — ToolStart creates ToolBlock in P5

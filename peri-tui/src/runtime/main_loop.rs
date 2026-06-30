@@ -60,11 +60,16 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // AcpEventData variants) and dispatch to the transition function.
         // When state is Modal, use handle_with_context() with real App data
         // so panels have access to i18n, scroll offset, panel area, etc.
-        // ── Pre-transition snapshot for Enter guard ───────────────────
+        // ── Pre-transition snapshots for Enter guard ──────────────────
         // Must be captured BEFORE the SM transition consumes `state`, so
         // `is_sm_handled_shortcut` can still filter Enter when the SM
         // transitions Idle → Streaming in the same frame.
         let was_idle = matches!(&state, State::Idle(_));
+        // Slash commands (e.g. /history, /model) must go through the
+        // keyboard fallback for CommandRegistry::dispatch.  Capture this
+        // before the SM clears the input buffer on Enter.
+        let is_slash_command =
+            matches!(&state, State::Idle(idle) if idle.input.text().starts_with('/'));
 
         let sm_event: SmEvent = event.clone().into();
         let new_state: State;
@@ -90,7 +95,9 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // state machine. Keyboard dispatch is filtered to avoid double-
         // executing shortcuts the state machine already owns.
         let fallback_effects = match &event {
-            TuiEvent::Key(key) if !is_sm_handled_shortcut(key, &state, was_idle) => {
+            TuiEvent::Key(key)
+                if !is_sm_handled_shortcut(key, &state, was_idle, is_slash_command) =>
+            {
                 match keyboard::handle_key_event(app, *key) {
                     Ok(Some(Action::Quit)) => vec![Effect::Quit],
                     Ok(Some(Action::Submit(input))) => {
@@ -237,11 +244,6 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 Effect::InterruptAgent => {
                     app.interrupt();
                 }
-                Effect::ResumeStreaming => {
-                    // ViewCommit has reset current_turn; new TextChunks
-                    // from the next iteration should be rendered.
-                    app.session_mgr.current_mut().messages.streaming_suppressed = false;
-                }
                 Effect::ClearPendingMessages => {
                     app.session_mgr
                         .current_mut()
@@ -260,6 +262,23 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 }
                 Effect::SwitchSession(session_id) => {
                     tracing::info!(session_id = %session_id, "SwitchSession");
+                    app.open_thread(session_id);
+                    // Close the panel so the user sees the loaded thread.
+                    if matches!(state, State::Modal(_)) {
+                        let idle = saved_idle.take().unwrap_or_else(|| {
+                            let input_snapshot = crate::state_machine::input::sync::from_textarea(
+                                &app.session_mgr.current().ui.textarea,
+                            );
+                            IdleState {
+                                input: input_snapshot,
+                                scroll_offset: app.session_mgr.current().ui.scroll_offset,
+                                view: vec![],
+                                double_esc_timer: None,
+                                history_index: None,
+                            }
+                        });
+                        state = State::Idle(idle);
+                    }
                     needs_render = true;
                 }
                 Effect::OpenPanel(kind) => {
@@ -473,49 +492,15 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
             // Sync state machine InputState → TextArea before rendering,
             // so that state-machine-originated changes (history restore,
             // rewind, prediction) are reflected in the widget.
+            // Sync input state from state machine to legacy textarea.
             match &state {
                 State::Idle(idle) => {
                     to_textarea(&idle.input, &mut app.session_mgr.current_mut().ui.textarea);
-                    // Clear streaming fields when idle — no streaming data to show.
-                    let msgs = &mut app.session_mgr.current_mut().messages;
-                    msgs.streaming_text.clear();
-                    msgs.streaming_reasoning.clear();
-                    msgs.streaming_suppressed = false;
                 }
                 State::Streaming(s) => {
                     to_textarea(&s.input, &mut app.session_mgr.current_mut().ui.textarea);
-                    // P5 bridge: sync streaming text/reasoning from state
-                    // machine to legacy MessageState, so render_messages
-                    // can include it in the view. Consumed by the next
-                    // render_messages call.
-                    //
-                    // streaming_suppressed guard: TurnCommitted already rebuilt
-                    // view_messages with committed content, but turn-done may
-                    // not have arrived yet (state still Streaming). Without this
-                    // guard, current_turn.text would be copied again and
-                    // render_messages would produce a duplicate bubble.
-                    // The flag persists until Idle (turn-done) resets it —
-                    // do NOT reset here, or the next tick would re-populate.
-                    let msgs = &mut app.session_mgr.current_mut().messages;
-                    if msgs.streaming_suppressed {
-                        msgs.streaming_text.clear();
-                        msgs.streaming_reasoning.clear();
-                    } else {
-                        msgs.streaming_text = s.current_turn.text.clone();
-                        msgs.streaming_reasoning = s.current_turn.reasoning.clone();
-                    }
                 }
-                _ => {
-                    // Reset streaming_suppressed if we're in a non-Streaming state
-                    // (e.g., Modal, Switching) — prevents stale flag from
-                    // suppressing the first frame of the next streaming session.
-                    let msgs = &mut app.session_mgr.current_mut().messages;
-                    if msgs.streaming_suppressed {
-                        msgs.streaming_text.clear();
-                        msgs.streaming_reasoning.clear();
-                        msgs.streaming_suppressed = false;
-                    }
-                }
+                _ => {}
             }
             if is_tick {
                 let now = std::time::Instant::now();
@@ -689,6 +674,7 @@ fn is_sm_handled_shortcut(
     key: &ratatui::crossterm::event::KeyEvent,
     state: &State,
     was_idle: bool,
+    is_slash_command: bool,
 ) -> bool {
     // Modal: state machine handles EVERY key (dispatches to panel/handler).
     if matches!(state, State::Modal(_)) {
@@ -702,16 +688,20 @@ fn is_sm_handled_shortcut(
         return true;
     }
 
-    // Enter (no Shift/Alt): state machine handles submission.
-    // Use pre-transition idle flag: when SM transitioned Idle → Streaming
-    // in this frame, the Enter still counts as handled by the SM.
-    // Keyboard fallback must NOT re-submit what the SM already submitted.
+    // Enter (no Shift/Alt): state machine handles submission,
+    // EXCEPT for slash commands — those must go through the keyboard
+    // fallback so CommandRegistry::dispatch can route them.
+    // Use pre-transition flags: is_slash_command was captured before the
+    // SM transition consumed the state (Idle → Streaming on Enter).
     if matches!(key.code, KeyCode::Enter)
         && !key
             .modifiers
             .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
         && (was_idle || matches!(state, State::Idle(_)))
     {
+        if is_slash_command {
+            return false;
+        }
         return true;
     }
 

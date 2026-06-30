@@ -8,11 +8,8 @@
 //! Actions: x = kill agent, d = kill workflow, r = resume workflow.
 //! Close: Esc or q.
 //!
-//! TODO (P3 Integration): `PanelReadContext` currently has no workflow data fields.
-//! The panel defines internal DTO types (`WorkflowRunEntry`, `WorkflowPhaseEntry`,
-//! `WorkflowAgentEntry`) for the UI state. During P3 Integration, the state machine
-//! will populate panel data via a `set_runs()` method after ACP query results arrive,
-//! or `ServiceRegistrySnapshot` will gain a `workflows` field.
+//! P3 Integration: `from_app()` reads `app.global_ui.workflow_tracker.snapshots()`
+//! and converts snapshot types to panel-local DTOs (WorkflowRunEntry/PhaseEntry/AgentEntry).
 
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -120,11 +117,43 @@ impl WorkflowPanel {
 
     /// Construct a panel from the live `App` state.
     ///
-    /// Returns an empty panel since workflow data arrives asynchronously
-    /// via the polling channel. Runs are populated later via `set_runs()`
-    /// when polling results arrive.
-    pub fn from_app(_app: &crate::app::App) -> Self {
-        Self::empty()
+    /// Reads workflow progress snapshots from `app.global_ui.workflow_tracker`
+    /// and converts them to panel-local DTOs. Returns an empty panel if no
+    /// workflow runs are tracked.
+    pub fn from_app(app: &crate::app::App) -> Self {
+        let snaps = app.global_ui.workflow_tracker.snapshots();
+        if snaps.is_empty() {
+            return Self::empty();
+        }
+        let runs: Vec<WorkflowRunEntry> = snaps
+            .into_iter()
+            .map(|s| WorkflowRunEntry {
+                run_id: s.run_id,
+                workflow_name: s.workflow_name,
+                status: s.status,
+                phases: s
+                    .phases
+                    .into_iter()
+                    .map(|p| WorkflowPhaseEntry {
+                        title: p.title,
+                        status: p.status,
+                    })
+                    .collect(),
+                agents: s
+                    .agents
+                    .into_iter()
+                    .map(|a| WorkflowAgentEntry {
+                        agent_id: a.agent_id,
+                        label: a.label,
+                        phase: a.phase,
+                        status: a.status,
+                        token_count: a.token_count,
+                        tool_count: a.tool_count,
+                    })
+                    .collect(),
+            })
+            .collect();
+        Self::new(runs)
     }
 
     /// Create a panel from a list of run entries.

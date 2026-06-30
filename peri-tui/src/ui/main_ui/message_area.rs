@@ -14,7 +14,7 @@ use crate::{
         message_state::{MessageRenderCache, WrappedLineInfo},
         App,
     },
-    ui::{markdown::parse_markdown_default, message_render::render_view_model, theme, welcome},
+    ui::{message_render::render_view_model, theme, welcome},
 };
 
 /// 视口裁剪结果
@@ -64,6 +64,41 @@ pub fn build_sync_render_cache(
         wrap_map,
         total_lines,
         version,
+        width,
+    }
+}
+
+/// V2 render cache builder: converts V2 ViewModels to Lines and builds the wrap map.
+fn build_sync_render_cache_v2(
+    view_models: &[peri_acp_types::view_model::ViewModel],
+    diff_visible: bool,
+    width: u16,
+) -> MessageRenderCache {
+    if width == 0 || view_models.is_empty() {
+        return MessageRenderCache {
+            lines: Vec::new(),
+            wrap_map: Vec::new(),
+            total_lines: 0,
+            version: 0,
+            width,
+        };
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for vm in view_models {
+        let vm_lines = crate::render::view_render::render_v2_vm(vm, width as usize, diff_visible);
+        lines.extend(vm_lines);
+        lines.push(Line::from(""));
+    }
+
+    let lines = dedup_blank_lines(lines);
+    let (total_lines, wrap_map) = build_wrap_map(&lines, width);
+
+    MessageRenderCache {
+        lines,
+        wrap_map,
+        total_lines,
+        version: 1,
         width,
     }
 }
@@ -133,78 +168,37 @@ pub(crate) fn render_messages(
     header_area: Rect,
     messages_area: Rect,
 ) {
-    // Welcome Card 或消息列表
-    if app.session_mgr.current().messages.view_messages.is_empty() {
-        welcome::render_welcome(f, app, messages_area);
-        return;
-    }
-
     let inner = messages_area;
     app.session_mgr.current_mut().ui.messages_area = Some(inner);
     let visible_height = inner.height;
-
-    // Build sync render cache.
-    // P5 bridge: when streaming_text/streaming_reasoning is non-empty (populated
-    // by main_loop from state machine's current_turn), build an AssistantBubble
-    // and append it to the view for cache construction. The streaming fields are
-    // consumed here so the next frame starts fresh.
     let text_area_width = inner.width.saturating_sub(1);
     let diff_visible = app.session_mgr.current().ui.diff_visible;
-    let has_streaming = !app.session_mgr.current().messages.streaming_text.is_empty()
-        || !app
-            .session_mgr
-            .current()
-            .messages
-            .streaming_reasoning
-            .is_empty();
-    {
-        let needs_rebuild = has_streaming
-            || match app.session_mgr.current().messages.message_cache.as_ref() {
-                Some(cache) => cache.width != text_area_width,
-                None => true,
-            };
+
+    // V2 path: render from state machine V2 ViewModels when available.
+    // Falls back to legacy MessageState path when v2 data is not set.
+    let v2_data = app.global_ui.v2_view_models.take();
+    if let Some(ref v2_vms) = v2_data {
+        if v2_vms.is_empty() {
+            welcome::render_welcome(f, app, messages_area);
+            return;
+        }
+
+        // V2 ViewModels change every frame during streaming; always rebuild.
+        let cache = build_sync_render_cache_v2(v2_vms, diff_visible, text_area_width);
+        app.session_mgr.current_mut().messages.message_cache = Some(cache);
+    } else {
+        // Legacy path
+        if app.session_mgr.current().messages.view_messages.is_empty() {
+            welcome::render_welcome(f, app, messages_area);
+            return;
+        }
+
+        let needs_rebuild = match app.session_mgr.current().messages.message_cache.as_ref() {
+            Some(cache) => cache.width != text_area_width,
+            None => true,
+        };
         if needs_rebuild {
-            let mut vms = app.session_mgr.current().messages.view_messages.clone();
-
-            // P5 bridge: inject streaming assistant from state machine
-            if has_streaming {
-                use crate::ui::message_view::{ContentBlockView, MessageViewModel};
-                let st = std::mem::take(&mut app.session_mgr.current_mut().messages.streaming_text);
-                let sr =
-                    std::mem::take(&mut app.session_mgr.current_mut().messages.streaming_reasoning);
-                let mut blocks: Vec<ContentBlockView> = Vec::new();
-                if !sr.is_empty() {
-                    blocks.push(ContentBlockView::Reasoning {
-                        char_count: sr.chars().count(),
-                        text: sr,
-                        tail_lines: None,
-                    });
-                }
-                if !st.is_empty() {
-                    let len = st.len();
-                    let rendered = parse_markdown_default(&st);
-                    let rendered_lines = rendered.lines.len();
-                    blocks.push(ContentBlockView::Text {
-                        raw: st,
-                        rendered,
-                        dirty: false,
-                        rendered_prefix_len: len,
-                        rendered_prefix_lines: rendered_lines,
-                        holdback_scanner: Default::default(),
-                    });
-                }
-                if !blocks.is_empty() {
-                    let mut bubble = MessageViewModel::AssistantBubble {
-                        blocks,
-                        is_streaming: true,
-                        collapsed: false,
-                        content_hash: 0,
-                    };
-                    bubble.recompute_hash();
-                    vms.push(bubble);
-                }
-            }
-
+            let vms = app.session_mgr.current().messages.view_messages.clone();
             let prev = app.session_mgr.current().messages.message_cache.as_ref();
             let cache = build_sync_render_cache(&vms, diff_visible, text_area_width, prev);
             app.session_mgr.current_mut().messages.message_cache = Some(cache);

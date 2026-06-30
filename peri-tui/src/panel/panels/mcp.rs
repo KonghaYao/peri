@@ -10,8 +10,7 @@
 //! Data is provided as `Vec<McpServerEntry>` (local DTOs). No direct dependency
 //! on `peri_middlewares::mcp` runtime types.
 //!
-//! **Data source**: pending P3 Integration phase -- will be injected from
-//! `ServiceRegistrySnapshot` once the snapshot carries MCP server data.
+//! **Data source**: `app.services.mcp_pool.server_infos()` via `from_app()` — P3 Integration 已完成。
 
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -36,7 +35,7 @@ use crate::ui::theme;
 /// Display-friendly MCP server entry.
 ///
 /// Fields mirror `peri_middlewares::mcp::ServerInfo` at the rendering layer.
-/// TODO(P3 Integration): populate from `ServiceRegistrySnapshot.mcp_servers`.
+/// P3 Integration: populated from `McpClientPool::server_infos()` via `from_app()`.
 #[derive(Debug, Clone)]
 pub struct McpServerEntry {
     /// Server display name.
@@ -160,11 +159,48 @@ impl McpPanel {
 
     /// Construct a panel from the live `App` state.
     ///
-    /// Returns an empty panel since MCP server data is not readily
-    /// extractable from `McpClientPool` at construction time. Servers
-    /// are populated later via `set_servers()` after ACP query results arrive.
-    pub fn from_app(_app: &crate::app::App) -> Self {
-        Self::empty()
+    /// Reads MCP server info from `app.services.mcp_pool` (if available) and
+    /// converts `ServerInfo` runtime types to panel-local `McpServerEntry` DTOs.
+    pub fn from_app(app: &crate::app::App) -> Self {
+        let servers = match &app.services.mcp_pool {
+            Some(pool) => {
+                use peri_middlewares::mcp::{ClientStatus, ConfigSource, OAuthStatus};
+                pool.server_infos()
+                    .into_iter()
+                    .map(|s| McpServerEntry {
+                        name: s.name,
+                        status: match s.status {
+                            ClientStatus::Connected => "connected".to_string(),
+                            ClientStatus::Failed(_) => "error".to_string(),
+                            ClientStatus::Disconnected => "offline".to_string(),
+                            ClientStatus::Disabled => "disabled".to_string(),
+                            ClientStatus::Uninitialized => "uninitialized".to_string(),
+                        },
+                        auth_status: match s.oauth_status {
+                            OAuthStatus::None => "none".to_string(),
+                            OAuthStatus::Authorized => "authorized".to_string(),
+                            OAuthStatus::NeedsAuthorization => "needs_auth".to_string(),
+                        },
+                        source: match s.source {
+                            Some(ConfigSource::Project(_)) => "project".to_string(),
+                            Some(ConfigSource::Global(_)) => "global".to_string(),
+                            Some(ConfigSource::Plugin) => "plugin".to_string(),
+                            None => "unknown".to_string(),
+                        },
+                        transport_type: s.transport_type,
+                        url: s.url,
+                        tool_count: s.tool_count,
+                        resource_count: s.resource_count,
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        if servers.is_empty() {
+            Self::empty()
+        } else {
+            Self::new(servers)
+        }
     }
 
     /// Create a panel from a list of `McpServerEntry`.

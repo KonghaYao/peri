@@ -89,9 +89,9 @@ pub fn create_panel(kind: PanelKind, app: &crate::app::App) -> Box<dyn super::Pa
         PanelKind::Agent => Box::new(super::panels::agent::AgentPanel::empty()),
         PanelKind::Hooks => Box::new(super::panels::hooks::HooksPanel::empty()),
         PanelKind::Config => Box::new(super::panels::config::ConfigPanel::from_app(app)),
-        PanelKind::ThreadBrowser => {
-            Box::new(super::panels::thread_browser::ThreadBrowserPanel::empty())
-        }
+        PanelKind::ThreadBrowser => Box::new(
+            super::panels::thread_browser::ThreadBrowserPanel::from_app(app),
+        ),
         PanelKind::Mcp => Box::new(super::panels::mcp::McpPanel::from_app(app)),
         PanelKind::Plugin => Box::new(super::panels::plugin::PluginPanel::from_app(app)),
         PanelKind::Cron => Box::new(super::panels::cron::CronPanel::from_app(app)),
