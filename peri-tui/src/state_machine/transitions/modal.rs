@@ -19,6 +19,16 @@ use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::ServiceRegistrySnapshot;
 use crate::runtime::effect::Effect;
 
+/// Result of dispatching a key/mouse/paste event in Modal state.
+struct DispatchResult {
+    /// Panel effects (for Panel variant).
+    panel_effects: Vec<PanelEffect>,
+    /// Whether the modal should close.
+    should_close: bool,
+    /// Handler submit payload (for Interaction variant, when Submit is returned).
+    handler_submit: Option<String>,
+}
+
 /// Modal-state transition entry point.
 pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
     match event {
@@ -35,9 +45,18 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
 
         // -- Other key events: delegate to the panel/handler -----------------
         Event::Key(key) => {
-            let (panel_effects, should_close) = dispatch_key(&mut state, key);
-            let effects = map_panel_effects(panel_effects);
-            if should_close {
+            let result = dispatch_key(&mut state, key);
+            let mut effects = map_panel_effects(result.panel_effects);
+            if let Some(payload) = result.handler_submit {
+                // Handler submitted -- send to ACP, then close panel.
+                effects.push(Effect::SendToAcp {
+                    method: "interaction/submit".to_string(),
+                    params: serde_json::json!({ "payload": payload }),
+                });
+                effects.push(Effect::ClosePanel);
+                effects.push(Effect::Render);
+                (State::Modal(state), effects)
+            } else if result.should_close {
                 // ClosePanel effect so main_loop restores saved_idle.
                 let mut all_effects = effects;
                 all_effects.push(Effect::ClosePanel);
@@ -50,28 +69,24 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
 
         // -- Mouse: dispatch scroll/click/hover to the panel (TLS context) ----
         Event::Mouse(mouse) => {
-            let (panel_effects, should_close) = dispatch_mouse_tls(&mut state, mouse);
-            let mut effects = map_panel_effects(panel_effects);
+            let result = dispatch_mouse_tls(&mut state, mouse);
+            let mut effects = map_panel_effects(result.panel_effects);
             effects.push(Effect::Render);
-            if should_close {
+            if result.should_close {
                 effects.push(Effect::ClosePanel);
-                (State::Modal(state), effects)
-            } else {
-                (State::Modal(state), effects)
             }
+            (State::Modal(state), effects)
         }
 
         // -- Paste: dispatch text to the panel (TLS context) ------------------
         Event::Paste(text) => {
-            let (panel_effects, should_close) = dispatch_paste_tls(&mut state, &text);
-            let mut effects = map_panel_effects(panel_effects);
+            let result = dispatch_paste_tls(&mut state, &text);
+            let mut effects = map_panel_effects(result.panel_effects);
             effects.push(Effect::Render);
-            if should_close {
+            if result.should_close {
                 effects.push(Effect::ClosePanel);
-                (State::Modal(state), effects)
-            } else {
-                (State::Modal(state), effects)
             }
+            (State::Modal(state), effects)
         }
 
         // -- Resize: re-render so the popup lays out correctly ---------------
@@ -133,13 +148,14 @@ fn transition_to_idle_with_effects(effects: Vec<Effect>) -> (State, Vec<Effect>)
 
 /// Dispatch a single key to the active panel / handler, using TLS stubs.
 ///
-/// Returns `(panel_effects, should_close)`. `should_close=true` when the panel
-/// produced `PanelEffect::Close` -- caller transitions to Idle.
+/// Returns a [`DispatchResult`]. `should_close=true` when the panel produced
+/// `PanelEffect::Close` or the handler returned `Submit`/`Dismiss`.
+/// `handler_submit` carries the payload when an Interaction handler returns `Submit`.
 ///
 /// **Production code should use [`dispatch_key_with_ctx`] instead**, providing
 /// a real [`PanelReadContext`] constructed from App data. This function exists
 /// only for test compatibility (tests don't have access to App).
-fn dispatch_key(state: &mut ModalState, key: KeyEvent) -> (Vec<PanelEffect>, bool) {
+fn dispatch_key(state: &mut ModalState, key: KeyEvent) -> DispatchResult {
     STUB_SNAPSHOT.with(|snapshot| {
         STUB_VMS.with(|vms| {
             STUB_CACHE.with(|cache| {
@@ -163,7 +179,7 @@ fn dispatch_key(state: &mut ModalState, key: KeyEvent) -> (Vec<PanelEffect>, boo
 fn dispatch_mouse_tls(
     state: &mut ModalState,
     mouse: ratatui::crossterm::event::MouseEvent,
-) -> (Vec<PanelEffect>, bool) {
+) -> DispatchResult {
     STUB_SNAPSHOT.with(|snapshot| {
         STUB_VMS.with(|vms| {
             STUB_CACHE.with(|cache| {
@@ -184,7 +200,7 @@ fn dispatch_mouse_tls(
 }
 
 /// Dispatch a paste event using TLS stubs (test-only path).
-fn dispatch_paste_tls(state: &mut ModalState, text: &str) -> (Vec<PanelEffect>, bool) {
+fn dispatch_paste_tls(state: &mut ModalState, text: &str) -> DispatchResult {
     STUB_SNAPSHOT.with(|snapshot| {
         STUB_VMS.with(|vms| {
             STUB_CACHE.with(|cache| {
@@ -225,7 +241,7 @@ fn dispatch_mouse(
     state: &mut ModalState,
     mouse: ratatui::crossterm::event::MouseEvent,
     ctx: &PanelReadContext,
-) -> (Vec<PanelEffect>, bool) {
+) -> DispatchResult {
     use ratatui::crossterm::event::MouseEventKind;
     match state {
         ModalState::Panel(panel) => {
@@ -235,25 +251,37 @@ fn dispatch_mouse(
                 _ => panel.handle_mouse(mouse, ctx.area, ctx),
             };
             let should_close = effects.iter().any(|pe| matches!(pe, PanelEffect::Close));
-            (effects, should_close)
+            DispatchResult {
+                panel_effects: effects,
+                should_close,
+                handler_submit: None,
+            }
         }
-        ModalState::Interaction(_) => (Vec::new(), false),
+        ModalState::Interaction(_) => DispatchResult {
+            panel_effects: Vec::new(),
+            should_close: false,
+            handler_submit: None,
+        },
     }
 }
 
 /// Dispatch a paste event to the active panel / handler with a real context.
-fn dispatch_paste(
-    state: &mut ModalState,
-    text: &str,
-    ctx: &PanelReadContext,
-) -> (Vec<PanelEffect>, bool) {
+fn dispatch_paste(state: &mut ModalState, text: &str, ctx: &PanelReadContext) -> DispatchResult {
     match state {
         ModalState::Panel(panel) => {
             let effects = panel.handle_paste(text, ctx);
             let should_close = effects.iter().any(|pe| matches!(pe, PanelEffect::Close));
-            (effects, should_close)
+            DispatchResult {
+                panel_effects: effects,
+                should_close,
+                handler_submit: None,
+            }
         }
-        ModalState::Interaction(_) => (Vec::new(), false),
+        ModalState::Interaction(_) => DispatchResult {
+            panel_effects: Vec::new(),
+            should_close: false,
+            handler_submit: None,
+        },
     }
 }
 
@@ -261,23 +289,44 @@ fn dispatch_key_with_ctx(
     state: &mut ModalState,
     key: KeyEvent,
     ctx: &PanelReadContext,
-) -> (Vec<PanelEffect>, bool) {
+) -> DispatchResult {
     match state {
         ModalState::Panel(panel) => {
             let panel_effects = panel.handle_key(Input::from(key), ctx);
             let should_close = panel_effects
                 .iter()
                 .any(|pe| matches!(pe, PanelEffect::Close));
-            (panel_effects, should_close)
+            DispatchResult {
+                panel_effects,
+                should_close,
+                handler_submit: None,
+            }
         }
         ModalState::Interaction(handler) => {
             if let KeyCode::Char(c) = key.code {
                 match handler.handle_key(c) {
-                    HandlerOutput::Nothing => (Vec::new(), false),
-                    HandlerOutput::Submit(_) | HandlerOutput::Dismiss => (Vec::new(), true),
+                    HandlerOutput::Nothing => DispatchResult {
+                        panel_effects: Vec::new(),
+                        should_close: false,
+                        handler_submit: None,
+                    },
+                    HandlerOutput::Submit(payload) => DispatchResult {
+                        panel_effects: Vec::new(),
+                        should_close: true,
+                        handler_submit: Some(payload),
+                    },
+                    HandlerOutput::Dismiss => DispatchResult {
+                        panel_effects: Vec::new(),
+                        should_close: true,
+                        handler_submit: None,
+                    },
                 }
             } else {
-                (Vec::new(), false)
+                DispatchResult {
+                    panel_effects: Vec::new(),
+                    should_close: false,
+                    handler_submit: None,
+                }
             }
         }
     }
@@ -306,9 +355,18 @@ pub fn handle_with_context(
 
         // -- Other key events: delegate to the panel/handler -----------------
         Event::Key(key) => {
-            let (panel_effects, should_close) = dispatch_key_with_ctx(&mut state, key, ctx);
-            let effects = map_panel_effects(panel_effects);
-            if should_close {
+            let result = dispatch_key_with_ctx(&mut state, key, ctx);
+            let mut effects = map_panel_effects(result.panel_effects);
+            if let Some(payload) = result.handler_submit {
+                // Handler submitted -- send to ACP, then close panel.
+                effects.push(Effect::SendToAcp {
+                    method: "interaction/submit".to_string(),
+                    params: serde_json::json!({ "payload": payload }),
+                });
+                effects.push(Effect::ClosePanel);
+                effects.push(Effect::Render);
+                (State::Modal(state), effects)
+            } else if result.should_close {
                 // ClosePanel effect so main_loop restores saved_idle.
                 let mut all_effects = effects;
                 all_effects.push(Effect::ClosePanel);
@@ -321,28 +379,24 @@ pub fn handle_with_context(
 
         // -- Mouse: dispatch scroll/click/hover to the panel -----------------
         Event::Mouse(mouse) => {
-            let (panel_effects, should_close) = dispatch_mouse(&mut state, mouse, ctx);
-            let mut effects = map_panel_effects(panel_effects);
+            let result = dispatch_mouse(&mut state, mouse, ctx);
+            let mut effects = map_panel_effects(result.panel_effects);
             effects.push(Effect::Render);
-            if should_close {
+            if result.should_close {
                 effects.push(Effect::ClosePanel);
-                (State::Modal(state), effects)
-            } else {
-                (State::Modal(state), effects)
             }
+            (State::Modal(state), effects)
         }
 
         // -- Paste: dispatch text to the panel -------------------------------
         Event::Paste(text) => {
-            let (panel_effects, should_close) = dispatch_paste(&mut state, &text, ctx);
-            let mut effects = map_panel_effects(panel_effects);
+            let result = dispatch_paste(&mut state, &text, ctx);
+            let mut effects = map_panel_effects(result.panel_effects);
             effects.push(Effect::Render);
-            if should_close {
+            if result.should_close {
                 effects.push(Effect::ClosePanel);
-                (State::Modal(state), effects)
-            } else {
-                (State::Modal(state), effects)
             }
+            (State::Modal(state), effects)
         }
 
         // -- Resize: re-render so the popup lays out correctly ---------------
