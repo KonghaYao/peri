@@ -194,9 +194,6 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     std::cmp::Ordering::Less => app.scroll_up(),
                     std::cmp::Ordering::Equal => {}
                 },
-                Effect::AskUserScroll { delta } => {
-                    app.ask_user_scroll(delta as i16);
-                }
                 // ── Mouse textarea interaction ───────────────────────────
                 Effect::MouseTextareaClick { row, column } => {
                     if !app.is_interaction_popup_active() {
@@ -264,16 +261,8 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     needs_render = true;
                 }
                 // ── Agent control ─────────────────────────────────
-                Effect::InterruptAgent => {
-                    app.interrupt();
-                }
-                Effect::ClearPendingMessages => {
-                    app.session_mgr
-                        .current_mut()
-                        .messages
-                        .pending_messages
-                        .clear();
-                }
+                // (InterruptAgent / ClearPendingMessages removed — legacy
+                // keyboard handles Ctrl+C / Esc-during-loading directly.)
                 // ── App-level effects (P3 Integration) ─────────────
                 Effect::ShowNotification(text) => {
                     app.push_system_note(text);
@@ -493,19 +482,14 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 Effect::ClearTextSelection => {
                     app.session_mgr.current_mut().ui.text_selection.clear();
                 }
-                Effect::OpenRewindPrompt => {
-                    app.open_rewind_prompt();
-                    needs_render = true;
-                }
+                // (OpenRewindPrompt removed — legacy keyboard handles Esc.)
                 // ── System / Thread / Memory ───────────────────────
                 Effect::PushSystemNote(msg) => {
                     app.push_system_note(msg);
                     needs_render = true;
                 }
-                Effect::OpenThreadWithFeedback { thread_id } => {
-                    app.open_thread_with_feedback(thread_id);
-                    needs_render = true;
-                }
+                // (OpenThreadWithFeedback removed — no SM emitter; thread
+                // browser panel will emit its own PanelEffect when wired.)
                 Effect::MemoryPanelOpenEditor { ref path } => {
                     let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
                         if cfg!(target_os = "macos") || cfg!(target_os = "linux") {

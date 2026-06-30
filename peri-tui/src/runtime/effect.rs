@@ -24,10 +24,6 @@ pub enum Effect {
     Scroll {
         delta: i32,
     },
-    /// Scroll the AskUser questions panel.
-    AskUserScroll {
-        delta: i32,
-    },
 
     // ── Mouse textarea interaction ────────────────────────────────────────
     /// Left-click on textarea: set cursor position and start selection.
@@ -61,10 +57,10 @@ pub enum Effect {
     },
 
     // ── Agent control ────────────────────────────────────────────────────
-    /// Interrupt the currently running agent.
-    InterruptAgent,
-    /// Clear pending messages buffer (used when Esc during loading).
-    ClearPendingMessages,
+    // Note: InterruptAgent / ClearPendingMessages were removed — Ctrl+C and
+    // Esc-during-loading are handled by the legacy keyboard module directly
+    // via &mut App. When the keyboard path is Effect-ized (B3 MigrateInput),
+    // these will be re-added with proper SM emit points.
 
     // ── Panel / interaction side-effects ─────────────────────────────────
     /// Show a transient notification.
@@ -96,18 +92,17 @@ pub enum Effect {
     PollWorkflow,
     /// Clear text selection (on terminal resize).
     ClearTextSelection,
-    /// Open the rewind prompt selector.
-    OpenRewindPrompt,
+    // Note: OpenRewindPrompt was removed — the legacy keyboard module handles
+    // Esc directly via app.open_rewind_prompt(). Phase 1.4-rewind will wire
+    // the v2 RewindHandler via HandlerOutput::Submit → proper ACP method.
 
     // ── System notes ─────────────────────────────────────────────────────
     /// Push a system note (model switch, compact, etc.) into the view.
     PushSystemNote(String),
 
     // ── Thread / session ─────────────────────────────────────────────────
-    /// Open a thread browser entry with user feedback context.
-    OpenThreadWithFeedback {
-        thread_id: String,
-    },
+    // Note: OpenThreadWithFeedback was removed — no SM emitter existed; the
+    // thread browser panel will emit its own PanelEffect when wired to v2.
     /// Open the memory panel with system editor.
     MemoryPanelOpenEditor {
         path: std::path::PathBuf,
@@ -158,17 +153,6 @@ mod tests {
         let e = Effect::PushSystemNote("compact done".into());
         match e {
             Effect::PushSystemNote(msg) => assert_eq!(msg, "compact done"),
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn test_effect_open_thread_with_feedback() {
-        let e = Effect::OpenThreadWithFeedback {
-            thread_id: "t1".into(),
-        };
-        match e {
-            Effect::OpenThreadWithFeedback { thread_id } => assert_eq!(thread_id, "t1"),
             _ => panic!("wrong variant"),
         }
     }

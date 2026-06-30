@@ -120,13 +120,11 @@ impl<'a> ApplyContext<'a> {
             | Effect::PollAgent
             | Effect::AdvanceSpinner
             | Effect::Scroll { .. }
-            | Effect::AskUserScroll { .. }
             | Effect::MouseTextareaClick { .. }
             | Effect::MouseTextareaDrag { .. }
             | Effect::MouseRelease
             | Effect::PasteText { .. }
             | Effect::PushSystemNote(_)
-            | Effect::OpenThreadWithFeedback { .. }
             | Effect::MemoryPanelOpenEditor { .. }
             | Effect::CycleModel
             | Effect::CycleProvider
@@ -134,10 +132,7 @@ impl<'a> ApplyContext<'a> {
             | Effect::FocusBgBar
             | Effect::ToggleDiff
             | Effect::PollWorkflow
-            | Effect::InterruptAgent
-            | Effect::ClearPendingMessages
             | Effect::ClearTextSelection
-            | Effect::OpenRewindPrompt
             | Effect::OpenPanel(_)
             | Effect::ClosePanel => ApplyOutcome::Ok,
         }

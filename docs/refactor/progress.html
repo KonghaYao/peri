@@ -45,9 +45,9 @@
 </div>
 
 <div class="summary">
-  <div class="stat done"><span class="num">1</span><span class="label">Phase 已完成</span></div>
-  <div class="stat active"><span class="num">1</span><span class="label">Phase 进行中</span></div>
-  <div class="stat pending"><span class="num">7</span><span class="label">Phase 待开始</span></div>
+  <div class="stat done"><span class="num">3</span><span class="label">Phase 已完成</span></div>
+  <div class="stat active"><span class="num">1</span><span class="label">Phase 3a 进行中</span></div>
+  <div class="stat pending"><span class="num">6</span><span class="label">Phase 待开始</span></div>
   <div class="stat pending"><span class="num">14</span><span class="label">已识别缺陷</span></div>
 </div>
 
@@ -57,15 +57,15 @@
     <tr><th>#</th><th>Phase</th><th>状态</th><th>说明</th></tr>
   </thead>
   <tbody>
-    <tr><td>0</td><td>建立进度跟踪基础设施</td><td class="status s-active">进行中</td><td>plan 文档 + artifact 看板 + TaskCreate 9 个任务</td></tr>
-    <tr><td>1.1</td><td>修复键盘双重执行</td><td class="status s-pending">待开始</td><td>is_sm_handled_shortcut + 2b 同步顺序冲突，需 Design Review</td></tr>
+    <tr><td>0</td><td>建立进度跟踪基础设施</td><td class="status s-done">完成</td><td>plan 文档 + artifact 看板 + TaskCreate 9 个任务（commit 8301b39f）</td></tr>
+    <tr><td>1.1</td><td>修复键盘双重执行</td><td class="status s-done">完成</td><td>方案 A：删 SM 编辑 arm（Ctrl+A/U/W/Backspace/Delete/Home/End/Left/Right），2b 同步条件化（keyboard_did_run），prediction 清零改用文本长度对比（commit <code>0da30e87</code>，949 测试全过）</td></tr>
     <tr><td>1.2</td><td>重构 Handler trait 签名</td><td class="status s-pending">待开始</td><td>render 接收 Frame；handle_key 接收 KeyEvent</td></tr>
     <tr><td>1.3</td><td>启用 v2 Interaction Handlers</td><td class="status s-pending">待开始</td><td>main_loop 接收 HITL/AskUser/Rewind/OAuth 时构造 Handler 进入 Modal</td></tr>
     <tr><td>1.4</td><td>实现 Handler.render() + 删除 v1 popup</td><td class="status s-pending">待开始</td><td>迁移 popups/{hitl,ask_user,rewind,oauth}.rs 渲染到 Handler</td></tr>
     <tr><td>1.5</td><td>修复 Modal 期间 AcpEvent 丢弃</td><td class="status s-pending">待开始</td><td>Modal 持有 saved_view，view_models() 不返回 &[]</td></tr>
     <tr><td>1.6</td><td>Streaming→Modal 可达 + Status 事件</td><td class="status s-pending">待开始</td><td>OpenPanel 在 Streaming 也触发；实现 §4.3 status 事件</td></tr>
     <tr><td>2</td><td>消息源单一化</td><td class="status s-pending">待开始</td><td>删 origin_messages/view_messages，统一 state.view + current_turn</td></tr>
-    <tr><td>3</td><td>清理死 Effect + Switching</td><td class="status s-pending">待开始</td><td>11 个无人 emit 的 Effect；modal.rs TLS stubs；State::Switching</td></tr>
+    <tr><td>3</td><td>清理死 Effect + Switching</td><td class="status s-active">Phase 3a 完成</td><td>3a：5 个真死 Effect 删除（AskUserScroll/ClearPendingMessages/InterruptAgent/OpenRewindPrompt/OpenThreadWithFeedback）；3b：modal.rs TLS stubs → #[cfg(test)]（推迟到下个窗口）；3c：State::Switching 完善（推迟）</td></tr>
     <tr><td>4</td><td>CLAUDE.md 同步</td><td class="status s-pending">待开始</td><td>peri-tui + 根 CLAUDE.md 删除过时引用</td></tr>
   </tbody>
 </table>
@@ -102,8 +102,9 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-06-30 cron #1（Phase 0 进行中）<br>
-  <strong>下一步</strong>：启动 Design Review workflow 评估 Phase 1.1 双向同步冲突方案
+  <strong>最后更新</strong>：2026-06-30 cron #2（Phase 1.1 + Phase 3a 完成 → Phase 3b/c 待续）<br>
+  <strong>本窗口成果</strong>：commit <code>0da30e87</code>（Phase 1.1）+ 待提交（Phase 3a：5 个死 Effect 删除）· 948 测试全过<br>
+  <strong>下一步</strong>：Phase 3b（modal.rs TLS stubs → #[cfg(test)]，需重写 state_machine::handle Modal arm）+ Phase 3c（State::Switching 完善）→ Phase 1.5（Modal 期间 AcpEvent 修复）
 </div>
 
 </body>
