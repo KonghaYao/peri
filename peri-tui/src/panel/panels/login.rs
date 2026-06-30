@@ -1238,7 +1238,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_enter_enters_edit_mode() {
         let mut panel = LoginPanel::with_providers(sample_providers());
         let ctx = make_ctx();

@@ -278,9 +278,10 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                                     _ => {}
                                 }
                             } else if !value.is_empty() {
-                                let mut new_provider =
-                                    peri_acp::provider::config::ProviderConfig::default();
-                                new_provider.id = id.to_string();
+                                let mut new_provider = peri_acp::provider::config::ProviderConfig {
+                                    id: id.to_string(),
+                                    ..Default::default()
+                                };
                                 match *field {
                                     "name" => new_provider.name = Some(value.clone()),
                                     "type" => new_provider.provider_type = value.clone(),
