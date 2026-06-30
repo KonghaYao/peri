@@ -114,15 +114,17 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #14（Phase 2.6 step 1 — source_agent_id 路由打通）<br>
-  <strong>本窗口成果</strong>：3 个本地 commit（均不 push）：<br>
+  <strong>最后更新</strong>：2026-07-01 cron #14（Phase 2.6 step 1 — source_agent_id 端到端打通）<br>
+  <strong>本窗口成果</strong>：5 个本地 commit（均不 push）：<br>
   · <code>c0a20f95</code> docs：提交 cron #13 遗留的 progress.html 更新<br>
   · <code>1d2435e4</code> <strong>Phase 2.6 step 1：source_agent_id 真实路由</strong>。调研确认 ACP 层链路完整（peri-agent <code>inject_source_agent_id</code> + ACP mapper 保留 + event_data 携带），TUI 侧 <code>agent_ops/mod.rs:220,252</code> 用 <code>_</code> 丢弃是真正的 bug。改动：① <code>SubAgentStatus</code> 加 <code>child_messages: Vec&lt;ViewModel&gt;</code> 字段（v2 权威源）② 新增 <code>find_owner_mut</code> / <code>append_child_message</code> / <code>update_child_tool_output</code> 三个 helper（instance_id 精确匹配 + agent_id 回退）③ ToolStart/ToolEnd 处理 <code>source_agent_id</code> 匹配时累积到 child_messages 而非 view_messages（找不到 fallback 到主消息流，保证事件顺序异常不丢数据）④ <code>SessionSubAgentProbe</code> 重命名 <code>children</code> → <code>legacy_children</code>，优先级 <code>child_messages &gt; legacy view_messages &gt; 空</code>。8 个新单元测试<br>
   · <code>b5778dcc</code> test：5 个端到端集成测试覆盖 source_agent_id 路由。验证 ① src 匹配时 tool 不在 view_messages 而在 child_messages ② src=None fallback 主消息流 ③ src 未知也 fallback ④ ToolEnd 原地更新 ToolCard（不新建）⑤ SessionSubAgentProbe.lookup_by_agent_id 通过 agent_id 查询返回权威源 child_messages。同时修复 clippy contains_key 提示<br>
-  <strong>关键突破</strong>：子 Agent 的工具调用现在<strong>真实</strong>累积到 <code>SubAgentStatus.child_messages</code>，不再污染主消息流。这是 v2 渲染路径的<strong>权威数据源</strong>，独立于 v1 <code>view_messages</code>。<code>SessionSubAgentProbe</code> 已优先读取此字段；仅当为空时回退到 legacy 路径。Phase 2.6 完整退役 <code>view_messages</code> 的核心数据通路打通<br>
-  <strong>当前状态</strong>：1047 测试全过（cron #13 后 +13）· 子 Agent 工具调用通过 source_agent_id 路由 · v2 渲染路径权威源 = <code>SubAgentStatus.child_messages</code><br>
-  <strong>已知限制</strong>：① 子 Agent 的<strong>文本回复</strong>当前仍不可见（<code>AgentEvent::AssistantChunk</code> 是空变体，不携带 text + source_agent_id；<code>TurnCommitted</code> 在 forwarder 被过滤不转发到父 Agent）② AiReasoning 类似限制<br>
-  <strong>下一步</strong>：① 扩展 <code>AgentEvent::AssistantChunk</code> 携带 <code>{source_agent_id, text}</code>，让子 Agent 文本可见 ② Phase 2.5 退役 apply_rebuild_all / ephemeral_notes ③ 评估 view_messages 删除的依赖链（SubAgentGroup 头部仍由 view_messages 提供视图）
+  · <code>2756664b</code> docs：progress.html 更新<br>
+  · <code>6ed0995b</code> <strong>test：HeadlessHandle::render 对齐生产 draw_now 路径</strong>。注入 SessionSubAgentProbe 通过 <code>with_status_probe</code> thread-local。新增 <code>test_subagent_child_tool_renders_on_screen</code> 端到端渲染测试，验证 SubAgentStart + ToolStart(src) → 屏幕上 ToolCard 真实可见（通过 probe → render_subagent_group 注入）。这闭合了 source_agent_id 路由 → child_messages → probe → 渲染 → 屏幕的完整链路<br>
+  <strong>关键突破</strong>：子 Agent 的工具调用现在<strong>真实</strong>累积到 <code>SubAgentStatus.child_messages</code>，不再污染主消息流。这是 v2 渲染路径的<strong>权威数据源</strong>。生产 + 测试渲染路径完全统一（都通过 SessionSubAgentProbe 注入）。Phase 2.6 完整退役 <code>view_messages</code> 的核心数据通路打通且测试覆盖<br>
+  <strong>当前状态</strong>：1048 测试全过（cron #13 后 +14）· 子 Agent 工具调用通过 source_agent_id 路由 · v2 渲染路径权威源 = <code>SubAgentStatus.child_messages</code> · 端到端屏幕渲染验证通过<br>
+  <strong>已知限制</strong>：① 子 Agent 的<strong>文本回复</strong>当前仍不可见（<code>AgentEvent::AssistantChunk</code> 是空变体；<code>TurnCommitted</code> 在 forwarder 被过滤）② AiReasoning 类似限制 ③ view_messages 中 SubAgentGroup 头部仍由 v1 handle_subagent_start 创建（待 v2 路径替代）<br>
+  <strong>下一步</strong>：① 扩展 <code>AgentEvent::AssistantChunk</code> 携带 <code>source_agent_id</code>，子 Agent 文本回复可见（仅 5 处构造点，工作量小）② Phase 2.5 退役 apply_rebuild_all / ephemeral_notes ③ SubAgentGroup 头部改由 ACP ViewCommit 提供，删除 v1 handle_subagent_start 的 apply_add_message 路径
 </div>
 
 </body>
