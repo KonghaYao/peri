@@ -212,12 +212,12 @@ impl App {
                 stop_reason: _,
             } => self.handle_token_usage_update(usage),
             AgentEvent::ToolStart {
-                tool_call_id: _,
+                tool_call_id,
                 name,
                 display,
                 args,
                 input: _,
-                source_agent_id: _,
+                source_agent_id,
             } => {
                 self.session_mgr.current_mut().agent.retry_status = None;
                 self.session_mgr.current_mut().agent.agent_replied = true;
@@ -237,6 +237,33 @@ impl App {
                     .current_mut()
                     .spinner_state
                     .set_verb(Some(&verb_text));
+
+                // Phase 2.6: source_agent_id 路由 — 若匹配 SubAgent 则累积到
+                // SubAgentStatus.child_messages（v2 权威源），不再追加到 view_messages。
+                // 这是实现「子 Agent 内容嵌套显示」的关键路径。
+                let tool_card = peri_acp_types::view_model::ViewModel::ToolCard(
+                    peri_acp_types::view_model::ToolCardData {
+                        tool_id: tool_call_id.clone(),
+                        tool_name: name.clone(),
+                        input_summary: args.clone(),
+                        output_summary: String::new(),
+                        is_error: false,
+                        diff: None,
+                    },
+                );
+                let routed_to_subagent = match source_agent_id.as_deref() {
+                    Some(src) => self
+                        .session_mgr
+                        .current_mut()
+                        .subagent_status
+                        .append_child_message(src, tool_card),
+                    None => false,
+                };
+                if routed_to_subagent {
+                    self.request_rebuild();
+                    return (true, false, false);
+                }
+                // 主 Agent 路径：保留 v1 view_messages 累积（向后兼容）。
                 // P5: No pipeline — create ToolBlock directly
                 let header = format!("{} {}", display, args);
                 let tool_vm = MessageViewModel::tool_block(name.clone(), header, None, false);
@@ -249,9 +276,22 @@ impl App {
                 name,
                 output,
                 is_error,
-                source_agent_id: _,
+                source_agent_id,
             } => {
-                // P5: Update ToolBlock directly in view_messages
+                // Phase 2.6: 优先在 SubAgentStatus.child_messages 中更新 ToolCard
+                // （与 ToolStart 路由配对）。匹配成功则跳过 view_messages 查找。
+                if let Some(src) = source_agent_id.as_deref() {
+                    if self
+                        .session_mgr
+                        .current_mut()
+                        .subagent_status
+                        .update_child_tool_output(src, &tool_call_id, output.clone(), is_error)
+                    {
+                        self.request_rebuild();
+                        return (true, false, false);
+                    }
+                }
+                // 主 Agent 路径或 SubAgent 路由失败时的 fallback
                 let session = self.session_mgr.current_mut();
                 let mut found = false;
                 for vm in &mut session.messages.view_messages {
@@ -270,6 +310,26 @@ impl App {
                             vm.recompute_hash();
                             found = true;
                             break;
+                        }
+                    }
+                }
+                if !found {
+                    // 若 source_agent_id 匹配 SubAgent（但 ToolStart 未路由 / 已被 evict），
+                    // 仍然累积到 child_messages 而非主消息流（保持子 Agent 内容隔离）。
+                    if let Some(src) = source_agent_id.as_deref() {
+                        let tool_card = peri_acp_types::view_model::ViewModel::ToolCard(
+                            peri_acp_types::view_model::ToolCardData {
+                                tool_id: tool_call_id.clone(),
+                                tool_name: name.clone(),
+                                input_summary: String::new(),
+                                output_summary: output.clone(),
+                                is_error,
+                                diff: None,
+                            },
+                        );
+                        if session.subagent_status.append_child_message(src, tool_card) {
+                            session.messages.message_cache = None;
+                            found = true;
                         }
                     }
                 }

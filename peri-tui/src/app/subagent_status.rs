@@ -31,7 +31,7 @@ use peri_acp_types::view_model::ViewModel;
 
 use crate::render::view_render::{SubAgentRenderInfo, SubAgentStatusProbe};
 
-/// SubAgent 运行时状态（8 字段）。由 TUI 事件实时维护，独立于 ACP ViewCommit。
+/// SubAgent 运行时状态（9 字段）。由 TUI 事件实时维护，独立于 ACP ViewCommit。
 #[derive(Clone, Debug)]
 pub struct SubAgentStatus {
     /// 是否仍在运行（false = 已完成或取消）
@@ -54,6 +54,16 @@ pub struct SubAgentStatus {
     pub started_at: Instant,
     /// 完成时间（None = 仍在运行或被取消）
     pub completed_at: Option<Instant>,
+    /// Phase 2.6：子 Agent 内部累积的 v2 ViewModels。
+    ///
+    /// 由 `source_agent_id`（child_thread_id）路由的事件累积：
+    /// - `ToolStart` / `ToolEnd` 路由匹配时，转换为 `ViewModel::ToolCard` 追加
+    /// - 未来可扩展 `AssistantChunk` / `AiReasoning` 路由
+    ///
+    /// 这是 v2 渲染路径的**权威数据源**，独立于 v1 `view_messages`。
+    /// `SessionSubAgentProbe::lookup_by_agent_id` 优先读取此字段；
+    /// 仅当为空时回退到从 `view_messages` 提取（Phase 2.6 完整退役前的兼容路径）。
+    pub child_messages: Vec<ViewModel>,
 }
 
 impl SubAgentStatus {
@@ -132,6 +142,7 @@ impl SubAgentStatusMap {
                 agent_id,
                 started_at: Instant::now(),
                 completed_at: None,
+                child_messages: Vec::new(),
             },
         );
     }
@@ -184,6 +195,84 @@ impl SubAgentStatusMap {
     /// 精确查询（instance_id 路径）。
     pub fn lookup(&self, instance_id: &str) -> Option<&SubAgentStatus> {
         self.inner.get(instance_id)
+    }
+
+    /// Phase 2.6：通过 source identifier（child_thread_id 或 agent_id）
+    /// 找到 owner entry 并返回可变引用。
+    ///
+    /// 优先精确匹配 instance_id；失败时回退到 `lookup_by_agent_id` 逻辑
+    /// （运行中优先 + 最近启动优先）。返回 `&mut` 供调用方修改 child_messages。
+    pub fn find_owner_mut(&mut self, source_id: &str) -> Option<&mut SubAgentStatus> {
+        // 1. 精确匹配 instance_id
+        if self.inner.get(source_id).is_some() {
+            return self.inner.get_mut(source_id);
+        }
+        // 2. 回退：按 agent_id 找最近匹配的 key（不能直接返回 &mut，需先定 key）
+        let target_key: Option<String> = {
+            let mut best: Option<(&String, &SubAgentStatus)> = None;
+            for (k, s) in &self.inner {
+                if s.agent_id != source_id {
+                    continue;
+                }
+                best = Some(match best {
+                    None => (k, s),
+                    Some((prev_k, prev)) => {
+                        let prefer_new = if s.is_running && !prev.is_running {
+                            true
+                        } else if s.is_running == prev.is_running {
+                            s.started_at > prev.started_at
+                        } else {
+                            false
+                        };
+                        if prefer_new {
+                            (k, s)
+                        } else {
+                            (prev_k, prev)
+                        }
+                    }
+                });
+            }
+            best.map(|(k, _)| k.clone())
+        };
+        target_key.and_then(|k| self.inner.get_mut(&k))
+    }
+
+    /// Phase 2.6：路由 v2 ViewModel 到匹配的 SubAgent child_messages。
+    ///
+    /// 返回 `true` 表示成功路由（调用方应跳过 view_messages 累积）；
+    /// 返回 `false` 表示无匹配（调用方应 fallback 到主消息流）。
+    pub fn append_child_message(&mut self, source_id: &str, vm: ViewModel) -> bool {
+        if let Some(s) = self.find_owner_mut(source_id) {
+            s.child_messages.push(vm);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Phase 2.6：更新子 Agent ToolCard 的 output（ToolEnd 路由）。
+    ///
+    /// 在 `source_id` 匹配的 owner child_messages 中查找 `tool_id == tool_call_id`
+    /// 的 ToolCard，更新 output_summary / is_error。返回 `true` 表示成功。
+    pub fn update_child_tool_output(
+        &mut self,
+        source_id: &str,
+        tool_call_id: &str,
+        output: String,
+        is_error: bool,
+    ) -> bool {
+        if let Some(s) = self.find_owner_mut(source_id) {
+            for vm in &mut s.child_messages {
+                if let ViewModel::ToolCard(d) = vm {
+                    if d.tool_id == tool_call_id {
+                        d.output_summary = output;
+                        d.is_error = is_error;
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// 回退路径：只有 agent_id 时，按 `started_at` 倒序返回最近匹配的 entry。
@@ -282,32 +371,34 @@ impl SubAgentStatusProbe for SubAgentStatusMap {
 // SessionSubAgentProbe — 状态 + 子内容复合 probe
 // ---------------------------------------------------------------------------
 
-/// 复合 probe：包装 [`SubAgentStatusMap`] + 子内容缓存。
+/// 复合 probe：包装 [`SubAgentStatusMap`] + v1 view_messages 兼容缓存。
 ///
-/// `draw_now` 从 v1 `view_messages` 中解析所有 `SubAgentGroup.recent_messages`
-/// （通过 [`crate::render::vm_convert::message_view_models_to_v2`] 转换为 v2）
-/// 一次性预计算，然后 probe 查询时按 agent_id 取出注入到 `SubAgentRenderInfo`。
+/// **子内容优先级**（Phase 2.6 双源策略）：
+/// 1. **权威源**：`SubAgentStatus.child_messages` — 由 `source_agent_id` 路由的
+///    ToolStart/ToolEnd 实时累积。这是 v2 路径的目标数据源。
+/// 2. **兼容源**：v1 `view_messages` 中的 `SubAgentGroup.recent_messages` —
+///    生产中永久为空 Vec（v1 设计如此），仅在测试或历史路径下可能有值。
 ///
-/// 这样 `render_subagent_group` 即使遇到 ACP 层生成的空 placeholder DTO，
-/// 也能从 v1 数据源拿到子内容渲染（Phase 2.6 切换前的过渡方案）。
+/// 当权威源非空时优先返回；否则返回兼容源（可能为空）。
+/// Phase 2.6 完整退役 `view_messages` 后，兼容源路径删除。
 #[derive(Clone)]
 pub struct SessionSubAgentProbe {
-    /// 运行时状态（共享 clone，避免 &self 与 closure 冲突）
+    /// 运行时状态（含 `child_messages` 权威源）
     pub status: SubAgentStatusMap,
-    /// agent_id → v2 子内容（已转换，按 agent_id 匹配最近一个）
-    pub children: HashMap<String, Vec<ViewModel>>,
+    /// 兼容源：agent_id → v2 子内容（从 v1 view_messages 提取）
+    pub legacy_children: HashMap<String, Vec<ViewModel>>,
 }
 
 impl SessionSubAgentProbe {
-    /// 从 v1 `view_messages` 解析所有 SubAgentGroup 子内容并构建 probe。
+    /// 从 `SubAgentStatusMap` + v1 `view_messages` 构建 probe。
     ///
-    /// 同名 agent_id 多次出现时，**后一个覆盖前一个**（保留最新状态）。
-    /// 这是 v1 view_messages 的语义（追加）—— 最近的 SubAgentGroup 是最新状态。
+    /// `legacy_children` 仅在 `SubAgentStatus.child_messages` 为空时使用。
+    /// 同名 agent_id 多次出现时，**后一个覆盖前一个**（v1 追加语义）。
     pub fn from_view_messages(
         status: SubAgentStatusMap,
         view_messages: &[crate::ui::message_view::MessageViewModel],
     ) -> Self {
-        let mut children: HashMap<String, Vec<ViewModel>> = HashMap::new();
+        let mut legacy_children: HashMap<String, Vec<ViewModel>> = HashMap::new();
         for vm in view_messages {
             if let crate::ui::message_view::MessageViewModel::SubAgentGroup {
                 agent_id,
@@ -316,20 +407,33 @@ impl SessionSubAgentProbe {
             } = vm
             {
                 let v2 = crate::render::vm_convert::message_view_models_to_v2(recent_messages);
-                children.insert(agent_id.clone(), v2);
+                legacy_children.insert(agent_id.clone(), v2);
             }
         }
-        Self { status, children }
+        Self {
+            status,
+            legacy_children,
+        }
     }
 }
 
 impl SubAgentStatusProbe for SessionSubAgentProbe {
     fn lookup_by_agent_id(&self, agent_id: &str) -> Option<SubAgentRenderInfo> {
-        // 通过 trait 方法查询（返回 SubAgentRenderInfo），而非 inherent 方法
-        // （inherent 方法返回 &SubAgentStatus，是给运行时维护用的）。
         SubAgentStatusProbe::lookup_by_agent_id(&self.status, agent_id).map(|mut info| {
-            // 注入子内容（DTO 占位符路径）
-            if let Some(vms) = self.children.get(agent_id) {
+            // 1. 权威源：SubAgentStatus.child_messages（按 agent_id 通过 status map 查询）
+            // 注意：info 中没有 instance_id 字段，只能通过 agent_id 回退匹配。
+            // find_owner_mut 在 &self 上无法调用，改为预先查询（用 inherent lookup_by_agent_id）。
+            let authoritative = self.status.lookup_by_agent_id(agent_id).and_then(|s| {
+                if s.child_messages.is_empty() {
+                    None
+                } else {
+                    Some(s.child_messages.clone())
+                }
+            });
+            if let Some(vms) = authoritative {
+                info.recent_messages = vms;
+            } else if let Some(vms) = self.legacy_children.get(agent_id) {
+                // 2. 兼容源：v1 view_messages 提取（仅当权威源为空）
                 info.recent_messages = vms.clone();
             }
             info
@@ -548,6 +652,91 @@ mod tests {
         assert_eq!(researcher.task_preview, "research task");
     }
 
+    // --- find_owner_mut / append_child_message / update_child_tool_output 测试 ---
+
+    #[test]
+    fn test_find_owner_mut_instance_id_exact_match() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
+        // instance_id 精确匹配
+        let owner = map.find_owner_mut("inst-1").expect("应精确匹配");
+        assert_eq!(owner.agent_id, "fork");
+    }
+
+    #[test]
+    fn test_find_owner_mut_fallback_to_agent_id() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
+        // 用 agent_id 查询（非 instance_id）→ 回退路径
+        let owner = map.find_owner_mut("fork").expect("应通过 agent_id 匹配");
+        assert_eq!(owner.task_preview, "task");
+    }
+
+    #[test]
+    fn test_find_owner_mut_no_match_returns_none() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
+        assert!(map.find_owner_mut("unknown").is_none());
+    }
+
+    #[test]
+    fn test_append_child_message_routes_to_matching_owner() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
+
+        let vm = ViewModel::UserBubble(peri_acp_types::view_model::UserBubbleData {
+            text: "child msg".into(),
+        });
+        let ok = map.append_child_message("fork", vm);
+        assert!(ok, "应成功路由");
+
+        let s = map.lookup("inst-1").unwrap();
+        assert_eq!(s.child_messages.len(), 1);
+    }
+
+    #[test]
+    fn test_append_child_message_returns_false_when_no_match() {
+        let mut map = SubAgentStatusMap::new();
+        let vm =
+            ViewModel::UserBubble(peri_acp_types::view_model::UserBubbleData { text: "x".into() });
+        assert!(!map.append_child_message("unknown", vm));
+        assert!(map.is_empty(), "无 owner 时不应保留 vm");
+    }
+
+    #[test]
+    fn test_update_child_tool_output_finds_by_tool_call_id() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
+        // 累积一个 ToolCard
+        let tool_vm = ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
+            tool_id: "tc-1".into(),
+            tool_name: "Read".into(),
+            input_summary: "file.rs".into(),
+            output_summary: String::new(),
+            is_error: false,
+            diff: None,
+        });
+        map.append_child_message("inst-1", tool_vm);
+
+        // ToolEnd 路由：更新 output
+        let ok = map.update_child_tool_output("inst-1", "tc-1", "content".into(), false);
+        assert!(ok);
+        let s = map.lookup("inst-1").unwrap();
+        if let ViewModel::ToolCard(d) = &s.child_messages[0] {
+            assert_eq!(d.output_summary, "content");
+        } else {
+            panic!("应为 ToolCard");
+        }
+    }
+
+    #[test]
+    fn test_update_child_tool_output_no_match_returns_false() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
+        // 没有 ToolCard → false
+        assert!(!map.update_child_tool_output("inst-1", "tc-x", "x".into(), false));
+    }
+
     // --- SessionSubAgentProbe 测试 ---
 
     #[test]
@@ -559,7 +748,7 @@ mod tests {
         let mut map = SubAgentStatusMap::new();
         map.start("inst-1".into(), "fork".into(), "task".into(), false);
 
-        // 构造一个含子内容的 SubAgentGroup v1 视图
+        // 构造一个含子内容的 SubAgentGroup v1 视图（兼容源）
         let child_vm = MessageViewModel::user("hello from child".into());
         let parent = MessageViewModel::SubAgentGroup {
             agent_id: "fork".into(),
@@ -586,11 +775,56 @@ mod tests {
         assert_eq!(
             info.recent_messages.len(),
             1,
-            "应注入 1 个子内容（UserBubble）"
+            "应注入 1 个子内容（UserBubble）— 来自 legacy 兼容源"
         );
         assert!(
             matches!(info.recent_messages[0], ViewModel::UserBubble(_)),
             "子内容应为 UserBubble（vm_convert 转换后）"
+        );
+    }
+
+    #[test]
+    fn test_session_probe_authoritative_child_messages_overrides_legacy() {
+        use crate::render::view_render::SubAgentStatusProbe;
+
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "task".into(), false);
+        // 权威源：累积一个 ToolCard
+        let tool_vm = ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
+            tool_id: "tc-1".into(),
+            tool_name: "Read".into(),
+            input_summary: "f.rs".into(),
+            output_summary: "ok".into(),
+            is_error: false,
+            diff: None,
+        });
+        map.append_child_message("fork", tool_vm);
+
+        // 兼容源：构造一个含不同子内容的 v1 view
+        let legacy_child = crate::ui::message_view::MessageViewModel::user("legacy".into());
+        let parent = crate::ui::message_view::MessageViewModel::SubAgentGroup {
+            agent_id: "fork".into(),
+            instance_id: Some("inst-1".into()),
+            task_preview: "task".into(),
+            is_running: true,
+            is_background: false,
+            total_steps: 0,
+            recent_messages: vec![legacy_child],
+            collapsed: false,
+            bg_hash: None,
+            final_result: None,
+            is_error: false,
+            batch_agents: Vec::new(),
+            content_hash: 0,
+        };
+        let probe = SessionSubAgentProbe::from_view_messages(map, std::slice::from_ref(&parent));
+        let info = probe.lookup_by_agent_id("fork").expect("应找到");
+
+        // 权威源（ToolCard）应优先于兼容源（UserBubble "legacy"）
+        assert_eq!(info.recent_messages.len(), 1);
+        assert!(
+            matches!(info.recent_messages[0], ViewModel::ToolCard(_)),
+            "权威源 child_messages 应优先于 legacy view_messages"
         );
     }
 
