@@ -5,6 +5,7 @@
 //! dispatch -- the actual OAuth-flow UI logic lands in P3.
 
 use peri_acp_types::event_data::OauthNeeded;
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use super::super::state::{Handler, HandlerOutput};
 
@@ -28,18 +29,24 @@ impl OauthHandler {
 }
 
 impl Handler for OauthHandler {
-    fn render(&self, _area: (u16, u16)) {
-        // P5: rendering uses legacy popup system
+    fn render(&self, _frame: &mut ratatui::Frame, _area: ratatui::layout::Rect) {
+        // Phase 1.3: render OAuth popup (server name + auth URL + open/close
+        // hints). For now the legacy popup system handles it.
     }
 
-    fn handle_key(&mut self, key: char) -> HandlerOutput {
-        match key {
-            '\n' | '\r' | 'o' | 'O' => {
+    fn handle_key(&mut self, key: KeyEvent) -> HandlerOutput {
+        match key.code {
+            KeyCode::Enter => {
                 // Open the auth URL in browser
                 self.url_opened = true;
                 HandlerOutput::Submit(self.request.auth_url.clone())
             }
-            '\x1b' | 'q' | 'Q' | 'c' | 'C' => HandlerOutput::Dismiss,
+            KeyCode::Char('o' | 'O') => {
+                self.url_opened = true;
+                HandlerOutput::Submit(self.request.auth_url.clone())
+            }
+            KeyCode::Esc => HandlerOutput::Dismiss,
+            KeyCode::Char('q' | 'Q' | 'c' | 'C') => HandlerOutput::Dismiss,
             _ => HandlerOutput::Nothing,
         }
     }
@@ -47,6 +54,7 @@ impl Handler for OauthHandler {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::handler::{key, key_enter, key_esc};
     use super::*;
 
     fn make_request() -> OauthNeeded {
@@ -59,25 +67,25 @@ mod tests {
     #[test]
     fn test_handle_key_enter_opens_url() {
         let mut h = OauthHandler::new(make_request());
-        let output = h.handle_key('\n');
+        let output = h.handle_key(key_enter());
         assert!(matches!(output, HandlerOutput::Submit(ref s) if s.contains("github.com")));
     }
 
     #[test]
     fn test_handle_key_o_opens_url() {
         let mut h = OauthHandler::new(make_request());
-        assert!(matches!(h.handle_key('o'), HandlerOutput::Submit(_)));
+        assert!(matches!(h.handle_key(key('o')), HandlerOutput::Submit(_)));
     }
 
     #[test]
     fn test_handle_key_esc_dismisses() {
         let mut h = OauthHandler::new(make_request());
-        assert_eq!(h.handle_key('\x1b'), HandlerOutput::Dismiss);
+        assert_eq!(h.handle_key(key_esc()), HandlerOutput::Dismiss);
     }
 
     #[test]
     fn test_handle_key_q_dismisses() {
         let mut h = OauthHandler::new(make_request());
-        assert_eq!(h.handle_key('q'), HandlerOutput::Dismiss);
+        assert_eq!(h.handle_key(key('q')), HandlerOutput::Dismiss);
     }
 }

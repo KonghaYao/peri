@@ -39,14 +39,18 @@ pub use crate::panel::{PanelEffect, PanelReadContext, PanelState};
 /// `Modal::Interaction`. Key dispatch delegates to the active handler
 /// without knowing its type.
 ///
-/// Signatures are simplified stubs; refined in Phase 3.
+/// Phase 1.2 signatures: `render` takes a ratatui `Frame` + `Rect` so handlers
+/// can draw directly (Phase 1.3 will wire this into the modal render path);
+/// `handle_key` takes a full `KeyEvent` so handlers can match on `KeyCode`
+/// (Esc / arrows / BackTab) and modifiers (Ctrl+Enter, Shift+Tab) instead of
+/// the lossy `char` projection.
 pub trait Handler: Send + std::fmt::Debug {
-    /// Render the interaction popup.
-    fn render(&self, area: (u16, u16));
+    /// Render the interaction popup directly into the provided frame area.
+    fn render(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect);
 
     /// Handle a key event. Returns the handler's output which the state
     /// machine translates to standard effects.
-    fn handle_key(&mut self, key: char) -> HandlerOutput;
+    fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> HandlerOutput;
 }
 
 /// Result of a handler key-press. Simplified stub.

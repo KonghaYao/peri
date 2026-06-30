@@ -5,6 +5,7 @@
 //! Space to toggle multi-select, Enter to submit, Esc to dismiss.
 
 use peri_acp_types::event_data::AskUser;
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use super::super::state::{Handler, HandlerOutput};
 
@@ -35,23 +36,24 @@ impl AskUserHandler {
 }
 
 impl Handler for AskUserHandler {
-    fn render(&self, _area: (u16, u16)) {
-        // P5: rendering uses legacy popup system
+    fn render(&self, _frame: &mut ratatui::Frame, _area: ratatui::layout::Rect) {
+        // Phase 1.3: render AskUser popup (question tabs + options list +
+        // multi-select hints). For now the legacy popup system handles it.
     }
 
-    fn handle_key(&mut self, key: char) -> HandlerOutput {
+    fn handle_key(&mut self, key: KeyEvent) -> HandlerOutput {
         if self.form.questions.is_empty() {
             return HandlerOutput::Dismiss;
         }
         let q = &self.form.questions[self.question_idx];
 
-        match key {
-            '\t' => {
+        match key.code {
+            KeyCode::Tab => {
                 // Tab: cycle to next question
                 self.question_idx = (self.question_idx + 1) % self.form.questions.len();
                 HandlerOutput::Nothing
             }
-            '\n' | '\r' => {
+            KeyCode::Enter => {
                 // Enter: submit answers
                 let answers: Vec<String> = self
                     .selections
@@ -75,7 +77,7 @@ impl Handler for AskUserHandler {
                 .to_string();
                 HandlerOutput::Submit(payload)
             }
-            'j' | 'J' => {
+            KeyCode::Char('j' | 'J') => {
                 // j: move selection down. In single-select mode sets the
                 // new position; in multi-select mode toggles the next item.
                 if !q.options.is_empty() {
@@ -97,7 +99,7 @@ impl Handler for AskUserHandler {
                 }
                 HandlerOutput::Nothing
             }
-            'k' | 'K' => {
+            KeyCode::Char('k' | 'K') => {
                 // k: move selection up. In single-select mode sets the new
                 // position; in multi-select mode toggles the previous item.
                 if !q.options.is_empty() {
@@ -119,7 +121,7 @@ impl Handler for AskUserHandler {
                 }
                 HandlerOutput::Nothing
             }
-            ' ' => {
+            KeyCode::Char(' ') => {
                 // Space: toggle the current option in multi-select mode.
                 if q.multi_select && !q.options.is_empty() {
                     let cur = self.selections[self.question_idx]
@@ -135,7 +137,7 @@ impl Handler for AskUserHandler {
                 }
                 HandlerOutput::Nothing
             }
-            '\x1b' => HandlerOutput::Dismiss, // Esc
+            KeyCode::Esc => HandlerOutput::Dismiss,
             _ => HandlerOutput::Nothing,
         }
     }
@@ -143,6 +145,7 @@ impl Handler for AskUserHandler {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::handler::{key, key_enter, key_esc, key_tab};
     use super::*;
     use peri_acp_types::event_data::{Question, QuestionOption};
 
@@ -178,7 +181,7 @@ mod tests {
     #[test]
     fn test_handle_key_enter_submits() {
         let mut h = AskUserHandler::new(make_form());
-        let output = h.handle_key('\n');
+        let output = h.handle_key(key_enter());
         assert!(matches!(output, HandlerOutput::Submit(_)));
         if let HandlerOutput::Submit(payload) = output {
             let v: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
@@ -189,7 +192,7 @@ mod tests {
     #[test]
     fn test_handle_key_enter_no_selection_submits_empty() {
         let mut h = AskUserHandler::new(make_form());
-        let output = h.handle_key('\n');
+        let output = h.handle_key(key_enter());
         if let HandlerOutput::Submit(payload) = output {
             let v: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
             assert_eq!(v["answers"][0], "");
@@ -202,10 +205,10 @@ mod tests {
     fn test_handle_key_enter_with_selection() {
         let mut h = AskUserHandler::new(make_form());
         // j moves from default 0 to 1 (option B)
-        h.handle_key('j');
+        h.handle_key(key('j'));
         // verify B was selected
         assert_eq!(h.selections[0], vec![1]);
-        let output = h.handle_key('\n');
+        let output = h.handle_key(key_enter());
         if let HandlerOutput::Submit(payload) = output {
             let v: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
             assert_eq!(v["answers"][0], "B");
@@ -227,10 +230,10 @@ mod tests {
         });
         let mut h = AskUserHandler::new(form);
         assert_eq!(h.question_idx, 0);
-        h.handle_key('\t');
+        h.handle_key(key_tab());
         assert_eq!(h.question_idx, 1);
         // Tab wraps around
-        h.handle_key('\t');
+        h.handle_key(key_tab());
         assert_eq!(h.question_idx, 0);
     }
 
@@ -239,7 +242,7 @@ mod tests {
         let form = AskUser { questions: vec![] };
         let mut h = AskUserHandler::new(form);
         // Empty questions: handle_key immediately dismisses
-        let output = h.handle_key('a');
+        let output = h.handle_key(key('a'));
         assert_eq!(output, HandlerOutput::Dismiss);
     }
 
@@ -247,7 +250,7 @@ mod tests {
     fn test_handle_key_j_moves_down() {
         let mut h = AskUserHandler::new(make_form());
         // Default selections[0] is empty; unwrap_or(0) gives 0. j moves to 1.
-        let _ = h.handle_key('j');
+        let _ = h.handle_key(key('j'));
         assert_eq!(h.selections[0], vec![1]);
     }
 
@@ -255,10 +258,10 @@ mod tests {
     fn test_handle_key_j_clamps_at_end() {
         let mut h = AskUserHandler::new(make_form());
         // Move to last option (index 1)
-        h.handle_key('j');
+        h.handle_key(key('j'));
         assert_eq!(h.selections[0], vec![1]);
         // j again should clamp
-        h.handle_key('j');
+        h.handle_key(key('j'));
         assert_eq!(h.selections[0], vec![1]);
     }
 
@@ -267,7 +270,7 @@ mod tests {
         let mut h = AskUserHandler::new(make_form());
         // Set selection to 1 first
         h.selections[0] = vec![1];
-        h.handle_key('k');
+        h.handle_key(key('k'));
         assert_eq!(h.selections[0], vec![0]);
     }
 
@@ -275,7 +278,7 @@ mod tests {
     fn test_handle_key_k_clamps_at_start() {
         let mut h = AskUserHandler::new(make_form());
         // Default is 0; k should saturate to 0
-        h.handle_key('k');
+        h.handle_key(key('k'));
         assert_eq!(h.selections[0], vec![0]);
     }
 
@@ -285,10 +288,10 @@ mod tests {
         form.questions[0].multi_select = true;
         let mut h = AskUserHandler::new(form);
         // Space toggles option 0 on
-        h.handle_key(' ');
+        h.handle_key(key(' '));
         assert_eq!(h.selections[0], vec![0]);
         // Space toggles option 0 off
-        h.handle_key(' ');
+        h.handle_key(key(' '));
         assert!(h.selections[0].is_empty());
     }
 
@@ -296,7 +299,7 @@ mod tests {
     fn test_handle_key_space_noop_on_single_select() {
         let mut h = AskUserHandler::new(make_form());
         // make_form creates a single-select question; space should be a no-op
-        h.handle_key(' ');
+        h.handle_key(key(' '));
         assert!(h.selections[0].is_empty());
     }
 
@@ -306,10 +309,10 @@ mod tests {
         form.questions[0].multi_select = true;
         let mut h = AskUserHandler::new(form);
         // j moves from 0 to 1 and toggles
-        h.handle_key('j');
+        h.handle_key(key('j'));
         assert_eq!(h.selections[0], vec![1]);
         // j again removes 1 (since 1 is already selected, next=1, toggle off)
-        h.handle_key('j');
+        h.handle_key(key('j'));
         assert!(h.selections[0].is_empty());
     }
 
@@ -321,19 +324,19 @@ mod tests {
         // Set cursor to 1
         h.selections[0] = vec![1];
         // k moves from 1 to 0 and toggles
-        h.handle_key('k');
+        h.handle_key(key('k'));
         assert_eq!(h.selections[0], vec![1, 0]);
     }
 
     #[test]
     fn test_handle_key_esc_dismisses() {
         let mut h = AskUserHandler::new(make_form());
-        assert_eq!(h.handle_key('\x1b'), HandlerOutput::Dismiss);
+        assert_eq!(h.handle_key(key_esc()), HandlerOutput::Dismiss);
     }
 
     #[test]
     fn test_handle_key_unknown_returns_nothing() {
         let mut h = AskUserHandler::new(make_form());
-        assert_eq!(h.handle_key('x'), HandlerOutput::Nothing);
+        assert_eq!(h.handle_key(key('x')), HandlerOutput::Nothing);
     }
 }

@@ -4,6 +4,7 @@
 //! dispatches confirm/cancel keys (Enter/y = submit, Esc/n/q = dismiss).
 
 use peri_acp_types::event_data::RewindPreview;
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use super::super::state::{Handler, HandlerOutput};
 
@@ -22,14 +23,19 @@ impl RewindHandler {
 }
 
 impl Handler for RewindHandler {
-    fn render(&self, _area: (u16, u16)) {}
+    fn render(&self, _frame: &mut ratatui::Frame, _area: ratatui::layout::Rect) {
+        // Phase 1.3: render rewind preview popup (file/message change list +
+        // confirm/cancel hints). For now the legacy popup system handles it.
+    }
 
-    fn handle_key(&mut self, key: char) -> HandlerOutput {
-        match key {
+    fn handle_key(&mut self, key: KeyEvent) -> HandlerOutput {
+        match key.code {
             // Enter, y, Y → confirm rewind
-            '\n' | '\r' | 'y' | 'Y' => HandlerOutput::Submit("confirmed".to_string()),
+            KeyCode::Enter => HandlerOutput::Submit("confirmed".to_string()),
+            KeyCode::Char('y' | 'Y') => HandlerOutput::Submit("confirmed".to_string()),
             // Esc, n, N, q, Q → dismiss
-            '\x1b' | 'n' | 'N' | 'q' | 'Q' => HandlerOutput::Dismiss,
+            KeyCode::Esc => HandlerOutput::Dismiss,
+            KeyCode::Char('n' | 'N' | 'q' | 'Q') => HandlerOutput::Dismiss,
             _ => HandlerOutput::Nothing,
         }
     }
@@ -37,6 +43,7 @@ impl Handler for RewindHandler {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::handler::{key, key_enter, key_esc};
     use super::*;
 
     fn make_preview() -> RewindPreview {
@@ -56,7 +63,7 @@ mod tests {
     fn test_handle_key_enter_confirms() {
         let mut h = RewindHandler::new(make_preview());
         assert_eq!(
-            h.handle_key('\n'),
+            h.handle_key(key_enter()),
             HandlerOutput::Submit("confirmed".to_string())
         );
     }
@@ -65,7 +72,7 @@ mod tests {
     fn test_handle_key_y_confirms() {
         let mut h = RewindHandler::new(make_preview());
         assert_eq!(
-            h.handle_key('y'),
+            h.handle_key(key('y')),
             HandlerOutput::Submit("confirmed".to_string())
         );
     }
@@ -73,18 +80,18 @@ mod tests {
     #[test]
     fn test_handle_key_esc_dismisses() {
         let mut h = RewindHandler::new(make_preview());
-        assert_eq!(h.handle_key('\x1b'), HandlerOutput::Dismiss);
+        assert_eq!(h.handle_key(key_esc()), HandlerOutput::Dismiss);
     }
 
     #[test]
     fn test_handle_key_n_dismisses() {
         let mut h = RewindHandler::new(make_preview());
-        assert_eq!(h.handle_key('n'), HandlerOutput::Dismiss);
+        assert_eq!(h.handle_key(key('n')), HandlerOutput::Dismiss);
     }
 
     #[test]
     fn test_handle_key_other_is_nothing() {
         let mut h = RewindHandler::new(make_preview());
-        assert_eq!(h.handle_key('x'), HandlerOutput::Nothing);
+        assert_eq!(h.handle_key(key('x')), HandlerOutput::Nothing);
     }
 }

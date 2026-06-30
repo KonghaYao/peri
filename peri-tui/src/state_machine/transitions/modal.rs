@@ -323,30 +323,25 @@ fn dispatch_key_with_ctx(
             }
         }
         ModalKind::Interaction(handler) => {
-            if let KeyCode::Char(c) = key.code {
-                match handler.handle_key(c) {
-                    HandlerOutput::Nothing => DispatchResult {
-                        panel_effects: Vec::new(),
-                        should_close: false,
-                        handler_submit: None,
-                    },
-                    HandlerOutput::Submit(payload) => DispatchResult {
-                        panel_effects: Vec::new(),
-                        should_close: true,
-                        handler_submit: Some(payload),
-                    },
-                    HandlerOutput::Dismiss => DispatchResult {
-                        panel_effects: Vec::new(),
-                        should_close: true,
-                        handler_submit: None,
-                    },
-                }
-            } else {
-                DispatchResult {
+            // Handler trait (Phase 1.2) takes a full KeyEvent so it can
+            // match on KeyCode::Esc / Tab / Enter / Char directly — no
+            // lossy char projection needed.
+            match handler.handle_key(key) {
+                HandlerOutput::Nothing => DispatchResult {
                     panel_effects: Vec::new(),
                     should_close: false,
                     handler_submit: None,
-                }
+                },
+                HandlerOutput::Submit(payload) => DispatchResult {
+                    panel_effects: Vec::new(),
+                    should_close: true,
+                    handler_submit: Some(payload),
+                },
+                HandlerOutput::Dismiss => DispatchResult {
+                    panel_effects: Vec::new(),
+                    should_close: true,
+                    handler_submit: None,
+                },
             }
         }
     }
