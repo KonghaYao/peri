@@ -176,6 +176,18 @@ pub(crate) fn render_messages(
 
     // V2 path: render from state machine V2 ViewModels when available.
     // Falls back to legacy MessageState path when v2 data is not set.
+    //
+    // [LEGACY FALLBACK — Phase 2 migration in progress]
+    // Production: `runtime::apply_context::draw_now` always sets
+    // `app.global_ui.v2_view_models = Some(...)` before calling
+    // `ui::main_ui::render`, so this `else` branch is unreachable in
+    // production.
+    // Tests: ~30+ tests in `headless_test.rs` / `popups/*_test.rs` call
+    // `main_ui::render(f, &mut app, None)` directly without going through
+    // `draw_now`, so they hit this legacy fallback. Until Phase 2.1
+    // introduces a test helper that constructs v2_view_models, this branch
+    // must be preserved.
+    // See `docs/refactor/phase2-migration-plan.md` Phase 2.1 for details.
     let v2_data = app.global_ui.v2_view_models.take();
     if let Some(ref v2_vms) = v2_data {
         if v2_vms.is_empty() {
@@ -187,7 +199,7 @@ pub(crate) fn render_messages(
         let cache = build_sync_render_cache_v2(v2_vms, diff_visible, text_area_width);
         app.session_mgr.current_mut().messages.message_cache = Some(cache);
     } else {
-        // Legacy path
+        // Legacy path — see [LEGACY FALLBACK] note above.
         if app.session_mgr.current().messages.view_messages.is_empty() {
             welcome::render_welcome(f, app, messages_area);
             return;
