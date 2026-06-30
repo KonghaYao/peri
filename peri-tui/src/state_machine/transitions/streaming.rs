@@ -11,7 +11,9 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::super::current_turn::ToolCardAccumulator;
 use super::super::event::{AcpEventData, Event};
+use super::super::handlers::{AskUserHandler, HitlHandler, OauthHandler, RewindHandler};
 use super::super::state::{IdleState, State, StreamingState};
+use super::enter_modal_from_streaming;
 use crate::app::panel_types::PanelKind;
 use crate::runtime::effect::Effect;
 
@@ -100,13 +102,21 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
         }
 
         // -- §4.5 Interaction requests (transition to Modal) ----------------
-        Event::AcpEvent(AcpEventData::HitlPending(_))
-        | Event::AcpEvent(AcpEventData::AskUser(_))
-        | Event::AcpEvent(AcpEventData::RewindPreview(_))
-        | Event::AcpEvent(AcpEventData::OauthNeeded(_)) => {
-            // P3 will build a real Handler from the payload and enter Modal.
-            // For P2 we just keep streaming.
-            (State::Streaming(state), Vec::new())
+        // Construct the matching Handler and enter Modal. The handler is
+        // wrapped in `ModalKind::Interaction`. `saved_current_turn = Some(..)`
+        // preserves the in-progress streaming output so it is not lost while
+        // the popup is open — ClosePanel will restore Streaming afterwards.
+        Event::AcpEvent(AcpEventData::HitlPending(p)) => {
+            enter_modal_from_streaming(state, Box::new(HitlHandler::new(p)))
+        }
+        Event::AcpEvent(AcpEventData::AskUser(f)) => {
+            enter_modal_from_streaming(state, Box::new(AskUserHandler::new(f)))
+        }
+        Event::AcpEvent(AcpEventData::RewindPreview(rp)) => {
+            enter_modal_from_streaming(state, Box::new(RewindHandler::new(rp)))
+        }
+        Event::AcpEvent(AcpEventData::OauthNeeded(o)) => {
+            enter_modal_from_streaming(state, Box::new(OauthHandler::new(o)))
         }
 
         // -- §4.6 Structure --------------------------------------------------
@@ -464,5 +474,128 @@ mod tests {
         );
         // 不应该有副作用消费方误以为 SM 已处理输入。
         assert!(effects.iter().all(|e| matches!(e, Effect::Render)));
+    }
+
+    // ── Phase 1.3: Agent-initiated interaction requests enter Modal ──
+    // 这些测试验证 Streaming 期间到达的 HITL/AskUser/Rewind/OAuth 会
+    // 进入 Modal(Interaction)，并且 saved_current_turn 保留了流式进度。
+
+    fn assert_interaction_modal_from_streaming(next: State, expected_text: &str) {
+        match next {
+            State::Modal(m) => {
+                // Streaming source: saved_current_turn must preserve text.
+                let turn = m
+                    .saved_current_turn
+                    .expect("Streaming→Modal must preserve saved_current_turn");
+                assert_eq!(
+                    turn.text, expected_text,
+                    "saved_current_turn must contain streaming progress"
+                );
+                assert!(
+                    matches!(
+                        m.kind,
+                        crate::state_machine::state::ModalKind::Interaction(_)
+                    ),
+                    "Modal kind must be Interaction"
+                );
+            }
+            other => panic!("expected Modal after interaction request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hitl_pending_in_streaming_enters_modal_with_saved_turn() {
+        // Streaming 期间收到 HitlPending 必须进入 Modal 且保留 current_turn。
+        let mut state = make_state();
+        state.current_turn.append_text("streaming-so-far");
+        let (next, effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::HitlPending(
+                peri_acp_types::event_data::HitlPending {
+                    tool_name: "Edit".into(),
+                    tool_input: serde_json::json!({}),
+                    batch: None,
+                },
+            )),
+        );
+        assert_interaction_modal_from_streaming(next, "streaming-so-far");
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
+    }
+
+    #[test]
+    fn test_ask_user_in_streaming_enters_modal_with_saved_turn() {
+        use peri_acp_types::event_data::{AskUser, Question};
+        let mut state = make_state();
+        state.current_turn.append_text("partial");
+        let (next, _effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::AskUser(AskUser {
+                questions: vec![Question {
+                    id: "q1".into(),
+                    header: "Pick".into(),
+                    question: "Which?".into(),
+                    options: vec![],
+                    multi_select: false,
+                }],
+            })),
+        );
+        assert_interaction_modal_from_streaming(next, "partial");
+    }
+
+    #[test]
+    fn test_rewind_preview_in_streaming_enters_modal_with_saved_turn() {
+        use peri_acp_types::event_data::RewindPreview;
+        let mut state = make_state();
+        state.current_turn.append_text("rp-stream");
+        let (next, _effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::RewindPreview(RewindPreview {
+                files: vec![],
+                messages: vec![],
+            })),
+        );
+        assert_interaction_modal_from_streaming(next, "rp-stream");
+    }
+
+    #[test]
+    fn test_oauth_needed_in_streaming_enters_modal_with_saved_turn() {
+        use peri_acp_types::event_data::OauthNeeded;
+        let mut state = make_state();
+        state.current_turn.append_text("oauth-stream");
+        let (next, _effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::OauthNeeded(OauthNeeded {
+                server_name: "github-mcp".into(),
+                auth_url: "https://github.com/login".into(),
+            })),
+        );
+        assert_interaction_modal_from_streaming(next, "oauth-stream");
+    }
+
+    #[test]
+    fn test_streaming_interaction_modal_preserves_input_and_scroll() {
+        // 进入 Modal 时 Streaming 的 input / view / scroll 都要保留，
+        // 这样关闭弹窗（ClosePanel）后能恢复 Streaming 而不丢失上下文。
+        use peri_acp_types::event_data::HitlPending;
+        let mut state = make_state();
+        state.input.insert_str("typing during stream");
+        state.scroll_offset = 4;
+        state.current_turn.append_text("stream-output");
+        let (next, _effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::HitlPending(HitlPending {
+                tool_name: "Edit".into(),
+                tool_input: serde_json::json!({}),
+                batch: None,
+            })),
+        );
+        match next {
+            State::Modal(m) => {
+                assert_eq!(m.saved_input.text(), "typing during stream");
+                assert_eq!(m.saved_scroll_offset, 4);
+                assert!(m.saved_current_turn.is_some());
+            }
+            _ => panic!("expected Modal"),
+        }
     }
 }

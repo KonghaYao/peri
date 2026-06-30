@@ -33,8 +33,10 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, Mo
 
 use super::super::current_turn::CurrentTurn;
 use super::super::event::{AcpEventData, Event};
+use super::super::handlers::{AskUserHandler, HitlHandler, OauthHandler, RewindHandler};
 use super::super::input::CursorPos;
 use super::super::state::{DoubleEscTracker, IdleState, State, StreamingState};
+use super::enter_modal_from_idle;
 use crate::app::panel_types::PanelKind;
 use crate::runtime::effect::Effect;
 
@@ -168,14 +170,21 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
         | Event::AcpEvent(AcpEventData::SubagentStopped(_))
         | Event::AcpEvent(AcpEventData::Unknown { .. }) => (State::Idle(state), Vec::new()),
 
-        // Interaction requests: P3 will enter Modal here.
-        Event::AcpEvent(AcpEventData::HitlPending(_))
-        | Event::AcpEvent(AcpEventData::AskUser(_))
-        | Event::AcpEvent(AcpEventData::RewindPreview(_))
-        | Event::AcpEvent(AcpEventData::OauthNeeded(_)) => {
-            // P3 will build a real Handler from the payload and enter Modal.
-            // For P2 we just stay Idle.
-            (State::Idle(state), Vec::new())
+        // Interaction requests: construct the matching Handler and enter
+        // Modal. The handler is wrapped in `ModalKind::Interaction` and
+        // the IdleState's fields become `ModalState.saved_*` so closing
+        // the popup restores the original view / input / scroll / history.
+        Event::AcpEvent(AcpEventData::HitlPending(p)) => {
+            enter_modal_from_idle(state, Box::new(HitlHandler::new(p)))
+        }
+        Event::AcpEvent(AcpEventData::AskUser(f)) => {
+            enter_modal_from_idle(state, Box::new(AskUserHandler::new(f)))
+        }
+        Event::AcpEvent(AcpEventData::RewindPreview(rp)) => {
+            enter_modal_from_idle(state, Box::new(RewindHandler::new(rp)))
+        }
+        Event::AcpEvent(AcpEventData::OauthNeeded(o)) => {
+            enter_modal_from_idle(state, Box::new(OauthHandler::new(o)))
         }
 
         // -- System signals ---------------------------------------------------
@@ -870,5 +879,134 @@ mod tests {
         let (next, effects) = handle(state, Event::AcpEvent(AcpEventData::TurnDone));
         assert!(matches!(next, State::Idle(_)));
         assert!(effects.is_empty());
+    }
+
+    // ── Phase 1.3: Agent-initiated interaction requests enter Modal ──
+
+    /// Helper: assert the result is a Modal holding a specific Handler kind.
+    /// We can't introspect Box<dyn Handler>, but we can verify the variant
+    /// and that saved_* fields are populated correctly.
+    fn assert_interaction_modal(next: State) {
+        match next {
+            State::Modal(m) => {
+                // Idle source: no saved_current_turn.
+                assert!(
+                    m.saved_current_turn.is_none(),
+                    "Idle→Modal must have no saved_current_turn"
+                );
+                // Kind is Interaction (not Panel).
+                assert!(
+                    matches!(
+                        m.kind,
+                        crate::state_machine::state::ModalKind::Interaction(_)
+                    ),
+                    "Modal kind must be Interaction"
+                );
+            }
+            other => panic!("expected Modal after interaction request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hitl_pending_in_idle_enters_modal() {
+        // HitlPending 在 Idle 必须进入 Modal(Interaction(HitlHandler))。
+        // Phase 1.3: 此前是 (State::Idle(state), Vec::new()) 静默丢弃。
+        use peri_acp_types::event_data::HitlPending;
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::HitlPending(HitlPending {
+                tool_name: "Edit".into(),
+                tool_input: serde_json::json!({}),
+                batch: None,
+            })),
+        );
+        assert_interaction_modal(next);
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "HitlPending → Modal must emit Render"
+        );
+    }
+
+    #[test]
+    fn test_ask_user_in_idle_enters_modal() {
+        // AskUser 在 Idle 必须进入 Modal(Interaction(AskUserHandler))。
+        use peri_acp_types::event_data::{AskUser, Question};
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::AskUser(AskUser {
+                questions: vec![Question {
+                    id: "q1".into(),
+                    header: "Pick".into(),
+                    question: "Which?".into(),
+                    options: vec![],
+                    multi_select: false,
+                }],
+            })),
+        );
+        assert_interaction_modal(next);
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
+    }
+
+    #[test]
+    fn test_rewind_preview_in_idle_enters_modal() {
+        // RewindPreview 在 Idle 必须进入 Modal(Interaction(RewindHandler))。
+        use peri_acp_types::event_data::RewindPreview;
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::RewindPreview(RewindPreview {
+                files: vec![],
+                messages: vec![],
+            })),
+        );
+        assert_interaction_modal(next);
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
+    }
+
+    #[test]
+    fn test_oauth_needed_in_idle_enters_modal() {
+        // OauthNeeded 在 Idle 必须进入 Modal(Interaction(OauthHandler))。
+        use peri_acp_types::event_data::OauthNeeded;
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::OauthNeeded(OauthNeeded {
+                server_name: "github-mcp".into(),
+                auth_url: "https://github.com/login".into(),
+            })),
+        );
+        assert_interaction_modal(next);
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
+    }
+
+    #[test]
+    fn test_interaction_modal_preserves_idle_saved_fields() {
+        // 进入 Modal 时必须保留 view / input / scroll / history / 双 Esc。
+        // 否则关闭弹窗后会丢失用户上下文。
+        use peri_acp_types::event_data::HitlPending;
+        let mut state = make_state();
+        state.input.insert_str("typing before popup");
+        state.scroll_offset = 7;
+        state.history_index = Some(2);
+        state.view = vec![];
+
+        let (next, _effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::HitlPending(HitlPending {
+                tool_name: "Edit".into(),
+                tool_input: serde_json::json!({}),
+                batch: None,
+            })),
+        );
+        match next {
+            State::Modal(m) => {
+                assert_eq!(m.saved_input.text(), "typing before popup");
+                assert_eq!(m.saved_scroll_offset, 7);
+                assert_eq!(m.saved_history_index, Some(2));
+            }
+            _ => panic!("expected Modal"),
+        }
     }
 }
