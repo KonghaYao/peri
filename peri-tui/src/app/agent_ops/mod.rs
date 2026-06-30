@@ -14,7 +14,11 @@ mod rewind;
 mod subagent;
 
 impl App {
-    pub(crate) fn handle_agent_event(&mut self, event: AgentEvent) -> (bool, bool, bool) {
+    pub(crate) fn handle_agent_event(
+        &mut self,
+        event: AgentEvent,
+        view_slice: &[peri_acp_types::view_model::ViewModel],
+    ) -> (bool, bool, bool) {
         match event {
             AgentEvent::SubAgentStart {
                 agent_id,
@@ -301,7 +305,7 @@ impl App {
                 (true, false, false)
             }
             AgentEvent::Done => self.handle_done(),
-            AgentEvent::Interrupted => self.handle_interrupted(),
+            AgentEvent::Interrupted => self.handle_interrupted(view_slice),
             AgentEvent::Error(ref e) => self.handle_error(e),
             AgentEvent::InteractionRequest { ctx, response_tx } => {
                 self.handle_interaction_request(ctx, response_tx)

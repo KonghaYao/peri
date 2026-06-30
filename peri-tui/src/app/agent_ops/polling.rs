@@ -8,7 +8,12 @@ use crate::app::App;
 
 impl App {
     /// Drain ACP notification channel.  Returns `true` if the UI needs a redraw.
-    pub fn poll_agent(&mut self) -> bool {
+    ///
+    /// `view_slice` is the current v2 state.view snapshot (captured by the caller
+    /// in main_loop) — passed through to handle_acp_notification → handle_agent_event
+    /// → handle_interrupted so interrupt paths can scan v2 ViewModels instead of
+    /// v1 view_messages.
+    pub fn poll_agent(&mut self, view_slice: &[peri_acp_types::view_model::ViewModel]) -> bool {
         // Check for events from ACP notification channel (primary path)
         let has_acp = self
             .session_mgr
@@ -33,7 +38,8 @@ impl App {
                 .as_mut()
                 .map(|rx| rx.try_recv());
             if let Some(Ok(notif)) = acp_result {
-                let (ev_updated, should_break, should_return) = self.handle_acp_notification(notif);
+                let (ev_updated, should_break, should_return) =
+                    self.handle_acp_notification(notif, view_slice);
                 if ev_updated {
                     updated = true;
                 }

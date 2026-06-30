@@ -132,7 +132,12 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     }
                 }
             }
-            TuiEvent::AcpEvent { event, data } => handle_acp_event(app, event, data),
+            TuiEvent::AcpEvent { event, data } => {
+                // Phase 2.6 step 7c: pass v2 state.view snapshot to handle_acp_event
+                // so handle_interrupted can scan v2 ViewModels (not v1 view_messages).
+                // Captured AFTER the SM transition above (state.view reflects current).
+                handle_acp_event(app, event, data, state.view_models())
+            }
             TuiEvent::SessionLoaded { session_id } => {
                 debug!(session_id = %session_id, "SessionLoaded event");
                 vec![Effect::Render]
@@ -212,7 +217,11 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     needs_render = true;
                 }
                 Effect::PollAgent => {
-                    app.poll_agent();
+                    // Phase 2.6 step 7c: pass v2 view snapshot so any interrupt
+                    // arriving during poll_agent's drain loop is handled correctly.
+                    let view_snapshot: Vec<peri_acp_types::view_model::ViewModel> =
+                        state.view_models().to_vec();
+                    app.poll_agent(&view_snapshot);
                 }
                 Effect::AdvanceSpinner => {
                     app.session_mgr.current_mut().spinner_state.advance_tick();
@@ -710,7 +719,12 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
 /// `TuiEvent::AcpEvent { event, data }`.  Here we reverse that translation
 /// back into `AcpNotification` and delegate to
 /// `App::handle_acp_notification`.
-fn handle_acp_event(app: &mut App, event_name: &str, data: &serde_json::Value) -> Vec<Effect> {
+fn handle_acp_event(
+    app: &mut App,
+    event_name: &str,
+    data: &serde_json::Value,
+    view_slice: &[peri_acp_types::view_model::ViewModel],
+) -> Vec<Effect> {
     use crate::acp_client::AcpNotification;
     use peri_acp::event::AcpEvent;
 
@@ -840,7 +854,7 @@ fn handle_acp_event(app: &mut App, event_name: &str, data: &serde_json::Value) -
     };
 
     // Delegate to the App handler.
-    let (updated, _should_break, should_return) = app.handle_acp_notification(notif);
+    let (updated, _should_break, should_return) = app.handle_acp_notification(notif, view_slice);
     if should_return {
         vec![Effect::Render]
     } else if updated {

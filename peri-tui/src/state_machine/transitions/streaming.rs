@@ -80,7 +80,23 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
         }
 
         Event::AcpEvent(AcpEventData::TurnInterrupted(_)) => {
-            // Treat like turn-done: stop streaming, return to Idle.
+            // Phase 2.6 step 7c: Persist current_turn's incremental
+            // ViewModels (text/reasoning/tool cards) to state.view BEFORE
+            // transitioning to Idle. `into_idle()` drops current_turn, so
+            // without this step the ToolCards accumulated during the
+            // interrupted turn would vanish from state.view — causing
+            // handle_interrupted's has_tool_cards_after check to incorrectly
+            // report false and roll back the user's submitted message.
+            //
+            // v1 parity: view_messages received ToolBlocks via apply_add_message
+            // on ToolStarted, so they survived interruption. This extend
+            // preserves the same data on the v2 side.
+            //
+            // Note: A subsequent ACP ViewCommit will replace state.view
+            // wholesale with the canonical snapshot, so this extension is
+            // safe — any partial/incorrect ToolCards here are overwritten.
+            let streaming_vms = state.current_turn.view_models().to_vec();
+            state.view.extend(streaming_vms);
             state.current_turn.deactivate();
             let idle = state.into_idle();
             (State::Idle(idle), Vec::new())
@@ -321,6 +337,117 @@ mod tests {
                 assert_eq!(idle.input.text(), "typed during streaming");
             }
             _ => panic!("expected Idle after TurnDone"),
+        }
+    }
+
+    // ── Phase 2.6 step 7c: TurnInterrupted 持久化 current_turn ────────────
+
+    #[test]
+    fn test_turn_interrupted_persists_tool_cards_to_view() {
+        // Phase 2.6 step 7c: 当 TurnInterrupted 到达时，current_turn 中的
+        // ToolCards 必须被持久化到 state.view，否则 handle_interrupted 的
+        // has_tool_cards_after 检查会错误地返回 false（导致用户消息被回滚）。
+        use peri_acp_types::event_data::{ToolStarted, TurnInterrupted};
+        use peri_acp_types::view_model::ViewModel;
+
+        let state = make_state();
+        // Simulate a tool-started event to populate current_turn.tool_cards.
+        let (next_after_start, _) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::ToolStarted(ToolStarted {
+                tool_id: "t1".into(),
+                tool_name: "Bash".into(),
+                input_summary: "ls".into(),
+                agent_id: None,
+            })),
+        );
+        let streaming_after_start = match next_after_start {
+            State::Streaming(s) => s,
+            _ => panic!("expected Streaming after ToolStarted"),
+        };
+        // Now dispatch TurnInterrupted.
+        let (next, _effects) = handle(
+            streaming_after_start,
+            Event::AcpEvent(AcpEventData::TurnInterrupted(TurnInterrupted {
+                reason: "user-cancel".into(),
+            })),
+        );
+        match next {
+            State::Idle(idle) => {
+                // The ToolCard from current_turn must be persisted in view.
+                let has_tool = idle
+                    .view
+                    .iter()
+                    .any(|vm| matches!(vm, ViewModel::ToolCard(_)));
+                assert!(
+                    has_tool,
+                    "TurnInterrupted must persist current_turn's ToolCards to state.view"
+                );
+            }
+            _ => panic!("expected Idle after TurnInterrupted"),
+        }
+    }
+
+    #[test]
+    fn test_turn_interrupted_persists_streaming_text_to_view() {
+        // 同上，验证 streaming text 也被持久化为 AssistantBubble。
+        use peri_acp_types::event_data::{TextChunk, TurnInterrupted};
+        use peri_acp_types::view_model::ViewModel;
+
+        let state = make_state();
+        let (next_after_text, _) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::TextChunk(TextChunk {
+                text: "partial reply".into(),
+                agent_id: None,
+            })),
+        );
+        let streaming_after_text = match next_after_text {
+            State::Streaming(s) => s,
+            _ => panic!("expected Streaming after TextChunk"),
+        };
+        let (next, _) = handle(
+            streaming_after_text,
+            Event::AcpEvent(AcpEventData::TurnInterrupted(TurnInterrupted {
+                reason: "user-cancel".into(),
+            })),
+        );
+        match next {
+            State::Idle(idle) => {
+                let has_assistant = idle
+                    .view
+                    .iter()
+                    .any(|vm| matches!(vm, ViewModel::AssistantBubble(_)));
+                assert!(
+                    has_assistant,
+                    "TurnInterrupted must persist current_turn's streaming text to state.view"
+                );
+            }
+            _ => panic!("expected Idle after TurnInterrupted"),
+        }
+    }
+
+    #[test]
+    fn test_turn_interrupted_with_empty_current_turn_extends_nothing() {
+        // 空 current_turn（无 text/tool）时，TurnInterrupted 不应追加任何内容。
+        use peri_acp_types::event_data::TurnInterrupted;
+
+        let mut state = make_state();
+        state.view = vec![]; // start empty
+        let (next, _) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::TurnInterrupted(TurnInterrupted {
+                reason: "user-cancel".into(),
+            })),
+        );
+        match next {
+            State::Idle(idle) => {
+                assert!(
+                    idle.view.is_empty(),
+                    "Empty current_turn must not add anything to state.view"
+                );
+            }
+            _ => panic!("expected Idle after TurnInterrupted"),
         }
     }
 

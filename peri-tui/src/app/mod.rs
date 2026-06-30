@@ -418,71 +418,38 @@ impl App {
             // 不执行强制清理——避免与 ACP server 端事件竞态导致双重清理。
             return;
         }
-        // Fallback: direct cancel_token (legacy path, kept for tests)
-        if let Some(token) = &self.session_mgr.current_mut().agent.cancel_token {
-            token.cancel();
-        } else if self.session_mgr.current_mut().ui.loading {
-            tracing::warn!("interrupt: 无 cancel_token 但 loading=true，强制清理");
-            self.set_loading(false);
-            self.session_mgr.current_mut().agent.interaction_prompt = None;
-            self.session_mgr.current_mut().agent.pending_hitl_items = None;
-            self.session_mgr.current_mut().agent.pending_ask_user = None;
-            if let Some(start) = self.session_mgr.current_mut().agent.task_start_time {
-                self.session_mgr.current_mut().agent.last_task_duration = Some(start.elapsed());
-            }
-
-            // 始终尝试恢复用户文本到输入框（无论 agent 是否已回复）
-            if let Some(text) = self
-                .session_mgr
+        // Phase 2.6 step 7c: 退役 interrupt fallback 死代码。
+        //
+        // 历史上此处有一个 fallback 路径：当 acp_client=None 且 cancel_token=None
+        // 且 loading=true 时，扫描 v1 view_messages 找 UserBubble、truncate view_messages、
+        // 恢复 textarea 文本。但：
+        //   1. 生产环境中 acp_client 始终为 Some（main.rs:816 启动时设置），
+        //      此分支永不触发——是死代码。
+        //   2. 测试环境中（new_headless）虽 acp_client=None，但 cancel_token=None
+        //      时进入此分支的 view_messages 扫描逻辑与 v2 ViewStore 迁移目标冲突。
+        //   3. v2 路径的中断恢复由 SM TurnInterrupted 处理（持久化 current_turn
+        //      到 state.view）+ handle_interrupted 扫描 state.view 完成。
+        //
+        // 测试 test_ctrl_c_interrupts_agent_when_textarea_empty 仅断言
+        // result.is_none() + quit_pending_since.is_none() —— 删除 fallback
+        // 不影响这两个断言（handle_ctrl_c 返回值不依赖 interrupt 内部）。
+        //
+        // 如未来需要在非 ACP 路径恢复中断能力，应通过 SM + Effect 重构，
+        // 而非恢复此处的 v1 view_messages 扫描。
+        if self.session_mgr.current_mut().agent.cancel_token.is_some() {
+            self.session_mgr
                 .current_mut()
-                .messages
-                .last_submitted_text
-                .take()
-            {
-                // 在 view_messages 中定位最后一个 UserBubble 的索引
-                let user_msg_idx = self
-                    .session_mgr
-                    .current_mut()
-                    .messages
-                    .view_messages
-                    .iter()
-                    .rposition(|vm| matches!(vm, MessageViewModel::UserBubble { .. }))
-                    .unwrap_or(0);
-                self.session_mgr
-                    .current_mut()
-                    .messages
-                    .view_messages
-                    .truncate(user_msg_idx);
-                // P5: No render_tx, no pipeline — truncate origin_messages only
-                // 截断 origin_messages（回滚 StateSnapshot 扩展的内容）
-                let pre_len = self.session_mgr.current_mut().metadata.pre_submit_state_len;
-                self.session_mgr
-                    .current_mut()
-                    .agent
-                    .origin_messages
-                    .truncate(pre_len);
-                let mut ta = build_textarea(false);
-                ta.insert_str(text.clone());
-                self.session_mgr.current_mut().ui.textarea = ta;
-                // 清除 loading 期间缓存的 pending_messages（中断恢复后使用恢复文本替代）
-                self.session_mgr
-                    .current_mut()
-                    .messages
-                    .pending_messages
-                    .clear();
-                self.session_mgr.current_mut().metadata.last_human_message = None;
-                self.push_system_note(format!(
-                    "⚠ {}",
-                    self.services.lc.tr("app-interrupted-resumed")
-                ));
-                self.render_rebuild();
-            } else {
-                self.push_system_note(format!(
-                    "⚠ {}",
-                    self.services.lc.tr("app-interrupted-background")
-                ));
-                self.render_rebuild();
-            }
+                .agent
+                .cancel_token
+                .as_ref()
+                .unwrap()
+                .cancel();
+        } else if self.session_mgr.current_mut().ui.loading {
+            tracing::warn!(
+                "interrupt: no acp_client, no cancel_token, loading=true — \
+                 clearing loading state only (v1 view_messages fallback retired in step 7c)"
+            );
+            self.set_loading(false);
         }
     }
 

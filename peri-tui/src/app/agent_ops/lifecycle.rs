@@ -114,7 +114,10 @@ impl App {
         (true, false, true)
     }
 
-    pub(super) fn handle_interrupted(&mut self) -> (bool, bool, bool) {
+    pub(super) fn handle_interrupted(
+        &mut self,
+        view_slice: &[peri_acp_types::view_model::ViewModel],
+    ) -> (bool, bool, bool) {
         self.session_mgr.current_mut().agent.cancel_sent_at = None;
 
         if self.session_mgr.current_mut().agent.subagent_depth > 0 {
@@ -123,35 +126,28 @@ impl App {
             );
         }
 
-        // P5: No pipeline.handle_event() — locate UserBubble directly
-
-        let user_msg_idx = self
-            .session_mgr
-            .current_mut()
-            .messages
-            .view_messages
-            .iter()
-            .rposition(|vm| matches!(vm, MessageViewModel::UserBubble { .. }))
-            .unwrap_or(0);
-        let view_len = self.session_mgr.current_mut().messages.view_messages.len();
+        // Phase 2.6 step 7c: scan v2 state.view (passed in as view_slice)
+        // instead of v1 view_messages. The v2 helpers are pure functions
+        // over &[ViewModel] defined in state_machine::view_store.
+        //
+        // v2 semantics:
+        // - last_user_bubble_index scans for ViewModel::UserBubble (DTO type).
+        //   The SM Enter transition (idle.rs step 7d) pushes UserBubble to
+        //   state.view on submit, so this finds it without v1 view_messages.
+        // - has_tool_cards_after scans top-level for ViewModel::ToolCard.
+        //   The SM TurnInterrupted handler (streaming.rs step 7c) persists
+        //   current_turn's ToolCards to state.view, so this detects progress
+        //   correctly even if interrupt arrives before ViewCommit.
+        let user_msg_idx =
+            crate::state_machine::view_store::last_user_bubble_index(view_slice).unwrap_or(0);
+        let view_len = view_slice.len();
         tracing::info!(
             user_msg_idx,
             view_len,
-            "handle_interrupted: about to check for tool calls"
+            "handle_interrupted: about to check for tool calls (v2)"
         );
-        let has_tool_calls = self
-            .session_mgr
-            .current_mut()
-            .messages
-            .view_messages
-            .iter()
-            .skip(user_msg_idx + 1)
-            .any(|vm| {
-                matches!(
-                    vm,
-                    MessageViewModel::ToolCallGroup { .. } | MessageViewModel::ToolBlock { .. }
-                )
-            });
+        let has_tool_calls =
+            crate::state_machine::view_store::has_tool_cards_after(view_slice, user_msg_idx);
 
         if has_tool_calls {
             self.push_system_note(self.services.lc.tr("app-interrupt-done"));
@@ -160,7 +156,7 @@ impl App {
                 "trap.cancel_interrupt",
                 serde_json::json!({
                     "subagent_depth": self.session_mgr.current().agent.subagent_depth,
-                    "messages_in_state": self.session_mgr.current().messages.view_messages.len(),
+                    "view_vm_count": view_slice.len(),
                     "had_progress": has_tool_calls,
                 }),
                 Some(&self.session_mgr.current().metadata.session_id.to_string()),

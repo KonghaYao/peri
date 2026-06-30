@@ -9,7 +9,11 @@ use crate::app::App;
 impl App {
     /// 处理 ACP notification — 将 AcpNotification 转换为相应的 UI 操作。
     /// 返回 `(updated, should_break, should_return)`，与 `handle_agent_event` 相同语义。
-    pub(crate) fn handle_acp_notification(&mut self, notif: AcpNotification) -> (bool, bool, bool) {
+    pub(crate) fn handle_acp_notification(
+        &mut self,
+        notif: AcpNotification,
+        view_slice: &[peri_acp_types::view_model::ViewModel],
+    ) -> (bool, bool, bool) {
         match notif {
             AcpNotification::AgentEvent { event, session_id } => {
                 // Convert AcpEvent DTO → TUI AgentEvent via map_acp_event
@@ -20,7 +24,7 @@ impl App {
                         session_id = %session_id,
                         "ACP→TUI: AcpEvent dispatched to handle_agent_event"
                     );
-                    return self.handle_agent_event(agent_event);
+                    return self.handle_agent_event(agent_event, view_slice);
                 }
                 debug!(
                     session_id = %session_id,
@@ -30,14 +34,14 @@ impl App {
             }
             AcpNotification::AgentDone { session_id } => {
                 debug!(session_id = %session_id, "ACP→TUI: AgentDone received");
-                self.handle_agent_event(super::super::AgentEvent::Done)
+                self.handle_agent_event(super::super::AgentEvent::Done, view_slice)
             }
             AcpNotification::RequestPermission { id, params } => {
                 self.handle_acp_request_permission(id, params)
             }
             AcpNotification::Elicitation { id, params } => self.handle_acp_elicitation(id, params),
             AcpNotification::SessionUpdate { params, .. } => {
-                self.handle_session_update_peri(&params)
+                self.handle_session_update_peri(&params, view_slice)
             }
             AcpNotification::Peri { method, params, .. } => {
                 tracing::debug!(%method, "ACP→TUI: peri/* notification (no TUI action)");
@@ -87,6 +91,7 @@ impl App {
     pub(crate) fn handle_session_update_peri(
         &mut self,
         params: &serde_json::Value,
+        view_slice: &[peri_acp_types::view_model::ViewModel],
     ) -> (bool, bool, bool) {
         let update = match params.get("update") {
             Some(u) => u,
@@ -129,9 +134,10 @@ impl App {
                         // source 匹配失败 → fallback 主路径（保留原有 AssistantChunk 信号语义）
                     }
                 }
-                self.handle_agent_event(super::super::AgentEvent::AssistantChunk {
-                    source_agent_id,
-                })
+                self.handle_agent_event(
+                    super::super::AgentEvent::AssistantChunk { source_agent_id },
+                    view_slice,
+                )
             }
             "tool_call" => {
                 let tool_call_id = update
@@ -157,14 +163,17 @@ impl App {
                 )
                 .unwrap_or_default();
 
-                self.handle_agent_event(super::super::AgentEvent::ToolStart {
-                    tool_call_id,
-                    name,
-                    display,
-                    args,
-                    input,
-                    source_agent_id,
-                })
+                self.handle_agent_event(
+                    super::super::AgentEvent::ToolStart {
+                        tool_call_id,
+                        name,
+                        display,
+                        args,
+                        input,
+                        source_agent_id,
+                    },
+                    view_slice,
+                )
             }
             "tool_call_update" => {
                 let tool_call_id = update
@@ -194,13 +203,16 @@ impl App {
                     .unwrap_or("")
                     .to_string();
 
-                self.handle_agent_event(super::super::AgentEvent::ToolEnd {
-                    tool_call_id,
-                    name,
-                    output,
-                    is_error,
-                    source_agent_id,
-                })
+                self.handle_agent_event(
+                    super::super::AgentEvent::ToolEnd {
+                        tool_call_id,
+                        name,
+                        output,
+                        is_error,
+                        source_agent_id,
+                    },
+                    view_slice,
+                )
             }
             "plan" => {
                 let entries = update.get("entries").and_then(|v| v.as_array());
@@ -228,7 +240,7 @@ impl App {
                         });
                     }
                 }
-                self.handle_agent_event(super::super::AgentEvent::TodoUpdate(todos))
+                self.handle_agent_event(super::super::AgentEvent::TodoUpdate(todos), view_slice)
             }
             "usage_update" => {
                 // 从 enriched UsageUpdate _meta 中解析完整 token 用量
@@ -278,11 +290,14 @@ impl App {
                     request_id,
                 };
 
-                self.handle_agent_event(super::super::AgentEvent::TokenUsageUpdate {
-                    usage,
-                    model,
-                    stop_reason,
-                })
+                self.handle_agent_event(
+                    super::super::AgentEvent::TokenUsageUpdate {
+                        usage,
+                        model,
+                        stop_reason,
+                    },
+                    view_slice,
+                )
             }
             "session_info_update" => (false, false, false),
             "available_commands_update" => {

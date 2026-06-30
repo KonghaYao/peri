@@ -31,7 +31,13 @@ impl App {
         let events: Vec<AgentEvent> =
             std::mem::take(&mut self.session_mgr.current_mut().agent.agent_event_queue);
         for event in events {
-            let (_updated, should_break, should_return) = self.handle_agent_event(event);
+            // Phase 2.6 step 7c: test-only path — pass empty v2 view slice.
+            // Production path goes through main_loop::handle_acp_event which
+            // captures state.view_models() snapshot. Tests that exercise the
+            // interrupt path should use the main_loop integration tests instead.
+            let empty_view: [peri_acp_types::view_model::ViewModel; 0] = [];
+            let (_updated, should_break, should_return) =
+                self.handle_agent_event(event, &empty_view);
             if should_return || should_break {
                 break;
             }
