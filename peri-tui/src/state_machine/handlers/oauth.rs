@@ -208,7 +208,7 @@ mod tests {
         let h = OauthHandler::new(make_request());
         let height = h.desired_height(50, 100);
         assert!(
-            height >= 7 && height <= 10,
+            (7..=10).contains(&height),
             "oauth popup height should be compact (7-10), got {height}"
         );
     }
