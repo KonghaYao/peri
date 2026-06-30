@@ -70,6 +70,57 @@ impl ViewStore {
         }
         out
     }
+
+    /// Phase 2.6 step 7b — Index of the last `UserBubble` in the committed view.
+    ///
+    /// Returns `None` if the view contains no `UserBubble`. Used by interrupt
+    /// rollback paths to locate the most recent user message boundary without
+    /// touching v1 `view_messages`. See `docs/refactor/tui-v3-plan.md` step 7c
+    /// for the migration target.
+    pub fn last_user_bubble_index(&self) -> Option<usize> {
+        last_user_bubble_index(&self.view_models)
+    }
+
+    /// Phase 2.6 step 7b — Whether any `ToolCard` appears strictly after `idx`.
+    ///
+    /// Returns `false` if `idx` is out of range or no `ToolCard` follows.
+    /// Used by interrupt rollback to decide whether the user message at `idx`
+    /// has already produced tool progress (and thus should not be discarded).
+    pub fn has_tool_cards_after(&self, idx: usize) -> bool {
+        has_tool_cards_after(&self.view_models, idx)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2.6 step 7b — Free-function query helpers
+// ---------------------------------------------------------------------------
+//
+// Pure functions over `&[ViewModel]` so callers can pass either `ViewStore`
+// (via `.view_models`) or pre-collected render slices (`state.view_models()`
+// which includes the current turn). These enable migrating v1 control-flow
+// readers (handle_interrupted, app/mod.rs interrupt path) off v1 view_messages
+// in step 7c.
+
+/// Index of the last `UserBubble` in `view`, or `None` if absent.
+pub fn last_user_bubble_index(view: &[ViewModel]) -> Option<usize> {
+    view.iter()
+        .rposition(|vm| matches!(vm, ViewModel::UserBubble(_)))
+}
+
+/// Whether any `ToolCard` variant exists at index > `idx`.
+///
+/// `SubAgentGroup` and `CollapsedGroup` may contain nested `ToolCard`s —
+/// this helper only scans the top level (matches the v1 semantics where
+/// `view_messages.iter().skip(idx + 1)` checked flat ordering). Nested
+/// groups are governed by their own state (SubAgentStatusMap) and are
+/// not relevant to interrupt-rollback decisions.
+pub fn has_tool_cards_after(view: &[ViewModel], idx: usize) -> bool {
+    if idx >= view.len() {
+        return false;
+    }
+    view.iter()
+        .skip(idx + 1)
+        .any(|vm| matches!(vm, ViewModel::ToolCard(_)))
 }
 
 // ---------------------------------------------------------------------------
@@ -293,5 +344,136 @@ mod tests {
         let merged = merge_preserving_local_notes(&old_view, new_view);
         assert_eq!(merged.len(), 1, "非 SystemNote 不应保留");
         assert!(matches!(merged[0], ViewModel::UserBubble(_)));
+    }
+
+    // -- Phase 2.6 step 7b query helpers -------------------------------------
+
+    use super::{has_tool_cards_after, last_user_bubble_index};
+    use peri_acp_types::view_model::{AssistantBubbleData, CollapsedGroupData, ToolCardData};
+
+    #[test]
+    fn test_last_user_bubble_index_empty() {
+        let view: Vec<ViewModel> = vec![];
+        assert_eq!(last_user_bubble_index(&view), None);
+    }
+
+    #[test]
+    fn test_last_user_bubble_index_none_when_no_userbubble() {
+        let view = vec![
+            ViewModel::AssistantBubble(AssistantBubbleData {
+                text: "hi".into(),
+                reasoning: None,
+                tool_card_ids: vec![],
+            }),
+            ViewModel::Divider(DividerData { label: None }),
+        ];
+        assert_eq!(last_user_bubble_index(&view), None);
+    }
+
+    #[test]
+    fn test_last_user_bubble_index_finds_last() {
+        // 多个 UserBubble — 返回最后一个的索引
+        let view = vec![
+            ViewModel::UserBubble(UserBubbleData {
+                text: "first".into(),
+            }),
+            ViewModel::Divider(DividerData { label: None }),
+            ViewModel::UserBubble(UserBubbleData {
+                text: "second".into(),
+            }),
+            ViewModel::AssistantBubble(AssistantBubbleData {
+                text: "reply".into(),
+                reasoning: None,
+                tool_card_ids: vec![],
+            }),
+        ];
+        assert_eq!(last_user_bubble_index(&view), Some(2));
+    }
+
+    #[test]
+    fn test_has_tool_cards_after_false_when_idx_out_of_range() {
+        let view = vec![ViewModel::UserBubble(UserBubbleData { text: "x".into() })];
+        // idx == len() 应返回 false（无内容在 idx 之后）
+        assert!(!has_tool_cards_after(&view, 1));
+        assert!(!has_tool_cards_after(&view, 100));
+    }
+
+    #[test]
+    fn test_has_tool_cards_after_false_when_no_toolcard() {
+        let view = vec![
+            ViewModel::UserBubble(UserBubbleData { text: "q".into() }),
+            ViewModel::AssistantBubble(AssistantBubbleData {
+                text: "a".into(),
+                reasoning: None,
+                tool_card_ids: vec![],
+            }),
+        ];
+        assert!(!has_tool_cards_after(&view, 0));
+    }
+
+    #[test]
+    fn test_has_tool_cards_after_true_when_toolcard_present() {
+        let view = vec![
+            ViewModel::UserBubble(UserBubbleData { text: "q".into() }),
+            ViewModel::ToolCard(ToolCardData {
+                tool_id: "t1".into(),
+                tool_name: "Bash".into(),
+                input_summary: "ls".into(),
+                output_summary: "files".into(),
+                is_error: false,
+                diff: None,
+            }),
+            ViewModel::AssistantBubble(AssistantBubbleData {
+                text: "done".into(),
+                reasoning: None,
+                tool_card_ids: vec!["t1".into()],
+            }),
+        ];
+        // UserBubble 在 idx=0，ToolCard 在 idx=1 > 0 → true
+        assert!(has_tool_cards_after(&view, 0));
+        // 从 ToolCard 自己（idx=1）开始 — 后面只有 AssistantBubble → false
+        assert!(!has_tool_cards_after(&view, 1));
+    }
+
+    #[test]
+    fn test_has_tool_cards_after_ignores_nested_groups() {
+        // SubAgentGroup / CollapsedGroup 内嵌的 ToolCard 不应被计算
+        // （顶层扫描，与 v1 view_messages.iter().skip() 语义一致）
+        let nested_tool = ViewModel::ToolCard(ToolCardData {
+            tool_id: "nested".into(),
+            tool_name: "Read".into(),
+            input_summary: "".into(),
+            output_summary: "".into(),
+            is_error: false,
+            diff: None,
+        });
+        let view = vec![
+            ViewModel::UserBubble(UserBubbleData { text: "q".into() }),
+            ViewModel::CollapsedGroup(CollapsedGroupData {
+                title: "tools".into(),
+                count: 1,
+                view_models: vec![nested_tool],
+            }),
+        ];
+        // CollapsedGroup 不是顶层 ToolCard → false
+        assert!(!has_tool_cards_after(&view, 0));
+    }
+
+    #[test]
+    fn test_view_store_last_user_bubble_index_via_method() {
+        let mut store = ViewStore::default();
+        store.commit(vec![
+            ViewModel::Divider(DividerData { label: None }),
+            ViewModel::UserBubble(UserBubbleData {
+                text: "hello".into(),
+            }),
+            ViewModel::AssistantBubble(AssistantBubbleData {
+                text: "world".into(),
+                reasoning: None,
+                tool_card_ids: vec![],
+            }),
+        ]);
+        assert_eq!(store.last_user_bubble_index(), Some(1));
+        assert!(!store.has_tool_cards_after(1));
     }
 }
