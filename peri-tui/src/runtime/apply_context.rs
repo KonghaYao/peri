@@ -127,7 +127,7 @@ impl<'a> ApplyContext<'a> {
             | Effect::PasteText { .. }
             | Effect::PushSystemNote(_)
             | Effect::OpenThreadWithFeedback { .. }
-            | Effect::MemoryPanelOpenEditor
+            | Effect::MemoryPanelOpenEditor { .. }
             | Effect::CycleModel
             | Effect::CycleProvider
             | Effect::CyclePermissionMode

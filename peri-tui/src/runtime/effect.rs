@@ -109,7 +109,9 @@ pub enum Effect {
         thread_id: String,
     },
     /// Open the memory panel with system editor.
-    MemoryPanelOpenEditor,
+    MemoryPanelOpenEditor {
+        path: std::path::PathBuf,
+    },
 
     // ── App lifecycle ────────────────────────────────────────────────────
     /// Exit the app.
@@ -173,9 +175,9 @@ mod tests {
 
     #[test]
     fn test_effect_memory_panel_open_editor() {
-        assert!(matches!(
-            Effect::MemoryPanelOpenEditor,
-            Effect::MemoryPanelOpenEditor
-        ));
+        let e = Effect::MemoryPanelOpenEditor {
+            path: std::path::PathBuf::from("/tmp/test.md"),
+        };
+        assert!(matches!(e, Effect::MemoryPanelOpenEditor { .. }));
     }
 }

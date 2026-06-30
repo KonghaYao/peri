@@ -389,6 +389,7 @@ fn map_panel_effects(panel_effects: Vec<PanelEffect>) -> Vec<Effect> {
             PanelEffect::ShowNotification(text) => Some(Effect::ShowNotification(text)),
             PanelEffect::UpdateConfig { key, value } => Some(Effect::UpdateConfig { key, value }),
             PanelEffect::SwitchSession(session_id) => Some(Effect::SwitchSession(session_id)),
+            PanelEffect::OpenEditor { path } => Some(Effect::MemoryPanelOpenEditor { path }),
             PanelEffect::Close => None,
         })
         .collect()

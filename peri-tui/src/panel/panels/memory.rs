@@ -483,10 +483,17 @@ mod tests {
         let md_path = dir.path().join("CLAUDE.md");
         std::fs::write(&md_path, "# test").unwrap();
         let mut panel = MemoryPanel::new(dir.path().to_string_lossy().to_string(), None);
+        // refresh_exists() is called during render; render once to update exists flags.
+        let ctx = make_ctx();
+        {
+            let backend = ratatui::backend::TestBackend::new(80, 24);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| panel.render(f, Rect::new(0, 0, 80, 20), &ctx))
+                .unwrap();
+        }
         // The first entry (Project) should now exist.
         assert!(panel.entries[0].exists);
-        // Navigate to first entry (already at 0).
-        let ctx = make_ctx();
         let effects = panel.handle_key(
             Input {
                 key: Key::Enter,
