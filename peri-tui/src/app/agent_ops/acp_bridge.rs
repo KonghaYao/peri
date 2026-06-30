@@ -108,9 +108,8 @@ impl App {
             .unwrap_or("");
 
         match update_type {
-            "agent_message_chunk" => {
-                self.handle_agent_event(super::super::AgentEvent::AssistantChunk)
-            }
+            "agent_message_chunk" => self
+                .handle_agent_event(super::super::AgentEvent::AssistantChunk { source_agent_id }),
             "tool_call" => {
                 let tool_call_id = update
                     .get("toolCallId")

@@ -24,7 +24,14 @@ pub enum AgentEvent {
         source_agent_id: Option<String>,
     },
     /// Agent 开始回复信号（触发 spinner 状态切换，清除重试状态）
-    AssistantChunk,
+    ///
+    /// Phase 2.6 step 2：携带 `source_agent_id` 区分主/子 Agent。
+    /// - `None`：主 Agent chunk，保持原行为（清 retry、设 spinner、agent_replied）
+    /// - `Some(instance_id)`：子 Agent chunk，跳过父 Agent 副作用，
+    ///   避免污染 retry_status / agent_replied / spinner_state
+    AssistantChunk {
+        source_agent_id: Option<String>,
+    },
     Done,
     Error(String),
     /// 用户中断（Ctrl+C），工具已以 error 结尾，消息已持久化

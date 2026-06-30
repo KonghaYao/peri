@@ -283,7 +283,9 @@ async fn test_empty_assistant_chunk_no_bubble() {
     // AssistantChunk 仅更新 spinner/retry 状态，不应创建 AssistantBubble
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
-    app.push_agent_event(AgentEvent::AssistantChunk);
+    app.push_agent_event(AgentEvent::AssistantChunk {
+        source_agent_id: None,
+    });
     app.process_pending_events();
 
     // view_messages 应为空（没有创建空白气泡）
@@ -298,8 +300,12 @@ async fn test_empty_assistant_chunk_no_bubble() {
     );
 
     // 发送多次 AssistantChunk，仍不应创建气泡
-    app.push_agent_event(AgentEvent::AssistantChunk);
-    app.push_agent_event(AgentEvent::AssistantChunk);
+    app.push_agent_event(AgentEvent::AssistantChunk {
+        source_agent_id: None,
+    });
+    app.push_agent_event(AgentEvent::AssistantChunk {
+        source_agent_id: None,
+    });
     app.process_pending_events();
 
     assert!(
@@ -3029,5 +3035,82 @@ async fn test_subagent_child_tool_renders_on_screen() {
     assert!(
         !has_tool_block_in_main,
         "ToolCard 不应出现在 view_messages 主消息流"
+    );
+}
+
+#[tokio::test]
+async fn test_subagent_assistant_chunk_does_not_pollute_parent_state() {
+    // Phase 2.6 step 2：子 Agent 的 AssistantChunk 不应污染父 Agent 的
+    // retry_status / agent_replied / spinner_state
+    let (mut app, _handle) = App::new_headless(120, 30).await;
+
+    // 主 Agent 先进入 ToolUse spinner 模式（模拟工具执行中）
+    app.session_mgr
+        .current_mut()
+        .spinner_state
+        .set_mode(peri_widgets::SpinnerMode::ToolUse);
+    app.session_mgr.current_mut().agent.retry_status = Some(crate::app::RetryStatus {
+        attempt: 1,
+        max_attempts: 3,
+        delay_ms: 100,
+        error: "retrying".into(),
+    });
+
+    // 子 Agent 的 AssistantChunk 到达
+    app.push_agent_event(AgentEvent::AssistantChunk {
+        source_agent_id: Some("child-inst-1".into()),
+    });
+    app.process_pending_events();
+
+    // 验证：父 Agent 状态未被污染
+    let session = app.session_mgr.current();
+    assert!(
+        session.agent.retry_status.is_some(),
+        "子 Agent AssistantChunk 不应清除父 Agent retry_status"
+    );
+    assert!(
+        !session.agent.agent_replied,
+        "子 Agent AssistantChunk 不应标记父 Agent agent_replied"
+    );
+    assert!(
+        matches!(
+            session.spinner_state.mode(),
+            peri_widgets::SpinnerMode::ToolUse
+        ),
+        "子 Agent AssistantChunk 不应改变父 Agent spinner 模式"
+    );
+}
+
+#[tokio::test]
+async fn test_main_agent_assistant_chunk_updates_parent_state() {
+    // Phase 2.6 step 2：主 Agent 的 AssistantChunk 保持原行为
+    let (mut app, _handle) = App::new_headless(120, 30).await;
+
+    app.session_mgr.current_mut().agent.retry_status = Some(crate::app::RetryStatus {
+        attempt: 1,
+        max_attempts: 3,
+        delay_ms: 100,
+        error: "retrying".into(),
+    });
+    app.push_agent_event(AgentEvent::AssistantChunk {
+        source_agent_id: None,
+    });
+    app.process_pending_events();
+
+    let session = app.session_mgr.current();
+    assert!(
+        session.agent.retry_status.is_none(),
+        "主 Agent AssistantChunk 应清除 retry_status"
+    );
+    assert!(
+        session.agent.agent_replied,
+        "主 Agent AssistantChunk 应标记 agent_replied"
+    );
+    assert!(
+        matches!(
+            session.spinner_state.mode(),
+            peri_widgets::SpinnerMode::Responding
+        ),
+        "主 Agent AssistantChunk 应将 spinner 设为 Responding"
     );
 }

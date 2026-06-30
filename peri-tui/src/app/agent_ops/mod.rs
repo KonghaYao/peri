@@ -345,7 +345,14 @@ impl App {
                 self.request_rebuild();
                 (true, false, false)
             }
-            AgentEvent::AssistantChunk => {
+            AgentEvent::AssistantChunk { source_agent_id } => {
+                // Phase 2.6 step 2：子 Agent 的 AssistantChunk 不应污染父 Agent 状态。
+                // - 主 Agent（None）：保持原行为（清 retry、设 spinner、agent_replied）
+                // - 子 Agent（Some）：仅触发 rebuild，跳过副作用
+                if source_agent_id.is_some() {
+                    self.request_rebuild();
+                    return (true, false, false);
+                }
                 self.session_mgr.current_mut().agent.retry_status = None;
                 self.session_mgr.current_mut().agent.agent_replied = true;
                 self.session_mgr
