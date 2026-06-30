@@ -1,5 +1,5 @@
 use crate::runtime::effect::Effect;
-use crate::{app::App, command::Command, ui::message_view::MessageViewModel};
+use crate::{app::App, command::Command};
 
 pub struct RenameCommand;
 
@@ -18,14 +18,9 @@ impl Command for RenameCommand {
         let thread_id = app.session_mgr.current_mut().current_thread_id.clone();
 
         let Some(thread_id) = thread_id else {
-            let vm = MessageViewModel::system(lc.tr("rename-no-session"));
-            app.session_mgr
-                .current_mut()
-                .messages
-                .view_messages
-                .push(vm);
-            app.render_rebuild();
-            return vec![];
+            return vec![Effect::PushSystemNote(
+                lc.tr("rename-no-session").to_string(),
+            )];
         };
 
         if name.is_empty() {
@@ -38,46 +33,24 @@ impl Command for RenameCommand {
                     .and_then(|m| m.title)
             })
             .unwrap_or_else(|| lc.tr("rename-untitled"));
-            let vm = MessageViewModel::system(
-                lc.tr_args("rename-current-title", &[("title".into(), title.into())]),
-            );
-            app.session_mgr
-                .current_mut()
-                .messages
-                .view_messages
-                .push(vm);
-            app.render_rebuild();
+            vec![Effect::PushSystemNote(
+                lc.tr_args("rename-current-title", &[("title".into(), title.into())])
+                    .to_string(),
+            )]
         } else {
             // 更新标题
             let store = app.services.thread_store.clone();
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(store.update_title(&thread_id, name))
             });
-            match result {
-                Ok(()) => {
-                    let vm = MessageViewModel::system(lc.tr_args(
-                        "rename-updated",
-                        &[("name".into(), name.to_string().into())],
-                    ));
-                    app.session_mgr
-                        .current_mut()
-                        .messages
-                        .view_messages
-                        .push(vm);
-                }
-                Err(e) => {
-                    let vm = MessageViewModel::system(
-                        lc.tr_args("rename-failed", &[("error".into(), e.to_string().into())]),
-                    );
-                    app.session_mgr
-                        .current_mut()
-                        .messages
-                        .view_messages
-                        .push(vm);
-                }
-            }
-            app.render_rebuild();
+            let msg = match result {
+                Ok(()) => lc.tr_args(
+                    "rename-updated",
+                    &[("name".into(), name.to_string().into())],
+                ),
+                Err(e) => lc.tr_args("rename-failed", &[("error".into(), e.to_string().into())]),
+            };
+            vec![Effect::PushSystemNote(msg)]
         }
-        vec![]
     }
 }

@@ -1,4 +1,4 @@
-use crate::app::{App, MessageViewModel};
+use crate::app::App;
 use crate::command::Command;
 use crate::runtime::effect::Effect;
 
@@ -19,13 +19,11 @@ impl Command for AgentCommand {
         if id.is_empty() {
             // 清除 agent_id
             app.set_agent_id(None);
-            app.session_mgr.current_mut().messages.view_messages.push(MessageViewModel::system(
-                lc.tr("command-agent-reset").to_string(),
-            ));
+            vec![Effect::PushSystemNote(lc.tr("command-agent-reset").to_string())]
         } else {
             app.set_agent_id(Some(id.to_string()));
             let name = peri_middlewares::format_agent_id(id);
-            app.session_mgr.current_mut().messages.view_messages.push(MessageViewModel::system(
+            vec![Effect::PushSystemNote(
                 lc.tr_args(
                     "command-agent-switched",
                     &[
@@ -33,8 +31,7 @@ impl Command for AgentCommand {
                         ("id".into(), id.to_string().into()),
                     ],
                 ),
-            ));
+            )]
         }
-        vec![]
     }
 }

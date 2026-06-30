@@ -199,6 +199,19 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
         ),
         Event::SessionLoaded { .. } => (State::Idle(state), Vec::new()),
         Event::Shutdown => (State::Idle(state), vec![Effect::Quit]),
+
+        // -- Phase 2.4: push system note into state.view (v2 source) -------
+        Event::PushSystemNote(text) => {
+            state
+                .view
+                .push(peri_acp_types::view_model::ViewModel::SystemNote(
+                    peri_acp_types::view_model::SystemNoteData {
+                        text,
+                        level: peri_acp_types::view_model::NoteLevel::Info,
+                    },
+                ));
+            (State::Idle(state), vec![Effect::Render])
+        }
     }
 }
 

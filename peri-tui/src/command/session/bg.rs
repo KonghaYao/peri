@@ -1,5 +1,5 @@
 use crate::runtime::effect::Effect;
-use crate::{app::App, command::Command, ui::message_view::MessageViewModel};
+use crate::{app::App, command::Command};
 
 pub struct BgCommand;
 
@@ -20,14 +20,9 @@ impl Command for BgCommand {
         let lc = &app.services.lc;
         let args = args.trim();
         if args.is_empty() {
-            let vm = MessageViewModel::system(lc.tr("command-bg-usage").to_string());
-            app.session_mgr
-                .current_mut()
-                .messages
-                .view_messages
-                .push(vm);
-            app.render_rebuild();
-            return vec![];
+            return vec![Effect::PushSystemNote(
+                lc.tr("command-bg-usage").to_string(),
+            )];
         }
         // Pass through to executor — keep /bg prefix so ACP executor intercepts it
         app.submit_message(format!("/bg {}", args));

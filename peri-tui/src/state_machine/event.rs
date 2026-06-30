@@ -54,6 +54,12 @@ pub enum Event {
 
     /// Request the main loop to exit.
     Shutdown,
+
+    /// Push a system note into the message view (e.g. `/agent` switch
+    /// notification, `/model` failure). Routes through the state machine so
+    /// the note lands in `state.view` (v2 source of truth) instead of the
+    /// legacy `view_messages` Vec.
+    PushSystemNote(String),
 }
 
 // ---------------------------------------------------------------------------

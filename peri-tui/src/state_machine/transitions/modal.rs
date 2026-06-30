@@ -128,6 +128,19 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
 
         // -- Shutdown: propagate to main_loop so app can quit ----------------
         Event::Shutdown => (State::Modal(state), vec![Effect::Quit]),
+
+        // -- Phase 2.4: push system note into saved_view (v2 source) -------
+        Event::PushSystemNote(text) => {
+            state
+                .saved_view
+                .push(peri_acp_types::view_model::ViewModel::SystemNote(
+                    peri_acp_types::view_model::SystemNoteData {
+                        text,
+                        level: peri_acp_types::view_model::NoteLevel::Info,
+                    },
+                ));
+            (State::Modal(state), Vec::new())
+        }
     }
 }
 
@@ -442,6 +455,19 @@ pub fn handle_with_context(
 
         // -- Shutdown: propagate to main_loop so app can quit ----------------
         Event::Shutdown => (State::Modal(state), vec![Effect::Quit]),
+
+        // -- Phase 2.4: push system note into saved_view (v2 source) -------
+        Event::PushSystemNote(text) => {
+            state
+                .saved_view
+                .push(peri_acp_types::view_model::ViewModel::SystemNote(
+                    peri_acp_types::view_model::SystemNoteData {
+                        text,
+                        level: peri_acp_types::view_model::NoteLevel::Info,
+                    },
+                ));
+            (State::Modal(state), Vec::new())
+        }
     }
 }
 

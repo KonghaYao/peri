@@ -1,5 +1,5 @@
 use crate::{
-    app::{agent, App, MessageViewModel, PanelKind},
+    app::{agent, App, PanelKind},
     command::Command,
     runtime::effect::Effect,
 };
@@ -22,14 +22,13 @@ impl Command for ModelCommand {
                 let cfg_arc = app.services.peri_config.clone();
                 let mut cfg = cfg_arc.write();
                 cfg.config.active_alias = alias.clone();
+                let mut effects: Vec<Effect> = Vec::new();
                 if let Err(e) = App::save_config(&cfg, app.services.config_path_override.as_deref())
                 {
-                    app.session_mgr.current_mut().messages.view_messages.push(
-                        MessageViewModel::system(app.services.lc.tr_args(
-                            "config-save-failed",
-                            &[("error".into(), e.to_string().into())],
-                        )),
-                    );
+                    effects.push(Effect::PushSystemNote(app.services.lc.tr_args(
+                        "config-save-failed",
+                        &[("error".into(), e.to_string().into())],
+                    )));
                 }
                 if let Some(p) = agent::LlmProvider::from_config(&cfg) {
                     app.services.provider_name = p.display_name().to_string();
@@ -42,7 +41,8 @@ impl Command for ModelCommand {
                         let _ = acp.set_config_option("model", &alias_val).await;
                     });
                 }
-                vec![Effect::Render]
+                effects.push(Effect::Render);
+                effects
             }
             _ => {
                 vec![Effect::OpenPanel(PanelKind::Model)]

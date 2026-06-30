@@ -156,6 +156,19 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
         }
 
         Event::Shutdown => (State::Streaming(state), vec![Effect::Quit]),
+
+        // -- Phase 2.4: push system note into state.view (v2 source) -------
+        Event::PushSystemNote(text) => {
+            state
+                .view
+                .push(peri_acp_types::view_model::ViewModel::SystemNote(
+                    peri_acp_types::view_model::SystemNoteData {
+                        text,
+                        level: peri_acp_types::view_model::NoteLevel::Info,
+                    },
+                ));
+            (State::Streaming(state), vec![Effect::Render])
+        }
     }
 }
 

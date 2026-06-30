@@ -521,7 +521,15 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 // (OpenRewindPrompt removed — legacy keyboard handles Esc.)
                 // ── System / Thread / Memory ───────────────────────
                 Effect::PushSystemNote(msg) => {
-                    app.push_system_note(msg);
+                    // v1 path: legacy view_messages (will be removed in Phase 2.6).
+                    app.push_system_note(msg.clone());
+                    // v2 path: route through state machine so state.view is
+                    // the single source of truth (Phase 2.4).
+                    let (new_state, _) = crate::state_machine::handle(
+                        state,
+                        crate::state_machine::event::Event::PushSystemNote(msg),
+                    );
+                    state = new_state;
                     needs_render = true;
                 }
                 // (OpenThreadWithFeedback removed — no SM emitter; thread

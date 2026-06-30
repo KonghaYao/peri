@@ -1,8 +1,4 @@
-use crate::{
-    app::{App, MessageViewModel},
-    command::Command,
-    runtime::effect::Effect,
-};
+use crate::{app::App, command::Command, runtime::effect::Effect};
 
 pub struct HelpCommand;
 
@@ -18,7 +14,7 @@ impl Command for HelpCommand {
     fn execute(&self, app: &mut App, _args: &str) -> Vec<Effect> {
         let lc = &app.services.lc;
         // 使用启动时预计算的列表（command_registry 在 dispatch 时已被 std::mem::take 取出）
-        let mut lines = vec![lc.tr("help-available-commands")];
+        let mut lines = vec![lc.tr("help-available-commands").to_string()];
         for (name, desc, aliases) in &app.session_mgr.current_mut().commands.command_help_list {
             let alias_str = if aliases.is_empty() {
                 String::new()
@@ -35,31 +31,30 @@ impl Command for HelpCommand {
         let skills_count = app.session_mgr.current_mut().commands.skills.len();
         lines.push("".to_string());
         if skills_count > 0 {
-            lines.push(lc.tr_args(
-                "help-skills-count",
-                &[("count".into(), skills_count.to_string().into())],
-            ));
+            lines.push(
+                lc.tr_args(
+                    "help-skills-count",
+                    &[("count".into(), skills_count.to_string().into())],
+                )
+                .to_string(),
+            );
         } else {
-            lines.push(lc.tr("help-skills-empty"));
+            lines.push(lc.tr("help-skills-empty").to_string());
         }
 
         // 全局快捷键提示
         lines.push("".to_string());
-        lines.push(lc.tr_args(
-            "help-shortcuts",
-            &[(
-                "model_key".into(),
-                crate::event::keyboard::cycle_model_label().into(),
-            )],
-        ));
+        lines.push(
+            lc.tr_args(
+                "help-shortcuts",
+                &[(
+                    "model_key".into(),
+                    crate::event::keyboard::cycle_model_label().into(),
+                )],
+            )
+            .to_string(),
+        );
 
-        let vm = MessageViewModel::system(lines.join("\n"));
-        app.session_mgr
-            .current_mut()
-            .messages
-            .view_messages
-            .push(vm);
-        app.render_rebuild();
-        vec![]
+        vec![Effect::PushSystemNote(lines.join("\n"))]
     }
 }

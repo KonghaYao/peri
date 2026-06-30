@@ -21,15 +21,9 @@ impl Command for HistoryCommand {
 
     fn execute(&self, app: &mut App, _args: &str) -> Vec<Effect> {
         if app.session_mgr.current_mut().ui.loading {
-            use crate::app::MessageViewModel;
-            app.session_mgr
-                .current_mut()
-                .messages
-                .view_messages
-                .push(MessageViewModel::system(
-                    app.services.lc.tr("history-agent-running"),
-                ));
-            return vec![];
+            return vec![Effect::PushSystemNote(
+                app.services.lc.tr("history-agent-running").to_string(),
+            )];
         }
         vec![Effect::OpenPanel(PanelKind::ThreadBrowser)]
     }

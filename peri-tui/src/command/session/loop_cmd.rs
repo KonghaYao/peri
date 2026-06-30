@@ -1,5 +1,5 @@
 use crate::runtime::effect::Effect;
-use crate::{app::App, command::Command, ui::message_view::MessageViewModel};
+use crate::{app::App, command::Command};
 
 pub struct LoopCommand;
 
@@ -16,14 +16,9 @@ impl Command for LoopCommand {
         let lc = &app.services.lc;
         let args = args.trim();
         if args.is_empty() {
-            let vm = MessageViewModel::system(lc.tr("command-loop-usage").to_string());
-            app.session_mgr
-                .current_mut()
-                .messages
-                .view_messages
-                .push(vm);
-            app.render_rebuild();
-            return vec![];
+            return vec![Effect::PushSystemNote(
+                lc.tr("command-loop-usage").to_string(),
+            )];
         }
 
         // 将用户输入包装为指令提交给 Agent，由 LLM 解析时间并调用 cron_register 工具

@@ -1,7 +1,5 @@
 use crate::runtime::effect::Effect;
-use crate::{
-    app::App, command::Command, config::ThinkingConfig, ui::message_view::MessageViewModel,
-};
+use crate::{app::App, command::Command, config::ThinkingConfig};
 
 pub struct EffortCommand;
 
@@ -33,25 +31,11 @@ impl Command for EffortCommand {
                 });
                 if let Err(e) = App::save_config(&cfg, app.services.config_path_override.as_deref())
                 {
-                    let vm = MessageViewModel::system(lc.tr_args(
+                    return vec![Effect::PushSystemNote(lc.tr_args(
                         "config-save-failed",
                         &[("error".into(), e.to_string().into())],
-                    ));
-                    app.session_mgr
-                        .current_mut()
-                        .messages
-                        .view_messages
-                        .push(vm);
-                    return vec![];
+                    ))];
                 }
-                let vm = MessageViewModel::system(
-                    lc.tr_args("effort-set", &[("effort".into(), arg.clone().into())]),
-                );
-                app.session_mgr
-                    .current_mut()
-                    .messages
-                    .view_messages
-                    .push(vm);
                 if let Some(ref acp_client) = app.acp_client {
                     let acp = acp_client.clone();
                     let val = arg.clone();
@@ -59,8 +43,13 @@ impl Command for EffortCommand {
                         let _ = acp.set_config_option("thinking_effort", &val).await;
                     });
                 }
-                app.render_rebuild();
-                vec![]
+                vec![
+                    Effect::PushSystemNote(
+                        lc.tr_args("effort-set", &[("effort".into(), arg.clone().into())])
+                            .to_string(),
+                    ),
+                    Effect::Render,
+                ]
             }
             _ => {
                 let current_owned = app
@@ -73,21 +62,14 @@ impl Command for EffortCommand {
                     .map(|t| t.effort.clone())
                     .unwrap_or_else(|| "high".to_string());
                 let current = current_owned.as_str();
-                let vm = MessageViewModel::system(format!(
+                vec![Effect::PushSystemNote(format!(
                     "{}\n{}",
                     lc.tr_args(
                         "effort-current",
                         &[("effort".into(), current.to_string().into())]
                     ),
                     lc.tr("effort-usage"),
-                ));
-                app.session_mgr
-                    .current_mut()
-                    .messages
-                    .view_messages
-                    .push(vm);
-                app.render_rebuild();
-                vec![]
+                ))]
             }
         }
     }

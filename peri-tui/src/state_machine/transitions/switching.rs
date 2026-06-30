@@ -11,7 +11,7 @@ use super::super::state::{IdleState, InputState, State, SwitchingState};
 use crate::runtime::effect::Effect;
 
 /// Switching-state transition entry point.
-pub fn handle(state: SwitchingState, event: Event) -> (State, Vec<Effect>) {
+pub fn handle(mut state: SwitchingState, event: Event) -> (State, Vec<Effect>) {
     match event {
         // -- view-commit: adopt snapshot, transition to Idle ----------------
         Event::AcpEvent(AcpEventData::ViewCommit(vc)) => {
@@ -39,6 +39,19 @@ pub fn handle(state: SwitchingState, event: Event) -> (State, Vec<Effect>) {
             ],
         ),
         Event::Shutdown => (State::Switching(state), vec![Effect::Quit]),
+
+        // -- Phase 2.4: push system note into state.view (v2 source) -------
+        Event::PushSystemNote(text) => {
+            state
+                .view
+                .push(peri_acp_types::view_model::ViewModel::SystemNote(
+                    peri_acp_types::view_model::SystemNoteData {
+                        text,
+                        level: peri_acp_types::view_model::NoteLevel::Info,
+                    },
+                ));
+            (State::Switching(state), vec![Effect::Render])
+        }
 
         // -- Drop everything else --------------------------------------------
         Event::Key(_) | Event::Paste(_) | Event::AcpEvent(_) => {

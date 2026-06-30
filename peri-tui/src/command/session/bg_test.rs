@@ -2,26 +2,23 @@
         App::new_headless(80, 24).await.0
     }
 
+    /// 从 `Vec<Effect>` 中提取首个 `PushSystemNote` 文本（若有）。
+    fn first_system_note_text(effects: &[Effect]) -> Option<String> {
+        for e in effects {
+            if let Effect::PushSystemNote(t) = e {
+                return Some(t.clone());
+            }
+        }
+        None
+    }
+
     #[tokio::test]
     async fn test_bg_cmd_empty_args_shows_usage() {
         let mut app = headless_app().await;
         let cmd = BgCommand;
-        cmd.execute(&mut app, "");
-        assert_eq!(
-            app.session_mgr.current_mut()
-                .messages
-                .view_messages
-                .len(),
-            1,
-            "空参数应显示用法提示"
-        );
-        let text = format!(
-            "{:?}",
-            app.session_mgr.current_mut()
-                .messages
-                .view_messages[0]
-        );
-        // 默认 locale 可能是 en/zh-CN，两种文案都接受
+        let effects = cmd.execute(&mut app, "");
+        let text = first_system_note_text(&effects)
+            .expect("空参数应返回 PushSystemNote 用法提示");
         assert!(
             text.contains("用法") || text.contains("Usage"),
             "空参数应显示用法提示，实际: {}",
@@ -33,24 +30,13 @@
     async fn test_bg_cmd_empty_whitespace_shows_usage() {
         let mut app = headless_app().await;
         let cmd = BgCommand;
-        cmd.execute(&mut app, "   ");
-        assert_eq!(
-            app.session_mgr.current_mut()
-                .messages
-                .view_messages
-                .len(),
-            1,
-            "纯空格参数应显示用法提示"
-        );
-        let text = format!(
-            "{:?}",
-            app.session_mgr.current_mut()
-                .messages
-                .view_messages[0]
-        );
+        let effects = cmd.execute(&mut app, "   ");
+        let text = first_system_note_text(&effects)
+            .expect("纯空格参数应返回 PushSystemNote 用法提示");
         assert!(
             text.contains("用法") || text.contains("Usage"),
-            "纯空格参数应显示用法提示"
+            "纯空格参数应显示用法提示，实际: {}",
+            text
         );
     }
 

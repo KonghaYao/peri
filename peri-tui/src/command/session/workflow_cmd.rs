@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use crate::runtime::effect::Effect;
-use crate::{app::App, command::Command, ui::message_view::MessageViewModel};
+use crate::{app::App, command::Command};
 
 /// 扫描 `.claude/workflows/` 目录，返回 `(name, path)` 列表（按 name 排序）。
 ///
@@ -63,18 +63,11 @@ impl Command for NamedWorkflowCommand {
         let script = match std::fs::read_to_string(&self.path) {
             Ok(content) => content,
             Err(e) => {
-                let vm = MessageViewModel::system(format!(
+                return vec![Effect::PushSystemNote(format!(
                     "Failed to read workflow file '{}': {}",
                     self.path.display(),
                     e
-                ));
-                app.session_mgr
-                    .current_mut()
-                    .messages
-                    .view_messages
-                    .push(vm);
-                app.render_rebuild();
-                return vec![];
+                ))];
             }
         };
 
