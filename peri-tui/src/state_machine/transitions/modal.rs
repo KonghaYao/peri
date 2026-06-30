@@ -540,13 +540,25 @@ fn apply_acp_event_to_saved(state: &mut ModalState, event: &AcpEventData) -> Opt
         }
 
         AcpEventData::TurnDone | AcpEventData::TurnInterrupted(_) => {
-            // Turn ended while modal was open — clear saved_current_turn
-            // so ClosePanel restores to Idle (not Streaming).
+            // Turn ended while modal was open. Before clearing
+            // saved_current_turn, flush its incremental view_models
+            // (text / reasoning / tool cards accumulated during the modal
+            // session) into saved_view — mirroring the streaming.rs
+            // TurnInterrupted handler (line 98-99). Without this flush,
+            // ClosePanel would restore saved_view that never received the
+            // interrupted/done turn's tool cards or partial text, silently
+            // losing any streaming progress made behind the popup.
+            //
+            // Note: a preceding ViewCommit would already have replaced
+            // saved_view wholesale, so this extend is only load-bearing
+            // when ViewCommit is delayed, lost, or never sent (interrupt).
             if let Some(turn) = state.saved_current_turn.as_mut() {
+                let streaming_vms = turn.view_models().to_vec();
+                state.saved_view.extend(streaming_vms);
                 turn.deactivate();
             }
             state.saved_current_turn = None;
-            None
+            Some(vec![Effect::Render])
         }
 
         // Status events / interaction requests / unknown — silently drop.
@@ -800,6 +812,118 @@ mod tests {
                 assert!(
                     m.saved_current_turn.is_none(),
                     "TurnDone in Modal must clear saved_current_turn"
+                );
+            }
+            _ => panic!("expected Modal"),
+        }
+    }
+
+    #[test]
+    fn test_turn_done_in_modal_flushes_text_to_saved_view() {
+        // Modal 期间 agent 完成（TurnDone）：saved_current_turn 上累积的
+        // 文本/工具卡片必须 flush 到 saved_view，否则 ClosePanel 恢复后
+        // 用户看不到 popup 后面发生的流式输出。回归测试：修复前 saved_view
+        // 不变，修复后必须包含 AssistantBubble（"finishing"）。
+        use crate::state_machine::current_turn::CurrentTurn;
+        let mut turn = CurrentTurn::new();
+        turn.append_text("finishing");
+        let mut modal = make_interaction_modal(Box::new(NoopHandler));
+        modal.saved_view = vec![];
+        modal.saved_current_turn = Some(turn);
+        let (next, effects) = handle(modal, Event::AcpEvent(AcpEventData::TurnDone));
+        match next {
+            State::Modal(m) => {
+                assert!(m.saved_current_turn.is_none());
+                assert!(
+                    !m.saved_view.is_empty(),
+                    "TurnDone must flush saved_current_turn VMs into saved_view"
+                );
+                let has_finishing_text = m.saved_view.iter().any(|vm| match vm {
+                    peri_acp_types::view_model::ViewModel::AssistantBubble(d) => {
+                        d.text.contains("finishing")
+                    }
+                    _ => false,
+                });
+                assert!(
+                    has_finishing_text,
+                    "saved_view should contain the AssistantBubble with finishing text"
+                );
+                assert!(
+                    effects.iter().any(|e| matches!(e, Effect::Render)),
+                    "TurnDone in Modal must emit Render so popup background updates"
+                );
+            }
+            _ => panic!("expected Modal"),
+        }
+    }
+
+    #[test]
+    fn test_turn_interrupted_in_modal_flushes_tool_cards_to_saved_view() {
+        // TurnInterrupted in Modal 同样需要 flush。工具卡片场景特别重要：
+        // streaming.rs TurnInterrupted 已经把工具卡片持久化到 state.view，
+        // Modal 路径必须保持一致，否则 popup 关闭后已执行的工具调用消失。
+        use crate::state_machine::current_turn::{CurrentTurn, ToolCardAccumulator};
+        let mut turn = CurrentTurn::new();
+        turn.append_text("partial");
+        turn.start_tool(ToolCardAccumulator::new(
+            "tool-1".to_string(),
+            "Read".to_string(),
+            "{path:\"f.txt\"}".to_string(),
+        ));
+        turn.end_tool("tool-1", "ok".to_string(), false);
+        let mut modal = make_interaction_modal(Box::new(NoopHandler));
+        modal.saved_view = vec![];
+        modal.saved_current_turn = Some(turn);
+        let (next, effects) = handle(
+            modal,
+            Event::AcpEvent(AcpEventData::TurnInterrupted(
+                peri_acp_types::event_data::TurnInterrupted {
+                    reason: "user-cancel".to_string(),
+                },
+            )),
+        );
+        match next {
+            State::Modal(m) => {
+                assert!(m.saved_current_turn.is_none());
+                assert!(
+                    !m.saved_view.is_empty(),
+                    "TurnInterrupted must flush saved_current_turn VMs into saved_view"
+                );
+                let has_tool = m
+                    .saved_view
+                    .iter()
+                    .any(|vm| matches!(vm, peri_acp_types::view_model::ViewModel::ToolCard(_)));
+                assert!(
+                    has_tool,
+                    "saved_view should contain the ToolCard from interrupted turn"
+                );
+                assert!(
+                    effects.iter().any(|e| matches!(e, Effect::Render)),
+                    "TurnInterrupted in Modal must emit Render"
+                );
+            }
+            _ => panic!("expected Modal"),
+        }
+    }
+
+    #[test]
+    fn test_turn_done_in_modal_without_saved_current_turn_is_noop() {
+        // Modal 从 Idle 打开时 saved_current_turn = None。TurnDone 到达时
+        // 不应 panic，不应修改 saved_view，但仍 emit Render（与有数据时一致）。
+        let mut modal = make_interaction_modal(Box::new(NoopHandler));
+        modal.saved_view = vec![];
+        modal.saved_current_turn = None;
+        let (next, effects) = handle(modal, Event::AcpEvent(AcpEventData::TurnDone));
+        match next {
+            State::Modal(m) => {
+                assert!(m.saved_current_turn.is_none());
+                assert!(
+                    m.saved_view.is_empty(),
+                    "saved_view must remain empty when no saved_current_turn"
+                );
+                assert!(
+                    effects.iter().any(|e| matches!(e, Effect::Render)),
+                    "TurnDone in Modal should still emit Render even without turn data"
                 );
             }
             _ => panic!("expected Modal"),
