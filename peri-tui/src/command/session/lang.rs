@@ -43,8 +43,7 @@ impl Command for LangCommand {
                     .collect::<Vec<_>>()
                     .join("\n")
             );
-            app.active_mut().messages.push_system_note(msg);
-            return vec![];
+            return vec![Effect::PushSystemNote(msg)];
         }
 
         match app.services.lc.switch(lang) {
@@ -60,16 +59,15 @@ impl Command for LangCommand {
                     .services
                     .lc
                     .tr_args("lang-switched", &[("lang".into(), lang.into())]);
-                app.active_mut().messages.push_system_note(msg);
+                vec![Effect::PushSystemNote(msg)]
             }
             Err(_) => {
                 let msg = app
                     .services
                     .lc
                     .tr_args("lang-unsupported", &[("lang".into(), lang.into())]);
-                app.active_mut().messages.push_system_note(msg);
+                vec![Effect::PushSystemNote(msg)]
             }
         }
-        vec![]
     }
 }

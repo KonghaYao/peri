@@ -23,39 +23,33 @@ impl Command for ChannelCommand {
         let args = args.trim();
 
         if args.is_empty() || args == "status" {
-            self.show_status(app);
-            return vec![];
+            return self.show_status(app);
         }
 
         if args == "close" {
-            self.close_all(app);
-            return vec![];
+            return self.close_all(app);
         }
 
         if let Some(source) = args.strip_prefix("open ") {
-            self.open_channel(app, source.trim());
-            return vec![];
+            return self.open_channel(app, source.trim());
         }
 
         if let Some(server_name) = args.strip_prefix("close ") {
-            self.close_one(app, server_name.trim());
-            return vec![];
+            return self.close_one(app, server_name.trim());
         }
 
         let usage = lc.tr("command-channel-usage").to_string();
-        app.push_system_note(usage);
-        vec![]
+        vec![Effect::PushSystemNote(usage)]
     }
 }
 
 impl ChannelCommand {
-    fn open_channel(&self, app: &mut App, source: &str) {
+    fn open_channel(&self, app: &mut App, source: &str) -> Vec<Effect> {
         let lc = &app.services.lc;
         let channel_state = match &app.services.channel_state {
             Some(cs) => Arc::clone(cs),
             None => {
-                self.add_note(app, &lc.tr("command-channel-not-init"));
-                return;
+                return note(&lc.tr("command-channel-not-init"));
             }
         };
 
@@ -74,14 +68,10 @@ impl ChannelCommand {
             .unwrap_or(false);
 
         if !has_capability {
-            self.add_note(
-                app,
-                &lc.tr_args(
-                    "command-channel-unavailable",
-                    &[("server".into(), server_name.to_string().into())],
-                ),
-            );
-            return;
+            return note(&lc.tr_args(
+                "command-channel-unavailable",
+                &[("server".into(), server_name.to_string().into())],
+            ));
         }
 
         // Authorize the channel
@@ -97,38 +87,34 @@ impl ChannelCommand {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         channel_state.register_session(session_id, tx);
 
-        self.add_note(
-            app,
-            &lc.tr_args(
-                "command-channel-opened",
-                &[("source".into(), source.to_string().into())],
-            ),
-        );
+        note(&lc.tr_args(
+            "command-channel-opened",
+            &[("source".into(), source.to_string().into())],
+        ))
     }
 
-    fn close_all(&self, app: &mut App) {
+    fn close_all(&self, app: &mut App) -> Vec<Effect> {
         let lc = &app.services.lc;
         if let Some(cs) = &app.services.channel_state {
             cs.close_all();
-            self.add_note(app, &lc.tr("command-channel-all-closed"));
+            return note(&lc.tr("command-channel-all-closed"));
         }
+        Vec::new()
     }
 
-    fn close_one(&self, app: &mut App, server_name: &str) {
+    fn close_one(&self, app: &mut App, server_name: &str) -> Vec<Effect> {
         let lc = &app.services.lc;
         if let Some(cs) = &app.services.channel_state {
             cs.revoke(server_name);
-            self.add_note(
-                app,
-                &lc.tr_args(
-                    "command-channel-closed",
-                    &[("server".into(), server_name.to_string().into())],
-                ),
-            );
+            return note(&lc.tr_args(
+                "command-channel-closed",
+                &[("server".into(), server_name.to_string().into())],
+            ));
         }
+        Vec::new()
     }
 
-    fn show_status(&self, app: &mut App) {
+    fn show_status(&self, app: &mut App) -> Vec<Effect> {
         let lc = &app.services.lc;
         let channel_state = app.services.channel_state.clone();
         let msg = if let Some(cs) = &channel_state {
@@ -150,13 +136,14 @@ impl ChannelCommand {
         } else {
             lc.tr("command-channel-not-init").to_string()
         };
-        self.add_note(app, &msg);
+        note(&msg)
     }
+}
 
-    fn add_note(&self, app: &mut App, msg: &str) {
-        // UI 反馈：走 ephemeral SystemNote VM 路径，不污染 BaseMessage[] / Prompt Cache。
-        app.push_system_note(msg.to_string());
-    }
+/// 包装一个 ephemeral SystemNote 字符串为单元素 Vec<Effect>。
+/// UI 反馈走 PushSystemNote 路径，由状态机吸收到 state.view，不污染 BaseMessage[] / Prompt Cache。
+fn note(msg: &str) -> Vec<Effect> {
+    vec![Effect::PushSystemNote(msg.to_string())]
 }
 
 /// 从 channel source 标识符提取 MCP server name（对齐 config 中的命名格式）
