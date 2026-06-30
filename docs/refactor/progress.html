@@ -45,9 +45,9 @@
 </div>
 
 <div class="summary">
-  <div class="stat done"><span class="num">5</span><span class="label">Phase 已完成</span></div>
-  <div class="stat active"><span class="num">1</span><span class="label">Phase 1.5c 进行中</span></div>
-  <div class="stat pending"><span class="num">4</span><span class="label">Phase 待开始</span></div>
+  <div class="stat done"><span class="num">6</span><span class="label">Phase 已完成</span></div>
+  <div class="stat active"><span class="num">1</span><span class="label">Phase 1.6b 进行中</span></div>
+  <div class="stat pending"><span class="num">3</span><span class="label">Phase 待开始</span></div>
   <div class="stat pending"><span class="num">14</span><span class="label">已识别缺陷</span></div>
 </div>
 
@@ -62,8 +62,8 @@
     <tr><td>1.2</td><td>重构 Handler trait 签名</td><td class="status s-pending">待开始</td><td>render 接收 Frame；handle_key 接收 KeyEvent</td></tr>
     <tr><td>1.3</td><td>启用 v2 Interaction Handlers</td><td class="status s-pending">待开始</td><td>main_loop 接收 HITL/AskUser/Rewind/OAuth 时构造 Handler 进入 Modal</td></tr>
     <tr><td>1.4</td><td>实现 Handler.render() + 删除 v1 popup</td><td class="status s-pending">待开始</td><td>迁移 popups/{hitl,ask_user,rewind,oauth}.rs 渲染到 Handler</td></tr>
-    <tr><td>1.5</td><td>修复 Modal 期间 AcpEvent 丢弃</td><td class="status s-active">Phase 1.5a/1.5b 完成</td><td>1.5a：ModalState 改 struct 持 saved_view/saved_input/saved_*/kind ✓；1.5b：modal.rs handle() 处理 AcpEvent（ViewCommit 更新 saved_view，TextChunk 等更新 saved_current_turn，TurnDone 清空）✓；1.5c：saved_current_turn 恢复（Phase 1.6a 配套）推迟</td></tr>
-    <tr><td>1.6</td><td>Streaming→Modal 可达 + Status 事件</td><td class="status s-pending">待开始</td><td>OpenPanel 在 Streaming 也触发；实现 §4.3 status 事件</td></tr>
+    <tr><td>1.5</td><td>修复 Modal 期间 AcpEvent 丢弃</td><td class="status s-done">完成</td><td>1.5a：ModalState 改 struct 持 saved_view/saved_input/saved_*/kind ✓；1.5b：modal.rs handle() 处理 AcpEvent（ViewCommit 更新 saved_view，TextChunk 等更新 saved_current_turn，TurnDone 清空）✓；1.5c：Streaming→Modal 可达 + saved_current_turn 恢复（commit <code>fa8d68c5</code>）</td></tr>
+    <tr><td>1.6</td><td>Streaming→Modal 可达 + Status 事件</td><td class="status s-done">1.6a 完成</td><td>1.6a：streaming.rs handle_key 镜像 Idle 的 Ctrl 快捷键（Ctrl+P/T/B/O/Shift+T/BackTab），main_loop OpenPanel 接受 Streaming 入口，ClosePanel 检测 saved_current_turn 恢复 Streaming ✓；1.6b：§4.3 status 事件（TokenUsage/ToolCount/Progress）状态栏渲染（推迟到状态栏重构）</td></tr>
     <tr><td>2</td><td>消息源单一化</td><td class="status s-pending">待开始</td><td>删 origin_messages/view_messages，统一 state.view + current_turn</td></tr>
     <tr><td>3</td><td>清理死 Effect + Switching</td><td class="status s-active">Phase 3a/3b 完成</td><td>3a：5 个真死 Effect 删除 ✓；3b：modal.rs TLS stubs → #[cfg(test)] ✓（handle/dispatch_key/dispatch_mouse_tls/dispatch_paste_tls/transition_to_idle*/TLS statics 全部 test-only，state_machine::handle Modal arm 改为生产 no-op + 测试 dispatch）；3c：State::Switching 完善（推迟到独立窗口）</td></tr>
     <tr><td>4</td><td>CLAUDE.md 同步</td><td class="status s-pending">待开始</td><td>peri-tui + 根 CLAUDE.md 删除过时引用</td></tr>
@@ -102,9 +102,9 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-06-30 cron #2（Phase 1.1 + 3a + 3b + 1.5a + 1.5b 完成）<br>
-  <strong>本窗口成果</strong>：5 个 commit · Modal 期间 AcpEvent 不再丢失（ViewCommit 更新 saved_view，TextChunk 等更新 saved_current_turn）· 951 测试全过<br>
-  <strong>下一步</strong>：Phase 1.5c（OpenPanel 从 Streaming 进入时存 saved_current_turn）+ Phase 1.6a（Streaming→Modal 可达）
+  <strong>最后更新</strong>：2026-06-30 cron #3（Phase 1.5c + 1.6a 完成）<br>
+  <strong>本窗口成果</strong>：1 个 commit (<code>fa8d68c5</code>) · Streaming→Modal 可达（Ctrl+P/T/B/O/Shift+T/BackTab 在 Streaming 也工作）· saved_current_turn 恢复（关闭面板时无缝回到 Streaming，不丢失流式输出）· 960 测试全过（+9 新测试）<br>
+  <strong>下一步</strong>：Phase 1.2（Handler trait 签名重构：render 接收 Frame，handle_key 接收 KeyEvent）+ Phase 1.3（启用 v2 Interaction Handlers）
 </div>
 
 </body>
