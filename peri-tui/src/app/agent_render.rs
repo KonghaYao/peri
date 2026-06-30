@@ -22,15 +22,15 @@ impl App {
     /// P5: Direct VM push without PipelineAction indirection.
     pub(crate) fn apply_add_message(&mut self, vm: MessageViewModel) {
         let session = self.session_mgr.current_mut();
-        let anchor = session.messages.view_messages.len();
-        session.messages.ephemeral_notes.push((anchor, vm.clone()));
         session.messages.view_messages.push(vm);
         // Invalidate render cache — view_messages mutated.
         session.messages.message_cache = None;
     }
 
     /// P5: Direct view_messages rebuild without PipelineAction indirection.
-    /// Preserves ephemeral note anchors and handles UserBubble deduplication.
+    /// Preserves UserBubble deduplication. SystemNote anchor tracking was
+    /// retired in Phase 2.5 — v2 state.view (production render source)
+    /// handles SystemNote via `pending_v2_notes → Event::PushSystemNote`.
     pub(crate) fn apply_rebuild_all(&mut self, prefix_len: usize, tail_vms: Vec<MessageViewModel>) {
         let session = self.session_mgr.current_mut();
         let view_len = session.messages.view_messages.len();
@@ -45,15 +45,6 @@ impl App {
         } else {
             prefix_len
         };
-
-        // 保存 ephemeral_notes 中锚点在 tail 范围内的
-        let mut saved_notes: Vec<(usize, MessageViewModel)> = session
-            .messages
-            .ephemeral_notes
-            .drain(..)
-            .filter(|(anchor, _)| *anchor >= prefix_len)
-            .filter(|(_, vm)| !matches!(vm, MessageViewModel::UserBubble { .. }))
-            .collect();
 
         // drain 尾部
         session.messages.view_messages.drain(prefix_len..);
@@ -80,18 +71,6 @@ impl App {
         }
 
         session.messages.view_messages.extend(tail);
-
-        // 按锚点位置插入 saved_notes
-        saved_notes.sort_by_key(|(anchor, _)| *anchor);
-        for (anchor, vm) in saved_notes {
-            let tail_len = session.messages.view_messages.len() - prefix_len;
-            let insert_pos = (anchor - prefix_len).min(tail_len) + prefix_len;
-            session
-                .messages
-                .view_messages
-                .insert(insert_pos, vm.clone());
-            session.messages.ephemeral_notes.push((insert_pos, vm));
-        }
 
         // Invalidate render cache: view_messages was modified (drain + extend).
         // Without this, render_messages() reuses stale cache because needs_rebuild

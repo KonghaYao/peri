@@ -7,9 +7,6 @@ pub struct MessageState {
     pub view_messages: Vec<MessageViewModel>,
     pub round_start_vm_idx: usize,
     pub last_submitted_text: Option<String>,
-    /// 临时系统通知（不在 BaseMessage[] 中），记录 (锚点索引, VM)。
-    /// 锚点 = 创建时 view_messages.len()，RebuildAll 时按锚点插入到对应位置。
-    pub ephemeral_notes: Vec<(usize, MessageViewModel)>,
     /// Loading 期间用户缓存的消息（Agent 任务完成后自动提交）。
     pub pending_messages: Vec<String>,
     /// P5: Synchronous render cache — rebuilt in draw() when messages or width change.
@@ -53,23 +50,20 @@ impl MessageState {
             view_messages: Vec::new(),
             round_start_vm_idx: 0,
             last_submitted_text: None,
-            ephemeral_notes: Vec::new(),
             pending_messages: Vec::new(),
             message_cache: None,
             pending_v2_notes: Vec::new(),
         }
     }
 
-    /// 添加系统通知并记录锚点位置。
+    /// 添加系统通知到 view_messages + pending_v2_notes 队列。
     ///
-    /// 同时将通知文本加入 `pending_v2_notes` 队列——`main_loop` 在下一次
-    /// 迭代中会取出并通过 `state_machine::handle(Event::PushSystemNote)`
-    /// 路由到 `state.view`（生产渲染源）。Phase 2.6 删除 view_messages
-    /// 后，本方法可直接由 Effect::PushSystemNote 取代。
+    /// `pending_v2_notes` 由 `main_loop` 取出并通过
+    /// `state_machine::handle(Event::PushSystemNote)` 路由到
+    /// `state.view`（生产渲染源）。view_messages 维护仅用于 legacy
+    /// 兼容（测试路径），生产渲染已切换到 v2 state.view。
     pub fn push_system_note(&mut self, content: String) {
-        let anchor = self.view_messages.len();
         let vm = MessageViewModel::system(content.clone());
-        self.ephemeral_notes.push((anchor, vm.clone()));
         self.view_messages.push(vm);
         self.pending_v2_notes.push(content);
     }

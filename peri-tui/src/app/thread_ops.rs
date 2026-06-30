@@ -95,11 +95,6 @@ impl App {
             .messages
             .view_messages
             .clear();
-        self.session_mgr
-            .current_mut()
-            .messages
-            .ephemeral_notes
-            .clear();
         self.session_mgr.current_mut().agent.origin_messages = base_msgs.clone();
 
         let mut view_msgs = super::messages_to_view_models(&base_msgs, &self.services.cwd);
@@ -198,11 +193,6 @@ impl App {
             .messages
             .view_messages
             .shrink_to_fit();
-        self.session_mgr
-            .current_mut()
-            .messages
-            .ephemeral_notes
-            .clear();
         self.session_mgr.current_mut().agent.origin_messages.clear();
         self.session_mgr
             .current_mut()

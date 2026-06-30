@@ -44,13 +44,7 @@ impl App {
 
         self.session_mgr.current_mut().agent.origin_messages = messages.clone();
 
-        // P5: Clear ephemeral notes, replace view_messages
-        self.session_mgr
-            .current_mut()
-            .messages
-            .ephemeral_notes
-            .clear();
-
+        // P5: replace view_messages (SystemNote anchor tracking retired in Phase 2.5)
         let view_msgs = vec![MessageViewModel::system(compact_label)];
         self.session_mgr.current_mut().messages.round_start_vm_idx = 0;
         self.apply_rebuild_all(0, view_msgs);
@@ -77,12 +71,7 @@ impl App {
     ) -> (bool, bool, bool) {
         self.session_mgr.current_mut().agent.origin_messages = messages.clone();
 
-        self.session_mgr
-            .current_mut()
-            .messages
-            .ephemeral_notes
-            .clear();
-
+        // P5: replace view_messages (SystemNote anchor tracking retired in Phase 2.5)
         let cwd = self.services.cwd.clone();
         let mut view_msgs = super::messages_to_view_models(&messages, &cwd);
         let label = format!("↩ {summary}");
