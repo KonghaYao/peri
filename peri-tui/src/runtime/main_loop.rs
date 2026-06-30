@@ -262,7 +262,15 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 // keyboard handles Ctrl+C / Esc-during-loading directly.)
                 // ── App-level effects (P3 Integration) ─────────────
                 Effect::ShowNotification(text) => {
-                    app.push_system_note(text);
+                    // v1 path: legacy view_messages (will be removed in Phase 2.6).
+                    app.push_system_note(text.clone());
+                    // v2 path: route through state machine so state.view is
+                    // the single source of truth (Phase 2.4).
+                    let (new_state, _) = crate::state_machine::handle(
+                        state,
+                        crate::state_machine::event::Event::PushSystemNote(text),
+                    );
+                    state = new_state;
                     needs_render = true;
                 }
                 Effect::UpdateConfig { key, value } => {
