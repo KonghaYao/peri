@@ -114,13 +114,12 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #23（P1 #1 修复：handle_interrupted rollback 截断 v2 state.view）<br>
-  <strong>本窗口成果</strong>：2 个本地 commit（均不 push）：<br>
-  · <code>ca122ed5</code> <strong>fix：handle_interrupted 分支 2 截断 v2 state.view</strong>。原代码只截断 v1 view_messages，v2 state.view 仍保留 stale UserBubble + 部分 AssistantBubble（用户感知为"按 Esc 回滚后消息还在"）。设计：不修改 streaming.rs 第 7c 步代码（cron #22 修复太脆弱有回归风险），改用 side-channel pattern：<code>GlobalUiState.pending_view_rewind_to</code> flag，handle_interrupted 设置 → main_loop 消费 → 对 Idle/Streaming.view 执行 truncate。4 个回归测试覆盖：分支 2 设置 flag / 分支 1 不设置 / AssistantBubble-only 也设置 / 无 last_submitted_text 不设置。1063 测试全过（1059 + 4 新增）。<br>
-  · <code>10e0d373</code> <strong>style：clippy nitpick cleanup</strong>。test 中 <code>iter().cloned().collect()</code> 改为 <code>to_vec()</code>。<br>
-  · <strong>3 个未修复 P1 bug 仍待处理</strong>：① AskUser 答案不可见（UX 决策，需 user-in-the-loop）② SM drops TokenUsage/BudgetWarning/Progress/SystemNotification without Render（MED — 需在 State 上存储数据，非仅 emit Render）③ 双通知处理双写（Phase 2.6 债务）<br>
-  <strong>当前状态</strong>：1063 测试全过 · 用户可见的回滚 bug 已修复 · v1/v2 状态一致性进一步收敛<br>
-  <strong>下一步</strong>：① 继续 Phase 2.6 step 7e 子步骤（7e.5 headless.rs / 7e.6 message_area fallback render / 7e.8 headless_test patterns / 7e.9 删除字段）② 或 P1 #3（SM drops status events，需设计 State 上的 status 字段）③ 或 P1 #2（AskUser UX 决策，建议等用户回来）
+  <strong>最后更新</strong>：2026-07-01 cron #24（P1 #2 修复：AskUser 答案通过 PushUserBubble 事件路由到 v2 state.view）<br>
+  <strong>本窗口成果</strong>：1 个本地 commit（不 push）：<br>
+  · <code>a61242b8</code> <strong>fix：AskUser 答案路由到 v2 state.view</strong>。原代码 <code>ask_user_confirm</code> 直接 push 到 v1 <code>MessageState.view_messages</code>，v2 渲染路径不读它 → 用户回答后答案在生产渲染中消失（用户感知为"弹窗逻辑无法正常工作"）。修复镜像既有 <code>push_system_note</code> queue-and-drain 模式：① SM <code>Event</code> 添加 <code>PushUserBubble(String)</code> 变体 ② 4 个 transition（idle/streaming/modal/switching）处理器：push <code>ViewModel::UserBubble</code> 到 <code>state.view</code>（Modal 走 saved_view，不 emit Render，与 PushSystemNote 镜像）③ <code>MessageState</code> 添加 <code>pending_v2_user_bubbles</code> 队列 + drain API ④ <code>ask_user_confirm</code> 调用 <code>push_user_bubble()</code> ⑤ <code>main_loop</code> 在 <code>pending_v2_notes</code> drain 旁并行 drain 并通过 <code>Event::PushUserBubble</code> 路由到 SM。7 个回归测试覆盖 4 个状态变体。1070 测试全过（1063 + 7 新增）。<br>
+  · <strong>2 个未修复 P1 bug 仍待处理</strong>：① SM drops TokenUsage/BudgetWarning/Progress/SystemNotification without Render（MED — 需在 State 上存储数据，非仅 emit Render）② 双通知处理双写（Phase 2.6 债务）<br>
+  <strong>当前状态</strong>：1070 测试全过 · 用户可见的 AskUser 答案消失 bug 已修复 · v1/v2 状态单一化进一步收敛<br>
+  <strong>下一步</strong>：① 继续 Phase 2.6 step 7e 子步骤（7e.5 headless.rs / 7e.6 message_area fallback render / 7e.8 headless_test patterns / 7e.9 删除字段）② 或 P1 #1（SM drops status events，需设计 State 上的 status 字段）③ 或 P1 #2（双写消除，需 v1 路径完全退役）
 </div>
 
 </body>
