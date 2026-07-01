@@ -356,49 +356,20 @@ fn render_session_column(
 fn active_panel_height(
     app: &App,
     screen_height: u16,
-    screen_width: u16,
+    _screen_width: u16,
     v2_panel_height: Option<u16>,
 ) -> u16 {
-    // v2 Modal 面板：用 PanelState::desired_height 的结果，受 60% 上限约束。
+    // v2 Modal 面板/交互弹窗：用 desired_height 的结果，受 60% 上限约束。
     if let Some(h) = v2_panel_height {
         return h.min(screen_height * 3 / 5).max(1);
     }
-
-    // Interaction popups (no longer depend on PanelManager)
-    let has_ask_user = matches!(
-        &app.session_mgr.current().agent.interaction_prompt,
-        Some(crate::app::InteractionPrompt::Questions(_))
-    );
-    let max_h = if has_ask_user {
-        screen_height * 3 / 4
-    } else {
-        screen_height * 3 / 5
-    };
-    let raw = if let Some(crate::app::InteractionPrompt::Approval(p)) =
-        &app.session_mgr.current().agent.interaction_prompt
-    {
-        (p.items.len() as u16 * 2 + 5).max(5)
-    } else if app.global_ui.oauth_prompt.is_some() {
-        9 // 标题1 + 提示1 + URL1 + 空行1 + 输入框1 + 错误1 + 快捷键1 + 边框2
-    } else if let Some(crate::app::InteractionPrompt::Questions(p)) =
-        &app.session_mgr.current().agent.interaction_prompt
-    {
-        let cur = &p.questions[p.active_tab];
-        let panel_width = screen_width.saturating_sub(1) as usize;
-        popups::ask_user_height::ask_user_content_height(&cur.data, panel_width).max(8)
-    } else if let Some(crate::app::InteractionPrompt::Rewind(p)) =
-        &app.session_mgr.current().agent.interaction_prompt
-    {
-        let base = p.items.len() as u16 + 3;
-        let confirm_extra = if p.mode == crate::app::RewindMode::ConfirmRevert {
-            let selected = &p.items[p.cursor];
-            (selected.file_changes.len() as u16 + 3).min(10)
-        } else {
-            0
-        };
-        (base + confirm_extra).max(5)
+    // v1 popup fallback: 仍有少数场景（headless test）未迁移到 v2 handler，
+    // 保守返回 60% 高度，让 legacy popup rendering 路径继续工作。
+    let has_popup = app.session_mgr.current().agent.interaction_prompt.is_some()
+        || app.global_ui.oauth_prompt.is_some();
+    if has_popup {
+        (screen_height * 3 / 5).max(1)
     } else {
         0
-    };
-    raw.min(max_h)
+    }
 }

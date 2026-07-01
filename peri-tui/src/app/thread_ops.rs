@@ -104,9 +104,17 @@ impl App {
             let model = self.services.model_name.clone();
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    match client.load_session(&thread_id_str, &cwd, Some(&model)).await {
-                        Ok(sid) => tracing::info!(session_id = %sid, "open_thread: ACP session synced"),
-                        Err(e) => tracing::warn!(error = %e, "open_thread: ACP session sync failed (compact may not work until first prompt)"),
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        client.load_session(&thread_id_str, &cwd, Some(&model)),
+                    )
+                    .await
+                    {
+                        Ok(Ok(sid)) => tracing::info!(session_id = %sid, "open_thread: ACP session synced"),
+                        Ok(Err(e)) => tracing::warn!(error = %e, "open_thread: ACP session sync failed (compact may not work until first prompt)"),
+                        Err(_elapsed) => {
+                            tracing::warn!("open_thread: ACP session sync timed out after 5s");
+                        }
                     }
                 })
             });
@@ -204,9 +212,17 @@ impl App {
             let model = self.services.model_name.clone();
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    match client.new_session(&cwd, Some(&model)).await {
-                        Ok(sid) => tracing::info!(session_id = %sid, "new_thread: ACP new_session succeeded"),
-                        Err(e) => tracing::warn!(error = %e, "new_thread: ACP new_session failed"),
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        client.new_session(&cwd, Some(&model)),
+                    )
+                    .await
+                    {
+                        Ok(Ok(sid)) => tracing::info!(session_id = %sid, "new_thread: ACP new_session succeeded"),
+                        Ok(Err(e)) => tracing::warn!(error = %e, "new_thread: ACP new_session failed"),
+                        Err(_elapsed) => {
+                            tracing::warn!("new_thread: ACP new_session timed out after 5s");
+                        }
                     }
                 })
             });

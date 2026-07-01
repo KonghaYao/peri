@@ -70,8 +70,8 @@ impl Default for ServiceRegistrySnapshot {
 /// snapshot and produce a list of `PanelEffect` instructions that the state
 /// machine maps to standard `Effect`s.
 pub struct PanelReadContext<'a> {
-    /// Read-only service registry snapshot.
-    pub services: &'a ServiceRegistrySnapshot,
+    /// Read-only service registry snapshot (owned, no unsafe lifetime extension).
+    pub services: ServiceRegistrySnapshot,
     /// Current ViewModel list (read-only).
     pub view_models: &'a [ViewModel],
     /// Current scroll offset in the message area.

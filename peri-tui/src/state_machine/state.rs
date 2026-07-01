@@ -66,6 +66,18 @@ pub trait Handler: Send + std::fmt::Debug {
     }
 }
 
+/// Who owns a keyboard shortcut — the state machine, the keyboard fallback, or
+/// deferred (let fallback decide).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutClaim {
+    /// State machine owns this key. Fallback must not process it.
+    SMOwns,
+    /// Keyboard fallback owns this key. SM must not process it.
+    FallbackOwns,
+    /// Neither definitively owns — let the fallback decide.
+    Defer,
+}
+
 /// Result of a handler key-press. Simplified stub.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HandlerOutput {

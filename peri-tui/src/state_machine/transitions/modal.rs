@@ -197,7 +197,7 @@ fn dispatch_key(state: &mut ModalState, key: KeyEvent) -> DispatchResult {
             STUB_CACHE.with(|cache| {
                 STUB_LC.with(|lc| {
                     let ctx = PanelReadContext {
-                        services: snapshot,
+                        services: snapshot.clone(),
                         view_models: vms,
                         scroll_offset: 0,
                         area: ratatui::layout::Rect::new(0, 0, 0, 0),
@@ -222,7 +222,7 @@ fn dispatch_mouse_tls(
             STUB_CACHE.with(|cache| {
                 STUB_LC.with(|lc| {
                     let ctx = PanelReadContext {
-                        services: snapshot,
+                        services: snapshot.clone(),
                         view_models: vms,
                         scroll_offset: 0,
                         area: ratatui::layout::Rect::new(0, 0, 0, 0),
@@ -244,7 +244,7 @@ fn dispatch_paste_tls(state: &mut ModalState, text: &str) -> DispatchResult {
             STUB_CACHE.with(|cache| {
                 STUB_LC.with(|lc| {
                     let ctx = PanelReadContext {
-                        services: snapshot,
+                        services: snapshot.clone(),
                         view_models: vms,
                         scroll_offset: 0,
                         area: ratatui::layout::Rect::new(0, 0, 0, 0),

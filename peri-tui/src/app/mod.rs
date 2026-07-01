@@ -1,12 +1,4 @@
-// ── Panel Modules ────────────────────────────────────────────────────────────
-pub mod panel_types;
-pub mod setup_wizard;
-pub mod workflow_tracker;
-
-// Panel private modules
-mod panel_ops;
-
-// ── State Management ─────────────────────────────────────────────────────────
+// ── State ─────────────────────────────────────────────────────────────────────
 mod global_ui_state;
 mod service_registry;
 pub use global_ui_state::GlobalUiState;
@@ -24,8 +16,27 @@ pub use at_mention::AtMentionState;
 pub(crate) mod message_state;
 pub use message_state::MessageState;
 
-// ── Agent Communication ──────────────────────────────────────────────────────
+mod chat_session;
+pub use chat_session::ChatSession;
+#[cfg(test)]
+pub(crate) use chat_session::RunningBgAgent;
+
+mod session_metadata;
+pub use session_metadata::SessionMetadata;
+
+mod cron_state;
+pub use cron_state::CronState;
+
+mod langfuse_state;
+pub use langfuse_state::LangfuseState;
+
+mod subagent_status;
+pub use subagent_status::{SessionSubAgentProbe, SubAgentStatus, SubAgentStatusMap};
+
+// ── Agent Ops ──────────────────────────────────────────────────────────────────
 mod agent_comm;
+pub use agent_comm::{AgentComm, RetryStatus};
+
 mod agent_compact;
 mod agent_events_bg;
 mod agent_events_oauth;
@@ -33,53 +44,44 @@ mod agent_ops;
 mod agent_ops_interaction;
 mod agent_render;
 mod agent_submit;
+
+pub mod agent;
+pub use agent::LlmProvider;
+
+pub mod events;
+pub use events::AgentEvent;
+
+mod thread_ops;
+
+// ── UI Interaction ────────────────────────────────────────────────────────────
+pub mod panel_types;
+pub use panel_types::{MutexGroup, PanelKind, PanelScope};
+
+pub mod setup_wizard;
+pub use setup_wizard::SetupWizardPanel;
+
+pub mod workflow_tracker;
+
+// Panel private modules
+mod panel_ops;
+
 mod ask_user_ops;
 mod ask_user_prompt;
 pub use ask_user_prompt::AskUserBatchPrompt;
 
-mod cron_state;
 mod hint_ops;
 pub use hint_ops::SlashHintState;
-mod history_ops;
-mod history_persistence;
+
 mod hitl_ops;
 mod hitl_prompt;
 pub use hitl_prompt::{HitlBatchPrompt, PendingAttachment};
+
+mod oauth_prompt;
+pub use oauth_prompt::OAuthPrompt;
+
 mod rewind_prompt;
 pub use rewind_prompt::{FileChangeInfo, RewindItem, RewindMode, RewindPrompt};
 
-// ── System Infrastructure ────────────────────────────────────────────────────
-mod chat_session;
-mod command_system;
-#[cfg(target_os = "windows")]
-mod ime;
-mod session_metadata;
-pub use chat_session::ChatSession;
-#[cfg(test)]
-pub(crate) use chat_session::RunningBgAgent;
-pub use command_system::CommandSystem;
-#[cfg(target_os = "windows")]
-pub use ime::textarea_cursor_pos;
-pub use session_metadata::SessionMetadata;
-
-mod langfuse_state;
-mod oauth_prompt;
-pub use oauth_prompt::OAuthPrompt;
-mod subagent_status;
-pub use subagent_status::{SessionSubAgentProbe, SubAgentStatus, SubAgentStatusMap};
-mod thread_ops;
-
-// ── Other Modules ─────────────────────────────────────────────────────────────
-pub mod agent;
-pub mod events;
-mod provider;
-pub mod text_selection;
-pub mod tool_display;
-
-// Re-exports
-pub use events::AgentEvent;
-
-/// 统一交互弹窗枚举：同一时刻只允许一种弹窗激活
 mod interaction;
 pub use interaction::InteractionPrompt;
 
@@ -87,17 +89,27 @@ mod edit_utils;
 pub use edit_utils::{build_textarea, ensure_cursor_visible};
 
 mod field_textarea;
+pub use field_textarea::FieldTextarea;
+
+pub mod text_selection;
+pub mod tool_display;
+
+// ── Services ───────────────────────────────────────────────────────────────────
+mod command_system;
+pub use command_system::CommandSystem;
+
+mod history_ops;
+mod history_persistence;
+mod provider;
+
+#[cfg(target_os = "windows")]
+mod ime;
+#[cfg(target_os = "windows")]
+pub use ime::textarea_cursor_pos;
 use std::sync::Arc;
 
-pub use agent::LlmProvider;
-pub use agent_comm::{AgentComm, RetryStatus};
-pub use cron_state::CronState;
-pub use field_textarea::FieldTextarea;
-pub use langfuse_state::LangfuseState;
-pub use panel_types::{MutexGroup, PanelKind, PanelScope};
 use peri_agent::messages::BaseMessage; // P4b: type-dependency
 use peri_middlewares::prelude::HitlDecision; // P4b: type-dependency
-pub use setup_wizard::SetupWizardPanel;
 
 use crate::acp_client::{AcpNotification, AcpTuiClient};
 // Re-export MessageViewModel from ui::message_view

@@ -9,7 +9,6 @@
 //! Design: `peri-tui-architecture.md` §8.3 -- ApplyContext holds terminal +
 //! acp_client + clipboard.  Stateless -- all state lives in the state machine.
 
-use std::collections::HashMap;
 use std::io::{self, Write};
 use std::time::Instant;
 
@@ -18,11 +17,8 @@ use tracing::warn;
 
 use crate::acp_client::AcpTuiClient;
 use crate::app::App;
-use crate::panel::read_context::ServiceRegistrySnapshot;
 use crate::runtime::effect::Effect;
-use crate::state_machine::state::PanelReadContext;
 use crate::state_machine::State;
-use crate::ui;
 
 /// Outcome of applying a single effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,32 +63,17 @@ impl<'a> ApplyContext<'a> {
     /// Execute a single [`Effect`], returning the outcome.
     ///
     /// `state` is the live state machine [`State`] owned by the main loop.
-    /// Input-related effects (TypeChar, DeletePrevChar, ...) mutate the
     /// state's [`InputState`] via the `with_input` helper.
     ///
     /// This is the **only** I/O path in the main loop.  Every side effect
     /// produced by the state machine flows through this method.
-    pub async fn apply(&mut self, effect: Effect, state: &mut State) -> ApplyOutcome {
+    pub async fn apply(&mut self, effect: Effect, _state: &mut State) -> ApplyOutcome {
         // Helper: call `f` on the InputState of the active Idle/Streaming state.
         // Returns effects produced by the InputState method.  No-op on
         // Modal/Switching (input effects should not arrive in those states).
         // Note: effects returned by InputState methods (typically `[Render]`)
         // are intentionally discarded -- the keyboard module already emits
         // `Render` alongside these effects.
-        fn with_input(
-            state: &mut State,
-            f: impl FnOnce(&mut crate::state_machine::input::InputState) -> Vec<Effect>,
-        ) {
-            match state {
-                State::Idle(ref mut idle) => {
-                    let _ = f(&mut idle.input);
-                }
-                State::Streaming(ref mut s) => {
-                    let _ = f(&mut s.input);
-                }
-                _ => {}
-            }
-        }
 
         match effect {
             Effect::Render => {
@@ -239,131 +220,15 @@ impl<'a> ApplyContext<'a> {
 
     /// Unconditionally perform a terminal draw and reset the render timer.
     ///
-    /// If `state` is [`State::Modal(ModalState::Panel(...))`], pre-computes the
-    /// v2 panel height so the legacy layout reserves space, then renders the v2
-    /// panel overlay in that reserved area.
+    /// Delegates to [`crate::render::draw`] which handles v2 state machines,
+    /// panel overlays, and modal interaction rendering.
     pub fn draw_now(
         &mut self,
         app: &mut App,
         last_render: &mut Instant,
         state: &mut crate::state_machine::State,
     ) {
-        use crate::state_machine::{ModalKind, ModalState, State};
-        // Clone view_models before the mutable borrow in the draw closure,
-        // so we can pass them to build_v2_panel_read_context without
-        // conflicting with the `if let State::Modal(..) = state` borrow.
-        let view_models: Vec<peri_acp_types::view_model::ViewModel> = state.view_models().to_vec();
-        // Collect V2 ViewModels for message area rendering:
-        // committed view + current_turn (if streaming).
-        let mut v2_vms: Vec<peri_acp_types::view_model::ViewModel> = view_models.clone();
-        if let State::Streaming(s) = &mut *state {
-            let turn_vms = s.current_turn.view_models().to_vec();
-            if !turn_vms.is_empty() {
-                v2_vms.extend(turn_vms);
-            }
-        }
-        let v2_vms_ref: &[peri_acp_types::view_model::ViewModel] = &v2_vms;
-        // Phase 2.3 step 8 + Phase 2.6：构造 probe 注入：
-        // 1. SubAgent 运行时状态（is_running / total_steps / final_result / ...）
-        // 2. 子内容（child_messages — 由 source_agent_id 路由实时累积）
-        // 子 Agent 文本/工具/未来扩展全部通过 child_messages 权威源注入。
-        let session = app.session_mgr.current();
-        let probe = crate::app::SessionSubAgentProbe::new(session.subagent_status.clone());
-        let status_probe: std::rc::Rc<dyn crate::render::view_render::SubAgentStatusProbe> =
-            std::rc::Rc::new(probe);
-        let draw_result = crate::render::view_render::with_status_probe(status_probe, || {
-            self.terminal.draw(|f| {
-                // Pre-compute v2 modal height (Panel or Interaction) so legacy
-                // layout reserves space. Both kinds expose `desired_height`.
-                let v2_panel_height = match &*state {
-                    State::Modal(ModalState {
-                        kind: ModalKind::Panel(panel),
-                        ..
-                    }) => Some(panel.desired_height(f.area().height, f.area().width)),
-                    State::Modal(ModalState {
-                        kind: ModalKind::Interaction(handler),
-                        ..
-                    }) => Some(handler.desired_height(f.area().height, f.area().width)),
-                    _ => None,
-                };
-                ui::main_ui::render(f, app, v2_panel_height, Some(v2_vms_ref));
-                // v2 Modal overlay: render in the area reserved by the layout.
-                // Both Panel and Interaction variants read panel_area (set by
-                // render_session_column when v2_panel_height is Some).
-                if let State::Modal(ModalState { kind, .. }) = state {
-                    let area = app
-                        .session_mgr
-                        .current()
-                        .ui
-                        .panel_area
-                        .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24));
-                    match kind {
-                        ModalKind::Panel(panel) => {
-                            // Cron #30: refresh cached fields from live App
-                            // before render. Default no-op; caching panels
-                            // (Workflow/Cron/Tasks/ThreadBrowser/Mcp/Plugin)
-                            // override to pull fresh data so the panel doesn't
-                            // show a stale snapshot while open. Cursor/scroll
-                            // state is preserved by each panel's refresh impl.
-                            panel.refresh(app);
-                            panel.render(f, area, &build_v2_panel_read_context(app, &view_models));
-                        }
-                        ModalKind::Interaction(handler) => {
-                            handler.render(f, area);
-                        }
-                    }
-                }
-            })
-        });
-        if let Err(e) = draw_result {
-            warn!(error = %e, "terminal draw failed");
-        }
+        crate::render::draw(state, app, self.terminal);
         *last_render = Instant::now();
-    }
-}
-
-/// Build a [`PanelReadContext`] for v2 panel rendering from live App data.
-///
-/// `view_models` is a pre-cloned snapshot from `state.view_models()` — cloned
-/// before the `terminal.draw()` closure to avoid borrow conflicts with the
-/// `if let State::Modal(..) = state` mutable borrow inside the closure.
-fn build_v2_panel_read_context<'a>(
-    app: &'a App,
-    view_models: &'a [peri_acp_types::view_model::ViewModel],
-) -> PanelReadContext<'a> {
-    use std::sync::LazyLock;
-
-    static EMPTY_CACHE: LazyLock<HashMap<String, serde_json::Value>> = LazyLock::new(HashMap::new);
-
-    // Thread-local snapshot store. Updated each draw tick; referenced within
-    // the terminal.draw() closure via unsafe lifetime extension. Safe because
-    // draws are single-threaded and the reference never escapes the closure.
-    std::thread_local! {
-        static SNAPSHOT: std::cell::RefCell<ServiceRegistrySnapshot> =
-            std::cell::RefCell::new(ServiceRegistrySnapshot::new());
-    }
-
-    let session = app.session_mgr.current();
-
-    // Leak the snapshot into the thread-local so it has 'static lifetime.
-    // SAFETY: SNAPSHOT lives for the lifetime of the main thread. We borrow
-    // it here and the reference does not escape this function's call stack.
-    let services: &'a ServiceRegistrySnapshot = SNAPSHOT.with(|cell| {
-        *cell.borrow_mut() = ServiceRegistrySnapshot::from_app(app);
-        // SAFETY: the reference is valid for the duration of terminal.draw().
-        // We never retain it beyond this function call.
-        unsafe { &*cell.as_ptr() }
-    });
-
-    PanelReadContext {
-        services,
-        view_models,
-        scroll_offset: session.ui.scroll_offset,
-        area: session
-            .ui
-            .panel_area
-            .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24)),
-        lc: &app.services.lc,
-        acp_query_cache: &EMPTY_CACHE,
     }
 }

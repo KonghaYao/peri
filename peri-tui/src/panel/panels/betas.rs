@@ -260,7 +260,7 @@ mod tests {
                     LC.with(|lc| {
                         let lc: &'static crate::i18n::LcRegistry = unsafe { &*(lc as *const _) };
                         PanelReadContext {
-                            services: snapshot,
+                            services: snapshot.clone(),
                             view_models: vms,
                             scroll_offset: 0,
                             area: Rect::new(0, 0, 80, 24),

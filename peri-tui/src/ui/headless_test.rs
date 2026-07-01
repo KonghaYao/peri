@@ -683,20 +683,17 @@ async fn test_spinner_shows_verb_in_status_bar() {
 async fn test_tool_call_widget_renders_completed() {
     let (_app, mut handle) = crate::app::App::new_headless(120, 30).await;
 
-    let vm = crate::app::MessageViewModel::ToolBlock {
-        tool_name: "Bash".to_string(),
-        tool_call_id: "tc_test".to_string(),
-        display_name: "Bash".to_string(),
-        args_display: Some("ls -la".to_string()),
-        content: "file1.txt\nfile2.txt".to_string(),
-        color: crate::ui::theme::SAGE,
+    use peri_acp_types::view_model::{ToolCardData, ViewModel};
+    let vm = ViewModel::ToolCard(ToolCardData {
+        tool_id: "tc_test".into(),
+        tool_name: "Bash".into(),
+        input_summary: "ls -la".into(),
+        output_summary: "file1.txt\nfile2.txt".into(),
         is_error: false,
-        collapsed: false,
-        diff_lines: None,
-        content_hash: 0,
-    };
+        diff: None,
+    });
 
-    let lines = crate::ui::message_render::render_view_model(&vm, Some(1), 80, false); // Render into a visible area for verification
+    let lines = crate::render::view_render::render_v2_vm(&vm, 80, false); // Render into a visible area for verification
     use ratatui::widgets::Paragraph;
     let paragraph = Paragraph::new(lines);
     handle

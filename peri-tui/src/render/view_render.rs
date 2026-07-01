@@ -78,15 +78,15 @@ fn lookup_subagent_status(agent_id: &str) -> Option<SubAgentRenderInfo> {
 
 /// 将单个 V2 ViewModel 转换为 ratatui Line 列表。
 ///
-/// * `width` — 终端可用宽度（当前未使用，为后续宽度感知预留）。
+/// * `width` — 终端可用宽度，用于 markdown 解析时折行。
 /// * `diff_visible` — 用户是否通过 `Ctrl+O` 展开了 diff 视图。
-pub fn render_v2_vm(vm: &ViewModel, _width: usize, diff_visible: bool) -> Vec<Line<'static>> {
+pub fn render_v2_vm(vm: &ViewModel, width: usize, diff_visible: bool) -> Vec<Line<'static>> {
     match vm {
-        ViewModel::UserBubble(data) => render_user_bubble(&data.text),
-        ViewModel::AssistantBubble(data) => render_assistant_bubble(data),
+        ViewModel::UserBubble(data) => render_user_bubble(&data.text, width),
+        ViewModel::AssistantBubble(data) => render_assistant_bubble(data, width),
         ViewModel::ToolCard(data) => render_tool_card(data, diff_visible),
         ViewModel::SystemNote(data) => render_system_note(data),
-        ViewModel::SubAgentGroup(data) => render_subagent_group(data, _width, diff_visible),
+        ViewModel::SubAgentGroup(data) => render_subagent_group(data, width, diff_visible),
         ViewModel::CollapsedGroup(data) => render_collapsed_group(data),
         ViewModel::Divider(data) => render_divider(data),
     }
@@ -94,9 +94,9 @@ pub fn render_v2_vm(vm: &ViewModel, _width: usize, diff_visible: bool) -> Vec<Li
 
 // ── 各变体渲染 ────────────────────────────────────────────────────────────
 
-fn render_user_bubble(text: &str) -> Vec<Line<'static>> {
+fn render_user_bubble(text: &str, width: usize) -> Vec<Line<'static>> {
     let user_bg = theme::USER_BG;
-    let parsed = crate::ui::markdown::parse_markdown_default(text);
+    let parsed = crate::ui::markdown::parse_markdown(text, width);
     let mut lines = Vec::with_capacity(parsed.lines.len() + 1);
     for (i, line) in parsed.lines.iter().enumerate() {
         if i == 0 {
@@ -124,6 +124,7 @@ fn render_user_bubble(text: &str) -> Vec<Line<'static>> {
 
 fn render_assistant_bubble(
     data: &peri_acp_types::view_model::AssistantBubbleData,
+    width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -134,7 +135,7 @@ fn render_assistant_bubble(
 
     // Text body（markdown 解析）
     if !data.text.is_empty() {
-        let parsed = crate::ui::markdown::parse_markdown_default(&data.text);
+        let parsed = crate::ui::markdown::parse_markdown(&data.text, width);
         for line in &parsed.lines {
             lines.push(Line::from(line.spans.clone()));
         }

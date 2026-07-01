@@ -39,6 +39,48 @@ use super::super::state::{IdleState, State, StreamingState};
 use super::enter_modal_from_idle;
 use crate::app::panel_types::PanelKind;
 use crate::runtime::effect::Effect;
+use crate::state_machine::state::ShortcutClaim;
+
+/// Determine whether the state machine or the keyboard fallback owns this
+/// shortcut key when in Idle state.
+///
+/// The SM owns the keys it emits Effects for (Ctrl+T/B/O/P, Ctrl+Shift+T,
+/// BackTab, Enter). All other keys belong to the keyboard fallback.
+pub fn owns_shortcut(
+    key: &KeyEvent,
+    is_slash_command: bool,
+    at_mention_active: bool,
+    slash_hint_active: bool,
+) -> ShortcutClaim {
+    // BackTab: cycle permission mode
+    if matches!(key.code, KeyCode::BackTab) {
+        return ShortcutClaim::SMOwns;
+    }
+
+    // Enter (no Shift/Alt): SM handles submission, EXCEPT when overlays own it
+    if matches!(key.code, KeyCode::Enter)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+    {
+        if is_slash_command || at_mention_active || slash_hint_active {
+            return ShortcutClaim::FallbackOwns;
+        }
+        return ShortcutClaim::SMOwns;
+    }
+
+    let ctrl = key.modifiers.intersects(KeyModifiers::CONTROL);
+    let shift = key.modifiers.intersects(KeyModifiers::SHIFT);
+
+    match key.code {
+        KeyCode::Char('t') if ctrl && shift => ShortcutClaim::SMOwns, // Ctrl+Shift+T
+        KeyCode::Char('t') if ctrl => ShortcutClaim::SMOwns,          // Ctrl+T
+        KeyCode::Char('b') if ctrl => ShortcutClaim::SMOwns,          // Ctrl+B
+        KeyCode::Char('o') if ctrl => ShortcutClaim::SMOwns,          // Ctrl+O
+        KeyCode::Char('p') if ctrl => ShortcutClaim::SMOwns,          // Ctrl+P
+        _ => ShortcutClaim::FallbackOwns,
+    }
+}
 
 /// Idle-state transition entry point.
 pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
@@ -1193,5 +1235,130 @@ mod tests {
             }
             _ => panic!("expected Modal"),
         }
+    }
+
+    // ── owns_shortcut tests ───────────────────────────────────────────────
+    // Phase 2.3: shortcut 决策分散化。验证 Idle 状态下 SM 独占的快捷键
+    // 返回 SMOwns，其他键返回 FallbackOwns。
+
+    #[test]
+    fn test_owns_shortcut_ctrl_t_is_sm_owns() {
+        let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(
+            owns_shortcut(&key, false, false, false),
+            ShortcutClaim::SMOwns
+        );
+    }
+
+    #[test]
+    fn test_owns_shortcut_ctrl_b_is_sm_owns() {
+        let key = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert_eq!(
+            owns_shortcut(&key, false, false, false),
+            ShortcutClaim::SMOwns
+        );
+    }
+
+    #[test]
+    fn test_owns_shortcut_ctrl_o_is_sm_owns() {
+        let key = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert_eq!(
+            owns_shortcut(&key, false, false, false),
+            ShortcutClaim::SMOwns
+        );
+    }
+
+    #[test]
+    fn test_owns_shortcut_ctrl_p_is_sm_owns() {
+        let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert_eq!(
+            owns_shortcut(&key, false, false, false),
+            ShortcutClaim::SMOwns
+        );
+    }
+
+    #[test]
+    fn test_owns_shortcut_ctrl_shift_t_is_sm_owns() {
+        let key = KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            owns_shortcut(&key, false, false, false),
+            ShortcutClaim::SMOwns
+        );
+    }
+
+    #[test]
+    fn test_owns_shortcut_backtab_is_sm_owns() {
+        let key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
+        assert_eq!(
+            owns_shortcut(&key, false, false, false),
+            ShortcutClaim::SMOwns
+        );
+    }
+
+    #[test]
+    fn test_owns_shortcut_enter_is_sm_owns() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            owns_shortcut(&key, false, false, false),
+            ShortcutClaim::SMOwns
+        );
+    }
+
+    #[test]
+    fn test_owns_shortcut_enter_slash_command_is_fallback_owns() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            owns_shortcut(&key, true, false, false),
+            ShortcutClaim::FallbackOwns
+        );
+    }
+
+    #[test]
+    fn test_owns_shortcut_enter_at_mention_is_fallback_owns() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            owns_shortcut(&key, false, true, false),
+            ShortcutClaim::FallbackOwns
+        );
+    }
+
+    #[test]
+    fn test_owns_shortcut_enter_slash_hint_is_fallback_owns() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            owns_shortcut(&key, false, false, true),
+            ShortcutClaim::FallbackOwns
+        );
+    }
+
+    #[test]
+    fn test_owns_shortcut_plain_char_is_fallback_owns() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(
+            owns_shortcut(&key, false, false, false),
+            ShortcutClaim::FallbackOwns
+        );
+    }
+
+    #[test]
+    fn test_owns_shortcut_esc_is_fallback_owns() {
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(
+            owns_shortcut(&key, false, false, false),
+            ShortcutClaim::FallbackOwns
+        );
+    }
+
+    #[test]
+    fn test_owns_shortcut_shift_enter_is_fallback_owns() {
+        // Shift+Enter 插入换行，不应由 SM 提交
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(
+            owns_shortcut(&key, false, false, false),
+            ShortcutClaim::FallbackOwns
+        );
     }
 }
