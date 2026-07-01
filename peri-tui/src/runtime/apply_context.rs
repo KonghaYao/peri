@@ -267,6 +267,13 @@ impl<'a> ApplyContext<'a> {
                         .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24));
                     match kind {
                         ModalKind::Panel(panel) => {
+                            // Cron #30: refresh cached fields from live App
+                            // before render. Default no-op; caching panels
+                            // (Workflow/Cron/Tasks/ThreadBrowser/Mcp/Plugin)
+                            // override to pull fresh data so the panel doesn't
+                            // show a stale snapshot while open. Cursor/scroll
+                            // state is preserved by each panel's refresh impl.
+                            panel.refresh(app);
                             panel.render(f, area, &build_v2_panel_read_context(app, &view_models));
                         }
                         ModalKind::Interaction(handler) => {

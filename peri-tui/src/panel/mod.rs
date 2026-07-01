@@ -74,4 +74,28 @@ pub trait PanelState: Send + std::fmt::Debug {
     fn status_bar_hints(&self, _lc: &LcRegistry) -> Vec<(String, String)> {
         Vec::new()
     }
+
+    /// Refresh cached data from live `App` state. Default: no-op.
+    ///
+    /// Called by `draw_now` before every `render`. Caching panels — those
+    /// that snapshot live data at `from_app` time (Workflow / Cron / Tasks
+    /// / ThreadBrowser / Mcp / Plugin) — override this to pull fresh data
+    /// so the panel doesn't show a stale snapshot while open.
+    ///
+    /// **Cursor / scroll preservation**: refresh must NOT reset cursor
+    /// position or scroll offset — those represent user intent and would
+    /// cause a jarring "jump back to top" every render. Use the panel's
+    /// existing `set_*` methods if they clamp cursors; otherwise manually
+    /// preserve.
+    ///
+    /// **Edit-buffer panels skip**: form-style panels (Model / Login /
+    /// Config) hold user-edit buffers that MUST persist across renders —
+    /// overriding refresh would clobber the user's typing. The default
+    /// no-op is correct for them.
+    ///
+    /// **Cron #30**: prior to this hook, all 7 caching panels showed data
+    /// frozen at open time. WorkflowPanel's progress never advanced; cron
+    /// toggles weren't reflected locally; newly-created sessions didn't
+    /// appear in ThreadBrowser; MCP connection status didn't update.
+    fn refresh(&mut self, _app: &crate::app::App) {}
 }

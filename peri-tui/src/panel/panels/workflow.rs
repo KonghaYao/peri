@@ -121,11 +121,21 @@ impl WorkflowPanel {
     /// and converts them to panel-local DTOs. Returns an empty panel if no
     /// workflow runs are tracked.
     pub fn from_app(app: &crate::app::App) -> Self {
-        let snaps = app.global_ui.workflow_tracker.snapshots();
-        if snaps.is_empty() {
-            return Self::empty();
+        let runs = Self::runs_from_app(app);
+        if runs.is_empty() {
+            Self::empty()
+        } else {
+            Self::new(runs)
         }
-        let runs: Vec<WorkflowRunEntry> = snaps
+    }
+
+    /// Convert live App workflow snapshots to panel-local DTOs.
+    ///
+    /// Cron #30: extracted from `from_app` so `refresh` can reuse the same
+    /// conversion without duplicating logic. Pure function (no state mutation).
+    fn runs_from_app(app: &crate::app::App) -> Vec<WorkflowRunEntry> {
+        let snaps = app.global_ui.workflow_tracker.snapshots();
+        snaps
             .into_iter()
             .map(|s| WorkflowRunEntry {
                 run_id: s.run_id,
@@ -152,8 +162,7 @@ impl WorkflowPanel {
                     })
                     .collect(),
             })
-            .collect();
-        Self::new(runs)
+            .collect()
     }
 
     /// Create a panel from a list of run entries.
@@ -308,6 +317,22 @@ impl WorkflowPanel {
 impl PanelState for WorkflowPanel {
     fn kind(&self) -> PanelKind {
         PanelKind::Workflow
+    }
+
+    /// Cron #30: refresh runs from live workflow_tracker snapshots.
+    ///
+    /// Bug: prior to this hook, WorkflowPanel cached `runs` at `from_app`
+    /// time and never updated while open. Users watching a workflow run saw
+    /// the snapshot from the moment they opened the panel — phase
+    /// transitions, agent token/tool counters, kill/resume status changes
+    /// never appeared until they Esc and reopened. This defeated the
+    /// entire purpose of the "execution progress" panel.
+    ///
+    /// Fix: pull fresh snapshots via `runs_from_app`, hand to `set_runs`
+    /// which preserves `selected_run` (clamped) and re-clamps cursors.
+    fn refresh(&mut self, app: &crate::app::App) {
+        let fresh_runs = Self::runs_from_app(app);
+        self.set_runs(fresh_runs);
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, _ctx: &PanelReadContext) {

@@ -68,9 +68,21 @@ impl CronPanel {
 
     /// Construct a panel from the live `App` state, reading cron tasks.
     pub fn from_app(app: &crate::app::App) -> Self {
+        let tasks = Self::tasks_from_app(app);
+        if tasks.is_empty() {
+            Self::empty()
+        } else {
+            Self::new(tasks)
+        }
+    }
+
+    /// Pull fresh cron tasks from the live scheduler and convert to DTOs.
+    ///
+    /// Cron #30: extracted from `from_app` so `refresh` can reuse the same
+    /// conversion without duplicating the CronTask → CronTaskDto mapping.
+    fn tasks_from_app(app: &crate::app::App) -> Vec<CronTaskDto> {
         use peri_middlewares::cron::CronTask; // P4b: runtime dependency, conversion to DTO
-        let tasks: Vec<CronTaskDto> = app
-            .services
+        app.services
             .cron
             .scheduler
             .lock()
@@ -83,12 +95,7 @@ impl CronPanel {
                 next_fire: t.next_fire.map(|dt| dt.to_rfc3339()),
                 enabled: t.enabled,
             })
-            .collect();
-        if tasks.is_empty() {
-            Self::empty()
-        } else {
-            Self::new(tasks)
-        }
+            .collect()
     }
 
     /// Create a panel from a list of `CronTaskDto`.
@@ -179,6 +186,31 @@ fn truncate_chars(s: &str, max: usize) -> String {
 impl PanelState for CronPanel {
     fn kind(&self) -> PanelKind {
         PanelKind::Cron
+    }
+
+    /// Cron #30: refresh tasks from live scheduler, preserving cursor +
+    /// scroll + confirm_delete state.
+    ///
+    /// Bug: prior to this hook, CronPanel cached `tasks` at `from_app`
+    /// time. The user's own toggle (Enter/Space) and delete (Ctrl+D) emit
+    /// SendToAcp but don't mutate `self.tasks` locally, so the panel kept
+    /// showing pre-action state. Newly created crons (via agent
+    /// conversation) also never appeared. Furthermore, `set_tasks` resets
+    /// cursor/scroll — using it in refresh would cause "jump to top"
+    /// every render.
+    ///
+    /// Fix: pull fresh tasks via `tasks_from_app`, replace `self.tasks`
+    /// in-place. Manually clamp cursor to new bounds (preserves position
+    /// when possible). Don't touch scroll_offset or confirm_delete —
+    /// those represent user intent mid-action.
+    fn refresh(&mut self, app: &crate::app::App) {
+        let fresh_tasks = Self::tasks_from_app(app);
+        self.tasks = fresh_tasks;
+        if self.cursor >= self.tasks.len() && !self.tasks.is_empty() {
+            self.cursor = self.tasks.len().saturating_sub(1);
+        } else if self.tasks.is_empty() {
+            self.cursor = 0;
+        }
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, ctx: &PanelReadContext) {
@@ -794,6 +826,180 @@ mod tests {
         assert_eq!(
             truncate_chars("\u{4f60}\u{597d}\u{4e16}\u{754c}", 2),
             "\u{4f60}\u{597d}..."
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Cron #30: refresh hook regression tests
+    // -----------------------------------------------------------------------
+    //
+    // Bug being prevented: prior to Cron #30, CronPanel cached `tasks` at
+    // `from_app` time. New tasks registered later (via agent conversation
+    // or /cron command) didn't appear until the user closed and reopened
+    // the panel. `refresh` is called by `draw_now` before every render.
+    //
+    // These tests use a live App + scheduler to verify the panel picks up
+    // mutations made AFTER `from_app`.
+
+    /// Helper: build a headless App with no cron tasks.
+    async fn make_empty_app() -> crate::app::App {
+        let (app, _handle) = crate::app::App::new_headless(80, 24).await;
+        app
+    }
+
+    /// Cron #30: refresh must pull tasks registered AFTER `from_app` time.
+    ///
+    /// Simulates: user opens CronPanel (panel is empty), agent registers a
+    /// cron task in the background, next render cycle calls refresh — the
+    /// panel must now show the new task without requiring Esc+reopen.
+    #[tokio::test]
+    async fn test_refresh_pulls_tasks_registered_after_open() {
+        let app = make_empty_app().await;
+        // sanity: app starts with no cron tasks
+        assert!(app.services.cron.scheduler.lock().list_tasks().is_empty());
+
+        // user opens panel before any tasks exist
+        let mut panel = CronPanel::from_app(&app);
+        assert_eq!(panel.total_tasks(), 0);
+
+        // agent registers a task while panel is open
+        let _id1 = app
+            .services
+            .cron
+            .scheduler
+            .lock()
+            .register("*/5 * * * *", "check deploy")
+            .expect("register should succeed");
+
+        // refresh must pick it up
+        panel.refresh(&app);
+        assert_eq!(panel.total_tasks(), 1);
+        assert_eq!(panel.tasks[0].schedule, "*/5 * * * *");
+        assert_eq!(panel.tasks[0].prompt, "check deploy");
+        assert!(panel.tasks[0].enabled);
+    }
+
+    /// Cron #30: refresh must preserve cursor when it's still in bounds.
+    ///
+    /// Simulates: user opens CronPanel with 2 tasks, moves cursor to task
+    /// #2, agent registers a 3rd task — refresh must keep cursor at #2
+    /// (the user's selection), not reset to 0.
+    #[tokio::test]
+    async fn test_refresh_preserves_cursor_when_in_bounds() {
+        let app = make_empty_app().await;
+        let _id1 = app
+            .services
+            .cron
+            .scheduler
+            .lock()
+            .register("*/5 * * * *", "task one")
+            .unwrap();
+        let _id2 = app
+            .services
+            .cron
+            .scheduler
+            .lock()
+            .register("0 * * * *", "task two")
+            .unwrap();
+
+        let mut panel = CronPanel::from_app(&app);
+        assert_eq!(panel.total_tasks(), 2);
+
+        // user moves cursor to task #2 (index 1)
+        panel.cursor = 1;
+        let cursor_before = panel.cursor;
+
+        // refresh with same data — cursor must be preserved
+        panel.refresh(&app);
+        assert_eq!(panel.cursor, cursor_before, "cursor must be preserved");
+        assert_eq!(panel.total_tasks(), 2);
+    }
+
+    /// Cron #30: refresh must clamp cursor when tasks shrink below cursor.
+    ///
+    /// Simulates: user opens CronPanel with 3 tasks, cursor on task #3,
+    /// agent removes task #3 via /cron delete — refresh must clamp cursor
+    /// to the last available task (not panic, not stay at invalid index).
+    #[tokio::test]
+    async fn test_refresh_clamps_cursor_when_tasks_shrink() {
+        let app = make_empty_app().await;
+        let id1 = app
+            .services
+            .cron
+            .scheduler
+            .lock()
+            .register("*/5 * * * *", "task one")
+            .unwrap();
+        let _id2 = app
+            .services
+            .cron
+            .scheduler
+            .lock()
+            .register("0 * * * *", "task two")
+            .unwrap();
+        let id3 = app
+            .services
+            .cron
+            .scheduler
+            .lock()
+            .register("0 0 * * *", "task three")
+            .unwrap();
+
+        let mut panel = CronPanel::from_app(&app);
+        assert_eq!(panel.total_tasks(), 3);
+
+        // user moves cursor to task #3 (index 2)
+        panel.cursor = 2;
+
+        // task #3 is removed externally (simulating /cron delete or agent action)
+        let removed = app.services.cron.scheduler.lock().remove(&id3);
+        assert!(removed);
+        // also remove id1 to verify the clamp uses NEW last index, not the old one
+        app.services.cron.scheduler.lock().remove(&id1);
+        // remaining tasks: [id2] (1 task, valid index = 0)
+
+        // refresh must clamp cursor to 0 (only 1 task left)
+        panel.refresh(&app);
+        assert_eq!(panel.total_tasks(), 1);
+        assert_eq!(
+            panel.cursor, 0,
+            "cursor must be clamped to last valid index after task removal"
+        );
+    }
+
+    /// Cron #30: refresh must NOT reset scroll_offset or confirm_delete.
+    ///
+    /// Simulates: user is mid-delete-confirmation (Ctrl+D pressed), agent
+    /// state updates trigger a refresh — refresh must preserve the
+    /// confirm_delete flag so the user's intent isn't lost.
+    #[tokio::test]
+    async fn test_refresh_preserves_confirm_delete_state() {
+        let app = make_empty_app().await;
+        let _id1 = app
+            .services
+            .cron
+            .scheduler
+            .lock()
+            .register("*/5 * * * *", "task one")
+            .unwrap();
+
+        let mut panel = CronPanel::from_app(&app);
+
+        // user pressed Ctrl+D, entered confirm-delete mode
+        panel.confirm_delete = true;
+        panel.scroll_offset = 5;
+
+        // refresh with same data
+        panel.refresh(&app);
+
+        // confirm_delete + scroll_offset must be preserved (user intent)
+        assert!(
+            panel.confirm_delete,
+            "confirm_delete must be preserved across refresh (user mid-action)"
+        );
+        assert_eq!(
+            panel.scroll_offset, 5,
+            "scroll_offset must be preserved across refresh"
         );
     }
 }

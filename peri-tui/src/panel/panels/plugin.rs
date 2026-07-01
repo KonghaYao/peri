@@ -278,7 +278,20 @@ impl PluginPanel {
     /// Reads loaded plugin data from `app.services.plugin_data` (if available)
     /// and converts `LoadedPlugin` runtime types to panel-local `PluginEntry` DTOs.
     pub fn from_app(app: &crate::app::App) -> Self {
-        let entries = match &app.services.plugin_data {
+        let entries = Self::entries_from_app(app);
+        if entries.is_empty() {
+            Self::empty()
+        } else {
+            Self::new(entries)
+        }
+    }
+
+    /// Pull fresh plugin entries from live plugin_data, convert to DTOs.
+    ///
+    /// Cron #30: extracted from `from_app` so `refresh` can reuse the
+    /// conversion without duplicating the LoadedPlugin → PluginEntry mapping.
+    fn entries_from_app(app: &crate::app::App) -> Vec<PluginEntry> {
+        match &app.services.plugin_data {
             Some(data) => data
                 .plugins
                 .iter()
@@ -296,11 +309,6 @@ impl PluginPanel {
                 })
                 .collect(),
             None => Vec::new(),
-        };
-        if entries.is_empty() {
-            Self::empty()
-        } else {
-            Self::new(entries)
         }
     }
 
@@ -1136,6 +1144,27 @@ impl std::fmt::Debug for PluginPanel {
 impl PanelState for PluginPanel {
     fn kind(&self) -> PanelKind {
         PanelKind::Plugin
+    }
+
+    /// Cron #30: refresh installed plugin entries from live plugin_data,
+    /// preserving cursor + scroll + view + search_field + confirm_delete.
+    ///
+    /// Bug: prior to this hook, PluginPanel cached `entries` at
+    /// `from_app`. If plugin data was reloaded while the panel was open
+    /// (user runs /plugin install elsewhere, marketplace refresh
+    /// completes), the panel kept showing the old list.
+    ///
+    /// Fix: pull fresh entries via `entries_from_app`, replace in place.
+    /// Clamp cursor to new bounds. Don't touch search_field, scroll_offset,
+    /// view, or confirm_delete — those represent user intent.
+    fn refresh(&mut self, app: &crate::app::App) {
+        let fresh_entries = Self::entries_from_app(app);
+        self.entries = fresh_entries;
+        if self.cursor >= self.entries.len() && !self.entries.is_empty() {
+            self.cursor = self.entries.len().saturating_sub(1);
+        } else if self.entries.is_empty() {
+            self.cursor = 0;
+        }
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, _ctx: &PanelReadContext) {

@@ -62,6 +62,25 @@ impl PanelState for StatusPanel {
         PanelKind::Status
     }
 
+    /// Cron #30: refresh provider/model name from live services.
+    ///
+    /// Bug: prior to this hook, StatusPanel cached `provider_name` +
+    /// `model_name` at `from_app` time. If the user opened Status, then
+    /// hit Ctrl+T (cycle model) or Ctrl+Shift+T (cycle provider) while
+    /// the panel was open, the panel continued to display the old values.
+    ///
+    /// Fix: pull fresh values from `app.services`. Cursor (active_tab)
+    /// is preserved — refresh only updates the data, not the user's tab
+    /// selection.
+    ///
+    /// Note: cost/context numbers are still hardcoded to 'status-empty-data'
+    /// placeholder (status.rs render). Extending ServiceRegistrySnapshot
+    /// with current-session token_tracker data is a separate future task.
+    fn refresh(&mut self, app: &crate::app::App) {
+        self.provider_name = app.services.provider_name.clone();
+        self.model_name = app.services.model_name.clone();
+    }
+
     fn render(&mut self, f: &mut Frame, area: Rect, ctx: &PanelReadContext) {
         let lc = ctx.lc;
 

@@ -162,7 +162,20 @@ impl McpPanel {
     /// Reads MCP server info from `app.services.mcp_pool` (if available) and
     /// converts `ServerInfo` runtime types to panel-local `McpServerEntry` DTOs.
     pub fn from_app(app: &crate::app::App) -> Self {
-        let servers = match &app.services.mcp_pool {
+        let servers = Self::servers_from_app(app);
+        if servers.is_empty() {
+            Self::empty()
+        } else {
+            Self::new(servers)
+        }
+    }
+
+    /// Pull fresh MCP server info from the live pool, convert to DTOs.
+    ///
+    /// Cron #30: extracted from `from_app` so `refresh` can reuse the
+    /// conversion without duplicating the ServerInfo → McpServerEntry mapping.
+    fn servers_from_app(app: &crate::app::App) -> Vec<McpServerEntry> {
+        match &app.services.mcp_pool {
             Some(pool) => {
                 use peri_middlewares::mcp::{ClientStatus, ConfigSource, OAuthStatus};
                 pool.server_infos()
@@ -195,11 +208,6 @@ impl McpPanel {
                     .collect()
             }
             None => Vec::new(),
-        };
-        if servers.is_empty() {
-            Self::empty()
-        } else {
-            Self::new(servers)
         }
     }
 
@@ -385,6 +393,46 @@ fn detail_line<'a>(label_width: usize, label: &str, value: &str, value_style: St
 impl PanelState for McpPanel {
     fn kind(&self) -> PanelKind {
         PanelKind::Mcp
+    }
+
+    /// Cron #30: refresh MCP server list from live pool, preserving
+    /// cursor + scroll + view + confirm_delete state.
+    ///
+    /// Bug: prior to this hook, McpPanel cached `servers` at `from_app`.
+    /// MCP connection state is asynchronous — clients connect/disconnect/
+    /// reconnect in the background. A user who opened McpPanel to
+    /// diagnose a connection problem saw the status from moment of open
+    /// and had to Esc+reopen to refresh.
+    ///
+    /// Fix: pull fresh server info via `servers_from_app`, sort+replace
+    /// in place. If in ServerDetail view and the server no longer exists,
+    /// fall back to ServerList (mirrors set_servers behavior). Don't
+    /// touch cursor/scroll_offset/confirm_delete unless forced by view
+    /// fallback.
+    fn refresh(&mut self, app: &crate::app::App) {
+        let fresh_servers = Self::servers_from_app(app);
+        // Sort same way as set_servers (project first, then name)
+        let mut sorted = fresh_servers;
+        sorted.sort_by(|a, b| {
+            let a_is_project = a.source == "project";
+            let b_is_project = b.source == "project";
+            b_is_project
+                .cmp(&a_is_project)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        self.servers = sorted;
+        // Clamp cursor to bounds
+        if self.cursor >= self.servers.len() && !self.servers.is_empty() {
+            self.cursor = self.servers.len().saturating_sub(1);
+        } else if self.servers.is_empty() {
+            self.cursor = 0;
+        }
+        // If in detail view and server is gone, fall back to list
+        if let McpView::ServerDetail { server_name, .. } = &self.view {
+            if !self.servers.iter().any(|s| &s.name == server_name) {
+                self.view = McpView::ServerList;
+            }
+        }
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, ctx: &PanelReadContext) {

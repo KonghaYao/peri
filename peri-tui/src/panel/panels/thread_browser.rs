@@ -91,6 +91,25 @@ impl ThreadBrowserPanel {
 
     /// Create a panel from live App data (thread_store + CWD).
     pub fn from_app(app: &crate::app::App) -> Self {
+        let (filtered, branch, current_thread_id) = Self::data_from_app(app);
+        Self::new(filtered, current_thread_id.as_deref(), branch)
+    }
+
+    /// Pull fresh thread list, git branch, and current thread ID from live App.
+    ///
+    /// Cron #30: extracted from `from_app` so `refresh` can reuse the same
+    /// data fetch without duplicating the block_in_place / git spawn logic.
+    ///
+    /// Returns (filtered_threads, git_branch, current_thread_id) — caller
+    /// decides whether to construct a fresh panel (from_app) or update
+    /// entries in place (refresh).
+    fn data_from_app(
+        app: &crate::app::App,
+    ) -> (
+        Vec<peri_agent::thread::ThreadMeta>,
+        Option<String>,
+        Option<String>,
+    ) {
         let store = app.services.thread_store.clone();
         let cwd = app.services.cwd.clone();
         // Load threads synchronously. In the TUI main loop this is called
@@ -113,8 +132,13 @@ impl ThreadBrowserPanel {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty());
-        let current_thread_id = app.session_mgr.current().current_thread_id.as_deref();
-        Self::new(filtered, current_thread_id, branch)
+        let current_thread_id = app
+            .session_mgr
+            .current()
+            .current_thread_id
+            .as_deref()
+            .map(|s| s.to_string());
+        (filtered, branch, current_thread_id)
     }
 
     /// Create a panel from a list of `ThreadMeta`.
@@ -288,6 +312,40 @@ fn format_relative_time(lc: &crate::i18n::LcRegistry, dt: &chrono::DateTime<Utc>
 impl PanelState for ThreadBrowserPanel {
     fn kind(&self) -> PanelKind {
         PanelKind::ThreadBrowser
+    }
+
+    /// Cron #30: refresh thread list from live store, preserving cursor +
+    /// scroll + search state.
+    ///
+    /// Bug: prior to this hook, ThreadBrowserPanel cached `entries` at
+    /// `from_app` time. Newly-created sessions (via /clear, /new, or
+    /// workflow/subagent thread creation) didn't appear until user
+    /// reopened the panel. The `is_current` marker also went stale
+    /// across a session switch performed from inside the panel.
+    ///
+    /// Fix: pull fresh (threads, branch, current_thread_id) via
+    /// `data_from_app`, replace `entries` + `branch` in place, re-mark
+    /// is_current per entry, re-apply filter. Cursor is clamped to new
+    /// filtered length. search_query / search_focused / scroll_offset
+    /// are preserved — they represent user intent mid-search.
+    fn refresh(&mut self, app: &crate::app::App) {
+        let (threads, branch, current_thread_id) = Self::data_from_app(app);
+        self.branch = branch;
+        let current_id = current_thread_id.as_deref();
+        self.entries = threads
+            .into_iter()
+            .map(|meta| {
+                let is_current = current_id == Some(&meta.id);
+                ThreadEntry { meta, is_current }
+            })
+            .collect();
+        self.refresh_filter();
+        let total = self.total_filtered();
+        if total == 0 {
+            self.cursor = 0;
+        } else if self.cursor >= total {
+            self.cursor = total.saturating_sub(1);
+        }
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, ctx: &PanelReadContext) {

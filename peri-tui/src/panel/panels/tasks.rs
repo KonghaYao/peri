@@ -71,9 +71,21 @@ impl TasksPanel {
     /// Reads cron tasks from `app.services.cron.scheduler` and converts
     /// `CronTask` runtime types to panel-local `CronTaskDto` DTOs.
     pub fn from_app(app: &crate::app::App) -> Self {
+        let tasks = Self::tasks_from_app(app);
+        if tasks.is_empty() {
+            Self::empty()
+        } else {
+            Self::new(tasks)
+        }
+    }
+
+    /// Pull fresh cron tasks from the live scheduler, convert to DTOs.
+    ///
+    /// Cron #30: extracted from `from_app` so `refresh` can reuse the
+    /// conversion without duplicating the CronTask → CronTaskDto mapping.
+    fn tasks_from_app(app: &crate::app::App) -> Vec<CronTaskDto> {
         use peri_middlewares::cron::CronTask; // P4b: runtime dependency, conversion to DTO
-        let tasks: Vec<CronTaskDto> = app
-            .services
+        app.services
             .cron
             .scheduler
             .lock()
@@ -86,12 +98,7 @@ impl TasksPanel {
                 next_fire: t.next_fire.map(|dt| dt.to_rfc3339()),
                 enabled: t.enabled,
             })
-            .collect();
-        if tasks.is_empty() {
-            Self::empty()
-        } else {
-            Self::new(tasks)
-        }
+            .collect()
     }
 
     /// Create a panel from a list of `CronTaskDto`.
@@ -182,6 +189,27 @@ fn truncate_chars(s: &str, max: usize) -> String {
 impl PanelState for TasksPanel {
     fn kind(&self) -> PanelKind {
         PanelKind::Tasks
+    }
+
+    /// Cron #30: refresh tasks from live scheduler, preserving cursor +
+    /// scroll + confirm_delete state.
+    ///
+    /// Bug: same class as CronPanel — TasksPanel cached `tasks` at
+    /// `from_app` and never refreshed while open. Newly-created cron
+    /// tasks (via agent conversation, /cron command, etc.) didn't appear
+    /// until user closed and reopened the panel.
+    ///
+    /// Fix: pull fresh tasks via `tasks_from_app`, replace in-place.
+    /// Clamp cursor to new bounds (preserves position when possible).
+    /// Don't touch scroll_offset or confirm_delete.
+    fn refresh(&mut self, app: &crate::app::App) {
+        let fresh_tasks = Self::tasks_from_app(app);
+        self.tasks = fresh_tasks;
+        if self.cursor >= self.tasks.len() && !self.tasks.is_empty() {
+            self.cursor = self.tasks.len().saturating_sub(1);
+        } else if self.tasks.is_empty() {
+            self.cursor = 0;
+        }
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, ctx: &PanelReadContext) {
