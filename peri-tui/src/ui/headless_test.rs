@@ -35,25 +35,24 @@ async fn test_assistant_chunk_renders() {
 #[tokio::test]
 async fn test_tool_call_renders() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
-    app.push_agent_event(AgentEvent::ToolStart {
-        tool_call_id: "t1".into(),
-        name: "Read".into(),
-        display: "ReadFile".into(),
-        args: "src/main.rs".into(),
-        input: serde_json::json!({"path": "src/main.rs"}),
-        source_agent_id: None,
-    });
-    app.process_pending_events();
+    // Cron #43: ToolStart 不再写 v1 view_messages（生产读 v2 state.view）。
+    // 直接 seed apply_add_message(ToolBlock) 测试渲染管线。
+    app.apply_add_message(MessageViewModel::tool_block(
+        "Read".into(),
+        "ReadFile src/main.rs".into(),
+        None,
+        false,
+    ));
     handle.wait_for_render().await;
     handle
         .terminal
         .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
-    // ToolStart 通过 Pipeline 创建 ToolBlock，display_name 为 format_tool_name 的结果
+    // ToolBlock 通过 apply_add_message 注入，display 在 header 中
     let has_tool = snap
         .iter()
-        .any(|l| l.contains("Read") || l.contains("Read"));
+        .any(|l| l.contains("Read") || l.contains("ReadFile"));
     assert!(has_tool, "应显示工具调用块，实际内容:\n{}", snap.join("\n"));
 }
 
@@ -96,16 +95,14 @@ async fn test_user_message_renders() {
 async fn test_tool_call_message_visible_when_toggled() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // 使用 ToolStart 事件添加工具调用
-    app.push_agent_event(AgentEvent::ToolStart {
-        tool_call_id: "tc1".into(),
-        name: "Bash".into(),
-        display: "Bash".into(),
-        args: "ls".into(),
-        input: serde_json::json!({"command": "ls"}),
-        source_agent_id: None,
-    });
-    app.process_pending_events();
+    // Cron #43: ToolStart 不再写 v1 view_messages（生产读 v2 state.view）。
+    // 直接 seed apply_add_message(ToolBlock) 测试 toggle 折叠管线。
+    app.apply_add_message(MessageViewModel::tool_block(
+        "Bash".into(),
+        "Shell".into(),
+        Some("ls".into()),
+        false,
+    ));
     handle.wait_for_render().await;
 
     // toggle_collapsed_messages 发送 ToggleToolMessages → 渲染线程 rebuild_all → notify
@@ -118,7 +115,7 @@ async fn test_tool_call_message_visible_when_toggled() {
         .unwrap();
 
     let snap = handle.snapshot();
-    // ToolStart 创建的 ToolBlock，display_name 为 format_tool_name 的结果
+    // ToolBlock display 字段为 "Shell"，由 apply_add_message 注入
     let has_tool_call_text = snap
         .iter()
         .any(|l| l.contains("Shell") || l.contains("Bash"));
@@ -204,16 +201,14 @@ async fn test_tool_call_without_assistant_chunk_no_bubble() {
     // 模拟 AI 只调用工具不输出文本的场景
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // 直接发送 ToolStart 事件（无 AssistantChunk）
-    app.push_agent_event(AgentEvent::ToolStart {
-        tool_call_id: "tc1".into(),
-        name: "Bash".into(),
-        display: "Bash".into(),
-        args: "ls".into(),
-        input: serde_json::json!({"command": "ls"}),
-        source_agent_id: None,
-    });
-    app.process_pending_events();
+    // Cron #43: ToolStart 不再写 v1 view_messages（生产读 v2 state.view）。
+    // 直接 seed apply_add_message(ToolBlock)，模拟「只工具无文本」场景。
+    app.apply_add_message(MessageViewModel::tool_block(
+        "Bash".into(),
+        "Bash".into(),
+        Some("ls".into()),
+        false,
+    ));
     handle.wait_for_render().await;
 
     handle
@@ -1040,15 +1035,14 @@ async fn test_tool_then_text_preserves_tool_block() {
     use peri_agent::messages::BaseMessage;
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    app.push_agent_event(AgentEvent::ToolStart {
-        tool_call_id: "tc1".into(),
-        name: "Bash".into(),
-        display: "Shell".into(),
-        args: "ls".into(),
-        input: serde_json::json!({"command": "ls"}),
-        source_agent_id: None,
-    });
-    app.process_pending_events();
+    // Cron #43: ToolStart 不再写 v1 view_messages（生产读 v2 state.view）。
+    // 直接 seed apply_add_message(ToolBlock)，紧跟 AI 回复，验证两者共存。
+    app.apply_add_message(MessageViewModel::tool_block(
+        "Bash".into(),
+        "Shell".into(),
+        Some("ls".into()),
+        false,
+    ));
     // P5: AssistantChunk is no-op, push AI VM directly
     app.apply_add_message(MessageViewModel::from_base_message(
         &BaseMessage::ai("result is here"),
@@ -2152,7 +2146,8 @@ async fn test_source_agent_id_routes_tool_to_child_messages() {
 
 #[tokio::test]
 async fn test_source_agent_id_none_falls_back_to_main_stream() {
-    // source_agent_id = None（主 Agent）→ ToolBlock 应进入 view_messages 主消息流
+    // Cron #43: source_agent_id = None（主 Agent）→ 不路由到 SubAgent
+    // （此前断言 view_messages 含 ToolBlock；退役 v1 push 后改断言语义）
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     app.push_agent_event(AgentEvent::ToolStart {
@@ -2165,26 +2160,34 @@ async fn test_source_agent_id_none_falls_back_to_main_stream() {
     });
     app.process_pending_events();
 
+    // Cron #43 防回归：v1 view_messages 不应被写入（生产读 v2 state.view）
     let view_messages = &app.session_mgr.current().messages.view_messages;
     let has_tool_block = view_messages
         .iter()
         .any(|vm| matches!(vm, MessageViewModel::ToolBlock { .. }));
     assert!(
-        has_tool_block,
-        "source_agent_id=None 的 ToolStart 应进入 view_messages 主消息流"
+        !has_tool_block,
+        "Cron #43: source_agent_id=None 的 ToolStart 不应写入 v1 view_messages (生产读 v2 state.view)"
     );
 
-    // 同时，SubAgentStatusMap 应为空（无 SubAgent 启动）
+    // 同时，SubAgentStatusMap 应为空（无 SubAgent 启动）— 这是实际的语义断言
     assert!(
         app.session_mgr.current().subagent_status.is_empty(),
         "无 SubAgent 启动时 status map 应为空"
+    );
+
+    // 验证 spinner 状态进入 ToolUse 模式（load-bearing UI 反馈，未被退休）
+    assert_eq!(
+        *app.session_mgr.current().spinner_state.mode(),
+        peri_widgets::SpinnerMode::ToolUse,
+        "ToolStart 应把 spinner 切换到 ToolUse 模式"
     );
 }
 
 #[tokio::test]
 async fn test_source_agent_id_unknown_falls_back_to_main_stream() {
-    // source_agent_id 不匹配任何已启动的 SubAgent → fallback 到主消息流
-    // （避免事件到达顺序异常导致 tool 永远丢失）
+    // Cron #43: source_agent_id 不匹配任何已启动的 SubAgent → 不创建 SubAgent 条目
+    // （此前断言 view_messages 含 ToolBlock；退役 v1 push 后改断言语义）
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     app.push_agent_event(AgentEvent::ToolStart {
@@ -2197,13 +2200,20 @@ async fn test_source_agent_id_unknown_falls_back_to_main_stream() {
     });
     app.process_pending_events();
 
+    // Cron #43 防回归：v1 view_messages 不应被写入
     let view_messages = &app.session_mgr.current().messages.view_messages;
     let has_tool_block = view_messages
         .iter()
         .any(|vm| matches!(vm, MessageViewModel::ToolBlock { .. }));
     assert!(
-        has_tool_block,
-        "source_agent_id 不匹配时 ToolStart 应 fallback 到主消息流"
+        !has_tool_block,
+        "Cron #43: source_agent_id 不匹配时 ToolStart 不应写入 v1 view_messages"
+    );
+
+    // orphan source_agent_id 不应创建 SubAgentStatus 条目
+    assert!(
+        app.session_mgr.current().subagent_status.is_empty(),
+        "orphan source_agent_id 不应创建 SubAgent 条目"
     );
 }
 

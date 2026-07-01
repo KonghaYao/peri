@@ -20,6 +20,13 @@ impl App {
     }
 
     /// P5: Direct VM push without PipelineAction indirection.
+    ///
+    /// Cron #43 (Phase 2.6 step 7e.6 + Bundle 2 item 1): all production
+    /// callers retired. Sole remaining users are test fixtures in
+    /// `headless_test.rs` and lifecycle test module (seed view_messages
+    /// for assertion setup). Will be deleted together with the
+    /// `view_messages` field in Phase 2.6 step 7e.9.
+    #[cfg(test)]
     pub(crate) fn apply_add_message(&mut self, vm: MessageViewModel) {
         let session = self.session_mgr.current_mut();
         session.messages.view_messages.push(vm);

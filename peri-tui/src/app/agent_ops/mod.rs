@@ -206,11 +206,19 @@ impl App {
                     self.request_rebuild();
                     return (true, false, false);
                 }
-                // 主 Agent 路径：保留 v1 view_messages 累积（向后兼容）。
-                // P5: No pipeline — create ToolBlock directly
-                let header = format!("{} {}", display, args);
-                let tool_vm = MessageViewModel::tool_block(name.clone(), header, None, false);
-                self.apply_add_message(tool_vm);
+                // Cron #43 (Phase 2.6 step 7e.6 + Bundle 2 item 1): retired
+                // apply_add_message(tool_vm) for main-agent ToolStart. ACP
+                // sends the same ExecutorEvent::ToolStart via BOTH peri/agent_event
+                // (v1, this path) AND peri/unstable-event "tool-started" (v2 SM).
+                // The v2 SM pushes a ToolCard to current_turn on "tool-started",
+                // which becomes part of state.view_models() via ViewCommit.
+                // Production render reads v2 state.view exclusively — the v1
+                // apply_add_message push was pure dead code.
+                //
+                // Spinner updates above (retry_status = None, agent_replied,
+                // tool_call_count++, spinner_state.set_mode/set_verb) are still
+                // load-bearing for the "Reading path..." / "Writing file..."
+                // spinner display during tool execution.
                 self.request_rebuild();
                 (true, false, false)
             }
@@ -222,7 +230,7 @@ impl App {
                 source_agent_id,
             } => {
                 // Phase 2.6: 优先在 SubAgentStatus.child_messages 中更新 ToolCard
-                // （与 ToolStart 路由配对）。匹配成功则跳过 view_messages 查找。
+                // （与 ToolStart 路由配对）。匹配成功则跳过后续 fallback。
                 if let Some(src) = source_agent_id.as_deref() {
                     if self
                         .session_mgr
@@ -233,58 +241,35 @@ impl App {
                         self.request_rebuild();
                         return (true, false, false);
                     }
-                }
-                // 主 Agent 路径或 SubAgent 路由失败时的 fallback
-                let session = self.session_mgr.current_mut();
-                let mut found = false;
-                for vm in &mut session.messages.view_messages {
-                    if let MessageViewModel::ToolBlock {
-                        tool_call_id: vm_tc_id,
-                        content,
-                        collapsed,
-                        is_error: vm_is_error,
-                        ..
-                    } = vm
-                    {
-                        if vm_tc_id == &tool_call_id {
-                            *content = output.clone();
-                            *collapsed = false; // auto-expand on completion
-                            *vm_is_error = is_error;
-                            vm.recompute_hash();
-                            found = true;
-                            break;
-                        }
+                    // SubAgent 路由失败 fallback：source_agent_id 匹配的 SubAgent
+                    // 存在，但 ToolStart 未路由（race condition）或已被 evict
+                    // （child_messages 200-cap FIFO）。仍累积 output-only ToolCard
+                    // 到 child_messages 而非主消息流，保持子 Agent 内容隔离。
+                    let tool_card = peri_acp_types::view_model::ViewModel::ToolCard(
+                        peri_acp_types::view_model::ToolCardData {
+                            tool_id: tool_call_id.clone(),
+                            tool_name: name.clone(),
+                            input_summary: String::new(),
+                            output_summary: output.clone(),
+                            is_error,
+                            diff: None,
+                        },
+                    );
+                    let session = self.session_mgr.current_mut();
+                    if session.subagent_status.append_child_message(src, tool_card) {
+                        session.messages.message_cache = None;
                     }
                 }
-                if !found {
-                    // 若 source_agent_id 匹配 SubAgent（但 ToolStart 未路由 / 已被 evict），
-                    // 仍然累积到 child_messages 而非主消息流（保持子 Agent 内容隔离）。
-                    if let Some(src) = source_agent_id.as_deref() {
-                        let tool_card = peri_acp_types::view_model::ViewModel::ToolCard(
-                            peri_acp_types::view_model::ToolCardData {
-                                tool_id: tool_call_id.clone(),
-                                tool_name: name.clone(),
-                                input_summary: String::new(),
-                                output_summary: output.clone(),
-                                is_error,
-                                diff: None,
-                            },
-                        );
-                        if session.subagent_status.append_child_message(src, tool_card) {
-                            session.messages.message_cache = None;
-                            found = true;
-                        }
-                    }
-                }
-                if !found {
-                    let mut vm =
-                        MessageViewModel::tool_block(name.clone(), output.clone(), None, is_error);
-                    vm.recompute_hash();
-                    session.messages.view_messages.push(vm);
-                    // Invalidate render cache — view_messages mutated.
-                    session.messages.message_cache = None;
-                }
-                let _ = session;
+                // Cron #43 (Phase 2.6 step 7e.6 + Bundle 2 item 1): retired
+                // v1 view_messages scan-and-update + v1 push fallback. ACP
+                // sends the same ExecutorEvent::ToolEnd via BOTH peri/agent_event
+                // (v1, this path) AND peri/unstable-event "tool-ended" (v2 SM).
+                // The v2 SM updates the matching ToolCard in current_turn on
+                // "tool-ended". Production render reads v2 state.view
+                // exclusively — the v1 scan + push were pure dead code.
+                //
+                // For source_agent_id=None (main agent) paths, no SubAgent
+                // routing is attempted — the v2 SM is the sole handler.
                 self.request_rebuild();
                 (true, false, false)
             }
