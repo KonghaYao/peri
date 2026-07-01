@@ -114,24 +114,20 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #44（Phase 2.6 step 7e.8 audit + TurnInterrupted Render fix：审计发现 <code>state_machine/transitions/streaming.rs:108 TurnInterrupted</code> 处理器返回 <code>Vec::new()</code> 而非 <code>vec![Effect::Render]</code>，与同文件 line 84-85 的 TurnDone 不对称；当前由 v1 <code>handle_acp_event</code> 兜底掩盖，Phase 2.6 退役 v1 后会变为可见闪烁）<br>
-  <strong>本窗口成果</strong>：2 个本地 commit（16374d09 + dashboard，不 push）：<br>
-  · <strong>Audit workflow（Explore agent ae36e3bd158ddc169）</strong>：全量扫描 SM transitions / runtime / keyboard / render / agent_ops。发现 3 个 P2 bug：<br>
-  &nbsp;&nbsp;① <strong>TurnInterrupted missing Render</strong>（FIXED 本窗口）— streaming.rs:108 返回 Vec::new() 导致 spinner 闪烁中间态<br>
-  &nbsp;&nbsp;② <strong>Dual Esc quit trackers</strong>（DEFERRED）— v2 DoubleEscTracker (500ms 触发 Quit) + v1 rewind_pending_since (2s 触发 rewind) 同时执行；fast double-tap 会先弹 rewind 再退出，UX 不一致<br>
-  &nbsp;&nbsp;③ <strong>SM prediction dead code</strong>（DEFERRED）— idle.rs:113 + streaming.rs:129 写入 <code>state.input.prediction</code>，但生产 render 读 <code>app.session_mgr.current().ui.prediction</code>（v1 字段）；SM 字段误导性死代码，需 wire render 或删除<br>
-  · <strong>Fix（peri-tui，streaming.rs:88-118）</strong>：<code>TurnInterrupted</code> 处理器返回值从 <code>Vec::new()</code> 改为 <code>vec![Effect::Render]</code>。注释说明与 TurnDone line 84-85 的对称性：<code>current_turn</code> 被 deactivate（spinner 消失）+ streaming ViewModels 持久化到 state.view（新内容），不重绘会留中间态直到下个 Tick。<br>
-  · <strong>新增回归测试（peri-tui，streaming.rs:553-580）</strong>：<code>test_turn_interrupted_emits_render_to_avoid_flicker</code> — 镜像 <code>test_turn_done_emits_render_to_avoid_flicker</code>（Cron #36），验证 Render effect 存在。<br>
-  · <strong>Phase 2.6 step 7e.8（SubAgent v1 path audit）</strong>：<strong>已确认 clean</strong>。检查 agent_ops/mod.rs + subagent.rs：<br>
-  &nbsp;&nbsp;① handle_subagent_start：SubAgentGroup push 已在 Cron #29 step 6 退役 ✓<br>
-  &nbsp;&nbsp;② ToolStart/End with source_agent_id：通过 <code>subagent_status.append_child_message</code> 路由（v2 权威源，非 v1 push）✓<br>
-  &nbsp;&nbsp;③ AssistantChunk with source_agent_id：early return 仅 request_rebuild ✓<br>
-  &nbsp;&nbsp;④ StateSnapshot：subagent_depth > 0 时 early return ✓<br>
-  &nbsp;&nbsp;⑤ TurnCommitted：subagent_depth > 0 时 early return ✓<br>
-  · <strong>当前累积缺陷轨迹</strong>：17 → 10 → 7 → 3 → 2 → 1 → 1 → 1 → 1 主 + 9 ACP-gated → 1 主 + 9 ACP-gated + 3 Bundle-2 → 1 主 + 9 ACP-gated + 1 Bundle-2 → 1 主 + 9 ACP-gated + 0 Bundle-2（Cron #42）→ 1 主 + 9 ACP-gated + 0 Bundle-2（Cron #43）→ <strong>1 主 + 9 ACP-gated + 0 Bundle-2 + 2 新发现（Cron #44 修复 1 个，defer 2 个）</strong>。<br>
-  · <strong>Phase 2.6 step 7e 进度</strong>：7e.1 ✓ / 7e.2 ✓ / 7e.3 ✓ / 7e.4 ✓ / 7e.5 ✓ / 7e.6 ✓ / 7e.7 ✓ / <strong>7e.8 ✓（Cron #44 audit clean）</strong>。<strong>剩余 1 个子步骤（7e.9 — 删除 view_messages 字段 + 迁移 ~30 headless 测试）</strong>。<br>
-  <strong>当前状态</strong>：<strong>1132 测试全过</strong>（1131 + 1 新增 TurnInterrupted Render 回归）· SubAgent v1 path 审计 clean · TurnInterrupted Render 修复（防御 v1 退役后的潜在闪烁）<br>
-  <strong>下一步</strong>：① Dual Esc trackers 架构清理（移除 v2 SM 的 DoubleEscTracker 或统一阈值）② SM prediction 死代码清理（wire render 或删除 SM handler）③ headless_test.rs ~30 测试迁移到 state.view 路径（解锁 mod.rs:365 退役 + apply_add_message 删除）④ 删除 view_messages 字段（step 7e.9，依赖 ③）⑤ subagent render-misroute（architectural SubAgentGroupData instance_id）
+  <strong>最后更新</strong>：2026-07-01 cron #45（State machine dead-code retirement：DoubleEscTracker + InputState.prediction。Cron #44 defer 的 2 个 P2 bug 本窗口全部 fix。两个 bug 都是用户感知 "状态机不正常工作" 的源头：DoubleEscTracker 在 popup/wizard 关闭后单次 Esc 误退出 app；prediction 字段写入但不渲染，是 SM 假装在管理 ghost text 的纯死状态）<br>
+  <strong>本窗口成果</strong>：1 个本地 commit（083aa66c，不 push）：<br>
+  · <strong>Retire 1 — SM DoubleEscTracker</strong>（state.rs / idle.rs / modal.rs / streaming.rs / switching.rs / transitions/mod.rs / main_loop.rs / mod.rs）：删除 <code>struct DoubleEscTracker</code> + <code>IdleState.double_esc_timer</code> + <code>ModalState.saved_double_esc_timer</code> + 3 个 tracker 自测。SM Esc 处理器移除 <code>Effect::Quit</code> 发送（保留 popup 关闭逻辑）。Quit + Rewind 现在统一由 v1 keyboard fallback 的 <code>rewind_pending_since</code> 2s 计时器管理，单一阈值，单一拥有者。Cron #38 的 <code>wizard_active</code> 旁路注释更新为反映新现实。<br>
+  · <strong>Retire 2 — InputState.prediction</strong>（input/mod.rs / input/sync.rs / idle.rs / streaming.rs / main_loop.rs / ui/mod.rs / ui/input_widget.rs）：删除 <code>InputState.prediction: Option&lt;String&gt;</code> 字段 + Default + clear_buffer 清理。SM 的 <code>AcpEventData::Prediction</code> 处理器降级为 <code>vec![Effect::Render]</code>（触发重绘读取 v1 <code>app.session_mgr.current().ui.prediction</code>）。main_loop 2b sync 的 prediction-clear 逻辑移除（old_text_len 快照退役）。<strong>删除整个 <code>ui/input_widget.rs</code> 模块</strong>（386 行死代码，<code>InputWidget::new</code> 仅在自身测试被引用，是 B3 MigrateInput 的预留 stub，但生产从未切到 InputWidget 渲染路径）。<br>
+  · <strong>Net</strong>：-568 行 / +84 行。1 个 struct 退役 + 3 个 state 字段退役 + 1 个模块删除。<br>
+  · <strong>测试</strong>：1120 pass（移除 4 个 tracker/prediction 自测 + 添加 1 个 <code>test_double_esc_does_not_quit_from_sm</code> 守护测试，确保未来不在 SM Esc 重新引入 Quit 发送）。<br>
+  · <strong>Phase 2.6 step 7e 进度</strong>：7e.1 ✓ / 7e.2 ✓ / 7e.3 ✓ / 7e.4 ✓ / 7e.5 ✓ / 7e.6 ✓ / 7e.7 ✓ / 7e.8 ✓。<strong>剩余 1 个子步骤（7e.9 — 删除 view_messages 字段 + 迁移 ~30 headless 测试）</strong>。<br>
+  <strong>当前状态</strong>：<strong>1120 测试全过</strong> · SM 死代码 -484 行净删除 · Esc 行为单一拥有者 · prediction 渲染单一拥有者<br>
+  <strong>下一步</strong>：① headless_test.rs ~30 测试迁移到 state.view 路径（解锁 apply_add_message 删除 + view_messages 字段退役）② 删除 view_messages 字段（step 7e.9，依赖 ①）③ SubAgent render-misroute（architectural SubAgentGroupData instance_id）④ 9 个 ACP-gated bugs（等 ACP 层扩展 AcpEvent 变体）
+</div>
+
+<div class="meta">
+  <strong>历史 - cron #44</strong>（commit 16374d09 + ae4d3619）：Phase 2.6 step 7e.8 audit + TurnInterrupted Render fix。Audit workflow（Explore agent ae36e3bd158ddc169）全量扫描 SM/runtime/keyboard/render/agent_ops，发现 3 个 P2 bug：TurnInterrupted missing Render（本窗口 FIXED）/ Dual Esc trackers（Cron #45 FIXED）/ SM prediction dead code（Cron #45 FIXED）。新增 <code>test_turn_interrupted_emits_render_to_avoid_flicker</code> 回归。SubAgent v1 path 审计 clean（5 个子路径已全部退役或路由到 v2 权威源）。
+</div>
 </div>
 
 <div class="meta">
