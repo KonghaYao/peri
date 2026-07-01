@@ -1,11 +1,8 @@
 //! ratatui-kit HooksPanel component.
 //!
-//! Phase 6a: read-only hook list with cursor navigation (use_state +
-//! use_local_events). Mock data; Phase 8 通过 Atom/props 注入真实 hook 列表。
-//!
-//! 旧版: panel/panels/hooks.rs (PanelState trait, HookDto-based).
-//! Hooks are configured via plugin hooks/hooks.json files; this panel is
-//! display-only.
+//! H1b（Iteration 14）：从 HOOK_LIST atom 读取真实 hooks 列表（由
+//! service_snapshot 从 plugin_data.all_hooks 派生）。只读面板——hooks 在
+//! 插件 hooks/<event>.json 中声明，UI 不修改。
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -18,78 +15,27 @@ use ratatui_kit::{
     },
 };
 
+use crate::kit::atoms::{HOOK_LIST, HookSummary};
 use crate::kit::theme;
 
-/// Mock hook entry (Phase 8: injected via Atom from HookDto).
-#[allow(dead_code)]
-struct HookEntry {
-    event: &'static str,
-    command: &'static str,
-    enabled: bool,
-}
-
-#[allow(dead_code)]
-const HOOK_ENTRIES: &[HookEntry] = &[
-    HookEntry {
-        event: "PreToolUse",
-        command: "echo 'About to use tool' | tee -a /tmp/hooks.log",
-        enabled: true,
-    },
-    HookEntry {
-        event: "PostToolUse",
-        command: "echo 'Tool used' | tee -a /tmp/hooks.log",
-        enabled: true,
-    },
-    HookEntry {
-        event: "PostToolUseFailure",
-        command: "echo 'Tool failed' | tee -a /tmp/hooks.log",
-        enabled: false,
-    },
-    HookEntry {
-        event: "Notification",
-        command: "osascript -e 'display notification \"Agent needs input\"'",
-        enabled: true,
-    },
-    HookEntry {
-        event: "SessionStart",
-        command: "echo 'Session started at' $(date)",
-        enabled: true,
-    },
-    HookEntry {
-        event: "SessionEnd",
-        command: "echo 'Session ended at' $(date)",
-        enabled: false,
-    },
-    HookEntry {
-        event: "Stop",
-        command: "echo 'Agent stopped'",
-        enabled: true,
-    },
-    HookEntry {
-        event: "PreCompact",
-        command: "echo 'About to compact context'",
-        enabled: false,
-    },
-];
-
-/// Map event name to human-readable description.
+/// Map event name to human-readable description。
 fn event_description(event: &str) -> &'static str {
     match event {
-        "PreToolUse" => "Before tool execution",
-        "PostToolUse" => "After tool execution",
-        "PostToolUseFailure" => "After tool execution fails",
-        "PermissionRequest" => "Before auto mode classifier decides",
-        "UserPromptSubmit" => "When user submits a prompt",
-        "SessionStart" => "When a new session starts",
-        "SessionEnd" => "When a session ends",
-        "Stop" => "When agent stops",
-        "StopFailure" => "When agent stops with failure",
-        "PostToolBatch" => "When all parallel tools complete",
-        "SubagentStart" => "When a subagent starts",
-        "SubagentStop" => "When a subagent stops",
-        "PreCompact" => "Before context compaction",
-        "PostCompact" => "After context compaction",
-        "Notification" => "When agent needs user input",
+        "pretooluse" => "Before tool execution",
+        "posttooluse" => "After tool execution",
+        "posttoolusefailure" => "After tool execution fails",
+        "permissionrequest" => "Before auto mode classifier decides",
+        "userpromptsubmit" => "When user submits a prompt",
+        "sessionstart" => "When a new session starts",
+        "sessionend" => "When a session ends",
+        "stop" => "When agent stops",
+        "stopfailure" => "When agent stops with failure",
+        "posttoolbatch" => "When all parallel tools complete",
+        "subagentstart" => "When a subagent starts",
+        "subagentstop" => "When a subagent stops",
+        "precompact" => "Before context compaction",
+        "postcompact" => "After context compaction",
+        "notification" => "When agent needs user input",
         _ => "",
     }
 }
@@ -97,10 +43,14 @@ fn event_description(event: &str) -> &'static str {
 #[component]
 pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected = hooks.use_state(|| 0usize);
+    let store = hooks.use_store(*HOOK_LIST.get().unwrap());
+    let hook_list: Vec<HookSummary> = store.read().clone();
+    let _ = store;
+    let count = hook_list.len();
 
     hooks.use_local_events({
-        let selected = selected;
-        let count = HOOK_ENTRIES.len();
+        let selected = selected.clone();
+        let count = count;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
@@ -108,7 +58,7 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        // TODO Phase 8: close panel via use_input_layer
+                        close_panel();
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         let mut s = selected.write();
@@ -121,7 +71,6 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        // Ctrl+C: don't consume, let upper layers handle
                         return;
                     }
                     _ => {}
@@ -134,22 +83,17 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     // Stats line
-    if !HOOK_ENTRIES.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            format!("  {} hooks configured", HOOK_ENTRIES.len()),
-            Style::new().fg(theme::TEXT).bold(),
-        )]));
-    }
-
-    // Read-only hint
+    lines.push(Line::from(vec![Span::styled(
+        format!("  {} hooks registered", count),
+        Style::new().fg(theme::TEXT).bold(),
+    )]));
     lines.push(Line::from(vec![Span::styled(
         "  (read-only — configured via plugins)",
-        Style::new().fg(theme::MUTED),
+        Style::new().fg(theme::MUTED).italic(),
     )]));
     lines.push(Line::from(""));
 
-    // Hook list
-    if HOOK_ENTRIES.is_empty() {
+    if hook_list.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "  No hooks configured",
             Style::new().fg(theme::MUTED),
@@ -159,7 +103,7 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme::MUTED),
         )]));
     } else {
-        for (i, entry) in HOOK_ENTRIES.iter().enumerate() {
+        for (i, entry) in hook_list.iter().enumerate() {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
@@ -167,30 +111,32 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             } else {
                 Style::new().fg(theme::TEXT)
             };
-            let enabled_label = if entry.enabled { "ON" } else { "OFF" };
-            let enabled_style = if entry.enabled {
-                Style::new().fg(theme::SAGE)
-            } else {
-                Style::new().fg(theme::MUTED)
-            };
-            let desc = event_description(entry.event);
+            let desc = event_description(&entry.event);
 
-            // Label line: cursor + num + event + [ON/OFF] + description
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} {}. {} ", cursor, i + 1, entry.event),
                     name_style,
                 ),
-                Span::styled(format!("[{}]", enabled_label), enabled_style),
+                Span::styled(
+                    format!("  via {}", entry.plugin_name),
+                    Style::new().fg(theme::ACCENT),
+                ),
                 Span::styled(format!("  {}", desc), Style::new().fg(theme::MUTED)),
             ]));
 
-            // Detail line: command summary (indented, truncated)
+            if let Some(m) = &entry.matcher {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("     matcher: {}", m),
+                    Style::new().fg(theme::DIM),
+                )]));
+            }
+
             let cmd_summary: String = entry
                 .command
                 .chars()
-                .take(50)
-                .chain(if entry.command.chars().count() > 50 {
+                .take(70)
+                .chain(if entry.command.chars().count() > 70 {
                     Some('…')
                 } else {
                     None
@@ -203,15 +149,10 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     }
 
-    // Footer hints
     lines.push(Line::from(""));
-    lines.push(Line::from("  ↑↓) Navigate  Esc) Close").fg(theme::DIM));
+    lines.push(Line::from("  j/k) Navigate  Esc) Close").fg(theme::DIM));
 
-    let content = if lines.is_empty() {
-        Paragraph::new(Line::from("  (empty)").fg(theme::MUTED))
-    } else {
-        Paragraph::new(ratatui::text::Text::from(lines))
-    };
+    let content = Paragraph::new(ratatui::text::Text::from(lines));
 
     element!(
         Border(
@@ -221,8 +162,8 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .fg(theme::THINKING)
                 .bold()
                 .centered(),
-            width: Constraint::Length(56),
-            height: Constraint::Length(14),
+            width: Constraint::Length(80),
+            height: Constraint::Length(20),
         ) {
             ScrollView(
                 scroll_bars: ScrollBars::default(),
@@ -233,4 +174,14 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         }
     )
+}
+
+fn close_panel() {
+    use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
+    if let Some(atom) = ACTIVE_PANEL.get() {
+        *atom.write() = None;
+    }
+    if let Some(atom) = OPEN_PANELS.get() {
+        atom.write().clear();
+    }
 }

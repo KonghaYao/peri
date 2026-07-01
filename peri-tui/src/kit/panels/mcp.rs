@@ -1,142 +1,55 @@
 //! ratatui-kit McpPanel component.
 //!
-//! Phase 6c batch 2: MCP server list with cursor navigation
-//! (use_state + use_local_events). Mock data with 4 MCP servers
-//! (filesystem, github, slack, web-search); Phase 8 通过 Atom/props 注入
-//! 真实 MCP server 状态。
-//!
-//! 旧版: panel/panels/mcp.rs (PanelState trait).
+//! H1d（Iteration 14）：从 MCP_SERVERS atom 读取真实 MCP server 列表（由
+//! service_snapshot 从 mcp_pool.all_server_infos 派生）。结合 SERVICE_SNAPSHOT.mcp
+//! 显示初始化阶段摘要。只读面板——MCP 配置通过 ~/.claude/settings.json 管理。
 
+use crate::kit::atoms::{MCP_SERVERS, McpServerSummary, SERVICE_SNAPSHOT};
 use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
-        style::{Color, Style, Stylize},
+        style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
     },
 };
 
-// ---------------------------------------------------------------------------
-// Mock MCP data
-// ---------------------------------------------------------------------------
-
-/// MCP server status enum.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum McpStatus {
-    Connected,
-    Disconnected,
-    Error,
-}
-
-#[allow(dead_code)]
-impl McpStatus {
-    fn icon(&self) -> &'static str {
-        match self {
-            Self::Connected => "\u{2714}",
-            Self::Disconnected => "\u{25ef}",
-            Self::Error => "\u{2717}",
-        }
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Connected => "connected",
-            Self::Disconnected => "offline",
-            Self::Error => "error",
-        }
-    }
-
-    fn color(&self) -> Color {
-        match self {
-            Self::Connected => theme::SAGE,
-            Self::Disconnected => theme::MUTED,
-            Self::Error => theme::ERROR,
-        }
-    }
-}
-
-/// Mock MCP server entry (Phase 8: from real pool).
-#[allow(dead_code)]
-struct McpServerEntry {
-    name: &'static str,
-    status: McpStatus,
-    tool_count: usize,
-    enabled: bool,
-}
-
-#[allow(dead_code)]
-const MCP_SERVERS: &[McpServerEntry] = &[
-    McpServerEntry {
-        name: "filesystem",
-        status: McpStatus::Connected,
-        tool_count: 8,
-        enabled: true,
-    },
-    McpServerEntry {
-        name: "github",
-        status: McpStatus::Connected,
-        tool_count: 12,
-        enabled: true,
-    },
-    McpServerEntry {
-        name: "slack",
-        status: McpStatus::Disconnected,
-        tool_count: 4,
-        enabled: false,
-    },
-    McpServerEntry {
-        name: "web-search",
-        status: McpStatus::Error,
-        tool_count: 2,
-        enabled: true,
-    },
-];
-
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
-
 #[component]
 pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let cursor = hooks.use_state(|| 0usize);
+    let selected = hooks.use_state(|| 0usize);
+    let store = hooks.use_store(*MCP_SERVERS.get().unwrap());
+    let servers: Vec<McpServerSummary> = store.read().clone();
+    let _ = store;
+
+    let snap_store = hooks.use_store(*SERVICE_SNAPSHOT.get().unwrap());
+    let init_phase = snap_store.read().mcp.init_phase;
+    let connected_total = snap_store.read().mcp.connected;
+    let config_total = snap_store.read().mcp.total;
+    let _ = snap_store;
+
+    let count = servers.len();
 
     hooks.use_local_events({
-        let cursor = cursor.clone();
-        let count = MCP_SERVERS.len();
+        let selected = selected.clone();
+        let count = count;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
                     return;
                 }
                 match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        // TODO Phase 8: close panel via use_input_layer
-                    }
+                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
                     KeyCode::Up | KeyCode::Char('k') => {
-                        let mut c = cursor.write();
-                        *c = c.saturating_sub(1);
+                        *selected.write() = selected.read().saturating_sub(1);
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        let mut c = cursor.write();
+                        let mut s = selected.write();
                         if count > 0 {
-                            *c = (*c + 1).min(count - 1);
+                            *s = (*s + 1).min(count - 1);
                         }
-                    }
-                    // Space: toggle enabled status
-                    KeyCode::Char(' ') => {
-                        // TODO Phase 8: toggle server via ACP
-                    }
-                    // r: refresh server list
-                    KeyCode::Char('r') => {
-                        // TODO Phase 8: refresh from live pool
-                    }
-                    // n: add new server
-                    KeyCode::Char('n') => {
-                        // TODO Phase 8: open new server dialog
                     }
                     _ => {}
                 }
@@ -144,63 +57,61 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
-    let sel = *cursor.read();
+    let sel = *selected.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    // Header: server count
-    lines.push(Line::from(vec![Span::styled(
-        format!("  {} servers", MCP_SERVERS.len()),
-        Style::new().fg(theme::MUTED),
-    )]));
+    // 摘要头：init phase / connected / total
+    let phase_label = match init_phase {
+        crate::kit::atoms::McpInitPhase::Pending => "pending",
+        crate::kit::atoms::McpInitPhase::Initializing => "initializing",
+        crate::kit::atoms::McpInitPhase::Ready => "ready",
+        crate::kit::atoms::McpInitPhase::Failed => "failed",
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  MCP Pool: ", Style::new().fg(theme::MUTED)),
+        Span::styled(phase_label, Style::new().fg(theme::ACCENT).bold()),
+        Span::styled(
+            format!("   {}/{} connected", connected_total, config_total),
+            Style::new().fg(theme::TEXT),
+        ),
+    ]));
     lines.push(Line::from(""));
 
-    // Server rows
-    for (i, entry) in MCP_SERVERS.iter().enumerate() {
-        let is_cursor = i == sel;
-        let cursor_mark = if is_cursor { "\u{276f}" } else { " " };
+    if servers.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "  No MCP servers configured",
+            Style::new().fg(theme::MUTED),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "  Add servers via ~/.claude/settings.json (mcpServers)",
+            Style::new().fg(theme::MUTED),
+        )]));
+    } else {
+        for (i, s) in servers.iter().enumerate() {
+            let is_selected = i == sel;
+            let cursor = if is_selected { ">" } else { " " };
+            let name_style = if is_selected {
+                Style::new().fg(theme::THINKING).bold()
+            } else {
+                Style::new().fg(theme::TEXT)
+            };
+            let (status_icon, status_color) = derive_status_style(&s.status);
 
-        let name_style = if is_cursor {
-            Style::new().fg(theme::THINKING).bold()
-        } else {
-            Style::new().fg(theme::TEXT)
-        };
-
-        let status_style = Style::new().fg(entry.status.color());
-
-        // Enabled/disabled indicator
-        let toggle = if entry.enabled {
-            "\u{25c9}"
-        } else {
-            "\u{25cb}"
-        };
-        let toggle_style = if entry.enabled {
-            Style::new().fg(theme::SAGE)
-        } else {
-            Style::new().fg(theme::MUTED)
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {} ", cursor_mark),
-                Style::new().fg(theme::THINKING),
-            ),
-            Span::styled(toggle.to_string(), toggle_style),
-            Span::styled(format!(" {:<20}", entry.name), name_style),
-            Span::styled(entry.status.icon(), status_style),
-            Span::styled(format!(" {}", entry.status.label()), status_style),
-            Span::styled(
-                format!("  {} tools", entry.tool_count),
-                Style::new().fg(theme::MUTED),
-            ),
-        ]));
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {} ", cursor), Style::new().fg(theme::THINKING)),
+                Span::styled(s.name.clone(), name_style),
+                Span::styled(format!("  {}", status_icon), Style::new().fg(status_color)),
+                Span::styled(format!(" {}", s.status), Style::new().fg(status_color)),
+            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("     transport: {}  tools: {}", s.transport, s.tools_count),
+                Style::new().fg(theme::DIM),
+            )]));
+        }
     }
 
-    // Footer hint
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled(
-        "  j/k) Nav  Space) Toggle  r) Refresh  n) New  q) Close",
-        Style::new().fg(theme::DIM),
-    )]));
+    lines.push(Line::from("  j/k) Navigate  Esc) Close").fg(theme::DIM));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
@@ -208,12 +119,12 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Border(
             flex_direction: Direction::Vertical,
             border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" MCP ")
+            top_title: Line::from(" MCP Servers ")
                 .fg(theme::THINKING)
                 .bold()
                 .centered(),
-            width: Constraint::Length(54),
-            height: Constraint::Length(16),
+            width: Constraint::Length(80),
+            height: Constraint::Length(20),
         ) {
             ScrollView(
                 scroll_bars: ScrollBars::default(),
@@ -224,4 +135,24 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         }
     )
+}
+
+fn derive_status_style(status: &str) -> (&'static str, ratatui::style::Color) {
+    if status.contains("connected") {
+        ("\u{2714}", theme::SAGE)
+    } else if status.contains("error") || status.contains("failed") {
+        ("\u{2717}", theme::ERROR)
+    } else {
+        ("\u{25ef}", theme::MUTED)
+    }
+}
+
+fn close_panel() {
+    use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
+    if let Some(atom) = ACTIVE_PANEL.get() {
+        *atom.write() = None;
+    }
+    if let Some(atom) = OPEN_PANELS.get() {
+        atom.write().clear();
+    }
 }

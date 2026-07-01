@@ -1,12 +1,17 @@
 //! ratatui-kit AgentPanel component.
 //!
-//! Phase 6c batch 1: agent session info display with cursor navigation
-//! (use_state + use_local_events). Mock data; Phase 8 通过 Atom/props 注入
-//! 真实 agent session 状态。
+//! H1e（Iteration 14）：从 SERVICE_SNAPSHOT + PERI_CONFIG_HANDLE + VIEW_MODELS
+//! 派生当前 agent 会话的元信息（provider/model/permission_mode/cwd/subagent
+//! 数量）。SubAgent 列表从 VIEW_MODELS 中扫描 `SubAgentGroup` 变体派生——
+//! 这是 v2 单路径架构下的权威数据源（子代理生命周期由 ACP 协议 + ViewCommit
+//! 替换语义维护）。
 //!
-//! 旧版: panel/panels/agent.rs (PanelState trait, agent selection).
+//! 只读面板——切换 provider/model 在 Login/Model 面板，permission_mode 在
+//! Config 面板。
 
+use crate::kit::atoms::{PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT, VIEW_MODELS};
 use crate::kit::theme;
+use peri_acp_types::view_model::{SubAgentGroupData, ViewModel};
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -18,66 +23,47 @@ use ratatui_kit::{
     },
 };
 
-/// Mock agent session info row.
-#[allow(dead_code)]
-struct AgentInfoRow {
-    label: &'static str,
-    value: &'static str,
-}
-
-/// Mock agent session data (Phase 8: injected via Atom from live session).
-#[allow(dead_code)]
-const AGENT_INFO_ROWS: &[AgentInfoRow] = &[
-    AgentInfoRow {
-        label: "Model",
-        value: "claude-sonnet-4-20250514",
-    },
-    AgentInfoRow {
-        label: "Provider",
-        value: "Anthropic",
-    },
-    AgentInfoRow {
-        label: "Context Window",
-        value: "200K tokens (standard)",
-    },
-    AgentInfoRow {
-        label: "Token Usage",
-        value: "34.2k input / 8.1k output",
-    },
-    AgentInfoRow {
-        label: "Session ID",
-        value: "sess_01JXYZ...",
-    },
-    AgentInfoRow {
-        label: "Subagent Count",
-        value: "2 active (code-review, test-gen)",
-    },
-];
-
 #[component]
 pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
 
+    let snap_store = hooks.use_store(*SERVICE_SNAPSHOT.get().unwrap());
+    let provider_name = snap_store.read().provider_name.clone();
+    let model_alias = snap_store.read().model_alias.clone();
+    let permission_mode = snap_store.read().permission_mode.clone();
+    let cwd = snap_store.read().cwd.clone();
+    let _ = snap_store;
+
+    // 从 VIEW_MODELS 派生 subagent 列表 + 当前 iteration 计数
+    let vm_store = hooks.use_store(*VIEW_MODELS.get().unwrap());
+    let committed_count = vm_store.read().committed.len();
+    let current_turn_count = vm_store.read().current_turn.len();
+    let subagents = collect_subagents(&vm_store.read());
+    let _ = vm_store;
+
+    let total_messages = committed_count + current_turn_count;
+    let subagent_count = subagents.len();
+
+    // 候选行数（仅用于 cursor 边界）
+    let row_count = 8 + subagent_count.max(1);
+
     hooks.use_local_events({
         let cursor = cursor.clone();
-        let count = AGENT_INFO_ROWS.len();
+        let row_count = row_count;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
                     return;
                 }
                 match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        // TODO Phase 8: close panel via use_input_layer
-                    }
+                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
                     KeyCode::Up | KeyCode::Char('k') => {
-                        let mut c = cursor.write();
-                        *c = c.saturating_sub(1);
+                        *cursor.write() = cursor.read().saturating_sub(1);
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
                         let mut c = cursor.write();
-                        if count > 0 {
-                            *c = (*c + 1).min(count - 1);
+                        if row_count > 0 {
+                            *c = (*c + 1).min(row_count - 1);
                         }
                     }
                     _ => {}
@@ -86,10 +72,22 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
+    // 从 PERI_CONFIG_HANDLE 派生 provider_id 和 active alias
+    let (active_provider_id, active_alias) = PERI_CONFIG_HANDLE
+        .get()
+        .map(|h| {
+            let cfg = h.read();
+            (
+                cfg.config.active_provider_id.clone(),
+                cfg.config.active_alias.clone(),
+            )
+        })
+        .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
+
     let sel = *cursor.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    // Header
+    // 头部
     lines.push(Line::from(vec![Span::styled(
         "  Current Agent Session",
         Style::new().fg(theme::TEXT).bold(),
@@ -100,8 +98,29 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     )]));
     lines.push(Line::from(""));
 
-    // Agent info rows
-    for (i, row) in AGENT_INFO_ROWS.iter().enumerate() {
+    // 元信息行
+    let meta_rows: Vec<(&str, String)> = vec![
+        (
+            "Provider",
+            format!("{} ({})", provider_name, active_provider_id),
+        ),
+        (
+            "Model",
+            format!("{} (alias: {})", model_alias, active_alias),
+        ),
+        ("Permission Mode", permission_mode),
+        ("CWD", cwd),
+        (
+            "Messages",
+            format!(
+                "{} committed / {} current",
+                committed_count, current_turn_count
+            ),
+        ),
+        ("Total Messages", format!("{}", total_messages)),
+    ];
+
+    for (i, (label, value)) in meta_rows.iter().enumerate() {
         let is_selected = i == sel;
         let cursor_mark = if is_selected { ">" } else { " " };
         let label_style = if is_selected {
@@ -120,14 +139,56 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 format!(" {} ", cursor_mark),
                 Style::new().fg(theme::THINKING),
             ),
-            Span::styled(format!("{:<18}", format!("{}:", row.label)), label_style),
-            Span::styled(row.value, value_style),
+            Span::styled(format!("{:<18}", format!("{}:", label)), label_style),
+            Span::styled(value.chars().take(60).collect::<String>(), value_style),
         ]));
     }
 
-    // Footer
+    // SubAgent 列表标题
     lines.push(Line::from(""));
-    lines.push(Line::from("  j/k) Navigate  q) Close").fg(theme::DIM));
+    lines.push(Line::from(vec![Span::styled(
+        format!("  SubAgents ({})", subagent_count),
+        Style::new().fg(theme::TEXT).bold(),
+    )]));
+
+    if subagents.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "  No sub-agents spawned in this session",
+            Style::new().fg(theme::MUTED).italic(),
+        )]));
+    } else {
+        for (i, sa) in subagents.iter().enumerate() {
+            let row_idx = meta_rows.len() + 1 + i;
+            let is_selected = row_idx == sel;
+            let cursor_mark = if is_selected { ">" } else { " " };
+            let name_style = if is_selected {
+                Style::new().fg(theme::THINKING).bold()
+            } else {
+                Style::new().fg(theme::TEXT)
+            };
+            let status_marker = if sa.collapsed {
+                Span::styled(" (collapsed)", Style::new().fg(theme::MUTED))
+            } else {
+                Span::styled(" (expanded)", Style::new().fg(theme::SAGE))
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {} ", cursor_mark),
+                    Style::new().fg(theme::THINKING),
+                ),
+                Span::styled(sa.agent_name.clone(), name_style),
+                Span::styled(format!("  [{}]", sa.agent_id), Style::new().fg(theme::DIM)),
+                status_marker,
+                Span::styled(
+                    format!("  {} msgs", sa.view_models.len()),
+                    Style::new().fg(theme::MUTED),
+                ),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from("  j/k) Navigate  Esc) Close").fg(theme::DIM));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
@@ -139,8 +200,8 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .fg(theme::THINKING)
                 .bold()
                 .centered(),
-            width: Constraint::Length(50),
-            height: Constraint::Length(14),
+            width: Constraint::Length(80),
+            height: Constraint::Length(22),
         ) {
             ScrollView(
                 scroll_bars: ScrollBars::default(),
@@ -151,4 +212,44 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         }
     )
+}
+
+/// 从 ViewModelsSnapshot 派生 SubAgent 列表（按出现顺序，去重）。
+fn collect_subagents(snap: &crate::kit::atoms::ViewModelsSnapshot) -> Vec<SubAgentGroupData> {
+    let mut out: Vec<SubAgentGroupData> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for vm in snap.committed.iter().chain(snap.current_turn.iter()) {
+        scan_vm_for_subagents(vm, &mut out, &mut seen);
+    }
+    out
+}
+
+fn scan_vm_for_subagents(
+    vm: &ViewModel,
+    out: &mut Vec<SubAgentGroupData>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    if let ViewModel::SubAgentGroup(d) = vm {
+        if seen.insert(d.agent_id.clone()) {
+            out.push(d.clone());
+        }
+        // 递归扫描子 view_models（嵌套 SubAgentGroup 罕见但支持）
+        for child in d.view_models.iter() {
+            scan_vm_for_subagents(child, out, seen);
+        }
+    } else if let ViewModel::CollapsedGroup(g) = vm {
+        for child in g.view_models.iter() {
+            scan_vm_for_subagents(child, out, seen);
+        }
+    }
+}
+
+fn close_panel() {
+    use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
+    if let Some(atom) = ACTIVE_PANEL.get() {
+        *atom.write() = None;
+    }
+    if let Some(atom) = OPEN_PANELS.get() {
+        atom.write().clear();
+    }
 }

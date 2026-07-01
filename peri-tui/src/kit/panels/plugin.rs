@@ -1,12 +1,10 @@
 //! ratatui-kit PluginPanel component.
 //!
-//! Phase 6c batch 2: plugin list with cursor navigation
-//! (use_state + use_local_events). Mock data with 4 plugins
-//! (claude-md-management, frontend-design, skill-creator, supergoal);
-//! Phase 8 通过 Atom/props 注入真实 plugin 状态。
-//!
-//! 旧版: panel/panels/plugin.rs (PanelState trait).
+//! H1c（Iteration 14）：从 PLUGIN_LIST atom 读取真实插件列表（由
+//! service_snapshot 从 plugin_data.plugins 派生）。只读面板——插件启用/禁用
+//! 通过修改 ~/.claude/plugins/config.json，UI 暂不实现切换。
 
+use crate::kit::atoms::{PLUGIN_LIST, PluginSummary};
 use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -19,79 +17,32 @@ use ratatui_kit::{
     },
 };
 
-// ---------------------------------------------------------------------------
-// Mock plugin data
-// ---------------------------------------------------------------------------
-
-/// Mock plugin entry (Phase 8: from real plugin registry).
-#[allow(dead_code)]
-struct PluginEntry {
-    name: &'static str,
-    version: &'static str,
-    enabled: bool,
-    description: &'static str,
-}
-
-#[allow(dead_code)]
-const PLUGINS: &[PluginEntry] = &[
-    PluginEntry {
-        name: "claude-md-management",
-        version: "1.0.0",
-        enabled: true,
-        description: "Audit and improve CLAUDE.md files in repositories",
-    },
-    PluginEntry {
-        name: "frontend-design",
-        version: "unknown",
-        enabled: true,
-        description: "Create distinctive, production-grade frontend interfaces",
-    },
-    PluginEntry {
-        name: "skill-creator",
-        version: "unknown",
-        enabled: true,
-        description: "Create new skills, modify and improve existing skills",
-    },
-    PluginEntry {
-        name: "supergoal",
-        version: "0.6.1",
-        enabled: false,
-        description: "Plan and autonomously build a software task end-to-end",
-    },
-];
-
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
-
 #[component]
 pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let cursor = hooks.use_state(|| 0usize);
+    let selected = hooks.use_state(|| 0usize);
+    let store = hooks.use_store(*PLUGIN_LIST.get().unwrap());
+    let plugins: Vec<PluginSummary> = store.read().clone();
+    let _ = store;
+    let count = plugins.len();
 
     hooks.use_local_events({
-        let cursor = cursor.clone();
-        let count = PLUGINS.len();
+        let selected = selected.clone();
+        let count = count;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
                     return;
                 }
                 match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        // TODO Phase 8: close panel via use_input_layer
-                    }
+                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
                     KeyCode::Up | KeyCode::Char('k') => {
-                        let mut c = cursor.write();
-                        *c = c.saturating_sub(1);
+                        *selected.write() = selected.read().saturating_sub(1);
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        let mut c = cursor.write();
+                        let mut s = selected.write();
                         if count > 0 {
-                            *c = (*c + 1).min(count - 1);
+                            *s = (*s + 1).min(count - 1);
                         }
-                    }
-                    KeyCode::Enter => {
-                        // TODO Phase 8: toggle/enter detail for selected plugin
                     }
                     _ => {}
                 }
@@ -99,63 +50,70 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
-    let sel = *cursor.read();
+    let sel = *selected.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    // Header
+    lines.push(Line::from(vec![Span::styled(
+        format!("  {} plugins loaded", count),
+        Style::new().fg(theme::TEXT).bold(),
+    )]));
+    lines.push(Line::from(vec![Span::styled(
+        "  (read-only — toggle via ~/.claude/plugins/config.json)",
+        Style::new().fg(theme::MUTED).italic(),
+    )]));
     lines.push(Line::from(""));
-    // Plugin rows
-    for (i, entry) in PLUGINS.iter().enumerate() {
-        let is_cursor = i == sel;
-        let cursor_mark = if is_cursor { "\u{276f}" } else { " " };
 
-        let name_style = if is_cursor {
-            Style::new().fg(theme::THINKING).bold()
-        } else {
-            Style::new().fg(theme::TEXT)
-        };
+    if plugins.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "  No plugins installed",
+            Style::new().fg(theme::MUTED),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "  Install via: agm install <name>",
+            Style::new().fg(theme::MUTED),
+        )]));
+    } else {
+        for (i, p) in plugins.iter().enumerate() {
+            let is_selected = i == sel;
+            let cursor = if is_selected { ">" } else { " " };
+            let name_style = if is_selected {
+                Style::new().fg(theme::THINKING).bold()
+            } else {
+                Style::new().fg(theme::TEXT)
+            };
 
-        // Status indicator
-        let (status_icon, status_style) = if entry.enabled {
-            ("\u{2714}", Style::new().fg(theme::SAGE))
-        } else {
-            ("\u{25cb}", Style::new().fg(theme::MUTED))
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {} ", cursor_mark),
-                Style::new().fg(theme::THINKING),
-            ),
-            Span::styled(format!("{:<28}", entry.name), name_style),
-            Span::styled(
-                format!("v{}  ", entry.version),
-                Style::new().fg(theme::MUTED),
-            ),
-            Span::styled(status_icon, status_style),
-            Span::styled(
-                if entry.enabled {
-                    " enabled"
-                } else {
-                    " disabled"
-                },
-                status_style,
-            ),
-        ]));
-
-        // Description line (indented)
-        lines.push(Line::from(vec![
-            Span::styled("     ", Style::new()),
-            Span::styled(entry.description, Style::new().fg(theme::MUTED)),
-        ]));
-        lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {} ", cursor), Style::new().fg(theme::THINKING)),
+                Span::styled(p.name.clone(), name_style),
+                Span::styled(
+                    format!(
+                        " v{}",
+                        if p.version.is_empty() {
+                            "?"
+                        } else {
+                            &p.version
+                        }
+                    ),
+                    Style::new().fg(theme::MUTED),
+                ),
+            ]));
+            if !p.description.is_empty() {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("     {}", p.description),
+                    Style::new().fg(theme::DIM),
+                )]));
+            }
+            // 截断 root 路径显示
+            let root: String = p.root.chars().take(76).collect();
+            lines.push(Line::from(vec![Span::styled(
+                format!("     {}", root),
+                Style::new().fg(theme::DIM),
+            )]));
+            lines.push(Line::from(""));
+        }
     }
 
-    // Footer hint
-    lines.push(Line::from(vec![Span::styled(
-        "  j/k) Navigate  Enter) Detail  q) Close",
-        Style::new().fg(theme::DIM),
-    )]));
+    lines.push(Line::from("  j/k) Navigate  Esc) Close").fg(theme::DIM));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
@@ -167,8 +125,8 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .fg(theme::THINKING)
                 .bold()
                 .centered(),
-            width: Constraint::Length(54),
-            height: Constraint::Length(16),
+            width: Constraint::Length(80),
+            height: Constraint::Length(20),
         ) {
             ScrollView(
                 scroll_bars: ScrollBars::default(),
@@ -179,4 +137,14 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         }
     )
+}
+
+fn close_panel() {
+    use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
+    if let Some(atom) = ACTIVE_PANEL.get() {
+        *atom.write() = None;
+    }
+    if let Some(atom) = OPEN_PANELS.get() {
+        atom.write().clear();
+    }
 }

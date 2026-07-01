@@ -33,6 +33,7 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let selected = selected;
         let confirm_delete = confirm_delete;
         let count = count;
+        let jobs_snapshot = jobs.clone();
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
@@ -43,7 +44,10 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if *confirm_delete.read() {
                     match key.code {
                         KeyCode::Enter => {
-                            // S11 TODO: 通过 AcpClient 删除 cron 任务
+                            let sel = *selected.read();
+                            if let Some(job) = jobs_snapshot.get(sel) {
+                                cron_remove(&job.id);
+                            }
                             *confirm_delete.write() = false;
                         }
                         KeyCode::Esc => {
@@ -61,7 +65,7 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        // 由 PanelOverlay 上层 Esc 处理关闭
+                        close_panel();
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         let mut s = selected.write();
@@ -74,7 +78,10 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     KeyCode::Enter | KeyCode::Char(' ') => {
-                        // S11 TODO: 通过 AcpClient 切换 cron 任务启用状态
+                        let sel = *selected.read();
+                        if let Some(job) = jobs_snapshot.get(sel) {
+                            cron_toggle(&job.id);
+                        }
                     }
                     KeyCode::Char('d') => {
                         if count > 0 {
@@ -204,4 +211,34 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         }
     )
+}
+
+/// H1g：toggle cron 任务启用状态。service_snapshot 下次 tick 自动刷新 UI（≤2s）。
+fn cron_toggle(id: &str) {
+    use crate::kit::atoms::CRON_SCHEDULER_HANDLE;
+    if let Some(handle) = CRON_SCHEDULER_HANDLE.get() {
+        let mut scheduler = handle.lock();
+        scheduler.toggle(id);
+        tracing::info!(cron_id = id, "CronPanel: toggled");
+    }
+}
+
+/// H1g：删除 cron 任务。service_snapshot 下次 tick 自动刷新 UI（≤2s）。
+fn cron_remove(id: &str) {
+    use crate::kit::atoms::CRON_SCHEDULER_HANDLE;
+    if let Some(handle) = CRON_SCHEDULER_HANDLE.get() {
+        let mut scheduler = handle.lock();
+        let removed = scheduler.remove(id);
+        tracing::info!(cron_id = id, removed, "CronPanel: removed");
+    }
+}
+
+fn close_panel() {
+    use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
+    if let Some(atom) = ACTIVE_PANEL.get() {
+        *atom.write() = None;
+    }
+    if let Some(atom) = OPEN_PANELS.get() {
+        atom.write().clear();
+    }
 }

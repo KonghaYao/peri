@@ -15,8 +15,9 @@ use ratatui_kit::{
     },
 };
 
-use crate::kit::atoms::SERVICE_SNAPSHOT;
+use crate::kit::atoms::{SERVICE_SNAPSHOT, VIEW_MODELS};
 use crate::kit::theme;
+use peri_acp_types::view_model::ViewModel;
 
 const TAB_SERVICE: usize = 0;
 const TAB_CONTEXT: usize = 1;
@@ -30,6 +31,12 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let snap = snapshot_store.read().clone();
     let _ = snapshot_store; // StoreState 是 Copy，无需显式 drop
 
+    // H1a: 订阅 VIEW_MODELS，从派生 Context Tab 的消息计数（committed + current_turn
+    // 的 ViewModel 分类统计）。这避免了占位文本，让 Context Tab 反映真实状态。
+    let vm_store = hooks.use_store(*VIEW_MODELS.get().unwrap());
+    let vm_stats = derive_vm_stats(&vm_store.read());
+    let _ = vm_store;
+
     hooks.use_local_events({
         let active_tab = active_tab;
         move |event: Event| {
@@ -38,6 +45,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     return;
                 }
                 match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
                     KeyCode::Left => {
                         *active_tab.write() = TAB_SERVICE;
                     }
@@ -145,8 +153,53 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
         ],
         TAB_CONTEXT => vec![
-            Line::from("  Context usage requires ACP stream"),
-            Line::from("  (S11 will wire this tab to live data)").fg(theme::MUTED),
+            Line::from(vec![
+                Span::styled("Total VMs:        ", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    format!("{}", vm_stats.total),
+                    Style::new().fg(theme::TEXT).bold(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  User turns:     ", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    format!("{}", vm_stats.user_bubbles),
+                    Style::new().fg(theme::TEXT),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  Assistant turns:", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    format!("{}", vm_stats.assistant_bubbles),
+                    Style::new().fg(theme::TEXT),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  Tool calls:     ", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    format!("{}", vm_stats.tool_cards),
+                    Style::new().fg(theme::TEXT),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  SubAgent groups:", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    format!("{}", vm_stats.subagent_groups),
+                    Style::new().fg(theme::TEXT),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  System notes:   ", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    format!("{}", vm_stats.system_notes),
+                    Style::new().fg(theme::TEXT),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "  Token-level budget requires ACP stream; VM counts shown here are derived locally.",
+                Style::new().fg(theme::DIM).italic(),
+            )]),
         ],
         _ => vec![Line::from("  Unknown tab").fg(theme::MUTED)],
     };
@@ -178,4 +231,62 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Text(text: content)
         }
     )
+}
+
+/// H1a：从 ViewModelsSnapshot 派生按 ViewModel 类型分类的统计。
+struct VmStats {
+    total: usize,
+    user_bubbles: usize,
+    assistant_bubbles: usize,
+    tool_cards: usize,
+    subagent_groups: usize,
+    system_notes: usize,
+}
+
+fn derive_vm_stats(snap: &crate::kit::atoms::ViewModelsSnapshot) -> VmStats {
+    let mut s = VmStats {
+        total: 0,
+        user_bubbles: 0,
+        assistant_bubbles: 0,
+        tool_cards: 0,
+        subagent_groups: 0,
+        system_notes: 0,
+    };
+    for vm in snap.committed.iter().chain(snap.current_turn.iter()) {
+        count_vm(vm, &mut s);
+    }
+    s.total =
+        s.user_bubbles + s.assistant_bubbles + s.tool_cards + s.subagent_groups + s.system_notes;
+    s
+}
+
+fn count_vm(vm: &ViewModel, s: &mut VmStats) {
+    match vm {
+        ViewModel::UserBubble(_) => s.user_bubbles += 1,
+        ViewModel::AssistantBubble(_) => s.assistant_bubbles += 1,
+        ViewModel::ToolCard(_) => s.tool_cards += 1,
+        ViewModel::SubAgentGroup(g) => {
+            s.subagent_groups += 1;
+            for child in g.view_models.iter() {
+                count_vm(child, s);
+            }
+        }
+        ViewModel::SystemNote(_) => s.system_notes += 1,
+        ViewModel::CollapsedGroup(g) => {
+            for child in g.view_models.iter() {
+                count_vm(child, s);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn close_panel() {
+    use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
+    if let Some(atom) = ACTIVE_PANEL.get() {
+        *atom.write() = None;
+    }
+    if let Some(atom) = OPEN_PANELS.get() {
+        atom.write().clear();
+    }
 }

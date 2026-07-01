@@ -1,13 +1,15 @@
 //! ratatui-kit ConfigPanel component.
 //!
-//! Phase 6d: configuration panel with toggle/cycle/text row types.
-//! Mock data; Phase 8 通过 Atom/props 注入真实配置并连接持久化。
-//!
-//! 旧版: panel/panels/config.rs (PanelState trait).
+//! H1a（Iteration 14）：从 PERI_CONFIG_HANDLE 读取真实 PeriConfig，操作时
+//! write + 调用 config::save 持久化到 ~/.peri/settings.json。permission_mode
+//! 通过 PERMISSION_MODE_HANDLE 写运行时 SharedPermissionMode（非持久化——
+//! 设计如此，每次启动默认从 YOLO_MODE 环境变量派生）。
 
 #![allow(dead_code)]
 
+use crate::kit::atoms::{PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE};
 use crate::kit::theme;
+use peri_middlewares::prelude::PermissionMode;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -23,76 +25,49 @@ use ratatui_kit::{
 // Row type
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
+#[derive(Clone)]
 enum RowType {
     Toggle,
     Cycle(&'static [&'static str]),
-    Text,
 }
 
 // ---------------------------------------------------------------------------
-// Mock config rows (Phase 8: from real config)
+// 配置行——每行绑定 PeriConfig 或 SharedPermissionMode 的真实字段
 // ---------------------------------------------------------------------------
+
+const ROW_SHOW_DIFF: usize = 0;
+const ROW_CACHE_WARN: usize = 1;
+const ROW_STREAMING: usize = 2;
+const ROW_1M_CONTEXT: usize = 3;
+const ROW_LANGUAGE: usize = 4;
+const ROW_ACTIVE_ALIAS: usize = 5;
+const ROW_PERMISSION_MODE: usize = 6;
+
+const STREAMING_OPTS: &[&str] = &["streaming", "block", "none"];
+const LANGUAGE_OPTS: &[&str] = &["en", "zh"];
+const ALIAS_OPTS: &[&str] = &["opus", "sonnet", "haiku"];
+const PERMISSION_OPTS: &[&str] = &["default", "accept-edit", "auto-mode", "bypass"];
 
 const CONFIG_ROWS: &[(&str, RowType)] = &[
-    ("YOLO Mode", RowType::Toggle),
-    ("Auto Compact", RowType::Toggle),
-    (
-        "Permission Mode",
-        RowType::Cycle(&["default", "accept-edit", "auto-mode", "bypass"]),
-    ),
-    ("Context Threshold", RowType::Text),
-    ("Max Iterations", RowType::Text),
     ("Show Diff", RowType::Toggle),
-    ("Model", RowType::Cycle(&["opus", "sonnet", "haiku"])),
-    ("Provider", RowType::Cycle(&["anthropic", "openai"])),
+    ("Cache Warning", RowType::Toggle),
+    ("Streaming Mode", RowType::Cycle(STREAMING_OPTS)),
+    ("1M Context", RowType::Toggle),
+    ("Language", RowType::Cycle(LANGUAGE_OPTS)),
+    ("Active Alias", RowType::Cycle(ALIAS_OPTS)),
+    ("Permission Mode", RowType::Cycle(PERMISSION_OPTS)),
 ];
-
-/// Human-readable labels for model cycle options.
-const MODEL_LABELS: &[&str] = &[
-    "claude-opus-4-20250514",
-    "claude-sonnet-4-20250514",
-    "claude-3-5-haiku-20241022",
-];
-
-// ---------------------------------------------------------------------------
-// Toggle row indices (used to map row index to state variable)
-// ---------------------------------------------------------------------------
-
-const ROW_YOLO: usize = 0;
-const ROW_AUTO_COMPACT: usize = 1;
-const ROW_PERMISSION: usize = 2;
-const ROW_THRESHOLD: usize = 3;
-const ROW_MAX_ITER: usize = 4;
-const ROW_SHOW_DIFF: usize = 5;
-const ROW_MODEL: usize = 6;
-const ROW_PROVIDER: usize = 7;
 
 #[component]
 pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
-    // Toggle states (default: YOLO=OFF, AutoCompact=ON, ShowDiff=ON)
-    let yolo = hooks.use_state(|| false);
-    let auto_compact = hooks.use_state(|| true);
-    let show_diff = hooks.use_state(|| true);
-    // Cycle indices
-    let perm_idx = hooks.use_state(|| 0usize);
-    let model_idx = hooks.use_state(|| 1usize); // default sonnet
-    let provider_idx = hooks.use_state(|| 0usize);
-    // Text values
-    let threshold = hooks.use_state(|| String::from("0.85"));
-    let max_iter = hooks.use_state(|| String::from("500"));
+    // bump：每次操作后递增，强制重渲染（PERI_CONFIG_HANDLE 是 RwLock 非 atom，
+    // 写入不会自动触发 ratatui-kit 重渲染，需要手动 bump）
+    let bump = hooks.use_state(|| 0u32);
 
     hooks.use_local_events({
         let cursor = cursor.clone();
-        let yolo = yolo.clone();
-        let auto_compact = auto_compact.clone();
-        let show_diff = show_diff.clone();
-        let perm_idx = perm_idx.clone();
-        let model_idx = model_idx.clone();
-        let provider_idx = provider_idx.clone();
-        let threshold = threshold.clone();
-        let max_iter = max_iter.clone();
+        let bump = bump.clone();
         let row_count = CONFIG_ROWS.len();
 
         move |event: Event| {
@@ -103,83 +78,26 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 let sel = *cursor.read();
 
                 match key.code {
-                    // Close
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        // TODO Phase 8: close panel via use_input_layer
+                        close_panel();
                     }
-                    // Navigate up
                     KeyCode::Up | KeyCode::Char('k') => {
                         *cursor.write() = sel.saturating_sub(1);
                     }
-                    // Navigate down
                     KeyCode::Down | KeyCode::Char('j') => {
                         *cursor.write() = (sel + 1).min(row_count - 1);
                     }
-                    // Space: toggle/cycle on current row
-                    KeyCode::Char(' ') => {
-                        let row_type = &CONFIG_ROWS[sel].1;
-                        match row_type {
-                            RowType::Toggle => toggle_row(sel, &yolo, &auto_compact, &show_diff),
-                            RowType::Cycle(opts) => {
-                                cycle_forward(sel, opts, &perm_idx, &model_idx, &provider_idx)
-                            }
-                            RowType::Text => {
-                                // Insert space on text rows
-                                match sel {
-                                    ROW_THRESHOLD => threshold.write().push(' '),
-                                    ROW_MAX_ITER => max_iter.write().push(' '),
-                                    _ => {}
-                                }
-                            }
-                        }
+                    KeyCode::Char(' ') | KeyCode::Enter => {
+                        activate_row(sel, true);
+                        *bump.write() += 1;
                     }
-                    // Left: cycle reverse / toggle
                     KeyCode::Left => {
-                        let row_type = &CONFIG_ROWS[sel].1;
-                        match row_type {
-                            RowType::Toggle => toggle_row(sel, &yolo, &auto_compact, &show_diff),
-                            RowType::Cycle(opts) => {
-                                cycle_backward(sel, opts, &perm_idx, &model_idx, &provider_idx)
-                            }
-                            RowType::Text => {} // no-op on text rows
-                        }
+                        activate_row(sel, false);
+                        *bump.write() += 1;
                     }
-                    // Right: cycle forward / toggle
                     KeyCode::Right => {
-                        let row_type = &CONFIG_ROWS[sel].1;
-                        match row_type {
-                            RowType::Toggle => toggle_row(sel, &yolo, &auto_compact, &show_diff),
-                            RowType::Cycle(opts) => {
-                                cycle_forward(sel, opts, &perm_idx, &model_idx, &provider_idx)
-                            }
-                            RowType::Text => {} // no-op on text rows
-                        }
-                    }
-                    // Backspace: delete last char on text rows
-                    KeyCode::Backspace => {
-                        let row_type = &CONFIG_ROWS[sel].1;
-                        if matches!(row_type, RowType::Text) {
-                            match sel {
-                                ROW_THRESHOLD => {
-                                    threshold.write().pop();
-                                }
-                                ROW_MAX_ITER => {
-                                    max_iter.write().pop();
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    // Char: insert on text rows
-                    KeyCode::Char(c) => {
-                        let row_type = &CONFIG_ROWS[sel].1;
-                        if matches!(row_type, RowType::Text) {
-                            match sel {
-                                ROW_THRESHOLD => threshold.write().push(c),
-                                ROW_MAX_ITER => max_iter.write().push(c),
-                                _ => {}
-                            }
-                        }
+                        activate_row(sel, true);
+                        *bump.write() += 1;
                     }
                     _ => {}
                 }
@@ -187,15 +105,18 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
+    // 读取 bump 强制 ratatui-kit 把这个值当作依赖（无此 read 调用则不会重渲染）
+    let _ = *bump.read();
+
     // ---- Render ----
     let sel = *cursor.read();
-    let yolo_val = *yolo.read();
-    let auto_compact_val = *auto_compact.read();
-    let show_diff_val = *show_diff.read();
-    let perm_val = *perm_idx.read();
-    let model_val = *model_idx.read();
-    let provider_val = *provider_idx.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
+
+    lines.push(Line::from(vec![Span::styled(
+        "  Configuration (persisted to ~/.peri/settings.json)",
+        Style::new().fg(theme::MUTED).italic(),
+    )]));
+    lines.push(Line::from(""));
 
     for (i, (label, row_type)) in CONFIG_ROWS.iter().enumerate() {
         let is_active = i == sel;
@@ -208,12 +129,7 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
         let value_line = match row_type {
             RowType::Toggle => {
-                let val = match i {
-                    ROW_YOLO => yolo_val,
-                    ROW_AUTO_COMPACT => auto_compact_val,
-                    ROW_SHOW_DIFF => show_diff_val,
-                    _ => false,
-                };
+                let val = read_toggle(i);
                 let (on_text, off_text) = if val {
                     ("[ON]", " OFF")
                 } else {
@@ -238,26 +154,20 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ])
             }
             RowType::Cycle(options) => {
-                let idx = match i {
-                    ROW_PERMISSION => perm_val,
-                    ROW_MODEL => model_val,
-                    ROW_PROVIDER => provider_val,
-                    _ => 0,
-                };
+                let idx = read_cycle_idx(i, options);
                 let mut spans = vec![
                     Span::styled(cursor_mark, Style::new().fg(theme::THINKING)),
                     Span::styled(format!("{:<22}", label), label_style),
                 ];
                 for (j, opt) in options.iter().enumerate() {
-                    let display = if i == ROW_MODEL { MODEL_LABELS[j] } else { opt };
                     if j == idx {
                         spans.push(Span::styled(
-                            format!("[{}]", display),
+                            format!("[{}]", opt),
                             Style::new().fg(theme::SAGE).bold(),
                         ));
                     } else {
                         spans.push(Span::styled(
-                            format!(" {}", display),
+                            format!(" {}", opt),
                             Style::new().fg(theme::MUTED),
                         ));
                     }
@@ -267,48 +177,17 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 Line::from(spans)
             }
-            RowType::Text => {
-                let display = match i {
-                    ROW_THRESHOLD => {
-                        let v = threshold.read().clone();
-                        if v.is_empty() {
-                            String::from("(empty)")
-                        } else {
-                            v
-                        }
-                    }
-                    ROW_MAX_ITER => {
-                        let v = max_iter.read().clone();
-                        if v.is_empty() {
-                            String::from("(empty)")
-                        } else {
-                            v
-                        }
-                    }
-                    _ => String::new(),
-                };
-                Line::from(vec![
-                    Span::styled(cursor_mark, Style::new().fg(theme::THINKING)),
-                    Span::styled(format!("{:<22}", label), label_style),
-                    Span::styled(
-                        display,
-                        if is_active {
-                            Style::new().fg(theme::ACCENT).bold()
-                        } else {
-                            Style::new().fg(theme::TEXT)
-                        },
-                    ),
-                ])
-            }
         };
         lines.push(value_line);
     }
 
     // Footer hints
     lines.push(Line::from(""));
-    lines.push(
-        Line::from("  j/k Navigate  Space Toggle  ←→ Cycle  Enter Edit  q Close").fg(theme::DIM),
-    );
+    lines.push(Line::from(vec![
+        Span::styled("  j/k Nav  ", Style::new().fg(theme::DIM)),
+        Span::styled("Space/Enter Toggle", Style::new().fg(theme::ACCENT)),
+        Span::styled("  ←→ Cycle  q Close", Style::new().fg(theme::DIM)),
+    ]));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
@@ -320,8 +199,8 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .fg(theme::THINKING)
                 .bold()
                 .centered(),
-            width: Constraint::Length(50),
-            height: Constraint::Length(18),
+            width: Constraint::Length(80),
+            height: Constraint::Length(20),
         ) {
             ScrollView(
                 scroll_bars: ScrollBars::default(),
@@ -335,45 +214,175 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 }
 
 // ---------------------------------------------------------------------------
-// Event helpers
+// 真实读写：通过 PERI_CONFIG_HANDLE / PERMISSION_MODE_HANDLE 操作
 // ---------------------------------------------------------------------------
 
-fn toggle_row(sel: usize, yolo: &State<bool>, auto_compact: &State<bool>, show_diff: &State<bool>) {
-    match sel {
-        ROW_YOLO => *yolo.write() = !*yolo.read(),
-        ROW_AUTO_COMPACT => *auto_compact.write() = !*auto_compact.read(),
-        ROW_SHOW_DIFF => *show_diff.write() = !*show_diff.read(),
-        _ => {}
+/// 读取 toggle 字段当前值（true=ON / false=OFF）。
+fn read_toggle(row: usize) -> bool {
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return false;
+    };
+    let cfg = handle.read();
+    match row {
+        ROW_SHOW_DIFF => cfg.config.diff_enabled,
+        ROW_CACHE_WARN => cfg.config.show_cache_warning,
+        ROW_1M_CONTEXT => cfg.config.context_1m.unwrap_or(false),
+        _ => false,
     }
 }
 
-fn cycle_forward(
-    sel: usize,
-    options: &[&str],
-    perm_idx: &State<usize>,
-    model_idx: &State<usize>,
-    provider_idx: &State<usize>,
-) {
-    match sel {
-        ROW_PERMISSION => *perm_idx.write() = (*perm_idx.read() + 1) % options.len(),
-        ROW_MODEL => *model_idx.write() = (*model_idx.read() + 1) % options.len(),
-        ROW_PROVIDER => *provider_idx.write() = (*provider_idx.read() + 1) % options.len(),
-        _ => {}
+/// 读取 cycle 字段当前选项索引。
+fn read_cycle_idx(row: usize, options: &[&str]) -> usize {
+    match row {
+        ROW_STREAMING => {
+            let cur = PERI_CONFIG_HANDLE
+                .get()
+                .map(|h| h.read().config.streaming_mode.clone())
+                .unwrap_or_default()
+                .unwrap_or_else(|| "streaming".to_string());
+            options.iter().position(|o| *o == cur.as_str()).unwrap_or(0)
+        }
+        ROW_LANGUAGE => {
+            let cur = PERI_CONFIG_HANDLE
+                .get()
+                .map(|h| h.read().config.language.clone())
+                .unwrap_or_default()
+                .unwrap_or_else(|| "en".to_string());
+            options.iter().position(|o| *o == cur.as_str()).unwrap_or(0)
+        }
+        ROW_ACTIVE_ALIAS => {
+            let cur = PERI_CONFIG_HANDLE
+                .get()
+                .map(|h| h.read().config.active_alias.clone())
+                .unwrap_or_default();
+            if cur.is_empty() {
+                1 // default sonnet
+            } else {
+                options.iter().position(|o| *o == cur.as_str()).unwrap_or(1)
+            }
+        }
+        ROW_PERMISSION_MODE => {
+            let cur = PERMISSION_MODE_HANDLE
+                .get()
+                .map(|m| permission_mode_label(m.load()))
+                .unwrap_or("default");
+            options.iter().position(|o| *o == cur).unwrap_or(0)
+        }
+        _ => 0,
     }
 }
 
-fn cycle_backward(
-    sel: usize,
-    options: &[&str],
-    perm_idx: &State<usize>,
-    model_idx: &State<usize>,
-    provider_idx: &State<usize>,
-) {
-    let n = options.len();
-    match sel {
-        ROW_PERMISSION => *perm_idx.write() = (*perm_idx.read() + n - 1) % n,
-        ROW_MODEL => *model_idx.write() = (*model_idx.read() + n - 1) % n,
-        ROW_PROVIDER => *provider_idx.write() = (*provider_idx.read() + n - 1) % n,
-        _ => {}
+/// 激活某行：toggle 反转，cycle forward=true 前进 / forward=false 后退。
+fn activate_row(row: usize, forward: bool) {
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return;
+    };
+    let row_type = &CONFIG_ROWS[row].1;
+    match row_type {
+        RowType::Toggle => {
+            let mut cfg = handle.write();
+            match row {
+                ROW_SHOW_DIFF => cfg.config.diff_enabled = !cfg.config.diff_enabled,
+                ROW_CACHE_WARN => cfg.config.show_cache_warning = !cfg.config.show_cache_warning,
+                ROW_1M_CONTEXT => {
+                    let cur = cfg.config.context_1m.unwrap_or(false);
+                    cfg.config.context_1m = Some(!cur);
+                }
+                _ => {}
+            }
+            // drop guard before save（save 借 &cfg）
+            let cfg_snapshot = cfg.clone();
+            drop(cfg);
+            let _ = crate::config::save(&cfg_snapshot);
+        }
+        RowType::Cycle(options) => {
+            let cur_idx = read_cycle_idx(row, options);
+            let next = if forward {
+                (cur_idx + 1) % options.len()
+            } else {
+                (cur_idx + options.len() - 1) % options.len()
+            };
+            let new_val = options[next];
+            match row {
+                ROW_STREAMING => {
+                    let mut cfg = handle.write();
+                    cfg.config.streaming_mode = Some(new_val.to_string());
+                    let snap = cfg.clone();
+                    drop(cfg);
+                    let _ = crate::config::save(&snap);
+                }
+                ROW_LANGUAGE => {
+                    let mut cfg = handle.write();
+                    cfg.config.language = Some(new_val.to_string());
+                    let snap = cfg.clone();
+                    drop(cfg);
+                    let _ = crate::config::save(&snap);
+                }
+                ROW_ACTIVE_ALIAS => {
+                    let mut cfg = handle.write();
+                    cfg.config.active_alias = new_val.to_string();
+                    let snap = cfg.clone();
+                    drop(cfg);
+                    let _ = crate::config::save(&snap);
+                }
+                ROW_PERMISSION_MODE => {
+                    if let Some(mode_handle) = PERMISSION_MODE_HANDLE.get() {
+                        if let Some(mode) = parse_permission_mode(new_val) {
+                            mode_handle.store(mode);
+                        }
+                    }
+                    // permission_mode 不持久化到 settings.json（运行时状态）
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn close_panel() {
+    use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
+    if let Some(atom) = ACTIVE_PANEL.get() {
+        *atom.write() = None;
+    }
+    if let Some(atom) = OPEN_PANELS.get() {
+        atom.write().clear();
+    }
+}
+
+fn permission_mode_label(m: PermissionMode) -> &'static str {
+    match m {
+        PermissionMode::Default => "default",
+        PermissionMode::AcceptEdit => "accept-edit",
+        PermissionMode::AutoMode => "auto-mode",
+        PermissionMode::Bypass => "bypass",
+    }
+}
+
+fn parse_permission_mode(s: &str) -> Option<PermissionMode> {
+    match s {
+        "default" => Some(PermissionMode::Default),
+        "accept-edit" => Some(PermissionMode::AcceptEdit),
+        "auto-mode" => Some(PermissionMode::AutoMode),
+        "bypass" => Some(PermissionMode::Bypass),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_permission_mode_label_roundtrip() {
+        for &label in PERMISSION_OPTS {
+            let mode = parse_permission_mode(label).unwrap();
+            assert_eq!(permission_mode_label(mode), label);
+        }
+    }
+
+    #[test]
+    fn test_parse_permission_mode_unknown() {
+        assert!(parse_permission_mode("unknown").is_none());
+        assert!(parse_permission_mode("").is_none());
     }
 }

@@ -2,7 +2,7 @@
 
 TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTransport`（in-memory channel pair）与 ACP Server 通信，不直接依赖 `peri-agent`/`peri-middlewares` 的运行时路径（仅作为类型依赖）。
 
-## 当前架构（ratatui-kit 单路径，S1-S13 完成 + Iteration 13 增量）
+## 当前架构（ratatui-kit 单路径，S1-S13 完成 + Iteration 14 增量——所有面板接入真实数据）
 
 **单一路径**：`use-kit` feature 默认 ON。`main.rs` 调用 `kit::entry::run_kit_fullscreen(opts, panic_notify_rx)`，legacy `runtime/main_loop` / `state_machine` / `command/` / `panel/` / `ui/` / `render/` / `event/` 已全部物理删除（净减 ~18000 行）。
 
@@ -43,7 +43,9 @@ TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTran
 - `THREAD_LOAD_TX: String` —— ThreadBrowser Enter → thread_load_consumer
 
 **非 atom 全局句柄**：
-- `PERI_CONFIG_HANDLE: Arc<RwLock<PeriConfig>>` —— ModelPanel / 配置类操作直接 write；ACP server 持同一 Arc，立即生效
+- `PERI_CONFIG_HANDLE: Arc<RwLock<PeriConfig>>` —— ModelPanel / LoginPanel / ConfigPanel 直接 write；ACP server 持同一 Arc，立即生效
+- `PERMISSION_MODE_HANDLE: Arc<SharedPermissionMode>` —— ConfigPanel 切换 permission_mode 直接 store
+- `CRON_SCHEDULER_HANDLE: Arc<Mutex<CronScheduler>>` —— CronPanel 直接 toggle/remove；service_snapshot 下次 tick 自动刷新 CRON_JOBS atom
 
 ## 输入框（InputArea，kit/input_area.rs）
 
@@ -76,19 +78,19 @@ TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTran
 | Panel | 数据源 | 切换功能 |
 |-------|--------|----------|
 | **Model** | SERVICE_SNAPSHOT + 静态 MODEL_ALIASES | ✅ Enter 修改 `PERI_CONFIG_HANDLE.active_alias` |
-| **Login** | 静态 mock | 只读 |
-| **Agent** | 静态 mock | 只读 |
-| **Hooks** | 静态 mock | 只读 |
-| **Config** | 静态 mock | 编辑本地状态（无持久化） |
+| **Login** | PROVIDER_LIST atom（H1f） | ✅ Enter 切换 `active_provider_id` + 持久化 |
+| **Agent** | SERVICE_SNAPSHOT + PERI_CONFIG_HANDLE + VIEW_MODELS（H1e） | 只读 |
+| **Hooks** | HOOK_LIST atom（H1b） | 只读 |
+| **Config** | PERI_CONFIG_HANDLE + PERMISSION_MODE_HANDLE（H1a） | ✅ 切换 + 持久化到 settings.json |
 | **ThreadBrowser** | THREAD_LIST atom | ✅ Enter 通过 THREAD_LOAD_TX 调用 `load_session` |
-| **Mcp** | 静态 mock | 只读 |
-| **Plugin** | 静态 mock | 只读 |
-| **Cron** | CRON_JOBS atom | toggle/delete UI 但无 RPC |
-| **Tasks** | 静态 mock | 只读 |
-| **Status** | SERVICE_SNAPSHOT atom | CPU/MEM/context 部分 placeholder |
-| **Memory** | 静态 mock | 只读 |
-| **Betas** | 静态 mock | Space toggle 无持久化 |
-| **Workflow** | 静态 mock | 只读 |
+| **Mcp** | MCP_SERVERS + SERVICE_SNAPSHOT.mcp（H1d） | 只读 |
+| **Plugin** | PLUGIN_LIST atom（H1c） | 只读 |
+| **Cron** | CRON_JOBS atom + CRON_SCHEDULER_HANDLE（H1g+） | ✅ Enter toggle / d+Enter delete |
+| **Tasks** | CRON_JOBS + VIEW_MODELS SubAgentGroup（H1g） | 只读总览 |
+| **Status** | SERVICE_SNAPSHOT + VIEW_MODELS 派生（H1a+） | 只读，Service + Context 双 Tab |
+| **Memory** | MEMORY_LIST atom（H1h） | ✅ Enter 调用 `$EDITOR` 打开文件 |
+| **Betas** | 构建期 feature flags | 只读 |
+| **Workflow** | VIEW_MODELS SubAgent 计数 + 外部 CLI 说明 | 只读 |
 | **SetupWizard** | App.global_ui | 配置向导（首次启动触发） |
 
 面板栈互斥组（MutexGroup）：Settings / Agent / Tools / Info / Thread。打开新面板按栈压入；关闭弹栈。

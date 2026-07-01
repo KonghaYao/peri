@@ -31,8 +31,10 @@ use tracing::{debug, warn};
 
 use crate::app::service_registry::{ProcessResourceMonitor, SharedPeriConfig};
 use crate::kit::atoms::{
-    AcpStateSnapshot, CRON_JOBS, CronJobSummary, FILE_LIST, McpInitPhase, McpStatusSnapshot,
-    SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST, ThreadSummary,
+    AcpStateSnapshot, CRON_JOBS, CronJobSummary, FILE_LIST, HOOK_LIST, HookSummary, MCP_SERVERS,
+    MEMORY_LIST, McpInitPhase, McpServerSummary, McpStatusSnapshot, MemoryEntry, PLUGIN_LIST,
+    PROVIDER_LIST, PluginSummary, ProviderSummary, SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST,
+    ThreadSummary,
 };
 use crate::thread::ThreadStore;
 
@@ -54,6 +56,10 @@ pub struct SnapshotSource {
     /// 独立的进程监控器（采样进程级数据，多实例不影响正确性）。
     /// 用 `Arc<Mutex<_>>` 让 task 间共享，避免每 tick 重建。
     pub resource_monitor: Arc<Mutex<ProcessResourceMonitor>>,
+    /// H1b/c/f：插件加载结果（启动时一次性派生的静态数据）
+    pub hooks: Vec<HookSummary>,
+    pub plugins: Vec<PluginSummary>,
+    pub providers: Vec<ProviderSummary>,
 }
 
 /// 启动 service snapshot 后台任务。
@@ -155,6 +161,19 @@ async fn tick_once(src: &SnapshotSource) -> Result<(), Box<dyn std::error::Error
             }
         };
 
+    // ── 6c. H1d: MCP server 详细列表（从 pool 派生） ───────────────────
+    let mcp_servers: Vec<McpServerSummary> = derive_mcp_servers(&src.mcp_pool);
+
+    // ── 6d. H1h: ~/.claude/memory 文件扫描 ──────────────────────────────
+    let memory_entries: Vec<MemoryEntry> = match tokio::task::spawn_blocking(scan_memory_dir).await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            warn!(error = %e, "service_snapshot: spawn_blocking for memory scan failed");
+            Vec::new()
+        }
+    };
+
     // ── 7. 写入 atoms ───────────────────────────────────────────────────
     let snap = ServiceSnapshot {
         cwd: src.cwd.clone(),
@@ -179,6 +198,24 @@ async fn tick_once(src: &SnapshotSource) -> Result<(), Box<dyn std::error::Error
     }
     if let Some(atom) = FILE_LIST.get() {
         *atom.write() = files;
+    }
+    // H1 系列：静态数据每 tick 也写一次（plugin_data 在 launch 时派生到 src，
+    // 这里直接 copy；MCP server 详细列表每 tick 重新派生以反映连接状态变化；
+    // Memory 列表每 tick 重新扫描）
+    if let Some(atom) = HOOK_LIST.get() {
+        *atom.write() = src.hooks.clone();
+    }
+    if let Some(atom) = PLUGIN_LIST.get() {
+        *atom.write() = src.plugins.clone();
+    }
+    if let Some(atom) = PROVIDER_LIST.get() {
+        *atom.write() = src.providers.clone();
+    }
+    if let Some(atom) = MCP_SERVERS.get() {
+        *atom.write() = mcp_servers;
+    }
+    if let Some(atom) = MEMORY_LIST.get() {
+        *atom.write() = memory_entries;
     }
 
     Ok(())
@@ -342,6 +379,80 @@ fn derive_provider_and_model(peri_config: &SharedPeriConfig) -> (String, String)
     (provider_type, active_alias)
 }
 
+/// 从 `McpClientPool` 派生详细 MCP server 列表（H1d）。
+fn derive_mcp_servers(pool: &Option<Arc<McpClientPool>>) -> Vec<McpServerSummary> {
+    let Some(p) = pool else {
+        return Vec::new();
+    };
+    p.all_server_infos()
+        .into_iter()
+        .map(|info| McpServerSummary {
+            name: info.name.clone(),
+            status: format!("{:?}", info.status).to_lowercase(),
+            transport: info.transport_type.clone(),
+            tools_count: info.tool_count,
+        })
+        .collect()
+}
+
+/// 扫描 ~/.claude/memory 目录（H1h）。
+///
+/// 返回每个文件的相对路径、字节数、最后修改时间。失败时返回空 Vec。
+fn scan_memory_dir() -> Vec<MemoryEntry> {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let Some(home) = dirs_next::home_dir() else {
+        return Vec::new();
+    };
+    let mem_dir: PathBuf = home.join(".claude").join("memory");
+    if !mem_dir.exists() || !mem_dir.is_dir() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<MemoryEntry> = Vec::new();
+    let entries = match fs::read_dir(&mem_dir) {
+        Ok(it) => it,
+        Err(_) => return Vec::new(),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        // 只看 .md 文件
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&mem_dir)
+            .ok()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if rel.is_empty() {
+            continue;
+        }
+        let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| {
+                let dt: chrono::DateTime<chrono::Utc> = t.into();
+                Some(dt)
+            });
+        out.push(MemoryEntry {
+            path: rel,
+            size_bytes,
+            modified,
+        });
+        if out.len() >= 200 {
+            break;
+        }
+    }
+    out
+}
+
 /// 从 `McpClientPool` + `McpInitStatus` watch 派生 MCP 池状态。
 fn derive_mcp_status(
     pool: &Option<Arc<McpClientPool>>,
@@ -424,6 +535,9 @@ mod tests {
             mcp_pool: None,
             mcp_init_rx: None,
             resource_monitor: monitor,
+            hooks: Vec::new(),
+            plugins: Vec::new(),
+            providers: Vec::new(),
         }
     }
 

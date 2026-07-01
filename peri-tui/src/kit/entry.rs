@@ -47,6 +47,12 @@ pub async fn run_kit_fullscreen(
     // 2b. H2: 把 peri_config 共享句柄塞到全局 OnceLock，让 ModelPanel 等组件
     //     在 #[component] 闭包里能直接 write active_alias。ACP server 持同一 Arc。
     let _ = atoms::PERI_CONFIG_HANDLE.set(app.services.peri_config.clone());
+    // 2c. H1a: 把 SharedPermissionMode 句柄塞到全局 OnceLock，让 ConfigPanel
+    //     能切换 permission_mode。ServiceRegistry + ACP server 持同一 Arc。
+    let _ = atoms::PERMISSION_MODE_HANDLE.set(app.services.permission_mode.clone());
+    // 2d. H1g: 把 CronScheduler 共享句柄塞到全局 OnceLock，让 CronPanel
+    //     能直接 toggle/remove。service_snapshot 下次 tick 自动派生新列表。
+    let _ = atoms::CRON_SCHEDULER_HANDLE.set(app.services.cron.scheduler.clone());
 
     let shutdown = CancellationToken::new();
 
@@ -105,7 +111,64 @@ pub async fn run_kit_fullscreen(
 /// 避免 `ServiceRegistry.resource_monitor: Mutex<ProcessResourceMonitor>`（非 Arc）
 /// 的所有权冲突。
 fn build_snapshot_source(app: &crate::app::App) -> SnapshotSource {
+    use crate::kit::atoms::{HookSummary, PluginSummary, ProviderSummary};
+
     let s = &app.services;
+
+    // H1b/c: 从 plugin_data 一次性派生 hooks/plugins 静态列表
+    let (hooks, plugins) = match &s.plugin_data {
+        Some(pd) => {
+            let hooks: Vec<HookSummary> = pd
+                .all_hooks
+                .iter()
+                .map(|h| HookSummary {
+                    event: format!("{:?}", h.event).to_lowercase(),
+                    plugin_name: h.plugin_name.clone(),
+                    command: format!("{:?}", h.hook).chars().take(120).collect(),
+                    matcher: h.matcher.clone(),
+                })
+                .collect();
+            let plugins: Vec<PluginSummary> = pd
+                .plugins
+                .iter()
+                .map(|p| PluginSummary {
+                    name: p.name.clone(),
+                    version: p.version.clone(),
+                    enabled: true, // 已加载的插件即视为 enabled
+                    root: p.install_path.display().to_string(),
+                    description: p.manifest.description.clone(),
+                })
+                .collect();
+            (hooks, plugins)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+
+    // H1f: 从 peri_config 派生 providers
+    let providers: Vec<ProviderSummary> = {
+        let cfg = s.peri_config.read();
+        cfg.config
+            .providers
+            .iter()
+            .map(|p| {
+                let env_key = format!("{}_API_KEY", p.provider_type.to_uppercase());
+                let has_api_key = !p.api_key.is_empty() || std::env::var(env_key).is_ok();
+                let base_url = if p.base_url.is_empty() {
+                    None
+                } else {
+                    Some(p.base_url.clone())
+                };
+                ProviderSummary {
+                    id: p.id.clone(),
+                    provider_type: p.provider_type.clone(),
+                    is_active: p.id == cfg.config.active_provider_id,
+                    has_api_key,
+                    base_url,
+                }
+            })
+            .collect()
+    };
+
     SnapshotSource {
         cwd: s.cwd.clone(),
         thread_store: s.thread_store.clone(),
@@ -115,5 +178,8 @@ fn build_snapshot_source(app: &crate::app::App) -> SnapshotSource {
         mcp_pool: s.mcp_pool.clone(),
         mcp_init_rx: s.mcp_init_rx.clone(),
         resource_monitor: Arc::new(Mutex::new(ProcessResourceMonitor::new())),
+        hooks,
+        plugins,
+        providers,
     }
 }

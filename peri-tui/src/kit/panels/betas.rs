@@ -61,6 +61,7 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     return;
                 }
                 match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
                     KeyCode::Up | KeyCode::Char('k') => {
                         let mut s = selected.write();
                         *s = s.saturating_sub(1);
@@ -71,10 +72,6 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             *s = (*s + 1).min(count - 1);
                         }
                     }
-                    KeyCode::Char(' ') => {
-                        // TODO Phase 8: toggle feature via Atom write
-                    }
-                    // Esc: Phase 8 通过 use_input_layer 实现模态面板关闭
                     _ => {}
                 }
             }
@@ -85,7 +82,9 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     // Hint line
-    lines.push(Line::from("  Changes take effect in new sessions").fg(theme::MUTED));
+    lines.push(
+        Line::from("  (read-only — feature flags are configured at build time)").fg(theme::MUTED),
+    );
     lines.push(Line::from(""));
 
     for (i, entry) in BETA_ENTRIES.iter().enumerate() {
@@ -121,7 +120,7 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Footer hints
     lines.push(Line::from(""));
-    lines.push(Line::from("  Space) Toggle  Esc) Close").fg(theme::DIM));
+    lines.push(Line::from("  j/k) Navigate  Esc) Close").fg(theme::DIM));
 
     let content = if lines.is_empty() {
         Paragraph::new(Line::from("  (empty)").fg(theme::MUTED))
@@ -143,4 +142,14 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Text(text: content)
         }
     )
+}
+
+fn close_panel() {
+    use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
+    if let Some(atom) = ACTIVE_PANEL.get() {
+        *atom.write() = None;
+    }
+    if let Some(atom) = OPEN_PANELS.get() {
+        atom.write().clear();
+    }
 }

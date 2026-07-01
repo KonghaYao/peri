@@ -130,6 +130,65 @@ pub struct CronJobSummary {
     pub next_fire: Option<DateTime<Utc>>,
 }
 
+/// H1b：Hook 条目投影——从 `peri_middlewares::hooks::RegisteredHook` 派生
+///
+/// service_snapshot tick 把 SnapshotSource.hooks（启动时一次性派生）拷贝到
+/// `HOOK_LIST` atom。Hooks 面板从这里读真实数据。
+#[derive(Debug, Clone, Default)]
+pub struct HookSummary {
+    pub event: String,
+    pub plugin_name: String,
+    pub command: String,
+    pub matcher: Option<String>,
+}
+
+/// H1c：Plugin 条目投影——从 `peri_middlewares::plugin::LoadedPlugin` 派生
+#[derive(Debug, Clone, Default)]
+pub struct PluginSummary {
+    pub name: String,
+    pub version: String,
+    pub enabled: bool,
+    pub root: String,
+    pub description: String,
+}
+
+/// H1d：MCP server 详细状态投影——从 `McpClientPool.all_server_infos` 派生
+#[derive(Debug, Clone, Default)]
+pub struct McpServerSummary {
+    pub name: String,
+    pub status: String,
+    pub transport: String,
+    pub tools_count: usize,
+}
+
+/// H1e：SubAgent 运行时状态投影——从 `SubAgentStatusMap` 派生
+#[derive(Debug, Clone, Default)]
+pub struct SubagentSummary {
+    pub agent_id: String,
+    pub display_name: String,
+    pub is_running: bool,
+    pub total_steps: usize,
+    pub status_text: String,
+}
+
+/// H1f：Provider 配置投影——从 `PeriConfig.providers` 派生
+#[derive(Debug, Clone, Default)]
+pub struct ProviderSummary {
+    pub id: String,
+    pub provider_type: String,
+    pub is_active: bool,
+    pub has_api_key: bool,
+    pub base_url: Option<String>,
+}
+
+/// H1h：Memory 文件投影——从 ~/.claude/memory 扫描派生
+#[derive(Debug, Clone, Default)]
+pub struct MemoryEntry {
+    pub path: String,
+    pub size_bytes: u64,
+    pub modified: Option<DateTime<Utc>>,
+}
+
 // ── 全局 Atom 声明（OnceLock 延迟初始化） ──
 
 pub static ACP_STATE: OnceLock<Atom<AcpStateSnapshot>> = OnceLock::new();
@@ -164,6 +223,24 @@ pub static THREAD_LIST: OnceLock<Atom<Vec<ThreadSummary>>> = OnceLock::new();
 
 /// Cron 任务列表（Cron 面板用）
 pub static CRON_JOBS: OnceLock<Atom<Vec<CronJobSummary>>> = OnceLock::new();
+
+/// H1b：Hooks 列表（Hooks 面板用）
+pub static HOOK_LIST: OnceLock<Atom<Vec<HookSummary>>> = OnceLock::new();
+
+/// H1c：Plugin 列表（Plugin 面板用）
+pub static PLUGIN_LIST: OnceLock<Atom<Vec<PluginSummary>>> = OnceLock::new();
+
+/// H1d：MCP server 详细列表（Mcp 面板用，比 SERVICE_SNAPSHOT.mcp 更详细）
+pub static MCP_SERVERS: OnceLock<Atom<Vec<McpServerSummary>>> = OnceLock::new();
+
+/// H1e：SubAgent 运行时列表（Agent 面板用）
+pub static SUBAGENT_LIST: OnceLock<Atom<Vec<SubagentSummary>>> = OnceLock::new();
+
+/// H1f：Provider 配置列表（Login 面板用）
+pub static PROVIDER_LIST: OnceLock<Atom<Vec<ProviderSummary>>> = OnceLock::new();
+
+/// H1h：Memory 文件列表（Memory 面板用）
+pub static MEMORY_LIST: OnceLock<Atom<Vec<MemoryEntry>>> = OnceLock::new();
 
 /// 当前打开的面板栈（栈顶 = ACTIVE_PANEL）。空 Vec 表示无面板打开。
 /// 同 MutexGroup 面板不可同时存在——这个约束由 panel_open/close 命令保证。
@@ -244,6 +321,25 @@ pub static PERI_CONFIG_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::RwLock<crate::config::PeriConfig>>,
 > = OnceLock::new();
 
+/// H1a：全局 PermissionMode 共享句柄——Config 面板切换 permission_mode 时直接 store。
+///
+/// 来自 `ServiceRegistry.permission_mode: Arc<SharedPermissionMode>`。ConfigPanel /
+/// Status Bar 均通过此句柄读写。service_snapshot tick 派生
+/// SERVICE_SNAPSHOT.permission_mode 字符串投影刷新 UI。
+pub static PERMISSION_MODE_HANDLE: OnceLock<
+    std::sync::Arc<peri_middlewares::prelude::SharedPermissionMode>,
+> = OnceLock::new();
+
+/// H1g：全局 CronScheduler 共享句柄——Cron 面板 toggle/delete 时直接调用。
+///
+/// 来自 `SnapshotSource.cron_scheduler: Arc<Mutex<CronScheduler>>`，由 entry.rs
+/// 启动 service_snapshot 时同步 set 到此 OnceLock。CronPanel 用它直接执行
+/// `scheduler.toggle(id)` / `scheduler.remove(id)`——service_snapshot 下次 tick
+/// 自动派生新列表写入 CRON_JOBS atom 刷新 UI（延迟 ≤2s）。
+pub static CRON_SCHEDULER_HANDLE: OnceLock<
+    std::sync::Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>,
+> = OnceLock::new();
+
 /// 初始化所有全局 Atom。
 ///
 /// 必须在 tokio 运行时启动后、任何组件渲染前调用。
@@ -260,6 +356,12 @@ pub fn init_atoms() {
     SERVICE_SNAPSHOT.get_or_init(|| Atom::new(ServiceSnapshot::default()));
     THREAD_LIST.get_or_init(|| Atom::new(Vec::new()));
     CRON_JOBS.get_or_init(|| Atom::new(Vec::new()));
+    HOOK_LIST.get_or_init(|| Atom::new(Vec::new()));
+    PLUGIN_LIST.get_or_init(|| Atom::new(Vec::new()));
+    MCP_SERVERS.get_or_init(|| Atom::new(Vec::new()));
+    SUBAGENT_LIST.get_or_init(|| Atom::new(Vec::new()));
+    PROVIDER_LIST.get_or_init(|| Atom::new(Vec::new()));
+    MEMORY_LIST.get_or_init(|| Atom::new(Vec::new()));
     OPEN_PANELS.get_or_init(|| Atom::new(Vec::new()));
     ACTIVE_PANEL.get_or_init(|| Atom::new(None));
     POPUP_KIND.get_or_init(|| Atom::new(None));
