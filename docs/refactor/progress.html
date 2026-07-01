@@ -114,23 +114,28 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #43（Phase 2.6 step 7e.6 + Bundle 2 item 1 — 退役 ToolStart/End v1 main-agent 路径死代码：ACP 通过 <code>peri/agent_event</code> (v1) + <code>peri/unstable-event</code> (v2) 双通道发送相同 <code>ExecutorEvent</code>，v1 main-agent ToolStart/End push 在生产中已被 v2 state.view 独占渲染完全取代，是死代码）<br>
-  <strong>本窗口成果</strong>：1 个本地 commit（0abfcb9a，不 push）：<br>
-  · <strong>Retirement（peri-tui，agent_ops/mod.rs）</strong>：ToolStart 处理 main-agent 路径删除 <code>apply_add_message(tool_vm)</code> + <code>request_rebuild()</code>；ToolEnd 处理删除 v1 scan-loop + v1 push fallback（保留 spinner 更新 + SubAgent 孤儿 append 兜底）。<br>
-  · <strong><code>apply_add_message</code> 标记 <code>#[cfg(test)]</code></strong>（agent_render.rs:29-35）：所有生产调用方已退役（ToolStart 唯一活跃路径）。仅剩测试 fixture 使用（headless_test.rs 为 ~36 个兼容性测试 seed view_messages）。将随 view_messages 字段在 step 7e.9 一并删除。<br>
-  · <strong>测试迁移（peri-tui，headless_test.rs）</strong>：6 个测试从 <code>AgentEvent::ToolStart</code> 事件源切换到直接 <code>apply_add_message(MessageViewModel::tool_block(...))</code> seed：<br>
-  &nbsp;&nbsp;① <code>test_tool_call_renders</code>（line 36）— 事件 seed → apply_add_message seed<br>
-  &nbsp;&nbsp;② <code>test_tool_call_message_visible_when_toggled</code>（line 95）— 事件 + toggle → apply_add_message + toggle<br>
-  &nbsp;&nbsp;③ <code>test_tool_call_without_assistant_chunk_no_bubble</code>（line 201）— 事件 → apply_add_message<br>
-  &nbsp;&nbsp;④ <code>test_tool_then_text_preserves_tool_block</code>（line 1037）— 事件 + AI VM → apply_add_message + apply_add_message(AI)<br>
-  &nbsp;&nbsp;⑤ <code>test_source_agent_id_none_falls_back_to_main_stream</code>（line 2153）— ToolBlock 不应出现在 v1 view_messages<br>
-  &nbsp;&nbsp;⑥ <code>test_source_agent_id_unknown_falls_back_to_main_stream</code>（line 2184）— 同上<br>
-  · <strong>当前累积缺陷轨迹</strong>：17 → 10 → 7 → 3 → 2 → 1 → 1 → 1 → 1 主 + 9 ACP-gated → 1 主 + 9 ACP-gated + 3 Bundle-2 → 1 主 + 9 ACP-gated + 1 Bundle-2 → 1 主 + 9 ACP-gated + 0 Bundle-2（Cron #42）→ <strong>1 主 + 9 ACP-gated + 0 Bundle-2（Cron #43 完成全部 Bundle 2）</strong>。<br>
-  · <strong>Phase 2.6 step 7e 进度</strong>：7e.1 ✓ / 7e.2 ✓ / 7e.3 ✓ / 7e.4 ✓ / 7e.5 ✓ / <strong>7e.6 ✓（Cron #43）</strong> / 7e.7 ✓。<strong>剩余 2 个子步骤（7e.8/9）</strong>。<br>
-  · <strong>apply_add_message 剩余调用方</strong>：<strong>0 生产调用方</strong>（标记 <code>#[cfg(test)]</code>），仅 ~30+ headless_test 兼容性测试 seed。<br>
-  · <strong>apply_rebuild_all 剩余调用方</strong>：<strong>仅 1 处活跃</strong>（mod.rs:365 TurnCommitted sync — 为 ~30 个 headless 测试提供 view_messages 数据源；生产渲染独占读 v2 state.view，故此调用是 test-only load-bearing，将随 view_messages 字段在 step 7e.9 一并删除）。<br>
-  <strong>当前状态</strong>：<strong>1131 测试全过</strong> · ToolStart/End v1 main-agent 路径退役 · <code>apply_add_message</code> 标记 <code>#[cfg(test)]</code> · Bundle 2 全部清零 · <strong>距离 view_messages 字段删除仅差 step 7e.8（subagent path） + 7e.9（删除字段 + 迁移 ~30 测试）</strong><br>
-  <strong>下一步</strong>：① SubAgent v1 path 审计（agent_ops/mod.rs:handle_subagent_* — 检查是否有 v1 push 残留）② headless_test.rs ~30 测试迁移到 state.view 路径（解锁 mod.rs:365 退役 + apply_add_message 删除）③ 删除 view_messages 字段（step 7e.9，依赖 ②）④ subagent render-misroute（architectural SubAgentGroupData instance_id）
+  <strong>最后更新</strong>：2026-07-01 cron #44（Phase 2.6 step 7e.8 audit + TurnInterrupted Render fix：审计发现 <code>state_machine/transitions/streaming.rs:108 TurnInterrupted</code> 处理器返回 <code>Vec::new()</code> 而非 <code>vec![Effect::Render]</code>，与同文件 line 84-85 的 TurnDone 不对称；当前由 v1 <code>handle_acp_event</code> 兜底掩盖，Phase 2.6 退役 v1 后会变为可见闪烁）<br>
+  <strong>本窗口成果</strong>：2 个本地 commit（16374d09 + dashboard，不 push）：<br>
+  · <strong>Audit workflow（Explore agent ae36e3bd158ddc169）</strong>：全量扫描 SM transitions / runtime / keyboard / render / agent_ops。发现 3 个 P2 bug：<br>
+  &nbsp;&nbsp;① <strong>TurnInterrupted missing Render</strong>（FIXED 本窗口）— streaming.rs:108 返回 Vec::new() 导致 spinner 闪烁中间态<br>
+  &nbsp;&nbsp;② <strong>Dual Esc quit trackers</strong>（DEFERRED）— v2 DoubleEscTracker (500ms 触发 Quit) + v1 rewind_pending_since (2s 触发 rewind) 同时执行；fast double-tap 会先弹 rewind 再退出，UX 不一致<br>
+  &nbsp;&nbsp;③ <strong>SM prediction dead code</strong>（DEFERRED）— idle.rs:113 + streaming.rs:129 写入 <code>state.input.prediction</code>，但生产 render 读 <code>app.session_mgr.current().ui.prediction</code>（v1 字段）；SM 字段误导性死代码，需 wire render 或删除<br>
+  · <strong>Fix（peri-tui，streaming.rs:88-118）</strong>：<code>TurnInterrupted</code> 处理器返回值从 <code>Vec::new()</code> 改为 <code>vec![Effect::Render]</code>。注释说明与 TurnDone line 84-85 的对称性：<code>current_turn</code> 被 deactivate（spinner 消失）+ streaming ViewModels 持久化到 state.view（新内容），不重绘会留中间态直到下个 Tick。<br>
+  · <strong>新增回归测试（peri-tui，streaming.rs:553-580）</strong>：<code>test_turn_interrupted_emits_render_to_avoid_flicker</code> — 镜像 <code>test_turn_done_emits_render_to_avoid_flicker</code>（Cron #36），验证 Render effect 存在。<br>
+  · <strong>Phase 2.6 step 7e.8（SubAgent v1 path audit）</strong>：<strong>已确认 clean</strong>。检查 agent_ops/mod.rs + subagent.rs：<br>
+  &nbsp;&nbsp;① handle_subagent_start：SubAgentGroup push 已在 Cron #29 step 6 退役 ✓<br>
+  &nbsp;&nbsp;② ToolStart/End with source_agent_id：通过 <code>subagent_status.append_child_message</code> 路由（v2 权威源，非 v1 push）✓<br>
+  &nbsp;&nbsp;③ AssistantChunk with source_agent_id：early return 仅 request_rebuild ✓<br>
+  &nbsp;&nbsp;④ StateSnapshot：subagent_depth > 0 时 early return ✓<br>
+  &nbsp;&nbsp;⑤ TurnCommitted：subagent_depth > 0 时 early return ✓<br>
+  · <strong>当前累积缺陷轨迹</strong>：17 → 10 → 7 → 3 → 2 → 1 → 1 → 1 → 1 主 + 9 ACP-gated → 1 主 + 9 ACP-gated + 3 Bundle-2 → 1 主 + 9 ACP-gated + 1 Bundle-2 → 1 主 + 9 ACP-gated + 0 Bundle-2（Cron #42）→ 1 主 + 9 ACP-gated + 0 Bundle-2（Cron #43）→ <strong>1 主 + 9 ACP-gated + 0 Bundle-2 + 2 新发现（Cron #44 修复 1 个，defer 2 个）</strong>。<br>
+  · <strong>Phase 2.6 step 7e 进度</strong>：7e.1 ✓ / 7e.2 ✓ / 7e.3 ✓ / 7e.4 ✓ / 7e.5 ✓ / 7e.6 ✓ / 7e.7 ✓ / <strong>7e.8 ✓（Cron #44 audit clean）</strong>。<strong>剩余 1 个子步骤（7e.9 — 删除 view_messages 字段 + 迁移 ~30 headless 测试）</strong>。<br>
+  <strong>当前状态</strong>：<strong>1132 测试全过</strong>（1131 + 1 新增 TurnInterrupted Render 回归）· SubAgent v1 path 审计 clean · TurnInterrupted Render 修复（防御 v1 退役后的潜在闪烁）<br>
+  <strong>下一步</strong>：① Dual Esc trackers 架构清理（移除 v2 SM 的 DoubleEscTracker 或统一阈值）② SM prediction 死代码清理（wire render 或删除 SM handler）③ headless_test.rs ~30 测试迁移到 state.view 路径（解锁 mod.rs:365 退役 + apply_add_message 删除）④ 删除 view_messages 字段（step 7e.9，依赖 ③）⑤ subagent render-misroute（architectural SubAgentGroupData instance_id）
+</div>
+
+<div class="meta">
+  <strong>历史 - cron #43</strong>（commit 0abfcb9a + 5d07da8f）：Phase 2.6 step 7e.6 + Bundle 2 item 1 — 退役 ToolStart/End v1 main-agent 路径死代码。ACP 通过 <code>peri/agent_event</code> (v1) + <code>peri/unstable-event</code> (v2) 双通道发送相同 <code>ExecutorEvent</code>，v1 main-agent ToolStart/End push 在生产中已被 v2 state.view 独占渲染完全取代，是死代码。<code>apply_add_message</code> 标记 <code>#[cfg(test)]</code>，6 个 headless 测试迁移到直接 seed。
 </div>
 
 <div class="meta">
