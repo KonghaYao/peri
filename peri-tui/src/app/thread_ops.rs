@@ -212,10 +212,8 @@ impl App {
             });
         }
         crate::alloc_config::alloc_collect();
-
         // P5: sync rendering, no render_tx Clear needed
     }
-
 }
 
 #[cfg(test)]
