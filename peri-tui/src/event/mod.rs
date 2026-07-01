@@ -415,7 +415,11 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
             app.session_mgr.current_mut().ui.text_selection.clear();
         }
         Event::Key(key_event) => {
-            return keyboard::handle_key_event(app, key_event);
+            return keyboard::handle_key_event(
+                app,
+                key_event,
+                &crate::state_machine::State::Idle(crate::state_machine::IdleState::default()),
+            );
         }
         Event::Paste(text) => {
             // Paste text handling

@@ -25,6 +25,7 @@ use crate::panel::read_context::ServiceRegistrySnapshot;
 use crate::runtime::apply_context::{ApplyContext, ApplyOutcome};
 use crate::runtime::effect::Effect;
 use crate::runtime::event_channel::{EventRx, TuiEvent};
+use crate::state_machine::input::edit::InputEdit;
 use crate::state_machine::state::PanelReadContext;
 use crate::state_machine::{
     handle as state_machine_handle, input::sync::to_textarea, transitions::modal, Event as SmEvent,
@@ -234,7 +235,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     ) =>
             {
                 keyboard_did_run = true;
-                match keyboard::handle_key_event(app, *key) {
+                match keyboard::handle_key_event(app, *key, &state) {
                     Ok(Some(Action::Quit)) => vec![Effect::Quit],
                     Ok(Some(Action::Submit(input))) => {
                         app.submit_message(input);
@@ -450,10 +451,22 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                                         modifiers: KeyModifiers::NONE,
                                     },
                                 );
+                                // Apply to TextArea widget (for rendering + coordinate calc)
                                 app.session_mgr.current_mut().ui.textarea.move_cursor(
                                     tui_textarea::CursorMove::Jump(r as u16, c as u16),
                                 );
                                 app.session_mgr.current_mut().ui.textarea.start_selection();
+                                // Also apply to v2 InputState for state machine consistency
+                                match &mut state {
+                                    State::Idle(idle) => {
+                                        idle.input.start_selection();
+                                        // cursor move already handled by TextArea → InputState sync below
+                                    }
+                                    State::Streaming(s) => {
+                                        s.input.start_selection();
+                                    }
+                                    _ => {}
+                                }
                                 // Cron #37: cursor moved via mouse — sync back
                                 // to InputState so render-time to_textarea does
                                 // not revert the click.
@@ -477,6 +490,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                                         modifiers: KeyModifiers::NONE,
                                     },
                                 );
+                                // Apply to TextArea widget (for selection tracking)
                                 app.session_mgr.current_mut().ui.textarea.move_cursor(
                                     tui_textarea::CursorMove::Jump(r as u16, c as u16),
                                 );
@@ -499,6 +513,20 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     } else if app.is_interaction_popup_active() {
                         app.paste_to_interaction_popup(&text);
                     } else {
+                        // Write to InputState via state machine (v2 path)
+                        match &mut state {
+                            State::Idle(idle) => {
+                                idle.input.insert_str(&text);
+                            }
+                            State::Streaming(s) => {
+                                s.input.insert_str(&text);
+                            }
+                            _ => {}
+                        }
+                        // Also sync to textarea widget so rendering reflects the new content.
+                        // The 2b sync below will overwrite InputState with textarea,
+                        // so we write to both. After Phase 4 complete, textarea mut
+                        // will only happen via to_textarea at render time.
                         app.session_mgr.current_mut().ui.textarea.insert_str(&text);
                         // Cron #37: textarea content changed — sync back to
                         // InputState so render-time to_textarea does not
@@ -827,7 +855,10 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     needs_render = true;
                 }
                 // I/O effects handled by ApplyContext (terminal / ACP / clipboard).
-                other => match ctx.apply(other).await {
+                // Input state effects (TypeChar, DeletePrevChar, ...) also
+                // route through ApplyContext now -- they mutate the live
+                // State via InputState methods.
+                other => match ctx.apply(other, &mut state).await {
                     ApplyOutcome::Quit => {
                         quit = true;
                         break;

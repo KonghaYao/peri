@@ -1,12 +1,27 @@
 use tui_textarea::{Input, Key};
 
-use super::super::Action;
 use crate::app::{App, PendingAttachment};
+use crate::runtime::effect::Effect;
+use crate::state_machine::State;
 
-/// Normal mode key handling: main match block arm bodies
-pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<Option<Action>> {
+/// Normal mode key handling: main match block arm bodies.
+///
+/// Returns a `Vec<Effect>` that the main_loop will route to the state machine's
+/// InputState for textarea mutations, and to the legacy App for non-textarea
+/// side effects.
+pub(super) fn handle_normal_keys(app: &mut App, input: Input, state: &State) -> Vec<Effect> {
     use super::update_slash_hint_detection;
     use super::{inject_at_mention_path, update_at_mention_detection};
+
+    // 从 v2 state machine 获取当前 InputState 引用，供 @mention/slash 检测使用
+    let input_state = match state {
+        State::Idle(idle) => &idle.input,
+        State::Streaming(s) => &s.input,
+        _ => {
+            // Modal/Switching 状态无输入，返回空 Vec
+            return vec![Effect::Render];
+        }
+    };
 
     match input {
         // Ctrl+C: interrupt agent / double-tap to quit
@@ -15,9 +30,7 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
             ctrl: true,
             ..
         } => {
-            if let Some(action) = handle_ctrl_c(app) {
-                return Ok(Some(action));
-            }
+            return handle_ctrl_c(app);
         }
 
         // ESC: no longer quits main window; only clears buffer while loading
@@ -68,10 +81,10 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
         }
 
         // Up: @ 提及导航 > hint navigation > history browse (only first row) > textarea cursor
-        Input { key: Key::Up, .. } => handle_up(app),
+        Input { key: Key::Up, .. } => return handle_up(app),
 
         // Down: @ 提及导航 > hint navigation > history restore (only last row) > textarea cursor
-        Input { key: Key::Down, .. } => handle_down(app),
+        Input { key: Key::Down, .. } => return handle_down(app),
 
         // Ctrl+V: try pasting clipboard image first, fallback to text paste
         // Loading 时同样允许——粘贴的文本/图片会进入 textarea / pending_attachments，
@@ -80,14 +93,14 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
             key: Key::Char('v'),
             ctrl: true,
             ..
-        } => handle_ctrl_v(app),
+        } => return handle_ctrl_v(app),
 
         // Tab: @ 提及补全 > hint overlay candidate navigation and completion
         Input {
             key: Key::Tab,
             shift: false,
             ..
-        } => handle_tab(app),
+        } => return handle_tab(app),
 
         // Enter with @ mention active and candidates: inject selected path
         Input {
@@ -101,7 +114,7 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
                 .candidates
                 .is_empty() =>
         {
-            inject_at_mention_path(app);
+            return inject_at_mention_path(app);
         }
 
         // Enter with hints available: confirm selection (defaults to first if none selected)
@@ -118,15 +131,10 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
         Input {
             key: Key::Enter, ..
         } if input.shift || input.alt => {
-            app.session_mgr.current_mut().ui.textarea.input(Input {
-                key: Key::Enter,
-                ctrl: false,
-                alt: false,
-                shift: false,
-            });
+            return vec![Effect::InsertNewline, Effect::Render];
         }
 
-        // Enter: submit (non-loading) or buffer (loading)
+        // Enter: submit (slash command routing falls through to keyboard, plain text handled by SM)
         Input {
             key: Key::Enter, ..
         } => {
@@ -136,96 +144,65 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
             }
             let text = app.session_mgr.current_mut().ui.textarea.lines().join("\n");
             let text = text.trim().to_string();
-            if !text.is_empty() {
-                if app.session_mgr.current_mut().ui.loading {
-                    // Loading state: buffer to pending_messages（Agent 完成后自动提交）
-                    app.session_mgr
+            if !text.is_empty() && text.starts_with('/') {
+                // Slash command dispatch: SM returns empty for slash commands,
+                // so keyboard fallback must handle CommandRegistry dispatch.
+                let registry =
+                    std::mem::take(&mut app.session_mgr.current_mut().commands.command_registry);
+                let result = registry.dispatch(app, &text);
+                app.session_mgr.current_mut().commands.command_registry = registry;
+                if let Some(effects) = result {
+                    if !effects.is_empty() {
+                        return effects;
+                    }
+                    // Command matched, no effects needed — fall through
+                } else {
+                    // Command not matched, try Skill matching
+                    let skill_name: String = text
+                        .trim_start_matches('/')
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                        .collect();
+                    if app
+                        .session_mgr
                         .current_mut()
-                        .messages
-                        .pending_messages
-                        .push(text);
-                    app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
-                } else if text.starts_with('/') {
-                    app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
-                    // SAFETY: command_registry is nested inside App; dispatch needs &mut App
-                    let registry = std::mem::take(
-                        &mut app.session_mgr.current_mut().commands.command_registry,
-                    );
-                    let result = registry.dispatch(app, &text);
-                    app.session_mgr.current_mut().commands.command_registry = registry;
-                    if let Some(effects) = result {
-                        if effects.is_empty() {
-                            // Command matched, no effects needed
-                        } else {
-                            return Ok(Some(Action::Effects(effects)));
-                        }
-                    } else {
-                        // Command not matched, try Skill matching
-                        let skill_name: String = text
-                            .trim_start_matches('/')
-                            .chars()
-                            .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-                            .collect();
-                        if let Some(_skill) = app
-                            .session_mgr
-                            .current_mut()
-                            .commands
-                            .skills
-                            .iter()
-                            .find(|s| s.name == skill_name)
-                        {
-                            // Skill matched: submit full message to agent.
-                            // Cron #26 step 7e.7: route UserBubble through
-                            // push_user_bubble → main_loop → SM Event::PushUserBubble
-                            // so it lands in v2 state.view (the production render
-                            // source). Previously submit_message's v1 apply_add_message
-                            // pushed to view_messages only, making the user's slash
-                            // command message invisible in v2 render until the next
-                            // ACP ViewCommit replaced state.view.
-                            app.session_mgr
-                                .current_mut()
-                                .messages
-                                .push_user_bubble(text.clone());
-                            return Ok(Some(Action::Submit(text)));
-                        } else if app
+                        .commands
+                        .skills
+                        .iter()
+                        .any(|s| s.name == skill_name)
+                        || app
                             .session_mgr
                             .current_mut()
                             .commands
                             .agent_commands
                             .contains(&skill_name)
-                        {
-                            // Agent command matched (from ACP AvailableCommandsUpdate): submit to agent
-                            tracing::debug!(skill_name, "Matched agent command, submitting to ACP");
-                            app.session_mgr
-                                .current_mut()
-                                .messages
-                                .push_user_bubble(text.clone());
-                            return Ok(Some(Action::Submit(text)));
-                        } else {
-                            // 未知命令/Skill：作为普通输入提交给 Agent
-                            tracing::debug!(
-                                skill_name,
-                                "Unknown slash command, submitting as normal input"
-                            );
-                            app.session_mgr
-                                .current_mut()
-                                .messages
-                                .push_user_bubble(text.clone());
-                            return Ok(Some(Action::Submit(text)));
-                        }
+                    {
+                        // Skill / Agent command matched: submit to agent.
+                        // UserBubble is pushed by push_user_bubble so it lands
+                        // in v2 state.view.
+                        app.session_mgr
+                            .current_mut()
+                            .messages
+                            .push_user_bubble(text.clone());
+                        return vec![Effect::SubmitMessage { text }, Effect::Render];
                     }
-                } else {
-                    app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
-                    return Ok(Some(Action::Submit(text)));
+                    // Unknown slash: submit as normal input
+                    app.session_mgr
+                        .current_mut()
+                        .messages
+                        .push_user_bubble(text.clone());
+                    return vec![Effect::SubmitMessage { text }, Effect::Render];
                 }
             }
+            // Plain text Enter: SM handles via SubmitMessage. Keyboard returns empty.
+            return vec![];
         }
 
         // VS Code terminal maps Option+Backspace to PageUp; perform word-delete when textarea has content
         Input {
             key: Key::PageUp, ..
         } if std::env::var("TERM_PROGRAM").as_deref() == Ok("vscode") => {
-            let session = &mut app.session_mgr.current_mut();
+            let session = &app.session_mgr.current_mut();
             let has_content = session
                 .ui
                 .textarea
@@ -233,7 +210,7 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
                 .iter()
                 .any(|line| !line.is_empty());
             if has_content {
-                session.ui.textarea.delete_word();
+                return vec![Effect::DeletePrevWord, Effect::Render];
             }
         }
 
@@ -243,19 +220,16 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
             ctrl: true,
             ..
         } => {
-            let session = &app.session_mgr.current_mut();
-            let has_content = session
+            let has_content = app
+                .session_mgr
+                .current_mut()
                 .ui
                 .textarea
                 .lines()
                 .iter()
                 .any(|line| !line.is_empty());
             if has_content {
-                app.session_mgr
-                    .current_mut()
-                    .ui
-                    .textarea
-                    .delete_line_by_head();
+                return vec![Effect::DeleteToLineStart, Effect::Render];
             } else {
                 for _ in 0..20 {
                     app.scroll_up();
@@ -292,14 +266,57 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
             if app.session_mgr.current_mut().ui.history_index.is_some() {
                 app.exit_history();
             }
-            app.session_mgr.current_mut().ui.textarea.input(input);
             // 任意输入清除 prediction
             app.session_mgr.current_mut().ui.prediction = None;
             // When input changes: reset cursor (don't pre-select; wait for user to press Tab/Up/Down)
             // Loading 时也需更新——用户在 queue 下一条消息时同样期望 slash hint / @mention 弹窗。
             app.session_mgr.current_mut().ui.hint_cursor = None;
-            update_at_mention_detection(app);
-            update_slash_hint_detection(app);
+            update_at_mention_detection(app, input_state);
+            update_slash_hint_detection(app, input_state);
+
+            // Route to SM InputState via Effect
+            // Backspace
+            if input.key == Key::Backspace {
+                return vec![Effect::DeletePrevChar, Effect::Render];
+            }
+            // Delete
+            if input.key == Key::Delete {
+                return vec![Effect::DeleteNextChar, Effect::Render];
+            }
+            // Ctrl+W / Option+Backspace → delete word
+            if input.key == Key::Char('w') && input.ctrl {
+                return vec![Effect::DeletePrevWord, Effect::Render];
+            }
+            // Ctrl+A → select all
+            if input.key == Key::Char('a') && input.ctrl {
+                return vec![Effect::SelectAllInput, Effect::Render];
+            }
+            // Left / Right arrows
+            if input.key == Key::Left {
+                return vec![Effect::CursorLeft, Effect::Render];
+            }
+            if input.key == Key::Right {
+                return vec![Effect::CursorRight, Effect::Render];
+            }
+            // Home / End
+            if input.key == Key::Home {
+                return vec![Effect::CursorLineStart, Effect::Render];
+            }
+            if input.key == Key::End {
+                return vec![Effect::CursorLineEnd, Effect::Render];
+            }
+            // Ctrl+N → keep existing logic (new session, not textarea)
+            if input.key == Key::Char('n') && input.ctrl {
+                // Handled by SM/app-level — fall through to Render
+            }
+            // Plain character input
+            if let Key::Char(c) = input.key {
+                if !input.ctrl && !input.alt {
+                    return vec![Effect::TypeChar(c), Effect::Render];
+                }
+            }
+            // Fallback: any other input not matched above — still need a render
+            // if textarea was modified by older code paths or SM transitions.
         }
         _ => {
             // Any other key cancels quit-pending state (Ctrl+C double-tap)
@@ -314,77 +331,72 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input) -> anyhow::Result<
         }
     }
 
-    Ok(Some(Action::Redraw))
+    vec![Effect::Render]
 }
 
 // ── Per-arm helper functions ──────────────────────────────────────────────
 
-fn handle_ctrl_c(app: &mut App) -> Option<Action> {
+fn handle_ctrl_c(app: &mut App) -> Vec<Effect> {
     let session = &mut app.session_mgr.current_mut();
 
     // 优先级 1: 输入框有内容 → 清空输入框
     if session.ui.textarea.lines().iter().any(|l| !l.is_empty()) {
-        session
-            .ui
-            .textarea
-            .move_cursor(tui_textarea::CursorMove::Head);
-        session.ui.textarea.select_all();
-        session.ui.textarea.cut();
         app.global_ui.quit_pending_since = None;
-        return None;
+        return vec![Effect::ClearInputBuffer, Effect::Render];
     }
 
     // 优先级 2: Agent 运行中 → 中断 agent
     if session.ui.loading {
         app.interrupt();
         app.global_ui.quit_pending_since = None;
-        return None;
+        return vec![Effect::Render];
     }
 
     // 优先级 3: Agent 未运行 → quit-pending 逻辑
     if let Some(since) = app.global_ui.quit_pending_since {
         if since.elapsed() < std::time::Duration::from_secs(2) {
-            return Some(Action::Quit);
+            return vec![Effect::Quit];
         } else {
             app.global_ui.quit_pending_since = Some(std::time::Instant::now());
         }
     } else {
         app.global_ui.quit_pending_since = Some(std::time::Instant::now());
     }
-    None
+    vec![Effect::Render]
 }
 
-fn handle_up(app: &mut App) {
+fn handle_up(app: &mut App) -> Vec<Effect> {
     let hint_count = app.hint_candidates_count();
     if app.session_mgr.current_mut().ui.at_mention.active {
         app.session_mgr.current_mut().ui.at_mention.move_up();
-    } else if hint_count > 0 {
+        return vec![Effect::Render];
+    }
+    if hint_count > 0 {
         let cur = app.session_mgr.current_mut().ui.hint_cursor.unwrap_or(0);
         app.session_mgr.current_mut().ui.hint_cursor = if cur == 0 {
             Some(hint_count - 1)
         } else {
             Some(cur - 1)
         };
+        return vec![Effect::Render];
+    }
+    // Check cursor row from textarea (synced from InputState before keyboard runs)
+    let (row, _col) = app.session_mgr.current_mut().ui.textarea.cursor();
+    if row == 0 {
+        app.history_up();
+        vec![Effect::Render]
     } else {
-        let (row, _col) = app.session_mgr.current_mut().ui.textarea.cursor();
-        if row == 0 {
-            app.history_up();
-        } else {
-            app.session_mgr.current_mut().ui.textarea.input(Input {
-                key: Key::Up,
-                ctrl: false,
-                alt: false,
-                shift: false,
-            });
-        }
+        vec![Effect::CursorUp, Effect::Render]
     }
 }
 
-fn handle_down(app: &mut App) {
+fn handle_down(app: &mut App) -> Vec<Effect> {
     let hint_count = app.hint_candidates_count();
     if app.session_mgr.current_mut().ui.at_mention.active {
         app.session_mgr.current_mut().ui.at_mention.move_down();
-    } else if hint_count > 0 {
+        return vec![Effect::Render];
+    }
+    if hint_count > 0 {
         let cur = app
             .session_mgr
             .current_mut()
@@ -396,32 +408,31 @@ fn handle_down(app: &mut App) {
         } else {
             Some(cur + 1)
         };
-    } else if app.session_mgr.current_mut().ui.history_index.is_some() {
+        return vec![Effect::Render];
+    }
+    if app.session_mgr.current_mut().ui.history_index.is_some() {
         app.history_down();
+        return vec![Effect::Render];
+    }
+    // Check cursor row from textarea (synced from InputState before keyboard runs)
+    let (row, _col) = app.session_mgr.current_mut().ui.textarea.cursor();
+    let last_row = app
+        .session_mgr
+        .current_mut()
+        .ui
+        .textarea
+        .lines()
+        .len()
+        .saturating_sub(1);
+    if row >= last_row {
+        app.history_down();
+        vec![Effect::Render]
     } else {
-        let (row, _col) = app.session_mgr.current_mut().ui.textarea.cursor();
-        let last_row = app
-            .session_mgr
-            .current_mut()
-            .ui
-            .textarea
-            .lines()
-            .len()
-            .saturating_sub(1);
-        if row >= last_row {
-            app.history_down();
-        } else {
-            app.session_mgr.current_mut().ui.textarea.input(Input {
-                key: Key::Down,
-                ctrl: false,
-                alt: false,
-                shift: false,
-            });
-        }
+        vec![Effect::CursorDown, Effect::Render]
     }
 }
 
-fn handle_ctrl_v(app: &mut App) {
+fn handle_ctrl_v(app: &mut App) -> Vec<Effect> {
     if let Ok(mut clipboard) = arboard::Clipboard::new() {
         if let Ok(img) = clipboard.get_image() {
             let (w, h) = (img.width as u32, img.height as u32);
@@ -440,55 +451,56 @@ fn handle_ctrl_v(app: &mut App) {
                     size_bytes: sz,
                 });
             }
+            return vec![Effect::Render];
         } else if let Ok(text) = clipboard.get_text() {
             let text = text.replace('\r', "\n");
-            app.session_mgr.current_mut().ui.textarea.insert_str(&text);
+            return vec![Effect::InsertStr(text), Effect::Render];
         }
     }
+    vec![Effect::Render]
 }
 
-fn handle_tab(app: &mut App) {
+fn handle_tab(app: &mut App) -> Vec<Effect> {
     use super::inject_at_mention_path;
 
     // Prediction 接受优先级最高
     if let Some(pred) = app.session_mgr.current_mut().ui.prediction.take() {
-        app.session_mgr
-            .current_mut()
-            .ui
-            .textarea
-            .insert_str(&pred.text);
-        return;
+        return vec![Effect::InsertStr(pred.text), Effect::Render];
     }
 
     if app.session_mgr.current_mut().ui.at_mention.active {
-        inject_at_mention_path(app);
-    } else {
-        let count = app.hint_candidates_count();
-        if count > 0 {
-            match app.session_mgr.current_mut().ui.hint_cursor {
-                Some(cur) if cur + 1 < count => {
-                    app.session_mgr.current_mut().ui.hint_cursor = Some(cur + 1);
-                }
-                Some(_) => {
-                    app.session_mgr.current_mut().ui.hint_cursor = Some(0);
-                }
-                None => {
-                    app.session_mgr.current_mut().ui.hint_cursor = Some(0);
-                }
+        return inject_at_mention_path(app);
+    }
+    let count = app.hint_candidates_count();
+    if count > 0 {
+        match app.session_mgr.current_mut().ui.hint_cursor {
+            Some(cur) if cur + 1 < count => {
+                app.session_mgr.current_mut().ui.hint_cursor = Some(cur + 1);
+            }
+            Some(_) => {
+                app.session_mgr.current_mut().ui.hint_cursor = Some(0);
+            }
+            None => {
+                app.session_mgr.current_mut().ui.hint_cursor = Some(0);
             }
         }
     }
+    vec![Effect::Render]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::build_textarea;
-    use crate::event::Action;
+    use crate::state_machine::{IdleState, State};
 
     async fn make_app() -> App {
         let (app, _) = App::new_headless(80, 24).await;
         app
+    }
+
+    fn idle_state() -> State {
+        State::Idle(IdleState::default())
     }
 
     #[tokio::test]
@@ -501,14 +513,13 @@ mod tests {
             .textarea
             .insert_str("hello world");
 
-        let result = handle_ctrl_c(&mut app);
+        let effects = handle_ctrl_c(&mut app);
 
-        assert!(result.is_none(), "有内容时 Ctrl+C 不应返回 Quit");
-        let lines = app.session_mgr.current_mut().ui.textarea.lines().to_vec();
         assert!(
-            lines.iter().all(|l| l.is_empty()),
-            "清空后 textarea 应为空，实际: {:?}",
-            lines
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ClearInputBuffer)),
+            "有内容时 Ctrl+C 应返回 ClearInputBuffer"
         );
         assert!(
             app.global_ui.quit_pending_since.is_none(),
@@ -521,9 +532,12 @@ mod tests {
         let mut app = make_app().await;
         app.set_loading(true);
 
-        let result = handle_ctrl_c(&mut app);
+        let effects = handle_ctrl_c(&mut app);
 
-        assert!(result.is_none(), "中断 agent 不应返回 Quit");
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Quit)),
+            "中断 agent 不应返回 Quit"
+        );
         assert!(
             app.global_ui.quit_pending_since.is_none(),
             "中断 agent 不应进入 quit-pending"
@@ -534,17 +548,20 @@ mod tests {
     async fn test_ctrl_c_enters_quit_pending_when_idle_and_empty() {
         let mut app = make_app().await;
 
-        let result = handle_ctrl_c(&mut app);
+        let effects = handle_ctrl_c(&mut app);
 
-        assert!(result.is_none(), "第一次 Ctrl+C 不应返回 Quit");
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Quit)),
+            "第一次 Ctrl+C 不应返回 Quit"
+        );
         assert!(
             app.global_ui.quit_pending_since.is_some(),
             "空闲时应进入 quit-pending"
         );
 
-        let result = handle_ctrl_c(&mut app);
+        let effects = handle_ctrl_c(&mut app);
         assert!(
-            matches!(result, Some(Action::Quit)),
+            effects.iter().any(|e| matches!(e, Effect::Quit)),
             "2 秒内第二次 Ctrl+C 应返回 Quit"
         );
     }
@@ -560,9 +577,12 @@ mod tests {
             .ui
             .textarea
             .insert_str("some text");
-        let result = handle_ctrl_c(&mut app);
+        let effects = handle_ctrl_c(&mut app);
 
-        assert!(result.is_none(), "有内容时不应退出");
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Quit)),
+            "有内容时不应退出"
+        );
         assert!(
             app.global_ui.quit_pending_since.is_none(),
             "清空输入框应重置 quit-pending"
@@ -571,13 +591,12 @@ mod tests {
 
     // ── Cron #26 step 7e.7: slash command submit routes UserBubble to v2 ──
 
-    /// Slash command（未知命令）提交时应将 UserBubble 文本入队到
-    /// `pending_v2_user_bubbles`，让 main_loop 通过 Event::PushUserBubble
-    /// 路由到 v2 state.view。这是修复"slash command 提交后用户消息在生产
-    /// 渲染路径下不可见"bug 的核心测试。
+    /// 未知 slash command 提交时应入队 UserBubble 到 pending_v2_user_bubbles
+    /// 并返回 SubmitMessage Effect。
     #[tokio::test]
     async fn test_unknown_slash_command_submit_enqueues_user_bubble() {
         let mut app = make_app().await;
+        let state = idle_state();
         app.session_mgr.current_mut().ui.textarea = build_textarea(false);
         app.session_mgr
             .current_mut()
@@ -585,7 +604,7 @@ mod tests {
             .textarea
             .insert_str("/unknown-cmd arg1");
 
-        let result = handle_normal_keys(
+        let effects = handle_normal_keys(
             &mut app,
             Input {
                 key: Key::Enter,
@@ -593,12 +612,14 @@ mod tests {
                 alt: false,
                 shift: false,
             },
-        )
-        .unwrap();
+            &state,
+        );
 
         assert!(
-            matches!(result, Some(Action::Submit(_))),
-            "未知 slash command 应返回 Action::Submit"
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::SubmitMessage { .. })),
+            "未知 slash command 应返回 SubmitMessage"
         );
         let pending = &app.session_mgr.current().messages.pending_v2_user_bubbles;
         assert_eq!(
@@ -609,10 +630,11 @@ mod tests {
         assert_eq!(pending[0], "/unknown-cmd arg1");
     }
 
-    /// Agent command（ACP AvailableCommandsUpdate 注册的命令）提交时也应入队。
+    /// Agent command 提交时也应入队并返回 SubmitMessage。
     #[tokio::test]
     async fn test_agent_command_submit_enqueues_user_bubble() {
         let mut app = make_app().await;
+        let state = idle_state();
         app.session_mgr.current_mut().ui.textarea = build_textarea(false);
         app.session_mgr
             .current_mut()
@@ -625,7 +647,7 @@ mod tests {
             .textarea
             .insert_str("/my-agent-cmd");
 
-        let result = handle_normal_keys(
+        let effects = handle_normal_keys(
             &mut app,
             Input {
                 key: Key::Enter,
@@ -633,10 +655,12 @@ mod tests {
                 alt: false,
                 shift: false,
             },
-        )
-        .unwrap();
+            &state,
+        );
 
-        assert!(matches!(result, Some(Action::Submit(_))));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::SubmitMessage { .. })));
         let pending = &app.session_mgr.current().messages.pending_v2_user_bubbles;
         assert_eq!(pending.len(), 1, "agent command submit 应入队 UserBubble");
         assert_eq!(pending[0], "/my-agent-cmd");

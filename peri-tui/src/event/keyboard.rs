@@ -31,10 +31,11 @@ pub fn cycle_provider_label() -> &'static str {
 
 /// Handles a single key event, dispatching to panels, prompts, textarea, or
 /// application-level shortcuts. Returns an `Action` when a redraw or quit is
-/// needed.
+/// needed. `state` is the v2 state machine state for InputState reads.
 pub fn handle_key_event(
     app: &mut App,
     key_event: ratatui::crossterm::event::KeyEvent,
+    state: &crate::state_machine::State,
 ) -> Result<Option<Action>> {
     // Only process Press events; ignore Release (prevents double-fires)
     if key_event.kind == KeyEventKind::Release {
@@ -62,27 +63,22 @@ pub fn handle_key_event(
     }
 
     // Stage 13: Normal key handling (main match block)
-    normal_keys::handle_normal_keys(app, input)
+    let effects = normal_keys::handle_normal_keys(app, input, state);
+    Ok(Some(Action::Effects(effects)))
 }
 
-/// 检测 textarea 中 @ 提及模式，更新状态并同步刷新候选
-pub(super) fn update_at_mention_detection(app: &mut App) {
-    let textarea = &app.session_mgr.current_mut().ui.textarea;
-    let text = textarea.lines().join("\n");
-    let (row, col) = textarea.cursor();
-    let mut pos = 0usize;
-    for (i, line) in textarea.lines().iter().enumerate() {
-        if i == row {
-            pos += line.chars().take(col).map(|c| c.len_utf8()).sum::<usize>();
-            break;
-        }
-        pos += line.len() + 1;
-    }
+/// 从 v2 InputState 检测 @ 提及模式，更新状态并同步刷新候选
+pub(super) fn update_at_mention_detection(
+    app: &mut App,
+    input: &crate::state_machine::input::InputState,
+) {
+    let text = input.text();
+    let cursor_byte = input.cursor.to_byte_offset(&input.lines);
 
     let at = &mut app.session_mgr.current_mut().ui.at_mention;
     at.ensure_cwd(app.services.cwd.clone());
 
-    if let Some((query, start)) = crate::app::AtMentionState::detect(&text, pos) {
+    if let Some((query, start)) = crate::app::AtMentionState::detect(&text, cursor_byte) {
         if at.active && at.query == query {
             return; // 未变化
         }
@@ -94,24 +90,14 @@ pub(super) fn update_at_mention_detection(app: &mut App) {
     }
 }
 
-/// 检测 textarea 中 / skill/command token，更新 slash_hint 状态。
-/// 参考 update_at_mention_detection 模式：将 (row, col) 转为字节偏移后调用 detect。
+/// 检测 v2 InputState 中 / skill/command token，更新 slash_hint 状态。
 /// 当 @mention 活跃时自动 deactivate 避免双弹窗。
-pub(super) fn update_slash_hint_detection(app: &mut App) {
-    let (text, cursor_pos) = {
-        let textarea = &app.session_mgr.current_mut().ui.textarea;
-        let text = textarea.lines().join("\n");
-        let (row, col) = textarea.cursor();
-        let mut pos = 0usize;
-        for (i, line) in textarea.lines().iter().enumerate() {
-            if i == row {
-                pos += line.chars().take(col).map(|c| c.len_utf8()).sum::<usize>();
-                break;
-            }
-            pos += line.len() + 1; // +1 for newline
-        }
-        (text, pos)
-    }; // textarea mutable borrow 在此结束 ← 关键：Rust NLL 通过作用域释放
+pub(super) fn update_slash_hint_detection(
+    app: &mut App,
+    input: &crate::state_machine::input::InputState,
+) {
+    let text = input.text();
+    let cursor_byte = input.cursor.to_byte_offset(&input.lines);
 
     // 先检查 at_mention 状态（不可变借用）
     let at_mention_active = app.session_mgr.current().ui.at_mention.active;
@@ -123,7 +109,7 @@ pub(super) fn update_slash_hint_detection(app: &mut App) {
         return;
     }
 
-    if let Some((prefix, start)) = crate::app::SlashHintState::detect(&text, cursor_pos) {
+    if let Some((prefix, start)) = crate::app::SlashHintState::detect(&text, cursor_byte) {
         if slash.active && slash.prefix == prefix && slash.token_start == start {
             return; // 未变化
         }
@@ -133,19 +119,22 @@ pub(super) fn update_slash_hint_detection(app: &mut App) {
     }
 }
 
-/// 将选中的 @ 提及路径注入 textarea
-pub(super) fn inject_at_mention_path(app: &mut App) {
-    let at = &app.session_mgr.current_mut().ui.at_mention;
-    let path = match at.selected_path() {
-        Some(p) => p,
-        None => return,
+/// 将选中的 @ 提及路径构造为 Effect::ReplaceTextarea，由 main_loop 写入 InputState
+pub(super) fn inject_at_mention_path(app: &mut App) -> Vec<crate::runtime::effect::Effect> {
+    let (path, is_dir, query_start, query_len) = {
+        let at = &app.session_mgr.current_mut().ui.at_mention;
+        let path = match at.selected_path() {
+            Some(p) => p,
+            None => return vec![],
+        };
+        let is_dir = at.selected_candidate().is_some_and(|e| e.is_dir);
+        let query_start = at.query_start;
+        let query_len = at.query.len();
+        (path, is_dir, query_start, query_len)
     };
-    let is_dir = at.selected_candidate().is_some_and(|e| e.is_dir);
-    let query_start = at.query_start;
-    let query_len = at.query.len();
 
-    let textarea = &app.session_mgr.current_mut().ui.textarea;
-    let full_text: String = textarea.lines().join("\n");
+    // 从 v2 InputState 读取当前 full_text
+    let full_text: String = app.session_mgr.current().ui.textarea.lines().join("\n");
 
     let needs_quotes = path.contains(' ');
     let replacement = if needs_quotes {
@@ -162,15 +151,14 @@ pub(super) fn inject_at_mention_path(app: &mut App) {
         new_text.push_str(&full_text[after_end..]);
     }
 
-    let mut new_ta = crate::app::build_textarea(false);
-    new_ta.insert_str(&new_text);
-    app.session_mgr.current_mut().ui.textarea = new_ta;
+    let mut effects = vec![crate::runtime::effect::Effect::ReplaceTextarea(new_text)];
 
     if is_dir {
-        app.session_mgr.current_mut().ui.textarea.insert_str("/");
-        update_at_mention_detection(app);
+        effects.push(crate::runtime::effect::Effect::InsertStr("/".to_string()));
     } else {
-        app.session_mgr.current_mut().ui.textarea.insert_str(" ");
+        effects.push(crate::runtime::effect::Effect::InsertStr(" ".to_string()));
         app.session_mgr.current_mut().ui.at_mention.close();
+        effects.push(crate::runtime::effect::Effect::Render);
     }
+    effects
 }

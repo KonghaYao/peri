@@ -158,7 +158,8 @@ impl HeadlessHandle {
     /// - `Redraw` / `Quit` → 忽略（由调用方决定重绘时机）
     pub fn press_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
         let key_event = KeyEvent::new(code, modifiers);
-        if let Some(action) = keyboard::handle_key_event(app, key_event)? {
+        let state = crate::state_machine::State::Idle(crate::state_machine::IdleState::default());
+        if let Some(action) = keyboard::handle_key_event(app, key_event, &state)? {
             Self::apply_action(app, action);
         }
         Ok(())

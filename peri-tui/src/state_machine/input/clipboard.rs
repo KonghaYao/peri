@@ -59,7 +59,7 @@ impl InputClipboard for InputState {
 
 impl InputState {
     /// Delete the current selection from the buffer.
-    fn delete_selection(&mut self) {
+    pub(crate) fn delete_selection(&mut self) {
         let Some(sel) = self.selection.take() else {
             return;
         };

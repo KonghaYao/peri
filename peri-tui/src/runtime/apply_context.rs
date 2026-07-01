@@ -21,6 +21,7 @@ use crate::app::App;
 use crate::panel::read_context::ServiceRegistrySnapshot;
 use crate::runtime::effect::Effect;
 use crate::state_machine::state::PanelReadContext;
+use crate::state_machine::State;
 use crate::ui;
 
 /// Outcome of applying a single effect.
@@ -65,9 +66,34 @@ impl<'a> ApplyContext<'a> {
 
     /// Execute a single [`Effect`], returning the outcome.
     ///
+    /// `state` is the live state machine [`State`] owned by the main loop.
+    /// Input-related effects (TypeChar, DeletePrevChar, ...) mutate the
+    /// state's [`InputState`] via the `with_input` helper.
+    ///
     /// This is the **only** I/O path in the main loop.  Every side effect
     /// produced by the state machine flows through this method.
-    pub async fn apply(&mut self, effect: Effect) -> ApplyOutcome {
+    pub async fn apply(&mut self, effect: Effect, state: &mut State) -> ApplyOutcome {
+        // Helper: call `f` on the InputState of the active Idle/Streaming state.
+        // Returns effects produced by the InputState method.  No-op on
+        // Modal/Switching (input effects should not arrive in those states).
+        // Note: effects returned by InputState methods (typically `[Render]`)
+        // are intentionally discarded -- the keyboard module already emits
+        // `Render` alongside these effects.
+        fn with_input(
+            state: &mut State,
+            f: impl FnOnce(&mut crate::state_machine::input::InputState) -> Vec<Effect>,
+        ) {
+            match state {
+                State::Idle(ref mut idle) => {
+                    let _ = f(&mut idle.input);
+                }
+                State::Streaming(ref mut s) => {
+                    let _ = f(&mut s.input);
+                }
+                _ => {}
+            }
+        }
+
         match effect {
             Effect::Render => {
                 // Rendering is performed by the main loop caller via
@@ -108,6 +134,85 @@ impl<'a> ApplyContext<'a> {
             }
 
             Effect::Quit => ApplyOutcome::Quit,
+
+            // ── Input state mutations (Phase 2) ──────────────────────────
+            // These effects arrive from the keyboard fallback handler.
+            // Each calls the corresponding InputState method to mutate the
+            // live state.  Follow-up effects (typically `Render`) are
+            // handled by the keyboard module which emits `Effect::Render`
+            // alongside these effects -- so we discard the returned effects
+            // here.
+            Effect::TypeChar(ch) => {
+                with_input(state, |input| input.type_char(ch));
+                ApplyOutcome::Ok
+            }
+            Effect::DeletePrevChar => {
+                with_input(state, |input| input.delete_prev_char());
+                ApplyOutcome::Ok
+            }
+            Effect::DeleteNextChar => {
+                with_input(state, |input| input.delete_next_char());
+                ApplyOutcome::Ok
+            }
+            Effect::DeletePrevWord => {
+                with_input(state, |input| input.delete_prev_word());
+                ApplyOutcome::Ok
+            }
+            Effect::DeleteToLineStart => {
+                with_input(state, |input| input.delete_to_line_start());
+                ApplyOutcome::Ok
+            }
+            Effect::SelectAllInput => {
+                with_input(state, |input| input.select_all());
+                ApplyOutcome::Ok
+            }
+            Effect::ClearInputBuffer => {
+                match state {
+                    State::Idle(ref mut idle) => idle.input.clear_buffer(),
+                    State::Streaming(ref mut s) => s.input.clear_buffer(),
+                    _ => {}
+                }
+                ApplyOutcome::Ok
+            }
+            Effect::InsertNewline => {
+                with_input(state, |input| input.insert_newline());
+                ApplyOutcome::Ok
+            }
+            Effect::CursorLeft => {
+                with_input(state, |input| input.cursor_left());
+                ApplyOutcome::Ok
+            }
+            Effect::CursorRight => {
+                with_input(state, |input| input.cursor_right());
+                ApplyOutcome::Ok
+            }
+            Effect::CursorLineStart => {
+                with_input(state, |input| input.cursor_line_start());
+                ApplyOutcome::Ok
+            }
+            Effect::CursorLineEnd => {
+                with_input(state, |input| input.cursor_line_end());
+                ApplyOutcome::Ok
+            }
+            Effect::ReplaceTextarea(text) => {
+                with_input(state, |input| input.replace_text(text));
+                ApplyOutcome::Ok
+            }
+            Effect::InsertStr(text) => {
+                with_input(state, |input| {
+                    input.insert_str(&text);
+                    vec![Effect::Render]
+                });
+                ApplyOutcome::Ok
+            }
+            Effect::CursorUp => {
+                with_input(state, |input| input.cursor_up());
+                ApplyOutcome::Ok
+            }
+            Effect::CursorDown => {
+                with_input(state, |input| input.cursor_down());
+                ApplyOutcome::Ok
+            }
 
             // App-level effects are handled by main_loop (need &mut App).
             // ApplyContext only carries I/O handles; reaching these arms means
