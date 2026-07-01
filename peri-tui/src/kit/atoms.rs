@@ -193,7 +193,6 @@ pub struct MemoryEntry {
 
 pub static ACP_STATE: OnceLock<Atom<AcpStateSnapshot>> = OnceLock::new();
 pub static VIEW_MODELS: OnceLock<Atom<ViewModelsSnapshot>> = OnceLock::new();
-pub static SCROLL_OFFSET: OnceLock<Atom<u16>> = OnceLock::new();
 
 /// 状态栏瞬时高亮计时器
 pub static MODEL_HIGHLIGHT_UNTIL: OnceLock<Atom<Option<Instant>>> = OnceLock::new();
@@ -286,6 +285,12 @@ pub static MENTION_PREFIX: OnceLock<Atom<String>> = OnceLock::new();
 /// slash 命令当前匹配前缀（用户输入 / 之后的字符）。
 pub static SLASH_PREFIX: OnceLock<Atom<String>> = OnceLock::new();
 
+/// I18-C：MentionPopup 当前选中项索引（跨组件共享，让 InputArea Enter 读取真实选中）。
+pub static MENTION_SELECTED_INDEX: OnceLock<Atom<usize>> = OnceLock::new();
+
+/// I18-C：SlashCompletion 当前选中项索引（跨组件共享，让 InputArea Enter 读取真实选中）。
+pub static SLASH_SELECTED_INDEX: OnceLock<Atom<usize>> = OnceLock::new();
+
 // ── S10：Rewind 系统 ──────────────────────────────────────────────────────
 
 /// 当前 rewind 预览数据——由 AcpEvent::RewindPreview 写入；RewindPopup 读取。
@@ -354,7 +359,6 @@ pub static WIZARD_ACTIVE: OnceLock<Atom<bool>> = OnceLock::new();
 pub fn init_atoms() {
     ACP_STATE.get_or_init(|| Atom::new(AcpStateSnapshot::default()));
     VIEW_MODELS.get_or_init(|| Atom::new(ViewModelsSnapshot::default()));
-    SCROLL_OFFSET.get_or_init(|| Atom::new(0));
     MODEL_HIGHLIGHT_UNTIL.get_or_init(|| Atom::new(None));
     PROVIDER_HIGHLIGHT_UNTIL.get_or_init(|| Atom::new(None));
     MODE_HIGHLIGHT_UNTIL.get_or_init(|| Atom::new(None));
@@ -380,6 +384,8 @@ pub fn init_atoms() {
     FILE_LIST.get_or_init(|| Atom::new(Vec::new()));
     MENTION_PREFIX.get_or_init(|| Atom::new(String::new()));
     SLASH_PREFIX.get_or_init(|| Atom::new(String::new()));
+    MENTION_SELECTED_INDEX.get_or_init(|| Atom::new(0));
+    SLASH_SELECTED_INDEX.get_or_init(|| Atom::new(0));
     REWIND_PREVIEW.get_or_init(|| Atom::new(None));
     LAST_ESC_TIME.get_or_init(|| Atom::new(None));
     // SUBMIT_TX 由 entry::run_kit_fullscreen 在 build_app_and_acp 之后初始化

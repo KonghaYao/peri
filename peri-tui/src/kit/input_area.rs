@@ -23,8 +23,8 @@ use ratatui_kit::{
 };
 
 use crate::kit::atoms::{
-    ACP_STATE, AT_MENTION_ACTIVE, FILE_LIST, INPUT_BUFFER, MENTION_PREFIX, SLASH_HINT_ACTIVE,
-    SLASH_PREFIX, SUBMIT_TX,
+    ACP_STATE, AT_MENTION_ACTIVE, FILE_LIST, INPUT_BUFFER, MENTION_PREFIX, MENTION_SELECTED_INDEX,
+    SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX,
 };
 use crate::kit::input_history::{history_down, history_up, push_history};
 use crate::kit::mention_popup::MentionPopup;
@@ -257,23 +257,18 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                 // 这里 popup 自身的 use_local_events 会消费 Up/Down；
                 // Enter/Esc 我们在 InputArea 层处理：选择第一项 / 取消
                 KeyCode::Enter if mention_active => {
-                    // 选当前 mention 项：插入到 editor @ 之后位置
+                    // I18-C：读取 popup 选中项索引，选取真实文件名（而非仅 prefix）
                     let prefix = MENTION_PREFIX
                         .get()
                         .map(|a| a.read().clone())
                         .unwrap_or_default();
-                    // 简单语义：直接用 prefix 作为文件名（无候选项源时）
-                    let replacement = if prefix.is_empty() {
-                        String::new()
-                    } else {
-                        prefix
-                    };
+                    let candidates = filter_files_for_mention(&prefix);
+                    let sel_idx = MENTION_SELECTED_INDEX.get().map(|a| *a.read()).unwrap_or(0);
+                    let replacement = candidates.get(sel_idx).cloned().unwrap_or_default();
                     // 找到 @ 字符位置并替换其后所有 mention prefix
                     let mut s = state.write();
                     if let Some(at_byte) = s.text.rfind('@') {
                         let after_at_byte = at_byte + 1;
-                        let cursor_chars_before = s.cursor;
-                        let _ = cursor_chars_before;
                         // 删除 @ 后的所有非空白字符（即旧的 prefix）
                         let keep_until_byte = s.text[after_at_byte..]
                             .char_indices()
@@ -293,20 +288,30 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     if let Some(a) = MENTION_PREFIX.get() {
                         a.write().clear();
                     }
+                    // 重置选中索引，下次开 popup 默认第 0 项
+                    if let Some(a) = MENTION_SELECTED_INDEX.get() {
+                        *a.write() = 0;
+                    }
                 }
                 KeyCode::Enter if slash_active => {
                     let prefix = SLASH_PREFIX
                         .get()
                         .map(|a| a.read().clone())
                         .unwrap_or_default();
-                    let cmd = if prefix.is_empty() {
-                        String::new()
-                    } else {
-                        format!("/{}", prefix)
-                    };
+                    // I18-C：按 popup 相同过滤逻辑获取真实选中命令
+                    let prefix_lower = prefix.to_lowercase();
+                    let filtered: Vec<String> = SLASH_COMMANDS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .filter(|cmd| {
+                            prefix_lower.is_empty() || cmd.to_lowercase().starts_with(&prefix_lower)
+                        })
+                        .collect();
+                    let sel_idx = SLASH_SELECTED_INDEX.get().map(|a| *a.read()).unwrap_or(0);
+                    let cmd = filtered.get(sel_idx).cloned();
                     let mut s = state.write();
                     // 替换整个 editor 内容为命令
-                    if !cmd.is_empty() {
+                    if let Some(cmd) = cmd {
                         s.replace_all(cmd.clone());
                         // 立即提交命令——同样检查 loading 入 buffer
                         drop(s);
@@ -338,6 +343,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     }
                     if let Some(a) = SLASH_PREFIX.get() {
                         a.write().clear();
+                    }
+                    // 重置选中索引
+                    if let Some(a) = SLASH_SELECTED_INDEX.get() {
+                        *a.write() = 0;
                     }
                 }
 
@@ -371,13 +380,15 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                 KeyCode::Right if !mention_active && !slash_active => {
                     state.write().cursor_right();
                 }
-                // ── history 导航（仅在不激活 popup 时）──
-                KeyCode::Up if !mention_active && !slash_active => {
+                // ── history 导航（仅在不激活 popup 且无 Ctrl 修饰时）──
+                // I18-B：必须排除 Ctrl+Up/Down/Home/End——这些键留给 message_area 滚动。
+                // use_local_events 是广播式，InputArea 和 MessageArea 都会收到同一事件。
+                KeyCode::Up if !is_ctrl && !mention_active && !slash_active => {
                     if let Some(historical) = history_up() {
                         state.write().replace_all(historical);
                     }
                 }
-                KeyCode::Down if !mention_active && !slash_active => {
+                KeyCode::Down if !is_ctrl && !mention_active && !slash_active => {
                     match history_down() {
                         Some(historical) => state.write().replace_all(historical),
                         None => {
@@ -385,10 +396,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         }
                     }
                 }
-                KeyCode::Home if !mention_active && !slash_active => {
+                KeyCode::Home if !is_ctrl && !mention_active && !slash_active => {
                     state.write().cursor_home();
                 }
-                KeyCode::End if !mention_active && !slash_active => {
+                KeyCode::End if !is_ctrl && !mention_active && !slash_active => {
                     state.write().cursor_end();
                 }
                 // Esc 在不激活 popup 时清空文本（激活 popup 时由上层关闭 popup）

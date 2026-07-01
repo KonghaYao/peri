@@ -147,6 +147,13 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                     if let Some(a) = SLASH_HINT_ACTIVE.get() {
                         *a.write() = false;
                     }
+                    // I18-C：Esc 关闭 popup 时也重置选中索引，下次打开默认第 0 项
+                    if let Some(a) = crate::kit::atoms::MENTION_SELECTED_INDEX.get() {
+                        *a.write() = 0;
+                    }
+                    if let Some(a) = crate::kit::atoms::SLASH_SELECTED_INDEX.get() {
+                        *a.write() = 0;
+                    }
                     return;
                 }
 
