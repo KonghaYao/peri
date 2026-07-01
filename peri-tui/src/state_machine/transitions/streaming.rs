@@ -101,11 +101,24 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
             // Note: A subsequent ACP ViewCommit will replace state.view
             // wholesale with the canonical snapshot, so this extension is
             // safe — any partial/incorrect ToolCards here are overwritten.
+            //
+            // Cron #44: emit Effect::Render to repaint after the transition.
+            // The TurnDone handler above (line 84-85) emits Render with the
+            // rationale that "气泡 + spinner 消失，若不触发重绘，用户会看到
+            // 一帧「气泡没了但 loading spinner 还在」的中间态". The same
+            // rationale applies here: current_turn is deactivated (spinner
+            // gone), streaming ViewModels are persisted to state.view (new
+            // content). Without Render, the screen retains the streaming
+            // state's spinner until the next Tick (33ms) or agent-done event.
+            // Today masked by v1 `handle_acp_event` always emitting Render
+            // fallback; once v1 retires in Phase 2.6, this becomes a visible
+            // flicker. Render is deduped by main_loop, so emitting twice is
+            // safe.
             let streaming_vms = state.current_turn.view_models().to_vec();
             state.view.extend(streaming_vms);
             state.current_turn.deactivate();
             let idle = state.into_idle();
-            (State::Idle(idle), Vec::new())
+            (State::Idle(idle), vec![Effect::Render])
         }
 
         // -- §4.3 Status (no message-area change) ----------------------------
@@ -534,6 +547,35 @@ mod tests {
             }
             _ => panic!("expected Idle after TurnInterrupted"),
         }
+    }
+
+    #[test]
+    fn test_turn_interrupted_emits_render_to_avoid_flicker() {
+        // Cron #44: TurnInterrupted 转换必须 emit Effect::Render，与 TurnDone
+        // 对称。当用户中断（Esc during streaming）时：current_turn 被持久化到
+        // state.view（新内容），current_turn 被 deactivate（spinner 消失）。
+        // 若不触发重绘，用户会看到一帧「spinner 还在但内容已变」的中间态，
+        // 直到下一个 Tick (33ms) 或 agent-done 事件触发 set_loading(false)。
+        // 当前由 v1 handle_acp_event 兜底 Render 掩盖，Phase 2.6 退役 v1 后
+        // 该缺失会变为可见闪烁。
+        use peri_acp_types::event_data::TurnInterrupted;
+
+        let state = make_state();
+        let (next, effects) = handle(
+            state,
+            Event::AcpEvent(AcpEventData::TurnInterrupted(TurnInterrupted {
+                reason: "user-cancel".into(),
+            })),
+        );
+
+        // 状态转换正确：Streaming -> Idle
+        assert!(matches!(next, State::Idle(_)));
+
+        // 关键断言：Render effect 必须存在
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Cron #44: TurnInterrupted 必须触发 Render（与 TurnDone 对称，避免闪烁）"
+        );
     }
 
     #[test]
