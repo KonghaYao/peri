@@ -84,19 +84,22 @@ impl App {
     ) -> (bool, bool, bool) {
         self.session_mgr.current_mut().agent.origin_messages = messages.clone();
 
-        // P5: replace view_messages (SystemNote anchor tracking retired in Phase 2.5)
-        let cwd = self.services.cwd.clone();
-        let mut view_msgs = super::messages_to_view_models(&messages, &cwd);
+        // Cron #42 (Phase 2.6 step 7e.5): retired apply_rebuild_all(0, view_msgs)
+        // — it only wrote to v1 view_messages, but production render reads v2
+        // state.view exclusively. Cron #29 P1 fix below (pending_view_rewind_to +
+        // push_system_note) is the sole load-bearing v2 route.
+        //
+        // Audit confirmed no headless test asserts view_messages after rewind
+        // (unlike compact which had 2 headless tests migrated in Cron #41),
+        // so this retirement needs no test migration.
         let label = format!("↩ {summary}");
-        view_msgs.push(MessageViewModel::system(label.clone()));
         self.session_mgr.current_mut().messages.round_start_vm_idx = 0;
-        self.apply_rebuild_all(0, view_msgs);
 
         // Cron #29 P1 fix: route rewind summary + state.view truncation to v2.
         //
-        // Bug (workflow weo7g6w2n P1): apply_rebuild_all only updates v1
-        // view_messages. ACP layer emits ONLY RewindCompleted — no
-        // subsequent ViewCommit/TurnCommitted (peri-acp/src/session/
+        // Bug (workflow weo7g6w2n P1): historically apply_rebuild_all only
+        // updated v1 view_messages. ACP layer emits ONLY RewindCompleted —
+        // no subsequent ViewCommit/TurnCommitted (peri-acp/src/session/
         // command/rewind.rs emits RewindCompleted then returns). Production
         // render reads v2 state.view exclusively, so:
         //   - state.view still shows the pre-rewind (removed) messages
@@ -115,7 +118,8 @@ impl App {
         // user's next input. This is strictly better than showing stale
         // pre-rewind content which makes rewind look broken.
         //
-        // Symmetric with Cron #28 handle_error fix (lifecycle.rs:240).
+        // Symmetric with Cron #28 handle_error fix (lifecycle.rs:240) +
+        // Cron #41 handle_compact_completed fix (agent_compact.rs:43).
         self.global_ui.pending_view_rewind_to = Some(0);
         self.push_system_note(label);
 
@@ -316,6 +320,41 @@ mod tests {
         assert_eq!(
             app.global_ui.pending_view_rewind_to, None,
             "micro_cleared > 0 early-return path must NOT set pending_view_rewind_to"
+        );
+    }
+
+    /// Cron #42 (Phase 2.6 step 7e.5): handle_rewind_completed must NOT
+    /// write to v1 view_messages. Previously the handler built view_msgs
+    /// from messages + label + called apply_rebuild_all(0, view_msgs).
+    /// But production render reads v2 state.view exclusively — the v1
+    /// rebuild was dead code. The sole load-bearing v2 route is
+    /// pending_view_rewind_to + push_system_note (Cron #29 P1 fix).
+    ///
+    /// This test confirms the retirement: after handle_rewind_completed,
+    /// view_messages is empty (initial state, untouched).
+    #[tokio::test]
+    async fn test_handle_rewind_completed_does_not_write_view_messages() {
+        let mut app = make_app().await;
+        // Initial state: view_messages is empty
+        assert_eq!(
+            app.session_mgr.current().messages.view_messages.len(),
+            0,
+            "precondition: view_messages starts empty"
+        );
+
+        let messages = vec![
+            BaseMessage::human("first".to_string()),
+            BaseMessage::ai("response".to_string()),
+        ];
+        let _ = app.handle_rewind_completed("Rewound 1 message".to_string(), messages);
+
+        assert_eq!(
+            app.session_mgr.current().messages.view_messages.len(),
+            0,
+            "Cron #42: handle_rewind_completed must NOT write to v1 \
+             view_messages — v2 pending_view_rewind_to + push_system_note \
+             is the sole route. Got view_messages.len() = {}",
+            app.session_mgr.current().messages.view_messages.len()
         );
     }
 }
