@@ -29,7 +29,9 @@ pub use state::{
     Handler, HandlerOutput, IdleState, InputState, ModalKind, ModalState, PanelEffect,
     PanelReadContext, PanelState, State, StreamingState, SwitchingState,
 };
-pub use view_store::ViewStore;
+pub use view_store::{
+    has_tool_cards_after, last_user_bubble_index, merge_preserving_local_notes, view_for_render,
+};
 
 /// Pure-function state machine entry point.
 ///
@@ -51,7 +53,7 @@ pub fn handle(state: State, event: Event) -> (State, Vec<crate::runtime::effect:
         State::Idle(s) => transitions::idle::handle(s, event),
         State::Streaming(s) => transitions::streaming::handle(s, event),
         State::Modal(s) => {
-            // Production never reaches here — main_loop calls
+            // Production never reaches here -- main_loop calls
             // `modal::handle_with_context` directly when state is Modal.
             #[cfg(test)]
             {

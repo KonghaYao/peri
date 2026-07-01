@@ -1,14 +1,7 @@
-//! ViewStore -- the state machine's authoritative ViewModel list.
+//! ViewModel query helpers -- free functions operating on `&[ViewModel]`.
 //!
-//! Holds the last committed snapshot from the ACP layer's `"view-commit"` event.
-//! Rendering concatenates this base list with the in-progress `CurrentTurn` to
-//! produce the final view shown on screen.
-//!
-//! # Replacement semantics
-//!
-//! Per design doc section 4.2 + CLAUDE.md P2-C: `commit()` uses **replacement**
-//! (not extend). The ACP layer sends a full ViewModel snapshot at each iteration
-//! boundary; the old list is entirely discarded.
+//! State variants hold `Vec<ViewModel>` directly; these pure functions provide
+//! the same query / merge functionality that ViewStore previously packaged.
 //!
 //! Reference: `docs/design/peri-tui-architecture.md` sections 4.2, 4.4, 8.2.
 
@@ -16,90 +9,13 @@ use peri_acp_types::view_model::ViewModel;
 
 use super::CurrentTurn;
 
-/// The state machine's authoritative ViewModel list.
-///
-/// Updated on `"view-commit"` events via [`commit`](Self::commit). Rendering
-/// accesses the combined list via [`for_render`](Self::for_render).
-#[derive(Default, Debug, Clone)]
-pub struct ViewStore {
-    /// Last committed ViewModel snapshot from the ACP layer.
-    ///
-    /// Updated on every `"view-commit"` event. The list is replaced wholesale --
-    /// never extended -- matching the design doc's "full replacement" invariant
-    /// (section 4.2 + CLAUDE.md P2-C).
-    pub view_models: Vec<ViewModel>,
-}
-
-impl ViewStore {
-    /// Replace the entire list with a new view-commit snapshot.
-    ///
-    /// Per design section 4.2 + CLAUDE.md P2-C: **replacement** semantics (not
-    /// extend). The `finalized_messages` from v2 stages are a full snapshot, not
-    /// an incremental delta. Extending would cause the list to double on every
-    /// commit in multi-iteration scenarios.
-    pub fn commit(&mut self, view_models: Vec<ViewModel>) {
-        self.view_models = view_models;
-    }
-
-    /// Clear the store (used on session switch).
-    ///
-    /// Called when entering `State::Switching` to discard the previous session's
-    /// view data before the new session's first `"view-commit"` arrives.
-    pub fn clear(&mut self) {
-        self.view_models.clear();
-    }
-
-    /// Render-time accessor: base list + current turn appended.
-    ///
-    /// This is a pure function -- the caller passes `&CurrentTurn`. The output
-    /// is a borrowed slice over the committed list, followed by borrowed
-    /// references to the current turn's view models (if any).
-    ///
-    /// Rendering derives the final view as:
-    /// ```text
-    ///   view_models (committed) + current_turn.view_models() (in-progress)
-    /// ```
-    pub fn for_render<'a>(
-        &'a self,
-        current_turn: Option<&'a mut CurrentTurn>,
-    ) -> Vec<&'a ViewModel> {
-        let mut out: Vec<&ViewModel> = self.view_models.iter().collect();
-        if let Some(ct) = current_turn {
-            let ct_vms = ct.view_models();
-            out.extend(ct_vms.iter());
-        }
-        out
-    }
-
-    /// Phase 2.6 step 7b — Index of the last `UserBubble` in the committed view.
-    ///
-    /// Returns `None` if the view contains no `UserBubble`. Used by interrupt
-    /// rollback paths to locate the most recent user message boundary without
-    /// touching v1 `view_messages`. See `docs/refactor/tui-v3-plan.md` step 7c
-    /// for the migration target.
-    pub fn last_user_bubble_index(&self) -> Option<usize> {
-        last_user_bubble_index(&self.view_models)
-    }
-
-    /// Phase 2.6 step 7b — Whether any `ToolCard` appears strictly after `idx`.
-    ///
-    /// Returns `false` if `idx` is out of range or no `ToolCard` follows.
-    /// Used by interrupt rollback to decide whether the user message at `idx`
-    /// has already produced tool progress (and thus should not be discarded).
-    pub fn has_tool_cards_after(&self, idx: usize) -> bool {
-        has_tool_cards_after(&self.view_models, idx)
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Phase 2.6 step 7b — Free-function query helpers
+// Phase 2.6 step 7b -- Free-function query helpers
 // ---------------------------------------------------------------------------
 //
-// Pure functions over `&[ViewModel]` so callers can pass either `ViewStore`
-// (via `.view_models`) or pre-collected render slices (`state.view_models()`
-// which includes the current turn). These enable migrating v1 control-flow
-// readers (handle_interrupted, app/mod.rs interrupt path) off v1 view_messages
-// in step 7c.
+// Pure functions over `&[ViewModel]` so callers can pass either committed
+// state views or pre-collected render slices (e.g. `state.view_models()`
+// which includes the current turn).
 
 /// Index of the last `UserBubble` in `view`, or `None` if absent.
 pub fn last_user_bubble_index(view: &[ViewModel]) -> Option<usize> {
@@ -109,7 +25,7 @@ pub fn last_user_bubble_index(view: &[ViewModel]) -> Option<usize> {
 
 /// Whether any `ToolCard` variant exists at index > `idx`.
 ///
-/// `SubAgentGroup` and `CollapsedGroup` may contain nested `ToolCard`s —
+/// `SubAgentGroup` and `CollapsedGroup` may contain nested `ToolCard`s --
 /// this helper only scans the top level (matches the v1 semantics where
 /// `view_messages.iter().skip(idx + 1)` checked flat ordering). Nested
 /// groups are governed by their own state (SubAgentStatusMap) and are
@@ -168,6 +84,28 @@ pub fn merge_preserving_local_notes(
     result
 }
 
+/// Render-time accessor: base list + current turn appended.
+///
+/// This is a pure function -- the caller passes `&[ViewModel]` and an
+/// optional `&mut CurrentTurn`. The output is a borrowed slice over the
+/// base list, followed by borrowed references to the current turn's view
+/// models (if any).
+///
+/// Rendering derives the final view as:
+/// ```text
+///   base (committed) + current_turn.view_models() (in-progress)
+/// ```
+pub fn view_for_render<'a>(
+    base: &'a [ViewModel],
+    current_turn: Option<&'a mut CurrentTurn>,
+) -> Vec<&'a ViewModel> {
+    let mut out: Vec<&ViewModel> = base.iter().collect();
+    if let Some(ct) = current_turn {
+        out.extend(ct.view_models());
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -175,77 +113,32 @@ pub fn merge_preserving_local_notes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peri_acp_types::view_model::{DividerData, UserBubbleData, ViewModel};
+    use peri_acp_types::view_model::{
+        AssistantBubbleData, CollapsedGroupData, DividerData, NoteLevel, SystemNoteData,
+        ToolCardData, UserBubbleData, ViewModel,
+    };
+
+    // -- view_for_render -----------------------------------------------------
 
     #[test]
-    fn test_default_is_empty() {
-        let store = ViewStore::default();
-        assert!(store.view_models.is_empty());
-    }
-
-    #[test]
-    fn test_commit_replaces_wholesale() {
-        let mut store = ViewStore::default();
-
-        // First commit
-        store.commit(vec![ViewModel::UserBubble(UserBubbleData {
+    fn test_view_for_render_base_only() {
+        let base = vec![ViewModel::UserBubble(UserBubbleData {
             text: "hello".into(),
-        })]);
-        assert_eq!(store.view_models.len(), 1);
-
-        // Second commit -- replaces, does not extend
-        store.commit(vec![
-            ViewModel::Divider(DividerData {
-                label: Some("round 2".into()),
-            }),
-            ViewModel::UserBubble(UserBubbleData {
-                text: "world".into(),
-            }),
-        ]);
-        assert_eq!(store.view_models.len(), 2);
-        // Old entry is gone -- replacement semantics
-        match &store.view_models[0] {
-            ViewModel::Divider(DividerData { label: Some(l) }) => {
-                assert_eq!(l, "round 2");
-            }
-            _ => panic!("expected Divider variant"),
-        }
-    }
-
-    #[test]
-    fn test_clear() {
-        let mut store = ViewStore::default();
-        store.commit(vec![ViewModel::UserBubble(UserBubbleData {
-            text: "data".into(),
-        })]);
-        assert!(!store.view_models.is_empty());
-
-        store.clear();
-        assert!(store.view_models.is_empty());
-    }
-
-    #[test]
-    fn test_for_render_base_only() {
-        let mut store = ViewStore::default();
-        store.commit(vec![ViewModel::UserBubble(UserBubbleData {
-            text: "committed".into(),
-        })]);
-
-        let rendered = store.for_render(None);
+        })];
+        let rendered = view_for_render(&base, None);
         assert_eq!(rendered.len(), 1);
     }
 
     #[test]
-    fn test_for_render_with_current_turn() {
-        let mut store = ViewStore::default();
-        store.commit(vec![ViewModel::Divider(DividerData {
+    fn test_view_for_render_with_current_turn() {
+        let base = vec![ViewModel::Divider(DividerData {
             label: Some("base".into()),
-        })]);
+        })];
 
         let mut current_turn = CurrentTurn::new();
         current_turn.append_text("streaming");
 
-        let rendered = store.for_render(Some(&mut current_turn));
+        let rendered = view_for_render(&base, Some(&mut current_turn));
         assert_eq!(rendered.len(), 2);
         // First item is from committed base
         assert!(matches!(rendered[0], ViewModel::Divider(_)));
@@ -254,17 +147,13 @@ mod tests {
     }
 
     #[test]
-    fn test_for_render_no_current_turn_no_panic() {
-        let store = ViewStore::default();
-        // None current_turn should not panic
-        let rendered = store.for_render(None);
+    fn test_view_for_render_empty_base_no_panic() {
+        let base: Vec<ViewModel> = vec![];
+        let rendered = view_for_render(&base, None);
         assert!(rendered.is_empty());
     }
 
-    // -- merge_preserving_local_notes (Phase 2.5) ----------------------------
-
-    use super::merge_preserving_local_notes;
-    use peri_acp_types::view_model::{NoteLevel, SystemNoteData};
+    // -- merge_preserving_local_notes ----------------------------------------
 
     #[test]
     fn test_merge_preserves_tui_only_system_note() {
@@ -347,9 +236,6 @@ mod tests {
     }
 
     // -- Phase 2.6 step 7b query helpers -------------------------------------
-
-    use super::{has_tool_cards_after, last_user_bubble_index};
-    use peri_acp_types::view_model::{AssistantBubbleData, CollapsedGroupData, ToolCardData};
 
     #[test]
     fn test_last_user_bubble_index_empty() {
@@ -457,23 +343,5 @@ mod tests {
         ];
         // CollapsedGroup 不是顶层 ToolCard → false
         assert!(!has_tool_cards_after(&view, 0));
-    }
-
-    #[test]
-    fn test_view_store_last_user_bubble_index_via_method() {
-        let mut store = ViewStore::default();
-        store.commit(vec![
-            ViewModel::Divider(DividerData { label: None }),
-            ViewModel::UserBubble(UserBubbleData {
-                text: "hello".into(),
-            }),
-            ViewModel::AssistantBubble(AssistantBubbleData {
-                text: "world".into(),
-                reasoning: None,
-                tool_card_ids: vec![],
-            }),
-        ]);
-        assert_eq!(store.last_user_bubble_index(), Some(1));
-        assert!(!store.has_tool_cards_after(1));
     }
 }
