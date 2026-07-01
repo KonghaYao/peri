@@ -8,6 +8,7 @@
 use chrono::{DateTime, Utc};
 use peri_acp_types::view_model::ViewModel;
 use ratatui_kit::prelude::StoreState;
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
@@ -172,6 +173,23 @@ pub static ACTIVE_PANEL: OnceLock<Atom<Option<PanelKind>>> = OnceLock::new();
 /// 当前激活弹窗。None = 无弹窗。弹窗优先级高于面板——同时存在时弹窗先消费 Esc。
 pub static POPUP_KIND: OnceLock<Atom<Option<PopupKind>>> = OnceLock::new();
 
+/// 输入历史栈——按提交时间顺序（旧 → 新）。最多 100 条，超出后从头部丢弃。
+///
+/// 由 `submit_consumer` 在 prompt 提交后 `push_history(text)` 写入；
+/// InputArea 用 Up/Down 浏览，按 Esc 或重新输入文本回到底部。
+pub static INPUT_HISTORY: OnceLock<Atom<VecDeque<String>>> = OnceLock::new();
+
+/// 输入历史浏览指针——`Some(i)` 表示当前正在浏览 `INPUT_HISTORY[i]`，
+/// `None` 表示正在编辑新文本（非历史浏览状态）。
+pub static INPUT_HISTORY_INDEX: OnceLock<Atom<Option<usize>>> = OnceLock::new();
+
+/// @mention 当前匹配的文件名前缀（用户输入 @ 之后的字符）。
+/// 由 InputArea 在用户输入 @ 时写入；MentionPopup 用它过滤文件列表。
+pub static MENTION_PREFIX: OnceLock<Atom<String>> = OnceLock::new();
+
+/// slash 命令当前匹配前缀（用户输入 / 之后的字符）。
+pub static SLASH_PREFIX: OnceLock<Atom<String>> = OnceLock::new();
+
 /// 初始化所有全局 Atom。
 ///
 /// 必须在 tokio 运行时启动后、任何组件渲染前调用。
@@ -191,6 +209,10 @@ pub fn init_atoms() {
     OPEN_PANELS.get_or_init(|| Atom::new(Vec::new()));
     ACTIVE_PANEL.get_or_init(|| Atom::new(None));
     POPUP_KIND.get_or_init(|| Atom::new(None));
+    INPUT_HISTORY.get_or_init(|| Atom::new(VecDeque::new()));
+    INPUT_HISTORY_INDEX.get_or_init(|| Atom::new(None));
+    MENTION_PREFIX.get_or_init(|| Atom::new(String::new()));
+    SLASH_PREFIX.get_or_init(|| Atom::new(String::new()));
     // SUBMIT_TX 由 entry::run_kit_fullscreen 在 build_app_and_acp 之后初始化
     // （需要 mpsc::unbounded_channel 的 rx 配对），不在此处 get_or_init。
 }

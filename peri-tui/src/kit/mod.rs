@@ -13,6 +13,7 @@ pub mod atoms;
 pub mod entry;
 pub mod event_handlers;
 pub mod input_area;
+pub mod input_history;
 pub mod layout;
 pub mod mention_popup;
 pub mod message_area;

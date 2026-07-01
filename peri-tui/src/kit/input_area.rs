@@ -1,7 +1,11 @@
 //! 输入区域 #[component] 组件。
 //!
-//! 使用 String 存储文本状态 + 手动处理键盘事件（tui_textarea 非 Send+Sync，
-//! 无法放入 ratatui-kit use_state）。渲染时用 Paragraph 显示文本 + 光标指示符。
+//! S8：完整输入体验——
+//! - **多行 buffer**：Shift/Alt+Enter 换行；渲染按行拆分；高度动态扩展（3~40% 屏幕）
+//! - **history**：Up/Down 浏览 `INPUT_HISTORY` atom；Esc 或回到栈底恢复编辑态
+//! - **@mention**：输入 @ 触发 AT_MENTION_ACTIVE；popup 显示在输入框上方
+//! - **slash**：行首 / 触发 SLASH_HINT_ACTIVE；popup 显示在输入框上方
+//! - **提交**：Enter 提交，submit_consumer 消费 + push_history
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -14,13 +18,25 @@ use ratatui_kit::{
     },
 };
 
+use crate::kit::atoms::{
+    AT_MENTION_ACTIVE, MENTION_PREFIX, SLASH_HINT_ACTIVE, SLASH_PREFIX, SUBMIT_TX,
+};
+use crate::kit::input_history::{history_down, history_up, push_history};
+use crate::kit::mention_popup::MentionPopup;
+use crate::kit::slash_completion::SlashCompletion;
 use crate::ui::theme;
+
+/// 静态 slash 命令列表——S11 解耦后从 CommandRegistry 注入真实命令。
+const SLASH_COMMANDS: &[&str] = &[
+    "/help", "/clear", "/compact", "/rewind", "/model", "/agents", "/cost", "/context", "/yolo",
+    "/mode", "/threads", "/mcp", "/cron", "/login", "/quit",
+];
 
 /// 输入状态
 #[derive(Clone, Default)]
 struct EditorState {
     text: String,
-    /// 字节偏移量（保证在字符边界上）
+    /// 字符索引（保证在字符边界上）
     cursor: usize,
 }
 
@@ -49,15 +65,6 @@ impl EditorState {
         }
     }
 
-    /// 删除光标处的字符
-    fn delete(&mut self) {
-        if self.cursor < self.len() {
-            let start = Self::char_to_byte(&self.text, self.cursor);
-            let end = Self::char_to_byte(&self.text, self.cursor + 1);
-            self.text.drain(start..end);
-        }
-    }
-
     /// 左移光标
     fn cursor_left(&mut self) {
         if self.cursor > 0 {
@@ -72,12 +79,12 @@ impl EditorState {
         }
     }
 
-    /// 光标到行首
+    /// 光标到文本首
     fn cursor_home(&mut self) {
         self.cursor = 0;
     }
 
-    /// 光标到行尾
+    /// 光标到文本尾
     fn cursor_end(&mut self) {
         self.cursor = self.len();
     }
@@ -111,6 +118,12 @@ impl EditorState {
         self.text.chars().count()
     }
 
+    /// 替换整个文本并把光标放到末尾（历史导航用）
+    fn replace_all(&mut self, text: String) {
+        self.text = text;
+        self.cursor = self.text.chars().count();
+    }
+
     /// 清除文本
     fn clear(&mut self) {
         self.text.clear();
@@ -133,7 +146,7 @@ pub struct InputAreaProps {
 
 #[component]
 pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    // 创建单一编辑状态（闭包编辑 + 渲染读取共享同一实例）
+    // 单一编辑状态——闭包编辑 + 渲染读取共享同一实例
     let state = hooks.use_state(EditorState::default);
 
     hooks.use_local_events({
@@ -144,23 +157,111 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                 let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
                 let is_alt = key.modifiers.contains(KeyModifiers::ALT);
 
+                // 当前是否激活了 @mention / slash（激活时方向键给 popup 用）
+                let mention_active = AT_MENTION_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
+                let slash_active = SLASH_HINT_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
+
                 match key.code {
-                    // ── 提交 ──
-                    KeyCode::Enter if !is_shift && !is_alt => {
+                    // ── 提交 ──（仅在不激活 popup 时按 Enter 提交）
+                    KeyCode::Enter if !is_shift && !is_alt && !mention_active && !slash_active => {
                         let mut s = state.write();
-                        let submitted = s.text.clone();
+                        let submitted = std::mem::take(&mut s.text);
+                        s.cursor = 0;
                         if !submitted.trim().is_empty() {
-                            // 通过 mpsc channel 推送给 submit_consumer → acp_client.prompt()
-                            if let Some(tx) = crate::kit::atoms::SUBMIT_TX.get() {
+                            // 入历史栈 + 通过 SUBMIT_TX 推送
+                            push_history(&submitted);
+                            if let Some(tx) = SUBMIT_TX.get() {
                                 let _ = tx.send(submitted);
                             }
-                            s.clear();
+                            // 关闭可能的 @mention/slash
+                            if let Some(a) = AT_MENTION_ACTIVE.get() {
+                                *a.write() = false;
+                            }
+                            if let Some(a) = SLASH_HINT_ACTIVE.get() {
+                                *a.write() = false;
+                            }
                         }
                     }
 
-                    // Shift/Alt+Enter: 换行
-                    KeyCode::Enter => {
+                    // Shift/Alt+Enter：换行（多行 buffer）
+                    KeyCode::Enter if (is_shift || is_alt) && !mention_active && !slash_active => {
                         state.write().insert_char('\n');
+                    }
+
+                    // ── popup 激活时方向键 / Enter 给 popup ──
+                    // 这里 popup 自身的 use_local_events 会消费 Up/Down；
+                    // Enter/Esc 我们在 InputArea 层处理：选择第一项 / 取消
+                    KeyCode::Enter if mention_active => {
+                        // 选当前 mention 项：插入到 editor @ 之后位置
+                        let prefix = MENTION_PREFIX
+                            .get()
+                            .map(|a| a.read().clone())
+                            .unwrap_or_default();
+                        // 简单语义：直接用 prefix 作为文件名（无候选项源时）
+                        let replacement = if prefix.is_empty() {
+                            String::new()
+                        } else {
+                            prefix
+                        };
+                        // 找到 @ 字符位置并替换其后所有 mention prefix
+                        let mut s = state.write();
+                        if let Some(at_byte) = s.text.rfind('@') {
+                            let after_at_byte = at_byte + 1;
+                            let cursor_chars_before = s.cursor;
+                            let _ = cursor_chars_before;
+                            // 删除 @ 后的所有非空白字符（即旧的 prefix）
+                            let keep_until_byte = s.text[after_at_byte..]
+                                .char_indices()
+                                .take_while(|(_, c)| !c.is_whitespace())
+                                .last()
+                                .map(|(i, c)| after_at_byte + i + c.len_utf8())
+                                .unwrap_or(after_at_byte);
+                            s.text.drain(after_at_byte..keep_until_byte);
+                            // 插入替换文本
+                            s.text.insert_str(after_at_byte, &replacement);
+                            s.cursor = s.text.chars().count();
+                        }
+                        drop(s);
+                        if let Some(a) = AT_MENTION_ACTIVE.get() {
+                            *a.write() = false;
+                        }
+                        if let Some(a) = MENTION_PREFIX.get() {
+                            a.write().clear();
+                        }
+                    }
+                    KeyCode::Enter if slash_active => {
+                        let prefix = SLASH_PREFIX
+                            .get()
+                            .map(|a| a.read().clone())
+                            .unwrap_or_default();
+                        let cmd = if prefix.is_empty() {
+                            String::new()
+                        } else {
+                            format!("/{}", prefix)
+                        };
+                        let mut s = state.write();
+                        // 替换整个 editor 内容为命令
+                        if !cmd.is_empty() {
+                            s.replace_all(cmd.clone());
+                            // 立即提交命令
+                            drop(s);
+                            let final_text = state.read().text.clone();
+                            if !final_text.trim().is_empty() {
+                                push_history(&final_text);
+                                if let Some(tx) = SUBMIT_TX.get() {
+                                    let _ = tx.send(final_text);
+                                }
+                                state.write().clear();
+                            }
+                        } else {
+                            drop(s);
+                        }
+                        if let Some(a) = SLASH_HINT_ACTIVE.get() {
+                            *a.write() = false;
+                        }
+                        if let Some(a) = SLASH_PREFIX.get() {
+                            a.write().clear();
+                        }
                     }
 
                     // ── 编辑快捷键 ──
@@ -170,44 +271,68 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     KeyCode::Char('u') if is_ctrl => {
                         state.write().clear();
                     }
+                    KeyCode::Backspace if !mention_active && !slash_active => {
+                        let mut s = state.write();
+                        s.backspace();
+                        // 若删完后文本不以 / 开头，关闭 slash 提示
+                        if let Some(a) = SLASH_HINT_ACTIVE.get() {
+                            if *a.read() && !s.text.starts_with('/') {
+                                *a.write() = false;
+                            }
+                        }
+                    }
                     KeyCode::Backspace => {
-                        state.write().backspace();
+                        // popup 激活时退格——更新 prefix
+                        let mut s = state.write();
+                        s.backspace();
+                        update_popup_prefix(&s.text);
                     }
-                    KeyCode::Delete => {
-                        state.write().delete();
-                    }
-                    KeyCode::Left => {
+                    KeyCode::Left if !mention_active && !slash_active => {
                         state.write().cursor_left();
                     }
-                    KeyCode::Right => {
+                    KeyCode::Right if !mention_active && !slash_active => {
                         state.write().cursor_right();
                     }
-                    KeyCode::Up => {
-                        // Phase 9: history up
+                    // ── history 导航（仅在不激活 popup 时）──
+                    KeyCode::Up if !mention_active && !slash_active => {
+                        if let Some(historical) = history_up() {
+                            state.write().replace_all(historical);
+                        }
                     }
-                    KeyCode::Down => {
-                        // Phase 9: history down
+                    KeyCode::Down if !mention_active && !slash_active => {
+                        match history_down() {
+                            Some(historical) => state.write().replace_all(historical),
+                            None => {
+                                // 回到编辑态——保留当前文本（草稿语义）
+                            }
+                        }
                     }
-                    KeyCode::Home => {
+                    KeyCode::Home if !mention_active && !slash_active => {
                         state.write().cursor_home();
                     }
-                    KeyCode::End => {
+                    KeyCode::End if !mention_active && !slash_active => {
                         state.write().cursor_end();
                     }
-                    KeyCode::Esc => {
+                    // Esc 在不激活 popup 时清空文本（激活 popup 时由上层关闭 popup）
+                    KeyCode::Esc if !mention_active && !slash_active => {
                         state.write().clear();
                     }
 
                     // ── 字符输入 ──
                     KeyCode::Char(ch) if !is_ctrl && !is_alt => {
-                        state.write().insert_char(ch);
+                        let mut s = state.write();
+                        s.insert_char(ch);
+                        // 触发 @mention / slash 提示
+                        update_popup_prefix(&s.text);
                     }
 
                     _ => {}
                 }
             }
             Event::Paste(paste_text) => {
-                state.write().insert_str(&paste_text);
+                let mut s = state.write();
+                s.insert_str(&paste_text);
+                update_popup_prefix(&s.text);
             }
             _ => {}
         }
@@ -218,65 +343,290 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let cursor = editor.cursor;
     let loading = props.loading;
 
-    // 构建带光标指示的渲染文本
-    let cursor_style = Style::default()
-        .fg(Color::Rgb(0, 0, 0))
-        .bg(theme::TEXT)
-        .add_modifier(Modifier::BOLD);
+    // 当前激活状态（驱动 popup 渲染）
+    let mention_active = AT_MENTION_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
+    let slash_active = SLASH_HINT_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
+    let mention_prefix = MENTION_PREFIX
+        .get()
+        .map(|a| a.read().clone())
+        .unwrap_or_default();
+    let slash_prefix = SLASH_PREFIX
+        .get()
+        .map(|a| a.read().clone())
+        .unwrap_or_default();
 
-    let line = if text.is_empty() {
-        if !loading {
-            // 空输入框：显示闪烁的光标
-            Line::from(vec![Span::styled("\u{258C}", cursor_style)])
-        } else {
-            Line::from("")
-        }
-    } else {
-        let mut cursor_byte = EditorState::char_to_byte(&text, cursor);
-        if cursor_byte > text.len() {
-            cursor_byte = text.len();
-        }
+    // 多行渲染——按 \n 拆分，每行作为独立 Line，光标高亮放在对应行
+    let lines = render_multiline_with_cursor(&text, cursor, loading);
 
-        let mut spans = Vec::new();
-        if cursor_byte > 0 {
-            spans.push(Span::raw(text[..cursor_byte].to_string()));
-        }
-        // 光标指示：用反转样式高亮当前字符，或在末尾插入块状光标
-        if cursor_byte < text.len() {
-            let next_char_end = text[cursor_byte..]
-                .chars()
-                .next()
-                .map(|c| cursor_byte + c.len_utf8())
-                .unwrap_or(text.len());
-            spans.push(Span::styled(
-                text[cursor_byte..next_char_end].to_string(),
-                cursor_style,
-            ));
-            if next_char_end < text.len() {
-                spans.push(Span::raw(text[next_char_end..].to_string()));
-            }
-        } else {
-            // 光标在文本末尾
-            spans.push(Span::styled(" ", cursor_style));
-        }
-        Line::from(spans)
-    };
+    // 计算高度：3 行基础 + 文本行数；最大 12 行
+    let line_count = text.matches('\n').count() + 1;
+    let editor_height = (line_count as u16 + 2).min(12);
+
+    let slash_commands: Vec<String> = SLASH_COMMANDS.iter().map(|s| s.to_string()).collect();
+
+    // popup 高度建议——避免高度计算复杂，固定 8 行
+    let _ = editor_height;
 
     element!(
         View(
             flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
-            height: Constraint::Length(3),
+            height: Constraint::Fill(1),
         ) {
-            Text(text: Paragraph::new(line).block(
-                if loading {
-                    Block::default()
-                        .borders(Borders::TOP)
-                        .border_style(ratatui::style::Style::new().fg(theme::MUTED))
-                } else {
-                    Block::default().borders(Borders::TOP)
-                }
-            ))
+            #(if slash_active {
+                element!(SlashCompletion(
+                    prefix: slash_prefix.clone(),
+                    commands: slash_commands.clone(),
+                    on_select: Handler::from(|_: String| {}),
+                    on_cancel: Handler::from(|_: ()| {}),
+                )).into_any()
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
+            })
+            #(if mention_active {
+                element!(MentionPopup(
+                    prefix: mention_prefix.clone(),
+                    items: Vec::<String>::new(), // S11 接入真实文件列表
+                    on_select: Handler::from(|_: String| {}),
+                    on_cancel: Handler::from(|_: ()| {}),
+                )).into_any()
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
+            })
+            View(
+                flex_direction: Direction::Vertical,
+                width: Constraint::Fill(1),
+                height: Constraint::Length(editor_height),
+            ) {
+                Text(text: Paragraph::new(lines).block(
+                    if loading {
+                        Block::default()
+                            .borders(Borders::TOP)
+                            .border_style(ratatui::style::Style::new().fg(theme::MUTED))
+                    } else {
+                        Block::default().borders(Borders::TOP)
+                    }
+                ))
+            }
         }
     )
+}
+
+/// 根据 editor 当前文本更新 @mention / slash 提示状态。
+///
+/// - `/` 在行首：开启 slash 提示，prefix = 第一个非空白/制表符之后到光标的内容
+/// - `@` 在最近词中：开启 @mention，prefix = @ 之后的字符
+fn update_popup_prefix(text: &str) {
+    // slash：仅当整段文本以 / 开头且无空格时
+    let slash_active_now = text.starts_with('/') && !text[1..].contains(' ');
+    if let Some(a) = SLASH_HINT_ACTIVE.get() {
+        *a.write() = slash_active_now;
+    }
+    if let Some(a) = SLASH_PREFIX.get() {
+        if slash_active_now {
+            // prefix = 去掉 / 后的所有字符
+            *a.write() = text[1..].to_string();
+        } else {
+            a.write().clear();
+        }
+    }
+
+    // @mention：找最后一个 @，若其后到文本末尾无空白则激活
+    let mention_active_now = if let Some(at_idx) = text.rfind('@') {
+        let after = &text[at_idx + 1..];
+        !after.is_empty() && !after.contains(char::is_whitespace) && after != "@"
+    } else {
+        false
+    };
+    if let Some(a) = AT_MENTION_ACTIVE.get() {
+        *a.write() = mention_active_now;
+    }
+    if let Some(a) = MENTION_PREFIX.get() {
+        if mention_active_now {
+            if let Some(at_idx) = text.rfind('@') {
+                *a.write() = text[at_idx + 1..].to_string();
+            }
+        } else {
+            a.write().clear();
+        }
+    }
+}
+
+/// 把文本按 \n 拆成多行 Line，光标以反转色高亮。
+fn render_multiline_with_cursor(text: &str, cursor: usize, loading: bool) -> Vec<Line<'static>> {
+    let cursor_style = Style::default()
+        .fg(Color::Rgb(0, 0, 0))
+        .bg(theme::TEXT)
+        .add_modifier(Modifier::BOLD);
+
+    if text.is_empty() {
+        return vec![if loading {
+            Line::from("")
+        } else {
+            Line::from(vec![Span::styled("\u{258C}", cursor_style)])
+        }];
+    }
+
+    // 把光标位置映射到 (line_idx, col_idx)
+    let mut chars_before_cursor = 0usize;
+    let mut done = false;
+    let mut target_line = 0usize;
+    let mut target_col = 0usize;
+    for (li, line) in text.split('\n').enumerate() {
+        let line_chars = line.chars().count();
+        if !done && chars_before_cursor + line_chars >= cursor {
+            target_line = li;
+            target_col = cursor - chars_before_cursor;
+            done = true;
+            break;
+        }
+        chars_before_cursor += line_chars + 1; // +1 for \n
+        if chars_before_cursor > cursor + 1 {
+            break;
+        }
+    }
+    if !done {
+        // 光标在文本末尾
+        let total_lines: Vec<&str> = text.split('\n').collect();
+        target_line = total_lines.len() - 1;
+        target_col = total_lines.last().map(|l| l.chars().count()).unwrap_or(0);
+    }
+
+    let mut result: Vec<Line<'static>> = Vec::new();
+    for (li, line) in text.split('\n').enumerate() {
+        if li == target_line {
+            let col_byte = EditorState::char_to_byte(line, target_col);
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if col_byte > 0 {
+                spans.push(Span::raw(line[..col_byte].to_string()));
+            }
+            if col_byte < line.len() {
+                // 高亮当前字符
+                let next_end = line[col_byte..]
+                    .chars()
+                    .next()
+                    .map(|c| col_byte + c.len_utf8())
+                    .unwrap_or(line.len());
+                spans.push(Span::styled(
+                    line[col_byte..next_end].to_string(),
+                    cursor_style,
+                ));
+                if next_end < line.len() {
+                    spans.push(Span::raw(line[next_end..].to_string()));
+                }
+            } else {
+                // 光标在行尾
+                spans.push(Span::styled(" ", cursor_style));
+            }
+            result.push(Line::from(spans));
+        } else {
+            result.push(Line::from(line.to_string()));
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    fn test_editor_state_replace_all_sets_cursor_to_end() {
+        let mut s = EditorState::default();
+        s.replace_all("hello".to_string());
+        assert_eq!(s.text, "hello");
+        assert_eq!(s.cursor, 5);
+    }
+
+    #[test]
+    fn test_editor_state_clear() {
+        let mut s = EditorState {
+            text: "abc".into(),
+            cursor: 2,
+        };
+        s.clear();
+        assert!(s.text.is_empty());
+        assert_eq!(s.cursor, 0);
+    }
+
+    #[test]
+    fn test_char_to_byte_boundaries() {
+        // ASCII
+        assert_eq!(EditorState::char_to_byte("hello", 0), 0);
+        assert_eq!(EditorState::char_to_byte("hello", 3), 3);
+        assert_eq!(EditorState::char_to_byte("hello", 5), 5);
+        assert_eq!(EditorState::char_to_byte("hello", 99), 5); // 越界回退
+
+        // CJK
+        assert_eq!(EditorState::char_to_byte("你好", 0), 0);
+        assert_eq!(EditorState::char_to_byte("你好", 1), 3); // '你' 占 3 字节
+        assert_eq!(EditorState::char_to_byte("你好", 2), 6);
+    }
+
+    #[test]
+    fn test_render_multiline_empty_shows_cursor() {
+        let lines = render_multiline_with_cursor("", 0, false);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn test_render_multiline_splits_newlines() {
+        let lines = render_multiline_with_cursor("a\nb\nc", 0, false);
+        assert_eq!(lines.len(), 3);
+    }
+
+    fn reset_popup_atoms() {
+        if let Some(a) = AT_MENTION_ACTIVE.get() {
+            *a.write() = false;
+        }
+        if let Some(a) = SLASH_HINT_ACTIVE.get() {
+            *a.write() = false;
+        }
+        if let Some(a) = MENTION_PREFIX.get() {
+            a.write().clear();
+        }
+        if let Some(a) = SLASH_PREFIX.get() {
+            a.write().clear();
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_update_popup_prefix_slash_at_start() {
+        crate::kit::atoms::init_atoms();
+        reset_popup_atoms();
+        update_popup_prefix("/hel");
+        assert!(!*AT_MENTION_ACTIVE.get().unwrap().read());
+        assert!(*SLASH_HINT_ACTIVE.get().unwrap().read());
+        assert_eq!(SLASH_PREFIX.get().unwrap().read().as_str(), "hel");
+    }
+
+    #[test]
+    #[serial]
+    fn test_update_popup_prefix_slash_with_space_disables() {
+        crate::kit::atoms::init_atoms();
+        reset_popup_atoms();
+        update_popup_prefix("/help me");
+        assert!(!*SLASH_HINT_ACTIVE.get().unwrap().read());
+    }
+
+    #[test]
+    #[serial]
+    fn test_update_popup_prefix_mention_trigger() {
+        crate::kit::atoms::init_atoms();
+        reset_popup_atoms();
+        update_popup_prefix("see @auth");
+        assert!(*AT_MENTION_ACTIVE.get().unwrap().read());
+        assert_eq!(MENTION_PREFIX.get().unwrap().read().as_str(), "auth");
+    }
+
+    #[test]
+    #[serial]
+    fn test_update_popup_prefix_mention_with_space_disables() {
+        crate::kit::atoms::init_atoms();
+        reset_popup_atoms();
+        update_popup_prefix("see @auth service");
+        assert!(!*AT_MENTION_ACTIVE.get().unwrap().read());
+    }
 }
