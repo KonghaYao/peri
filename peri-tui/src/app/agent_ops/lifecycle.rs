@@ -113,10 +113,29 @@ impl App {
     ) -> (bool, bool, bool) {
         self.session_mgr.current_mut().agent.cancel_sent_at = None;
 
+        // Cron #31 P1 fix: early-return on subagent_depth > 0, mirroring
+        // handle_done (line 44-46) and handle_error (line 212-214).
+        //
+        // Bug: prior to this guard, Ctrl+C during a sync SubAgent's run
+        // would flow through the FULL interrupt pipeline on the PARENT's
+        // view_slice — `last_user_bubble_index` finds the parent's
+        // UserBubble, `has_tool_cards_after` checks the parent's top-level
+        // ToolCards (not the SubAgent's internal content). If the parent
+        // had no top-level ToolCards after the user bubble (common during
+        // early SubAgent execution), branch 2 triggers — apply_rebuild_all
+        // wipes the parent's progress + pending_view_rewind_to truncates
+        // state.view + last_submitted_text gets restored to textarea.
+        // Result: cancelling a SubAgent accidentally rolled back the
+        // parent's submission + input.
+        //
+        // The SubAgentEnd event (mod.rs:59-93) still fires independently
+        // to decrement subagent_depth and record SubAgent completion
+        // status, so this early-return doesn't strand any SubAgent state.
         if self.session_mgr.current_mut().agent.subagent_depth > 0 {
             tracing::info!(
-                "Parent agent interrupted during sync SubAgent — proceeding with cleanup"
+                "Parent agent interrupted during sync SubAgent — bailing out to preserve parent state"
             );
+            return (false, false, false);
         }
 
         // Phase 2.6 step 7c: scan v2 state.view (passed in as view_slice)
@@ -480,6 +499,138 @@ mod tests {
             pending[0].contains("provider rate limited"),
             "enqueued note must contain original error message, got: {}",
             pending[0]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Cron #31: handle_interrupted subagent_depth early-return regression
+    // -----------------------------------------------------------------------
+    //
+    // Bug: handle_interrupted lacked the subagent_depth > 0 early-return
+    // that handle_done (line 44-46) and handle_error (line 212-214) both
+    // have. Ctrl+C during a sync SubAgent's run flowed through the full
+    // interrupt pipeline on the PARENT's view, rolling back the parent's
+    // submission + restoring last_submitted_text.
+    //
+    // These tests verify the guard mirrors its siblings exactly.
+
+    /// Cron #31 P1: handle_interrupted MUST early-return when
+    /// subagent_depth > 0, preserving parent state.
+    ///
+    /// Without the guard, the parent's UserBubble in view_slice would
+    /// trigger branch 2 rollback (no top-level ToolCards after user msg).
+    #[tokio::test]
+    async fn test_handle_interrupted_subagent_depth_early_return() {
+        let mut app = make_app_with_active_turn().await;
+        // Simulate SubAgent in flight
+        app.session_mgr.current_mut().agent.subagent_depth = 1;
+
+        // Parent's view_slice: just a UserBubble (would trigger branch 2
+        // rollback if the guard isn't in place)
+        let view_slice: Vec<ViewModel> = vec![ViewModel::UserBubble(UserBubbleData {
+            text: "hello".into(),
+        })];
+
+        let (should_return, should_break, _) = app.handle_interrupted(&view_slice);
+
+        // Guard returns (false, false, false) — same as handle_done/error
+        assert!(
+            !should_return && !should_break,
+            "handle_interrupted must early-return (false, false, _) when subagent_depth > 0"
+        );
+
+        // CRITICAL: pending_view_rewind_to must NOT be set
+        // (parent's state.view should not be truncated)
+        assert_eq!(
+            app.global_ui.pending_view_rewind_to, None,
+            "subagent_depth > 0 must NOT trigger pending_view_rewind_to (would roll back parent)"
+        );
+
+        // CRITICAL: last_submitted_text must NOT be consumed
+        // (parent's textarea should not be restored)
+        assert_eq!(
+            app.session_mgr
+                .current()
+                .messages
+                .last_submitted_text
+                .as_deref(),
+            Some("hello"),
+            "subagent_depth > 0 must NOT consume last_submitted_text"
+        );
+
+        // CRITICAL: v1 view_messages must NOT be truncated
+        assert_eq!(
+            app.session_mgr.current().messages.view_messages.len(),
+            1,
+            "subagent_depth > 0 must NOT truncate view_messages"
+        );
+    }
+
+    /// Cron #31 P1: handle_interrupted subagent_depth > 0 with ToolCards
+    /// also early-returns (asymmetric to ensure parent state never touched).
+    ///
+    /// Verifies that branch 1 (has_tool_calls → keep progress) is also
+    /// bypassed when subagent_depth > 0. The SubAgentEnd event handles
+    /// cleanup; handle_interrupted should never touch parent state.
+    #[tokio::test]
+    async fn test_handle_interrupted_subagent_depth_skips_branch1_too() {
+        let mut app = make_app_with_active_turn().await;
+        app.session_mgr.current_mut().agent.subagent_depth = 1;
+
+        // view_slice with ToolCards — would trigger branch 1 if guard absent
+        let view_slice: Vec<ViewModel> = vec![
+            ViewModel::UserBubble(UserBubbleData {
+                text: "hello".into(),
+            }),
+            ViewModel::ToolCard(ToolCardData {
+                tool_id: "t1".into(),
+                tool_name: "Bash".into(),
+                input_summary: "ls".into(),
+                output_summary: "files".into(),
+                is_error: false,
+                diff: None,
+            }),
+        ];
+
+        let _ = app.handle_interrupted(&view_slice);
+
+        // Branch 1 would set reconcile_already_done = true + push system note
+        // "app-interrupt-done". Both must NOT happen.
+        assert!(
+            !app.session_mgr.current().agent.reconcile_already_done,
+            "subagent_depth > 0 must NOT set reconcile_already_done (branch 1 also bypassed)"
+        );
+
+        // No "interrupt-done" system note enqueued
+        let pending = &app.session_mgr.current().messages.pending_v2_notes;
+        assert!(
+            pending.is_empty(),
+            "subagent_depth > 0 must NOT push interrupt-done note, got: {:?}",
+            pending
+        );
+    }
+
+    /// Cron #31 P1: subagent_depth = 0 (no SubAgent) must NOT early-return —
+    /// existing branch 1/branch 2 logic still applies.
+    ///
+    /// Regression guard: the new early-return must not break the normal
+    /// (no SubAgent) interrupt flow.
+    #[tokio::test]
+    async fn test_handle_interrupted_no_subagent_still_runs_full_pipeline() {
+        let mut app = make_app_with_active_turn().await;
+        // subagent_depth = 0 (default)
+
+        let view_slice: Vec<ViewModel> = vec![ViewModel::UserBubble(UserBubbleData {
+            text: "hello".into(),
+        })];
+
+        let _ = app.handle_interrupted(&view_slice);
+
+        // Branch 2 should fire: flag set + view_messages truncated
+        assert_eq!(
+            app.global_ui.pending_view_rewind_to,
+            Some(0),
+            "subagent_depth = 0 must still run full pipeline (branch 2 rollback)"
         );
     }
 }
