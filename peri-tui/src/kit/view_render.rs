@@ -17,7 +17,7 @@ use peri_acp_types::view_model::{
     SubAgentGroupData, ViewModel,
 };
 
-use crate::ui::theme;
+use crate::kit::theme;
 
 // ── SubAgent 运行时状态探针（thread-local） ─────────────────────────────────
 
@@ -96,7 +96,7 @@ pub fn render_v2_vm(vm: &ViewModel, width: usize, diff_visible: bool) -> Vec<Lin
 
 fn render_user_bubble(text: &str, width: usize) -> Vec<Line<'static>> {
     let user_bg = theme::USER_BG;
-    let parsed = crate::ui::markdown::parse_markdown(text, width);
+    let parsed = crate::kit::markdown::parse_markdown(text, width);
     let mut lines = Vec::with_capacity(parsed.lines.len() + 1);
     for (i, line) in parsed.lines.iter().enumerate() {
         if i == 0 {
@@ -135,7 +135,7 @@ fn render_assistant_bubble(
 
     // Text body（markdown 解析）
     if !data.text.is_empty() {
-        let parsed = crate::ui::markdown::parse_markdown(&data.text, width);
+        let parsed = crate::kit::markdown::parse_markdown(&data.text, width);
         for line in &parsed.lines {
             lines.push(Line::from(line.spans.clone()));
         }

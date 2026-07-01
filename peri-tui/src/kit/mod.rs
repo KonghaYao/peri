@@ -16,6 +16,7 @@ pub mod event_handlers;
 pub mod input_area;
 pub mod input_history;
 pub mod layout;
+pub mod markdown;
 pub mod mention_popup;
 pub mod message_area;
 pub mod panel_overlay;
@@ -30,6 +31,7 @@ pub mod slash_completion;
 pub mod status_bar;
 pub mod submit_consumer;
 pub mod theme;
+pub mod view_render;
 
 // Phase 3: 导出布局组件
 pub use app_shell::AppShell;

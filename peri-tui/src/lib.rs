@@ -22,7 +22,6 @@ pub mod i18n;
 pub mod kit;
 pub mod launch;
 pub mod panel;
-pub mod render;
 pub mod runtime;
 pub mod state_machine;
 pub mod sync;

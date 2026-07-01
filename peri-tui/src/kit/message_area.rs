@@ -4,7 +4,7 @@
 //! 复用 `render/view_render.rs` 的 `render_v2_vm` 纯函数渲染全部 7 种 ViewModel 变体。
 
 use crate::kit::theme;
-use crate::render::view_render;
+use crate::kit::view_render;
 use peri_acp_types::view_model::ViewModel;
 use ratatui_kit::{
     prelude::*,

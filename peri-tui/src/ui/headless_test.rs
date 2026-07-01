@@ -694,7 +694,7 @@ async fn test_tool_call_widget_renders_completed() {
         diff: None,
     });
 
-    let lines = crate::render::view_render::render_v2_vm(&vm, 80, false); // Render into a visible area for verification
+    let lines = crate::kit::view_render::render_v2_vm(&vm, 80, false); // Render into a visible area for verification
     use ratatui::widgets::Paragraph;
     let paragraph = Paragraph::new(lines);
     handle
@@ -2146,7 +2146,7 @@ async fn test_subagent_group_renders_child_content_via_probe() {
     // 端到端：SubAgentStart + ToolStart(src) + ToolEnd(src) + 渲染
     // → SessionSubAgentProbe 应从 child_messages 读取并注入到 SubAgentRenderInfo
     use crate::app::SessionSubAgentProbe;
-    use crate::render::view_render::SubAgentStatusProbe;
+    use crate::kit::view_render::SubAgentStatusProbe;
 
     let (mut app, _handle) = App::new_headless(120, 30).await;
 

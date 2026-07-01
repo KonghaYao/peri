@@ -43,7 +43,7 @@ fn build_sync_render_cache_v2(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     for vm in view_models {
-        let vm_lines = crate::render::view_render::render_v2_vm(vm, width as usize, diff_visible);
+        let vm_lines = crate::kit::view_render::render_v2_vm(vm, width as usize, diff_visible);
         lines.extend(vm_lines);
         lines.push(Line::from(""));
     }

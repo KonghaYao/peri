@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use peri_acp_types::view_model::ViewModel;
 
-use crate::render::view_render::{SubAgentRenderInfo, SubAgentStatusProbe};
+use crate::kit::view_render::{SubAgentRenderInfo, SubAgentStatusProbe};
 
 /// SubAgent 运行时状态（9 字段）。由 TUI 事件实时维护，独立于 ACP ViewCommit。
 #[derive(Clone, Debug)]
@@ -797,7 +797,7 @@ mod tests {
     /// Phase 2.6 step 4：probe 仅包装 status map，权威源 = child_messages
     #[test]
     fn test_session_probe_injects_child_messages_from_authoritative_source() {
-        use crate::render::view_render::SubAgentStatusProbe;
+        use crate::kit::view_render::SubAgentStatusProbe;
         use peri_acp_types::view_model::ViewModel;
 
         let mut map = SubAgentStatusMap::new();
@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn test_session_probe_recent_messages_empty_when_child_messages_empty() {
-        use crate::render::view_render::SubAgentStatusProbe;
+        use crate::kit::view_render::SubAgentStatusProbe;
 
         let mut map = SubAgentStatusMap::new();
         map.start("inst-1".into(), "fork".into(), "task".into(), false);
@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn test_session_probe_returns_none_for_unknown_agent() {
-        use crate::render::view_render::SubAgentStatusProbe;
+        use crate::kit::view_render::SubAgentStatusProbe;
 
         let map = SubAgentStatusMap::new();
         let probe = SessionSubAgentProbe::new(map);
