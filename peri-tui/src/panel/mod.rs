@@ -16,7 +16,7 @@ pub mod registry;
 // Re-export the primary types at the panel module level.
 pub use effect::PanelEffect;
 pub use read_context::{PanelReadContext, ServiceRegistrySnapshot};
-pub use registry::{create_panel, PanelStateStub};
+pub use registry::create_panel;
 
 use ratatui::crossterm::event::MouseEvent;
 use ratatui::layout::Rect;
