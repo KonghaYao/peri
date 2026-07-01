@@ -517,10 +517,32 @@ impl BaseTool for SubAgentTool {
             }
             peri_agent::agent::stages::LoopResult::Interrupted => (String::new(), true),
             peri_agent::agent::stages::LoopResult::Error(e) => {
+                // Cron #32: emit SubagentStopped on error path so TUI decrements
+                // subagent_depth (mod.rs SubAgentEnd handler). Without this emit,
+                // parent's subagent_depth stays > 0 forever — handle_done/error
+                // early-return on depth > 0, permanently freezing the parent.
+                // Mirrors execute_bg.rs:220-227 error-path pattern.
+                let error_summary = format!("Sub-agent execution failed: {}", e);
+                let error_result: String = error_summary.chars().take(500).collect();
+                if let Some(ref handler) = self.event_handler {
+                    handler.on_event(ExecutorEvent::SubagentStopped {
+                        agent_name: agent_id.clone(),
+                        result: error_result.clone(),
+                        is_error: true,
+                        instance_id: instance_id.clone(),
+                    });
+                }
+                self.fire_subagent_lifecycle_hook(
+                    crate::hooks::types::HookEvent::SubagentStop,
+                    &cwd,
+                    &agent_id,
+                    Some(&error_result),
+                )
+                .await;
                 if let Some(ref store) = self.thread_store {
                     let _ = store.update_thread_status(&child_thread_id, "error").await;
                 }
-                return Err(format!("Sub-agent execution failed: {}", e).into());
+                return Err(error_summary.into());
             }
         };
 

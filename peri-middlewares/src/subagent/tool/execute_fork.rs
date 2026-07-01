@@ -162,6 +162,29 @@ impl super::SubAgentTool {
             }
             LoopResult::Interrupted => (String::new(), true),
             LoopResult::Error(e) => {
+                // Cron #32: emit SubagentStopped on error path so TUI decrements
+                // subagent_depth (mod.rs SubAgentEnd handler). Without this emit,
+                // parent's subagent_depth stays > 0 forever — handle_done/error
+                // early-return on depth > 0, permanently freezing the parent
+                // (spinner stuck, agent unrecoverable without /new thread).
+                // Mirrors execute_bg.rs:220-227 error-path pattern.
+                let error_summary = format!("Fork sub-agent execution failed: {}", e);
+                let error_result: String = error_summary.chars().take(500).collect();
+                if let Some(ref handler) = self.event_handler {
+                    handler.on_event(ExecutorEvent::SubagentStopped {
+                        agent_name: "fork".to_string(),
+                        result: error_result.clone(),
+                        is_error: true,
+                        instance_id: instance_id.clone(),
+                    });
+                }
+                self.fire_subagent_lifecycle_hook(
+                    crate::hooks::types::HookEvent::SubagentStop,
+                    cwd,
+                    "fork",
+                    Some(&error_result),
+                )
+                .await;
                 // deregister before error return
                 if let Some(deregister) = &self.deregister_runtime {
                     deregister(&child_thread_id);
@@ -169,7 +192,7 @@ impl super::SubAgentTool {
                 if let Some(ref store) = self.thread_store {
                     let _ = store.update_thread_status(&child_thread_id, "error").await;
                 }
-                return Err(format!("Fork sub-agent execution failed: {}", e).into());
+                return Err(error_summary.into());
             }
         };
 

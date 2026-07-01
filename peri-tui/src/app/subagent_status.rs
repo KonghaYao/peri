@@ -103,6 +103,23 @@ impl SubAgentStatusMap {
         }
     }
 
+    /// Cron #32: per-entry cap on `child_messages`. Running entries don't expire
+    /// (TTL only counts after completion), so without this cap a long-running
+    /// background/researcher subagent accumulates VMs without bound — a real
+    /// memory leak for hour-scale agents. 200 keeps the thread panel useful
+    /// while bounding memory (~200KB per entry, ~6MB worst case at capacity).
+    pub(crate) const MAX_CHILD_MESSAGES: usize = 200;
+
+    /// 内部辅助：push 后钳制 child_messages 长度，FIFO 丢弃最旧条目。
+    fn push_child_bounded(status: &mut SubAgentStatus, vm: ViewModel) {
+        status.child_messages.push(vm);
+        let cap = Self::MAX_CHILD_MESSAGES;
+        if status.child_messages.len() > cap {
+            let drop_n = status.child_messages.len() - cap;
+            status.child_messages.drain(..drop_n);
+        }
+    }
+
     /// 当前 entry 数（含运行中 + 已完成未过期）。
     pub fn len(&self) -> usize {
         self.inner.len()
@@ -243,7 +260,7 @@ impl SubAgentStatusMap {
     /// 返回 `false` 表示无匹配（调用方应 fallback 到主消息流）。
     pub fn append_child_message(&mut self, source_id: &str, vm: ViewModel) -> bool {
         if let Some(s) = self.find_owner_mut(source_id) {
-            s.child_messages.push(vm);
+            Self::push_child_bounded(s, vm);
             true
         } else {
             false
@@ -259,19 +276,21 @@ impl SubAgentStatusMap {
     /// 返回 `true` 表示成功路由。返回 `false` 表示无匹配 owner。
     pub fn append_child_text(&mut self, source_id: &str, text: &str) -> bool {
         if let Some(s) = self.find_owner_mut(source_id) {
-            match s.child_messages.last_mut() {
-                Some(ViewModel::AssistantBubble(d)) => {
-                    d.text.push_str(text);
-                }
-                _ => {
-                    s.child_messages.push(ViewModel::AssistantBubble(
-                        peri_acp_types::view_model::AssistantBubbleData {
-                            text: text.to_string(),
-                            reasoning: None,
-                            tool_card_ids: Vec::new(),
-                        },
-                    ));
-                }
+            // Cron #32: 先用不可变 last() 判定是否需要新建 bubble，避免在
+            // match last_mut() 期间持 &mut 同时调 push_child_bounded(s, ..) 的借用冲突。
+            let needs_new_bubble =
+                !matches!(s.child_messages.last(), Some(ViewModel::AssistantBubble(_)));
+            if needs_new_bubble {
+                Self::push_child_bounded(
+                    s,
+                    ViewModel::AssistantBubble(peri_acp_types::view_model::AssistantBubbleData {
+                        text: text.to_string(),
+                        reasoning: None,
+                        tool_card_ids: Vec::new(),
+                    }),
+                );
+            } else if let Some(ViewModel::AssistantBubble(d)) = s.child_messages.last_mut() {
+                d.text.push_str(text);
             }
             true
         } else {
@@ -871,5 +890,110 @@ mod tests {
         assert!(routed, "agent_id 回退应匹配");
         let s = map.lookup("inst-1").expect("entry exists");
         assert_eq!(s.child_messages.len(), 1);
+    }
+
+    // --- Cron #32: child_messages cap regression tests ---
+
+    /// Cron #32: child_messages 增长超过 MAX_CHILD_MESSAGES 时，最旧条目应被 FIFO 丢弃。
+    /// 长时间运行的 background/researcher SubAgent 可能累积上千条 VM，导致内存泄漏。
+    #[test]
+    fn test_append_child_message_caps_at_max_with_fifo_eviction() {
+        let mut map = SubAgentStatusMap::new();
+        map.start(
+            "inst-1".into(),
+            "researcher".into(),
+            "long-running".into(),
+            false,
+        );
+        let cap = SubAgentStatusMap::MAX_CHILD_MESSAGES;
+
+        // 推入 cap + 50 条 ToolCard
+        for i in 0..(cap + 50) {
+            let vm = ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
+                tool_id: format!("tc-{i}"),
+                tool_name: "Read".into(),
+                input_summary: format!("file-{i}.rs"),
+                output_summary: String::new(),
+                is_error: false,
+                diff: None,
+            });
+            assert!(map.append_child_message("inst-1", vm));
+        }
+
+        let s = map.lookup("inst-1").expect("entry exists");
+        assert_eq!(
+            s.child_messages.len(),
+            cap,
+            "child_messages 必须钳制在 MAX_CHILD_MESSAGES"
+        );
+        // 最旧 50 条应已被丢弃，保留下标 [50, cap+50)
+        if let ViewModel::ToolCard(d) = &s.child_messages[0] {
+            assert_eq!(
+                d.tool_id, "tc-50",
+                "FIFO 丢弃应保留最新 cap 条，最旧 50 条已删除"
+            );
+        } else {
+            panic!("首条应为 ToolCard");
+        }
+        if let ViewModel::ToolCard(d) = s.child_messages.last().unwrap() {
+            assert_eq!(d.tool_id, format!("tc-{}", cap + 49));
+        }
+    }
+
+    /// Cron #32: append_child_text 也必须遵守 cap。新建 bubble 路径会增长 Vec，
+    /// 验证超限后最旧 bubble 被丢弃。
+    #[test]
+    fn test_append_child_text_caps_when_many_new_bubbles() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "many-bubbles".into(), false);
+        let cap = SubAgentStatusMap::MAX_CHILD_MESSAGES;
+
+        // 每个 chunk 前先推一个 ToolCard，强制 append_child_text 走「新建 bubble」分支
+        for i in 0..(cap + 10) {
+            let tool_vm = ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
+                tool_id: format!("tc-{i}"),
+                tool_name: "Read".into(),
+                input_summary: format!("f-{i}"),
+                output_summary: String::new(),
+                is_error: false,
+                diff: None,
+            });
+            map.append_child_message("inst-1", tool_vm);
+            // 紧跟一个 chunk → 因为 last 是 ToolCard，会新建 AssistantBubble
+            map.append_child_text("inst-1", &format!("text-{i}"));
+        }
+
+        let s = map.lookup("inst-1").expect("entry exists");
+        assert_eq!(
+            s.child_messages.len(),
+            cap,
+            "append_child_text 也必须钳制在 MAX_CHILD_MESSAGES"
+        );
+    }
+
+    /// Cron #32: 正常使用（远低于 cap）不应触发任何丢弃。回归保护。
+    #[test]
+    fn test_cap_does_not_affect_normal_usage_below_limit() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "normal".into(), false);
+
+        // 推 10 条（远低于 200 cap）
+        for i in 0..10 {
+            let vm = ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
+                tool_id: format!("tc-{i}"),
+                tool_name: "Read".into(),
+                input_summary: format!("f-{i}"),
+                output_summary: String::new(),
+                is_error: false,
+                diff: None,
+            });
+            map.append_child_message("inst-1", vm);
+        }
+
+        let s = map.lookup("inst-1").expect("entry exists");
+        assert_eq!(s.child_messages.len(), 10, "未达 cap 时不应丢弃");
+        if let ViewModel::ToolCard(d) = &s.child_messages[0] {
+            assert_eq!(d.tool_id, "tc-0", "首条应保留");
+        }
     }
 }
