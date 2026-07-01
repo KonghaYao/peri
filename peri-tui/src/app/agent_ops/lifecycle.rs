@@ -3,7 +3,6 @@
 
 use tracing::debug;
 
-use super::super::*;
 use crate::app::App;
 
 impl App {
@@ -263,28 +262,14 @@ impl App {
         self.session_mgr.current_mut().agent.retry_status = None;
         // P5: No pipeline.done() needed
 
-        let mut vm = MessageViewModel::tool_block(
-            "error".to_string(),
-            "Agent Error".to_string(),
-            None,
-            true,
-        );
-        if let MessageViewModel::ToolBlock {
-            content, collapsed, ..
-        } = &mut vm
-        {
-            *content = error_msg.to_string();
-            *collapsed = false;
-            vm.recompute_hash();
-        }
-        self.apply_add_message(vm);
-        // Cron #28: route error message through v2 state.view via
-        // push_system_note (mirrors cron #24/cron #26 queue-and-drain pattern).
-        // Without this, production render (which reads v2 state.view
-        // exclusively) shows NOTHING when the agent errors out — the
-        // error ToolBlock above only reaches v1 view_messages, which is
-        // not on the production render path. Phase 2.6 will retire the
-        // v1 push above; this v2 routing is the load-bearing path.
+        // Cron #39 (Phase 2.6 step 7e.2): retired the v1 apply_add_message(vm)
+        // push — it wrote a ToolBlock to view_messages, but production render
+        // reads v2 state.view exclusively (via state.view_models()). The v2
+        // route below (push_system_note → pending_v2_notes → SM
+        // Event::PushSystemNote → state.view) is the sole load-bearing path.
+        // Confirmed safe by audit workflow wj0c3ppca auditor-0: only
+        // test_handle_error_routes_to_v2_state_view covers this, and it
+        // asserts pending_v2_notes (not view_messages).
         self.push_system_note(format!("⚠️ Agent Error: {}", error_msg));
         self.session_mgr.current_mut().agent.reconcile_already_done = true;
 
@@ -529,6 +514,54 @@ mod tests {
             "enqueued note must contain original error message, got: {}",
             pending[0]
         );
+    }
+
+    /// Cron #39 (Phase 2.6 step 7e.2): handle_error must NOT push the error
+    /// ToolBlock to v1 view_messages. Previously (pre-Cron #39) the handler
+    /// constructed a `MessageViewModel::tool_block(...)` + called
+    /// `apply_add_message(vm)`, writing to view_messages. But production
+    /// render reads v2 state.view exclusively — the v1 push was dead code.
+    /// The sole load-bearing v2 route is `push_system_note` (verified by
+    /// `test_handle_error_routes_to_v2_state_view` above).
+    ///
+    /// This test confirms the retirement: after handle_error, view_messages
+    /// contains ONLY the initial UserBubble seeded by make_app_with_active_turn
+    /// (length 1). If a future refactor reintroduces the v1 push, this test
+    /// will fail with view_messages.len() == 2.
+    #[tokio::test]
+    async fn test_handle_error_does_not_write_view_messages() {
+        let mut app = make_app_with_active_turn().await;
+        // make_app_with_active_turn seeds exactly 1 UserBubble to view_messages
+        assert_eq!(
+            app.session_mgr.current().messages.view_messages.len(),
+            1,
+            "precondition: make_app_with_active_turn seeds 1 UserBubble"
+        );
+
+        let _ = app.handle_error("api timeout");
+
+        assert_eq!(
+            app.session_mgr.current().messages.view_messages.len(),
+            1,
+            "Cron #39: handle_error must NOT push error ToolBlock to v1 \
+             view_messages — v2 push_system_note is the sole route. \
+             Got view_messages.len() = {} (expected 1)",
+            app.session_mgr.current().messages.view_messages.len()
+        );
+        // 验证剩余的 VM 是原始 UserBubble（"hello"），不是 error ToolBlock
+        match &app.session_mgr.current().messages.view_messages[0] {
+            MessageViewModel::UserBubble { content, .. } => {
+                assert!(
+                    content.contains("hello"),
+                    "remaining view_messages[0] must be the original UserBubble, got: {:?}",
+                    content
+                );
+            }
+            other => panic!(
+                "expected UserBubble, got {:?} — handle_error must not push ToolBlock",
+                std::mem::discriminant(other)
+            ),
+        }
     }
 
     // -----------------------------------------------------------------------

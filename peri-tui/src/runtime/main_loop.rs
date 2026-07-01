@@ -259,6 +259,22 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 // Phase 2.6 step 7c: pass v2 state.view snapshot to handle_acp_event
                 // so handle_interrupted can scan v2 ViewModels (not v1 view_messages).
                 // Captured AFTER the SM transition above (state.view reflects current).
+                //
+                // Cron #39: ViewCommit defensive clear of pending_view_rewind_to.
+                // SM streaming.rs ViewCommit handler uses replace semantics on
+                // state.view (vc.view_models ⊕ local notes). If a rewind flag
+                // is in flight (set by handle_interrupted / handle_rewind_completed
+                // but not yet consumed at the top of this loop body), the
+                // subsequent truncate at loop top would WIPE the just-committed
+                // canonical snapshot. Current race_active: false — single-threaded
+                // event loop guarantees synchronous set/consume within one frame
+                // (auditor-2 confirmed). This clear is invariant insurance
+                // against future refactors that might insert async paths
+                // (e.g., moving the rewind truncate into the SM, or batching
+                // multiple events per tick).
+                if event == "view-commit" {
+                    app.global_ui.pending_view_rewind_to = None;
+                }
                 handle_acp_event(app, event, data, state.view_models())
             }
             TuiEvent::SessionLoaded { session_id } => {
