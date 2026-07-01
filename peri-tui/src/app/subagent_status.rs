@@ -110,13 +110,50 @@ impl SubAgentStatusMap {
     /// while bounding memory (~200KB per entry, ~6MB worst case at capacity).
     pub(crate) const MAX_CHILD_MESSAGES: usize = 200;
 
-    /// 内部辅助：push 后钳制 child_messages 长度，FIFO 丢弃最旧条目。
+    /// 内部辅助：push 后钳制 child_messages 长度。
+    ///
+    /// Cron #36: 优先丢弃「已完成」条目（含输出的 ToolCard、AssistantBubble 等），
+    /// **保留 pending ToolCard**（output_summary 为空且非错误的 ToolStart entry）。
+    ///
+    /// 历史 bug：纯 FIFO 丢弃会移除尚未收到 ToolEnd 的 ToolStart entry。当 ToolEnd
+    /// 到达时，`update_child_tool_output` 找不到 tool_id → 调用方 fallback
+    /// （`agent_ops/mod.rs:259-278`）创建一个 `input_summary` 为空的**重复**
+    /// ToolCard，原始 input_summary 永久丢失。在长运行 SubAgent（>200 工具调用）
+    /// 中可观察到 orphaned output-only 卡片。
+    ///
+    /// 安全网：若可丢弃条目不足（极端情况：全是 pending ToolCard），降级为 FIFO
+    /// 从头部丢弃——内存边界比 orphan 防御更重要（最坏情况多保留几条 pending 卡，
+    /// 但仍受 cap 约束）。
     fn push_child_bounded(status: &mut SubAgentStatus, vm: ViewModel) {
         status.child_messages.push(vm);
         let cap = Self::MAX_CHILD_MESSAGES;
-        if status.child_messages.len() > cap {
-            let drop_n = status.child_messages.len() - cap;
-            status.child_messages.drain(..drop_n);
+        if status.child_messages.len() <= cap {
+            return;
+        }
+        let drop_n = status.child_messages.len() - cap;
+
+        // 第一轮：保留 pending ToolCard，只丢弃已完成条目。
+        let mut dropped = 0usize;
+        status.child_messages.retain(|vm| {
+            if dropped >= drop_n {
+                return true;
+            }
+            let is_pending_tool = matches!(
+                vm,
+                ViewModel::ToolCard(d) if d.output_summary.is_empty() && !d.is_error
+            );
+            if is_pending_tool {
+                true // 保留
+            } else {
+                dropped += 1;
+                false // 丢弃
+            }
+        });
+
+        // 安全网：若丢弃数量仍不足，FIFO 从头部丢弃（内存边界优先）。
+        if dropped < drop_n {
+            let remaining = drop_n - dropped;
+            status.child_messages.drain(..remaining);
         }
     }
 
@@ -994,6 +1031,252 @@ mod tests {
         assert_eq!(s.child_messages.len(), 10, "未达 cap 时不应丢弃");
         if let ViewModel::ToolCard(d) = &s.child_messages[0] {
             assert_eq!(d.tool_id, "tc-0", "首条应保留");
+        }
+    }
+
+    // ─── Cron #36: push_child_bounded 保留 pending ToolCard ────────────────
+    //
+    // Bug（Cron #35 审计发现，af347/a78e1 verifier 确认）：
+    // 长 SubAgent 累积 >200 工具调用时，push_child_bounded FIFO 丢弃会移除
+    // 尚未收到 ToolEnd 的 ToolStart entry。当 ToolEnd 到达时，
+    // update_child_tool_output 找不到 tool_id，调用方 fallback 创建一个
+    // input_summary 为空的**重复** ToolCard——原始输入永久丢失。
+    //
+    // 修复：FIFO 丢弃时优先选择已完成条目，保留 pending ToolCard。
+
+    /// Cron #36: 当 child_messages 含混合（completed + pending）条目且超出 cap 时，
+    /// 应优先丢弃 completed ToolCard，保留 pending ToolCard。
+    #[test]
+    fn test_push_child_bounded_prefers_dropping_completed_over_pending() {
+        let mut map = SubAgentStatusMap::new();
+        map.start(
+            "inst-1".into(),
+            "researcher".into(),
+            "many-tools".into(),
+            false,
+        );
+        let cap = SubAgentStatusMap::MAX_CHILD_MESSAGES;
+
+        // 布局：100 个 completed ToolCard（有 output）+ 100 个 pending ToolCard（无 output）= 200 = cap
+        for i in 0..100 {
+            let completed = ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
+                tool_id: format!("completed-{i}"),
+                tool_name: "Bash".into(),
+                input_summary: format!("cmd-{i}"),
+                output_summary: format!("output-{i}"),
+                is_error: false,
+                diff: None,
+            });
+            map.append_child_message("inst-1", completed);
+        }
+        for i in 0..100 {
+            let pending = ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
+                tool_id: format!("pending-{i}"),
+                tool_name: "Read".into(),
+                input_summary: format!("path-{i}"),
+                output_summary: String::new(),
+                is_error: false,
+                diff: None,
+            });
+            map.append_child_message("inst-1", pending);
+        }
+
+        let s = map.lookup("inst-1").expect("entry exists");
+        assert_eq!(
+            s.child_messages.len(),
+            cap,
+            "预热：恰好达到 cap，未触发丢弃"
+        );
+
+        // 触发：push 第 201 条 entry（pending ToolCard）
+        let extra = ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
+            tool_id: "extra".into(),
+            tool_name: "Edit".into(),
+            input_summary: "edit-file".into(),
+            output_summary: String::new(),
+            is_error: false,
+            diff: None,
+        });
+        assert!(map.append_child_message("inst-1", extra));
+
+        let s = map.lookup("inst-1").expect("entry exists");
+        assert_eq!(
+            s.child_messages.len(),
+            cap,
+            "cap 保持不变（丢弃 1 条 completed）"
+        );
+
+        // 收集所有剩余 tool_id
+        let remaining_ids: Vec<String> = s
+            .child_messages
+            .iter()
+            .filter_map(|vm| match vm {
+                ViewModel::ToolCard(d) => Some(d.tool_id.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // 关键断言：completed-0 应该被丢弃（最旧的 completed）
+        assert!(
+            !remaining_ids.iter().any(|id| id == "completed-0"),
+            "Cron #36: 最旧的 completed ToolCard 应被优先丢弃"
+        );
+
+        // 关键断言：所有 pending ToolCard 都保留
+        for i in 0..100 {
+            let id = format!("pending-{i}");
+            assert!(
+                remaining_ids.iter().any(|x| x == &id),
+                "Cron #36: pending ToolCard {} 必须保留（未被 FIFO 丢弃）",
+                id
+            );
+        }
+
+        // 关键断言：新 entry 也保留
+        assert!(
+            remaining_ids.iter().any(|id| id == "extra"),
+            "Cron #36: 新 push 的 entry 必须保留"
+        );
+    }
+
+    /// Cron #36: 端到端验证 orphaned duplicate 不再产生。
+    ///
+    /// 场景：SubAgent 累积 >200 个 ToolStart（全部 pending，因为 SubAgent 还在
+    /// 并发执行），然后 ToolEnd 到达。
+    /// - 旧行为：FIFO 丢弃最旧 pending ToolCard → ToolEnd 找不到匹配 → fallback
+    ///   创建 input_summary 空白的重复卡片。
+    /// - 新行为：保留 pending ToolCard（即使超出 cap，由 safety net FIFO 在
+    ///   AssistantBubble 等可丢弃条目中消化）→ ToolEnd 正常更新已有 entry。
+    #[test]
+    fn test_push_child_bounded_preserves_pending_allows_toolend_match() {
+        let mut map = SubAgentStatusMap::new();
+        map.start(
+            "inst-1".into(),
+            "researcher".into(),
+            "concurrent-tools".into(),
+            false,
+        );
+        let cap = SubAgentStatusMap::MAX_CHILD_MESSAGES;
+
+        // 阶段 1：push cap 个 pending ToolCard（output 为空）
+        // 这是「全是 pending」的极端情况——safety net 必须介入 FIFO 丢弃以
+        // 维持内存边界。所以这里我们穿插 AssistantBubble 让第一轮丢弃生效。
+        for i in 0..cap {
+            // 穿插 AssistantBubble（droppable）—— i 偶数 push bubble，奇数 push tool
+            if i % 2 == 0 {
+                let bubble =
+                    ViewModel::AssistantBubble(peri_acp_types::view_model::AssistantBubbleData {
+                        text: format!("thinking-{i}"),
+                        reasoning: None,
+                        tool_card_ids: Vec::new(),
+                    });
+                map.append_child_message("inst-1", bubble);
+            } else {
+                let tool = ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
+                    tool_id: format!("tool-{}", i),
+                    tool_name: "Read".into(),
+                    input_summary: format!("path-{}", i),
+                    output_summary: String::new(),
+                    is_error: false,
+                    diff: None,
+                });
+                map.append_child_message("inst-1", tool);
+            }
+        }
+
+        // 此时 child_messages.len() == cap（200），含 100 bubble + 100 pending tool。
+
+        // 阶段 2：push 第 cap+1 个 pending ToolCard（触发丢弃 1 条）
+        let new_tool_id = "tool-new".to_string();
+        let new_tool = ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
+            tool_id: new_tool_id.clone(),
+            tool_name: "Bash".into(),
+            input_summary: "ls -la".into(),
+            output_summary: String::new(),
+            is_error: false,
+            diff: None,
+        });
+        assert!(map.append_child_message("inst-1", new_tool));
+
+        // 阶段 3：ToolEnd 到达，尝试更新刚 push 的 tool-new
+        let updated = map.update_child_tool_output("inst-1", &new_tool_id, "success".into(), false);
+
+        // 关键断言：update 成功（ToolCard 未被 FIFO 丢弃）
+        assert!(
+            updated,
+            "Cron #36: ToolEnd 必须能匹配到新 push 的 ToolCard（未被 FIFO 丢弃）"
+        );
+
+        // 验证：找到的 entry output 已更新，input_summary 保留
+        let s = map.lookup("inst-1").expect("entry exists");
+        let target = s
+            .child_messages
+            .iter()
+            .find_map(|vm| match vm {
+                ViewModel::ToolCard(d) if d.tool_id == new_tool_id => Some(d),
+                _ => None,
+            })
+            .expect("tool-new entry 应保留");
+
+        assert_eq!(
+            target.output_summary, "success",
+            "ToolEnd 应更新 output_summary"
+        );
+        assert_eq!(
+            target.input_summary, "ls -la",
+            "原始 input_summary 应保留（未被孤儿重复替换）"
+        );
+
+        // 关键断言：未产生重复 ToolCard（同一 tool_id 只出现一次）
+        let count = s
+            .child_messages
+            .iter()
+            .filter(|vm| matches!(vm, ViewModel::ToolCard(d) if d.tool_id == new_tool_id))
+            .count();
+        assert_eq!(
+            count, 1,
+            "Cron #36: ToolCard 不应被重复（orphan duplicate 应消除）"
+        );
+    }
+
+    /// Cron #36: 全 pending ToolCard 的极端场景——safety net FIFO 降级保证内存边界。
+    ///
+    /// 当所有条目都是 pending ToolCard（无可丢弃 completed entry）时，
+    /// 必须从头部 FIFO 丢弃以维持 cap，避免无限增长。
+    #[test]
+    fn test_push_child_bounded_all_pending_falls_back_to_fifo() {
+        let mut map = SubAgentStatusMap::new();
+        map.start("inst-1".into(), "fork".into(), "all-pending".into(), false);
+        let cap = SubAgentStatusMap::MAX_CHILD_MESSAGES;
+
+        // 推入 cap + 30 个 pending ToolCard
+        for i in 0..(cap + 30) {
+            let tool = ViewModel::ToolCard(peri_acp_types::view_model::ToolCardData {
+                tool_id: format!("tc-{i}"),
+                tool_name: "Read".into(),
+                input_summary: format!("f-{i}"),
+                output_summary: String::new(),
+                is_error: false,
+                diff: None,
+            });
+            map.append_child_message("inst-1", tool);
+        }
+
+        let s = map.lookup("inst-1").expect("entry exists");
+        assert_eq!(
+            s.child_messages.len(),
+            cap,
+            "Cron #36 safety net: 全 pending 场景仍必须钳制到 cap"
+        );
+
+        // 最旧 30 条已 FIFO 丢弃，保留下标 [30, cap+30)
+        if let ViewModel::ToolCard(d) = &s.child_messages[0] {
+            assert_eq!(
+                d.tool_id, "tc-30",
+                "Cron #36 safety net: 全 pending 时 FIFO 从头部丢弃"
+            );
+        } else {
+            panic!("首条应为 ToolCard");
         }
     }
 }

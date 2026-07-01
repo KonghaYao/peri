@@ -75,8 +75,14 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
         Event::AcpEvent(AcpEventData::TurnDone) => {
             // Streaming -> Idle. The buffered input is carried over so the
             // user's in-progress typing is not lost.
+            //
+            // Cron #36: 显式 emit Render。TurnDone 转换会丢弃 current_turn（流式
+            // 气泡 + spinner 消失），若不触发重绘，用户会看到一帧「气泡没了但
+            // loading spinner 还在」的中间态——直到下一个 Tick (33ms 后) 或
+            // agent-done 事件触发 set_loading(false) 才修复。Render 经 main_loop
+            // 去重，重复触发无副作用。
             let idle = state.into_idle();
-            (State::Idle(idle), Vec::new())
+            (State::Idle(idle), vec![Effect::Render])
         }
 
         Event::AcpEvent(AcpEventData::TurnInterrupted(_)) => {
@@ -355,6 +361,33 @@ mod tests {
             }
             _ => panic!("expected Idle after TurnDone"),
         }
+    }
+
+    // ── Cron #36: TurnDone 必须触发 Render ───────────────────────────────
+    //
+    // 历史 bug（Cron #35 审计 af347 verifier 发现）：
+    // TurnDone 返回 Vec::new() → main_loop 不触发重绘。Streaming→Idle 转换
+    // 丢弃了 current_turn（流式气泡+spinner 消失），但用户看到一帧「气泡消失
+    // 但 loading spinner 还在」的中间态——直到下一个 Tick (33ms 后) 或
+    // agent-done 事件触发 set_loading(false) 才修复。
+    //
+    // 修复：emit Effect::Render（main_loop 自动去重）。
+
+    #[test]
+    fn test_turn_done_emits_render_to_avoid_flicker() {
+        // Cron #36: TurnDone 转换必须 emit Effect::Render，避免 streaming bubble
+        // 消失但 loading spinner 仍显示的中间态闪烁。
+        let state = make_state();
+        let (next, effects) = handle(state, Event::AcpEvent(AcpEventData::TurnDone));
+
+        // 状态转换正确：Streaming -> Idle
+        assert!(matches!(next, State::Idle(_)));
+
+        // 关键断言：Render effect 必须存在
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Cron #36: TurnDone 必须触发 Render（避免闪烁）"
+        );
     }
 
     // ── Phase 2.6 step 7c: TurnInterrupted 持久化 current_turn ────────────
