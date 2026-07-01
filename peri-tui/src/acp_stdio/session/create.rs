@@ -194,25 +194,38 @@ pub(crate) async fn handle_resume(
     ctx.session_manager.ensure_session(&sid, &cwd);
     // Build frozen data for session
     let frozen_data = freeze::build(ctx, &cwd);
-    let mut sessions = ctx.sessions.write();
-    if !sessions.contains_key(&sid) {
-        sessions.insert(
-            sid.clone(),
-            SessionInfo {
-                session_id: sid.clone(),
-                thread_id: sid.clone(),
-                cwd,
-                history: Vec::new(),
-                cancel_token: None,
-                frozen: Some(frozen_data),
-                agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
-                workflow_middleware: None,
-            },
-        );
-        tracing::info!(session_id = %sid, "Session resumed (new)");
-    } else {
-        tracing::info!(session_id = %sid, "Session resumed (existing)");
+
+    // Load history from ThreadStore (deferred load — emit view-commit if any)
+    let history = dispatch::load_session_messages(ctx.thread_store.as_ref(), &sid).await;
+
+    {
+        let mut sessions = ctx.sessions.write();
+        if !sessions.contains_key(&sid) {
+            sessions.insert(
+                sid.clone(),
+                SessionInfo {
+                    session_id: sid.clone(),
+                    thread_id: sid.clone(),
+                    cwd,
+                    history,
+                    cancel_token: None,
+                    frozen: Some(frozen_data),
+                    agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                    workflow_middleware: None,
+                },
+            );
+            tracing::info!(session_id = %sid, "Session resumed (new)");
+        } else {
+            // Existing session: if history is empty, populate from ThreadStore
+            if let Some(s) = sessions.get_mut(&sid) {
+                if s.history.is_empty() {
+                    s.history = history;
+                }
+            }
+            tracing::info!(session_id = %sid, "Session resumed (existing)");
+        }
     }
+
     let _ = responder.respond(ResumeSessionResponse::new());
     Ok(())
 }

@@ -19,7 +19,7 @@ pub use init::build_initialize_response;
 pub use list_sessions::list_sessions_as_info;
 pub use prompt::{extract_prompt_params, handle_prompt};
 pub use session_fork::fork_session;
-pub use session_load::load_session_messages;
+pub use session_load::{build_session_view_commit_payload, load_session_messages};
 
 #[cfg(test)]
 mod commands_test;

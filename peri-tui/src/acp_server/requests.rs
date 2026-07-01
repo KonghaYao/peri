@@ -248,6 +248,15 @@ pub(crate) async fn handle_request(
             let history =
                 dispatch::load_session_messages(cfg.thread_store.as_ref(), req_session_id).await;
 
+            // Emit view-commit to populate v2 state.view with loaded history
+            if let Some(payload) =
+                dispatch::build_session_view_commit_payload(req_session_id, &history)
+            {
+                let _ = transport
+                    .send_notification("peri/unstable-event", payload)
+                    .await;
+            }
+
             // Insert into sessions if not already present
             if let Some(state) = sessions.get_mut(req_session_id) {
                 if state.history.is_empty() {
@@ -451,6 +460,10 @@ pub(crate) async fn handle_request(
                 .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
             let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
+            // Load history from ThreadStore (deferred load)
+            let history =
+                dispatch::load_session_messages(cfg.thread_store.as_ref(), req_session_id).await;
+
             if !sessions.contains_key(req_session_id) {
                 sessions.insert(
                     req_session_id.to_string(),
@@ -458,7 +471,7 @@ pub(crate) async fn handle_request(
                         session_id: req_session_id.to_string(),
                         thread_id: req_session_id.to_string(),
                         cwd: cwd.to_string(),
-                        history: Vec::new(),
+                        history,
                         cancel_token: None,
                         frozen: None,
                         recall_items: Vec::new(),
@@ -468,7 +481,26 @@ pub(crate) async fn handle_request(
                 );
                 info!(session_id = %req_session_id, "Session resumed (new)");
             } else {
+                // Existing session: if history still empty, populate from ThreadStore
+                if let Some(s) = sessions.get_mut(req_session_id) {
+                    if s.history.is_empty() {
+                        s.history = history;
+                    }
+                }
                 info!(session_id = %req_session_id, "Session resumed (existing)");
+            }
+
+            // Emit view-commit with loaded history
+            let existing_history: Vec<_> = sessions
+                .get(req_session_id)
+                .map(|s| s.history.clone())
+                .unwrap_or_default();
+            if let Some(payload) =
+                dispatch::build_session_view_commit_payload(req_session_id, &existing_history)
+            {
+                let _ = transport
+                    .send_notification("peri/unstable-event", payload)
+                    .await;
             }
 
             // ── Freeze session data at resume time ──

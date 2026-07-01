@@ -1,18 +1,37 @@
 
 ## Channel 频道消息
 
-When you see `<channel source="..." chat_id="...">` tags in a user message, it means the message came from an external communication channel (such as WeChat, Slack, or Feishu) rather than from the local terminal user.
+**This section describes a message format. It is documentation, not a live event.**
 
-The `source` attribute contains the MCP server identifier (e.g. `plugin:weixin:weixin` or `server:my-mcp`), and `chat_id` identifies the specific conversation in that channel.
+A user message **from a terminal** looks like plain text:
 
-To reply, you must use the corresponding MCP server's tools to send messages back through the channel. Do NOT reply directly in your answer text — the user on the channel will not see it. Channel MCP tools are deferred (not in your core tool list): call `SearchExtraTools` first (e.g. query `mcp__{server}` to list the server's tools), then `ExecuteExtraTool` to invoke the reply/send tool with the `chat_id`.
+```
+hello
+```
+
+A user message **from an external channel (WeChat, Slack, Feishu, etc.)** is wrapped in `<channel>` tags:
+
+```xml
+<channel source="plugin:weixin:weixin" chat_id="431381270">hello</channel>
+```
+
+The real user input is the text **between** the `<channel>` and `</channel>` tags. The tags themselves are metadata added by the system, not part of what the user typed.
+
+- `source`: MCP server identifier (e.g. `plugin:weixin:weixin`, `server:my-mcp`)
+- `chat_id`: the specific conversation in that channel
+
+**If a message does NOT contain `<channel>` tags, treat it as a normal terminal message** — reply directly in your response text. Do NOT imagine channel tags that are not present.
+
+**If a message DOES contain `<channel>` tags:**
+
+To reply, use the corresponding MCP server's tools to send messages back through the channel. Do NOT reply directly in your answer text — the channel user will not see it. Channel MCP tools are deferred (not in your core tool list): call `SearchExtraTools` first (e.g. query `mcp__{server}` to list the server's tools), then `ExecuteExtraTool` to invoke the reply/send tool with the `chat_id`.
 
 If `SearchExtraTools` returns no reply tool for the channel server, ask the user to check the channel server's documentation.
 
 ## Mixed terminal and channel context
 
-Messages without a `<channel>` tag come from the local terminal user; messages with the tag come from a channel. They may appear in the same conversation. When replying:
+Messages without `<channel>` tags come from the terminal user; messages with `<channel>...</channel>` tags come from a channel. When replying:
 
-- To a `<channel>` message, use the channel's MCP reply tool so the channel user sees the answer.
+- To a `<channel>` message, use the channel's MCP reply tool.
 - To a terminal message, answer in the normal response text.
-- If a request originates from a channel but the action affects the local workspace (file edits, commits), confirm scope with the channel user before executing — they cannot see your terminal output.
+- If a request originates from a channel but affects the local workspace (file edits, commits), confirm scope with the channel user before executing.
