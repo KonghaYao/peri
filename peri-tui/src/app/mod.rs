@@ -18,8 +18,6 @@ pub use message_state::MessageState;
 
 mod chat_session;
 pub use chat_session::ChatSession;
-#[cfg(test)]
-pub(crate) use chat_session::RunningBgAgent;
 
 mod session_metadata;
 pub use session_metadata::SessionMetadata;

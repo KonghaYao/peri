@@ -1,4 +1,3 @@
-use peri_acp_types::view_model::ViewModel;
 use ratatui::text::Line;
 
 /// 消息状态 — 会话级的消息列表
@@ -23,14 +22,6 @@ pub struct MessageState {
     /// 只读 `state.view`，导致用户回答后答案在生产渲染中消失。镜像
     /// `pending_v2_notes` 的 queue-and-drain 模式修复。
     pub pending_v2_user_bubbles: Vec<String>,
-
-    /// Phase 2.6 step 7e: headless test v2 seed source.
-    ///
-    /// headless tests cannot access `state_machine::State.view` (it is a
-    /// local variable in `main_loop::run`). This field lets tests seed v2
-    /// ViewModels directly so that `HeadlessHandle::render()` can read them
-    /// as the render source, replacing the legacy `view_messages` bridge.
-    pub(crate) v2_test_views: Vec<ViewModel>,
 }
 
 /// 渲染换行信息：每个逻辑行在渲染后的视觉行范围。
@@ -73,7 +64,6 @@ impl MessageState {
             message_cache: None,
             pending_v2_notes: Vec::new(),
             pending_v2_user_bubbles: Vec::new(),
-            v2_test_views: Vec::new(),
         }
     }
 
