@@ -60,7 +60,7 @@ pub fn history_up() -> Option<String> {
 
     let new_idx = match *index_atom.read() {
         None => history.len() - 1, // 从栈顶（最新）开始
-        Some(i) if i == 0 => 0,    // 已在最旧
+        Some(0) => 0,              // 已在最旧
         Some(i) => i - 1,
     };
     *index_atom.write() = Some(new_idx);

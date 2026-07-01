@@ -6,6 +6,10 @@
 //! - **@mention**：输入 @ 触发 AT_MENTION_ACTIVE；popup 显示在输入框上方
 //! - **slash**：行首 / 触发 SLASH_HINT_ACTIVE；popup 显示在输入框上方
 //! - **提交**：Enter 提交，submit_consumer 消费 + push_history
+//
+// element! 宏展开为 `XxxProps { ... ..Default::default() }`，全字段已指定时
+// clippy 触发 needless_update 警告。该警告来自宏展开而非用户代码，模块级抑制。
+#![allow(clippy::needless_update)]
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -149,195 +153,192 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     // 单一编辑状态——闭包编辑 + 渲染读取共享同一实例
     let state = hooks.use_state(EditorState::default);
 
-    hooks.use_local_events({
-        let state = state;
-        move |event: Event| match event {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
-                let is_alt = key.modifiers.contains(KeyModifiers::ALT);
+    hooks.use_local_events(move |event: Event| match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
+            let is_alt = key.modifiers.contains(KeyModifiers::ALT);
 
-                // 当前是否激活了 @mention / slash（激活时方向键给 popup 用）
-                let mention_active = AT_MENTION_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
-                let slash_active = SLASH_HINT_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
+            // 当前是否激活了 @mention / slash（激活时方向键给 popup 用）
+            let mention_active = AT_MENTION_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
+            let slash_active = SLASH_HINT_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
 
-                match key.code {
-                    // ── 提交 ──（仅在不激活 popup 时按 Enter 提交）
-                    KeyCode::Enter if !is_shift && !is_alt && !mention_active && !slash_active => {
-                        let mut s = state.write();
-                        let submitted = std::mem::take(&mut s.text);
-                        s.cursor = 0;
-                        if !submitted.trim().is_empty() {
-                            // 入历史栈 + 通过 SUBMIT_TX 推送
-                            push_history(&submitted);
-                            if let Some(tx) = SUBMIT_TX.get() {
-                                let _ = tx.send(submitted);
-                            }
-                            // 关闭可能的 @mention/slash
-                            if let Some(a) = AT_MENTION_ACTIVE.get() {
-                                *a.write() = false;
-                            }
-                            if let Some(a) = SLASH_HINT_ACTIVE.get() {
-                                *a.write() = false;
-                            }
+            match key.code {
+                // ── 提交 ──（仅在不激活 popup 时按 Enter 提交）
+                KeyCode::Enter if !is_shift && !is_alt && !mention_active && !slash_active => {
+                    let mut s = state.write();
+                    let submitted = std::mem::take(&mut s.text);
+                    s.cursor = 0;
+                    if !submitted.trim().is_empty() {
+                        // 入历史栈 + 通过 SUBMIT_TX 推送
+                        push_history(&submitted);
+                        if let Some(tx) = SUBMIT_TX.get() {
+                            let _ = tx.send(submitted);
                         }
-                    }
-
-                    // Shift/Alt+Enter：换行（多行 buffer）
-                    KeyCode::Enter if (is_shift || is_alt) && !mention_active && !slash_active => {
-                        state.write().insert_char('\n');
-                    }
-
-                    // ── popup 激活时方向键 / Enter 给 popup ──
-                    // 这里 popup 自身的 use_local_events 会消费 Up/Down；
-                    // Enter/Esc 我们在 InputArea 层处理：选择第一项 / 取消
-                    KeyCode::Enter if mention_active => {
-                        // 选当前 mention 项：插入到 editor @ 之后位置
-                        let prefix = MENTION_PREFIX
-                            .get()
-                            .map(|a| a.read().clone())
-                            .unwrap_or_default();
-                        // 简单语义：直接用 prefix 作为文件名（无候选项源时）
-                        let replacement = if prefix.is_empty() {
-                            String::new()
-                        } else {
-                            prefix
-                        };
-                        // 找到 @ 字符位置并替换其后所有 mention prefix
-                        let mut s = state.write();
-                        if let Some(at_byte) = s.text.rfind('@') {
-                            let after_at_byte = at_byte + 1;
-                            let cursor_chars_before = s.cursor;
-                            let _ = cursor_chars_before;
-                            // 删除 @ 后的所有非空白字符（即旧的 prefix）
-                            let keep_until_byte = s.text[after_at_byte..]
-                                .char_indices()
-                                .take_while(|(_, c)| !c.is_whitespace())
-                                .last()
-                                .map(|(i, c)| after_at_byte + i + c.len_utf8())
-                                .unwrap_or(after_at_byte);
-                            s.text.drain(after_at_byte..keep_until_byte);
-                            // 插入替换文本
-                            s.text.insert_str(after_at_byte, &replacement);
-                            s.cursor = s.text.chars().count();
-                        }
-                        drop(s);
+                        // 关闭可能的 @mention/slash
                         if let Some(a) = AT_MENTION_ACTIVE.get() {
                             *a.write() = false;
                         }
-                        if let Some(a) = MENTION_PREFIX.get() {
-                            a.write().clear();
-                        }
-                    }
-                    KeyCode::Enter if slash_active => {
-                        let prefix = SLASH_PREFIX
-                            .get()
-                            .map(|a| a.read().clone())
-                            .unwrap_or_default();
-                        let cmd = if prefix.is_empty() {
-                            String::new()
-                        } else {
-                            format!("/{}", prefix)
-                        };
-                        let mut s = state.write();
-                        // 替换整个 editor 内容为命令
-                        if !cmd.is_empty() {
-                            s.replace_all(cmd.clone());
-                            // 立即提交命令
-                            drop(s);
-                            let final_text = state.read().text.clone();
-                            if !final_text.trim().is_empty() {
-                                push_history(&final_text);
-                                if let Some(tx) = SUBMIT_TX.get() {
-                                    let _ = tx.send(final_text);
-                                }
-                                state.write().clear();
-                            }
-                        } else {
-                            drop(s);
-                        }
                         if let Some(a) = SLASH_HINT_ACTIVE.get() {
                             *a.write() = false;
                         }
-                        if let Some(a) = SLASH_PREFIX.get() {
-                            a.write().clear();
-                        }
                     }
-
-                    // ── 编辑快捷键 ──
-                    KeyCode::Char('w') if is_ctrl => {
-                        state.write().delete_word_backward();
-                    }
-                    KeyCode::Char('u') if is_ctrl => {
-                        state.write().clear();
-                    }
-                    KeyCode::Backspace if !mention_active && !slash_active => {
-                        let mut s = state.write();
-                        s.backspace();
-                        // 若删完后文本不以 / 开头，关闭 slash 提示
-                        if let Some(a) = SLASH_HINT_ACTIVE.get() {
-                            if *a.read() && !s.text.starts_with('/') {
-                                *a.write() = false;
-                            }
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        // popup 激活时退格——更新 prefix
-                        let mut s = state.write();
-                        s.backspace();
-                        update_popup_prefix(&s.text);
-                    }
-                    KeyCode::Left if !mention_active && !slash_active => {
-                        state.write().cursor_left();
-                    }
-                    KeyCode::Right if !mention_active && !slash_active => {
-                        state.write().cursor_right();
-                    }
-                    // ── history 导航（仅在不激活 popup 时）──
-                    KeyCode::Up if !mention_active && !slash_active => {
-                        if let Some(historical) = history_up() {
-                            state.write().replace_all(historical);
-                        }
-                    }
-                    KeyCode::Down if !mention_active && !slash_active => {
-                        match history_down() {
-                            Some(historical) => state.write().replace_all(historical),
-                            None => {
-                                // 回到编辑态——保留当前文本（草稿语义）
-                            }
-                        }
-                    }
-                    KeyCode::Home if !mention_active && !slash_active => {
-                        state.write().cursor_home();
-                    }
-                    KeyCode::End if !mention_active && !slash_active => {
-                        state.write().cursor_end();
-                    }
-                    // Esc 在不激活 popup 时清空文本（激活 popup 时由上层关闭 popup）
-                    KeyCode::Esc if !mention_active && !slash_active => {
-                        state.write().clear();
-                    }
-
-                    // ── 字符输入 ──
-                    KeyCode::Char(ch) if !is_ctrl && !is_alt => {
-                        let mut s = state.write();
-                        s.insert_char(ch);
-                        // 触发 @mention / slash 提示
-                        update_popup_prefix(&s.text);
-                    }
-
-                    _ => {}
                 }
-            }
-            Event::Paste(paste_text) => {
-                let mut s = state.write();
-                s.insert_str(&paste_text);
-                update_popup_prefix(&s.text);
-            }
-            _ => {}
-        }
-    });
 
+                // Shift/Alt+Enter：换行（多行 buffer）
+                KeyCode::Enter if (is_shift || is_alt) && !mention_active && !slash_active => {
+                    state.write().insert_char('\n');
+                }
+
+                // ── popup 激活时方向键 / Enter 给 popup ──
+                // 这里 popup 自身的 use_local_events 会消费 Up/Down；
+                // Enter/Esc 我们在 InputArea 层处理：选择第一项 / 取消
+                KeyCode::Enter if mention_active => {
+                    // 选当前 mention 项：插入到 editor @ 之后位置
+                    let prefix = MENTION_PREFIX
+                        .get()
+                        .map(|a| a.read().clone())
+                        .unwrap_or_default();
+                    // 简单语义：直接用 prefix 作为文件名（无候选项源时）
+                    let replacement = if prefix.is_empty() {
+                        String::new()
+                    } else {
+                        prefix
+                    };
+                    // 找到 @ 字符位置并替换其后所有 mention prefix
+                    let mut s = state.write();
+                    if let Some(at_byte) = s.text.rfind('@') {
+                        let after_at_byte = at_byte + 1;
+                        let cursor_chars_before = s.cursor;
+                        let _ = cursor_chars_before;
+                        // 删除 @ 后的所有非空白字符（即旧的 prefix）
+                        let keep_until_byte = s.text[after_at_byte..]
+                            .char_indices()
+                            .take_while(|(_, c)| !c.is_whitespace())
+                            .last()
+                            .map(|(i, c)| after_at_byte + i + c.len_utf8())
+                            .unwrap_or(after_at_byte);
+                        s.text.drain(after_at_byte..keep_until_byte);
+                        // 插入替换文本
+                        s.text.insert_str(after_at_byte, &replacement);
+                        s.cursor = s.text.chars().count();
+                    }
+                    drop(s);
+                    if let Some(a) = AT_MENTION_ACTIVE.get() {
+                        *a.write() = false;
+                    }
+                    if let Some(a) = MENTION_PREFIX.get() {
+                        a.write().clear();
+                    }
+                }
+                KeyCode::Enter if slash_active => {
+                    let prefix = SLASH_PREFIX
+                        .get()
+                        .map(|a| a.read().clone())
+                        .unwrap_or_default();
+                    let cmd = if prefix.is_empty() {
+                        String::new()
+                    } else {
+                        format!("/{}", prefix)
+                    };
+                    let mut s = state.write();
+                    // 替换整个 editor 内容为命令
+                    if !cmd.is_empty() {
+                        s.replace_all(cmd.clone());
+                        // 立即提交命令
+                        drop(s);
+                        let final_text = state.read().text.clone();
+                        if !final_text.trim().is_empty() {
+                            push_history(&final_text);
+                            if let Some(tx) = SUBMIT_TX.get() {
+                                let _ = tx.send(final_text);
+                            }
+                            state.write().clear();
+                        }
+                    } else {
+                        drop(s);
+                    }
+                    if let Some(a) = SLASH_HINT_ACTIVE.get() {
+                        *a.write() = false;
+                    }
+                    if let Some(a) = SLASH_PREFIX.get() {
+                        a.write().clear();
+                    }
+                }
+
+                // ── 编辑快捷键 ──
+                KeyCode::Char('w') if is_ctrl => {
+                    state.write().delete_word_backward();
+                }
+                KeyCode::Char('u') if is_ctrl => {
+                    state.write().clear();
+                }
+                KeyCode::Backspace if !mention_active && !slash_active => {
+                    let mut s = state.write();
+                    s.backspace();
+                    // 若删完后文本不以 / 开头，关闭 slash 提示
+                    if let Some(a) = SLASH_HINT_ACTIVE.get()
+                        && *a.read()
+                        && !s.text.starts_with('/')
+                    {
+                        *a.write() = false;
+                    }
+                }
+                KeyCode::Backspace => {
+                    // popup 激活时退格——更新 prefix
+                    let mut s = state.write();
+                    s.backspace();
+                    update_popup_prefix(&s.text);
+                }
+                KeyCode::Left if !mention_active && !slash_active => {
+                    state.write().cursor_left();
+                }
+                KeyCode::Right if !mention_active && !slash_active => {
+                    state.write().cursor_right();
+                }
+                // ── history 导航（仅在不激活 popup 时）──
+                KeyCode::Up if !mention_active && !slash_active => {
+                    if let Some(historical) = history_up() {
+                        state.write().replace_all(historical);
+                    }
+                }
+                KeyCode::Down if !mention_active && !slash_active => {
+                    match history_down() {
+                        Some(historical) => state.write().replace_all(historical),
+                        None => {
+                            // 回到编辑态——保留当前文本（草稿语义）
+                        }
+                    }
+                }
+                KeyCode::Home if !mention_active && !slash_active => {
+                    state.write().cursor_home();
+                }
+                KeyCode::End if !mention_active && !slash_active => {
+                    state.write().cursor_end();
+                }
+                // Esc 在不激活 popup 时清空文本（激活 popup 时由上层关闭 popup）
+                KeyCode::Esc if !mention_active && !slash_active => {
+                    state.write().clear();
+                }
+
+                // ── 字符输入 ──
+                KeyCode::Char(ch) if !is_ctrl && !is_alt => {
+                    let mut s = state.write();
+                    s.insert_char(ch);
+                    // 触发 @mention / slash 提示
+                    update_popup_prefix(&s.text);
+                }
+
+                _ => {}
+            }
+        }
+        Event::Paste(paste_text) => {
+            let mut s = state.write();
+            s.insert_str(&paste_text);
+            update_popup_prefix(&s.text);
+        }
+        _ => {}
+    });
     let editor = state.read().clone();
     let text = editor.text.clone();
     let cursor = editor.cursor;
