@@ -26,8 +26,8 @@ mod input_test;
 pub use current_turn::CurrentTurn;
 pub use event::{AcpEventData, Event};
 pub use state::{
-    DoubleEscTracker, Handler, HandlerOutput, IdleState, InputState, ModalKind, ModalState,
-    PanelEffect, PanelReadContext, PanelState, State, StreamingState, SwitchingState,
+    Handler, HandlerOutput, IdleState, InputState, ModalKind, ModalState, PanelEffect,
+    PanelReadContext, PanelState, State, StreamingState, SwitchingState,
 };
 pub use view_store::ViewStore;
 

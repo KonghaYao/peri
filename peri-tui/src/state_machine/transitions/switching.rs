@@ -81,7 +81,6 @@ impl SwitchingState {
             input: InputState::default(),
             scroll_offset: 0,
             view: view_models,
-            double_esc_timer: None,
             history_index: None,
         }
     }

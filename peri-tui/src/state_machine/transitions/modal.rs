@@ -162,7 +162,6 @@ fn transition_to_idle() -> (State, Vec<Effect>) {
         input: InputState::default(),
         scroll_offset: 0,
         view: vec![],
-        double_esc_timer: None,
         history_index: None,
     };
     (State::Idle(idle), vec![Effect::Render])
@@ -175,7 +174,6 @@ fn transition_to_idle_with_effects(effects: Vec<Effect>) -> (State, Vec<Effect>)
         input: InputState::default(),
         scroll_offset: 0,
         view: vec![],
-        double_esc_timer: None,
         history_index: None,
     };
     // Ensure at least one Render so the user sees the dismissal.
@@ -638,7 +636,6 @@ mod tests {
             saved_input: InputState::default(),
             saved_scroll_offset: 0,
             saved_history_index: None,
-            saved_double_esc_timer: None,
             kind: ModalKind::Interaction(handler),
         }
     }
@@ -651,7 +648,6 @@ mod tests {
             saved_input: InputState::default(),
             saved_scroll_offset: 0,
             saved_history_index: None,
-            saved_double_esc_timer: None,
             kind: ModalKind::Panel(panel),
         }
     }

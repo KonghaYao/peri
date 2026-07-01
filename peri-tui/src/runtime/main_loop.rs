@@ -52,19 +52,11 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
     while let Some(event) = rx.recv().await {
         let is_tick = matches!(event, TuiEvent::Tick);
 
-        // ── Pre-event snapshot: textarea text length, used by 2b sync to
-        // clear InputState.prediction when the keyboard fallback shrunk
-        // the buffer (Backspace/Ctrl+U/Ctrl+W). Captured before any event
-        // processing mutates the widget.
-        let old_text_len: usize = app
-            .session_mgr
-            .current()
-            .ui
-            .textarea
-            .lines()
-            .iter()
-            .map(|l| l.chars().count())
-            .sum();
+        // ── Pre-event snapshot retired (Cron #45): the textarea text-length
+        // snapshot was only used to clear `InputState.prediction` on shrink.
+        // The prediction field has been removed (dead code — production
+        // render reads `app.session_mgr.current().ui.prediction` from v1
+        // path). 2b sync below now only mirrors `lines` + `cursor`.
 
         // ── 1a. Drive the pure state machine ────────────────────────────
         // Convert TuiEvent → SmEvent (decode ACP {event, data} into typed
@@ -95,10 +87,10 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // Cron #25 unified popup-guard: when a v1 popup is active
         // (AskUser / HITL / OAuth / Rewind), the keyboard fallback owns
         // all key dispatch. Letting the SM also run would double-execute
-        // (e.g., Ctrl+T cycles model AND popup ignores it; Esc advances
-        // DoubleEscTracker AND popup closes; BackTab cycles permission AND
-        // popup expected prev-question). SM still processes Tick/AcpEvent/
-        // Paste/Mouse/Resize — only Key dispatch is suppressed.
+        // (e.g., Ctrl+T cycles model AND popup ignores it; Esc both closes
+        // the popup AND triggers the v1 rewind gesture; BackTab cycles
+        // permission AND popup expected prev-question). SM still processes
+        // Tick/AcpEvent/Paste/Mouse/Resize — only Key dispatch is suppressed.
         let popup_active = app.is_interaction_popup_active();
         // Cron #38: setup wizard also needs the popup-style SM Key bypass.
         // Wizard is NOT included in is_interaction_popup_active (it lives on
@@ -143,7 +135,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 // Cron #25: SM no-op for Key events while popup is active.
                 // The keyboard fallback will handle the key (popups::handle_popups
                 // routes to the active popup). Returning the original state
-                // unchanged preserves InputState / view / double_esc_timer.
+                // unchanged preserves InputState / view.
                 //
                 // Cron #38: extended to also cover setup_wizard. The wizard
                 // is NOT in is_interaction_popup_active (it lives on
@@ -156,9 +148,10 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 //     keyboard fallback was also blocked — wizard never saw
                 //     these keys. SM side effects fired silently behind the
                 //     wizard: cycle model, open Model panel, etc.
-                //   - Esc advanced the SM DoubleEscTracker simultaneously
-                //     with the wizard's own Esc handler, causing premature
-                //     single-tap quit after wizard dismissal.
+                //   - Esc fired into both the SM and the wizard's own Esc
+                //     handler, causing premature single-tap quit after the
+                //     wizard was dismissed (Cron #45 removed the SM's
+                //     DoubleEscTracker entirely — see idle.rs).
                 // The wizard's own Ctrl+C double-tap handler
                 // (setup_wizard.rs:13-31) and key routing
                 // (keyboard.rs:55 setup_wizard::handle_setup_wizard) work
@@ -632,7 +625,6 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                             saved_input: idle.input,
                             saved_scroll_offset: idle.scroll_offset,
                             saved_history_index: idle.history_index,
-                            saved_double_esc_timer: idle.double_esc_timer,
                             kind: ModalKind::Panel(panel),
                         });
                         needs_render = true;
@@ -643,7 +635,6 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                             saved_input: s.input,
                             saved_scroll_offset: s.scroll_offset,
                             saved_history_index: None,
-                            saved_double_esc_timer: None,
                             kind: ModalKind::Panel(panel),
                         });
                         needs_render = true;
@@ -675,7 +666,6 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                                 input,
                                 scroll_offset: modal.saved_scroll_offset,
                                 view: modal.saved_view,
-                                double_esc_timer: modal.saved_double_esc_timer,
                                 history_index: modal.saved_history_index,
                             })
                         };
@@ -885,22 +875,14 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 .map(|line| line.chars().take(col_char).map(|c| c.len_utf8()).sum())
                 .unwrap_or(0);
             let cursor = crate::state_machine::input::CursorPos::new(row, col_byte);
-            let new_text_len: usize = lines.iter().map(|l| l.chars().count()).sum();
-            let text_shrunk = new_text_len < old_text_len;
             match &mut state {
                 State::Idle(idle) => {
                     idle.input.lines = lines;
                     idle.input.cursor = cursor;
-                    if text_shrunk {
-                        idle.input.prediction = None;
-                    }
                 }
                 State::Streaming(s) => {
                     s.input.lines = lines;
                     s.input.cursor = cursor;
-                    if text_shrunk {
-                        s.input.prediction = None;
-                    }
                 }
                 _ => {}
             }
@@ -1163,7 +1145,7 @@ fn is_sm_handled_shortcut(
     // / OAuth / Rewind), the keyboard fallback owns all key dispatch. This
     // prevents the SM from double-executing: BackTab cycles permission AND
     // popup expects prev-question; Ctrl+T cycles model AND popup ignores;
-    // Esc advances DoubleEscTracker AND popup expects to close. Returning
+    // Esc both closes the popup AND triggers the v1 rewind gesture. Returning
     // false here lets the keyboard fallback (popups::handle_popups) route
     // the key to the active popup exclusively.
     if popup_active {
@@ -1266,7 +1248,6 @@ mod tests {
             input: InputState::default(),
             scroll_offset: 0,
             view: vec![],
-            double_esc_timer: None,
             history_index: None,
         })
     }
@@ -1380,7 +1361,7 @@ mod tests {
 
     #[test]
     fn test_popup_active_esc_returns_false() {
-        // Esc + popup active → false（让 popup 关闭，而非推进 DoubleEscTracker）
+        // Esc + popup active → false（让 popup 关闭，而非触发 SM 副作用）
         // 这是 cron #25 审计 P0 bug 的核心：双击 Esc 不应退出 app。
         let state = idle_state();
         let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
@@ -1500,7 +1481,6 @@ mod tests {
             saved_input: InputState::default(),
             saved_scroll_offset: 0,
             saved_history_index: None,
-            saved_double_esc_timer: None,
             kind: ModalKind::Interaction(Box::new(NoopHandler)),
         });
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -1534,7 +1514,6 @@ mod tests {
             saved_input: InputState::default(),
             saved_scroll_offset: 0,
             saved_history_index: None,
-            saved_double_esc_timer: None,
             kind: ModalKind::Interaction(Box::new(NoopHandler)),
         });
         let ctrl_c = ctrl('c');
@@ -1556,7 +1535,6 @@ mod tests {
             saved_input: InputState::default(),
             saved_scroll_offset: 0,
             saved_history_index: None,
-            saved_double_esc_timer: None,
             kind: ModalKind::Interaction(Box::new(NoopHandler)),
         });
         let ctrl_t = ctrl('t');
@@ -1578,7 +1556,6 @@ mod tests {
             saved_input: InputState::default(),
             saved_scroll_offset: 0,
             saved_history_index: None,
-            saved_double_esc_timer: None,
             kind: ModalKind::Interaction(Box::new(NoopHandler)),
         });
         let plain_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
@@ -1617,7 +1594,6 @@ mod tests {
             saved_input: InputState::default(),
             saved_scroll_offset: 0,
             saved_history_index: None,
-            saved_double_esc_timer: None,
             kind: ModalKind::Interaction(Box::new(NoopHandler)),
         });
 
@@ -1778,8 +1754,8 @@ mod tests {
     //   - Ctrl+T / Ctrl+P / BackTab 被 is_sm_handled_shortcut 返回
     //     true 阻止键盘 fallback，wizard 收不到这些键，SM 在背后静默
     //     副作用（cycle model、开 Model panel、cycle permission）。
-    //   - Esc 同时推进 SM DoubleEscTracker 和 wizard 自己的 Esc handler，
-    //     导致 wizard 关闭后单次 Esc 退出 app。
+    //   - Esc 同时被 SM 与 wizard 自己的 Esc handler 消费，导致 wizard
+    //     关闭后单次 Esc 退出 app（Cron #45 已删除 SM 的 DoubleEscTracker）。
     //
     // 修复：新增 wizard_active 标志，扩展 popup_active bypass 也覆盖
     // wizard。键盘 fallback 条件改为 `wizard_active || !is_sm_handled

@@ -138,8 +138,11 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
         }
 
         // -- §4.4 Input assist ----------------------------------------------
-        Event::AcpEvent(AcpEventData::Prediction(p)) => {
-            state.input.prediction = Some(p.text);
+        Event::AcpEvent(AcpEventData::Prediction(_p)) => {
+            // Cron #45: removed `state.input.prediction = Some(p.text)` —
+            // production render reads `app.session_mgr.current().ui.prediction`
+            // (v1 field set by `acp_bridge.rs:63`), not the SM InputState.
+            // The v2 field was misleading dead code. SM now just emits Render.
             (State::Streaming(state), vec![Effect::Render])
         }
 
@@ -244,7 +247,6 @@ impl StreamingState {
             input: self.input,
             scroll_offset: self.scroll_offset,
             view: self.view,
-            double_esc_timer: None,
             history_index: None,
         }
     }

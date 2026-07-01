@@ -33,7 +33,7 @@ pub use sync::{from_textarea, to_textarea};
 /// Aggregated input-box state.
 ///
 /// Holds multi-line buffer, cursor position, selection, history navigation,
-/// prediction text, at-mention / slash-completion popup state, and attachments.
+/// at-mention / slash-completion popup state, and attachments.
 #[derive(Debug, Clone)]
 pub struct InputState {
     /// Multi-line text buffer (always >= 1 line; empty buffer is `vec![String::new()]`).
@@ -53,10 +53,6 @@ pub struct InputState {
     /// `None` means "not navigating, edits apply to the live buffer".
     pub history_index: Option<usize>,
 
-    /// Greyed-out prediction text shown after the cursor (from
-    /// `"prediction"` events).
-    pub prediction: Option<String>,
-
     /// Active `@mention` popup state, if any.
     pub at_mention: Option<AtMentionState>,
 
@@ -75,7 +71,6 @@ impl Default for InputState {
             selection: None,
             history: Vec::new(),
             history_index: None,
-            prediction: None,
             at_mention: None,
             slash_completion: None,
             attachments: Vec::new(),
@@ -152,7 +147,6 @@ impl InputState {
         self.lines = vec![String::new()];
         self.cursor = CursorPos::default();
         self.selection = None;
-        self.prediction = None;
         self.at_mention = None;
         self.slash_completion = None;
     }
@@ -201,7 +195,6 @@ mod tests {
         assert_eq!(s.cursor, CursorPos::default());
         assert!(s.history.is_empty());
         assert!(s.history_index.is_none());
-        assert!(s.prediction.is_none());
         assert!(s.at_mention.is_none());
         assert!(s.slash_completion.is_none());
         assert!(s.attachments.is_empty());
@@ -220,7 +213,6 @@ mod tests {
         let mut s = InputState {
             lines: vec!["hello".to_string()],
             cursor: CursorPos::new(0, 3),
-            prediction: Some("world".into()),
             at_mention: Some(AtMentionState {
                 candidates: vec!["a".into()],
                 selected: 0,
@@ -236,7 +228,6 @@ mod tests {
         assert_eq!(s.lines.len(), 1);
         assert!(s.lines[0].is_empty());
         assert_eq!(s.cursor, CursorPos::default());
-        assert!(s.prediction.is_none());
         assert!(s.at_mention.is_none());
         assert!(s.slash_completion.is_none());
     }

@@ -78,55 +78,6 @@ pub enum HandlerOutput {
 }
 
 // ---------------------------------------------------------------------------
-// Double-Esc tracker
-// ---------------------------------------------------------------------------
-
-/// Tracks whether the user pressed Esc twice within a short window.
-///
-/// Used to implement the "press Esc twice to quit" gesture. The timer
-/// resets on the first press; the second press within the threshold
-/// triggers a quit effect.
-#[derive(Debug, Clone)]
-pub struct DoubleEscTracker {
-    /// Instant of the first Esc press, if any.
-    pub first_press_at: Option<std::time::Instant>,
-}
-
-impl DoubleEscTracker {
-    /// Maximum duration between two Esc presses that still counts as
-    /// a "double press" (500 ms).
-    pub const THRESHOLD_MS: u64 = 500;
-
-    /// Create a new tracker in the idle state.
-    pub fn new() -> Self {
-        Self {
-            first_press_at: None,
-        }
-    }
-
-    /// Record an Esc press. Returns `true` if this is the second press
-    /// within the threshold (meaning the application should quit).
-    pub fn press_esc(&mut self) -> bool {
-        let now = std::time::Instant::now();
-        if let Some(first) = self.first_press_at {
-            let elapsed = now.duration_since(first);
-            self.first_press_at = None;
-            if elapsed.as_millis() < Self::THRESHOLD_MS as u128 {
-                return true; // double-press detected
-            }
-        }
-        self.first_press_at = Some(now);
-        false
-    }
-}
-
-impl Default for DoubleEscTracker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Top-level State enum
 // ---------------------------------------------------------------------------
 
@@ -197,9 +148,6 @@ pub struct IdleState {
     /// Updated on `"view-commit"` events. Rendering derives the final view
     /// from this list.
     pub view: Vec<ViewModel>,
-
-    /// Double-Esc quit tracker.
-    pub double_esc_timer: Option<DoubleEscTracker>,
 
     /// Current position in the input-history list (None = latest entry).
     pub history_index: Option<usize>,
@@ -285,9 +233,6 @@ pub struct ModalState {
     /// Saved input-history navigation index.
     pub saved_history_index: Option<usize>,
 
-    /// Saved double-Esc quit tracker.
-    pub saved_double_esc_timer: Option<DoubleEscTracker>,
-
     /// The modal content: panel or interaction handler.
     pub kind: ModalKind,
 }
@@ -331,12 +276,10 @@ mod tests {
             input: InputState::default(),
             scroll_offset: 0,
             view: vec![],
-            double_esc_timer: Some(DoubleEscTracker::new()),
             history_index: None,
         };
         assert!(idle.view.is_empty());
         assert!(idle.history_index.is_none());
-        assert!(idle.double_esc_timer.is_some());
     }
 
     #[test]
@@ -380,33 +323,11 @@ mod tests {
     }
 
     #[test]
-    fn test_double_esc_tracker_single_press() {
-        let mut tracker = DoubleEscTracker::new();
-        assert!(!tracker.press_esc()); // first press -- no quit
-        assert!(tracker.first_press_at.is_some());
-    }
-
-    #[test]
-    fn test_double_esc_tracker_double_press_quick() {
-        let mut tracker = DoubleEscTracker::new();
-        tracker.press_esc(); // first press
-        assert!(tracker.press_esc()); // second press within threshold -> quit
-        assert!(tracker.first_press_at.is_none()); // reset after detection
-    }
-
-    #[test]
-    fn test_double_esc_tracker_default() {
-        let tracker = DoubleEscTracker::default();
-        assert!(tracker.first_press_at.is_none());
-    }
-
-    #[test]
     fn test_state_enum_variants() {
         let idle = State::Idle(IdleState {
             input: InputState::default(),
             scroll_offset: 0,
             view: vec![],
-            double_esc_timer: None,
             history_index: None,
         });
         assert!(matches!(idle, State::Idle(_)));

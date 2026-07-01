@@ -45,7 +45,6 @@ pub(crate) fn enter_modal_from_idle(
         saved_input: state.input,
         saved_scroll_offset: state.scroll_offset,
         saved_history_index: state.history_index,
-        saved_double_esc_timer: state.double_esc_timer,
         kind: ModalKind::Interaction(handler),
     };
     (State::Modal(modal), vec![Effect::Render])
@@ -57,7 +56,7 @@ pub(crate) fn enter_modal_from_idle(
 /// Same as [`enter_modal_from_idle`] but preserves the in-progress
 /// `CurrentTurn` via `saved_current_turn = Some(...)` so streaming output
 /// accumulating while the popup is open is not lost. Streaming has no
-/// double-Esc tracker / history navigation, so those are `None`.
+/// history navigation, so `saved_history_index` is `None`.
 pub(crate) fn enter_modal_from_streaming(
     state: StreamingState,
     handler: Box<dyn Handler>,
@@ -68,7 +67,6 @@ pub(crate) fn enter_modal_from_streaming(
         saved_input: state.input,
         saved_scroll_offset: state.scroll_offset,
         saved_history_index: None,
-        saved_double_esc_timer: None,
         kind: ModalKind::Interaction(handler),
     };
     (State::Modal(modal), vec![Effect::Render])

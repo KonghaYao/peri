@@ -35,7 +35,7 @@ use super::super::current_turn::CurrentTurn;
 use super::super::event::{AcpEventData, Event};
 use super::super::handlers::{AskUserHandler, HitlHandler, OauthHandler, RewindHandler};
 use super::super::input::CursorPos;
-use super::super::state::{DoubleEscTracker, IdleState, State, StreamingState};
+use super::super::state::{IdleState, State, StreamingState};
 use super::enter_modal_from_idle;
 use crate::app::panel_types::PanelKind;
 use crate::runtime::effect::Effect;
@@ -109,8 +109,13 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
             (State::Idle(state), vec![Effect::Render])
         }
 
-        Event::AcpEvent(AcpEventData::Prediction(p)) => {
-            state.input.prediction = Some(p.text);
+        Event::AcpEvent(AcpEventData::Prediction(_p)) => {
+            // Cron #45: removed `state.input.prediction = Some(p.text)` —
+            // production render reads `app.session_mgr.current().ui.prediction`
+            // (v1 field set by `acp_bridge.rs:63`), not the SM InputState.
+            // The v2 field was misleading dead code. SM now just emits Render
+            // (redundant with v1 fallback, but safe). Proper v2 ownership of
+            // prediction requires rewiring render — deferred.
             (State::Idle(state), vec![Effect::Render])
         }
 
@@ -315,23 +320,43 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
             (State::Streaming(streaming), effects)
         }
 
-        // -- Esc: double-press quit tracker ---------------------------------
+        // -- Esc: clear at-mention / slash popup, no quit -------------------
+        //
+        // Cron #45: removed `Effect::Quit` emission from this handler.
+        // Previously the SM advanced a `DoubleEscTracker` (500ms threshold)
+        // and emitted `Effect::Quit` on fast double-Esc. But
+        // `is_sm_handled_shortcut` returns `false` for Esc — the v1 keyboard
+        // fallback at `event/keyboard/normal_keys.rs:55-68` ALSO runs and
+        // advances its own `rewind_pending_since` (2s threshold) tracker.
+        //
+        // Dual execution: a fast double-Esc (<500ms) triggered BOTH paths —
+        // the SM emitted `Effect::Quit` while the v1 fallback opened the
+        // rewind prompt. Quit won the effect race, but the rewind prompt
+        // briefly flashed on screen before exit. Users who learned the
+        // rewind gesture (slower double-tap) would accidentally quit on a
+        // fast double-tap.
+        //
+        // Fix: SM no longer emits Quit. Esc gestures are owned by v1
+        // exclusively:
+        //   - First Esc: sets `rewind_pending_since` timestamp
+        //   - Second Esc within 2s: opens rewind selector
+        //   - Otherwise: no-op
+        // Quit remains available via Ctrl+C (3-tier: clear input → interrupt
+        // → double-tap quit) and the `/exit` slash command.
+        //
+        // The popup-clearing for `state.input.at_mention` / `slash_completion`
+        // is retained for forward-compat (v2 InputState may own these
+        // popups after the v1 keyboard module retires). In current
+        // production these v2 fields are not the source of truth (v1
+        // `app.session_mgr.current().ui.at_mention.active` is), so this
+        // branch is a no-op until v2 owns the popups.
         KeyCode::Esc => {
-            let tracker = state
-                .double_esc_timer
-                .get_or_insert_with(DoubleEscTracker::new);
-            if tracker.press_esc() {
-                // Double Esc -> quit.
-                (State::Idle(state), vec![Effect::Quit])
+            if state.input.at_mention.take().is_some()
+                || state.input.slash_completion.take().is_some()
+            {
+                (State::Idle(state), vec![Effect::Render])
             } else {
-                // Single press -- clear at-mention / slash popup if any.
-                if state.input.at_mention.take().is_some()
-                    || state.input.slash_completion.take().is_some()
-                {
-                    (State::Idle(state), vec![Effect::Render])
-                } else {
-                    (State::Idle(state), Vec::new())
-                }
+                (State::Idle(state), Vec::new())
             }
         }
 
@@ -449,7 +474,6 @@ mod tests {
             input: InputState::default(),
             scroll_offset: 0,
             view: vec![],
-            double_esc_timer: None,
             history_index: None,
         }
     }
@@ -476,19 +500,6 @@ mod tests {
         }
         // SM produces no effects for plain Char — keyboard fallback provides Render.
         assert!(effects.is_empty());
-    }
-
-    #[test]
-    fn test_typing_via_sm_does_not_clear_prediction() {
-        // Prediction clearing is handled by the keyboard fallback path,
-        // not the SM. The SM just passes through plain Char keys.
-        let mut state = make_state();
-        state.input.prediction = Some("ghost".into());
-        let (next, _effects) = handle(state, Event::Key(char_key('x')));
-        match next {
-            State::Idle(idle) => assert!(idle.input.prediction.is_some()),
-            _ => panic!("expected Idle"),
-        }
     }
 
     #[test]
@@ -709,14 +720,21 @@ mod tests {
     }
 
     #[test]
-    fn test_double_esc_quits() {
-        // Two Esc presses with no time gap -> quit on second press.
+    fn test_double_esc_does_not_quit_from_sm() {
+        // Cron #45: removed `Effect::Quit` emission from SM Esc handler.
+        // Previously the SM advanced `DoubleEscTracker` (500ms threshold)
+        // and emitted `Effect::Quit` on fast double-Esc. But
+        // `is_sm_handled_shortcut` returns false for Esc — v1 keyboard
+        // fallback ALSO runs and advances `rewind_pending_since` (2s
+        // threshold). Fast double-Esc triggered BOTH: SM Quit + v1 rewind
+        // prompt. Quit won the effect race but rewind prompt briefly
+        // flashed. Now SM Esc is no-op for quit; v1 owns rewind gesture
+        // exclusively. Quit is via Ctrl+C / `/exit`.
         let state = make_state();
         let (next, _e1) = handle(
             state,
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         );
-        // Unwrap the IdleState so we can call `handle` again.
         let idle_again = match next {
             State::Idle(s) => s,
             _ => panic!("expected Idle after first Esc"),
@@ -725,7 +743,10 @@ mod tests {
             idle_again,
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         );
-        assert!(e2.iter().any(|e| matches!(e, Effect::Quit)));
+        assert!(
+            !e2.iter().any(|e| matches!(e, Effect::Quit)),
+            "Cron #45: SM Esc handler must NOT emit Quit (conflicts with v1 rewind gesture)"
+        );
     }
 
     #[test]
