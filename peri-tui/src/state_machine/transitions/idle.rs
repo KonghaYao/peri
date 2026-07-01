@@ -14,7 +14,7 @@
 //! Left/Right/Ctrl+A/U/W/普通 Char). These are owned exclusively by the
 //! keyboard fallback path (`event::keyboard::normal_keys`), which mutates
 //! the `tui_textarea::TextArea` widget directly. The main loop's 2b sync
-//! (TextArea → InputState, conditional on `keyboard_did_run`) then reflects
+//! (TextArea → InputState, conditional on `effect_did_mutate_textarea`) then reflects
 //! the widget state back into `InputState` for read-only use by SM branches
 //! like Enter/Up/Down.
 //!

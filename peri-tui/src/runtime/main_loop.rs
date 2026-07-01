@@ -212,7 +212,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // state changes (e.g. SM clearing InputState on Enter) with the
         // stale TextArea snapshot. See idle.rs module doc for the full
         // rationale on textarea being the single source of truth.
-        let mut keyboard_did_run = false;
+        let mut _keyboard_did_run = false;
         // Cron #37: track whether any Effect handler mutated the textarea
         // widget directly (Effect::PasteText, MouseTextareaClick, MouseText
         // areaDrag). When true, the 2b sync below runs so the new lines +
@@ -234,7 +234,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                         slash_hint_active,
                     ) =>
             {
-                keyboard_did_run = true;
+                _keyboard_did_run = true;
                 match keyboard::handle_key_event(app, *key, &state) {
                     Ok(Some(Action::Quit)) => vec![Effect::Quit],
                     Ok(Some(Action::Submit(input))) => {
@@ -873,10 +873,10 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
 
         // ── 2b. Sync TextArea → state machine InputState ───────────────
         // The keyboard module mutates the TextArea widget directly. When it
-        // runs (keyboard_did_run=true), pull the widget's lines+cursor back
+        // from_textarea() now only runs for mouse/paste double-write paths.
         // into InputState so SM-owned branches (Enter, Up/Down history) see
         // the latest text. SM-owned state changes (Enter clearing buffer,
-        // history navigation) are NOT overwritten because keyboard_did_run
+        // from_textarea() is conditional on effect_did_mutate_textarea.
         // is false for those events (is_sm_handled_shortcut filters them).
         //
         // Cron #37: the same sync must also run when an Effect handler
@@ -895,7 +895,11 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // Semantic fields (at_mention, slash_completion, history, attachments)
         // remain managed independently by the state machine — only lines +
         // cursor are synced, plus the prediction side-effect on shrink.
-        if keyboard_did_run || effect_did_mutate_textarea {
+        // Phase 1-4: keyboard now returns Effects instead of mutating
+        // textarea directly. from_textarea() only runs for mouse/paste
+        // double-write paths (effect_did_mutate_textarea flag).
+        //
+        if effect_did_mutate_textarea {
             let ta = &app.session_mgr.current().ui.textarea;
             let lines: Vec<String> = ta.lines().to_vec();
             let (row, col_char) = ta.cursor();
