@@ -114,15 +114,28 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #40（Phase 2.6 step 7e.3 — 退役 <code>handle_interrupted</code> 分支 2 的 <code>apply_rebuild_all(user_msg_idx, vec![])</code> 调用 + 迁移 4 个测试 / 5 个 view_messages.len() 断言到 v2 state.view / pending_view_rewind_to 语义 — audit workflow wj0c3ppca auditor-0 的 Bundle 2 item 2）<br>
-  <strong>本窗口成果</strong>：1 个本地 commit（c481b2f9，不 push）：<br>
-  · <strong>Retirement（peri-tui，lifecycle.rs:209）</strong>：<code>handle_interrupted</code> 分支 2（无 tool 进度，回滚路径）此前调用 <code>apply_rebuild_all(user_msg_idx, vec![])</code> 截断 v1 view_messages。但生产渲染独占读 v2 state.view，截断通过 <code>pending_view_rewind_to = Some(user_msg_idx)</code> flag（下一行 line 223 设置）由 main_loop 顶端的消费方完成（truncate state.view）。apply_rebuild_all 是 v1-only dead code，sole load-bearing 仅服务于 4 个 lifecycle 测试的 view_messages.len() 断言（auditor-0 已确认）。删除调用 + 替换为详细的历史注释。<br>
-  · <strong>Test migration（peri-tui，lifecycle.rs:380-635）</strong>：4 个测试移除 view_messages.len() 断言：① <code>test_handle_interrupted_branch2_sets_pending_view_rewind</code>（len==0 → 移除，由 flag 断言间接保证）② <code>test_handle_interrupted_branch1_does_not_set_pending_view_rewind</code>（len==1 → 移除，flag == None 间接保证保留语义）③ <code>test_handle_interrupted_branch2_with_assistant_bubble_also_sets_flag</code>（len==0 → 移除）④ <code>test_handle_interrupted_subagent_depth_early_return</code>（len==1 → 移除，flag == None + last_text == "hello" 间接保证 guard 正确）。每个移除点都留下 Cron #40 标记 + 解释注释。<br>
-  · <strong>当前累积缺陷轨迹</strong>：17 → 10 → 7 → 3 → 2 → 1 → 1 → 1 → 1 主 + 9 ACP-gated → 1 主 + 9 ACP-gated + 3 Bundle-2（Cron #39）→ <strong>1 主 + 9 ACP-gated + 2 Bundle-2（Cron #40 完成 Bundle 2 item 2）</strong>。<br>
-  · <strong>Phase 2.6 step 7e 进度</strong>：7e.1 ✓ / 7e.2 ✓（Cron #39）/ 7e.3 ✓（Cron #40）/ 7e.7 ✓。剩余 5 个子步骤（7e.4/5/6/8/9）。<br>
-  · <strong>apply_rebuild_all 剩余调用方</strong>：3 处活跃（agent_compact.rs:48, 77 + mod.rs:365）—— 全部在 compact/rewind 路径，非 cron #40 目标，将随 view_messages 字段整体退役一并删除。<br>
-  <strong>当前状态</strong>：<strong>1128 测试全过</strong>（不增不减，全部断言迁移）· <code>handle_interrupted</code> v1 截断死代码退役 · 测试断言完全脱离 v1 view_messages<br>
-  <strong>下一步</strong>：① ToolStart/End v1 双轨退役（HIGH Bundle 2 item 1，需先确认 ACP 是否同时发 SessionUpdate + UnstableEvent 双信号）② lifecycle 剩余 apply_rebuild_all 调用方退役（compact + rewind 路径）③ headless_test.rs 37 测试迁移（L effort）④ subagent render-misroute（architectural SubAgentGroupData instance_id）
+  <strong>最后更新</strong>：2026-07-01 cron #41（Phase 2.6 step 7e.4 — 修复 <code>handle_compact_completed</code> 的 P1 v2 routing bug：compact-done label 之前只写入 v1 view_messages，生产渲染独占读 v2 state.view 导致用户看不到 compact 完成 + state.view 一直显示 pre-compact 陈旧消息）<br>
+  <strong>本窗口成果</strong>：1 个本地 commit（b7b4c045，不 push）：<br>
+  · <strong>P1 Bug Fix（peri-tui，agent_compact.rs:43-67）</strong>：<code>handle_compact_completed</code>（full compact 路径）此前调 <code>apply_rebuild_all(0, vec![SystemNote("✻ Compact Done")])</code> 只写 v1 view_messages。ACP emit 完 CompactCompleted 后直接返回（无后续 ViewCommit），导致：<br>
+  &nbsp;&nbsp;① state.view 仍显示 pre-compact（被压缩前的）陈旧消息<br>
+  &nbsp;&nbsp;② "✻ Compact Done + Read X (Y lines) + Skill: Z" 反馈在 v2 完全不可见<br>
+  用户感知：<strong>/compact 看起来像没生效</strong>——旧消息还在，没有压缩完成的提示。修复镜像 Cron #29 P1（handle_rewind_completed）+ Cron #28（handle_error）：① <code>pending_view_rewind_to = Some(0)</code> 让 main_loop 截断 state.view（清除陈旧内容）② <code>push_system_note(compact_label)</code> 路由到 pending_v2_notes → SM Event::PushSystemNote → state.view。修复后用户看到清空的消息区 + "✻ Compact Done" 提示，压缩后的 transcript 在下次 ViewCommit 时由后续 turn 重建。<br>
+  · <strong>Test Migration（peri-tui，headless_test.rs:830-887）</strong>：2 个 headless 测试迁移断言到 v2：<br>
+  &nbsp;&nbsp;① <code>test_compact_done_with_re_inject</code>：view_messages.len()==1 → pending_v2_notes.len()==1 + 检查 ✻/Read/Skill 内容 + 防回归断言 view_messages 不被写入<br>
+  &nbsp;&nbsp;② <code>test_compact_done_without_re_inject</code>：同样迁移到 pending_v2_notes，验证无 re_inject 时不显示 Read/Skill 详情<br>
+  · <strong>新增回归测试（peri-tui，agent_compact.rs:226-296）</strong>：3 个新测试覆盖 v2 routing + early-return 路径不设 flag：<br>
+  &nbsp;&nbsp;① <code>test_handle_compact_completed_sets_pending_view_rewind</code>（flag == Some(0)）<br>
+  &nbsp;&nbsp;② <code>test_handle_compact_completed_routes_label_to_v2</code>（label 入队 pending_v2_notes）<br>
+  &nbsp;&nbsp;③ <code>test_handle_compact_completed_micro_cleared_does_not_set_rewind_flag</code>（micro_cleared > 0 早返回路径正确不设 flag）<br>
+  · <strong>当前累积缺陷轨迹</strong>：17 → 10 → 7 → 3 → 2 → 1 → 1 → 1 → 1 主 + 9 ACP-gated → 1 主 + 9 ACP-gated + 3 Bundle-2 → <strong>1 主 + 9 ACP-gated + 1 Bundle-2（Cron #41 完成 Bundle 2 item 3 = 7e.4）</strong>。<br>
+  · <strong>Phase 2.6 step 7e 进度</strong>：7e.1 ✓ / 7e.2 ✓（Cron #39）/ 7e.3 ✓（Cron #40）/ 7e.4 ✓（Cron #41）/ 7e.7 ✓。剩余 4 个子步骤（7e.5/6/8/9）。<br>
+  · <strong>apply_rebuild_all 剩余调用方</strong>：2 处活跃（agent_compact.rs:77 handle_rewind_completed + mod.rs:365）—— rewind 路径的 apply_rebuild_all 是 paired legacy，仍服务于 headless 测试，将随 view_messages 字段整体退役一并删除。<br>
+  <strong>当前状态</strong>：<strong>1130 测试全过</strong>（1128 + 3 新增 - 1 重复名）· <code>handle_compact_completed</code> v2 routing 就位 · compact 完成反馈对用户可见 · state.view 不再陈旧<br>
+  <strong>下一步</strong>：① ToolStart/End v1 双轨退役（HIGH Bundle 2 item 1）② handle_rewind_completed 的 apply_rebuild_all 退役（需迁移 headless 测试）③ headless_test.rs 剩余 ~35 测试迁移（L effort）④ subagent render-misroute（architectural SubAgentGroupData instance_id）
+</div>
+
+<div class="meta">
+  <strong>历史 - cron #40</strong>（commit c481b2f9 + 7e7d52e8）：Phase 2.6 step 7e.3 — 退役 <code>handle_interrupted</code> 分支 2 的 <code>apply_rebuild_all(user_msg_idx, vec![])</code> + 迁移 4 个 lifecycle 测试 / 5 个 view_messages.len() 断言。Phase 2.6 step 7e 第 3 子步骤完成，测试断言完全脱离 v1 view_messages。
 </div>
 
 <div class="meta">
