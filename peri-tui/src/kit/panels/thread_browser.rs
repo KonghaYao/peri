@@ -56,13 +56,8 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             if let Some(tx) = THREAD_LOAD_TX.get() {
                                 let _ = tx.send(entry.id.clone());
                             }
-                            // 关闭面板：清空 ACTIVE_PANEL / OPEN_PANELS
-                            if let Some(atom) = crate::kit::atoms::ACTIVE_PANEL.get() {
-                                *atom.write() = None;
-                            }
-                            if let Some(atom) = crate::kit::atoms::OPEN_PANELS.get() {
-                                atom.write().clear();
-                            }
+                            // I19-A: 弹栈而非清空整个栈
+                            crate::kit::panel_registry::close_active_panel();
                         }
                     }
                     _ => {}

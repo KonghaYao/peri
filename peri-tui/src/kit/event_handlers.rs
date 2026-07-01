@@ -50,9 +50,13 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 exit(());
             }
-            // Ctrl+O: toggle diff
+            // Ctrl+O: toggle diff view（I19-B 接入 DIFF_VISIBLE atom）
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Phase 5: 切换 diff 视图
+                if let Some(atom) = crate::kit::atoms::DIFF_VISIBLE.get() {
+                    let mut g = atom.write();
+                    *g = !*g;
+                    tracing::info!(diff_visible = *g, "Ctrl+O: 切换 diff 视图");
+                }
             }
             _ => {}
         }

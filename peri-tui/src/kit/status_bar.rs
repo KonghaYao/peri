@@ -103,14 +103,16 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// 状态栏第 2 行：状态相关的快捷键 hints
 #[component]
 fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let popup = hooks.use_store(*atoms::POPUP_ACTIVE.get().unwrap());
+    // I19-C：原代码读 POPUP_ACTIVE（dead atom，open/close_popup 从不同步）
+    // 导致 popup hints 永远不显示。改读 POPUP_KIND.is_some()。
+    let popup_kind = hooks.use_store(*atoms::POPUP_KIND.get().unwrap());
     let at_active = hooks.use_store(*atoms::AT_MENTION_ACTIVE.get().unwrap());
     let slash_active = hooks.use_store(*atoms::SLASH_HINT_ACTIVE.get().unwrap());
 
-    let is_popup = popup.get();
+    let is_popup = popup_kind.read().is_some();
     let is_at = at_active.get();
     let is_slash = slash_active.get();
-    let _ = (popup, at_active, slash_active); // StoreState Copy
+    let _ = (popup_kind, at_active, slash_active); // 释放 StoreState 借用
 
     let hints = if is_popup {
         Line::from(" Esc: close | Enter: confirm ").fg(theme::MUTED)

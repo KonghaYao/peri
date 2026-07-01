@@ -281,11 +281,6 @@ fn count_vm(vm: &ViewModel, s: &mut VmStats) {
 }
 
 fn close_panel() {
-    use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
-    if let Some(atom) = ACTIVE_PANEL.get() {
-        *atom.write() = None;
-    }
-    if let Some(atom) = OPEN_PANELS.get() {
-        atom.write().clear();
-    }
+    // I19-A: 弹栈而非清空整个栈，避免同时打开多个不同组面板时关闭一个会全部关闭
+    crate::kit::panel_registry::close_active_panel();
 }

@@ -45,6 +45,8 @@ pub struct MessageAreaProps {
     pub loading: bool,
     /// 终端可用宽度，用于 markdown 折行。
     pub width: usize,
+    /// I19-B：diff 视图展开开关（Ctrl+O toggle）。
+    pub diff_visible: bool,
 }
 
 #[component]
@@ -53,14 +55,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // 已提交消息
     for vm in &props.view_models {
-        let lines = view_render::render_v2_vm(vm, props.width, false);
+        let lines = view_render::render_v2_vm(vm, props.width, props.diff_visible);
         all_lines.extend(lines);
         all_lines.push(Line::from(""));
     }
 
     // 当前轮次消息
     for vm in &props.current_turn {
-        let lines = view_render::render_v2_vm(vm, props.width, false);
+        let lines = view_render::render_v2_vm(vm, props.width, props.diff_visible);
         all_lines.extend(lines);
         all_lines.push(Line::from(""));
     }

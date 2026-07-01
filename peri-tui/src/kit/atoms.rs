@@ -202,7 +202,8 @@ pub static MODE_HIGHLIGHT_UNTIL: OnceLock<Atom<Option<Instant>>> = OnceLock::new
 /// @mention / slash_hint / popup 激活状态
 pub static AT_MENTION_ACTIVE: OnceLock<Atom<bool>> = OnceLock::new();
 pub static SLASH_HINT_ACTIVE: OnceLock<Atom<bool>> = OnceLock::new();
-pub static POPUP_ACTIVE: OnceLock<Atom<bool>> = OnceLock::new();
+// I19-C：POPUP_ACTIVE 已退役——dead atom（open/close_popup 从不同步）。
+// 改读 POPUP_KIND.is_some() 获取真实弹窗状态。
 
 /// 提交通道：InputArea 写入 → submit_consumer 读取 → acp_client.prompt()。
 ///
@@ -291,6 +292,9 @@ pub static MENTION_SELECTED_INDEX: OnceLock<Atom<usize>> = OnceLock::new();
 /// I18-C：SlashCompletion 当前选中项索引（跨组件共享，让 InputArea Enter 读取真实选中）。
 pub static SLASH_SELECTED_INDEX: OnceLock<Atom<usize>> = OnceLock::new();
 
+/// I19-B：diff 视图展开开关（Ctrl+O toggle），传给 view_render::render_v2_vm。
+pub static DIFF_VISIBLE: OnceLock<Atom<bool>> = OnceLock::new();
+
 // ── S10：Rewind 系统 ──────────────────────────────────────────────────────
 
 /// 当前 rewind 预览数据——由 AcpEvent::RewindPreview 写入；RewindPopup 读取。
@@ -364,7 +368,6 @@ pub fn init_atoms() {
     MODE_HIGHLIGHT_UNTIL.get_or_init(|| Atom::new(None));
     AT_MENTION_ACTIVE.get_or_init(|| Atom::new(false));
     SLASH_HINT_ACTIVE.get_or_init(|| Atom::new(false));
-    POPUP_ACTIVE.get_or_init(|| Atom::new(false));
     SERVICE_SNAPSHOT.get_or_init(|| Atom::new(ServiceSnapshot::default()));
     THREAD_LIST.get_or_init(|| Atom::new(Vec::new()));
     CRON_JOBS.get_or_init(|| Atom::new(Vec::new()));
@@ -386,6 +389,7 @@ pub fn init_atoms() {
     SLASH_PREFIX.get_or_init(|| Atom::new(String::new()));
     MENTION_SELECTED_INDEX.get_or_init(|| Atom::new(0));
     SLASH_SELECTED_INDEX.get_or_init(|| Atom::new(0));
+    DIFF_VISIBLE.get_or_init(|| Atom::new(false));
     REWIND_PREVIEW.get_or_init(|| Atom::new(None));
     LAST_ESC_TIME.get_or_init(|| Atom::new(None));
     // SUBMIT_TX 由 entry::run_kit_fullscreen 在 build_app_and_acp 之后初始化

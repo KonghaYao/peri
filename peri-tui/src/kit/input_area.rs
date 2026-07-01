@@ -402,9 +402,11 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                 KeyCode::End if !is_ctrl && !mention_active && !slash_active => {
                     state.write().cursor_end();
                 }
-                // Esc 在不激活 popup 时清空文本（激活 popup 时由上层关闭 popup）
+                // I19-D：Esc 不再清空草稿——用户多行输入时误按 Esc 会丢失全部内容。
+                // 双击 Esc 由 event_handlers.rs 上层处理（触发 RewindPopup），
+                // 用户想清空输入框用 Ctrl+U。popup 激活时 Esc 由 event_handlers 关 popup。
                 KeyCode::Esc if !mention_active && !slash_active => {
-                    state.write().clear();
+                    // no-op：保留草稿
                 }
 
                 // ── 字符输入 ──

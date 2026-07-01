@@ -75,9 +75,11 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 提示文字
     lines.push(Line::from(format!("  {}", oauth.hint)).fg(theme::TEXT));
     lines.push(Line::from(""));
-    // URL（截断显示）
-    let truncated_url = if oauth.auth_url.len() > 44 {
-        format!("{}...", &oauth.auth_url[..44])
+    // URL（按字符截断显示，I19-D 修复 CJK 字节截断 panic）
+    let url_chars: Vec<char> = oauth.auth_url.chars().collect();
+    let truncated_url = if url_chars.len() > 44 {
+        let prefix: String = url_chars.into_iter().take(44).collect();
+        format!("{}...", prefix)
     } else {
         oauth.auth_url.to_string()
     };

@@ -105,13 +105,8 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 );
                             }
                         }
-                        // 关闭面板
-                        if let Some(atom) = crate::kit::atoms::ACTIVE_PANEL.get() {
-                            *atom.write() = None;
-                        }
-                        if let Some(atom) = crate::kit::atoms::OPEN_PANELS.get() {
-                            atom.write().clear();
-                        }
+                        // 关闭面板：I19-A 弹栈而非清空整个栈
+                        crate::kit::panel_registry::close_active_panel();
                     }
                     KeyCode::Left => {
                         let mut s = selected_tab.write();

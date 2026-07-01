@@ -16,7 +16,7 @@ use ratatui_kit::{
 pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 订阅全局状态
     let acp_state = hooks.use_store(*atoms::ACP_STATE.get().unwrap());
-    let popup_active = hooks.use_store(*atoms::POPUP_ACTIVE.get().unwrap());
+    let popup_kind_atom = hooks.use_store(*atoms::POPUP_KIND.get().unwrap());
     let wizard_active_atom = hooks.use_store(*atoms::WIZARD_ACTIVE.get().unwrap());
 
     // 注册事件处理器
@@ -27,7 +27,7 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 读取状态值 (AcpStateSnapshot 非 Copy，用 .read())
     let state = acp_state.read();
     let wizard_active = *wizard_active_atom.read();
-    let _ = popup_active.get();
+    let _ = popup_kind_atom.read().is_some(); // I19-C：用 POPUP_KIND 替代 dead POPUP_ACTIVE
     let _ = state; // AcpStateSnapshot 借用解除
 
     // 设置向导覆盖（最高优先级）；否则显示主布局 + 面板覆盖层 + 弹窗覆盖层
