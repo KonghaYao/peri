@@ -108,10 +108,6 @@ pub enum Effect {
         path: std::path::PathBuf,
     },
 
-    // ── Input buffer operations (Phase 1: unified InputOp) ──
-    /// Apply an atomic input operation to the state machine's InputState.
-    ApplyInputOp(crate::state_machine::input::InputOp),
-
     // ── App lifecycle ────────────────────────────────────────────────────
     /// Exit the app.
     Quit,

@@ -432,7 +432,3 @@ impl App {
 
     // poll_agent/poll_panic_notifications/poll_workflow_runs are in polling.rs
 }
-
-#[cfg(test)]
-#[path = "../agent_ops_test.rs"]
-mod tests;

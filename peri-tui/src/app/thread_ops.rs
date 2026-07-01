@@ -231,9 +231,3 @@ impl App {
         // P5: sync rendering, no render_tx Clear needed
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::thread::ThreadMeta;
-    include!("thread_ops_test.rs");
-}

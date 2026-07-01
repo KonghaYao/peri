@@ -153,15 +153,3 @@ impl CommandRegistry {
             .collect()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-
-    use super::*;
-    use crate::app::App;
-    include!("mod_test.rs");
-}

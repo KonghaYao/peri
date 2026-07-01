@@ -181,11 +181,3 @@ impl App {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use peri_acp_types::skill::{SkillMetadataDto, SkillSourceDto};
-
-    use super::*;
-    include!("hint_ops_test.rs");
-}

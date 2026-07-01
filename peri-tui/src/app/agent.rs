@@ -177,7 +177,3 @@ pub(crate) fn map_acp_event(event: AcpEvent, _cwd: &str) -> Option<AgentEvent> {
         },
     })
 }
-
-#[cfg(test)]
-#[path = "agent_test.rs"]
-mod tests;

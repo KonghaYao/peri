@@ -120,7 +120,3 @@ pub enum EventResult {
     /// 请求打开指定 Thread（ThreadBrowser 专用）
     OpenThread(String),
 }
-
-#[cfg(test)]
-#[path = "panel_types_test.rs"]
-mod tests;

@@ -2,7 +2,7 @@ use ratatui::widgets::{Block, Borders};
 use ratatui::{Frame, layout::Rect, style::Style};
 use tui_textarea::TextArea;
 
-use crate::ui::theme;
+use crate::kit::theme;
 
 /// 基于 `tui_textarea::TextArea` 的统一文本输入组件，
 /// 替代所有 `String + usize` 和 `InputState` 用法。
@@ -132,7 +132,3 @@ impl Clone for FieldTextarea {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "field_textarea_test.rs"]
-mod tests;

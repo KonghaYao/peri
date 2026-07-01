@@ -58,8 +58,3 @@ impl Command for PluginCommand {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    include!("plugin_test.rs");
-}

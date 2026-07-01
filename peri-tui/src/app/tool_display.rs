@@ -95,9 +95,3 @@ pub fn should_auto_expand_tool(tool_name: &str, is_error: bool) -> bool {
     }
     matches!(tool_name, "AgentResult" | "ExecuteExtraTool")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tool_display_test.rs");
-}

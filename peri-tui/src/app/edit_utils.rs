@@ -1,7 +1,7 @@
 use ratatui::{style::Style, text::Span};
 use tui_textarea::TextArea;
 
-use crate::ui::theme;
+use crate::kit::theme;
 
 /// 确保光标在滚动视口内可见，返回调整后的 scroll_offset
 pub fn ensure_cursor_visible(cursor_row: u16, scroll_offset: u16, visible_height: u16) -> u16 {

@@ -63,8 +63,6 @@ pub use setup_wizard::SetupWizardPanel;
 pub mod workflow_tracker;
 
 // Panel private modules
-mod panel_ops;
-
 mod ask_user_ops;
 mod ask_user_prompt;
 pub use ask_user_prompt::AskUserBatchPrompt;
@@ -112,11 +110,6 @@ use peri_agent::messages::BaseMessage; // P4b: type-dependency
 use peri_middlewares::prelude::HitlDecision; // P4b: type-dependency
 
 use crate::acp_client::{AcpNotification, AcpTuiClient};
-// Re-export MessageViewModel from ui::message_view
-pub use crate::ui::message_view::{
-    ContentBlockView, MessageViewModel, ToolCategory, aggregate_tail_tool_groups,
-    aggregate_tool_groups,
-};
 use crate::{
     config::PeriConfig,
     thread::{SqliteThreadStore, ThreadId, ThreadStore},

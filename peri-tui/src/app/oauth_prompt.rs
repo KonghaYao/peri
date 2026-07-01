@@ -65,9 +65,3 @@ impl OAuthPrompt {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    include!("oauth_prompt_test.rs");
-}

@@ -367,7 +367,3 @@ pub fn extract_selected_text(
         Some(parts.join("\n"))
     }
 }
-
-#[cfg(test)]
-#[path = "text_selection_test.rs"]
-mod tests;

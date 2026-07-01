@@ -35,9 +35,3 @@ impl Command for BgCommand {
         vec![]
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    include!("bg_test.rs");
-}

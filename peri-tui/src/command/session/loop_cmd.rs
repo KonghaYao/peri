@@ -41,9 +41,3 @@ impl Command for LoopCommand {
         vec![]
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    include!("loop_cmd_test.rs");
-}

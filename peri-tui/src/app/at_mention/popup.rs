@@ -9,7 +9,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::AtMentionState;
-use crate::ui::theme;
+use crate::kit::theme;
 
 /// 弹窗最大显示行数
 pub const MAX_VIEWPORT: usize = 10;
