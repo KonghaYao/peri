@@ -133,8 +133,11 @@ pub struct InputAreaProps {
 
 #[component]
 pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    // 创建单一编辑状态（闭包编辑 + 渲染读取共享同一实例）
+    let state = hooks.use_state(EditorState::default);
+
     hooks.use_local_events({
-        let state = hooks.use_state(EditorState::default);
+        let state = state;
         move |event: Event| match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);

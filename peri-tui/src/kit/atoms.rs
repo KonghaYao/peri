@@ -22,6 +22,10 @@ pub struct AcpStateSnapshot {
     pub popup_active: bool,
     pub wizard_active: bool,
     pub at_mention_active: bool,
+    pub slash_hint_active: bool,
+}
+
+/// Session ViewModels 快照
 #[derive(Debug, Clone, Default)]
 pub struct ViewModelsSnapshot {
     pub committed: Vec<ViewModel>,
