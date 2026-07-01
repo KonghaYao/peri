@@ -140,6 +140,33 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 };
                 sm_effects = Vec::new();
             }
+            _ if inline_overlay_active_for_enter(&event, at_mention_active, slash_hint_active) => {
+                // Cron #37: SM no-op for Enter while an inline overlay
+                // (@mention popup or slash_completion hint) is active.
+                // The keyboard fallback owns these — it injects the selected
+                // path or completes the hint into the textarea. Without this
+                // bypass, the SM Enter handler (which runs unconditionally
+                // before the fallback) read `state.input.text()` — still the
+                // raw `@query` token because InputState.at_mention is dead
+                // code (always None in production) — and emitted
+                // Effect::SubmitMessage { text: "@query" }, submitting the
+                // raw token instead of the resolved path. The 2b sync then
+                // overwrote InputState with the textarea's resolved path,
+                // but Effect::SubmitMessage already carried the wrong text.
+                //
+                // is_sm_handled_shortcut already returns false for Enter
+                // when these overlays are active, but that only gates the
+                // keyboard fallback — it does NOT prevent the SM from
+                // running. This arm closes that gap by making the SM itself
+                // no-op for Enter when an overlay is active.
+                new_state = match state {
+                    State::Idle(s) => State::Idle(s),
+                    State::Streaming(s) => State::Streaming(s),
+                    State::Switching(s) => State::Switching(s),
+                    State::Modal(s) => State::Modal(s),
+                };
+                sm_effects = Vec::new();
+            }
             _ => {
                 let (ns, fx) = state_machine_handle(state, sm_event);
                 new_state = ns;
@@ -160,6 +187,14 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // stale TextArea snapshot. See idle.rs module doc for the full
         // rationale on textarea being the single source of truth.
         let mut keyboard_did_run = false;
+        // Cron #37: track whether any Effect handler mutated the textarea
+        // widget directly (Effect::PasteText, MouseTextareaClick, MouseText
+        // areaDrag). When true, the 2b sync below runs so the new lines +
+        // cursor land in SM InputState before render. Without this, the
+        // render-time to_textarea would overwrite the just-pasted / clicked
+        // position with the stale SM InputState, undoing the user's edit
+        // within the same frame.
+        let mut effect_did_mutate_textarea = false;
         let fallback_effects = match &event {
             TuiEvent::Key(key)
                 if !is_sm_handled_shortcut(
@@ -377,6 +412,10 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                                     tui_textarea::CursorMove::Jump(r as u16, c as u16),
                                 );
                                 app.session_mgr.current_mut().ui.textarea.start_selection();
+                                // Cron #37: cursor moved via mouse — sync back
+                                // to InputState so render-time to_textarea does
+                                // not revert the click.
+                                effect_did_mutate_textarea = true;
                             }
                         }
                     }
@@ -399,6 +438,8 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                                 app.session_mgr.current_mut().ui.textarea.move_cursor(
                                     tui_textarea::CursorMove::Jump(r as u16, c as u16),
                                 );
+                                // Cron #37: cursor moved via drag — sync back.
+                                effect_did_mutate_textarea = true;
                             }
                         }
                     }
@@ -417,6 +458,12 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                         app.paste_to_interaction_popup(&text);
                     } else {
                         app.session_mgr.current_mut().ui.textarea.insert_str(&text);
+                        // Cron #37: textarea content changed — sync back to
+                        // InputState so render-time to_textarea does not
+                        // erase the pasted text. (Wizard / popup paths own
+                        // their own widgets, so we only flag the textarea
+                        // branch.)
+                        effect_did_mutate_textarea = true;
                     }
                     needs_render = true;
                 }
@@ -762,6 +809,13 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // history navigation) are NOT overwritten because keyboard_did_run
         // is false for those events (is_sm_handled_shortcut filters them).
         //
+        // Cron #37: the same sync must also run when an Effect handler
+        // mutates the textarea (Effect::PasteText, MouseTextareaClick,
+        // MouseTextareaDrag). Without it, the render-time to_textarea would
+        // overwrite the just-applied edit with stale InputState within the
+        // same frame — paste would visibly vanish, mouse clicks would snap
+        // the cursor back.
+        //
         // Prediction clearing: previously attached to SM's Backspace/Ctrl+U/
         // Ctrl+W arms (now deleted). Reimplemented here by comparing text
         // length before/after — any shrink clears prediction. This catches
@@ -771,7 +825,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // Semantic fields (at_mention, slash_completion, history, attachments)
         // remain managed independently by the state machine — only lines +
         // cursor are synced, plus the prediction side-effect on shrink.
-        if keyboard_did_run {
+        if keyboard_did_run || effect_did_mutate_textarea {
             let ta = &app.session_mgr.current().ui.textarea;
             let lines: Vec<String> = ta.lines().to_vec();
             let (row, col_char) = ta.cursor();
@@ -991,6 +1045,33 @@ fn handle_acp_event(
     } else {
         vec![Effect::Render]
     }
+}
+
+/// Returns `true` if the event is a plain Enter (no Shift/Alt) AND an inline
+/// overlay (@mention popup or slash_completion hint) is active.
+///
+/// Cron #37: used by main_loop to bypass SM Enter dispatch when these
+/// overlays are active. The keyboard fallback owns the injection / hint
+/// completion; the SM must not pre-empt it by submitting the raw `@query`
+/// or incomplete slash token. See the inline comment at the call site for
+/// the full rationale.
+fn inline_overlay_active_for_enter(
+    event: &TuiEvent,
+    at_mention_active: bool,
+    slash_hint_active: bool,
+) -> bool {
+    if !(at_mention_active || slash_hint_active) {
+        return false;
+    }
+    let key = match event {
+        TuiEvent::Key(k) => k,
+        _ => return false,
+    };
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    matches!(key.code, KeyCode::Enter)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
 }
 
 /// Returns `true` if the state machine already handles this shortcut,
@@ -1555,6 +1636,86 @@ mod tests {
         assert!(
             effects.iter().any(|e| matches!(e, Effect::Render)),
             "ViewCommit in Switching must emit Render"
+        );
+    }
+
+    // ── Cron #37: inline overlay (@mention / slash_completion) Enter bypass ──
+    //
+    // 背景：当 @mention popup 或 slash_completion hint 激活时，用户按 Enter
+    // 期望键盘 fallback 注入选中路径 / 完成提示。此前 SM Enter handler 在
+    // fallback 之前抢先执行：读取 `state.input.text()`（仍是原始 `@query`
+    // token，因 InputState.at_mention 在生产中恒为 None），emit
+    // Effect::SubmitMessage { text: "@query" }，提交了原始 token 而非解析
+    // 后的路径。`is_sm_handled_shortcut` 已对 Enter 返回 false 让 fallback
+    // 跑，但那只控制 fallback — 不阻止 SM 自身。
+    //
+    // 修复：新增 `inline_overlay_active_for_enter` helper，main_loop 用它作为
+    // 旁路条件。Enter + (at_mention_active || slash_hint_active) 时 SM no-op，
+    // 让 fallback 独占注入选中项。
+
+    #[test]
+    fn test_inline_overlay_enter_with_at_mention_active_returns_true() {
+        // Enter + at_mention 激活 → true（SM 应旁路）
+        let key_event = TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            inline_overlay_active_for_enter(&key_event, true, false),
+            "Cron #37: Enter + at_mention active must trigger SM bypass"
+        );
+    }
+
+    #[test]
+    fn test_inline_overlay_enter_with_slash_hint_active_returns_true() {
+        // Enter + slash_hint 激活 → true（SM 应旁路）
+        let key_event = TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            inline_overlay_active_for_enter(&key_event, false, true),
+            "Cron #37: Enter + slash_hint active must trigger SM bypass"
+        );
+    }
+
+    #[test]
+    fn test_inline_overlay_enter_without_overlay_returns_false() {
+        // Enter + 两个 overlay 都不激活 → false（SM 正常处理提交）
+        let key_event = TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            !inline_overlay_active_for_enter(&key_event, false, false),
+            "Cron #37: Enter without overlay must NOT bypass SM (normal submit)"
+        );
+    }
+
+    #[test]
+    fn test_inline_overlay_enter_with_shift_or_alt_returns_false() {
+        // Shift+Enter / Alt+Enter 应插入换行而非提交，SM 不需要旁路
+        // （这个 helper 只负责 Enter 提交场景的旁路判断）。
+        let key_event = TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert!(
+            !inline_overlay_active_for_enter(&key_event, true, false),
+            "Cron #37: Shift+Enter must not trigger bypass (inserts newline)"
+        );
+        let key_event = TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        assert!(
+            !inline_overlay_active_for_enter(&key_event, true, false),
+            "Cron #37: Alt+Enter must not trigger bypass (inserts newline)"
+        );
+    }
+
+    #[test]
+    fn test_inline_overlay_non_enter_key_returns_false() {
+        // 非 Enter 按键 + overlay 激活 → false（helper 只关心 Enter）
+        // 其他按键（BackTab/Ctrl+T/普通字符）的 SM 路由由 is_sm_handled_shortcut 决定。
+        let key_event = TuiEvent::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert!(
+            !inline_overlay_active_for_enter(&key_event, true, false),
+            "Cron #37: Non-Enter keys are not affected by this helper"
+        );
+    }
+
+    #[test]
+    fn test_inline_overlay_non_key_event_returns_false() {
+        // Tick / Mouse / Paste 等非 Key 事件 → false（SM 正常处理）
+        assert!(
+            !inline_overlay_active_for_enter(&TuiEvent::Tick, true, false),
+            "Cron #37: Non-Key events are not affected by this helper"
         );
     }
 }

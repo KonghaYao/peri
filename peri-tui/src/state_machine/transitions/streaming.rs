@@ -180,9 +180,15 @@ pub fn handle(mut state: StreamingState, event: Event) -> (State, Vec<Effect>) {
         //    remains the single source of truth for input editing).
         Event::Key(key) => handle_key(state, key),
 
-        // -- Paste: routed by main_loop. Streaming re-renders to show the
-        //    pasted text in the input box.
-        Event::Paste(_) => (State::Streaming(state), vec![Effect::Render]),
+        // -- Paste: route through Effect::PasteText so main_loop inserts
+        //    into the textarea (mirrors Idle handler). Cron #37: previously
+        //    this arm emitted only Effect::Render, silently dropping the
+        //    pasted text during Streaming — users pre-typing during agent
+        //    output lost their paste entirely.
+        Event::Paste(text) => (
+            State::Streaming(state),
+            vec![Effect::PasteText { text }, Effect::Render],
+        ),
 
         // -- System events --------------------------------------------------
         Event::AcpDisconnected | Event::SessionLoaded { .. } => {
@@ -387,6 +393,35 @@ mod tests {
         assert!(
             effects.iter().any(|e| matches!(e, Effect::Render)),
             "Cron #36: TurnDone 必须触发 Render（避免闪烁）"
+        );
+    }
+
+    #[test]
+    fn test_paste_emits_paste_text_effect() {
+        // Cron #37: Streaming 状态下 Event::Paste 必须发出 Effect::PasteText，
+        // 让 main_loop 把文本插入 textarea。此前此分支仅 emit Effect::Render，
+        // 用户在 agent 输出期间预先粘贴下一条消息会被静默丢弃。
+        let state = make_state();
+        let (next, effects) = handle(state, Event::Paste("hello world".into()));
+
+        // 状态保持 Streaming
+        assert!(matches!(next, State::Streaming(_)));
+
+        // 关键断言：PasteText effect 必须存在，且文本正确
+        let paste_effect = effects.iter().find_map(|e| match e {
+            Effect::PasteText { text } => Some(text.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            paste_effect.as_deref(),
+            Some("hello world"),
+            "Cron #37: Streaming Paste 必须发出携带原始文本的 PasteText effect"
+        );
+
+        // Render 也必须存在
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Render)),
+            "Cron #37: Streaming Paste 必须同时发出 Render"
         );
     }
 
