@@ -122,7 +122,6 @@ async fn handle_confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peri_acp::transport::AcpTransport;
     use peri_acp::transport::mpsc::{
         MpscClientTransport, MpscServerTransport, mpsc_transport_pair,
     };
