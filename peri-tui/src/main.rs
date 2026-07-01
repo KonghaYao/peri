@@ -1,26 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-#[cfg(not(feature = "use-kit"))]
-use peri_acp::transport::mpsc::mpsc_transport_pair;
-#[cfg(not(feature = "use-kit"))]
-use peri_tui::{acp_client::AcpTuiClient, runtime, ui};
-#[cfg(not(feature = "use-kit"))]
-use ratatui::{
-    crossterm::{
-        event::{
-            DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-            EnableFocusChange, EnableMouseCapture,
-        },
-        execute,
-        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-    },
-    prelude::*,
-};
-#[cfg(not(feature = "use-kit"))]
-use std::io;
 use std::sync::OnceLock;
-#[cfg(not(feature = "use-kit"))]
-use tokio_util::sync::CancellationToken;
 
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
@@ -508,39 +488,6 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
     // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
     let rt = build_runtime()?;
 
-    #[cfg(not(feature = "use-kit"))]
-    let result = rt.block_on(async {
-        // 初始化终端
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste,
-            EnableFocusChange
-        )?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-
-        // 运行应用
-        let result = run_app(&mut terminal, &opts, panic_notify_rx).await;
-
-        // 恢复终端
-        disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            DisableFocusChange
-        )?;
-        terminal.show_cursor()?;
-
-        result
-    });
-
-    #[cfg(feature = "use-kit")]
     let result = rt.block_on(async {
         // ratatui-kit fullscreen() 自行管理 raw mode / alternate screen / 事件循环。
         // 外层不做任何终端操作。
@@ -568,84 +515,6 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
     if let Err(e) = result {
         eprintln!("Error: {e}");
     }
-
-    Ok(())
-}
-
-#[cfg(not(feature = "use-kit"))]
-async fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    tui_opts: &TuiOptions,
-    panic_notify_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
-) -> Result<()> {
-    let launch_opts = peri_tui::launch::TuiLaunchOptions {
-        approve: tui_opts.approve,
-        permission_mode: tui_opts.permission_mode.clone(),
-        skip_permissions: tui_opts.skip_permissions,
-        model: tui_opts.model.clone(),
-        effort: tui_opts.effort.clone(),
-        continue_session: tui_opts.continue_session,
-        resume_session: tui_opts.resume_session.clone(),
-        session_id: tui_opts.session_id.clone(),
-        session_name: tui_opts.session_name.clone(),
-        settings: tui_opts.settings.clone(),
-        allowed_tools: tui_opts.allowed_tools.clone(),
-        disallowed_tools: tui_opts.disallowed_tools.clone(),
-    };
-    let (mut app, acp_client) =
-        peri_tui::launch::build_app_and_acp(&launch_opts, Some(panic_notify_rx)).await?;
-    let _ = tui_opts; // tui_opts 字段已在 launch_opts 中拷贝
-
-    // ── v2 Runtime: event channel + background collectors ──────────────────
-    let shutdown = CancellationToken::new();
-    let (tx, rx) = runtime::event_channel::channel();
-
-    // Spawn keyboard collector (crossterm poll → TuiEvent::Key/Mouse/Paste/Resize/Tick)
-    runtime::keyboard_collector::spawn(tx.clone(), shutdown.clone());
-
-    // Spinner tick 驱动 + 初始全量绘制（before ApplyContext borrows terminal）
-    app.session_mgr.current_mut().spinner_state.advance_tick();
-    terminal.draw(|f| ui::main_ui::render(f, &mut app, None, None))?;
-
-    // Spawn ACP notifier (AcpNotification → TuiEvent::AcpEvent)
-    if let Some((acp_client, notification_rx)) = acp_client {
-        runtime::acp_notifier::spawn(tx.clone(), notification_rx, shutdown.clone());
-        // Construct ApplyContext with terminal + acp_client
-        let mut ctx = runtime::apply_context::ApplyContext::new(terminal, acp_client);
-
-        // Run the v2 main loop
-        let result = runtime::main_loop::run(rx, &mut ctx, &mut app).await;
-
-        // Signal shutdown to background tasks
-        shutdown.cancel();
-
-        result
-    } else {
-        // No ACP provider available — fall back to a minimal loop that only
-        // processes keyboard events (no agent functionality).
-        let mut ctx = runtime::apply_context::ApplyContext::new(
-            terminal,
-            // Construct a dummy AcpTuiClient — this path is extremely rare
-            // (no provider configured at all).  The AcpTuiClient is Clone + Arc
-            // internally, so we create one via a no-op transport pair.
-            {
-                let (client_transport, server_transport) = mpsc_transport_pair();
-                // Drop the server side immediately — no ACP server will ever read.
-                drop(server_transport);
-                let (client, _notification_rx) = AcpTuiClient::new(client_transport);
-                client
-            },
-        );
-
-        let result = runtime::main_loop::run(rx, &mut ctx, &mut app).await;
-
-        shutdown.cancel();
-
-        result
-    }?;
-
-    // 关闭 hooks + MCP pool + 等 Langfuse flush
-    peri_tui::launch::teardown_app(&mut app).await;
 
     Ok(())
 }
