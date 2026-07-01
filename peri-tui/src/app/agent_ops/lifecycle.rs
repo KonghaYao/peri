@@ -206,12 +206,20 @@ impl App {
             .last_submitted_text
             .take()
         {
-            self.apply_rebuild_all(user_msg_idx, vec![]);
-            // Cron #23 P1 fix: 请求 main_loop 截断 v2 state.view 到 user_msg_idx，
-            // 与 v1 view_messages 的截断保持一致。否则 stale UserBubble + 部分
-            // AssistantBubble 会持续存在直到下一个 view-commit（用户感知为
-            // "按 Esc 回滚后消息还在"）。main_loop 在 handle_acp_event 返回后
-            // 消费此 flag，仅对 Idle/Streaming 生效（Modal/Switching 跳过）。
+            // Cron #40 (Phase 2.6 step 7e.3): retired apply_rebuild_all(user_msg_idx, vec![])
+            // — it only truncated v1 view_messages, but production render reads v2 state.view
+            // exclusively. The v2 rewind is carried out by pending_view_rewind_to flag below
+            // (consumed by main_loop at the top of the next iteration, truncating state.view).
+            // Audit workflow wj0c3ppca auditor-0 confirmed apply_rebuild_all in handle_interrupted
+            // was load-bearing ONLY for v1 test assertions; pending_view_rewind_to is the
+            // production-critical path. Test assertions on view_messages.len() migrated to
+            // rely solely on pending_view_rewind_to + state.view semantics.
+            //
+            // Cron #23 P1 fix: 请求 main_loop 截断 v2 state.view 到 user_msg_idx。
+            // 否则 stale UserBubble + 部分 AssistantBubble 会持续存在直到下一个
+            // view-commit（用户感知为 "按 Esc 回滚后消息还在"）。main_loop 在
+            // handle_acp_event 返回后消费此 flag，仅对 Idle/Streaming 生效
+            // （Modal/Switching 跳过）。
             self.global_ui.pending_view_rewind_to = Some(user_msg_idx);
             let pre_len = self.session_mgr.current_mut().metadata.pre_submit_state_len;
             self.session_mgr
@@ -374,12 +382,10 @@ mod tests {
             "分支 2（回滚）必须设置 pending_view_rewind_to = Some(user_msg_idx)"
         );
 
-        // v1 view_messages 也应被截断
-        assert_eq!(
-            app.session_mgr.current().messages.view_messages.len(),
-            0,
-            "v1 view_messages 应被 apply_rebuild_all(0, []) 截断为 0"
-        );
+        // Cron #40 (Phase 2.6 step 7e.3): 退役 apply_rebuild_all 后，v1
+        // view_messages 不再被截断（生产渲染独占读 v2 state.view，截断由
+        // main_loop 顶端的 pending_view_rewind_to 消费完成）。不再断言
+        // view_messages.len()——它将在 view_messages 字段整体退役时一并删除。
 
         // last_submitted_text 应被还原到 textarea
         let textarea_text: String = app
@@ -425,12 +431,9 @@ mod tests {
             "分支 1（保留工具进度）不应设置 pending_view_rewind_to"
         );
 
-        // v1 view_messages 不应被截断（保留 UserBubble + 后续工作）
-        assert_eq!(
-            app.session_mgr.current().messages.view_messages.len(),
-            1,
-            "分支 1 应保留 UserBubble 在 view_messages 中"
-        );
+        // Cron #40: view_messages 不再断言——生产渲染独占读 v2 state.view，
+        // 此分支保留语义通过 pending_view_rewind_to == None 间接保证
+        // （若误设 flag，main_loop 会错误截断 state.view）。
     }
 
     #[tokio::test]
@@ -459,12 +462,8 @@ mod tests {
             "AssistantBubble 不算 tool 进度，应进入分支 2 设置 flag"
         );
 
-        // v1 view_messages 也应被截断
-        assert_eq!(
-            app.session_mgr.current().messages.view_messages.len(),
-            0,
-            "v1 view_messages 应被截断（包括 AssistantBubble 也被移除）"
-        );
+        // Cron #40: view_messages 截断断言已退役——生产渲染读 v2 state.view，
+        // 由 main_loop 消费 pending_view_rewind_to 完成截断。
     }
 
     #[tokio::test]
@@ -620,12 +619,8 @@ mod tests {
             "subagent_depth > 0 must NOT consume last_submitted_text"
         );
 
-        // CRITICAL: v1 view_messages must NOT be truncated
-        assert_eq!(
-            app.session_mgr.current().messages.view_messages.len(),
-            1,
-            "subagent_depth > 0 must NOT truncate view_messages"
-        );
+        // Cron #40: view_messages 断言已退役——guard 通过 flag + last_text
+        // 间接保证。生产渲染独占读 v2 state.view，v1 字段将在整体退役时删除。
     }
 
     /// Cron #31 P1: handle_interrupted subagent_depth > 0 with ToolCards
