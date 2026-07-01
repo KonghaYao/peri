@@ -515,53 +515,10 @@ mod tests {
         );
     }
 
-    /// Cron #39 (Phase 2.6 step 7e.2): handle_error must NOT push the error
-    /// ToolBlock to v1 view_messages. Previously (pre-Cron #39) the handler
-    /// constructed a `MessageViewModel::tool_block(...)` + called
-    /// `apply_add_message(vm)`, writing to view_messages. But production
-    /// render reads v2 state.view exclusively — the v1 push was dead code.
-    /// The sole load-bearing v2 route is `push_system_note` (verified by
-    /// `test_handle_error_routes_to_v2_state_view` above).
-    ///
-    /// This test confirms the retirement: after handle_error, view_messages
-    /// contains ONLY the initial UserBubble seeded by make_app_with_active_turn
-    /// (length 1). If a future refactor reintroduces the v1 push, this test
-    /// will fail with view_messages.len() == 2.
-    #[tokio::test]
-    async fn test_handle_error_does_not_write_view_messages() {
-        let mut app = make_app_with_active_turn().await;
-        // make_app_with_active_turn seeds exactly 1 UserBubble to view_messages
-        assert_eq!(
-            app.session_mgr.current().messages.view_messages.len(),
-            1,
-            "precondition: make_app_with_active_turn seeds 1 UserBubble"
-        );
-
-        let _ = app.handle_error("api timeout");
-
-        assert_eq!(
-            app.session_mgr.current().messages.view_messages.len(),
-            1,
-            "Cron #39: handle_error must NOT push error ToolBlock to v1 \
-             view_messages — v2 push_system_note is the sole route. \
-             Got view_messages.len() = {} (expected 1)",
-            app.session_mgr.current().messages.view_messages.len()
-        );
-        // 验证剩余的 VM 是原始 UserBubble（"hello"），不是 error ToolBlock
-        match &app.session_mgr.current().messages.view_messages[0] {
-            MessageViewModel::UserBubble { content, .. } => {
-                assert!(
-                    content.contains("hello"),
-                    "remaining view_messages[0] must be the original UserBubble, got: {:?}",
-                    content
-                );
-            }
-            other => panic!(
-                "expected UserBubble, got {:?} — handle_error must not push ToolBlock",
-                std::mem::discriminant(other)
-            ),
-        }
-    }
+    /// Cron #46 (Phase 2.6 step 7e.9): `test_handle_error_does_not_write_view_messages`
+    /// removed — the `view_messages` field it asserted on is being deleted. The regression
+    /// it guarded (handle_error pushing error ToolBlock to v1 view_messages) is now
+    /// structurally impossible because apply_add_message has been deleted.
 
     // -----------------------------------------------------------------------
     // Cron #31: handle_interrupted subagent_depth early-return regression

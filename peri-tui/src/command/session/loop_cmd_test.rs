@@ -42,7 +42,6 @@
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_loop_cmd_valid_args_submits_message() {
-        // Cron #26 step 7e.7: submit_message 不再写 v1 view_messages。
         // UserBubble 通过 push_user_bubble 入队到 pending_v2_user_bubbles，
         // 由 main_loop 通过 Event::PushUserBubble 路由到 v2 state.view。
         let mut app = headless_app().await;

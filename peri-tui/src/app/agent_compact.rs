@@ -323,38 +323,8 @@ mod tests {
         );
     }
 
-    /// Cron #42 (Phase 2.6 step 7e.5): handle_rewind_completed must NOT
-    /// write to v1 view_messages. Previously the handler built view_msgs
-    /// from messages + label + called apply_rebuild_all(0, view_msgs).
-    /// But production render reads v2 state.view exclusively — the v1
-    /// rebuild was dead code. The sole load-bearing v2 route is
-    /// pending_view_rewind_to + push_system_note (Cron #29 P1 fix).
-    ///
-    /// This test confirms the retirement: after handle_rewind_completed,
-    /// view_messages is empty (initial state, untouched).
-    #[tokio::test]
-    async fn test_handle_rewind_completed_does_not_write_view_messages() {
-        let mut app = make_app().await;
-        // Initial state: view_messages is empty
-        assert_eq!(
-            app.session_mgr.current().messages.view_messages.len(),
-            0,
-            "precondition: view_messages starts empty"
-        );
-
-        let messages = vec![
-            BaseMessage::human("first".to_string()),
-            BaseMessage::ai("response".to_string()),
-        ];
-        let _ = app.handle_rewind_completed("Rewound 1 message".to_string(), messages);
-
-        assert_eq!(
-            app.session_mgr.current().messages.view_messages.len(),
-            0,
-            "Cron #42: handle_rewind_completed must NOT write to v1 \
-             view_messages — v2 pending_view_rewind_to + push_system_note \
-             is the sole route. Got view_messages.len() = {}",
-            app.session_mgr.current().messages.view_messages.len()
-        );
-    }
+    // Cron #46 (Phase 2.6 step 7e.9): `test_handle_rewind_completed_does_not_write_view_messages`
+    // removed — the `view_messages` field it asserted on is being deleted. The regression
+    // it guarded (rewind handler pushing to v1 view_messages) is now structurally
+    // impossible because apply_rebuild_all has been deleted.
 }

@@ -852,15 +852,7 @@ async fn test_compact_done_with_re_inject() {
         "Cron #41: pending_v2_notes 应包含 ✻ + Read /a.rs + Skill: skill.md"
     );
 
-    // Cron #41 防回归：view_messages 必须不再被 apply_rebuild_all 写入
-    let view_msgs = &app.session_mgr.current().messages.view_messages;
-    assert!(
-        view_msgs.iter().all(|m| match m {
-            MessageViewModel::SystemNote { content, .. } => !content.contains("✻"),
-            _ => true,
-        }),
-        "Cron #41 防回归：CompactDone label 不应写入 v1 view_messages (生产独占读 v2)"
-    );
+    // Cron #46 (Phase 2.6 step 7e.9): view_messages 防回归断言已删除 —— 字段已退役。
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2160,15 +2152,8 @@ async fn test_source_agent_id_none_falls_back_to_main_stream() {
     });
     app.process_pending_events();
 
-    // Cron #43 防回归：v1 view_messages 不应被写入（生产读 v2 state.view）
-    let view_messages = &app.session_mgr.current().messages.view_messages;
-    let has_tool_block = view_messages
-        .iter()
-        .any(|vm| matches!(vm, MessageViewModel::ToolBlock { .. }));
-    assert!(
-        !has_tool_block,
-        "Cron #43: source_agent_id=None 的 ToolStart 不应写入 v1 view_messages (生产读 v2 state.view)"
-    );
+    // Cron #46 (Phase 2.6 step 7e.9): view_messages 防回归断言已删除 —— 字段已退役。
+    // 实际语义由下方 SubAgentStatusMap + spinner_state 断言承载。
 
     // 同时，SubAgentStatusMap 应为空（无 SubAgent 启动）— 这是实际的语义断言
     assert!(
@@ -2200,15 +2185,7 @@ async fn test_source_agent_id_unknown_falls_back_to_main_stream() {
     });
     app.process_pending_events();
 
-    // Cron #43 防回归：v1 view_messages 不应被写入
-    let view_messages = &app.session_mgr.current().messages.view_messages;
-    let has_tool_block = view_messages
-        .iter()
-        .any(|vm| matches!(vm, MessageViewModel::ToolBlock { .. }));
-    assert!(
-        !has_tool_block,
-        "Cron #43: source_agent_id 不匹配时 ToolStart 不应写入 v1 view_messages"
-    );
+    // Cron #46 (Phase 2.6 step 7e.9): view_messages 防回归断言已删除 —— 字段已退役。
 
     // orphan source_agent_id 不应创建 SubAgentStatus 条目
     assert!(
