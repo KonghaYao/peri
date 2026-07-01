@@ -10,7 +10,7 @@ use super::{agent_events_bg::BackgroundTaskResult, *};
 mod acp_bridge;
 mod lifecycle;
 mod polling;
-mod rewind;
+
 mod subagent;
 
 impl App {
