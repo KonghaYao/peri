@@ -1102,15 +1102,8 @@ fn handle_acp_event(
         }
     };
 
-    // Delegate to the App handler.
-    let (updated, _should_break, should_return) = app.handle_acp_notification(notif, view_slice);
-    if should_return {
-        vec![Effect::Render]
-    } else if updated {
-        vec![Effect::Render]
-    } else {
-        vec![Effect::Render]
-    }
+    let (_updated, _should_break, _should_return) = app.handle_acp_notification(notif, view_slice);
+    vec![Effect::Render]
 }
 
 /// Returns `true` if the event is a plain Enter (no Shift/Alt) AND an inline

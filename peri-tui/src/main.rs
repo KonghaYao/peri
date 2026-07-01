@@ -329,6 +329,18 @@ fn inject_settings_override(source: &str) {
     }
 }
 
+// ─── 辅助函数 ──────────────────────────────────────────────────────────────
+
+/// 统一创建 tokio runtime（4 workers，4MB stack），避免 7 处重复构造
+fn build_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(4 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .map_err(Into::into)
+}
+
 // ─── 入口 ──────────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
@@ -345,11 +357,8 @@ fn main() -> Result<()> {
 
     // -p/--print 模式（优先级高于子命令）
     if cli.print.is_some() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
-            .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
-            .enable_all()
-            .build()?;
+        // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
+        let rt = build_runtime()?;
         return rt.block_on(cli_print::run_print(
             cli.print.and_then(|o| o),
             cli.output_format,
@@ -386,19 +395,13 @@ fn main() -> Result<()> {
             model: _,
             agent: _,
         }) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
-                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
-                .enable_all()
-                .build()?;
+            // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
+            let rt = build_runtime()?;
             rt.block_on(acp_stdio::run_acp_stdio(cwd))
         }
         Some(Commands::Update) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
-                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
-                .enable_all()
-                .build()?;
+            // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
+            let rt = build_runtime()?;
             rt.block_on(async {
                 match peri_tui::update::run_update().await {
                     Ok(tag) => println!("Updated to {tag}"),
@@ -411,11 +414,8 @@ fn main() -> Result<()> {
             })
         }
         Some(Commands::Sync { action, server }) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
-                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
-                .enable_all()
-                .build()?;
+            // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
+            let rt = build_runtime()?;
             rt.block_on(async {
                 match action {
                     SyncAction::Sender => peri_tui::sync::run_sync_sender(&server).await,
@@ -429,11 +429,8 @@ fn main() -> Result<()> {
             })
         }
         Some(Commands::Plugin { action }) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
-                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
-                .enable_all()
-                .build()?;
+            // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
+            let rt = build_runtime()?;
             rt.block_on(async {
                 match action {
                     PluginAction::List { json } => cli_plugin::run_plugin_list(json),
@@ -447,11 +444,7 @@ fn main() -> Result<()> {
             })
         }
         Some(Commands::Web) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4)
-                .thread_stack_size(4 * 1024 * 1024)
-                .enable_all()
-                .build()?;
+            let rt = build_runtime()?;
             rt.block_on(async {
                 peri_web_pty::start_server(peri_web_pty::config::Config::from_env()).await
             })
@@ -504,11 +497,8 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
     // 否则 Rust 默认 panic hook 的 stderr 输出会破坏 TUI 画面。
     let panic_notify_rx = init_panic_notify();
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
-        .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
-        .enable_all()
-        .build()?;
+    // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
+    let rt = build_runtime()?;
 
     let result = rt.block_on(async {
         // 初始化终端

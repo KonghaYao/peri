@@ -72,7 +72,6 @@ mod thread_ops;
 // ── Other Modules ─────────────────────────────────────────────────────────────
 pub mod agent;
 pub mod events;
-mod message_convert;
 mod provider;
 pub mod text_selection;
 pub mod tool_display;

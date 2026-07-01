@@ -1,5 +1,4 @@
 use super::*;
-use crate::thread::ThreadBrowser;
 
 impl App {
     pub fn scroll_up(&mut self) {
@@ -215,33 +214,8 @@ impl App {
         crate::alloc_config::alloc_collect();
 
         // P5: sync rendering, no render_tx Clear needed
-        crate::alloc_config::alloc_collect();
     }
 
-    pub fn open_thread_browser(&mut self) {
-        let store = self.services.thread_store.clone();
-        let cwd = self.services.cwd.clone();
-        let threads = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(store.list_threads())
-                .unwrap_or_default()
-        });
-        let filtered: Vec<_> = threads.into_iter().filter(|t| t.cwd == cwd).collect();
-
-        let branch = std::process::Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .current_dir(&self.services.cwd)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty());
-
-        let _browser = ThreadBrowser::new(filtered, self.services.thread_store.clone(), branch);
-        self.session_mgr.current_mut().messages.push_system_note(
-            "Thread browser panel: use /history via v2 state machine".to_string(),
-        );
-    }
 }
 
 #[cfg(test)]

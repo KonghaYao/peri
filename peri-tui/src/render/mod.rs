@@ -12,7 +12,6 @@
 //! ## 当前状态（P5 进行中）
 //!
 //! 本模块提供：
-//! - [`Throttle`]：16ms 帧率节流器（含 force_render 旁路）。
 //! - [`render`]：同步渲染入口（目前委托给 legacy `App::draw`，后续替换为
 //!   `State` 驱动的派生）。
 //!
@@ -22,10 +21,7 @@
 //! 状态机的 `ViewStore::for_render()` + `CurrentTurn::view_models()` 已就绪。
 
 // pub mod block_mode;  // P5 skeleton — uncomment when implementing
-pub mod throttle;
 pub mod view_render;
-
-// pub(crate) use throttle::{RenderReason, Throttle};  // P5 skeleton — enable when integrating
 
 use std::time::Instant;
 
