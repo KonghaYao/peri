@@ -500,6 +500,7 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
     // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
     let rt = build_runtime()?;
 
+    #[cfg(not(feature = "use-kit"))]
     let result = rt.block_on(async {
         // 初始化终端
         enable_raw_mode()?;
@@ -515,10 +516,7 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
         let mut terminal = Terminal::new(backend)?;
 
         // 运行应用
-        #[cfg(not(feature = "use-kit"))]
         let result = run_app(&mut terminal, &opts, panic_notify_rx).await;
-        #[cfg(feature = "use-kit")]
-        let result = run_app_kit(&mut terminal, &opts, panic_notify_rx).await;
 
         // 恢复终端
         disable_raw_mode()?;
@@ -532,6 +530,15 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
         terminal.show_cursor()?;
 
         result
+    });
+
+    #[cfg(feature = "use-kit")]
+    let result = rt.block_on(async {
+        // ratatui-kit fullscreen() 自行管理 raw mode / alternate screen / 事件循环。
+        // 外层不做任何终端操作。
+        let _opts = &opts;
+        let _panic_notify_rx = panic_notify_rx;
+        peri_tui::kit::entry::run_kit_fullscreen().await
     });
 
     // 先 drop rt（关闭所有 tokio 任务），再 drop _telemetry
@@ -914,25 +921,6 @@ async fn run_app(
     }
 
     Ok(())
-}
-
-// ─── ratatui-kit 入口（feature = "use-kit"）────────────────────────────────┐
-
-/// Phase 8: ratatui-kit 替代入口点。
-///
-/// 在 feature `use-kit` 启用时替代 `run_app`，使用 ratatui-kit 组件树
-/// 和 fullscreen() 事件循环。ACP server 尚未连线（atoms 用默认 mock 数据）。
-#[cfg(feature = "use-kit")]
-async fn run_app_kit(
-    _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    _tui_opts: &TuiOptions,
-    _panic_notify_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
-) -> Result<()> {
-    // 注意：外层 run_tui 已启用 raw mode + alternate screen。
-    // ratatui-kit fullscreen() 会再次启用（幂等），退出时自行恢复。
-    // Phase 8 最小可用：直接启动组件树，不连线 ACP server。
-    // Phase 9: 接入 ACP event bridge，连接真实数据。
-    peri_tui::kit::entry::run_kit_fullscreen().await
 }
 
 #[cfg(test)]
