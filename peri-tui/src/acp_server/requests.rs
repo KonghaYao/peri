@@ -6,10 +6,11 @@ use std::sync::Arc;
 
 use agent_client_protocol::schema::{
     CloseSessionResponse, ForkSessionResponse, ListSessionsResponse, LoadSessionResponse,
-    NewSessionResponse, ResumeSessionResponse, SessionId, SessionInfo,
+    NewSessionResponse, ResumeSessionResponse, SessionId, SessionInfo, SessionNotification,
     SetSessionConfigOptionResponse, SetSessionModeResponse,
 };
 use peri_acp::dispatch::config_update::make_config_options;
+use peri_acp::dispatch::ReplaySender;
 use peri_acp::{dispatch, transport::types::AcpError};
 use peri_agent::thread::ThreadMeta;
 use serde_json::Value;
@@ -289,6 +290,26 @@ pub(crate) async fn handle_request(
             if let Some(s) = sessions.get_mut(req_session_id) {
                 s.frozen = Some(frozen_data);
             }
+
+            // ── ACP v1 spec: replay history via session/update BEFORE responding ──
+            let history_for_replay: Vec<_> = sessions
+                .get(req_session_id)
+                .map(|s| s.history.clone())
+                .unwrap_or_default();
+            let replay_sender = TuiReplaySender { transport };
+            if let Err(e) = dispatch::replay_session_history(
+                req_session_id,
+                &history_for_replay,
+                &replay_sender,
+            )
+            .await
+            {
+                tracing::warn!(session_id = %req_session_id, error = %e, "session/load: history replay failed, continuing");
+            }
+
+            // modes/configOptions sent both via notification AND in response body
+            // (notification for async update, response body for immediate availability)
+            send_config_option_update(transport, req_session_id, cfg).await;
 
             let modes = build_mode_state(&cfg.permission_mode);
             let config_options = {
@@ -626,6 +647,26 @@ pub(crate) async fn handle_request(
         }
 
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),
+    }
+}
+
+/// Adapts `&dyn AcpTransport` into a `ReplaySender` for the TUI path.
+struct TuiReplaySender<'a> {
+    transport: &'a dyn peri_acp::transport::AcpTransport,
+}
+
+#[async_trait::async_trait]
+impl ReplaySender for TuiReplaySender<'_> {
+    async fn send(
+        &self,
+        notif: SessionNotification,
+    ) -> Result<(), peri_acp::dispatch::ReplayError> {
+        let payload = serde_json::to_value(&notif)
+            .map_err(|e| peri_acp::dispatch::ReplayError::SendFailed(e.to_string()))?;
+        self.transport
+            .send_notification("session/update", payload)
+            .await
+            .map_err(|e| peri_acp::dispatch::ReplayError::SendFailed(e.to_string()))
     }
 }
 
