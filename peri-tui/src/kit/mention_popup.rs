@@ -14,7 +14,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::ui::theme;
+use crate::kit::theme;
 
 #[derive(Default, Props)]
 pub struct MentionPopupProps {

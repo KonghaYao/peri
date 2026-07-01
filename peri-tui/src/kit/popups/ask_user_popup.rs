@@ -16,7 +16,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::ui::theme;
+use crate::kit::theme;
 
 /// 单个问题
 #[derive(Clone)]

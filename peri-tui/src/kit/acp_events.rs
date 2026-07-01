@@ -3,9 +3,8 @@
 //! 将 AcpEventData 映射为全局 Atom 写入，供 kit 组件通过 use_store 订阅。
 //! Phase 2 桥接层——ACP 事件 → Atom 写入。
 
+use crate::kit::acp_types::{AcpEventData, CurrentTurn, ToolCardAccumulator};
 use crate::kit::atoms::*;
-use crate::state_machine::current_turn::{CurrentTurn, ToolCardAccumulator};
-use crate::state_machine::event::AcpEventData;
 use peri_acp_types::view_model::{NoteLevel, SystemNoteData, ViewModel};
 
 // ---------------------------------------------------------------------------

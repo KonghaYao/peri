@@ -1,6 +1,6 @@
 //! ratatui-kit SetupWizard component.
 
-use crate::ui::theme;
+use crate::kit::theme;
 use ratatui_kit::{
     prelude::*,
     ratatui::{

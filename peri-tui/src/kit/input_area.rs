@@ -28,7 +28,7 @@ use crate::kit::atoms::{
 use crate::kit::input_history::{history_down, history_up, push_history};
 use crate::kit::mention_popup::MentionPopup;
 use crate::kit::slash_completion::SlashCompletion;
-use crate::ui::theme;
+use crate::kit::theme;
 
 /// 静态 slash 命令列表——S11 解耦后从 CommandRegistry 注入真实命令。
 const SLASH_COMMANDS: &[&str] = &[

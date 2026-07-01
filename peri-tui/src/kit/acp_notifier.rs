@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::acp_client::AcpNotification;
-use crate::state_machine::event::AcpEventData;
+use crate::kit::acp_types::AcpEventData;
 
 /// 启动 kit ACP notifier 后台任务。
 ///

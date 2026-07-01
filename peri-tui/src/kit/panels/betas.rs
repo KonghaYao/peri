@@ -14,7 +14,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::ui::theme;
+use crate::kit::theme;
 
 /// Mock beta feature entries (Phase 8: injected via Atom).
 #[allow(dead_code)]

@@ -7,7 +7,7 @@
 //!
 //! 旧版: panel/panels/mcp.rs (PanelState trait).
 
-use crate::ui::theme;
+use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,

@@ -6,7 +6,7 @@
 //!
 //! 旧版: panel/panels/agent.rs (PanelState trait, agent selection).
 
-use crate::ui::theme;
+use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,

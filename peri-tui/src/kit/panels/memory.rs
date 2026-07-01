@@ -5,7 +5,7 @@
 //!
 //! 旧版: panel/panels/memory.rs (PanelState trait, MemoryEntry-based).
 
-use crate::ui::theme;
+use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,

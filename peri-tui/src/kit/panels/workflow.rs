@@ -15,7 +15,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::ui::theme;
+use crate::kit::theme;
 
 /// Mock workflow snapshot entry.
 #[allow(dead_code)]

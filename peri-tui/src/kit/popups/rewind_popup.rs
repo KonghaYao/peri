@@ -34,7 +34,7 @@ use ratatui_kit::{
 use crate::kit::atoms::REWIND_ACTION_TX;
 use crate::kit::popup_overlay::close_popup;
 use crate::kit::rewind_action::RewindAction;
-use crate::ui::theme;
+use crate::kit::theme;
 
 /// 视图切换——messages ↔ files。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

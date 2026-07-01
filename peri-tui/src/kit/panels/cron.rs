@@ -16,7 +16,7 @@ use ratatui_kit::{
 };
 
 use crate::kit::atoms::{CRON_JOBS, CronJobSummary};
-use crate::ui::theme;
+use crate::kit::theme;
 
 #[component]
 pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {

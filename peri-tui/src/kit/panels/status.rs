@@ -16,7 +16,7 @@ use ratatui_kit::{
 };
 
 use crate::kit::atoms::SERVICE_SNAPSHOT;
-use crate::ui::theme;
+use crate::kit::theme;
 
 const TAB_SERVICE: usize = 0;
 const TAB_CONTEXT: usize = 1;

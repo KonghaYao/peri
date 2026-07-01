@@ -3,8 +3,8 @@
 //! Phase 4：将占位 Widget 转换为完整 ratatui-kit 组件，
 //! 复用 `render/view_render.rs` 的 `render_v2_vm` 纯函数渲染全部 7 种 ViewModel 变体。
 
+use crate::kit::theme;
 use crate::render::view_render;
-use crate::ui::theme;
 use peri_acp_types::view_model::ViewModel;
 use ratatui_kit::{
     prelude::*,

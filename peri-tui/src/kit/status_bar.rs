@@ -6,7 +6,7 @@
 //! - **Row 2**：状态相关的快捷键 hints（popup/mention/slash/默认 4 态切换）。
 
 use crate::kit::atoms;
-use crate::ui::theme;
+use crate::kit::theme;
 use ratatui_kit::{
     prelude::*,
     ratatui::{

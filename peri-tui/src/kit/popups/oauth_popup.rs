@@ -15,7 +15,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::ui::theme;
+use crate::kit::theme;
 
 /// 模拟授权信息
 struct OAuthInfo {

@@ -15,7 +15,7 @@ use ratatui_kit::{
 };
 
 use crate::kit::atoms::{THREAD_LIST, ThreadSummary};
-use crate::ui::theme;
+use crate::kit::theme;
 
 #[component]
 pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {

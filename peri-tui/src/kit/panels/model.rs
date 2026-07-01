@@ -6,7 +6,7 @@
 //! 需要 S11 解耦后通过 AcpClient 触发（暂留 TODO）。
 
 use crate::kit::atoms::SERVICE_SNAPSHOT;
-use crate::ui::theme;
+use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,

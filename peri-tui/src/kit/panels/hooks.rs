@@ -18,7 +18,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::ui::theme;
+use crate::kit::theme;
 
 /// Mock hook entry (Phase 8: injected via Atom from HookDto).
 #[allow(dead_code)]

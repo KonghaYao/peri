@@ -5,8 +5,7 @@
 //! Phase 2 完整实现——main_loop fan-out 后独立消费。
 
 use crate::kit::acp_events::{self, BridgeState};
-use crate::state_machine::current_turn::CurrentTurn;
-use crate::state_machine::event::AcpEventData;
+use crate::kit::acp_types::{AcpEventData, CurrentTurn};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 

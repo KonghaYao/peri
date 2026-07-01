@@ -15,7 +15,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::ui::theme;
+use crate::kit::theme;
 
 /// 工具调用审批 mock 数据
 struct ToolApproval {
