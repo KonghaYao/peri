@@ -234,6 +234,53 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         let mut quit = false;
         let mut needs_render = false;
 
+        // Cron #34: apply pending_view_rewind_to BEFORE draining pending
+        // notes / user bubbles. Previous order (drain-then-truncate) had a
+        // drop bug: handle_interrupted branch 2 enqueues BOTH
+        //   - pending_view_rewind_to = Some(user_msg_idx)
+        //   - push_system_note("interrupted-resumed") → pending_v2_notes
+        // and handle_rewind_completed (Cron #29) does the same with
+        // "↩ rewound to message X". In the old order, the drain appended
+        // the note to state.view FIRST, then the truncate dropped it
+        // along with the rolled-back messages — user saw the view
+        // truncate but the confirmation note vanished, leaving no UX
+        // feedback for the destructive rollback.
+        //
+        // Fixed order: truncate first, then drain. Notes/bubbles land
+        // AFTER the rewind cut and are preserved.
+        //
+        // 仅对 Idle/Streaming 生效：Modal 保存的是 saved_view（不应被回滚操作触碰），
+        // Switching 是过渡态。这两个状态跳过截断，与 v1 路径的现有不一致行为保持一致
+        // （pre-existing，本修复不引入回归）。
+        if let Some(idx) = app.global_ui.pending_view_rewind_to.take() {
+            match &mut state {
+                State::Idle(idle) => {
+                    idle.view.truncate(idx);
+                    needs_render = true;
+                    tracing::debug!(
+                        idx,
+                        new_len = idle.view.len(),
+                        "main_loop: applied pending_view_rewind_to to Idle.view"
+                    );
+                }
+                State::Streaming(s) => {
+                    s.view.truncate(idx);
+                    needs_render = true;
+                    tracing::debug!(
+                        idx,
+                        new_len = s.view.len(),
+                        "main_loop: applied pending_view_rewind_to to Streaming.view"
+                    );
+                }
+                State::Modal(_) | State::Switching(_) => {
+                    tracing::warn!(
+                        idx,
+                        "pending_view_rewind_to set during Modal/Switching state — ignoring truncate"
+                    );
+                }
+            }
+        }
+
         // Phase 2.4 — drain (see note above).
         {
             let notes = app
@@ -270,46 +317,6 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                     state = new_state;
                 }
                 needs_render = true;
-            }
-        }
-
-        // Cron #23 P1 fix — 应用 handle_interrupted 请求的 state.view 截断。
-        //
-        // handle_interrupted 分支 2（无工具调用，回滚路径）已通过 apply_rebuild_all
-        // 截断 v1 view_messages，但 v2 state.view 由状态机拥有。App 通过
-        // `global_ui.pending_view_rewind_to` 请求 main_loop 应用同样的截断。
-        //
-        // 仅对 Idle/Streaming 生效：Modal 保存的是 saved_view（不应被回滚操作触碰），
-        // Switching 是过渡态。这两个状态跳过截断，与 v1 路径的现有不一致行为保持一致
-        // （pre-existing，本修复不引入回归）。
-        //
-        // 在 effects 循环之前执行，确保 Effect::Render 触发重绘时 state.view 已截断。
-        if let Some(idx) = app.global_ui.pending_view_rewind_to.take() {
-            match &mut state {
-                State::Idle(idle) => {
-                    idle.view.truncate(idx);
-                    needs_render = true;
-                    tracing::debug!(
-                        idx,
-                        new_len = idle.view.len(),
-                        "main_loop: applied pending_view_rewind_to to Idle.view"
-                    );
-                }
-                State::Streaming(s) => {
-                    s.view.truncate(idx);
-                    needs_render = true;
-                    tracing::debug!(
-                        idx,
-                        new_len = s.view.len(),
-                        "main_loop: applied pending_view_rewind_to to Streaming.view"
-                    );
-                }
-                State::Modal(_) | State::Switching(_) => {
-                    tracing::warn!(
-                        idx,
-                        "pending_view_rewind_to set during Modal/Switching state — ignoring truncate"
-                    );
-                }
             }
         }
 

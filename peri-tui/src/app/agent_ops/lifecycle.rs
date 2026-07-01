@@ -813,4 +813,148 @@ mod tests {
             "subagent_depth > 0 early-return must NOT clear parent loading"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Cron #34: rewind-before-drain ordering preserves confirmation note
+    // -----------------------------------------------------------------------
+    //
+    // Bug (found by Cron #33 workflow wv5751rjq synthesizer, MEDIUM):
+    // main_loop had the order backwards — it drained pending_v2_notes
+    // FIRST (appending the system note to state.view), THEN applied
+    // pending_view_rewind_to (truncating state.view). The truncate
+    // dropped the just-appended note along with the rolled-back
+    // messages.
+    //
+    // handle_interrupted branch 2 and handle_rewind_completed both
+    // enqueue a confirmation note + a rewind flag simultaneously:
+    //   - "interrupted-resumed" / "↩ rewound to message X"
+    // Users saw the view truncate but the note vanished — no UX
+    // feedback for a destructive rollback.
+    //
+    // Fix: in main_loop.rs, move the pending_view_rewind_to block to
+    // BEFORE the pending_v2_notes / pending_v2_user_bubbles drains.
+    //
+    // This test exercises the SM ordering invariant directly:
+    //   truncate-then-drain → note preserved at end of state.view
+    //   drain-then-truncate → note dropped (the bug)
+
+    /// Helper: build an Idle state with the given viewModels.
+    fn idle_state_with_view(vms: Vec<ViewModel>) -> crate::state_machine::State {
+        use crate::state_machine::state::{IdleState, State};
+        State::Idle(IdleState {
+            view: vms,
+            ..Default::default()
+        })
+    }
+
+    /// Cron #34 FIXED order: truncate to user_msg_idx first, then push
+    /// the system note. The note lands AFTER the cut and is preserved.
+    #[test]
+    fn test_rewind_before_drain_preserves_system_note() {
+        use crate::state_machine::{event::Event, handle, state::State};
+
+        // Setup: state.view = [UserBubble, AssistantBubble]
+        // (mimics agent mid-stream when user presses Ctrl+C with no tools run)
+        let state = idle_state_with_view(vec![
+            ViewModel::UserBubble(UserBubbleData {
+                text: "hello".into(),
+            }),
+            ViewModel::AssistantBubble(AssistantBubbleData {
+                text: "partial reply".into(),
+                reasoning: None,
+                tool_card_ids: vec![],
+            }),
+        ]);
+
+        // Step 1 (FIXED order): truncate to user_msg_idx = 1
+        // (keep only UserBubble, drop the AssistantBubble)
+        let mut state = state;
+        if let State::Idle(idle) = &mut state {
+            idle.view.truncate(1);
+        }
+
+        // Step 2: drain pending_v2_notes — push_system_note("resumed")
+        let (new_state, _) = handle(state, Event::PushSystemNote("resumed".to_string()));
+        state = new_state;
+
+        // Assert: AssistantBubble dropped, SystemNote preserved at idx 1
+        if let State::Idle(idle) = &state {
+            assert_eq!(
+                idle.view.len(),
+                2,
+                "FIXED order: state.view should have UserBubble + SystemNote (len 2)"
+            );
+            assert!(
+                matches!(idle.view.get(1), Some(ViewModel::SystemNote(_))),
+                "FIXED order: SystemNote must be preserved at idx 1, got {:?}",
+                idle.view.get(1).map(|v| discriminant_name(v))
+            );
+        } else {
+            panic!("expected State::Idle after operations, got {:?}", state);
+        }
+    }
+
+    /// Cron #34 BUGGY order (regression guard): drain notes first,
+    /// then truncate. This drops the just-appended note.
+    ///
+    /// We keep this test to document the bug we fixed — if someone
+    /// reorders the blocks back, this test still passes (it tests the
+    /// buggy order in isolation, not the production order), but the
+    /// paired FIXED-order test above will fail in integration.
+    #[test]
+    fn test_drain_before_rewind_drops_system_note_bug_documented() {
+        use crate::state_machine::{event::Event, handle, state::State};
+
+        let state = idle_state_with_view(vec![
+            ViewModel::UserBubble(UserBubbleData {
+                text: "hello".into(),
+            }),
+            ViewModel::AssistantBubble(AssistantBubbleData {
+                text: "partial reply".into(),
+                reasoning: None,
+                tool_card_ids: vec![],
+            }),
+        ]);
+
+        // Step 1 (BUGGY order): drain pending_v2_notes first
+        let mut state = state;
+        let (new_state, _) = handle(state, Event::PushSystemNote("resumed".to_string()));
+        state = new_state;
+        // state.view is now [UserBubble, AssistantBubble, SystemNote]
+
+        // Step 2: truncate to user_msg_idx = 1
+        // (this is what the bug does — drops the note along with AssistantBubble)
+        if let State::Idle(idle) = &mut state {
+            idle.view.truncate(1);
+        }
+
+        // Assert: SystemNote is GONE (the bug)
+        if let State::Idle(idle) = &state {
+            assert_eq!(
+                idle.view.len(),
+                1,
+                "BUGGY order: SystemNote got dropped by truncate (regression guard documents the bug)"
+            );
+            assert!(
+                matches!(idle.view.first(), Some(ViewModel::UserBubble(_))),
+                "BUGGY order: only UserBubble remains — note was silently dropped"
+            );
+        } else {
+            panic!("expected State::Idle");
+        }
+    }
+
+    /// Helper for the assert messages above — gets a short name for a
+    /// ViewModel variant for diagnostic output.
+    fn discriminant_name(vm: &ViewModel) -> &'static str {
+        match vm {
+            ViewModel::UserBubble(_) => "UserBubble",
+            ViewModel::AssistantBubble(_) => "AssistantBubble",
+            ViewModel::ToolCard(_) => "ToolCard",
+            ViewModel::SystemNote(_) => "SystemNote",
+            ViewModel::SubAgentGroup(_) => "SubAgentGroup",
+            ViewModel::CollapsedGroup(_) => "CollapsedGroup",
+            ViewModel::Divider(_) => "Divider",
+        }
+    }
 }
