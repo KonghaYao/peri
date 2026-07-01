@@ -269,11 +269,11 @@ fn inject_env_from_file(path: &std::path::Path, env_paths: &[&[&str]]) {
 /// 遍历 env map 注入进程环境变量，仅在变量未设置时写入
 fn inject_env_map(env_map: &serde_json::Map<String, serde_json::Value>) {
     for (key, value) in env_map {
-        if let Some(value_str) = value.as_str() {
-            if std::env::var(key).is_err() {
-                unsafe {
-                    std::env::set_var(key, value_str);
-                }
+        if let Some(value_str) = value.as_str()
+            && std::env::var(key).is_err()
+        {
+            unsafe {
+                std::env::set_var(key, value_str);
             }
         }
     }
@@ -298,18 +298,10 @@ fn inject_settings_override(source: &str) {
         return;
     };
 
-    if let Some(env_obj) = json.get("config").and_then(|c| c.get("env")) {
-        if let Some(env_map) = env_obj.as_object() {
-            for (key, value) in env_map {
-                if let Some(value_str) = value.as_str() {
-                    if std::env::var(key).is_err() {
-                        unsafe {
-                            std::env::set_var(key, value_str);
-                        }
-                    }
-                }
-            }
-        }
+    if let Some(env_obj) = json.get("config").and_then(|c| c.get("env"))
+        && let Some(env_map) = env_obj.as_object()
+    {
+        inject_env_map(env_map);
     }
 }
 

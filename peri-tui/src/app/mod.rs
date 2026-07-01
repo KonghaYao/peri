@@ -4,38 +4,9 @@ pub mod service_registry;
 pub use global_ui_state::GlobalUiState;
 pub use service_registry::ServiceRegistry;
 
-mod session_manager;
-pub use session_manager::SessionManager;
-
-mod ui_state;
-pub use ui_state::UiState;
-
-pub(crate) mod at_mention;
-pub use at_mention::AtMentionState;
-
-pub(crate) mod message_state;
-pub use message_state::MessageState;
-
-mod chat_session;
-pub use chat_session::ChatSession;
-
-mod session_metadata;
-pub use session_metadata::SessionMetadata;
-
-mod cron_state;
-pub use cron_state::CronState;
-
-mod langfuse_state;
-pub use langfuse_state::LangfuseState;
-
-mod subagent_status;
-pub use subagent_status::{SessionSubAgentProbe, SubAgentStatus, SubAgentStatusMap};
-
 // ── Provider ──────────────────────────────────────────────────────────────────
 pub mod agent;
 pub use agent::LlmProvider;
-
-mod thread_ops;
 
 // ── UI Interaction ────────────────────────────────────────────────────────────
 pub mod panel_types;
@@ -44,32 +15,21 @@ pub use panel_types::{MutexGroup, PanelKind, PanelScope};
 pub mod setup_wizard;
 pub use setup_wizard::SetupWizardPanel;
 
-pub mod workflow_tracker;
-
-mod edit_utils;
-pub use edit_utils::{build_textarea, ensure_cursor_visible};
+mod cron_state;
+pub use cron_state::CronState;
 
 mod field_textarea;
 pub use field_textarea::FieldTextarea;
 
 // ── Services ───────────────────────────────────────────────────────────────────
-mod history_ops;
-mod history_persistence;
 mod provider;
 
-use std::sync::Arc;
-
 use crate::acp_client::AcpTuiClient;
-use crate::{
-    config::PeriConfig,
-    thread::{SqliteThreadStore, ThreadStore},
-};
+use crate::config::PeriConfig;
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 pub struct App {
-    /// 会话管理器（单个 ChatSession）
-    pub session_mgr: SessionManager,
     /// 全局服务/状态聚合（跨 session 共享）
     pub services: ServiceRegistry,
     /// 跨 session 全局 UI 临时状态
@@ -79,12 +39,6 @@ pub struct App {
     /// ACP client — communicates with the ACP server via in-memory transport.
     /// Initialized after App construction in run_app(); None until `set_acp_client` is called.
     pub acp_client: Option<AcpTuiClient>,
-
-    // ── Workflow 面板轮询状态 ────────────────────────────────
-    pub workflow_poll_rx:
-        Option<tokio::sync::mpsc::UnboundedReceiver<Vec<workflow_tracker::WorkflowRunSnapshot>>>,
-    pub workflow_poll_kill: Option<tokio::sync::mpsc::UnboundedSender<()>>,
-    pub workflow_polling_active: bool,
 }
 
 impl App {
@@ -128,30 +82,21 @@ impl App {
             };
 
         // 初始化 thread 存储（失败时 fallback 到临时目录）
-        let thread_store: Arc<dyn ThreadStore> = match SqliteThreadStore::default_path().await {
-            Ok(store) => Arc::new(store),
-            Err(_) => Arc::new(
-                SqliteThreadStore::new(std::env::temp_dir().join("zen-threads.db"))
+        let thread_store: std::sync::Arc<dyn crate::thread::ThreadStore> =
+            match crate::thread::SqliteThreadStore::default_path().await {
+                Ok(store) => std::sync::Arc::new(store),
+                Err(_) => std::sync::Arc::new(
+                    crate::thread::SqliteThreadStore::new(
+                        std::env::temp_dir().join("zen-threads.db"),
+                    )
                     .await
                     .expect("无法创建临时 SQLite 数据库"),
-            ),
-        };
+                ),
+            };
 
         // 初始化 cron state + spawn tick task
         let (cron_state, scheduler_arc) = CronState::new();
         CronState::spawn_tick_task(scheduler_arc);
-
-        let diff_enabled = peri_config
-            .as_ref()
-            .map(|c| c.config.diff_enabled)
-            .unwrap_or(false);
-        let streaming_mode = peri_config
-            .as_ref()
-            .and_then(|c| c.config.streaming_mode.clone());
-
-        let initial_session = ChatSession::new(cwd.clone(), diff_enabled, streaming_mode);
-
-        let session_mgr = SessionManager::new(initial_session);
 
         let permission_mode = peri_middlewares::prelude::SharedPermissionMode::new(
             peri_middlewares::prelude::PermissionMode::Bypass,
@@ -180,50 +125,18 @@ impl App {
         };
 
         Self {
-            session_mgr,
             services,
             global_ui: GlobalUiState::new(),
             focused: true,
             acp_client: None,
-            workflow_poll_rx: None,
-            workflow_poll_kill: None,
-            workflow_polling_active: false,
         }
-    }
-
-    // ─── Session 访问器 ─────────────────────────────────────────────────────
-
-    /// 获取当前激活 session 的不可变引用
-    pub fn active(&self) -> &ChatSession {
-        self.session_mgr.current()
-    }
-
-    /// 获取当前激活 session 的可变引用
-    pub fn active_mut(&mut self) -> &mut ChatSession {
-        self.session_mgr.current_mut()
-    }
-
-    /// 创建新 session 并替换当前 session（用于 /clear）
-    pub fn new_session(&mut self) {
-        // (S13c-4b) command/ + CommandSystem + ChatSession.commands 已删除
-        // (S13c-4c) ChatSession.agent 字段已删除——cancel_token 由 ACP server 管理
-        let diff_visible = self.session_mgr.current_mut().ui.diff_visible;
-        let streaming_mode = self
-            .services
-            .peri_config
-            .read()
-            .config
-            .streaming_mode
-            .clone();
-        let session = ChatSession::new(self.services.cwd.clone(), diff_visible, streaming_mode);
-        self.session_mgr.replace(session);
     }
 
     /// 后台初始化 MCP 连接池（不阻塞 UI），在 run_app 中 App::new() 之后调用
     pub fn spawn_mcp_init(&mut self) {
         use peri_middlewares::mcp::{McpClientPool, McpInitStatus};
 
-        let pool = Arc::new(McpClientPool::new_pending());
+        let pool = std::sync::Arc::new(McpClientPool::new_pending());
         self.services.mcp_pool = Some(pool.clone());
 
         let (init_tx, init_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);

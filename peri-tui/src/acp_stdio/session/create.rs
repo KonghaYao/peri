@@ -229,10 +229,10 @@ pub(crate) async fn handle_resume(
             tracing::info!(session_id = %sid, "Session resumed (new)");
         } else {
             // Existing session: if history is empty, populate from ThreadStore
-            if let Some(s) = sessions.get_mut(&sid) {
-                if s.history.is_empty() {
-                    s.history = history;
-                }
+            if let Some(s) = sessions.get_mut(&sid)
+                && s.history.is_empty()
+            {
+                s.history = history;
             }
             tracing::info!(session_id = %sid, "Session resumed (existing)");
         }

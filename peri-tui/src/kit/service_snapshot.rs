@@ -612,15 +612,17 @@ mod tests {
     async fn test_derive_provider_and_model_set() {
         use peri_acp::provider::config::{AppConfig, ProviderConfig};
 
-        let mut cfg = crate::config::PeriConfig::default();
-        cfg.config = AppConfig {
-            active_alias: "sonnet".into(),
-            active_provider_id: "p1".into(),
-            providers: vec![ProviderConfig {
-                id: "p1".into(),
-                provider_type: "anthropic".into(),
+        let cfg = crate::config::PeriConfig {
+            config: AppConfig {
+                active_alias: "sonnet".into(),
+                active_provider_id: "p1".into(),
+                providers: vec![ProviderConfig {
+                    id: "p1".into(),
+                    provider_type: "anthropic".into(),
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
+            },
             ..Default::default()
         };
         let peri_config = Arc::new(parking_lot::RwLock::new(cfg));

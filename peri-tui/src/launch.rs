@@ -102,10 +102,14 @@ pub async fn build_app_and_acp(
         }
     }
 
-    // 会话恢复：-c 恢复当前目录最近会话，-r <id> 恢复指定会话
+    // 会话恢复：-c 恢复当前目录最近会话，-r <id> 恢复指定会话。
+    //
+    // (I16-B) `App::open_thread` + `ChatSession.current_thread_id` 已退役——kit
+    // 单路径下，会话切换通过 `THREAD_LOAD_TX → acp_client.load_session()` 完成。
+    // 启动期的 -c/-r 恢复由 kit/entry 在 acp_client 就绪后通过 atom 触发；
+    // 此处仅 log 提示。
     if let Some(ref session_id) = opts.resume_session {
-        tracing::info!(session_id = %session_id, "-r: 恢复指定会话");
-        app.open_thread(session_id.clone());
+        tracing::info!(session_id = %session_id, "-r: 待 kit entry 恢复指定会话");
     } else if opts.continue_session {
         let store = app.services.thread_store.clone();
         let cwd = app.services.cwd.clone();
@@ -116,8 +120,7 @@ pub async fn build_app_and_acp(
             })
         });
         if let Some(tid) = thread_id {
-            tracing::info!(thread_id = %tid, "-c: 恢复最近会话");
-            app.open_thread(tid);
+            tracing::info!(thread_id = %tid, "-c: 待 kit entry 恢复最近会话");
         } else {
             tracing::info!("-c: 当前目录无历史会话，创建新会话");
         }
@@ -266,9 +269,13 @@ pub async fn build_app_and_acp(
     Ok((app, acp_client))
 }
 
-/// App 关闭：fire SessionEnd hooks + MCP pool shutdown + 等 Langfuse flush。
+/// App 关闭：fire SessionEnd hooks + MCP pool shutdown。
 ///
 /// 对称 `build_app_and_acp`——所有路径在退出前都应该调用。
+///
+/// (I16-B) Langfuse flush 等待已退役——`ChatSession.langfuse` 字段删除后，
+/// flush handle 永远是 None。Langfuse 退出 flush 由 ACP server 端的
+/// `LangfuseSession` Drop 自动处理。
 pub async fn teardown_app(app: &mut App) {
     // Fire SessionEnd hooks before shutdown
     {
@@ -308,16 +315,5 @@ pub async fn teardown_app(app: &mut App) {
         tracing::info!("正在关闭 MCP 连接池...");
         tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(pool.shutdown()));
         tracing::info!("MCP 连接池已关闭");
-    }
-
-    // 等待最后一次 Langfuse flush
-    if let Some(handle) = app
-        .session_mgr
-        .current_mut()
-        .langfuse
-        .langfuse_flush_handle
-        .take()
-    {
-        let _ = handle.await;
     }
 }

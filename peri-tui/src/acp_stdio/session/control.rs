@@ -23,11 +23,11 @@ pub(crate) async fn handle_list(
 /// session/cancel 核心逻辑
 pub(crate) fn handle_cancel(ctx: &StdioContext, session_id: &str) {
     let sessions = ctx.sessions.read();
-    if let Some(s) = sessions.get(session_id) {
-        if let Some(ref token) = s.cancel_token {
-            token.cancel();
-            tracing::info!(session_id = %session_id, "Cancel requested");
-        }
+    if let Some(s) = sessions.get(session_id)
+        && let Some(ref token) = s.cancel_token
+    {
+        token.cancel();
+        tracing::info!(session_id = %session_id, "Cancel requested");
     }
 }
 

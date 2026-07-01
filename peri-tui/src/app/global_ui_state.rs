@@ -1,35 +1,18 @@
-//! App 级 UI 状态：跨 session 共享的全局 UI 临时状态
+//! App 级 UI 状态：跨 session 共享的全局 UI 临时状态。
+//!
+//! (I16-B) 大幅瘦身：mode_highlight_until / model_highlight_until /
+//! provider_highlight_until / mcp_ready_shown_until / mcp_failed_shown_until /
+//! quit_pending_since / rewind_pending_since / rewind_busy_hint_until /
+//! quit_requested / mouse_available / workflow_tracker /
+//! pending_view_rewind_to 全部退役——kit 单路径下，瞬时高亮、rewind 触发、
+//! workflow 累积、退出确认等均由 atoms（MODEL_HIGHLIGHT_UNTIL /
+//! LAST_ESC_TIME / REWIND_PREVIEW 等）独立维护。
 
-use std::{cell::Cell, time::Instant};
+use super::setup_wizard::SetupWizardPanel;
 
-use super::{setup_wizard::SetupWizardPanel, workflow_tracker::WorkflowProgressTracker};
-
-/// App 级 UI 状态：跨 session 共享的全局 UI 临时状态。
-///
-/// 与 `ServiceRegistry` 中的"服务"字段（config、MCP pool、cron 等）不同，
-/// 这里的字段纯粹是 UI 层面的临时状态（高亮计时、弹窗、鼠标探测等）。
-///
-/// (S13c-4c) `oauth_prompt` 字段已删除——legacy OAuth 弹窗由 kit 的
-/// `kit/popups/oauth_popup.rs` 独立实现。
+/// App 级 UI 临时状态：跨 session 共享的 UI 层状态。
 pub struct GlobalUiState {
     pub setup_wizard: Option<SetupWizardPanel>,
-    pub mode_highlight_until: Option<Instant>,
-    pub model_highlight_until: Option<Instant>,
-    pub provider_highlight_until: Option<Instant>,
-    pub mcp_ready_shown_until: Cell<Option<Instant>>,
-    /// MCP 失败提示自动消失计时器（首次显示后 10 秒消失）
-    pub mcp_failed_shown_until: Cell<Option<Instant>>,
-    pub quit_pending_since: Option<Instant>,
-    /// 双击 ESC 检测时间戳（rewind 弹窗触发）
-    pub rewind_pending_since: Option<Instant>,
-    /// 运行中按 ESC 的 rewind 提示截止时间
-    pub rewind_busy_hint_until: Option<Instant>,
-    pub quit_requested: bool,
-    pub mouse_available: Option<bool>,
-    /// Workflow 进度追踪器（累积 WorkflowProgressPayload 事件）。
-    pub workflow_tracker: WorkflowProgressTracker,
-    /// Cron #23 P1 fix — App 侧向 SM 请求截断 state.view 到指定索引。
-    pub pending_view_rewind_to: Option<usize>,
 }
 
 impl Default for GlobalUiState {
@@ -37,22 +20,9 @@ impl Default for GlobalUiState {
         Self::new()
     }
 }
+
 impl GlobalUiState {
     pub fn new() -> Self {
-        Self {
-            setup_wizard: None,
-            mode_highlight_until: None,
-            model_highlight_until: None,
-            provider_highlight_until: None,
-            mcp_ready_shown_until: Cell::new(None),
-            mcp_failed_shown_until: Cell::new(None),
-            quit_pending_since: None,
-            rewind_pending_since: None,
-            rewind_busy_hint_until: None,
-            quit_requested: false,
-            mouse_available: None,
-            workflow_tracker: WorkflowProgressTracker::new(),
-            pending_view_rewind_to: None,
-        }
+        Self { setup_wizard: None }
     }
 }
