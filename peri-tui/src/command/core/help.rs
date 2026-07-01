@@ -49,7 +49,7 @@ impl Command for HelpCommand {
                 "help-shortcuts",
                 &[(
                     "model_key".into(),
-                    crate::event::keyboard::cycle_model_label().into(),
+                    "Ctrl+T".into(),
                 )],
             )
             .to_string(),

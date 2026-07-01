@@ -151,7 +151,7 @@ pub(crate) fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled("  ", Style::default().fg(theme::DIM)),
         Span::styled(
-            crate::event::keyboard::cycle_model_label(),
+            "Ctrl+T",
             Style::default().fg(theme::DIM),
         ),
         Span::styled(

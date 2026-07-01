@@ -459,6 +459,7 @@ async fn test_sticky_header_truncation_long_message() {
 // Phase E: test_bordered_panel_integration removed — legacy PanelManager/session_panels deleted.
 
 #[tokio::test]
+#[ignore = "legacy ask_user popup renderer removed (Phase 2.6); migrated to v2 Modal handler"]
 async fn test_tab_bar_integration() {
     // TabBar 集成冒烟测试：渲染 ask_user popup 验证 TabBar widget 正确工作
     use peri_middlewares::ask_user::{AskUserBatchRequest, AskUserOption, AskUserQuestionData};

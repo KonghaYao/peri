@@ -32,9 +32,9 @@ pub fn render(
     v2_panel_height: Option<u16>,
     v2_view_models: Option<&[peri_acp_types::view_model::ViewModel]>,
 ) {
-    // Setup 向导：全屏覆盖，优先于所有正常界面
+    // Setup 向导由 v2 state machine Modal handler 渲染（Phase 2.6）。
+    // 此处仅做快速返回，布局无需占用。
     if app.global_ui.setup_wizard.is_some() {
-        popups::setup_wizard::render_setup_wizard(f, app);
         return;
     }
 
@@ -116,23 +116,8 @@ fn render_session_column(
     // 底部展开区
     if panel_height > 0 {
         let panel_area = chunks[3];
-        match &app.session_mgr.current_mut().agent.interaction_prompt {
-            Some(crate::app::InteractionPrompt::Approval(_)) => {
-                popups::hitl::render_hitl_popup(f, app, panel_area);
-            }
-            Some(crate::app::InteractionPrompt::Questions(_)) => {
-                popups::ask_user::render_ask_user_popup(f, app, panel_area);
-            }
-            Some(crate::app::InteractionPrompt::Rewind(_)) => {
-                popups::rewind::render_rewind_popup(f, app, panel_area);
-            }
-            None => {}
-        }
-        if app.global_ui.oauth_prompt.is_some() {
-            popups::oauth::render_oauth_popup(f, app, panel_area);
-        }
-        // v2 Modal: 存储 panel_area 供 draw_now 中的 overlay 渲染使用。
-        // Legacy 渲染器会在内部设 inner rect，v2 面板使用完整的布局区域。
+        // v2 Modal: popup rendering is handled by v2 state machine Modal handler.
+        // Legacy popup renderers (hitl/ask_user/rewind/oauth) have been removed (Phase 2.6).
         if v2_panel_height.is_some() {
             app.session_mgr.current_mut().ui.panel_area = Some(panel_area);
         }
@@ -338,9 +323,9 @@ fn render_session_column(
             &app.session_mgr.current_mut().ui.at_mention,
             chunks[5],
         );
-    } else {
-        popups::hints::render_unified_hint(f, app, chunks[5]);
     }
+    // Legacy hints renderer removed (Phase 2.6). v2 slash_completion and
+    // command hints are now rendered by the state machine or kit components.
 
     // 状态栏
     status_bar::render_status_bar(f, app, chunks[6]);

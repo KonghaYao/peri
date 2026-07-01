@@ -10,7 +10,6 @@
 // 详见 spec/global/domains/tui.md#issue_2026-05-12-textarea-mouse-click-cursor-misposition-cjk
 //
 // [TRAP] coalesce_mouse_events 对连续 Scroll/Drag 事件做非阻塞 drain 合并，只保留最后一个。
-pub mod keyboard;
 pub mod mouse;
 
 use std::cell::RefCell;
@@ -22,7 +21,6 @@ use anyhow::Result;
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
-use tui_textarea::{Input, Key};
 
 use crate::app::App;
 
@@ -414,12 +412,10 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
             // Width sync is now driven by render_messages (compares cache.width vs text_area.width)
             app.session_mgr.current_mut().ui.text_selection.clear();
         }
-        Event::Key(key_event) => {
-            return keyboard::handle_key_event(
-                app,
-                key_event,
-                &crate::state_machine::State::Idle(crate::state_machine::IdleState::default()),
-            );
+        Event::Key(_key_event) => {
+            // Key events are handled by the v2 state machine + keyboard_collector.
+            // Legacy keyboard fallback has been removed (Phase 2.6).
+            return Ok(Some(Action::Redraw));
         }
         Event::Paste(text) => {
             // Paste text handling
@@ -700,49 +696,4 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
     }
 
     Ok(Some(Action::Redraw))
-}
-
-// ── OAuth prompt ────────────────────────────────────────────────────────────
-
-fn handle_oauth_prompt(app: &mut App, input: Input) {
-    let prompt = match app.global_ui.oauth_prompt.as_mut() {
-        Some(p) => p,
-        None => return,
-    };
-    match input {
-        Input {
-            key: Key::Enter, ..
-        } => {
-            if prompt.submit() {
-                app.global_ui.oauth_prompt = None;
-            }
-        }
-        Input {
-            key: Key::Char('o'),
-            ctrl: true,
-            ..
-        } => {
-            let url = prompt.authorization_url.clone();
-            #[cfg(unix)]
-            let _ = std::process::Command::new("open").arg(&url).spawn();
-            #[cfg(windows)]
-            let _ = std::process::Command::new("cmd")
-                .args(["/C", "start", &url])
-                .spawn();
-        }
-        Input { key: Key::Esc, .. } => {
-            app.global_ui.oauth_prompt = None;
-        }
-        Input {
-            key: Key::Char('c'),
-            ctrl: true,
-            ..
-        } => {
-            // Ctrl+C in OAuth popup: ignore (no quit)
-        }
-        _ => {
-            prompt.error_message = None;
-            prompt.field.input(input);
-        }
-    }
 }

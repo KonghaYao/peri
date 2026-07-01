@@ -1,16 +1,8 @@
-//! Main loop: recv event → state machine (pure) + keyboard fallback → merge effects → loop.
+//! Main loop: recv event → state machine (pure) → execute effects → render.
 //!
-//! The loop drives both the v2 state machine and the keyboard fallback handler:
-//!
-//! - **1a. State machine** ([`crate::state_machine::handle`]): pure `(State, Event) → (State, Vec<Effect>)`.
-//!   Handles shortcuts, mouse, paste, tick, resize, AcpDisconnected, Shutdown.
-//! - **1b. Keyboard fallback**: [`crate::event::keyboard`] handles complex UI interactions
-//!   (panel dispatch, popups, setup wizard, textarea input, @mention/slash hints, history).
-//!   Shortcut ownership is determined by the per-state `owns_shortcut()` functions.
-//! - **1c. Merge**: Effects from both paths are merged; `Render` is de-duplicated.
-//!
-//! The state machine is the authoritative path. Its `State` persists across events;
-//! `ViewStore` accumulates view-commits; transitions are pure functions with zero I/O.
+//! The v2 state machine is the authoritative event handler. Keyboard fallback has
+//! been removed (Phase 2.6). All key events flow through the state machine; mouse,
+//! ACP, and session-load events are dispatched by the fallback path.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -19,16 +11,12 @@ use ratatui::crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, 
 use tracing::debug;
 
 use crate::app::App;
-use crate::event::keyboard;
-use crate::event::Action;
 use crate::panel::read_context::ServiceRegistrySnapshot;
 use crate::runtime::apply_context::{ApplyContext, ApplyOutcome};
 use crate::runtime::effect::Effect;
 use crate::runtime::event_channel::{EventRx, TuiEvent};
 use crate::state_machine::input::edit::InputEdit;
-use crate::state_machine::state::{PanelReadContext, ShortcutClaim};
-use crate::state_machine::transitions::idle::owns_shortcut as idle_owns_shortcut;
-use crate::state_machine::transitions::streaming::owns_shortcut as streaming_owns_shortcut;
+use crate::state_machine::state::PanelReadContext;
 use crate::state_machine::{
     handle as state_machine_handle, input::sync::to_textarea, transitions::modal, Event as SmEvent,
     IdleState, ModalKind, ModalState, State, StreamingState,
@@ -47,8 +35,6 @@ const TARGET_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 #[derive(Debug)]
 struct PreEventSnapshot {
     is_tick: bool,
-    was_idle: bool,
-    is_slash_command: bool,
     at_mention_active: bool,
     slash_hint_active: bool,
     popup_active: bool,
@@ -62,8 +48,8 @@ struct PreEventSnapshot {
 /// The loop is the **only** place that reads from the event channel and the
 /// **only** place that performs I/O (terminal draw, ACP send, clipboard).
 ///
-/// Uses the dual-path architecture: state machine (1a) + keyboard fallback (1b),
-/// with effects merged and Render de-duplicated.
+/// Uses the v2 state machine as the authoritative event handler with fallback
+/// for mouse, ACP, and session-load events. Keyboard fallback removed (Phase 2.6).
 pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> anyhow::Result<()> {
     let mut last_render = std::time::Instant::now();
 
@@ -95,18 +81,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         }
 
         // ── 2b. Sync TextArea → state machine InputState ───────────────
-        // The keyboard module mutates the TextArea widget directly. When it
-        // from_textarea() now only runs for mouse/paste double-write paths.
-        // into InputState so SM-owned branches (Enter, Up/Down history) see
-        // the latest text. SM-owned state changes (Enter clearing buffer,
-        // from_textarea() is conditional on effect_did_mutate_textarea.
-        //
-        // Cron #37: the same sync must also run when an Effect handler
-        // mutates the textarea (Effect::PasteText, MouseTextareaClick,
-        // MouseTextareaDrag). Without it, the render-time to_textarea would
-        // overwrite the just-applied edit with stale InputState within the
-        // same frame — paste would visibly vanish, mouse clicks would snap
-        // the cursor back.
+        // Mouse/paste/double-write effect handlers may mutate the TextArea.
         if effect_did_mutate_textarea {
             let ta = &app.session_mgr.current().ui.textarea;
             let lines: Vec<String> = ta.lines().to_vec();
@@ -167,12 +142,9 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
 
 /// Capture a pre-event snapshot of UI state.
 ///
-/// Must run BEFORE the SM transition consumes `state`, so fields like
-/// `was_idle` and `is_slash_command` are available for shortcut dispersal.
 fn capture_snapshot(event: &TuiEvent, state: &State, app: &App) -> PreEventSnapshot {
     let is_tick = matches!(event, TuiEvent::Tick);
-    let was_idle = matches!(state, State::Idle(_));
-    let is_slash_command = matches!(state, State::Idle(idle) if idle.input.text().starts_with('/'));
+    let _ = state; // was_idle/is_slash_command removed with keyboard fallback
     let (at_mention_active, slash_hint_active) = {
         let ui = &app.session_mgr.current().ui;
         (ui.at_mention.active, ui.slash_hint.active)
@@ -182,8 +154,6 @@ fn capture_snapshot(event: &TuiEvent, state: &State, app: &App) -> PreEventSnaps
 
     PreEventSnapshot {
         is_tick,
-        was_idle,
-        is_slash_command,
         at_mention_active,
         slash_hint_active,
         popup_active,
@@ -239,62 +209,22 @@ fn dispatch_sm(
     }
 }
 
-/// Keyboard fallback + ACP event dispatch.
+/// Fallback event dispatch for Mouse / AcpEvent / SessionLoaded.
 ///
-/// Shortcut dispersal (Phase 2.3): uses per-state `owns_shortcut()` instead
-/// of the centralized `is_sm_handled_shortcut()`.  Modal owns all keys
-/// except Ctrl+C; Idle/Streaming delegate to their respective functions.
+/// Keyboard fallback has been removed (Phase 2.6). The v2 state machine
+/// handles all key events through the unified channel. Remaining fallback
+/// dispatches mouse events, ACP notifications, and session load events.
 fn dispatch_fallback(
     event: &TuiEvent,
     snap: &PreEventSnapshot,
     app: &mut App,
     state: &State,
 ) -> Vec<Effect> {
+    let _ = (snap, state); // mark as intentionally unused
     match event {
-        TuiEvent::Key(key) => {
-            let run_fallback = match state {
-                // Modal: SM owns all keys EXCEPT Ctrl+C (keyboard fallback
-                // runs `app.interrupt()` for Ctrl+C).
-                State::Modal(_) => {
-                    let is_ctrl_c = matches!(key.code, KeyCode::Char('c'))
-                        && key.modifiers.intersects(KeyModifiers::CONTROL);
-                    is_ctrl_c
-                }
-                // popup / wizard: keyboard fallback owns all keys.
-                _ if snap.popup_active || snap.wizard_active => true,
-                State::Idle(_) => {
-                    let claim = idle_owns_shortcut(
-                        key,
-                        snap.is_slash_command,
-                        snap.at_mention_active,
-                        snap.slash_hint_active,
-                    );
-                    !matches!(claim, ShortcutClaim::SMOwns)
-                }
-                State::Streaming(_) => {
-                    let claim = streaming_owns_shortcut(key);
-                    !matches!(claim, ShortcutClaim::SMOwns)
-                }
-                State::Switching(_) => true,
-            };
-
-            if run_fallback {
-                match keyboard::handle_key_event(app, *key, state) {
-                    Ok(Some(Action::Quit)) => vec![Effect::Quit],
-                    Ok(Some(Action::Submit(input))) => {
-                        app.submit_message(input);
-                        vec![Effect::Render]
-                    }
-                    Ok(Some(Action::Effects(effects))) => effects,
-                    Ok(Some(Action::Redraw)) | Ok(None) => vec![Effect::Render],
-                    Err(e) => {
-                        tracing::warn!(error = %e, "keyboard handler error");
-                        vec![Effect::Render]
-                    }
-                }
-            } else {
-                vec![Effect::Render]
-            }
+        TuiEvent::Key(_) => {
+            // Key events are fully handled by the v2 state machine.
+            vec![Effect::Render]
         }
         TuiEvent::AcpEvent { event, data } => {
             // Phase 2.6 step 7c: pass v2 state.view snapshot to handle_acp_event

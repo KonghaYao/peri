@@ -33,7 +33,6 @@ use ratatui::{
 
 use crate::{
     app::App,
-    event::{keyboard, Action},
     ui::main_ui,
 };
 
@@ -151,16 +150,27 @@ impl HeadlessHandle {
 
     // ── 输入模拟 ──────────────────────────────────────────────────────────────
 
-    /// 注入单个按键事件，调用完整的 `handle_key_event` 路径。
+    /// 注入单个按键事件，直接写入 textarea（键盘 fallback 已删除，Phase 2.6）。
     ///
-    /// 自动处理返回的 `Action`：
-    /// - `Submit(text)` → 调用 `app.submit_message(text)`（触发 Agent）
-    /// - `Redraw` / `Quit` → 忽略（由调用方决定重绘时机）
+    /// 自动处理回车提交：
+    /// - Enter → 调用 `app.submit_message(text)`（触发 Agent）
+    /// - 其他按键 → 直接插入 textarea
     pub fn press_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
-        let key_event = KeyEvent::new(code, modifiers);
-        let state = crate::state_machine::State::Idle(crate::state_machine::IdleState::default());
-        if let Some(action) = keyboard::handle_key_event(app, key_event, &state)? {
-            Self::apply_action(app, action);
+        use tui_textarea::Input;
+        let input = Input::from(KeyEvent::new(code, modifiers));
+        let textarea = &mut app.session_mgr.current_mut().ui.textarea;
+        match input {
+            Input { key: tui_textarea::Key::Enter, .. } => {
+                let text: String = textarea.lines().join("\n");
+                textarea.delete_str(textarea.lines().len());
+                app.submit_message(text);
+            }
+            Input { key: tui_textarea::Key::Esc, .. } => {
+                textarea.delete_str(textarea.lines().len());
+            }
+            _ => {
+                textarea.input(input);
+            }
         }
         Ok(())
     }
@@ -193,16 +203,6 @@ impl HeadlessHandle {
     /// 按下 Tab 键
     pub fn press_tab(app: &mut App) -> Result<()> {
         Self::press_key(app, KeyCode::Tab, KeyModifiers::NONE)
-    }
-
-    fn apply_action(app: &mut App, action: Action) {
-        match action {
-            Action::Submit(text) => app.submit_message(text),
-            Action::Effects(_effects) => {
-                // v2 effects from command dispatch — not wired in headless mode
-            }
-            Action::Quit | Action::Redraw => {}
-        }
     }
 }
 

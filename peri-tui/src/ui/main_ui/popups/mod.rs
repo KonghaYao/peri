@@ -1,7 +1,2 @@
-pub mod ask_user;
-pub(crate) mod ask_user_height;
-pub mod hints;
-pub mod hitl;
-pub mod oauth;
-pub mod rewind;
-pub mod setup_wizard;
+// Legacy popup renderers have been removed (Phase 2.6).
+// Popup rendering is now handled by v2 kit/popups through the state machine's Modal interaction handler.
