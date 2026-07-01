@@ -311,7 +311,7 @@ fn dispatch_fallback(
             vec![Effect::Render]
         }
         // Mouse: handler for message-area text selection / copy.
-        TuiEvent::Mouse(ref mouse) => {
+        TuiEvent::Mouse(mouse) => {
             crate::event::mouse::handle_mouse_event(app, mouse);
             vec![Effect::Render]
         }

@@ -291,7 +291,7 @@ fn inject_env_map(env_map: &serde_json::Map<String, serde_json::Value>) {
     for (key, value) in env_map {
         if let Some(value_str) = value.as_str() {
             if std::env::var(key).is_err() {
-                std::env::set_var(key, value_str);
+                unsafe { std::env::set_var(key, value_str); }
             }
         }
     }
@@ -321,7 +321,7 @@ fn inject_settings_override(source: &str) {
             for (key, value) in env_map {
                 if let Some(value_str) = value.as_str() {
                     if std::env::var(key).is_err() {
-                        std::env::set_var(key, value_str);
+                        unsafe { std::env::set_var(key, value_str); }
                     }
                 }
             }
@@ -482,11 +482,11 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
     }
 
     if opts.approve {
-        std::env::set_var("YOLO_MODE", "false");
+        unsafe { std::env::set_var("YOLO_MODE", "false"); }
     }
 
     if opts.skip_permissions {
-        std::env::set_var("YOLO_MODE", "true");
+        unsafe { std::env::set_var("YOLO_MODE", "true"); }
     }
 
     // 在创建 tokio runtime 之前初始化 tracing，确保 reqwest::blocking::Client
@@ -933,7 +933,7 @@ mod tests {
         let path = make_temp_file(r#"{"config": {"env": {"TEST_C1": "v1"}}}"#);
         inject_env_from_file(&path, &[&["config", "env"]]);
         assert_eq!(std::env::var("TEST_C1").unwrap(), "v1");
-        std::env::remove_var("TEST_C1");
+        unsafe { std::env::remove_var("TEST_C1"); }
     }
 
     #[test]
@@ -942,7 +942,7 @@ mod tests {
         let path = make_temp_file(r#"{"env": {"TEST_T1": "v2"}}"#);
         inject_env_from_file(&path, &[&["env"]]);
         assert_eq!(std::env::var("TEST_T1").unwrap(), "v2");
-        std::env::remove_var("TEST_T1");
+        unsafe { std::env::remove_var("TEST_T1"); }
     }
 
     #[test]
@@ -952,7 +952,7 @@ mod tests {
         let path = make_temp_file(r#"{"env": {"TEST_FB1": "from_fallback"}}"#);
         inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
         assert_eq!(std::env::var("TEST_FB1").unwrap(), "from_fallback");
-        std::env::remove_var("TEST_FB1");
+        unsafe { std::env::remove_var("TEST_FB1"); }
     }
 
     #[test]
@@ -963,17 +963,17 @@ mod tests {
         );
         inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
         assert_eq!(std::env::var("TEST_PRI").unwrap(), "from_config");
-        std::env::remove_var("TEST_PRI");
+        unsafe { std::env::remove_var("TEST_PRI"); }
     }
 
     #[test]
     fn test_process_env_priority() {
         // 进程环境变量存在时不被 settings.json 覆盖
-        std::env::set_var("TEST_PROC_PRI", "from_process");
+        unsafe { std::env::set_var("TEST_PROC_PRI", "from_process"); }
         let path = make_temp_file(r#"{"env": {"TEST_PROC_PRI": "from_file"}}"#);
         inject_env_from_file(&path, &[&["env"]]);
         assert_eq!(std::env::var("TEST_PROC_PRI").unwrap(), "from_process");
-        std::env::remove_var("TEST_PROC_PRI");
+        unsafe { std::env::remove_var("TEST_PROC_PRI"); }
     }
 
     #[test]
@@ -984,7 +984,7 @@ mod tests {
         // 数字值不应被注入
         assert!(std::env::var("TEST_NUM").is_err());
         assert_eq!(std::env::var("TEST_STR").unwrap(), "ok");
-        std::env::remove_var("TEST_STR");
+        unsafe { std::env::remove_var("TEST_STR"); }
     }
 
     #[test]
@@ -1030,14 +1030,14 @@ mod tests {
         );
 
         // 清理测试环境变量
-        std::env::remove_var("TEST_E2E_API_KEY");
-        std::env::remove_var("TEST_E2E_BASE_URL");
+        unsafe { std::env::remove_var("TEST_E2E_API_KEY"); }
+        unsafe { std::env::remove_var("TEST_E2E_BASE_URL"); }
 
         // 恢复之前保存的环境变量
         for (key, value) in saved {
             match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
+                Some(v) => unsafe { std::env::set_var(key, v); },
+                None => unsafe { std::env::remove_var(key) },
             }
         }
     }

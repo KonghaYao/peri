@@ -1,7 +1,7 @@
 [package]
 name = "peri-tui"
 version.workspace = true
-edition.workspace = true
+edition = "2024"
 description = "TUI interface for Rust Agent - interactive terminal playground"
 
 [lib]
@@ -23,6 +23,8 @@ peri-agent = { path = "../peri-agent" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-lsp = { path = "../peri-lsp" }
 ratatui = { version = "0.30.1", features = ["unstable-rendered-line-info", "unstable-widget-ref"] }
+ratatui-kit = { version = "0.6", features = ["full"] }
+tui-input = "0.8"
 tokio.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true

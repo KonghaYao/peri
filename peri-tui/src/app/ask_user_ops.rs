@@ -171,7 +171,7 @@ impl App {
                                 .selected
                                 .iter()
                                 .enumerate()
-                                .filter(|(_, &v)| v)
+                                .filter(|(_, v)| **v)
                                 .map(|(i, _)| q.data.options[i].label.clone())
                                 .collect();
                             let value = if q.data.multi_select {

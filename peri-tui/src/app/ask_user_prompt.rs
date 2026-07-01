@@ -59,7 +59,7 @@ impl QuestionState {
             .selected
             .iter()
             .enumerate()
-            .filter(|(_, &v)| v)
+            .filter(|(_, v)| **v)
             .map(|(i, _)| self.data.options[i].label.clone())
             .collect();
         let custom = self.custom_input.value().trim().to_string();

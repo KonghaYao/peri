@@ -40,10 +40,12 @@ pub struct JemallocBreakdown {
 #[cfg(not(target_os = "windows"))]
 pub fn init_alloc_conf() {
     if std::env::var("MALLOC_CONF").is_err() {
-        std::env::set_var(
-            "MALLOC_CONF",
-            "dirty_decay_ms:0,muzzy_decay_ms:0,background_thread:true",
-        );
+        unsafe {
+            std::env::set_var(
+                "MALLOC_CONF",
+                "dirty_decay_ms:0,muzzy_decay_ms:0,background_thread:true",
+            );
+        }
     }
 }
 

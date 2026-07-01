@@ -4,7 +4,7 @@ use crate::alloc_config::*;
 #[test]
 fn test_init_alloc_conf_does_not_overwrite() {
     let sentinel = "dirty_decay_ms:9999";
-    std::env::set_var("MALLOC_CONF", sentinel);
+    unsafe { std::env::set_var("MALLOC_CONF", sentinel); }
 
     init_alloc_conf();
 
@@ -16,7 +16,7 @@ fn test_init_alloc_conf_does_not_overwrite() {
     );
 
     // Cleanup
-    std::env::remove_var("MALLOC_CONF");
+    unsafe { std::env::remove_var("MALLOC_CONF"); }
 }
 
 #[test]
