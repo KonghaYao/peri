@@ -515,7 +515,10 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
         let mut terminal = Terminal::new(backend)?;
 
         // 运行应用
+        #[cfg(not(feature = "use-kit"))]
         let result = run_app(&mut terminal, &opts, panic_notify_rx).await;
+        #[cfg(feature = "use-kit")]
+        let result = run_app_kit(&mut terminal, &opts, panic_notify_rx).await;
 
         // 恢复终端
         disable_raw_mode()?;
@@ -911,6 +914,24 @@ async fn run_app(
     }
 
     Ok(())
+}
+
+// ─── ratatui-kit 入口（feature = "use-kit"）────────────────────────────────┐
+
+/// Phase 8: ratatui-kit 替代入口点。
+/// 
+/// 在 feature `use-kit` 启用时替代 `run_app`。当前为编译桩——用于验证
+/// feature gate 双轨架构正确编译，完整实现见后续 Phase。
+#[cfg(feature = "use-kit")]
+async fn run_app_kit(
+    _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    _tui_opts: &TuiOptions,
+    _panic_notify_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> Result<()> {
+    // 1. 启动 ACP server（与旧路径相同）
+    // 2. 启动 acp bridge（接收 ACP 事件 → 写入 Atom）
+    // 3. 调用 crate::kit::entry::run_kit_fullscreen().await
+    todo!("Phase 8: wire up ACP server + acp_bridge + kit fullscreen")
 }
 
 #[cfg(test)]

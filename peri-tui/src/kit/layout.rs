@@ -4,30 +4,43 @@ use ratatui_kit::{
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
-        style::{Style, Stylize},
+        style::Stylize,
         text::Line,
+        widgets::Paragraph,
     },
 };
+use crate::kit::atoms;
+use crate::kit::input_area::InputArea;
 use crate::ui::theme;
 
 #[component]
-fn SessionColumn(_hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn SessionColumn(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    // 订阅数据
+    let vms = hooks.use_store(*atoms::VIEW_MODELS.get().unwrap());
+    let scroll = hooks.use_store(*atoms::SCROLL_OFFSET.get().unwrap());
+    let acp = hooks.use_store(*atoms::ACP_STATE.get().unwrap());
+
+    let view_models = vms.read(); // ViewModelsSnapshot: 非 Copy，用 .read()
+    let _scroll_offset = scroll.get(); // u16: Copy
+    let _is_loading = acp.read().is_loading; // AcpStateSnapshot: 非 Copy
+
+    let loading = acp.read().is_loading;
+    let _ = acp; // 仅用于读取，StoreState 是 Copy 类型
+
     element!(
-        Border(
+        View(
             flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Session ").fg(theme::THINKING).bold().centered(),
-            width: Constraint::Length(80),
-            height: Constraint::Length(20),
+            width: Constraint::Fill(1),
+            height: Constraint::Fill(1),
         ) {
-            View(
-                flex_direction: Direction::Vertical,
-                width: Constraint::Fill(1),
-                height: Constraint::Fill(1),
-            ) {
-                Text(text: Line::from("TODO: scrollback").fg(theme::TEXT))
-                Text(text: Line::from("TODO: input area").fg(theme::MUTED))
-            }
+            // 消息区（吃剩余高度）
+            Text(text: Paragraph::new(
+                Line::from(format!("Messages ({} committed, {} current)", view_models.committed.len(), view_models.current_turn.len()))
+                    .fg(theme::TEXT)
+            ))
+
+            // 输入区（底部固定高度）
+            InputArea(loading: loading)
         }
     )
 }

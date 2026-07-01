@@ -20,6 +20,7 @@ pub mod config;
 pub mod dto_convert;
 pub mod event;
 pub mod i18n;
+pub mod kit;
 pub mod panel;
 pub mod render;
 pub mod runtime;

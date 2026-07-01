@@ -6,12 +6,13 @@ use ratatui_kit::{
         layout::{Constraint, Direction},
         style::{Style, Stylize},
         text::Line,
+        widgets::Paragraph,
     },
 };
 use crate::ui::theme;
 
 #[component]
-fn SetupWizard(_hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn SetupWizard(_hooks: Hooks) -> impl Into<AnyElement<'static>> {
     element!(
         Border(
             flex_direction: Direction::Vertical,
@@ -20,7 +21,7 @@ fn SetupWizard(_hooks: Hooks) -> impl Into<AnyElement<'static>> {
             width: Constraint::Length(60),
             height: Constraint::Length(15),
         ) {
-            Text(text: Line::from("Step 1/5: TODO").fg(theme::TEXT).centered())
+            Text(text: Paragraph::new(Line::from("Step 1/5: TODO").fg(theme::TEXT).centered()))
         }
     )
 }
