@@ -300,29 +300,12 @@ impl App {
             }
             "session_info_update" => (false, false, false),
             "available_commands_update" => {
-                // 从 ACP AvailableCommandsUpdate 学习 Agent 命令列表
-                tracing::debug!(?update, "ACP→TUI: received available_commands_update");
-                if let Some(cmds) = update
-                    .get("availableCommands")
-                    .or_else(|| update.get("commands"))
-                    .and_then(|c| c.as_array())
-                {
-                    let names: Vec<String> = cmds
-                        .iter()
-                        .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(String::from))
-                        .collect();
-                    tracing::debug!(?names, "ACP→TUI: parsed command names");
-                    if !names.is_empty() {
-                        self.session_mgr
-                            .current_mut()
-                            .commands
-                            .update_agent_commands(names);
-                        tracing::debug!(
-                            "ACP→TUI: learned {} agent commands from AvailableCommandsUpdate",
-                            self.session_mgr.current_mut().commands.agent_commands.len()
-                        );
-                    }
-                }
+                // (S13c-4b) ChatSession.commands 已删除——本地不再缓存命令列表，
+                // 命令分发完全由 ACP server 侧 session/prompt 处理。
+                tracing::debug!(
+                    ?update,
+                    "ACP→TUI: received available_commands_update (ignored)"
+                );
                 (false, false, false)
             }
             _ => {

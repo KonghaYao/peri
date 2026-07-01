@@ -65,9 +65,6 @@ mod ask_user_ops;
 mod ask_user_prompt;
 pub use ask_user_prompt::AskUserBatchPrompt;
 
-mod hint_ops;
-pub use hint_ops::SlashHintState;
-
 mod hitl_ops;
 mod hitl_prompt;
 pub use hitl_prompt::{HitlBatchPrompt, PendingAttachment};
@@ -91,9 +88,6 @@ pub mod text_selection;
 pub mod tool_display;
 
 // ── Services ───────────────────────────────────────────────────────────────────
-mod command_system;
-pub use command_system::CommandSystem;
-
 mod history_ops;
 mod history_persistence;
 mod provider;
@@ -190,12 +184,7 @@ impl App {
         };
 
         // 预计算命令帮助列表
-        let mut command_registry = crate::command::default_registry();
-        // 注册命名 Workflow 命令（GAP-09：扫描 .claude/workflows/）
-        crate::command::session::workflow_cmd::register_named_workflow_commands(
-            &cwd,
-            &mut command_registry,
-        );
+        // (S13c-4b) command/ + CommandSystem + ChatSession.commands 已删除
         // 复用 loader::resolve_skill_roots 作为 single source of truth，
         // 与 new_session() / ACP session/new 保持一致，确保 Builtin skills 被扫描
         let skills: Vec<peri_acp_types::skill::SkillMetadataDto> = {
@@ -207,6 +196,7 @@ impl App {
                 .map(crate::dto_convert::skill_metadata_dto)
                 .collect()
         };
+        let _ = skills; // skills 注入由 ACP server 侧负责（kit 路径自包含）
 
         // 初始化 cron state + spawn tick task
         let (cron_state, scheduler_arc) = CronState::new();
@@ -222,14 +212,7 @@ impl App {
             .as_ref()
             .and_then(|c| c.config.streaming_mode.clone());
 
-        let initial_session = ChatSession::new(
-            cwd.clone(),
-            command_registry,
-            skills,
-            &lc,
-            diff_enabled,
-            streaming_mode,
-        );
+        let initial_session = ChatSession::new(cwd.clone(), diff_enabled, streaming_mode);
 
         let session_mgr = SessionManager::new(initial_session);
 
@@ -293,35 +276,7 @@ impl App {
         if let Some(token) = &self.session_mgr.current_mut().agent.cancel_token {
             token.cancel();
         }
-        let mut command_registry = crate::command::default_registry();
-        // 注册命名 Workflow 命令（GAP-09：扫描 .claude/workflows/）
-        crate::command::session::workflow_cmd::register_named_workflow_commands(
-            &self.services.cwd,
-            &mut command_registry,
-        );
-        // 复用 loader::resolve_skill_roots 作为 single source of truth，
-        // 避免与 SkillsMiddleware 的根顺序逻辑漂移
-        let plugin_skill_roots = self
-            .services
-            .plugin_data
-            .as_ref()
-            .map(|pd| pd.all_skill_roots.clone())
-            .unwrap_or_default();
-        let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
-        let skill_roots = peri_middlewares::skills::resolve_skill_roots(
-            &self.services.cwd,
-            plugin_skill_roots,
-            disable_bundled, // TUI 侧仅用于显示
-        );
-        let skills: Vec<peri_acp_types::skill::SkillMetadataDto> =
-            peri_middlewares::skills::scan_skill_roots(&skill_roots)
-                .into_iter()
-                .map(crate::dto_convert::skill_metadata_dto)
-                .collect();
-        // 追加插件 commands
-        if let Some(pd) = &self.services.plugin_data {
-            command_registry.register_plugin_commands(pd.all_commands.clone());
-        }
+        // (S13c-4b) command/ + CommandSystem + ChatSession.commands 已删除
         let diff_visible = self.session_mgr.current_mut().ui.diff_visible;
         let streaming_mode = self
             .services
@@ -330,14 +285,7 @@ impl App {
             .config
             .streaming_mode
             .clone();
-        let session = ChatSession::new(
-            self.services.cwd.clone(),
-            command_registry,
-            skills,
-            &self.services.lc,
-            diff_visible,
-            streaming_mode,
-        );
+        let session = ChatSession::new(self.services.cwd.clone(), diff_visible, streaming_mode);
         self.session_mgr.replace(session);
     }
 

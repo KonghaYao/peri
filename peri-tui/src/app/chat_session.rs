@@ -1,13 +1,12 @@
 use std::time::Instant;
 
 use peri_acp::event::TodoItemDto;
-use peri_acp_types::skill::SkillMetadataDto;
 
 use super::{
-    AgentComm, CommandSystem, MessageState, SessionMetadata, SubAgentStatusMap, UiState,
+    AgentComm, MessageState, SessionMetadata, SubAgentStatusMap, UiState,
     langfuse_state::LangfuseState,
 };
-use crate::{command::CommandRegistry, thread::ThreadId};
+use crate::thread::ThreadId;
 
 /// 正在运行的后台 SubAgent
 #[derive(Clone, Debug)]
@@ -23,7 +22,6 @@ pub struct RunningBgAgent {
 pub struct ChatSession {
     pub ui: UiState,
     pub messages: MessageState,
-    pub commands: CommandSystem,
     pub metadata: SessionMetadata,
     pub agent: AgentComm,
     pub current_thread_id: Option<ThreadId>,
@@ -39,19 +37,10 @@ pub struct ChatSession {
 }
 
 impl ChatSession {
-    pub fn new(
-        cwd: String,
-        command_registry: CommandRegistry,
-        skills: Vec<SkillMetadataDto>,
-        lc: &crate::i18n::LcRegistry,
-        diff_enabled: bool,
-        _streaming_mode: Option<String>,
-    ) -> Self {
-        let commands = CommandSystem::new(command_registry, skills.clone(), lc);
+    pub fn new(cwd: String, diff_enabled: bool, _streaming_mode: Option<String>) -> Self {
         Self {
             ui: UiState::new(super::build_textarea(false), &cwd, diff_enabled),
             messages: MessageState::new(),
-            commands,
             metadata: SessionMetadata::new(),
             agent: AgentComm::default(),
             current_thread_id: None,

@@ -2,7 +2,6 @@ use peri_widgets::ScrollbarMetrics;
 use tui_textarea::TextArea;
 
 use super::at_mention::AtMentionState;
-use super::hint_ops::SlashHintState;
 use crate::app::text_selection::{PanelTextSelection, TextSelection};
 
 /// 预测输入状态：agent 完成后 LLM 生成的下一步输入建议。
@@ -18,7 +17,6 @@ pub struct UiState {
     pub scroll_offset: u16,
     pub scroll_follow: bool,
     pub show_tool_messages: bool,
-    pub hint_cursor: Option<usize>,
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
     pub draft_input: Option<String>,
@@ -45,8 +43,6 @@ pub struct UiState {
     pub panel_scrollbar_dragging: bool,
     /// @ 文件提及状态
     pub at_mention: AtMentionState,
-    /// / skill/command 内联补全状态
-    pub slash_hint: SlashHintState,
     /// 后台 Agent Bar 光标位置
     pub bg_bar_cursor: Option<usize>,
     /// 后台 Agent Bar 渲染区域（用于鼠标点击检测）
@@ -69,7 +65,6 @@ impl UiState {
             scroll_offset: u16::MAX,
             scroll_follow: true,
             show_tool_messages: false,
-            hint_cursor: None,
             input_history,
             history_index: None,
             draft_input: None,
@@ -89,7 +84,6 @@ impl UiState {
             panel_scrollbar_metrics: None,
             panel_scrollbar_dragging: false,
             at_mention: AtMentionState::new(),
-            slash_hint: SlashHintState::default(),
             bg_bar_cursor: None,
             bg_bar_area: None,
             diff_visible: diff_enabled,

@@ -142,40 +142,8 @@ pub async fn build_app_and_acp(
         app.services.plugin_data = Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
             &claude_dir,
         ));
-        let plugin_commands = app
-            .services
-            .plugin_data
-            .as_ref()
-            .map(|pd| pd.all_commands.clone())
-            .unwrap_or_default();
-        let plugin_skill_roots = app
-            .services
-            .plugin_data
-            .as_ref()
-            .map(|pd| pd.all_skill_roots.clone())
-            .unwrap_or_default();
-        let plugin_skills: Vec<peri_acp_types::skill::SkillMetadataDto> =
-            peri_middlewares::skills::scan_skill_roots(&plugin_skill_roots)
-                .into_iter()
-                .map(crate::dto_convert::skill_metadata_dto)
-                .collect();
-        app.session_mgr
-            .current_mut()
-            .commands
-            .command_registry
-            .register_plugin_commands(plugin_commands.clone());
-        let session = app.session_mgr.current_mut();
-        let existing_names: std::collections::HashSet<String> = session
-            .commands
-            .skills
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
-        for skill in &plugin_skills {
-            if !existing_names.contains(&skill.name) {
-                session.commands.skills.push(skill.clone());
-            }
-        }
+        // (S13c-4b) plugin_commands + plugin_skills 注入已随 command/ 删除——
+        // 插件技能/命令注册由 ACP server 侧 SkillsMiddleware + PluginMiddleware 负责。
     }
 
     // ── ACP Server + Client ─────────────────────────────────────────────
