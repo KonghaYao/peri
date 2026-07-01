@@ -340,6 +340,14 @@ pub static CRON_SCHEDULER_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>,
 > = OnceLock::new();
 
+/// I17-B：Setup Wizard 触发开关。
+///
+/// 首次启动时若 `needs_setup() == true`（无 Provider 配置），entry.rs 设置此
+/// atom 为 true，触发 `kit/setup_wizard.rs` 渲染引导界面。用户按 q/Esc/Enter
+/// 关闭 wizard 后写入 false（即使未配置 Provider 也允许进入主界面，避免
+/// 首次启动锁死）。
+pub static WIZARD_ACTIVE: OnceLock<Atom<bool>> = OnceLock::new();
+
 /// 初始化所有全局 Atom。
 ///
 /// 必须在 tokio 运行时启动后、任何组件渲染前调用。
@@ -362,6 +370,7 @@ pub fn init_atoms() {
     SUBAGENT_LIST.get_or_init(|| Atom::new(Vec::new()));
     PROVIDER_LIST.get_or_init(|| Atom::new(Vec::new()));
     MEMORY_LIST.get_or_init(|| Atom::new(Vec::new()));
+    WIZARD_ACTIVE.get_or_init(|| Atom::new(false));
     OPEN_PANELS.get_or_init(|| Atom::new(Vec::new()));
     ACTIVE_PANEL.get_or_init(|| Atom::new(None));
     POPUP_KIND.get_or_init(|| Atom::new(None));

@@ -56,26 +56,21 @@ impl App {
         let provider_from_config = peri_config
             .as_ref()
             .and_then(agent::LlmProvider::from_config);
-        let (provider_name, model_name, _status_msg) =
-            match provider_from_config.or_else(agent::LlmProvider::from_env) {
-                Some(p) => {
-                    let name = p.display_name().to_string();
-                    let model = p.model_name().to_string();
-                    let msg = lc.tr_args(
-                        "app-provider-ready",
-                        &[
-                            ("name".into(), name.clone().into()),
-                            ("model".into(), model.clone().into()),
-                        ],
-                    );
-                    (name, model, msg)
-                }
-                None => (
-                    lc.tr("app-not-configured"),
-                    lc.tr("app-empty"),
-                    lc.tr("app-no-api-key-warning"),
-                ),
-            };
+        let provider_name = match provider_from_config.or_else(agent::LlmProvider::from_env) {
+            Some(p) => {
+                let name = p.display_name().to_string();
+                let model = p.model_name().to_string();
+                let _msg = lc.tr_args(
+                    "app-provider-ready",
+                    &[
+                        ("name".into(), name.clone().into()),
+                        ("model".into(), model.into()),
+                    ],
+                );
+                name
+            }
+            None => lc.tr("app-not-configured"),
+        };
 
         // 初始化 thread 存储（失败时 fallback 到临时目录）
         let thread_store: std::sync::Arc<dyn crate::thread::ThreadStore> =
@@ -103,21 +98,15 @@ impl App {
             )),
             cwd: cwd.clone(),
             provider_name: provider_name.clone(),
-            model_name: model_name.clone(),
             permission_mode: permission_mode.clone(),
             thread_store: thread_store.clone(),
             mcp_pool: None,
             mcp_init_rx: None,
             cron: cron_state,
             plugin_data: None,
-            config_path_override: None,
-            claude_settings_override: None,
             resource_monitor: parking_lot::Mutex::new(
                 service_registry::ProcessResourceMonitor::new(),
             ),
-            lc,
-            panic_notify_rx: None,
-            acp_session_manager: None,
         };
 
         Self {
@@ -176,7 +165,6 @@ impl App {
         let cfg_ref = self.services.peri_config.read();
         if let Some(p) = agent::LlmProvider::from_config(&cfg_ref) {
             self.services.provider_name = p.display_name().to_string();
-            self.services.model_name = p.model_name().to_string();
         }
     }
 

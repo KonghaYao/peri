@@ -54,6 +54,18 @@ pub async fn run_kit_fullscreen(
     //     能直接 toggle/remove。service_snapshot 下次 tick 自动派生新列表。
     let _ = atoms::CRON_SCHEDULER_HANDLE.set(app.services.cron.scheduler.clone());
 
+    // 2e. I17-B：检测首次启动未配置 Provider，触发 SetupWizard 渲染。
+    //     wizard 即使是引导界面也支持 Esc/q 退出（避免首次启动锁死）。
+    {
+        let cfg = app.services.peri_config.read();
+        if crate::app::setup_wizard::needs_setup(&cfg.config)
+            && let Some(atom) = atoms::WIZARD_ACTIVE.get()
+        {
+            *atom.write() = true;
+            tracing::info!("kit entry: needs_setup=true，触发 SetupWizard");
+        }
+    }
+
     let shutdown = CancellationToken::new();
 
     // 3. service_snapshot 任务——无论是否配 ACP provider 都要启动：
@@ -88,6 +100,49 @@ pub async fn run_kit_fullscreen(
         let _rewind_handle = spawn_rewind_consumer(client.clone(), rewind_rx, shutdown.clone());
         let _thread_load_handle =
             spawn_thread_load_consumer(client.clone(), thread_load_rx, cwd, shutdown.clone());
+
+        // 4e. I17-A：CLI -c/-r 会话恢复——在 acp_client + THREAD_LOAD_TX 就绪后
+        //     通过 channel 触发 load_session。spawn 一次性的延迟任务，让
+        //     notifier/bridge 先初始化，再 send（避免 race）。
+        if opts.resume_session.is_some() || opts.continue_session {
+            let thread_load_tx_clone = atoms::THREAD_LOAD_TX.get().cloned();
+            let thread_store = app.services.thread_store.clone();
+            let cwd_for_restore = app.services.cwd.clone();
+            let resume_id = opts.resume_session.clone();
+            tokio::spawn(async move {
+                let Some(tx) = thread_load_tx_clone else {
+                    tracing::warn!("kit 恢复：THREAD_LOAD_TX 未就绪，跳过");
+                    return;
+                };
+                let thread_id = match resume_id.as_deref() {
+                    Some(id) => {
+                        tracing::info!(session_id = %id, "-r: 触发 load_session");
+                        Some(id.to_string())
+                    }
+                    None => {
+                        // -c: 查 thread_store 找当前 cwd 最近 thread
+                        match thread_store.list_threads().await {
+                            Ok(threads) => threads
+                                .into_iter()
+                                .find(|t| t.cwd == cwd_for_restore)
+                                .map(|t| {
+                                    tracing::info!(thread_id = %t.id, "-c: 触发 load_session");
+                                    t.id.to_string()
+                                }),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "-c: list_threads 失败");
+                                None
+                            }
+                        }
+                    }
+                };
+                if let Some(id) = thread_id
+                    && let Err(e) = tx.send(id)
+                {
+                    tracing::warn!(error = %e, "kit 恢复：THREAD_LOAD_TX.send 失败");
+                }
+            });
+        }
     } else {
         tracing::warn!("kit 路径：无 ACP provider，TUI 仅以离线模式运行（无 agent 交互）");
     }

@@ -17,6 +17,7 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 订阅全局状态
     let acp_state = hooks.use_store(*atoms::ACP_STATE.get().unwrap());
     let popup_active = hooks.use_store(*atoms::POPUP_ACTIVE.get().unwrap());
+    let wizard_active_atom = hooks.use_store(*atoms::WIZARD_ACTIVE.get().unwrap());
 
     // 注册事件处理器
     let mut exit_fn = hooks.use_exit();
@@ -25,7 +26,7 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 读取状态值 (AcpStateSnapshot 非 Copy，用 .read())
     let state = acp_state.read();
-    let wizard_active = state.wizard_active;
+    let wizard_active = *wizard_active_atom.read();
     let _ = popup_active.get();
     let _ = state; // AcpStateSnapshot 借用解除
 

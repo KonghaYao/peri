@@ -2,12 +2,13 @@
 //!
 //! (I16-C) 大幅瘦身：原 1673 行的完整表单逻辑（SetupWizardPanel +
 //! handle_setup_wizard_key + 多步骤表单 + Claude Code 迁移 + 连通性测试）
-//! 已退役——kit 单路径下 `kit/setup_wizard.rs` 是 TODO stub，
-//! `wizard_active` atom 永远为 false，整套表单渲染与按键处理无消费者。
+//! 已退役。
 //!
-//! 本模块仅保留 `needs_setup()` 检测函数，供 launch.rs 启动期判断是否
-//! 需要引导用户配置 Provider（日志提示）；未来 kit 实现完整 Setup Wizard
-//! 时可在此重建。
+//! (I17-B) kit 路径下的 `kit/setup_wizard.rs` 已升级为可用的引导界面，
+//! 由本模块的 `needs_setup()` + `atoms::WIZARD_ACTIVE` atom 触发渲染。
+//!
+//! 本模块仅保留 `needs_setup()` 检测函数，供 kit/entry 启动期判断是否
+//! 需要引导用户配置 Provider 并设置 wizard atom。
 
 /// 检测配置是否需要 Setup 向导。
 ///
@@ -42,8 +43,13 @@ pub fn needs_setup(config: &crate::config::AppConfig) -> bool {
 mod tests {
     use super::*;
     use crate::config::{AppConfig, ProviderConfig};
+    use serial_test::serial;
+
+    // needs_setup 依赖 std::env::var，多测试并行跑会相互污染（共享进程环境）。
+    // 用 #[serial] 强制串行执行，避免 flaky 失败。
 
     #[test]
+    #[serial]
     fn test_needs_setup_empty_providers_no_env() {
         let config = AppConfig::default();
         // 无 providers 且显式移除所有已知 API key 环境变量 → 需要 setup
@@ -63,6 +69,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_needs_setup_empty_providers_but_env_key() {
         let config = AppConfig::default();
         // 无 providers 但 OPENAI_API_KEY + MODEL_PROVIDER=openai → 不需要 setup
@@ -82,6 +89,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_needs_setup_api_key_from_config() {
         let mut config = AppConfig::default();
         config.providers.push(ProviderConfig {

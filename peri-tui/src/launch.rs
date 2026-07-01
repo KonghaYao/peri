@@ -49,16 +49,15 @@ pub struct TuiLaunchOptions {
 /// - kit：spawn kit 专用 notifier → `kit::acp_bridge` → atoms；spawn SUBMIT 消费者
 pub async fn build_app_and_acp(
     opts: &TuiLaunchOptions,
-    panic_notify_rx: Option<mpsc::UnboundedReceiver<String>>,
+    _panic_notify_rx: Option<mpsc::UnboundedReceiver<String>>,
 ) -> Result<(
     App,
     Option<(AcpTuiClient, mpsc::UnboundedReceiver<AcpNotification>)>,
 )> {
     let mut app = App::new().await;
 
-    if let Some(rx) = panic_notify_rx {
-        app.services.panic_notify_rx = Some(rx);
-    }
+    // (I17-D) panic_notify_rx 已退役——ServiceRegistry.panic_notify_rx 字段删除，
+    // 该参数仅保留签名以维持调用方兼容；实际 panic 通知走 tracing log。
 
     // 根据环境变量/CLI 参数设置初始权限模式
     {
@@ -104,38 +103,25 @@ pub async fn build_app_and_acp(
 
     // 会话恢复：-c 恢复当前目录最近会话，-r <id> 恢复指定会话。
     //
-    // (I16-B) `App::open_thread` + `ChatSession.current_thread_id` 已退役——kit
-    // 单路径下，会话切换通过 `THREAD_LOAD_TX → acp_client.load_session()` 完成。
-    // 启动期的 -c/-r 恢复由 kit/entry 在 acp_client 就绪后通过 atom 触发；
-    // 此处仅 log 提示。
+    // (I17-A) launch 层仅 log 提示，实际的 thread 恢复由 kit/entry 在
+    // acp_client + THREAD_LOAD_TX 就绪后异步触发 load_session（避免
+    // 在 launch 同步阶段重复 list_threads 查询）。
     if let Some(ref session_id) = opts.resume_session {
-        tracing::info!(session_id = %session_id, "-r: 待 kit entry 恢复指定会话");
+        tracing::info!(session_id = %session_id, "-r: kit entry 将恢复指定会话");
     } else if opts.continue_session {
-        let store = app.services.thread_store.clone();
-        let cwd = app.services.cwd.clone();
-        let thread_id = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let threads = store.list_threads().await.ok()?;
-                threads.into_iter().find(|t| t.cwd == cwd).map(|t| t.id)
-            })
-        });
-        if let Some(tid) = thread_id {
-            tracing::info!(thread_id = %tid, "-c: 待 kit entry 恢复最近会话");
-        } else {
-            tracing::info!("-c: 当前目录无历史会话，创建新会话");
-        }
+        tracing::info!("-c: kit entry 将恢复当前目录最近会话（若存在）");
     }
 
     // 检测是否需要 Setup 向导。
     //
-    // (I16-C) 仅做日志提示——`app.global_ui.setup_wizard` 字段已退役，
-    // kit 单路径下 `wizard_active` atom 永远为 false（kit/setup_wizard.rs
-    // 是 TODO stub）。`needs_setup()` 判断结果保留用于未来 kit 实现
-    // 完整 Setup Wizard 时通过 atom 触发。
+    // (I17-B) 实际的 wizard 触发由 kit/entry.rs 在 atoms 初始化后通过
+    // WIZARD_ACTIVE atom 设置，这里仅做日志提示。
     {
         let cfg = app.services.peri_config.read();
         if crate::app::setup_wizard::needs_setup(&cfg.config) {
-            tracing::info!("needs_setup=true: 首次启动未配置 Provider（kit Setup Wizard 待实现）");
+            tracing::info!(
+                "needs_setup=true: 首次启动未配置 Provider，kit entry 将触发 SetupWizard"
+            );
         }
     }
 
@@ -224,7 +210,8 @@ pub async fn build_app_and_acp(
                 None,
             );
 
-            app.services.acp_session_manager = Some(session_manager.clone());
+            // (I17-D) app.services.acp_session_manager 字段已退役——
+            // 该句柄此前仅由 ServiceRegistry 持有但无任何消费者读取。
 
             let server_config = AcpServerConfig {
                 provider: Arc::new(parking_lot::RwLock::new(provider.clone())),

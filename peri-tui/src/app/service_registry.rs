@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use peri_middlewares::{
@@ -71,28 +71,22 @@ impl ProcessResourceMonitor {
 }
 
 /// 全局服务/状态聚合：跨 session 共享的服务字段。
+///
+/// (I17-D) 大幅瘦身：model_name / config_path_override /
+/// claude_settings_override / lc / panic_notify_rx / acp_session_manager
+/// 6 字段退役——前者 service_snapshot 派生不需要，中两者仅 mod.rs 设为 None
+/// 无任何读写，lc 无 services.lc 访问，后两者 launch 写入后无消费者。
 pub struct ServiceRegistry {
     /// 共享配置：TUI 与 ACP Server 持有同一 `Arc`，写入即时传播。
     pub peri_config: SharedPeriConfig,
     pub cwd: String,
     pub provider_name: String,
-    pub model_name: String,
     pub permission_mode: Arc<SharedPermissionMode>,
     pub thread_store: Arc<dyn ThreadStore>,
     pub mcp_pool: Option<Arc<McpClientPool>>,
     pub mcp_init_rx: Option<tokio::sync::watch::Receiver<McpInitStatus>>,
     pub cron: CronState,
     pub plugin_data: Option<PluginLoadResult>,
-    pub config_path_override: Option<PathBuf>,
-    pub claude_settings_override: Option<PathBuf>,
     /// 进程内存监控（2s 刷新）
     pub resource_monitor: parking_lot::Mutex<ProcessResourceMonitor>,
-    /// i18n 语言注册表（跨 session 共享）
-    pub lc: crate::i18n::LcRegistry,
-    /// panic hook 通知 receiver（TUI 模式专用，由 main.rs init_panic_notify 初始化）
-    pub panic_notify_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
-    /// ACP SessionManager 句柄（Arc 共享，clone 廉价）。
-    /// 由 main.rs 构建 ACP server 时注入；None 时（如未启动 ACP server）降级为无 v2 queue 注入。
-    /// 用于 TUI 侧 cron/channel 异步触发 push 到共享 v2 MessageQueue。
-    pub acp_session_manager: Option<peri_acp::session::SessionManager>,
 }
