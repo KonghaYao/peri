@@ -1,6 +1,5 @@
 use super::*;
 use crate::thread::ThreadBrowser;
-use crate::ui::message_view::aggregate_batch_groups;
 
 impl App {
     pub fn scroll_up(&mut self) {
@@ -90,17 +89,12 @@ impl App {
                 .block_on(store.load_context(&tid))
                 .unwrap_or_default()
         });
-        self.session_mgr
-            .current_mut()
-            .messages
-            .view_messages
-            .clear();
         self.session_mgr.current_mut().agent.origin_messages = base_msgs.clone();
 
-        let mut view_msgs = super::messages_to_view_models(&base_msgs, &self.services.cwd);
-        // 历史恢复时聚合连续的已完成 SubAgentGroup 为批次汇总
-        aggregate_batch_groups(&mut view_msgs);
-        self.session_mgr.current_mut().messages.view_messages = view_msgs;
+        // Phase 2.6 step 7e.9: view_messages assignment removed — dead code.
+        // Production rendering reads from v2 state.view (populated by ACP
+        // ViewCommit during load_session below).
+
         self.session_mgr.current_mut().messages.message_cache = None;
 
         let thread_id_str = thread_id.to_string();
@@ -183,16 +177,6 @@ impl App {
             }
         }
 
-        self.session_mgr
-            .current_mut()
-            .messages
-            .view_messages
-            .clear();
-        self.session_mgr
-            .current_mut()
-            .messages
-            .view_messages
-            .shrink_to_fit();
         self.session_mgr.current_mut().agent.origin_messages.clear();
         self.session_mgr
             .current_mut()

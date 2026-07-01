@@ -343,7 +343,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::message_view::MessageViewModel;
+
     use peri_acp_types::view_model::{
         AssistantBubbleData, ToolCardData, UserBubbleData, ViewModel,
     };
@@ -352,9 +352,8 @@ mod tests {
     async fn make_app_with_active_turn() -> App {
         let (mut app, _handle) = App::new_headless(80, 24).await;
 
-        // 模拟用户提交 "hello" —— 复刻 agent_submit.rs 的关键字段
-        let user_vm = MessageViewModel::user("hello".to_string());
-        app.apply_add_message(user_vm);
+        // Phase 2.6 step 7e: seed UserBubble via v2 test views
+        app.seed_v2_user_bubble("hello");
         app.session_mgr.current_mut().messages.round_start_vm_idx = 1;
         app.session_mgr.current_mut().messages.last_submitted_text = Some("hello".to_string());
         app.session_mgr.current_mut().metadata.pre_submit_state_len = 0;
@@ -514,11 +513,6 @@ mod tests {
             pending[0]
         );
     }
-
-    /// Cron #46 (Phase 2.6 step 7e.9): `test_handle_error_does_not_write_view_messages`
-    /// removed — the `view_messages` field it asserted on is being deleted. The regression
-    /// it guarded (handle_error pushing error ToolBlock to v1 view_messages) is now
-    /// structurally impossible because apply_add_message has been deleted.
 
     // -----------------------------------------------------------------------
     // Cron #31: handle_interrupted subagent_depth early-return regression

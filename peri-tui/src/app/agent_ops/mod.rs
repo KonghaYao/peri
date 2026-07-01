@@ -337,17 +337,10 @@ impl App {
                 // complete snapshot, not incremental. extend would double the history
                 // on each turn (see CLAUDE.md TRAP re: commit_iteration).
                 self.session_mgr.current_mut().agent.origin_messages = messages;
-                // Convert origin_messages to view_messages for sync rendering.
-                // prefix_len = 0: full rebuild from complete transcript snapshot —
-                // origin_messages is the full history (replacement semantics), and
-                // messages_to_view_models returns ALL VMs. Using round_start_vm_idx
-                // would duplicate prefix VMs in the tail (same messages appear twice).
-                let cwd = self.services.cwd.clone();
-                let view_msgs = super::messages_to_view_models(
-                    &self.session_mgr.current().agent.origin_messages,
-                    &cwd,
-                );
-                self.apply_rebuild_all(0, view_msgs);
+                // Phase 2.6 step 7e.9: TurnCommitted handler no longer writes
+                // to v1 view_messages. Production rendering reads from v2
+                // state.view (via draw_now → v2_path), and the ACP ViewCommit
+                // event repopulates state.view after TurnCommitted.
                 (true, false, false)
             }
             AgentEvent::CompactCompleted {

@@ -4,13 +4,13 @@
 /// Tests 4-8 (anchor insertion, discard, clamping) removed in Phase 2.5 —
 /// ephemeral_notes anchor tracking retired. v2 state.view handles SystemNote
 /// via pending_v2_notes → Event::PushSystemNote path.
-
+///
 /// Cron #46 (Phase 2.6 step 7e.9): `test_submit_message_does_not_write_view_messages`
 /// removed — the field it asserted on (`view_messages`) is being deleted. The
 /// regression it guarded (submit_message pushing to v1 view_messages) is now
 /// structurally impossible because apply_add_message has been deleted and the
 /// field itself will be gone.
-
+///
 /// Cron #26 step 7e.7: round_start_vm_idx 不再被 submit_message 更新。
 ///
 /// 历史上 submit_message 把 round_start_vm_idx 设为 view_messages.len()

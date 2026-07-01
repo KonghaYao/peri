@@ -1,5 +1,5 @@
 use crate::{
-    app::{AgentEvent, App, MessageViewModel},
+    app::{AgentEvent, App},
     ui::main_ui,
 };
 
@@ -11,15 +11,10 @@ async fn test_snapshot_row_count() {
 
 #[tokio::test]
 async fn test_assistant_chunk_renders() {
-    use peri_agent::messages::BaseMessage;
-
     let (mut app, mut handle) = App::new_headless(120, 30).await;
-    // P5: Push UserBubble + AssistantBubble via from_base_message (AssistantChunk is no-op)
-    app.apply_add_message(MessageViewModel::user("q".into()));
-    app.apply_add_message(MessageViewModel::from_base_message(
-        &BaseMessage::ai("Hello world"),
-        &[],
-    ));
+    // v2: seed UserBubble + AssistantBubble via v2_test_views
+    app.seed_v2_user_bubble("q");
+    app.seed_v2_assistant_bubble("Hello world");
     handle
         .terminal
         .draw(|f| main_ui::render(f, &mut app, None, None))
@@ -35,21 +30,15 @@ async fn test_assistant_chunk_renders() {
 #[tokio::test]
 async fn test_tool_call_renders() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
-    // Cron #43: ToolStart 不再写 v1 view_messages（生产读 v2 state.view）。
-    // 直接 seed apply_add_message(ToolBlock) 测试渲染管线。
-    app.apply_add_message(MessageViewModel::tool_block(
-        "Read".into(),
-        "ReadFile src/main.rs".into(),
-        None,
-        false,
-    ));
+    // v2: 直接 seed ToolCard 到 v2_test_views 测试渲染管线
+    app.seed_v2_tool_card("Read", "ReadFile src/main.rs");
     handle.wait_for_render().await;
     handle
         .terminal
         .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
     let snap = handle.snapshot();
-    // ToolBlock 通过 apply_add_message 注入，display 在 header 中
+    // ToolCard 通过 seed_v2_tool_card 注入，display 在 header 中
     let has_tool = snap
         .iter()
         .any(|l| l.contains("Read") || l.contains("ReadFile"));
@@ -59,14 +48,8 @@ async fn test_tool_call_renders() {
 #[tokio::test]
 async fn test_user_message_renders() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
-    // 先注册监听，再发送事件，避免时序问题
-    // 使用 ASCII 内容避免 CJK 宽字符在 buffer 中的空格填充问题
-    let vm = MessageViewModel::user("hello from user".into());
-    app.session_mgr
-        .current_mut()
-        .messages
-        .view_messages
-        .push(vm);
+    // v2: seed user bubble 到 v2_test_views
+    app.seed_v2_user_bubble("hello from user");
     app.render_rebuild();
     handle.wait_for_render().await;
     handle
@@ -95,14 +78,8 @@ async fn test_user_message_renders() {
 async fn test_tool_call_message_visible_when_toggled() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // Cron #43: ToolStart 不再写 v1 view_messages（生产读 v2 state.view）。
-    // 直接 seed apply_add_message(ToolBlock) 测试 toggle 折叠管线。
-    app.apply_add_message(MessageViewModel::tool_block(
-        "Bash".into(),
-        "Shell".into(),
-        Some("ls".into()),
-        false,
-    ));
+    // v2: 直接 seed ToolCard 到 v2_test_views 测试 toggle 折叠管线
+    app.seed_v2_tool_card("Bash", "Bash");
     handle.wait_for_render().await;
 
     // toggle_collapsed_messages 发送 ToggleToolMessages → 渲染线程 rebuild_all → notify
@@ -115,7 +92,7 @@ async fn test_tool_call_message_visible_when_toggled() {
         .unwrap();
 
     let snap = handle.snapshot();
-    // ToolBlock display 字段为 "Shell"，由 apply_add_message 注入
+    // ToolCard 由 seed_v2_tool_card 注入到 v2_test_views
     let has_tool_call_text = snap
         .iter()
         .any(|l| l.contains("Shell") || l.contains("Bash"));
@@ -136,15 +113,15 @@ async fn test_empty_assistant_chunk_no_bubble() {
     });
     app.process_pending_events();
 
-    // view_messages 应为空（没有创建空白气泡）
+    // v2_test_views 应为空（没有创建空白气泡）
     assert!(
         app.session_mgr
             .current_mut()
             .messages
-            .view_messages
+            .v2_test_views
             .is_empty(),
         "AssistantChunk 不应创建 AssistantBubble，实际: {:?}",
-        app.session_mgr.current_mut().messages.view_messages.len()
+        app.session_mgr.current_mut().messages.v2_test_views.len()
     );
 
     // 发送多次 AssistantChunk，仍不应创建气泡
@@ -160,7 +137,7 @@ async fn test_empty_assistant_chunk_no_bubble() {
         app.session_mgr
             .current_mut()
             .messages
-            .view_messages
+            .v2_test_views
             .is_empty(),
         "多个空 AssistantChunk 仍不应创建 AssistantBubble"
     );
@@ -168,16 +145,11 @@ async fn test_empty_assistant_chunk_no_bubble() {
 
 #[tokio::test]
 async fn test_empty_then_nonempty_assistant_chunk() {
-    use peri_agent::messages::BaseMessage;
-
-    // P5: AssistantChunk is no-op, push UserBubble + AI VM directly
+    // v2: seed UserBubble + AssistantBubble 到 v2_test_views
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    app.apply_add_message(MessageViewModel::user("q".into()));
-    app.apply_add_message(MessageViewModel::from_base_message(
-        &BaseMessage::ai("Hello"),
-        &[],
-    ));
+    app.seed_v2_user_bubble("q");
+    app.seed_v2_assistant_bubble("Hello");
 
     handle
         .terminal
@@ -185,12 +157,15 @@ async fn test_empty_then_nonempty_assistant_chunk() {
         .unwrap();
 
     assert_eq!(
-        app.session_mgr.current_mut().messages.view_messages.len(),
+        app.session_mgr.current_mut().messages.v2_test_views.len(),
         2,
         "应有 2 条消息（Human+AI）"
     );
     assert!(
-        app.session_mgr.current_mut().messages.view_messages[1].is_assistant(),
+        matches!(
+            app.session_mgr.current_mut().messages.v2_test_views[1],
+            peri_acp_types::view_model::ViewModel::AssistantBubble(_)
+        ),
         "第二条应为 AssistantBubble"
     );
     assert!(handle.contains("Hello"), "应显示 Hello 内容");
@@ -201,14 +176,8 @@ async fn test_tool_call_without_assistant_chunk_no_bubble() {
     // 模拟 AI 只调用工具不输出文本的场景
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // Cron #43: ToolStart 不再写 v1 view_messages（生产读 v2 state.view）。
-    // 直接 seed apply_add_message(ToolBlock)，模拟「只工具无文本」场景。
-    app.apply_add_message(MessageViewModel::tool_block(
-        "Bash".into(),
-        "Bash".into(),
-        Some("ls".into()),
-        false,
-    ));
+    // v2: 直接 seed ToolCard，模拟「只工具无文本」场景
+    app.seed_v2_tool_card("Bash", "Bash");
     handle.wait_for_render().await;
 
     handle
@@ -216,23 +185,26 @@ async fn test_tool_call_without_assistant_chunk_no_bubble() {
         .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
 
-    // 应该有 1 个 ToolBlock，不应有空白 AssistantBubble
+    // 应该有 1 个 ToolCard，不应有空白 AssistantBubble
     assert_eq!(
-        app.session_mgr.current_mut().messages.view_messages.len(),
+        app.session_mgr.current_mut().messages.v2_test_views.len(),
         1,
-        "应有 1 条消息（ToolBlock）"
+        "应有 1 条消息（ToolCard）"
     );
     // 确保不是 AssistantBubble（空白气泡）
     assert!(
-        !app.session_mgr.current_mut().messages.view_messages[0].is_assistant(),
-        "不应创建 AssistantBubble，应为 ToolBlock"
+        !matches!(
+            app.session_mgr.current_mut().messages.v2_test_views[0],
+            peri_acp_types::view_model::ViewModel::AssistantBubble(_)
+        ),
+        "不应创建 AssistantBubble，应为 ToolCard"
     );
 }
 
 #[tokio::test]
 async fn test_welcome_card_renders_when_empty() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
-    // 默认 view_messages 为空，应显示 Welcome Card
+    // 默认 v2_test_views 为空，应显示 Welcome Card
     handle
         .terminal
         .draw(|f| main_ui::render(f, &mut app, None, None))
@@ -253,15 +225,10 @@ async fn test_welcome_card_renders_when_empty() {
 
 #[tokio::test]
 async fn test_welcome_card_hidden_after_message() {
-    use peri_agent::messages::BaseMessage;
-
     let (mut app, mut handle) = App::new_headless(120, 30).await;
-    // P5: AssistantChunk is no-op, push UserBubble + AI VM directly
-    app.apply_add_message(MessageViewModel::user("q".into()));
-    app.apply_add_message(MessageViewModel::from_base_message(
-        &BaseMessage::ai("Hello from agent"),
-        &[],
-    ));
+    // v2: seed UserBubble + AssistantBubble 到 v2_test_views
+    app.seed_v2_user_bubble("q");
+    app.seed_v2_assistant_bubble("Hello from agent");
 
     handle
         .terminal
@@ -357,12 +324,7 @@ async fn test_sticky_header_shows_after_submit() {
 
     // 填充足够多的消息使消息区产生滚动
     for i in 0..30 {
-        let vm = MessageViewModel::user(format!("message line {}", i));
-        app.session_mgr
-            .current_mut()
-            .messages
-            .view_messages
-            .push(vm);
+        app.seed_v2_user_bubble(&format!("message line {}", i));
         app.render_rebuild();
         handle.wait_for_render().await;
     }
@@ -433,12 +395,7 @@ async fn test_sticky_header_shows_last_message_not_first() {
 
     // 填充足够多的消息使消息区产生滚动
     for i in 0..30 {
-        let vm = MessageViewModel::user(format!("padding line {}", i));
-        app.session_mgr
-            .current_mut()
-            .messages
-            .view_messages
-            .push(vm);
+        app.seed_v2_user_bubble(&format!("padding line {}", i));
         app.render_rebuild();
         handle.wait_for_render().await;
     }
@@ -474,12 +431,7 @@ async fn test_sticky_header_truncation_long_message() {
 
     // 填充足够多的消息使消息区产生滚动
     for i in 0..30 {
-        let vm = MessageViewModel::user(format!("padding {}", i));
-        app.session_mgr
-            .current_mut()
-            .messages
-            .view_messages
-            .push(vm);
+        app.seed_v2_user_bubble(&format!("padding {}", i));
         app.render_rebuild();
         handle.wait_for_render().await;
     }
@@ -713,12 +665,8 @@ async fn test_mode_highlight_until_set_on_cycle() {
 #[tokio::test]
 async fn test_spinner_shows_verb_in_status_bar() {
     let (mut app, mut handle) = crate::app::App::new_headless(120, 30).await;
-    // 添加一条消息，否则 render_messages 会走 welcome 分支提前 return
-    app.session_mgr
-        .current_mut()
-        .messages
-        .view_messages
-        .push(crate::app::MessageViewModel::user("hello".into()));
+    // v2: seed 一条消息，否则 render_messages 会走 welcome 分支提前 return
+    app.seed_v2_user_bubble("hello");
     app.session_mgr
         .current_mut()
         .spinner_state
@@ -914,27 +862,22 @@ async fn test_get_compact_config_from_settings() {
 /// 回归：用户消息在 AI 回复后仍应可见（不应被 AppendChunk 覆盖）
 #[tokio::test]
 async fn test_user_message_survives_assistant_chunk() {
-    use peri_agent::messages::BaseMessage;
-
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // P5: Push UserBubble + AI VM directly (AssistantChunk/StateSnapshot are no-op)
-    app.apply_add_message(MessageViewModel::user("my question".into()));
-    app.apply_add_message(MessageViewModel::from_base_message(
-        &BaseMessage::ai("AI answer"),
-        &[],
-    ));
+    // v2: seed UserBubble + AssistantBubble 到 v2_test_views
+    app.seed_v2_user_bubble("my question");
+    app.seed_v2_assistant_bubble("AI answer");
 
     handle
         .terminal
         .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
 
-    // view_messages 应包含用户消息 + AI 消息
+    // v2_test_views 应包含用户消息 + AI 消息
     assert!(
-        app.session_mgr.current_mut().messages.view_messages.len() >= 2,
+        app.session_mgr.current_mut().messages.v2_test_views.len() >= 2,
         "应有至少 2 条消息（用户+AI），实际: {}",
-        app.session_mgr.current_mut().messages.view_messages.len()
+        app.session_mgr.current_mut().messages.v2_test_views.len()
     );
     assert!(
         handle.contains("my question"),
@@ -951,22 +894,14 @@ async fn test_user_message_survives_assistant_chunk() {
 /// 回归：多轮对话消息累积，不应只看到最后一条
 #[tokio::test]
 async fn test_messages_accumulate_across_turns() {
-    use peri_agent::messages::BaseMessage;
-
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // P5: Push UserBubble + AI VM directly for each turn (AssistantChunk/StateSnapshot are no-op)
-    app.apply_add_message(MessageViewModel::user("turn1".into()));
-    app.apply_add_message(MessageViewModel::from_base_message(
-        &BaseMessage::ai("answer1"),
-        &[],
-    ));
+    // v2: seed UserBubble + AssistantBubble 到 v2_test_views for each turn
+    app.seed_v2_user_bubble("turn1");
+    app.seed_v2_assistant_bubble("answer1");
 
-    app.apply_add_message(MessageViewModel::user("turn2".into()));
-    app.apply_add_message(MessageViewModel::from_base_message(
-        &BaseMessage::ai("answer2"),
-        &[],
-    ));
+    app.seed_v2_user_bubble("turn2");
+    app.seed_v2_assistant_bubble("answer2");
 
     handle
         .terminal
@@ -975,10 +910,10 @@ async fn test_messages_accumulate_across_turns() {
 
     // 应累积 4 条消息
     assert_eq!(
-        app.session_mgr.current_mut().messages.view_messages.len(),
+        app.session_mgr.current_mut().messages.v2_test_views.len(),
         4,
         "两轮对话应有 4 条消息，实际: {}",
-        app.session_mgr.current_mut().messages.view_messages.len()
+        app.session_mgr.current_mut().messages.v2_test_views.len()
     );
     assert!(handle.contains("turn1"), "第一轮用户消息应可见");
     assert!(handle.contains("turn2"), "第二轮用户消息应可见");
@@ -987,25 +922,20 @@ async fn test_messages_accumulate_across_turns() {
 /// 回归：AI 消息不应在 Done 后重复
 #[tokio::test]
 async fn test_done_does_not_duplicate_ai_message() {
-    use peri_agent::messages::BaseMessage;
-
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
-    // P5: AssistantChunk is no-op, push UserBubble + AI VM directly
-    app.apply_add_message(MessageViewModel::user("q".into()));
-    app.apply_add_message(MessageViewModel::from_base_message(
-        &BaseMessage::ai("unique text"),
-        &[],
-    ));
+    // v2: seed UserBubble + AssistantBubble 到 v2_test_views
+    app.seed_v2_user_bubble("q");
+    app.seed_v2_assistant_bubble("unique text");
 
-    // 统计包含 "unique text" 的 assistant bubble 数量
+    // 统计 v2_test_views 中的 AssistantBubble 数量
     let assistant_count = app
         .session_mgr
         .current_mut()
         .messages
-        .view_messages
+        .v2_test_views
         .iter()
-        .filter(|m| m.is_assistant())
+        .filter(|v| matches!(v, peri_acp_types::view_model::ViewModel::AssistantBubble(_)))
         .count();
     assert_eq!(
         assistant_count, 1,
@@ -1020,48 +950,37 @@ async fn test_done_does_not_duplicate_ai_message() {
 /// `finalized_messages: Arc<Vec<BaseMessage>>`（全量快照），TUI 用「替换」吸收。
 /// 旧的 v1 增量 extend 语义已废弃（会导致多迭代文本渲染在工具之前的 bug，
 // P5: test_state_snapshot_is_incremental removed — MessagePipeline::set_completed deleted
-
+///
 /// 回归：ToolStart 之后 AssistantChunk 不会丢失工具消息
 #[tokio::test]
 async fn test_tool_then_text_preserves_tool_block() {
-    use peri_agent::messages::BaseMessage;
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // Cron #43: ToolStart 不再写 v1 view_messages（生产读 v2 state.view）。
-    // 直接 seed apply_add_message(ToolBlock)，紧跟 AI 回复，验证两者共存。
-    app.apply_add_message(MessageViewModel::tool_block(
-        "Bash".into(),
-        "Shell".into(),
-        Some("ls".into()),
-        false,
-    ));
-    // P5: AssistantChunk is no-op, push AI VM directly
-    app.apply_add_message(MessageViewModel::from_base_message(
-        &BaseMessage::ai("result is here"),
-        &[],
-    ));
+    // v2: 直接 seed ToolCard + AssistantBubble 到 v2_test_views，验证两者共存
+    app.seed_v2_tool_card("Bash", "Shell");
+    app.seed_v2_assistant_bubble("result is here");
 
     handle
         .terminal
         .draw(|f| main_ui::render(f, &mut app, None, None))
         .unwrap();
 
-    // ToolBlock 和 AssistantBubble 都应存在
+    // ToolCard 和 AssistantBubble 都应存在
     let has_tool = app
         .session_mgr
         .current_mut()
         .messages
-        .view_messages
+        .v2_test_views
         .iter()
-        .any(|m| matches!(m, MessageViewModel::ToolBlock { .. }));
+        .any(|v| matches!(v, peri_acp_types::view_model::ViewModel::ToolCard(_)));
     let has_assistant = app
         .session_mgr
         .current_mut()
         .messages
-        .view_messages
+        .v2_test_views
         .iter()
-        .any(|m| m.is_assistant());
-    assert!(has_tool, "应有 ToolBlock");
+        .any(|v| matches!(v, peri_acp_types::view_model::ViewModel::AssistantBubble(_)));
+    assert!(has_tool, "应有 ToolCard");
     assert!(has_assistant, "应有 AssistantBubble");
     assert!(handle.contains("result is here"), "应显示 AI 回复");
 }
@@ -1428,7 +1347,7 @@ async fn test_welcome_shows_model_info() {
 }
 
 // Phase 2.6 step 6 — test_background_task_notification removed.
-// 原 v1 测试断言 view_messages 中存在 `bg:code-reviewer` ToolBlock 含 "LGTM"，
+// 原 v1 测试断言 v2 路径中存在 `bg:code-reviewer` ToolCard 含 "LGTM"，
 // 该 ToolBlock 是 step 6 删除的 v1 回退路径。生产 v2 路径将通知存入
 // `bg_task_state.pre_done_completions: Vec<String>`，由
 // test_bg_completed_before_done_triggers_continuation 覆盖竞态条件路径，
@@ -1441,13 +1360,8 @@ async fn test_background_task_status_bar() {
 
     // 模拟 submit_message：设置 round_start_vm_idx 并推送用户消息
     app.session_mgr.current_mut().messages.round_start_vm_idx =
-        app.session_mgr.current_mut().messages.view_messages.len();
-    let user_vm = MessageViewModel::user("test".into());
-    app.session_mgr
-        .current_mut()
-        .messages
-        .view_messages
-        .push(user_vm);
+        app.session_mgr.current_mut().messages.v2_test_views.len();
+    app.seed_v2_user_bubble("test");
     app.render_rebuild();
 
     app.session_mgr.current_mut().background_agents = vec![
@@ -1526,7 +1440,7 @@ async fn test_textarea_input_visible_during_loading() {
 // ── SubAgentGroup Reconcile Preservation ──────────────────────────────────
 
 // Phase 2.6 step 6 — test_subagent_group_preserved_after_done_reconcile removed.
-// 该 v1 测试断言 view_messages 中 SubAgentGroup 在 Done reconcile 后保留富状态；
+// 该 v1 测试断言 v2_test_views 中 SubAgentGroup 在 Done reconcile 后保留富状态；
 // step 6 删除 handle_subagent_start 中 SubAgentGroup 推送后此断言失效。
 // 生产 v2 路径：SubAgentStatusMap 是权威源，complete_foreground/complete_background
 // 单元测试 + test_subagent_group_renders_child_content_via_probe e2e 覆盖。
@@ -1548,28 +1462,23 @@ async fn test_textarea_input_visible_during_loading() {
 /// 但 Done 后 RebuildAll 不应丢失 user message
 #[tokio::test]
 async fn test_thinking_mode_user_message_survives_rebuild() {
-    use peri_agent::messages::BaseMessage;
-
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // 1. P5: Push UserBubble directly
-    app.apply_add_message(MessageViewModel::user("explain recursion".into()));
+    // 1. v2: seed UserBubble 到 v2_test_views
+    app.seed_v2_user_bubble("explain recursion");
 
     // 2. Reasoning 已通过 state machine 渲染，不再有 AiReasoning 事件
     app.process_pending_events();
 
-    // 此时 view_messages 应只有 UserBubble
+    // 此时 v2_test_views 应只有 UserBubble
     assert_eq!(
-        app.session_mgr.current_mut().messages.view_messages.len(),
+        app.session_mgr.current_mut().messages.v2_test_views.len(),
         1,
         "thinking 阶段应只有 UserBubble"
     );
 
-    // 3. P5: AssistantChunk/StateSnapshot are no-op, push AI VM directly
-    app.apply_add_message(MessageViewModel::from_base_message(
-        &BaseMessage::ai("Recursion is a technique where a function calls itself."),
-        &[],
-    ));
+    // 3. v2: seed AssistantBubble 到 v2_test_views
+    app.seed_v2_assistant_bubble("Recursion is a technique where a function calls itself.");
 
     handle
         .terminal
@@ -1594,12 +1503,10 @@ async fn test_thinking_mode_user_message_survives_rebuild() {
 /// 回归：thinking → tool_call → text 的完整流程，RebuildAll 后所有消息可见
 #[tokio::test]
 async fn test_thinking_toolcall_text_rebuild_preserves_user() {
-    use peri_agent::messages::BaseMessage;
-
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    // 1. P5: Push UserBubble directly
-    app.apply_add_message(MessageViewModel::user("show me main.rs".into()));
+    // 1. v2: seed UserBubble 到 v2_test_views
+    app.seed_v2_user_bubble("show me main.rs");
 
     // 2. Reasoning via state machine (was AiReasoning no-op)
     app.process_pending_events();
@@ -1627,11 +1534,8 @@ async fn test_thinking_toolcall_text_rebuild_preserves_user() {
     app.process_pending_events();
     handle.wait_for_render().await;
 
-    // 5. Reasoning via state machine bridge, push AI VM directly
-    app.apply_add_message(MessageViewModel::from_base_message(
-        &BaseMessage::ai("Here is the content of main.rs:"),
-        &[],
-    ));
+    // 5. v2: seed AssistantBubble 到 v2_test_views
+    app.seed_v2_assistant_bubble("Here is the content of main.rs:");
 
     handle
         .terminal
@@ -1857,15 +1761,10 @@ async fn test_submit_message_clears_pre_done_completions() {
 async fn test_background_agents_lifecycle() {
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
-    // 设置 view_messages 基础状态
+    // 设置 v2_test_views 基础状态
     app.session_mgr.current_mut().messages.round_start_vm_idx =
-        app.session_mgr.current_mut().messages.view_messages.len();
-    let user_vm = MessageViewModel::user("test query".into());
-    app.session_mgr
-        .current_mut()
-        .messages
-        .view_messages
-        .push(user_vm);
+        app.session_mgr.current_mut().messages.v2_test_views.len();
+    app.seed_v2_user_bubble("test query");
     app.render_rebuild();
 
     // SubAgentStart(bg=true) → push agent
@@ -2107,14 +2006,14 @@ async fn test_source_agent_id_routes_tool_to_child_messages() {
     });
     app.process_pending_events();
 
-    // 验证 1：主消息流 view_messages 中不应有 ToolBlock（被路由走了）
-    let view_messages = &app.session_mgr.current().messages.view_messages;
-    let has_tool_block_in_main = view_messages
+    // 验证 1：主消息流 v2_test_views 中不应有 ToolCard（被路由走了）
+    let v2_views = &app.session_mgr.current().messages.v2_test_views;
+    let has_tool_block_in_main = v2_views
         .iter()
-        .any(|vm| matches!(vm, MessageViewModel::ToolBlock { .. }));
+        .any(|v| matches!(v, peri_acp_types::view_model::ViewModel::ToolCard(_)));
     assert!(
         !has_tool_block_in_main,
-        "source_agent_id 匹配的 ToolStart 不应出现在 view_messages 主消息流"
+        "source_agent_id 匹配的 ToolStart 不应出现在 v2_test_views 主消息流"
     );
 
     // 验证 2：SubAgentStatus.child_messages 应有 1 个 ToolCard
@@ -2239,11 +2138,11 @@ async fn test_tool_end_updates_child_tool_card_output() {
         panic!("child_messages[0] 应为 ToolCard");
     }
 
-    // 同时主消息流仍无 ToolBlock
-    let view_messages = &app.session_mgr.current().messages.view_messages;
-    let has_tool_block = view_messages
+    // 同时主消息流仍无 ToolCard
+    let v2_views = &app.session_mgr.current().messages.v2_test_views;
+    let has_tool_block = v2_views
         .iter()
-        .any(|vm| matches!(vm, MessageViewModel::ToolBlock { .. }));
+        .any(|v| matches!(v, peri_acp_types::view_model::ViewModel::ToolCard(_)));
     assert!(
         !has_tool_block,
         "source_agent_id 匹配时 ToolEnd 也不应污染主消息流"
@@ -2342,14 +2241,14 @@ async fn test_subagent_child_tool_renders_on_screen() {
         joined
     );
 
-    // 3. 验证 view_messages 中没有 ToolBlock（路由走了 child_messages）
-    let view_messages = &app.session_mgr.current().messages.view_messages;
-    let has_tool_block_in_main = view_messages
+    // 3. 验证 v2_test_views 中没有 ToolCard（路由走了 child_messages）
+    let v2_views = &app.session_mgr.current().messages.v2_test_views;
+    let has_tool_block_in_main = v2_views
         .iter()
-        .any(|vm| matches!(vm, MessageViewModel::ToolBlock { .. }));
+        .any(|v| matches!(v, peri_acp_types::view_model::ViewModel::ToolCard(_)));
     assert!(
         !has_tool_block_in_main,
-        "ToolCard 不应出现在 view_messages 主消息流"
+        "ToolCard 不应出现在 v2_test_views 主消息流"
     );
 }
 

@@ -19,52 +19,54 @@ impl App {
         session.messages.message_cache = None;
     }
 
-    /// P5: Direct VM push without PipelineAction indirection.
+    /// Phase 2.6 step 7e: seed a v2 `ViewModel` into the headless test
+    /// render source.
     ///
-    /// Cron #43 (Phase 2.6 step 7e.6 + Bundle 2 item 1): all production
-    /// callers retired. Sole remaining users are test fixtures in
-    /// `headless_test.rs` and lifecycle test module (seed view_messages
-    /// for assertion setup). Will be deleted together with the
-    /// `view_messages` field in Phase 2.6 step 7e.9.
+    /// Headless tests cannot access `state_machine::State.view` (local
+    /// variable in `main_loop::run`). This helper pushes VMs to
+    /// `MessageState.v2_test_views`, which `HeadlessHandle::render()`
+    /// reads as the primary render source. Replaces `apply_add_message`.
     #[cfg(test)]
-    pub(crate) fn apply_add_message(&mut self, vm: MessageViewModel) {
+    pub(crate) fn seed_v2_vm(&mut self, vm: peri_acp_types::view_model::ViewModel) {
         let session = self.session_mgr.current_mut();
-        session.messages.view_messages.push(vm);
-        // Invalidate render cache — view_messages mutated.
+        session.messages.v2_test_views.push(vm);
         session.messages.message_cache = None;
     }
 
-    /// P5: Direct view_messages rebuild without PipelineAction indirection.
-    /// SystemNote anchor tracking was retired in Phase 2.5 — v2 state.view
-    /// (production render source) handles SystemNote via `pending_v2_notes
-    /// → Event::PushSystemNote`.
-    ///
-    /// Phase 2.6 step 7a：删除 UserBubble 去重分支（死代码）。所有 4 个调用点
-    /// 要么传 `prefix_len=0`（agent_compact ×2、agent_ops::mod ×1）要么传空
-    /// tail（agent_ops::lifecycle::handle_interrupted），dedup 条件
-    /// `prefix_len > 0 && !tail.is_empty()` 永远为 false。
-    pub(crate) fn apply_rebuild_all(&mut self, prefix_len: usize, tail_vms: Vec<MessageViewModel>) {
-        let session = self.session_mgr.current_mut();
-        let view_len = session.messages.view_messages.len();
-        let prefix_len = if prefix_len > view_len {
-            tracing::error!(
-                prefix_len,
-                view_len,
-                round_start_vm_idx = session.messages.round_start_vm_idx,
-                "RebuildAll prefix_len 越界，已钳位到 view_messages.len()"
-            );
-            view_len
-        } else {
-            prefix_len
-        };
+    /// Convenience: seed a UserBubble with the given text.
+    #[cfg(test)]
+    pub(crate) fn seed_v2_user_bubble(&mut self, text: &str) {
+        self.seed_v2_vm(peri_acp_types::view_model::ViewModel::UserBubble(
+            peri_acp_types::view_model::UserBubbleData {
+                text: text.to_string(),
+            },
+        ));
+    }
 
-        // drain 尾部 + 追加新 tail
-        session.messages.view_messages.truncate(prefix_len);
-        session.messages.view_messages.extend(tail_vms);
+    /// Convenience: seed an AssistantBubble with the given text.
+    #[cfg(test)]
+    pub(crate) fn seed_v2_assistant_bubble(&mut self, text: &str) {
+        self.seed_v2_vm(peri_acp_types::view_model::ViewModel::AssistantBubble(
+            peri_acp_types::view_model::AssistantBubbleData {
+                text: text.to_string(),
+                reasoning: None,
+                tool_card_ids: Vec::new(),
+            },
+        ));
+    }
 
-        // Invalidate render cache: view_messages was modified (drain + extend).
-        // Without this, render_messages() reuses stale cache because needs_rebuild
-        // only checks width changes, not view_messages mutations.
-        session.messages.message_cache = None;
+    /// Convenience: seed a ToolCard.
+    #[cfg(test)]
+    pub(crate) fn seed_v2_tool_card(&mut self, tool_name: &str, input_summary: &str) {
+        self.seed_v2_vm(peri_acp_types::view_model::ViewModel::ToolCard(
+            peri_acp_types::view_model::ToolCardData {
+                tool_id: format!("tool-{}", tool_name),
+                tool_name: tool_name.to_string(),
+                input_summary: input_summary.to_string(),
+                output_summary: String::new(),
+                is_error: false,
+                diff: None,
+            },
+        ));
     }
 }

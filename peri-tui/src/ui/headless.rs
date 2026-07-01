@@ -100,10 +100,8 @@ impl HeadlessHandle {
     /// `render_subagent_group` 能找到插槽并通过 probe 注入 child_messages。
     pub async fn render(&mut self, app: &mut App) -> Result<()> {
         self.wait_for_render().await;
-        let mut v2_vms: Vec<peri_acp_types::view_model::ViewModel> =
-            crate::render::vm_convert::message_view_models_to_v2(
-                &app.session_mgr.current().messages.view_messages,
-            );
+        let v2_views = &app.session_mgr.current().messages.v2_test_views;
+        let mut v2_vms: Vec<peri_acp_types::view_model::ViewModel> = v2_views.clone();
         // 合成 SubAgentGroup 占位符（headless 路径无 ACP ViewCommit）
         let session = app.session_mgr.current();
         for (instance_id, status) in session.subagent_status.iter() {

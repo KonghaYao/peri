@@ -28,7 +28,7 @@ impl Command for GcCommand {
         // P5: No pipeline — completed stats not available
         let completed_count = 0usize;
         let completed_bytes = 0usize;
-        let vm_count = active.messages.view_messages.len();
+        let vm_count = active.agent.origin_messages.len();
 
         // ── Markdown/Diff 缓存诊断 ──
         let md_cache_len = peri_widgets::markdown::cache::MarkdownCache::global().len();
@@ -88,7 +88,7 @@ impl Command for GcCommand {
             completed_count,
             fmt_bytes(completed_bytes),
         ));
-        lines.push(format!("view_messages:     {} 条 VM", vm_count,));
+        lines.push(format!("origin_messages:    {} 条", vm_count,));
 
         // 检查重复
         if origin_count > 0 && completed_count > 0 {

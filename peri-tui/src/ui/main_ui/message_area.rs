@@ -151,9 +151,15 @@ pub(crate) fn render_messages(
         if let Some(v2_vms) = v2_view_models {
             v2_vms.to_vec()
         } else {
-            crate::render::vm_convert::message_view_models_to_v2(
-                &app.session_mgr.current().messages.view_messages,
-            )
+            // Phase 2.6 step 7e.9: view_messages field deleted. v2_test_views
+            // is the headless test seed source; production always passes
+            // v2_view_models=Some via draw_now.
+            let test_views = &app.session_mgr.current().messages.v2_test_views;
+            if !test_views.is_empty() {
+                test_views.clone()
+            } else {
+                Vec::new()
+            }
         };
 
     if effective_v2.is_empty() {
