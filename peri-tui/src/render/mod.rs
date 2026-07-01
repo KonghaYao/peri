@@ -18,14 +18,12 @@
 //!
 //! **message_pipeline 已删除**，但渲染入口尚未切换到 `State.view + current_turn`。
 //! 当前渲染路径：`main_loop → ctx.draw_now() → terminal.draw() → ui::main_ui::render()`
-//! → 从 `app.session_mgr.current().messages.view_messages` 读取数据。
-//! 状态机的 `ViewStore::for_render()` + `CurrentTurn::view_models()` 已就绪，
-//! 待连接到渲染路径。
+//! → 从 v2 `State.view` + `current_turn` 派生 v2_vms。
+//! 状态机的 `ViewStore::for_render()` + `CurrentTurn::view_models()` 已就绪。
 
 pub mod block_mode;
 pub mod throttle;
 pub mod view_render;
-pub mod vm_convert;
 
 pub use throttle::{RenderReason, Throttle};
 

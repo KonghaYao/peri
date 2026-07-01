@@ -138,22 +138,14 @@ pub(crate) fn render_messages(
     // [LEGACY FALLBACK — Phase 2 migration in progress]
     // Production: `runtime::apply_context::draw_now` always passes
     // `Some(v2_vms)` to `ui::main_ui::render`, so this `else` branch is
-    // unreachable in production.
-    // Tests: ~30+ tests in `headless_test.rs` / `popups/*_test.rs` call
-    // `main_ui::render(f, &mut app, None, None)` directly without going
-    // through `draw_now`, so they hit this legacy fallback.
-    //
-    // Phase 2.6: legacy fallback 也通过 vm_convert 走 v2 渲染路径，
-    // 让测试覆盖 vm_convert + v2 render 完整链路（build_sync_render_cache
-    // 的 v1 路径仅 scrollbar 重建使用，待 Phase 2.6 完成后退役）。
-    // See `docs/refactor/phase2-migration-plan.md` for details.
+    // unreachable in production — draw_now always passes v2_view_models=Some.
+    // Headless tests hit this path via `main_ui::render(f, &mut app, None)`;
+    // they seed v2_test_views via the seed_v2_* helpers.
     let effective_v2: Vec<peri_acp_types::view_model::ViewModel> =
         if let Some(v2_vms) = v2_view_models {
             v2_vms.to_vec()
         } else {
-            // Phase 2.6 step 7e.9: view_messages field deleted. v2_test_views
-            // is the headless test seed source; production always passes
-            // v2_view_models=Some via draw_now.
+            // Phase 2.6 step 7e.9: v2_test_views is the headless test seed source.
             let test_views = &app.session_mgr.current().messages.v2_test_views;
             if !test_views.is_empty() {
                 test_views.clone()

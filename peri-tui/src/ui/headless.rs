@@ -84,10 +84,8 @@ impl HeadlessHandle {
 
     /// 等待渲染 + 绘制到 TestBackend（便捷组合）
     ///
-    /// 从 `app.session_mgr.current().messages.view_messages` 通过 `vm_convert`
-    /// 构造 v2 ViewModels，让测试走与生产一致的 v2 渲染路径（而非 legacy
-    /// `None` fallback）。这样 headless 测试也覆盖 vm_convert + v2 render
-    /// 的完整链路。
+    /// Phase 2.6 step 7e.9: 从 `v2_test_views` 构造 v2 ViewModels，
+    /// 让测试走与生产一致的 v2 渲染路径。
     ///
     /// Phase 2.6 step 1：同时构造 `SessionSubAgentProbe` 并通过 thread-local
     /// 注入，让测试覆盖与生产 `draw_now` 完全一致的 SubAgent 渲染路径
