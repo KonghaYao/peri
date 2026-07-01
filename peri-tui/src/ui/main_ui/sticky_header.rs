@@ -5,6 +5,7 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{app::App, ui::theme};
 
@@ -58,49 +59,79 @@ pub(super) fn estimate_header_lines(msg: &str, width: u16) -> usize {
         return 1;
     }
     let width = width as usize;
-    let char_count = msg.chars().count();
-    let lines = char_count.div_ceil(width);
+    let display_width = UnicodeWidthStr::width(msg);
+    let lines = display_width.div_ceil(width);
     lines.clamp(1, 3)
 }
 
-/// 将消息文本按宽度分多行（用于渲染）
-fn wrap_message(msg: &str, width: usize, max_lines: usize) -> Vec<String> {
-    if width == 0 {
+/// 将消息文本按显示列宽分多行（用于渲染）。
+///
+/// CJK 字符占 2 列，ASCII 占 1 列。使用 `unicode_width` 计算每字符的
+/// 实际显示宽度，确保中文/英文混排时换行位置正确。
+fn wrap_message(msg: &str, max_width: usize, max_lines: usize) -> Vec<String> {
+    if max_width == 0 {
         return vec![];
     }
 
-    let chars: Vec<char> = msg.chars().collect();
-    let total_chars = chars.len();
-    let mut result = Vec::new();
-    let mut pos = 0;
+    let mut result: Vec<String> = Vec::new();
+    let mut line_start = 0usize; // 当前行起始字符索引（char 偏移）
+    let mut line_width = 0usize; // 当前行已累计的显示列宽
+    let chars: Vec<(usize, char)> = msg.char_indices().collect();
 
-    while pos < total_chars && result.len() < max_lines {
-        let remaining = total_chars - pos;
-        let chunk_size = width.min(remaining);
+    let mut i = 0;
+    while i < chars.len() && result.len() < max_lines {
+        let (_, ch) = chars[i];
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
 
-        if pos + chunk_size >= total_chars {
-            result.push(chars[pos..].iter().collect());
-            break;
+        // 下一个字符会导致本行溢出
+        if line_width + cw > max_width {
+            // 查找本行内的断词点（向前搜索空格/全角空格）
+            let break_at = if let Some(space_pos) = chars[line_start..i]
+                .iter()
+                .rposition(|(_, c)| c.is_ascii_whitespace() || *c == '　')
+            {
+                let abs_pos = line_start + space_pos;
+                // 跳过断词空格
+                if abs_pos + 1 < chars.len() {
+                    abs_pos + 1
+                } else {
+                    i // 断词点后无内容，整行输出
+                }
+            } else {
+                // 无双词点，硬截断
+                i
+            };
+
+            let line_text: String = chars[line_start..break_at]
+                .iter()
+                .map(|(_, c)| *c)
+                .collect();
+            result.push(line_text);
+
+            line_start = break_at;
+            // 跳过行首空格
+            while line_start < chars.len()
+                && (chars[line_start].1.is_ascii_whitespace() || chars[line_start].1 == '　')
+            {
+                line_start += 1;
+            }
+            i = line_start;
+            line_width = 0;
+            continue;
         }
 
-        let chunk_chars = &chars[pos..pos + chunk_size];
-        let break_idx = chunk_chars
-            .iter()
-            .rposition(|&c| c.is_ascii_whitespace() || c == '　')
-            .map(|i| i + 1)
-            .unwrap_or(chunk_size);
+        line_width += cw;
+        i += 1;
+    }
 
-        let line_text: String = chars[pos..pos + break_idx].iter().collect();
+    // 输出最后一行（剩余内容）
+    if line_start < chars.len() && result.len() < max_lines {
+        let line_text: String = chars[line_start..].iter().map(|(_, c)| *c).collect();
         result.push(line_text);
-        pos += break_idx;
-
-        while pos < total_chars && (chars[pos].is_ascii_whitespace() || chars[pos] == '　') {
-            pos += 1;
-        }
     }
 
     // 截断时在最后一行末尾加 …
-    if pos < total_chars && result.len() == max_lines {
+    if i < chars.len() && result.len() == max_lines {
         if let Some(last) = result.last_mut() {
             let trimmed = last.trim_end();
             if !trimmed.is_empty() && !trimmed.ends_with('…') {
@@ -116,4 +147,65 @@ fn wrap_message(msg: &str, width: usize, max_lines: usize) -> Vec<String> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_estimate_header_lines_cjk() {
+        // "你好世界" = 4 字符，但显示宽度 = 8 列
+        // width=8 → 正好 1 行
+        assert_eq!(estimate_header_lines("你好世界", 8), 1);
+        // width=4 → 8/4 = 2 行
+        assert_eq!(estimate_header_lines("你好世界", 4), 2);
+        // "你好世界你好世界" = 8 字符，显示宽度 = 16 列，width=5 → 16/5=4 行 → clamp 到 3
+        assert_eq!(estimate_header_lines("你好世界你好世界", 5), 3);
+    }
+
+    #[test]
+    fn test_estimate_header_lines_ascii() {
+        // "hello" = 5 字符，显示宽度 = 5 列
+        assert_eq!(estimate_header_lines("hello", 10), 1);
+        assert_eq!(estimate_header_lines("hello world this is a test", 10), 3);
+    }
+
+    #[test]
+    fn test_wrap_message_cjk() {
+        // "你好世界" 占 8 列，max_width=6 → 应折行为 2 行
+        let lines = wrap_message("你好世界", 6, 3);
+        assert_eq!(lines.len(), 2, "CJK 8 列在 6 列宽度下应折为 2 行");
+    }
+
+    #[test]
+    fn test_wrap_message_cjk_no_overflow() {
+        // max_width=8，"你好"=4 列，"世界"=4 列，都不溢出
+        let lines = wrap_message("你好你好世界世界", 6, 5);
+        for line in &lines {
+            let w = UnicodeWidthStr::width(line.as_str());
+            assert!(w <= 6, "每行显示宽度应 ≤6，实际 {line:?} = {w} 列");
+        }
+    }
+
+    #[test]
+    fn test_wrap_message_mixed_cjk_ascii() {
+        // "你好Hello" = 2+2+5 = 9 列
+        let lines = wrap_message("你好Hello你好Hello", 8, 5);
+        for line in &lines {
+            let w = UnicodeWidthStr::width(line.as_str());
+            assert!(w <= 8, "每行显示宽度应 ≤8，实际 {line:?} = {w} 列");
+        }
+    }
+
+    #[test]
+    fn test_wrap_message_word_break() {
+        // ASCII 空格断词仍正常工作
+        let lines = wrap_message("hello world foo bar baz", 10, 5);
+        assert!(!lines.is_empty());
+        for line in &lines {
+            let w = UnicodeWidthStr::width(line.as_str());
+            assert!(w <= 10, "每行显示宽度应 ≤10，实际 {line:?} = {w} 列");
+        }
+    }
 }

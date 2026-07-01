@@ -6,16 +6,18 @@ use agent_client_protocol::{
     schema::{
         ForkSessionRequest, ForkSessionResponse, LoadSessionRequest, LoadSessionResponse,
         NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
-        SessionId,
+        SessionId, SessionNotification,
     },
     Client, ConnectionTo, Responder,
 };
 use peri_acp::{dispatch, session::state_builders::build_mode_state};
 
+use peri_acp::dispatch::ReplaySender;
+
 use super::super::{
     commands,
     context::{SessionInfo, StdioContext},
-    freeze,
+    freeze, notification,
 };
 
 /// session/new 处理器：创建 ThreadStore 线程、冻结系统提示词、返回模式/模型/配置选项。
@@ -136,6 +138,12 @@ pub(crate) async fn handle_load(
     // Load history from ThreadStore via dispatch function
     let history = dispatch::load_session_messages(ctx.thread_store.as_ref(), &sid).await;
 
+    // ── ACP v1 spec: replay history via session/update BEFORE responding ──
+    let replay_sender = StdioReplaySender { cx: cx.clone() };
+    if let Err(e) = dispatch::replay_session_history(&sid, &history, &replay_sender).await {
+        tracing::warn!(session_id = %sid, error = %e, "session/load: history replay failed, continuing");
+    }
+
     // Insert into sessions if not already present
     {
         let mut sessions = ctx.sessions.write();
@@ -160,16 +168,20 @@ pub(crate) async fn handle_load(
         }
     }
 
+    // Send config options via session/update notification (for async update)
+    notification::send_config_update(ctx, &SessionId::new(&*sid), &cx);
+
     let modes = build_mode_state(&ctx.permission_mode);
     let config_options = {
         let c = ctx.peri_config.read();
         let p = ctx.provider.read();
         dispatch::config_update::make_config_options(&c, &p, ctx.permission_mode.load())
     };
-    let resp = LoadSessionResponse::new()
-        .modes(modes)
-        .config_options(config_options);
-    let _ = responder.respond(resp);
+    let _ = responder.respond(
+        LoadSessionResponse::new()
+            .modes(modes)
+            .config_options(config_options),
+    );
 
     // Scan skills for AvailableCommands notification
     commands::send_available_commands(
@@ -306,4 +318,21 @@ pub(crate) async fn handle_fork(
     let resp = ForkSessionResponse::new(SessionId::new(new_session_id));
     let _ = responder.respond(resp);
     Ok(())
+}
+
+/// Adapts `ConnectionTo<Client>` into a `ReplaySender` for the stdio path.
+struct StdioReplaySender {
+    cx: ConnectionTo<Client>,
+}
+
+#[async_trait::async_trait]
+impl ReplaySender for StdioReplaySender {
+    async fn send(
+        &self,
+        notif: SessionNotification,
+    ) -> Result<(), peri_acp::dispatch::ReplayError> {
+        self.cx
+            .send_notification(notif)
+            .map_err(|e| peri_acp::dispatch::ReplayError::SendFailed(e.to_string()))
+    }
 }
