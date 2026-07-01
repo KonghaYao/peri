@@ -14,6 +14,24 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::panel_types::PanelKind;
 
+// ──────────────────────────────────────────────────────────────────────────
+// Popup 系统：S7 引入。4 种交互弹窗，由 ACP 事件或全局快捷键触发。
+// ──────────────────────────────────────────────────────────────────────────
+
+/// 4 种交互弹窗枚举——由 AcpEvent 或本地操作触发。
+///
+/// - **Hitl**：来自 `AcpEventData::HitlPending`，工具调用审批
+/// - **AskUser**：来自 `AcpEventData::AskUser`，Agent 向用户提问
+/// - **Rewind**：来自 `AcpEventData::RewindPreview`，回退预览（也可由双击 Esc 触发）
+/// - **OAuth**：来自 `AcpEventData::OauthNeeded`，OAuth 授权
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupKind {
+    Hitl,
+    AskUser,
+    Rewind,
+    OAuth,
+}
+
 /// 类型别名：将 StoreState 映射为 Atom，保持命名一致性
 pub type Atom<T> = StoreState<T>;
 
@@ -151,6 +169,9 @@ pub static OPEN_PANELS: OnceLock<Atom<Vec<PanelKind>>> = OnceLock::new();
 /// 当前激活面板（栈顶），快捷渲染用。None = 无面板。
 pub static ACTIVE_PANEL: OnceLock<Atom<Option<PanelKind>>> = OnceLock::new();
 
+/// 当前激活弹窗。None = 无弹窗。弹窗优先级高于面板——同时存在时弹窗先消费 Esc。
+pub static POPUP_KIND: OnceLock<Atom<Option<PopupKind>>> = OnceLock::new();
+
 /// 初始化所有全局 Atom。
 ///
 /// 必须在 tokio 运行时启动后、任何组件渲染前调用。
@@ -169,6 +190,7 @@ pub fn init_atoms() {
     CRON_JOBS.get_or_init(|| Atom::new(Vec::new()));
     OPEN_PANELS.get_or_init(|| Atom::new(Vec::new()));
     ACTIVE_PANEL.get_or_init(|| Atom::new(None));
+    POPUP_KIND.get_or_init(|| Atom::new(None));
     // SUBMIT_TX 由 entry::run_kit_fullscreen 在 build_app_and_acp 之后初始化
     // （需要 mpsc::unbounded_channel 的 rx 配对），不在此处 get_or_init。
 }

@@ -4,6 +4,7 @@ use crate::kit::atoms;
 use crate::kit::event_handlers;
 use crate::kit::layout::SessionColumn;
 use crate::kit::panel_overlay::PanelOverlay;
+use crate::kit::popup_overlay::PopupOverlay;
 use crate::kit::setup_wizard::SetupWizard;
 use crate::kit::status_bar::StatusBar;
 use ratatui_kit::{
@@ -26,9 +27,11 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let state = acp_state.read();
     let wizard_active = state.wizard_active;
     let _ = popup_active.get();
-    drop(state);
+    let _ = state; // AcpStateSnapshot 借用解除
 
-    // 设置向导覆盖（最高优先级）；否则显示主布局 + 面板覆盖层
+    // 设置向导覆盖（最高优先级）；否则显示主布局 + 面板覆盖层 + 弹窗覆盖层
+    // 叠加顺序：SessionColumn/StatusBar → PanelOverlay → PopupOverlay
+    // （后到子节点覆盖前节点；弹窗在面板之上）
     if wizard_active {
         element!(
             View(
@@ -49,6 +52,7 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 SessionColumn()
                 StatusBar()
                 PanelOverlay()
+                PopupOverlay()
             }
         )
     }

@@ -26,6 +26,7 @@ pub fn spawn_acp_bridge(
             current_turn: CurrentTurn::new(),
             is_loading: false,
             popup_active: false,
+            popup_kind: None,
         };
 
         loop {

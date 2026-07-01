@@ -24,8 +24,10 @@ pub struct BridgeState {
     pub current_turn: CurrentTurn,
     /// Agent 是否正在加载中
     pub is_loading: bool,
-    /// 是否有交互弹窗挂起
+    /// 是否有交互弹窗挂起（仅作为状态栏的"是否有弹窗"指示，精确路由用 popup_kind）
     pub popup_active: bool,
+    /// S7：精确弹窗类型，由 AcpEvent 直接映射。None = 无弹窗。
+    pub popup_kind: Option<crate::kit::atoms::PopupKind>,
 }
 
 // ---------------------------------------------------------------------------
@@ -133,9 +135,29 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         Prediction(_) | FileSuggestions(_) => {}
 
         // ── §4.5 Interaction events ──
-        HitlPending(_) | AskUser(_) | RewindPreview(_) | OauthNeeded(_) => {
-            state.popup_active = true;
+        // S7：把每个交互事件映射到具体 PopupKind，让 PopupOverlay 精确路由
+        HitlPending(_) => {
+            state.popup_kind = Some(PopupKind::Hitl);
             state.variant = 2;
+            push_popup_kind(state);
+            push_acp_state(state);
+        }
+        AskUser(_) => {
+            state.popup_kind = Some(PopupKind::AskUser);
+            state.variant = 2;
+            push_popup_kind(state);
+            push_acp_state(state);
+        }
+        RewindPreview(_) => {
+            state.popup_kind = Some(PopupKind::Rewind);
+            state.variant = 2;
+            push_popup_kind(state);
+            push_acp_state(state);
+        }
+        OauthNeeded(_) => {
+            state.popup_kind = Some(PopupKind::OAuth);
+            state.variant = 2;
+            push_popup_kind(state);
             push_acp_state(state);
         }
 
@@ -174,4 +196,11 @@ fn push_acp_state(state: &mut BridgeState) {
         slash_hint_active: *SLASH_HINT_ACTIVE.get().unwrap().read(),
     };
     *ACP_STATE.get().unwrap().write() = snapshot;
+}
+
+/// 将 BridgeState.popup_kind 写入 POPUP_KIND Atom（S7）。
+fn push_popup_kind(state: &BridgeState) {
+    if let Some(atom) = POPUP_KIND.get() {
+        *atom.write() = state.popup_kind;
+    }
 }

@@ -19,6 +19,7 @@ pub mod message_area;
 pub mod panel_overlay;
 pub mod panel_registry;
 pub mod panels;
+pub mod popup_overlay;
 pub mod popups;
 pub mod service_snapshot;
 pub mod setup_wizard;

@@ -29,9 +29,10 @@ use ratatui_kit::{
 
 use super::atoms::{
     ACTIVE_PANEL, AT_MENTION_ACTIVE, MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL, OPEN_PANELS,
-    PROVIDER_HIGHLIGHT_UNTIL, SLASH_HINT_ACTIVE,
+    POPUP_KIND, PROVIDER_HIGHLIGHT_UNTIL, SLASH_HINT_ACTIVE,
 };
 use crate::kit::panel_registry::{close_active_panel, from_key_code, open_panel};
+use crate::kit::popup_overlay::close_popup;
 
 /// Global Layer: 不可阻断的快捷键。
 ///
@@ -100,7 +101,17 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
 
             // Esc: 关闭优先级 popup → @mention/slash → 激活面板
             KeyCode::Esc => {
-                // 先关 @mention / slash_hint
+                // 优先关弹窗（最高优先级，覆盖面板和输入辅助）
+                let popup_open = POPUP_KIND
+                    .get()
+                    .map(|a| a.read().is_some())
+                    .unwrap_or(false);
+                if popup_open {
+                    close_popup();
+                    return;
+                }
+
+                // 再关 @mention / slash_hint
                 let mention = AT_MENTION_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
                 let slash = SLASH_HINT_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
                 if mention || slash {
@@ -113,7 +124,7 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                     return;
                 }
 
-                // 再关激活面板
+                // 最后关激活面板
                 let has_active = ACTIVE_PANEL
                     .get()
                     .map(|a| a.read().is_some())
