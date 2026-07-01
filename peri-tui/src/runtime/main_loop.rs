@@ -100,6 +100,18 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // popup expected prev-question). SM still processes Tick/AcpEvent/
         // Paste/Mouse/Resize — only Key dispatch is suppressed.
         let popup_active = app.is_interaction_popup_active();
+        // Cron #38: setup wizard also needs the popup-style SM Key bypass.
+        // Wizard is NOT included in is_interaction_popup_active (it lives on
+        // GlobalUiState, not InteractionPrompt), so without this flag the SM
+        // would run Enter / Ctrl+T / Ctrl+P / BackTab / Esc behind the
+        // wizard. is_sm_handled_shortcut returns true for some of these
+        // (Enter when InputState is empty, Ctrl+T, Ctrl+P, BackTab), so the
+        // keyboard fallback would also be blocked — wizard never sees the
+        // key. User-visible symptom: wizard cannot advance past the first
+        // step because Enter is silently consumed by the SM's empty-input
+        // no-op (idle.rs:276-279). Ctrl+P silently opens a Model panel
+        // OVER the wizard.
+        let wizard_active = app.global_ui.setup_wizard.is_some();
 
         let sm_event: SmEvent = event.clone().into();
         let new_state: State;
@@ -127,11 +139,31 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                 new_state = ns;
                 sm_effects = fx;
             }
-            _ if popup_active && matches!(event, TuiEvent::Key(_)) => {
+            _ if (popup_active || wizard_active) && matches!(event, TuiEvent::Key(_)) => {
                 // Cron #25: SM no-op for Key events while popup is active.
                 // The keyboard fallback will handle the key (popups::handle_popups
                 // routes to the active popup). Returning the original state
                 // unchanged preserves InputState / view / double_esc_timer.
+                //
+                // Cron #38: extended to also cover setup_wizard. The wizard
+                // is NOT in is_interaction_popup_active (it lives on
+                // GlobalUiState, not InteractionPrompt). Without this bypass:
+                //   - Enter was stolen by SM's empty-input no-op (idle.rs:
+                //     276-279), so wizard could not advance past the first
+                //     step. HIGH severity user-visible bug.
+                //   - Ctrl+T / Ctrl+B / Ctrl+O / Ctrl+P / BackTab all
+                //     returned true from is_sm_handled_shortcut, so the
+                //     keyboard fallback was also blocked — wizard never saw
+                //     these keys. SM side effects fired silently behind the
+                //     wizard: cycle model, open Model panel, etc.
+                //   - Esc advanced the SM DoubleEscTracker simultaneously
+                //     with the wizard's own Esc handler, causing premature
+                //     single-tap quit after wizard dismissal.
+                // The wizard's own Ctrl+C double-tap handler
+                // (setup_wizard.rs:13-31) and key routing
+                // (keyboard.rs:55 setup_wizard::handle_setup_wizard) work
+                // correctly once the SM bypass lets the keyboard fallback
+                // receive the key.
                 new_state = match state {
                     State::Idle(s) => State::Idle(s),
                     State::Streaming(s) => State::Streaming(s),
@@ -197,15 +229,16 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         let mut effect_did_mutate_textarea = false;
         let fallback_effects = match &event {
             TuiEvent::Key(key)
-                if !is_sm_handled_shortcut(
-                    key,
-                    &state,
-                    was_idle,
-                    is_slash_command,
-                    popup_active,
-                    at_mention_active,
-                    slash_hint_active,
-                ) =>
+                if wizard_active
+                    || !is_sm_handled_shortcut(
+                        key,
+                        &state,
+                        was_idle,
+                        is_slash_command,
+                        popup_active,
+                        at_mention_active,
+                        slash_hint_active,
+                    ) =>
             {
                 keyboard_did_run = true;
                 match keyboard::handle_key_event(app, *key) {
@@ -1716,6 +1749,47 @@ mod tests {
         assert!(
             !inline_overlay_active_for_enter(&TuiEvent::Tick, true, false),
             "Cron #37: Non-Key events are not affected by this helper"
+        );
+    }
+
+    // ── Cron #38: setup wizard SM bypass regression tests ───────────────
+    //
+    // 背景：setup_wizard 不在 is_interaction_popup_active 内（它住在
+    // GlobalUiState，不是 InteractionPrompt）。Cron #38 之前，wizard
+    // 激活时 SM 仍然处理 Key events：
+    //   - Enter 被 SM 的空输入 no-op 吞掉（idle.rs:276-279），wizard
+    //     无法前进到下一步。HIGH 用户可见 bug。
+    //   - Ctrl+T / Ctrl+P / BackTab 被 is_sm_handled_shortcut 返回
+    //     true 阻止键盘 fallback，wizard 收不到这些键，SM 在背后静默
+    //     副作用（cycle model、开 Model panel、cycle permission）。
+    //   - Esc 同时推进 SM DoubleEscTracker 和 wizard 自己的 Esc handler，
+    //     导致 wizard 关闭后单次 Esc 退出 app。
+    //
+    // 修复：新增 wizard_active 标志，扩展 popup_active bypass 也覆盖
+    // wizard。键盘 fallback 条件改为 `wizard_active || !is_sm_handled
+    // _shortcut(...)` 确保 wizard 收到所有按键。
+    //
+    // 这些测试验证 helper 级别的行为不变（wizard 不影响 is_sm_handled
+    // _shortcut），bypass 是在 main_loop 层（集成测试需要 App 全栈，
+    // 这里只覆盖单元可测的部分）。
+
+    #[test]
+    fn test_is_sm_handled_shortcut_unchanged_by_wizard_flag() {
+        // Cron #38: wizard_active 是 main_loop 层的标志，不进入
+        // is_sm_handled_shortcut。helper 行为对 wizard 场景应保持原样
+        // （Enter 仍返回 true 等）—— bypass 完全由 main_loop 的 match
+        // arm 处理。这条测试是「负向」断言：确认 helper 没有意外
+        // 增加 wizard 参数。
+        let state = idle_state();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            is_sm_handled_shortcut(&enter, &state, true, false, false, false, false),
+            "Cron #38: is_sm_handled_shortcut 行为不变 — wizard bypass 在 main_loop 层"
+        );
+        let ctrl_t = ctrl('t');
+        assert!(
+            is_sm_handled_shortcut(&ctrl_t, &state, true, false, false, false, false),
+            "Cron #38: Ctrl+T 仍由 SM 处理标志不变 — wizard bypass 在 main_loop 层"
         );
     }
 }
