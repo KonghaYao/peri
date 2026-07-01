@@ -163,14 +163,25 @@ fn activate_provider(provider_id: &str) {
         return;
     };
     let mut cfg = handle.write();
-    if cfg.config.active_provider_id == provider_id {
+    if !apply_provider_switch(&mut cfg, provider_id) {
         return;
     }
-    cfg.config.active_provider_id = provider_id.to_string();
     let snap = cfg.clone();
     drop(cfg);
     let _ = crate::config::save(&snap);
     tracing::info!(provider_id, "LoginPanel: active_provider_id switched");
+}
+
+/// 纯函数：若 `provider_id` 与当前 active_provider_id 不同，则更新并返回 true；
+/// 否则返回 false（无变更，调用方应跳过持久化）。
+///
+/// 提取为独立函数便于单测——避免依赖全局 atom 和磁盘 IO。
+fn apply_provider_switch(cfg: &mut crate::config::PeriConfig, provider_id: &str) -> bool {
+    if cfg.config.active_provider_id == provider_id {
+        return false;
+    }
+    cfg.config.active_provider_id = provider_id.to_string();
+    true
 }
 
 fn close_panel() {
@@ -180,5 +191,64 @@ fn close_panel() {
     }
     if let Some(atom) = OPEN_PANELS.get() {
         atom.write().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PeriConfig;
+
+    #[test]
+    fn test_apply_provider_switch_updates_when_different() {
+        let mut cfg = PeriConfig::default();
+        // 默认 active_provider_id 为空
+        assert!(cfg.config.active_provider_id.is_empty());
+
+        let changed = apply_provider_switch(&mut cfg, "anthropic-prod");
+        assert!(changed, "切换到不同 provider 应返回 true");
+        assert_eq!(cfg.config.active_provider_id, "anthropic-prod");
+    }
+
+    #[test]
+    fn test_apply_provider_switch_noop_when_same() {
+        let mut cfg = PeriConfig::default();
+        cfg.config.active_provider_id = "openai-prod".into();
+
+        let changed = apply_provider_switch(&mut cfg, "openai-prod");
+        assert!(!changed, "切换到相同 provider 应返回 false（无变更）");
+        assert_eq!(cfg.config.active_provider_id, "openai-prod");
+    }
+
+    #[test]
+    fn test_apply_provider_switch_to_empty_string_still_changes() {
+        // 边界：从有值切到空串——仍视为变更（调用方负责保证 provider_id 有效）
+        let mut cfg = PeriConfig::default();
+        cfg.config.active_provider_id = "openai-prod".into();
+
+        let changed = apply_provider_switch(&mut cfg, "");
+        assert!(changed, "从有值切到空串仍是状态变更");
+        assert!(cfg.config.active_provider_id.is_empty());
+    }
+
+    #[test]
+    fn test_apply_provider_switch_persists_other_fields() {
+        // 切换 provider 不应破坏其他字段
+        let mut cfg = PeriConfig::default();
+        cfg.config.providers.push(crate::config::ProviderConfig {
+            id: "p1".into(),
+            provider_type: "anthropic".into(),
+            api_key: "sk-test".into(),
+            ..Default::default()
+        });
+        cfg.config.active_alias = "sonnet".into();
+
+        let changed = apply_provider_switch(&mut cfg, "p1");
+        assert!(changed);
+        assert_eq!(cfg.config.active_provider_id, "p1");
+        // 其他字段保留
+        assert_eq!(cfg.config.active_alias, "sonnet");
+        assert_eq!(cfg.config.providers.len(), 1);
+        assert_eq!(cfg.config.providers[0].id, "p1");
     }
 }
