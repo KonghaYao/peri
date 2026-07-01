@@ -3,7 +3,7 @@ use super::{
     MessageViewModel,
 };
 
-/// 将 view_messages 中相邻的只读 ToolBlock 聚合为 ToolCallGroup（支持跨类别，跳过空 thinking bubble）
+/// 将 ViewModel 列表中相邻的只读 ToolBlock 聚合为 ToolCallGroup（支持跨类别，跳过空 thinking bubble）
 pub fn aggregate_tool_groups(messages: &mut Vec<MessageViewModel>) {
     aggregate_tail_tool_groups(messages, 0);
 }

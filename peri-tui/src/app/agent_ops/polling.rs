@@ -89,7 +89,6 @@ impl App {
         let updated = !messages.is_empty();
         for msg in messages {
             self.push_system_note(msg);
-            self.request_rebuild();
         }
         updated
     }

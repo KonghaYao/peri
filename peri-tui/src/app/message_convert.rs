@@ -6,6 +6,7 @@ use crate::ui::message_view::{aggregate_tool_groups, ContentBlockView, MessageVi
 ///
 /// **这是唯一的转换入口**——流式渲染和历史恢复都调用此函数。
 /// 从已删除的 message_pipeline/transform.rs 提取为独立模块。
+#[allow(dead_code)]
 pub fn messages_to_view_models(msgs: &[BaseMessage], cwd: &str) -> Vec<MessageViewModel> {
     let mut vms: Vec<MessageViewModel> = Vec::with_capacity(msgs.len());
     let mut prev_ai_tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();

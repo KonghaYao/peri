@@ -22,9 +22,7 @@ impl App {
     }
 
     /// P5: No-op — sync rendering replaces pipeline rebuild
-    pub fn flush_rebuild(&mut self) {
-        self.request_rebuild();
-    }
+    pub fn flush_rebuild(&mut self) {}
 
     /// 批量处理队列中所有待处理事件，复用 handle_agent_event 逻辑
     pub fn process_pending_events(&mut self) {

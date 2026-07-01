@@ -59,7 +59,6 @@ impl App {
         // The compacted transcript re-appears on the next ViewCommit triggered by
         // user's next input. Strictly better than showing stale pre-compact content
         // (which made compact look broken).
-        self.session_mgr.current_mut().messages.round_start_vm_idx = 0;
         self.global_ui.pending_view_rewind_to = Some(0);
         self.push_system_note(compact_label);
 
@@ -93,7 +92,6 @@ impl App {
         // (unlike compact which had 2 headless tests migrated in Cron #41),
         // so this retirement needs no test migration.
         let label = format!("↩ {summary}");
-        self.session_mgr.current_mut().messages.round_start_vm_idx = 0;
 
         // Cron #29 P1 fix: route rewind summary + state.view truncation to v2.
         //
@@ -315,16 +313,10 @@ mod tests {
             messages,
         );
 
-        // 早返回路径不设置 flag —— 它没有截断 view_messages 的语义（只清了
-        // micro 消息）。production render 仍正常显示 state.view。
+        // 早返回路径不设置 flag
         assert_eq!(
             app.global_ui.pending_view_rewind_to, None,
             "micro_cleared > 0 early-return path must NOT set pending_view_rewind_to"
         );
     }
-
-    // Cron #46 (Phase 2.6 step 7e.9): `test_handle_rewind_completed_does_not_write_view_messages`
-    // removed — the `view_messages` field it asserted on is being deleted. The regression
-    // it guarded (rewind handler pushing to v1 view_messages) is now structurally
-    // impossible because apply_rebuild_all has been deleted.
 }

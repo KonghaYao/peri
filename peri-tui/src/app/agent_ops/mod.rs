@@ -53,7 +53,6 @@ impl App {
                         .set_verb(Some("思考中…"));
                 }
                 // 触发 rebuild 刷新 SubAgentGroup 卡片显示
-                self.request_rebuild();
                 (true, false, false)
             }
             AgentEvent::SubAgentEnd {
@@ -203,7 +202,6 @@ impl App {
                     None => false,
                 };
                 if routed_to_subagent {
-                    self.request_rebuild();
                     return (true, false, false);
                 }
                 // Cron #43 (Phase 2.6 step 7e.6 + Bundle 2 item 1): retired
@@ -219,7 +217,6 @@ impl App {
                 // tool_call_count++, spinner_state.set_mode/set_verb) are still
                 // load-bearing for the "Reading path..." / "Writing file..."
                 // spinner display during tool execution.
-                self.request_rebuild();
                 (true, false, false)
             }
             AgentEvent::ToolEnd {
@@ -238,7 +235,6 @@ impl App {
                         .subagent_status
                         .update_child_tool_output(src, &tool_call_id, output.clone(), is_error)
                     {
-                        self.request_rebuild();
                         return (true, false, false);
                     }
                     // SubAgent 路由失败 fallback：source_agent_id 匹配的 SubAgent
@@ -270,7 +266,6 @@ impl App {
                 //
                 // For source_agent_id=None (main agent) paths, no SubAgent
                 // routing is attempted — the v2 SM is the sole handler.
-                self.request_rebuild();
                 (true, false, false)
             }
             AgentEvent::AssistantChunk { source_agent_id } => {
@@ -278,7 +273,6 @@ impl App {
                 // - 主 Agent（None）：保持原行为（清 retry、设 spinner、agent_replied）
                 // - 子 Agent（Some）：仅触发 rebuild，跳过副作用
                 if source_agent_id.is_some() {
-                    self.request_rebuild();
                     return (true, false, false);
                 }
                 self.session_mgr.current_mut().agent.retry_status = None;
@@ -319,7 +313,6 @@ impl App {
                 // NOTE: extend semantics are correct here — StateSnapshot(msgs)
                 // is a legacy v1 event carrying incremental messages, not a
                 // full transcript snapshot.
-                self.request_rebuild();
                 (true, false, false)
             }
             AgentEvent::TurnCommitted { messages, steps } => {

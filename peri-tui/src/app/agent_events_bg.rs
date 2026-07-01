@@ -98,7 +98,6 @@ impl App {
         if was_focused {
             self.session_mgr.current_mut().focused_instance_id = None;
             self.session_mgr.current_mut().ui.bg_bar_cursor = None;
-            self.request_rebuild();
         }
 
         // Phase 2.3: 同步完成状态到 SubAgentStatusMap（v2 渲染时覆盖 DTO）

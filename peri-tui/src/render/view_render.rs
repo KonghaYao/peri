@@ -35,8 +35,7 @@ pub struct SubAgentRenderInfo {
     ///
     /// 当 v2 DTO `SubAgentGroupData.view_models` 为空（ACP 层 view_mapper
     /// 生成的 placeholder）时，渲染层从此字段取子内容。app 层通过
-    /// [`crate::render::vm_convert::message_view_models_to_v2`] 把 v1
-    /// `MessageViewModel::SubAgentGroup.recent_messages` 转换为 v2 VMs
+    /// 通过 `subagent_status` 状态 probe 把 SubAgent 运行时状态转换为 v2 VMs
     /// 后填充此字段。
     pub recent_messages: Vec<ViewModel>,
 }
@@ -343,8 +342,7 @@ fn render_subagent_group(
 
     // 子内容来源优先级：
     // 1. v2 DTO `view_models`（ACP 层填充，当前永久为空 placeholder）
-    // 2. status probe 的 `recent_messages`（app 层从 v1 view_messages
-    //    通过 vm_convert 注入；Phase 2.6 完成前的过渡期使用）
+    // 2. status probe 的 `recent_messages`（app 层填充）
     let children: Vec<ViewModel> = if !data.view_models.is_empty() {
         data.view_models.clone()
     } else if let Some(ref s) = status {

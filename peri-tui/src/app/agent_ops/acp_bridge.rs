@@ -86,7 +86,7 @@ impl App {
 impl App {
     /// Peri 模式：将 session/update JSON 转换为 AgentEvent 并派发。
     ///
-    /// 与 External 模式不同：External 模式直接操作 view_messages；
+    /// 与 External 模式不同：External 模式直接操作消息流；
     /// Peri 模式转换为 AgentEvent 走 handle_agent_event() → pipeline。
     pub(crate) fn handle_session_update_peri(
         &mut self,
@@ -128,7 +128,6 @@ impl App {
                             .subagent_status
                             .append_child_text(src, text);
                         if routed {
-                            self.request_rebuild();
                             return (true, false, false);
                         }
                         // source 匹配失败 → fallback 主路径（保留原有 AssistantChunk 信号语义）

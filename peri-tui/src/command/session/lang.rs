@@ -54,7 +54,6 @@ impl Command for LangCommand {
                     let _ =
                         App::save_config(&cfg_guard, app.services.config_path_override.as_deref());
                 }
-                app.request_rebuild();
                 let msg = app
                     .services
                     .lc

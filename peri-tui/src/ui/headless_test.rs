@@ -50,7 +50,6 @@ async fn test_user_message_renders() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
     // v2: seed user bubble 到 v2_test_views
     app.seed_v2_user_bubble("hello from user");
-    app.render_rebuild();
     handle.wait_for_render().await;
     handle
         .terminal
@@ -325,7 +324,6 @@ async fn test_sticky_header_shows_after_submit() {
     // 填充足够多的消息使消息区产生滚动
     for i in 0..30 {
         app.seed_v2_user_bubble(&format!("message line {}", i));
-        app.render_rebuild();
         handle.wait_for_render().await;
     }
 
@@ -396,7 +394,6 @@ async fn test_sticky_header_shows_last_message_not_first() {
     // 填充足够多的消息使消息区产生滚动
     for i in 0..30 {
         app.seed_v2_user_bubble(&format!("padding line {}", i));
-        app.render_rebuild();
         handle.wait_for_render().await;
     }
 
@@ -432,7 +429,6 @@ async fn test_sticky_header_truncation_long_message() {
     // 填充足够多的消息使消息区产生滚动
     for i in 0..30 {
         app.seed_v2_user_bubble(&format!("padding {}", i));
-        app.render_rebuild();
         handle.wait_for_render().await;
     }
 
@@ -1362,7 +1358,6 @@ async fn test_background_task_status_bar() {
     app.session_mgr.current_mut().messages.round_start_vm_idx =
         app.session_mgr.current_mut().messages.v2_test_views.len();
     app.seed_v2_user_bubble("test");
-    app.render_rebuild();
 
     app.session_mgr.current_mut().background_agents = vec![
         crate::app::RunningBgAgent {
@@ -1765,7 +1760,6 @@ async fn test_background_agents_lifecycle() {
     app.session_mgr.current_mut().messages.round_start_vm_idx =
         app.session_mgr.current_mut().messages.v2_test_views.len();
     app.seed_v2_user_bubble("test query");
-    app.render_rebuild();
 
     // SubAgentStart(bg=true) → push agent
     app.push_agent_event(AgentEvent::SubAgentStart {

@@ -52,7 +52,6 @@ pub(super) fn handle_setup_wizard(app: &mut App, input: &Input) -> Option<Action
                                 .current_mut()
                                 .messages
                                 .push_system_note(msg_text);
-                            app.render_rebuild();
                         }
                     }
                 }

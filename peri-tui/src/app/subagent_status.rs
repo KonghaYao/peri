@@ -61,8 +61,7 @@ pub struct SubAgentStatus {
     /// - 未来可扩展 `AssistantChunk` / `AiReasoning` 路由
     ///
     /// 这是 v2 渲染路径的**权威数据源**，独立于 v1 `view_messages`。
-    /// `SessionSubAgentProbe::lookup_by_agent_id` 优先读取此字段；
-    /// 仅当为空时回退到从 `view_messages` 提取（Phase 2.6 完整退役前的兼容路径）。
+    /// `SessionSubAgentProbe::lookup_by_agent_id` 优先读取此字段。
     pub child_messages: Vec<ViewModel>,
 }
 

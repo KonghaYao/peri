@@ -1,17 +1,6 @@
 use super::*;
 
 impl App {
-    /// P5: Synchronous rendering from state machine State.view + current_turn.
-    /// render_rebuild is now a no-op — rendering happens immediately in draw().
-    pub(crate) fn render_rebuild(&self) {
-        // P5: no-op, sync rendering from state machine
-    }
-
-    /// P5: request_rebuild is now a no-op — sync rendering from state machine.
-    pub(crate) fn request_rebuild(&mut self) {
-        // P5: no-op, sync rendering from state machine
-    }
-
     /// 添加系统通知并记录锚点位置。
     pub(crate) fn push_system_note(&mut self, content: String) {
         let session = self.session_mgr.current_mut();

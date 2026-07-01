@@ -45,22 +45,7 @@ impl App {
         }
         self.session_mgr.current_mut().agent.retry_status = None;
 
-        // Phase 2.6 step 7e.1: Retired the v1 is_streaming=false mutation
-        // on the last AssistantBubble. Confirmed dead in production:
-        // vm_convert.rs:293 always emits is_streaming: false when bridging
-        // v1 → v2, so v2 rendering never reads the v1 flag. The v1 fallback
-        // render path (message_area.rs:155) is only triggered by tests;
-        // production always passes v2_view_models=Some.
-
-        if !self.session_mgr.current_mut().agent.reconcile_already_done {
-            let prefix_len = self.session_mgr.current_mut().messages.round_start_vm_idx;
-            // P5: No has_snapshot_this_round() check — simpler defense
-            if prefix_len == 0 {
-                tracing::warn!("handle_done: prefix_len=0, skipping rebuild to preserve view");
-            } else {
-                self.request_rebuild();
-            }
-        }
+        // v2 渲染不再读取 v1 is_streaming 标志
 
         if !self.session_mgr.current_mut().background_agents.is_empty() {
             self.session_mgr
@@ -634,7 +619,7 @@ mod tests {
 
         let _ = app.handle_interrupted(&view_slice);
 
-        // Branch 2 should fire: flag set + view_messages truncated
+        // Branch 2 should fire: flag set + pending_view_rewind_to set
         assert_eq!(
             app.global_ui.pending_view_rewind_to,
             Some(0),

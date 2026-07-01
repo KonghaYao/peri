@@ -21,11 +21,11 @@
 //! → 从 v2 `State.view` + `current_turn` 派生 v2_vms。
 //! 状态机的 `ViewStore::for_render()` + `CurrentTurn::view_models()` 已就绪。
 
-pub mod block_mode;
+// pub mod block_mode;  // P5 skeleton — uncomment when implementing
 pub mod throttle;
 pub mod view_render;
 
-pub use throttle::{RenderReason, Throttle};
+// pub(crate) use throttle::{RenderReason, Throttle};  // P5 skeleton — enable when integrating
 
 use std::time::Instant;
 

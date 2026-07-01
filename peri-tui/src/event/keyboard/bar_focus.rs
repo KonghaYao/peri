@@ -25,7 +25,6 @@ pub(super) fn handle_focused_only(
         if matches!(key_event.code, KeyCode::Esc) {
             app.session_mgr.current_mut().focused_instance_id = None;
             app.session_mgr.current_mut().ui.bg_bar_cursor = None;
-            app.request_rebuild();
         }
         return Some(Action::Redraw);
     }
@@ -80,7 +79,6 @@ pub(super) fn handle_bar_key_event(
                 }
             }
             app.session_mgr.current_mut().ui.bg_bar_cursor = None;
-            app.request_rebuild();
             Action::Redraw
         }
         _ => Action::Redraw,

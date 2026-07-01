@@ -36,7 +36,7 @@ mod agent_submit;
 mod ask_user_ops;
 mod ask_user_prompt;
 pub use ask_user_prompt::AskUserBatchPrompt;
-mod cron_ops;
+
 mod cron_state;
 mod hint_ops;
 pub use hint_ops::SlashHintState;
@@ -73,7 +73,6 @@ mod thread_ops;
 pub mod agent;
 pub mod events;
 mod message_convert;
-pub use message_convert::messages_to_view_models;
 mod provider;
 pub mod text_selection;
 pub mod tool_display;
