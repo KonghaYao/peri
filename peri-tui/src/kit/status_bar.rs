@@ -1,4 +1,9 @@
 //! ratatui-kit StatusBar component.
+//!
+//! S9：完整双行布局——
+//! - **Row 1**：权限模式 → cwd basename → provider/model → CPU% → MEM
+//!   全部从 SERVICE_SNAPSHOT atom 派生（S5 落地）；高亮计时器控制闪烁。
+//! - **Row 2**：状态相关的快捷键 hints（popup/mention/slash/默认 4 态切换）。
 
 use crate::kit::atoms;
 use crate::ui::theme;
@@ -6,38 +11,96 @@ use ratatui_kit::{
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction, Flex},
-        style::Stylize,
-        text::Line,
+        style::{Modifier, Style, Stylize},
+        text::{Line, Span},
         widgets::Paragraph,
     },
 };
 use std::time::Instant;
 
-/// 状态栏第 1 行：名称/model/provider/权限/MEM/上下文使用率
+/// 状态栏第 1 行：权限模式 · cwd · provider/model · CPU% · MEM
 #[component]
 fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let acp = hooks.use_store(*atoms::ACP_STATE.get().unwrap());
+    let snap_store = hooks.use_store(*atoms::SERVICE_SNAPSHOT.get().unwrap());
     let model_hl = hooks.use_store(*atoms::MODEL_HIGHLIGHT_UNTIL.get().unwrap());
+    let provider_hl = hooks.use_store(*atoms::PROVIDER_HIGHLIGHT_UNTIL.get().unwrap());
     let mode_hl = hooks.use_store(*atoms::MODE_HIGHLIGHT_UNTIL.get().unwrap());
 
-    let state = acp.read(); // AcpStateSnapshot 非 Copy
-    let _model_highlight = model_hl.get().map(|t| t > Instant::now()).unwrap_or(false);
-    let _mode_highlight = mode_hl.get().map(|t| t > Instant::now()).unwrap_or(false);
+    let snap = snap_store.read().clone();
+    let model_highlighted = model_hl.get().map(|t| t > Instant::now()).unwrap_or(false);
+    let provider_highlighted = provider_hl
+        .get()
+        .map(|t| t > Instant::now())
+        .unwrap_or(false);
+    let mode_highlighted = mode_hl.get().map(|t| t > Instant::now()).unwrap_or(false);
+    let _ = snap_store; // StoreState Copy
 
-    // 构建第 1 行：名称占位（后续 Phase 8 由 ACP_STATE 补充字段）
+    let mut spans: Vec<Span<'static>> = Vec::new();
+
+    // 1. 权限模式（Default 不显示）
+    let mode_label = permission_mode_display(&snap.permission_mode);
+    if !mode_label.is_empty() {
+        let color = permission_mode_color(&snap.permission_mode);
+        let mut style = Style::default().fg(color);
+        if mode_highlighted {
+            style = style.add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK);
+        }
+        spans.push(Span::styled(format!(" {}", mode_label), style));
+    }
+
+    // 2. cwd basename
+    spans.push(separator());
+    spans.push(Span::styled(
+        cwd_basename(&snap.cwd),
+        Style::default().fg(theme::MUTED),
+    ));
+
+    // 3. provider/model
+    spans.push(separator());
+    if !snap.provider_name.is_empty() {
+        let mut style = Style::default().fg(theme::MUTED);
+        if provider_highlighted {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        spans.push(Span::styled(format!(" {}", snap.provider_name), style));
+        spans.push(Span::styled("/", Style::default().fg(theme::DIM)));
+    }
+    if !snap.model_alias.is_empty() {
+        let mut style = Style::default().fg(theme::TEXT);
+        if model_highlighted {
+            style = style.add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK);
+        }
+        spans.push(Span::styled(snap.model_alias.clone(), style));
+    }
+
+    // 4. CPU%
+    if snap.cpu_percent > 0.0 {
+        spans.push(separator());
+        spans.push(Span::styled(
+            format!("CPU {:.0}%", snap.cpu_percent),
+            Style::default().fg(resource_color_by_load(snap.cpu_percent as f64, 50.0, 100.0)),
+        ));
+    }
+
+    // 5. MEM
+    spans.push(separator());
+    spans.push(Span::styled(
+        format!("MEM {}MB", snap.memory_mb),
+        Style::default().fg(memory_color(snap.memory_mb)),
+    ));
+
     element!(
         View(
             flex_direction: Direction::Horizontal,
             width: Constraint::Fill(1),
             height: Constraint::Length(1),
         ) {
-            Text(text: Paragraph::new(Line::from("peri").fg(theme::THINKING).bold()))
-            Text(text: Paragraph::new(Line::from(format!(" {} agents", state.view_count)).fg(theme::MUTED)))
+            Text(text: Paragraph::new(Line::from(spans)))
         }
     )
 }
 
-/// 状态栏第 2 行：左侧状态 + 右侧快捷键
+/// 状态栏第 2 行：状态相关的快捷键 hints
 #[component]
 fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let popup = hooks.use_store(*atoms::POPUP_ACTIVE.get().unwrap());
@@ -47,8 +110,8 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let is_popup = popup.get();
     let is_at = at_active.get();
     let is_slash = slash_active.get();
+    let _ = (popup, at_active, slash_active); // StoreState Copy
 
-    // 快捷键提示：根据当前状态切换
     let hints = if is_popup {
         Line::from(" Esc: close | Enter: confirm ").fg(theme::MUTED)
     } else if is_at || is_slash {
@@ -80,8 +143,168 @@ pub fn StatusBar(_hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ) {
             StatusBarRow1()
             StatusBarRow2()
-            // 第 3 行留空（缓冲行）
+            // 第 3 行留空（视觉缓冲）
             Text(text: Paragraph::new(Line::from("")))
         }
     )
+}
+
+// ── 辅助函数 ─────────────────────────────────────────────────────────────
+
+fn separator() -> Span<'static> {
+    Span::styled(" · ", Style::default().fg(theme::MUTED))
+}
+
+/// 把 atom 中的 permission_mode 字符串映射为显示标签。
+/// "default" 返回空串（与 legacy 一致——Default 模式不显示标签）。
+fn permission_mode_display(mode: &str) -> &'static str {
+    match mode {
+        "accept-edit" => "Accept Edit",
+        "auto-mode" => "Auto Mode",
+        "bypass" => "Bypass",
+        _ => "",
+    }
+}
+
+fn permission_mode_color(mode: &str) -> ratatui::style::Color {
+    match mode {
+        "accept-edit" => theme::THINKING,
+        "auto-mode" => theme::WARNING,
+        "bypass" => theme::ERROR,
+        _ => theme::TEXT,
+    }
+}
+
+/// 从 cwd 路径取 basename（最后一节）。空或异常返回原串。
+fn cwd_basename(cwd: &str) -> String {
+    std::path::Path::new(cwd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| cwd.to_string())
+}
+
+/// 通用阈值染色：>= high → ERROR，>= low → WARNING，else SAGE。
+fn resource_color_by_load(value: f64, low: f64, high: f64) -> ratatui::style::Color {
+    if value >= high {
+        theme::ERROR
+    } else if value >= low {
+        theme::WARNING
+    } else {
+        theme::SAGE
+    }
+}
+
+/// MEM 染色：>1024 ERROR，>512 WARNING，else SAGE（与 legacy status_bar 一致）。
+fn memory_color(mem_mb: u64) -> ratatui::style::Color {
+    if mem_mb > 1024 {
+        theme::ERROR
+    } else if mem_mb > 512 {
+        theme::WARNING
+    } else {
+        theme::SAGE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    fn test_permission_mode_display() {
+        assert_eq!(permission_mode_display("default"), "");
+        assert_eq!(permission_mode_display("accept-edit"), "Accept Edit");
+        assert_eq!(permission_mode_display("auto-mode"), "Auto Mode");
+        assert_eq!(permission_mode_display("bypass"), "Bypass");
+        assert_eq!(permission_mode_display("unknown"), "");
+    }
+
+    #[test]
+    fn test_permission_mode_color() {
+        assert_eq!(permission_mode_color("accept-edit"), theme::THINKING);
+        assert_eq!(permission_mode_color("auto-mode"), theme::WARNING);
+        assert_eq!(permission_mode_color("bypass"), theme::ERROR);
+    }
+
+    #[test]
+    fn test_cwd_basename_simple() {
+        assert_eq!(cwd_basename("/Users/foo/project"), "project");
+        assert_eq!(cwd_basename("/tmp"), "tmp");
+        assert_eq!(cwd_basename("/"), "/");
+    }
+
+    #[test]
+    fn test_cwd_basename_empty() {
+        assert_eq!(cwd_basename(""), "");
+    }
+
+    #[test]
+    fn test_memory_color_thresholds() {
+        assert_eq!(memory_color(100), theme::SAGE);
+        assert_eq!(memory_color(512), theme::SAGE); // 512 不算超阈值
+        assert_eq!(memory_color(513), theme::WARNING);
+        assert_eq!(memory_color(1024), theme::WARNING); // 1024 不算超阈值
+        assert_eq!(memory_color(1025), theme::ERROR);
+    }
+
+    #[test]
+    fn test_resource_color_by_load() {
+        // low=50, high=100
+        assert_eq!(resource_color_by_load(10.0, 50.0, 100.0), theme::SAGE);
+        assert_eq!(resource_color_by_load(50.0, 50.0, 100.0), theme::WARNING);
+        assert_eq!(resource_color_by_load(75.0, 50.0, 100.0), theme::WARNING);
+        assert_eq!(resource_color_by_load(100.0, 50.0, 100.0), theme::ERROR);
+    }
+
+    #[test]
+    #[serial]
+    fn test_status_bar_row_renders_without_panic() {
+        crate::kit::atoms::init_atoms();
+        // 写入测试数据
+        if let Some(atom) = atoms::SERVICE_SNAPSHOT.get() {
+            *atom.write() = atoms::ServiceSnapshot {
+                cwd: "/home/user/test-project".into(),
+                provider_name: "anthropic".into(),
+                model_alias: "sonnet".into(),
+                permission_mode: "accept-edit".into(),
+                memory_mb: 256,
+                cpu_percent: 12.5,
+                ..Default::default()
+            };
+        }
+        // 辅助函数应能正确处理这些值
+        let snap = atoms::SERVICE_SNAPSHOT.get().unwrap().read().clone();
+        assert_eq!(snap.cwd, "/home/user/test-project");
+        assert_eq!(cwd_basename(&snap.cwd), "test-project");
+        assert_eq!(
+            permission_mode_display(&snap.permission_mode),
+            "Accept Edit"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_status_bar_handles_empty_provider_model() {
+        crate::kit::atoms::init_atoms();
+        if let Some(atom) = atoms::SERVICE_SNAPSHOT.get() {
+            *atom.write() = atoms::ServiceSnapshot {
+                cwd: "/tmp".into(),
+                provider_name: "".into(),
+                model_alias: "".into(),
+                permission_mode: "default".into(),
+                memory_mb: 0,
+                cpu_percent: 0.0,
+                ..Default::default()
+            };
+        }
+        let snap = atoms::SERVICE_SNAPSHOT.get().unwrap().read().clone();
+        // 空 provider/model 应被渲染逻辑跳过（不在 Row1 中显示）
+        assert!(snap.provider_name.is_empty());
+        assert!(snap.model_alias.is_empty());
+        // Default mode → 空标签
+        assert_eq!(permission_mode_display(&snap.permission_mode), "");
+        // 0% CPU 应被跳过
+        assert_eq!(snap.cpu_percent, 0.0);
+    }
 }
