@@ -114,17 +114,19 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #39（Phase 2.6 step 7e.2 退役 handle_error v1 push 死代码 + ViewCommit rewind 防御性 clear — audit workflow 5 auditor 全部完成，明确分出 Bundle 1 安全清理 vs Bundle 2 ToolStart/ToolEnd 双轨退役的先后顺序）<br>
-  <strong>本窗口成果</strong>：1 个本地 commit（不 push），Bundle 1 安全清理 + 防御性 invariant：<br>
-  · <strong>Fix 1（peri-tui，LOW→clean，lifecycle.rs）</strong>：<code>handle_error</code> 此前构造 <code>MessageViewModel::tool_block(...)</code> + 调 <code>apply_add_message(vm)</code> 写到 v1 view_messages，但生产渲染独占读 v2 state.view（<code>state.view_models()</code>）。v2 路由（<code>push_system_note → pending_v2_notes → SM Event::PushSystemNote → state.view</code>）在 line 288 已是 sole load-bearing path，v1 push 是死代码。删除 vm 构造 + apply_add_message 调用，更新注释。同时删除随之 unused 的 <code>use super::super::*</code> glob import（MessageViewModel 不再在 lib 代码引用，仅在 test 模块）。<br>
-  · <strong>Fix 2（peri-tui，invariant insurance，main_loop.rs）</strong>：ViewCommit 到达时 clear <code>pending_view_rewind_to = None</code>。Auditor-2 确认 <code>race_active: false</code>（单线程事件循环保证同步 set/consume 同一帧），但 flag 住在 <code>GlobalUiState</code>（impure App struct）而非纯 SM 转换，未来若插入异步路径（如批量事件、把 rewind truncate 移入 SM），ViewCommit 的 replace 语义会被后续 truncate 错误覆盖权威 snapshot。此 clear 是低成本 invariant 保险。<br>
-  · <strong>新增回归测试</strong>：<code>test_handle_error_does_not_write_view_messages</code> — 验证 handle_error 后 view_messages.len() == 1（仅初始 UserBubble），若未来重构重新引入 v1 push，此测试会以 len==2 失败。<br>
-  · <strong>audit workflow</strong> <code>wj0c3ppca</code>：5 auditor 全部完成（lifecycle / ToolStart-ToolEnd / pending_view_rewind_to race / SM coverage / test-deps）。总 70+ 发现。关键架构确认：① <code>handle_acp_event</code> 与 SM 双轨——UnstableEvent 走 SM，AgentEvent/SessionUpdate 走 v1，<code>acp_bridge.rs:71-75</code> UnstableEvent 显式 no-op 让 v2 独占；② <code>mod.rs:184-208</code> SubAgent routing（append_child_message）load-bearing 必须保留；③ <code>mod.rs:211-213</code> ToolStart v1 push + <code>mod.rs:240-286</code> ToolEnd scan 是配对死代码（HIGH），不能单独退役，需先把 AgentEvent bridge 路由独占迁到 SM；④ headless_test.rs 37 个测试需迁移（L effort，2-3 cron 窗口）。<br>
-  · <strong>Bundle 2 延后</strong>（按 auditor 推荐顺序）：① mod.rs:211-213 + mod.rs:240-286 ToolStart/End v1 双轨退役（HIGH，需 ACP 层协调或 SM 迁移）② lifecycle.rs:210 apply_rebuild_all 退役（需 12 个 lifecycle 测试迁移）③ headless_test.rs 37 测试迁移（L effort）。<br>
-  · <strong>当前累积缺陷轨迹</strong>：17 → 10 → 7 → 3 → 2 → 1 → 1 → 1 → 1 主 + 9 ACP-gated → <strong>1 主 + 9 ACP-gated + 3 Bundle-2（Cron #39）</strong>。主剩余仍是 architectural SubAgent instance_id。<br>
-  · <strong>Phase 2.6 step 7e 进度</strong>：7e.1 ✓ / 7e.2 ✓（Cron #39）/ 7e.7 ✓。剩余 6 个子步骤（7e.3/4/5/6/8/9）。<br>
-  <strong>当前状态</strong>：<strong>1128 测试全过</strong>（1127 + 1 新增）· handle_error v1 死代码退役 · ViewCommit rewind 防御性 clear 就位<br>
-  <strong>下一步</strong>：① ToolStart/End v1 双轨退役（HIGH，需先确认 ACP 是否同时发 SessionUpdate + UnstableEvent）② lifecycle 测试迁移 12 个 → 解锁 apply_rebuild_all 退役 ③ headless_test.rs 批量迁移 ④ subagent render-misroute（architectural SubAgentGroupData instance_id）
+  <strong>最后更新</strong>：2026-07-01 cron #40（Phase 2.6 step 7e.3 — 退役 <code>handle_interrupted</code> 分支 2 的 <code>apply_rebuild_all(user_msg_idx, vec![])</code> 调用 + 迁移 4 个测试 / 5 个 view_messages.len() 断言到 v2 state.view / pending_view_rewind_to 语义 — audit workflow wj0c3ppca auditor-0 的 Bundle 2 item 2）<br>
+  <strong>本窗口成果</strong>：1 个本地 commit（c481b2f9，不 push）：<br>
+  · <strong>Retirement（peri-tui，lifecycle.rs:209）</strong>：<code>handle_interrupted</code> 分支 2（无 tool 进度，回滚路径）此前调用 <code>apply_rebuild_all(user_msg_idx, vec![])</code> 截断 v1 view_messages。但生产渲染独占读 v2 state.view，截断通过 <code>pending_view_rewind_to = Some(user_msg_idx)</code> flag（下一行 line 223 设置）由 main_loop 顶端的消费方完成（truncate state.view）。apply_rebuild_all 是 v1-only dead code，sole load-bearing 仅服务于 4 个 lifecycle 测试的 view_messages.len() 断言（auditor-0 已确认）。删除调用 + 替换为详细的历史注释。<br>
+  · <strong>Test migration（peri-tui，lifecycle.rs:380-635）</strong>：4 个测试移除 view_messages.len() 断言：① <code>test_handle_interrupted_branch2_sets_pending_view_rewind</code>（len==0 → 移除，由 flag 断言间接保证）② <code>test_handle_interrupted_branch1_does_not_set_pending_view_rewind</code>（len==1 → 移除，flag == None 间接保证保留语义）③ <code>test_handle_interrupted_branch2_with_assistant_bubble_also_sets_flag</code>（len==0 → 移除）④ <code>test_handle_interrupted_subagent_depth_early_return</code>（len==1 → 移除，flag == None + last_text == "hello" 间接保证 guard 正确）。每个移除点都留下 Cron #40 标记 + 解释注释。<br>
+  · <strong>当前累积缺陷轨迹</strong>：17 → 10 → 7 → 3 → 2 → 1 → 1 → 1 → 1 主 + 9 ACP-gated → 1 主 + 9 ACP-gated + 3 Bundle-2（Cron #39）→ <strong>1 主 + 9 ACP-gated + 2 Bundle-2（Cron #40 完成 Bundle 2 item 2）</strong>。<br>
+  · <strong>Phase 2.6 step 7e 进度</strong>：7e.1 ✓ / 7e.2 ✓（Cron #39）/ 7e.3 ✓（Cron #40）/ 7e.7 ✓。剩余 5 个子步骤（7e.4/5/6/8/9）。<br>
+  · <strong>apply_rebuild_all 剩余调用方</strong>：3 处活跃（agent_compact.rs:48, 77 + mod.rs:365）—— 全部在 compact/rewind 路径，非 cron #40 目标，将随 view_messages 字段整体退役一并删除。<br>
+  <strong>当前状态</strong>：<strong>1128 测试全过</strong>（不增不减，全部断言迁移）· <code>handle_interrupted</code> v1 截断死代码退役 · 测试断言完全脱离 v1 view_messages<br>
+  <strong>下一步</strong>：① ToolStart/End v1 双轨退役（HIGH Bundle 2 item 1，需先确认 ACP 是否同时发 SessionUpdate + UnstableEvent 双信号）② lifecycle 剩余 apply_rebuild_all 调用方退役（compact + rewind 路径）③ headless_test.rs 37 测试迁移（L effort）④ subagent render-misroute（architectural SubAgentGroupData instance_id）
+</div>
+
+<div class="meta">
+  <strong>历史 - cron #39</strong>（commit 71abeb6b + 14c2d595）：Phase 2.6 step 7e.2 — handle_error v1 push 死代码退役 + ViewCommit rewind 防御性 clear。audit workflow wj0c3ppca 5 auditor 完整生命周期 / ToolStart-ToolEnd 双轨 / pending_view_rewind_to race / SM coverage / test-deps。Bundle 1 安全清理 + Bundle 2 后续规划。
 </div>
 
 <div class="meta">
