@@ -40,7 +40,7 @@ graph TB
 
 ### 2.1 段落文件组织
 
-14 个 Markdown 段落文件位于 `peri-tui/prompts/sections/`，通过 `include_str!` 编译期嵌入。编号即拼接顺序：
+14 个 Markdown 段落文件位于 `peri-acp/prompts/sections/`，通过 `include_str!` 编译期嵌入。编号即拼接顺序：
 
 | 编号 | 文件 | 区域 | 内容 | Feature Gate |
 |------|------|------|------|-------------|

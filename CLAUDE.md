@@ -88,7 +88,7 @@ peri-tui/src/runtime/main_loop.rs  # TUI 主循环（双路径分发）
 peri-tui/src/state_machine/       # State 4 变体 + ViewStore + CurrentTurn + InputState
 peri-tui/src/app/agent_ops/       # Agent 事件处理
 peri-tui/src/render/view_render.rs  # V2 ViewModel 渲染
-peri-tui/prompts/sections/        # 14 个系统提示词段落
+peri-acp/prompts/sections/        # 14 个系统提示词段落（已从 peri-tui 迁入，归属 ACP 层）
 ```
 
 ## 架构要点

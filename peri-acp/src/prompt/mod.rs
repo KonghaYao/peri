@@ -3,7 +3,7 @@
 //! Assembles system prompt from section files with feature-gated conditional
 //! injection. Uses `PromptFeatures` to control which sections are included.
 //!
-//! Sections are loaded from peri-tui's `prompts/sections/` directory using
+//! Sections are loaded from `prompts/sections/` directory using
 //! `include_str!` with paths relative to the peri-acp crate root.
 
 use peri_middlewares::AgentOverrides;
@@ -132,31 +132,31 @@ pub fn build_system_prompt(
     let static_sections: &[&str] = &[
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-tui/prompts/sections/01_intro.md"
+            "/prompts/sections/01_intro.md"
         )),
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-tui/prompts/sections/02_system.md"
+            "/prompts/sections/02_system.md"
         )),
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-tui/prompts/sections/03_doing_tasks.md"
+            "/prompts/sections/03_doing_tasks.md"
         )),
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-tui/prompts/sections/04_actions.md"
+            "/prompts/sections/04_actions.md"
         )),
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-tui/prompts/sections/05_using_tools.md"
+            "/prompts/sections/05_using_tools.md"
         )),
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-tui/prompts/sections/06_tone_style.md"
+            "/prompts/sections/06_tone_style.md"
         )),
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-tui/prompts/sections/16_workflow.md"
+            "/prompts/sections/16_workflow.md"
         )),
     ];
 
@@ -164,40 +164,40 @@ pub fn build_system_prompt(
     let mut dynamic_sections: Vec<&str> = Vec::new();
     dynamic_sections.push(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../peri-tui/prompts/sections/07_env.md"
+        "/prompts/sections/07_env.md"
     )));
     dynamic_sections.push(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../peri-tui/prompts/sections/14_system_reminder.md"
+        "/prompts/sections/14_system_reminder.md"
     )));
     if features.hitl_enabled {
         dynamic_sections.push(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-tui/prompts/sections/10_hitl.md"
+            "/prompts/sections/10_hitl.md"
         )));
     }
     if features.subagent_enabled {
         dynamic_sections.push(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-tui/prompts/sections/11_subagent.md"
+            "/prompts/sections/11_subagent.md"
         )));
     }
     if features.cron_enabled {
         dynamic_sections.push(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-tui/prompts/sections/12_cron.md"
+            "/prompts/sections/12_cron.md"
         )));
     }
     if features.skills_enabled {
         dynamic_sections.push(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-tui/prompts/sections/13_skills.md"
+            "/prompts/sections/13_skills.md"
         )));
     }
     if features.channel_enabled {
         dynamic_sections.push(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-tui/prompts/sections/15_channel.md"
+            "/prompts/sections/15_channel.md"
         )));
     }
 

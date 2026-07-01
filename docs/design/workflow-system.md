@@ -568,7 +568,7 @@ pub struct WorkflowRunSnapshot {
 
 ### 11.1 系统提示词
 
-`peri-tui/prompts/sections/16_workflow.md` — LLM 可见的 workflow 简介（~10 行），内容简练：
+`peri-acp/prompts/sections/16_workflow.md` — LLM 可见的 workflow 简介（~10 行），内容简练：
 - Workflow 是 deferred tool，需通过 `SearchExtraTools` 发现
 - 主要用途说明（编排多 agent 并行/流水线）
 - **重定向到 ultracode skill**（"For detailed guidance on writing workflow scripts, invoke the `ultracode` skill."）
