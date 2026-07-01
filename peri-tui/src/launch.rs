@@ -1,0 +1,355 @@
+//! TUI 启动共享层——App + ACP server/client 构建与拆解。
+//!
+//! 把 `main.rs::run_app` 头部的 App 初始化、ACP server/client 配对、插件/Hook 装配
+//! 等步骤提取为公共函数，供两条运行路径复用：
+//!
+//! - legacy 路径（`runtime::main_loop::run`）：继续在 `main.rs` 内调用
+//! - kit 路径（`kit::entry::run_kit_fullscreen`）：通过 `TuiLaunchOptions` 入参启动
+//!
+//! 这一层是无状态、可测试的纯构造逻辑——终端管理、事件循环均不在此。
+
+use std::sync::Arc;
+
+use anyhow::Result;
+use tokio::sync::mpsc;
+
+use crate::acp_client::{AcpNotification, AcpTuiClient};
+use crate::acp_server::{AcpServerConfig, run_acp_server};
+use crate::app::App;
+use crate::app::agent::LlmProvider;
+use crate::config::config_path;
+use peri_acp::session::SessionManager;
+use peri_acp::transport::mpsc::mpsc_transport_pair;
+use peri_middlewares::prelude::PermissionMode;
+
+/// TUI 启动选项——CLI 解析后由调用方填好传入。
+///
+/// 字段语义与 `main.rs::TuiOptions` 一致，但放在 lib 层供 kit 路径复用。
+#[derive(Default, Clone)]
+pub struct TuiLaunchOptions {
+    pub approve: bool,
+    pub permission_mode: Option<String>,
+    pub skip_permissions: bool,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub continue_session: bool,
+    pub resume_session: Option<String>,
+    pub session_id: Option<String>,
+    pub session_name: Option<String>,
+    pub settings: Option<String>,
+    pub allowed_tools: Vec<String>,
+    pub disallowed_tools: Vec<String>,
+}
+
+/// 构建 App + ACP server/client，并把 acp_client 注入 App。
+///
+/// 这是从 `run_app` 头部提取的纯构造逻辑——所有副作用都局限在 App 字段写入。
+/// 调用方负责后续：
+/// - legacy：spawn `runtime::acp_notifier` + 进入 `runtime::main_loop::run`
+/// - kit：spawn kit 专用 notifier → `kit::acp_bridge` → atoms；spawn SUBMIT 消费者
+pub async fn build_app_and_acp(
+    opts: &TuiLaunchOptions,
+    panic_notify_rx: Option<mpsc::UnboundedReceiver<String>>,
+) -> Result<(
+    App,
+    Option<(AcpTuiClient, mpsc::UnboundedReceiver<AcpNotification>)>,
+)> {
+    let mut app = App::new().await;
+
+    if let Some(rx) = panic_notify_rx {
+        app.services.panic_notify_rx = Some(rx);
+    }
+
+    // 根据环境变量/CLI 参数设置初始权限模式
+    {
+        let initial_mode = if opts.skip_permissions {
+            PermissionMode::Bypass
+        } else if let Some(ref mode_str) = opts.permission_mode {
+            match mode_str.as_str() {
+                "bypass" => PermissionMode::Bypass,
+                "default" => PermissionMode::Default,
+                "accept-edit" => PermissionMode::AcceptEdit,
+                "auto-mode" => PermissionMode::AutoMode,
+                _ => {
+                    if std::env::var("YOLO_MODE")
+                        .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
+                        .unwrap_or(true)
+                    {
+                        PermissionMode::Bypass
+                    } else {
+                        PermissionMode::Default
+                    }
+                }
+            }
+        } else if opts.approve {
+            PermissionMode::Default
+        } else if std::env::var("YOLO_MODE")
+            .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
+            .unwrap_or(true)
+        {
+            PermissionMode::Bypass
+        } else {
+            PermissionMode::Default
+        };
+        app.services.permission_mode.store(initial_mode);
+    }
+
+    // --model 覆盖
+    if let Some(ref model_str) = opts.model {
+        let config = app.services.peri_config.read();
+        if let Some(new_provider) = LlmProvider::from_config_for_alias(&config, model_str) {
+            tracing::info!(model = %new_provider.model_name(), "CLI --model 覆盖生效");
+        }
+    }
+
+    // 会话恢复：-c 恢复当前目录最近会话，-r <id> 恢复指定会话
+    if let Some(ref session_id) = opts.resume_session {
+        tracing::info!(session_id = %session_id, "-r: 恢复指定会话");
+        app.open_thread(session_id.clone());
+    } else if opts.continue_session {
+        let store = app.services.thread_store.clone();
+        let cwd = app.services.cwd.clone();
+        let thread_id = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let threads = store.list_threads().await.ok()?;
+                threads.into_iter().find(|t| t.cwd == cwd).map(|t| t.id)
+            })
+        });
+        if let Some(tid) = thread_id {
+            tracing::info!(thread_id = %tid, "-c: 恢复最近会话");
+            app.open_thread(tid);
+        } else {
+            tracing::info!("-c: 当前目录无历史会话，创建新会话");
+        }
+    }
+
+    // 检测是否需要 Setup 向导
+    {
+        let cfg = app.services.peri_config.read();
+        if crate::app::setup_wizard::needs_setup(&cfg.config) {
+            app.global_ui.setup_wizard = Some(crate::app::SetupWizardPanel::new());
+        }
+    }
+
+    // 后台初始化 MCP 连接池（不阻塞 UI）
+    app.spawn_mcp_init();
+
+    // 加载已启用插件数据
+    {
+        let claude_dir = dirs_next::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".claude");
+        app.services.plugin_data = Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
+            &claude_dir,
+        ));
+        let plugin_commands = app
+            .services
+            .plugin_data
+            .as_ref()
+            .map(|pd| pd.all_commands.clone())
+            .unwrap_or_default();
+        let plugin_skill_roots = app
+            .services
+            .plugin_data
+            .as_ref()
+            .map(|pd| pd.all_skill_roots.clone())
+            .unwrap_or_default();
+        let plugin_skills: Vec<peri_acp_types::skill::SkillMetadataDto> =
+            peri_middlewares::skills::scan_skill_roots(&plugin_skill_roots)
+                .into_iter()
+                .map(crate::dto_convert::skill_metadata_dto)
+                .collect();
+        app.session_mgr
+            .current_mut()
+            .commands
+            .command_registry
+            .register_plugin_commands(plugin_commands.clone());
+        let session = app.session_mgr.current_mut();
+        let existing_names: std::collections::HashSet<String> = session
+            .commands
+            .skills
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        for skill in &plugin_skills {
+            if !existing_names.contains(&skill.name) {
+                session.commands.skills.push(skill.clone());
+            }
+        }
+    }
+
+    // ── ACP Server + Client ─────────────────────────────────────────────
+    let acp_client = {
+        let provider = {
+            let cfg_guard = app.services.peri_config.read();
+            LlmProvider::from_config(&cfg_guard)
+        }
+        .or_else(LlmProvider::from_env);
+
+        if let Some(provider) = provider {
+            let plugin_skill_roots = app
+                .services
+                .plugin_data
+                .as_ref()
+                .map(|pd| pd.all_skill_roots.clone())
+                .unwrap_or_default();
+            let plugin_agent_dirs = app
+                .services
+                .plugin_data
+                .as_ref()
+                .map(|pd| pd.all_agent_dirs.clone())
+                .unwrap_or_default();
+            let plugin_lsp_servers = app
+                .services
+                .plugin_data
+                .as_ref()
+                .map(|pd| pd.all_lsp_servers.clone())
+                .unwrap_or_default();
+            let plugin_hooks = app
+                .services
+                .plugin_data
+                .as_ref()
+                .map(|pd| pd.all_hooks.clone())
+                .unwrap_or_default();
+
+            let mut hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>> = Vec::new();
+            if !plugin_hooks.is_empty() {
+                hook_groups.push(plugin_hooks);
+            }
+            let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
+            if !global_hooks.is_empty() {
+                hook_groups.push(global_hooks);
+            }
+            let local_hooks =
+                peri_middlewares::hooks::loader::load_settings_local_hooks(&app.services.cwd);
+            if !local_hooks.is_empty() {
+                hook_groups.push(local_hooks);
+            }
+
+            let flat_hooks: Vec<peri_middlewares::hooks::RegisteredHook> =
+                hook_groups.iter().flatten().cloned().collect();
+            tracing::info!(
+                groups = hook_groups.len(),
+                total_hooks = flat_hooks.len(),
+                "Hook groups assembled for ACP server"
+            );
+
+            let tool_search_index = Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
+            let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
+
+            let shared_peri_config = app.services.peri_config.clone();
+            let session_manager_peri_config_snapshot =
+                Arc::new(app.services.peri_config.read().clone());
+            let session_manager = SessionManager::new(
+                app.services.thread_store.clone(),
+                provider.clone(),
+                session_manager_peri_config_snapshot,
+                app.services.permission_mode.clone(),
+                None,
+            );
+
+            app.services.acp_session_manager = Some(session_manager.clone());
+
+            let server_config = AcpServerConfig {
+                provider: Arc::new(parking_lot::RwLock::new(provider.clone())),
+                peri_config: shared_peri_config,
+                permission_mode: app.services.permission_mode.clone(),
+                cron_scheduler: Some(app.services.cron.scheduler.clone()),
+                mcp_pool: app.services.mcp_pool.clone(),
+                channel_state: app.services.channel_state.clone(),
+                plugin_skill_roots,
+                plugin_agent_dirs,
+                plugin_hooks: flat_hooks,
+                hook_groups,
+                plugin_lsp_servers,
+                tool_search_index: tool_search_index.clone(),
+                shared_tools: shared_tools.clone(),
+                thread_store: app.services.thread_store.clone(),
+                langfuse_session: {
+                    if let Some(config) = peri_acp::langfuse::LangfuseConfig::from_env() {
+                        tracing::info!("Langfuse tracing enabled (TUI mode)");
+                        peri_acp::langfuse::LangfuseSession::new(config)
+                            .await
+                            .map(Arc::new)
+                    } else {
+                        None
+                    }
+                },
+                config_path: config_path(),
+                session_manager,
+            };
+
+            let (client_transport, server_transport) = mpsc_transport_pair();
+            tokio::spawn(async move {
+                run_acp_server(Arc::new(server_transport), server_config).await;
+            });
+
+            let (acp_client, notification_rx) = AcpTuiClient::new(client_transport);
+            acp_client.spawn_pump();
+
+            app.acp_client = Some(acp_client.clone());
+
+            Some((acp_client, notification_rx))
+        } else {
+            None
+        }
+    };
+
+    Ok((app, acp_client))
+}
+
+/// App 关闭：fire SessionEnd hooks + MCP pool shutdown + 等 Langfuse flush。
+///
+/// 对称 `build_app_and_acp`——所有路径在退出前都应该调用。
+pub async fn teardown_app(app: &mut App) {
+    // Fire SessionEnd hooks before shutdown
+    {
+        let mut hooks = app
+            .services
+            .plugin_data
+            .as_ref()
+            .map(|pd| pd.all_hooks.clone())
+            .unwrap_or_default();
+        hooks.extend(peri_middlewares::hooks::loader::load_global_settings_hooks());
+        hooks.extend(peri_middlewares::hooks::loader::load_settings_local_hooks(
+            &app.services.cwd,
+        ));
+        if !hooks.is_empty() {
+            let cwd = app.services.cwd.clone();
+            let provider_name = app.services.provider_name.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    peri_middlewares::hooks::middleware::fire_standalone_lifecycle_hooks(
+                        &hooks,
+                        peri_middlewares::hooks::types::HookEvent::SessionEnd,
+                        &cwd,
+                        "",
+                        "",
+                        &provider_name,
+                        None,
+                        Some("prompt_input_exit"),
+                    )
+                    .await;
+                })
+            });
+        }
+    }
+
+    // 关闭 MCP 连接池
+    if let Some(pool) = app.services.mcp_pool.take() {
+        tracing::info!("正在关闭 MCP 连接池...");
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(pool.shutdown()));
+        tracing::info!("MCP 连接池已关闭");
+    }
+
+    // 等待最后一次 Langfuse flush
+    if let Some(handle) = app
+        .session_mgr
+        .current_mut()
+        .langfuse
+        .langfuse_flush_handle
+        .take()
+    {
+        let _ = handle.await;
+    }
+}

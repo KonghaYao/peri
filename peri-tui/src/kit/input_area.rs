@@ -150,12 +150,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         let mut s = state.write();
                         let submitted = s.text.clone();
                         if !submitted.trim().is_empty() {
-                            // 写入提交 Atom（connect Phase 8 with ACP）
-                            if let Some(pending) = crate::kit::atoms::SUBMIT_PENDING.get() {
-                                *pending.write() = true;
-                            }
-                            if let Some(submit_text) = crate::kit::atoms::SUBMIT_TEXT.get() {
-                                *submit_text.write() = submitted;
+                            // 通过 mpsc channel 推送给 submit_consumer → acp_client.prompt()
+                            if let Some(tx) = crate::kit::atoms::SUBMIT_TX.get() {
+                                let _ = tx.send(submitted);
                             }
                             s.clear();
                         }

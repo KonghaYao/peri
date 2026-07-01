@@ -1,12 +1,10 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+#[cfg(not(feature = "use-kit"))]
 use peri_acp::transport::mpsc::mpsc_transport_pair;
-use peri_tui::{
-    acp_client::AcpTuiClient,
-    acp_server::{AcpServerConfig, run_acp_server},
-    app::App,
-    runtime, ui,
-};
+#[cfg(not(feature = "use-kit"))]
+use peri_tui::{acp_client::AcpTuiClient, runtime, ui};
+#[cfg(not(feature = "use-kit"))]
 use ratatui::{
     crossterm::{
         event::{
@@ -18,8 +16,10 @@ use ratatui::{
     },
     prelude::*,
 };
+#[cfg(not(feature = "use-kit"))]
 use std::io;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
+#[cfg(not(feature = "use-kit"))]
 use tokio_util::sync::CancellationToken;
 
 #[cfg(not(target_os = "windows"))]
@@ -544,9 +544,21 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
     let result = rt.block_on(async {
         // ratatui-kit fullscreen() 自行管理 raw mode / alternate screen / 事件循环。
         // 外层不做任何终端操作。
-        let _opts = &opts;
-        let _panic_notify_rx = panic_notify_rx;
-        peri_tui::kit::entry::run_kit_fullscreen().await
+        let launch_opts = peri_tui::launch::TuiLaunchOptions {
+            approve: opts.approve,
+            permission_mode: opts.permission_mode.clone(),
+            skip_permissions: opts.skip_permissions,
+            model: opts.model.clone(),
+            effort: opts.effort.clone(),
+            continue_session: opts.continue_session,
+            resume_session: opts.resume_session.clone(),
+            session_id: opts.session_id.clone(),
+            session_name: opts.session_name.clone(),
+            settings: opts.settings.clone(),
+            allowed_tools: opts.allowed_tools.clone(),
+            disallowed_tools: opts.disallowed_tools.clone(),
+        };
+        peri_tui::kit::entry::run_kit_fullscreen(launch_opts, panic_notify_rx).await
     });
 
     // 先 drop rt（关闭所有 tokio 任务），再 drop _telemetry
@@ -560,274 +572,29 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "use-kit"))]
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     tui_opts: &TuiOptions,
     panic_notify_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Result<()> {
-    let mut app = App::new().await;
-
-    // 接入 panic hook 通知通道
-    app.services.panic_notify_rx = Some(panic_notify_rx);
-
-    // 根据环境变量/CLI 参数设置初始权限模式
-    {
-        use peri_middlewares::prelude::PermissionMode;
-        let initial_mode = if tui_opts.skip_permissions {
-            PermissionMode::Bypass
-        } else if let Some(ref mode_str) = tui_opts.permission_mode {
-            match mode_str.as_str() {
-                "bypass" => PermissionMode::Bypass,
-                "default" => PermissionMode::Default,
-                "accept-edit" => PermissionMode::AcceptEdit,
-                "auto-mode" => PermissionMode::AutoMode,
-                _ => {
-                    if std::env::var("YOLO_MODE")
-                        .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
-                        .unwrap_or(true)
-                    {
-                        PermissionMode::Bypass
-                    } else {
-                        PermissionMode::Default
-                    }
-                }
-            }
-        } else if tui_opts.approve {
-            PermissionMode::Default
-        } else if std::env::var("YOLO_MODE")
-            .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
-            .unwrap_or(true)
-        {
-            PermissionMode::Bypass
-        } else {
-            PermissionMode::Default
-        };
-        app.services.permission_mode.store(initial_mode);
-    }
-
-    // --model 覆盖
-    if let Some(ref model_str) = tui_opts.model {
-        let config = app.services.peri_config.read();
-        if let Some(new_provider) =
-            peri_tui::app::agent::LlmProvider::from_config_for_alias(&config, model_str)
-        {
-            tracing::info!(model = %new_provider.model_name(), "CLI --model 覆盖生效");
-        }
-    }
-
-    // 会话恢复：-c 恢复当前目录最近会话，-r <id> 恢复指定会话
-    if let Some(ref session_id) = tui_opts.resume_session {
-        tracing::info!(session_id = %session_id, "-r: 恢复指定会话");
-        app.open_thread(session_id.clone());
-    } else if tui_opts.continue_session {
-        let store = app.services.thread_store.clone();
-        let cwd = app.services.cwd.clone();
-        let thread_id = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let threads = store.list_threads().await.ok()?;
-                threads.into_iter().find(|t| t.cwd == cwd).map(|t| t.id)
-            })
-        });
-        if let Some(tid) = thread_id {
-            tracing::info!(thread_id = %tid, "-c: 恢复最近会话");
-            app.open_thread(tid);
-        } else {
-            tracing::info!("-c: 当前目录无历史会话，创建新会话");
-        }
-    }
-
-    // 检测是否需要 Setup 向导
-    {
-        let cfg = app.services.peri_config.read();
-        if peri_tui::app::setup_wizard::needs_setup(&cfg.config) {
-            app.global_ui.setup_wizard = Some(peri_tui::app::SetupWizardPanel::new());
-        }
-    }
-
-    // 后台初始化 MCP 连接池（不阻塞 UI）
-    app.spawn_mcp_init();
-
-    // 加载已启用插件数据
-    {
-        let claude_dir = dirs_next::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".claude");
-        app.services.plugin_data = Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
-            &claude_dir,
-        ));
-        // 将插件命令注册到所有 session 的 CommandRegistry
-        let plugin_commands = app
-            .services
-            .plugin_data
-            .as_ref()
-            .map(|pd| pd.all_commands.clone())
-            .unwrap_or_default();
-        // 将插件 skills 追加到所有 session 的 skill 列表
-        let plugin_skill_roots = app
-            .services
-            .plugin_data
-            .as_ref()
-            .map(|pd| pd.all_skill_roots.clone())
-            .unwrap_or_default();
-        let plugin_skills: Vec<peri_acp_types::skill::SkillMetadataDto> =
-            peri_middlewares::skills::scan_skill_roots(&plugin_skill_roots)
-                .into_iter()
-                .map(peri_tui::dto_convert::skill_metadata_dto)
-                .collect();
-        app.session_mgr
-            .current_mut()
-            .commands
-            .command_registry
-            .register_plugin_commands(plugin_commands.clone());
-        let session = app.session_mgr.current_mut();
-        let existing_names: std::collections::HashSet<String> = session
-            .commands
-            .skills
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
-        for skill in &plugin_skills {
-            if !existing_names.contains(&skill.name) {
-                session.commands.skills.push(skill.clone());
-            }
-        }
-    }
-
-    // ── Step 6-a: Setup ACP Server + Client ──────────────────────────────
-    // Collect the ACP client + notification_rx for wiring into the runtime event channel.
-    let acp_client = {
-        let provider = {
-            let cfg_guard = app.services.peri_config.read();
-            peri_tui::app::LlmProvider::from_config(&cfg_guard)
-        }
-        .or_else(peri_tui::app::LlmProvider::from_env);
-
-        if let Some(provider) = provider {
-            // Gather plugin configs
-            let plugin_skill_roots = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.all_skill_roots.clone())
-                .unwrap_or_default();
-            let plugin_agent_dirs = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.all_agent_dirs.clone())
-                .unwrap_or_default();
-            let plugin_lsp_servers = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.all_lsp_servers.clone())
-                .unwrap_or_default();
-            let plugin_hooks = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.all_hooks.clone())
-                .unwrap_or_default();
-
-            // Build hook groups from plugin hooks + global hooks + local hooks
-            let mut hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>> = Vec::new();
-            if !plugin_hooks.is_empty() {
-                hook_groups.push(plugin_hooks);
-            }
-            let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
-            if !global_hooks.is_empty() {
-                hook_groups.push(global_hooks);
-            }
-            let local_hooks =
-                peri_middlewares::hooks::loader::load_settings_local_hooks(&app.services.cwd);
-            if !local_hooks.is_empty() {
-                hook_groups.push(local_hooks);
-            }
-
-            let flat_hooks: Vec<peri_middlewares::hooks::RegisteredHook> =
-                hook_groups.iter().flatten().cloned().collect();
-            tracing::info!(
-                groups = hook_groups.len(),
-                total_hooks = flat_hooks.len(),
-                "Hook groups assembled for ACP server"
-            );
-
-            // Create session-level tool_search_index and shared_tools
-            let tool_search_index = Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
-            let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
-
-            // 构建 SessionManager：支撑 SubAgent cascade cancel 与 goal_state 跨 prompt 共享。
-            // TUI 本地仍维护 SessionState（history/frozen/agent_pool 等），SessionManager
-            // 只持有 AcpSession 元数据 + active_agents + goal_state。
-            //
-            // 关键：session_manager 与 server_config 共享同一 `Arc<RwLock<PeriConfig>>`，
-            // 与 ServiceRegistry.peri_config 也是同一 Arc —— Single Source of Truth。
-            let shared_peri_config = app.services.peri_config.clone();
-            // SessionManager 接收 `Arc<PeriConfig>`（frozen 快照），与 AcpServerConfig
-            // 的 `Arc<RwLock<PeriConfig>>` 不同：SessionManager 仅用于 cascade cancel
-            // 与 goal_state，不参与热更新，故传一份快照。
-            let session_manager_peri_config_snapshot =
-                Arc::new(app.services.peri_config.read().clone());
-            let session_manager = peri_acp::session::SessionManager::new(
-                app.services.thread_store.clone(),
-                provider.clone(),
-                session_manager_peri_config_snapshot,
-                app.services.permission_mode.clone(),
-                None,
-            );
-
-            // 注入 SessionManager clone 到 TUI ServiceRegistry：用于 TUI 侧
-            // cron/channel/gc 等异步触发 push 到共享 v2 MessageQueue。
-            // SessionManager 仅 `Arc<SessionManagerInner>`，clone 零成本；注入后
-            // 再把 session_manager move 进 server_config，不会冲突。
-            app.services.acp_session_manager = Some(session_manager.clone());
-
-            let server_config = AcpServerConfig {
-                provider: Arc::new(parking_lot::RwLock::new(provider.clone())),
-                peri_config: shared_peri_config,
-                permission_mode: app.services.permission_mode.clone(),
-                cron_scheduler: Some(app.services.cron.scheduler.clone()),
-                mcp_pool: app.services.mcp_pool.clone(),
-                channel_state: app.services.channel_state.clone(),
-                plugin_skill_roots,
-                plugin_agent_dirs,
-                plugin_hooks: flat_hooks,
-                hook_groups,
-                plugin_lsp_servers,
-                tool_search_index: tool_search_index.clone(),
-                shared_tools: shared_tools.clone(),
-                thread_store: app.services.thread_store.clone(),
-                langfuse_session: {
-                    if let Some(config) = peri_acp::langfuse::LangfuseConfig::from_env() {
-                        tracing::info!("Langfuse tracing enabled (TUI mode)");
-                        peri_acp::langfuse::LangfuseSession::new(config)
-                            .await
-                            .map(Arc::new)
-                    } else {
-                        None
-                    }
-                },
-                config_path: peri_tui::config::config_path(),
-                session_manager,
-            };
-
-            let (client_transport, server_transport) = mpsc_transport_pair();
-            tokio::spawn(async move {
-                run_acp_server(Arc::new(server_transport), server_config).await;
-            });
-
-            let (acp_client, notification_rx) = AcpTuiClient::new(client_transport);
-            // Spawn notification pump (transport → notification_rx)
-            acp_client.spawn_pump();
-
-            // Store acp_client in App for legacy code paths that access it directly.
-            app.acp_client = Some(acp_client.clone());
-
-            Some((acp_client, notification_rx))
-        } else {
-            None
-        }
+    let launch_opts = peri_tui::launch::TuiLaunchOptions {
+        approve: tui_opts.approve,
+        permission_mode: tui_opts.permission_mode.clone(),
+        skip_permissions: tui_opts.skip_permissions,
+        model: tui_opts.model.clone(),
+        effort: tui_opts.effort.clone(),
+        continue_session: tui_opts.continue_session,
+        resume_session: tui_opts.resume_session.clone(),
+        session_id: tui_opts.session_id.clone(),
+        session_name: tui_opts.session_name.clone(),
+        settings: tui_opts.settings.clone(),
+        allowed_tools: tui_opts.allowed_tools.clone(),
+        disallowed_tools: tui_opts.disallowed_tools.clone(),
     };
+    let (mut app, acp_client) =
+        peri_tui::launch::build_app_and_acp(&launch_opts, Some(panic_notify_rx)).await?;
+    let _ = tui_opts; // tui_opts 字段已在 launch_opts 中拷贝
 
     // ── v2 Runtime: event channel + background collectors ──────────────────
     let shutdown = CancellationToken::new();
@@ -877,56 +644,8 @@ async fn run_app(
         result
     }?;
 
-    // Fire SessionEnd hooks before shutdown
-    {
-        let mut hooks = app
-            .services
-            .plugin_data
-            .as_ref()
-            .map(|pd| pd.all_hooks.clone())
-            .unwrap_or_default();
-        hooks.extend(peri_middlewares::hooks::loader::load_global_settings_hooks());
-        hooks.extend(peri_middlewares::hooks::loader::load_settings_local_hooks(
-            &app.services.cwd,
-        ));
-        if !hooks.is_empty() {
-            let cwd = app.services.cwd.clone();
-            let provider_name = app.services.provider_name.clone();
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    peri_middlewares::hooks::middleware::fire_standalone_lifecycle_hooks(
-                        &hooks,
-                        peri_middlewares::hooks::types::HookEvent::SessionEnd,
-                        &cwd,
-                        "",
-                        "",
-                        &provider_name,
-                        None,
-                        Some("prompt_input_exit"),
-                    )
-                    .await;
-                })
-            });
-        }
-    }
-
-    // 关闭 MCP 连接池（断开所有 MCP 服务器连接，清理子进程）
-    if let Some(pool) = app.services.mcp_pool.take() {
-        tracing::info!("正在关闭 MCP 连接池...");
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(pool.shutdown()));
-        tracing::info!("MCP 连接池已关闭");
-    }
-
-    // 等待最后一次 Langfuse flush 完成，防止 runtime drop 前 batcher 数据丢失
-    if let Some(handle) = app
-        .session_mgr
-        .current_mut()
-        .langfuse
-        .langfuse_flush_handle
-        .take()
-    {
-        let _ = handle.await;
-    }
+    // 关闭 hooks + MCP pool + 等 Langfuse flush
+    peri_tui::launch::teardown_app(&mut app).await;
 
     Ok(())
 }

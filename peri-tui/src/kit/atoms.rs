@@ -9,6 +9,7 @@ use peri_acp_types::view_model::ViewModel;
 use ratatui_kit::prelude::StoreState;
 use std::sync::OnceLock;
 use std::time::Instant;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// 类型别名：将 StoreState 映射为 Atom，保持命名一致性
 pub type Atom<T> = StoreState<T>;
@@ -48,9 +49,13 @@ pub static AT_MENTION_ACTIVE: OnceLock<Atom<bool>> = OnceLock::new();
 pub static SLASH_HINT_ACTIVE: OnceLock<Atom<bool>> = OnceLock::new();
 pub static POPUP_ACTIVE: OnceLock<Atom<bool>> = OnceLock::new();
 
-/// 提交通道：InputArea 写入提交文本 → ACP bridge 读取并发送
-pub static SUBMIT_PENDING: OnceLock<Atom<bool>> = OnceLock::new();
-pub static SUBMIT_TEXT: OnceLock<Atom<String>> = OnceLock::new();
+/// 提交通道：InputArea 写入 → submit_consumer 读取 → acp_client.prompt()。
+///
+/// 用 mpsc 而非 atom 的原因：
+/// 1. **背压**：UnboundedSender 在 channel 满时自然阻塞消费者，atom 无此语义。
+/// 2. **顺序保证**：每个提交独立成事件，消费者按序处理；atom 会被覆盖丢失。
+/// 3. **Send+Sync**：UnboundedSender 可在 #[component] 闭包与 tokio task 间自由 Clone。
+pub static SUBMIT_TX: OnceLock<UnboundedSender<String>> = OnceLock::new();
 
 /// 初始化所有全局 Atom。
 ///
@@ -65,6 +70,6 @@ pub fn init_atoms() {
     AT_MENTION_ACTIVE.get_or_init(|| Atom::new(false));
     SLASH_HINT_ACTIVE.get_or_init(|| Atom::new(false));
     POPUP_ACTIVE.get_or_init(|| Atom::new(false));
-    SUBMIT_PENDING.get_or_init(|| Atom::new(false));
-    SUBMIT_TEXT.get_or_init(|| Atom::new(String::new()));
+    // SUBMIT_TX 由 entry::run_kit_fullscreen 在 build_app_and_acp 之后初始化
+    // （需要 mpsc::unbounded_channel 的 rx 配对），不在此处 get_or_init。
 }

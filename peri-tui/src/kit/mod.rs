@@ -7,6 +7,7 @@
 
 pub mod acp_bridge;
 pub mod acp_events;
+pub mod acp_notifier;
 pub mod app_shell;
 pub mod atoms;
 pub mod entry;
@@ -20,6 +21,7 @@ pub mod popups;
 pub mod setup_wizard;
 pub mod slash_completion;
 pub mod status_bar;
+pub mod submit_consumer;
 
 // Phase 3: 导出布局组件
 pub use app_shell::AppShell;
