@@ -15,10 +15,6 @@
 
 ### 已完成（P1–P5 + 完全清理 + P2-B + P2-C）
 
-**当前状态**：**v2 stages 单路径架构（完全清理 + 异步事件回路打通 + TUI MessagePipeline 单一数据源）**。v1 `ReActAgent` / `executor/` 目录 / `State` trait / `CompactMiddleware` / v1 `MessageQueue` 已物理删除，所有执行路径（main agent / SubAgent / Hook / Workflow）统一通过 v2 `run_react_loop` 驱动。异步事件（cron/channel/workflow/bg_results）通过共享 v2 MessageQueue + TUI polling 接收方主动续跑形成完整回路。TUI MessagePipeline 重构为 `transcript + Option<PartialAiMessage>` 单一数据源架构，v2 stages 在迭代边界 emit `TurnCompleted` 携带全量 transcript 快照，commit_iteration 用替换语义吸收——修复多迭代场景下文本渲染在工具之前的顺序 bug（详见 `docs/design/peri-tui-message-pipeline-v2.md`）。
-
-### 已完成（P1–P5 + 完全清理 + P2-B + P2-C）
-
 - ✅ **P1**：`trait Middleware` 移除 `<S: State>` 泛型，改为 `MiddlewareContext` / `MiddlewareContextMut`（commit 98626062）
 - ✅ **P2**：v2 stages 真实化——`reason/act/compact/receive/end` 全部接入 LLM + 工具分发 + middleware 钩子（commit 177cc517）
 - ✅ **P3**：ACP executor v2 路径默认开启（`build_and_execute_agent_v2` + 9 个 Phase）
