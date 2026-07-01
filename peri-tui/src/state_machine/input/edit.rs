@@ -360,7 +360,7 @@ impl InputState {
 #[cfg(test)]
 mod phase1_tests {
     use super::*;
-    use crate::state_machine::input::{AtMentionState, Selection};
+    use crate::state_machine::input::Selection;
 
     // ── type_char ─────────────────────────────────────────────────────────
 
@@ -634,20 +634,5 @@ mod phase1_tests {
         assert_eq!(state.text(), "world");
         assert_eq!(state.cursor, CursorPos::new(0, 5));
         assert!(state.selection.is_none());
-    }
-
-    #[test]
-    fn test_replace_text_clears_at_mention() {
-        let mut state = InputState {
-            lines: vec!["@file".to_string()],
-            at_mention: Some(AtMentionState {
-                candidates: vec!["a".into()],
-                selected: 0,
-            }),
-            ..Default::default()
-        };
-        state.replace_text("done".to_string());
-        assert_eq!(state.text(), "done");
-        assert!(state.at_mention.is_none());
     }
 }

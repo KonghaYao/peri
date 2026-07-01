@@ -131,8 +131,6 @@ mod tests {
         let state = from_textarea(&ta);
         // Fields not derived from TextArea stay at their defaults.
         assert!(state.selection.is_none());
-        assert!(state.at_mention.is_none());
-        assert!(state.slash_completion.is_none());
         assert!(state.history.is_empty());
         assert!(state.history_index.is_none());
         assert!(state.attachments.is_empty());
