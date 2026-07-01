@@ -839,24 +839,33 @@ async fn test_compact_done_with_re_inject() {
     app.process_pending_events();
     handle.wait_for_render().await;
 
-    // view_messages 应包含压缩提示（condensed summary 格式）
-    let msgs = &app.session_mgr.current_mut().messages.view_messages;
+    // Cron #41: CompactCompleted label 路由从 v1 view_messages 迁到 v2
+    // pending_v2_notes → SM Event::PushSystemNote → state.view。
+    // 检查 pending_v2_notes 是否包含压缩提示 + 文件 + skill 信息。
+    let notes = &app.session_mgr.current().messages.pending_v2_notes;
     assert_eq!(
-        msgs.len(),
+        notes.len(),
         1,
-        "应只有 1 条压缩占位消息，实际: {}",
-        msgs.len()
+        "Cron #41: CompactDone 应入队到 pending_v2_notes，实际: {}",
+        notes.len()
     );
-    let has_compact = msgs.iter().any(|m| {
-        if let MessageViewModel::SystemNote { content, .. } = m {
-            content.contains("✻ Context compressed")
-                && content.contains("Read /a.rs")
-                && content.contains("Skill: skill.md")
-        } else {
-            false
-        }
-    });
-    assert!(has_compact, "应包含压缩提示消息");
+    let has_compact = notes
+        .iter()
+        .any(|n| n.contains("✻") && n.contains("Read /a.rs") && n.contains("Skill: skill.md"));
+    assert!(
+        has_compact,
+        "Cron #41: pending_v2_notes 应包含 ✻ + Read /a.rs + Skill: skill.md"
+    );
+
+    // Cron #41 防回归：view_messages 必须不再被 apply_rebuild_all 写入
+    let view_msgs = &app.session_mgr.current().messages.view_messages;
+    assert!(
+        view_msgs.iter().all(|m| match m {
+            MessageViewModel::SystemNote { content, .. } => !content.contains("✻"),
+            _ => true,
+        }),
+        "Cron #41 防回归：CompactDone label 不应写入 v1 view_messages (生产独占读 v2)"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -866,24 +875,26 @@ async fn test_compact_done_without_re_inject() {
     app.process_pending_events();
     handle.wait_for_render().await;
 
-    let msgs = &app.session_mgr.current_mut().messages.view_messages;
-    assert_eq!(msgs.len(), 1, "应只有 1 条压缩占位消息");
-    let has_compact = msgs.iter().any(|m| {
-        if let MessageViewModel::SystemNote { content, .. } = m {
-            content.contains("✻ Context compressed")
-        } else {
-            false
-        }
-    });
-    assert!(has_compact, "应包含压缩提示消息");
-    let has_re_inject = msgs.iter().any(|m| {
-        if let MessageViewModel::SystemNote { content, .. } = m {
-            content.contains("Read ") || content.contains("Skill:")
-        } else {
-            false
-        }
-    });
-    assert!(!has_re_inject, "无重新注入内容时不应显示文件/skill 详情");
+    // Cron #41: CompactDone label 在 pending_v2_notes 中（无 re_inject 时只有 ✻ 标志）
+    let notes = &app.session_mgr.current().messages.pending_v2_notes;
+    assert_eq!(
+        notes.len(),
+        1,
+        "Cron #41: CompactDone 应入队到 pending_v2_notes"
+    );
+    let has_compact_marker = notes.iter().any(|n| n.contains("✻"));
+    assert!(
+        has_compact_marker,
+        "Cron #41: pending_v2_notes 应包含 ✻ 压缩标志"
+    );
+    let has_re_inject = notes
+        .iter()
+        .any(|n| n.contains("Read ") || n.contains("Skill:"));
+    assert!(
+        !has_re_inject,
+        "无重新注入内容时不应显示文件/skill 详情，实际 notes: {:?}",
+        notes
+    );
 }
 
 #[tokio::test]
