@@ -114,17 +114,22 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #37（paste/mouse-cursor/@mention 同步 bug 三连击 — 4 个 auditor 收敛于同一根因：textarea-mutating effect 不触发 2b sync → render-time to_textarea 用陈旧 InputState 覆盖合法变更）<br>
-  <strong>本窗口成果</strong>：1 个本地 commit（不 push），含 3 个 HIGH 修复（共享根因）：<br>
-  · <strong>Fix 1（peri-tui，HIGH，streaming.rs）</strong>：<code>Event::Paste</code> 在 Streaming 状态下仅 emit <code>Effect::Render</code>，<strong>静默丢弃</strong>粘贴文本。用户在 agent 输出期间预先粘贴下一条消息会丢失。修复：emit <code>Effect::PasteText { text } + Effect::Render</code>，与 Idle 对齐。<br>
-  · <strong>Fix 2（peri-tui，HIGH，main_loop.rs）</strong>：新增 <code>effect_did_mutate_textarea</code> 标志，<code>Effect::PasteText</code>/<code>MouseTextareaClick</code>/<code>MouseTextareaDrag</code> 处理器修改 textarea 后置位。2b sync 条件从 <code>if keyboard_did_run</code> 改为 <code>if keyboard_did_run || effect_did_mutate_textarea</code>。无此修复，paste 在下一帧 render 被 to_textarea 抹除（用户看到粘贴瞬间消失），鼠标 click/drag 选区被光标弹回原位。Wizard/popup 分支自有 widget，故意不置位。<br>
-  · <strong>Fix 3（peri-tui，HIGH，main_loop.rs）</strong>：@mention popup 或 slash_completion hint 激活时按 Enter，必须由键盘 fallback 拥有（注入选中路径 / 完成提示）。此前 SM Enter handler 在 fallback 之前<strong>无条件执行</strong>：读取 <code>state.input.text()</code>（仍是原始 <code>@query</code> token，因 <code>InputState.at_mention</code> 在生产中恒为 None）→ emit <code>Effect::SubmitMessage { text: "@query" }</code> → 提交原始 token 而非解析后的路径。<code>is_sm_handled_shortcut</code> 对 Enter + overlay 返回 false 只控制 fallback，不阻止 SM 自身先跑。修复：新增 SM 旁路 arm（镜像 Cron #25 的 <code>popup_active</code> 模式）通过新 <code>inline_overlay_active_for_enter</code> helper 实现。Enter + overlay 激活时 SM no-op，fallback 独占注入。<br>
-  · <strong>audit workflow</strong> <code>w69sx5rcq</code>：5 auditor on input state sync（textarea↔InputState 双向同步 / @mention & slash_hint desync / history navigation / paste & IME / cursor & clipboard）。4/5 auditor 在窗口内完成，findings 与我的并行侦察交叉验证（双 prediction 字段 / from_textarea 语义清除）。Synthesis 跳过（直接消费 audit journals，遵循 <code>workflow-synthesis-stall-pattern.md</code> 反馈）。<br>
-  · <strong>新增延后（2 LOW + 1 MEDIUM）</strong>：① <code>InputState::insert_str</code> 不清空 selection（future-proofing，当前无 user symptom）② Dead SM Up/Down history navigation code（<code>idle.rs:400-431</code> 执行但被 2b sync 覆盖，legacy 路径正常工作）。<br>
-  · <strong>当前累积缺陷轨迹</strong>：17 → 10 → 7 → 3（Cron #32）→ 2（Cron #33）→ 1（Cron #34）→ 1（Cron #36）→ <strong>1（Cron #37，architectural SubAgent instance_id 仍是主剩余）</strong>。<br>
+  <strong>最后更新</strong>：2026-07-01 cron #38（setup wizard SM 旁路缺失 — wizard 不在 <code>is_interaction_popup_active</code> 内 → SM 在 wizard 背后吞键：Enter 被空输入 no-op 吃掉无法前进，Ctrl+T/Ctrl+P/BackTab 静默开 panel，Esc 同时推进 DoubleEscTracker）<br>
+  <strong>本窗口成果</strong>：1 个本地 commit（不 push），单点修复（HIGH）扩展 <code>popup_active</code> bypass 覆盖 <code>wizard_active</code>：<br>
+  · <strong>Fix（peri-tui，HIGH，main_loop.rs）</strong>：setup_wizard 激活时 <code>wizard_active = app.global_ui.setup_wizard.is_some()</code>。SM bypass arm 条件从 <code>popup_active && Key</code> 扩展为 <code>(popup_active || wizard_active) && Key</code>，键盘 fallback guard 从 <code>!is_sm_handled_shortcut(...)</code> 改为 <code>wizard_active || !is_sm_handled_shortcut(...)</code>。三个用户可见症状一并消除：<br>
+  &nbsp;&nbsp;① <strong>Enter stolen by SM empty-input no-op</strong>（<code>idle.rs:276-279</code>）— 用户无法越过 wizard 第一步（这是审计最严重的用户可见 bug）。<br>
+  &nbsp;&nbsp;② <strong>Ctrl+T/Ctrl+P/BackTab silently handled by SM</strong> — <code>is_sm_handled_shortcut</code> 返回 true 阻塞键盘 fallback，wizard 收不到键，SM 在背后 cycle model / 开 Model panel。<br>
+  &nbsp;&nbsp;③ <strong>Esc advances DoubleEscTracker + wizard handler</strong> — wizard 关闭后下次普通 Esc 立即退出 app。<br>
+  · <strong>审计 workflow</strong> <code>w9tf0y2kq</code>：5 Explore auditor on popup/modal 二元性（v1 popup vs v2 Handler 共存 / wizard 不在 popup_active / mouse events gate / popup-hint Ctrl+T / Ctrl+C handler 双轨）。3/5 在窗口内完成，12 个发现提取。TOP_FIX 束 = wizard 三角（Enter + shortcut + Esc）共享根因。<br>
+  · <strong>新增延后（6 项，全部依赖 ACP 层激活）</strong>：① v2 Handler 双重渲染面板重叠（panel_area overlay 与 fallback popup 同时画）② v2-handler-submit-无-acp-响应-id（HandlerOutput::Submit payload 无对应 ACP 通道）③ v2-hitl-无每工具决策（hitl 批量设计，但 v1 是 per-tool）④ v2-askuser-缺少自定义输入（v2 AskUser 仅选项，无 free-text）⑤ v2-oauth-无回调输入（v2 OauthHandler 无浏览器回调 url 解析）⑥ prediction-file-suggestion-在-modal-中丢弃（LOW）⑦ openpanel-静默-noop-从-modal-或-switching（LOW）⑧ askuser-hitl-ctrl-c-立即退出（行为，LOW）⑨ popup-mouse-events-未门控（LOW）。<br>
+  · <strong>当前累积缺陷轨迹</strong>：17 → 10 → 7 → 3（Cron #32）→ 2（Cron #33）→ 1（Cron #34）→ 1（Cron #36）→ 1（Cron #37）→ <strong>1 主缺陷 + 9 新延后（Cron #38）</strong>。主剩余仍是 architectural SubAgent instance_id。<br>
   · <strong>Phase 2.6 step 7e 进度</strong>：7e.1 ✓ / 7e.7 ✓。剩余 7 个子步骤不变。<br>
-  <strong>当前状态</strong>：<strong>1126 测试全过</strong>（1119 + 7 个新增回归：1 streaming Paste + 6 inline_overlay_active_for_enter helper 测试）· Idle/Streaming paste 正常工作 · 鼠标 click/drag 选区稳定 · @mention Enter 注入正确路径<br>
-  <strong>下一步</strong>：① pending_view_rewind_to ViewCommit clear（race，仍未处理）② subagent render-misroute（architectural，需 peri-acp-types SubAgentGroupData 加 instance_id + view_mapper 填充 + view_render.rs 用精确查找）③ Phase 2.6 step 7e.6（删除 message_area.rs v1 fallback，~35 个 headless_test 更新）④ Phase 2.6 step 7e.2（handle_tool_end HIGH，含 handle_error:251 dead v1 apply_add_message 退休）⑤ dual prediction 字段统一（SM InputState.prediction vs App ui.prediction，input_widget 读 SM 字段，App 字段是死代码候选）
+  <strong>当前状态</strong>：<strong>1127 测试全过</strong>（1126 + 1 个新增负向断言：helper <code>is_sm_handled_shortcut</code> 未改，bypass 完全在 main_loop 层）· Setup wizard 可正常前进所有 step · Ctrl+T/Ctrl+P 在 wizard 激活时不再背后副作用 · Esc 不再污染 wizard 后单次退出<br>
+  <strong>下一步</strong>：① pending_view_rewind_to ViewCommit clear（race）② subagent render-misroute（architectural SubAgentGroupData instance_id）③ Phase 2.6 step 7e 剩余子步骤 ④ ACP 层扩展（激活 v2 Handler 路径，解锁 9 个延后）
+</div>
+
+<div class="meta">
+  <strong>历史 - cron #37</strong>（commit 61f8b4e0）：paste/mouse-cursor/@mention 同步 bug 三连击 — 4 个 auditor 收敛于同一根因：textarea-mutating effect 不触发 2b sync → render-time to_textarea 用陈旧 InputState 覆盖合法变更。Fix 1: <code>Event::Paste</code> 在 Streaming 状态丢弃文本 → emit <code>Effect::PasteText</code>；Fix 2: 新增 <code>effect_did_mutate_textarea</code> 标志，paste/mouse 处理器置位，2b sync 条件扩展；Fix 3: @mention/slash_hint 激活时 Enter 经新 <code>inline_overlay_active_for_enter</code> helper 触发 SM 旁路，fallback 独占注入。新增 7 个回归测试。
 </div>
 
 <div class="meta">
