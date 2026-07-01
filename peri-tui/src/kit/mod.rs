@@ -18,6 +18,7 @@ pub mod mention_popup;
 pub mod message_area;
 pub mod panels;
 pub mod popups;
+pub mod service_snapshot;
 pub mod setup_wizard;
 pub mod slash_completion;
 pub mod status_bar;

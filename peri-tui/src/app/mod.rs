@@ -1,6 +1,6 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 mod global_ui_state;
-mod service_registry;
+pub mod service_registry;
 pub use global_ui_state::GlobalUiState;
 pub use service_registry::ServiceRegistry;
 
