@@ -367,6 +367,14 @@ impl SubAgentStatusMap {
     /// - BackgroundTaskCompleted 找不到 instance_id（child_thread_id）时按 agent_name 回退
     ///
     /// **歧义容忍**：同名 agent 多实例时返回最近启动的（仍在运行优先）。
+    ///
+    /// **[TRAP]** 当多个同类型 SubAgent 并发运行时（如两个 "researcher"），
+    /// 此函数对所有 SubAgentGroup 占位符返回同一个 status entry，导致 misroute：
+    /// 多个卡片显示相同的 is_running / final_result，子内容串到错误实例。
+    /// 根因是 `SubAgentGroupData` DTO 缺少 `instance_id` 字段（ACP 层冻结）。
+    /// 等 ACP 解冻后，DTO 加 instance_id → 渲染优先精确匹配。TUI 侧已预留
+    /// `lookup_by_instance_id` 接口(`SubAgentStatusProbe::lookup_by_instance_id`)。
+    /// See `docs/refactor/progress.html` SubAgent render-misroute。
     pub fn lookup_by_agent_id(&self, agent_id: &str) -> Option<&SubAgentStatus> {
         let mut best: Option<&SubAgentStatus> = None;
         for s in self.inner.values() {

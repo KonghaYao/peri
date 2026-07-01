@@ -114,15 +114,14 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #47（Phase 2.6 step 7e.9 完成 — view_messages 字段退役）。核心改动：新增 <code>v2_test_views</code> headless 种子源 + seed 辅助函数；headless_test.rs ~30 种子/断言全量迁移到 v2；删除 <code>apply_add_message</code> + <code>apply_rebuild_all</code> + <code>view_messages</code> 字段；清理 thread_ops/agent_ops/gc 中 v1 path 死代码。<br>
-  <strong>本窗口成果</strong>：~200 行净删除（+100 seed helpers -300 v1 dead code）。<br>
-  · <strong>Retire 1 — SM DoubleEscTracker</strong>（state.rs / idle.rs / modal.rs / streaming.rs / switching.rs / transitions/mod.rs / main_loop.rs / mod.rs）：删除 <code>struct DoubleEscTracker</code> + <code>IdleState.double_esc_timer</code> + <code>ModalState.saved_double_esc_timer</code> + 3 个 tracker 自测。SM Esc 处理器移除 <code>Effect::Quit</code> 发送（保留 popup 关闭逻辑）。Quit + Rewind 现在统一由 v1 keyboard fallback 的 <code>rewind_pending_since</code> 2s 计时器管理，单一阈值，单一拥有者。Cron #38 的 <code>wizard_active</code> 旁路注释更新为反映新现实。<br>
-  · <strong>Retire 2 — InputState.prediction</strong>（input/mod.rs / input/sync.rs / idle.rs / streaming.rs / main_loop.rs / ui/mod.rs / ui/input_widget.rs）：删除 <code>InputState.prediction: Option&lt;String&gt;</code> 字段 + Default + clear_buffer 清理。SM 的 <code>AcpEventData::Prediction</code> 处理器降级为 <code>vec![Effect::Render]</code>（触发重绘读取 v1 <code>app.session_mgr.current().ui.prediction</code>）。main_loop 2b sync 的 prediction-clear 逻辑移除（old_text_len 快照退役）。<strong>删除整个 <code>ui/input_widget.rs</code> 模块</strong>（386 行死代码，<code>InputWidget::new</code> 仅在自身测试被引用，是 B3 MigrateInput 的预留 stub，但生产从未切到 InputWidget 渲染路径）。<br>
-  · <strong>Net</strong>：-568 行 / +84 行。1 个 struct 退役 + 3 个 state 字段退役 + 1 个模块删除。<br>
-  · <strong>测试</strong>：1120 pass（移除 4 个 tracker/prediction 自测 + 添加 1 个 <code>test_double_esc_does_not_quit_from_sm</code> 守护测试，确保未来不在 SM Esc 重新引入 Quit 发送）。<br>
-  · <strong>Phase 2.6 step 7e 进度</strong>：7e.1 ✓ / 7e.2 ✓ / 7e.3 ✓ / 7e.4 ✓ / 7e.5 ✓ / 7e.6 ✓ / 7e.7 ✓ / 7e.8 ✓ / <strong>7e.9 ✓</strong>。<strong>Phase 2.6 全部完成</strong>。<br>
-  <strong>当前状态</strong>：<strong>1117 测试全过</strong> · view_messages 字段已删除 · apply_add_message / apply_rebuild_all 已删除<br>
-  <strong>下一步</strong>：① SubAgent render-misroute（architectural SubAgentGroupData instance_id）② 9 个 ACP-gated bugs（等 ACP 层扩展 AcpEvent 变体）③ vm_convert 模块清理
+  <strong>最后更新</strong>：2026-07-01 cron #47（Phase 2.6 全部完成 + vm_convert 死代码清理 + SubAgent render-misroute 调研）。<br>
+  <strong>本窗口成果</strong>：2 个本地 commit（bcf97d0f, 47edccd3）：<br>
+  · <strong>step 7e.9</strong>：view_messages 字段退役 — 新增 v2_test_views 种子源 + 4 个 seed 辅助函数；headless_test ~30 站点迁移；删除 apply_add_message / apply_rebuild_all / 字段定义；清理 thread_ops/gc/agent_ops v1 死代码。<br>
+  · <strong>vm_convert 清理</strong>：v1→v2 桥接模块死代码删除（300 行），唯一数据源 view_messages 已退役。<br>
+  · <strong>SubAgent render-misroute 调研</strong>：根因是 SubAgentGroupData DTO 缺 instance_id，并发同类型 SubAgent 时 lookup_by_agent_id 回退匹配歧义。修复需要 ACP 层 DTO 变更 → <strong>blocked by ACP freeze</strong>。TUI 侧已添加 TRAP 注释 + 预留 lookup_by_instance_id 接口。<br>
+  · <strong>Net</strong>：~430 行净删除（1111 pass）。<br>
+  <strong>当前状态</strong>：<strong>1111 测试全过</strong> · Phase 2.6 全部完成 · vm_convert 死代码清除 · SubAgent misroute 已调研<br>
+  <strong>下一步</strong>：① SubAgent misroute 修复（等 ACP 层解冻）② 9 个 ACP-gated bugs（等 ACP 层扩展 AcpEvent 变体）③ 寻找更多 TUI-only 低风险清理
 </div>
 
 <div class="meta">
