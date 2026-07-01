@@ -71,8 +71,6 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = snapshot; // StoreState 是 Copy，无需显式 drop
 
     hooks.use_local_events({
-        let cursor = cursor.clone();
-        let selected_tab = selected_tab.clone();
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {

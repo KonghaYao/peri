@@ -291,12 +291,12 @@ impl AcpTuiClient {
     ) -> Result<String, AcpError> {
         // Close previous session (if different from the one being loaded)
         let old_id = self.current_session_id.lock().unwrap().take();
-        if let Some(ref old_sid) = old_id {
-            if old_sid != session_id {
-                let params = json!({ "sessionId": old_sid });
-                if let Err(e) = self.transport.send_request("session/close", params).await {
-                    debug!(error = %e, "Failed to close previous session (non-fatal)");
-                }
+        if let Some(ref old_sid) = old_id
+            && old_sid != session_id
+        {
+            let params = json!({ "sessionId": old_sid });
+            if let Err(e) = self.transport.send_request("session/close", params).await {
+                debug!(error = %e, "Failed to close previous session (non-fatal)");
             }
         }
 

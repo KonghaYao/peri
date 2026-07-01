@@ -1,5 +1,8 @@
 //! ratatui-kit SessionColumn layout component.
 
+// element! 宏展开触发 clippy::needless_update（ratatui-kit 上游问题），模块级抑制。
+#![allow(clippy::needless_update)]
+
 use crate::kit::atoms;
 use crate::kit::input_area::InputArea;
 use crate::kit::message_area::MessageArea;

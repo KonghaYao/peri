@@ -26,8 +26,6 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let count = plugins.len();
 
     hooks.use_local_events({
-        let selected = selected.clone();
-        let count = count;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {

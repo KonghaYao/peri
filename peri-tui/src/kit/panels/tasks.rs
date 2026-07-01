@@ -40,8 +40,6 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let total = cron_count + subagent_count;
 
     hooks.use_local_events({
-        let selected = selected.clone();
-        let total = total;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {

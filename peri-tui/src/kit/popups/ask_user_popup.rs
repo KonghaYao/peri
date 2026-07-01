@@ -54,8 +54,6 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let inputs = hooks.use_state(|| vec![String::new(); question_count]);
 
     hooks.use_local_events({
-        let focused = focused;
-        let inputs = inputs;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {

@@ -45,8 +45,6 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let count = rows.len();
 
     hooks.use_local_events({
-        let cursor = cursor.clone();
-        let count = count;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {

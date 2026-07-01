@@ -38,7 +38,6 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = vm_store;
 
     hooks.use_local_events({
-        let active_tab = active_tab;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {

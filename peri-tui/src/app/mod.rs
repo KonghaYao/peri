@@ -52,17 +52,11 @@ pub use edit_utils::{build_textarea, ensure_cursor_visible};
 mod field_textarea;
 pub use field_textarea::FieldTextarea;
 
-pub mod text_selection;
-
 // ── Services ───────────────────────────────────────────────────────────────────
 mod history_ops;
 mod history_persistence;
 mod provider;
 
-#[cfg(target_os = "windows")]
-mod ime;
-#[cfg(target_os = "windows")]
-pub use ime::textarea_cursor_pos;
 use std::sync::Arc;
 
 use crate::acp_client::AcpTuiClient;

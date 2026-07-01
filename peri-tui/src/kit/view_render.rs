@@ -223,10 +223,8 @@ fn render_tool_card(
     }
 
     // Diff 块
-    if diff_visible {
-        if let Some(ref diff) = data.diff {
-            lines.extend(render_diff_block(diff));
-        }
+    if diff_visible && let Some(ref diff) = data.diff {
+        lines.extend(render_diff_block(diff));
     }
 
     lines
@@ -375,28 +373,27 @@ fn render_subagent_group(
     }
 
     // 显示 final_result 摘要（如果完成且有结果）
-    if let Some(ref s) = status {
-        if !s.is_running {
-            if let Some(ref result) = s.final_result {
-                let preview: String = result
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(120)
-                    .collect();
-                if !preview.is_empty() {
-                    let color = if s.is_error {
-                        theme::ERROR
-                    } else {
-                        theme::MUTED
-                    };
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(format!("→ {}", preview), Style::default().fg(color)),
-                    ]));
-                }
-            }
+    if let Some(ref s) = status
+        && !s.is_running
+        && let Some(ref result) = s.final_result
+    {
+        let preview: String = result
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(120)
+            .collect();
+        if !preview.is_empty() {
+            let color = if s.is_error {
+                theme::ERROR
+            } else {
+                theme::MUTED
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("→ {}", preview), Style::default().fg(color)),
+            ]));
         }
     }
 

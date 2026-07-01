@@ -49,8 +49,6 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let count = hook_list.len();
 
     hooks.use_local_events({
-        let selected = selected.clone();
-        let count = count;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
@@ -70,9 +68,7 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             *s = (*s + 1).min(count - 1);
                         }
                     }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return;
-                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
                     _ => {}
                 }
             }

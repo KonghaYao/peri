@@ -19,7 +19,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::DateTime;
 use parking_lot::Mutex;
 use peri_middlewares::{
     cron::CronScheduler,
@@ -139,7 +138,7 @@ async fn tick_once(src: &SnapshotSource) -> Result<(), Box<dyn std::error::Error
                 title: m.title.clone(),
                 cwd: m.cwd.clone(),
                 message_count: m.message_count,
-                updated_at: Some(DateTime::<chrono::Utc>::from(m.updated_at)),
+                updated_at: Some(m.updated_at),
             })
             .collect(),
         Err(e) => {
@@ -433,14 +432,10 @@ fn scan_memory_dir() -> Vec<MemoryEntry> {
             continue;
         }
         let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        let modified = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| {
-                let dt: chrono::DateTime<chrono::Utc> = t.into();
-                Some(dt)
-            });
+        let modified = entry.metadata().and_then(|m| m.modified()).ok().map(|t| {
+            let dt: chrono::DateTime<chrono::Utc> = t.into();
+            dt
+        });
         out.push(MemoryEntry {
             path: rel,
             size_bytes,
@@ -645,7 +640,7 @@ mod tests {
     fn test_chrono_datetime_conversion() {
         // 验证 chrono::DateTime<chrono::Utc> 与 ThreadMeta.updated_at 类型一致
         let now = Utc::now();
-        let _dt: DateTime<Utc> = now;
+        let _dt: chrono::DateTime<Utc> = now;
         // 验证 ThreadSummary.updated_at 是 Option<DateTime<Utc>>
         let summary = ThreadSummary {
             id: "x".into(),

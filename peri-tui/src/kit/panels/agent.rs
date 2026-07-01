@@ -48,8 +48,6 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let row_count = 8 + subagent_count.max(1);
 
     hooks.use_local_events({
-        let cursor = cursor.clone();
-        let row_count = row_count;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
@@ -251,5 +249,105 @@ fn close_panel() {
     }
     if let Some(atom) = OPEN_PANELS.get() {
         atom.write().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kit::atoms::ViewModelsSnapshot;
+    use peri_acp_types::view_model::{CollapsedGroupData, SubAgentGroupData, UserBubbleData};
+
+    fn make_subagent(id: &str, name: &str) -> SubAgentGroupData {
+        SubAgentGroupData {
+            agent_id: id.to_string(),
+            agent_name: name.to_string(),
+            view_models: Vec::new(),
+            collapsed: false,
+        }
+    }
+
+    #[test]
+    fn test_collect_subagents_empty_snapshot() {
+        let snap = ViewModelsSnapshot::default();
+        assert!(collect_subagents(&snap).is_empty());
+    }
+
+    #[test]
+    fn test_collect_subagents_only_user_bubbles() {
+        let snap = ViewModelsSnapshot {
+            committed: vec![ViewModel::UserBubble(UserBubbleData {
+                text: "hi".to_string(),
+            })],
+            current_turn: Vec::new(),
+        };
+        assert!(collect_subagents(&snap).is_empty());
+    }
+
+    #[test]
+    fn test_collect_subagents_dedup_across_committed_and_current() {
+        // 同一 agent_id 出现在 committed 和 current_turn——应只保留一次
+        let snap = ViewModelsSnapshot {
+            committed: vec![ViewModel::SubAgentGroup(make_subagent(
+                "researcher",
+                "Researcher",
+            ))],
+            current_turn: vec![ViewModel::SubAgentGroup(make_subagent(
+                "researcher",
+                "Researcher",
+            ))],
+        };
+        let result = collect_subagents(&snap);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].agent_id, "researcher");
+    }
+
+    #[test]
+    fn test_collect_subagents_preserves_insertion_order() {
+        let snap = ViewModelsSnapshot {
+            committed: vec![
+                ViewModel::SubAgentGroup(make_subagent("alpha", "Alpha")),
+                ViewModel::SubAgentGroup(make_subagent("beta", "Beta")),
+                ViewModel::SubAgentGroup(make_subagent("gamma", "Gamma")),
+            ],
+            current_turn: Vec::new(),
+        };
+        let result = collect_subagents(&snap);
+        let ids: Vec<_> = result.iter().map(|s| s.agent_id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn test_collect_subagents_recurses_into_collapsed_group() {
+        // CollapsedGroup 内嵌 SubAgent——应被扫描到
+        let collapsed = CollapsedGroupData {
+            title: "batch".to_string(),
+            count: 1,
+            view_models: vec![ViewModel::SubAgentGroup(make_subagent("hidden", "Hidden"))],
+        };
+        let snap = ViewModelsSnapshot {
+            committed: vec![ViewModel::CollapsedGroup(collapsed)],
+            current_turn: Vec::new(),
+        };
+        let result = collect_subagents(&snap);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].agent_id, "hidden");
+    }
+
+    #[test]
+    fn test_collect_subagents_recurses_into_nested_subagent() {
+        // SubAgent 内嵌 SubAgent（嵌套）——内层也应被扫描
+        let mut outer = make_subagent("outer", "Outer");
+        outer
+            .view_models
+            .push(ViewModel::SubAgentGroup(make_subagent("inner", "Inner")));
+        let snap = ViewModelsSnapshot {
+            committed: vec![ViewModel::SubAgentGroup(outer)],
+            current_turn: Vec::new(),
+        };
+        let result = collect_subagents(&snap);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].agent_id, "outer");
+        assert_eq!(result[1].agent_id, "inner");
     }
 }

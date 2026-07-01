@@ -66,8 +66,6 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let bump = hooks.use_state(|| 0u32);
 
     hooks.use_local_events({
-        let cursor = cursor.clone();
-        let bump = bump.clone();
         let row_count = CONFIG_ROWS.len();
 
         move |event: Event| {
@@ -326,10 +324,10 @@ fn activate_row(row: usize, forward: bool) {
                     let _ = crate::config::save(&snap);
                 }
                 ROW_PERMISSION_MODE => {
-                    if let Some(mode_handle) = PERMISSION_MODE_HANDLE.get() {
-                        if let Some(mode) = parse_permission_mode(new_val) {
-                            mode_handle.store(mode);
-                        }
+                    if let Some(mode_handle) = PERMISSION_MODE_HANDLE.get()
+                        && let Some(mode) = parse_permission_mode(new_val)
+                    {
+                        mode_handle.store(mode);
                     }
                     // permission_mode 不持久化到 settings.json（运行时状态）
                 }

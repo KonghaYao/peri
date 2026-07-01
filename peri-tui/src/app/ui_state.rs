@@ -2,7 +2,6 @@ use peri_widgets::ScrollbarMetrics;
 use tui_textarea::TextArea;
 
 use super::at_mention::AtMentionState;
-use crate::app::text_selection::{PanelTextSelection, TextSelection};
 
 /// 预测输入状态：agent 完成后 LLM 生成的下一步输入建议。
 pub struct PredictionState {
@@ -20,12 +19,10 @@ pub struct UiState {
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
     pub draft_input: Option<String>,
-    pub text_selection: TextSelection,
     pub messages_area: Option<ratatui::layout::Rect>,
     pub textarea_area: Option<ratatui::layout::Rect>,
     pub copy_message_until: Option<std::time::Instant>,
     pub copy_char_count: usize,
-    pub panel_selection: PanelTextSelection,
     pub panel_area: Option<ratatui::layout::Rect>,
     pub panel_plain_lines: Vec<String>,
     pub panel_scroll_offset: u16,
@@ -68,12 +65,10 @@ impl UiState {
             input_history,
             history_index: None,
             draft_input: None,
-            text_selection: TextSelection::new(),
             messages_area: None,
             textarea_area: None,
             copy_message_until: None,
             copy_char_count: 0,
-            panel_selection: PanelTextSelection::new(),
             panel_area: None,
             panel_plain_lines: Vec::new(),
             panel_scroll_offset: 0,

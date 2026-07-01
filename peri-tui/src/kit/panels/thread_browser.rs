@@ -28,8 +28,6 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let count = threads.len();
 
     hooks.use_local_events({
-        let cursor = cursor.clone();
-        let count = count;
         let threads_snapshot = threads.clone();
         move |event: Event| {
             if let Event::Key(key) = event {

@@ -304,10 +304,10 @@ impl SetupWizardPanel {
             None => return,
         };
         let text = text.lines().next().unwrap_or("");
-        if self.form_focus.is_text_input() {
-            if let Some(field) = ops::provider_field_buf(mp, self.form_focus) {
-                field.insert_text(text);
-            }
+        if self.form_focus.is_text_input()
+            && let Some(field) = ops::provider_field_buf(mp, self.form_focus)
+        {
+            field.insert_text(text);
         }
     }
 

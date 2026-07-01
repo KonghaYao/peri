@@ -38,7 +38,6 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let code = hooks.use_state(String::new);
 
     hooks.use_local_events({
-        let code = code;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {

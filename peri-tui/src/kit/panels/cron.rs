@@ -30,9 +30,6 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let count = jobs.len();
 
     hooks.use_local_events({
-        let selected = selected;
-        let confirm_delete = confirm_delete;
-        let count = count;
         let jobs_snapshot = jobs.clone();
         move |event: Event| {
             if let Event::Key(key) = event {
@@ -83,14 +80,10 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             cron_toggle(&job.id);
                         }
                     }
-                    KeyCode::Char('d') => {
-                        if count > 0 {
-                            *confirm_delete.write() = true;
-                        }
+                    KeyCode::Char('d') if count > 0 => {
+                        *confirm_delete.write() = true;
                     }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return;
-                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
                     _ => {}
                 }
             }

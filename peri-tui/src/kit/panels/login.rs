@@ -30,10 +30,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let bump = hooks.use_state(|| 0u32);
 
     hooks.use_local_events({
-        let cursor = cursor.clone();
         let providers = providers.clone();
-        let bump = bump.clone();
-        let count = count;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
@@ -122,7 +119,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ("missing", theme::ERROR)
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("     API key: ",), Style::new().fg(theme::MUTED)),
+                Span::styled("     API key: ".to_string(), Style::new().fg(theme::MUTED)),
                 Span::styled(key_marker.0, Style::new().fg(key_marker.1)),
             ]));
             if let Some(url) = &p.base_url {

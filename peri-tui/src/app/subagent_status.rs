@@ -343,12 +343,12 @@ impl SubAgentStatusMap {
     ) -> bool {
         if let Some(s) = self.find_owner_mut(source_id) {
             for vm in &mut s.child_messages {
-                if let ViewModel::ToolCard(d) = vm {
-                    if d.tool_id == tool_call_id {
-                        d.output_summary = output;
-                        d.is_error = is_error;
-                        return true;
-                    }
+                if let ViewModel::ToolCard(d) = vm
+                    && d.tool_id == tool_call_id
+                {
+                    d.output_summary = output;
+                    d.is_error = is_error;
+                    return true;
                 }
             }
         }
@@ -412,10 +412,10 @@ impl SubAgentStatusMap {
     fn evict_oldest_completed(&mut self) {
         let mut oldest: Option<(String, Instant)> = None;
         for (k, s) in &self.inner {
-            if let Some(c) = s.completed_at {
-                if oldest.is_none() || c < oldest.as_ref().unwrap().1 {
-                    oldest = Some((k.clone(), c));
-                }
+            if let Some(c) = s.completed_at
+                && (oldest.is_none() || c < oldest.as_ref().unwrap().1)
+            {
+                oldest = Some((k.clone(), c));
             }
         }
         if let Some((k, _)) = oldest {
@@ -486,10 +486,10 @@ impl SubAgentStatusProbe for SessionSubAgentProbe {
         SubAgentStatusProbe::lookup_by_agent_id(&self.status, agent_id).map(|mut info| {
             // 唯一权威源：SubAgentStatus.child_messages（按 agent_id 通过 status map 查询）
             // 注意：info 中没有 instance_id 字段，只能通过 agent_id 回退匹配。
-            if let Some(s) = self.status.lookup_by_agent_id(agent_id) {
-                if !s.child_messages.is_empty() {
-                    info.recent_messages = s.child_messages.clone();
-                }
+            if let Some(s) = self.status.lookup_by_agent_id(agent_id)
+                && !s.child_messages.is_empty()
+            {
+                info.recent_messages = s.child_messages.clone();
             }
             info
         })

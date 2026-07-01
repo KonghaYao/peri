@@ -53,7 +53,6 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected = hooks.use_state(|| 0usize);
 
     hooks.use_local_events({
-        let selected = selected;
         let count = BETA_ENTRIES.len();
         move |event: Event| {
             if let Event::Key(key) = event {

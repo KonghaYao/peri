@@ -503,10 +503,10 @@ pub(crate) async fn handle_request(
                 info!(session_id = %req_session_id, "Session resumed (new)");
             } else {
                 // Existing session: if history still empty, populate from ThreadStore
-                if let Some(s) = sessions.get_mut(req_session_id) {
-                    if s.history.is_empty() {
-                        s.history = history;
-                    }
+                if let Some(s) = sessions.get_mut(req_session_id)
+                    && s.history.is_empty()
+                {
+                    s.history = history;
                 }
                 info!(session_id = %req_session_id, "Session resumed (existing)");
             }

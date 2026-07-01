@@ -28,6 +28,12 @@ pub struct ProcessResourceMonitor {
     cpu_percent: f32,
 }
 
+impl Default for ProcessResourceMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProcessResourceMonitor {
     pub fn new() -> Self {
         let mut sys = sysinfo::System::new();
