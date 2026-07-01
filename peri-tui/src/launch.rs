@@ -126,11 +126,16 @@ pub async fn build_app_and_acp(
         }
     }
 
-    // 检测是否需要 Setup 向导
+    // 检测是否需要 Setup 向导。
+    //
+    // (I16-C) 仅做日志提示——`app.global_ui.setup_wizard` 字段已退役，
+    // kit 单路径下 `wizard_active` atom 永远为 false（kit/setup_wizard.rs
+    // 是 TODO stub）。`needs_setup()` 判断结果保留用于未来 kit 实现
+    // 完整 Setup Wizard 时通过 atom 触发。
     {
         let cfg = app.services.peri_config.read();
         if crate::app::setup_wizard::needs_setup(&cfg.config) {
-            app.global_ui.setup_wizard = Some(crate::app::SetupWizardPanel::new());
+            tracing::info!("needs_setup=true: 首次启动未配置 Provider（kit Setup Wizard 待实现）");
         }
     }
 

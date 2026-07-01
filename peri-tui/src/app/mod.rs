@@ -13,13 +13,9 @@ pub mod panel_types;
 pub use panel_types::{MutexGroup, PanelKind, PanelScope};
 
 pub mod setup_wizard;
-pub use setup_wizard::SetupWizardPanel;
 
 mod cron_state;
 pub use cron_state::CronState;
-
-mod field_textarea;
-pub use field_textarea::FieldTextarea;
 
 // ── Services ───────────────────────────────────────────────────────────────────
 mod provider;
@@ -195,11 +191,5 @@ impl App {
             .unwrap_or_default();
         config.apply_env_overrides();
         config
-    }
-
-    /// 打开 setup 向导（全屏覆盖）
-    pub fn open_setup_wizard(&mut self) {
-        self.global_ui.setup_wizard =
-            Some(crate::app::setup_wizard::SetupWizardPanel::new_from_command());
     }
 }
