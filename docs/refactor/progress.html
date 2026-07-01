@@ -114,20 +114,27 @@
 </ul>
 
 <div class="meta" id="footer">
-  <strong>最后更新</strong>：2026-07-01 cron #42（Phase 2.6 step 7e.5 — 退役 <code>handle_rewind_completed</code> 的 <code>apply_rebuild_all(0, view_msgs)</code> 死代码：Cron #29 P1 fix 已通过 pending_view_rewind_to + push_system_note 路由 label，v1 rebuild 对生产完全无影响；audit 确认无 headless 测试断言 rewind 后的 view_messages，可直接退役）<br>
-  <strong>本窗口成果</strong>：1 个本地 commit（43320a38，不 push）：<br>
-  · <strong>Retirement（peri-tui，agent_compact.rs:64-110）</strong>：<code>handle_rewind_completed</code> 此前在 line 73-77 调 <code>messages_to_view_models(messages, cwd)</code> + push SystemNote label + <code>apply_rebuild_all(0, view_msgs)</code>，把 rewound transcript + label 写到 v1 view_messages。但 Cron #29 P1 fix 已经在 line 103-104 通过 <code>pending_view_rewind_to = Some(0)</code> + <code>push_system_note(label)</code> 路由到 v2 state.view（生产渲染独占）。audit workflow wj0c3ppca 确认 <strong>无 headless 测试断言 rewind 后的 view_messages</strong>（与 compact 的 2 个测试迁移不同），因此直接退役无破坏。同步移除 <code>let cwd = ...</code> + <code>let mut view_msgs = ...</code> 死变量。<br>
-  · <strong>新增回归测试（peri-tui，agent_compact.rs:301-334）</strong>：<code>test_handle_rewind_completed_does_not_write_view_messages</code> — 验证 handle_rewind_completed 后 view_messages.len() == 0（保持初始状态）。若未来重构重新引入 v1 push，此测试会以 len()==N+1 失败。<br>
-  · <strong>对称完成度</strong>：lifecycle 三个 handler 的 v1 dead-code 全部退役：<br>
-  &nbsp;&nbsp;① Cron #39: <code>handle_error</code> v1 push retired<br>
-  &nbsp;&nbsp;② Cron #40: <code>handle_interrupted</code> apply_rebuild_all retired<br>
-  &nbsp;&nbsp;③ Cron #41: <code>handle_compact_completed</code> apply_rebuild_all retired + v2 routing fix<br>
-  &nbsp;&nbsp;④ Cron #42: <code>handle_rewind_completed</code> apply_rebuild_all retired（本窗口）<br>
-  · <strong>当前累积缺陷轨迹</strong>：17 → 10 → 7 → 3 → 2 → 1 → 1 → 1 → 1 主 + 9 ACP-gated → 1 主 + 9 ACP-gated + 3 Bundle-2 → 1 主 + 9 ACP-gated + 1 Bundle-2 → <strong>1 主 + 9 ACP-gated + 0 Bundle-2（Cron #42 完成 Bundle 2 item 2 = 7e.5）</strong>。<br>
-  · <strong>Phase 2.6 step 7e 进度</strong>：7e.1 ✓ / 7e.2 ✓ / 7e.3 ✓ / 7e.4 ✓ / 7e.5 ✓（Cron #42）/ 7e.7 ✓。<strong>剩余 3 个子步骤（7e.6/8/9）</strong>。<br>
+  <strong>最后更新</strong>：2026-07-01 cron #43（Phase 2.6 step 7e.6 + Bundle 2 item 1 — 退役 ToolStart/End v1 main-agent 路径死代码：ACP 通过 <code>peri/agent_event</code> (v1) + <code>peri/unstable-event</code> (v2) 双通道发送相同 <code>ExecutorEvent</code>，v1 main-agent ToolStart/End push 在生产中已被 v2 state.view 独占渲染完全取代，是死代码）<br>
+  <strong>本窗口成果</strong>：1 个本地 commit（0abfcb9a，不 push）：<br>
+  · <strong>Retirement（peri-tui，agent_ops/mod.rs）</strong>：ToolStart 处理 main-agent 路径删除 <code>apply_add_message(tool_vm)</code> + <code>request_rebuild()</code>；ToolEnd 处理删除 v1 scan-loop + v1 push fallback（保留 spinner 更新 + SubAgent 孤儿 append 兜底）。<br>
+  · <strong><code>apply_add_message</code> 标记 <code>#[cfg(test)]</code></strong>（agent_render.rs:29-35）：所有生产调用方已退役（ToolStart 唯一活跃路径）。仅剩测试 fixture 使用（headless_test.rs 为 ~36 个兼容性测试 seed view_messages）。将随 view_messages 字段在 step 7e.9 一并删除。<br>
+  · <strong>测试迁移（peri-tui，headless_test.rs）</strong>：6 个测试从 <code>AgentEvent::ToolStart</code> 事件源切换到直接 <code>apply_add_message(MessageViewModel::tool_block(...))</code> seed：<br>
+  &nbsp;&nbsp;① <code>test_tool_call_renders</code>（line 36）— 事件 seed → apply_add_message seed<br>
+  &nbsp;&nbsp;② <code>test_tool_call_message_visible_when_toggled</code>（line 95）— 事件 + toggle → apply_add_message + toggle<br>
+  &nbsp;&nbsp;③ <code>test_tool_call_without_assistant_chunk_no_bubble</code>（line 201）— 事件 → apply_add_message<br>
+  &nbsp;&nbsp;④ <code>test_tool_then_text_preserves_tool_block</code>（line 1037）— 事件 + AI VM → apply_add_message + apply_add_message(AI)<br>
+  &nbsp;&nbsp;⑤ <code>test_source_agent_id_none_falls_back_to_main_stream</code>（line 2153）— ToolBlock 不应出现在 v1 view_messages<br>
+  &nbsp;&nbsp;⑥ <code>test_source_agent_id_unknown_falls_back_to_main_stream</code>（line 2184）— 同上<br>
+  · <strong>当前累积缺陷轨迹</strong>：17 → 10 → 7 → 3 → 2 → 1 → 1 → 1 → 1 主 + 9 ACP-gated → 1 主 + 9 ACP-gated + 3 Bundle-2 → 1 主 + 9 ACP-gated + 1 Bundle-2 → 1 主 + 9 ACP-gated + 0 Bundle-2（Cron #42）→ <strong>1 主 + 9 ACP-gated + 0 Bundle-2（Cron #43 完成全部 Bundle 2）</strong>。<br>
+  · <strong>Phase 2.6 step 7e 进度</strong>：7e.1 ✓ / 7e.2 ✓ / 7e.3 ✓ / 7e.4 ✓ / 7e.5 ✓ / <strong>7e.6 ✓（Cron #43）</strong> / 7e.7 ✓。<strong>剩余 2 个子步骤（7e.8/9）</strong>。<br>
+  · <strong>apply_add_message 剩余调用方</strong>：<strong>0 生产调用方</strong>（标记 <code>#[cfg(test)]</code>），仅 ~30+ headless_test 兼容性测试 seed。<br>
   · <strong>apply_rebuild_all 剩余调用方</strong>：<strong>仅 1 处活跃</strong>（mod.rs:365 TurnCommitted sync — 为 ~30 个 headless 测试提供 view_messages 数据源；生产渲染独占读 v2 state.view，故此调用是 test-only load-bearing，将随 view_messages 字段在 step 7e.9 一并删除）。<br>
-  <strong>当前状态</strong>：<strong>1131 测试全过</strong>（1130 + 1 新增回归）· handle_rewind_completed v1 死代码退役 · 全部 4 个 lifecycle handler v1 dead-code 清零 · apply_rebuild_all 调用方从 3 减到 1<br>
-  <strong>下一步</strong>：① ToolStart/End v1 双轨退役（HIGH Bundle 2 item 1，需 ACP 层协调或 SM 迁移）② headless_test.rs ~35 测试迁移到 state.view 路径（解锁 mod.rs:365 退役）③ 删除 view_messages 字段（step 7e.9，依赖 ②）④ subagent render-misroute（architectural SubAgentGroupData instance_id）
+  <strong>当前状态</strong>：<strong>1131 测试全过</strong> · ToolStart/End v1 main-agent 路径退役 · <code>apply_add_message</code> 标记 <code>#[cfg(test)]</code> · Bundle 2 全部清零 · <strong>距离 view_messages 字段删除仅差 step 7e.8（subagent path） + 7e.9（删除字段 + 迁移 ~30 测试）</strong><br>
+  <strong>下一步</strong>：① SubAgent v1 path 审计（agent_ops/mod.rs:handle_subagent_* — 检查是否有 v1 push 残留）② headless_test.rs ~30 测试迁移到 state.view 路径（解锁 mod.rs:365 退役 + apply_add_message 删除）③ 删除 view_messages 字段（step 7e.9，依赖 ②）④ subagent render-misroute（architectural SubAgentGroupData instance_id）
+</div>
+
+<div class="meta">
+  <strong>历史 - cron #42</strong>（commit 43320a38 + 1f15ea5e）：Phase 2.6 step 7e.5 — 退役 <code>handle_rewind_completed</code> 的 <code>apply_rebuild_all(0, view_msgs)</code> 死代码。Cron #29 P1 fix 已通过 pending_view_rewind_to + push_system_note 路由 label，v1 rebuild 对生产完全无影响；audit 确认无 headless 测试断言 rewind 后的 view_messages，可直接退役。
 </div>
 
 <div class="meta">
