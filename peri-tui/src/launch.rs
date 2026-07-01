@@ -224,7 +224,7 @@ pub async fn build_app_and_acp(
                 permission_mode: app.services.permission_mode.clone(),
                 cron_scheduler: Some(app.services.cron.scheduler.clone()),
                 mcp_pool: app.services.mcp_pool.clone(),
-                channel_state: app.services.channel_state.clone(),
+                channel_state: None, // (S13c-4c) ServiceRegistry.channel_state 已删除
                 plugin_skill_roots,
                 plugin_agent_dirs,
                 plugin_hooks: flat_hooks,

@@ -3,8 +3,7 @@ use std::time::Instant;
 use peri_acp::event::TodoItemDto;
 
 use super::{
-    AgentComm, MessageState, SessionMetadata, SubAgentStatusMap, UiState,
-    langfuse_state::LangfuseState,
+    MessageState, SessionMetadata, SubAgentStatusMap, UiState, langfuse_state::LangfuseState,
 };
 use crate::thread::ThreadId;
 
@@ -19,11 +18,14 @@ pub struct RunningBgAgent {
 }
 
 /// 独立聊天会话：封装一个对话的完整 UI 状态、Agent 通信状态和持久化上下文。
+///
+/// (S13c-4c) `agent: AgentComm` 字段已删除——legacy agent 事件队列、取消令牌、
+/// 计时器、HITL/AskUser 弹窗状态全部退役。kit 路径完全通过 ACP 协议驱动，
+/// 无需 TUI 侧维护 agent 通信状态。
 pub struct ChatSession {
     pub ui: UiState,
     pub messages: MessageState,
     pub metadata: SessionMetadata,
-    pub agent: AgentComm,
     pub current_thread_id: Option<ThreadId>,
     pub langfuse: LangfuseState,
     pub todo_items: Vec<TodoItemDto>,
@@ -42,7 +44,6 @@ impl ChatSession {
             ui: UiState::new(super::build_textarea(false), &cwd, diff_enabled),
             messages: MessageState::new(),
             metadata: SessionMetadata::new(),
-            agent: AgentComm::default(),
             current_thread_id: None,
             langfuse: LangfuseState::default(),
             todo_items: Vec::new(),

@@ -31,23 +31,9 @@ pub use langfuse_state::LangfuseState;
 mod subagent_status;
 pub use subagent_status::{SessionSubAgentProbe, SubAgentStatus, SubAgentStatusMap};
 
-// ── Agent Ops ──────────────────────────────────────────────────────────────────
-mod agent_comm;
-pub use agent_comm::{AgentComm, RetryStatus};
-
-mod agent_compact;
-mod agent_events_bg;
-mod agent_events_oauth;
-mod agent_ops;
-mod agent_ops_interaction;
-mod agent_render;
-mod agent_submit;
-
+// ── Provider ──────────────────────────────────────────────────────────────────
 pub mod agent;
 pub use agent::LlmProvider;
-
-pub mod events;
-pub use events::AgentEvent;
 
 mod thread_ops;
 
@@ -60,24 +46,6 @@ pub use setup_wizard::SetupWizardPanel;
 
 pub mod workflow_tracker;
 
-// Panel private modules
-mod ask_user_ops;
-mod ask_user_prompt;
-pub use ask_user_prompt::AskUserBatchPrompt;
-
-mod hitl_ops;
-mod hitl_prompt;
-pub use hitl_prompt::{HitlBatchPrompt, PendingAttachment};
-
-mod oauth_prompt;
-pub use oauth_prompt::OAuthPrompt;
-
-mod rewind_prompt;
-pub use rewind_prompt::{FileChangeInfo, RewindItem, RewindMode, RewindPrompt};
-
-mod interaction;
-pub use interaction::InteractionPrompt;
-
 mod edit_utils;
 pub use edit_utils::{build_textarea, ensure_cursor_visible};
 
@@ -85,7 +53,6 @@ mod field_textarea;
 pub use field_textarea::FieldTextarea;
 
 pub mod text_selection;
-pub mod tool_display;
 
 // ── Services ───────────────────────────────────────────────────────────────────
 mod history_ops;
@@ -98,13 +65,10 @@ mod ime;
 pub use ime::textarea_cursor_pos;
 use std::sync::Arc;
 
-use peri_agent::messages::BaseMessage; // P4b: type-dependency
-use peri_middlewares::prelude::HitlDecision; // P4b: type-dependency
-
-use crate::acp_client::{AcpNotification, AcpTuiClient};
+use crate::acp_client::AcpTuiClient;
 use crate::{
     config::PeriConfig,
-    thread::{SqliteThreadStore, ThreadId, ThreadStore},
+    thread::{SqliteThreadStore, ThreadStore},
 };
 
 // ─── App ──────────────────────────────────────────────────────────────────────
@@ -120,16 +84,12 @@ pub struct App {
     pub focused: bool,
     /// ACP client — communicates with the ACP server via in-memory transport.
     /// Initialized after App construction in run_app(); None until `set_acp_client` is called.
-    /// Added in Step 6-a; fully integrated in Steps 6-c..6-h.
     pub acp_client: Option<AcpTuiClient>,
 
-    // ── Workflow 面板轮询状态 ────────────────────────────────────────
-    /// Receiver for workflow polling results (ACP workflow/list_runs responses).
+    // ── Workflow 面板轮询状态 ────────────────────────────────
     pub workflow_poll_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<Vec<workflow_tracker::WorkflowRunSnapshot>>>,
-    /// Kill switch for the workflow polling task.
     pub workflow_poll_kill: Option<tokio::sync::mpsc::UnboundedSender<()>>,
-    /// 标志位：是否 workflow 面板正在轮询。关闭后设为 false，跳过 poll_workflow_runs() 调用。
     pub workflow_polling_active: bool,
 }
 
@@ -183,26 +143,9 @@ impl App {
             ),
         };
 
-        // 预计算命令帮助列表
-        // (S13c-4b) command/ + CommandSystem + ChatSession.commands 已删除
-        // 复用 loader::resolve_skill_roots 作为 single source of truth，
-        // 与 new_session() / ACP session/new 保持一致，确保 Builtin skills 被扫描
-        let skills: Vec<peri_acp_types::skill::SkillMetadataDto> = {
-            let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
-            let skill_roots =
-                peri_middlewares::skills::resolve_skill_roots(&cwd, vec![], disable_bundled);
-            peri_middlewares::skills::scan_skill_roots(&skill_roots)
-                .into_iter()
-                .map(crate::dto_convert::skill_metadata_dto)
-                .collect()
-        };
-        let _ = skills; // skills 注入由 ACP server 侧负责（kit 路径自包含）
-
         // 初始化 cron state + spawn tick task
         let (cron_state, scheduler_arc) = CronState::new();
         CronState::spawn_tick_task(scheduler_arc);
-
-        let (bg_event_tx, bg_event_rx) = tokio::sync::mpsc::channel(128);
 
         let diff_enabled = peri_config
             .as_ref()
@@ -219,7 +162,6 @@ impl App {
         let permission_mode = peri_middlewares::prelude::SharedPermissionMode::new(
             peri_middlewares::prelude::PermissionMode::Bypass,
         );
-        let channel_state = peri_agent::interaction::ChannelState::new();
         let services = ServiceRegistry {
             peri_config: std::sync::Arc::new(parking_lot::RwLock::new(
                 peri_config.clone().unwrap_or_default(),
@@ -233,15 +175,12 @@ impl App {
             mcp_init_rx: None,
             cron: cron_state,
             plugin_data: None,
-            bg_event_tx: bg_event_tx.clone(),
-            bg_event_rx: Some(bg_event_rx),
             config_path_override: None,
             claude_settings_override: None,
             resource_monitor: parking_lot::Mutex::new(
                 service_registry::ProcessResourceMonitor::new(),
             ),
             lc,
-            channel_state: Some(channel_state.clone()),
             panic_notify_rx: None,
             acp_session_manager: None,
         };
@@ -272,11 +211,8 @@ impl App {
 
     /// 创建新 session 并替换当前 session（用于 /clear）
     pub fn new_session(&mut self) {
-        // 取消旧 session 的 agent
-        if let Some(token) = &self.session_mgr.current_mut().agent.cancel_token {
-            token.cancel();
-        }
         // (S13c-4b) command/ + CommandSystem + ChatSession.commands 已删除
+        // (S13c-4c) ChatSession.agent 字段已删除——cancel_token 由 ACP server 管理
         let diff_visible = self.session_mgr.current_mut().ui.diff_visible;
         let streaming_mode = self
             .services
@@ -300,26 +236,6 @@ impl App {
         self.services.mcp_init_rx = Some(init_rx);
 
         let cwd = self.services.cwd.clone();
-        let tx = self.services.bg_event_tx.clone();
-        let oauth_cb: Box<dyn Fn(peri_middlewares::mcp::OAuthFlowEvent) + Send + Sync> =
-            Box::new(move |ev| {
-                use peri_middlewares::mcp::OAuthFlowEvent;
-                if let OAuthFlowEvent::AuthorizationNeeded {
-                    server_name,
-                    authorization_url,
-                    callback_tx,
-                } = ev
-                {
-                    // P4b: 桥接 runtime channel → DTO channel
-                    let dto_tx = crate::dto_convert::bridge_oauth_callback(callback_tx);
-                    let _ = tx.try_send(events::AgentEvent::OAuthAuthorizationNeeded {
-                        server_name,
-                        authorization_url,
-                        callback_tx: dto_tx,
-                    });
-                }
-            });
-
         let claude_home = dirs_next::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".claude");
@@ -330,7 +246,7 @@ impl App {
                 std::path::Path::new(&cwd),
                 &claude_home,
                 init_tx,
-                Some(oauth_cb),
+                None,
                 None,
             )
             .await;
@@ -346,94 +262,6 @@ impl App {
             Some(path) => crate::config::save_to(cfg, path),
             None => crate::config::save(cfg),
         }
-    }
-
-    // ─── 转发访问器（通过 active session 路由）──────────────────────────────
-
-    /// 中断正在运行的 Agent（Ctrl+C during loading）
-    pub fn interrupt(&mut self) {
-        // Try ACP cancel first (agent runs in ACP server)
-        // Spawn cancel async without blocking the UI thread
-        if let Some(ref acp_client) = self.acp_client {
-            let client = acp_client.clone();
-            tokio::spawn(async move {
-                if let Err(e) = client.cancel().await {
-                    tracing::warn!(error = %e, "ACP cancel failed (session may have ended)");
-                }
-            });
-            // 安全网：记录 cancel 时间，5 秒后如果仍在 loading 则强制清理
-            self.session_mgr.current_mut().agent.cancel_sent_at = Some(std::time::Instant::now());
-            // ACP 路径：cancel 已发送，UI 清理由后续 Interrupted/Done 事件完成。
-            // 不执行强制清理——避免与 ACP server 端事件竞态导致双重清理。
-            return;
-        }
-        // Phase 2.6 step 7c: 退役 interrupt fallback 死代码。
-        //
-        // 历史上此处有一个 fallback 路径：当 acp_client=None 且 cancel_token=None
-        // 且 loading=true 时，扫描 v1 view_messages 找 UserBubble、truncate view_messages、
-        // 恢复 textarea 文本。但：
-        //   1. 生产环境中 acp_client 始终为 Some（main.rs:816 启动时设置），
-        //      此分支永不触发——是死代码。
-        //   2. 测试环境中（new_headless）虽 acp_client=None，但 cancel_token=None
-        //      时进入此分支的 view_messages 扫描逻辑与 v2 ViewStore 迁移目标冲突。
-        //   3. v2 路径的中断恢复由 SM TurnInterrupted 处理（持久化 current_turn
-        //      到 state.view）+ handle_interrupted 扫描 state.view 完成。
-        //
-        // 测试 test_ctrl_c_interrupts_agent_when_textarea_empty 仅断言
-        // result.is_none() + quit_pending_since.is_none() —— 删除 fallback
-        // 不影响这两个断言（handle_ctrl_c 返回值不依赖 interrupt 内部）。
-        //
-        // 如未来需要在非 ACP 路径恢复中断能力，应通过 SM + Effect 重构，
-        // 而非恢复此处的 v1 view_messages 扫描。
-        if self.session_mgr.current_mut().agent.cancel_token.is_some() {
-            self.session_mgr
-                .current_mut()
-                .agent
-                .cancel_token
-                .as_ref()
-                .unwrap()
-                .cancel();
-        } else if self.session_mgr.current_mut().ui.loading {
-            tracing::warn!(
-                "interrupt: no acp_client, no cancel_token, loading=true — \
-                 clearing loading state only (v1 view_messages fallback retired in step 7c)"
-            );
-            self.set_loading(false);
-        }
-    }
-
-    pub fn set_loading(&mut self, loading: bool) {
-        let s = self.active_mut();
-        s.ui.loading = loading;
-        if loading {
-            s.ui.prediction = None;
-            s.ui.textarea = build_textarea(true);
-            s.spinner_state
-                .set_mode(peri_widgets::SpinnerMode::Responding);
-        } else {
-            s.spinner_state.set_mode(peri_widgets::SpinnerMode::Idle);
-            s.agent.cancel_token = None;
-        }
-    }
-
-    /// 重建输入框（pending_messages 是 loading 期间用户输入缓存，长期保留）。
-    /// 异步事件触发（cron/channel/workflow/bg_results）由 polling.rs 的
-    /// v2 queue drain 路径独立处理，与 pending_messages 机制无关。
-    /// textarea title 当前显示 pending_messages.len()
-    /// （见 ui/main_ui/mod.rs:48）。
-    pub fn update_textarea_hint(&mut self) {
-        // 当前 textarea title 由 main_ui 直接读取 pending_messages.len() 渲染，
-        // 此函数保留为后续 hint 联动的占位入口。
-    }
-
-    /// 设置当前 Agent 的 ID（用于 AgentDefineMiddleware）
-    pub fn set_agent_id(&mut self, id: Option<String>) {
-        self.session_mgr.current_mut().agent.agent_id = id;
-    }
-
-    /// 获取当前 Agent 的 ID
-    pub fn get_agent_id(&self) -> Option<&String> {
-        self.session_mgr.current().agent.agent_id.as_ref()
     }
 
     /// Setup 向导保存后刷新内存中的 Provider 状态。
@@ -460,35 +288,6 @@ impl App {
             .unwrap_or_default();
         config.apply_env_overrides();
         config
-    }
-
-    /// 检查是否有任何交互弹窗处于激活状态（AskUser / HITL / OAuth）。
-    /// 弹窗激活时，底部 textarea 应失效——隐藏光标、禁止输入、视觉变暗。
-    pub fn is_interaction_popup_active(&self) -> bool {
-        self.global_ui.oauth_prompt.is_some()
-            || self
-                .session_mgr
-                .current()
-                .agent
-                .interaction_prompt
-                .is_some()
-    }
-
-    /// 将粘贴文本路由到当前激活弹窗的输入区。用于支持 IME 组合输入（macOS
-    /// 终端通过 Bracketed Paste 发送组合后的中文），以及常规粘贴操作。
-    /// 仅处理 AskUser 弹窗的 custom_input；HITL/OAuth 弹窗无文本输入区，静默丢弃。
-    pub fn paste_to_interaction_popup(&mut self, text: &str) {
-        if let Some(crate::app::InteractionPrompt::Questions(p)) = self
-            .session_mgr
-            .current_mut()
-            .agent
-            .interaction_prompt
-            .as_mut()
-        {
-            let q = p.current();
-            q.custom_input.insert_text(text);
-            q.in_custom_input = true;
-        }
     }
 
     /// 打开 setup 向导（全屏覆盖）

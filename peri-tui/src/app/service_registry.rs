@@ -1,14 +1,13 @@
 use std::{path::PathBuf, sync::Arc};
 
 use parking_lot::RwLock;
-use peri_agent::interaction::ChannelState; // P4b: runtime dependency
 use peri_middlewares::{
     mcp::{McpClientPool, McpInitStatus},
     plugin::PluginLoadResult,
     prelude::SharedPermissionMode,
 };
 
-use super::{cron_state::CronState, events::AgentEvent};
+use super::cron_state::CronState;
 use crate::{config::PeriConfig, thread::ThreadStore};
 
 /// `ServiceRegistry` 中共享的配置类型：单一来源（Single Source of Truth）。
@@ -78,16 +77,12 @@ pub struct ServiceRegistry {
     pub mcp_init_rx: Option<tokio::sync::watch::Receiver<McpInitStatus>>,
     pub cron: CronState,
     pub plugin_data: Option<PluginLoadResult>,
-    pub bg_event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
-    pub bg_event_rx: Option<tokio::sync::mpsc::Receiver<AgentEvent>>,
     pub config_path_override: Option<PathBuf>,
     pub claude_settings_override: Option<PathBuf>,
     /// 进程内存监控（2s 刷新）
     pub resource_monitor: parking_lot::Mutex<ProcessResourceMonitor>,
     /// i18n 语言注册表（跨 session 共享）
     pub lc: crate::i18n::LcRegistry,
-    /// Channel 共享状态（MCP handler ↔ TUI/broker 桥接）
-    pub channel_state: Option<Arc<ChannelState>>,
     /// panic hook 通知 receiver（TUI 模式专用，由 main.rs init_panic_notify 初始化）
     pub panic_notify_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     /// ACP SessionManager 句柄（Arc 共享，clone 廉价）。

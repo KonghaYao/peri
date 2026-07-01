@@ -2,18 +2,17 @@
 
 use std::{cell::Cell, time::Instant};
 
-use super::{
-    oauth_prompt::OAuthPrompt, setup_wizard::SetupWizardPanel,
-    workflow_tracker::WorkflowProgressTracker,
-};
+use super::{setup_wizard::SetupWizardPanel, workflow_tracker::WorkflowProgressTracker};
 
 /// App 级 UI 状态：跨 session 共享的全局 UI 临时状态。
 ///
 /// 与 `ServiceRegistry` 中的"服务"字段（config、MCP pool、cron 等）不同，
 /// 这里的字段纯粹是 UI 层面的临时状态（高亮计时、弹窗、鼠标探测等）。
+///
+/// (S13c-4c) `oauth_prompt` 字段已删除——legacy OAuth 弹窗由 kit 的
+/// `kit/popups/oauth_popup.rs` 独立实现。
 pub struct GlobalUiState {
     pub setup_wizard: Option<SetupWizardPanel>,
-    pub oauth_prompt: Option<OAuthPrompt>,
     pub mode_highlight_until: Option<Instant>,
     pub model_highlight_until: Option<Instant>,
     pub provider_highlight_until: Option<Instant>,
@@ -30,14 +29,6 @@ pub struct GlobalUiState {
     /// Workflow 进度追踪器（累积 WorkflowProgressPayload 事件）。
     pub workflow_tracker: WorkflowProgressTracker,
     /// Cron #23 P1 fix — App 侧向 SM 请求截断 state.view 到指定索引。
-    ///
-    /// 由 `handle_interrupted` 分支 2（无工具调用，回滚路径）设置。
-    /// 但 v2 `state.view` 由状态机拥有，App 无法直接修改。main_loop 在
-    /// `handle_acp_event` 返回后会检查此 flag，对 `State::Idle.view` /
-    /// `State::Streaming.view` 执行 `truncate(idx)`。
-    ///
-    /// 不修改 streaming.rs 第 7c 步代码（TurnInterrupted 持久化逻辑），
-    /// 避免破坏 cron #22 / 7c 步的脆弱修复。
     pub pending_view_rewind_to: Option<usize>,
 }
 
@@ -50,7 +41,6 @@ impl GlobalUiState {
     pub fn new() -> Self {
         Self {
             setup_wizard: None,
-            oauth_prompt: None,
             mode_highlight_until: None,
             model_highlight_until: None,
             provider_highlight_until: None,
