@@ -4,7 +4,7 @@
 //! byte indexing. Indices (row, col) use byte offset for the column, matching
 //! `CursorPos` contract.
 
-use super::{CursorPos, InputState};
+use super::{CursorPos, InputState, InputOp, CursorDirection};
 use crate::runtime::effect::Effect;
 
 /// Editing operations on the input buffer.
@@ -225,6 +225,40 @@ impl InputState {
 
 fn is_punct(c: char) -> bool {
     c.is_ascii_punctuation() || c.is_ascii_whitespace()
+}
+
+// ── InputOp dispatcher ─────────────────────────────────────────────────────────
+
+impl InputState {
+    /// Dispatch an [`InputOp`] to the corresponding edit method.
+    pub fn apply(&mut self, op: InputOp) -> Vec<Effect> {
+        match op {
+            InputOp::InsertChar(ch) => self.type_char(ch),
+            InputOp::DeletePrevChar => self.delete_prev_char(),
+            InputOp::DeleteNextChar => self.delete_next_char(),
+            InputOp::DeletePrevWord => self.delete_prev_word(),
+            InputOp::DeleteToLineStart => self.delete_to_line_start(),
+            InputOp::SelectAll => self.select_all(),
+            InputOp::Clear => {
+                self.clear_buffer();
+                vec![Effect::Render]
+            }
+            InputOp::InsertNewline => self.insert_newline(),
+            InputOp::SetText(text) => self.replace_text(text),
+            InputOp::InsertStr(text) => {
+                self.insert_str(&text);
+                vec![Effect::Render]
+            }
+            InputOp::MoveCursor(dir) => match dir {
+                CursorDirection::Left => self.cursor_left(),
+                CursorDirection::Right => self.cursor_right(),
+                CursorDirection::Up => self.cursor_up(),
+                CursorDirection::Down => self.cursor_down(),
+                CursorDirection::LineStart => self.cursor_line_start(),
+                CursorDirection::LineEnd => self.cursor_line_end(),
+            },
+        }
+    }
 }
 
 // ── Phase 1: v2 InputState methods with Effect return ────────────────────────

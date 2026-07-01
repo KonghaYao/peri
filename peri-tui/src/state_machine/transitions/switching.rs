@@ -32,7 +32,7 @@ pub fn handle(mut state: SwitchingState, event: Event) -> (State, Vec<Effect>) {
         Event::AcpDisconnected => (
             State::Switching(state),
             vec![
-                Effect::PushSystemNote(
+                Effect::ShowNotification(
                     "ACP connection lost during session switch. The UI may be stale.".to_string(),
                 ),
                 Effect::Render,
@@ -148,15 +148,15 @@ mod tests {
     }
 
     #[test]
-    fn test_acp_disconnected_emits_system_note_in_switching() {
+    fn test_acp_disconnected_emits_show_notification_in_switching() {
         let state = SwitchingState { view: vec![] };
         let (next, effects) = handle(state, Event::AcpDisconnected);
         assert!(matches!(next, State::Switching(_)));
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, Effect::PushSystemNote(_))),
-            "AcpDisconnected in Switching should emit PushSystemNote"
+                .any(|e| matches!(e, Effect::ShowNotification(_))),
+            "AcpDisconnected in Switching should emit ShowNotification"
         );
         assert!(
             effects.iter().any(|e| matches!(e, Effect::Render)),

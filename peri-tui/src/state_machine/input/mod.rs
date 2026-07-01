@@ -24,11 +24,37 @@ mod selection_test;
 #[cfg(test)]
 mod sync_test;
 
+/// Atomic input operation. Replaces 16 Effect variants.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputOp {
+    InsertChar(char),
+    DeletePrevChar,
+    DeleteNextChar,
+    DeletePrevWord,
+    DeleteToLineStart,
+    SelectAll,
+    Clear,
+    InsertNewline,
+    SetText(String),
+    InsertStr(String),
+    MoveCursor(CursorDirection),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CursorDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+    LineStart,
+    LineEnd,
+}
+
 pub use clipboard::InputClipboard;
 pub use cursor::CursorPos;
 pub use edit::InputEdit;
 pub use selection::{Selection, SelectionRange};
-pub use sync::{from_textarea, to_textarea};
+pub use sync::to_textarea;
 
 /// Aggregated input-box state.
 ///

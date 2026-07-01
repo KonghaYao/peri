@@ -55,6 +55,6 @@ impl Command for HelpCommand {
             .to_string(),
         );
 
-        vec![Effect::PushSystemNote(lines.join("\n"))]
+        vec![Effect::ShowNotification(lines.join("\n"))]
     }
 }

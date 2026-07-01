@@ -282,15 +282,15 @@ fn handle_key(state: StreamingState, key: KeyEvent) -> (State, Vec<Effect>) {
                     State::Streaming(state),
                     vec![Effect::CycleModel, Effect::Render],
                 ),
-                // Ctrl+B: focus background agent bar.
+                // Ctrl+B: focus background agent bar (handled by keyboard fallback).
                 'b' => (
                     State::Streaming(state),
-                    vec![Effect::FocusBgBar, Effect::Render],
+                    vec![Effect::Render],
                 ),
-                // Ctrl+O: toggle inline diff.
+                // Ctrl+O: toggle inline diff (handled by keyboard fallback).
                 'o' => (
                     State::Streaming(state),
-                    vec![Effect::ToggleDiff, Effect::Render],
+                    vec![Effect::Render],
                 ),
                 // Ctrl+P: open Model panel.
                 'p' => (
@@ -307,10 +307,10 @@ fn handle_key(state: StreamingState, key: KeyEvent) -> (State, Vec<Effect>) {
         }
     } else {
         match key.code {
-            // BackTab: cycle permission mode.
+            // BackTab: cycle permission mode (handled by keyboard fallback).
             KeyCode::BackTab => (
                 State::Streaming(state),
-                vec![Effect::CyclePermissionMode, Effect::Render],
+                vec![Effect::Render],
             ),
             // All other keys (plain chars, navigation, Backspace, Enter, Esc):
             // keyboard fallback owns textarea editing; SM re-renders to make
@@ -741,38 +741,36 @@ mod tests {
     }
 
     #[test]
-    fn test_ctrl_b_focuses_bg_bar_in_streaming() {
+    fn test_ctrl_b_emits_render_in_streaming() {
         let state = make_state();
         let (next, effects) = handle(
             state,
             Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
         );
         assert!(matches!(next, State::Streaming(_)));
-        assert!(effects.iter().any(|e| matches!(e, Effect::FocusBgBar)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
     #[test]
-    fn test_ctrl_o_toggles_diff_in_streaming() {
+    fn test_ctrl_o_emits_render_in_streaming() {
         let state = make_state();
         let (next, effects) = handle(
             state,
             Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
         );
         assert!(matches!(next, State::Streaming(_)));
-        assert!(effects.iter().any(|e| matches!(e, Effect::ToggleDiff)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
     #[test]
-    fn test_backtab_cycles_permission_mode_in_streaming() {
+    fn test_backtab_emits_render_in_streaming() {
         let state = make_state();
         let (next, effects) = handle(
             state,
             Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)),
         );
         assert!(matches!(next, State::Streaming(_)));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, Effect::CyclePermissionMode)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
     #[test]

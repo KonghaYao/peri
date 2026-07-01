@@ -2,6 +2,7 @@ use tui_textarea::{Input, Key};
 
 use crate::app::{App, PendingAttachment};
 use crate::runtime::effect::Effect;
+use crate::state_machine::input::{InputOp, CursorDirection};
 use crate::state_machine::State;
 
 /// Normal mode key handling: main match block arm bodies.
@@ -131,7 +132,7 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input, state: &State) -> 
         Input {
             key: Key::Enter, ..
         } if input.shift || input.alt => {
-            return vec![Effect::InsertNewline, Effect::Render];
+            return vec![Effect::ApplyInputOp(InputOp::InsertNewline), Effect::Render];
         }
 
         // Enter: submit (slash command routing falls through to keyboard, plain text handled by SM)
@@ -210,7 +211,7 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input, state: &State) -> 
                 .iter()
                 .any(|line| !line.is_empty());
             if has_content {
-                return vec![Effect::DeletePrevWord, Effect::Render];
+                return vec![Effect::ApplyInputOp(InputOp::DeletePrevWord), Effect::Render];
             }
         }
 
@@ -229,7 +230,7 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input, state: &State) -> 
                 .iter()
                 .any(|line| !line.is_empty());
             if has_content {
-                return vec![Effect::DeleteToLineStart, Effect::Render];
+                return vec![Effect::ApplyInputOp(InputOp::DeleteToLineStart), Effect::Render];
             } else {
                 for _ in 0..20 {
                     app.scroll_up();
@@ -277,33 +278,33 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input, state: &State) -> 
             // Route to SM InputState via Effect
             // Backspace
             if input.key == Key::Backspace {
-                return vec![Effect::DeletePrevChar, Effect::Render];
+                return vec![Effect::ApplyInputOp(InputOp::DeletePrevChar), Effect::Render];
             }
             // Delete
             if input.key == Key::Delete {
-                return vec![Effect::DeleteNextChar, Effect::Render];
+                return vec![Effect::ApplyInputOp(InputOp::DeleteNextChar), Effect::Render];
             }
             // Ctrl+W / Option+Backspace → delete word
             if input.key == Key::Char('w') && input.ctrl {
-                return vec![Effect::DeletePrevWord, Effect::Render];
+                return vec![Effect::ApplyInputOp(InputOp::DeletePrevWord), Effect::Render];
             }
             // Ctrl+A → select all
             if input.key == Key::Char('a') && input.ctrl {
-                return vec![Effect::SelectAllInput, Effect::Render];
+                return vec![Effect::ApplyInputOp(InputOp::SelectAll), Effect::Render];
             }
             // Left / Right arrows
             if input.key == Key::Left {
-                return vec![Effect::CursorLeft, Effect::Render];
+                return vec![Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::Left)), Effect::Render];
             }
             if input.key == Key::Right {
-                return vec![Effect::CursorRight, Effect::Render];
+                return vec![Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::Right)), Effect::Render];
             }
             // Home / End
             if input.key == Key::Home {
-                return vec![Effect::CursorLineStart, Effect::Render];
+                return vec![Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::LineStart)), Effect::Render];
             }
             if input.key == Key::End {
-                return vec![Effect::CursorLineEnd, Effect::Render];
+                return vec![Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::LineEnd)), Effect::Render];
             }
             // Ctrl+N → keep existing logic (new session, not textarea)
             if input.key == Key::Char('n') && input.ctrl {
@@ -312,7 +313,7 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input, state: &State) -> 
             // Plain character input
             if let Key::Char(c) = input.key {
                 if !input.ctrl && !input.alt {
-                    return vec![Effect::TypeChar(c), Effect::Render];
+                    return vec![Effect::ApplyInputOp(InputOp::InsertChar(c)), Effect::Render];
                 }
             }
             // Fallback: any other input not matched above — still need a render
@@ -342,7 +343,7 @@ fn handle_ctrl_c(app: &mut App) -> Vec<Effect> {
     // 优先级 1: 输入框有内容 → 清空输入框
     if session.ui.textarea.lines().iter().any(|l| !l.is_empty()) {
         app.global_ui.quit_pending_since = None;
-        return vec![Effect::ClearInputBuffer, Effect::Render];
+        return vec![Effect::ApplyInputOp(InputOp::Clear), Effect::Render];
     }
 
     // 优先级 2: Agent 运行中 → 中断 agent
@@ -386,7 +387,7 @@ fn handle_up(app: &mut App) -> Vec<Effect> {
         app.history_up();
         vec![Effect::Render]
     } else {
-        vec![Effect::CursorUp, Effect::Render]
+        vec![Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::Up)), Effect::Render]
     }
 }
 
@@ -428,7 +429,7 @@ fn handle_down(app: &mut App) -> Vec<Effect> {
         app.history_down();
         vec![Effect::Render]
     } else {
-        vec![Effect::CursorDown, Effect::Render]
+        vec![Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::Down)), Effect::Render]
     }
 }
 
@@ -454,7 +455,7 @@ fn handle_ctrl_v(app: &mut App) -> Vec<Effect> {
             return vec![Effect::Render];
         } else if let Ok(text) = clipboard.get_text() {
             let text = text.replace('\r', "\n");
-            return vec![Effect::InsertStr(text), Effect::Render];
+            return vec![Effect::ApplyInputOp(InputOp::InsertStr(text)), Effect::Render];
         }
     }
     vec![Effect::Render]
@@ -465,7 +466,7 @@ fn handle_tab(app: &mut App) -> Vec<Effect> {
 
     // Prediction 接受优先级最高
     if let Some(pred) = app.session_mgr.current_mut().ui.prediction.take() {
-        return vec![Effect::InsertStr(pred.text), Effect::Render];
+        return vec![Effect::ApplyInputOp(InputOp::InsertStr(pred.text)), Effect::Render];
     }
 
     if app.session_mgr.current_mut().ui.at_mention.active {
@@ -518,7 +519,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, Effect::ClearInputBuffer)),
+                .any(|e| matches!(e, Effect::ApplyInputOp(InputOp::Clear))),
             "有内容时 Ctrl+C 应返回 ClearInputBuffer"
         );
         assert!(

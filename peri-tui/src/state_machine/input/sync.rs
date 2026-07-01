@@ -5,40 +5,8 @@
 //!
 //! # Sync direction
 //!
-//! - `from_textarea`: After keyboard processing mutates the TextArea widget,
-//!   this extracts the new state so the state machine stays in sync.
 //! - `to_textarea`: Before rendering, this pushes `InputState` changes
 //!   (from history navigation, rewind, etc.) back into the TextArea widget.
-
-use super::cursor::CursorPos;
-
-/// Extract an `InputState` snapshot from the current TextArea widget state.
-///
-/// Copies text content and cursor position. Selection, prediction, at-mention,
-/// slash-completion, history, and attachments are **not** read from TextArea —
-/// they are managed independently by the state machine.
-///
-/// **Important**: `tui_textarea::cursor()` returns (row, col) where col is a
-/// **character index** (0-based). `CursorPos.col_byte` is a **byte offset**.
-/// The conversion: sum `len_utf8()` of chars up to col.
-pub fn from_textarea(ta: &tui_textarea::TextArea) -> super::InputState {
-    let lines: Vec<String> = ta.lines().to_vec();
-    let (row, col_char) = ta.cursor();
-    let col_byte = lines
-        .get(row)
-        .map(|line| {
-            line.chars()
-                .take(col_char)
-                .map(|c| c.len_utf8())
-                .sum::<usize>()
-        })
-        .unwrap_or(0);
-    super::InputState {
-        lines,
-        cursor: CursorPos::new(row, col_byte),
-        ..Default::default()
-    }
-}
 
 /// Apply an `InputState` snapshot into a TextArea widget.
 ///
@@ -100,40 +68,12 @@ pub fn to_textarea(state: &super::InputState, ta: &mut tui_textarea::TextArea) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state_machine::input::CursorPos;
 
     fn make_textarea(text: &str) -> tui_textarea::TextArea<'static> {
         let mut ta = tui_textarea::TextArea::default();
         ta.insert_str(text);
         ta
-    }
-
-    #[test]
-    fn test_from_textarea_single_line() {
-        let ta = make_textarea("hello world");
-        let state = from_textarea(&ta);
-        assert_eq!(state.lines, vec!["hello world"]);
-        assert_eq!(state.cursor.row, 0);
-        assert_eq!(state.cursor.col_byte, 11);
-    }
-
-    #[test]
-    fn test_from_textarea_multi_line() {
-        let mut ta = make_textarea("line1");
-        ta.insert_newline();
-        ta.insert_str("line2");
-        let state = from_textarea(&ta);
-        assert_eq!(state.lines, vec!["line1", "line2"]);
-    }
-
-    #[test]
-    fn test_from_textarea_preserves_non_textarea_fields() {
-        let ta = make_textarea("x");
-        let state = from_textarea(&ta);
-        // Fields not derived from TextArea stay at their defaults.
-        assert!(state.selection.is_none());
-        assert!(state.history.is_empty());
-        assert!(state.history_index.is_none());
-        assert!(state.attachments.is_empty());
     }
 
     #[test]
@@ -172,48 +112,5 @@ mod tests {
         };
         to_textarea(&state, &mut ta);
         assert_eq!(ta.lines(), [""]);
-    }
-
-    #[test]
-    fn test_roundtrip() {
-        let mut ta = make_textarea("hello\nworld");
-        ta.move_cursor(tui_textarea::CursorMove::Jump(1, 2));
-        let state = from_textarea(&ta);
-
-        let mut ta2 = make_textarea("");
-        to_textarea(&state, &mut ta2);
-        assert_eq!(ta2.lines(), ["hello", "world"]);
-        assert_eq!(ta2.cursor(), (1, 2));
-    }
-
-    #[test]
-    fn test_roundtrip_cjk() {
-        let mut ta = make_textarea("你好世界\n中文测试");
-        // Jump(0, 2) = char index 2 = third char '世'
-        ta.move_cursor(tui_textarea::CursorMove::Jump(0, 2));
-        let state = from_textarea(&ta);
-        // col_byte: '你'(3) + '好'(3) = 6
-        assert_eq!(state.cursor.row, 0);
-        assert_eq!(state.cursor.col_byte, 6);
-
-        let mut ta2 = make_textarea("");
-        to_textarea(&state, &mut ta2);
-        assert_eq!(ta2.lines(), ["你好世界", "中文测试"]);
-        assert_eq!(ta2.cursor(), (0, 2));
-    }
-
-    #[test]
-    fn test_roundtrip_cjk_cursor_preserved() {
-        let mut ta = make_textarea("abc你好");
-        // Jump(0, 4) = char index 4 = first char of '你好' = '好'
-        ta.move_cursor(tui_textarea::CursorMove::Jump(0, 4));
-        let state = from_textarea(&ta);
-        // col_byte: 'a'(1)+'b'(1)+'c'(1)+'好'(3) = 6
-        assert_eq!(state.cursor.col_byte, 6);
-
-        let mut ta2 = make_textarea("");
-        to_textarea(&state, &mut ta2);
-        assert_eq!(ta2.lines(), ["abc你好"]);
-        assert_eq!(ta2.cursor(), (0, 4));
     }
 }

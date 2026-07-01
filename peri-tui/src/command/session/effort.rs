@@ -31,7 +31,7 @@ impl Command for EffortCommand {
                 });
                 if let Err(e) = App::save_config(&cfg, app.services.config_path_override.as_deref())
                 {
-                    return vec![Effect::PushSystemNote(lc.tr_args(
+                    return vec![Effect::ShowNotification(lc.tr_args(
                         "config-save-failed",
                         &[("error".into(), e.to_string().into())],
                     ))];
@@ -44,7 +44,7 @@ impl Command for EffortCommand {
                     });
                 }
                 vec![
-                    Effect::PushSystemNote(
+                    Effect::ShowNotification(
                         lc.tr_args("effort-set", &[("effort".into(), arg.clone().into())])
                             .to_string(),
                     ),
@@ -62,7 +62,7 @@ impl Command for EffortCommand {
                     .map(|t| t.effort.clone())
                     .unwrap_or_else(|| "high".to_string());
                 let current = current_owned.as_str();
-                vec![Effect::PushSystemNote(format!(
+                vec![Effect::ShowNotification(format!(
                     "{}\n{}",
                     lc.tr_args(
                         "effort-current",

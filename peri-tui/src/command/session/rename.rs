@@ -18,7 +18,7 @@ impl Command for RenameCommand {
         let thread_id = app.session_mgr.current_mut().current_thread_id.clone();
 
         let Some(thread_id) = thread_id else {
-            return vec![Effect::PushSystemNote(
+            return vec![Effect::ShowNotification(
                 lc.tr("rename-no-session").to_string(),
             )];
         };
@@ -33,7 +33,7 @@ impl Command for RenameCommand {
                     .and_then(|m| m.title)
             })
             .unwrap_or_else(|| lc.tr("rename-untitled"));
-            vec![Effect::PushSystemNote(
+            vec![Effect::ShowNotification(
                 lc.tr_args("rename-current-title", &[("title".into(), title.into())])
                     .to_string(),
             )]
@@ -50,7 +50,7 @@ impl Command for RenameCommand {
                 ),
                 Err(e) => lc.tr_args("rename-failed", &[("error".into(), e.to_string().into())]),
             };
-            vec![Effect::PushSystemNote(msg)]
+            vec![Effect::ShowNotification(msg)]
         }
     }
 }

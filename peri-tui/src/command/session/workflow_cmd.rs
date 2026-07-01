@@ -63,7 +63,7 @@ impl Command for NamedWorkflowCommand {
         let script = match std::fs::read_to_string(&self.path) {
             Ok(content) => content,
             Err(e) => {
-                return vec![Effect::PushSystemNote(format!(
+                return vec![Effect::ShowNotification(format!(
                     "Failed to read workflow file '{}': {}",
                     self.path.display(),
                     e

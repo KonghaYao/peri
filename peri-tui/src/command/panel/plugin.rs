@@ -25,7 +25,7 @@ impl Command for PluginCommand {
             ["marketplace", "add", rest @ ..] if !rest.is_empty() => {
                 let input = rest.join(" ");
                 // v2: marketplace operations deferred until PluginPanel v2 is wired
-                vec![Effect::PushSystemNote(format!(
+                vec![Effect::ShowNotification(format!(
                     "Marketplace add: {} (v2 plugin panel pending)",
                     input
                 ))]
@@ -36,7 +36,7 @@ impl Command for PluginCommand {
                 let (name, marketplace) = name_at_marketplace
                     .split_once('@')
                     .unwrap_or((name_at_marketplace, "claude-plugins-official"));
-                vec![Effect::PushSystemNote(format!(
+                vec![Effect::ShowNotification(format!(
                     "Plugin install: {}@{} (v2 plugin panel pending)",
                     name, marketplace
                 ))]
@@ -44,7 +44,7 @@ impl Command for PluginCommand {
 
             // /plugin marketplace update <name>
             ["marketplace", "update", name] => {
-                vec![Effect::PushSystemNote(format!(
+                vec![Effect::ShowNotification(format!(
                     "Marketplace update: {} (v2 plugin panel pending)",
                     name
                 ))]
@@ -53,7 +53,7 @@ impl Command for PluginCommand {
             // 未知用法 → 显示帮助
             _ => {
                 let help = app.services.lc.tr("command-plugin-help");
-                vec![Effect::PushSystemNote(help.to_string())]
+                vec![Effect::ShowNotification(help.to_string())]
             }
         }
     }

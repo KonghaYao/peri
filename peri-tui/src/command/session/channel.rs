@@ -39,7 +39,7 @@ impl Command for ChannelCommand {
         }
 
         let usage = lc.tr("command-channel-usage").to_string();
-        vec![Effect::PushSystemNote(usage)]
+        vec![Effect::ShowNotification(usage)]
     }
 }
 
@@ -143,7 +143,7 @@ impl ChannelCommand {
 /// 包装一个 ephemeral SystemNote 字符串为单元素 Vec<Effect>。
 /// UI 反馈走 PushSystemNote 路径，由状态机吸收到 state.view，不污染 BaseMessage[] / Prompt Cache。
 fn note(msg: &str) -> Vec<Effect> {
-    vec![Effect::PushSystemNote(msg.to_string())]
+    vec![Effect::ShowNotification(msg.to_string())]
 }
 
 /// 从 channel source 标识符提取 MCP server name（对齐 config 中的命名格式）

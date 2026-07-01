@@ -108,43 +108,17 @@ pub enum Effect {
         path: std::path::PathBuf,
     },
 
-    // ── Input buffer operations (Phase 1: keyboard → v2 InputState) ──────
-    /// Insert a single character at cursor position.
-    TypeChar(char),
-    /// Delete char before cursor (Backspace).
-    DeletePrevChar,
-    /// Delete char at cursor (Delete key).
-    DeleteNextChar,
-    /// Delete word before cursor (Ctrl+W / Option+Backspace).
-    DeletePrevWord,
-    /// Delete from cursor to start of line (Ctrl+U).
-    DeleteToLineStart,
-    /// Select all text (Ctrl+A).
-    SelectAllInput,
-    /// Clear entire input buffer (Ctrl+C when has content).
-    ClearInputBuffer,
-    /// Insert newline at cursor (Shift+Enter / Alt+Enter).
-    InsertNewline,
-    /// Move cursor left by one char.
-    CursorLeft,
-    /// Move cursor right by one char.
-    CursorRight,
-    /// Move cursor to start of line (Home).
-    CursorLineStart,
-    /// Move cursor to end of line (End).
-    CursorLineEnd,
-    /// Replace textarea content (for @mention / slash completion injection).
-    ReplaceTextarea(String),
-    /// Insert a string at the cursor position (for Ctrl+V paste into textarea).
-    InsertStr(String),
-    /// Move cursor up one line (when not navigating history/hints).
-    CursorUp,
-    /// Move cursor down one line (when not navigating history/hints).
-    CursorDown,
+    // ── Input buffer operations (Phase 1: unified InputOp) ──
+    /// Apply an atomic input operation to the state machine's InputState.
+    ApplyInputOp(crate::state_machine::input::InputOp),
 
     // ── App lifecycle ────────────────────────────────────────────────────
     /// Exit the app.
     Quit,
+
+    // ── Internal loop mechanics ──────────────────────────────────────────
+    /// Drain pending v2 notes from App into the state machine view.
+    DrainPendingNotes,
 }
 
 #[cfg(test)]

@@ -25,7 +25,7 @@ impl Command for ModelCommand {
                 let mut effects: Vec<Effect> = Vec::new();
                 if let Err(e) = App::save_config(&cfg, app.services.config_path_override.as_deref())
                 {
-                    effects.push(Effect::PushSystemNote(app.services.lc.tr_args(
+                    effects.push(Effect::ShowNotification(app.services.lc.tr_args(
                         "config-save-failed",
                         &[("error".into(), e.to_string().into())],
                     )));

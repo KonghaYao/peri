@@ -20,7 +20,7 @@ impl Command for BgCommand {
         let lc = &app.services.lc;
         let args = args.trim();
         if args.is_empty() {
-            return vec![Effect::PushSystemNote(
+            return vec![Effect::ShowNotification(
                 lc.tr("command-bg-usage").to_string(),
             )];
         }

@@ -54,13 +54,12 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
             vec![Effect::PasteText { text }, Effect::Render],
         ),
 
-        // -- Tick: advance spinner + poll agent + poll workflow + render. --
+        // -- Tick: poll agent + drain notes + render. --
         Event::Tick => (
             State::Idle(state),
             vec![
-                Effect::AdvanceSpinner,
                 Effect::PollAgent,
-                Effect::PollWorkflow,
+                Effect::DrainPendingNotes,
                 Effect::Render,
             ],
         ),
@@ -71,33 +70,21 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
             MouseEventKind::ScrollUp => (State::Idle(state), vec![Effect::Scroll { delta: -3 }]),
             MouseEventKind::Down(MouseButton::Left) => (
                 State::Idle(state),
-                vec![
-                    Effect::MouseTextareaClick {
-                        row: mouse.row,
-                        column: mouse.column,
-                    },
-                    Effect::Render,
-                ],
+                vec![Effect::Render],
             ),
             MouseEventKind::Drag(MouseButton::Left) => (
                 State::Idle(state),
-                vec![
-                    Effect::MouseTextareaDrag {
-                        row: mouse.row,
-                        column: mouse.column,
-                    },
-                    Effect::Render,
-                ],
+                vec![Effect::Render],
             ),
             MouseEventKind::Up(MouseButton::Left) => (
                 State::Idle(state),
-                vec![Effect::MouseRelease, Effect::Render],
+                vec![Effect::Render],
             ),
             _ => (State::Idle(state), vec![Effect::Render]),
         },
         Event::Resize { .. } => (
             State::Idle(state),
-            vec![Effect::ClearTextSelection, Effect::Render],
+            vec![Effect::Render],
         ),
 
         // -- ACP events ------------------------------------------------------
@@ -202,7 +189,7 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
         Event::AcpDisconnected => (
             State::Idle(state),
             vec![
-                Effect::PushSystemNote(
+                Effect::ShowNotification(
                     "ACP connection lost. Agent responses may not arrive.".to_string(),
                 ),
                 Effect::Render,
@@ -327,10 +314,10 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
         // → double-tap quit) and the `/exit` slash command.
         KeyCode::Esc => (State::Idle(state), Vec::new()),
 
-        // -- BackTab: cycle permission mode ---------------------------------
+        // -- BackTab: cycle permission mode (handled by keyboard fallback) ---
         KeyCode::BackTab => (
             State::Idle(state),
-            vec![Effect::CyclePermissionMode, Effect::Render],
+            vec![Effect::Render],
         ),
 
         // -- Printable character --------------------------------------------
@@ -362,12 +349,12 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
                     (State::Idle(state), vec![Effect::CycleModel, Effect::Render])
                 }
                 'b' => {
-                    // Ctrl+B: focus background agent bar.
-                    (State::Idle(state), vec![Effect::FocusBgBar, Effect::Render])
+                    // Ctrl+B: focus background agent bar (handled by keyboard fallback).
+                    (State::Idle(state), vec![Effect::Render])
                 }
                 'o' => {
-                    // Ctrl+O: toggle inline diff.
-                    (State::Idle(state), vec![Effect::ToggleDiff, Effect::Render])
+                    // Ctrl+O: toggle inline diff (handled by keyboard fallback).
+                    (State::Idle(state), vec![Effect::Render])
                 }
                 'p' => {
                     // Ctrl+P: open Model panel (P5 proof of concept).
@@ -470,12 +457,10 @@ mod tests {
     }
 
     #[test]
-    fn test_tick_produces_spinner_poll_and_workflow_in_idle() {
+    fn test_tick_produces_poll_in_idle() {
         let state = make_state();
         let (_next, effects) = handle(state, Event::Tick);
-        assert!(effects.iter().any(|e| matches!(e, Effect::AdvanceSpinner)));
         assert!(effects.iter().any(|e| matches!(e, Effect::PollAgent)));
-        assert!(effects.iter().any(|e| matches!(e, Effect::PollWorkflow)));
         assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
@@ -782,15 +767,12 @@ mod tests {
     }
 
     #[test]
-    fn test_backtab_cycles_permission_mode() {
+    fn test_backtab_emits_render() {
         let state = make_state();
         let (_next, effects) = handle(
             state,
             Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)),
         );
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, Effect::CyclePermissionMode)));
         assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
@@ -820,24 +802,22 @@ mod tests {
     }
 
     #[test]
-    fn test_ctrl_b_focuses_bg_bar() {
+    fn test_ctrl_b_emits_render() {
         let state = make_state();
         let (_next, effects) = handle(
             state,
             Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
         );
-        assert!(effects.iter().any(|e| matches!(e, Effect::FocusBgBar)));
         assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
     #[test]
-    fn test_ctrl_o_toggles_diff() {
+    fn test_ctrl_o_emits_render() {
         let state = make_state();
         let (_next, effects) = handle(
             state,
             Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
         );
-        assert!(effects.iter().any(|e| matches!(e, Effect::ToggleDiff)));
         assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
@@ -855,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resize_clears_text_selection() {
+    fn test_resize_emits_render() {
         let state = make_state();
         let (_next, effects) = handle(
             state,
@@ -865,26 +845,20 @@ mod tests {
             },
         );
         assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, Effect::ClearTextSelection)),
-            "Resize in Idle should emit ClearTextSelection"
-        );
-        assert!(
             effects.iter().any(|e| matches!(e, Effect::Render)),
             "Resize in Idle should emit Render"
         );
     }
 
     #[test]
-    fn test_acp_disconnected_pushes_system_note() {
+    fn test_acp_disconnected_emits_show_notification() {
         let state = make_state();
         let (_next, effects) = handle(state, Event::AcpDisconnected);
         assert!(
             effects.iter().any(
-                |e| matches!(e, Effect::PushSystemNote(msg) if msg.contains("ACP connection lost"))
+                |e| matches!(e, Effect::ShowNotification(msg) if msg.contains("ACP connection lost"))
             ),
-            "AcpDisconnected in Idle should push a system note about lost connection"
+            "AcpDisconnected in Idle should emit a notification about lost connection"
         );
         assert!(
             effects.iter().any(|e| matches!(e, Effect::Render)),
@@ -957,51 +931,35 @@ mod tests {
     }
 
     #[test]
-    fn test_mouse_left_click_emits_textarea_click() {
+    fn test_mouse_left_click_emits_render() {
         let state = make_state();
         let mouse = make_mouse(MouseEventKind::Down(MouseButton::Left), 10, 5);
         let (_next, effects) = handle(state, Event::Mouse(mouse));
         assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, Effect::MouseTextareaClick { row: 10, column: 5 })),
-            "Left click should emit MouseTextareaClick with coordinates"
-        );
-        assert!(
             effects.iter().any(|e| matches!(e, Effect::Render)),
-            "Left click should also emit Render"
+            "Left click should emit Render"
         );
     }
 
     #[test]
-    fn test_mouse_drag_emits_textarea_drag() {
+    fn test_mouse_drag_emits_render() {
         let state = make_state();
         let mouse = make_mouse(MouseEventKind::Drag(MouseButton::Left), 12, 8);
         let (_next, effects) = handle(state, Event::Mouse(mouse));
         assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, Effect::MouseTextareaDrag { row: 12, column: 8 })),
-            "Left drag should emit MouseTextareaDrag with coordinates"
-        );
-        assert!(
             effects.iter().any(|e| matches!(e, Effect::Render)),
-            "Left drag should also emit Render"
+            "Left drag should emit Render"
         );
     }
 
     #[test]
-    fn test_mouse_up_emits_release() {
+    fn test_mouse_up_emits_render() {
         let state = make_state();
         let mouse = make_mouse(MouseEventKind::Up(MouseButton::Left), 10, 5);
         let (_next, effects) = handle(state, Event::Mouse(mouse));
         assert!(
-            effects.iter().any(|e| matches!(e, Effect::MouseRelease)),
-            "Mouse up should emit MouseRelease"
-        );
-        assert!(
             effects.iter().any(|e| matches!(e, Effect::Render)),
-            "Mouse up should also emit Render"
+            "Mouse up should emit Render"
         );
     }
 

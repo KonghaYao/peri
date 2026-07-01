@@ -21,7 +21,7 @@ impl Command for HistoryCommand {
 
     fn execute(&self, app: &mut App, _args: &str) -> Vec<Effect> {
         if app.session_mgr.current_mut().ui.loading {
-            return vec![Effect::PushSystemNote(
+            return vec![Effect::ShowNotification(
                 app.services.lc.tr("history-agent-running").to_string(),
             )];
         }

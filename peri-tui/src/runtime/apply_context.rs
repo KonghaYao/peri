@@ -136,83 +136,9 @@ impl<'a> ApplyContext<'a> {
             Effect::Quit => ApplyOutcome::Quit,
 
             // ── Input state mutations (Phase 2) ──────────────────────────
-            // These effects arrive from the keyboard fallback handler.
-            // Each calls the corresponding InputState method to mutate the
-            // live state.  Follow-up effects (typically `Render`) are
-            // handled by the keyboard module which emits `Effect::Render`
-            // alongside these effects -- so we discard the returned effects
-            // here.
-            Effect::TypeChar(ch) => {
-                with_input(state, |input| input.type_char(ch));
-                ApplyOutcome::Ok
-            }
-            Effect::DeletePrevChar => {
-                with_input(state, |input| input.delete_prev_char());
-                ApplyOutcome::Ok
-            }
-            Effect::DeleteNextChar => {
-                with_input(state, |input| input.delete_next_char());
-                ApplyOutcome::Ok
-            }
-            Effect::DeletePrevWord => {
-                with_input(state, |input| input.delete_prev_word());
-                ApplyOutcome::Ok
-            }
-            Effect::DeleteToLineStart => {
-                with_input(state, |input| input.delete_to_line_start());
-                ApplyOutcome::Ok
-            }
-            Effect::SelectAllInput => {
-                with_input(state, |input| input.select_all());
-                ApplyOutcome::Ok
-            }
-            Effect::ClearInputBuffer => {
-                match state {
-                    State::Idle(ref mut idle) => idle.input.clear_buffer(),
-                    State::Streaming(ref mut s) => s.input.clear_buffer(),
-                    _ => {}
-                }
-                ApplyOutcome::Ok
-            }
-            Effect::InsertNewline => {
-                with_input(state, |input| input.insert_newline());
-                ApplyOutcome::Ok
-            }
-            Effect::CursorLeft => {
-                with_input(state, |input| input.cursor_left());
-                ApplyOutcome::Ok
-            }
-            Effect::CursorRight => {
-                with_input(state, |input| input.cursor_right());
-                ApplyOutcome::Ok
-            }
-            Effect::CursorLineStart => {
-                with_input(state, |input| input.cursor_line_start());
-                ApplyOutcome::Ok
-            }
-            Effect::CursorLineEnd => {
-                with_input(state, |input| input.cursor_line_end());
-                ApplyOutcome::Ok
-            }
-            Effect::ReplaceTextarea(text) => {
-                with_input(state, |input| input.replace_text(text));
-                ApplyOutcome::Ok
-            }
-            Effect::InsertStr(text) => {
-                with_input(state, |input| {
-                    input.insert_str(&text);
-                    vec![Effect::Render]
-                });
-                ApplyOutcome::Ok
-            }
-            Effect::CursorUp => {
-                with_input(state, |input| input.cursor_up());
-                ApplyOutcome::Ok
-            }
-            Effect::CursorDown => {
-                with_input(state, |input| input.cursor_down());
-                ApplyOutcome::Ok
-            }
+            // Phase 1: input editing is now dispatched via Effect::ApplyInputOp
+            // which is handled directly in main_loop.rs — not here.
+            Effect::ApplyInputOp(_) => ApplyOutcome::Ok,
 
             // App-level effects are handled by main_loop (need &mut App).
             // ApplyContext only carries I/O handles; reaching these arms means
@@ -223,23 +149,24 @@ impl<'a> ApplyContext<'a> {
             | Effect::SwitchSession(_)
             | Effect::SubmitMessage { .. }
             | Effect::PollAgent
-            | Effect::AdvanceSpinner
             | Effect::Scroll { .. }
-            | Effect::MouseTextareaClick { .. }
-            | Effect::MouseTextareaDrag { .. }
-            | Effect::MouseRelease
             | Effect::PasteText { .. }
-            | Effect::PushSystemNote(_)
             | Effect::MemoryPanelOpenEditor { .. }
             | Effect::CycleModel
             | Effect::CycleProvider
+            | Effect::OpenPanel(_)
+            | Effect::ClosePanel
+            | Effect::AdvanceSpinner
+            | Effect::MouseTextareaClick { .. }
+            | Effect::MouseTextareaDrag { .. }
+            | Effect::MouseRelease
             | Effect::CyclePermissionMode
             | Effect::FocusBgBar
             | Effect::ToggleDiff
             | Effect::PollWorkflow
             | Effect::ClearTextSelection
-            | Effect::OpenPanel(_)
-            | Effect::ClosePanel => ApplyOutcome::Ok,
+            | Effect::PushSystemNote(_)
+            | Effect::DrainPendingNotes => ApplyOutcome::Ok,
         }
     }
 

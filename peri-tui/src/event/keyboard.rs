@@ -4,6 +4,7 @@ use tui_textarea::Input;
 
 use super::Action;
 use crate::app::App;
+use crate::state_machine::input::InputOp;
 
 // ── Submodule declarations ─────────────────────────────────────────────────
 mod bar_focus;
@@ -119,7 +120,7 @@ pub(super) fn update_slash_hint_detection(
     }
 }
 
-/// 将选中的 @ 提及路径构造为 Effect::ReplaceTextarea，由 main_loop 写入 InputState
+/// 将选中的 @ 提及路径构造为 Effect::ApplyInputOp(SetText)，由 main_loop 写入 InputState
 pub(super) fn inject_at_mention_path(app: &mut App) -> Vec<crate::runtime::effect::Effect> {
     let (path, is_dir, query_start, query_len) = {
         let at = &app.session_mgr.current_mut().ui.at_mention;
@@ -151,12 +152,18 @@ pub(super) fn inject_at_mention_path(app: &mut App) -> Vec<crate::runtime::effec
         new_text.push_str(&full_text[after_end..]);
     }
 
-    let mut effects = vec![crate::runtime::effect::Effect::ReplaceTextarea(new_text)];
+    let mut effects = vec![crate::runtime::effect::Effect::ApplyInputOp(
+        InputOp::SetText(new_text),
+    )];
 
     if is_dir {
-        effects.push(crate::runtime::effect::Effect::InsertStr("/".to_string()));
+        effects.push(crate::runtime::effect::Effect::ApplyInputOp(
+            InputOp::InsertStr("/".to_string()),
+        ));
     } else {
-        effects.push(crate::runtime::effect::Effect::InsertStr(" ".to_string()));
+        effects.push(crate::runtime::effect::Effect::ApplyInputOp(
+            InputOp::InsertStr(" ".to_string()),
+        ));
         app.session_mgr.current_mut().ui.at_mention.close();
         effects.push(crate::runtime::effect::Effect::Render);
     }

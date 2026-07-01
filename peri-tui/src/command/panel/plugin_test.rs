@@ -11,7 +11,7 @@ async fn make_headless() -> App {
 /// 辅助：从 `Vec<Effect>` 中提取首个 `PushSystemNote` 文本（若有）。
 fn first_system_note_text(effects: &[Effect]) -> Option<String> {
     for e in effects {
-        if let Effect::PushSystemNote(t) = e {
+        if let Effect::ShowNotification(t) = e {
             return Some(t.clone());
         }
     }

@@ -102,14 +102,11 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
         Event::Resize { .. } => (State::Modal(state), vec![Effect::Render]),
 
         // -- Tick: keep background processes alive while Modal is open --------
-        // PollAgent keeps ACP event consumption flowing; AdvanceSpinner keeps
-        // the loading animation running; Render ensures the panel redraws.
+        // PollAgent keeps ACP event consumption flowing; Render ensures the panel redraws.
         Event::Tick => (
             State::Modal(state),
             vec![
-                Effect::AdvanceSpinner,
                 Effect::PollAgent,
-                Effect::PollWorkflow,
                 Effect::Render,
             ],
         ),
@@ -443,9 +440,7 @@ pub fn handle_with_context(
         Event::Tick => (
             State::Modal(state),
             vec![
-                Effect::AdvanceSpinner,
                 Effect::PollAgent,
-                Effect::PollWorkflow,
                 Effect::Render,
             ],
         ),
@@ -736,13 +731,12 @@ mod tests {
 
     #[test]
     fn test_tick_keeps_background_processes_alive_in_modal() {
-        // Tick 在 Modal 期间必须保持 PollAgent + AdvanceSpinner + Render，
-        // 否则 ACP 事件消费停止、loading 动画冻结、面板不再重绘。
+        // Tick 在 Modal 期间必须保持 PollAgent + Render，
+        // 否则 ACP 事件消费停止、面板不再重绘。
         let modal = make_interaction_modal(Box::new(NoopHandler));
         let (next, effects) = handle(modal, Event::Tick);
         assert!(matches!(next, State::Modal(_)));
         assert!(effects.iter().any(|e| matches!(e, Effect::PollAgent)));
-        assert!(effects.iter().any(|e| matches!(e, Effect::AdvanceSpinner)));
         assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 
@@ -1083,7 +1077,7 @@ mod tests {
 
     #[test]
     fn test_all_14_panels_tick_keeps_background_alive() {
-        // Tick 在面板打开期间必须保持后台进程活跃（PollAgent/AdvanceSpinner/Render）。
+        // Tick 在面板打开期间必须保持后台进程活跃（PollAgent/Render）。
         for kind in ALL_PANEL_KINDS {
             let panel = Box::new(TestPanel::new(kind)) as Box<dyn PanelState>;
             let modal = make_panel_modal(panel);
@@ -1095,10 +1089,6 @@ mod tests {
             assert!(
                 effects.iter().any(|e| matches!(e, Effect::PollAgent)),
                 "Tick on {kind:?} should emit PollAgent"
-            );
-            assert!(
-                effects.iter().any(|e| matches!(e, Effect::AdvanceSpinner)),
-                "Tick on {kind:?} should emit AdvanceSpinner"
             );
             assert!(
                 effects.iter().any(|e| matches!(e, Effect::Render)),

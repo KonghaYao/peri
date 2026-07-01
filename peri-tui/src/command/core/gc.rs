@@ -168,7 +168,7 @@ impl Command for GcCommand {
         }
 
         // UI 反馈：走 ephemeral SystemNote VM 路径，不污染 BaseMessage[] / Prompt Cache。
-        vec![Effect::PushSystemNote(lines.join("\n"))]
+        vec![Effect::ShowNotification(lines.join("\n"))]
     }
 }
 

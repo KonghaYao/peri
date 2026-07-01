@@ -19,11 +19,11 @@ impl Command for AgentCommand {
         if id.is_empty() {
             // 清除 agent_id
             app.set_agent_id(None);
-            vec![Effect::PushSystemNote(lc.tr("command-agent-reset").to_string())]
+            vec![Effect::ShowNotification(lc.tr("command-agent-reset").to_string())]
         } else {
             app.set_agent_id(Some(id.to_string()));
             let name = peri_middlewares::format_agent_id(id);
-            vec![Effect::PushSystemNote(
+            vec![Effect::ShowNotification(
                 lc.tr_args(
                     "command-agent-switched",
                     &[

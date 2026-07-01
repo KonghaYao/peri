@@ -51,6 +51,8 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
     let mut state: State = State::Idle(IdleState::default());
 
     while let Some(event) = rx.recv().await {
+        // Phase 1 mouse-only flag: only set by mouse click/drag handlers
+        let mut effect_did_mutate_textarea = false;
         let is_tick = matches!(event, TuiEvent::Tick);
 
         // ── Pre-event snapshot retired (Cron #45): the textarea text-length
@@ -213,14 +215,6 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         // stale TextArea snapshot. See idle.rs module doc for the full
         // rationale on textarea being the single source of truth.
         let mut _keyboard_did_run = false;
-        // Cron #37: track whether any Effect handler mutated the textarea
-        // widget directly (Effect::PasteText, MouseTextareaClick, MouseText
-        // areaDrag). When true, the 2b sync below runs so the new lines +
-        // cursor land in SM InputState before render. Without this, the
-        // render-time to_textarea would overwrite the just-pasted / clicked
-        // position with the stale SM InputState, undoing the user's edit
-        // within the same frame.
-        let mut effect_did_mutate_textarea = false;
         let fallback_effects = match &event {
             TuiEvent::Key(key)
                 if wizard_active
@@ -296,18 +290,6 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
             }
         }
 
-        // Phase 2.4 — drain pending v2 notes pushed by App-method paths
-        // (thread_ops, agent_ops, rewind, polling, etc.) that don't return
-        // Vec<Effect>. These paths call `app.push_system_note(...)` which
-        // only enqueues into `pending_v2_notes` (Phase 2.6 step 5 retired
-        // the legacy view_messages push). We drain here and route through
-        // the state machine so they reach `state.view` (production render
-        // source). The `Effect::ShowNotification` / `Effect::PushSystemNote`
-        // handlers do NOT use this queue — they call the SM directly to
-        // avoid a duplicate note on the next-tick drain.
-        //
-        // (Drain happens after `needs_render` is declared below.)
-
         // ── 2. Execute effects ─────────────────────────────────────────
         let mut quit = false;
         let mut needs_render = false;
@@ -359,25 +341,6 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
             }
         }
 
-        // Phase 2.4 — drain (see note above).
-        {
-            let notes = app
-                .session_mgr
-                .current_mut()
-                .messages
-                .drain_pending_v2_notes();
-            if !notes.is_empty() {
-                for note in notes {
-                    let (new_state, _) = crate::state_machine::handle(
-                        state,
-                        crate::state_machine::event::Event::PushSystemNote(note),
-                    );
-                    state = new_state;
-                }
-                needs_render = true;
-            }
-        }
-
         // Cron #24 P1 #2 — drain AskUser 用户回答队列，路由到 v2 state.view。
         // 与 pending_v2_notes 同构（queue-and-drain via SM Event）。
         {
@@ -401,6 +364,35 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
         for effect in effects {
             match effect {
                 Effect::Render => needs_render = true,
+                Effect::ApplyInputOp(ref op) => {
+                    match &mut state {
+                        State::Idle(idle) => {
+                            idle.input.apply(op.clone());
+                        }
+                        State::Streaming(s) => {
+                            s.input.apply(op.clone());
+                        }
+                        _ => {}
+                    }
+                    needs_render = true;
+                }
+                Effect::DrainPendingNotes => {
+                    let notes = app
+                        .session_mgr
+                        .current_mut()
+                        .messages
+                        .drain_pending_v2_notes();
+                    if !notes.is_empty() {
+                        for note in notes {
+                            let (new_state, _) = crate::state_machine::handle(
+                                state,
+                                crate::state_machine::event::Event::PushSystemNote(note),
+                            );
+                            state = new_state;
+                        }
+                        needs_render = true;
+                    }
+                }
                 Effect::Quit => {
                     quit = true;
                     break;
@@ -674,9 +666,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
                         // Falls back to TextArea snapshot when saved_input is
                         // empty (panel opened via legacy fallback path).
                         let input = if modal.saved_input.text().is_empty() {
-                            crate::state_machine::input::sync::from_textarea(
-                                &app.session_mgr.current().ui.textarea,
-                            )
+                            crate::state_machine::input::InputState::default()
                         } else {
                             modal.saved_input
                         };
