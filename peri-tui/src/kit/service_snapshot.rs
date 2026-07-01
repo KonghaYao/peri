@@ -31,8 +31,8 @@ use tracing::{debug, warn};
 
 use crate::app::service_registry::{ProcessResourceMonitor, SharedPeriConfig};
 use crate::kit::atoms::{
-    AcpStateSnapshot, CRON_JOBS, CronJobSummary, McpInitPhase, McpStatusSnapshot, SERVICE_SNAPSHOT,
-    ServiceSnapshot, THREAD_LIST, ThreadSummary,
+    AcpStateSnapshot, CRON_JOBS, CronJobSummary, FILE_LIST, McpInitPhase, McpStatusSnapshot,
+    SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST, ThreadSummary,
 };
 use crate::thread::ThreadStore;
 
@@ -142,6 +142,19 @@ async fn tick_once(src: &SnapshotSource) -> Result<(), Box<dyn std::error::Error
         }
     };
 
+    // ── 6b. C2: cwd 文件浅扫（@mention 补全用） ────────────────────────
+    // spawn_blocking 包裹同步 fs 操作，避免阻塞 async runtime。失败时静默
+    // 跳过（FILE_LIST 保持上一帧值或空 Vec）。
+    let cwd_for_scan = src.cwd.clone();
+    let files: Vec<String> =
+        match tokio::task::spawn_blocking(move || scan_cwd_files_shallow(&cwd_for_scan)).await {
+            Ok(result) => result,
+            Err(e) => {
+                warn!(error = %e, "service_snapshot: spawn_blocking for cwd scan failed");
+                Vec::new()
+            }
+        };
+
     // ── 7. 写入 atoms ───────────────────────────────────────────────────
     let snap = ServiceSnapshot {
         cwd: src.cwd.clone(),
@@ -164,8 +177,135 @@ async fn tick_once(src: &SnapshotSource) -> Result<(), Box<dyn std::error::Error
     if let Some(atom) = CRON_JOBS.get() {
         *atom.write() = cron_jobs;
     }
+    if let Some(atom) = FILE_LIST.get() {
+        *atom.write() = files;
+    }
 
     Ok(())
+}
+
+/// 浅扫 cwd 文件列表（深度=2，最多 500 条），用于 @mention 补全。
+///
+/// 实现：先列顶层条目（文件 + 目录），文件直接入列；目录若不在忽略名单则进入
+/// 一层。最终返回相对 cwd 的路径（POSIX 风格 `/`-分隔）。
+///
+/// 性能：典型 Rust 项目 ~200 文件 → 一次扫描 < 5ms；node_modules / target 等
+/// 大目录被忽略，避免数十万文件遍历。失败时返回空 Vec（@mention 自动失效）。
+fn scan_cwd_files_shallow(cwd: &str) -> Vec<String> {
+    use std::fs;
+    use std::path::Path;
+
+    const MAX_FILES: usize = 500;
+    /// 常见忽略目录——出现于任何层级都跳过（顶层 + 1 层子目录）。
+    const IGNORED_DIRS: &[&str] = &[
+        ".git",
+        ".hg",
+        ".svn",
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        "__pycache__",
+        ".next",
+        ".nuxt",
+        ".venv",
+        "venv",
+        ".cache",
+        ".idea",
+        ".vscode",
+        ".DS_Store",
+        ".gradle",
+        ".maven",
+        ".cargo",
+        ".rust-analyzer",
+        ".ruff_cache",
+        ".pytest_cache",
+        "coverage",
+        "out",
+        "bin",
+        "obj",
+        ".terraform",
+        ".serverless",
+        ".aws",
+        ".kube",
+    ];
+
+    let root = Path::new(cwd);
+    if !root.exists() || !root.is_dir() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<String> = Vec::new();
+
+    // 顶层扫描
+    let top_entries = match fs::read_dir(root) {
+        Ok(it) => it,
+        Err(_) => return Vec::new(),
+    };
+
+    // 收集顶层目录用于二层扫描（保持顺序，避免 HashMap 开销）
+    let mut subdirs_to_scan: Vec<std::path::PathBuf> = Vec::new();
+
+    for entry in top_entries.flatten() {
+        if out.len() >= MAX_FILES {
+            break;
+        }
+        let path = entry.path();
+        let file_name = match entry.file_name().into_string() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        if IGNORED_DIRS.contains(&file_name.as_str()) {
+            continue;
+        }
+
+        if path.is_dir() {
+            subdirs_to_scan.push(path);
+        } else {
+            push_rel_path(&mut out, &path, root);
+        }
+    }
+
+    // 二层扫描
+    for subdir in subdirs_to_scan {
+        if out.len() >= MAX_FILES {
+            break;
+        }
+        let sub_entries = match fs::read_dir(&subdir) {
+            Ok(it) => it,
+            Err(_) => continue,
+        };
+        for entry in sub_entries.flatten() {
+            if out.len() >= MAX_FILES {
+                break;
+            }
+            let path = entry.path();
+            let file_name = match entry.file_name().into_string() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if IGNORED_DIRS.contains(&file_name.as_str()) {
+                continue;
+            }
+            // 二层不再递归子目录（深度=2 截止）
+            if path.is_file() {
+                push_rel_path(&mut out, &path, root);
+            }
+        }
+    }
+
+    out
+}
+
+/// 把 `path` 相对 `root` 的路径压入 `out`（POSIX 风格分隔符），跳过根路径本身。
+fn push_rel_path(out: &mut Vec<String>, path: &std::path::Path, root: &std::path::Path) {
+    if let Ok(rel) = path.strip_prefix(root) {
+        let s = rel.to_string_lossy().replace('\\', "/");
+        if !s.is_empty() {
+            out.push(s);
+        }
+    }
 }
 
 /// PermissionMode → 稳定小写字符串（用于 UI 显示 + atom 存储）。
@@ -253,6 +393,7 @@ mod tests {
     use chrono::Utc;
     use peri_agent::thread::SqliteThreadStore;
     use peri_middlewares::cron::CronScheduler;
+    use serial_test::serial;
 
     /// 创建一个 SQLite in-memory thread store 用于测试。
     async fn make_sqlite_store() -> Arc<dyn ThreadStore> {
@@ -287,6 +428,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_tick_once_writes_atoms() {
         // 先 init atoms（避免 SERVICE_SNAPSHOT.get() 返回 None）
         crate::kit::atoms::init_atoms();
@@ -306,6 +448,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_tick_once_empty_thread_list() {
         crate::kit::atoms::init_atoms();
 
@@ -320,6 +463,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_cron_tasks_collected() {
         crate::kit::atoms::init_atoms();
 
@@ -404,5 +548,56 @@ mod tests {
     fn test_snapshot_source_is_clone() {
         fn assert_clone<T: Clone>() {}
         assert_clone::<SnapshotSource>();
+    }
+
+    /// C2 回归测试：scan_cwd_files_shallow 在临时目录正确收集文件相对路径。
+    #[test]
+    fn test_scan_cwd_files_shallow_collects_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // 顶层文件
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        std::fs::write(root.join("b.rs"), "x").unwrap();
+        // 子目录文件（深度=2）
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("mod.rs"), "x").unwrap();
+        // 忽略目录：node_modules 内文件不应出现
+        std::fs::create_dir_all(root.join("node_modules").join("pkg")).unwrap();
+        std::fs::write(
+            root.join("node_modules").join("pkg").join("ignored.js"),
+            "x",
+        )
+        .unwrap();
+
+        let files = scan_cwd_files_shallow(root.to_str().unwrap());
+        assert!(files.contains(&"a.txt".to_string()));
+        assert!(files.contains(&"b.rs".to_string()));
+        assert!(files.contains(&"src/mod.rs".to_string()));
+        assert!(
+            !files.iter().any(|f| f.contains("node_modules")),
+            "ignored dir should be filtered out, got: {:?}",
+            files
+        );
+    }
+
+    /// C2 回归测试：不存在的目录返回空 Vec，不 panic。
+    #[test]
+    fn test_scan_cwd_files_shallow_nonexistent() {
+        let files = scan_cwd_files_shallow("/this/path/does/not/exist");
+        assert!(files.is_empty());
+    }
+
+    /// C2 回归测试：MAX_FILES 上限防止无限增长。
+    #[test]
+    fn test_scan_cwd_files_shallow_caps_at_max() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // 创建 600 个文件（超过 MAX_FILES=500）
+        for i in 0..600 {
+            std::fs::write(root.join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let files = scan_cwd_files_shallow(root.to_str().unwrap());
+        assert!(files.len() <= 500, "should cap at 500, got {}", files.len());
     }
 }

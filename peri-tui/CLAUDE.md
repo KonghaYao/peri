@@ -2,171 +2,180 @@
 
 TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTransport`（in-memory channel pair）与 ACP Server 通信，不直接依赖 `peri-agent`/`peri-middlewares` 的运行时路径（仅作为类型依赖）。
 
-## 当前架构（v2 + B3 Cutover）
+## 当前架构（ratatui-kit 单路径，S1-S13 完成 + Iteration 13 增量）
 
-**双路径事件分发**（详见根 CLAUDE.md 「TUI 双路径事件分发」）：
-- **1a. 状态机路径**（`state_machine::handle`）：纯函数 `(State, Event) → (State, Vec<Effect>)`
-- **1b. Legacy 兜底**：`keyboard::handle_key_event`（6 文件 ~1200 行）+ `handle_acp_event`（ACP notification 桥接）
-- **1c. 合并去重**：Render 唯一化后执行
+**单一路径**：`use-kit` feature 默认 ON。`main.rs` 调用 `kit::entry::run_kit_fullscreen(opts, panic_notify_rx)`，legacy `runtime/main_loop` / `state_machine` / `command/` / `panel/` / `ui/` / `render/` / `event/` 已全部物理删除（净减 ~18000 行）。
 
-**v2 状态机骨架**（`state_machine/`）：
-- `state.rs`：State 4 变体（Idle/Streaming/Modal/Switching）+ ModalState（struct，持 saved_view/saved_input/saved_*/kind）+ ModalKind（Panel|Interaction）
-- `event.rs`：Event 9 变体 + AcpEventData decode（22 子变体 + Unknown 兜底）
-- `view_store.rs`：替换语义 commit（非 extend）
-- `current_turn.rs`：流式累积 text/reasoning/tool_cards/spinner
-- `input/`：InputState（buffer+cursor+history+at_mention+slash+attachments）
-- `transitions/`：idle/streaming/modal/switching 4 个转换函数 + enter_modal_from_idle/streaming helper
-- `handlers/`：Handler trait + 4 个 Interaction Handlers（hitl/ask_user/rewind/oauth）+ NoopHandler
+### kit 四链路（spawn 于 entry::run_kit_fullscreen）
 
-**Handler trait**（v2，Phase 1.4 扩展）：
-```rust
-pub trait Handler: Send + std::fmt::Debug {
-    fn render(&self, frame: &mut ratatui::Frame, area: Rect);
-    fn handle_key(&mut self, key: KeyEvent) -> HandlerOutput;
-    fn desired_height(&self, _screen_height: u16, _screen_width: u16) -> u16 { 12 }
-}
+```
+1. spawn_kit_notifier  : AcpNotification → AcpEventData → bridge_tx
+2. spawn_acp_bridge    : bridge_rx → BridgeState → Atom 写入（VIEW_MODELS / ACP_STATE / POPUP_KIND ...）
+3. spawn_submit_consumer : SUBMIT_TX (String) → acp_client.prompt()
+4. spawn_service_snapshot : 2s tick → SERVICE_SNAPSHOT / THREAD_LIST / CRON_JOBS / FILE_LIST atoms
+
+附加：
+- spawn_rewind_consumer     : REWIND_ACTION_TX → session/execute-command ("/rewind")
+- spawn_thread_load_consumer : THREAD_LOAD_TX → acp_client.load_session(thread_id)
 ```
 
-**[已知缺陷 #15]** v2 Interaction Handler 路径在生产仍是死代码（ACP 层无 AcpEvent::HitlPending 等变体，HITL 走 v1 RequestPermission JSON-RPC 路径）。Phase 1.3/1.4 代码作为前端预留接口，等 ACP 层扩展后启用。详见 `docs/refactor/tui-v3-plan.md` 2026-07-01 cron #7 调研结论。
+### 全局状态（atoms.rs，OnceLock 延迟初始化）
 
-## 核心文件
+类型别名：`pub type Atom<T> = ratatui_kit::prelude::StoreState<T>`。
 
-| 文件 | 职责 |
+| Atom | 用途 |
 |------|------|
-| `src/render/vm_convert.rs` | v1 MessageViewModel → v2 ViewModel 转换器（Phase 2.6 桥接） |
-| `src/app/subagent_status.rs` | SubAgentStatusMap + SessionSubAgentProbe（运行时状态 + 子内容注入） |
-| `src/runtime/main_loop.rs` | 主事件循环（双路径分发 + Effect 执行） |
-| `src/runtime/event_channel.rs` | 统一 unbounded channel（5 类输入源合并） |
-| `src/runtime/acp_notifier.rs` | ACP notification → TuiEvent 桥接（后台 task） |
-| `src/runtime/keyboard_collector.rs` | crossterm 事件轮询（持久化 spawn_blocking → mpsc） |
-| `src/runtime/apply_context.rs` | Effect 执行器（terminal + acp_client + clipboard） |
-| `src/runtime/effect.rs` | Effect 枚举（26 变体） |
-| `src/state_machine/` | v2 纯函数状态机 |
-| `src/acp_client/client.rs` | ACP client 封装，`AcpNotification` 变体定义 |
-| `src/app/agent.rs` | `ExecutorEvent → AgentEvent` 映射（`map_executor_event`） |
-| `src/app/agent_ops/acp_bridge.rs` | `AcpNotification → AgentEvent` 桥接 |
-| `src/app/agent_ops_interaction.rs` | HITL/AskUser v1 路径（`InteractionPrompt` 设置） |
-| `src/app/agent_submit.rs` | 用户输入提交入口 |
-| `src/app/agent_compact.rs` | Compact 事件处理：pipeline 清理 + UI 通知 |
-| `src/app/message_state.rs` | MessageState（view_messages + round_start_vm_idx） |
-| `src/app/panel_types.rs` | PanelKind（14 变体） + MutexGroup |
-| `src/ui/main_ui/mod.rs` | 主布局（含 v1 popup 渲染 + v2 panel_area 预留） |
-| `src/i18n/` | 国际化模块（`LcRegistry` + Fluent） |
+| `VIEW_MODELS` | `ViewModelsSnapshot { committed, current_turn }` —— 消息流单一数据源 |
+| `ACP_STATE` | `AcpStateSnapshot { variant, is_loading, popup_active, at_mention_active, slash_hint_active ... }` |
+| `SERVICE_SNAPSHOT` | CPU/MEM/MCP/Cron/provider/model/permission_mode/cwd 投影 |
+| `THREAD_LIST` / `CRON_JOBS` / `FILE_LIST` | Thread / Cron / cwd 文件列表 |
+| `OPEN_PANELS` / `ACTIVE_PANEL` / `POPUP_KIND` | 当前面板栈 + 激活面板 + 激活弹窗 |
+| `INPUT_HISTORY` / `INPUT_HISTORY_INDEX` | 输入历史栈 + 浏览指针 |
+| `INPUT_BUFFER` | **Iteration 13 新增**：agent loading 时缓存的待提交输入队列（上限 32） |
+| `AT_MENTION_ACTIVE` / `MENTION_PREFIX` / `SLASH_HINT_ACTIVE` / `SLASH_PREFIX` | 输入辅助状态 |
+| `REWIND_PREVIEW` / `LAST_ESC_TIME` | Rewind 弹窗数据 + 双击 Esc 检测 |
+| `MODEL_HIGHLIGHT_UNTIL` / `PROVIDER_HIGHLIGHT_UNTIL` / `MODE_HIGHLIGHT_UNTIL` | Status bar 瞬时高亮 |
+| `SCROLL_OFFSET` | 消息区滚动位置 |
+
+**Channels（OnceLock<UnboundedSender>）**：
+- `SUBMIT_TX: String` —— InputArea Enter → submit_consumer
+- `REWIND_ACTION_TX: RewindAction` —— RewindPopup → rewind_consumer
+- `THREAD_LOAD_TX: String` —— ThreadBrowser Enter → thread_load_consumer
+
+**非 atom 全局句柄**：
+- `PERI_CONFIG_HANDLE: Arc<RwLock<PeriConfig>>` —— ModelPanel / 配置类操作直接 write；ACP server 持同一 Arc，立即生效
+
+## 输入框（InputArea，kit/input_area.rs）
+
+`#[component]` 组件，自管 EditorState（text + cursor）。完整功能：
+
+- **多行**：Shift/Alt+Enter 换行；高度动态（3~12 行）
+- **history**：Up/Down 浏览 `INPUT_HISTORY`；Esc 或回到底部恢复编辑
+- **@mention**：`@` 触发 → MentionPopup 显示 `FILE_LIST` 过滤后的文件（前缀优先，大小写不敏感）
+- **slash 补全**：行首 `/` 触发 → SlashCompletion 显示 33 条静态命令
+- **编辑快捷键**：Ctrl+W（删词）/ Ctrl+U（清空）/ Home/End / Backspace
+- **粘贴**：Event::Paste 整段插入
+- **提交**：Enter 检查 `ACP_STATE.is_loading`：
+  - **非 loading** → SUBMIT_TX.send(text)
+  - **loading 中** → push 到 `INPUT_BUFFER`（上限 32，FIFO），TurnDone 时 `drain_input_buffer()` 顺序重新提交
+- **slash Enter**：替换 editor 为命令并提交（同样检查 loading 入 buffer）
+
+## 消息流（kit/message_area.rs + view_render.rs）
+
+`view_render::render_v2_vm` 渲染 `peri_acp_types::view_model::ViewModel` 7 变体：
+- `UserBubble` / `AssistantBubble`（Text + Reasoning 提取）
+- `ToolCard`（成功/错误/diff 三态）
+- `SystemNote`（Info/Warning/Error 三级）
+- `SubAgentGroup`（DTO.view_models 优先；fallback probe.recent_messages）
+- `CollapsedGroup` / `CacheWarning`
+
+`message_area::render` 拼装 `VIEW_MODELS.committed + current_turn`，loading 时附加 spinner，空时显示 Welcome card。
+
+## 14 面板（kit/panels/，PanelKind 枚举）
+
+| Panel | 数据源 | 切换功能 |
+|-------|--------|----------|
+| **Model** | SERVICE_SNAPSHOT + 静态 MODEL_ALIASES | ✅ Enter 修改 `PERI_CONFIG_HANDLE.active_alias` |
+| **Login** | 静态 mock | 只读 |
+| **Agent** | 静态 mock | 只读 |
+| **Hooks** | 静态 mock | 只读 |
+| **Config** | 静态 mock | 编辑本地状态（无持久化） |
+| **ThreadBrowser** | THREAD_LIST atom | ✅ Enter 通过 THREAD_LOAD_TX 调用 `load_session` |
+| **Mcp** | 静态 mock | 只读 |
+| **Plugin** | 静态 mock | 只读 |
+| **Cron** | CRON_JOBS atom | toggle/delete UI 但无 RPC |
+| **Tasks** | 静态 mock | 只读 |
+| **Status** | SERVICE_SNAPSHOT atom | CPU/MEM/context 部分 placeholder |
+| **Memory** | 静态 mock | 只读 |
+| **Betas** | 静态 mock | Space toggle 无持久化 |
+| **Workflow** | 静态 mock | 只读 |
+| **SetupWizard** | App.global_ui | 配置向导（首次启动触发） |
+
+面板栈互斥组（MutexGroup）：Settings / Agent / Tools / Info / Thread。打开新面板按栈压入；关闭弹栈。
+
+## 4 弹窗（kit/popups/）
+
+由 ACP 事件触发，统一通过 `POPUP_KIND` atom 路由：
+
+| Popup | 触发源 | 功能 |
+|-------|--------|------|
+| **HITL** | `AcpEventData::HitlPending` | 工具调用审批（Accept/Reject/Once） |
+| **AskUser** | `AcpEventData::AskUser` | Agent 向用户提问（多选项） |
+| **Rewind** | `AcpEventData::RewindPreview` 或双击 Esc | 回退预览 + 确认；REWIND_ACTION_TX → /rewind RPC |
+| **OAuth** | `AcpEventData::OauthNeeded` | OAuth 授权流程 |
+
+## Status Bar（kit/status_bar.rs）
+
+双行布局：
+- 第一行：权限模式 → cwd → model alias → CPU% → MEM → context
+- 第二行：瞬时状态（复制提示/MCP/LSP）→ 快捷键 hints
+
+瞬时高亮通过 `MODEL_HIGHLIGHT_UNTIL` 等 atom + Instant 控制 1.5s 消失。
 
 ## ACP 数据流
 
 ```
-TUI 输入 → AcpTuiClient.new_session() / .prompt()
-         → MpscClientTransport.send_request/notification()
-         → MpscServerTransport.recv() (ACP Server, tokio::spawn)
-         → ExecutorEvent → TransportEventSink.push_event()
-         → AcpTuiClient.pump_notifications() → AcpNotification
-         → acp_notifier 后台 task → TuiEvent::AcpEvent
-         → main_loop 1a (state_machine) + 1b (handle_acp_event 桥接)
-         → handle_acp_notification → map_executor_event → AgentEvent
-         → UI 更新
+用户 Enter → InputArea → SUBMIT_TX
+                            ↓
+            spawn_submit_consumer → acp_client.prompt()
+                            ↓
+                MpscClientTransport.send_request()
+                            ↓
+            ACP Server (tokio::spawn) → ExecutorEvent
+                            ↓
+                TransportEventSink.push_event()
+                            ↓
+            AcpTuiClient.pump_notifications() → AcpNotification
+                            ↓
+            spawn_kit_notifier → AcpEventData::decode
+                            ↓
+                bridge_tx → spawn_acp_bridge
+                            ↓
+            dispatch_and_notify → BridgeState → Atom 写入
+                            ↓
+            ratatui-kit 组件 use_store → 自动重渲染
 ```
 
-**[TRAP]** TUI 层数据必须通过 ACP 协议到达 ACP 层，禁止直连。所有 TUI → ACP Server 的状态变更必须通过 `acp_client` 的协议方法。TUI 本地清空状态（如 `new_thread()`）不等于 ACP Server 端状态同步——必须同时通过 ACP 协议通知 Server 侧。
+**[TRAP]** TUI 层数据必须通过 ACP 协议到达 ACP 层，禁止直连 peri-agent / peri-middlewares 运行时。本地状态变更（如 ModelPanel 切 alias）通过共享 `Arc<RwLock<PeriConfig>>` 直接 write，ACP server 持同一 Arc。
 
-**[TRAP]** `keyboard_collector.rs` 禁止用 `tokio::select!` 同时竞态 `spawn_blocking`（crossterm poll）和 tick interval——会导致事件丢失。必须用持久化 spawn_blocking → mpsc channel → select 从 recv() 读取（见根 CLAUDE.md `keyboard_collector.rs` 重写）。
+## Rewind 完整路径
 
-## 消息渲染（v2 已是生产路径 — Phase 2.6 桥接完成）
+1. 双击 Esc（500ms 内）或 ACP `RewindPreview` 事件 → 设置 `REWIND_PREVIEW` + `POPUP_KIND = Rewind`
+2. RewindPopup 渲染预览：消息列表 / 文件改动（Tab 切换视图）
+3. Enter → `REWIND_ACTION_TX.send(Confirm { target_message_id, revert_files })`
+4. `spawn_rewind_consumer` → `acp_client.send_raw_request("session/execute-command", { command: "/rewind", args: {...} })`
+5. ACP server RewindCommand 完成 → 推送 `ExecutorEvent::RewindCompleted` → kit_notifier → ViewCommit → VIEW_MODELS 刷新
 
-**生产渲染路径**：v2 单源
-- `runtime::apply_context::draw_now` 从 `state.view_models()` + 流式 `current_turn` 派生 `v2_vms`
-- `v2_vms` 通过 `ui::main_ui::render(f, app, panel_height, Some(&v2_vms))` 传入
-- `message_area::render_messages` 走 v2 分支（`build_sync_render_cache_v2`）
+## 关键 [TRAP]
 
-**SubAgent 子内容桥接**（Phase 2.6 关键）：
-- ACP 层 `view_mapper` 生成 `SubAgentGroupData` 时 `view_models` 永久为空 placeholder
-- `app/subagent_status.rs::SessionSubAgentProbe` 复合 probe 在 `draw_now` 时构造：
-  1. 包装 `SubAgentStatusMap`（运行时状态：is_running / total_steps / final_result / ...）
-  2. 从 `view_messages` 通过 `render/vm_convert::message_view_models_to_v2` 解析所有 `SubAgentGroup.recent_messages`（按 agent_id 缓存）
-- `render/view_render.rs::render_subagent_group` 子内容优先级：`DTO.view_models > probe.recent_messages > 空`
+- **绝不推远程** —— 见 `~/.claude/projects/-Users-konghayao-code-ai-perihelion/memory/never-push-remote.md`
+- **`AcpNotification::AgentEvent` 暂忽略** —— 携带的 AcpEvent DTO（TurnCommitted/StateSnapshotMeta/CompactCompleted）属于低频 v2 事件，kit 以 UnstableEvent 为主通道
+- **SUBMIT_TX / REWIND_ACTION_TX / THREAD_LOAD_TX 必须 OnceLock 而非 lazy** —— rx 端在 entry::run_kit_fullscreen 中 spawn 任务，必须在 build_app_and_acp 完成后由 entry 显式 `set(tx)`
+- **`ACP_STATE.is_loading` 是 InputArea 判断 loading 的唯一来源** —— 不能依赖 `props.loading`（渲染时快照，事件触发时可能已变化）
+- **PERI_CONFIG_HANDLE 共享 Arc** —— ACP server 持同一 Arc，write 后立即可见；service_snapshot 2s 内捕获变化刷新 SERVICE_SNAPSHOT
+- **drain_input_buffer 必须在 TurnDone 而非 TurnInterrupted** —— Interrupted 表示用户主动打断，不应自动续跑
+- **FILE_LIST 扫描深度=2** —— 浅扫避免 node_modules / target 等大目录爆栈；MAX_FILES=500 上限
+- **`scan_cwd_files_shallow` 必须 spawn_blocking 包裹** —— std::fs 同步操作阻塞 async runtime
+- **ModelPanel 切换不立即触发 status bar 刷新** —— 依赖 service_snapshot 2s tick；如需立即刷新可手动改 SERVICE_SNAPSHOT atom
+- **ThreadBrowser Enter 后必须手动关闭面板** —— load_session 的 ViewCommit 通知不会自动关面板
+- **process_resource_monitor 独立新建** —— service_snapshot 不复用 ServiceRegistry.resource_monitor（非 Arc），新建实例采样进程级数据不影响正确性
 
-**v1 view_messages 的当前作用**：
-- SessionSubAgentProbe 提取 SubAgentGroup 头部 + recent_messages（生产中 recent_messages 永远为空 Vec，因 v1 不累积子 Agent 内部消息 — 设计如此，"子 agent 内部消息不持久化"）
-- 兼容性测试路径（`main_ui::render(f, app, None, None)`，~36 个测试，主要集中在 `headless_test.rs`）
+## 测试风格
 
-**vm_convert 模块**（`render/vm_convert.rs`）：
-- 纯函数 `message_view_model_to_v2(vm) -> Option<ViewModel>` + 批量 `message_view_models_to_v2(vms) -> Vec<ViewModel>`
-- 6 变体映射：UserBubble / AssistantBubble（Text + Reasoning 提取）/ ToolBlock / SystemNote / CacheWarning / ToolCallGroup 扁平化 / SubAgentGroup 不嵌套（返回 None）
-- 用于：① SessionSubAgentProbe 子内容注入 ② HeadlessHandle::render 测试路径统一走 v2
+- `kit::input_area::tests` —— EditorState / 多行渲染 / @mention 触发 / slash 触发 / 文件过滤
+- `kit::acp_events::tests` —— drain_input_buffer 顺序 / 空队列 / SUBMIT_TX 缺失安全性
+- `kit::service_snapshot::tests` —— tick_once / 派生 provider+model / cwd 文件扫描 / MAX_FILES 上限
+- `kit::submit_consumer::tests` —— 空文本跳过 / 首次创建 session / shutdown / dropped tx
+- `kit::thread_load_consumer::tests` —— 空 thread_id 跳过 / shutdown / dropped tx
+- `kit::rewind_action::tests` —— /rewind RPC payload / has_session 检查 / 双击 Esc 时序
 
-**[INFO]** `MessageState.view_messages` 仍由 `handle_agent_event` 维护（`apply_add_message` / `apply_rebuild_all`），但生产渲染不再读它。**Phase 2.5 已退役 `ephemeral_notes` 锚点管理**（SystemNote 通过 `pending_v2_notes → Event::PushSystemNote` 独立路由）。**Phase 2.6 完整退役 view_messages 剩余工作**：① 让 SessionSubAgentProbe 完全脱离 view_messages（删除 `legacy_children` 兼容源） ② 删除 `handle_subagent_start` 中 `apply_add_message(SubAgentGroup)` 推送 ③ 移除 `view_messages` 字段（涉及 88+ 测试更新）。
+`#[serial]` 用于依赖全局 atom 的并发敏感测试。
 
-**[TRAP]** BaseMessage vs MessageViewModel 维度混淆：`completed_len_at_round_start` 是 BaseMessage 长度，`prefix_len` 是 VM 索引，两者非 1:1。`prefix_len` 必须用 `round_start_vm_idx`，`drain` 必须钳位。
+## 编码规范
 
-**[INFO]** `MessageViewModel` 已不再包含 `message_id` 字段。SubAgentGroup 使用 `instance_id: Option<String>` 标识。
-
-## 主布局
-
-单 Session 垂直切分（Sticky Header → Messages → Attachment Bar → Panel Area → Input → Status Bar → BG Agent Bar）。高度优先级：Status Bar 固定 3 行 → Input 动态（3~40% 屏幕）→ 面板（60-75% 屏幕）→ 其余分配给消息区。
-
-### 界面组件
-
-| 组件 | 文件 | 说明 |
-|------|------|------|
-| Welcome Card | `ui/welcome.rs` | 空消息时替代显示，ASCII Art + 功能要点 + 命令提示 |
-| Sticky Header | `ui/main_ui/sticky_header.rs` | 滚动时顶部固定显示最后 Human 消息摘要 |
-| Attachment Bar | `ui/main_ui/attachment.rs` | 图片附件标签列表，Input 正上方 |
-| Input Area | `edit_utils.rs` | `tui_textarea::TextArea` 封装，高度动态 |
-| Hints 浮层 | `ui/main_ui/popups/hints.rs` | `/` 前缀命令匹配，输入框上方 |
-| @提及弹窗 | `app/at_mention/mod.rs` | `@` 触发文件搜索，200ms 节流 |
-| BG Agent Bar | `ui/main_ui/bg_agent_bar.rs` | 后台 Agent 列表，8 色循环 |
-
-### 弹窗系统（双轨）
-
-**v1 路径（生产活跃）**：统一通过 `InteractionPrompt` 枚举互斥管理（3 种：Approval/Questions/Rewind）。OAuth 和 Setup Wizard 通过 `GlobalUiState` 独立管理。
-- **HITL 审批**（`popups/hitl.rs`）：`InteractionPrompt::Approval` + `app/agent_ops_interaction.rs::handle_acp_request_permission`（JSON-RPC RequestPermission）
-- **AskUser 问答**（`popups/ask_user.rs`）：`InteractionPrompt::Questions` + `handle_acp_elicitation`（JSON-RPC Elicitation）
-- **Rewind 确认**（`popups/rewind.rs`）：`InteractionPrompt::Rewind`（双击 Esc 触发）
-- **OAuth 授权**（`popups/oauth.rs`）：`GlobalUiState.oauth_prompt`
-- **Setup Wizard**（`popups/setup_wizard.rs`）：`GlobalUiState.setup_wizard`
-
-**v2 路径（前端就位，后端待启用）**：`State::Modal(ModalKind::Interaction(Box<dyn Handler>))`。4 个 Handler（hitl/ask_user/rewind/oauth）的 render + desired_height 全部实现（Phase 1.4）。draw_now 在 `panel_area` 渲染。**当前 ACP 层不 emit 对应 AcpEvent，路径不会触发**（见缺陷 #15）。
-
-### 面板系统（v2 PanelState trait）
-
-14 种 `PanelKind`（`app/panel_types.rs`）：Model/Login/Agent/Hooks/Config/ThreadBrowser（Session 作用域）；Mcp/Plugin/Cron/Tasks/Status/Memory/Betas/Workflow（Global 作用域）。
-
-互斥组（`MutexGroup`）：Settings（Model/Login/Config）、Agent（Agent/Hooks）、Tools（MCP/Plugin/Cron/Tasks/Workflow）、Info（Status/Memory/Betas）、Thread（ThreadBrowser 独占）。
-
-**v2 PanelState trait**（`state_machine/state.rs`）：`render + desired_height + handle_key + from_app(&App)` 工厂。`registry::create_panel(kind, app)` 工厂 0 stub，全部 14 面板迁移完成。
-
-Slash 命令 → v2 面板端到端通路：`Command::execute → Vec<Effect> → Effect::OpenPanel(PanelKind) → main_loop create_panel(kind, app) → State::Modal(Panel) → draw_now overlay 渲染`。
-
-8 个面板有 `from_app(app)` 构造函数从 ServiceRegistry 提取真实数据（Model/Login/Config/Mcp/Plugin/Cron/Status/Workflow）。
-
-### Status Bar
-
-双行布局（`ui/main_ui/status_bar.rs`）：
-- **第一行**：权限模式 → 工作目录 → 模型名 → CPU% → MEM → 上下文使用率
-- **第二行**：左侧瞬时状态（复制提示/后台 agent/LLM 重试/MCP/LSP）→ 右侧快捷键 hints
-
-瞬时提示用 `Instant` + Duration 控制消失；颜色分级用 `theme::ERROR`/`WARNING`/`SAGE`；面板 hints 通过 `PanelState::status_bar_hints()` trait 注入。
-
-### 消息区
-
-Welcome Card 或消息列表 + 滚动条 + spinner。视口裁剪渲染（`viewport_clip`）。`MessageViewModel` 7 种变体：`UserBubble` / `AssistantBubble`（含 Text/Reasoning/ToolUse） / `ToolBlock` / `SystemNote` / `CacheWarning` / `ToolCallGroup` / `SubAgentGroup`。
-
-## i18n
-
-`LcRegistry` 存储在 `ServiceRegistry.lc` 中，翻译资源通过 `include!` 编译时嵌入 `locales/{lang}/main.ftl`。
-
-`Command trait` 的 `description()` 接收 `&LcRegistry` 参数并返回 `String`。`CommandRegistry::match_prefix()` 和 `list()` 均需 `&LcRegistry`。
-
-## 状态管理
-
-**`ServiceRegistry` 与 `GlobalUiState`**：`App` 状态拆分为 `ServiceRegistry`（跨会话共享：config/MCP/cron/provider）和 `GlobalUiState`（纯 UI 临时状态：高亮计时器/弹窗/鼠标检测）。
-
-**`ServiceRegistrySnapshot`**（`panel/read_context.rs`）：从 `&App` 派生的快照，含 cwd/model_alias/provider_name/permission_mode。`build_v2_panel_read_context` 使用真实 snapshot + State.view_models() 数据。
-
-**`CommandRegistry::dispatch` 借用限制 [TRAP]**：`&self` + `&mut App` 冲突，用 `std::mem::take` + put-back 解决。dispatch 期间不可改变 `app.session_mgr` 的 session 实例。
-
-## Compact 事件处理
-
-**[TRAP]** `handle_compact_completed` 必须三步清理：① `pipeline.clear()` ② `pipeline.restore_completed(messages)` ③ `RebuildAll { prefix_len: 0 }`。缺少任一步都会导致旧消息残留或 system 消息泄漏。禁止在 TUI 层触发 auto-compact——所有触发判断在 executor 内部。
-
-**[TRAP]** `restore_completed(messages)` 会把 system 消息放入 completed 列表。re_inject 产生的 System 消息不应渲染。`round_start_vm_idx` 和 `completed_len_at_round_start` 必须正确设置。
+- `#![allow(clippy::needless_update)]` —— ratatui-kit element! 宏展开触发，模块级抑制
+- 字符串截断用 `chars().take(N)`（CJK 安全）
+- 终端列宽用 `unicode-width`
+- 快捷键：禁止 `Shift+字母`；优先 `Ctrl+字母`；不用 PageUp/Down
+- 测试隔离：`App::save_config(cfg, self.config_path_override.as_deref())`
+- `std::sync::RwLockReadGuard` 不是 Send → async 跨 `.await` 用 `parking_lot::RwLock`

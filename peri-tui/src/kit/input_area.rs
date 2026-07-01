@@ -23,17 +23,64 @@ use ratatui_kit::{
 };
 
 use crate::kit::atoms::{
-    AT_MENTION_ACTIVE, MENTION_PREFIX, SLASH_HINT_ACTIVE, SLASH_PREFIX, SUBMIT_TX,
+    ACP_STATE, AT_MENTION_ACTIVE, FILE_LIST, INPUT_BUFFER, MENTION_PREFIX, SLASH_HINT_ACTIVE,
+    SLASH_PREFIX, SUBMIT_TX,
 };
 use crate::kit::input_history::{history_down, history_up, push_history};
 use crate::kit::mention_popup::MentionPopup;
 use crate::kit::slash_completion::SlashCompletion;
 use crate::kit::theme;
 
-/// 静态 slash 命令列表——S11 解耦后从 CommandRegistry 注入真实命令。
+/// 静态 slash 命令列表——补全提示用。
+///
+/// 设计原则：所有可能的命令（ACP server 内置 + 历史保留）都列出，让用户能
+/// 看到 discoverability。命令实际执行逻辑在 ACP server 端或后续 RPC 调用。
+///
+/// 分类（仅注释，UI 不分组）：
+/// - **ACP server 内置**：/bg /clear /compact /rewind
+/// - **会话控制**：/help /quit /init /resume /continue /bug
+/// - **配置类**：/mode /yolo /model /login /permissions
+/// - **状态查看**：/cost /context /status
+/// - **面板入口**：/agents /threads /mcp /cron /tasks /memory /hooks /config /plugins /lsp
+/// - **子 Agent / 技能**：/subagent /workflow /skill
 const SLASH_COMMANDS: &[&str] = &[
-    "/help", "/clear", "/compact", "/rewind", "/model", "/agents", "/cost", "/context", "/yolo",
-    "/mode", "/threads", "/mcp", "/cron", "/login", "/quit",
+    // ACP server 内置
+    "/bg",
+    "/clear",
+    "/compact",
+    "/rewind",
+    // 会话控制
+    "/help",
+    "/quit",
+    "/init",
+    "/resume",
+    "/continue",
+    "/bug",
+    // 配置类
+    "/mode",
+    "/yolo",
+    "/model",
+    "/login",
+    "/permissions",
+    // 状态查看
+    "/cost",
+    "/context",
+    "/status",
+    // 面板入口
+    "/agents",
+    "/threads",
+    "/mcp",
+    "/cron",
+    "/tasks",
+    "/memory",
+    "/hooks",
+    "/config",
+    "/plugins",
+    "/lsp",
+    // 子 Agent / 技能
+    "/subagent",
+    "/workflow",
+    "/skill",
 ];
 
 /// 输入状态
@@ -170,9 +217,25 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     let submitted = std::mem::take(&mut s.text);
                     s.cursor = 0;
                     if !submitted.trim().is_empty() {
-                        // 入历史栈 + 通过 SUBMIT_TX 推送
+                        // 入历史栈
                         push_history(&submitted);
-                        if let Some(tx) = SUBMIT_TX.get() {
+                        // 关键：loading 时入 INPUT_BUFFER，否则 SUBMIT_TX 直接提交。
+                        // 通过 ACP_STATE.is_loading 判断当前 agent 是否运行——
+                        // 这是 ratatui-kit 跨闭包共享 loading 状态的官方方式。
+                        let is_loading = ACP_STATE
+                            .get()
+                            .map(|a| a.read().is_loading)
+                            .unwrap_or(false);
+                        if is_loading {
+                            if let Some(buf) = INPUT_BUFFER.get() {
+                                let mut guard = buf.write();
+                                guard.push_back(submitted);
+                                // 上限 32 条，超出从头部丢弃
+                                while guard.len() > 32 {
+                                    guard.pop_front();
+                                }
+                            }
+                        } else if let Some(tx) = SUBMIT_TX.get() {
                             let _ = tx.send(submitted);
                         }
                         // 关闭可能的 @mention/slash
@@ -245,12 +308,24 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     // 替换整个 editor 内容为命令
                     if !cmd.is_empty() {
                         s.replace_all(cmd.clone());
-                        // 立即提交命令
+                        // 立即提交命令——同样检查 loading 入 buffer
                         drop(s);
                         let final_text = state.read().text.clone();
                         if !final_text.trim().is_empty() {
                             push_history(&final_text);
-                            if let Some(tx) = SUBMIT_TX.get() {
+                            let is_loading = ACP_STATE
+                                .get()
+                                .map(|a| a.read().is_loading)
+                                .unwrap_or(false);
+                            if is_loading {
+                                if let Some(buf) = INPUT_BUFFER.get() {
+                                    let mut guard = buf.write();
+                                    guard.push_back(final_text);
+                                    while guard.len() > 32 {
+                                        guard.pop_front();
+                                    }
+                                }
+                            } else if let Some(tx) = SUBMIT_TX.get() {
                                 let _ = tx.send(final_text);
                             }
                             state.write().clear();
@@ -387,7 +462,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             #(if mention_active {
                 element!(MentionPopup(
                     prefix: mention_prefix.clone(),
-                    items: Vec::<String>::new(), // S11 接入真实文件列表
+                    items: filter_files_for_mention(&mention_prefix),
                     on_select: Handler::from(|_: String| {}),
                     on_cancel: Handler::from(|_: ()| {}),
                 )).into_any()
@@ -411,6 +486,30 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             }
         }
     )
+}
+
+/// 从 `FILE_LIST` atom 读出 cwd 文件列表，按 `prefix` 过滤，最多 20 条。
+///
+/// 大小写不敏感的子串匹配——这样 `@auth` 能匹配 `auth.rs` / `oauth.rs` /
+/// `authenticated.md` 等。结果按"prefix 开头优先"排序，提升命中率。
+fn filter_files_for_mention(prefix: &str) -> Vec<String> {
+    let files = FILE_LIST
+        .get()
+        .map(|a| a.read().clone())
+        .unwrap_or_default();
+    if prefix.is_empty() {
+        return files.into_iter().take(20).collect();
+    }
+    let prefix_lower = prefix.to_lowercase();
+    let mut matches: Vec<String> = files
+        .iter()
+        .filter(|f| f.to_lowercase().contains(&prefix_lower))
+        .cloned()
+        .collect();
+    // prefix 开头的优先
+    matches.sort_by_key(|f| !f.to_lowercase().starts_with(&prefix_lower));
+    matches.truncate(20);
+    matches
 }
 
 /// 根据 editor 当前文本更新 @mention / slash 提示状态。
@@ -629,5 +728,57 @@ mod tests {
         reset_popup_atoms();
         update_popup_prefix("see @auth service");
         assert!(!*AT_MENTION_ACTIVE.get().unwrap().read());
+    }
+
+    /// C2 回归测试：filter_files_for_mention 在 prefix 为空时返回前 20 条。
+    #[test]
+    #[serial]
+    fn test_filter_files_empty_prefix_returns_top_20() {
+        crate::kit::atoms::init_atoms();
+        // 写 25 个文件
+        if let Some(atom) = FILE_LIST.get() {
+            let mut list: Vec<String> = (0..25).map(|i| format!("file{i}.rs")).collect();
+            list.sort();
+            *atom.write() = list;
+        }
+        let result = filter_files_for_mention("");
+        assert_eq!(result.len(), 20);
+    }
+
+    /// C2 回归测试：filter_files_for_mention 按大小写不敏感子串过滤。
+    #[test]
+    #[serial]
+    fn test_filter_files_substring_case_insensitive() {
+        crate::kit::atoms::init_atoms();
+        if let Some(atom) = FILE_LIST.get() {
+            *atom.write() = vec![
+                "auth.rs".into(),
+                "oauth.rs".into(),
+                "OAUTH.md".into(),
+                "utils.rs".into(),
+            ];
+        }
+        let result = filter_files_for_mention("AUTH");
+        // 三个含 auth/AUTH 的文件应被过滤出来（大小写不敏感）
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&"auth.rs".to_string()));
+        assert!(result.contains(&"oauth.rs".to_string()));
+        assert!(result.contains(&"OAUTH.md".to_string()));
+    }
+
+    /// C2 回归测试：prefix 开头的文件优先于子串匹配的。
+    #[test]
+    #[serial]
+    fn test_filter_files_prefix_start_priority() {
+        crate::kit::atoms::init_atoms();
+        if let Some(atom) = FILE_LIST.get() {
+            *atom.write() = vec![
+                "myauth.rs".into(), // 子串匹配
+                "auth.rs".into(),   // 开头匹配，应优先
+                "oauth.rs".into(),  // 子串匹配
+            ];
+        }
+        let result = filter_files_for_mention("auth");
+        assert_eq!(result.first().unwrap(), "auth.rs");
     }
 }

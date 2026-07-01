@@ -185,6 +185,23 @@ pub static INPUT_HISTORY: OnceLock<Atom<VecDeque<String>>> = OnceLock::new();
 /// `None` 表示正在编辑新文本（非历史浏览状态）。
 pub static INPUT_HISTORY_INDEX: OnceLock<Atom<Option<usize>>> = OnceLock::new();
 
+/// 输入缓冲区——agent loading 时用户按 Enter 的输入按顺序排队。
+///
+/// 设计：当 `ACP_STATE.is_loading == true` 时 InputArea 把 Enter 提交的文本
+/// push_back 到此队列；TurnDone 事件触发时由 acp_events 按顺序 drain 并
+/// 通过 SUBMIT_TX 重新提交。这样用户在 agent 运行期间可以连续输入下一条
+/// 指令而不会丢失。
+///
+/// 上限：保留最近 32 条，超出从头部丢弃（防止无限增长）。
+pub static INPUT_BUFFER: OnceLock<Atom<VecDeque<String>>> = OnceLock::new();
+
+/// 当前工作目录下浅扫的文件相对路径列表（用于 @mention 补全）。
+///
+/// 由 service_snapshot 每 2s 刷新一次：扫描 cwd 顶层 + 1 层子目录，
+/// 过滤常见忽略目录（.git / node_modules / target / dist 等），最多 500 条。
+/// InputArea 渲染时基于 `MENTION_PREFIX` 过滤后传给 MentionPopup。
+pub static FILE_LIST: OnceLock<Atom<Vec<String>>> = OnceLock::new();
+
 /// @mention 当前匹配的文件名前缀（用户输入 @ 之后的字符）。
 /// 由 InputArea 在用户输入 @ 时写入；MentionPopup 用它过滤文件列表。
 pub static MENTION_PREFIX: OnceLock<Atom<String>> = OnceLock::new();
@@ -209,6 +226,24 @@ pub static LAST_ESC_TIME: OnceLock<Atom<Option<Instant>>> = OnceLock::new();
 /// `session/execute-command` (command="/rewind") RPC。
 pub static REWIND_ACTION_TX: OnceLock<UnboundedSender<RewindAction>> = OnceLock::new();
 
+/// H3：thread 切换通道——ThreadBrowser Enter → thread_load_consumer → AcpClient.load_session。
+///
+/// 设计同 SUBMIT_TX：mpsc 保证 Send+Sync + 顺序；消费者在 entry.rs spawn。
+/// String = thread_id（即 SQLite Thread 表主键；ACP server 把它直接当 sessionId 用）。
+/// 切换成功后 ACP server 推送 view-commit 通知 → kit_notifier → VIEW_MODELS atom 自动刷新。
+pub static THREAD_LOAD_TX: OnceLock<UnboundedSender<String>> = OnceLock::new();
+
+/// H2：全局 PeriConfig 共享句柄（非 atom——直接 write 反映到所有读取者）。
+///
+/// ModelPanel / ConfigPanel 等需要修改本地配置（active_alias / permission_mode 等）
+/// 的组件直接 read 此 OnceLock 拿到 `Arc<RwLock<PeriConfig>>` 副本，然后 write 内部字段。
+/// service_snapshot 任务每 2s 派生 `SERVICE_SNAPSHOT` atom，会自动捕获变化并刷新 UI。
+///
+/// 注意：ACP server 持有同一 Arc，所以这里 write 后 server 端立即可见——无需额外同步。
+pub static PERI_CONFIG_HANDLE: OnceLock<
+    std::sync::Arc<parking_lot::RwLock<crate::config::PeriConfig>>,
+> = OnceLock::new();
+
 /// 初始化所有全局 Atom。
 ///
 /// 必须在 tokio 运行时启动后、任何组件渲染前调用。
@@ -230,6 +265,8 @@ pub fn init_atoms() {
     POPUP_KIND.get_or_init(|| Atom::new(None));
     INPUT_HISTORY.get_or_init(|| Atom::new(VecDeque::new()));
     INPUT_HISTORY_INDEX.get_or_init(|| Atom::new(None));
+    INPUT_BUFFER.get_or_init(|| Atom::new(VecDeque::new()));
+    FILE_LIST.get_or_init(|| Atom::new(Vec::new()));
     MENTION_PREFIX.get_or_init(|| Atom::new(String::new()));
     SLASH_PREFIX.get_or_init(|| Atom::new(String::new()));
     REWIND_PREVIEW.get_or_init(|| Atom::new(None));

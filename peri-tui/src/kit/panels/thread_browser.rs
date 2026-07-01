@@ -14,7 +14,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::kit::atoms::{THREAD_LIST, ThreadSummary};
+use crate::kit::atoms::{THREAD_LIST, THREAD_LOAD_TX, ThreadSummary};
 use crate::kit::theme;
 
 #[component]
@@ -30,6 +30,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_local_events({
         let cursor = cursor.clone();
         let count = count;
+        let threads_snapshot = threads.clone();
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
@@ -50,7 +51,21 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     KeyCode::Enter => {
-                        // S11 TODO: 通过 AcpClient 切换 thread
+                        // H3: 通过 THREAD_LOAD_TX → thread_load_consumer → AcpClient.load_session
+                        // 切换成功后 ACP server 推送 ViewCommit 自动刷新消息流。
+                        let sel_idx = *cursor.read();
+                        if let Some(entry) = threads_snapshot.get(sel_idx) {
+                            if let Some(tx) = THREAD_LOAD_TX.get() {
+                                let _ = tx.send(entry.id.clone());
+                            }
+                            // 关闭面板：清空 ACTIVE_PANEL / OPEN_PANELS
+                            if let Some(atom) = crate::kit::atoms::ACTIVE_PANEL.get() {
+                                *atom.write() = None;
+                            }
+                            if let Some(atom) = crate::kit::atoms::OPEN_PANELS.get() {
+                                atom.write().clear();
+                            }
+                        }
                     }
                     _ => {}
                 }

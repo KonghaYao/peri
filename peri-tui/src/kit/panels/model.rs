@@ -5,7 +5,7 @@
 //! Enter/←→ 操作目前只更新本地 selected_tab state，**真实切换 provider/model**
 //! 需要 S11 解耦后通过 AcpClient 触发（暂留 TODO）。
 
-use crate::kit::atoms::SERVICE_SNAPSHOT;
+use crate::kit::atoms::{PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT};
 use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -91,9 +91,29 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         *c = (*c + 1).min(MODEL_ALIASES.len() - 1);
                     }
                     KeyCode::Enter => {
-                        // S11 TODO: 通过 AcpClient 切换真实 alias
+                        // H2: 通过 PERI_CONFIG_HANDLE 直接 write active_alias。
+                        // ACP server 持同一 Arc，立即生效；service_snapshot 2s 内
+                        // 派生到 SERVICE_SNAPSHOT.model_alias 让 status bar 同步刷新。
                         let sel = *cursor.read();
                         *selected_tab.write() = sel;
+                        if let Some(handle) = PERI_CONFIG_HANDLE.get() {
+                            let new_alias = MODEL_ALIASES[sel].key.to_string();
+                            let mut cfg = handle.write();
+                            if cfg.config.active_alias != new_alias {
+                                cfg.config.active_alias = new_alias;
+                                tracing::info!(
+                                    alias = MODEL_ALIASES[sel].key,
+                                    "ModelPanel: active_alias switched"
+                                );
+                            }
+                        }
+                        // 关闭面板
+                        if let Some(atom) = crate::kit::atoms::ACTIVE_PANEL.get() {
+                            *atom.write() = None;
+                        }
+                        if let Some(atom) = crate::kit::atoms::OPEN_PANELS.get() {
+                            atom.write().clear();
+                        }
                     }
                     KeyCode::Left => {
                         let mut s = selected_tab.write();

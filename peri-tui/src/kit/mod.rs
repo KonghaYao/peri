@@ -31,6 +31,7 @@ pub mod slash_completion;
 pub mod status_bar;
 pub mod submit_consumer;
 pub mod theme;
+pub mod thread_load_consumer;
 pub mod view_render;
 
 // Phase 3: 导出布局组件
