@@ -138,6 +138,25 @@ impl App {
             return (false, false, false);
         }
 
+        // Cron #33: reset retry_status and defer to cleanup_agent_state for
+        // the shared teardown. Mirrors handle_done (line 47 + 97) and
+        // handle_error (line 234 + 294). Without this, Ctrl+C during an
+        // LLM retry leaves:
+        //   - stale retry_status in the status bar ("Retrying (attempt N)")
+        //     — read by status_bar.rs:212
+        //   - langfuse_tracer never flushed (orphaned trace)
+        //   - interaction_prompt / pending_hitl_items / pending_ask_user
+        //     left dangling (a subsequent Done/Error would have cleared
+        //     them, but if the executor returns Interrupted as the
+        //     terminal event, they stay set forever)
+        //   - task_start_time consumed into last_task_duration only on
+        //     Done/Error paths today — status bar shows "Elapsed: …"
+        //     counting from this turn's start, but last_task_duration
+        //     is never set, so a future agent submit resets it
+        //   - spinner_state stays in Responding mode (set_loading(false)
+        //     only happens via cleanup_agent_state)
+        self.session_mgr.current_mut().agent.retry_status = None;
+
         // Phase 2.6 step 7c: scan v2 state.view (passed in as view_slice)
         // instead of v1 view_messages. The v2 helpers are pure functions
         // over &[ViewModel] defined in state_machine::view_store.
@@ -174,6 +193,10 @@ impl App {
                 Some(&self.session_mgr.current().metadata.session_id.to_string()),
                 None,
             );
+            // Cron #33: branch 1 (keep tool progress) is also a terminal
+            // agent state — clear langfuse tracer / interaction_prompt /
+            // spinner / loading here too, mirroring branch 2/3 below.
+            self.cleanup_agent_state(None);
             return (true, false, false);
         }
 
@@ -212,6 +235,12 @@ impl App {
             self.push_system_note(self.services.lc.tr("app-interrupt-done"));
         }
         self.session_mgr.current_mut().agent.reconcile_already_done = true;
+        // Cron #33: terminal agent state — call shared teardown before
+        // flush_pending_messages to mirror handle_done (line 97-106).
+        // Without this, branch 2 (rollback) and branch 3 (no rollback
+        // text) leave loading=true / spinner in Responding mode after
+        // Ctrl+C.
+        self.cleanup_agent_state(None);
         if !self
             .session_mgr
             .current()
@@ -631,6 +660,157 @@ mod tests {
             app.global_ui.pending_view_rewind_to,
             Some(0),
             "subagent_depth = 0 must still run full pipeline (branch 2 rollback)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Cron #33: handle_interrupted state cleanup parity with handle_done
+    // -----------------------------------------------------------------------
+    //
+    // Bug: handle_interrupted never reset retry_status and never called
+    // cleanup_agent_state — unlike handle_done (line 47 + 97) and
+    // handle_error (line 234 + 294). Ctrl+C during an LLM retry left a
+    // stale "Retrying (attempt N)" in the status bar, an orphaned
+    // langfuse tracer, dangling interaction_prompt / pending_hitl_items /
+    // pending_ask_user, and spinner stuck in Responding mode (loading
+    // stayed true because set_loading(false) is only called via
+    // cleanup_agent_state).
+    //
+    // These tests verify the parity:
+    //   1. retry_status cleared in ALL branches (1/2/3)
+    //   2. spinner_state reset to Idle (set_loading(false) ran)
+    //   3. loading flag cleared
+    //   4. Early-return on subagent_depth > 0 does NOT clear (SubAgentEnd
+    //      handles its own cleanup; parent's retry_status may still be
+    //      legitimately set if parent was retrying before SubAgent ran)
+
+    /// Helper: simulate an active LLM retry state — mirrors what
+    /// AgentEvent::LlmRetrying sets (retry_status populated).
+    fn set_active_retry(app: &mut App) {
+        // RetryStatus is a plain struct with public fields (see
+        // app/agent_comm.rs:14). Construct directly.
+        app.session_mgr.current_mut().agent.retry_status = Some(crate::app::RetryStatus {
+            attempt: 2,
+            max_attempts: 5,
+            delay_ms: 100,
+            error: "provider rate limited".into(),
+        });
+    }
+
+    #[tokio::test]
+    async fn test_handle_interrupted_branch1_resets_retry_status_and_loading() {
+        // Branch 1: has tool calls → keep progress, but STILL clear retry
+        // and loading. Otherwise spinner stays in Responding mode after
+        // Ctrl+C.
+        let mut app = make_app_with_active_turn().await;
+        set_active_retry(&mut app);
+        // Sanity: retry_status really is populated
+        assert!(app.session_mgr.current().agent.retry_status.is_some());
+
+        let view_slice: Vec<ViewModel> = vec![
+            ViewModel::UserBubble(UserBubbleData {
+                text: "hello".into(),
+            }),
+            ViewModel::ToolCard(ToolCardData {
+                tool_id: "t1".into(),
+                tool_name: "Bash".into(),
+                input_summary: "ls".into(),
+                output_summary: "files".into(),
+                is_error: false,
+                diff: None,
+            }),
+        ];
+
+        let _ = app.handle_interrupted(&view_slice);
+
+        // CRITICAL: retry_status must be cleared (status bar would show
+        // stale "Retrying (attempt 2)" otherwise)
+        assert!(
+            app.session_mgr.current().agent.retry_status.is_none(),
+            "branch 1 must clear retry_status — stale retry indicator would persist otherwise"
+        );
+
+        // CRITICAL: loading must be cleared (spinner stuck otherwise)
+        assert!(
+            !app.session_mgr.current().ui.loading,
+            "branch 1 must clear loading — spinner stays in Responding mode otherwise"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_interrupted_branch2_resets_retry_status_and_loading() {
+        // Branch 2: no tool calls + has last_submitted_text → rollback.
+        // Same cleanup obligations.
+        let mut app = make_app_with_active_turn().await;
+        set_active_retry(&mut app);
+
+        let view_slice: Vec<ViewModel> = vec![ViewModel::UserBubble(UserBubbleData {
+            text: "hello".into(),
+        })];
+
+        let _ = app.handle_interrupted(&view_slice);
+
+        assert!(
+            app.session_mgr.current().agent.retry_status.is_none(),
+            "branch 2 must clear retry_status"
+        );
+        assert!(
+            !app.session_mgr.current().ui.loading,
+            "branch 2 must clear loading"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_interrupted_branch3_no_text_resets_retry_and_loading() {
+        // Branch 3: no tool calls + no last_submitted_text (e.g. interrupt
+        // during setup). All three branches must call cleanup_agent_state.
+        let mut app = make_app_with_active_turn().await;
+        set_active_retry(&mut app);
+        app.session_mgr.current_mut().messages.last_submitted_text = None;
+
+        let view_slice: Vec<ViewModel> = vec![ViewModel::UserBubble(UserBubbleData {
+            text: "hello".into(),
+        })];
+
+        let _ = app.handle_interrupted(&view_slice);
+
+        assert!(
+            app.session_mgr.current().agent.retry_status.is_none(),
+            "branch 3 must clear retry_status"
+        );
+        assert!(
+            !app.session_mgr.current().ui.loading,
+            "branch 3 must clear loading"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_interrupted_subagent_depth_does_not_clear_retry() {
+        // Early-return guard (subagent_depth > 0): retry_status is NOT
+        // touched. If the parent was itself in an LLM retry when the
+        // SubAgent ran, the parent's retry indicator stays — clearing it
+        // would mask a real retry in progress.
+        //
+        // SubAgentEnd handler (mod.rs) decrements subagent_depth; the
+        // parent's eventual Interrupted/Done/Error will clear retry_status.
+        let mut app = make_app_with_active_turn().await;
+        set_active_retry(&mut app);
+        app.session_mgr.current_mut().agent.subagent_depth = 1;
+
+        let view_slice: Vec<ViewModel> = vec![ViewModel::UserBubble(UserBubbleData {
+            text: "hello".into(),
+        })];
+
+        let _ = app.handle_interrupted(&view_slice);
+
+        assert!(
+            app.session_mgr.current().agent.retry_status.is_some(),
+            "subagent_depth > 0 early-return must NOT clear parent retry_status"
+        );
+        // Loading stays true — parent is still in flight
+        assert!(
+            app.session_mgr.current().ui.loading,
+            "subagent_depth > 0 early-return must NOT clear parent loading"
         );
     }
 }
