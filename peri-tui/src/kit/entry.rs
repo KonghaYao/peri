@@ -20,6 +20,7 @@ use crate::kit::acp_bridge::spawn_acp_bridge;
 use crate::kit::acp_notifier::spawn_kit_notifier;
 use crate::kit::app_shell::AppShell;
 use crate::kit::atoms;
+use crate::kit::rewind_action::spawn_rewind_consumer;
 use crate::kit::service_snapshot::{SnapshotSource, spawn_service_snapshot};
 use crate::kit::submit_consumer::spawn_submit_consumer;
 use crate::launch::{TuiLaunchOptions, build_app_and_acp, teardown_app};
@@ -49,22 +50,27 @@ pub async fn run_kit_fullscreen(
     let snapshot_src = build_snapshot_source(&app);
     let _snapshot_handle = spawn_service_snapshot(snapshot_src, shutdown.clone());
 
-    // 4. 接通 kit 三链路（仅当 ACP provider 配置成功——acp_client 为 None 时
+    // 4. 接通 kit 四链路（仅当 ACP provider 配置成功——acp_client 为 None 时
     //    走最小可用路径：UI 可显示但无 agent 交互）。
     if let Some((client, notification_rx)) = acp_client {
         // 4a. SUBMIT channel：InputArea → submit_consumer
         let (submit_tx, submit_rx) = mpsc::unbounded_channel::<String>();
         let _ = atoms::SUBMIT_TX.set(submit_tx);
 
-        // 4b. bridge channel：notifier → acp_bridge
+        // 4b. REWIND_ACTION channel：RewindPopup → rewind_consumer
+        let (rewind_tx, rewind_rx) = mpsc::unbounded_channel();
+        let _ = atoms::REWIND_ACTION_TX.set(rewind_tx);
+
+        // 4c. bridge channel：notifier → acp_bridge
         let (bridge_tx, bridge_rx) = mpsc::unbounded_channel();
 
-        // 4c. 启动三链路
+        // 4d. 启动四链路
         let _notifier_handle = spawn_kit_notifier(notification_rx, bridge_tx, shutdown.clone());
         let _bridge_handle = spawn_acp_bridge(bridge_rx, shutdown.clone());
         let cwd = app.services.cwd.clone();
         let _submit_handle =
             spawn_submit_consumer(client.clone(), submit_rx, cwd, shutdown.clone());
+        let _rewind_handle = spawn_rewind_consumer(client.clone(), rewind_rx, shutdown.clone());
     } else {
         tracing::warn!("kit 路径：无 ACP provider，TUI 仅以离线模式运行（无 agent 交互）");
     }

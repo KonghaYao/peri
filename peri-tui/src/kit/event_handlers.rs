@@ -28,11 +28,12 @@ use ratatui_kit::{
 };
 
 use super::atoms::{
-    ACTIVE_PANEL, AT_MENTION_ACTIVE, MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL, OPEN_PANELS,
-    POPUP_KIND, PROVIDER_HIGHLIGHT_UNTIL, SLASH_HINT_ACTIVE,
+    ACTIVE_PANEL, AT_MENTION_ACTIVE, LAST_ESC_TIME, MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL,
+    OPEN_PANELS, POPUP_KIND, PROVIDER_HIGHLIGHT_UNTIL, REWIND_PREVIEW, SLASH_HINT_ACTIVE,
 };
+use crate::kit::atoms::PopupKind;
 use crate::kit::panel_registry::{close_active_panel, from_key_code, open_panel};
-use crate::kit::popup_overlay::close_popup;
+use crate::kit::popup_overlay::{close_popup, open_popup};
 
 /// Global Layer: 不可阻断的快捷键。
 ///
@@ -76,20 +77,19 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::SHIFT)
             && !key.modifiers.contains(KeyModifiers::ALT)
+            && let Some(kind) = from_key_code(key.code)
         {
-            if let Some(kind) = from_key_code(key.code) {
-                // toggle 行为：已打开则关闭，否则打开。这样 Ctrl+M 第二次按下关闭 Model。
-                let is_open = OPEN_PANELS
-                    .get()
-                    .map(|a| a.read().contains(&kind))
-                    .unwrap_or(false);
-                if is_open {
-                    crate::kit::panel_registry::close_panel(kind);
-                } else {
-                    open_panel(kind);
-                }
-                return;
+            // toggle 行为：已打开则关闭，否则打开。这样 Ctrl+M 第二次按下关闭 Model。
+            let is_open = OPEN_PANELS
+                .get()
+                .map(|a| a.read().contains(&kind))
+                .unwrap_or(false);
+            if is_open {
+                crate::kit::panel_registry::close_panel(kind);
+            } else {
+                open_panel(kind);
             }
+            return;
         }
 
         match key.code {
@@ -99,7 +99,7 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
             }
 
-            // Esc: 关闭优先级 popup → @mention/slash → 激活面板
+            // Esc: 双击触发 Rewind popup，否则走关闭优先级链
             KeyCode::Esc => {
                 // 优先关弹窗（最高优先级，覆盖面板和输入辅助）
                 let popup_open = POPUP_KIND
@@ -111,7 +111,33 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                     return;
                 }
 
-                // 再关 @mention / slash_hint
+                // S10：双击 Esc 触发 Rewind popup（仅在无 @mention / slash / panel 时）
+                let now = std::time::Instant::now();
+                let last_esc = LAST_ESC_TIME.get().and_then(|a| *a.read());
+                let is_double_esc = last_esc
+                    .map(|t| now.duration_since(t) < std::time::Duration::from_millis(500))
+                    .unwrap_or(false);
+
+                // 更新 LAST_ESC_TIME（每次 Esc 都记录）
+                if let Some(atom) = LAST_ESC_TIME.get() {
+                    *atom.write() = Some(now);
+                }
+
+                if is_double_esc {
+                    // 双击 Esc：打开 Rewind popup（无论是否有 preview 数据；popup 内部处理 None）
+                    // 同时清掉 mention/slash/panel 状态，避免 popup 被遮挡
+                    if let Some(a) = AT_MENTION_ACTIVE.get() {
+                        *a.write() = false;
+                    }
+                    if let Some(a) = SLASH_HINT_ACTIVE.get() {
+                        *a.write() = false;
+                    }
+                    let _ = REWIND_PREVIEW.get(); // 触发 OnceLock 初始化检查
+                    open_popup(PopupKind::Rewind);
+                    return;
+                }
+
+                // 单击 Esc：关 @mention / slash_hint
                 let mention = AT_MENTION_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
                 let slash = SLASH_HINT_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
                 if mention || slash {

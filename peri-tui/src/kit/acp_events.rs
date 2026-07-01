@@ -148,7 +148,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_popup_kind(state);
             push_acp_state(state);
         }
-        RewindPreview(_) => {
+        RewindPreview(rp) => {
+            // S10：保存 payload 到 REWIND_PREVIEW atom，供 RewindPopup 读取真实数据
+            if let Some(atom) = REWIND_PREVIEW.get() {
+                *atom.write() = Some(rp.clone());
+            }
             state.popup_kind = Some(PopupKind::Rewind);
             state.variant = 2;
             push_popup_kind(state);

@@ -6,6 +6,7 @@
 //! 类型别名：pub type Atom<T> = StoreState<T>（保持与设计文档一致的命名）。
 
 use chrono::{DateTime, Utc};
+use peri_acp_types::event_data::RewindPreview;
 use peri_acp_types::view_model::ViewModel;
 use ratatui_kit::prelude::StoreState;
 use std::collections::VecDeque;
@@ -14,6 +15,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::panel_types::PanelKind;
+use crate::kit::rewind_action::RewindAction;
 
 // ──────────────────────────────────────────────────────────────────────────
 // Popup 系统：S7 引入。4 种交互弹窗，由 ACP 事件或全局快捷键触发。
@@ -190,6 +192,23 @@ pub static MENTION_PREFIX: OnceLock<Atom<String>> = OnceLock::new();
 /// slash 命令当前匹配前缀（用户输入 / 之后的字符）。
 pub static SLASH_PREFIX: OnceLock<Atom<String>> = OnceLock::new();
 
+// ── S10：Rewind 系统 ──────────────────────────────────────────────────────
+
+/// 当前 rewind 预览数据——由 AcpEvent::RewindPreview 写入；RewindPopup 读取。
+/// 双击 Esc 触发 popup 时若此 atom 为 None，popup 显示"无可回退"占位。
+pub static REWIND_PREVIEW: OnceLock<Atom<Option<RewindPreview>>> = OnceLock::new();
+
+/// 双击 Esc 检测——记录最近一次 Esc 按下时间。
+/// event_handlers 在 Esc 时检查：距上次 < 500ms 且无 popup → open_popup(Rewind)。
+pub static LAST_ESC_TIME: OnceLock<Atom<Option<Instant>>> = OnceLock::new();
+
+/// Rewind 指令通道：RewindPopup 确认/取消 → rewind_consumer → AcpClient。
+///
+/// 与 SUBMIT_TX 同模式：用 mpsc 而非 atom 以保证顺序 + Send+Sync。
+/// Confirm 携带 `target_message_id` + `revert_files`，consumer 调
+/// `session/execute-command` (command="/rewind") RPC。
+pub static REWIND_ACTION_TX: OnceLock<UnboundedSender<RewindAction>> = OnceLock::new();
+
 /// 初始化所有全局 Atom。
 ///
 /// 必须在 tokio 运行时启动后、任何组件渲染前调用。
@@ -213,6 +232,9 @@ pub fn init_atoms() {
     INPUT_HISTORY_INDEX.get_or_init(|| Atom::new(None));
     MENTION_PREFIX.get_or_init(|| Atom::new(String::new()));
     SLASH_PREFIX.get_or_init(|| Atom::new(String::new()));
+    REWIND_PREVIEW.get_or_init(|| Atom::new(None));
+    LAST_ESC_TIME.get_or_init(|| Atom::new(None));
     // SUBMIT_TX 由 entry::run_kit_fullscreen 在 build_app_and_acp 之后初始化
     // （需要 mpsc::unbounded_channel 的 rx 配对），不在此处 get_or_init。
+    // REWIND_ACTION_TX 同理——需要 rx 配对给 spawn_rewind_consumer。
 }
