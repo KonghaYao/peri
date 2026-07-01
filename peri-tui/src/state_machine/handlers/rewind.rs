@@ -153,7 +153,7 @@ impl Handler for RewindHandler {
         }
         content += 2; // hint line + spacer
         content += 2; // border
-                      // Cap at 60% of screen to leave room for input + status bar.
+        // Cap at 60% of screen to leave room for input + status bar.
         content.min(screen_height * 3 / 5).max(5)
     }
 

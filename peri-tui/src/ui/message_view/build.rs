@@ -61,11 +61,7 @@ pub(crate) fn build_diff_lines(
         _ => None,
     }?;
     let lines = peri_widgets::diff::render_diff(&diff_input, 80, &peri_widgets::DarkTheme);
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines)
-    }
+    if lines.is_empty() { None } else { Some(lines) }
 }
 
 impl MessageViewModel {

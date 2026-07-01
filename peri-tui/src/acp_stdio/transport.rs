@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use agent_client_protocol::{
-    schema::InitializeRequest, Client, ConnectionTo, LineDirection, Responder,
+    Client, ConnectionTo, LineDirection, Responder, schema::InitializeRequest,
 };
 use peri_acp::dispatch;
 

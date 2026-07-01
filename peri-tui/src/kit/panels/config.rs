@@ -7,6 +7,7 @@
 
 #![allow(dead_code)]
 
+use crate::ui::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -17,7 +18,6 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use crate::ui::theme;
 
 // ---------------------------------------------------------------------------
 // Row type
@@ -37,7 +37,10 @@ enum RowType {
 const CONFIG_ROWS: &[(&str, RowType)] = &[
     ("YOLO Mode", RowType::Toggle),
     ("Auto Compact", RowType::Toggle),
-    ("Permission Mode", RowType::Cycle(&["default", "accept-edit", "auto-mode", "bypass"])),
+    (
+        "Permission Mode",
+        RowType::Cycle(&["default", "accept-edit", "auto-mode", "bypass"]),
+    ),
     ("Context Threshold", RowType::Text),
     ("Max Iterations", RowType::Text),
     ("Show Diff", RowType::Toggle),
@@ -46,7 +49,11 @@ const CONFIG_ROWS: &[(&str, RowType)] = &[
 ];
 
 /// Human-readable labels for model cycle options.
-const MODEL_LABELS: &[&str] = &["claude-opus-4-20250514", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"];
+const MODEL_LABELS: &[&str] = &[
+    "claude-opus-4-20250514",
+    "claude-sonnet-4-20250514",
+    "claude-3-5-haiku-20241022",
+];
 
 // ---------------------------------------------------------------------------
 // Toggle row indices (used to map row index to state variable)
@@ -113,7 +120,9 @@ fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         let row_type = &CONFIG_ROWS[sel].1;
                         match row_type {
                             RowType::Toggle => toggle_row(sel, &yolo, &auto_compact, &show_diff),
-                            RowType::Cycle(opts) => cycle_forward(sel, opts, &perm_idx, &model_idx, &provider_idx),
+                            RowType::Cycle(opts) => {
+                                cycle_forward(sel, opts, &perm_idx, &model_idx, &provider_idx)
+                            }
                             RowType::Text => {
                                 // Insert space on text rows
                                 match sel {
@@ -129,7 +138,9 @@ fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         let row_type = &CONFIG_ROWS[sel].1;
                         match row_type {
                             RowType::Toggle => toggle_row(sel, &yolo, &auto_compact, &show_diff),
-                            RowType::Cycle(opts) => cycle_backward(sel, opts, &perm_idx, &model_idx, &provider_idx),
+                            RowType::Cycle(opts) => {
+                                cycle_backward(sel, opts, &perm_idx, &model_idx, &provider_idx)
+                            }
                             RowType::Text => {} // no-op on text rows
                         }
                     }
@@ -138,7 +149,9 @@ fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         let row_type = &CONFIG_ROWS[sel].1;
                         match row_type {
                             RowType::Toggle => toggle_row(sel, &yolo, &auto_compact, &show_diff),
-                            RowType::Cycle(opts) => cycle_forward(sel, opts, &perm_idx, &model_idx, &provider_idx),
+                            RowType::Cycle(opts) => {
+                                cycle_forward(sel, opts, &perm_idx, &model_idx, &provider_idx)
+                            }
                             RowType::Text => {} // no-op on text rows
                         }
                     }
@@ -147,8 +160,12 @@ fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         let row_type = &CONFIG_ROWS[sel].1;
                         if matches!(row_type, RowType::Text) {
                             match sel {
-                                ROW_THRESHOLD => { threshold.write().pop(); }
-                                ROW_MAX_ITER => { max_iter.write().pop(); }
+                                ROW_THRESHOLD => {
+                                    threshold.write().pop();
+                                }
+                                ROW_MAX_ITER => {
+                                    max_iter.write().pop();
+                                }
                                 _ => {}
                             }
                         }
@@ -254,11 +271,19 @@ fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 let display = match i {
                     ROW_THRESHOLD => {
                         let v = threshold.read().clone();
-                        if v.is_empty() { String::from("(empty)") } else { v }
+                        if v.is_empty() {
+                            String::from("(empty)")
+                        } else {
+                            v
+                        }
                     }
                     ROW_MAX_ITER => {
                         let v = max_iter.read().clone();
-                        if v.is_empty() { String::from("(empty)") } else { v }
+                        if v.is_empty() {
+                            String::from("(empty)")
+                        } else {
+                            v
+                        }
                     }
                     _ => String::new(),
                 };
@@ -282,8 +307,7 @@ fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Footer hints
     lines.push(Line::from(""));
     lines.push(
-        Line::from("  j/k Navigate  Space Toggle  ←→ Cycle  Enter Edit  q Close")
-            .fg(theme::DIM),
+        Line::from("  j/k Navigate  Space Toggle  ←→ Cycle  Enter Edit  q Close").fg(theme::DIM),
     );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
@@ -314,12 +338,7 @@ fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 // Event helpers
 // ---------------------------------------------------------------------------
 
-fn toggle_row(
-    sel: usize,
-    yolo: &State<bool>,
-    auto_compact: &State<bool>,
-    show_diff: &State<bool>,
-) {
+fn toggle_row(sel: usize, yolo: &State<bool>, auto_compact: &State<bool>, show_diff: &State<bool>) {
     match sel {
         ROW_YOLO => *yolo.write() = !*yolo.read(),
         ROW_AUTO_COMPACT => *auto_compact.write() = !*auto_compact.read(),

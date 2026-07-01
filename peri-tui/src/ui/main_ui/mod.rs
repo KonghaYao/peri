@@ -15,10 +15,10 @@ mod sticky_header;
 #[cfg(not(target_os = "windows"))]
 use ratatui::buffer::CellDiffOption;
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     widgets::{Padding, Paragraph},
-    Frame,
 };
 
 #[cfg(target_os = "windows")]

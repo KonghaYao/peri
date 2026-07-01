@@ -1,11 +1,11 @@
 //! 后台 Agent 管理栏——显示运行中的后台 SubAgent 列表
 
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{List, ListItem},
-    Frame,
 };
 
 use crate::app::App;

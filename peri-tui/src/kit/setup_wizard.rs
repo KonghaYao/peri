@@ -1,5 +1,6 @@
 //! ratatui-kit SetupWizard component.
 
+use crate::ui::theme;
 use ratatui_kit::{
     prelude::*,
     ratatui::{
@@ -9,7 +10,6 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use crate::ui::theme;
 
 #[component]
 pub fn SetupWizard(_hooks: Hooks) -> impl Into<AnyElement<'static>> {

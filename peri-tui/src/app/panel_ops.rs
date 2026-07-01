@@ -47,7 +47,7 @@ impl App {
         width: u16,
         height: u16,
     ) -> (App, crate::ui::headless::HeadlessHandle) {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
 
         use crate::thread::SqliteThreadStore;
 

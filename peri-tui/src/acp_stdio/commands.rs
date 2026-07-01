@@ -1,8 +1,8 @@
 //! AvailableCommands 通知辅助，供 session/new 和 session/load 复用。
 
 use agent_client_protocol::{
-    schema::{AvailableCommandsUpdate, SessionId, SessionNotification, SessionUpdate},
     Client, ConnectionTo,
+    schema::{AvailableCommandsUpdate, SessionId, SessionNotification, SessionUpdate},
 };
 
 /// 扫描 skill 目录并发送 AvailableCommandsUpdate 通知。

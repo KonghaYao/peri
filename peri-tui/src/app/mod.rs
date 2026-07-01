@@ -114,8 +114,8 @@ use peri_middlewares::prelude::HitlDecision; // P4b: type-dependency
 use crate::acp_client::{AcpNotification, AcpTuiClient};
 // Re-export MessageViewModel from ui::message_view
 pub use crate::ui::message_view::{
-    aggregate_tail_tool_groups, aggregate_tool_groups, ContentBlockView, MessageViewModel,
-    ToolCategory,
+    ContentBlockView, MessageViewModel, ToolCategory, aggregate_tail_tool_groups,
+    aggregate_tool_groups,
 };
 use crate::{
     config::PeriConfig,

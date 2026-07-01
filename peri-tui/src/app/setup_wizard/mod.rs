@@ -520,8 +520,8 @@ fn parse_url_parts(url: &str) -> Option<(&str, u16, &str)> {
 }
 
 pub use ops::{
-    build_wizard_config, handle_setup_wizard_key, needs_setup, save_setup, save_setup_to,
-    SetupWizardAction,
+    SetupWizardAction, build_wizard_config, handle_setup_wizard_key, needs_setup, save_setup,
+    save_setup_to,
 };
 
 mod ops;

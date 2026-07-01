@@ -1,8 +1,8 @@
 use tui_textarea::Input;
 
 use super::{
-    test_connectivity, FormField, FormMode, MigratedProvider, ProviderType, SetupSource, SetupStep,
-    SetupWizardPanel, LANGUAGE_OPTIONS,
+    FormField, FormMode, LANGUAGE_OPTIONS, MigratedProvider, ProviderType, SetupSource, SetupStep,
+    SetupWizardPanel, test_connectivity,
 };
 use crate::app::FieldTextarea;
 

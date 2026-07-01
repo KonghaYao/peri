@@ -7,6 +7,7 @@
 //!
 //! 旧版: panel/panels/mcp.rs (PanelState trait).
 
+use crate::ui::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -17,7 +18,6 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use crate::ui::theme;
 
 // ---------------------------------------------------------------------------
 // Mock MCP data
@@ -168,7 +168,11 @@ fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let status_style = Style::new().fg(entry.status.color());
 
         // Enabled/disabled indicator
-        let toggle = if entry.enabled { "\u{25c9}" } else { "\u{25cb}" };
+        let toggle = if entry.enabled {
+            "\u{25c9}"
+        } else {
+            "\u{25cb}"
+        };
         let toggle_style = if entry.enabled {
             Style::new().fg(theme::SAGE)
         } else {
@@ -181,15 +185,9 @@ fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Style::new().fg(theme::THINKING),
             ),
             Span::styled(toggle.to_string(), toggle_style),
-            Span::styled(
-                format!(" {:<20}", entry.name),
-                name_style,
-            ),
+            Span::styled(format!(" {:<20}", entry.name), name_style),
             Span::styled(entry.status.icon(), status_style),
-            Span::styled(
-                format!(" {}", entry.status.label()),
-                status_style,
-            ),
+            Span::styled(format!(" {}", entry.status.label()), status_style),
             Span::styled(
                 format!("  {} tools", entry.tool_count),
                 Style::new().fg(theme::MUTED),

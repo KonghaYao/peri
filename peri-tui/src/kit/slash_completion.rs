@@ -37,10 +37,7 @@ pub fn SlashCompletion(
         .commands
         .iter()
         .filter(|cmd| {
-            props.prefix.is_empty()
-                || cmd
-                    .to_lowercase()
-                    .starts_with(&props.prefix.to_lowercase())
+            props.prefix.is_empty() || cmd.to_lowercase().starts_with(&props.prefix.to_lowercase())
         })
         .cloned()
         .collect();
@@ -81,9 +78,7 @@ pub fn SlashCompletion(
         .enumerate()
         .map(|(i, cmd)| {
             if i == sel_idx {
-                Line::from(format!("> {}", cmd))
-                    .fg(theme::THINKING)
-                    .bold()
+                Line::from(format!("> {}", cmd)).fg(theme::THINKING).bold()
             } else {
                 Line::from(format!("  {}", cmd)).fg(theme::TEXT)
             }

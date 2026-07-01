@@ -5,6 +5,7 @@
 //!
 //! 旧版: panel/panels/memory.rs (PanelState trait, MemoryEntry-based).
 
+use crate::ui::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -15,7 +16,6 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use crate::ui::theme;
 
 /// Mock memory entry (Phase 8: injected via Atom from real memory files).
 #[allow(dead_code)]
@@ -112,14 +112,8 @@ fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(vec![
                 Span::styled(cursor.to_string(), label_style),
                 Span::styled(format!(" [{}] ", exist_icon), exist_style),
-                Span::styled(
-                    format!("{:<12} ", entry.label),
-                    label_style,
-                ),
-                Span::styled(
-                    entry.path,
-                    Style::new().fg(theme::MUTED),
-                ),
+                Span::styled(format!("{:<12} ", entry.label), label_style),
+                Span::styled(entry.path, Style::new().fg(theme::MUTED)),
             ]));
         }
     }

@@ -5,6 +5,7 @@
 //!
 //! 旧版: panel/panels/tasks.rs (PanelState trait, CronTaskDto-based).
 
+use crate::ui::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -15,7 +16,6 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use crate::ui::theme;
 
 /// Mock task entry (Phase 8: injected via Atom from real task sources).
 #[allow(dead_code)]
@@ -124,16 +124,10 @@ fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let status_style = Style::new().fg(entry.status.color());
 
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} {}. ", cursor, i + 1),
-                    name_style,
-                ),
+                Span::styled(format!(" {} {}. ", cursor, i + 1), name_style),
                 Span::styled(entry.name, name_style),
                 Span::raw("  "),
-                Span::styled(
-                    format!("[{}]", entry.status.label()),
-                    status_style,
-                ),
+                Span::styled(format!("[{}]", entry.status.label()), status_style),
             ]));
         }
     }

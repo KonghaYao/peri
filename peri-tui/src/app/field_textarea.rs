@@ -1,5 +1,5 @@
 use ratatui::widgets::{Block, Borders};
-use ratatui::{layout::Rect, style::Style, Frame};
+use ratatui::{Frame, layout::Rect, style::Style};
 use tui_textarea::TextArea;
 
 use crate::ui::theme;

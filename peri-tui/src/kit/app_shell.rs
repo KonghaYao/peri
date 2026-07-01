@@ -1,14 +1,14 @@
 //! ratatui-kit AppShell root component.
 
-use ratatui_kit::{
-    prelude::*,
-    ratatui::layout::{Constraint, Direction},
-};
 use crate::kit::atoms;
 use crate::kit::event_handlers;
 use crate::kit::layout::SessionColumn;
 use crate::kit::setup_wizard::SetupWizard;
 use crate::kit::status_bar::StatusBar;
+use ratatui_kit::{
+    prelude::*,
+    ratatui::layout::{Constraint, Direction},
+};
 
 #[component]
 pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {

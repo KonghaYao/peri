@@ -1,12 +1,12 @@
 //! Welcome Card — 空消息时显示品牌 Logo + 功能提示
 
 use ratatui::{
+    Frame,
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::Paragraph,
-    Frame,
 };
 
 use crate::{app::App, ui::theme};
@@ -150,10 +150,7 @@ pub(crate) fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(theme::DIM),
         ),
         Span::styled("  ", Style::default().fg(theme::DIM)),
-        Span::styled(
-            "Ctrl+T",
-            Style::default().fg(theme::DIM),
-        ),
+        Span::styled("Ctrl+T", Style::default().fg(theme::DIM)),
         Span::styled(
             lc.tr("welcome-shortcut-model"),
             Style::default().fg(theme::DIM),

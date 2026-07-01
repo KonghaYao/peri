@@ -187,11 +187,7 @@ impl App {
                                     .next()
                                     .or_else(|| {
                                         let s = q.custom_input.value().trim().to_string();
-                                        if s.is_empty() {
-                                            None
-                                        } else {
-                                            Some(s)
-                                        }
+                                        if s.is_empty() { None } else { Some(s) }
                                     })
                                     .unwrap_or_default();
                                 serde_json::Value::String(text)

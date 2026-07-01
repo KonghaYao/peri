@@ -7,6 +7,7 @@
 //!
 //! 旧版: panel/panels/plugin.rs (PanelState trait).
 
+use crate::ui::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -17,7 +18,6 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use crate::ui::theme;
 
 // ---------------------------------------------------------------------------
 // Mock plugin data
@@ -127,17 +127,18 @@ fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 format!(" {} ", cursor_mark),
                 Style::new().fg(theme::THINKING),
             ),
-            Span::styled(
-                format!("{:<28}", entry.name),
-                name_style,
-            ),
+            Span::styled(format!("{:<28}", entry.name), name_style),
             Span::styled(
                 format!("v{}  ", entry.version),
                 Style::new().fg(theme::MUTED),
             ),
             Span::styled(status_icon, status_style),
             Span::styled(
-                if entry.enabled { " enabled" } else { " disabled" },
+                if entry.enabled {
+                    " enabled"
+                } else {
+                    " disabled"
+                },
                 status_style,
             ),
         ]));
@@ -145,10 +146,7 @@ fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         // Description line (indented)
         lines.push(Line::from(vec![
             Span::styled("     ", Style::new()),
-            Span::styled(
-                entry.description,
-                Style::new().fg(theme::MUTED),
-            ),
+            Span::styled(entry.description, Style::new().fg(theme::MUTED)),
         ]));
         lines.push(Line::from(""));
     }

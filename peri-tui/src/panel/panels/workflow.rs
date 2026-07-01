@@ -11,18 +11,18 @@
 //! P3 Integration: `from_app()` reads `app.global_ui.workflow_tracker.snapshots()`
 //! and converts snapshot types to panel-local DTOs (WorkflowRunEntry/PhaseEntry/AgentEntry).
 
+use ratatui::Frame;
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use ratatui::Frame;
 use tui_textarea::Input;
 
 use crate::app::panel_types::PanelKind;
+use crate::panel::PanelState;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
-use crate::panel::PanelState;
 use crate::ui::theme;
 
 // ---------------------------------------------------------------------------
@@ -730,13 +730,13 @@ impl WorkflowPanel {
 mod tests {
     use std::collections::HashMap;
 
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use tui_textarea::Key;
 
     use super::*;
-    use crate::panel::read_context::{PanelReadContext, ServiceRegistrySnapshot};
     use crate::panel::PanelState;
+    use crate::panel::read_context::{PanelReadContext, ServiceRegistrySnapshot};
 
     /// Helper: build a minimal `PanelReadContext` for testing.
     fn make_ctx() -> PanelReadContext<'static> {

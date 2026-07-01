@@ -25,10 +25,7 @@ pub struct MentionPopupProps {
 }
 
 #[component]
-pub fn MentionPopup(
-    props: &MentionPopupProps,
-    mut hooks: Hooks,
-) -> impl Into<AnyElement<'static>> {
+pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 当前选中项索引
     let selection = hooks.use_state(|| 0usize);
 
@@ -37,10 +34,7 @@ pub fn MentionPopup(
         .items
         .iter()
         .filter(|item| {
-            props.prefix.is_empty()
-                || item
-                    .to_lowercase()
-                    .contains(&props.prefix.to_lowercase())
+            props.prefix.is_empty() || item.to_lowercase().contains(&props.prefix.to_lowercase())
         })
         .cloned()
         .collect();
@@ -81,9 +75,7 @@ pub fn MentionPopup(
         .enumerate()
         .map(|(i, item)| {
             if i == sel_idx {
-                Line::from(format!("> {}", item))
-                    .fg(theme::THINKING)
-                    .bold()
+                Line::from(format!("> {}", item)).fg(theme::THINKING).bold()
             } else {
                 Line::from(format!("  {}", item)).fg(theme::TEXT)
             }

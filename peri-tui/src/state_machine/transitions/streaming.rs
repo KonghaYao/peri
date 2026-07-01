@@ -727,9 +727,11 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
         );
         assert!(matches!(next, State::Streaming(_)));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, Effect::OpenPanel(PanelKind::Model))));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::OpenPanel(PanelKind::Model)))
+        );
     }
 
     #[test]

@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use agent_client_protocol::{
+    Client, ConnectionTo, Responder,
     schema::{
         ForkSessionRequest, ForkSessionResponse, LoadSessionRequest, LoadSessionResponse,
         NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
         SessionId, SessionNotification,
     },
-    Client, ConnectionTo, Responder,
 };
 use peri_acp::{dispatch, session::state_builders::build_mode_state};
 

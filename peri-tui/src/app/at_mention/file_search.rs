@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
+use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
 /// 文件系统条目
 #[derive(Clone, Debug)]
@@ -53,11 +53,7 @@ pub fn fuzzy_match_entries<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Ent
         .filter_map(|e| {
             let name_str = e.name.to_string_lossy();
             let score = matcher.fuzzy_match(&name_str, query).unwrap_or(0);
-            if score > 0 {
-                Some((e, score))
-            } else {
-                None
-            }
+            if score > 0 { Some((e, score)) } else { None }
         })
         .collect();
 

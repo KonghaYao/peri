@@ -114,12 +114,10 @@ fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             };
 
             // Line 1: cursor + name
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} {} ", cursor_marker, entry.name),
-                    name_style,
-                ),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!(" {} {} ", cursor_marker, entry.name),
+                name_style,
+            )]));
 
             // Line 2: id, time, messages
             lines.push(Line::from(vec![Span::styled(

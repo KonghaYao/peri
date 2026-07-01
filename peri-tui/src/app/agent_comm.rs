@@ -1,7 +1,7 @@
 use peri_agent::{agent::AgentCancellationToken, messages::BaseMessage}; // P4b: type-dependency
 use tokio::sync::mpsc;
 
-use super::{events::AgentEvent, InteractionPrompt};
+use super::{InteractionPrompt, events::AgentEvent};
 use crate::acp_client::AcpNotification;
 
 type SharedToolRegistry = std::sync::Arc<

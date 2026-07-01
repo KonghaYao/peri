@@ -205,9 +205,7 @@ fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Footer hints
     lines.push(Line::from(""));
-    lines.push(
-        Line::from("  ↑↓) Navigate  Esc) Close").fg(theme::DIM),
-    );
+    lines.push(Line::from("  ↑↓) Navigate  Esc) Close").fg(theme::DIM));
 
     let content = if lines.is_empty() {
         Paragraph::new(Line::from("  (empty)").fg(theme::MUTED))

@@ -634,9 +634,9 @@ mod tests {
         }
     }
     use crate::state_machine::PanelState;
+    use ratatui::Frame;
     use ratatui::crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
-    use ratatui::Frame;
 
     /// Test-only panel stub (replaces deleted PanelStateStub).
     #[derive(Debug)]

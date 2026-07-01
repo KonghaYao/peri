@@ -54,10 +54,7 @@ fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Span::styled(
             " Cost ",
             if tab == TAB_COST {
-                Style::new()
-                    .fg(theme::TEXT)
-                    .bg(theme::THINKING)
-                    .bold()
+                Style::new().fg(theme::TEXT).bg(theme::THINKING).bold()
             } else {
                 Style::new().fg(theme::MUTED)
             },
@@ -65,10 +62,7 @@ fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Span::styled(
             " Context ",
             if tab == TAB_CONTEXT {
-                Style::new()
-                    .fg(theme::TEXT)
-                    .bg(theme::THINKING)
-                    .bold()
+                Style::new().fg(theme::TEXT).bg(theme::THINKING).bold()
             } else {
                 Style::new().fg(theme::MUTED)
             },
@@ -80,10 +74,7 @@ fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         TAB_COST => vec![
             Line::from(vec![
                 Span::styled("Provider: ", Style::new().fg(theme::MUTED)),
-                Span::styled(
-                    "Anthropic",
-                    Style::new().fg(theme::TEXT).bold(),
-                ),
+                Span::styled("Anthropic", Style::new().fg(theme::TEXT).bold()),
             ]),
             Line::from(vec![
                 Span::styled("Model: ", Style::new().fg(theme::MUTED)),

@@ -230,9 +230,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let line = if text.is_empty() {
         if !loading {
             // 空输入框：显示闪烁的光标
-            Line::from(vec![
-                Span::styled("\u{258C}", cursor_style),
-            ])
+            Line::from(vec![Span::styled("\u{258C}", cursor_style)])
         } else {
             Line::from("")
         }

@@ -18,8 +18,8 @@ use crate::runtime::event_channel::{EventRx, TuiEvent};
 use crate::state_machine::input::edit::InputEdit;
 use crate::state_machine::state::PanelReadContext;
 use crate::state_machine::{
-    handle as state_machine_handle, input::sync::to_textarea, transitions::modal, Event as SmEvent,
-    IdleState, ModalKind, ModalState, State, StreamingState,
+    Event as SmEvent, IdleState, ModalKind, ModalState, State, StreamingState,
+    handle as state_machine_handle, input::sync::to_textarea, transitions::modal,
 };
 
 /// Target frame interval for loading-spinner animation (~30 FPS).
@@ -1204,7 +1204,7 @@ mod tests {
         // 端到端契约：SwitchSession 进入 Switching → 下一个 ViewCommit 落地
         // → state 变为 Idle 且 view 是新会话的快照（不是旧 saved_view）。
         use crate::state_machine::state::SwitchingState;
-        use crate::state_machine::{handle as state_machine_handle, Event};
+        use crate::state_machine::{Event, handle as state_machine_handle};
         use peri_acp_types::event_data::ViewCommit;
         use peri_acp_types::view_model::{UserBubbleData, ViewModel as AcpViewModel};
 

@@ -1,18 +1,18 @@
 use peri_acp::event::TodoStatusDto;
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Paragraph, Wrap},
-    Frame,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::sticky_header;
 use crate::{
     app::{
-        message_state::{MessageRenderCache, WrappedLineInfo},
         App,
+        message_state::{MessageRenderCache, WrappedLineInfo},
     },
     ui::{theme, welcome},
 };
@@ -349,7 +349,7 @@ fn viewport_clip(
                 return ViewportClip {
                     lines: Vec::new(),
                     local_offset: 0,
-                }
+                };
             }
         };
 

@@ -9,21 +9,21 @@
 //! Data is provided as `Vec<HookDto>` (from `peri-acp-types`), avoiding
 //! direct dependency on `peri_middlewares::hooks` types.
 
+use ratatui::Frame;
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 use tui_textarea::Input;
 
 use peri_acp_types::summary::HookDto;
 use peri_widgets::BorderedPanel;
 
 use crate::app::panel_types::PanelKind;
+use crate::panel::PanelState;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
-use crate::panel::PanelState;
 use crate::ui::theme;
 
 // ---------------------------------------------------------------------------
@@ -386,13 +386,13 @@ impl PanelState for HooksPanel {
 mod tests {
     use std::collections::HashMap;
 
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use tui_textarea::Key;
 
     use super::*;
-    use crate::panel::read_context::{PanelReadContext, ServiceRegistrySnapshot};
     use crate::panel::PanelState;
+    use crate::panel::read_context::{PanelReadContext, ServiceRegistrySnapshot};
 
     /// Helper: build a minimal `PanelReadContext` for testing.
     fn make_ctx() -> PanelReadContext<'static> {

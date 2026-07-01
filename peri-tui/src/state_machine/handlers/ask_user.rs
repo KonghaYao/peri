@@ -216,7 +216,7 @@ impl Handler for AskUserHandler {
         }
         content += 2; // hint + spacer
         content += 2; // border
-                      // AskUser can be tall — cap at 75% of screen.
+        // AskUser can be tall — cap at 75% of screen.
         content.min(screen_height * 3 / 4).max(5)
     }
 

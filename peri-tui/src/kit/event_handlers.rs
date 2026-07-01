@@ -10,17 +10,14 @@ use ratatui_kit::{
 };
 
 use super::atoms::{
-    MODEL_HIGHLIGHT_UNTIL, PROVIDER_HIGHLIGHT_UNTIL,
-    MODE_HIGHLIGHT_UNTIL, AT_MENTION_ACTIVE, SLASH_HINT_ACTIVE,
+    AT_MENTION_ACTIVE, MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL, PROVIDER_HIGHLIGHT_UNTIL,
+    SLASH_HINT_ACTIVE,
 };
 
 /// Global Layer: 不可阻断的快捷键。
 ///
 /// 注册监听 Ctrl+C / Ctrl+O 等顶级快捷键。
-pub fn register_global_handlers(
-    hooks: &mut Hooks,
-    mut exit: Handler<'static, ()>,
-) {
+pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()>) {
     hooks.use_events(move |event| {
         let Event::Key(key) = event else { return };
         if key.kind != KeyEventKind::Press {
@@ -44,9 +41,7 @@ pub fn register_global_handlers(
 /// Root Layer: 可被子层阻断的快捷键。
 ///
 /// 注册 Ctrl+T/M/P/K 轮换、Esc 关闭、Enter 提交等快捷键。
-pub fn register_root_handlers(
-    hooks: &mut Hooks,
-) {
+pub fn register_root_handlers(hooks: &mut Hooks) {
     hooks.use_events(move |event| {
         let Event::Key(key) = event else { return };
         if key.kind != KeyEventKind::Press {
@@ -58,14 +53,12 @@ pub fn register_root_handlers(
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     // Ctrl+Shift+T: cycle provider
-                    *PROVIDER_HIGHLIGHT_UNTIL.get().unwrap().write() = Some(
-                        std::time::Instant::now() + std::time::Duration::from_secs(2),
-                    );
+                    *PROVIDER_HIGHLIGHT_UNTIL.get().unwrap().write() =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                 } else {
                     // Ctrl+T: cycle model
-                    *MODEL_HIGHLIGHT_UNTIL.get().unwrap().write() = Some(
-                        std::time::Instant::now() + std::time::Duration::from_secs(2),
-                    );
+                    *MODEL_HIGHLIGHT_UNTIL.get().unwrap().write() =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                 }
             }
 
@@ -76,9 +69,8 @@ pub fn register_root_handlers(
 
             // Ctrl+K: cycle permission mode
             KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                *MODE_HIGHLIGHT_UNTIL.get().unwrap().write() = Some(
-                    std::time::Instant::now() + std::time::Duration::from_secs(2),
-                );
+                *MODE_HIGHLIGHT_UNTIL.get().unwrap().write() =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
             }
 
             // Esc: 关闭 popup / @mention / slash_hint

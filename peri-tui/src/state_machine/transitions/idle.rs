@@ -851,9 +851,11 @@ mod tests {
             state,
             Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
         );
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, Effect::OpenPanel(PanelKind::Model))));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::OpenPanel(PanelKind::Model)))
+        );
         assert!(effects.iter().any(|e| matches!(e, Effect::Render)));
     }
 

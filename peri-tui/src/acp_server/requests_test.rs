@@ -5,7 +5,7 @@ use peri_acp::provider::{PeriConfig, ProviderConfig, ProviderModels};
 use peri_acp::transport::types::{AcpError, IncomingMessage, RequestId};
 use peri_agent::thread::FilesystemThreadStore;
 use peri_middlewares::hitl::shared_mode::{PermissionMode, SharedPermissionMode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::*;
 use crate::app::agent::LlmProvider;

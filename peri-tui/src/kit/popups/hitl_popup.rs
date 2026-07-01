@@ -72,18 +72,13 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 参数行
     for (key, val) in &approval.params {
-        lines.push(
-            Line::from(format!("    {} = {}", key, val)).fg(theme::TEXT),
-        );
+        lines.push(Line::from(format!("    {} = {}", key, val)).fg(theme::TEXT));
     }
     lines.push(Line::from(""));
 
     // 底部操作提示
     lines.push(Line::from(""));
-    lines.push(
-        Line::from("  Enter: approve  |  Esc: reject")
-            .fg(theme::DIM),
-    );
+    lines.push(Line::from("  Enter: approve  |  Esc: reject").fg(theme::DIM));
 
     let text_render = Paragraph::new(ratatui::text::Text::from(lines));
 

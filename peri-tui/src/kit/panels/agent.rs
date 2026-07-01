@@ -6,6 +6,7 @@
 //!
 //! 旧版: panel/panels/agent.rs (PanelState trait, agent selection).
 
+use crate::ui::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -16,7 +17,6 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use crate::ui::theme;
 
 /// Mock agent session info row.
 #[allow(dead_code)]
@@ -116,20 +116,18 @@ fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         };
 
         lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", cursor_mark), Style::new().fg(theme::THINKING)),
             Span::styled(
-                format!("{:<18}", format!("{}:", row.label)),
-                label_style,
+                format!(" {} ", cursor_mark),
+                Style::new().fg(theme::THINKING),
             ),
+            Span::styled(format!("{:<18}", format!("{}:", row.label)), label_style),
             Span::styled(row.value, value_style),
         ]));
     }
 
     // Footer
     lines.push(Line::from(""));
-    lines.push(
-        Line::from("  j/k) Navigate  q) Close").fg(theme::DIM),
-    );
+    lines.push(Line::from("  j/k) Navigate  q) Close").fg(theme::DIM));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 

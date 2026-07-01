@@ -1,5 +1,5 @@
 use crate::{
-    app::{agent, App, PanelKind},
+    app::{App, PanelKind, agent},
     command::Command,
     runtime::effect::Effect,
 };

@@ -85,9 +85,7 @@ fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     // Hint line
-    lines.push(
-        Line::from("  Changes take effect in new sessions").fg(theme::MUTED),
-    );
+    lines.push(Line::from("  Changes take effect in new sessions").fg(theme::MUTED));
     lines.push(Line::from(""));
 
     for (i, entry) in BETA_ENTRIES.iter().enumerate() {
@@ -123,10 +121,7 @@ fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Footer hints
     lines.push(Line::from(""));
-    lines.push(
-        Line::from("  Space) Toggle  Esc) Close")
-            .fg(theme::DIM),
-    );
+    lines.push(Line::from("  Space) Toggle  Esc) Close").fg(theme::DIM));
 
     let content = if lines.is_empty() {
         Paragraph::new(Line::from("  (empty)").fg(theme::MUTED))

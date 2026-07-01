@@ -80,7 +80,8 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             *s = (*s + 1) % change_count;
                         }
                     }
-                    (KeyModifiers::SHIFT, KeyCode::BackTab) | (KeyModifiers::NONE, KeyCode::BackTab) => {
+                    (KeyModifiers::SHIFT, KeyCode::BackTab)
+                    | (KeyModifiers::NONE, KeyCode::BackTab) => {
                         let mut s = sel.write();
                         *s = s.checked_sub(1).unwrap_or(change_count - 1);
                     }
@@ -119,19 +120,10 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     .fg(theme::THINKING)
                     .bold(),
             );
-            lines.push(
-                Line::from(format!("  └ {}", status_str))
-                    .fg(status_color),
-            );
+            lines.push(Line::from(format!("  └ {}", status_str)).fg(status_color));
         } else {
-            lines.push(
-                Line::from(format!("{}{}", prefix, change.path))
-                    .fg(theme::TEXT),
-            );
-            lines.push(
-                Line::from(format!("  └ {}", status_str))
-                    .fg(theme::MUTED),
-            );
+            lines.push(Line::from(format!("{}{}", prefix, change.path)).fg(theme::TEXT));
+            lines.push(Line::from(format!("  └ {}", status_str)).fg(theme::MUTED));
         }
 
         lines.push(Line::from(""));

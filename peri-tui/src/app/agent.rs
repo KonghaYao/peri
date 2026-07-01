@@ -4,8 +4,8 @@
 
 use peri_acp::event::AcpEvent;
 
-pub use super::provider::LlmProvider;
 use super::AgentEvent;
+pub use super::provider::LlmProvider;
 
 /// 将 AcpEvent DTO 映射为 TUI AgentEvent。
 ///

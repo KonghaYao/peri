@@ -5,8 +5,8 @@
 //!
 //! 类型别名：pub type Atom<T> = StoreState<T>（保持与设计文档一致的命名）。
 
-use ratatui_kit::prelude::StoreState;
 use peri_acp_types::view_model::ViewModel;
+use ratatui_kit::prelude::StoreState;
 use std::sync::OnceLock;
 use std::time::Instant;
 

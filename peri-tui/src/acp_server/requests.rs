@@ -9,17 +9,17 @@ use agent_client_protocol::schema::{
     NewSessionResponse, ResumeSessionResponse, SessionId, SessionInfo, SessionNotification,
     SetSessionConfigOptionResponse, SetSessionModeResponse,
 };
-use peri_acp::dispatch::config_update::make_config_options;
 use peri_acp::dispatch::ReplaySender;
+use peri_acp::dispatch::config_update::make_config_options;
 use peri_acp::{dispatch, transport::types::AcpError};
 use peri_agent::thread::ThreadMeta;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use super::{
-    apply_thinking_effort, build_mode_state,
+    AcpServerConfig, SessionState, apply_thinking_effort, build_mode_state,
     notify::{extract_session_id, send_available_commands_update, send_config_option_update},
-    parse_permission_mode, AcpServerConfig, SessionState,
+    parse_permission_mode,
 };
 use crate::{app::agent::LlmProvider, config::save_to};
 

@@ -1,8 +1,8 @@
 use std::num::NonZeroU32;
 
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Nonce,
+    aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 use ring::pbkdf2::{self, PBKDF2_HMAC_SHA256};
 

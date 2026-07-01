@@ -6,6 +6,7 @@
 //!
 //! 旧版: panel/panels/login.rs (PanelState trait).
 
+use crate::ui::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -16,7 +17,6 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use crate::ui::theme;
 
 // ---------------------------------------------------------------------------
 // Mock provider data
@@ -33,11 +33,7 @@ struct ProviderEntry {
 /// Return the display name of a provider (Phase 8: tr("unnamed")).
 #[allow(dead_code)]
 fn display_name(name: &str) -> &str {
-    if name.is_empty() {
-        "Unnamed"
-    } else {
-        name
-    }
+    if name.is_empty() { "Unnamed" } else { name }
 }
 
 /// Mask an API key for display: keep first 4 and last 4 chars.
@@ -223,14 +219,8 @@ fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         format!(" {} ", cursor_mark),
                         Style::new().fg(theme::THINKING),
                     ),
-                    Span::styled(
-                        format!("{} ", bullet),
-                        row_style,
-                    ),
-                    Span::styled(
-                        format!("{} ", display_name(p.name)),
-                        row_style.bold(),
-                    ),
+                    Span::styled(format!("{} ", bullet), row_style),
+                    Span::styled(format!("{} ", display_name(p.name)), row_style.bold()),
                     Span::styled(
                         format!("({})", p.provider_type),
                         Style::new().fg(theme::MUTED),
@@ -240,30 +230,22 @@ fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 // Sub-row: API key
                 let masked = mask_api_key(p.api_key);
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        "       api_key: ",
-                        Style::new().fg(theme::MUTED).bold(),
-                    ),
-                    Span::styled(
-                        masked,
-                        Style::new().fg(theme::MUTED),
-                    ),
+                    Span::styled("       api_key: ", Style::new().fg(theme::MUTED).bold()),
+                    Span::styled(masked, Style::new().fg(theme::MUTED)),
                 ]));
             }
 
             if PROVIDERS.is_empty() {
                 lines.push(Line::from(""));
                 lines.push(
-                    Line::from("  No providers configured. Press 'n' to add one.")
-                        .fg(theme::MUTED),
+                    Line::from("  No providers configured. Press 'n' to add one.").fg(theme::MUTED),
                 );
             }
 
             // Footer hints
             lines.push(Line::from(""));
             lines.push(
-                Line::from("  e/Enter) Edit  n) New  d) Delete  q/Esc) Close")
-                    .fg(theme::DIM),
+                Line::from("  e/Enter) Edit  n) New  d) Delete  q/Esc) Close").fg(theme::DIM),
             );
         }
 
@@ -288,10 +270,7 @@ fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let masked = mask_api_key(&edit_buf);
             lines.push(Line::from(vec![
                 Span::styled("  API Key: ", Style::new().fg(theme::THINKING).bold()),
-                Span::styled(
-                    format!("{}|", masked),
-                    Style::new().fg(theme::TEXT),
-                ),
+                Span::styled(format!("{}|", masked), Style::new().fg(theme::TEXT)),
                 Span::styled(" (editing)", Style::new().fg(theme::MUTED)),
             ]));
 
@@ -303,19 +282,18 @@ fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
             // Footer hints
             lines.push(Line::from(""));
-            lines.push(
-                Line::from("  Enter) Save  Esc/q) Cancel")
-                    .fg(theme::DIM),
-            );
+            lines.push(Line::from("  Enter) Save  Esc/q) Cancel").fg(theme::DIM));
         }
 
         Mode::New => {
-            lines.push(Line::from(vec![
-                Span::styled("  New Provider", Style::new().fg(theme::THINKING).bold()),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("  Type: openai (default)", Style::new().fg(theme::MUTED)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                "  New Provider",
+                Style::new().fg(theme::THINKING).bold(),
+            )]));
+            lines.push(Line::from(vec![Span::styled(
+                "  Type: openai (default)",
+                Style::new().fg(theme::MUTED),
+            )]));
             lines.push(Line::from(""));
 
             // API Key edit field
@@ -326,10 +304,7 @@ fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             };
             lines.push(Line::from(vec![
                 Span::styled("  API Key: ", Style::new().fg(theme::THINKING).bold()),
-                Span::styled(
-                    format!("{}|", masked),
-                    Style::new().fg(theme::TEXT),
-                ),
+                Span::styled(format!("{}|", masked), Style::new().fg(theme::TEXT)),
                 Span::styled(" (editing)", Style::new().fg(theme::MUTED)),
             ]));
 
@@ -341,10 +316,7 @@ fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
             // Footer hints
             lines.push(Line::from(""));
-            lines.push(
-                Line::from("  Enter) Save  Esc/q) Cancel")
-                    .fg(theme::DIM),
-            );
+            lines.push(Line::from("  Enter) Save  Esc/q) Cancel").fg(theme::DIM));
         }
 
         Mode::ConfirmDelete => {
@@ -364,14 +336,8 @@ fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         format!(" {} ", cursor_mark),
                         Style::new().fg(theme::THINKING),
                     ),
-                    Span::styled(
-                        format!("{} ", bullet),
-                        row_style,
-                    ),
-                    Span::styled(
-                        display_name(p.name).to_string(),
-                        row_style.bold(),
-                    ),
+                    Span::styled(format!("{} ", bullet), row_style),
+                    Span::styled(display_name(p.name).to_string(), row_style.bold()),
                 ]));
             }
 
@@ -380,20 +346,14 @@ fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 lines.push(Line::from(""));
                 lines.push(Line::from(vec![
                     Span::styled("  Delete ", Style::new().fg(theme::TEXT)),
-                    Span::styled(
-                        display_name(p.name),
-                        Style::new().fg(theme::ERROR).bold(),
-                    ),
+                    Span::styled(display_name(p.name), Style::new().fg(theme::ERROR).bold()),
                     Span::styled("? (y/n)", Style::new().fg(theme::TEXT)),
                 ]));
             }
 
             // Footer hints
             lines.push(Line::from(""));
-            lines.push(
-                Line::from("  y) Confirm  n/Esc) Cancel")
-                    .fg(theme::DIM),
-            );
+            lines.push(Line::from("  y) Confirm  n/Esc) Cancel").fg(theme::DIM));
         }
     }
 

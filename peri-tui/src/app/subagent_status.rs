@@ -277,11 +277,7 @@ impl SubAgentStatusMap {
                         } else {
                             false
                         };
-                        if prefer_new {
-                            (k, s)
-                        } else {
-                            (prev_k, prev)
-                        }
+                        if prefer_new { (k, s) } else { (prev_k, prev) }
                     }
                 });
             }

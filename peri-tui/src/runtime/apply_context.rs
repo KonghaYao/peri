@@ -86,8 +86,8 @@ impl<'a> ApplyContext<'a> {
                             "SendToAcp: request succeeded"
                         );
                         let _ = response; // Response is consumed by ACP protocol;
-                                          // TUI does not process RPC responses
-                                          // (all data arrives via notifications).
+                        // TUI does not process RPC responses
+                        // (all data arrives via notifications).
                     }
                     Err(e) => {
                         warn!(

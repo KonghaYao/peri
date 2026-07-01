@@ -1,11 +1,11 @@
 //! 会话配置：set_mode / set_config_option / update_config。
 
 use agent_client_protocol::{
+    Client, ConnectionTo, Error, Handled, Responder, UntypedMessage,
     schema::{
         SessionId, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
         SetSessionModeRequest, SetSessionModeResponse,
     },
-    Client, ConnectionTo, Error, Handled, Responder, UntypedMessage,
 };
 use peri_acp::session::state_builders::{apply_thinking_effort, parse_permission_mode};
 use peri_tui::app::agent::LlmProvider;

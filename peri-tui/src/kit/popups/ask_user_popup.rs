@@ -66,7 +66,8 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         let mut f = focused.write();
                         *f = (*f + 1) % question_count;
                     }
-                    (KeyModifiers::SHIFT, KeyCode::BackTab) | (KeyModifiers::NONE, KeyCode::BackTab) => {
+                    (KeyModifiers::SHIFT, KeyCode::BackTab)
+                    | (KeyModifiers::NONE, KeyCode::BackTab) => {
                         let mut f = focused.write();
                         *f = f.checked_sub(1).unwrap_or(question_count - 1);
                     }
@@ -102,7 +103,9 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             vec![
                 // 问题行
                 if is_focused {
-                    Line::from(format!("> {}", q.question)).fg(theme::THINKING).bold()
+                    Line::from(format!("> {}", q.question))
+                        .fg(theme::THINKING)
+                        .bold()
                 } else {
                     Line::from(format!("  {}", q.question)).fg(theme::TEXT)
                 },
@@ -125,8 +128,8 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .collect();
 
     // 底部提示
-    let footer = Line::from(" Tab: next | Shift+Tab: prev | Enter: submit | Esc: cancel ")
-        .fg(theme::DIM);
+    let footer =
+        Line::from(" Tab: next | Shift+Tab: prev | Enter: submit | Esc: cancel ").fg(theme::DIM);
 
     let mut all_lines = display_lines;
     all_lines.push(footer);

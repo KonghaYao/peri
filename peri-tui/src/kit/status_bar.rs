@@ -1,6 +1,7 @@
 //! ratatui-kit StatusBar component.
 
-use std::time::Instant;
+use crate::kit::atoms;
+use crate::ui::theme;
 use ratatui_kit::{
     prelude::*,
     ratatui::{
@@ -10,8 +11,7 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use crate::kit::atoms;
-use crate::ui::theme;
+use std::time::Instant;
 
 /// 状态栏第 1 行：名称/model/provider/权限/MEM/上下文使用率
 #[component]
@@ -54,7 +54,8 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     } else if is_at || is_slash {
         Line::from(" Esc: close | Tab: navigate | Enter: select ").fg(theme::MUTED)
     } else {
-        Line::from(" /: commands | Shift+Enter: newline | Ctrl+T: model | Ctrl+O: diff ").fg(theme::MUTED)
+        Line::from(" /: commands | Shift+Enter: newline | Ctrl+T: model | Ctrl+O: diff ")
+            .fg(theme::MUTED)
     };
 
     element!(

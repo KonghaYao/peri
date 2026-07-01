@@ -4,20 +4,20 @@
 //! "No Agent" sentinel entry. The user navigates with arrow keys, selects with
 //! Enter, and closes with Esc.
 
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::Frame;
 use tui_textarea::Input;
 
 use peri_widgets::{BorderedPanel, ScrollState, ScrollableArea};
 
 use crate::app::panel_types::PanelKind;
 use crate::command::panel::AgentItem;
+use crate::panel::PanelState;
 use crate::panel::effect::PanelEffect;
 use crate::panel::read_context::PanelReadContext;
-use crate::panel::PanelState;
 use crate::ui::theme;
 
 // ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ impl AgentPanel {
     /// active agent_id (highlighted in the list).
     pub fn new(agents: Vec<AgentItem>, current_id: Option<String>) -> Self {
         let total = 1 + agents.len(); // +1 for "No Agent" sentinel
-                                      // Position cursor on the currently active agent
+        // Position cursor on the currently active agent
         let cursor = current_id
             .as_ref()
             .and_then(|id| agents.iter().position(|a| &a.id == id))
@@ -403,14 +403,14 @@ impl PanelState for AgentPanel {
 mod tests {
     use std::collections::HashMap;
 
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use tui_textarea::Key;
 
     use super::*;
     use crate::command::panel::AgentItem;
-    use crate::panel::read_context::{PanelReadContext, ServiceRegistrySnapshot};
     use crate::panel::PanelState;
+    use crate::panel::read_context::{PanelReadContext, ServiceRegistrySnapshot};
 
     /// Helper: build a minimal `PanelReadContext` for testing.
     fn make_ctx() -> PanelReadContext<'static> {

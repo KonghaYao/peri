@@ -2,9 +2,9 @@
 //!
 //! 由 main.rs 在 #[cfg(feature = "use-kit")] 条件下调用。
 
-use ratatui_kit::prelude::*;
 use crate::kit::app_shell::AppShell;
 use crate::kit::atoms;
+use ratatui_kit::prelude::*;
 
 /// 使用 ratatui-kit 的全屏模式启动 TUI。
 ///

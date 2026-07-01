@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex};
 
 use peri_acp::event::AcpEvent;
 use peri_acp::transport::{
+    AcpTransport,
     mpsc::MpscClientTransport,
     types::{AcpError, IncomingMessage, RequestId},
-    AcpTransport,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
@@ -129,7 +129,9 @@ impl AcpTuiClient {
                         } else if let Some(event_value) = params.get("event") {
                             serde_json::from_value::<AcpEvent>(event_value.clone())
                         } else {
-                            warn!("ACP client pump: agent_event notification missing 'event_json' or 'event' field");
+                            warn!(
+                                "ACP client pump: agent_event notification missing 'event_json' or 'event' field"
+                            );
                             continue;
                         };
                         match event_result {

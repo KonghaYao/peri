@@ -18,9 +18,9 @@ pub use effect::PanelEffect;
 pub use read_context::{PanelReadContext, ServiceRegistrySnapshot};
 pub use registry::create_panel;
 
+use ratatui::Frame;
 use ratatui::crossterm::event::MouseEvent;
 use ratatui::layout::Rect;
-use ratatui::Frame;
 use tui_textarea::Input;
 
 use crate::app::panel_types::PanelKind;

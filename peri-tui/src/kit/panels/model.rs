@@ -7,6 +7,7 @@
 //!
 //! 旧版: panel/panels/model.rs (PanelState trait).
 
+use crate::ui::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -17,7 +18,6 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use crate::ui::theme;
 
 // ---------------------------------------------------------------------------
 // Mock model data
@@ -177,10 +177,7 @@ fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     ]));
     lines.push(Line::from(vec![
         Span::styled("  Effort: ", Style::new().fg(theme::MUTED)),
-        Span::styled(
-            active_entry.effort,
-            Style::new().fg(theme::WARNING).bold(),
-        ),
+        Span::styled(active_entry.effort, Style::new().fg(theme::WARNING).bold()),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  Max Tokens: ", Style::new().fg(theme::MUTED)),
@@ -203,9 +200,7 @@ fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Footer
     lines.push(Line::from(""));
-    lines.push(
-        Line::from("  j/k) Nav  Enter) Select  ←/→) Switch  q) Close").fg(theme::DIM),
-    );
+    lines.push(Line::from("  j/k) Nav  Enter) Select  ←/→) Switch  q) Close").fg(theme::DIM));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 

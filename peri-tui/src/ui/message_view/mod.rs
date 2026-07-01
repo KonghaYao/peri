@@ -12,7 +12,7 @@ mod tools;
 mod utils;
 
 pub use aggregate::{aggregate_batch_groups, aggregate_tail_tool_groups, aggregate_tool_groups};
-pub use tools::{tool_color, AgentSummary, ToolCategory, ToolEntry};
+pub use tools::{AgentSummary, ToolCategory, ToolEntry, tool_color};
 
 /// 渲染层的视图模型，从 BaseMessage/AgentEvent 转换而来
 #[derive(Debug, Clone)]

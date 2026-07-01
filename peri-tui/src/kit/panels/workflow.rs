@@ -142,14 +142,8 @@ fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
             // Line 1: cursor + name + status badge
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} {} ", cursor_marker, entry.name),
-                    name_style,
-                ),
-                Span::styled(
-                    format!("[{}]", entry.status.label()),
-                    status_style,
-                ),
+                Span::styled(format!(" {} {} ", cursor_marker, entry.name), name_style),
+                Span::styled(format!("[{}]", entry.status.label()), status_style),
             ]));
 
             // Line 2: agents, tool calls, time range

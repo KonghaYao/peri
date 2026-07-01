@@ -45,14 +45,8 @@ impl Command for HelpCommand {
         // 全局快捷键提示
         lines.push("".to_string());
         lines.push(
-            lc.tr_args(
-                "help-shortcuts",
-                &[(
-                    "model_key".into(),
-                    "Ctrl+T".into(),
-                )],
-            )
-            .to_string(),
+            lc.tr_args("help-shortcuts", &[("model_key".into(), "Ctrl+T".into())])
+                .to_string(),
         );
 
         vec![Effect::ShowNotification(lines.join("\n"))]

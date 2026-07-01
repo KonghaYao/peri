@@ -26,15 +26,12 @@
 
 use anyhow::Result;
 use ratatui::{
+    Terminal,
     backend::TestBackend,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
-    Terminal,
 };
 
-use crate::{
-    app::App,
-    ui::main_ui,
-};
+use crate::{app::App, ui::main_ui};
 
 /// Headless 测试句柄，包含 TestBackend Terminal
 /// P5: render_notify removed — sync rendering from state machine
@@ -160,12 +157,18 @@ impl HeadlessHandle {
         let input = Input::from(KeyEvent::new(code, modifiers));
         let textarea = &mut app.session_mgr.current_mut().ui.textarea;
         match input {
-            Input { key: tui_textarea::Key::Enter, .. } => {
+            Input {
+                key: tui_textarea::Key::Enter,
+                ..
+            } => {
                 let text: String = textarea.lines().join("\n");
                 textarea.delete_str(textarea.lines().len());
                 app.submit_message(text);
             }
-            Input { key: tui_textarea::Key::Esc, .. } => {
+            Input {
+                key: tui_textarea::Key::Esc,
+                ..
+            } => {
                 textarea.delete_str(textarea.lines().len());
             }
             _ => {

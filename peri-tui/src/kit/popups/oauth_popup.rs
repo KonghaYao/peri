@@ -74,9 +74,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     );
     lines.push(Line::from(""));
     // 提示文字
-    lines.push(
-        Line::from(format!("  {}", oauth.hint)).fg(theme::TEXT),
-    );
+    lines.push(Line::from(format!("  {}", oauth.hint)).fg(theme::TEXT));
     lines.push(Line::from(""));
     // URL（截断显示）
     let truncated_url = if oauth.auth_url.len() > 44 {
@@ -84,26 +82,19 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     } else {
         oauth.auth_url.to_string()
     };
-    lines.push(
-        Line::from(format!("  {}", truncated_url)).fg(theme::MUTED),
-    );
+    lines.push(Line::from(format!("  {}", truncated_url)).fg(theme::MUTED));
     lines.push(Line::from(""));
     // 输入区域
     if current_code.is_empty() {
-        lines.push(
-            Line::from("  [paste authorization code here]").fg(theme::DIM),
-        );
+        lines.push(Line::from("  [paste authorization code here]").fg(theme::DIM));
     } else {
         let masked: String = current_code.chars().map(|_| '*').collect();
-        lines.push(
-            Line::from(format!("  [ {} ]", masked)).fg(theme::SAGE),
-        );
+        lines.push(Line::from(format!("  [ {} ]", masked)).fg(theme::SAGE));
     }
 
     lines.push(Line::from(""));
     lines.push(
-        Line::from("  Ctrl+O: open browser  |  Enter: submit  |  Esc: cancel")
-            .fg(theme::DIM),
+        Line::from("  Ctrl+O: open browser  |  Enter: submit  |  Esc: cancel").fg(theme::DIM),
     );
 
     let text_render = Paragraph::new(ratatui::text::Text::from(lines));

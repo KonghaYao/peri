@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use agent_client_protocol::{
-    schema::{PromptRequest, PromptResponse, StopReason},
     Client, ConnectionTo, Responder,
+    schema::{PromptRequest, PromptResponse, StopReason},
 };
 use peri_agent::{
     agent::AgentCancellationToken, messages::ContentBlock as PeriContentBlock,

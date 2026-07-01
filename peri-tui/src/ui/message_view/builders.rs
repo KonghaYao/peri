@@ -3,8 +3,8 @@
 use crate::ui::markdown::parse_markdown_default;
 use crate::ui::theme;
 
-use super::tool_color;
 use super::MessageViewModel;
+use super::tool_color;
 
 impl MessageViewModel {
     /// 创建用户消息

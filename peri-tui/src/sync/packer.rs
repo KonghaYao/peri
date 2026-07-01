@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use crate::sync::{crypto, protocol::SyncPackage};
 
@@ -64,7 +64,7 @@ pub fn pack(sync_pkg: &SyncPackage, pair_code: &str) -> Result<PackedData> {
 ///
 /// 用于 transfer_complete 完整性验证
 pub fn compute_checksum(data: &[u8]) -> String {
-    use ring::digest::{digest, SHA256};
+    use ring::digest::{SHA256, digest};
     let d = digest(&SHA256, data);
     d.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
 }
