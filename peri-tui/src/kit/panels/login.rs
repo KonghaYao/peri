@@ -92,7 +92,7 @@ enum Mode {
 // ---------------------------------------------------------------------------
 
 #[component]
-fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
     let mode = hooks.use_state(|| Mode::Browse);
     let edit_buffer = hooks.use_state(String::new);

@@ -3393,6 +3393,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "serial_test",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.18",

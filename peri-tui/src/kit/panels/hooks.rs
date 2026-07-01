@@ -95,7 +95,7 @@ fn event_description(event: &str) -> &'static str {
 }
 
 #[component]
-fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected = hooks.use_state(|| 0usize);
 
     hooks.use_local_events({

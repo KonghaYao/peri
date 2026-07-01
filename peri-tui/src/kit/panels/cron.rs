@@ -1,10 +1,8 @@
 //! ratatui-kit CronPanel component.
 //!
-//! Phase 6a: cron task list with cursor navigation, toggle, and delete
-//! (use_state + use_local_events). Mock data; Phase 8 通过 Atom/props 注入真实
-//! cron 任务列表。
-//!
-//! 旧版: panel/panels/cron.rs (PanelState trait, CronTaskDto-based).
+//! S6c：cron 任务列表从 `CRON_JOBS` atom 读取（由 `service_snapshot` 后台任务
+//! 周期性从 ServiceRegistry.cron_scheduler 派生）。toggle/delete 操作 S11 解耦后
+//! 通过 AcpClient 触发（暂留 TODO）。
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -17,49 +15,24 @@ use ratatui_kit::{
     },
 };
 
+use crate::kit::atoms::{CRON_JOBS, CronJobSummary};
 use crate::ui::theme;
 
-/// Mock cron entry (Phase 8: injected via Atom from CronTaskDto).
-#[allow(dead_code)]
-struct CronEntry {
-    schedule: &'static str,
-    prompt: &'static str,
-    enabled: bool,
-}
-
-#[allow(dead_code)]
-const CRON_ENTRIES: &[CronEntry] = &[
-    CronEntry {
-        schedule: "*/5 * * * *",
-        prompt: "Check deploy status and report",
-        enabled: true,
-    },
-    CronEntry {
-        schedule: "0 * * * *",
-        prompt: "Hourly health check",
-        enabled: true,
-    },
-    CronEntry {
-        schedule: "0 0 * * *",
-        prompt: "Daily backup rotation",
-        enabled: false,
-    },
-    CronEntry {
-        schedule: "0 9 * * 1",
-        prompt: "Weekly summary report",
-        enabled: true,
-    },
-];
-
 #[component]
-fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected = hooks.use_state(|| 0usize);
     let confirm_delete = hooks.use_state(|| false);
+
+    // S6c: 订阅 CRON_JOBS atom——后台 service_snapshot 2s 派生一次
+    let jobs_store = hooks.use_store(*CRON_JOBS.get().unwrap());
+    let jobs: Vec<CronJobSummary> = jobs_store.read().clone();
+    let _ = jobs_store; // StoreState 是 Copy，无需显式 drop
+    let count = jobs.len();
 
     hooks.use_local_events({
         let selected = selected;
         let confirm_delete = confirm_delete;
-        let count = CRON_ENTRIES.len();
+        let count = count;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
@@ -70,14 +43,13 @@ fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if *confirm_delete.read() {
                     match key.code {
                         KeyCode::Enter => {
-                            // TODO Phase 8: emit SendToAcp delete_cron_task
+                            // S11 TODO: 通过 AcpClient 删除 cron 任务
                             *confirm_delete.write() = false;
                         }
                         KeyCode::Esc => {
                             *confirm_delete.write() = false;
                         }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            // Ctrl+C: don't consume, let upper layers handle
                             return;
                         }
                         _ => {
@@ -89,7 +61,7 @@ fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        // TODO Phase 8: close panel via use_input_layer
+                        // 由 PanelOverlay 上层 Esc 处理关闭
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         let mut s = selected.write();
@@ -102,15 +74,14 @@ fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     KeyCode::Enter | KeyCode::Char(' ') => {
-                        // TODO Phase 8: emit SendToAcp toggle_cron_task
+                        // S11 TODO: 通过 AcpClient 切换 cron 任务启用状态
                     }
                     KeyCode::Char('d') => {
-                        if !CRON_ENTRIES.is_empty() {
+                        if count > 0 {
                             *confirm_delete.write() = true;
                         }
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        // Ctrl+C: don't consume
                         return;
                     }
                     _ => {}
@@ -121,17 +92,13 @@ fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let sel = *selected.read();
     let is_confirming = *confirm_delete.read();
-    let enabled_count = CRON_ENTRIES.iter().filter(|e| e.enabled).count();
+    let enabled_count = jobs.iter().filter(|e| e.enabled).count();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     // Stats line
-    if !CRON_ENTRIES.is_empty() {
+    if !jobs.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            format!(
-                "  {} configured, {} enabled",
-                CRON_ENTRIES.len(),
-                enabled_count
-            ),
+            format!("  {} configured, {} enabled", jobs.len(), enabled_count),
             Style::new().fg(theme::TEXT).bold(),
         )]));
     }
@@ -151,7 +118,7 @@ fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     lines.push(Line::from(""));
 
     // Task list
-    if CRON_ENTRIES.is_empty() {
+    if jobs.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "  No cron tasks configured",
             Style::new().fg(theme::MUTED),
@@ -161,7 +128,7 @@ fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme::MUTED),
         )]));
     } else {
-        for (i, entry) in CRON_ENTRIES.iter().enumerate() {
+        for (i, entry) in jobs.iter().enumerate() {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
@@ -179,7 +146,7 @@ fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Label line: cursor + num + schedule + [ON/OFF]
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!(" {} {}. {} ", cursor, i + 1, entry.schedule),
+                    format!(" {} {}. {} ", cursor, i + 1, entry.expression),
                     name_style,
                 ),
                 Span::styled(format!("[{}]", enabled_label), enabled_style),
@@ -200,6 +167,14 @@ fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 format!("     {}", prompt_summary),
                 Style::new().fg(theme::TEXT),
             )]));
+
+            // Next fire timestamp (if available)
+            if let Some(next) = entry.next_fire {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("     next: {}", next.format("%Y-%m-%d %H:%M")),
+                    Style::new().fg(theme::MUTED),
+                )]));
+            }
         }
     }
 

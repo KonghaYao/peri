@@ -87,7 +87,7 @@ const WORKFLOW_ENTRIES: &[WorkflowEntry] = &[
 ];
 
 #[component]
-fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
 
     hooks.use_local_events({

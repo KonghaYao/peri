@@ -69,7 +69,7 @@ const ROW_MODEL: usize = 6;
 const ROW_PROVIDER: usize = 7;
 
 #[component]
-fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
     // Toggle states (default: YOLO=OFF, AutoCompact=ON, ShowDiff=ON)
     let yolo = hooks.use_state(|| false);

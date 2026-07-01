@@ -49,7 +49,7 @@ const BETA_ENTRIES: &[BetaEntry] = &[
 ];
 
 #[component]
-fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected = hooks.use_state(|| 0usize);
 
     hooks.use_local_events({

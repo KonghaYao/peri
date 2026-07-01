@@ -16,6 +16,8 @@ pub mod input_area;
 pub mod layout;
 pub mod mention_popup;
 pub mod message_area;
+pub mod panel_overlay;
+pub mod panel_registry;
 pub mod panels;
 pub mod popups;
 pub mod service_snapshot;

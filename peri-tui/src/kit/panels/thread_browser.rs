@@ -1,9 +1,8 @@
 //! ratatui-kit ThreadBrowserPanel component.
 //!
-//! Phase 6b 第2批: session list with cursor navigation (use_state + use_local_events).
-//! Mock data; Phase 8 通过 Atom/props 注入真实 session 列表。
-//!
-//! 旧版: panel/panels/thread_browser.rs (PanelState trait, ThreadMeta-based).
+//! S6c：thread 列表从 `THREAD_LIST` atom 读取（由 `service_snapshot` 后台任务
+//! 周期性从 ServiceRegistry.thread_store 派生）。Enter 切换 thread 操作 S11
+//! 解耦后通过 AcpClient 触发（暂留 TODO）。
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -15,58 +14,22 @@ use ratatui_kit::{
     },
 };
 
+use crate::kit::atoms::{THREAD_LIST, ThreadSummary};
 use crate::ui::theme;
 
-/// Mock session entry.
-#[allow(dead_code)]
-struct SessionEntry {
-    id: &'static str,
-    name: &'static str,
-    time: &'static str,
-    messages: u32,
-}
-
-#[allow(dead_code)]
-const SESSION_ENTRIES: &[SessionEntry] = &[
-    SessionEntry {
-        id: "session-a3f2d1c0",
-        name: "Refactor panel system",
-        time: "2026-07-01 15:42",
-        messages: 34,
-    },
-    SessionEntry {
-        id: "session-b1c4e5d2",
-        name: "Fix memory leak in executor",
-        time: "2026-06-30 09:18",
-        messages: 52,
-    },
-    SessionEntry {
-        id: "session-d5e6f7a8",
-        name: "Add search feature",
-        time: "2026-06-29 16:55",
-        messages: 27,
-    },
-    SessionEntry {
-        id: "session-f7a8b9c0",
-        name: "Update documentation",
-        time: "2026-06-28 11:30",
-        messages: 18,
-    },
-    SessionEntry {
-        id: "session-c9b0d1e2",
-        name: "Code review pipeline",
-        time: "2026-06-27 14:05",
-        messages: 41,
-    },
-];
-
 #[component]
-fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
+
+    // S6c: 订阅 THREAD_LIST atom——后台 service_snapshot 2s 派生一次
+    let threads_store = hooks.use_store(*THREAD_LIST.get().unwrap());
+    let threads: Vec<ThreadSummary> = threads_store.read().clone();
+    let _ = threads_store; // StoreState 是 Copy，无需显式 drop
+    let count = threads.len();
 
     hooks.use_local_events({
         let cursor = cursor.clone();
-        let count = SESSION_ENTRIES.len();
+        let count = count;
         move |event: Event| {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
@@ -74,7 +37,7 @@ fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        // TODO Phase 8: close panel via use_input_layer
+                        // 由 PanelOverlay 上层 Esc 处理关闭
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         let mut c = cursor.write();
@@ -87,7 +50,7 @@ fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     KeyCode::Enter => {
-                        // TODO Phase 8: switch session via use_input_layer
+                        // S11 TODO: 通过 AcpClient 切换 thread
                     }
                     _ => {}
                 }
@@ -98,13 +61,13 @@ fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sel = *cursor.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    if SESSION_ENTRIES.is_empty() {
+    if threads.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            "  No sessions",
+            "  No threads",
             Style::new().fg(theme::MUTED),
         )]));
     } else {
-        for (i, entry) in SESSION_ENTRIES.iter().enumerate() {
+        for (i, entry) in threads.iter().enumerate() {
             let is_selected = i == sel;
             let cursor_marker = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
@@ -113,19 +76,36 @@ fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Style::new().fg(theme::TEXT)
             };
 
-            // Line 1: cursor + name
+            let id_short: String = entry.id.chars().take(8.min(entry.id.len())).collect();
+            let title = entry
+                .title
+                .clone()
+                .unwrap_or_else(|| format!("(untitled {})", id_short));
+
+            // Line 1: cursor + title
             lines.push(Line::from(vec![Span::styled(
-                format!(" {} {} ", cursor_marker, entry.name),
+                format!(" {} {} ", cursor_marker, title),
                 name_style,
             )]));
 
-            // Line 2: id, time, messages
+            // Line 2: id, updated_at, message_count
+            let updated = entry
+                .updated_at
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "-".to_string());
             lines.push(Line::from(vec![Span::styled(
                 format!(
                     "    {}  {}  {} messages",
-                    entry.id, entry.time, entry.messages,
+                    entry.id, updated, entry.message_count,
                 ),
                 Style::new().fg(theme::MUTED),
+            )]));
+
+            // Line 3: cwd (truncated for narrow viewports)
+            let cwd: String = entry.cwd.chars().take(54).collect();
+            lines.push(Line::from(vec![Span::styled(
+                format!("    {}", cwd),
+                Style::new().fg(theme::DIM),
             )]));
 
             // Blank separator line
@@ -139,7 +119,7 @@ fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Style::new().fg(theme::MUTED),
     )]));
 
-    let content = if SESSION_ENTRIES.is_empty() {
+    let content = if threads.is_empty() {
         Paragraph::new(Line::from("  (empty)").fg(theme::MUTED))
     } else {
         Paragraph::new(ratatui::text::Text::from(lines))
@@ -153,8 +133,8 @@ fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .fg(theme::THINKING)
                 .bold()
                 .centered(),
-            width: ratatui_kit::ratatui::layout::Constraint::Length(56),
-            height: ratatui_kit::ratatui::layout::Constraint::Length(16),
+            width: ratatui_kit::ratatui::layout::Constraint::Length(60),
+            height: ratatui_kit::ratatui::layout::Constraint::Length(18),
         ) {
             ScrollView(
                 scroll_bars: ScrollBars::default(),

@@ -1,12 +1,11 @@
 //! ratatui-kit ModelPanel component.
 //!
-//! Phase 6c batch 1: model alias selection with cursor/settings navigation
-//! (use_state + use_local_events). Mock data with 3 alias tiers
-//! (Opus/Sonnet/Haiku), each with effort/max_tokens/1M context config.
-//! Phase 8 通过 Atom/props 注入真实模型配置。
-//!
-//! 旧版: panel/panels/model.rs (PanelState trait).
+//! S6c：alias 列表沿用静态元数据（Opus/Sonnet/Haiku），但**当前激活 alias**
+//! 从 `SERVICE_SNAPSHOT` atom 读取——这样面板和 status bar 始终一致。
+//! Enter/←→ 操作目前只更新本地 selected_tab state，**真实切换 provider/model**
+//! 需要 S11 解耦后通过 AcpClient 触发（暂留 TODO）。
 
+use crate::kit::atoms::SERVICE_SNAPSHOT;
 use crate::ui::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -20,11 +19,9 @@ use ratatui_kit::{
 };
 
 // ---------------------------------------------------------------------------
-// Mock model data
+// 静态 alias 元数据（与 active 状态无关）
 // ---------------------------------------------------------------------------
 
-/// Mock model alias entry (Phase 8: from real config).
-#[allow(dead_code)]
 struct ModelAliasEntry {
     name: &'static str,
     key: &'static str,
@@ -34,7 +31,6 @@ struct ModelAliasEntry {
     model_id: &'static str,
 }
 
-#[allow(dead_code)]
 const MODEL_ALIASES: &[ModelAliasEntry] = &[
     ModelAliasEntry {
         name: "Opus",
@@ -63,10 +59,16 @@ const MODEL_ALIASES: &[ModelAliasEntry] = &[
 ];
 
 #[component]
-fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
     // selected_tab stores the index of the selected alias
     let selected_tab = hooks.use_state(|| 1usize); // default Sonnet
+
+    // S6c: 订阅 SERVICE_SNAPSHOT——active alias 来自 atom，确保面板和 status bar 一致
+    let snapshot = hooks.use_store(*SERVICE_SNAPSHOT.get().unwrap());
+    let active_alias = snapshot.read().model_alias.clone();
+    let active_provider = snapshot.read().provider_name.clone();
+    let _ = snapshot; // StoreState 是 Copy，无需显式 drop
 
     hooks.use_local_events({
         let cursor = cursor.clone();
@@ -78,7 +80,7 @@ fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        // TODO Phase 8: close panel via use_input_layer
+                        // 由 PanelOverlay 上层 Esc 处理关闭
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         let mut c = cursor.write();
@@ -89,18 +91,16 @@ fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         *c = (*c + 1).min(MODEL_ALIASES.len() - 1);
                     }
                     KeyCode::Enter => {
-                        // Select the currently highlighted alias
+                        // S11 TODO: 通过 AcpClient 切换真实 alias
                         let sel = *cursor.read();
                         *selected_tab.write() = sel;
                     }
                     KeyCode::Left => {
-                        // Cycle selected model left
                         let mut s = selected_tab.write();
                         *s = s.saturating_sub(1);
                         *cursor.write() = *s;
                     }
                     KeyCode::Right => {
-                        // Cycle selected model right
                         let mut s = selected_tab.write();
                         *s = (*s + 1).min(MODEL_ALIASES.len() - 1);
                         *cursor.write() = *s;
@@ -112,8 +112,19 @@ fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     });
 
     let sel = *cursor.read();
-    let active = *selected_tab.read();
-    let active_entry = &MODEL_ALIASES[active];
+    let local_selected = *selected_tab.read();
+
+    // active alias 优先取 atom；atom 为空时回退到本地 selected_tab
+    let active_idx = MODEL_ALIASES
+        .iter()
+        .position(|e| e.key.eq_ignore_ascii_case(&active_alias))
+        .unwrap_or(local_selected);
+    let active_entry = &MODEL_ALIASES[active_idx];
+    let provider_label = if active_provider.is_empty() {
+        "(unconfigured)".to_string()
+    } else {
+        active_provider.clone()
+    };
 
     let mut lines: Vec<Line<'_>> = Vec::new();
 
@@ -122,15 +133,15 @@ fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         "  Model Alias Selection",
         Style::new().fg(theme::TEXT).bold(),
     )]));
-    lines.push(Line::from(vec![Span::styled(
-        "  --------------------",
-        Style::new().fg(theme::DIM),
-    )]));
+    lines.push(Line::from(vec![
+        Span::styled("  Provider: ", Style::new().fg(theme::MUTED)),
+        Span::styled(provider_label, Style::new().fg(theme::ACCENT).bold()),
+    ]));
     lines.push(Line::from(""));
 
     // Alias rows
     for (i, entry) in MODEL_ALIASES.iter().enumerate() {
-        let is_selected = i == active;
+        let is_selected = i == active_idx;
         let is_cursor = i == sel;
         let cursor_mark = if is_cursor { "\u{276f}" } else { " " };
         let check = if is_selected { "\u{2714}" } else { " " };
@@ -213,7 +224,7 @@ fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .bold()
                 .centered(),
             width: Constraint::Length(50),
-            height: Constraint::Length(16),
+            height: Constraint::Length(18),
         ) {
             ScrollView(
                 scroll_bars: ScrollBars::default(),

@@ -72,7 +72,7 @@ const TASK_ENTRIES: &[TaskEntry] = &[
 ];
 
 #[component]
-fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected = hooks.use_state(|| 0usize);
 
     hooks.use_local_events({

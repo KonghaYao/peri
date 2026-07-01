@@ -101,7 +101,7 @@ const MCP_SERVERS: &[McpServerEntry] = &[
 // ---------------------------------------------------------------------------
 
 #[component]
-fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
 
     hooks.use_local_events({

@@ -50,7 +50,7 @@ const MEMORY_ENTRIES: &[MemoryEntry] = &[
 ];
 
 #[component]
-fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected = hooks.use_state(|| 0usize);
 
     hooks.use_local_events({

@@ -65,7 +65,7 @@ const PLUGINS: &[PluginEntry] = &[
 // ---------------------------------------------------------------------------
 
 #[component]
-fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
 
     hooks.use_local_events({
