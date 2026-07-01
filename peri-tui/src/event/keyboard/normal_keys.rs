@@ -2,7 +2,7 @@ use tui_textarea::{Input, Key};
 
 use crate::app::{App, PendingAttachment};
 use crate::runtime::effect::Effect;
-use crate::state_machine::input::{InputOp, CursorDirection};
+use crate::state_machine::input::{CursorDirection, InputOp};
 use crate::state_machine::State;
 
 /// Normal mode key handling: main match block arm bodies.
@@ -211,7 +211,10 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input, state: &State) -> 
                 .iter()
                 .any(|line| !line.is_empty());
             if has_content {
-                return vec![Effect::ApplyInputOp(InputOp::DeletePrevWord), Effect::Render];
+                return vec![
+                    Effect::ApplyInputOp(InputOp::DeletePrevWord),
+                    Effect::Render,
+                ];
             }
         }
 
@@ -230,7 +233,10 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input, state: &State) -> 
                 .iter()
                 .any(|line| !line.is_empty());
             if has_content {
-                return vec![Effect::ApplyInputOp(InputOp::DeleteToLineStart), Effect::Render];
+                return vec![
+                    Effect::ApplyInputOp(InputOp::DeleteToLineStart),
+                    Effect::Render,
+                ];
             } else {
                 for _ in 0..20 {
                     app.scroll_up();
@@ -278,15 +284,24 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input, state: &State) -> 
             // Route to SM InputState via Effect
             // Backspace
             if input.key == Key::Backspace {
-                return vec![Effect::ApplyInputOp(InputOp::DeletePrevChar), Effect::Render];
+                return vec![
+                    Effect::ApplyInputOp(InputOp::DeletePrevChar),
+                    Effect::Render,
+                ];
             }
             // Delete
             if input.key == Key::Delete {
-                return vec![Effect::ApplyInputOp(InputOp::DeleteNextChar), Effect::Render];
+                return vec![
+                    Effect::ApplyInputOp(InputOp::DeleteNextChar),
+                    Effect::Render,
+                ];
             }
             // Ctrl+W / Option+Backspace → delete word
             if input.key == Key::Char('w') && input.ctrl {
-                return vec![Effect::ApplyInputOp(InputOp::DeletePrevWord), Effect::Render];
+                return vec![
+                    Effect::ApplyInputOp(InputOp::DeletePrevWord),
+                    Effect::Render,
+                ];
             }
             // Ctrl+A → select all
             if input.key == Key::Char('a') && input.ctrl {
@@ -294,17 +309,29 @@ pub(super) fn handle_normal_keys(app: &mut App, input: Input, state: &State) -> 
             }
             // Left / Right arrows
             if input.key == Key::Left {
-                return vec![Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::Left)), Effect::Render];
+                return vec![
+                    Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::Left)),
+                    Effect::Render,
+                ];
             }
             if input.key == Key::Right {
-                return vec![Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::Right)), Effect::Render];
+                return vec![
+                    Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::Right)),
+                    Effect::Render,
+                ];
             }
             // Home / End
             if input.key == Key::Home {
-                return vec![Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::LineStart)), Effect::Render];
+                return vec![
+                    Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::LineStart)),
+                    Effect::Render,
+                ];
             }
             if input.key == Key::End {
-                return vec![Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::LineEnd)), Effect::Render];
+                return vec![
+                    Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::LineEnd)),
+                    Effect::Render,
+                ];
             }
             // Ctrl+N → keep existing logic (new session, not textarea)
             if input.key == Key::Char('n') && input.ctrl {
@@ -387,7 +414,10 @@ fn handle_up(app: &mut App) -> Vec<Effect> {
         app.history_up();
         vec![Effect::Render]
     } else {
-        vec![Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::Up)), Effect::Render]
+        vec![
+            Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::Up)),
+            Effect::Render,
+        ]
     }
 }
 
@@ -429,7 +459,10 @@ fn handle_down(app: &mut App) -> Vec<Effect> {
         app.history_down();
         vec![Effect::Render]
     } else {
-        vec![Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::Down)), Effect::Render]
+        vec![
+            Effect::ApplyInputOp(InputOp::MoveCursor(CursorDirection::Down)),
+            Effect::Render,
+        ]
     }
 }
 
@@ -455,7 +488,10 @@ fn handle_ctrl_v(app: &mut App) -> Vec<Effect> {
             return vec![Effect::Render];
         } else if let Ok(text) = clipboard.get_text() {
             let text = text.replace('\r', "\n");
-            return vec![Effect::ApplyInputOp(InputOp::InsertStr(text)), Effect::Render];
+            return vec![
+                Effect::ApplyInputOp(InputOp::InsertStr(text)),
+                Effect::Render,
+            ];
         }
     }
     vec![Effect::Render]
@@ -466,7 +502,10 @@ fn handle_tab(app: &mut App) -> Vec<Effect> {
 
     // Prediction 接受优先级最高
     if let Some(pred) = app.session_mgr.current_mut().ui.prediction.take() {
-        return vec![Effect::ApplyInputOp(InputOp::InsertStr(pred.text)), Effect::Render];
+        return vec![
+            Effect::ApplyInputOp(InputOp::InsertStr(pred.text)),
+            Effect::Render,
+        ];
     }
 
     if app.session_mgr.current_mut().ui.at_mention.active {

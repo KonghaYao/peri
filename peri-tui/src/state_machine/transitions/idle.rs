@@ -99,35 +99,19 @@ pub fn handle(mut state: IdleState, event: Event) -> (State, Vec<Effect>) {
         // -- Tick: poll agent + drain notes + render. --
         Event::Tick => (
             State::Idle(state),
-            vec![
-                Effect::PollAgent,
-                Effect::DrainPendingNotes,
-                Effect::Render,
-            ],
+            vec![Effect::PollAgent, Effect::DrainPendingNotes, Effect::Render],
         ),
 
         // -- Mouse / Resize --------------------------------------------------
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollDown => (State::Idle(state), vec![Effect::Scroll { delta: 3 }]),
             MouseEventKind::ScrollUp => (State::Idle(state), vec![Effect::Scroll { delta: -3 }]),
-            MouseEventKind::Down(MouseButton::Left) => (
-                State::Idle(state),
-                vec![Effect::Render],
-            ),
-            MouseEventKind::Drag(MouseButton::Left) => (
-                State::Idle(state),
-                vec![Effect::Render],
-            ),
-            MouseEventKind::Up(MouseButton::Left) => (
-                State::Idle(state),
-                vec![Effect::Render],
-            ),
+            MouseEventKind::Down(MouseButton::Left) => (State::Idle(state), vec![Effect::Render]),
+            MouseEventKind::Drag(MouseButton::Left) => (State::Idle(state), vec![Effect::Render]),
+            MouseEventKind::Up(MouseButton::Left) => (State::Idle(state), vec![Effect::Render]),
             _ => (State::Idle(state), vec![Effect::Render]),
         },
-        Event::Resize { .. } => (
-            State::Idle(state),
-            vec![Effect::Render],
-        ),
+        Event::Resize { .. } => (State::Idle(state), vec![Effect::Render]),
 
         // -- ACP events ------------------------------------------------------
         Event::AcpEvent(AcpEventData::ViewCommit(vc)) => {
@@ -357,10 +341,7 @@ fn handle_key(mut state: IdleState, key: KeyEvent) -> (State, Vec<Effect>) {
         KeyCode::Esc => (State::Idle(state), Vec::new()),
 
         // -- BackTab: cycle permission mode (handled by keyboard fallback) ---
-        KeyCode::BackTab => (
-            State::Idle(state),
-            vec![Effect::Render],
-        ),
+        KeyCode::BackTab => (State::Idle(state), vec![Effect::Render]),
 
         // -- Printable character --------------------------------------------
         // Ctrl+<char> shortcuts are intercepted BEFORE the general Char arm.

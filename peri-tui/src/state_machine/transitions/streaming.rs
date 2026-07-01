@@ -309,15 +309,9 @@ fn handle_key(state: StreamingState, key: KeyEvent) -> (State, Vec<Effect>) {
                     vec![Effect::CycleModel, Effect::Render],
                 ),
                 // Ctrl+B: focus background agent bar (handled by keyboard fallback).
-                'b' => (
-                    State::Streaming(state),
-                    vec![Effect::Render],
-                ),
+                'b' => (State::Streaming(state), vec![Effect::Render]),
                 // Ctrl+O: toggle inline diff (handled by keyboard fallback).
-                'o' => (
-                    State::Streaming(state),
-                    vec![Effect::Render],
-                ),
+                'o' => (State::Streaming(state), vec![Effect::Render]),
                 // Ctrl+P: open Model panel.
                 'p' => (
                     State::Streaming(state),
@@ -334,10 +328,7 @@ fn handle_key(state: StreamingState, key: KeyEvent) -> (State, Vec<Effect>) {
     } else {
         match key.code {
             // BackTab: cycle permission mode (handled by keyboard fallback).
-            KeyCode::BackTab => (
-                State::Streaming(state),
-                vec![Effect::Render],
-            ),
+            KeyCode::BackTab => (State::Streaming(state), vec![Effect::Render]),
             // All other keys (plain chars, navigation, Backspace, Enter, Esc):
             // keyboard fallback owns textarea editing; SM re-renders to make
             // typed text visible.

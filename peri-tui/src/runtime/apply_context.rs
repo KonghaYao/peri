@@ -63,18 +63,9 @@ impl<'a> ApplyContext<'a> {
     /// Execute a single [`Effect`], returning the outcome.
     ///
     /// `state` is the live state machine [`State`] owned by the main loop.
-    /// state's [`InputState`] via the `with_input` helper.
-    ///
     /// This is the **only** I/O path in the main loop.  Every side effect
     /// produced by the state machine flows through this method.
     pub async fn apply(&mut self, effect: Effect, _state: &mut State) -> ApplyOutcome {
-        // Helper: call `f` on the InputState of the active Idle/Streaming state.
-        // Returns effects produced by the InputState method.  No-op on
-        // Modal/Switching (input effects should not arrive in those states).
-        // Note: effects returned by InputState methods (typically `[Render]`)
-        // are intentionally discarded -- the keyboard module already emits
-        // `Render` alongside these effects.
-
         match effect {
             Effect::Render => {
                 // Rendering is performed by the main loop caller via

@@ -352,7 +352,11 @@ fn render_session_column(
     }
 }
 
-/// 计算底部展开区所需高度（无激活面板时返回 0）
+/// 计算底部展开区所需高度（无激活面板时返回 0）。
+///
+/// v2 路径：高度由 `draw()` 预计算（`handler.desired_height()`
+/// 或 `panel.desired_height()`），此处仅做上限约束。
+/// v1 fallback：仍为少数 headless test 场景用 flat percentage。
 fn active_panel_height(
     app: &App,
     screen_height: u16,

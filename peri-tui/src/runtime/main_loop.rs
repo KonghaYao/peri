@@ -172,8 +172,7 @@ pub async fn run(mut rx: EventRx, ctx: &mut ApplyContext<'_>, app: &mut App) -> 
 fn capture_snapshot(event: &TuiEvent, state: &State, app: &App) -> PreEventSnapshot {
     let is_tick = matches!(event, TuiEvent::Tick);
     let was_idle = matches!(state, State::Idle(_));
-    let is_slash_command =
-        matches!(state, State::Idle(idle) if idle.input.text().starts_with('/'));
+    let is_slash_command = matches!(state, State::Idle(idle) if idle.input.text().starts_with('/'));
     let (at_mention_active, slash_hint_active) = {
         let ui = &app.session_mgr.current().ui;
         (ui.at_mention.active, ui.slash_hint.active)
@@ -198,14 +197,18 @@ fn capture_snapshot(event: &TuiEvent, state: &State, app: &App) -> PreEventSnaps
 /// slice, and dispatches through `state_machine::handle`.  Includes bypass
 /// arms for popup/wizard (SM no-op for Key events) and inline overlay
 /// (@mention/slash hint, SM no-op for Enter).
-fn dispatch_sm(state: &mut State, event: &TuiEvent, snap: &PreEventSnapshot, app: &App) -> (State, Vec<Effect>) {
+fn dispatch_sm(
+    state: &mut State,
+    event: &TuiEvent,
+    snap: &PreEventSnapshot,
+    app: &App,
+) -> (State, Vec<Effect>) {
     let sm_event: SmEvent = event.clone().into();
 
     // Cron #28: Composite view_slice = state.view + current_turn's
     // incremental VMs.  Include current_turn's VMs in the slice so
     // handle_interrupted sees the FULL picture (committed + streaming).
-    let mut view_models: Vec<peri_acp_types::view_model::ViewModel> =
-        state.view_models().to_vec();
+    let mut view_models: Vec<peri_acp_types::view_model::ViewModel> = state.view_models().to_vec();
     if let State::Streaming(s) = &mut *state {
         view_models.extend(s.current_turn.view_models().to_vec());
     }
@@ -323,7 +326,11 @@ fn merge_effects(sm_effects: Vec<Effect>, fallback_effects: Vec<Effect>) -> Vec<
     let mut effects = sm_effects;
     for e in fallback_effects {
         let is_render = matches!(e, Effect::Render);
-        if !is_render || !effects.iter().any(|existing| matches!(existing, Effect::Render)) {
+        if !is_render
+            || !effects
+                .iter()
+                .any(|existing| matches!(existing, Effect::Render))
+        {
             effects.push(e);
         }
     }
@@ -451,9 +458,7 @@ async fn execute_effects(
                 // TextChunk / ReasoningChunk / ToolStarted events
                 // accumulate in current_turn instead of being dropped.
                 if let State::Idle(idle) = state {
-                    *state = State::Streaming(
-                        std::mem::take(idle).into_streaming(),
-                    );
+                    *state = State::Streaming(std::mem::take(idle).into_streaming());
                 }
                 _needs_render = true;
             }
@@ -493,9 +498,11 @@ async fn execute_effects(
                                 },
                             );
                             // Apply to TextArea widget (for rendering + coordinate calc)
-                            app.session_mgr.current_mut().ui.textarea.move_cursor(
-                                tui_textarea::CursorMove::Jump(r as u16, c as u16),
-                            );
+                            app.session_mgr
+                                .current_mut()
+                                .ui
+                                .textarea
+                                .move_cursor(tui_textarea::CursorMove::Jump(r as u16, c as u16));
                             app.session_mgr.current_mut().ui.textarea.start_selection();
                             // Also apply to v2 InputState for state machine consistency
                             match state {
@@ -528,9 +535,11 @@ async fn execute_effects(
                                 },
                             );
                             // Apply to TextArea widget (for selection tracking)
-                            app.session_mgr.current_mut().ui.textarea.move_cursor(
-                                tui_textarea::CursorMove::Jump(r as u16, c as u16),
-                            );
+                            app.session_mgr
+                                .current_mut()
+                                .ui
+                                .textarea
+                                .move_cursor(tui_textarea::CursorMove::Jump(r as u16, c as u16));
                             effect_did_mutate_textarea = true;
                         }
                     }
@@ -717,10 +726,9 @@ async fn execute_effects(
                 let idx = aliases.iter().position(|&a| a == current).unwrap_or(0);
                 let next = aliases[(idx + 1) % aliases.len()];
                 cfg.config.active_alias = next.to_string();
-                if let Err(e) = crate::app::App::save_config(
-                    &cfg,
-                    app.services.config_path_override.as_deref(),
-                ) {
+                if let Err(e) =
+                    crate::app::App::save_config(&cfg, app.services.config_path_override.as_deref())
+                {
                     let session = app.session_mgr.current_mut();
                     session.messages.push_system_note(app.services.lc.tr_args(
                         "config-save-failed",
@@ -773,9 +781,8 @@ async fn execute_effects(
                         ));
                         session.messages.message_cache = None;
                     }
-                    app.global_ui.provider_highlight_until = Some(
-                        std::time::Instant::now() + std::time::Duration::from_millis(2000),
-                    );
+                    app.global_ui.provider_highlight_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(2000));
                 }
                 _needs_render = true;
             }
@@ -839,8 +846,7 @@ async fn execute_effects(
                             );
                             // Fallback: try nano
                             if editor != "nano" {
-                                if let Ok(mut child) =
-                                    Command::new("nano").arg(&path_clone).spawn()
+                                if let Ok(mut child) = Command::new("nano").arg(&path_clone).spawn()
                                 {
                                     let _ = child.wait();
                                 }
@@ -1098,7 +1104,10 @@ mod tests {
         let fb = vec![Effect::Render];
         let merged = merge_effects(sm, fb);
         assert_eq!(
-            merged.iter().filter(|e| matches!(e, Effect::Render)).count(),
+            merged
+                .iter()
+                .filter(|e| matches!(e, Effect::Render))
+                .count(),
             1,
             "Render must be deduplicated"
         );
@@ -1122,7 +1131,10 @@ mod tests {
         let fb = vec![Effect::Render];
         let merged = merge_effects(sm, fb);
         assert_eq!(
-            merged.iter().filter(|e| matches!(e, Effect::Render)).count(),
+            merged
+                .iter()
+                .filter(|e| matches!(e, Effect::Render))
+                .count(),
             1
         );
     }

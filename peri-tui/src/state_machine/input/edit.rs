@@ -4,7 +4,7 @@
 //! byte indexing. Indices (row, col) use byte offset for the column, matching
 //! `CursorPos` contract.
 
-use super::{CursorPos, InputState, InputOp, CursorDirection};
+use super::{CursorDirection, CursorPos, InputOp, InputState};
 use crate::runtime::effect::Effect;
 
 /// Editing operations on the input buffer.

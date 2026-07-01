@@ -103,13 +103,7 @@ pub fn handle(mut state: ModalState, event: Event) -> (State, Vec<Effect>) {
 
         // -- Tick: keep background processes alive while Modal is open --------
         // PollAgent keeps ACP event consumption flowing; Render ensures the panel redraws.
-        Event::Tick => (
-            State::Modal(state),
-            vec![
-                Effect::PollAgent,
-                Effect::Render,
-            ],
-        ),
+        Event::Tick => (State::Modal(state), vec![Effect::PollAgent, Effect::Render]),
 
         // -- AcpEvent: apply to saved_* (don't drop!) ------------------------
         // The agent keeps producing output while the popup is open. Apply
@@ -437,13 +431,7 @@ pub fn handle_with_context(
         Event::Resize { .. } => (State::Modal(state), vec![Effect::Render]),
 
         // -- Tick: keep background processes alive while Modal is open --------
-        Event::Tick => (
-            State::Modal(state),
-            vec![
-                Effect::PollAgent,
-                Effect::Render,
-            ],
-        ),
+        Event::Tick => (State::Modal(state), vec![Effect::PollAgent, Effect::Render]),
 
         // -- AcpEvent: apply to saved_* (don't drop!) ------------------------
         // The agent keeps producing output while the popup is open. Apply
