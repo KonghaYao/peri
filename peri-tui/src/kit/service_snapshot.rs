@@ -30,10 +30,10 @@ use tracing::{debug, warn};
 
 use crate::app::service_registry::{ProcessResourceMonitor, SharedPeriConfig};
 use crate::kit::atoms::{
-    AcpStateSnapshot, CRON_JOBS, CronJobSummary, FILE_LIST, HOOK_LIST, HookSummary, MCP_SERVERS,
-    MEMORY_LIST, McpInitPhase, McpServerSummary, McpStatusSnapshot, MemoryEntry, PLUGIN_LIST,
-    PROVIDER_LIST, PluginSummary, ProviderSummary, SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST,
-    ThreadSummary,
+    AcpStateSnapshot, CRON_JOBS, CronJobSummary, FILE_LIST, HOOK_LIST, Handle, HookSummary,
+    MCP_SERVERS, MEMORY_LIST, McpInitPhase, McpServerSummary, McpStatusSnapshot, MemoryEntry,
+    PLUGIN_LIST, PROVIDER_LIST, PluginSummary, ProviderSummary, SERVICE_SNAPSHOT, ServiceSnapshot,
+    THREAD_LIST, ThreadSummary,
 };
 use crate::thread::ThreadStore;
 
@@ -180,44 +180,35 @@ async fn tick_once(src: &SnapshotSource) -> Result<(), Box<dyn std::error::Error
         model_alias,
         permission_mode: permission_mode.to_string(),
         memory_mb,
-        cpu_percent,
+        cpu_percent: cpu_percent.round(),
         mcp,
         cron_total,
         cron_enabled,
     };
 
-    if let Some(atom) = SERVICE_SNAPSHOT.get() {
-        *atom.write() = snap;
-    }
-    if let Some(atom) = THREAD_LIST.get() {
-        *atom.write() = threads;
-    }
-    if let Some(atom) = CRON_JOBS.get() {
-        *atom.write() = cron_jobs;
-    }
-    if let Some(atom) = FILE_LIST.get() {
-        *atom.write() = files;
-    }
-    // H1 系列：静态数据每 tick 也写一次（plugin_data 在 launch 时派生到 src，
-    // 这里直接 copy；MCP server 详细列表每 tick 重新派生以反映连接状态变化；
-    // Memory 列表每 tick 重新扫描）
-    if let Some(atom) = HOOK_LIST.get() {
-        *atom.write() = src.hooks.clone();
-    }
-    if let Some(atom) = PLUGIN_LIST.get() {
-        *atom.write() = src.plugins.clone();
-    }
-    if let Some(atom) = PROVIDER_LIST.get() {
-        *atom.write() = src.providers.clone();
-    }
-    if let Some(atom) = MCP_SERVERS.get() {
-        *atom.write() = mcp_servers;
-    }
-    if let Some(atom) = MEMORY_LIST.get() {
-        *atom.write() = memory_entries;
-    }
+    write_if_changed(&SERVICE_SNAPSHOT.state(), snap);
+    write_if_changed(&THREAD_LIST.state(), threads);
+    write_if_changed(&CRON_JOBS.state(), cron_jobs);
+    write_if_changed(&FILE_LIST.state(), files);
+    // H1 系列：静态数据来自 launch 时派生的 src；MCP server 详细列表每 tick
+    // 重新派生以反映连接状态；Memory 列表每 tick 重新扫描。所有 atom 都只在
+    // 值变化时写入，避免 ratatui-kit Atom 对相同值写入也唤醒订阅组件。
+    write_if_changed(&HOOK_LIST.state(), src.hooks.clone());
+    write_if_changed(&PLUGIN_LIST.state(), src.plugins.clone());
+    write_if_changed(&PROVIDER_LIST.state(), src.providers.clone());
+    write_if_changed(&MCP_SERVERS.state(), mcp_servers);
+    write_if_changed(&MEMORY_LIST.state(), memory_entries);
 
     Ok(())
+}
+
+fn write_if_changed<T>(state: &Handle<T>, next: T)
+where
+    T: PartialEq + Send + Sync + 'static,
+{
+    if *state.read() != next {
+        *state.write() = next;
+    }
 }
 
 /// 浅扫 cwd 文件列表（深度=2，最多 500 条），用于 @mention 补全。
@@ -547,7 +538,7 @@ mod tests {
         let result = tick_once(&src).await;
         assert!(result.is_ok(), "tick_once should succeed");
 
-        let snap = SERVICE_SNAPSHOT.get().unwrap().read().clone();
+        let snap = SERVICE_SNAPSHOT.state().read().clone();
         assert_eq!(snap.cwd, ".");
         assert_eq!(snap.cron_total, 0);
         assert_eq!(snap.cron_enabled, 0);
@@ -567,7 +558,7 @@ mod tests {
         let result = tick_once(&src).await;
         assert!(result.is_ok());
 
-        let threads = THREAD_LIST.get().unwrap().read().clone();
+        let threads = THREAD_LIST.state().read().clone();
         assert!(threads.is_empty());
     }
 
@@ -589,10 +580,10 @@ mod tests {
         let result = tick_once(&src).await;
         assert!(result.is_ok());
 
-        let jobs = CRON_JOBS.get().unwrap().read().clone();
+        let jobs = CRON_JOBS.state().read().clone();
         assert_eq!(jobs.len(), 2);
 
-        let snap = SERVICE_SNAPSHOT.get().unwrap().read().clone();
+        let snap = SERVICE_SNAPSHOT.state().read().clone();
         assert_eq!(snap.cron_total, 2);
         assert_eq!(snap.cron_enabled, 1);
     }

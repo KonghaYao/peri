@@ -24,69 +24,73 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let confirm_delete = hooks.use_state(|| false);
 
     // S6c: 订阅 CRON_JOBS atom——后台 service_snapshot 2s 派生一次
-    let jobs_store = hooks.use_store(*CRON_JOBS.get().unwrap());
+    let jobs_store = hooks.use_atom(&CRON_JOBS);
     let jobs: Vec<CronJobSummary> = jobs_store.read().clone();
     let _ = jobs_store; // StoreState 是 Copy，无需显式 drop
     let count = jobs.len();
 
-    hooks.use_local_events({
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         let jobs_snapshot = jobs.clone();
-        move |event: Event| {
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    return;
-                }
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
+            }
 
-                // Confirm-delete mode: Enter confirms, Esc cancels, others cancel
-                if *confirm_delete.read() {
-                    match key.code {
-                        KeyCode::Enter => {
-                            let sel = *selected.read();
-                            if let Some(job) = jobs_snapshot.get(sel) {
-                                cron_remove(&job.id);
-                            }
-                            *confirm_delete.write() = false;
-                        }
-                        KeyCode::Esc => {
-                            *confirm_delete.write() = false;
-                        }
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            return;
-                        }
-                        _ => {
-                            *confirm_delete.write() = false;
-                        }
-                    }
-                    return;
-                }
-
+            // Confirm-delete mode: Enter confirms, Esc cancels, others cancel
+            if *confirm_delete.read() {
                 match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        close_panel();
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let mut s = selected.write();
-                        *s = s.saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let mut s = selected.write();
-                        if count > 0 {
-                            *s = (*s + 1).min(count - 1);
-                        }
-                    }
-                    KeyCode::Enter | KeyCode::Char(' ') => {
+                    KeyCode::Enter => {
                         let sel = *selected.read();
                         if let Some(job) = jobs_snapshot.get(sel) {
-                            cron_toggle(&job.id);
+                            cron_remove(&job.id);
                         }
+                        *confirm_delete.write() = false;
                     }
-                    KeyCode::Char('d') if count > 0 => {
-                        *confirm_delete.write() = true;
+                    KeyCode::Esc => {
+                        *confirm_delete.write() = false;
                     }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
-                    _ => {}
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return EventResult::Ignored;
+                    }
+                    _ => {
+                        *confirm_delete.write() = false;
+                    }
                 }
+                return EventResult::Consumed;
             }
+
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    close_panel();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let mut s = selected.write();
+                    *s = s.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let mut s = selected.write();
+                    if count > 0 {
+                        *s = (*s + 1).min(count - 1);
+                    }
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    let sel = *selected.read();
+                    if let Some(job) = jobs_snapshot.get(sel) {
+                        cron_toggle(&job.id);
+                    }
+                }
+                KeyCode::Char('d') if count > 0 => {
+                    *confirm_delete.write() = true;
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return EventResult::Ignored;
+                }
+                _ => {}
+            }
+            EventResult::Consumed
         }
     });
 

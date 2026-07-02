@@ -26,12 +26,12 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected = hooks.use_state(|| 0usize);
 
     // Cron
-    let cron_store = hooks.use_store(*CRON_JOBS.get().unwrap());
+    let cron_store = hooks.use_atom(&CRON_JOBS);
     let cron_jobs = cron_store.read().clone();
     let _ = cron_store;
 
     // SubAgent（从 VIEW_MODELS 扫描）
-    let vm_store = hooks.use_store(*VIEW_MODELS.get().unwrap());
+    let vm_store = hooks.use_atom(&VIEW_MODELS);
     let subagents = collect_subagents(&vm_store.read());
     let _ = vm_store;
 
@@ -39,26 +39,28 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let subagent_count = subagents.len();
     let total = cron_count + subagent_count;
 
-    hooks.use_local_events({
-        move |event: Event| {
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    return;
-                }
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        *selected.write() = selected.read().saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let mut s = selected.write();
-                        if total > 0 {
-                            *s = (*s + 1).min(total - 1);
-                        }
-                    }
-                    _ => {}
-                }
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
             }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => close_panel(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *selected.write() = selected.read().saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let mut s = selected.write();
+                    if total > 0 {
+                        *s = (*s + 1).min(total - 1);
+                    }
+                }
+                _ => {}
+            }
+            EventResult::Consumed
         }
     });
 

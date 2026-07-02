@@ -1,7 +1,9 @@
-//! @mention 文件提醒弹出组件。
+//! MentionPopup：@ 提及补全弹窗。
 //!
-//! I18-C：Up/Down 选中索引同步写入 `MENTION_SELECTED_INDEX` atom，
-//! InputArea 在 Enter 时读取真实选中文件名（而非仅 prefix）。
+//! MentionPopup：输入区本地 owner，自己处理方向键/确认/取消，
+//! 通过回调把选择结果反馈给 InputArea。
+
+use std::sync::{Arc, Mutex};
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -21,16 +23,14 @@ use crate::kit::theme;
 pub struct MentionPopupProps {
     pub prefix: String,
     pub items: Vec<String>,
-    pub on_select: Handler<'static, String>,
-    pub on_cancel: Handler<'static, ()>,
+    pub on_select: Arc<Mutex<Handler<'static, String>>>,
+    pub on_cancel: Arc<Mutex<Handler<'static, ()>>>,
 }
 
 #[component]
 pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    // 当前选中项索引——用 atom 共享给 InputArea
-    let selection = hooks.use_store(*MENTION_SELECTED_INDEX.get().unwrap());
+    let selection = hooks.use_atom(&MENTION_SELECTED_INDEX);
 
-    // 按 prefix 过滤
     let filtered: Vec<String> = props
         .items
         .iter()
@@ -41,30 +41,53 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
         .collect();
 
     let item_count = filtered.len();
+    let filtered_for_handler = filtered.clone();
+    let on_select = Arc::clone(&props.on_select);
+    let on_cancel = Arc::clone(&props.on_cancel);
 
-    // 键盘事件处理
-    hooks.use_local_events(move |event: Event| {
-        if let Event::Key(key) = event {
-            if key.kind != KeyEventKind::Press {
-                return;
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
+        let Event::Key(key) = event else {
+            return EventResult::Ignored;
+        };
+        if key.kind != KeyEventKind::Press {
+            return EventResult::Ignored;
+        }
+        match key.code {
+            KeyCode::Up => {
+                let mut s = selection.write();
+                *s = s.saturating_sub(1);
+                EventResult::Consumed
             }
-            match key.code {
-                KeyCode::Up => {
-                    let mut s = selection.write();
-                    *s = s.saturating_sub(1);
+            KeyCode::Down => {
+                let mut s = selection.write();
+                if item_count > 0 {
+                    *s = (s.saturating_add(1)).min(item_count - 1);
                 }
-                KeyCode::Down => {
-                    let mut s = selection.write();
-                    if item_count > 0 {
-                        *s = (s.saturating_add(1)).min(item_count - 1);
-                    }
-                }
-                _ => {}
+                EventResult::Consumed
             }
+            KeyCode::Enter => {
+                let selected = {
+                    let sel_idx = *selection.read();
+                    filtered_for_handler.get(sel_idx).cloned()
+                };
+                if let Some(item) = selected {
+                    let mut on_select = on_select.lock().expect("MentionPopup on_select poisoned");
+                    (*on_select)(item);
+                } else {
+                    let mut on_cancel = on_cancel.lock().expect("MentionPopup on_cancel poisoned");
+                    (*on_cancel)(());
+                }
+                EventResult::Consumed
+            }
+            KeyCode::Esc => {
+                let mut on_cancel = on_cancel.lock().expect("MentionPopup on_cancel poisoned");
+                (*on_cancel)(());
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
         }
     });
 
-    // 构建渲染文本
     let sel_idx = *selection.read();
     let display_lines: Vec<Line<'_>> = filtered
         .iter()

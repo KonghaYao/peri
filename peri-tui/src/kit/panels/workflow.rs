@@ -23,7 +23,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
 
     // 从 VIEW_MODELS 派生 subagent group 数量（间接显示 workflow 活跃度）
-    let vm_store = hooks.use_store(*VIEW_MODELS.get().unwrap());
+    let vm_store = hooks.use_atom(&VIEW_MODELS);
     let subagent_count = vm_store
         .read()
         .committed
@@ -44,26 +44,28 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     ];
     let count = rows.len();
 
-    hooks.use_local_events({
-        move |event: Event| {
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    return;
-                }
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        *cursor.write() = cursor.read().saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let mut c = cursor.write();
-                        if count > 0 {
-                            *c = (*c + 1).min(count - 1);
-                        }
-                    }
-                    _ => {}
-                }
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
             }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => close_panel(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *cursor.write() = cursor.read().saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let mut c = cursor.write();
+                    if count > 0 {
+                        *c = (*c + 1).min(count - 1);
+                    }
+                }
+                _ => {}
+            }
+            EventResult::Consumed
         }
     });
 

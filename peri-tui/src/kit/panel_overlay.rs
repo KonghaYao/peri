@@ -25,51 +25,55 @@ use crate::kit::panels::{
     status::StatusPanel, tasks::TasksPanel, thread_browser::ThreadBrowserPanel,
     workflow::WorkflowPanel,
 };
-use ratatui_kit::{
-    prelude::*,
-    ratatui::layout::{Constraint, Direction},
-};
+use ratatui_kit::{prelude::*, ratatui::layout::Constraint};
 
 /// 面板覆盖层组件。
 ///
 /// 订阅 `ACTIVE_PANEL` atom，渲染当前激活面板。无面板时返回空 View。
 #[component]
 pub fn PanelOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let active_store = hooks.use_store(*atoms::ACTIVE_PANEL.get().unwrap());
-    let active = *active_store.read();
-
+    let active_panel = hooks.use_atom(&atoms::ACTIVE_PANEL);
+    let active = *active_panel.read();
+    let (term_w, term_h) = hooks.use_terminal_size();
     match active {
-        Some(PanelKind::Model) => render_panel(element!(ModelPanel()).into()),
-        Some(PanelKind::Login) => render_panel(element!(LoginPanel()).into()),
-        Some(PanelKind::Agent) => render_panel(element!(AgentPanel()).into()),
-        Some(PanelKind::Hooks) => render_panel(element!(HooksPanel()).into()),
-        Some(PanelKind::Config) => render_panel(element!(ConfigPanel()).into()),
-        Some(PanelKind::ThreadBrowser) => render_panel(element!(ThreadBrowserPanel()).into()),
-        Some(PanelKind::Mcp) => render_panel(element!(McpPanel()).into()),
-        Some(PanelKind::Plugin) => render_panel(element!(PluginPanel()).into()),
-        Some(PanelKind::Cron) => render_panel(element!(CronPanel()).into()),
-        Some(PanelKind::Status) => render_panel(element!(StatusPanel()).into()),
-        Some(PanelKind::Memory) => render_panel(element!(MemoryPanel()).into()),
-        Some(PanelKind::Tasks) => render_panel(element!(TasksPanel()).into()),
-        Some(PanelKind::Betas) => render_panel(element!(BetasPanel()).into()),
-        Some(PanelKind::Workflow) => render_panel(element!(WorkflowPanel()).into()),
+        Some(PanelKind::Model) => render_panel(element!(ModelPanel()).into(), term_w, term_h),
+        Some(PanelKind::Login) => render_panel(element!(LoginPanel()).into(), term_w, term_h),
+        Some(PanelKind::Agent) => render_panel(element!(AgentPanel()).into(), term_w, term_h),
+        Some(PanelKind::Hooks) => render_panel(element!(HooksPanel()).into(), term_w, term_h),
+        Some(PanelKind::Config) => render_panel(element!(ConfigPanel()).into(), term_w, term_h),
+        Some(PanelKind::ThreadBrowser) => {
+            render_panel(element!(ThreadBrowserPanel()).into(), term_w, term_h)
+        }
+        Some(PanelKind::Mcp) => render_panel(element!(McpPanel()).into(), term_w, term_h),
+        Some(PanelKind::Plugin) => render_panel(element!(PluginPanel()).into(), term_w, term_h),
+        Some(PanelKind::Cron) => render_panel(element!(CronPanel()).into(), term_w, term_h),
+        Some(PanelKind::Status) => render_panel(element!(StatusPanel()).into(), term_w, term_h),
+        Some(PanelKind::Memory) => render_panel(element!(MemoryPanel()).into(), term_w, term_h),
+        Some(PanelKind::Tasks) => render_panel(element!(TasksPanel()).into(), term_w, term_h),
+        Some(PanelKind::Betas) => render_panel(element!(BetasPanel()).into(), term_w, term_h),
+        Some(PanelKind::Workflow) => render_panel(element!(WorkflowPanel()).into(), term_w, term_h),
         None => render_empty(),
     }
 }
 
-/// 包裹面板——给绝对定位的覆盖层一个填充背景的容器，
-/// 让面板的 Border 居中显示而不被主布局穿透。
-fn render_panel(panel: AnyElement<'static>) -> AnyElement<'static> {
-    let _ = (Direction::Vertical, Constraint::Fill(1)); // 静默未使用警告（element! 内引用）
-    panel
+/// 包裹面板——只定位和清除面板矩形，避免 Modal 整屏背景绘制导致白屏。
+fn render_panel(panel: AnyElement<'static>, term_w: u16, term_h: u16) -> AnyElement<'static> {
+    let width = term_w.saturating_sub(4).min(120).max(1);
+    let height = term_h.saturating_sub(4).min(36).max(1);
+    let x = term_w.saturating_sub(width) / 2;
+    let y = term_h.saturating_sub(height) / 2;
+
+    element!(
+        Positioned(x: x, y: y, width: width, height: height, clear: true) {
+            Center(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
+                { panel }
+            }
+        }
+    )
+    .into()
 }
 
-/// 空覆盖——无面板激活时返回。零尺寸 View，不影响下层渲染。
+/// 空覆盖——无面板激活时返回零尺寸 Positioned，避免默认 View/Fragment 布局参与父级 flex。
 fn render_empty() -> AnyElement<'static> {
-    element!(View(
-        flex_direction: Direction::Vertical,
-        width: Constraint::Fill(1),
-        height: Constraint::Fill(1),
-    ))
-    .into()
+    element!(Positioned(x: 0u16, y: 0u16, width: 0u16, height: 0u16, clear: false)).into()
 }

@@ -27,7 +27,7 @@ use ratatui_kit::{
 pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
 
-    let snap_store = hooks.use_store(*SERVICE_SNAPSHOT.get().unwrap());
+    let snap_store = hooks.use_atom(&SERVICE_SNAPSHOT);
     let provider_name = snap_store.read().provider_name.clone();
     let model_alias = snap_store.read().model_alias.clone();
     let permission_mode = snap_store.read().permission_mode.clone();
@@ -35,7 +35,7 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = snap_store;
 
     // 从 VIEW_MODELS 派生 subagent 列表 + 当前 iteration 计数
-    let vm_store = hooks.use_store(*VIEW_MODELS.get().unwrap());
+    let vm_store = hooks.use_atom(&VIEW_MODELS);
     let committed_count = vm_store.read().committed.len();
     let current_turn_count = vm_store.read().current_turn.len();
     let subagents = collect_subagents(&vm_store.read());
@@ -47,26 +47,28 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 候选行数（仅用于 cursor 边界）
     let row_count = 8 + subagent_count.max(1);
 
-    hooks.use_local_events({
-        move |event: Event| {
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    return;
-                }
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        *cursor.write() = cursor.read().saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let mut c = cursor.write();
-                        if row_count > 0 {
-                            *c = (*c + 1).min(row_count - 1);
-                        }
-                    }
-                    _ => {}
-                }
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
             }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => close_panel(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *cursor.write() = cursor.read().saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let mut c = cursor.write();
+                    if row_count > 0 {
+                        *c = (*c + 1).min(row_count - 1);
+                    }
+                }
+                _ => {}
+            }
+            EventResult::Consumed
         }
     });
 

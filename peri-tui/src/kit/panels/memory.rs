@@ -22,38 +22,40 @@ use ratatui_kit::{
 #[component]
 pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected = hooks.use_state(|| 0usize);
-    let store = hooks.use_store(*MEMORY_LIST.get().unwrap());
+    let store = hooks.use_atom(&MEMORY_LIST);
     let entries: Vec<MemoryEntry> = store.read().clone();
     let _ = store;
     let count = entries.len();
 
-    hooks.use_local_events({
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         let entries = entries.clone();
-        move |event: Event| {
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    return;
-                }
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        *selected.write() = selected.read().saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let mut s = selected.write();
-                        if count > 0 {
-                            *s = (*s + 1).min(count - 1);
-                        }
-                    }
-                    KeyCode::Enter => {
-                        let sel = *selected.read();
-                        if let Some(entry) = entries.get(sel) {
-                            open_memory_in_editor(&entry.path);
-                        }
-                    }
-                    _ => {}
-                }
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
             }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => close_panel(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *selected.write() = selected.read().saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let mut s = selected.write();
+                    if count > 0 {
+                        *s = (*s + 1).min(count - 1);
+                    }
+                }
+                KeyCode::Enter => {
+                    let sel = *selected.read();
+                    if let Some(entry) = entries.get(sel) {
+                        open_memory_in_editor(&entry.path);
+                    }
+                }
+                _ => {}
+            }
+            EventResult::Consumed
         }
     });
 

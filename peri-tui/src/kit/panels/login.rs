@@ -23,40 +23,42 @@ use ratatui_kit::{
 #[component]
 pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
-    let store = hooks.use_store(*PROVIDER_LIST.get().unwrap());
+    let store = hooks.use_atom(&PROVIDER_LIST);
     let providers: Vec<ProviderSummary> = store.read().clone();
     let _ = store;
     let count = providers.len();
     let bump = hooks.use_state(|| 0u32);
 
-    hooks.use_local_events({
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         let providers = providers.clone();
-        move |event: Event| {
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    return;
-                }
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        *cursor.write() = cursor.read().saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let mut c = cursor.write();
-                        if count > 0 {
-                            *c = (*c + 1).min(count - 1);
-                        }
-                    }
-                    KeyCode::Enter => {
-                        let sel = *cursor.read();
-                        if let Some(p) = providers.get(sel) {
-                            activate_provider(&p.id);
-                        }
-                        *bump.write() += 1;
-                    }
-                    _ => {}
-                }
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
             }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => close_panel(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *cursor.write() = cursor.read().saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let mut c = cursor.write();
+                    if count > 0 {
+                        *c = (*c + 1).min(count - 1);
+                    }
+                }
+                KeyCode::Enter => {
+                    let sel = *cursor.read();
+                    if let Some(p) = providers.get(sel) {
+                        activate_provider(&p.id);
+                    }
+                    *bump.write() += 1;
+                }
+                _ => {}
+            }
+            EventResult::Consumed
         }
     });
 

@@ -27,34 +27,36 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let active_tab = hooks.use_state(|| TAB_SERVICE);
 
     // S6c: 订阅 SERVICE_SNAPSHOT——后台 service_snapshot 2s 派生一次
-    let snapshot_store = hooks.use_store(*SERVICE_SNAPSHOT.get().unwrap());
+    let snapshot_store = hooks.use_atom(&SERVICE_SNAPSHOT);
     let snap = snapshot_store.read().clone();
     let _ = snapshot_store; // StoreState 是 Copy，无需显式 drop
 
     // H1a: 订阅 VIEW_MODELS，从派生 Context Tab 的消息计数（committed + current_turn
     // 的 ViewModel 分类统计）。这避免了占位文本，让 Context Tab 反映真实状态。
-    let vm_store = hooks.use_store(*VIEW_MODELS.get().unwrap());
+    let vm_store = hooks.use_atom(&VIEW_MODELS);
     let vm_stats = derive_vm_stats(&vm_store.read());
     let _ = vm_store;
 
-    hooks.use_local_events({
-        move |event: Event| {
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    return;
-                }
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
-                    KeyCode::Left => {
-                        *active_tab.write() = TAB_SERVICE;
-                    }
-                    KeyCode::Right => {
-                        *active_tab.write() = TAB_CONTEXT;
-                    }
-                    // Esc 由 PanelOverlay 上层处理
-                    _ => {}
-                }
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
             }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => close_panel(),
+                KeyCode::Left => {
+                    *active_tab.write() = TAB_SERVICE;
+                }
+                KeyCode::Right => {
+                    *active_tab.write() = TAB_CONTEXT;
+                }
+                // Esc 由 PanelOverlay 上层处理
+                _ => {}
+            }
+            EventResult::Consumed
         }
     });
 

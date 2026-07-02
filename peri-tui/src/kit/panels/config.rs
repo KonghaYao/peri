@@ -65,41 +65,43 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 写入不会自动触发 ratatui-kit 重渲染，需要手动 bump）
     let bump = hooks.use_state(|| 0u32);
 
-    hooks.use_local_events({
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         let row_count = CONFIG_ROWS.len();
 
-        move |event: Event| {
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    return;
-                }
-                let sel = *cursor.read();
-
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        close_panel();
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        *cursor.write() = sel.saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        *cursor.write() = (sel + 1).min(row_count - 1);
-                    }
-                    KeyCode::Char(' ') | KeyCode::Enter => {
-                        activate_row(sel, true);
-                        *bump.write() += 1;
-                    }
-                    KeyCode::Left => {
-                        activate_row(sel, false);
-                        *bump.write() += 1;
-                    }
-                    KeyCode::Right => {
-                        activate_row(sel, true);
-                        *bump.write() += 1;
-                    }
-                    _ => {}
-                }
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
             }
+            let sel = *cursor.read();
+
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    close_panel();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *cursor.write() = sel.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *cursor.write() = (sel + 1).min(row_count - 1);
+                }
+                KeyCode::Char(' ') | KeyCode::Enter => {
+                    activate_row(sel, true);
+                    *bump.write() += 1;
+                }
+                KeyCode::Left => {
+                    activate_row(sel, false);
+                    *bump.write() += 1;
+                }
+                KeyCode::Right => {
+                    activate_row(sel, true);
+                    *bump.write() += 1;
+                }
+                _ => {}
+            }
+            EventResult::Consumed
         }
     });
 

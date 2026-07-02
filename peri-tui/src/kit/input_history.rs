@@ -19,10 +19,8 @@ const MAX_HISTORY: usize = 100;
 
 /// 提交后写入历史。空白去重，与栈顶相同则不重复入栈。
 pub fn push_history(text: &str) {
-    let (Some(history_atom), Some(index_atom)) = (INPUT_HISTORY.get(), INPUT_HISTORY_INDEX.get())
-    else {
-        return;
-    };
+    let history_atom = INPUT_HISTORY.state();
+    let index_atom = INPUT_HISTORY_INDEX.state();
 
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -48,10 +46,8 @@ pub fn push_history(text: &str) {
 ///
 /// 空历史直接返回 None；已在最旧位置则维持并返回该位置文本。
 pub fn history_up() -> Option<String> {
-    let (Some(history_atom), Some(index_atom)) = (INPUT_HISTORY.get(), INPUT_HISTORY_INDEX.get())
-    else {
-        return None;
-    };
+    let history_atom = INPUT_HISTORY.state();
+    let index_atom = INPUT_HISTORY_INDEX.state();
 
     let history = history_atom.read().clone();
     if history.is_empty() {
@@ -69,45 +65,41 @@ pub fn history_up() -> Option<String> {
 
 /// 向新方向浏览一步。返回历史文本，或 None（已回到编辑状态）。
 pub fn history_down() -> Option<String> {
-    let (Some(history_atom), Some(index_atom)) = (INPUT_HISTORY.get(), INPUT_HISTORY_INDEX.get())
-    else {
-        return None;
-    };
+    let history_atom = INPUT_HISTORY.state();
+    let index_atom = INPUT_HISTORY_INDEX.state();
 
     let history = history_atom.read().clone();
     let current = *index_atom.read();
     let new_idx = match current {
         None => return None, // 已经在编辑状态，无需下移
-        Some(i) => i as i64 + 1,
+        Some(i) => i + 1,
     };
 
-    if new_idx as usize >= history.len() as i64 as usize {
+    if new_idx >= history.len() {
         // 超过最新——回到编辑状态
         *index_atom.write() = None;
         None
     } else {
-        *index_atom.write() = Some(new_idx as usize);
-        history.get(new_idx as usize).cloned()
+        *index_atom.write() = Some(new_idx);
+        history.get(new_idx).cloned()
     }
 }
 
 /// 清空浏览指针，回到编辑新文本状态。提交成功后必须调用。
 pub fn reset_history_cursor() {
-    if let Some(atom) = INPUT_HISTORY_INDEX.get() {
-        *atom.write() = None;
-    }
+    *INPUT_HISTORY_INDEX.state().write() = None;
 }
 
 /// 当前历史浏览位置（如有）。
 #[allow(dead_code)]
 pub fn current_index() -> Option<usize> {
-    INPUT_HISTORY_INDEX.get().and_then(|a| *a.read())
+    *INPUT_HISTORY_INDEX.state().read()
 }
 
 /// 历史条目数（测试 / 状态显示用）。
 #[allow(dead_code)]
 pub fn history_len() -> usize {
-    INPUT_HISTORY.get().map(|a| a.read().len()).unwrap_or(0)
+    INPUT_HISTORY.state().read().len()
 }
 
 #[cfg(test)]
@@ -118,12 +110,8 @@ mod tests {
 
     fn setup() {
         crate::kit::atoms::init_atoms();
-        if let Some(a) = INPUT_HISTORY.get() {
-            *a.write() = VecDeque::new();
-        }
-        if let Some(a) = INPUT_HISTORY_INDEX.get() {
-            *a.write() = None;
-        }
+        *INPUT_HISTORY.state().write() = VecDeque::new();
+        *INPUT_HISTORY_INDEX.state().write() = None;
     }
 
     #[test]
@@ -159,7 +147,7 @@ mod tests {
         setup();
         push_history("  hello  ");
         assert_eq!(history_len(), 1);
-        let stored: VecDeque<String> = INPUT_HISTORY.get().unwrap().read().clone();
+        let stored: VecDeque<String> = INPUT_HISTORY.state().read().clone();
         assert_eq!(stored[0], "hello");
     }
 
@@ -223,7 +211,7 @@ mod tests {
         }
         assert_eq!(history_len(), MAX_HISTORY);
         // 最旧的 cmd-0~49 应被丢弃，cmd-50 是栈底
-        let stored: VecDeque<String> = INPUT_HISTORY.get().unwrap().read().clone();
+        let stored: VecDeque<String> = INPUT_HISTORY.state().read().clone();
         assert_eq!(stored.front().map(String::as_str), Some("cmd-50"));
         assert_eq!(stored.back().map(String::as_str), Some("cmd-149"));
     }

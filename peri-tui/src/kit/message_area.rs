@@ -1,4 +1,4 @@
-//! 消息区域 ratatui-kit #[component]。
+//! MessageArea：消息流渲染区。
 //!
 //! 复用 `render/view_render.rs` 的 `render_v2_vm` 纯函数渲染全部 7 种 ViewModel 变体。
 //!
@@ -7,28 +7,29 @@
 //! 历史问题：原版本中 layout 传入 `scroll_offset: u16` prop 但本组件从不消费，
 //! 且没有任何按键写入 SCROLL_OFFSET atom——用户无法滚动长输出。
 //!
-//! 修复：本组件自管 `ScrollViewState`（ratatui-kit 0.6），并注册
+//! 修复：本组件自管 `ScrollViewState`（ratatui-kit 0.7 可控滚动模式），并注册
 //! Ctrl+Up/Ctrl+Down/Ctrl+Home/Ctrl+End 滚动键。之所以选 Ctrl+ 修饰符，
 //! 是因为：
 //! - Up/Down/Home/End 已被 InputArea 用于 history + 行内导航
 //! - PageUp/PageDown 被 CLAUDE.md 规则禁用
 //! - 鼠标滚轮在终端上跨平台支持不一致
 //!
-//! `use_local_events` 是广播式（不消费事件），所以 Ctrl+Up 也会传给 InputArea，
-//! 但 InputArea 的 match 中无对应分支，自然忽略——安全。
+//! 事件通过 `use_event_handler(EventScope::Current)` 注册，避免旧的
+//! 广播式局部事件注册方式。
 
 #![allow(clippy::needless_update)]
 
 use crate::kit::theme;
 use crate::kit::view_render;
+use crate::kit::welcome::Welcome;
 use peri_acp_types::view_model::ViewModel;
 use ratatui_kit::{
     components::scroll_view::{ScrollBars, ScrollView, ScrollViewState},
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, MouseEventKind},
     prelude::*,
     ratatui::{
-        layout::Constraint,
-        style::{Style, Stylize},
+        layout::{Constraint, Direction},
+        style::Style,
         text::{Line, Span},
         widgets::Paragraph,
     },
@@ -51,6 +52,15 @@ pub struct MessageAreaProps {
     pub width: usize,
     /// I19-B：diff 视图展开开关（Ctrl+O toggle）。
     pub diff_visible: bool,
+}
+
+fn visual_content_height(lines: &[Line<'static>], width: usize) -> u16 {
+    let width = width.max(1);
+    let rows = lines.iter().fold(0usize, |sum, line| {
+        let line_width = line.width().max(1);
+        sum.saturating_add(line_width.div_ceil(width))
+    });
+    rows.max(1).min(u16::MAX as usize) as u16
 }
 
 #[component]
@@ -79,47 +89,43 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         )]));
     }
 
+    let content_height = visual_content_height(&all_lines, props.width);
+    tracing::info!(
+        content_height,
+        line_count = all_lines.len(),
+        render_width = props.width,
+        "message area content metrics"
+    );
     let paragraph = if all_lines.is_empty() {
-        Paragraph::new(
-            Line::from("Start a conversation...")
-                .centered()
-                .fg(theme::MUTED),
-        )
+        None
     } else {
-        Paragraph::new(all_lines)
+        Some(Paragraph::new(all_lines))
     };
 
-    // I18-B：手动管理模式——本组件完全掌控滚动状态，避免与 InputArea 的 Up/Down 冲突。
-    // ScrollView 自动模式会监听 Up/Down/j/k/PageUp/PageDown/Home/End，与 InputArea 的
-    // history 导航和行内 Home/End 严重冲突，因此必须手动。
+    // 消息区只吃鼠标滚轮；键盘 Up/Down/Home/End 全部留给 InputArea。
+    // 滚轮事件依赖 entry.rs 显式 EnableMouseCapture，不能再用 KeyCode::Up/Down 模拟。
     let scroll_state = hooks.use_state(ScrollViewState::default);
 
-    hooks.use_local_events({
-        move |event| {
-            let Event::Key(key) = event else {
-                return;
-            };
-            if key.kind != KeyEventKind::Press {
-                return;
+    hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
+        let Event::Mouse(mouse) = event else {
+            return EventResult::Ignored;
+        };
+        tracing::info!(?mouse, "message area mouse event");
+        match mouse.kind {
+            MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight => {
+                let before = scroll_state.read().offset();
+                {
+                    let mut state = scroll_state.write();
+                    state.handle_event(&Event::Mouse(mouse));
+                }
+                let after = scroll_state.read().offset();
+                tracing::info!(?before, ?after, "message area handled mouse scroll");
+                EventResult::Consumed
             }
-            // 仅 Ctrl+ 方向键 / Home / End 触发滚动（避开 InputArea 的无修饰键绑定）
-            if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                return;
-            }
-            // 排除 Ctrl+Shift+ 等组合（仅纯 Ctrl+ 触发）
-            if key.modifiers.contains(KeyModifiers::SHIFT)
-                || key.modifiers.contains(KeyModifiers::ALT)
-            {
-                return;
-            }
-            let mut state = scroll_state.write();
-            match key.code {
-                KeyCode::Up => state.scroll_up(),
-                KeyCode::Down => state.scroll_down(),
-                KeyCode::Home => state.scroll_to_top(),
-                KeyCode::End => state.scroll_to_bottom(),
-                _ => {}
-            }
+            _ => EventResult::Ignored,
         }
     });
 
@@ -127,10 +133,31 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         ScrollView(
             scroll_view_state: scroll_state,
             scroll_bars: ScrollBars::default(),
+            flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
+            disabled: true,
         ) {
-            Text(text: paragraph)
+            {
+                if let Some(paragraph) = paragraph {
+                    element!(
+                        View(
+                            width: Constraint::Fill(1),
+                            height: Constraint::Length(content_height),
+                        ) {
+                            Text(text: paragraph)
+                        }
+                    )
+                    .into_any()
+                } else {
+                    element!(
+                        View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
+                            Welcome(width: props.width)
+                        }
+                    )
+                    .into_any()
+                }
+            }
         }
     )
 }

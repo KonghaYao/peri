@@ -22,47 +22,49 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
 
     // S6c: 订阅 THREAD_LIST atom——后台 service_snapshot 2s 派生一次
-    let threads_store = hooks.use_store(*THREAD_LIST.get().unwrap());
+    let threads_store = hooks.use_atom(&THREAD_LIST);
     let threads: Vec<ThreadSummary> = threads_store.read().clone();
     let _ = threads_store; // StoreState 是 Copy，无需显式 drop
     let count = threads.len();
 
-    hooks.use_local_events({
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         let threads_snapshot = threads.clone();
-        move |event: Event| {
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    return;
-                }
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        // 由 PanelOverlay 上层 Esc 处理关闭
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let mut c = cursor.write();
-                        *c = c.saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let mut c = cursor.write();
-                        if count > 0 {
-                            *c = (*c + 1).min(count - 1);
-                        }
-                    }
-                    KeyCode::Enter => {
-                        // H3: 通过 THREAD_LOAD_TX → thread_load_consumer → AcpClient.load_session
-                        // 切换成功后 ACP server 推送 ViewCommit 自动刷新消息流。
-                        let sel_idx = *cursor.read();
-                        if let Some(entry) = threads_snapshot.get(sel_idx) {
-                            if let Some(tx) = THREAD_LOAD_TX.get() {
-                                let _ = tx.send(entry.id.clone());
-                            }
-                            // I19-A: 弹栈而非清空整个栈
-                            crate::kit::panel_registry::close_active_panel();
-                        }
-                    }
-                    _ => {}
-                }
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
             }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    // 由 PanelOverlay 上层 Esc 处理关闭
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let mut c = cursor.write();
+                    *c = c.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let mut c = cursor.write();
+                    if count > 0 {
+                        *c = (*c + 1).min(count - 1);
+                    }
+                }
+                KeyCode::Enter => {
+                    // H3: 通过 THREAD_LOAD_TX → thread_load_consumer → AcpClient.load_session
+                    // 切换成功后 ACP server 推送 ViewCommit 自动刷新消息流。
+                    let sel_idx = *cursor.read();
+                    if let Some(entry) = threads_snapshot.get(sel_idx) {
+                        if let Some(tx) = THREAD_LOAD_TX.get() {
+                            let _ = tx.send(entry.id.clone());
+                        }
+                        // I19-A: 弹栈而非清空整个栈
+                        crate::kit::panel_registry::close_active_panel();
+                    }
+                }
+                _ => {}
+            }
+            EventResult::Consumed
         }
     });
 

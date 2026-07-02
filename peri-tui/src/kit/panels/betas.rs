@@ -1,6 +1,6 @@
 //! ratatui-kit BetasPanel component.
 //!
-//! Phase 6a: toggle list with cursor navigation (use_state + use_local_events).
+//! Phase 6a: toggle list with cursor navigation (use_state + use_event_handler).
 //! Mock data; Phase 8 通过 Atom/props 注入真实 feature 列表。
 
 use ratatui_kit::{
@@ -52,27 +52,33 @@ const BETA_ENTRIES: &[BetaEntry] = &[
 pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected = hooks.use_state(|| 0usize);
 
-    hooks.use_local_events({
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         let count = BETA_ENTRIES.len();
-        move |event: Event| {
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    return;
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
+            }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    close_panel();
+                    EventResult::Consumed
                 }
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let mut s = selected.write();
-                        *s = s.saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let mut s = selected.write();
-                        if count > 0 {
-                            *s = (*s + 1).min(count - 1);
-                        }
-                    }
-                    _ => {}
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let mut s = selected.write();
+                    *s = s.saturating_sub(1);
+                    EventResult::Consumed
                 }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let mut s = selected.write();
+                    if count > 0 {
+                        *s = (*s + 1).min(count - 1);
+                    }
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
             }
         }
     });

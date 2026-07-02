@@ -10,6 +10,7 @@
 //! `Vec<PanelKind>` 不会同时含两个同组面板。
 
 use ratatui_kit::crossterm::event::KeyCode;
+use std::borrow::Cow;
 
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
@@ -128,6 +129,25 @@ pub const PANELS: &[PanelMeta] = &[
     },
 ];
 
+pub fn slash_command_for_panel(kind: PanelKind) -> Cow<'static, str> {
+    match kind {
+        PanelKind::ThreadBrowser => Cow::Borrowed("threads"),
+        other => Cow::Owned(
+            meta(other)
+                .map(|m| m.title.to_ascii_lowercase())
+                .unwrap_or_default(),
+        ),
+    }
+}
+
+pub fn panel_for_slash_command(command: &str) -> Option<PanelKind> {
+    let normalized = command.trim_start_matches('/').to_ascii_lowercase();
+    PANELS
+        .iter()
+        .find(|m| slash_command_for_panel(m.kind) == normalized)
+        .map(|m| m.kind)
+}
+
 /// 查找面板元数据。未注册返回 None。
 pub fn meta(kind: PanelKind) -> Option<&'static PanelMeta> {
     PANELS.iter().find(|m| m.kind == kind)
@@ -162,14 +182,8 @@ pub fn from_key_code(code: KeyCode) -> Option<PanelKind> {
 /// - 若同 MutexGroup 有其他面板：先关闭它们。
 /// - 若面板不在栈中：push 到栈尾（栈顶）。
 pub fn open_panel(kind: PanelKind) {
-    let open_atom = match OPEN_PANELS.get() {
-        Some(a) => a,
-        None => return,
-    };
-    let active_atom = match ACTIVE_PANEL.get() {
-        Some(a) => a,
-        None => return,
-    };
+    let open_atom = OPEN_PANELS.state();
+    let active_atom = ACTIVE_PANEL.state();
 
     let group = kind.mutex_group();
     let mut current = open_atom.read().clone();
@@ -191,44 +205,37 @@ pub fn open_panel(kind: PanelKind) {
 ///
 /// 返回被关闭的 PanelKind（若有），调用方可用于日志/状态反馈。
 pub fn close_active_panel() -> Option<PanelKind> {
-    let open_atom = OPEN_PANELS.get()?;
-    let active_atom = ACTIVE_PANEL.get()?;
+    let open_atom = OPEN_PANELS.state();
+    let active_atom = ACTIVE_PANEL.state();
 
     let mut current = open_atom.read().clone();
     let closed = current.pop();
+    let next_active = current.last().copied();
     *open_atom.write() = current;
-    *active_atom.write() = open_atom.read().last().copied();
+    *active_atom.write() = next_active;
     closed
 }
 
 /// 关闭指定面板：从栈中移除，若它原本是栈顶则更新 ACTIVE_PANEL。
 pub fn close_panel(kind: PanelKind) -> bool {
-    let open_atom = match OPEN_PANELS.get() {
-        Some(a) => a,
-        None => return false,
-    };
-    let active_atom = match ACTIVE_PANEL.get() {
-        Some(a) => a,
-        None => return false,
-    };
+    let open_atom = OPEN_PANELS.state();
+    let active_atom = ACTIVE_PANEL.state();
 
     let mut current = open_atom.read().clone();
     let before_len = current.len();
     current.retain(|k| *k != kind);
     let removed = current.len() < before_len;
     if removed {
+        let next_active = current.last().copied();
         *open_atom.write() = current;
-        *active_atom.write() = open_atom.read().last().copied();
+        *active_atom.write() = next_active;
     }
     removed
 }
 
 /// Toggle：若已打开则关闭，否则打开。返回操作后的最终状态（true=已打开）。
 pub fn toggle_panel(kind: PanelKind) -> bool {
-    let is_open = OPEN_PANELS
-        .get()
-        .map(|a| a.read().contains(&kind))
-        .unwrap_or(false);
+    let is_open = OPEN_PANELS.state().read().contains(&kind);
     if is_open {
         close_panel(kind);
         false
@@ -240,12 +247,8 @@ pub fn toggle_panel(kind: PanelKind) -> bool {
 
 /// 关闭所有面板（清空栈）。
 pub fn close_all_panels() {
-    if let Some(a) = OPEN_PANELS.get() {
-        *a.write() = Vec::new();
-    }
-    if let Some(a) = ACTIVE_PANEL.get() {
-        *a.write() = None;
-    }
+    *OPEN_PANELS.state().write() = Vec::new();
+    *ACTIVE_PANEL.state().write() = None;
 }
 
 #[cfg(test)]
@@ -257,8 +260,8 @@ mod tests {
     fn setup_atoms() {
         crate::kit::atoms::init_atoms();
         // 重置为空
-        *OPEN_PANELS.get().unwrap().write() = Vec::new();
-        *ACTIVE_PANEL.get().unwrap().write() = None;
+        *OPEN_PANELS.state().write() = Vec::new();
+        *ACTIVE_PANEL.state().write() = None;
     }
 
     #[test]
@@ -292,9 +295,9 @@ mod tests {
     fn test_open_panel_pushes_to_stack() {
         setup_atoms();
         open_panel(PanelKind::Model);
-        let stack = OPEN_PANELS.get().unwrap().read().clone();
+        let stack = OPEN_PANELS.state().read().clone();
         assert_eq!(stack, vec![PanelKind::Model]);
-        assert_eq!(*ACTIVE_PANEL.get().unwrap().read(), Some(PanelKind::Model));
+        assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Model));
     }
 
     #[test]
@@ -303,9 +306,9 @@ mod tests {
         setup_atoms();
         open_panel(PanelKind::Model); // Settings 组
         open_panel(PanelKind::Cron); // Tools 组
-        let stack = OPEN_PANELS.get().unwrap().read().clone();
+        let stack = OPEN_PANELS.state().read().clone();
         assert_eq!(stack, vec![PanelKind::Model, PanelKind::Cron]);
-        assert_eq!(*ACTIVE_PANEL.get().unwrap().read(), Some(PanelKind::Cron));
+        assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Cron));
     }
 
     #[test]
@@ -315,10 +318,10 @@ mod tests {
         // Model 和 Config 都属于 Settings 组
         open_panel(PanelKind::Model);
         open_panel(PanelKind::Config);
-        let stack = OPEN_PANELS.get().unwrap().read().clone();
+        let stack = OPEN_PANELS.state().read().clone();
         // Model 应被替换为 Config
         assert_eq!(stack, vec![PanelKind::Config]);
-        assert_eq!(*ACTIVE_PANEL.get().unwrap().read(), Some(PanelKind::Config));
+        assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Config));
     }
 
     #[test]
@@ -329,9 +332,9 @@ mod tests {
         open_panel(PanelKind::Cron); // Tools（不同组，共存）
         open_panel(PanelKind::Model); // 再次打开 Model——应移到栈顶
 
-        let stack = OPEN_PANELS.get().unwrap().read().clone();
+        let stack = OPEN_PANELS.state().read().clone();
         assert_eq!(stack, vec![PanelKind::Cron, PanelKind::Model]);
-        assert_eq!(*ACTIVE_PANEL.get().unwrap().read(), Some(PanelKind::Model));
+        assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Model));
     }
 
     #[test]
@@ -343,9 +346,9 @@ mod tests {
 
         let closed = close_active_panel();
         assert_eq!(closed, Some(PanelKind::Cron));
-        let stack = OPEN_PANELS.get().unwrap().read().clone();
+        let stack = OPEN_PANELS.state().read().clone();
         assert_eq!(stack, vec![PanelKind::Model]);
-        assert_eq!(*ACTIVE_PANEL.get().unwrap().read(), Some(PanelKind::Model));
+        assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Model));
     }
 
     #[test]
@@ -366,9 +369,9 @@ mod tests {
         // 关闭非栈顶的 Model
         let removed = close_panel(PanelKind::Model);
         assert!(removed);
-        let stack = OPEN_PANELS.get().unwrap().read().clone();
+        let stack = OPEN_PANELS.state().read().clone();
         assert_eq!(stack, vec![PanelKind::Cron]);
-        assert_eq!(*ACTIVE_PANEL.get().unwrap().read(), Some(PanelKind::Cron));
+        assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Cron));
     }
 
     #[test]
@@ -385,12 +388,12 @@ mod tests {
         setup_atoms();
         let opened = toggle_panel(PanelKind::Model);
         assert!(opened);
-        assert_eq!(*ACTIVE_PANEL.get().unwrap().read(), Some(PanelKind::Model));
+        assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Model));
 
         let closed = toggle_panel(PanelKind::Model);
         assert!(!closed);
-        assert!(OPEN_PANELS.get().unwrap().read().is_empty());
-        assert_eq!(*ACTIVE_PANEL.get().unwrap().read(), None);
+        assert!(OPEN_PANELS.state().read().is_empty());
+        assert_eq!(*ACTIVE_PANEL.state().read(), None);
     }
 
     #[test]
@@ -400,8 +403,8 @@ mod tests {
         open_panel(PanelKind::Model);
         open_panel(PanelKind::Cron);
         close_all_panels();
-        assert!(OPEN_PANELS.get().unwrap().read().is_empty());
-        assert_eq!(*ACTIVE_PANEL.get().unwrap().read(), None);
+        assert!(OPEN_PANELS.state().read().is_empty());
+        assert_eq!(*ACTIVE_PANEL.state().read(), None);
     }
 
     #[test]

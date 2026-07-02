@@ -21,14 +21,18 @@ use ratatui_kit::{
         widgets::{Block, Borders, Paragraph},
     },
 };
+use std::sync::{Arc, Mutex};
 
 use crate::kit::atoms::{
-    ACP_STATE, AT_MENTION_ACTIVE, FILE_LIST, INPUT_BUFFER, MENTION_PREFIX, MENTION_SELECTED_INDEX,
-    SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX,
+    ACP_STATE, AT_MENTION_ACTIVE, FILE_LIST, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, MENTION_PREFIX,
+    MENTION_SELECTED_INDEX, SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX,
 };
 use crate::kit::input_history::{history_down, history_up, push_history};
 use crate::kit::mention_popup::MentionPopup;
-use crate::kit::slash_completion::SlashCompletion;
+use crate::kit::panel_registry::{
+    PANELS, open_panel, panel_for_slash_command, slash_command_for_panel,
+};
+use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
 use crate::kit::theme;
 
 /// 静态 slash 命令列表——补全提示用。
@@ -43,44 +47,11 @@ use crate::kit::theme;
 /// - **状态查看**：/cost /context /status
 /// - **面板入口**：/agents /threads /mcp /cron /tasks /memory /hooks /config /plugins /lsp
 /// - **子 Agent / 技能**：/subagent /workflow /skill
-const SLASH_COMMANDS: &[&str] = &[
-    // ACP server 内置
-    "/bg",
-    "/clear",
-    "/compact",
-    "/rewind",
-    // 会话控制
-    "/help",
-    "/quit",
-    "/init",
-    "/resume",
-    "/continue",
-    "/bug",
-    // 配置类
-    "/mode",
-    "/yolo",
-    "/model",
-    "/login",
-    "/permissions",
-    // 状态查看
-    "/cost",
-    "/context",
-    "/status",
-    // 面板入口
-    "/agents",
-    "/threads",
-    "/mcp",
-    "/cron",
-    "/tasks",
-    "/memory",
-    "/hooks",
-    "/config",
-    "/plugins",
-    "/lsp",
-    // 子 Agent / 技能
-    "/subagent",
-    "/workflow",
-    "/skill",
+const REMOTE_SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("bg", "Run the next prompt as a background task"),
+    ("clear", "Clear current thread messages"),
+    ("compact", "Compact conversation context"),
+    ("rewind", "Delete the most recent user turn"),
 ];
 
 /// 输入状态
@@ -128,6 +99,52 @@ impl EditorState {
         if self.cursor < self.len() {
             self.cursor += 1;
         }
+    }
+
+    /// 左移到上一个词边界
+    fn cursor_word_left(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let mut new_cursor = self.cursor;
+        while new_cursor > 0 {
+            let prev = self.char_at(new_cursor - 1);
+            if !prev.is_whitespace() {
+                break;
+            }
+            new_cursor -= 1;
+        }
+        while new_cursor > 0 {
+            let prev = self.char_at(new_cursor - 1);
+            if prev.is_whitespace() {
+                break;
+            }
+            new_cursor -= 1;
+        }
+        self.cursor = new_cursor;
+    }
+
+    /// 右移到下一个词边界
+    fn cursor_word_right(&mut self) {
+        if self.cursor >= self.len() {
+            return;
+        }
+        let mut new_cursor = self.cursor;
+        while new_cursor < self.len() {
+            let ch = self.char_at(new_cursor);
+            if ch.is_whitespace() {
+                break;
+            }
+            new_cursor += 1;
+        }
+        while new_cursor < self.len() {
+            let ch = self.char_at(new_cursor);
+            if !ch.is_whitespace() {
+                break;
+            }
+            new_cursor += 1;
+        }
+        self.cursor = new_cursor;
     }
 
     /// 光标到文本首
@@ -188,6 +205,13 @@ impl EditorState {
             .map(|(i, _)| i)
             .unwrap_or(s.len())
     }
+
+    fn char_at(&self, char_idx: usize) -> char {
+        self.text
+            .chars()
+            .nth(char_idx)
+            .expect("cursor must stay within character bounds")
+    }
 }
 
 #[derive(Default, Props)]
@@ -200,318 +224,363 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     // 单一编辑状态——闭包编辑 + 渲染读取共享同一实例
     let state = hooks.use_state(EditorState::default);
 
-    hooks.use_local_events(move |event: Event| match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => {
-            let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
-            let is_alt = key.modifiers.contains(KeyModifiers::ALT);
+    hooks.use_event_handler(
+        EventScope::Current,
+        EventPriority::Normal,
+        move |event| match event {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                let is_alt = key.modifiers.contains(KeyModifiers::ALT);
 
-            // 当前是否激活了 @mention / slash（激活时方向键给 popup 用）
-            let mention_active = AT_MENTION_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
-            let slash_active = SLASH_HINT_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
-
-            match key.code {
-                // ── 提交 ──（仅在不激活 popup 时按 Enter 提交）
-                KeyCode::Enter if !is_shift && !is_alt && !mention_active && !slash_active => {
-                    let mut s = state.write();
-                    let submitted = std::mem::take(&mut s.text);
-                    s.cursor = 0;
-                    if !submitted.trim().is_empty() {
-                        // 入历史栈
-                        push_history(&submitted);
-                        // 关键：loading 时入 INPUT_BUFFER，否则 SUBMIT_TX 直接提交。
-                        // 通过 ACP_STATE.is_loading 判断当前 agent 是否运行——
-                        // 这是 ratatui-kit 跨闭包共享 loading 状态的官方方式。
-                        let is_loading = ACP_STATE
-                            .get()
-                            .map(|a| a.read().is_loading)
-                            .unwrap_or(false);
-                        if is_loading {
-                            if let Some(buf) = INPUT_BUFFER.get() {
-                                let mut guard = buf.write();
-                                guard.push_back(submitted);
-                                // 上限 32 条，超出从头部丢弃
-                                while guard.len() > 32 {
-                                    guard.pop_front();
-                                }
-                            }
-                        } else if let Some(tx) = SUBMIT_TX.get() {
-                            let _ = tx.send(submitted);
-                        }
-                        // 关闭可能的 @mention/slash
-                        if let Some(a) = AT_MENTION_ACTIVE.get() {
-                            *a.write() = false;
-                        }
-                        if let Some(a) = SLASH_HINT_ACTIVE.get() {
-                            *a.write() = false;
-                        }
-                    }
+                if matches!(key.code, KeyCode::Esc) {
+                    INPUT_AREA_ESC_PREFIX.set(is_alt);
+                } else {
+                    INPUT_AREA_ESC_PREFIX.set(false);
                 }
 
-                // Shift/Alt+Enter：换行（多行 buffer）
-                KeyCode::Enter if (is_shift || is_alt) && !mention_active && !slash_active => {
-                    state.write().insert_char('\n');
-                }
+                // 当前是否激活了 @mention / slash（激活时方向键给 popup 用）
+                let mention_active = *AT_MENTION_ACTIVE.state().read();
+                let slash_active = *SLASH_HINT_ACTIVE.state().read();
 
-                // ── popup 激活时方向键 / Enter 给 popup ──
-                // 这里 popup 自身的 use_local_events 会消费 Up/Down；
-                // Enter/Esc 我们在 InputArea 层处理：选择第一项 / 取消
-                KeyCode::Enter if mention_active => {
-                    // I18-C：读取 popup 选中项索引，选取真实文件名（而非仅 prefix）
-                    let prefix = MENTION_PREFIX
-                        .get()
-                        .map(|a| a.read().clone())
-                        .unwrap_or_default();
-                    let candidates = filter_files_for_mention(&prefix);
-                    let sel_idx = MENTION_SELECTED_INDEX.get().map(|a| *a.read()).unwrap_or(0);
-                    let replacement = candidates.get(sel_idx).cloned().unwrap_or_default();
-                    // 找到 @ 字符位置并替换其后所有 mention prefix
-                    let mut s = state.write();
-                    if let Some(at_byte) = s.text.rfind('@') {
-                        let after_at_byte = at_byte + 1;
-                        // 删除 @ 后的所有非空白字符（即旧的 prefix）
-                        let keep_until_byte = s.text[after_at_byte..]
-                            .char_indices()
-                            .take_while(|(_, c)| !c.is_whitespace())
-                            .last()
-                            .map(|(i, c)| after_at_byte + i + c.len_utf8())
-                            .unwrap_or(after_at_byte);
-                        s.text.drain(after_at_byte..keep_until_byte);
-                        // 插入替换文本
-                        s.text.insert_str(after_at_byte, &replacement);
-                        s.cursor = s.text.chars().count();
-                    }
-                    drop(s);
-                    if let Some(a) = AT_MENTION_ACTIVE.get() {
-                        *a.write() = false;
-                    }
-                    if let Some(a) = MENTION_PREFIX.get() {
-                        a.write().clear();
-                    }
-                    // 重置选中索引，下次开 popup 默认第 0 项
-                    if let Some(a) = MENTION_SELECTED_INDEX.get() {
-                        *a.write() = 0;
-                    }
-                }
-                KeyCode::Enter if slash_active => {
-                    let prefix = SLASH_PREFIX
-                        .get()
-                        .map(|a| a.read().clone())
-                        .unwrap_or_default();
-                    // I18-C：按 popup 相同过滤逻辑获取真实选中命令
-                    let prefix_lower = prefix.to_lowercase();
-                    let filtered: Vec<String> = SLASH_COMMANDS
-                        .iter()
-                        .map(|s| s.to_string())
-                        .filter(|cmd| {
-                            prefix_lower.is_empty() || cmd.to_lowercase().starts_with(&prefix_lower)
-                        })
-                        .collect();
-                    let sel_idx = SLASH_SELECTED_INDEX.get().map(|a| *a.read()).unwrap_or(0);
-                    let cmd = filtered.get(sel_idx).cloned();
-                    let mut s = state.write();
-                    // 替换整个 editor 内容为命令
-                    if let Some(cmd) = cmd {
-                        s.replace_all(cmd.clone());
-                        // 立即提交命令——同样检查 loading 入 buffer
+                let result = match key.code {
+                    // ── 提交 ──（仅在不激活 popup 时按 Enter 提交）
+                    KeyCode::Enter if !is_shift && !is_alt && !mention_active && !slash_active => {
+                        let mut s = state.write();
+                        let submitted = std::mem::take(&mut s.text);
+                        s.cursor = 0;
                         drop(s);
-                        let final_text = state.read().text.clone();
-                        if !final_text.trim().is_empty() {
-                            push_history(&final_text);
-                            let is_loading = ACP_STATE
-                                .get()
-                                .map(|a| a.read().is_loading)
-                                .unwrap_or(false);
-                            if is_loading {
-                                if let Some(buf) = INPUT_BUFFER.get() {
-                                    let mut guard = buf.write();
-                                    guard.push_back(final_text);
-                                    while guard.len() > 32 {
-                                        guard.pop_front();
-                                    }
-                                }
-                            } else if let Some(tx) = SUBMIT_TX.get() {
-                                let _ = tx.send(final_text);
-                            }
-                            state.write().clear();
+
+                        submit_text(submitted);
+                        reset_mention_popup();
+                        reset_slash_popup();
+                        EventResult::Consumed
+                    }
+
+                    // Shift/Alt+Enter：换行（多行 buffer）
+                    KeyCode::Enter if (is_shift || is_alt) && !mention_active && !slash_active => {
+                        state.write().insert_char('\n');
+                        EventResult::Consumed
+                    }
+
+                    // ── 编辑快捷键 ──
+                    KeyCode::Char('w') if is_ctrl => {
+                        state.write().delete_word_backward();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('u') if is_ctrl => {
+                        state.write().clear();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Backspace if !mention_active && !slash_active => {
+                        let mut s = state.write();
+                        s.backspace();
+                        if *SLASH_HINT_ACTIVE.state().read() && !s.text.starts_with('/') {
+                            *SLASH_HINT_ACTIVE.state().write() = false;
                         }
-                    } else {
-                        drop(s);
+                        EventResult::Consumed
                     }
-                    if let Some(a) = SLASH_HINT_ACTIVE.get() {
-                        *a.write() = false;
+                    KeyCode::Backspace => {
+                        let mut s = state.write();
+                        s.backspace();
+                        update_popup_prefix(&s.text);
+                        EventResult::Consumed
                     }
-                    if let Some(a) = SLASH_PREFIX.get() {
-                        a.write().clear();
+                    KeyCode::Left if is_alt && !is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_word_left();
+                        EventResult::Consumed
                     }
-                    // 重置选中索引
-                    if let Some(a) = SLASH_SELECTED_INDEX.get() {
-                        *a.write() = 0;
+                    KeyCode::Right if is_alt && !is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_word_right();
+                        EventResult::Consumed
                     }
-                }
-
-                // ── 编辑快捷键 ──
-                KeyCode::Char('w') if is_ctrl => {
-                    state.write().delete_word_backward();
-                }
-                KeyCode::Char('u') if is_ctrl => {
-                    state.write().clear();
-                }
-                KeyCode::Backspace if !mention_active && !slash_active => {
-                    let mut s = state.write();
-                    s.backspace();
-                    // 若删完后文本不以 / 开头，关闭 slash 提示
-                    if let Some(a) = SLASH_HINT_ACTIVE.get()
-                        && *a.read()
-                        && !s.text.starts_with('/')
-                    {
-                        *a.write() = false;
+                    KeyCode::Left if !mention_active && !slash_active => {
+                        state.write().cursor_left();
+                        EventResult::Consumed
                     }
-                }
-                KeyCode::Backspace => {
-                    // popup 激活时退格——更新 prefix
-                    let mut s = state.write();
-                    s.backspace();
-                    update_popup_prefix(&s.text);
-                }
-                KeyCode::Left if !mention_active && !slash_active => {
-                    state.write().cursor_left();
-                }
-                KeyCode::Right if !mention_active && !slash_active => {
-                    state.write().cursor_right();
-                }
-                // ── history 导航（仅在不激活 popup 且无 Ctrl 修饰时）──
-                // I18-B：必须排除 Ctrl+Up/Down/Home/End——这些键留给 message_area 滚动。
-                // use_local_events 是广播式，InputArea 和 MessageArea 都会收到同一事件。
-                KeyCode::Up if !is_ctrl && !mention_active && !slash_active => {
-                    if let Some(historical) = history_up() {
-                        state.write().replace_all(historical);
+                    KeyCode::Right if !mention_active && !slash_active => {
+                        state.write().cursor_right();
+                        EventResult::Consumed
                     }
-                }
-                KeyCode::Down if !is_ctrl && !mention_active && !slash_active => {
-                    match history_down() {
-                        Some(historical) => state.write().replace_all(historical),
-                        None => {
-                            // 回到编辑态——保留当前文本（草稿语义）
+                    // ── history 导航（仅在不激活 popup 且无 Ctrl 修饰时）──
+                    // I18-B：必须排除 Ctrl+Up/Down/Home/End——这些键留给 message_area 滚动。
+                    // 事件现在分别由 InputArea / MessageArea 用 `use_event_handler` 注册，
+                    // 因此这里显式避开 Ctrl+ 组合，避免与消息区滚动键冲突。
+                    KeyCode::Up if !is_ctrl && !mention_active && !slash_active => {
+                        tracing::info!(?key, "input area consumed history up");
+                        if let Some(historical) = history_up() {
+                            state.write().replace_all(historical);
                         }
+                        EventResult::Consumed
                     }
-                }
-                KeyCode::Home if !is_ctrl && !mention_active && !slash_active => {
-                    state.write().cursor_home();
-                }
-                KeyCode::End if !is_ctrl && !mention_active && !slash_active => {
-                    state.write().cursor_end();
-                }
-                // I19-D：Esc 不再清空草稿——用户多行输入时误按 Esc 会丢失全部内容。
-                // 双击 Esc 由 event_handlers.rs 上层处理（触发 RewindPopup），
-                // 用户想清空输入框用 Ctrl+U。popup 激活时 Esc 由 event_handlers 关 popup。
-                KeyCode::Esc if !mention_active && !slash_active => {
-                    // no-op：保留草稿
-                }
+                    KeyCode::Down if !is_ctrl && !mention_active && !slash_active => {
+                        tracing::info!(?key, "input area consumed history down");
+                        if let Some(historical) = history_down() {
+                            state.write().replace_all(historical);
+                        }
+                        EventResult::Consumed
+                    }
+                    KeyCode::Home if !is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_home();
+                        EventResult::Consumed
+                    }
+                    KeyCode::End if !is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_end();
+                        EventResult::Consumed
+                    }
+                    // I19-D：Esc 不再清空草稿——用户多行输入时误按 Esc 会丢失全部内容。
+                    // 双击 Esc 由 event_handlers.rs 上层处理（触发 RewindPopup），
+                    // 用户想清空输入框用 Ctrl+U。popup 激活时 Esc 由 event_handlers 关 popup。
+                    KeyCode::Esc if !mention_active && !slash_active => EventResult::Ignored,
 
-                // ── 字符输入 ──
-                KeyCode::Char(ch) if !is_ctrl && !is_alt => {
-                    let mut s = state.write();
-                    s.insert_char(ch);
-                    // 触发 @mention / slash 提示
-                    update_popup_prefix(&s.text);
-                }
+                    // ── 字符输入 ──
+                    KeyCode::Char(ch) if !is_ctrl && !is_alt => {
+                        let mut s = state.write();
+                        s.insert_char(ch);
+                        update_popup_prefix(&s.text);
+                        EventResult::Consumed
+                    }
 
-                _ => {}
+                    _ => EventResult::Ignored,
+                };
+
+                if !is_alt {
+                    INPUT_AREA_ESC_PREFIX.set(false);
+                }
+                result
             }
-        }
-        Event::Paste(paste_text) => {
-            // I22-A：paste 大小上限——防止用户误粘 10MB 日志冻结终端。
-            // 10_000 chars 足够覆盖正常长 paste（代码片段、命令输出）；
-            // 超出截断并 log warn 提示（用户可改用文件追加方式）。
-            const MAX_PASTE_CHARS: usize = 10_000;
-            let char_count = paste_text.chars().count();
-            let truncated: String = paste_text.chars().take(MAX_PASTE_CHARS).collect();
-            if char_count > MAX_PASTE_CHARS {
-                tracing::warn!(
-                    original_chars = char_count,
-                    capped_at = MAX_PASTE_CHARS,
-                    "InputArea: paste 截断——超出 10K char 上限"
-                );
+            Event::Paste(paste_text) => {
+                // I22-A：paste 大小上限——防止用户误粘 10MB 日志冻结终端。
+                // 10_000 chars 足够覆盖正常长 paste（代码片段、命令输出）；
+                // 超出截断并 log warn 提示（用户可改用文件追加方式）。
+                const MAX_PASTE_CHARS: usize = 10_000;
+                let char_count = paste_text.chars().count();
+                let truncated: String = paste_text.chars().take(MAX_PASTE_CHARS).collect();
+                if char_count > MAX_PASTE_CHARS {
+                    tracing::warn!(
+                        original_chars = char_count,
+                        capped_at = MAX_PASTE_CHARS,
+                        "InputArea: paste 截断——超出 10K char 上限"
+                    );
+                }
+                let mut s = state.write();
+                s.insert_str(&truncated);
+                update_popup_prefix(&s.text);
+                EventResult::Consumed
             }
-            let mut s = state.write();
-            s.insert_str(&truncated);
-            update_popup_prefix(&s.text);
-        }
-        _ => {}
-    });
+            _ => EventResult::Ignored,
+        },
+    );
     let editor = state.read().clone();
     let text = editor.text.clone();
     let cursor = editor.cursor;
     let loading = props.loading;
 
     // 当前激活状态（驱动 popup 渲染）
-    let mention_active = AT_MENTION_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
-    let slash_active = SLASH_HINT_ACTIVE.get().map(|a| *a.read()).unwrap_or(false);
-    let mention_prefix = MENTION_PREFIX
-        .get()
-        .map(|a| a.read().clone())
-        .unwrap_or_default();
-    let slash_prefix = SLASH_PREFIX
-        .get()
-        .map(|a| a.read().clone())
-        .unwrap_or_default();
+    let mention_active = *AT_MENTION_ACTIVE.state().read();
+    let slash_active = *SLASH_HINT_ACTIVE.state().read();
+    let mention_prefix = MENTION_PREFIX.state().read().clone();
+    let slash_prefix = SLASH_PREFIX.state().read().clone();
 
     // 多行渲染——按 \n 拆分，每行作为独立 Line，光标高亮放在对应行
     let lines = render_multiline_with_cursor(&text, cursor, loading);
 
-    // 计算高度：3 行基础 + 文本行数；最大 12 行
+    // 计算 composer 本体高度；popup 额外占位，避免被输入区自身裁切。
     let line_count = text.matches('\n').count() + 1;
-    let editor_height = (line_count as u16 + 2).min(12);
+    let editor_rows = (line_count as u16).clamp(1, 10);
+    let composer_height = editor_rows + 2;
 
-    let slash_commands: Vec<String> = SLASH_COMMANDS.iter().map(|s| s.to_string()).collect();
+    let slash_items = build_slash_items();
+    let mention_select_state = state.clone();
+    let slash_select_state = state.clone();
 
-    // popup 高度建议——避免高度计算复杂，固定 8 行
-    let _ = editor_height;
+    let slash_popup_height = if slash_active {
+        popup_height(slash_items.len())
+    } else {
+        0
+    };
+    let mention_popup_height = if mention_active {
+        popup_height(filter_files_for_mention(&mention_prefix).len())
+    } else {
+        0
+    };
+    let total_height = composer_height + slash_popup_height + mention_popup_height;
+
+    let composer_lines = build_composer_lines(lines, loading);
+    let mention_items = filter_files_for_mention(&mention_prefix);
 
     element!(
         View(
             flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
-            height: Constraint::Fill(1),
+            height: Constraint::Length(total_height),
         ) {
-            #(if slash_active {
+            { if slash_active {
                 element!(SlashCompletion(
                     prefix: slash_prefix.clone(),
-                    commands: slash_commands.clone(),
-                    on_select: Handler::from(|_: String| {}),
-                    on_cancel: Handler::from(|_: ()| {}),
+                    items: slash_items.clone(),
+                    on_select: Arc::new(Mutex::new(Handler::from(move |item: SlashCompletionItem| {
+                        match item.kind {
+                            SlashActionKind::Panel => {
+                                if let Some(kind) = panel_for_slash_command(&item.insert_text) {
+                                    open_panel(kind);
+                                }
+                            }
+                            SlashActionKind::Command => {
+                                let mut editor = slash_select_state.write();
+                                apply_slash_selection(&mut editor, &item.insert_text);
+                            }
+                        }
+                        reset_slash_popup();
+                    }))),
+                    on_cancel: Arc::new(Mutex::new(Handler::from(|_: ()| {
+                        reset_slash_popup();
+                    }))),
                 )).into_any()
             } else {
                 element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
-            })
-            #(if mention_active {
+            } }
+            { if mention_active {
                 element!(MentionPopup(
                     prefix: mention_prefix.clone(),
-                    items: filter_files_for_mention(&mention_prefix),
-                    on_select: Handler::from(|_: String| {}),
-                    on_cancel: Handler::from(|_: ()| {}),
+                    items: mention_items.clone(),
+                    on_select: Arc::new(Mutex::new(Handler::from(move |replacement: String| {
+                        let mut editor = mention_select_state.write();
+                        replace_last_mention(&mut editor, &replacement);
+                        reset_mention_popup();
+                    }))),
+                    on_cancel: Arc::new(Mutex::new(Handler::from(|_: ()| {
+                        reset_mention_popup();
+                    }))),
                 )).into_any()
             } else {
                 element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
-            })
+            } }
             View(
                 flex_direction: Direction::Vertical,
                 width: Constraint::Fill(1),
-                height: Constraint::Length(editor_height),
+                height: Constraint::Length(composer_height),
             ) {
-                Text(text: Paragraph::new(lines).block(
-                    if loading {
-                        Block::default()
-                            .borders(Borders::TOP)
-                            .border_style(ratatui::style::Style::new().fg(theme::MUTED))
-                    } else {
-                        Block::default().borders(Borders::TOP)
-                    }
-                ))
+                Text(text: Paragraph::new(composer_lines).block(build_composer_block(loading)))
             }
         }
     )
+}
+
+fn build_composer_block(loading: bool) -> Block<'static> {
+    let border_color = if loading {
+        theme::MUTED
+    } else {
+        theme::BORDER_ACTIVE
+    };
+
+    Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(Style::default().fg(border_color))
+}
+
+fn build_composer_lines(editor_lines: Vec<Line<'static>>, loading: bool) -> Vec<Line<'static>> {
+    let mut lines = Vec::with_capacity(editor_lines.len().max(1));
+    let prompt_style = Style::default()
+        .fg(if loading { theme::MUTED } else { theme::ACCENT })
+        .add_modifier(Modifier::BOLD);
+
+    if editor_lines.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(" ❯ ", prompt_style),
+            Span::raw(""),
+        ]));
+        return lines;
+    }
+
+    for (index, line) in editor_lines.into_iter().enumerate() {
+        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+        if index == 0 {
+            spans.push(Span::styled(" ❯ ", prompt_style));
+        } else {
+            spans.push(Span::styled("   ", Style::default().fg(theme::DIM)));
+        }
+        spans.extend(line.spans);
+        lines.push(Line::from(spans));
+    }
+
+    lines
+}
+
+fn popup_height(item_count: usize) -> u16 {
+    (item_count.max(1) + 2).min(10) as u16
+}
+
+fn submit_text(submitted: String) {
+    if submitted.trim().is_empty() {
+        return;
+    }
+
+    push_history(&submitted);
+    let is_loading = ACP_STATE.state().read().is_loading;
+    if is_loading {
+        let input_buffer = INPUT_BUFFER.state();
+        let mut guard = input_buffer.write();
+        guard.push_back(submitted);
+        while guard.len() > 32 {
+            guard.pop_front();
+        }
+    } else if let Some(tx) = SUBMIT_TX.get() {
+        let _ = tx.send(submitted);
+    }
+}
+
+fn reset_mention_popup() {
+    *AT_MENTION_ACTIVE.state().write() = false;
+    MENTION_PREFIX.state().write().clear();
+    *MENTION_SELECTED_INDEX.state().write() = 0;
+}
+
+fn reset_slash_popup() {
+    *SLASH_HINT_ACTIVE.state().write() = false;
+    SLASH_PREFIX.state().write().clear();
+    *SLASH_SELECTED_INDEX.state().write() = 0;
+}
+
+fn replace_last_mention(state: &mut EditorState, replacement: &str) {
+    if let Some(at_byte) = state.text.rfind('@') {
+        let after_at_byte = at_byte + 1;
+        let keep_until_byte = state.text[after_at_byte..]
+            .char_indices()
+            .take_while(|(_, c)| !c.is_whitespace())
+            .last()
+            .map(|(i, c)| after_at_byte + i + c.len_utf8())
+            .unwrap_or(after_at_byte);
+        state.text.drain(after_at_byte..keep_until_byte);
+        state.text.insert_str(after_at_byte, replacement);
+        state.cursor = state.text.chars().count();
+    }
+}
+
+fn apply_slash_selection(state: &mut EditorState, cmd: &str) {
+    state.replace_all(format!("/{cmd} "));
+}
+
+fn build_slash_items() -> Vec<SlashCompletionItem> {
+    let mut items = Vec::with_capacity(PANELS.len() + REMOTE_SLASH_COMMANDS.len());
+    for panel in PANELS {
+        let slash_name = slash_command_for_panel(panel.kind).into_owned();
+        items.push(SlashCompletionItem {
+            label: slash_name.clone(),
+            insert_text: slash_name,
+            description: panel.description.to_string(),
+            kind: SlashActionKind::Panel,
+        });
+    }
+    for (name, description) in REMOTE_SLASH_COMMANDS {
+        items.push(SlashCompletionItem {
+            label: (*name).to_string(),
+            insert_text: (*name).to_string(),
+            description: (*description).to_string(),
+            kind: SlashActionKind::Command,
+        });
+    }
+    items
 }
 
 /// 从 `FILE_LIST` atom 读出 cwd 文件列表，按 `prefix` 过滤，最多 20 条。
@@ -519,10 +588,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 /// 大小写不敏感的子串匹配——这样 `@auth` 能匹配 `auth.rs` / `oauth.rs` /
 /// `authenticated.md` 等。结果按"prefix 开头优先"排序，提升命中率。
 fn filter_files_for_mention(prefix: &str) -> Vec<String> {
-    let files = FILE_LIST
-        .get()
-        .map(|a| a.read().clone())
-        .unwrap_or_default();
+    let files = FILE_LIST.state().read().clone();
     if prefix.is_empty() {
         return files.into_iter().take(20).collect();
     }
@@ -545,16 +611,11 @@ fn filter_files_for_mention(prefix: &str) -> Vec<String> {
 fn update_popup_prefix(text: &str) {
     // slash：仅当整段文本以 / 开头且无空格时
     let slash_active_now = text.starts_with('/') && !text[1..].contains(' ');
-    if let Some(a) = SLASH_HINT_ACTIVE.get() {
-        *a.write() = slash_active_now;
-    }
-    if let Some(a) = SLASH_PREFIX.get() {
-        if slash_active_now {
-            // prefix = 去掉 / 后的所有字符
-            *a.write() = text[1..].to_string();
-        } else {
-            a.write().clear();
-        }
+    *SLASH_HINT_ACTIVE.state().write() = slash_active_now;
+    if slash_active_now {
+        *SLASH_PREFIX.state().write() = text[1..].to_string();
+    } else {
+        SLASH_PREFIX.state().write().clear();
     }
 
     // @mention：找最后一个 @，若其后到文本末尾无空白则激活
@@ -564,17 +625,13 @@ fn update_popup_prefix(text: &str) {
     } else {
         false
     };
-    if let Some(a) = AT_MENTION_ACTIVE.get() {
-        *a.write() = mention_active_now;
-    }
-    if let Some(a) = MENTION_PREFIX.get() {
-        if mention_active_now {
-            if let Some(at_idx) = text.rfind('@') {
-                *a.write() = text[at_idx + 1..].to_string();
-            }
-        } else {
-            a.write().clear();
+    *AT_MENTION_ACTIVE.state().write() = mention_active_now;
+    if mention_active_now {
+        if let Some(at_idx) = text.rfind('@') {
+            *MENTION_PREFIX.state().write() = text[at_idx + 1..].to_string();
         }
+    } else {
+        MENTION_PREFIX.state().write().clear();
     }
 }
 
@@ -726,18 +783,10 @@ mod tests {
     }
 
     fn reset_popup_atoms() {
-        if let Some(a) = AT_MENTION_ACTIVE.get() {
-            *a.write() = false;
-        }
-        if let Some(a) = SLASH_HINT_ACTIVE.get() {
-            *a.write() = false;
-        }
-        if let Some(a) = MENTION_PREFIX.get() {
-            a.write().clear();
-        }
-        if let Some(a) = SLASH_PREFIX.get() {
-            a.write().clear();
-        }
+        *AT_MENTION_ACTIVE.state().write() = false;
+        *SLASH_HINT_ACTIVE.state().write() = false;
+        MENTION_PREFIX.state().write().clear();
+        SLASH_PREFIX.state().write().clear();
     }
 
     #[test]
@@ -746,9 +795,9 @@ mod tests {
         crate::kit::atoms::init_atoms();
         reset_popup_atoms();
         update_popup_prefix("/hel");
-        assert!(!*AT_MENTION_ACTIVE.get().unwrap().read());
-        assert!(*SLASH_HINT_ACTIVE.get().unwrap().read());
-        assert_eq!(SLASH_PREFIX.get().unwrap().read().as_str(), "hel");
+        assert!(!*AT_MENTION_ACTIVE.state().read());
+        assert!(*SLASH_HINT_ACTIVE.state().read());
+        assert_eq!(SLASH_PREFIX.state().read().as_str(), "hel");
     }
 
     #[test]
@@ -757,7 +806,7 @@ mod tests {
         crate::kit::atoms::init_atoms();
         reset_popup_atoms();
         update_popup_prefix("/help me");
-        assert!(!*SLASH_HINT_ACTIVE.get().unwrap().read());
+        assert!(!*SLASH_HINT_ACTIVE.state().read());
     }
 
     #[test]
@@ -766,8 +815,8 @@ mod tests {
         crate::kit::atoms::init_atoms();
         reset_popup_atoms();
         update_popup_prefix("see @auth");
-        assert!(*AT_MENTION_ACTIVE.get().unwrap().read());
-        assert_eq!(MENTION_PREFIX.get().unwrap().read().as_str(), "auth");
+        assert!(*AT_MENTION_ACTIVE.state().read());
+        assert_eq!(MENTION_PREFIX.state().read().as_str(), "auth");
     }
 
     #[test]
@@ -776,7 +825,7 @@ mod tests {
         crate::kit::atoms::init_atoms();
         reset_popup_atoms();
         update_popup_prefix("see @auth service");
-        assert!(!*AT_MENTION_ACTIVE.get().unwrap().read());
+        assert!(!*AT_MENTION_ACTIVE.state().read());
     }
 
     /// C2 回归测试：filter_files_for_mention 在 prefix 为空时返回前 20 条。
@@ -785,10 +834,11 @@ mod tests {
     fn test_filter_files_empty_prefix_returns_top_20() {
         crate::kit::atoms::init_atoms();
         // 写 25 个文件
-        if let Some(atom) = FILE_LIST.get() {
-            let mut list: Vec<String> = (0..25).map(|i| format!("file{i}.rs")).collect();
+        {
+            let state = FILE_LIST.state();
+            let mut list = state.write();
+            *list = (0..25).map(|i| format!("file{i}.rs")).collect();
             list.sort();
-            *atom.write() = list;
         }
         let result = filter_files_for_mention("");
         assert_eq!(result.len(), 20);
@@ -799,14 +849,12 @@ mod tests {
     #[serial]
     fn test_filter_files_substring_case_insensitive() {
         crate::kit::atoms::init_atoms();
-        if let Some(atom) = FILE_LIST.get() {
-            *atom.write() = vec![
-                "auth.rs".into(),
-                "oauth.rs".into(),
-                "OAUTH.md".into(),
-                "utils.rs".into(),
-            ];
-        }
+        *FILE_LIST.state().write() = vec![
+            "auth.rs".into(),
+            "oauth.rs".into(),
+            "OAUTH.md".into(),
+            "utils.rs".into(),
+        ];
         let result = filter_files_for_mention("AUTH");
         // 三个含 auth/AUTH 的文件应被过滤出来（大小写不敏感）
         assert_eq!(result.len(), 3);
@@ -820,13 +868,11 @@ mod tests {
     #[serial]
     fn test_filter_files_prefix_start_priority() {
         crate::kit::atoms::init_atoms();
-        if let Some(atom) = FILE_LIST.get() {
-            *atom.write() = vec![
-                "myauth.rs".into(), // 子串匹配
-                "auth.rs".into(),   // 开头匹配，应优先
-                "oauth.rs".into(),  // 子串匹配
-            ];
-        }
+        *FILE_LIST.state().write() = vec![
+            "myauth.rs".into(), // 子串匹配
+            "auth.rs".into(),   // 开头匹配，应优先
+            "oauth.rs".into(),  // 子串匹配
+        ];
         let result = filter_files_for_mention("auth");
         assert_eq!(result.first().unwrap(), "auth.rs");
     }

@@ -25,52 +25,53 @@ use crate::kit::popups::{
     ask_user_popup::AskUserPopup, hitl_popup::HitlPopup, oauth_popup::OAuthPopup,
     rewind_popup::RewindPopup,
 };
-use ratatui_kit::{
-    prelude::*,
-    ratatui::layout::{Constraint, Direction},
-};
+use ratatui_kit::{prelude::*, ratatui::layout::Constraint};
 
 /// 弹窗覆盖层组件。
 ///
 /// 订阅 `POPUP_KIND` atom，渲染当前激活弹窗。无弹窗时返回空 View。
 #[component]
 pub fn PopupOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let popup_store = hooks.use_store(*atoms::POPUP_KIND.get().unwrap());
+    let popup_store = hooks.use_atom(&atoms::POPUP_KIND);
     let kind = *popup_store.read();
-    let _ = popup_store; // StoreState 是 Copy
+    let (term_w, term_h) = hooks.use_terminal_size();
 
     match kind {
-        Some(PopupKind::Hitl) => render_popup(element!(HitlPopup()).into()),
-        Some(PopupKind::AskUser) => render_popup(element!(AskUserPopup()).into()),
-        Some(PopupKind::Rewind) => render_popup(element!(RewindPopup()).into()),
-        Some(PopupKind::OAuth) => render_popup(element!(OAuthPopup()).into()),
+        Some(PopupKind::Hitl) => render_popup(element!(HitlPopup()).into(), term_w, term_h),
+        Some(PopupKind::AskUser) => render_popup(element!(AskUserPopup()).into(), term_w, term_h),
+        Some(PopupKind::Rewind) => render_popup(element!(RewindPopup()).into(), term_w, term_h),
+        Some(PopupKind::OAuth) => render_popup(element!(OAuthPopup()).into(), term_w, term_h),
         None => render_empty(),
     }
 }
 
-/// 包裹弹窗——返回原元素（弹窗自带 Border/居中尺寸）。
-fn render_popup(p: AnyElement<'static>) -> AnyElement<'static> {
-    let _ = (Direction::Vertical, Constraint::Fill(1));
-    p
+/// 包裹弹窗——只定位和清除弹窗矩形，避免 Modal 整屏背景绘制导致白屏。
+fn render_popup(p: AnyElement<'static>, term_w: u16, term_h: u16) -> AnyElement<'static> {
+    let width = term_w.saturating_sub(4).min(90).max(1);
+    let height = term_h.saturating_sub(4).min(28).max(1);
+    let x = term_w.saturating_sub(width) / 2;
+    let y = term_h.saturating_sub(height) / 2;
+
+    element!(
+        Positioned(x: x, y: y, width: width, height: height, clear: true) {
+            Center(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
+                { p }
+            }
+        }
+    )
+    .into()
 }
 
-/// 空覆盖——无弹窗激活时返回。零尺寸 View。
+/// 空覆盖——无弹窗激活时返回零尺寸 Positioned，避免默认 View/Fragment 布局参与父级 flex。
 fn render_empty() -> AnyElement<'static> {
-    element!(View(
-        flex_direction: Direction::Vertical,
-        width: Constraint::Fill(1),
-        height: Constraint::Fill(1),
-    ))
-    .into()
+    element!(Positioned(x: 0u16, y: 0u16, width: 0u16, height: 0u16, clear: false)).into()
 }
 
 // ── 弹窗操作辅助函数（mutates POPUP_KIND atom） ──────────────────────────
 
 /// 打开弹窗（覆盖式）。已打开其他弹窗会被替换。
 pub fn open_popup(kind: PopupKind) {
-    if let Some(atom) = atoms::POPUP_KIND.get() {
-        *atom.write() = Some(kind);
-    }
+    *atoms::POPUP_KIND.state().write() = Some(kind);
 }
 
 /// 关闭当前弹窗（如果有）。返回被关闭的 PopupKind（用于日志/状态反馈）。
@@ -80,32 +81,15 @@ pub fn open_popup(kind: PopupKind) {
 /// HitlPending 事件时 dispatch_and_notify 会重新写入。但若用户在两次事件
 /// 之间手动 open_popup（如未来加快捷键），不会看到上次的工具调用信息。
 pub fn close_popup() -> Option<PopupKind> {
-    let atom = atoms::POPUP_KIND.get()?;
-    let prev = *atom.read();
-    *atom.write() = None;
+    let prev = *atoms::POPUP_KIND.state().read();
+    *atoms::POPUP_KIND.state().write() = None;
     // I21-C：根据关闭的 popup 类型清空对应 payload atom
     if let Some(kind) = prev {
         match kind {
-            PopupKind::Hitl => {
-                if let Some(a) = atoms::HITL_PENDING.get() {
-                    *a.write() = None;
-                }
-            }
-            PopupKind::AskUser => {
-                if let Some(a) = atoms::ASK_USER_PENDING.get() {
-                    *a.write() = None;
-                }
-            }
-            PopupKind::Rewind => {
-                if let Some(a) = atoms::REWIND_PREVIEW.get() {
-                    *a.write() = None;
-                }
-            }
-            PopupKind::OAuth => {
-                if let Some(a) = atoms::OAUTH_INFO.get() {
-                    *a.write() = None;
-                }
-            }
+            PopupKind::Hitl => *atoms::HITL_PENDING.state().write() = None,
+            PopupKind::AskUser => *atoms::ASK_USER_PENDING.state().write() = None,
+            PopupKind::Rewind => *atoms::REWIND_PREVIEW.state().write() = None,
+            PopupKind::OAuth => *atoms::OAUTH_INFO.state().write() = None,
         }
     }
     prev
@@ -113,10 +97,7 @@ pub fn close_popup() -> Option<PopupKind> {
 
 /// 是否有弹窗激活。
 pub fn is_popup_active() -> bool {
-    atoms::POPUP_KIND
-        .get()
-        .map(|a| a.read().is_some())
-        .unwrap_or(false)
+    atoms::POPUP_KIND.state().read().is_some()
 }
 
 #[cfg(test)]
@@ -126,7 +107,7 @@ mod tests {
 
     fn setup_atoms() {
         crate::kit::atoms::init_atoms();
-        *atoms::POPUP_KIND.get().unwrap().write() = None;
+        *atoms::POPUP_KIND.state().write() = None;
     }
 
     #[test]
@@ -134,10 +115,7 @@ mod tests {
     fn test_open_popup_sets_atom() {
         setup_atoms();
         open_popup(PopupKind::Hitl);
-        assert_eq!(
-            *atoms::POPUP_KIND.get().unwrap().read(),
-            Some(PopupKind::Hitl)
-        );
+        assert_eq!(*atoms::POPUP_KIND.state().read(), Some(PopupKind::Hitl));
         // 清理——避免全局 OnceLock atom 在测试间残留 POPUP_KIND 状态
         close_popup();
     }
@@ -149,7 +127,7 @@ mod tests {
         open_popup(PopupKind::AskUser);
         let closed = close_popup();
         assert_eq!(closed, Some(PopupKind::AskUser));
-        assert_eq!(*atoms::POPUP_KIND.get().unwrap().read(), None);
+        assert_eq!(*atoms::POPUP_KIND.state().read(), None);
     }
 
     #[test]
@@ -190,12 +168,12 @@ mod tests {
         setup_atoms();
 
         // 构造 4 种 popup 的 payload 写入对应 atom
-        *atoms::HITL_PENDING.get().unwrap().write() = Some(HitlPending {
+        *atoms::HITL_PENDING.state().write() = Some(HitlPending {
             tool_name: "rm".to_string(),
             tool_input: serde_json::Value::Null,
             batch: None,
         });
-        *atoms::ASK_USER_PENDING.get().unwrap().write() = Some(AskUser {
+        *atoms::ASK_USER_PENDING.state().write() = Some(AskUser {
             questions: vec![Question {
                 id: "q1".to_string(),
                 header: "h".to_string(),
@@ -204,11 +182,11 @@ mod tests {
                 multi_select: false,
             }],
         });
-        *atoms::REWIND_PREVIEW.get().unwrap().write() = Some(RewindPreview {
+        *atoms::REWIND_PREVIEW.state().write() = Some(RewindPreview {
             files: vec![],
             messages: vec![],
         });
-        *atoms::OAUTH_INFO.get().unwrap().write() = Some(OauthNeeded {
+        *atoms::OAUTH_INFO.state().write() = Some(OauthNeeded {
             server_name: "test".to_string(),
             auth_url: "https://example.com".to_string(),
         });
@@ -217,28 +195,28 @@ mod tests {
         open_popup(PopupKind::Hitl);
         close_popup();
         assert!(
-            atoms::HITL_PENDING.get().unwrap().read().is_none(),
+            atoms::HITL_PENDING.state().read().is_none(),
             "HITL_PENDING should be cleared after close_popup"
         );
 
         open_popup(PopupKind::AskUser);
         close_popup();
         assert!(
-            atoms::ASK_USER_PENDING.get().unwrap().read().is_none(),
+            atoms::ASK_USER_PENDING.state().read().is_none(),
             "ASK_USER_PENDING should be cleared after close_popup"
         );
 
         open_popup(PopupKind::Rewind);
         close_popup();
         assert!(
-            atoms::REWIND_PREVIEW.get().unwrap().read().is_none(),
+            atoms::REWIND_PREVIEW.state().read().is_none(),
             "REWIND_PREVIEW should be cleared after close_popup"
         );
 
         open_popup(PopupKind::OAuth);
         close_popup();
         assert!(
-            atoms::OAUTH_INFO.get().unwrap().read().is_none(),
+            atoms::OAUTH_INFO.state().read().is_none(),
             "OAUTH_INFO should be cleared after close_popup"
         );
     }

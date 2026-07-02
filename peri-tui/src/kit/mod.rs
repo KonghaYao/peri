@@ -33,6 +33,7 @@ pub mod submit_consumer;
 pub mod theme;
 pub mod thread_load_consumer;
 pub mod view_render;
+pub mod welcome;
 
 // Phase 3: 导出布局组件
 pub use app_shell::AppShell;

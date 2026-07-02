@@ -4022,9 +4022,9 @@ dependencies = [
 
 [[package]]
 name = "ratatui-kit"
-version = "0.6.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8194a825fac18c9caf679d8ca733fef838e1caa9017ccedfa7c8f07f6bdfa820"
+checksum = "46b3a47ee576e202d3c2708bc8e3d02bb9625712f6169094e700e25cc995bb12"
 dependencies = [
  "any_key",
  "crossterm 0.29.0",
@@ -4033,15 +4033,17 @@ dependencies = [
  "ratatui",
  "ratatui-kit-macros",
  "regex",
+ "textwrap",
  "tui-input 0.15.3",
  "tui-tree-widget",
+ "tui-widget-list",
 ]
 
 [[package]]
 name = "ratatui-kit-macros"
-version = "0.5.1"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22bf3a8e830d8a0db564c642d017597c912580049a7569e79708007acef9de73"
+checksum = "4a511f2edcdb49972b88d32aca5a8385cce30e64694e0a906008dbc1763a9f79"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4888,6 +4890,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "smawk"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
+
+[[package]]
 name = "socket2"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5387,6 +5395,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "textwrap"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c13547615a44dc9c452a8a534638acdf07120d4b6847c8178705da06306a3057"
+dependencies = [
+ "smawk",
+ "unicode-linebreak",
+ "unicode-width 0.2.2",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5819,6 +5838,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tui-widget-list"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fbf7f6c7d04beb3602630d83db44e81d7a1de1fea11ca3435d82e094c5c0192"
+dependencies = [
+ "ratatui-core",
+ "ratatui-widgets",
+]
+
+[[package]]
 name = "tungstenite"
 version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5935,6 +5964,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-linebreak"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b09c83c3c29d37506a3e260c08c03743a6bb66a9cd432c6934ab501a190571f"
 
 [[package]]
 name = "unicode-normalization"

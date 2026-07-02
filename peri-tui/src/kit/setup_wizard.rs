@@ -32,29 +32,31 @@ use ratatui_kit::{
 #[component]
 pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 订阅 WIZARD_ACTIVE 以便 Esc 关闭后重渲染（虽然 app_shell 也会切走）
-    let wizard_atom = hooks.use_store(*atoms::WIZARD_ACTIVE.get().unwrap());
-    let _ = *wizard_atom.read();
+    let wizard_active = hooks.use_atom(&atoms::WIZARD_ACTIVE);
+    let _ = *wizard_active.read();
 
     // 订阅 SERVICE_SNAPSHOT 显示当前 Provider 状态
-    let snapshot = hooks.use_store(*atoms::SERVICE_SNAPSHOT.get().unwrap());
-    let provider_name = snapshot.read().provider_name.clone();
-    let model_alias = snapshot.read().model_alias.clone();
+    let snapshot = hooks.use_atom(&atoms::SERVICE_SNAPSHOT);
+    let snapshot = snapshot.read().clone();
+    let provider_name = snapshot.provider_name;
+    let model_alias = snapshot.model_alias;
     let has_provider = !provider_name.is_empty();
 
-    hooks.use_local_events(move |event: Event| {
-        if let Event::Key(key) = event {
-            if key.kind != KeyEventKind::Press {
-                return;
-            }
+    hooks.use_event_handler(EventScope::Current, EventPriority::High, move |event| {
+        let Event::Key(key) = event else {
+            return EventResult::Ignored;
+        };
+        if key.kind != KeyEventKind::Press {
+            return EventResult::Ignored;
+        }
+
+        match key.code {
             // Esc / q / Enter / Space：关闭 wizard，进入主界面
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter | KeyCode::Char(' ') => {
-                    if let Some(atom) = atoms::WIZARD_ACTIVE.get() {
-                        *atom.write() = false;
-                    }
-                }
-                _ => {}
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter | KeyCode::Char(' ') => {
+                *atoms::WIZARD_ACTIVE.state().write() = false;
+                EventResult::Consumed
             }
+            _ => EventResult::Ignored,
         }
     });
 
@@ -100,15 +102,17 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Line::from(""),
             Line::from(vec![
                 Span::styled("  1. ", Style::new().fg(theme::ACCENT).bold()),
-                Span::styled("进入主界面后按 ", Style::new().fg(theme::TEXT)),
-                Span::styled("Ctrl+L", Style::new().fg(theme::THINKING).bold()),
-                Span::styled(" 打开 Login 面板配置 API Key", Style::new().fg(theme::TEXT)),
+                Span::styled(
+                    "进入主界面后打开 Login 页面配置 API Key",
+                    Style::new().fg(theme::TEXT),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("  2. ", Style::new().fg(theme::ACCENT).bold()),
-                Span::styled("或按 ", Style::new().fg(theme::TEXT)),
-                Span::styled("Ctrl+,", Style::new().fg(theme::THINKING).bold()),
-                Span::styled(" 打开 Config 面板切换配置", Style::new().fg(theme::TEXT)),
+                Span::styled(
+                    "或打开 Settings 页面调整 Provider 配置",
+                    Style::new().fg(theme::TEXT),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("  3. ", Style::new().fg(theme::ACCENT).bold()),
@@ -124,22 +128,38 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
 
     element!(
-        Border(
+        View(
             flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Setup Wizard ").fg(theme::THINKING).bold().centered(),
             width: Constraint::Fill(1),
-            height: Constraint::Length(14),
+            height: Constraint::Fill(1),
         ) {
-            Text(text: Paragraph::new(vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "欢迎使用 Peri TUI",
-                    Style::new().fg(theme::TEXT).bold(),
-                )).alignment(Alignment::Center),
-                Line::from(""),
-            ].into_iter().chain(status_line.into_iter()).chain(hint_lines.into_iter()).collect::<Vec<Line<'static>>>())
-                .alignment(Alignment::Left))
+            View(height: Constraint::Fill(1), width: Constraint::Fill(1)) {}
+            View(
+                flex_direction: Direction::Horizontal,
+                width: Constraint::Fill(1),
+                height: Constraint::Length(16),
+            ) {
+                View(width: Constraint::Fill(1), height: Constraint::Length(16)) {}
+                Border(
+                    flex_direction: Direction::Vertical,
+                    border_style: Style::new().fg(theme::BORDER),
+                    top_title: Line::from(" Setup Wizard ").fg(theme::THINKING).bold().centered(),
+                    width: Constraint::Length(72),
+                    height: Constraint::Length(16),
+                ) {
+                    Text(text: Paragraph::new(vec![
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            "欢迎使用 Peri TUI",
+                            Style::new().fg(theme::TEXT).bold(),
+                        )).alignment(Alignment::Center),
+                        Line::from(""),
+                    ].into_iter().chain(status_line.into_iter()).chain(hint_lines.into_iter()).collect::<Vec<Line<'static>>>())
+                        .alignment(Alignment::Left))
+                }
+                View(width: Constraint::Fill(1), height: Constraint::Length(16)) {}
+            }
+            View(height: Constraint::Fill(1), width: Constraint::Fill(1)) {}
         }
     )
 }

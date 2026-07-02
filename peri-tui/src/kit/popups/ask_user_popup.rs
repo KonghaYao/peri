@@ -33,7 +33,7 @@ use crate::kit::theme;
 
 #[component]
 pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let pending_store = hooks.use_store(*ASK_USER_PENDING.get().unwrap());
+    let pending_store = hooks.use_atom(&ASK_USER_PENDING);
     let pending: Option<AskUser> = pending_store.read().clone();
     let _ = pending_store;
 
@@ -63,55 +63,57 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 闭包另持一份 pending 副本（避免与渲染端争用 move）
     let pending_for_closure = pending.clone();
 
-    hooks.use_local_events(move |event: Event| {
-        if let Event::Key(key) = event
-            && key.kind == KeyEventKind::Press
-        {
-            match (key.modifiers, key.code) {
-                // Up：焦点问题上移
-                (KeyModifiers::NONE, KeyCode::Up) => {
-                    let mut f = focused.write();
-                    *f = f.saturating_sub(1);
-                }
-                // Down：焦点问题下移
-                (KeyModifiers::NONE, KeyCode::Down) if question_count > 0 => {
-                    let mut f = focused.write();
-                    *f = (*f + 1).min(question_count - 1);
-                }
-                // Tab：循环切到下一个问题
-                (KeyModifiers::NONE, KeyCode::Tab) if question_count > 0 => {
-                    let mut f = focused.write();
-                    *f = (*f + 1) % question_count;
-                }
-                // Shift+Tab：循环切到上一个
-                (KeyModifiers::SHIFT, KeyCode::BackTab)
-                | (KeyModifiers::NONE, KeyCode::BackTab)
-                    if question_count > 0 =>
-                {
-                    let mut f = focused.write();
-                    *f = f.checked_sub(1).unwrap_or(question_count - 1);
-                }
-                // 数字键 1-9：选中当前问题对应索引的 option（单选语义）
-                (KeyModifiers::NONE, KeyCode::Char(c)) if c.is_ascii_digit() => {
-                    let idx = *focused.read();
-                    let digit = (c as u8 - b'1') as usize; // '1' → 0, '2' → 1, ...
-                    let mut a = answers.write();
-                    if let Some(questions) = pending_for_closure.as_ref().map(|p| &p.questions)
-                        && let Some(q) = questions.get(idx)
-                        && digit < q.options.len()
-                    {
-                        if idx >= a.len() {
-                            a.resize(idx + 1, None);
-                        }
-                        a[idx] = Some(digit);
-                    }
-                }
-                // Enter：提交（关闭 popup——answers 暂不发送，未来可加通道）
-                (KeyModifiers::NONE, KeyCode::Enter) => {
-                    close_popup();
-                }
-                _ => {}
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
+        let Event::Key(key) = event else {
+            return EventResult::Ignored;
+        };
+        if key.kind != KeyEventKind::Press {
+            return EventResult::Ignored;
+        }
+
+        match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Up) => {
+                let mut f = focused.write();
+                *f = f.saturating_sub(1);
+                EventResult::Consumed
             }
+            (KeyModifiers::NONE, KeyCode::Down) if question_count > 0 => {
+                let mut f = focused.write();
+                *f = (*f + 1).min(question_count - 1);
+                EventResult::Consumed
+            }
+            (KeyModifiers::NONE, KeyCode::Tab) if question_count > 0 => {
+                let mut f = focused.write();
+                *f = (*f + 1) % question_count;
+                EventResult::Consumed
+            }
+            (KeyModifiers::SHIFT, KeyCode::BackTab) | (KeyModifiers::NONE, KeyCode::BackTab)
+                if question_count > 0 =>
+            {
+                let mut f = focused.write();
+                *f = f.checked_sub(1).unwrap_or(question_count - 1);
+                EventResult::Consumed
+            }
+            (KeyModifiers::NONE, KeyCode::Char(c)) if c.is_ascii_digit() => {
+                let idx = *focused.read();
+                let digit = (c as u8 - b'1') as usize;
+                let mut a = answers.write();
+                if let Some(questions) = pending_for_closure.as_ref().map(|p| &p.questions)
+                    && let Some(q) = questions.get(idx)
+                    && digit < q.options.len()
+                {
+                    if idx >= a.len() {
+                        a.resize(idx + 1, None);
+                    }
+                    a[idx] = Some(digit);
+                }
+                EventResult::Consumed
+            }
+            (KeyModifiers::NONE, KeyCode::Enter) => {
+                close_popup();
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
         }
     });
 

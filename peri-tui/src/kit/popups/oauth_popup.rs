@@ -31,34 +31,35 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // I20-D：从 OAUTH_INFO atom 读取真实数据。atom 由 dispatch_and_notify 在
     // OauthNeeded 事件时写入。None 时显示占位（理论上不会发生——popup 只有在
     // POPUP_KIND=OAuth 时渲染，而该状态只在写入 OAUTH_INFO 同步设置）。
-    let info_store = hooks.use_store(*OAUTH_INFO.get().unwrap());
+    let info_store = hooks.use_atom(&OAUTH_INFO);
     let info = info_store.read().clone();
     let _ = info_store;
 
-    hooks.use_local_events({
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         let info_for_open = info.clone();
-        move |event: Event| {
-            if let Event::Key(key) = event
-                && key.kind == KeyEventKind::Press
-            {
-                match (key.modifiers, key.code) {
-                    // Ctrl+O：调用系统 open 命令打开 auth_url
-                    // 仅 macOS 使用 `open`；Linux/Windows 平台 fallback 记日志
-                    (KeyModifiers::CONTROL, KeyCode::Char('o') | KeyCode::Char('O')) => {
-                        if let Some(info) = &info_for_open {
-                            open_auth_url_in_browser(&info.auth_url);
-                        }
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
+            }
+            match (key.modifiers, key.code) {
+                (KeyModifiers::CONTROL, KeyCode::Char('o') | KeyCode::Char('O')) => {
+                    if let Some(info) = &info_for_open {
+                        open_auth_url_in_browser(&info.auth_url);
                     }
-                    // Enter：关闭 popup——OAuth 完成由 ACP server 推送事件刷新
-                    // I21-C：close_popup 内部统一清空 OAUTH_INFO atom
-                    (KeyModifiers::NONE, KeyCode::Enter) => {
-                        close_popup();
-                    }
-                    // 退格：no-op（不再支持本地输入授权码——避免与 ACP 完成回调冲突）
-                    (KeyModifiers::NONE, KeyCode::Backspace) => {}
-                    (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(_)) => {}
-                    _ => {}
+                    EventResult::Consumed
                 }
+                (KeyModifiers::NONE, KeyCode::Enter) => {
+                    close_popup();
+                    EventResult::Consumed
+                }
+                (KeyModifiers::NONE, KeyCode::Backspace) => EventResult::Consumed,
+                (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(_)) => {
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
             }
         }
     });

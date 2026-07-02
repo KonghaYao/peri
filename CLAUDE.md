@@ -33,6 +33,13 @@ Effect 枚举 26 变体（Render/SubmitMessage/PollAgent/AdvanceSpinner/Scroll/M
 
 **[TRAP]** `is_sm_handled_shortcut()` 必须与 `idle.rs` 的 Ctrl+Char 分支保持同步。
 **[TRAP]** `keyboard_collector.rs` 禁止 `tokio::select!` 竞态 `spawn_blocking` 和 tick——事件永久丢失。修复：持久化 task → mpsc → `recv()`。
+**[TRAP]** ratatui-kit 事件边界：消息区只处理鼠标滚轮 `Event::Mouse(MouseEventKind::Scroll*)`，编辑区只处理键盘编辑/导航事件。不要让消息区消费 `KeyCode::Up/Down` 来模拟滚动；滚轮必须靠 `EnableMouseCapture` 进入 Mouse 通道。`InputArea` 是手写 textarea，Up/Down 应先做多行光标上下移动，只有在首/末行时才考虑 history fallback。
+
+### ratatui-kit overlay 白屏教训
+
+`AppShell` 根层把主内容、`PanelOverlay`、`PopupOverlay` 作为兄弟节点渲染；overlay 空态绝不能返回普通 `View()`，也不要用 `Fragment` 当函数组件根空态。ratatui-kit 函数组件布局透明，会继承返回根节点的 layout；`View()` 会参与父级 flex，`Fragment` 空根在该场景也会退化成会挤布局的默认节点，表现为 `/ratatui-kit` 整屏白/主界面被挤没。
+
+**[TRAP]** 根级 overlay 空态必须返回显式零尺寸 `Positioned(x: 0u16, y: 0u16, width: 0u16, height: 0u16, clear: false)`，不要返回 `View()` / `Fragment`。active overlay 才用实际尺寸的 `Positioned`。排查白屏时先做根层早退诊断：`AppShell` 最小 Text → `SessionColumn` → `StatusBar` → `PanelOverlay` → `PopupOverlay`，逐个恢复定位。
 
 ### 关键架构点
 

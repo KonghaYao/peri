@@ -65,62 +65,64 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected_tab = hooks.use_state(|| 1usize); // default Sonnet
 
     // S6c: 订阅 SERVICE_SNAPSHOT——active alias 来自 atom，确保面板和 status bar 一致
-    let snapshot = hooks.use_store(*SERVICE_SNAPSHOT.get().unwrap());
+    let snapshot = hooks.use_atom(&SERVICE_SNAPSHOT);
     let active_alias = snapshot.read().model_alias.clone();
     let active_provider = snapshot.read().provider_name.clone();
     let _ = snapshot; // StoreState 是 Copy，无需显式 drop
 
-    hooks.use_local_events({
-        move |event: Event| {
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    return;
-                }
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        // 由 PanelOverlay 上层 Esc 处理关闭
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let mut c = cursor.write();
-                        *c = c.saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let mut c = cursor.write();
-                        *c = (*c + 1).min(MODEL_ALIASES.len() - 1);
-                    }
-                    KeyCode::Enter => {
-                        // H2: 通过 PERI_CONFIG_HANDLE 直接 write active_alias。
-                        // ACP server 持同一 Arc，立即生效；service_snapshot 2s 内
-                        // 派生到 SERVICE_SNAPSHOT.model_alias 让 status bar 同步刷新。
-                        let sel = *cursor.read();
-                        *selected_tab.write() = sel;
-                        if let Some(handle) = PERI_CONFIG_HANDLE.get() {
-                            let new_alias = MODEL_ALIASES[sel].key.to_string();
-                            let mut cfg = handle.write();
-                            if cfg.config.active_alias != new_alias {
-                                cfg.config.active_alias = new_alias;
-                                tracing::info!(
-                                    alias = MODEL_ALIASES[sel].key,
-                                    "ModelPanel: active_alias switched"
-                                );
-                            }
-                        }
-                        // 关闭面板：I19-A 弹栈而非清空整个栈
-                        crate::kit::panel_registry::close_active_panel();
-                    }
-                    KeyCode::Left => {
-                        let mut s = selected_tab.write();
-                        *s = s.saturating_sub(1);
-                        *cursor.write() = *s;
-                    }
-                    KeyCode::Right => {
-                        let mut s = selected_tab.write();
-                        *s = (*s + 1).min(MODEL_ALIASES.len() - 1);
-                        *cursor.write() = *s;
-                    }
-                    _ => {}
-                }
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
             }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    // 由 PanelOverlay 上层 Esc 处理关闭
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let mut c = cursor.write();
+                    *c = c.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let mut c = cursor.write();
+                    *c = (*c + 1).min(MODEL_ALIASES.len() - 1);
+                }
+                KeyCode::Enter => {
+                    // H2: 通过 PERI_CONFIG_HANDLE 直接 write active_alias。
+                    // ACP server 持同一 Arc，立即生效；service_snapshot 2s 内
+                    // 派生到 SERVICE_SNAPSHOT.model_alias 让 status bar 同步刷新。
+                    let sel = *cursor.read();
+                    *selected_tab.write() = sel;
+                    if let Some(handle) = PERI_CONFIG_HANDLE.get() {
+                        let new_alias = MODEL_ALIASES[sel].key.to_string();
+                        let mut cfg = handle.write();
+                        if cfg.config.active_alias != new_alias {
+                            cfg.config.active_alias = new_alias;
+                            tracing::info!(
+                                alias = MODEL_ALIASES[sel].key,
+                                "ModelPanel: active_alias switched"
+                            );
+                        }
+                    }
+                    // 关闭面板：I19-A 弹栈而非清空整个栈
+                    crate::kit::panel_registry::close_active_panel();
+                }
+                KeyCode::Left => {
+                    let mut s = selected_tab.write();
+                    *s = s.saturating_sub(1);
+                    *cursor.write() = *s;
+                }
+                KeyCode::Right => {
+                    let mut s = selected_tab.write();
+                    *s = (*s + 1).min(MODEL_ALIASES.len() - 1);
+                    *cursor.write() = *s;
+                }
+                _ => {}
+            }
+            EventResult::Consumed
         }
     });
 

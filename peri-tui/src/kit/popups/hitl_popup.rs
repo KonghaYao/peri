@@ -29,17 +29,22 @@ use crate::kit::theme;
 
 #[component]
 pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let pending_store = hooks.use_store(*HITL_PENDING.get().unwrap());
+    let pending_store = hooks.use_atom(&HITL_PENDING);
     let pending = pending_store.read().clone();
     let _ = pending_store;
 
-    hooks.use_local_events(move |event: Event| {
-        if let Event::Key(key) = event
-            && key.kind == KeyEventKind::Press
-            && (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Enter)
-        {
-            // Enter：approve——关闭 popup（HITL_PENDING 由 close_popup 清空）
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
+        let Event::Key(key) = event else {
+            return EventResult::Ignored;
+        };
+        if key.kind != KeyEventKind::Press {
+            return EventResult::Ignored;
+        }
+        if (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Enter) {
             close_popup();
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
         }
     });
 

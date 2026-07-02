@@ -21,19 +21,16 @@ use std::time::Instant;
 /// 状态栏第 1 行：权限模式 · cwd · provider/model · CPU% · MEM
 #[component]
 fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let snap_store = hooks.use_store(*atoms::SERVICE_SNAPSHOT.get().unwrap());
-    let model_hl = hooks.use_store(*atoms::MODEL_HIGHLIGHT_UNTIL.get().unwrap());
-    let provider_hl = hooks.use_store(*atoms::PROVIDER_HIGHLIGHT_UNTIL.get().unwrap());
-    let mode_hl = hooks.use_store(*atoms::MODE_HIGHLIGHT_UNTIL.get().unwrap());
+    let snap = hooks.use_atom(&atoms::SERVICE_SNAPSHOT);
+    let model_hl = hooks.use_atom(&atoms::MODEL_HIGHLIGHT_UNTIL);
+    let provider_hl = hooks.use_atom(&atoms::PROVIDER_HIGHLIGHT_UNTIL);
+    let mode_hl = hooks.use_atom(&atoms::MODE_HIGHLIGHT_UNTIL);
 
-    let snap = snap_store.read().clone();
-    let model_highlighted = model_hl.get().map(|t| t > Instant::now()).unwrap_or(false);
-    let provider_highlighted = provider_hl
-        .get()
-        .map(|t| t > Instant::now())
-        .unwrap_or(false);
-    let mode_highlighted = mode_hl.get().map(|t| t > Instant::now()).unwrap_or(false);
-    let _ = snap_store; // StoreState Copy
+    let snap = snap.read().clone();
+    let now = Instant::now();
+    let model_highlighted = model_hl.read().as_ref().is_some_and(|t| *t > now);
+    let provider_highlighted = provider_hl.read().as_ref().is_some_and(|t| *t > now);
+    let mode_highlighted = mode_hl.read().as_ref().is_some_and(|t| *t > now);
 
     let mut spans: Vec<Span<'static>> = Vec::new();
 
@@ -105,21 +102,20 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // I19-C：原代码读 POPUP_ACTIVE（dead atom，open/close_popup 从不同步）
     // 导致 popup hints 永远不显示。改读 POPUP_KIND.is_some()。
-    let popup_kind = hooks.use_store(*atoms::POPUP_KIND.get().unwrap());
-    let at_active = hooks.use_store(*atoms::AT_MENTION_ACTIVE.get().unwrap());
-    let slash_active = hooks.use_store(*atoms::SLASH_HINT_ACTIVE.get().unwrap());
+    let popup_kind = hooks.use_atom(&atoms::POPUP_KIND);
+    let at_active = hooks.use_atom(&atoms::AT_MENTION_ACTIVE);
+    let slash_active = hooks.use_atom(&atoms::SLASH_HINT_ACTIVE);
 
     let is_popup = popup_kind.read().is_some();
-    let is_at = at_active.get();
-    let is_slash = slash_active.get();
-    let _ = (popup_kind, at_active, slash_active); // 释放 StoreState 借用
+    let is_at = *at_active.read();
+    let is_slash = *slash_active.read();
 
     let hints = if is_popup {
         Line::from(" Esc: close | Enter: confirm ").fg(theme::MUTED)
     } else if is_at || is_slash {
         Line::from(" Esc: close | Tab: navigate | Enter: select ").fg(theme::MUTED)
     } else {
-        Line::from(" /: commands | Shift+Enter: newline | Ctrl+T: model | Ctrl+O: diff ")
+        Line::from(" /: commands | Shift+Enter: newline | Ctrl+K: mode | Ctrl+O: diff ")
             .fg(theme::MUTED)
     };
 
@@ -264,19 +260,17 @@ mod tests {
     fn test_status_bar_row_renders_without_panic() {
         crate::kit::atoms::init_atoms();
         // 写入测试数据
-        if let Some(atom) = atoms::SERVICE_SNAPSHOT.get() {
-            *atom.write() = atoms::ServiceSnapshot {
-                cwd: "/home/user/test-project".into(),
-                provider_name: "anthropic".into(),
-                model_alias: "sonnet".into(),
-                permission_mode: "accept-edit".into(),
-                memory_mb: 256,
-                cpu_percent: 12.5,
-                ..Default::default()
-            };
-        }
+        *atoms::SERVICE_SNAPSHOT.state().write() = atoms::ServiceSnapshot {
+            cwd: "/home/user/test-project".into(),
+            provider_name: "anthropic".into(),
+            model_alias: "sonnet".into(),
+            permission_mode: "accept-edit".into(),
+            memory_mb: 256,
+            cpu_percent: 12.5,
+            ..Default::default()
+        };
         // 辅助函数应能正确处理这些值
-        let snap = atoms::SERVICE_SNAPSHOT.get().unwrap().read().clone();
+        let snap = atoms::SERVICE_SNAPSHOT.state().read().clone();
         assert_eq!(snap.cwd, "/home/user/test-project");
         assert_eq!(cwd_basename(&snap.cwd), "test-project");
         assert_eq!(
@@ -289,18 +283,16 @@ mod tests {
     #[serial]
     fn test_status_bar_handles_empty_provider_model() {
         crate::kit::atoms::init_atoms();
-        if let Some(atom) = atoms::SERVICE_SNAPSHOT.get() {
-            *atom.write() = atoms::ServiceSnapshot {
-                cwd: "/tmp".into(),
-                provider_name: "".into(),
-                model_alias: "".into(),
-                permission_mode: "default".into(),
-                memory_mb: 0,
-                cpu_percent: 0.0,
-                ..Default::default()
-            };
-        }
-        let snap = atoms::SERVICE_SNAPSHOT.get().unwrap().read().clone();
+        *atoms::SERVICE_SNAPSHOT.state().write() = atoms::ServiceSnapshot {
+            cwd: "/tmp".into(),
+            provider_name: "".into(),
+            model_alias: "".into(),
+            permission_mode: "default".into(),
+            memory_mb: 0,
+            cpu_percent: 0.0,
+            ..Default::default()
+        };
+        let snap = atoms::SERVICE_SNAPSHOT.state().read().clone();
         // 空 provider/model 应被渲染逻辑跳过（不在 Row1 中显示）
         assert!(snap.provider_name.is_empty());
         assert!(snap.model_alias.is_empty());

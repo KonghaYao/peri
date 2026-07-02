@@ -45,7 +45,7 @@ enum RewindView {
 
 #[component]
 pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let preview_store = hooks.use_store(*crate::kit::atoms::REWIND_PREVIEW.get().unwrap());
+    let preview_store = hooks.use_atom(&crate::kit::atoms::REWIND_PREVIEW);
     let preview = preview_store.read().clone();
     let _ = preview_store;
 
@@ -62,7 +62,7 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 闭包另持一份 preview 副本（避免与渲染端争用 move）
     let preview_for_closure = preview.clone();
 
-    hooks.use_local_events(move |event: Event| {
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
         if let Event::Key(key) = event
             && key.kind == KeyEventKind::Press
         {
@@ -76,6 +76,7 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         RewindView::Messages => RewindView::Files,
                         RewindView::Files => RewindView::Messages,
                     };
+                    return EventResult::Consumed;
                 }
 
                 // ── 上下导航（按当前视图分派） ──
@@ -91,6 +92,7 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             *s = s.saturating_sub(1);
                         }
                     }
+                    return EventResult::Consumed;
                 }
                 (KeyModifiers::NONE, KeyCode::Down) => {
                     let cur = *view.read();
@@ -108,6 +110,7 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                         }
                     }
+                    return EventResult::Consumed;
                 }
 
                 // ── Enter：确认回退 ──
@@ -130,6 +133,7 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         });
                     }
                     close_popup();
+                    return EventResult::Consumed;
                 }
 
                 // ── Esc：仅关闭 popup，由全局 event_handlers 处理 ──
@@ -139,11 +143,13 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         let _ = tx.send(RewindAction::Cancel);
                     }
                     close_popup();
+                    return EventResult::Consumed;
                 }
 
                 _ => {}
             }
         }
+        EventResult::Ignored
     });
 
     let cur_view = *view.read();

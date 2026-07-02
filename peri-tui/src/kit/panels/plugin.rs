@@ -20,31 +20,33 @@ use ratatui_kit::{
 #[component]
 pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected = hooks.use_state(|| 0usize);
-    let store = hooks.use_store(*PLUGIN_LIST.get().unwrap());
+    let store = hooks.use_atom(&PLUGIN_LIST);
     let plugins: Vec<PluginSummary> = store.read().clone();
     let _ = store;
     let count = plugins.len();
 
-    hooks.use_local_events({
-        move |event: Event| {
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    return;
-                }
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => close_panel(),
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        *selected.write() = selected.read().saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let mut s = selected.write();
-                        if count > 0 {
-                            *s = (*s + 1).min(count - 1);
-                        }
-                    }
-                    _ => {}
-                }
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
             }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => close_panel(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *selected.write() = selected.read().saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let mut s = selected.write();
+                    if count > 0 {
+                        *s = (*s + 1).min(count - 1);
+                    }
+                }
+                _ => {}
+            }
+            EventResult::Consumed
         }
     });
 

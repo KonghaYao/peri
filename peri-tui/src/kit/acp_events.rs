@@ -157,9 +157,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // S7：把每个交互事件映射到具体 PopupKind，让 PopupOverlay 精确路由
         HitlPending(hp) => {
             // I21-A：保存 payload 到 HITL_PENDING atom，供 HitlPopup 读取真实数据
-            if let Some(atom) = HITL_PENDING.get() {
-                *atom.write() = Some(hp.clone());
-            }
+            *HITL_PENDING.state().write() = Some(hp.clone());
             state.popup_kind = Some(PopupKind::Hitl);
             state.variant = 2;
             push_popup_kind(state);
@@ -167,9 +165,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         AskUser(au) => {
             // I21-B：保存 payload 到 ASK_USER_PENDING atom，供 AskUserPopup 读取真实数据
-            if let Some(atom) = ASK_USER_PENDING.get() {
-                *atom.write() = Some(au.clone());
-            }
+            *ASK_USER_PENDING.state().write() = Some(au.clone());
             state.popup_kind = Some(PopupKind::AskUser);
             state.variant = 2;
             push_popup_kind(state);
@@ -177,9 +173,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         RewindPreview(rp) => {
             // S10：保存 payload 到 REWIND_PREVIEW atom，供 RewindPopup 读取真实数据
-            if let Some(atom) = REWIND_PREVIEW.get() {
-                *atom.write() = Some(rp.clone());
-            }
+            *REWIND_PREVIEW.state().write() = Some(rp.clone());
             state.popup_kind = Some(PopupKind::Rewind);
             state.variant = 2;
             push_popup_kind(state);
@@ -187,9 +181,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         OauthNeeded(on) => {
             // I20-D：保存 payload 到 OAUTH_INFO atom，供 OAuthPopup 读取真实数据
-            if let Some(atom) = OAUTH_INFO.get() {
-                *atom.write() = Some(on.clone());
-            }
+            *OAUTH_INFO.state().write() = Some(on.clone());
             state.popup_kind = Some(PopupKind::OAuth);
             state.variant = 2;
             push_popup_kind(state);
@@ -218,7 +210,7 @@ fn push_view_models(state: &mut BridgeState) {
         committed: Arc::clone(&state.committed),
         current_turn: Arc::from(state.current_turn.view_models()),
     };
-    *VIEW_MODELS.get().unwrap().write() = snapshot;
+    *VIEW_MODELS.state().write() = snapshot;
 }
 
 /// 将 BridgeState 中的状态快照写入 ACP_STATE Atom。
@@ -228,17 +220,15 @@ fn push_acp_state(state: &mut BridgeState) {
         view_count: state.committed.len() + state.current_turn.view_models().len(),
         is_loading: state.is_loading,
         wizard_active: false,
-        at_mention_active: *AT_MENTION_ACTIVE.get().unwrap().read(),
-        slash_hint_active: *SLASH_HINT_ACTIVE.get().unwrap().read(),
+        at_mention_active: *AT_MENTION_ACTIVE.state().read(),
+        slash_hint_active: *SLASH_HINT_ACTIVE.state().read(),
     };
-    *ACP_STATE.get().unwrap().write() = snapshot;
+    *ACP_STATE.state().write() = snapshot;
 }
 
 /// 将 BridgeState.popup_kind 写入 POPUP_KIND Atom（S7）。
 fn push_popup_kind(state: &BridgeState) {
-    if let Some(atom) = POPUP_KIND.get() {
-        *atom.write() = state.popup_kind;
-    }
+    *POPUP_KIND.state().write() = state.popup_kind;
 }
 
 /// 将 `INPUT_BUFFER` atom 中所有排队输入按入队顺序 drain，逐条发送到 SUBMIT_TX。
@@ -250,12 +240,16 @@ fn push_popup_kind(state: &BridgeState) {
 /// 严格 FIFO。第一条立即触发 prompt，后续在 submit_consumer 内部顺序处理
 /// （每条都等上一条的 RPC 完成）。
 fn drain_input_buffer() {
-    let (Some(buf_atom), Some(tx)) = (INPUT_BUFFER.get(), SUBMIT_TX.get()) else {
+    let tx = SUBMIT_TX.get().cloned();
+    if tx.is_none() {
         return;
-    };
-    let drained: Vec<String> = buf_atom.write().drain(..).collect();
-    for text in drained {
-        let _ = tx.send(text);
+    }
+
+    let drained: Vec<String> = INPUT_BUFFER.state().write().drain(..).collect();
+    if let Some(tx) = tx {
+        for text in drained {
+            let _ = tx.send(text);
+        }
     }
 }
 
@@ -274,13 +268,15 @@ mod tests {
     #[serial]
     async fn test_drain_input_buffer_preserves_order() {
         crate::kit::atoms::init_atoms();
-        // 确保 SUBMIT_TX 已 set（首次 set 或被前一个测试 set 都 OK）
-        let (tx, _rx) = mpsc::unbounded_channel::<String>();
-        let _ = SUBMIT_TX.set(tx);
+        let _ = SUBMIT_TX.get_or_init(|| {
+            let (tx, _rx) = mpsc::unbounded_channel::<String>();
+            tx
+        });
 
         // 入队三条
         {
-            let mut buf = INPUT_BUFFER.get().unwrap().write();
+            let state = INPUT_BUFFER.state();
+            let mut buf = state.write();
             buf.push_back("first".into());
             buf.push_back("second".into());
             buf.push_back("third".into());
@@ -290,7 +286,7 @@ mod tests {
 
         // 验证 buffer 已被 drain 干净——这是 drain_input_buffer 的核心效应
         assert!(
-            INPUT_BUFFER.get().unwrap().read().is_empty(),
+            INPUT_BUFFER.state().read().is_empty(),
             "buffer should be empty after drain"
         );
     }
@@ -300,14 +296,16 @@ mod tests {
     #[serial]
     async fn test_drain_input_buffer_empty_is_noop() {
         crate::kit::atoms::init_atoms();
-        let (tx, _rx) = mpsc::unbounded_channel::<String>();
-        let _ = SUBMIT_TX.set(tx);
+        let _ = SUBMIT_TX.get_or_init(|| {
+            let (tx, _rx) = mpsc::unbounded_channel::<String>();
+            tx
+        });
 
-        INPUT_BUFFER.get().unwrap().write().clear();
+        INPUT_BUFFER.state().write().clear();
         drain_input_buffer();
 
         assert!(
-            INPUT_BUFFER.get().unwrap().read().is_empty(),
+            INPUT_BUFFER.state().read().is_empty(),
             "empty buffer should remain empty"
         );
     }
@@ -320,7 +318,7 @@ mod tests {
     fn test_drain_input_buffer_no_submit_tx_safe() {
         crate::kit::atoms::init_atoms();
         // 不论 SUBMIT_TX 是否 set，都不应 panic
-        INPUT_BUFFER.get().unwrap().write().push_back("x".into());
+        INPUT_BUFFER.state().write().push_back("x".into());
         drain_input_buffer();
         // SUBMIT_TX 已被前面测试 set 过，所以 drain 成功 → buffer 被清空
         // 即使 SUBMIT_TX 未 set，drain 早退，buffer 仍有 "x"——两种情况都不算 panic
