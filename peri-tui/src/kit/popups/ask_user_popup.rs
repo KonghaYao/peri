@@ -41,15 +41,23 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let focused = hooks.use_state(|| 0usize);
     // 每个问题的当前选中 option index（单选语义；multi_select 暂按单选处理）
     let answers = hooks.use_state(Vec::<Option<usize>>::new);
+    // I22-D：session 指纹——记录上次渲染时的 question id 列表。
+    // 当 payload 变化（不同 AskUser 事件）时复位 focused/answers，
+    // 避免上次会话的旧焦点/旧选项残留到新 popup。
+    let session_fingerprint = hooks.use_state(Vec::<String>::new);
 
     let question_count = pending.as_ref().map(|q| q.questions.len()).unwrap_or(0);
 
-    // 初始化 answers vec 到正确长度（首次渲染或问题数变化时）
-    {
-        let mut a = answers.write();
-        if a.len() != question_count {
-            a.resize(question_count, None);
-        }
+    // I22-D：检测 payload 变化——question id 列表不同则视为新 session
+    let current_fingerprint: Vec<String> = pending
+        .as_ref()
+        .map(|p| p.questions.iter().map(|q| q.id.clone()).collect())
+        .unwrap_or_default();
+    if *session_fingerprint.read() != current_fingerprint {
+        // 新 popup 会话——复位本地状态
+        *focused.write() = 0;
+        *answers.write() = vec![None; question_count];
+        *session_fingerprint.write() = current_fingerprint;
     }
 
     // 闭包另持一份 pending 副本（避免与渲染端争用 move）

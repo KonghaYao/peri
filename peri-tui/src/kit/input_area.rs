@@ -421,8 +421,21 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             }
         }
         Event::Paste(paste_text) => {
+            // I22-A：paste 大小上限——防止用户误粘 10MB 日志冻结终端。
+            // 10_000 chars 足够覆盖正常长 paste（代码片段、命令输出）；
+            // 超出截断并 log warn 提示（用户可改用文件追加方式）。
+            const MAX_PASTE_CHARS: usize = 10_000;
+            let char_count = paste_text.chars().count();
+            let truncated: String = paste_text.chars().take(MAX_PASTE_CHARS).collect();
+            if char_count > MAX_PASTE_CHARS {
+                tracing::warn!(
+                    original_chars = char_count,
+                    capped_at = MAX_PASTE_CHARS,
+                    "InputArea: paste 截断——超出 10K char 上限"
+                );
+            }
             let mut s = state.write();
-            s.insert_str(&paste_text);
+            s.insert_str(&truncated);
             update_popup_prefix(&s.text);
         }
         _ => {}
@@ -566,11 +579,19 @@ fn update_popup_prefix(text: &str) {
 }
 
 /// 把文本按 \n 拆成多行 Line，光标以反转色高亮。
+///
+/// I22-B：渲染窗口上限——只渲染光标附近的 MAX_RENDER_LINES 行。
+/// 原实现遍历整个 text 拆分并生成 Line，paste 大文本时每帧分配 O(n) Vec。
+/// 现改为以光标行为中心，仅渲染 MAX_RENDER_LINES 行（与 editor_height 上限一致），
+/// 渲染成本由 O(总行数) 降为 O(12)。光标始终落在渲染窗口内。
 fn render_multiline_with_cursor(text: &str, cursor: usize, loading: bool) -> Vec<Line<'static>> {
     let cursor_style = Style::default()
         .fg(Color::Rgb(0, 0, 0))
         .bg(theme::TEXT)
         .add_modifier(Modifier::BOLD);
+
+    // I22-B：渲染窗口上限。editor_height 最大 12，所以渲染 >12 行是浪费。
+    const MAX_RENDER_LINES: usize = 12;
 
     if text.is_empty() {
         return vec![if loading {
@@ -605,8 +626,23 @@ fn render_multiline_with_cursor(text: &str, cursor: usize, loading: bool) -> Vec
         target_col = total_lines.last().map(|l| l.chars().count()).unwrap_or(0);
     }
 
-    let mut result: Vec<Line<'static>> = Vec::new();
-    for (li, line) in text.split('\n').enumerate() {
+    // I22-B：计算渲染窗口 [start, end)，确保光标行包含在内。
+    // 当总行数 <= MAX_RENDER_LINES 时展示全部；否则以光标行为中心构建窗口，
+    // 并在 end 被末尾钳位后向上扩展 start，保证窗口始终占满 MAX_RENDER_LINES 行
+    // （修复验证报告的"光标在末尾时窗口缩到 7 行"shrinkage bug）。
+    let total_line_count = text.matches('\n').count() + 1;
+    let (start, end) = if total_line_count <= MAX_RENDER_LINES {
+        (0, total_line_count)
+    } else {
+        let half_window = MAX_RENDER_LINES / 2;
+        let center_start = target_line.saturating_sub(half_window);
+        let end = (center_start + MAX_RENDER_LINES).min(total_line_count);
+        let start = end.saturating_sub(MAX_RENDER_LINES);
+        (start, end)
+    };
+
+    let mut result: Vec<Line<'static>> = Vec::with_capacity(end - start);
+    for (li, line) in text.split('\n').enumerate().skip(start).take(end - start) {
         if li == target_line {
             let col_byte = EditorState::char_to_byte(line, target_col);
             let mut spans: Vec<Span<'static>> = Vec::new();

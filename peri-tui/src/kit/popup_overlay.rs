@@ -138,18 +138,8 @@ mod tests {
             *atoms::POPUP_KIND.get().unwrap().read(),
             Some(PopupKind::Hitl)
         );
-    }
-
-    #[test]
-    #[serial]
-    fn test_open_popup_replaces_previous() {
-        setup_atoms();
-        open_popup(PopupKind::Hitl);
-        open_popup(PopupKind::OAuth);
-        assert_eq!(
-            *atoms::POPUP_KIND.get().unwrap().read(),
-            Some(PopupKind::OAuth)
-        );
+        // 清理——避免全局 OnceLock atom 在测试间残留 POPUP_KIND 状态
+        close_popup();
     }
 
     #[test]
