@@ -74,10 +74,40 @@ pub fn open_popup(kind: PopupKind) {
 }
 
 /// 关闭当前弹窗（如果有）。返回被关闭的 PopupKind（用于日志/状态反馈）。
+///
+/// I21-C：同步清空对应 payload atom——避免下次打开 popup 仍显示陈旧数据。
+/// 例如 HitlPopup 关闭后，HITL_PENDING 应为 None；下次 agent 触发新的
+/// HitlPending 事件时 dispatch_and_notify 会重新写入。但若用户在两次事件
+/// 之间手动 open_popup（如未来加快捷键），不会看到上次的工具调用信息。
 pub fn close_popup() -> Option<PopupKind> {
     let atom = atoms::POPUP_KIND.get()?;
     let prev = *atom.read();
     *atom.write() = None;
+    // I21-C：根据关闭的 popup 类型清空对应 payload atom
+    if let Some(kind) = prev {
+        match kind {
+            PopupKind::Hitl => {
+                if let Some(a) = atoms::HITL_PENDING.get() {
+                    *a.write() = None;
+                }
+            }
+            PopupKind::AskUser => {
+                if let Some(a) = atoms::ASK_USER_PENDING.get() {
+                    *a.write() = None;
+                }
+            }
+            PopupKind::Rewind => {
+                if let Some(a) = atoms::REWIND_PREVIEW.get() {
+                    *a.write() = None;
+                }
+            }
+            PopupKind::OAuth => {
+                if let Some(a) = atoms::OAUTH_INFO.get() {
+                    *a.write() = None;
+                }
+            }
+        }
+    }
     prev
 }
 
@@ -155,5 +185,71 @@ mod tests {
     fn test_popup_kind_is_copy() {
         fn assert_copy<T: Copy>() {}
         assert_copy::<PopupKind>();
+    }
+
+    /// I21-C 回归保护：close_popup 必须根据关闭的 kind 清空对应 payload atom。
+    /// 防止未来重构破坏 atom 清空语义——用户打开 popup → 看到 payload → 关闭 →
+    /// 下次再打开时不应看到陈旧 payload（即使没有新事件）。
+    #[test]
+    #[serial]
+    fn test_close_popup_clears_payload_atoms() {
+        use peri_acp_types::event_data::{
+            AskUser, HitlPending, OauthNeeded, Question, RewindPreview,
+        };
+
+        setup_atoms();
+
+        // 构造 4 种 popup 的 payload 写入对应 atom
+        *atoms::HITL_PENDING.get().unwrap().write() = Some(HitlPending {
+            tool_name: "rm".to_string(),
+            tool_input: serde_json::Value::Null,
+            batch: None,
+        });
+        *atoms::ASK_USER_PENDING.get().unwrap().write() = Some(AskUser {
+            questions: vec![Question {
+                id: "q1".to_string(),
+                header: "h".to_string(),
+                question: "q".to_string(),
+                options: vec![],
+                multi_select: false,
+            }],
+        });
+        *atoms::REWIND_PREVIEW.get().unwrap().write() = Some(RewindPreview {
+            files: vec![],
+            messages: vec![],
+        });
+        *atoms::OAUTH_INFO.get().unwrap().write() = Some(OauthNeeded {
+            server_name: "test".to_string(),
+            auth_url: "https://example.com".to_string(),
+        });
+
+        // 逐一关闭每种 popup，验证对应 atom 被清空
+        open_popup(PopupKind::Hitl);
+        close_popup();
+        assert!(
+            atoms::HITL_PENDING.get().unwrap().read().is_none(),
+            "HITL_PENDING should be cleared after close_popup"
+        );
+
+        open_popup(PopupKind::AskUser);
+        close_popup();
+        assert!(
+            atoms::ASK_USER_PENDING.get().unwrap().read().is_none(),
+            "ASK_USER_PENDING should be cleared after close_popup"
+        );
+
+        open_popup(PopupKind::Rewind);
+        close_popup();
+        assert!(
+            atoms::REWIND_PREVIEW.get().unwrap().read().is_none(),
+            "REWIND_PREVIEW should be cleared after close_popup"
+        );
+
+        open_popup(PopupKind::OAuth);
+        close_popup();
+        assert!(
+            atoms::OAUTH_INFO.get().unwrap().read().is_none(),
+            "OAUTH_INFO should be cleared after close_popup"
+        );
     }
 }

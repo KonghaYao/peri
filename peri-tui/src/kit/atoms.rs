@@ -6,7 +6,7 @@
 //! 类型别名：pub type Atom<T> = StoreState<T>（保持与设计文档一致的命名）。
 
 use chrono::{DateTime, Utc};
-use peri_acp_types::event_data::{OauthNeeded, RewindPreview};
+use peri_acp_types::event_data::{AskUser, HitlPending, OauthNeeded, RewindPreview};
 use peri_acp_types::view_model::ViewModel;
 use ratatui_kit::prelude::StoreState;
 use std::collections::VecDeque;
@@ -319,6 +319,14 @@ pub static REWIND_PREVIEW: OnceLock<Atom<Option<RewindPreview>>> = OnceLock::new
 /// popup 关闭时清空，避免下次打开仍显示陈旧数据。
 pub static OAUTH_INFO: OnceLock<Atom<Option<OauthNeeded>>> = OnceLock::new();
 
+/// I21-A：HITL 工具审批 payload——由 AcpEvent::HitlPending 写入；HitlPopup 读取
+/// 真实 tool_name + tool_input + batch。popup 关闭时清空。
+pub static HITL_PENDING: OnceLock<Atom<Option<HitlPending>>> = OnceLock::new();
+
+/// I21-B：AskUser 表单 payload——由 AcpEvent::AskUser 写入；AskUserPopup 读取
+/// 真实 questions（id/header/question/options/multi_select）。popup 关闭时清空。
+pub static ASK_USER_PENDING: OnceLock<Atom<Option<AskUser>>> = OnceLock::new();
+
 /// 双击 Esc 检测——记录最近一次 Esc 按下时间。
 /// event_handlers 在 Esc 时检查：距上次 < 500ms 且无 popup → open_popup(Rewind)。
 pub static LAST_ESC_TIME: OnceLock<Atom<Option<Instant>>> = OnceLock::new();
@@ -410,6 +418,8 @@ pub fn init_atoms() {
     DIFF_VISIBLE.get_or_init(|| Atom::new(false));
     REWIND_PREVIEW.get_or_init(|| Atom::new(None));
     OAUTH_INFO.get_or_init(|| Atom::new(None));
+    HITL_PENDING.get_or_init(|| Atom::new(None));
+    ASK_USER_PENDING.get_or_init(|| Atom::new(None));
     LAST_ESC_TIME.get_or_init(|| Atom::new(None));
     // SUBMIT_TX 由 entry::run_kit_fullscreen 在 build_app_and_acp 之后初始化
     // （需要 mpsc::unbounded_channel 的 rx 配对），不在此处 get_or_init。

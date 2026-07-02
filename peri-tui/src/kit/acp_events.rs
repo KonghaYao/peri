@@ -155,13 +155,21 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 
         // ── §4.5 Interaction events ──
         // S7：把每个交互事件映射到具体 PopupKind，让 PopupOverlay 精确路由
-        HitlPending(_) => {
+        HitlPending(hp) => {
+            // I21-A：保存 payload 到 HITL_PENDING atom，供 HitlPopup 读取真实数据
+            if let Some(atom) = HITL_PENDING.get() {
+                *atom.write() = Some(hp.clone());
+            }
             state.popup_kind = Some(PopupKind::Hitl);
             state.variant = 2;
             push_popup_kind(state);
             push_acp_state(state);
         }
-        AskUser(_) => {
+        AskUser(au) => {
+            // I21-B：保存 payload 到 ASK_USER_PENDING atom，供 AskUserPopup 读取真实数据
+            if let Some(atom) = ASK_USER_PENDING.get() {
+                *atom.write() = Some(au.clone());
+            }
             state.popup_kind = Some(PopupKind::AskUser);
             state.variant = 2;
             push_popup_kind(state);

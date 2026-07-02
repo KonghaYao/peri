@@ -25,13 +25,15 @@ TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTran
 
 | Atom | 用途 |
 |------|------|
-| `VIEW_MODELS` | `ViewModelsSnapshot { committed, current_turn }` —— 消息流单一数据源 |
-| `ACP_STATE` | `AcpStateSnapshot { variant, is_loading, popup_active, at_mention_active, slash_hint_active ... }` |
+| `VIEW_MODELS` | `ViewModelsSnapshot { committed: Arc<[ViewModel]>, current_turn: Arc<[ViewModel]> }` —— 消息流单一数据源（I20-B：Arc 避免 streaming chunk 上 O(n) clone） |
+| `ACP_STATE` | `AcpStateSnapshot { variant, is_loading, at_mention_active, slash_hint_active ... }` —— popup_active 已退役（I20-A），弹窗状态走 POPUP_KIND.is_some() |
 | `SERVICE_SNAPSHOT` | CPU/MEM/MCP/Cron/provider/model/permission_mode/cwd 投影 |
 | `THREAD_LIST` / `CRON_JOBS` / `FILE_LIST` | Thread / Cron / cwd 文件列表 |
 | `OPEN_PANELS` / `ACTIVE_PANEL` / `POPUP_KIND` | 当前面板栈 + 激活面板 + 激活弹窗 |
 | `INPUT_HISTORY` / `INPUT_HISTORY_INDEX` | 输入历史栈 + 浏览指针 |
 | `INPUT_BUFFER` | **Iteration 13 新增**：agent loading 时缓存的待提交输入队列（上限 32） |
+| `HITL_PENDING` / `ASK_USER_PENDING` / `REWIND_PREVIEW` / `OAUTH_INFO` | **I20-D / I21-A / I21-B**：4 popup 的真实 payload（由 dispatch_and_notify 写入，close_popup 统一清空） |
+| `DIFF_VISIBLE` | **I19-B**：Ctrl+O toggle 的 diff 视图开关，传给 view_render |
 | `AT_MENTION_ACTIVE` / `MENTION_PREFIX` / `SLASH_HINT_ACTIVE` / `SLASH_PREFIX` | 输入辅助状态 |
 | `REWIND_PREVIEW` / `LAST_ESC_TIME` | Rewind 弹窗数据 + 双击 Esc 检测 |
 | `MODEL_HIGHLIGHT_UNTIL` / `PROVIDER_HIGHLIGHT_UNTIL` / `MODE_HIGHLIGHT_UNTIL` | Status bar 瞬时高亮 |
@@ -97,14 +99,16 @@ TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTran
 
 ## 4 弹窗（kit/popups/）
 
-由 ACP 事件触发，统一通过 `POPUP_KIND` atom 路由：
+由 ACP 事件触发，统一通过 `POPUP_KIND` atom 路由。dispatch_and_notify 在写入
+`POPUP_KIND` 的同时把完整 payload 写入对应 atom（I20-D / I21-A / I21-B）；
+`close_popup()` 关闭时根据 kind 统一清空 payload atom，避免陈旧数据残留（I21-C）。
 
-| Popup | 触发源 | 功能 |
-|-------|--------|------|
-| **HITL** | `AcpEventData::HitlPending` | 工具调用审批（Accept/Reject/Once） |
-| **AskUser** | `AcpEventData::AskUser` | Agent 向用户提问（多选项） |
-| **Rewind** | `AcpEventData::RewindPreview` 或双击 Esc | 回退预览 + 确认；REWIND_ACTION_TX → /rewind RPC |
-| **OAuth** | `AcpEventData::OauthNeeded` | OAuth 授权流程 |
+| Popup | 触发源 | payload atom | 功能 |
+|-------|--------|--------------|------|
+| **HITL** | `AcpEventData::HitlPending` | `HITL_PENDING: Option<HitlPending>` | 显示真实 tool_name + tool_input + batch；Enter approve / Esc reject（I21-A） |
+| **AskUser** | `AcpEventData::AskUser` | `ASK_USER_PENDING: Option<AskUser>` | 显示真实 questions；↑↓ 切焦点、1-9 选 option、Enter 提交（I21-B） |
+| **Rewind** | `AcpEventData::RewindPreview` 或双击 Esc | `REWIND_PREVIEW: Option<RewindPreview>` | 回退预览 + 确认；REWIND_ACTION_TX → /rewind RPC |
+| **OAuth** | `AcpEventData::OauthNeeded` | `OAUTH_INFO: Option<OauthNeeded>` | 显示真实 server_name + auth_url；Ctrl+O 开浏览器、Enter 关闭（I20-D） |
 
 ## Status Bar（kit/status_bar.rs）
 

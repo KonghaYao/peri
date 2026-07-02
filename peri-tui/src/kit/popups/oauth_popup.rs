@@ -50,10 +50,8 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     // Enter：关闭 popup——OAuth 完成由 ACP server 推送事件刷新
+                    // I21-C：close_popup 内部统一清空 OAUTH_INFO atom
                     (KeyModifiers::NONE, KeyCode::Enter) => {
-                        if let Some(atom) = OAUTH_INFO.get() {
-                            *atom.write() = None;
-                        }
                         close_popup();
                     }
                     // 退格：no-op（不再支持本地输入授权码——避免与 ACP 完成回调冲突）
