@@ -17,7 +17,7 @@
 //! 这意味着如果用户运行时切 provider/model（通过 TUI 命令），本任务下次 tick 会看到。
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use peri_middlewares::{
@@ -71,6 +71,7 @@ pub fn spawn_service_snapshot(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
+        let mut slow_refresh = SlowSnapshotRefresh::default();
         // 起始 tick 立即触发一次（首次 interval.tick() 立即返回）——让 UI 启动后
         // 立即拿到首帧服务快照，而非 2s 后才出现数据。
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -82,7 +83,7 @@ pub fn spawn_service_snapshot(
                     break;
                 }
                 _ = interval.tick() => {
-                    if let Err(e) = tick_once(&src).await {
+                    if let Err(e) = tick_once(&src, &mut slow_refresh).await {
                         warn!(error = %e, "service_snapshot: tick failed");
                     }
                 }
@@ -91,8 +92,33 @@ pub fn spawn_service_snapshot(
     })
 }
 
+struct SlowSnapshotRefresh {
+    next_file_scan: Instant,
+    next_thread_scan: Instant,
+    next_memory_scan: Instant,
+    files: Vec<String>,
+    threads: Vec<ThreadSummary>,
+    memory_entries: Vec<MemoryEntry>,
+}
+
+impl Default for SlowSnapshotRefresh {
+    fn default() -> Self {
+        Self {
+            next_file_scan: Instant::now(),
+            next_thread_scan: Instant::now(),
+            next_memory_scan: Instant::now(),
+            files: Vec::new(),
+            threads: Vec::new(),
+            memory_entries: Vec::new(),
+        }
+    }
+}
+
 /// 单次快照派发——读所有源 → 写所有 atom。返回 Err 仅在 thread_store I/O 失败时。
-async fn tick_once(src: &SnapshotSource) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn tick_once(
+    src: &SnapshotSource,
+    slow: &mut SlowSnapshotRefresh,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // ── 1. CPU/MEM（同步采样，持锁时间极短） ────────────────────────────
     let (memory_mb, cpu_percent) = {
         let mut monitor = src.resource_monitor.lock();
@@ -128,50 +154,65 @@ async fn tick_once(src: &SnapshotSource) -> Result<(), Box<dyn std::error::Error
         (total, enabled, jobs)
     };
 
-    // ── 6. Thread 列表（async，可能因 SQLite I/O 失败） ─────────────────
-    let threads: Vec<ThreadSummary> = match src.thread_store.list_threads().await {
-        Ok(metas) => metas
-            .into_iter()
-            .filter(|m| !m.hidden) // 主列表不显示子 agent
-            .map(|m| ThreadSummary {
-                id: m.id.clone(),
-                title: m.title.clone(),
-                cwd: m.cwd.clone(),
-                message_count: m.message_count,
-                updated_at: Some(m.updated_at),
-            })
-            .collect(),
-        Err(e) => {
-            warn!(error = %e, "service_snapshot: list_threads failed");
-            Vec::new()
-        }
-    };
+    // ── 6. Thread 列表：慢频刷新，避免空闲时持续打 SQLite / I/O ───────────────
+    let now = Instant::now();
+    if now >= slow.next_thread_scan {
+        slow.threads = match src.thread_store.list_threads().await {
+            Ok(metas) => metas
+                .into_iter()
+                .filter(|m| !m.hidden) // 主列表不显示子 agent
+                .map(|m| ThreadSummary {
+                    id: m.id.clone(),
+                    title: m.title.clone(),
+                    cwd: m.cwd.clone(),
+                    message_count: m.message_count,
+                    updated_at: Some(m.updated_at),
+                })
+                .collect(),
+            Err(e) => {
+                warn!(error = %e, "service_snapshot: list_threads failed");
+                Vec::new()
+            }
+        };
+        slow.next_thread_scan = now + Duration::from_secs(30);
+    }
+    let threads = slow.threads.clone();
 
     // ── 6b. C2: cwd 文件浅扫（@mention 补全用） ────────────────────────
-    // spawn_blocking 包裹同步 fs 操作，避免阻塞 async runtime。失败时静默
-    // 跳过（FILE_LIST 保持上一帧值或空 Vec）。
-    let cwd_for_scan = src.cwd.clone();
-    let files: Vec<String> =
-        match tokio::task::spawn_blocking(move || scan_cwd_files_shallow(&cwd_for_scan)).await {
+    // 文件列表不需要 2 秒刷新；慢频刷新可避免大型 cwd 空闲时持续扫盘。
+    if now >= slow.next_file_scan {
+        let cwd_for_scan = src.cwd.clone();
+        slow.files = match tokio::task::spawn_blocking(move || {
+            scan_cwd_files_shallow(&cwd_for_scan)
+        })
+        .await
+        {
             Ok(result) => result,
             Err(e) => {
                 warn!(error = %e, "service_snapshot: spawn_blocking for cwd scan failed");
                 Vec::new()
             }
         };
+        slow.next_file_scan = now + Duration::from_secs(30);
+    }
+    let files = slow.files.clone();
 
     // ── 6c. H1d: MCP server 详细列表（从 pool 派生） ───────────────────
     let mcp_servers: Vec<McpServerSummary> = derive_mcp_servers(&src.mcp_pool);
 
     // ── 6d. H1h: ~/.claude/memory 文件扫描 ──────────────────────────────
-    let memory_entries: Vec<MemoryEntry> = match tokio::task::spawn_blocking(scan_memory_dir).await
-    {
-        Ok(result) => result,
-        Err(e) => {
-            warn!(error = %e, "service_snapshot: spawn_blocking for memory scan failed");
-            Vec::new()
-        }
-    };
+    // Memory 面板数据慢频刷新即可，避免空闲时每 2 秒扫 ~/.claude/memory。
+    if now >= slow.next_memory_scan {
+        slow.memory_entries = match tokio::task::spawn_blocking(scan_memory_dir).await {
+            Ok(result) => result,
+            Err(e) => {
+                warn!(error = %e, "service_snapshot: spawn_blocking for memory scan failed");
+                Vec::new()
+            }
+        };
+        slow.next_memory_scan = now + Duration::from_secs(30);
+    }
+    let memory_entries = slow.memory_entries.clone();
 
     // ── 7. 写入 atoms ───────────────────────────────────────────────────
     let snap = ServiceSnapshot {
@@ -535,7 +576,8 @@ mod tests {
 
         let store = make_sqlite_store().await;
         let src = make_minimal_source(store);
-        let result = tick_once(&src).await;
+        let mut slow = SlowSnapshotRefresh::default();
+        let result = tick_once(&src, &mut slow).await;
         assert!(result.is_ok(), "tick_once should succeed");
 
         let snap = SERVICE_SNAPSHOT.state().read().clone();
@@ -555,7 +597,8 @@ mod tests {
         let store = make_sqlite_store().await;
         let src = make_minimal_source(store);
         // 空 SQLite store——list_threads 返回空 Vec
-        let result = tick_once(&src).await;
+        let mut slow = SlowSnapshotRefresh::default();
+        let result = tick_once(&src, &mut slow).await;
         assert!(result.is_ok());
 
         let threads = THREAD_LIST.state().read().clone();
@@ -577,7 +620,8 @@ mod tests {
             scheduler.toggle(&id2); // disable
         }
 
-        let result = tick_once(&src).await;
+        let mut slow = SlowSnapshotRefresh::default();
+        let result = tick_once(&src, &mut slow).await;
         assert!(result.is_ok());
 
         let jobs = CRON_JOBS.state().read().clone();
