@@ -217,6 +217,7 @@ impl EditorState {
 #[derive(Default, Props)]
 pub struct InputAreaProps {
     pub loading: bool,
+    pub hidden: bool,
 }
 
 #[component]
@@ -372,6 +373,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         },
     );
     let editor = state.read().clone();
+    let hidden = props.hidden;
     let text = editor.text.clone();
     let cursor = editor.cursor;
     let loading = props.loading;
@@ -404,7 +406,11 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     } else {
         0
     };
-    let total_height = composer_height + slash_popup_height + mention_popup_height;
+    let total_height = if hidden {
+        0
+    } else {
+        composer_height + slash_popup_height + mention_popup_height
+    };
 
     let composer_lines = build_composer_lines(lines, loading);
     let mention_items = filter_files_for_mention(&mention_prefix);
@@ -415,7 +421,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             width: Constraint::Fill(1),
             height: Constraint::Length(total_height),
         ) {
-            { if slash_active {
+            { if !hidden && slash_active {
                 element!(SlashCompletion(
                     prefix: slash_prefix.clone(),
                     items: slash_items.clone(),
@@ -440,7 +446,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             } else {
                 element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
             } }
-            { if mention_active {
+            { if !hidden && mention_active {
                 element!(MentionPopup(
                     prefix: mention_prefix.clone(),
                     items: mention_items.clone(),
@@ -456,13 +462,19 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             } else {
                 element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
             } }
-            View(
-                flex_direction: Direction::Vertical,
-                width: Constraint::Fill(1),
-                height: Constraint::Length(composer_height),
-            ) {
-                Text(text: Paragraph::new(composer_lines).block(build_composer_block(loading)))
-            }
+            { if !hidden {
+                element!(
+                    View(
+                        flex_direction: Direction::Vertical,
+                        width: Constraint::Fill(1),
+                        height: Constraint::Length(composer_height),
+                    ) {
+                        Text(text: Paragraph::new(composer_lines).block(build_composer_block(loading)))
+                    }
+                ).into_any()
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
+            } }
         }
     )
 }
@@ -609,8 +621,10 @@ fn filter_files_for_mention(prefix: &str) -> Vec<String> {
 /// - `/` 在行首：开启 slash 提示，prefix = 第一个非空白/制表符之后到光标的内容
 /// - `@` 在最近词中：开启 @mention，prefix = @ 之后的字符
 fn update_popup_prefix(text: &str) {
-    // slash：仅当整段文本以 / 开头且无空格时
-    let slash_active_now = text.starts_with('/') && !text[1..].contains(' ');
+    // slash：仅当整段文本是单个 slash 命令 token 时开启提示。
+    // `//` 常见于用户误触/路径/注释，不应保持一个空匹配 popup 反复渲染。
+    let slash_active_now = text == "/"
+        || (text.starts_with('/') && !text.starts_with("//") && !text[1..].contains(' '));
     *SLASH_HINT_ACTIVE.state().write() = slash_active_now;
     if slash_active_now {
         *SLASH_PREFIX.state().write() = text[1..].to_string();

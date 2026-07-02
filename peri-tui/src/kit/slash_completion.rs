@@ -67,7 +67,10 @@ pub fn SlashCompletion(
     let on_cancel = Arc::clone(&props.on_cancel);
 
     if item_count == 0 {
-        *selection.write() = 0;
+        let mut sel = selection.write();
+        if *sel != 0 {
+            *sel = 0;
+        }
     } else {
         let mut sel = selection.write();
         if *sel >= item_count {
