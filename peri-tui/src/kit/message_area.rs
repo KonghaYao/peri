@@ -33,14 +33,18 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
+use std::sync::Arc;
 
 /// MessageArea 组件 Props——由父组件（layout.rs SessionColumn）注入。
+///
+/// I20-B：view_models / current_turn 改 `Arc<[ViewModel]>`——避免 layout
+/// 每次 clone 快照时 O(n) 拷贝整条消息历史。
 #[derive(Default, Props)]
 pub struct MessageAreaProps {
     /// 已提交（committed）消息列表。
-    pub view_models: Vec<ViewModel>,
+    pub view_models: Arc<[ViewModel]>,
     /// 当前轮次正在进行的消息列表。
-    pub current_turn: Vec<ViewModel>,
+    pub current_turn: Arc<[ViewModel]>,
     /// 是否正在加载（Agent 思考中）。
     pub loading: bool,
     /// 终端可用宽度，用于 markdown 折行。
@@ -54,14 +58,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let mut all_lines: Vec<Line<'static>> = Vec::new();
 
     // 已提交消息
-    for vm in &props.view_models {
+    for vm in props.view_models.iter() {
         let lines = view_render::render_v2_vm(vm, props.width, props.diff_visible);
         all_lines.extend(lines);
         all_lines.push(Line::from(""));
     }
 
     // 当前轮次消息
-    for vm in &props.current_turn {
+    for vm in props.current_turn.iter() {
         let lines = view_render::render_v2_vm(vm, props.width, props.diff_visible);
         all_lines.extend(lines);
         all_lines.push(Line::from(""));

@@ -6,11 +6,11 @@
 //! 类型别名：pub type Atom<T> = StoreState<T>（保持与设计文档一致的命名）。
 
 use chrono::{DateTime, Utc};
-use peri_acp_types::event_data::RewindPreview;
+use peri_acp_types::event_data::{OauthNeeded, RewindPreview};
 use peri_acp_types::view_model::ViewModel;
 use ratatui_kit::prelude::StoreState;
 use std::collections::VecDeque;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -44,17 +44,31 @@ pub struct AcpStateSnapshot {
     pub variant: u8, // 0=Idle, 1=Streaming, 2=Modal, 3=Switching
     pub view_count: usize,
     pub is_loading: bool,
-    pub popup_active: bool,
     pub wizard_active: bool,
     pub at_mention_active: bool,
     pub slash_hint_active: bool,
 }
 
 /// Session ViewModels 快照
-#[derive(Debug, Clone, Default)]
+///
+/// I20-B：`committed` 用 `Arc<[ViewModel]>` 而非 `Vec<ViewModel>`——
+/// `push_view_models` 在每个 streaming chunk（TextChunk/ReasoningChunk/ToolStarted/
+/// ToolEnded）上都会 clone 一份快照写入 atom，长时间会话中每次 clone O(n)
+/// 会造成严重性能问题。改 Arc 后 clone O(1)，只有 ViewCommit/TurnDone 等
+/// 真正修改 committed 的事件才重建 Arc（O(n)，但稀少）。
+#[derive(Debug, Clone)]
 pub struct ViewModelsSnapshot {
-    pub committed: Vec<ViewModel>,
-    pub current_turn: Vec<ViewModel>,
+    pub committed: Arc<[ViewModel]>,
+    pub current_turn: Arc<[ViewModel]>,
+}
+
+impl Default for ViewModelsSnapshot {
+    fn default() -> Self {
+        Self {
+            committed: Arc::from([]),
+            current_turn: Arc::from([]),
+        }
+    }
 }
 
 // ── S5：service snapshot 投影类型 ─────────────────────────────────────────
@@ -301,6 +315,10 @@ pub static DIFF_VISIBLE: OnceLock<Atom<bool>> = OnceLock::new();
 /// 双击 Esc 触发 popup 时若此 atom 为 None，popup 显示"无可回退"占位。
 pub static REWIND_PREVIEW: OnceLock<Atom<Option<RewindPreview>>> = OnceLock::new();
 
+/// I20-D：OAuth 授权数据——由 AcpEvent::OauthNeeded 写入；OAuthPopup 读取。
+/// popup 关闭时清空，避免下次打开仍显示陈旧数据。
+pub static OAUTH_INFO: OnceLock<Atom<Option<OauthNeeded>>> = OnceLock::new();
+
 /// 双击 Esc 检测——记录最近一次 Esc 按下时间。
 /// event_handlers 在 Esc 时检查：距上次 < 500ms 且无 popup → open_popup(Rewind)。
 pub static LAST_ESC_TIME: OnceLock<Atom<Option<Instant>>> = OnceLock::new();
@@ -391,6 +409,7 @@ pub fn init_atoms() {
     SLASH_SELECTED_INDEX.get_or_init(|| Atom::new(0));
     DIFF_VISIBLE.get_or_init(|| Atom::new(false));
     REWIND_PREVIEW.get_or_init(|| Atom::new(None));
+    OAUTH_INFO.get_or_init(|| Atom::new(None));
     LAST_ESC_TIME.get_or_init(|| Atom::new(None));
     // SUBMIT_TX 由 entry::run_kit_fullscreen 在 build_app_and_acp 之后初始化
     // （需要 mpsc::unbounded_channel 的 rx 配对），不在此处 get_or_init。

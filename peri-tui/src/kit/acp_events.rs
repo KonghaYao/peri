@@ -6,6 +6,7 @@
 use crate::kit::acp_types::{AcpEventData, CurrentTurn, ToolCardAccumulator};
 use crate::kit::atoms::*;
 use peri_acp_types::view_model::{NoteLevel, SystemNoteData, ViewModel};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // BridgeState — ACP 事件桥接内部状态
@@ -18,14 +19,17 @@ pub struct BridgeState {
     /// 0=Idle, 1=Streaming, 2=Modal
     pub variant: u8,
     /// 已提交的 ViewModel 列表
-    pub committed: Vec<ViewModel>,
+    ///
+    /// I20-B：改 `Arc<[ViewModel]>`——push_view_models 在每个 streaming chunk
+    /// 上都会 clone 一份写入 atom，Vec 会 O(n)；Arc clone O(1)，只有
+    /// ViewCommit/TurnDone/SystemNotification 真正修改时才重建 Arc。
+    pub committed: Arc<[ViewModel]>,
     /// 当前轮次的增量数据
     pub current_turn: CurrentTurn,
     /// Agent 是否正在加载中
     pub is_loading: bool,
-    /// 是否有交互弹窗挂起（仅作为状态栏的"是否有弹窗"指示，精确路由用 popup_kind）
-    pub popup_active: bool,
     /// S7：精确弹窗类型，由 AcpEvent 直接映射。None = 无弹窗。
+    /// 弹窗激活状态由 POPUP_KIND.is_some() 派生（status_bar / event_handlers 都读这个）
     pub popup_kind: Option<crate::kit::atoms::PopupKind>,
 }
 
@@ -78,14 +82,19 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 
         // ── §4.2 Boundary events ──
         ViewCommit(vc) => {
-            state.committed = vc.view_models.clone();
+            // I20-B：clone incoming Vec → 移入 Arc，单次 O(n) 分配。
+            state.committed = Arc::from(vc.view_models.clone());
             state.current_turn = CurrentTurn::new();
             push_view_models(state);
             push_acp_state(state);
         }
         TurnDone => {
             let vms = state.current_turn.view_models().to_vec();
-            state.committed.extend(vms);
+            // I20-B：Arc 不可 extend，需重建——拼接旧 + 新
+            let mut combined = Vec::with_capacity(state.committed.len() + vms.len());
+            combined.extend(state.committed.iter().cloned());
+            combined.extend(vms);
+            state.committed = Arc::from(combined);
             state.current_turn = CurrentTurn::new();
             state.variant = 0;
             state.is_loading = false;
@@ -98,7 +107,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         TurnInterrupted(_ti) => {
             state.current_turn.deactivate();
             let vms = state.current_turn.view_models().to_vec();
-            state.committed.extend(vms);
+            // I20-B：同 TurnDone，重建 Arc
+            let mut combined = Vec::with_capacity(state.committed.len() + vms.len());
+            combined.extend(state.committed.iter().cloned());
+            combined.extend(vms);
+            state.committed = Arc::from(combined);
             state.current_turn = CurrentTurn::new();
             state.variant = 0;
             state.is_loading = false;
@@ -125,10 +138,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 "error" => NoteLevel::Error,
                 _ => NoteLevel::Info,
             };
-            state.committed.push(ViewModel::SystemNote(SystemNoteData {
+            // I20-B：Arc 不可 push，需重建
+            let mut combined = Vec::with_capacity(state.committed.len() + 1);
+            combined.extend(state.committed.iter().cloned());
+            combined.push(ViewModel::SystemNote(SystemNoteData {
                 text: sn.text.clone(),
                 level,
             }));
+            state.committed = Arc::from(combined);
             push_view_models(state);
             push_acp_state(state);
         }
@@ -160,7 +177,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_popup_kind(state);
             push_acp_state(state);
         }
-        OauthNeeded(_) => {
+        OauthNeeded(on) => {
+            // I20-D：保存 payload 到 OAUTH_INFO atom，供 OAuthPopup 读取真实数据
+            if let Some(atom) = OAUTH_INFO.get() {
+                *atom.write() = Some(on.clone());
+            }
             state.popup_kind = Some(PopupKind::OAuth);
             state.variant = 2;
             push_popup_kind(state);
@@ -183,9 +204,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 
 /// 将 BridgeState 中的 ViewModels 写入 VIEW_MODELS Atom。
 fn push_view_models(state: &mut BridgeState) {
+    // I20-B：Arc::clone 是 O(1) 原子指针拷贝，避免之前每个 streaming chunk
+    // 都 O(n) clone 整个消息历史的性能问题。
     let snapshot = ViewModelsSnapshot {
-        committed: state.committed.clone(),
-        current_turn: state.current_turn.view_models().to_vec(),
+        committed: Arc::clone(&state.committed),
+        current_turn: Arc::from(state.current_turn.view_models()),
     };
     *VIEW_MODELS.get().unwrap().write() = snapshot;
 }
@@ -196,7 +219,6 @@ fn push_acp_state(state: &mut BridgeState) {
         variant: state.variant,
         view_count: state.committed.len() + state.current_turn.view_models().len(),
         is_loading: state.is_loading,
-        popup_active: state.popup_active,
         wizard_active: false,
         at_mention_active: *AT_MENTION_ACTIVE.get().unwrap().read(),
         slash_hint_active: *SLASH_HINT_ACTIVE.get().unwrap().read(),

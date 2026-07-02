@@ -273,8 +273,9 @@ mod tests {
         let snap = ViewModelsSnapshot {
             committed: vec![ViewModel::UserBubble(UserBubbleData {
                 text: "hi".to_string(),
-            })],
-            current_turn: Vec::new(),
+            })]
+            .into(),
+            current_turn: Vec::new().into(),
         };
         assert!(collect_subagents(&snap).is_empty());
     }
@@ -286,11 +287,13 @@ mod tests {
             committed: vec![ViewModel::SubAgentGroup(make_subagent(
                 "researcher",
                 "Researcher",
-            ))],
+            ))]
+            .into(),
             current_turn: vec![ViewModel::SubAgentGroup(make_subagent(
                 "researcher",
                 "Researcher",
-            ))],
+            ))]
+            .into(),
         };
         let result = collect_subagents(&snap);
         assert_eq!(result.len(), 1);
@@ -304,8 +307,9 @@ mod tests {
                 ViewModel::SubAgentGroup(make_subagent("alpha", "Alpha")),
                 ViewModel::SubAgentGroup(make_subagent("beta", "Beta")),
                 ViewModel::SubAgentGroup(make_subagent("gamma", "Gamma")),
-            ],
-            current_turn: Vec::new(),
+            ]
+            .into(),
+            current_turn: Vec::new().into(),
         };
         let result = collect_subagents(&snap);
         let ids: Vec<_> = result.iter().map(|s| s.agent_id.as_str()).collect();
@@ -321,8 +325,8 @@ mod tests {
             view_models: vec![ViewModel::SubAgentGroup(make_subagent("hidden", "Hidden"))],
         };
         let snap = ViewModelsSnapshot {
-            committed: vec![ViewModel::CollapsedGroup(collapsed)],
-            current_turn: Vec::new(),
+            committed: vec![ViewModel::CollapsedGroup(collapsed)].into(),
+            current_turn: Vec::new().into(),
         };
         let result = collect_subagents(&snap);
         assert_eq!(result.len(), 1);
@@ -337,8 +341,8 @@ mod tests {
             .view_models
             .push(ViewModel::SubAgentGroup(make_subagent("inner", "Inner")));
         let snap = ViewModelsSnapshot {
-            committed: vec![ViewModel::SubAgentGroup(outer)],
-            current_turn: Vec::new(),
+            committed: vec![ViewModel::SubAgentGroup(outer)].into(),
+            current_turn: Vec::new().into(),
         };
         let result = collect_subagents(&snap);
         assert_eq!(result.len(), 2);

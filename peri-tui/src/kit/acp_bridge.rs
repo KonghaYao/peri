@@ -6,6 +6,7 @@
 
 use crate::kit::acp_events::{self, BridgeState};
 use crate::kit::acp_types::{AcpEventData, CurrentTurn};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -21,10 +22,9 @@ pub fn spawn_acp_bridge(
     tokio::spawn(async move {
         let mut state = BridgeState {
             variant: 0,
-            committed: Vec::new(),
+            committed: Arc::from([]),
             current_turn: CurrentTurn::new(),
             is_loading: false,
-            popup_active: false,
             popup_kind: None,
         };
 
