@@ -149,7 +149,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32) -> Vec<MappedEvent>
             )]
         }
 
-        ExecutorEvent::AiReasoning(text) => {
+        ExecutorEvent::AiReasoning { text, .. } => {
             vec![MappedEvent::standard(vec![
                 SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(
                     TextContent::new(text.clone()),
@@ -451,7 +451,7 @@ pub fn executor_event_to_acp(event: &ExecutorEvent) -> Option<super::AcpEvent> {
         // Category ① events: already handled via session/update
         // Filtered events: not forwarded
         ExecutorEvent::TextChunk { .. }
-        | ExecutorEvent::AiReasoning(_)
+        | ExecutorEvent::AiReasoning { .. }
         | ExecutorEvent::ToolStart { .. }
         | ExecutorEvent::ToolEnd { .. }
         | ExecutorEvent::TodoUpdate(_)

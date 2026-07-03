@@ -105,7 +105,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                 chunk,
             });
         }
-        ExecutorEvent::AiReasoning(text) => {
+        ExecutorEvent::AiReasoning { text, .. } => {
             eb.emit_render(RenderEvent::ThinkingChunk {
                 turn_id,
                 agent_id,

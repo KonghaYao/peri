@@ -66,6 +66,9 @@ pub struct ToolCardData {
     pub output_summary: String,
     /// Whether the tool invocation resulted in an error.
     pub is_error: bool,
+    /// Whether the tool is still streaming/running.
+    #[serde(default)]
+    pub is_running: bool,
     /// Inline diff preview (Write / Edit tools).
     pub diff: Option<DiffBlock>,
 }
@@ -97,6 +100,9 @@ pub struct SubAgentGroupData {
     pub view_models: Vec<ViewModel>,
     /// Whether the group is currently collapsed.
     pub collapsed: bool,
+    /// Whether the sub-agent is still streaming.
+    #[serde(default)]
+    pub is_running: bool,
 }
 
 /// Generic collapsible group -- e.g. batched tool calls.
@@ -211,6 +217,7 @@ mod tests {
             input_summary: "path: foo.rs".into(),
             output_summary: "updated 3 lines".into(),
             is_error: false,
+            is_running: false,
             diff: Some(DiffBlock {
                 path: "foo.rs".into(),
                 hunks: vec![Hunk {
@@ -250,6 +257,7 @@ mod tests {
                 label: Some("inner".into()),
             })],
             collapsed: true,
+            is_running: false,
         });
         let json = serde_json::to_string(&vm).unwrap();
         let back: ViewModel = serde_json::from_str(&json).unwrap();

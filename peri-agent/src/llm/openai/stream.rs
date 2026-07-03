@@ -142,8 +142,10 @@ pub(super) async fn do_invoke_streaming(
                 .or_else(|| delta["reasoning"].as_str())
             {
                 if !r.is_empty() {
-                    ctx.event_handler
-                        .on_event(ExecutorEvent::AiReasoning(r.to_string()));
+                    ctx.event_handler.on_event(ExecutorEvent::AiReasoning {
+                        text: r.to_string(),
+                        source_agent_id: None,
+                    });
                     reasoning_text.push_str(r);
                 }
             }

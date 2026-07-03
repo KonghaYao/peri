@@ -46,37 +46,96 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
     match event {
         // ── §4.1 Streaming events ──
         TextChunk(tc) => {
-            state.current_turn.append_text(&tc.text);
-            state.variant = 1;
-            state.is_loading = true;
-            push_view_models(state);
+            if let Some(agent_id) = tc.agent_id.as_deref() {
+                if !state.current_turn.append_subagent_text(agent_id, &tc.text) {
+                    tracing::trace!(
+                        agent_id,
+                        "kit bridge: subagent text chunk has no active group"
+                    );
+                }
+                state.variant = 1;
+                state.is_loading = true;
+                push_view_models(state);
+            } else {
+                state.current_turn.append_text(&tc.text);
+                state.variant = 1;
+                state.is_loading = true;
+                push_view_models(state);
+            }
             push_acp_state(state);
         }
         ReasoningChunk(rc) => {
-            state.current_turn.append_reasoning(&rc.text);
-            state.variant = 1;
-            state.is_loading = true;
-            push_view_models(state);
+            if let Some(agent_id) = rc.agent_id.as_deref() {
+                if !state
+                    .current_turn
+                    .append_subagent_reasoning(agent_id, &rc.text)
+                {
+                    tracing::trace!(
+                        agent_id,
+                        "kit bridge: subagent reasoning chunk has no active group"
+                    );
+                }
+                state.variant = 1;
+                state.is_loading = true;
+                push_view_models(state);
+            } else {
+                state.current_turn.append_reasoning(&rc.text);
+                state.variant = 1;
+                state.is_loading = true;
+                push_view_models(state);
+            }
             push_acp_state(state);
         }
         ToolStarted(ts) => {
-            state.current_turn.start_tool(ToolCardAccumulator::new(
-                ts.tool_id.clone(),
-                ts.tool_name.clone(),
-                ts.input_summary.clone(),
-            ));
-            state.variant = 1;
-            state.is_loading = true;
-            push_view_models(state);
+            if let Some(agent_id) = ts.agent_id.as_deref() {
+                let routed = state.current_turn.start_subagent_tool(
+                    agent_id,
+                    ToolCardAccumulator::new(
+                        ts.tool_id.clone(),
+                        ts.tool_name.clone(),
+                        ts.input_summary.clone(),
+                    ),
+                );
+                if !routed {
+                    tracing::trace!(agent_id, tool_id = %ts.tool_id, "kit bridge: subagent tool start has no active group");
+                }
+                state.variant = 1;
+                state.is_loading = true;
+                push_view_models(state);
+            } else {
+                state.current_turn.start_tool(ToolCardAccumulator::new(
+                    ts.tool_id.clone(),
+                    ts.tool_name.clone(),
+                    ts.input_summary.clone(),
+                ));
+                state.variant = 1;
+                state.is_loading = true;
+                push_view_models(state);
+            }
             push_acp_state(state);
         }
         ToolEnded(te) => {
-            state
-                .current_turn
-                .end_tool(&te.tool_id, te.output_summary.clone(), te.is_error);
-            state.variant = 1;
-            state.is_loading = true;
-            push_view_models(state);
+            if let Some(agent_id) = te.agent_id.as_deref() {
+                let routed = state.current_turn.end_subagent_tool(
+                    agent_id,
+                    &te.tool_id,
+                    te.output_summary.clone(),
+                    te.is_error,
+                );
+                if !routed {
+                    tracing::trace!(agent_id, tool_id = %te.tool_id, "kit bridge: subagent tool end has no active group");
+                }
+                state.variant = 1;
+                state.is_loading = true;
+                push_view_models(state);
+            } else {
+                state
+                    .current_turn
+                    .end_tool(&te.tool_id, te.output_summary.clone(), te.is_error);
+                state.variant = 1;
+                state.is_loading = true;
+                push_view_models(state);
+            }
             push_acp_state(state);
         }
 
@@ -84,18 +143,20 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         ViewCommit(vc) => {
             // I20-B：clone incoming Vec → 移入 Arc，单次 O(n) 分配。
             state.committed = Arc::from(vc.view_models.clone());
-            state.current_turn = CurrentTurn::new();
+            state.current_turn.mark_committed();
             push_view_models(state);
             push_acp_state(state);
         }
         TurnDone => {
-            let vms = state.current_turn.view_models().to_vec();
-            // I20-B：Arc 不可 extend，需重建——拼接旧 + 新
-            let mut combined = Vec::with_capacity(state.committed.len() + vms.len());
-            combined.extend(state.committed.iter().cloned());
-            combined.extend(vms);
-            state.committed = Arc::from(combined);
-            state.current_turn = CurrentTurn::new();
+            if !state.current_turn.committed && !state.current_turn.is_empty() {
+                let vms = state.current_turn.view_models().to_vec();
+                // I20-B：Arc 不可 extend，需重建——拼接旧 + 新
+                let mut combined = Vec::with_capacity(state.committed.len() + vms.len());
+                combined.extend(state.committed.iter().cloned());
+                combined.extend(vms);
+                state.committed = Arc::from(combined);
+            }
+            state.current_turn.reset();
             state.variant = 0;
             state.is_loading = false;
             push_view_models(state);
@@ -189,7 +250,20 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
 
         // ── §4.6 Structure events ──
-        SubagentStarted(_) | SubagentStopped(_) => {
+        SubagentStarted(sg) => {
+            state
+                .current_turn
+                .start_subagent(sg.agent_id.clone(), sg.agent_name.clone());
+            state.variant = 1;
+            state.is_loading = true;
+            push_view_models(state);
+            push_acp_state(state);
+        }
+        SubagentStopped(sg) => {
+            state.current_turn.stop_subagent(&sg.agent_id);
+            state.variant = 1;
+            state.is_loading = true;
+            push_view_models(state);
             push_acp_state(state);
         }
 
@@ -258,6 +332,88 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use tokio::sync::mpsc;
+
+    #[test]
+    #[serial]
+    fn test_dispatch_subagent_streaming_updates_current_turn_group() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: Arc::from([]),
+            current_turn: CurrentTurn::new(),
+            is_loading: false,
+            popup_kind: None,
+        };
+
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::SubagentStarted(peri_acp_types::event_data::SubagentStarted {
+                agent_id: "agent-1".into(),
+                agent_name: "researcher".into(),
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
+                text: "child text".into(),
+                agent_id: Some("agent-1".into()),
+            }),
+        );
+
+        let snapshot = VIEW_MODELS.state().read().clone();
+        assert_eq!(snapshot.current_turn.len(), 1);
+        match &snapshot.current_turn[0] {
+            ViewModel::SubAgentGroup(group) => {
+                assert_eq!(group.agent_id, "agent-1");
+                assert_eq!(group.view_models.len(), 1);
+            }
+            other => panic!("expected SubAgentGroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_view_commit_then_turn_done_does_not_duplicate_current_turn() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: Arc::from([]),
+            current_turn: CurrentTurn::new(),
+            is_loading: false,
+            popup_kind: None,
+        };
+
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
+                text: "streaming".into(),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ViewCommit(peri_acp_types::event_data::ViewCommit {
+                view_models: vec![ViewModel::AssistantBubble(
+                    peri_acp_types::view_model::AssistantBubbleData {
+                        text: "committed".into(),
+                        reasoning: None,
+                        tool_card_ids: Vec::new(),
+                    },
+                )],
+            }),
+        );
+        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+
+        let snapshot = VIEW_MODELS.state().read().clone();
+        assert_eq!(
+            snapshot.committed.len(),
+            1,
+            "TurnDone 不应重复 append 已提交轮次"
+        );
+        assert!(snapshot.current_turn.is_empty());
+    }
 
     /// C1 回归测试：drain_input_buffer 清空 INPUT_BUFFER 队列。
     ///

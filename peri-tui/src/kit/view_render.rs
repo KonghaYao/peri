@@ -171,30 +171,31 @@ fn render_tool_card(
     data: &peri_acp_types::view_model::ToolCardData,
     diff_visible: bool,
 ) -> Vec<Line<'static>> {
-    let tool_color = if data.is_error {
-        theme::ERROR
-    } else {
-        theme::SAGE
-    };
-
-    let indicator = if data.is_error { "✗" } else { "●" };
+    let display = tool_display(&data.tool_name, data.is_error);
 
     let mut header_spans = vec![
-        Span::styled(indicator.to_string(), Style::default().fg(tool_color)),
+        Span::styled(display.indicator, Style::default().fg(display.color)),
         Span::raw(" "),
         Span::styled(
-            data.tool_name.clone(),
+            display.label,
             Style::default()
-                .fg(theme::TEXT)
+                .fg(display.color)
                 .add_modifier(Modifier::BOLD),
         ),
     ];
 
-    if !data.input_summary.is_empty() {
-        let summary = truncate_str(&data.input_summary, 400);
+    let summary = compact_summary(&data.input_summary, 140);
+    if !summary.is_empty() {
         header_spans.push(Span::styled(
-            format!("({})", summary),
-            Style::default().fg(theme::DIM),
+            format!(" — {}", summary),
+            Style::default().fg(theme::MUTED),
+        ));
+    }
+
+    if data.is_running && !data.is_error {
+        header_spans.push(Span::styled(
+            " · running",
+            Style::default().fg(theme::LOADING),
         ));
     }
 
@@ -212,19 +213,101 @@ fn render_tool_card(
         } else {
             theme::DIM
         };
-        for out_line in data.output_summary.lines() {
-            if !out_line.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::styled("  ⎿ ".to_string(), Style::default().fg(border_color)),
-                    Span::styled(out_line.to_string(), Style::default().fg(result_color)),
-                ]));
-            }
+        for out_line in compact_output_lines(&data.output_summary, 4, 180) {
+            lines.push(Line::from(vec![
+                Span::styled("  ⎿ ".to_string(), Style::default().fg(border_color)),
+                Span::styled(out_line, Style::default().fg(result_color)),
+            ]));
         }
     }
 
     // Diff 块
-    if diff_visible && let Some(ref diff) = data.diff {
-        lines.extend(render_diff_block(diff));
+    if let Some(ref diff) = data.diff {
+        if diff_visible {
+            lines.extend(render_diff_block(diff));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("  ⎿ ", Style::default().fg(theme::DIM)),
+                Span::styled(
+                    format!("diff: {} hidden · Ctrl+O to toggle", diff.path),
+                    Style::default().fg(theme::DIM),
+                ),
+            ]));
+        }
+    }
+
+    lines
+}
+
+struct ToolDisplay {
+    indicator: &'static str,
+    label: String,
+    color: Color,
+}
+
+fn tool_display(tool_name: &str, is_error: bool) -> ToolDisplay {
+    if is_error {
+        return ToolDisplay {
+            indicator: "✗",
+            label: tool_name.to_string(),
+            color: theme::ERROR,
+        };
+    }
+
+    let lower = tool_name.to_ascii_lowercase();
+    let (indicator, color) = if lower.contains("bash") {
+        ("$", theme::BASH_BORDER)
+    } else if lower.contains("edit") || lower.contains("write") {
+        ("✎", theme::ACCENT)
+    } else if lower.contains("read") || lower.contains("glob") || lower.contains("grep") {
+        ("⌕", theme::SAGE)
+    } else if lower.contains("ask") || lower.contains("question") {
+        ("?", theme::WARNING)
+    } else if lower.contains("todo") {
+        ("☑", theme::WARNING)
+    } else if lower.contains("folder") {
+        ("▣", theme::SAGE)
+    } else if lower.contains("artifact") {
+        ("◈", theme::ACCENT)
+    } else if lower.contains("cron") {
+        ("◷", theme::LOADING)
+    } else if lower.contains("agent") {
+        ("◆", theme::SUB_AGENT)
+    } else if lower.contains("web") {
+        ("◎", theme::LOADING)
+    } else {
+        ("●", theme::TOOL_NAME)
+    };
+
+    ToolDisplay {
+        indicator,
+        label: tool_name.to_string(),
+        color,
+    }
+}
+
+fn compact_summary(text: &str, max_chars: usize) -> String {
+    let joined = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    truncate_str(&joined, max_chars)
+}
+
+fn compact_output_lines(text: &str, max_lines: usize, max_chars: usize) -> Vec<String> {
+    let mut lines: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(max_lines)
+        .map(|line| truncate_str(line, max_chars))
+        .collect();
+
+    let total = text.lines().filter(|line| !line.trim().is_empty()).count();
+    if total > max_lines {
+        lines.push(format!("… {} more lines", total - max_lines));
     }
 
     lines
@@ -328,13 +411,15 @@ fn render_subagent_group(
         } else {
             header_spans.push(Span::styled(" · done", Style::default().fg(theme::SAGE)));
         }
+    } else if data.is_running {
+        header_spans.push(Span::styled(
+            " · running",
+            Style::default().fg(theme::LOADING),
+        ));
     } else if data.view_models.is_empty() {
         // DTO placeholder（ACP 层 view_mapper 生成的空 SubAgentGroup），
-        // 没有 status probe 或 probe 未命中 → 显示通用 running 提示
-        header_spans.push(Span::styled(
-            " · running...",
-            Style::default().fg(theme::MUTED),
-        ));
+        // 没有 status probe 或 probe 未命中 → 显示通用完成提示，避免已提交历史一直像在运行。
+        header_spans.push(Span::styled(" · done", Style::default().fg(theme::SAGE)));
     }
 
     let mut lines = vec![Line::from(header_spans)];
@@ -494,6 +579,7 @@ mod tests {
             input_summary: "path: foo.rs".into(),
             output_summary: "3 lines".into(),
             is_error: false,
+            is_running: false,
             diff: None,
         });
         let lines = render_v2_vm(&vm, 80, false);
@@ -510,11 +596,105 @@ mod tests {
             input_summary: "rm -rf /".into(),
             output_summary: "permission denied".into(),
             is_error: true,
+            is_running: false,
             diff: None,
         });
         let lines = render_v2_vm(&vm, 80, false);
         let first = &lines[0].spans;
         assert!(first.iter().any(|s| s.content.contains("✗")));
+    }
+
+    #[test]
+    fn test_tool_card_running_shows_status() {
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-running".into(),
+            tool_name: "Edit".into(),
+            input_summary: "path: foo.rs\nold_string: hello".into(),
+            output_summary: String::new(),
+            is_error: false,
+            is_running: true,
+            diff: None,
+        });
+        let lines = render_v2_vm(&vm, 80, false);
+        let text = collect_text(&lines);
+        assert!(text.contains("✎"), "运行中工具应保留类型标识：{}", text);
+        assert!(
+            text.contains("running"),
+            "运行中工具应显示 running：{}",
+            text
+        );
+        assert!(text.contains("path: foo.rs · old_string: hello"));
+    }
+
+    #[test]
+    fn test_tool_card_output_is_compacted() {
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-output".into(),
+            tool_name: "Bash".into(),
+            input_summary: "cargo test".into(),
+            output_summary: "line 1\nline 2\nline 3\nline 4\nline 5".into(),
+            is_error: false,
+            is_running: false,
+            diff: None,
+        });
+        let lines = render_v2_vm(&vm, 80, false);
+        let text = collect_text(&lines);
+        assert!(text.contains("… 1 more lines"), "长输出应被压缩：{}", text);
+    }
+
+    #[test]
+    fn test_tool_card_diff_hidden_shows_hint() {
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-diff-hint".into(),
+            tool_name: "Write".into(),
+            input_summary: "bar.rs".into(),
+            output_summary: "ok".into(),
+            is_error: false,
+            is_running: false,
+            diff: Some(DiffBlock {
+                path: "bar.rs".into(),
+                hunks: vec![],
+            }),
+        });
+        let lines = render_v2_vm(&vm, 80, false);
+        let text = collect_text(&lines);
+        assert!(
+            text.contains("diff: bar.rs hidden"),
+            "隐藏 diff 应提示可展开：{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_tool_card_web_uses_distinct_indicator() {
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-web".into(),
+            tool_name: "WebFetch".into(),
+            input_summary: "https://example.com".into(),
+            output_summary: "ok".into(),
+            is_error: false,
+            is_running: false,
+            diff: None,
+        });
+        let lines = render_v2_vm(&vm, 80, false);
+        let text = collect_text(&lines);
+        assert!(text.contains("◎"), "Web 工具应有独立标识：{}", text);
+    }
+
+    #[test]
+    fn test_tool_card_bash_uses_distinct_indicator() {
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-bash".into(),
+            tool_name: "Bash".into(),
+            input_summary: "cargo test".into(),
+            output_summary: "ok".into(),
+            is_error: false,
+            is_running: false,
+            diff: None,
+        });
+        let lines = render_v2_vm(&vm, 80, false);
+        let text = collect_text(&lines);
+        assert!(text.contains("$"), "Bash 工具应有独立标识：{}", text);
     }
 
     #[test]
@@ -525,6 +705,7 @@ mod tests {
             input_summary: "foo.rs".into(),
             output_summary: "ok".into(),
             is_error: false,
+            is_running: false,
             diff: Some(DiffBlock {
                 path: "foo.rs".into(),
                 hunks: vec![Hunk {
@@ -560,6 +741,7 @@ mod tests {
             input_summary: "bar.rs".into(),
             output_summary: "ok".into(),
             is_error: false,
+            is_running: false,
             diff: Some(DiffBlock {
                 path: "bar.rs".into(),
                 hunks: vec![],
@@ -601,6 +783,7 @@ mod tests {
                 text: "find foo".into(),
             })],
             collapsed: true,
+            is_running: false,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert!(!lines.is_empty());
@@ -615,6 +798,7 @@ mod tests {
                 text: "test".into(),
             })],
             collapsed: false,
+            is_running: false,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert!(!lines.is_empty());
@@ -646,6 +830,7 @@ mod tests {
             agent_name: "Agent".into(),
             view_models: Vec::new(),
             collapsed: false,
+            is_running: false,
         });
         let probe = std::rc::Rc::new(StaticProbe {
             info: Some(SubAgentRenderInfo {
@@ -669,6 +854,7 @@ mod tests {
             agent_name: "Agent".into(),
             view_models: Vec::new(),
             collapsed: false,
+            is_running: false,
         });
         let probe = std::rc::Rc::new(StaticProbe {
             info: Some(SubAgentRenderInfo {
@@ -696,6 +882,7 @@ mod tests {
             agent_name: "Agent".into(),
             view_models: Vec::new(),
             collapsed: false,
+            is_running: false,
         });
         let probe = std::rc::Rc::new(StaticProbe {
             info: Some(SubAgentRenderInfo {
@@ -713,19 +900,34 @@ mod tests {
     }
 
     #[test]
-    fn test_subagent_group_without_probe_shows_running_hint() {
-        // 不设置 probe → DTO placeholder 显示 "running..."（无 probe 命中）
+    fn test_subagent_group_without_probe_shows_done_for_committed_placeholder() {
+        // 不设置 probe → 已提交的 DTO placeholder 显示 done，避免历史消息看起来仍在运行。
         let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
             view_models: Vec::new(),
             collapsed: false,
+            is_running: false,
+        });
+        let lines = render_v2_vm(&vm, 80, false);
+        let text = collect_text(&lines);
+        assert!(text.contains("done"), "无 probe 时应显示 done：{}", text);
+    }
+
+    #[test]
+    fn test_subagent_group_streaming_dto_shows_running() {
+        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+            agent_id: "fork".into(),
+            agent_name: "Agent".into(),
+            view_models: Vec::new(),
+            collapsed: false,
+            is_running: true,
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
         assert!(
             text.contains("running"),
-            "无 probe 时应显示 running 提示：{}",
+            "流式 DTO 应显示 running：{}",
             text
         );
     }
@@ -739,6 +941,7 @@ mod tests {
             agent_name: "Agent".into(),
             view_models: Vec::new(), // 空占位符
             collapsed: false,
+            is_running: false,
         });
         let probe = std::rc::Rc::new(StaticProbe {
             info: Some(SubAgentRenderInfo {
@@ -771,6 +974,7 @@ mod tests {
                 text: "dto child".into(),
             })],
             collapsed: false,
+            is_running: false,
         });
         let probe = std::rc::Rc::new(StaticProbe {
             info: Some(SubAgentRenderInfo {

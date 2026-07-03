@@ -348,6 +348,7 @@ impl SubAgentStatusMap {
                 {
                     d.output_summary = output;
                     d.is_error = is_error;
+                    d.is_running = false;
                     return true;
                 }
             }
@@ -769,6 +770,7 @@ mod tests {
             input_summary: "file.rs".into(),
             output_summary: String::new(),
             is_error: false,
+            is_running: false,
             diff: None,
         });
         map.append_child_message("inst-1", tool_vm);
@@ -809,6 +811,7 @@ mod tests {
             input_summary: "f.rs".into(),
             output_summary: "ok".into(),
             is_error: false,
+            is_running: false,
             diff: None,
         });
         map.append_child_message("fork", tool_vm);
@@ -900,6 +903,7 @@ mod tests {
                 input_summary: "foo.rs".into(),
                 output_summary: String::new(),
                 is_error: false,
+                is_running: false,
                 diff: None,
             }),
         );
@@ -955,6 +959,7 @@ mod tests {
                 input_summary: format!("file-{i}.rs"),
                 output_summary: String::new(),
                 is_error: false,
+                is_running: false,
                 diff: None,
             });
             assert!(map.append_child_message("inst-1", vm));
@@ -996,6 +1001,7 @@ mod tests {
                 input_summary: format!("f-{i}"),
                 output_summary: String::new(),
                 is_error: false,
+                is_running: false,
                 diff: None,
             });
             map.append_child_message("inst-1", tool_vm);
@@ -1025,6 +1031,7 @@ mod tests {
                 input_summary: format!("f-{i}"),
                 output_summary: String::new(),
                 is_error: false,
+                is_running: false,
                 diff: None,
             });
             map.append_child_message("inst-1", vm);
@@ -1068,6 +1075,7 @@ mod tests {
                 input_summary: format!("cmd-{i}"),
                 output_summary: format!("output-{i}"),
                 is_error: false,
+                is_running: false,
                 diff: None,
             });
             map.append_child_message("inst-1", completed);
@@ -1079,6 +1087,7 @@ mod tests {
                 input_summary: format!("path-{i}"),
                 output_summary: String::new(),
                 is_error: false,
+                is_running: false,
                 diff: None,
             });
             map.append_child_message("inst-1", pending);
@@ -1098,6 +1107,7 @@ mod tests {
             input_summary: "edit-file".into(),
             output_summary: String::new(),
             is_error: false,
+            is_running: false,
             diff: None,
         });
         assert!(map.append_child_message("inst-1", extra));
@@ -1181,6 +1191,7 @@ mod tests {
                     input_summary: format!("path-{}", i),
                     output_summary: String::new(),
                     is_error: false,
+                    is_running: false,
                     diff: None,
                 });
                 map.append_child_message("inst-1", tool);
@@ -1197,6 +1208,7 @@ mod tests {
             input_summary: "ls -la".into(),
             output_summary: String::new(),
             is_error: false,
+            is_running: false,
             diff: None,
         });
         assert!(map.append_child_message("inst-1", new_tool));
@@ -1260,6 +1272,7 @@ mod tests {
                 input_summary: format!("f-{i}"),
                 output_summary: String::new(),
                 is_error: false,
+                is_running: false,
                 diff: None,
             });
             map.append_child_message("inst-1", tool);

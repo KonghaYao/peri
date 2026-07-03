@@ -180,14 +180,17 @@ fn test_stop_reason_display_roundtrip() {
 #[test]
 fn test_ai_reasoning_maps_to_session_update() {
     // AiReasoning → AgentThoughtChunk SessionUpdate，forward_to_tui=false
-    let event = ExecutorEvent::AiReasoning("let me think...".to_string());
+    let event = ExecutorEvent::AiReasoning {
+        text: "let me think...".to_string(),
+        source_agent_id: None,
+    };
     let mapped = map_event(&event, 200_000);
     assert_eq!(mapped.len(), 1, "应产出 1 个 MappedEvent");
     assert!(!mapped[0].forward_to_tui, "AiReasoning 不应转发到 TUI");
     assert_eq!(mapped[0].updates.len(), 1, "应包含 1 个 SessionUpdate");
     assert!(
         mapped[0].source_agent_id.is_none(),
-        "AiReasoning 不应携带 source_agent_id"
+        "AiReasoning 此处无 source_agent_id"
     );
     match &mapped[0].updates[0] {
         SessionUpdate::AgentThoughtChunk(chunk) => {

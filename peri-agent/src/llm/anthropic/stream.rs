@@ -164,8 +164,10 @@ pub(super) async fn do_invoke_streaming(
                         "thinking_delta" => {
                             if let Some(t) = delta["thinking"].as_str() {
                                 if !t.is_empty() {
-                                    ctx.event_handler
-                                        .on_event(ExecutorEvent::AiReasoning(t.to_string()));
+                                    ctx.event_handler.on_event(ExecutorEvent::AiReasoning {
+                                        text: t.to_string(),
+                                        source_agent_id: None,
+                                    });
                                     reasoning_content.push_str(t);
                                 }
                             }

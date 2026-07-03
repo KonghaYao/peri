@@ -64,11 +64,14 @@ pub fn route(ev: &ExecutorEvent, view_mapper: &mut dyn ViewMapper) -> Option<Rou
             .unwrap(),
         }),
 
-        ExecutorEvent::AiReasoning(text) => Some(RoutingOutput {
+        ExecutorEvent::AiReasoning {
+            text,
+            source_agent_id,
+        } => Some(RoutingOutput {
             event_name: "reasoning-chunk".into(),
             data: serde_json::to_value(&ReasoningChunk {
                 text: text.clone(),
-                agent_id: None,
+                agent_id: source_agent_id.clone(),
             })
             .unwrap(),
         }),
@@ -335,11 +338,28 @@ mod tests {
 
     #[test]
     fn test_reasoning_chunk_routes() {
-        let ev = ExecutorEvent::AiReasoning("thinking...".into());
+        let ev = ExecutorEvent::AiReasoning {
+            text: "thinking...".into(),
+            source_agent_id: None,
+        };
         let mut mapper = NopViewMapper;
         let out = route(&ev, &mut mapper).unwrap();
         assert_eq!(out.event_name, "reasoning-chunk");
         assert_eq!(out.data["text"], "thinking...");
+        assert!(out.data["agent_id"].is_null());
+    }
+
+    #[test]
+    fn test_reasoning_chunk_with_subagent_routes() {
+        let ev = ExecutorEvent::AiReasoning {
+            text: "sub thinking".into(),
+            source_agent_id: Some("sa-1".into()),
+        };
+        let mut mapper = NopViewMapper;
+        let out = route(&ev, &mut mapper).unwrap();
+        assert_eq!(out.event_name, "reasoning-chunk");
+        assert_eq!(out.data["text"], "sub thinking");
+        assert_eq!(out.data["agent_id"], "sa-1");
     }
 
     #[test]

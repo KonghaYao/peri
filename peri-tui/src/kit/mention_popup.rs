@@ -114,7 +114,7 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
             border_style: Style::new().fg(theme::THINKING),
             top_title: Line::from(format!(" @{} ", props.prefix)).fg(theme::THINKING).bold(),
             width: Constraint::Length(50),
-            height: Constraint::Length((filtered.len().max(1) + 2).min(10) as u16),
+            height: Constraint::Length(10),
         ) {
             Text(text: text_render)
         }

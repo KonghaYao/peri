@@ -261,6 +261,7 @@ mod tests {
             agent_name: name.to_string(),
             view_models: Vec::new(),
             collapsed: false,
+            is_running: false,
         }
     }
 

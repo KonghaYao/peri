@@ -35,11 +35,17 @@ pub struct CurrentTurn {
     /// Tool cards created by `"tool-started"` and finalised by `"tool-ended"`.
     pub tool_cards: Vec<ToolCardAccumulator>,
 
+    /// Whether a ViewCommit already replaced the canonical view for this turn.
+    pub committed: bool,
+
     /// Spinner animation frame counter (advanced by `Tick`).
     pub spinner_frame: u32,
 
     /// Whether the turn is actively streaming (any text / tool event arrived).
     pub active: bool,
+
+    /// Streaming sub-agent cards keyed by agent_id / instance_id.
+    pub subagents: Vec<SubAgentAccumulator>,
 
     /// Cached ViewModels built from streaming data (populated by `build_view_models`).
     ///
@@ -91,6 +97,79 @@ impl CurrentTurn {
         }
     }
 
+    /// Begin a new sub-agent group from `"subagent-started"`.
+    pub fn start_subagent(&mut self, agent_id: String, agent_name: String) {
+        if self.subagents.iter().any(|s| s.agent_id == agent_id) {
+            return;
+        }
+        self.subagents
+            .push(SubAgentAccumulator::new(agent_id, agent_name));
+        self.active = true;
+        self.invalidate_cache();
+    }
+
+    /// Mark a sub-agent group as done from `"subagent-stopped"`.
+    pub fn stop_subagent(&mut self, agent_id: &str) {
+        if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
+            s.is_running = false;
+            self.invalidate_cache();
+        }
+    }
+
+    /// Route text chunks into a sub-agent child message.
+    pub fn append_subagent_text(&mut self, agent_id: &str, text: &str) -> bool {
+        if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
+            s.append_text(text);
+            self.active = true;
+            self.invalidate_cache();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Route reasoning chunks into a sub-agent child message.
+    pub fn append_subagent_reasoning(&mut self, agent_id: &str, text: &str) -> bool {
+        if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
+            s.append_reasoning(text);
+            self.active = true;
+            self.invalidate_cache();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Route tool start into a sub-agent child message.
+    pub fn start_subagent_tool(&mut self, agent_id: &str, tool: ToolCardAccumulator) -> bool {
+        if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
+            s.start_tool(tool);
+            self.active = true;
+            self.invalidate_cache();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Route tool end into a sub-agent child message.
+    pub fn end_subagent_tool(
+        &mut self,
+        agent_id: &str,
+        tool_id: &str,
+        output: String,
+        is_error: bool,
+    ) -> bool {
+        if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
+            s.end_tool(tool_id, output, is_error);
+            self.active = true;
+            self.invalidate_cache();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Advance the spinner frame counter (called on `Tick`).
     pub fn advance_spinner(&mut self) {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
@@ -99,6 +178,32 @@ impl CurrentTurn {
     /// Mark the turn as no longer active (e.g. on `"turn-interrupted"`).
     pub fn deactivate(&mut self) {
         self.active = false;
+        self.invalidate_cache();
+    }
+
+    /// Mark current turn as committed by a canonical ViewCommit snapshot.
+    pub fn mark_committed(&mut self) {
+        self.text.clear();
+        self.reasoning.clear();
+        self.tool_cards.clear();
+        self.subagents.clear();
+        self.cached_view_models.clear();
+        self.active = false;
+        self.committed = true;
+    }
+
+    /// Clear current turn without marking a canonical commit boundary.
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    /// Whether this turn has no pending incremental ViewModels.
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+            && self.reasoning.is_empty()
+            && self.tool_cards.is_empty()
+            && self.subagents.is_empty()
+            && self.cached_view_models.is_empty()
     }
 
     /// Accessor: returns cached ViewModels, building them on first call.
@@ -110,7 +215,8 @@ impl CurrentTurn {
             && (self.active
                 || !self.text.is_empty()
                 || !self.reasoning.is_empty()
-                || !self.tool_cards.is_empty())
+                || !self.tool_cards.is_empty()
+                || !self.subagents.is_empty())
         {
             self.build_view_models();
         }
@@ -151,8 +257,13 @@ impl CurrentTurn {
                 input_summary: t.input_summary.clone(),
                 output_summary: t.output_summary.clone().unwrap_or_default(),
                 is_error: t.is_error,
+                is_running: t.output_summary.is_none(),
                 diff: None,
             }));
+        }
+
+        for s in &self.subagents {
+            vms.push(s.view_model());
         }
 
         self.cached_view_models = vms;
@@ -184,6 +295,53 @@ impl ToolCardAccumulator {
             output_summary: None,
             is_error: false,
         }
+    }
+}
+
+/// In-progress sub-agent accumulator.
+#[derive(Debug, Clone)]
+pub struct SubAgentAccumulator {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub is_running: bool,
+    pub child_turn: CurrentTurn,
+}
+
+impl SubAgentAccumulator {
+    pub fn new(agent_id: String, agent_name: String) -> Self {
+        Self {
+            agent_id,
+            agent_name,
+            is_running: true,
+            child_turn: CurrentTurn::new(),
+        }
+    }
+
+    fn append_text(&mut self, text: &str) {
+        self.child_turn.append_text(text);
+    }
+
+    fn append_reasoning(&mut self, text: &str) {
+        self.child_turn.append_reasoning(text);
+    }
+
+    fn start_tool(&mut self, tool: ToolCardAccumulator) {
+        self.child_turn.start_tool(tool);
+    }
+
+    fn end_tool(&mut self, tool_id: &str, output: String, is_error: bool) {
+        self.child_turn.end_tool(tool_id, output, is_error);
+    }
+
+    fn view_model(&self) -> ViewModel {
+        let mut child_turn = self.child_turn.clone();
+        ViewModel::SubAgentGroup(peri_acp_types::view_model::SubAgentGroupData {
+            agent_id: self.agent_id.clone(),
+            agent_name: self.agent_name.clone(),
+            view_models: child_turn.view_models().to_vec(),
+            collapsed: false,
+            is_running: self.is_running,
+        })
     }
 }
 
@@ -443,6 +601,36 @@ mod tests {
     }
 
     // -- AcpEventData decode tests -------------------------------------------
+
+    #[test]
+    fn test_current_turn_subagent_streaming_builds_nested_group() {
+        let mut ct = CurrentTurn::new();
+        ct.start_subagent("agent-1".into(), "researcher".into());
+        assert!(ct.append_subagent_text("agent-1", "hello"));
+        assert!(ct.start_subagent_tool(
+            "agent-1",
+            ToolCardAccumulator::new("tc-1".into(), "Read".into(), "path: foo.rs".into()),
+        ));
+        assert!(ct.end_subagent_tool("agent-1", "tc-1", "10 lines".into(), false));
+
+        let vms = ct.view_models().to_vec();
+        assert_eq!(vms.len(), 1);
+        match &vms[0] {
+            ViewModel::SubAgentGroup(group) => {
+                assert_eq!(group.agent_id, "agent-1");
+                assert_eq!(group.agent_name, "researcher");
+                assert_eq!(group.view_models.len(), 2);
+            }
+            other => panic!("expected SubAgentGroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_current_turn_subagent_unknown_route_returns_false() {
+        let mut ct = CurrentTurn::new();
+        assert!(!ct.append_subagent_text("missing", "hello"));
+        assert!(ct.view_models().is_empty());
+    }
 
     #[test]
     fn test_decode_text_chunk() {

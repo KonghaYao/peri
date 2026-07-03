@@ -292,6 +292,7 @@ fn convert_tool(
         input_summary,
         output_summary,
         is_error,
+        is_running: false,
         diff,
     })
 }
@@ -344,6 +345,7 @@ fn convert_agent_tool(
         agent_name: tool_name.to_string(),
         view_models: Vec::new(),
         collapsed: !is_error, // expand on error so user sees the failure
+        is_running: false,
     })
 }
 

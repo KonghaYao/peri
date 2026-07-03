@@ -27,7 +27,10 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
                 source_agent_id: None,
             })
         }
-        RenderEvent::ThinkingChunk { chunk, .. } => Some(ExecutorEvent::AiReasoning(chunk)),
+        RenderEvent::ThinkingChunk { chunk, .. } => Some(ExecutorEvent::AiReasoning {
+            text: chunk,
+            source_agent_id: None,
+        }),
         RenderEvent::ToolStarted {
             tool_call_id,
             name,
@@ -260,7 +263,13 @@ mod tests {
             chunk: "thinking".to_string(),
         };
         match render_event_to_executor(r).unwrap() {
-            ExecutorEvent::AiReasoning(s) => assert_eq!(s, "thinking"),
+            ExecutorEvent::AiReasoning {
+                text,
+                source_agent_id,
+            } => {
+                assert_eq!(text, "thinking");
+                assert!(source_agent_id.is_none());
+            }
             _ => panic!("应为 AiReasoning"),
         }
     }

@@ -173,7 +173,7 @@ pub fn SlashCompletion(
             border_style: Style::new().fg(theme::THINKING),
             top_title: Line::from(format!(" /{} ", props.prefix)).fg(theme::THINKING).bold(),
             width: Constraint::Fill(1),
-            height: Constraint::Length((filtered.len().max(1) + 2).min(10) as u16),
+            height: Constraint::Length(10),
         ) {
             Text(text: text_render)
         }

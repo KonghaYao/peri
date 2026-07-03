@@ -103,7 +103,10 @@ pub struct WorkflowProgressPayload {
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExecutorEvent {
     /// AI 推理内容（reasoning/思考过程）
-    AiReasoning(String),
+    AiReasoning {
+        text: String,
+        source_agent_id: Option<String>,
+    },
     /// LLM 输出最终文字（非流式，整段答案），携带所属 AI 消息的 message_id
     TextChunk {
         message_id: crate::messages::MessageId,
@@ -296,13 +299,13 @@ where
 #[doc(hidden)]
 pub type AgentEvent = ExecutorEvent;
 
-/// 覆盖 ExecutorEvent 的 `source_agent_id` 字段（仅 ToolStart / ToolEnd / TextChunk）。
+/// 覆盖 ExecutorEvent 的 `source_agent_id` 字段（ToolStart / ToolEnd / TextChunk / AiReasoning）。
 ///
 /// 用于 SubAgent 转发器：v2 RenderEvent 的 `agent_id` 字段在 mapper_v2 中被丢弃
 /// （main executor 路径不需要），但 SubAgent 转发器需要把 `source_agent_id` 设为
 /// `child_thread_id`，让 TUI 的 `find_running_subagent_mut(aid)` 按 instance_id 匹配。
 ///
-/// 其他变体（AiReasoning / TurnCommitted / SubagentStarted 等）没有 `source_agent_id`
+/// 其他变体（TurnCommitted / SubagentStarted 等）没有 `source_agent_id`
 /// 字段，本函数对它们是 no-op。
 pub fn inject_source_agent_id(event: &mut ExecutorEvent, agent_id: &str) {
     match event {
@@ -313,6 +316,9 @@ pub fn inject_source_agent_id(event: &mut ExecutorEvent, agent_id: &str) {
             source_agent_id, ..
         }
         | ExecutorEvent::TextChunk {
+            source_agent_id, ..
+        }
+        | ExecutorEvent::AiReasoning {
             source_agent_id, ..
         } => {
             *source_agent_id = Some(agent_id.to_string());

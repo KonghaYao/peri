@@ -237,6 +237,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_forwarder_injects_source_agent_id_for_reasoning_chunk() {
+        // ThinkingChunk 也必须注入 source_agent_id，避免子 Agent reasoning 污染父消息流。
+        let (bus, handles) = EventBus::new(EventBusConfig::default());
+        let captured: Arc<Mutex<Vec<ExecutorEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let handler = Arc::new(CapturingHandler {
+            events: Arc::clone(&captured),
+        });
+
+        let _forwarder =
+            spawn_subagent_event_forwarder(handles, Some(handler), "child_reasoning".to_string());
+
+        let (turn_id, agent_id) = ids();
+        bus.emit_render(RenderEvent::ThinkingChunk {
+            turn_id,
+            agent_id,
+            chunk: "thinking".to_string(),
+        });
+
+        wait_for_event_count(&captured, 1).await;
+
+        let first_event = captured.lock()[0].clone();
+        match first_event {
+            ExecutorEvent::AiReasoning {
+                text,
+                source_agent_id,
+            } => {
+                assert_eq!(text, "thinking");
+                assert_eq!(source_agent_id.as_deref(), Some("child_reasoning"));
+            }
+            other => panic!("应为 AiReasoning，实际 {:?}", other),
+        }
+    }
+
+    #[tokio::test]
     async fn test_forwarder_propagates_all_event_layers() {
         // 3 层 v2 事件中，State 层 TurnCompleted/StateSnapshot 应被过滤
         // 仅 Render + Observe 层事件转发到父 agent（与 v1 subagent_stack 对齐）
@@ -283,9 +317,13 @@ mod tests {
         let events_snapshot: Vec<ExecutorEvent> = captured.lock().clone();
         assert_eq!(events_snapshot.len(), 2, "应仅转发 Render + Observe 层事件");
 
-        let has_ai_reasoning = events_snapshot
-            .iter()
-            .any(|e| matches!(e, ExecutorEvent::AiReasoning(s) if s == "thinking"));
+        let has_ai_reasoning = events_snapshot.iter().any(|e| {
+            matches!(
+                e,
+                ExecutorEvent::AiReasoning { text, source_agent_id }
+                    if text == "thinking" && source_agent_id.as_deref() == Some("test_id")
+            )
+        });
         let has_subagent_started = events_snapshot
             .iter()
             .any(|e| matches!(e, ExecutorEvent::SubagentStarted { agent_name, .. } if agent_name == "explore"));

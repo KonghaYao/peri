@@ -87,6 +87,15 @@ impl EditorState {
         }
     }
 
+    /// 删除光标后的字符
+    fn delete_forward(&mut self) {
+        if self.cursor < self.len() {
+            let byte_idx = Self::char_to_byte(&self.text, self.cursor);
+            let next_byte = Self::char_to_byte(&self.text, self.cursor + 1);
+            self.text.drain(byte_idx..next_byte);
+        }
+    }
+
     /// 左移光标
     fn cursor_left(&mut self) {
         if self.cursor > 0 {
@@ -182,6 +191,88 @@ impl EditorState {
         self.text.drain(pos..byte_idx);
     }
 
+    /// 删除光标后的一个词（Alt+Delete）
+    fn delete_word_forward(&mut self) {
+        let start_byte = Self::char_to_byte(&self.text, self.cursor);
+        let mut pos = start_byte;
+
+        while pos < self.text.len() {
+            let ch = self.text[pos..]
+                .chars()
+                .next()
+                .expect("pos must be char boundary");
+            if !ch.is_whitespace() {
+                break;
+            }
+            pos += ch.len_utf8();
+        }
+        while pos < self.text.len() {
+            let ch = self.text[pos..]
+                .chars()
+                .next()
+                .expect("pos must be char boundary");
+            if ch.is_whitespace() {
+                break;
+            }
+            pos += ch.len_utf8();
+        }
+
+        if pos > start_byte {
+            self.text.drain(start_byte..pos);
+        }
+    }
+
+    /// 当前光标所在的 (line_idx, col_idx)
+    fn cursor_line_col(&self) -> (usize, usize) {
+        Self::cursor_line_col_for(&self.text, self.cursor)
+    }
+
+    fn cursor_line_col_for(text: &str, cursor: usize) -> (usize, usize) {
+        let mut chars_before_line = 0usize;
+        for (line_idx, line) in text.split('\n').enumerate() {
+            let line_chars = line.chars().count();
+            if chars_before_line + line_chars >= cursor {
+                return (line_idx, cursor - chars_before_line);
+            }
+            chars_before_line += line_chars + 1;
+        }
+        let last_line = text.split('\n').last().unwrap_or("");
+        (text.matches('\n').count(), last_line.chars().count())
+    }
+
+    fn line_col_to_cursor(text: &str, target_line: usize, target_col: usize) -> usize {
+        let mut cursor = 0usize;
+        for (line_idx, line) in text.split('\n').enumerate() {
+            let line_chars = line.chars().count();
+            if line_idx == target_line {
+                return cursor + target_col.min(line_chars);
+            }
+            cursor += line_chars + 1;
+        }
+        text.chars().count()
+    }
+
+    /// 上移一行，返回是否真的做了多行移动。
+    fn cursor_line_up(&mut self) -> bool {
+        let (line, col) = self.cursor_line_col();
+        if line == 0 {
+            return false;
+        }
+        self.cursor = Self::line_col_to_cursor(&self.text, line - 1, col);
+        true
+    }
+
+    /// 下移一行，返回是否真的做了多行移动。
+    fn cursor_line_down(&mut self) -> bool {
+        let (line, col) = self.cursor_line_col();
+        let last_line = self.text.matches('\n').count();
+        if line >= last_line {
+            return false;
+        }
+        self.cursor = Self::line_col_to_cursor(&self.text, line + 1, col);
+        true
+    }
+
     fn len(&self) -> usize {
         self.text.chars().count()
     }
@@ -275,15 +366,34 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     }
                     KeyCode::Backspace if !mention_active && !slash_active => {
                         let mut s = state.write();
-                        s.backspace();
+                        if is_alt {
+                            s.delete_word_backward();
+                        } else {
+                            s.backspace();
+                        }
                         if *SLASH_HINT_ACTIVE.state().read() && !s.text.starts_with('/') {
                             *SLASH_HINT_ACTIVE.state().write() = false;
                         }
+                        update_popup_prefix(&s.text);
                         EventResult::Consumed
                     }
                     KeyCode::Backspace => {
                         let mut s = state.write();
-                        s.backspace();
+                        if is_alt {
+                            s.delete_word_backward();
+                        } else {
+                            s.backspace();
+                        }
+                        update_popup_prefix(&s.text);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Delete if !mention_active && !slash_active => {
+                        let mut s = state.write();
+                        if is_alt {
+                            s.delete_word_forward();
+                        } else {
+                            s.delete_forward();
+                        }
                         update_popup_prefix(&s.text);
                         EventResult::Consumed
                     }
@@ -308,15 +418,17 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     // 事件现在分别由 InputArea / MessageArea 用 `use_event_handler` 注册，
                     // 因此这里显式避开 Ctrl+ 组合，避免与消息区滚动键冲突。
                     KeyCode::Up if !is_ctrl && !mention_active && !slash_active => {
-                        tracing::info!(?key, "input area consumed history up");
-                        if let Some(historical) = history_up() {
+                        tracing::info!(?key, "input area consumed up");
+                        let moved = state.write().cursor_line_up();
+                        if !moved && let Some(historical) = history_up() {
                             state.write().replace_all(historical);
                         }
                         EventResult::Consumed
                     }
                     KeyCode::Down if !is_ctrl && !mention_active && !slash_active => {
-                        tracing::info!(?key, "input area consumed history down");
-                        if let Some(historical) = history_down() {
+                        tracing::info!(?key, "input area consumed down");
+                        let moved = state.write().cursor_line_down();
+                        if !moved && let Some(historical) = history_down() {
                             state.write().replace_all(historical);
                         }
                         EventResult::Consumed
@@ -401,19 +513,20 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     } else {
         0
     };
+    let mention_items = filter_files_for_mention(&mention_prefix);
     let mention_popup_height = if mention_active {
-        popup_height(filter_files_for_mention(&mention_prefix).len())
+        popup_height(mention_items.len())
     } else {
         0
     };
+    let overlay_height = slash_popup_height.max(mention_popup_height);
     let total_height = if hidden {
         0
     } else {
-        composer_height + slash_popup_height + mention_popup_height
+        composer_height + overlay_height
     };
 
     let composer_lines = build_composer_lines(lines, loading);
-    let mention_items = filter_files_for_mention(&mention_prefix);
 
     element!(
         View(
@@ -768,6 +881,57 @@ mod tests {
         s.clear();
         assert!(s.text.is_empty());
         assert_eq!(s.cursor, 0);
+    }
+
+    #[test]
+    fn test_editor_delete_forward_removes_char_after_cursor() {
+        let mut s = EditorState {
+            text: "ab你c".into(),
+            cursor: 2,
+        };
+        s.delete_forward();
+        assert_eq!(s.text, "abc");
+        assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn test_editor_delete_word_forward_removes_next_word() {
+        let mut s = EditorState {
+            text: "hello   world next".into(),
+            cursor: 5,
+        };
+        s.delete_word_forward();
+        assert_eq!(s.text, "hello next");
+        assert_eq!(s.cursor, 5);
+    }
+
+    #[test]
+    fn test_editor_cursor_word_left_and_right() {
+        let mut s = EditorState {
+            text: "hello world next".into(),
+            cursor: 0,
+        };
+        s.cursor_word_right();
+        assert_eq!(s.cursor, 6);
+        s.cursor_word_right();
+        assert_eq!(s.cursor, 12);
+        s.cursor_word_left();
+        assert_eq!(s.cursor, 6);
+    }
+
+    #[test]
+    fn test_editor_cursor_line_up_and_down() {
+        let mut s = EditorState {
+            text: "abc\nd\nefgh".into(),
+            cursor: 2,
+        };
+        assert!(!s.cursor_line_up());
+        assert!(s.cursor_line_down());
+        assert_eq!(s.cursor, 5);
+        assert!(s.cursor_line_down());
+        assert_eq!(s.cursor, 7);
+        assert!(s.cursor_line_up());
+        assert_eq!(s.cursor, 5);
     }
 
     #[test]

@@ -278,16 +278,27 @@ fn test_inject_source_agent_id_for_text_chunk() {
 }
 
 #[test]
-fn test_inject_source_agent_id_no_op_for_other_variants() {
-    // 其他变体（如 AiReasoning / StateSnapshotMeta）没有 source_agent_id 字段，
-    // inject 应该是 no-op
-    let mut ev = ExecutorEvent::AiReasoning("thinking".to_string());
-    inject_source_agent_id(&mut ev, "ignored");
+fn test_inject_source_agent_id_for_ai_reasoning() {
+    let mut ev = ExecutorEvent::AiReasoning {
+        text: "thinking".to_string(),
+        source_agent_id: None,
+    };
+    inject_source_agent_id(&mut ev, "child_reasoning");
     match ev {
-        ExecutorEvent::AiReasoning(s) => assert_eq!(s, "thinking"),
-        _ => panic!("AiReasoning 不应被改动"),
+        ExecutorEvent::AiReasoning {
+            text,
+            source_agent_id,
+        } => {
+            assert_eq!(text, "thinking");
+            assert_eq!(source_agent_id.as_deref(), Some("child_reasoning"));
+        }
+        _ => panic!("应为 AiReasoning"),
     }
+}
 
+#[test]
+fn test_inject_source_agent_id_no_op_for_other_variants() {
+    // 其他无 source_agent_id 字段的变体仍应保持 no-op。
     let mut ev = ExecutorEvent::StateSnapshotMeta {
         message_count: 1,
         total_tokens: 100,
