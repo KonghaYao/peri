@@ -6,17 +6,20 @@
 use std::sync::{Arc, Mutex};
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
+    crossterm::event::{Event, KeyEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
         style::{Modifier, Style, Stylize},
         text::{Line, Span},
-        widgets::Paragraph,
+        widgets::{Block, Borders, Paragraph},
     },
 };
 
 use crate::kit::atoms::SLASH_SELECTED_INDEX;
+use crate::kit::inline_nav::{
+    InlineNavAction, clamp_selection, classify_inline_nav, next_selection, previous_selection,
+};
 use crate::kit::theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,17 +69,9 @@ pub fn SlashCompletion(
     let on_select = Arc::clone(&props.on_select);
     let on_cancel = Arc::clone(&props.on_cancel);
 
-    if item_count == 0 {
-        let mut sel = selection.write();
-        if *sel != 0 {
-            *sel = 0;
-        }
-    } else {
-        let mut sel = selection.write();
-        if *sel >= item_count {
-            *sel = item_count - 1;
-        }
-    }
+    // 不在此处写 SLASH_SELECTED_INDEX——事件处理器 (next_selection/previous_selection)
+    // 已通过 saturating_sub/min 保持边界安全。render body 写 atom 会触发级联重渲染，
+    // 在 slash_active 从 true→false 过渡时可能导致无限渲染循环和 CPU 100%。
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
         let Event::Key(key) = event else {
@@ -85,22 +80,20 @@ pub fn SlashCompletion(
         if key.kind != KeyEventKind::Press {
             return EventResult::Ignored;
         }
-        match key.code {
-            KeyCode::Up => {
+        match classify_inline_nav(&key) {
+            Some(InlineNavAction::MoveUp) => {
                 let mut s = selection.write();
-                *s = s.saturating_sub(1);
+                *s = previous_selection(*s);
                 EventResult::Consumed
             }
-            KeyCode::Down => {
+            Some(InlineNavAction::MoveDown) => {
                 let mut s = selection.write();
-                if item_count > 0 {
-                    *s = (s.saturating_add(1)).min(item_count - 1);
-                }
+                *s = next_selection(*s, item_count);
                 EventResult::Consumed
             }
-            KeyCode::Enter => {
+            Some(InlineNavAction::Confirm) => {
                 let selected = {
-                    let sel_idx = *selection.read();
+                    let sel_idx = clamp_selection(*selection.read(), item_count);
                     filtered_for_handler.get(sel_idx).cloned()
                 };
                 if let Some(item) = selected {
@@ -116,18 +109,20 @@ pub fn SlashCompletion(
                 }
                 EventResult::Consumed
             }
-            KeyCode::Esc => {
+            Some(InlineNavAction::Cancel) => {
                 let mut on_cancel = on_cancel
                     .lock()
                     .expect("SlashCompletion on_cancel poisoned");
                 (*on_cancel)(());
                 EventResult::Consumed
             }
-            _ => EventResult::Ignored,
+            None => EventResult::Ignored,
         }
     });
 
-    let sel_idx = *selection.read();
+    let popup_tokens = &theme::component().popup;
+    let semantic = theme::semantic();
+    let sel_idx = clamp_selection(*selection.read(), item_count);
     let display_lines: Vec<Line<'_>> = filtered
         .iter()
         .enumerate()
@@ -140,15 +135,15 @@ pub fn SlashCompletion(
             };
             let line_style = if selected {
                 Style::default()
-                    .fg(theme::THINKING)
+                    .fg(popup_tokens.selected_fg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme::TEXT)
+                Style::default().fg(semantic.text.primary)
             };
             let detail_style = if selected {
-                Style::default().fg(theme::THINKING)
+                Style::default().fg(popup_tokens.selected_fg)
             } else {
-                Style::default().fg(theme::MUTED)
+                Style::default().fg(semantic.text.muted)
             };
 
             Line::from(vec![
@@ -161,19 +156,27 @@ pub fn SlashCompletion(
         .collect();
 
     let empty = display_lines.is_empty();
+    let popup_block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(Style::new().fg(popup_tokens.border))
+        .title_top(
+            Line::from(format!(" /{} ", props.prefix))
+                .fg(popup_tokens.action_primary)
+                .bold(),
+        );
+
     let text_render = if empty {
-        Paragraph::new(Line::from("  (no matches)").fg(theme::MUTED))
+        Paragraph::new(Line::from("  (no matches)").fg(semantic.text.muted))
     } else {
         Paragraph::new(ratatui::text::Text::from(display_lines))
-    };
+    }
+    .block(popup_block);
 
     element!(
-        Border(
+        View(
             flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::THINKING),
-            top_title: Line::from(format!(" /{} ", props.prefix)).fg(theme::THINKING).bold(),
             width: Constraint::Fill(1),
-            height: Constraint::Length(10),
+            height: Constraint::Length(theme::component().popup.inline_height),
         ) {
             Text(text: text_render)
         }

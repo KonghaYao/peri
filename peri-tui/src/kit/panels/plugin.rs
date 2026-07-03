@@ -4,13 +4,15 @@
 //! service_snapshot 从 plugin_data.plugins 派生）。只读面板——插件启用/禁用
 //! 通过修改 ~/.claude/plugins/config.json，UI 暂不实现切换。
 
+use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{PLUGIN_LIST, PluginSummary};
+use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
+        layout::Constraint,
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -34,14 +36,14 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => close_panel(),
-                KeyCode::Up | KeyCode::Char('k') => {
-                    *selected.write() = selected.read().saturating_sub(1);
+                KeyCode::Esc => close_panel(),
+                KeyCode::Up => {
+                    *selected.write() = previous_selection(*selected.read());
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down => {
                     let mut s = selected.write();
                     if count > 0 {
-                        *s = (*s + 1).min(count - 1);
+                        *s = next_selection(*s, count);
                     }
                 }
                 _ => {}
@@ -55,35 +57,38 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     lines.push(Line::from(vec![Span::styled(
         format!("  {} plugins loaded", count),
-        Style::new().fg(theme::TEXT).bold(),
+        Style::new().fg(theme::semantic().text.primary).bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
         "  (read-only — toggle via ~/.claude/plugins/config.json)",
-        Style::new().fg(theme::MUTED).italic(),
+        Style::new().fg(theme::semantic().text.muted).italic(),
     )]));
     lines.push(Line::from(""));
 
     if plugins.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "  No plugins installed",
-            Style::new().fg(theme::MUTED),
+            Style::new().fg(theme::semantic().text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  Install via: agm install <name>",
-            Style::new().fg(theme::MUTED),
+            Style::new().fg(theme::semantic().text.muted),
         )]));
     } else {
         for (i, p) in plugins.iter().enumerate() {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::THINKING).bold()
+                Style::new().fg(theme::component().panel.title).bold()
             } else {
-                Style::new().fg(theme::TEXT)
+                Style::new().fg(theme::semantic().text.primary)
             };
 
             lines.push(Line::from(vec![
-                Span::styled(format!(" {} ", cursor), Style::new().fg(theme::THINKING)),
+                Span::styled(
+                    format!(" {} ", cursor),
+                    Style::new().fg(theme::component().panel.title),
+                ),
                 Span::styled(p.name.clone(), name_style),
                 Span::styled(
                     format!(
@@ -94,40 +99,32 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             &p.version
                         }
                     ),
-                    Style::new().fg(theme::MUTED),
+                    Style::new().fg(theme::semantic().text.muted),
                 ),
             ]));
             if !p.description.is_empty() {
                 lines.push(Line::from(vec![Span::styled(
                     format!("     {}", p.description),
-                    Style::new().fg(theme::DIM),
+                    Style::new().fg(theme::semantic().text.dim),
                 )]));
             }
             // 截断 root 路径显示
             let root: String = p.root.chars().take(76).collect();
             lines.push(Line::from(vec![Span::styled(
                 format!("     {}", root),
-                Style::new().fg(theme::DIM),
+                Style::new().fg(theme::semantic().text.dim),
             )]));
             lines.push(Line::from(""));
         }
     }
 
-    lines.push(Line::from("  j/k) Navigate  Esc) Close").fg(theme::DIM));
+    lines.push(
+        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme::semantic().text.dim),
+    );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Plugins ")
-                .fg(theme::THINKING)
-                .bold()
-                .centered(),
-            width: Constraint::Length(80),
-            height: Constraint::Length(20),
-        ) {
+    panel_shell!(PanelKind::Plugin, {
             ScrollView(
                 scroll_bars: ScrollBars::default(),
                 width: Constraint::Fill(1),
@@ -135,8 +132,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ) {
                 Text(text: content)
             }
-        }
-    )
+    })
 }
 
 fn close_panel() {

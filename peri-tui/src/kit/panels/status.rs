@@ -8,13 +8,13 @@ use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
     },
 };
 
+use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{SERVICE_SNAPSHOT, VIEW_MODELS};
 use crate::kit::theme;
 use peri_acp_types::view_model::ViewModel;
@@ -46,7 +46,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => close_panel(),
+                KeyCode::Esc => close_panel(),
                 KeyCode::Left => {
                     *active_tab.write() = TAB_SERVICE;
                 }
@@ -67,17 +67,23 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Span::styled(
             " Service ",
             if tab == TAB_SERVICE {
-                Style::new().fg(theme::TEXT).bg(theme::THINKING).bold()
+                Style::new()
+                    .fg(theme::semantic().text.primary)
+                    .bg(theme::component().panel.title)
+                    .bold()
             } else {
-                Style::new().fg(theme::MUTED)
+                Style::new().fg(theme::semantic().text.muted)
             },
         ),
         Span::styled(
             " Context ",
             if tab == TAB_CONTEXT {
-                Style::new().fg(theme::TEXT).bg(theme::THINKING).bold()
+                Style::new()
+                    .fg(theme::semantic().text.primary)
+                    .bg(theme::component().panel.title)
+                    .bold()
             } else {
-                Style::new().fg(theme::MUTED)
+                Style::new().fg(theme::semantic().text.muted)
             },
         ),
     ]));
@@ -109,104 +115,158 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let content_lines: Vec<Line<'_>> = match tab {
         TAB_SERVICE => vec![
             Line::from(vec![
-                Span::styled("Provider:   ", Style::new().fg(theme::MUTED)),
-                Span::styled(provider_label, Style::new().fg(theme::TEXT).bold()),
+                Span::styled(
+                    "Provider:   ",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
+                Span::styled(
+                    provider_label,
+                    Style::new().fg(theme::semantic().text.primary).bold(),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("Model:      ", Style::new().fg(theme::MUTED)),
-                Span::styled(model_label, Style::new().fg(theme::TEXT).bold()),
+                Span::styled(
+                    "Model:      ",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
+                Span::styled(
+                    model_label,
+                    Style::new().fg(theme::semantic().text.primary).bold(),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("Permission: ", Style::new().fg(theme::MUTED)),
-                Span::styled(mode_label, Style::new().fg(theme::ACCENT).bold()),
+                Span::styled(
+                    "Permission: ",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
+                Span::styled(
+                    mode_label,
+                    Style::new().fg(theme::semantic().border.active).bold(),
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("CPU:        ", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    "CPU:        ",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
                 Span::styled(
                     format!("{:.1}%", snap.cpu_percent),
-                    Style::new().fg(theme::TEXT),
+                    Style::new().fg(theme::semantic().text.primary),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Memory:     ", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    "Memory:     ",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
                 Span::styled(
                     format!("{} MB", snap.memory_mb),
-                    Style::new().fg(theme::TEXT),
+                    Style::new().fg(theme::semantic().text.primary),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("MCP:        ", Style::new().fg(theme::MUTED)),
-                Span::styled(mcp_label, Style::new().fg(theme::SAGE)),
-                Span::styled(format!("  [{}]", mcp_phase), Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    "MCP:        ",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
+                Span::styled(mcp_label, Style::new().fg(theme::semantic().status.success)),
+                Span::styled(
+                    format!("  [{}]", mcp_phase),
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("Cron:       ", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    "Cron:       ",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
                 Span::styled(
                     format!("{} ({} enabled)", snap.cron_total, snap.cron_enabled),
-                    Style::new().fg(theme::TEXT),
+                    Style::new().fg(theme::semantic().text.primary),
                 ),
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("cwd: ", Style::new().fg(theme::MUTED)),
-                Span::styled(snap.cwd.clone(), Style::new().fg(theme::TEXT)),
+                Span::styled("cwd: ", Style::new().fg(theme::semantic().text.muted)),
+                Span::styled(
+                    snap.cwd.clone(),
+                    Style::new().fg(theme::semantic().text.primary),
+                ),
             ]),
         ],
         TAB_CONTEXT => vec![
             Line::from(vec![
-                Span::styled("Total VMs:        ", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    "Total VMs:        ",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
                 Span::styled(
                     format!("{}", vm_stats.total),
-                    Style::new().fg(theme::TEXT).bold(),
+                    Style::new().fg(theme::semantic().text.primary).bold(),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  User turns:     ", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    "  User turns:     ",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
                 Span::styled(
                     format!("{}", vm_stats.user_bubbles),
-                    Style::new().fg(theme::TEXT),
+                    Style::new().fg(theme::semantic().text.primary),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  Assistant turns:", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    "  Assistant turns:",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
                 Span::styled(
                     format!("{}", vm_stats.assistant_bubbles),
-                    Style::new().fg(theme::TEXT),
+                    Style::new().fg(theme::semantic().text.primary),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  Tool calls:     ", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    "  Tool calls:     ",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
                 Span::styled(
                     format!("{}", vm_stats.tool_cards),
-                    Style::new().fg(theme::TEXT),
+                    Style::new().fg(theme::semantic().text.primary),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  SubAgent groups:", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    "  SubAgent groups:",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
                 Span::styled(
                     format!("{}", vm_stats.subagent_groups),
-                    Style::new().fg(theme::TEXT),
+                    Style::new().fg(theme::semantic().text.primary),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  System notes:   ", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    "  System notes:   ",
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
                 Span::styled(
                     format!("{}", vm_stats.system_notes),
-                    Style::new().fg(theme::TEXT),
+                    Style::new().fg(theme::semantic().text.primary),
                 ),
             ]),
             Line::from(""),
             Line::from(vec![Span::styled(
                 "  Token-level budget requires ACP stream; VM counts shown here are derived locally.",
-                Style::new().fg(theme::DIM).italic(),
+                Style::new().fg(theme::semantic().text.dim).italic(),
             )]),
         ],
-        _ => vec![Line::from("  Unknown tab").fg(theme::MUTED)],
+        _ => vec![Line::from("  Unknown tab").fg(theme::semantic().text.muted)],
     };
 
     // ── Footer ───────────────────────────────────────────────────────
-    let footer = Line::from("  ← →) Switch Tab  Esc) Close").fg(theme::DIM);
+    let footer = Line::from("  ←/→::switch  Esc::close").fg(theme::semantic().text.dim);
 
     let content = Paragraph::new(ratatui::text::Text::from({
         let mut all: Vec<Line> = Vec::new();
@@ -217,21 +277,10 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         all
     }));
 
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Status ")
-                .fg(theme::THINKING)
-                .bold()
-                .centered(),
-            width: Constraint::Length(48),
-            height: Constraint::Length(16),
-        ) {
+    panel_shell!(PanelKind::Status, {
             Text(text: tab_bar)
             Text(text: content)
-        }
-    )
+    })
 }
 
 /// H1a：从 ViewModelsSnapshot 派生按 ViewModel 类型分类的统计。

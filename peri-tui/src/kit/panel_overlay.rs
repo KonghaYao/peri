@@ -15,14 +15,8 @@
 //! 全局 Esc 由 `event_handlers::register_root_handlers` 处理：
 //! 若 `ACTIVE_PANEL` 为 Some，调用 `close_active_panel`；否则交由子组件。
 
-use crate::app::panel_types::PanelKind;
 use crate::kit::atoms;
-use crate::kit::panels::{
-    agent::AgentPanel, betas::BetasPanel, config::ConfigPanel, cron::CronPanel, hooks::HooksPanel,
-    login::LoginPanel, mcp::McpPanel, memory::MemoryPanel, model::ModelPanel, plugin::PluginPanel,
-    status::StatusPanel, tasks::TasksPanel, thread_browser::ThreadBrowserPanel,
-    workflow::WorkflowPanel,
-};
+use crate::kit::panel_registry;
 use ratatui_kit::{
     prelude::*,
     ratatui::layout::{Constraint, Direction, Flex},
@@ -35,46 +29,39 @@ use ratatui_kit::{
 pub fn PanelOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let active_panel = hooks.use_atom(&atoms::ACTIVE_PANEL);
     let active = *active_panel.read();
-    let (_term_w, term_h) = hooks.use_terminal_size();
+    let (_term_w, _term_h) = hooks.use_terminal_size();
     match active {
-        Some(PanelKind::Model) => render_panel(element!(ModelPanel()).into(), term_h),
-        Some(PanelKind::Login) => render_panel(element!(LoginPanel()).into(), term_h),
-        Some(PanelKind::Agent) => render_panel(element!(AgentPanel()).into(), term_h),
-        Some(PanelKind::Hooks) => render_panel(element!(HooksPanel()).into(), term_h),
-        Some(PanelKind::Config) => render_panel(element!(ConfigPanel()).into(), term_h),
-        Some(PanelKind::ThreadBrowser) => {
-            render_panel(element!(ThreadBrowserPanel()).into(), term_h)
-        }
-        Some(PanelKind::Mcp) => render_panel(element!(McpPanel()).into(), term_h),
-        Some(PanelKind::Plugin) => render_panel(element!(PluginPanel()).into(), term_h),
-        Some(PanelKind::Cron) => render_panel(element!(CronPanel()).into(), term_h),
-        Some(PanelKind::Status) => render_panel(element!(StatusPanel()).into(), term_h),
-        Some(PanelKind::Memory) => render_panel(element!(MemoryPanel()).into(), term_h),
-        Some(PanelKind::Tasks) => render_panel(element!(TasksPanel()).into(), term_h),
-        Some(PanelKind::Betas) => render_panel(element!(BetasPanel()).into(), term_h),
-        Some(PanelKind::Workflow) => render_panel(element!(WorkflowPanel()).into(), term_h),
+        Some(kind) => match panel_registry::render(kind) {
+            Some(panel) => render_panel(kind, panel),
+            None => render_empty(),
+        },
         None => render_empty(),
     }
 }
 
-/// 包裹面板——在消息流和输入区之间占据固定高度，水平居中显示面板内容。
-fn render_panel(panel: AnyElement<'static>, term_h: u16) -> AnyElement<'static> {
-    let height = term_h.saturating_sub(8).min(28).max(8);
+/// 包裹面板——在消息流和输入区之间占据注册表声明的固定高度，水平居中显示面板内容。
+fn render_panel(
+    kind: crate::app::panel_types::PanelKind,
+    panel: AnyElement<'static>,
+) -> AnyElement<'static> {
+    let layout = panel_registry::panel_layout(kind);
 
     element!(
         View(
             flex_direction: Direction::Horizontal,
             justify_content: Flex::Center,
             width: Constraint::Fill(1),
-            height: Constraint::Length(height),
+            height: panel_registry::panel_constraint(layout.height),
         ) {
-            { panel }
+            View(width: panel_registry::panel_constraint(layout.width), height: Constraint::Fill(1)) {
+                { panel }
+            }
         }
     )
     .into()
 }
 
-/// 空面板——无面板激活时不占用主布局高度。
+/// 空面板——无面板激活时返回零尺寸 Positioned，避免默认 View/Fragment 布局参与父级 flex。
 fn render_empty() -> AnyElement<'static> {
-    element!(View(width: Constraint::Fill(1), height: Constraint::Length(0))).into()
+    element!(Positioned(x: 0u16, y: 0u16, width: 0u16, height: 0u16, clear: false)).into()
 }

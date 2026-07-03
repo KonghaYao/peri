@@ -14,12 +14,7 @@
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
-    ratatui::{
-        layout::{Constraint, Direction},
-        style::{Style, Stylize},
-        text::Line,
-        widgets::Paragraph,
-    },
+    ratatui::{style::Stylize, text::Line},
 };
 
 use crate::kit::atoms::OAUTH_INFO;
@@ -64,6 +59,8 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
+    let popup_tokens = &theme::component().popup;
+    let semantic = theme::semantic();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     match &info {
@@ -72,27 +69,27 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(""));
             lines.push(
                 Line::from("  No OAuth request pending.")
-                    .fg(theme::MUTED)
+                    .fg(semantic.text.muted)
                     .italic(),
             );
             lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(theme::DIM));
+            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
         }
         Some(oauth) => {
             lines.push(Line::from(""));
             lines.push(
                 Line::from(format!("  Server: {}", oauth.server_name))
-                    .fg(theme::SAGE)
+                    .fg(popup_tokens.action_primary)
                     .bold(),
             );
             lines.push(Line::from(""));
             lines.push(
                 Line::from("  MCP server requires authorization. Visit the URL below,")
-                    .fg(theme::TEXT),
+                    .fg(semantic.text.primary),
             );
             lines.push(
                 Line::from("  complete the flow, then press Enter to close this dialog.")
-                    .fg(theme::TEXT),
+                    .fg(semantic.text.primary),
             );
             lines.push(Line::from(""));
             // URL 截断用 chars().take(N) 避免 CJK 字节切片 panic（I19-C 同模式）
@@ -103,28 +100,16 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             } else {
                 oauth.auth_url.clone()
             };
-            lines.push(Line::from(format!("  {}", truncated_url)).fg(theme::MUTED));
+            lines.push(Line::from(format!("  {}", truncated_url)).fg(semantic.text.muted));
             lines.push(Line::from(""));
             lines.push(
                 Line::from("  Ctrl+O: open in browser  |  Enter: close  |  Esc: cancel")
-                    .fg(theme::DIM),
+                    .fg(semantic.text.dim),
             );
         }
     }
 
-    let text_render = Paragraph::new(ratatui::text::Text::from(lines));
-
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" OAuth Authorization ").fg(theme::THINKING).bold().centered(),
-            width: Constraint::Length(50),
-            height: Constraint::Length(11),
-        ) {
-            Text(text: text_render)
-        }
-    )
+    popup_text_shell!(" OAuth Authorization ", popup_tokens.action_primary, lines)
 }
 
 /// I20-D：用系统命令打开 auth_url——best-effort，失败仅记日志不报错。

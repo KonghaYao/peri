@@ -7,13 +7,14 @@ use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
     },
 };
 
+use crate::app::panel_types::PanelKind;
+use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 
 /// Mock beta feature entries (Phase 8: injected via Atom).
@@ -62,19 +63,19 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
+                KeyCode::Esc => {
                     close_panel();
                     EventResult::Consumed
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Up => {
                     let mut s = selected.write();
-                    *s = s.saturating_sub(1);
+                    *s = previous_selection(*s);
                     EventResult::Consumed
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down => {
                     let mut s = selected.write();
                     if count > 0 {
-                        *s = (*s + 1).min(count - 1);
+                        *s = next_selection(*s, count);
                     }
                     EventResult::Consumed
                 }
@@ -88,7 +89,8 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Hint line
     lines.push(
-        Line::from("  (read-only — feature flags are configured at build time)").fg(theme::MUTED),
+        Line::from("  (read-only — feature flags are configured at build time)")
+            .fg(theme::semantic().text.muted),
     );
     lines.push(Line::from(""));
 
@@ -96,57 +98,48 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let is_selected = i == sel;
         let cursor = if is_selected { "> " } else { "  " };
         let label_style = if is_selected {
-            Style::new().fg(theme::THINKING).bold()
+            Style::new().fg(theme::component().panel.title).bold()
         } else {
-            Style::new().fg(theme::TEXT)
+            Style::new().fg(theme::semantic().text.primary)
         };
         let value_text = if entry.enabled { "on" } else { "off" };
         let value_style = if entry.enabled {
-            Style::new().fg(theme::SAGE).bold()
+            Style::new().fg(theme::semantic().status.success).bold()
         } else {
-            Style::new().fg(theme::MUTED)
+            Style::new().fg(theme::semantic().text.muted)
         };
 
         lines.push(Line::from(vec![
-            Span::styled(cursor, Style::new().fg(theme::THINKING)),
+            Span::styled(cursor, Style::new().fg(theme::component().panel.title)),
             Span::styled(format!("{:<22}", entry.label), label_style),
             Span::styled(value_text, value_style),
         ]));
         lines.push(Line::from(Span::styled(
             format!("      {}", entry.description),
-            Style::new().fg(theme::MUTED),
+            Style::new().fg(theme::semantic().text.muted),
         )));
     }
 
     if BETA_ENTRIES.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from("  No active beta features").fg(theme::MUTED));
+        lines.push(Line::from("  No active beta features").fg(theme::semantic().text.muted));
     }
 
     // Footer hints
     lines.push(Line::from(""));
-    lines.push(Line::from("  j/k) Navigate  Esc) Close").fg(theme::DIM));
+    lines.push(
+        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme::semantic().text.dim),
+    );
 
     let content = if lines.is_empty() {
-        Paragraph::new(Line::from("  (empty)").fg(theme::MUTED))
+        Paragraph::new(Line::from("  (empty)").fg(theme::semantic().text.muted))
     } else {
         Paragraph::new(ratatui::text::Text::from(lines))
     };
 
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Beta Features ")
-                .fg(theme::THINKING)
-                .bold()
-                .centered(),
-            width: Constraint::Length(44),
-            height: Constraint::Length(14),
-        ) {
-            Text(text: content)
-        }
-    )
+    panel_shell!(PanelKind::Betas, {
+        Text(text: content)
+    })
 }
 
 fn close_panel() {

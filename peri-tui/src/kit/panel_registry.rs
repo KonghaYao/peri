@@ -9,20 +9,122 @@
 //! `open_panel(kind)` 在打开新面板前会关闭同组其他面板——这保证栈中
 //! `Vec<PanelKind>` 不会同时含两个同组面板。
 
-use ratatui_kit::crossterm::event::KeyCode;
-use std::borrow::Cow;
+use ratatui_kit::{crossterm::event::KeyCode, prelude::*, ratatui::layout::Constraint};
 
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
+use crate::kit::panels::{
+    agent::AgentPanel, betas::BetasPanel, config::ConfigPanel, cron::CronPanel, hooks::HooksPanel,
+    login::LoginPanel, mcp::McpPanel, memory::MemoryPanel, model::ModelPanel, plugin::PluginPanel,
+    status::StatusPanel, tasks::TasksPanel, thread_browser::ThreadBrowserPanel,
+    workflow::WorkflowPanel,
+};
 
-/// Panel 元数据——编译期穷举。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelScope {
+    Session,
+    Global,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutexGroup {
+    Settings,
+    Agent,
+    Tools,
+    Info,
+    Thread,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelSize {
+    Fill,
+    Length(u16),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelLayout {
+    pub width: PanelSize,
+    pub height: PanelSize,
+}
+
+impl PanelLayout {
+    pub const fn fixed(width: u16, height: u16) -> Self {
+        Self {
+            width: PanelSize::Length(width),
+            height: PanelSize::Length(height),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PanelMeta {
     pub kind: PanelKind,
     pub title: &'static str,
     /// 触发面板的快捷键字母（小写）。`KeyCode::Char(letter)` + Ctrl。
     pub shortcut_letter: char,
+    pub slash_command: &'static str,
     pub description: &'static str,
+    pub priority: u8,
+    pub mutex_group: MutexGroup,
+    pub scope: PanelScope,
+    pub layout: PanelLayout,
+    pub render: fn() -> AnyElement<'static>,
+}
+
+fn render_model_panel() -> AnyElement<'static> {
+    element!(ModelPanel()).into()
+}
+
+fn render_login_panel() -> AnyElement<'static> {
+    element!(LoginPanel()).into()
+}
+
+fn render_agent_panel() -> AnyElement<'static> {
+    element!(AgentPanel()).into()
+}
+
+fn render_hooks_panel() -> AnyElement<'static> {
+    element!(HooksPanel()).into()
+}
+
+fn render_config_panel() -> AnyElement<'static> {
+    element!(ConfigPanel()).into()
+}
+
+fn render_thread_browser_panel() -> AnyElement<'static> {
+    element!(ThreadBrowserPanel()).into()
+}
+
+fn render_mcp_panel() -> AnyElement<'static> {
+    element!(McpPanel()).into()
+}
+
+fn render_plugin_panel() -> AnyElement<'static> {
+    element!(PluginPanel()).into()
+}
+
+fn render_cron_panel() -> AnyElement<'static> {
+    element!(CronPanel()).into()
+}
+
+fn render_status_panel() -> AnyElement<'static> {
+    element!(StatusPanel()).into()
+}
+
+fn render_memory_panel() -> AnyElement<'static> {
+    element!(MemoryPanel()).into()
+}
+
+fn render_tasks_panel() -> AnyElement<'static> {
+    element!(TasksPanel()).into()
+}
+
+fn render_betas_panel() -> AnyElement<'static> {
+    element!(BetasPanel()).into()
+}
+
+fn render_workflow_panel() -> AnyElement<'static> {
+    element!(WorkflowPanel()).into()
 }
 
 /// 所有 14 面板的元数据。
@@ -47,105 +149,210 @@ pub const PANELS: &[PanelMeta] = &[
         kind: PanelKind::Model,
         title: "Model",
         shortcut_letter: 'm',
+        slash_command: "model",
         description: "Model alias selection",
+        priority: 2,
+        mutex_group: MutexGroup::Settings,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_model_panel,
     },
     PanelMeta {
         kind: PanelKind::Login,
         title: "Login",
         shortcut_letter: 'l',
+        slash_command: "login",
         description: "Provider credentials",
+        priority: 3,
+        mutex_group: MutexGroup::Settings,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_login_panel,
     },
     PanelMeta {
         kind: PanelKind::Agent,
         title: "Agent",
         shortcut_letter: 'g',
+        slash_command: "agent",
         description: "Subagent definitions",
+        priority: 0,
+        mutex_group: MutexGroup::Agent,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_agent_panel,
     },
     PanelMeta {
         kind: PanelKind::Hooks,
         title: "Hooks",
         shortcut_letter: 'h',
+        slash_command: "hooks",
         description: "Hook events",
+        priority: 1,
+        mutex_group: MutexGroup::Agent,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_hooks_panel,
     },
     PanelMeta {
         kind: PanelKind::Config,
         title: "Config",
         shortcut_letter: 'f',
+        slash_command: "config",
         description: "PeriConfig editor",
+        priority: 4,
+        mutex_group: MutexGroup::Settings,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_config_panel,
     },
     PanelMeta {
         kind: PanelKind::ThreadBrowser,
         title: "Threads",
         shortcut_letter: 't',
+        slash_command: "threads",
         description: "Thread history browser",
+        priority: 5,
+        mutex_group: MutexGroup::Thread,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_thread_browser_panel,
     },
     PanelMeta {
         kind: PanelKind::Mcp,
         title: "MCP",
         shortcut_letter: 'x',
+        slash_command: "mcp",
         description: "MCP server pool",
+        priority: 6,
+        mutex_group: MutexGroup::Tools,
+        scope: PanelScope::Global,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_mcp_panel,
     },
     PanelMeta {
         kind: PanelKind::Plugin,
         title: "Plugin",
         shortcut_letter: 'p',
+        slash_command: "plugin",
         description: "Installed plugins",
+        priority: 7,
+        mutex_group: MutexGroup::Tools,
+        scope: PanelScope::Global,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_plugin_panel,
     },
     PanelMeta {
         kind: PanelKind::Cron,
         title: "Cron",
         shortcut_letter: 'r',
+        slash_command: "cron",
         description: "Scheduled tasks",
+        priority: 8,
+        mutex_group: MutexGroup::Tools,
+        scope: PanelScope::Global,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_cron_panel,
     },
     PanelMeta {
         kind: PanelKind::Status,
         title: "Status",
         shortcut_letter: 's',
+        slash_command: "status",
         description: "Service snapshot",
+        priority: 9,
+        mutex_group: MutexGroup::Info,
+        scope: PanelScope::Global,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_status_panel,
     },
     PanelMeta {
         kind: PanelKind::Memory,
         title: "Memory",
         shortcut_letter: 'n',
+        slash_command: "memory",
         description: "Persisted memory",
+        priority: 10,
+        mutex_group: MutexGroup::Info,
+        scope: PanelScope::Global,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_memory_panel,
     },
     PanelMeta {
         kind: PanelKind::Tasks,
         title: "Tasks",
         shortcut_letter: 'j',
+        slash_command: "tasks",
         description: "Background tasks",
+        priority: 11,
+        mutex_group: MutexGroup::Tools,
+        scope: PanelScope::Global,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_tasks_panel,
     },
     PanelMeta {
         kind: PanelKind::Betas,
         title: "Betas",
         shortcut_letter: 'b',
+        slash_command: "betas",
         description: "Feature flags",
+        priority: 12,
+        mutex_group: MutexGroup::Info,
+        scope: PanelScope::Global,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_betas_panel,
     },
     PanelMeta {
         kind: PanelKind::Workflow,
         title: "Workflow",
         shortcut_letter: 'w',
+        slash_command: "workflow",
         description: "Workflow runs",
+        priority: 13,
+        mutex_group: MutexGroup::Tools,
+        scope: PanelScope::Global,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_workflow_panel,
     },
 ];
 
-pub fn slash_command_for_panel(kind: PanelKind) -> Cow<'static, str> {
-    match kind {
-        PanelKind::ThreadBrowser => Cow::Borrowed("threads"),
-        other => Cow::Owned(
-            meta(other)
-                .map(|m| m.title.to_ascii_lowercase())
-                .unwrap_or_default(),
-        ),
-    }
+pub fn slash_command_for_panel(kind: PanelKind) -> &'static str {
+    meta(kind)
+        .expect("all PanelKind variants must be registered")
+        .slash_command
 }
 
 pub fn panel_for_slash_command(command: &str) -> Option<PanelKind> {
     let normalized = command.trim_start_matches('/').to_ascii_lowercase();
     PANELS
         .iter()
-        .find(|m| slash_command_for_panel(m.kind) == normalized)
+        .find(|m| m.slash_command == normalized)
         .map(|m| m.kind)
+}
+
+pub fn panel_title(kind: PanelKind) -> String {
+    format!(
+        " {} ",
+        meta(kind)
+            .expect("all PanelKind variants must be registered")
+            .title
+    )
+}
+
+pub fn panel_layout(kind: PanelKind) -> PanelLayout {
+    meta(kind)
+        .expect("all PanelKind variants must be registered")
+        .layout
+}
+
+pub fn panel_constraint(size: PanelSize) -> Constraint {
+    match size {
+        PanelSize::Fill => Constraint::Fill(1),
+        PanelSize::Length(value) => Constraint::Length(value),
+    }
+}
+
+pub fn render(kind: PanelKind) -> Option<AnyElement<'static>> {
+    meta(kind).map(|m| (m.render)())
 }
 
 /// 查找面板元数据。未注册返回 None。
@@ -185,11 +392,18 @@ pub fn open_panel(kind: PanelKind) {
     let open_atom = OPEN_PANELS.state();
     let active_atom = ACTIVE_PANEL.state();
 
-    let group = kind.mutex_group();
+    let group = meta(kind)
+        .expect("all PanelKind variants must be registered")
+        .mutex_group;
     let mut current = open_atom.read().clone();
 
     // 关闭同 MutexGroup 的其他面板（除 kind 自身）
-    current.retain(|k| *k == kind || k.mutex_group() != group);
+    current.retain(|k| {
+        let item_group = meta(*k)
+            .expect("all PanelKind variants must be registered")
+            .mutex_group;
+        *k == kind || item_group != group
+    });
 
     // 若 kind 已在栈中，先移除（稍后 push 到栈顶）
     current.retain(|k| *k != kind);
@@ -216,7 +430,7 @@ pub fn close_active_panel() -> Option<PanelKind> {
     closed
 }
 
-/// 关闭指定面板：从栈中移除，若它原本是栈顶则更新 ACTIVE_PANEL。
+/// 关闭指定面板：从栈中移除，删除成功后统一重算 ACTIVE_PANEL 为新的栈顶。
 pub fn close_panel(kind: PanelKind) -> bool {
     let open_atom = OPEN_PANELS.state();
     let active_atom = ACTIVE_PANEL.state();
@@ -254,7 +468,7 @@ pub fn close_all_panels() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::panel_types::MutexGroup;
+    use ratatui_kit::ratatui::layout::Constraint;
     use serial_test::serial;
 
     fn setup_atoms() {
@@ -420,6 +634,56 @@ mod tests {
         assert_eq!(from_key_code(KeyCode::Char('k')), None);
         // 数字 / 其他按键也应返回 None
         assert_eq!(from_key_code(KeyCode::Enter), None);
+    }
+
+    #[test]
+    fn test_slash_commands_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for m in PANELS {
+            assert!(
+                seen.insert(m.slash_command),
+                "duplicate slash command {} for {:?}",
+                m.slash_command,
+                m.kind
+            );
+            assert_eq!(panel_for_slash_command(m.slash_command), Some(m.kind));
+            assert_eq!(slash_command_for_panel(m.kind), m.slash_command);
+        }
+    }
+
+    #[test]
+    fn test_registry_metadata_has_expected_shape() {
+        for m in PANELS {
+            assert!(m.priority < PANELS.len() as u8);
+        }
+        assert_eq!(
+            meta(PanelKind::Model).map(|m| m.mutex_group),
+            Some(MutexGroup::Settings)
+        );
+        assert_eq!(
+            meta(PanelKind::ThreadBrowser).map(|m| m.scope),
+            Some(PanelScope::Session)
+        );
+        assert_eq!(
+            meta(PanelKind::Workflow).map(|m| m.scope),
+            Some(PanelScope::Global)
+        );
+    }
+
+    #[test]
+    fn test_panel_constraint_maps_panel_size() {
+        assert_eq!(panel_constraint(PanelSize::Fill), Constraint::Fill(1));
+        assert_eq!(
+            panel_constraint(PanelSize::Length(42)),
+            Constraint::Length(42)
+        );
+    }
+
+    #[test]
+    fn test_render_all_registered_panels_constructs_element() {
+        for m in PANELS {
+            let _panel = render(m.kind).expect("registered panel should render");
+        }
     }
 
     #[test]

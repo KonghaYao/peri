@@ -21,17 +21,13 @@
 #![allow(clippy::needless_update)]
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyEventKind},
     prelude::*,
-    ratatui::{
-        layout::{Constraint, Direction},
-        style::{Style, Stylize},
-        text::Line,
-        widgets::Paragraph,
-    },
+    ratatui::{style::Stylize, text::Line},
 };
 
 use crate::kit::atoms::REWIND_ACTION_TX;
+use crate::kit::list_nav::{ListNavAction, classify_list_nav, next_selection, previous_selection};
 use crate::kit::popup_overlay::close_popup;
 use crate::kit::rewind_action::RewindAction;
 use crate::kit::theme;
@@ -66,11 +62,8 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         if let Event::Key(key) = event
             && key.kind == KeyEventKind::Press
         {
-            match (key.modifiers, key.code) {
-                // ── 视图切换 ──
-                (KeyModifiers::NONE, KeyCode::Tab)
-                | (KeyModifiers::SHIFT, KeyCode::BackTab)
-                | (KeyModifiers::NONE, KeyCode::BackTab) => {
+            match classify_list_nav(&key) {
+                Some(ListNavAction::CycleForward | ListNavAction::CycleBackward) => {
                     let cur = *view.read();
                     *view.write() = match cur {
                         RewindView::Messages => RewindView::Files,
@@ -78,44 +71,35 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     };
                     return EventResult::Consumed;
                 }
-
-                // ── 上下导航（按当前视图分派） ──
-                (KeyModifiers::NONE, KeyCode::Up) => {
+                Some(ListNavAction::MoveUp) => {
                     let cur = *view.read();
                     match cur {
                         RewindView::Messages => {
                             let mut s = msg_sel.write();
-                            *s = s.saturating_sub(1);
+                            *s = previous_selection(*s);
                         }
                         RewindView::Files => {
                             let mut s = file_sel.write();
-                            *s = s.saturating_sub(1);
+                            *s = previous_selection(*s);
                         }
                     }
                     return EventResult::Consumed;
                 }
-                (KeyModifiers::NONE, KeyCode::Down) => {
+                Some(ListNavAction::MoveDown) => {
                     let cur = *view.read();
                     match cur {
                         RewindView::Messages => {
                             let mut s = msg_sel.write();
-                            if msg_count > 0 {
-                                *s = (*s).saturating_add(1).min(msg_count - 1);
-                            }
+                            *s = next_selection(*s, msg_count);
                         }
                         RewindView::Files => {
                             let mut s = file_sel.write();
-                            if file_count > 0 {
-                                *s = (*s).saturating_add(1).min(file_count - 1);
-                            }
+                            *s = next_selection(*s, file_count);
                         }
                     }
                     return EventResult::Consumed;
                 }
-
-                // ── Enter：确认回退 ──
-                // target_message_id 从 messages 选中条目取（无 messages 时占位空串——不发 RPC）
-                (KeyModifiers::NONE, KeyCode::Enter) => {
+                Some(ListNavAction::Confirm) => {
                     let target_id = match &preview_for_closure {
                         Some(p) => p
                             .messages
@@ -135,23 +119,18 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     close_popup();
                     return EventResult::Consumed;
                 }
-
-                // ── Esc：仅关闭 popup，由全局 event_handlers 处理 ──
-                // 但作为兜底，本地也响应一次（防止事件被消费链卡住）
-                (KeyModifiers::NONE, KeyCode::Esc) => {
-                    if let Some(tx) = REWIND_ACTION_TX.get() {
-                        let _ = tx.send(RewindAction::Cancel);
-                    }
+                Some(ListNavAction::Cancel) => {
                     close_popup();
                     return EventResult::Consumed;
                 }
-
-                _ => {}
+                None => {}
             }
         }
         EventResult::Ignored
     });
 
+    let popup_tokens = &theme::component().popup;
+    let semantic = theme::semantic();
     let cur_view = *view.read();
     let cur_msg_sel = *msg_sel.read();
     let cur_file_sel = *file_sel.read();
@@ -164,14 +143,15 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(""));
             lines.push(
                 Line::from("  No rewind preview available.")
-                    .fg(theme::MUTED)
+                    .fg(semantic.text.muted)
                     .italic(),
             );
             lines.push(Line::from(""));
-            lines.push(Line::from("  Rewind 通常由 Agent 在工具调用前触发；").fg(theme::DIM));
-            lines.push(Line::from("  或由历史面板右键选择消息后回退。").fg(theme::DIM));
+            lines
+                .push(Line::from("  Rewind 通常由 Agent 在工具调用前触发；").fg(semantic.text.dim));
+            lines.push(Line::from("  或由历史面板右键选择消息后回退。").fg(semantic.text.dim));
             lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(theme::DIM));
+            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
         }
         Some(p) => {
             lines.push(Line::from(""));
@@ -184,12 +164,12 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             };
             lines.push(
                 Line::from(format!("{} Messages ({})", msg_marker, p.messages.len()))
-                    .fg(theme::TEXT)
+                    .fg(semantic.text.primary)
                     .bold(),
             );
 
             if p.messages.is_empty() {
-                lines.push(Line::from("    (no messages to rewind)").fg(theme::DIM));
+                lines.push(Line::from("    (no messages to rewind)").fg(semantic.text.dim));
             } else {
                 for (i, msg) in p.messages.iter().enumerate().take(8) {
                     let is_selected = cur_view == RewindView::Messages && i == cur_msg_sel;
@@ -198,15 +178,15 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let role_label = role_display(&msg.role);
                     let line_text = format!("{}[{}] {}", prefix, role_label, preview_text);
                     if is_selected {
-                        lines.push(Line::from(line_text).fg(theme::THINKING).bold());
+                        lines.push(Line::from(line_text).fg(popup_tokens.selected_fg).bold());
                     } else {
-                        lines.push(Line::from(line_text).fg(theme::TEXT));
+                        lines.push(Line::from(line_text).fg(semantic.text.primary));
                     }
                 }
                 if p.messages.len() > 8 {
                     lines.push(
                         Line::from(format!("    ... and {} more", p.messages.len() - 8))
-                            .fg(theme::DIM),
+                            .fg(semantic.text.dim),
                     );
                 }
             }
@@ -221,25 +201,25 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             };
             lines.push(
                 Line::from(format!("{} Files ({})", file_marker, p.files.len()))
-                    .fg(theme::TEXT)
+                    .fg(semantic.text.primary)
                     .bold(),
             );
 
             if p.files.is_empty() {
-                lines.push(Line::from("    (no file changes)").fg(theme::DIM));
+                lines.push(Line::from("    (no file changes)").fg(semantic.text.dim));
             } else {
                 for (i, fc) in p.files.iter().enumerate().take(6) {
                     let is_selected = cur_view == RewindView::Files && i == cur_file_sel;
                     let prefix = if is_selected { "  > " } else { "    " };
                     let status_color = match fc.change_type.as_str() {
-                        "added" => theme::SAGE,
-                        "deleted" => theme::ERROR,
-                        _ => theme::WARNING,
+                        "added" => semantic.status.success,
+                        "deleted" => semantic.status.error,
+                        _ => semantic.status.warning,
                     };
                     let path_text = truncate_str(&fc.path, 42);
                     let line_text = format!("{}{} ({})", prefix, path_text, fc.change_type);
                     if is_selected {
-                        lines.push(Line::from(line_text).fg(theme::THINKING).bold());
+                        lines.push(Line::from(line_text).fg(popup_tokens.selected_fg).bold());
                     } else {
                         lines.push(Line::from(line_text).fg(status_color));
                     }
@@ -247,7 +227,7 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if p.files.len() > 6 {
                     lines.push(
                         Line::from(format!("    ... and {} more", p.files.len() - 6))
-                            .fg(theme::DIM),
+                            .fg(semantic.text.dim),
                     );
                 }
             }
@@ -257,24 +237,12 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Line::from(
                     "  Tab: switch view  |  ↑↓: select  |  Enter: rewind to selected  |  Esc: cancel",
                 )
-                .fg(theme::DIM),
+                .fg(semantic.text.dim),
             );
         }
     }
 
-    let text_render = Paragraph::new(ratatui::text::Text::from(lines));
-
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Rewind Changes ").fg(theme::WARNING).bold().centered(),
-            width: Constraint::Length(60),
-            height: Constraint::Length(22),
-        ) {
-            Text(text: text_render)
-        }
-    )
+    popup_text_shell!(" Rewind Changes ", semantic.status.warning, lines)
 }
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────

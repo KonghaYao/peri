@@ -99,13 +99,27 @@ pub async fn run_kit_fullscreen(
         let _notifier_handle = spawn_kit_notifier(notification_rx, bridge_tx, shutdown.clone());
         let _bridge_handle = spawn_acp_bridge(bridge_rx, shutdown.clone());
         let cwd = app.services.cwd.clone();
+        let cwd_for_init = cwd.clone();
         let _submit_handle =
             spawn_submit_consumer(client.clone(), submit_rx, cwd.clone(), shutdown.clone());
         let _rewind_handle = spawn_rewind_consumer(client.clone(), rewind_rx, shutdown.clone());
         let _thread_load_handle =
             spawn_thread_load_consumer(client.clone(), thread_load_rx, cwd, shutdown.clone());
 
-        // 4e. I17-A：CLI -c/-r 会话恢复——在 acp_client + THREAD_LOAD_TX 就绪后
+        // 4e. 初始化会话——在 notifier/bridge 就绪后立即创建 session，
+        //     触发服务器发送 AvailableCommandsUpdate（含 skills），确保
+        //     slash 补全弹窗在首次输入前就有数据。
+        {
+            let client = client.clone();
+            tokio::spawn(async move {
+                match client.new_session(&cwd_for_init, None).await {
+                    Ok(_) => tracing::info!("kit: initial session created"),
+                    Err(e) => tracing::warn!(error = %e, "kit: initial session creation failed"),
+                }
+            });
+        }
+
+        // 4f. I17-A：CLI -c/-r 会话恢复——在 acp_client + THREAD_LOAD_TX 就绪后
         //     通过 channel 触发 load_session。spawn 一次性的延迟任务，让
         //     notifier/bridge 先初始化，再 send（避免 race）。
         if opts.resume_session.is_some() || opts.continue_session {

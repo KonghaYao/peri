@@ -33,6 +33,7 @@ pub struct WelcomeProps {
 
 #[component]
 pub fn Welcome(props: &WelcomeProps) -> impl Into<AnyElement<'static>> {
+    let semantic = theme::semantic();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let narrow = props.width < NARROW_THRESHOLD;
 
@@ -40,7 +41,7 @@ pub fn Welcome(props: &WelcomeProps) -> impl Into<AnyElement<'static>> {
         lines.push(Line::from(Span::styled(
             "Peri",
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(semantic.border.active)
                 .add_modifier(Modifier::BOLD),
         )));
     } else {
@@ -49,7 +50,7 @@ pub fn Welcome(props: &WelcomeProps) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(Span::styled(
                 row.to_string(),
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(semantic.border.active)
                     .add_modifier(Modifier::BOLD),
             )));
         }
@@ -58,13 +59,13 @@ pub fn Welcome(props: &WelcomeProps) -> impl Into<AnyElement<'static>> {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Your AI operating system for code, tools, and workflows",
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(semantic.text.muted),
     )));
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "────────────────────────────────────────",
-        Style::default().fg(theme::DIM),
+        Style::default().fg(semantic.text.dim),
     )));
 
     lines.push(Line::from(""));
@@ -74,32 +75,32 @@ pub fn Welcome(props: &WelcomeProps) -> impl Into<AnyElement<'static>> {
         "Delegate work to agents and workflows",
     ] {
         lines.push(Line::from(vec![
-            Span::styled(" • ", Style::default().fg(theme::ACCENT)),
-            Span::styled(feature, Style::default().fg(theme::TEXT)),
+            Span::styled(" • ", Style::default().fg(semantic.border.active)),
+            Span::styled(feature, Style::default().fg(semantic.text.primary)),
         ]));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(" /model", Style::default().fg(theme::WARNING)),
-        Span::styled("  ", Style::default().fg(theme::DIM)),
-        Span::styled("/agents", Style::default().fg(theme::WARNING)),
-        Span::styled("  ", Style::default().fg(theme::DIM)),
-        Span::styled("/tasks", Style::default().fg(theme::WARNING)),
-        Span::styled("  ", Style::default().fg(theme::DIM)),
-        Span::styled("/help", Style::default().fg(theme::WARNING)),
+        Span::styled(" /model", Style::default().fg(semantic.status.warning)),
+        Span::styled("  ", Style::default().fg(semantic.text.dim)),
+        Span::styled("/agents", Style::default().fg(semantic.status.warning)),
+        Span::styled("  ", Style::default().fg(semantic.text.dim)),
+        Span::styled("/tasks", Style::default().fg(semantic.status.warning)),
+        Span::styled("  ", Style::default().fg(semantic.text.dim)),
+        Span::styled("/help", Style::default().fg(semantic.status.warning)),
     ]));
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(" Enter", Style::default().fg(theme::DIM)),
-        Span::styled(" send", Style::default().fg(theme::DIM)),
-        Span::styled("  ", Style::default().fg(theme::DIM)),
-        Span::styled("Shift+Enter", Style::default().fg(theme::DIM)),
-        Span::styled(" newline", Style::default().fg(theme::DIM)),
-        Span::styled("  ", Style::default().fg(theme::DIM)),
-        Span::styled("@", Style::default().fg(theme::DIM)),
-        Span::styled(" mention files", Style::default().fg(theme::DIM)),
+        Span::styled("Enter", Style::default().fg(semantic.text.dim)),
+        Span::styled(" send", Style::default().fg(semantic.text.dim)),
+        Span::styled("  ", Style::default().fg(semantic.text.dim)),
+        Span::styled("Shift+Enter", Style::default().fg(semantic.text.dim)),
+        Span::styled(" newline", Style::default().fg(semantic.text.dim)),
+        Span::styled("  ", Style::default().fg(semantic.text.dim)),
+        Span::styled("@", Style::default().fg(semantic.text.dim)),
+        Span::styled(" mention files", Style::default().fg(semantic.text.dim)),
     ]));
 
     let centered_lines: Vec<Line<'static>> =

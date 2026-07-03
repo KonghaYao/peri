@@ -25,6 +25,7 @@ use crate::kit::popups::{
     ask_user_popup::AskUserPopup, hitl_popup::HitlPopup, oauth_popup::OAuthPopup,
     rewind_popup::RewindPopup,
 };
+use crate::kit::theme;
 use ratatui_kit::{prelude::*, ratatui::layout::Constraint};
 
 /// 弹窗覆盖层组件。
@@ -47,8 +48,9 @@ pub fn PopupOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 /// 包裹弹窗——只定位和清除弹窗矩形，避免 Modal 整屏背景绘制导致白屏。
 fn render_popup(p: AnyElement<'static>, term_w: u16, term_h: u16) -> AnyElement<'static> {
-    let width = term_w.saturating_sub(4).min(90).max(1);
-    let height = term_h.saturating_sub(4).min(28).max(1);
+    let popup = &theme::component().popup;
+    let width = term_w.saturating_sub(4).min(popup.modal_max_width).max(1);
+    let height = term_h.saturating_sub(4).min(popup.modal_max_height).max(1);
     let x = term_w.saturating_sub(width) / 2;
     let y = term_h.saturating_sub(height) / 2;
 

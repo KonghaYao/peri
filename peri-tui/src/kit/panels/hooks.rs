@@ -8,14 +8,16 @@ use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
+        layout::Constraint,
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
     },
 };
 
+use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{HOOK_LIST, HookSummary};
+use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 
 /// Map event name to human-readable description。
@@ -57,17 +59,17 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
+                KeyCode::Esc => {
                     close_panel();
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Up => {
                     let mut s = selected.write();
-                    *s = s.saturating_sub(1);
+                    *s = previous_selection(*s);
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down => {
                     let mut s = selected.write();
                     if count > 0 {
-                        *s = (*s + 1).min(count - 1);
+                        *s = next_selection(*s, count);
                     }
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -85,31 +87,31 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Stats line
     lines.push(Line::from(vec![Span::styled(
         format!("  {} hooks registered", count),
-        Style::new().fg(theme::TEXT).bold(),
+        Style::new().fg(theme::semantic().text.primary).bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
         "  (read-only — configured via plugins)",
-        Style::new().fg(theme::MUTED).italic(),
+        Style::new().fg(theme::semantic().text.muted).italic(),
     )]));
     lines.push(Line::from(""));
 
     if hook_list.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "  No hooks configured",
-            Style::new().fg(theme::MUTED),
+            Style::new().fg(theme::semantic().text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  Add hooks/<event>.json files to a plugin",
-            Style::new().fg(theme::MUTED),
+            Style::new().fg(theme::semantic().text.muted),
         )]));
     } else {
         for (i, entry) in hook_list.iter().enumerate() {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::THINKING).bold()
+                Style::new().fg(theme::component().panel.title).bold()
             } else {
-                Style::new().fg(theme::TEXT)
+                Style::new().fg(theme::semantic().text.primary)
             };
             let desc = event_description(&entry.event);
 
@@ -120,15 +122,18 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ),
                 Span::styled(
                     format!("  via {}", entry.plugin_name),
-                    Style::new().fg(theme::ACCENT),
+                    Style::new().fg(theme::semantic().border.active),
                 ),
-                Span::styled(format!("  {}", desc), Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    format!("  {}", desc),
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
             ]));
 
             if let Some(m) = &entry.matcher {
                 lines.push(Line::from(vec![Span::styled(
                     format!("     matcher: {}", m),
-                    Style::new().fg(theme::DIM),
+                    Style::new().fg(theme::semantic().text.dim),
                 )]));
             }
 
@@ -144,27 +149,19 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .collect();
             lines.push(Line::from(vec![Span::styled(
                 format!("     {}", cmd_summary),
-                Style::new().fg(theme::TEXT),
+                Style::new().fg(theme::semantic().text.primary),
             )]));
         }
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("  j/k) Navigate  Esc) Close").fg(theme::DIM));
+    lines.push(
+        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme::semantic().text.dim),
+    );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Hooks ")
-                .fg(theme::THINKING)
-                .bold()
-                .centered(),
-            width: Constraint::Length(80),
-            height: Constraint::Length(20),
-        ) {
+    panel_shell!(PanelKind::Hooks, {
             ScrollView(
                 scroll_bars: ScrollBars::default(),
                 width: Constraint::Fill(1),
@@ -172,8 +169,7 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ) {
                 Text(text: content)
             }
-        }
-    )
+    })
 }
 
 fn close_panel() {

@@ -15,12 +15,7 @@
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
-    ratatui::{
-        layout::{Constraint, Direction},
-        style::{Style, Stylize},
-        text::Line,
-        widgets::Paragraph,
-    },
+    ratatui::{style::Stylize, text::Line},
 };
 
 use crate::kit::atoms::HITL_PENDING;
@@ -48,6 +43,8 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
+    let popup_tokens = &theme::component().popup;
+    let semantic = theme::semantic();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     match &pending {
@@ -56,18 +53,18 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(""));
             lines.push(
                 Line::from("  No pending approval request.")
-                    .fg(theme::MUTED)
+                    .fg(semantic.text.muted)
                     .italic(),
             );
             lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(theme::DIM));
+            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
         }
         Some(hp) => {
             lines.push(Line::from(""));
             // 工具名行
             lines.push(
                 Line::from(format!("  Tool: {}", hp.tool_name))
-                    .fg(theme::SAGE)
+                    .fg(popup_tokens.action_primary)
                     .bold(),
             );
             lines.push(Line::from(""));
@@ -86,11 +83,12 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             };
 
             for line in display_str.lines().take(8) {
-                lines.push(Line::from(format!("    {}", line)).fg(theme::TEXT));
+                lines.push(Line::from(format!("    {}", line)).fg(semantic.text.primary));
             }
             if display_str.lines().count() > 8 || char_count > max_chars {
                 lines.push(
-                    Line::from(format!("    ... ({} chars total)", char_count)).fg(theme::DIM),
+                    Line::from(format!("    ... ({} chars total)", char_count))
+                        .fg(semantic.text.dim),
                 );
             }
 
@@ -100,37 +98,27 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             {
                 lines.push(Line::from(""));
                 lines.push(
-                    Line::from(format!("  Batch ({} more):", batch.len())).fg(theme::WARNING),
+                    Line::from(format!("  Batch ({} more):", batch.len()))
+                        .fg(semantic.status.warning),
                 );
                 for tp in batch.iter().take(4) {
                     lines.push(
                         Line::from(format!("    - {} ({})", tp.tool_name, tp.tool_id))
-                            .fg(theme::MUTED),
+                            .fg(semantic.text.muted),
                     );
                 }
                 if batch.len() > 4 {
                     lines.push(
-                        Line::from(format!("    ... and {} more", batch.len() - 4)).fg(theme::DIM),
+                        Line::from(format!("    ... and {} more", batch.len() - 4))
+                            .fg(semantic.text.dim),
                     );
                 }
             }
 
             lines.push(Line::from(""));
-            lines.push(Line::from("  Enter: approve  |  Esc: reject").fg(theme::DIM));
+            lines.push(Line::from("  Enter: approve  |  Esc: reject").fg(semantic.text.dim));
         }
     }
 
-    let text_render = Paragraph::new(ratatui::text::Text::from(lines));
-
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Approval Required ").fg(theme::WARNING).bold().centered(),
-            width: Constraint::Length(60),
-            height: Constraint::Length(16),
-        ) {
-            Text(text: text_render)
-        }
-    )
+    popup_text_shell!(" Approval Required ", semantic.status.warning, lines)
 }

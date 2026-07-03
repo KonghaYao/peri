@@ -7,13 +7,15 @@
 //! 简化设计：只读列表 + Enter 激活；不提供 New/Edit/Delete UI（这些操作
 //! 通过 Setup Wizard 完成）。
 
+use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{PERI_CONFIG_HANDLE, PROVIDER_LIST, ProviderSummary};
+use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
+        layout::Constraint,
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -39,14 +41,14 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => close_panel(),
-                KeyCode::Up | KeyCode::Char('k') => {
-                    *cursor.write() = cursor.read().saturating_sub(1);
+                KeyCode::Esc => close_panel(),
+                KeyCode::Up => {
+                    *cursor.write() = previous_selection(*cursor.read());
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down => {
                     let mut c = cursor.write();
                     if count > 0 {
-                        *c = (*c + 1).min(count - 1);
+                        *c = next_selection(*c, count);
                     }
                 }
                 KeyCode::Enter => {
@@ -68,35 +70,38 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     lines.push(Line::from(vec![Span::styled(
         format!("  {} providers configured", count),
-        Style::new().fg(theme::TEXT).bold(),
+        Style::new().fg(theme::semantic().text.primary).bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
         "  Enter) Activate  Esc) Close",
-        Style::new().fg(theme::MUTED).italic(),
+        Style::new().fg(theme::semantic().text.muted).italic(),
     )]));
     lines.push(Line::from(""));
 
     if providers.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "  No providers configured",
-            Style::new().fg(theme::MUTED),
+            Style::new().fg(theme::semantic().text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  Run setup wizard or edit ~/.peri/settings.json",
-            Style::new().fg(theme::MUTED),
+            Style::new().fg(theme::semantic().text.muted),
         )]));
     } else {
         for (i, p) in providers.iter().enumerate() {
             let is_cursor = i == sel;
             let cursor_mark = if is_cursor { ">" } else { " " };
             let row_style = if is_cursor {
-                Style::new().fg(theme::THINKING).bold()
+                Style::new().fg(theme::component().panel.title).bold()
             } else {
-                Style::new().fg(theme::TEXT)
+                Style::new().fg(theme::semantic().text.primary)
             };
 
             let active_marker = if p.is_active {
-                Span::styled(" \u{2714}", Style::new().fg(theme::SAGE).bold())
+                Span::styled(
+                    " \u{2714}",
+                    Style::new().fg(theme::semantic().status.success).bold(),
+                )
             } else {
                 Span::styled("  ", Style::new())
             };
@@ -104,31 +109,34 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor_mark),
-                    Style::new().fg(theme::THINKING),
+                    Style::new().fg(theme::component().panel.title),
                 ),
                 active_marker,
                 Span::styled(p.id.clone(), row_style),
                 Span::styled(
                     format!("  ({})", p.provider_type),
-                    Style::new().fg(theme::MUTED),
+                    Style::new().fg(theme::semantic().text.muted),
                 ),
             ]));
 
             // API key 状态
             let key_marker = if p.has_api_key {
-                ("configured", theme::SAGE)
+                ("configured", theme::semantic().status.success)
             } else {
-                ("missing", theme::ERROR)
+                ("missing", theme::semantic().status.error)
             };
             lines.push(Line::from(vec![
-                Span::styled("     API key: ".to_string(), Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    "     API key: ".to_string(),
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
                 Span::styled(key_marker.0, Style::new().fg(key_marker.1)),
             ]));
             if let Some(url) = &p.base_url {
                 let url_display: String = url.chars().take(70).collect();
                 lines.push(Line::from(vec![Span::styled(
                     format!("     Base URL: {}", url_display),
-                    Style::new().fg(theme::DIM),
+                    Style::new().fg(theme::semantic().text.dim),
                 )]));
             }
             lines.push(Line::from(""));
@@ -137,17 +145,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Login ")
-                .fg(theme::THINKING)
-                .bold()
-                .centered(),
-            width: Constraint::Length(80),
-            height: Constraint::Length(22),
-        ) {
+    panel_shell!(PanelKind::Login, {
             ScrollView(
                 scroll_bars: ScrollBars::default(),
                 width: Constraint::Fill(1),
@@ -155,8 +153,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ) {
                 Text(text: content)
             }
-        }
-    )
+    })
 }
 
 /// H1f: 切换 active_provider_id 并持久化到 settings.json。

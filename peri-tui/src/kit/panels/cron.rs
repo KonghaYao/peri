@@ -8,14 +8,16 @@ use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
+        layout::Constraint,
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
     },
 };
 
+use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{CRON_JOBS, CronJobSummary};
+use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 
 #[component]
@@ -63,17 +65,17 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
 
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
+                KeyCode::Esc => {
                     close_panel();
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Up => {
                     let mut s = selected.write();
-                    *s = s.saturating_sub(1);
+                    *s = previous_selection(*s);
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down => {
                     let mut s = selected.write();
                     if count > 0 {
-                        *s = (*s + 1).min(count - 1);
+                        *s = next_selection(*s, count);
                     }
                 }
                 KeyCode::Enter | KeyCode::Char(' ') => {
@@ -103,20 +105,20 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if !jobs.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             format!("  {} configured, {} enabled", jobs.len(), enabled_count),
-            Style::new().fg(theme::TEXT).bold(),
+            Style::new().fg(theme::semantic().text.primary).bold(),
         )]));
     }
 
     // Hint / confirm-delete line
     if is_confirming {
         lines.push(Line::from(vec![Span::styled(
-            "  Enter) Confirm delete  Esc) Cancel",
-            Style::new().fg(theme::WARNING),
+            "  Enter::confirm  Esc::close",
+            Style::new().fg(theme::semantic().status.warning),
         )]));
     } else {
         lines.push(Line::from(vec![Span::styled(
-            "  Enter/Space) Toggle  d) Delete  Esc) Close",
-            Style::new().fg(theme::MUTED),
+            "  ↑/↓::navigate  Enter::toggle  Esc::close",
+            Style::new().fg(theme::semantic().text.muted),
         )]));
     }
     lines.push(Line::from(""));
@@ -125,26 +127,26 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if jobs.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "  No cron tasks configured",
-            Style::new().fg(theme::MUTED),
+            Style::new().fg(theme::semantic().text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  Ask the agent to set up recurring tasks",
-            Style::new().fg(theme::MUTED),
+            Style::new().fg(theme::semantic().text.muted),
         )]));
     } else {
         for (i, entry) in jobs.iter().enumerate() {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::THINKING).bold()
+                Style::new().fg(theme::component().panel.title).bold()
             } else {
-                Style::new().fg(theme::TEXT)
+                Style::new().fg(theme::semantic().text.primary)
             };
             let enabled_label = if entry.enabled { "ON" } else { "OFF" };
             let enabled_style = if entry.enabled {
-                Style::new().fg(theme::SAGE)
+                Style::new().fg(theme::semantic().status.success)
             } else {
-                Style::new().fg(theme::MUTED)
+                Style::new().fg(theme::semantic().text.muted)
             };
 
             // Label line: cursor + num + schedule + [ON/OFF]
@@ -169,36 +171,26 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .collect();
             lines.push(Line::from(vec![Span::styled(
                 format!("     {}", prompt_summary),
-                Style::new().fg(theme::TEXT),
+                Style::new().fg(theme::semantic().text.primary),
             )]));
 
             // Next fire timestamp (if available)
             if let Some(next) = entry.next_fire {
                 lines.push(Line::from(vec![Span::styled(
                     format!("     next: {}", next.format("%Y-%m-%d %H:%M")),
-                    Style::new().fg(theme::MUTED),
+                    Style::new().fg(theme::semantic().text.muted),
                 )]));
             }
         }
     }
 
     let content = if lines.is_empty() {
-        Paragraph::new(Line::from("  (empty)").fg(theme::MUTED))
+        Paragraph::new(Line::from("  (empty)").fg(theme::semantic().text.muted))
     } else {
         Paragraph::new(ratatui::text::Text::from(lines))
     };
 
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Cron ")
-                .fg(theme::THINKING)
-                .bold()
-                .centered(),
-            width: Constraint::Length(52),
-            height: Constraint::Length(14),
-        ) {
+    panel_shell!(PanelKind::Cron, {
             ScrollView(
                 scroll_bars: ScrollBars::default(),
                 width: Constraint::Fill(1),
@@ -206,8 +198,7 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ) {
                 Text(text: content)
             }
-        }
-    )
+    })
 }
 
 /// H1g：toggle cron 任务启用状态。service_snapshot 下次 tick 自动刷新 UI（≤2s）。

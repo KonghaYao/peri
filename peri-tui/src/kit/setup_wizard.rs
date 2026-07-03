@@ -25,12 +25,14 @@ use ratatui_kit::{
         layout::{Alignment, Constraint, Direction},
         style::{Style, Stylize},
         text::{Line, Span},
-        widgets::Paragraph,
+        widgets::{Borders, Paragraph},
     },
 };
 
 #[component]
 pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let semantic = theme::semantic();
+    let component = theme::component();
     // 订阅 WIZARD_ACTIVE 以便 Esc 关闭后重渲染（虽然 app_shell 也会切走）
     let wizard_active = hooks.use_atom(&atoms::WIZARD_ACTIVE);
     let _ = *wizard_active.read();
@@ -51,8 +53,8 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
 
         match key.code {
-            // Esc / q / Enter / Space：关闭 wizard，进入主界面
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter | KeyCode::Char(' ') => {
+            // Esc / Enter / Space：关闭 wizard，进入主界面
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
                 *atoms::WIZARD_ACTIVE.state().write() = false;
                 EventResult::Consumed
             }
@@ -66,25 +68,25 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let status_line = if has_provider {
         vec![Line::from(vec![
-            Span::styled("● ", Style::new().fg(theme::SAGE).bold()),
+            Span::styled("✅ ", Style::new().fg(semantic.status.success).bold()),
             Span::styled(
                 format!("Provider: {} ({})", provider_name, model_alias),
-                Style::new().fg(theme::SAGE),
+                Style::new().fg(semantic.status.success),
             ),
         ])]
     } else {
         vec![
             Line::from(vec![
-                Span::styled("● ", Style::new().fg(theme::ERROR).bold()),
+                Span::styled("⚠ ", Style::new().fg(semantic.status.error).bold()),
                 Span::styled(
-                    "未配置 Provider — Agent 功能不可用",
-                    Style::new().fg(theme::ERROR).bold(),
+                    "未配置 Provider · Agent 功能暂不可用",
+                    Style::new().fg(semantic.status.error).bold(),
                 ),
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                "要配置 Provider，请选择以下任一方式：",
-                Style::new().fg(theme::TEXT),
+                "可通过以下任一方式完成配置：",
+                Style::new().fg(semantic.text.primary),
             )),
         ]
     };
@@ -93,36 +95,39 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         vec![
             Line::from(""),
             Line::from(Span::styled(
-                "按 Enter / q / Esc 关闭向导，进入主界面",
-                Style::new().fg(theme::DIM),
+                "Enter::close · Esc::close",
+                Style::new().fg(semantic.text.dim),
             )),
         ]
     } else {
         vec![
             Line::from(""),
             Line::from(vec![
-                Span::styled("  1. ", Style::new().fg(theme::ACCENT).bold()),
+                Span::styled("  1. ", Style::new().fg(semantic.border.active).bold()),
                 Span::styled(
                     "进入主界面后打开 Login 页面配置 API Key",
-                    Style::new().fg(theme::TEXT),
+                    Style::new().fg(semantic.text.primary),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  2. ", Style::new().fg(theme::ACCENT).bold()),
+                Span::styled("  2. ", Style::new().fg(semantic.border.active).bold()),
                 Span::styled(
                     "或打开 Settings 页面调整 Provider 配置",
-                    Style::new().fg(theme::TEXT),
+                    Style::new().fg(semantic.text.primary),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  3. ", Style::new().fg(theme::ACCENT).bold()),
-                Span::styled("或手动编辑 ", Style::new().fg(theme::TEXT)),
-                Span::styled(home_dir.clone(), Style::new().fg(theme::ACCENT).italic()),
+                Span::styled("  3. ", Style::new().fg(semantic.border.active).bold()),
+                Span::styled("或手动编辑 ", Style::new().fg(semantic.text.primary)),
+                Span::styled(
+                    home_dir.clone(),
+                    Style::new().fg(semantic.border.active).italic(),
+                ),
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                "按 Enter / q / Esc 跳过向导，进入主界面",
-                Style::new().fg(theme::DIM),
+                "Enter::skip · Esc::close",
+                Style::new().fg(semantic.text.dim),
             )),
         ]
     };
@@ -142,8 +147,12 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 View(width: Constraint::Fill(1), height: Constraint::Length(16)) {}
                 Border(
                     flex_direction: Direction::Vertical,
-                    border_style: Style::new().fg(theme::BORDER),
-                    top_title: Line::from(" Setup Wizard ").fg(theme::THINKING).bold().centered(),
+                    border_style: Style::new().fg(semantic.border.default),
+                    top_title: Line::from(" Setup Wizard ")
+                        .fg(component.message.reasoning)
+                        .bold()
+                        .centered(),
+                    borders: Borders::TOP | Borders::BOTTOM,
                     width: Constraint::Length(72),
                     height: Constraint::Length(16),
                 ) {
@@ -151,7 +160,7 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         Line::from(""),
                         Line::from(Span::styled(
                             "欢迎使用 Peri TUI",
-                            Style::new().fg(theme::TEXT).bold(),
+                            Style::new().fg(semantic.text.primary).bold(),
                         )).alignment(Alignment::Center),
                         Line::from(""),
                     ].into_iter().chain(status_line.into_iter()).chain(hint_lines.into_iter()).collect::<Vec<Line<'static>>>())

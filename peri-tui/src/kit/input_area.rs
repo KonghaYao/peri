@@ -16,7 +16,7 @@ use ratatui_kit::{
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
-        style::{Color, Modifier, Style},
+        style::{Modifier, Style},
         text::{Line, Span},
         widgets::{Block, Borders, Paragraph},
     },
@@ -24,35 +24,16 @@ use ratatui_kit::{
 use std::sync::{Arc, Mutex};
 
 use crate::kit::atoms::{
-    ACP_STATE, AT_MENTION_ACTIVE, FILE_LIST, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, MENTION_PREFIX,
-    MENTION_SELECTED_INDEX, SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX,
+    ACP_STATE, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST, INPUT_AREA_ESC_PREFIX,
+    INPUT_BUFFER, MENTION_PREFIX, MENTION_SELECTED_INDEX, SLASH_HINT_ACTIVE, SLASH_PREFIX,
+    SLASH_SELECTED_INDEX, SUBMIT_TX,
 };
+use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history};
 use crate::kit::mention_popup::MentionPopup;
-use crate::kit::panel_registry::{
-    PANELS, open_panel, panel_for_slash_command, slash_command_for_panel,
-};
+use crate::kit::panel_registry::{PANELS, open_panel, panel_for_slash_command};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
 use crate::kit::theme;
-
-/// 静态 slash 命令列表——补全提示用。
-///
-/// 设计原则：所有可能的命令（ACP server 内置 + 历史保留）都列出，让用户能
-/// 看到 discoverability。命令实际执行逻辑在 ACP server 端或后续 RPC 调用。
-///
-/// 分类（仅注释，UI 不分组）：
-/// - **ACP server 内置**：/bg /clear /compact /rewind
-/// - **会话控制**：/help /quit /init /resume /continue /bug
-/// - **配置类**：/mode /yolo /model /login /permissions
-/// - **状态查看**：/cost /context /status
-/// - **面板入口**：/agents /threads /mcp /cron /tasks /memory /hooks /config /plugins /lsp
-/// - **子 Agent / 技能**：/subagent /workflow /skill
-const REMOTE_SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("bg", "Run the next prompt as a background task"),
-    ("clear", "Clear current thread messages"),
-    ("compact", "Compact conversation context"),
-    ("rewind", "Delete the most recent user turn"),
-];
 
 /// 输入状态
 #[derive(Clone, Default)]
@@ -321,6 +302,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         EventPriority::Normal,
         move |event| match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if !input_accepts_key(&key) {
+                    return EventResult::Ignored;
+                }
                 let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                 let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
                 let is_alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -592,11 +576,16 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     )
 }
 
+fn input_tokens() -> &'static theme::InputTokens {
+    &theme::component().input
+}
+
 fn build_composer_block(loading: bool) -> Block<'static> {
+    let tokens = input_tokens();
     let border_color = if loading {
-        theme::MUTED
+        tokens.border_loading
     } else {
-        theme::BORDER_ACTIVE
+        tokens.border
     };
 
     Block::default()
@@ -605,9 +594,14 @@ fn build_composer_block(loading: bool) -> Block<'static> {
 }
 
 fn build_composer_lines(editor_lines: Vec<Line<'static>>, loading: bool) -> Vec<Line<'static>> {
+    let tokens = input_tokens();
     let mut lines = Vec::with_capacity(editor_lines.len().max(1));
     let prompt_style = Style::default()
-        .fg(if loading { theme::MUTED } else { theme::ACCENT })
+        .fg(if loading {
+            tokens.prompt_loading
+        } else {
+            tokens.prompt
+        })
         .add_modifier(Modifier::BOLD);
 
     if editor_lines.is_empty() {
@@ -623,7 +617,10 @@ fn build_composer_lines(editor_lines: Vec<Line<'static>>, loading: bool) -> Vec<
         if index == 0 {
             spans.push(Span::styled(" ❯ ", prompt_style));
         } else {
-            spans.push(Span::styled("   ", Style::default().fg(theme::DIM)));
+            spans.push(Span::styled(
+                "   ",
+                Style::default().fg(tokens.continuation),
+            ));
         }
         spans.extend(line.spans);
         lines.push(Line::from(spans));
@@ -633,7 +630,7 @@ fn build_composer_lines(editor_lines: Vec<Line<'static>>, loading: bool) -> Vec<
 }
 
 fn popup_height(item_count: usize) -> u16 {
-    (item_count.max(1) + 2).min(10) as u16
+    (item_count.max(1) as u16 + 2).min(theme::component().popup.inline_height)
 }
 
 fn submit_text(submitted: String) {
@@ -687,9 +684,10 @@ fn apply_slash_selection(state: &mut EditorState, cmd: &str) {
 }
 
 fn build_slash_items() -> Vec<SlashCompletionItem> {
-    let mut items = Vec::with_capacity(PANELS.len() + REMOTE_SLASH_COMMANDS.len());
+    let remote = AVAILABLE_SLASH_COMMANDS.state().read().clone();
+    let mut items = Vec::with_capacity(PANELS.len() + remote.len());
     for panel in PANELS {
-        let slash_name = slash_command_for_panel(panel.kind).into_owned();
+        let slash_name = panel.slash_command.to_string();
         items.push(SlashCompletionItem {
             label: slash_name.clone(),
             insert_text: slash_name,
@@ -697,11 +695,11 @@ fn build_slash_items() -> Vec<SlashCompletionItem> {
             kind: SlashActionKind::Panel,
         });
     }
-    for (name, description) in REMOTE_SLASH_COMMANDS {
+    for (name, description) in &remote {
         items.push(SlashCompletionItem {
-            label: (*name).to_string(),
-            insert_text: (*name).to_string(),
-            description: (*description).to_string(),
+            label: name.clone(),
+            insert_text: name.clone(),
+            description: description.clone(),
             kind: SlashActionKind::Command,
         });
     }
@@ -769,9 +767,10 @@ fn update_popup_prefix(text: &str) {
 /// 现改为以光标行为中心，仅渲染 MAX_RENDER_LINES 行（与 editor_height 上限一致），
 /// 渲染成本由 O(总行数) 降为 O(12)。光标始终落在渲染窗口内。
 fn render_multiline_with_cursor(text: &str, cursor: usize, loading: bool) -> Vec<Line<'static>> {
+    let tokens = input_tokens();
     let cursor_style = Style::default()
-        .fg(Color::Rgb(0, 0, 0))
-        .bg(theme::TEXT)
+        .fg(tokens.cursor_fg)
+        .bg(tokens.cursor_bg)
         .add_modifier(Modifier::BOLD);
 
     // I22-B：渲染窗口上限。editor_height 最大 12，所以渲染 >12 行是浪费。

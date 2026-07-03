@@ -5,13 +5,15 @@
 //! 说明如何使用外部工具，并提供当前会话内可观察的 workflow hint（来自
 //! VIEW_MODELS 中的 SubAgentGroup 计数）。
 
+use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::VIEW_MODELS;
+use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
+        layout::Constraint,
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -53,14 +55,14 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => close_panel(),
-                KeyCode::Up | KeyCode::Char('k') => {
-                    *cursor.write() = cursor.read().saturating_sub(1);
+                KeyCode::Esc => close_panel(),
+                KeyCode::Up => {
+                    *cursor.write() = previous_selection(*cursor.read());
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down => {
                     let mut c = cursor.write();
                     if count > 0 {
-                        *c = (*c + 1).min(count - 1);
+                        *c = next_selection(*c, count);
                     }
                 }
                 _ => {}
@@ -74,11 +76,11 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     lines.push(Line::from(vec![Span::styled(
         "  Workflow Engine",
-        Style::new().fg(theme::TEXT).bold(),
+        Style::new().fg(theme::semantic().text.primary).bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
         "  Multi-agent orchestration via @peri-workflow CLI",
-        Style::new().fg(theme::MUTED).italic(),
+        Style::new().fg(theme::semantic().text.muted).italic(),
     )]));
     lines.push(Line::from(""));
 
@@ -86,20 +88,20 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let is_selected = i == sel;
         let cursor_mark = if is_selected { ">" } else { " " };
         let label_style = if is_selected {
-            Style::new().fg(theme::THINKING).bold()
+            Style::new().fg(theme::component().panel.title).bold()
         } else {
-            Style::new().fg(theme::MUTED)
+            Style::new().fg(theme::semantic().text.muted)
         };
         let value_style = if is_selected {
-            Style::new().fg(theme::TEXT).bold()
+            Style::new().fg(theme::semantic().text.primary).bold()
         } else {
-            Style::new().fg(theme::TEXT)
+            Style::new().fg(theme::semantic().text.primary)
         };
 
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {} ", cursor_mark),
-                Style::new().fg(theme::THINKING),
+                Style::new().fg(theme::component().panel.title),
             ),
             Span::styled(format!("{:<26}", format!("{}:", label)), label_style),
             Span::styled(value.chars().take(60).collect::<String>(), value_style),
@@ -109,28 +111,20 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
         "  Workflows are spawned from agent prompts;",
-        Style::new().fg(theme::DIM),
+        Style::new().fg(theme::semantic().text.dim),
     )]));
     lines.push(Line::from(vec![Span::styled(
         "  progress surfaces here as SubAgent groups in the message stream.",
-        Style::new().fg(theme::DIM),
+        Style::new().fg(theme::semantic().text.dim),
     )]));
     lines.push(Line::from(""));
-    lines.push(Line::from("  j/k) Navigate  Esc) Close").fg(theme::DIM));
+    lines.push(
+        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme::semantic().text.dim),
+    );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Workflow ")
-                .fg(theme::THINKING)
-                .bold()
-                .centered(),
-            width: Constraint::Length(80),
-            height: Constraint::Length(16),
-        ) {
+    panel_shell!(PanelKind::Workflow, {
             ScrollView(
                 scroll_bars: ScrollBars::default(),
                 width: Constraint::Fill(1),
@@ -138,8 +132,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ) {
                 Text(text: content)
             }
-        }
-    )
+    })
 }
 
 fn close_panel() {

@@ -19,13 +19,14 @@
 
 #![allow(clippy::needless_update)]
 
+use crate::kit::focus_router;
 use crate::kit::theme;
 use crate::kit::view_render;
 use crate::kit::welcome::Welcome;
 use peri_acp_types::view_model::ViewModel;
 use ratatui_kit::{
     components::scroll_view::{ScrollBars, ScrollView, ScrollViewState},
-    crossterm::event::{Event, MouseEventKind},
+    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
@@ -83,9 +84,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // 加载指示器
     if props.loading {
+        let semantic = theme::semantic();
         all_lines.push(Line::from(vec![Span::styled(
-            "● Thinking...",
-            Style::default().fg(theme::LOADING),
+            "🧠 思考中…",
+            Style::default().fg(semantic.status.running),
         )]));
     }
 
@@ -102,32 +104,65 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         Some(Paragraph::new(all_lines))
     };
 
-    // 消息区只吃鼠标滚轮；键盘 Up/Down/Home/End 全部留给 InputArea。
-    // 滚轮事件依赖 entry.rs 显式 EnableMouseCapture，不能再用 KeyCode::Up/Down 模拟。
+    // 消息区只吃鼠标滚轮；普通 Up/Down/Home/End 全部留给 InputArea。
+    // Ctrl+ 导航键用于驱动消息区滚动，保持输入区多行/历史行为不变。
     let scroll_state = hooks.use_state(ScrollViewState::default);
 
-    hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
-        let Event::Mouse(mouse) = event else {
-            return EventResult::Ignored;
-        };
-        tracing::info!(?mouse, "message area mouse event");
-        match mouse.kind {
-            MouseEventKind::ScrollUp
-            | MouseEventKind::ScrollDown
-            | MouseEventKind::ScrollLeft
-            | MouseEventKind::ScrollRight => {
-                let before = scroll_state.read().offset();
-                {
-                    let mut state = scroll_state.write();
-                    state.handle_event(&Event::Mouse(mouse));
+    hooks.use_event_handler(
+        EventScope::Global,
+        EventPriority::High,
+        move |event| match event {
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                let _ = focus_router::message_accepts_key(&key);
+                let key_event = Event::Key(key);
+                match key.code {
+                    KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End => {
+                        let before = scroll_state.read().offset();
+                        {
+                            let mut state = scroll_state.write();
+                            state.handle_event(&key_event);
+                        }
+                        let after = scroll_state.read().offset();
+                        tracing::info!(
+                            ?before,
+                            ?after,
+                            ?key,
+                            "message area handled ctrl key scroll"
+                        );
+                        EventResult::Consumed
+                    }
+                    _ => EventResult::Ignored,
                 }
-                let after = scroll_state.read().offset();
-                tracing::info!(?before, ?after, "message area handled mouse scroll");
-                EventResult::Consumed
+            }
+            Event::Mouse(mouse) => {
+                tracing::info!(?mouse, "message area mouse event");
+                match mouse.kind {
+                    MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight => {
+                        let before = scroll_state.read().offset();
+                        {
+                            let mut state = scroll_state.write();
+                            state.handle_event(&Event::Mouse(mouse));
+                        }
+                        let after = scroll_state.read().offset();
+                        tracing::info!(?before, ?after, "message area handled mouse scroll");
+                        EventResult::Consumed
+                    }
+                    _ => EventResult::Ignored,
+                }
+            }
+            Event::Key(key) => {
+                let _ = focus_router::message_accepts_key(&key);
+                EventResult::Ignored
             }
             _ => EventResult::Ignored,
-        }
-    });
+        },
+    );
 
     element!(
         ScrollView(

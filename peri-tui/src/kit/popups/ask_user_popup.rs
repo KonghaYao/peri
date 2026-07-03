@@ -20,14 +20,16 @@ use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
         style::{Style, Stylize},
         text::Line,
-        widgets::Paragraph,
     },
 };
 
 use crate::kit::atoms::ASK_USER_PENDING;
+use crate::kit::list_nav::{
+    ListNavAction, classify_list_nav, cycle_next, cycle_previous, next_selection,
+    previous_selection,
+};
 use crate::kit::popup_overlay::close_popup;
 use crate::kit::theme;
 
@@ -71,52 +73,54 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             return EventResult::Ignored;
         }
 
-        match (key.modifiers, key.code) {
-            (KeyModifiers::NONE, KeyCode::Up) => {
+        match classify_list_nav(&key) {
+            Some(ListNavAction::MoveUp) => {
                 let mut f = focused.write();
-                *f = f.saturating_sub(1);
+                *f = previous_selection(*f);
                 EventResult::Consumed
             }
-            (KeyModifiers::NONE, KeyCode::Down) if question_count > 0 => {
+            Some(ListNavAction::MoveDown) if question_count > 0 => {
                 let mut f = focused.write();
-                *f = (*f + 1).min(question_count - 1);
+                *f = next_selection(*f, question_count);
                 EventResult::Consumed
             }
-            (KeyModifiers::NONE, KeyCode::Tab) if question_count > 0 => {
+            Some(ListNavAction::CycleForward) if question_count > 0 => {
                 let mut f = focused.write();
-                *f = (*f + 1) % question_count;
+                *f = cycle_next(*f, question_count);
                 EventResult::Consumed
             }
-            (KeyModifiers::SHIFT, KeyCode::BackTab) | (KeyModifiers::NONE, KeyCode::BackTab)
-                if question_count > 0 =>
-            {
+            Some(ListNavAction::CycleBackward) if question_count > 0 => {
                 let mut f = focused.write();
-                *f = f.checked_sub(1).unwrap_or(question_count - 1);
+                *f = cycle_previous(*f, question_count);
                 EventResult::Consumed
             }
-            (KeyModifiers::NONE, KeyCode::Char(c)) if c.is_ascii_digit() => {
-                let idx = *focused.read();
-                let digit = (c as u8 - b'1') as usize;
-                let mut a = answers.write();
-                if let Some(questions) = pending_for_closure.as_ref().map(|p| &p.questions)
-                    && let Some(q) = questions.get(idx)
-                    && digit < q.options.len()
-                {
-                    if idx >= a.len() {
-                        a.resize(idx + 1, None);
-                    }
-                    a[idx] = Some(digit);
-                }
-                EventResult::Consumed
-            }
-            (KeyModifiers::NONE, KeyCode::Enter) => {
+            Some(ListNavAction::Confirm) => {
                 close_popup();
                 EventResult::Consumed
             }
-            _ => EventResult::Ignored,
+            _ => match (key.modifiers, key.code) {
+                (KeyModifiers::NONE, KeyCode::Char(c)) if c.is_ascii_digit() => {
+                    let idx = *focused.read();
+                    let digit = (c as u8 - b'1') as usize;
+                    let mut a = answers.write();
+                    if let Some(questions) = pending_for_closure.as_ref().map(|p| &p.questions)
+                        && let Some(q) = questions.get(idx)
+                        && digit < q.options.len()
+                    {
+                        if idx >= a.len() {
+                            a.resize(idx + 1, None);
+                        }
+                        a[idx] = Some(digit);
+                    }
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            },
         }
     });
 
+    let popup_tokens = &theme::component().popup;
+    let semantic = theme::semantic();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     match &pending {
@@ -125,19 +129,20 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(""));
             lines.push(
                 Line::from("  No pending questions.")
-                    .fg(theme::MUTED)
+                    .fg(semantic.text.muted)
                     .italic(),
             );
             lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(theme::DIM));
+            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
         }
         Some(au) if au.questions.is_empty() => {
             lines.push(Line::from(""));
             lines.push(
-                Line::from("  Agent asked 0 questions (malformed request).").fg(theme::WARNING),
+                Line::from("  Agent asked 0 questions (malformed request).")
+                    .fg(semantic.status.warning),
             );
             lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(theme::DIM));
+            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
         }
         Some(au) => {
             let focused_idx = (*focused.read()).min(au.questions.len() - 1);
@@ -153,6 +158,8 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     q,
                     is_focused,
                     answers_read.get(i).copied().flatten(),
+                    popup_tokens,
+                    semantic,
                 );
                 lines.push(Line::from(""));
             }
@@ -161,24 +168,12 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Line::from(
                     "  ↑↓: navigate  |  1-9: select option  |  Enter: submit  |  Esc: cancel",
                 )
-                .fg(theme::DIM),
+                .fg(semantic.text.dim),
             );
         }
     }
 
-    let text_render = Paragraph::new(ratatui::text::Text::from(lines));
-
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Question ").fg(theme::THINKING).bold().centered(),
-            width: Constraint::Length(60),
-            height: Constraint::Length(18),
-        ) {
-            Text(text: text_render)
-        }
-    )
+    popup_text_shell!(" Question ", popup_tokens.action_primary, lines)
 }
 
 /// 渲染单个问题——header + question + 选项列表 + 当前选中标记
@@ -188,19 +183,22 @@ fn render_question(
     q: &Question,
     is_focused: bool,
     selected: Option<usize>,
+    popup_tokens: &theme::PopupTokens,
+    semantic: &theme::SemanticTokens,
 ) {
     // 问题 header 行（如 "Module Name"）
     let header_marker = if is_focused { "▶" } else { " " };
     lines.push(if is_focused {
         Line::from(format!("{} Q{}: {}", header_marker, idx + 1, q.header))
-            .fg(theme::THINKING)
+            .fg(popup_tokens.selected_fg)
             .bold()
     } else {
-        Line::from(format!("{} Q{}: {}", header_marker, idx + 1, q.header)).fg(theme::TEXT)
+        Line::from(format!("{} Q{}: {}", header_marker, idx + 1, q.header))
+            .fg(semantic.text.primary)
     });
 
     // 问题正文
-    lines.push(Line::from(format!("    {}", q.question)).fg(theme::MUTED));
+    lines.push(Line::from(format!("    {}", q.question)).fg(semantic.text.muted));
 
     // 选项列表
     for (opt_i, opt) in q.options.iter().enumerate() {
@@ -213,9 +211,9 @@ fn render_question(
         };
 
         let style = if is_selected {
-            Style::new().fg(theme::SAGE).bold()
+            Style::new().fg(popup_tokens.action_primary).bold()
         } else {
-            Style::new().fg(theme::TEXT)
+            Style::new().fg(semantic.text.primary)
         };
 
         let line = format!("    {}) {} {}", key_hint, check, opt.label);
@@ -223,7 +221,7 @@ fn render_question(
 
         // 选项描述（如有，次行展示）
         if !opt.description.is_empty() {
-            lines.push(Line::from(format!("        {}", opt.description)).fg(theme::DIM));
+            lines.push(Line::from(format!("        {}", opt.description)).fg(semantic.text.dim));
         }
     }
 
@@ -231,14 +229,14 @@ fn render_question(
     if q.multi_select && !q.options.is_empty() {
         lines.push(
             Line::from("    (multi-select not yet supported — treated as single)")
-                .fg(theme::DIM)
+                .fg(semantic.text.dim)
                 .italic(),
         );
     }
 
     // 当前未选任何项的提示
     if q.options.is_empty() {
-        lines.push(Line::from("    (no options provided)").fg(theme::DIM));
+        lines.push(Line::from("    (no options provided)").fg(semantic.text.dim));
     }
 }
 

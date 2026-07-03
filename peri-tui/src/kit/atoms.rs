@@ -226,6 +226,11 @@ pub static CRON_SCHEDULER_HANDLE: OnceLock<
 
 pub static ACP_COMMANDS: AtomStatic<Vec<String>> = AtomStatic::new(|| Vec::new());
 pub static SKILL_NAMES: AtomStatic<Vec<String>> = AtomStatic::new(|| Vec::new());
+/// ACP 服务器下发的可用 slash 命令列表（含 skills）。
+/// 键 = 命令名（不含 / 前缀），值 = 描述。
+/// 由 kit notifier 在收到 `SessionUpdate::AvailableCommandsUpdate` 后写入。
+pub static AVAILABLE_SLASH_COMMANDS: AtomStatic<Vec<(String, String)>> =
+    AtomStatic::new(|| Vec::new());
 pub static WIZARD_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static PREDICTION: AtomStatic<PredictionState> = AtomStatic::new(|| PredictionState::default());
 pub static INPUT_AREA_ESC_PREFIX: AtomStatic<bool> = AtomStatic::new(|| false);

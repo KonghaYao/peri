@@ -21,6 +21,7 @@ use tracing::{debug, warn};
 
 use crate::acp_client::AcpNotification;
 use crate::kit::acp_types::AcpEventData;
+use crate::kit::atoms::AVAILABLE_SLASH_COMMANDS;
 
 /// 启动 kit ACP notifier 后台任务。
 ///
@@ -69,9 +70,13 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventData>, n: AcpN
                 warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping event");
             }
         }
+        // kit notifier: extract AvailableCommandsUpdate from SessionUpdate
+        // and write to AVAILABLE_SLASH_COMMANDS atom for InputArea slash popup.
+        AcpNotification::SessionUpdate { params, .. } => {
+            handle_session_update(params);
+        }
         // 暂未在 kit 路径处理——S5+ 接入 DTO 事件时再扩展
         AcpNotification::AgentEvent { .. }
-        | AcpNotification::SessionUpdate { .. }
         | AcpNotification::AgentDone { .. }
         | AcpNotification::RequestPermission { .. }
         | AcpNotification::Elicitation { .. }
@@ -83,12 +88,51 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventData>, n: AcpN
     }
 }
 
+/// Extract commands from an AvailableCommandsUpdate SessionUpdate notification
+/// and write them to the AVAILABLE_SLASH_COMMANDS atom for InputArea slash completion.
+fn handle_session_update(params: serde_json::Value) {
+    // params: {"session_id": "...", "update": <SessionUpdate>}
+    // SessionUpdate uses #[serde(tag = "sessionUpdate", rename_all = "snake_case")]
+    // → AvailableCommandsUpdate serializes as:
+    //   {"sessionUpdate": "available_commands_update", "availableCommands": [...]}
+    let update = match params.get("update") {
+        Some(u) => u,
+        None => return,
+    };
+    // Discriminate: check the tag field, not a container key
+    if update.get("sessionUpdate").and_then(|v| v.as_str()) != Some("available_commands_update") {
+        return;
+    }
+    let cmds = match update.get("availableCommands").and_then(|v| v.as_array()) {
+        Some(c) => c,
+        None => return,
+    };
+    let entries: Vec<(String, String)> = cmds
+        .iter()
+        .filter_map(|cmd| {
+            let name = cmd.get("name")?.as_str()?;
+            let desc = cmd
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Some((name.to_string(), desc.to_string()))
+        })
+        .collect();
+    let len = entries.len();
+    *AVAILABLE_SLASH_COMMANDS.state().write() = entries;
+    debug!(
+        "kit ACP notifier: updated AVAILABLE_SLASH_COMMANDS ({})",
+        len
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use peri_acp::event::AcpEvent;
     use peri_acp_types::event_data::TextChunk;
     use serde_json::json;
+    use serial_test::serial;
 
     fn spawn_test_notifier() -> (
         mpsc::UnboundedSender<AcpNotification>,
@@ -186,6 +230,56 @@ mod tests {
 
         // shutdown 仍可正常调用（任务已退出，cancel 信号无害）
         shutdown.cancel();
+    }
+
+    /// 验证 handle_session_update 能正确解析 ACP SessionUpdate 的 JSON 格式。
+    /// SessionUpdate 使用 #[serde(tag = "sessionUpdate")] 内部标签，字段名 camelCase。
+    #[test]
+    #[serial]
+    fn test_handle_session_update_parses_available_commands() {
+        crate::kit::atoms::init_atoms();
+        let payload = json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": [
+                    {"name": "help", "description": "Show help"},
+                    {"name": "clear", "description": "Clear conversation"},
+                    {"name": "archify", "description": "Create architecture diagrams"}
+                ]
+            }
+        });
+        handle_session_update(payload);
+        let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0], ("help".to_string(), "Show help".to_string()));
+        assert_eq!(
+            entries[2],
+            (
+                "archify".to_string(),
+                "Create architecture diagrams".to_string()
+            )
+        );
+    }
+
+    /// 验证非 available_commands_update 的 session/update 不会错误写入 atom。
+    #[test]
+    #[serial]
+    fn test_handle_session_update_skips_non_command_update() {
+        crate::kit::atoms::init_atoms();
+        // 重置 atom 状态，避免跨测试污染
+        *AVAILABLE_SLASH_COMMANDS.state().write() = Vec::new();
+        let payload = json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "used": 1000,
+                "total": 200000
+            }
+        });
+        handle_session_update(payload);
+        let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
+        assert_eq!(entries.len(), 0, "非 commands update 不应写入 atom");
     }
 
     /// 编译期类型断言：TextChunk 仍可从 peri-acp-types 引用——确保 S3 与 v2 event_data

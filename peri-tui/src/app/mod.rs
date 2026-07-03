@@ -10,7 +10,7 @@ pub use agent::LlmProvider;
 
 // ── UI Interaction ────────────────────────────────────────────────────────────
 pub mod panel_types;
-pub use panel_types::{MutexGroup, PanelKind, PanelScope};
+pub use panel_types::PanelKind;
 
 pub mod setup_wizard;
 

@@ -8,13 +8,16 @@ use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
+        layout::Constraint,
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
     },
 };
 
+use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{THREAD_LIST, THREAD_LOAD_TX, ThreadSummary};
+use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 
 #[component]
@@ -37,17 +40,17 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
+                KeyCode::Esc => {
                     // 由 PanelOverlay 上层 Esc 处理关闭
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Up => {
                     let mut c = cursor.write();
-                    *c = c.saturating_sub(1);
+                    *c = previous_selection(*c);
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down => {
                     let mut c = cursor.write();
                     if count > 0 {
-                        *c = (*c + 1).min(count - 1);
+                        *c = next_selection(*c, count);
                     }
                 }
                 KeyCode::Enter => {
@@ -74,16 +77,16 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if threads.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "  No threads",
-            Style::new().fg(theme::MUTED),
+            Style::new().fg(theme::semantic().text.muted),
         )]));
     } else {
         for (i, entry) in threads.iter().enumerate() {
             let is_selected = i == sel;
             let cursor_marker = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::THINKING).bold()
+                Style::new().fg(theme::component().panel.title).bold()
             } else {
-                Style::new().fg(theme::TEXT)
+                Style::new().fg(theme::semantic().text.primary)
             };
 
             let id_short: String = entry.id.chars().take(8.min(entry.id.len())).collect();
@@ -108,14 +111,14 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     "    {}  {}  {} messages",
                     entry.id, updated, entry.message_count,
                 ),
-                Style::new().fg(theme::MUTED),
+                Style::new().fg(theme::semantic().text.muted),
             )]));
 
             // Line 3: cwd (truncated for narrow viewports)
             let cwd: String = entry.cwd.chars().take(54).collect();
             lines.push(Line::from(vec![Span::styled(
                 format!("    {}", cwd),
-                Style::new().fg(theme::DIM),
+                Style::new().fg(theme::semantic().text.dim),
             )]));
 
             // Blank separator line
@@ -125,34 +128,22 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Bottom hint line
     lines.push(Line::from(vec![Span::styled(
-        "  j/k) Navigate  Enter) Switch  q) Close",
-        Style::new().fg(theme::MUTED),
+        "  ↑/↓::navigate Enter::switch · Esc::close",
+        Style::new().fg(theme::semantic().text.muted),
     )]));
 
     let content = if threads.is_empty() {
-        Paragraph::new(Line::from("  (empty)").fg(theme::MUTED))
+        Paragraph::new(Line::from("  (empty)").fg(theme::semantic().text.muted))
     } else {
         Paragraph::new(ratatui::text::Text::from(lines))
     };
-
-    element!(
-        Border(
-            flex_direction: ratatui_kit::ratatui::layout::Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Threads ")
-                .fg(theme::THINKING)
-                .bold()
-                .centered(),
-            width: ratatui_kit::ratatui::layout::Constraint::Length(60),
-            height: ratatui_kit::ratatui::layout::Constraint::Length(18),
-        ) {
+    panel_shell!(PanelKind::ThreadBrowser, {
             ScrollView(
                 scroll_bars: ScrollBars::default(),
-                width: ratatui_kit::ratatui::layout::Constraint::Fill(1),
-                height: ratatui_kit::ratatui::layout::Constraint::Fill(1),
+                width: Constraint::Fill(1),
+                height: Constraint::Fill(1),
             ) {
                 Text(text: content)
             }
-        }
-    )
+    })
 }

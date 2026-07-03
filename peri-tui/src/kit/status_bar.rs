@@ -49,21 +49,21 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     spans.push(separator());
     spans.push(Span::styled(
         cwd_basename(&snap.cwd),
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(statusbar().muted),
     ));
 
     // 3. provider/model
     spans.push(separator());
     if !snap.provider_name.is_empty() {
-        let mut style = Style::default().fg(theme::MUTED);
+        let mut style = Style::default().fg(statusbar().muted);
         if provider_highlighted {
             style = style.add_modifier(Modifier::BOLD);
         }
         spans.push(Span::styled(format!(" {}", snap.provider_name), style));
-        spans.push(Span::styled("/", Style::default().fg(theme::DIM)));
+        spans.push(Span::styled("/", Style::default().fg(statusbar().dim)));
     }
     if !snap.model_alias.is_empty() {
-        let mut style = Style::default().fg(theme::TEXT);
+        let mut style = Style::default().fg(statusbar().text);
         if model_highlighted {
             style = style.add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK);
         }
@@ -111,12 +111,12 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let is_slash = *slash_active.read();
 
     let hints = if is_popup {
-        Line::from(" Esc: close | Enter: confirm ").fg(theme::MUTED)
+        Line::from(" Esc: close | Enter: confirm ").fg(statusbar().muted)
     } else if is_at || is_slash {
-        Line::from(" Esc: close | Tab: navigate | Enter: select ").fg(theme::MUTED)
+        Line::from(" Esc: close | Tab: navigate | Enter: select ").fg(statusbar().muted)
     } else {
         Line::from(" /: commands | Shift+Enter: newline | Ctrl+K: mode | Ctrl+O: diff ")
-            .fg(theme::MUTED)
+            .fg(statusbar().muted)
     };
 
     element!(
@@ -149,8 +149,12 @@ pub fn StatusBar(_hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────
 
+fn statusbar() -> &'static theme::StatusBarTokens {
+    &theme::component().statusbar
+}
+
 fn separator() -> Span<'static> {
-    Span::styled(" · ", Style::default().fg(theme::MUTED))
+    Span::styled(" · ", Style::default().fg(statusbar().muted))
 }
 
 /// 把 atom 中的 permission_mode 字符串映射为显示标签。
@@ -166,10 +170,10 @@ fn permission_mode_display(mode: &str) -> &'static str {
 
 fn permission_mode_color(mode: &str) -> ratatui::style::Color {
     match mode {
-        "accept-edit" => theme::THINKING,
-        "auto-mode" => theme::WARNING,
-        "bypass" => theme::ERROR,
-        _ => theme::TEXT,
+        "accept-edit" => statusbar().mode_accept_edit,
+        "auto-mode" => statusbar().mode_auto,
+        "bypass" => statusbar().mode_bypass,
+        _ => statusbar().text,
     }
 }
 
@@ -185,22 +189,22 @@ fn cwd_basename(cwd: &str) -> String {
 /// 通用阈值染色：>= high → ERROR，>= low → WARNING，else SAGE。
 fn resource_color_by_load(value: f64, low: f64, high: f64) -> ratatui::style::Color {
     if value >= high {
-        theme::ERROR
+        statusbar().resource_bad
     } else if value >= low {
-        theme::WARNING
+        statusbar().resource_warn
     } else {
-        theme::SAGE
+        statusbar().resource_good
     }
 }
 
 /// MEM 染色：>1024 ERROR，>512 WARNING，else SAGE（与 legacy status_bar 一致）。
 fn memory_color(mem_mb: u64) -> ratatui::style::Color {
     if mem_mb > 1024 {
-        theme::ERROR
+        statusbar().resource_bad
     } else if mem_mb > 512 {
-        theme::WARNING
+        statusbar().resource_warn
     } else {
-        theme::SAGE
+        statusbar().resource_good
     }
 }
 
@@ -220,9 +224,12 @@ mod tests {
 
     #[test]
     fn test_permission_mode_color() {
-        assert_eq!(permission_mode_color("accept-edit"), theme::THINKING);
-        assert_eq!(permission_mode_color("auto-mode"), theme::WARNING);
-        assert_eq!(permission_mode_color("bypass"), theme::ERROR);
+        assert_eq!(
+            permission_mode_color("accept-edit"),
+            statusbar().mode_accept_edit
+        );
+        assert_eq!(permission_mode_color("auto-mode"), statusbar().mode_auto);
+        assert_eq!(permission_mode_color("bypass"), statusbar().mode_bypass);
     }
 
     #[test]
@@ -239,20 +246,32 @@ mod tests {
 
     #[test]
     fn test_memory_color_thresholds() {
-        assert_eq!(memory_color(100), theme::SAGE);
-        assert_eq!(memory_color(512), theme::SAGE); // 512 不算超阈值
-        assert_eq!(memory_color(513), theme::WARNING);
-        assert_eq!(memory_color(1024), theme::WARNING); // 1024 不算超阈值
-        assert_eq!(memory_color(1025), theme::ERROR);
+        assert_eq!(memory_color(100), statusbar().resource_good);
+        assert_eq!(memory_color(512), statusbar().resource_good); // 512 不算超阈值
+        assert_eq!(memory_color(513), statusbar().resource_warn);
+        assert_eq!(memory_color(1024), statusbar().resource_warn); // 1024 不算超阈值
+        assert_eq!(memory_color(1025), statusbar().resource_bad);
     }
 
     #[test]
     fn test_resource_color_by_load() {
         // low=50, high=100
-        assert_eq!(resource_color_by_load(10.0, 50.0, 100.0), theme::SAGE);
-        assert_eq!(resource_color_by_load(50.0, 50.0, 100.0), theme::WARNING);
-        assert_eq!(resource_color_by_load(75.0, 50.0, 100.0), theme::WARNING);
-        assert_eq!(resource_color_by_load(100.0, 50.0, 100.0), theme::ERROR);
+        assert_eq!(
+            resource_color_by_load(10.0, 50.0, 100.0),
+            statusbar().resource_good
+        );
+        assert_eq!(
+            resource_color_by_load(50.0, 50.0, 100.0),
+            statusbar().resource_warn
+        );
+        assert_eq!(
+            resource_color_by_load(75.0, 50.0, 100.0),
+            statusbar().resource_warn
+        );
+        assert_eq!(
+            resource_color_by_load(100.0, 50.0, 100.0),
+            statusbar().resource_bad
+        );
     }
 
     #[test]

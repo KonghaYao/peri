@@ -5,13 +5,15 @@
 //! Enter/←→ 操作目前只更新本地 selected_tab state，**真实切换 provider/model**
 //! 需要 S11 解耦后通过 AcpClient 触发（暂留 TODO）。
 
+use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT};
+use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
+        layout::Constraint,
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -79,16 +81,16 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
+                KeyCode::Esc => {
                     // 由 PanelOverlay 上层 Esc 处理关闭
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Up => {
                     let mut c = cursor.write();
-                    *c = c.saturating_sub(1);
+                    *c = previous_selection(*c);
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down => {
                     let mut c = cursor.write();
-                    *c = (*c + 1).min(MODEL_ALIASES.len() - 1);
+                    *c = next_selection(*c, MODEL_ALIASES.len());
                 }
                 KeyCode::Enter => {
                     // H2: 通过 PERI_CONFIG_HANDLE 直接 write active_alias。
@@ -112,12 +114,12 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::Left => {
                     let mut s = selected_tab.write();
-                    *s = s.saturating_sub(1);
+                    *s = previous_selection(*s);
                     *cursor.write() = *s;
                 }
                 KeyCode::Right => {
                     let mut s = selected_tab.write();
-                    *s = (*s + 1).min(MODEL_ALIASES.len() - 1);
+                    *s = next_selection(*s, MODEL_ALIASES.len());
                     *cursor.write() = *s;
                 }
                 _ => {}
@@ -146,11 +148,17 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Header
     lines.push(Line::from(vec![Span::styled(
         "  Model Alias Selection",
-        Style::new().fg(theme::TEXT).bold(),
+        Style::new().fg(theme::semantic().text.primary).bold(),
     )]));
     lines.push(Line::from(vec![
-        Span::styled("  Provider: ", Style::new().fg(theme::MUTED)),
-        Span::styled(provider_label, Style::new().fg(theme::ACCENT).bold()),
+        Span::styled(
+            "  Provider: ",
+            Style::new().fg(theme::semantic().text.muted),
+        ),
+        Span::styled(
+            provider_label,
+            Style::new().fg(theme::semantic().border.active).bold(),
+        ),
     ]));
     lines.push(Line::from(""));
 
@@ -162,30 +170,30 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let check = if is_selected { "\u{2714}" } else { " " };
 
         let name_style = if is_selected {
-            Style::new().fg(theme::SAGE).bold()
+            Style::new().fg(theme::semantic().status.success).bold()
         } else if is_cursor {
-            Style::new().fg(theme::THINKING).bold()
+            Style::new().fg(theme::component().panel.title).bold()
         } else {
-            Style::new().fg(theme::TEXT)
+            Style::new().fg(theme::semantic().text.primary)
         };
 
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {} ", cursor_mark),
-                Style::new().fg(theme::THINKING),
+                Style::new().fg(theme::component().panel.title),
             ),
             Span::styled(format!("{:<10}", entry.name), name_style),
             Span::styled(
                 format!(" {}", check),
                 if is_selected {
-                    Style::new().fg(theme::SAGE)
+                    Style::new().fg(theme::semantic().status.success)
                 } else {
-                    Style::new().fg(theme::MUTED)
+                    Style::new().fg(theme::semantic().text.muted)
                 },
             ),
             Span::styled(
                 format!("  {}", entry.model_id),
-                Style::new().fg(theme::MUTED),
+                Style::new().fg(theme::semantic().text.muted),
             ),
         ]));
     }
@@ -195,59 +203,64 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Current selection details
     lines.push(Line::from(vec![Span::styled(
         format!("  Active: {}", active_entry.name),
-        Style::new().fg(theme::ACCENT).bold(),
+        Style::new().fg(theme::semantic().border.active).bold(),
     )]));
     lines.push(Line::from(vec![
-        Span::styled("  Model ID: ", Style::new().fg(theme::MUTED)),
-        Span::styled(active_entry.model_id, Style::new().fg(theme::TEXT)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  Effort: ", Style::new().fg(theme::MUTED)),
-        Span::styled(active_entry.effort, Style::new().fg(theme::WARNING).bold()),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  Max Tokens: ", Style::new().fg(theme::MUTED)),
         Span::styled(
-            active_entry.max_tokens.to_string(),
-            Style::new().fg(theme::TEXT),
+            "  Model ID: ",
+            Style::new().fg(theme::semantic().text.muted),
+        ),
+        Span::styled(
+            active_entry.model_id,
+            Style::new().fg(theme::semantic().text.primary),
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  1M Context: ", Style::new().fg(theme::MUTED)),
+        Span::styled("  Effort: ", Style::new().fg(theme::semantic().text.muted)),
+        Span::styled(
+            active_entry.effort,
+            Style::new().fg(theme::semantic().status.warning).bold(),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "  Max Tokens: ",
+            Style::new().fg(theme::semantic().text.muted),
+        ),
+        Span::styled(
+            active_entry.max_tokens.to_string(),
+            Style::new().fg(theme::semantic().text.primary),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "  1M Context: ",
+            Style::new().fg(theme::semantic().text.muted),
+        ),
         Span::styled(
             if active_entry.context_1m { "ON" } else { "OFF" },
             if active_entry.context_1m {
-                Style::new().fg(theme::SAGE)
+                Style::new().fg(theme::semantic().status.success)
             } else {
-                Style::new().fg(theme::MUTED)
+                Style::new().fg(theme::semantic().text.muted)
             },
         ),
     ]));
 
     // Footer
     lines.push(Line::from(""));
-    lines.push(Line::from("  j/k) Nav  Enter) Select  ←/→) Switch  q) Close").fg(theme::DIM));
+    lines.push(
+        Line::from("  ↑/↓::navigate  Enter::open  ←/→::switch").fg(theme::semantic().text.dim),
+    );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
-
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Model ")
-                .fg(theme::THINKING)
-                .bold()
-                .centered(),
-            width: Constraint::Length(50),
-            height: Constraint::Length(18),
+    panel_shell!(PanelKind::Model, {
+        ScrollView(
+            scroll_bars: ScrollBars::default(),
+            width: Constraint::Fill(1),
+            height: Constraint::Fill(1),
         ) {
-            ScrollView(
-                scroll_bars: ScrollBars::default(),
-                width: Constraint::Fill(1),
-                height: Constraint::Fill(1),
-            ) {
-                Text(text: content)
-            }
+            Text(text: content)
         }
-    )
+    })
 }

@@ -7,14 +7,16 @@
 //! 只读面板。Cron 任务的 enable/disable/delete 在 Cron 面板；SubAgent 详情
 //! 在 Agent 面板。本面板提供跨调度源的"任务总览"。
 
+use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{CRON_JOBS, VIEW_MODELS};
+use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 use peri_acp_types::view_model::{SubAgentGroupData, ViewModel};
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
+        layout::Constraint,
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -48,14 +50,14 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => close_panel(),
-                KeyCode::Up | KeyCode::Char('k') => {
-                    *selected.write() = selected.read().saturating_sub(1);
+                KeyCode::Esc => close_panel(),
+                KeyCode::Up => {
+                    *selected.write() = previous_selection(*selected.read());
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down => {
                     let mut s = selected.write();
                     if total > 0 {
-                        *s = (*s + 1).min(total - 1);
+                        *s = next_selection(*s, total);
                     }
                 }
                 _ => {}
@@ -69,11 +71,14 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 摘要
     lines.push(Line::from(vec![
-        Span::styled("  Total: ", Style::new().fg(theme::MUTED)),
-        Span::styled(format!("{}", total), Style::new().fg(theme::TEXT).bold()),
+        Span::styled("  Total: ", Style::new().fg(theme::semantic().text.muted)),
+        Span::styled(
+            format!("{}", total),
+            Style::new().fg(theme::semantic().text.primary).bold(),
+        ),
         Span::styled(
             format!("   ({} cron, {} subagent)", cron_count, subagent_count),
-            Style::new().fg(theme::DIM),
+            Style::new().fg(theme::semantic().text.dim),
         ),
     ]));
     lines.push(Line::from(""));
@@ -82,20 +87,20 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if !cron_jobs.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             format!("  ▼ Cron Jobs ({})", cron_count),
-            Style::new().fg(theme::ACCENT).bold(),
+            Style::new().fg(theme::semantic().border.active).bold(),
         )]));
         for (i, job) in cron_jobs.iter().enumerate() {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::THINKING).bold()
+                Style::new().fg(theme::component().panel.title).bold()
             } else {
-                Style::new().fg(theme::TEXT)
+                Style::new().fg(theme::semantic().text.primary)
             };
             let (status_icon, status_color) = if job.enabled {
-                ("\u{25cf}", theme::SAGE)
+                ("\u{25cf}", theme::semantic().status.success)
             } else {
-                ("\u{25cb}", theme::MUTED)
+                ("\u{25cb}", theme::semantic().text.muted)
             };
             let next_str = job
                 .next_fire
@@ -104,11 +109,20 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
             let prompt_preview: String = job.prompt.chars().take(50).collect();
             lines.push(Line::from(vec![
-                Span::styled(format!(" {} ", cursor), Style::new().fg(theme::THINKING)),
+                Span::styled(
+                    format!(" {} ", cursor),
+                    Style::new().fg(theme::component().panel.title),
+                ),
                 Span::styled(status_icon, Style::new().fg(status_color)),
-                Span::styled(format!(" {} ", job.expression), Style::new().fg(theme::DIM)),
+                Span::styled(
+                    format!(" {} ", job.expression),
+                    Style::new().fg(theme::semantic().text.dim),
+                ),
                 Span::styled(prompt_preview, name_style),
-                Span::styled(format!("  @{}", next_str), Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    format!("  @{}", next_str),
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
             ]));
         }
         lines.push(Line::from(""));
@@ -118,30 +132,39 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if !subagents.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             format!("  ▼ SubAgents ({})", subagent_count),
-            Style::new().fg(theme::ACCENT).bold(),
+            Style::new().fg(theme::semantic().border.active).bold(),
         )]));
         for (i, sa) in subagents.iter().enumerate() {
             let row_idx = cron_count + i;
             let is_selected = row_idx == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::THINKING).bold()
+                Style::new().fg(theme::component().panel.title).bold()
             } else {
-                Style::new().fg(theme::TEXT)
+                Style::new().fg(theme::semantic().text.primary)
             };
             let collapsed_marker = if sa.collapsed {
-                Span::styled(" (collapsed)", Style::new().fg(theme::MUTED))
+                Span::styled(
+                    " (collapsed)",
+                    Style::new().fg(theme::semantic().text.muted),
+                )
             } else {
-                Span::styled(" (live)", Style::new().fg(theme::SAGE))
+                Span::styled(" (live)", Style::new().fg(theme::semantic().status.success))
             };
             lines.push(Line::from(vec![
-                Span::styled(format!(" {} ", cursor), Style::new().fg(theme::THINKING)),
+                Span::styled(
+                    format!(" {} ", cursor),
+                    Style::new().fg(theme::component().panel.title),
+                ),
                 Span::styled(sa.agent_name.clone(), name_style),
-                Span::styled(format!("  [{}]", sa.agent_id), Style::new().fg(theme::DIM)),
+                Span::styled(
+                    format!("  [{}]", sa.agent_id),
+                    Style::new().fg(theme::semantic().text.dim),
+                ),
                 collapsed_marker,
                 Span::styled(
                     format!("  {} msgs", sa.view_models.len()),
-                    Style::new().fg(theme::MUTED),
+                    Style::new().fg(theme::semantic().text.muted),
                 ),
             ]));
         }
@@ -150,34 +173,26 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if total == 0 {
         lines.push(Line::from(vec![Span::styled(
             "  No active tasks",
-            Style::new().fg(theme::MUTED).italic(),
+            Style::new().fg(theme::semantic().text.muted).italic(),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  Cron jobs are scheduled via /loop command;",
-            Style::new().fg(theme::DIM),
+            Style::new().fg(theme::semantic().text.dim),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  SubAgents are spawned by Task / SubAgent tools.",
-            Style::new().fg(theme::DIM),
+            Style::new().fg(theme::semantic().text.dim),
         )]));
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("  j/k) Navigate  Esc) Close").fg(theme::DIM));
+    lines.push(
+        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme::semantic().text.dim),
+    );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Tasks ")
-                .fg(theme::THINKING)
-                .bold()
-                .centered(),
-            width: Constraint::Length(80),
-            height: Constraint::Length(22),
-        ) {
+    panel_shell!(PanelKind::Tasks, {
             ScrollView(
                 scroll_bars: ScrollBars::default(),
                 width: Constraint::Fill(1),
@@ -185,8 +200,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ) {
                 Text(text: content)
             }
-        }
-    )
+    })
 }
 
 /// 从 ViewModelsSnapshot 派生去重 SubAgent 列表。

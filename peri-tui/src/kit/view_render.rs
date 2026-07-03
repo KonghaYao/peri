@@ -21,7 +21,7 @@ use crate::kit::theme;
 
 // ── SubAgent 运行时状态探针（thread-local） ─────────────────────────────────
 
-/// V2 SubAgentGroup 渲染所需的运行时状态（用于显示 running/done/failed + total_steps）。
+/// V2 SubAgentGroup 渲染所需的运行时状态（用于显示状态 emoji + total_steps）。
 ///
 /// 由 app 层通过 [`with_status_probe`] 注入；render_subagent_group 通过
 /// agent_id 查询。对应 v2 DTO `SubAgentGroupData` 缺失的运行时字段。
@@ -95,7 +95,9 @@ pub fn render_v2_vm(vm: &ViewModel, width: usize, diff_visible: bool) -> Vec<Lin
 // ── 各变体渲染 ────────────────────────────────────────────────────────────
 
 fn render_user_bubble(text: &str, width: usize) -> Vec<Line<'static>> {
-    let user_bg = theme::USER_BG;
+    let semantic = theme::semantic();
+    let component = theme::component();
+    let user_bg = component.message.user_bg;
     let parsed = crate::kit::markdown::parse_markdown(text, width);
     let mut lines = Vec::with_capacity(parsed.lines.len() + 1);
     for (i, line) in parsed.lines.iter().enumerate() {
@@ -103,7 +105,7 @@ fn render_user_bubble(text: &str, width: usize) -> Vec<Line<'static>> {
             let mut spans = vec![Span::styled(
                 "❯ ",
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(semantic.border.active)
                     .add_modifier(Modifier::BOLD)
                     .bg(user_bg),
             )];
@@ -145,10 +147,12 @@ fn render_assistant_bubble(
 }
 
 fn render_reasoning_block(reasoning: &ReasoningBlock) -> Vec<Line<'static>> {
+    let semantic = theme::semantic();
+    let component = theme::component();
     let char_count = reasoning.text.chars().count();
     let mut lines = vec![Line::from(vec![Span::styled(
-        format!("Thought for {} chars", char_count),
-        Style::default().fg(theme::DIM),
+        format!("🧠 已思考 {} 字符", char_count),
+        Style::default().fg(component.message.reasoning),
     )])];
 
     // 尾部预览（最后 3 行）
@@ -157,8 +161,8 @@ fn render_reasoning_block(reasoning: &ReasoningBlock) -> Vec<Line<'static>> {
         for tail in tail_lines.into_iter().rev() {
             if !tail.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::styled(" ⎿ ", Style::default().fg(theme::DIM)),
-                    Span::styled(tail.to_string(), Style::default().fg(theme::DIM)),
+                    Span::styled(" ⎿ ", Style::default().fg(semantic.text.dim)),
+                    Span::styled(tail.to_string(), Style::default().fg(semantic.text.dim)),
                 ]));
             }
         }
@@ -171,7 +175,8 @@ fn render_tool_card(
     data: &peri_acp_types::view_model::ToolCardData,
     diff_visible: bool,
 ) -> Vec<Line<'static>> {
-    let display = tool_display(&data.tool_name, data.is_error);
+    let semantic = theme::semantic();
+    let display = tool_display(&data.tool_name, data.is_error, data.is_running);
 
     let mut header_spans = vec![
         Span::styled(display.indicator, Style::default().fg(display.color)),
@@ -188,14 +193,14 @@ fn render_tool_card(
     if !summary.is_empty() {
         header_spans.push(Span::styled(
             format!(" — {}", summary),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(semantic.text.muted),
         ));
     }
 
     if data.is_running && !data.is_error {
         header_spans.push(Span::styled(
-            " · running",
-            Style::default().fg(theme::LOADING),
+            " · ⏳",
+            Style::default().fg(semantic.status.running),
         ));
     }
 
@@ -204,14 +209,14 @@ fn render_tool_card(
     // 输出摘要
     if !data.output_summary.is_empty() {
         let result_color = if data.is_error {
-            theme::ERROR
+            semantic.status.error
         } else {
-            theme::MUTED
+            semantic.text.muted
         };
         let border_color = if data.is_error {
-            theme::ERROR
+            semantic.status.error
         } else {
-            theme::DIM
+            semantic.text.dim
         };
         for out_line in compact_output_lines(&data.output_summary, 4, 180) {
             lines.push(Line::from(vec![
@@ -227,10 +232,10 @@ fn render_tool_card(
             lines.extend(render_diff_block(diff));
         } else {
             lines.push(Line::from(vec![
-                Span::styled("  ⎿ ", Style::default().fg(theme::DIM)),
+                Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim)),
                 Span::styled(
-                    format!("diff: {} hidden · Ctrl+O to toggle", diff.path),
-                    Style::default().fg(theme::DIM),
+                    format!("📝 diff: {} 已折叠 · Enter::open", diff.path),
+                    Style::default().fg(semantic.text.dim),
                 ),
             ]));
         }
@@ -245,38 +250,48 @@ struct ToolDisplay {
     color: Color,
 }
 
-fn tool_display(tool_name: &str, is_error: bool) -> ToolDisplay {
+fn tool_display(tool_name: &str, is_error: bool, is_running: bool) -> ToolDisplay {
+    let semantic = theme::semantic();
+    let component = theme::component();
     if is_error {
         return ToolDisplay {
-            indicator: "✗",
+            indicator: "❌",
             label: tool_name.to_string(),
-            color: theme::ERROR,
+            color: semantic.status.error,
+        };
+    }
+
+    if is_running {
+        return ToolDisplay {
+            indicator: "⏳",
+            label: tool_name.to_string(),
+            color: semantic.status.running,
         };
     }
 
     let lower = tool_name.to_ascii_lowercase();
     let (indicator, color) = if lower.contains("bash") {
-        ("$", theme::BASH_BORDER)
+        ("$", semantic.status.warning)
     } else if lower.contains("edit") || lower.contains("write") {
-        ("✎", theme::ACCENT)
+        ("✎", semantic.border.active)
     } else if lower.contains("read") || lower.contains("glob") || lower.contains("grep") {
-        ("⌕", theme::SAGE)
+        ("⌕", semantic.status.success)
     } else if lower.contains("ask") || lower.contains("question") {
-        ("?", theme::WARNING)
+        ("?", semantic.status.warning)
     } else if lower.contains("todo") {
-        ("☑", theme::WARNING)
+        ("☑", semantic.status.warning)
     } else if lower.contains("folder") {
-        ("▣", theme::SAGE)
+        ("▣", semantic.status.success)
     } else if lower.contains("artifact") {
-        ("◈", theme::ACCENT)
+        ("◈", semantic.border.active)
     } else if lower.contains("cron") {
-        ("◷", theme::LOADING)
+        ("◷", semantic.status.running)
     } else if lower.contains("agent") {
-        ("◆", theme::SUB_AGENT)
+        ("◆", component.message.ai_prefix)
     } else if lower.contains("web") {
-        ("◎", theme::LOADING)
+        ("◎", semantic.status.running)
     } else {
-        ("●", theme::TOOL_NAME)
+        ("●", component.message.tool_indicator)
     };
 
     ToolDisplay {
@@ -314,21 +329,22 @@ fn compact_output_lines(text: &str, max_lines: usize, max_chars: usize) -> Vec<S
 }
 
 fn render_diff_block(diff: &DiffBlock) -> Vec<Line<'static>> {
+    let semantic = theme::semantic();
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // File path header
     lines.push(Line::from(vec![
-        Span::styled("  ", Style::default().fg(theme::DIM)),
+        Span::styled("  ", Style::default().fg(semantic.text.dim)),
         Span::styled(
             format!("--- a/{}", diff.path),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(semantic.text.muted),
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  ", Style::default().fg(theme::DIM)),
+        Span::styled("  ", Style::default().fg(semantic.text.dim)),
         Span::styled(
             format!("+++ b/{}", diff.path),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(semantic.text.muted),
         ),
     ]));
 
@@ -336,17 +352,17 @@ fn render_diff_block(diff: &DiffBlock) -> Vec<Line<'static>> {
         // Hunk header
         lines.push(Line::from(vec![Span::styled(
             format!("  @@ -{} +{} @@", hunk.old_range, hunk.new_range),
-            Style::default().fg(theme::THINKING),
+            Style::default().fg(semantic.diff.hunk),
         )]));
 
         for hunk_line in &hunk.lines {
             let (prefix, color) = match hunk_line.kind {
-                HunkLineKind::Add => ("+", Color::Green),
-                HunkLineKind::Del => ("-", Color::Red),
-                HunkLineKind::Context => (" ", theme::MUTED),
+                HunkLineKind::Add => ("+", semantic.diff.add),
+                HunkLineKind::Del => ("-", semantic.diff.remove),
+                HunkLineKind::Context => (" ", semantic.text.muted),
             };
             lines.push(Line::from(vec![
-                Span::styled("  ", Style::default().fg(theme::DIM)),
+                Span::styled("  ", Style::default().fg(semantic.text.dim)),
                 Span::styled(prefix.to_string(), Style::default().fg(color)),
                 Span::styled(hunk_line.text.clone(), Style::default().fg(color)),
             ]));
@@ -357,15 +373,16 @@ fn render_diff_block(diff: &DiffBlock) -> Vec<Line<'static>> {
 }
 
 fn render_system_note(data: &peri_acp_types::view_model::SystemNoteData) -> Vec<Line<'static>> {
-    let color = match data.level {
-        NoteLevel::Info => theme::MUTED,
-        NoteLevel::Warning => theme::WARNING,
-        NoteLevel::Error => theme::ERROR,
+    let semantic = theme::semantic();
+    let (icon, color) = match data.level {
+        NoteLevel::Info => ("•", semantic.text.muted),
+        NoteLevel::Warning => ("⚠", semantic.status.warning),
+        NoteLevel::Error => ("✖", semantic.status.error),
     };
-    vec![Line::from(Span::styled(
-        format!("· {}", &data.text),
+    vec![Line::from(vec![Span::styled(
+        format!("{} {}", icon, &data.text),
         Style::default().fg(color),
-    ))]
+    )])]
 }
 
 fn render_subagent_group(
@@ -373,23 +390,23 @@ fn render_subagent_group(
     width: usize,
     diff_visible: bool,
 ) -> Vec<Line<'static>> {
-    let agent_color = theme::SAGE;
-    let arrow_color = theme::LOADING;
+    let semantic = theme::semantic();
+    let component = theme::component();
 
     // 查询运行时状态（v2 DTO 缺失字段由 status probe 注入）
     let status = lookup_subagent_status(&data.agent_id);
 
     let mut header_spans = vec![
-        Span::styled("❯ ", Style::default().fg(arrow_color)),
+        Span::styled("◆ ", Style::default().fg(component.message.ai_prefix)),
         Span::styled(
             "Agent".to_string(),
             Style::default()
-                .fg(agent_color)
+                .fg(component.message.ai_prefix)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("({})", data.agent_name),
-            Style::default().fg(theme::MUTED),
+            format!(" ({})", data.agent_name),
+            Style::default().fg(semantic.text.muted),
         ),
     ];
 
@@ -397,29 +414,36 @@ fn render_subagent_group(
     if let Some(ref s) = status {
         if s.is_running {
             header_spans.push(Span::styled(
-                " · running",
-                Style::default().fg(theme::LOADING),
+                " · ⏳",
+                Style::default().fg(semantic.status.running),
             ));
             if s.total_steps > 0 {
                 header_spans.push(Span::styled(
-                    format!(" · {} steps", s.total_steps),
-                    Style::default().fg(theme::MUTED),
+                    format!(" {} 步", s.total_steps),
+                    Style::default().fg(semantic.text.muted),
                 ));
             }
         } else if s.is_error {
-            header_spans.push(Span::styled(" · failed", Style::default().fg(theme::ERROR)));
+            header_spans.push(Span::styled(
+                " · ❌",
+                Style::default().fg(semantic.status.error),
+            ));
         } else {
-            header_spans.push(Span::styled(" · done", Style::default().fg(theme::SAGE)));
+            header_spans.push(Span::styled(
+                " · ✅",
+                Style::default().fg(semantic.status.success),
+            ));
         }
     } else if data.is_running {
         header_spans.push(Span::styled(
-            " · running",
-            Style::default().fg(theme::LOADING),
+            " · ⏳",
+            Style::default().fg(semantic.status.running),
         ));
     } else if data.view_models.is_empty() {
-        // DTO placeholder（ACP 层 view_mapper 生成的空 SubAgentGroup），
-        // 没有 status probe 或 probe 未命中 → 显示通用完成提示，避免已提交历史一直像在运行。
-        header_spans.push(Span::styled(" · done", Style::default().fg(theme::SAGE)));
+        header_spans.push(Span::styled(
+            " · ✅",
+            Style::default().fg(semantic.status.success),
+        ));
     }
 
     let mut lines = vec![Line::from(header_spans)];
@@ -439,8 +463,8 @@ fn render_subagent_group(
         let count = children.len();
         if count > 0 {
             lines.push(Line::from(vec![Span::styled(
-                format!("  {} items", count),
-                Style::default().fg(theme::MUTED),
+                format!("  📦 {} 项", count),
+                Style::default().fg(semantic.text.muted),
             )]));
         }
     } else {
@@ -471,9 +495,9 @@ fn render_subagent_group(
             .collect();
         if !preview.is_empty() {
             let color = if s.is_error {
-                theme::ERROR
+                semantic.status.error
             } else {
-                theme::MUTED
+                semantic.text.muted
             };
             lines.push(Line::from(vec![
                 Span::raw("  "),
@@ -486,26 +510,28 @@ fn render_subagent_group(
 }
 
 fn render_collapsed_group(data: &CollapsedGroupData) -> Vec<Line<'static>> {
+    let semantic = theme::semantic();
     vec![Line::from(vec![
-        Span::styled("● ", Style::default().fg(theme::SAGE)),
+        Span::styled("📦 ", Style::default().fg(semantic.status.success)),
         Span::styled(
-            format!("{} ({} items)", data.title, data.count),
-            Style::default().fg(theme::MUTED),
+            format!("{}（{} 项）", data.title, data.count),
+            Style::default().fg(semantic.text.muted),
         ),
     ])]
 }
 
 fn render_divider(data: &DividerData) -> Vec<Line<'static>> {
+    let semantic = theme::semantic();
     if let Some(ref label) = data.label {
         vec![Line::from(vec![
-            Span::styled("── ", Style::default().fg(theme::DIM)),
-            Span::styled(label.clone(), Style::default().fg(theme::MUTED)),
-            Span::styled(" ──", Style::default().fg(theme::DIM)),
+            Span::styled("── ", Style::default().fg(semantic.text.dim)),
+            Span::styled(label.clone(), Style::default().fg(semantic.text.muted)),
+            Span::styled(" ──", Style::default().fg(semantic.text.dim)),
         ])]
     } else {
         vec![Line::from(vec![Span::styled(
             "───────────────",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(semantic.text.dim),
         )])]
     }
 }
@@ -568,7 +594,7 @@ mod tests {
         assert!(!lines.is_empty());
         // Should have "Thought for N chars" line
         let first = &lines[0].spans;
-        assert!(first.iter().any(|s| s.content.contains("Thought for")));
+        assert!(first.iter().any(|s| s.content.contains("🧠")));
     }
 
     #[test]
@@ -601,7 +627,7 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80, false);
         let first = &lines[0].spans;
-        assert!(first.iter().any(|s| s.content.contains("✗")));
+        assert!(first.iter().any(|s| s.content.contains("❌")));
     }
 
     #[test]
@@ -617,12 +643,8 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
-        assert!(text.contains("✎"), "运行中工具应保留类型标识：{}", text);
-        assert!(
-            text.contains("running"),
-            "运行中工具应显示 running：{}",
-            text
-        );
+        assert!(text.contains("⏳"), "运行中工具应显示状态：{}", text);
+        assert!(text.contains("⏳"), "运行中工具应显示状态 emoji：{}", text);
         assert!(text.contains("path: foo.rs · old_string: hello"));
     }
 
@@ -658,11 +680,7 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
-        assert!(
-            text.contains("diff: bar.rs hidden"),
-            "隐藏 diff 应提示可展开：{}",
-            text
-        );
+        assert!(text.contains("已折叠"), "隐藏 diff 应提示可展开：{}", text);
     }
 
     #[test]
@@ -824,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn test_subagent_group_with_running_probe_shows_running() {
+    fn test_subagent_group_with_running_probe_shows_status_icon() {
         let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
@@ -843,8 +861,8 @@ mod tests {
         });
         let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
         let text = collect_text(&lines);
-        assert!(text.contains("running"), "应显示 running：{}", text);
-        assert!(text.contains("5 steps"), "应显示步数：{}", text);
+        assert!(text.contains("⏳"), "应显示运行中状态：{}", text);
+        assert!(text.contains("5 步"), "应显示步数：{}", text);
     }
 
     #[test]
@@ -867,7 +885,7 @@ mod tests {
         });
         let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
         let text = collect_text(&lines);
-        assert!(text.contains("done"), "应显示 done：{}", text);
+        assert!(text.contains("✅"), "应显示完成状态：{}", text);
         assert!(
             text.contains("→ completed task"),
             "应显示结果预览：{}",
@@ -895,13 +913,13 @@ mod tests {
         });
         let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
         let text = collect_text(&lines);
-        assert!(text.contains("failed"), "应显示 failed：{}", text);
+        assert!(text.contains("❌"), "应显示失败状态：{}", text);
         assert!(text.contains("→ Error"), "应显示错误结果：{}", text);
     }
 
     #[test]
-    fn test_subagent_group_without_probe_shows_done_for_committed_placeholder() {
-        // 不设置 probe → 已提交的 DTO placeholder 显示 done，避免历史消息看起来仍在运行。
+    fn test_subagent_group_without_probe_shows_success_icon_for_committed_placeholder() {
+        // 不设置 probe → 已提交的 DTO placeholder 显示完成状态，避免历史消息看起来仍在运行。
         let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
@@ -911,7 +929,7 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
-        assert!(text.contains("done"), "无 probe 时应显示 done：{}", text);
+        assert!(text.contains("✅"), "无 probe 时应显示完成状态：{}", text);
     }
 
     #[test]
@@ -925,11 +943,7 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
-        assert!(
-            text.contains("running"),
-            "流式 DTO 应显示 running：{}",
-            text
-        );
+        assert!(text.contains("⏳"), "流式 DTO 应显示运行中状态：{}", text);
     }
 
     #[test]

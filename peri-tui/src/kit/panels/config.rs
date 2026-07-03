@@ -7,14 +7,16 @@
 
 #![allow(dead_code)]
 
+use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE};
+use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 use peri_middlewares::prelude::PermissionMode;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
+        layout::Constraint,
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -78,14 +80,14 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let sel = *cursor.read();
 
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
+                KeyCode::Esc => {
                     close_panel();
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    *cursor.write() = sel.saturating_sub(1);
+                KeyCode::Up => {
+                    *cursor.write() = previous_selection(sel);
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    *cursor.write() = (sel + 1).min(row_count - 1);
+                KeyCode::Down => {
+                    *cursor.write() = next_selection(sel, row_count);
                 }
                 KeyCode::Char(' ') | KeyCode::Enter => {
                     activate_row(sel, true);
@@ -114,7 +116,7 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     lines.push(Line::from(vec![Span::styled(
         "  Configuration (persisted to ~/.peri/settings.json)",
-        Style::new().fg(theme::MUTED).italic(),
+        Style::new().fg(theme::semantic().text.muted).italic(),
     )]));
     lines.push(Line::from(""));
 
@@ -122,9 +124,9 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let is_active = i == sel;
         let cursor_mark = if is_active { "> " } else { "  " };
         let label_style = if is_active {
-            Style::new().fg(theme::THINKING).bold()
+            Style::new().fg(theme::component().panel.title).bold()
         } else {
-            Style::new().fg(theme::TEXT)
+            Style::new().fg(theme::semantic().text.primary)
         };
 
         let value_line = match row_type {
@@ -136,17 +138,17 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     (" ON ", "[OFF]")
                 };
                 let on_style = if val {
-                    Style::new().fg(theme::SAGE).bold()
+                    Style::new().fg(theme::semantic().status.success).bold()
                 } else {
-                    Style::new().fg(theme::MUTED)
+                    Style::new().fg(theme::semantic().text.muted)
                 };
                 let off_style = if val {
-                    Style::new().fg(theme::MUTED)
+                    Style::new().fg(theme::semantic().text.muted)
                 } else {
-                    Style::new().fg(theme::ERROR).bold()
+                    Style::new().fg(theme::semantic().status.error).bold()
                 };
                 Line::from(vec![
-                    Span::styled(cursor_mark, Style::new().fg(theme::THINKING)),
+                    Span::styled(cursor_mark, Style::new().fg(theme::component().panel.title)),
                     Span::styled(format!("{:<22}", label), label_style),
                     Span::styled(on_text, on_style),
                     Span::styled(" ", Style::new()),
@@ -156,19 +158,19 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             RowType::Cycle(options) => {
                 let idx = read_cycle_idx(i, options);
                 let mut spans = vec![
-                    Span::styled(cursor_mark, Style::new().fg(theme::THINKING)),
+                    Span::styled(cursor_mark, Style::new().fg(theme::component().panel.title)),
                     Span::styled(format!("{:<22}", label), label_style),
                 ];
                 for (j, opt) in options.iter().enumerate() {
                     if j == idx {
                         spans.push(Span::styled(
                             format!("[{}]", opt),
-                            Style::new().fg(theme::SAGE).bold(),
+                            Style::new().fg(theme::semantic().status.success).bold(),
                         ));
                     } else {
                         spans.push(Span::styled(
                             format!(" {}", opt),
-                            Style::new().fg(theme::MUTED),
+                            Style::new().fg(theme::semantic().text.muted),
                         ));
                     }
                     if j < options.len() - 1 {
@@ -184,33 +186,31 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Footer hints
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("  j/k Nav  ", Style::new().fg(theme::DIM)),
-        Span::styled("Space/Enter Toggle", Style::new().fg(theme::ACCENT)),
-        Span::styled("  ←→ Cycle  q Close", Style::new().fg(theme::DIM)),
+        Span::styled(
+            "  ↑/↓::navigate  ",
+            Style::new().fg(theme::semantic().text.dim),
+        ),
+        Span::styled(
+            "Enter::toggle",
+            Style::new().fg(theme::semantic().border.active),
+        ),
+        Span::styled(
+            "  ←/→::switch  Esc::close",
+            Style::new().fg(theme::semantic().text.dim),
+        ),
     ]));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
-    element!(
-        Border(
-            flex_direction: Direction::Vertical,
-            border_style: Style::new().fg(theme::BORDER),
-            top_title: Line::from(" Config ")
-                .fg(theme::THINKING)
-                .bold()
-                .centered(),
-            width: Constraint::Length(80),
-            height: Constraint::Length(20),
+    panel_shell!(PanelKind::Config, {
+        ScrollView(
+            scroll_bars: ScrollBars::default(),
+            width: Constraint::Fill(1),
+            height: Constraint::Fill(1),
         ) {
-            ScrollView(
-                scroll_bars: ScrollBars::default(),
-                width: Constraint::Fill(1),
-                height: Constraint::Fill(1),
-            ) {
-                Text(text: content)
-            }
+            Text(text: content)
         }
-    )
+    })
 }
 
 // ---------------------------------------------------------------------------

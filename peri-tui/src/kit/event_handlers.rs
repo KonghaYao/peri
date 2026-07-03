@@ -13,16 +13,18 @@
 //! | Esc    | 关闭 popup / 面板 / mention / slash |
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
 };
 
 use super::atoms::{
-    ACP_STATE, ACTIVE_PANEL, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LAST_ESC_TIME,
-    MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL, POPUP_KIND, PROVIDER_HIGHLIGHT_UNTIL,
-    QUIT_PENDING_SINCE, REWIND_PREVIEW,
+    ACP_STATE, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LAST_ESC_TIME, MODE_HIGHLIGHT_UNTIL,
+    MODEL_HIGHLIGHT_UNTIL, PROVIDER_HIGHLIGHT_UNTIL, QUIT_PENDING_SINCE, REWIND_PREVIEW,
 };
 use crate::kit::atoms::PopupKind;
+use crate::kit::focus_router::{
+    FocusLayer, GlobalShortcut, active_layer, classify_global_shortcut,
+};
 use crate::kit::panel_registry::close_active_panel;
 use crate::kit::popup_overlay::{close_popup, open_popup};
 use tracing::info;
@@ -40,11 +42,8 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
             return EventResult::Ignored;
         }
 
-        match key.code {
-            // Ctrl+C: 三级优先级链
-            // Level 2: agent loading → 清空输入缓冲区（丢弃排队输入）
-            // Level 3: 双击退出检测（1s 内两次 Ctrl+C → quit）
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        match classify_global_shortcut(&key) {
+            Some(GlobalShortcut::Quit) => {
                 let loading = ACP_STATE.state().read().is_loading;
                 if loading {
                     INPUT_BUFFER.state().write().clear();
@@ -67,8 +66,7 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
                 }
                 EventResult::Consumed
             }
-            // Ctrl+O: toggle diff view
-            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(GlobalShortcut::ToggleDiff) => {
                 let diff_visible = crate::kit::atoms::DIFF_VISIBLE.state();
                 let mut g = diff_visible.write();
                 *g = !*g;
@@ -94,51 +92,52 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
             return EventResult::Ignored;
         }
 
-        match key.code {
-            // Ctrl+K: cycle permission mode（保留）
-            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        match classify_global_shortcut(&key) {
+            Some(GlobalShortcut::CyclePermissionMode) => {
                 *MODE_HIGHLIGHT_UNTIL.state().write() =
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                 EventResult::Consumed
             }
+            _ => match key.code {
+                // Esc: 双击触发 Rewind popup，否则走关闭优先级链
+                KeyCode::Esc => {
+                    // 跳过由 InputArea 检测到的 Alt+key ESC 前缀
+                    let is_alt_prefix = *INPUT_AREA_ESC_PREFIX.state().read();
+                    if is_alt_prefix {
+                        return EventResult::Ignored;
+                    }
 
-            // Esc: 双击触发 Rewind popup，否则走关闭优先级链
-            KeyCode::Esc => {
-                // 跳过由 InputArea 检测到的 Alt+key ESC 前缀
-                let is_alt_prefix = *INPUT_AREA_ESC_PREFIX.state().read();
-                if is_alt_prefix {
-                    return EventResult::Ignored;
-                }
+                    match active_layer() {
+                        FocusLayer::Popup(_) => {
+                            close_popup();
+                            return EventResult::Consumed;
+                        }
+                        FocusLayer::InlineCompletion => return EventResult::Ignored,
+                        FocusLayer::Panel => {
+                            close_active_panel();
+                            return EventResult::Consumed;
+                        }
+                        FocusLayer::Input | FocusLayer::Message => {}
+                    }
 
-                let popup_open = POPUP_KIND.state().read().is_some();
-                if popup_open {
-                    close_popup();
-                    return EventResult::Consumed;
-                }
+                    let now = std::time::Instant::now();
+                    let last_esc = *LAST_ESC_TIME.state().read();
+                    let is_double_esc = last_esc
+                        .map(|t| now.duration_since(t) < std::time::Duration::from_millis(500))
+                        .unwrap_or(false);
 
-                let now = std::time::Instant::now();
-                let last_esc = *LAST_ESC_TIME.state().read();
-                let is_double_esc = last_esc
-                    .map(|t| now.duration_since(t) < std::time::Duration::from_millis(500))
-                    .unwrap_or(false);
+                    *LAST_ESC_TIME.state().write() = Some(now);
 
-                *LAST_ESC_TIME.state().write() = Some(now);
+                    if is_double_esc {
+                        let _ = REWIND_PREVIEW.state();
+                        open_popup(PopupKind::Rewind);
+                        return EventResult::Consumed;
+                    }
 
-                if is_double_esc {
-                    let _ = REWIND_PREVIEW.state();
-                    open_popup(PopupKind::Rewind);
-                    return EventResult::Consumed;
-                }
-
-                let has_active = ACTIVE_PANEL.state().read().is_some();
-                if has_active {
-                    close_active_panel();
-                    EventResult::Consumed
-                } else {
                     EventResult::Ignored
                 }
-            }
-            _ => EventResult::Ignored,
+                _ => EventResult::Ignored,
+            },
         }
     });
 }
