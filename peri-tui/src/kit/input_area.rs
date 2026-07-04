@@ -23,10 +23,11 @@ use ratatui_kit::{
 };
 use std::sync::{Arc, Mutex};
 
+use crate::kit::atoms::ViewModelsSnapshot;
 use crate::kit::atoms::{
     ACP_STATE, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST, INPUT_AREA_ESC_PREFIX,
     INPUT_BUFFER, MENTION_PREFIX, MENTION_SELECTED_INDEX, SLASH_HINT_ACTIVE, SLASH_PREFIX,
-    SLASH_SELECTED_INDEX, SUBMIT_TX,
+    SLASH_SELECTED_INDEX, SUBMIT_TX, VIEW_MODELS,
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history};
@@ -34,6 +35,7 @@ use crate::kit::mention_popup::MentionPopup;
 use crate::kit::panel_registry::{PANELS, open_panel, panel_for_slash_command};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
 use crate::kit::theme;
+use peri_acp_types::view_model::{UserBubbleData, ViewModel};
 
 /// 输入状态
 #[derive(Clone, Default)]
@@ -648,7 +650,32 @@ fn submit_text(submitted: String) {
             guard.pop_front();
         }
     } else if let Some(tx) = SUBMIT_TX.get() {
-        let _ = tx.send(submitted);
+        let _ = tx.send(submitted.trim().to_string());
+
+        // S16：提交后立即设为 loading + 添加 UserBubble，
+        // 避免按键到首条流式事件间的空白窗口期。
+        let user_vm = ViewModel::UserBubble(UserBubbleData {
+            text: submitted.trim().to_string(),
+        });
+        {
+            let vms = VIEW_MODELS.state();
+            let snapshot = vms.read();
+            let mut combined: Vec<ViewModel> = Vec::with_capacity(snapshot.committed.len() + 1);
+            combined.extend(snapshot.committed.iter().cloned());
+            combined.push(user_vm);
+            let new_snapshot = ViewModelsSnapshot {
+                committed: Arc::from(combined),
+                current_turn: Arc::clone(&snapshot.current_turn),
+            };
+            drop(snapshot);
+            *vms.write() = new_snapshot;
+        }
+
+        {
+            let acp = ACP_STATE.state();
+            let mut guard = acp.write();
+            guard.is_loading = true;
+        }
     }
 }
 

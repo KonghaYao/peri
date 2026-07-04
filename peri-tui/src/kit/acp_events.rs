@@ -5,7 +5,7 @@
 
 use crate::kit::acp_types::{AcpEventData, CurrentTurn, ToolCardAccumulator};
 use crate::kit::atoms::*;
-use peri_acp_types::view_model::{NoteLevel, SystemNoteData, ViewModel};
+use peri_acp_types::view_model::{NoteLevel, SystemNoteData, UserBubbleData, ViewModel};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -158,7 +158,27 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             }
             state.current_turn.reset();
             state.variant = 0;
-            state.is_loading = false;
+
+            // S16：TurnDone 时有 buffered 输入尚未提交 → 保持 loading 态，
+            // 避免 drain→submit 到首条流式事件间的空白窗口期。
+            // 同时为每条 buffered 输入添加 UserBubble，保证消息区立即可见。
+            let has_buffered = !INPUT_BUFFER.state().read().is_empty();
+            if has_buffered {
+                // S16：为所有 buffered 输入添加 UserBubble，保证消息区立即可见。
+                let buffered_texts: Vec<String> =
+                    INPUT_BUFFER.state().read().iter().cloned().collect();
+                if !buffered_texts.is_empty() {
+                    let mut combined =
+                        Vec::with_capacity(state.committed.len() + buffered_texts.len());
+                    combined.extend(state.committed.iter().cloned());
+                    for text in &buffered_texts {
+                        combined.push(ViewModel::UserBubble(UserBubbleData { text: text.clone() }));
+                    }
+                    state.committed = Arc::from(combined);
+                }
+            }
+            state.is_loading = has_buffered;
+
             push_view_models(state);
             push_acp_state(state);
             // C1: agent 完成本轮——drain INPUT_BUFFER，按顺序重新提交。
@@ -277,11 +297,20 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 // ---------------------------------------------------------------------------
 
 /// 将 BridgeState 中的 ViewModels 写入 VIEW_MODELS Atom。
+///
+/// S16：bridge 的 committed 仅在 ViewCommit 时填充。streaming 事件到达时若
+/// bridge committed 仍为空（尚未收到 ViewCommit），则保留 atom 中已有的
+/// committed（可能含 submit_text 预先注入的 UserBubble），避免消息区退回 Welcome。
 fn push_view_models(state: &mut BridgeState) {
     // I20-B：Arc::clone 是 O(1) 原子指针拷贝，避免之前每个 streaming chunk
     // 都 O(n) clone 整个消息历史的性能问题。
+    let committed = if state.committed.is_empty() {
+        Arc::clone(&VIEW_MODELS.state().read().committed)
+    } else {
+        Arc::clone(&state.committed)
+    };
     let snapshot = ViewModelsSnapshot {
-        committed: Arc::clone(&state.committed),
+        committed,
         current_turn: Arc::from(state.current_turn.view_models()),
     };
     *VIEW_MODELS.state().write() = snapshot;

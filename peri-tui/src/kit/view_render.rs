@@ -128,6 +128,8 @@ fn render_assistant_bubble(
     data: &peri_acp_types::view_model::AssistantBubbleData,
     width: usize,
 ) -> Vec<Line<'static>> {
+    let component = theme::component();
+    let ai_prefix_color = component.message.ai_prefix;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Reasoning block（如果存在）
@@ -138,8 +140,21 @@ fn render_assistant_bubble(
     // Text body（markdown 解析）
     if !data.text.is_empty() {
         let parsed = crate::kit::markdown::parse_markdown(&data.text, width);
-        for line in &parsed.lines {
-            lines.push(Line::from(line.spans.clone()));
+        for (i, line) in parsed.lines.iter().enumerate() {
+            if i == 0 {
+                let mut spans = vec![Span::styled(
+                    "● ",
+                    Style::default()
+                        .fg(ai_prefix_color)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                spans.extend(line.spans.clone());
+                lines.push(Line::from(spans));
+            } else {
+                let mut spans = vec![Span::styled("  ", Style::default())];
+                spans.extend(line.spans.clone());
+                lines.push(Line::from(spans));
+            }
         }
     }
 

@@ -52,22 +52,29 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Style::default().fg(statusbar().muted),
     ));
 
-    // 3. provider/model
-    spans.push(separator());
-    if !snap.provider_name.is_empty() {
-        let mut style = Style::default().fg(statusbar().muted);
-        if provider_highlighted {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        spans.push(Span::styled(format!(" {}", snap.provider_name), style));
-        spans.push(Span::styled("/", Style::default().fg(statusbar().dim)));
-    }
-    if !snap.model_alias.is_empty() {
+    // 3. provider/model —— 整体统一样式
+    let model_display = if !snap.model_name.is_empty() {
+        &snap.model_name
+    } else if !snap.model_alias.is_empty() {
+        &snap.model_alias
+    } else {
+        ""
+    };
+
+    if !snap.provider_name.is_empty() && !model_display.is_empty() {
+        spans.push(separator());
         let mut style = Style::default().fg(statusbar().text);
-        if model_highlighted {
+        if provider_highlighted && model_highlighted {
+            style = style.add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK);
+        } else if provider_highlighted {
+            style = style.add_modifier(Modifier::BOLD);
+        } else if model_highlighted {
             style = style.add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK);
         }
-        spans.push(Span::styled(snap.model_alias.clone(), style));
+        spans.push(Span::styled(
+            format!(" {}/{}", snap.provider_name, model_display),
+            style,
+        ));
     }
 
     // 4. CPU%
@@ -283,6 +290,7 @@ mod tests {
             cwd: "/home/user/test-project".into(),
             provider_name: "anthropic".into(),
             model_alias: "sonnet".into(),
+            model_name: "claude-sonnet-4-20250514".into(),
             permission_mode: "accept-edit".into(),
             memory_mb: 256,
             cpu_percent: 12.5,
@@ -306,6 +314,7 @@ mod tests {
             cwd: "/tmp".into(),
             provider_name: "".into(),
             model_alias: "".into(),
+            model_name: "".into(),
             permission_mode: "default".into(),
             memory_mb: 0,
             cpu_percent: 0.0,
@@ -315,6 +324,7 @@ mod tests {
         // 空 provider/model 应被渲染逻辑跳过（不在 Row1 中显示）
         assert!(snap.provider_name.is_empty());
         assert!(snap.model_alias.is_empty());
+        assert!(snap.model_name.is_empty());
         // Default mode → 空标签
         assert_eq!(permission_mode_display(&snap.permission_mode), "");
         // 0% CPU 应被跳过

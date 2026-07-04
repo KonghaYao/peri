@@ -82,11 +82,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         all_lines.push(Line::from(""));
     }
 
-    // 加载指示器
+    // 加载指示器（S16：遵循 TUI-PAGE.md 2.2——◜ 思考中… 样式）
     if props.loading {
         let semantic = theme::semantic();
         all_lines.push(Line::from(vec![Span::styled(
-            "🧠 思考中…",
+            "◜ 思考中…",
             Style::default().fg(semantic.status.running),
         )]));
     }
