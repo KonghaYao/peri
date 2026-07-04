@@ -6,7 +6,7 @@
 //! 需要 S11 解耦后通过 AcpClient 触发（暂留 TODO）。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT};
+use crate::kit::atoms::{MODEL_HIGHLIGHT_UNTIL, PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 use ratatui_kit::{
@@ -19,6 +19,7 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // 静态 alias 元数据（与 active 状态无关）
@@ -94,20 +95,30 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::Enter => {
                     // H2: 通过 PERI_CONFIG_HANDLE 直接 write active_alias。
-                    // ACP server 持同一 Arc，立即生效；service_snapshot 2s 内
-                    // 派生到 SERVICE_SNAPSHOT.model_alias 让 status bar 同步刷新。
+                    // ACP server 持同一 Arc，立即生效。
                     let sel = *cursor.read();
                     *selected_tab.write() = sel;
                     if let Some(handle) = PERI_CONFIG_HANDLE.get() {
                         let new_alias = MODEL_ALIASES[sel].key.to_string();
                         let mut cfg = handle.write();
                         if cfg.config.active_alias != new_alias {
-                            cfg.config.active_alias = new_alias;
+                            cfg.config.active_alias = new_alias.clone();
                             tracing::info!(
                                 alias = MODEL_ALIASES[sel].key,
                                 "ModelPanel: active_alias switched"
                             );
                         }
+                        drop(cfg);
+                        // S6c: 即时推送 SERVICE_SNAPSHOT，避免等待 2s 后台轮询。
+                        // write() 返回 ReactiveMutRef，Drop 时自动唤醒所有订阅者（含 StatusBar）。
+                        let handle = SERVICE_SNAPSHOT.state();
+                        let mut snap = handle.read().clone();
+                        snap.model_alias = new_alias;
+                        *handle.write() = snap;
+                        // 激活动画闪烁：StatusBar 已有 MODEL_HIGHLIGHT_UNTIL 订阅，
+                        // 切换后 2s 内 model_alias 文字 BOLD + SLOW_BLINK。
+                        *MODEL_HIGHLIGHT_UNTIL.state().write() =
+                            Some(Instant::now() + Duration::from_secs(2));
                     }
                     // 关闭面板：I19-A 弹栈而非清空整个栈
                     crate::kit::panel_registry::close_active_panel();
