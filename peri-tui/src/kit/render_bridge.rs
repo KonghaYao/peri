@@ -8,7 +8,7 @@ use std::sync::Arc;
 use ratatui::text::Line;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::kit::acp_types::AcpEventData;
 use crate::kit::atoms::{RENDER_CACHE, VIEW_MODELS};
@@ -56,8 +56,10 @@ pub fn spawn_render_bridge(
                 }
                 Some(_event) = rx.recv() => {
                     let Some(snapshot) = read_ready_snapshot(last_committed_ptr, last_committed_len, last_ct_ptr).await else {
+                        info!("render_bridge: event dropped (VIEW_MODELS unchanged after 5 retries)");
                         continue;
                     };
+                    log_ct_snapshot(&snapshot, "render_bridge: processing snapshot");
                     let committed_ptr = Arc::as_ptr(&snapshot.committed) as *const () as usize;
                     let committed_len = snapshot.committed.len();
                     let ct_ptr = Arc::as_ptr(&snapshot.current_turn) as *const () as usize;
@@ -119,6 +121,23 @@ async fn read_ready_snapshot(
         tokio::task::yield_now().await;
     }
     None
+}
+
+fn log_ct_snapshot(snapshot: &crate::kit::atoms::ViewModelsSnapshot, label: &str) {
+    info!(
+        label,
+        committed_len = snapshot.committed.len(),
+        ct_len = snapshot.current_turn.len(),
+    );
+    for vm in snapshot.current_turn.iter() {
+        if let peri_acp_types::view_model::ViewModel::AssistantBubble(data) = vm {
+            info!(
+                "  CT AssistantBubble text_len={} has_reasoning={}",
+                data.text.len(),
+                data.reasoning.is_some()
+            );
+        }
+    }
 }
 
 async fn rebuild_all(
