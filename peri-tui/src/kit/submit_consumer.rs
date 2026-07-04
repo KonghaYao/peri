@@ -16,9 +16,10 @@ use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
 use crate::kit::atoms::{
-    ACP_STATE, DIFF_VISIBLE, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE, REWIND_ACTION_TX,
-    VIEW_MODELS, ViewModelsSnapshot,
+    ACP_STATE, DIFF_VISIBLE, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE, RENDER_CACHE,
+    REWIND_ACTION_TX, VIEW_MODELS, ViewModelsSnapshot,
 };
+use crate::kit::render_bridge::RenderCache;
 
 /// 启动提交消费者后台任务。
 ///
@@ -77,6 +78,9 @@ async fn handle_submit(
         acp_client.new_session(cwd, None).await?;
         // 新会话无消息 → 清空消息区 Atom
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        // 同步重置渲染缓存——MessageArea 通过 use_atom 订阅 RENDER_CACHE，
+        // 直接写入 atom 会触发组件重渲染，无需经过 render_bridge 事件通道。
+        *RENDER_CACHE.state().write() = RenderCache::default();
         // 重置 loading 态
         let ref_guard = ACP_STATE.state();
         let mut acp = ref_guard.write();
