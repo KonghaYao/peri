@@ -127,7 +127,7 @@ async fn tick_once(
     };
 
     // ── 2. provider/model 从 peri_config 派生 ──────────────────────────
-    let (provider_name, model_alias) = derive_provider_and_model(&src.peri_config);
+    let (provider_name, model_alias, model_name) = derive_provider_and_model(&src.peri_config);
 
     // ── 3. permission_mode ─────────────────────────────────────────────
     let permission_mode = permission_mode_label(src.permission_mode.load());
@@ -219,6 +219,7 @@ async fn tick_once(
         cwd: src.cwd.clone(),
         provider_name,
         model_alias,
+        model_name,
         permission_mode: permission_mode.to_string(),
         memory_mb,
         cpu_percent: cpu_percent.round(),
@@ -389,25 +390,27 @@ fn permission_mode_label(mode: PermissionMode) -> &'static str {
     }
 }
 
-/// 从 `peri_config` 派生 provider 显示名 + model alias。
-///
-/// - provider：取 `active_provider_id`，再从 `providers` 列表查同 ID 的 `provider_type`
-///   （如 "anthropic" / "openai"）；查不到则回退 active_provider_id 本身。
-/// - model：直接用 `active_alias`（"opus"/"sonnet"/"haiku"）。
-fn derive_provider_and_model(peri_config: &SharedPeriConfig) -> (String, String) {
+/// 从 PeriConfig 派生 (provider_type, active_alias, model_name)。
+/// model_name 优先从 provider.models.get_model(alias) 查询；
+/// 若 provider 未配置 models 或 alias 非标准名，回退到 active_alias。
+fn derive_provider_and_model(peri_config: &SharedPeriConfig) -> (String, String, String) {
     let cfg = peri_config.read();
     let active_id = cfg.config.active_provider_id.clone();
     let active_alias = cfg.config.active_alias.clone();
 
-    let provider_type = cfg
-        .config
-        .providers
-        .iter()
-        .find(|p| p.id == active_id)
-        .map(|p| p.provider_type.clone())
-        .unwrap_or(active_id);
+    let provider = cfg.config.providers.iter().find(|p| p.id == active_id);
 
-    (provider_type, active_alias)
+    let provider_type = provider
+        .map(|p| p.provider_type.clone())
+        .unwrap_or(active_id.clone());
+
+    let model_name = provider
+        .and_then(|p| p.models.get_model(&active_alias))
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| active_alias.clone());
+
+    (provider_type, active_alias, model_name)
 }
 
 /// 从 `McpClientPool` 派生详细 MCP server 列表（H1d）。
@@ -637,19 +640,49 @@ mod tests {
         let peri_config = Arc::new(parking_lot::RwLock::new(
             crate::config::PeriConfig::default(),
         ));
-        let (provider, model) = derive_provider_and_model(&peri_config);
+        let (provider, alias, model_name) = derive_provider_and_model(&peri_config);
         // 默认 AppConfig::default() 的 active_alias 和 active_provider_id 均为空
         assert!(provider.is_empty());
-        assert!(model.is_empty());
+        assert!(alias.is_empty());
+        assert!(model_name.is_empty());
     }
 
     #[tokio::test]
     async fn test_derive_provider_and_model_set() {
-        use peri_acp::provider::config::{AppConfig, ProviderConfig};
+        use peri_acp::provider::config::{AppConfig, ProviderConfig, ProviderModels};
 
         let cfg = crate::config::PeriConfig {
             config: AppConfig {
                 active_alias: "sonnet".into(),
+                active_provider_id: "p1".into(),
+                providers: vec![ProviderConfig {
+                    id: "p1".into(),
+                    provider_type: "anthropic".into(),
+                    models: ProviderModels {
+                        opus: "claude-opus-4-20250514".into(),
+                        sonnet: "claude-sonnet-4-20250514".into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let peri_config = Arc::new(parking_lot::RwLock::new(cfg));
+        let (provider, alias, model_name) = derive_provider_and_model(&peri_config);
+        assert_eq!(provider, "anthropic");
+        assert_eq!(alias, "sonnet");
+        assert_eq!(model_name, "claude-sonnet-4-20250514");
+    }
+
+    #[tokio::test]
+    async fn test_derive_provider_and_model_no_models_fallback() {
+        use peri_acp::provider::config::{AppConfig, ProviderConfig};
+
+        let cfg = crate::config::PeriConfig {
+            config: AppConfig {
+                active_alias: "custom-alias".into(),
                 active_provider_id: "p1".into(),
                 providers: vec![ProviderConfig {
                     id: "p1".into(),
@@ -661,9 +694,10 @@ mod tests {
             ..Default::default()
         };
         let peri_config = Arc::new(parking_lot::RwLock::new(cfg));
-        let (provider, model) = derive_provider_and_model(&peri_config);
+        let (provider, alias, model_name) = derive_provider_and_model(&peri_config);
         assert_eq!(provider, "anthropic");
-        assert_eq!(model, "sonnet");
+        assert_eq!(alias, "custom-alias");
+        assert_eq!(model_name, "custom-alias");
     }
 
     #[test]

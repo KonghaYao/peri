@@ -57,6 +57,7 @@ pub struct ServiceSnapshot {
     pub cwd: String,
     pub provider_name: String,
     pub model_alias: String,
+    pub model_name: String,
     pub permission_mode: String,
     pub memory_mb: u64,
     pub cpu_percent: f32,
