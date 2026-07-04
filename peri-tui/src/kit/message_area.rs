@@ -1,25 +1,26 @@
-//! MessageArea：消息流渲染区——render_bridge 预计算 lines + 本地 LineCache。
+//! MessageArea：仅依赖 RENDER_CACHE 渲染消息，不再订阅完整 ViewStore。
 //!
 //! RENDER_CACHE atom 变化时，LineCache 根据 (len, ch, loading) key 重建 lines。
 //! 滚动/terminal resize 不触发重建——仅重建 Vec<Line>，不做 markdown 解析。
 //!
-//! - 滚动：Ctrl+Up/Down/Home/End + 鼠标滚轮
+//! - 滚动：由 ScrollViewState 处理键盘/鼠标事件
 //! - 智能跟随：use_effect 检测 CurrentTurn 出现
 
 #![allow(clippy::needless_update)]
 
 use crate::kit::atoms::{ACP_STATE, RENDER_CACHE};
 use crate::kit::focus_router;
+use crate::kit::panel_registry::clean_scrollbars;
 use crate::kit::theme;
 use crate::kit::welcome::Welcome;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
+    components::ScrollViewState,
+    crossterm::event::Event,
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction, Position},
+        layout::{Constraint, Direction},
         style::Style,
         text::{Line, Span},
-        widgets::{Paragraph, Wrap},
     },
 };
 
@@ -56,6 +57,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // ── 缓存 key：仅 entries 数量/高度/loading 变化时重建 ──
     let line_cache = hooks.use_state(|| LineCache::default());
+    let scroll_state = hooks.use_state(ScrollViewState::default);
+    let mut auto_scroll = hooks.use_state(|| true);
+    let had_ct = hooks.use_state(|| false);
     let new_key = {
         let h = raw_ch as u64;
         let l = entries_len as u64;
@@ -91,30 +95,35 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     }
 
     let cache = line_cache.read();
-    let all_lines = &cache.lines;
-    let empty = all_lines.is_empty();
-    let content_h = cache.content_h;
+    let empty = cache.lines.is_empty();
+    let content_lines = cache.lines.clone();
     let current_has_ct = cache.current_has_ct;
+    drop(cache);
     drop(cache_snapshot);
 
-    // ── 滚动状态 ──
-    let scroll_offset = hooks.use_state(|| 0u16);
-    let mut auto_scroll = hooks.use_state(|| true);
-    let (_, term_h) = hooks.use_terminal_size();
-    let vp_h: u16 = term_h.saturating_sub(4).max(1);
-    let max_scroll: u16 = content_h
-        .saturating_sub(vp_h as usize)
-        .min(u16::MAX as usize) as u16;
+    hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
+        if let Event::Key(key) = &event {
+            let _ = focus_router::message_accepts_key(key);
+        }
+        scroll_state.write().handle_event(&event);
+        if matches!(event, Event::Key(_) | Event::Mouse(_)) {
+            auto_scroll.set(false);
+            return EventResult::Consumed;
+        }
+        EventResult::Ignored
+    });
 
-    // use_effect：仅 current_has_ct 变化时运行，恢复自动滚动
-    let had_ct = hooks.use_state(|| false);
     hooks.use_effect(
         {
             let mut a = auto_scroll;
             let mut h = had_ct;
+            let st = scroll_state;
             move || {
                 if !h.get() && current_has_ct {
                     a.set(true);
+                }
+                if a.get() {
+                    st.write().scroll_to_bottom();
                 }
                 h.set(current_has_ct);
             }
@@ -122,69 +131,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         (current_has_ct,),
     );
 
-    // 自动滚底 + clamp（仅值变化时写入）
-    {
-        let mut new_val = *scroll_offset.read();
-        if auto_scroll.get() {
-            new_val = max_scroll;
-        }
-        new_val = new_val.min(max_scroll);
-        if new_val != *scroll_offset.read() {
-            *scroll_offset.write() = new_val;
-        }
-    }
-    let offset = *scroll_offset.read();
-
-    // ── 事件处理 ──
-    hooks.use_event_handler(
-        EventScope::Global,
-        EventPriority::High,
-        move |event| match event {
-            Event::Key(key)
-                if key.kind == KeyEventKind::Press
-                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                let _ = focus_router::message_accepts_key(&key);
-                match key.code {
-                    KeyCode::Up => {
-                        auto_scroll.set(false);
-                        *scroll_offset.write() = scroll_offset.read().saturating_sub(3);
-                        EventResult::Consumed
-                    }
-                    KeyCode::Down => {
-                        *scroll_offset.write() = (*scroll_offset.read() + 3).min(max_scroll);
-                        EventResult::Consumed
-                    }
-                    KeyCode::Home => {
-                        auto_scroll.set(false);
-                        *scroll_offset.write() = 0;
-                        EventResult::Consumed
-                    }
-                    KeyCode::End => {
-                        auto_scroll.set(true);
-                        *scroll_offset.write() = max_scroll;
-                        EventResult::Consumed
-                    }
-                    _ => EventResult::Ignored,
-                }
-            }
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    auto_scroll.set(false);
-                    *scroll_offset.write() = scroll_offset.read().saturating_sub(3);
-                    EventResult::Consumed
-                }
-                MouseEventKind::ScrollDown => {
-                    *scroll_offset.write() = (*scroll_offset.read() + 3).min(max_scroll);
-                    EventResult::Consumed
-                }
-                _ => EventResult::Ignored,
-            },
-            _ => EventResult::Ignored,
-        },
-    );
-
-    // ── 渲染 ──
     if empty {
         return element!(
             View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
@@ -194,64 +140,20 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .into_any();
     }
 
-    let text_content = Paragraph::new(all_lines.clone()).wrap(Wrap { trim: false });
-    let needs_bar = content_h > vp_h as usize;
-
     element!(
-        View(
-            flex_direction: Direction::Horizontal,
+        ScrollView(
+            flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
+            scroll_view_state: scroll_state,
+            scroll_bars: clean_scrollbars(),
         ) {
-            View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
-                Text(text: text_content, scroll: Position::new(0, offset), wrap: false)
+            for (i, line) in content_lines.iter().enumerate() {
+                View(key: i, height: Constraint::Length(1)) {
+                    Text(text: line.clone())
+                }
             }
-            { if needs_bar {
-                element!(scrollbar(
-                    offset: offset,
-                    content_h: content_h.min(u16::MAX as usize) as u16,
-                    vp_h: vp_h,
-                )).into_any()
-            } else {
-                element!(View(width: Constraint::Length(0), height: Constraint::Fill(1))).into_any()
-            } }
         }
     )
     .into_any()
-}
-
-#[derive(Clone, Props, Default)]
-struct ScrollbarProps {
-    offset: u16,
-    content_h: u16,
-    vp_h: u16,
-}
-
-#[component]
-#[allow(non_camel_case_types)]
-fn scrollbar(props: &ScrollbarProps) -> impl Into<AnyElement<'static>> {
-    let max_s = props.content_h.saturating_sub(props.vp_h);
-    if max_s == 0 {
-        return element!(View(width: Constraint::Length(0), height: Constraint::Fill(1)));
-    }
-    let thumb_h = ((props.vp_h as u64 * props.vp_h as u64) / props.content_h as u64)
-        .max(1)
-        .min(props.vp_h as u64) as u16;
-    let thumb_y =
-        ((props.vp_h.saturating_sub(thumb_h) as u64 * props.offset as u64) / max_s as u64) as u16;
-    let dim = theme::semantic().text.dim;
-    let top_text = " ".repeat(thumb_y as usize);
-    let thumb_text = " ".repeat(thumb_h as usize);
-
-    element!(
-        View(
-            flex_direction: Direction::Vertical,
-            width: Constraint::Length(1),
-            height: Constraint::Fill(1),
-        ) {
-            Text(text: top_text)
-            Text(text: thumb_text, style: Style::default().bg(dim))
-            Text(text: " ")
-        }
-    )
 }
