@@ -23,6 +23,9 @@ use ratatui_kit::{
 };
 use std::sync::{Arc, Mutex};
 
+use parking_lot::RwLock;
+use std::sync::OnceLock;
+
 use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::ViewModelsSnapshot;
 use crate::kit::atoms::{
@@ -505,8 +508,17 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     // 当前激活状态（驱动 popup 渲染）
     let mention_active = *AT_MENTION_ACTIVE.state().read();
     let slash_active = *SLASH_HINT_ACTIVE.state().read();
-    let mention_prefix = MENTION_PREFIX.state().read().clone();
-    let slash_prefix = SLASH_PREFIX.state().read().clone();
+    // 只在 popup 激活时才读/克隆 prefix 和 items，避免每帧不必要的 atom 读 + 堆分配
+    let mention_prefix = if mention_active {
+        MENTION_PREFIX.state().read().clone()
+    } else {
+        String::new()
+    };
+    let slash_prefix = if slash_active {
+        SLASH_PREFIX.state().read().clone()
+    } else {
+        String::new()
+    };
 
     // 多行渲染——按 \n 拆分，每行作为独立 Line，光标高亮放在对应行
     let lines = render_multiline_with_cursor(&text, cursor, loading);
@@ -516,7 +528,12 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let editor_rows = (line_count as u16).clamp(1, 10);
     let composer_height = editor_rows + 2;
 
-    let slash_items = build_slash_items();
+    // 只在 slash 激活时克隆整个 item 列表——非激活态跳过 50+ item × 3 String 的堆分配
+    let slash_items = if slash_active {
+        get_cached_slash_items()
+    } else {
+        Vec::new()
+    };
     let mention_select_state = state.clone();
     let slash_select_state = state.clone();
 
@@ -525,7 +542,12 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     } else {
         0
     };
-    let mention_items = filter_files_for_mention(&mention_prefix);
+    // 只在 mention 激活时读 FILE_LIST + 过滤——非激活态跳过 200+ 文件名的 atom 读和分配
+    let mention_items = if mention_active {
+        filter_files_for_mention(&mention_prefix)
+    } else {
+        Vec::new()
+    };
     let mention_popup_height = if mention_active {
         popup_height(mention_items.len())
     } else {
@@ -557,12 +579,20 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         match item.kind {
                             SlashActionKind::Panel => {
                                 if let Some(kind) = panel_for_slash_command(&item.insert_text) {
+                                    // 清空输入框再打开面板
+                                    let mut editor = slash_select_state.write();
+                                    editor.text.clear();
+                                    editor.cursor = 0;
                                     open_panel(kind);
                                 }
                             }
                             SlashActionKind::Command | SlashActionKind::Skill => {
                                 // S16：command/skill 先检查是否映射到面板（如 /history → ThreadBrowser）
                                 if let Some(kind) = panel_for_slash_command(&item.insert_text) {
+                                    // 清空输入框再打开面板
+                                    let mut editor = slash_select_state.write();
+                                    editor.text.clear();
+                                    editor.cursor = 0;
                                     open_panel(kind);
                                 } else {
                                     let mut editor = slash_select_state.write();
@@ -765,6 +795,7 @@ fn build_slash_items() -> Vec<SlashCompletionItem> {
     for panel in PANELS {
         let slash_name = panel.slash_command.to_string();
         items.push(SlashCompletionItem {
+            label_lowercase: slash_name.to_lowercase(),
             label: slash_name.clone(),
             insert_text: slash_name,
             description: panel.description.to_string(),
@@ -783,9 +814,28 @@ fn build_slash_items() -> Vec<SlashCompletionItem> {
             insert_text: name.clone(),
             description: description.clone(),
             kind,
+            label_lowercase: name.to_lowercase(),
         });
     }
+    // 字母序排序——只排一次，组件端不再重排
+    items.sort_by(|a, b| a.label_lowercase.cmp(&b.label_lowercase));
     items
+}
+
+/// 缓存 `build_slash_items()` 的结果，仅在 ACP 推送新命令时刷新。
+static SLASH_ITEMS_CACHE: OnceLock<RwLock<Vec<SlashCompletionItem>>> = OnceLock::new();
+
+fn slash_items_cache() -> &'static RwLock<Vec<SlashCompletionItem>> {
+    SLASH_ITEMS_CACHE.get_or_init(|| RwLock::new(build_slash_items()))
+}
+
+/// 刷新斜杠命令缓存——由 acp_notifier 在收到新命令后调用。
+pub(crate) fn refresh_slash_items() {
+    *slash_items_cache().write() = build_slash_items();
+}
+
+fn get_cached_slash_items() -> Vec<SlashCompletionItem> {
+    slash_items_cache().read().clone()
 }
 
 /// 从 `FILE_LIST` atom 读出 cwd 文件列表，按 `prefix` 过滤，最多 20 条。

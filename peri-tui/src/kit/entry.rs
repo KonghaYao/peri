@@ -21,6 +21,7 @@ use crate::kit::acp_notifier::spawn_kit_notifier;
 use crate::kit::app_shell::AppShell;
 use crate::kit::atoms;
 use crate::kit::input_history;
+use crate::kit::render_bridge::spawn_render_bridge;
 use crate::kit::rewind_action::spawn_rewind_consumer;
 use crate::kit::service_snapshot::{SnapshotSource, spawn_service_snapshot};
 use crate::kit::submit_consumer::spawn_submit_consumer;
@@ -98,10 +99,19 @@ pub async fn run_kit_fullscreen(
 
         // 4c. bridge channel：notifier → acp_bridge
         let (bridge_tx, bridge_rx) = mpsc::unbounded_channel();
+        let (render_bridge_tx, render_bridge_rx) = mpsc::unbounded_channel();
+        let (resize_tx, resize_rx) = mpsc::unbounded_channel::<u16>();
+        let _ = atoms::RESIZE_TX.set(resize_tx);
 
         // 4d. 启动四链路
-        let _notifier_handle = spawn_kit_notifier(notification_rx, bridge_tx, shutdown.clone());
+        let _notifier_handle = spawn_kit_notifier(
+            notification_rx,
+            bridge_tx,
+            render_bridge_tx,
+            shutdown.clone(),
+        );
         let _bridge_handle = spawn_acp_bridge(bridge_rx, shutdown.clone());
+        let _render_handle = spawn_render_bridge(render_bridge_rx, resize_rx, shutdown.clone());
         let cwd = app.services.cwd.clone();
         let cwd_for_init = cwd.clone();
         let _submit_handle =

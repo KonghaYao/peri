@@ -35,6 +35,8 @@ pub struct SlashCompletionItem {
     pub insert_text: String,
     pub description: String,
     pub kind: SlashActionKind,
+    /// label 的小写版本，预计算避免每帧 to_lowercase() 分配。
+    pub label_lowercase: String,
 }
 
 #[derive(Default, Props)]
@@ -52,18 +54,16 @@ pub fn SlashCompletion(
 ) -> impl Into<AnyElement<'static>> {
     let selection = hooks.use_atom(&SLASH_SELECTED_INDEX);
 
+    // 预计算一次 prefix_lower，避免过滤循环中反复分配。
+    let prefix_lower = props.prefix.to_lowercase();
     let filtered: Vec<SlashCompletionItem> = props
         .items
         .iter()
-        .filter(|item| {
-            props.prefix.is_empty()
-                || item
-                    .label
-                    .to_lowercase()
-                    .starts_with(&props.prefix.to_lowercase())
-        })
+        .filter(|item| props.prefix.is_empty() || item.label_lowercase.starts_with(&prefix_lower))
         .cloned()
         .collect();
+
+    // items 已在 build_slash_items() 端字母序排序，此处不再重排
 
     let item_count = filtered.len();
     let filtered_for_handler = filtered.clone();
@@ -124,6 +124,13 @@ pub fn SlashCompletion(
     let popup_tokens = &theme::component().popup;
     let semantic = theme::semantic();
     let sel_idx = clamp_selection(*selection.read(), item_count);
+
+    // 双列布局：计算 label 列最大宽度（含 / 前缀），描述列自然对齐
+    let max_label_width = filtered
+        .iter()
+        .map(|item| item.label.chars().count() + 1) // +1 for '/'
+        .max()
+        .unwrap_or(0);
     let display_lines: Vec<Line<'_>> = filtered
         .iter()
         .enumerate()
@@ -152,9 +159,12 @@ pub fn SlashCompletion(
                 Style::default().fg(semantic.text.dim)
             };
 
+            // 双列：label 左对齐补足到 max_label_width，描述从固定列开始
+            let padded_label = format!("/{:<width$}", item.label, width = max_label_width);
+
             Line::from(vec![
                 Span::styled(marker, line_style),
-                Span::styled(format!("/{}", item.label), line_style),
+                Span::styled(padded_label, line_style),
                 Span::styled(format!("  {}", item.description), detail_style),
             ])
         })
@@ -170,10 +180,26 @@ pub fn SlashCompletion(
                 .bold(),
         );
 
+    // 计算可见窗口：只渲染可见区域内的项，避免选中项滚出视野
+    let popup_h = theme::component().popup.inline_height;
+    let visible_rows = popup_h.saturating_sub(2) as usize; // 减去上下边框
+    let scroll_start = if item_count <= visible_rows {
+        0
+    } else {
+        let max_scroll = item_count.saturating_sub(visible_rows);
+        // 选中项保持在可视区域上 1/3 处，避免靠近边缘
+        sel_idx.saturating_sub(visible_rows / 3).min(max_scroll)
+    };
+    let visible_lines: Vec<Line<'_>> = display_lines
+        .into_iter()
+        .skip(scroll_start)
+        .take(visible_rows)
+        .collect();
+
     let text_render = if empty {
         Paragraph::new(Line::from("  (no matches)").fg(semantic.text.muted))
     } else {
-        Paragraph::new(ratatui::text::Text::from(display_lines))
+        Paragraph::new(ratatui::text::Text::from(visible_lines))
     }
     .block(popup_block);
 
@@ -181,7 +207,7 @@ pub fn SlashCompletion(
         View(
             flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
-            height: Constraint::Length(theme::component().popup.inline_height),
+            height: Constraint::Length(popup_h),
         ) {
             Text(text: text_render)
         }

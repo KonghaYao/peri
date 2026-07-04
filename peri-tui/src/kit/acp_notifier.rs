@@ -22,6 +22,7 @@ use tracing::{debug, warn};
 use crate::acp_client::AcpNotification;
 use crate::kit::acp_types::AcpEventData;
 use crate::kit::atoms::AVAILABLE_SLASH_COMMANDS;
+use crate::kit::input_area::refresh_slash_items;
 
 /// 启动 kit ACP notifier 后台任务。
 ///
@@ -32,6 +33,7 @@ use crate::kit::atoms::AVAILABLE_SLASH_COMMANDS;
 pub fn spawn_kit_notifier(
     mut notification_rx: mpsc::UnboundedReceiver<AcpNotification>,
     bridge_tx: mpsc::UnboundedSender<AcpEventData>,
+    render_bridge_tx: mpsc::UnboundedSender<AcpEventData>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -43,7 +45,7 @@ pub fn spawn_kit_notifier(
                 }
                 n = notification_rx.recv() => {
                     match n {
-                        Some(notif) => forward_notification(&bridge_tx, notif),
+                        Some(notif) => forward_notification(&bridge_tx, &render_bridge_tx, notif),
                         None => {
                             debug!("kit ACP notifier: notification channel closed (transport disconnected)");
                             break;
@@ -58,7 +60,11 @@ pub fn spawn_kit_notifier(
 /// 把单条 `AcpNotification` 转换并推入 bridge channel。
 ///
 /// 设计决策见模块级注释：UnstableEvent 是主通道，其他变体目前 silent drop。
-fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventData>, n: AcpNotification) {
+fn forward_notification(
+    bridge_tx: &mpsc::UnboundedSender<AcpEventData>,
+    render_bridge_tx: &mpsc::UnboundedSender<AcpEventData>,
+    n: AcpNotification,
+) {
     match n {
         AcpNotification::UnstableEvent { event, data, .. } => {
             let decoded = AcpEventData::decode(&event, data);
@@ -66,8 +72,11 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventData>, n: AcpN
                 debug!(event = %event, "kit ACP notifier: unknown unstable-event, dropping");
                 return;
             }
-            if let Err(e) = bridge_tx.send(decoded) {
+            if let Err(e) = bridge_tx.send(decoded.clone()) {
                 warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping event");
+            }
+            if let Err(e) = render_bridge_tx.send(decoded) {
+                warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may stall");
             }
         }
         // kit notifier: extract AvailableCommandsUpdate from SessionUpdate
@@ -120,6 +129,7 @@ fn handle_session_update(params: serde_json::Value) {
         .collect();
     let len = entries.len();
     *AVAILABLE_SLASH_COMMANDS.state().write() = entries;
+    refresh_slash_items();
     debug!(
         "kit ACP notifier: updated AVAILABLE_SLASH_COMMANDS ({})",
         len
@@ -141,8 +151,9 @@ mod tests {
     ) {
         let (notif_tx, notif_rx) = mpsc::unbounded_channel::<AcpNotification>();
         let (bridge_tx, bridge_rx) = mpsc::unbounded_channel::<AcpEventData>();
+        let (render_bridge_tx, _render_bridge_rx) = mpsc::unbounded_channel::<AcpEventData>();
         let shutdown = CancellationToken::new();
-        let _handle = spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+        let _handle = spawn_kit_notifier(notif_rx, bridge_tx, render_bridge_tx, shutdown.clone());
         (notif_tx, bridge_rx, shutdown)
     }
 

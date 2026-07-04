@@ -15,6 +15,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::panel_types::PanelKind;
+use crate::kit::render_bridge::RenderCache;
 use crate::kit::rewind_action::RewindAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +28,7 @@ pub enum PopupKind {
 
 pub type Handle<T> = AtomState<T>;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct AcpStateSnapshot {
     pub variant: u8,
     pub view_count: usize,
@@ -169,12 +170,14 @@ pub static ACP_STATE: AtomStatic<AcpStateSnapshot> =
     AtomStatic::new(|| AcpStateSnapshot::default());
 pub static VIEW_MODELS: AtomStatic<ViewModelsSnapshot> =
     AtomStatic::new(|| ViewModelsSnapshot::default());
+pub static RENDER_CACHE: AtomStatic<RenderCache> = AtomStatic::new(|| RenderCache::default());
 pub static MODEL_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static PROVIDER_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static MODE_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static AT_MENTION_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static SLASH_HINT_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static SUBMIT_TX: OnceLock<UnboundedSender<String>> = OnceLock::new();
+pub static RESIZE_TX: OnceLock<UnboundedSender<u16>> = OnceLock::new();
 
 pub static SERVICE_SNAPSHOT: AtomStatic<ServiceSnapshot> =
     AtomStatic::new(|| ServiceSnapshot::default());

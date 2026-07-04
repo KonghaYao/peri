@@ -317,6 +317,11 @@ fn push_view_models(state: &mut BridgeState) {
 }
 
 /// 将 BridgeState 中的状态快照写入 ACP_STATE Atom。
+///
+/// 仅在快照值变化时才写入——避免不必要的全树重渲染。
+/// 流式期间 variant/is_loading 不变时，仅 view_count 变化；
+/// popup 状态由各自的独立 atom 追踪（SLASH_HINT_ACTIVE 等），
+/// 不应写入 ACP_STATE 导致 AppShell 重渲染。
 fn push_acp_state(state: &mut BridgeState) {
     let snapshot = AcpStateSnapshot {
         variant: state.variant,
@@ -326,7 +331,11 @@ fn push_acp_state(state: &mut BridgeState) {
         at_mention_active: *AT_MENTION_ACTIVE.state().read(),
         slash_hint_active: *SLASH_HINT_ACTIVE.state().read(),
     };
-    *ACP_STATE.state().write() = snapshot;
+    let ref_guard = ACP_STATE.state();
+    let mut acp = ref_guard.write();
+    if *acp != snapshot {
+        *acp = snapshot;
+    }
 }
 
 /// 将 BridgeState.popup_kind 写入 POPUP_KIND Atom（S7）。
