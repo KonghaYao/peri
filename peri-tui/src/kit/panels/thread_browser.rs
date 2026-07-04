@@ -1,14 +1,14 @@
-//! ratatui-kit ThreadBrowserPanel component.
+//! Thread Browser 面板（TUI-PAGE §6.6）
 //!
 //! S6c：thread 列表从 `THREAD_LIST` atom 读取（由 `service_snapshot` 后台任务
 //! 周期性从 ServiceRegistry.thread_store 派生）。Enter 切换 thread 操作 S11
 //! 解耦后通过 AcpClient 触发（暂留 TODO）。
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
+    prelude::tui_widget_list::{ListBuildContext, ListState},
     prelude::*,
     ratatui::{
-        layout::Constraint,
+        layout::{Constraint, Direction},
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -17,133 +17,112 @@ use ratatui_kit::{
 
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{THREAD_LIST, THREAD_LOAD_TX, ThreadSummary};
-use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 
 #[component]
 pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let cursor = hooks.use_state(|| 0usize);
+    let list_state = hooks.use_state(ListState::default);
 
     // S6c: 订阅 THREAD_LIST atom——后台 service_snapshot 2s 派生一次
     let threads_store = hooks.use_atom(&THREAD_LIST);
     let threads: Vec<ThreadSummary> = threads_store.read().clone();
     let _ = threads_store; // StoreState 是 Copy，无需显式 drop
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        move |event| {
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
-            }
-            match key.code {
-                KeyCode::Esc => {
-                    // 由 PanelOverlay 上层 Esc 处理关闭
-                }
-                KeyCode::Up => {
-                    let mut c = cursor.write();
-                    *c = previous_selection(*c);
-                }
-                KeyCode::Down => {
-                    let mut c = cursor.write();
-                    let count = THREAD_LIST.state().read().len();
-                    if count > 0 {
-                        *c = next_selection(*c, count);
-                    }
-                }
-                KeyCode::Enter => {
-                    // H3: 通过 THREAD_LOAD_TX → thread_load_consumer → AcpClient.load_session
-                    // 切换成功后 ACP server 推送 ViewCommit 自动刷新消息流。
-                    let sel_idx = *cursor.read();
-                    let threads = THREAD_LIST.state().read().clone();
-                    if let Some(entry) = threads.get(sel_idx) {
-                        if let Some(tx) = THREAD_LOAD_TX.get() {
-                            let _ = tx.send(entry.id.clone());
-                        }
-                        // I19-A: 弹栈而非清空整个栈
-                        crate::kit::panel_registry::close_active_panel();
-                    }
-                }
-                _ => {}
-            }
-            EventResult::Consumed
-        }
-    });
+    let header_style = Style::new().fg(theme::semantic().text.primary).bold();
+    let muted_style = Style::new().fg(theme::semantic().text.muted).italic();
+    let item_meta_style = Style::new().fg(theme::semantic().text.muted);
 
-    let sel = *cursor.read();
-    let mut lines: Vec<Line<'_>> = Vec::new();
-
-    if threads.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            "  No threads",
-            Style::new().fg(theme::semantic().text.muted),
-        )]));
-    } else {
-        for (i, entry) in threads.iter().enumerate() {
-            let is_selected = i == sel;
-            let cursor_marker = if is_selected { ">" } else { " " };
-            let name_style = if is_selected {
-                Style::new().fg(theme::component().panel.title).bold()
-            } else {
-                Style::new().fg(theme::semantic().text.primary)
-            };
-
-            let id_short: String = entry.id.chars().take(8.min(entry.id.len())).collect();
-            let title = entry
-                .title
-                .clone()
-                .unwrap_or_else(|| format!("(untitled {})", id_short));
-
-            // Line 1: cursor + title
-            lines.push(Line::from(vec![Span::styled(
-                format!(" {} {} ", cursor_marker, title),
-                name_style,
-            )]));
-
-            // Line 2: id, updated_at, message_count
-            let updated = entry
-                .updated_at
-                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_else(|| "-".to_string());
-            lines.push(Line::from(vec![Span::styled(
-                format!(
-                    "    {}  {}  {} messages",
-                    entry.id, updated, entry.message_count,
-                ),
-                Style::new().fg(theme::semantic().text.muted),
-            )]));
-
-            // Line 3: cwd (truncated for narrow viewports)
-            let cwd: String = entry.cwd.chars().take(54).collect();
-            lines.push(Line::from(vec![Span::styled(
-                format!("    {}", cwd),
-                Style::new().fg(theme::semantic().text.dim),
-            )]));
-
-            // Blank separator line
-            lines.push(Line::from(""));
-        }
-    }
-
-    // Bottom hint line
-    lines.push(Line::from(vec![Span::styled(
-        "  ↑/↓::navigate Enter::switch · Esc::close",
-        Style::new().fg(theme::semantic().text.muted),
-    )]));
-
-    let content = if threads.is_empty() {
-        Paragraph::new(Line::from("  (empty)").fg(theme::semantic().text.muted))
-    } else {
-        Paragraph::new(ratatui::text::Text::from(lines))
-    };
     panel_shell!(PanelKind::ThreadBrowser, {
-            ScrollView(
-                scroll_bars: crate::kit::panel_registry::clean_scrollbars(),
-                width: Constraint::Fill(1),
-                height: Constraint::Fill(1),
-            ) {
-                Text(text: content)
+        View(
+            flex_direction: Direction::Vertical,
+            width: Constraint::Fill(1),
+            height: Constraint::Fill(1),
+        ) {
+            Text(
+                text: Line::from(vec![Span::styled(
+                    format!("  {} threads", threads.len()),
+                    header_style,
+                )]),
+            )
+            Text(
+                text: Line::from(vec![Span::styled(
+                    "  Enter::open · Esc::close",
+                    muted_style,
+                )]),
+            )
+            if threads.is_empty() {
+                Text(
+                    text: Line::from(vec![Span::styled(
+                        "  No recent threads",
+                        item_meta_style,
+                    )]),
+                )
+            } else {
+                VirtualList<Paragraph<'static>>(
+                    width: Constraint::Fill(1),
+                    height: Constraint::Fill(1),
+                    state: list_state,
+                    item_count: threads.len(),
+                    active: true,
+                    default_index: Some(0),
+                    scroll_padding: 2u16,
+                    infinite_scrolling: false,
+                    render_item: move |ctx: &ListBuildContext| {
+                        let entry = &threads[ctx.index];
+                        let selected_style = if ctx.is_selected {
+                            Style::new().fg(theme::component().panel.title).bold()
+                        } else {
+                            Style::new().fg(theme::semantic().text.primary)
+                        };
+                        let id_short: String = entry.id.chars().take(8).collect();
+                        let title = entry
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| format!("(untitled {})", id_short));
+                        let updated = entry
+                            .updated_at
+                            .map(|dt| dt.format("%Y-%m-%d").to_string())
+                            .unwrap_or_else(|| "-".to_string());
+                        let cwd: String = entry.cwd.chars().take(40).collect();
+                        (
+                            Paragraph::new(vec![
+                                Line::from(vec![Span::styled(
+                                    format!(
+                                        "{} {}  {}",
+                                        if ctx.is_selected { ">" } else { " " },
+                                        updated,
+                                        title
+                                    ),
+                                    selected_style,
+                                )]),
+                                Line::from(vec![Span::styled(
+                                    format!(
+                                        "    id: {}...  {} messages  {}",
+                                        id_short, entry.message_count, cwd
+                                    ),
+                                    item_meta_style,
+                                )]),
+                            ]),
+                            2u16,
+                        )
+                    },
+                    on_select: move |index: usize| {
+                        let threads = THREAD_LIST.state().read().clone();
+                        if let Some(entry) = threads.get(index) {
+                            if let Some(tx) = THREAD_LOAD_TX.get() {
+                                let _ = tx.send(entry.id.clone());
+                            }
+                            crate::kit::panel_registry::close_active_panel();
+                        }
+                    },
+                )
             }
+            Text(
+                text: Line::from(vec![Span::styled(
+                    "  ↑/↓::navigate Enter::open · Esc::close",
+                    muted_style,
+                )]),
+            )
+        }
     })
 }
