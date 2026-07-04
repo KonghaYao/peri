@@ -20,12 +20,13 @@
 #![allow(clippy::needless_update)]
 
 use crate::kit::focus_router;
+use crate::kit::panel_registry::clean_scrollbars;
 use crate::kit::theme;
 use crate::kit::view_render;
 use crate::kit::welcome::Welcome;
 use peri_acp_types::view_model::ViewModel;
 use ratatui_kit::{
-    components::scroll_view::{ScrollBars, ScrollView, ScrollViewState},
+    components::scroll_view::{ScrollView, ScrollViewState},
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
     prelude::*,
     ratatui::{
@@ -212,10 +213,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         },
     );
 
+    // S16：peri-widgets 风格滚动条——空格 + bg 颜色替代 █ 字符，无行间缝隙
+    let message_scrollbars = clean_scrollbars();
+
     element!(
         ScrollView(
             scroll_view_state: scroll_state,
-            scroll_bars: ScrollBars::default(),
+            scroll_bars: message_scrollbars,
             flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),

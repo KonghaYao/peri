@@ -5,6 +5,9 @@
 
 use std::sync::{Arc, Mutex};
 
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
+
 use ratatui_kit::{
     crossterm::event::{Event, KeyEventKind},
     prelude::*,
@@ -34,14 +37,27 @@ pub struct MentionPopupProps {
 pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selection = hooks.use_atom(&MENTION_SELECTED_INDEX);
 
-    let filtered: Vec<String> = props
-        .items
-        .iter()
-        .filter(|item| {
-            props.prefix.is_empty() || item.to_lowercase().contains(&props.prefix.to_lowercase())
-        })
-        .cloned()
-        .collect();
+    let filtered: Vec<String> = if props.prefix.is_empty() {
+        props.items.iter().take(20).cloned().collect()
+    } else {
+        let matcher = SkimMatcherV2::default();
+        let query = props.prefix.to_lowercase();
+        let mut scored: Vec<(i64, &String)> = props
+            .items
+            .iter()
+            .filter_map(|item| {
+                let score = matcher.fuzzy_match(item, &query)?;
+                Some((score, item))
+            })
+            .collect();
+        // 按分数降序排列
+        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
+        scored
+            .into_iter()
+            .take(20)
+            .map(|(_, item)| item.clone())
+            .collect()
+    };
 
     let item_count = filtered.len();
     let filtered_for_handler = filtered.clone();
