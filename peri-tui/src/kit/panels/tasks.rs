@@ -52,7 +52,8 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             match key.code {
                 KeyCode::Esc => close_panel(),
                 KeyCode::Up => {
-                    *selected.write() = previous_selection(*selected.read());
+                    let mut s = selected.write();
+                    *s = previous_selection(*s);
                 }
                 KeyCode::Down => {
                     let mut s = selected.write();

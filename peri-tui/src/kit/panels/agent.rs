@@ -60,7 +60,8 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             match key.code {
                 KeyCode::Esc => close_panel(),
                 KeyCode::Up => {
-                    *cursor.write() = previous_selection(*cursor.read());
+                    let mut c = cursor.write();
+                    *c = previous_selection(*c);
                 }
                 KeyCode::Down => {
                     let mut c = cursor.write();
