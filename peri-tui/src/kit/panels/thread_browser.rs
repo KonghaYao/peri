@@ -8,7 +8,7 @@ use ratatui_kit::{
     prelude::tui_widget_list::{ListBuildContext, ListState},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
+        layout::Constraint,
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -33,11 +33,6 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let item_meta_style = Style::new().fg(theme::semantic().text.muted);
 
     panel_shell!(PanelKind::ThreadBrowser, {
-        View(
-            flex_direction: Direction::Vertical,
-            width: Constraint::Fill(1),
-            height: Constraint::Fill(1),
-        ) {
             Text(
                 text: Line::from(vec![Span::styled(
                     format!("  {} threads", threads.len()),
@@ -123,6 +118,5 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     muted_style,
                 )]),
             )
-        }
     })
 }
