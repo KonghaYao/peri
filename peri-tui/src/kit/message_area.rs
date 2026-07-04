@@ -108,19 +108,32 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // Ctrl+ 导航键用于驱动消息区滚动，保持输入区多行/历史行为不变。
     let scroll_state = hooks.use_state(ScrollViewState::default);
 
-    // I23：流式自动跟随——每次 current_turn Arc 重建（新 chunk 到达）
-    // 时自动滚动到底部。Arc::as_ptr 作为 deps，每帧相同指针则不触发，
-    // 新的分配必触发（push_view_models 每次 Arc::from 都分配新 buffer）。
+    // I23-b：智能跟随——用户手动滚上后不再抢滚动，新 turn 自动恢复。
+    let mut auto_scroll = hooks.use_state(|| true);
+
+    // I23-b：智能跟随——新 turn 自动启用，用户 Ctrl+Up 滚上去后暂停。
+    // deps 用 (Arc指针, len) 元组：指针变 = 新 chunk，len 变 = turn 边界。
     let current_turn_ptr = Arc::as_ptr(&props.current_turn) as *const () as usize;
+    let current_turn_len = props.current_turn.len();
+    let had_content = hooks.use_state(|| false);
+    let current_turn_empty = props.current_turn.is_empty();
     hooks.use_effect(
         {
+            let mut auto_scroll = auto_scroll;
+            let mut had_content = had_content;
             move || {
-                // 有 chunk 就滚底。大多数聊天 UI（ChatGPT/Claude）
-                // 都这么做——流式期间自动跟随，结束后用户可用 Ctrl+Up 回看。
-                scroll_state.write().scroll_to_bottom();
+                // 新 turn 开始（上一帧空→本帧非空）→ 恢复自动滚动
+                if !had_content.get() && !current_turn_empty {
+                    auto_scroll.set(true);
+                }
+                had_content.set(!current_turn_empty);
+
+                if auto_scroll.get() {
+                    scroll_state.write().scroll_to_bottom();
+                }
             }
         },
-        current_turn_ptr,
+        (current_turn_ptr, current_turn_len),
     );
 
     hooks.use_event_handler(
@@ -135,6 +148,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 let key_event = Event::Key(key);
                 match key.code {
                     KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End => {
+                        let is_scroll_up = matches!(key.code, KeyCode::Up | KeyCode::Home);
+                        let is_scroll_end = matches!(key.code, KeyCode::End);
+                        if is_scroll_up {
+                            auto_scroll.set(false);
+                        }
+                        if is_scroll_end {
+                            auto_scroll.set(true);
+                        }
                         let before = scroll_state.read().offset();
                         {
                             let mut state = scroll_state.write();
@@ -145,6 +166,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                             ?before,
                             ?after,
                             ?key,
+                            auto_scroll = auto_scroll.get(),
                             "message area handled ctrl key scroll"
                         );
                         EventResult::Consumed
@@ -159,6 +181,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     | MouseEventKind::ScrollDown
                     | MouseEventKind::ScrollLeft
                     | MouseEventKind::ScrollRight => {
+                        auto_scroll.set(false);
                         let before = scroll_state.read().offset();
                         {
                             let mut state = scroll_state.write();
