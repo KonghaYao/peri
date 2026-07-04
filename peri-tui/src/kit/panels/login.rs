@@ -58,8 +58,9 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let latest_providers = PROVIDER_LIST.state().read().clone();
                     if let Some(p) = latest_providers.get(sel) {
                         let provider_id = p.id.clone();
-                        // S16：异步切换 + 持久化，避免同步 disk IO 阻塞主线程
-                        std::thread::spawn(move || {
+                        // 异步切换 + 持久化——在 tokio runtime 内执行，避免 OS 线程
+                        // 与事件循环竞速 parking_lot::RwLock（PERI_CONFIG_HANDLE）
+                        tokio::spawn(async move {
                             activate_provider(&provider_id);
                         });
                     }
