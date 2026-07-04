@@ -53,7 +53,7 @@ fn render_panel(
             width: Constraint::Fill(1),
             height: panel_registry::panel_constraint(layout.height),
         ) {
-            View(width: panel_registry::panel_constraint(layout.width), height: Constraint::Fill(1)) {
+            View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
                 { panel }
             }
         }

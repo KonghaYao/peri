@@ -15,7 +15,7 @@ use crate::kit::theme;
 use crate::kit::welcome::Welcome;
 use ratatui_kit::{
     components::ScrollViewState,
-    crossterm::event::Event,
+    crossterm::event::{Event, KeyEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
@@ -105,10 +105,19 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         if let Event::Key(key) = &event {
             let _ = focus_router::message_accepts_key(key);
         }
-        scroll_state.write().handle_event(&event);
-        if matches!(event, Event::Key(_) | Event::Mouse(_)) {
+        // 鼠标事件：交 ScrollView 内置滚动处理
+        if matches!(&event, Event::Mouse(_)) {
+            scroll_state.write().handle_event(&event);
             auto_scroll.set(false);
             return EventResult::Consumed;
+        }
+        // 键盘事件：仅消费 message 专用键（Ctrl+↑↓HomeEnd），其余透传给 InputArea
+        if let Event::Key(key) = &event {
+            if key.kind == KeyEventKind::Press && focus_router::message_accepts_key(key) {
+                scroll_state.write().handle_event(&event);
+                auto_scroll.set(false);
+                return EventResult::Consumed;
+            }
         }
         EventResult::Ignored
     });
