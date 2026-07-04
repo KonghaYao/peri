@@ -23,11 +23,12 @@ use ratatui_kit::{
 };
 use std::sync::{Arc, Mutex};
 
+use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::ViewModelsSnapshot;
 use crate::kit::atoms::{
     ACP_STATE, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST, INPUT_AREA_ESC_PREFIX,
-    INPUT_BUFFER, MENTION_PREFIX, MENTION_SELECTED_INDEX, SKILL_NAMES, SLASH_HINT_ACTIVE,
-    SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX, VIEW_MODELS,
+    INPUT_BUFFER, MENTION_PREFIX, MENTION_SELECTED_INDEX, PREDICTION, SKILL_NAMES,
+    SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX, VIEW_MODELS,
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history};
@@ -337,6 +338,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         submit_text(submitted);
                         reset_mention_popup();
                         reset_slash_popup();
+                        *PREDICTION.state().write() = PredictionState::default();
                         EventResult::Consumed
                     }
 
@@ -445,7 +447,22 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         let mut s = state.write();
                         s.insert_char(ch);
                         update_popup_prefix(&s.text);
+                        *PREDICTION.state().write() = PredictionState::default();
                         EventResult::Consumed
+                    }
+
+                    // ── 预测文本接受（Tab）──
+                    KeyCode::Tab => {
+                        let pred = PREDICTION.state();
+                        if !pred.read().text.is_empty() {
+                            let text = pred.read().text.clone();
+                            *pred.write() = PredictionState::default();
+                            state.write().replace_all(text);
+                            reset_mention_popup();
+                            reset_slash_popup();
+                            return EventResult::Consumed;
+                        }
+                        EventResult::Ignored
                     }
 
                     _ => EventResult::Ignored,
@@ -473,6 +490,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                 let mut s = state.write();
                 s.insert_str(&truncated);
                 update_popup_prefix(&s.text);
+                *PREDICTION.state().write() = PredictionState::default();
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -514,10 +532,13 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         0
     };
     let overlay_height = slash_popup_height.max(mention_popup_height);
+    // 预测文本（buffer 为空且 prediction 非空时显示为灰色占位符）
+    let pred_text = hooks.use_atom(&PREDICTION).read().text.clone();
+    let show_prediction = !hidden && !pred_text.is_empty() && text.is_empty();
     let total_height = if hidden {
         0
     } else {
-        composer_height + overlay_height
+        composer_height + overlay_height + if show_prediction { 1 } else { 0 }
     };
 
     let composer_lines = build_composer_lines(lines, loading);
@@ -582,6 +603,19 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         height: Constraint::Length(composer_height),
                     ) {
                         Text(text: Paragraph::new(composer_lines).block(build_composer_block(loading)))
+                    }
+                ).into_any()
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
+            } }
+            { if show_prediction {
+                let pred_line = Line::from(Span::styled(
+                    format!("  {}", pred_text),
+                    Style::default().fg(theme::component().statusbar.muted),
+                ));
+                element!(
+                    View(width: Constraint::Fill(1), height: Constraint::Length(1)) {
+                        Text(text: Paragraph::new(pred_line))
                     }
                 ).into_any()
             } else {
