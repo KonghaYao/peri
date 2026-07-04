@@ -112,7 +112,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let mut auto_scroll = hooks.use_state(|| true);
 
     // I23-b：智能跟随——新 turn 自动启用，用户 Ctrl+Up 滚上去后暂停。
-    // deps 用 (Arc指针, len) 元组：指针变 = 新 chunk，len 变 = turn 边界。
+    // deps 用 (Arc指针, len, content_height) 元组：指针变 = 新 chunk，len 变 = turn 边界，
+    // content_height 变 = 内容增长。仅在未处于底部时才触发 scroll_to_bottom，
+    // 避免已到底时多余的 state write → 二重渲染 → 100% CPU。
     let current_turn_ptr = Arc::as_ptr(&props.current_turn) as *const () as usize;
     let current_turn_len = props.current_turn.len();
     let had_content = hooks.use_state(|| false);
@@ -129,11 +131,19 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 had_content.set(!current_turn_empty);
 
                 if auto_scroll.get() {
-                    scroll_state.write().scroll_to_bottom();
+                    // S16：仅内容增长且未在底部时才滚动，避免多余的 state write →
+                    // 组件二重渲染 → markdown 全量重解析。
+                    let is_at_bottom = {
+                        let offset_y = scroll_state.read().offset().y as usize;
+                        offset_y >= content_height as usize
+                    };
+                    if !is_at_bottom {
+                        scroll_state.write().scroll_to_bottom();
+                    }
                 }
             }
         },
-        (current_turn_ptr, current_turn_len),
+        (current_turn_ptr, current_turn_len, content_height),
     );
 
     hooks.use_event_handler(

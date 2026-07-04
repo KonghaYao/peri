@@ -193,6 +193,8 @@ pub static POPUP_KIND: AtomStatic<Option<PopupKind>> = AtomStatic::new(|| None);
 
 pub static INPUT_HISTORY: AtomStatic<VecDeque<String>> = AtomStatic::new(|| VecDeque::new());
 pub static INPUT_HISTORY_INDEX: AtomStatic<Option<usize>> = AtomStatic::new(|| None);
+/// 进入历史模式时保存的用户当前输入文本草稿。
+pub static DRAFT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 pub static INPUT_BUFFER: AtomStatic<VecDeque<String>> = AtomStatic::new(|| VecDeque::new());
 
 pub static FILE_LIST: AtomStatic<Vec<String>> = AtomStatic::new(|| Vec::new());

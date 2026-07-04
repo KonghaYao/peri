@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex};
 use crate::kit::atoms::ViewModelsSnapshot;
 use crate::kit::atoms::{
     ACP_STATE, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST, INPUT_AREA_ESC_PREFIX,
-    INPUT_BUFFER, MENTION_PREFIX, MENTION_SELECTED_INDEX, SLASH_HINT_ACTIVE, SLASH_PREFIX,
-    SLASH_SELECTED_INDEX, SUBMIT_TX, VIEW_MODELS,
+    INPUT_BUFFER, MENTION_PREFIX, MENTION_SELECTED_INDEX, SKILL_NAMES, SLASH_HINT_ACTIVE,
+    SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX, VIEW_MODELS,
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history};
@@ -260,6 +260,11 @@ impl EditorState {
         self.text.chars().count()
     }
 
+    /// 返回当前完整文本的引用。
+    fn all_text(&self) -> String {
+        self.text.clone()
+    }
+
     /// 替换整个文本并把光标放到末尾（历史导航用）
     fn replace_all(&mut self, text: String) {
         self.text = text;
@@ -406,8 +411,11 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     KeyCode::Up if !is_ctrl && !mention_active && !slash_active => {
                         tracing::info!(?key, "input area consumed up");
                         let moved = state.write().cursor_line_up();
-                        if !moved && let Some(historical) = history_up() {
-                            state.write().replace_all(historical);
+                        if !moved {
+                            let current = state.read().all_text();
+                            if let Some(historical) = history_up(Some(&current)) {
+                                state.write().replace_all(historical);
+                            }
                         }
                         EventResult::Consumed
                     }
@@ -531,9 +539,14 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                                     open_panel(kind);
                                 }
                             }
-                            SlashActionKind::Command => {
-                                let mut editor = slash_select_state.write();
-                                apply_slash_selection(&mut editor, &item.insert_text);
+                            SlashActionKind::Command | SlashActionKind::Skill => {
+                                // S16：command/skill 先检查是否映射到面板（如 /history → ThreadBrowser）
+                                if let Some(kind) = panel_for_slash_command(&item.insert_text) {
+                                    open_panel(kind);
+                                } else {
+                                    let mut editor = slash_select_state.write();
+                                    apply_slash_selection(&mut editor, &item.insert_text);
+                                }
                             }
                         }
                         reset_slash_popup();
@@ -712,6 +725,8 @@ fn apply_slash_selection(state: &mut EditorState, cmd: &str) {
 
 fn build_slash_items() -> Vec<SlashCompletionItem> {
     let remote = AVAILABLE_SLASH_COMMANDS.state().read().clone();
+    let skill_names: std::collections::HashSet<String> =
+        SKILL_NAMES.state().read().iter().cloned().collect();
     let mut items = Vec::with_capacity(PANELS.len() + remote.len());
     for panel in PANELS {
         let slash_name = panel.slash_command.to_string();
@@ -723,11 +738,17 @@ fn build_slash_items() -> Vec<SlashCompletionItem> {
         });
     }
     for (name, description) in &remote {
+        // S16：根据 SKILL_NAMES 区分 Skill vs Command
+        let kind = if skill_names.contains(name) {
+            SlashActionKind::Skill
+        } else {
+            SlashActionKind::Command
+        };
         items.push(SlashCompletionItem {
             label: name.clone(),
             insert_text: name.clone(),
             description: description.clone(),
-            kind: SlashActionKind::Command,
+            kind,
         });
     }
     items

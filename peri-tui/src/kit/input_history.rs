@@ -10,12 +10,14 @@
 //!
 //! ## 容量限制
 //!
-//! `MAX_HISTORY = 100`——超出后从头部（最旧）丢弃。
+//! `MAX_HISTORY = 1000`——超出后从头部（最旧）丢弃。
 
-use crate::kit::atoms::{INPUT_HISTORY, INPUT_HISTORY_INDEX};
+use crate::kit::atoms::{DRAFT as HISTORY_DRAFT, INPUT_HISTORY, INPUT_HISTORY_INDEX};
+use std::collections::VecDeque;
+use std::path::PathBuf;
 
 /// 最大保留历史条数。
-const MAX_HISTORY: usize = 100;
+const MAX_HISTORY: usize = 1000;
 
 /// 提交后写入历史。空白去重，与栈顶相同则不重复入栈。
 pub fn push_history(text: &str) {
@@ -40,12 +42,16 @@ pub fn push_history(text: &str) {
     }
     *history_atom.write() = history;
     *index_atom.write() = None;
+    save_history();
 }
 
 /// 向旧方向浏览一步。返回该位置的历史文本（如有）。
 ///
 /// 空历史直接返回 None；已在最旧位置则维持并返回该位置文本。
-pub fn history_up() -> Option<String> {
+///
+/// 首次进入历史模式时（`current_text` 非空且非纯空白），
+/// 自动将 `current_text` 保存为草稿——`history_down()` 回到编辑态时会返回该草稿。
+pub fn history_up(current_text: Option<&str>) -> Option<String> {
     let history_atom = INPUT_HISTORY.state();
     let index_atom = INPUT_HISTORY_INDEX.state();
 
@@ -55,8 +61,15 @@ pub fn history_up() -> Option<String> {
     }
 
     let new_idx = match *index_atom.read() {
-        None => history.len() - 1, // 从栈顶（最新）开始
-        Some(0) => 0,              // 已在最旧
+        None => {
+            // 进入历史模式：保存当前文本为草稿
+            let draft_text = current_text
+                .map(|s| s.to_string())
+                .filter(|s| !s.trim().is_empty());
+            *HISTORY_DRAFT.state().write() = draft_text;
+            history.len() - 1
+        }
+        Some(0) => 0,
         Some(i) => i - 1,
     };
     *index_atom.write() = Some(new_idx);
@@ -64,6 +77,8 @@ pub fn history_up() -> Option<String> {
 }
 
 /// 向新方向浏览一步。返回历史文本，或 None（已回到编辑状态）。
+///
+/// 超过最新位置时回到编辑状态，返回 `DRAFT` atom 中保存的草稿文本。
 pub fn history_down() -> Option<String> {
     let history_atom = INPUT_HISTORY.state();
     let index_atom = INPUT_HISTORY_INDEX.state();
@@ -78,7 +93,10 @@ pub fn history_down() -> Option<String> {
     if new_idx >= history.len() {
         // 超过最新——回到编辑状态
         *index_atom.write() = None;
-        None
+        // 返回草稿并清除
+        let draft = HISTORY_DRAFT.state().read().clone();
+        *HISTORY_DRAFT.state().write() = None;
+        draft
     } else {
         *index_atom.write() = Some(new_idx);
         history.get(new_idx).cloned()
@@ -88,6 +106,7 @@ pub fn history_down() -> Option<String> {
 /// 清空浏览指针，回到编辑新文本状态。提交成功后必须调用。
 pub fn reset_history_cursor() {
     *INPUT_HISTORY_INDEX.state().write() = None;
+    *HISTORY_DRAFT.state().write() = None;
 }
 
 /// 当前历史浏览位置（如有）。
@@ -102,8 +121,54 @@ pub fn history_len() -> usize {
     INPUT_HISTORY.state().read().len()
 }
 
+/// ~/.peri/input-history.json
+fn history_path() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".peri").join("input-history.json")
+}
+
+/// 启动时从磁盘加载历史到 atom。文件不存在或解析失败时静默跳过。
+pub fn load_history() {
+    let path = history_path();
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let entries: Vec<String> = match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let mut history = entries
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
+        .collect::<VecDeque<String>>();
+    while history.len() > MAX_HISTORY {
+        history.pop_front();
+    }
+    *INPUT_HISTORY.state().write() = history;
+}
+
+/// 原子写入历史到磁盘（先写 .tmp 再 rename）。
+fn save_history() {
+    let path = history_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("tmp");
+    let history_handle = INPUT_HISTORY.state();
+    let history = history_handle.read();
+    let entries: Vec<&String> = history.iter().collect();
+    if let Ok(json) = serde_json::to_string(&entries) {
+        if std::fs::write(&tmp, &json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::HISTORY_DRAFT as DRAFT;
     use super::*;
     use serial_test::serial;
     use std::collections::VecDeque;
@@ -112,6 +177,7 @@ mod tests {
         crate::kit::atoms::init_atoms();
         *INPUT_HISTORY.state().write() = VecDeque::new();
         *INPUT_HISTORY_INDEX.state().write() = None;
+        *HISTORY_DRAFT.state().write() = None;
     }
 
     #[test]
@@ -160,13 +226,13 @@ mod tests {
         push_history("third");
 
         // 第一次 Up → 最新（third）
-        assert_eq!(history_up().as_deref(), Some("third"));
+        assert_eq!(history_up(None).as_deref(), Some("third"));
         // 第二次 Up → second
-        assert_eq!(history_up().as_deref(), Some("second"));
+        assert_eq!(history_up(None).as_deref(), Some("second"));
         // 第三次 Up → first
-        assert_eq!(history_up().as_deref(), Some("first"));
+        assert_eq!(history_up(None).as_deref(), Some("first"));
         // 第四次 Up → 已在最旧，保持 first
-        assert_eq!(history_up().as_deref(), Some("first"));
+        assert_eq!(history_up(None).as_deref(), Some("first"));
     }
 
     #[test]
@@ -176,8 +242,8 @@ mod tests {
         push_history("a");
         push_history("b");
 
-        history_up(); // → b
-        history_up(); // → a
+        history_up(None); // → b
+        history_up(None); // → a
         assert_eq!(history_down().as_deref(), Some("b"));
         assert_eq!(history_down(), None); // 超过最新 → None
         assert_eq!(current_index(), None);
@@ -188,7 +254,7 @@ mod tests {
     fn test_reset_history_cursor() {
         setup();
         push_history("x");
-        history_up();
+        history_up(None);
         assert!(current_index().is_some());
         reset_history_cursor();
         assert!(current_index().is_none());
@@ -198,7 +264,7 @@ mod tests {
     #[serial]
     fn test_history_up_empty_stack() {
         setup();
-        assert_eq!(history_up(), None);
+        assert_eq!(history_up(None), None);
         assert_eq!(history_down(), None);
     }
 
@@ -206,13 +272,44 @@ mod tests {
     #[serial]
     fn test_max_history_capacity() {
         setup();
-        for i in 0..150 {
+        for i in 0..1050 {
             push_history(&format!("cmd-{}", i));
         }
         assert_eq!(history_len(), MAX_HISTORY);
-        // 最旧的 cmd-0~49 应被丢弃，cmd-50 是栈底
         let stored: VecDeque<String> = INPUT_HISTORY.state().read().clone();
         assert_eq!(stored.front().map(String::as_str), Some("cmd-50"));
-        assert_eq!(stored.back().map(String::as_str), Some("cmd-149"));
+        assert_eq!(stored.back().map(String::as_str), Some("cmd-1049"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_draft_saved_on_history_entry_and_restored() {
+        setup();
+        push_history("old");
+        assert_eq!(history_up(Some("current draft")).as_deref(), Some("old"));
+        assert_eq!(DRAFT.state().read().as_deref(), Some("current draft"));
+        assert_eq!(history_down(), Some("current draft".to_string()));
+        assert!(DRAFT.state().read().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_draft_cleared_on_reset() {
+        setup();
+        push_history("x");
+        history_up(Some("draft"));
+        assert!(DRAFT.state().read().is_some());
+        reset_history_cursor();
+        assert!(DRAFT.state().read().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_draft_is_none_for_empty_text() {
+        setup();
+        push_history("old");
+        history_up(Some("   "));
+        // 纯空白文本不应保存为草稿
+        assert!(DRAFT.state().read().is_none());
     }
 }

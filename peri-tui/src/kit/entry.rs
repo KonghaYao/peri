@@ -20,6 +20,7 @@ use crate::kit::acp_bridge::spawn_acp_bridge;
 use crate::kit::acp_notifier::spawn_kit_notifier;
 use crate::kit::app_shell::AppShell;
 use crate::kit::atoms;
+use crate::kit::input_history;
 use crate::kit::rewind_action::spawn_rewind_consumer;
 use crate::kit::service_snapshot::{SnapshotSource, spawn_service_snapshot};
 use crate::kit::submit_consumer::spawn_submit_consumer;
@@ -46,6 +47,9 @@ pub async fn run_kit_fullscreen(
 ) -> Result<()> {
     // 1. 初始化全局 atoms（必须在 element! 之前）
     atoms::init_atoms();
+
+    // 1b. 从磁盘加载输入历史到 INPUT_HISTORY atom（文件不存在则静默跳过）
+    input_history::load_history();
 
     // 2. 构建 App + ACP server/client（与 legacy 共享同一段构造逻辑）
     let (mut app, acp_client) = build_app_and_acp(&opts, Some(panic_notify_rx)).await?;

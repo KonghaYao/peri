@@ -26,6 +26,7 @@ use crate::kit::theme;
 pub enum SlashActionKind {
     Panel,
     Command,
+    Skill,
 }
 
 #[derive(Debug, Clone)]
@@ -129,28 +130,32 @@ pub fn SlashCompletion(
         .map(|(i, item)| {
             let selected = i == sel_idx;
             let marker = if selected { "> " } else { "  " };
-            let kind_label = match item.kind {
-                SlashActionKind::Panel => "[panel]",
-                SlashActionKind::Command => "[cmd]",
+
+            // S16：三层 slash 用颜色区分，不用方括号标签
+            let tier_color = match item.kind {
+                SlashActionKind::Panel => semantic.border.active,
+                SlashActionKind::Command => semantic.text.muted,
+                SlashActionKind::Skill => semantic.status.warning,
             };
+
             let line_style = if selected {
                 Style::default()
                     .fg(popup_tokens.selected_fg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(semantic.text.primary)
+                Style::default().fg(tier_color)
             };
+
             let detail_style = if selected {
                 Style::default().fg(popup_tokens.selected_fg)
             } else {
-                Style::default().fg(semantic.text.muted)
+                Style::default().fg(semantic.text.dim)
             };
 
             Line::from(vec![
                 Span::styled(marker, line_style),
                 Span::styled(format!("/{}", item.label), line_style),
-                Span::styled(format!(" {}", kind_label), detail_style),
-                Span::styled(format!(" — {}", item.description), detail_style),
+                Span::styled(format!("  {}", item.description), detail_style),
             ])
         })
         .collect();
