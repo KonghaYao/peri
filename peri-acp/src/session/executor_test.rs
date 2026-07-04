@@ -14,7 +14,7 @@ use peri_agent::{
     messages::{BaseMessage, MessageContent},
 };
 
-use super::{intercept_immediate_command, InterceptRequest, PromptStopReason};
+use super::{intercept_immediate_command, InterceptRequest};
 use crate::{provider::PeriConfig, session::event_sink::EventSink};
 
 // ── Mock EventSink ─────────────────────────────────────────────────────────
@@ -184,9 +184,9 @@ async fn test_intercept_slash_only_returns_none() {
 
 // ── intercept_immediate_command: Immediate 命令拦截（/clear） ─────────────
 
-/// `/clear` 是 Immediate 命令：拦截成功，返回 Some(PromptResult)
+/// `/clear` 已迁移到视图层——prompt 路径不再拦截，返回 None（走 agent 管线）
 #[tokio::test]
-async fn test_intercept_clear_command_returns_some() {
+async fn test_intercept_clear_command_not_intercepted_in_prompt_path() {
     // Arrange
     let content = MessageContent::text("/clear");
     let history: Vec<BaseMessage> = vec![BaseMessage::human("你好"), BaseMessage::ai("世界")];
@@ -208,24 +208,16 @@ async fn test_intercept_clear_command_returns_some() {
     // Act
     let result = intercept_immediate_command(req).await;
 
-    // Assert：clear 命令应被拦截
-    assert!(result.is_some(), "/clear 应返回 Some(PromptResult)");
-    let prompt_result = result.unwrap();
-    assert!(prompt_result.ok, "拦截结果 ok 应为 true");
-    assert_eq!(
-        prompt_result.stop_reason,
-        PromptStopReason::EndTurn,
-        "clear 命令停止原因应为 EndTurn"
-    );
+    // Assert：视图层命令不再被拦截
     assert!(
-        prompt_result.messages.is_empty(),
-        "clear 命令应清空历史，messages 为空"
+        result.is_none(),
+        "/clear 在 prompt 路径应返回 None（由视图层处理）"
     );
 }
 
-/// `/clear` 别名 `/cls` 也应被拦截
+/// `/clear` 别名 `/cls` 已迁移到视图层——不再被 prompt 路径拦截
 #[tokio::test]
-async fn test_intercept_clear_alias_cls_returns_some() {
+async fn test_intercept_clear_alias_cls_not_intercepted() {
     // Arrange
     let content = MessageContent::text("/cls");
     let history: Vec<BaseMessage> = vec![BaseMessage::human("历史消息")];
@@ -247,18 +239,16 @@ async fn test_intercept_clear_alias_cls_returns_some() {
     // Act
     let result = intercept_immediate_command(req).await;
 
-    // Assert：cls 别名也应被拦截
-    assert!(result.is_some(), "/cls 别名应返回 Some(PromptResult)");
-    let prompt_result = result.unwrap();
+    // Assert：视图层命令不再被拦截
     assert!(
-        prompt_result.messages.is_empty(),
-        "/cls 应清空历史，messages 为空"
+        result.is_none(),
+        "/cls 别名在 prompt 路径应返回 None（由视图层处理）"
     );
 }
 
-/// `/reset` 别名也应被拦截（ClearCommand 的第二个别名）
+/// `/reset` 别名已迁移到视图层——不再被 prompt 路径拦截
 #[tokio::test]
-async fn test_intercept_clear_alias_reset_returns_some() {
+async fn test_intercept_clear_alias_reset_not_intercepted() {
     // Arrange
     let content = MessageContent::text("/reset");
     let history: Vec<BaseMessage> = vec![BaseMessage::ai("对话历史")];
@@ -281,7 +271,10 @@ async fn test_intercept_clear_alias_reset_returns_some() {
     let result = intercept_immediate_command(req).await;
 
     // Assert
-    assert!(result.is_some(), "/reset 别名应返回 Some(PromptResult)");
+    assert!(
+        result.is_none(),
+        "/reset 别名在 prompt 路径应返回 None（由视图层处理）"
+    );
 }
 
 // ── intercept_immediate_command: push_done TRAP 验证 ──────────────────────
@@ -289,9 +282,9 @@ async fn test_intercept_clear_alias_reset_returns_some() {
 /// [TRAP] Immediate 命令拦截后必须调用 `push_done`，否则 TUI 永久 loading
 /// （issue_2026-05-29-immediate-command-missing-push-done）
 #[tokio::test]
-async fn test_intercept_clear_command_calls_push_done() {
+async fn test_intercept_compact_command_calls_push_done() {
     // Arrange
-    let content = MessageContent::text("/clear");
+    let content = MessageContent::text("/compact");
     let history: Vec<BaseMessage> = vec![];
     let cancel = AgentCancellationToken::new();
     let peri_config: Arc<PeriConfig> = Arc::new(Default::default());
@@ -358,12 +351,12 @@ async fn test_intercept_no_match_does_not_call_push_done() {
 /// cancel 信号已触发时：intercept 仍返回 Some（已拦截），且必然调用 push_done。
 ///
 /// 注意：tokio::select! 对已 ready 的 cancel 和快速完成的命令执行是竞速关系，
-/// 对瞬时命令（如 /clear）执行分支可能先完成。本测试只验证不变量：
+/// 对瞬时命令（如 /compact）执行分支可能先完成。本测试只验证不变量：
 /// 无论哪个分支执行，push_done 都被调用、结果非 None。
 #[tokio::test]
 async fn test_intercept_with_cancelled_token_still_returns_some() {
     // Arrange
-    let content = MessageContent::text("/clear");
+    let content = MessageContent::text("/compact");
     let history: Vec<BaseMessage> = vec![BaseMessage::human("hello"), BaseMessage::ai("world")];
     let cancel = AgentCancellationToken::new();
     // 预先 cancel，与命令执行竞速
@@ -401,7 +394,7 @@ async fn test_intercept_with_cancelled_token_still_returns_some() {
 #[tokio::test]
 async fn test_intercept_immediate_returns_empty_recall_items() {
     // Arrange
-    let content = MessageContent::text("/clear");
+    let content = MessageContent::text("/compact");
     let history: Vec<BaseMessage> = vec![];
     let cancel = AgentCancellationToken::new();
     let peri_config: Arc<PeriConfig> = Arc::new(Default::default());
@@ -435,7 +428,7 @@ async fn test_intercept_immediate_returns_empty_recall_items() {
 #[tokio::test]
 async fn test_intercept_immediate_ok_always_true() {
     // Arrange
-    let content = MessageContent::text("/clear");
+    let content = MessageContent::text("/compact");
     let history: Vec<BaseMessage> = vec![];
     let cancel = AgentCancellationToken::new();
     let peri_config: Arc<PeriConfig> = Arc::new(Default::default());

@@ -610,7 +610,7 @@ async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<Prompt
         return None;
     }
 
-    let command_registry = crate::session::command::default_command_registry();
+    let command_registry = crate::session::command::default_prompt_command_registry();
     let (cmd, args) = command_registry.find(&text)?;
     if cmd.kind() != crate::session::command::CommandKind::Immediate {
         // Passthrough/Transform → fall through to normal agent flow

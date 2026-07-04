@@ -178,23 +178,68 @@ cargo run -p peri-tui -- -a
 提交前已通过：
 
 ```bash
-cargo fmt -p peri-tui
-cargo test -p peri-tui --lib kit::acp_notifier
-cargo test -p peri-tui --lib kit::panel_registry::tests::test_render_all_registered_panels_constructs_element
-cargo test -p peri-tui --lib
 cargo check -p peri-tui
+cargo clippy -p peri-tui --lib
+cargo test -p peri-tui --lib
+lefthook run pre-commit
 ```
 
 结果摘要：
 
-- `kit::acp_notifier`：7 passed
-- panel render 定向测试：1 passed
-- `peri-tui --lib` 全量：307 passed
+- `peri-tui --lib` 全量：**316 passed**
 - `cargo check -p peri-tui`：通过
+- `cargo clippy -p peri-tui --lib`：通过（warnings 均为既有代码）
 
-pre-commit hook 已跑完并允许提交：
+---
 
-- `typos`：通过
-- `fmt`：通过
-- `check`：通过
-- `clippy`：通过但有 warnings
+## 8. StatusBar 模型名称字段（2026-07-04 修复）
+
+- [ ] 状态栏第一行显示 `provider/model_name` 格式（如 `anthropic/claude-sonnet-4-20250514`），而非短别名 `sonnet`
+- [ ] provider/model 显示为整体统一样式（之前是 provider/muted + /dim + alias/text 三段分离）
+- [ ] SetupWizard 页面的 provider 信息也显示完整模型名
+- [ ] 模型切换时（Ctrl+T / /model 面板）状态栏实时更新
+
+## 9. 输入历史（2026-07-04 新增）
+
+- [ ] 提交消息后关闭重启 Peri，之前的历史依然存在（`~/.peri/input-history.json` 持久化）
+- [ ] ↑ 浏览历史，首次进入历史模式时当前输入文本被保存为草稿
+- [ ] 浏览到最旧位置后 ↓ 返回编辑态，草稿自动恢复
+- [ ] 纯空白文本（仅空格）不保存为草稿
+- [ ] 连续输入相同文本不入栈（去重）
+- [ ] 历史容量上限 1000 条
+
+## 10. 预测输入（2026-07-04 新增）
+
+- [ ] Agent 回复完成后，输入区下方出现灰色预测文本（需等待 ACP 下发 `prediction_ready` 事件）
+- [ ] 输入区为空 + 有预测文本时，`Tab` 接受预测并注入到输入框
+- [ ] 打印任意字符后预测文本消失
+- [ ] `Enter` 提交消息后预测文本消失
+
+## 11. macOS Option 键兼容层（2026-07-04 新增）
+
+- [ ] macOS 终端：`Alt+M` 可循环切换模型（等价 `Ctrl+T`）
+- [ ] macOS 终端：`Alt+Shift+M` 可循环切换 Provider（等价 `Ctrl+Shift+T`）
+- [ ] 标准终端：`Ctrl+T` / `Ctrl+Shift+T` 行为不变
+
+## 12. @mention 模糊匹配（2026-07-04 优化）
+
+- [ ] 输入 `@` 弹出文件候选，输入模糊关键词能匹配到非前缀命中的文件（如 `@ipua` 匹配 `input_area.rs`）
+- [ ] 结果按相关度降序排列
+- [ ] 空 prefix 时显示前 20 个文件
+- [ ] ↑/↓ 选择，Enter 插入
+
+## 13. InputArea 编辑快捷键（2026-07-04 新增/确认）
+
+- [ ] `Shift+Enter` / `Alt+Enter` 插入换行（多行编辑）
+- [ ] `Ctrl+W` 删除光标前一个词
+- [ ] `Ctrl+Backspace` 删除前一个词（与 `Ctrl+W` 等价）
+- [ ] `Ctrl+Delete` 删除光标后一个词
+- [ ] `Alt+←/→` 按词跳转光标
+- [ ] `Home` / `End` 跳转到行首/行尾
+- [ ] `Ctrl+U` 从光标位置删除到行首（textarea 有内容时）；消息区向上翻页（textarea 为空时）
+- [ ] `Ctrl+D` 消息区向下翻页
+- [ ] `Ctrl+C`：有文本时清空；loading 中打断 Agent；空闲 +2s 内双击退出
+- [ ] `Esc`：关闭 @mention/slash popup；双击打开 Rewind 选择器
+- [ ] `Ctrl+T` 循环切换模型（opus → sonnet → haiku）
+- [ ] `Ctrl+Shift+T` 循环切换 Provider
+- [ ] `Shift+Tab` 循环切换权限模式

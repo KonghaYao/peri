@@ -163,6 +163,15 @@ pub fn default_command_registry() -> CommandRegistry {
     reg
 }
 
+/// 创建仅包含 agent 内部命令的注册表（供 prompt 拦截用）。
+/// 视图层命令（/clear、/rewind）不在此注册表中——它们由 TUI kit 路径拦截处理。
+pub fn default_prompt_command_registry() -> CommandRegistry {
+    let mut reg = CommandRegistry::new();
+    reg.register(Box::new(compact::CompactCommand));
+    reg.register(Box::new(bg::BgCommand));
+    reg
+}
+
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;

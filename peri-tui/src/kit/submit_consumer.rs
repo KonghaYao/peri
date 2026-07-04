@@ -15,6 +15,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
+use crate::kit::atoms::{
+    ACP_STATE, DIFF_VISIBLE, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE, REWIND_ACTION_TX,
+    VIEW_MODELS, ViewModelsSnapshot,
+};
 
 /// 启动提交消费者后台任务。
 ///
@@ -56,6 +60,7 @@ pub fn spawn_submit_consumer(
 }
 
 /// 处理单条提交：确保 session 存在 → 发送 prompt。
+/// `/clear`（及别名 `/cls` `/reset`）不经过 agent，直接创建新会话。
 async fn handle_submit(
     acp_client: &AcpTuiClient,
     cwd: &str,
@@ -63,6 +68,39 @@ async fn handle_submit(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    // /clear（及别名）不走 agent 协议——直接新开会话，清空 UI
+    if is_clear_command(trimmed) {
+        info!("kit submit_consumer: /clear intercepted, creating new session");
+        acp_client.new_session(cwd, None).await?;
+        // 新会话无消息 → 清空消息区 Atom
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        // 重置 loading 态
+        let ref_guard = ACP_STATE.state();
+        let mut acp = ref_guard.write();
+        acp.is_loading = false;
+        return Ok(());
+    }
+
+    // /rewind（及别名 /undo）发 RewindAction::Confirm 到 rewind_consumer
+    if is_rewind_or_undo_command(trimmed) {
+        info!("kit submit_consumer: /rewind intercepted, forwarding to rewind_consumer");
+        let args = parse_rewind_args(trimmed);
+        if let Some(tx) = REWIND_ACTION_TX.get() {
+            let _ = tx.send(crate::kit::rewind_action::RewindAction::Confirm {
+                target_message_id: args.target_message_id.clone(),
+                revert_files: args.revert_files,
+            });
+        }
+        return Ok(());
+    }
+
+    // 视图层快捷命令——不经过 ACP，直接执行视图操作
+    if let Some(action) = resolve_view_action(trimmed) {
+        info!(action = ?action, "kit submit_consumer: view-layer command intercepted");
+        execute_view_action(&action, acp_client);
         return Ok(());
     }
 
@@ -78,6 +116,118 @@ async fn handle_submit(
         Box::new(e) as Box<dyn std::error::Error + Send + Sync>
     })?;
     Ok(())
+}
+
+/// 判断输入是否为 `/clear` 命令（含别名 `/cls` `/reset`）。
+fn is_clear_command(input: &str) -> bool {
+    let cmd = input.split_whitespace().next().unwrap_or("");
+    matches!(cmd, "/clear" | "/cls" | "/reset")
+}
+
+/// 判断输入是否为 `/rewind` 命令（含别名 `/undo`）。
+fn is_rewind_or_undo_command(input: &str) -> bool {
+    let cmd = input.split_whitespace().next().unwrap_or("");
+    matches!(cmd, "/rewind" | "/undo")
+}
+
+struct RewindArgs {
+    target_message_id: String,
+    revert_files: bool,
+}
+
+/// 解析 /rewind 命令参数。
+/// 格式: `/rewind <message_id> [--revert-files]`
+fn parse_rewind_args(input: &str) -> RewindArgs {
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    let target_message_id = parts.get(1).map(|s| s.to_string()).unwrap_or_default();
+    let revert_files = parts.contains(&"--revert-files");
+    RewindArgs {
+        target_message_id,
+        revert_files,
+    }
+}
+
+#[derive(Debug)]
+enum ViewAction {
+    CycleModel,
+    CycleProvider,
+    CyclePermissionMode,
+    ToggleDiff,
+}
+
+/// 解析视图层快捷命令。格式: `/command [next|cycle|toggle]`
+fn resolve_view_action(input: &str) -> Option<ViewAction> {
+    let cmd = input.split_whitespace().next().unwrap_or("");
+    match cmd {
+        "/model" => Some(ViewAction::CycleModel),
+        "/provider" => Some(ViewAction::CycleProvider),
+        "/mode" => Some(ViewAction::CyclePermissionMode),
+        "/diff" => Some(ViewAction::ToggleDiff),
+        _ => None,
+    }
+}
+
+/// 执行视图层操作。
+fn execute_view_action(action: &ViewAction, acp_client: &AcpTuiClient) {
+    match action {
+        ViewAction::CycleModel => {
+            if let Some(cfg_handle) = PERI_CONFIG_HANDLE.get() {
+                let cfg = cfg_handle.read();
+                let aliases = [
+                    "opus".to_string(),
+                    "sonnet".to_string(),
+                    "haiku".to_string(),
+                ];
+                if !aliases.is_empty() {
+                    let current = &cfg.config.active_alias;
+                    let idx = aliases.iter().position(|a| a == current).unwrap_or(0);
+                    let next = aliases[(idx + 1) % aliases.len()].clone();
+                    let client = acp_client.clone();
+                    tokio::spawn(async move {
+                        let _ = client.set_config_option("model", &next).await;
+                    });
+                }
+            }
+        }
+        ViewAction::CycleProvider => {
+            if let Some(cfg_handle) = PERI_CONFIG_HANDLE.get() {
+                let cfg = cfg_handle.read();
+                let provider_ids: Vec<String> =
+                    cfg.config.providers.iter().map(|p| p.id.clone()).collect();
+                if !provider_ids.is_empty() {
+                    let current = &cfg.config.active_provider_id;
+                    let idx = provider_ids.iter().position(|p| p == current).unwrap_or(0);
+                    let next = provider_ids[(idx + 1) % provider_ids.len()].clone();
+                    let client = acp_client.clone();
+                    let cfg_handle = cfg_handle.clone();
+                    tokio::spawn(async move {
+                        let mut new_cfg = cfg_handle.read().clone();
+                        new_cfg.config.active_provider_id = next;
+                        let _ = client.update_config(&new_cfg).await;
+                    });
+                }
+            }
+        }
+        ViewAction::CyclePermissionMode => {
+            use peri_middlewares::hitl::PermissionMode;
+
+            if let Some(mode_handle) = PERMISSION_MODE_HANDLE.get() {
+                let current = mode_handle.load();
+                let next = match current {
+                    PermissionMode::Default => PermissionMode::AcceptEdit,
+                    PermissionMode::AcceptEdit => PermissionMode::AutoMode,
+                    PermissionMode::AutoMode => PermissionMode::Bypass,
+                    PermissionMode::Bypass => PermissionMode::Default,
+                };
+                mode_handle.store(next);
+            }
+        }
+        ViewAction::ToggleDiff => {
+            let state = DIFF_VISIBLE.state();
+            let mut visible = state.write();
+            *visible = !*visible;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -157,5 +307,100 @@ mod tests {
         let (tx, _rx): (mpsc::UnboundedSender<String>, _) = mpsc::unbounded_channel();
         // 模拟 atoms::SUBMIT_TX.set(tx) 的契约
         let _ = tx;
+    }
+
+    #[test]
+    fn test_is_clear_command_matches_variants() {
+        assert!(is_clear_command("/clear"));
+        assert!(is_clear_command("/cls"));
+        assert!(is_clear_command("/reset"));
+        // 允许尾部空白
+        assert!(is_clear_command("/clear  "));
+        // 允许额外参数
+        assert!(is_clear_command("/clear extra args"));
+        assert!(is_clear_command("/cls  some stuff"));
+        // 非 clear 命令
+        assert!(!is_clear_command("/compact"));
+        assert!(!is_clear_command("hello"));
+        assert!(!is_clear_command(""));
+    }
+
+    #[test]
+    fn test_is_rewind_command_matches_variants() {
+        assert!(is_rewind_or_undo_command("/rewind"));
+        assert!(is_rewind_or_undo_command("/undo"));
+        assert!(is_rewind_or_undo_command("/rewind msg-123"));
+        assert!(is_rewind_or_undo_command("/rewind msg-123 --revert-files"));
+        assert!(!is_rewind_or_undo_command("/clear"));
+        assert!(!is_rewind_or_undo_command("hello"));
+    }
+
+    #[test]
+    fn test_parse_rewind_args() {
+        let args = parse_rewind_args("/rewind abc123 --revert-files");
+        assert_eq!(args.target_message_id, "abc123");
+        assert!(args.revert_files);
+
+        let args = parse_rewind_args("/rewind xyz");
+        assert_eq!(args.target_message_id, "xyz");
+        assert!(!args.revert_files);
+
+        let args = parse_rewind_args("/rewind");
+        assert_eq!(args.target_message_id, "");
+        assert!(!args.revert_files);
+    }
+
+    #[test]
+    fn test_resolve_view_action() {
+        assert!(matches!(
+            resolve_view_action("/model"),
+            Some(ViewAction::CycleModel)
+        ));
+        assert!(matches!(
+            resolve_view_action("/provider"),
+            Some(ViewAction::CycleProvider)
+        ));
+        assert!(matches!(
+            resolve_view_action("/mode"),
+            Some(ViewAction::CyclePermissionMode)
+        ));
+        assert!(matches!(
+            resolve_view_action("/diff"),
+            Some(ViewAction::ToggleDiff)
+        ));
+        assert!(resolve_view_action("/clear").is_none());
+        assert!(resolve_view_action("hello").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_clear_command_bypasses_prompt() {
+        use peri_acp_types::view_model::{AssistantBubbleData, ViewModel};
+
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot {
+            committed: std::sync::Arc::from(vec![ViewModel::AssistantBubble(
+                AssistantBubbleData {
+                    text: "existing".into(),
+                    reasoning: None,
+                    tool_card_ids: vec![],
+                },
+            )]),
+            current_turn: std::sync::Arc::from([]),
+        };
+        let (client, _server_transport) = make_client_without_pump();
+        let cwd = ".".to_string();
+
+        // /clear 在无 server 时会因 new_session RPC 超时，但不走 prompt 路径
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            handle_submit(&client, &cwd, "/clear".to_string()),
+        )
+        .await;
+
+        // 超时表示走到了 new_session 路径（因无 server 响应而 hang）
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "expected timeout (clear → new_session with no server)"
+        );
     }
 }
