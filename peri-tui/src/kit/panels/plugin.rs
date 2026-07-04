@@ -37,6 +37,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
             match key.code {
                 KeyCode::Esc => close_panel(),
+                KeyCode::Enter => close_panel(),
                 KeyCode::Up => {
                     let mut s = selected.write();
                     *s = previous_selection(*s);

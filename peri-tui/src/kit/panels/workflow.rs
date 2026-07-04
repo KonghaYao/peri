@@ -56,6 +56,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
             match key.code {
                 KeyCode::Esc => close_panel(),
+                KeyCode::Enter => close_panel(),
                 KeyCode::Up => {
                     let mut c = cursor.write();
                     *c = previous_selection(*c);

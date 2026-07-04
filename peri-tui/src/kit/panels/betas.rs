@@ -67,6 +67,10 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     close_panel();
                     EventResult::Consumed
                 }
+                KeyCode::Enter => {
+                    close_panel();
+                    EventResult::Consumed
+                }
                 KeyCode::Up => {
                     let mut s = selected.write();
                     *s = previous_selection(*s);

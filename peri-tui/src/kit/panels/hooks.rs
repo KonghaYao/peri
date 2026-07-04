@@ -62,6 +62,9 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 KeyCode::Esc => {
                     close_panel();
                 }
+                KeyCode::Enter => {
+                    close_panel();
+                }
                 KeyCode::Up => {
                     let mut s = selected.write();
                     *s = previous_selection(*s);
