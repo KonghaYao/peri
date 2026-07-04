@@ -73,6 +73,16 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
                 tracing::info!(diff_visible = *g, "Ctrl+O: 切换 diff 视图");
                 EventResult::Consumed
             }
+            Some(GlobalShortcut::CycleModel) => {
+                *MODEL_HIGHLIGHT_UNTIL.state().write() =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                EventResult::Consumed
+            }
+            Some(GlobalShortcut::CycleProvider) => {
+                *PROVIDER_HIGHLIGHT_UNTIL.state().write() =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     });
@@ -140,12 +150,6 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
             },
         }
     });
-}
-
-#[allow(dead_code)]
-fn _silence_unused_atoms_warnings() {
-    let _ = MODEL_HIGHLIGHT_UNTIL.state();
-    let _ = PROVIDER_HIGHLIGHT_UNTIL.state();
 }
 
 #[cfg(test)]
