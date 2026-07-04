@@ -41,7 +41,11 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let snapshot = hooks.use_atom(&atoms::SERVICE_SNAPSHOT);
     let snapshot = snapshot.read().clone();
     let provider_name = snapshot.provider_name;
-    let model_alias = snapshot.model_alias;
+    let model_label = if !snapshot.model_name.is_empty() {
+        &snapshot.model_name
+    } else {
+        &snapshot.model_alias
+    };
     let has_provider = !provider_name.is_empty();
 
     hooks.use_event_handler(EventScope::Current, EventPriority::High, move |event| {
@@ -70,7 +74,7 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         vec![Line::from(vec![
             Span::styled("✅ ", Style::new().fg(semantic.status.success).bold()),
             Span::styled(
-                format!("Provider: {} ({})", provider_name, model_alias),
+                format!("Provider: {} ({})", provider_name, model_label),
                 Style::new().fg(semantic.status.success),
             ),
         ])]
