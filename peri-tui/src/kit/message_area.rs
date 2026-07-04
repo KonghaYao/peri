@@ -114,7 +114,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let current_turn_ptr = Arc::as_ptr(&props.current_turn) as *const () as usize;
     hooks.use_effect(
         {
-            let scroll_state = scroll_state;
             move || {
                 // 有 chunk 就滚底。大多数聊天 UI（ChatGPT/Claude）
                 // 都这么做——流式期间自动跟随，结束后用户可用 Ctrl+Up 回看。
