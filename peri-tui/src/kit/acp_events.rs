@@ -31,6 +31,9 @@ pub struct BridgeState {
     /// S7：精确弹窗类型，由 AcpEvent 直接映射。None = 无弹窗。
     /// 弹窗激活状态由 POPUP_KIND.is_some() 派生（status_bar / event_handlers 都读这个）
     pub popup_kind: Option<crate::kit::atoms::PopupKind>,
+    /// I21-D：是否已收到 ViewCommit。用于 /clear 场景——/clear 的 ViewCommit
+    /// committed 为空是合法结果（清空历史），不应 fallback 到 atom 旧值。
+    pub has_view_commit: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +151,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             // I20-B：clone incoming Vec → 移入 Arc，单次 O(n) 分配。
             state.committed = Arc::from(vc.view_models.clone());
             state.current_turn.mark_committed();
+            state.has_view_commit = true;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -305,10 +309,13 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 /// S16：bridge 的 committed 仅在 ViewCommit 时填充。streaming 事件到达时若
 /// bridge committed 仍为空（尚未收到 ViewCommit），则保留 atom 中已有的
 /// committed（可能含 submit_text 预先注入的 UserBubble），避免消息区退回 Welcome。
+///
+/// I21-D：一旦收到过 ViewCommit（has_view_commit=true），committed 以 bridge
+/// 为准，即使为空也不 fallback——/clear 产生空 committed 是合法结果。
 fn push_view_models(state: &mut BridgeState) {
     // I20-B：Arc::clone 是 O(1) 原子指针拷贝，避免之前每个 streaming chunk
     // 都 O(n) clone 整个消息历史的性能问题。
-    let committed = if state.committed.is_empty() {
+    let committed = if state.committed.is_empty() && !state.has_view_commit {
         Arc::clone(&VIEW_MODELS.state().read().committed)
     } else {
         Arc::clone(&state.committed)
@@ -386,6 +393,7 @@ mod tests {
             current_turn: CurrentTurn::new(),
             is_loading: false,
             popup_kind: None,
+            has_view_commit: false,
         };
 
         dispatch_and_notify(
@@ -425,6 +433,7 @@ mod tests {
             current_turn: CurrentTurn::new(),
             is_loading: false,
             popup_kind: None,
+            has_view_commit: false,
         };
 
         dispatch_and_notify(
