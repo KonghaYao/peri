@@ -32,8 +32,6 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let config_total = snap_store.read().mcp.total;
     let _ = snap_store;
 
-    let count = servers.len();
-
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         move |event| {
             let Event::Key(key) = event else {
@@ -49,6 +47,7 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::Down => {
                     let mut s = selected.write();
+                    let count = MCP_SERVERS.state().read().len();
                     if count > 0 {
                         *s = next_selection(*s, count);
                     }
@@ -130,7 +129,7 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     panel_shell!(PanelKind::Mcp, {
             ScrollView(
-                scroll_bars: ScrollBars::default(),
+                scroll_bars: crate::kit::panel_registry::clean_scrollbars(),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {

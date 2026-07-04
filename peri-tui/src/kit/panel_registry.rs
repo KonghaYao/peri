@@ -9,7 +9,16 @@
 //! `open_panel(kind)` 在打开新面板前会关闭同组其他面板——这保证栈中
 //! `Vec<PanelKind>` 不会同时含两个同组面板。
 
-use ratatui_kit::{crossterm::event::KeyCode, prelude::*, ratatui::layout::Constraint};
+use ratatui::{
+    style::Style,
+    widgets::{Scrollbar, ScrollbarOrientation},
+};
+use ratatui_kit::{
+    components::scroll_view::{ScrollBars, ScrollbarVisibility},
+    crossterm::event::KeyCode,
+    prelude::*,
+    ratatui::layout::Constraint,
+};
 
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
@@ -468,6 +477,24 @@ pub fn toggle_panel(kind: PanelKind) -> bool {
 pub fn close_all_panels() {
     *OPEN_PANELS.state().write() = Vec::new();
     *ACTIVE_PANEL.state().write() = None;
+}
+
+// ── S16：per-widgets 风格干净滚动条（空格 + bg 色，无 █ 缝隙）──
+
+/// 创建 peri-widgets 风格的垂直滚动条配置：
+/// thumb 用空格 + bg 颜色，track 透明，无箭头符号。
+pub fn clean_scrollbars() -> ScrollBars<'static> {
+    let thumb_bg = crate::kit::theme::semantic().text.dim;
+    ScrollBars {
+        vertical_scrollbar: Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_symbol(" ")
+            .thumb_style(Style::default().bg(thumb_bg))
+            .track_symbol(None)
+            .begin_symbol(None)
+            .end_symbol(None),
+        vertical_scrollbar_visibility: ScrollbarVisibility::Automatic,
+        ..ScrollBars::default()
+    }
 }
 
 #[cfg(test)]

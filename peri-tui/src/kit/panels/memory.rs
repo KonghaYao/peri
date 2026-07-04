@@ -30,7 +30,6 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let count = entries.len();
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        let entries = entries.clone();
         move |event| {
             let Event::Key(key) = event else {
                 return EventResult::Ignored;
@@ -45,12 +44,14 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::Down => {
                     let mut s = selected.write();
+                    let count = MEMORY_LIST.state().read().len();
                     if count > 0 {
                         *s = next_selection(*s, count);
                     }
                 }
                 KeyCode::Enter => {
                     let sel = *selected.read();
+                    let entries = MEMORY_LIST.state().read().clone();
                     if let Some(entry) = entries.get(sel) {
                         open_memory_in_editor(&entry.path);
                     }
@@ -120,7 +121,7 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     panel_shell!(PanelKind::Memory, {
             ScrollView(
-                scroll_bars: ScrollBars::default(),
+                scroll_bars: crate::kit::panel_registry::clean_scrollbars(),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {

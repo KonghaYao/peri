@@ -56,6 +56,8 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::Down => {
                     let mut s = selected.write();
+                    let total = CRON_JOBS.state().read().len()
+                        + collect_subagents(&VIEW_MODELS.state().read()).len();
                     if total > 0 {
                         *s = next_selection(*s, total);
                     }
@@ -194,7 +196,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     panel_shell!(PanelKind::Tasks, {
             ScrollView(
-                scroll_bars: ScrollBars::default(),
+                scroll_bars: crate::kit::panel_registry::clean_scrollbars(),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {

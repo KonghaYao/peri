@@ -32,7 +32,8 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let bump = hooks.use_state(|| 0u32);
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        let providers = providers.clone();
+        // S16：不在闭包里捕获 providers（use_event_handler 无 deps 参数），
+        // 改为执行时重新从 atom 读取最新数据，避免导航/选择操作使用陈旧快照。
         move |event| {
             let Event::Key(key) = event else {
                 return EventResult::Ignored;
@@ -46,15 +47,21 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     *cursor.write() = previous_selection(*cursor.read());
                 }
                 KeyCode::Down => {
+                    let latest = PROVIDER_LIST.state().read().len();
                     let mut c = cursor.write();
-                    if count > 0 {
-                        *c = next_selection(*c, count);
+                    if latest > 0 {
+                        *c = next_selection(*c, latest);
                     }
                 }
                 KeyCode::Enter => {
                     let sel = *cursor.read();
-                    if let Some(p) = providers.get(sel) {
-                        activate_provider(&p.id);
+                    let latest_providers = PROVIDER_LIST.state().read().clone();
+                    if let Some(p) = latest_providers.get(sel) {
+                        let provider_id = p.id.clone();
+                        // S16：异步切换 + 持久化，避免同步 disk IO 阻塞主线程
+                        std::thread::spawn(move || {
+                            activate_provider(&provider_id);
+                        });
                     }
                     *bump.write() += 1;
                 }
@@ -68,12 +75,13 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sel = *cursor.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
+    // S16：TUI-PAGE.md §6.2 样式——Enter::activate · Esc::close
     lines.push(Line::from(vec![Span::styled(
         format!("  {} providers configured", count),
         Style::new().fg(theme::semantic().text.primary).bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
-        "  Enter) Activate  Esc) Close",
+        "  Enter::activate · Esc::close",
         Style::new().fg(theme::semantic().text.muted).italic(),
     )]));
     lines.push(Line::from(""));
@@ -106,36 +114,30 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Span::styled("  ", Style::new())
             };
 
+            // S16：provider_id (provider_type) ——无 "API key:" 前缀
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor_mark),
                     Style::new().fg(theme::component().panel.title),
                 ),
                 active_marker,
-                Span::styled(p.id.clone(), row_style),
-                Span::styled(
-                    format!("  ({})", p.provider_type),
-                    Style::new().fg(theme::semantic().text.muted),
-                ),
+                Span::styled(format!("{}  ({})", p.id, p.provider_type), row_style),
             ]));
 
-            // API key 状态
+            // API key 状态（configured / missing）
             let key_marker = if p.has_api_key {
-                ("configured", theme::semantic().status.success)
+                ("api key: configured", theme::semantic().status.success)
             } else {
-                ("missing", theme::semantic().status.error)
+                ("api key: missing", theme::semantic().status.error)
             };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "     API key: ".to_string(),
-                    Style::new().fg(theme::semantic().text.muted),
-                ),
-                Span::styled(key_marker.0, Style::new().fg(key_marker.1)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("     {}", key_marker.0),
+                Style::new().fg(key_marker.1),
+            )]));
             if let Some(url) = &p.base_url {
                 let url_display: String = url.chars().take(70).collect();
                 lines.push(Line::from(vec![Span::styled(
-                    format!("     Base URL: {}", url_display),
+                    format!("     base url: {}", url_display),
                     Style::new().fg(theme::semantic().text.dim),
                 )]));
             }
@@ -143,11 +145,17 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     }
 
+    // S16：底部 hints
+    lines.push(Line::from(vec![Span::styled(
+        "  \u{2191}/\u{2193}::navigate  Enter::activate  Esc::close",
+        Style::new().fg(theme::semantic().text.muted).italic(),
+    )]));
+
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
     panel_shell!(PanelKind::Login, {
             ScrollView(
-                scroll_bars: ScrollBars::default(),
+                scroll_bars: crate::kit::panel_registry::clean_scrollbars(),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {

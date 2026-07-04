@@ -28,10 +28,8 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let threads_store = hooks.use_atom(&THREAD_LIST);
     let threads: Vec<ThreadSummary> = threads_store.read().clone();
     let _ = threads_store; // StoreState 是 Copy，无需显式 drop
-    let count = threads.len();
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        let threads_snapshot = threads.clone();
         move |event| {
             let Event::Key(key) = event else {
                 return EventResult::Ignored;
@@ -49,6 +47,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::Down => {
                     let mut c = cursor.write();
+                    let count = THREAD_LIST.state().read().len();
                     if count > 0 {
                         *c = next_selection(*c, count);
                     }
@@ -57,7 +56,8 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     // H3: 通过 THREAD_LOAD_TX → thread_load_consumer → AcpClient.load_session
                     // 切换成功后 ACP server 推送 ViewCommit 自动刷新消息流。
                     let sel_idx = *cursor.read();
-                    if let Some(entry) = threads_snapshot.get(sel_idx) {
+                    let threads = THREAD_LIST.state().read().clone();
+                    if let Some(entry) = threads.get(sel_idx) {
                         if let Some(tx) = THREAD_LOAD_TX.get() {
                             let _ = tx.send(entry.id.clone());
                         }
@@ -139,7 +139,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
     panel_shell!(PanelKind::ThreadBrowser, {
             ScrollView(
-                scroll_bars: ScrollBars::default(),
+                scroll_bars: crate::kit::panel_registry::clean_scrollbars(),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {

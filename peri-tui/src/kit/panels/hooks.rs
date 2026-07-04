@@ -68,6 +68,7 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::Down => {
                     let mut s = selected.write();
+                    let count = HOOK_LIST.state().read().len();
                     if count > 0 {
                         *s = next_selection(*s, count);
                     }
@@ -163,7 +164,7 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     panel_shell!(PanelKind::Hooks, {
             ScrollView(
-                scroll_bars: ScrollBars::default(),
+                scroll_bars: crate::kit::panel_registry::clean_scrollbars(),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {

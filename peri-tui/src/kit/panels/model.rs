@@ -267,7 +267,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let content = Paragraph::new(ratatui::text::Text::from(lines));
     panel_shell!(PanelKind::Model, {
         ScrollView(
-            scroll_bars: ScrollBars::default(),
+            scroll_bars: crate::kit::panel_registry::clean_scrollbars(),
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
         ) {

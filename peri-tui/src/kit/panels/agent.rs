@@ -207,7 +207,7 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     panel_shell!(PanelKind::Agent, {
         ScrollView(
-            scroll_bars: ScrollBars::default(),
+            scroll_bars: crate::kit::panel_registry::clean_scrollbars(),
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
         ) {

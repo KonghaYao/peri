@@ -29,10 +29,8 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let jobs_store = hooks.use_atom(&CRON_JOBS);
     let jobs: Vec<CronJobSummary> = jobs_store.read().clone();
     let _ = jobs_store; // StoreState 是 Copy，无需显式 drop
-    let count = jobs.len();
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        let jobs_snapshot = jobs.clone();
         move |event| {
             let Event::Key(key) = event else {
                 return EventResult::Ignored;
@@ -46,7 +44,8 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 match key.code {
                     KeyCode::Enter => {
                         let sel = *selected.read();
-                        if let Some(job) = jobs_snapshot.get(sel) {
+                        let jobs = CRON_JOBS.state().read().clone();
+                        if let Some(job) = jobs.get(sel) {
                             cron_remove(&job.id);
                         }
                         *confirm_delete.write() = false;
@@ -74,17 +73,19 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::Down => {
                     let mut s = selected.write();
+                    let count = CRON_JOBS.state().read().len();
                     if count > 0 {
                         *s = next_selection(*s, count);
                     }
                 }
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     let sel = *selected.read();
-                    if let Some(job) = jobs_snapshot.get(sel) {
+                    let jobs = CRON_JOBS.state().read().clone();
+                    if let Some(job) = jobs.get(sel) {
                         cron_toggle(&job.id);
                     }
                 }
-                KeyCode::Char('d') if count > 0 => {
+                KeyCode::Char('d') if CRON_JOBS.state().read().len() > 0 => {
                     *confirm_delete.write() = true;
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -192,7 +193,7 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     panel_shell!(PanelKind::Cron, {
             ScrollView(
-                scroll_bars: ScrollBars::default(),
+                scroll_bars: crate::kit::panel_registry::clean_scrollbars(),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {
