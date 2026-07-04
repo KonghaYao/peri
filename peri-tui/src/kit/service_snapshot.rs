@@ -12,8 +12,9 @@
 //! ## 派生而非直读
 //!
 //! `provider_name` / `model_name` 在 `ServiceRegistry` 内是 `String`（非 Arc），
-//! 在 task 边界外无法实时读。本任务从 `peri_config` 派生 provider，再查 LlmProvider
-//! 得到 model alias——这与 `app::agent::LlmProvider::from_config` 的逻辑对齐。
+//! 在 task 边界外无法实时读。本任务从 `peri_config` 派生 provider，再通过
+//! `ProviderModels.get_model(active_alias)` 查询实际 model name——若查到非空字符串
+//! 则使用该值，否则 fallback 到 active_alias 本身。
 //! 这意味着如果用户运行时切 provider/model（通过 TUI 命令），本任务下次 tick 会看到。
 
 use std::sync::Arc;
@@ -674,6 +675,35 @@ mod tests {
         assert_eq!(provider, "anthropic");
         assert_eq!(alias, "sonnet");
         assert_eq!(model_name, "claude-sonnet-4-20250514");
+    }
+
+    #[tokio::test]
+    async fn test_derive_provider_and_model_set_empty_model() {
+        use peri_acp::provider::config::{AppConfig, ProviderConfig, ProviderModels};
+
+        let cfg = crate::config::PeriConfig {
+            config: AppConfig {
+                active_alias: "haiku".into(),
+                active_provider_id: "p1".into(),
+                providers: vec![ProviderConfig {
+                    id: "p1".into(),
+                    provider_type: "anthropic".into(),
+                    models: ProviderModels {
+                        haiku: "".into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let peri_config = Arc::new(parking_lot::RwLock::new(cfg));
+        let (provider, alias, model_name) = derive_provider_and_model(&peri_config);
+        assert_eq!(provider, "anthropic");
+        assert_eq!(alias, "haiku");
+        // Some("") 应被 filter 掉，回退到 active_alias
+        assert_eq!(model_name, "haiku");
     }
 
     #[tokio::test]
