@@ -37,6 +37,23 @@ render_bridge 监听 ACP 事件 + 宽度变化，预计算每条 ViewModel 的 `
 **[TRAP]** `/clear` 命令必须同步重置 `RENDER_CACHE`，否则旧缓存残留。
 **[TRAP]** ratatui-kit 事件边界：消息区只处理鼠标滚轮 `Event::Mouse(MouseEventKind::Scroll*)`，编辑区只处理键盘编辑/导航事件。`InputArea` Up/Down 应先做多行光标移动，只在首/末行时才 history fallback。
 
+### 跨 task 共享状态排障铁律（2026-07-05 双 bug 教训）
+
+两个 `/clear`/history 切换卡死 bug 暴露同一模式：见症状治症状，没追踪到唯一事实源。
+
+**铁律 1：先画数据写入者链，再动手。** 看到 atom 值不对时，不要直接改该 atom 的写入点。先往回追问：
+1. 这个 atom 被谁写？（列出所有 `*.state().write()` 调用点）
+2. 这些写入者从哪读数据？（追踪到内存中的 struct 字段）
+3. 那个 struct 字段是谁在维护？（找到**唯一的真实数据源**）
+4. **改真实数据源**，而不是在每个 consumer 端做 defensive reset。
+
+典型案例：`VIEW_MODELS` atom 的 committed 值不对 → 查到 `push_view_models` 从 `BridgeState.committed` 读取 → `BridgeState` 是唯一事实源 → 修复是清 `state.committed`（`BRIDGE_RESET_COUNTER`），而不是在 submit_consumer 里重复重置 atom。
+
+**铁律 2：ratatui-kit hook 修了就要逐行枚举。** 任何 `hooks.use_*` 调用点变更后，必须列出该组件中**每一个 hook 调用**（行号 + 类型），对比场景 A/场景 B 两帧的调用列表是否完全一致。肉眼扫一眼不可靠——`build_footer_lines` 就是漏了第 5 个 `use_state(once)`。
+
+**[TRAP]** 涉及 ratatui-kit `#[component]` 或接收 `&mut Hooks` 的函数内部，**所有** `hooks.use_*` 调用必须在任何 `if`/`match`/`return` 之前——ratatui-kit 按调用顺序索引 hook，顺序/数量变化会触发 `"Hook type mismatch"` panic 或状态数据错位。
+**[TRAP]** /clear 和 thread 切换时必须递增 `BRIDGE_RESET_COUNTER`，acp_bridge 在下次事件处理前检测到变更会自动清空 `committed`/`has_view_commit`/`current_turn`/`is_loading`。仅在 atom 层面重置不足以清除旧 session 残留。`BRIDGE_RESET_COUNTER` 是跨 session 的桥梁状态重置，/clear 或 thread 切换前必须先 +1。
+
 ### ratatui-kit overlay 白屏教训
 
 `AppShell` 根层把主内容、`PanelOverlay`、`PopupOverlay` 作为兄弟节点渲染；overlay 空态绝不能返回普通 `View()`，也不要用 `Fragment` 当函数组件根空态。ratatui-kit 函数组件布局透明，会继承返回根节点的 layout；`View()` 会参与父级 flex，`Fragment` 空根在该场景也会退化成会挤布局的默认节点，表现为 `/ratatui-kit` 整屏白/主界面被挤没。
