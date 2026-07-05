@@ -5,8 +5,6 @@
 //! 通过 PERMISSION_MODE_HANDLE 写运行时 SharedPermissionMode（非持久化——
 //! 设计如此，每次启动默认从 YOLO_MODE 环境变量派生）。
 
-#![allow(dead_code)]
-
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE};
 use crate::kit::list_nav::{next_selection, previous_selection};
@@ -355,6 +353,7 @@ fn permission_mode_label(m: PermissionMode) -> &'static str {
 
 /// 纯函数：toggle 行的值反转。返回反转后的新值（无效 row 返回 None）。
 /// 提取为独立函数便于单测——避免依赖全局 atom。
+#[allow(dead_code)]
 fn apply_toggle_row(cfg: &mut crate::config::PeriConfig, row: usize) -> Option<bool> {
     let new_val = match row {
         ROW_SHOW_DIFF => {
@@ -376,6 +375,7 @@ fn apply_toggle_row(cfg: &mut crate::config::PeriConfig, row: usize) -> Option<b
 }
 
 /// 纯函数：cycle 行前进/后退并写入新值。返回新选项在 options 中的索引。
+#[allow(dead_code)]
 fn apply_cycle_row(
     cfg: &mut crate::config::PeriConfig,
     row: usize,

@@ -1,12 +1,7 @@
 //! TUI 启动共享层——App + ACP server/client 构建与拆解。
 //!
-//! 把 `main.rs::run_app` 头部的 App 初始化、ACP server/client 配对、插件/Hook 装配
-//! 等步骤提取为公共函数，供两条运行路径复用：
-//!
-//! - legacy 路径（`runtime::main_loop::run`）：继续在 `main.rs` 内调用
-//! - kit 路径（`kit::entry::run_kit_fullscreen`）：通过 `TuiLaunchOptions` 入参启动
-//!
-//! 这一层是无状态、可测试的纯构造逻辑——终端管理、事件循环均不在此。
+//! 把 App 初始化、ACP server/client 配对、插件/Hook 装配等步骤提取为
+//! `build_app_and_acp` / `teardown_app` 公共函数，供 `kit::entry::run_kit_fullscreen` 调用。
 
 use std::sync::Arc;
 
@@ -43,10 +38,7 @@ pub struct TuiLaunchOptions {
 
 /// 构建 App + ACP server/client，并把 acp_client 注入 App。
 ///
-/// 这是从 `run_app` 头部提取的纯构造逻辑——所有副作用都局限在 App 字段写入。
-/// 调用方负责后续：
-/// - legacy：spawn `runtime::acp_notifier` + 进入 `runtime::main_loop::run`
-/// - kit：spawn kit 专用 notifier → `kit::acp_bridge` → atoms；spawn SUBMIT 消费者
+/// 调用方负责后续：spawn kit 专用 notifier → `kit::acp_bridge` → atoms；spawn SUBMIT 消费者。
 pub async fn build_app_and_acp(
     opts: &TuiLaunchOptions,
     _panic_notify_rx: Option<mpsc::UnboundedReceiver<String>>,

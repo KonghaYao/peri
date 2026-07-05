@@ -16,7 +16,6 @@ pub mod acp_server;
 pub mod alloc_config;
 pub mod app;
 pub mod config;
-pub mod dto_convert;
 pub mod i18n;
 pub mod kit;
 pub mod launch;

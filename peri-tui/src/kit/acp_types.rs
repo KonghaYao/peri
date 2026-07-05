@@ -1,8 +1,6 @@
 //! ACP 流式数据类型——`CurrentTurn` + `ToolCardAccumulator` + `AcpEventData`。
 //!
-//! 这三个类型在 kit 路径和 legacy state_machine 路径中都被使用。S11 起类型
-//! 定义集中在本模块，`state_machine::current_turn` / `state_machine::event`
-//! 通过 re-export 保持兼容。
+//! S11 起类型定义集中在本模块，不再通过 re-export 分散到其他模块。
 //!
 //! ## 设计
 //!

@@ -13,14 +13,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, RENDER_CACHE, VIEW_MODELS};
+use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, RENDER_CACHE};
 use crate::kit::focus_router;
 use crate::kit::panel_registry::clean_scrollbars;
 use crate::kit::render_bridge::WrappedLineInfo;
 use crate::kit::text_selection::{self, TextSelection};
 use crate::kit::theme;
 use crate::kit::welcome::Welcome;
-use peri_acp_types::view_model::ViewModel;
 use peri_widgets::spinner::{SpinnerMode, SpinnerState};
 use ratatui_kit::{
     components::ScrollViewState,
@@ -173,10 +172,8 @@ pub struct MessageAreaProps {
 #[component]
 pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let semantic = theme::semantic();
-    let component = theme::component();
 
     let render_cache = hooks.use_atom(&RENDER_CACHE);
-    let view_models = hooks.use_atom(&VIEW_MODELS);
     let cache_snapshot = render_cache.read();
     // is_loading 从 RENDER_CACHE 推断——存在 CurrentTurn 说明 agent 在运行。
     let is_loading = cache_snapshot.entries.last().map_or(false, |(k, _)| {
@@ -225,6 +222,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         // 通过清空 cached_line_count 触发后续 rebuild。
         lc.cached_wrap_map.clear();
         lc.cached_line_count = 0;
+        // 内容变化时触发自动滚动到底部（覆盖 session/load 等无 CT 的批量加载场景）
+        auto_scroll.set(true);
     }
 
     let lc_data = line_cache.read();
@@ -255,6 +254,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     }
     let empty = cache_snapshot.entries.is_empty() && !is_loading;
+    let all_line_count = all_lines.len();
     let content_lines = Arc::new(all_lines.clone());
     drop(cache_snapshot);
 
@@ -409,10 +409,15 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 视口裁剪 ──
     let scroll_y = scroll_state.read().offset().y as u16;
     let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
-    let (first, last, local_offset) = viewport_clip(&wrap_map, scroll_y, vis_height);
+    let (first, last, _local_offset) = viewport_clip(&wrap_map, scroll_y, vis_height);
 
     let visible_lines: Vec<Line<'static>> =
         highlighted_lines.get(first..last).unwrap_or(&[]).to_vec();
+
+    // 内容在 ScrollView 中的垂直起始位置（视觉行号）。
+    // ScrollView 负责整体滚动；这里通过在内容 View 前面插入一个 spacer，
+    // 使 visible_lines 出现在内容 View 的正确偏移处。
+    let content_top = wrap_map.get(first).map_or(0u16, |w| w.visual_row);
 
     let total_visual_rows: u16 = if wrap_map.is_empty() {
         if is_loading { 1 } else { 0 }
@@ -424,86 +429,42 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     let max_scroll = total_visual_rows.saturating_sub(vis_height);
 
-    // ── Sticky Header：滚动时显示最后一条用户消息摘要 ──
-    let sticky_header: Option<Vec<Line<'static>>> = {
-        let store = view_models.read();
-        let last_user_text = store
-            .committed
-            .iter()
-            .rev()
-            .chain(store.current_turn.iter().rev())
-            .find_map(|vm| {
-                if let ViewModel::UserBubble(data) = vm {
-                    Some(data.text.chars().take(80).collect::<String>())
-                } else {
-                    None
-                }
-            });
-        drop(store);
+    // 诊断：记录关键渲染参数，输出到 agent-tui.log
+    tracing::info!(
+        total_visual_rows,
+        vis_height,
+        max_scroll,
+        scroll_y,
+        first,
+        last,
+        all_count = all_line_count,
+        hl_count = highlighted_lines.len(),
+        vis_count = visible_lines.len(),
+        content_top,
+        empty,
+        "msg-area diag"
+    );
 
-        last_user_text.filter(|_| max_scroll > 0).map(|text| {
-            vec![Line::styled(
-                format!("❯ {}", text),
-                Style::default()
-                    .fg(semantic.text.primary)
-                    .bg(component.message.user_bg),
-            )]
-        })
-    };
-
-    let show_sticky = sticky_header.is_some();
-
-    if show_sticky {
-        let hdr_lines = sticky_header.unwrap();
-        element!(
+    // 暂时禁用 sticky header，测试是否是它导致内容消失
+    element!(
+        ScrollView(
+            flex_direction: Direction::Vertical,
+            width: Constraint::Fill(1),
+            height: Constraint::Fill(1),
+            scroll_view_state: scroll_state,
+            scroll_bars: clean_scrollbars(),
+        ) {
             View(
                 flex_direction: Direction::Vertical,
                 width: Constraint::Fill(1),
-                height: Constraint::Fill(1),
+                height: Constraint::Length(total_visual_rows.max(1)),
             ) {
-                // Sticky header — 固定在顶部
-                Text(text: Paragraph::new(RatText::from(hdr_lines)))
-                // 消息区主体
-                ScrollView(
-                    flex_direction: Direction::Vertical,
-                    width: Constraint::Fill(1),
-                    height: Constraint::Fill(1),
-                    scroll_view_state: scroll_state,
-                    scroll_bars: clean_scrollbars(),
-                ) {
-                    View(
-                        flex_direction: Direction::Vertical,
-                        width: Constraint::Fill(1),
-                        height: Constraint::Length(total_visual_rows.max(1)),
-                    ) {
-                        Text(text: Paragraph::new(RatText::from(visible_lines))
-                            .scroll((local_offset, 0)))
-                    }
-                }
+                View(height: Constraint::Length(content_top)) {}
+                Text(text: Paragraph::new(RatText::from(visible_lines)))
             }
-        )
-        .into_any()
-    } else {
-        element!(
-            ScrollView(
-                flex_direction: Direction::Vertical,
-                width: Constraint::Fill(1),
-                height: Constraint::Fill(1),
-                scroll_view_state: scroll_state,
-                scroll_bars: clean_scrollbars(),
-            ) {
-                View(
-                    flex_direction: Direction::Vertical,
-                    width: Constraint::Fill(1),
-                    height: Constraint::Length(total_visual_rows.max(1)),
-                ) {
-                    Text(text: Paragraph::new(RatText::from(visible_lines))
-                        .scroll((local_offset, 0)))
-                }
-            }
-        )
-        .into_any()
-    }
+        }
+    )
+    .into_any()
 }
 
 #[cfg(test)]

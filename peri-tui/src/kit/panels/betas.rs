@@ -18,14 +18,12 @@ use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 
 /// Mock beta feature entries (Phase 8: injected via Atom).
-#[allow(dead_code)]
 struct BetaEntry {
     label: &'static str,
     description: &'static str,
     enabled: bool,
 }
 
-#[allow(dead_code)]
 const BETA_ENTRIES: &[BetaEntry] = &[
     BetaEntry {
         label: "subagent_v2",

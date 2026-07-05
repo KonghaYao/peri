@@ -1,6 +1,6 @@
 //! TUI 统一颜色主题（对齐 Claude Code Dark 配色方案）。
 //!
-//! S11 起类型定义集中在 kit 内，`ui::theme` 通过 re-export 保持 legacy 兼容。
+//! S11 起类型定义集中在 kit 内，由 kit 组件直接引用。
 //!
 //! ## 设计哲学
 //!

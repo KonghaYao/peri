@@ -1,10 +1,6 @@
-//! kit 路径专用 ACP notifier——AcpNotification → AcpEventData 转换器。
+//! ACP notifier——AcpNotification → AcpEventData 转换器。
 //!
-//! 与 legacy `runtime::acp_notifier` 的关键区别：
-//!
-//! - **不做 TuiEvent 中间态**：legacy 先转 `TuiEvent::AcpEvent {event:"agent-event", ..}`
-//!   再由 main_loop 反向解包，效率低且绕路。kit 直接在 notifier 内完成 DTO 转换，
-//!   产出的 `AcpEventData` 立即送入 `spawn_acp_bridge`。
+//! 直接在 notifier 内完成 DTO 转换，产出的 `AcpEventData` 立即送入 `spawn_acp_bridge`。
 //! - **以 UnstableEvent 为流式主通道**：ACP 服务端的高频流式事件
 //!   （text-chunk / reasoning-chunk / tool-started / tool-ended / view-commit /
 //!   turn-done / ...）通过 `peri/unstable-event` notification 携带，event 字段是

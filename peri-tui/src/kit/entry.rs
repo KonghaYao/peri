@@ -1,8 +1,6 @@
-//! ratatui-kit 入口——替代 main_loop::run 的事件循环和渲染。
+//! ratatui-kit 全屏 TUI 入口——事件循环和渲染。
 //!
-//! 由 main.rs 在 `#[cfg(feature = "use-kit")]` 条件下调用。
-//!
-//! 这是 kit 路径的总线：与 legacy `run_app` 平级但走完全不同的运行栈——
+//! 这是 kit 总线：替代旧的 main_loop，走完全不同的运行栈——
 //! AcpNotification → AcpEventData（kit notifier）→ BridgeState（acp_bridge）
 //! → Atom 写入（acp_events）→ ratatui-kit 组件 use_store 重渲染。
 //! 用户提交则反向：InputArea → SUBMIT_TX → submit_consumer → acp_client.prompt()。
@@ -39,11 +37,11 @@ use ratatui_kit::{
 
 /// 使用 ratatui-kit 的全屏模式启动 TUI。
 ///
-/// 与 legacy `run_app` 对称：接收 CLI 选项 + panic 通知 rx，完成 App+ACP 构建后
+/// 接收 CLI 选项 + panic 通知 rx，完成 App+ACP 构建后
 /// spawn kit 四链路（notifier / bridge / submit_consumer / service_snapshot），
 /// 进入 ratatui-kit 全屏。
 ///
-/// 返回时已调用 `teardown_app`——hooks/hooks 清理、MCP 池关闭、Langfuse flush。
+/// 返回时已调用 `teardown_app`——hooks 清理、MCP 池关闭、Langfuse flush。
 pub async fn run_kit_fullscreen(
     opts: TuiLaunchOptions,
     panic_notify_rx: mpsc::UnboundedReceiver<String>,
@@ -54,7 +52,7 @@ pub async fn run_kit_fullscreen(
     // 1b. 从磁盘加载输入历史到 INPUT_HISTORY atom（文件不存在则静默跳过）
     input_history::load_history();
 
-    // 2. 构建 App + ACP server/client（与 legacy 共享同一段构造逻辑）
+    // 2. 构建 App + ACP server/client
     let (mut app, acp_client) = build_app_and_acp(&opts, Some(panic_notify_rx)).await?;
 
     // 2b. H2: 把 peri_config 共享句柄塞到全局 OnceLock，让 ModelPanel 等组件
@@ -195,7 +193,7 @@ pub async fn run_kit_fullscreen(
     // 6. 退出前触发 shutdown，让后台任务干净退出
     shutdown.cancel();
 
-    // 7. teardown：hooks/MCP/Langfuse（与 legacy run_app 对称）
+    // 7. teardown：hooks / MCP / Langfuse
     teardown_app(&mut app).await;
 
     result?;
