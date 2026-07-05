@@ -67,11 +67,14 @@ pub struct DiffPalette {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SemanticTokens {
+    pub accent: Color,
     pub text: TextTokens,
     pub border: BorderTokens,
     pub status: StatusTokens,
     pub surface: SurfaceTokens,
     pub diff: DiffTokens,
+    pub loading: Color,
+    pub thinking: Color,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,6 +247,9 @@ pub const DEFAULT_THEME: ThemeDefinition = ThemeDefinition {
             remove: ERROR,
             hunk: THINKING,
         },
+        loading: LOADING,
+        thinking: THINKING,
+        accent: ACCENT,
     },
     component: ComponentTokens {
         message: MessageTokens {

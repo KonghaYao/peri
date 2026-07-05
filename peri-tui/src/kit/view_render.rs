@@ -402,21 +402,27 @@ fn render_subagent_group(
     diff_visible: bool,
 ) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
-    let component = theme::component();
 
     // 查询运行时状态（v2 DTO 缺失字段由 status probe 注入）
     let status = lookup_subagent_status(&data.agent_id);
 
+    // Agent 标签颜色：仅 error 态用红色。后台运行 warning 色依赖 is_background
+    // 数据通道（后续迭代），当前所有非 error 态统一 success 绿色
+    let agent_color = match status {
+        Some(ref s) if s.is_error => semantic.status.error,
+        _ => semantic.status.success,
+    };
+
     let mut header_spans = vec![
-        Span::styled("◆ ", Style::default().fg(component.message.ai_prefix)),
+        Span::styled("❯ ", Style::default().fg(semantic.loading)),
         Span::styled(
             "Agent".to_string(),
             Style::default()
-                .fg(component.message.ai_prefix)
+                .fg(agent_color)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" ({})", data.agent_name),
+            format!("({})", data.agent_name),
             Style::default().fg(semantic.text.muted),
         ),
     ];
