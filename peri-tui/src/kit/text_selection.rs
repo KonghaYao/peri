@@ -169,7 +169,7 @@ pub fn extract_selected_text(
 // ── 选区高亮 ─────────────────────────────────────────────────────────────
 
 /// 选区高亮背景色。
-const SELECTION_BG: ratatui::style::Color = ratatui::style::Color::Rgb(60, 60, 60);
+const SELECTION_BG: ratatui::style::Color = ratatui::style::Color::Rgb(38, 79, 120);
 
 /// 为选区内的行做字符级高亮——首/末行仅 highlight 被选中的列范围，中间行全行。
 ///
