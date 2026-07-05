@@ -37,6 +37,7 @@ pub mod submit_consumer;
 pub mod text_selection;
 pub mod theme;
 pub mod thread_load_consumer;
+pub mod tool_display;
 pub mod view_render;
 pub mod welcome;
 

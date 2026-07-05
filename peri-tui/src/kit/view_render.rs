@@ -13,6 +13,8 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use crate::kit::tool_display;
+
 use peri_acp_types::view_model::{
     CollapsedGroupData, DiffBlock, DividerData, HunkLineKind, NoteLevel, ReasoningBlock,
     SubAgentGroupData, ViewModel,
@@ -194,18 +196,20 @@ fn render_reasoning_block(reasoning: &ReasoningBlock) -> Vec<Line<'static>> {
     lines
 }
 
+/// 工具调用卡片渲染（v2 ViewModel 渲染器）。
 fn render_tool_card(
     data: &peri_acp_types::view_model::ToolCardData,
     diff_visible: bool,
 ) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
     let display = tool_display(&data.tool_name, data.is_error, data.is_running);
+    let display_name = tool_display::format_tool_name(&data.tool_name).to_string();
 
     let mut header_spans = vec![
         Span::styled(display.indicator, Style::default().fg(display.color)),
         Span::raw(" "),
         Span::styled(
-            display.label,
+            display_name,
             Style::default()
                 .fg(display.color)
                 .add_modifier(Modifier::BOLD),
@@ -269,7 +273,6 @@ fn render_tool_card(
 
 struct ToolDisplay {
     indicator: &'static str,
-    label: String,
     color: Color,
 }
 
@@ -279,7 +282,6 @@ fn tool_display(tool_name: &str, is_error: bool, is_running: bool) -> ToolDispla
     if is_error {
         return ToolDisplay {
             indicator: "✗",
-            label: tool_name.to_string(),
             color: semantic.status.error,
         };
     }
@@ -292,7 +294,6 @@ fn tool_display(tool_name: &str, is_error: bool, is_running: bool) -> ToolDispla
         let indicator = if visible { "●" } else { " " };
         return ToolDisplay {
             indicator,
-            label: tool_name.to_string(),
             color: semantic.status.success, // §2.4.2: Running 用 success 绿色
         };
     }
@@ -322,11 +323,7 @@ fn tool_display(tool_name: &str, is_error: bool, is_running: bool) -> ToolDispla
         ("●", component.message.tool_indicator)
     };
 
-    ToolDisplay {
-        indicator,
-        label: tool_name.to_string(),
-        color,
-    }
+    ToolDisplay { indicator, color }
 }
 
 fn compact_summary(text: &str, max_chars: usize) -> String {
