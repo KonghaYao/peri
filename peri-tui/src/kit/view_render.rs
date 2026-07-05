@@ -196,6 +196,12 @@ fn render_reasoning_block(reasoning: &ReasoningBlock) -> Vec<Line<'static>> {
     lines
 }
 
+// ── 折叠/展开规则（TUI-PAGE.md §2.4.2） ────────────────────────────────
+
+const COLLAPSED_BY_DEFAULT: &[&str] = &["Read", "Glob", "Grep", "AskUserQuestion"];
+const AUTO_EXPAND: &[&str] = &["AgentResult", "ExecuteExtraTool"];
+const FORCE_EXPAND_ON_COMPLETE: &[&str] = &["Write", "Edit"];
+
 /// 工具调用卡片渲染（v2 ViewModel 渲染器）。
 fn render_tool_card(
     data: &peri_acp_types::view_model::ToolCardData,
@@ -232,6 +238,21 @@ fn render_tool_card(
     }
 
     let mut lines = vec![Line::from(header_spans)];
+
+    // 折叠/展开判断（纯 UI 决策，对应 TUI-PAGE.md §2.4.2）
+    let collapsed = if data.is_error {
+        false // 错误不折叠
+    } else if AUTO_EXPAND.contains(&data.tool_name.as_str()) {
+        false // AgentResult/ExecuteExtraTool 自动展开
+    } else if FORCE_EXPAND_ON_COMPLETE.contains(&data.tool_name.as_str()) && !data.is_running {
+        false // Write/Edit 完成后强制展开
+    } else {
+        COLLAPSED_BY_DEFAULT.contains(&data.tool_name.as_str())
+    };
+
+    if collapsed {
+        return lines;
+    }
 
     // 输出摘要
     if !data.output_summary.is_empty() {
@@ -547,7 +568,7 @@ fn render_subagent_group(
 fn render_collapsed_group(data: &CollapsedGroupData) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
     vec![Line::from(vec![
-        Span::styled("📦 ", Style::default().fg(semantic.status.success)),
+        Span::styled("● ", Style::default().fg(semantic.status.success)),
         Span::styled(
             format!("{}（{} 项）", data.title, data.count),
             Style::default().fg(semantic.text.muted),
