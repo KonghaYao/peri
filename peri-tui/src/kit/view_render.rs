@@ -15,6 +15,7 @@ use ratatui::{
 
 use crate::kit::tool_display;
 
+#[allow(unused_imports)]
 use peri_acp_types::view_model::{
     AskUserBlockData, CollapsedGroupData, DiffBlock, DividerData, HunkLineKind, NoteLevel,
     ReasoningBlock, SubAgentGroupData, ViewModel,
@@ -125,13 +126,14 @@ fn render_user_bubble(text: &str, width: usize, is_system_reminder: bool) -> Vec
     let component = theme::component();
     let user_bg = component.message.user_bg;
     let parsed = crate::kit::markdown::parse_markdown(text, width);
-    let mut lines = Vec::with_capacity(parsed.lines.len() + 1);
+    let mut lines = Vec::with_capacity(parsed.lines.len() + 2);
+    lines.push(Line::from(""));
     for (i, line) in parsed.lines.iter().enumerate() {
         if i == 0 {
             let mut spans = vec![Span::styled(
                 "❯ ",
                 Style::default()
-                    .fg(semantic.border.active)
+                    .fg(semantic.accent)
                     .add_modifier(Modifier::BOLD)
                     .bg(user_bg),
             )];
@@ -147,6 +149,7 @@ fn render_user_bubble(text: &str, width: usize, is_system_reminder: bool) -> Vec
             lines.push(Line::from(spans));
         }
     }
+    lines.push(Line::from(""));
     lines
 }
 
@@ -174,11 +177,10 @@ fn render_assistant_bubble(
 
 fn render_reasoning_block(reasoning: &ReasoningBlock) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
-    let component = theme::component();
     let char_count = reasoning.text.chars().count();
     let mut lines = vec![Line::from(vec![Span::styled(
-        format!("🧠 已思考 {} 字符", char_count),
-        Style::default().fg(component.message.reasoning),
+        format!("Thought for {} chars", char_count),
+        Style::default().fg(semantic.text.dim),
     )])];
 
     // 尾部预览（最后 3 行）
@@ -218,16 +220,16 @@ fn render_tool_card(
         Span::styled(
             display_name,
             Style::default()
-                .fg(display.color)
+                .fg(semantic.text.primary)
                 .add_modifier(Modifier::BOLD),
         ),
     ];
 
-    let summary = compact_summary(&data.input_summary, 140);
+    let summary = compact_summary(&data.input_summary, 400);
     if !summary.is_empty() {
         header_spans.push(Span::styled(
-            format!(" — {}", summary),
-            Style::default().fg(semantic.text.muted),
+            format!(" ({})", summary),
+            Style::default().fg(semantic.text.dim),
         ));
     }
 
@@ -252,7 +254,15 @@ fn render_tool_card(
     };
 
     if collapsed {
-        return lines;
+        if data.is_error && !data.output_summary.is_empty() {
+            for out_line in compact_output_lines(&data.output_summary, 1, 400) {
+                lines.push(Line::from(vec![
+                    Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim)),
+                    Span::styled(out_line, Style::default().fg(semantic.status.error)),
+                ]));
+            }
+        }
+        return with_message_spacing(lines);
     }
 
     // 输出摘要
@@ -267,7 +277,7 @@ fn render_tool_card(
         } else {
             semantic.text.dim
         };
-        for out_line in compact_output_lines(&data.output_summary, 4, 180) {
+        for out_line in compact_output_lines(&data.output_summary, 4, 400) {
             lines.push(Line::from(vec![
                 Span::styled("  ⎿ ".to_string(), Style::default().fg(border_color)),
                 Span::styled(out_line, Style::default().fg(result_color)),
@@ -290,7 +300,7 @@ fn render_tool_card(
         }
     }
 
-    lines
+    with_message_spacing(lines)
 }
 
 struct ToolDisplay {
@@ -298,9 +308,8 @@ struct ToolDisplay {
     color: Color,
 }
 
-fn tool_display(tool_name: &str, is_error: bool, is_running: bool) -> ToolDisplay {
+fn tool_display(_tool_name: &str, is_error: bool, is_running: bool) -> ToolDisplay {
     let semantic = theme::semantic();
-    let component = theme::component();
     if is_error {
         return ToolDisplay {
             indicator: "✗",
@@ -320,32 +329,28 @@ fn tool_display(tool_name: &str, is_error: bool, is_running: bool) -> ToolDispla
         };
     }
 
-    let lower = tool_name.to_ascii_lowercase();
-    let (indicator, color) = if lower.contains("bash") {
-        ("$", semantic.status.warning)
-    } else if lower.contains("edit") || lower.contains("write") {
-        ("✎", semantic.border.active)
-    } else if lower.contains("read") || lower.contains("glob") || lower.contains("grep") {
-        ("⌕", semantic.status.success)
-    } else if lower.contains("ask") || lower.contains("question") {
-        ("?", semantic.status.warning)
-    } else if lower.contains("todo") {
-        ("☑", semantic.status.warning)
-    } else if lower.contains("folder") {
-        ("▣", semantic.status.success)
-    } else if lower.contains("artifact") {
-        ("◈", semantic.border.active)
-    } else if lower.contains("cron") {
-        ("◷", semantic.status.running)
-    } else if lower.contains("agent") {
-        ("◆", component.message.ai_prefix)
-    } else if lower.contains("web") {
-        ("◎", semantic.status.running)
-    } else {
-        ("●", component.message.tool_indicator)
-    };
+    ToolDisplay {
+        indicator: "●",
+        color: semantic.status.success,
+    }
+}
 
-    ToolDisplay { indicator, color }
+fn trim_trailing_blank_lines(lines: &mut Vec<Line<'static>>) {
+    while lines
+        .last()
+        .is_some_and(|line| line.spans.iter().all(|span| span.content.is_empty()))
+    {
+        lines.pop();
+    }
+}
+
+fn with_message_spacing(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    trim_trailing_blank_lines(&mut lines);
+    let mut spaced = Vec::with_capacity(lines.len() + 2);
+    spaced.push(Line::from(""));
+    spaced.extend(lines);
+    spaced.push(Line::from(""));
+    spaced
 }
 
 fn compact_summary(text: &str, max_chars: usize) -> String {
@@ -559,16 +564,20 @@ fn render_subagent_group(
     let mut header_spans = vec![
         Span::styled("❯ ", Style::default().fg(semantic.loading)),
         Span::styled(
-            "Agent".to_string(),
+            format!("Agent({})", data.agent_id),
             Style::default()
                 .fg(agent_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("({})", data.agent_name),
-            Style::default().fg(semantic.text.muted),
-        ),
     ];
+
+    let task_preview = truncate_str(&data.agent_name, 50);
+    if !task_preview.is_empty() {
+        header_spans.push(Span::styled(
+            format!(" {}", task_preview),
+            Style::default().fg(semantic.text.muted),
+        ));
+    }
 
     // 运行时状态指示器
     if let Some(ref s) = status {
@@ -620,24 +629,21 @@ fn render_subagent_group(
     };
 
     if data.collapsed {
-        let count = children.len();
-        if count > 0 {
-            lines.push(Line::from(vec![Span::styled(
-                format!("  📦 {} 项", count),
-                Style::default().fg(semantic.text.muted),
-            )]));
+        return with_message_spacing(lines);
+    }
+
+    for inner_vm in &children {
+        if matches!(inner_vm, ViewModel::AssistantBubble(_)) {
+            continue;
         }
-    } else {
-        for inner_vm in &children {
-            let inner_lines = render_v2_vm(inner_vm, width, diff_visible);
-            if inner_lines.is_empty() {
-                continue;
-            }
-            for line in inner_lines {
-                let mut new_spans = vec![Span::raw("  ")];
-                new_spans.extend(line.spans);
-                lines.push(Line::from(new_spans));
-            }
+        let inner_lines = render_v2_vm(inner_vm, width, diff_visible);
+        if inner_lines.is_empty() {
+            continue;
+        }
+        for line in inner_lines {
+            let mut new_spans = vec![Span::raw("  ")];
+            new_spans.extend(line.spans);
+            lines.push(Line::from(new_spans));
         }
     }
 
@@ -651,7 +657,7 @@ fn render_subagent_group(
             .next()
             .unwrap_or("")
             .chars()
-            .take(120)
+            .take(80)
             .collect();
         if !preview.is_empty() {
             let color = if s.is_error {
@@ -666,7 +672,7 @@ fn render_subagent_group(
         }
     }
 
-    lines
+    with_message_spacing(lines)
 }
 
 fn render_collapsed_group(data: &CollapsedGroupData) -> Vec<Line<'static>> {
@@ -732,6 +738,33 @@ mod tests {
     }
 
     #[test]
+    fn test_user_bubble_has_spec_spacing_and_prefix() {
+        let vm = ViewModel::UserBubble(UserBubbleData {
+            text: "hello\nworld".into(),
+            content_hash: 0,
+            is_system_reminder: false,
+        });
+        let lines = render_v2_vm(&vm, 80, false);
+        let text = collect_text(&lines);
+        assert_eq!(lines.len(), 3, "用户消息前后应各有 1 行空行：{}", text);
+        assert!(
+            text.contains("❯ hello world"),
+            "首行应使用 ❯ 前缀：{}",
+            text
+        );
+        assert!(
+            lines
+                .first()
+                .is_some_and(|line| collect_text(std::slice::from_ref(line)).is_empty())
+        );
+        assert!(
+            lines
+                .last()
+                .is_some_and(|line| collect_text(std::slice::from_ref(line)).is_empty())
+        );
+    }
+
+    #[test]
     fn test_assistant_bubble_text() {
         let vm = ViewModel::AssistantBubble(AssistantBubbleData {
             text: "**bold** text".into(),
@@ -758,7 +791,7 @@ mod tests {
         assert!(!lines.is_empty());
         // Should have "Thought for N chars" line
         let first = &lines[0].spans;
-        assert!(first.iter().any(|s| s.content.contains("🧠")));
+        assert!(first.iter().any(|s| s.content.contains("Thought for")));
     }
 
     #[test]
@@ -775,8 +808,44 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert!(!lines.is_empty());
-        let first = &lines[0].spans;
+        let first = &lines[1].spans;
         assert!(first.iter().any(|s| s.content.contains("Read")));
+    }
+
+    #[test]
+    fn test_tool_card_read_collapsed_has_spacing_and_no_output() {
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-read-collapsed".into(),
+            tool_name: "Read".into(),
+            input_summary: "path: foo.rs".into(),
+            output_summary: "hidden output".into(),
+            is_error: false,
+            is_running: false,
+            diff: None,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80, false);
+        let text = collect_text(&lines);
+        assert!(
+            text.contains("● Read (path: foo.rs)"),
+            "工具头应使用括号摘要：{}",
+            text
+        );
+        assert!(
+            !text.contains("hidden output"),
+            "只读工具默认折叠输出：{}",
+            text
+        );
+        assert!(
+            lines
+                .first()
+                .is_some_and(|line| collect_text(std::slice::from_ref(line)).is_empty())
+        );
+        assert!(
+            lines
+                .last()
+                .is_some_and(|line| collect_text(std::slice::from_ref(line)).is_empty())
+        );
     }
 
     #[test]
@@ -792,8 +861,34 @@ mod tests {
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
-        let first = &lines[0].spans;
+        let first = &lines[1].spans;
         assert!(first.iter().any(|s| s.content.contains("✗")));
+    }
+
+    #[test]
+    fn test_tool_card_collapsed_error_shows_error_summary() {
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-read-error".into(),
+            tool_name: "Read".into(),
+            input_summary: "foo.rs".into(),
+            output_summary: "permission denied".into(),
+            is_error: true,
+            is_running: false,
+            diff: None,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80, false);
+        let text = collect_text(&lines);
+        assert!(
+            text.contains("✗ Read (foo.rs)"),
+            "错误工具应显示失败标识：{}",
+            text
+        );
+        assert!(
+            text.contains("⎿ permission denied"),
+            "错误摘要应展开显示：{}",
+            text
+        );
     }
 
     #[test]
@@ -815,7 +910,7 @@ mod tests {
         let text = collect_text(&lines);
         assert!(text.contains("●"), "运行中工具应显示状态 ●：{}", text);
         assert!(text.contains("· ●"), "运行中工具应显示运行中标记：{}", text);
-        assert!(text.contains("path: foo.rs · old_string: hello"));
+        assert!(text.contains("Edit (path: foo.rs · old_string: hello"));
     }
 
     #[test]
@@ -859,7 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_card_web_uses_distinct_indicator() {
+    fn test_tool_card_web_uses_spec_indicator() {
         let vm = ViewModel::ToolCard(ToolCardData {
             tool_id: "tc-web".into(),
             tool_name: "WebFetch".into(),
@@ -872,11 +967,15 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
-        assert!(text.contains("◎"), "Web 工具应有独立标识：{}", text);
+        assert!(
+            text.contains("● Browse"),
+            "Web 工具应使用统一成功标识：{}",
+            text
+        );
     }
 
     #[test]
-    fn test_tool_card_bash_uses_distinct_indicator() {
+    fn test_tool_card_bash_uses_spec_indicator_and_display_name() {
         let vm = ViewModel::ToolCard(ToolCardData {
             tool_id: "tc-bash".into(),
             tool_name: "Bash".into(),
@@ -889,7 +988,11 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
-        assert!(text.contains("$"), "Bash 工具应有独立标识：{}", text);
+        assert!(
+            text.contains("● Shell"),
+            "Bash 工具应映射为 Shell 并使用统一成功标识：{}",
+            text
+        );
     }
 
     #[test]
@@ -994,7 +1097,9 @@ mod tests {
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
-        assert!(!lines.is_empty());
+        let text = collect_text(&lines);
+        assert!(text.contains("Agent(sa-1) file-searcher"));
+        assert!(!text.contains("📦"));
     }
 
     #[test]
@@ -1032,6 +1137,57 @@ mod tests {
             .map(|s| s.content.clone())
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    #[test]
+    fn test_subagent_group_expanded_skips_assistant_bubble_and_trims_result() {
+        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+            agent_id: "sa-visual".into(),
+            agent_name: "visual".into(),
+            view_models: vec![
+                ViewModel::AssistantBubble(AssistantBubbleData {
+                    text: "hidden assistant".into(),
+                    reasoning: None,
+                    tool_card_ids: vec![],
+                    content_hash: 0,
+                }),
+                ViewModel::UserBubble(UserBubbleData {
+                    text: "visible user".into(),
+                    content_hash: 0,
+                    is_system_reminder: false,
+                }),
+            ],
+            collapsed: false,
+            is_running: false,
+            content_hash: 0,
+        });
+        let probe = std::rc::Rc::new(StaticProbe {
+            info: Some(SubAgentRenderInfo {
+                is_running: false,
+                is_error: false,
+                total_steps: 1,
+                final_result: Some("x".repeat(100)),
+                recent_messages: Vec::new(),
+            }),
+        });
+        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
+        let text = collect_text(&lines);
+        assert!(
+            !text.contains("hidden assistant"),
+            "嵌套 AssistantBubble 不应渲染：{}",
+            text
+        );
+        assert!(
+            text.contains("visible user"),
+            "非 AssistantBubble 嵌套消息应渲染：{}",
+            text
+        );
+        assert_eq!(
+            text.matches('x').count(),
+            80,
+            "最终结果应截断到 80 字符：{}",
+            text
+        );
     }
 
     #[test]
@@ -1082,7 +1238,7 @@ mod tests {
         let text = collect_text(&lines);
         assert!(text.contains("✅"), "应显示完成状态：{}", text);
         assert!(
-            text.contains("→ completed task"),
+            text.contains("⎿ completed task"),
             "应显示结果预览：{}",
             text
         );
@@ -1110,7 +1266,7 @@ mod tests {
         let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
         let text = collect_text(&lines);
         assert!(text.contains("❌"), "应显示失败状态：{}", text);
-        assert!(text.contains("→ Error"), "应显示错误结果：{}", text);
+        assert!(text.contains("⎿ Error"), "应显示错误结果：{}", text);
     }
 
     #[test]

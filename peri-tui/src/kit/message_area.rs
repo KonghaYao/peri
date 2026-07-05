@@ -11,6 +11,7 @@
 #![allow(clippy::needless_update)]
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, RENDER_CACHE, VIEW_MODELS};
 use crate::kit::focus_router;
@@ -57,7 +58,7 @@ fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
             TodoStatus::Completed => ("✔", sem.status.success, sem.text.muted, true),
             TodoStatus::Pending => ("◻", sem.text.muted, sem.text.muted, false),
         };
-        let mut prefix_style = Style::default().fg(icon_color).add_modifier(Modifier::BOLD);
+        let prefix_style = Style::default().fg(icon_color).add_modifier(Modifier::BOLD);
         let mut text_style = Style::default().fg(text_color);
         if crossed {
             text_style = text_style.add_modifier(Modifier::CROSSED_OUT);
@@ -80,11 +81,41 @@ fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
 struct LineCache {
     key: u64,
     current_has_ct: bool,
-    /// 拷贝自 RENDER_CACHE.wrap_map——viewport_clip 二分查找用
-    wrap_map: Vec<WrappedLineInfo>,
+    /// 从 highlighted_lines 重建的完整 wrap_map（含 spinner/todo 视觉行）
+    /// 仅在内容变化（key 变更）时重建，滚动/选区变化复用缓存。
+    cached_wrap_map: Vec<WrappedLineInfo>,
+    /// 上次计算 wrap_map 时对应的 highlighted_lines 长度，
+    /// 用于在内容无变化时复用 cached_wrap_map。
+    cached_line_count: usize,
 }
 
 // ── 视口裁剪 ────────────────────────────────────────────────────────────────
+
+fn mouse_in_area(mouse_row: u16, mouse_col: u16, area: Rect) -> bool {
+    let area_bottom = area.y.saturating_add(area.height);
+    let area_right = area.x.saturating_add(area.width);
+    mouse_row >= area.y && mouse_row < area_bottom && mouse_col >= area.x && mouse_col < area_right
+}
+
+fn mouse_visual_position(mouse_row: u16, mouse_col: u16, area: Rect, scroll_y: u16) -> (u16, u16) {
+    (
+        mouse_row.saturating_sub(area.y).saturating_add(scroll_y),
+        mouse_col.saturating_sub(area.x),
+    )
+}
+
+fn copy_selected_text_to_clipboard(text: String) {
+    std::thread::spawn(move || {
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            let _ = clipboard.set_text(text);
+        }
+    });
+}
+
+fn mark_copy_message(char_count: usize) {
+    *COPY_CHAR_COUNT.state().write() = char_count;
+    *COPY_MESSAGE_UNTIL.state().write() = Some(Instant::now() + Duration::from_millis(2000));
+}
 
 /// 视口裁剪：基于 wrap_map 二分查找，返回当前视口内可见的逻辑行范围 [first, last)。
 ///
@@ -190,12 +221,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         let mut lc = line_cache.write();
         lc.key = new_key;
         lc.current_has_ct = ct;
-        lc.wrap_map = cache_snapshot.wrap_map.clone();
+        // key 变更 → 内容已变化，cached_wrap_map 需重建，
+        // 通过清空 cached_line_count 触发后续 rebuild。
+        lc.cached_wrap_map.clear();
+        lc.cached_line_count = 0;
     }
 
     let lc_data = line_cache.read();
     let current_has_ct = lc_data.current_has_ct;
-    let wrap_map_base = lc_data.wrap_map.clone();
     drop(lc_data);
 
     // 构建全量行（基于 cache_snapshot entries，不含空行分隔符，含 spinner）
@@ -213,7 +246,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     }
 
-    // ── Todo 列表（数据通道日后接入） ──
     // ── Todo 列表（从 ACP SessionUpdate::Plan 消费） ──
     let todo_atom = hooks.use_atom(&crate::kit::atoms::TODO_ITEMS);
     let todo_items = todo_atom.read();
@@ -233,7 +265,41 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 文本选区状态 ──
     let text_sel = hooks.use_state(TextSelection::new);
 
-    // ── 事件处理（鼠标选中 + 滚动 + 键盘） ──
+    // 选区高亮依赖 all_lines，提前拿到
+    let sel = text_sel.read();
+    let highlighted_lines: Vec<Line<'static>> =
+        if let Some(((sr, sc), (er, ec))) = sel.normalized_bounds() {
+            if sel.is_active() {
+                text_selection::highlight_selected_lines(&all_lines, sr, sc, er, ec)
+            } else {
+                all_lines
+            }
+        } else {
+            all_lines
+        };
+    drop(sel);
+
+    // ── wrap_map：仅在内容行数变化时重建，滚动/选区变化复用缓存 ──
+    let wrap_map = {
+        let lc = line_cache.read();
+        let stale = lc.cached_line_count != highlighted_lines.len();
+        drop(lc);
+        if stale && !highlighted_lines.is_empty() {
+            let vis_width = area_rect
+                .map(|r| r.width)
+                .unwrap_or(props.width as u16)
+                .max(1);
+            let map = crate::kit::render_bridge::build_wrap_map(&highlighted_lines, vis_width);
+            let mut lc = line_cache.write();
+            lc.cached_wrap_map = map.clone();
+            lc.cached_line_count = highlighted_lines.len();
+            map
+        } else if highlighted_lines.is_empty() {
+            Vec::new()
+        } else {
+            line_cache.read().cached_wrap_map.clone()
+        }
+    };
     {
         let content_lines_handler = content_lines.clone();
         hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
@@ -245,15 +311,12 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             if let Event::Mouse(mouse) = &event {
                 // 判断鼠标是否在消息区内
                 if let Some(area) = area_rect {
-                    let in_area = mouse.row >= area.y
-                        && mouse.row < area.y + area.height
-                        && mouse.column >= area.x
-                        && mouse.column < area.x + area.width;
+                    let in_area = mouse_in_area(mouse.row, mouse.column, area);
 
                     if in_area {
                         let scroll_y = scroll_state.read().offset().y;
-                        let visual_row = mouse.row - area.y + scroll_y;
-                        let visual_col = mouse.column - area.x;
+                        let (visual_row, visual_col) =
+                            mouse_visual_position(mouse.row, mouse.column, area, scroll_y);
 
                         match mouse.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
@@ -281,16 +344,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                                             &content_lines_handler,
                                         );
                                         if let Some(ref text) = selected_text {
-                                            let char_count = text.chars().count();
-                                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                                let _ = clipboard.set_text(text);
-                                            }
-                                            // 设置复制提示（状态栏显示 "已复制 N 字符"）
-                                            *COPY_CHAR_COUNT.state().write() = char_count;
-                                            *COPY_MESSAGE_UNTIL.state().write() = Some(
-                                                std::time::Instant::now()
-                                                    + std::time::Duration::from_millis(2000),
-                                            );
+                                            mark_copy_message(text.chars().count());
+                                            copy_selected_text_to_clipboard(text.clone());
                                         }
                                         sel.set_selected_text(selected_text);
                                     }
@@ -351,33 +406,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .into_any();
     }
 
-    // ── 选区高亮 + 视口裁剪 ──
-    let sel = text_sel.read();
-    let highlighted_lines: Vec<Line<'static>> =
-        if let Some(((sr, sc), (er, ec))) = sel.normalized_bounds() {
-            if sel.is_active() {
-                text_selection::highlight_selected_lines(&all_lines, sr, sc, er, ec)
-            } else {
-                all_lines
-            }
-        } else {
-            all_lines
-        };
-    drop(sel);
-
-    // 扩展 wrap_map 包含 spinner（如果 loading）
-    let mut wrap_map = wrap_map_base;
-    if is_loading && !wrap_map.is_empty() {
-        let spinner_vis_row = wrap_map
-            .last()
-            .map_or(0, |w| w.visual_row + w.visual_height);
-        wrap_map.push(WrappedLineInfo {
-            line_idx: highlighted_lines.len().saturating_sub(1),
-            visual_row: spinner_vis_row,
-            visual_height: 1,
-        });
-    }
-
+    // ── 视口裁剪 ──
     let scroll_y = scroll_state.read().offset().y as u16;
     let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
     let (first, last, local_offset) = viewport_clip(&wrap_map, scroll_y, vis_height);
@@ -496,5 +525,17 @@ mod tests {
             viewport_clip(&wrap_map, u16::MAX - 1, 10),
             (0, 1, u16::MAX - 1)
         );
+    }
+
+    #[test]
+    fn test_mouse_area_and_visual_position_saturate_u16_bounds() {
+        let area = Rect {
+            x: u16::MAX - 1,
+            y: u16::MAX - 1,
+            width: 10,
+            height: 10,
+        };
+        assert!(mouse_in_area(u16::MAX - 1, u16::MAX - 1, area));
+        assert_eq!(mouse_visual_position(u16::MAX, u16::MAX, area, 10), (11, 1));
     }
 }
