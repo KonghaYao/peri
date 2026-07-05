@@ -6,6 +6,7 @@
 //! - 滚动：由 ScrollViewState 处理键盘/鼠标事件
 //! - 智能跟随：use_effect 检测 CurrentTurn 出现
 //! - 鼠标文本选中：Down 开始拖拽 → Drag 更新选区 → Up 提取文本并复制到剪贴板
+//! - 视口裁剪：基于 RENDER_CACHE.wrap_map 二分查找，每帧只传递可见行给 Paragraph
 
 #![allow(clippy::needless_update)]
 
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, RENDER_CACHE};
 use crate::kit::focus_router;
 use crate::kit::panel_registry::clean_scrollbars;
+use crate::kit::render_bridge::WrappedLineInfo;
 use crate::kit::text_selection::{self, TextSelection};
 use crate::kit::theme;
 use crate::kit::welcome::Welcome;
@@ -34,12 +36,37 @@ use ratatui_kit::{
 #[derive(Default)]
 struct LineCache {
     key: u64,
-    lines: Vec<Line<'static>>,
-    content_h: usize,
     current_has_ct: bool,
-    /// H6：预计算的选区高亮 chunks（每 CHUNK_LINES 行一组）。
-    /// 仅在 key 变化时重建，帧间通过 Arc clone 共享——消除每帧 4 次全量 Line clone。
-    highlight_chunks: Arc<[(Vec<Line<'static>>, u16)]>,
+    /// 拷贝自 RENDER_CACHE.wrap_map——viewport_clip 二分查找用
+    wrap_map: Vec<WrappedLineInfo>,
+}
+
+// ── 视口裁剪 ────────────────────────────────────────────────────────────────
+
+/// 视口裁剪：基于 wrap_map 二分查找，返回当前视口内可见的逻辑行范围 [first, last)。
+///
+/// - `wrap_map`: 每逻辑行的视觉行映射（`visual_row` + `visual_height`）
+/// - `scroll_y`: ScrollViewState 的当前滚动偏移（视觉行号）
+/// - `vis_height`: 消息区当前可见行数
+fn viewport_clip(
+    wrap_map: &[WrappedLineInfo],
+    scroll_y: u16,
+    vis_height: u16,
+) -> (usize, usize, u16) {
+    let total = wrap_map
+        .last()
+        .map_or(0, |w| w.visual_row + w.visual_height);
+    let vis_start = scroll_y.min(total.saturating_sub(1));
+    let vis_end = (scroll_y + vis_height).min(total);
+
+    let first = wrap_map.partition_point(|w| w.visual_row + w.visual_height <= vis_start);
+    let last = wrap_map.partition_point(|w| w.visual_row < vis_end);
+
+    let local_offset = wrap_map
+        .get(first)
+        .map_or(0, |w| vis_start.saturating_sub(w.visual_row));
+
+    (first, last, local_offset)
 }
 
 // ── 消息区位置追踪 Hook ─────────────────────────────────────────────────
@@ -75,8 +102,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     let render_cache = hooks.use_atom(&RENDER_CACHE);
     let cache_snapshot = render_cache.read();
-    // H6: is_loading 从 RENDER_CACHE 推断——存在 CurrentTurn 说明 agent 在运行。
-    // 不再订阅 ACP_STATE，避免流式期间 view_count 每次变化都触发无意义重渲染。
+    // is_loading 从 RENDER_CACHE 推断——存在 CurrentTurn 说明 agent 在运行。
     let is_loading = cache_snapshot.entries.last().map_or(false, |(k, _)| {
         matches!(k, crate::kit::render_bridge::VmKey::CurrentTurn(_))
     });
@@ -103,43 +129,37 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     };
 
     if line_cache.read().key != new_key {
-        let mut lines: Vec<Line<'static>> = Vec::new();
         let mut ct = false;
-        for (key, entry) in cache_snapshot.entries.iter() {
+        for (key, _entry) in cache_snapshot.entries.iter() {
             if matches!(key, crate::kit::render_bridge::VmKey::CurrentTurn(_)) {
                 ct = true;
             }
-            for line in entry.lines.iter() {
-                lines.push(line.clone());
-            }
-            lines.push(Line::from(""));
         }
-        if is_loading {
-            lines.push(Line::from(vec![Span::styled(
-                "◜ 思考中…",
-                Style::default().fg(semantic.status.running),
-            )]));
-        }
-        // H6：预计算 chunks 并缓存，帧间避免 4 次全量 Line clone。
-        const CHUNK_LINES: usize = 200;
-        let chunks: Vec<(Vec<Line<'static>>, u16)> = lines
-            .chunks(CHUNK_LINES)
-            .map(|c| (c.to_vec(), c.len() as u16))
-            .collect();
         let mut lc = line_cache.write();
         lc.key = new_key;
-        lc.lines = lines;
-        lc.content_h = raw_ch.saturating_add(if is_loading { 1 } else { 0 });
         lc.current_has_ct = ct;
-        lc.highlight_chunks = Arc::from(chunks);
+        lc.wrap_map = cache_snapshot.wrap_map.clone();
     }
 
-    let cache = line_cache.read();
-    let empty = cache.lines.is_empty();
-    let content_lines = Arc::new(cache.lines.clone());
-    let current_has_ct = cache.current_has_ct;
-    let cached_chunks_arc = Arc::clone(&cache.highlight_chunks);
-    drop(cache);
+    let lc_data = line_cache.read();
+    let current_has_ct = lc_data.current_has_ct;
+    let wrap_map_base = lc_data.wrap_map.clone();
+    drop(lc_data);
+
+    // 构建全量行（基于 cache_snapshot entries，不含空行分隔符，含 spinner）
+    let mut all_lines: Vec<Line<'static>> = cache_snapshot
+        .entries
+        .iter()
+        .flat_map(|(_, entry)| entry.lines.iter().cloned())
+        .collect();
+    if is_loading {
+        all_lines.push(Line::from(vec![Span::styled(
+            "◜ 思考中…",
+            Style::default().fg(semantic.status.running),
+        )]));
+    }
+    let empty = cache_snapshot.entries.is_empty() && !is_loading;
+    let content_lines = Arc::new(all_lines.clone());
     drop(cache_snapshot);
 
     // ── 消息区位置追踪 ──
@@ -267,34 +287,48 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .into_any();
     }
 
-    // ── 选区高亮（字符级，通过 span Style 传递） ──
-    // H6：无选区时直接用 LineCache 缓存的 chunks（Arc clone O(1)），
-    // 避免每帧 content_lines.to_vec() + chunks 重新分配 ~20000 次 Line clone。
+    // ── 选区高亮 + 视口裁剪 ──
     let sel = text_sel.read();
-    let is_active_sel = sel.is_active();
-    let cached_chunks = Arc::clone(&cached_chunks_arc);
-
-    let display_chunks: Vec<(Vec<Line<'static>>, u16)> = if is_active_sel {
-        // 选区活跃时退化为旧路径——重新计算（罕见场景，可接受回退代价）
-        let hl = if let Some(((sr, sc), (er, ec))) = sel.normalized_bounds() {
-            text_selection::highlight_selected_lines(&content_lines, sr, sc, er, ec)
+    let highlighted_lines: Vec<Line<'static>> =
+        if let Some(((sr, sc), (er, ec))) = sel.normalized_bounds() {
+            if sel.is_active() {
+                text_selection::highlight_selected_lines(&all_lines, sr, sc, er, ec)
+            } else {
+                all_lines
+            }
         } else {
-            content_lines.to_vec()
+            all_lines
         };
-        let chunk_sz = 200usize;
-        hl.chunks(chunk_sz)
-            .map(|c| (c.to_vec(), c.len() as u16))
-            .collect()
-    } else {
-        cached_chunks.to_vec()
-    };
     drop(sel);
 
-    // H5: 性能说明——分块渲染避免 O(N) View widget 和单 Paragraph 溢出
-    // 长历史 thread 可达 5000+ 行。逐行 View 在 terminal.draw() 中 O(N) 布局。
-    // 改为每 200 行一个 chunk → 5000 行 = 25 个 View widget。
-    // H6：chunks 由 LineCache 缓存，帧间仅 Arc clone。
-    let total_height: u16 = display_chunks.iter().map(|(_, h)| *h).sum::<u16>().max(1);
+    // 扩展 wrap_map 包含 spinner（如果 loading）
+    let mut wrap_map = wrap_map_base;
+    if is_loading && !wrap_map.is_empty() {
+        let spinner_vis_row = wrap_map
+            .last()
+            .map_or(0, |w| w.visual_row + w.visual_height);
+        wrap_map.push(WrappedLineInfo {
+            line_idx: highlighted_lines.len().saturating_sub(1),
+            visual_row: spinner_vis_row,
+            visual_height: 1,
+        });
+    }
+
+    let scroll_y = scroll_state.read().offset().y as u16;
+    let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
+    let (first, last, local_offset) = viewport_clip(&wrap_map, scroll_y, vis_height);
+
+    let visible_lines: Vec<Line<'static>> =
+        highlighted_lines.get(first..last).unwrap_or(&[]).to_vec();
+
+    let total_visual_rows: u16 = if wrap_map.is_empty() {
+        if is_loading { 1 } else { 0 }
+    } else {
+        wrap_map
+            .last()
+            .map_or(0, |w| w.visual_row + w.visual_height)
+    };
+
     element!(
         ScrollView(
             flex_direction: Direction::Vertical,
@@ -306,11 +340,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             View(
                 flex_direction: Direction::Vertical,
                 width: Constraint::Fill(1),
-                height: Constraint::Length(total_height),
+                height: Constraint::Length(total_visual_rows.max(1)),
             ) {
-                for (_i, (chunk_lines, _)) in display_chunks.iter().enumerate() {
-                    Text(text: Paragraph::new(RatText::from(chunk_lines.clone())))
-                }
+                Text(text: Paragraph::new(RatText::from(visible_lines))
+                    .scroll((local_offset, 0)))
             }
         }
     )
