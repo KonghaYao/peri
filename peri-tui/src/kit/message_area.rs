@@ -20,19 +20,61 @@ use crate::kit::text_selection::{self, TextSelection};
 use crate::kit::theme;
 use crate::kit::welcome::Welcome;
 use peri_acp_types::view_model::ViewModel;
+use peri_widgets::spinner::{SpinnerMode, SpinnerState};
 use ratatui_kit::{
     components::ScrollViewState,
     crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction, Rect},
-        style::Style,
+        style::{Modifier, Style},
         text::{Line, Span, Text as RatText},
         widgets::Paragraph,
     },
 };
 
 // ── 本地行缓存（仅 RENDER_CACHE 内容变化时重建，滚动不触发）─────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TodoStatus {
+    InProgress,
+    Completed,
+    Pending,
+}
+
+#[derive(Debug, Clone)]
+pub struct TodoItem {
+    pub status: TodoStatus,
+    pub content: String,
+}
+
+fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
+    let sem = theme::semantic();
+    let mut lines = Vec::new();
+    for item in items {
+        let (icon, icon_color, text_color, crossed) = match item.status {
+            TodoStatus::InProgress => ("◼", sem.accent, sem.text.primary, false),
+            TodoStatus::Completed => ("✔", sem.status.success, sem.text.muted, true),
+            TodoStatus::Pending => ("◻", sem.text.muted, sem.text.muted, false),
+        };
+        let mut prefix_style = Style::default().fg(icon_color).add_modifier(Modifier::BOLD);
+        let mut text_style = Style::default().fg(text_color);
+        if crossed {
+            text_style = text_style.add_modifier(Modifier::CROSSED_OUT);
+        }
+        let prefix = Span::styled(format!("  {}  ", icon), prefix_style);
+        let mut content = item.content.clone();
+        if item.status == TodoStatus::Pending {
+            content.push_str(" (可开始)");
+        }
+        let text = Span::styled(content, text_style);
+        lines.push(Line::from(vec![prefix, text]));
+    }
+    for _ in 0..3 {
+        lines.push(Line::from(""));
+    }
+    lines
+}
 
 #[derive(Default)]
 struct LineCache {
@@ -58,7 +100,7 @@ fn viewport_clip(
         .last()
         .map_or(0, |w| w.visual_row + w.visual_height);
     let vis_start = scroll_y.min(total.saturating_sub(1));
-    let vis_end = (scroll_y + vis_height).min(total);
+    let vis_end = scroll_y.saturating_add(vis_height).min(total);
 
     let first = wrap_map.partition_point(|w| w.visual_row + w.visual_height <= vis_start);
     let last = wrap_map.partition_point(|w| w.visual_row < vis_end);
@@ -122,6 +164,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let scroll_state = hooks.use_state(ScrollViewState::default);
     let mut auto_scroll = hooks.use_state(|| true);
     let had_ct = hooks.use_state(|| false);
+    let spinner_state = hooks.use_state(|| SpinnerState::new(SpinnerMode::Thinking));
+    // 每帧推进 tick——同一帧可能多次调 render，用 tick_done 标记避免重复推进
+    let tick_done = hooks.use_state(|| false);
+    if !*tick_done.read() {
+        spinner_state.write().advance_tick();
+        *tick_done.write() = true;
+    }
     let new_key = {
         let h = raw_ch as u64;
         let l = entries_len as u64;
@@ -156,10 +205,22 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .flat_map(|(_, entry)| entry.lines.iter().cloned())
         .collect();
     if is_loading {
-        all_lines.push(Line::from(vec![Span::styled(
-            "◜ 思考中…",
-            Style::default().fg(semantic.status.running),
-        )]));
+        let spinner = spinner_state.read();
+        let spinner_lines =
+            spinner.render_to_lines(semantic.status.running, semantic.text.muted, true, true);
+        for line in spinner_lines {
+            all_lines.push(line);
+        }
+    }
+
+    // ── Todo 列表（数据通道日后接入） ──
+    // ── Todo 列表（从 ACP SessionUpdate::Plan 消费） ──
+    let todo_atom = hooks.use_atom(&crate::kit::atoms::TODO_ITEMS);
+    let todo_items = todo_atom.read();
+    if !todo_items.is_empty() {
+        for line in render_todo_lines(&todo_items) {
+            all_lines.push(line);
+        }
     }
     let empty = cache_snapshot.entries.is_empty() && !is_loading;
     let content_lines = Arc::new(all_lines.clone());
@@ -413,5 +474,27 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             }
         )
         .into_any()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wrapped(line_idx: usize, visual_row: u16, visual_height: u16) -> WrappedLineInfo {
+        WrappedLineInfo {
+            line_idx,
+            visual_row,
+            visual_height,
+        }
+    }
+
+    #[test]
+    fn test_viewport_clip_saturates_visible_end_on_u16_overflow() {
+        let wrap_map = vec![wrapped(0, 0, u16::MAX)];
+        assert_eq!(
+            viewport_clip(&wrap_map, u16::MAX - 1, 10),
+            (0, 1, u16::MAX - 1)
+        );
     }
 }

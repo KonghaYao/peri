@@ -538,3 +538,32 @@ mod tests {
         // 即使 SUBMIT_TX 未 set，drain 早退，buffer 仍有 "x"——两种情况都不算 panic
     }
 }
+
+/// 从 ACP SessionUpdate::Plan JSON 中提取 TodoItem 列表并写入 TODO_ITEMS atom。
+///
+/// JSON 格式:
+///   {"sessionUpdate":"plan","entries":[{"content":"Fix bug","status":"in_progress","priority":"medium"}]}
+pub fn handle_plan_update(update: &serde_json::Value) {
+    use crate::kit::message_area::{TodoItem, TodoStatus};
+
+    let entries = match update.get("entries").and_then(|v| v.as_array()) {
+        Some(e) => e,
+        None => return,
+    };
+
+    let items: Vec<TodoItem> = entries
+        .iter()
+        .filter_map(|e| {
+            let content = e.get("content")?.as_str()?.to_string();
+            let status = match e.get("status")?.as_str()? {
+                "in_progress" => TodoStatus::InProgress,
+                "completed" => TodoStatus::Completed,
+                "pending" => TodoStatus::Pending,
+                _ => return None,
+            };
+            Some(TodoItem { status, content })
+        })
+        .collect();
+
+    *crate::kit::atoms::TODO_ITEMS.state().write() = items;
+}

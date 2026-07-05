@@ -109,31 +109,34 @@ fn handle_session_update(params: serde_json::Value) {
         None => return,
     };
     // Discriminate: check the tag field, not a container key
-    if update.get("sessionUpdate").and_then(|v| v.as_str()) != Some("available_commands_update") {
-        return;
+    let tag = update.get("sessionUpdate").and_then(|v| v.as_str());
+
+    if tag == Some("available_commands_update") {
+        let cmds = match update.get("availableCommands").and_then(|v| v.as_array()) {
+            Some(c) => c,
+            None => return,
+        };
+        let entries: Vec<(String, String)> = cmds
+            .iter()
+            .filter_map(|cmd| {
+                let name = cmd.get("name")?.as_str()?;
+                let desc = cmd
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                Some((name.to_string(), desc.to_string()))
+            })
+            .collect();
+        let len = entries.len();
+        *AVAILABLE_SLASH_COMMANDS.state().write() = entries;
+        refresh_slash_items();
+        debug!(
+            "kit ACP notifier: updated AVAILABLE_SLASH_COMMANDS ({})",
+            len
+        );
+    } else if tag == Some("plan") {
+        crate::kit::acp_events::handle_plan_update(update);
     }
-    let cmds = match update.get("availableCommands").and_then(|v| v.as_array()) {
-        Some(c) => c,
-        None => return,
-    };
-    let entries: Vec<(String, String)> = cmds
-        .iter()
-        .filter_map(|cmd| {
-            let name = cmd.get("name")?.as_str()?;
-            let desc = cmd
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            Some((name.to_string(), desc.to_string()))
-        })
-        .collect();
-    let len = entries.len();
-    *AVAILABLE_SLASH_COMMANDS.state().write() = entries;
-    refresh_slash_items();
-    debug!(
-        "kit ACP notifier: updated AVAILABLE_SLASH_COMMANDS ({})",
-        len
-    );
 }
 
 #[cfg(test)]

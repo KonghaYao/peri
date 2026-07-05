@@ -190,6 +190,10 @@ pub static SUBAGENT_LIST: AtomStatic<Vec<SubagentSummary>> = AtomStatic::new(|| 
 pub static PROVIDER_LIST: AtomStatic<Vec<ProviderSummary>> = AtomStatic::new(|| Vec::new());
 pub static MEMORY_LIST: AtomStatic<Vec<MemoryEntry>> = AtomStatic::new(|| Vec::new());
 
+/// Todo 列表数据（来自 ACP SessionUpdate::Plan）
+pub static TODO_ITEMS: AtomStatic<Vec<crate::kit::message_area::TodoItem>> =
+    AtomStatic::new(|| Vec::new());
+
 pub static OPEN_PANELS: AtomStatic<Vec<PanelKind>> = AtomStatic::new(|| Vec::new());
 pub static ACTIVE_PANEL: AtomStatic<Option<PanelKind>> = AtomStatic::new(|| None);
 pub static POPUP_KIND: AtomStatic<Option<PopupKind>> = AtomStatic::new(|| None);
