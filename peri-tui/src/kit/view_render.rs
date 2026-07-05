@@ -222,8 +222,8 @@ fn render_tool_card(
 
     if data.is_running && !data.is_error {
         header_spans.push(Span::styled(
-            " · ⏳",
-            Style::default().fg(semantic.status.running),
+            " · ●",
+            Style::default().fg(semantic.status.success),
         ));
     }
 
@@ -278,17 +278,22 @@ fn tool_display(tool_name: &str, is_error: bool, is_running: bool) -> ToolDispla
     let component = theme::component();
     if is_error {
         return ToolDisplay {
-            indicator: "❌",
+            indicator: "✗",
             label: tool_name.to_string(),
             color: semantic.status.error,
         };
     }
 
     if is_running {
+        // 800ms 闪烁：((RENDER_CALL_COUNT/16) % 2) == 0 显示 ●，否则空格
+        // RENDER_CALL_COUNT 约每 50ms 递增一次，16 次 ≈ 800ms
+        let visible =
+            (RENDER_CALL_COUNT.with(|c| c.load(Ordering::Relaxed)) / 16).is_multiple_of(2);
+        let indicator = if visible { "●" } else { " " };
         return ToolDisplay {
-            indicator: "⏳",
+            indicator,
             label: tool_name.to_string(),
-            color: semantic.status.running,
+            color: semantic.status.success, // §2.4.2: Running 用 success 绿色
         };
     }
 
@@ -662,11 +667,14 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80, false);
         let first = &lines[0].spans;
-        assert!(first.iter().any(|s| s.content.contains("❌")));
+        assert!(first.iter().any(|s| s.content.contains("✗")));
     }
 
     #[test]
     fn test_tool_card_running_shows_status() {
+        // 重置渲染计数器，确保 running 指示器可见（第 0 帧显示 ●）
+        RENDER_CALL_COUNT.with(|c| c.store(0, Ordering::Relaxed));
+
         let vm = ViewModel::ToolCard(ToolCardData {
             tool_id: "tc-running".into(),
             tool_name: "Edit".into(),
@@ -679,8 +687,8 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
-        assert!(text.contains("⏳"), "运行中工具应显示状态：{}", text);
-        assert!(text.contains("⏳"), "运行中工具应显示状态 emoji：{}", text);
+        assert!(text.contains("●"), "运行中工具应显示状态 ●：{}", text);
+        assert!(text.contains("· ●"), "运行中工具应显示运行中标记：{}", text);
         assert!(text.contains("path: foo.rs · old_string: hello"));
     }
 
