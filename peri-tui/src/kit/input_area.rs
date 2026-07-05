@@ -875,6 +875,13 @@ fn sync_render_cache(snapshot: &ViewModelsSnapshot) {
         sum = sum.saturating_add(entry.height);
         cache.cumulative_heights.push(sum);
     }
+    let all_lines: Vec<ratatui::text::Line<'static>> = cache
+        .entries
+        .iter()
+        .flat_map(|(_, entry)| entry.lines.iter())
+        .cloned()
+        .collect();
+    cache.wrap_map = render_bridge::build_wrap_map(&all_lines, width as u16);
     *RENDER_CACHE.state().write() = cache;
 }
 

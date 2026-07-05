@@ -6,7 +6,8 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use ratatui::text::Line;
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Paragraph, Wrap};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -31,6 +32,20 @@ pub struct RenderedEntry {
 pub struct RenderCache {
     pub entries: Vec<(VmKey, RenderedEntry)>,
     pub cumulative_heights: Vec<usize>,
+    /// 每逻辑行的视觉行映射——message_area 视口裁剪用
+    /// 在 rebuild + dedup 后基于所有行重新计算
+    pub wrap_map: Vec<WrappedLineInfo>,
+}
+
+/// 每条逻辑行的 wrap 信息——用于视口裁剪的二分查找
+#[derive(Debug, Clone)]
+pub struct WrappedLineInfo {
+    /// 在 render_cache 的全量 lines（所有 entries 展开）中的索引
+    pub line_idx: usize,
+    /// 该逻辑行渲染后的起始视觉行号（从 0 开始）
+    pub visual_row: u16,
+    /// 该逻辑行的视觉行数（>= 1，考虑 wrap）
+    pub visual_height: u16,
 }
 
 pub fn spawn_render_bridge(
@@ -91,6 +106,14 @@ pub fn spawn_render_bridge(
                     }
 
                     rebuild_cumulative_heights(&mut cache);
+                    // 在所有 entry 追加/重建完成后，构建 wrap_map
+                    let all_lines: Vec<Line<'static>> = cache
+                        .entries
+                        .iter()
+                        .flat_map(|(_, entry)| entry.lines.iter())
+                        .cloned()
+                        .collect();
+                    cache.wrap_map = build_wrap_map(&all_lines, width as u16);
                     *RENDER_CACHE.state().write() = cache.clone();
                     last_committed_ptr = committed_ptr;
                     last_committed_len = committed_len;
@@ -157,6 +180,13 @@ async fn rebuild_all(
     )
     .await;
     rebuild_cumulative_heights(cache);
+    let all_lines: Vec<Line<'static>> = cache
+        .entries
+        .iter()
+        .flat_map(|(_, entry)| entry.lines.iter())
+        .cloned()
+        .collect();
+    cache.wrap_map = build_wrap_map(&all_lines, width as u16);
     *RENDER_CACHE.state().write() = cache.clone();
     *last_committed_ptr = Arc::as_ptr(&snapshot.committed) as *const () as usize;
     *last_committed_len = snapshot.committed.len();
@@ -236,4 +266,47 @@ pub fn visual_height(lines: &[Line<'static>], width: usize) -> usize {
         s.saturating_add(l.width().max(1).div_ceil(w))
     });
     rows.max(1)
+}
+
+/// 空行去重——连续空行只保留一个，移除末尾多余空行。
+/// peri-main 的 rebuild() 在拼接所有消息行后做此操作，确保 wrap_map 行号准确。
+pub fn dedup_lines(lines: &[Line<'static>]) -> Vec<Line<'static>> {
+    let mut result: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let is_empty = line.spans.is_empty() || line.spans.iter().all(|s| s.content.is_empty());
+        if is_empty
+            && result.last().map_or(false, |l: &Line| {
+                l.spans.is_empty() || l.spans.iter().all(|s| s.content.is_empty())
+            })
+        {
+            continue;
+        }
+        result.push(line.clone());
+    }
+    while result.last().map_or(false, |l| l.spans.is_empty()) {
+        result.pop();
+    }
+    result
+}
+
+/// 基于所有 lines 构建 wrap_map。
+/// 使用 ratatui Paragraph::line_count() 确保与真实渲染的 WordWrapper 完全一致（含 CJK 支持）。
+pub fn build_wrap_map(lines: &[Line<'static>], width: u16) -> Vec<WrappedLineInfo> {
+    let deduped = dedup_lines(lines);
+    let mut map = Vec::with_capacity(deduped.len());
+    let mut row: u16 = 0;
+    for (line_idx, line) in deduped.iter().enumerate() {
+        let text = Text::from(line.clone());
+        let height = Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .line_count(width) as u16;
+        let visual_height = height.max(1);
+        map.push(WrappedLineInfo {
+            line_idx,
+            visual_row: row,
+            visual_height,
+        });
+        row = row.saturating_add(visual_height);
+    }
+    map
 }
