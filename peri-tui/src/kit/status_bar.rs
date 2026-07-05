@@ -104,7 +104,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     )
 }
 
-/// 状态栏第 2 行：状态相关的快捷键 hints
+/// 状态栏第 2 行：状态相关的快捷键 hints + 复制提示
 #[component]
 fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // I19-C：原代码读 POPUP_ACTIVE（dead atom，open/close_popup 从不同步）
@@ -112,10 +112,35 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let popup_kind = hooks.use_atom(&atoms::POPUP_KIND);
     let at_active = hooks.use_atom(&atoms::AT_MENTION_ACTIVE);
     let slash_active = hooks.use_atom(&atoms::SLASH_HINT_ACTIVE);
+    let copy_until = hooks.use_atom(&atoms::COPY_MESSAGE_UNTIL);
+    let copy_count = hooks.use_atom(&atoms::COPY_CHAR_COUNT);
 
     let is_popup = popup_kind.read().is_some();
     let is_at = *at_active.read();
     let is_slash = *slash_active.read();
+    let now = Instant::now();
+
+    // 复制提示优先于其他 hints
+    if let Some(until) = *copy_until.read() {
+        if now < until {
+            let char_count = *copy_count.read();
+            let hint = format!(" 已复制 {} 字符 ", char_count);
+            return element!(
+                View(
+                    flex_direction: Direction::Horizontal,
+                    width: Constraint::Fill(1),
+                    height: Constraint::Length(1),
+                    justify_content: Flex::Center,
+                ) {
+                    Text(text: Paragraph::new(
+                        Line::from(hint).fg(statusbar().text)
+                    ).centered())
+                }
+            );
+        } else {
+            *copy_until.write() = None;
+        }
+    }
 
     let hints = if is_popup {
         Line::from(" Esc: close | Enter: confirm ").fg(statusbar().muted)

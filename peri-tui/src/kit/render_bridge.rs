@@ -4,6 +4,7 @@
 //! `Vec<Line<'static>>` 与可视高度，并写入 `RENDER_CACHE` atom。
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use ratatui::text::Line;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -80,13 +81,13 @@ pub fn spawn_render_bridge(
                                 width,
                                 last_committed_len,
                                 true,
-                            );
-                            rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, width);
+                            ).await;
+                            rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, width).await;
                         } else {
-                            rebuild_entries(&mut cache.entries, &snapshot.committed, &snapshot.current_turn, width);
+                            rebuild_entries(&mut cache.entries, &snapshot.committed, &snapshot.current_turn, width).await;
                         }
                     } else if ct_ptr != last_ct_ptr {
-                        rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, width);
+                        rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, width).await;
                     }
 
                     rebuild_cumulative_heights(&mut cache);
@@ -153,7 +154,8 @@ async fn rebuild_all(
         &snapshot.committed,
         &snapshot.current_turn,
         width,
-    );
+    )
+    .await;
     rebuild_cumulative_heights(cache);
     *RENDER_CACHE.state().write() = cache.clone();
     *last_committed_ptr = Arc::as_ptr(&snapshot.committed) as *const () as usize;
@@ -166,28 +168,34 @@ fn rebuild_entries(
     committed: &[peri_acp_types::view_model::ViewModel],
     current_turn: &[peri_acp_types::view_model::ViewModel],
     width: usize,
-) {
+) -> impl std::future::Future<Output = ()> {
     entries.clear();
-    append_entries(entries, committed, width, 0, true);
-    append_entries(entries, current_turn, width, 0, false);
+    async move {
+        append_entries(entries, committed, width, 0, true).await;
+        append_entries(entries, current_turn, width, 0, false).await;
+    }
 }
 
 fn rebuild_current_turn(
     entries: &mut Vec<(VmKey, RenderedEntry)>,
     current_turn: &[peri_acp_types::view_model::ViewModel],
     width: usize,
-) {
+) -> impl std::future::Future<Output = ()> {
     entries.retain(|(key, _)| !matches!(key, VmKey::CurrentTurn(_)));
-    append_entries(entries, current_turn, width, 0, false);
+    async move {
+        append_entries(entries, current_turn, width, 0, false).await;
+    }
 }
 
-fn append_entries(
+async fn append_entries(
     entries: &mut Vec<(VmKey, RenderedEntry)>,
     items: &[peri_acp_types::view_model::ViewModel],
     width: usize,
     start_index: usize,
     committed: bool,
 ) {
+    const YIELD_EVERY: usize = 20;
+    let mut next_yield_at: usize = YIELD_EVERY;
     for (offset, vm) in items.iter().enumerate() {
         let key = if committed {
             VmKey::Committed(start_index + offset)
@@ -203,7 +211,14 @@ fn append_entries(
                 lines: Arc::from(lines),
             },
         ));
+        let call_count = view_render::RENDER_CALL_COUNT.with(|c| c.load(Ordering::Relaxed));
+        if call_count >= next_yield_at {
+            tokio::task::yield_now().await;
+            next_yield_at =
+                view_render::RENDER_CALL_COUNT.with(|c| c.load(Ordering::Relaxed)) + YIELD_EVERY;
+        }
     }
+    view_render::RENDER_CALL_COUNT.with(|c| c.store(0, Ordering::Relaxed));
 }
 
 fn rebuild_cumulative_heights(cache: &mut RenderCache) {

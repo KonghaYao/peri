@@ -34,6 +34,7 @@ pub mod setup_wizard;
 pub mod slash_completion;
 pub mod status_bar;
 pub mod submit_consumer;
+pub mod text_selection;
 pub mod theme;
 pub mod thread_load_consumer;
 pub mod view_render;

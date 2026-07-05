@@ -241,6 +241,11 @@ pub static WIZARD_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static PREDICTION: AtomStatic<PredictionState> = AtomStatic::new(|| PredictionState::default());
 pub static INPUT_AREA_ESC_PREFIX: AtomStatic<bool> = AtomStatic::new(|| false);
 
+/// 最近一次复制到剪贴板的字符数（用于状态栏提示 "已复制 N 字符"）
+pub static COPY_CHAR_COUNT: AtomStatic<usize> = AtomStatic::new(|| 0);
+/// 复制提示显示截止时间
+pub static COPY_MESSAGE_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
+
 pub fn init_atoms() {
     PENDING_ATTACHMENTS.get_or_init(|| Handle::new(Vec::new()));
 }

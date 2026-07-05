@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -53,6 +54,13 @@ thread_local! {
     static STATUS_PROBE: RefCell<Option<Rc<dyn SubAgentStatusProbe>>> = const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// 全局渲染调用计数器，用于跨递归边界的 yield 决策。
+    /// 每次 render_v2_vm 入口递增 1；render_bridge::append_entries
+    /// 每 N 次调用检查后 yield。在 append_entries 结束时重置为 0。
+    pub(crate) static RENDER_CALL_COUNT: AtomicUsize = const { AtomicUsize::new(0) };
+}
+
 /// 在 closure 内设置 status probe，closure 结束后自动恢复（支持嵌套）。
 ///
 /// 典型用法：`draw_now` 中 `with_status_probe(probe, || self.terminal.draw(...))`。
@@ -81,6 +89,9 @@ fn lookup_subagent_status(agent_id: &str) -> Option<SubAgentRenderInfo> {
 /// * `width` — 终端可用宽度，用于 markdown 解析时折行。
 /// * `diff_visible` — 用户是否通过 `Ctrl+O` 展开了 diff 视图。
 pub fn render_v2_vm(vm: &ViewModel, width: usize, diff_visible: bool) -> Vec<Line<'static>> {
+    RENDER_CALL_COUNT.with(|c| {
+        c.fetch_add(1, Ordering::Relaxed);
+    });
     match vm {
         ViewModel::UserBubble(data) => render_user_bubble(&data.text, width),
         ViewModel::AssistantBubble(data) => render_assistant_bubble(data, width),

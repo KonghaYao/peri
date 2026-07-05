@@ -62,11 +62,9 @@ pub fn history_up(current_text: Option<&str>) -> Option<String> {
 
     let new_idx = match *index_atom.read() {
         None => {
-            // 进入历史模式：保存当前文本为草稿
-            let draft_text = current_text
-                .map(|s| s.to_string())
-                .filter(|s| !s.trim().is_empty());
-            *HISTORY_DRAFT.state().write() = draft_text;
+            // 进入历史模式：保存当前草稿（包括空串），history_down 回到底部时
+            // 必须能明确恢复为空输入，而不是把旧历史项留在编辑器里。
+            *HISTORY_DRAFT.state().write() = current_text.map(|s| s.to_string());
             history.len() - 1
         }
         Some(0) => 0,
@@ -237,15 +235,15 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_history_down_returns_none_at_bottom() {
+    fn test_history_down_restores_empty_draft_at_bottom() {
         setup();
         push_history("a");
         push_history("b");
 
-        history_up(None); // → b
+        history_up(Some("")); // → b，并保存空草稿
         history_up(None); // → a
         assert_eq!(history_down().as_deref(), Some("b"));
-        assert_eq!(history_down(), None); // 超过最新 → None
+        assert_eq!(history_down().as_deref(), Some(""));
         assert_eq!(current_index(), None);
     }
 
@@ -305,11 +303,11 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_draft_is_none_for_empty_text() {
+    fn test_empty_draft_is_preserved_for_restore() {
         setup();
         push_history("old");
-        history_up(Some("   "));
-        // 纯空白文本不应保存为草稿
-        assert!(DRAFT.state().read().is_none());
+        history_up(Some(""));
+        // 空草稿也要保存，否则 Down 回到底部时无法清空旧历史项。
+        assert_eq!(DRAFT.state().read().as_deref(), Some(""));
     }
 }

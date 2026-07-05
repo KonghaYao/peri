@@ -30,13 +30,14 @@ use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::ViewModelsSnapshot;
 use crate::kit::atoms::{
     ACP_STATE, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST, INPUT_AREA_ESC_PREFIX,
-    INPUT_BUFFER, MENTION_PREFIX, MENTION_SELECTED_INDEX, PREDICTION, SKILL_NAMES,
+    INPUT_BUFFER, MENTION_PREFIX, MENTION_SELECTED_INDEX, PREDICTION, RENDER_CACHE, SKILL_NAMES,
     SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX, VIEW_MODELS,
 };
 use crate::kit::focus_router::input_accepts_key;
-use crate::kit::input_history::{history_down, history_up, push_history};
+use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
 use crate::kit::mention_popup::MentionPopup;
 use crate::kit::panel_registry::{PANELS, open_panel, panel_for_slash_command};
+use crate::kit::render_bridge::{self, RenderedEntry, VmKey};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
 use crate::kit::theme;
 use peri_acp_types::view_model::{UserBubbleData, ViewModel};
@@ -554,8 +555,12 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                 // 10_000 chars 足够覆盖正常长 paste（代码片段、命令输出）；
                 // 超出截断并 log warn 提示（用户可改用文件追加方式）。
                 const MAX_PASTE_CHARS: usize = 10_000;
-                let char_count = paste_text.chars().count();
-                let truncated: String = paste_text.chars().take(MAX_PASTE_CHARS).collect();
+                // 部分终端（VSCode、iTerm2）在 Bracketed Paste 中使用 \r 作为
+                // 换行分隔符；render_multiline_with_cursor 只按 \n 拆分行，
+                // 未归一化的 \r 会导致换行在渲染时不可见。
+                let normalized = paste_text.replace("\r\n", "\n").replace('\r', "\n");
+                let char_count = normalized.chars().count();
+                let truncated: String = normalized.chars().take(MAX_PASTE_CHARS).collect();
                 if char_count > MAX_PASTE_CHARS {
                     tracing::warn!(
                         original_chars = char_count,
@@ -791,41 +796,109 @@ fn submit_text(submitted: String) {
     }
 
     push_history(&submitted);
+    reset_history_cursor();
+    let trimmed = submitted.trim().to_string();
     let is_loading = ACP_STATE.state().read().is_loading;
     if is_loading {
+        append_local_user_bubble(&trimmed);
         let input_buffer = INPUT_BUFFER.state();
         let mut guard = input_buffer.write();
-        guard.push_back(submitted);
+        guard.push_back(trimmed);
         while guard.len() > 32 {
             guard.pop_front();
         }
     } else if let Some(tx) = SUBMIT_TX.get() {
-        let _ = tx.send(submitted.trim().to_string());
+        append_local_user_bubble(&trimmed);
+        let _ = tx.send(trimmed);
 
-        // S16：提交后立即设为 loading + 添加 UserBubble，
-        // 避免按键到首条流式事件间的空白窗口期。
-        let user_vm = ViewModel::UserBubble(UserBubbleData {
-            text: submitted.trim().to_string(),
-        });
-        {
-            let vms = VIEW_MODELS.state();
-            let snapshot = vms.read();
-            let mut combined: Vec<ViewModel> = Vec::with_capacity(snapshot.committed.len() + 1);
-            combined.extend(snapshot.committed.iter().cloned());
-            combined.push(user_vm);
-            let new_snapshot = ViewModelsSnapshot {
-                committed: Arc::from(combined),
-                current_turn: Arc::clone(&snapshot.current_turn),
-            };
-            drop(snapshot);
-            *vms.write() = new_snapshot;
-        }
+        // S16：提交后立即设为 loading，避免按键到首条流式事件间的空白窗口期。
+        let acp = ACP_STATE.state();
+        let mut guard = acp.write();
+        guard.is_loading = true;
+    }
+}
 
-        {
-            let acp = ACP_STATE.state();
-            let mut guard = acp.write();
-            guard.is_loading = true;
+fn append_local_user_bubble(text: &str) {
+    let user_vm = ViewModel::UserBubble(UserBubbleData {
+        text: text.to_string(),
+    });
+    let snapshot = {
+        let vms = VIEW_MODELS.state();
+        let snapshot = vms.read();
+        let mut combined: Vec<ViewModel> = Vec::with_capacity(snapshot.committed.len() + 1);
+        combined.extend(snapshot.committed.iter().cloned());
+        combined.push(user_vm.clone());
+        let new_snapshot = ViewModelsSnapshot {
+            committed: Arc::from(combined),
+            current_turn: Arc::clone(&snapshot.current_turn),
+        };
+        drop(snapshot);
+        *vms.write() = new_snapshot.clone();
+        new_snapshot
+    };
+    sync_render_cache(&snapshot);
+}
+
+fn sync_render_cache(snapshot: &ViewModelsSnapshot) {
+    let width = 80;
+    let mut cache = RENDER_CACHE.state().read().clone();
+
+    // 增量模式：只追加最新一条 UserBubble，避免全量 markdown 重解析
+    if !cache.entries.is_empty() {
+        if let Some(last_vm) = snapshot.committed.last() {
+            let new_index = snapshot.committed.len().saturating_sub(1);
+            let key = VmKey::Committed(new_index);
+            let lines = crate::kit::view_render::render_v2_vm(last_vm, width, false);
+            let height = render_bridge::visual_height(&lines, width);
+            cache.entries.push((
+                key,
+                RenderedEntry {
+                    height,
+                    lines: Arc::from(lines),
+                },
+            ));
         }
+    } else {
+        // Fallback：cache 为空时走全量构建
+        let mut entries =
+            Vec::with_capacity(snapshot.committed.len() + snapshot.current_turn.len());
+        append_render_entries(&mut entries, &snapshot.committed, width, 0, true);
+        append_render_entries(&mut entries, &snapshot.current_turn, width, 0, false);
+        cache.entries = entries;
+    }
+
+    // 重建 cumulative_heights
+    cache.cumulative_heights.clear();
+    let mut sum = 0usize;
+    for (_, entry) in &cache.entries {
+        sum = sum.saturating_add(entry.height);
+        cache.cumulative_heights.push(sum);
+    }
+    *RENDER_CACHE.state().write() = cache;
+}
+
+fn append_render_entries(
+    entries: &mut Vec<(VmKey, RenderedEntry)>,
+    items: &[ViewModel],
+    width: usize,
+    start_index: usize,
+    committed: bool,
+) {
+    for (offset, vm) in items.iter().enumerate() {
+        let key = if committed {
+            VmKey::Committed(start_index + offset)
+        } else {
+            VmKey::CurrentTurn(offset)
+        };
+        let lines = crate::kit::view_render::render_v2_vm(vm, width, false);
+        let height = render_bridge::visual_height(&lines, width);
+        entries.push((
+            key,
+            RenderedEntry {
+                height,
+                lines: Arc::from(lines),
+            },
+        ));
     }
 }
 

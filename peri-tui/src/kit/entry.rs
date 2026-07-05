@@ -29,7 +29,9 @@ use crate::kit::thread_load_consumer::spawn_thread_load_consumer;
 use crate::launch::{TuiLaunchOptions, build_app_and_acp, teardown_app};
 use ratatui_kit::{
     crossterm::{
-        event::{DisableMouseCapture, EnableMouseCapture},
+        event::{
+            DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        },
         execute,
     },
     prelude::*,
@@ -182,9 +184,13 @@ pub async fn run_kit_fullscreen(
     // 5. 进入 ratatui-kit 全屏 event loop（fullscreen 自管 raw mode + alt screen）。
     // ratatui::init() 默认不启用鼠标捕获；未启用时很多终端会把滚轮转成 Up/Down。
     // 必须显式启用，才能让消息区收到 MouseEventKind::Scroll*，避免和键盘方向键语义混淆。
-    let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
     let result = element!(AppShell).fullscreen().await;
-    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
 
     // 6. 退出前触发 shutdown，让后台任务干净退出
     shutdown.cancel();

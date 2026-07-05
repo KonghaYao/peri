@@ -51,6 +51,7 @@ pub fn spawn_submit_consumer(
                         Some(text) => {
                             if let Err(e) = handle_submit(&acp_client, &cwd, text).await {
                                 error!(error = %e, "kit submit_consumer: prompt failed");
+                                clear_loading_state();
                             }
                         }
                     }
@@ -232,6 +233,13 @@ fn execute_view_action(action: &ViewAction, acp_client: &AcpTuiClient) {
             *visible = !*visible;
         }
     }
+}
+
+/// 清空 loading 状态——prompt 失败时兜底，防止 loading 永久卡死。
+fn clear_loading_state() {
+    let ref_guard = ACP_STATE.state();
+    let mut acp = ref_guard.write();
+    acp.is_loading = false;
 }
 
 #[cfg(test)]
