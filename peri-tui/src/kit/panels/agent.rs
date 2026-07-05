@@ -282,6 +282,7 @@ mod tests {
             committed: vec![ViewModel::UserBubble(UserBubbleData {
                 text: "hi".to_string(),
                 content_hash: 0,
+                is_system_reminder: false,
             })]
             .into(),
             current_turn: Vec::new().into(),

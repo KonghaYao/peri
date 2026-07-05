@@ -183,6 +183,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                         combined.push(ViewModel::UserBubble(UserBubbleData {
                             text: text.clone(),
                             content_hash: hash_str(text),
+                            is_system_reminder: false,
                         }));
                     }
                     state.committed = Arc::from(combined);

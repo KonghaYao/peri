@@ -822,6 +822,7 @@ fn append_local_user_bubble(text: &str) {
     let user_vm = ViewModel::UserBubble(UserBubbleData {
         text: text.to_string(),
         content_hash: hash_str(text),
+        is_system_reminder: false,
     });
     let snapshot = {
         let vms = VIEW_MODELS.state();

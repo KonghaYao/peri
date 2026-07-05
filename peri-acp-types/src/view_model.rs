@@ -67,6 +67,9 @@ pub struct UserBubbleData {
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     #[serde(skip)]
     pub content_hash: u64,
+    /// 是否为 system_reminder 注入消息（不含 CONTINUATION_HINT 的裸 <system-reminder>）。
+    #[serde(default)]
+    pub is_system_reminder: bool,
 }
 
 impl_partial_eq!(UserBubbleData: text);
@@ -252,6 +255,7 @@ mod tests {
         let vm = ViewModel::UserBubble(UserBubbleData {
             text: "hello".into(),
             content_hash: hash_str("hello"),
+            is_system_reminder: false,
         });
         let json = serde_json::to_string(&vm).unwrap();
         let back: ViewModel = serde_json::from_str(&json).unwrap();
@@ -362,6 +366,7 @@ mod tests {
         let vm = ViewModel::UserBubble(UserBubbleData {
             text: "hi".into(),
             content_hash: hash_str("hi"),
+            is_system_reminder: false,
         });
         let json = serde_json::to_value(&vm).unwrap();
         assert_eq!(json["type"], "user-bubble");

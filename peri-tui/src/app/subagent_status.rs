@@ -744,6 +744,7 @@ mod tests {
         let vm = ViewModel::UserBubble(peri_acp_types::view_model::UserBubbleData {
             text: "child msg".into(),
         content_hash: 0,
+        is_system_reminder: false,
         });
         let ok = map.append_child_message("fork", vm);
         assert!(ok, "应成功路由");

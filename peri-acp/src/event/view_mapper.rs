@@ -162,17 +162,17 @@ fn convert_human(content: &peri_agent::messages::MessageContent) -> ViewModel {
     // Bare <system-reminder> tags are also used for goal steering,
     // tool_dispatch consecutive-failure warnings, hooks stop_hook_feedback,
     // etc. (see CLAUDE.md TRAP). Only treat as compact when the hint is present.
-    let (display_text, is_compact) =
-        if raw.contains("<system-reminder>") && raw.contains(CONTINUATION_HINT) {
-            let cleaned = raw
-                .replacen("<system-reminder>\n", "", 1)
-                .replacen("\n</system-reminder>", "", 1)
-                .trim()
-                .to_string();
-            (cleaned, true)
-        } else {
-            (raw, false)
-        };
+    let is_system_reminder = raw.contains("<system-reminder>");
+    let (display_text, is_compact) = if is_system_reminder && raw.contains(CONTINUATION_HINT) {
+        let cleaned = raw
+            .replacen("<system-reminder>\n", "", 1)
+            .replacen("\n</system-reminder>", "", 1)
+            .trim()
+            .to_string();
+        (cleaned, true)
+    } else {
+        (raw, false)
+    };
 
     if is_compact {
         // Compact summary → SystemNote with Info level (matches build.rs behavior
@@ -187,6 +187,7 @@ fn convert_human(content: &peri_agent::messages::MessageContent) -> ViewModel {
         ViewModel::UserBubble(UserBubbleData {
             text: display_text.clone(),
             content_hash: hash_str(&display_text),
+            is_system_reminder,
         })
     }
 }

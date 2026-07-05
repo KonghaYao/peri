@@ -93,7 +93,9 @@ pub fn render_v2_vm(vm: &ViewModel, width: usize, diff_visible: bool) -> Vec<Lin
         c.fetch_add(1, Ordering::Relaxed);
     });
     match vm {
-        ViewModel::UserBubble(data) => render_user_bubble(&data.text, width),
+        ViewModel::UserBubble(data) => {
+            render_user_bubble(&data.text, width, data.is_system_reminder)
+        }
         ViewModel::AssistantBubble(data) => render_assistant_bubble(data, width),
         ViewModel::ToolCard(data) => render_tool_card(data, diff_visible),
         ViewModel::SystemNote(data) => render_system_note(data),
@@ -105,7 +107,17 @@ pub fn render_v2_vm(vm: &ViewModel, width: usize, diff_visible: bool) -> Vec<Lin
 
 // ── 各变体渲染 ────────────────────────────────────────────────────────────
 
-fn render_user_bubble(text: &str, width: usize) -> Vec<Line<'static>> {
+fn render_user_bubble(text: &str, width: usize, is_system_reminder: bool) -> Vec<Line<'static>> {
+    // is_system_reminder: 仅渲染 "📋 Context compacted"（dim + ITALIC），无 ❯ 前缀，无底色
+    if is_system_reminder {
+        return vec![Line::from(Span::styled(
+            "📋 Context compacted",
+            Style::default()
+                .fg(crate::kit::theme::semantic().text.dim)
+                .add_modifier(Modifier::ITALIC),
+        ))];
+    }
+
     let semantic = theme::semantic();
     let component = theme::component();
     let user_bg = component.message.user_bg;
@@ -579,6 +591,7 @@ mod tests {
         let vm = ViewModel::UserBubble(UserBubbleData {
             text: "hello world".into(),
             content_hash: 0,
+            is_system_reminder: false,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert!(
@@ -831,6 +844,7 @@ mod tests {
             view_models: vec![ViewModel::UserBubble(UserBubbleData {
                 text: "find foo".into(),
                 content_hash: 0,
+                is_system_reminder: false,
             })],
             collapsed: true,
             is_running: false,
@@ -848,6 +862,7 @@ mod tests {
             view_models: vec![ViewModel::UserBubble(UserBubbleData {
                 text: "test".into(),
                 content_hash: 0,
+                is_system_reminder: false,
             })],
             collapsed: false,
             is_running: false,
@@ -1007,6 +1022,7 @@ mod tests {
                 recent_messages: vec![ViewModel::UserBubble(UserBubbleData {
                     text: "child content from probe".into(),
                     content_hash: 0,
+                    is_system_reminder: false,
                 })],
             }),
         });
@@ -1029,6 +1045,7 @@ mod tests {
             view_models: vec![ViewModel::UserBubble(UserBubbleData {
                 text: "dto child".into(),
                 content_hash: 0,
+                is_system_reminder: false,
             })],
             collapsed: false,
             is_running: false,
@@ -1043,6 +1060,7 @@ mod tests {
                 recent_messages: vec![ViewModel::UserBubble(UserBubbleData {
                     text: "probe child (should not appear)".into(),
                     content_hash: 0,
+                    is_system_reminder: false,
                 })],
             }),
         });
