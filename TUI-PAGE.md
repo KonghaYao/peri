@@ -805,7 +805,7 @@ InputArea 内所有按键事件通过优先级链分发，同一事件只被最�
 
 能力：
 
-- Panel 水平占满输入区域宽度，参与 `SessionColumn` 垂直布局。
+- Panel 宽度全铺满终端：外层 View 和内层 View 均使用 `Constraint::Fill(1)`，不再使用固定 60 列约束（`panel_registry::panel_constraint(layout.width)` 已废弃宽度维度的固定尺寸）。
 - Panel 与 InputArea 同样只有上下边框；禁止左右边框。
 - 面板打开时隐藏 InputArea。
 - 互斥组：Settings、Agent、Tools、Info、Thread；同组只保留一个。
@@ -951,6 +951,8 @@ InputArea 内所有按键事件通过优先级链分发，同一事件只被最�
 ```
 
 能力：浏览历史 thread，选择后切换当前会话上下文。数据来源：ACP session list / thread summary query；切换通过 `SwitchSession` effect 与 ACP session open。
+
+技术实现：ThreadBrowser 采用手动渲染模式（仿 Login 面板），不再使用 VirtualList。VirtualList 在 `panel_shell!` 的 `border` 内 `Fill(1)` 会被 ratatui 解析为 0，导致不可见。当前实现：`Vec<Line>` → `Paragraph` → `ScrollView(Text)`，手动处理 ↑/↓/Enter 键盘事件，条目间有空行分隔，选中行使用 `>` 标记 + bold 高亮。
 
 ### 6.7 MCP Panel
 
