@@ -264,6 +264,40 @@ impl EditorState {
         self.text.chars().count()
     }
 
+    /// 把当前字符光标转换为字节偏移。
+    fn cursor_byte(&self) -> usize {
+        Self::char_to_byte(&self.text, self.cursor)
+    }
+
+    /// 当前行首。
+    fn cursor_line_home(&mut self) {
+        let (line, _) = self.cursor_line_col();
+        self.cursor = Self::line_col_to_cursor(&self.text, line, 0);
+    }
+
+    /// 当前行尾。
+    fn cursor_line_end(&mut self) {
+        let (line, _) = self.cursor_line_col();
+        let line_len = self
+            .text
+            .split('\n')
+            .nth(line)
+            .unwrap_or("")
+            .chars()
+            .count();
+        self.cursor = Self::line_col_to_cursor(&self.text, line, line_len);
+    }
+
+    /// 替换字符区间，并把光标放在替换文本末尾。
+    fn replace_char_range(&mut self, start: usize, end: usize, replacement: &str) {
+        let start = start.min(self.len());
+        let end = end.min(self.len()).max(start);
+        let start_byte = Self::char_to_byte(&self.text, start);
+        let end_byte = Self::char_to_byte(&self.text, end);
+        self.text.replace_range(start_byte..end_byte, replacement);
+        self.cursor = start + replacement.chars().count();
+    }
+
     /// 返回当前完整文本的引用。
     fn all_text(&self) -> String {
         self.text.clone()
@@ -358,6 +392,48 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     }
                     KeyCode::Char('u') if is_ctrl => {
                         state.write().clear();
+                        reset_mention_popup();
+                        reset_slash_popup();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('a') if is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_line_home();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('e') if is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_line_end();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('b') if is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_left();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('f') if is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_right();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('h') if is_ctrl && !mention_active && !slash_active => {
+                        let mut s = state.write();
+                        s.backspace();
+                        update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('d') if is_ctrl && !mention_active && !slash_active => {
+                        let mut s = state.write();
+                        s.delete_forward();
+                        update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('b')
+                        if is_alt && !is_ctrl && !mention_active && !slash_active =>
+                    {
+                        state.write().cursor_word_left();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('f')
+                        if is_alt && !is_ctrl && !mention_active && !slash_active =>
+                    {
+                        state.write().cursor_word_right();
                         EventResult::Consumed
                     }
                     KeyCode::Backspace if !mention_active && !slash_active => {
@@ -367,10 +443,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         } else {
                             s.backspace();
                         }
-                        if *SLASH_HINT_ACTIVE.state().read() && !s.text.starts_with('/') {
-                            *SLASH_HINT_ACTIVE.state().write() = false;
-                        }
-                        update_popup_prefix(&s.text);
+                        update_popup_prefix(&s);
                         EventResult::Consumed
                     }
                     KeyCode::Backspace => {
@@ -380,7 +453,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         } else {
                             s.backspace();
                         }
-                        update_popup_prefix(&s.text);
+                        update_popup_prefix(&s);
                         EventResult::Consumed
                     }
                     KeyCode::Delete if !mention_active && !slash_active => {
@@ -390,7 +463,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         } else {
                             s.delete_forward();
                         }
-                        update_popup_prefix(&s.text);
+                        update_popup_prefix(&s);
                         EventResult::Consumed
                     }
                     KeyCode::Left if is_alt && !is_ctrl && !mention_active && !slash_active => {
@@ -449,7 +522,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     KeyCode::Char(ch) if !is_ctrl && !is_alt => {
                         let mut s = state.write();
                         s.insert_char(ch);
-                        update_popup_prefix(&s.text);
+                        update_popup_prefix(&s);
                         *PREDICTION.state().write() = PredictionState::default();
                         EventResult::Consumed
                     }
@@ -492,7 +565,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                 }
                 let mut s = state.write();
                 s.insert_str(&truncated);
-                update_popup_prefix(&s.text);
+                update_popup_prefix(&s);
                 *PREDICTION.state().write() = PredictionState::default();
                 EventResult::Consumed
             }
@@ -784,7 +857,14 @@ fn replace_last_mention(state: &mut EditorState, replacement: &str) {
 }
 
 fn apply_slash_selection(state: &mut EditorState, cmd: &str) {
-    state.replace_all(format!("/{cmd} "));
+    let replacement = format!("/{cmd} ");
+    if let Some((_, token_start_byte)) = detect_slash_token(&state.text, state.cursor_byte()) {
+        let token_start = state.text[..token_start_byte].chars().count();
+        let token_end = state.cursor;
+        state.replace_char_range(token_start, token_end, &replacement);
+    } else {
+        state.replace_all(replacement);
+    }
 }
 
 fn build_slash_items() -> Vec<SlashCompletionItem> {
@@ -859,37 +939,62 @@ fn filter_files_for_mention(prefix: &str) -> Vec<String> {
     matches
 }
 
-/// 根据 editor 当前文本更新 @mention / slash 提示状态。
+/// 根据 editor 当前文本和光标更新 @mention / slash 提示状态。
 ///
-/// - `/` 在行首：开启 slash 提示，prefix = 第一个非空白/制表符之后到光标的内容
-/// - `@` 在最近词中：开启 @mention，prefix = @ 之后的字符
-fn update_popup_prefix(text: &str) {
-    // slash：仅当整段文本是单个 slash 命令 token 时开启提示。
-    // `//` 常见于用户误触/路径/注释，不应保持一个空匹配 popup 反复渲染。
-    let slash_active_now = text == "/"
-        || (text.starts_with('/') && !text.starts_with("//") && !text[1..].contains(' '));
-    *SLASH_HINT_ACTIVE.state().write() = slash_active_now;
-    if slash_active_now {
-        *SLASH_PREFIX.state().write() = text[1..].to_string();
+/// - `/` token：参考 peri-main，向光标前回溯最近的 `/`，要求 `/` 前为空白或行首。
+/// - `@` 在最近词中：开启 @mention，prefix = @ 之后的字符。
+fn update_popup_prefix(state: &EditorState) {
+    let cursor_byte = state.cursor_byte();
+    if let Some((prefix, _)) = detect_slash_token(&state.text, cursor_byte) {
+        *SLASH_HINT_ACTIVE.state().write() = true;
+        *SLASH_PREFIX.state().write() = prefix;
     } else {
+        *SLASH_HINT_ACTIVE.state().write() = false;
         SLASH_PREFIX.state().write().clear();
     }
 
-    // @mention：找最后一个 @，若其后到文本末尾无空白则激活
-    let mention_active_now = if let Some(at_idx) = text.rfind('@') {
-        let after = &text[at_idx + 1..];
+    let before_cursor = &state.text[..cursor_byte];
+    let mention_active_now = if let Some(at_idx) = before_cursor.rfind('@') {
+        let after = &before_cursor[at_idx + 1..];
         !after.is_empty() && !after.contains(char::is_whitespace) && after != "@"
     } else {
         false
     };
     *AT_MENTION_ACTIVE.state().write() = mention_active_now;
     if mention_active_now {
-        if let Some(at_idx) = text.rfind('@') {
-            *MENTION_PREFIX.state().write() = text[at_idx + 1..].to_string();
+        if let Some(at_idx) = before_cursor.rfind('@') {
+            *MENTION_PREFIX.state().write() = before_cursor[at_idx + 1..].to_string();
         }
     } else {
         MENTION_PREFIX.state().write().clear();
     }
+}
+
+/// 在 `text[..cursor_byte]` 中检测光标前最近的 `/` token。
+fn detect_slash_token(text: &str, cursor_byte: usize) -> Option<(String, usize)> {
+    if cursor_byte == 0 || cursor_byte > text.len() || !text.is_char_boundary(cursor_byte) {
+        return None;
+    }
+    let before_cursor = &text[..cursor_byte];
+    let slash_pos = before_cursor.rfind('/')?;
+    let after_slash = &before_cursor[slash_pos + '/'.len_utf8()..];
+
+    if slash_pos > 0 {
+        let char_before = before_cursor[..slash_pos].chars().next_back()?;
+        if !char_before.is_whitespace() {
+            return None;
+        }
+    }
+
+    if !after_slash.is_empty()
+        && !after_slash
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == ':' || c == '.')
+    {
+        return None;
+    }
+
+    Some((after_slash.to_string(), slash_pos))
 }
 
 /// 把文本按 \n 拆成多行 Line，光标以反转色高亮。
@@ -1080,6 +1185,52 @@ mod tests {
     }
 
     #[test]
+    fn test_editor_cursor_line_home_and_end() {
+        let mut s = EditorState {
+            text: "abc\nde你f".into(),
+            cursor: 6,
+        };
+        s.cursor_line_home();
+        assert_eq!(s.cursor, 4);
+        s.cursor_line_end();
+        assert_eq!(s.cursor, 8);
+    }
+
+    #[test]
+    fn test_apply_slash_selection_replaces_only_current_token() {
+        let mut s = EditorState::default();
+        s.insert_str("run /hel after");
+        s.cursor = 8;
+        apply_slash_selection(&mut s, "help");
+        assert_eq!(s.text, "run /help  after");
+        assert_eq!(s.cursor, 10);
+    }
+
+    #[test]
+    fn test_apply_slash_selection_preserves_cjk_before_token() {
+        let mut s = EditorState::default();
+        s.insert_str("你好 /he 后面");
+        s.cursor = 6;
+        apply_slash_selection(&mut s, "help");
+        assert_eq!(s.text, "你好 /help  后面");
+        assert_eq!(s.cursor, 9);
+    }
+
+    #[test]
+    fn test_detect_slash_token_rejects_path_or_comment() {
+        assert!(detect_slash_token("src/foo", 7).is_none());
+        assert!(detect_slash_token("//", 2).is_none());
+    }
+
+    #[test]
+    fn test_detect_slash_token_accepts_line_start() {
+        assert_eq!(
+            detect_slash_token("hello\n/com", 10),
+            Some(("com".to_string(), 6))
+        );
+    }
+
+    #[test]
     fn test_render_multiline_empty_shows_cursor() {
         let lines = render_multiline_with_cursor("", 0, false);
         assert_eq!(lines.len(), 1);
@@ -1100,10 +1251,12 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_update_popup_prefix_slash_at_start() {
+    fn test_update_popup_prefix_slash_token_at_cursor() {
         crate::kit::atoms::init_atoms();
         reset_popup_atoms();
-        update_popup_prefix("/hel");
+        let mut s = EditorState::default();
+        s.insert_str("say /hel");
+        update_popup_prefix(&s);
         assert!(!*AT_MENTION_ACTIVE.state().read());
         assert!(*SLASH_HINT_ACTIVE.state().read());
         assert_eq!(SLASH_PREFIX.state().read().as_str(), "hel");
@@ -1111,10 +1264,12 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_update_popup_prefix_slash_with_space_disables() {
+    fn test_update_popup_prefix_slash_with_space_disables_after_token() {
         crate::kit::atoms::init_atoms();
         reset_popup_atoms();
-        update_popup_prefix("/help me");
+        let mut s = EditorState::default();
+        s.insert_str("/help me");
+        update_popup_prefix(&s);
         assert!(!*SLASH_HINT_ACTIVE.state().read());
     }
 
@@ -1123,7 +1278,9 @@ mod tests {
     fn test_update_popup_prefix_mention_trigger() {
         crate::kit::atoms::init_atoms();
         reset_popup_atoms();
-        update_popup_prefix("see @auth");
+        let mut s = EditorState::default();
+        s.insert_str("see @auth");
+        update_popup_prefix(&s);
         assert!(*AT_MENTION_ACTIVE.state().read());
         assert_eq!(MENTION_PREFIX.state().read().as_str(), "auth");
     }
@@ -1133,7 +1290,9 @@ mod tests {
     fn test_update_popup_prefix_mention_with_space_disables() {
         crate::kit::atoms::init_atoms();
         reset_popup_atoms();
-        update_popup_prefix("see @auth service");
+        let mut s = EditorState::default();
+        s.insert_str("see @auth service");
+        update_popup_prefix(&s);
         assert!(!*AT_MENTION_ACTIVE.state().read());
     }
 
