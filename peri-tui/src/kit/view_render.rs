@@ -660,8 +660,8 @@ fn render_subagent_group(
                 semantic.text.muted
             };
             lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(format!("→ {}", preview), Style::default().fg(color)),
+                Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim)),
+                Span::styled(preview, Style::default().fg(color)),
             ]));
         }
     }
