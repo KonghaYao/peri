@@ -225,7 +225,9 @@ impl CurrentTurn {
 
     /// Build incremental ViewModels from accumulated streaming data into cache.
     fn build_view_models(&mut self) {
-        use peri_acp_types::view_model::{AssistantBubbleData, ReasoningBlock, ToolCardData};
+        use peri_acp_types::view_model::{
+            AssistantBubbleData, ReasoningBlock, ToolCardData, hash_str,
+        };
 
         let mut vms: Vec<ViewModel> = Vec::new();
 
@@ -242,11 +244,17 @@ impl CurrentTurn {
                     collapsed: false,
                 })
             };
+            let reasoning_text = reasoning
+                .as_ref()
+                .map(|r| r.text.clone())
+                .unwrap_or_default();
+            let content_hash = hash_str(&format!("{}|{}", self.text, reasoning_text));
 
             vms.push(ViewModel::AssistantBubble(AssistantBubbleData {
                 text: self.text.clone(),
                 reasoning,
                 tool_card_ids: tool_ids.clone(),
+                content_hash,
             }));
         }
 
@@ -259,6 +267,15 @@ impl CurrentTurn {
                 is_error: t.is_error,
                 is_running: t.output_summary.is_none(),
                 diff: None,
+                content_hash: hash_str(&format!(
+                    "{}|{}|{}|{}|{}|{}|",
+                    t.tool_id,
+                    t.tool_name,
+                    t.input_summary,
+                    t.output_summary.as_deref().unwrap_or(""),
+                    t.is_error,
+                    t.output_summary.is_none(),
+                )),
             }));
         }
 
@@ -335,12 +352,21 @@ impl SubAgentAccumulator {
 
     fn view_model(&self) -> ViewModel {
         let mut child_turn = self.child_turn.clone();
+        let child_vms = child_turn.view_models();
         ViewModel::SubAgentGroup(peri_acp_types::view_model::SubAgentGroupData {
             agent_id: self.agent_id.clone(),
             agent_name: self.agent_name.clone(),
-            view_models: child_turn.view_models().to_vec(),
+            view_models: child_vms.to_vec(),
             collapsed: false,
             is_running: self.is_running,
+            content_hash: peri_acp_types::view_model::hash_str(&format!(
+                "{}|{}|{}|{}|{}",
+                self.agent_id,
+                self.agent_name,
+                child_vms.len(),
+                false,
+                self.is_running,
+            )),
         })
     }
 }

@@ -8,6 +8,34 @@
 //! Reference: `docs/design/peri-tui-architecture.md` section 4.1.
 
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
+
+// ---------------------------------------------------------------------------
+// Hash helper
+// ---------------------------------------------------------------------------
+
+/// 内容哈希——rebuild 时用于检测是否需重新渲染。
+pub fn hash_str(s: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+// ---------------------------------------------------------------------------
+// PartialEq helper macro -- skips content_hash field
+// ---------------------------------------------------------------------------
+
+/// Implement `PartialEq` for a struct, comparing only the listed fields
+/// (excluding `content_hash`).
+macro_rules! impl_partial_eq {
+    ($ty:ty: $($field:ident),+ $(,)?) => {
+        impl PartialEq for $ty {
+            fn eq(&self, other: &Self) -> bool {
+                $(self.$field == other.$field)&&+
+            }
+        }
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Top-level enum
@@ -33,17 +61,22 @@ pub enum ViewModel {
 // ---------------------------------------------------------------------------
 
 /// User message bubble -- right-aligned plain text.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserBubbleData {
     pub text: String,
+    /// 内容哈希——rebuild 时用于检测是否需重新渲染
+    #[serde(skip)]
+    pub content_hash: u64,
 }
+
+impl_partial_eq!(UserBubbleData: text);
 
 /// Agent reply bubble -- left-aligned markdown with optional reasoning block.
 ///
 /// Tool invocations are **siblings** (separate `ToolCard` entries), not
 /// embedded inside the bubble. `tool_card_ids` references them so the
 /// renderer can visually group bubble + its tool cards.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantBubbleData {
     /// Markdown source text.
     pub text: String,
@@ -51,10 +84,15 @@ pub struct AssistantBubbleData {
     pub reasoning: Option<ReasoningBlock>,
     /// Tool-card IDs that belong to this assistant turn (siblings, not children).
     pub tool_card_ids: Vec<String>,
+    /// 内容哈希——rebuild 时用于检测是否需重新渲染
+    #[serde(skip)]
+    pub content_hash: u64,
 }
 
+impl_partial_eq!(AssistantBubbleData: text, reasoning, tool_card_ids);
+
 /// Tool invocation card -- name, summaries, optional diff.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCardData {
     /// Stable identifier (matches `tool_card_ids` in AssistantBubbleData).
     pub tool_id: String,
@@ -71,14 +109,24 @@ pub struct ToolCardData {
     pub is_running: bool,
     /// Inline diff preview (Write / Edit tools).
     pub diff: Option<DiffBlock>,
+    /// 内容哈希——rebuild 时用于检测是否需重新渲染
+    #[serde(skip)]
+    pub content_hash: u64,
 }
 
+impl_partial_eq!(ToolCardData: tool_id, tool_name, input_summary, output_summary, is_error, is_running, diff);
+
 /// System notification -- centered banner for model switches, compact, etc.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemNoteData {
     pub text: String,
     pub level: NoteLevel,
+    /// 内容哈希——rebuild 时用于检测是否需重新渲染
+    #[serde(skip)]
+    pub content_hash: u64,
 }
+
+impl_partial_eq!(SystemNoteData: text, level);
 
 /// Severity of a system note.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -92,7 +140,7 @@ pub enum NoteLevel {
 /// Sub-agent message group -- bounded by start/stop events.
 ///
 /// Nested `view_models` render inside a collapsible container.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentGroupData {
     pub agent_id: String,
     pub agent_name: String,
@@ -103,24 +151,39 @@ pub struct SubAgentGroupData {
     /// Whether the sub-agent is still streaming.
     #[serde(default)]
     pub is_running: bool,
+    /// 内容哈希——rebuild 时用于检测是否需重新渲染
+    #[serde(skip)]
+    pub content_hash: u64,
 }
 
+impl_partial_eq!(SubAgentGroupData: agent_id, agent_name, view_models, collapsed, is_running);
+
 /// Generic collapsible group -- e.g. batched tool calls.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollapsedGroupData {
     pub title: String,
     /// Number of items hidden when collapsed.
     pub count: u32,
     /// The view models inside the group (visible when expanded).
     pub view_models: Vec<ViewModel>,
+    /// 内容哈希——rebuild 时用于检测是否需重新渲染
+    #[serde(skip)]
+    pub content_hash: u64,
 }
 
+impl_partial_eq!(CollapsedGroupData: title, count, view_models);
+
 /// Visual separator between iteration rounds.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DividerData {
     /// Optional label rendered next to the line (e.g. "Round 3").
     pub label: Option<String>,
+    /// 内容哈希——rebuild 时用于检测是否需重新渲染
+    #[serde(skip)]
+    pub content_hash: u64,
 }
+
+impl_partial_eq!(DividerData: label);
 
 // ---------------------------------------------------------------------------
 // Shared helper types
@@ -188,6 +251,7 @@ mod tests {
     fn test_view_model_user_bubble_roundtrip() {
         let vm = ViewModel::UserBubble(UserBubbleData {
             text: "hello".into(),
+            content_hash: hash_str("hello"),
         });
         let json = serde_json::to_string(&vm).unwrap();
         let back: ViewModel = serde_json::from_str(&json).unwrap();
@@ -203,6 +267,7 @@ mod tests {
                 collapsed: false,
             }),
             tool_card_ids: vec!["tc-1".into()],
+            content_hash: hash_str("done|thinking..."),
         });
         let json = serde_json::to_string(&vm).unwrap();
         let back: ViewModel = serde_json::from_str(&json).unwrap();
@@ -231,6 +296,7 @@ mod tests {
                     }],
                 }],
             }),
+            content_hash: hash_str("tc-1|Edit|path: foo.rs|updated 3 lines|false|false|foo.rs"),
         });
         let json = serde_json::to_string(&vm).unwrap();
         let back: ViewModel = serde_json::from_str(&json).unwrap();
@@ -242,6 +308,7 @@ mod tests {
         let vm = ViewModel::SystemNote(SystemNoteData {
             text: "model switched".into(),
             level: NoteLevel::Warning,
+            content_hash: hash_str("model switched|Warning"),
         });
         let json = serde_json::to_string(&vm).unwrap();
         let back: ViewModel = serde_json::from_str(&json).unwrap();
@@ -255,9 +322,11 @@ mod tests {
             agent_name: "file-searcher".into(),
             view_models: vec![ViewModel::Divider(DividerData {
                 label: Some("inner".into()),
+                content_hash: hash_str("inner"),
             })],
             collapsed: true,
             is_running: false,
+            content_hash: hash_str("sa-1|file-searcher|1|true|false"),
         });
         let json = serde_json::to_string(&vm).unwrap();
         let back: ViewModel = serde_json::from_str(&json).unwrap();
@@ -270,6 +339,7 @@ mod tests {
             title: "3 searches".into(),
             count: 3,
             view_models: vec![],
+            content_hash: hash_str("3 searches|3"),
         });
         let json = serde_json::to_string(&vm).unwrap();
         let back: ViewModel = serde_json::from_str(&json).unwrap();
@@ -278,7 +348,10 @@ mod tests {
 
     #[test]
     fn test_view_model_divider_roundtrip() {
-        let vm = ViewModel::Divider(DividerData { label: None });
+        let vm = ViewModel::Divider(DividerData {
+            label: None,
+            content_hash: hash_str(""),
+        });
         let json = serde_json::to_string(&vm).unwrap();
         let back: ViewModel = serde_json::from_str(&json).unwrap();
         assert_eq!(vm, back);
@@ -286,7 +359,10 @@ mod tests {
 
     #[test]
     fn test_json_tag_is_kebab_case() {
-        let vm = ViewModel::UserBubble(UserBubbleData { text: "hi".into() });
+        let vm = ViewModel::UserBubble(UserBubbleData {
+            text: "hi".into(),
+            content_hash: hash_str("hi"),
+        });
         let json = serde_json::to_value(&vm).unwrap();
         assert_eq!(json["type"], "user-bubble");
     }

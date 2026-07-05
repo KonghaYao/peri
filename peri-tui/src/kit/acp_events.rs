@@ -5,7 +5,7 @@
 
 use crate::kit::acp_types::{AcpEventData, CurrentTurn, ToolCardAccumulator};
 use crate::kit::atoms::*;
-use peri_acp_types::view_model::{NoteLevel, SystemNoteData, UserBubbleData, ViewModel};
+use peri_acp_types::view_model::{NoteLevel, SystemNoteData, UserBubbleData, ViewModel, hash_str};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -180,7 +180,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                         Vec::with_capacity(state.committed.len() + buffered_texts.len());
                     combined.extend(state.committed.iter().cloned());
                     for text in &buffered_texts {
-                        combined.push(ViewModel::UserBubble(UserBubbleData { text: text.clone() }));
+                        combined.push(ViewModel::UserBubble(UserBubbleData {
+                            text: text.clone(),
+                            content_hash: hash_str(text),
+                        }));
                     }
                     state.committed = Arc::from(combined);
                 }
@@ -230,9 +233,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             // I20-B：Arc 不可 push，需重建
             let mut combined = Vec::with_capacity(state.committed.len() + 1);
             combined.extend(state.committed.iter().cloned());
+            let content_hash = hash_str(&format!("{}|{:?}", sn.text, level));
             combined.push(ViewModel::SystemNote(SystemNoteData {
                 text: sn.text.clone(),
                 level,
+                content_hash,
             }));
             state.committed = Arc::from(combined);
             push_view_models(state);
@@ -451,6 +456,7 @@ mod tests {
                         text: "committed".into(),
                         reasoning: None,
                         tool_card_ids: Vec::new(),
+                        content_hash: 0,
                     },
                 )],
             }),

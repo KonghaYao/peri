@@ -386,7 +386,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_command_bypasses_prompt() {
-        use peri_acp_types::view_model::{AssistantBubbleData, ViewModel};
+        use peri_acp_types::view_model::{AssistantBubbleData, ViewModel, hash_str};
 
         crate::kit::atoms::init_atoms();
         *VIEW_MODELS.state().write() = ViewModelsSnapshot {
@@ -395,6 +395,7 @@ mod tests {
                     text: "existing".into(),
                     reasoning: None,
                     tool_card_ids: vec![],
+                    content_hash: hash_str("existing|"),
                 },
             )]),
             current_turn: std::sync::Arc::from([]),

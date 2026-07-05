@@ -319,6 +319,7 @@ impl SubAgentStatusMap {
                         text: text.to_string(),
                         reasoning: None,
                         tool_card_ids: Vec::new(),
+                    content_hash: 0,
                     }),
                 );
             } else if let Some(ViewModel::AssistantBubble(d)) = s.child_messages.last_mut() {
@@ -742,6 +743,7 @@ mod tests {
 
         let vm = ViewModel::UserBubble(peri_acp_types::view_model::UserBubbleData {
             text: "child msg".into(),
+        content_hash: 0,
         });
         let ok = map.append_child_message("fork", vm);
         assert!(ok, "应成功路由");
@@ -754,6 +756,7 @@ mod tests {
     fn test_append_child_message_returns_false_when_no_match() {
         let mut map = SubAgentStatusMap::new();
         let vm =
+            content_hash: 0,
             ViewModel::UserBubble(peri_acp_types::view_model::UserBubbleData { text: "x".into() });
         assert!(!map.append_child_message("unknown", vm));
         assert!(map.is_empty(), "无 owner 时不应保留 vm");
@@ -772,6 +775,7 @@ mod tests {
             is_error: false,
             is_running: false,
             diff: None,
+        content_hash: 0,
         });
         map.append_child_message("inst-1", tool_vm);
 
@@ -813,6 +817,7 @@ mod tests {
             is_error: false,
             is_running: false,
             diff: None,
+        content_hash: 0,
         });
         map.append_child_message("fork", tool_vm);
 
@@ -905,6 +910,7 @@ mod tests {
                 is_error: false,
                 is_running: false,
                 diff: None,
+            content_hash: 0,
             }),
         );
         map.append_child_text("inst-1", "second");
@@ -961,6 +967,7 @@ mod tests {
                 is_error: false,
                 is_running: false,
                 diff: None,
+            content_hash: 0,
             });
             assert!(map.append_child_message("inst-1", vm));
         }
@@ -1003,6 +1010,7 @@ mod tests {
                 is_error: false,
                 is_running: false,
                 diff: None,
+            content_hash: 0,
             });
             map.append_child_message("inst-1", tool_vm);
             // 紧跟一个 chunk → 因为 last 是 ToolCard，会新建 AssistantBubble
@@ -1033,6 +1041,7 @@ mod tests {
                 is_error: false,
                 is_running: false,
                 diff: None,
+            content_hash: 0,
             });
             map.append_child_message("inst-1", vm);
         }
@@ -1077,6 +1086,7 @@ mod tests {
                 is_error: false,
                 is_running: false,
                 diff: None,
+            content_hash: 0,
             });
             map.append_child_message("inst-1", completed);
         }
@@ -1089,6 +1099,7 @@ mod tests {
                 is_error: false,
                 is_running: false,
                 diff: None,
+            content_hash: 0,
             });
             map.append_child_message("inst-1", pending);
         }
@@ -1109,6 +1120,7 @@ mod tests {
             is_error: false,
             is_running: false,
             diff: None,
+        content_hash: 0,
         });
         assert!(map.append_child_message("inst-1", extra));
 
@@ -1126,6 +1138,7 @@ mod tests {
             .filter_map(|vm| match vm {
                 ViewModel::ToolCard(d) => Some(d.tool_id.clone()),
                 _ => None,
+            content_hash: 0,
             })
             .collect();
 
@@ -1182,6 +1195,7 @@ mod tests {
                         text: format!("thinking-{i}"),
                         reasoning: None,
                         tool_card_ids: Vec::new(),
+                    content_hash: 0,
                     });
                 map.append_child_message("inst-1", bubble);
             } else {
@@ -1193,6 +1207,7 @@ mod tests {
                     is_error: false,
                     is_running: false,
                     diff: None,
+                content_hash: 0,
                 });
                 map.append_child_message("inst-1", tool);
             }
@@ -1210,6 +1225,7 @@ mod tests {
             is_error: false,
             is_running: false,
             diff: None,
+        content_hash: 0,
         });
         assert!(map.append_child_message("inst-1", new_tool));
 
@@ -1230,6 +1246,7 @@ mod tests {
             .find_map(|vm| match vm {
                 ViewModel::ToolCard(d) if d.tool_id == new_tool_id => Some(d),
                 _ => None,
+            content_hash: 0,
             })
             .expect("tool-new entry 应保留");
 
@@ -1274,6 +1291,7 @@ mod tests {
                 is_error: false,
                 is_running: false,
                 diff: None,
+            content_hash: 0,
             });
             map.append_child_message("inst-1", tool);
         }

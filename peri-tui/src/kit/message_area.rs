@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use crate::kit::atoms::{ACP_STATE, COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, RENDER_CACHE};
+use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, RENDER_CACHE};
 use crate::kit::focus_router;
 use crate::kit::panel_registry::clean_scrollbars;
 use crate::kit::text_selection::{self, TextSelection};
@@ -37,6 +37,9 @@ struct LineCache {
     lines: Vec<Line<'static>>,
     content_h: usize,
     current_has_ct: bool,
+    /// H6：预计算的选区高亮 chunks（每 CHUNK_LINES 行一组）。
+    /// 仅在 key 变化时重建，帧间通过 Arc clone 共享——消除每帧 4 次全量 Line clone。
+    highlight_chunks: Arc<[(Vec<Line<'static>>, u16)]>,
 }
 
 // ── 消息区位置追踪 Hook ─────────────────────────────────────────────────
@@ -71,9 +74,12 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let semantic = theme::semantic();
 
     let render_cache = hooks.use_atom(&RENDER_CACHE);
-    let acp = hooks.use_atom(&ACP_STATE);
     let cache_snapshot = render_cache.read();
-    let is_loading = acp.read().is_loading;
+    // H6: is_loading 从 RENDER_CACHE 推断——存在 CurrentTurn 说明 agent 在运行。
+    // 不再订阅 ACP_STATE，避免流式期间 view_count 每次变化都触发无意义重渲染。
+    let is_loading = cache_snapshot.entries.last().map_or(false, |(k, _)| {
+        matches!(k, crate::kit::render_bridge::VmKey::CurrentTurn(_))
+    });
 
     let entries_len = cache_snapshot.entries.len();
     let raw_ch = cache_snapshot
@@ -114,17 +120,25 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 Style::default().fg(semantic.status.running),
             )]));
         }
+        // H6：预计算 chunks 并缓存，帧间避免 4 次全量 Line clone。
+        const CHUNK_LINES: usize = 200;
+        let chunks: Vec<(Vec<Line<'static>>, u16)> = lines
+            .chunks(CHUNK_LINES)
+            .map(|c| (c.to_vec(), c.len() as u16))
+            .collect();
         let mut lc = line_cache.write();
         lc.key = new_key;
         lc.lines = lines;
         lc.content_h = raw_ch.saturating_add(if is_loading { 1 } else { 0 });
         lc.current_has_ct = ct;
+        lc.highlight_chunks = Arc::from(chunks);
     }
 
     let cache = line_cache.read();
     let empty = cache.lines.is_empty();
     let content_lines = Arc::new(cache.lines.clone());
     let current_has_ct = cache.current_has_ct;
+    let cached_chunks_arc = Arc::clone(&cache.highlight_chunks);
     drop(cache);
     drop(cache_snapshot);
 
@@ -254,30 +268,33 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     }
 
     // ── 选区高亮（字符级，通过 span Style 传递） ──
+    // H6：无选区时直接用 LineCache 缓存的 chunks（Arc clone O(1)），
+    // 避免每帧 content_lines.to_vec() + chunks 重新分配 ~20000 次 Line clone。
     let sel = text_sel.read();
-    let highlight_lines: Vec<Line<'static>> = if sel.is_active() {
-        let bounds = sel.normalized_bounds();
-        if let Some(((sr, sc), (er, ec))) = bounds {
+    let is_active_sel = sel.is_active();
+    let cached_chunks = Arc::clone(&cached_chunks_arc);
+
+    let display_chunks: Vec<(Vec<Line<'static>>, u16)> = if is_active_sel {
+        // 选区活跃时退化为旧路径——重新计算（罕见场景，可接受回退代价）
+        let hl = if let Some(((sr, sc), (er, ec))) = sel.normalized_bounds() {
             text_selection::highlight_selected_lines(&content_lines, sr, sc, er, ec)
         } else {
             content_lines.to_vec()
-        }
+        };
+        let chunk_sz = 200usize;
+        hl.chunks(chunk_sz)
+            .map(|c| (c.to_vec(), c.len() as u16))
+            .collect()
     } else {
-        content_lines.to_vec()
+        cached_chunks.to_vec()
     };
     drop(sel);
 
     // H5: 性能说明——分块渲染避免 O(N) View widget 和单 Paragraph 溢出
     // 长历史 thread 可达 5000+ 行。逐行 View 在 terminal.draw() 中 O(N) 布局。
-    // 单 Paragraph 在 ScrollView 内可能导致 ratatui-kit 内部 buffer 溢出。
-    // 改为每 200 行一个 chunk → 5000 行 = 25 个 View widget（200x 缩减）。
-    // 选区高亮通过 highlight_selected_lines 返回的 span Style 传递。
-    const CHUNK_LINES: usize = 200;
-    let chunks: Vec<Vec<Line<'static>>> = highlight_lines
-        .chunks(CHUNK_LINES)
-        .map(|chunk| chunk.to_vec())
-        .collect();
-    let total_height: u16 = chunks.iter().map(|c| c.len() as u16).sum::<u16>().max(1);
+    // 改为每 200 行一个 chunk → 5000 行 = 25 个 View widget。
+    // H6：chunks 由 LineCache 缓存，帧间仅 Arc clone。
+    let total_height: u16 = display_chunks.iter().map(|(_, h)| *h).sum::<u16>().max(1);
     element!(
         ScrollView(
             flex_direction: Direction::Vertical,
@@ -291,8 +308,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 width: Constraint::Fill(1),
                 height: Constraint::Length(total_height),
             ) {
-                for (_i, chunk) in chunks.iter().enumerate() {
-                    Text(text: Paragraph::new(RatText::from(chunk.to_vec())))
+                for (_i, (chunk_lines, _)) in display_chunks.iter().enumerate() {
+                    Text(text: Paragraph::new(RatText::from(chunk_lines.clone())))
                 }
             }
         }

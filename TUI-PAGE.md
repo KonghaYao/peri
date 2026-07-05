@@ -12,6 +12,7 @@
 - [设计原则](#设计原则)
 - [1. AppShell 根页面](#1-appshell-根页面)
 - [2. MessageArea 区域组件](#2-messagearea-区域组件)
+  - [2.4 消息渲染样式详细规范](#24-消息渲染样式详细规范)
 - [3. InputArea 输入区域组件](#3-inputarea-输入区域组件)
 - [4. StatusBar 区域组件](#4-statusbar-区域组件)
 - [5. PanelOverlay 面板容器](#5-paneloverlay-面板容器)
@@ -552,6 +553,411 @@ TUI loading 统一使用 `peri-widgets/src/spinner`，包括 `SpinnerState` / `S
 - Todo 文本优先显示每项的 `activeForm`；若缺失再显示 `content` 的短文本。
 - Todo 列表最多展示当前 in-progress、接下来的 2-3 个 pending、最近 1 个 completed；超出数量用 `+N more` 折叠。
 - Todo 数据来自 ACP-only data flow：TodoWrite 工具结果映射为标准 `SessionUpdate::Plan`；若标准通道不足，再通过 `peri/unstable-event` 推入 TUI store，MessageArea 只消费派生后的 todo view state。
+
+### 2.4 消息渲染样式详细规范
+
+> 本节定义 MessageArea 中每种消息类型的**精确视觉规格**——颜色、前缀符号、间距、字体和布局规则。
+> 参数化颜色引自 [Theme System v2](#theme-system-v2) 的 SemanticTokens，此处引用语义名和设计参考值。
+>
+> **ASCII 图约定**：`————————` 表示该行内容延续到终端右边界（满宽），用于示意布局而非实际文本长度。空白行 `│  │` 省略中间内容区，仅保留左右边界示意。
+
+#### 2.4.1 颜色 Token 参考
+
+##### 强调色与功能色
+
+| Token | Hex 参考 | 语义 |
+|-------|----------|------|
+| `accent` | `#D77757` | Claude 暖橙：用户消息前缀、激活边框、光标、Logo、关键操作 |
+| `success` | `#4EBA65` | 工具成功、SubAgent 前缀、`✔` 对勾 |
+| `warning` | `#FFC107` | 标题、次要强调、重试态、用户按钮、权限标签 |
+| `error` | `#FF6B80` | 工具失败、错误摘要、缓存警告 |
+| `thinking` | `#A2A9E4` | 推理/CoT 思考、面板选中行 |
+| `loading` | `#93A5FF` | Loading 动画、SubAgent 箭头、Auto Mode 标签 |
+| `model_info` | `#A0825F` | 状态栏模型名（棕金） |
+| `bash_border` | `#FD5DB1` | Bash 工具结果边框（粉红） |
+| `selected_fg` | `#B2B9F9` | 列表选中项前景色 |
+
+##### 文字层级
+
+| Token | Hex 参考 | 用途 |
+|-------|----------|------|
+| `text` | `#FFFFFF` | 主文字、AI 回复、工具名、用户消息、Todo InProgress |
+| `muted` | `#999999` | 次要文字、标签、路径、Spinner 辅助、折叠预览 |
+| `dim` | `#505050` | 占位符、分隔符、前缀 `⎿`/`·`、已完成项、滚动条 |
+
+##### 底色
+
+| Token | Hex 参考 | 用途 |
+|-------|----------|------|
+| `user_bg` | `#373737` | 用户消息整行底色 |
+| `popup_bg` | `#000000` | 弹窗底色 |
+| `cursor_bg` | `#262626` | 列表光标行背景 |
+| `selection_bg` | `#264F78` | 文本选区背景色（暗蓝） |
+| `subagent_bg` | `#1E1E26` | SubAgent 嵌套消息背景色 |
+
+##### 边框色
+
+| Token | Hex 参考 | 用途 |
+|-------|----------|------|
+| `border` | `#505050` | 空闲/标准面板边框 |
+| `border_dim` | `#2A2A30` | 非活跃 Session 分隔线 |
+| `border_active` | `#D77757` | 激活边框（= accent） |
+
+##### Diff 高亮色
+
+| Token | Hex 参考 | 用途 |
+|-------|----------|------|
+| `diff_add` | `#3FB950` | 新增行前景色 |
+| `diff_add_bg` | `#12341A` | 新增行背景色 |
+| `diff_add_word_bg` | `#1A4E24` | 新增单词级高亮 |
+| `diff_remove` | `#F85149` | 删除行前景色 |
+| `diff_remove_bg` | `#371412` | 删除行背景色 |
+| `diff_remove_word_bg` | `#4E1C16` | 删除单词级高亮 |
+| `diff_hunk` | `#578FA9` | Hunk 头部 (`@@`) 青色 |
+
+---
+
+#### 2.4.2 消息类型视觉规格
+
+##### 用户消息 `UserBubble`
+
+```
+❯ 这是一条用户消息内容——————————————————————————
+  续行自动缩进两个空格对齐——————————————————————
+```
+
+| 属性 | 规格 |
+|------|------|
+| 前缀 | `❯`，`accent` 色，**BOLD** |
+| 底色 | 整行 `user_bg` |
+| 首行 | `❯ ` + 内容 |
+| 续行 | `  `（两个空格缩进）+ 内容 |
+| system_reminder | 仅渲染 `📋 Context compacted`（`dim` 色，*ITALIC*，无前缀/无底色） |
+| 前空行 | 1 行 |
+| 后空行 | 1 行 |
+
+##### AI 回复 `AssistantBubble`
+
+```
+AI 回复的 Markdown 内容段落，由 Markdown 渲染器处理。————————
+段落之间由空行分隔。——————————————————————————————————————
+
+代码块自动语法高亮：
+  code example here
+
+▍ 这是引用块内容，前缀 ▍ 可嵌套多级
+```
+
+| 元素 | 规格 |
+|------|------|
+| **正文段落** | `text` 色，Markdown 解析后逐行输出 |
+| **标题 H1-H3** | `warning` 色，**BOLD**，前后各 1 空行（去重） |
+| **标题 H4+** | `muted` 色，**BOLD**，前后各 1 空行 |
+| **行内代码** | `thinking` 色，无反引号包围 |
+| **多行代码块** | `text` 色，syntect 语法高亮，前后各 1 空行 |
+| **单行代码块** | `thinking` 色，简洁态 |
+| **链接** | `success` 色，*UNDERLINED*，OSC-8 包裹 |
+| **引用块** | `▍ ` 前缀（`muted` 色），嵌套 `quote_depth` 次，前后各 1 空行 |
+| **列表** | `•` / `1.` 前缀，`text` 色，嵌套 `"  "` 缩进 |
+| **加粗** | 继承颜色，**BOLD** |
+| **斜体** | 继承颜色，*ITALIC* |
+| **删除线** | 继承颜色，~~CROSSED_OUT~~ |
+| **水平线** | `─` × 60 字符，`muted` 色，前后各 1 空行 |
+| **表格** | `┌├└─│` BOX 绘制，CJK 对齐，`muted` 色边框 |
+| **空行去重** | `ensure_blank_line()`：仅上前一行非空时插入 |
+
+**Markdown 增量渲染器**（流式支持）：
+- `ensure_rendered_incremental()`：逐 chunk 增量解析
+- `ensure_rendered_flush()`：流结束后 flush 剩余内容
+- `find_last_block_boundary()`：块级边界检测，避免截断 mid-block
+- 表格 holdback 策略：流式中不完整表格行暂缓渲染
+
+##### 推理块（CoT Thinking）
+
+```
+Thought for 1234 chars
+ ⎿ 最后一行预览内容————————————————————————
+```
+
+| 属性 | 规格 |
+|------|------|
+| 首行 | `"Thought for N chars"`，`dim` 色 |
+| 预览行 | `" ⎿ "` 前缀（`dim`）+ 尾部内容（`dim`），最多 3 行 |
+| 折叠逻辑 | 默认折叠，仅显示首行和预览行 |
+| 注意 | `tail_lines` 字段当前始终为 `None`，预览行为未激活 |
+
+##### 工具调用 `ToolBlock`
+
+```
+● tool_name (参数摘要)———————————————
+  ⎿ 工具执行结果内容———————————————————
+```
+
+| 状态 | 指示器 | 颜色 | 动画 |
+|------|--------|------|------|
+| Running | `●` | `success` | 800ms 切换（`●` ↔ 空格），1600ms 完整周期 |
+| Completed | `●` | `success` | 固定 |
+| Failed | `✗` | `error` | 固定 |
+
+| 属性 | 规格 |
+|------|------|
+| 工具名 | `text` 色，**BOLD**，经过 `format_tool_name()` 映射显示名 |
+| 参数摘要 | `" (summary)"`，`dim` 色，截断 400 Unicode 字符 |
+| 结果前缀 | `"  ⎿ "`，正常态 `dim` 色，错误展开态 `error` 色 |
+| 结果内容 | 正常 `muted`，错误 `error` |
+| 错误摘要（折叠时） | `"  ⎿ "`（`dim`）+ 错误内容（`error`），截断 400 字符 |
+| 折叠/展开 | 默认折叠只读工具（Read/Glob/Grep/AskUserQuestion） |
+| Write/Edit | 完成后**强制展开** |
+| Diff 视图 | 内嵌 diff 行，默认关闭，Ctrl+O 切换 |
+| 前空行 | 1 行 |
+| 后空行 | 1 行 |
+
+**工具显示名映射表** (`format_tool_name`)：
+
+| 工具 | 显示名 |
+|------|--------|
+| Bash | Shell |
+| Read | Read |
+| Write | Write |
+| Edit | Edit |
+| Glob | Glob |
+| Grep | Grep |
+| folder_operations | Folder |
+| TodoWrite | Todo |
+| AskUserQuestion | Ask |
+| Agent | Agent |
+| LSP | LSP |
+| artifact | ArtUp |
+| WebSearch | Research |
+| WebFetch | Browse |
+| AgentResult | SubAgent |
+| 其他 | PascalCase 转换 |
+
+**工具参数摘要规则** (`format_tool_args`)：
+
+| 工具 | 提取字段 | 截断 |
+|------|---------|------|
+| Bash | `command` | 400 字符 |
+| Read/Write/Edit | `file_path`（相对化） | 不截断 |
+| Glob/Grep | `pattern`（相对化） | 200 字符 |
+| folder_operations | `operation path` | 不截断 |
+| WebSearch/WebFetch | `query` / `url` | 60 字符 |
+| ExecuteExtraTool/SearchExtraTools | `tool_name` / `query` | 40 字符 |
+| AgentResult | `task_id` | 12 字符 |
+| artifact | `file_path`（相对化） | 不截断 |
+| LSP | `operation` | 40 字符 |
+
+**自动展开规则** (`should_auto_expand_tool`)：
+- `AgentResult`（后台 agent 结果）：自动展开
+- `ExecuteExtraTool`（deferred 工具包装）：自动展开
+- 错误结果不自动展开
+
+##### 只读工具聚合组 `ToolCallGroup`
+
+```
+● Read 4 files————————————————————————————
+```
+
+| 属性 | 规格 |
+|------|------|
+| 标题 | `● summary`（`success` + `muted`） |
+| 行为 | **不可展开**，仅单行汇总 |
+| 出错 | 错误工具在聚合态中仍显示 `error` 色 error_summary |
+| AskUser | **专用路径**：`● User answered Peri's questions:`（`success`/`error`）+ 子行 `  ⎿ header → answer` |
+| 前空行 | 1 行 |
+| 后空行 | 1 行 |
+
+##### SubAgent 消息 `SubAgentGroup`
+
+**折叠态**：
+```
+❯ Agent(agent_id) 任务预览内容…————————————————
+```
+
+**展开态**：
+```
+❯ Agent(agent_id) 任务预览内容…————————————————
+  嵌套消息首行内容——————————————————————————————
+  嵌套消息续行内容——————————————————————————————
+    ⎿ 最终结果内容—————————————————————
+```
+
+| 属性 | 规格 |
+|------|------|
+| 箭头前缀 | `❯`，`loading` 色 |
+| Agent 标签 | `Agent(agent_id)`，正常 `success`，错误 `error`，后台运行 `warning` |
+| 短 hash | `#hash`（后台 agent），`muted` 色 |
+| 任务预览 | 截断 50 字符 + `…`，`muted` 色 |
+| 嵌套消息缩进 | 每行前 `"  "`（2 空格缩进） |
+| 最终结果行 | `"  ⎿ "`（`dim`）+ 第一行内容（`muted`），截断 80 字符 |
+| AssistantBubble | 在嵌套消息中**跳过不渲染** |
+| 尾部空行 | 展开态自动移除尾部空白行 |
+| 前空行 | 1 行 |
+| 后空行 | 1 行 |
+
+**批次汇总** (`batch_agents` 非空)：
+
+| 汇总行 | `● N agents finished`（`success`）/ `failed`（`error`）/ mixed |
+|--------|------|
+| 折叠态子行 | `├─`/`└─` 树形连接符（`dim`）+ task_preview（`text`）+ `· N tool uses`（`dim`）+ `· Done/Failed` |
+| 展开态追加 | `"     ⎿ "` + final_result（`muted`） |
+
+##### 系统消息 `SystemNote`
+
+```
+· 系统通知内容——————————————————————————
+✻ 星号开头的版本信息—————————————————
+⎿ 缩进开头的上下文信息———————————————
+  ⎿ 错误消息内容————————————————————————
+```
+
+| 前缀 | 规格 |
+|------|------|
+| `✻` 开头行 | `dim` 色，无额外前缀 |
+| `⎿` 开头行 | `muted` 色，无额外前缀 |
+| 其余行 | `· ` 前缀（`dim`）+ 内容：自动检测 `❌`/失败/错误 → `error`，`⚠`/已中断 → `warning`，其他 → `muted` |
+
+##### 缓存警告 `CacheWarning`
+
+| 属性 | 规格 |
+|------|------|
+| 内容 | 纯文本整行，`warning` 色，**无前缀符号** |
+
+##### AskUser 问答块 `AskUserBlock`
+
+```
+● User answered Peri's questions:
+  ⎿ header → answer—————————————————————
+```
+
+| 属性 | 规格 |
+|------|------|
+| 标题 | `● User answered Peri's questions:`（`success`/`error`） |
+| 结果行 | `"  ⎿ "`（`dim`）+ `header → answer`（`muted`/`error`） |
+| 解析格式 | `[问: H]\n回答: V` |
+
+##### 错误摘要行 `error_summary_lines`
+
+| 属性 | 规格 |
+|------|------|
+| 前缀 | `"  ⎿ "`，`dim` 色 |
+| 内容 | `error` 色，截断 400 Unicode 字符 |
+| 多行 | 原样保留换行 |
+
+---
+
+#### 2.4.3 Diff 渲染
+
+| 行类型 | gutter | 前景色 | 背景色 |
+|--------|--------|--------|--------|
+| 新增文件 | `+ path` | `diff_add` | `diff_add_bg` |
+| 删除文件 | `- path` | `diff_remove` | `diff_remove_bg` |
+| 修改文件 | `  path` | `muted` | 无 |
+| Hunk `@@` | 整行 | `diff_hunk` `#578FA9` | — |
+| Context | `{old:>n}  {new:>n} │ 内容` | `dim` gutter + 默认内容 | — |
+| Add `+` | `+{empty:>n}  {new:>n} │ 内容` | `diff_add` `#3FB950` | `diff_add_bg` `#12341A` |
+| Remove `-` | `-{old:>n}  {empty:>n} │ 内容` | `diff_remove` `#F85149` | `diff_remove_bg` `#371412` |
+
+**Word Diff**：变更单词用更深色背景（`#1A4E24` / `#4E1C16`），不变部分用行级背景色。
+
+**特殊规则**：
+- 新文件最多显示 6 行内容，超出显示 `"... N more lines not shown"`（`dim`）
+- 二进制文件：`"  Binary file path - cannot display diff"`（`dim`）
+- 超长 diff：`"  Diff too large for path - changes not displayed"`（`dim`）
+- 公共缩进裁剪：自动检测并移除所有内容行的公共前导空格
+- 渲染缓存：LRU 容量 64，key = (old_hash, new_hash, flags, width)
+
+---
+
+#### 2.4.4 消息区布局规格
+
+| 属性 | 规格 |
+|------|------|
+| 消息区宽度 | `inner.width - 1`（右侧 1 列留给滚动条） |
+| 视口裁剪 | 二分查找 `wrap_map` 定位可见行，只克隆视口内数据 |
+| 滚动跟随 | 默认跟随底部，用户手动滚离时取消（`scroll_follow = false`） |
+| 缩放去抖 | 记录 `last_resize_width`，防止 N 次/秒 resize 重渲染 |
+
+**滚动条**（右侧 1 列）：
+
+| 元素 | 规格 |
+|------|------|
+| 滚动条体 | `muted` 色 |
+| 滚动到底 ▼ | offset < max_scroll 时显示，`muted` + **BOLD** |
+| 滚动到顶 ▲ | offset > 0 时显示，`muted` + **BOLD** |
+
+**Sticky Header**（仅 `max_scroll > 0` 时渲染）：
+- 显示最后一条用户消息的摘要
+- 前缀 `❯`（`accent`，**BOLD**）+ 底色 `user_bg`
+- 自动换行 + 截断
+
+**选区高亮**：
+- 字符级高亮，背景色 `selection_bg` `#264F78`
+- Unicode-safe（`char_indices()` 切割）
+- 跨多 span 时拆分片段
+
+---
+
+#### 2.4.5 Todo 列表样式
+
+| 状态 | 图标 | 图标样式 | 文字样式 |
+|------|------|---------|---------|
+| InProgress | `◼` | `accent` + **BOLD** | `text` |
+| Completed | `✔` | `success` | `muted` + ~~CROSSED_OUT~~ |
+| Pending | `◻` | `muted` | `muted` |
+
+- 缩进 2 空格（`"  ◼"` / `"  ✔"` / `"  ◻"`）
+- Todo 列表在 Spinner 下方不显示额外标题或分隔线
+- 仅使用 `item.content` 字段渲染文本
+- Pending 项可选附加 `(可开始)` 提示
+- Spinner 下方可选显示 `"  ⎿  Tip: "` 提示行
+- Todo 列表结束后插入 3 行空行
+
+---
+
+#### 2.4.6 前缀符号体系总览
+
+| 符号 | 语义 | 位置 |
+|------|------|------|
+| `❯` | 用户消息头 | UserBubble 首行 |
+| `❯` | SubAgent 头 | SubAgentGroup 首行 |
+| `●` | 工具调用头 | ToolBlock 首行 |
+| `●` | 聚合组头 | ToolCallGroup 首行 |
+| `◼` | Todo 进行中 | Todo InProgress |
+| `✗` | 工具失败 | ToolBlock 首行 |
+| `✔` | Todo 完成 | Todo Completed |
+| `◻` | Todo 待处理 | Todo Pending |
+| `·` | 系统消息 | SystemNote 普通行 |
+| `⎿` | 结果/续行 | 工具结果行、错误摘要行、子 Agent 结果、SystemNote 续行 |
+| `▍` | 引用块 | Markdown 引用前缀 |
+| `├─` / `└─` | 树形连接 | SubAgent 批次汇总 |
+| `✳` | Spinner | Loading 动画 16 帧之一 |
+| `▲` / `▼` | 滚动 | 滚动条顶部/底部按钮 |
+
+> 注：`▸`/`▾` 折叠/展开箭头在 `peri-widgets` 组件库中存在，但 TUI 消息渲染路径未使用。
+
+---
+
+#### 2.4.7 Spinner 动画帧
+
+16 帧来回扫动画（100ms/帧，50ms raw tick 每 2 次推进 1 帧）：
+
+向前：`✳ ✴ ✵ ✶ ✷ ✸ ✹ ✺ ✻ ✼ ❃ ❊`
+向后：`✼ ✻ ✺ ✸`（第 12–15 帧为第 8–11 帧倒序，形成来回扫效果）
+
+tick 对 16 取模选帧：`BRAILLE_FRAMES[tick % 16]`。
+
+紧凑态（Compact 中）：颜色切换为 `thinking`
+
+---
+
+#### 2.4.8 设计哲学
+
+1. **前缀分层**：`❯`（用户/子Agent）> `●`（工具/聚合）> `·`/`⎿`（辅助信息），形成三级视觉缩进
+2. **颜色语义化**：`success`=成功绿色、`error`=失败红色、`warning`=警告琥珀、`thinking`=思考蓝紫
+3. **背景约束**：除 `user_bg` / `subagent_bg` / `popup_bg` / `cursor_bg` / `selection_bg` 外，不使用任何背景色
+4. **空行去重**：`ensure_blank_line()` 保证相邻空行不重复
+5. **流式友好**：Markdown 增量渲染 + 表格 holdback 策略
 
 ## 3. InputArea 输入区域组件
 

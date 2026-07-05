@@ -587,6 +587,7 @@ mod tests {
     fn test_user_bubble_basic() {
         let vm = ViewModel::UserBubble(UserBubbleData {
             text: "hello world".into(),
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert!(
@@ -601,6 +602,7 @@ mod tests {
             text: "**bold** text".into(),
             reasoning: None,
             tool_card_ids: vec![],
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert!(!lines.is_empty());
@@ -615,6 +617,7 @@ mod tests {
                 collapsed: false,
             }),
             tool_card_ids: vec![],
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert!(!lines.is_empty());
@@ -633,6 +636,7 @@ mod tests {
             is_error: false,
             is_running: false,
             diff: None,
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert!(!lines.is_empty());
@@ -650,6 +654,7 @@ mod tests {
             is_error: true,
             is_running: false,
             diff: None,
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         let first = &lines[0].spans;
@@ -666,6 +671,7 @@ mod tests {
             is_error: false,
             is_running: true,
             diff: None,
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
@@ -684,6 +690,7 @@ mod tests {
             is_error: false,
             is_running: false,
             diff: None,
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
@@ -703,6 +710,7 @@ mod tests {
                 path: "bar.rs".into(),
                 hunks: vec![],
             }),
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
@@ -719,6 +727,7 @@ mod tests {
             is_error: false,
             is_running: false,
             diff: None,
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
@@ -735,6 +744,7 @@ mod tests {
             is_error: false,
             is_running: false,
             diff: None,
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
@@ -763,6 +773,7 @@ mod tests {
                     }],
                 }],
             }),
+            content_hash: 0,
         });
         // diff_visible = true
         let lines = render_v2_vm(&vm, 80, true);
@@ -790,6 +801,7 @@ mod tests {
                 path: "bar.rs".into(),
                 hunks: vec![],
             }),
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         let has_diff = lines
@@ -803,6 +815,7 @@ mod tests {
         let vm = ViewModel::SystemNote(peri_acp_types::view_model::SystemNoteData {
             text: "session started".into(),
             level: NoteLevel::Info,
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert_eq!(lines.len(), 1);
@@ -813,6 +826,7 @@ mod tests {
         let vm = ViewModel::SystemNote(peri_acp_types::view_model::SystemNoteData {
             text: "fatal error".into(),
             level: NoteLevel::Error,
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert_eq!(lines.len(), 1);
@@ -825,9 +839,11 @@ mod tests {
             agent_name: "file-searcher".into(),
             view_models: vec![ViewModel::UserBubble(UserBubbleData {
                 text: "find foo".into(),
+                content_hash: 0,
             })],
             collapsed: true,
             is_running: false,
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert!(!lines.is_empty());
@@ -840,9 +856,11 @@ mod tests {
             agent_name: "tester".into(),
             view_models: vec![ViewModel::UserBubble(UserBubbleData {
                 text: "test".into(),
+                content_hash: 0,
             })],
             collapsed: false,
             is_running: false,
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert!(!lines.is_empty());
@@ -875,6 +893,7 @@ mod tests {
             view_models: Vec::new(),
             collapsed: false,
             is_running: false,
+            content_hash: 0,
         });
         let probe = std::rc::Rc::new(StaticProbe {
             info: Some(SubAgentRenderInfo {
@@ -899,6 +918,7 @@ mod tests {
             view_models: Vec::new(),
             collapsed: false,
             is_running: false,
+            content_hash: 0,
         });
         let probe = std::rc::Rc::new(StaticProbe {
             info: Some(SubAgentRenderInfo {
@@ -927,6 +947,7 @@ mod tests {
             view_models: Vec::new(),
             collapsed: false,
             is_running: false,
+            content_hash: 0,
         });
         let probe = std::rc::Rc::new(StaticProbe {
             info: Some(SubAgentRenderInfo {
@@ -952,6 +973,7 @@ mod tests {
             view_models: Vec::new(),
             collapsed: false,
             is_running: false,
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
@@ -966,6 +988,7 @@ mod tests {
             view_models: Vec::new(),
             collapsed: false,
             is_running: true,
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         let text = collect_text(&lines);
@@ -982,6 +1005,7 @@ mod tests {
             view_models: Vec::new(), // 空占位符
             collapsed: false,
             is_running: false,
+            content_hash: 0,
         });
         let probe = std::rc::Rc::new(StaticProbe {
             info: Some(SubAgentRenderInfo {
@@ -991,6 +1015,7 @@ mod tests {
                 final_result: None,
                 recent_messages: vec![ViewModel::UserBubble(UserBubbleData {
                     text: "child content from probe".into(),
+                    content_hash: 0,
                 })],
             }),
         });
@@ -1012,9 +1037,11 @@ mod tests {
             agent_name: "Agent".into(),
             view_models: vec![ViewModel::UserBubble(UserBubbleData {
                 text: "dto child".into(),
+                content_hash: 0,
             })],
             collapsed: false,
             is_running: false,
+            content_hash: 0,
         });
         let probe = std::rc::Rc::new(StaticProbe {
             info: Some(SubAgentRenderInfo {
@@ -1024,6 +1051,7 @@ mod tests {
                 final_result: None,
                 recent_messages: vec![ViewModel::UserBubble(UserBubbleData {
                     text: "probe child (should not appear)".into(),
+                    content_hash: 0,
                 })],
             }),
         });
@@ -1047,6 +1075,7 @@ mod tests {
             title: "3 searches".into(),
             count: 3,
             view_models: vec![],
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert_eq!(lines.len(), 1);
@@ -1058,6 +1087,7 @@ mod tests {
     fn test_divider_with_label() {
         let vm = ViewModel::Divider(DividerData {
             label: Some("Round 2".into()),
+            content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80, false);
         assert_eq!(lines.len(), 1);
@@ -1065,7 +1095,10 @@ mod tests {
 
     #[test]
     fn test_divider_no_label() {
-        let vm = ViewModel::Divider(DividerData { label: None });
+        let vm = ViewModel::Divider(DividerData {
+            label: None,
+            content_hash: 0,
+        });
         let lines = render_v2_vm(&vm, 80, false);
         assert_eq!(lines.len(), 1);
     }

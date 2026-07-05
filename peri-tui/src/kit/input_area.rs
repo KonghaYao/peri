@@ -40,7 +40,7 @@ use crate::kit::panel_registry::{PANELS, open_panel, panel_for_slash_command};
 use crate::kit::render_bridge::{self, RenderedEntry, VmKey};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
 use crate::kit::theme;
-use peri_acp_types::view_model::{UserBubbleData, ViewModel};
+use peri_acp_types::view_model::{UserBubbleData, ViewModel, hash_str};
 
 /// 输入状态
 #[derive(Clone, Default)]
@@ -821,6 +821,7 @@ fn submit_text(submitted: String) {
 fn append_local_user_bubble(text: &str) {
     let user_vm = ViewModel::UserBubble(UserBubbleData {
         text: text.to_string(),
+        content_hash: hash_str(text),
     });
     let snapshot = {
         let vms = VIEW_MODELS.state();

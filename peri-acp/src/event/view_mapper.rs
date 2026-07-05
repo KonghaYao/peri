@@ -18,8 +18,8 @@
 //! | System                | SystemNote             | Info level                                 |
 
 use peri_acp_types::view_model::{
-    AssistantBubbleData, DiffBlock, Hunk, HunkLine, HunkLineKind, NoteLevel, ReasoningBlock,
-    SubAgentGroupData, SystemNoteData, ToolCardData, UserBubbleData, ViewModel,
+    hash_str, AssistantBubbleData, DiffBlock, Hunk, HunkLine, HunkLineKind, NoteLevel,
+    ReasoningBlock, SubAgentGroupData, SystemNoteData, ToolCardData, UserBubbleData, ViewModel,
 };
 use peri_agent::agent::compact::CONTINUATION_HINT;
 use peri_agent::messages::{BaseMessage, ContentBlock};
@@ -179,11 +179,15 @@ fn convert_human(content: &peri_agent::messages::MessageContent) -> ViewModel {
         // where system_reminder=true is set on UserBubble; in the DTO layer we
         // use SystemNote to communicate this distinction without adding a field).
         ViewModel::SystemNote(SystemNoteData {
-            text: display_text,
+            text: display_text.clone(),
             level: NoteLevel::Info,
+            content_hash: hash_str(&format!("{}|Info", display_text)),
         })
     } else {
-        ViewModel::UserBubble(UserBubbleData { text: display_text })
+        ViewModel::UserBubble(UserBubbleData {
+            text: display_text.clone(),
+            content_hash: hash_str(&display_text),
+        })
     }
 }
 
@@ -243,10 +247,16 @@ fn convert_ai(
 
     let text = text_parts.join("");
 
+    let reasoning_hash_text = reasoning
+        .as_ref()
+        .map(|r| r.text.clone())
+        .unwrap_or_default();
+    let content_hash = hash_str(&format!("{}|{}", text, reasoning_hash_text));
     ViewModel::AssistantBubble(AssistantBubbleData {
-        text,
+        text: text.clone(),
         reasoning,
         tool_card_ids,
+        content_hash,
     })
 }
 
@@ -286,6 +296,12 @@ fn convert_tool(
         build_diff_block(tool_name_str, &input)
     };
 
+    let diff_path = diff.as_ref().map(|d| d.path.as_str()).unwrap_or("");
+    let content_hash_input = format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        tool_call_id, tool_name, input_summary, output_summary, is_error, false, diff_path,
+    );
+
     ViewModel::ToolCard(ToolCardData {
         tool_id: tool_call_id.to_string(),
         tool_name,
@@ -294,6 +310,7 @@ fn convert_tool(
         is_error,
         is_running: false,
         diff,
+        content_hash: hash_str(&content_hash_input),
     })
 }
 
@@ -302,9 +319,11 @@ fn convert_tool(
 // ---------------------------------------------------------------------------
 
 fn convert_system(content: &peri_agent::messages::MessageContent) -> ViewModel {
+    let text = content.text_content();
     ViewModel::SystemNote(SystemNoteData {
-        text: content.text_content(),
+        text: text.clone(),
         level: NoteLevel::Info,
+        content_hash: hash_str(&format!("{}|Info", text)),
     })
 }
 
@@ -341,11 +360,12 @@ fn convert_agent_tool(
     // from the Tool message. Here we emit a SubAgentGroup placeholder so the
     // view-commit has a slot for it.
     ViewModel::SubAgentGroup(SubAgentGroupData {
-        agent_id,
+        agent_id: agent_id.clone(),
         agent_name: tool_name.to_string(),
         view_models: Vec::new(),
         collapsed: !is_error, // expand on error so user sees the failure
         is_running: false,
+        content_hash: hash_str(&format!("{}|{}|0|{}|false", agent_id, tool_name, !is_error)),
     })
 }
 

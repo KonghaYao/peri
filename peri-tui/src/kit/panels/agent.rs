@@ -266,6 +266,7 @@ mod tests {
             view_models: Vec::new(),
             collapsed: false,
             is_running: false,
+            content_hash: 0,
         }
     }
 
@@ -280,6 +281,7 @@ mod tests {
         let snap = ViewModelsSnapshot {
             committed: vec![ViewModel::UserBubble(UserBubbleData {
                 text: "hi".to_string(),
+                content_hash: 0,
             })]
             .into(),
             current_turn: Vec::new().into(),
@@ -330,6 +332,7 @@ mod tests {
             title: "batch".to_string(),
             count: 1,
             view_models: vec![ViewModel::SubAgentGroup(make_subagent("hidden", "Hidden"))],
+            content_hash: 0,
         };
         let snap = ViewModelsSnapshot {
             committed: vec![ViewModel::CollapsedGroup(collapsed)].into(),
