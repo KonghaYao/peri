@@ -384,15 +384,19 @@ fn render_diff_block(diff: &DiffBlock) -> Vec<Line<'static>> {
         )]));
 
         for hunk_line in &hunk.lines {
-            let (prefix, color) = match hunk_line.kind {
-                HunkLineKind::Add => ("+", semantic.diff.add),
-                HunkLineKind::Del => ("-", semantic.diff.remove),
-                HunkLineKind::Context => (" ", semantic.text.muted),
+            let (prefix, color, bg_color) = match hunk_line.kind {
+                HunkLineKind::Add => ("+", semantic.diff.add, Some(semantic.diff.add_bg)),
+                HunkLineKind::Del => ("-", semantic.diff.remove, Some(semantic.diff.remove_bg)),
+                HunkLineKind::Context => (" ", semantic.text.muted, None),
             };
+            let mut line_style = Style::default().fg(color);
+            if let Some(bg) = bg_color {
+                line_style = line_style.bg(bg);
+            }
             lines.push(Line::from(vec![
                 Span::styled("  ", Style::default().fg(semantic.text.dim)),
-                Span::styled(prefix.to_string(), Style::default().fg(color)),
-                Span::styled(hunk_line.text.clone(), Style::default().fg(color)),
+                Span::styled(prefix.to_string(), line_style),
+                Span::styled(hunk_line.text.clone(), line_style),
             ]));
         }
     }

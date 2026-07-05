@@ -63,6 +63,10 @@ pub struct DiffPalette {
     pub add: Color,
     pub remove: Color,
     pub hunk: Color,
+    pub add_bg: Color,
+    pub remove_bg: Color,
+    pub add_word_bg: Color,
+    pub remove_word_bg: Color,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +117,10 @@ pub struct DiffTokens {
     pub add: Color,
     pub remove: Color,
     pub hunk: Color,
+    pub add_bg: Color,
+    pub remove_bg: Color,
+    pub add_word_bg: Color,
+    pub remove_word_bg: Color,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +224,10 @@ pub const DEFAULT_THEME: ThemeDefinition = ThemeDefinition {
             add: SAGE,
             remove: ERROR,
             hunk: THINKING,
+            add_bg: Color::Rgb(18, 52, 26),
+            remove_bg: Color::Rgb(55, 20, 18),
+            add_word_bg: Color::Rgb(26, 78, 36),
+            remove_word_bg: Color::Rgb(78, 28, 22),
         },
     },
     semantic: SemanticTokens {
@@ -246,6 +258,10 @@ pub const DEFAULT_THEME: ThemeDefinition = ThemeDefinition {
             add: SAGE,
             remove: ERROR,
             hunk: THINKING,
+            add_bg: Color::Rgb(18, 52, 26),
+            remove_bg: Color::Rgb(55, 20, 18),
+            add_word_bg: Color::Rgb(26, 78, 36),
+            remove_word_bg: Color::Rgb(78, 28, 22),
         },
         loading: LOADING,
         thinking: THINKING,
