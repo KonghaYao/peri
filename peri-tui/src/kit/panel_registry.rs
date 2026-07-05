@@ -491,13 +491,17 @@ pub fn clean_scrollbars() -> ScrollBars<'static> {
             .thumb_style(Style::default().bg(thumb_bg))
             .track_symbol(None)
             .begin_symbol(Some("▲"))
-            .begin_style(Style::default()
-                .fg(crate::kit::theme::semantic().text.muted)
-                .add_modifier(ratatui::style::Modifier::BOLD))
+            .begin_style(
+                Style::default()
+                    .fg(crate::kit::theme::semantic().text.muted)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )
             .end_symbol(Some("▼"))
-            .end_style(Style::default()
-                .fg(crate::kit::theme::semantic().text.muted)
-                .add_modifier(ratatui::style::Modifier::BOLD)),
+            .end_style(
+                Style::default()
+                    .fg(crate::kit::theme::semantic().text.muted)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
         vertical_scrollbar_visibility: ScrollbarVisibility::Automatic,
         ..ScrollBars::default()
     }

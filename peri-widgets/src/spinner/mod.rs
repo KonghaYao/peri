@@ -124,6 +124,49 @@ impl SpinnerState {
         self.raw_tick = 0;
         self.last_summary_elapsed_ms = 0;
     }
+
+    /// 将 spinner 渲染为 Vec<Line>，供 TUI 消息区直接追加到 all_lines 中。
+    ///
+    /// 与 WidgetRef::render_ref 渲染逻辑一致，但不依赖 Buffer——产出纯数据 Line。
+    pub fn render_to_lines(
+        &self,
+        primary: Color,
+        secondary: Color,
+        show_elapsed: bool,
+        show_tokens: bool,
+    ) -> Vec<Line<'static>> {
+        let frame = animation::tick_to_frame(self.tick());
+        let mut spans: Vec<Span<'static>> = vec![];
+
+        spans.push(Span::styled(
+            format!("{} ", frame),
+            Style::default().fg(primary),
+        ));
+        spans.push(Span::styled(
+            self.verb().to_string(),
+            Style::default().fg(primary),
+        ));
+
+        let mut suffix_parts = Vec::new();
+        if show_elapsed {
+            suffix_parts.push(animation::format_elapsed(self.elapsed_ms()));
+        }
+        if show_tokens && self.displayed_tokens() > 0 {
+            suffix_parts.push(format!(
+                "↓ {} tokens",
+                animation::format_tokens(self.displayed_tokens())
+            ));
+        }
+        if !suffix_parts.is_empty() {
+            spans.push(Span::styled(
+                format!(" ({}", suffix_parts.join(" · ")),
+                Style::default().fg(secondary),
+            ));
+            spans.push(Span::styled(")", Style::default().fg(secondary)));
+        }
+
+        vec![Line::from(spans)]
+    }
 }
 
 pub struct SpinnerWidget<'a> {
@@ -171,41 +214,13 @@ impl<'a> SpinnerWidget<'a> {
 
 impl WidgetRef for SpinnerWidget<'_> {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        let mut spans: Vec<Span<'_>> = vec![];
-
-        let frame = animation::tick_to_frame(self.state.tick());
-        let orange = Style::default().fg(self.primary_color);
-        let gray = Style::default().fg(self.secondary_color);
-
-        spans.push(Span::styled(format!("{} ", frame), orange));
-
-        spans.push(Span::styled(self.state.verb().to_string(), orange));
-
-        let elapsed = self.state.elapsed_ms();
-        let displayed_tokens = self.state.displayed_tokens();
-
-        let mut suffix_parts = Vec::new();
-
-        if self.show_elapsed {
-            suffix_parts.push(animation::format_elapsed(elapsed));
-        }
-
-        if self.show_tokens && displayed_tokens > 0 {
-            suffix_parts.push(format!(
-                "↓ {} tokens",
-                animation::format_tokens(displayed_tokens)
-            ));
-        }
-
-        if !suffix_parts.is_empty() {
-            spans.push(Span::styled(
-                format!(" ({}", suffix_parts.join(" · ")),
-                gray,
-            ));
-            spans.push(Span::styled(")", gray));
-        }
-
-        Paragraph::new(Line::from(spans)).render(area, buf);
+        let lines = self.state.render_to_lines(
+            self.primary_color,
+            self.secondary_color,
+            self.show_elapsed,
+            self.show_tokens,
+        );
+        Paragraph::new(lines.into_iter().next().unwrap_or_default()).render(area, buf);
     }
 }
 
