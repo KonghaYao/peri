@@ -16,8 +16,8 @@ use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
 use crate::kit::atoms::{
-    ACP_STATE, DIFF_VISIBLE, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE, RENDER_CACHE,
-    REWIND_ACTION_TX, VIEW_MODELS, ViewModelsSnapshot,
+    ACP_STATE, BRIDGE_RESET_COUNTER, DIFF_VISIBLE, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE,
+    RENDER_CACHE, REWIND_ACTION_TX, VIEW_MODELS, ViewModelsSnapshot,
 };
 use crate::kit::render_bridge::RenderCache;
 
@@ -76,6 +76,9 @@ async fn handle_submit(
     // /clear（及别名）不走 agent 协议——直接新开会话，清空 UI
     if is_clear_command(trimmed) {
         info!("kit submit_consumer: /clear intercepted, creating new session");
+        // 触发 bridge 状态重置：防止旧 session committed 在新 session 中残留
+        BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
+
         // 立即重置 atom 状态（在异步 new_session 之前）。
         // input_area 已在 submit_text 中将 is_loading 设为 true，
         // 旧 session 的滞留事件也会在 new_session 执行期间通过

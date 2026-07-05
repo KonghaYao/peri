@@ -68,6 +68,15 @@ async fn handle_load(
         return Ok(());
     }
     info!(thread_id = %thread_id, cwd = %cwd, "kit thread_load_consumer: calling session/load");
+
+    // 触发 bridge 状态重置：防止旧 session 的 committed ViewModel
+    // 在新 session 的 ViewCommit 到达之前污染消息区。
+    crate::kit::atoms::BRIDGE_RESET_COUNTER.set(
+        crate::kit::atoms::BRIDGE_RESET_COUNTER
+            .get()
+            .wrapping_add(1),
+    );
+
     acp_client
         .load_session(&thread_id, cwd, None)
         .await

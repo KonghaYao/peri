@@ -255,6 +255,11 @@ pub static COPY_MESSAGE_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| 
 /// 永久卡死。AppShell 组件 `use_atom` 订阅此 atom。
 pub static RENDER_HEARTBEAT: AtomStatic<u64> = AtomStatic::new(|| 0);
 
+/// Bridge 重置计数器——/clear 或 thread 切换时 +1，acp_bridge 检测到变更时
+/// 清空 committed / has_view_commit / current_turn，防止旧 session 的 VM
+/// 残留污染新 session 的消息区。
+pub static BRIDGE_RESET_COUNTER: AtomStatic<u64> = AtomStatic::new(|| 0);
+
 pub fn init_atoms() {
     PENDING_ATTACHMENTS.get_or_init(|| Handle::new(Vec::new()));
 }

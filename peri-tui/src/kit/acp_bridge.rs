@@ -6,6 +6,7 @@
 
 use crate::kit::acp_events::{self, BridgeState};
 use crate::kit::acp_types::{AcpEventData, CurrentTurn};
+use crate::kit::atoms;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -29,6 +30,11 @@ pub fn spawn_acp_bridge(
             has_view_commit: false,
         };
 
+        // 追踪 BRIDGE_RESET_COUNTER——submit_consumer 的 /clear / thread_load
+        // 递增此计数器，bridge 检测到变更时立即清空 committed/has_view_commit，
+        // 防止旧 session 的 ViewModel 在新 session 中残留。
+        let mut last_reset_counter: u64 = 0;
+
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
@@ -36,6 +42,21 @@ pub fn spawn_acp_bridge(
                     match event {
                         None => break,
                         Some(event) => {
+                            // 在处理每个事件前检查是否需要重置 bridge 状态
+                            let counter = atoms::BRIDGE_RESET_COUNTER.get();
+                            if counter != last_reset_counter {
+                                last_reset_counter = counter;
+                                state.committed = Arc::from([]);
+                                state.current_turn.reset();
+                                state.has_view_commit = false;
+                                state.is_loading = false;
+                                state.popup_kind = None;
+                                tracing::info!(
+                                    old = last_reset_counter,
+                                    new = counter,
+                                    "bridge: state reset by BRIDGE_RESET_COUNTER"
+                                );
+                            }
                             acp_events::dispatch_and_notify(&mut state, &event);
                         }
                     }
