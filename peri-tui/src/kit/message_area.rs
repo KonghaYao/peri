@@ -12,13 +12,14 @@
 
 use std::sync::Arc;
 
-use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, RENDER_CACHE};
+use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, RENDER_CACHE, VIEW_MODELS};
 use crate::kit::focus_router;
 use crate::kit::panel_registry::clean_scrollbars;
 use crate::kit::render_bridge::WrappedLineInfo;
 use crate::kit::text_selection::{self, TextSelection};
 use crate::kit::theme;
 use crate::kit::welcome::Welcome;
+use peri_acp_types::view_model::ViewModel;
 use ratatui_kit::{
     components::ScrollViewState,
     crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind},
@@ -99,8 +100,10 @@ pub struct MessageAreaProps {
 #[component]
 pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let semantic = theme::semantic();
+    let component = theme::component();
 
     let render_cache = hooks.use_atom(&RENDER_CACHE);
+    let view_models = hooks.use_atom(&VIEW_MODELS);
     let cache_snapshot = render_cache.read();
     // is_loading 从 RENDER_CACHE 推断——存在 CurrentTurn 说明 agent 在运行。
     let is_loading = cache_snapshot.entries.last().map_or(false, |(k, _)| {
@@ -329,23 +332,86 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             .map_or(0, |w| w.visual_row + w.visual_height)
     };
 
-    element!(
-        ScrollView(
-            flex_direction: Direction::Vertical,
-            width: Constraint::Fill(1),
-            height: Constraint::Fill(1),
-            scroll_view_state: scroll_state,
-            scroll_bars: clean_scrollbars(),
-        ) {
+    let max_scroll = total_visual_rows.saturating_sub(vis_height);
+
+    // ── Sticky Header：滚动时显示最后一条用户消息摘要 ──
+    let sticky_header: Option<Vec<Line<'static>>> = {
+        let store = view_models.read();
+        let last_user_text = store
+            .committed
+            .iter()
+            .rev()
+            .chain(store.current_turn.iter().rev())
+            .find_map(|vm| {
+                if let ViewModel::UserBubble(data) = vm {
+                    Some(data.text.chars().take(80).collect::<String>())
+                } else {
+                    None
+                }
+            });
+        drop(store);
+
+        last_user_text.filter(|_| max_scroll > 0).map(|text| {
+            vec![Line::styled(
+                format!("❯ {}", text),
+                Style::default()
+                    .fg(semantic.text.primary)
+                    .bg(component.message.user_bg),
+            )]
+        })
+    };
+
+    let show_sticky = sticky_header.is_some();
+
+    if show_sticky {
+        let hdr_lines = sticky_header.unwrap();
+        element!(
             View(
                 flex_direction: Direction::Vertical,
                 width: Constraint::Fill(1),
-                height: Constraint::Length(total_visual_rows.max(1)),
+                height: Constraint::Fill(1),
             ) {
-                Text(text: Paragraph::new(RatText::from(visible_lines))
-                    .scroll((local_offset, 0)))
+                // Sticky header — 固定在顶部
+                Text(text: Paragraph::new(RatText::from(hdr_lines)))
+                // 消息区主体
+                ScrollView(
+                    flex_direction: Direction::Vertical,
+                    width: Constraint::Fill(1),
+                    height: Constraint::Fill(1),
+                    scroll_view_state: scroll_state,
+                    scroll_bars: clean_scrollbars(),
+                ) {
+                    View(
+                        flex_direction: Direction::Vertical,
+                        width: Constraint::Fill(1),
+                        height: Constraint::Length(total_visual_rows.max(1)),
+                    ) {
+                        Text(text: Paragraph::new(RatText::from(visible_lines))
+                            .scroll((local_offset, 0)))
+                    }
+                }
             }
-        }
-    )
-    .into_any()
+        )
+        .into_any()
+    } else {
+        element!(
+            ScrollView(
+                flex_direction: Direction::Vertical,
+                width: Constraint::Fill(1),
+                height: Constraint::Fill(1),
+                scroll_view_state: scroll_state,
+                scroll_bars: clean_scrollbars(),
+            ) {
+                View(
+                    flex_direction: Direction::Vertical,
+                    width: Constraint::Fill(1),
+                    height: Constraint::Length(total_visual_rows.max(1)),
+                ) {
+                    Text(text: Paragraph::new(RatText::from(visible_lines))
+                        .scroll((local_offset, 0)))
+                }
+            }
+        )
+        .into_any()
+    }
 }
