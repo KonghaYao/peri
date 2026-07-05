@@ -76,13 +76,26 @@ async fn handle_submit(
     // /clear（及别名）不走 agent 协议——直接新开会话，清空 UI
     if is_clear_command(trimmed) {
         info!("kit submit_consumer: /clear intercepted, creating new session");
-        acp_client.new_session(cwd, None).await?;
-        // 新会话无消息 → 清空消息区 Atom
+        // 立即重置 atom 状态（在异步 new_session 之前）。
+        // input_area 已在 submit_text 中将 is_loading 设为 true，
+        // 旧 session 的滞留事件也会在 new_session 执行期间通过
+        // acp_bridge 写入 is_loading=true。先重置可最小化窗口期。
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
-        // 同步重置渲染缓存——MessageArea 通过 use_atom 订阅 RENDER_CACHE，
-        // 直接写入 atom 会触发组件重渲染，无需经过 render_bridge 事件通道。
         *RENDER_CACHE.state().write() = RenderCache::default();
-        // 重置 loading 态
+        {
+            let ref_guard = ACP_STATE.state();
+            let mut acp = ref_guard.write();
+            acp.is_loading = false;
+        }
+
+        acp_client.new_session(cwd, None).await?;
+
+        // 再次重置：旧 session 的 CancellationToken 虽在 session/close
+        // 时取消，但已进入 pipe 的滞留事件（TextChunk/ToolStarted）
+        // 会在 new_session 执行期间通过 acp_bridge 写入 is_loading=true。
+        // 这些事件无后续 TurnDone 来清除 loading，必须手动再清理一次。
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        *RENDER_CACHE.state().write() = RenderCache::default();
         let ref_guard = ACP_STATE.state();
         let mut acp = ref_guard.write();
         acp.is_loading = false;

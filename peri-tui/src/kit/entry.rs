@@ -28,7 +28,8 @@ use crate::launch::{TuiLaunchOptions, build_app_and_acp, teardown_app};
 use ratatui_kit::{
     crossterm::{
         event::{
-            DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+            DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange,
+            EnableMouseCapture,
         },
         execute,
     },
@@ -81,6 +82,25 @@ pub async fn run_kit_fullscreen(
     //    用户即使离线，也需要看到 CPU/MEM/Cron/Thread 列表。
     let snapshot_src = build_snapshot_source(&app);
     let _snapshot_handle = spawn_service_snapshot(snapshot_src, shutdown.clone());
+
+    // 3b. 渲染心跳任务——每 5 秒写一次 RENDER_HEARTBEAT atom，
+    //     确保 ratatui-kit render loop 的 `futures::select` 周期性唤醒。
+    //     即使终端窗口切换导致 EventStream 阻塞，心跳也能在 5 秒内恢复渲染。
+    {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                        atoms::RENDER_HEARTBEAT.set(
+                            atoms::RENDER_HEARTBEAT.get().wrapping_add(1)
+                        );
+                    }
+                }
+            }
+        });
+    }
 
     // 4. 接通 kit 四链路（仅当 ACP provider 配置成功——acp_client 为 None 时
     //    走最小可用路径：UI 可显示但无 agent 交互）。
@@ -182,7 +202,12 @@ pub async fn run_kit_fullscreen(
     // 5. 进入 ratatui-kit 全屏 event loop（fullscreen 自管 raw mode + alt screen）。
     // ratatui::init() 默认不启用鼠标捕获；未启用时很多终端会把滚轮转成 Up/Down。
     // 必须显式启用，才能让消息区收到 MouseEventKind::Scroll*，避免和键盘方向键语义混淆。
-    let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    let _ = execute!(
+        std::io::stdout(),
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        EnableFocusChange
+    );
     let result = element!(AppShell).fullscreen().await;
     let _ = execute!(
         std::io::stdout(),

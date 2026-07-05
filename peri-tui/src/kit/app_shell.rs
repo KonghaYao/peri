@@ -17,6 +17,12 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let acp_state = hooks.use_atom(&atoms::ACP_STATE);
     let popup_kind = hooks.use_atom(&atoms::POPUP_KIND);
     let wizard_active = hooks.use_atom(&atoms::WIZARD_ACTIVE);
+    // 订阅渲染心跳：即使终端无输入，heartbeat 也能周期性唤醒 render loop，
+    // 防止窗口切换后 EventStream 永久阻塞。
+    let _heartbeat = hooks.use_atom(&atoms::RENDER_HEARTBEAT);
+    // 触发 read 确保组件被注册为订阅者；read 返回的 u64 值没在其他地方用，
+    // 仅用于保证 ratatui-kit 在 wait() 时将本组件 waker 注入 heartbeat 的订阅表。
+    let _heartbeat_val = *_heartbeat.read();
 
     // 注册事件处理器
     let mut exit_fn = hooks.use_exit();

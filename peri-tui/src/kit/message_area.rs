@@ -57,7 +57,7 @@ pub struct TodoItem {
     pub content: String,
 }
 
-fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
+pub fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
     let sem = theme::semantic();
     let mut lines = Vec::new();
     for item in items {
@@ -180,14 +180,14 @@ pub struct MessageAreaProps {
 
 #[component]
 pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let semantic = theme::semantic();
-
     let render_cache = hooks.use_atom(&RENDER_CACHE);
     let cache_snapshot = render_cache.read();
-    // is_loading 从 RENDER_CACHE 推断——存在 CurrentTurn 说明 agent 在运行。
-    let is_loading = cache_snapshot.entries.last().map_or(false, |(k, _)| {
-        matches!(k, crate::kit::render_bridge::VmKey::CurrentTurn(_))
-    });
+    // is_loading 双重检测：ACP_STATE.is_loading（acp_bridge 在首条流式事件时置 true）+ RENDER_CACHE CurrentTurn。
+    let acp_is_loading = crate::kit::atoms::ACP_STATE.state().read().is_loading;
+    let is_loading = acp_is_loading
+        || cache_snapshot.entries.last().map_or(false, |(k, _)| {
+            matches!(k, crate::kit::render_bridge::VmKey::CurrentTurn(_))
+        });
 
     let entries_len = cache_snapshot.entries.len();
     let raw_ch = cache_snapshot
@@ -201,13 +201,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let scroll_state = hooks.use_state(ScrollViewState::default);
     let mut auto_scroll = hooks.use_state(|| true);
     let had_ct = hooks.use_state(|| false);
-    let spinner_state = hooks.use_state(|| SpinnerState::new(SpinnerMode::Thinking));
-    // 每帧推进 tick——同一帧可能多次调 render，用 tick_done 标记避免重复推进
-    let tick_done = hooks.use_state(|| false);
-    if !*tick_done.read() {
-        spinner_state.write().advance_tick();
-        *tick_done.write() = true;
-    }
     let new_key = {
         let h = raw_ch as u64;
         let l = entries_len as u64;
@@ -239,29 +232,12 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let current_has_ct = lc_data.current_has_ct;
     drop(lc_data);
 
-    // 构建全量行（基于 cache_snapshot entries，不含空行分隔符，含 spinner）
-    let mut all_lines: Vec<Line<'static>> = cache_snapshot
+    // 构建全量行（基于 cache_snapshot entries，仅消息内容，不含 spinner/todo）
+    let all_lines: Vec<Line<'static>> = cache_snapshot
         .entries
         .iter()
         .flat_map(|(_, entry)| entry.lines.iter().cloned())
         .collect();
-    if is_loading {
-        let spinner = spinner_state.read();
-        let spinner_lines =
-            spinner.render_to_lines(semantic.status.running, semantic.text.muted, true, true);
-        for line in spinner_lines {
-            all_lines.push(line);
-        }
-    }
-
-    // ── Todo 列表（从 ACP SessionUpdate::Plan 消费） ──
-    let todo_atom = hooks.use_atom(&crate::kit::atoms::TODO_ITEMS);
-    let todo_items = todo_atom.read();
-    if !todo_items.is_empty() {
-        for line in render_todo_lines(&todo_items) {
-            all_lines.push(line);
-        }
-    }
     let empty = cache_snapshot.entries.is_empty() && !is_loading;
     let all_line_count = all_lines.len();
     let content_lines = Arc::new(all_lines.clone());
@@ -294,8 +270,15 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         let stale = lc.cached_line_count != highlighted_lines.len();
         drop(lc);
         if stale && !highlighted_lines.is_empty() {
+            // 宽度需匹配 ScrollView 内部实际渲染宽度。
+            //
+            // ratatui-kit ScrollView 在 content_height > visible_height 时，
+            // ScrollbarVisibility::Automatic 会同时显示垂直+水平滚动条（horizontal_space==0
+            // 时 visible_scrollbars 回退到 else → (true, true)）。垂直滚动条占 1 列，
+            // 实际渲染宽度 = area.width - 1。若 build_wrap_map 用 area.width，Paragraph
+            // 换行点与预测不一致，累积的视觉高度差异导致内容溢出/底部空白。
             let vis_width = area_rect
-                .map(|r| r.width)
+                .map(|r| r.width.saturating_sub(1))
                 .unwrap_or(props.width as u16)
                 .max(1);
             let map = crate::kit::render_bridge::build_wrap_map(&highlighted_lines, vis_width);
@@ -424,6 +407,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         (current_has_ct,),
     );
 
+    // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
+    // [TRAP] build_footer_lines 内部调用 hooks.use_atom / hooks.use_state，
+    // 必须每帧按相同顺序执行，否则 ratatui-kit 触发 "Hook type mismatch" panic。
+    let footer_lines = build_footer_lines(&mut hooks);
+
     if empty {
         return element!(
             View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
@@ -454,6 +442,17 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             .map_or(0, |w| w.visual_row + w.visual_height)
     };
 
+    // 底部 spacer：补齐 content_top + visible 实际高度到 total_visual_rows。
+    //
+    // viewport_clip 只选取 [first..last) 子集，ScrollView 内容 View 高度却是
+    // total_visual_rows（全量）。当滚到中间时 visible 子集高度 << total，
+    // 差值在视口底部表现为空白区域（有换行内容时更明显，因 wrap_map 每行高度 >1，
+    // 与 Paragraph 实际渲染高度的微小差异会产生更大空白）。
+    let content_bottom = wrap_map
+        .get(last.saturating_sub(1))
+        .map_or(0u16, |w| w.visual_row + w.visual_height);
+    let bottom_spacer = total_visual_rows.saturating_sub(content_bottom);
+
     let max_scroll = total_visual_rows.saturating_sub(vis_height);
 
     // 诊断：记录关键渲染参数，输出到 agent-tui.log
@@ -468,30 +467,108 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         hl_count = highlighted_lines.len(),
         vis_count = visible_lines.len(),
         content_top,
+        content_bottom,
+        bottom_spacer,
         empty,
         "msg-area diag"
     );
 
+    // ── Footer：spinner + todo，固定在 ScrollView 之外 ──
+    // footer_lines 已在 empty 分支前预计算；此处仅消费结果。
+
     // 暂时禁用 sticky header，测试是否是它导致内容消失
     element!(
-        ScrollView(
+        View(
             flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
-            scroll_view_state: scroll_state,
-            scroll_bars: clean_scrollbars(),
         ) {
-            View(
+            ScrollView(
                 flex_direction: Direction::Vertical,
                 width: Constraint::Fill(1),
-                height: Constraint::Length(total_visual_rows.max(1)),
+                height: Constraint::Fill(1),
+                scroll_view_state: scroll_state,
+                scroll_bars: clean_scrollbars(),
             ) {
-                View(height: Constraint::Length(content_top)) {}
-                Text(text: Paragraph::new(RatText::from(visible_lines)))
+                View(
+                    flex_direction: Direction::Vertical,
+                    width: Constraint::Fill(1),
+                    height: Constraint::Length(total_visual_rows.max(1)),
+                ) {
+                    View(height: Constraint::Length(content_top)) {}
+                    Text(text: Paragraph::new(RatText::from(visible_lines)))
+                    View(height: Constraint::Length(bottom_spacer)) {}
+                }
+            }
+            View(
+                width: Constraint::Fill(1),
+                height: Constraint::Length(footer_lines.len().max(1) as u16),
+            ) {
+                Text(text: Paragraph::new(RatText::from(footer_lines)))
             }
         }
     )
     .into_any()
+}
+
+// ── footer 行构建：在 MessageArea 作用域内计算 spinner + todo 行 ──
+
+fn build_footer_lines(hooks: &mut Hooks) -> Vec<Line<'static>> {
+    let semantic = theme::semantic();
+
+    let acp_state = hooks.use_atom(&crate::kit::atoms::ACP_STATE);
+    let is_loading = acp_state.read().is_loading;
+
+    let todo_atom = hooks.use_atom(&crate::kit::atoms::TODO_ITEMS);
+    let todo_items = todo_atom.read();
+
+    // [TRAP] 所有 hook 调用必须在任何 early return 之前，确保每帧 hook 调用顺序一致。
+    // ratatui-kit 按调用顺序索引 hook，顺序变化会触发 "Hook type mismatch" panic。
+    let spinner_state = hooks.use_state(|| SpinnerState::new(SpinnerMode::Thinking));
+    let load_start = hooks.use_state(|| Option::<Instant>::None);
+    let once = hooks.use_state(|| false);
+
+    // 快速路径：无需渲染 footer 行时直接返回空。
+    if !is_loading && todo_items.is_empty() {
+        return Vec::new();
+    }
+    if !*once.read() {
+        let mut ls = load_start.write();
+        if is_loading && ls.is_none() {
+            *ls = Some(Instant::now());
+            *spinner_state.write() = SpinnerState::new(SpinnerMode::Thinking);
+        } else if !is_loading {
+            *ls = None;
+        }
+
+        // 壁钟时间补偿步进
+        if let Some(start) = *ls {
+            let elapsed = start.elapsed().as_millis() as u64;
+            let target = elapsed / 50;
+            let delta = {
+                let current = spinner_state.read().raw_tick();
+                target.saturating_sub(current).min(20)
+            };
+            for _ in 0..delta {
+                spinner_state.write().advance_tick();
+            }
+        }
+        *once.write() = true;
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if is_loading {
+        lines.extend(spinner_state.read().render_to_lines(
+            semantic.accent,
+            semantic.text.muted,
+            true,
+            true,
+        ));
+    }
+    if !todo_items.is_empty() {
+        lines.extend(render_todo_lines(&todo_items));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -525,5 +602,106 @@ mod tests {
         };
         assert!(mouse_in_area(u16::MAX - 1, u16::MAX - 1, area));
         assert_eq!(mouse_visual_position(u16::MAX, u16::MAX, area, 10), (11, 1));
+    }
+
+    /// 回归：visual_row 越界时 clamp 后 extract_selected_text 正常返回。
+    ///
+    /// 场景：内容 3 行，用户点击在 row=50（空白区域），visual_row=50。
+    /// 不 clamp → sr=50 >= lines.len()=3 → extract_selected_text 返回 None。
+    /// clamp 到 max_row=2 → sr=2 < 3 → 正常提取。
+    #[test]
+    fn test_extract_selected_text_clamped_to_content_bounds() {
+        let lines: Vec<Line<'static>> = vec![
+            Line::from("line 0"),
+            Line::from("line 1"),
+            Line::from("line 2"),
+        ];
+
+        let max_row = (lines.len().saturating_sub(1)) as u16; // 2
+
+        // 不 clamp：sr=50 越界，extract 返回 None
+        assert!(
+            text_selection::extract_selected_text((50, 0), (50, 5), &lines).is_none(),
+            "sr=50 >= len=3 应返回 None"
+        );
+
+        // clamp 后 sr=2：正常提取
+        let clamped = 50u16.min(max_row);
+        let r = text_selection::extract_selected_text((clamped, 0), (clamped, 6), &lines);
+        assert!(r.is_some(), "clamped sr=2 应正常提取文本");
+        assert_eq!(r.unwrap(), "line 2");
+    }
+
+    /// 回归：滚动到中间时底部 spacer 补齐 content_bottom 到 total_visual_rows。
+    ///
+    /// 场景：wrap_map 有换行内容（多行 visual_height > 1），滚动到中间时
+    /// viewport_clip 只返回 [first..last) 子集。如果只渲染 spacer(top) +
+    /// visible_lines 而不加底部 spacer，content_top + visible 实际高度远小于
+    /// total_visual_rows，ScrollView 底部出现大段空白。
+    ///
+    /// 修复：在 visible_lines 之后补充 bottom_spacer =
+    /// total_visual_rows - content_bottom。
+    #[test]
+    fn test_bottom_spacer_fills_gap_when_scrolling_mid() {
+        // 构建 wrap_map：模拟含换行内容（代码块/长行），每行 visual_height 可能 > 1
+        let wrap_map = vec![
+            wrapped(0, 0, 5),   // 0-4
+            wrapped(1, 5, 10),  // 5-14
+            wrapped(2, 15, 5),  // 15-19
+            wrapped(3, 20, 10), // 20-29
+        ];
+        let total_visual_rows =
+            wrap_map.last().unwrap().visual_row + wrap_map.last().unwrap().visual_height; // 30
+
+        // 滚动到中间：scroll_y=8, vis_height=12
+        let scroll_y = 8u16;
+        let vis_height = 12u16;
+        let (first, last, _) = viewport_clip(&wrap_map, scroll_y, vis_height);
+
+        assert_eq!(first, 1, "first 应跳过第 0 行（视觉范围 0-4）");
+        assert_eq!(last, 3, "last 应包含第 1、2 行（视觉 5-19 覆盖视口 8-20）");
+
+        let content_top = wrap_map[first].visual_row; // 5
+        let content_bottom = wrap_map[last.saturating_sub(1)].visual_row
+            + wrap_map[last.saturating_sub(1)].visual_height; // 15 + 5 = 20
+        let bottom_spacer = total_visual_rows.saturating_sub(content_bottom); // 30 - 20 = 10
+
+        assert_eq!(content_bottom, 20);
+        assert_eq!(
+            bottom_spacer, 10,
+            "中间滚动时底部空白 = total - content_bottom"
+        );
+
+        // 验证：spacer(top) + visible_height(wrap_map 预测) + spacer(bottom) = total
+        let visible_height = content_bottom - content_top; // 15
+        assert_eq!(
+            content_top + visible_height + bottom_spacer,
+            total_visual_rows
+        );
+    }
+
+    /// 底部 spacer 在最底部时应为 0（no unnecessary spacer）。
+    #[test]
+    fn test_bottom_spacer_is_zero_at_bottom() {
+        let wrap_map = vec![
+            wrapped(0, 0, 3),
+            wrapped(1, 3, 5),
+            wrapped(2, 8, 2),
+            wrapped(3, 10, 4),
+        ];
+        let total_visual_rows =
+            wrap_map.last().unwrap().visual_row + wrap_map.last().unwrap().visual_height; // 14
+
+        // 滚动到最底部
+        let scroll_y = total_visual_rows - 5; // 9
+        let (_first, last, _) = viewport_clip(&wrap_map, scroll_y, 5);
+        let content_bottom = wrap_map[last.saturating_sub(1)].visual_row
+            + wrap_map[last.saturating_sub(1)].visual_height;
+        let bottom_spacer = total_visual_rows.saturating_sub(content_bottom);
+
+        assert_eq!(
+            bottom_spacer, 0,
+            "在底部时 bottom_spacer 应为 0，不应有多余空白"
+        );
     }
 }

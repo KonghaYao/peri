@@ -3436,7 +3436,7 @@ version = "0.2.0"
 dependencies = [
  "lru",
  "parking_lot",
- "pulldown-cmark",
+ "pulldown-cmark 0.13.4",
  "rand 0.10.1",
  "ratatui",
  "similar 3.1.1",
@@ -3779,6 +3779,17 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f86ba2052aebccc42cbbb3ed234b8b13ce76f75c3551a303cb2bcffcff12bb14"
+dependencies = [
+ "bitflags 2.13.0",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
@@ -4023,27 +4034,29 @@ dependencies = [
 [[package]]
 name = "ratatui-kit"
 version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46b3a47ee576e202d3c2708bc8e3d02bb9625712f6169094e700e25cc995bb12"
+source = "git+https://github.com/KonghaYao/ratatui-kit.git?branch=main#45b9b3a9816726fe9783857e697503cdb6b41cb4"
 dependencies = [
  "any_key",
  "crossterm 0.29.0",
  "futures",
  "generational-box",
+ "pulldown-cmark 0.12.2",
  "ratatui",
  "ratatui-kit-macros",
  "regex",
+ "similar 2.7.0",
+ "syntect",
  "textwrap",
  "tui-input 0.15.3",
  "tui-tree-widget",
  "tui-widget-list",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
 name = "ratatui-kit-macros"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a511f2edcdb49972b88d32aca5a8385cce30e64694e0a906008dbc1763a9f79"
+source = "git+https://github.com/KonghaYao/ratatui-kit.git?branch=main#45b9b3a9816726fe9783857e697503cdb6b41cb4"
 dependencies = [
  "proc-macro2",
  "quote",

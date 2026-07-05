@@ -364,12 +364,21 @@ panel-payload
 │ ┌──────────────────────────────────────────────────────────────────────────┐ │
 │ │ SessionColumn                                                            │ │
 │ │ ┌──────────────────────────────────────────────────────────────────────┐ │ │
-│ │ │ MessageArea / Welcome                                                │ │ │
-│ │ │ - committed view models                                              │ │ │
-│ │ │ - current turn stream                                                │ │ │
-│ │ │ - tool / subagent / diff render                                      │ │ │
-│ │ │ - mouse wheel scroll                                                 │ │ │
-│ │ └──────────────────────────────────────────────────────────────────────┘ │ │
+│ │ │ MessageArea                                                              │ │ │
+│ │ │ ┌──────────────────────────────────────────────────────────────────────┐ │ │ │
+│ │ │ │ MessageArea / Welcome                                                │ │ │ │
+│ │ │ │ - committed view models                                              │ │ │ │
+│ │ │ │ - current turn stream                                                │ │ │ │
+│ │ │ │ - tool / subagent / diff render                                      │ │ │ │
+│ │ │ │ - mouse wheel scroll                                                 │ │ │ │
+│ │ │ └──────────────────────────────────────────────────────────────────────┘ │ │ │
+│ │ │ ┌──────────────────────────────────────────────────────────────────────┐ │ │ │
+│ │ │ │ LoadingFooter（固定在 ScrollView 之外）                              │ │ │ │
+│ │ │ │ - Spinner 动画（accent 橙色）                                       │ │ │ │
+│ │ │ │ - Todo 列表                                                         │ │ │ │
+│ │ │ │ - 空态时高度收缩为 0                                                │ │ │ │
+│ │ │ └──────────────────────────────────────────────────────────────────────┘ │ │ │
+│ │ └──────────────────────────────────────────────────────────────────────────┘ │ │
 │ │ ┌──────────────────────────────────────────────────────────────────────┐ │ │
 │ │ │ PanelOverlay：Model/Login/Agent/Hooks/Config/Threads/...             │ │ │
 │ │ │ - inside SessionColumn                                               │ │ │
@@ -402,11 +411,11 @@ panel-payload
 │                                                                              │
 │  ❯ 用户输入                                                                   │
 │                                                                              │
-│  ◜ 思考中…  Todo: 设计 Workflow Panel (12s · ↓ 1.2k tokens)                  │
-│                                                                              │
+│  ◜ 思考中… (12s · ↓ 1.2k tokens)                                             │
+│    ◼ 进行中  设计 Workflow Panel                                              │
 │                                                                              │
 │ ┌──────────────────────────────────────────────────────────────────────────┐ │
-│ │ > 输入你的任务...                                                        │ │
+│ │ ❯ 输入你的任务...                                                        │ │
 │ │ @ mention files    / commands                                           │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │
 │ Auto · perihelion · anthropic/claude-code-sonnet · CPU 12% · MEM 430MB        │
@@ -522,20 +531,24 @@ panel-payload
 
 TUI loading 统一使用 `peri-widgets/src/spinner`，包括 `SpinnerState` / `SpinnerMode` / `SpinnerWidget`。禁止在 MessageArea 中手写独立 loading 文案或自造 spinner。
 
-```text
+**架构（v2.1）**：LoadingFooter 作为 MessageArea 的固定子区域，位于 ScrollView 之外、消息流底部。不随消息区滚动，空态时高度收缩为 0。数据流：`ACP_STATE.is_loading` + `TODO_ITEMS` atom → 每轮渲染按壁钟时间补偿步进（once 门控防 tight loop）。
+
+```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ MessageArea                                                                  │
+│ MessageArea（ScrollView 可滚动）                                              │
 │                                                                              │
 │ ● 我会先梳理当前 TUI 页面结构，然后更新设计文档。                              │
 │                                                                              │
 │ ⏺ Read 3 files                                                               │
+╞══════════════════════════════════════════════════════════════════════════════╡
+│ LoadingFooter（固定，不滚动）                                                 │
 │                                                                              │
-│ ◜ 思考中… (12s · ↓ 1.2k tokens)                                              │
+│ ✳ 思考中… (12s · ↓ 1.2k tokens)                                              │
 │                                                                              │
-│   ● 进行中  更新 Workflow Panel 设计                                          │
-│   ○ 待处理  补充 spinner + todo 设计图                                        │
-│   ○ 待处理  复核快捷键与边框规则                                              │
-│   ✓ 已完成  阅读 peri-widgets spinner                                        │
+│   ◼ 进行中  更新 Workflow Panel 设计                                          │
+│   ◻ 待处理  补充 spinner + todo 设计图                                        │
+│   ◻ 待处理  复核快捷键与边框规则                                              │
+│   ✔ 已完成  阅读 peri-widgets spinner                                        │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -545,14 +558,14 @@ TUI loading 统一使用 `peri-widgets/src/spinner`，包括 `SpinnerState` / `S
 - `SpinnerMode::Thinking`：模型推理中，verb 默认 `思考中…`。
 - `SpinnerMode::ToolUse`：工具执行中，verb 默认 `执行工具…`。
 - `SpinnerMode::Responding`：回复生成中，verb 默认 `正在生成回复…`。
-- `SpinnerWidget::with_theme(theme)` 从 Theme System 获取 accent / muted 颜色。
+- Spinner 帧使用 **`accent` 橙色**（`#D77757`），辅助文本使用 `muted` 灰色。
 - Spinner 后缀展示 elapsed time 与 token count，例如 `(12s · ↓ 1.2k tokens)`。
 - Todo 列表显示在 Spinner 下方，不嵌入 Spinner 主行。
 - Todo 样式沿用 ACP `SessionUpdate::Plan` / IDE plan 组件语义，但不显示额外标题或分隔线；Spinner 下方直接渲染 todo list。
-- Todo 列表与 TodoWrite 工具状态挂钩：`in_progress` 显示 `● 进行中`，`pending` 显示 `○ 待处理`，`completed` 显示 `✓ 已完成`。
+- Todo 列表与 TodoWrite 工具状态挂钩：`in_progress` 显示 `◼ 进行中`，`pending` 显示 `◻ 待处理`，`completed` 显示 `✔ 已完成`。
 - Todo 文本优先显示每项的 `activeForm`；若缺失再显示 `content` 的短文本。
 - Todo 列表最多展示当前 in-progress、接下来的 2-3 个 pending、最近 1 个 completed；超出数量用 `+N more` 折叠。
-- Todo 数据来自 ACP-only data flow：TodoWrite 工具结果映射为标准 `SessionUpdate::Plan`；若标准通道不足，再通过 `peri/unstable-event` 推入 TUI store，MessageArea 只消费派生后的 todo view state。
+- Todo 数据来自 ACP-only data flow：TodoWrite 工具结果映射为标准 `SessionUpdate::Plan`；若标准通道不足，再通过 `peri/unstable-event` 推入 TUI store。
 
 ### 2.4 消息渲染样式详细规范
 
@@ -947,6 +960,8 @@ Thought for 1234 chars
 
 tick 对 16 取模选帧：`BRAILLE_FRAMES[tick % 16]`。
 
+Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、token count）：`muted`。
+
 紧凑态（Compact 中）：颜色切换为 `thinking`
 
 ---
@@ -987,13 +1002,16 @@ InputArea 内所有按键事件通过优先级链分发，同一事件只被最�
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ ──────────────────────────────────────────────────────────────────────────── │
-│   > 帮我实现一个功能，并写测试                                               │
+│   ❯ 帮我实现一个功能，并写测试                                               │
 │ ──────────────────────────────────────────────────────────────────────────── │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
+**颜色**：边框与 `❯` 前缀均使用 `muted` 灰色（`#999999`），idle 与 loading 态统一。
+
 能力：
 
+- InputArea 边框、`❯` 前缀统一使用 `muted` 灰色，与消息区形成弱对比，不抢注意力。
 - 多行 buffer，`Shift+Enter` / `Alt+Enter` 插入换行。
 - `Enter`（无修饰键）提交消息并写入输入历史。
 - `Ctrl+C`（有文本时）清空输入区全部内容（select-all + cut）。

@@ -281,11 +281,11 @@ pub const DEFAULT_THEME: ThemeDefinition = ThemeDefinition {
             reasoning: THINKING,
         },
         input: InputTokens {
-            border: BORDER_ACTIVE,
+            border: MUTED,
             border_loading: MUTED,
             cursor_fg: POPUP_BG,
             cursor_bg: TEXT,
-            prompt: ACCENT,
+            prompt: MUTED,
             prompt_loading: MUTED,
             continuation: DIM,
             placeholder: MUTED,
@@ -341,7 +341,7 @@ mod tests {
     fn test_default_theme_maps_legacy_colors_to_tokens() {
         let theme = current();
         assert_eq!(theme.name, "peri-dark");
-        assert_eq!(theme.component.input.border, BORDER_ACTIVE);
+        assert_eq!(theme.component.input.border, MUTED);
         assert_eq!(theme.component.statusbar.resource_good, SAGE);
         assert_eq!(theme.semantic.status.error, ERROR);
         assert_eq!(theme.component.panel.min_height, 8);
