@@ -1222,4 +1222,158 @@ mod tests {
             assert_eq!(d.tool_card_ids, vec!["tc-2".to_string()]);
         }
     }
+
+    // ── Interleaved text + tool_use scenario ──────────────────────────────
+
+    /// 单条 AI 消息中文本和工具调用交错出现——所有文本段必须拼接保留。
+    #[test]
+    fn test_ai_interleaved_text_and_tooluse_all_text_preserved() {
+        let msg = BaseMessage::ai(MessageContent::blocks(vec![
+            ContentBlock::text("Let me start by searching."),
+            ContentBlock::ToolUse {
+                id: "tc-grep".into(),
+                name: "Grep".into(),
+                input: serde_json::json!({"pattern": "foo"}),
+            },
+            ContentBlock::text("I found it, now editing."),
+            ContentBlock::ToolUse {
+                id: "tc-edit".into(),
+                name: "Edit".into(),
+                input: serde_json::json!({"file_path": "bar.rs"}),
+            },
+        ]));
+        let vm = convert_one(&msg, &[]);
+        match vm {
+            ViewModel::AssistantBubble(d) => {
+                assert!(
+                    d.text.contains("Let me start by searching"),
+                    "第一段文本应保留，实际 text='{}'",
+                    d.text
+                );
+                assert!(
+                    d.text.contains("I found it, now editing"),
+                    "中间文本（两工具之间）应保留，实际 text='{}'",
+                    d.text
+                );
+                assert_eq!(d.tool_card_ids.len(), 2);
+                assert!(d.tool_card_ids.contains(&"tc-grep".to_string()));
+                assert!(d.tool_card_ids.contains(&"tc-edit".to_string()));
+            }
+            other => panic!("期望 AssistantBubble，得到 {:?}", other),
+        }
+    }
+
+    /// 完整消息序列——多段 AI 文本+工具调用+最终纯文本 AI 回复——所有文本都保留。
+    #[test]
+    fn test_full_pipeline_interleaved_text_all_preserved() {
+        let mut mapper = ViewMapperImpl::new();
+
+        // 模拟真实 LLM 交互：用户提问 → AI 查文件+改文件 → AI 总结
+        let msgs = vec![
+            BaseMessage::human("帮我在 parser.rs 中修复 foo 函数"),
+            // AI 回复包含多段文字+多个工具调用交错
+            BaseMessage::ai(MessageContent::blocks(vec![
+                ContentBlock::text("我先搜索一下 foo 的定义。"),
+                ContentBlock::ToolUse {
+                    id: "tc-grep".into(),
+                    name: "Grep".into(),
+                    input: serde_json::json!({"pattern": "fn foo"}),
+                },
+                ContentBlock::text("找到了，让我读取 parser.rs。"),
+                ContentBlock::ToolUse {
+                    id: "tc-read".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({"file_path": "parser.rs"}),
+                },
+            ])),
+            BaseMessage::tool_result("tc-grep", "parser.rs:42 fn foo()"),
+            BaseMessage::tool_result("tc-read", "fn foo() { returns_none(); }"),
+            // 第二段 AI 回复——根据工具结果修改
+            BaseMessage::ai(MessageContent::blocks(vec![
+                ContentBlock::text("我看到问题了，现在修复它。"),
+                ContentBlock::ToolUse {
+                    id: "tc-edit".into(),
+                    name: "Edit".into(),
+                    input: serde_json::json!({
+                        "file_path": "parser.rs",
+                        "old_string": "returns_none()",
+                        "new_string": "returns_some()",
+                    }),
+                },
+            ])),
+            BaseMessage::tool_result("tc-edit", "updated successfully"),
+            // 最终总结——纯文本，无工具调用（症状 2：应被渲染但实际可能丢失）
+            BaseMessage::ai("修复完成！foo 函数现在返回 Some 而不是 None。"),
+        ];
+
+        let vms = mapper.convert(&msgs);
+
+        // 期望顺序：UserBubble, AssistantBubble(2段文字), ToolCard(Grep), ToolCard(Read),
+        //           AssistantBubble(文字), ToolCard(Edit), AssistantBubble(最终总结)
+        // = 7 条 ViewModel
+        assert_eq!(vms.len(), 7, "期望 7 条 ViewModel，实际 {} 条", vms.len());
+
+        // 验证类型序列
+        assert!(
+            matches!(&vms[0], ViewModel::UserBubble(_)),
+            "vms[0] 应为 UserBubble"
+        );
+        assert!(
+            matches!(&vms[1], ViewModel::AssistantBubble(_)),
+            "vms[1] 应为 AssistantBubble"
+        );
+        assert!(
+            matches!(&vms[2], ViewModel::ToolCard(_)),
+            "vms[2] 应为 ToolCard(Grep)"
+        );
+        assert!(
+            matches!(&vms[3], ViewModel::ToolCard(_)),
+            "vms[3] 应为 ToolCard(Read)"
+        );
+        assert!(
+            matches!(&vms[4], ViewModel::AssistantBubble(_)),
+            "vms[4] 应为 AssistantBubble"
+        );
+        assert!(
+            matches!(&vms[5], ViewModel::ToolCard(_)),
+            "vms[5] 应为 ToolCard(Edit)"
+        );
+        assert!(
+            matches!(&vms[6], ViewModel::AssistantBubble(_)),
+            "vms[6] 应为 AssistantBubble(总结)"
+        );
+
+        // 症状 1 验证：第一条 AssistantBubble 包含两段工具调用之间的文字
+        if let ViewModel::AssistantBubble(d) = &vms[1] {
+            assert!(
+                d.text.contains("我先搜索一下"),
+                "第一条 AB 应包含开头文字，text='{}'",
+                d.text
+            );
+            assert!(
+                d.text.contains("找到了，让我读取"),
+                "第一条 AB 应包含工具间的中间文字，text='{}'",
+                d.text
+            );
+        }
+
+        // 第二条 AssistantBubble
+        if let ViewModel::AssistantBubble(d) = &vms[4] {
+            assert!(
+                d.text.contains("我看到问题了"),
+                "第二条 AB 应包含文字，text='{}'",
+                d.text
+            );
+        }
+
+        // 症状 2 验证：最终纯文本 AI 回复必须存在且有内容
+        if let ViewModel::AssistantBubble(d) = &vms[6] {
+            assert!(
+                d.text.contains("修复完成"),
+                "最终 AI 总结应保留，text='{}'",
+                d.text
+            );
+            assert!(d.tool_card_ids.is_empty(), "最终总结不应关联工具调用");
+        }
+    }
 }

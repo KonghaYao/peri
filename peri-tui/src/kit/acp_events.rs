@@ -537,6 +537,247 @@ mod tests {
         // SUBMIT_TX 已被前面测试 set 过，所以 drain 成功 → buffer 被清空
         // 即使 SUBMIT_TX 未 set，drain 早退，buffer 仍有 "x"——两种情况都不算 panic
     }
+
+    /// 模拟 ReAct 多迭代边界——每轮 ViewCommit 后 committed 应包含全部 AI 文本。
+    #[test]
+    #[serial]
+    fn test_multi_iteration_view_commit_preserves_all_ai_text() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: Arc::from([]),
+            current_turn: CurrentTurn::new(),
+            is_loading: false,
+            popup_kind: None,
+            has_view_commit: false,
+        };
+
+        use peri_acp_types::view_model::{AssistantBubbleData, ToolCardData, UserBubbleData};
+
+        // ── 迭代 1: Human + AI 文字+工具调用 ──
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
+                text: "我先搜索一下。".into(),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolStarted(peri_acp_types::event_data::ToolStarted {
+                tool_id: "tc-grep".into(),
+                tool_name: "Grep".into(),
+                input_summary: "pattern: fn foo".into(),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolEnded(peri_acp_types::event_data::ToolEnded {
+                tool_id: "tc-grep".into(),
+                output_summary: "parser.rs:42".into(),
+                is_error: false,
+                agent_id: None,
+            }),
+        );
+
+        // ViewCommit 迭代 1（3 条，模拟 ACP 先前轮次包含 UserBubble）
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ViewCommit(peri_acp_types::event_data::ViewCommit {
+                view_models: vec![
+                    ViewModel::UserBubble(UserBubbleData {
+                        text: "帮我修复".into(),
+                        content_hash: 1,
+                        is_system_reminder: false,
+                    }),
+                    ViewModel::AssistantBubble(AssistantBubbleData {
+                        text: "我先搜索一下。".into(),
+                        reasoning: None,
+                        tool_card_ids: vec!["tc-grep".into()],
+                        content_hash: 2,
+                    }),
+                    ViewModel::ToolCard(ToolCardData {
+                        tool_id: "tc-grep".into(),
+                        tool_name: "Grep".into(),
+                        input_summary: "pattern: fn foo".into(),
+                        output_summary: "parser.rs:42".into(),
+                        is_error: false,
+                        is_running: false,
+                        diff: None,
+                        content_hash: 3,
+                    }),
+                ],
+            }),
+        );
+
+        // ── 迭代 2: streaming → ViewCommit（上一轮 + 新内容）──
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
+                text: "我来编辑。".into(),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolStarted(peri_acp_types::event_data::ToolStarted {
+                tool_id: "tc-edit".into(),
+                tool_name: "Edit".into(),
+                input_summary: "path: parser.rs".into(),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolEnded(peri_acp_types::event_data::ToolEnded {
+                tool_id: "tc-edit".into(),
+                output_summary: "updated".into(),
+                is_error: false,
+                agent_id: None,
+            }),
+        );
+
+        // ViewCommit 迭代 2: 5 条（前 3 + 新 Ai + ToolCard）
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ViewCommit(peri_acp_types::event_data::ViewCommit {
+                view_models: vec![
+                    ViewModel::UserBubble(UserBubbleData {
+                        text: "帮我修复".into(),
+                        content_hash: 1,
+                        is_system_reminder: false,
+                    }),
+                    ViewModel::AssistantBubble(AssistantBubbleData {
+                        text: "我先搜索一下。".into(),
+                        reasoning: None,
+                        tool_card_ids: vec!["tc-grep".into()],
+                        content_hash: 2,
+                    }),
+                    ViewModel::ToolCard(ToolCardData {
+                        tool_id: "tc-grep".into(),
+                        tool_name: "Grep".into(),
+                        input_summary: "pattern: fn foo".into(),
+                        output_summary: "parser.rs:42".into(),
+                        is_error: false,
+                        is_running: false,
+                        diff: None,
+                        content_hash: 3,
+                    }),
+                    ViewModel::AssistantBubble(AssistantBubbleData {
+                        text: "我来编辑。".into(),
+                        reasoning: None,
+                        tool_card_ids: vec!["tc-edit".into()],
+                        content_hash: 4,
+                    }),
+                    ViewModel::ToolCard(ToolCardData {
+                        tool_id: "tc-edit".into(),
+                        tool_name: "Edit".into(),
+                        input_summary: "path: parser.rs".into(),
+                        output_summary: "updated".into(),
+                        is_error: false,
+                        is_running: false,
+                        diff: None,
+                        content_hash: 5,
+                    }),
+                ],
+            }),
+        );
+
+        // ── 迭代 3: 最终总结（纯文本 Ai）──
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
+                text: "修复完成！".into(),
+                agent_id: None,
+            }),
+        );
+
+        // ViewCommit 迭代 3: 6 条（前 5 + 最终 Ai 总结）
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ViewCommit(peri_acp_types::event_data::ViewCommit {
+                view_models: vec![
+                    ViewModel::UserBubble(UserBubbleData {
+                        text: "帮我修复".into(),
+                        content_hash: 1,
+                        is_system_reminder: false,
+                    }),
+                    ViewModel::AssistantBubble(AssistantBubbleData {
+                        text: "我先搜索一下。".into(),
+                        reasoning: None,
+                        tool_card_ids: vec!["tc-grep".into()],
+                        content_hash: 2,
+                    }),
+                    ViewModel::ToolCard(ToolCardData {
+                        tool_id: "tc-grep".into(),
+                        tool_name: "Grep".into(),
+                        input_summary: "pattern: fn foo".into(),
+                        output_summary: "parser.rs:42".into(),
+                        is_error: false,
+                        is_running: false,
+                        diff: None,
+                        content_hash: 3,
+                    }),
+                    ViewModel::AssistantBubble(AssistantBubbleData {
+                        text: "我来编辑。".into(),
+                        reasoning: None,
+                        tool_card_ids: vec!["tc-edit".into()],
+                        content_hash: 4,
+                    }),
+                    ViewModel::ToolCard(ToolCardData {
+                        tool_id: "tc-edit".into(),
+                        tool_name: "Edit".into(),
+                        input_summary: "path: parser.rs".into(),
+                        output_summary: "updated".into(),
+                        is_error: false,
+                        is_running: false,
+                        diff: None,
+                        content_hash: 5,
+                    }),
+                    // 症状 2 关键：最终 Ai 总结
+                    ViewModel::AssistantBubble(AssistantBubbleData {
+                        text: "修复完成！".into(),
+                        reasoning: None,
+                        tool_card_ids: vec![],
+                        content_hash: 6,
+                    }),
+                ],
+            }),
+        );
+        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+
+        // ── 验证最终状态 ──
+        let snapshot = VIEW_MODELS.state().read().clone();
+        assert_eq!(snapshot.committed.len(), 6);
+        assert!(snapshot.current_turn.is_empty());
+
+        let texts: Vec<&str> = snapshot
+            .committed
+            .iter()
+            .filter_map(|vm| match vm {
+                ViewModel::AssistantBubble(d) => Some(d.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 3);
+        assert!(
+            texts.contains(&"我先搜索一下。"),
+            "第一条 AI 文本丢失: {texts:?}"
+        );
+        assert!(
+            texts.contains(&"我来编辑。"),
+            "第二条 AI 文本丢失: {texts:?}"
+        );
+        assert!(texts.contains(&"修复完成！"), "最终 AI 总结丢失: {texts:?}");
+
+        assert!(
+            matches!(&snapshot.committed[5], ViewModel::AssistantBubble(_)),
+            "vm[5] 应为最终总结 AB，实际: {:?}",
+            &snapshot.committed[5]
+        );
+    }
 }
 
 /// 从 ACP SessionUpdate::Plan JSON 中提取 TodoItem 列表并写入 TODO_ITEMS atom。

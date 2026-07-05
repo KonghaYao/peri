@@ -33,6 +33,15 @@ use ratatui_kit::{
     },
 };
 
+// ── 滚动速度控制 ──────────────────────────────────────────────────────────
+
+/// 鼠标滚轮每格的滚动行数倍数。
+///
+/// ratatui-kit `ScrollViewState::handle_event` 每个 `ScrollDown`/`ScrollUp` 只移 1 行，
+/// 对于长对话来说太慢了。这自己接管鼠标滚动，乘以本倍数调用 `scroll_up`/`scroll_down`。
+/// 调大改滚轮速度，调整不需要重新编译其他模块（仅重编译本文件）。
+const SCROLL_MULTIPLIER: u16 = 3;
+
 // ── 本地行缓存（仅 RENDER_CACHE 内容变化时重建，滚动不触发）─────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,6 +318,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
             // ── 鼠标事件 ──
             if let Event::Mouse(mouse) = &event {
+                // MouseMove 事件频率极高（数百次/秒），不做任何处理直接忽略。
+                if matches!(mouse.kind, MouseEventKind::Moved) {
+                    return EventResult::Ignored;
+                }
                 // 判断鼠标是否在消息区内
                 if let Some(area) = area_rect {
                     let in_area = mouse_in_area(mouse.row, mouse.column, area);
@@ -361,8 +374,22 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     }
                 }
 
-                // 委托滚动事件给 ScrollViewState
-                scroll_state.write().handle_event(&event);
+                // 滚动事件：鼠标滚轮用乘数加速；其他鼠标事件委托 ScrollViewState
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => {
+                        for _ in 0..SCROLL_MULTIPLIER {
+                            scroll_state.write().scroll_down();
+                        }
+                    }
+                    MouseEventKind::ScrollUp => {
+                        for _ in 0..SCROLL_MULTIPLIER {
+                            scroll_state.write().scroll_up();
+                        }
+                    }
+                    _ => {
+                        scroll_state.write().handle_event(&event);
+                    }
+                }
                 auto_scroll.set(false);
                 return EventResult::Consumed;
             }
