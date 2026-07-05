@@ -79,6 +79,9 @@ pub struct SemanticTokens {
     pub diff: DiffTokens,
     pub loading: Color,
     pub thinking: Color,
+    pub model_info: Color,
+    pub bash_border: Color,
+    pub selected_fg: Color,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +269,9 @@ pub const DEFAULT_THEME: ThemeDefinition = ThemeDefinition {
         loading: LOADING,
         thinking: THINKING,
         accent: ACCENT,
+        model_info: Color::Rgb(160, 130, 95),
+        bash_border: Color::Rgb(253, 93, 177),
+        selected_fg: Color::Rgb(178, 185, 249),
     },
     component: ComponentTokens {
         message: MessageTokens {
