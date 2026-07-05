@@ -2,10 +2,10 @@
 
 ## v2 架构状态（2026-07-01）
 
-**当前状态**：v2 stages 单路径架构。v1 `ReActAgent` / `executor/` / `State` trait / `CompactMiddleware` / v1 `MessageQueue` 已物理删除。所有执行路径（main/SubAgent/Hook/Workflow）统一走 v2 `run_react_loop`。TUI MessagePipeline 为 `transcript + Option<PartialAiMessage>` 单一数据源，`commit_iteration` 替换语义。异步事件回路：push v2 queue → stages/end 或 TUI polling 续跑。TUI 双路径分发：state machine 纯函数路径 + keyboard legacy 兜底。B3 Cutover 已完成（`thin_handle` 物理删除）。Phase 2.6 step 7e.9 已完成——`view_messages` 字段退役。
+**当前状态**：v2 stages 单路径架构。v1 `ReActAgent` / `executor/` / `State` trait / `CompactMiddleware` / v1 `MessageQueue` 已物理删除。所有执行路径（main/SubAgent/Hook/Workflow）统一走 v2 `run_react_loop`。TUI 已迁移至 ratatui-kit 单路径（S1–S13 删除 ~18000 行 legacy 代码），详见下文。Phase 2.6 step 7e.9 已完成——`view_messages` 字段退役。
 
 **已完成**：P1–P5 + ultracode Workflow A/B1/B2/B3 + Workflow C（面板重写）+ Workflow D（类型隔离）+ Phase 2.6（全部）。
-⏳ **未完成**：Workflow E（P5 渲染重写，risk high）、B3 MigrateInput。
+**全部完成**：S1–S13 kit 单路径迁移（净减 ~18000 行）、I14–I23 生产级增量开发。
 
 ### v2 单路径架构
 
@@ -14,26 +14,28 @@
 **[TRAP]** ACP executor 末尾禁止加 `drain_for_end` 循环——消息物理丢失。idle 续跑由 TUI 负责。
 **[TRAP]** `run_session_loop` 末尾禁止加 `await_wake`——stdio/IDE 收不到完成响应。
 
-### TUI MessagePipeline
+### TUI 当前架构（ratatui-kit 单路径）
 
-`transcript + Option<PartialAiMessage>` 单一数据源。`commit_iteration` 用替换语义（全量快照，非 extend）。`build_tail_vms` 纯函数派生。
+S1–S13 已删除全部 legacy 路径（`runtime/main_loop`、`state_machine/`、`command/`、`ui/`、`render/`、`event/`、`agent_ops/`），TUI 现在纯 kit 路径，详见 `peri-tui/CLAUDE.md`。
 
-**[TRAP]** `commit_iteration` / `restore_completed` 必须用替换语义——v2 的 `finalized_messages` 是全量快照，extend 会让 transcript 翻倍累积。
-**[TRAP]** `TurnCommitted` 在 `in_subagent() == true` 时必须直接返回 None——子 Agent 提交不污染父 Agent transcript。
+核心数据流：`ViewModelsSnapshot { committed: Arc<[ViewModel]>, current_turn: Arc<[ViewModel]> }` 单一数据源。`RENDER_CACHE` atom 存储 `render_bridge` 预计算的 `Vec<Line<'static>>` + `wrap_map`（WrappedLineInfo 视觉行映射），message_area 基于 `wrap_map` 二分查找做视口裁剪。`content_hash` 增量检测避免全量重建。
 
-### TUI 双路径事件分发
+**[TRAP]** `RENDER_CACHE` 与 `VIEW_MODELS` 分离：render_bridge 异步预计算 Line，message_area 仅从 RENDER_CACHE 取用——渲染层不直接 touch ViewModel。
+
+### TUI 渲染管道
 
 ```
-TuiEvent → state_machine::handle (纯函数) → (State, Vec<Effect>)
-        → keyboard::handle_key_event (兜底)
-        → 合并去重 → 执行 Effects → 渲染
+ACP 事件 → acp_notifier → acp_bridge → dispatch_and_notify → VIEW_MODELS atom 写入
+                                                                    ↓
+                                        render_bridge (独立 tokio task) → RENDER_CACHE atom
+                                                                    ↓
+                              message_area (ratatui-kit ScrollView + 视口裁剪)
 ```
 
-Effect 枚举 26 变体（Render/SubmitMessage/PollAgent/AdvanceSpinner/Scroll/MouseTextarea*/SendToAcp/CopyToClipboard/PasteText/ShowNotification/UpdateConfig/SwitchSession/OpenPanel/ClosePanel/CycleModel/CycleProvider/CyclePermissionMode/FocusBgBar/ToggleDiff/PollWorkflow/ClearTextSelection/PushSystemNote/MemoryPanelOpenEditor/Quit）。
+render_bridge 监听 ACP 事件 + 宽度变化，预计算每条 ViewModel 的 `Vec<Line<'static>>` + `WrappedLineInfo`（视觉行映射），写入 `RENDER_CACHE`。message_area 基于 `wrap_map` 做二分查找视口裁剪，只渲染可见行。
 
-**[TRAP]** `is_sm_handled_shortcut()` 必须与 `idle.rs` 的 Ctrl+Char 分支保持同步。
-**[TRAP]** `keyboard_collector.rs` 禁止 `tokio::select!` 竞态 `spawn_blocking` 和 tick——事件永久丢失。修复：持久化 task → mpsc → `recv()`。
-**[TRAP]** ratatui-kit 事件边界：消息区只处理鼠标滚轮 `Event::Mouse(MouseEventKind::Scroll*)`，编辑区只处理键盘编辑/导航事件。不要让消息区消费 `KeyCode::Up/Down` 来模拟滚动；滚轮必须靠 `EnableMouseCapture` 进入 Mouse 通道。`InputArea` 是手写 textarea，Up/Down 应先做多行光标上下移动，只有在首/末行时才考虑 history fallback。
+**[TRAP]** `/clear` 命令必须同步重置 `RENDER_CACHE`，否则旧缓存残留。
+**[TRAP]** ratatui-kit 事件边界：消息区只处理鼠标滚轮 `Event::Mouse(MouseEventKind::Scroll*)`，编辑区只处理键盘编辑/导航事件。`InputArea` Up/Down 应先做多行光标移动，只在首/末行时才 history fallback。
 
 ### ratatui-kit overlay 白屏教训
 
@@ -91,10 +93,11 @@ peri-middlewares/src/agents_md/    # CLAUDE.md 加载（frozen 透传终点）
 peri-acp/src/session/executor.rs  # execute_prompt() 统一入口
 peri-acp/src/prompt/mod.rs        # build_system_prompt() + __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__
 peri-acp/src/event/{router,mapper,view_mapper}.rs  # ACP 事件 → ViewModel 映射
-peri-tui/src/runtime/main_loop.rs  # TUI 主循环（双路径分发）
-peri-tui/src/state_machine/       # State 4 变体 + ViewStore + CurrentTurn + InputState
-peri-tui/src/app/agent_ops/       # Agent 事件处理
-peri-tui/src/render/view_render.rs  # V2 ViewModel 渲染
+peri-tui/src/kit/entry.rs  # TUI 入口（单路径 run_kit_fullscreen）
+peri-tui/src/kit/acp_bridge.rs  # BridgeState → Atom 写入
+peri-tui/src/kit/render_bridge.rs  # 渲染预计算（Vec<Line> + wrap_map）
+peri-tui/src/kit/view_render.rs  # ViewModel → ratatui Line 转换
+peri-tui/src/kit/message_area.rs  # 消息区（ScrollView + 视口裁剪 + Todo）
 peri-acp/prompts/sections/        # 14 个系统提示词段落（已从 peri-tui 迁入，归属 ACP 层）
 ```
 
