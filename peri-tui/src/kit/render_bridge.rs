@@ -54,7 +54,7 @@ pub fn spawn_render_bridge(
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut width: usize = 80;
+        let mut last_resize_width: usize = 80;
         let mut last_committed_ptr: usize = 0;
         let mut last_committed_len: usize = 0;
         let mut last_ct_ptr: usize = 0;
@@ -69,9 +69,9 @@ pub fn spawn_render_bridge(
                 _ = shutdown.cancelled() => break,
                 Some(new_width) = resize_rx.recv() => {
                     let new_width = usize::from(new_width).max(1);
-                    if new_width != width {
-                        width = new_width;
-                        rebuild_all(width, &mut cache, &mut last_committed_ptr, &mut last_committed_len, &mut last_ct_ptr).await;
+                    if new_width != last_resize_width {
+                        last_resize_width = new_width;
+                        rebuild_all(last_resize_width, &mut cache, &mut last_committed_ptr, &mut last_committed_len, &mut last_ct_ptr).await;
                         // 宽度变化后所有 entries 已重建，更新 hash 缓存
                         let snapshot = VIEW_MODELS.state().read().clone();
                         msg_hashes = extract_hashes(&snapshot.committed);
@@ -105,7 +105,7 @@ pub fn spawn_render_bridge(
                             msg_hashes.clear();
                             msg_lines_cache.clear();
                             cache.entries.clear();
-                            rebuild_entries(&mut cache.entries, &snapshot.committed, &snapshot.current_turn, width).await;
+                            rebuild_entries(&mut cache.entries, &snapshot.committed, &snapshot.current_turn, last_resize_width).await;
                         } else if stable > 0 && snapshot.committed.len() >= msg_hashes.len() {
                             // 仅追加变化部分——只对 stable.. 范围做 markdown 解析
                             cache.entries.retain(|(key, _)| !matches!(key, VmKey::CurrentTurn(_)));
@@ -116,29 +116,29 @@ pub fn spawn_render_bridge(
                             append_entries(
                                 &mut cache.entries,
                                 &snapshot.committed[stable..],
-                                width,
+                                last_resize_width,
                                 stable,
                                 true,
                             ).await;
-                            rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, width).await;
+                            rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, last_resize_width).await;
                         } else if committed_len > last_committed_len && cache.entries.len() >= last_committed_len {
                             // 原有增量路径
                             cache.entries.retain(|(key, _)| !matches!(key, VmKey::CurrentTurn(_)));
                             append_entries(
                                 &mut cache.entries,
                                 &snapshot.committed[last_committed_len..],
-                                width,
+                                last_resize_width,
                                 last_committed_len,
                                 true,
                             ).await;
-                            rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, width).await;
+                            rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, last_resize_width).await;
                         } else {
-                            rebuild_entries(&mut cache.entries, &snapshot.committed, &snapshot.current_turn, width).await;
+                            rebuild_entries(&mut cache.entries, &snapshot.committed, &snapshot.current_turn, last_resize_width).await;
                         }
 
                         msg_hashes = new_hashes;
                     } else if ct_ptr != last_ct_ptr {
-                        rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, width).await;
+                        rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, last_resize_width).await;
                     }
 
                     rebuild_cumulative_heights(&mut cache);
@@ -149,7 +149,7 @@ pub fn spawn_render_bridge(
                         .flat_map(|(_, entry)| entry.lines.iter())
                         .cloned()
                         .collect();
-                    cache.wrap_map = build_wrap_map(&all_lines, width as u16);
+                    cache.wrap_map = build_wrap_map(&all_lines, last_resize_width as u16);
                     *RENDER_CACHE.state().write() = cache.clone();
                     last_committed_ptr = committed_ptr;
                     last_committed_len = committed_len;
