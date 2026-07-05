@@ -16,8 +16,8 @@ use ratatui::{
 use crate::kit::tool_display;
 
 use peri_acp_types::view_model::{
-    CollapsedGroupData, DiffBlock, DividerData, HunkLineKind, NoteLevel, ReasoningBlock,
-    SubAgentGroupData, ViewModel,
+    AskUserBlockData, CollapsedGroupData, DiffBlock, DividerData, HunkLineKind, NoteLevel,
+    ReasoningBlock, SubAgentGroupData, ViewModel,
 };
 
 use crate::kit::theme;
@@ -104,6 +104,7 @@ pub fn render_v2_vm(vm: &ViewModel, width: usize, diff_visible: bool) -> Vec<Lin
         ViewModel::SubAgentGroup(data) => render_subagent_group(data, width, diff_visible),
         ViewModel::CollapsedGroup(data) => render_collapsed_group(data),
         ViewModel::Divider(data) => render_divider(data),
+        ViewModel::AskUserBlock(data) => render_ask_user_block(data),
     }
 }
 
@@ -376,6 +377,23 @@ fn compact_output_lines(text: &str, max_lines: usize, max_chars: usize) -> Vec<S
 
 fn render_diff_block(diff: &DiffBlock) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
+
+    // Early return: binary file
+    if diff.is_binary {
+        return vec![Line::from(Span::styled(
+            format!("  Binary {} - cannot display diff", diff.path),
+            Style::default().fg(semantic.text.dim),
+        ))];
+    }
+
+    // Early return: diff too large
+    if diff.is_too_large {
+        return vec![Line::from(Span::styled(
+            format!("  Diff too large for {} - changes not displayed", diff.path),
+            Style::default().fg(semantic.text.dim),
+        ))];
+    }
+
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // File path header
@@ -394,6 +412,10 @@ fn render_diff_block(diff: &DiffBlock) -> Vec<Line<'static>> {
         ),
     ]));
 
+    // New file cap: show at most 6 content lines
+    let hunk_line_limit: usize = if diff.is_new_file { 6 } else { usize::MAX };
+    let mut total_hunk_lines = 0usize;
+
     for hunk in &diff.hunks {
         // Hunk header
         lines.push(Line::from(vec![Span::styled(
@@ -402,6 +424,9 @@ fn render_diff_block(diff: &DiffBlock) -> Vec<Line<'static>> {
         )]));
 
         for hunk_line in &hunk.lines {
+            if total_hunk_lines >= hunk_line_limit {
+                break;
+            }
             let (prefix, color, bg_color) = match hunk_line.kind {
                 HunkLineKind::Add => ("+", semantic.diff.add, Some(semantic.diff.add_bg)),
                 HunkLineKind::Del => ("-", semantic.diff.remove, Some(semantic.diff.remove_bg)),
@@ -416,6 +441,23 @@ fn render_diff_block(diff: &DiffBlock) -> Vec<Line<'static>> {
                 Span::styled(prefix.to_string(), line_style),
                 Span::styled(hunk_line.text.clone(), line_style),
             ]));
+            total_hunk_lines += 1;
+        }
+
+        if total_hunk_lines >= hunk_line_limit {
+            let skipped = diff
+                .hunks
+                .iter()
+                .map(|h| h.lines.len())
+                .sum::<usize>()
+                .saturating_sub(hunk_line_limit);
+            if skipped > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("  ... {} more lines not shown", skipped),
+                    Style::default().fg(semantic.text.dim),
+                )));
+            }
+            break;
         }
     }
 
@@ -424,15 +466,77 @@ fn render_diff_block(diff: &DiffBlock) -> Vec<Line<'static>> {
 
 fn render_system_note(data: &peri_acp_types::view_model::SystemNoteData) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
-    let (icon, color) = match data.level {
-        NoteLevel::Info => ("•", semantic.text.muted),
-        NoteLevel::Warning => ("⚠", semantic.status.warning),
-        NoteLevel::Error => ("✖", semantic.status.error),
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    for line_text in data.text.lines() {
+        if line_text.starts_with('✻') {
+            // ✻ 开头行 — dim 色，无额外前缀
+            lines.push(Line::from(Span::styled(
+                line_text.to_string(),
+                Style::default().fg(semantic.text.dim),
+            )));
+        } else if line_text.starts_with('⎿') {
+            // ⎿ 开头行 — muted 色，无额外前缀
+            lines.push(Line::from(Span::styled(
+                line_text.to_string(),
+                Style::default().fg(semantic.text.muted),
+            )));
+        } else if line_text.starts_with("  ⎿") {
+            // 已缩进的 ⎿ — error 色（错误摘要行）
+            lines.push(Line::from(Span::styled(
+                line_text.to_string(),
+                Style::default().fg(semantic.status.error),
+            )));
+        } else {
+            // 其余行 — · 前缀 + 自动检测错误/警告
+            let color = if line_text.contains("❌")
+                || line_text.contains("失败")
+                || line_text.to_lowercase().contains("error")
+            {
+                semantic.status.error
+            } else if line_text.contains('⚠') || line_text.contains("已中断") {
+                semantic.status.warning
+            } else {
+                semantic.text.muted
+            };
+            let prefix = Span::styled("· ", Style::default().fg(semantic.text.dim));
+            let content = Span::styled(line_text.to_string(), Style::default().fg(color));
+            lines.push(Line::from(vec![prefix, content]));
+        }
+    }
+
+    lines
+}
+
+fn render_ask_user_block(data: &AskUserBlockData) -> Vec<Line<'static>> {
+    let semantic = theme::semantic();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    let title_color = if data.is_error {
+        semantic.status.error
+    } else {
+        semantic.status.success
     };
-    vec![Line::from(vec![Span::styled(
-        format!("{} {}", icon, &data.text),
-        Style::default().fg(color),
-    )])]
+    lines.push(Line::from(Span::styled(
+        "● User answered Peri's questions:",
+        Style::default().fg(title_color),
+    )));
+
+    for item in &data.items {
+        let prefix = Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim));
+        let item_color = if data.is_error {
+            semantic.status.error
+        } else {
+            semantic.text.muted
+        };
+        let content = Span::styled(
+            format!("{} → {}", item.header, item.answer),
+            Style::default().fg(item_color),
+        );
+        lines.push(Line::from(vec![prefix, content]));
+    }
+
+    lines
 }
 
 fn render_subagent_group(
@@ -743,6 +847,9 @@ mod tests {
             diff: Some(DiffBlock {
                 path: "bar.rs".into(),
                 hunks: vec![],
+                is_binary: false,
+                is_too_large: false,
+                is_new_file: false,
             }),
             content_hash: 0,
         });
@@ -806,6 +913,9 @@ mod tests {
                         new_no: Some(4),
                     }],
                 }],
+                is_binary: false,
+                is_too_large: false,
+                is_new_file: false,
             }),
             content_hash: 0,
         });
@@ -834,6 +944,9 @@ mod tests {
             diff: Some(DiffBlock {
                 path: "bar.rs".into(),
                 hunks: vec![],
+                is_binary: false,
+                is_too_large: false,
+                is_new_file: false,
             }),
             content_hash: 0,
         });

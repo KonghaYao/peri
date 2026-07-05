@@ -18,8 +18,9 @@
 //! | System                | SystemNote             | Info level                                 |
 
 use peri_acp_types::view_model::{
-    hash_str, AssistantBubbleData, DiffBlock, Hunk, HunkLine, HunkLineKind, NoteLevel,
-    ReasoningBlock, SubAgentGroupData, SystemNoteData, ToolCardData, UserBubbleData, ViewModel,
+    hash_str, AskUserBlockData, AskUserItem, AssistantBubbleData, DiffBlock, Hunk, HunkLine,
+    HunkLineKind, NoteLevel, ReasoningBlock, SubAgentGroupData, SystemNoteData, ToolCardData,
+    UserBubbleData, ViewModel,
 };
 use peri_agent::agent::compact::CONTINUATION_HINT;
 use peri_agent::messages::{BaseMessage, ContentBlock};
@@ -285,17 +286,28 @@ fn convert_tool(
         return convert_agent_tool(&tool_name, &input, &raw_content, is_error, tool_call_id);
     }
 
+    // AskUserQuestion → AskUserBlock
+    if tool_name == "AskUserQuestion" {
+        return convert_ask_user_tool(&input, &raw_content, is_error);
+    }
+
     // Build summaries (replicates tool_display helpers from TUI).
     let tool_name_str = tool_name.as_str();
     let input_summary = summarize_input(tool_name_str, &input);
     let output_summary = summarize_output(tool_name_str, &raw_content);
 
     // Diff for Write/Edit tools (successful only).
-    let diff = if is_error {
+    let mut diff = if is_error {
         None
     } else {
         build_diff_block(tool_name_str, &input)
     };
+
+    // Annotate diff with output-bound metadata (binary / too-large detection).
+    if let Some(ref mut d) = diff {
+        d.is_binary = raw_content.contains("Binary");
+        d.is_too_large = raw_content.contains("too large");
+    }
 
     let diff_path = diff.as_ref().map(|d| d.path.as_str()).unwrap_or("");
     let content_hash_input = format!(
@@ -367,6 +379,63 @@ fn convert_agent_tool(
         collapsed: !is_error, // expand on error so user sees the failure
         is_running: false,
         content_hash: hash_str(&format!("{}|{}|0|{}|false", agent_id, tool_name, !is_error)),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// AskUserQuestion → AskUserBlock conversion
+// ---------------------------------------------------------------------------
+
+fn convert_ask_user_tool(
+    input: &serde_json::Value,
+    raw_content: &str,
+    is_error: bool,
+) -> ViewModel {
+    let mut items = Vec::new();
+
+    // Extract questions from tool input: {"questions": [{"header": "...", "id": "..."}, ...]}
+    let questions: Vec<String> = input
+        .get("questions")
+        .and_then(|q| q.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|q| {
+                    q.get("header")
+                        .and_then(|h| h.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Try to pair answers from raw_content (user response text).
+    // Format is typically question-per-line with answers following.
+    let answers: Vec<&str> = raw_content.lines().filter(|l| !l.is_empty()).collect();
+
+    // Pair questions with answers by index match.
+    for (i, header) in questions.into_iter().enumerate() {
+        let answer = answers.get(i).map(|s| s.to_string()).unwrap_or_default();
+        items.push(AskUserItem { header, answer });
+    }
+
+    // If no structured questions found, emit a single item with raw content as answer.
+    if items.is_empty() {
+        items.push(AskUserItem {
+            header: "Questions".to_string(),
+            answer: raw_content.to_string(),
+        });
+    }
+
+    let content_hash = hash_str(&format!(
+        "askuser|{}|{}",
+        if is_error { "err" } else { "ok" },
+        raw_content.len(),
+    ));
+
+    ViewModel::AskUserBlock(AskUserBlockData {
+        items,
+        is_error,
+        content_hash,
     })
 }
 
@@ -483,9 +552,14 @@ fn build_diff_block(name: &str, input: &serde_json::Value) -> Option<DiffBlock> 
         return None;
     }
 
+    let is_new_file = name == "Write" || old_content.is_empty();
+
     Some(DiffBlock {
         path: file_path,
         hunks,
+        is_binary: false,
+        is_too_large: false,
+        is_new_file,
     })
 }
 

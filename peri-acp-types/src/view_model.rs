@@ -54,6 +54,7 @@ pub enum ViewModel {
     SubAgentGroup(SubAgentGroupData),
     CollapsedGroup(CollapsedGroupData),
     Divider(DividerData),
+    AskUserBlock(AskUserBlockData),
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +189,29 @@ pub struct DividerData {
 
 impl_partial_eq!(DividerData: label);
 
+/// AskUser question-answer block — rendered after user responds to AskUserQuestion tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskUserBlockData {
+    /// Question-answer pairs extracted from tool input/output.
+    pub items: Vec<AskUserItem>,
+    /// Whether any item indicates an error response.
+    pub is_error: bool,
+    /// 内容哈希——rebuild 时用于检测是否需重新渲染
+    #[serde(skip)]
+    pub content_hash: u64,
+}
+
+impl_partial_eq!(AskUserBlockData: items, is_error);
+
+/// A single question-answer pair in an AskUser block.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AskUserItem {
+    /// Question header text.
+    pub header: String,
+    /// User's answer text.
+    pub answer: String,
+}
+
 // ---------------------------------------------------------------------------
 // Shared helper types
 // ---------------------------------------------------------------------------
@@ -206,6 +230,15 @@ pub struct DiffBlock {
     /// File path the diff applies to.
     pub path: String,
     pub hunks: Vec<Hunk>,
+    /// Binary file -- cannot display diff.
+    #[serde(default)]
+    pub is_binary: bool,
+    /// Diff content exceeded safe size limit.
+    #[serde(default)]
+    pub is_too_large: bool,
+    /// New file (Write, or Edit with empty old_string) -- cap at 6 lines.
+    #[serde(default)]
+    pub is_new_file: bool,
 }
 
 /// A single diff hunk.
@@ -299,6 +332,9 @@ mod tests {
                         new_no: Some(4),
                     }],
                 }],
+                is_binary: false,
+                is_too_large: false,
+                is_new_file: false,
             }),
             content_hash: hash_str("tc-1|Edit|path: foo.rs|updated 3 lines|false|false|foo.rs"),
         });

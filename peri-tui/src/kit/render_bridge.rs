@@ -59,6 +59,10 @@ pub fn spawn_render_bridge(
         let mut last_committed_len: usize = 0;
         let mut last_ct_ptr: usize = 0;
         let mut cache = RenderCache::default();
+        // 上次 rebuild 时所有 committed ViewModel 的 content_hash 列表
+        let mut msg_hashes: Vec<u64> = Vec::new();
+        // 上次 rebuild 时每条消息的渲染行缓存（按消息索引）
+        let mut msg_lines_cache: Vec<Vec<ratatui::text::Line<'static>>> = Vec::new();
 
         loop {
             tokio::select! {
@@ -68,6 +72,10 @@ pub fn spawn_render_bridge(
                     if new_width != width {
                         width = new_width;
                         rebuild_all(width, &mut cache, &mut last_committed_ptr, &mut last_committed_len, &mut last_ct_ptr).await;
+                        // 宽度变化后所有 entries 已重建，更新 hash 缓存
+                        let snapshot = VIEW_MODELS.state().read().clone();
+                        msg_hashes = extract_hashes(&snapshot.committed);
+                        msg_lines_cache.clear();
                     }
                 }
                 Some(_event) = rx.recv() => {
@@ -88,7 +96,33 @@ pub fn spawn_render_bridge(
                     }
 
                     if committed_ptr != last_committed_ptr {
-                        if committed_len > last_committed_len && cache.entries.len() >= last_committed_len {
+                        // --- hash diff 优化：提取所有 committed VM 的 content_hash ---
+                        let new_hashes = extract_hashes(&snapshot.committed);
+                        let stable = prefix_stable_len(&new_hashes, &msg_hashes);
+
+                        if snapshot.committed.len() < msg_hashes.len() {
+                            // Thread 切换或 clear——清空所有历史缓存
+                            msg_hashes.clear();
+                            msg_lines_cache.clear();
+                            cache.entries.clear();
+                            rebuild_entries(&mut cache.entries, &snapshot.committed, &snapshot.current_turn, width).await;
+                        } else if stable > 0 && snapshot.committed.len() >= msg_hashes.len() {
+                            // 仅追加变化部分——只对 stable.. 范围做 markdown 解析
+                            cache.entries.retain(|(key, _)| !matches!(key, VmKey::CurrentTurn(_)));
+                            // 截断到 stable 位置（稳定前缀）
+                            while cache.entries.len() > stable {
+                                cache.entries.pop();
+                            }
+                            append_entries(
+                                &mut cache.entries,
+                                &snapshot.committed[stable..],
+                                width,
+                                stable,
+                                true,
+                            ).await;
+                            rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, width).await;
+                        } else if committed_len > last_committed_len && cache.entries.len() >= last_committed_len {
+                            // 原有增量路径
                             cache.entries.retain(|(key, _)| !matches!(key, VmKey::CurrentTurn(_)));
                             append_entries(
                                 &mut cache.entries,
@@ -101,6 +135,8 @@ pub fn spawn_render_bridge(
                         } else {
                             rebuild_entries(&mut cache.entries, &snapshot.committed, &snapshot.current_turn, width).await;
                         }
+
+                        msg_hashes = new_hashes;
                     } else if ct_ptr != last_ct_ptr {
                         rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, width).await;
                     }
@@ -162,6 +198,33 @@ fn log_ct_snapshot(snapshot: &crate::kit::atoms::ViewModelsSnapshot, label: &str
             );
         }
     }
+}
+
+/// 计算新旧 hash 列表的前缀稳定长度——第一个 hash 不同的位置。
+/// 返回 0 表示全部变化（或首次加载），返回 N 表示前 N 条消息可安全复用缓存。
+fn prefix_stable_len(new_hashes: &[u64], old_hashes: &[u64]) -> usize {
+    new_hashes
+        .iter()
+        .zip(old_hashes.iter())
+        .position(|(new_h, old_h)| new_h != old_h)
+        .unwrap_or_else(|| old_hashes.len().min(new_hashes.len()))
+}
+
+/// 从 ViewModel 列表中提取 content_hash 集合。
+fn extract_hashes(vms: &[peri_acp_types::view_model::ViewModel]) -> Vec<u64> {
+    use peri_acp_types::view_model::ViewModel;
+    vms.iter()
+        .map(|vm| match vm {
+            ViewModel::UserBubble(d) => d.content_hash,
+            ViewModel::AssistantBubble(d) => d.content_hash,
+            ViewModel::ToolCard(d) => d.content_hash,
+            ViewModel::SubAgentGroup(d) => d.content_hash,
+            ViewModel::CollapsedGroup(d) => d.content_hash,
+            ViewModel::SystemNote(d) => d.content_hash,
+            ViewModel::Divider(d) => d.content_hash,
+            ViewModel::AskUserBlock(d) => d.content_hash,
+        })
+        .collect()
 }
 
 async fn rebuild_all(
@@ -268,34 +331,11 @@ pub fn visual_height(lines: &[Line<'static>], width: usize) -> usize {
     rows.max(1)
 }
 
-/// 空行去重——连续空行只保留一个，移除末尾多余空行。
-/// peri-main 的 rebuild() 在拼接所有消息行后做此操作，确保 wrap_map 行号准确。
-pub fn dedup_lines(lines: &[Line<'static>]) -> Vec<Line<'static>> {
-    let mut result: Vec<Line<'static>> = Vec::with_capacity(lines.len());
-    for line in lines {
-        let is_empty = line.spans.is_empty() || line.spans.iter().all(|s| s.content.is_empty());
-        if is_empty
-            && result.last().map_or(false, |l: &Line| {
-                l.spans.is_empty() || l.spans.iter().all(|s| s.content.is_empty())
-            })
-        {
-            continue;
-        }
-        result.push(line.clone());
-    }
-    while result.last().map_or(false, |l| l.spans.is_empty()) {
-        result.pop();
-    }
-    result
-}
-
 /// 基于所有 lines 构建 wrap_map。
-/// 使用 ratatui Paragraph::line_count() 确保与真实渲染的 WordWrapper 完全一致（含 CJK 支持）。
 pub fn build_wrap_map(lines: &[Line<'static>], width: u16) -> Vec<WrappedLineInfo> {
-    let deduped = dedup_lines(lines);
-    let mut map = Vec::with_capacity(deduped.len());
+    let mut map = Vec::with_capacity(lines.len());
     let mut row: u16 = 0;
-    for (line_idx, line) in deduped.iter().enumerate() {
+    for (line_idx, line) in lines.iter().enumerate() {
         let text = Text::from(line.clone());
         let height = Paragraph::new(text)
             .wrap(Wrap { trim: false })
