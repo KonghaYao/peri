@@ -333,6 +333,16 @@ fn push_view_models(state: &mut BridgeState) {
     *VIEW_MODELS.state().write() = snapshot;
 }
 
+/// 由 acp_bridge 在 BRIDGE_RESET_COUNTER 复位时调用——
+/// 立即将空快照写入 VIEW_MODELS atom，防止其他 reader 读到旧 session 数据。
+pub fn push_view_models_for_reset() {
+    let snapshot = ViewModelsSnapshot {
+        committed: Arc::from([]),
+        current_turn: Arc::from([]),
+    };
+    *VIEW_MODELS.state().write() = snapshot;
+}
+
 /// 将 BridgeState 中的状态快照写入 ACP_STATE Atom。
 ///
 /// 仅在快照值变化时才写入——避免不必要的全树重渲染。

@@ -51,6 +51,9 @@ pub fn spawn_acp_bridge(
                                 state.has_view_commit = false;
                                 state.is_loading = false;
                                 state.popup_kind = None;
+                                // 立即推送空快照到 VIEW_MODELS atom——
+                                // 防止 render_bridge 在下一次事件到达前读到旧数据。
+                                acp_events::push_view_models_for_reset();
                                 tracing::info!(
                                     old = last_reset_counter,
                                     new = counter,
