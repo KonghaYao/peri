@@ -58,6 +58,7 @@ pub fn spawn_render_bridge(
         let mut last_committed_ptr: usize = 0;
         let mut last_committed_len: usize = 0;
         let mut last_ct_ptr: usize = 0;
+        let mut last_reset_counter: u64 = 0;
         let mut cache = RenderCache::default();
         // 上次 rebuild 时所有 committed ViewModel 的 content_hash 列表
         let mut msg_hashes: Vec<u64> = Vec::new();
@@ -79,6 +80,21 @@ pub fn spawn_render_bridge(
                     }
                 }
                 Some(_event) = rx.recv() => {
+                    // 检测 BRIDGE_RESET_COUNTER——acp_bridge 已清空 VIEW_MODELS，
+                    // render_bridge 同步清空缓存，避免用旧数据重建 RENDER_CACHE。
+                    let counter = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
+                    if counter != last_reset_counter {
+                        last_reset_counter = counter;
+                        cache = RenderCache::default();
+                        msg_hashes.clear();
+                        msg_lines_cache.clear();
+                        last_committed_ptr = 0;
+                        last_committed_len = 0;
+                        last_ct_ptr = 0;
+                        *RENDER_CACHE.state().write() = cache.clone();
+                        info!("render_bridge: cache cleared by BRIDGE_RESET_COUNTER");
+                    }
+
                     let Some(snapshot) = read_ready_snapshot(last_committed_ptr, last_committed_len, last_ct_ptr).await else {
                         info!("render_bridge: event dropped (VIEW_MODELS unchanged after 5 retries)");
                         continue;
