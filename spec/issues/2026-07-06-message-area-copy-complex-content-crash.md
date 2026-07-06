@@ -1,8 +1,9 @@
 # Message Area 复制操作导致 TUI 崩溃/卡死
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：高
 **创建日期**：2026-07-06
+**修复日期**：2026-07-06
 
 ## 问题描述
 
@@ -61,10 +62,148 @@
 | 2026-07-06 | — | Open | agent | 创建（初始崩溃现象） |
 | 2026-07-06 | Open | Open | agent | 追加现象 2：第二次复制必然卡死，Drag 中途 TUI 无响应，日志无 panic |
 | 2026-07-06 | Open | Open | agent | 追加探索记录：7 项尝试均未修复，记录 3 个剩余猜想及建议下一步 |
+| 2026-07-06 | Open | In Review | agent | 推测 PTY buffer 饱和，实施 ScrollUp/ScrollDown wake 节流（32ms） |
+| 2026-07-06 | In Review | In Review | agent | 节流未生效。用户反馈"单滚动不卡死，复制后才卡死"——彻底推翻 PTY 假设 |
+| 2026-07-06 | In Review | In Review | agent | **真正根因**：status_bar.rs:141 在 render body 中写 COPY_MESSAGE_UNTIL atom，违反 ratatui-kit 状态管理铁律（同 issue_2026-07-03-tui-double-slash-cpu-spike）。复制后 2s 过渡时 status_bar 检测到 now >= until 触发 atom write → wake → render → atom write 自激回路。修复：渲染层只读判断 now < until，移除 atom 写入。同时把 arboard 调用包到 std::thread::spawn 避免阻塞 tokio worker |
+| 2026-07-06 | In Review | Fixed | user | 用户验证：复制后连续滚动不再卡死，复制无延迟，提示正常消失。诊断埋点和基于错误假设的节流代码全部回滚 |
 
 ## 修复记录
 
-（由 fix-issue 或 issue-verify skill 追加，创建时留空）
+### 修复 v4（2026-07-06）：status_bar render body 写 atom 自激回路（真正根因）
+
+**真正根因**（再次推翻 v3 的 PTY 假设）：
+
+用户反馈："单滚动不卡死，复制后才卡死"。日志显示从启动到复制前用户滚动 1348 次都没问题，复制后约 2 秒的窗口内滚动也正常（处理了 107 个 ScrollUp 事件），**正好在 2 秒过期点**卡死。
+
+`status_bar.rs:141` 在 render body 中写入 atom：
+
+```rust
+if let Some(until) = *copy_until.read() {
+    if now < until {
+        // 显示"已复制 N 字符"
+    } else {
+        *copy_until.write() = None;   // ← render body 中写 atom！违反铁律
+    }
+}
+```
+
+时间线：
+```
+T+0.000s  Up(Left) → mark_copy_message 写 COPY_MESSAGE_UNTIL = T+2.000s
+T+0.535s  用户开始滚动,ScrollUp 持续到来
+T+0.535s ~ T+2.008s  正常处理 107 个 ScrollUp(节流后 21 次渲染),
+                      status_bar 始终走 now < until 分支(显示复制提示)
+T+2.008s  最后一个 ScrollUp event_hits=1492,日志中断
+T+2.008s ~ T+?  status_bar 第一次检测到 now >= until → 进入 else 分支
+                  → 写 atom = None → 触发 wake → render → 与组件生命周期交互
+                  → 形成 render → state write → render 自激回路 → TUI 卡死
+```
+
+这和 issue_2026-07-03-tui-double-slash-cpu-spike 是**完全相同的模式**：SlashCompletion 在 render body 写 SLASH_SELECTED_INDEX atom，在 slash_active 从 true→false 过渡时引发自激回路。
+
+CLAUDE.md 已明确写：
+> **[TRAP]** ratatui-kit render body 中禁止写 atom——render 期间任何 atom 写入会与组件生命周期交互形成 render → state write → render 自激回路。
+
+**为什么前 8 次失败**：所有尝试都在治理"事件/状态写入频率"和"渲染管线"，**没有触及 status_bar 这个违反铁律的写入点**。日志显示复制前 1348 次滚动正常,本来就该排除"高频滚动"假设。
+
+### 实施 v4
+
+#### 1. status_bar.rs：移除 render body 中的 atom 写入
+
+```rust
+// 修复前：
+if let Some(until) = *copy_until.read() {
+    if now < until { /* 显示提示 */ }
+    else { *copy_until.write() = None; }   // ← 自激源
+}
+
+// 修复后：只读判断
+let copy_active = copy_until.read().map_or(false, |until| now < until);
+if copy_active { /* 显示提示 */ }
+```
+
+atom 保留旧 `Some(until)`,但渲染层用 `now < until` 做只读判断。下次 `mark_copy_message` 用新 `Instant` 覆盖 atom,无副作用。
+
+#### 2. message_area.rs：arboard 调用包到 std::thread::spawn
+
+```rust
+fn copy_selected_text_to_clipboard(text: String) {
+    std::thread::spawn(move || {
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            let _ = clipboard.set_text(text);
+        }
+    });
+}
+```
+
+原注释"在 tokio 主任务中运行"是**错误前提**——tokio multi-thread runtime 的 worker **不是**主线程,主线程在 `block_on` 等待。CLAUDE.md 明确要求剪贴板等阻塞 I/O 用 `std::thread::spawn`。这一项解释了 Up(Left) 后的 535ms 静默期(arboard 同步调用阻塞 tokio worker)。
+
+### 待用户验证
+
+1. 复制后立即连续滚动——是否仍卡死?(应不再卡死)
+2. 复制时是否有可感知的延迟?(应消失,arboard 不再阻塞)
+3. "已复制 N 字符"提示是否在 2 秒后正常消失?(应正常)
+
+---
+
+### 修复 v3（2026-07-06，已被 v4 推翻）：滚轮 wake 节流
+
+**真正根因**（推翻 select! race 假设）：
+
+`ratatui-kit` `render_loop` 在 `tokio` worker 上单线程运行，`self.render(terminal)` 调用 `terminal.draw` 同步写 stdout。macOS 鼠标滚轮高频事件（≈100-125Hz）让 crossterm `VecDeque` 无限积压，ratatui-kit 每个 ScrollUp 触发一次完整渲染循环：
+
+```
+ScrollUp 每 8ms 到达（crossterm 内部缓冲无上限）
+  → ratatui-kit select 命中 Right(next_event) → dispatch
+  → scroll_state.write() 触发 wake
+  → 回到 select 顶 → render() → terminal.draw() → stdout.write_all()
+  → PTY buffer (macOS ~64KB) 渐满
+  → stdout.write_all 阻塞（系统调用同步阻塞 tokio worker）
+  → 渲染永远赶不上事件产生速度 → PTY 永久饱和
+  → worker 在 stdout write 中阻塞，tracing 也无法在同线程执行
+  → 日志突然中断，TUI 无响应，需要外部 kill
+```
+
+**关键日志证据**（`.tmp/agent-tui.log`，2026-07-06T12:30:27-28）：
+- `next_event` 命中 216 次，`wait Ready` 命中 189 次（同步交替）
+- 事件间隔稳定 8-17ms
+- 日志在 `event_hits=216 wait_hits=189` 处突然中断，**无 panic、无 shutdown**
+- 说明 worker 被同步系统调用阻塞，进程仍活但无响应
+
+**为什么 7 次失败**：上一位程序员的所有 7 次尝试都在治理"事件/状态写入频率"，没有触及渲染管线的 stdout 阻塞。
+
+### 实施（message_area.rs）
+
+**节流策略**：ScrollUp/ScrollDown 持续累积到 `scroll_state`（用 `write_no_update` 不触发 wake），每帧 wake 限频到 ≥ 32ms 间隔：
+
+```rust
+const SCROLL_WAKE_THROTTLE: Duration = Duration::from_millis(32);
+
+// use_state 增加：
+let scroll_wake_at = hooks.use_state(|| None::<Instant>);
+
+// mouse handler 闭包内 ScrollUp/ScrollDown：
+let now = Instant::now();
+let should_wake = scroll_wake_at_handler
+    .read()
+    .as_ref()
+    .map_or(true, |t| now.duration_since(*t) >= SCROLL_WAKE_THROTTLE);
+scroll_state_handler.write_no_update().scroll_up();  // 累积但不 wake
+if should_wake {
+    *scroll_wake_at_handler.write() = Some(now);     // 触发渲染
+}
+```
+
+### 已知遗留
+
+1. **用户停止滚动后画面可能落后 1-2 行**：最后一次节流跳过的 wake 不会被消费，但下次任何交互（mouse Moved、键盘）触发 message_area re-render 时会自动修正。
+2. **第一次复制场景仍可能有少量积压**：Drag 事件间隔（10-30ms）已比 ScrollUp 稀疏，未节流。如果用户复制后立即拖动复杂数千行内容，理论仍可能 PTY 饱和。本次未处理 Drag 节流以避免影响选中精度。
+
+### 待用户验证
+
+1. 第二次复制后连续滚动——是否仍卡死？
+2. 滚动体感是否流畅（32ms = ~31Hz 渲染）？如果不够流畅可调到 24ms（~41Hz）；如果仍卡死可调到 48ms（~20Hz）。
+3. 验证通过后回滚诊断埋点（fork `ratatui-kit` `tree.rs` + `Cargo.toml`，以及 message_area.rs 中 4 处 `tracing::info!`）。
 
 ---
 
@@ -123,3 +262,38 @@ ratatui-kit 的 `Tree::render_loop` 使用 `futures::select!{wait(), next_event(
 2. **验证心跳是否生效**：在 `RENDER_HEARTBEAT.set()` 处加 `tracing::info!`，确认心跳 task 存活且值在递增
 3. **验证 AppShell 是否收到 heartbeat wake**：在 `AppShell` 组件入口加 heartbeat counter 日志
 4. **测试最小复现**：在一个纯 ScrollView + 文本选区的 minimal app 中复现，排除项目代码干扰
+
+---
+
+## 诊断埋点 v1（2026-07-06，第二轮调查）
+
+**新发现**：ratatui-kit 0.7.2 fork（`KonghaYao/ratatui-kit@45b9b3a`）的 `render_loop` 使用 `futures::future::select`（非公平）。`select` 先 poll A（`wait()`），A 总 Ready 时 B（`next_event()`）永远不被 poll——crossterm 内部 buffer 鼠标事件积压但读不到。7 次失败修复都未触及根因，问题在架构层 race。
+
+**已埋点（临时，待复现日志回归根因后回滚）**：
+
+1. `~/.cargo/git/checkouts/ratatui-kit-57880b1120009d67/45b9b3a/crates/ratatui-kit/Cargo.toml`：加 `tracing = "0.1"` dep
+2. `~/.cargo/git/checkouts/ratatui-kit-57880b1120009d67/45b9b3a/crates/ratatui-kit/src/render/tree.rs`：在 `select!` 两个分支加 `tracing::info!`，记录 `wait_hits` / `event_hits` 计数器
+3. `peri-tui/src/kit/message_area.rs`：
+   - mouse 事件入口（line 419 附近）记录 `msg-area: mouse event`
+   - line_cache.key 变化（line 285 附近）记录 `msg-area: line_cache key changed` + `auto_scroll.set(true)`
+   - spinner advance（line 670 附近）记录 `msg-area: spinner advance`
+
+**复现步骤**：
+
+```bash
+# 启动（保证日志写到 .tmp/agent-tui.log）
+RUST_LOG_FILE=.tmp/agent-tui.log cargo run -p peri-tui
+
+# 复现：完成第一次复制 → 第二次拖拽中途卡死 → Ctrl+C kill 进程
+
+# 提供日志（末尾 500-1000 行最关键）
+tail -1000 .tmp/agent-tui.log
+```
+
+**预期诊断结论**：
+
+- 若日志显示 `select: wait Ready` 计数器每秒数百次增长，`select: next_event` 在 Drag 后停滞 → 确认 select! race，需修 fork 改 `tokio::select!`
+- 若 `msg-area: spinner advance` 在卡死期间持续刷屏 → 确认 spinner 自激循环未真正修复（c7207c37 仅加了壁钟节流，但 delta 总是 > 0 仍触发 wake）
+- 若 `msg-area: line_cache key changed` 频繁出现 → 某个 atom 在每次 render 后变化（VIEW_MODELS / TODO_ITEMS / ACP_STATE）
+
+**回滚**：直接 `git checkout` `~/.cargo/git/checkouts/ratatui-kit-57880b1120009d67/45b9b3a` 中的两个文件，并撤销 `peri-tui/src/kit/message_area.rs` 中的 4 处 `tracing::info!`。

@@ -180,10 +180,13 @@ fn visual_to_line_position(
 }
 
 fn copy_selected_text_to_clipboard(text: String) {
-    // 不 spawn 线程——handler 在 tokio 主任务中运行，AppKit 需要主线程。
-    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-        let _ = clipboard.set_text(text);
-    }
+    // [TRAP] arboard 是同步阻塞 I/O（macOS NSPasteboard），在 tokio worker 上调用会卡住
+    // render_loop 几百 ms。CLAUDE.md 要求剪贴板等阻塞 I/O 用 std::thread::spawn。
+    std::thread::spawn(move || {
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            let _ = clipboard.set_text(text);
+        }
+    });
 }
 
 fn mark_copy_message(char_count: usize) {
@@ -440,7 +443,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                         .unwrap_or((visual_row as usize, visual_col));
 
                         match mouse.kind {
-                            // 滚轮事件：委托给 ScrollViewState
+                            // 滚轮事件：直接 scroll_up/scroll_down（write 触发 wake）。
                             MouseEventKind::ScrollDown => {
                                 scroll_state.write().scroll_down();
                             }

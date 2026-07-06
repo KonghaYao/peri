@@ -120,26 +120,25 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let is_slash = *slash_active.read();
     let now = Instant::now();
 
-    // 复制提示优先于其他 hints
-    if let Some(until) = *copy_until.read() {
-        if now < until {
-            let char_count = *copy_count.read();
-            let hint = format!(" 已复制 {} 字符 ", char_count);
-            return element!(
-                View(
-                    flex_direction: Direction::Horizontal,
-                    width: Constraint::Fill(1),
-                    height: Constraint::Length(1),
-                    justify_content: Flex::Center,
-                ) {
-                    Text(text: Paragraph::new(
-                        Line::from(hint).fg(statusbar().text)
-                    ).centered())
-                }
-            );
-        } else {
-            *copy_until.write() = None;
-        }
+    // 复制提示优先于其他 hints。
+    // [TRAP] 只读 atom 判断过期——禁止在 render body 中写 atom（render→write→render 自激）。
+    // mark_copy_message 总是用新 Instant 覆盖 atom，旧 Some(until) 残留不影响下次显示。
+    let copy_active = copy_until.read().map_or(false, |until| now < until);
+    if copy_active {
+        let char_count = *copy_count.read();
+        let hint = format!(" 已复制 {} 字符 ", char_count);
+        return element!(
+            View(
+                flex_direction: Direction::Horizontal,
+                width: Constraint::Fill(1),
+                height: Constraint::Length(1),
+                justify_content: Flex::Center,
+            ) {
+                Text(text: Paragraph::new(
+                    Line::from(hint).fg(statusbar().text)
+                ).centered())
+            }
+        );
     }
 
     let hints = if is_popup {
