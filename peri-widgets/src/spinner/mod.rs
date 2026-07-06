@@ -113,6 +113,11 @@ impl SpinnerState {
         self.displayed_tokens
     }
 
+    /// 当前原始 token 计数（未经平滑追赶，等于最近一次 set_token_count 的值）。
+    pub fn token_count(&self) -> usize {
+        self.token_count
+    }
+
     /// 重置所有字段到初始状态
     pub fn reset(&mut self) {
         self.mode = SpinnerMode::Idle;

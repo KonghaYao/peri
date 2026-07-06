@@ -260,6 +260,11 @@ pub static RENDER_HEARTBEAT: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// 残留污染新 session 的消息区。
 pub static BRIDGE_RESET_COUNTER: AtomStatic<u64> = AtomStatic::new(|| 0);
 
+/// Spinner token 计数——由 acp_bridge 在收到 TokenUsage 事件时写入（input+output），
+/// MessageArea 的 build_footer_lines 读取后调用 `spinner_state.set_token_count(count)`
+/// 驱动平滑动画追赶，最终在 spinner 行右侧显示 `↓ X.Xk tokens`。
+pub static SPINNER_TOKEN_COUNT: AtomStatic<usize> = AtomStatic::new(|| 0);
+
 pub fn init_atoms() {
     PENDING_ATTACHMENTS.get_or_init(|| Handle::new(Vec::new()));
 }

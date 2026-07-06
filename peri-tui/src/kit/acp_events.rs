@@ -213,7 +213,9 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
 
         // ── §4.3 Status events ──
-        TokenUsage(_tu) => {
+        TokenUsage(tu) => {
+            *SPINNER_TOKEN_COUNT.state().write() =
+                (tu.input as usize).saturating_add(tu.output as usize);
             push_acp_state(state);
         }
         ToolCount(_tc) => {

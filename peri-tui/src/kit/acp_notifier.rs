@@ -80,9 +80,17 @@ fn forward_notification(
         AcpNotification::SessionUpdate { params, .. } => {
             handle_session_update(params);
         }
+        AcpNotification::AgentDone { .. } => {
+            let decoded = AcpEventData::TurnDone;
+            if let Err(e) = bridge_tx.send(decoded.clone()) {
+                warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping agent done");
+            }
+            if let Err(e) = render_bridge_tx.send(decoded) {
+                warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may keep current turn");
+            }
+        }
         // 暂未在 kit 路径处理——S5+ 接入 DTO 事件时再扩展
         AcpNotification::AgentEvent { .. }
-        | AcpNotification::AgentDone { .. }
         | AcpNotification::RequestPermission { .. }
         | AcpNotification::Elicitation { .. }
         | AcpNotification::PredictionReady { .. }
@@ -146,19 +154,20 @@ mod tests {
     fn spawn_test_notifier() -> (
         mpsc::UnboundedSender<AcpNotification>,
         mpsc::UnboundedReceiver<AcpEventData>,
+        mpsc::UnboundedReceiver<AcpEventData>,
         CancellationToken,
     ) {
         let (notif_tx, notif_rx) = mpsc::unbounded_channel::<AcpNotification>();
         let (bridge_tx, bridge_rx) = mpsc::unbounded_channel::<AcpEventData>();
-        let (render_bridge_tx, _render_bridge_rx) = mpsc::unbounded_channel::<AcpEventData>();
+        let (render_bridge_tx, render_bridge_rx) = mpsc::unbounded_channel::<AcpEventData>();
         let shutdown = CancellationToken::new();
         let _handle = spawn_kit_notifier(notif_rx, bridge_tx, render_bridge_tx, shutdown.clone());
-        (notif_tx, bridge_rx, shutdown)
+        (notif_tx, bridge_rx, render_bridge_rx, shutdown)
     }
 
     #[tokio::test]
     async fn test_unstable_event_text_chunk_forwarded() {
-        let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+        let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
 
         notif_tx
             .send(AcpNotification::UnstableEvent {
@@ -182,7 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unstable_event_unknown_dropped() {
-        let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+        let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
 
         notif_tx
             .send(AcpNotification::UnstableEvent {
@@ -205,7 +214,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_event_dropped_for_now() {
-        let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+        let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
 
         notif_tx
             .send(AcpNotification::AgentEvent {
@@ -229,8 +238,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_agent_done_forwards_turn_done_to_bridges() {
+        let (notif_tx, mut bridge_rx, mut render_bridge_rx, shutdown) = spawn_test_notifier();
+
+        notif_tx
+            .send(AcpNotification::AgentDone {
+                session_id: "s1".into(),
+            })
+            .unwrap();
+
+        let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 TurnDone");
+        assert!(matches!(bridge_event, AcpEventData::TurnDone));
+        let render_event = render_bridge_rx
+            .recv()
+            .await
+            .expect("render bridge 应收到 TurnDone");
+        assert!(matches!(render_event, AcpEventData::TurnDone));
+
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn test_channel_close_exits_cleanly() {
-        let (notif_tx, _bridge_rx, shutdown) = spawn_test_notifier();
+        let (notif_tx, _bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
 
         // 模拟 transport 断开：drop sender 让 recv() 返回 None
         drop(notif_tx);

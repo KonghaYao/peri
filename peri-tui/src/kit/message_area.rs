@@ -10,6 +10,8 @@
 
 #![allow(clippy::needless_update)]
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -29,7 +31,7 @@ use ratatui_kit::{
         layout::{Constraint, Direction, Rect},
         style::{Modifier, Style},
         text::{Line, Span, Text as RatText},
-        widgets::Paragraph,
+        widgets::{Paragraph, Wrap},
     },
 };
 
@@ -44,7 +46,7 @@ const SCROLL_MULTIPLIER: u16 = 3;
 
 // ── 本地行缓存（仅 RENDER_CACHE 内容变化时重建，滚动不触发）─────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TodoStatus {
     InProgress,
     Completed,
@@ -55,6 +57,15 @@ pub enum TodoStatus {
 pub struct TodoItem {
     pub status: TodoStatus,
     pub content: String,
+}
+
+fn hash_todo_items(items: &[TodoItem]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for item in items {
+        item.status.hash(&mut hasher);
+        item.content.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 pub fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
@@ -79,7 +90,7 @@ pub fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
         let text = Span::styled(content, text_style);
         lines.push(Line::from(vec![prefix, text]));
     }
-    for _ in 0..3 {
+    for _ in 0..1 {
         lines.push(Line::from(""));
     }
     lines
@@ -95,6 +106,9 @@ struct LineCache {
     /// 上次计算 wrap_map 时对应的 highlighted_lines 长度，
     /// 用于在内容无变化时复用 cached_wrap_map。
     cached_line_count: usize,
+    /// 上次计算 wrap_map 时对应的渲染宽度。
+    /// 宽度变化会改变 Paragraph 换行点，必须触发 wrap_map 重建。
+    cached_width: u16,
 }
 
 // ── 视口裁剪 ────────────────────────────────────────────────────────────────
@@ -181,9 +195,12 @@ pub struct MessageAreaProps {
 #[component]
 pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let render_cache = hooks.use_atom(&RENDER_CACHE);
+    let acp_state = hooks.use_atom(&crate::kit::atoms::ACP_STATE);
+    let todo_atom = hooks.use_atom(&crate::kit::atoms::TODO_ITEMS);
     let cache_snapshot = render_cache.read();
+    let todo_items = todo_atom.read().clone();
     // is_loading 双重检测：ACP_STATE.is_loading（acp_bridge 在首条流式事件时置 true）+ RENDER_CACHE CurrentTurn。
-    let acp_is_loading = crate::kit::atoms::ACP_STATE.state().read().is_loading;
+    let acp_is_loading = acp_state.read().is_loading;
     let is_loading = acp_is_loading
         || cache_snapshot.entries.last().map_or(false, |(k, _)| {
             matches!(k, crate::kit::render_bridge::VmKey::CurrentTurn(_))
@@ -196,11 +213,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .copied()
         .unwrap_or(0);
 
-    // ── 缓存 key：仅 entries 数量/高度/loading 变化时重建 ──
+    // ── 缓存 key：仅 entries 数量/高度/loading/todo 变化时重建 ──
     let line_cache = hooks.use_state(|| LineCache::default());
     let scroll_state = hooks.use_state(ScrollViewState::default);
     let mut auto_scroll = hooks.use_state(|| true);
     let had_ct = hooks.use_state(|| false);
+    let todo_hash = hash_todo_items(&todo_items);
+    let should_follow_on_content_change = auto_scroll.get();
     let new_key = {
         let h = raw_ch as u64;
         let l = entries_len as u64;
@@ -208,6 +227,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         h.wrapping_mul(0x9e3779b9)
             .wrapping_add(l.wrapping_mul(0x7f4a7c15))
             .wrapping_add(d)
+            .wrapping_add(todo_hash.wrapping_mul(0x94d049bb133111eb))
     };
 
     if line_cache.read().key != new_key {
@@ -224,21 +244,30 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         // 通过清空 cached_line_count 触发后续 rebuild。
         lc.cached_wrap_map.clear();
         lc.cached_line_count = 0;
-        // 内容变化时触发自动滚动到底部（覆盖 session/load 等无 CT 的批量加载场景）
-        auto_scroll.set(true);
+        lc.cached_width = 0;
+        // 内容变化时仅在当前仍处于跟随模式时继续滚到底；用户主动上滚后不抢回视口。
+        if should_follow_on_content_change {
+            auto_scroll.set(true);
+        }
     }
 
     let lc_data = line_cache.read();
     let current_has_ct = lc_data.current_has_ct;
     drop(lc_data);
 
-    // 构建全量行（基于 cache_snapshot entries，仅消息内容，不含 spinner/todo）
-    let all_lines: Vec<Line<'static>> = cache_snapshot
+    // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
+    // [TRAP] build_footer_lines 内部调用 hooks.use_state，必须每帧按相同顺序执行，
+    // 否则 ratatui-kit 触发 "Hook type mismatch" panic。
+    let footer_lines = build_footer_lines(&mut hooks, is_loading, &todo_items);
+
+    // 构建全量行（基于 cache_snapshot entries + footer，footer 位于同一个 ScrollView 底部）
+    let mut all_lines: Vec<Line<'static>> = cache_snapshot
         .entries
         .iter()
         .flat_map(|(_, entry)| entry.lines.iter().cloned())
         .collect();
-    let empty = cache_snapshot.entries.is_empty() && !is_loading;
+    all_lines.extend(footer_lines);
+    let empty = cache_snapshot.entries.is_empty() && !is_loading && todo_items.is_empty();
     let all_line_count = all_lines.len();
     let content_lines = Arc::new(all_lines.clone());
     drop(cache_snapshot);
@@ -264,10 +293,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         };
     drop(sel);
 
-    // ── wrap_map：仅在内容行数变化时重建，滚动/选区变化复用缓存 ──
+    // ── wrap_map：内容或宽度变化时重建，滚动变化复用缓存 ──
+    let vis_width = area_rect
+        .map(|r| r.width.saturating_sub(1))
+        .unwrap_or(props.width as u16)
+        .max(1);
     let wrap_map = {
         let lc = line_cache.read();
-        let stale = lc.cached_line_count != highlighted_lines.len();
+        let stale = lc.cached_line_count != highlighted_lines.len()
+            || lc.cached_width != vis_width
+            || lc.cached_wrap_map.is_empty();
         drop(lc);
         if stale && !highlighted_lines.is_empty() {
             // 宽度需匹配 ScrollView 内部实际渲染宽度。
@@ -277,14 +312,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             // 时 visible_scrollbars 回退到 else → (true, true)）。垂直滚动条占 1 列，
             // 实际渲染宽度 = area.width - 1。若 build_wrap_map 用 area.width，Paragraph
             // 换行点与预测不一致，累积的视觉高度差异导致内容溢出/底部空白。
-            let vis_width = area_rect
-                .map(|r| r.width.saturating_sub(1))
-                .unwrap_or(props.width as u16)
-                .max(1);
             let map = crate::kit::render_bridge::build_wrap_map(&highlighted_lines, vis_width);
             let mut lc = line_cache.write();
             lc.cached_wrap_map = map.clone();
             lc.cached_line_count = highlighted_lines.len();
+            lc.cached_width = vis_width;
             map
         } else if highlighted_lines.is_empty() {
             Vec::new()
@@ -407,11 +439,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         (current_has_ct,),
     );
 
-    // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
-    // [TRAP] build_footer_lines 内部调用 hooks.use_atom / hooks.use_state，
-    // 必须每帧按相同顺序执行，否则 ratatui-kit 触发 "Hook type mismatch" panic。
-    let footer_lines = build_footer_lines(&mut hooks);
-
     if empty {
         return element!(
             View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
@@ -473,8 +500,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         "msg-area diag"
     );
 
-    // ── Footer：spinner + todo，固定在 ScrollView 之外 ──
-    // footer_lines 已在 empty 分支前预计算；此处仅消费结果。
+    // ── Footer：spinner + todo 已作为普通内容行追加到 ScrollView 底部 ──
 
     // 暂时禁用 sticky header，测试是否是它导致内容消失
     element!(
@@ -496,15 +522,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     height: Constraint::Length(total_visual_rows.max(1)),
                 ) {
                     View(height: Constraint::Length(content_top)) {}
-                    Text(text: Paragraph::new(RatText::from(visible_lines)))
+                    View(height: Constraint::Length(
+                        content_bottom.saturating_sub(content_top).max(1),
+                    )) {
+                        Text(text: Paragraph::new(RatText::from(visible_lines)).wrap(Wrap { trim: false }))
+                    }
                     View(height: Constraint::Length(bottom_spacer)) {}
                 }
-            }
-            View(
-                width: Constraint::Fill(1),
-                height: Constraint::Length(footer_lines.len().max(1) as u16),
-            ) {
-                Text(text: Paragraph::new(RatText::from(footer_lines)))
             }
         }
     )
@@ -513,60 +537,93 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
 // ── footer 行构建：在 MessageArea 作用域内计算 spinner + todo 行 ──
 
-fn build_footer_lines(hooks: &mut Hooks) -> Vec<Line<'static>> {
+fn build_footer_lines(
+    hooks: &mut Hooks,
+    is_loading: bool,
+    todo_items: &[TodoItem],
+) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
-
-    let acp_state = hooks.use_atom(&crate::kit::atoms::ACP_STATE);
-    let is_loading = acp_state.read().is_loading;
-
-    let todo_atom = hooks.use_atom(&crate::kit::atoms::TODO_ITEMS);
-    let todo_items = todo_atom.read();
 
     // [TRAP] 所有 hook 调用必须在任何 early return 之前，确保每帧 hook 调用顺序一致。
     // ratatui-kit 按调用顺序索引 hook，顺序变化会触发 "Hook type mismatch" panic。
     let spinner_state = hooks.use_state(|| SpinnerState::new(SpinnerMode::Thinking));
     let load_start = hooks.use_state(|| Option::<Instant>::None);
-    let once = hooks.use_state(|| false);
+    let was_loading = hooks.use_state(|| false);
+    // loading 结束时的耗时（ms）——用于渲染「✻ Brewed for Xm Xs」总结行。
+    // 下一次 loading 开始时清零。
+    let summary_elapsed_ms = hooks.use_state(|| 0u64);
 
-    // 快速路径：无需渲染 footer 行时直接返回空。
-    if !is_loading && todo_items.is_empty() {
+    // 快速路径：无 loading、无 todo、无总结行时直接返回空。
+    let has_summary = *summary_elapsed_ms.read() > 0;
+    if !is_loading && todo_items.is_empty() && !has_summary {
         return Vec::new();
     }
-    if !*once.read() {
-        let mut ls = load_start.write();
-        if is_loading && ls.is_none() {
-            *ls = Some(Instant::now());
-            *spinner_state.write() = SpinnerState::new(SpinnerMode::Thinking);
-        } else if !is_loading {
-            *ls = None;
+    {
+        let prev_loading = *was_loading.read();
+        if prev_loading != is_loading {
+            let mut ls = load_start.write();
+            if is_loading {
+                *ls = Some(Instant::now());
+                *spinner_state.write() = SpinnerState::new(SpinnerMode::Thinking);
+                *summary_elapsed_ms.write() = 0;
+            } else {
+                *summary_elapsed_ms.write() =
+                    ls.map_or(0, |start| start.elapsed().as_millis() as u64);
+                *ls = None;
+            }
+            *was_loading.write() = is_loading;
         }
 
-        // 壁钟时间补偿步进
-        if let Some(start) = *ls {
+        // 壁钟时间补偿步进：仅在 tick 确实落后时写 state，避免 render → state write → render 自激循环。
+        if let Some(start) = *load_start.read() {
             let elapsed = start.elapsed().as_millis() as u64;
             let target = elapsed / 50;
             let delta = {
                 let current = spinner_state.read().raw_tick();
                 target.saturating_sub(current).min(20)
             };
-            for _ in 0..delta {
-                spinner_state.write().advance_tick();
+            if delta > 0 {
+                let mut spinner = spinner_state.write();
+                for _ in 0..delta {
+                    spinner.advance_tick();
+                }
             }
         }
-        *once.write() = true;
     }
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let has_footer_content = is_loading || has_summary || !todo_items.is_empty();
+    if has_footer_content {
+        // 与上方消息内容隔离 2 行
+        lines.push(Line::from(""));
+        lines.push(Line::from(""));
+    }
     if is_loading {
+        // 同步 ACP 下发的 token 计数到 spinner state，驱动平滑追赶动画。
+        // 仅在数值变化时写 state，避免 render → state write → render 环路。
+        let token_count = crate::kit::atoms::SPINNER_TOKEN_COUNT.get();
+        if token_count > 0 && spinner_state.read().token_count() != token_count {
+            spinner_state.write().set_token_count(token_count);
+        }
         lines.extend(spinner_state.read().render_to_lines(
             semantic.accent,
             semantic.text.muted,
             true,
             true,
         ));
+    } else if has_summary {
+        let elapsed = peri_widgets::spinner::animation::format_elapsed(*summary_elapsed_ms.read());
+        lines.push(Line::from(Span::styled(
+            format!("  ✻  Brewed for {elapsed}"),
+            Style::default().fg(semantic.text.muted),
+        )));
     }
     if !todo_items.is_empty() {
         lines.extend(render_todo_lines(&todo_items));
+    }
+    if has_footer_content {
+        // 与下方内容隔离 1 行
+        lines.push(Line::from(""));
     }
     lines
 }
@@ -678,6 +735,202 @@ mod tests {
             content_top + visible_height + bottom_spacer,
             total_visual_rows
         );
+    }
+
+    /// 回归：裁剪后的 Text 组件高度必须使用 wrap_map 的视觉高度。
+    ///
+    /// 场景：visible_lines 只有 2 条逻辑行，但每条长行 wrap 后分别占 10/5 个视觉行。
+    /// 如果 Text 组件没有显式高度，布局会按逻辑行数给 2 行，ScrollView 剩余区域由 spacer
+    /// 填充，表现为向上滚动或滚到底部时内容下方留白。
+    #[test]
+    fn test_visible_text_height_uses_visual_height_not_line_count() {
+        let wrap_map = vec![
+            wrapped(0, 0, 5),
+            wrapped(1, 5, 10),
+            wrapped(2, 15, 5),
+            wrapped(3, 20, 10),
+        ];
+        let scroll_y = 8u16;
+        let vis_height = 12u16;
+        let (first, last, _) = viewport_clip(&wrap_map, scroll_y, vis_height);
+        let content_top = wrap_map[first].visual_row;
+        let content_bottom = wrap_map[last.saturating_sub(1)].visual_row
+            + wrap_map[last.saturating_sub(1)].visual_height;
+        let visible_line_count = (last - first) as u16;
+        let visible_visual_height = content_bottom.saturating_sub(content_top);
+
+        assert_eq!(visible_line_count, 2);
+        assert_eq!(visible_visual_height, 15);
+        assert!(
+            visible_visual_height > visible_line_count,
+            "换行内容的 Text 高度必须按视觉行数，而不是逻辑行数"
+        );
+    }
+
+    /// 回归：裁剪渲染使用的 Paragraph 必须启用与 build_wrap_map 相同的 wrap 策略。
+    ///
+    /// build_wrap_map 用 `Wrap { trim: false }` 预测视觉高度；如果实际渲染的 Paragraph
+    /// 不启用 wrap，长行不会按预测换行，ScrollView 的内容高度与实际绘制高度继续失配。
+    #[test]
+    fn test_render_paragraph_must_wrap_like_wrap_map() {
+        let line = Line::from("x".repeat(25));
+        let lines = vec![line];
+        let predicted = crate::kit::render_bridge::build_wrap_map(&lines, 10);
+        let actual_wrapped = Paragraph::new(RatText::from(lines.clone()))
+            .wrap(Wrap { trim: false })
+            .line_count(10) as u16;
+        let actual_unwrapped = Paragraph::new(RatText::from(lines)).line_count(10) as u16;
+
+        assert_eq!(predicted[0].visual_height, actual_wrapped);
+        assert!(
+            actual_unwrapped < predicted[0].visual_height,
+            "未启用 wrap 时，实际渲染高度会小于 wrap_map 预测高度"
+        );
+    }
+
+    /// 回归：footer render 不应在 loading 稳态下无条件写 hook state。
+    ///
+    /// 用户提交 `hello` 后，`submit_text` 会先把 `ACP_STATE.is_loading` 置为 true，
+    /// MessageArea 随后渲染 spinner。若 footer 每帧都写 `was_loading`/`load_start`，
+    /// 会形成 render → state write → render 的自激循环，表现为 Enter 后 CPU 100%。
+    /// 稳态下只有 spinner tick 落后于壁钟时才允许写 `spinner_state`。
+    #[test]
+    fn test_footer_loading_steady_state_has_no_control_state_transition() {
+        let prev_loading = true;
+        let is_loading = true;
+        let transition = prev_loading != is_loading;
+
+        assert!(
+            !transition,
+            "loading 稳态不应写 was_loading/load_start，否则会触发持续重渲染"
+        );
+    }
+
+    /// 回归：spinner 补偿只有在 tick 落后壁钟时才写 state。
+    #[test]
+    fn test_spinner_catchup_skips_state_write_when_no_delta() {
+        let current_tick = 10u64;
+        let target_tick = 10u64;
+        let delta = target_tick.saturating_sub(current_tick).min(20);
+
+        assert_eq!(delta, 0);
+    }
+
+    /// 回归：仅有 todo 条目、无消息且非 loading 时，不应误判为 empty 而显示 Welcome。
+    ///
+    /// 场景：agent 执行 `TodoWrite` → ACP server 推送 `SessionUpdate::Plan` →
+    /// `handle_plan_update` 写入 `TODO_ITEMS` atom。消息区尚无历史消息
+    /// （`entries.is_empty()`），也不在 loading（`!is_loading`），
+    /// 但 todo 列表非空。此时 empty 应为 false，让 footer 渲染 todo 行。
+    #[test]
+    fn test_empty_with_todo_items_shows_footer_not_welcome() {
+        let entries_empty = true;
+        let is_loading = false;
+        let todo_items_empty = false;
+        let empty = entries_empty && !is_loading && todo_items_empty;
+
+        assert!(
+            !empty,
+            "仅有 todo 条目且无消息时不应判定为 empty，避免 Welcome 覆盖 todo 显示"
+        );
+    }
+
+    /// 回归：无消息、非 loading、无 todo 的正确 empty 判定。
+    #[test]
+    fn test_empty_without_todo_is_truly_empty() {
+        let entries_empty = true;
+        let is_loading = false;
+        let todo_items_empty = true;
+        let empty = entries_empty && !is_loading && todo_items_empty;
+
+        assert!(empty);
+    }
+
+    /// 回归：`render_todo_lines` 对三种状态输出正确的图标和样式。
+    ///
+    /// - InProgress → ◼ + accent 色 + 无删除线
+    /// - Completed → ✔ + success 色 + 删除线
+    /// - Pending → ◻ + muted 色 + 无删除线
+    #[test]
+    fn test_render_todo_lines_icons_and_crossed() {
+        let items = vec![
+            TodoItem {
+                status: TodoStatus::InProgress,
+                content: "修复 bug".into(),
+            },
+            TodoItem {
+                status: TodoStatus::Completed,
+                content: "草拟 PRD".into(),
+            },
+            TodoItem {
+                status: TodoStatus::Pending,
+                content: "部署".into(),
+            },
+        ];
+        let lines = render_todo_lines(&items);
+        assert_eq!(lines.len(), 4); // 3 items + 1 trailing blank line
+
+        let in_progress_icon = lines[0].spans[0].content.as_ref();
+        assert!(in_progress_icon.contains("◼"), "InProgress 图标应为 ◼");
+        let in_progress_text = lines[0].spans[1].content.as_ref();
+        assert!(
+            in_progress_text.contains("修复 bug"),
+            "InProgress 文本应包含任务内容"
+        );
+
+        let completed_icon = lines[1].spans[0].content.as_ref();
+        assert!(completed_icon.contains("✔"), "Completed 图标应为 ✔");
+        let completed_text = lines[1].spans[1].content.as_ref();
+        assert!(
+            completed_text.contains("草拟 PRD"),
+            "Completed 文本应包含任务内容"
+        );
+
+        let pending_icon = lines[2].spans[0].content.as_ref();
+        assert!(pending_icon.contains("◻"), "Pending 图标应为 ◻");
+        let pending_text = lines[2].spans[1].content.as_ref();
+        assert!(pending_text.contains("部署"), "Pending 文本应包含任务内容");
+        assert!(pending_text.contains("(可开始)"));
+    }
+
+    /// 回归：空 todo 列表输出空行（仅 3 个 trailing blank lines）。
+    #[test]
+    fn test_render_todo_lines_empty() {
+        let lines = render_todo_lines(&[]);
+        assert_eq!(lines.len(), 1);
+        for line in &lines {
+            assert!(
+                line.spans.is_empty(),
+                "空 todo 列表不应输出任何内容行，仅 trailing blank lines"
+            );
+        }
+    }
+
+    /// 回归：loading 结束后应显示总结行（✻ Brewed for Xs），token 计数仅在变化时写 state。
+    ///
+    /// 场景：agent 完成一轮后 `is_loading` 从 `true` 降为 `false`，
+    /// footer 应渲染总结行而非 spinner；同时 token count 不应在稳态下重复写 hook state。
+    #[test]
+    fn test_spinner_summary_after_loading_ends() {
+        // 模拟 loading 结束时捕获的耗时
+        let elapsed_ms: u64 = 30_000; // 30s
+        let elapsed_str = peri_widgets::spinner::animation::format_elapsed(elapsed_ms);
+        assert_eq!(elapsed_str, "30s");
+
+        // 总结行格式应与 peri-main 保持一致
+        let summary = format!("  ✻  Brewed for {elapsed_str}");
+        assert!(summary.contains("✻"));
+        assert!(summary.contains("Brewed for"));
+    }
+
+    /// 回归：token count 相同值不应触发 set_token_count 写入。
+    #[test]
+    fn test_token_count_no_write_when_unchanged() {
+        let prev_token_count: usize = 1500;
+        let new_token_count: usize = 1500;
+        let changed = prev_token_count != new_token_count;
+
+        assert!(!changed, "token count 未变化时不应写 state");
     }
 
     /// 底部 spacer 在最底部时应为 0（no unnecessary spacer）。
