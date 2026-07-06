@@ -163,6 +163,7 @@ async fn tick_once(
                 .into_iter()
                 .filter(|m| !m.hidden) // 主列表不显示子 agent
                 .filter(|m| m.message_count > 0) // 不显示无消息的空 thread
+                .filter(|m| m.cwd == src.cwd) // 只显示当前工作目录的 thread
                 .map(|m| ThreadSummary {
                     id: m.id.clone(),
                     title: m.title.clone(),
