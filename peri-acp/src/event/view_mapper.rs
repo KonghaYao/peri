@@ -447,24 +447,70 @@ fn convert_ask_user_tool(
 // format_tool_args, summarize_output) without depending on the TUI crate.
 
 /// Produce a one-line summary of a tool's JSON input.
-fn summarize_input(_name: &str, input: &serde_json::Value) -> String {
-    match input {
-        serde_json::Value::Object(map) => {
-            if let Some(path) = map.get("path").or_else(|| map.get("file_path")) {
-                return format!("path: {}", truncate_text(&path.to_string(), 120));
+fn summarize_input(name: &str, input: &serde_json::Value) -> String {
+    let obj = match input {
+        serde_json::Value::Object(map) => map,
+        other => return truncate_chars(&other.to_string(), 120),
+    };
+    let str_val = |key: &str| -> String {
+        obj.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    match name {
+        // ── 无前缀，文件路径不截断 ──
+        "Read" | "Write" | "Edit" => {
+            let p = str_val("file_path");
+            if p.is_empty() {
+                str_val("path")
+            } else {
+                p
             }
-            if let Some(query) = map.get("query").or_else(|| map.get("pattern")) {
-                return format!("query: {}", truncate_text(&query.to_string(), 120));
-            }
-            if let Some(cmd) = map.get("command") {
-                return format!("cmd: {}", truncate_text(&cmd.to_string(), 120));
-            }
-            if let Some((k, v)) = map.iter().next() {
-                return format!("{}: {}", k, truncate_text(&v.to_string(), 100));
-            }
-            "(empty input)".to_string()
         }
-        other => truncate_text(&other.to_string(), 120),
+        // ── 无前缀，命令截断 400 ──
+        "Bash" => truncate_chars(&str_val("command"), 400),
+        // ── 有前缀 pattern:，pattern 截断 200 ──
+        "Glob" | "Grep" => {
+            let p = str_val("pattern");
+            let p = if p.is_empty() { str_val("query") } else { p };
+            format!("pattern: {}", truncate_chars(&p, 200))
+        }
+        // ── "operation folder_path"，不截断 ──
+        "folder_operations" => {
+            let op = str_val("operation");
+            let fp = str_val("folder_path");
+            format!("{} {}", op, fp)
+        }
+        // ── query: 截断 60 ──
+        "WebSearch" => {
+            format!("query: {}", truncate_chars(&str_val("query"), 60))
+        }
+        // ── url: 不截断 ──
+        "WebFetch" => {
+            format!("url: {}", str_val("url"))
+        }
+        // ── 空字符串（文档无参数）──
+        "TodoWrite" => String::new(),
+        // ── task_id 截断 12 ──
+        "AgentResult" => truncate_chars(&str_val("task_id"), 12),
+        // ── file_path 不截断 ──
+        "artifact" => str_val("file_path"),
+        // ── operation 截断 40 ──
+        "LSP" => truncate_chars(&str_val("operation"), 40),
+        // ── tool_name 截断 40 ──
+        "ExecuteExtraTool" => truncate_chars(&str_val("tool_name"), 40),
+        // ── query 截断 40 ──
+        "SearchExtraTools" => truncate_chars(&str_val("query"), 40),
+        // ── 兜底：第一个非空字段，截断 100 ──
+        _ => {
+            if let Some((k, v)) = obj.iter().next() {
+                let raw = v.as_str().unwrap_or("");
+                format!("{}: {}", k, truncate_chars(raw, 100))
+            } else {
+                "(empty input)".to_string()
+            }
+        }
     }
 }
 
@@ -505,6 +551,18 @@ fn summarize_output(name: &str, output: &str) -> String {
 
 /// Truncate text to `max_chars` Unicode code points (CJK-safe).
 fn truncate_text(s: &str, max_chars: usize) -> String {
+    let len = s.chars().count();
+    if len <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{}...", truncated)
+    }
+}
+
+/// Truncate text to `max_chars` Unicode code points (CJK-safe).
+/// Same logic as `truncate_text`, distinct name for tool-input truncation.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
     let len = s.chars().count();
     if len <= max_chars {
         s.to_string()
@@ -925,7 +983,7 @@ mod tests {
             ViewModel::ToolCard(d) => {
                 assert_eq!(d.tool_id, "tc-1");
                 assert_eq!(d.tool_name, "Read");
-                assert_eq!(d.input_summary, "path: \"/tmp/foo.rs\"");
+                assert_eq!(d.input_summary, "/tmp/foo.rs");
                 assert_eq!(d.output_summary, "1 lines");
                 assert!(!d.is_error);
                 assert!(d.diff.is_none());
@@ -1089,21 +1147,111 @@ mod tests {
     }
 
     #[test]
-    fn test_summarize_input_path() {
-        let input = serde_json::json!({"path": "/tmp/foo.rs", "offset": 10});
-        assert_eq!(summarize_input("Read", &input), "path: \"/tmp/foo.rs\"");
+    fn test_summarize_input_read() {
+        let input = serde_json::json!({"file_path": "/tmp/foo.rs", "offset": 10});
+        assert_eq!(summarize_input("Read", &input), "/tmp/foo.rs");
     }
 
     #[test]
-    fn test_summarize_input_query() {
-        let input = serde_json::json!({"query": "TODO", "glob": "*.rs"});
-        assert_eq!(summarize_input("Grep", &input), "query: \"TODO\"");
+    fn test_summarize_input_read_fallback_path() {
+        let input = serde_json::json!({"path": "/tmp/bar.rs"});
+        assert_eq!(summarize_input("Read", &input), "/tmp/bar.rs");
     }
 
     #[test]
-    fn test_summarize_input_command() {
-        let input = serde_json::json!({"command": "cargo build"});
-        assert_eq!(summarize_input("Bash", &input), "cmd: \"cargo build\"");
+    fn test_summarize_input_write() {
+        let input = serde_json::json!({"file_path": "src/main.rs"});
+        assert_eq!(summarize_input("Write", &input), "src/main.rs");
+    }
+
+    #[test]
+    fn test_summarize_input_edit() {
+        let input = serde_json::json!({"file_path": "lib.rs", "old_string": "x"});
+        assert_eq!(summarize_input("Edit", &input), "lib.rs");
+    }
+
+    #[test]
+    fn test_summarize_input_bash() {
+        let input = serde_json::json!({"command": "cargo build --release"});
+        assert_eq!(summarize_input("Bash", &input), "cargo build --release");
+    }
+
+    #[test]
+    fn test_summarize_input_grep() {
+        let input = serde_json::json!({"pattern": "TODO"});
+        assert_eq!(summarize_input("Grep", &input), "pattern: TODO");
+    }
+
+    #[test]
+    fn test_summarize_input_glob() {
+        let input = serde_json::json!({"pattern": "**/*.rs"});
+        assert_eq!(summarize_input("Glob", &input), "pattern: **/*.rs");
+    }
+
+    #[test]
+    fn test_summarize_input_folder_operations() {
+        let input = serde_json::json!({"operation": "list", "folder_path": "/tmp/workdir", "pattern": "*.rs"});
+        assert_eq!(
+            summarize_input("folder_operations", &input),
+            "list /tmp/workdir"
+        );
+    }
+
+    #[test]
+    fn test_summarize_input_web_search() {
+        let input = serde_json::json!({"query": "rust async best practices"});
+        assert_eq!(
+            summarize_input("WebSearch", &input),
+            "query: rust async best practices"
+        );
+    }
+
+    #[test]
+    fn test_summarize_input_web_fetch() {
+        let input = serde_json::json!({"url": "https://docs.rs/tokio/latest/tokio/"});
+        assert_eq!(
+            summarize_input("WebFetch", &input),
+            "url: https://docs.rs/tokio/latest/tokio/"
+        );
+    }
+
+    #[test]
+    fn test_summarize_input_todo_write() {
+        let input = serde_json::json!({"todos": [{"content": "do stuff", "status": "pending"}]});
+        assert_eq!(summarize_input("TodoWrite", &input), "");
+    }
+
+    #[test]
+    fn test_summarize_input_agent_result() {
+        let input = serde_json::json!({"task_id": "abc123def456ghi789"});
+        assert_eq!(summarize_input("AgentResult", &input), "abc123def456...");
+    }
+
+    #[test]
+    fn test_summarize_input_lsp() {
+        let input = serde_json::json!({"operation": "completion", "file_path": "foo.rs"});
+        assert_eq!(summarize_input("LSP", &input), "completion");
+    }
+
+    #[test]
+    fn test_summarize_input_execute_extra_tool() {
+        let input = serde_json::json!({"tool_name": "mcp__server__some_tool", "arguments": "{}"});
+        assert_eq!(
+            summarize_input("ExecuteExtraTool", &input),
+            "mcp__server__some_tool"
+        );
+    }
+
+    #[test]
+    fn test_summarize_input_search_extra_tools() {
+        let input = serde_json::json!({"query": "mcp"});
+        assert_eq!(summarize_input("SearchExtraTools", &input), "mcp");
+    }
+
+    #[test]
+    fn test_summarize_input_empty_object() {
+        let input = serde_json::json!({});
+        assert_eq!(summarize_input("Unknown", &input), "(empty input)");
     }
 
     #[test]

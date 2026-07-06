@@ -200,8 +200,8 @@ fn render_reasoning_block(reasoning: &ReasoningBlock) -> Vec<Line<'static>> {
 
 // ── 折叠/展开规则（TUI-PAGE.md §2.4.2） ────────────────────────────────
 
-const COLLAPSED_BY_DEFAULT: &[&str] = &["Read", "Glob", "Grep", "AskUserQuestion"];
-const AUTO_EXPAND: &[&str] = &["AgentResult", "ExecuteExtraTool"];
+const COLLAPSED_BY_DEFAULT: &[&str] = &["Bash", "Read", "Glob", "Grep", "AskUserQuestion"];
+const AUTO_EXPAND: &[&str] = &["AgentResult", "ExecuteExtraTool", "SearchExtraTools"];
 const FORCE_EXPAND_ON_COMPLETE: &[&str] = &["Write", "Edit"];
 
 /// 工具调用卡片渲染（v2 ViewModel 渲染器）。
@@ -869,6 +869,7 @@ mod tests {
 
     #[test]
     fn test_tool_card_output_is_compacted() {
+        // Bash 默认折叠（COLLAPSED_BY_DEFAULT），max_lines=1，5 行输出 → 1 行 + "… 4 more lines"
         let vm = ViewModel::ToolCard(ToolCardData {
             tool_id: "tc-output".into(),
             tool_name: "Bash".into(),
@@ -881,7 +882,7 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
-        assert!(text.contains("… 1 more lines"), "长输出应被压缩：{}", text);
+        assert!(text.contains("… 4 more lines"), "长输出应被压缩：{}", text);
     }
 
     #[test]
@@ -1026,6 +1027,50 @@ mod tests {
             .iter()
             .any(|l| l.spans.iter().any(|s| s.content.contains("+++")));
         assert!(!has_diff, "diff 已移除，不应包含 diff header");
+    }
+
+    #[test]
+    fn test_tool_card_bash_collapsed_by_default() {
+        // Bash 默认折叠（COLLAPSED_BY_DEFAULT），完成后仅显示首行输出摘要
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-bash-collapsed".into(),
+            tool_name: "Bash".into(),
+            input_summary: "ls -la".into(),
+            output_summary: "total 8\ndrwxr-xr-x  3 user staff  96 Jul  6 10:00 .\ndrwxr-xr-x  5 user staff 160 Jul  6 09:00 ..".into(),
+            is_error: false,
+            is_running: false,
+            diff: None,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80);
+        let text = collect_text(&lines);
+        assert!(
+            text.contains("… 2 more lines"),
+            "Bash 默认折叠，应压缩多行输出：{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_tool_card_search_extra_tools_auto_expand() {
+        // SearchExtraTools 结果自动展开（AUTO_EXPAND），完成后展示完整输出（最多 4 行）
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-set-autox".into(),
+            tool_name: "SearchExtraTools".into(),
+            input_summary: "mcp__weixin".into(),
+            output_summary: "tool_1\ntool_2\ntool_3".into(),
+            is_error: false,
+            is_running: false,
+            diff: None,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80);
+        let text = collect_text(&lines);
+        assert!(
+            text.contains("tool_1"),
+            "SearchExtraTools 应自动展开显示完整结果：{}",
+            text
+        );
     }
 
     #[test]

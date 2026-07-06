@@ -87,7 +87,7 @@ pub fn route(ev: &ExecutorEvent, view_mapper: &mut dyn ViewMapper) -> Option<Rou
             data: serde_json::to_value(&ToolStarted {
                 tool_id: tool_call_id.clone(),
                 tool_name: name.clone(),
-                input_summary: summarize_input(input),
+                input_summary: summarize_input(name, input),
                 agent_id: source_agent_id.clone(),
             })
             .unwrap(),
@@ -240,26 +240,77 @@ pub fn route(ev: &ExecutorEvent, view_mapper: &mut dyn ViewMapper) -> Option<Rou
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Produce a one-line summary of a tool's JSON input.
-fn summarize_input(input: &serde_json::Value) -> String {
-    match input {
-        serde_json::Value::Object(map) => {
-            // Extract the most informative field as summary
-            if let Some(path) = map.get("path").or_else(|| map.get("file_path")) {
-                return format!("path: {}", truncate_text(&path.to_string(), 120));
-            }
-            if let Some(query) = map.get("query").or_else(|| map.get("pattern")) {
-                return format!("query: {}", truncate_text(&query.to_string(), 120));
-            }
-            if let Some(cmd) = map.get("command") {
-                return format!("cmd: {}", truncate_text(&cmd.to_string(), 120));
-            }
-            // Fallback: show first key-value pair
-            if let Some((k, v)) = map.iter().next() {
-                return format!("{}: {}", k, truncate_text(&v.to_string(), 100));
-            }
-            "(empty input)".to_string()
+///
+/// Tool-specific formatting per TUI-TOOLCALL.md §2:
+/// - Read/Write/Edit: `file_path` value only
+/// - Bash: `command` value only
+/// - Glob/Grep: `pattern: "{pattern}"`, pattern truncated to 200 chars
+/// - folder_operations: `"{operation} {folder_path}"`
+/// - WebSearch: `query: "{query}"`, query truncated to 60 chars
+/// - WebFetch: `url: {url}`, no truncation
+/// - TodoWrite: empty string
+/// - AgentResult: `task_id`, truncated to 12 chars
+/// - artifact: `file_path` value only
+/// - LSP: `operation`, truncated to 40 chars
+/// - ExecuteExtraTool: `tool_name`, truncated to 40 chars
+/// - SearchExtraTools: `query`, truncated to 40 chars
+/// - Other: fallback to first key-value pair
+fn summarize_input(name: &str, input: &serde_json::Value) -> String {
+    // Helper to extract a string field
+    let field = |key: &str| -> Option<&str> { input.get(key).and_then(|v| v.as_str()) };
+
+    match name {
+        "Read" | "Write" | "Edit" => field("file_path").unwrap_or("(empty input)").to_string(),
+        "Bash" => field("command").unwrap_or("(empty input)").to_string(),
+        "Glob" | "Grep" => field("pattern")
+            .map(|s| format!(r#"pattern: "{}""#, truncate_text(s, 200)))
+            .unwrap_or_else(|| "(empty input)".to_string()),
+        "folder_operations" => {
+            let op = field("operation").unwrap_or("");
+            let path = field("folder_path").unwrap_or("");
+            format!("{} {}", op, path)
         }
-        other => truncate_text(&other.to_string(), 120),
+        "WebSearch" => field("query")
+            .map(|s| format!(r#"query: "{}""#, truncate_text(s, 60)))
+            .unwrap_or_else(|| "(empty input)".to_string()),
+        "WebFetch" => field("url")
+            .map(|s| format!("url: {}", s))
+            .unwrap_or_else(|| "(empty input)".to_string()),
+        "TodoWrite" => String::new(),
+        "AgentResult" => field("task_id")
+            .map(|s| truncate_text(s, 12))
+            .unwrap_or_default(),
+        "artifact" => field("file_path").unwrap_or("").to_string(),
+        "LSP" => field("operation")
+            .map(|s| truncate_text(s, 40))
+            .unwrap_or_default(),
+        "ExecuteExtraTool" => field("tool_name")
+            .map(|s| truncate_text(s, 40))
+            .unwrap_or_default(),
+        "SearchExtraTools" => field("query")
+            .map(|s| truncate_text(s, 40))
+            .unwrap_or_default(),
+        _ => {
+            // Fallback: existing generic logic for unknown tools
+            match input {
+                serde_json::Value::Object(map) => {
+                    if let Some(path) = map.get("path").or_else(|| map.get("file_path")) {
+                        return format!("path: {}", truncate_text(&path.to_string(), 120));
+                    }
+                    if let Some(query) = map.get("query").or_else(|| map.get("pattern")) {
+                        return format!("query: {}", truncate_text(&query.to_string(), 120));
+                    }
+                    if let Some(cmd) = map.get("command") {
+                        return format!("cmd: {}", truncate_text(&cmd.to_string(), 120));
+                    }
+                    if let Some((k, v)) = map.iter().next() {
+                        return format!("{}: {}", k, truncate_text(&v.to_string(), 100));
+                    }
+                    "(empty input)".to_string()
+                }
+                other => truncate_text(&other.to_string(), 120),
+            }
+        }
     }
 }
 
@@ -368,7 +419,7 @@ mod tests {
             message_id: Default::default(),
             tool_call_id: "tc-1".into(),
             name: "Read".into(),
-            input: serde_json::json!({"path": "/tmp/foo.rs"}),
+            input: serde_json::json!({"file_path": "/tmp/foo.rs"}),
             source_agent_id: None,
         };
         let mut mapper = NopViewMapper;
@@ -376,7 +427,7 @@ mod tests {
         assert_eq!(out.event_name, "tool-started");
         assert_eq!(out.data["tool_id"], "tc-1");
         assert_eq!(out.data["tool_name"], "Read");
-        assert_eq!(out.data["input_summary"], "path: \"/tmp/foo.rs\"");
+        assert_eq!(out.data["input_summary"], "/tmp/foo.rs");
     }
 
     #[test]
@@ -708,26 +759,26 @@ mod tests {
 
     #[test]
     fn test_summarize_input_path() {
-        let input = serde_json::json!({"path": "/tmp/foo.rs", "offset": 10});
-        assert_eq!(summarize_input(&input), "path: \"/tmp/foo.rs\"");
+        let input = serde_json::json!({"file_path": "/tmp/foo.rs", "offset": 10});
+        assert_eq!(summarize_input("Read", &input), "/tmp/foo.rs");
     }
 
     #[test]
     fn test_summarize_input_query() {
         let input = serde_json::json!({"query": "TODO", "glob": "*.rs"});
-        assert_eq!(summarize_input(&input), "query: \"TODO\"");
+        assert_eq!(summarize_input("WebSearch", &input), r#"query: "TODO""#);
     }
 
     #[test]
     fn test_summarize_input_command() {
         let input = serde_json::json!({"command": "cargo build"});
-        assert_eq!(summarize_input(&input), "cmd: \"cargo build\"");
+        assert_eq!(summarize_input("Bash", &input), "cargo build");
     }
 
     #[test]
     fn test_summarize_input_empty_object() {
         let input = serde_json::json!({});
-        assert_eq!(summarize_input(&input), "(empty input)");
+        assert_eq!(summarize_input("Read", &input), "(empty input)");
     }
 
     #[test]
