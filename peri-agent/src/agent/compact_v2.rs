@@ -845,7 +845,10 @@ pub async fn re_inject_v2(
 
         for (path, content) in &valid_files {
             // 用 Human 消息（而非 System）避免 LLM invoke hoist 污染 frozen prompt
-            let human_content = format!("[最近读取的文件: {}]\n{}", path, content);
+            let human_content = format!(
+                "[最近读取的文件: {}]\n<system-reminder>\n{}\n</system-reminder>",
+                path, content
+            );
             result_messages.push(BaseMessage::human(human_content));
         }
         files_injected = valid_files.len();
@@ -880,7 +883,10 @@ pub async fn re_inject_v2(
         truncate_to_budget(&mut valid_skills, config.re_inject_skills_budget);
 
         for (path, content) in &valid_skills {
-            let human_content = format!("[激活的 Skill 指令: {}]\n{}", path, content);
+            let human_content = format!(
+                "[激活的 Skill 指令: {}]\n<system-reminder>\n{}\n</system-reminder>",
+                path, content
+            );
             result_messages.push(BaseMessage::human(human_content));
         }
         skills_injected = valid_skills.len();
