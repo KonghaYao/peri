@@ -865,7 +865,7 @@ fn sync_render_cache(snapshot: &ViewModelsSnapshot) {
         if let Some(last_vm) = snapshot.committed.last() {
             let new_index = snapshot.committed.len().saturating_sub(1);
             let key = VmKey::Committed(new_index);
-            let lines = crate::kit::view_render::render_v2_vm(last_vm, width, false);
+            let lines = crate::kit::view_render::render_v2_vm(last_vm, width);
             let height = render_bridge::visual_height(&lines, width);
             cache.entries.push((
                 key,
@@ -914,7 +914,7 @@ fn append_render_entries(
         } else {
             VmKey::CurrentTurn(offset)
         };
-        let lines = crate::kit::view_render::render_v2_vm(vm, width, false);
+        let lines = crate::kit::view_render::render_v2_vm(vm, width);
         let height = render_bridge::visual_height(&lines, width);
         entries.push((
             key,

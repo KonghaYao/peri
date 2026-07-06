@@ -6,20 +6,7 @@
 pub fn format_tool_name(raw: &str) -> &str {
     match raw {
         "Bash" => "Shell",
-        "Read" => "Read",
-        "Write" => "Write",
-        "Edit" => "Edit",
-        "Glob" => "Glob",
-        "Grep" => "Grep",
         "folder_operations" => "Folder",
-        "TodoWrite" => "Todo",
-        "AskUserQuestion" => "Ask",
-        "Agent" => "Agent",
-        "WebSearch" => "Research",
-        "WebFetch" => "Browse",
-        "AgentResult" => "SubAgent",
-        "LSP" => "LSP",
-        "artifact" => "ArtUp",
         other => other,
     }
 }
@@ -112,17 +99,19 @@ mod tests {
     }
 
     #[test]
-    fn test_websearch_maps_to_research() {
-        assert_eq!(format_tool_name("WebSearch"), "Research");
-    }
-
-    #[test]
     fn test_folder_operations_maps_to_folder() {
         assert_eq!(format_tool_name("folder_operations"), "Folder");
     }
 
     #[test]
     fn test_unknown_passthrough() {
+        // 大部分工具名保留原样（不再映射为别名）
+        assert_eq!(format_tool_name("WebSearch"), "WebSearch");
+        assert_eq!(format_tool_name("WebFetch"), "WebFetch");
+        assert_eq!(format_tool_name("TodoWrite"), "TodoWrite");
+        assert_eq!(format_tool_name("AskUserQuestion"), "AskUserQuestion");
+        assert_eq!(format_tool_name("AgentResult"), "AgentResult");
+        assert_eq!(format_tool_name("artifact"), "artifact");
         assert_eq!(format_tool_name("CustomTool"), "CustomTool");
     }
 

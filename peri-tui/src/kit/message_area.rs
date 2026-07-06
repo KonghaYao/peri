@@ -42,7 +42,6 @@ use ratatui_kit::{
 /// ratatui-kit `ScrollViewState::handle_event` 每个 `ScrollDown`/`ScrollUp` 只移 1 行，
 /// 对于长对话来说太慢了。这自己接管鼠标滚动，乘以本倍数调用 `scroll_up`/`scroll_down`。
 /// 调大改滚轮速度，调整不需要重新编译其他模块（仅重编译本文件）。
-const SCROLL_MULTIPLIER: u16 = 3;
 
 // ── 本地行缓存（仅 RENDER_CACHE 内容变化时重建，滚动不触发）─────────────────
 
@@ -96,7 +95,6 @@ pub fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
     lines
 }
 
-#[derive(Default)]
 struct LineCache {
     key: u64,
     current_has_ct: bool,
@@ -109,6 +107,34 @@ struct LineCache {
     /// 上次计算 wrap_map 时对应的渲染宽度。
     /// 宽度变化会改变 Paragraph 换行点，必须触发 wrap_map 重建。
     cached_width: u16,
+    /// 基于原始 all_lines（无高亮）的 wrap_map，用于事件 handler 坐标转换。
+    /// 选区高亮不改变行结构，因此与 highlighted_lines 的 wrap_map 具有相同的
+    /// line_idx→visual 映射关系，只是不包含颜色信息。
+    raw_wrap_map: Vec<WrappedLineInfo>,
+    /// raw_wrap_map 对应的行数和宽度，用于增量更新。
+    raw_line_count: usize,
+    raw_width: u16,
+    /// 上次重建 wrap_map 的时间，用于 resize 限流。
+    /// 窗口 resize 时宽度连续变化，每个变化触发全量 Paragraph 重建（~2ms×N行），
+    /// 高频 resize 导致渲染积压→crossterm 事件缓冲区溢出→死锁。
+    #[allow(dead_code)]
+    last_rebuild: Option<std::time::Instant>,
+}
+
+impl Default for LineCache {
+    fn default() -> Self {
+        Self {
+            key: 0,
+            current_has_ct: false,
+            cached_wrap_map: Vec::new(),
+            cached_line_count: 0,
+            cached_width: 0,
+            raw_wrap_map: Vec::new(),
+            raw_line_count: 0,
+            raw_width: 0,
+            last_rebuild: Some(std::time::Instant::now()),
+        }
+    }
 }
 
 // ── 视口裁剪 ────────────────────────────────────────────────────────────────
@@ -126,12 +152,38 @@ fn mouse_visual_position(mouse_row: u16, mouse_col: u16, area: Rect, scroll_y: u
     )
 }
 
+/// 将视觉坐标 (visual_row, visual_col) 转换为 (line_index, col_in_line)。
+///
+/// visual_row 是内容空间中的视觉行号（含 scroll 偏移），通过 wrap_map 反查
+/// 对应的原始行索引。对于折行产生的后续视觉行，col_in_line 需要加上前序行的
+/// 宽度补偿，确保正确索引到原始行中的列位置。
+fn visual_to_line_position(
+    wrap_map: &[WrappedLineInfo],
+    visual_row: u16,
+    visual_col: u16,
+    vis_width: u16,
+) -> Option<(usize, u16)> {
+    // 二分查找 visual_row 所属的原始行
+    let idx = wrap_map.partition_point(|w| w.visual_row + w.visual_height <= visual_row);
+    let info = wrap_map.get(idx)?;
+    if visual_row < info.visual_row || visual_row >= info.visual_row + info.visual_height {
+        return None;
+    }
+    let rows_before = visual_row.saturating_sub(info.visual_row);
+    let col = if rows_before == 0 {
+        visual_col
+    } else {
+        // 折行后续行：col 需要加上前序视觉行的宽度
+        visual_col.saturating_add(rows_before.saturating_mul(vis_width))
+    };
+    Some((info.line_idx, col))
+}
+
 fn copy_selected_text_to_clipboard(text: String) {
-    std::thread::spawn(move || {
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            let _ = clipboard.set_text(text);
-        }
-    });
+    // 不 spawn 线程——handler 在 tokio 主任务中运行，AppKit 需要主线程。
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        let _ = clipboard.set_text(text);
+    }
 }
 
 fn mark_copy_message(char_count: usize) {
@@ -268,7 +320,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .collect();
     all_lines.extend(footer_lines);
     let empty = cache_snapshot.entries.is_empty() && !is_loading && todo_items.is_empty();
-    let all_line_count = all_lines.len();
+    let _all_line_count = all_lines.len();
     let content_lines = Arc::new(all_lines.clone());
     drop(cache_snapshot);
 
@@ -276,40 +328,69 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let area_hook = hooks.use_hook(MsgAreaTracker::new);
     let area_rect = area_hook.rect;
 
+    // 渲染宽度（提前计算，raw_wrap_map 和 highlighted_lines wrap_map 共用）
+    let vis_width = area_rect
+        .map(|r| r.width.saturating_sub(1))
+        .unwrap_or(props.width as u16)
+        .max(1);
+
+    // ── raw_wrap_map：用于事件 handler 中将视觉坐标转换为行索引 ──
+    let raw_wrap_map: Vec<WrappedLineInfo> = {
+        let lc = line_cache.read();
+        let stale = lc.raw_line_count != all_lines.len()
+            || (lc.raw_width != vis_width
+                && lc.last_rebuild.map_or(true, |t| {
+                    t.elapsed() > std::time::Duration::from_millis(100)
+                }))
+            || lc.raw_wrap_map.is_empty();
+        drop(lc);
+        if stale && !all_lines.is_empty() {
+            let map = crate::kit::render_bridge::build_wrap_map(&all_lines, vis_width);
+            let mut lc = line_cache.write();
+            lc.raw_wrap_map = map.clone();
+            lc.raw_line_count = all_lines.len();
+            lc.raw_width = vis_width;
+            lc.last_rebuild = Some(std::time::Instant::now());
+            map
+        } else if all_lines.is_empty() {
+            Vec::new()
+        } else {
+            line_cache.read().raw_wrap_map.clone()
+        }
+    };
+
     // ── 文本选区状态 ──
     let text_sel = hooks.use_state(TextSelection::new);
 
     // 选区高亮依赖 all_lines，提前拿到
     let sel = text_sel.read();
-    let highlighted_lines: Vec<Line<'static>> =
-        if let Some(((sr, sc), (er, ec))) = sel.normalized_bounds() {
-            if sel.is_active() {
-                text_selection::highlight_selected_lines(&all_lines, sr, sc, er, ec)
-            } else {
-                all_lines
-            }
+    let sel_active = sel.is_active();
+    let sel_bounds = sel.normalized_bounds();
+    drop(sel);
+    let highlighted_lines: Vec<Line<'static>> = if let Some(((sr, sc), (er, ec))) = sel_bounds {
+        if sel_active {
+            text_selection::highlight_selected_lines(&all_lines, sr, sc, er, ec)
         } else {
             all_lines
-        };
-    drop(sel);
+        }
+    } else {
+        all_lines
+    };
 
     // ── wrap_map：内容或宽度变化时重建，滚动变化复用缓存 ──
-    let vis_width = area_rect
-        .map(|r| r.width.saturating_sub(1))
-        .unwrap_or(props.width as u16)
-        .max(1);
     let wrap_map = {
         let lc = line_cache.read();
         let stale = lc.cached_line_count != highlighted_lines.len()
-            || lc.cached_width != vis_width
+            || (lc.cached_width != vis_width
+                && lc.last_rebuild.map_or(true, |t| {
+                    t.elapsed() > std::time::Duration::from_millis(100)
+                }))
             || lc.cached_wrap_map.is_empty();
         drop(lc);
         if stale && !highlighted_lines.is_empty() {
             // 宽度需匹配 ScrollView 内部实际渲染宽度。
-            //
             // ratatui-kit ScrollView 在 content_height > visible_height 时，
-            // ScrollbarVisibility::Automatic 会同时显示垂直+水平滚动条（horizontal_space==0
-            // 时 visible_scrollbars 回退到 else → (true, true)）。垂直滚动条占 1 列，
+            // ScrollbarVisibility::Automatic 会同时显示垂直+水平滚动条。垂直滚动条占 1 列，
             // 实际渲染宽度 = area.width - 1。若 build_wrap_map 用 area.width，Paragraph
             // 换行点与预测不一致，累积的视觉高度差异导致内容溢出/底部空白。
             let map = crate::kit::render_bridge::build_wrap_map(&highlighted_lines, vis_width);
@@ -317,6 +398,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             lc.cached_wrap_map = map.clone();
             lc.cached_line_count = highlighted_lines.len();
             lc.cached_width = vis_width;
+            lc.last_rebuild = Some(std::time::Instant::now());
             map
         } else if highlighted_lines.is_empty() {
             Vec::new()
@@ -326,6 +408,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     };
     {
         let content_lines_handler = content_lines.clone();
+        let raw_wrap_map_handler = Arc::new(raw_wrap_map.clone());
+        let vis_width_handler = vis_width;
         hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
             if let Event::Key(key) = &event {
                 let _ = focus_router::message_accepts_key(key);
@@ -346,17 +430,34 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                         let (visual_row, visual_col) =
                             mouse_visual_position(mouse.row, mouse.column, area, scroll_y);
 
+                        // 通过 raw_wrap_map 将视觉坐标转换为行索引 + 列偏移
+                        let (line_idx, col_in_line) = visual_to_line_position(
+                            &raw_wrap_map_handler,
+                            visual_row,
+                            visual_col,
+                            vis_width_handler,
+                        )
+                        .unwrap_or((visual_row as usize, visual_col));
+
                         match mouse.kind {
+                            // 滚轮事件：委托给 ScrollViewState
+                            MouseEventKind::ScrollDown => {
+                                scroll_state.write().scroll_down();
+                            }
+                            MouseEventKind::ScrollUp => {
+                                scroll_state.write().scroll_up();
+                            }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 // 开始文本拖拽选中
-                                text_sel.write().start_drag(visual_row, visual_col);
+                                text_sel.write().start_drag(line_idx as u16, col_in_line);
                                 auto_scroll.set(false);
                             }
                             MouseEventKind::Drag(MouseButton::Left) => {
                                 let mut sel = text_sel.write();
                                 if sel.dragging {
-                                    sel.update_drag(visual_row, visual_col);
+                                    sel.update_drag(line_idx as u16, col_in_line);
                                 }
+                                drop(sel);
                                 auto_scroll.set(false);
                             }
                             MouseEventKind::Up(MouseButton::Left) => {
@@ -375,8 +476,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                                             mark_copy_message(text.chars().count());
                                             copy_selected_text_to_clipboard(text.clone());
                                         }
-                                        sel.set_selected_text(selected_text);
                                     }
+                                    // 复制完成后立即清除选区，避免每帧高亮全量行导致渲染卡死
+                                    sel.clear();
                                 }
                                 // 非拖拽点击——清除旧选区
                                 if !was_dragging {
@@ -386,26 +488,26 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                             }
                             _ => {}
                         }
+                    } else {
+                        // 鼠标在消息区外：滚轮 + 其他鼠标事件委托 ScrollViewState
+                        match mouse.kind {
+                            MouseEventKind::ScrollDown => {
+                                scroll_state.write().scroll_down();
+                            }
+                            MouseEventKind::ScrollUp => {
+                                scroll_state.write().scroll_up();
+                            }
+                            _ => {
+                                scroll_state.write().handle_event(&event);
+                            }
+                        }
                     }
                 }
 
-                // 滚动事件：鼠标滚轮用乘数加速；其他鼠标事件委托 ScrollViewState
-                match mouse.kind {
-                    MouseEventKind::ScrollDown => {
-                        for _ in 0..SCROLL_MULTIPLIER {
-                            scroll_state.write().scroll_down();
-                        }
-                    }
-                    MouseEventKind::ScrollUp => {
-                        for _ in 0..SCROLL_MULTIPLIER {
-                            scroll_state.write().scroll_up();
-                        }
-                    }
-                    _ => {
-                        scroll_state.write().handle_event(&event);
-                    }
+                // 仅在 auto_scroll 为 true 时才写入，避免每次鼠标事件触发不必要的 re-render
+                if auto_scroll.get() {
+                    auto_scroll.set(false);
                 }
-                auto_scroll.set(false);
                 return EventResult::Consumed;
             }
 
@@ -480,25 +582,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .map_or(0u16, |w| w.visual_row + w.visual_height);
     let bottom_spacer = total_visual_rows.saturating_sub(content_bottom);
 
-    let max_scroll = total_visual_rows.saturating_sub(vis_height);
-
-    // 诊断：记录关键渲染参数，输出到 agent-tui.log
-    tracing::info!(
-        total_visual_rows,
-        vis_height,
-        max_scroll,
-        scroll_y,
-        first,
-        last,
-        all_count = all_line_count,
-        hl_count = highlighted_lines.len(),
-        vis_count = visible_lines.len(),
-        content_top,
-        content_bottom,
-        bottom_spacer,
-        empty,
-        "msg-area diag"
-    );
+    let _max_scroll = total_visual_rows.saturating_sub(vis_height);
 
     // ── Footer：spinner + todo 已作为普通内容行追加到 ScrollView 底部 ──
 

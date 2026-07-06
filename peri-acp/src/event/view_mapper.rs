@@ -474,14 +474,32 @@ fn summarize_output(name: &str, output: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    if matches!(name, "Edit" | "Write") {
-        let lines = trimmed.lines().count();
-        if lines <= 3 {
-            return truncate_text(trimmed, 200);
+    match name {
+        "Edit" | "Write" => {
+            let lines = trimmed.lines().count();
+            if lines <= 3 {
+                return truncate_text(trimmed, 200);
+            }
+            format!("{} lines changed", lines)
         }
-        format!("{} lines changed", lines)
-    } else {
-        truncate_text(trimmed, 200)
+        "WebFetch" => {
+            let lines = trimmed.lines().count();
+            let bytes = output.len();
+            format!(
+                "{} lines · {} bytes\n{}",
+                lines,
+                bytes,
+                truncate_text(trimmed, 400)
+            )
+        }
+        // TodoWrite 返回全量内容（显示完整 todo 列表）
+        "TodoWrite" => trimmed.to_string(),
+        // Read / Glob / Grep — 折叠态显示行数
+        "Read" | "Glob" | "Grep" => {
+            let lines = trimmed.lines().count();
+            format!("{} lines", lines)
+        }
+        _ => truncate_text(trimmed, 200),
     }
 }
 
@@ -908,7 +926,7 @@ mod tests {
                 assert_eq!(d.tool_id, "tc-1");
                 assert_eq!(d.tool_name, "Read");
                 assert_eq!(d.input_summary, "path: \"/tmp/foo.rs\"");
-                assert_eq!(d.output_summary, "file contents here");
+                assert_eq!(d.output_summary, "1 lines");
                 assert!(!d.is_error);
                 assert!(d.diff.is_none());
             }

@@ -311,7 +311,7 @@ async fn append_entries(
         } else {
             VmKey::CurrentTurn(offset)
         };
-        let lines = view_render::render_v2_vm(vm, width, false);
+        let lines = view_render::render_v2_vm(vm, width);
         let height = visual_height(&lines, width);
         entries.push((
             key,

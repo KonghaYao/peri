@@ -1,6 +1,6 @@
 //! V2 ViewModel → ratatui Line 转换器。
 //!
-//! 纯函数 `render_v2_vm(vm, width, diff_visible) -> Vec<Line<'static>>`，
+//! 纯函数 `render_v2_vm(vm, width) -> Vec<Line<'static>>`，
 //! 处理全部 7 种 `peri_acp_types::view_model::ViewModel` 变体。
 //! 零副作用，不持有缓存——markdown 每帧重新解析。
 
@@ -90,8 +90,7 @@ fn lookup_subagent_status(agent_id: &str) -> Option<SubAgentRenderInfo> {
 /// 将单个 V2 ViewModel 转换为 ratatui Line 列表。
 ///
 /// * `width` — 终端可用宽度，用于 markdown 解析时折行。
-/// * `diff_visible` — 用户是否通过 `Ctrl+O` 展开了 diff 视图。
-pub fn render_v2_vm(vm: &ViewModel, width: usize, diff_visible: bool) -> Vec<Line<'static>> {
+pub fn render_v2_vm(vm: &ViewModel, width: usize) -> Vec<Line<'static>> {
     RENDER_CALL_COUNT.with(|c| {
         c.fetch_add(1, Ordering::Relaxed);
     });
@@ -100,9 +99,9 @@ pub fn render_v2_vm(vm: &ViewModel, width: usize, diff_visible: bool) -> Vec<Lin
             render_user_bubble(&data.text, width, data.is_system_reminder)
         }
         ViewModel::AssistantBubble(data) => render_assistant_bubble(data, width),
-        ViewModel::ToolCard(data) => render_tool_card(data, diff_visible),
+        ViewModel::ToolCard(data) => render_tool_card(data),
         ViewModel::SystemNote(data) => render_system_note(data),
-        ViewModel::SubAgentGroup(data) => render_subagent_group(data, width, diff_visible),
+        ViewModel::SubAgentGroup(data) => render_subagent_group(data, width),
         ViewModel::CollapsedGroup(data) => render_collapsed_group(data),
         ViewModel::Divider(data) => render_divider(data),
         ViewModel::AskUserBlock(data) => render_ask_user_block(data),
@@ -206,10 +205,7 @@ const AUTO_EXPAND: &[&str] = &["AgentResult", "ExecuteExtraTool"];
 const FORCE_EXPAND_ON_COMPLETE: &[&str] = &["Write", "Edit"];
 
 /// 工具调用卡片渲染（v2 ViewModel 渲染器）。
-fn render_tool_card(
-    data: &peri_acp_types::view_model::ToolCardData,
-    diff_visible: bool,
-) -> Vec<Line<'static>> {
+fn render_tool_card(data: &peri_acp_types::view_model::ToolCardData) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
     let display = tool_display(&data.tool_name, data.is_error, data.is_running);
     let display_name = tool_display::format_tool_name(&data.tool_name).to_string();
@@ -233,13 +229,6 @@ fn render_tool_card(
         ));
     }
 
-    if data.is_running && !data.is_error {
-        header_spans.push(Span::styled(
-            " · ●",
-            Style::default().fg(semantic.status.success),
-        ));
-    }
-
     let mut lines = vec![Line::from(header_spans)];
 
     // 折叠/展开判断（纯 UI 决策，对应 TUI-PAGE.md §2.4.2）
@@ -254,11 +243,16 @@ fn render_tool_card(
     };
 
     if collapsed {
-        if data.is_error && !data.output_summary.is_empty() {
+        if !data.output_summary.is_empty() {
+            let color = if data.is_error {
+                semantic.status.error
+            } else {
+                semantic.text.muted
+            };
             for out_line in compact_output_lines(&data.output_summary, 1, 400) {
                 lines.push(Line::from(vec![
                     Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim)),
-                    Span::styled(out_line, Style::default().fg(semantic.status.error)),
+                    Span::styled(out_line, Style::default().fg(color)),
                 ]));
             }
         }
@@ -277,7 +271,12 @@ fn render_tool_card(
         } else {
             semantic.text.dim
         };
-        for out_line in compact_output_lines(&data.output_summary, 4, 400) {
+        let max_lines = if data.tool_name == "TodoWrite" {
+            usize::MAX
+        } else {
+            4
+        };
+        for out_line in compact_output_lines(&data.output_summary, max_lines, 400) {
             lines.push(Line::from(vec![
                 Span::styled("  ⎿ ".to_string(), Style::default().fg(border_color)),
                 Span::styled(out_line, Style::default().fg(result_color)),
@@ -285,22 +284,43 @@ fn render_tool_card(
         }
     }
 
-    // Diff 块
+    // Diff 变更统计（Write/Edit）
     if let Some(ref diff) = data.diff {
-        if diff_visible {
-            lines.extend(render_diff_block(diff));
-        } else {
+        if let Some(summary) = diff_change_summary(diff) {
             lines.push(Line::from(vec![
                 Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim)),
-                Span::styled(
-                    format!("📝 diff: {} 已折叠 · Enter::open", diff.path),
-                    Style::default().fg(semantic.text.dim),
-                ),
+                Span::styled(summary, Style::default().fg(semantic.text.muted)),
             ]));
         }
     }
 
     with_message_spacing(lines)
+}
+
+fn diff_change_summary(diff: &DiffBlock) -> Option<String> {
+    let adds = diff
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .filter(|l| matches!(l.kind, HunkLineKind::Add))
+        .count();
+    let dels = diff
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .filter(|l| matches!(l.kind, HunkLineKind::Del))
+        .count();
+    if adds == 0 && dels == 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if adds > 0 {
+        parts.push(format!("+{}", adds));
+    }
+    if dels > 0 {
+        parts.push(format!("-{}", dels));
+    }
+    Some(parts.join(" · "))
 }
 
 struct ToolDisplay {
@@ -312,7 +332,7 @@ fn tool_display(_tool_name: &str, is_error: bool, is_running: bool) -> ToolDispl
     let semantic = theme::semantic();
     if is_error {
         return ToolDisplay {
-            indicator: "✗",
+            indicator: "●",
             color: semantic.status.error,
         };
     }
@@ -325,7 +345,7 @@ fn tool_display(_tool_name: &str, is_error: bool, is_running: bool) -> ToolDispl
         let indicator = if visible { "●" } else { " " };
         return ToolDisplay {
             indicator,
-            color: semantic.status.success, // §2.4.2: Running 用 success 绿色
+            color: Color::White,
         };
     }
 
@@ -380,136 +400,19 @@ fn compact_output_lines(text: &str, max_lines: usize, max_chars: usize) -> Vec<S
     lines
 }
 
-fn render_diff_block(diff: &DiffBlock) -> Vec<Line<'static>> {
-    let semantic = theme::semantic();
-
-    // Early return: binary file
-    if diff.is_binary {
-        return vec![Line::from(Span::styled(
-            format!("  Binary {} - cannot display diff", diff.path),
-            Style::default().fg(semantic.text.dim),
-        ))];
-    }
-
-    // Early return: diff too large
-    if diff.is_too_large {
-        return vec![Line::from(Span::styled(
-            format!("  Diff too large for {} - changes not displayed", diff.path),
-            Style::default().fg(semantic.text.dim),
-        ))];
-    }
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    // File path header
-    lines.push(Line::from(vec![
-        Span::styled("  ", Style::default().fg(semantic.text.dim)),
-        Span::styled(
-            format!("--- a/{}", diff.path),
-            Style::default().fg(semantic.text.muted),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  ", Style::default().fg(semantic.text.dim)),
-        Span::styled(
-            format!("+++ b/{}", diff.path),
-            Style::default().fg(semantic.text.muted),
-        ),
-    ]));
-
-    // New file cap: show at most 6 content lines
-    let hunk_line_limit: usize = if diff.is_new_file { 6 } else { usize::MAX };
-    let mut total_hunk_lines = 0usize;
-
-    for hunk in &diff.hunks {
-        // Hunk header
-        lines.push(Line::from(vec![Span::styled(
-            format!("  @@ -{} +{} @@", hunk.old_range, hunk.new_range),
-            Style::default().fg(semantic.diff.hunk),
-        )]));
-
-        for hunk_line in &hunk.lines {
-            if total_hunk_lines >= hunk_line_limit {
-                break;
-            }
-            let (prefix, color, bg_color) = match hunk_line.kind {
-                HunkLineKind::Add => ("+", semantic.diff.add, Some(semantic.diff.add_bg)),
-                HunkLineKind::Del => ("-", semantic.diff.remove, Some(semantic.diff.remove_bg)),
-                HunkLineKind::Context => (" ", semantic.text.muted, None),
-            };
-            let mut line_style = Style::default().fg(color);
-            if let Some(bg) = bg_color {
-                line_style = line_style.bg(bg);
-            }
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default().fg(semantic.text.dim)),
-                Span::styled(prefix.to_string(), line_style),
-                Span::styled(hunk_line.text.clone(), line_style),
-            ]));
-            total_hunk_lines += 1;
-        }
-
-        if total_hunk_lines >= hunk_line_limit {
-            let skipped = diff
-                .hunks
-                .iter()
-                .map(|h| h.lines.len())
-                .sum::<usize>()
-                .saturating_sub(hunk_line_limit);
-            if skipped > 0 {
-                lines.push(Line::from(Span::styled(
-                    format!("  ... {} more lines not shown", skipped),
-                    Style::default().fg(semantic.text.dim),
-                )));
-            }
-            break;
-        }
-    }
-
-    lines
-}
-
 fn render_system_note(data: &peri_acp_types::view_model::SystemNoteData) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
+    let color = match data.level {
+        NoteLevel::Error => semantic.status.error,
+        NoteLevel::Warning => semantic.status.warning,
+        _ => semantic.text.muted,
+    };
     let mut lines: Vec<Line<'static>> = Vec::new();
-
     for line_text in data.text.lines() {
-        if line_text.starts_with('✻') {
-            // ✻ 开头行 — dim 色，无额外前缀
-            lines.push(Line::from(Span::styled(
-                line_text.to_string(),
-                Style::default().fg(semantic.text.dim),
-            )));
-        } else if line_text.starts_with('⎿') {
-            // ⎿ 开头行 — muted 色，无额外前缀
-            lines.push(Line::from(Span::styled(
-                line_text.to_string(),
-                Style::default().fg(semantic.text.muted),
-            )));
-        } else if line_text.starts_with("  ⎿") {
-            // 已缩进的 ⎿ — error 色（错误摘要行）
-            lines.push(Line::from(Span::styled(
-                line_text.to_string(),
-                Style::default().fg(semantic.status.error),
-            )));
-        } else {
-            // 其余行 — · 前缀 + 自动检测错误/警告
-            let color = if line_text.contains("❌")
-                || line_text.contains("失败")
-                || line_text.to_lowercase().contains("error")
-            {
-                semantic.status.error
-            } else if line_text.contains('⚠') || line_text.contains("已中断") {
-                semantic.status.warning
-            } else {
-                semantic.text.muted
-            };
-            let prefix = Span::styled("· ", Style::default().fg(semantic.text.dim));
-            let content = Span::styled(line_text.to_string(), Style::default().fg(color));
-            lines.push(Line::from(vec![prefix, content]));
-        }
+        let prefix = Span::styled("· ", Style::default().fg(semantic.text.dim));
+        let content = Span::styled(line_text.to_string(), Style::default().fg(color));
+        lines.push(Line::from(vec![prefix, content]));
     }
-
     lines
 }
 
@@ -544,11 +447,7 @@ fn render_ask_user_block(data: &AskUserBlockData) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_subagent_group(
-    data: &SubAgentGroupData,
-    width: usize,
-    diff_visible: bool,
-) -> Vec<Line<'static>> {
+fn render_subagent_group(data: &SubAgentGroupData, width: usize) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
 
     // 查询运行时状态（v2 DTO 缺失字段由 status probe 注入）
@@ -628,10 +527,6 @@ fn render_subagent_group(
         Vec::new()
     };
 
-    if data.collapsed {
-        return with_message_spacing(lines);
-    }
-
     // 截断：SubAgent 展开区只显示最后 5 个 ToolCard，其余省略。
     // 非 ToolCard 的子消息（如 ReasoningBlock、SystemNote 等）不计数、不截断。
     let tool_count = children
@@ -653,7 +548,20 @@ fn render_subagent_group(
                 continue;
             }
         }
-        let inner_lines = render_v2_vm(inner_vm, width, diff_visible);
+        let inner_lines = render_v2_vm(inner_vm, width);
+        // 运行中的 SubAgent：ToolCard 去掉输出行，单行显示
+        let is_running = status.as_ref().map_or(data.is_running, |s| s.is_running);
+        let inner_lines: Vec<_> = if is_running && matches!(inner_vm, ViewModel::ToolCard(_)) {
+            inner_lines
+                .into_iter()
+                .filter(|l| {
+                    let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                    !text.contains("⎿") && !text.contains("📝")
+                })
+                .collect()
+        } else {
+            inner_lines
+        };
         if inner_lines.is_empty() {
             continue;
         }
@@ -770,7 +678,7 @@ mod tests {
             content_hash: 0,
             is_system_reminder: false,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         assert!(
             !lines.is_empty(),
             "UserBubble should produce at least one line"
@@ -784,7 +692,7 @@ mod tests {
             content_hash: 0,
             is_system_reminder: false,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
         assert_eq!(lines.len(), 3, "用户消息前后应各有 1 行空行：{}", text);
         assert!(
@@ -812,7 +720,7 @@ mod tests {
             tool_card_ids: vec![],
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         assert!(!lines.is_empty());
     }
 
@@ -827,7 +735,7 @@ mod tests {
             tool_card_ids: vec![],
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         assert!(!lines.is_empty());
         // Should have "Thought for N chars" line
         let first = &lines[0].spans;
@@ -846,25 +754,26 @@ mod tests {
             diff: None,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         assert!(!lines.is_empty());
         let first = &lines[1].spans;
         assert!(first.iter().any(|s| s.content.contains("Read")));
     }
 
     #[test]
-    fn test_tool_card_read_collapsed_has_spacing_and_no_output() {
+    fn test_tool_card_read_collapsed_shows_line_count() {
+        // Read 折叠态现在显示行数摘要（"N lines"），不再隐藏全部输出
         let vm = ViewModel::ToolCard(ToolCardData {
             tool_id: "tc-read-collapsed".into(),
             tool_name: "Read".into(),
             input_summary: "path: foo.rs".into(),
-            output_summary: "hidden output".into(),
+            output_summary: "47 lines".into(),
             is_error: false,
             is_running: false,
             diff: None,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
         assert!(
             text.contains("● Read (path: foo.rs)"),
@@ -872,8 +781,8 @@ mod tests {
             text
         );
         assert!(
-            !text.contains("hidden output"),
-            "只读工具默认折叠输出：{}",
+            text.contains("47 lines"),
+            "Read 折叠态应显示行数摘要：{}",
             text
         );
         assert!(
@@ -900,9 +809,9 @@ mod tests {
             diff: None,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let first = &lines[1].spans;
-        assert!(first.iter().any(|s| s.content.contains("✗")));
+        assert!(first.iter().any(|s| s.content.contains("●")));
     }
 
     #[test]
@@ -917,11 +826,11 @@ mod tests {
             diff: None,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
         assert!(
-            text.contains("✗ Read (foo.rs)"),
-            "错误工具应显示失败标识：{}",
+            text.contains("● Read (foo.rs)"),
+            "错误工具应显示失败标识（红色 ●）：{}",
             text
         );
         assert!(
@@ -946,10 +855,15 @@ mod tests {
             diff: None,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
         assert!(text.contains("●"), "运行中工具应显示状态 ●：{}", text);
-        assert!(text.contains("· ●"), "运行中工具应显示运行中标记：{}", text);
+        // 运行中状态仅通过前导 ● 闪烁表示，不再追加尾部 · ●
+        assert!(
+            !text.contains("· ●"),
+            "运行中工具不应显示尾部标记：{}",
+            text
+        );
         assert!(text.contains("Edit (path: foo.rs · old_string: hello"));
     }
 
@@ -965,18 +879,19 @@ mod tests {
             diff: None,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
         assert!(text.contains("… 1 more lines"), "长输出应被压缩：{}", text);
     }
 
     #[test]
-    fn test_tool_card_diff_hidden_shows_hint() {
+    fn test_tool_card_write_shows_output_summary_no_diff_hint() {
+        // Write 工具完成后不再渲染 diff（已移除），仅显示 output_summary。
         let vm = ViewModel::ToolCard(ToolCardData {
             tool_id: "tc-diff-hint".into(),
             tool_name: "Write".into(),
             input_summary: "bar.rs".into(),
-            output_summary: "ok".into(),
+            output_summary: "12 lines changed".into(),
             is_error: false,
             is_running: false,
             diff: Some(DiffBlock {
@@ -988,9 +903,19 @@ mod tests {
             }),
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
-        assert!(text.contains("已折叠"), "隐藏 diff 应提示可展开：{}", text);
+        assert!(
+            text.contains("12 lines changed"),
+            "Write 工具应显示 output_summary：{}",
+            text
+        );
+        assert!(
+            !text.contains("已折叠"),
+            "不应再显示 diff 折叠提示：{}",
+            text
+        );
+        assert!(!text.contains("📝"), "不应再显示 diff 标记：{}", text);
     }
 
     #[test]
@@ -1005,11 +930,11 @@ mod tests {
             diff: None,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
         assert!(
-            text.contains("● Browse"),
-            "Web 工具应使用统一成功标识：{}",
+            text.contains("● WebFetch"),
+            "Web 工具应使用原始工具名而非映射别名：{}",
             text
         );
     }
@@ -1026,7 +951,7 @@ mod tests {
             diff: None,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
         assert!(
             text.contains("● Shell"),
@@ -1036,7 +961,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_card_diff() {
+    fn test_tool_card_diff_removed() {
+        // diff 渲染已完全移除，Edit/Write 工具不再展示 diff 行。
         let vm = ViewModel::ToolCard(ToolCardData {
             tool_id: "tc-3".into(),
             tool_name: "Edit".into(),
@@ -1062,21 +988,23 @@ mod tests {
             }),
             content_hash: 0,
         });
-        // diff_visible = true
-        let lines = render_v2_vm(&vm, 80, true);
+        let lines = render_v2_vm(&vm, 80);
         assert!(!lines.is_empty());
-        // Should contain diff header
         let has_diff = lines
             .iter()
             .any(|l| l.spans.iter().any(|s| s.content.contains("+++")));
+        assert!(!has_diff, "diff 已移除，不应包含 +++ diff header");
+        let text = collect_text(&lines);
         assert!(
-            has_diff,
-            "should contain diff header when diff_visible=true"
+            text.contains("ok"),
+            "Edit 工具应显示 output_summary：{}",
+            text
         );
     }
 
     #[test]
-    fn test_tool_card_diff_hidden() {
+    fn test_tool_card_write_no_diff() {
+        // Write 工具不再渲染 diff（diff 已移除），assert 不应出现 diff 行。
         let vm = ViewModel::ToolCard(ToolCardData {
             tool_id: "tc-4".into(),
             tool_name: "Write".into(),
@@ -1093,11 +1021,11 @@ mod tests {
             }),
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let has_diff = lines
             .iter()
             .any(|l| l.spans.iter().any(|s| s.content.contains("+++")));
-        assert!(!has_diff, "should NOT contain diff when diff_visible=false");
+        assert!(!has_diff, "diff 已移除，不应包含 diff header");
     }
 
     #[test]
@@ -1107,7 +1035,7 @@ mod tests {
             level: NoteLevel::Info,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         assert_eq!(lines.len(), 1);
     }
 
@@ -1118,12 +1046,13 @@ mod tests {
             level: NoteLevel::Error,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         assert_eq!(lines.len(), 1);
     }
 
     #[test]
-    fn test_subagent_group_collapsed() {
+    fn test_subagent_group_always_shows_content() {
+        // SubAgent 无折叠态——collapsed 字段被忽略，始终展开
         let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
             agent_id: "sa-1".into(),
             agent_name: "file-searcher".into(),
@@ -1136,10 +1065,14 @@ mod tests {
             is_running: false,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
         assert!(text.contains("Agent(sa-1) file-searcher"));
-        assert!(!text.contains("📦"));
+        assert!(
+            text.contains("find foo"),
+            "SubAgent 不再折叠，内容始终可见：{}",
+            text
+        );
     }
 
     #[test]
@@ -1156,7 +1089,7 @@ mod tests {
             is_running: false,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         assert!(!lines.is_empty());
     }
 
@@ -1210,7 +1143,7 @@ mod tests {
                 recent_messages: Vec::new(),
             }),
         });
-        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
+        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80));
         let text = collect_text(&lines);
         assert!(
             !text.contains("hidden assistant"),
@@ -1249,7 +1182,7 @@ mod tests {
                 recent_messages: Vec::new(),
             }),
         });
-        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
+        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80));
         let text = collect_text(&lines);
         assert!(text.contains("⏳"), "应显示运行中状态：{}", text);
         assert!(text.contains("5 步"), "应显示步数：{}", text);
@@ -1274,7 +1207,7 @@ mod tests {
                 recent_messages: Vec::new(),
             }),
         });
-        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
+        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80));
         let text = collect_text(&lines);
         assert!(text.contains("✅"), "应显示完成状态：{}", text);
         assert!(
@@ -1303,7 +1236,7 @@ mod tests {
                 recent_messages: Vec::new(),
             }),
         });
-        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
+        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80));
         let text = collect_text(&lines);
         assert!(text.contains("❌"), "应显示失败状态：{}", text);
         assert!(text.contains("⎿ Error"), "应显示错误结果：{}", text);
@@ -1320,7 +1253,7 @@ mod tests {
             is_running: false,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
         assert!(text.contains("✅"), "无 probe 时应显示完成状态：{}", text);
     }
@@ -1335,7 +1268,7 @@ mod tests {
             is_running: true,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
         assert!(text.contains("⏳"), "流式 DTO 应显示运行中状态：{}", text);
     }
@@ -1365,7 +1298,7 @@ mod tests {
                 })],
             }),
         });
-        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
+        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80));
         let text = collect_text(&lines);
         assert!(
             text.contains("child content from probe"),
@@ -1403,7 +1336,7 @@ mod tests {
                 })],
             }),
         });
-        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80, false));
+        let lines = with_status_probe(probe, || render_v2_vm(&vm, 80));
         let text = collect_text(&lines);
         assert!(
             text.contains("dto child"),
@@ -1425,7 +1358,7 @@ mod tests {
             view_models: vec![],
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         assert_eq!(lines.len(), 1);
         let text = &lines[0].spans;
         assert!(text.iter().any(|s| s.content.contains("3 searches")));
@@ -1437,7 +1370,7 @@ mod tests {
             label: Some("Round 2".into()),
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         assert_eq!(lines.len(), 1);
     }
 
@@ -1447,7 +1380,7 @@ mod tests {
             label: None,
             content_hash: 0,
         });
-        let lines = render_v2_vm(&vm, 80, false);
+        let lines = render_v2_vm(&vm, 80);
         assert_eq!(lines.len(), 1);
     }
 }
