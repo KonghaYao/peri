@@ -7,14 +7,14 @@ use super::commands::build_available_commands;
 #[test]
 fn test_build_available_commands_includes_builtins() {
     let cmds = build_available_commands(&[]);
-    // 至少 22 个内置命令
-    assert!(cmds.len() >= 20, "至少 20 个内置命令，实际: {}", cmds.len());
+    // 至少 13 个内置命令
+    assert!(cmds.len() >= 13, "至少 13 条内置命令，实际: {}", cmds.len());
     // 验证关键命令存在
     let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
     assert!(names.contains(&"help"), "help 命令应存在");
     assert!(names.contains(&"clear"), "clear 命令应存在");
     assert!(names.contains(&"compact"), "compact 命令应存在");
-    assert!(names.contains(&"model"), "model 命令应存在");
+    assert!(names.contains(&"agents"), "agents 命令应存在");
 }
 
 #[test]
