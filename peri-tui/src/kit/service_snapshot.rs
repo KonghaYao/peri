@@ -162,6 +162,7 @@ async fn tick_once(
             Ok(metas) => metas
                 .into_iter()
                 .filter(|m| !m.hidden) // 主列表不显示子 agent
+                .filter(|m| m.message_count > 0) // 不显示无消息的空 thread
                 .map(|m| ThreadSummary {
                     id: m.id.clone(),
                     title: m.title.clone(),

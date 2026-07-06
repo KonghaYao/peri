@@ -22,6 +22,7 @@ use ratatui_kit::{
     },
 };
 use std::sync::{Arc, Mutex};
+use unicode_width::UnicodeWidthChar;
 
 use parking_lot::RwLock;
 use std::sync::OnceLock;
@@ -330,6 +331,14 @@ impl EditorState {
             .nth(char_idx)
             .expect("cursor must stay within character bounds")
     }
+}
+
+/// 计算字符串前 char_idx 个字符的显示列宽度（CJK 字符占 2 列）。
+fn display_width_before(s: &str, char_idx: usize) -> usize {
+    s.chars()
+        .take(char_idx)
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
 }
 
 #[derive(Default, Props)]
@@ -643,6 +652,12 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
     let composer_lines = build_composer_lines(lines, loading);
 
+    // 显式背景色：防止 Paragraph 文本缩短时旧内容残留（ghosting）。
+    // 未设背景时 ratatui 仅渲染文本 span，超出新文本的列保留终端原有像素。
+    let composer_paragraph = Paragraph::new(composer_lines)
+        .block(build_composer_block(loading))
+        .style(Style::default().bg(theme::semantic().surface.default));
+
     element!(
         View(
             flex_direction: Direction::Vertical,
@@ -710,7 +725,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         width: Constraint::Fill(1),
                         height: Constraint::Length(composer_height),
                     ) {
-                        Text(text: Paragraph::new(composer_lines).block(build_composer_block(loading)))
+                        Text(text: composer_paragraph)
                     }
                 ).into_any()
             } else {
@@ -1099,7 +1114,8 @@ fn render_multiline_with_cursor(text: &str, cursor: usize, loading: bool) -> Vec
         return vec![if loading {
             Line::from("")
         } else {
-            Line::from(vec![Span::styled("\u{258C}", cursor_style)])
+            // 空态光标：styled space 与行尾光标保持一致，避免 ▓ 块与终端默认光标重叠产生"双光标"
+            Line::from(vec![Span::styled(" ", cursor_style)])
         }];
     }
 
@@ -1146,20 +1162,32 @@ fn render_multiline_with_cursor(text: &str, cursor: usize, loading: bool) -> Vec
     let mut result: Vec<Line<'static>> = Vec::with_capacity(end - start);
     for (li, line) in text.split('\n').enumerate().skip(start).take(end - start) {
         if li == target_line {
-            let col_byte = EditorState::char_to_byte(line, target_col);
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            if col_byte > 0 {
-                spans.push(Span::raw(line[..col_byte].to_string()));
+            // 用 unicode-width 计算光标所在显示列，确保 CJK 双宽字符定位正确。
+            // 与 text_selection.rs:visual_col_to_byte_offset 同策略。
+            let visual_col = display_width_before(line, target_col);
+            let mut col = 0usize;
+            let mut cut_byte = 0usize;
+            for (i, ch) in line.char_indices() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if col + cw > visual_col {
+                    break;
+                }
+                col += cw;
+                cut_byte = i + ch.len_utf8();
             }
-            if col_byte < line.len() {
-                // 高亮当前字符
-                let next_end = line[col_byte..]
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if cut_byte > 0 {
+                spans.push(Span::raw(line[..cut_byte].to_string()));
+            }
+            if cut_byte < line.len() {
+                // 反色高亮光标所在字符（用户期望的"字反色"行为）
+                let next_end = line[cut_byte..]
                     .chars()
                     .next()
-                    .map(|c| col_byte + c.len_utf8())
+                    .map(|c| cut_byte + c.len_utf8())
                     .unwrap_or(line.len());
                 spans.push(Span::styled(
-                    line[col_byte..next_end].to_string(),
+                    line[cut_byte..next_end].to_string(),
                     cursor_style,
                 ));
                 if next_end < line.len() {
@@ -1316,6 +1344,84 @@ mod tests {
     fn test_render_multiline_empty_shows_cursor() {
         let lines = render_multiline_with_cursor("", 0, false);
         assert_eq!(lines.len(), 1);
+        // 空态：单行，光标为反色 space（字符反色风格）
+        let spans = &lines[0].spans;
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, " ");
+    }
+
+    #[test]
+    fn test_render_multiline_empty_loading_shows_blank() {
+        let lines = render_multiline_with_cursor("", 0, true);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].spans.is_empty() || lines[0].spans.iter().all(|s| s.content.is_empty()));
+    }
+
+    #[test]
+    fn test_render_multiline_cjk_cursor_mid_line() {
+        // "你好世界" (4 CJK chars, 8 display cols), cursor 在位置 2（"好"之后即"世"上）
+        let lines = render_multiline_with_cursor("你好世界", 2, false);
+        assert_eq!(lines.len(), 1);
+        // spans: [Span("你好"), Span("世", cursor_style), Span("界")]
+        assert_eq!(lines[0].spans.len(), 3);
+        assert_eq!(lines[0].spans[0].content, "你好");
+        // 光标字符应为反色高亮
+        assert!(
+            !lines[0].spans[1].style.bg.is_none() || !lines[0].spans[1].style.fg.is_none(),
+            "cursor span should have non-default style (reversed fg/bg)"
+        );
+        assert_eq!(lines[0].spans[2].content, "界");
+    }
+
+    #[test]
+    fn test_render_multiline_cjk_cursor_at_start() {
+        // "你好", cursor 在位置 0（"你"上）
+        let lines = render_multiline_with_cursor("你好", 0, false);
+        assert_eq!(lines.len(), 1);
+        // spans: [Span("你", cursor_style), Span("好")]
+        assert_eq!(lines[0].spans.len(), 2);
+        assert!(
+            !lines[0].spans[0].style.bg.is_none(),
+            "cursor span should have background (reversed)"
+        );
+        assert_eq!(lines[0].spans[1].content, "好");
+    }
+
+    #[test]
+    fn test_render_multiline_cjk_cursor_at_end() {
+        // "你好", cursor 在位置 2（末尾）
+        let lines = render_multiline_with_cursor("你好", 2, false);
+        assert_eq!(lines.len(), 1);
+        // spans: [Span("你好"), Span(" ", cursor_style)]
+        assert_eq!(lines[0].spans.len(), 2);
+        assert_eq!(lines[0].spans[0].content, "你好");
+        assert_eq!(lines[0].spans[1].content, " ");
+    }
+
+    #[test]
+    fn test_render_multiline_cjk_cursor_second_line() {
+        // "abc\n你好", cursor 在位置 5（第二行"好"上）
+        let lines = render_multiline_with_cursor("abc\n你好", 5, false);
+        assert_eq!(lines.len(), 2);
+        // 第一行无光标
+        assert_eq!(lines[0].spans.len(), 1);
+        assert_eq!(lines[0].spans[0].content, "abc");
+        // 第二行：["你", Span("好", cursor_style)]
+        assert_eq!(lines[1].spans.len(), 2);
+        assert_eq!(lines[1].spans[0].content, "你");
+        assert!(
+            !lines[1].spans[1].style.bg.is_none(),
+            "cursor span should have background"
+        );
+    }
+
+    #[test]
+    fn test_display_width_before_cjk() {
+        assert_eq!(display_width_before("abc", 2), 2);
+        assert_eq!(display_width_before("abc", 0), 0);
+        assert_eq!(display_width_before("你好世界", 2), 4); // 2 CJK chars = 4 cols
+        assert_eq!(display_width_before("你好世界", 1), 2);
+        assert_eq!(display_width_before("你好", 3), 4); // 超出 char 数返回全宽
     }
 
     #[test]

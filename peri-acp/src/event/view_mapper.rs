@@ -376,7 +376,7 @@ fn convert_agent_tool(
         agent_id: agent_id.clone(),
         agent_name: tool_name.to_string(),
         view_models: Vec::new(),
-        collapsed: !is_error, // expand on error so user sees the failure
+        collapsed: false,
         is_running: false,
         content_hash: hash_str(&format!("{}|{}|0|{}|false", agent_id, tool_name, !is_error)),
     })

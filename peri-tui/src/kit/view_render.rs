@@ -632,43 +632,83 @@ fn render_subagent_group(
         return with_message_spacing(lines);
     }
 
+    // 截断：SubAgent 展开区只显示最后 5 个 ToolCard，其余省略。
+    // 非 ToolCard 的子消息（如 ReasoningBlock、SystemNote 等）不计数、不截断。
+    let tool_count = children
+        .iter()
+        .filter(|vm| matches!(vm, ViewModel::ToolCard(_)))
+        .count();
+    let keep_from = tool_count.saturating_sub(5);
+    let mut tool_idx = 0;
+    let mut skipped = 0;
+
     for inner_vm in &children {
         if matches!(inner_vm, ViewModel::AssistantBubble(_)) {
             continue;
+        }
+        if matches!(inner_vm, ViewModel::ToolCard(_)) {
+            tool_idx += 1;
+            if tool_idx <= keep_from {
+                skipped += 1;
+                continue;
+            }
         }
         let inner_lines = render_v2_vm(inner_vm, width, diff_visible);
         if inner_lines.is_empty() {
             continue;
         }
-        for line in inner_lines {
+        // SubAgent 展开区内移除嵌套消息的 leading/trailing 空行
+        // （render_v2_vm 对 ToolCard 等会调用 with_message_spacing 包裹空行）
+        let start = inner_lines
+            .iter()
+            .position(|l| !l.spans.is_empty())
+            .unwrap_or(0);
+        let end = inner_lines
+            .iter()
+            .rposition(|l| !l.spans.is_empty())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let trimmed = &inner_lines[start..end];
+        for line in trimmed {
             let mut new_spans = vec![Span::raw("  ")];
-            new_spans.extend(line.spans);
+            new_spans.extend(line.spans.iter().cloned());
             lines.push(Line::from(new_spans));
         }
     }
 
-    // 显示 final_result 摘要（如果完成且有结果）
+    if skipped > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("  … ", Style::default().fg(semantic.text.dim)),
+            Span::styled(
+                format!("{} more tools", skipped),
+                Style::default().fg(semantic.text.muted),
+            ),
+        ]));
+    }
+
+    // 显示 final_result 摘要（如果完成且有结果，最多前 3 行）
     if let Some(ref s) = status
         && !s.is_running
         && let Some(ref result) = s.final_result
     {
-        let preview: String = result
+        let color = if s.is_error {
+            semantic.status.error
+        } else {
+            semantic.text.muted
+        };
+        let preview_lines: Vec<&str> = result
             .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(80)
+            .filter(|l| !l.trim().is_empty())
+            .take(3)
             .collect();
-        if !preview.is_empty() {
-            let color = if s.is_error {
-                semantic.status.error
-            } else {
-                semantic.text.muted
-            };
-            lines.push(Line::from(vec![
-                Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim)),
-                Span::styled(preview, Style::default().fg(color)),
-            ]));
+        for line_text in preview_lines {
+            let truncated: String = line_text.chars().take(80).collect();
+            if !truncated.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim)),
+                    Span::styled(truncated, Style::default().fg(color)),
+                ]));
+            }
         }
     }
 
