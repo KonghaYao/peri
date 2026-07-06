@@ -45,6 +45,7 @@ pub fn spawn_acp_bridge(
                             // 在处理每个事件前检查是否需要重置 bridge 状态
                             let counter = atoms::BRIDGE_RESET_COUNTER.get();
                             if counter != last_reset_counter {
+                                let old_counter = last_reset_counter;
                                 last_reset_counter = counter;
                                 state.committed = Arc::from([]);
                                 state.current_turn.reset();
@@ -55,7 +56,7 @@ pub fn spawn_acp_bridge(
                                 // 防止 render_bridge 在下一次事件到达前读到旧数据。
                                 acp_events::push_view_models_for_reset();
                                 tracing::info!(
-                                    old = last_reset_counter,
+                                    old = old_counter,
                                     new = counter,
                                     "bridge: state reset by BRIDGE_RESET_COUNTER"
                                 );
