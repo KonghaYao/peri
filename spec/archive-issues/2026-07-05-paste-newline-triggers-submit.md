@@ -1,3 +1,5 @@
+> 归档于 2026-07-06，原路径 spec/issues/2026-07-05-paste-newline-triggers-submit.md
+
 # 输入框粘贴含换行文本时直接触发 Enter 提交
 
 **状态**：Fixed

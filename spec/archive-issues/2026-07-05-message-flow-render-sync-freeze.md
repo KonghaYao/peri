@@ -1,3 +1,5 @@
+> 归档于 2026-07-06，原路径 spec/issues/2026-07-05-message-flow-render-sync-freeze.md
+
 # 消息流渲染同步问题——提交后用户输入不显示、loading 卡死、history 恢复异常
 
 **状态**：Fixed

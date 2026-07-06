@@ -1,3 +1,5 @@
+> 归档于 2026-07-06，原路径 spec/issues/2026-07-06-enter-hello-cpu-spike.md
+
 # TUI 输入 hello 并 Enter 后 CPU 100%
 
 **状态**：Verified

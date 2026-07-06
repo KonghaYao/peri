@@ -1,3 +1,5 @@
+> 归档于 2026-07-06，原路径 spec/issues/2026-07-03-tui-double-slash-cpu-spike.md
+
 # TUI 输入区输入 // 导致 CPU 持续高负载
 
 **状态**：Verified

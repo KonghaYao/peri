@@ -34,7 +34,7 @@ ACP 事件 → acp_notifier → acp_bridge → dispatch_and_notify → VIEW_MODE
 
 render_bridge 监听 ACP 事件 + 宽度变化，预计算每条 ViewModel 的 `Vec<Line<'static>>` + `WrappedLineInfo`（视觉行映射），写入 `RENDER_CACHE`。message_area 基于 `wrap_map` 做二分查找视口裁剪，只渲染可见行。
 
-**[TRAP]** `/clear` 命令必须同步重置 `RENDER_CACHE`，否则旧缓存残留。
+**[TRAP]** `/clear` 命令必须同步重置 `RENDER_CACHE`，否则旧缓存残留。所有视图更新必须走统一事件渠道（本地提交也需触发渲染刷新），禁止旁路 RENDER_CACHE。（详见 spec/global/domains/tui.md#issue_2026-07-05-message-flow-render-sync-freeze）
 **[TRAP]** ratatui-kit 事件边界：消息区只处理鼠标滚轮 `Event::Mouse(MouseEventKind::Scroll*)`，编辑区只处理键盘编辑/导航事件。`InputArea` Up/Down 应先做多行光标移动，只在首/末行时才 history fallback。
 
 ### 跨 task 共享状态排障铁律（2026-07-05 双 bug 教训）
@@ -51,7 +51,9 @@ render_bridge 监听 ACP 事件 + 宽度变化，预计算每条 ViewModel 的 `
 
 **铁律 2：ratatui-kit hook 修了就要逐行枚举。** 任何 `hooks.use_*` 调用点变更后，必须列出该组件中**每一个 hook 调用**（行号 + 类型），对比场景 A/场景 B 两帧的调用列表是否完全一致。肉眼扫一眼不可靠——`build_footer_lines` 就是漏了第 5 个 `use_state(once)`。
 
-**[TRAP]** 涉及 ratatui-kit `#[component]` 或接收 `&mut Hooks` 的函数内部，**所有** `hooks.use_*` 调用必须在任何 `if`/`match`/`return` 之前——ratatui-kit 按调用顺序索引 hook，顺序/数量变化会触发 `"Hook type mismatch"` panic 或状态数据错位。
+**[TRAP]** 涉及 ratatui-kit `#[component]` 或接收 `&mut Hooks` 的函数内部，**所有** `hooks.use_*` 调用必须在任何 `if`/`match`/`return` 之前——ratatui-kit 按调用顺序索引 hook，顺序/数量变化会触发 `"Hook type mismatch"` panic 或状态数据错位。（详见 spec/global/domains/tui.md#issue_2026-07-05-enter-clear-hook-mismatch-panic）
+
+**[TRAP]** ratatui-kit render body 中禁止写 atom——render 期间任何 atom 写入会与组件生命周期交互形成 render → state write → render 自激回路。事件处理器负责所有状态变更，render 仅做只读展示。（详见 spec/global/domains/tui.md#issue_2026-07-03-tui-double-slash-cpu-spike）
 **[TRAP]** /clear 和 thread 切换时必须递增 `BRIDGE_RESET_COUNTER`，acp_bridge 在下次事件处理前检测到变更会自动清空 `committed`/`has_view_commit`/`current_turn`/`is_loading`。仅在 atom 层面重置不足以清除旧 session 残留。`BRIDGE_RESET_COUNTER` 是跨 session 的桥梁状态重置，/clear 或 thread 切换前必须先 +1。
 
 ### ratatui-kit overlay 白屏教训
@@ -68,6 +70,7 @@ render_bridge 监听 ACP 事件 + 宽度变化，预计算每条 ViewModel 的 `
 - EventBus 3 层：render/state/observe → `ExecutorEvent` → event_tx。
 - Compact 由 `stages/compact.rs` 统一处理（`/compact` 命令也复用）。
 - v2 `MessageQueue` 作为统一异步消息通道：cron/channel/workflow/bg_results push → polling drain_for_end → submit_message 续跑。
+- **[TRAP]** ACP 通知覆盖度：`acp_notifier` 生命周期中的所有事件（包括结束类 AgentDone→TurnDone）必须完整转发，遗漏导致 UI 状态残留（loading 卡死等）。（详见 spec/global/domains/tui.md#issue_2026-07-06-enter-hello-cpu-spike）
 
 ## Workflow 故障排查
 
@@ -171,7 +174,7 @@ TUI 纯 ACP client，通过 `MpscTransport` 通信。Frozen Data Flow：`frozen_
 - 字符串截断用 `chars().take(N)`（`&s[..N]` 对 CJK panic）。终端列宽用 `unicode-width`。
 - 快捷键：禁止 `Shift+字母`；优先 `Ctrl+字母`；不用 PageUp/Down。
 - 禁止 `ℹ`（U+2139）和 `[i]` 前缀。
-- `Event::Paste` 独立于 key event 链。
+- `Event::Paste` 独立于 key event 链。需启用 BracketedPaste 确保粘贴内容合并为单个 Event::Paste，缺失会导致换行符被解析为 Enter 提交。（详见 spec/global/domains/tui.md#issue_2026-07-05-paste-newline-triggers-submit）
 
 ## 测试风格
 
@@ -182,3 +185,4 @@ TUI 纯 ACP client，通过 `MpscTransport` 通信。Frozen Data Flow：`frozen_
 - 测试隔离：`App::save_config(cfg, self.config_path_override.as_deref())`
 - `std::sync::RwLockReadGuard` 不是 Send → async 跨 `.await` 用 `parking_lot::RwLock`
 - App 状态拆分：`ServiceRegistry`（跨会话）+ `GlobalUiState`（UI 临时）
+- **[TRAP]** u16 坐标偏移计算必须使用 `saturating_add`/`saturating_sub`，禁止裸 `+`/`-`；单一滚动机制，ScrollView 与 Paragraph 内置滚动不能叠加；剪贴板等阻塞系统 I/O 用 `std::thread::spawn` 独立线程。（详见 spec/global/domains/tui.md#issue_2026-07-05-message-area-crashes-and-rendering）
