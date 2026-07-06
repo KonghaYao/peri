@@ -83,7 +83,7 @@ pub fn spawn_render_bridge(
                     // 检测 BRIDGE_RESET_COUNTER——acp_bridge 已清空 VIEW_MODELS，
                     // render_bridge 同步清空缓存，避免用旧数据重建 RENDER_CACHE。
                     let counter = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
-                    if counter != last_reset_counter {
+                    let did_clear = if counter != last_reset_counter {
                         last_reset_counter = counter;
                         cache = RenderCache::default();
                         msg_hashes.clear();
@@ -92,22 +92,62 @@ pub fn spawn_render_bridge(
                         last_committed_len = 0;
                         last_ct_ptr = 0;
                         *RENDER_CACHE.state().write() = cache.clone();
-                        info!("render_bridge: cache cleared by BRIDGE_RESET_COUNTER");
-                    }
+                        info!(counter, "render_bridge: cache cleared by BRIDGE_RESET_COUNTER");
+                        true
+                    } else {
+                        false
+                    };
 
-                    let Some(snapshot) = read_ready_snapshot(last_committed_ptr, last_committed_len, last_ct_ptr).await else {
+                    let Some(mut snapshot) = read_ready_snapshot(last_committed_ptr, last_committed_len, last_ct_ptr).await else {
                         info!("render_bridge: event dropped (VIEW_MODELS unchanged after 5 retries)");
                         continue;
                     };
+
+                    // 竞态修复：BRIDGE_RESET_COUNTER 清零后，acp_bridge 可能还未处理
+                    // 本次事件并写入新数据。因两个 tokio task 并发消费同一事件，
+                    // render_bridge 可能在 acp_bridge 之前读取 VIEW_MODELS，
+                    // 导致读到旧 session 数据或刚被 push_view_models_for_reset
+                    // 清空的中间态。yield 等待 acp_bridge 完成 ViewCommit 写入。
+                    if did_clear {
+                        let initial_ptr =
+                            Arc::as_ptr(&snapshot.committed) as *const () as usize;
+                        for wait_round in 0..15 {
+                            tokio::task::yield_now().await;
+                            let fresh = VIEW_MODELS.state().read().clone();
+                            let fresh_ptr =
+                                Arc::as_ptr(&fresh.committed) as *const () as usize;
+                            if fresh_ptr != initial_ptr {
+                                let fresh_len = fresh.committed.len();
+                                info!(wait_round, fresh_len, "render_bridge: BRIDGE_RESET race resolved, acp_bridge committed updated");
+                                snapshot = fresh;
+                                break;
+                            }
+                        }
+                    }
+
                     log_ct_snapshot(&snapshot, "render_bridge: processing snapshot");
                     let committed_ptr = Arc::as_ptr(&snapshot.committed) as *const () as usize;
                     let committed_len = snapshot.committed.len();
                     let ct_ptr = Arc::as_ptr(&snapshot.current_turn) as *const () as usize;
 
+                    debug!(
+                        did_clear,
+                        committed_ptr,
+                        committed_len,
+                        ct_ptr,
+                        last_committed_ptr,
+                        last_committed_len,
+                        last_ct_ptr,
+                        msg_hashes_len = msg_hashes.len(),
+                        cache_entries = cache.entries.len(),
+                        "render_bridge: pre-decision snapshot state"
+                    );
+
                     if committed_ptr == last_committed_ptr
                         && committed_len == last_committed_len
                         && ct_ptr == last_ct_ptr
                     {
+                        debug!(committed_ptr, committed_len, ct_ptr, "render_bridge: NO_CHANGE, skipping rebuild");
                         continue;
                     }
 
@@ -116,13 +156,23 @@ pub fn spawn_render_bridge(
                         let new_hashes = extract_hashes(&snapshot.committed);
                         let stable = prefix_stable_len(&new_hashes, &msg_hashes);
 
+                        debug!(
+                            stable,
+                            snapshot_committed_len = snapshot.committed.len(),
+                            msg_hashes_len = msg_hashes.len(),
+                            cache_entries_before = cache.entries.len(),
+                            "render_bridge: committed_ptr CHANGED, choosing rebuild strategy"
+                        );
+
                         if snapshot.committed.len() < msg_hashes.len() {
+                            debug!("render_bridge: strategy=CLEAR_AND_REBUILD (len decreased)");
                             // Thread 切换或 clear——清空所有历史缓存
                             msg_hashes.clear();
                             msg_lines_cache.clear();
                             cache.entries.clear();
                             rebuild_entries(&mut cache.entries, &snapshot.committed, &snapshot.current_turn, last_resize_width).await;
                         } else if stable > 0 && snapshot.committed.len() >= msg_hashes.len() {
+                            debug!(stable, "render_bridge: strategy=HASH_DIFF_APPEND");
                             // 仅追加变化部分——只对 stable.. 范围做 markdown 解析
                             cache.entries.retain(|(key, _)| !matches!(key, VmKey::CurrentTurn(_)));
                             // 截断到 stable 位置（稳定前缀）
@@ -138,6 +188,12 @@ pub fn spawn_render_bridge(
                             ).await;
                             rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, last_resize_width).await;
                         } else if committed_len > last_committed_len && cache.entries.len() >= last_committed_len {
+                            debug!(
+                                committed_len,
+                                last_committed_len,
+                                cache_entries = cache.entries.len(),
+                                "render_bridge: strategy=INCREMENTAL_APPEND (same ptr, more items)"
+                            );
                             // 原有增量路径
                             cache.entries.retain(|(key, _)| !matches!(key, VmKey::CurrentTurn(_)));
                             append_entries(
@@ -149,11 +205,26 @@ pub fn spawn_render_bridge(
                             ).await;
                             rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, last_resize_width).await;
                         } else {
+                            debug!(
+                                committed_len,
+                                last_committed_len,
+                                cache_entries = cache.entries.len(),
+                                "render_bridge: strategy=FULL_REBUILD (fallback, ptr changed but no branch matched)"
+                            );
                             rebuild_entries(&mut cache.entries, &snapshot.committed, &snapshot.current_turn, last_resize_width).await;
                         }
 
                         msg_hashes = new_hashes;
                     } else if ct_ptr != last_ct_ptr {
+                        debug!(
+                            ct_ptr,
+                            last_ct_ptr,
+                            committed_ptr,
+                            last_committed_ptr,
+                            committed_len,
+                            last_committed_len,
+                            "render_bridge: REBUILD_CURRENT_TURN (only ct_ptr changed)"
+                        );
                         rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, last_resize_width).await;
                     }
 
@@ -166,6 +237,11 @@ pub fn spawn_render_bridge(
                         .cloned()
                         .collect();
                     cache.wrap_map = build_wrap_map(&all_lines, last_resize_width as u16);
+                    debug!(
+                        cache_entries = cache.entries.len(),
+                        wrap_map_len = cache.wrap_map.len(),
+                        "render_bridge: writing RENDER_CACHE"
+                    );
                     *RENDER_CACHE.state().write() = cache.clone();
                     last_committed_ptr = committed_ptr;
                     last_committed_len = committed_len;
