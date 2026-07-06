@@ -250,13 +250,10 @@ pub(crate) async fn handle_request(
                 dispatch::load_session_messages(cfg.thread_store.as_ref(), req_session_id).await;
 
             // Emit view-commit to populate v2 state.view with loaded history
-            if let Some(payload) =
-                dispatch::build_session_view_commit_payload(req_session_id, &history)
-            {
-                let _ = transport
-                    .send_notification("peri/unstable-event", payload)
-                    .await;
-            }
+            let payload = dispatch::build_session_view_commit_payload(req_session_id, &history);
+            let _ = transport
+                .send_notification("peri/unstable-event", payload)
+                .await;
 
             // Insert into sessions if not already present
             if let Some(state) = sessions.get_mut(req_session_id) {
@@ -516,13 +513,11 @@ pub(crate) async fn handle_request(
                 .get(req_session_id)
                 .map(|s| s.history.clone())
                 .unwrap_or_default();
-            if let Some(payload) =
-                dispatch::build_session_view_commit_payload(req_session_id, &existing_history)
-            {
-                let _ = transport
-                    .send_notification("peri/unstable-event", payload)
-                    .await;
-            }
+            let payload =
+                dispatch::build_session_view_commit_payload(req_session_id, &existing_history);
+            let _ = transport
+                .send_notification("peri/unstable-event", payload)
+                .await;
 
             // ── Freeze session data at resume time ──
             cfg.session_manager.ensure_session(req_session_id, cwd);

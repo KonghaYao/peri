@@ -36,24 +36,24 @@ pub async fn load_session_messages(
 /// and returns a `{ sessionId, event, data }` JSON payload suitable for
 /// sending through the transport's `send_notification()` method.
 ///
-/// Always returns `Some`——even for empty history. An empty (but present)
-/// ViewCommit is required by the TUI bridge to clear stale VIEW_MODELS
-/// from the previous session.
+/// Always returns a ViewCommit payload——even for empty history. An empty
+/// (but present) ViewCommit is required by the TUI bridge to clear stale
+/// VIEW_MODELS from the previous session.
 pub fn build_session_view_commit_payload(
     session_id: &str,
     history: &[BaseMessage],
-) -> Option<serde_json::Value> {
+) -> serde_json::Value {
     let vms = if history.is_empty() {
         Vec::new()
     } else {
         let mut vm = crate::event::ViewMapperImpl::new();
         vm.convert(history)
     };
-    Some(json!({
+    json!({
         "sessionId": session_id,
         "event": "view-commit",
         "data": { "view_models": vms },
-    }))
+    })
 }
 
 #[cfg(test)]
