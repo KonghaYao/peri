@@ -97,7 +97,6 @@ pub fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
 
 struct LineCache {
     key: u64,
-    current_has_ct: bool,
     /// 从 highlighted_lines 重建的完整 wrap_map（含 spinner/todo 视觉行）
     /// 仅在内容变化（key 变更）时重建，滚动/选区变化复用缓存。
     cached_wrap_map: Vec<WrappedLineInfo>,
@@ -125,7 +124,6 @@ impl Default for LineCache {
     fn default() -> Self {
         Self {
             key: 0,
-            current_has_ct: false,
             cached_wrap_map: Vec::new(),
             cached_line_count: 0,
             cached_width: 0,
@@ -283,25 +281,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     };
 
     if line_cache.read().key != new_key {
-        let mut ct = false;
-        for (key, _entry) in cache_snapshot.entries.iter() {
-            if matches!(key, crate::kit::render_bridge::VmKey::CurrentTurn(_)) {
-                ct = true;
-            }
-        }
         let mut lc = line_cache.write();
         lc.key = new_key;
-        lc.current_has_ct = ct;
         // key 变更 → 内容已变化，cached_wrap_map 需重建，
         // 通过清空 cached_line_count 触发后续 rebuild。
         lc.cached_wrap_map.clear();
         lc.cached_line_count = 0;
         lc.cached_width = 0;
     }
-
-    let lc_data = line_cache.read();
-    let current_has_ct = lc_data.current_has_ct;
-    drop(lc_data);
 
     // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
     // [TRAP] build_footer_lines 内部调用 hooks.use_state，必须每帧按相同顺序执行，
