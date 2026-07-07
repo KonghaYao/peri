@@ -15,7 +15,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, MESSAGE_VIEWPORT, RENDER_CACHE};
+use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, RENDER_CACHE};
 use crate::kit::focus_router;
 use crate::kit::panel_registry::clean_scrollbars;
 use crate::kit::render_bridge::WrappedLineInfo;
@@ -457,7 +457,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                             MouseEventKind::Down(MouseButton::Left) => {
                                 // 开始文本拖拽选中
                                 text_sel.write().start_drag(line_idx as u16, col_in_line);
-                                auto_scroll.set(false);
                             }
                             MouseEventKind::Drag(MouseButton::Left) => {
                                 let mut sel = text_sel.write();
@@ -465,7 +464,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                                     sel.update_drag(line_idx as u16, col_in_line);
                                 }
                                 drop(sel);
-                                auto_scroll.set(false);
                             }
                             MouseEventKind::Up(MouseButton::Left) => {
                                 let mut sel = text_sel.write();
@@ -491,7 +489,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                                 if !was_dragging {
                                     sel.clear();
                                 }
-                                auto_scroll.set(false);
                             }
                             _ => {}
                         }
@@ -511,10 +508,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     }
                 }
 
-                // 仅在 auto_scroll 为 true 时才写入，避免每次鼠标事件触发不必要的 re-render
-                if auto_scroll.get() {
-                    auto_scroll.set(false);
-                }
                 return EventResult::Consumed;
             }
 
@@ -522,7 +515,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             if let Event::Key(key) = &event {
                 if key.kind == KeyEventKind::Press && focus_router::message_accepts_key(key) {
                     scroll_state.write().handle_event(&event);
-                    auto_scroll.set(false);
                     return EventResult::Consumed;
                 }
             }
@@ -570,12 +562,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 视口裁剪 ──
     let scroll_y = scroll_state.read().offset().y as u16;
     let (first, last, _local_offset) = viewport_clip(&wrap_map, scroll_y, vis_height);
-    *MESSAGE_VIEWPORT.state().write() = crate::kit::atoms::MessageViewportSnapshot {
-        scroll_y,
-        vis_height,
-        first_line: first,
-        last_line: last,
-    };
+    *crate::kit::atoms::message_viewport_snapshot().write() =
+        crate::kit::atoms::MessageViewportSnapshot {
+            scroll_y,
+            vis_height,
+            first_line: first,
+            last_line: last,
+        };
 
     let visible_lines: Vec<Line<'static>> =
         highlighted_lines.get(first..last).unwrap_or(&[]).to_vec();
