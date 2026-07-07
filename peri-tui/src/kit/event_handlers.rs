@@ -118,13 +118,6 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
                 }
                 EventResult::Consumed
             }
-            Some(GlobalShortcut::ToggleDiff) => {
-                let diff_visible = crate::kit::atoms::DIFF_VISIBLE.state();
-                let mut g = diff_visible.write();
-                *g = !*g;
-                tracing::info!(diff_visible = *g, "切换 diff 视图");
-                EventResult::Consumed
-            }
             Some(GlobalShortcut::CycleModel) => {
                 *MODEL_HIGHLIGHT_UNTIL.state().write() =
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(2));

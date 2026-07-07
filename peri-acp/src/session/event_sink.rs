@@ -179,6 +179,11 @@ impl EventSink for TransportEventSink {
         }
     }
 
+    // 设计决策：ACP v1 无 turn_done SessionUpdate tag，TurnDone 信号通过
+    // peri/agent_event_done 传输层通知传递。TUI 侧 acp_client/client.rs:188 将
+    // transport 层 "peri/agent_event_done" method 映射为 AcpNotification::AgentDone，
+    // acp_notifier.rs:127 再将 AgentDone 转换为 AcpEventData::TurnDone 推入双 bridge。
+    // 若未来 ACP 标准协议新增 turn_done tag，应迁移至 session/update 标准通道。
     async fn push_done(&self, session_id: &str) {
         debug!(session_id = %session_id, "EventSink: sending agent_event_done");
         if let Err(e) = self

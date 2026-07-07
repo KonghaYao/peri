@@ -61,6 +61,11 @@ pub fn spawn_acp_bridge(
                                 state.has_turn_done = false;
                                 state.is_loading = false;
                                 state.popup_kind = None;
+                                // 同步清空 INPUT_BUFFER：/clear 和 thread_load 切换时，
+                                // 递增 BRIDGE_RESET_COUNTER 触发此分支，旧会话 loading
+                                // 期间缓存的输入必须丢弃，防止新会话首个 TurnDone 时
+                                // drain_input_buffer() 把旧输入泄漏到新会话。
+                                atoms::INPUT_BUFFER.state().write().clear();
                                 acp_events::push_view_models_for_reset();
                                 tracing::info!(
                                     old = old_counter,

@@ -48,17 +48,16 @@ pub fn format_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
                 .unwrap_or("");
             format!("{} {}", op, path)
         }
-        "WebSearch" | "WebFetch" => {
-            let key = if tool_name == "WebSearch" {
-                "query"
-            } else {
-                "url"
-            };
-            args.get(key)
-                .and_then(|v| v.as_str())
-                .map(|s| truncate(s, 60))
-                .unwrap_or_default()
-        }
+        "WebSearch" => args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate(s, 60))
+            .unwrap_or_default(),
+        "WebFetch" => args
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
         "ExecuteExtraTool" | "SearchExtraTools" => {
             let key = if tool_name == "ExecuteExtraTool" {
                 "tool_name"
@@ -154,5 +153,26 @@ mod tests {
     fn test_format_tool_args_folder_operations() {
         let args = serde_json::json!({"operation": "list", "folder_path": "/tmp"});
         assert_eq!(format_tool_args("folder_operations", &args), "list /tmp");
+    }
+
+    #[test]
+    fn test_format_websearch_query_truncated() {
+        // WebSearch query 超过 60 字符时应截断
+        let long = "q".repeat(80);
+        let args = serde_json::json!({"query": &long});
+        let result = format_tool_args("WebSearch", &args);
+        assert!(result.len() <= 63, "应为 60 字符 + '...'");
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_format_webfetch_url_not_truncated() {
+        // WebFetch url 不截断，返回原始字符串
+        let long_url =
+            "https://example.com/very/long/path/that/exceeds/sixty/characters/total/here.txt";
+        assert!(long_url.chars().count() > 60, "测试用 url 长度应 > 60");
+        let args = serde_json::json!({"url": &long_url});
+        let result = format_tool_args("WebFetch", &args);
+        assert_eq!(result, long_url, "WebFetch url 不应被截断");
     }
 }

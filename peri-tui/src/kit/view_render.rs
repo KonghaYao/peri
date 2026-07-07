@@ -242,13 +242,13 @@ fn render_tool_card(data: &peri_acp_types::view_model::ToolCardData) -> Vec<Line
         ]));
     }
 
-    // 折叠/展开判断（纯 UI 决策，对应 TUI-PAGE.md §2.4.2）
+    // 折叠/展开判断（纯 UI 决策，对应 TUI-TOOLCALL.md §1.3）
     let collapsed = if data.is_error {
         false // 错误不折叠
     } else if AUTO_EXPAND.contains(&data.tool_name.as_str()) {
         false // AgentResult/ExecuteExtraTool 自动展开
-    } else if FORCE_EXPAND_ON_COMPLETE.contains(&data.tool_name.as_str()) && !data.is_running {
-        false // Write/Edit 完成后强制展开
+    } else if FORCE_EXPAND_ON_COMPLETE.contains(&data.tool_name.as_str()) {
+        data.is_running // Write/Edit 运行中折叠，完成后展开
     } else {
         COLLAPSED_BY_DEFAULT.contains(&data.tool_name.as_str())
     };
@@ -422,16 +422,60 @@ fn compact_output_lines(text: &str, max_lines: usize, max_chars: usize) -> Vec<S
 
 fn render_system_note(data: &peri_acp_types::view_model::SystemNoteData) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
-    let color = match data.level {
-        NoteLevel::Error => semantic.status.error,
-        NoteLevel::Warning => semantic.status.warning,
-        _ => semantic.text.muted,
-    };
     let mut lines: Vec<Line<'static>> = Vec::new();
     for line_text in data.text.lines() {
-        let prefix = Span::styled("· ", Style::default().fg(semantic.text.dim));
-        let content = Span::styled(line_text.to_string(), Style::default().fg(color));
-        lines.push(Line::from(vec![prefix, content]));
+        let (prefix_str, color) = if line_text.starts_with('\u{273B}') {
+            // ✻ 元信息前缀 → dim 色
+            ("✻ ", semantic.text.dim)
+        } else if line_text.starts_with("⎿") {
+            // 行首 ⎿（无缩进）→ muted 色
+            ("⎿ ", semantic.text.muted)
+        } else if line_text.starts_with("  ⎿") {
+            // 缩进 ⎿ → error 色
+            ("  ⎿ ", semantic.status.error)
+        } else if line_text.contains('\u{274C}')
+            || line_text.contains("失败")
+            || line_text.contains("error")
+        {
+            // 含 ❌/失败/error 关键词 → error 色，无前缀
+            ("", semantic.status.error)
+        } else if line_text.contains("warning") || line_text.contains("warn") {
+            // 含 warning/warn 关键词 → warning 色，无前缀
+            ("", semantic.status.warning)
+        } else {
+            // 其余行 → muted 色，无前缀
+            ("", semantic.text.muted)
+        };
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        // 跳过已消费的前缀字符
+        let content_text = if prefix_str.contains('\u{273B}') {
+            spans.push(Span::styled(
+                "✻ ".to_string(),
+                Style::default().fg(semantic.text.dim),
+            ));
+            line_text.strip_prefix('\u{273B}').unwrap_or(line_text)
+        } else if prefix_str.contains("⎿") && prefix_str.starts_with("  ") {
+            spans.push(Span::styled(
+                "  ⎿ ".to_string(),
+                Style::default().fg(semantic.text.dim),
+            ));
+            line_text.strip_prefix("  ⎿").unwrap_or(line_text)
+        } else if prefix_str.contains("⎿") {
+            spans.push(Span::styled(
+                "⎿ ".to_string(),
+                Style::default().fg(semantic.text.dim),
+            ));
+            line_text.strip_prefix("⎿").unwrap_or(line_text)
+        } else {
+            line_text
+        };
+        if !content_text.is_empty() {
+            spans.push(Span::styled(
+                content_text.to_string(),
+                Style::default().fg(color),
+            ));
+        }
+        lines.push(Line::from(spans));
     }
     lines
 }
@@ -547,15 +591,24 @@ fn render_subagent_group(data: &SubAgentGroupData, width: usize) -> Vec<Line<'st
         Vec::new()
     };
 
-    // 截断：SubAgent 展开区只显示最后 5 个 ToolCard，其余省略。
-    // 非 ToolCard 的子消息（如 ReasoningBlock、SystemNote 等）不计数、不截断。
+    // 折叠摘要：ToolCard 超过 5 个时，前 N-5 个渲染为单行 "▶ N collapsed tools"，
+    // 最后 5 个正常渲染。非 ToolCard 子消息始终正常渲染。
     let tool_count = children
         .iter()
         .filter(|vm| matches!(vm, ViewModel::ToolCard(_)))
         .count();
-    let keep_from = tool_count.saturating_sub(5);
+    let collapse_count = tool_count.saturating_sub(5);
     let mut tool_idx = 0;
-    let mut skipped = 0;
+
+    if collapse_count > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("  ▶ ", Style::default().fg(semantic.text.dim)),
+            Span::styled(
+                format!("{} collapsed tools", collapse_count),
+                Style::default().fg(semantic.text.muted),
+            ),
+        ]));
+    }
 
     for inner_vm in &children {
         if matches!(inner_vm, ViewModel::AssistantBubble(_)) {
@@ -563,8 +616,8 @@ fn render_subagent_group(data: &SubAgentGroupData, width: usize) -> Vec<Line<'st
         }
         if matches!(inner_vm, ViewModel::ToolCard(_)) {
             tool_idx += 1;
-            if tool_idx <= keep_from {
-                skipped += 1;
+            // 跳过被折叠的前 N-5 个 ToolCard
+            if tool_idx <= collapse_count {
                 continue;
             }
         }
@@ -576,7 +629,7 @@ fn render_subagent_group(data: &SubAgentGroupData, width: usize) -> Vec<Line<'st
                 .into_iter()
                 .filter(|l| {
                     let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                    !text.contains("⎿") && !text.contains("📝")
+                    !text.contains("⎿")
                 })
                 .collect()
         } else {
@@ -602,16 +655,6 @@ fn render_subagent_group(data: &SubAgentGroupData, width: usize) -> Vec<Line<'st
             new_spans.extend(line.spans.iter().cloned());
             lines.push(Line::from(new_spans));
         }
-    }
-
-    if skipped > 0 {
-        lines.push(Line::from(vec![
-            Span::styled("  … ", Style::default().fg(semantic.text.dim)),
-            Span::styled(
-                format!("{} more tools", skipped),
-                Style::default().fg(semantic.text.muted),
-            ),
-        ]));
     }
 
     // 显示 final_result 摘要（如果完成且有结果，最多前 3 行）
@@ -1521,5 +1564,155 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80);
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn test_tool_card_write_running_collapsed() {
+        // Write 运行中应折叠（FORCE_EXPAND_ON_COMPLETE + is_running → collapsed=true）
+        RENDER_CALL_COUNT.with(|c| c.store(0, Ordering::Relaxed));
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-write-running".into(),
+            tool_name: "Write".into(),
+            input_summary: "path: foo.rs".into(),
+            output_summary: "writing...".into(),
+            is_error: false,
+            is_running: true,
+            running_duration_ms: None,
+            diff: None,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80);
+        let text = collect_text(&lines);
+        // 折叠态只显示 1 行 output_summary
+        let output_lines: Vec<_> = lines
+            .iter()
+            .filter(|l| {
+                let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                t.contains("writing...")
+            })
+            .collect();
+        assert_eq!(
+            output_lines.len(),
+            1,
+            "Write 运行中折叠态应仅显示 1 行输出摘要：{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_tool_card_edit_running_collapsed() {
+        // Edit 运行中应折叠（FORCE_EXPAND_ON_COMPLETE + is_running → collapsed=true）
+        RENDER_CALL_COUNT.with(|c| c.store(0, Ordering::Relaxed));
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-edit-running".into(),
+            tool_name: "Edit".into(),
+            input_summary: "path: foo.rs".into(),
+            output_summary: "applying edit...".into(),
+            is_error: false,
+            is_running: true,
+            running_duration_ms: None,
+            diff: None,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80);
+        let text = collect_text(&lines);
+        let output_lines: Vec<_> = lines
+            .iter()
+            .filter(|l| {
+                let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                t.contains("applying edit...")
+            })
+            .collect();
+        assert_eq!(
+            output_lines.len(),
+            1,
+            "Edit 运行中折叠态应仅显示 1 行输出摘要：{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_subagent_group_collapsed_summary_replaces_hard_truncation() {
+        // 超过 5 个 ToolCard 时，前 N-5 个应显示为 "▶ N collapsed tools" 摘要
+        let tool_cards: Vec<ViewModel> = (0..8)
+            .map(|i| {
+                ViewModel::ToolCard(ToolCardData {
+                    tool_id: format!("tc-{}", i),
+                    tool_name: "Read".into(),
+                    input_summary: format!("file_{}.rs", i),
+                    output_summary: format!("{} lines", i),
+                    is_error: false,
+                    is_running: false,
+                    running_duration_ms: None,
+                    diff: None,
+                    content_hash: 0,
+                })
+            })
+            .collect();
+        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+            agent_id: "sa-collapse".into(),
+            agent_name: "Agent".into(),
+            view_models: tool_cards,
+            collapsed: false,
+            is_running: false,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80);
+        let text = collect_text(&lines);
+        // 8 个 ToolCard，collapse_count = 3
+        assert!(
+            text.contains("▶ 3 collapsed tools"),
+            "应显示折叠摘要行：{}",
+            text
+        );
+        // 前 3 个 ToolCard 不应出现
+        assert!(
+            !text.contains("file_0.rs"),
+            "被折叠的 ToolCard 不应渲染：{}",
+            text
+        );
+        // 最后 5 个 ToolCard 应正常渲染
+        assert!(
+            text.contains("file_5.rs"),
+            "最后 5 个 ToolCard 应正常渲染：{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_system_note_prefix_classification() {
+        let vm = ViewModel::SystemNote(peri_acp_types::view_model::SystemNoteData {
+            text: "✻ 元信息行\n⎿ 结果引用行\n  ⎿ 错误摘要行\n正常行含 ❌ 关键词\n含 warning 关键词的行\n其余普通行"
+                .into(),
+            level: NoteLevel::Info,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80);
+        assert_eq!(lines.len(), 6, "6 行输入应产生 6 行输出");
+
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+
+        // 第 1 行：✻ 前缀，内容无原始前缀
+        assert!(text[0].starts_with("✻"), "✻ 行应以 ✻ 前缀开头：{}", text[0]);
+        // 不应再有旧的 · 前缀
+        assert!(
+            text.iter().all(|t| !t.contains("· ")),
+            "不应再使用旧的 · 前缀：{:?}",
+            text
+        );
+        // 第 4 行含 ❌ 应 error 色
+        let error_color_line = &lines[3];
+        let has_error = error_color_line.spans.iter().any(|s| {
+            s.content.contains("❌") && s.style.fg == Some(theme::semantic().status.error)
+        });
+        assert!(has_error, "含 ❌ 的行应 error 色");
     }
 }

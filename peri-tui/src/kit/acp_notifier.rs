@@ -269,15 +269,16 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            // ACP SDK ToolCallUpdate wraps output/status inside "fields" struct
+            // ACP SDK ToolCallUpdate 使用 #[serde(flatten)] 将 rawOutput/status 合并到顶层；
+            // 先尝试顶层字段（flatten 后的正确格式），再 fallback 到 fields 嵌套（兼容旧格式）。
             let output_summary = update
-                .get("fields")
-                .and_then(|f| f.get("rawOutput"))
+                .get("rawOutput")
+                .or_else(|| update.get("fields").and_then(|f| f.get("rawOutput")))
                 .map(|v| serde_json::to_string(v).unwrap_or_default())
                 .unwrap_or_default();
             let is_error = update
-                .get("fields")
-                .and_then(|f| f.get("status"))
+                .get("status")
+                .or_else(|| update.get("fields").and_then(|f| f.get("status")))
                 .and_then(|v| v.as_str())
                 .map(|s| s == "failed")
                 .unwrap_or(false);
@@ -573,8 +574,10 @@ mod tests {
         shutdown.cancel();
     }
 
+    /// 验证 tool_call_update 的顶层 flatten 格式（ACP SDK 实际序列化格式）：
+    /// rawOutput/status 被 #[serde(flatten)] 合并到 update 顶层。
     #[tokio::test]
-    async fn test_session_update_tool_call_update_to_tool_ended() {
+    async fn test_session_update_tool_call_update_flattened_format() {
         let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
 
         notif_tx
@@ -585,10 +588,8 @@ mod tests {
                     "update": {
                         "sessionUpdate": "tool_call_update",
                         "toolCallId": "tc-1",
-                        "fields": {
-                            "rawOutput": "output content",
-                            "status": "failed"
-                        }
+                        "rawOutput": "output content",
+                        "status": "failed"
                     }
                 }),
             })
@@ -602,6 +603,42 @@ mod tests {
                 assert!(te.is_error);
             }
             other => panic!("expected ToolEnded, got {other:?}"),
+        }
+
+        shutdown.cancel();
+    }
+
+    /// 验证 tool_call_update 的 fields 嵌套格式（fallback 兼容路径）：
+    /// rawOutput/status 在 fields 子对象内。
+    #[tokio::test]
+    async fn test_session_update_tool_call_update_nested_fields_fallback() {
+        let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
+
+        notif_tx
+            .send(AcpNotification::SessionUpdate {
+                session_id: "s1".into(),
+                params: json!({
+                    "sessionId": "s1",
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "tc-2",
+                        "fields": {
+                            "rawOutput": "nested output",
+                            "status": "failed"
+                        }
+                    }
+                }),
+            })
+            .unwrap();
+
+        let ev = bridge_rx.recv().await.expect("expected one event");
+        match ev {
+            AcpEventData::ToolEnded(te) => {
+                assert_eq!(te.tool_id, "tc-2");
+                assert!(te.output_summary.contains("nested output"));
+                assert!(te.is_error);
+            }
+            other => panic!("expected ToolEnded from nested fields, got {other:?}"),
         }
 
         shutdown.cancel();

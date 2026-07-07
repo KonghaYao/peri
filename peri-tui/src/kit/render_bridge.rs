@@ -122,7 +122,7 @@ pub fn spawn_render_bridge(
                     };
 
                     let Some(mut snapshot) = read_ready_snapshot(last_committed_ptr, last_committed_len, last_ct_ptr).await else {
-                        info!("render_bridge: event dropped (VIEW_MODELS unchanged after 5 retries)");
+                        info!("render_bridge: event dropped (VIEW_MODELS unchanged after 50 yields)");
                         continue;
                     };
 
@@ -215,7 +215,7 @@ pub fn spawn_render_bridge(
                                 committed_len,
                                 last_committed_len,
                                 cache_entries = cache.entries.len(),
-                                "render_bridge: strategy=INCREMENTAL_APPEND (same ptr, more items)"
+                                "render_bridge: strategy=INCREMENTAL_APPEND (ptr changed, len grew)"
                             );
                             // 原有增量路径
                             cache.entries.retain(|(key, _)| !matches!(key, VmKey::CurrentTurn(_)));
@@ -282,19 +282,28 @@ async fn read_ready_snapshot(
     last_committed_len: usize,
     last_ct_ptr: usize,
 ) -> Option<crate::kit::atoms::ViewModelsSnapshot> {
-    for _ in 0..5 {
+    let mut prev_committed_ptr = last_committed_ptr;
+    let mut prev_ct_ptr = last_ct_ptr;
+    for _ in 0..50 {
         let snapshot = VIEW_MODELS.state().read().clone();
         let committed_ptr = Arc::as_ptr(&snapshot.committed) as *const () as usize;
         let committed_len = snapshot.committed.len();
         let ct_ptr = Arc::as_ptr(&snapshot.current_turn) as *const () as usize;
-        if committed_ptr != last_committed_ptr
-            || committed_len != last_committed_len
-            || ct_ptr != last_ct_ptr
-        {
+        // ptr 变化意味着 acp_bridge 已写入新数据，即使 len 相同也返回
+        if committed_ptr != prev_committed_ptr || ct_ptr != prev_ct_ptr {
             return Some(snapshot);
         }
+        if committed_len != last_committed_len || ct_ptr != last_ct_ptr {
+            return Some(snapshot);
+        }
+        prev_committed_ptr = committed_ptr;
+        prev_ct_ptr = ct_ptr;
         tokio::task::yield_now().await;
     }
+    tracing::warn!(
+        target = "render_bridge",
+        "snapshot not ready after 50 yields"
+    );
     None
 }
 

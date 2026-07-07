@@ -21,9 +21,8 @@ use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
 use crate::kit::atoms::{
-    ACP_STATE, BRIDGE_RESET_COUNTER, DIFF_VISIBLE, NOTIFICATION, PERI_CONFIG_HANDLE,
-    PERMISSION_MODE_HANDLE, RENDER_CACHE, RENDER_HEARTBEAT, REWIND_ACTION_TX, VIEW_MODELS,
-    ViewModelsSnapshot,
+    ACP_STATE, BRIDGE_RESET_COUNTER, NOTIFICATION, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE,
+    RENDER_CACHE, RENDER_HEARTBEAT, REWIND_ACTION_TX, VIEW_MODELS, ViewModelsSnapshot,
 };
 use crate::kit::render_bridge::RenderCache;
 
@@ -188,7 +187,6 @@ enum ViewAction {
     CycleModel,
     CycleProvider,
     CyclePermissionMode,
-    ToggleDiff,
     ExportText(ExportMode),
 }
 
@@ -199,7 +197,6 @@ fn resolve_view_action(input: &str) -> Option<ViewAction> {
         "/model" => Some(ViewAction::CycleModel),
         "/provider" => Some(ViewAction::CycleProvider),
         "/mode" => Some(ViewAction::CyclePermissionMode),
-        "/diff" => Some(ViewAction::ToggleDiff),
         "/debug-export-text" => Some(ViewAction::ExportText(parse_export_mode(input))),
         _ => None,
     }
@@ -259,11 +256,6 @@ fn execute_view_action(action: &ViewAction, acp_client: &AcpTuiClient, cwd: &str
                 };
                 mode_handle.store(next);
             }
-        }
-        ViewAction::ToggleDiff => {
-            let state = DIFF_VISIBLE.state();
-            let mut visible = state.write();
-            *visible = !*visible;
         }
         ViewAction::ExportText(mode) => {
             let message = match export_debug_text(*mode, cwd) {
@@ -517,10 +509,6 @@ mod tests {
             Some(ViewAction::CyclePermissionMode)
         ));
         assert!(matches!(
-            resolve_view_action("/diff"),
-            Some(ViewAction::ToggleDiff)
-        ));
-        assert!(matches!(
             resolve_view_action("/debug-export-text"),
             Some(ViewAction::ExportText(ExportMode::All))
         ));
@@ -533,6 +521,7 @@ mod tests {
             Some(ViewAction::ExportText(ExportMode::Screen))
         ));
         assert!(resolve_view_action("/clear").is_none());
+        assert!(resolve_view_action("/diff").is_none());
         assert!(resolve_view_action("hello").is_none());
     }
 

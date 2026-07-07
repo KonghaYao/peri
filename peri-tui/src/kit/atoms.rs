@@ -221,8 +221,6 @@ pub static SLASH_PREFIX: AtomStatic<String> = AtomStatic::new(|| String::new());
 pub static MENTION_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
 pub static SLASH_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
 
-pub static DIFF_VISIBLE: AtomStatic<bool> = AtomStatic::new(|| false);
-
 pub static REWIND_PREVIEW: AtomStatic<Option<RewindPreview>> = AtomStatic::new(|| None);
 pub static OAUTH_INFO: AtomStatic<Option<OauthNeeded>> = AtomStatic::new(|| None);
 pub static HITL_PENDING: AtomStatic<Option<HitlPending>> = AtomStatic::new(|| None);

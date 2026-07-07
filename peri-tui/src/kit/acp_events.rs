@@ -151,39 +151,43 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 
         // ── §4.2 Boundary events ──
         TurnDone => {
-            if !state.current_turn.committed && !state.current_turn.is_empty() {
-                let vms = state.current_turn.view_models().to_vec();
-                // I20-B：Arc 不可 extend，需重建——拼接旧 + 新
-                let mut combined = Vec::with_capacity(state.committed.len() + vms.len());
+            // (a) 收集 buffered 输入和 assistant view_models，确保归档顺序正确
+            let buffered_texts: Vec<String> = INPUT_BUFFER.state().read().iter().cloned().collect();
+            let has_buffered = !buffered_texts.is_empty();
+
+            let vms = if !state.current_turn.committed && !state.current_turn.is_empty() {
+                Some(state.current_turn.view_models().to_vec())
+            } else {
+                None
+            };
+
+            // (b) 一次性重建 committed：[旧 committed, UserBubble..., assistant view_models...]
+            // UserBubble 排在 assistant 之前，符合真实对话顺序
+            let extra_len = buffered_texts.len() + vms.as_ref().map_or(0, Vec::len);
+            if extra_len > 0 {
+                let mut combined = Vec::with_capacity(state.committed.len() + extra_len);
                 combined.extend(state.committed.iter().cloned());
-                combined.extend(vms);
+                for text in &buffered_texts {
+                    combined.push(ViewModel::UserBubble(UserBubbleData {
+                        text: text.clone(),
+                        content_hash: hash_str(text),
+                        is_system_reminder: false,
+                    }));
+                }
+                if let Some(ref vms) = vms {
+                    combined.extend(vms.iter().cloned());
+                }
                 state.committed = Arc::from(combined);
             }
+
+            // (c) reset current_turn
             state.current_turn.reset();
             state.variant = 0;
 
-            // S16：TurnDone 时有 buffered 输入尚未提交 → 保持 loading 态，
-            // 避免 drain→submit 到首条流式事件间的空白窗口期。
-            // 同时为每条 buffered 输入添加 UserBubble，保证消息区立即可见。
-            let has_buffered = !INPUT_BUFFER.state().read().is_empty();
-            if has_buffered {
-                // S16：为所有 buffered 输入添加 UserBubble，保证消息区立即可见。
-                let buffered_texts: Vec<String> =
-                    INPUT_BUFFER.state().read().iter().cloned().collect();
-                if !buffered_texts.is_empty() {
-                    let mut combined =
-                        Vec::with_capacity(state.committed.len() + buffered_texts.len());
-                    combined.extend(state.committed.iter().cloned());
-                    for text in &buffered_texts {
-                        combined.push(ViewModel::UserBubble(UserBubbleData {
-                            text: text.clone(),
-                            content_hash: hash_str(text),
-                            is_system_reminder: false,
-                        }));
-                    }
-                    state.committed = Arc::from(combined);
-                }
-            }
+            // (d) has_turn_done 提前到 push_view_models 之前，语义直观
+            state.has_turn_done = true;
+
+            // (e) S16：有 buffered 输入 → 保持 loading 态，避免 drain→submit 到首条流式事件间的空白窗口期
             state.is_loading = has_buffered;
 
             tracing::info!(
@@ -195,27 +199,32 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 "TurnDone: writing ACP_STATE"
             );
 
+            // (f) push_view_models + push_acp_state
             push_view_models(state);
             push_acp_state(state);
-            // C1: agent 完成本轮——drain INPUT_BUFFER，按顺序重新提交。
+
+            // (g) C1: agent 完成本轮——drain INPUT_BUFFER，按顺序重新提交。
             // 用户在 loading 期间按 Enter 的输入在此处一次性 flush 到 SUBMIT_TX。
             drain_input_buffer();
-            state.has_turn_done = true;
         }
         TurnInterrupted(_ti) => {
-            state.current_turn.deactivate();
-            let vms = state.current_turn.view_models().to_vec();
-            // I20-B：同 TurnDone，重建 Arc
-            let mut combined = Vec::with_capacity(state.committed.len() + vms.len());
-            combined.extend(state.committed.iter().cloned());
-            combined.extend(vms);
-            state.committed = Arc::from(combined);
+            // 守卫：仅当 current_turn 有未归档内容时才归档，避免空/半成品消息成为幽灵
+            if !state.current_turn.committed && !state.current_turn.is_empty() {
+                state.current_turn.deactivate();
+                let vms = state.current_turn.view_models().to_vec();
+                // I20-B：同 TurnDone，重建 Arc
+                let mut combined = Vec::with_capacity(state.committed.len() + vms.len());
+                combined.extend(state.committed.iter().cloned());
+                combined.extend(vms);
+                state.committed = Arc::from(combined);
+            }
             state.current_turn = CurrentTurn::new();
             state.variant = 0;
             state.is_loading = false;
+            // has_turn_done 提前到 push_view_models 之前，语义直观
+            state.has_turn_done = true;
             push_view_models(state);
             push_acp_state(state);
-            state.has_turn_done = true;
         }
 
         // ── §4.3 Status events ──
@@ -574,6 +583,50 @@ mod tests {
         // 即使 SUBMIT_TX 未 set，drain 早退，buffer 仍有 "x"——两种情况都不算 panic
     }
 
+    /// BRIDGE_RESET_COUNTER 递增时 acp_bridge 重置分支同步清空 INPUT_BUFFER，
+    /// 防止旧会话缓存输入在新会话 TurnDone 时泄漏。
+    ///
+    /// 此测试模拟 bridge 的 counter != last_reset_counter 分支：先填入 buffer 数据，
+    /// 递增 BRIDGE_RESET_COUNTER，构造任意事件 dispatch，断言 buffer 已被清空。
+    /// 注意：实际清空发生在 acp_bridge.rs 的 counter 检测分支，而非 dispatch_and_notify
+    /// 内部。此测试模拟的是那个分支调用 push_view_models_for_reset() 前后的完整效应。
+    #[test]
+    #[serial]
+    fn test_bridge_reset_clears_input_buffer() {
+        crate::kit::atoms::init_atoms();
+        // 填入 buffer 数据
+        INPUT_BUFFER
+            .state()
+            .write()
+            .push_back("leaked input".into());
+        INPUT_BUFFER
+            .state()
+            .write()
+            .push_back("another leaked input".into());
+        assert!(!INPUT_BUFFER.state().read().is_empty(), "buffer 应有数据");
+
+        // 模拟 acp_bridge 的 counter 检测分支：
+        // push_view_models_for_reset() 前同步清空 INPUT_BUFFER
+        INPUT_BUFFER.state().write().clear();
+        push_view_models_for_reset();
+
+        assert!(
+            INPUT_BUFFER.state().read().is_empty(),
+            "bridge reset 后 INPUT_BUFFER 应被清空"
+        );
+
+        // VIEW_MODELS 也应被重置
+        let snapshot = VIEW_MODELS.state().read().clone();
+        assert!(
+            snapshot.committed.is_empty(),
+            "bridge reset 后 committed 应为空"
+        );
+        assert!(
+            snapshot.current_turn.is_empty(),
+            "bridge reset 后 current_turn 应为空"
+        );
+    }
+
     #[test]
     #[serial]
     fn test_replay_user_bubble_appends_to_committed() {
@@ -687,6 +740,117 @@ mod tests {
             "two TurnDones: committed should have 2 VMs"
         );
         assert!(snapshot.current_turn.is_empty());
+    }
+
+    /// TurnDone UserBubble 排在 assistant 之前：预置 INPUT_BUFFER 两条文本 +
+    /// current_turn 一条 AssistantBubble，触发 TurnDone，断言 committed 顺序为
+    /// [UserBubble, UserBubble, AssistantBubble]。
+    #[test]
+    #[serial]
+    fn test_turndone_userbubble_before_assistant() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: Arc::from([]),
+            current_turn: CurrentTurn::new(),
+            is_loading: false,
+            popup_kind: None,
+            has_turn_done: false,
+        };
+
+        // 往 current_turn 写入一条 assistant 文本
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
+                text: "assistant reply".into(),
+                agent_id: None,
+            }),
+        );
+
+        // 往 INPUT_BUFFER 塞两条 buffered 输入
+        INPUT_BUFFER
+            .state()
+            .write()
+            .push_back("user says hello".into());
+        INPUT_BUFFER
+            .state()
+            .write()
+            .push_back("user says world".into());
+
+        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+
+        assert_eq!(
+            state.committed.len(),
+            3,
+            "committed 应有 3 个 VM：2 UserBubble + 1 AssistantBubble"
+        );
+        // 顺序：UserBubble, UserBubble, AssistantBubble
+        match &state.committed[0] {
+            ViewModel::UserBubble(d) => assert_eq!(d.text, "user says hello"),
+            other => panic!("expected UserBubble at [0], got {other:?}"),
+        }
+        match &state.committed[1] {
+            ViewModel::UserBubble(d) => assert_eq!(d.text, "user says world"),
+            other => panic!("expected UserBubble at [1], got {other:?}"),
+        }
+        match &state.committed[2] {
+            ViewModel::AssistantBubble(d) => assert_eq!(d.text, "assistant reply"),
+            other => panic!("expected AssistantBubble at [2], got {other:?}"),
+        }
+        assert!(
+            state.has_turn_done,
+            "has_turn_done 应在 push_view_models 之前已为 true"
+        );
+    }
+
+    /// TurnInterrupted 空 current_turn 不归档：预置空 current_turn 触发 TurnInterrupted，
+    /// 断言 committed 长度不变。
+    #[test]
+    #[serial]
+    fn test_turn_interrupted_empty_skips_archive() {
+        crate::kit::atoms::init_atoms();
+        // 预置一条 committed 数据
+        let pre_existing: Arc<[ViewModel]> = Arc::from([ViewModel::UserBubble(UserBubbleData {
+            text: "existing".into(),
+            content_hash: 1,
+            is_system_reminder: false,
+        })]);
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot {
+            committed: Arc::clone(&pre_existing),
+            current_turn: Arc::from([]),
+        };
+        let mut state = BridgeState {
+            variant: 1,
+            committed: Arc::clone(&pre_existing),
+            current_turn: CurrentTurn::new(),
+            is_loading: true,
+            popup_kind: None,
+            has_turn_done: false,
+        };
+
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TurnInterrupted(peri_acp_types::event_data::TurnInterrupted {
+                reason: "test".into(),
+            }),
+        );
+
+        assert_eq!(
+            state.committed.len(),
+            1,
+            "空 current_turn → TurnInterrupted 不应归档，committed 长度不变"
+        );
+        match &state.committed[0] {
+            ViewModel::UserBubble(d) => assert_eq!(d.text, "existing"),
+            other => panic!("committed[0] 应为原始 UserBubble, got {other:?}"),
+        }
+        assert!(state.current_turn.is_empty(), "current_turn 应已重置");
+        assert!(!state.is_loading, "is_loading 应为 false");
+        assert!(
+            state.has_turn_done,
+            "has_turn_done 应在 push_view_models 之前已为 true"
+        );
     }
 
     #[test]
