@@ -5,9 +5,10 @@
 //!   （text-chunk / reasoning-chunk / tool-started / tool-ended / view-commit /
 //!   turn-done / ...）通过 `peri/unstable-event` notification 携带，event 字段是
 //!   kebab-case 字符串，data 是 JSON——这恰好匹配 `AcpEventData::decode` 的输入。
-//! - **AgentEvent DTO 暂时忽略**：`peri/agent_event` 携带的 AcpEvent 变体
-//!   （TurnCommitted/StateSnapshotMeta/CompactCompleted/...）属于 v2 低频 DTO，
-//!   kit 路径目前只关心 unstable-event 流。S5+ 扩展时再接入。
+//! - **AgentEvent DTO 已接入**：`peri/agent_event` 携带的 AcpEvent 变体
+//!   （SubagentStarted/SubagentStopped）通过 `convert_agent_event` 转换为
+//!   AcpEventData 推入双 bridge channel。未映射变体（TurnCommitted/
+//!   StateSnapshotMeta/CompactCompleted/...）保持静默丢弃，S5+ 迭代扩展。
 //!
 //! 该任务是**纯转换 + channel push**——不做状态突变。
 
@@ -89,7 +90,8 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
 
 /// 把单条 `AcpNotification` 转换并推入 bridge channel。
 ///
-/// 设计决策见模块级注释：UnstableEvent 是主通道，其他变体目前 silent drop。
+/// 设计决策见模块级注释：UnstableEvent 是流式主通道，
+/// AgentEvent 通过 `convert_agent_event` 转换后以双通道形式推送。
 fn forward_notification(
     bridge_tx: &mpsc::UnboundedSender<AcpEventData>,
     render_bridge_tx: &mpsc::UnboundedSender<AcpEventData>,
