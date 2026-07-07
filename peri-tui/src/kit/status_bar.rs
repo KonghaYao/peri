@@ -78,8 +78,8 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ));
     }
 
-    // 4. CPU%
-    if snap.cpu_percent > 0.0 {
+    // 4. CPU%（仅在超过 50% 时显示）
+    if snap.cpu_percent > 50.0 {
         spans.push(separator());
         spans.push(Span::styled(
             format!("CPU {:.0}%", snap.cpu_percent),

@@ -1,4 +1,4 @@
-use crate::textarea::{TextAreaState, display_width_before, render_multiline_with_cursor};
+use crate::textarea::{display_width_before, render_multiline_with_cursor, TextAreaState};
 use ratatui::style::{Color, Style};
 
 #[test]

@@ -147,6 +147,7 @@ impl BaseTool for McpResourceTool {
                             output.push(format!("[blob/{}]", mime));
                             output.push(format!("<{} bytes of binary data>", blob.len()));
                         }
+                        _ => {}
                     }
                 }
                 let formatted = output.join("\n");

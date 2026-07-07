@@ -2,9 +2,10 @@ use std::num::NonZeroU32;
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
 };
 use ring::pbkdf2::{self, PBKDF2_HMAC_SHA256};
+use ring::rand::{SecureRandom, SystemRandom};
 
 /// AES-256 密钥长度（32 字节）
 pub const AES_KEY_LEN: usize = 32;
@@ -39,7 +40,10 @@ pub fn derive_key(pair_code: &str) -> [u8; AES_KEY_LEN] {
 /// 随机生成 12 字节 IV，返回 `IV(12B) + ciphertext + auth_tag(16B)` 的拼接。
 pub fn encrypt(plaintext: &[u8], key: &[u8; AES_KEY_LEN]) -> Vec<u8> {
     let cipher = Aes256Gcm::new_from_slice(key).expect("AES-256 key must be 32 bytes");
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let rng = SystemRandom::new();
+    let mut nonce_bytes = [0u8; IV_LEN];
+    rng.fill(&mut nonce_bytes).expect("OS RNG should not fail");
+    let nonce = Nonce::try_from(&nonce_bytes[..]).expect("12 bytes should construct a valid Nonce");
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
         .expect("AES-GCM encryption should not fail with valid inputs");
@@ -65,9 +69,9 @@ pub fn decrypt(encrypted_data: &[u8], key: &[u8; AES_KEY_LEN]) -> anyhow::Result
 
     let (iv, ciphertext) = encrypted_data.split_at(IV_LEN);
     let cipher = Aes256Gcm::new_from_slice(key).expect("AES-256 key must be 32 bytes");
-    let nonce = Nonce::from_slice(iv);
+    let nonce = Nonce::try_from(iv).map_err(|e| anyhow::anyhow!("invalid nonce: {e}"))?;
     let plaintext = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| anyhow::anyhow!("AES-GCM decryption failed: {e}"))?;
     Ok(plaintext)
 }
