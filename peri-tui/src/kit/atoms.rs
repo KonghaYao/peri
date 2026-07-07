@@ -275,6 +275,10 @@ pub static RENDER_HEARTBEAT: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// Bridge 重置计数器——/clear 或 thread 切换时 +1，acp_bridge 检测到变更时
 /// 清空 committed / has_view_commit / current_turn，防止旧 session 的 VM
 /// 残留污染新 session 的消息区。
+///
+/// ACP server 在 session/new 响应后推送空 ViewCommit 清空旧 session 残留。
+/// bridge 只需在 counter 变更时重置内部状态——新 session 的空 ViewCommit
+/// 会通过正常事件流到达，确保 committed 清空。
 pub static BRIDGE_RESET_COUNTER: AtomStatic<u64> = AtomStatic::new(|| 0);
 
 /// Spinner token 计数——由 acp_bridge 在收到 TokenUsage 事件时写入（input+output），

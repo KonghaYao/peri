@@ -52,7 +52,6 @@ pub fn spawn_acp_bridge(
                     match event {
                         None => break,
                         Some(event) => {
-                            // 在处理每个事件前检查是否需要重置 bridge 状态
                             let counter = atoms::BRIDGE_RESET_COUNTER.get();
                             if counter != last_reset_counter {
                                 let old_counter = last_reset_counter;
@@ -62,8 +61,6 @@ pub fn spawn_acp_bridge(
                                 state.has_view_commit = false;
                                 state.is_loading = false;
                                 state.popup_kind = None;
-                                // 立即推送空快照到 VIEW_MODELS atom——
-                                // 防止 render_bridge 在下一次事件到达前读到旧数据。
                                 acp_events::push_view_models_for_reset();
                                 tracing::info!(
                                     old = old_counter,

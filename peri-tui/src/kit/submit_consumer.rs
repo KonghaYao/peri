@@ -82,6 +82,7 @@ async fn handle_submit(
     // /clear（及别名）不走 agent 协议——直接新开会话，清空 UI
     if is_clear_command(trimmed) {
         info!("kit submit_consumer: /clear intercepted, creating new session");
+
         // 触发 bridge 状态重置：防止旧 session committed 在新 session 中残留
         BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
 
@@ -105,9 +106,11 @@ async fn handle_submit(
         // 这些事件无后续 TurnDone 来清除 loading，必须手动再清理一次。
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
         *RENDER_CACHE.state().write() = RenderCache::default();
-        let ref_guard = ACP_STATE.state();
-        let mut acp = ref_guard.write();
-        acp.is_loading = false;
+        {
+            let ref_guard = ACP_STATE.state();
+            let mut acp = ref_guard.write();
+            acp.is_loading = false;
+        }
         return Ok(());
     }
 

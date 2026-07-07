@@ -18,7 +18,7 @@
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::acp_client::AcpTuiClient;
 use crate::kit::atoms;
@@ -117,13 +117,8 @@ async fn handle_load(
             .wrapping_add(1),
     );
 
-    acp_client
-        .load_session(&thread_id, cwd, None)
-        .await
-        .map_err(|e| {
-            warn!(error = %e, "kit thread_load_consumer: load_session RPC failed");
-            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-        })?;
+    acp_client.load_session(&thread_id, cwd, None).await?;
+
     Ok(())
 }
 

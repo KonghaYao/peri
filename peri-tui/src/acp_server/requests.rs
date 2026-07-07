@@ -146,6 +146,15 @@ pub(crate) async fn handle_request(
             );
             let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
             send_available_commands_update(transport, &session_id, &skills).await;
+
+            // Push empty ViewCommit — clears any stale committed from the previous session
+            // in the TUI bridge. FIFO ordering guarantees it arrives after all old-session
+            // events already in the notification pipeline.
+            let view_commit = dispatch::build_session_view_commit_payload(&session_id, &[]);
+            let _ = transport
+                .send_notification("peri/unstable-event", view_commit)
+                .await;
+
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
