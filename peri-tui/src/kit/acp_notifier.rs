@@ -21,6 +21,7 @@ use crate::kit::atoms::{ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS};
 use crate::kit::input_area::refresh_slash_items;
 use peri_acp_types::event_data::{AskUser, Question, QuestionOption};
 use serde_json::Value;
+use peri_acp::event::AcpEvent;
 
 /// 启动 kit ACP notifier 后台任务。
 ///
@@ -53,6 +54,37 @@ pub fn spawn_kit_notifier(
             }
         }
     })
+}
+
+/// 将 `peri/agent_event` 通道的 `AcpEvent` DTO 转换为 kit 层的 `AcpEventData`。
+///
+/// 当前映射列表（需与后续 S5+ 迭代同步扩展）：
+/// - `SubagentStarted` / `SubagentStopped` → 对应的 `AcpEventData` 变体
+/// - 其他变体返回 `None`（不存在对应的 `AcpEventData` 或以其他通道覆盖）
+fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
+    match event {
+        AcpEvent::SubagentStarted {
+            agent_name,
+            instance_id,
+            ..
+        } => Some(AcpEventData::SubagentStarted(
+            peri_acp_types::event_data::SubagentStarted {
+                agent_id: instance_id,
+                agent_name,
+            },
+        )),
+        AcpEvent::SubagentStopped { instance_id, .. } => {
+            Some(AcpEventData::SubagentStopped(
+                peri_acp_types::event_data::SubagentStopped {
+                    agent_id: instance_id,
+                },
+            ))
+        }
+        _ => {
+            debug!("kit ACP notifier: AcpEvent variant not yet mapped to AcpEventData, dropping");
+            None
+        }
+    }
 }
 
 /// 把单条 `AcpNotification` 转换并推入 bridge channel。
@@ -94,8 +126,19 @@ fn forward_notification(
         AcpNotification::Elicitation { id, params } => {
             handle_elicitation(&id, &params, bridge_tx, render_bridge_tx);
         }
-        // 暂未在 kit 路径处理——S5+ 接入 DTO 事件时再扩展
-        AcpNotification::AgentEvent { .. }
+        // peri/agent_event → AcpEvent → AcpEventData 转换
+        // SubagentStarted/SubagentStopped 首先映射至此通道；通过 convert_agent_event
+        // 转换为 kit 层 DTO 后推送（与 UnstableEvent 路径形成双通道冗余）。
+        AcpNotification::AgentEvent { event, .. } => {
+            if let Some(decoded) = convert_agent_event(event) {
+                if let Err(e) = bridge_tx.send(decoded.clone()) {
+                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping AgentEvent");
+                }
+                if let Err(e) = render_bridge_tx.send(decoded) {
+                    warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may stall");
+                }
+            }
+        }
         | AcpNotification::RequestPermission { .. }
         | AcpNotification::PredictionReady { .. }
         | AcpNotification::Peri { .. }
@@ -180,22 +223,21 @@ fn handle_elicitation(
 
 /// 从 CreateElicitationRequest JSON 中解析问题列表。
 ///
-/// JSON 结构（来自 agent-client-protocol-schema v0.13.6）:
+/// JSON 结构（CreateElicitationRequest 序列化后，#[serde(flatten)] 展开）:
 /// ```json
-/// {"formMode": {"schema": {"requestedSchema": {"properties": {
+/// {"mode": "form", "sessionId": "sess_1", "message": "...",
+///  "requestedSchema": {"type": "object", "properties": {
 ///   "q_id": {"type": "string", "title": "Header", "description": "Question text",
-///            "oneOf": [{"const": "label", "title": "label", "description": "..."}]},
+///            "oneOf": [{"const": "label", "title": "label"}]},
 ///   "multi_q_id": {"type": "array", "title": "...", "description": "...",
-///                  "items": {"anyOf": [{"const": "label", ...}]}}
-/// }}}}}
+///                  "items": {"anyOf": [{"const": "label", "title": "..."}]}}
+/// }}}
 /// ```
 ///
 /// 解析失败时返回空 Vec（弹窗显示 "0 questions"）。
 fn parse_elicitation_questions(params: &Value) -> Vec<Question> {
     let props = match params
-        .get("formMode")
-        .and_then(|fm| fm.get("schema"))
-        .and_then(|s| s.get("requestedSchema"))
+        .get("requestedSchema")
         .and_then(|rs| rs.get("properties"))
         .and_then(|p| p.as_object())
     {
@@ -358,8 +400,50 @@ mod tests {
         shutdown.cancel();
     }
 
+    /// 验证 AgentEvent 的 SubagentStarted 变体被正确转换并转发到 bridge。
+    /// SubagentStopped 同理（此处仅覆盖 SubagentStarted 作为 smoke test）。
     #[tokio::test]
-    async fn test_agent_event_dropped_for_now() {
+    async fn test_agent_event_forwards_subagent_started() {
+        let (notif_tx, mut bridge_rx, mut render_bridge_rx, shutdown) = spawn_test_notifier();
+
+        notif_tx
+            .send(AcpNotification::AgentEvent {
+                session_id: "s1".into(),
+                event: AcpEvent::SubagentStarted {
+                    agent_name: "explore".into(),
+                    instance_id: "abc-123".into(),
+                    is_background: false,
+                },
+            })
+            .unwrap();
+
+        let bridge_event = bridge_rx.recv().await.expect("bridge 应收 到 SubagentStarted");
+        match bridge_event {
+            AcpEventData::SubagentStarted(ss) => {
+                assert_eq!(ss.agent_id, "abc-123", "agent_id 应从 instance_id 映射");
+                assert_eq!(ss.agent_name, "explore");
+            }
+            other => panic!("expected SubagentStarted, got {other:?}"),
+        }
+
+        let render_event = render_bridge_rx
+            .recv()
+            .await
+            .expect("render bridge 应收到 SubagentStarted");
+        match render_event {
+            AcpEventData::SubagentStarted(ss) => {
+                assert_eq!(ss.agent_id, "abc-123");
+                assert_eq!(ss.agent_name, "explore");
+            }
+            other => panic!("expected SubagentStarted on render bridge, got {other:?}"),
+        }
+
+        shutdown.cancel();
+    }
+
+    /// 验证未映射的 AcpEvent 变体被静默丢弃（防御性测试）。
+    #[tokio::test]
+    async fn test_agent_event_unknown_variant_dropped() {
         let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
 
         notif_tx
@@ -372,12 +456,12 @@ mod tests {
             })
             .unwrap();
 
-        // AgentEvent DTO 目前 silent drop
+        // TurnCommitted 目前未映射 → 应被丢弃
         let result =
             tokio::time::timeout(std::time::Duration::from_millis(50), bridge_rx.recv()).await;
         assert!(
             matches!(result, Ok(None)) || result.is_err(),
-            "expected AgentEvent to be dropped, got {result:?}"
+            "expected unmapped AgentEvent to be dropped, got {result:?}"
         );
 
         shutdown.cancel();
