@@ -392,38 +392,34 @@ fn convert_agent_tool(
 // ---------------------------------------------------------------------------
 
 fn convert_ask_user_tool(
-    input: &serde_json::Value,
+    _input: &serde_json::Value,
     raw_content: &str,
     is_error: bool,
 ) -> ViewModel {
+    // 解析工具输出格式: "[问: H]\n回答: V\n\n[问: H2]\n回答: V2"
     let mut items = Vec::new();
-
-    // Extract questions from tool input: {"questions": [{"header": "...", "id": "..."}, ...]}
-    let questions: Vec<String> = input
-        .get("questions")
-        .and_then(|q| q.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|q| {
-                    q.get("header")
-                        .and_then(|h| h.as_str())
-                        .map(|s| s.to_string())
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Try to pair answers from raw_content (user response text).
-    // Format is typically question-per-line with answers following.
-    let answers: Vec<&str> = raw_content.lines().filter(|l| !l.is_empty()).collect();
-
-    // Pair questions with answers by index match.
-    for (i, header) in questions.into_iter().enumerate() {
-        let answer = answers.get(i).map(|s| s.to_string()).unwrap_or_default();
-        items.push(AskUserItem { header, answer });
+    let mut current_header: Option<String> = None;
+    for line in raw_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(h) = trimmed
+            .strip_prefix("[问: ")
+            .and_then(|s| s.strip_suffix(']'))
+        {
+            current_header = Some(h.to_string());
+        } else if let Some(v) = trimmed.strip_prefix("回答: ") {
+            if let Some(h) = current_header.take() {
+                items.push(AskUserItem {
+                    header: h,
+                    answer: v.to_string(),
+                });
+            }
+        }
     }
 
-    // If no structured questions found, emit a single item with raw content as answer.
+    // 解析失败时显示原始内容
     if items.is_empty() {
         items.push(AskUserItem {
             header: "Questions".to_string(),
