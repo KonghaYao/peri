@@ -15,7 +15,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, RENDER_CACHE};
+use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, MESSAGE_VIEWPORT, RENDER_CACHE};
 use crate::kit::focus_router;
 use crate::kit::panel_registry::clean_scrollbars;
 use crate::kit::render_bridge::WrappedLineInfo;
@@ -271,10 +271,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 缓存 key：仅 entries 数量/高度/loading/todo 变化时重建 ──
     let line_cache = hooks.use_state(|| LineCache::default());
     let scroll_state = hooks.use_state(ScrollViewState::default);
-    let mut auto_scroll = hooks.use_state(|| true);
-    let had_ct = hooks.use_state(|| false);
     let todo_hash = hash_todo_items(&todo_items);
-    let should_follow_on_content_change = auto_scroll.get();
     let new_key = {
         let h = raw_ch as u64;
         let l = entries_len as u64;
@@ -300,10 +297,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         lc.cached_wrap_map.clear();
         lc.cached_line_count = 0;
         lc.cached_width = 0;
-        // 内容变化时仅在当前仍处于跟随模式时继续滚到底；用户主动上滚后不抢回视口。
-        if should_follow_on_content_change {
-            auto_scroll.set(true);
-        }
     }
 
     let lc_data = line_cache.read();
