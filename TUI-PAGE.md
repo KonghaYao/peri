@@ -16,7 +16,7 @@
 - [3. InputArea 输入区域组件](#3-inputarea-输入区域组件)
 - [4. StatusBar 区域组件](#4-statusbar-区域组件)
 - [5. PanelOverlay 面板容器](#5-paneloverlay-面板容器)
-- [6. 14 个 Panel 页面设计](#6-14-个-panel-页面设计)
+- [6. 15 个 Panel 页面设计](#6-15-个-panel-页面设计)
 - [7. PopupOverlay 弹窗页面设计](#7-popupoverlay-弹窗页面设计)
 - [8. 面板导航与互斥关系](#8-面板导航与互斥关系)
 - [9. 快捷键设计规范](#9-快捷键设计规范)
@@ -167,14 +167,14 @@ v2 之后所有 TUI 组件以 ratatui-kit 为唯一 UI 范式。旧组件可以�
 | MessageArea | ratatui-kit native + adapter | 可短期包裹 legacy ViewModel renderer，但新 loading/todo 直接用 kit 组件 |
 | InputArea | ratatui-kit native | 手写 textarea 行为通过 props/state 进入组件，不暴露旧渲染入口 |
 | PanelOverlay | ratatui-kit native | 所有 Panel 由 registry 注入 component renderer |
-| PopupOverlay | ratatui-kit native | HITL / AskUser / Rewind / OAuth 由 registry 注入 component renderer |
+| PopupOverlay | ratatui-kit native | HITL / Rewind / OAuth 由 registry 注入 component renderer |
 | StatusBar | ratatui-kit native | 只消费 theme token 与 ACP snapshot |
 | Spinner | MessageArea 子组件，ratatui-kit wrapped widget | 使用 `peri-widgets/src/spinner`，通过 kit wrapper 接入 |
 | Todo / Plan | MessageArea 子组件，ratatui-kit native | 消费 `SessionUpdate::Plan` view state，显示在 Spinner 下方 |
 | Welcome | ratatui-kit native | 空会话 MessageArea 状态，窄屏需降级 |
 | SetupWizard | ratatui-kit native | 首启引导，禁止裸 `q` 关闭 |
-| 14 Panels | ratatui-kit native | 由 Panel Registry 注入，所有 Panel 只使用上下边框 |
-| 4 Popups | ratatui-kit native | 由 Popup Registry 注入；AskUser 只使用上下边框，其余 popup 可按语义保留 modal 边框 |
+| 15 Panels | ratatui-kit native | 由 Panel Registry 注入，所有 Panel 只使用上下边框 |
+| 3 Popups | ratatui-kit native | 由 Popup Registry 注入；HITL / Rewind / OAuth 可按语义保留 modal 边框 |
 | MentionPopup / SlashCompletion | ratatui-kit native | 与 InputArea 同宽，只使用上下边框 |
 
 ## Theme System v2
@@ -350,11 +350,11 @@ panel-payload
 ## 设计原则
 
 - **聊天优先**：默认界面始终以消息流为主体，所有能力围绕输入、回放、工具结果和状态反馈展开。
-- **抽屉式面板**：14 个 Panel 不是全屏 modal，而是插入消息区底部，打开时隐藏输入区，减少焦点冲突。
-- **弹窗高优先级**：HITL、AskUser、Rewind、OAuth 是根级覆盖，优先于面板和输入补全。
+- **抽屉式面板**：15 个 Panel 不是全屏 modal，而是插入消息区底部，打开时隐藏输入区，减少焦点冲突。
+- **弹窗高优先级**：HITL、Rewind、OAuth 是根级覆盖，优先于面板和输入补全。
 - **键盘可达**：面板统一使用方向键导航，`Enter` 确认，`Esc` 关闭；禁止 `j/k/q` 这类裸单字母承担导航或关闭能力。
 - **透明信息层级**：主文字、次级说明、弱提示、状态色遵循 Theme System 的 TEXT/MUTED/DIM 与功能色规范。
-- **边框克制**：InputArea、PanelOverlay、所有 Panel、@mention、Slash completion、AskUser Popup 只使用上下边框；禁止左右边框，保持聊天主界面横向通透。
+- **边框克制**：InputArea、PanelOverlay、所有 Panel、@mention、Slash completion 只使用上下边框；禁止左右边框，保持聊天主界面横向通透。
 
 ## 页面总览
 
@@ -394,7 +394,7 @@ panel-payload
 │ │ StatusBar：permission · cwd · provider/model · CPU · MEM + hints         │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
-│ PopupOverlay：Hitl / AskUser / Rewind / OAuth，居中覆盖，优先级最高           │
+│ PopupOverlay：Hitl / Rewind / OAuth，居中覆盖，优先级最高           │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -990,10 +990,9 @@ InputArea 内所有按键事件通过优先级链分发，同一事件只被最�
 5. Session Panel 键盘分发（Model/Agent/Hooks/Login/Config/ThreadBrowser）
 6. Global Panel 键盘分发（Status/Memory/Mcp/Cron/Plugin/Betas）
 7. OAuth popup
-8. AskUser popup
-9. Rewind popup
-10. HITL popup
-11. 主匹配块（Ctrl+C、Esc、↑/↓、Ctrl+V、Tab、Enter、Ctrl+U/D、Delete）
+8. Rewind popup
+9. HITL popup
+10. 主匹配块（Ctrl+C、Esc、↑/↓、Ctrl+V、Tab、Enter、Ctrl+U/D、Delete）
 12. tui_textarea 通用输入（字符插入、光标移动、退格、Delete、词级操作）
 ```
 
@@ -1234,7 +1233,7 @@ InputArea 内所有按键事件通过优先级链分发，同一事件只被最�
 - 面板打开时隐藏 InputArea。
 - 互斥组：Settings、Agent、Tools、Info、Thread；同组只保留一个。
 
-## 6. 14 个 Panel 页面设计
+## 6. 15 个 Panel 页面设计
 
 统一约束：所有 Panel 只使用上下边框，不使用左右边框；所有 Panel 的数据来源必须可追溯到 ACP standard、`session/query` snapshot 或 `peri/unstable-event` custom event。
 
@@ -1610,7 +1609,9 @@ Discover 视图：
 
 能力：展示工具名和输入参数，支持用户审批或拒绝工具执行。
 
-### 7.2 AskUser Popup
+### 7.2 AskUser Panel
+
+用户问答面板——当 agent 调用 AskUserQuestion 工具时，自动作为 Panel 内联在 MessageArea 和 InputArea 之间渲染（与 Thread Browser 等面板一致）。Tab 键在问题间切换，当前问题显示选项列表，Space 选中/取消，Enter 跳到下一个未确认问题或全部答完后提交，Esc 取消并标记失败。
 
 ```text
 ──────────────────────────── Ask User ────────────────────────────
@@ -1627,27 +1628,26 @@ Discover 视图：
   ○ 双栏监控
     适合长期运行任务
 
-  Tab::next-question · Shift+Tab::prev-question · ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+  Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel
 ──────────────────────────────────────────────────────────────────
 ```
 
-多问题切换状态：
+多问题已全部确认时：
 
 ```text
 ──────────────────────────── Ask User ────────────────────────────
-   布局方案  [启用能力]  备注
+  布局方案 ✓  启用能力 ✓  备注 ✓
 ──────────────────────────────────────────────────────────────────
-  是否启用实验能力
+  备注
 
-  ☑ Theme System v2
-  ☐ Side Inspector
-  ☑ ACP custom events
+  ○ 选项 A
+  ● 选项 B
 
-  Tab::next-question · Shift+Tab::prev-question · ↑/↓::navigate · Space::toggle · Enter::submit · Esc::cancel
+  Tab::next-question · ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
 ──────────────────────────────────────────────────────────────────
 ```
 
-能力：展示 Agent 发起的结构化问题，支持 1-4 个问题批量接收；顶部用 tabs 展示所有问题，当前 tab 展示一个问题内容，通过 `Tab` / `Shift+Tab` 切换问题。每个问题可为单选、多选或自定义输入；整体弹窗只使用上下边框，不使用左右边框。
+能力：展示 Agent 发起的结构化问题，支持 1-4 个问题批量接收；顶部用 tabs 展示所有问题，已回答项旁显示 ✓；当前 tab 展示一个问题内容，通过 `Tab` / `Shift+Tab` 切换。每个问题可为单选（○/●）或多选（☐/☑）；面板打开时隐藏 InputArea，与其他 Panel 行为一致。
 
 ### 7.3 Rewind Popup
 

@@ -146,7 +146,7 @@ message_area (ratatui-kit ScrollView)：
 | Popup | 触发源 | payload atom | 功能 |
 |-------|--------|--------------|------|
 | **HITL** | `AcpEventData::HitlPending` | `HITL_PENDING: Option<HitlPending>` | 显示真实 tool_name + tool_input + batch；Enter approve / Esc reject（I21-A） |
-| **AskUser** | `AcpEventData::AskUser` | `ASK_USER_PENDING: Option<AskUser>` | 显示真实 questions；↑↓ 切焦点、1-9 选 option、Enter 提交（I21-B） |
+| **AskUser** | `AcpEventData::AskUser` | `ASK_USER_PENDING: Option<AskUser>` | Panel 内联渲染；Tab 切问题、↑↓ 导航、Space 选、Enter 下一题/提交、Esc 取消 |
 | **Rewind** | `AcpEventData::RewindPreview` 或双击 Esc | `REWIND_PREVIEW: Option<RewindPreview>` | 回退预览 + 确认；REWIND_ACTION_TX → /rewind RPC |
 | **OAuth** | `AcpEventData::OauthNeeded` | `OAUTH_INFO: Option<OauthNeeded>` | 显示真实 server_name + auth_url；Ctrl+O 开浏览器、Enter 关闭（I20-D） |
 
