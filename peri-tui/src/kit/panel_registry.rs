@@ -23,10 +23,10 @@ use ratatui_kit::{
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
 use crate::kit::panels::{
-    agent::AgentPanel, betas::BetasPanel, config::ConfigPanel, cron::CronPanel, hooks::HooksPanel,
-    login::LoginPanel, mcp::McpPanel, memory::MemoryPanel, model::ModelPanel, plugin::PluginPanel,
-    status::StatusPanel, tasks::TasksPanel, thread_browser::ThreadBrowserPanel,
-    workflow::WorkflowPanel,
+    agent::AgentPanel, ask_user::AskUserPanel, betas::BetasPanel, config::ConfigPanel,
+    cron::CronPanel, hooks::HooksPanel, login::LoginPanel, mcp::McpPanel, memory::MemoryPanel,
+    model::ModelPanel, plugin::PluginPanel, status::StatusPanel, tasks::TasksPanel,
+    thread_browser::ThreadBrowserPanel, workflow::WorkflowPanel,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +42,7 @@ pub enum MutexGroup {
     Tools,
     Info,
     Thread,
+    AskUser,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +135,10 @@ fn render_betas_panel() -> AnyElement<'static> {
 
 fn render_workflow_panel() -> AnyElement<'static> {
     element!(WorkflowPanel()).into()
+}
+
+fn render_ask_user_panel() -> AnyElement<'static> {
+    element!(AskUserPanel()).into()
 }
 
 /// 所有 14 面板的元数据。
@@ -321,6 +326,18 @@ pub const PANELS: &[PanelMeta] = &[
         scope: PanelScope::Global,
         layout: PanelLayout::fixed(60, 18),
         render: render_workflow_panel,
+    },
+    PanelMeta {
+        kind: PanelKind::AskUser,
+        title: "Ask User",
+        shortcut_letter: '\0',
+        slash_command: "",
+        description: "Agent user questions (auto-open)",
+        priority: 14,
+        mutex_group: MutexGroup::AskUser,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(60, 18),
+        render: render_ask_user_panel,
     },
 ];
 
@@ -751,6 +768,7 @@ mod tests {
         PanelKind::Tasks,
         PanelKind::Betas,
         PanelKind::Workflow,
+        PanelKind::AskUser,
     ];
 
     /// 编译期断言：MutexGroup 实现了 PartialEq（测试需要）。

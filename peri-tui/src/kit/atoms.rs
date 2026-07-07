@@ -22,6 +22,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::panel_types::PanelKind;
+use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::render_bridge::RenderCache;
 use crate::kit::rewind_action::RewindAction;
 
@@ -226,11 +227,14 @@ pub static REWIND_PREVIEW: AtomStatic<Option<RewindPreview>> = AtomStatic::new(|
 pub static OAUTH_INFO: AtomStatic<Option<OauthNeeded>> = AtomStatic::new(|| None);
 pub static HITL_PENDING: AtomStatic<Option<HitlPending>> = AtomStatic::new(|| None);
 pub static ASK_USER_PENDING: AtomStatic<Option<AskUser>> = AtomStatic::new(|| None);
+/// Elicitation RequestId 临时存储——notifier 写入，popup Confirm/Esc 读取后通过 consumer 发回 ACP。
+pub static ASK_USER_REQUEST_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 
 pub static LAST_ESC_TIME: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static QUIT_PENDING_SINCE: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 
 pub static REWIND_ACTION_TX: OnceLock<UnboundedSender<RewindAction>> = OnceLock::new();
+pub static ASK_USER_RESPONSE_TX: OnceLock<UnboundedSender<AskUserResponseAction>> = OnceLock::new();
 pub static THREAD_LOAD_TX: OnceLock<UnboundedSender<String>> = OnceLock::new();
 
 pub static PERI_CONFIG_HANDLE: OnceLock<

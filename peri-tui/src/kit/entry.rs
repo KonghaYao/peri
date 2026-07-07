@@ -17,6 +17,7 @@ use crate::app::service_registry::ProcessResourceMonitor;
 use crate::kit::acp_bridge::spawn_acp_bridge;
 use crate::kit::acp_notifier::spawn_kit_notifier;
 use crate::kit::app_shell::AppShell;
+use crate::kit::ask_user_action::{AskUserResponseAction, spawn_ask_user_consumer};
 use crate::kit::atoms;
 use crate::kit::input_history;
 use crate::kit::render_bridge::spawn_render_bridge;
@@ -113,6 +114,10 @@ pub async fn run_kit_fullscreen(
         let (rewind_tx, rewind_rx) = mpsc::unbounded_channel();
         let _ = atoms::REWIND_ACTION_TX.set(rewind_tx);
 
+        // 4b1. ASK_USER_RESPONSE channel：AskUserPopup → ask_user_consumer
+        let (ask_user_tx, ask_user_rx) = mpsc::unbounded_channel::<AskUserResponseAction>();
+        let _ = atoms::ASK_USER_RESPONSE_TX.set(ask_user_tx);
+
         // 4b2. THREAD_LOAD channel：ThreadBrowser → thread_load_consumer（H3）
         let (thread_load_tx, thread_load_rx) = mpsc::unbounded_channel::<String>();
         let _ = atoms::THREAD_LOAD_TX.set(thread_load_tx);
@@ -141,6 +146,8 @@ pub async fn run_kit_fullscreen(
         let _submit_handle =
             spawn_submit_consumer(client.clone(), submit_rx, cwd.clone(), shutdown.clone());
         let _rewind_handle = spawn_rewind_consumer(client.clone(), rewind_rx, shutdown.clone());
+        let _ask_user_handle =
+            spawn_ask_user_consumer(client.clone(), ask_user_rx, shutdown.clone());
         let _thread_load_handle =
             spawn_thread_load_consumer(client.clone(), thread_load_rx, cwd, shutdown.clone());
         let _cancel_handle = spawn_cancel_consumer(client.clone(), cancel_rx, shutdown.clone());

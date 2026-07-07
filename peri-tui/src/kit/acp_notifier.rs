@@ -20,9 +20,9 @@ use crate::acp_client::AcpNotification;
 use crate::kit::acp_types::AcpEventData;
 use crate::kit::atoms::{ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS};
 use crate::kit::input_area::refresh_slash_items;
+use peri_acp::event::AcpEvent;
 use peri_acp_types::event_data::{AskUser, Question, QuestionOption};
 use serde_json::Value;
-use peri_acp::event::AcpEvent;
 
 /// 启动 kit ACP notifier 后台任务。
 ///
@@ -74,13 +74,11 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
                 agent_name,
             },
         )),
-        AcpEvent::SubagentStopped { instance_id, .. } => {
-            Some(AcpEventData::SubagentStopped(
-                peri_acp_types::event_data::SubagentStopped {
-                    agent_id: instance_id,
-                },
-            ))
-        }
+        AcpEvent::SubagentStopped { instance_id, .. } => Some(AcpEventData::SubagentStopped(
+            peri_acp_types::event_data::SubagentStopped {
+                agent_id: instance_id,
+            },
+        )),
         _ => {
             debug!("kit ACP notifier: AcpEvent variant not yet mapped to AcpEventData, dropping");
             None
@@ -141,7 +139,7 @@ fn forward_notification(
                 }
             }
         }
-        | AcpNotification::RequestPermission { .. }
+        AcpNotification::RequestPermission { .. }
         | AcpNotification::PredictionReady { .. }
         | AcpNotification::Peri { .. }
         | AcpNotification::Other { .. } => {
@@ -419,7 +417,10 @@ mod tests {
             })
             .unwrap();
 
-        let bridge_event = bridge_rx.recv().await.expect("bridge 应收 到 SubagentStarted");
+        let bridge_event = bridge_rx
+            .recv()
+            .await
+            .expect("bridge 应收 到 SubagentStarted");
         match bridge_event {
             AcpEventData::SubagentStarted(ss) => {
                 assert_eq!(ss.agent_id, "abc-123", "agent_id 应从 instance_id 映射");

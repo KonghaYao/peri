@@ -287,11 +287,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
         AskUser(au) => {
-            // I21-B：保存 payload 到 ASK_USER_PENDING atom，供 AskUserPopup 读取真实数据
+            // I21-B：保存 payload 到 ASK_USER_PENDING atom，供 AskUserPanel 读取真实数据。
+            // 通过 panel_registry 打开 AskUser 面板（非弹窗），内联在 MessageArea 下方。
             *ASK_USER_PENDING.state().write() = Some(au.clone());
-            state.popup_kind = Some(PopupKind::AskUser);
+            crate::kit::panel_registry::open_panel(crate::app::panel_types::PanelKind::AskUser);
             state.variant = 2;
-            push_popup_kind(state);
             push_acp_state(state);
         }
         RewindPreview(rp) => {

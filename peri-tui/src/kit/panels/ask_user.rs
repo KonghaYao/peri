@@ -1,20 +1,17 @@
-//! ratatui-kit AskUserPopup component.
+//! ratatui-kit AskUserPanel component.
 //!
-//! 用户问答弹窗：从 `ASK_USER_PENDING` atom 读取真实问题列表（id/header/
-//! question/options/multi_select）。Tab 键在问题间切换（tab 风格），↑/↓ 导航选项，
-//! Space 选择/取消，Enter 提交，Esc 取消。
+//! 用户问答面板——当 agent 调用 AskUserQuestion 工具时，自动作为 Panel 内联渲染
+//! 在 MessageArea 和 InputArea 之间（替代弹窗形式）。
 //!
-//! 对齐 TUI-PAGE.md §7.2 AskUser Popup 规范：
-//! - 只使用上下边框（popup_text_shell! TOP | BOTTOM）
-//! - 多问题时顶部 tab 行：`[header]` 标记当前，` header ` 标记其他
-//! - ●/○ 单选项（单选）/ ☑/☐ 多选项
-//! - Tab::next-question · ↑/↓·选项 · Space::select · Enter::submit · Esc::cancel
+//! 面板逻辑复用 ask_user_popup 的 Tab 交互模型，但通过 panel_shell! 渲染。
 
+use crate::app::panel_types::PanelKind;
 use peri_acp_types::event_data::AskUser;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
     ratatui::{
+        layout::Constraint,
         style::{Style, Stylize},
         text::Line,
     },
@@ -26,28 +23,23 @@ use crate::kit::list_nav::{
     ListNavAction, classify_list_nav, cycle_next, cycle_previous, next_selection,
     previous_selection,
 };
-use crate::kit::popup_overlay::close_popup;
+use crate::kit::panel_registry;
 use crate::kit::theme;
 use serde_json::json;
 
 #[component]
-pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending_store = hooks.use_atom(&ASK_USER_PENDING);
     let pending: Option<AskUser> = pending_store.read().clone();
     let _ = pending_store;
 
-    // 当前选中的问题 tab 索引
     let focused = hooks.use_state(|| 0usize);
-    // 每个问题的当前选中 option index（单选语义；multi_select 暂按单选处理）
     let answers = hooks.use_state(Vec::<Option<usize>>::new);
-    // 当前问题内的高亮选项索引（用于 ↑/↓ 浏览 + Space 选中），None = 未浏览过
     let focused_option = hooks.use_state(|| 0usize);
-    // session 指纹——检测 payload 变化时复位状态
     let session_fingerprint = hooks.use_state(Vec::<String>::new);
 
     let question_count = pending.as_ref().map(|q| q.questions.len()).unwrap_or(0);
 
-    // 检测 payload 变化——question id 列表不同则视为新 session
     let current_fingerprint: Vec<String> = pending
         .as_ref()
         .map(|p| p.questions.iter().map(|q| q.id.clone()).collect())
@@ -57,6 +49,19 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         *answers.write() = vec![None; question_count];
         *focused_option.write() = 0;
         *session_fingerprint.write() = current_fingerprint;
+    }
+
+    fn cancel_ask_user() {
+        if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone() {
+            if let Some(tx) = ASK_USER_RESPONSE_TX.get() {
+                let _ = tx.send(AskUserResponseAction::Cancel {
+                    request_id_str: id_str,
+                });
+            }
+        }
+        panel_registry::close_panel(PanelKind::AskUser);
+        *ASK_USER_PENDING.state().write() = None;
+        *ASK_USER_REQUEST_ID.state().write() = None;
     }
 
     let pending_for_closure = pending.clone();
@@ -69,7 +74,7 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             return EventResult::Ignored;
         }
 
-        // ── Space：选中/取消当前高亮的选项 ──
+        // Space：选中/取消当前高亮的选项
         if (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Char(' ')) {
             let q_idx = *focused.read();
             let opt_idx = *focused_option.read();
@@ -78,9 +83,9 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     if opt_idx < q.options.len() {
                         let new_val =
                             if answers.read().get(q_idx).copied().flatten() == Some(opt_idx) {
-                                None // 取消选择
+                                None
                             } else {
-                                Some(opt_idx) // 选中
+                                Some(opt_idx)
                             };
                         let mut a = answers.write();
                         if q_idx >= a.len() {
@@ -94,7 +99,6 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
 
         match classify_list_nav(&key) {
-            // ↑/↓：在当前问题的选项列表中移动高亮
             Some(ListNavAction::MoveUp) => {
                 let mut fo = focused_option.write();
                 *fo = previous_selection(*fo);
@@ -112,16 +116,11 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 EventResult::Consumed
             }
-            // Tab / Shift+Tab：切换到下一个/上一个问题 tab
             Some(ListNavAction::CycleForward) if question_count > 0 => {
                 let mut f = focused.write();
-                let old = *f;
                 *f = cycle_next(*f, question_count);
-                // 切换 tab 时复位高亮选项
                 let mut fo = focused_option.write();
                 *fo = answers.read().get(*f).copied().flatten().unwrap_or(0);
-                // 需要把旧 tab 的选项数量传进来以便 bounded read
-                let _ = old;
                 EventResult::Consumed
             }
             Some(ListNavAction::CycleBackward) if question_count > 0 => {
@@ -131,7 +130,6 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 *fo = answers.read().get(*f).copied().flatten().unwrap_or(0);
                 EventResult::Consumed
             }
-            // Enter：如果还有未回答的问题 → 跳转到下一个；全部已回答 → 提交
             Some(ListNavAction::Confirm) => {
                 let q_idx = *focused.read();
                 let all_answered = answers.read().iter().enumerate().all(|(i, a)| {
@@ -143,7 +141,6 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             .unwrap_or(true)
                 });
                 if !all_answered {
-                    // 找下一个未回答的问题
                     let qc = question_count;
                     let mut next = (q_idx + 1) % qc;
                     loop {
@@ -165,9 +162,9 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     *focused_option.write() = 0;
                     EventResult::Consumed
                 } else {
-                    // 全部已确认 → 提交
+                    let answers_snapshot = answers.read().clone();
                     let answers_map =
-                        build_answers_map(pending_for_closure.as_ref(), &*answers.read());
+                        build_answers_map(pending_for_closure.as_ref(), &answers_snapshot);
                     if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone() {
                         if let Some(tx) = ASK_USER_RESPONSE_TX.get() {
                             let _ = tx.send(AskUserResponseAction::Submit {
@@ -176,20 +173,14 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             });
                         }
                     }
-                    close_popup();
+                    panel_registry::close_panel(PanelKind::AskUser);
+                    *ASK_USER_PENDING.state().write() = None;
+                    *ASK_USER_REQUEST_ID.state().write() = None;
                     EventResult::Consumed
                 }
             }
-            // Esc：取消
             Some(ListNavAction::Cancel) => {
-                if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone() {
-                    if let Some(tx) = ASK_USER_RESPONSE_TX.get() {
-                        let _ = tx.send(AskUserResponseAction::Cancel {
-                            request_id_str: id_str,
-                        });
-                    }
-                }
-                close_popup();
+                cancel_ask_user();
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -208,8 +199,6 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     .fg(semantic.text.muted)
                     .italic(),
             );
-            lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
         }
         Some(au) if au.questions.is_empty() => {
             lines.push(Line::from(""));
@@ -217,14 +206,12 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Line::from("  Agent asked 0 questions (malformed request).")
                     .fg(semantic.status.warning),
             );
-            lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
         }
         Some(au) => {
             let focused_idx = (*focused.read()).min(au.questions.len() - 1);
             let answers_read = answers.read();
 
-            // ── Tab 行：已答表示 ✓，当前用 [header] ──
+            // Tab 行：已答表示 ✓，当前用 [header]
             lines.push(Line::from(""));
             let tab_line = au
                 .questions
@@ -242,12 +229,9 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .collect::<Vec<_>>()
                 .join("  ");
             lines.push(Line::from(format!("  {}", tab_line)).fg(semantic.text.dim));
-            // 分隔线
             lines.push(Line::from("─".repeat(60)).fg(semantic.border.default));
 
-            // ── 当前问题的 content ──
             if let Some(q) = au.questions.get(focused_idx) {
-                // 问题文本
                 lines.push(Line::from(""));
                 lines.push(
                     Line::from(if q.question.is_empty() {
@@ -259,7 +243,6 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 );
                 lines.push(Line::from(""));
 
-                // 选项列表
                 let selected = answers_read.get(focused_idx).copied().flatten();
                 let fopt = *focused_option.read();
                 for (opt_i, opt) in q.options.iter().enumerate() {
@@ -282,8 +265,6 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     };
 
                     lines.push(Line::from(format!("  {} {}", mark, opt.label)).style(style));
-
-                    // 选项描述（如有，次行展示）
                     if !opt.description.is_empty() {
                         lines.push(
                             Line::from(format!("    {}", opt.description)).fg(semantic.text.dim),
@@ -297,7 +278,6 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
 
             lines.push(Line::from(""));
-            // 底部提示
             if au.questions.len() > 1 {
                 let all_answered = answers_read.iter().enumerate().all(|(i, a)| {
                     a.is_some()
@@ -344,11 +324,19 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     }
 
-    popup_text_shell!(" Ask User ", popup_tokens.action_primary, lines)
+    panel_shell!(PanelKind::AskUser, {
+        element!(
+            ScrollView(
+                scroll_bars: panel_registry::clean_scrollbars(),
+                width: Constraint::Fill(1),
+                height: Constraint::Fill(1),
+            ) {
+                Text(text: ratatui_kit::ratatui::text::Text::from(lines))
+            }
+        )
+    })
 }
 
-/// 将用户选中的答案映射为 serde_json::Value（CreateElicitationResponse content 格式）。
-/// ElicitationContentValue 为 #[serde(untagged)]，String 变体直接序列化为纯字符串。
 fn build_answers_map(pending: Option<&AskUser>, answers: &[Option<usize>]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     if let Some(au) = pending {
@@ -366,20 +354,4 @@ fn build_answers_map(pending: Option<&AskUser>, answers: &[Option<usize>]) -> se
         }
     }
     serde_json::Value::Object(map)
-}
-
-/// 编译期断言：QuestionOption 字段可读（防止上游 DTO 变更未发现）
-#[cfg(test)]
-mod tests {
-    use peri_acp_types::event_data::QuestionOption;
-
-    #[test]
-    fn test_question_option_struct_fields() {
-        let opt = QuestionOption {
-            label: "test".to_string(),
-            description: "desc".to_string(),
-        };
-        assert_eq!(opt.label, "test");
-        assert_eq!(opt.description, "desc");
-    }
 }

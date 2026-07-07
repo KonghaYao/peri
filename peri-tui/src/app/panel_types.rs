@@ -19,6 +19,7 @@ pub enum PanelKind {
     Tasks,
     Betas,
     Workflow,
+    AskUser,
 }
 
 // ─── EventResult ────────────────────────────────────────────────────────────

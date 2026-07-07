@@ -22,8 +22,8 @@
 
 use crate::kit::atoms::{self, PopupKind};
 use crate::kit::popups::{
-    ask_user_popup::AskUserPopup, confirm_popup::ConfirmPopup, hitl_popup::HitlPopup,
-    oauth_popup::OAuthPopup, rewind_popup::RewindPopup,
+    confirm_popup::ConfirmPopup, hitl_popup::HitlPopup, oauth_popup::OAuthPopup,
+    rewind_popup::RewindPopup,
 };
 use crate::kit::theme;
 use ratatui_kit::{prelude::*, ratatui::layout::Constraint};
@@ -39,7 +39,7 @@ pub fn PopupOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     match kind {
         Some(PopupKind::Hitl) => render_popup(element!(HitlPopup()).into(), term_w, term_h),
-        Some(PopupKind::AskUser) => render_popup(element!(AskUserPopup()).into(), term_w, term_h),
+        Some(PopupKind::AskUser) => render_empty(), // AskUser 已迁移为 Panel
         Some(PopupKind::Rewind) => render_popup(element!(RewindPopup()).into(), term_w, term_h),
         Some(PopupKind::OAuth) => render_popup(element!(OAuthPopup()).into(), term_w, term_h),
         Some(PopupKind::Confirm) => render_popup(element!(ConfirmPopup()).into(), term_w, term_h),
@@ -90,7 +90,10 @@ pub fn close_popup() -> Option<PopupKind> {
     if let Some(kind) = prev {
         match kind {
             PopupKind::Hitl => *atoms::HITL_PENDING.state().write() = None,
-            PopupKind::AskUser => *atoms::ASK_USER_PENDING.state().write() = None,
+            PopupKind::AskUser => {
+                *atoms::ASK_USER_PENDING.state().write() = None;
+                *atoms::ASK_USER_REQUEST_ID.state().write() = None;
+            }
             PopupKind::Rewind => *atoms::REWIND_PREVIEW.state().write() = None,
             PopupKind::OAuth => *atoms::OAUTH_INFO.state().write() = None,
             PopupKind::Confirm => *atoms::CONFIRM_PAYLOAD.state().write() = None,
