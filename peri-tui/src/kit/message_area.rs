@@ -1037,4 +1037,89 @@ mod tests {
             "在底部时 bottom_spacer 应为 0，不应有多余空白"
         );
     }
+
+    // ── 就近判断阈值计算 ──
+
+    /// 计算距底部的距离，及是否应自动跟到底部。
+    ///
+    /// 若 total=0 返回 false（无内容不滚动）。
+    /// 若 scroll_y 已在底部（>= max_scroll）返回 false——上层调用应走
+    /// no-op 跳过（不做 scroll_to_bottom 写入避免 re-render 环路）。
+    fn proximity_check(total: u16, scroll_y: u16, vis_height: u16) -> bool {
+        if total == 0 {
+            return false;
+        }
+        let max_scroll = total.saturating_sub(vis_height);
+        if scroll_y >= max_scroll {
+            // 已在或超出底部——上层应 no-op 跳过
+            return false;
+        }
+        let distance = max_scroll.saturating_sub(scroll_y);
+        let threshold = (vis_height / 2).max(5);
+        distance <= threshold
+    }
+
+    #[test]
+    fn test_proximity_at_bottom_should_not_trigger_scroll() {
+        let total = 100;
+        let vis_height = 20;
+        let scroll_y = total - vis_height; // 刚好在底部
+        // 已在底部时不调用 scroll_to_bottom（避免 no-op 写入）
+        assert!(!proximity_check(total, scroll_y, vis_height));
+    }
+
+    #[test]
+    fn test_proximity_within_half_viewport_should_follow() {
+        let total = 100;
+        let vis_height = 20;
+        // 距底部 10 行 → threshold = 20/2 = 10 → 应跟随
+        let scroll_y = total - vis_height - 10;
+        assert!(proximity_check(total, scroll_y, vis_height));
+    }
+
+    #[test]
+    fn test_proximity_beyond_half_viewport_should_not_follow() {
+        let total = 100;
+        let vis_height = 20;
+        // 距底部 11 行 → threshold = 10 → 不应跟随
+        let scroll_y = total - vis_height - 11;
+        assert!(!proximity_check(total, scroll_y, vis_height));
+    }
+
+    #[test]
+    fn test_proximity_near_top_should_not_follow() {
+        let total = 200;
+        let vis_height = 30;
+        // 距底部 150 行，远远超过 threshold=15
+        let scroll_y = 20;
+        assert!(!proximity_check(total, scroll_y, vis_height));
+    }
+
+    #[test]
+    fn test_proximity_small_viewport_minimum_threshold() {
+        let total = 50;
+        let vis_height = 6;
+        // threshold = max(6/2, 5) = 5
+        // 距底部 5 行 → 应跟随
+        let scroll_y = total - vis_height - 5;
+        assert!(proximity_check(total, scroll_y, vis_height));
+        // 距底部 6 行 → 不应跟随
+        let scroll_y = total - vis_height - 6;
+        assert!(!proximity_check(total, scroll_y, vis_height));
+    }
+
+    #[test]
+    fn test_proximity_empty_content_no_follow() {
+        assert!(!proximity_check(0, 0, 20));
+    }
+
+    /// 回归：total < vis_height 时（内容未满一屏），max_scroll=0，
+    /// 任何 scroll_y >= 0 都已在底部，不应触发 scroll_to_bottom 写入。
+    #[test]
+    fn test_proximity_content_smaller_than_viewport_at_bottom() {
+        let total = 10;
+        let vis_height = 30;
+        // max_scroll = 0，scroll_y=0 时已在底部 → false（上层 no-op）
+        assert!(!proximity_check(total, 0, vis_height));
+    }
 }
