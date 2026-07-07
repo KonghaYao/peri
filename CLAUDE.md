@@ -93,6 +93,22 @@ Workflow 出现 "0 agents, 0 tool calls" 时：
 
 依赖方向：`peri-tui` → `peri-acp` → `peri-agent`/`peri-middlewares`。
 
+### subagent + worktree 排障铁律（2026-07-07 ACP 升级双坑）
+
+使用 Agent 工具派发 coding 子任务到 worktree 时，以下两点已验证会出问题：
+
+**铁律 1：coder subagent 不遵守 cwd。** 即使 `Agent(cwd=worktree_path)` 已指定工作目录，coder 的 `Read`/`Edit`/`Write` 仍可能落在主工作区。**强约束**：
+- coding subagent 的 prompt 中必须用绝对路径前缀指定所有文件（如 `Write(file_path="/abs/path/to/worktree/peri-acp/Cargo.toml")`）
+- push 代码前必须 `git diff --stat` 在 worktree 目录确认变更确实落在了 worktree
+- 主工作区若被误改，立即 `git reset --hard HEAD && git clean -fd` 恢复
+
+**铁律 2：coder 天生越权。** coder 在机械性任务中仍有概率夹带无关变更。**强约束**：
+- coding prompt 必须显式列出允许修改的**文件白名单**
+- 用 `DO NOT modify:` 逐条写明禁止触碰的目录/文件
+- commit 前用 `git diff --stat` 核对文件清单，不在白名单内的立即回退
+
+**[TRAP]** rustfmt import 排序规则：同一 crate 下，`use crate::module::*` 通配导入排在 `use crate::module::SpecificType` 单类型导入之前。跨 crate 同理：`use foo::v1::{...}` 排在 `use foo::ProtocolVersion` 之前。如果 formatter 报错但肉眼看起来一样，交换两组 import 的顺序即可。
+
 ## 开发命令
 
 - `cargo run -p peri-tui -- -a`：HITL 审批
