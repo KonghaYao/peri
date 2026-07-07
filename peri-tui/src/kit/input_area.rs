@@ -11,6 +11,8 @@
 // clippy 触发 needless_update 警告。该警告来自宏展开而非用户代码，模块级抑制。
 #![allow(clippy::needless_update)]
 
+use peri_widgets::textarea::TextAreaState;
+
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
@@ -22,7 +24,6 @@ use ratatui_kit::{
     },
 };
 use std::sync::{Arc, Mutex};
-use unicode_width::UnicodeWidthChar;
 
 use parking_lot::RwLock;
 use std::sync::OnceLock;
@@ -43,304 +44,6 @@ use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashComple
 use crate::kit::theme;
 use peri_acp_types::view_model::{UserBubbleData, ViewModel, hash_str};
 
-/// 输入状态
-#[derive(Clone, Default)]
-struct EditorState {
-    text: String,
-    /// 字符索引（保证在字符边界上）
-    cursor: usize,
-}
-
-impl EditorState {
-    /// 在光标位置插入字符，返回新的光标位置
-    fn insert_char(&mut self, ch: char) {
-        let byte_idx = Self::char_to_byte(&self.text, self.cursor);
-        self.text.insert(byte_idx, ch);
-        self.cursor += 1;
-    }
-
-    /// 在光标位置插入字符串
-    fn insert_str(&mut self, s: &str) {
-        let byte_idx = Self::char_to_byte(&self.text, self.cursor);
-        self.text.insert_str(byte_idx, s);
-        self.cursor += s.chars().count();
-    }
-
-    /// 删除光标前的字符
-    fn backspace(&mut self) {
-        if self.cursor > 0 {
-            let byte_idx = Self::char_to_byte(&self.text, self.cursor);
-            let prev_byte = Self::char_to_byte(&self.text, self.cursor - 1);
-            self.text.drain(prev_byte..byte_idx);
-            self.cursor -= 1;
-        }
-    }
-
-    /// 删除光标后的字符
-    fn delete_forward(&mut self) {
-        if self.cursor < self.len() {
-            let byte_idx = Self::char_to_byte(&self.text, self.cursor);
-            let next_byte = Self::char_to_byte(&self.text, self.cursor + 1);
-            self.text.drain(byte_idx..next_byte);
-        }
-    }
-
-    /// 左移光标
-    fn cursor_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-        }
-    }
-
-    /// 右移光标
-    fn cursor_right(&mut self) {
-        if self.cursor < self.len() {
-            self.cursor += 1;
-        }
-    }
-
-    /// 左移到上一个词边界
-    fn cursor_word_left(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let mut new_cursor = self.cursor;
-        while new_cursor > 0 {
-            let prev = self.char_at(new_cursor - 1);
-            if !prev.is_whitespace() {
-                break;
-            }
-            new_cursor -= 1;
-        }
-        while new_cursor > 0 {
-            let prev = self.char_at(new_cursor - 1);
-            if prev.is_whitespace() {
-                break;
-            }
-            new_cursor -= 1;
-        }
-        self.cursor = new_cursor;
-    }
-
-    /// 右移到下一个词边界
-    fn cursor_word_right(&mut self) {
-        if self.cursor >= self.len() {
-            return;
-        }
-        let mut new_cursor = self.cursor;
-        while new_cursor < self.len() {
-            let ch = self.char_at(new_cursor);
-            if ch.is_whitespace() {
-                break;
-            }
-            new_cursor += 1;
-        }
-        while new_cursor < self.len() {
-            let ch = self.char_at(new_cursor);
-            if !ch.is_whitespace() {
-                break;
-            }
-            new_cursor += 1;
-        }
-        self.cursor = new_cursor;
-    }
-
-    /// 光标到文本首
-    fn cursor_home(&mut self) {
-        self.cursor = 0;
-    }
-
-    /// 光标到文本尾
-    fn cursor_end(&mut self) {
-        self.cursor = self.len();
-    }
-
-    /// 删除光标前一个词（Ctrl+W）
-    fn delete_word_backward(&mut self) {
-        let byte_idx = Self::char_to_byte(&self.text, self.cursor);
-        // 跳过光标前的空白
-        let mut pos = byte_idx;
-        while pos > 0 {
-            let prev = self.text[..pos].chars().last().unwrap();
-            if !prev.is_whitespace() {
-                break;
-            }
-            pos -= prev.len_utf8();
-            self.cursor -= 1;
-        }
-        // 删除到词首
-        while pos > 0 {
-            let prev = self.text[..pos].chars().last().unwrap();
-            if prev.is_whitespace() {
-                break;
-            }
-            pos -= prev.len_utf8();
-            self.cursor -= 1;
-        }
-        self.text.drain(pos..byte_idx);
-    }
-
-    /// 删除光标后的一个词（Alt+Delete）
-    fn delete_word_forward(&mut self) {
-        let start_byte = Self::char_to_byte(&self.text, self.cursor);
-        let mut pos = start_byte;
-
-        while pos < self.text.len() {
-            let ch = self.text[pos..]
-                .chars()
-                .next()
-                .expect("pos must be char boundary");
-            if !ch.is_whitespace() {
-                break;
-            }
-            pos += ch.len_utf8();
-        }
-        while pos < self.text.len() {
-            let ch = self.text[pos..]
-                .chars()
-                .next()
-                .expect("pos must be char boundary");
-            if ch.is_whitespace() {
-                break;
-            }
-            pos += ch.len_utf8();
-        }
-
-        if pos > start_byte {
-            self.text.drain(start_byte..pos);
-        }
-    }
-
-    /// 当前光标所在的 (line_idx, col_idx)
-    fn cursor_line_col(&self) -> (usize, usize) {
-        Self::cursor_line_col_for(&self.text, self.cursor)
-    }
-
-    fn cursor_line_col_for(text: &str, cursor: usize) -> (usize, usize) {
-        let mut chars_before_line = 0usize;
-        for (line_idx, line) in text.split('\n').enumerate() {
-            let line_chars = line.chars().count();
-            if chars_before_line + line_chars >= cursor {
-                return (line_idx, cursor - chars_before_line);
-            }
-            chars_before_line += line_chars + 1;
-        }
-        let last_line = text.split('\n').last().unwrap_or("");
-        (text.matches('\n').count(), last_line.chars().count())
-    }
-
-    fn line_col_to_cursor(text: &str, target_line: usize, target_col: usize) -> usize {
-        let mut cursor = 0usize;
-        for (line_idx, line) in text.split('\n').enumerate() {
-            let line_chars = line.chars().count();
-            if line_idx == target_line {
-                return cursor + target_col.min(line_chars);
-            }
-            cursor += line_chars + 1;
-        }
-        text.chars().count()
-    }
-
-    /// 上移一行，返回是否真的做了多行移动。
-    fn cursor_line_up(&mut self) -> bool {
-        let (line, col) = self.cursor_line_col();
-        if line == 0 {
-            return false;
-        }
-        self.cursor = Self::line_col_to_cursor(&self.text, line - 1, col);
-        true
-    }
-
-    /// 下移一行，返回是否真的做了多行移动。
-    fn cursor_line_down(&mut self) -> bool {
-        let (line, col) = self.cursor_line_col();
-        let last_line = self.text.matches('\n').count();
-        if line >= last_line {
-            return false;
-        }
-        self.cursor = Self::line_col_to_cursor(&self.text, line + 1, col);
-        true
-    }
-
-    fn len(&self) -> usize {
-        self.text.chars().count()
-    }
-
-    /// 把当前字符光标转换为字节偏移。
-    fn cursor_byte(&self) -> usize {
-        Self::char_to_byte(&self.text, self.cursor)
-    }
-
-    /// 当前行首。
-    fn cursor_line_home(&mut self) {
-        let (line, _) = self.cursor_line_col();
-        self.cursor = Self::line_col_to_cursor(&self.text, line, 0);
-    }
-
-    /// 当前行尾。
-    fn cursor_line_end(&mut self) {
-        let (line, _) = self.cursor_line_col();
-        let line_len = self
-            .text
-            .split('\n')
-            .nth(line)
-            .unwrap_or("")
-            .chars()
-            .count();
-        self.cursor = Self::line_col_to_cursor(&self.text, line, line_len);
-    }
-
-    /// 替换字符区间，并把光标放在替换文本末尾。
-    fn replace_char_range(&mut self, start: usize, end: usize, replacement: &str) {
-        let start = start.min(self.len());
-        let end = end.min(self.len()).max(start);
-        let start_byte = Self::char_to_byte(&self.text, start);
-        let end_byte = Self::char_to_byte(&self.text, end);
-        self.text.replace_range(start_byte..end_byte, replacement);
-        self.cursor = start + replacement.chars().count();
-    }
-
-    /// 返回当前完整文本的引用。
-    fn all_text(&self) -> String {
-        self.text.clone()
-    }
-
-    /// 替换整个文本并把光标放到末尾（历史导航用）
-    fn replace_all(&mut self, text: String) {
-        self.text = text;
-        self.cursor = self.text.chars().count();
-    }
-
-    /// 清除文本
-    fn clear(&mut self) {
-        self.text.clear();
-        self.cursor = 0;
-    }
-
-    /// 字符索引 → 字节偏移
-    fn char_to_byte(s: &str, char_idx: usize) -> usize {
-        s.char_indices()
-            .nth(char_idx)
-            .map(|(i, _)| i)
-            .unwrap_or(s.len())
-    }
-
-    fn char_at(&self, char_idx: usize) -> char {
-        self.text
-            .chars()
-            .nth(char_idx)
-            .expect("cursor must stay within character bounds")
-    }
-}
-
-/// 计算字符串前 char_idx 个字符的显示列宽度（CJK 字符占 2 列）。
-fn display_width_before(s: &str, char_idx: usize) -> usize {
-    s.chars()
-        .take(char_idx)
-        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
-        .sum()
-}
-
 #[derive(Default, Props)]
 pub struct InputAreaProps {
     pub loading: bool,
@@ -350,7 +53,7 @@ pub struct InputAreaProps {
 #[component]
 pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 单一编辑状态——闭包编辑 + 渲染读取共享同一实例
-    let state = hooks.use_state(EditorState::default);
+    let state = hooks.use_state(TextAreaState::default);
 
     hooks.use_event_handler(
         EventScope::Current,
@@ -608,7 +311,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     };
 
     // 多行渲染——按 \n 拆分，每行作为独立 Line，光标高亮放在对应行
-    let lines = render_multiline_with_cursor(&text, cursor, loading);
+    let lines = render_multiline_with_cursor_for_themed(&text, cursor, loading);
 
     // 计算 composer 本体高度；popup 额外占位，避免被输入区自身裁切。
     let line_count = text.matches('\n').count() + 1;
@@ -938,7 +641,7 @@ fn reset_slash_popup() {
     *SLASH_SELECTED_INDEX.state().write() = 0;
 }
 
-fn replace_last_mention(state: &mut EditorState, replacement: &str) {
+fn replace_last_mention(state: &mut TextAreaState, replacement: &str) {
     if let Some(at_byte) = state.text.rfind('@') {
         let after_at_byte = at_byte + 1;
         let keep_until_byte = state.text[after_at_byte..]
@@ -953,7 +656,7 @@ fn replace_last_mention(state: &mut EditorState, replacement: &str) {
     }
 }
 
-fn apply_slash_selection(state: &mut EditorState, cmd: &str) {
+fn apply_slash_selection(state: &mut TextAreaState, cmd: &str) {
     let replacement = format!("/{cmd} ");
     if let Some((_, token_start_byte)) = detect_slash_token(&state.text, state.cursor_byte()) {
         let token_start = state.text[..token_start_byte].chars().count();
@@ -1040,7 +743,7 @@ fn filter_files_for_mention(prefix: &str) -> Vec<String> {
 ///
 /// - `/` token：参考 peri-main，向光标前回溯最近的 `/`，要求 `/` 前为空白或行首。
 /// - `@` 在最近词中：开启 @mention，prefix = @ 之后的字符。
-fn update_popup_prefix(state: &EditorState) {
+fn update_popup_prefix(state: &TextAreaState) {
     let cursor_byte = state.cursor_byte();
     if let Some((prefix, _)) = detect_slash_token(&state.text, cursor_byte) {
         *SLASH_HINT_ACTIVE.state().write() = true;
@@ -1094,115 +797,17 @@ fn detect_slash_token(text: &str, cursor_byte: usize) -> Option<(String, usize)>
     Some((after_slash.to_string(), slash_pos))
 }
 
-/// 把文本按 \n 拆成多行 Line，光标以反转色高亮。
-///
-/// I22-B：渲染窗口上限——只渲染光标附近的 MAX_RENDER_LINES 行。
-/// 原实现遍历整个 text 拆分并生成 Line，paste 大文本时每帧分配 O(n) Vec。
-/// 现改为以光标行为中心，仅渲染 MAX_RENDER_LINES 行（与 editor_height 上限一致），
-/// 渲染成本由 O(总行数) 降为 O(12)。光标始终落在渲染窗口内。
-fn render_multiline_with_cursor(text: &str, cursor: usize, loading: bool) -> Vec<Line<'static>> {
+fn render_multiline_with_cursor_for_themed(
+    text: &str,
+    cursor: usize,
+    loading: bool,
+) -> Vec<ratatui::text::Line<'static>> {
     let tokens = input_tokens();
     let cursor_style = Style::default()
         .fg(tokens.cursor_fg)
         .bg(tokens.cursor_bg)
         .add_modifier(Modifier::BOLD);
-
-    // I22-B：渲染窗口上限。editor_height 最大 12，所以渲染 >12 行是浪费。
-    const MAX_RENDER_LINES: usize = 12;
-
-    if text.is_empty() {
-        return vec![if loading {
-            Line::from("")
-        } else {
-            // 空态光标：styled space 与行尾光标保持一致，避免 ▓ 块与终端默认光标重叠产生"双光标"
-            Line::from(vec![Span::styled(" ", cursor_style)])
-        }];
-    }
-
-    // 把光标位置映射到 (line_idx, col_idx)
-    let mut chars_before_cursor = 0usize;
-    let mut done = false;
-    let mut target_line = 0usize;
-    let mut target_col = 0usize;
-    for (li, line) in text.split('\n').enumerate() {
-        let line_chars = line.chars().count();
-        if !done && chars_before_cursor + line_chars >= cursor {
-            target_line = li;
-            target_col = cursor - chars_before_cursor;
-            done = true;
-            break;
-        }
-        chars_before_cursor += line_chars + 1; // +1 for \n
-        if chars_before_cursor > cursor + 1 {
-            break;
-        }
-    }
-    if !done {
-        // 光标在文本末尾
-        let total_lines: Vec<&str> = text.split('\n').collect();
-        target_line = total_lines.len() - 1;
-        target_col = total_lines.last().map(|l| l.chars().count()).unwrap_or(0);
-    }
-
-    // I22-B：计算渲染窗口 [start, end)，确保光标行包含在内。
-    // 当总行数 <= MAX_RENDER_LINES 时展示全部；否则以光标行为中心构建窗口，
-    // 并在 end 被末尾钳位后向上扩展 start，保证窗口始终占满 MAX_RENDER_LINES 行
-    // （修复验证报告的"光标在末尾时窗口缩到 7 行"shrinkage bug）。
-    let total_line_count = text.matches('\n').count() + 1;
-    let (start, end) = if total_line_count <= MAX_RENDER_LINES {
-        (0, total_line_count)
-    } else {
-        let half_window = MAX_RENDER_LINES / 2;
-        let center_start = target_line.saturating_sub(half_window);
-        let end = (center_start + MAX_RENDER_LINES).min(total_line_count);
-        let start = end.saturating_sub(MAX_RENDER_LINES);
-        (start, end)
-    };
-
-    let mut result: Vec<Line<'static>> = Vec::with_capacity(end - start);
-    for (li, line) in text.split('\n').enumerate().skip(start).take(end - start) {
-        if li == target_line {
-            // 用 unicode-width 计算光标所在显示列，确保 CJK 双宽字符定位正确。
-            // 与 text_selection.rs:visual_col_to_byte_offset 同策略。
-            let visual_col = display_width_before(line, target_col);
-            let mut col = 0usize;
-            let mut cut_byte = 0usize;
-            for (i, ch) in line.char_indices() {
-                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-                if col + cw > visual_col {
-                    break;
-                }
-                col += cw;
-                cut_byte = i + ch.len_utf8();
-            }
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            if cut_byte > 0 {
-                spans.push(Span::raw(line[..cut_byte].to_string()));
-            }
-            if cut_byte < line.len() {
-                // 反色高亮光标所在字符（用户期望的"字反色"行为）
-                let next_end = line[cut_byte..]
-                    .chars()
-                    .next()
-                    .map(|c| cut_byte + c.len_utf8())
-                    .unwrap_or(line.len());
-                spans.push(Span::styled(
-                    line[cut_byte..next_end].to_string(),
-                    cursor_style,
-                ));
-                if next_end < line.len() {
-                    spans.push(Span::raw(line[next_end..].to_string()));
-                }
-            } else {
-                // 光标在行尾
-                spans.push(Span::styled(" ", cursor_style));
-            }
-            result.push(Line::from(spans));
-        } else {
-            result.push(Line::from(line.to_string()));
-        }
-    }
-    result
+    peri_widgets::textarea::render_multiline_with_cursor(text, cursor, cursor_style, loading)
 }
 
 #[cfg(test)]
@@ -1211,104 +816,8 @@ mod tests {
     use serial_test::serial;
 
     #[test]
-    fn test_editor_state_replace_all_sets_cursor_to_end() {
-        let mut s = EditorState::default();
-        s.replace_all("hello".to_string());
-        assert_eq!(s.text, "hello");
-        assert_eq!(s.cursor, 5);
-    }
-
-    #[test]
-    fn test_editor_state_clear() {
-        let mut s = EditorState {
-            text: "abc".into(),
-            cursor: 2,
-        };
-        s.clear();
-        assert!(s.text.is_empty());
-        assert_eq!(s.cursor, 0);
-    }
-
-    #[test]
-    fn test_editor_delete_forward_removes_char_after_cursor() {
-        let mut s = EditorState {
-            text: "ab你c".into(),
-            cursor: 2,
-        };
-        s.delete_forward();
-        assert_eq!(s.text, "abc");
-        assert_eq!(s.cursor, 2);
-    }
-
-    #[test]
-    fn test_editor_delete_word_forward_removes_next_word() {
-        let mut s = EditorState {
-            text: "hello   world next".into(),
-            cursor: 5,
-        };
-        s.delete_word_forward();
-        assert_eq!(s.text, "hello next");
-        assert_eq!(s.cursor, 5);
-    }
-
-    #[test]
-    fn test_editor_cursor_word_left_and_right() {
-        let mut s = EditorState {
-            text: "hello world next".into(),
-            cursor: 0,
-        };
-        s.cursor_word_right();
-        assert_eq!(s.cursor, 6);
-        s.cursor_word_right();
-        assert_eq!(s.cursor, 12);
-        s.cursor_word_left();
-        assert_eq!(s.cursor, 6);
-    }
-
-    #[test]
-    fn test_editor_cursor_line_up_and_down() {
-        let mut s = EditorState {
-            text: "abc\nd\nefgh".into(),
-            cursor: 2,
-        };
-        assert!(!s.cursor_line_up());
-        assert!(s.cursor_line_down());
-        assert_eq!(s.cursor, 5);
-        assert!(s.cursor_line_down());
-        assert_eq!(s.cursor, 7);
-        assert!(s.cursor_line_up());
-        assert_eq!(s.cursor, 5);
-    }
-
-    #[test]
-    fn test_char_to_byte_boundaries() {
-        // ASCII
-        assert_eq!(EditorState::char_to_byte("hello", 0), 0);
-        assert_eq!(EditorState::char_to_byte("hello", 3), 3);
-        assert_eq!(EditorState::char_to_byte("hello", 5), 5);
-        assert_eq!(EditorState::char_to_byte("hello", 99), 5); // 越界回退
-
-        // CJK
-        assert_eq!(EditorState::char_to_byte("你好", 0), 0);
-        assert_eq!(EditorState::char_to_byte("你好", 1), 3); // '你' 占 3 字节
-        assert_eq!(EditorState::char_to_byte("你好", 2), 6);
-    }
-
-    #[test]
-    fn test_editor_cursor_line_home_and_end() {
-        let mut s = EditorState {
-            text: "abc\nde你f".into(),
-            cursor: 6,
-        };
-        s.cursor_line_home();
-        assert_eq!(s.cursor, 4);
-        s.cursor_line_end();
-        assert_eq!(s.cursor, 8);
-    }
-
-    #[test]
     fn test_apply_slash_selection_replaces_only_current_token() {
-        let mut s = EditorState::default();
+        let mut s = TextAreaState::default();
         s.insert_str("run /hel after");
         s.cursor = 8;
         apply_slash_selection(&mut s, "help");
@@ -1318,7 +827,7 @@ mod tests {
 
     #[test]
     fn test_apply_slash_selection_preserves_cjk_before_token() {
-        let mut s = EditorState::default();
+        let mut s = TextAreaState::default();
         s.insert_str("你好 /he 后面");
         s.cursor = 6;
         apply_slash_selection(&mut s, "help");
@@ -1340,96 +849,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_render_multiline_empty_shows_cursor() {
-        let lines = render_multiline_with_cursor("", 0, false);
-        assert_eq!(lines.len(), 1);
-        // 空态：单行，光标为反色 space（字符反色风格）
-        let spans = &lines[0].spans;
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content, " ");
-    }
-
-    #[test]
-    fn test_render_multiline_empty_loading_shows_blank() {
-        let lines = render_multiline_with_cursor("", 0, true);
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].spans.is_empty() || lines[0].spans.iter().all(|s| s.content.is_empty()));
-    }
-
-    #[test]
-    fn test_render_multiline_cjk_cursor_mid_line() {
-        // "你好世界" (4 CJK chars, 8 display cols), cursor 在位置 2（"好"之后即"世"上）
-        let lines = render_multiline_with_cursor("你好世界", 2, false);
-        assert_eq!(lines.len(), 1);
-        // spans: [Span("你好"), Span("世", cursor_style), Span("界")]
-        assert_eq!(lines[0].spans.len(), 3);
-        assert_eq!(lines[0].spans[0].content, "你好");
-        // 光标字符应为反色高亮
-        assert!(
-            !lines[0].spans[1].style.bg.is_none() || !lines[0].spans[1].style.fg.is_none(),
-            "cursor span should have non-default style (reversed fg/bg)"
-        );
-        assert_eq!(lines[0].spans[2].content, "界");
-    }
-
-    #[test]
-    fn test_render_multiline_cjk_cursor_at_start() {
-        // "你好", cursor 在位置 0（"你"上）
-        let lines = render_multiline_with_cursor("你好", 0, false);
-        assert_eq!(lines.len(), 1);
-        // spans: [Span("你", cursor_style), Span("好")]
-        assert_eq!(lines[0].spans.len(), 2);
-        assert!(
-            !lines[0].spans[0].style.bg.is_none(),
-            "cursor span should have background (reversed)"
-        );
-        assert_eq!(lines[0].spans[1].content, "好");
-    }
-
-    #[test]
-    fn test_render_multiline_cjk_cursor_at_end() {
-        // "你好", cursor 在位置 2（末尾）
-        let lines = render_multiline_with_cursor("你好", 2, false);
-        assert_eq!(lines.len(), 1);
-        // spans: [Span("你好"), Span(" ", cursor_style)]
-        assert_eq!(lines[0].spans.len(), 2);
-        assert_eq!(lines[0].spans[0].content, "你好");
-        assert_eq!(lines[0].spans[1].content, " ");
-    }
-
-    #[test]
-    fn test_render_multiline_cjk_cursor_second_line() {
-        // "abc\n你好", cursor 在位置 5（第二行"好"上）
-        let lines = render_multiline_with_cursor("abc\n你好", 5, false);
-        assert_eq!(lines.len(), 2);
-        // 第一行无光标
-        assert_eq!(lines[0].spans.len(), 1);
-        assert_eq!(lines[0].spans[0].content, "abc");
-        // 第二行：["你", Span("好", cursor_style)]
-        assert_eq!(lines[1].spans.len(), 2);
-        assert_eq!(lines[1].spans[0].content, "你");
-        assert!(
-            !lines[1].spans[1].style.bg.is_none(),
-            "cursor span should have background"
-        );
-    }
-
-    #[test]
-    fn test_display_width_before_cjk() {
-        assert_eq!(display_width_before("abc", 2), 2);
-        assert_eq!(display_width_before("abc", 0), 0);
-        assert_eq!(display_width_before("你好世界", 2), 4); // 2 CJK chars = 4 cols
-        assert_eq!(display_width_before("你好世界", 1), 2);
-        assert_eq!(display_width_before("你好", 3), 4); // 超出 char 数返回全宽
-    }
-
-    #[test]
-    fn test_render_multiline_splits_newlines() {
-        let lines = render_multiline_with_cursor("a\nb\nc", 0, false);
-        assert_eq!(lines.len(), 3);
-    }
-
     fn reset_popup_atoms() {
         *AT_MENTION_ACTIVE.state().write() = false;
         *SLASH_HINT_ACTIVE.state().write() = false;
@@ -1442,7 +861,7 @@ mod tests {
     fn test_update_popup_prefix_slash_token_at_cursor() {
         crate::kit::atoms::init_atoms();
         reset_popup_atoms();
-        let mut s = EditorState::default();
+        let mut s = TextAreaState::default();
         s.insert_str("say /hel");
         update_popup_prefix(&s);
         assert!(!*AT_MENTION_ACTIVE.state().read());
@@ -1455,7 +874,7 @@ mod tests {
     fn test_update_popup_prefix_slash_with_space_disables_after_token() {
         crate::kit::atoms::init_atoms();
         reset_popup_atoms();
-        let mut s = EditorState::default();
+        let mut s = TextAreaState::default();
         s.insert_str("/help me");
         update_popup_prefix(&s);
         assert!(!*SLASH_HINT_ACTIVE.state().read());
@@ -1466,7 +885,7 @@ mod tests {
     fn test_update_popup_prefix_mention_trigger() {
         crate::kit::atoms::init_atoms();
         reset_popup_atoms();
-        let mut s = EditorState::default();
+        let mut s = TextAreaState::default();
         s.insert_str("see @auth");
         update_popup_prefix(&s);
         assert!(*AT_MENTION_ACTIVE.state().read());
@@ -1478,7 +897,7 @@ mod tests {
     fn test_update_popup_prefix_mention_with_space_disables() {
         crate::kit::atoms::init_atoms();
         reset_popup_atoms();
-        let mut s = EditorState::default();
+        let mut s = TextAreaState::default();
         s.insert_str("see @auth service");
         update_popup_prefix(&s);
         assert!(!*AT_MENTION_ACTIVE.state().read());

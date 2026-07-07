@@ -12,6 +12,7 @@ pub mod radio_group;
 pub mod scrollable;
 pub mod spinner;
 pub mod tab_bar;
+pub mod textarea;
 pub mod theme;
 pub mod tool_call;
 
