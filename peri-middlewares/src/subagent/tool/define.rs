@@ -374,19 +374,23 @@ impl BaseTool for SubAgentTool {
         let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
             || subagent_type.as_deref() == Some("fork");
 
-        // 优先读 self.parent_messages（SubAgentMiddleware 装配时通过 with_parent_messages 注入，
-        // Arc<RwLock<Vec<BaseMessage>>> 跨轮次共享 main agent transcript 快照）；
-        // 回退到 _ctx.messages（ToolContext，工具调用时的单次快照）。
+        // 优先读 _ctx.messages（工具调用当下的实时快照），为空时才回退到
+        // self.parent_messages（SubAgentMiddleware::before_agent 时刻的旧快照）。
+        //
+        // Fork 需要继承当前调用现场的完整对话上下文；parent_messages 只在每轮
+        // before_agent 刷新一次，若本轮中途调用 Agent(fork:true)，它会缺少本轮
+        // 新增消息。
         //
         // 剪掉最后一条含 tool_calls 的 AI 消息——它包含未完成的 tool_use block（如 Agent 工具本身），
         // 缺少 tool_result 会导致 LLM API 400 错误。
         let current_messages: Vec<peri_agent::messages::BaseMessage> = {
-            let mut msgs: Vec<peri_agent::messages::BaseMessage> =
-                if let Some(ref pm) = self.parent_messages {
-                    pm.read().clone()
-                } else {
-                    _ctx.messages.to_vec()
-                };
+            let mut msgs: Vec<peri_agent::messages::BaseMessage> = if !_ctx.messages.is_empty() {
+                _ctx.messages.to_vec()
+            } else if let Some(ref pm) = self.parent_messages {
+                pm.read().clone()
+            } else {
+                Vec::new()
+            };
             if let Some(last) = msgs.last() {
                 if last.has_tool_calls() {
                     msgs.pop();

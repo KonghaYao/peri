@@ -1272,6 +1272,218 @@ async fn test_integration_fork_parent_messages_passthrough() {
     );
 }
 
+#[tokio::test]
+async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
+    let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
+    parent_messages
+        .write()
+        .push(BaseMessage::human("old before_agent snapshot"));
+    let ctx_messages = vec![
+        BaseMessage::human("old before_agent snapshot"),
+        BaseMessage::ai("new current turn detail"),
+        BaseMessage::human("latest user request"),
+    ];
+
+    let captured: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_clone = Arc::clone(&captured);
+
+    struct CaptureContentLLM {
+        captured: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    #[async_trait::async_trait]
+    impl ReactLLM for CaptureContentLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
+            Ok(Reasoning::with_answer("", "ctx-preferred"))
+        }
+    }
+
+    let t = SubAgentTool::new(
+        Arc::new(vec![]),
+        None,
+        Arc::new(move |_: Option<&str>| {
+            Box::new(CaptureContentLLM {
+                captured: Arc::clone(&captured_clone),
+            }) as Box<dyn ReactLLM + Send + Sync>
+        }),
+        "/tmp".to_string(),
+    )
+    .with_parent_messages(Arc::clone(&parent_messages));
+
+    let result = t
+        .invoke(
+            serde_json::json!({
+                "fork": true,
+                "prompt": "review current turn"
+            }),
+            peri_agent::tools::ToolContext::new(&ctx_messages, "."),
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.contains("ctx-preferred"),
+        "fork should execute via context-preferred path: {}",
+        result
+    );
+    let contents = captured.lock().unwrap().clone();
+    assert!(
+        contents
+            .iter()
+            .any(|c| c.contains("new current turn detail")),
+        "fork should inherit current ToolContext messages, got: {:?}",
+        contents
+    );
+    assert!(
+        contents.iter().any(|c| c.contains("latest user request")),
+        "fork should inherit latest ToolContext user request, got: {:?}",
+        contents
+    );
+}
+
+#[tokio::test]
+async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
+    let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
+    parent_messages
+        .write()
+        .push(BaseMessage::human("parent fallback context"));
+
+    let captured: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_clone = Arc::clone(&captured);
+
+    struct FallbackCaptureLLM {
+        captured: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    #[async_trait::async_trait]
+    impl ReactLLM for FallbackCaptureLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
+            Ok(Reasoning::with_answer("", "fallback-used"))
+        }
+    }
+
+    let t = SubAgentTool::new(
+        Arc::new(vec![]),
+        None,
+        Arc::new(move |_: Option<&str>| {
+            Box::new(FallbackCaptureLLM {
+                captured: Arc::clone(&captured_clone),
+            }) as Box<dyn ReactLLM + Send + Sync>
+        }),
+        "/tmp".to_string(),
+    )
+    .with_parent_messages(Arc::clone(&parent_messages));
+
+    let result = t
+        .invoke(
+            serde_json::json!({
+                "fork": true,
+                "prompt": "review fallback"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.contains("fallback-used"),
+        "fork should execute via fallback path: {}",
+        result
+    );
+    let contents = captured.lock().unwrap().clone();
+    assert!(
+        contents
+            .iter()
+            .any(|c| c.contains("parent fallback context")),
+        "fork should fall back to parent_messages when ToolContext is empty, got: {:?}",
+        contents
+    );
+}
+
+#[tokio::test]
+async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
+    let ctx_messages = vec![
+        BaseMessage::human("stable context before tool call"),
+        BaseMessage::ai_with_tool_calls(
+            "unfinished agent tool call text",
+            vec![peri_agent::messages::ToolCallRequest::new(
+                "call-agent-1",
+                "Agent",
+                serde_json::json!({"fork": true, "prompt": "review"}),
+            )],
+        ),
+    ];
+
+    let captured: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_clone = Arc::clone(&captured);
+
+    struct DropToolCallCaptureLLM {
+        captured: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    #[async_trait::async_trait]
+    impl ReactLLM for DropToolCallCaptureLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
+            Ok(Reasoning::with_answer("", "tool-call-dropped"))
+        }
+    }
+
+    let t = SubAgentTool::new(
+        Arc::new(vec![]),
+        None,
+        Arc::new(move |_: Option<&str>| {
+            Box::new(DropToolCallCaptureLLM {
+                captured: Arc::clone(&captured_clone),
+            }) as Box<dyn ReactLLM + Send + Sync>
+        }),
+        "/tmp".to_string(),
+    );
+
+    let result = t
+        .invoke(
+            serde_json::json!({
+                "fork": true,
+                "prompt": "review without dangling tool call"
+            }),
+            peri_agent::tools::ToolContext::new(&ctx_messages, "."),
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.contains("tool-call-dropped"),
+        "fork should execute after dropping trailing tool call message: {}",
+        result
+    );
+    let contents = captured.lock().unwrap().clone();
+    assert!(
+        contents
+            .iter()
+            .any(|c| c.contains("stable context before tool call")),
+        "fork should keep earlier context, got: {:?}",
+        contents
+    );
+    assert!(
+        contents
+            .iter()
+            .all(|c| !c.contains("unfinished agent tool call text")),
+        "fork should drop trailing AI message with unclosed tool call, got: {:?}",
+        contents
+    );
+}
+
 /// 场景 2（Background Independent cancel）：端到端验证 background fork 在父 cancel 后**不**中断。
 ///
 /// 基于 `SubAgentTool::invoke` → `invoke_background` → `invoke_background_fork`
