@@ -5,6 +5,7 @@
 
 use crate::kit::acp_types::{AcpEventData, CurrentTurn, ToolCardAccumulator};
 use crate::kit::atoms::*;
+use agent_client_protocol::schema::{Plan, PlanEntryStatus};
 use peri_acp_types::view_model::{NoteLevel, SystemNoteData, UserBubbleData, ViewModel, hash_str};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -457,6 +458,8 @@ fn drain_input_buffer() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kit::message_area::TodoStatus;
+    use serde_json::json;
     use serial_test::serial;
     use tokio::sync::mpsc;
 
@@ -855,33 +858,111 @@ mod tests {
             &snapshot.committed[5]
         );
     }
+
+    #[test]
+    #[serial]
+    fn test_handle_plan_update_multiple_entries() {
+        crate::kit::atoms::init_atoms();
+        *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
+
+        let plan_json = json!({
+            "entries": [
+                {"content": "Task 1", "status": "in_progress", "priority": "medium"},
+                {"content": "Task 2", "status": "pending", "priority": "medium"},
+                {"content": "Task 3", "status": "completed", "priority": "medium"}
+            ]
+        });
+
+        handle_plan_update(&plan_json);
+
+        let items = crate::kit::atoms::TODO_ITEMS.state().read().clone();
+        assert_eq!(items.len(), 3, "应包含 3 个条目");
+        assert!(matches!(items[0].status, TodoStatus::InProgress));
+        assert!(matches!(items[1].status, TodoStatus::Pending));
+        assert!(matches!(items[2].status, TodoStatus::Completed));
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_plan_update_empty_entries() {
+        crate::kit::atoms::init_atoms();
+        *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
+
+        let plan_json = json!({
+            "entries": []
+        });
+
+        handle_plan_update(&plan_json);
+
+        let items = crate::kit::atoms::TODO_ITEMS.state().read().clone();
+        assert!(items.is_empty(), "空 entries 应产出空列表");
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_plan_update_missing_entries() {
+        crate::kit::atoms::init_atoms();
+        // 写入一个非空值，确认不被覆盖
+        *crate::kit::atoms::TODO_ITEMS.state().write() = vec![crate::kit::message_area::TodoItem {
+            status: crate::kit::message_area::TodoStatus::InProgress,
+            content: "existing".into(),
+        }];
+
+        let plan_json = json!({});
+        handle_plan_update(&plan_json);
+
+        // Plan 缺少 entries 字段 → deserialize 失败 → 不覆盖 TODO_ITEMS
+        let items = crate::kit::atoms::TODO_ITEMS.state().read().clone();
+        assert_eq!(items.len(), 1, "缺少 entries 不应覆盖已有列表");
+        assert_eq!(items[0].content, "existing");
+    }
 }
 
 /// 从 ACP SessionUpdate::Plan JSON 中提取 TodoItem 列表并写入 TODO_ITEMS atom。
 ///
-/// JSON 格式:
+/// 使用类型安全 serde 反序列化将 Plan JSON 映射为 TodoItem 列表。
+/// Plan JSON 格式:
 ///   {"sessionUpdate":"plan","entries":[{"content":"Fix bug","status":"in_progress","priority":"medium"}]}
 pub fn handle_plan_update(update: &serde_json::Value) {
     use crate::kit::message_area::{TodoItem, TodoStatus};
 
-    let entries = match update.get("entries").and_then(|v| v.as_array()) {
-        Some(e) => e,
-        None => return,
+    let plan: Plan = match serde_json::from_value(update.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "handle_plan_update: failed to deserialize Plan");
+            return;
+        }
     };
 
-    let items: Vec<TodoItem> = entries
-        .iter()
-        .filter_map(|e| {
-            let content = e.get("content")?.as_str()?.to_string();
-            let status = match e.get("status")?.as_str()? {
-                "in_progress" => TodoStatus::InProgress,
-                "completed" => TodoStatus::Completed,
-                "pending" => TodoStatus::Pending,
-                _ => return None,
+    tracing::debug!(
+        entries_count = plan.entries.len(),
+        "handle_plan_update: received Plan entries"
+    );
+
+    let items: Vec<TodoItem> = plan
+        .entries
+        .into_iter()
+        .map(|e| {
+            let status = match e.status {
+                PlanEntryStatus::InProgress => TodoStatus::InProgress,
+                PlanEntryStatus::Completed => TodoStatus::Completed,
+                PlanEntryStatus::Pending => TodoStatus::Pending,
+                _ => {
+                    tracing::warn!(status = ?e.status, "handle_plan_update: unknown PlanEntryStatus, fallback to Pending");
+                    TodoStatus::Pending
+                }
             };
-            Some(TodoItem { status, content })
+            TodoItem {
+                status,
+                content: e.content,
+            }
         })
         .collect();
 
+    tracing::debug!(
+        items_count = items.len(),
+        "handle_plan_update: writing {} items to TODO_ITEMS",
+        items.len()
+    );
     *crate::kit::atoms::TODO_ITEMS.state().write() = items;
 }

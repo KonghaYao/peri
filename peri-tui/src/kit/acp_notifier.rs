@@ -13,12 +13,14 @@
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::acp_client::AcpNotification;
 use crate::kit::acp_types::AcpEventData;
-use crate::kit::atoms::AVAILABLE_SLASH_COMMANDS;
+use crate::kit::atoms::{ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS};
 use crate::kit::input_area::refresh_slash_items;
+use peri_acp_types::event_data::{AskUser, Question, QuestionOption};
+use serde_json::Value;
 
 /// 启动 kit ACP notifier 后台任务。
 ///
@@ -89,10 +91,12 @@ fn forward_notification(
                 warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may keep current turn");
             }
         }
+        AcpNotification::Elicitation { id, params } => {
+            handle_elicitation(&id, &params, bridge_tx, render_bridge_tx);
+        }
         // 暂未在 kit 路径处理——S5+ 接入 DTO 事件时再扩展
         AcpNotification::AgentEvent { .. }
         | AcpNotification::RequestPermission { .. }
-        | AcpNotification::Elicitation { .. }
         | AcpNotification::PredictionReady { .. }
         | AcpNotification::Peri { .. }
         | AcpNotification::Other { .. } => {
@@ -139,8 +143,150 @@ fn handle_session_update(params: serde_json::Value) {
             len
         );
     } else if tag == Some("plan") {
+        debug!(update = %update, "handle_session_update: plan tag matched");
         crate::kit::acp_events::handle_plan_update(update);
     }
+}
+
+/// 处理 Elicitation 通知：解析 params 为 AskUser → 写入 ASK_USER_REQUEST_ID atom →
+/// 构造 AcpEventData::AskUser 推入双 bridge。
+fn handle_elicitation(
+    id: &peri_acp::transport::types::RequestId,
+    params: &Value,
+    bridge_tx: &mpsc::UnboundedSender<AcpEventData>,
+    render_bridge_tx: &mpsc::UnboundedSender<AcpEventData>,
+) {
+    // 序列化 RequestId 存入 atom（供 popup 提交时回传）
+    if let Ok(id_str) = serde_json::to_string(id) {
+        *ASK_USER_REQUEST_ID.state().write() = Some(id_str);
+    } else {
+        warn!("kit ACP notifier: failed to serialize elicitation RequestId");
+        return;
+    }
+
+    let questions = parse_elicitation_questions(params);
+    let ask_user = AskUser { questions };
+    let event = AcpEventData::AskUser(ask_user);
+
+    info!("kit ACP notifier: forwarding Elicitation as AskUser event");
+
+    if let Err(e) = bridge_tx.send(event.clone()) {
+        warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping AskUser");
+    }
+    if let Err(e) = render_bridge_tx.send(event) {
+        warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may miss AskUser");
+    }
+}
+
+/// 从 CreateElicitationRequest JSON 中解析问题列表。
+///
+/// JSON 结构（来自 agent-client-protocol-schema v0.13.6）:
+/// ```json
+/// {"formMode": {"schema": {"requestedSchema": {"properties": {
+///   "q_id": {"type": "string", "title": "Header", "description": "Question text",
+///            "oneOf": [{"const": "label", "title": "label", "description": "..."}]},
+///   "multi_q_id": {"type": "array", "title": "...", "description": "...",
+///                  "items": {"anyOf": [{"const": "label", ...}]}}
+/// }}}}}
+/// ```
+///
+/// 解析失败时返回空 Vec（弹窗显示 "0 questions"）。
+fn parse_elicitation_questions(params: &Value) -> Vec<Question> {
+    let props = match params
+        .get("formMode")
+        .and_then(|fm| fm.get("schema"))
+        .and_then(|s| s.get("requestedSchema"))
+        .and_then(|rs| rs.get("properties"))
+        .and_then(|p| p.as_object())
+    {
+        Some(p) => p,
+        None => {
+            warn!("kit ACP notifier: elicitation params missing requestedSchema.properties");
+            return vec![];
+        }
+    };
+
+    props
+        .iter()
+        .map(|(id, prop)| {
+            let header = prop
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let question = prop
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            let prop_type = prop.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+            match prop_type {
+                "array" => {
+                    // multi_select: options 在 items.anyOf
+                    let options = extract_options_from_oneof(prop, "anyOf", true);
+                    Question {
+                        id: id.clone(),
+                        question,
+                        header,
+                        options,
+                        multi_select: true,
+                    }
+                }
+                "string" => {
+                    // single select: options 在 oneOf
+                    let options = extract_options_from_oneof(prop, "oneOf", false);
+                    Question {
+                        id: id.clone(),
+                        question,
+                        header,
+                        options,
+                        multi_select: false,
+                    }
+                }
+                _ => Question {
+                    id: id.clone(),
+                    question,
+                    header,
+                    options: vec![],
+                    multi_select: false,
+                },
+            }
+        })
+        .collect()
+}
+
+/// 从 prop["items"][key] 或 prop[key] 中提取 QuestionOption 列表。
+/// - `nested=true`：选项在 `prop["items"][key]`（multi_select / anyOf）
+/// - `nested=false`：选项在 `prop[key]`（single_select / oneOf）
+fn extract_options_from_oneof(prop: &Value, key: &str, nested: bool) -> Vec<QuestionOption> {
+    let arr = if nested {
+        prop.get("items").and_then(|items| items.get(key))
+    } else {
+        prop.get(key)
+    }
+    .and_then(|v| v.as_array());
+
+    let Some(arr) = arr else {
+        return vec![];
+    };
+
+    arr.iter()
+        .map(|opt| QuestionOption {
+            label: opt
+                .get("const")
+                .or_else(|| opt.get("title"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            description: opt
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -320,6 +466,38 @@ mod tests {
         handle_session_update(payload);
         let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
         assert_eq!(entries.len(), 0, "非 commands update 不应写入 atom");
+    }
+
+    /// 验证 handle_session_update 能正确解析 plan update 并写入 TODO_ITEMS atom。
+    #[test]
+    #[serial]
+    fn test_handle_session_update_parses_plan() {
+        use crate::kit::message_area::TodoStatus;
+        crate::kit::atoms::init_atoms();
+        *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
+
+        let payload = json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "plan",
+                "entries": [
+                    {"content": "Fix bug", "status": "in_progress", "priority": "medium"},
+                    {"content": "Write tests", "status": "pending", "priority": "medium"},
+                    {"content": "Document", "status": "completed", "priority": "medium"}
+                ]
+            }
+        });
+
+        handle_session_update(payload);
+
+        let items = crate::kit::atoms::TODO_ITEMS.state().read().clone();
+        assert_eq!(items.len(), 3, "应包含 3 个条目，实际: {items:?}");
+        assert_eq!(items[0].content, "Fix bug");
+        assert_eq!(items[1].content, "Write tests");
+        assert_eq!(items[2].content, "Document");
+        assert!(matches!(items[0].status, TodoStatus::InProgress));
+        assert!(matches!(items[1].status, TodoStatus::Pending));
+        assert!(matches!(items[2].status, TodoStatus::Completed));
     }
 
     /// 编译期类型断言：TextChunk 仍可从 peri-acp-types 引用——确保 S3 与 v2 event_data
