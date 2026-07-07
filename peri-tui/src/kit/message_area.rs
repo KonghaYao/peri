@@ -337,6 +337,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .unwrap_or(props.width as u16)
         .max(1);
 
+    // 渲染高度（提前计算，供 use_effect 就近判断使用）
+    let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
+
     // ── raw_wrap_map：用于事件 handler 中将视觉坐标转换为行索引 ──
     let raw_wrap_map: Vec<WrappedLineInfo> = {
         let lc = line_cache.read();
@@ -408,6 +411,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         } else {
             line_cache.read().cached_wrap_map.clone()
         }
+    };
+    // ── 总视觉行数（供 use_effect 就近判断使用，提前到 hooks 之前）──
+    let total_visual_rows: u16 = if wrap_map.is_empty() {
+        if is_loading { 1 } else { 0 }
+    } else {
+        wrap_map
+            .last()
+            .map_or(0, |w| w.visual_row + w.visual_height)
     };
     {
         let content_lines_handler = content_lines.clone();
@@ -555,7 +566,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // ── 视口裁剪 ──
     let scroll_y = scroll_state.read().offset().y as u16;
-    let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
     let (first, last, _local_offset) = viewport_clip(&wrap_map, scroll_y, vis_height);
 
     let visible_lines: Vec<Line<'static>> =
@@ -566,13 +576,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 使 visible_lines 出现在内容 View 的正确偏移处。
     let content_top = wrap_map.get(first).map_or(0u16, |w| w.visual_row);
 
-    let total_visual_rows: u16 = if wrap_map.is_empty() {
-        if is_loading { 1 } else { 0 }
-    } else {
-        wrap_map
-            .last()
-            .map_or(0, |w| w.visual_row + w.visual_height)
-    };
+    // total_visual_rows 已在 hook 声明之前计算，此处复用同一值。
 
     // 底部 spacer：补齐 content_top + visible 实际高度到 total_visual_rows。
     //
