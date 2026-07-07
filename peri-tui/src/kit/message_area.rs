@@ -595,6 +595,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 height: Constraint::Fill(1),
                 state: scroll_state,
                 scrollbars: clean_scrollbars(),
+                active: false,
             ) {
                 View(
                     flex_direction: Direction::Vertical,

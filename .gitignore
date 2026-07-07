@@ -196,3 +196,6 @@ settings.json
 .claude/skills/*
 !.claude/skills/learn-from-history/**
 !.claude/skills/learn-from-history/
+!.claude/skills/start-devflow/**
+!.claude/skills/start-devflow/
+!.claude/agents/coder.md

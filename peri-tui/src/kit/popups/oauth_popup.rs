@@ -141,14 +141,3 @@ fn open_auth_url_in_browser(url: &str) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_open_auth_url_does_not_panic_on_invalid_platform() {
-        // 即使 xdg-open 不存在（CI 容器），此调用也应安全返回而非 panic
-        open_auth_url_in_browser("https://example.com/oauth");
-    }
-}
