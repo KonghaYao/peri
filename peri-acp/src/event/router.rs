@@ -1,38 +1,29 @@
 //! Event router -- maps `ExecutorEvent` to `peri/unstable-event` protocol payloads.
 //!
 //! Each call to [`route`] returns an optional [`RoutingOutput`] containing:
-//! - `event_name`: kebab-case string identifying the event (e.g. `"text-chunk"`)
+//! - `event_name`: kebab-case string identifying the event
 //! - `data`: JSON value carrying the event-specific payload
 //!
 //! Events that are internal to the agent (LLM retries, compact lifecycle, etc.)
 //! return `None` and are discarded per §5.1 of the protocol design doc.
+//!
+//! §4.1 streaming events (TextChunk/AiReasoning/ToolStart/ToolEnd)
+//! are now routed through standard ACP `session/update`, not `peri/unstable-event`.
 //!
 //! Reference: `docs/design/peri-acp-protocol.md` section 5 "Event Router".
 
 use peri_acp_types::event_data::*;
 use peri_agent::agent::events::ExecutorEvent;
 
-use super::truncate::{summarize_input, summarize_output, truncate_text};
+use super::truncate::truncate_text;
 
 /// Output of [`route`] -- an event name + its JSON data payload.
 #[derive(Debug, Clone)]
 pub struct RoutingOutput {
-    /// kebab-case event name (e.g. `"text-chunk"`, `"view-commit"`).
+    /// kebab-case event name (e.g. `"turn-done"`).
     pub event_name: String,
     /// Serialized event data.
     pub data: serde_json::Value,
-}
-
-/// Trait for converting finalized messages into [`peri_acp_types::view_model::ViewModel`]s.
-///
-/// The ACP layer injects a concrete implementation at construction time.
-/// The router itself is agnostic to the conversion logic.
-pub trait ViewMapper {
-    /// Convert a list of finalized `BaseMessage`s into `ViewModel`s.
-    fn convert(
-        &mut self,
-        messages: &[peri_agent::messages::BaseMessage],
-    ) -> Vec<peri_acp_types::view_model::ViewModel>;
 }
 
 /// Map an [`ExecutorEvent`] to a `peri/unstable-event` routing output.
@@ -43,95 +34,17 @@ pub trait ViewMapper {
 /// - `CompactStarted` / `CompactCompleted` / `CompactError` -- transparent to user
 /// - `LlmCallStart` / `LlmRequestPayload` -- observability-only
 /// - `MessageAdded` -- incremental, not needed for TUI rendering
-/// - `StateSnapshot` -- superseded by `TurnCommitted` for rendering
+/// - `StateSnapshot` -- superseded by incremental streaming for rendering
+/// - `TurnCommitted` -- superseded by streaming + TurnDone for rendering
 /// - `StateSnapshotMeta` -- status-bar metadata, not a push event
-/// - `LlmCallEnd` with usage -- status-bar metadata (token counts), not a push event
-/// - `LlmCallEnd` without usage -- filtered
+/// - `LlmCallEnd` -- status-bar metadata (token counts), now delivered via
+///   standard ACP `session/update` (usage_update tag), §C
 /// - `BackgroundTaskCompleted` / `BgToolStep` -- handled via separate TUI polling
 /// - `WorkflowProgress` -- handled via dedicated panel
 /// - `AgentExecutionFailed` -- routed as `"turn-interrupted"` so the v2 state machine can exit Streaming
-pub fn route(ev: &ExecutorEvent, view_mapper: &mut dyn ViewMapper) -> Option<RoutingOutput> {
+pub fn route(ev: &ExecutorEvent) -> Option<RoutingOutput> {
     match ev {
-        // ── §4.1 Streaming events ───────────────────────────────────────────
-        ExecutorEvent::TextChunk {
-            chunk,
-            source_agent_id,
-            ..
-        } => Some(RoutingOutput {
-            event_name: "text-chunk".into(),
-            data: serde_json::to_value(&TextChunk {
-                text: chunk.clone(),
-                agent_id: source_agent_id.clone(),
-            })
-            .unwrap(),
-        }),
-
-        ExecutorEvent::AiReasoning {
-            text,
-            source_agent_id,
-        } => Some(RoutingOutput {
-            event_name: "reasoning-chunk".into(),
-            data: serde_json::to_value(&ReasoningChunk {
-                text: text.clone(),
-                agent_id: source_agent_id.clone(),
-            })
-            .unwrap(),
-        }),
-
-        ExecutorEvent::ToolStart {
-            tool_call_id,
-            name,
-            input,
-            source_agent_id,
-            ..
-        } => Some(RoutingOutput {
-            event_name: "tool-started".into(),
-            data: serde_json::to_value(&ToolStarted {
-                tool_id: tool_call_id.clone(),
-                tool_name: name.clone(),
-                input_summary: summarize_input(name, input),
-                agent_id: source_agent_id.clone(),
-            })
-            .unwrap(),
-        }),
-
-        ExecutorEvent::ToolEnd {
-            tool_call_id,
-            name,
-            output,
-            is_error,
-            source_agent_id,
-            ..
-        } => Some(RoutingOutput {
-            event_name: "tool-ended".into(),
-            data: serde_json::to_value(&ToolEnded {
-                tool_id: tool_call_id.clone(),
-                output_summary: summarize_output(name, output),
-                is_error: *is_error,
-                agent_id: source_agent_id.clone(),
-            })
-            .unwrap(),
-        }),
-
-        // ── §4.2 Boundary events ─────────────────────────────────────────────
-        ExecutorEvent::TurnCommitted { messages, .. } => {
-            let view_models = view_mapper.convert(messages);
-            Some(RoutingOutput {
-                event_name: "view-commit".into(),
-                data: serde_json::to_value(&ViewCommit { view_models }).unwrap(),
-            })
-        }
-
         // ── §4.3 Status events ───────────────────────────────────────────────
-        ExecutorEvent::LlmCallEnd { usage: Some(u), .. } => Some(RoutingOutput {
-            event_name: "token-usage".into(),
-            data: serde_json::to_value(&TokenUsage {
-                input: u.input_tokens as u64,
-                output: u.output_tokens as u64,
-            })
-            .unwrap(),
-        }),
-
         ExecutorEvent::ContextWarning {
             used_tokens,
             total_tokens,
@@ -212,7 +125,8 @@ pub fn route(ev: &ExecutorEvent, view_mapper: &mut dyn ViewMapper) -> Option<Rou
         }),
 
         // ── §5.1 Discarded events ────────────────────────────────────────────
-        ExecutorEvent::LlmRetrying { .. }
+        ExecutorEvent::LlmCallEnd { .. }
+        | ExecutorEvent::LlmRetrying { .. }
         | ExecutorEvent::LspDiagnostics { .. }
         | ExecutorEvent::CompactStarted
         | ExecutorEvent::CompactCompleted { .. }
@@ -222,11 +136,16 @@ pub fn route(ev: &ExecutorEvent, view_mapper: &mut dyn ViewMapper) -> Option<Rou
         | ExecutorEvent::MessageAdded(_)
         | ExecutorEvent::StateSnapshot(_)
         | ExecutorEvent::StateSnapshotMeta { .. }
-        | ExecutorEvent::LlmCallEnd { usage: None, .. }
         | ExecutorEvent::BackgroundTaskCompleted(_)
         | ExecutorEvent::BgToolStep { .. }
         | ExecutorEvent::WorkflowProgress(_)
-        | ExecutorEvent::TodoUpdate(_) => None,
+        | ExecutorEvent::TodoUpdate(_)
+        // §4.1 streaming events now routed through standard session/update
+        | ExecutorEvent::TextChunk { .. }
+        | ExecutorEvent::AiReasoning { .. }
+        | ExecutorEvent::ToolStart { .. }
+        | ExecutorEvent::ToolEnd { .. }
+        | ExecutorEvent::TurnCommitted { .. } => None,
 
         // ── §4.6 Terminal events ────────────────────────────────────────────
         ExecutorEvent::AgentExecutionFailed { message } => Some(RoutingOutput {
@@ -240,9 +159,8 @@ pub fn route(ev: &ExecutorEvent, view_mapper: &mut dyn ViewMapper) -> Option<Rou
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
-// summarize_input / summarize_output / truncate_text 已迁移至
-// `super::truncate`（与 `view_mapper.rs` 共享），本文件顶部 `use` 引入。
-// 统一后同一工具调用在 streaming 与 view-commit 通道显示相同格式。
+// truncate_text 已迁移至 `super::truncate`（与 `view_mapper.rs` 共享），
+// 本文件顶部 `use` 引入。RewindPreview 仍使用它来截断消息预览。
 
 // ─── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -250,135 +168,10 @@ pub fn route(ev: &ExecutorEvent, view_mapper: &mut dyn ViewMapper) -> Option<Rou
 mod tests {
     use super::*;
 
-    /// No-op ViewMapper for testing.
-    struct NopViewMapper;
-
-    impl ViewMapper for NopViewMapper {
-        fn convert(
-            &mut self,
-            _messages: &[peri_agent::messages::BaseMessage],
-        ) -> Vec<peri_acp_types::view_model::ViewModel> {
-            vec![]
-        }
-    }
-
     #[test]
-    fn test_text_chunk_routes() {
-        let ev = ExecutorEvent::TextChunk {
-            message_id: Default::default(),
-            chunk: "hello world".into(),
-            source_agent_id: None,
-        };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
-        assert_eq!(out.event_name, "text-chunk");
-        assert_eq!(out.data["text"], "hello world");
-        assert!(out.data.get("agent_id").unwrap().is_null());
-    }
-
-    #[test]
-    fn test_text_chunk_with_subagent_routes() {
-        let ev = ExecutorEvent::TextChunk {
-            message_id: Default::default(),
-            chunk: "sub output".into(),
-            source_agent_id: Some("sa-1".into()),
-        };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
-        assert_eq!(out.data["agent_id"], "sa-1");
-    }
-
-    #[test]
-    fn test_reasoning_chunk_routes() {
-        let ev = ExecutorEvent::AiReasoning {
-            text: "thinking...".into(),
-            source_agent_id: None,
-        };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
-        assert_eq!(out.event_name, "reasoning-chunk");
-        assert_eq!(out.data["text"], "thinking...");
-        assert!(out.data["agent_id"].is_null());
-    }
-
-    #[test]
-    fn test_reasoning_chunk_with_subagent_routes() {
-        let ev = ExecutorEvent::AiReasoning {
-            text: "sub thinking".into(),
-            source_agent_id: Some("sa-1".into()),
-        };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
-        assert_eq!(out.event_name, "reasoning-chunk");
-        assert_eq!(out.data["text"], "sub thinking");
-        assert_eq!(out.data["agent_id"], "sa-1");
-    }
-
-    #[test]
-    fn test_tool_start_routes() {
-        let ev = ExecutorEvent::ToolStart {
-            message_id: Default::default(),
-            tool_call_id: "tc-1".into(),
-            name: "Read".into(),
-            input: serde_json::json!({"file_path": "/tmp/foo.rs"}),
-            source_agent_id: None,
-        };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
-        assert_eq!(out.event_name, "tool-started");
-        assert_eq!(out.data["tool_id"], "tc-1");
-        assert_eq!(out.data["tool_name"], "Read");
-        assert_eq!(out.data["input_summary"], "/tmp/foo.rs");
-    }
-
-    #[test]
-    fn test_tool_end_routes() {
-        let ev = ExecutorEvent::ToolEnd {
-            message_id: Default::default(),
-            tool_call_id: "tc-1".into(),
-            name: "Bash".into(),
-            output: "done\n".into(),
-            is_error: false,
-            source_agent_id: None,
-        };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
-        assert_eq!(out.event_name, "tool-ended");
-        assert_eq!(out.data["tool_id"], "tc-1");
-        assert_eq!(out.data["is_error"], false);
-    }
-
-    #[test]
-    fn test_tool_end_error_routes() {
-        let ev = ExecutorEvent::ToolEnd {
-            message_id: Default::default(),
-            tool_call_id: "tc-2".into(),
-            name: "Bash".into(),
-            output: "command not found".into(),
-            is_error: true,
-            source_agent_id: None,
-        };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
-        assert_eq!(out.data["is_error"], true);
-    }
-
-    #[test]
-    fn test_turn_committed_routes_to_view_commit() {
-        let ev = ExecutorEvent::TurnCommitted {
-            messages: vec![],
-            steps: 3,
-        };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
-        assert_eq!(out.event_name, "view-commit");
-        // NopViewMapper returns empty list
-        assert_eq!(out.data["view_models"], serde_json::json!([]));
-    }
-
-    #[test]
-    fn test_token_usage_routes() {
-        let ev = ExecutorEvent::LlmCallEnd {
+    fn test_llm_call_end_all_discarded() {
+        // usage: Some → discarded (token-usage event deprecated, §C)
+        let ev_with_usage = ExecutorEvent::LlmCallEnd {
             step: 1,
             model: "test".into(),
             output: "answer".into(),
@@ -391,24 +184,17 @@ mod tests {
             }),
             stop_reason: None,
         };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
-        assert_eq!(out.event_name, "token-usage");
-        assert_eq!(out.data["input"], 500);
-        assert_eq!(out.data["output"], 200);
-    }
+        assert!(route(&ev_with_usage).is_none());
 
-    #[test]
-    fn test_llm_call_end_no_usage_discarded() {
-        let ev = ExecutorEvent::LlmCallEnd {
+        // usage: None → discarded (was already in discarded list)
+        let ev_no_usage = ExecutorEvent::LlmCallEnd {
             step: 1,
             model: "test".into(),
             output: "answer".into(),
             usage: None,
             stop_reason: None,
         };
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev_no_usage).is_none());
     }
 
     #[test]
@@ -418,8 +204,7 @@ mod tests {
             total_tokens: 100000,
             percentage: 0.85,
         };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
+        let out = route(&ev).unwrap();
         assert_eq!(out.event_name, "budget-warning");
         assert_eq!(out.data["used"], 85000);
         assert_eq!(out.data["limit"], 100000);
@@ -433,8 +218,7 @@ mod tests {
             total_tokens: 100000,
             percentage: 0.70,
         };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
+        let out = route(&ev).unwrap();
         assert_eq!(out.data["threshold"], "0.70");
     }
 
@@ -445,8 +229,7 @@ mod tests {
             instance_id: "sa-42".into(),
             is_background: false,
         };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
+        let out = route(&ev).unwrap();
         assert_eq!(out.event_name, "subagent-started");
         assert_eq!(out.data["agent_id"], "sa-42");
         assert_eq!(out.data["agent_name"], "researcher");
@@ -460,8 +243,7 @@ mod tests {
             is_error: false,
             instance_id: "sa-42".into(),
         };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
+        let out = route(&ev).unwrap();
         assert_eq!(out.event_name, "subagent-stopped");
         assert_eq!(out.data["agent_id"], "sa-42");
     }
@@ -480,8 +262,7 @@ mod tests {
             summary: "rolled back 2 messages".into(),
             messages: msgs,
         };
-        let mut mapper = NopViewMapper;
-        let out = route(&ev, &mut mapper).unwrap();
+        let out = route(&ev).unwrap();
         assert_eq!(out.event_name, "rewind-preview");
         assert_eq!(out.data["messages"].as_array().unwrap().len(), 2);
     }
@@ -496,8 +277,7 @@ mod tests {
             delay_ms: 1000,
             error: "rate limited".into(),
         };
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     #[test]
@@ -507,14 +287,12 @@ mod tests {
             warnings: 2,
             files_with_errors: 1,
         };
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     #[test]
     fn test_compact_started_discarded() {
-        let mut mapper = NopViewMapper;
-        assert!(route(&ExecutorEvent::CompactStarted, &mut mapper).is_none());
+        assert!(route(&ExecutorEvent::CompactStarted).is_none());
     }
 
     #[test]
@@ -526,8 +304,7 @@ mod tests {
             micro_cleared: 0,
             messages: vec![],
         };
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     #[test]
@@ -535,8 +312,7 @@ mod tests {
         let ev = ExecutorEvent::CompactError {
             message: "failed".into(),
         };
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     #[test]
@@ -544,15 +320,13 @@ mod tests {
         let ev = ExecutorEvent::MessageAdded(peri_agent::messages::BaseMessage::human(
             peri_agent::messages::MessageContent::text("test"),
         ));
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     #[test]
     fn test_state_snapshot_discarded() {
         let ev = ExecutorEvent::StateSnapshot(vec![]);
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     #[test]
@@ -562,8 +336,7 @@ mod tests {
             messages: std::sync::Arc::new(vec![]),
             tools: vec![],
         };
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     #[test]
@@ -572,8 +345,7 @@ mod tests {
             step: 1,
             body: std::sync::Arc::new(serde_json::Value::Null),
         };
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     #[test]
@@ -590,8 +362,7 @@ mod tests {
                 child_thread_id: None,
             },
         );
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     #[test]
@@ -599,8 +370,7 @@ mod tests {
         let ev = ExecutorEvent::BgToolStep {
             child_thread_id: "ct-1".into(),
         };
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     #[test]
@@ -619,8 +389,7 @@ mod tests {
                 run_status: None,
                 message: None,
             });
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     #[test]
@@ -628,8 +397,7 @@ mod tests {
         let ev = ExecutorEvent::AgentExecutionFailed {
             message: "oom".into(),
         };
-        let mut mapper = NopViewMapper;
-        let output = route(&ev, &mut mapper).expect("AgentExecutionFailed should route");
+        let output = route(&ev).expect("AgentExecutionFailed should route");
         assert_eq!(output.event_name, "turn-interrupted");
         let reason = output.data["reason"].as_str().unwrap();
         assert_eq!(reason, "oom");
@@ -638,8 +406,7 @@ mod tests {
     #[test]
     fn test_todo_update_discarded() {
         let ev = ExecutorEvent::TodoUpdate(vec![]);
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     #[test]
@@ -652,8 +419,7 @@ mod tests {
             budget_pct: Some(0.5),
             context_total_tokens: Some(200_000),
         };
-        let mut mapper = NopViewMapper;
-        assert!(route(&ev, &mut mapper).is_none());
+        assert!(route(&ev).is_none());
     }
 
     // ── Helper tests ─────────────────────────────────────────────────────────

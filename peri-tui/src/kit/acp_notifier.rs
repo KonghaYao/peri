@@ -1,10 +1,12 @@
 //! ACP notifier——AcpNotification → AcpEventData 转换器。
 //!
 //! 直接在 notifier 内完成 DTO 转换，产出的 `AcpEventData` 立即送入 `spawn_acp_bridge`。
-//! - **以 UnstableEvent 为流式主通道**：ACP 服务端的高频流式事件
-//!   （text-chunk / reasoning-chunk / tool-started / tool-ended / view-commit /
-//!   turn-done / ...）通过 `peri/unstable-event` notification 携带，event 字段是
-//!   kebab-case 字符串，data 是 JSON——这恰好匹配 `AcpEventData::decode` 的输入。
+//! - **以 session/update 为流式主通道**：ACP 服务端的高频流式事件
+//!   （agent_message_chunk / agent_thought_chunk / tool_call / tool_call_update）
+//!   通过标准 `session/update` 携带，在 `handle_session_update` 中转换为
+//!   `AcpEventData` 变体推入双 bridge channel。
+//! - **usage_update**：token 消耗通过标准 session/update 的 `usage_update` tag
+//!   携带，直接写入 `SPINNER_TOKEN_COUNT` atom，不产生 AcpEventData。
 //! - **AgentEvent DTO 已接入**：`peri/agent_event` 携带的 AcpEvent 变体
 //!   （SubagentStarted/SubagentStopped）通过 `convert_agent_event` 转换为
 //!   AcpEventData 推入双 bridge channel。未映射变体（TurnCommitted/
@@ -18,7 +20,7 @@ use tracing::{debug, info, warn};
 
 use crate::acp_client::AcpNotification;
 use crate::kit::acp_types::AcpEventData;
-use crate::kit::atoms::{ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS};
+use crate::kit::atoms::{ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, SPINNER_TOKEN_COUNT};
 use crate::kit::input_area::refresh_slash_items;
 use peri_acp::event::AcpEvent;
 use peri_acp_types::event_data::{AskUser, Question, QuestionOption};
@@ -88,8 +90,8 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
 
 /// 把单条 `AcpNotification` 转换并推入 bridge channel。
 ///
-/// 设计决策见模块级注释：UnstableEvent 是流式主通道，
-/// AgentEvent 通过 `convert_agent_event` 转换后以双通道形式推送。
+/// 设计决策：session/update 是流式主通道（agent_message_chunk / tool_call 等），
+/// AgentDone 通过 TurnDone 转换，AgentEvent 通过 `convert_agent_event` 转换。
 fn forward_notification(
     bridge_tx: &mpsc::UnboundedSender<AcpEventData>,
     render_bridge_tx: &mpsc::UnboundedSender<AcpEventData>,
@@ -109,10 +111,18 @@ fn forward_notification(
                 warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may stall");
             }
         }
-        // kit notifier: extract AvailableCommandsUpdate from SessionUpdate
-        // and write to AVAILABLE_SLASH_COMMANDS atom for InputArea slash popup.
+        // kit notifier: extract AvailableCommandsUpdate / plan / streaming
+        // from SessionUpdate. Streaming tags produce AcpEventData pushed to
+        // dual-bridge; status tags write atoms directly.
         AcpNotification::SessionUpdate { params, .. } => {
-            handle_session_update(params);
+            if let Some(decoded) = handle_session_update(params) {
+                if let Err(e) = bridge_tx.send(decoded.clone()) {
+                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping session/update streaming event");
+                }
+                if let Err(e) = render_bridge_tx.send(decoded) {
+                    warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may stall");
+                }
+            }
         }
         AcpNotification::AgentDone { .. } => {
             let decoded = AcpEventData::TurnDone;
@@ -148,16 +158,20 @@ fn forward_notification(
     }
 }
 
-/// Extract commands from an AvailableCommandsUpdate SessionUpdate notification
-/// and write them to the AVAILABLE_SLASH_COMMANDS atom for InputArea slash completion.
-fn handle_session_update(params: serde_json::Value) {
+/// Extract commands / plan / streaming events from a SessionUpdate notification.
+///
+/// Returns `Some(AcpEventData)` for streaming tags (agent_message_chunk,
+/// agent_thought_chunk, tool_call, tool_call_update) so the caller can push
+/// to the dual-bridge channel. Returns `None` for status-only updates
+/// (available_commands_update, plan, usage_update).
+fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
     // params: {"session_id": "...", "update": <SessionUpdate>}
     // SessionUpdate uses #[serde(tag = "sessionUpdate", rename_all = "snake_case")]
     // → AvailableCommandsUpdate serializes as:
     //   {"sessionUpdate": "available_commands_update", "availableCommands": [...]}
     let update = match params.get("update") {
         Some(u) => u,
-        None => return,
+        None => return None,
     };
     // Discriminate: check the tag field, not a container key
     let tag = update.get("sessionUpdate").and_then(|v| v.as_str());
@@ -165,7 +179,7 @@ fn handle_session_update(params: serde_json::Value) {
     if tag == Some("available_commands_update") {
         let cmds = match update.get("availableCommands").and_then(|v| v.as_array()) {
             Some(c) => c,
-            None => return,
+            None => return None,
         };
         let entries: Vec<(String, String)> = cmds
             .iter()
@@ -185,9 +199,108 @@ fn handle_session_update(params: serde_json::Value) {
             "kit ACP notifier: updated AVAILABLE_SLASH_COMMANDS ({})",
             len
         );
-    } else if tag == Some("plan") {
+        return None;
+    }
+
+    if tag == Some("plan") {
         debug!(update = %update, "handle_session_update: plan tag matched");
         crate::kit::acp_events::handle_plan_update(update);
+        return None;
+    }
+
+    // ── §4.1 streaming: standard session/update streaming tags ──
+    // agent_id from params["_peri"]["sourceAgentId"] (ACP extension)
+
+    let agent_id: Option<String> = params
+        .get("_peri")
+        .and_then(|p| p.get("sourceAgentId"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    match tag {
+        Some("agent_message_chunk") => {
+            // ACP SDK ContentChunk wraps text in content.text, not at update top-level
+            let text = update
+                .get("content")
+                .and_then(|c| c.get("text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let text_chunk = peri_acp_types::event_data::TextChunk { text, agent_id };
+            Some(AcpEventData::TextChunk(text_chunk))
+        }
+        Some("agent_thought_chunk") => {
+            let text = update
+                .get("content")
+                .and_then(|c| c.get("text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let reasoning_chunk = peri_acp_types::event_data::ReasoningChunk { text, agent_id };
+            Some(AcpEventData::ReasoningChunk(reasoning_chunk))
+        }
+        Some("tool_call") => {
+            let tool_id = update
+                .get("toolCallId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // ACP SDK ToolCall uses "title" field, not "name"
+            let tool_name = update
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let input_summary = update
+                .get("rawInput")
+                .map(|v| serde_json::to_string(v).unwrap_or_default())
+                .unwrap_or_default();
+            let tool_started =
+                peri_acp_types::event_data::ToolStarted { tool_id, tool_name, input_summary, agent_id };
+            Some(AcpEventData::ToolStarted(tool_started))
+        }
+        Some("tool_call_update") => {
+            let tool_id = update
+                .get("toolCallId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // ACP SDK ToolCallUpdate wraps output/status inside "fields" struct
+            let output_summary = update
+                .get("fields")
+                .and_then(|f| f.get("rawOutput"))
+                .map(|v| serde_json::to_string(v).unwrap_or_default())
+                .unwrap_or_default();
+            let is_error = update
+                .get("fields")
+                .and_then(|f| f.get("status"))
+                .and_then(|v| v.as_str())
+                .map(|s| s == "failed")
+                .unwrap_or(false);
+            let tool_ended = peri_acp_types::event_data::ToolEnded {
+                tool_id,
+                output_summary,
+                is_error,
+                agent_id,
+            };
+            Some(AcpEventData::ToolEnded(tool_ended))
+        }
+        Some("usage_update") => {
+            // §C: token-usage deprecated, read from standard usage_update meta
+            let input = update
+                .get("meta")
+                .and_then(|m| m.get("inputTokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let output = update
+                .get("meta")
+                .and_then(|m| m.get("outputTokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            *SPINNER_TOKEN_COUNT.state().write() = (input + output) as usize;
+            return None;
+        }
+        _ => None, // unknown tags
     }
 }
 
@@ -335,7 +448,6 @@ fn extract_options_from_oneof(prop: &Value, key: &str, nested: bool) -> Vec<Ques
 mod tests {
     use super::*;
     use peri_acp::event::AcpEvent;
-    use peri_acp_types::event_data::TextChunk;
     use serde_json::json;
     use serial_test::serial;
 
@@ -354,14 +466,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unstable_event_text_chunk_forwarded() {
+    async fn test_session_update_agent_message_chunk_to_text_chunk() {
         let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
 
         notif_tx
-            .send(AcpNotification::UnstableEvent {
+            .send(AcpNotification::SessionUpdate {
                 session_id: "s1".into(),
-                event: "text-chunk".into(),
-                data: json!({"text": "hi", "agent_id": null}),
+                params: json!({
+                    "sessionId": "s1",
+                    "_peri": {"sourceAgentId": "sa-1"},
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hi"}
+                    }
+                }),
             })
             .unwrap();
 
@@ -369,9 +487,104 @@ mod tests {
         match ev {
             AcpEventData::TextChunk(tc) => {
                 assert_eq!(tc.text, "hi");
-                assert!(tc.agent_id.is_none());
+                assert_eq!(tc.agent_id.as_deref(), Some("sa-1"));
             }
             other => panic!("expected TextChunk, got {other:?}"),
+        }
+
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_session_update_agent_thought_chunk() {
+        let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
+
+        notif_tx
+            .send(AcpNotification::SessionUpdate {
+                session_id: "s1".into(),
+                params: json!({
+                    "sessionId": "s1",
+                    "update": {
+                        "sessionUpdate": "agent_thought_chunk",
+                        "content": {"type": "text", "text": "thinking..."}
+                    }
+                }),
+            })
+            .unwrap();
+
+        let ev = bridge_rx.recv().await.expect("expected one event");
+        match ev {
+            AcpEventData::ReasoningChunk(rc) => {
+                assert_eq!(rc.text, "thinking...");
+                assert!(rc.agent_id.is_none());
+            }
+            other => panic!("expected ReasoningChunk, got {other:?}"),
+        }
+
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_session_update_tool_call_to_tool_started() {
+        let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
+
+        notif_tx
+            .send(AcpNotification::SessionUpdate {
+                session_id: "s1".into(),
+                params: json!({
+                    "sessionId": "s1",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tc-1",
+                        "title": "Read",
+                        "rawInput": {"file_path": "/tmp/foo.rs"}
+                    }
+                }),
+            })
+            .unwrap();
+
+        let ev = bridge_rx.recv().await.expect("expected one event");
+        match ev {
+            AcpEventData::ToolStarted(ts) => {
+                assert_eq!(ts.tool_id, "tc-1");
+                assert_eq!(ts.tool_name, "Read");
+                assert!(ts.input_summary.contains("file_path"));
+            }
+            other => panic!("expected ToolStarted, got {other:?}"),
+        }
+
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_session_update_tool_call_update_to_tool_ended() {
+        let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
+
+        notif_tx
+            .send(AcpNotification::SessionUpdate {
+                session_id: "s1".into(),
+                params: json!({
+                    "sessionId": "s1",
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "tc-1",
+                        "fields": {
+                            "rawOutput": "output content",
+                            "status": "failed"
+                        }
+                    }
+                }),
+            })
+            .unwrap();
+
+        let ev = bridge_rx.recv().await.expect("expected one event");
+        match ev {
+            AcpEventData::ToolEnded(te) => {
+                assert_eq!(te.tool_id, "tc-1");
+                assert!(te.output_summary.contains("output content"));
+                assert!(te.is_error);
+            }
+            other => panic!("expected ToolEnded, got {other:?}"),
         }
 
         shutdown.cancel();
@@ -522,7 +735,7 @@ mod tests {
                 ]
             }
         });
-        handle_session_update(payload);
+        let _ = handle_session_update(payload);
         let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0], ("help".to_string(), "Show help".to_string()));
@@ -550,7 +763,7 @@ mod tests {
                 "total": 200000
             }
         });
-        handle_session_update(payload);
+        let _ = handle_session_update(payload);
         let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
         assert_eq!(entries.len(), 0, "非 commands update 不应写入 atom");
     }
@@ -575,7 +788,7 @@ mod tests {
             }
         });
 
-        handle_session_update(payload);
+        let _ = handle_session_update(payload);
 
         let items = crate::kit::atoms::TODO_ITEMS.state().read().clone();
         assert_eq!(items.len(), 3, "应包含 3 个条目，实际: {items:?}");
@@ -587,14 +800,4 @@ mod tests {
         assert!(matches!(items[2].status, TodoStatus::Completed));
     }
 
-    /// 编译期类型断言：TextChunk 仍可从 peri-acp-types 引用——确保 S3 与 v2 event_data
-    /// 类型契约一致。
-    #[test]
-    fn test_text_chunk_type_contract() {
-        let tc = TextChunk {
-            text: "x".into(),
-            agent_id: None,
-        };
-        assert_eq!(tc.text, "x");
-    }
 }

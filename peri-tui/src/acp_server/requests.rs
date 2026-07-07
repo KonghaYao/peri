@@ -147,14 +147,7 @@ pub(crate) async fn handle_request(
             let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
             send_available_commands_update(transport, &session_id, &skills).await;
 
-            // Push empty ViewCommit — clears any stale committed from the previous session
-            // in the TUI bridge. FIFO ordering guarantees it arrives after all old-session
-            // events already in the notification pipeline.
-            let view_commit = dispatch::build_session_view_commit_payload(&session_id, &[]);
-            let _ = transport
-                .send_notification("peri/unstable-event", view_commit)
-                .await;
-
+            // BRIDGE_RESET_COUNTER handles stale committed cleanup; no explicit clear needed
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -257,12 +250,6 @@ pub(crate) async fn handle_request(
             // Load history from ThreadStore
             let history =
                 dispatch::load_session_messages(cfg.thread_store.as_ref(), req_session_id).await;
-
-            // Emit view-commit to populate v2 state.view with loaded history
-            let payload = dispatch::build_session_view_commit_payload(req_session_id, &history);
-            let _ = transport
-                .send_notification("peri/unstable-event", payload)
-                .await;
 
             // Insert into sessions if not already present
             if let Some(state) = sessions.get_mut(req_session_id) {
@@ -536,17 +523,6 @@ pub(crate) async fn handle_request(
                 }
                 info!(session_id = %req_session_id, "Session resumed (existing)");
             }
-
-            // Emit view-commit with loaded history
-            let existing_history: Vec<_> = sessions
-                .get(req_session_id)
-                .map(|s| s.history.clone())
-                .unwrap_or_default();
-            let payload =
-                dispatch::build_session_view_commit_payload(req_session_id, &existing_history);
-            let _ = transport
-                .send_notification("peri/unstable-event", payload)
-                .await;
 
             // ── Freeze session data at resume time ──
             cfg.session_manager.ensure_session(req_session_id, cwd);

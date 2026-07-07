@@ -420,19 +420,19 @@ pub enum AcpEventData {
     ToolEnded(ToolEnded),
 
     // -- §4.2 Boundary (low-frequency) -------------------------------------
-    /// `"view-commit"` -- complete ViewModel list, TUI replaces entire view.
-    ViewCommit(ViewCommit),
-
     /// `"turn-done"` -- agent finished this turn (Streaming -> Idle).
     TurnDone,
 
     /// `"turn-interrupted"` -- agent was interrupted (user cancel / timeout).
     TurnInterrupted(TurnInterrupted),
 
-    // -- §4.3 Status (status bar updates) ----------------------------------
-    /// `"token-usage"` -- token consumption for the current turn.
-    TokenUsage(TokenUsage),
+    /// `"replay-user-bubble"` -- user bubble from session history replay.
+    ReplayUserBubble { text: String },
 
+    /// `"replay-assistant-bubble"` -- assistant bubble from session history replay.
+    ReplayAssistantBubble { text: String },
+
+    // -- §4.3 Status (status bar updates) ----------------------------------
     /// `"tool-count"` -- number of tool calls in the current turn.
     ToolCount(ToolCount),
 
@@ -506,22 +506,24 @@ impl AcpEventData {
     /// failure or unknown event name, falls back to [`AcpEventData::Unknown`].
     pub fn decode(event: &str, data: serde_json::Value) -> Self {
         match event {
-            // §4.1 Streaming
-            "text-chunk" => decode_or_unknown(event, data, AcpEventData::TextChunk),
-            "reasoning-chunk" => decode_or_unknown(event, data, AcpEventData::ReasoningChunk),
-            "tool-started" => decode_or_unknown(event, data, AcpEventData::ToolStarted),
-            "tool-ended" => decode_or_unknown(event, data, AcpEventData::ToolEnded),
+            // §4.1 Streaming -- deprecated, now delivered via session/update
+            // "text-chunk", "reasoning-chunk", "tool-started", "tool-ended" 解码分支已移除。
+            // 流式事件现在由 handle_session_update（acp_notifier.rs）处理。
 
             // §4.2 Boundary
-            "view-commit" => decode_or_unknown(event, data, AcpEventData::ViewCommit),
             "turn-done" => match serde_json::from_value::<TurnDone>(data.clone()) {
                 Ok(_) => AcpEventData::TurnDone,
                 Err(_) => AcpEventData::unknown(event, data),
             },
             "turn-interrupted" => decode_or_unknown(event, data, AcpEventData::TurnInterrupted),
+            "replay-user-bubble" => AcpEventData::ReplayUserBubble {
+                text: data["text"].as_str().unwrap_or_default().to_string(),
+            },
+            "replay-assistant-bubble" => AcpEventData::ReplayAssistantBubble {
+                text: data["text"].as_str().unwrap_or_default().to_string(),
+            },
 
             // §4.3 Status
-            "token-usage" => decode_or_unknown(event, data, AcpEventData::TokenUsage),
             "tool-count" => decode_or_unknown(event, data, AcpEventData::ToolCount),
             "progress" => decode_or_unknown(event, data, AcpEventData::Progress),
             "budget-warning" => decode_or_unknown(event, data, AcpEventData::BudgetWarning),
@@ -534,8 +536,6 @@ impl AcpEventData {
             "file-suggestions" => decode_or_unknown(event, data, AcpEventData::FileSuggestions),
 
             // §4.5 Interaction requests
-            "hitl-pending" => decode_or_unknown(event, data, AcpEventData::HitlPending),
-            "ask-user" => decode_or_unknown(event, data, AcpEventData::AskUser),
             "rewind-preview" => decode_or_unknown(event, data, AcpEventData::RewindPreview),
             "oauth-needed" => decode_or_unknown(event, data, AcpEventData::OauthNeeded),
 
@@ -810,66 +810,22 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_text_chunk() {
-        let data = serde_json::json!({"text": "hello", "agent_id": null});
-        let decoded = AcpEventData::decode("text-chunk", data);
+    fn test_decode_replay_user_bubble() {
+        let data = serde_json::json!({"text": "hello from history"});
+        let decoded = AcpEventData::decode("replay-user-bubble", data);
         match decoded {
-            AcpEventData::TextChunk(tc) => {
-                assert_eq!(tc.text, "hello");
-                assert!(tc.agent_id.is_none());
-            }
-            _ => panic!("expected TextChunk, got {:?}", decoded),
+            AcpEventData::ReplayUserBubble { text } => assert_eq!(text, "hello from history"),
+            _ => panic!("expected ReplayUserBubble"),
         }
     }
 
     #[test]
-    fn test_decode_reasoning_chunk() {
-        let data = serde_json::json!({"text": "thinking...", "agent_id": "sa-1"});
-        let decoded = AcpEventData::decode("reasoning-chunk", data);
+    fn test_decode_replay_assistant_bubble() {
+        let data = serde_json::json!({"text": "assistant reply"});
+        let decoded = AcpEventData::decode("replay-assistant-bubble", data);
         match decoded {
-            AcpEventData::ReasoningChunk(rc) => {
-                assert_eq!(rc.text, "thinking...");
-                assert_eq!(rc.agent_id.as_deref(), Some("sa-1"));
-            }
-            _ => panic!("expected ReasoningChunk"),
-        }
-    }
-
-    #[test]
-    fn test_decode_tool_started() {
-        let data = serde_json::json!({
-            "tool_id": "tc-1",
-            "tool_name": "Edit",
-            "input_summary": "path: foo.rs"
-        });
-        let decoded = AcpEventData::decode("tool-started", data);
-        match decoded {
-            AcpEventData::ToolStarted(ts) => assert_eq!(ts.tool_name, "Edit"),
-            _ => panic!("expected ToolStarted"),
-        }
-    }
-
-    #[test]
-    fn test_decode_tool_ended() {
-        let data = serde_json::json!({
-            "tool_id": "tc-1",
-            "output_summary": "ok",
-            "is_error": false
-        });
-        let decoded = AcpEventData::decode("tool-ended", data);
-        match decoded {
-            AcpEventData::ToolEnded(te) => assert!(!te.is_error),
-            _ => panic!("expected ToolEnded"),
-        }
-    }
-
-    #[test]
-    fn test_decode_view_commit() {
-        let data = serde_json::json!({"view_models": []});
-        let decoded = AcpEventData::decode("view-commit", data);
-        match decoded {
-            AcpEventData::ViewCommit(vc) => assert!(vc.view_models.is_empty()),
-            _ => panic!("expected ViewCommit"),
+            AcpEventData::ReplayAssistantBubble { text } => assert_eq!(text, "assistant reply"),
+            _ => panic!("expected ReplayAssistantBubble"),
         }
     }
 
@@ -889,19 +845,6 @@ mod tests {
         match decoded {
             AcpEventData::TurnInterrupted(ti) => assert_eq!(ti.reason, "user cancelled"),
             _ => panic!("expected TurnInterrupted"),
-        }
-    }
-
-    #[test]
-    fn test_decode_token_usage() {
-        let data = serde_json::json!({"input": 100, "output": 50});
-        let decoded = AcpEventData::decode("token-usage", data);
-        match decoded {
-            AcpEventData::TokenUsage(tu) => {
-                assert_eq!(tu.input, 100);
-                assert_eq!(tu.output, 50);
-            }
-            _ => panic!("expected TokenUsage"),
         }
     }
 
@@ -956,38 +899,6 @@ mod tests {
         match decoded {
             AcpEventData::FileSuggestions(fs) => assert_eq!(fs.files.len(), 2),
             _ => panic!("expected FileSuggestions"),
-        }
-    }
-
-    #[test]
-    fn test_decode_hitl_pending_standalone() {
-        let data = serde_json::json!({
-            "tool_name": "Edit",
-            "tool_input": {"path": "foo.rs"},
-            "batch": null
-        });
-        let decoded = AcpEventData::decode("hitl-pending", data);
-        match decoded {
-            AcpEventData::HitlPending(hp) => assert!(hp.batch.is_none()),
-            _ => panic!("expected HitlPending"),
-        }
-    }
-
-    #[test]
-    fn test_decode_ask_user() {
-        let data = serde_json::json!({
-            "questions": [{
-                "id": "q1",
-                "header": "Choose",
-                "question": "Which?",
-                "options": [],
-                "multi_select": false
-            }]
-        });
-        let decoded = AcpEventData::decode("ask-user", data);
-        match decoded {
-            AcpEventData::AskUser(au) => assert_eq!(au.questions.len(), 1),
-            _ => panic!("expected AskUser"),
         }
     }
 
@@ -1053,9 +964,9 @@ mod tests {
     #[test]
     fn test_decode_malformed_data_falls_to_unknown() {
         let data = serde_json::json!("not an object");
-        let decoded = AcpEventData::decode("text-chunk", data);
+        let decoded = AcpEventData::decode("future-event-xyz", data);
         match decoded {
-            AcpEventData::Unknown { event, .. } => assert_eq!(event, "text-chunk"),
+            AcpEventData::Unknown { event, .. } => assert_eq!(event, "future-event-xyz"),
             _ => panic!("expected Unknown for malformed data"),
         }
     }

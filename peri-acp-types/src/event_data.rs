@@ -9,30 +9,31 @@
 use serde::{Deserialize, Serialize};
 
 // ===========================================================================
-// §4.1 Streaming events (high-frequency)
+// §4.1 Streaming events -- DEPRECATED. These events are now delivered via
+//     standard ACP `session/update` (agent_message_chunk, agent_thought_chunk,
+//     tool_call, tool_call_update). The corresponding Rust structs remain here
+//     as internal data containers for AcpEventData enum variants in
+//     `peri-tui/src/kit/acp_types.rs`. Serde derives are removed.
 // ===========================================================================
 
-/// `"text-chunk"` — incremental text for the current assistant bubble.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Internal data container for `AcpEventData::TextChunk`.
+#[derive(Debug, Clone)]
 pub struct TextChunk {
     pub text: String,
     /// Present when the event originates from a sub-agent.
     pub agent_id: Option<String>,
 }
 
-/// `"reasoning-chunk"` — incremental reasoning / thinking text.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Internal data container for `AcpEventData::ReasoningChunk`.
+#[derive(Debug, Clone)]
 pub struct ReasoningChunk {
     pub text: String,
     /// Present when the event originates from a sub-agent.
     pub agent_id: Option<String>,
 }
 
-/// `"tool-started"` — signals creation of an in-progress tool card.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Internal data container for `AcpEventData::ToolStarted`.
+#[derive(Debug, Clone)]
 pub struct ToolStarted {
     pub tool_id: String,
     pub tool_name: String,
@@ -41,9 +42,8 @@ pub struct ToolStarted {
     pub agent_id: Option<String>,
 }
 
-/// `"tool-ended"` — fills in the tool card result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Internal data container for `AcpEventData::ToolEnded`.
+#[derive(Debug, Clone)]
 pub struct ToolEnded {
     pub tool_id: String,
     pub output_summary: String,
@@ -55,13 +55,6 @@ pub struct ToolEnded {
 // ===========================================================================
 // §4.2 Boundary events (low-frequency)
 // ===========================================================================
-
-/// `"view-commit"` — complete ViewModel list, TUI replaces its entire view.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ViewCommit {
-    pub view_models: Vec<crate::view_model::ViewModel>,
-}
 
 /// `"turn-done"` — agent finished this turn, transition from Streaming to Idle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,14 +71,6 @@ pub struct TurnInterrupted {
 // ===========================================================================
 // §4.3 Status events (update status bar, no message-area changes)
 // ===========================================================================
-
-/// `"token-usage"` — token consumption for the current turn.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct TokenUsage {
-    pub input: u64,
-    pub output: u64,
-}
 
 /// `"tool-count"` — number of tool calls in the current turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,79 +233,7 @@ pub struct SubagentStopped {
 mod tests {
     use super::*;
 
-    // -- Streaming (§4.1) --------------------------------------------------
-
-    #[test]
-    fn test_text_chunk_roundtrip() {
-        let tc = TextChunk {
-            text: "hello".into(),
-            agent_id: None,
-        };
-        let json = serde_json::to_string(&tc).unwrap();
-        let back: TextChunk = serde_json::from_str(&json).unwrap();
-        assert_eq!(tc.text, back.text);
-        assert!(back.agent_id.is_none());
-    }
-
-    #[test]
-    fn test_text_chunk_with_agent_id() {
-        let tc = TextChunk {
-            text: "sub-agent output".into(),
-            agent_id: Some("sa-1".into()),
-        };
-        let json = serde_json::to_string(&tc).unwrap();
-        let back: TextChunk = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.agent_id.as_deref(), Some("sa-1"));
-    }
-
-    #[test]
-    fn test_reasoning_chunk_roundtrip() {
-        let rc = ReasoningChunk {
-            text: "thinking...".into(),
-            agent_id: None,
-        };
-        let json = serde_json::to_string(&rc).unwrap();
-        let back: ReasoningChunk = serde_json::from_str(&json).unwrap();
-        assert_eq!(rc.text, back.text);
-    }
-
-    #[test]
-    fn test_tool_started_roundtrip() {
-        let ts = ToolStarted {
-            tool_id: "tc-1".into(),
-            tool_name: "Edit".into(),
-            input_summary: "path: foo.rs".into(),
-            agent_id: None,
-        };
-        let json = serde_json::to_string(&ts).unwrap();
-        let back: ToolStarted = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.tool_name, "Edit");
-    }
-
-    #[test]
-    fn test_tool_ended_roundtrip() {
-        let te = ToolEnded {
-            tool_id: "tc-1".into(),
-            output_summary: "updated 3 lines".into(),
-            is_error: false,
-            agent_id: None,
-        };
-        let json = serde_json::to_string(&te).unwrap();
-        let back: ToolEnded = serde_json::from_str(&json).unwrap();
-        assert!(!back.is_error);
-    }
-
     // -- Boundary (§4.2) ---------------------------------------------------
-
-    #[test]
-    fn test_view_commit_roundtrip() {
-        let vc = ViewCommit {
-            view_models: vec![],
-        };
-        let json = serde_json::to_string(&vc).unwrap();
-        let back: ViewCommit = serde_json::from_str(&json).unwrap();
-        assert!(back.view_models.is_empty());
-    }
 
     #[test]
     fn test_turn_done_roundtrip() {
@@ -340,18 +253,6 @@ mod tests {
     }
 
     // -- Status (§4.3) -----------------------------------------------------
-
-    #[test]
-    fn test_token_usage_roundtrip() {
-        let tu = TokenUsage {
-            input: 100,
-            output: 50,
-        };
-        let json = serde_json::to_string(&tu).unwrap();
-        let back: TokenUsage = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.input, 100);
-        assert_eq!(back.output, 50);
-    }
 
     #[test]
     fn test_tool_count_roundtrip() {
@@ -522,32 +423,6 @@ mod tests {
     }
 
     // -- Snake_case serialization verification ------------------------------
-
-    #[test]
-    fn test_text_chunk_fields_are_snake_case() {
-        let tc = TextChunk {
-            text: "x".into(),
-            agent_id: Some("a".into()),
-        };
-        let val = serde_json::to_value(&tc).unwrap();
-        assert!(val.get("agent_id").is_some());
-        assert!(val.get("agentId").is_none());
-    }
-
-    #[test]
-    fn test_tool_started_fields_are_snake_case() {
-        let ts = ToolStarted {
-            tool_id: "1".into(),
-            tool_name: "Edit".into(),
-            input_summary: "x".into(),
-            agent_id: None,
-        };
-        let val = serde_json::to_value(&ts).unwrap();
-        assert!(val.get("tool_id").is_some());
-        assert!(val.get("tool_name").is_some());
-        assert!(val.get("input_summary").is_some());
-        assert!(val.get("toolId").is_none());
-    }
 
     #[test]
     fn test_question_fields_are_snake_case() {

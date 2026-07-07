@@ -50,15 +50,12 @@ pub trait EventSink: Send + Sync {
 /// `peri/unstable-event` notifications for new-protocol consumers.
 pub struct TransportEventSink {
     transport: std::sync::Arc<dyn AcpTransport>,
-    /// Caching ViewMapper for the event router (interior mutability for async context).
-    view_mapper: parking_lot::Mutex<crate::event::ViewMapperImpl>,
 }
 
 impl TransportEventSink {
     pub fn new(transport: std::sync::Arc<dyn AcpTransport>) -> Self {
         Self {
             transport,
-            view_mapper: parking_lot::Mutex::new(crate::event::ViewMapperImpl::new()),
         }
     }
 
@@ -168,10 +165,7 @@ impl EventSink for TransportEventSink {
             // Route each ExecutorEvent through the event router. Events that
             // map to a RoutingOutput are forwarded as unstable events; discarded
             // events return None and are silently dropped.
-            let routing_out = {
-                let mut vm = self.view_mapper.lock();
-                router::route(event, &mut *vm)
-            };
+            let routing_out = router::route(event);
             if let Some(out) = routing_out {
                 if let Err(e) = self
                     .push_unstable_event(session_id, out.event_name, out.data)

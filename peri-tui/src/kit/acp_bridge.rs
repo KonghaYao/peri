@@ -27,11 +27,11 @@ pub fn spawn_acp_bridge(
             current_turn: CurrentTurn::new(),
             is_loading: false,
             popup_kind: None,
-            has_view_commit: false,
+            has_turn_done: false,
         };
 
         // 追踪 BRIDGE_RESET_COUNTER——submit_consumer 的 /clear / thread_load
-        // 递增此计数器，bridge 检测到变更时立即清空 committed/has_view_commit，
+        // 递增此计数器，bridge 检测到变更时立即清空 committed/has_turn_done，
         // 防止旧 session 的 ViewModel 在新 session 中残留。
         let mut last_reset_counter: u64 = 0;
 
@@ -58,7 +58,7 @@ pub fn spawn_acp_bridge(
                                 last_reset_counter = counter;
                                 state.committed = Arc::from([]);
                                 state.current_turn.reset();
-                                state.has_view_commit = false;
+                                state.has_turn_done = false;
                                 state.is_loading = false;
                                 state.popup_kind = None;
                                 acp_events::push_view_models_for_reset();

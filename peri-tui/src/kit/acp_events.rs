@@ -33,9 +33,10 @@ pub struct BridgeState {
     /// S7：精确弹窗类型，由 AcpEvent 直接映射。None = 无弹窗。
     /// 弹窗激活状态由 POPUP_KIND.is_some() 派生（status_bar / event_handlers 都读这个）
     pub popup_kind: Option<crate::kit::atoms::PopupKind>,
-    /// I21-D：是否已收到 ViewCommit。用于 /clear 场景——/clear 的 ViewCommit
-    /// committed 为空是合法结果（清空历史），不应 fallback 到 atom 旧值。
-    pub has_view_commit: bool,
+    /// I21-D：是否已完成至少一轮 TurnDone/TurnInterrupted。用于 push_view_models
+    /// fallback 判断——一旦 has_turn_done=true，committed 以 bridge 为准，
+    /// 即使为空也不 fallback 到 atom 旧值（/clear 产生空 committed 是合法结果）。
+    pub has_turn_done: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -149,38 +150,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
 
         // ── §4.2 Boundary events ──
-        ViewCommit(vc) => {
-            // I20-B：clone incoming Vec → 移入 Arc，单次 O(n) 分配。
-            let mut committed_vms = vc.view_models.clone();
-
-            // 将流式累积的 SubAgent 子内容注入 view-commit 的 SubAgentGroup，
-            // 避免 view_mapper 产生的空 placeholder 覆盖流式期间显示的子工具调用。
-            let mut subagent_map: std::collections::HashMap<String, ViewModel> =
-                std::collections::HashMap::new();
-            for sa in &state.current_turn.subagents {
-                let vm = sa.view_model();
-                subagent_map.insert(sa.agent_id.clone(), vm);
-            }
-            if !subagent_map.is_empty() {
-                for vm in committed_vms.iter_mut() {
-                    if let ViewModel::SubAgentGroup(d) = vm {
-                        if let Some(streaming_vm) = subagent_map.get(&d.agent_id) {
-                            if let ViewModel::SubAgentGroup(streaming_data) = streaming_vm {
-                                if !streaming_data.view_models.is_empty() {
-                                    d.view_models = streaming_data.view_models.clone();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            state.committed = Arc::from(committed_vms);
-            state.current_turn.mark_committed();
-            state.has_view_commit = true;
-            push_view_models(state);
-            push_acp_state(state);
-        }
         TurnDone => {
             if !state.current_turn.committed && !state.current_turn.is_empty() {
                 let vms = state.current_turn.view_models().to_vec();
@@ -222,6 +191,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             // C1: agent 完成本轮——drain INPUT_BUFFER，按顺序重新提交。
             // 用户在 loading 期间按 Enter 的输入在此处一次性 flush 到 SUBMIT_TX。
             drain_input_buffer();
+            state.has_turn_done = true;
         }
         TurnInterrupted(_ti) => {
             state.current_turn.deactivate();
@@ -236,14 +206,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.is_loading = false;
             push_view_models(state);
             push_acp_state(state);
+            state.has_turn_done = true;
         }
 
         // ── §4.3 Status events ──
-        TokenUsage(tu) => {
-            *SPINNER_TOKEN_COUNT.state().write() =
-                (tu.input as usize).saturating_add(tu.output as usize);
-            push_acp_state(state);
-        }
         ToolCount(_tc) => {
             push_acp_state(state);
         }
@@ -329,6 +295,39 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
 
+        // ── Replay events ──
+        ReplayUserBubble { text } => {
+            let vm = ViewModel::UserBubble(UserBubbleData {
+                text: text.clone(),
+                content_hash: hash_str(text),
+                is_system_reminder: false,
+            });
+            let mut combined = Vec::with_capacity(state.committed.len() + 1);
+            combined.extend(state.committed.iter().cloned());
+            combined.push(vm);
+            state.committed = Arc::from(combined);
+            state.has_turn_done = true;
+            push_view_models(state);
+            push_acp_state(state);
+        }
+        ReplayAssistantBubble { text } => {
+            let vm = ViewModel::AssistantBubble(
+                peri_acp_types::view_model::AssistantBubbleData {
+                    text: text.clone(),
+                    reasoning: None,
+                    tool_card_ids: vec![],
+                    content_hash: 0,
+                },
+            );
+            let mut combined = Vec::with_capacity(state.committed.len() + 1);
+            combined.extend(state.committed.iter().cloned());
+            combined.push(vm);
+            state.committed = Arc::from(combined);
+            state.has_turn_done = true;
+            push_view_models(state);
+            push_acp_state(state);
+        }
+
         // ── Unknown / forward-compat ──
         Unknown { .. } => {}
 
@@ -375,16 +374,16 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 
 /// 将 BridgeState 中的 ViewModels 写入 VIEW_MODELS Atom。
 ///
-/// S16：bridge 的 committed 仅在 ViewCommit 时填充。streaming 事件到达时若
-/// bridge committed 仍为空（尚未收到 ViewCommit），则保留 atom 中已有的
+/// S16：bridge 的 committed 仅在 TurnDone 时填充完整。streaming 事件到达时若
+/// bridge committed 仍为空（尚未收到 TurnDone），则保留 atom 中已有的
 /// committed（可能含 submit_text 预先注入的 UserBubble），避免消息区退回 Welcome。
 ///
-/// I21-D：一旦收到过 ViewCommit（has_view_commit=true），committed 以 bridge
+/// I21-D：一旦完成过 TurnDone（has_turn_done=true），committed 以 bridge
 /// 为准，即使为空也不 fallback——/clear 产生空 committed 是合法结果。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
     // I20-B：Arc::clone 是 O(1) 原子指针拷贝，避免之前每个 streaming chunk
     // 都 O(n) clone 整个消息历史的性能问题。
-    let committed = if state.committed.is_empty() && !state.has_view_commit {
+    let committed = if state.committed.is_empty() && !state.has_turn_done {
         Arc::clone(&VIEW_MODELS.state().read().committed)
     } else {
         Arc::clone(&state.committed)
@@ -474,7 +473,7 @@ mod tests {
             current_turn: CurrentTurn::new(),
             is_loading: false,
             popup_kind: None,
-            has_view_commit: false,
+            has_turn_done: false,
         };
 
         dispatch_and_notify(
@@ -501,51 +500,6 @@ mod tests {
             }
             other => panic!("expected SubAgentGroup, got {other:?}"),
         }
-    }
-
-    #[test]
-    #[serial]
-    fn test_view_commit_then_turn_done_does_not_duplicate_current_turn() {
-        crate::kit::atoms::init_atoms();
-        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
-        let mut state = BridgeState {
-            variant: 0,
-            committed: Arc::from([]),
-            current_turn: CurrentTurn::new(),
-            is_loading: false,
-            popup_kind: None,
-            has_view_commit: false,
-        };
-
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
-                text: "streaming".into(),
-                agent_id: None,
-            }),
-        );
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::ViewCommit(peri_acp_types::event_data::ViewCommit {
-                view_models: vec![ViewModel::AssistantBubble(
-                    peri_acp_types::view_model::AssistantBubbleData {
-                        text: "committed".into(),
-                        reasoning: None,
-                        tool_card_ids: Vec::new(),
-                        content_hash: 0,
-                    },
-                )],
-            }),
-        );
-        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
-
-        let snapshot = VIEW_MODELS.state().read().clone();
-        assert_eq!(
-            snapshot.committed.len(),
-            1,
-            "TurnDone 不应重复 append 已提交轮次"
-        );
-        assert!(snapshot.current_turn.is_empty());
     }
 
     /// C1 回归测试：drain_input_buffer 清空 INPUT_BUFFER 队列。
@@ -613,10 +567,9 @@ mod tests {
         // 即使 SUBMIT_TX 未 set，drain 早退，buffer 仍有 "x"——两种情况都不算 panic
     }
 
-    /// 模拟 ReAct 多迭代边界——每轮 ViewCommit 后 committed 应包含全部 AI 文本。
     #[test]
     #[serial]
-    fn test_multi_iteration_view_commit_preserves_all_ai_text() {
+    fn test_replay_user_bubble_appends_to_committed() {
         crate::kit::atoms::init_atoms();
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
         let mut state = BridgeState {
@@ -625,237 +578,127 @@ mod tests {
             current_turn: CurrentTurn::new(),
             is_loading: false,
             popup_kind: None,
-            has_view_commit: false,
+            has_turn_done: false,
         };
 
-        use peri_acp_types::view_model::{AssistantBubbleData, ToolCardData, UserBubbleData};
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ReplayUserBubble {
+                text: "hello from replay".into(),
+            },
+        );
 
-        // ── 迭代 1: Human + AI 文字+工具调用 ──
+        let snapshot = VIEW_MODELS.state().read().clone();
+        assert_eq!(snapshot.committed.len(), 1);
+        match &snapshot.committed[0] {
+            ViewModel::UserBubble(d) => assert_eq!(d.text, "hello from replay"),
+            other => panic!("expected UserBubble, got {other:?}"),
+        }
+        assert!(state.has_turn_done, "has_turn_done should be true after replay");
+    }
+
+    #[test]
+    #[serial]
+    fn test_replay_assistant_bubble_appends_to_committed() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: Arc::from([]),
+            current_turn: CurrentTurn::new(),
+            is_loading: false,
+            popup_kind: None,
+            has_turn_done: false,
+        };
+
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ReplayAssistantBubble {
+                text: "assistant from replay".into(),
+            },
+        );
+
+        let snapshot = VIEW_MODELS.state().read().clone();
+        assert_eq!(snapshot.committed.len(), 1);
+        match &snapshot.committed[0] {
+            ViewModel::AssistantBubble(d) => assert_eq!(d.text, "assistant from replay"),
+            other => panic!("expected AssistantBubble, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_two_turn_done_accumulates_committed() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: Arc::from([]),
+            current_turn: CurrentTurn::new(),
+            is_loading: false,
+            popup_kind: None,
+            has_turn_done: false,
+        };
+
+        // 第一轮：stream one text → TurnDone
         dispatch_and_notify(
             &mut state,
             &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
-                text: "我先搜索一下。".into(),
+                text: "first turn".into(),
                 agent_id: None,
-            }),
-        );
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::ToolStarted(peri_acp_types::event_data::ToolStarted {
-                tool_id: "tc-grep".into(),
-                tool_name: "Grep".into(),
-                input_summary: "pattern: fn foo".into(),
-                agent_id: None,
-            }),
-        );
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::ToolEnded(peri_acp_types::event_data::ToolEnded {
-                tool_id: "tc-grep".into(),
-                output_summary: "parser.rs:42".into(),
-                is_error: false,
-                agent_id: None,
-            }),
-        );
-
-        // ViewCommit 迭代 1（3 条，模拟 ACP 先前轮次包含 UserBubble）
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::ViewCommit(peri_acp_types::event_data::ViewCommit {
-                view_models: vec![
-                    ViewModel::UserBubble(UserBubbleData {
-                        text: "帮我修复".into(),
-                        content_hash: 1,
-                        is_system_reminder: false,
-                    }),
-                    ViewModel::AssistantBubble(AssistantBubbleData {
-                        text: "我先搜索一下。".into(),
-                        reasoning: None,
-                        tool_card_ids: vec!["tc-grep".into()],
-                        content_hash: 2,
-                    }),
-                    ViewModel::ToolCard(ToolCardData {
-                        tool_id: "tc-grep".into(),
-                        tool_name: "Grep".into(),
-                        input_summary: "pattern: fn foo".into(),
-                        output_summary: "parser.rs:42".into(),
-                        is_error: false,
-                        is_running: false,
-                        running_duration_ms: None,
-                        diff: None,
-                        content_hash: 3,
-                    }),
-                ],
-            }),
-        );
-
-        // ── 迭代 2: streaming → ViewCommit（上一轮 + 新内容）──
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
-                text: "我来编辑。".into(),
-                agent_id: None,
-            }),
-        );
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::ToolStarted(peri_acp_types::event_data::ToolStarted {
-                tool_id: "tc-edit".into(),
-                tool_name: "Edit".into(),
-                input_summary: "path: parser.rs".into(),
-                agent_id: None,
-            }),
-        );
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::ToolEnded(peri_acp_types::event_data::ToolEnded {
-                tool_id: "tc-edit".into(),
-                output_summary: "updated".into(),
-                is_error: false,
-                agent_id: None,
-            }),
-        );
-
-        // ViewCommit 迭代 2: 5 条（前 3 + 新 Ai + ToolCard）
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::ViewCommit(peri_acp_types::event_data::ViewCommit {
-                view_models: vec![
-                    ViewModel::UserBubble(UserBubbleData {
-                        text: "帮我修复".into(),
-                        content_hash: 1,
-                        is_system_reminder: false,
-                    }),
-                    ViewModel::AssistantBubble(AssistantBubbleData {
-                        text: "我先搜索一下。".into(),
-                        reasoning: None,
-                        tool_card_ids: vec!["tc-grep".into()],
-                        content_hash: 2,
-                    }),
-                    ViewModel::ToolCard(ToolCardData {
-                        tool_id: "tc-grep".into(),
-                        tool_name: "Grep".into(),
-                        input_summary: "pattern: fn foo".into(),
-                        output_summary: "parser.rs:42".into(),
-                        is_error: false,
-                        is_running: false,
-                        running_duration_ms: None,
-                        diff: None,
-                        content_hash: 3,
-                    }),
-                    ViewModel::AssistantBubble(AssistantBubbleData {
-                        text: "我来编辑。".into(),
-                        reasoning: None,
-                        tool_card_ids: vec!["tc-edit".into()],
-                        content_hash: 4,
-                    }),
-                    ViewModel::ToolCard(ToolCardData {
-                        tool_id: "tc-edit".into(),
-                        tool_name: "Edit".into(),
-                        input_summary: "path: parser.rs".into(),
-                        output_summary: "updated".into(),
-                        is_error: false,
-                        is_running: false,
-                        running_duration_ms: None,
-                        diff: None,
-                        content_hash: 5,
-                    }),
-                ],
-            }),
-        );
-
-        // ── 迭代 3: 最终总结（纯文本 Ai）──
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
-                text: "修复完成！".into(),
-                agent_id: None,
-            }),
-        );
-
-        // ViewCommit 迭代 3: 6 条（前 5 + 最终 Ai 总结）
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::ViewCommit(peri_acp_types::event_data::ViewCommit {
-                view_models: vec![
-                    ViewModel::UserBubble(UserBubbleData {
-                        text: "帮我修复".into(),
-                        content_hash: 1,
-                        is_system_reminder: false,
-                    }),
-                    ViewModel::AssistantBubble(AssistantBubbleData {
-                        text: "我先搜索一下。".into(),
-                        reasoning: None,
-                        tool_card_ids: vec!["tc-grep".into()],
-                        content_hash: 2,
-                    }),
-                    ViewModel::ToolCard(ToolCardData {
-                        tool_id: "tc-grep".into(),
-                        tool_name: "Grep".into(),
-                        input_summary: "pattern: fn foo".into(),
-                        output_summary: "parser.rs:42".into(),
-                        is_error: false,
-                        is_running: false,
-                        running_duration_ms: None,
-                        diff: None,
-                        content_hash: 3,
-                    }),
-                    ViewModel::AssistantBubble(AssistantBubbleData {
-                        text: "我来编辑。".into(),
-                        reasoning: None,
-                        tool_card_ids: vec!["tc-edit".into()],
-                        content_hash: 4,
-                    }),
-                    ViewModel::ToolCard(ToolCardData {
-                        tool_id: "tc-edit".into(),
-                        tool_name: "Edit".into(),
-                        input_summary: "path: parser.rs".into(),
-                        output_summary: "updated".into(),
-                        is_error: false,
-                        is_running: false,
-                        running_duration_ms: None,
-                        diff: None,
-                        content_hash: 5,
-                    }),
-                    // 症状 2 关键：最终 Ai 总结
-                    ViewModel::AssistantBubble(AssistantBubbleData {
-                        text: "修复完成！".into(),
-                        reasoning: None,
-                        tool_card_ids: vec![],
-                        content_hash: 6,
-                    }),
-                ],
             }),
         );
         dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
-        // ── 验证最终状态 ──
+        assert_eq!(state.committed.len(), 1, "first TurnDone: committed should have 1 VM");
+        assert!(state.has_turn_done, "first TurnDone should set has_turn_done");
+
+        // 第二轮：stream another text → TurnDone
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
+                text: "second turn".into(),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+
         let snapshot = VIEW_MODELS.state().read().clone();
-        assert_eq!(snapshot.committed.len(), 6);
+        assert_eq!(snapshot.committed.len(), 2, "two TurnDones: committed should have 2 VMs");
         assert!(snapshot.current_turn.is_empty());
+    }
 
-        let texts: Vec<&str> = snapshot
-            .committed
-            .iter()
-            .filter_map(|vm| match vm {
-                ViewModel::AssistantBubble(d) => Some(d.text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(texts.len(), 3);
-        assert!(
-            texts.contains(&"我先搜索一下。"),
-            "第一条 AI 文本丢失: {texts:?}"
-        );
-        assert!(
-            texts.contains(&"我来编辑。"),
-            "第二条 AI 文本丢失: {texts:?}"
-        );
-        assert!(texts.contains(&"修复完成！"), "最终 AI 总结丢失: {texts:?}");
+    #[test]
+    #[serial]
+    fn test_has_turn_done_prevents_fallback() {
+        crate::kit::atoms::init_atoms();
+        // 设置 atom 中有旧 committed 数据
+        let old_committed: Arc<[ViewModel]> = Arc::from([ViewModel::UserBubble(UserBubbleData {
+            text: "old data".into(),
+            content_hash: 1,
+            is_system_reminder: false,
+        })]);
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot {
+            committed: Arc::clone(&old_committed),
+            current_turn: Arc::from([]),
+        };
 
+        let mut state = BridgeState {
+            variant: 0,
+            committed: Arc::from([]),
+            current_turn: CurrentTurn::new(),
+            is_loading: false,
+            popup_kind: None,
+            has_turn_done: true,
+        };
+
+        // push_view_models: committed 为空但 has_turn_done=true — 不 fallback 到 atom 旧值
+        push_view_models(&mut state);
+
+        let snapshot = VIEW_MODELS.state().read().clone();
         assert!(
-            matches!(&snapshot.committed[5], ViewModel::AssistantBubble(_)),
-            "vm[5] 应为最终总结 AB，实际: {:?}",
-            &snapshot.committed[5]
+            snapshot.committed.is_empty(),
+            "has_turn_done=true with empty committed should NOT fallback to atom"
         );
     }
 
