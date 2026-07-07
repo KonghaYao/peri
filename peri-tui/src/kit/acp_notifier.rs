@@ -255,8 +255,12 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .get("rawInput")
                 .map(|v| serde_json::to_string(v).unwrap_or_default())
                 .unwrap_or_default();
-            let tool_started =
-                peri_acp_types::event_data::ToolStarted { tool_id, tool_name, input_summary, agent_id };
+            let tool_started = peri_acp_types::event_data::ToolStarted {
+                tool_id,
+                tool_name,
+                input_summary,
+                agent_id,
+            };
             Some(AcpEventData::ToolStarted(tool_started))
         }
         Some("tool_call_update") => {
@@ -299,6 +303,19 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .unwrap_or(0);
             *SPINNER_TOKEN_COUNT.state().write() = (input + output) as usize;
             return None;
+        }
+        // ── session/replay: user_message_chunk → ReplayUserBubble ──
+        // Session replay 通过 session/update 推送 user_message_chunk + agent_message_chunk，
+        // 逐条重放历史。agent_message_chunk 已在上面映射为 TextChunk，
+        // user_message_chunk 映射为 ReplayUserBubble 追加到 committed。
+        Some("user_message_chunk") => {
+            let text = update
+                .get("content")
+                .and_then(|c| c.get("text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some(AcpEventData::ReplayUserBubble { text })
         }
         _ => None, // unknown tags
     }
@@ -799,5 +816,4 @@ mod tests {
         assert!(matches!(items[1].status, TodoStatus::Pending));
         assert!(matches!(items[2].status, TodoStatus::Completed));
     }
-
 }

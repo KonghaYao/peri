@@ -383,10 +383,8 @@ pub fn build_agent(
         Arc::new(RwLock::new(Vec::new()));
 
     // 后台任务通知通道
-    let background_registry = background_registry.unwrap_or_else(|| {
-        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
-        Arc::new(peri_middlewares::BackgroundTaskRegistry::new(tx))
-    });
+    let background_registry = background_registry
+        .unwrap_or_else(|| Arc::new(peri_middlewares::BackgroundTaskRegistry::new()));
 
     // 后台任务完成事件的独立通道（不随 executor 生命周期销毁）
     let (bg_event_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();

@@ -323,7 +323,7 @@ impl super::SubAgentTool {
             pid: None,
             output_preview: None,
         };
-        if let Err(e) = registry.register(bg_task) {
+        if let Err(e) = registry.register_with_kind(bg_task) {
             // 极端情况：并发超出上限（虽然前面已检查），降级返回错误
             return Err(format!("Failed to register background task: {}", e).into());
         }

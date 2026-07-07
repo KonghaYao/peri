@@ -149,12 +149,17 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32) -> Vec<MappedEvent>
             )]
         }
 
-        ExecutorEvent::AiReasoning { text, .. } => {
-            vec![MappedEvent::standard(vec![
-                SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(
-                    TextContent::new(text.clone()),
-                ))),
-            ])]
+        ExecutorEvent::AiReasoning {
+            text,
+            source_agent_id,
+            ..
+        } => {
+            vec![MappedEvent::standard_with_src(
+                vec![SessionUpdate::AgentThoughtChunk(ContentChunk::new(
+                    ContentBlock::Text(TextContent::new(text.clone())),
+                ))],
+                source_agent_id.clone(),
+            )]
         }
 
         ExecutorEvent::ToolStart {

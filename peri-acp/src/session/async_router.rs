@@ -48,6 +48,13 @@ impl AsyncRouter {
     /// Defer, SubAgentComplete, human(result.to_notification())))` — the only
     /// difference is that this path also triggers the inbox wake `Notify`.
     pub fn route_bg_result(&self, result: &BackgroundTaskResult) {
+        tracing::info!(
+            task_id = %result.task_id,
+            agent_name = %result.agent_name,
+            success = result.success,
+            output_len = result.output.len(),
+            "[bg-diag] route_bg_result: calling push_defer"
+        );
         let msg = BaseMessage::human(MessageContent::text(result.to_notification()));
         self.inbox.push_defer(MessageSource::SubAgentComplete, msg);
         debug!(

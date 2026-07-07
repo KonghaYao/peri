@@ -1,9 +1,5 @@
-    fn make_registry() -> (
-        BackgroundTaskRegistry,
-        tokio::sync::mpsc::UnboundedReceiver<BackgroundTaskResult>,
-    ) {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (BackgroundTaskRegistry::new(tx), rx)
+    fn make_registry() -> BackgroundTaskRegistry {
+        BackgroundTaskRegistry::new()
     }
 
     fn make_task(id: &str) -> BackgroundTask {
@@ -23,7 +19,7 @@
 
     #[tokio::test]
     async fn test_register_and_active_count() {
-        let (registry, _rx) = make_registry();
+        let registry = make_registry();
         assert_eq!(registry.active_count(), 0);
 
         registry.register(make_task("bg-1")).unwrap();
@@ -32,7 +28,7 @@
 
     #[tokio::test]
     async fn test_max_concurrent_limit() {
-        let (registry, _rx) = make_registry();
+        let registry = make_registry();
 
         registry.register(make_task("bg-1")).unwrap();
         registry.register(make_task("bg-2")).unwrap();
@@ -44,8 +40,8 @@
     }
 
     #[tokio::test]
-    async fn test_complete_sends_notification() {
-        let (registry, mut rx) = make_registry();
+    async fn test_complete_updates_status() {
+        let registry = make_registry();
 
         registry.register(make_task("bg-1")).unwrap();
         assert_eq!(registry.active_count(), 1);
@@ -67,16 +63,11 @@
         let tasks = registry.list_tasks();
         assert_eq!(tasks.len(), 0, "completed tasks should be cleaned up immediately");
         assert_eq!(registry.active_count(), 0);
-
-        // 通知应已发送
-        let received = rx.try_recv().unwrap();
-        assert_eq!(received.task_id, "bg-1");
-        assert!(received.success);
     }
 
     #[tokio::test]
     async fn test_cancel_removes_task() {
-        let (registry, _rx) = make_registry();
+        let registry = make_registry();
 
         registry.register(make_task("bg-1")).unwrap();
         registry.register(make_task("bg-2")).unwrap();
@@ -95,7 +86,7 @@
     /// 验证 abort_handle.abort() 真正触发了 JoinHandle 的取消，而非仅从 registry 移除条目。
     #[tokio::test]
     async fn test_cancel_propagates_to_running_task() {
-        let (registry, _rx) = make_registry();
+        let registry = make_registry();
 
         // 构造一个会长时间阻塞的 JoinHandle（等待 oneshot，永不 resolve）
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -143,7 +134,7 @@
 
     #[tokio::test]
     async fn test_count_by_kind_works() {
-        let (registry, _rx) = make_registry();
+        let registry = make_registry();
 
         let mut shell_task = make_task("bg-shell-1");
         shell_task.kind = BgTaskKind::Shell;
@@ -162,7 +153,7 @@
 
     #[tokio::test]
     async fn test_register_with_kind_shell_limit() {
-        let (registry, _rx) = make_registry();
+        let registry = make_registry();
 
         for i in 0..5 {
             let mut task = make_task(&format!("bg-shell-{}", i));
@@ -180,7 +171,7 @@
 
     #[tokio::test]
     async fn test_register_with_kind_agent_limit() {
-        let (registry, _rx) = make_registry();
+        let registry = make_registry();
 
         for i in 0..3 {
             let mut task = make_task(&format!("bg-agent-{}", i));
@@ -197,7 +188,7 @@
 
     #[tokio::test]
     async fn test_list_tasks_full_returns_info() {
-        let (registry, _rx) = make_registry();
+        let registry = make_registry();
 
         let mut task = make_task("bg-agent-1");
         task.kind = BgTaskKind::Agent;

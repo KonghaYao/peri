@@ -54,9 +54,7 @@ pub struct TransportEventSink {
 
 impl TransportEventSink {
     pub fn new(transport: std::sync::Arc<dyn AcpTransport>) -> Self {
-        Self {
-            transport,
-        }
+        Self { transport }
     }
 
     /// Push a `{event, data}` custom event through `peri/unstable-event` channel.

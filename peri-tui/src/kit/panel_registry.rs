@@ -499,13 +499,15 @@ pub fn close_all_panels() {
 // ── S16：per-widgets 风格干净滚动条（空格 + bg 色，无 █ 缝隙）──
 
 /// 创建 peri-widgets 风格的垂直滚动条配置：
-/// thumb 用空格 + bg 颜色，track 透明，无箭头符号。
+/// thumb 纯色块（fg==bg 让 █ 退化为纯背景色），track 透明。
+/// 注意：ratatui-kit ScrollView 内部 `.orientation()` 会把 thumb_symbol 重置为
+/// DEFAULT_VERTICAL 的 "█"，因此通过 fg==bg 同色方案实现"空白反色"视觉效果。
 pub fn clean_scrollbars() -> Scrollbars<'static> {
     let thumb_bg = crate::kit::theme::semantic().text.dim;
     Scrollbars {
         vertical_scrollbar: Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .thumb_symbol(" ")
-            .thumb_style(Style::default().bg(thumb_bg))
+            .thumb_style(Style::default().fg(thumb_bg).bg(thumb_bg))
             .track_symbol(None)
             .begin_symbol(Some("▲"))
             .begin_style(

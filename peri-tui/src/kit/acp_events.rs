@@ -186,6 +186,15 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             }
             state.is_loading = has_buffered;
 
+            tracing::info!(
+                is_loading = state.is_loading,
+                has_buffered,
+                committed_len = state.committed.len(),
+                current_turn_empty = state.current_turn.is_empty(),
+                has_turn_done = state.has_turn_done,
+                "TurnDone: writing ACP_STATE"
+            );
+
             push_view_models(state);
             push_acp_state(state);
             // C1: agent 完成本轮——drain INPUT_BUFFER，按顺序重新提交。
@@ -311,14 +320,12 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
         ReplayAssistantBubble { text } => {
-            let vm = ViewModel::AssistantBubble(
-                peri_acp_types::view_model::AssistantBubbleData {
-                    text: text.clone(),
-                    reasoning: None,
-                    tool_card_ids: vec![],
-                    content_hash: 0,
-                },
-            );
+            let vm = ViewModel::AssistantBubble(peri_acp_types::view_model::AssistantBubbleData {
+                text: text.clone(),
+                reasoning: None,
+                tool_card_ids: vec![],
+                content_hash: 0,
+            });
             let mut combined = Vec::with_capacity(state.committed.len() + 1);
             combined.extend(state.committed.iter().cloned());
             combined.push(vm);
@@ -594,7 +601,10 @@ mod tests {
             ViewModel::UserBubble(d) => assert_eq!(d.text, "hello from replay"),
             other => panic!("expected UserBubble, got {other:?}"),
         }
-        assert!(state.has_turn_done, "has_turn_done should be true after replay");
+        assert!(
+            state.has_turn_done,
+            "has_turn_done should be true after replay"
+        );
     }
 
     #[test]
@@ -650,8 +660,15 @@ mod tests {
         );
         dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
-        assert_eq!(state.committed.len(), 1, "first TurnDone: committed should have 1 VM");
-        assert!(state.has_turn_done, "first TurnDone should set has_turn_done");
+        assert_eq!(
+            state.committed.len(),
+            1,
+            "first TurnDone: committed should have 1 VM"
+        );
+        assert!(
+            state.has_turn_done,
+            "first TurnDone should set has_turn_done"
+        );
 
         // 第二轮：stream another text → TurnDone
         dispatch_and_notify(
@@ -664,7 +681,11 @@ mod tests {
         dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
         let snapshot = VIEW_MODELS.state().read().clone();
-        assert_eq!(snapshot.committed.len(), 2, "two TurnDones: committed should have 2 VMs");
+        assert_eq!(
+            snapshot.committed.len(),
+            2,
+            "two TurnDones: committed should have 2 VMs"
+        );
         assert!(snapshot.current_turn.is_empty());
     }
 

@@ -90,6 +90,7 @@ pub enum BgRegistryEvent {
         success: bool,
         output_preview: String,
         duration_ms: u64,
+        result: BackgroundTaskResult,
     },
     Cancelled {
         task_id: String,
@@ -100,11 +101,16 @@ pub enum BgRegistryEvent {
 /// 后台任务注册中心
 pub struct BackgroundTaskRegistry {
     tasks: parking_lot::Mutex<HashMap<String, BackgroundTask>>,
-    notification_tx: tokio::sync::mpsc::UnboundedSender<BackgroundTaskResult>,
     max_concurrent: usize,
     /// ACP 事件推送通道（由 executor 在 run_session_loop 注入）
     event_sender: parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>>>,
     session_id: parking_lot::RwLock<String>,
+}
+
+impl Default for BackgroundTaskRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BackgroundTaskRegistry {
@@ -112,10 +118,9 @@ impl BackgroundTaskRegistry {
     pub const AGENT_LIMIT: usize = 3;
     pub const WORKFLOW_LIMIT: usize = 3;
 
-    pub fn new(notification_tx: tokio::sync::mpsc::UnboundedSender<BackgroundTaskResult>) -> Self {
+    pub fn new() -> Self {
         Self {
             tasks: parking_lot::Mutex::new(HashMap::new()),
-            notification_tx,
             max_concurrent: 3,
             event_sender: parking_lot::RwLock::new(None),
             session_id: parking_lot::RwLock::new(String::new()),
@@ -218,6 +223,13 @@ impl BackgroundTaskRegistry {
 
     /// 任务完成时调用：更新状态 + 推送通知
     pub fn complete(&self, task_id: &str, result: BackgroundTaskResult) {
+        tracing::info!(
+            task_id = %task_id,
+            agent_name = %result.agent_name,
+            success = result.success,
+            output_len = result.output.len(),
+            "[bg-diag] registry.complete() called"
+        );
         let duration_ms = result.duration_ms;
         let success = result.success;
         let output_preview: String = result.output.chars().take(500).collect();
@@ -235,20 +247,13 @@ impl BackgroundTaskRegistry {
         tasks.retain(|_, t| matches!(t.status, BackgroundTaskStatus::Running));
         drop(tasks);
 
-        // 推送通知（现有 bg notification 通道）
-        if self.notification_tx.send(result).is_err() {
-            warn!(
-                task_id = %task_id,
-                "background task complete: failed to send notification (channel closed)"
-            );
-        }
-
-        // 推送 BgTaskCompleted 事件
+        // 推送 BgTaskCompleted 事件（携带完整 result 供下游注入主 agent inbox）
         self.push_event(BgRegistryEvent::Completed {
             task_id: task_id.to_string(),
             success,
             output_preview,
             duration_ms,
+            result,
         });
     }
 

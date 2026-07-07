@@ -159,9 +159,7 @@ impl SessionManager {
 
         let session_id = thread_id.clone();
 
-        // session 级 bg notification channel（rx 由 executor 在 run_session_loop 消费）
-        let (bg_notification_tx, _bg_notification_rx) = tokio::sync::mpsc::unbounded_channel();
-        let background_registry = Arc::new(BackgroundTaskRegistry::new(bg_notification_tx));
+        let background_registry = Arc::new(BackgroundTaskRegistry::new());
 
         let session = AcpSession {
             session_id: session_id.clone(),
@@ -190,9 +188,7 @@ impl SessionManager {
     }
 
     fn build_session(&self, session_id: &str, thread_id: ThreadId, cwd: &str) -> AcpSession {
-        // session 级 bg notification channel（rx 由 executor 在 run_session_loop 消费）
-        let (bg_notification_tx, _bg_notification_rx) = tokio::sync::mpsc::unbounded_channel();
-        let background_registry = Arc::new(BackgroundTaskRegistry::new(bg_notification_tx));
+        let background_registry = Arc::new(BackgroundTaskRegistry::new());
 
         AcpSession {
             session_id: session_id.to_string(),

@@ -121,6 +121,17 @@ pub struct StageContext {
     /// Post-compact 插件 hook 回调（可选）。由 ACP 层注入。
     /// 参数: (compacted, affected_count)
     pub compact_post_hook: Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
+
+    // ── Transport-aware async wake ───────────────────────────────────────────
+    /// Idle 时等待异步事件的 inbox（可选；ACP 层注入）。
+    /// TUI 路径传 Some，stdio/print 路径传 None（保持 c9dbfb18 的 stdio 不卡死保证）。
+    /// run_react_loop 在 queue 空时调 await_wake 阻塞，等 AsyncRouter 推送的 Defer 触发 wake。
+    pub idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,
+    /// Idle 时是否应该 await_wake 的判断 closure（可选）。
+    /// 返回 true → 主 agent 有未完成的异步任务（bg subagent），需要 await_wake 等结果。
+    /// 返回 false 或 None → 直接退出 loop，避免正常对话 loading 卡死。
+    /// peri-acp 注入：检查 background_registry.active_count() > 0。
+    pub idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl StageContext {
@@ -153,6 +164,8 @@ impl StageContext {
             recall_buffer: Arc::new(RwLock::new(Vec::new())),
             compact_pre_hook: None,
             compact_post_hook: None,
+            idle_inbox: None,
+            idle_should_wait: None,
         }
     }
 
@@ -244,6 +257,8 @@ struct StageContextInner {
     session_context: Option<Arc<RwLock<HashMap<String, String>>>>,
     compact_pre_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     compact_post_hook: Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
+    idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,
+    idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl StageContextBuilder {
@@ -322,6 +337,19 @@ impl StageContextBuilder {
         self
     }
 
+    pub fn with_idle_inbox(mut self, inbox: Arc<crate::agent::session::SessionInbox>) -> Self {
+        self.inner.idle_inbox = Some(inbox);
+        self
+    }
+
+    /// 设置 idle 时是否应该 await_wake 的判断 closure。
+    /// 返回 true → 主 agent 有未完成异步任务，需要 await_wake 等结果续跑。
+    /// 返回 false → 直接退出 loop，避免正常对话 loading 卡死。
+    pub fn with_idle_should_wait(mut self, probe: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.inner.idle_should_wait = Some(probe);
+        self
+    }
+
     pub fn build(self) -> StageContext {
         StageContext {
             turn: self.turn,
@@ -359,6 +387,8 @@ impl StageContextBuilder {
             recall_buffer: Arc::new(RwLock::new(Vec::new())),
             compact_pre_hook: self.inner.compact_pre_hook,
             compact_post_hook: self.inner.compact_post_hook,
+            idle_inbox: self.inner.idle_inbox,
+            idle_should_wait: self.inner.idle_should_wait,
         }
     }
 }
@@ -479,6 +509,18 @@ pub fn append_messages_to_transcript(
 /// 返回循环最终结果（Completed / Interrupted / Error）。
 pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
     let mut has_tool_calls = false;
+    // await_wake 只在主 agent 首次 idle 时启用一次。
+    // 被 wake 唤醒续跑一轮后，本轮 End queue 空时直接退出，避免 await_wake 永久阻塞
+    // 导致 TUI loading 卡死。后续异步事件（cron/workflow）由 TUI 发新 prompt 重启
+    // run_session_loop 处理（与 stdio 路径一致）。
+    let mut woken_once = false;
+
+    tracing::info!(
+        turn_id = %context.turn.turn_id,
+        queue_len = context.queue.len(),
+        has_idle_inbox = context.idle_inbox.is_some(),
+        "[bg-diag] run_react_loop: ENTER"
+    );
 
     for _ in 0..max_iterations {
         // 检查 cancel
@@ -548,6 +590,14 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             context: context.clone(),
         });
 
+        tracing::info!(
+            step = context.turn.current_step(),
+            should_continue = end_out.should_continue,
+            awakened_count = end_out.awakened_messages.len(),
+            queue_len_after = context.queue.len(),
+            "[bg-diag] End stage: should_continue decision"
+        );
+
         if end_out.should_continue {
             // End 阶段 drain 出的 Prompt / Defer 必须写入 transcript——
             // drain_for_end 是 destructive，不写入会物理丢失。
@@ -558,11 +608,69 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 append_messages_to_transcript(&mut transcript, end_out.awakened_messages);
             }
             has_tool_calls = false;
-            tracing::debug!("End 阶段有新消息，写入 transcript，开始新 turn");
+            tracing::info!("[bg-diag] End: should_continue=true, loop continue new turn");
             continue;
         }
 
-        // 队列空 → 退出
+        // 队列空 → 如有 idle_inbox 且未被 wake 过，等异步事件续跑一次。
+        // 这条路径是 c9dbfb18 移除 run_session_loop 末尾 await_wake 后的替代方案：
+        // 把 await_wake 下沉到 run_react_loop 内部，由 idle_inbox: Option 控制启用。
+        // TUI 路径注入 Some → idle 等异步事件续跑（cron/bg/workflow）一次。
+        // stdio/print 路径 None → 直接退出，保持 PromptResponse 响应性（避免 Zed 卡死）。
+        //
+        // woken_once 守卫：被 wake 唤醒续跑一轮后，本轮 End queue 空时直接退出。
+        // 否则 await_wake 永久阻塞 → TUI loading 卡死。后续异步事件由 TUI 发新 prompt
+        // 重启 run_session_loop 处理。
+        if !woken_once {
+            // 只有当 idle_should_wait closure 返回 true（主 agent 有未完成异步任务）
+            // 才 await_wake。否则直接退出，避免正常对话 loading 卡死。
+            let should_wait = context
+                .idle_should_wait
+                .as_ref()
+                .map(|probe| probe())
+                .unwrap_or(false);
+            if should_wait {
+                if let Some(inbox) = &context.idle_inbox {
+                    tracing::info!(
+                        "[bg-diag] End: queue empty, awaiting wake (idle_should_wait=true, first-time)"
+                    );
+                    // select cancel：用户中断时立即退出，避免 await_wake 永久阻塞
+                    let cancel_fut = context.turn.cancel_token.cancelled();
+                    tokio::pin!(cancel_fut);
+                    tokio::select! {
+                        _ = inbox.await_wake() => {
+                            if context.turn.is_cancelled() {
+                                return LoopResult::Interrupted;
+                            }
+                            woken_once = true;
+                            tracing::info!(
+                                turn_id = %context.turn.turn_id,
+                                queue_len_after_wake = context.queue.len(),
+                                "[bg-diag] run_react_loop: idle inbox woken, continue new turn (no more await_wake)"
+                            );
+                            // 醒来后立即 drain_for_end 消费已 push 的 Defer/Prompt 写入 transcript，
+                            // 让新一轮 Reason 阶段就能看到 bg/workflow 结果，避免 hallucination +
+                            // 多余续跑（否则本轮 Receive 跳过 Defer，Reason 看不到，End 才写入触发又一轮）。
+                            if let Some(msgs) = context.queue.drain_for_end() {
+                                if !msgs.is_empty() {
+                                    let mut transcript = context.transcript.write();
+                                    append_messages_to_transcript(&mut transcript, msgs);
+                                    tracing::info!(
+                                        "[bg-diag] post-wake drain_for_end wrote messages to transcript"
+                                    );
+                                }
+                            }
+                            continue;
+                        }
+                        _ = &mut cancel_fut => return LoopResult::Interrupted,
+                    }
+                }
+            }
+        }
+        tracing::info!(
+            woken_once = woken_once,
+            "[bg-diag] run_react_loop: exit (woken_once or idle_should_wait=false)"
+        );
         return LoopResult::Completed;
     }
 

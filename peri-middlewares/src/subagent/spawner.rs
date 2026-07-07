@@ -351,7 +351,7 @@ pub async fn spawn_background_fork(
         pid: None,
         output_preview: None,
     };
-    if let Err(e) = config.bg_registry.register(bg_task) {
+    if let Err(e) = config.bg_registry.register_with_kind(bg_task) {
         return Err(format!("Failed to register background fork task: {}", e).into());
     }
 

@@ -1526,8 +1526,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
 
     // Background registry
-    let (bg_result_tx, _bg_result_rx) = mpsc::unbounded_channel();
-    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new(bg_result_tx));
+    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new());
 
     // 父消息（fork background 需要）
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
@@ -1787,8 +1786,7 @@ async fn test_integration_fork_plus_background_priority() {
     }
 
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
-    let (bg_result_tx, _bg_result_rx) = mpsc::unbounded_channel();
-    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new(bg_result_tx));
+    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new());
 
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages

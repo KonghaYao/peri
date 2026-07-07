@@ -140,6 +140,7 @@ pub(crate) async fn run(params: PromptExecParams) {
         session_manager: Some(ctx.session_manager.clone()),
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
+        allow_await_wake: false,
     })
     .await;
 

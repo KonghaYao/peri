@@ -175,6 +175,16 @@ TUI 纯 ACP client，通过 `MpscTransport` 通信。Frozen Data Flow：`frozen_
 **[TRAP]** Immediate 命令绕过 agent event pump，必须手动 `sink.push_done()`。
 **[TRAP]** Agent 构建统一走 `execute_prompt()`，禁止 TUI 直连。
 
+### ACP 自定义事件原则（2026-07-07 决策）
+
+**标准有的走标准，真没有的才自定义。** 不要在 `peri/unstable-event` 中重复定义 ACP `session/update` 已有的能力。判断流程：
+
+1. 先查 ACP v1 `SessionUpdate` 是否有对应 tag
+2. 有 → 走标准 `session/update`，不发明自定义事件
+3. 没有 → `peri/unstable-event` 自定义事件
+
+**已知违例待清理**：§4.1 流式四事件（`text-chunk`/`reasoning-chunk`/`tool-started`/`tool-ended`）与 `session/update` 的 `agent_message_chunk`/`agent_thought_chunk`/`tool_call`/`tool_call_update` 完全重复。（详见 `docs/design/decisions/2026-07-07-acp-reuse-first.md`）
+
 ## 上下文压缩
 
 `stages/compact.rs` 每轮检查 `ContextBudget`：0.70→micro，0.85→full。`/compact` 命令复用 `compact_v2::run_compact(force=true)`。

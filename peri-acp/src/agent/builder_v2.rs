@@ -69,6 +69,8 @@ pub fn build_stage_context(
     cached_llm: Option<&CachedLlmInstances>,
     pool: &Arc<parking_lot::Mutex<AgentPool>>,
     shared_queue: &peri_agent::session::MessageQueue,
+    idle_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
+    idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> (V2AgentOutput, Option<CachedLlmInstances>) {
     // 提取 LLM 用字段（在 cfg 被 build_agent 消费前）
     let cwd = cfg.cwd.clone();
@@ -246,6 +248,16 @@ pub fn build_stage_context(
     }
     if let Some(sp) = system_prompt {
         builder = builder.with_system_prompt(sp);
+    }
+
+    // 注入 idle_inbox（transport-aware await_wake）
+    if let Some(inbox) = idle_inbox {
+        builder = builder.with_idle_inbox(inbox);
+    }
+
+    // 注入 idle_should_wait probe（gate await_wake，仅当有未完成异步任务时启用）
+    if let Some(probe) = idle_should_wait {
+        builder = builder.with_idle_should_wait(probe);
     }
 
     // 注入 compact plugin hook 回调（PreCompact / PostCompact）

@@ -224,6 +224,7 @@ pub async fn run_print(
             session_manager: None, // print 模式不需要 cancel 级联
             workflow_executor: None,
             workflow_middleware: None,
+            allow_await_wake: false,
         },
     )
     .await;

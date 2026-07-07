@@ -328,6 +328,14 @@ pub struct PromptExecutionContext {
     /// Session 级 WorkflowMiddleware（None = 该会话不启用 workflow 或临时创建）。
     /// session/new 时创建，存入 SessionState/SessionInfo，每轮复用。
     pub workflow_middleware: Option<Arc<peri_middlewares::workflow::WorkflowMiddleware>>,
+
+    // ── Transport-aware async wake ───────────────────────────────────────────
+    /// 是否允许主 agent idle 时 await_wake 等异步事件续跑。
+    /// TUI（MpscTransport）路径设 true → run_react_loop 在 queue 空时阻塞等异步事件。
+    /// stdio/print 路径设 false → run_react_loop 直接退出，保持 PromptResponse 响应性。
+    /// 这是 c9dbfb18 移除 run_session_loop 末尾 await_wake 后的替代方案：通过 transport
+    /// 分流避免 stdio/IDE 卡死，同时让 TUI 续跑机制恢复。
+    pub allow_await_wake: bool,
 }
 
 /// Per-turn computed configuration derived from `PromptExecutionContext`.
@@ -396,6 +404,7 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         session_manager,
         workflow_executor,
         workflow_middleware,
+        allow_await_wake,
     } = ctx;
 
     // Compact config — computed early for command interception and agent building.
@@ -439,6 +448,10 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     // `<system-reminder>`）。与 WorkflowComplete / cron 等其他异步唤醒路径
     // 走同一套机制——见 `append_messages_to_transcript`。
     if !bg_results.is_empty() {
+        tracing::info!(
+            count = bg_results.len(),
+            "[bg-diag] ctx.bg_results is non-empty, will inject each via AsyncRouter"
+        );
         if let Some(ref router) = async_router {
             // v2 路径：通过 AsyncRouter → InboxHandle → push_defer（触发 wake）
             for result in &bg_results {
@@ -493,10 +506,7 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         .as_ref()
         .and_then(|sm| sm.get_session(&session_id))
         .map(|s| s.background_registry.clone())
-        .unwrap_or_else(|| {
-            let (tx, _) = tokio::sync::mpsc::unbounded_channel();
-            Arc::new(peri_middlewares::subagent::BackgroundTaskRegistry::new(tx))
-        });
+        .unwrap_or_else(|| Arc::new(peri_middlewares::subagent::BackgroundTaskRegistry::new()));
 
     // BgCommand 事件的 bg event pump（必须在命令拦截之前启动，Immediate 命令才能发事件）
     {
@@ -508,6 +518,12 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
                 bg_cmd_sink
                     .push_event(&bg_cmd_sid, &bg_event, bg_cmd_cw)
                     .await;
+                // bg agent 完成后必须 push_done，否则 TUI 因 SubagentStopped 设置
+                // is_loading=true 后永久卡住（与 Immediate 命令路径同模式，需手动
+                // 发 peri/agent_event_done 触发 acp_notifier 的 AgentDone→TurnDone）。
+                if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
+                    bg_cmd_sink.push_done(&bg_cmd_sid).await;
+                }
             }
         });
     }
@@ -519,8 +535,19 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         bg_registry_for_cmd.set_event_sender(registry_event_tx, session_id.clone());
         let registry_sink = Arc::clone(&event_sink);
         let registry_sid = session_id.clone();
+        let registry_async_router = async_router.clone();
         tokio::spawn(async move {
             while let Some(event) = registry_event_rx.recv().await {
+                tracing::info!(
+                    event_type = match &event {
+                        peri_middlewares::subagent::BgRegistryEvent::Started { .. } => "Started",
+                        peri_middlewares::subagent::BgRegistryEvent::Completed { .. } =>
+                            "Completed",
+                        peri_middlewares::subagent::BgRegistryEvent::Cancelled { .. } =>
+                            "Cancelled",
+                    },
+                    "[bg-diag] registry event pump: received event"
+                );
                 let (event_name, payload) = match &event {
                     peri_middlewares::subagent::BgRegistryEvent::Started {
                         task_id,
@@ -541,15 +568,35 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
                         success,
                         output_preview,
                         duration_ms,
-                    } => (
-                        "bg-task-completed",
-                        serde_json::json!({
-                            "task_id": task_id,
-                            "success": success,
-                            "output_preview": output_preview,
-                            "duration_ms": duration_ms,
-                        }),
-                    ),
+                        result,
+                    } => {
+                        // 注入主 agent inbox，触发续跑（若 AsyncRouter 可用）。
+                        // 模式参照 workflow Path B（route_workflow_event）。
+                        // 注意：此注入只对 Agent 工具 bg 模式有效（主 agent 在
+                        // run_session_loop 内）；/bg 命令是 immediate command，
+                        // 主 agent 不在 loop，注入对它无效（用户已接受此 trade-off）。
+                        tracing::info!(
+                            task_id = %task_id,
+                            "[bg-diag] registry event pump: Completed branch, calling route_bg_result"
+                        );
+                        if let Some(ref router) = registry_async_router {
+                            router.route_bg_result(result);
+                        } else {
+                            tracing::info!(
+                                "[bg-diag] registry event pump: async_router is None, skip inject"
+                            );
+                        }
+
+                        (
+                            "bg-task-completed",
+                            serde_json::json!({
+                                "task_id": task_id,
+                                "success": success,
+                                "output_preview": output_preview,
+                                "duration_ms": duration_ms,
+                            }),
+                        )
+                    }
                     peri_middlewares::subagent::BgRegistryEvent::Cancelled { task_id, reason } => (
                         "bg-task-cancelled",
                         serde_json::json!({
@@ -635,6 +682,23 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         provider_display_name: provider.display_name().to_string(),
     });
 
+    // transport-aware: 仅 TUI 路径（allow_await_wake=true）注入 idle_inbox，
+    // 让 run_react_loop 在 queue 空时 await_wake 等异步事件。
+    // stdio/print 路径 None，保持 run_react_loop 直接退出。
+    let idle_inbox = if allow_await_wake {
+        session_inbox.as_ref().map(Arc::clone)
+    } else {
+        None
+    };
+
+    // idle_should_wait probe：检查 background_registry 是否有未完成的 bg subagent。
+    // TUI 路径注入，run_react_loop 用它 gate await_wake（避免正常对话 loading 卡死）。
+    // stdio/print 路径 idle_inbox=None，probe 即使有也不影响（gate 双层保险）。
+    let idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>> = {
+        let probe_registry = Arc::clone(&bg_registry_for_cmd);
+        Some(Arc::new(move || probe_registry.active_count() > 0))
+    };
+
     // 把会 move 的资源打包成 struct，turn + event_tx + cached_llm 仍借用。
     // 由于 prompt builder 需要的所有资源都在这里 move 进 BuildAgentRequest，
     // 调用方后续不再访问这些字段（session_id 在 collect_result 借用，
@@ -666,6 +730,8 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         cached_llm: cached_llm.as_ref(),
         v2_message_queue: &v2_message_queue,
         async_router: async_router.clone(),
+        idle_inbox,
+        idle_should_wait,
     })
     .await;
 
@@ -724,6 +790,11 @@ struct BuildAgentRequest<'a> {
     /// AsyncRouter（统一异步事件路由到 inbox，触发 wake）。
     /// None 表示无 inbox（print mode / 无 SessionManager），回退到直接 push。
     async_router: Option<AsyncRouter>,
+    /// Transport-aware idle inbox（await_wake）。TUI 路径 Some，stdio/print 路径 None。
+    idle_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
+    /// idle_should_wait probe：检查 background_registry.active_count > 0。
+    /// gate await_wake，避免正常对话 loading 卡死。
+    idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 /// Agent 执行后的最终输出（state + 停止原因）。
@@ -768,6 +839,8 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         cached_llm,
         v2_message_queue,
         async_router,
+        idle_inbox,
+        idle_should_wait,
     } = req;
 
     let (
@@ -1011,6 +1084,8 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         session_manager,
         v2_message_queue,
         async_router,
+        idle_inbox,
+        idle_should_wait,
     )
     .await;
 }

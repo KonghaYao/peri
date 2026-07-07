@@ -410,6 +410,8 @@ pub(super) async fn build_and_execute_agent_v2(
     session_manager: Option<SessionManager>,
     v2_queue: &peri_agent::session::MessageQueue,
     _async_router: Option<AsyncRouter>,
+    idle_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
+    idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> ExecOutcome {
     use peri_agent::agent::stages::{run_react_loop, LoopResult};
     use peri_agent::session::queue::{
@@ -417,8 +419,14 @@ pub(super) async fn build_and_execute_agent_v2(
     };
 
     // Phase 1: build StageContext（内部消费 AgentComponents；传入会话级共享 v2_queue）
-    let (v2_out, new_cache) =
-        crate::agent::builder_v2::build_stage_context(cfg, cached_llm, pool, v2_queue);
+    let (v2_out, new_cache) = crate::agent::builder_v2::build_stage_context(
+        cfg,
+        cached_llm,
+        pool,
+        v2_queue,
+        idle_inbox,
+        idle_should_wait,
+    );
     if let Some(cache) = new_cache {
         pool.lock().store_llm(cache);
     }

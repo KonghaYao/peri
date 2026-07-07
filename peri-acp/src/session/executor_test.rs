@@ -89,10 +89,7 @@ fn make_bg_infra() -> (
     Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
 ) {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
-    let (notif_tx, _notif_rx) = tokio::sync::mpsc::unbounded_channel();
-    let registry = Arc::new(peri_middlewares::subagent::BackgroundTaskRegistry::new(
-        notif_tx,
-    ));
+    let registry = Arc::new(peri_middlewares::subagent::BackgroundTaskRegistry::new());
     (tx, registry)
 }
 

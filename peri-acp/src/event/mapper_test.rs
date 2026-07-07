@@ -190,7 +190,7 @@ fn test_ai_reasoning_maps_to_session_update() {
     assert_eq!(mapped[0].updates.len(), 1, "应包含 1 个 SessionUpdate");
     assert!(
         mapped[0].source_agent_id.is_none(),
-        "AiReasoning 此处无 source_agent_id"
+        "主 agent reasoning 无 source_agent_id"
     );
     match &mapped[0].updates[0] {
         SessionUpdate::AgentThoughtChunk(chunk) => {
@@ -203,6 +203,30 @@ fn test_ai_reasoning_maps_to_session_update() {
             }
         }
         other => panic!("预期 AgentThoughtChunk，实际: {:?}", other),
+    }
+}
+
+#[test]
+fn test_ai_reasoning_with_source_agent_id_forwards_to_notifier() {
+    // SubAgent reasoning → 应携带 source_agent_id，使 TUI notifier
+    // 的 agent_thought_chunk handler 正确路由到 SubAgentGroup
+    let event = ExecutorEvent::AiReasoning {
+        text: "subagent thinking...".to_string(),
+        source_agent_id: Some("sa-1".to_string()),
+    };
+    let mapped = map_event(&event, 200_000);
+    assert_eq!(mapped.len(), 1);
+    assert_eq!(
+        mapped[0].source_agent_id.as_deref(),
+        Some("sa-1"),
+        "SubAgent reasoning 应携带 source_agent_id"
+    );
+    match &mapped[0].updates[0] {
+        SessionUpdate::AgentThoughtChunk(chunk) => match &chunk.content {
+            ContentBlock::Text(tc) => assert_eq!(tc.text, "subagent thinking..."),
+            other => panic!("预期 Text，实际: {other:?}"),
+        },
+        other => panic!("预期 AgentThoughtChunk，实际: {other:?}"),
     }
 }
 

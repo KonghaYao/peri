@@ -182,6 +182,7 @@ pub(crate) async fn run_prompt(
         session_manager: Some(session_manager),
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
+        allow_await_wake: true,
     })
     .await;
 
