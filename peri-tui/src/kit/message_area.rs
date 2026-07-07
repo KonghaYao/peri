@@ -481,12 +481,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                         }
                     } else {
                         // 鼠标在消息区外：滚轮 + 其他鼠标事件委托 ScrollViewState
+                        // Left click outside → 不消费，让 InputArea 等组件处理点击光标定位
                         match mouse.kind {
                             MouseEventKind::ScrollDown => {
                                 scroll_state.write().scroll_down();
                             }
                             MouseEventKind::ScrollUp => {
                                 scroll_state.write().scroll_up();
+                            }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                return EventResult::Ignored;
                             }
                             _ => {
                                 scroll_state.write().handle_event(&event);

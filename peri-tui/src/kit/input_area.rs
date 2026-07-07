@@ -14,10 +14,10 @@
 use peri_widgets::textarea::TextAreaState;
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
+        layout::{Constraint, Direction, Rect},
         style::{Modifier, Style},
         text::{Line, Span},
         widgets::{Block, Borders, Paragraph},
@@ -44,6 +44,31 @@ use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashComple
 use crate::kit::theme;
 use peri_acp_types::view_model::{UserBubbleData, ViewModel, hash_str};
 
+/// 追踪 composer 段落区域，供鼠标点击→光标定位使用。
+/// 仿照 MsgAreaTracker 模式：rect 是值类型，每帧 pre_component_draw 更新后在
+/// handler 注册前取出副本传给闭包。
+struct AreaTracker {
+    rect: Option<Rect>,
+}
+
+impl Hook for AreaTracker {
+    fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        self.rect = Some(drawer.area);
+    }
+}
+
+/// 将终端显示列坐标转换为行内字符索引（处理 CJK 双宽字符）。
+fn display_col_to_char_idx(line: &str, display_col: usize) -> usize {
+    let mut col = 0usize;
+    for (char_idx, ch) in line.chars().enumerate() {
+        if col >= display_col {
+            return char_idx;
+        }
+        col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+    }
+    line.chars().count()
+}
+
 #[derive(Default, Props)]
 pub struct InputAreaProps {
     pub loading: bool,
@@ -54,6 +79,15 @@ pub struct InputAreaProps {
 pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 单一编辑状态——闭包编辑 + 渲染读取共享同一实例
     let state = hooks.use_state(TextAreaState::default);
+
+    // 追踪 composer 区域 + overlay 高度，用于鼠标点击→光标定位
+    // area_tracker: 值拷贝模式（仿 MsgAreaTracker），避免每帧 Arc 重建导致 handler 读到 None
+    let composer_area;
+    {
+        let tracker = hooks.use_hook(|| AreaTracker { rect: None });
+        composer_area = tracker.rect; // 每帧取副本，区块结束即释放 &mut hooks 借用
+    }
+    let overlay_height = Arc::new(parking_lot::Mutex::new(0u16));
 
     hooks.use_event_handler(
         EventScope::Current,
@@ -81,8 +115,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     // ── 提交 ──（仅在不激活 popup 时按 Enter 提交）
                     KeyCode::Enter if !is_shift && !is_alt && !mention_active && !slash_active => {
                         let mut s = state.write();
-                        let submitted = std::mem::take(&mut s.text);
-                        s.cursor = 0;
+                        let submitted = s.take_text();
                         drop(s);
 
                         submit_text(submitted);
@@ -137,6 +170,30 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         update_popup_prefix(&s);
                         EventResult::Consumed
                     }
+                    KeyCode::Char('z')
+                        if is_ctrl && !is_alt && !mention_active && !slash_active =>
+                    {
+                        let mut s = state.write();
+                        s.undo();
+                        update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('r')
+                        if is_ctrl && !is_alt && !mention_active && !slash_active =>
+                    {
+                        let mut s = state.write();
+                        s.redo();
+                        update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('y')
+                        if is_ctrl && !is_alt && !mention_active && !slash_active =>
+                    {
+                        let mut s = state.write();
+                        s.paste_yank();
+                        update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
                     KeyCode::Char('b')
                         if is_alt && !is_ctrl && !mention_active && !slash_active =>
                     {
@@ -187,6 +244,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         state.write().cursor_word_right();
                         EventResult::Consumed
                     }
+
                     KeyCode::Left if !mention_active && !slash_active => {
                         state.write().cursor_left();
                         EventResult::Consumed
@@ -195,6 +253,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         state.write().cursor_right();
                         EventResult::Consumed
                     }
+
                     // ── history 导航（仅在不激活 popup 且无 Ctrl 修饰时）──
                     // I18-B：必须排除 Ctrl+Up/Down/Home/End——这些键留给 message_area 滚动。
                     // 事件现在分别由 InputArea / MessageArea 用 `use_event_handler` 注册，
@@ -205,7 +264,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         if !moved {
                             let current = state.read().all_text();
                             if let Some(historical) = history_up(Some(&current)) {
-                                state.write().replace_all(historical);
+                                state.write().replace_all_no_undo(historical);
                             }
                         }
                         EventResult::Consumed
@@ -214,7 +273,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         tracing::info!(?key, "input area consumed down");
                         let moved = state.write().cursor_line_down();
                         if !moved && let Some(historical) = history_down() {
-                            state.write().replace_all(historical);
+                            state.write().replace_all_no_undo(historical);
                         }
                         EventResult::Consumed
                     }
@@ -246,7 +305,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         if !pred.read().text.is_empty() {
                             let text = pred.read().text.clone();
                             *pred.write() = PredictionState::default();
-                            state.write().replace_all(text);
+                            state.write().replace_all_no_undo(text);
                             reset_mention_popup();
                             reset_slash_popup();
                             return EventResult::Consumed;
@@ -289,6 +348,49 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             _ => EventResult::Ignored,
         },
     );
+    // ── 鼠标点击光标定位（Global scope，确保点击事件能到达）──
+    {
+        let state_cl = state.clone();
+        let overlay_height_cl = overlay_height.clone();
+        hooks.use_event_handler(
+            ratatui_kit::prelude::EventScope::Global,
+            ratatui_kit::prelude::EventPriority::High,
+            move |event| {
+                if let Event::Mouse(mouse) = event {
+                    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                        return EventResult::Ignored;
+                    }
+                    if let Some(outer) = composer_area {
+                        let ov_h = *overlay_height_cl.lock();
+                        let composer_top = outer.y.saturating_add(ov_h).saturating_add(1);
+                        let text_x = outer.x.saturating_add(3);
+                        if mouse.row >= composer_top && mouse.column >= text_x {
+                            let line_idx = mouse.row.saturating_sub(composer_top) as usize;
+                            let display_col = mouse.column.saturating_sub(text_x) as usize;
+                            let s = state_cl.read();
+                            if !s.text.is_empty() {
+                                let lines: Vec<&str> = s.text.split('\n').collect();
+                                if line_idx < lines.len() {
+                                    let char_col =
+                                        display_col_to_char_idx(lines[line_idx], display_col);
+                                    let new_cursor = TextAreaState::line_col_to_cursor(
+                                        &s.text, line_idx, char_col,
+                                    );
+                                    drop(s);
+                                    state_cl.write().cursor = new_cursor;
+                                    // 点击在 composer 内，消费事件，阻止 message_area 误处理
+                                    return EventResult::Consumed;
+                                }
+                            }
+                            drop(s);
+                        }
+                    }
+                }
+                // 点击不在 composer 内，不消费
+                EventResult::Ignored
+            },
+        );
+    }
     let editor = state.read().clone();
     let hidden = props.hidden;
     let text = editor.text.clone();
@@ -343,14 +445,15 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     } else {
         0
     };
-    let overlay_height = slash_popup_height.max(mention_popup_height);
+    let ov_height = slash_popup_height.max(mention_popup_height);
+    *overlay_height.lock() = slash_popup_height.max(mention_popup_height);
     // 预测文本（buffer 为空且 prediction 非空时显示为灰色占位符）
     let pred_text = hooks.use_atom(&PREDICTION).read().text.clone();
     let show_prediction = !hidden && !pred_text.is_empty() && text.is_empty();
     let total_height = if hidden {
         0
     } else {
-        composer_height + overlay_height + if show_prediction { 1 } else { 0 }
+        composer_height + ov_height + if show_prediction { 1 } else { 0 }
     };
 
     let composer_lines = build_composer_lines(lines, loading);
@@ -643,6 +746,7 @@ fn reset_slash_popup() {
 
 fn replace_last_mention(state: &mut TextAreaState, replacement: &str) {
     if let Some(at_byte) = state.text.rfind('@') {
+        let before = peri_widgets::textarea::History::snapshot(state);
         let after_at_byte = at_byte + 1;
         let keep_until_byte = state.text[after_at_byte..]
             .char_indices()
@@ -653,6 +757,7 @@ fn replace_last_mention(state: &mut TextAreaState, replacement: &str) {
         state.text.drain(after_at_byte..keep_until_byte);
         state.text.insert_str(after_at_byte, replacement);
         state.cursor = state.text.chars().count();
+        state.record_edit(before);
     }
 }
 
@@ -807,7 +912,14 @@ fn render_multiline_with_cursor_for_themed(
         .fg(tokens.cursor_fg)
         .bg(tokens.cursor_bg)
         .add_modifier(Modifier::BOLD);
-    peri_widgets::textarea::render_multiline_with_cursor(text, cursor, cursor_style, loading)
+    peri_widgets::textarea::render_multiline_with_cursor(
+        text,
+        cursor,
+        cursor_style,
+        None,
+        Style::default(),
+        loading,
+    )
 }
 
 #[cfg(test)]
