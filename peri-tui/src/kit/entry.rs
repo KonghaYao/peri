@@ -22,7 +22,7 @@ use crate::kit::input_history;
 use crate::kit::render_bridge::spawn_render_bridge;
 use crate::kit::rewind_action::spawn_rewind_consumer;
 use crate::kit::service_snapshot::{SnapshotSource, spawn_service_snapshot};
-use crate::kit::submit_consumer::spawn_submit_consumer;
+use crate::kit::submit_consumer::{spawn_cancel_consumer, spawn_submit_consumer};
 use crate::kit::thread_load_consumer::spawn_thread_load_consumer;
 use crate::launch::{TuiLaunchOptions, build_app_and_acp, teardown_app};
 use ratatui_kit::{
@@ -117,6 +117,10 @@ pub async fn run_kit_fullscreen(
         let (thread_load_tx, thread_load_rx) = mpsc::unbounded_channel::<String>();
         let _ = atoms::THREAD_LOAD_TX.set(thread_load_tx);
 
+        // 4a2. CANCEL channel：event_handlers Ctrl+C → cancel_consumer
+        let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<()>();
+        let _ = atoms::CANCEL_TX.set(cancel_tx);
+
         // 4c. bridge channel：notifier → acp_bridge
         let (bridge_tx, bridge_rx) = mpsc::unbounded_channel();
         let (render_bridge_tx, render_bridge_rx) = mpsc::unbounded_channel();
@@ -139,6 +143,7 @@ pub async fn run_kit_fullscreen(
         let _rewind_handle = spawn_rewind_consumer(client.clone(), rewind_rx, shutdown.clone());
         let _thread_load_handle =
             spawn_thread_load_consumer(client.clone(), thread_load_rx, cwd, shutdown.clone());
+        let _cancel_handle = spawn_cancel_consumer(client.clone(), cancel_rx, shutdown.clone());
 
         // 4e. 初始化会话——在 notifier/bridge 就绪后立即创建 session，
         //     触发服务器发送 AvailableCommandsUpdate（含 skills），确保

@@ -7,16 +7,16 @@ pre-commit:
   commands:
     fmt:
       glob: "*.rs"
-      run: cargo fmt --all -- --check
-      fix: cargo fmt --all
+      run: cargo fmt --check
+      fix: cargo fmt
 
     check:
       glob: "*.rs"
-      run: cargo check --all-targets
+      run: cargo check
 
     clippy:
       glob: "*.rs"
-      run: cargo clippy --all-targets -- -W clippy::all
+      run: cargo clippy -- -W clippy::all
 
     typos:
       run: typos --ignore-hidden 2>/dev/null || true

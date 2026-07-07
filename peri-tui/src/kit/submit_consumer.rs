@@ -9,15 +9,21 @@
 //! - 与 notifier / bridge 并行运行，三者通过独立 channel 解耦
 //! - shutdown 信号触发时干净退出，不发残留请求
 
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use chrono::Local;
 use peri_agent::messages::MessageContent;
+use ratatui::text::Line;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
 use crate::kit::atoms::{
-    ACP_STATE, BRIDGE_RESET_COUNTER, DIFF_VISIBLE, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE,
-    RENDER_CACHE, REWIND_ACTION_TX, VIEW_MODELS, ViewModelsSnapshot,
+    ACP_STATE, BRIDGE_RESET_COUNTER, DIFF_VISIBLE, NOTIFICATION, PERI_CONFIG_HANDLE,
+    PERMISSION_MODE_HANDLE, RENDER_CACHE, RENDER_HEARTBEAT, REWIND_ACTION_TX, VIEW_MODELS,
+    ViewModelsSnapshot,
 };
 use crate::kit::render_bridge::RenderCache;
 
@@ -121,7 +127,7 @@ async fn handle_submit(
     // 视图层快捷命令——不经过 ACP，直接执行视图操作
     if let Some(action) = resolve_view_action(trimmed) {
         info!(action = ?action, "kit submit_consumer: view-layer command intercepted");
-        execute_view_action(&action, acp_client);
+        execute_view_action(&action, acp_client, cwd);
         return Ok(());
     }
 
@@ -168,12 +174,19 @@ fn parse_rewind_args(input: &str) -> RewindArgs {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportMode {
+    All,
+    Screen,
+}
+
 #[derive(Debug)]
 enum ViewAction {
     CycleModel,
     CycleProvider,
     CyclePermissionMode,
     ToggleDiff,
+    ExportText(ExportMode),
 }
 
 /// 解析视图层快捷命令。格式: `/command [next|cycle|toggle]`
@@ -184,12 +197,13 @@ fn resolve_view_action(input: &str) -> Option<ViewAction> {
         "/provider" => Some(ViewAction::CycleProvider),
         "/mode" => Some(ViewAction::CyclePermissionMode),
         "/diff" => Some(ViewAction::ToggleDiff),
+        "/debug-export-text" => Some(ViewAction::ExportText(parse_export_mode(input))),
         _ => None,
     }
 }
 
 /// 执行视图层操作。
-fn execute_view_action(action: &ViewAction, acp_client: &AcpTuiClient) {
+fn execute_view_action(action: &ViewAction, acp_client: &AcpTuiClient, cwd: &str) {
     match action {
         ViewAction::CycleModel => {
             if let Some(cfg_handle) = PERI_CONFIG_HANDLE.get() {
@@ -248,7 +262,74 @@ fn execute_view_action(action: &ViewAction, acp_client: &AcpTuiClient) {
             let mut visible = state.write();
             *visible = !*visible;
         }
+        ViewAction::ExportText(mode) => {
+            let message = match export_debug_text(*mode, cwd) {
+                Ok(path) => format!("已导出消息文本：{}", path.display()),
+                Err(err) => format!("导出消息文本失败：{err}"),
+            };
+            *NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
+                message,
+                until: Instant::now() + Duration::from_secs(5),
+            });
+            RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
+        }
     }
+}
+
+fn parse_export_mode(input: &str) -> ExportMode {
+    match input.split_whitespace().nth(1) {
+        Some("screen") => ExportMode::Screen,
+        _ => ExportMode::All,
+    }
+}
+
+fn export_debug_text(
+    mode: ExportMode,
+    cwd: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let lines = collect_debug_export_lines(mode);
+    let text = lines_to_plain_text(&lines);
+    let path = debug_export_path(cwd);
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
+fn collect_debug_export_lines(mode: ExportMode) -> Vec<Line<'static>> {
+    let cache = RENDER_CACHE.state().read().clone();
+    let all_lines: Vec<Line<'static>> = cache
+        .entries
+        .iter()
+        .flat_map(|(_, entry)| entry.lines.iter().cloned())
+        .collect();
+    match mode {
+        ExportMode::All => all_lines,
+        ExportMode::Screen => {
+            let viewport = crate::kit::atoms::message_viewport_snapshot()
+                .read()
+                .clone();
+            let start = viewport.first_line.min(all_lines.len());
+            let end = viewport.last_line.min(all_lines.len()).max(start);
+            all_lines[start..end].to_vec()
+        }
+    }
+}
+
+fn lines_to_plain_text(lines: &[Line<'static>]) -> String {
+    let mut output = String::new();
+    for line in lines {
+        for span in &line.spans {
+            output.push_str(span.content.as_ref());
+        }
+        output.push('\n');
+    }
+    output
+}
+
+fn debug_export_path(cwd: &str) -> PathBuf {
+    Path::new(cwd).join(format!(
+        "peri-debug-export-{}.txt",
+        Local::now().format("%Y%m%d-%H%M%S")
+    ))
 }
 
 /// 清空 loading 状态——prompt 失败时兜底，防止 loading 永久卡死。
@@ -256,6 +337,46 @@ fn clear_loading_state() {
     let ref_guard = ACP_STATE.state();
     let mut acp = ref_guard.write();
     acp.is_loading = false;
+}
+
+/// 启动取消消费者后台任务。
+///
+/// 监听 CANCEL_TX channel，收到信号时调用 `acp_client.cancel()` 中断当前 agent。
+/// 与 submit_consumer / notifier / bridge 并行运行，通过独立 channel 解耦。
+///
+/// 参数：
+/// - `acp_client`：克隆自 build_app_and_acp 返回的 AcpTuiClient
+/// - `rx`：CANCEL_TX 的接收端（由 entry::run_kit_fullscreen 创建 channel 时拿到）
+/// - `shutdown`：与 notifier / bridge 共享的同一 CancellationToken
+pub fn spawn_cancel_consumer(
+    acp_client: AcpTuiClient,
+    mut rx: mpsc::UnboundedReceiver<()>,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        info!("kit cancel_consumer: started");
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    info!("kit cancel_consumer: shutdown signal received, exiting");
+                    break;
+                }
+                msg = rx.recv() => {
+                    match msg {
+                        None => {
+                            info!("kit cancel_consumer: CANCEL_TX dropped, exiting");
+                            break;
+                        }
+                        Some(()) => {
+                            if let Err(e) = acp_client.cancel().await {
+                                tracing::warn!(%e, "cancel_consumer: cancel 失败");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -396,8 +517,41 @@ mod tests {
             resolve_view_action("/diff"),
             Some(ViewAction::ToggleDiff)
         ));
+        assert!(matches!(
+            resolve_view_action("/debug-export-text"),
+            Some(ViewAction::ExportText(ExportMode::All))
+        ));
+        assert!(matches!(
+            resolve_view_action("/debug-export-text all"),
+            Some(ViewAction::ExportText(ExportMode::All))
+        ));
+        assert!(matches!(
+            resolve_view_action("/debug-export-text screen"),
+            Some(ViewAction::ExportText(ExportMode::Screen))
+        ));
         assert!(resolve_view_action("/clear").is_none());
         assert!(resolve_view_action("hello").is_none());
+    }
+
+    #[test]
+    fn test_lines_to_plain_text_joins_spans_and_lines() {
+        let lines = vec![
+            Line::from(vec![
+                ratatui::text::Span::raw("hello"),
+                ratatui::text::Span::raw(" world"),
+            ]),
+            Line::from("next"),
+        ];
+        assert_eq!(lines_to_plain_text(&lines), "hello world\nnext\n");
+    }
+
+    #[test]
+    fn test_debug_export_path_uses_cwd_and_timestamp_prefix() {
+        let path = debug_export_path("/tmp/peri-export-test");
+        assert!(path.starts_with("/tmp/peri-export-test"));
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("peri-debug-export-"));
+        assert!(name.ends_with(".txt"));
     }
 
     #[tokio::test]

@@ -18,16 +18,49 @@ use ratatui_kit::{
 };
 
 use super::atoms::{
-    ACP_STATE, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LAST_ESC_TIME, MODE_HIGHLIGHT_UNTIL,
-    MODEL_HIGHLIGHT_UNTIL, PROVIDER_HIGHLIGHT_UNTIL, QUIT_PENDING_SINCE, REWIND_PREVIEW,
+    ACP_STATE, CANCEL_TX, INPUT_AREA_ESC_PREFIX, LAST_ESC_TIME, MODE_HIGHLIGHT_UNTIL,
+    MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, PROVIDER_HIGHLIGHT_UNTIL, QUIT_PENDING_SINCE,
+    REWIND_PREVIEW,
 };
-use crate::kit::atoms::PopupKind;
+use crate::kit::atoms::{Notification, PopupKind};
 use crate::kit::focus_router::{
     FocusLayer, GlobalShortcut, active_layer, classify_global_shortcut,
 };
 use crate::kit::panel_registry::close_active_panel;
 use crate::kit::popup_overlay::{close_popup, open_popup};
 use tracing::info;
+
+/// Ctrl+C 的行为由状态纯函数决定，确保可测试。
+#[derive(Debug, PartialEq, Eq)]
+enum CtrlCAction {
+    /// 发送取消请求给 agent（loading 状态）
+    Cancel,
+    /// 启动或重置退出倒计时
+    FirstQuit,
+    /// 1 秒内双击——立即退出
+    Quit,
+}
+
+/// 根据 loading 状态和退出计时器决定 Ctrl+C 的行为。
+///
+/// 纯函数——不依赖全局状态，输入决定输出。
+fn determine_ctrl_c_action(
+    loading: bool,
+    quit_pending: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> CtrlCAction {
+    if loading {
+        CtrlCAction::Cancel
+    } else {
+        match quit_pending {
+            None => CtrlCAction::FirstQuit,
+            Some(t) if now.duration_since(t) < std::time::Duration::from_secs(1) => {
+                CtrlCAction::Quit
+            }
+            Some(_) => CtrlCAction::FirstQuit,
+        }
+    }
+}
 
 /// Global Layer: 不可阻断的快捷键。
 ///
@@ -45,23 +78,25 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
         match classify_global_shortcut(&key) {
             Some(GlobalShortcut::Quit) => {
                 let loading = ACP_STATE.state().read().is_loading;
-                if loading {
-                    INPUT_BUFFER.state().write().clear();
-                    return EventResult::Consumed;
-                }
-
                 let now = std::time::Instant::now();
                 let pending = *QUIT_PENDING_SINCE.state().read();
-                match pending {
-                    None => {
+
+                match determine_ctrl_c_action(loading, pending, now) {
+                    CtrlCAction::Cancel => {
+                        *QUIT_PENDING_SINCE.state().write() = None;
+                        if let Some(tx) = CANCEL_TX.get() {
+                            let _ = tx.send(());
+                            show_cancel_notification(now);
+                        }
+                    }
+                    CtrlCAction::FirstQuit => {
                         *QUIT_PENDING_SINCE.state().write() = Some(now);
+                        show_quit_pending_notification(now);
                         info!("再次按 Ctrl+C 退出");
                     }
-                    Some(t) if now.duration_since(t) < std::time::Duration::from_secs(1) => {
+                    CtrlCAction::Quit => {
+                        *QUIT_PENDING_SINCE.state().write() = None;
                         exit(());
-                    }
-                    Some(_) => {
-                        *QUIT_PENDING_SINCE.state().write() = Some(now);
                     }
                 }
                 EventResult::Consumed
@@ -152,8 +187,25 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
     });
 }
 
+fn show_quit_pending_notification(now: std::time::Instant) {
+    *NOTIFICATION.state().write() = Some(Notification {
+        message: "再次按 Ctrl+C 退出".to_string(),
+        until: now + std::time::Duration::from_secs(1),
+    });
+}
+
+fn show_cancel_notification(now: std::time::Instant) {
+    *NOTIFICATION.state().write() = Some(Notification {
+        message: "已发送取消请求".to_string(),
+        until: now + std::time::Duration::from_secs(2),
+    });
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
     use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
 
     fn setup_atoms() {
@@ -167,5 +219,57 @@ mod tests {
         setup_atoms();
         assert!(OPEN_PANELS.state().read().is_empty());
         assert!(ACTIVE_PANEL.state().read().is_none());
+    }
+
+    // ── determine_ctrl_c_action 测试 ──────────────────────────────────────
+
+    #[test]
+    fn test_determine_ctrl_c_action_loading() {
+        // loading 状态下始终返回 Cancel
+        let now = Instant::now();
+        assert_eq!(
+            determine_ctrl_c_action(true, None, now),
+            CtrlCAction::Cancel
+        );
+        assert_eq!(
+            determine_ctrl_c_action(true, Some(now), now),
+            CtrlCAction::Cancel
+        );
+        assert_eq!(
+            determine_ctrl_c_action(true, Some(now - Duration::from_millis(500)), now),
+            CtrlCAction::Cancel
+        );
+    }
+
+    #[test]
+    fn test_determine_ctrl_c_action_idle_first() {
+        // 空闲状态下首次按 Ctrl+C 返回 FirstQuit
+        let now = Instant::now();
+        assert_eq!(
+            determine_ctrl_c_action(false, None, now),
+            CtrlCAction::FirstQuit
+        );
+    }
+
+    #[test]
+    fn test_determine_ctrl_c_action_idle_double() {
+        // 空闲状态下 1 秒内双击返回 Quit
+        let now = Instant::now();
+        let first = now - Duration::from_millis(500);
+        assert_eq!(
+            determine_ctrl_c_action(false, Some(first), now),
+            CtrlCAction::Quit
+        );
+    }
+
+    #[test]
+    fn test_determine_ctrl_c_action_idle_expired() {
+        // 空闲状态下超过 1 秒未双击，重置为 FirstQuit
+        let now = Instant::now();
+        let first = now - Duration::from_millis(1500);
+        assert_eq!(
+            determine_ctrl_c_action(false, Some(first), now),
+            CtrlCAction::FirstQuit
+        );
     }
 }

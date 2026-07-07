@@ -232,7 +232,7 @@ pub(super) async fn do_invoke_streaming(
 ///
 /// ToolUse 和 text 两种 stop_reason 的 LlmResponse 构建逻辑合并，
 /// 差异仅在 content 和 message 类型上。
-fn build_stream_response(
+pub(super) fn build_stream_response(
     reasoning_text: &str,
     content_text: &str,
     tool_call_requests: Vec<crate::messages::ToolCallRequest>,
@@ -251,6 +251,9 @@ fn build_stream_response(
     }
 
     if stop_reason == StopReason::ToolUse {
+        if !content_text.is_empty() {
+            blocks.push(ContentBlock::text(content_text));
+        }
         for tc in &tool_call_requests {
             blocks.push(ContentBlock::tool_use(
                 &tc.id,
@@ -292,5 +295,102 @@ fn build_stream_response(
             usage,
             request_id,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        llm::types::StopReason,
+        messages::{ContentBlock, ToolCallRequest},
+    };
+
+    /// 流式 ToolUse 场景：content_text 应在最终 BaseMessage 中保留为 Text block。
+    #[test]
+    fn test_build_stream_response_tooluse_preserves_text() {
+        let tc = ToolCallRequest::new("tc-1", "Bash", serde_json::json!({"command": "ls"}));
+
+        let response = build_stream_response(
+            "", // reasoning 为空
+            "Let me run a command.",
+            vec![tc],
+            StopReason::ToolUse,
+            None, // usage
+            None, // request_id
+        );
+
+        let blocks = response.message.content_blocks();
+        let has_text = blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { .. }));
+        let has_tool_use = blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+
+        assert!(
+            has_text,
+            "流式 ToolUse 分支应保留文本块，但 blocks 中无 Text"
+        );
+        assert!(has_tool_use, "应包含 ToolUse block");
+
+        let text = blocks
+            .iter()
+            .filter_map(|b| b.as_text())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(text, "Let me run a command.", "文本内容应完整保留");
+    }
+
+    /// 流式 ToolUse 场景：content_text 为空时不应凭空产生 text block。
+    #[test]
+    fn test_build_stream_response_tooluse_empty_text() {
+        let tc = ToolCallRequest::new("tc-1", "Bash", serde_json::json!({"command": "ls"}));
+
+        let response = build_stream_response(
+            "", // content_text 为空
+            "",
+            vec![tc],
+            StopReason::ToolUse,
+            None,
+            None,
+        );
+
+        let blocks = response.message.content_blocks();
+        let has_text = blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text } if !text.is_empty()));
+        assert!(!has_text, "content_text 为空时不应产生非空文本块");
+
+        let has_tool_use = blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+        assert!(has_tool_use, "应包含 ToolUse block");
+    }
+
+    /// 流式 ToolUse 场景：含 reasoning 时文本和 tool_use 都应保留。
+    #[test]
+    fn test_build_stream_response_tooluse_with_reasoning() {
+        let tc = ToolCallRequest::new("tc-1", "Grep", serde_json::json!({"pattern": "foo"}));
+
+        let response = build_stream_response(
+            "step-by-step analysis",  // reasoning_text
+            "I will search for foo.", // content_text
+            vec![tc],
+            StopReason::ToolUse,
+            None,
+            None,
+        );
+
+        let blocks = response.message.content_blocks();
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Reasoning { .. })));
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { .. })));
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. })));
     }
 }

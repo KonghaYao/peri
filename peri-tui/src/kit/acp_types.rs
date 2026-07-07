@@ -12,6 +12,7 @@
 
 use peri_acp_types::event_data::*;
 use peri_acp_types::view_model::ViewModel;
+use std::time::Instant;
 
 // ---------------------------------------------------------------------------
 // CurrentTurn + ToolCardAccumulator
@@ -171,6 +172,9 @@ impl CurrentTurn {
     /// Advance the spinner frame counter (called on `Tick`).
     pub fn advance_spinner(&mut self) {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
+        if self.has_running_bash_tool() {
+            self.invalidate_cache();
+        }
     }
 
     /// Mark the turn as no longer active (e.g. on `"turn-interrupted"`).
@@ -257,22 +261,28 @@ impl CurrentTurn {
         }
 
         for t in &self.tool_cards {
+            let is_running = t.output_summary.is_none();
+            let running_duration_ms = is_running.then(|| t.started_at.elapsed().as_millis() as u64);
+            let running_duration_bucket = running_duration_ms.map(|ms| ms / 1000).unwrap_or(0);
+
             vms.push(ViewModel::ToolCard(ToolCardData {
                 tool_id: t.tool_id.clone(),
                 tool_name: t.tool_name.clone(),
                 input_summary: t.input_summary.clone(),
                 output_summary: t.output_summary.clone().unwrap_or_default(),
                 is_error: t.is_error,
-                is_running: t.output_summary.is_none(),
+                is_running,
+                running_duration_ms,
                 diff: None,
                 content_hash: hash_str(&format!(
-                    "{}|{}|{}|{}|{}|{}|",
+                    "{}|{}|{}|{}|{}|{}|{}",
                     t.tool_id,
                     t.tool_name,
                     t.input_summary,
                     t.output_summary.as_deref().unwrap_or(""),
                     t.is_error,
-                    t.output_summary.is_none(),
+                    is_running,
+                    running_duration_bucket,
                 )),
             }));
         }
@@ -282,6 +292,16 @@ impl CurrentTurn {
         }
 
         self.cached_view_models = vms;
+    }
+
+    pub fn has_running_bash_tool(&self) -> bool {
+        self.tool_cards
+            .iter()
+            .any(|t| t.tool_name == "Bash" && t.output_summary.is_none())
+            || self
+                .subagents
+                .iter()
+                .any(|s| s.child_turn.has_running_bash_tool())
     }
 }
 
@@ -298,6 +318,8 @@ pub struct ToolCardAccumulator {
     pub output_summary: Option<String>,
     /// Whether the tool returned an error.
     pub is_error: bool,
+    /// When the tool started on the TUI side.
+    pub started_at: Instant,
 }
 
 impl ToolCardAccumulator {
@@ -309,6 +331,7 @@ impl ToolCardAccumulator {
             input_summary,
             output_summary: None,
             is_error: false,
+            started_at: Instant::now(),
         }
     }
 }
@@ -676,6 +699,73 @@ mod tests {
         ct.spinner_frame = u32::MAX;
         ct.advance_spinner();
         assert_eq!(ct.spinner_frame, 0);
+    }
+
+    #[test]
+    fn test_advance_spinner_invalidates_cache_for_running_bash() {
+        let mut ct = CurrentTurn::new();
+        ct.start_tool(ToolCardAccumulator::new(
+            "tc-bash".into(),
+            "Bash".into(),
+            "cargo test".into(),
+        ));
+
+        let first_hash = match &ct.view_models()[0] {
+            ViewModel::ToolCard(card) => {
+                assert!(card.is_running);
+                assert!(card.running_duration_ms.is_some());
+                card.content_hash
+            }
+            other => panic!("expected ToolCard, got {other:?}"),
+        };
+
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        ct.advance_spinner();
+
+        let second_hash = match &ct.view_models()[0] {
+            ViewModel::ToolCard(card) => {
+                assert!(card.is_running);
+                assert!(card.running_duration_ms.unwrap() >= 1_000);
+                card.content_hash
+            }
+            other => panic!("expected ToolCard, got {other:?}"),
+        };
+
+        assert_ne!(first_hash, second_hash);
+    }
+
+    #[test]
+    fn test_advance_spinner_keeps_completed_bash_duration_none() {
+        let mut ct = CurrentTurn::new();
+        ct.start_tool(ToolCardAccumulator::new(
+            "tc-bash".into(),
+            "Bash".into(),
+            "cargo test".into(),
+        ));
+        ct.end_tool("tc-bash", "ok".into(), false);
+
+        let first_hash = match &ct.view_models()[0] {
+            ViewModel::ToolCard(card) => {
+                assert!(!card.is_running);
+                assert_eq!(card.running_duration_ms, None);
+                card.content_hash
+            }
+            other => panic!("expected ToolCard, got {other:?}"),
+        };
+
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        ct.advance_spinner();
+
+        let second_hash = match &ct.view_models()[0] {
+            ViewModel::ToolCard(card) => {
+                assert!(!card.is_running);
+                assert_eq!(card.running_duration_ms, None);
+                card.content_hash
+            }
+            other => panic!("expected ToolCard, got {other:?}"),
+        };
+
+        assert_eq!(first_hash, second_hash);
     }
 
     #[test]

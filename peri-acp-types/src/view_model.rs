@@ -111,6 +111,9 @@ pub struct ToolCardData {
     /// Whether the tool is still streaming/running.
     #[serde(default)]
     pub is_running: bool,
+    /// Elapsed time in milliseconds for a running tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_duration_ms: Option<u64>,
     /// Inline diff preview (Write / Edit tools).
     pub diff: Option<DiffBlock>,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
@@ -118,7 +121,7 @@ pub struct ToolCardData {
     pub content_hash: u64,
 }
 
-impl_partial_eq!(ToolCardData: tool_id, tool_name, input_summary, output_summary, is_error, is_running, diff);
+impl_partial_eq!(ToolCardData: tool_id, tool_name, input_summary, output_summary, is_error, is_running, running_duration_ms, diff);
 
 /// System notification -- centered banner for model switches, compact, etc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,6 +323,7 @@ mod tests {
             output_summary: "updated 3 lines".into(),
             is_error: false,
             is_running: false,
+            running_duration_ms: None,
             diff: Some(DiffBlock {
                 path: "foo.rs".into(),
                 hunks: vec![Hunk {

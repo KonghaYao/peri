@@ -323,6 +323,7 @@ fn convert_tool(
         output_summary,
         is_error,
         is_running: false,
+        running_duration_ms: None,
         diff,
         content_hash: hash_str(&content_hash_input),
     })

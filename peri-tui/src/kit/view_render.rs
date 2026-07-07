@@ -231,6 +231,17 @@ fn render_tool_card(data: &peri_acp_types::view_model::ToolCardData) -> Vec<Line
 
     let mut lines = vec![Line::from(header_spans)];
 
+    if data.tool_name == "Bash" && data.is_running && !data.is_error {
+        let duration = data.running_duration_ms.unwrap_or(0);
+        lines.push(Line::from(vec![
+            Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim)),
+            Span::styled(
+                format!("Running ({})", format_running_duration(duration)),
+                Style::default().fg(semantic.text.muted),
+            ),
+        ]));
+    }
+
     // 折叠/展开判断（纯 UI 决策，对应 TUI-PAGE.md §2.4.2）
     let collapsed = if data.is_error {
         false // 错误不折叠
@@ -295,6 +306,15 @@ fn render_tool_card(data: &peri_acp_types::view_model::ToolCardData) -> Vec<Line
     }
 
     with_message_spacing(lines)
+}
+
+fn format_running_duration(ms: u64) -> String {
+    let secs = ms / 1000;
+    if secs < 60 {
+        format!("{}s", secs)
+    } else {
+        format!("{}min", secs / 60)
+    }
 }
 
 fn diff_change_summary(diff: &DiffBlock) -> Option<String> {
@@ -751,6 +771,7 @@ mod tests {
             output_summary: "3 lines".into(),
             is_error: false,
             is_running: false,
+            running_duration_ms: None,
             diff: None,
             content_hash: 0,
         });
@@ -770,6 +791,7 @@ mod tests {
             output_summary: "47 lines".into(),
             is_error: false,
             is_running: false,
+            running_duration_ms: None,
             diff: None,
             content_hash: 0,
         });
@@ -806,6 +828,7 @@ mod tests {
             output_summary: "permission denied".into(),
             is_error: true,
             is_running: false,
+            running_duration_ms: None,
             diff: None,
             content_hash: 0,
         });
@@ -823,6 +846,7 @@ mod tests {
             output_summary: "permission denied".into(),
             is_error: true,
             is_running: false,
+            running_duration_ms: None,
             diff: None,
             content_hash: 0,
         });
@@ -852,6 +876,7 @@ mod tests {
             output_summary: String::new(),
             is_error: false,
             is_running: true,
+            running_duration_ms: None,
             diff: None,
             content_hash: 0,
         });
@@ -868,6 +893,67 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_card_bash_running_shows_elapsed_line() {
+        RENDER_CALL_COUNT.with(|c| c.store(0, Ordering::Relaxed));
+
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-bash-running".into(),
+            tool_name: "Bash".into(),
+            input_summary: "cargo test".into(),
+            output_summary: String::new(),
+            is_error: false,
+            is_running: true,
+            running_duration_ms: Some(61_000),
+            diff: None,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80);
+        let text = collect_text(&lines);
+        assert!(
+            text.contains("● Shell (cargo test)"),
+            "Bash 应显示为 Shell：{}",
+            text
+        );
+        assert!(
+            text.contains("⎿ Running (1min)"),
+            "运行中 Bash 应显示耗时行：{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_tool_card_bash_completed_does_not_show_running_line() {
+        let vm = ViewModel::ToolCard(ToolCardData {
+            tool_id: "tc-bash-complete".into(),
+            tool_name: "Bash".into(),
+            input_summary: "cargo test".into(),
+            output_summary: "line 1\nline 2\nline 3".into(),
+            is_error: false,
+            is_running: false,
+            running_duration_ms: None,
+            diff: None,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80);
+        let text = collect_text(&lines);
+        assert!(
+            !text.contains("Running ("),
+            "完成态不应显示 Running：{}",
+            text
+        );
+        assert!(
+            text.contains("line 1"),
+            "完成态应保留现有输出摘要：{}",
+            text
+        );
+        assert!(
+            text.contains("… 2 more lines"),
+            "完成态仍应压缩输出：{}",
+            text
+        );
+    }
+
+    #[test]
     fn test_tool_card_output_is_compacted() {
         // Bash 默认折叠（COLLAPSED_BY_DEFAULT），max_lines=1，5 行输出 → 1 行 + "… 4 more lines"
         let vm = ViewModel::ToolCard(ToolCardData {
@@ -877,6 +963,7 @@ mod tests {
             output_summary: "line 1\nline 2\nline 3\nline 4\nline 5".into(),
             is_error: false,
             is_running: false,
+            running_duration_ms: None,
             diff: None,
             content_hash: 0,
         });
@@ -895,6 +982,7 @@ mod tests {
             output_summary: "12 lines changed".into(),
             is_error: false,
             is_running: false,
+            running_duration_ms: None,
             diff: Some(DiffBlock {
                 path: "bar.rs".into(),
                 hunks: vec![],
@@ -928,6 +1016,7 @@ mod tests {
             output_summary: "ok".into(),
             is_error: false,
             is_running: false,
+            running_duration_ms: None,
             diff: None,
             content_hash: 0,
         });
@@ -949,6 +1038,7 @@ mod tests {
             output_summary: "ok".into(),
             is_error: false,
             is_running: false,
+            running_duration_ms: None,
             diff: None,
             content_hash: 0,
         });
@@ -971,6 +1061,7 @@ mod tests {
             output_summary: "ok".into(),
             is_error: false,
             is_running: false,
+            running_duration_ms: None,
             diff: Some(DiffBlock {
                 path: "foo.rs".into(),
                 hunks: vec![Hunk {
@@ -1013,6 +1104,7 @@ mod tests {
             output_summary: "ok".into(),
             is_error: false,
             is_running: false,
+            running_duration_ms: None,
             diff: Some(DiffBlock {
                 path: "bar.rs".into(),
                 hunks: vec![],
@@ -1039,6 +1131,7 @@ mod tests {
             output_summary: "total 8\ndrwxr-xr-x  3 user staff  96 Jul  6 10:00 .\ndrwxr-xr-x  5 user staff 160 Jul  6 09:00 ..".into(),
             is_error: false,
             is_running: false,
+            running_duration_ms: None,
             diff: None,
             content_hash: 0,
         });
@@ -1061,6 +1154,7 @@ mod tests {
             output_summary: "tool_1\ntool_2\ntool_3".into(),
             is_error: false,
             is_running: false,
+            running_duration_ms: None,
             diff: None,
             content_hash: 0,
         });

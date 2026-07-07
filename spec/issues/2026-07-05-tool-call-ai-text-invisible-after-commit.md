@@ -1,6 +1,6 @@
 # 消息流渲染中，AI 消息文本在多分支渲染路径下不可见
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-07-05
 
@@ -48,6 +48,12 @@ Ai: "修改完成，foo 函数已更新到 v2"               ← 症状2：整�
 - **影响范围**：所有 LLM 模型（OpenAI / Anthropic）
 - **环境**：macOS
 
+### 现象 3（2026-07-07）追加确认
+
+同日二次确认：当一条 Ai message 同时包含 content 文本和 tool call 时，渲染结果中 AI 消息文本不可见，界面上只渲染了 ToolCard。用户描述："如果同时一个 ai message 包含 content 和 tool call，渲染好像没有了 ai message"。
+
+这与症状 1 描述一致——流式期间文字可见（由 `current_turn` 路径渲染），流式结束（`ViewCommit` 写入 committed）后文字消失。
+
 ## 复现条件
 
 - **复现频率**：必现（任何涉及工具调用的对话）
@@ -58,22 +64,58 @@ Ai: "修改完成，foo 函数已更新到 v2"               ← 症状2：整�
   4. 流式结束后——发起工具调用的 AI 文本消失；工具完成后的最终 AI 回复完全不出现
 - **环境**：任意模型，macOS
 
+## 根因分析
+
+**定位**：`peri-agent/src/llm/openai/stream.rs:253-275`，`build_stream_response` 函数
+
+在流式 `ToolUse` 分支中，流式期间累积的文本 `content_text` 从未被推入 `blocks` 数组。对比非流式路径 `invoke.rs:252-254` 正确地在添加 ToolUse blocks 之前先将文本推入 blocks。
+
+```rust
+// stream.rs:253（Bug：content_text 丢失）
+if stop_reason == StopReason::ToolUse {
+    for tc in &tool_call_requests {
+        blocks.push(ContentBlock::tool_use(...));  // 只推了 ToolUse blocks
+    }
+    // ← content_text 从未被加入 blocks
+}
+
+// invoke.rs:252-254（正确：文本先推入）
+if !content_str.is_empty() {
+    blocks.push(ContentBlock::text(&content_str));
+}
+```
+
+**影响范围**：仅影响 OpenAI 兼容 API (ChatOpenAI) 的流式路径。Anthropic 的流式路径 (`anthropic/stream.rs`) 通过 `parse_content_blocks` 正确处理文本块，不受影响。
+
+**症状解释**：
+- 流式期间：`TextChunk` 事件 → `current_turn.text` 累积 → TUI 渲染可见 ✓
+- ViewCommit 后：`build_stream_response` 产生的 BaseMessage 不含 Text block → `view_mapper.convert_ai` 产生 `AssistantBubble(text="")` → TUI 只显示 ToolCard ✗
+
 ## 涉及文件
 
 | 文件 | 说明 |
 |------|------|
-| `peri-acp/src/event/view_mapper.rs` | ACP 层 BaseMessage→ViewModel 转换（`convert_ai` 将所有 ContentBlock::Text 拼接） |
+| `peri-agent/src/llm/openai/stream.rs` | **🔴 根因**：`build_stream_response` ToolUse 分支遗漏 `content_text` |
+| `peri-acp/src/event/view_mapper.rs` | ACP 层 BaseMessage→ViewModel 转换（非 bug，正确消费已存在的内容） |
 | `peri-tui/src/kit/acp_types.rs` | 流式路径 `CurrentTurn.build_view_models()` 构建增量 ViewModels |
-| `peri-tui/src/kit/acp_events.rs` | `ViewCommit` / `TurnDone` 处理，多分支 committed 合并逻辑 |
-| `peri-tui/src/kit/view_render.rs` | AssistantBubble 渲染（`render_assistant_bubble`） |
-| `peri-acp-types/src/view_model.rs` | `AssistantBubbleData` 只持有一段连续 `text`，不支持交错布局 |
+| `peri-tui/src/kit/acp_events.rs` | `ViewCommit` / `TurnDone` 处理 |
+| `peri-acp-types/src/view_model.rs` | `AssistantBubbleData` DTO 定义 |
 
 ## 状态变更记录
 
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-07-05 | — | Open | agent | 创建 |
+| 2026-07-07 | Open | Open | agent | 追加现象 3——用户二次确认症状 1（ai message 含 content+tool call 时文本不可见） |
+| 2026-07-07 | Open | Fixed | agent | 定位根因：stream.rs build_stream_response ToolUse 分支遗漏 content_text，修复并添加单元测试 |
 
 ## 修复记录
 
-（由 fix-issue 或 issue-verify skill 追加，创建时留空）
+### 修复 #1（2026-07-07）
+
+- **操作人**：agent (deepseek-v4-pro)
+- **用户原意**：修复 AI 消息同时包含文本和工具调用时文本在 ViewCommit 后消失的问题
+- **修复内容**：
+  1. `peri-agent/src/llm/openai/stream.rs`：在 `build_stream_response` 的 ToolUse 分支中添加 `content_text` 到 `blocks` 数组（与非流式路径 `invoke.rs` 行为对齐）
+  2. `peri-agent/src/llm/openai/stream.rs`（内联 `#[cfg(test)] mod tests`）：添加 3 个单元测试
+- **验证状态**：待验证

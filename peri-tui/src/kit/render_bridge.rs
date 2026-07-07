@@ -65,9 +65,32 @@ pub fn spawn_render_bridge(
         // 上次 rebuild 时每条消息的渲染行缓存（按消息索引）
         let mut msg_lines_cache: Vec<Vec<ratatui::text::Line<'static>>> = Vec::new();
 
+        // 每秒轮询 VIEW_MODELS atom——检测 running Bash 计时器引发的 ct_ptr 变化
+        let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
+                _ = poll_interval.tick() => {
+                    // running Bash 工具计时器刷新：仅 ct_ptr 变化时重建 current_turn 条目
+                    let snapshot = VIEW_MODELS.state().read().clone();
+                    let ct_ptr = Arc::as_ptr(&snapshot.current_turn) as *const () as usize;
+                    if ct_ptr != last_ct_ptr {
+                        debug!(ct_ptr, last_ct_ptr, "render_bridge: tick REBUILD_CURRENT_TURN (timer refresh)");
+                        rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, last_resize_width).await;
+                        rebuild_cumulative_heights(&mut cache);
+                        let all_lines: Vec<Line<'static>> = cache
+                            .entries
+                            .iter()
+                            .flat_map(|(_, entry)| entry.lines.iter())
+                            .cloned()
+                            .collect();
+                        cache.wrap_map = build_wrap_map(&all_lines, last_resize_width as u16);
+                        *RENDER_CACHE.state().write() = cache.clone();
+                        last_ct_ptr = ct_ptr;
+                    }
+                }
                 Some(new_width) = resize_rx.recv() => {
                     let new_width = usize::from(new_width).max(1);
                     if new_width != last_resize_width {

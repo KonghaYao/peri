@@ -261,17 +261,14 @@ TUI 内部通过 `format_tool_name()` 做少量名称简化：
 
 #### 运行中
 
-```
-● Shell (cargo build --release)
-```
-
-#### 完成（折叠）
+需要计算时间的功能
 
 ```
 ● Shell (cargo build --release)
+  ⎿  Running (1min)
 ```
 
-#### 完成（展开）
+#### 完成
 
 ```
 ● Shell (cargo build -p peri-tui)

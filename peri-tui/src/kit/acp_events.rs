@@ -380,7 +380,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 ///
 /// I21-D：一旦收到过 ViewCommit（has_view_commit=true），committed 以 bridge
 /// 为准，即使为空也不 fallback——/clear 产生空 committed 是合法结果。
-fn push_view_models(state: &mut BridgeState) {
+pub(crate) fn push_view_models(state: &mut BridgeState) {
     // I20-B：Arc::clone 是 O(1) 原子指针拷贝，避免之前每个 streaming chunk
     // 都 O(n) clone 整个消息历史的性能问题。
     let committed = if state.committed.is_empty() && !state.has_view_commit {
@@ -677,6 +677,7 @@ mod tests {
                         output_summary: "parser.rs:42".into(),
                         is_error: false,
                         is_running: false,
+                        running_duration_ms: None,
                         diff: None,
                         content_hash: 3,
                     }),
@@ -734,6 +735,7 @@ mod tests {
                         output_summary: "parser.rs:42".into(),
                         is_error: false,
                         is_running: false,
+                        running_duration_ms: None,
                         diff: None,
                         content_hash: 3,
                     }),
@@ -750,6 +752,7 @@ mod tests {
                         output_summary: "updated".into(),
                         is_error: false,
                         is_running: false,
+                        running_duration_ms: None,
                         diff: None,
                         content_hash: 5,
                     }),
@@ -789,6 +792,7 @@ mod tests {
                         output_summary: "parser.rs:42".into(),
                         is_error: false,
                         is_running: false,
+                        running_duration_ms: None,
                         diff: None,
                         content_hash: 3,
                     }),
@@ -805,6 +809,7 @@ mod tests {
                         output_summary: "updated".into(),
                         is_error: false,
                         is_running: false,
+                        running_duration_ms: None,
                         diff: None,
                         content_hash: 5,
                     }),

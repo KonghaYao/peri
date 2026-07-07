@@ -4,6 +4,13 @@
 //! 组件通过 use_atom(&ATOM) 订阅。写入自动唤醒订阅组件。
 //!
 //! 类型别名：pub type Handle<T> = AtomState<T>（供其他文件引用）。
+//!
+//! Channel 约定：
+//! - SUBMIT_TX: event_handlers 按键 → submit_consumer 消费
+//! - CANCEL_TX: event_handlers Ctrl+C → cancel_consumer 消费
+//! - RESIZE_TX: 终端 resize → render_bridge
+//! - REWIND_ACTION_TX: rewind popup → rewind_consumer
+//! - THREAD_LOAD_TX: thread browser → thread_load_consumer
 
 use chrono::{DateTime, Utc};
 use peri_acp_types::event_data::{AskUser, HitlPending, OauthNeeded, RewindPreview};
@@ -178,6 +185,7 @@ pub static MODE_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|
 pub static AT_MENTION_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static SLASH_HINT_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static SUBMIT_TX: OnceLock<UnboundedSender<String>> = OnceLock::new();
+pub static CANCEL_TX: OnceLock<UnboundedSender<()>> = OnceLock::new();
 pub static RESIZE_TX: OnceLock<UnboundedSender<u16>> = OnceLock::new();
 
 pub static SERVICE_SNAPSHOT: AtomStatic<ServiceSnapshot> =
@@ -265,6 +273,21 @@ pub static BRIDGE_RESET_COUNTER: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// MessageArea 的 build_footer_lines 读取后调用 `spinner_state.set_token_count(count)`
 /// 驱动平滑动画追赶，最终在 spinner 行右侧显示 `↓ X.Xk tokens`。
 pub static SPINNER_TOKEN_COUNT: AtomStatic<usize> = AtomStatic::new(|| 0);
+
+/// 最近一次消息区视口快照。由 MessageArea 在 render 阶段计算后写入，
+/// 仅供调试导出命令读取；screen 模式按此范围导出当前可见文本。
+#[derive(Debug, Clone, Default)]
+pub struct MessageViewportSnapshot {
+    pub scroll_y: u16,
+    pub vis_height: u16,
+    pub first_line: usize,
+    pub last_line: usize,
+}
+static MESSAGE_VIEWPORT: OnceLock<parking_lot::RwLock<MessageViewportSnapshot>> = OnceLock::new();
+
+pub fn message_viewport_snapshot() -> &'static parking_lot::RwLock<MessageViewportSnapshot> {
+    MESSAGE_VIEWPORT.get_or_init(|| parking_lot::RwLock::new(MessageViewportSnapshot::default()))
+}
 
 // ── Background Tasks 相关 State ──────────────────────────────────────────────
 
