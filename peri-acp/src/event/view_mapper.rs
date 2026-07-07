@@ -985,7 +985,7 @@ mod tests {
         match vm {
             ViewModel::SubAgentGroup(d) => {
                 assert_eq!(d.agent_id, "fork");
-                assert_eq!(d.agent_name, "Agent");
+                assert_eq!(d.agent_name, "search for TODO items in the codebase");
             }
             other => panic!("expected SubAgentGroup, got {:?}", other),
         }
