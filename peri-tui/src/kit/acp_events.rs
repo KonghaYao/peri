@@ -149,7 +149,31 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // ── §4.2 Boundary events ──
         ViewCommit(vc) => {
             // I20-B：clone incoming Vec → 移入 Arc，单次 O(n) 分配。
-            state.committed = Arc::from(vc.view_models.clone());
+            let mut committed_vms = vc.view_models.clone();
+
+            // 将流式累积的 SubAgent 子内容注入 view-commit 的 SubAgentGroup，
+            // 避免 view_mapper 产生的空 placeholder 覆盖流式期间显示的子工具调用。
+            let mut subagent_map: std::collections::HashMap<String, ViewModel> =
+                std::collections::HashMap::new();
+            for sa in &state.current_turn.subagents {
+                let vm = sa.view_model();
+                subagent_map.insert(sa.agent_id.clone(), vm);
+            }
+            if !subagent_map.is_empty() {
+                for vm in committed_vms.iter_mut() {
+                    if let ViewModel::SubAgentGroup(d) = vm {
+                        if let Some(streaming_vm) = subagent_map.get(&d.agent_id) {
+                            if let ViewModel::SubAgentGroup(streaming_data) = streaming_vm {
+                                if !streaming_data.view_models.is_empty() {
+                                    d.view_models = streaming_data.view_models.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            state.committed = Arc::from(committed_vms);
             state.current_turn.mark_committed();
             state.has_view_commit = true;
             push_view_models(state);

@@ -348,7 +348,7 @@ impl SubAgentAccumulator {
         self.child_turn.end_tool(tool_id, output, is_error);
     }
 
-    fn view_model(&self) -> ViewModel {
+    pub(crate) fn view_model(&self) -> ViewModel {
         let mut child_turn = self.child_turn.clone();
         let child_vms = child_turn.view_models();
         ViewModel::SubAgentGroup(peri_acp_types::view_model::SubAgentGroupData {
