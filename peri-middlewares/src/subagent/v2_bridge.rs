@@ -78,6 +78,19 @@ pub fn build_v2_subagent_context(
         }
     }
 
+    // SubAgent system_prompt（身份构建）注入到 transcript 开头位置：
+    // - fork 路径：在 parent_messages 之后（让身份提示词位于对话上下文之后、
+    //   prompt 之前——SubAgent 的 prompt 由调用方 push 到 queue，Receive 阶段追加）
+    // - 非 fork 路径：parent_messages 为空，直接 append 到 transcript 开头
+    //
+    // 注意：这是 session 起始身份构建（在 run_react_loop 调用前注入），不是中途纠正，
+    // 用 BaseMessage::System 合法（CLAUDE.md TRAP 仅禁止中途纠正用 System）。
+    // 调用 invoke.rs 时 Provider 会把 System hoist 到请求顶层与 LlmRequest.system 合并。
+    if let Some(sp) = system_prompt {
+        let mut tx = transcript.write();
+        tx.append(BaseMessage::system(sp));
+    }
+
     // tools → SharedToolMap（即使外部传 shared_tools，本地 tools 也合并进去）
     let mut tools_map: std::collections::HashMap<String, Arc<dyn BaseTool>> =
         std::collections::HashMap::new();
@@ -115,9 +128,9 @@ pub fn build_v2_subagent_context(
     if let Some(reg) = error_suggest_registry {
         builder = builder.with_error_suggest_registry(reg);
     }
-    if let Some(sp) = system_prompt {
-        builder = builder.with_system_prompt(sp);
-    }
+    // system_prompt 已作为 BaseMessage::System 注入 transcript（见上方 fork 路径后块）。
+    // 不再写入 StageContext.system_prompt 死字段——peri-agent/src/agent/stages/ 内零代码读取该字段。
+    // 保留 StageContextBuilder::with_system_prompt 方法本身，可能有其他调用方使用。
 
     let context = builder.build();
 

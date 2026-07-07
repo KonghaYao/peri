@@ -6,7 +6,7 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{PLUGIN_LIST, PluginSummary};
-use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -56,6 +56,14 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     });
 
     let sel = *selected.read();
+
+    // viewport 跟随：让选中项始终可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
+    // panel_layout.height = 18，减 panel_shell! Border 2 行 + 头部 3 行 + 尾部 1 行 = 12 行；
+    // 每 plugin 固定 4 行（含 description 占位空行）→ 可见 3 个 plugin。
+    // 仿 slash_completion 的 scroll_start 模式：选中项保持在上 1/3 处。
+    const VISIBLE_ITEMS: usize = 3;
+    let scroll_start = scroll_start_for_selected(sel, count, VISIBLE_ITEMS);
+
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     lines.push(Line::from(vec![Span::styled(
@@ -78,7 +86,13 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme::semantic().text.muted),
         )]));
     } else {
-        for (i, p) in plugins.iter().enumerate() {
+        // viewport 裁剪：只渲染 [scroll_start, scroll_start + VISIBLE_ITEMS) 范围
+        for (i, p) in plugins
+            .iter()
+            .enumerate()
+            .skip(scroll_start)
+            .take(VISIBLE_ITEMS)
+        {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
@@ -110,6 +124,9 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     format!("     {}", p.description),
                     Style::new().fg(theme::semantic().text.dim),
                 )]));
+            } else {
+                // description 缺失时占位空行，保证每 plugin 固定 4 行（viewport 计算依赖）
+                lines.push(Line::from(""));
             }
             // 截断 root 路径显示
             let root: String = p.root.chars().take(76).collect();

@@ -279,7 +279,7 @@ impl peri_acp::session::event_sink::EventSink for PrintEventSink {
     async fn push_event(
         &self,
         _session_id: &str,
-        event: &peri_agent::agent::events::AgentEvent,
+        event: &peri_agent::agent::events::ExecutorEvent,
         _context_window: u32,
     ) {
         let mut c = self.collector.lock().unwrap();
@@ -308,8 +308,8 @@ impl PrintCollector {
         }
     }
 
-    fn handle_event(&mut self, event: peri_agent::agent::AgentEvent) -> Option<String> {
-        use peri_agent::agent::AgentEvent as E;
+    fn handle_event(&mut self, event: peri_agent::agent::ExecutorEvent) -> Option<String> {
+        use peri_agent::agent::ExecutorEvent as E;
 
         match self.fmt {
             OutputFormat::StreamJson => match event {

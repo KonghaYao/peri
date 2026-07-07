@@ -8,7 +8,7 @@ use super::middleware_runner::run_after_agent;
 use super::tool_dispatch::dispatch_tools;
 use super::{ActInput, ActOutput};
 use crate::agent::events_v2::{RenderEvent, StateEvent};
-// StateEvent 仍用于 StateSnapshot（轻量级元数据快照）
+// StateEvent 仍用于 StateSnapshot（轻量级元数据快照，含 token_tracker 真实值）
 use crate::error::AgentResult;
 
 /// 运行 Act 阶段
@@ -103,9 +103,19 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         // emit StateSnapshot 让消费方（持久化等）看到完成状态
         // 注：v2 快照为轻量级元数据，不携带完整消息列表（避免 transcript 锁开销）
         let message_count = ctx.transcript.read().len();
-        let context_total_tokens = ctx.context_budget.as_ref().map(|b| b.context_window as u64);
-        // total_tokens 实际值由 token_tracker 持有（位于 AgentState，此处简化为 0）
-        let total_tokens = 0;
+        let context_budget = ctx.context_budget.clone();
+        let context_total_tokens = context_budget.as_ref().map(|b| b.context_window as u64);
+
+        // 通过 middleware_runner 拿到当前 AgentState 中的 token_tracker（与 compact 阶段同源）
+        let (total_tokens, budget_pct) = match context_budget.as_ref() {
+            Some(budget) => super::middleware_runner::run_with_state(ctx, |state| {
+                let tracker = state.token_tracker();
+                let used = tracker.estimated_context_tokens().unwrap_or(0);
+                let pct = tracker.context_usage_percent(budget.context_window);
+                (used, pct)
+            }),
+            None => (0, None),
+        };
         ctx.event_bus.emit_state(StateEvent::StateSnapshot {
             turn_id: ctx.turn_id(),
             agent_id: ctx.agent_id,
@@ -115,8 +125,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
             consecutive_failures: ctx
                 .consecutive_failures
                 .load(std::sync::atomic::Ordering::Relaxed),
-            // v2 快照不携带 token_tracker，使用率暂不可得（None）
-            budget_pct: None,
+            budget_pct,
             context_total_tokens,
         });
 

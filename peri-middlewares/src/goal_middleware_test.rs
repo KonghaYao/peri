@@ -34,7 +34,6 @@ fn make_active_snapshot() -> GoalViewSnapshot {
     }
 }
 
-#[allow(dead_code)]
 fn make_complete_snapshot() -> GoalViewSnapshot {
     GoalViewSnapshot {
         status: Some(GoalStatus::Complete),

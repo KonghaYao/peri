@@ -7,6 +7,35 @@
 //! Compact 由 v2 `stages/compact.rs`（`run_react_loop` 在每轮开头调
 //! `compact_v2::run_compact`）统一处理，不再需要外层 loop + resubmit，
 //! 也不再经过 CompactMiddleware。
+//!
+//! # 文件结构（EXECUTOR-SPLIT 选项 B）
+//!
+//! 本文件是 orchestrator，仅保留：
+//! - 共享类型：`PromptStopReason` / `PromptResult` / `FrozenSessionData`
+//!   / `PromptExecutionContext` / `TurnConfig` / `BuildAgentRequest` / `ExecOutcome`
+//! - 入口：`run_session_loop`（编排）+ `build_and_execute_agent`（cfg 组装与 v2 dispatch）
+//! - Prediction facade：`execute_prediction` / `extract_prediction_text`
+//!
+//! 子流程已抽到本模块的子模块 `executor_helpers`：
+//! - [`intercept_immediate_command`]：slash 命令拦截
+//! - [`spawn_event_pump`]：后台事件泵 + Langfuse tracer
+//! - [`forward_langfuse_event`]：单个 executor 事件 → Langfuse tracer
+//! - [`build_and_execute_agent_v2`]：v2 stages 装配与 ReAct 循环驱动（9 个 phase）
+//! - [`collect_result`] / [`close_channel`] / [`wait_for_pump`]：结果收集
+//!
+//! `executor_helpers` 是本模块的子模块（声明见文件末尾 `mod executor_helpers;`），
+//! 因此可以直接访问本模块的私有项（struct/enum/use 引入的符号）。本模块通过
+//! `use executor_helpers::{...};` 把 helper 提升到本模块命名空间，使
+//! `executor_test.rs` 的 `super::{intercept_immediate_command, InterceptRequest}`
+//! 路径继续可解析。
+//!
+//! ## Cancel 语义保持
+//!
+//! - `intercept_immediate_command` 内的 `tokio::select!` 分支顺序原样保留
+//!   （`cmd.execute` 与 `cancel.cancelled()` 仍按原 biased 顺序，二者均触发 push_done）
+//! - `build_and_execute_agent_v2` 末尾的 cancel cascade 仍在循环失败后触发，
+//!   `LoopResult::Error` 分支先发 `AgentExecutionFailed` 事件再判断 stop_reason
+//! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"
 
 use std::sync::Arc;
 
@@ -17,20 +46,15 @@ use peri_agent::{
         state::AgentState,
         AgentCancellationToken,
     },
-    error::AgentError,
     interaction::{ChannelState, UserInteractionBroker},
     messages::{BaseMessage, ContentBlock, MessageContent},
     session::queue::QueuedMessage,
 };
-use tokio::sync::oneshot;
-use tracing::{debug, error};
+use tracing::debug;
 
-use crate::event::mapper_v2::{
-    observe_event_to_executor, render_event_to_executor, state_event_to_executor,
-};
 use crate::{
     agent::builder::{self, AcpAgentConfig},
-    langfuse::{LangfuseSession, LangfuseTracer},
+    langfuse::LangfuseSession,
     prompt::{build_system_prompt, PromptFeatures},
     provider::LlmProvider,
     session::{
@@ -41,6 +65,27 @@ use crate::{
         SessionManager,
     },
 };
+
+// 引入子流程 helper：intercept_immediate_command / InterceptRequest /
+// spawn_event_pump / SpawnPumpRequest / PumpHandle / forward_langfuse_event /
+// collect_result / CollectRequest / close_channel / wait_for_pump /
+// build_and_execute_agent_v2 在本模块命名空间可见——executor_test.rs 通过
+// `super::` 访问的 helper 路径保持不变。
+//
+// 这些 helper 标 `pub(super)`（仅本模块可见）；其中 `forward_langfuse_event`
+// 是 `pub(crate)`（被 `crate::agent::workflow_agent` 跨模块复用），通过下方的
+// `pub(crate) use executor_helpers::forward_langfuse_event;` 重导出保持
+// `crate::session::executor::forward_langfuse_event` 路径不变。
+#[allow(unused_imports)]
+use executor_helpers::{
+    build_and_execute_agent_v2, close_channel, collect_result, intercept_immediate_command,
+    spawn_event_pump, wait_for_pump, CollectRequest, InterceptRequest, PumpHandle,
+    SpawnPumpRequest,
+};
+// 重导出 langfuse 转发器，保持 `crate::session::executor::forward_langfuse_event`
+// 路径对 `agent::workflow_agent` 可见（跨模块复用——workflow_agent 自跑独立 langfuse
+// tracer pump，事件→tracer 映射与主 executor 完全一致）。
+pub(crate) use executor_helpers::forward_langfuse_event;
 
 /// High-level reason why prompt execution stopped, used to derive ACP `StopReason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -577,277 +622,6 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     result
 }
 
-// ── Intercept Request parameter object ─────────────────────────────────────
-
-/// 命令拦截请求（参数对象，避免 12 个位置参数）。
-struct InterceptRequest<'a> {
-    content: &'a MessageContent,
-    history: &'a [BaseMessage],
-    cwd: &'a str,
-    session_id: &'a str,
-    cancel: &'a AgentCancellationToken,
-    peri_config: &'a Arc<crate::provider::PeriConfig>,
-    event_sink: &'a Arc<dyn EventSink>,
-    auxiliary_model: &'a Option<Arc<dyn peri_agent::llm::BaseModel>>,
-    thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
-    thread_id: Option<String>,
-    bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    bg_registry: &'a Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
-    frozen: Option<&'a FrozenSessionData>,
-}
-
-/// 命令拦截：检查 content 是否为 Immediate 类型 slash 命令。
-///
-/// 返回 `Some(PromptResult)` 表示已处理（agent 不构建）；
-/// 返回 `None` 表示继续走 agent 管线。
-///
-/// [TRAP] Immediate 命令路径绕过 agent event pump，必须手动调用 `sink.push_done()`。
-/// 否则 TUI 界面永久卡在 loading 状态（issue_2026-05-29-immediate-command-missing-push-done）。
-async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<PromptResult> {
-    let text = req.content.text_content();
-    let stripped = text.strip_prefix('/')?;
-    if stripped.is_empty() {
-        return None;
-    }
-
-    let command_registry = crate::session::command::default_prompt_command_registry();
-    let (cmd, args) = command_registry.find(&text)?;
-    if cmd.kind() != crate::session::command::CommandKind::Immediate {
-        // Passthrough/Transform → fall through to normal agent flow
-        return None;
-    }
-
-    tracing::debug!(
-        command = %cmd.name(),
-        history_len = req.history.len(),
-        "Immediate command intercepted"
-    );
-    let ctx = crate::session::command::CommandContext {
-        session_id: req.session_id.to_string(),
-        history: req.history.to_vec(),
-        cwd: req.cwd.to_string(),
-        peri_config: Arc::new(req.peri_config.as_ref().clone()),
-        auxiliary_model: req.auxiliary_model.clone(),
-        event_sink: req.event_sink.clone(),
-        args: args.to_string(),
-        cancel_token: req.cancel.clone(),
-        thread_store: req.thread_store,
-        thread_id: req.thread_id,
-        bg_event_sender: Some(req.bg_event_tx.clone()),
-        bg_registry: Some(req.bg_registry.clone()),
-        frozen_claude_md: req
-            .frozen
-            .as_ref()
-            .and_then(|f| f.claude_md().map(|s| Arc::new(s.to_string()))),
-        frozen_claude_local_md: req
-            .frozen
-            .as_ref()
-            .and_then(|f| f.claude_local_md().map(|s| Arc::new(s.to_string()))),
-        frozen_skill_summary: req
-            .frozen
-            .as_ref()
-            .and_then(|f| f.skill_summary().map(|s| Arc::new(s.to_string()))),
-    };
-    let result = tokio::select! {
-        r = cmd.execute(ctx) => r,
-        _ = req.cancel.cancelled() => {
-            tracing::info!(session_id = %req.session_id, "Immediate command cancelled");
-            crate::session::command::CommandResult {
-                messages: req.history.to_vec(),
-                stop_reason: PromptStopReason::Cancelled,
-            }
-        }
-    };
-    // Immediate 命令跳过 agent event pump，必须手动发送 push_done
-    // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
-    req.event_sink.push_done(req.session_id).await;
-    Some(PromptResult {
-        messages: result.messages,
-        ok: true,
-        stop_reason: result.stop_reason,
-        recall_items: Vec::new(),
-    })
-}
-
-// ── Spawn Pump Request parameter object ─────────────────────────────────────
-
-/// 事件泵启动请求（参数对象）。
-struct SpawnPumpRequest {
-    event_rx: tokio::sync::mpsc::UnboundedReceiver<ExecutorEvent>,
-    sink: Arc<dyn EventSink>,
-    session_id: String,
-    effective_context_window: u32,
-    langfuse_session: Option<Arc<LangfuseSession>>,
-    trace_input: String,
-    provider_display_name: String,
-}
-
-/// 后台事件泵句柄，通过 oneshot channel 与 pump_done_rx 配对。
-struct PumpHandle {
-    pump_done_rx: oneshot::Receiver<()>,
-}
-
-/// 启动主事件泵任务。
-///
-/// 任务循环：
-/// 1. trace_start → recv events → forward to sink
-/// 2. trace_end + push_done → signal pump completion（在 Langfuse flush 之前）
-/// 3. Langfuse flush（fire-and-forget，不得阻塞管线）
-fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
-    let SpawnPumpRequest {
-        mut event_rx,
-        sink,
-        session_id,
-        effective_context_window,
-        langfuse_session,
-        trace_input,
-        provider_display_name,
-    } = req;
-
-    let (pump_done_tx, pump_done_rx) = oneshot::channel();
-
-    let langfuse_tracer = langfuse_session
-        .as_ref()
-        .map(|s| parking_lot::Mutex::new(LangfuseTracer::new(Arc::clone(s), session_id.clone())));
-    if langfuse_tracer.is_some() {
-        debug!(session_id = %session_id, "Langfuse tracer created for turn");
-    }
-
-    tokio::spawn(async move {
-        // Start Langfuse trace
-        if let Some(ref tracer) = langfuse_tracer {
-            tracer.lock().on_trace_start(&trace_input);
-        }
-
-        while let Some(exec_event) = event_rx.recv().await {
-            // Langfuse tracing
-            if let Some(ref tracer) = langfuse_tracer {
-                forward_langfuse_event(tracer, &exec_event, &provider_display_name);
-            }
-
-            sink.push_event(&session_id, &exec_event, effective_context_window)
-                .await;
-        }
-
-        // End Langfuse trace and flush
-        let langfuse_flush = if let Some(tracer) = langfuse_tracer {
-            let handle = tracer.into_inner().on_trace_end(None);
-            Some(handle)
-        } else {
-            None
-        };
-
-        // Emit turn-done as an unstable event so the TUI v2 state machine
-        // can transition Streaming → Idle. Must come before push_done so
-        // TurnDone arrives before AgentDone in the notification channel.
-        sink.push_unstable_event(&session_id, "turn-done".into(), serde_json::json!({}))
-            .await;
-        sink.push_done(&session_id).await;
-
-        // Signal pump completion BEFORE Langfuse flush.
-        // Langfuse is telemetry — it must never block the execution pipeline.
-        // Without this, a slow/unreachable Langfuse API blocks pump_done_tx,
-        // which blocks wait_for_pump(), which blocks run_session_loop() from
-        // returning, which holds the prompt_lock and prevents the next prompt
-        // from starting. Ctrl+C can't recover because the new prompt's cancel
-        // token hasn't been created yet (still waiting on the lock).
-        let _ = pump_done_tx.send(());
-
-        // Langfuse flush: fire-and-forget. The spawned task runs independently;
-        // worst-case it blocks for ~150s (HTTP 30s × 3 retries + backoff) then
-        // logs warnings. The pump has already signaled completion above, so this
-        // never blocks the execution pipeline.
-        drop(langfuse_flush);
-    });
-
-    PumpHandle { pump_done_rx }
-}
-
-/// 转发单个 executor 事件到 Langfuse tracer（pump 内的纯函数，便于测试）。
-pub(crate) fn forward_langfuse_event(
-    tracer: &parking_lot::Mutex<LangfuseTracer>,
-    exec_event: &ExecutorEvent,
-    provider_display_name: &str,
-) {
-    match exec_event {
-        ExecutorEvent::LlmCallStart {
-            step,
-            messages,
-            tools,
-        } => {
-            tracer.lock().on_llm_start(*step, messages, tools);
-        }
-        ExecutorEvent::LlmRequestPayload { step, body } => {
-            tracer
-                .lock()
-                .on_llm_request_payload(*step, std::sync::Arc::clone(body));
-        }
-        ExecutorEvent::LlmCallEnd {
-            step,
-            model,
-            output,
-            usage,
-            stop_reason: _,
-        } => {
-            tracer
-                .lock()
-                .on_llm_end(*step, model, provider_display_name, output, usage.as_ref());
-        }
-        ExecutorEvent::ToolStart {
-            tool_call_id,
-            name,
-            input,
-            ..
-        } => {
-            tracer.lock().on_tool_start(tool_call_id, name, input);
-        }
-        ExecutorEvent::ToolEnd {
-            tool_call_id,
-            output,
-            is_error,
-            ..
-        } => {
-            tracer.lock().on_tool_end(tool_call_id, output, *is_error);
-        }
-        ExecutorEvent::TextChunk { chunk, .. } => {
-            tracer.lock().on_text_chunk(chunk);
-        }
-        ExecutorEvent::LlmRetrying {
-            attempt,
-            max_attempts,
-            delay_ms,
-            error,
-        } => {
-            tracer
-                .lock()
-                .on_llm_retrying(*attempt, *max_attempts, *delay_ms, error);
-        }
-        ExecutorEvent::CompactStarted => {
-            tracer.lock().on_compact_start();
-        }
-        ExecutorEvent::CompactCompleted {
-            summary,
-            files,
-            skills,
-            micro_cleared,
-            ..
-        } => {
-            tracer.lock().on_compact_end(
-                summary,
-                files.len(),
-                skills.len(),
-                *micro_cleared,
-                false,
-                "",
-            );
-        }
-        ExecutorEvent::CompactError { message } => {
-            tracer.lock().on_compact_end("", 0, 0, 0, true, message);
-        }
-        _ => {}
-    }
-}
-
 // ── Build Agent Request parameter object ────────────────────────────────────
 
 /// Agent 构建请求（参数对象）。
@@ -1187,288 +961,6 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
 /// 调用前已完成 AcpAgentConfig 构造（含 register/deregister、event_handler、
 /// workflow 消费者 spawn、goal_controller）。所有副作用与 v1 一致。
 #[allow(clippy::too_many_arguments)]
-async fn build_and_execute_agent_v2(
-    cfg: AcpAgentConfig,
-    cached_llm: Option<&CachedLlmInstances>,
-    pool: &Arc<parking_lot::Mutex<AgentPool>>,
-    turn: &TurnConfig<'_>,
-    agent_input: peri_agent::agent::react::AgentInput,
-    history: Vec<BaseMessage>,
-    session_id: &str,
-    event_tx: &Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>,
-    event_sink: &Arc<dyn EventSink>,
-    session_manager: Option<SessionManager>,
-    v2_queue: &peri_agent::session::MessageQueue,
-    _async_router: Option<AsyncRouter>,
-) -> ExecOutcome {
-    use peri_agent::agent::stages::{run_react_loop, LoopResult};
-    use peri_agent::session::queue::{
-        MessageKind, MessageSource as V2MessageSource, QueuedMessage,
-    };
-
-    // Phase 1: build StageContext（内部消费 AgentComponents；传入会话级共享 v2_queue）
-    let (v2_out, new_cache) =
-        crate::agent::builder_v2::build_stage_context(cfg, cached_llm, pool, v2_queue);
-    if let Some(cache) = new_cache {
-        pool.lock().store_llm(cache);
-    }
-
-    // Phase 2: bg event pump（复用 V2AgentOutput.bg_event_rx）
-    {
-        let mut bg_event_rx = v2_out.bg_event_rx;
-        let bg_session_id = session_id.to_string();
-        let bg_sink = Arc::clone(event_sink);
-        let bg_cw = turn.effective_context_window;
-        tokio::spawn(async move {
-            let mut bg_event_count: u64 = 0;
-            while let Some(bg_event) = bg_event_rx.recv().await {
-                bg_event_count += 1;
-                bg_sink.push_event(&bg_session_id, &bg_event, bg_cw).await;
-            }
-            tracing::debug!(
-                total = bg_event_count,
-                "bg-event-pump: all senders dropped, exiting"
-            );
-        });
-    }
-
-    // Phase 3: todo forwarder（同 v1，复用 V2AgentOutput.todo_rx）
-    {
-        let mut todo_rx = v2_out.todo_rx;
-        let tx_for_todo = event_tx.clone();
-        tokio::spawn(async move {
-            while let Some(todos) = todo_rx.recv().await {
-                let entries: Vec<peri_agent::agent::events::TodoEntry> = todos
-                    .into_iter()
-                    .map(|t| peri_agent::agent::events::TodoEntry {
-                        content: t.content,
-                        active_form: t.active_form,
-                        status: match t.status {
-                            peri_middlewares::tools::todo::TodoStatus::Pending => {
-                                peri_agent::agent::events::TodoStatus::Pending
-                            }
-                            peri_middlewares::tools::todo::TodoStatus::InProgress => {
-                                peri_agent::agent::events::TodoStatus::InProgress
-                            }
-                            peri_middlewares::tools::todo::TodoStatus::Completed => {
-                                peri_agent::agent::events::TodoStatus::Completed
-                            }
-                        },
-                    })
-                    .collect();
-                if let Some(tx) = tx_for_todo.lock().as_ref() {
-                    let _ = tx.send(ExecutorEvent::TodoUpdate(entries));
-                }
-            }
-        });
-    }
-
-    // Phase 4: EventBus forwarder（v2 → v1 ExecutorEvent）
-    // 通过 tokio::select! 同时排空 render / state / observe 三层通道，
-    // 将 v2 事件经 mapper_v2 映射为 v1 ExecutorEvent，转发到 event_tx。
-    //
-    // 注意：不直接 push 到 event_sink —— spawn_event_pump 已订阅 event_tx 并
-    // 负责推送 sink（含 Langfuse trace + pump_done 同步）。直推会造成 TUI 双重渲染。
-    //
-    // [TRAP] TurnCompleted 在 render_tx 通道（与同迭代 TextChunk/ToolStarted/
-    // ToolEnded 共享 FIFO），不能放回 state_tx：跨通道 biased select! 只保证
-    // 单次迭代内的优先级，不保证跨迭代——iter2 的 TextChunk 会先于 iter1 的
-    // TurnCompleted 被消费，污染 partial，渲染出"新文本在旧工具之前"的错乱。
-    {
-        let mut handles = v2_out.event_handles;
-        let tx_for_v2 = event_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                // biased + render 优先：保证 Render 通道（含 TurnCompleted）
-                // 先于 State 通道被消费。State 通道仅剩 StateSnapshot，无顺序耦合。
-                tokio::select! {
-                    biased;
-                    Some(ev) = handles.render_rx.recv() => {
-                        if let Some(exec_ev) = render_event_to_executor(ev) {
-                            if let Some(tx) = tx_for_v2.lock().as_ref() {
-                                let _ = tx.send(exec_ev);
-                            }
-                        }
-                    }
-                    Some(ev) = handles.state_rx.recv() => {
-                        if let Some(exec_ev) = state_event_to_executor(ev) {
-                            if let Some(tx) = tx_for_v2.lock().as_ref() {
-                                let _ = tx.send(exec_ev);
-                            }
-                        }
-                    }
-                    ev_res = handles.observe_rx.recv() => {
-                        match ev_res {
-                            Ok(ev) => {
-                                if let Some(exec_ev) = observe_event_to_executor(ev) {
-                                    if let Some(tx) = tx_for_v2.lock().as_ref() {
-                                        let _ = tx.send(exec_ev);
-                                    }
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!(
-                                    n,
-                                    "[v2] observe_rx lagged, events dropped"
-                                );
-                            }
-                        }
-                    }
-                    else => break,
-                }
-            }
-        });
-    }
-
-    // Phase 5: seed transcript（history 作为 ancestor 之外的自有消息）
-    {
-        let transcript_arc = v2_out.session.transcript();
-        let mut transcript = transcript_arc.write();
-        transcript.append_batch(history);
-    }
-
-    // Phase 6: push 用户输入到 v2 queue（Receive 阶段消费）
-    v2_out.context.queue.push(QueuedMessage::new(
-        MessageKind::Prompt,
-        V2MessageSource::UserInput,
-        BaseMessage::human(agent_input.content),
-    ));
-
-    // Phase 6.5: clone recall_buffer 的 Arc，便于 Phase 8.5 在 context 被
-    // run_react_loop 消费后仍可访问累积的 recall。
-    let recall_buffer = Arc::clone(&v2_out.context.recall_buffer);
-
-    // Phase 6.7: run before_agent middleware hooks
-    // v1 在 execute() 开头调用 chain.run_before_agent，让 AgentsMd/Skills/
-    // ToolSearch 等中间件缓存贡献数据。v2 在 run_react_loop 前调用以保持兼容。
-    if let Err(e) =
-        peri_agent::agent::stages::middleware_runner::run_before_agent(&v2_out.context).await
-    {
-        tracing::warn!(error = %e, "[v2] before_agent hook failed");
-    }
-
-    // Phase 7: 运行 v2 ReAct 循环（max_iterations 与 v1 一致 = 500）
-    let loop_result = run_react_loop(v2_out.context, 500).await;
-
-    // Phase 8: 从 transcript 提取最终消息列表，构造 AgentState（兼容下游 PromptResult）
-    let messages: Vec<BaseMessage> = v2_out
-        .session
-        .transcript()
-        .read()
-        .visible_messages()
-        .into_iter()
-        .cloned()
-        .collect();
-    let mut agent_state = AgentState::with_messages(turn.cwd.to_string(), messages);
-    agent_state.set_context("session_id", session_id);
-    agent_state.set_context("run_id", uuid::Uuid::now_v7().to_string());
-
-    // Phase 8.5: 把 v2 recall_buffer（middleware hook 期间累积）灌入 agent_state。
-    // 下游 collect_result() 调用 agent_state.drain_recall() 取出 recall_items，
-    // 必须先迁移到 agent_state 才能复用 v1 的 drain 路径。
-    //
-    // v2 路径下 middleware hook 在临时 AgentState 上 push_recall（见
-    // middleware_runner::restore_from_agent_state），restore 时 drain 到
-    // StageContext.recall_buffer；循环结束后（context 已被 run_react_loop
-    // 消费）从 Phase 6.5 clone 的 Arc 取回累积的 recall。
-    {
-        let recalls: Vec<String> = recall_buffer.write().drain(..).collect();
-        for r in recalls {
-            agent_state.push_recall(r);
-        }
-    }
-
-    // Phase 9: 映射 LoopResult → ExecOutcome
-    let (ok, stop_reason) = match loop_result {
-        LoopResult::Completed => (true, PromptStopReason::EndTurn),
-        LoopResult::Interrupted => (false, PromptStopReason::Cancelled),
-        LoopResult::Error(ref e) => {
-            error!(session_id = %session_id, error = %e, "[v2] loop failed");
-            if let Some(tx) = event_tx.lock().as_ref() {
-                let _ = tx.send(ExecutorEvent::AgentExecutionFailed {
-                    message: e.to_string(),
-                });
-            }
-            let reason = if turn.cancel.is_cancelled() || matches!(e, AgentError::Interrupted) {
-                PromptStopReason::Cancelled
-            } else if matches!(e, AgentError::MaxIterationsExceeded(_)) {
-                PromptStopReason::MaxTurnRequests
-            } else {
-                PromptStopReason::EndTurn
-            };
-            (false, reason)
-        }
-    };
-
-    // Cancel cascade children when this agent is cancelled
-    if stop_reason == PromptStopReason::Cancelled {
-        if let Some(ref sm) = session_manager {
-            if let Some(session) = sm.get_session(session_id) {
-                session.cancel_cascade_children();
-            }
-        }
-    }
-
-    ExecOutcome {
-        ok,
-        stop_reason,
-        agent_state,
-    }
-}
-
-// ── Collect Result Request parameter object ─────────────────────────────────
-
-/// 结果收集请求（参数对象）。
-struct CollectRequest<'a> {
-    event_tx:
-        &'a Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>,
-    pump_handle: PumpHandle,
-    session_id: &'a str,
-    exec_outcome: ExecOutcome,
-}
-
-/// 最终结果收集：close channel → 等待 pump drain → 提取 recall items。
-///
-/// 顺序约束：必须先 close event_tx，pump 才能退出 recv 循环；然后等待 pump_done。
-async fn collect_result(req: CollectRequest<'_>) -> PromptResult {
-    let CollectRequest {
-        event_tx,
-        pump_handle,
-        session_id,
-        mut exec_outcome,
-    } = req;
-
-    close_channel(event_tx);
-    wait_for_pump(pump_handle.pump_done_rx, session_id).await;
-
-    let recall_items = exec_outcome.agent_state.drain_recall();
-    PromptResult {
-        messages: exec_outcome.agent_state.into_messages(),
-        ok: exec_outcome.ok,
-        stop_reason: exec_outcome.stop_reason,
-        recall_items,
-    }
-}
-
-fn close_channel(
-    event_tx: &Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>,
-) {
-    let mut tx_guard = event_tx.lock();
-    *tx_guard = None;
-}
-
-async fn wait_for_pump(pump_done_rx: oneshot::Receiver<()>, session_id: &str) {
-    match tokio::time::timeout(std::time::Duration::from_secs(10), pump_done_rx).await {
-        Ok(Ok(())) => debug!(session_id, "Event pump done"),
-        Ok(Err(_)) => error!(session_id, "Event pump done channel closed unexpectedly"),
-        Err(_) => error!(
-            session_id,
-            "Event pump timed out (10s) — Langfuse flush may have blocked push_done"
-        ),
-    }
-}
-
 // ── Prediction facade ───────────────────────────────────────────────────────
 
 /// 预测失败原因，用于决定是否发送通知及日志级别。
@@ -1590,3 +1082,9 @@ mod tests;
 #[cfg(test)]
 #[path = "executor_prediction_test.rs"]
 mod prediction_tests;
+
+// 子流程 helper 子模块（EXECUTOR-SPLIT 选项 B）。
+// executor.rs 是单文件而非目录，因此需 `#[path]` 显式指定同目录兄弟文件路径。
+// 作为本模块的子模块，可直接访问本模块的私有项（struct/enum/use 引入的符号）。
+#[path = "executor_helpers.rs"]
+mod executor_helpers;

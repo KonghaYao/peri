@@ -40,7 +40,7 @@ impl Middleware for LoggingMiddleware {
     }
 
     async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
-        println!("[{}] Agent starting | cwd: {}", self.name, state.cwd());
+        tracing::info!(name = %self.name, cwd = %state.cwd(), "Agent starting");
         Ok(())
     }
 
@@ -51,14 +51,19 @@ impl Middleware for LoggingMiddleware {
     ) -> AgentResult<ToolCall> {
         let step = state.current_step();
         if self.verbose {
-            println!(
-                "[{}] Step {step} | Calling tool: {} | input: {}",
-                self.name, tool_call.name, tool_call.input
+            tracing::info!(
+                name = %self.name,
+                step,
+                tool = %tool_call.name,
+                input = %tool_call.input,
+                "Calling tool"
             );
         } else {
-            println!(
-                "[{}] Step {step} | Calling tool: {}",
-                self.name, tool_call.name
+            tracing::info!(
+                name = %self.name,
+                step,
+                tool = %tool_call.name,
+                "Calling tool"
             );
         }
         Ok(tool_call.clone())
@@ -71,17 +76,25 @@ impl Middleware for LoggingMiddleware {
         result: &ToolResult,
     ) -> AgentResult<()> {
         if result.is_error {
-            eprintln!(
-                "[{}] Tool {} failed: {}",
-                self.name, tool_call.name, result.output
+            tracing::warn!(
+                name = %self.name,
+                tool = %tool_call.name,
+                output = %result.output,
+                "Tool failed"
             );
         } else if self.verbose {
-            println!(
-                "[{}] Tool {} succeeded: {}",
-                self.name, tool_call.name, result.output
+            tracing::info!(
+                name = %self.name,
+                tool = %tool_call.name,
+                output = %result.output,
+                "Tool succeeded"
             );
         } else {
-            println!("[{}] Tool {} succeeded", self.name, tool_call.name);
+            tracing::info!(
+                name = %self.name,
+                tool = %tool_call.name,
+                "Tool succeeded"
+            );
         }
         Ok(())
     }
@@ -91,7 +104,7 @@ impl Middleware for LoggingMiddleware {
         _state: &mut dyn MiddlewareState,
         output: &AgentOutput,
     ) -> AgentResult<AgentOutput> {
-        println!("[{}] Agent completed in {} steps", self.name, output.steps);
+        tracing::info!(name = %self.name, steps = output.steps, "Agent completed");
         Ok(output.clone())
     }
 
@@ -100,7 +113,7 @@ impl Middleware for LoggingMiddleware {
         _state: &mut dyn MiddlewareState,
         error: &AgentError,
     ) -> AgentResult<()> {
-        eprintln!("[{}] Agent error: {}", self.name, error);
+        tracing::warn!(name = %self.name, error = %error, "Agent error");
         Ok(())
     }
 }
@@ -135,11 +148,11 @@ impl Middleware for MetricsMiddleware {
         _state: &mut dyn MiddlewareState,
         output: &AgentOutput,
     ) -> AgentResult<AgentOutput> {
-        println!(
-            "[{}] Total tool calls: {} | Steps: {}",
-            self.name,
-            output.tool_calls.len(),
-            output.steps
+        tracing::info!(
+            name = %self.name,
+            tool_calls = output.tool_calls.len(),
+            steps = output.steps,
+            "Total tool calls"
         );
         Ok(output.clone())
     }

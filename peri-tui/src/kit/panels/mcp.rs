@@ -6,7 +6,7 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{MCP_SERVERS, McpServerSummary, SERVICE_SNAPSHOT};
-use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -63,6 +63,11 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sel = *selected.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
+    // 视口跟随：让选中项始终可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
+    // panel 高度 18 - border 2 - header 2 - footer 2 = 12 行；每项 2 行 → 可见 6 个。
+    const VISIBLE_ITEMS: usize = 6;
+    let scroll_start = scroll_start_for_selected(sel, servers.len(), VISIBLE_ITEMS);
+
     // 摘要头：init phase / connected / total
     let phase_label = match init_phase {
         crate::kit::atoms::McpInitPhase::Pending => "pending",
@@ -96,7 +101,12 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme::semantic().text.muted),
         )]));
     } else {
-        for (i, s) in servers.iter().enumerate() {
+        for (i, s) in servers
+            .iter()
+            .enumerate()
+            .skip(scroll_start)
+            .take(VISIBLE_ITEMS)
+        {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {

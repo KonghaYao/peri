@@ -662,10 +662,6 @@ pub fn build_agent(
     // 当前保持绑定避免 unbounded channel 误用，未来迁移后删除。
     drop(bg_notification_rx);
 
-    // event_handler 已通过 LLM.with_event_handler 注入到 model；shared_tools 已装入。
-    // 此处保留 Arc::clone 用于未来 hook 扩展点（当前 v2 stages 不直接消费）。
-    let _ = Arc::clone(&event_handler);
-
     let components = AgentComponents {
         llm: model,
         chain,

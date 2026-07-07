@@ -179,7 +179,17 @@ struct CollectOutcome {
     deferred_error: Option<String>,
 }
 
+/// before_tool 审批阶段的产出
+struct ApprovalOutcome {
+    /// 通过审批、准备并发执行的调用
+    ready_calls: Vec<ToolCall>,
+    /// 已在审批阶段就结算完成的（例如 ToolRejected）结果
+    settled_results: Vec<(ToolCall, ToolResult)>,
+}
+
 /// 执行 before_tool 审批 + 并发工具调用，收集所有结果（不写 transcript）
+///
+/// Orchestrator：按顺序调用三个子阶段函数。
 async fn collect_tool_results(
     ctx: &StageContext,
     original_calls: Vec<ToolCall>,
@@ -190,13 +200,44 @@ async fn collect_tool_results(
     ai_msg: &BaseMessage,
 ) -> AgentResult<CollectOutcome> {
     let _ = ai_msg_id;
+
+    // 阶段一：批量 before_tool 审批
+    let approval = run_before_tool_approvals(ctx, original_calls, cancel).await?;
+
+    // 阶段二：并发执行（snapshot messages + ai_msg 只读视图）
+    let tool_results =
+        dispatch_concurrent(ctx, &approval.ready_calls, all_tools, cancel, ai_msg).await;
+
+    // 阶段三：聚合 + 错误延迟
+    Ok(settle_results(
+        ctx,
+        approval,
+        tool_results,
+        cancel.is_cancelled(),
+        all_tools,
+    )
+    .await)
+}
+
+/// 阶段一：批量 before_tool 审批。
+///
+/// 遍历 `run_before_tools_batch` 结果，emit `ToolStarted`，分流：
+/// - `Ok(call)` → 推入 ready_calls
+/// - `Err(ToolRejected)` → emit ToolStart + ToolEnd，推入 settled_results
+/// - `Err(e)` → run_on_error + 为已 emit ToolStart 的补发 ToolEnd，向上传播错误
+///
+/// 取消检查发生在 zip 迭代开头：若已取消，为 ready_calls 补发 ToolEnd 后返回 Interrupted。
+async fn run_before_tool_approvals(
+    ctx: &StageContext,
+    original_calls: Vec<ToolCall>,
+    cancel: &CancellationToken,
+) -> AgentResult<ApprovalOutcome> {
     let turn_id = ctx.turn_id();
     let agent_id = ctx.agent_id;
 
     let mut ready_calls: Vec<ToolCall> = Vec::with_capacity(original_calls.len());
     let mut settled_results: Vec<(ToolCall, ToolResult)> = Vec::new();
 
-    // 阶段一：批量 before_tool
     let before_results = run_before_tools_batch(ctx, &original_calls).await;
 
     for (tool_call, before_result) in original_calls.iter().zip(before_results) {
@@ -262,7 +303,27 @@ async fn collect_tool_results(
         }
     }
 
-    // 阶段二：并发执行（snapshot messages + ai_msg 只读视图）
+    Ok(ApprovalOutcome {
+        ready_calls,
+        settled_results,
+    })
+}
+
+/// 阶段二：并发执行 ready_calls（snapshot messages + ai_msg 只读视图）。
+///
+/// 每个调用走 `biased` select：cancel.cancelled() 优先于 invoke_fut，
+/// 命中时返回 `ToolExecutionFailed { reason: "interrupted by user" }`。
+async fn dispatch_concurrent(
+    ctx: &StageContext,
+    ready_calls: &[ToolCall],
+    all_tools: &HashMap<String, Arc<dyn BaseTool>>,
+    cancel: &CancellationToken,
+    ai_msg: &BaseMessage,
+) -> Vec<Result<String, AgentError>> {
+    if ready_calls.is_empty() {
+        return Vec::new();
+    }
+
     let messages_snapshot: Arc<Vec<BaseMessage>> = {
         let mut msgs = ctx.visible_messages();
         msgs.push(ai_msg.clone());
@@ -270,55 +331,71 @@ async fn collect_tool_results(
     };
     let cwd_snapshot = ctx.cwd().to_owned();
 
-    let tool_results: Vec<Result<String, AgentError>> = {
-        let futures: Vec<_> = ready_calls
-            .iter()
-            .map(|call| {
-                let tool_name = call.name.clone();
-                let call_id = call.id.clone();
-                let input = normalize_params(call.input.clone());
-                let tool = resolve_tool(&call.name, all_tools).cloned();
-                let cancel = cancel.clone();
-                let messages = Arc::clone(&messages_snapshot);
-                let cwd = cwd_snapshot.clone();
-                async move {
-                    let span = tracing::info_span!(
-                        "agent.tool_call",
-                        tool.name = %tool_name,
-                        tool.call_id = %call_id,
-                    );
-                    let _enter = span.enter();
-                    let invoke_fut = async {
-                        let ctx_param = crate::tools::ToolContext::new(&messages, &cwd);
-                        match tool {
-                            Some(t) => t.invoke(input, ctx_param).await.map_err(|e| {
-                                AgentError::ToolExecutionFailed {
-                                    tool: tool_name.clone(),
-                                    reason: e.to_string(),
-                                }
-                            }),
-                            None => Err(AgentError::ToolNotFound(tool_name.clone())),
-                        }
-                    };
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => {
-                            Err(AgentError::ToolExecutionFailed {
-                                tool: tool_name,
-                                reason: "interrupted by user".to_string(),
-                            })
-                        }
-                        result = invoke_fut => result,
+    let futures: Vec<_> = ready_calls
+        .iter()
+        .map(|call| {
+            let tool_name = call.name.clone();
+            let call_id = call.id.clone();
+            let input = normalize_params(call.input.clone());
+            let tool = resolve_tool(&call.name, all_tools).cloned();
+            let cancel = cancel.clone();
+            let messages = Arc::clone(&messages_snapshot);
+            let cwd = cwd_snapshot.clone();
+            async move {
+                let span = tracing::info_span!(
+                    "agent.tool_call",
+                    tool.name = %tool_name,
+                    tool.call_id = %call_id,
+                );
+                let _enter = span.enter();
+                let invoke_fut = async {
+                    let ctx_param = crate::tools::ToolContext::new(&messages, &cwd);
+                    match tool {
+                        Some(t) => t.invoke(input, ctx_param).await.map_err(|e| {
+                            AgentError::ToolExecutionFailed {
+                                tool: tool_name.clone(),
+                                reason: e.to_string(),
+                            }
+                        }),
+                        None => Err(AgentError::ToolNotFound(tool_name.clone())),
                     }
+                };
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        Err(AgentError::ToolExecutionFailed {
+                            tool: tool_name,
+                            reason: "interrupted by user".to_string(),
+                        })
+                    }
+                    result = invoke_fut => result,
                 }
-            })
-            .collect();
-        futures::future::join_all(futures).await
-    };
+            }
+        })
+        .collect();
+    futures::future::join_all(futures).await
+}
 
-    let was_cancelled = cancel.is_cancelled();
+/// 阶段三：串行处理结果 + emit ToolEnd + after_tool + error_suggest + 截断 + 聚合。
+///
+/// 不变量：deferred_error 取首个 after_tool 错误，后续错误不覆盖。
+/// ToolEnd emit 在 error_suggest 注入之前。
+async fn settle_results(
+    ctx: &StageContext,
+    approval: ApprovalOutcome,
+    tool_results: Vec<Result<String, AgentError>>,
+    was_cancelled: bool,
+    all_tools: &HashMap<String, Arc<dyn BaseTool>>,
+) -> CollectOutcome {
+    let turn_id = ctx.turn_id();
+    let agent_id = ctx.agent_id;
+    let all_tools_ref = all_tools;
 
-    // 阶段三：串行处理结果
+    let ApprovalOutcome {
+        ready_calls,
+        mut settled_results,
+    } = approval;
+
     let mut deferred_error: Option<String> = None;
     let mut exec_results: Vec<(ToolCall, ToolResult)> = Vec::with_capacity(ready_calls.len());
 
@@ -384,44 +461,56 @@ async fn collect_tool_results(
             deferred_error = deferred_error.or(Some(e.to_string()));
         }
 
-        // error_suggest 注入：仅修改 output 文本
-        if result.is_error {
-            if let Some(registry) = &ctx.error_suggest_registry {
-                let ec = crate::error_suggest::ErrorContext::new(
-                    &modified_call.name,
-                    &modified_call.input,
-                    &result.output,
-                    std::path::Path::new(ctx.cwd()),
-                    &ctx.tool_registry_snapshot,
-                );
-                if let Some(sug) = registry.suggest(&ec) {
-                    result.output =
-                        crate::error_suggest::format::format_suggestion(&result.output, &sug);
-                }
-            }
-        }
-
-        // output_char_limit 截断：工具声明输出上限时按字符截断
-        if let Some(tool) = all_tools.get(&modified_call.name) {
-            if let Some(limit) = tool.output_char_limit() {
-                if result.output.chars().count() > limit {
-                    let truncated: String = result.output.chars().take(limit).collect();
-                    result.output =
-                        format!("{}\n\n[Output truncated at {} chars]", truncated, limit);
-                }
-            }
-        }
+        // error_suggest 注入 + output_char_limit 截断
+        post_process_result(ctx, &modified_call, &mut result, all_tools_ref);
 
         exec_results.push((modified_call, result));
     }
 
     settled_results.extend(exec_results);
 
-    Ok(CollectOutcome {
+    CollectOutcome {
         results: settled_results,
         was_cancelled,
         deferred_error,
-    })
+    }
+}
+
+/// 单条结果的后处理：error_suggest 注入（仅 error 分支）+ output_char_limit 截断。
+///
+/// 顺序：先注入建议文本，再按工具声明的 `output_char_limit` 截断。
+fn post_process_result(
+    ctx: &StageContext,
+    modified_call: &ToolCall,
+    result: &mut ToolResult,
+    all_tools: &HashMap<String, Arc<dyn BaseTool>>,
+) {
+    // error_suggest 注入：仅修改 output 文本
+    if result.is_error {
+        if let Some(registry) = &ctx.error_suggest_registry {
+            let ec = crate::error_suggest::ErrorContext::new(
+                &modified_call.name,
+                &modified_call.input,
+                &result.output,
+                std::path::Path::new(ctx.cwd()),
+                &ctx.tool_registry_snapshot,
+            );
+            if let Some(sug) = registry.suggest(&ec) {
+                result.output =
+                    crate::error_suggest::format::format_suggestion(&result.output, &sug);
+            }
+        }
+    }
+
+    // output_char_limit 截断：工具声明输出上限时按字符截断
+    if let Some(tool) = all_tools.get(&modified_call.name) {
+        if let Some(limit) = tool.output_char_limit() {
+            if result.output.chars().count() > limit {
+                let truncated: String = result.output.chars().take(limit).collect();
+                result.output = format!("{}\n\n[Output truncated at {} chars]", truncated, limit);
+            }
+        }
+    }
 }
 
 /// 处理连续失败追踪 + ToolFailureWarning 注入

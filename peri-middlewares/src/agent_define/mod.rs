@@ -144,6 +144,25 @@ impl Middleware for AgentDefineMiddleware {
     async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // 覆盖注入已在构建 LLM 时通过 build_system_prompt(overrides, cwd) 完成，
         // 中间件层无需再操作消息列表。
+        //
+        // [设计说明 /agent 覆盖功能停用]（crate-audit 2026-07-06 P2-5 调查结论 A）
+        //
+        // `/agent` 覆盖功能在**主 Agent 链路**显式停用（executor.rs 内
+        // `agent_overrides: None` 硬编码）。这是有意设计而非 bug：
+        //
+        // 1. **主 Agent 无 `/agent` 身份**：主 Agent 不携带 persona/tone/proactiveness，
+        //    仅 SubAgent 才有（来自 `.claude/agents/{agent_id}.md` 的 frontmatter）。
+        // 2. **SubAgent 覆盖走工具调用路径**：`SubAgentTool::invoke` →
+        //    `overrides_from_agent_def`（`build_agent.rs:136`）从已解析的 agent 文件
+        //    抽取 overrides，再通过 `system_builder`（`builder.rs:365`）传给
+        //    `build_system_prompt(overrides, cwd)`。SubAgent **不需要**本中间件注入。
+        // 3. **`load_overrides` 仅测试调用**：本中间件的 `load_overrides` 从磁盘读
+        //    `.claude/agents/{id}.md`，但生产 SubAgent 路径已通过工具调用解析获取
+        //    overrides，无需中途重读盘（与 CLAUDE.md [TRAP]「SubAgent 必须复用 main
+        //    agent frozen 的 CLAUDE.md/Skills，禁止重新读盘」一致）。保留 `load_overrides`
+        //    作为 helper / 测试入口。
+        //
+        // 详见 `docs/design/peri-agent-system-prompt-v2.md` §125-136。
         Ok(())
     }
 }

@@ -5,14 +5,18 @@
 //! avoiding a direct `peri_agent::agent::events::ExecutorEvent` dependency in the TUI.
 
 pub mod dto;
+pub mod forwarder;
 pub mod mapper;
 pub mod mapper_v2;
 pub mod router;
+pub mod truncate;
 pub mod view_mapper;
+
 pub use dto::{
     CompactFileInfoDto, StopReasonDto, TodoItemDto, TodoStatusDto, TokenUsageDto,
     WorkflowProgressDto,
 };
+pub(crate) use forwarder::spawn_eventbus_forwarder;
 pub use mapper::{executor_event_to_acp, map_event, MappedEvent};
 pub use mapper_v2::{
     observe_event_to_executor, render_event_to_executor, state_event_to_executor, V2Event,

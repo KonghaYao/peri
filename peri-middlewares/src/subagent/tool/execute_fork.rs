@@ -134,13 +134,16 @@ impl super::SubAgentTool {
             );
 
         // 10. push prompt 到 queue（Receive 阶段消费）
+        // 套用 fork directive 模板（与 spawner.rs:147-150 的 /bg 路径对齐）：
+        // 注入"禁止生成子 agent / 禁止提问 / 输出格式约束"等规则。
+        let fork_directive = crate::subagent::fork::build_fork_directive(prompt);
         v2_ctx
             .context
             .queue
             .push(peri_agent::session::queue::QueuedMessage::new(
                 peri_agent::session::queue::MessageKind::Prompt,
                 peri_agent::session::queue::MessageSource::UserInput,
-                BaseMessage::human(prompt.to_string()),
+                BaseMessage::human(fork_directive),
             ));
 
         // 11. 运行 before_agent middleware hooks

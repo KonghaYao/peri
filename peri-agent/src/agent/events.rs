@@ -295,10 +295,6 @@ where
     }
 }
 
-/// 历史兼容别名（过渡期保留，下个 sprint 删除）。
-#[doc(hidden)]
-pub type AgentEvent = ExecutorEvent;
-
 /// 覆盖 ExecutorEvent 的 `source_agent_id` 字段（ToolStart / ToolEnd / TextChunk / AiReasoning）。
 ///
 /// 用于 SubAgent 转发器：v2 RenderEvent 的 `agent_id` 字段在 mapper_v2 中被丢弃

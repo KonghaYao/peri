@@ -8,7 +8,7 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{MEMORY_LIST, MemoryEntry};
-use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -66,6 +66,11 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sel = *selected.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
+    // 视口跟随：让选中项始终可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
+    // panel 高度 18 - border 2 - header 3 = 13 行；每项 1 行 → 可见 13 个。
+    const VISIBLE_ITEMS: usize = 13;
+    let scroll_start = scroll_start_for_selected(sel, entries.len(), VISIBLE_ITEMS);
+
     // 头部摘要
     lines.push(Line::from(vec![Span::styled(
         format!("  {} memory files in ~/.claude/memory", count),
@@ -87,7 +92,12 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme::semantic().text.muted),
         )]));
     } else {
-        for (i, entry) in entries.iter().enumerate() {
+        for (i, entry) in entries
+            .iter()
+            .enumerate()
+            .skip(scroll_start)
+            .take(VISIBLE_ITEMS)
+        {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {

@@ -12,6 +12,8 @@
 use peri_acp_types::event_data::*;
 use peri_agent::agent::events::ExecutorEvent;
 
+use super::truncate::{summarize_input, summarize_output, truncate_text};
+
 /// Output of [`route`] -- an event name + its JSON data payload.
 #[derive(Debug, Clone)]
 pub struct RoutingOutput {
@@ -238,110 +240,9 @@ pub fn route(ev: &ExecutorEvent, view_mapper: &mut dyn ViewMapper) -> Option<Rou
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Produce a one-line summary of a tool's JSON input.
-///
-/// Tool-specific formatting per TUI-TOOLCALL.md §2:
-/// - Read/Write/Edit: `file_path` value only
-/// - Bash: `command` value only
-/// - Glob/Grep: `pattern: "{pattern}"`, pattern truncated to 200 chars
-/// - folder_operations: `"{operation} {folder_path}"`
-/// - WebSearch: `query: "{query}"`, query truncated to 60 chars
-/// - WebFetch: `url: {url}`, no truncation
-/// - TodoWrite: empty string
-/// - AgentResult: `task_id`, truncated to 12 chars
-/// - artifact: `file_path` value only
-/// - LSP: `operation`, truncated to 40 chars
-/// - ExecuteExtraTool: `tool_name`, truncated to 40 chars
-/// - SearchExtraTools: `query`, truncated to 40 chars
-/// - Other: fallback to first key-value pair
-fn summarize_input(name: &str, input: &serde_json::Value) -> String {
-    // Helper to extract a string field
-    let field = |key: &str| -> Option<&str> { input.get(key).and_then(|v| v.as_str()) };
-
-    match name {
-        "Read" | "Write" | "Edit" => field("file_path").unwrap_or("(empty input)").to_string(),
-        "Bash" => field("command").unwrap_or("(empty input)").to_string(),
-        "Glob" | "Grep" => field("pattern")
-            .map(|s| format!(r#"pattern: "{}""#, truncate_text(s, 200)))
-            .unwrap_or_else(|| "(empty input)".to_string()),
-        "folder_operations" => {
-            let op = field("operation").unwrap_or("");
-            let path = field("folder_path").unwrap_or("");
-            format!("{} {}", op, path)
-        }
-        "WebSearch" => field("query")
-            .map(|s| format!(r#"query: "{}""#, truncate_text(s, 60)))
-            .unwrap_or_else(|| "(empty input)".to_string()),
-        "WebFetch" => field("url")
-            .map(|s| format!("url: {}", s))
-            .unwrap_or_else(|| "(empty input)".to_string()),
-        "TodoWrite" => String::new(),
-        "AgentResult" => field("task_id")
-            .map(|s| truncate_text(s, 12))
-            .unwrap_or_default(),
-        "artifact" => field("file_path").unwrap_or("").to_string(),
-        "LSP" => field("operation")
-            .map(|s| truncate_text(s, 40))
-            .unwrap_or_default(),
-        "ExecuteExtraTool" => field("tool_name")
-            .map(|s| truncate_text(s, 40))
-            .unwrap_or_default(),
-        "SearchExtraTools" => field("query")
-            .map(|s| truncate_text(s, 40))
-            .unwrap_or_default(),
-        _ => {
-            // Fallback: existing generic logic for unknown tools
-            match input {
-                serde_json::Value::Object(map) => {
-                    if let Some(path) = map.get("path").or_else(|| map.get("file_path")) {
-                        return format!("path: {}", truncate_text(&path.to_string(), 120));
-                    }
-                    if let Some(query) = map.get("query").or_else(|| map.get("pattern")) {
-                        return format!("query: {}", truncate_text(&query.to_string(), 120));
-                    }
-                    if let Some(cmd) = map.get("command") {
-                        return format!("cmd: {}", truncate_text(&cmd.to_string(), 120));
-                    }
-                    if let Some((k, v)) = map.iter().next() {
-                        return format!("{}: {}", k, truncate_text(&v.to_string(), 100));
-                    }
-                    "(empty input)".to_string()
-                }
-                other => truncate_text(&other.to_string(), 120),
-            }
-        }
-    }
-}
-
-/// Produce a one-line summary of a tool's output.
-fn summarize_output(name: &str, output: &str) -> String {
-    let trimmed = output.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    // For diff-producing tools, count changed lines
-    if matches!(name, "Edit" | "Write") {
-        let lines = trimmed.lines().count();
-        if lines <= 3 {
-            return truncate_text(trimmed, 200);
-        }
-        format!("{} lines changed", lines)
-    } else {
-        truncate_text(trimmed, 200)
-    }
-}
-
-/// Truncate text to `max_chars` Unicode code points.
-fn truncate_text(s: &str, max_chars: usize) -> String {
-    let len = s.chars().count();
-    if len <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars).collect();
-        format!("{}...", truncated)
-    }
-}
+// summarize_input / summarize_output / truncate_text 已迁移至
+// `super::truncate`（与 `view_mapper.rs` 共享），本文件顶部 `use` 引入。
+// 统一后同一工具调用在 streaming 与 view-commit 通道显示相同格式。
 
 // ─── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -756,51 +657,6 @@ mod tests {
     }
 
     // ── Helper tests ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_summarize_input_path() {
-        let input = serde_json::json!({"file_path": "/tmp/foo.rs", "offset": 10});
-        assert_eq!(summarize_input("Read", &input), "/tmp/foo.rs");
-    }
-
-    #[test]
-    fn test_summarize_input_query() {
-        let input = serde_json::json!({"query": "TODO", "glob": "*.rs"});
-        assert_eq!(summarize_input("WebSearch", &input), r#"query: "TODO""#);
-    }
-
-    #[test]
-    fn test_summarize_input_command() {
-        let input = serde_json::json!({"command": "cargo build"});
-        assert_eq!(summarize_input("Bash", &input), "cargo build");
-    }
-
-    #[test]
-    fn test_summarize_input_empty_object() {
-        let input = serde_json::json!({});
-        assert_eq!(summarize_input("Read", &input), "(empty input)");
-    }
-
-    #[test]
-    fn test_truncate_text_short() {
-        assert_eq!(truncate_text("hello", 10), "hello");
-    }
-
-    #[test]
-    fn test_truncate_text_exact() {
-        assert_eq!(truncate_text("hello", 5), "hello");
-    }
-
-    #[test]
-    fn test_truncate_text_long() {
-        let long = "abcdefghij";
-        assert_eq!(truncate_text(long, 5), "abcde...");
-    }
-
-    #[test]
-    fn test_truncate_text_cjk() {
-        // CJK: each char is 1 code point (chars().count), not 1 byte
-        let cjk = "你好世界";
-        assert_eq!(truncate_text(cjk, 2), "你好...");
-    }
+    // summarize_input / summarize_output / truncate_text 的单元测试
+    // 已随实现一起迁移至 `super::truncate` 模块，这里不再重复。
 }

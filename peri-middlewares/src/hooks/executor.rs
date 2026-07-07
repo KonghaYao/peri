@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::{collections::HashSet, process::Stdio, sync::Arc, time::Duration};
 
 use peri_agent::{agent::react::ReactLLM, messages::BaseMessage};
@@ -412,35 +411,6 @@ fn sanitize_header_value(value: &str, allowed_env_vars: &HashSet<String>) -> Str
     }
 
     result
-}
-
-/// Extract structured hook output from agent messages.
-///
-/// Looks through Tool messages for structured output and parses it.
-/// Falls back to the last AI message text if no structured output is found.
-fn extract_structured_output(messages: &[BaseMessage]) -> HookAction {
-    // Look for Tool message results in reverse order (most recent first)
-    for msg in messages.iter().rev() {
-        if let BaseMessage::Tool { content, .. } = msg {
-            let text = content.text_content();
-            let action = parse_command_hook_output(&text);
-            if !matches!(action, HookAction::Allow) {
-                return action;
-            }
-        }
-    }
-
-    // Fallback: check last AI message for JSON
-    for msg in messages.iter().rev() {
-        if let BaseMessage::Ai { content, .. } = msg {
-            let text = content.text_content();
-            if text.trim().starts_with('{') {
-                return parse_command_hook_output(&text);
-            }
-        }
-    }
-
-    HookAction::Allow
 }
 
 #[cfg(test)]

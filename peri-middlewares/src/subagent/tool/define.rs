@@ -1,10 +1,7 @@
-#![allow(unused_variables, unreachable_code)]
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-// P5.1 TODO: v1 AgentCancellationToken 已随 executor 一并移除，这里以 tokio_util 原生
-// 类型别名保持结构体字段 / 方法签名兼容（人工迁移到 v2 时再决定是否重命名）。
 use peri_agent::{
     agent::{
         events::{AgentEventHandler, ExecutorEvent},
@@ -377,11 +374,19 @@ impl BaseTool for SubAgentTool {
         let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
             || subagent_type.as_deref() == Some("fork");
 
-        // 从 ToolContext 获取当前消息历史（fork 子 agent 需要看到完整上下文）。
+        // 优先读 self.parent_messages（SubAgentMiddleware 装配时通过 with_parent_messages 注入，
+        // Arc<RwLock<Vec<BaseMessage>>> 跨轮次共享 main agent transcript 快照）；
+        // 回退到 _ctx.messages（ToolContext，工具调用时的单次快照）。
+        //
         // 剪掉最后一条含 tool_calls 的 AI 消息——它包含未完成的 tool_use block（如 Agent 工具本身），
         // 缺少 tool_result 会导致 LLM API 400 错误。
         let current_messages: Vec<peri_agent::messages::BaseMessage> = {
-            let mut msgs: Vec<peri_agent::messages::BaseMessage> = _ctx.messages.to_vec();
+            let mut msgs: Vec<peri_agent::messages::BaseMessage> =
+                if let Some(ref pm) = self.parent_messages {
+                    pm.read().clone()
+                } else {
+                    _ctx.messages.to_vec()
+                };
             if let Some(last) = msgs.last() {
                 if last.has_tool_calls() {
                     msgs.pop();

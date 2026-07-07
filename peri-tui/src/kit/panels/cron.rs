@@ -17,7 +17,7 @@ use ratatui_kit::{
 
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{CRON_JOBS, CronJobSummary};
-use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::theme;
 
 #[component]
@@ -102,6 +102,12 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let enabled_count = jobs.iter().filter(|e| e.enabled).count();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
+    // 视口跟随：让选中项始终可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
+    // panel 高度 18 - border 2 - header 3 = 13 行；每项 3 行 → 可见 4 个。
+    // next_fire 缺失时占位空行，保证每项固定 3 行（视口计算依赖）。
+    const VISIBLE_ITEMS: usize = 4;
+    let scroll_start = scroll_start_for_selected(sel, jobs.len(), VISIBLE_ITEMS);
+
     // Stats line
     if !jobs.is_empty() {
         lines.push(Line::from(vec![Span::styled(
@@ -135,7 +141,12 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme::semantic().text.muted),
         )]));
     } else {
-        for (i, entry) in jobs.iter().enumerate() {
+        for (i, entry) in jobs
+            .iter()
+            .enumerate()
+            .skip(scroll_start)
+            .take(VISIBLE_ITEMS)
+        {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
@@ -181,6 +192,9 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     format!("     next: {}", next.format("%Y-%m-%d %H:%M")),
                     Style::new().fg(theme::semantic().text.muted),
                 )]));
+            } else {
+                // next_fire 缺失时占位空行，保证每项固定 3 行（视口计算依赖）
+                lines.push(Line::from(""));
             }
         }
     }

@@ -26,6 +26,7 @@ use peri_agent::agent::compact::CONTINUATION_HINT;
 use peri_agent::messages::{BaseMessage, ContentBlock};
 
 use super::router::ViewMapper;
+use super::truncate::{summarize_input, summarize_output};
 
 // ---------------------------------------------------------------------------
 // ViewMapper impl
@@ -345,7 +346,7 @@ fn convert_system(content: &peri_agent::messages::MessageContent) -> ViewModel {
 // ---------------------------------------------------------------------------
 
 fn convert_agent_tool(
-    tool_name: &str,
+    _tool_name: &str,
     input: &serde_json::Value,
     _raw_content: &str,
     is_error: bool,
@@ -358,7 +359,7 @@ fn convert_agent_tool(
         .unwrap_or("fork")
         .to_string();
 
-    let _task_preview = input["prompt"]
+    let task_preview = input["prompt"]
         .as_str()
         .unwrap_or("")
         .chars()
@@ -374,11 +375,14 @@ fn convert_agent_tool(
     // view-commit has a slot for it.
     ViewModel::SubAgentGroup(SubAgentGroupData {
         agent_id: agent_id.clone(),
-        agent_name: tool_name.to_string(),
+        agent_name: task_preview.clone(),
         view_models: Vec::new(),
         collapsed: false,
         is_running: false,
-        content_hash: hash_str(&format!("{}|{}|0|{}|false", agent_id, tool_name, !is_error)),
+        content_hash: hash_str(&format!(
+            "{}|{}|0|{}|false",
+            agent_id, task_preview, !is_error
+        )),
     })
 }
 
@@ -446,131 +450,9 @@ fn convert_ask_user_tool(
 // These replicate the logic from `peri-tui/app/tool_display.rs` (format_tool_name,
 // format_tool_args, summarize_output) without depending on the TUI crate.
 
-/// Produce a one-line summary of a tool's JSON input.
-fn summarize_input(name: &str, input: &serde_json::Value) -> String {
-    let obj = match input {
-        serde_json::Value::Object(map) => map,
-        other => return truncate_chars(&other.to_string(), 120),
-    };
-    let str_val = |key: &str| -> String {
-        obj.get(key)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-    match name {
-        // ── 无前缀，文件路径不截断 ──
-        "Read" | "Write" | "Edit" => {
-            let p = str_val("file_path");
-            if p.is_empty() {
-                str_val("path")
-            } else {
-                p
-            }
-        }
-        // ── 无前缀，命令截断 400 ──
-        "Bash" => truncate_chars(&str_val("command"), 400),
-        // ── 有前缀 pattern:，pattern 截断 200 ──
-        "Glob" | "Grep" => {
-            let p = str_val("pattern");
-            let p = if p.is_empty() { str_val("query") } else { p };
-            format!("pattern: {}", truncate_chars(&p, 200))
-        }
-        // ── "operation folder_path"，不截断 ──
-        "folder_operations" => {
-            let op = str_val("operation");
-            let fp = str_val("folder_path");
-            format!("{} {}", op, fp)
-        }
-        // ── query: 截断 60 ──
-        "WebSearch" => {
-            format!("query: {}", truncate_chars(&str_val("query"), 60))
-        }
-        // ── url: 不截断 ──
-        "WebFetch" => {
-            format!("url: {}", str_val("url"))
-        }
-        // ── 空字符串（文档无参数）──
-        "TodoWrite" => String::new(),
-        // ── task_id 截断 12 ──
-        "AgentResult" => truncate_chars(&str_val("task_id"), 12),
-        // ── file_path 不截断 ──
-        "artifact" => str_val("file_path"),
-        // ── operation 截断 40 ──
-        "LSP" => truncate_chars(&str_val("operation"), 40),
-        // ── tool_name 截断 40 ──
-        "ExecuteExtraTool" => truncate_chars(&str_val("tool_name"), 40),
-        // ── query 截断 40 ──
-        "SearchExtraTools" => truncate_chars(&str_val("query"), 40),
-        // ── 兜底：第一个非空字段，截断 100 ──
-        _ => {
-            if let Some((k, v)) = obj.iter().next() {
-                let raw = v.as_str().unwrap_or("");
-                format!("{}: {}", k, truncate_chars(raw, 100))
-            } else {
-                "(empty input)".to_string()
-            }
-        }
-    }
-}
-
-/// Produce a one-line summary of a tool's output.
-fn summarize_output(name: &str, output: &str) -> String {
-    let trimmed = output.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    match name {
-        "Edit" | "Write" => {
-            let lines = trimmed.lines().count();
-            if lines <= 3 {
-                return truncate_text(trimmed, 200);
-            }
-            format!("{} lines changed", lines)
-        }
-        "WebFetch" => {
-            let lines = trimmed.lines().count();
-            let bytes = output.len();
-            format!(
-                "{} lines · {} bytes\n{}",
-                lines,
-                bytes,
-                truncate_text(trimmed, 400)
-            )
-        }
-        // TodoWrite 返回全量内容（显示完整 todo 列表）
-        "TodoWrite" => trimmed.to_string(),
-        // Read / Glob / Grep — 折叠态显示行数
-        "Read" | "Glob" | "Grep" => {
-            let lines = trimmed.lines().count();
-            format!("{} lines", lines)
-        }
-        _ => truncate_text(trimmed, 200),
-    }
-}
-
-/// Truncate text to `max_chars` Unicode code points (CJK-safe).
-fn truncate_text(s: &str, max_chars: usize) -> String {
-    let len = s.chars().count();
-    if len <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars).collect();
-        format!("{}...", truncated)
-    }
-}
-
-/// Truncate text to `max_chars` Unicode code points (CJK-safe).
-/// Same logic as `truncate_text`, distinct name for tool-input truncation.
-fn truncate_chars(s: &str, max_chars: usize) -> String {
-    let len = s.chars().count();
-    if len <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars).collect();
-        format!("{}...", truncated)
-    }
-}
+/// summarize_input / summarize_output / truncate_text / truncate_chars 已迁移至
+/// `super::truncate`（与 `router.rs` 共享），本文件顶部 `use` 引入。
+/// 统一后同一工具调用在 view-commit 与 streaming 通道显示相同格式（pattern/query 带引号）。
 
 // ---------------------------------------------------------------------------
 // Diff block builder (Write / Edit tools)
@@ -1125,138 +1007,30 @@ mod tests {
     }
 
     // ── Helper function tests ─────────────────────────────────────────────
+    // summarize_input / summarize_output / truncate_text 的基础单测
+    // 已随实现一起迁移至 `super::truncate` 模块，这里只保留 view_mapper 专属行为测试
+    // （Grep/Glob/WebSearch 的**带引号**统一格式回归断言）。
 
     #[test]
-    fn test_truncate_text_short() {
-        assert_eq!(truncate_text("hello", 10), "hello");
-    }
-
-    #[test]
-    fn test_truncate_text_exact() {
-        assert_eq!(truncate_text("hello", 5), "hello");
-    }
-
-    #[test]
-    fn test_truncate_text_long() {
-        assert_eq!(truncate_text("abcdefghij", 5), "abcde...");
-    }
-
-    #[test]
-    fn test_truncate_text_cjk() {
-        assert_eq!(truncate_text("你好世界", 2), "你好...");
-    }
-
-    #[test]
-    fn test_summarize_input_read() {
-        let input = serde_json::json!({"file_path": "/tmp/foo.rs", "offset": 10});
-        assert_eq!(summarize_input("Read", &input), "/tmp/foo.rs");
-    }
-
-    #[test]
-    fn test_summarize_input_read_fallback_path() {
-        let input = serde_json::json!({"path": "/tmp/bar.rs"});
-        assert_eq!(summarize_input("Read", &input), "/tmp/bar.rs");
-    }
-
-    #[test]
-    fn test_summarize_input_write() {
-        let input = serde_json::json!({"file_path": "src/main.rs"});
-        assert_eq!(summarize_input("Write", &input), "src/main.rs");
-    }
-
-    #[test]
-    fn test_summarize_input_edit() {
-        let input = serde_json::json!({"file_path": "lib.rs", "old_string": "x"});
-        assert_eq!(summarize_input("Edit", &input), "lib.rs");
-    }
-
-    #[test]
-    fn test_summarize_input_bash() {
-        let input = serde_json::json!({"command": "cargo build --release"});
-        assert_eq!(summarize_input("Bash", &input), "cargo build --release");
-    }
-
-    #[test]
-    fn test_summarize_input_grep() {
+    fn test_summarize_input_grep_unified_quoted_format() {
+        // 统一格式回归：view-commit 与 streaming 通道必须显示相同格式（带引号）
         let input = serde_json::json!({"pattern": "TODO"});
-        assert_eq!(summarize_input("Grep", &input), "pattern: TODO");
+        assert_eq!(summarize_input("Grep", &input), r#"pattern: "TODO""#);
     }
 
     #[test]
-    fn test_summarize_input_glob() {
+    fn test_summarize_input_glob_unified_quoted_format() {
         let input = serde_json::json!({"pattern": "**/*.rs"});
-        assert_eq!(summarize_input("Glob", &input), "pattern: **/*.rs");
+        assert_eq!(summarize_input("Glob", &input), r#"pattern: "**/*.rs""#);
     }
 
     #[test]
-    fn test_summarize_input_folder_operations() {
-        let input = serde_json::json!({"operation": "list", "folder_path": "/tmp/workdir", "pattern": "*.rs"});
-        assert_eq!(
-            summarize_input("folder_operations", &input),
-            "list /tmp/workdir"
-        );
-    }
-
-    #[test]
-    fn test_summarize_input_web_search() {
+    fn test_summarize_input_web_search_unified_quoted_format() {
         let input = serde_json::json!({"query": "rust async best practices"});
         assert_eq!(
             summarize_input("WebSearch", &input),
-            "query: rust async best practices"
+            r#"query: "rust async best practices""#
         );
-    }
-
-    #[test]
-    fn test_summarize_input_web_fetch() {
-        let input = serde_json::json!({"url": "https://docs.rs/tokio/latest/tokio/"});
-        assert_eq!(
-            summarize_input("WebFetch", &input),
-            "url: https://docs.rs/tokio/latest/tokio/"
-        );
-    }
-
-    #[test]
-    fn test_summarize_input_todo_write() {
-        let input = serde_json::json!({"todos": [{"content": "do stuff", "status": "pending"}]});
-        assert_eq!(summarize_input("TodoWrite", &input), "");
-    }
-
-    #[test]
-    fn test_summarize_input_agent_result() {
-        let input = serde_json::json!({"task_id": "abc123def456ghi789"});
-        assert_eq!(summarize_input("AgentResult", &input), "abc123def456...");
-    }
-
-    #[test]
-    fn test_summarize_input_lsp() {
-        let input = serde_json::json!({"operation": "completion", "file_path": "foo.rs"});
-        assert_eq!(summarize_input("LSP", &input), "completion");
-    }
-
-    #[test]
-    fn test_summarize_input_execute_extra_tool() {
-        let input = serde_json::json!({"tool_name": "mcp__server__some_tool", "arguments": "{}"});
-        assert_eq!(
-            summarize_input("ExecuteExtraTool", &input),
-            "mcp__server__some_tool"
-        );
-    }
-
-    #[test]
-    fn test_summarize_input_search_extra_tools() {
-        let input = serde_json::json!({"query": "mcp"});
-        assert_eq!(summarize_input("SearchExtraTools", &input), "mcp");
-    }
-
-    #[test]
-    fn test_summarize_input_empty_object() {
-        let input = serde_json::json!({});
-        assert_eq!(summarize_input("Unknown", &input), "(empty input)");
-    }
-
-    #[test]
-    fn test_summarize_output_empty() {
-        assert_eq!(summarize_output("Bash", ""), "");
     }
 
     #[test]

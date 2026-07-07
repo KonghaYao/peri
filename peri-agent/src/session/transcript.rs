@@ -82,8 +82,8 @@ pub struct MessageTranscript {
     persist_tx: Option<Arc<tokio::sync::mpsc::UnboundedSender<PersistOp>>>,
     /// 持久化目标 thread id
     thread_id: Option<ThreadId>,
-    /// 持久化后端引用
-    #[allow(dead_code)] // 用于 Drop / 未来扩展
+    /// 持久化后端引用（保留 Arc 让 store 在 transcript 存活期间不被释放，
+    /// spawned writer task 持有独立 clone）
     store: Option<Arc<dyn ThreadStore>>,
 }
 
@@ -154,14 +154,11 @@ impl MessageTranscript {
             while let Some(op) = rx.recv().await {
                 let result = match op {
                     PersistOp::Append(msg) => store.append_message(&tid, msg).await,
-                    PersistOp::RewindTo(_id) => {
-                        // ThreadStore v1 无 delete_messages_after，暂 no-op
-                        // 未来 ThreadStore v2 支持后实现
-                        Ok(())
-                    }
-                    PersistOp::UpdateFlags(_id, _flags) => {
-                        // ThreadStore v1 无 update_message_flags，暂 no-op
-                        Ok(())
+                    PersistOp::RewindTo(id) => store.delete_messages_since(&tid, &id).await,
+                    PersistOp::UpdateFlags(id, flags) => {
+                        store
+                            .update_message_flags(&id, flags.truncated, flags.excluded)
+                            .await
                     }
                 };
                 if let Err(e) = result {

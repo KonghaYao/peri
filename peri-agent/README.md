@@ -21,7 +21,7 @@ run_react_loop（peri-agent::agent::stages）
 
 ## 快速开始
 
-```rust
+```rust,ignore
 use peri_agent::prelude::*;
 use peri_agent::agent::stages::{run_react_loop, StageContext};
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use parking_lot::RwLock;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _guard = peri_agent::telemetry::init_tracing("my-agent").await;
+    let _guard = peri_agent::telemetry::init_tracing("my-agent");
 
     // 1. 构造 LLM（BaseModel → ReactLLM 适配）
     let llm: Arc<dyn ReactLLM + Send + Sync> = Arc::new(BaseModelReactLLM::new(
@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
 
 通过实现 `Middleware` trait 在 Agent 生命周期各节点插入逻辑。v2 中间件接收 `&MiddlewareContext`（只读）或 `&mut MiddlewareContextMut`（可变），不再泛型于 `<S: State>`。
 
-```rust
+```rust,ignore
 use async_trait::async_trait;
 use peri_agent::prelude::*;
 
@@ -110,7 +110,7 @@ impl Middleware for MyMiddleware {
 
 ### 自定义工具（Tool）
 
-```rust
+```rust,ignore
 use async_trait::async_trait;
 use peri_agent::tools::BaseTool;
 
@@ -146,7 +146,7 @@ v2 通过 `EventBus` 发出三层事件：
 
 历史兼容的 `ExecutorEvent` 仍保留（`peri_agent::agent::events::ExecutorEvent`），由上层 mapper 从 v2 事件桥接而来。通过 `AgentEventHandler` / `FnEventHandler` 消费：
 
-```rust
+```rust,ignore
 use std::sync::Arc;
 use peri_agent::prelude::*;
 
@@ -164,8 +164,8 @@ let handler = FnEventHandler(|event| match event {
 
 在 `main` 入口调用一次，其余自动处理：
 
-```rust
-let _guard = peri_agent::telemetry::init_tracing("my-agent").await;
+```rust,ignore
+let _guard = peri_agent::telemetry::init_tracing("my-agent");
 // _guard 必须存活到程序退出，drop 时自动 flush
 ```
 

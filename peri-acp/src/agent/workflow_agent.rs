@@ -379,45 +379,13 @@ impl AgentExecutor for WorkflowAgentExecutor {
         );
 
         // EventBus forwarder（v2 → v1 ExecutorEvent，转发给 event_handler）
-        // 用于 Langfuse trace + token usage 累积
-        let mut handles = v2_ctx.event_handles;
+        // 用于 Langfuse trace + token usage 累积。
+        //
+        // 循环实现抽取至 `crate::event::forwarder::spawn_eventbus_forwarder`，
+        // 以保证 biased select 顺序不变量与 main executor 调用点一致。
         let handler_for_forwarder = Arc::clone(&event_handler);
-        tokio::spawn(async move {
-            use crate::event::{
-                observe_event_to_executor, render_event_to_executor, state_event_to_executor,
-            };
-            loop {
-                // biased + render 优先：保证同一 ReAct 迭代的 Render 事件在 State 事件
-                // （TurnCompleted）之前被消费，避免 commit_iteration 清空 partial 后
-                // Render channel 残留事件污染 partial（与 main executor 同根因）。
-                tokio::select! {
-                    biased;
-                    Some(ev) = handles.render_rx.recv() => {
-                        if let Some(exec_ev) = render_event_to_executor(ev) {
-                            handler_for_forwarder.on_event(exec_ev);
-                        }
-                    }
-                    Some(ev) = handles.state_rx.recv() => {
-                        if let Some(exec_ev) = state_event_to_executor(ev) {
-                            handler_for_forwarder.on_event(exec_ev);
-                        }
-                    }
-                    ev_res = handles.observe_rx.recv() => {
-                        match ev_res {
-                            Ok(ev) => {
-                                if let Some(exec_ev) = observe_event_to_executor(ev) {
-                                    handler_for_forwarder.on_event(exec_ev);
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!(n, "[workflow] observe_rx lagged, events dropped");
-                            }
-                        }
-                    }
-                    else => break,
-                }
-            }
+        crate::event::spawn_eventbus_forwarder(v2_ctx.event_handles, move |exec_ev| {
+            handler_for_forwarder.on_event(exec_ev);
         });
 
         // push prompt 到 queue

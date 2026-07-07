@@ -9,7 +9,7 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{THREAD_LIST, THREAD_LOAD_TX, ThreadSummary};
-use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::theme;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -68,6 +68,10 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // ── 构建行列表（仿 Login 面板）──
     let sel = *cursor.read();
+    // 视口跟随：让选中项始终可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
+    // panel 高度 18 - border 2 - header 3 - footer 1 = 12 行；每项 3 行 → 可见 4 个。
+    const VISIBLE_ITEMS: usize = 4;
+    let scroll_start = scroll_start_for_selected(sel, item_count, VISIBLE_ITEMS);
     let semantic = theme::semantic();
     let header_style = Style::new().fg(semantic.text.primary).bold();
     let muted_style = Style::new().fg(semantic.text.muted).italic();
@@ -94,7 +98,12 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             item_meta_style,
         )]));
     } else {
-        for (i, entry) in threads.iter().enumerate() {
+        for (i, entry) in threads
+            .iter()
+            .enumerate()
+            .skip(scroll_start)
+            .take(VISIBLE_ITEMS)
+        {
             let is_selected = i == sel;
             let cursor_mark = if is_selected { ">" } else { " " };
             let row_style = if is_selected {
