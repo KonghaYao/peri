@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use agent_client_protocol::{
     Client, ConnectionTo, Responder,
-    schema::{PromptRequest, PromptResponse, StopReason},
+    schema::v1::{PromptRequest, PromptResponse, StopReason},
 };
 use peri_agent::{
     agent::AgentCancellationToken, messages::ContentBlock as PeriContentBlock,
@@ -36,10 +36,10 @@ pub(crate) async fn handle_prompt(
             .prompt
             .iter()
             .filter_map(|b| match b {
-                agent_client_protocol::schema::ContentBlock::Text(t) => {
+                agent_client_protocol::schema::v1::ContentBlock::Text(t) => {
                     Some(PeriContentBlock::text(&t.text))
                 }
-                agent_client_protocol::schema::ContentBlock::Image(img) => {
+                agent_client_protocol::schema::v1::ContentBlock::Image(img) => {
                     Some(PeriContentBlock::image_base64(&img.mime_type, &img.data))
                 }
                 _ => None, // Audio/ResourceLink/Resource not supported yet

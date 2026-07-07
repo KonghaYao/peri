@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     PermissionOption, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionId, ToolCallStatus,
     ToolCallUpdate, ToolCallUpdateFields,
 };
-use agent_client_protocol_schema::{
+use agent_client_protocol_schema::v1::{
     CreateElicitationRequest, CreateElicitationResponse, ElicitationAction,
     ElicitationContentValue, ElicitationFormMode, ElicitationSchema, ElicitationSessionScope,
     EnumOption, MultiSelectPropertySchema, StringPropertySchema,

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use agent_client_protocol::{
     Client, ConnectionTo, Responder,
-    schema::{
+    schema::v1::{
         ForkSessionRequest, ForkSessionResponse, LoadSessionRequest, LoadSessionResponse,
         NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
         SessionId, SessionNotification,

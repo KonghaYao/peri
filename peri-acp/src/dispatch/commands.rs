@@ -1,6 +1,6 @@
 //! Build ACP available commands list, shared by TUI and stdio transports.
 
-use agent_client_protocol_schema::AvailableCommand;
+use agent_client_protocol_schema::v1::AvailableCommand;
 use peri_middlewares::skills::SkillMetadata;
 
 /// Build the list of available slash commands for ACP clients,

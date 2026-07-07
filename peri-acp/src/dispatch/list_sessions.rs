@@ -1,6 +1,6 @@
 //! List sessions via [`ThreadStore`], returning ACP [`SessionInfo`] entries.
 
-use agent_client_protocol_schema::{SessionId, SessionInfo};
+use agent_client_protocol_schema::v1::{SessionId, SessionInfo};
 use anyhow::{Context, Result};
 use peri_agent::thread::ThreadStore;
 

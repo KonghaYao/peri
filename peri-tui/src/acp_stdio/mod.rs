@@ -16,7 +16,7 @@ pub async fn run_acp_stdio(cwd: String) -> anyhow::Result<()> {
 
     use agent_client_protocol::{
         Agent, Client, ConnectionTo, Stdio,
-        schema::{
+        schema::v1::{
             CancelNotification, CloseSessionRequest, CloseSessionResponse, ForkSessionRequest,
             InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
             PromptRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,

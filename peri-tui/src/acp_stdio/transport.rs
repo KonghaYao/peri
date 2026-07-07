@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use agent_client_protocol::{
-    Client, ConnectionTo, LineDirection, Responder, schema::InitializeRequest,
+    Client, ConnectionTo, LineDirection, Responder, schema::v1::InitializeRequest,
 };
 use peri_acp::dispatch;
 
@@ -12,7 +12,7 @@ use super::context::StdioContext;
 /// initialize 请求处理器。
 pub(super) async fn handle_initialize(
     _req: InitializeRequest,
-    responder: Responder<agent_client_protocol::schema::InitializeResponse>,
+    responder: Responder<agent_client_protocol::schema::v1::InitializeResponse>,
     _cx: ConnectionTo<Client>,
 ) -> Result<(), agent_client_protocol::Error> {
     tracing::info!("ACP initialize");

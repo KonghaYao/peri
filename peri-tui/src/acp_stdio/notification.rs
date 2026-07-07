@@ -2,7 +2,7 @@
 
 use agent_client_protocol::{
     Client, ConnectionTo,
-    schema::{
+    schema::v1::{
         ConfigOptionUpdate, SessionConfigOption, SessionId, SessionNotification, SessionUpdate,
     },
 };

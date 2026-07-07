@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use agent_client_protocol::schema::{AvailableCommandsUpdate, SessionUpdate};
+use agent_client_protocol::schema::v1::{AvailableCommandsUpdate, SessionUpdate};
 use peri_acp::dispatch::config_update;
 use peri_middlewares::skills::SkillMetadata;
 use serde_json::Value;
@@ -161,7 +161,7 @@ pub(crate) async fn send_session_info_update(
     transport: &dyn peri_acp::transport::AcpTransport,
     session_id: &str,
 ) {
-    use agent_client_protocol::schema::SessionInfoUpdate;
+    use agent_client_protocol::schema::v1::SessionInfoUpdate;
     let info = SessionInfoUpdate::new().updated_at(chrono::Utc::now().to_rfc3339());
     let update = SessionUpdate::SessionInfoUpdate(info);
     let update_value = match serde_json::to_value(&update) {

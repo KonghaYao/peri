@@ -2,7 +2,7 @@
 
 use agent_client_protocol::{
     Client, ConnectionTo, Error, Handled, Responder, UntypedMessage,
-    schema::{
+    schema::v1::{
         SessionId, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
         SetSessionModeRequest, SetSessionModeResponse,
     },
@@ -37,7 +37,7 @@ pub(crate) async fn handle_set_config_option(
     let config_id = req.config_id.0.as_ref();
     let session_id = req.session_id.0.as_ref();
     match &req.value {
-        agent_client_protocol_schema::SessionConfigOptionValue::ValueId { value } => {
+        agent_client_protocol_schema::v1::SessionConfigOptionValue::ValueId { value } => {
             let v = value.0.as_ref();
             match config_id {
                 "mode" => {
@@ -77,7 +77,7 @@ pub(crate) async fn handle_set_config_option(
                 }
             }
         }
-        agent_client_protocol_schema::SessionConfigOptionValue::Boolean { value: _ } => {
+        agent_client_protocol_schema::v1::SessionConfigOptionValue::Boolean { value: _ } => {
             tracing::debug!(config_id = %config_id, "Boolean config option not handled");
         }
         _ => {

@@ -3,7 +3,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use agent_client_protocol::schema::{PromptResponse, StopReason};
+use agent_client_protocol::schema::v1::{PromptResponse, StopReason};
 use parking_lot::RwLock;
 use peri_acp::{
     broker::AcpTransportBroker,

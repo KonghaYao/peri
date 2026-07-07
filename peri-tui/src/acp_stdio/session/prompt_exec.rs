@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use agent_client_protocol::{
     Client, ConnectionTo, Responder,
-    schema::{PromptResponse, SessionId, SessionInfoUpdate, SessionUpdate, StopReason},
+    schema::v1::{PromptResponse, SessionId, SessionInfoUpdate, SessionUpdate, StopReason},
 };
 use peri_acp::session::{event_sink::StdioEventSink, executor};
 use peri_agent::{agent::AgentCancellationToken, messages::MessageContent};

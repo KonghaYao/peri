@@ -6,7 +6,7 @@
 //!
 //! Reference: <https://agentclientprotocol.com/protocol/v1/session-setup#loading-a-session>
 
-use agent_client_protocol_schema::{
+use agent_client_protocol_schema::v1::{
     ContentBlock, ContentChunk, SessionId, SessionNotification, SessionUpdate, TextContent,
 };
 use peri_agent::messages::{

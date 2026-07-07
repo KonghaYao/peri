@@ -6,7 +6,7 @@
 
 // Re-export SDK types used by StdioEventSink.
 pub use agent_client_protocol::{
-    schema::{SessionId as SdkSessionId, SessionNotification, SessionUpdate},
+    schema::v1::{SessionId as SdkSessionId, SessionNotification, SessionUpdate},
     Client, ConnectionTo,
 };
 use async_trait::async_trait;

@@ -5,7 +5,7 @@
 
 use crate::kit::acp_types::{AcpEventData, CurrentTurn, ToolCardAccumulator};
 use crate::kit::atoms::*;
-use agent_client_protocol::schema::{Plan, PlanEntryStatus};
+use agent_client_protocol::schema::v1::{Plan, PlanEntryStatus};
 use peri_acp_types::view_model::{NoteLevel, SystemNoteData, UserBubbleData, ViewModel, hash_str};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

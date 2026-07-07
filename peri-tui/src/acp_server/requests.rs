@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     CloseSessionResponse, ForkSessionResponse, ListSessionsResponse, LoadSessionResponse,
     NewSessionResponse, ResumeSessionResponse, SessionId, SessionInfo, SessionNotification,
     SetSessionConfigOptionResponse, SetSessionModeResponse,

@@ -2,7 +2,7 @@
 //!
 //! Tests key components end-to-end: transport, broker, event mapping.
 
-use agent_client_protocol::schema::SessionId;
+use agent_client_protocol::schema::v1::SessionId;
 use serde_json::json;
 
 #[tokio::test]
@@ -122,7 +122,7 @@ async fn test_event_mapper_text_chunk() {
 
 #[test]
 fn test_event_mapper_todo_update_maps_to_plan() {
-    use agent_client_protocol::schema::{PlanEntryPriority, PlanEntryStatus, SessionUpdate};
+    use agent_client_protocol::schema::v1::{PlanEntryPriority, PlanEntryStatus, SessionUpdate};
     use peri_acp::event::map_event;
     use peri_agent::agent::events::{ExecutorEvent, TodoEntry, TodoStatus};
 

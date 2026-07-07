@@ -1,6 +1,6 @@
 //! 会话控制：list / cancel / close。
 
-use agent_client_protocol::schema::{ListSessionsRequest, ListSessionsResponse};
+use agent_client_protocol::schema::v1::{ListSessionsRequest, ListSessionsResponse};
 
 use super::super::context::StdioContext;
 

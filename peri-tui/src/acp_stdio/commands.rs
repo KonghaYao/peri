@@ -2,7 +2,7 @@
 
 use agent_client_protocol::{
     Client, ConnectionTo,
-    schema::{AvailableCommandsUpdate, SessionId, SessionNotification, SessionUpdate},
+    schema::v1::{AvailableCommandsUpdate, SessionId, SessionNotification, SessionUpdate},
 };
 
 /// 扫描 skill 目录并发送 AvailableCommandsUpdate 通知。
