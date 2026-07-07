@@ -530,22 +530,32 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         });
     }
 
+    // I23-b：就近判断自动跟随——用户视口在底部附近时跟随内容增长，
+    // 往上滚动超出 vis_height/2 后停止吸底。无需 auto_scroll flag，
+    // 是否跟随完全由当前 scroll_y 与 bottom 的距离决定。
     hooks.use_effect(
         {
-            let mut a = auto_scroll;
-            let mut h = had_ct;
             let st = scroll_state;
             move || {
-                if !h.get() && current_has_ct {
-                    a.set(true);
+                let scroll_y = st.read().offset().y as u16;
+                let total = total_visual_rows;
+                let vh = vis_height;
+                if total == 0 {
+                    return;
                 }
-                if a.get() {
+                let max_scroll = total.saturating_sub(vh);
+                if scroll_y >= max_scroll {
+                    // 已在或超出底部——scroll_to_bottom 是 no-op
+                    return;
+                }
+                let distance = max_scroll.saturating_sub(scroll_y);
+                let threshold = (vh / 2).max(5);
+                if distance <= threshold {
                     st.write().scroll_to_bottom();
                 }
-                h.set(current_has_ct);
             }
         },
-        (current_has_ct,),
+        (entries_len, raw_ch),
     );
 
     if empty {
@@ -560,6 +570,12 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 视口裁剪 ──
     let scroll_y = scroll_state.read().offset().y as u16;
     let (first, last, _local_offset) = viewport_clip(&wrap_map, scroll_y, vis_height);
+    *MESSAGE_VIEWPORT.state().write() = crate::kit::atoms::MessageViewportSnapshot {
+        scroll_y,
+        vis_height,
+        first_line: first,
+        last_line: last,
+    };
 
     let visible_lines: Vec<Line<'static>> =
         highlighted_lines.get(first..last).unwrap_or(&[]).to_vec();
