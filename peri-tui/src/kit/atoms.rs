@@ -24,6 +24,7 @@ pub enum PopupKind {
     AskUser,
     Rewind,
     OAuth,
+    Confirm,
 }
 
 pub type Handle<T> = AtomState<T>;
@@ -264,6 +265,41 @@ pub static BRIDGE_RESET_COUNTER: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// MessageArea 的 build_footer_lines 读取后调用 `spinner_state.set_token_count(count)`
 /// 驱动平滑动画追赶，最终在 spinner 行右侧显示 `↓ X.Xk tokens`。
 pub static SPINNER_TOKEN_COUNT: AtomStatic<usize> = AtomStatic::new(|| 0);
+
+// ── Background Tasks 相关 State ──────────────────────────────────────────────
+
+/// 后台任务条目列表（TUI 侧定义，与 agent 层 BgTaskInfo 对应）
+pub use crate::kit::acp_types::BgTaskEntry;
+
+/// 活跃的后台任务列表（由 bg-task-started/completed/cancelled 事件维护）
+pub static BG_TASKS: AtomStatic<Vec<BgTaskEntry>> = AtomStatic::new(|| Vec::new());
+
+/// 通知消息（状态栏短暂显示，过期后自动忽略）
+pub struct Notification {
+    pub message: String,
+    pub until: Instant,
+}
+pub static NOTIFICATION: AtomStatic<Option<Notification>> = AtomStatic::new(|| None);
+
+// ── Confirm Popup 相关 State ─────────────────────────────────────────────────
+
+/// 确认弹窗要执行的操作
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    /// 切换到指定 thread_id
+    ThreadSwitch(String),
+}
+
+/// 确认弹窗的 payload
+#[derive(Debug, Clone)]
+pub struct ConfirmPayload {
+    pub title: String,
+    pub message: String,
+    pub details: Vec<String>,
+    pub pending_action: ConfirmAction,
+}
+
+pub static CONFIRM_PAYLOAD: AtomStatic<Option<ConfirmPayload>> = AtomStatic::new(|| None);
 
 pub fn init_atoms() {
     PENDING_ATTACHMENTS.get_or_init(|| Handle::new(Vec::new()));

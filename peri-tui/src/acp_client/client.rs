@@ -466,6 +466,15 @@ impl AcpTuiClient {
             .await
     }
 
+    /// Cancel a specific background task by task_id.
+    pub async fn cancel_bg_task(&self, session_id: &str, task_id: &str) -> Result<Value, AcpError> {
+        self.send_raw_request(
+            "session/cancel-bg-task",
+            json!({ "sessionId": session_id, "taskId": task_id }),
+        )
+        .await
+    }
+
     /// Send a response to a server-initiated request (e.g. HITL approval).
     pub async fn send_response(
         &self,

@@ -72,8 +72,9 @@ pub use skills::{
 };
 pub use subagent::{
     infer_agent_capability, scan_agents, scan_agents_detailed, scan_agents_with_extra_dirs,
-    AgentCapability, BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus,
-    SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool,
+    AgentCapability, BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle,
+    BgRegistryEvent, BgTaskInfo, BgTaskKind, SkillPreloadMiddleware, SubAgentMiddleware,
+    SubAgentTool,
 };
 pub use tool_search::{
     is_deferred_tool, resolve_effective_tool_name, ToolSearchMiddleware, CORE_TOOLS,

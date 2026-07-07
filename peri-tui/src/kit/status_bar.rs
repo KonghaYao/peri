@@ -18,13 +18,14 @@ use ratatui_kit::{
 };
 use std::time::Instant;
 
-/// 状态栏第 1 行：权限模式 · cwd · provider/model · CPU% · MEM
+/// 状态栏第 1 行：权限模式 · cwd · provider/model · CPU% · MEM · bg tasks
 #[component]
 fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let snap = hooks.use_atom(&atoms::SERVICE_SNAPSHOT);
     let model_hl = hooks.use_atom(&atoms::MODEL_HIGHLIGHT_UNTIL);
     let provider_hl = hooks.use_atom(&atoms::PROVIDER_HIGHLIGHT_UNTIL);
     let mode_hl = hooks.use_atom(&atoms::MODE_HIGHLIGHT_UNTIL);
+    let bg_tasks = hooks.use_atom(&atoms::BG_TASKS);
 
     let snap = snap.read().clone();
     let now = Instant::now();
@@ -92,6 +93,29 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         format!("MEM {}MB", snap.memory_mb),
         Style::default().fg(memory_color(snap.memory_mb)),
     ));
+
+    // 6. 后台任务计数
+    let bg = bg_tasks.read();
+    let shell_c = bg.iter().filter(|t| t.kind == "shell").count();
+    let agent_c = bg.iter().filter(|t| t.kind == "agent").count();
+    let wf_c = bg.iter().filter(|t| t.kind == "workflow").count();
+    if shell_c > 0 || agent_c > 0 || wf_c > 0 {
+        spans.push(separator());
+        let mut parts = vec![];
+        if shell_c > 0 {
+            parts.push(format!("{} shell", shell_c));
+        }
+        if agent_c > 0 {
+            parts.push(format!("{} agent", agent_c));
+        }
+        if wf_c > 0 {
+            parts.push(format!("{} workflow", wf_c));
+        }
+        spans.push(Span::styled(
+            parts.join(" "),
+            Style::default().fg(statusbar().text),
+        ));
+    }
 
     element!(
         View(
@@ -163,16 +187,59 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 }
 
 #[component]
-pub fn StatusBar(_hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn StatusBar(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    // 通知条：渲染前检查过期——不写 atom，过期自动忽略。
+    // 下次事件处理器写 NOTIFICATION 会用新值覆盖旧 Some。
+    let notif_store = hooks.use_atom(&atoms::NOTIFICATION);
+    let show_notif = notif_store
+        .read()
+        .as_ref()
+        .is_some_and(|n| Instant::now() < n.until);
+    let notif_text = if show_notif {
+        notif_store
+            .read()
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let statusbar_tokens = statusbar();
+    let notif_line = if show_notif && !notif_text.is_empty() {
+        element!(
+            View(
+                flex_direction: Direction::Horizontal,
+                width: Constraint::Fill(1),
+                height: Constraint::Length(1),
+            ) {
+                Text(text: Paragraph::new(
+                    Line::from(Span::styled(notif_text, Style::default().fg(statusbar_tokens.text).add_modifier(Modifier::BOLD)))
+                ))
+            }
+        )
+    } else {
+        element!(
+            View(
+                flex_direction: Direction::Horizontal,
+                width: Constraint::Fill(1),
+                height: Constraint::Length(0),
+            ) {
+                Text(text: Paragraph::new(Line::from("")))
+            }
+        )
+    };
+
     element!(
         View(
             flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
-            height: Constraint::Length(3),
+            height: Constraint::Length(4),
         ) {
+            { notif_line }
             StatusBarRow1()
             StatusBarRow2()
-            // 第 3 行留空（视觉缓冲）
+            // 第 4 行留空（视觉缓冲）
             Text(text: Paragraph::new(Line::from("")))
         }
     )

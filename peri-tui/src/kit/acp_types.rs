@@ -457,6 +457,23 @@ pub enum AcpEventData {
         event: String,
         data: serde_json::Value,
     },
+
+    // -- §4.7 Background Tasks (bg-task-*) ----------------------------------
+    /// `"bg-task-started"` -- a background task has been registered.
+    BgTaskStarted(BgTaskEntry),
+
+    /// `"bg-task-completed"` -- a background task has finished.
+    BgTaskCompleted {
+        task_id: String,
+        success: bool,
+        duration_ms: u64,
+    },
+
+    /// `"bg-task-cancelled"` -- a background task was cancelled.
+    BgTaskCancelled { task_id: String, reason: String },
+
+    /// `"bg-task-snapshot"` -- full list of active background tasks.
+    BgTaskSnapshot(Vec<BgTaskEntry>),
 }
 
 impl AcpEventData {
@@ -503,6 +520,23 @@ impl AcpEventData {
             "subagent-started" => decode_or_unknown(event, data, AcpEventData::SubagentStarted),
             "subagent-stopped" => decode_or_unknown(event, data, AcpEventData::SubagentStopped),
 
+            // §4.7 Background Tasks
+            "bg-task-started" => decode_or_unknown(event, data, AcpEventData::BgTaskStarted),
+            "bg-task-completed" => decode_or_unknown(event, data, |d: BgTaskCompletedData| {
+                AcpEventData::BgTaskCompleted {
+                    task_id: d.task_id,
+                    success: d.success,
+                    duration_ms: d.duration_ms,
+                }
+            }),
+            "bg-task-cancelled" => decode_or_unknown(event, data, |d: BgTaskCancelledData| {
+                AcpEventData::BgTaskCancelled {
+                    task_id: d.task_id,
+                    reason: d.reason,
+                }
+            }),
+            "bg-task-snapshot" => decode_or_unknown(event, data, AcpEventData::BgTaskSnapshot),
+
             // Unknown / future event names -- forward-compatible fallback.
             _ => AcpEventData::unknown(event, data),
         }
@@ -515,6 +549,35 @@ impl AcpEventData {
             data,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// BgTaskEntry -- TUI-side background task entry
+// ---------------------------------------------------------------------------
+
+/// Background task entry mirroring `BgTaskInfo` from the agent layer.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct BgTaskEntry {
+    pub task_id: String,
+    pub kind: String,
+    pub summary: String,
+    pub started_at: String,
+    pub pid: Option<u32>,
+}
+
+/// Deserialization helper for `bg-task-completed` payload.
+#[derive(Debug, serde::Deserialize)]
+struct BgTaskCompletedData {
+    task_id: String,
+    success: bool,
+    duration_ms: u64,
+}
+
+/// Deserialization helper for `bg-task-cancelled` payload.
+#[derive(Debug, serde::Deserialize)]
+struct BgTaskCancelledData {
+    task_id: String,
+    reason: String,
 }
 
 /// Decode `data` into `T` and apply the variant constructor, or fall back to

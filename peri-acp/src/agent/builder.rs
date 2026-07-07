@@ -131,6 +131,8 @@ pub struct AcpAgentConfig {
     pub workflow_executor: Option<Arc<dyn peri_workflow::runner::AgentExecutor>>,
     /// Session 级 WorkflowMiddleware（None = 每轮创建临时实例）。
     pub workflow_middleware: Option<Arc<peri_middlewares::workflow::WorkflowMiddleware>>,
+    /// Session 级 BackgroundTaskRegistry（跨 prompt 存活，取代 per-prompt 创建）
+    pub background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
 }
 
 pub struct AcpAgentOutput {
@@ -181,6 +183,7 @@ pub fn build_agent(
     cached_llm: Option<&CachedLlmInstances>,
     pool: &Arc<parking_lot::Mutex<AgentPool>>,
 ) -> (AcpAgentOutput, Option<CachedLlmInstances>) {
+    // destructure background_registry from config at the top
     let AcpAgentConfig {
         provider,
         cwd,
@@ -222,6 +225,7 @@ pub fn build_agent(
         goal_controller,
         workflow_executor,
         workflow_middleware,
+        background_registry,
     } = cfg;
 
     // 应用 agent overrides 到系统提示词
@@ -379,10 +383,10 @@ pub fn build_agent(
         Arc::new(RwLock::new(Vec::new()));
 
     // 后台任务通知通道
-    let (bg_notification_tx, bg_notification_rx) = tokio::sync::mpsc::unbounded_channel();
-    let background_registry = Arc::new(peri_middlewares::BackgroundTaskRegistry::new(
-        bg_notification_tx,
-    ));
+    let background_registry = background_registry.unwrap_or_else(|| {
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        Arc::new(peri_middlewares::BackgroundTaskRegistry::new(tx))
+    });
 
     // 后台任务完成事件的独立通道（不随 executor 生命周期销毁）
     let (bg_event_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -505,7 +509,11 @@ pub fn build_agent(
     chain.add(Box::new(peri_middlewares::GitAttributionMiddleware::new(
         &model_name,
     )));
-    chain.add(Box::new(TerminalMiddleware::new()));
+    chain.add(Box::new({
+        let mut tm = TerminalMiddleware::new();
+        tm = tm.with_registry(Arc::clone(&background_registry));
+        tm
+    }));
     chain.add(Box::new(WebMiddleware::new()));
     chain.add(Box::new(TodoMiddleware::new(todo_tx)));
     chain.add(Box::new(CronMiddleware::new(
@@ -658,9 +666,8 @@ pub fn build_agent(
         fingerprint: provider_fp.clone(),
     });
 
-    // bg_notification_rx：v2 stages 暂未消费（P5 后会由 Receive 阶段消费）。
-    // 当前保持绑定避免 unbounded channel 误用，未来迁移后删除。
-    drop(bg_notification_rx);
+    // Session 级 registry 无需本地 channel 清理
+    //（session 创建时创建 bg_notification channel，由 session 管理生命周期）
 
     let components = AgentComponents {
         llm: model,

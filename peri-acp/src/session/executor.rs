@@ -485,14 +485,18 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         context_window
     };
 
-    // 前置创建 bg 通道（BgCommand 等 Immediate 命令依赖）
+    // 前置创建 bg 事件通道（BgCommand 等 Immediate 命令依赖）
     let (bg_event_tx_for_cmd, mut bg_event_rx_for_cmd) =
         tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
-    let (bg_notification_tx_for_cmd, _bg_notification_rx_for_cmd) =
-        tokio::sync::mpsc::unbounded_channel();
-    let bg_registry_for_cmd = Arc::new(peri_middlewares::subagent::BackgroundTaskRegistry::new(
-        bg_notification_tx_for_cmd,
-    ));
+    // session 级 registry（跨 prompt 存活，由 executor 从 session 获取）
+    let bg_registry_for_cmd = session_manager
+        .as_ref()
+        .and_then(|sm| sm.get_session(&session_id))
+        .map(|s| s.background_registry.clone())
+        .unwrap_or_else(|| {
+            let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+            Arc::new(peri_middlewares::subagent::BackgroundTaskRegistry::new(tx))
+        });
 
     // BgCommand 事件的 bg event pump（必须在命令拦截之前启动，Immediate 命令才能发事件）
     {
@@ -503,6 +507,59 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
             while let Some(bg_event) = bg_event_rx_for_cmd.recv().await {
                 bg_cmd_sink
                     .push_event(&bg_cmd_sid, &bg_event, bg_cmd_cw)
+                    .await;
+            }
+        });
+    }
+
+    // Registry → ACP 事件泵：将 BgRegistryEvent 转换为 ACP unstable 事件
+    {
+        let (registry_event_tx, mut registry_event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<peri_middlewares::subagent::BgRegistryEvent>();
+        bg_registry_for_cmd.set_event_sender(registry_event_tx, session_id.clone());
+        let registry_sink = Arc::clone(&event_sink);
+        let registry_sid = session_id.clone();
+        tokio::spawn(async move {
+            while let Some(event) = registry_event_rx.recv().await {
+                let (event_name, payload) = match &event {
+                    peri_middlewares::subagent::BgRegistryEvent::Started {
+                        task_id,
+                        kind,
+                        summary,
+                        started_at,
+                    } => (
+                        "bg-task-started",
+                        serde_json::json!({
+                            "task_id": task_id,
+                            "kind": kind,
+                            "summary": summary,
+                            "started_at": started_at,
+                        }),
+                    ),
+                    peri_middlewares::subagent::BgRegistryEvent::Completed {
+                        task_id,
+                        success,
+                        output_preview,
+                        duration_ms,
+                    } => (
+                        "bg-task-completed",
+                        serde_json::json!({
+                            "task_id": task_id,
+                            "success": success,
+                            "output_preview": output_preview,
+                            "duration_ms": duration_ms,
+                        }),
+                    ),
+                    peri_middlewares::subagent::BgRegistryEvent::Cancelled { task_id, reason } => (
+                        "bg-task-cancelled",
+                        serde_json::json!({
+                            "task_id": task_id,
+                            "reason": reason,
+                        }),
+                    ),
+                };
+                registry_sink
+                    .push_unstable_event(&registry_sid, event_name.to_string(), payload)
                     .await;
             }
         });
@@ -602,6 +659,7 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         session_manager,
         workflow_executor,
         workflow_middleware: workflow_middleware.as_ref(),
+        bg_registry: Arc::clone(&bg_registry_for_cmd),
         event_sink: &event_sink,
         session_id: &session_id,
         event_tx: &event_tx,
@@ -653,6 +711,7 @@ struct BuildAgentRequest<'a> {
     session_manager: Option<SessionManager>,
     workflow_executor: Option<Arc<dyn peri_workflow::runner::AgentExecutor>>,
     workflow_middleware: Option<&'a Arc<peri_middlewares::workflow::WorkflowMiddleware>>,
+    bg_registry: Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
     // ── 借用的引用 ──────────────────────────────────────────────────────────
     event_sink: &'a Arc<dyn EventSink>,
     session_id: &'a str,
@@ -702,6 +761,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         session_manager,
         workflow_executor,
         workflow_middleware,
+        bg_registry,
         event_sink,
         session_id,
         event_tx,
@@ -797,6 +857,9 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
     //
     // [NOTE] 自动 continuation 需 TUI 侧处理 BackgroundTaskCompleted 事件（参考 bg task auto-continuation）。
     if let Some(wf_mw) = workflow_middleware {
+        // 将 session 级 bg_registry 注入 WorkflowMiddleware（延迟注入，支持内部可变性）
+        wf_mw.set_bg_registry(bg_registry.clone());
+
         // init_notification_buffer() 是 set-once gate：首次返回 true，后续返回 false。
         // WorkflowMiddleware 是 session 级实例（session/new 创建），
         // 因此每个 session 的消费者只 spawn 一次，无跨 session 污染。
@@ -927,6 +990,10 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         goal_controller,
         workflow_executor: workflow_executor.clone(),
         workflow_middleware: workflow_middleware.cloned(),
+        background_registry: session_manager
+            .as_ref()
+            .and_then(|sm| sm.get_session(&session_id))
+            .map(|s| s.background_registry.clone()),
     };
 
     // v2 stages 唯一路径（P5 后 v1 已物理删除，PERI_USE_V1 不再生效）。

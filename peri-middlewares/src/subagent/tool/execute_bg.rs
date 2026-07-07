@@ -18,7 +18,10 @@ use super::build_agent::CancelPolicy;
 use crate::{
     hooks::types::{HookEvent, RegisteredHook},
     subagent::{
-        background::{BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus},
+        background::{
+            BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle,
+            BgTaskKind,
+        },
         v2_bridge::build_v2_subagent_context,
     },
 };
@@ -315,7 +318,10 @@ impl super::SubAgentTool {
             prompt_summary,
             status: BackgroundTaskStatus::Running,
             started_at: std::time::Instant::now(),
-            abort_handle: join_handle,
+            kind: BgTaskKind::Agent,
+            cancel_handle: BgCancelHandle::Abort(join_handle.abort_handle()),
+            pid: None,
+            output_preview: None,
         };
         if let Err(e) = registry.register(bg_task) {
             // 极端情况：并发超出上限（虽然前面已检查），降级返回错误

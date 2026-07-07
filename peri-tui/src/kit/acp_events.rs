@@ -7,6 +7,7 @@ use crate::kit::acp_types::{AcpEventData, CurrentTurn, ToolCardAccumulator};
 use crate::kit::atoms::*;
 use peri_acp_types::view_model::{NoteLevel, SystemNoteData, UserBubbleData, ViewModel, hash_str};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // BridgeState — ACP 事件桥接内部状态
@@ -329,6 +330,41 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 
         // ── Unknown / forward-compat ──
         Unknown { .. } => {}
+
+        // ── §4.7 Background Tasks ──
+        BgTaskSnapshot(tasks) => {
+            BG_TASKS.state().write().clone_from(tasks);
+        }
+        BgTaskStarted(task) => {
+            BG_TASKS.state().write().push(task.clone());
+        }
+        BgTaskCompleted {
+            task_id,
+            success,
+            duration_ms,
+        } => {
+            BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
+            let msg = if *success {
+                format!(
+                    "[✓] {} 完成 ({:.0}s)",
+                    task_id,
+                    *duration_ms as f64 / 1000.0
+                )
+            } else {
+                format!(
+                    "[✗] {} 失败 ({:.0}s)",
+                    task_id,
+                    *duration_ms as f64 / 1000.0
+                )
+            };
+            NOTIFICATION.state().write().replace(Notification {
+                message: msg,
+                until: Instant::now() + Duration::from_millis(1500),
+            });
+        }
+        BgTaskCancelled { task_id, .. } => {
+            BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
+        }
     }
 }
 

@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
+use crate::kit::atoms;
 
 /// 启动 thread 切换消费者后台任务。
 pub fn spawn_thread_load_consumer(
@@ -44,6 +45,45 @@ pub fn spawn_thread_load_consumer(
                             break;
                         }
                         Some(thread_id) => {
+                            // 检查是否有运行中的后台任务（scoped 以避免 Non-Send guard 跨 await 点）
+                            let has_bg_tasks = {
+                                let state = atoms::BG_TASKS.state();
+                                let bg_tasks = state.read();
+                                if !bg_tasks.is_empty() {
+                                    let shell_c = bg_tasks.iter().filter(|t| t.kind == "shell").count();
+                                    let agent_c = bg_tasks.iter().filter(|t| t.kind == "agent").count();
+                                    let wf_c = bg_tasks.iter().filter(|t| t.kind == "workflow").count();
+
+                                    *atoms::CONFIRM_PAYLOAD.state().write() =
+                                        Some(atoms::ConfirmPayload {
+                                            title: "切换 thread 确认".into(),
+                                            message: format!(
+                                                "当前 thread 有 {} 个后台任务仍在运行",
+                                                bg_tasks.len()
+                                            ),
+                                            details: vec![
+                                                format!(
+                                                    "  {} shell  {} agent  {} workflow",
+                                                    shell_c, agent_c, wf_c
+                                                ),
+                                                "切换后这些任务继续在后台执行，但当前视图不再显示其状态。"
+                                                    .into(),
+                                            ],
+                                            pending_action: atoms::ConfirmAction::ThreadSwitch(
+                                                thread_id.clone(),
+                                            ),
+                                        });
+                                    *atoms::POPUP_KIND.state().write() = Some(atoms::PopupKind::Confirm);
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+
+                            if has_bg_tasks {
+                                continue;
+                            }
+
                             if let Err(e) = handle_load(&acp_client, &cwd, thread_id).await {
                                 error!(error = %e, "kit thread_load_consumer: load_session failed");
                             }

@@ -17,12 +17,22 @@ use crate::progress::WorkflowProgressStore;
 use crate::registry::{WorkflowRunStatus, WorkflowTaskRegistry, WorkflowTaskResult};
 use crate::runner::{WorkflowInput, WorkflowResult, WorkflowRunner};
 
+/// Background task registry interface — avoids peri-workflow → peri-middlewares dependency.
+///
+/// Implemented by `peri_middlewares::BackgroundTaskRegistry`.
+pub trait BgTaskRegistry: Send + Sync {
+    fn register_workflow(&self, task_id: String, summary: String);
+    fn complete_workflow(&self, task_id: &str, success: bool, output: String, duration_ms: u64);
+}
+
 /// Workflow 工具 — 启动 workflow（fire-and-forget）
 pub struct WorkflowTool {
     runner: Arc<WorkflowRunner>,
     registry: Arc<WorkflowTaskRegistry>,
     progress_store: Arc<WorkflowProgressStore>,
     journal_store: Arc<WorkflowJournalStore>,
+    /// Optional background task registry for unified task management
+    bg_registry: Option<Arc<dyn BgTaskRegistry>>,
 }
 
 impl WorkflowTool {
@@ -37,7 +47,13 @@ impl WorkflowTool {
             registry,
             progress_store,
             journal_store,
+            bg_registry: None,
         }
+    }
+
+    pub fn with_bg_registry(mut self, bg_registry: Arc<dyn BgTaskRegistry>) -> Self {
+        self.bg_registry = Some(bg_registry);
+        self
     }
 }
 
@@ -200,6 +216,18 @@ impl BaseTool for WorkflowTool {
             return Err(format!("Workflow concurrency limit: {e}").into());
         }
 
+        // 注册到统一后台任务注册表
+        if let Some(ref bg) = self.bg_registry {
+            bg.register_workflow(
+                run_id.clone(),
+                format!(
+                    "{}: {}",
+                    workflow_name,
+                    script.chars().take(80).collect::<String>()
+                ),
+            );
+        }
+
         // ─── 快速失败检测（1s 内 done 到来即同步报错）───
         let mut fast_rx = done_rx.clone(); // clone 用于快速失败检测
         let fast_result = tokio::select! {
@@ -243,6 +271,7 @@ impl BaseTool for WorkflowTool {
 
         // Notification task: wait for completion → registry.complete()
         let registry_for_complete = Arc::clone(&self.registry);
+        let bg_for_complete = self.bg_registry.clone();
         let notify_name = workflow_name.clone();
         let notify_started = started_at;
         let notify_run_id = run_id.clone();
@@ -256,19 +285,23 @@ impl BaseTool for WorkflowTool {
                 let (agent_count, tool_calls_count) = notify_progress_store
                     .get_run_stats(&notify_run_id)
                     .unwrap_or((0, 0));
+                let duration = notify_started.elapsed().as_millis() as u64;
                 registry_for_complete.complete(
                     &notify_run_id,
                     WorkflowTaskResult {
                         run_id: notify_run_id.clone(),
-                        workflow_name: notify_name,
+                        workflow_name: notify_name.clone(),
                         success: false,
                         status: WorkflowRunStatus::Failed,
-                        duration_ms: notify_started.elapsed().as_millis() as u64,
+                        duration_ms: duration,
                         agent_count,
                         tool_calls_count,
                         error: Some("workflow process exited unexpectedly".to_string()),
                     },
                 );
+                if let Some(ref bg) = bg_for_complete {
+                    bg.complete_workflow(&notify_run_id, false, String::new(), duration);
+                }
                 return;
             }
             let result = done_rx
@@ -300,6 +333,18 @@ impl BaseTool for WorkflowTool {
                     error: result.error,
                 },
             );
+            if let Some(ref bg) = bg_for_complete {
+                let output = result
+                    .return_value
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "completed".to_string());
+                bg.complete_workflow(
+                    &notify_run_id,
+                    success,
+                    output,
+                    notify_started.elapsed().as_millis() as u64,
+                );
+            }
         });
 
         Ok(format!(

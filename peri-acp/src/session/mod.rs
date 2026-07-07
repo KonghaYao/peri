@@ -29,6 +29,7 @@ use peri_agent::{
 use peri_middlewares::{
     agent_define::AgentOverrides,
     prelude::{PermissionMode, SharedPermissionMode},
+    subagent::BackgroundTaskRegistry,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -81,6 +82,8 @@ pub struct AcpSession {
     /// `None` means the session doesn't support async wake (e.g., print mode
     /// without a SessionManager). The executor falls back to direct return.
     pub session_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
+    /// 后台任务注册中心（session 级，跨 prompt 存活）
+    pub background_registry: Arc<BackgroundTaskRegistry>,
 }
 
 struct SessionManagerInner {
@@ -156,6 +159,10 @@ impl SessionManager {
 
         let session_id = thread_id.clone();
 
+        // session 级 bg notification channel（rx 由 executor 在 run_session_loop 消费）
+        let (bg_notification_tx, _bg_notification_rx) = tokio::sync::mpsc::unbounded_channel();
+        let background_registry = Arc::new(BackgroundTaskRegistry::new(bg_notification_tx));
+
         let session = AcpSession {
             session_id: session_id.clone(),
             thread_id: thread_id.clone(),
@@ -175,6 +182,7 @@ impl SessionManager {
             v2_message_queue: peri_agent::session::MessageQueue::new(),
             v2_session: None,
             session_inbox: None,
+            background_registry,
         };
 
         self.inner.sessions.insert(session_id.clone(), session);
@@ -182,6 +190,10 @@ impl SessionManager {
     }
 
     fn build_session(&self, session_id: &str, thread_id: ThreadId, cwd: &str) -> AcpSession {
+        // session 级 bg notification channel（rx 由 executor 在 run_session_loop 消费）
+        let (bg_notification_tx, _bg_notification_rx) = tokio::sync::mpsc::unbounded_channel();
+        let background_registry = Arc::new(BackgroundTaskRegistry::new(bg_notification_tx));
+
         AcpSession {
             session_id: session_id.to_string(),
             thread_id,
@@ -201,6 +213,7 @@ impl SessionManager {
             v2_message_queue: peri_agent::session::MessageQueue::new(),
             v2_session: None,
             session_inbox: None,
+            background_registry,
         }
     }
 

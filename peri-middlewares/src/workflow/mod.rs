@@ -15,6 +15,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use peri_agent::{
+    agent::events::BackgroundTaskResult,
     error::AgentResult,
     middleware::{r#trait::Middleware, state::MiddlewareState},
     tools::BaseTool,
@@ -26,6 +27,44 @@ use peri_workflow::{
     runner::{AgentExecutor, WorkflowInput, WorkflowRunner},
     tool::WorkflowTool,
 };
+
+use crate::subagent::{
+    BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
+};
+
+/// 将 BackgroundTaskRegistry 适配为 peri-workflow 的 BgTaskRegistry trait
+impl peri_workflow::tool::BgTaskRegistry for BackgroundTaskRegistry {
+    fn register_workflow(&self, task_id: String, summary: String) {
+        let bg_task = BackgroundTask {
+            id: task_id,
+            agent_name: "workflow".to_string(),
+            prompt_summary: summary,
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            kind: BgTaskKind::Workflow,
+            cancel_handle: BgCancelHandle::Kill(None),
+            pid: None,
+            output_preview: None,
+        };
+        if let Err(e) = self.register_with_kind(bg_task) {
+            tracing::warn!(error = %e, "workflow bg registry: register_with_kind failed");
+        }
+    }
+
+    fn complete_workflow(&self, task_id: &str, success: bool, output: String, duration_ms: u64) {
+        let result = BackgroundTaskResult {
+            task_id: task_id.to_string(),
+            agent_name: "workflow".to_string(),
+            prompt_summary: String::new(),
+            success,
+            output: output.chars().take(500).collect(),
+            tool_calls_count: 0,
+            duration_ms,
+            child_thread_id: None,
+        };
+        self.complete(task_id, result);
+    }
+}
 
 /// Workflow 中间件持有者——session 级共享状态，跨 turn 存活。
 ///
@@ -41,6 +80,8 @@ pub struct WorkflowMiddleware {
     /// 原 notification_buffer_rx 通道已迁移到 MessageQueue 模式，
     /// 保留此 gate 用于 session 级 consumer 去重。
     notification_consumer_spawned: AtomicBool,
+    /// 统一后台任务注册表（可选，创建后可通过 set_bg_registry 延迟注入）
+    bg_registry: parking_lot::RwLock<Option<Arc<BackgroundTaskRegistry>>>,
 }
 
 impl WorkflowMiddleware {
@@ -67,17 +108,34 @@ impl WorkflowMiddleware {
             progress_store,
             journal_store,
             notification_consumer_spawned: AtomicBool::new(false),
+            bg_registry: parking_lot::RwLock::new(None),
         }
+    }
+
+    /// 设置统一后台任务注册表（构造时链式调用）
+    pub fn with_bg_registry(self, bg_registry: Arc<BackgroundTaskRegistry>) -> Self {
+        *self.bg_registry.write() = Some(bg_registry);
+        self
+    }
+
+    /// 延迟注入 bg_registry（创建后设置，通过 RwLock 支持内部可变性）
+    pub fn set_bg_registry(&self, bg_registry: Arc<BackgroundTaskRegistry>) {
+        *self.bg_registry.write() = Some(bg_registry);
     }
 
     /// 创建一个新的 WorkflowTool 实例。
     pub fn create_tool(&self) -> WorkflowTool {
-        WorkflowTool::new(
+        let mut tool = WorkflowTool::new(
             Arc::clone(&self.runner),
             Arc::clone(&self.registry),
             Arc::clone(&self.progress_store),
             Arc::clone(&self.journal_store),
-        )
+        );
+        if let Some(ref bg) = *self.bg_registry.read() {
+            tool = tool
+                .with_bg_registry(Arc::clone(bg) as Arc<dyn peri_workflow::tool::BgTaskRegistry>);
+        }
+        tool
     }
 
     /// 获取 progress store（TUI 面板订阅用）。

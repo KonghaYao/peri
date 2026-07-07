@@ -34,6 +34,7 @@ macro_rules! popup_text_shell {
 }
 
 pub mod ask_user_popup;
+pub mod confirm_popup;
 pub mod hitl_popup;
 pub mod oauth_popup;
 pub mod rewind_popup;

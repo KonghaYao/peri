@@ -8,7 +8,7 @@
 //! 在 Agent 面板。本面板提供跨调度源的"任务总览"。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{CRON_JOBS, VIEW_MODELS};
+use crate::kit::atoms::{BG_TASKS, CRON_JOBS, VIEW_MODELS};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 use peri_acp_types::view_model::{SubAgentGroupData, ViewModel};
@@ -27,6 +27,11 @@ use ratatui_kit::{
 pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let selected = hooks.use_state(|| 0usize);
 
+    // Background Tasks（从 BG_TASKS atom）
+    let bg_store = hooks.use_atom(&BG_TASKS);
+    let bg_tasks = bg_store.read().clone();
+    let _ = bg_store;
+
     // Cron
     let cron_store = hooks.use_atom(&CRON_JOBS);
     let cron_jobs = cron_store.read().clone();
@@ -37,9 +42,10 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let subagents = collect_subagents(&vm_store.read());
     let _ = vm_store;
 
+    let bg_count = bg_tasks.len();
     let cron_count = cron_jobs.len();
     let subagent_count = subagents.len();
-    let total = cron_count + subagent_count;
+    let total = bg_count + cron_count + subagent_count;
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         move |event| {
@@ -51,14 +57,29 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
             match key.code {
                 KeyCode::Esc => close_panel(),
-                KeyCode::Enter => close_panel(),
+                KeyCode::Enter => {
+                    // 如果选中了 bg task，尝试取消
+                    let sel = *selected.read();
+                    let bg_count = BG_TASKS.state().read().len();
+                    if sel < bg_count {
+                        if let Some(task) = BG_TASKS.state().read().get(sel) {
+                            tracing::info!(
+                                task_id = %task.task_id,
+                                kind = %task.kind,
+                                "tasks panel: cancel bg task (RPC not yet wired)"
+                            );
+                        }
+                    }
+                    close_panel()
+                }
                 KeyCode::Up => {
                     let mut s = selected.write();
                     *s = previous_selection(*s);
                 }
                 KeyCode::Down => {
                     let mut s = selected.write();
-                    let total = CRON_JOBS.state().read().len()
+                    let total = BG_TASKS.state().read().len()
+                        + CRON_JOBS.state().read().len()
                         + collect_subagents(&VIEW_MODELS.state().read()).len();
                     if total > 0 {
                         *s = next_selection(*s, total);
@@ -81,11 +102,56 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme::semantic().text.primary).bold(),
         ),
         Span::styled(
-            format!("   ({} cron, {} subagent)", cron_count, subagent_count),
+            format!(
+                "   ({} bg, {} cron, {} subagent)",
+                bg_count, cron_count, subagent_count
+            ),
             Style::new().fg(theme::semantic().text.dim),
         ),
     ]));
     lines.push(Line::from(""));
+
+    // Background Tasks section
+    if !bg_tasks.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            format!("  ▼ Background Tasks ({})", bg_count),
+            Style::new().fg(theme::semantic().border.active).bold(),
+        )]));
+        for (i, task) in bg_tasks.iter().enumerate() {
+            let row_idx = i;
+            let is_selected = row_idx == sel;
+            let cursor = if is_selected { ">" } else { " " };
+            let name_style = if is_selected {
+                Style::new().fg(theme::component().panel.title).bold()
+            } else {
+                Style::new().fg(theme::semantic().text.primary)
+            };
+            let kind_str = match task.kind.as_str() {
+                "shell" => "[sh]",
+                "agent" => "[ag]",
+                "workflow" => "[wf]",
+                _ => "[?]",
+            };
+            let pid_str = task.pid.map(|p| format!(" pid:{}", p)).unwrap_or_default();
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {} ", cursor),
+                    Style::new().fg(theme::component().panel.title),
+                ),
+                Span::styled(kind_str, Style::new().fg(theme::semantic().text.dim)),
+                Span::styled(format!(" {} ", task.task_id), name_style),
+                Span::styled(
+                    format!(
+                        "{}{}",
+                        task.summary.chars().take(60).collect::<String>(),
+                        pid_str
+                    ),
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
 
     // Cron section
     if !cron_jobs.is_empty() {
@@ -94,7 +160,8 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme::semantic().border.active).bold(),
         )]));
         for (i, job) in cron_jobs.iter().enumerate() {
-            let is_selected = i == sel;
+            let row_idx = bg_count + i;
+            let is_selected = row_idx == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
                 Style::new().fg(theme::component().panel.title).bold()
@@ -139,7 +206,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme::semantic().border.active).bold(),
         )]));
         for (i, sa) in subagents.iter().enumerate() {
-            let row_idx = cron_count + i;
+            let row_idx = bg_count + cron_count + i;
             let is_selected = row_idx == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {

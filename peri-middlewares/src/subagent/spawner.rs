@@ -25,7 +25,10 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     hooks::types::{HookEvent, RegisteredHook},
     subagent::{
-        background::{BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus},
+        background::{
+            BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle,
+            BgTaskKind,
+        },
         v2_bridge::build_v2_subagent_context,
         SubAgentMiddlewareConfig,
     },
@@ -343,7 +346,10 @@ pub async fn spawn_background_fork(
         prompt_summary,
         status: BackgroundTaskStatus::Running,
         started_at: std::time::Instant::now(),
-        abort_handle: join_handle,
+        kind: BgTaskKind::Agent,
+        cancel_handle: BgCancelHandle::Abort(join_handle.abort_handle()),
+        pid: None,
+        output_preview: None,
     };
     if let Err(e) = config.bg_registry.register(bg_task) {
         return Err(format!("Failed to register background fork task: {}", e).into());
