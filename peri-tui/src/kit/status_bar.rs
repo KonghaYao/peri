@@ -16,7 +16,7 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// 状态栏第 1 行：权限模式 · cwd · provider/model · CPU% · MEM · bg tasks
 #[component]
@@ -138,6 +138,7 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let slash_active = hooks.use_atom(&atoms::SLASH_HINT_ACTIVE);
     let copy_until = hooks.use_atom(&atoms::COPY_MESSAGE_UNTIL);
     let copy_count = hooks.use_atom(&atoms::COPY_CHAR_COUNT);
+    let quit_pending = hooks.use_atom(&atoms::QUIT_PENDING_SINCE);
 
     let is_popup = popup_kind.read().is_some();
     let is_at = *at_active.read();
@@ -165,13 +166,32 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         );
     }
 
+    // Ctrl+C 退出待确认提示——在 hint 行显示，不挤占通知栏。
+    let quit_active = quit_pending
+        .read()
+        .map_or(false, |t| now.duration_since(t) < Duration::from_secs(1));
+    if quit_active {
+        let hint = " 再次按 Ctrl+C 退出，其他键取消 ";
+        return element!(
+            View(
+                flex_direction: Direction::Horizontal,
+                width: Constraint::Fill(1),
+                height: Constraint::Length(1),
+                justify_content: Flex::End,
+            ) {
+                Text(text: Paragraph::new(
+                    Line::from(hint).fg(statusbar().text)
+                ).right_aligned())
+            }
+        );
+    }
+
     let hints = if is_popup {
         Line::from(" Esc: close | Enter: confirm ").fg(statusbar().muted)
     } else if is_at || is_slash {
         Line::from(" Esc: close | Tab: navigate | Enter: select ").fg(statusbar().muted)
     } else {
-        Line::from(" /: commands | Shift+Enter: newline | Ctrl+K: mode | Ctrl+O: diff ")
-            .fg(statusbar().muted)
+        Line::from(" /: commands | Shift+Enter: newline | Shift+Tab: mode ").fg(statusbar().muted)
     };
 
     element!(

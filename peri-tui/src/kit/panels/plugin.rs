@@ -146,7 +146,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     panel_shell!(PanelKind::Plugin, {
             ScrollView(
-                scroll_bars: crate::kit::panel_registry::clean_scrollbars(),
+                scrollbars: crate::kit::panel_registry::clean_scrollbars(),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {

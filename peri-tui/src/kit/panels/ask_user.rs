@@ -327,7 +327,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     panel_shell!(PanelKind::AskUser, {
         element!(
             ScrollView(
-                scroll_bars: panel_registry::clean_scrollbars(),
+                scrollbars: panel_registry::clean_scrollbars(),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {

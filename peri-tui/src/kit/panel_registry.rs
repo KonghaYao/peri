@@ -14,7 +14,7 @@ use ratatui::{
     widgets::{Scrollbar, ScrollbarOrientation},
 };
 use ratatui_kit::{
-    components::scroll_view::{ScrollBars, ScrollbarVisibility},
+    components::scroll_view::{ScrollbarVisibility, Scrollbars},
     crossterm::event::KeyCode,
     prelude::*,
     ratatui::layout::Constraint,
@@ -143,7 +143,7 @@ fn render_ask_user_panel() -> AnyElement<'static> {
 
 /// 所有 14 面板的元数据。
 ///
-/// 快捷键分配（避开 Ctrl+C 全局 quit 和 Ctrl+K cycle permission mode）：
+/// 快捷键分配（避开 Ctrl+C 全局 quit）：
 /// - Ctrl+M = Model（替代 legacy cycle model）
 /// - Ctrl+T = ThreadBrowser
 /// - Ctrl+R = Cron
@@ -500,9 +500,9 @@ pub fn close_all_panels() {
 
 /// 创建 peri-widgets 风格的垂直滚动条配置：
 /// thumb 用空格 + bg 颜色，track 透明，无箭头符号。
-pub fn clean_scrollbars() -> ScrollBars<'static> {
+pub fn clean_scrollbars() -> Scrollbars<'static> {
     let thumb_bg = crate::kit::theme::semantic().text.dim;
-    ScrollBars {
+    Scrollbars {
         vertical_scrollbar: Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .thumb_symbol(" ")
             .thumb_style(Style::default().bg(thumb_bg))
@@ -520,7 +520,7 @@ pub fn clean_scrollbars() -> ScrollBars<'static> {
                     .add_modifier(ratatui::style::Modifier::BOLD),
             ),
         vertical_scrollbar_visibility: ScrollbarVisibility::Automatic,
-        ..ScrollBars::default()
+        ..Scrollbars::default()
     }
 }
 

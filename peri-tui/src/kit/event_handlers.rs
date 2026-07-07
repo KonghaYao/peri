@@ -8,8 +8,7 @@
 //! | 快捷键 | 功能 |
 //! |--------|------|
 //! | Ctrl+C | 三级优先级链（中断→双击退出） |
-//! | Ctrl+O | Diff 视图切换 |
-//! | Ctrl+K | 权限模式循环 |
+//! | Shift+Tab（BackTab） | 权限模式循环 |
 //! | Esc    | 关闭 popup / 面板 / mention / slash |
 
 use ratatui_kit::{
@@ -18,9 +17,9 @@ use ratatui_kit::{
 };
 
 use super::atoms::{
-    ACP_STATE, CANCEL_TX, INPUT_AREA_ESC_PREFIX, LAST_ESC_TIME, MODE_HIGHLIGHT_UNTIL,
-    MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, PROVIDER_HIGHLIGHT_UNTIL, QUIT_PENDING_SINCE,
-    REWIND_PREVIEW,
+    ACP_STATE, CANCEL_TX, INPUT_AREA_ESC_PREFIX, LAST_CTRL_C_PROCESSED, LAST_ESC_TIME,
+    MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, PERMISSION_MODE_HANDLE,
+    PROVIDER_HIGHLIGHT_UNTIL, QUIT_PENDING_SINCE, REWIND_PREVIEW, SERVICE_SNAPSHOT,
 };
 use crate::kit::atoms::{Notification, PopupKind};
 use crate::kit::focus_router::{
@@ -64,7 +63,7 @@ fn determine_ctrl_c_action(
 
 /// Global Layer: 不可阻断的快捷键。
 ///
-/// 注册监听 Ctrl+C / Ctrl+O 等顶级快捷键。
+/// 注册监听 Ctrl+C 等顶级快捷键。
 pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()>) {
     hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
         tracing::info!(?event, "kit raw input event");
@@ -77,8 +76,25 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
 
         match classify_global_shortcut(&key) {
             Some(GlobalShortcut::Quit) => {
-                let loading = ACP_STATE.state().read().is_loading;
+                // 防重入：同一 Ctrl+C 事件在 200ms 内只能处理一次。
+                // ratatui-kit 在事件处理中写 atom 后可能触发重渲染并二次分发同一事件，
+                // 导致 FirstQuit 写入 QUIT_PENDING_SINCE 后第二次进入立即命中 Quit 分支。
+                // 200ms 远小于人类双击间隔（~500ms），仅屏蔽框架级重放。
                 let now = std::time::Instant::now();
+                let last_processed = *LAST_CTRL_C_PROCESSED.state().read();
+                const REENTRY_GUARD_MS: u64 = 200;
+                if let Some(last) = last_processed
+                    && now.duration_since(last) < std::time::Duration::from_millis(REENTRY_GUARD_MS)
+                {
+                    tracing::warn!(
+                        elapsed_ms = now.duration_since(last).as_millis(),
+                        "Ctrl+C reentrant guard: skipping duplicate dispatch"
+                    );
+                    return EventResult::Consumed;
+                }
+                *LAST_CTRL_C_PROCESSED.state().write() = Some(now);
+
+                let loading = ACP_STATE.state().read().is_loading;
                 let pending = *QUIT_PENDING_SINCE.state().read();
 
                 match determine_ctrl_c_action(loading, pending, now) {
@@ -91,7 +107,8 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
                     }
                     CtrlCAction::FirstQuit => {
                         *QUIT_PENDING_SINCE.state().write() = Some(now);
-                        show_quit_pending_notification(now);
+                        // 提示由 StatusBarRow2 订阅 QUIT_PENDING_SINCE 直接渲染，不走 NOTIFICATION
+                        info!("再次按 Ctrl+C 退出");
                         info!("再次按 Ctrl+C 退出");
                     }
                     CtrlCAction::Quit => {
@@ -105,7 +122,7 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
                 let diff_visible = crate::kit::atoms::DIFF_VISIBLE.state();
                 let mut g = diff_visible.write();
                 *g = !*g;
-                tracing::info!(diff_visible = *g, "Ctrl+O: 切换 diff 视图");
+                tracing::info!(diff_visible = *g, "切换 diff 视图");
                 EventResult::Consumed
             }
             Some(GlobalShortcut::CycleModel) => {
@@ -127,7 +144,7 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
 ///
 /// 注册：
 /// - Esc → 关闭 popup / @mention / slash_hint / 当前激活面板
-/// - Ctrl+K → cycle permission mode（保留）
+/// - Shift+Tab(BackTab)  → cycle permission mode
 pub fn register_root_handlers(hooks: &mut Hooks) {
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
         let Event::Key(key) = event else {
@@ -141,6 +158,21 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
             Some(GlobalShortcut::CyclePermissionMode) => {
                 *MODE_HIGHLIGHT_UNTIL.state().write() =
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                // 执行权限模式循环，并即时推送 SERVICE_SNAPSHOT 避免等待 2s 后台轮询
+                if let Some(mode_handle) = PERMISSION_MODE_HANDLE.get() {
+                    let new_mode = mode_handle.cycle();
+                    use peri_middlewares::hitl::PermissionMode;
+                    let label = match new_mode {
+                        PermissionMode::Default => "default",
+                        PermissionMode::AcceptEdit => "accept-edit",
+                        PermissionMode::AutoMode => "auto-mode",
+                        PermissionMode::Bypass => "bypass",
+                    };
+                    let handle = SERVICE_SNAPSHOT.state();
+                    let mut snap = handle.read().clone();
+                    snap.permission_mode = label.to_string();
+                    *handle.write() = snap;
+                }
                 EventResult::Consumed
             }
             _ => match key.code {
@@ -184,13 +216,6 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                 _ => EventResult::Ignored,
             },
         }
-    });
-}
-
-fn show_quit_pending_notification(now: std::time::Instant) {
-    *NOTIFICATION.state().write() = Some(Notification {
-        message: "再次按 Ctrl+C 退出".to_string(),
-        until: now + std::time::Duration::from_secs(1),
     });
 }
 

@@ -232,6 +232,10 @@ pub static ASK_USER_REQUEST_ID: AtomStatic<Option<String>> = AtomStatic::new(|| 
 
 pub static LAST_ESC_TIME: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static QUIT_PENDING_SINCE: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
+/// 防重入：记录上一次 Ctrl+C 事件被处理的时间。同一次按键在 200ms 内重复分发则忽略。
+/// 这是防御性保护，防止 ratatui-kit 在事件处理 → atom 写入 → 重渲染过程中
+/// 将同一事件二次分发，导致 FirstQuit → 立即 Quit 的 race condition。
+pub static LAST_CTRL_C_PROCESSED: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 
 pub static REWIND_ACTION_TX: OnceLock<UnboundedSender<RewindAction>> = OnceLock::new();
 pub static ASK_USER_RESPONSE_TX: OnceLock<UnboundedSender<AskUserResponseAction>> = OnceLock::new();

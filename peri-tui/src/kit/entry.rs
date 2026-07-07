@@ -220,6 +220,25 @@ pub async fn run_kit_fullscreen(
         EnableBracketedPaste,
         EnableFocusChange
     );
+
+    // 5a. 防御性 SIGINT 拦截——macOS 上部分终端在 raw mode 下仍可能对 Ctrl+C 发送
+    // SIGINT（或 ratatui-kit 的 raw mode 未完全生效）。此 handler 吞掉 SIGINT 避免
+    // 进程被 kernel 强制终止；Ctrl+C 的事件级处理由 Global handler（event_handlers.rs）
+    // 独立完成，两者互不干扰。
+    let sigint_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = sigint_shutdown.cancelled() => break,
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::warn!(
+                        "SIGINT received at process level — swallowed (handled by TUI event handler)"
+                    );
+                }
+            }
+        }
+    });
+
     let result = element!(AppShell).fullscreen().await;
     let _ = execute!(
         std::io::stdout(),

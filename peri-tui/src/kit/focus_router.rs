@@ -115,12 +115,16 @@ pub fn active_layer() -> FocusLayer {
 }
 
 pub fn classify_global_shortcut(key: &KeyEvent) -> Option<GlobalShortcut> {
+    // BackTab (Shift+Tab) → 权限模式循环
+    // crossterm 发送 BackTab 时 modifiers 可能为 SHIFT 或 NONE，两者都处理
+    if key.code == KeyCode::BackTab {
+        return Some(GlobalShortcut::CyclePermissionMode);
+    }
     // Ctrl+letter shortcuts (standard terminal)
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => return Some(GlobalShortcut::Quit),
             KeyCode::Char('o') => return Some(GlobalShortcut::ToggleDiff),
-            KeyCode::Char('k') => return Some(GlobalShortcut::CyclePermissionMode),
             KeyCode::Char('t') => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     return Some(GlobalShortcut::CycleProvider);

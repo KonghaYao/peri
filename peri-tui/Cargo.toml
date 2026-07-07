@@ -28,8 +28,7 @@ peri-agent = { path = "../peri-agent" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-lsp = { path = "../peri-lsp" }
 ratatui = { version = "0.30.1", features = ["unstable-rendered-line-info", "unstable-widget-ref"] }
-ratatui-kit = { git = "https://github.com/KonghaYao/ratatui-kit.git", branch = "main", features = ["full"] }
-tui-input = "0.8"
+ratatui-kit = { git = "https://github.com/KonghaYao/ratatui-kit.git", branch = "peri/deps", features = ["full"] }
 tokio.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true
@@ -39,7 +38,6 @@ serde_json.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 dirs-next.workspace = true
-tui-textarea-2 = "0.11"
 parking_lot.workspace = true
 arboard = "3"
 png = "0.18"
