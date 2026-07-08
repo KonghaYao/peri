@@ -28,24 +28,26 @@ pub async fn replay_session_history(
 ) -> Result<(), ReplayError> {
     for msg in history.iter().filter(|m| !m.is_system()) {
         let update = match msg {
-            BaseMessage::Human { content, .. } => {
-                let text = extract_text(content);
-                SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
-                    TextContent::new(text),
-                )))
-            }
-            BaseMessage::Ai { content, .. } => {
-                let text = extract_text(content);
-                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-                    TextContent::new(text),
-                )))
-            }
+            BaseMessage::Human { content, .. } => SessionUpdate::UserMessageChunk(replay_chunk(
+                ContentBlock::Text(TextContent::new(extract_text(content))),
+            )),
+            BaseMessage::Ai { content, .. } => SessionUpdate::AgentMessageChunk(replay_chunk(
+                ContentBlock::Text(TextContent::new(extract_text(content))),
+            )),
             _ => continue,
         };
         let notif = SessionNotification::new(SessionId::new(session_id.to_string()), update);
         sender.send(notif).await?;
     }
     Ok(())
+}
+
+fn replay_chunk(content: ContentBlock) -> ContentChunk {
+    let mut chunk = ContentChunk::new(content);
+    let mut meta = serde_json::Map::new();
+    meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));
+    chunk.meta = Some(meta);
+    chunk
 }
 
 /// Extract plain text from a `MessageContent`.

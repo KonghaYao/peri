@@ -12,7 +12,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::kit::acp_types::AcpEventData;
+use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::{RENDER_CACHE, VIEW_MODELS};
 use crate::kit::view_render;
 
@@ -49,7 +49,7 @@ pub struct WrappedLineInfo {
 }
 
 pub fn spawn_render_bridge(
-    mut rx: UnboundedReceiver<AcpEventData>,
+    mut rx: UnboundedReceiver<AcpEventWithEpoch>,
     mut resize_rx: UnboundedReceiver<u16>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
@@ -102,7 +102,7 @@ pub fn spawn_render_bridge(
                         msg_lines_cache.clear();
                     }
                 }
-                Some(_event) = rx.recv() => {
+                Some(_epoch_event) = rx.recv() => {
                     // 检测 BRIDGE_RESET_COUNTER——acp_bridge 已清空 VIEW_MODELS，
                     // render_bridge 同步清空缓存，避免用旧数据重建 RENDER_CACHE。
                     let counter = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();

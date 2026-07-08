@@ -4,8 +4,8 @@
 //! 经 acp_events::dispatch_and_notify 处理后写入全局 Atom。
 //! Phase 2 完整实现——main_loop fan-out 后独立消费。
 
-use crate::kit::acp_events::{self, BridgeState};
-use crate::kit::acp_types::{AcpEventData, CurrentTurn};
+use crate::kit::acp_events::{self, BridgeState, SessionPhase};
+use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch, CurrentTurn};
 use crate::kit::atoms;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 /// 维护 BridgeState 内部状态，每次事件后写入 VIEW_MODELS / ACP_STATE Atom，
 /// 触发 ratatui-kit 组件重渲染。
 pub fn spawn_acp_bridge(
-    mut rx: mpsc::UnboundedReceiver<AcpEventData>,
+    mut rx: mpsc::UnboundedReceiver<AcpEventWithEpoch>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -25,9 +25,10 @@ pub fn spawn_acp_bridge(
             variant: 0,
             committed: Arc::from([]),
             current_turn: CurrentTurn::new(),
-            is_loading: false,
+            phase: SessionPhase::Idle,
             popup_kind: None,
             has_turn_done: false,
+            active_session_id: String::new(),
         };
 
         // 追踪 BRIDGE_RESET_COUNTER——submit_consumer 的 /clear / thread_load
@@ -51,16 +52,20 @@ pub fn spawn_acp_bridge(
                 event = rx.recv() => {
                     match event {
                         None => break,
-                        Some(event) => {
+                        Some(epoch_event) => {
+                            // 先检测 BRIDGE_RESET_COUNTER 变更 → 重置 state
+                            // （reset 内部会更新 state.active_session_id，
+                            //  因此 session_id filter 必须在 reset 之后执行）
                             let counter = atoms::BRIDGE_RESET_COUNTER.get();
                             let just_reset = counter != last_reset_counter;
                             if just_reset {
                                 let old_counter = last_reset_counter;
                                 last_reset_counter = counter;
+                                state.active_session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
                                 state.committed = Arc::from([]);
                                 state.current_turn.reset();
                                 state.has_turn_done = false;
-                                state.is_loading = false;
+                                state.phase = SessionPhase::Idle;
                                 state.popup_kind = None;
                                 // 同步清空 INPUT_BUFFER：/clear 和 thread_load 切换时，
                                 // 递增 BRIDGE_RESET_COUNTER 触发此分支，旧会话 loading
@@ -71,9 +76,37 @@ pub fn spawn_acp_bridge(
                                 tracing::info!(
                                     old = old_counter,
                                     new = counter,
+                                    sid = %state.active_session_id,
                                     "[CLEAR_DEBUG] bridge: state reset by BRIDGE_RESET_COUNTER"
                                 );
+                                // reset 触发事件可能来自旧 session——此时需过滤
+                                // （state.active_session_id 已更新为新值，旧事件不匹配）
+                                if !epoch_event.active_session_id.is_empty()
+                                    && epoch_event.active_session_id != state.active_session_id
+                                {
+                                    tracing::debug!(
+                                        event_sid = %epoch_event.active_session_id,
+                                        state_sid = %state.active_session_id,
+                                        "[SESSION_FILTER] dropping stale event that triggered reset"
+                                    );
+                                    continue;
+                                }
                             }
+
+                            // 非 reset 路径：陈旧事件过滤（active_session_id 不匹配 → 丢弃）
+                            if !just_reset
+                                && !epoch_event.active_session_id.is_empty()
+                                && epoch_event.active_session_id != state.active_session_id
+                            {
+                                tracing::debug!(
+                                    event_sid = %epoch_event.active_session_id,
+                                    state_sid = %state.active_session_id,
+                                    "[SESSION_FILTER] dropping stale event from old session"
+                                );
+                                continue;
+                            }
+
+                            let event = epoch_event.event;
 
                             // === [CLEAR_DEBUG] 诊断 instrumentation（临时） ===
                             // 目的：定位 /clear 后哪个事件把旧数据写回 committed。
@@ -123,6 +156,9 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         ReasoningChunk(_) => "ReasoningChunk",
         ToolStarted(_) => "ToolStarted",
         ToolEnded(_) => "ToolEnded",
+        PromptStarted => "PromptStarted",
+        SessionReplayStarted => "SessionReplayStarted",
+        SessionReplayDone => "SessionReplayDone",
         TurnDone => "TurnDone",
         TurnInterrupted { reason: _ } => "TurnInterrupted",
         ReplayUserBubble { .. } => "ReplayUserBubble",
@@ -144,5 +180,12 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         BgTaskCompleted { .. } => "BgTaskCompleted",
         BgTaskCancelled { .. } => "BgTaskCancelled",
         BgTaskSnapshot(_) => "BgTaskSnapshot",
+        TurnCommitted { .. } => "TurnCommitted",
+        CompactStarted => "CompactStarted",
+        CompactCompleted { .. } => "CompactCompleted",
+        CompactError { .. } => "CompactError",
+        BackgroundTaskCompleted { .. } => "BackgroundTaskCompleted",
+        AgentExecutionFailed { .. } => "AgentExecutionFailed",
+        WorkflowProgress { .. } => "WorkflowProgress",
     }
 }

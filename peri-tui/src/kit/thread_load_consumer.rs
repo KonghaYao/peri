@@ -21,7 +21,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::acp_client::AcpTuiClient;
-use crate::kit::atoms;
+use crate::kit::atoms::{self, RENDER_CACHE, VIEW_MODELS, ViewModelsSnapshot};
+use crate::kit::render_bridge::RenderCache;
 
 /// 启动 thread 切换消费者后台任务。
 pub fn spawn_thread_load_consumer(
@@ -109,15 +110,31 @@ async fn handle_load(
     }
     info!(thread_id = %thread_id, cwd = %cwd, "kit thread_load_consumer: calling session/load");
 
-    // 触发 bridge 状态重置：防止旧 session 的 committed ViewModel
-    // 在新 session 的 ViewCommit 到达之前污染消息区。
+    // 1. 先设置目标 session_id，bridge reset 后会立刻进入 session_id 过滤模式。
+    atoms::ACTIVE_SESSION_ID.set(thread_id.to_string());
+    // 2. 先触发 bridge 重置，避免旧 session 的 committed/current_turn 污染新 thread。
     crate::kit::atoms::BRIDGE_RESET_COUNTER.set(
         crate::kit::atoms::BRIDGE_RESET_COUNTER
             .get()
             .wrapping_add(1),
     );
-
+    // 3. 先清空 UI/cache。后续 session/load replay 事件会重新追加历史消息。
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    *RENDER_CACHE.state().write() = RenderCache::default();
+    {
+        let ref_guard = atoms::ACP_STATE.state();
+        let mut acp = ref_guard.write();
+        acp.is_loading = false;
+    }
+    // 4. 最后加载 session。replay notification 到达时 active session 已就绪，不会被误丢。
     acp_client.load_session(&thread_id, cwd, None).await?;
+    // 5. session/load 已完成，显式回到 idle，避免 replay 或历史 usage 留下 loading 态。
+    {
+        let ref_guard = atoms::ACP_STATE.state();
+        let mut acp = ref_guard.write();
+        acp.variant = 0;
+        acp.is_loading = false;
+    }
 
     Ok(())
 }

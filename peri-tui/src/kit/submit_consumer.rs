@@ -21,8 +21,9 @@ use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
 use crate::kit::atoms::{
-    ACP_STATE, BRIDGE_RESET_COUNTER, NOTIFICATION, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE,
-    RENDER_CACHE, RENDER_HEARTBEAT, REWIND_ACTION_TX, VIEW_MODELS, ViewModelsSnapshot,
+    ACP_STATE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, NOTIFICATION, PERI_CONFIG_HANDLE,
+    PERMISSION_MODE_HANDLE, RENDER_CACHE, RENDER_HEARTBEAT, REWIND_ACTION_TX, VIEW_MODELS,
+    ViewModelsSnapshot,
 };
 use crate::kit::render_bridge::RenderCache;
 
@@ -82,13 +83,9 @@ async fn handle_submit(
     if is_clear_command(trimmed) {
         info!("kit submit_consumer: /clear intercepted, creating new session");
 
-        // 触发 bridge 状态重置：防止旧 session committed 在新 session 中残留
+        // 1. 先切断当前 UI 事实源，防止旧 session 的延迟事件继续污染视图。
+        ACTIVE_SESSION_ID.set(String::new());
         BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
-
-        // 立即重置 atom 状态（在异步 new_session 之前）。
-        // input_area 已在 submit_text 中将 is_loading 设为 true，
-        // 旧 session 的滞留事件也会在 new_session 执行期间通过
-        // acp_bridge 写入 is_loading=true。先重置可最小化窗口期。
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
         *RENDER_CACHE.state().write() = RenderCache::default();
         {
@@ -97,12 +94,13 @@ async fn handle_submit(
             acp.is_loading = false;
         }
 
-        acp_client.new_session(cwd, None).await?;
+        // 2. 再创建新 session（同步等待），期间旧 session 事件会被 pump/bridge 过滤。
+        let new_sid = acp_client.new_session(cwd, None).await?;
+        // 3. 拿到新 sid 后同步活跃 session，并再次 reset，让 bridge 进入新 session 过滤模式。
+        ACTIVE_SESSION_ID.set(new_sid);
+        BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
 
-        // 再次重置：旧 session 的 CancellationToken 虽在 session/close
-        // 时取消，但已进入 pipe 的滞留事件（TextChunk/ToolStarted）
-        // 会在 new_session 执行期间通过 acp_bridge 写入 is_loading=true。
-        // 这些事件无后续 TurnDone 来清除 loading，必须手动再清理一次。
+        // 4. 二次清空，确保 new_session 过程中的中间状态不会残留。
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
         *RENDER_CACHE.state().write() = RenderCache::default();
         {
@@ -136,7 +134,16 @@ async fn handle_submit(
     // 懒初始化 session（首次提交或 session/load 之后）
     if !acp_client.has_session() {
         info!(cwd = %cwd, "kit submit_consumer: creating initial session");
-        acp_client.new_session(cwd, None).await?;
+        let session_id = acp_client.new_session(cwd, None).await?;
+        ACTIVE_SESSION_ID.set(session_id);
+        BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
+    }
+
+    {
+        let acp = ACP_STATE.state();
+        let mut guard = acp.write();
+        guard.variant = 1;
+        guard.is_loading = true;
     }
 
     let content = MessageContent::text(trimmed.to_string());

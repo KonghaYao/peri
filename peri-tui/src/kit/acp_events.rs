@@ -16,6 +16,13 @@ use std::time::{Duration, Instant};
 // BridgeState — ACP 事件桥接内部状态
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPhase {
+    Idle,
+    PromptRunning,
+    ReplayingHistory,
+}
+
 /// 桥接任务维护的内部状态，每个 ACP 事件到达时同步更新。
 ///
 /// 定义在 acp_events.rs 中以避免 acp_bridge ↔ acp_events 循环依赖。
@@ -30,8 +37,8 @@ pub struct BridgeState {
     pub committed: Arc<[TuiRenderUnit]>,
     /// 当前轮次的增量数据
     pub current_turn: CurrentTurn,
-    /// Agent 是否正在加载中
-    pub is_loading: bool,
+    /// 当前 session lifecycle 阶段。loading 只由该阶段派生。
+    pub phase: SessionPhase,
     /// S7：精确弹窗类型，由 AcpEvent 直接映射。None = 无弹窗。
     /// 弹窗激活状态由 POPUP_KIND.is_some() 派生（status_bar / event_handlers 都读这个）
     pub popup_kind: Option<crate::kit::atoms::PopupKind>,
@@ -39,6 +46,8 @@ pub struct BridgeState {
     /// fallback 判断——一旦 has_turn_done=true，committed 以 bridge 为准，
     /// 即使为空也不 fallback 到 atom 旧值（/clear 产生空 committed 是合法结果）。
     pub has_turn_done: bool,
+    /// 当前活跃 session 的 ID。事件携带的 active_session_id 不匹配时丢弃。
+    pub active_session_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -62,12 +71,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     );
                 }
                 state.variant = 1;
-                state.is_loading = true;
                 push_view_models(state);
             } else {
                 state.current_turn.append_text(&tc.text);
                 state.variant = 1;
-                state.is_loading = true;
                 push_view_models(state);
             }
             push_acp_state(state);
@@ -84,7 +91,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     );
                 }
                 state.variant = 1;
-                state.is_loading = true;
                 push_view_models(state);
             } else {
                 state.current_turn.append_reasoning(&rc.text);
@@ -93,7 +99,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     "bridge: reasoning appended"
                 );
                 state.variant = 1;
-                state.is_loading = true;
                 push_view_models(state);
             }
             push_acp_state(state);
@@ -112,7 +117,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     tracing::trace!(agent_id, tool_id = %ts.tool_id, "kit bridge: subagent tool start has no active group");
                 }
                 state.variant = 1;
-                state.is_loading = true;
                 push_view_models(state);
             } else {
                 state.current_turn.start_tool(ToolCardAccumulator::new(
@@ -121,7 +125,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     ts.input_summary.clone(),
                 ));
                 state.variant = 1;
-                state.is_loading = true;
                 push_view_models(state);
             }
             push_acp_state(state);
@@ -138,20 +141,40 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     tracing::trace!(agent_id, tool_id = %te.tool_id, "kit bridge: subagent tool end has no active group");
                 }
                 state.variant = 1;
-                state.is_loading = true;
                 push_view_models(state);
             } else {
                 state
                     .current_turn
                     .end_tool(&te.tool_id, te.output_summary.clone(), te.is_error);
                 state.variant = 1;
-                state.is_loading = true;
                 push_view_models(state);
             }
             push_acp_state(state);
         }
 
         // ── §4.2 Boundary events ──
+        PromptStarted => {
+            state.phase = SessionPhase::PromptRunning;
+            state.variant = 1;
+            push_acp_state(state);
+        }
+        SessionReplayStarted => {
+            state.phase = SessionPhase::ReplayingHistory;
+            state.variant = 0;
+            state.current_turn.reset();
+            push_view_models(state);
+            push_acp_state(state);
+        }
+        SessionReplayDone => {
+            if state.phase == SessionPhase::ReplayingHistory {
+                state.phase = SessionPhase::Idle;
+            }
+            state.variant = 0;
+            state.current_turn.reset();
+            state.has_turn_done = true;
+            push_view_models(state);
+            push_acp_state(state);
+        }
         TurnDone => {
             // (a) 收集 buffered 输入和 assistant view_models，确保归档顺序正确
             let buffered_texts: Vec<String> = INPUT_BUFFER.state().read().iter().cloned().collect();
@@ -189,11 +212,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             // (d) has_turn_done 提前到 push_view_models 之前，语义直观
             state.has_turn_done = true;
 
-            // (e) S16：有 buffered 输入 → 保持 loading 态，避免 drain→submit 到首条流式事件间的空白窗口期
-            state.is_loading = has_buffered;
+            state.phase = SessionPhase::Idle;
 
             tracing::info!(
-                is_loading = state.is_loading,
+                is_loading = state.phase == SessionPhase::PromptRunning,
                 has_buffered,
                 committed_len = state.committed.len(),
                 current_turn_empty = state.current_turn.is_empty(),
@@ -222,7 +244,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             }
             state.current_turn = CurrentTurn::new();
             state.variant = 0;
-            state.is_loading = false;
+            state.phase = SessionPhase::Idle;
             // has_turn_done 提前到 push_view_models 之前，语义直观
             state.has_turn_done = true;
             push_view_models(state);
@@ -306,14 +328,12 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 .current_turn
                 .start_subagent(agent_id.clone(), agent_name.clone());
             state.variant = 1;
-            state.is_loading = true;
             push_view_models(state);
             push_acp_state(state);
         }
         SubagentStopped { agent_id } => {
             state.current_turn.stop_subagent(agent_id);
             state.variant = 1;
-            state.is_loading = true;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -349,6 +369,73 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.has_turn_done = true;
             push_view_models(state);
             push_acp_state(state);
+        }
+
+        // ── §4.8 Agent Event Extensions ──
+        TurnCommitted {
+            messages_json: _,
+            steps,
+        } => {
+            tracing::info!(steps, "bridge: TurnCommitted ({steps} steps)");
+        }
+        CompactStarted => {
+            tracing::info!("bridge: CompactStarted");
+            state.phase = SessionPhase::PromptRunning;
+            push_acp_state(state);
+        }
+        CompactCompleted { summary, .. } => {
+            tracing::info!(summary_len = summary.len(), "bridge: CompactCompleted");
+            state.phase = SessionPhase::Idle;
+            push_acp_state(state);
+        }
+        CompactError { message } => {
+            tracing::warn!(message, "bridge: CompactError");
+            state.phase = SessionPhase::Idle;
+            push_acp_state(state);
+        }
+        BackgroundTaskCompleted {
+            task_id,
+            agent_name,
+            success,
+            duration_ms,
+            ..
+        } => {
+            let msg = if *success {
+                format!(
+                    "后台 {} {} 完成 ({:.0}s)",
+                    agent_name,
+                    task_id,
+                    *duration_ms as f64 / 1000.0
+                )
+            } else {
+                format!(
+                    "后台 {} {} 失败 ({:.0}s)",
+                    agent_name,
+                    task_id,
+                    *duration_ms as f64 / 1000.0
+                )
+            };
+            tracing::info!(msg, "bridge: BackgroundTaskCompleted");
+        }
+        AgentExecutionFailed { message } => {
+            tracing::error!(message, "bridge: AgentExecutionFailed");
+            state.phase = SessionPhase::Idle;
+            push_acp_state(state);
+        }
+        WorkflowProgress {
+            run_id,
+            workflow_name,
+            event_type,
+            phase,
+            ..
+        } => {
+            tracing::debug!(
+                run_id,
+                workflow_name,
+                event_type,
+                phase = ?phase,
+                "bridge: WorkflowProgress"
+            );
         }
 
         // ── Unknown / forward-compat ──
@@ -438,7 +525,7 @@ fn push_acp_state(state: &mut BridgeState) {
     let snapshot = AcpStateSnapshot {
         variant: state.variant,
         view_count: state.committed.len() + state.current_turn.view_models().len(),
-        is_loading: state.is_loading,
+        is_loading: state.phase == SessionPhase::PromptRunning,
         wizard_active: false,
         at_mention_active: *AT_MENTION_ACTIVE.state().read(),
         slash_hint_active: *SLASH_HINT_ACTIVE.state().read(),
@@ -494,9 +581,10 @@ mod tests {
             variant: 0,
             committed: Arc::from([]),
             current_turn: CurrentTurn::new(),
-            is_loading: false,
+            phase: SessionPhase::Idle,
             popup_kind: None,
             has_turn_done: false,
+            active_session_id: String::new(),
         };
 
         dispatch_and_notify(
@@ -643,9 +731,10 @@ mod tests {
             variant: 0,
             committed: Arc::from([]),
             current_turn: CurrentTurn::new(),
-            is_loading: false,
+            phase: SessionPhase::Idle,
             popup_kind: None,
             has_turn_done: false,
+            active_session_id: String::new(),
         };
 
         dispatch_and_notify(
@@ -676,9 +765,10 @@ mod tests {
             variant: 0,
             committed: Arc::from([]),
             current_turn: CurrentTurn::new(),
-            is_loading: false,
+            phase: SessionPhase::Idle,
             popup_kind: None,
             has_turn_done: false,
+            active_session_id: String::new(),
         };
 
         dispatch_and_notify(
@@ -705,9 +795,10 @@ mod tests {
             variant: 0,
             committed: Arc::from([]),
             current_turn: CurrentTurn::new(),
-            is_loading: false,
+            phase: SessionPhase::Idle,
             popup_kind: None,
             has_turn_done: false,
+            active_session_id: String::new(),
         };
 
         // 第一轮：stream one text → TurnDone
@@ -761,9 +852,10 @@ mod tests {
             variant: 0,
             committed: Arc::from([]),
             current_turn: CurrentTurn::new(),
-            is_loading: false,
+            phase: SessionPhase::Idle,
             popup_kind: None,
             has_turn_done: false,
+            active_session_id: String::new(),
         };
 
         // 往 current_turn 写入一条 assistant 文本
@@ -832,9 +924,10 @@ mod tests {
             variant: 1,
             committed: Arc::clone(&pre_existing),
             current_turn: CurrentTurn::new(),
-            is_loading: true,
+            phase: SessionPhase::PromptRunning,
             popup_kind: None,
             has_turn_done: false,
+            active_session_id: String::new(),
         };
 
         dispatch_and_notify(
@@ -854,7 +947,7 @@ mod tests {
             other => panic!("committed[0] 应为原始 TuiUserBubble, got {other:?}"),
         }
         assert!(state.current_turn.is_empty(), "current_turn 应已重置");
-        assert!(!state.is_loading, "is_loading 应为 false");
+        assert_eq!(state.phase, SessionPhase::Idle, "phase 应为 Idle");
         assert!(
             state.has_turn_done,
             "has_turn_done 应在 push_view_models 之前已为 true"
@@ -881,9 +974,10 @@ mod tests {
             variant: 0,
             committed: Arc::from([]),
             current_turn: CurrentTurn::new(),
-            is_loading: false,
+            phase: SessionPhase::Idle,
             popup_kind: None,
             has_turn_done: true,
+            active_session_id: String::new(),
         };
 
         // push_view_models: committed 为空但 has_turn_done=true — 不 fallback 到 atom 旧值

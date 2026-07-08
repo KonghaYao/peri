@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use parking_lot::RwLock;
 use std::sync::OnceLock;
 
+use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::ViewModelsSnapshot;
 use crate::kit::atoms::{
@@ -616,9 +617,16 @@ fn submit_text(submitted: String) {
         return;
     }
 
+    let trimmed = submitted.trim().to_string();
+    if let Some(kind) =
+        panel_for_submit_slash_command(trimmed.split_whitespace().next().unwrap_or(""))
+    {
+        open_panel(kind);
+        return;
+    }
+
     push_history(&submitted);
     reset_history_cursor();
-    let trimmed = submitted.trim().to_string();
     let is_loading = ACP_STATE.state().read().is_loading;
     if is_loading {
         append_local_user_bubble(&trimmed);
@@ -631,11 +639,17 @@ fn submit_text(submitted: String) {
     } else if let Some(tx) = SUBMIT_TX.get() {
         append_local_user_bubble(&trimmed);
         let _ = tx.send(trimmed);
+    }
+}
 
-        // S16：提交后立即设为 loading，避免按键到首条流式事件间的空白窗口期。
-        let acp = ACP_STATE.state();
-        let mut guard = acp.write();
-        guard.is_loading = true;
+fn panel_for_submit_slash_command(cmd: &str) -> Option<PanelKind> {
+    if !cmd.starts_with('/') || cmd == "/" {
+        return None;
+    }
+    match cmd {
+        // `/model` 直接 Enter 保留 submit_consumer 的快速切 model 行为；Tab 选择仍打开面板。
+        "/model" => None,
+        _ => panel_for_slash_command(cmd),
     }
 }
 
@@ -945,6 +959,23 @@ mod tests {
         apply_slash_selection(&mut s, "help");
         assert_eq!(s.text, "你好 /help  后面");
         assert_eq!(s.cursor, 9);
+    }
+
+    #[test]
+    fn test_panel_for_submit_slash_command_handles_history_aliases() {
+        assert_eq!(
+            panel_for_submit_slash_command("/history"),
+            Some(PanelKind::ThreadBrowser)
+        );
+        assert_eq!(
+            panel_for_submit_slash_command("/his"),
+            Some(PanelKind::ThreadBrowser)
+        );
+    }
+
+    #[test]
+    fn test_panel_for_submit_slash_command_keeps_model_as_view_action() {
+        assert_eq!(panel_for_submit_slash_command("/model"), None);
     }
 
     #[test]

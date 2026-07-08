@@ -270,6 +270,10 @@ pub static COPY_MESSAGE_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| 
 /// 永久卡死。AppShell 组件 `use_atom` 订阅此 atom。
 pub static RENDER_HEARTBEAT: AtomStatic<u64> = AtomStatic::new(|| 0);
 
+/// 当前活跃 session 的 ID。由 submit_consumer/thread_load_consumer 在 session 变更时设置。
+/// acp_bridge 在 reset 后用于过滤陈旧事件（event.active_session_id != ACTIVE_SESSION_ID → 丢弃）。
+pub static ACTIVE_SESSION_ID: AtomStatic<String> = AtomStatic::new(|| String::new());
+
 /// Bridge 重置计数器——/clear 或 thread 切换时 +1，acp_bridge 检测到变更时
 /// 清空 committed / has_view_commit / current_turn，防止旧 session 的 VM
 /// 残留污染新 session 的消息区。

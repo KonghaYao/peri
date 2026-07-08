@@ -252,12 +252,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let todo_atom = hooks.use_atom(&crate::kit::atoms::TODO_ITEMS);
     let cache_snapshot = render_cache.read();
     let todo_items = todo_atom.read().clone();
-    // is_loading 双重检测：ACP_STATE.is_loading（acp_bridge 在首条流式事件时置 true）+ RENDER_CACHE CurrentTurn。
-    let acp_is_loading = acp_state.read().is_loading;
-    let is_loading = acp_is_loading
-        || cache_snapshot.entries.last().map_or(false, |(k, _)| {
-            matches!(k, crate::kit::render_bridge::VmKey::CurrentTurn(_))
-        });
+    // is_loading 单数据源：ACP_STATE.is_loading（acp_bridge 在首条流式事件时置 true）。
+    let is_loading = acp_state.read().is_loading;
 
     let entries_len = cache_snapshot.entries.len();
     let raw_ch = cache_snapshot

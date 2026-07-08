@@ -349,9 +349,9 @@ pub fn slash_command_for_panel(kind: PanelKind) -> &'static str {
 
 pub fn panel_for_slash_command(command: &str) -> Option<PanelKind> {
     let normalized = command.trim_start_matches('/').to_ascii_lowercase();
-    // S16：/history 是 /threads（Thread Browser 面板）的别名。
+    // S16：/history（以及用户常用缩写 /his）是 /threads（Thread Browser 面板）的别名。
     // ACP server 将 "history" 作为远程 command 下发，但 TUI 应映射为面板打开。
-    if normalized == "history" {
+    if normalized == "history" || normalized == "his" {
         return Some(PanelKind::ThreadBrowser);
     }
     PANELS
@@ -710,6 +710,22 @@ mod tests {
             assert_eq!(panel_for_slash_command(m.slash_command), Some(m.kind));
             assert_eq!(slash_command_for_panel(m.kind), m.slash_command);
         }
+    }
+
+    #[test]
+    fn test_history_aliases_map_to_thread_browser() {
+        assert_eq!(
+            panel_for_slash_command("history"),
+            Some(PanelKind::ThreadBrowser)
+        );
+        assert_eq!(
+            panel_for_slash_command("/history"),
+            Some(PanelKind::ThreadBrowser)
+        );
+        assert_eq!(
+            panel_for_slash_command("/his"),
+            Some(PanelKind::ThreadBrowser)
+        );
     }
 
     #[test]

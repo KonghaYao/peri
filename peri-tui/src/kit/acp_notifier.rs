@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::acp_client::AcpNotification;
-use crate::kit::acp_types::AcpEventData;
+use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, SPINNER_TOKEN_COUNT};
 use crate::kit::input_area::refresh_slash_items;
 use peri_acp::event::AcpEvent;
@@ -34,8 +34,8 @@ use serde_json::Value;
 /// 通道关闭（transport 断开）或 shutdown 触发时干净退出。
 pub fn spawn_kit_notifier(
     mut notification_rx: mpsc::UnboundedReceiver<AcpNotification>,
-    bridge_tx: mpsc::UnboundedSender<AcpEventData>,
-    render_bridge_tx: mpsc::UnboundedSender<AcpEventData>,
+    bridge_tx: mpsc::UnboundedSender<AcpEventWithEpoch>,
+    render_bridge_tx: mpsc::UnboundedSender<AcpEventWithEpoch>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -77,6 +77,80 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
         AcpEvent::SubagentStopped { instance_id, .. } => Some(AcpEventData::SubagentStopped {
             agent_id: instance_id,
         }),
+        // ── §4.8 Agent Event Extensions (P1-5) ──
+        AcpEvent::TurnCommitted {
+            messages_json,
+            steps,
+        } => Some(AcpEventData::TurnCommitted {
+            messages_json,
+            steps,
+        }),
+        AcpEvent::CompactStarted => Some(AcpEventData::CompactStarted),
+        AcpEvent::CompactCompleted {
+            summary,
+            files,
+            skills,
+            micro_cleared,
+            messages_json,
+        } => {
+            let files_json: Vec<serde_json::Value> = files
+                .into_iter()
+                .filter_map(|f| serde_json::to_value(f).ok())
+                .collect();
+            Some(AcpEventData::CompactCompleted {
+                summary,
+                files: files_json,
+                skills,
+                micro_cleared,
+                messages_json,
+            })
+        }
+        AcpEvent::CompactError { message } => Some(AcpEventData::CompactError { message }),
+        AcpEvent::BackgroundTaskCompleted {
+            task_id,
+            agent_name,
+            success,
+            output,
+            tool_calls_count,
+            duration_ms,
+            child_thread_id,
+        } => Some(AcpEventData::BackgroundTaskCompleted {
+            task_id,
+            agent_name,
+            success,
+            output,
+            tool_calls_count,
+            duration_ms,
+            child_thread_id,
+        }),
+        AcpEvent::AgentExecutionFailed { message } => {
+            Some(AcpEventData::AgentExecutionFailed { message })
+        }
+        AcpEvent::WorkflowProgress {
+            run_id,
+            workflow_name,
+            event_type,
+            agent_id,
+            phase,
+            label,
+            agent_status,
+            token_count,
+            tool_count,
+            run_status,
+            message,
+        } => Some(AcpEventData::WorkflowProgress {
+            run_id,
+            workflow_name,
+            event_type,
+            agent_id,
+            phase,
+            label,
+            agent_status,
+            token_count,
+            tool_count,
+            run_status,
+            message,
+        }),
         _ => {
             debug!("kit ACP notifier: AcpEvent variant not yet mapped to AcpEventData, dropping");
             None
@@ -89,38 +163,55 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
 /// 设计决策：session/update 是流式主通道（agent_message_chunk / tool_call 等），
 /// AgentDone 通过 TurnDone 转换，AgentEvent 通过 `convert_agent_event` 转换。
 fn forward_notification(
-    bridge_tx: &mpsc::UnboundedSender<AcpEventData>,
-    render_bridge_tx: &mpsc::UnboundedSender<AcpEventData>,
+    bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    render_bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
     n: AcpNotification,
 ) {
+    /// 将 AcpEventData 包装为 AcpEventWithEpoch（注入 session_id）。
+    fn wrap_with_session(event: AcpEventData, session_id: String) -> AcpEventWithEpoch {
+        AcpEventWithEpoch {
+            event,
+            active_session_id: session_id,
+        }
+    }
+
     match n {
-        AcpNotification::UnstableEvent { event, data, .. } => {
+        AcpNotification::UnstableEvent {
+            session_id,
+            event,
+            data,
+        } => {
             let decoded = AcpEventData::decode(&event, data);
             if matches!(decoded, AcpEventData::Unknown { .. }) {
                 debug!(event = %event, "kit ACP notifier: unknown unstable-event, dropping");
                 return;
             }
-            if let Err(e) = bridge_tx.send(decoded.clone()) {
-                warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping event");
-            }
-            if let Err(e) = render_bridge_tx.send(decoded) {
+            let wrapped = wrap_with_session(decoded, session_id);
+            if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
                 warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may stall");
+            }
+            if let Err(e) = bridge_tx.send(wrapped) {
+                warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping event");
             }
         }
         // kit notifier: extract AvailableCommandsUpdate / plan / streaming
         // from SessionUpdate. Streaming tags produce AcpEventData pushed to
         // dual-bridge; status tags write atoms directly.
-        AcpNotification::SessionUpdate { params, .. } => {
+        AcpNotification::SessionUpdate { session_id, params } => {
             if let Some(decoded) = handle_session_update(params) {
-                if let Err(e) = bridge_tx.send(decoded.clone()) {
-                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping session/update streaming event");
-                }
-                if let Err(e) = render_bridge_tx.send(decoded) {
+                let wrapped = wrap_with_session(decoded, session_id);
+                if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
                     warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may stall");
+                }
+                if let Err(e) = bridge_tx.send(wrapped) {
+                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping session/update streaming event");
                 }
             }
         }
-        AcpNotification::AgentDone { stop_reason, .. } => {
+        AcpNotification::AgentDone {
+            session_id,
+            stop_reason,
+        } => {
             let decoded = if stop_reason == "cancelled" {
                 AcpEventData::TurnInterrupted {
                     reason: "user cancelled".into(),
@@ -128,11 +219,12 @@ fn forward_notification(
             } else {
                 AcpEventData::TurnDone
             };
-            if let Err(e) = bridge_tx.send(decoded.clone()) {
-                warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping agent done");
-            }
-            if let Err(e) = render_bridge_tx.send(decoded) {
+            let wrapped = wrap_with_session(decoded, session_id);
+            if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
                 warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may keep current turn");
+            }
+            if let Err(e) = bridge_tx.send(wrapped) {
+                warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping agent done");
             }
         }
         AcpNotification::Elicitation { id, params } => {
@@ -141,13 +233,14 @@ fn forward_notification(
         // peri/agent_event → AcpEvent → AcpEventData 转换
         // SubagentStarted/SubagentStopped 首先映射至此通道；通过 convert_agent_event
         // 转换为 kit 层 DTO 后推送（与 UnstableEvent 路径形成双通道冗余）。
-        AcpNotification::AgentEvent { event, .. } => {
+        AcpNotification::AgentEvent { session_id, event } => {
             if let Some(decoded) = convert_agent_event(event) {
-                if let Err(e) = bridge_tx.send(decoded.clone()) {
-                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping AgentEvent");
-                }
-                if let Err(e) = render_bridge_tx.send(decoded) {
+                let wrapped = wrap_with_session(decoded, session_id);
+                if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
                     warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may stall");
+                }
+                if let Err(e) = bridge_tx.send(wrapped) {
+                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping AgentEvent");
                 }
             }
         }
@@ -210,6 +303,13 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
         return None;
     }
 
+    let is_session_replay = update
+        .get("meta")
+        .or_else(|| update.get("content").and_then(|c| c.get("meta")))
+        .and_then(|m| m.get("periReplay"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     // ── §4.1 streaming: standard session/update streaming tags ──
     // agent_id from params["_peri"]["sourceAgentId"] (ACP extension)
 
@@ -228,8 +328,12 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let text_chunk = crate::kit::stream_data::TuiTextChunk { text, agent_id };
-            Some(AcpEventData::TextChunk(text_chunk))
+            if is_session_replay {
+                Some(AcpEventData::ReplayAssistantBubble { text })
+            } else {
+                let text_chunk = crate::kit::stream_data::TuiTextChunk { text, agent_id };
+                Some(AcpEventData::TextChunk(text_chunk))
+            }
         }
         Some("agent_thought_chunk") => {
             let text = update
@@ -292,7 +396,7 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
             };
             Some(AcpEventData::ToolEnded(tool_ended))
         }
-        Some("usage_update") => {
+        Some("usage_update") if !is_session_replay => {
             // §C: token-usage deprecated, read from standard usage_update meta
             let input = update
                 .get("meta")
@@ -329,9 +433,16 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
 fn handle_elicitation(
     id: &peri_acp::transport::types::RequestId,
     params: &Value,
-    bridge_tx: &mpsc::UnboundedSender<AcpEventData>,
-    render_bridge_tx: &mpsc::UnboundedSender<AcpEventData>,
+    bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    render_bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
 ) {
+    // 从 params 中提取 session_id
+    let session_id = params
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
     // 序列化 RequestId 存入 atom（供 popup 提交时回传）
     if let Ok(id_str) = serde_json::to_string(id) {
         *ASK_USER_REQUEST_ID.state().write() = Some(id_str);
@@ -343,14 +454,18 @@ fn handle_elicitation(
     let questions = parse_elicitation_questions(params);
     let ask_user = AskUser { questions };
     let event = AcpEventData::AskUser(ask_user);
+    let wrapped = AcpEventWithEpoch {
+        event,
+        active_session_id: session_id,
+    };
 
     info!("kit ACP notifier: forwarding Elicitation as AskUser event");
 
-    if let Err(e) = bridge_tx.send(event.clone()) {
-        warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping AskUser");
-    }
-    if let Err(e) = render_bridge_tx.send(event) {
+    if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
         warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may miss AskUser");
+    }
+    if let Err(e) = bridge_tx.send(wrapped) {
+        warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping AskUser");
     }
 }
 
@@ -473,13 +588,13 @@ mod tests {
 
     fn spawn_test_notifier() -> (
         mpsc::UnboundedSender<AcpNotification>,
-        mpsc::UnboundedReceiver<AcpEventData>,
-        mpsc::UnboundedReceiver<AcpEventData>,
+        mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+        mpsc::UnboundedReceiver<AcpEventWithEpoch>,
         CancellationToken,
     ) {
         let (notif_tx, notif_rx) = mpsc::unbounded_channel::<AcpNotification>();
-        let (bridge_tx, bridge_rx) = mpsc::unbounded_channel::<AcpEventData>();
-        let (render_bridge_tx, render_bridge_rx) = mpsc::unbounded_channel::<AcpEventData>();
+        let (bridge_tx, bridge_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
+        let (render_bridge_tx, render_bridge_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
         let shutdown = CancellationToken::new();
         let _handle = spawn_kit_notifier(notif_rx, bridge_tx, render_bridge_tx, shutdown.clone());
         (notif_tx, bridge_rx, render_bridge_rx, shutdown)
@@ -504,7 +619,7 @@ mod tests {
             .unwrap();
 
         let ev = bridge_rx.recv().await.expect("expected one event");
-        match ev {
+        match ev.event {
             AcpEventData::TextChunk(tc) => {
                 assert_eq!(tc.text, "hi");
                 assert_eq!(tc.agent_id.as_deref(), Some("sa-1"));
@@ -533,7 +648,7 @@ mod tests {
             .unwrap();
 
         let ev = bridge_rx.recv().await.expect("expected one event");
-        match ev {
+        match ev.event {
             AcpEventData::ReasoningChunk(rc) => {
                 assert_eq!(rc.text, "thinking...");
                 assert!(rc.agent_id.is_none());
@@ -564,7 +679,7 @@ mod tests {
             .unwrap();
 
         let ev = bridge_rx.recv().await.expect("expected one event");
-        match ev {
+        match ev.event {
             AcpEventData::ToolStarted(ts) => {
                 assert_eq!(ts.tool_id, "tc-1");
                 assert_eq!(ts.tool_name, "Read");
@@ -598,7 +713,7 @@ mod tests {
             .unwrap();
 
         let ev = bridge_rx.recv().await.expect("expected one event");
-        match ev {
+        match ev.event {
             AcpEventData::ToolEnded(te) => {
                 assert_eq!(te.tool_id, "tc-1");
                 assert!(te.output_summary.contains("output content"));
@@ -634,13 +749,39 @@ mod tests {
             .unwrap();
 
         let ev = bridge_rx.recv().await.expect("expected one event");
-        match ev {
+        match ev.event {
             AcpEventData::ToolEnded(te) => {
                 assert_eq!(te.tool_id, "tc-2");
                 assert!(te.output_summary.contains("nested output"));
                 assert!(te.is_error);
             }
             other => panic!("expected ToolEnded from nested fields, got {other:?}"),
+        }
+
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_session_replay_agent_message_chunk_to_replay_assistant_bubble() {
+        let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
+
+        notif_tx
+            .send(AcpNotification::SessionUpdate {
+                session_id: "s1".into(),
+                params: json!({
+                    "sessionId": "s1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "历史回答", "meta": {"periReplay": true}}
+                    }
+                }),
+            })
+            .unwrap();
+
+        let ev = bridge_rx.recv().await.expect("expected one event");
+        match ev.event {
+            AcpEventData::ReplayAssistantBubble { text } => assert_eq!(text, "历史回答"),
+            other => panic!("expected ReplayAssistantBubble, got {other:?}"),
         }
 
         shutdown.cancel();
@@ -690,7 +831,7 @@ mod tests {
             .recv()
             .await
             .expect("bridge 应收 到 SubagentStarted");
-        match bridge_event {
+        match bridge_event.event {
             AcpEventData::SubagentStarted {
                 agent_id,
                 agent_name,
@@ -705,7 +846,7 @@ mod tests {
             .recv()
             .await
             .expect("render bridge 应收到 SubagentStarted");
-        match render_event {
+        match render_event.event {
             AcpEventData::SubagentStarted {
                 agent_id,
                 agent_name,
@@ -727,14 +868,18 @@ mod tests {
         notif_tx
             .send(AcpNotification::AgentEvent {
                 session_id: "s1".into(),
-                event: AcpEvent::TurnCommitted {
-                    messages_json: "[]".into(),
-                    steps: 0,
+                event: AcpEvent::StateSnapshotMeta {
+                    message_count: 0,
+                    total_tokens: 0,
+                    current_step: 0,
+                    consecutive_failures: 0,
+                    budget_pct: None,
+                    context_total_tokens: None,
                 },
             })
             .unwrap();
 
-        // TurnCommitted 目前未映射 → 应被丢弃
+        // StateSnapshotMeta 保持丢弃（纯信息性，不影响渲染）
         let result =
             tokio::time::timeout(std::time::Duration::from_millis(50), bridge_rx.recv()).await;
         assert!(
@@ -757,12 +902,12 @@ mod tests {
             .unwrap();
 
         let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 TurnDone");
-        assert!(matches!(bridge_event, AcpEventData::TurnDone));
+        assert!(matches!(bridge_event.event, AcpEventData::TurnDone));
         let render_event = render_bridge_rx
             .recv()
             .await
             .expect("render bridge 应收到 TurnDone");
-        assert!(matches!(render_event, AcpEventData::TurnDone));
+        assert!(matches!(render_event.event, AcpEventData::TurnDone));
 
         shutdown.cancel();
     }

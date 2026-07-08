@@ -112,6 +112,7 @@ impl CurrentTurn {
     pub fn stop_subagent(&mut self, agent_id: &str) {
         if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
             s.is_running = false;
+            s.cached_view_model.replace(None);
             self.invalidate_cache();
         }
     }
@@ -264,7 +265,6 @@ impl CurrentTurn {
         for t in &self.tool_cards {
             let is_running = t.output_summary.is_none();
             let running_duration_ms = is_running.then(|| t.started_at.elapsed().as_millis() as u64);
-            let running_duration_bucket = running_duration_ms.map(|ms| ms / 1000).unwrap_or(0);
 
             vms.push(TuiRenderUnit::TuiToolCard(TuiToolCard {
                 tool_id: t.tool_id.clone(),
@@ -276,14 +276,13 @@ impl CurrentTurn {
                 running_duration_ms,
                 diff: None,
                 content_hash: tui_hash_str(&format!(
-                    "{}|{}|{}|{}|{}|{}|{}",
+                    "{}|{}|{}|{}|{}|{}",
                     t.tool_id,
                     t.tool_name,
                     t.input_summary,
                     t.output_summary.as_deref().unwrap_or(""),
                     t.is_error,
                     is_running,
-                    running_duration_bucket,
                 )),
             }));
         }
@@ -344,6 +343,8 @@ pub struct SubAgentAccumulator {
     pub agent_name: String,
     pub is_running: bool,
     pub child_turn: CurrentTurn,
+    /// Cached view_model result, invalidated on any mutation.
+    cached_view_model: std::cell::RefCell<Option<TuiRenderUnit>>,
 }
 
 impl SubAgentAccumulator {
@@ -353,29 +354,39 @@ impl SubAgentAccumulator {
             agent_name,
             is_running: true,
             child_turn: CurrentTurn::new(),
+            cached_view_model: std::cell::RefCell::new(None),
         }
     }
 
     fn append_text(&mut self, text: &str) {
         self.child_turn.append_text(text);
+        self.cached_view_model.replace(None);
     }
 
     fn append_reasoning(&mut self, text: &str) {
         self.child_turn.append_reasoning(text);
+        self.cached_view_model.replace(None);
     }
 
     fn start_tool(&mut self, tool: ToolCardAccumulator) {
         self.child_turn.start_tool(tool);
+        self.cached_view_model.replace(None);
     }
 
     fn end_tool(&mut self, tool_id: &str, output: String, is_error: bool) {
         self.child_turn.end_tool(tool_id, output, is_error);
+        self.cached_view_model.replace(None);
     }
 
     pub(crate) fn view_model(&self) -> TuiRenderUnit {
+        // 缓存命中——直接返回，避免 child_turn.clone() + view_models() 全量重建
+        if let Some(vm) = self.cached_view_model.borrow().as_ref() {
+            return vm.clone();
+        }
+
         let mut child_turn = self.child_turn.clone();
         let child_vms = child_turn.view_models();
-        TuiRenderUnit::TuiSubAgentGroup(crate::kit::tui_render_unit::TuiSubAgentGroup {
+        let vm = TuiRenderUnit::TuiSubAgentGroup(crate::kit::tui_render_unit::TuiSubAgentGroup {
             agent_id: self.agent_id.clone(),
             agent_name: self.agent_name.clone(),
             view_models: child_vms.to_vec(),
@@ -389,13 +400,24 @@ impl SubAgentAccumulator {
                 false,
                 self.is_running,
             )),
-        })
+        });
+        self.cached_view_model.replace(Some(vm.clone()));
+        vm
     }
 }
 
 // ---------------------------------------------------------------------------
 // AcpEventData -- decoded ACP custom event
 // ---------------------------------------------------------------------------
+
+/// AcpEventData + active_session_id 包装类型。
+/// active_session_id 从 ACP 通知的 session_id 字段提取。
+/// acp_bridge 消费时与 state.active_session_id 比较以丢弃陈旧滞留事件。
+#[derive(Debug, Clone)]
+pub struct AcpEventWithEpoch {
+    pub event: AcpEventData,
+    pub active_session_id: String,
+}
 
 /// Decoded ACP custom event.
 ///
@@ -421,6 +443,15 @@ pub enum AcpEventData {
     ToolEnded(TuiToolEnded),
 
     // -- §4.2 Boundary (low-frequency) -------------------------------------
+    /// 本地提交已进入当前 ACP session，开始一轮真实 agent turn。
+    PromptStarted,
+
+    /// session/load 历史恢复开始。Replay 不是 agent turn，不能触发 loading。
+    SessionReplayStarted,
+
+    /// session/load 历史恢复结束。
+    SessionReplayDone,
+
     /// `"turn-done"` -- agent finished this turn (Streaming -> Idle).
     TurnDone,
 
@@ -501,6 +532,54 @@ pub enum AcpEventData {
 
     /// `"bg-task-snapshot"` -- full list of active background tasks.
     BgTaskSnapshot(Vec<BgTaskEntry>),
+
+    // -- §4.8 Agent Event Extensions (P1-5) ----------------------------------
+    /// `"turn-committed"` — ReAct 迭代提交信号。
+    TurnCommitted { messages_json: String, steps: usize },
+
+    /// `"compact-started"` — 上下文压缩开始。
+    CompactStarted,
+
+    /// `"compact-completed"` — 上下文压缩完成。
+    CompactCompleted {
+        summary: String,
+        files: Vec<serde_json::Value>,
+        skills: Vec<String>,
+        micro_cleared: usize,
+        messages_json: String,
+    },
+
+    /// `"compact-error"` — 上下文压缩失败。
+    CompactError { message: String },
+
+    /// `"background-task-completed"` — 后台 agent 任务完成。
+    BackgroundTaskCompleted {
+        task_id: String,
+        agent_name: String,
+        success: bool,
+        output: String,
+        tool_calls_count: usize,
+        duration_ms: u64,
+        child_thread_id: Option<String>,
+    },
+
+    /// `"agent-execution-failed"` — agent 执行失败。
+    AgentExecutionFailed { message: String },
+
+    /// `"workflow-progress"` — 工作流进度更新。
+    WorkflowProgress {
+        run_id: String,
+        workflow_name: String,
+        event_type: String,
+        agent_id: Option<u64>,
+        phase: Option<String>,
+        label: Option<String>,
+        agent_status: Option<String>,
+        token_count: Option<u64>,
+        tool_count: Option<u64>,
+        run_status: Option<String>,
+        message: Option<String>,
+    },
 }
 
 impl AcpEventData {
@@ -745,7 +824,7 @@ mod tests {
             other => panic!("expected TuiToolCard, got {other:?}"),
         };
 
-        assert_ne!(first_hash, second_hash);
+        assert_eq!(first_hash, second_hash);
     }
 
     #[test]
