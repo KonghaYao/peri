@@ -2,6 +2,14 @@
 
 TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTransport`（in-memory channel pair）与 ACP Server 通信，不直接依赖 `peri-agent`/`peri-middlewares` 的运行时路径（仅作为类型依赖）。
 
+## 开发命令
+
+- `cargo run -p peri-tui`：启动 TUI
+- `cargo run -p peri-tui -- -a`：HITL 审批模式
+- `scripts/start-tui.sh`：启动（RELAY_PORT=3001）
+- `cargo test -p peri-tui --lib`：运行 TUI 测试
+- `cargo build -p peri-tui`：构建
+
 ## 当前架构（ratatui-kit 单路径，S1–S13 完成，I14–I23 增量 + 渲染管道重写）
 
 **单一路径**：`use-kit` feature 默认 ON。`main.rs` 调用 `kit::entry::run_kit_fullscreen(opts, panic_notify_rx)`，legacy `runtime/main_loop` / `state_machine` / `command/` / `panel/` / `ui/` / `render/` / `event/` 已全部物理删除（净减 ~18000 行）。

@@ -84,7 +84,7 @@ Workflow 出现 "0 agents, 0 tool calls" 时：
 | Crate | 职责 |
 |-------|------|
 | `peri-agent` | ReAct 循环、Middleware trait、LLM 适配器、工具系统 |
-| `peri-middlewares` | 19 个中间件（FS/终端/HITL/SubAgent/Skills/Todo/Cron/MCP/Hooks/Plugin/LSP） |
+| `peri-middlewares` | 18 个中间件（FS/终端/HITL/SubAgent/Skills/Todo/Cron/MCP/Hooks/LSP） |
 | `peri-widgets` | ratatui + pulldown-cmark 组件库 |
 | `peri-acp` | ACP 服务层（MpscTransport/StdioTransport） |
 | `peri-tui` | TUI 应用（纯 ACP client） |
@@ -111,6 +111,8 @@ Workflow 出现 "0 agents, 0 tool calls" 时：
 
 ## 开发命令
 
+- `cargo build --workspace`：全量构建
+- `cargo test --workspace`：运行所有测试
 - `cargo run -p peri-tui -- -a`：HITL 审批
 - `scripts/start-tui.sh`：启动（RELAY_PORT=3001）
 - `lefthook run pre-commit`：fmt/check/clippy
@@ -129,6 +131,7 @@ peri-middlewares/src/agents_md/    # CLAUDE.md 加载（frozen 透传终点）
 peri-acp/src/session/executor.rs  # execute_prompt() 统一入口
 peri-acp/src/prompt/mod.rs        # build_system_prompt() + __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__
 peri-acp/src/event/{router,mapper,view_mapper}.rs  # ACP 事件 → ViewModel 映射
+peri-widgets/src/         # ratatui + pulldown-cmark 组件库（ToolCard/Markdown/Diff/Spinner）
 peri-tui/src/kit/entry.rs  # TUI 入口（单路径 run_kit_fullscreen）
 peri-tui/src/kit/acp_bridge.rs  # BridgeState → Atom 写入
 peri-tui/src/kit/render_bridge.rs  # 渲染预计算（Vec<Line> + wrap_map）

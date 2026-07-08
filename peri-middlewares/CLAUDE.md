@@ -2,6 +2,12 @@
 
 中间件实现 crate，依赖 `peri-agent` 和 `peri-lsp`。18 个中间件按固定顺序组成链。
 
+## 开发命令
+
+- `cargo build -p peri-middlewares`：构建
+- `cargo test -p peri-middlewares --lib`：运行全部中间件测试
+- `cargo test -p peri-acp`：ACP 层集成测试（链构造验证）
+
 ## 中间件链执行顺序
 
 ```
@@ -25,8 +31,6 @@
 18. GoalMiddleware           ← after_agent 注入递增紧迫感 steering + 设 block_continue 自驱循环（链最后）
 [with_system_prompt()]       ← prepend
 ```
-
-**[v2] CompactMiddleware 已删除**：自动 compact 由 v2 `stages/compact.rs`（`peri-agent::agent::stages`）在 `run_react_loop` 每轮开头检查 `ContextBudget` 后触发 `compact_v2::run_compact`。0.70 触发 micro-compact，0.85 触发 full compact。
 
 插件通过 `plugin_skill_roots: Vec<SkillRoot>` → `SkillsMiddleware.with_plugin_roots()`、`plugin_hooks` → `HookMiddleware` 注入，无独立 PluginMiddleware。
 
