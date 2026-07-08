@@ -66,12 +66,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     );
                 }
                 state.variant = 1;
+                state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
             } else {
                 state
                     .current_turn
                     .append_text(&tc.text, tc.message_id.as_deref());
                 state.variant = 1;
+                state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
             }
             push_acp_state(state);
@@ -88,6 +90,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     );
                 }
                 state.variant = 1;
+                state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
             } else {
                 state
@@ -98,6 +101,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     "bridge: reasoning appended"
                 );
                 state.variant = 1;
+                state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
             }
             push_acp_state(state);
@@ -116,6 +120,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     tracing::trace!(agent_id, tool_id = %ts.tool_id, "kit bridge: subagent tool start has no active group");
                 }
                 state.variant = 1;
+                state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
             } else {
                 state.current_turn.start_tool(ToolCardAccumulator::new(
@@ -124,6 +129,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     ts.input_summary.clone(),
                 ));
                 state.variant = 1;
+                state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
             }
             push_acp_state(state);
@@ -140,12 +146,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     tracing::trace!(agent_id, tool_id = %te.tool_id, "kit bridge: subagent tool end has no active group");
                 }
                 state.variant = 1;
+                state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
             } else {
                 state
                     .current_turn
                     .end_tool(&te.tool_id, te.output_summary.clone(), te.is_error);
                 state.variant = 1;
+                state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
             }
             push_acp_state(state);
@@ -170,6 +178,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             }
             state.variant = 0;
             state.current_turn.reset();
+            ACP_STATE.state().write().is_loading = false;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -189,6 +198,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.variant = 0;
 
             state.phase = SessionPhase::Idle;
+            // 显式清 loading：push_acp_state 的防御逻辑会在 atom is_loading=true
+            // + phase=Idle 时自动提升 phase 为 PromptRunning。为避免此防御逻辑
+            // 阻挡正常的 loading 结束，必须在 push_acp_state 之前将 atom 的
+            // is_loading 置为 false。
+            ACP_STATE.state().write().is_loading = false;
 
             tracing::info!(
                 is_loading = state.phase == SessionPhase::PromptRunning,
@@ -214,6 +228,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.current_turn = CurrentTurn::new();
             state.variant = 0;
             state.phase = SessionPhase::Idle;
+            // 同 TurnDone 注释：显式清 loading，防 push_acp_state 防御逻辑阻挡。
+            ACP_STATE.state().write().is_loading = false;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -293,12 +309,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 .current_turn
                 .start_subagent(agent_id.clone(), agent_name.clone());
             state.variant = 1;
+            state.phase = SessionPhase::PromptRunning;
             push_view_models(state);
             push_acp_state(state);
         }
         SubagentStopped { agent_id } => {
             state.current_turn.stop_subagent(agent_id);
             state.variant = 1;
+            state.phase = SessionPhase::PromptRunning;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -342,11 +360,13 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         CompactCompleted { summary, .. } => {
             tracing::info!(summary_len = summary.len(), "bridge: CompactCompleted");
             state.phase = SessionPhase::Idle;
+            ACP_STATE.state().write().is_loading = false;
             push_acp_state(state);
         }
         CompactError { message } => {
             tracing::warn!(message, "bridge: CompactError");
             state.phase = SessionPhase::Idle;
+            ACP_STATE.state().write().is_loading = false;
             push_acp_state(state);
         }
         BackgroundTaskCompleted {
@@ -376,6 +396,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         AgentExecutionFailed { message } => {
             tracing::error!(message, "bridge: AgentExecutionFailed");
             state.phase = SessionPhase::Idle;
+            ACP_STATE.state().write().is_loading = false;
             push_acp_state(state);
         }
         WorkflowProgress {
@@ -483,6 +504,19 @@ pub fn push_view_models_for_reset() {
 /// popup 状态由各自的独立 atom 追踪（SLASH_HINT_ACTIVE 等），
 /// 不应写入 ACP_STATE 导致 AppShell 重渲染。
 fn push_acp_state(state: &mut BridgeState) {
+    let ref_guard = ACP_STATE.state();
+    let acp = ref_guard.read();
+
+    // 防御：submit_consumer 已将 is_loading 直接置 true（ACP_STATE atom 写入），
+    // 但 bridge 侧 phase 可能仍是 Idle（首次流事件尚未到达）。此时若被非流事件
+    // （如 ToolCount/Progress）调用 push_acp_state，会因 phase = Idle 而错误地
+    // 将 is_loading 覆盖为 false。此检查自动提升 phase 为 PromptRunning，
+    // 确保 atom 中已有的 is_loading=true 不被覆盖。
+    if acp.is_loading && state.phase == SessionPhase::Idle {
+        state.phase = SessionPhase::PromptRunning;
+    }
+    drop(acp);
+
     let snapshot = AcpStateSnapshot {
         variant: state.variant,
         view_count: state.committed.len() + state.current_turn.view_models().len(),
@@ -491,7 +525,6 @@ fn push_acp_state(state: &mut BridgeState) {
         at_mention_active: *AT_MENTION_ACTIVE.state().read(),
         slash_hint_active: *SLASH_HINT_ACTIVE.state().read(),
     };
-    let ref_guard = ACP_STATE.state();
     let mut acp = ref_guard.write();
     if *acp != snapshot {
         *acp = snapshot;
