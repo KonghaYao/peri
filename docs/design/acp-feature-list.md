@@ -1,6 +1,6 @@
 # ACP 协议功能清单
 
-> 生成日期：2026-07-07 | 数据来源：`peri-acp/`、`peri-acp-types/`、`peri-tui/src/kit/acp_types.rs`
+> 生成日期：2026-07-08 | 数据来源：`peri-acp/`、`peri-acp-types/`、`peri-tui/src/kit/tui_render_unit.rs`
 
 ## 一、标准 ACP 方法（TUI → Agent，JSON-RPC request/response）
 
@@ -230,29 +230,19 @@
 
 | 事件名 | 作用 | 状态 |
 |--------|------|------|
-| `view-commit` | 完整 ViewModel 列表全量替换 UI | 🗑 废弃（改用 `session/update` 增量 + `turn-done` 边界） |
-| `turn-done` | Agent 本轮结束，Streaming → Idle | ✅ 已实现 |
-| `turn-interrupted` | Agent 被中断（取消/超时） | ✅ 已实现 |
+| `view-commit` | 完整 ViewModel 列表全量替换 UI | 🗑 废弃（改用 `session/update` 增量） |
 
-#### JSON 结构
-
-```json
-// turn-done
-{ "event": "turn-done", "data": {} }
-
-// turn-interrupted
-{ "event": "turn-interrupted", "data": { "reason": "user cancelled" } }
-```
+> **决策（2026-07-08）**：`turn-done` / `turn-interrupted` 改用 ACP 标准 `session/prompt` 响应 `StopReason`（EndTurn / Cancelled），不再作为 `peri/unstable-event` 发送。push_done 签名扩展，AgentDone 通知携带 `stopReason` 字段。
 
 ### §4.3 状态事件（更新状态栏）
 
 | 事件名 | 作用 | 状态 |
 |--------|------|------|
-| `token-usage` | 本轮 token 消耗 | 🗑 废弃（`usage_update` meta 已含 input/output/model） |
-| `tool-count` | 本轮工具调用次数 | ⚠️ 放入 `usage_update` meta，不单独建事件 |
-| `progress` | 进度百分比 + 文本 | 🔲 预留 |
 | `budget-warning` | 上下文预算警告（阈值 0.70/0.85） | ✅ 已实现 |
+| `progress` | 进度百分比 + 文本 | 🔲 预留 |
 | `system-notification` | 系统通知文本 + 级别 | 🔲 预留 |
+
+> **决策（2026-07-07）**：`token-usage` / `tool-count` 已废弃，改走标准 `session/update` → `usage_update` meta。
 
 #### JSON 结构
 
@@ -307,8 +297,10 @@
 
 | 事件名 | 作用 | 状态 |
 |--------|------|------|
-| `subagent-started` | SubAgent 创建，TUI 打开折叠组 | ✅ 已实现 |
-| `subagent-stopped` | SubAgent 退出，TUI 关闭组 | ✅ 已实现 |
+| `subagent-started` | SubAgent 创建，TUI 打开折叠组 | ✅ 已实现（走 `peri/agent_event`，非 `peri/unstable-event` router） |
+| `subagent-stopped` | SubAgent 退出，TUI 关闭组 | ✅ 已实现（同上） |
+
+> **决策（2026-07-08）**：SubAgent 事件不再走 `peri/unstable-event` router（已从 router.rs 删除），改走 `peri/agent_event`（mapper.rs → AcpEvent）通道。router.rs 仅保留 2 个分支：`budget-warning` + `rewind-preview`。
 
 #### JSON 结构
 
@@ -359,108 +351,22 @@
 
 ---
 
-## 三、ViewModel 渲染原子（8 种）
+## 三、TUI 内部渲染单元（8 种）—— TuiRenderUnit
 
-| type 标签 | 作用 |
-|-----------|------|
-| `user-bubble` | 用户消息气泡 |
-| `assistant-bubble` | AI 回复气泡（含 reasoning 折叠 + diff 预览） |
-| `tool-card` | 工具调用卡片（含 diff 块、运行时长） |
-| `system-note` | 系统提示/通知（Info/Warning/Error） |
-| `sub-agent-group` | SubAgent 折叠组（含内嵌 ViewModel[]） |
-| `collapsed-group` | 通用折叠组 |
-| `divider` | 分隔线（可选 label） |
-| `ask-user-block` | 用户问答表单块 |
+> **决策（2026-07-08）**：ViewModel 从 `peri-acp-types` 共享 crate 中物理删除，改为 TUI 内部类型 `TuiRenderUnit`（定义于 `peri-tui/src/kit/tui_render_unit.rs`）。不再跨 crate 共享，不再参与 wire 序列化。
 
-#### JSON 结构
+| TuiRenderUnit 变体 | 对应渲染用途 | 数据来源 |
+|-----------|------|------|
+| `TuiUserBubble` | 用户消息气泡 | `session/update` → `user_message_chunk`（replay） |
+| `TuiAssistantBubble` | AI 回复气泡（含 reasoning 折叠） | `session/update` → `agent_message_chunk` + `agent_thought_chunk` |
+| `TuiToolCard` | 工具调用卡片（含 diff、运行时长） | `session/update` → `tool_call` + `tool_call_update` |
+| `TuiSystemNote` | 系统提示/通知（Info/Warning/Error） | TUI 端从 `config_option_update` / `session_info_update` 等派生 |
+| `TuiSubAgentGroup` | SubAgent 折叠组（含内嵌 TuiRenderUnit[]） | `peri/agent_event` → SubagentStarted/Stopped + 流式事件 |
+| `TuiCollapsedGroup` | 通用折叠组 | TUI 端连续同类事件合并逻辑 |
+| `TuiDivider` | 分隔线（可选 label） | TUI 端在 TurnDone 后自动插入 |
+| `TuiAskUserBlock` | 用户问答表单块 | `elicitation/create`（标准 ACP broker JSON-RPC） |
 
-```json
-// user-bubble
-{ "type": "user-bubble", "text": "hello", "is_system_reminder": false }
-
-// assistant-bubble
-{ "type": "assistant-bubble",
-  "text": "你好，我可以帮助你。",
-  "reasoning": { "text": "用户想打招呼...", "collapsed": true },
-  "tool_card_ids": ["tc-1", "tc-2"]
-}
-
-// tool-card
-{ "type": "tool-card",
-  "tool_id": "tc-1",
-  "tool_name": "Bash",
-  "input_summary": "cargo build",
-  "output_summary": "Finished dev [unoptimized] target(s) in 2.34s",
-  "is_error": false,
-  "is_running": false,
-  "running_duration_ms": 2340,
-  "diff": {
-    "path": "Cargo.lock",
-    "hunks": [{ "old_start": 1, "old_count": 3, "new_start": 1, "new_count": 3,
-                "lines": [{ "kind": "context", "text": "..." }, ...] }],
-    "is_binary": false,
-    "is_too_large": false
-  }
-}
-
-// system-note
-{ "type": "system-note", "text": "上下文已压缩", "level": "info" }
-
-// sub-agent-group
-{ "type": "sub-agent-group",
-  "agent_id": "sa-1",
-  "agent_name": "explorer",
-  "view_models": [{ "type": "user-bubble", "text": "find ACP code" }, ...],
-  "collapsed": false,
-  "is_running": true
-}
-
-// collapsed-group
-{ "type": "collapsed-group",
-  "title": "批量工具调用",
-  "count": 3,
-  "view_models": [{ "type": "tool-card", ... }, ...]
-}
-
-// divider
-{ "type": "divider", "label": "Round 3" }
-
-// ask-user-block
-{ "type": "ask-user-block",
-  "items": [{ "header": "确认删除", "answer": "是" }],
-  "is_error": false
-}
-```
-
-### DiffBlock 结构
-
-```json
-{
-  "path": "src/main.rs",
-  "hunks": [{
-    "old_start": 10, "old_count": 3,
-    "new_start": 10, "new_count": 5,
-    "lines": [
-      { "kind": "context", "text": "fn main() {" },
-      { "kind": "removed", "text": "-    println!(\"old\");" },
-      { "kind": "added", "text": "+    println!(\"new\");" },
-      { "kind": "context", "text": "}" }
-    ]
-  }],
-  "is_binary": false,
-  "is_too_large": false,
-  "new_file_preview": null
-}
-```
-
-### ReasoningBlock 结构
-
-```json
-{
-  "text": "用户想了解 ACP 协议...",
-  "collapsed": true
-}
-```
+> 原 `peri-acp-types/src/view_model.rs` 已删除（427 行）。DiffBlock / ReasoningBlock / Hunk 等辅助类型同步内部化，加 `Tui` 前缀。render_bridge 从 VIEW_MODELS atom 读取 TuiRenderUnit，render_v2_vm 逐变体渲染。
 
 ---
 
@@ -468,8 +374,8 @@
 
 | 通知名 | 作用 | 通道类型 |
 |--------|------|----------|
-| `peri/agent_event` | AcpEvent DTO 全量推送（16 种变体，TUI-only） | notification |
-| `peri/agent_event_done` | Agent 执行结束信号 | notification |
+| `peri/agent_event` | AcpEvent DTO 推送（SubAgent/Compact/LSP 等） | notification |
+| `peri/agent_event_done` | Agent 执行结束信号（含 `stopReason` 字段） | notification |
 | `peri/hitl_pending` | HITL 审批专用通道 | notification |
 | `peri/observable` | SubAgent 启动/停止观测 | notification |
 
@@ -495,4 +401,4 @@
 
 ---
 
-**总结**：标准 ACP 方法 17 个 = 全部已实现 | 自定义事件 13 个（6 已实现 + 5 预留 + 2 待合并到 `usage_update` meta）| 已废弃 11 个（含流式 4 + `view-commit` + `token-usage` + broker 2 + 其他）| ViewModel 8 种。
+**总结**：标准 ACP 方法 17 个 = 全部已实现 | `peri/unstable-event` 路由器仅剩 2 个（`budget-warning` + `rewind-preview`）| `turn-done` / `turn-interrupted` 改用标准 `session/prompt` StopReason | ViewModel 已内部化为 TUI 端 TuiRenderUnit，不再跨 crate 共享。
