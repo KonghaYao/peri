@@ -130,17 +130,21 @@ pub async fn run_kit_fullscreen(
 
         // 4c. bridge channel：notifier → acp_bridge
         let (bridge_tx, bridge_rx) = mpsc::unbounded_channel();
-        // 4c2. LOCAL_EVENT_TX：input_area 本地提交 → acp_bridge（统一写入路径）
+        let (render_bridge_tx, render_bridge_rx) = mpsc::unbounded_channel();
+        // 4c2. LOCAL_EVENT_TX：input_area 本地提交 → acp_bridge + render_bridge
+        // 双通道推送：bridge 处理状态（VIEW_MODELS），render_bridge 触发缓存重建。
+        // 缺一不可——缺 render_bridge 则用户气泡依赖 1s poll，延迟数百 ms。
         let (local_event_tx, mut local_event_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
         let _ = atoms::LOCAL_EVENT_TX.set(local_event_tx);
-        // Mini bridge task：转发 local event 到主 bridge channel
+        // Mini bridge task：转发 local event 到双 bridge channel
         let bridge_tx_clone = bridge_tx.clone();
+        let render_bridge_tx_clone = render_bridge_tx.clone();
         tokio::spawn(async move {
             while let Some(ev) = local_event_rx.recv().await {
-                let _ = bridge_tx_clone.send(ev);
+                let _ = bridge_tx_clone.send(ev.clone());
+                let _ = render_bridge_tx_clone.send(ev);
             }
         });
-        let (render_bridge_tx, render_bridge_rx) = mpsc::unbounded_channel();
         let (resize_tx, resize_rx) = mpsc::unbounded_channel::<u16>();
         let _ = atoms::RESIZE_TX.set(resize_tx);
 
