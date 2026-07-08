@@ -5,6 +5,7 @@
 
 use crate::kit::acp_types::{AcpEventData, CurrentTurn, ToolCardAccumulator};
 use crate::kit::atoms::*;
+use crate::kit::submit_request::SubmitRequest;
 use crate::kit::tui_render_unit::{
     TuiNoteLevel, TuiRenderUnit, TuiSystemNote, TuiUserBubble, tui_hash_str,
 };
@@ -545,7 +546,7 @@ fn push_popup_kind(state: &BridgeState) {
 /// 将 `INPUT_BUFFER` atom 中所有排队输入按入队顺序 drain，逐条发送到 SUBMIT_TX。
 ///
 /// 调用时机：`TurnDone` 事件——agent 完成本轮，从队列里取出用户在 loading 期间
-/// 缓存的输入继续提交。若 buffer 为空则 no-op；若 SUBMIT_TX 未初始化也安全跳过。
+/// 缓存的 agent text 继续提交。若 buffer 为空则 no-op；若 SUBMIT_TX 未初始化也安全跳过。
 ///
 /// 多条输入的顺序保证：VecDeque + 顺序 `tx.send` + submit_consumer 单消费者 →
 /// 严格 FIFO。第一条立即触发 prompt，后续在 submit_consumer 内部顺序处理
@@ -559,7 +560,7 @@ fn drain_input_buffer() {
     let drained: Vec<String> = INPUT_BUFFER.state().write().drain(..).collect();
     if let Some(tx) = tx {
         for text in drained {
-            let _ = tx.send(text);
+            let _ = tx.send(SubmitRequest::AgentText(text));
         }
     }
 }
@@ -623,7 +624,7 @@ mod tests {
     async fn test_drain_input_buffer_preserves_order() {
         crate::kit::atoms::init_atoms();
         let _ = SUBMIT_TX.get_or_init(|| {
-            let (tx, _rx) = mpsc::unbounded_channel::<String>();
+            let (tx, _rx) = mpsc::unbounded_channel::<SubmitRequest>();
             tx
         });
 
@@ -651,7 +652,7 @@ mod tests {
     async fn test_drain_input_buffer_empty_is_noop() {
         crate::kit::atoms::init_atoms();
         let _ = SUBMIT_TX.get_or_init(|| {
-            let (tx, _rx) = mpsc::unbounded_channel::<String>();
+            let (tx, _rx) = mpsc::unbounded_channel::<SubmitRequest>();
             tx
         });
 

@@ -23,6 +23,7 @@ use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, SPINNER_TOKEN_COUNT};
 use crate::kit::input_area::refresh_slash_items;
 use peri_acp::event::AcpEvent;
+use peri_acp::event::truncate::summarize_input;
 use peri_acp_types::event_data::{AskUser, Question, QuestionOption};
 use serde_json::Value;
 
@@ -357,10 +358,10 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let input_summary = update
-                .get("rawInput")
-                .map(|v| serde_json::to_string(v).unwrap_or_default())
-                .unwrap_or_default();
+            let input_summary = {
+                let raw_input = update.get("rawInput").unwrap_or(&Value::Null);
+                summarize_input(&tool_name, raw_input)
+            };
             let tool_started = crate::kit::stream_data::TuiToolStarted {
                 tool_id,
                 tool_name,
@@ -380,8 +381,9 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
             let output_summary = update
                 .get("rawOutput")
                 .or_else(|| update.get("fields").and_then(|f| f.get("rawOutput")))
-                .map(|v| serde_json::to_string(v).unwrap_or_default())
-                .unwrap_or_default();
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let is_error = update
                 .get("status")
                 .or_else(|| update.get("fields").and_then(|f| f.get("status")))
@@ -683,7 +685,7 @@ mod tests {
             AcpEventData::ToolStarted(ts) => {
                 assert_eq!(ts.tool_id, "tc-1");
                 assert_eq!(ts.tool_name, "Read");
-                assert!(ts.input_summary.contains("file_path"));
+                assert_eq!(ts.input_summary, "/tmp/foo.rs");
             }
             other => panic!("expected ToolStarted, got {other:?}"),
         }

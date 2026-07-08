@@ -28,7 +28,6 @@ use std::sync::{Arc, Mutex};
 use parking_lot::RwLock;
 use std::sync::OnceLock;
 
-use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::ViewModelsSnapshot;
 use crate::kit::atoms::{
@@ -42,6 +41,7 @@ use crate::kit::mention_popup::MentionPopup;
 use crate::kit::panel_registry::{PANELS, open_panel, panel_for_slash_command};
 use crate::kit::render_bridge::{self, RenderedEntry, VmKey};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
+use crate::kit::submit_request::{SubmitRequest, parse_submit_request};
 use crate::kit::theme;
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble, tui_hash_str};
 
@@ -613,44 +613,62 @@ fn popup_height(item_count: usize) -> u16 {
 }
 
 fn submit_text(submitted: String) {
-    if submitted.trim().is_empty() {
+    let Some(request) = parse_submit_request(&submitted) else {
         return;
-    }
+    };
 
-    let trimmed = submitted.trim().to_string();
-    if let Some(kind) =
-        panel_for_submit_slash_command(trimmed.split_whitespace().next().unwrap_or(""))
-    {
-        open_panel(kind);
-        return;
-    }
-
-    push_history(&submitted);
-    reset_history_cursor();
     let is_loading = ACP_STATE.state().read().is_loading;
-    if is_loading {
-        append_local_user_bubble(&trimmed);
-        let input_buffer = INPUT_BUFFER.state();
-        let mut guard = input_buffer.write();
-        guard.push_back(trimmed);
-        while guard.len() > 32 {
-            guard.pop_front();
+    dispatch_submit_request(request, is_loading, |request| {
+        if let Some(tx) = SUBMIT_TX.get() {
+            let _ = tx.send(request);
         }
-    } else if let Some(tx) = SUBMIT_TX.get() {
-        append_local_user_bubble(&trimmed);
-        let _ = tx.send(trimmed);
+    });
+}
+
+fn dispatch_submit_request<F>(request: SubmitRequest, is_loading: bool, mut send_request: F)
+where
+    F: FnMut(SubmitRequest),
+{
+    match request {
+        SubmitRequest::OpenPanel(kind) => open_panel(kind),
+        SubmitRequest::AgentText(text) => {
+            push_history(&text);
+            reset_history_cursor();
+            if is_loading {
+                append_local_user_bubble(&text);
+                let input_buffer = INPUT_BUFFER.state();
+                let mut guard = input_buffer.write();
+                guard.push_back(text);
+                while guard.len() > 32 {
+                    guard.pop_front();
+                }
+            } else {
+                append_local_user_bubble(&text);
+                send_request(SubmitRequest::AgentText(text));
+            }
+        }
+        request @ (SubmitRequest::SessionControl(_) | SubmitRequest::ViewAction(_)) => {
+            if is_loading {
+                show_submit_blocked_notification(&request);
+            } else {
+                send_request(request);
+            }
+        }
     }
 }
 
-fn panel_for_submit_slash_command(cmd: &str) -> Option<PanelKind> {
-    if !cmd.starts_with('/') || cmd == "/" {
-        return None;
-    }
-    match cmd {
-        // `/model` 直接 Enter 保留 submit_consumer 的快速切 model 行为；Tab 选择仍打开面板。
-        "/model" => None,
-        _ => panel_for_slash_command(cmd),
-    }
+fn show_submit_blocked_notification(request: &SubmitRequest) {
+    let message = match request {
+        SubmitRequest::SessionControl(_) => "当前请求运行中，稍后再执行该命令".to_string(),
+        SubmitRequest::ViewAction(_) => "当前请求运行中，稍后再执行该命令".to_string(),
+        _ => return,
+    };
+    *crate::kit::atoms::NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
+        message,
+        until: std::time::Instant::now() + std::time::Duration::from_secs(3),
+    });
+    crate::kit::atoms::RENDER_HEARTBEAT
+        .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
 }
 
 fn append_local_user_bubble(text: &str) {
@@ -939,6 +957,7 @@ fn render_multiline_with_cursor_for_themed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::panel_types::PanelKind;
     use serial_test::serial;
 
     #[test]
@@ -962,26 +981,41 @@ mod tests {
     }
 
     #[test]
-    fn test_panel_for_submit_slash_command_handles_history_aliases() {
+    fn test_submit_request_history_aliases() {
         assert_eq!(
-            panel_for_submit_slash_command("/history"),
-            Some(PanelKind::ThreadBrowser)
+            parse_submit_request("/history"),
+            Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
         );
         assert_eq!(
-            panel_for_submit_slash_command("/his"),
-            Some(PanelKind::ThreadBrowser)
+            parse_submit_request("/his"),
+            Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
         );
-    }
-
-    #[test]
-    fn test_panel_for_submit_slash_command_keeps_model_as_view_action() {
-        assert_eq!(panel_for_submit_slash_command("/model"), None);
     }
 
     #[test]
     fn test_detect_slash_token_rejects_path_or_comment() {
         assert!(detect_slash_token("src/foo", 7).is_none());
         assert!(detect_slash_token("//", 2).is_none());
+    }
+
+    #[test]
+    fn test_parse_submit_request_opens_model_panel() {
+        assert_eq!(
+            parse_submit_request("/model"),
+            Some(SubmitRequest::OpenPanel(PanelKind::Model))
+        );
+    }
+
+    #[test]
+    fn test_parse_submit_request_resolves_history_aliases() {
+        assert_eq!(
+            parse_submit_request("/history"),
+            Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
+        );
+        assert_eq!(
+            parse_submit_request("/his"),
+            Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
+        );
     }
 
     #[test]
@@ -997,6 +1031,32 @@ mod tests {
         *SLASH_HINT_ACTIVE.state().write() = false;
         MENTION_PREFIX.state().write().clear();
         SLASH_PREFIX.state().write().clear();
+    }
+
+    fn reset_submit_side_effect_state() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        *RENDER_CACHE.state().write() = crate::kit::render_bridge::RenderCache::default();
+        INPUT_BUFFER.state().write().clear();
+        crate::kit::atoms::INPUT_HISTORY.state().write().clear();
+        crate::kit::atoms::INPUT_HISTORY_INDEX
+            .state()
+            .write()
+            .take();
+        crate::kit::atoms::OPEN_PANELS.state().write().clear();
+        crate::kit::atoms::ACTIVE_PANEL.state().write().take();
+        *crate::kit::atoms::NOTIFICATION.state().write() = None;
+        ACP_STATE.state().write().is_loading = false;
+    }
+
+    fn make_submit_recorder() -> std::sync::Arc<parking_lot::Mutex<Vec<SubmitRequest>>> {
+        std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()))
+    }
+
+    fn recorded_submit(
+        recorder: &std::sync::Arc<parking_lot::Mutex<Vec<SubmitRequest>>>,
+    ) -> Option<SubmitRequest> {
+        recorder.lock().pop()
     }
 
     #[test]
@@ -1046,7 +1106,113 @@ mod tests {
         assert!(!*AT_MENTION_ACTIVE.state().read());
     }
 
-    /// C2 回归测试：filter_files_for_mention 在 prefix 为空时返回前 20 条。
+    #[test]
+    #[serial]
+    fn test_submit_text_model_opens_panel_without_history_or_bubble() {
+        reset_submit_side_effect_state();
+        submit_text("/model".to_string());
+        assert_eq!(
+            *crate::kit::atoms::ACTIVE_PANEL.state().read(),
+            Some(PanelKind::Model)
+        );
+        assert!(crate::kit::atoms::INPUT_HISTORY.state().read().is_empty());
+        assert!(VIEW_MODELS.state().read().committed.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_submit_text_clear_sends_session_control_without_history_or_bubble() {
+        reset_submit_side_effect_state();
+        let recorder = make_submit_recorder();
+        dispatch_submit_request(parse_submit_request("/clear").unwrap(), false, |request| {
+            recorder.lock().push(request)
+        });
+        assert!(crate::kit::atoms::INPUT_HISTORY.state().read().is_empty());
+        assert!(VIEW_MODELS.state().read().committed.is_empty());
+        assert_eq!(
+            recorded_submit(&recorder),
+            Some(SubmitRequest::SessionControl(
+                crate::kit::submit_request::SessionControlRequest::Clear,
+            ))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_submit_text_provider_sends_view_action_without_history_or_bubble() {
+        reset_submit_side_effect_state();
+        let recorder = make_submit_recorder();
+        dispatch_submit_request(
+            parse_submit_request("/provider").unwrap(),
+            false,
+            |request| recorder.lock().push(request),
+        );
+        assert!(crate::kit::atoms::INPUT_HISTORY.state().read().is_empty());
+        assert!(VIEW_MODELS.state().read().committed.is_empty());
+        assert_eq!(
+            recorded_submit(&recorder),
+            Some(SubmitRequest::ViewAction(
+                crate::kit::submit_request::ViewActionRequest::CycleProvider,
+            ))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_submit_text_compact_appends_bubble_and_history_and_sends_agent_text() {
+        reset_submit_side_effect_state();
+        let recorder = make_submit_recorder();
+        dispatch_submit_request(
+            parse_submit_request("/compact").unwrap(),
+            false,
+            |request| recorder.lock().push(request),
+        );
+        assert_eq!(crate::kit::atoms::INPUT_HISTORY.state().read().len(), 1);
+        assert_eq!(VIEW_MODELS.state().read().committed.len(), 1);
+        assert_eq!(
+            recorded_submit(&recorder),
+            Some(SubmitRequest::AgentText("/compact".to_string()))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_submit_text_unknown_slash_appends_bubble_and_history_and_sends_agent_text() {
+        reset_submit_side_effect_state();
+        let recorder = make_submit_recorder();
+        dispatch_submit_request(parse_submit_request("/foo").unwrap(), false, |request| {
+            recorder.lock().push(request)
+        });
+        assert_eq!(crate::kit::atoms::INPUT_HISTORY.state().read().len(), 1);
+        assert_eq!(VIEW_MODELS.state().read().committed.len(), 1);
+        assert_eq!(
+            recorded_submit(&recorder),
+            Some(SubmitRequest::AgentText("/foo".to_string()))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_submit_text_loading_unknown_slash_buffers_agent_text() {
+        reset_submit_side_effect_state();
+        ACP_STATE.state().write().is_loading = true;
+        submit_text("/foo".to_string());
+        assert_eq!(crate::kit::atoms::INPUT_HISTORY.state().read().len(), 1);
+        assert_eq!(VIEW_MODELS.state().read().committed.len(), 1);
+        assert_eq!(INPUT_BUFFER.state().read().len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn test_submit_text_loading_clear_shows_notification_without_history_or_buffer() {
+        reset_submit_side_effect_state();
+        ACP_STATE.state().write().is_loading = true;
+        submit_text("/clear".to_string());
+        assert!(crate::kit::atoms::INPUT_HISTORY.state().read().is_empty());
+        assert!(VIEW_MODELS.state().read().committed.is_empty());
+        assert!(INPUT_BUFFER.state().read().is_empty());
+        assert!(crate::kit::atoms::NOTIFICATION.state().read().is_some());
+    }
     #[test]
     #[serial]
     fn test_filter_files_empty_prefix_returns_top_20() {

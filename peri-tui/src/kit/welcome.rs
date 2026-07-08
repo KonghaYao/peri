@@ -8,7 +8,7 @@ use crate::kit::theme;
 use ratatui_kit::{
     prelude::*,
     ratatui::{
-        layout::{Constraint, Flex},
+        layout::{Constraint, Direction, Flex},
         style::{Modifier, Style},
         text::{Line, Span},
         widgets::Paragraph,
@@ -105,14 +105,18 @@ pub fn Welcome(props: &WelcomeProps) -> impl Into<AnyElement<'static>> {
 
     let centered_lines: Vec<Line<'static>> =
         lines.into_iter().map(|line| line.centered()).collect();
+    let welcome_height = centered_lines.len() as u16;
 
     element!(
         View(
+            flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
             justify_content: Flex::Center,
         ) {
-            Text(text: Paragraph::new(centered_lines))
+            View(width: Constraint::Fill(1), height: Constraint::Length(welcome_height)) {
+                Text(text: Paragraph::new(centered_lines))
+            }
         }
     )
 }

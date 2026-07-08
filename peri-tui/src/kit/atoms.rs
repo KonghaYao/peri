@@ -25,6 +25,7 @@ use crate::app::panel_types::PanelKind;
 use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::render_bridge::RenderCache;
 use crate::kit::rewind_action::RewindAction;
+use crate::kit::submit_request::SubmitRequest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopupKind {
@@ -185,7 +186,7 @@ pub static PROVIDER_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::n
 pub static MODE_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static AT_MENTION_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static SLASH_HINT_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
-pub static SUBMIT_TX: OnceLock<UnboundedSender<String>> = OnceLock::new();
+pub static SUBMIT_TX: OnceLock<UnboundedSender<SubmitRequest>> = OnceLock::new();
 pub static CANCEL_TX: OnceLock<UnboundedSender<()>> = OnceLock::new();
 pub static RESIZE_TX: OnceLock<UnboundedSender<u16>> = OnceLock::new();
 

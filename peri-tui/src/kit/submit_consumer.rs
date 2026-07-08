@@ -5,7 +5,7 @@
 //! **首次会话懒初始化**：用户第一次提交时如果还没有 session，先创建。
 //!
 //! 设计：
-//! - 单消费者，从 `mpsc::UnboundedReceiver<String>` 顺序读取（保证提交顺序）
+//! - 单消费者，从 `mpsc::UnboundedReceiver<SubmitRequest>` 顺序读取（保证提交顺序）
 //! - 与 notifier / bridge 并行运行，三者通过独立 channel 解耦
 //! - shutdown 信号触发时干净退出，不发残留请求
 
@@ -26,6 +26,9 @@ use crate::kit::atoms::{
     ViewModelsSnapshot,
 };
 use crate::kit::render_bridge::RenderCache;
+use crate::kit::submit_request::{
+    ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
+};
 
 /// 启动提交消费者后台任务。
 ///
@@ -36,7 +39,7 @@ use crate::kit::render_bridge::RenderCache;
 /// - `shutdown`：与 notifier / bridge 共享的同一 CancellationToken
 pub fn spawn_submit_consumer(
     acp_client: AcpTuiClient,
-    mut rx: mpsc::UnboundedReceiver<String>,
+    mut rx: mpsc::UnboundedReceiver<SubmitRequest>,
     cwd: String,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
@@ -54,8 +57,8 @@ pub fn spawn_submit_consumer(
                             info!("kit submit_consumer: SUBMIT_TX dropped, exiting");
                             break;
                         }
-                        Some(text) => {
-                            if let Err(e) = handle_submit(&acp_client, &cwd, text).await {
+                        Some(request) => {
+                            if let Err(e) = handle_submit(&acp_client, &cwd, request).await {
                                 error!(error = %e, "kit submit_consumer: prompt failed");
                                 clear_loading_state();
                             }
@@ -72,6 +75,71 @@ pub fn spawn_submit_consumer(
 async fn handle_submit(
     acp_client: &AcpTuiClient,
     cwd: &str,
+    request: SubmitRequest,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match request {
+        SubmitRequest::AgentText(text) => handle_agent_text_submit(acp_client, cwd, text).await,
+        SubmitRequest::SessionControl(SessionControlRequest::Clear) => {
+            handle_clear_submit(acp_client, cwd).await
+        }
+        SubmitRequest::SessionControl(SessionControlRequest::Rewind(args)) => {
+            info!("kit submit_consumer: /rewind intercepted, forwarding to rewind_consumer");
+            if let Some(tx) = REWIND_ACTION_TX.get() {
+                let _ = tx.send(crate::kit::rewind_action::RewindAction::Confirm {
+                    target_message_id: args.target_message_id,
+                    revert_files: args.revert_files,
+                });
+            }
+            Ok(())
+        }
+        SubmitRequest::ViewAction(action) => {
+            info!(action = ?action, "kit submit_consumer: view-layer command intercepted");
+            execute_view_action(action, acp_client, cwd);
+            Ok(())
+        }
+        SubmitRequest::OpenPanel(kind) => {
+            warn!(
+                ?kind,
+                "kit submit_consumer: unexpected OpenPanel request in consumer"
+            );
+            Ok(())
+        }
+    }
+}
+
+async fn handle_clear_submit(
+    acp_client: &AcpTuiClient,
+    cwd: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!("kit submit_consumer: /clear intercepted, creating new session");
+
+    ACTIVE_SESSION_ID.set(String::new());
+    BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    *RENDER_CACHE.state().write() = RenderCache::default();
+    {
+        let ref_guard = ACP_STATE.state();
+        let mut acp = ref_guard.write();
+        acp.is_loading = false;
+    }
+
+    let new_sid = acp_client.new_session(cwd, None).await?;
+    ACTIVE_SESSION_ID.set(new_sid);
+    BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
+
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    *RENDER_CACHE.state().write() = RenderCache::default();
+    {
+        let ref_guard = ACP_STATE.state();
+        let mut acp = ref_guard.write();
+        acp.is_loading = false;
+    }
+    Ok(())
+}
+
+async fn handle_agent_text_submit(
+    acp_client: &AcpTuiClient,
+    cwd: &str,
     text: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let trimmed = text.trim();
@@ -79,59 +147,6 @@ async fn handle_submit(
         return Ok(());
     }
 
-    // /clear（及别名）不走 agent 协议——直接新开会话，清空 UI
-    if is_clear_command(trimmed) {
-        info!("kit submit_consumer: /clear intercepted, creating new session");
-
-        // 1. 先切断当前 UI 事实源，防止旧 session 的延迟事件继续污染视图。
-        ACTIVE_SESSION_ID.set(String::new());
-        BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
-        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
-        *RENDER_CACHE.state().write() = RenderCache::default();
-        {
-            let ref_guard = ACP_STATE.state();
-            let mut acp = ref_guard.write();
-            acp.is_loading = false;
-        }
-
-        // 2. 再创建新 session（同步等待），期间旧 session 事件会被 pump/bridge 过滤。
-        let new_sid = acp_client.new_session(cwd, None).await?;
-        // 3. 拿到新 sid 后同步活跃 session，并再次 reset，让 bridge 进入新 session 过滤模式。
-        ACTIVE_SESSION_ID.set(new_sid);
-        BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
-
-        // 4. 二次清空，确保 new_session 过程中的中间状态不会残留。
-        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
-        *RENDER_CACHE.state().write() = RenderCache::default();
-        {
-            let ref_guard = ACP_STATE.state();
-            let mut acp = ref_guard.write();
-            acp.is_loading = false;
-        }
-        return Ok(());
-    }
-
-    // /rewind（及别名 /undo）发 RewindAction::Confirm 到 rewind_consumer
-    if is_rewind_or_undo_command(trimmed) {
-        info!("kit submit_consumer: /rewind intercepted, forwarding to rewind_consumer");
-        let args = parse_rewind_args(trimmed);
-        if let Some(tx) = REWIND_ACTION_TX.get() {
-            let _ = tx.send(crate::kit::rewind_action::RewindAction::Confirm {
-                target_message_id: args.target_message_id.clone(),
-                revert_files: args.revert_files,
-            });
-        }
-        return Ok(());
-    }
-
-    // 视图层快捷命令——不经过 ACP，直接执行视图操作
-    if let Some(action) = resolve_view_action(trimmed) {
-        info!(action = ?action, "kit submit_consumer: view-layer command intercepted");
-        execute_view_action(&action, acp_client, cwd);
-        return Ok(());
-    }
-
-    // 懒初始化 session（首次提交或 session/load 之后）
     if !acp_client.has_session() {
         info!(cwd = %cwd, "kit submit_consumer: creating initial session");
         let session_id = acp_client.new_session(cwd, None).await?;
@@ -154,84 +169,10 @@ async fn handle_submit(
     Ok(())
 }
 
-/// 判断输入是否为 `/clear` 命令（含别名 `/cls` `/reset`）。
-fn is_clear_command(input: &str) -> bool {
-    let cmd = input.split_whitespace().next().unwrap_or("");
-    matches!(cmd, "/clear" | "/cls" | "/reset")
-}
-
-/// 判断输入是否为 `/rewind` 命令（含别名 `/undo`）。
-fn is_rewind_or_undo_command(input: &str) -> bool {
-    let cmd = input.split_whitespace().next().unwrap_or("");
-    matches!(cmd, "/rewind" | "/undo")
-}
-
-struct RewindArgs {
-    target_message_id: String,
-    revert_files: bool,
-}
-
-/// 解析 /rewind 命令参数。
-/// 格式: `/rewind <message_id> [--revert-files]`
-fn parse_rewind_args(input: &str) -> RewindArgs {
-    let parts: Vec<&str> = input.split_whitespace().collect();
-    let target_message_id = parts.get(1).map(|s| s.to_string()).unwrap_or_default();
-    let revert_files = parts.contains(&"--revert-files");
-    RewindArgs {
-        target_message_id,
-        revert_files,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExportMode {
-    All,
-    Screen,
-}
-
-#[derive(Debug)]
-enum ViewAction {
-    CycleModel,
-    CycleProvider,
-    CyclePermissionMode,
-    ExportText(ExportMode),
-}
-
-/// 解析视图层快捷命令。格式: `/command [next|cycle|toggle]`
-fn resolve_view_action(input: &str) -> Option<ViewAction> {
-    let cmd = input.split_whitespace().next().unwrap_or("");
-    match cmd {
-        "/model" => Some(ViewAction::CycleModel),
-        "/provider" => Some(ViewAction::CycleProvider),
-        "/mode" => Some(ViewAction::CyclePermissionMode),
-        "/debug-export-text" => Some(ViewAction::ExportText(parse_export_mode(input))),
-        _ => None,
-    }
-}
-
 /// 执行视图层操作。
-fn execute_view_action(action: &ViewAction, acp_client: &AcpTuiClient, cwd: &str) {
+fn execute_view_action(action: ViewActionRequest, acp_client: &AcpTuiClient, cwd: &str) {
     match action {
-        ViewAction::CycleModel => {
-            if let Some(cfg_handle) = PERI_CONFIG_HANDLE.get() {
-                let cfg = cfg_handle.read();
-                let aliases = [
-                    "opus".to_string(),
-                    "sonnet".to_string(),
-                    "haiku".to_string(),
-                ];
-                if !aliases.is_empty() {
-                    let current = &cfg.config.active_alias;
-                    let idx = aliases.iter().position(|a| a == current).unwrap_or(0);
-                    let next = aliases[(idx + 1) % aliases.len()].clone();
-                    let client = acp_client.clone();
-                    tokio::spawn(async move {
-                        let _ = client.set_config_option("model", &next).await;
-                    });
-                }
-            }
-        }
-        ViewAction::CycleProvider => {
+        ViewActionRequest::CycleProvider => {
             if let Some(cfg_handle) = PERI_CONFIG_HANDLE.get() {
                 let cfg = cfg_handle.read();
                 let provider_ids: Vec<String> =
@@ -250,7 +191,7 @@ fn execute_view_action(action: &ViewAction, acp_client: &AcpTuiClient, cwd: &str
                 }
             }
         }
-        ViewAction::CyclePermissionMode => {
+        ViewActionRequest::CyclePermissionMode => {
             use peri_middlewares::hitl::PermissionMode;
 
             if let Some(mode_handle) = PERMISSION_MODE_HANDLE.get() {
@@ -264,8 +205,8 @@ fn execute_view_action(action: &ViewAction, acp_client: &AcpTuiClient, cwd: &str
                 mode_handle.store(next);
             }
         }
-        ViewAction::ExportText(mode) => {
-            let message = match export_debug_text(*mode, cwd) {
+        ViewActionRequest::ExportText(mode) => {
+            let message = match export_debug_text(mode, cwd) {
                 Ok(path) => format!("已导出消息文本：{}", path.display()),
                 Err(err) => format!("导出消息文本失败：{err}"),
             };
@@ -275,13 +216,6 @@ fn execute_view_action(action: &ViewAction, acp_client: &AcpTuiClient, cwd: &str
             });
             RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
         }
-    }
-}
-
-fn parse_export_mode(input: &str) -> ExportMode {
-    match input.split_whitespace().nth(1) {
-        Some("screen") => ExportMode::Screen,
-        _ => ExportMode::All,
     }
 }
 
@@ -397,12 +331,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_empty_text_skipped() {
+    async fn test_empty_agent_text_skipped() {
         let (client, _server_transport) = make_client_without_pump();
         let cwd = ".".to_string();
 
-        // 空文本 + 只有空白——不应创建 session
-        let result = handle_submit(&client, &cwd, "   \n\t ".to_string()).await;
+        let result = handle_submit(
+            &client,
+            &cwd,
+            SubmitRequest::AgentText("   \n\t ".to_string()),
+        )
+        .await;
         assert!(result.is_ok());
         assert!(!client.has_session());
     }
@@ -416,7 +354,7 @@ mod tests {
         // 启动一个简短超时，确保 handle_submit 进入 new_session 分支
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(100),
-            handle_submit(&client, &cwd, "hello".to_string()),
+            handle_submit(&client, &cwd, SubmitRequest::AgentText("hello".to_string())),
         )
         .await;
 
@@ -430,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn test_shutdown_exits_loop() {
         let (client, _server_transport) = make_client_without_pump();
-        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
         let shutdown = CancellationToken::new();
         let handle = spawn_submit_consumer(client, rx, ".".into(), shutdown.clone());
 
@@ -444,7 +382,7 @@ mod tests {
     #[tokio::test]
     async fn test_dropped_tx_exits_loop() {
         let (client, _server_transport) = make_client_without_pump();
-        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
         let shutdown = CancellationToken::new();
         let handle = spawn_submit_consumer(client, rx, ".".into(), shutdown);
 
@@ -452,84 +390,12 @@ mod tests {
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
     }
 
-    /// 编译期断言：UnboundedSender<String> 与 atoms::SUBMIT_TX 类型契约一致。
+    /// 编译期断言：UnboundedSender<SubmitRequest> 与 atoms::SUBMIT_TX 类型契约一致。
     #[test]
     fn test_submit_tx_type_contract() {
-        let (tx, _rx): (mpsc::UnboundedSender<String>, _) = mpsc::unbounded_channel();
+        let (tx, _rx): (mpsc::UnboundedSender<SubmitRequest>, _) = mpsc::unbounded_channel();
         // 模拟 atoms::SUBMIT_TX.set(tx) 的契约
         let _ = tx;
-    }
-
-    #[test]
-    fn test_is_clear_command_matches_variants() {
-        assert!(is_clear_command("/clear"));
-        assert!(is_clear_command("/cls"));
-        assert!(is_clear_command("/reset"));
-        // 允许尾部空白
-        assert!(is_clear_command("/clear  "));
-        // 允许额外参数
-        assert!(is_clear_command("/clear extra args"));
-        assert!(is_clear_command("/cls  some stuff"));
-        // 非 clear 命令
-        assert!(!is_clear_command("/compact"));
-        assert!(!is_clear_command("hello"));
-        assert!(!is_clear_command(""));
-    }
-
-    #[test]
-    fn test_is_rewind_command_matches_variants() {
-        assert!(is_rewind_or_undo_command("/rewind"));
-        assert!(is_rewind_or_undo_command("/undo"));
-        assert!(is_rewind_or_undo_command("/rewind msg-123"));
-        assert!(is_rewind_or_undo_command("/rewind msg-123 --revert-files"));
-        assert!(!is_rewind_or_undo_command("/clear"));
-        assert!(!is_rewind_or_undo_command("hello"));
-    }
-
-    #[test]
-    fn test_parse_rewind_args() {
-        let args = parse_rewind_args("/rewind abc123 --revert-files");
-        assert_eq!(args.target_message_id, "abc123");
-        assert!(args.revert_files);
-
-        let args = parse_rewind_args("/rewind xyz");
-        assert_eq!(args.target_message_id, "xyz");
-        assert!(!args.revert_files);
-
-        let args = parse_rewind_args("/rewind");
-        assert_eq!(args.target_message_id, "");
-        assert!(!args.revert_files);
-    }
-
-    #[test]
-    fn test_resolve_view_action() {
-        assert!(matches!(
-            resolve_view_action("/model"),
-            Some(ViewAction::CycleModel)
-        ));
-        assert!(matches!(
-            resolve_view_action("/provider"),
-            Some(ViewAction::CycleProvider)
-        ));
-        assert!(matches!(
-            resolve_view_action("/mode"),
-            Some(ViewAction::CyclePermissionMode)
-        ));
-        assert!(matches!(
-            resolve_view_action("/debug-export-text"),
-            Some(ViewAction::ExportText(ExportMode::All))
-        ));
-        assert!(matches!(
-            resolve_view_action("/debug-export-text all"),
-            Some(ViewAction::ExportText(ExportMode::All))
-        ));
-        assert!(matches!(
-            resolve_view_action("/debug-export-text screen"),
-            Some(ViewAction::ExportText(ExportMode::Screen))
-        ));
-        assert!(resolve_view_action("/clear").is_none());
-        assert!(resolve_view_action("/diff").is_none());
-        assert!(resolve_view_action("hello").is_none());
     }
 
     #[test]
@@ -554,7 +420,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_clear_command_bypasses_prompt() {
+    async fn test_execute_view_action_export_text_writes_notification() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        *NOTIFICATION.state().write() = None;
+        execute_view_action(
+            ViewActionRequest::ExportText(ExportMode::All),
+            &make_client_without_pump().0,
+            tempdir.path().to_str().expect("utf8 path"),
+        );
+        assert!(NOTIFICATION.state().read().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_clear_request_bypasses_prompt() {
         use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit, tui_hash_str};
 
         crate::kit::atoms::init_atoms();
@@ -575,7 +453,11 @@ mod tests {
         // /clear 在无 server 时会因 new_session RPC 超时，但不走 prompt 路径
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(100),
-            handle_submit(&client, &cwd, "/clear".to_string()),
+            handle_submit(
+                &client,
+                &cwd,
+                SubmitRequest::SessionControl(SessionControlRequest::Clear),
+            ),
         )
         .await;
 

@@ -24,6 +24,7 @@ use crate::kit::render_bridge::spawn_render_bridge;
 use crate::kit::rewind_action::spawn_rewind_consumer;
 use crate::kit::service_snapshot::{SnapshotSource, spawn_service_snapshot};
 use crate::kit::submit_consumer::{spawn_cancel_consumer, spawn_submit_consumer};
+use crate::kit::submit_request::SubmitRequest;
 use crate::kit::thread_load_consumer::spawn_thread_load_consumer;
 use crate::launch::{TuiLaunchOptions, build_app_and_acp, teardown_app};
 use ratatui_kit::{
@@ -107,7 +108,7 @@ pub async fn run_kit_fullscreen(
     //    走最小可用路径：UI 可显示但无 agent 交互）。
     if let Some((client, notification_rx)) = acp_client {
         // 4a. SUBMIT channel：InputArea → submit_consumer
-        let (submit_tx, submit_rx) = mpsc::unbounded_channel::<String>();
+        let (submit_tx, submit_rx) = mpsc::unbounded_channel::<SubmitRequest>();
         let _ = atoms::SUBMIT_TX.set(submit_tx);
 
         // 4b. REWIND_ACTION channel：RewindPopup → rewind_consumer
