@@ -6,6 +6,9 @@
 #[derive(Debug, Clone)]
 pub struct TuiTextChunk {
     pub text: String,
+    /// ACP 协议 `agent_message_chunk` 携带的 `messageId`。
+    /// 同一 message 的所有 chunk 共享同一 ID。变化时表示新消息开始。
+    pub message_id: Option<String>,
     /// 当事件来自子 agent 时存在。
     pub agent_id: Option<String>,
 }

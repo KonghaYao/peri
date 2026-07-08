@@ -167,11 +167,21 @@ pub async fn run_kit_fullscreen(
         // 4e. 初始化会话——在 notifier/bridge 就绪后立即创建 session，
         //     触发服务器发送 AvailableCommandsUpdate（含 skills），确保
         //     slash 补全弹窗在首次输入前就有数据。
+        //     **[TRAP]** 必须将返回的 session_id 写入 ACTIVE_SESSION_ID
+        //     + 递增 BRIDGE_RESET_COUNTER。不写 ACTIVE_SESSION_ID 则
+        //     acp_bridge 的 state.active_session_id 保持空值，后续全部
+        //     携带真实 session_id 的 ACP 事件均被 session filter 丢弃
+        //     → 渲染管线断流，消息区显示为空。
         {
             let client = client.clone();
             tokio::spawn(async move {
                 match client.new_session(&cwd_for_init, None).await {
-                    Ok(_) => tracing::info!("kit: initial session created"),
+                    Ok(session_id) => {
+                        tracing::info!(%session_id, "kit: initial session created");
+                        atoms::ACTIVE_SESSION_ID.set(session_id);
+                        atoms::BRIDGE_RESET_COUNTER
+                            .set(atoms::BRIDGE_RESET_COUNTER.get().wrapping_add(1));
+                    }
                     Err(e) => tracing::warn!(error = %e, "kit: initial session creation failed"),
                 }
             });

@@ -24,6 +24,14 @@ use std::time::Instant;
 /// When `"view-commit"` arrives, the consumer clears this and replaces
 /// the base view with the full snapshot. Rendering concatenates
 /// `committed + CurrentTurn.view_models()`.
+///
+/// ## Segment interleaving
+///
+/// Agent text, tool calls, and sub-agent starts are interleaved at the protocol
+/// level: the model says a few words, then calls a tool, then continues speaking.
+/// `segments` records this chronological order so that `build_view_models` can
+/// create separate `TuiAssistantBubble` entries for text before and after each
+/// tool/sub-agent boundary, instead of merging everything into one fat bubble.
 #[derive(Debug, Clone, Default)]
 pub struct CurrentTurn {
     /// Accumulated assistant text for the current turn.
@@ -47,11 +55,35 @@ pub struct CurrentTurn {
     /// Streaming sub-agent cards keyed by agent_id / instance_id.
     pub subagents: Vec<SubAgentAccumulator>,
 
+    /// Chronological order of text flushes, tool starts, and sub-agent starts
+    /// within this turn. Drive `build_view_models` to produce interleaved output.
+    segments: Vec<TurnSegment>,
+
+    /// Byte offset in `self.text` that the last `AssistantText` segment covered.
+    /// Used by `flush_text_segment` to detect when new text needs a new segment.
+    last_text_flush: usize,
+
+    /// ACP `messageId` of the most recent `TextChunk`. Used to detect when
+    /// a new assistant message starts (message_id change → flush pending text).
+    last_message_id: Option<String>,
+
     /// Cached ViewModels built from streaming data (populated by `build_view_models`).
     ///
     /// Cleared whenever new streaming data arrives (text/reasoning/tool events),
     /// and rebuilt on the next call to `view_models()`.
     cached_view_models: Vec<TuiRenderUnit>,
+}
+
+/// A single entry in the chronological ordering of a turn's streaming events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TurnSegment {
+    /// Text from `last_text_flush` (inclusive) up to `text_end_byte` (exclusive)
+    /// in `CurrentTurn.text` belongs to one assistant bubble.
+    AssistantText { text_end_byte: usize },
+    /// Tool card reference to `CurrentTurn.tool_cards[tool_idx]`.
+    Tool { tool_idx: usize },
+    /// Sub-agent reference to `CurrentTurn.subagents[subagent_idx]`.
+    SubAgent { subagent_idx: usize },
 }
 
 impl CurrentTurn {
@@ -60,13 +92,37 @@ impl CurrentTurn {
         Self::default()
     }
 
+    /// If text has grown since the last `AssistantText` segment, push a new
+    /// segment capturing the delta.
+    fn flush_text_segment(&mut self) {
+        let current_len = self.text.len();
+        if current_len > self.last_text_flush {
+            self.segments.push(TurnSegment::AssistantText {
+                text_end_byte: current_len,
+            });
+            self.last_text_flush = current_len;
+        }
+    }
+
     /// Invalidate the cached ViewModels (call after any streaming data mutation).
     fn invalidate_cache(&mut self) {
         self.cached_view_models.clear();
     }
 
     /// Append a text chunk from `"text-chunk"`.
-    pub fn append_text(&mut self, t: &str) {
+    ///
+    /// If `message_id` differs from the previous chunk, a new assistant message
+    /// has started — the pending text is flushed as a separate segment so the
+    /// renderer can show it in its own bubble rather than merging it into one blob.
+    pub fn append_text(&mut self, t: &str, message_id: Option<&str>) {
+        if let Some(prev_id) = &self.last_message_id {
+            if let Some(new_id) = message_id {
+                if prev_id != new_id {
+                    self.flush_text_segment();
+                }
+            }
+        }
+        self.last_message_id = message_id.map(|s| s.to_string());
         self.text.push_str(t);
         self.active = true;
         self.invalidate_cache();
@@ -80,7 +136,13 @@ impl CurrentTurn {
     }
 
     /// Begin a new tool card from `"tool-started"`.
+    ///
+    /// Flushes any pending text as a segment BEFORE pushing the tool,
+    /// so text spoken before the tool call appears in its own bubble.
     pub fn start_tool(&mut self, tool: ToolCardAccumulator) {
+        self.flush_text_segment();
+        let idx = self.tool_cards.len();
+        self.segments.push(TurnSegment::Tool { tool_idx: idx });
         self.tool_cards.push(tool);
         self.active = true;
         self.invalidate_cache();
@@ -98,10 +160,16 @@ impl CurrentTurn {
     }
 
     /// Begin a new sub-agent group from `"subagent-started"`.
+    ///
+    /// Flushes any pending text before the sub-agent boundary.
     pub fn start_subagent(&mut self, agent_id: String, agent_name: String) {
         if self.subagents.iter().any(|s| s.agent_id == agent_id) {
             return;
         }
+        self.flush_text_segment();
+        let idx = self.subagents.len();
+        self.segments
+            .push(TurnSegment::SubAgent { subagent_idx: idx });
         self.subagents
             .push(SubAgentAccumulator::new(agent_id, agent_name));
         self.active = true;
@@ -191,6 +259,9 @@ impl CurrentTurn {
         self.reasoning.clear();
         self.tool_cards.clear();
         self.subagents.clear();
+        self.segments.clear();
+        self.last_text_flush = 0;
+        self.last_message_id = None;
         self.cached_view_models.clear();
         self.active = false;
         self.committed = true;
@@ -228,64 +299,110 @@ impl CurrentTurn {
     }
 
     /// Build incremental ViewModels from accumulated streaming data into cache.
+    ///
+    /// Walks through `self.segments` in chronological order, creating separate
+    /// `TuiAssistantBubble` entries for text before and after each tool/sub-agent
+    /// boundary. Any trailing text past the last segment is rendered as a final
+    /// assistant bubble.
     fn build_view_models(&mut self) {
         use crate::kit::tui_render_unit::{
             TuiAssistantBubble, TuiReasoningBlock, TuiToolCard, tui_hash_str,
         };
 
         let mut vms: Vec<TuiRenderUnit> = Vec::new();
+        let mut prev_text_end: usize = 0;
+        let mut first_text = true;
 
-        let has_content = !self.text.is_empty() || !self.reasoning.is_empty();
+        let reasoning_block = if self.reasoning.is_empty() {
+            None
+        } else {
+            Some(TuiReasoningBlock {
+                text: self.reasoning.clone(),
+                collapsed: false,
+            })
+        };
 
-        if has_content {
-            let reasoning = if self.reasoning.is_empty() {
-                None
+        for segment in &self.segments {
+            match segment {
+                TurnSegment::AssistantText { text_end_byte } => {
+                    let end = *text_end_byte;
+                    if end > prev_text_end || reasoning_block.is_some() {
+                        let reasoning = if first_text {
+                            first_text = false;
+                            reasoning_block.clone()
+                        } else {
+                            None
+                        };
+                        let text_slice = &self.text[prev_text_end..end.min(self.text.len())];
+                        let reasoning_text = reasoning
+                            .as_ref()
+                            .map(|r| r.text.clone())
+                            .unwrap_or_default();
+                        let content_hash =
+                            tui_hash_str(&format!("{}|{}", text_slice, reasoning_text));
+                        vms.push(TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+                            text: text_slice.to_string(),
+                            reasoning,
+                            content_hash,
+                        }));
+                        prev_text_end = end;
+                    }
+                }
+                TurnSegment::Tool { tool_idx } => {
+                    if let Some(t) = self.tool_cards.get(*tool_idx) {
+                        let is_running = t.output_summary.is_none();
+                        let running_duration_ms =
+                            is_running.then(|| t.started_at.elapsed().as_millis() as u64);
+                        vms.push(TuiRenderUnit::TuiToolCard(TuiToolCard {
+                            tool_id: t.tool_id.clone(),
+                            tool_name: t.tool_name.clone(),
+                            input_summary: t.input_summary.clone(),
+                            output_summary: t.output_summary.clone().unwrap_or_default(),
+                            is_error: t.is_error,
+                            is_running,
+                            running_duration_ms,
+                            diff: None,
+                            content_hash: tui_hash_str(&format!(
+                                "{}|{}|{}|{}|{}|{}",
+                                t.tool_id,
+                                t.tool_name,
+                                t.input_summary,
+                                t.output_summary.as_deref().unwrap_or(""),
+                                t.is_error,
+                                is_running,
+                            )),
+                        }));
+                    }
+                }
+                TurnSegment::SubAgent { subagent_idx } => {
+                    if let Some(s) = self.subagents.get(*subagent_idx) {
+                        vms.push(s.view_model());
+                    }
+                }
+            }
+        }
+
+        // Flush remaining text (after last segment, or if no segments exist)
+        let remaining_start = prev_text_end;
+        if remaining_start < self.text.len()
+            || (first_text && reasoning_block.is_some() && self.segments.is_empty())
+        {
+            let reasoning = if first_text {
+                reasoning_block.clone()
             } else {
-                Some(TuiReasoningBlock {
-                    text: self.reasoning.clone(),
-                    collapsed: false,
-                })
+                None
             };
+            let text_slice = &self.text[remaining_start..];
             let reasoning_text = reasoning
                 .as_ref()
                 .map(|r| r.text.clone())
                 .unwrap_or_default();
-            let content_hash = tui_hash_str(&format!("{}|{}", self.text, reasoning_text));
-
+            let content_hash = tui_hash_str(&format!("{}|{}", text_slice, reasoning_text));
             vms.push(TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
-                text: self.text.clone(),
+                text: text_slice.to_string(),
                 reasoning,
                 content_hash,
             }));
-        }
-
-        for t in &self.tool_cards {
-            let is_running = t.output_summary.is_none();
-            let running_duration_ms = is_running.then(|| t.started_at.elapsed().as_millis() as u64);
-
-            vms.push(TuiRenderUnit::TuiToolCard(TuiToolCard {
-                tool_id: t.tool_id.clone(),
-                tool_name: t.tool_name.clone(),
-                input_summary: t.input_summary.clone(),
-                output_summary: t.output_summary.clone().unwrap_or_default(),
-                is_error: t.is_error,
-                is_running,
-                running_duration_ms,
-                diff: None,
-                content_hash: tui_hash_str(&format!(
-                    "{}|{}|{}|{}|{}|{}",
-                    t.tool_id,
-                    t.tool_name,
-                    t.input_summary,
-                    t.output_summary.as_deref().unwrap_or(""),
-                    t.is_error,
-                    is_running,
-                )),
-            }));
-        }
-
-        for s in &self.subagents {
-            vms.push(s.view_model());
         }
 
         self.cached_view_models = vms;
@@ -356,7 +473,7 @@ impl SubAgentAccumulator {
     }
 
     fn append_text(&mut self, text: &str) {
-        self.child_turn.append_text(text);
+        self.child_turn.append_text(text, None);
         self.cached_view_model.replace(None);
     }
 
@@ -742,8 +859,8 @@ mod tests {
     fn test_append_text_sets_active() {
         let mut ct = CurrentTurn::new();
         assert!(!ct.active);
-        ct.append_text("hello ");
-        ct.append_text("world");
+        ct.append_text("hello ", None);
+        ct.append_text("world", None);
         assert_eq!(ct.text, "hello world");
         assert!(ct.active);
     }
@@ -864,7 +981,7 @@ mod tests {
     #[test]
     fn test_deactivate() {
         let mut ct = CurrentTurn::new();
-        ct.append_text("x");
+        ct.append_text("x", None);
         assert!(ct.active);
         ct.deactivate();
         assert!(!ct.active);
@@ -1064,5 +1181,102 @@ mod tests {
             AcpEventData::Unknown { event, .. } => assert_eq!(event, "future-event-xyz"),
             _ => panic!("expected Unknown for malformed data"),
         }
+    }
+
+    // ── Segment interleaving tests ─────────────────────────────────────────
+
+    /// 工具调用之间由 message_id 变化驱动的文本段分隔。
+    ///
+    /// 场景：Agent 说"1"（message_A）→ Read → 说"2"（message_B）→ Bash。
+    /// 期望 view_models 产出 4 项，顺序为
+    /// [TuiAssistantBubble("1"), TuiToolCard(Read), TuiAssistantBubble("2"), TuiToolCard(Bash)]
+    #[test]
+    fn test_build_view_models_interleaves_text_and_tools() {
+        let mut ct = CurrentTurn::new();
+        ct.append_text("1", Some("msg_A"));
+        ct.start_tool(ToolCardAccumulator::new(
+            "tc-1".into(),
+            "Read".into(),
+            "file: a.rs".into(),
+        ));
+        ct.end_tool("tc-1", "ok".into(), false);
+        ct.append_text("2", Some("msg_B"));
+        ct.start_tool(ToolCardAccumulator::new(
+            "tc-2".into(),
+            "Bash".into(),
+            "echo hi".into(),
+        ));
+        ct.end_tool("tc-2", "hi".into(), false);
+
+        let vms: Vec<_> = ct.view_models().to_vec();
+        assert_eq!(vms.len(), 4, "应为 4 项：Text→Tool→Text→Tool");
+        assert!(
+            matches!(&vms[0], TuiRenderUnit::TuiAssistantBubble(_)),
+            "[0] 应为 Text bubble (1)"
+        );
+        assert!(
+            matches!(&vms[1], TuiRenderUnit::TuiToolCard(_)),
+            "[1] 应为 Tool card (Read)"
+        );
+        assert!(
+            matches!(&vms[2], TuiRenderUnit::TuiAssistantBubble(_)),
+            "[2] 应为 Text bubble (2)"
+        );
+        assert!(
+            matches!(&vms[3], TuiRenderUnit::TuiToolCard(_)),
+            "[3] 应为 Tool card (Bash)"
+        );
+
+        // 验证文本内容是否正确分离（不是整体拼接）
+        match &vms[0] {
+            TuiRenderUnit::TuiAssistantBubble(b) => assert_eq!(b.text, "1"),
+            _ => unreachable!(),
+        }
+        match &vms[2] {
+            TuiRenderUnit::TuiAssistantBubble(b) => assert_eq!(b.text, "2"),
+            _ => unreachable!(),
+        }
+    }
+
+    /// 同一 message_id 的多段文本不拆开，保持为一个 bubble。
+    #[test]
+    fn test_same_message_id_keeps_text_contiguous() {
+        let mut ct = CurrentTurn::new();
+        ct.append_text("part1", Some("msg_A"));
+        ct.append_text(" part2", Some("msg_A"));
+        ct.start_tool(ToolCardAccumulator::new(
+            "tc-1".into(),
+            "Read".into(),
+            "f: x.rs".into(),
+        ));
+
+        let vms: Vec<_> = ct.view_models().to_vec();
+        assert_eq!(vms.len(), 2, "1 个 Text bubble + 1 个 Tool card");
+        match &vms[0] {
+            TuiRenderUnit::TuiAssistantBubble(b) => {
+                assert_eq!(b.text, "part1 part2", "同 message_id 不应拆分");
+            }
+            _ => panic!("[0] 应为 Text bubble"),
+        }
+    }
+
+    /// 无 message_id（旧事件或协议不携带）时，依赖 tool/subagent 边界分段。
+    #[test]
+    fn test_no_message_id_uses_tool_boundaries() {
+        let mut ct = CurrentTurn::new();
+        ct.append_text("a", None);
+        ct.start_tool(ToolCardAccumulator::new(
+            "tc-1".into(),
+            "Read".into(),
+            "f: x.rs".into(),
+        ));
+        ct.end_tool("tc-1", "ok".into(), false);
+        ct.append_text("b", None);
+
+        let vms: Vec<_> = ct.view_models().to_vec();
+        assert_eq!(vms.len(), 3, "Text→Tool→Text");
+        assert!(matches!(&vms[0], TuiRenderUnit::TuiAssistantBubble(_)));
+        assert!(matches!(&vms[1], TuiRenderUnit::TuiToolCard(_)));
+        assert!(matches!(&vms[2], TuiRenderUnit::TuiAssistantBubble(_)));
     }
 }

@@ -322,17 +322,27 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
 
     match tag {
         Some("agent_message_chunk") => {
-            // ACP SDK ContentChunk wraps text in content.text, not at update top-level
+            // ACP SDK ContentChunk wraps text in content.text, not at update top-level.
+            // messageId is a top-level field on ContentChunk (alongside content) —
+            // it carries the unique message identifier for each ReAct iteration.
             let text = update
                 .get("content")
                 .and_then(|c| c.get("text"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let message_id = update
+                .get("messageId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             if is_session_replay {
                 Some(AcpEventData::ReplayAssistantBubble { text })
             } else {
-                let text_chunk = crate::kit::stream_data::TuiTextChunk { text, agent_id };
+                let text_chunk = crate::kit::stream_data::TuiTextChunk {
+                    text,
+                    message_id,
+                    agent_id,
+                };
                 Some(AcpEventData::TextChunk(text_chunk))
             }
         }

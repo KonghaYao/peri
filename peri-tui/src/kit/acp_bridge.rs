@@ -92,8 +92,13 @@ pub fn spawn_acp_bridge(
                                 }
                             }
 
-                            // 非 reset 路径：陈旧事件过滤（active_session_id 不匹配 → 丢弃）
+                            // 非 reset 路径：陈旧事件过滤（active_session_id 不匹配 → 丢弃）。
+                            // 仅当 state 已初始化（active_session_id 非空）时才过滤——
+                            // state.active_session_id 为空意味着 bridge 尚未确认
+                            // 当前活跃 session（entry.rs 初始会话创建前），此时不应
+                            // 丢弃任何事件，否则 ACP 应答事件全部被过滤，渲染管线断流。
                             if !just_reset
+                                && !state.active_session_id.is_empty()
                                 && !epoch_event.active_session_id.is_empty()
                                 && epoch_event.active_session_id != state.active_session_id
                             {

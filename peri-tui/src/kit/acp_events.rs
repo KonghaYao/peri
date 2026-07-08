@@ -68,7 +68,9 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 state.variant = 1;
                 push_view_models(state);
             } else {
-                state.current_turn.append_text(&tc.text);
+                state
+                    .current_turn
+                    .append_text(&tc.text, tc.message_id.as_deref());
                 state.variant = 1;
                 push_view_models(state);
             }
@@ -555,6 +557,7 @@ mod tests {
             &mut state,
             &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
                 text: "child text".into(),
+                message_id: None,
                 agent_id: Some("agent-1".into()),
             }),
         );
@@ -759,6 +762,7 @@ mod tests {
             &mut state,
             &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
                 text: "first turn".into(),
+                message_id: None,
                 agent_id: None,
             }),
         );
@@ -775,6 +779,7 @@ mod tests {
             &mut state,
             &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
                 text: "second turn".into(),
+                message_id: None,
                 agent_id: None,
             }),
         );
@@ -809,6 +814,7 @@ mod tests {
             &mut state,
             &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
                 text: "assistant reply".into(),
+                message_id: None,
                 agent_id: None,
             }),
         );
