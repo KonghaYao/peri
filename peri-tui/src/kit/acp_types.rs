@@ -129,7 +129,19 @@ impl CurrentTurn {
     }
 
     /// Append a reasoning chunk from `"reasoning-chunk"`.
-    pub fn append_reasoning(&mut self, t: &str) {
+    ///
+    /// Same `message_id` semantics as `append_text`: a new ID triggeres
+    /// a text segment flush so reasoning and text for different messages
+    /// are separated.
+    pub fn append_reasoning(&mut self, t: &str, message_id: Option<&str>) {
+        if let Some(prev_id) = &self.last_message_id {
+            if let Some(new_id) = message_id {
+                if prev_id != new_id {
+                    self.flush_text_segment();
+                }
+            }
+        }
+        self.last_message_id = message_id.map(|s| s.to_string());
         self.reasoning.push_str(t);
         self.active = true;
         self.invalidate_cache();
@@ -478,7 +490,7 @@ impl SubAgentAccumulator {
     }
 
     fn append_reasoning(&mut self, text: &str) {
-        self.child_turn.append_reasoning(text);
+        self.child_turn.append_reasoning(text, None);
         self.cached_view_model.replace(None);
     }
 
@@ -868,7 +880,7 @@ mod tests {
     #[test]
     fn test_append_reasoning_sets_active() {
         let mut ct = CurrentTurn::new();
-        ct.append_reasoning("thinking...");
+        ct.append_reasoning("thinking...", None);
         assert_eq!(ct.reasoning, "thinking...");
         assert!(ct.active);
     }

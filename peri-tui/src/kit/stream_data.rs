@@ -17,6 +17,9 @@ pub struct TuiTextChunk {
 #[derive(Debug, Clone)]
 pub struct TuiReasoningChunk {
     pub text: String,
+    /// ACP 协议 `agent_thought_chunk` 携带的 `messageId`。
+    /// 与 `TuiTextChunk.message_id` 语义相同。
+    pub message_id: Option<String>,
     /// 当事件来自子 agent 时存在。
     pub agent_id: Option<String>,
 }

@@ -353,7 +353,15 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let reasoning_chunk = crate::kit::stream_data::TuiReasoningChunk { text, agent_id };
+            let message_id = update
+                .get("messageId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let reasoning_chunk = crate::kit::stream_data::TuiReasoningChunk {
+                text,
+                message_id,
+                agent_id,
+            };
             Some(AcpEventData::ReasoningChunk(reasoning_chunk))
         }
         Some("tool_call") => {

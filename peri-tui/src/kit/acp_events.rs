@@ -90,7 +90,9 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 state.variant = 1;
                 push_view_models(state);
             } else {
-                state.current_turn.append_reasoning(&rc.text);
+                state
+                    .current_turn
+                    .append_reasoning(&rc.text, rc.message_id.as_deref());
                 tracing::info!(
                     len = state.current_turn.reasoning.len(),
                     "bridge: reasoning appended"
