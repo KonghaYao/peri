@@ -278,7 +278,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 fn collect_subagents(snap: &crate::kit::atoms::ViewModelsSnapshot) -> Vec<TuiSubAgentGroup> {
     let mut out: Vec<TuiSubAgentGroup> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for vm in snap.committed.iter().chain(snap.current_turn.iter()) {
+    for vm in snap.items.iter() {
         scan_vm_for_subagents(vm, &mut out, &mut seen);
     }
     out

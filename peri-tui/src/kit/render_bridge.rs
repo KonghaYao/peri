@@ -2,6 +2,9 @@
 //!
 //! 独立 tokio task 监听 ACP 流式事件与宽度变化，预计算每条 TuiRenderUnit 的
 //! `Vec<Line<'static>>` 与可视高度，并写入 `RENDER_CACHE` atom。
+//!
+//! 检测逻辑：比较 `ViewModelsSnapshot.generation`（替代 Arc::as_ptr），
+//! 变化时触发全量/增量重建。
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -18,8 +21,7 @@ use crate::kit::view_render;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VmKey {
-    Committed(usize),
-    CurrentTurn(usize),
+    Item(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -33,18 +35,14 @@ pub struct RenderCache {
     pub entries: Vec<(VmKey, RenderedEntry)>,
     pub cumulative_heights: Vec<usize>,
     /// 每逻辑行的视觉行映射——message_area 视口裁剪用
-    /// 在 rebuild + dedup 后基于所有行重新计算
     pub wrap_map: Vec<WrappedLineInfo>,
 }
 
 /// 每条逻辑行的 wrap 信息——用于视口裁剪的二分查找
 #[derive(Debug, Clone)]
 pub struct WrappedLineInfo {
-    /// 在 render_cache 的全量 lines（所有 entries 展开）中的索引
     pub line_idx: usize,
-    /// 该逻辑行渲染后的起始视觉行号（从 0 开始）
     pub visual_row: u16,
-    /// 该逻辑行的视觉行数（>= 1，考虑 wrap）
     pub visual_height: u16,
 }
 
@@ -55,17 +53,13 @@ pub fn spawn_render_bridge(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut last_resize_width: usize = 80;
-        let mut last_committed_ptr: usize = 0;
-        let mut last_committed_len: usize = 0;
-        let mut last_ct_ptr: usize = 0;
+        let mut last_generation: u64 = 0;
         let mut last_reset_counter: u64 = 0;
         let mut cache = RenderCache::default();
-        // 上次 rebuild 时所有 committed TuiRenderUnit 的 content_hash 列表
         let mut msg_hashes: Vec<u64> = Vec::new();
-        // 上次 rebuild 时每条消息的渲染行缓存（按消息索引）
         let mut msg_lines_cache: Vec<Vec<ratatui::text::Line<'static>>> = Vec::new();
 
-        // 每秒轮询 VIEW_MODELS atom——检测 running Bash 计时器引发的 ct_ptr 变化
+        // 每秒轮询 VIEW_MODELS atom——检测 generation 变化（如 running Bash 计时器）
         let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(1));
         poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -73,12 +67,11 @@ pub fn spawn_render_bridge(
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = poll_interval.tick() => {
-                    // running Bash 工具计时器刷新：仅 ct_ptr 变化时重建 current_turn 条目
                     let snapshot = VIEW_MODELS.state().read().clone();
-                    let ct_ptr = Arc::as_ptr(&snapshot.current_turn) as *const () as usize;
-                    if ct_ptr != last_ct_ptr {
-                        debug!(ct_ptr, last_ct_ptr, "render_bridge: tick REBUILD_CURRENT_TURN (timer refresh)");
-                        rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, last_resize_width).await;
+                    if snapshot.generation != last_generation {
+                        debug!(generation = snapshot.generation, last_generation, "render_bridge: tick FULL_REBUILD (generation changed)");
+                        rebuild_entries(&mut cache.entries, &snapshot.items, last_resize_width).await;
+                        msg_hashes = extract_hashes_from_im(&snapshot.items);
                         rebuild_cumulative_heights(&mut cache);
                         let all_lines: Vec<Line<'static>> = cache
                             .entries
@@ -88,32 +81,28 @@ pub fn spawn_render_bridge(
                             .collect();
                         cache.wrap_map = build_wrap_map(&all_lines, last_resize_width as u16);
                         *RENDER_CACHE.state().write() = cache.clone();
-                        last_ct_ptr = ct_ptr;
+                        last_generation = snapshot.generation;
                     }
                 }
                 Some(new_width) = resize_rx.recv() => {
                     let new_width = usize::from(new_width).max(1);
                     if new_width != last_resize_width {
                         last_resize_width = new_width;
-                        rebuild_all(last_resize_width, &mut cache, &mut last_committed_ptr, &mut last_committed_len, &mut last_ct_ptr).await;
-                        // 宽度变化后所有 entries 已重建，更新 hash 缓存
+                        rebuild_all(last_resize_width, &mut cache, &mut last_generation).await;
                         let snapshot = VIEW_MODELS.state().read().clone();
-                        msg_hashes = extract_hashes(&snapshot.committed);
+                        msg_hashes = extract_hashes_from_im(&snapshot.items);
                         msg_lines_cache.clear();
                     }
                 }
                 Some(_epoch_event) = rx.recv() => {
-                    // 检测 BRIDGE_RESET_COUNTER——acp_bridge 已清空 VIEW_MODELS，
-                    // render_bridge 同步清空缓存，避免用旧数据重建 RENDER_CACHE。
+                    // BRIDGE_RESET_COUNTER 变更 → 清空缓存
                     let counter = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
                     let did_clear = if counter != last_reset_counter {
                         last_reset_counter = counter;
                         cache = RenderCache::default();
                         msg_hashes.clear();
                         msg_lines_cache.clear();
-                        last_committed_ptr = 0;
-                        last_committed_len = 0;
-                        last_ct_ptr = 0;
+                        last_generation = 0;
                         *RENDER_CACHE.state().write() = cache.clone();
                         info!(counter, "render_bridge: cache cleared by BRIDGE_RESET_COUNTER");
                         true
@@ -121,138 +110,93 @@ pub fn spawn_render_bridge(
                         false
                     };
 
-                    let Some(mut snapshot) = read_ready_snapshot(last_committed_ptr, last_committed_len, last_ct_ptr).await else {
-                        info!("render_bridge: event dropped (VIEW_MODELS unchanged after 50 yields)");
+                    let Some(snapshot) = read_ready_snapshot(last_generation).await else {
+                        info!("render_bridge: event dropped (generation unchanged after 50 yields)");
                         continue;
                     };
 
-                    // 竞态修复：BRIDGE_RESET_COUNTER 清零后，acp_bridge 可能还未处理
-                    // 本次事件并写入新数据。因两个 tokio task 并发消费同一事件，
-                    // render_bridge 可能在 acp_bridge 之前读取 VIEW_MODELS，
-                    // 导致读到旧 session 数据或刚被 push_view_models_for_reset
-                    // 清空的中间态。yield 等待 acp_bridge 完成 ViewCommit 写入。
+                    let generation_val = snapshot.generation;
+                    let items_len = snapshot.items.len();
+
                     if did_clear {
-                        let initial_ptr =
-                            Arc::as_ptr(&snapshot.committed) as *const () as usize;
+                        // BRIDGE_RESET race: yield until acp_bridge writes new data
                         for wait_round in 0..15 {
                             tokio::task::yield_now().await;
                             let fresh = VIEW_MODELS.state().read().clone();
-                            let fresh_ptr =
-                                Arc::as_ptr(&fresh.committed) as *const () as usize;
-                            if fresh_ptr != initial_ptr {
-                                let fresh_len = fresh.committed.len();
-                                info!(wait_round, fresh_len, "render_bridge: BRIDGE_RESET race resolved, acp_bridge committed updated");
-                                snapshot = fresh;
+                            if fresh.generation != generation_val || !fresh.items.is_empty() {
+                                info!(wait_round, generation_val = fresh.generation, len = fresh.items.len(), "render_bridge: BRIDGE_RESET race resolved");
                                 break;
                             }
                         }
                     }
 
-                    log_ct_snapshot(&snapshot, "render_bridge: processing snapshot");
-                    let committed_ptr = Arc::as_ptr(&snapshot.committed) as *const () as usize;
-                    let committed_len = snapshot.committed.len();
-                    let ct_ptr = Arc::as_ptr(&snapshot.current_turn) as *const () as usize;
-
-                    debug!(
-                        did_clear,
-                        committed_ptr,
-                        committed_len,
-                        ct_ptr,
-                        last_committed_ptr,
-                        last_committed_len,
-                        last_ct_ptr,
-                        msg_hashes_len = msg_hashes.len(),
-                        cache_entries = cache.entries.len(),
-                        "render_bridge: pre-decision snapshot state"
-                    );
-
-                    if committed_ptr == last_committed_ptr
-                        && committed_len == last_committed_len
-                        && ct_ptr == last_ct_ptr
-                    {
-                        debug!(committed_ptr, committed_len, ct_ptr, "render_bridge: NO_CHANGE, skipping rebuild");
+                    if generation_val == last_generation {
+                        debug!(generation_val, last_generation, "render_bridge: NO_CHANGE, skipping rebuild");
                         continue;
                     }
 
-                    if committed_ptr != last_committed_ptr {
-                        // --- hash diff 优化：提取所有 committed VM 的 content_hash ---
-                        let new_hashes = extract_hashes(&snapshot.committed);
-                        let stable = prefix_stable_len(&new_hashes, &msg_hashes);
+                    // hash diff 优化
+                    let new_hashes = extract_hashes_from_im(&snapshot.items);
+                    let new_len = items_len;
+                    let old_len = msg_hashes.len();
+                    let stable = prefix_stable_len(&new_hashes, &msg_hashes);
 
-                        debug!(
-                            stable,
-                            snapshot_committed_len = snapshot.committed.len(),
-                            msg_hashes_len = msg_hashes.len(),
-                            cache_entries_before = cache.entries.len(),
-                            "render_bridge: committed_ptr CHANGED, choosing rebuild strategy"
-                        );
+                    debug!(
+                        stable,
+                        new_len,
+                        old_len,
+                        generation_val,
+                        last_generation,
+                        cache_entries = cache.entries.len(),
+                        "render_bridge: generation changed, choosing rebuild strategy"
+                    );
 
-                        if snapshot.committed.len() < msg_hashes.len() {
-                            debug!("render_bridge: strategy=CLEAR_AND_REBUILD (len decreased)");
-                            // Thread 切换或 clear——清空所有历史缓存
-                            msg_hashes.clear();
-                            msg_lines_cache.clear();
-                            cache.entries.clear();
-                            rebuild_entries(&mut cache.entries, &snapshot.committed, &snapshot.current_turn, last_resize_width).await;
-                        } else if stable > 0 && snapshot.committed.len() >= msg_hashes.len() {
-                            debug!(stable, "render_bridge: strategy=HASH_DIFF_APPEND");
-                            // 仅追加变化部分——只对 stable.. 范围做 markdown 解析
-                            cache.entries.retain(|(key, _)| !matches!(key, VmKey::CurrentTurn(_)));
-                            // 截断到 stable 位置（稳定前缀）
-                            while cache.entries.len() > stable {
-                                cache.entries.pop();
-                            }
-                            append_entries(
-                                &mut cache.entries,
-                                &snapshot.committed[stable..],
-                                last_resize_width,
-                                stable,
-                                true,
-                            ).await;
-                            rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, last_resize_width).await;
-                        } else if committed_len > last_committed_len && cache.entries.len() >= last_committed_len {
-                            debug!(
-                                committed_len,
-                                last_committed_len,
-                                cache_entries = cache.entries.len(),
-                                "render_bridge: strategy=INCREMENTAL_APPEND (ptr changed, len grew)"
-                            );
-                            // 原有增量路径
-                            cache.entries.retain(|(key, _)| !matches!(key, VmKey::CurrentTurn(_)));
-                            append_entries(
-                                &mut cache.entries,
-                                &snapshot.committed[last_committed_len..],
-                                last_resize_width,
-                                last_committed_len,
-                                true,
-                            ).await;
-                            rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, last_resize_width).await;
-                        } else {
-                            debug!(
-                                committed_len,
-                                last_committed_len,
-                                cache_entries = cache.entries.len(),
-                                "render_bridge: strategy=FULL_REBUILD (fallback, ptr changed but no branch matched)"
-                            );
-                            rebuild_entries(&mut cache.entries, &snapshot.committed, &snapshot.current_turn, last_resize_width).await;
+                    if new_len < old_len {
+                        debug!("render_bridge: strategy=CLEAR_AND_REBUILD (len decreased)");
+                        msg_hashes.clear();
+                        msg_lines_cache.clear();
+                        cache.entries.clear();
+                        rebuild_entries(&mut cache.entries, &snapshot.items, last_resize_width).await;
+                    } else if stable > 0 && new_len >= old_len {
+                        debug!(stable, "render_bridge: strategy=HASH_DIFF_APPEND");
+                        while cache.entries.len() > stable {
+                            cache.entries.pop();
                         }
-
-                        msg_hashes = new_hashes;
-                    } else if ct_ptr != last_ct_ptr {
+                        let tail: Vec<crate::kit::tui_render_unit::TuiRenderUnit> =
+                            snapshot.items.iter().skip(stable).cloned().collect();
+                        append_entries(
+                            &mut cache.entries,
+                            &tail,
+                            last_resize_width,
+                            stable,
+                        ).await;
+                    } else if new_len > old_len && cache.entries.len() >= old_len {
                         debug!(
-                            ct_ptr,
-                            last_ct_ptr,
-                            committed_ptr,
-                            last_committed_ptr,
-                            committed_len,
-                            last_committed_len,
-                            "render_bridge: REBUILD_CURRENT_TURN (only ct_ptr changed)"
+                            new_len,
+                            old_len,
+                            cache_entries = cache.entries.len(),
+                            "render_bridge: strategy=INCREMENTAL_APPEND (len grew)"
                         );
-                        rebuild_current_turn(&mut cache.entries, &snapshot.current_turn, last_resize_width).await;
+                        let tail: Vec<crate::kit::tui_render_unit::TuiRenderUnit> =
+                            snapshot.items.iter().skip(old_len).cloned().collect();
+                        append_entries(
+                            &mut cache.entries,
+                            &tail,
+                            last_resize_width,
+                            old_len,
+                        ).await;
+                    } else {
+                        debug!(
+                            new_len,
+                            old_len,
+                            "render_bridge: strategy=FULL_REBUILD (fallback)"
+                        );
+                        rebuild_entries(&mut cache.entries, &snapshot.items, last_resize_width).await;
                     }
 
+                    msg_hashes = new_hashes;
+
                     rebuild_cumulative_heights(&mut cache);
-                    // 在所有 entry 追加/重建完成后，构建 wrap_map
                     let all_lines: Vec<Line<'static>> = cache
                         .entries
                         .iter()
@@ -266,9 +210,7 @@ pub fn spawn_render_bridge(
                         "render_bridge: writing RENDER_CACHE"
                     );
                     *RENDER_CACHE.state().write() = cache.clone();
-                    last_committed_ptr = committed_ptr;
-                    last_committed_len = committed_len;
-                    last_ct_ptr = ct_ptr;
+                    last_generation = generation_val;
                 }
                 else => break,
             }
@@ -278,26 +220,13 @@ pub fn spawn_render_bridge(
 }
 
 async fn read_ready_snapshot(
-    last_committed_ptr: usize,
-    last_committed_len: usize,
-    last_ct_ptr: usize,
+    last_generation: u64,
 ) -> Option<crate::kit::atoms::ViewModelsSnapshot> {
-    let mut prev_committed_ptr = last_committed_ptr;
-    let mut prev_ct_ptr = last_ct_ptr;
     for _ in 0..50 {
         let snapshot = VIEW_MODELS.state().read().clone();
-        let committed_ptr = Arc::as_ptr(&snapshot.committed) as *const () as usize;
-        let committed_len = snapshot.committed.len();
-        let ct_ptr = Arc::as_ptr(&snapshot.current_turn) as *const () as usize;
-        // ptr 变化意味着 acp_bridge 已写入新数据，即使 len 相同也返回
-        if committed_ptr != prev_committed_ptr || ct_ptr != prev_ct_ptr {
+        if snapshot.generation != last_generation {
             return Some(snapshot);
         }
-        if committed_len != last_committed_len || ct_ptr != last_ct_ptr {
-            return Some(snapshot);
-        }
-        prev_committed_ptr = committed_ptr;
-        prev_ct_ptr = ct_ptr;
         tokio::task::yield_now().await;
     }
     tracing::warn!(
@@ -307,37 +236,12 @@ async fn read_ready_snapshot(
     None
 }
 
-fn log_ct_snapshot(snapshot: &crate::kit::atoms::ViewModelsSnapshot, label: &str) {
-    info!(
-        label,
-        committed_len = snapshot.committed.len(),
-        ct_len = snapshot.current_turn.len(),
-    );
-    for vm in snapshot.current_turn.iter() {
-        if let crate::kit::tui_render_unit::TuiRenderUnit::TuiAssistantBubble(data) = vm {
-            info!(
-                "  CT TuiAssistantBubble text_len={} has_reasoning={}",
-                data.text.len(),
-                data.reasoning.is_some()
-            );
-        }
-    }
-}
-
-/// 计算新旧 hash 列表的前缀稳定长度——第一个 hash 不同的位置。
-/// 返回 0 表示全部变化（或首次加载），返回 N 表示前 N 条消息可安全复用缓存。
-fn prefix_stable_len(new_hashes: &[u64], old_hashes: &[u64]) -> usize {
-    new_hashes
-        .iter()
-        .zip(old_hashes.iter())
-        .position(|(new_h, old_h)| new_h != old_h)
-        .unwrap_or_else(|| old_hashes.len().min(new_hashes.len()))
-}
-
-/// 从 TuiRenderUnit 列表中提取 content_hash 集合。
-fn extract_hashes(vms: &[crate::kit::tui_render_unit::TuiRenderUnit]) -> Vec<u64> {
+fn extract_hashes_from_im(
+    items: &im::Vector<crate::kit::tui_render_unit::TuiRenderUnit>,
+) -> Vec<u64> {
     use crate::kit::tui_render_unit::TuiRenderUnit;
-    vms.iter()
+    items
+        .iter()
         .map(|vm| match vm {
             TuiRenderUnit::TuiUserBubble(d) => d.content_hash,
             TuiRenderUnit::TuiAssistantBubble(d) => d.content_hash,
@@ -351,21 +255,17 @@ fn extract_hashes(vms: &[crate::kit::tui_render_unit::TuiRenderUnit]) -> Vec<u64
         .collect()
 }
 
-async fn rebuild_all(
-    width: usize,
-    cache: &mut RenderCache,
-    last_committed_ptr: &mut usize,
-    last_committed_len: &mut usize,
-    last_ct_ptr: &mut usize,
-) {
+fn prefix_stable_len(new_hashes: &[u64], old_hashes: &[u64]) -> usize {
+    new_hashes
+        .iter()
+        .zip(old_hashes.iter())
+        .position(|(new_h, old_h)| new_h != old_h)
+        .unwrap_or_else(|| old_hashes.len().min(new_hashes.len()))
+}
+
+async fn rebuild_all(width: usize, cache: &mut RenderCache, last_generation: &mut u64) {
     let snapshot = VIEW_MODELS.state().read().clone();
-    rebuild_entries(
-        &mut cache.entries,
-        &snapshot.committed,
-        &snapshot.current_turn,
-        width,
-    )
-    .await;
+    rebuild_entries(&mut cache.entries, &snapshot.items, width).await;
     rebuild_cumulative_heights(cache);
     let all_lines: Vec<Line<'static>> = cache
         .entries
@@ -375,32 +275,19 @@ async fn rebuild_all(
         .collect();
     cache.wrap_map = build_wrap_map(&all_lines, width as u16);
     *RENDER_CACHE.state().write() = cache.clone();
-    *last_committed_ptr = Arc::as_ptr(&snapshot.committed) as *const () as usize;
-    *last_committed_len = snapshot.committed.len();
-    *last_ct_ptr = Arc::as_ptr(&snapshot.current_turn) as *const () as usize;
+    *last_generation = snapshot.generation;
 }
 
 fn rebuild_entries(
     entries: &mut Vec<(VmKey, RenderedEntry)>,
-    committed: &[crate::kit::tui_render_unit::TuiRenderUnit],
-    current_turn: &[crate::kit::tui_render_unit::TuiRenderUnit],
+    items: &im::Vector<crate::kit::tui_render_unit::TuiRenderUnit>,
     width: usize,
 ) -> impl std::future::Future<Output = ()> {
     entries.clear();
+    let items_vec: Vec<crate::kit::tui_render_unit::TuiRenderUnit> =
+        items.iter().cloned().collect();
     async move {
-        append_entries(entries, committed, width, 0, true).await;
-        append_entries(entries, current_turn, width, 0, false).await;
-    }
-}
-
-fn rebuild_current_turn(
-    entries: &mut Vec<(VmKey, RenderedEntry)>,
-    current_turn: &[crate::kit::tui_render_unit::TuiRenderUnit],
-    width: usize,
-) -> impl std::future::Future<Output = ()> {
-    entries.retain(|(key, _)| !matches!(key, VmKey::CurrentTurn(_)));
-    async move {
-        append_entries(entries, current_turn, width, 0, false).await;
+        append_entries(entries, &items_vec, width, 0).await;
     }
 }
 
@@ -409,16 +296,11 @@ async fn append_entries(
     items: &[crate::kit::tui_render_unit::TuiRenderUnit],
     width: usize,
     start_index: usize,
-    committed: bool,
 ) {
     const YIELD_EVERY: usize = 20;
     let mut next_yield_at: usize = YIELD_EVERY;
     for (offset, vm) in items.iter().enumerate() {
-        let key = if committed {
-            VmKey::Committed(start_index + offset)
-        } else {
-            VmKey::CurrentTurn(offset)
-        };
+        let key = VmKey::Item(start_index + offset);
         let lines = view_render::render_v2_vm(vm, width);
         let height = visual_height(&lines, width);
         entries.push((
@@ -455,7 +337,6 @@ pub fn visual_height(lines: &[Line<'static>], width: usize) -> usize {
     rows.max(1)
 }
 
-/// 基于所有 lines 构建 wrap_map。
 pub fn build_wrap_map(lines: &[Line<'static>], width: u16) -> Vec<WrappedLineInfo> {
     let mut map = Vec::with_capacity(lines.len());
     let mut row: u16 = 0;

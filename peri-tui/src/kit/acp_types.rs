@@ -235,8 +235,6 @@ impl CurrentTurn {
 
         let mut vms: Vec<TuiRenderUnit> = Vec::new();
 
-        let tool_ids: Vec<String> = self.tool_cards.iter().map(|t| t.tool_id.clone()).collect();
-
         let has_content = !self.text.is_empty() || !self.reasoning.is_empty();
 
         if has_content {
@@ -257,7 +255,6 @@ impl CurrentTurn {
             vms.push(TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
                 text: self.text.clone(),
                 reasoning,
-                tool_card_ids: tool_ids.clone(),
                 content_hash,
             }));
         }
@@ -389,7 +386,7 @@ impl SubAgentAccumulator {
         let vm = TuiRenderUnit::TuiSubAgentGroup(crate::kit::tui_render_unit::TuiSubAgentGroup {
             agent_id: self.agent_id.clone(),
             agent_name: self.agent_name.clone(),
-            view_models: child_vms.to_vec(),
+            view_models: child_vms.iter().cloned().collect::<im::Vector<_>>(),
             collapsed: false,
             is_running: self.is_running,
             content_hash: crate::kit::tui_render_unit::tui_hash_str(&format!(
@@ -463,6 +460,9 @@ pub enum AcpEventData {
 
     /// `"replay-assistant-bubble"` -- assistant bubble from session history replay.
     ReplayAssistantBubble { text: String },
+
+    /// TUI 内部事件：本地用户提交的 UserBubble。仅 TUI 内部使用，不走 ACP 协议。
+    LocalUserBubble { text: String },
 
     // -- §4.3 Status (status bar updates) ----------------------------------
     /// `"tool-count"` -- number of tool calls in the current turn.

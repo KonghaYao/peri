@@ -28,22 +28,20 @@ use std::sync::{Arc, Mutex};
 use parking_lot::RwLock;
 use std::sync::OnceLock;
 
+use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::PredictionState;
-use crate::kit::atoms::ViewModelsSnapshot;
 use crate::kit::atoms::{
     ACP_STATE, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST, INPUT_AREA_ESC_PREFIX,
-    INPUT_BUFFER, MENTION_PREFIX, MENTION_SELECTED_INDEX, PREDICTION, RENDER_CACHE, SKILL_NAMES,
-    SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX, VIEW_MODELS,
+    INPUT_BUFFER, LOCAL_EVENT_TX, MENTION_PREFIX, MENTION_SELECTED_INDEX, PREDICTION, SKILL_NAMES,
+    SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX,
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
 use crate::kit::mention_popup::MentionPopup;
 use crate::kit::panel_registry::{PANELS, open_panel, panel_for_slash_command};
-use crate::kit::render_bridge::{self, RenderedEntry, VmKey};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
 use crate::kit::submit_request::{SubmitRequest, parse_submit_request};
 use crate::kit::theme;
-use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble, tui_hash_str};
 
 /// 追踪 composer 段落区域，供鼠标点击→光标定位使用。
 /// 仿照 MsgAreaTracker 模式：rect 是值类型，每帧 pre_component_draw 更新后在
@@ -634,8 +632,10 @@ where
         SubmitRequest::AgentText(text) => {
             push_history(&text);
             reset_history_cursor();
+            // 通过 LOCAL_EVENT_TX 发送 LocalUserBubble 事件到 acp_bridge，
+            // 统一走 dispatch_and_notify → push_view_models 写入路径。
+            send_local_user_bubble(&text);
             if is_loading {
-                append_local_user_bubble(&text);
                 let input_buffer = INPUT_BUFFER.state();
                 let mut guard = input_buffer.write();
                 guard.push_back(text);
@@ -643,7 +643,6 @@ where
                     guard.pop_front();
                 }
             } else {
-                append_local_user_bubble(&text);
                 send_request(SubmitRequest::AgentText(text));
             }
         }
@@ -671,96 +670,15 @@ fn show_submit_blocked_notification(request: &SubmitRequest) {
         .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
 }
 
-fn append_local_user_bubble(text: &str) {
-    let user_vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
-        text: text.to_string(),
-        content_hash: tui_hash_str(text),
-        is_system_reminder: false,
-    });
-    let snapshot = {
-        let vms = VIEW_MODELS.state();
-        let snapshot = vms.read();
-        let mut combined: Vec<TuiRenderUnit> = Vec::with_capacity(snapshot.committed.len() + 1);
-        combined.extend(snapshot.committed.iter().cloned());
-        combined.push(user_vm.clone());
-        let new_snapshot = ViewModelsSnapshot {
-            committed: Arc::from(combined),
-            current_turn: Arc::clone(&snapshot.current_turn),
-        };
-        drop(snapshot);
-        *vms.write() = new_snapshot.clone();
-        new_snapshot
-    };
-    sync_render_cache(&snapshot);
-}
-
-fn sync_render_cache(snapshot: &ViewModelsSnapshot) {
-    let width = 80;
-    let mut cache = RENDER_CACHE.state().read().clone();
-
-    // 增量模式：只追加最新一条 TuiUserBubble，避免全量 markdown 重解析
-    if !cache.entries.is_empty() {
-        if let Some(last_vm) = snapshot.committed.last() {
-            let new_index = snapshot.committed.len().saturating_sub(1);
-            let key = VmKey::Committed(new_index);
-            let lines = crate::kit::view_render::render_v2_vm(last_vm, width);
-            let height = render_bridge::visual_height(&lines, width);
-            cache.entries.push((
-                key,
-                RenderedEntry {
-                    height,
-                    lines: Arc::from(lines),
-                },
-            ));
-        }
-    } else {
-        // Fallback：cache 为空时走全量构建
-        let mut entries =
-            Vec::with_capacity(snapshot.committed.len() + snapshot.current_turn.len());
-        append_render_entries(&mut entries, &snapshot.committed, width, 0, true);
-        append_render_entries(&mut entries, &snapshot.current_turn, width, 0, false);
-        cache.entries = entries;
-    }
-
-    // 重建 cumulative_heights
-    cache.cumulative_heights.clear();
-    let mut sum = 0usize;
-    for (_, entry) in &cache.entries {
-        sum = sum.saturating_add(entry.height);
-        cache.cumulative_heights.push(sum);
-    }
-    let all_lines: Vec<ratatui::text::Line<'static>> = cache
-        .entries
-        .iter()
-        .flat_map(|(_, entry)| entry.lines.iter())
-        .cloned()
-        .collect();
-    cache.wrap_map = render_bridge::build_wrap_map(&all_lines, width as u16);
-    *RENDER_CACHE.state().write() = cache;
-}
-
-fn append_render_entries(
-    entries: &mut Vec<(VmKey, RenderedEntry)>,
-    items: &[TuiRenderUnit],
-    width: usize,
-    start_index: usize,
-    committed: bool,
-) {
-    for (offset, vm) in items.iter().enumerate() {
-        let key = if committed {
-            VmKey::Committed(start_index + offset)
-        } else {
-            VmKey::CurrentTurn(offset)
-        };
-        let lines = crate::kit::view_render::render_v2_vm(vm, width);
-        let height = render_bridge::visual_height(&lines, width);
-        entries.push((
-            key,
-            RenderedEntry {
-                height,
-                lines: Arc::from(lines),
+fn send_local_user_bubble(text: &str) {
+    use crate::kit::acp_types::AcpEventData;
+    if let Some(tx) = LOCAL_EVENT_TX.get() {
+        let _ = tx.send(AcpEventWithEpoch {
+            event: AcpEventData::LocalUserBubble {
+                text: text.to_string(),
             },
-        ));
+            active_session_id: String::new(),
+        });
     }
 }
 
@@ -958,6 +876,7 @@ fn render_multiline_with_cursor_for_themed(
 mod tests {
     use super::*;
     use crate::app::panel_types::PanelKind;
+    use crate::kit::atoms::{RENDER_CACHE, VIEW_MODELS, ViewModelsSnapshot};
     use serial_test::serial;
 
     #[test]
@@ -1116,7 +1035,7 @@ mod tests {
             Some(PanelKind::Model)
         );
         assert!(crate::kit::atoms::INPUT_HISTORY.state().read().is_empty());
-        assert!(VIEW_MODELS.state().read().committed.is_empty());
+        assert!(VIEW_MODELS.state().read().items.is_empty());
     }
 
     #[test]
@@ -1128,7 +1047,7 @@ mod tests {
             recorder.lock().push(request)
         });
         assert!(crate::kit::atoms::INPUT_HISTORY.state().read().is_empty());
-        assert!(VIEW_MODELS.state().read().committed.is_empty());
+        assert!(VIEW_MODELS.state().read().items.is_empty());
         assert_eq!(
             recorded_submit(&recorder),
             Some(SubmitRequest::SessionControl(
@@ -1148,7 +1067,7 @@ mod tests {
             |request| recorder.lock().push(request),
         );
         assert!(crate::kit::atoms::INPUT_HISTORY.state().read().is_empty());
-        assert!(VIEW_MODELS.state().read().committed.is_empty());
+        assert!(VIEW_MODELS.state().read().items.is_empty());
         assert_eq!(
             recorded_submit(&recorder),
             Some(SubmitRequest::ViewAction(
@@ -1168,7 +1087,7 @@ mod tests {
             |request| recorder.lock().push(request),
         );
         assert_eq!(crate::kit::atoms::INPUT_HISTORY.state().read().len(), 1);
-        assert_eq!(VIEW_MODELS.state().read().committed.len(), 1);
+        // UserBubble 通过 LOCAL_EVENT_TX 异步发送，不在此断言
         assert_eq!(
             recorded_submit(&recorder),
             Some(SubmitRequest::AgentText("/compact".to_string()))
@@ -1184,7 +1103,6 @@ mod tests {
             recorder.lock().push(request)
         });
         assert_eq!(crate::kit::atoms::INPUT_HISTORY.state().read().len(), 1);
-        assert_eq!(VIEW_MODELS.state().read().committed.len(), 1);
         assert_eq!(
             recorded_submit(&recorder),
             Some(SubmitRequest::AgentText("/foo".to_string()))
@@ -1198,7 +1116,7 @@ mod tests {
         ACP_STATE.state().write().is_loading = true;
         submit_text("/foo".to_string());
         assert_eq!(crate::kit::atoms::INPUT_HISTORY.state().read().len(), 1);
-        assert_eq!(VIEW_MODELS.state().read().committed.len(), 1);
+        // UserBubble 通过 LOCAL_EVENT_TX 异步发送；assert INPUT_BUFFER 接收了文本
         assert_eq!(INPUT_BUFFER.state().read().len(), 1);
     }
 
@@ -1209,7 +1127,7 @@ mod tests {
         ACP_STATE.state().write().is_loading = true;
         submit_text("/clear".to_string());
         assert!(crate::kit::atoms::INPUT_HISTORY.state().read().is_empty());
-        assert!(VIEW_MODELS.state().read().committed.is_empty());
+        assert!(VIEW_MODELS.state().read().items.is_empty());
         assert!(INPUT_BUFFER.state().read().is_empty());
         assert!(crate::kit::atoms::NOTIFICATION.state().read().is_some());
     }

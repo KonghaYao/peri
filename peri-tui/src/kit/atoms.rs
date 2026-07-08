@@ -17,11 +17,12 @@ use chrono::{DateTime, Utc};
 use peri_acp_types::event_data::{AskUser, HitlPending, OauthNeeded, RewindPreview};
 use ratatui_kit::prelude::{Atom as AtomStatic, AtomState};
 use std::collections::VecDeque;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::panel_types::PanelKind;
+use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::render_bridge::RenderCache;
 use crate::kit::rewind_action::RewindAction;
@@ -50,15 +51,15 @@ pub struct AcpStateSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct ViewModelsSnapshot {
-    pub committed: Arc<[TuiRenderUnit]>,
-    pub current_turn: Arc<[TuiRenderUnit]>,
+    pub items: im::Vector<TuiRenderUnit>,
+    pub generation: u64,
 }
 
 impl Default for ViewModelsSnapshot {
     fn default() -> Self {
         Self {
-            committed: Arc::from([]),
-            current_turn: Arc::from([]),
+            items: im::Vector::new(),
+            generation: 0,
         }
     }
 }
@@ -283,6 +284,10 @@ pub static ACTIVE_SESSION_ID: AtomStatic<String> = AtomStatic::new(|| String::ne
 /// bridge 只需在 counter 变更时重置内部状态——新 session 的空 ViewCommit
 /// 会通过正常事件流到达，确保 committed 清空。
 pub static BRIDGE_RESET_COUNTER: AtomStatic<u64> = AtomStatic::new(|| 0);
+
+/// TUI 内部事件通道——input_area 本地提交通过此 channel 发送 LocalUserBubble
+/// 到 acp_bridge，统一走 dispatch_and_notify 路径写入 VIEW_MODELS atom。
+pub static LOCAL_EVENT_TX: OnceLock<UnboundedSender<AcpEventWithEpoch>> = OnceLock::new();
 
 /// Spinner token 计数——由 acp_bridge 在收到 TokenUsage 事件时写入（input+output），
 /// MessageArea 的 build_footer_lines 读取后调用 `spinner_state.set_token_count(count)`

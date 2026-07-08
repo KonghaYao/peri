@@ -302,7 +302,7 @@ fn derive_vm_stats(snap: &crate::kit::atoms::ViewModelsSnapshot) -> VmStats {
         subagent_groups: 0,
         system_notes: 0,
     };
-    for vm in snap.committed.iter().chain(snap.current_turn.iter()) {
+    for vm in snap.items.iter() {
         count_vm(vm, &mut s);
     }
     s.total =

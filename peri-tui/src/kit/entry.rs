@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::service_registry::ProcessResourceMonitor;
 use crate::kit::acp_bridge::spawn_acp_bridge;
 use crate::kit::acp_notifier::spawn_kit_notifier;
+use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::app_shell::AppShell;
 use crate::kit::ask_user_action::{AskUserResponseAction, spawn_ask_user_consumer};
 use crate::kit::atoms;
@@ -129,6 +130,16 @@ pub async fn run_kit_fullscreen(
 
         // 4c. bridge channel：notifier → acp_bridge
         let (bridge_tx, bridge_rx) = mpsc::unbounded_channel();
+        // 4c2. LOCAL_EVENT_TX：input_area 本地提交 → acp_bridge（统一写入路径）
+        let (local_event_tx, mut local_event_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
+        let _ = atoms::LOCAL_EVENT_TX.set(local_event_tx);
+        // Mini bridge task：转发 local event 到主 bridge channel
+        let bridge_tx_clone = bridge_tx.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = local_event_rx.recv().await {
+                let _ = bridge_tx_clone.send(ev);
+            }
+        });
         let (render_bridge_tx, render_bridge_rx) = mpsc::unbounded_channel();
         let (resize_tx, resize_rx) = mpsc::unbounded_channel::<u16>();
         let _ = atoms::RESIZE_TX.set(resize_tx);

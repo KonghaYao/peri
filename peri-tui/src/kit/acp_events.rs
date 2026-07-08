@@ -10,7 +10,6 @@ use crate::kit::tui_render_unit::{
     TuiNoteLevel, TuiRenderUnit, TuiSystemNote, TuiUserBubble, tui_hash_str,
 };
 use agent_client_protocol::schema::v1::{Plan, PlanEntryStatus};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -30,12 +29,8 @@ pub enum SessionPhase {
 pub struct BridgeState {
     /// 0=Idle, 1=Streaming, 2=Modal
     pub variant: u8,
-    /// 已提交的 TuiRenderUnit 列表
-    ///
-    /// I20-B：改 `Arc<[TuiRenderUnit]>`——push_view_models 在每个 streaming chunk
-    /// 上都会 clone 一份写入 atom，Vec 会 O(n)；Arc clone O(1)，只有
-    /// ViewCommit/TurnDone/SystemNotification 真正修改时才重建 Arc。
-    pub committed: Arc<[TuiRenderUnit]>,
+    /// 已提交的 TuiRenderUnit 列表——im::Vector 支持 O(1) clone + O(log n) push_back。
+    pub committed: im::Vector<TuiRenderUnit>,
     /// 当前轮次的增量数据
     pub current_turn: CurrentTurn,
     /// 当前 session lifecycle 阶段。loading 只由该阶段派生。
@@ -43,10 +38,9 @@ pub struct BridgeState {
     /// S7：精确弹窗类型，由 AcpEvent 直接映射。None = 无弹窗。
     /// 弹窗激活状态由 POPUP_KIND.is_some() 派生（status_bar / event_handlers 都读这个）
     pub popup_kind: Option<crate::kit::atoms::PopupKind>,
-    /// I21-D：是否已完成至少一轮 TurnDone/TurnInterrupted。用于 push_view_models
-    /// fallback 判断——一旦 has_turn_done=true，committed 以 bridge 为准，
-    /// 即使为空也不 fallback 到 atom 旧值（/clear 产生空 committed 是合法结果）。
-    pub has_turn_done: bool,
+    /// ViewModelsSnapshot generation——每次 push_view_models 递增。
+    /// render_bridge 用此值检测变化（替代原先的 Arc::as_ptr 比较）。
+    pub generation: u64,
     /// 当前活跃 session 的 ID。事件携带的 active_session_id 不匹配时丢弃。
     pub active_session_id: String,
 }
@@ -172,82 +166,50 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             }
             state.variant = 0;
             state.current_turn.reset();
-            state.has_turn_done = true;
             push_view_models(state);
             push_acp_state(state);
         }
         TurnDone => {
-            // (a) 收集 buffered 输入和 assistant view_models，确保归档顺序正确
-            let buffered_texts: Vec<String> = INPUT_BUFFER.state().read().iter().cloned().collect();
-            let has_buffered = !buffered_texts.is_empty();
-
-            let vms = if !state.current_turn.committed && !state.current_turn.is_empty() {
-                Some(state.current_turn.view_models().to_vec())
-            } else {
-                None
-            };
-
-            // (b) 一次性重建 committed：[旧 committed, TuiUserBubble..., assistant view_models...]
-            // TuiUserBubble 排在 assistant 之前，符合真实对话顺序
-            let extra_len = buffered_texts.len() + vms.as_ref().map_or(0, Vec::len);
-            if extra_len > 0 {
-                let mut combined = Vec::with_capacity(state.committed.len() + extra_len);
-                combined.extend(state.committed.iter().cloned());
-                for text in &buffered_texts {
-                    combined.push(TuiRenderUnit::TuiUserBubble(TuiUserBubble {
-                        text: text.clone(),
-                        content_hash: tui_hash_str(text),
-                        is_system_reminder: false,
-                    }));
+            // H3: TurnDone 仅做两件事：
+            // (a) current_turn.view_models() → 逐条 push_back 到 committed
+            // (b) current_turn.reset() + push_view_models
+            // buffered_text 已由 LocalUserBubble 事件提前入队 committed，
+            // TurnDone 不再代为搬运。
+            if !state.current_turn.committed && !state.current_turn.is_empty() {
+                for vm in state.current_turn.view_models() {
+                    state.committed.push_back(vm.clone());
                 }
-                if let Some(ref vms) = vms {
-                    combined.extend(vms.iter().cloned());
-                }
-                state.committed = Arc::from(combined);
             }
 
-            // (c) reset current_turn
             state.current_turn.reset();
             state.variant = 0;
-
-            // (d) has_turn_done 提前到 push_view_models 之前，语义直观
-            state.has_turn_done = true;
 
             state.phase = SessionPhase::Idle;
 
             tracing::info!(
                 is_loading = state.phase == SessionPhase::PromptRunning,
-                has_buffered,
                 committed_len = state.committed.len(),
                 current_turn_empty = state.current_turn.is_empty(),
-                has_turn_done = state.has_turn_done,
                 "TurnDone: writing ACP_STATE"
             );
 
-            // (f) push_view_models + push_acp_state
             push_view_models(state);
             push_acp_state(state);
 
             // (g) C1: agent 完成本轮——drain INPUT_BUFFER，按顺序重新提交。
-            // 用户在 loading 期间按 Enter 的输入在此处一次性 flush 到 SUBMIT_TX。
             drain_input_buffer();
         }
         TurnInterrupted { reason: _reason } => {
-            // 守卫：仅当 current_turn 有未归档内容时才归档，避免空/半成品消息成为幽灵
+            // 守卫：仅当 current_turn 有未归档内容时才归档
             if !state.current_turn.committed && !state.current_turn.is_empty() {
                 state.current_turn.deactivate();
-                let vms = state.current_turn.view_models().to_vec();
-                // I20-B：同 TurnDone，重建 Arc
-                let mut combined = Vec::with_capacity(state.committed.len() + vms.len());
-                combined.extend(state.committed.iter().cloned());
-                combined.extend(vms);
-                state.committed = Arc::from(combined);
+                for vm in state.current_turn.view_models() {
+                    state.committed.push_back(vm.clone());
+                }
             }
             state.current_turn = CurrentTurn::new();
             state.variant = 0;
             state.phase = SessionPhase::Idle;
-            // has_turn_done 提前到 push_view_models 之前，语义直观
-            state.has_turn_done = true;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -268,16 +230,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 "error" => TuiNoteLevel::Error,
                 _ => TuiNoteLevel::Info,
             };
-            // I20-B：Arc 不可 push，需重建
-            let mut combined = Vec::with_capacity(state.committed.len() + 1);
-            combined.extend(state.committed.iter().cloned());
             let content_hash = tui_hash_str(&format!("{}|{:?}", sn.text, level));
-            combined.push(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
-                text: sn.text.clone(),
-                level,
-                content_hash,
-            }));
-            state.committed = Arc::from(combined);
+            state
+                .committed
+                .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+                    text: sn.text.clone(),
+                    level,
+                    content_hash,
+                }));
             push_view_models(state);
             push_acp_state(state);
         }
@@ -346,11 +306,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 content_hash: tui_hash_str(text),
                 is_system_reminder: false,
             });
-            let mut combined = Vec::with_capacity(state.committed.len() + 1);
-            combined.extend(state.committed.iter().cloned());
-            combined.push(vm);
-            state.committed = Arc::from(combined);
-            state.has_turn_done = true;
+            state.committed.push_back(vm);
             push_view_models(state);
             push_acp_state(state);
         }
@@ -359,15 +315,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 crate::kit::tui_render_unit::TuiAssistantBubble {
                     text: text.clone(),
                     reasoning: None,
-                    tool_card_ids: vec![],
                     content_hash: 0,
                 },
             );
-            let mut combined = Vec::with_capacity(state.committed.len() + 1);
-            combined.extend(state.committed.iter().cloned());
-            combined.push(vm);
-            state.committed = Arc::from(combined);
-            state.has_turn_done = true;
+            state.committed.push_back(vm);
             push_view_models(state);
             push_acp_state(state);
         }
@@ -441,6 +392,17 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 
         // ── Unknown / forward-compat ──
         Unknown { .. } => {}
+        LocalUserBubble { text } => {
+            state
+                .committed
+                .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+                    text: text.clone(),
+                    content_hash: tui_hash_str(text),
+                    is_system_reminder: false,
+                }));
+            push_view_models(state);
+            push_acp_state(state);
+        }
 
         // ── §4.7 Background Tasks ──
         BgTaskSnapshot(tasks) => {
@@ -485,23 +447,17 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 
 /// 将 BridgeState 中的 ViewModels 写入 VIEW_MODELS Atom。
 ///
-/// S16：bridge 的 committed 仅在 TurnDone 时填充完整。streaming 事件到达时若
-/// bridge committed 仍为空（尚未收到 TurnDone），则保留 atom 中已有的
-/// committed（可能含 submit_text 预先注入的 TuiUserBubble），避免消息区退回 Welcome。
-///
-/// I21-D：一旦完成过 TurnDone（has_turn_done=true），committed 以 bridge
-/// 为准，即使为空也不 fallback——/clear 产生空 committed 是合法结果。
+/// 从 `state.committed`（im::Vector）clone（O(1)引用计数）后逐条 push_back
+/// `current_turn.view_models()`，构成扁平单层列表。generation 每次调用递增+1。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
-    // I20-B：Arc::clone 是 O(1) 原子指针拷贝，避免之前每个 streaming chunk
-    // 都 O(n) clone 整个消息历史的性能问题。
-    let committed = if state.committed.is_empty() && !state.has_turn_done {
-        Arc::clone(&VIEW_MODELS.state().read().committed)
-    } else {
-        Arc::clone(&state.committed)
-    };
+    let mut items = state.committed.clone();
+    for vm in state.current_turn.view_models() {
+        items.push_back(vm.clone());
+    }
+    state.generation = state.generation.wrapping_add(1);
     let snapshot = ViewModelsSnapshot {
-        committed,
-        current_turn: Arc::from(state.current_turn.view_models()),
+        items,
+        generation: state.generation,
     };
     *VIEW_MODELS.state().write() = snapshot;
 }
@@ -510,8 +466,8 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
 /// 立即将空快照写入 VIEW_MODELS atom，防止其他 reader 读到旧 session 数据。
 pub fn push_view_models_for_reset() {
     let snapshot = ViewModelsSnapshot {
-        committed: Arc::from([]),
-        current_turn: Arc::from([]),
+        items: im::Vector::new(),
+        generation: 0,
     };
     *VIEW_MODELS.state().write() = snapshot;
 }
@@ -580,11 +536,11 @@ mod tests {
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
         let mut state = BridgeState {
             variant: 0,
-            committed: Arc::from([]),
+            committed: im::Vector::new(),
             current_turn: CurrentTurn::new(),
             phase: SessionPhase::Idle,
             popup_kind: None,
-            has_turn_done: false,
+            generation: 0,
             active_session_id: String::new(),
         };
 
@@ -604,8 +560,8 @@ mod tests {
         );
 
         let snapshot = VIEW_MODELS.state().read().clone();
-        assert_eq!(snapshot.current_turn.len(), 1);
-        match &snapshot.current_turn[0] {
+        assert_eq!(snapshot.items.len(), 1);
+        match &snapshot.items[0] {
             TuiRenderUnit::TuiSubAgentGroup(group) => {
                 assert_eq!(group.agent_id, "agent-1");
                 assert_eq!(group.view_models.len(), 1);
@@ -714,11 +670,11 @@ mod tests {
         // VIEW_MODELS 也应被重置
         let snapshot = VIEW_MODELS.state().read().clone();
         assert!(
-            snapshot.committed.is_empty(),
+            snapshot.items.is_empty(),
             "bridge reset 后 committed 应为空"
         );
         assert!(
-            snapshot.current_turn.is_empty(),
+            snapshot.items.is_empty(),
             "bridge reset 后 current_turn 应为空"
         );
     }
@@ -730,11 +686,11 @@ mod tests {
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
         let mut state = BridgeState {
             variant: 0,
-            committed: Arc::from([]),
+            committed: im::Vector::new(),
             current_turn: CurrentTurn::new(),
             phase: SessionPhase::Idle,
             popup_kind: None,
-            has_turn_done: false,
+            generation: 0,
             active_session_id: String::new(),
         };
 
@@ -746,15 +702,11 @@ mod tests {
         );
 
         let snapshot = VIEW_MODELS.state().read().clone();
-        assert_eq!(snapshot.committed.len(), 1);
-        match &snapshot.committed[0] {
+        assert_eq!(snapshot.items.len(), 1);
+        match &snapshot.items[0] {
             TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "hello from replay"),
             other => panic!("expected TuiUserBubble, got {other:?}"),
         }
-        assert!(
-            state.has_turn_done,
-            "has_turn_done should be true after replay"
-        );
     }
 
     #[test]
@@ -764,11 +716,11 @@ mod tests {
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
         let mut state = BridgeState {
             variant: 0,
-            committed: Arc::from([]),
+            committed: im::Vector::new(),
             current_turn: CurrentTurn::new(),
             phase: SessionPhase::Idle,
             popup_kind: None,
-            has_turn_done: false,
+            generation: 0,
             active_session_id: String::new(),
         };
 
@@ -780,8 +732,8 @@ mod tests {
         );
 
         let snapshot = VIEW_MODELS.state().read().clone();
-        assert_eq!(snapshot.committed.len(), 1);
-        match &snapshot.committed[0] {
+        assert_eq!(snapshot.items.len(), 1);
+        match &snapshot.items[0] {
             TuiRenderUnit::TuiAssistantBubble(d) => assert_eq!(d.text, "assistant from replay"),
             other => panic!("expected TuiAssistantBubble, got {other:?}"),
         }
@@ -794,11 +746,11 @@ mod tests {
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
         let mut state = BridgeState {
             variant: 0,
-            committed: Arc::from([]),
+            committed: im::Vector::new(),
             current_turn: CurrentTurn::new(),
             phase: SessionPhase::Idle,
             popup_kind: None,
-            has_turn_done: false,
+            generation: 0,
             active_session_id: String::new(),
         };
 
@@ -817,10 +769,6 @@ mod tests {
             1,
             "first TurnDone: committed should have 1 VM"
         );
-        assert!(
-            state.has_turn_done,
-            "first TurnDone should set has_turn_done"
-        );
 
         // 第二轮：stream another text → TurnDone
         dispatch_and_notify(
@@ -834,28 +782,25 @@ mod tests {
 
         let snapshot = VIEW_MODELS.state().read().clone();
         assert_eq!(
-            snapshot.committed.len(),
+            snapshot.items.len(),
             2,
             "two TurnDones: committed should have 2 VMs"
         );
-        assert!(snapshot.current_turn.is_empty());
     }
 
-    /// TurnDone TuiUserBubble 排在 assistant 之前：预置 INPUT_BUFFER 两条文本 +
-    /// current_turn 一条 TuiAssistantBubble，触发 TurnDone，断言 committed 顺序为
-    /// [TuiUserBubble, TuiUserBubble, TuiAssistantBubble]。
+    /// TurnDone 归档 assistant VM 到 committed，不再代为搬运 buffered_text。
     #[test]
     #[serial]
-    fn test_turndone_userbubble_before_assistant() {
+    fn test_turndone_archives_assistant_to_committed() {
         crate::kit::atoms::init_atoms();
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
         let mut state = BridgeState {
             variant: 0,
-            committed: Arc::from([]),
+            committed: im::Vector::new(),
             current_turn: CurrentTurn::new(),
             phase: SessionPhase::Idle,
             popup_kind: None,
-            has_turn_done: false,
+            generation: 0,
             active_session_id: String::new(),
         };
 
@@ -868,66 +813,42 @@ mod tests {
             }),
         );
 
-        // 往 INPUT_BUFFER 塞两条 buffered 输入
-        INPUT_BUFFER
-            .state()
-            .write()
-            .push_back("user says hello".into());
-        INPUT_BUFFER
-            .state()
-            .write()
-            .push_back("user says world".into());
-
         dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
+        // TurnDone 后 assistant VM 被归档到 committed
         assert_eq!(
             state.committed.len(),
-            3,
-            "committed 应有 3 个 VM：2 TuiUserBubble + 1 TuiAssistantBubble"
+            1,
+            "committed 应有 1 个 VM：TuiAssistantBubble"
         );
-        // 顺序：TuiUserBubble, TuiUserBubble, TuiAssistantBubble
         match &state.committed[0] {
-            TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "user says hello"),
-            other => panic!("expected TuiUserBubble at [0], got {other:?}"),
-        }
-        match &state.committed[1] {
-            TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "user says world"),
-            other => panic!("expected TuiUserBubble at [1], got {other:?}"),
-        }
-        match &state.committed[2] {
             TuiRenderUnit::TuiAssistantBubble(d) => assert_eq!(d.text, "assistant reply"),
-            other => panic!("expected TuiAssistantBubble at [2], got {other:?}"),
+            other => panic!("expected TuiAssistantBubble at [0], got {other:?}"),
         }
-        assert!(
-            state.has_turn_done,
-            "has_turn_done 应在 push_view_models 之前已为 true"
-        );
     }
 
-    /// TurnInterrupted 空 current_turn 不归档：预置空 current_turn 触发 TurnInterrupted，
-    /// 断言 committed 长度不变。
+    /// TurnInterrupted 空 current_turn 不归档
     #[test]
     #[serial]
     fn test_turn_interrupted_empty_skips_archive() {
         crate::kit::atoms::init_atoms();
         // 预置一条 committed 数据
-        let pre_existing: Arc<[TuiRenderUnit]> =
-            Arc::from([TuiRenderUnit::TuiUserBubble(TuiUserBubble {
-                text: "existing".into(),
-                content_hash: 1,
-                is_system_reminder: false,
-            })]);
+        let pre_existing = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+            text: "existing".into(),
+            content_hash: 1,
+            is_system_reminder: false,
+        })]);
         *VIEW_MODELS.state().write() = ViewModelsSnapshot {
-            committed: Arc::clone(&pre_existing),
-            current_turn: Arc::from([]),
+            items: pre_existing.clone(),
+            generation: 0,
         };
         let mut state = BridgeState {
             variant: 1,
-            committed: Arc::clone(&pre_existing),
+            committed: pre_existing,
             current_turn: CurrentTurn::new(),
             phase: SessionPhase::PromptRunning,
             popup_kind: None,
-            has_turn_done: false,
+            generation: 0,
             active_session_id: String::new(),
         };
 
@@ -949,45 +870,43 @@ mod tests {
         }
         assert!(state.current_turn.is_empty(), "current_turn 应已重置");
         assert_eq!(state.phase, SessionPhase::Idle, "phase 应为 Idle");
-        assert!(
-            state.has_turn_done,
-            "has_turn_done 应在 push_view_models 之前已为 true"
-        );
     }
 
     #[test]
     #[serial]
-    fn test_has_turn_done_prevents_fallback() {
+    /// push_view_models 以 BridgeState 为准，不再 fallback 到 atom 旧值。
+    #[test]
+    #[serial]
+    fn test_push_view_models_uses_bridge_state() {
         crate::kit::atoms::init_atoms();
-        // 设置 atom 中有旧 committed 数据
-        let old_committed: Arc<[TuiRenderUnit]> =
-            Arc::from([TuiRenderUnit::TuiUserBubble(TuiUserBubble {
-                text: "old data".into(),
-                content_hash: 1,
-                is_system_reminder: false,
-            })]);
+        // atom 中有旧数据
+        let old_items = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+            text: "old data".into(),
+            content_hash: 1,
+            is_system_reminder: false,
+        })]);
         *VIEW_MODELS.state().write() = ViewModelsSnapshot {
-            committed: Arc::clone(&old_committed),
-            current_turn: Arc::from([]),
+            items: old_items,
+            generation: 0,
         };
 
         let mut state = BridgeState {
             variant: 0,
-            committed: Arc::from([]),
+            committed: im::Vector::new(),
             current_turn: CurrentTurn::new(),
             phase: SessionPhase::Idle,
             popup_kind: None,
-            has_turn_done: true,
+            generation: 0,
             active_session_id: String::new(),
         };
 
-        // push_view_models: committed 为空但 has_turn_done=true — 不 fallback 到 atom 旧值
+        // push_view_models: 用 BridgeState 数据（空 committed + 空 current_turn）→ 空 items
         push_view_models(&mut state);
 
         let snapshot = VIEW_MODELS.state().read().clone();
         assert!(
-            snapshot.committed.is_empty(),
-            "has_turn_done=true with empty committed should NOT fallback to atom"
+            snapshot.items.is_empty(),
+            "push_view_models with empty BridgeState should produce empty items"
         );
     }
 

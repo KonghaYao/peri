@@ -584,7 +584,7 @@ fn render_subagent_group(data: &TuiSubAgentGroup, width: usize) -> Vec<Line<'sta
     // 1. v2 DTO `view_models`（ACP 层填充，当前永久为空 placeholder）
     // 2. status probe 的 `recent_messages`（app 层填充）
     let children: Vec<TuiRenderUnit> = if !data.view_models.is_empty() {
-        data.view_models.clone()
+        data.view_models.iter().cloned().collect()
     } else if let Some(ref s) = status {
         s.recent_messages.clone()
     } else {
@@ -781,7 +781,6 @@ mod tests {
         let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
             text: "**bold** text".into(),
             reasoning: None,
-            tool_card_ids: vec![],
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -796,7 +795,6 @@ mod tests {
                 text: "thinking deeply...\nline 2\nline 3\nline 4".into(),
                 collapsed: false,
             }),
-            tool_card_ids: vec![],
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1239,11 +1237,11 @@ mod tests {
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "sa-1".into(),
             agent_name: "file-searcher".into(),
-            view_models: vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+            view_models: im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: "find foo".into(),
                 content_hash: 0,
                 is_system_reminder: false,
-            })],
+            })]),
             collapsed: true,
             is_running: false,
             content_hash: 0,
@@ -1263,11 +1261,11 @@ mod tests {
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "sa-2".into(),
             agent_name: "tester".into(),
-            view_models: vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+            view_models: im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: "test".into(),
                 content_hash: 0,
                 is_system_reminder: false,
-            })],
+            })]),
             collapsed: false,
             is_running: false,
             content_hash: 0,
@@ -1300,11 +1298,10 @@ mod tests {
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "sa-visual".into(),
             agent_name: "visual".into(),
-            view_models: vec![
+            view_models: im::Vector::from(vec![
                 TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
                     text: "hidden assistant".into(),
                     reasoning: None,
-                    tool_card_ids: vec![],
                     content_hash: 0,
                 }),
                 TuiRenderUnit::TuiUserBubble(TuiUserBubble {
@@ -1312,7 +1309,7 @@ mod tests {
                     content_hash: 0,
                     is_system_reminder: false,
                 }),
-            ],
+            ]),
             collapsed: false,
             is_running: false,
             content_hash: 0,
@@ -1351,7 +1348,7 @@ mod tests {
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
-            view_models: Vec::new(),
+            view_models: im::Vector::new(),
             collapsed: false,
             is_running: false,
             content_hash: 0,
@@ -1376,7 +1373,7 @@ mod tests {
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
-            view_models: Vec::new(),
+            view_models: im::Vector::new(),
             collapsed: false,
             is_running: false,
             content_hash: 0,
@@ -1405,7 +1402,7 @@ mod tests {
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
-            view_models: Vec::new(),
+            view_models: im::Vector::new(),
             collapsed: false,
             is_running: false,
             content_hash: 0,
@@ -1431,7 +1428,7 @@ mod tests {
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
-            view_models: Vec::new(),
+            view_models: im::Vector::new(),
             collapsed: false,
             is_running: false,
             content_hash: 0,
@@ -1446,7 +1443,7 @@ mod tests {
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
-            view_models: Vec::new(),
+            view_models: im::Vector::new(),
             collapsed: false,
             is_running: true,
             content_hash: 0,
@@ -1463,7 +1460,7 @@ mod tests {
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
-            view_models: Vec::new(), // 空占位符
+            view_models: im::Vector::new(), // 空占位符
             collapsed: false,
             is_running: false,
             content_hash: 0,
@@ -1497,11 +1494,11 @@ mod tests {
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
-            view_models: vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+            view_models: im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: "dto child".into(),
                 content_hash: 0,
                 is_system_reminder: false,
-            })],
+            })]),
             collapsed: false,
             is_running: false,
             content_hash: 0,
@@ -1653,7 +1650,7 @@ mod tests {
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "sa-collapse".into(),
             agent_name: "Agent".into(),
-            view_models: tool_cards,
+            view_models: im::Vector::from(tool_cards),
             collapsed: false,
             is_running: false,
             content_hash: 0,

@@ -65,26 +65,23 @@ tui_impl_partial_eq!(TuiUserBubble: text);
 /// Agent reply bubble -- left-aligned markdown with optional reasoning block.
 ///
 /// Tool invocations are **siblings** (separate `TuiToolCard` entries), not
-/// embedded inside the bubble. `tool_card_ids` references them so the
-/// renderer can visually group bubble + its tool cards.
+/// embedded inside the bubble.
 #[derive(Debug, Clone)]
 pub struct TuiAssistantBubble {
     /// Markdown source text.
     pub text: String,
     /// Optional reasoning / thinking block (Anthropic extended thinking etc.).
     pub reasoning: Option<TuiReasoningBlock>,
-    /// Tool-card IDs that belong to this assistant turn (siblings, not children).
-    pub tool_card_ids: Vec<String>,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
 }
 
-tui_impl_partial_eq!(TuiAssistantBubble: text, reasoning, tool_card_ids);
+tui_impl_partial_eq!(TuiAssistantBubble: text, reasoning);
 
 /// Tool invocation card -- name, summaries, optional diff.
 #[derive(Debug, Clone)]
 pub struct TuiToolCard {
-    /// Stable identifier (matches `tool_card_ids` in TuiAssistantBubble).
+    /// Stable identifier for this tool call.
     pub tool_id: String,
     /// Human-readable tool name (e.g. "Edit", "Bash").
     pub tool_name: String,
@@ -133,7 +130,7 @@ pub struct TuiSubAgentGroup {
     pub agent_id: String,
     pub agent_name: String,
     /// Nested view models produced by the sub-agent.
-    pub view_models: Vec<TuiRenderUnit>,
+    pub view_models: im::Vector<TuiRenderUnit>,
     /// Whether the group is currently collapsed.
     pub collapsed: bool,
     /// Whether the sub-agent is still streaming.
@@ -313,13 +310,11 @@ mod tests {
         let a = TuiAssistantBubble {
             text: "hello".into(),
             reasoning: None,
-            tool_card_ids: vec![],
             content_hash: 42,
         };
         let b = TuiAssistantBubble {
             text: "hello".into(),
             reasoning: None,
-            tool_card_ids: vec![],
             content_hash: 99,
         };
         assert_eq!(a, b);
@@ -354,7 +349,7 @@ mod tests {
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "sa-1".into(),
             agent_name: "explorer".into(),
-            view_models: vec![inner],
+            view_models: im::Vector::from(vec![inner]),
             collapsed: true,
             is_running: false,
             content_hash: 0,

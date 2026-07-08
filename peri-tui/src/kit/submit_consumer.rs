@@ -20,10 +20,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
+use crate::kit::acp_events;
 use crate::kit::atoms::{
     ACP_STATE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, NOTIFICATION, PERI_CONFIG_HANDLE,
-    PERMISSION_MODE_HANDLE, RENDER_CACHE, RENDER_HEARTBEAT, REWIND_ACTION_TX, VIEW_MODELS,
-    ViewModelsSnapshot,
+    PERMISSION_MODE_HANDLE, RENDER_CACHE, RENDER_HEARTBEAT, REWIND_ACTION_TX,
 };
 use crate::kit::render_bridge::RenderCache;
 use crate::kit::submit_request::{
@@ -115,7 +115,7 @@ async fn handle_clear_submit(
 
     ACTIVE_SESSION_ID.set(String::new());
     BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
-    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    acp_events::push_view_models_for_reset();
     *RENDER_CACHE.state().write() = RenderCache::default();
     {
         let ref_guard = ACP_STATE.state();
@@ -127,7 +127,7 @@ async fn handle_clear_submit(
     ACTIVE_SESSION_ID.set(new_sid);
     BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
 
-    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    acp_events::push_view_models_for_reset();
     *RENDER_CACHE.state().write() = RenderCache::default();
     {
         let ref_guard = ACP_STATE.state();
@@ -318,6 +318,8 @@ pub fn spawn_cancel_consumer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
+    use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit, tui_hash_str};
     use peri_acp::transport::mpsc::{
         MpscClientTransport, MpscServerTransport, mpsc_transport_pair,
     };
@@ -437,15 +439,14 @@ mod tests {
 
         crate::kit::atoms::init_atoms();
         *VIEW_MODELS.state().write() = ViewModelsSnapshot {
-            committed: std::sync::Arc::from(vec![TuiRenderUnit::TuiAssistantBubble(
+            items: im::Vector::from(vec![TuiRenderUnit::TuiAssistantBubble(
                 TuiAssistantBubble {
                     text: "existing".into(),
                     reasoning: None,
-                    tool_card_ids: vec![],
                     content_hash: tui_hash_str("existing|"),
                 },
             )]),
-            current_turn: std::sync::Arc::from([]),
+            generation: 0,
         };
         let (client, _server_transport) = make_client_without_pump();
         let cwd = ".".to_string();

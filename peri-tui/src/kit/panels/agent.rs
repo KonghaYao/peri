@@ -38,12 +38,10 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 从 VIEW_MODELS 派生 subagent 列表 + 当前 iteration 计数
     let vm_store = hooks.use_atom(&VIEW_MODELS);
-    let committed_count = vm_store.read().committed.len();
-    let current_turn_count = vm_store.read().current_turn.len();
+    let total_messages = vm_store.read().items.len();
     let subagents = collect_subagents(&vm_store.read());
     let _ = vm_store;
 
-    let total_messages = committed_count + current_turn_count;
     let subagent_count = subagents.len();
 
     // 候选行数（仅用于 cursor 边界）
@@ -114,13 +112,7 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ),
         ("Permission Mode", permission_mode),
         ("CWD", cwd),
-        (
-            "Messages",
-            format!(
-                "{} committed / {} current",
-                committed_count, current_turn_count
-            ),
-        ),
+        ("Messages", format!("Messages: {total_messages}",)),
         ("Total Messages", format!("{}", total_messages)),
     ];
 
@@ -222,7 +214,7 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 fn collect_subagents(snap: &crate::kit::atoms::ViewModelsSnapshot) -> Vec<TuiSubAgentGroup> {
     let mut out: Vec<TuiSubAgentGroup> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for vm in snap.committed.iter().chain(snap.current_turn.iter()) {
+    for vm in snap.items.iter() {
         scan_vm_for_subagents(vm, &mut out, &mut seen);
     }
     out
@@ -263,7 +255,7 @@ mod tests {
         TuiSubAgentGroup {
             agent_id: id.to_string(),
             agent_name: name.to_string(),
-            view_models: Vec::new(),
+            view_models: im::Vector::new(),
             collapsed: false,
             is_running: false,
             content_hash: 0,
@@ -279,31 +271,25 @@ mod tests {
     #[test]
     fn test_collect_subagents_only_user_bubbles() {
         let snap = ViewModelsSnapshot {
-            committed: vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+            items: im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: "hi".to_string(),
                 content_hash: 0,
                 is_system_reminder: false,
-            })]
-            .into(),
-            current_turn: Vec::new().into(),
+            })]),
+            generation: 0,
         };
         assert!(collect_subagents(&snap).is_empty());
     }
 
     #[test]
     fn test_collect_subagents_dedup_across_committed_and_current() {
-        // 同一 agent_id 出现在 committed 和 current_turn——应只保留一次
+        // 同一 agent_id 出现在 items 中两次——应只保留一次
         let snap = ViewModelsSnapshot {
-            committed: vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
-                "researcher",
-                "Researcher",
-            ))]
-            .into(),
-            current_turn: vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
-                "researcher",
-                "Researcher",
-            ))]
-            .into(),
+            items: im::Vector::from(vec![
+                TuiRenderUnit::TuiSubAgentGroup(make_subagent("researcher", "Researcher")),
+                TuiRenderUnit::TuiSubAgentGroup(make_subagent("researcher", "Researcher")),
+            ]),
+            generation: 0,
         };
         let result = collect_subagents(&snap);
         assert_eq!(result.len(), 1);
@@ -313,13 +299,12 @@ mod tests {
     #[test]
     fn test_collect_subagents_preserves_insertion_order() {
         let snap = ViewModelsSnapshot {
-            committed: vec![
+            items: im::Vector::from(vec![
                 TuiRenderUnit::TuiSubAgentGroup(make_subagent("alpha", "Alpha")),
                 TuiRenderUnit::TuiSubAgentGroup(make_subagent("beta", "Beta")),
                 TuiRenderUnit::TuiSubAgentGroup(make_subagent("gamma", "Gamma")),
-            ]
-            .into(),
-            current_turn: Vec::new().into(),
+            ]),
+            generation: 0,
         };
         let result = collect_subagents(&snap);
         let ids: Vec<_> = result.iter().map(|s| s.agent_id.as_str()).collect();
@@ -338,8 +323,8 @@ mod tests {
             content_hash: 0,
         };
         let snap = ViewModelsSnapshot {
-            committed: vec![TuiRenderUnit::TuiCollapsedGroup(collapsed)].into(),
-            current_turn: Vec::new().into(),
+            items: im::Vector::from(vec![TuiRenderUnit::TuiCollapsedGroup(collapsed)]),
+            generation: 0,
         };
         let result = collect_subagents(&snap);
         assert_eq!(result.len(), 1);
@@ -350,14 +335,14 @@ mod tests {
     fn test_collect_subagents_recurses_into_nested_subagent() {
         // SubAgent 内嵌 SubAgent（嵌套）——内层也应被扫描
         let mut outer = make_subagent("outer", "Outer");
-        outer
-            .view_models
-            .push(TuiRenderUnit::TuiSubAgentGroup(make_subagent(
-                "inner", "Inner",
-            )));
+        let mut outer_vms: Vec<TuiRenderUnit> = Vec::new();
+        outer_vms.push(TuiRenderUnit::TuiSubAgentGroup(make_subagent(
+            "inner", "Inner",
+        )));
+        outer.view_models = im::Vector::from(outer_vms);
         let snap = ViewModelsSnapshot {
-            committed: vec![TuiRenderUnit::TuiSubAgentGroup(outer)].into(),
-            current_turn: Vec::new().into(),
+            items: im::Vector::from(vec![TuiRenderUnit::TuiSubAgentGroup(outer)]),
+            generation: 0,
         };
         let result = collect_subagents(&snap);
         assert_eq!(result.len(), 2);

@@ -7,7 +7,6 @@
 use crate::kit::acp_events::{self, BridgeState, SessionPhase};
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch, CurrentTurn};
 use crate::kit::atoms;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -23,16 +22,16 @@ pub fn spawn_acp_bridge(
     tokio::spawn(async move {
         let mut state = BridgeState {
             variant: 0,
-            committed: Arc::from([]),
+            committed: im::Vector::new(),
             current_turn: CurrentTurn::new(),
             phase: SessionPhase::Idle,
             popup_kind: None,
-            has_turn_done: false,
+            generation: 0,
             active_session_id: String::new(),
         };
 
         // 追踪 BRIDGE_RESET_COUNTER——submit_consumer 的 /clear / thread_load
-        // 递增此计数器，bridge 检测到变更时立即清空 committed/has_turn_done，
+        // 递增此计数器，bridge 检测到变更时立即清空 committed，
         // 防止旧 session 的 ViewModel 在新 session 中残留。
         let mut last_reset_counter: u64 = 0;
 
@@ -62,9 +61,9 @@ pub fn spawn_acp_bridge(
                                 let old_counter = last_reset_counter;
                                 last_reset_counter = counter;
                                 state.active_session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
-                                state.committed = Arc::from([]);
+                                state.committed = im::Vector::new();
                                 state.current_turn.reset();
-                                state.has_turn_done = false;
+                                state.generation = 0;
                                 state.phase = SessionPhase::Idle;
                                 state.popup_kind = None;
                                 // 同步清空 INPUT_BUFFER：/clear 和 thread_load 切换时，
@@ -114,7 +113,6 @@ pub fn spawn_acp_bridge(
                             let event_kind = event_kind_short(&event);
                             let committed_before = state.committed.len();
                             let current_turn_before = state.current_turn.view_models().len();
-                            let has_turn_done_before = state.has_turn_done;
 
                             acp_events::dispatch_and_notify(&mut state, &event);
 
@@ -131,9 +129,8 @@ pub fn spawn_acp_bridge(
                                     committed_after,
                                     current_turn_before,
                                     current_turn_after,
-                                    has_turn_done_before,
-                                    has_turn_done_after = state.has_turn_done,
                                     just_reset,
+                                    generation = state.generation,
                                     "[CLEAR_DEBUG] dispatch event"
                                 );
                             }
@@ -163,6 +160,7 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         TurnInterrupted { reason: _ } => "TurnInterrupted",
         ReplayUserBubble { .. } => "ReplayUserBubble",
         ReplayAssistantBubble { .. } => "ReplayAssistantBubble",
+        LocalUserBubble { .. } => "LocalUserBubble",
         ToolCount(_) => "ToolCount",
         Progress(_) => "Progress",
         BudgetWarning(_) => "BudgetWarning",

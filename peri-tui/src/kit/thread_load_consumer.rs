@@ -21,7 +21,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::acp_client::AcpTuiClient;
-use crate::kit::atoms::{self, RENDER_CACHE, VIEW_MODELS, ViewModelsSnapshot};
+use crate::kit::acp_events;
+use crate::kit::atoms::{self, RENDER_CACHE};
 use crate::kit::render_bridge::RenderCache;
 
 /// 启动 thread 切换消费者后台任务。
@@ -119,7 +120,7 @@ async fn handle_load(
             .wrapping_add(1),
     );
     // 3. 先清空 UI/cache。后续 session/load replay 事件会重新追加历史消息。
-    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    acp_events::push_view_models_for_reset();
     *RENDER_CACHE.state().write() = RenderCache::default();
     {
         let ref_guard = atoms::ACP_STATE.state();

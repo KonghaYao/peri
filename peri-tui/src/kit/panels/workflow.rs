@@ -28,9 +28,8 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let vm_store = hooks.use_atom(&VIEW_MODELS);
     let subagent_count = vm_store
         .read()
-        .committed
+        .items
         .iter()
-        .chain(vm_store.read().current_turn.iter())
         .filter(|vm| {
             matches!(
                 vm,
