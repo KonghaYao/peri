@@ -190,6 +190,11 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         request_id: req_id,
     });
 
+    // 累积 token_tracker（P0 #2 修复：v2 路径下 token tracker 从未累积）
+    if let Some(ref usage) = reasoning.usage {
+        ctx.token_tracker.write().accumulate(usage);
+    }
+
     // after_model middleware（hook_middleware / git_attribution 等在此）
     run_after_model(ctx, &reasoning).await?;
 

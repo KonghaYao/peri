@@ -7,9 +7,10 @@
 //!
 //! Full Compact 失败时 `consecutive_failures` 累加，达上限后降级跳过。
 
-use super::middleware_runner::run_with_state;
 use super::{CompactInput, CompactOutput};
+use crate::agent::agent_context::AgentContext;
 use crate::agent::compact::config::CompactConfig;
+use crate::middleware::state::MiddlewareState;
 
 /// 运行 Compact 阶段
 pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<CompactOutput> {
@@ -56,12 +57,12 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             break 'compact_core Ok(CompactOutput { compacted: false });
         }
 
-        // 通过 middleware_runner 拿到当前 AgentState 中的 token_tracker
-        // （由前置 stage 写入；compact 在 receive 之后运行，token_tracker 状态是最新的）
-        let budget_pct = run_with_state(ctx, |state| {
-            let tracker = state.token_tracker();
+        // 读 token_tracker（只读操作，无需 drain recall）
+        let cx = AgentContext::from_stage(ctx);
+        let budget_pct = {
+            let tracker = cx.token_tracker();
             tracker.context_usage_percent(budget.context_window)
-        });
+        };
 
         let pct = match budget_pct {
             Some(p) => p / 100.0,
@@ -154,9 +155,9 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 // compact 前的累积 token 数，导致每轮都触发 compact
                 // 注：与 v1 CompactMiddleware 行为对齐（v1 已删除）
                 if r.strategy == crate::agent::compact_v2::CompactStrategy::Full {
-                    run_with_state(ctx, |state| {
-                        state.token_tracker_mut().reset();
-                    });
+                    let mut cx = AgentContext::from_stage(ctx);
+                    cx.token_tracker_mut().reset();
+                    // 注：token_tracker reset 为只读 token 操作，无需 drain recall
                 }
 
                 // emit 观测事件（携带 messages 快照供 TUI 重建 pipeline）

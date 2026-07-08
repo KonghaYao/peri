@@ -7,7 +7,9 @@
 use super::middleware_runner::run_after_agent;
 use super::tool_dispatch::dispatch_tools;
 use super::{ActInput, ActOutput};
+use crate::agent::agent_context::AgentContext;
 use crate::agent::events_v2::{RenderEvent, StateEvent};
+use crate::middleware::state::MiddlewareState;
 // StateEvent 仍用于 StateSnapshot（轻量级元数据快照，含 token_tracker 真实值）
 use crate::error::AgentResult;
 
@@ -106,14 +108,15 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         let context_budget = ctx.context_budget.clone();
         let context_total_tokens = context_budget.as_ref().map(|b| b.context_window as u64);
 
-        // 通过 middleware_runner 拿到当前 AgentState 中的 token_tracker（与 compact 阶段同源）
+        // 读 token_tracker（只读操作）
         let (total_tokens, budget_pct) = match context_budget.as_ref() {
-            Some(budget) => super::middleware_runner::run_with_state(ctx, |state| {
-                let tracker = state.token_tracker();
+            Some(budget) => {
+                let cx = AgentContext::from_stage(ctx);
+                let tracker = cx.token_tracker();
                 let used = tracker.estimated_context_tokens().unwrap_or(0);
                 let pct = tracker.context_usage_percent(budget.context_window);
                 (used, pct)
-            }),
+            }
             None => (0, None),
         };
         ctx.event_bus.emit_state(StateEvent::StateSnapshot {

@@ -1,3 +1,4 @@
+pub mod agent_context;
 pub mod compact;
 pub mod compact_v2;
 pub mod events;

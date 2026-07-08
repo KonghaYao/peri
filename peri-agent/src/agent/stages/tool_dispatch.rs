@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +30,9 @@ use crate::tools::BaseTool;
 
 /// 连续失败检测阈值
 const CONSECUTIVE_FAILURE_THRESHOLD: u32 = 5;
+
+/// 单个工具调用超时（秒），防止恶意/死循环工具调用永久阻塞 turn
+const TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// 工具名语义别名表：LLM 输出的名称 → 实际注册的工具名。
 const TOOL_ALIASES: &[(&str, &str)] = &[("task", "Agent"), ("shell", "Bash"), ("reading", "Read")];
@@ -368,7 +372,18 @@ async fn dispatch_concurrent(
                             reason: "interrupted by user".to_string(),
                         })
                     }
-                    result = invoke_fut => result,
+                    result = tokio::time::timeout(TOOL_CALL_TIMEOUT, invoke_fut) => {
+                        match result {
+                            Ok(tool_result) => tool_result,
+                            Err(_elapsed) => Err(AgentError::ToolExecutionFailed {
+                                tool: tool_name.clone(),
+                                reason: format!(
+                                    "tool call timed out after {}s",
+                                    TOOL_CALL_TIMEOUT.as_secs()
+                                ),
+                            }),
+                        }
+                    }
                 }
             }
         })
@@ -556,6 +571,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    use crate::messages::MessageContent;
+    use crate::session::queue::MessageQueue;
+    use crate::session::transcript::MessageTranscript;
+    use crate::session::turn::TurnContext;
+
     // ── normalize_params ──
 
     #[test]
@@ -667,4 +687,163 @@ mod tests {
         let tool = resolve_tool("SHELL", &tools);
         assert!(tool.is_some());
     }
+
+    // ── dispatch_concurrent / settle_results / post_process_result / handle_consecutive_failures ──
+
+    /// 可返回自定义输出的测试工具
+    struct OutputTool {
+        name: String,
+        output: String,
+    }
+
+    #[async_trait::async_trait]
+    impl BaseTool for OutputTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "test output"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.output.clone())
+        }
+    }
+
+    fn make_test_ctx() -> StageContext {
+        let turn = TurnContext::new(
+            std::sync::Arc::from("/tmp"),
+            std::sync::Arc::new(CancellationToken::new()),
+        );
+        let transcript = std::sync::Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
+        let queue = MessageQueue::new();
+        StageContext::new(turn, transcript, queue)
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_concurrent_single_tool_succeeds() {
+        let ctx = make_test_ctx();
+        let tool = std::sync::Arc::new(OutputTool {
+            name: "Read".to_string(),
+            output: "ok".to_string(),
+        });
+        let mut all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
+        all_tools.insert("Read".to_string(), tool);
+        let cancel = CancellationToken::new();
+        let ai_msg = BaseMessage::ai(MessageContent::text("thinking...".to_string()));
+        let ready_calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "Read".to_string(),
+            input: serde_json::json!({"file_path": "/tmp/test.txt"}),
+        }];
+        let results = dispatch_concurrent(&ctx, &ready_calls, &all_tools, &cancel, &ai_msg).await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok(), "工具应成功执行");
+        assert_eq!(results[0].as_ref().unwrap(), "ok");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_concurrent_cancelled() {
+        let ctx = make_test_ctx();
+        let tool = std::sync::Arc::new(OutputTool {
+            name: "Read".to_string(),
+            output: "ok".to_string(),
+        });
+        let mut all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
+        all_tools.insert("Read".to_string(), tool);
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // 提前触发取消
+        let ai_msg = BaseMessage::ai(MessageContent::text("thinking...".to_string()));
+        let ready_calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "Read".to_string(),
+            input: serde_json::json!({}),
+        }];
+        let results = dispatch_concurrent(&ctx, &ready_calls, &all_tools, &cancel, &ai_msg).await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err(), "取消后应返回错误");
+        let err = results[0].as_ref().unwrap_err().to_string();
+        assert!(
+            err.contains("interrupted by user"),
+            "错误信息应包含取消描述，实际: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_settle_results_mixed_ready_settled() {
+        let ctx = make_test_ctx();
+        let approval = ApprovalOutcome {
+            ready_calls: vec![ToolCall {
+                id: "call_ready".to_string(),
+                name: "Read".to_string(),
+                input: serde_json::json!({}),
+            }],
+            settled_results: vec![(
+                ToolCall {
+                    id: "call_rejected".to_string(),
+                    name: "Bash".to_string(),
+                    input: serde_json::json!({}),
+                },
+                ToolResult::error("call_rejected", "Bash", "HITL rejected"),
+            )],
+        };
+        let tool_results: Vec<Result<String, AgentError>> = vec![Ok("success output".to_string())];
+        let all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
+        let outcome = settle_results(&ctx, approval, tool_results, false, &all_tools).await;
+        // ready + settled = 2 条
+        assert_eq!(outcome.results.len(), 2, "应合并 ready 和 settled 结果");
+        // settled 在前，ready 在后
+        assert!(outcome.results[0].1.is_error, "rejected 应是错误");
+        assert!(!outcome.results[1].1.is_error, "ready 工具应成功");
+        assert_eq!(outcome.results[1].1.output, "success output");
+    }
+
+    #[test]
+    fn test_post_process_result_no_registry() {
+        let ctx = make_test_ctx();
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "Read".to_string(),
+            input: serde_json::json!({"file_path": "/tmp/x"}),
+        };
+        let mut result = ToolResult::error("call_1", "Read", "ENOENT: file not found");
+        let all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
+        let output_before = result.output.clone();
+        // error_suggest_registry 为 None（默认），不应修改 output
+        post_process_result(&ctx, &call, &mut result, &all_tools);
+        assert_eq!(
+            result.output, output_before,
+            "无 registry 时 output 不应变化，实际: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_consecutive_failures_success_resets() {
+        let ctx = make_test_ctx();
+        // 先设置失败计数为非 0
+        ctx.consecutive_failures
+            .store(4, std::sync::atomic::Ordering::Relaxed);
+        let ok_call = ToolCall {
+            id: "call_1".to_string(),
+            name: "Read".to_string(),
+            input: serde_json::json!({}),
+        };
+        let ok_result = ToolResult::success("call_1", "Read", "ok");
+        handle_consecutive_failures(&ctx, &[(ok_call, ok_result)]);
+        assert_eq!(
+            ctx.consecutive_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "成功执行后失败计数器应重置为 0"
+        );
+    }
 }
+
+// ─── End of tests ───────────────────────────────────────────────────────────

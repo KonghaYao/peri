@@ -30,6 +30,9 @@ pub struct AgentState {
     /// 避免 tokio::spawn 的 fire-and-forget 模式因 .await 让步导致乱序。
     #[serde(skip)]
     persist_tx: Option<Arc<tokio::sync::mpsc::UnboundedSender<BaseMessage>>>,
+    /// 持久化 writer task 的 AbortHandle（用于 shutdown 时取消 + 检测 panic）
+    #[serde(skip)]
+    persist_handle: Option<tokio::task::AbortHandle>,
     /// 会话级 recall 缓冲区：收集运行时事件通知，executor 在构建用户消息前 drain 消费。
     /// 不随 session 持久化，仅存活于当前会话生命周期内。
     #[serde(skip)]
@@ -41,7 +44,7 @@ pub struct AgentState {
     /// 通过它向 session 级共享收件箱 push 异步消息。
     ///
     /// **共享语义**：`MessageQueue` 内部用 `Arc<Mutex<VecDeque>> + Arc<Notify>`，
-    /// clone 共享底层数据。`snapshot_to_agent_state` 构造临时 AgentState 时
+    /// clone 共享底层数据。`AgentState::new` 或 `AgentContext::from_stage` 构造时
     /// 传入 `ctx.queue.clone()`，因此 middleware push 的消息直接进入 v2 queue，
     /// Receive / End 阶段统一消费。
     #[serde(skip)]
@@ -103,7 +106,7 @@ impl AgentState {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BaseMessage>();
         self.persist_tx = Some(Arc::new(tx));
         let tid = self.thread_id.clone().unwrap();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut processed: u64 = 0;
             let mut last_warn_at: u64 = 0;
             while let Some(msg) = rx.recv().await {
@@ -123,6 +126,7 @@ impl AgentState {
                 }
             }
         });
+        self.persist_handle = Some(handle.abort_handle());
         self
     }
 
@@ -244,6 +248,20 @@ impl AgentState {
     /// v2 MessageQueue 句柄（共享 session 级实例）
     pub fn v2_queue(&self) -> &MessageQueue {
         &self.v2_queue
+    }
+
+    /// 优雅关闭持久化 writer task
+    pub fn shutdown_persistence(&self) {
+        if let Some(ref handle) = self.persist_handle {
+            handle.abort();
+        }
+    }
+
+    /// 标记已关闭，后续 add_message 不再入队
+    pub fn is_persistence_shutdown(&self) -> bool {
+        self.persist_handle
+            .as_ref()
+            .map_or(true, |h| h.is_finished())
     }
 }
 

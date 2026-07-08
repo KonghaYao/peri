@@ -101,18 +101,18 @@ pub struct StageContext {
     pub tool_registry_snapshot: Arc<ToolRegistrySnapshot>,
     /// Frozen system prompt（构造时一次性确定）
     pub system_prompt: Option<String>,
+    /// 会话级 TokenTracker（每次 LLM 调用后累积，compact/act 读取）.
+    /// P0 #2 修复：从 AgentContext 自有默认值迁移到 StageContext 共享实例。
+    pub token_tracker: Arc<parking_lot::RwLock<crate::agent::token::TokenTracker>>,
     /// 连续失败计数（工具失败检测，跨 step 共享）
     pub consecutive_failures: Arc<AtomicU32>,
     /// 会话上下文键值（session_id / run_id 等，metrics/tracing 用）
     pub session_context: Arc<RwLock<HashMap<String, String>>>,
     /// Recall 累加器（跨 middleware hook 共享）。
     ///
-    /// 每次 middleware hook 都会构造临时 AgentState
-    /// （见 [`super::middleware_runner::snapshot_to_agent_state`]），调用结束
-    /// 后由 `restore_from_agent_state` 整体写回 transcript——但 recall 字段
-    /// 不属于 transcript，会被丢弃。本字段作为跨 hook 的等价缓冲区：每次
-    /// middleware hook 调用结束后，[`restore_from_agent_state`] 把 state 中
-    /// 新增的 recall drain 到本缓冲区，循环结束后由 executor 统一取出。
+    /// 每次 middleware hook 都会构造临时 [`AgentContext`]，
+    /// 调用结束后由 middleware_runner 把 AgentContext 内部
+    /// recall_buffer drain 到本缓冲区，循环结束后由 executor 统一取出。
     pub recall_buffer: Arc<RwLock<Vec<String>>>,
 
     // ── Compact hook 回调（插件 PreCompact/PostCompact 触发）──
@@ -159,6 +159,9 @@ impl StageContext {
             error_suggest_registry: None,
             tool_registry_snapshot: Arc::new(ToolRegistrySnapshot::default()),
             system_prompt: None,
+            token_tracker: Arc::new(parking_lot::RwLock::new(
+                crate::agent::token::TokenTracker::default(),
+            )),
             consecutive_failures: Arc::new(AtomicU32::new(0)),
             session_context: Arc::new(RwLock::new(HashMap::new())),
             recall_buffer: Arc::new(RwLock::new(Vec::new())),
@@ -379,6 +382,9 @@ impl StageContextBuilder {
                 .tool_registry_snapshot
                 .unwrap_or_else(|| Arc::new(ToolRegistrySnapshot::default())),
             system_prompt: self.inner.system_prompt,
+            token_tracker: Arc::new(parking_lot::RwLock::new(
+                crate::agent::token::TokenTracker::default(),
+            )),
             consecutive_failures: Arc::new(AtomicU32::new(0)),
             session_context: self
                 .inner

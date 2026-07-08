@@ -80,6 +80,8 @@ pub struct MessageTranscript {
     flags: HashMap<MessageId, MessageFlags>,
     /// 异步持久化发送端
     persist_tx: Option<Arc<tokio::sync::mpsc::UnboundedSender<PersistOp>>>,
+    /// 持久化 writer task 的 AbortHandle
+    persist_handle: Option<tokio::task::AbortHandle>,
     /// 持久化目标 thread id
     thread_id: Option<ThreadId>,
     /// 持久化后端引用（保留 Arc 让 store 在 transcript 存活期间不被释放，
@@ -116,6 +118,7 @@ impl MessageTranscript {
             staged: None,
             flags: HashMap::new(),
             persist_tx: None,
+            persist_handle: None,
             thread_id: None,
             store: None,
         }
@@ -148,7 +151,7 @@ impl MessageTranscript {
         self.store = Some(store.clone());
 
         let tid = thread_id;
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut processed: u64 = 0;
             let mut last_warn_at: u64 = 0;
             while let Some(op) = rx.recv().await {
@@ -176,6 +179,7 @@ impl MessageTranscript {
                 }
             }
         });
+        self.persist_handle = Some(handle.abort_handle());
 
         self
     }
@@ -399,9 +403,10 @@ impl MessageTranscript {
             flags: new_flags,
             ancestor_len: self.ancestor_len,
             staged: None,
-            persist_tx: self.persist_tx,
-            thread_id: self.thread_id,
-            store: self.store,
+            persist_tx: self.persist_tx.clone(),
+            persist_handle: self.persist_handle.clone(),
+            thread_id: self.thread_id.clone(),
+            store: self.store.clone(),
         }
     }
 
@@ -460,6 +465,19 @@ impl MessageTranscript {
                 tracing::warn!("transcript persist send failed (channel closed): {e}");
             }
         }
+    }
+
+    /// 优雅关闭持久化 writer task
+    pub fn shutdown_persistence(&self) {
+        if let Some(ref handle) = self.persist_handle {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for MessageTranscript {
+    fn drop(&mut self) {
+        self.shutdown_persistence();
     }
 }
 
