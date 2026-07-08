@@ -63,6 +63,12 @@ pub struct CurrentTurn {
     /// Used by `flush_text_segment` to detect when new text needs a new segment.
     last_text_flush: usize,
 
+    /// Byte offset in `self.reasoning` that the last `AssistantText` segment covered.
+    /// Parallel to `last_text_flush` — each content flush records both text and
+    /// reasoning boundaries so `build_view_models` can assign the correct reasoning
+    /// slice to each assistant bubble.
+    last_reasoning_flush: usize,
+
     /// ACP `messageId` of the most recent `TextChunk`. Used to detect when
     /// a new assistant message starts (message_id change → flush pending text).
     last_message_id: Option<String>,
@@ -77,9 +83,13 @@ pub struct CurrentTurn {
 /// A single entry in the chronological ordering of a turn's streaming events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TurnSegment {
-    /// Text from `last_text_flush` (inclusive) up to `text_end_byte` (exclusive)
-    /// in `CurrentTurn.text` belongs to one assistant bubble.
-    AssistantText { text_end_byte: usize },
+    /// Text and reasoning belonging to one assistant bubble.
+    /// `text_end_byte`: end (exclusive) of the text slice in `CurrentTurn.text`.
+    /// `reasoning_end_byte`: end (exclusive) of the reasoning slice in `CurrentTurn.reasoning`.
+    AssistantText {
+        text_end_byte: usize,
+        reasoning_end_byte: usize,
+    },
     /// Tool card reference to `CurrentTurn.tool_cards[tool_idx]`.
     Tool { tool_idx: usize },
     /// Sub-agent reference to `CurrentTurn.subagents[subagent_idx]`.
@@ -93,14 +103,17 @@ impl CurrentTurn {
     }
 
     /// If text has grown since the last `AssistantText` segment, push a new
-    /// segment capturing the delta.
+    /// segment capturing the delta (both text and reasoning boundaries).
     fn flush_text_segment(&mut self) {
-        let current_len = self.text.len();
-        if current_len > self.last_text_flush {
+        let current_text = self.text.len();
+        let current_reasoning = self.reasoning.len();
+        if current_text > self.last_text_flush || current_reasoning > self.last_reasoning_flush {
             self.segments.push(TurnSegment::AssistantText {
-                text_end_byte: current_len,
+                text_end_byte: current_text,
+                reasoning_end_byte: current_reasoning,
             });
-            self.last_text_flush = current_len;
+            self.last_text_flush = current_text;
+            self.last_reasoning_flush = current_reasoning;
         }
     }
 
@@ -273,6 +286,7 @@ impl CurrentTurn {
         self.subagents.clear();
         self.segments.clear();
         self.last_text_flush = 0;
+        self.last_reasoning_flush = 0;
         self.last_message_id = None;
         self.cached_view_models.clear();
         self.active = false;
@@ -314,8 +328,9 @@ impl CurrentTurn {
     ///
     /// Walks through `self.segments` in chronological order, creating separate
     /// `TuiAssistantBubble` entries for text before and after each tool/sub-agent
-    /// boundary. Any trailing text past the last segment is rendered as a final
-    /// assistant bubble.
+    /// boundary. Each bubble gets its own reasoning slice from `self.reasoning`,
+    /// bounded by `reasoning_end_byte` in the current segment.
+    /// Any trailing content past the last segment is rendered as a final bubble.
     fn build_view_models(&mut self) {
         use crate::kit::tui_render_unit::{
             TuiAssistantBubble, TuiReasoningBlock, TuiToolCard, tui_hash_str,
@@ -323,41 +338,41 @@ impl CurrentTurn {
 
         let mut vms: Vec<TuiRenderUnit> = Vec::new();
         let mut prev_text_end: usize = 0;
-        let mut first_text = true;
+        let mut prev_reasoning_end: usize = 0;
 
-        let reasoning_block = if self.reasoning.is_empty() {
-            None
-        } else {
-            Some(TuiReasoningBlock {
-                text: self.reasoning.clone(),
-                collapsed: false,
-            })
+        let build_reasoning = |text: &str, reasoning: &str| -> (Option<TuiReasoningBlock>, u64) {
+            let block = if reasoning.is_empty() {
+                None
+            } else {
+                Some(TuiReasoningBlock {
+                    text: reasoning.to_string(),
+                    collapsed: false,
+                })
+            };
+            let content_hash = tui_hash_str(&format!("{}|{}", text, reasoning));
+            (block, content_hash)
         };
 
         for segment in &self.segments {
             match segment {
-                TurnSegment::AssistantText { text_end_byte } => {
-                    let end = *text_end_byte;
-                    if end > prev_text_end || reasoning_block.is_some() {
-                        let reasoning = if first_text {
-                            first_text = false;
-                            reasoning_block.clone()
-                        } else {
-                            None
-                        };
-                        let text_slice = &self.text[prev_text_end..end.min(self.text.len())];
-                        let reasoning_text = reasoning
-                            .as_ref()
-                            .map(|r| r.text.clone())
-                            .unwrap_or_default();
-                        let content_hash =
-                            tui_hash_str(&format!("{}|{}", text_slice, reasoning_text));
+                TurnSegment::AssistantText {
+                    text_end_byte,
+                    reasoning_end_byte,
+                } => {
+                    let text_end = (*text_end_byte).min(self.text.len());
+                    let reason_end = (*reasoning_end_byte).min(self.reasoning.len());
+                    if text_end > prev_text_end || reason_end > prev_reasoning_end {
+                        let text_slice = &self.text[prev_text_end..text_end];
+                        let reasoning_slice = &self.reasoning[prev_reasoning_end..reason_end];
+                        let (reasoning, content_hash) =
+                            build_reasoning(text_slice, reasoning_slice);
                         vms.push(TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
                             text: text_slice.to_string(),
                             reasoning,
                             content_hash,
                         }));
-                        prev_text_end = end;
+                        prev_text_end = text_end;
+                        prev_reasoning_end = reason_end;
                     }
                 }
                 TurnSegment::Tool { tool_idx } => {
@@ -394,22 +409,11 @@ impl CurrentTurn {
             }
         }
 
-        // Flush remaining text (after last segment, or if no segments exist)
-        let remaining_start = prev_text_end;
-        if remaining_start < self.text.len()
-            || (first_text && reasoning_block.is_some() && self.segments.is_empty())
-        {
-            let reasoning = if first_text {
-                reasoning_block.clone()
-            } else {
-                None
-            };
-            let text_slice = &self.text[remaining_start..];
-            let reasoning_text = reasoning
-                .as_ref()
-                .map(|r| r.text.clone())
-                .unwrap_or_default();
-            let content_hash = tui_hash_str(&format!("{}|{}", text_slice, reasoning_text));
+        // Flush remaining content (after last segment, or if no segments exist)
+        if prev_text_end < self.text.len() || prev_reasoning_end < self.reasoning.len() {
+            let text_slice = &self.text[prev_text_end..];
+            let reasoning_slice = &self.reasoning[prev_reasoning_end..];
+            let (reasoning, content_hash) = build_reasoning(text_slice, reasoning_slice);
             vms.push(TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
                 text: text_slice.to_string(),
                 reasoning,
