@@ -1,0 +1,11 @@
+{
+  "name": "peri-db-viewer",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/server.ts"
+  },
+  "dependencies": {
+    "hono": "^4.6"
+  }
+}
