@@ -5,8 +5,10 @@
 
 use crate::kit::acp_types::{AcpEventData, CurrentTurn, ToolCardAccumulator};
 use crate::kit::atoms::*;
+use crate::kit::tui_render_unit::{
+    TuiNoteLevel, TuiRenderUnit, TuiSystemNote, TuiUserBubble, tui_hash_str,
+};
 use agent_client_protocol::schema::v1::{Plan, PlanEntryStatus};
-use peri_acp_types::view_model::{NoteLevel, SystemNoteData, UserBubbleData, ViewModel, hash_str};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,12 +22,12 @@ use std::time::{Duration, Instant};
 pub struct BridgeState {
     /// 0=Idle, 1=Streaming, 2=Modal
     pub variant: u8,
-    /// 已提交的 ViewModel 列表
+    /// 已提交的 TuiRenderUnit 列表
     ///
-    /// I20-B：改 `Arc<[ViewModel]>`——push_view_models 在每个 streaming chunk
+    /// I20-B：改 `Arc<[TuiRenderUnit]>`——push_view_models 在每个 streaming chunk
     /// 上都会 clone 一份写入 atom，Vec 会 O(n)；Arc clone O(1)，只有
     /// ViewCommit/TurnDone/SystemNotification 真正修改时才重建 Arc。
-    pub committed: Arc<[ViewModel]>,
+    pub committed: Arc<[TuiRenderUnit]>,
     /// 当前轮次的增量数据
     pub current_turn: CurrentTurn,
     /// Agent 是否正在加载中
@@ -161,16 +163,16 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 None
             };
 
-            // (b) 一次性重建 committed：[旧 committed, UserBubble..., assistant view_models...]
-            // UserBubble 排在 assistant 之前，符合真实对话顺序
+            // (b) 一次性重建 committed：[旧 committed, TuiUserBubble..., assistant view_models...]
+            // TuiUserBubble 排在 assistant 之前，符合真实对话顺序
             let extra_len = buffered_texts.len() + vms.as_ref().map_or(0, Vec::len);
             if extra_len > 0 {
                 let mut combined = Vec::with_capacity(state.committed.len() + extra_len);
                 combined.extend(state.committed.iter().cloned());
                 for text in &buffered_texts {
-                    combined.push(ViewModel::UserBubble(UserBubbleData {
+                    combined.push(TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                         text: text.clone(),
-                        content_hash: hash_str(text),
+                        content_hash: tui_hash_str(text),
                         is_system_reminder: false,
                     }));
                 }
@@ -207,7 +209,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             // 用户在 loading 期间按 Enter 的输入在此处一次性 flush 到 SUBMIT_TX。
             drain_input_buffer();
         }
-        TurnInterrupted(_ti) => {
+        TurnInterrupted { reason: _reason } => {
             // 守卫：仅当 current_turn 有未归档内容时才归档，避免空/半成品消息成为幽灵
             if !state.current_turn.committed && !state.current_turn.is_empty() {
                 state.current_turn.deactivate();
@@ -239,15 +241,15 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         SystemNotification(sn) => {
             let level = match sn.level.as_str() {
-                "warning" => NoteLevel::Warning,
-                "error" => NoteLevel::Error,
-                _ => NoteLevel::Info,
+                "warning" => TuiNoteLevel::Warning,
+                "error" => TuiNoteLevel::Error,
+                _ => TuiNoteLevel::Info,
             };
             // I20-B：Arc 不可 push，需重建
             let mut combined = Vec::with_capacity(state.committed.len() + 1);
             combined.extend(state.committed.iter().cloned());
-            let content_hash = hash_str(&format!("{}|{:?}", sn.text, level));
-            combined.push(ViewModel::SystemNote(SystemNoteData {
+            let content_hash = tui_hash_str(&format!("{}|{:?}", sn.text, level));
+            combined.push(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
                 text: sn.text.clone(),
                 level,
                 content_hash,
@@ -296,17 +298,20 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
 
         // ── §4.6 Structure events ──
-        SubagentStarted(sg) => {
+        SubagentStarted {
+            agent_id,
+            agent_name,
+        } => {
             state
                 .current_turn
-                .start_subagent(sg.agent_id.clone(), sg.agent_name.clone());
+                .start_subagent(agent_id.clone(), agent_name.clone());
             state.variant = 1;
             state.is_loading = true;
             push_view_models(state);
             push_acp_state(state);
         }
-        SubagentStopped(sg) => {
-            state.current_turn.stop_subagent(&sg.agent_id);
+        SubagentStopped { agent_id } => {
+            state.current_turn.stop_subagent(agent_id);
             state.variant = 1;
             state.is_loading = true;
             push_view_models(state);
@@ -315,9 +320,9 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 
         // ── Replay events ──
         ReplayUserBubble { text } => {
-            let vm = ViewModel::UserBubble(UserBubbleData {
+            let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: text.clone(),
-                content_hash: hash_str(text),
+                content_hash: tui_hash_str(text),
                 is_system_reminder: false,
             });
             let mut combined = Vec::with_capacity(state.committed.len() + 1);
@@ -329,12 +334,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
         ReplayAssistantBubble { text } => {
-            let vm = ViewModel::AssistantBubble(peri_acp_types::view_model::AssistantBubbleData {
-                text: text.clone(),
-                reasoning: None,
-                tool_card_ids: vec![],
-                content_hash: 0,
-            });
+            let vm = TuiRenderUnit::TuiAssistantBubble(
+                crate::kit::tui_render_unit::TuiAssistantBubble {
+                    text: text.clone(),
+                    reasoning: None,
+                    tool_card_ids: vec![],
+                    content_hash: 0,
+                },
+            );
             let mut combined = Vec::with_capacity(state.committed.len() + 1);
             combined.extend(state.committed.iter().cloned());
             combined.push(vm);
@@ -392,7 +399,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 ///
 /// S16：bridge 的 committed 仅在 TurnDone 时填充完整。streaming 事件到达时若
 /// bridge committed 仍为空（尚未收到 TurnDone），则保留 atom 中已有的
-/// committed（可能含 submit_text 预先注入的 UserBubble），避免消息区退回 Welcome。
+/// committed（可能含 submit_text 预先注入的 TuiUserBubble），避免消息区退回 Welcome。
 ///
 /// I21-D：一旦完成过 TurnDone（has_turn_done=true），committed 以 bridge
 /// 为准，即使为空也不 fallback——/clear 产生空 committed 是合法结果。
@@ -494,14 +501,14 @@ mod tests {
 
         dispatch_and_notify(
             &mut state,
-            &AcpEventData::SubagentStarted(peri_acp_types::event_data::SubagentStarted {
+            &AcpEventData::SubagentStarted {
                 agent_id: "agent-1".into(),
                 agent_name: "researcher".into(),
-            }),
+            },
         );
         dispatch_and_notify(
             &mut state,
-            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
+            &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
                 text: "child text".into(),
                 agent_id: Some("agent-1".into()),
             }),
@@ -510,11 +517,11 @@ mod tests {
         let snapshot = VIEW_MODELS.state().read().clone();
         assert_eq!(snapshot.current_turn.len(), 1);
         match &snapshot.current_turn[0] {
-            ViewModel::SubAgentGroup(group) => {
+            TuiRenderUnit::TuiSubAgentGroup(group) => {
                 assert_eq!(group.agent_id, "agent-1");
                 assert_eq!(group.view_models.len(), 1);
             }
-            other => panic!("expected SubAgentGroup, got {other:?}"),
+            other => panic!("expected TuiSubAgentGroup, got {other:?}"),
         }
     }
 
@@ -651,8 +658,8 @@ mod tests {
         let snapshot = VIEW_MODELS.state().read().clone();
         assert_eq!(snapshot.committed.len(), 1);
         match &snapshot.committed[0] {
-            ViewModel::UserBubble(d) => assert_eq!(d.text, "hello from replay"),
-            other => panic!("expected UserBubble, got {other:?}"),
+            TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "hello from replay"),
+            other => panic!("expected TuiUserBubble, got {other:?}"),
         }
         assert!(
             state.has_turn_done,
@@ -684,8 +691,8 @@ mod tests {
         let snapshot = VIEW_MODELS.state().read().clone();
         assert_eq!(snapshot.committed.len(), 1);
         match &snapshot.committed[0] {
-            ViewModel::AssistantBubble(d) => assert_eq!(d.text, "assistant from replay"),
-            other => panic!("expected AssistantBubble, got {other:?}"),
+            TuiRenderUnit::TuiAssistantBubble(d) => assert_eq!(d.text, "assistant from replay"),
+            other => panic!("expected TuiAssistantBubble, got {other:?}"),
         }
     }
 
@@ -706,7 +713,7 @@ mod tests {
         // 第一轮：stream one text → TurnDone
         dispatch_and_notify(
             &mut state,
-            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
+            &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
                 text: "first turn".into(),
                 agent_id: None,
             }),
@@ -726,7 +733,7 @@ mod tests {
         // 第二轮：stream another text → TurnDone
         dispatch_and_notify(
             &mut state,
-            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
+            &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
                 text: "second turn".into(),
                 agent_id: None,
             }),
@@ -742,9 +749,9 @@ mod tests {
         assert!(snapshot.current_turn.is_empty());
     }
 
-    /// TurnDone UserBubble 排在 assistant 之前：预置 INPUT_BUFFER 两条文本 +
-    /// current_turn 一条 AssistantBubble，触发 TurnDone，断言 committed 顺序为
-    /// [UserBubble, UserBubble, AssistantBubble]。
+    /// TurnDone TuiUserBubble 排在 assistant 之前：预置 INPUT_BUFFER 两条文本 +
+    /// current_turn 一条 TuiAssistantBubble，触发 TurnDone，断言 committed 顺序为
+    /// [TuiUserBubble, TuiUserBubble, TuiAssistantBubble]。
     #[test]
     #[serial]
     fn test_turndone_userbubble_before_assistant() {
@@ -762,7 +769,7 @@ mod tests {
         // 往 current_turn 写入一条 assistant 文本
         dispatch_and_notify(
             &mut state,
-            &AcpEventData::TextChunk(peri_acp_types::event_data::TextChunk {
+            &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
                 text: "assistant reply".into(),
                 agent_id: None,
             }),
@@ -783,20 +790,20 @@ mod tests {
         assert_eq!(
             state.committed.len(),
             3,
-            "committed 应有 3 个 VM：2 UserBubble + 1 AssistantBubble"
+            "committed 应有 3 个 VM：2 TuiUserBubble + 1 TuiAssistantBubble"
         );
-        // 顺序：UserBubble, UserBubble, AssistantBubble
+        // 顺序：TuiUserBubble, TuiUserBubble, TuiAssistantBubble
         match &state.committed[0] {
-            ViewModel::UserBubble(d) => assert_eq!(d.text, "user says hello"),
-            other => panic!("expected UserBubble at [0], got {other:?}"),
+            TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "user says hello"),
+            other => panic!("expected TuiUserBubble at [0], got {other:?}"),
         }
         match &state.committed[1] {
-            ViewModel::UserBubble(d) => assert_eq!(d.text, "user says world"),
-            other => panic!("expected UserBubble at [1], got {other:?}"),
+            TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "user says world"),
+            other => panic!("expected TuiUserBubble at [1], got {other:?}"),
         }
         match &state.committed[2] {
-            ViewModel::AssistantBubble(d) => assert_eq!(d.text, "assistant reply"),
-            other => panic!("expected AssistantBubble at [2], got {other:?}"),
+            TuiRenderUnit::TuiAssistantBubble(d) => assert_eq!(d.text, "assistant reply"),
+            other => panic!("expected TuiAssistantBubble at [2], got {other:?}"),
         }
         assert!(
             state.has_turn_done,
@@ -811,11 +818,12 @@ mod tests {
     fn test_turn_interrupted_empty_skips_archive() {
         crate::kit::atoms::init_atoms();
         // 预置一条 committed 数据
-        let pre_existing: Arc<[ViewModel]> = Arc::from([ViewModel::UserBubble(UserBubbleData {
-            text: "existing".into(),
-            content_hash: 1,
-            is_system_reminder: false,
-        })]);
+        let pre_existing: Arc<[TuiRenderUnit]> =
+            Arc::from([TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+                text: "existing".into(),
+                content_hash: 1,
+                is_system_reminder: false,
+            })]);
         *VIEW_MODELS.state().write() = ViewModelsSnapshot {
             committed: Arc::clone(&pre_existing),
             current_turn: Arc::from([]),
@@ -831,9 +839,9 @@ mod tests {
 
         dispatch_and_notify(
             &mut state,
-            &AcpEventData::TurnInterrupted(peri_acp_types::event_data::TurnInterrupted {
+            &AcpEventData::TurnInterrupted {
                 reason: "test".into(),
-            }),
+            },
         );
 
         assert_eq!(
@@ -842,8 +850,8 @@ mod tests {
             "空 current_turn → TurnInterrupted 不应归档，committed 长度不变"
         );
         match &state.committed[0] {
-            ViewModel::UserBubble(d) => assert_eq!(d.text, "existing"),
-            other => panic!("committed[0] 应为原始 UserBubble, got {other:?}"),
+            TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "existing"),
+            other => panic!("committed[0] 应为原始 TuiUserBubble, got {other:?}"),
         }
         assert!(state.current_turn.is_empty(), "current_turn 应已重置");
         assert!(!state.is_loading, "is_loading 应为 false");
@@ -858,11 +866,12 @@ mod tests {
     fn test_has_turn_done_prevents_fallback() {
         crate::kit::atoms::init_atoms();
         // 设置 atom 中有旧 committed 数据
-        let old_committed: Arc<[ViewModel]> = Arc::from([ViewModel::UserBubble(UserBubbleData {
-            text: "old data".into(),
-            content_hash: 1,
-            is_system_reminder: false,
-        })]);
+        let old_committed: Arc<[TuiRenderUnit]> =
+            Arc::from([TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+                text: "old data".into(),
+                content_hash: 1,
+                is_system_reminder: false,
+            })]);
         *VIEW_MODELS.state().write() = ViewModelsSnapshot {
             committed: Arc::clone(&old_committed),
             current_turn: Arc::from([]),

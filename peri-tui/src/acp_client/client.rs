@@ -29,7 +29,10 @@ pub enum AcpNotification {
     /// An unrecognized notification or request.
     Other { msg: String },
     /// Agent execution completed (synthetic notification from ACP server).
-    AgentDone { session_id: String },
+    AgentDone {
+        session_id: String,
+        stop_reason: String,
+    },
     /// Prediction fork 完成后的建议文本。
     PredictionReady { session_id: String, text: String },
     /// A `notifications/peri/*` custom notification (SubAgent, Compact, LSP, etc.)
@@ -196,7 +199,15 @@ impl AcpTuiClient {
                             total_events = event_count,
                             "ACP client pump: received agent_event_done"
                         );
-                        let _ = notification_tx.send(AcpNotification::AgentDone { session_id });
+                        let stop_reason = params
+                            .get("stopReason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("end_turn")
+                            .to_string();
+                        let _ = notification_tx.send(AcpNotification::AgentDone {
+                            session_id,
+                            stop_reason,
+                        });
                     } else if method == "peri/prediction_ready" {
                         let session_id = params
                             .get("sessionId")

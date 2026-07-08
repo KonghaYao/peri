@@ -34,11 +34,13 @@ pub mod service_snapshot;
 pub mod setup_wizard;
 pub mod slash_completion;
 pub mod status_bar;
+pub mod stream_data;
 pub mod submit_consumer;
 pub mod text_selection;
 pub mod theme;
 pub mod thread_load_consumer;
 pub mod tool_display;
+pub mod tui_render_unit;
 pub mod view_render;
 pub mod welcome;
 

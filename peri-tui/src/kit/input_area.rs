@@ -42,7 +42,7 @@ use crate::kit::panel_registry::{PANELS, open_panel, panel_for_slash_command};
 use crate::kit::render_bridge::{self, RenderedEntry, VmKey};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
 use crate::kit::theme;
-use peri_acp_types::view_model::{UserBubbleData, ViewModel, hash_str};
+use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble, tui_hash_str};
 
 /// 追踪 composer 段落区域，供鼠标点击→光标定位使用。
 /// 仿照 MsgAreaTracker 模式：rect 是值类型，每帧 pre_component_draw 更新后在
@@ -640,15 +640,15 @@ fn submit_text(submitted: String) {
 }
 
 fn append_local_user_bubble(text: &str) {
-    let user_vm = ViewModel::UserBubble(UserBubbleData {
+    let user_vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
         text: text.to_string(),
-        content_hash: hash_str(text),
+        content_hash: tui_hash_str(text),
         is_system_reminder: false,
     });
     let snapshot = {
         let vms = VIEW_MODELS.state();
         let snapshot = vms.read();
-        let mut combined: Vec<ViewModel> = Vec::with_capacity(snapshot.committed.len() + 1);
+        let mut combined: Vec<TuiRenderUnit> = Vec::with_capacity(snapshot.committed.len() + 1);
         combined.extend(snapshot.committed.iter().cloned());
         combined.push(user_vm.clone());
         let new_snapshot = ViewModelsSnapshot {
@@ -666,7 +666,7 @@ fn sync_render_cache(snapshot: &ViewModelsSnapshot) {
     let width = 80;
     let mut cache = RENDER_CACHE.state().read().clone();
 
-    // 增量模式：只追加最新一条 UserBubble，避免全量 markdown 重解析
+    // 增量模式：只追加最新一条 TuiUserBubble，避免全量 markdown 重解析
     if !cache.entries.is_empty() {
         if let Some(last_vm) = snapshot.committed.last() {
             let new_index = snapshot.committed.len().saturating_sub(1);
@@ -709,7 +709,7 @@ fn sync_render_cache(snapshot: &ViewModelsSnapshot) {
 
 fn append_render_entries(
     entries: &mut Vec<(VmKey, RenderedEntry)>,
-    items: &[ViewModel],
+    items: &[TuiRenderUnit],
     width: usize,
     start_index: usize,
     committed: bool,

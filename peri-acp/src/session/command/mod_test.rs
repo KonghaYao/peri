@@ -95,7 +95,7 @@ impl crate::session::event_sink::EventSink for MockEventSink {
             .push((session_id.to_string(), json));
     }
 
-    async fn push_done(&self, _session_id: &str) {
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {
         *self.push_done_count.lock().unwrap() += 1;
     }
 }

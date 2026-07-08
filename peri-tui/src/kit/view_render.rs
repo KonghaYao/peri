@@ -1,7 +1,7 @@
-//! V2 ViewModel → ratatui Line 转换器。
+//! V2 TuiRenderUnit → ratatui Line 转换器。
 //!
 //! 纯函数 `render_v2_vm(vm, width) -> Vec<Line<'static>>`，
-//! 处理全部 7 种 `peri_acp_types::view_model::ViewModel` 变体。
+//! 处理全部 7 种 `crate::kit::tui_render_unit::TuiRenderUnit` 变体。
 //! 零副作用，不持有缓存——markdown 每帧重新解析。
 
 use std::cell::RefCell;
@@ -16,35 +16,35 @@ use ratatui::{
 use crate::kit::tool_display;
 
 #[allow(unused_imports)]
-use peri_acp_types::view_model::{
-    AskUserBlockData, CollapsedGroupData, DiffBlock, DividerData, HunkLineKind, NoteLevel,
-    ReasoningBlock, SubAgentGroupData, ViewModel,
+use crate::kit::tui_render_unit::{
+    TuiAskUserBlock, TuiCollapsedGroup, TuiDiffBlock, TuiDivider, TuiHunkLineKind, TuiNoteLevel,
+    TuiReasoningBlock, TuiRenderUnit, TuiSubAgentGroup,
 };
 
 use crate::kit::theme;
 
 // ── SubAgent 运行时状态探针（thread-local） ─────────────────────────────────
 
-/// V2 SubAgentGroup 渲染所需的运行时状态（用于显示状态 emoji + total_steps）。
+/// V2 TuiSubAgentGroup 渲染所需的运行时状态（用于显示状态 emoji + total_steps）。
 ///
 /// 由 app 层通过 [`with_status_probe`] 注入；render_subagent_group 通过
-/// agent_id 查询。对应 v2 DTO `SubAgentGroupData` 缺失的运行时字段。
+/// agent_id 查询。对应 v2 DTO `TuiSubAgentGroup` 缺失的运行时字段。
 #[derive(Clone, Debug, Default)]
 pub struct SubAgentRenderInfo {
     pub is_running: bool,
     pub is_error: bool,
     pub total_steps: usize,
     pub final_result: Option<String>,
-    /// 子 Agent 的最近消息（v2 ViewModel 形式）。
+    /// 子 Agent 的最近消息（v2 TuiRenderUnit 形式）。
     ///
-    /// 当 v2 DTO `SubAgentGroupData.view_models` 为空（ACP 层 view_mapper
+    /// 当 v2 DTO `TuiSubAgentGroup.view_models` 为空（ACP 层 view_mapper
     /// 生成的 placeholder）时，渲染层从此字段取子内容。app 层通过
     /// 通过 `subagent_status` 状态 probe 把 SubAgent 运行时状态转换为 v2 VMs
     /// 后填充此字段。
-    pub recent_messages: Vec<ViewModel>,
+    pub recent_messages: Vec<TuiRenderUnit>,
 }
 
-/// V2 SubAgentGroup 状态查询接口。app 层实现并通过 [`with_status_probe`] 设置。
+/// V2 TuiSubAgentGroup 状态查询接口。app 层实现并通过 [`with_status_probe`] 设置。
 ///
 /// 实现者通常是 `SubAgentStatusMap` 的快照或借用包装。
 pub trait SubAgentStatusProbe {
@@ -87,24 +87,24 @@ fn lookup_subagent_status(agent_id: &str) -> Option<SubAgentRenderInfo> {
 
 // ── 公开入口 ──────────────────────────────────────────────────────────────
 
-/// 将单个 V2 ViewModel 转换为 ratatui Line 列表。
+/// 将单个 V2 TuiRenderUnit 转换为 ratatui Line 列表。
 ///
 /// * `width` — 终端可用宽度，用于 markdown 解析时折行。
-pub fn render_v2_vm(vm: &ViewModel, width: usize) -> Vec<Line<'static>> {
+pub fn render_v2_vm(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>> {
     RENDER_CALL_COUNT.with(|c| {
         c.fetch_add(1, Ordering::Relaxed);
     });
     match vm {
-        ViewModel::UserBubble(data) => {
+        TuiRenderUnit::TuiUserBubble(data) => {
             render_user_bubble(&data.text, width, data.is_system_reminder)
         }
-        ViewModel::AssistantBubble(data) => render_assistant_bubble(data, width),
-        ViewModel::ToolCard(data) => render_tool_card(data),
-        ViewModel::SystemNote(data) => render_system_note(data),
-        ViewModel::SubAgentGroup(data) => render_subagent_group(data, width),
-        ViewModel::CollapsedGroup(data) => render_collapsed_group(data),
-        ViewModel::Divider(data) => render_divider(data),
-        ViewModel::AskUserBlock(data) => render_ask_user_block(data),
+        TuiRenderUnit::TuiAssistantBubble(data) => render_assistant_bubble(data, width),
+        TuiRenderUnit::TuiToolCard(data) => render_tool_card(data),
+        TuiRenderUnit::TuiSystemNote(data) => render_system_note(data),
+        TuiRenderUnit::TuiSubAgentGroup(data) => render_subagent_group(data, width),
+        TuiRenderUnit::TuiCollapsedGroup(data) => render_collapsed_group(data),
+        TuiRenderUnit::TuiDivider(data) => render_divider(data),
+        TuiRenderUnit::TuiAskUserBlock(data) => render_ask_user_block(data),
     }
 }
 
@@ -153,7 +153,7 @@ fn render_user_bubble(text: &str, width: usize, is_system_reminder: bool) -> Vec
 }
 
 fn render_assistant_bubble(
-    data: &peri_acp_types::view_model::AssistantBubbleData,
+    data: &crate::kit::tui_render_unit::TuiAssistantBubble,
     width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -174,7 +174,7 @@ fn render_assistant_bubble(
     lines
 }
 
-fn render_reasoning_block(reasoning: &ReasoningBlock) -> Vec<Line<'static>> {
+fn render_reasoning_block(reasoning: &TuiReasoningBlock) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
     let char_count = reasoning.text.chars().count();
     let mut lines = vec![Line::from(vec![Span::styled(
@@ -204,8 +204,8 @@ const COLLAPSED_BY_DEFAULT: &[&str] = &["Bash", "Read", "Glob", "Grep", "AskUser
 const AUTO_EXPAND: &[&str] = &["AgentResult", "ExecuteExtraTool", "SearchExtraTools"];
 const FORCE_EXPAND_ON_COMPLETE: &[&str] = &["Write", "Edit"];
 
-/// 工具调用卡片渲染（v2 ViewModel 渲染器）。
-fn render_tool_card(data: &peri_acp_types::view_model::ToolCardData) -> Vec<Line<'static>> {
+/// 工具调用卡片渲染（v2 TuiRenderUnit 渲染器）。
+fn render_tool_card(data: &crate::kit::tui_render_unit::TuiToolCard) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
     let display = tool_display(&data.tool_name, data.is_error, data.is_running);
     let display_name = tool_display::format_tool_name(&data.tool_name).to_string();
@@ -317,18 +317,18 @@ fn format_running_duration(ms: u64) -> String {
     }
 }
 
-fn diff_change_summary(diff: &DiffBlock) -> Option<String> {
+fn diff_change_summary(diff: &TuiDiffBlock) -> Option<String> {
     let adds = diff
         .hunks
         .iter()
         .flat_map(|h| &h.lines)
-        .filter(|l| matches!(l.kind, HunkLineKind::Add))
+        .filter(|l| matches!(l.kind, TuiHunkLineKind::Add))
         .count();
     let dels = diff
         .hunks
         .iter()
         .flat_map(|h| &h.lines)
-        .filter(|l| matches!(l.kind, HunkLineKind::Del))
+        .filter(|l| matches!(l.kind, TuiHunkLineKind::Del))
         .count();
     if adds == 0 && dels == 0 {
         return None;
@@ -420,7 +420,7 @@ fn compact_output_lines(text: &str, max_lines: usize, max_chars: usize) -> Vec<S
     lines
 }
 
-fn render_system_note(data: &peri_acp_types::view_model::SystemNoteData) -> Vec<Line<'static>> {
+fn render_system_note(data: &crate::kit::tui_render_unit::TuiSystemNote) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
     let mut lines: Vec<Line<'static>> = Vec::new();
     for line_text in data.text.lines() {
@@ -480,7 +480,7 @@ fn render_system_note(data: &peri_acp_types::view_model::SystemNoteData) -> Vec<
     lines
 }
 
-fn render_ask_user_block(data: &AskUserBlockData) -> Vec<Line<'static>> {
+fn render_ask_user_block(data: &TuiAskUserBlock) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -511,7 +511,7 @@ fn render_ask_user_block(data: &AskUserBlockData) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_subagent_group(data: &SubAgentGroupData, width: usize) -> Vec<Line<'static>> {
+fn render_subagent_group(data: &TuiSubAgentGroup, width: usize) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
 
     // 查询运行时状态（v2 DTO 缺失字段由 status probe 注入）
@@ -583,7 +583,7 @@ fn render_subagent_group(data: &SubAgentGroupData, width: usize) -> Vec<Line<'st
     // 子内容来源优先级：
     // 1. v2 DTO `view_models`（ACP 层填充，当前永久为空 placeholder）
     // 2. status probe 的 `recent_messages`（app 层填充）
-    let children: Vec<ViewModel> = if !data.view_models.is_empty() {
+    let children: Vec<TuiRenderUnit> = if !data.view_models.is_empty() {
         data.view_models.clone()
     } else if let Some(ref s) = status {
         s.recent_messages.clone()
@@ -591,11 +591,11 @@ fn render_subagent_group(data: &SubAgentGroupData, width: usize) -> Vec<Line<'st
         Vec::new()
     };
 
-    // 折叠摘要：ToolCard 超过 5 个时，前 N-5 个渲染为单行 "▶ N collapsed tools"，
-    // 最后 5 个正常渲染。非 ToolCard 子消息始终正常渲染。
+    // 折叠摘要：TuiToolCard 超过 5 个时，前 N-5 个渲染为单行 "▶ N collapsed tools"，
+    // 最后 5 个正常渲染。非 TuiToolCard 子消息始终正常渲染。
     let tool_count = children
         .iter()
-        .filter(|vm| matches!(vm, ViewModel::ToolCard(_)))
+        .filter(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(_)))
         .count();
     let collapse_count = tool_count.saturating_sub(5);
     let mut tool_idx = 0;
@@ -611,20 +611,21 @@ fn render_subagent_group(data: &SubAgentGroupData, width: usize) -> Vec<Line<'st
     }
 
     for inner_vm in &children {
-        if matches!(inner_vm, ViewModel::AssistantBubble(_)) {
+        if matches!(inner_vm, TuiRenderUnit::TuiAssistantBubble(_)) {
             continue;
         }
-        if matches!(inner_vm, ViewModel::ToolCard(_)) {
+        if matches!(inner_vm, TuiRenderUnit::TuiToolCard(_)) {
             tool_idx += 1;
-            // 跳过被折叠的前 N-5 个 ToolCard
+            // 跳过被折叠的前 N-5 个 TuiToolCard
             if tool_idx <= collapse_count {
                 continue;
             }
         }
         let inner_lines = render_v2_vm(inner_vm, width);
-        // 运行中的 SubAgent：ToolCard 去掉输出行，单行显示
+        // 运行中的 SubAgent：TuiToolCard 去掉输出行，单行显示
         let is_running = status.as_ref().map_or(data.is_running, |s| s.is_running);
-        let inner_lines: Vec<_> = if is_running && matches!(inner_vm, ViewModel::ToolCard(_)) {
+        let inner_lines: Vec<_> = if is_running && matches!(inner_vm, TuiRenderUnit::TuiToolCard(_))
+        {
             inner_lines
                 .into_iter()
                 .filter(|l| {
@@ -639,7 +640,7 @@ fn render_subagent_group(data: &SubAgentGroupData, width: usize) -> Vec<Line<'st
             continue;
         }
         // SubAgent 展开区内移除嵌套消息的 leading/trailing 空行
-        // （render_v2_vm 对 ToolCard 等会调用 with_message_spacing 包裹空行）
+        // （render_v2_vm 对 TuiToolCard 等会调用 with_message_spacing 包裹空行）
         let start = inner_lines
             .iter()
             .position(|l| !l.spans.is_empty())
@@ -686,7 +687,7 @@ fn render_subagent_group(data: &SubAgentGroupData, width: usize) -> Vec<Line<'st
     with_message_spacing(lines)
 }
 
-fn render_collapsed_group(data: &CollapsedGroupData) -> Vec<Line<'static>> {
+fn render_collapsed_group(data: &TuiCollapsedGroup) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
     vec![Line::from(vec![
         Span::styled("● ", Style::default().fg(semantic.status.success)),
@@ -697,7 +698,7 @@ fn render_collapsed_group(data: &CollapsedGroupData) -> Vec<Line<'static>> {
     ])]
 }
 
-fn render_divider(data: &DividerData) -> Vec<Line<'static>> {
+fn render_divider(data: &TuiDivider) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
     if let Some(ref label) = data.label {
         vec![Line::from(vec![
@@ -730,13 +731,13 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peri_acp_types::view_model::{
-        AssistantBubbleData, Hunk, HunkLine, ToolCardData, UserBubbleData,
+    use crate::kit::tui_render_unit::{
+        TuiAssistantBubble, TuiHunk, TuiHunkLine, TuiToolCard, TuiUserBubble,
     };
 
     #[test]
     fn test_user_bubble_basic() {
-        let vm = ViewModel::UserBubble(UserBubbleData {
+        let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
             text: "hello world".into(),
             content_hash: 0,
             is_system_reminder: false,
@@ -744,13 +745,13 @@ mod tests {
         let lines = render_v2_vm(&vm, 80);
         assert!(
             !lines.is_empty(),
-            "UserBubble should produce at least one line"
+            "TuiUserBubble should produce at least one line"
         );
     }
 
     #[test]
     fn test_user_bubble_has_spec_spacing_and_prefix() {
-        let vm = ViewModel::UserBubble(UserBubbleData {
+        let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
             text: "hello\nworld".into(),
             content_hash: 0,
             is_system_reminder: false,
@@ -777,7 +778,7 @@ mod tests {
 
     #[test]
     fn test_assistant_bubble_text() {
-        let vm = ViewModel::AssistantBubble(AssistantBubbleData {
+        let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
             text: "**bold** text".into(),
             reasoning: None,
             tool_card_ids: vec![],
@@ -789,9 +790,9 @@ mod tests {
 
     #[test]
     fn test_assistant_bubble_with_reasoning() {
-        let vm = ViewModel::AssistantBubble(AssistantBubbleData {
+        let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
             text: String::new(),
-            reasoning: Some(ReasoningBlock {
+            reasoning: Some(TuiReasoningBlock {
                 text: "thinking deeply...\nline 2\nline 3\nline 4".into(),
                 collapsed: false,
             }),
@@ -807,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_tool_card_success() {
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-1".into(),
             tool_name: "Read".into(),
             input_summary: "path: foo.rs".into(),
@@ -827,7 +828,7 @@ mod tests {
     #[test]
     fn test_tool_card_read_collapsed_shows_line_count() {
         // Read 折叠态现在显示行数摘要（"N lines"），不再隐藏全部输出
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-read-collapsed".into(),
             tool_name: "Read".into(),
             input_summary: "path: foo.rs".into(),
@@ -864,7 +865,7 @@ mod tests {
 
     #[test]
     fn test_tool_card_error() {
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-2".into(),
             tool_name: "Bash".into(),
             input_summary: "rm -rf /".into(),
@@ -882,7 +883,7 @@ mod tests {
 
     #[test]
     fn test_tool_card_collapsed_error_shows_error_summary() {
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-read-error".into(),
             tool_name: "Read".into(),
             input_summary: "foo.rs".into(),
@@ -912,7 +913,7 @@ mod tests {
         // 重置渲染计数器，确保 running 指示器可见（第 0 帧显示 ●）
         RENDER_CALL_COUNT.with(|c| c.store(0, Ordering::Relaxed));
 
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-running".into(),
             tool_name: "Edit".into(),
             input_summary: "path: foo.rs\nold_string: hello".into(),
@@ -939,7 +940,7 @@ mod tests {
     fn test_tool_card_bash_running_shows_elapsed_line() {
         RENDER_CALL_COUNT.with(|c| c.store(0, Ordering::Relaxed));
 
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-bash-running".into(),
             tool_name: "Bash".into(),
             input_summary: "cargo test".into(),
@@ -966,7 +967,7 @@ mod tests {
 
     #[test]
     fn test_tool_card_bash_completed_does_not_show_running_line() {
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-bash-complete".into(),
             tool_name: "Bash".into(),
             input_summary: "cargo test".into(),
@@ -999,7 +1000,7 @@ mod tests {
     #[test]
     fn test_tool_card_output_is_compacted() {
         // Bash 默认折叠（COLLAPSED_BY_DEFAULT），max_lines=1，5 行输出 → 1 行 + "… 4 more lines"
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-output".into(),
             tool_name: "Bash".into(),
             input_summary: "cargo test".into(),
@@ -1018,7 +1019,7 @@ mod tests {
     #[test]
     fn test_tool_card_write_shows_output_summary_no_diff_hint() {
         // Write 工具完成后不再渲染 diff（已移除），仅显示 output_summary。
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-diff-hint".into(),
             tool_name: "Write".into(),
             input_summary: "bar.rs".into(),
@@ -1026,7 +1027,7 @@ mod tests {
             is_error: false,
             is_running: false,
             running_duration_ms: None,
-            diff: Some(DiffBlock {
+            diff: Some(TuiDiffBlock {
                 path: "bar.rs".into(),
                 hunks: vec![],
                 is_binary: false,
@@ -1052,7 +1053,7 @@ mod tests {
 
     #[test]
     fn test_tool_card_web_uses_spec_indicator() {
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-web".into(),
             tool_name: "WebFetch".into(),
             input_summary: "https://example.com".into(),
@@ -1074,7 +1075,7 @@ mod tests {
 
     #[test]
     fn test_tool_card_bash_uses_spec_indicator_and_display_name() {
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-bash".into(),
             tool_name: "Bash".into(),
             input_summary: "cargo test".into(),
@@ -1097,7 +1098,7 @@ mod tests {
     #[test]
     fn test_tool_card_diff_removed() {
         // diff 渲染已完全移除，Edit/Write 工具不再展示 diff 行。
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-3".into(),
             tool_name: "Edit".into(),
             input_summary: "foo.rs".into(),
@@ -1105,13 +1106,13 @@ mod tests {
             is_error: false,
             is_running: false,
             running_duration_ms: None,
-            diff: Some(DiffBlock {
+            diff: Some(TuiDiffBlock {
                 path: "foo.rs".into(),
-                hunks: vec![Hunk {
+                hunks: vec![TuiHunk {
                     old_range: "-1,3".into(),
                     new_range: "+1,4".into(),
-                    lines: vec![HunkLine {
-                        kind: HunkLineKind::Add,
+                    lines: vec![TuiHunkLine {
+                        kind: TuiHunkLineKind::Add,
                         text: "new line".into(),
                         old_no: None,
                         new_no: Some(4),
@@ -1140,7 +1141,7 @@ mod tests {
     #[test]
     fn test_tool_card_write_no_diff() {
         // Write 工具不再渲染 diff（diff 已移除），assert 不应出现 diff 行。
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-4".into(),
             tool_name: "Write".into(),
             input_summary: "bar.rs".into(),
@@ -1148,7 +1149,7 @@ mod tests {
             is_error: false,
             is_running: false,
             running_duration_ms: None,
-            diff: Some(DiffBlock {
+            diff: Some(TuiDiffBlock {
                 path: "bar.rs".into(),
                 hunks: vec![],
                 is_binary: false,
@@ -1167,7 +1168,7 @@ mod tests {
     #[test]
     fn test_tool_card_bash_collapsed_by_default() {
         // Bash 默认折叠（COLLAPSED_BY_DEFAULT），完成后仅显示首行输出摘要
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-bash-collapsed".into(),
             tool_name: "Bash".into(),
             input_summary: "ls -la".into(),
@@ -1190,7 +1191,7 @@ mod tests {
     #[test]
     fn test_tool_card_search_extra_tools_auto_expand() {
         // SearchExtraTools 结果自动展开（AUTO_EXPAND），完成后展示完整输出（最多 4 行）
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-set-autox".into(),
             tool_name: "SearchExtraTools".into(),
             input_summary: "mcp__weixin".into(),
@@ -1212,9 +1213,9 @@ mod tests {
 
     #[test]
     fn test_system_note_info() {
-        let vm = ViewModel::SystemNote(peri_acp_types::view_model::SystemNoteData {
+        let vm = TuiRenderUnit::TuiSystemNote(crate::kit::tui_render_unit::TuiSystemNote {
             text: "session started".into(),
-            level: NoteLevel::Info,
+            level: TuiNoteLevel::Info,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1223,9 +1224,9 @@ mod tests {
 
     #[test]
     fn test_system_note_error() {
-        let vm = ViewModel::SystemNote(peri_acp_types::view_model::SystemNoteData {
+        let vm = TuiRenderUnit::TuiSystemNote(crate::kit::tui_render_unit::TuiSystemNote {
             text: "fatal error".into(),
-            level: NoteLevel::Error,
+            level: TuiNoteLevel::Error,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1235,10 +1236,10 @@ mod tests {
     #[test]
     fn test_subagent_group_always_shows_content() {
         // SubAgent 无折叠态——collapsed 字段被忽略，始终展开
-        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+        let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "sa-1".into(),
             agent_name: "file-searcher".into(),
-            view_models: vec![ViewModel::UserBubble(UserBubbleData {
+            view_models: vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: "find foo".into(),
                 content_hash: 0,
                 is_system_reminder: false,
@@ -1259,10 +1260,10 @@ mod tests {
 
     #[test]
     fn test_subagent_group_expanded() {
-        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+        let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "sa-2".into(),
             agent_name: "tester".into(),
-            view_models: vec![ViewModel::UserBubble(UserBubbleData {
+            view_models: vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: "test".into(),
                 content_hash: 0,
                 is_system_reminder: false,
@@ -1296,17 +1297,17 @@ mod tests {
 
     #[test]
     fn test_subagent_group_expanded_skips_assistant_bubble_and_trims_result() {
-        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+        let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "sa-visual".into(),
             agent_name: "visual".into(),
             view_models: vec![
-                ViewModel::AssistantBubble(AssistantBubbleData {
+                TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
                     text: "hidden assistant".into(),
                     reasoning: None,
                     tool_card_ids: vec![],
                     content_hash: 0,
                 }),
-                ViewModel::UserBubble(UserBubbleData {
+                TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                     text: "visible user".into(),
                     content_hash: 0,
                     is_system_reminder: false,
@@ -1329,12 +1330,12 @@ mod tests {
         let text = collect_text(&lines);
         assert!(
             !text.contains("hidden assistant"),
-            "嵌套 AssistantBubble 不应渲染：{}",
+            "嵌套 TuiAssistantBubble 不应渲染：{}",
             text
         );
         assert!(
             text.contains("visible user"),
-            "非 AssistantBubble 嵌套消息应渲染：{}",
+            "非 TuiAssistantBubble 嵌套消息应渲染：{}",
             text
         );
         assert_eq!(
@@ -1347,7 +1348,7 @@ mod tests {
 
     #[test]
     fn test_subagent_group_with_running_probe_shows_status_icon() {
-        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+        let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
             view_models: Vec::new(),
@@ -1372,7 +1373,7 @@ mod tests {
 
     #[test]
     fn test_subagent_group_with_done_probe_shows_final_result() {
-        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+        let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
             view_models: Vec::new(),
@@ -1401,7 +1402,7 @@ mod tests {
 
     #[test]
     fn test_subagent_group_with_error_probe_shows_failed() {
-        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+        let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
             view_models: Vec::new(),
@@ -1427,7 +1428,7 @@ mod tests {
     #[test]
     fn test_subagent_group_without_probe_shows_success_icon_for_committed_placeholder() {
         // 不设置 probe → 已提交的 DTO placeholder 显示完成状态，避免历史消息看起来仍在运行。
-        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+        let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
             view_models: Vec::new(),
@@ -1442,7 +1443,7 @@ mod tests {
 
     #[test]
     fn test_subagent_group_streaming_dto_shows_running() {
-        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+        let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
             view_models: Vec::new(),
@@ -1459,7 +1460,7 @@ mod tests {
     fn test_subagent_group_falls_back_to_probe_recent_messages() {
         // DTO.view_models 为空 placeholder，但 probe 提供 recent_messages
         // → 渲染应回退到 probe 的子内容（Phase 2.6 桥接核心路径）
-        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+        let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
             view_models: Vec::new(), // 空占位符
@@ -1473,7 +1474,7 @@ mod tests {
                 is_error: false,
                 total_steps: 1,
                 final_result: None,
-                recent_messages: vec![ViewModel::UserBubble(UserBubbleData {
+                recent_messages: vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                     text: "child content from probe".into(),
                     content_hash: 0,
                     is_system_reminder: false,
@@ -1493,10 +1494,10 @@ mod tests {
     fn test_subagent_group_dto_view_models_takes_priority_over_probe() {
         // 当 DTO.view_models 非空时，应优先使用 DTO（ACP 层填充的真实子内容）
         // 而非 probe.recent_messages（v1 fallback）
-        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+        let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
-            view_models: vec![ViewModel::UserBubble(UserBubbleData {
+            view_models: vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: "dto child".into(),
                 content_hash: 0,
                 is_system_reminder: false,
@@ -1511,7 +1512,7 @@ mod tests {
                 is_error: false,
                 total_steps: 0,
                 final_result: None,
-                recent_messages: vec![ViewModel::UserBubble(UserBubbleData {
+                recent_messages: vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                     text: "probe child (should not appear)".into(),
                     content_hash: 0,
                     is_system_reminder: false,
@@ -1534,7 +1535,7 @@ mod tests {
 
     #[test]
     fn test_collapsed_group() {
-        let vm = ViewModel::CollapsedGroup(CollapsedGroupData {
+        let vm = TuiRenderUnit::TuiCollapsedGroup(TuiCollapsedGroup {
             title: "3 searches".into(),
             count: 3,
             view_models: vec![],
@@ -1548,7 +1549,7 @@ mod tests {
 
     #[test]
     fn test_divider_with_label() {
-        let vm = ViewModel::Divider(DividerData {
+        let vm = TuiRenderUnit::TuiDivider(TuiDivider {
             label: Some("Round 2".into()),
             content_hash: 0,
         });
@@ -1558,7 +1559,7 @@ mod tests {
 
     #[test]
     fn test_divider_no_label() {
-        let vm = ViewModel::Divider(DividerData {
+        let vm = TuiRenderUnit::TuiDivider(TuiDivider {
             label: None,
             content_hash: 0,
         });
@@ -1570,7 +1571,7 @@ mod tests {
     fn test_tool_card_write_running_collapsed() {
         // Write 运行中应折叠（FORCE_EXPAND_ON_COMPLETE + is_running → collapsed=true）
         RENDER_CALL_COUNT.with(|c| c.store(0, Ordering::Relaxed));
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-write-running".into(),
             tool_name: "Write".into(),
             input_summary: "path: foo.rs".into(),
@@ -1603,7 +1604,7 @@ mod tests {
     fn test_tool_card_edit_running_collapsed() {
         // Edit 运行中应折叠（FORCE_EXPAND_ON_COMPLETE + is_running → collapsed=true）
         RENDER_CALL_COUNT.with(|c| c.store(0, Ordering::Relaxed));
-        let vm = ViewModel::ToolCard(ToolCardData {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
             tool_id: "tc-edit-running".into(),
             tool_name: "Edit".into(),
             input_summary: "path: foo.rs".into(),
@@ -1633,10 +1634,10 @@ mod tests {
 
     #[test]
     fn test_subagent_group_collapsed_summary_replaces_hard_truncation() {
-        // 超过 5 个 ToolCard 时，前 N-5 个应显示为 "▶ N collapsed tools" 摘要
-        let tool_cards: Vec<ViewModel> = (0..8)
+        // 超过 5 个 TuiToolCard 时，前 N-5 个应显示为 "▶ N collapsed tools" 摘要
+        let tool_cards: Vec<TuiRenderUnit> = (0..8)
             .map(|i| {
-                ViewModel::ToolCard(ToolCardData {
+                TuiRenderUnit::TuiToolCard(TuiToolCard {
                     tool_id: format!("tc-{}", i),
                     tool_name: "Read".into(),
                     input_summary: format!("file_{}.rs", i),
@@ -1649,7 +1650,7 @@ mod tests {
                 })
             })
             .collect();
-        let vm = ViewModel::SubAgentGroup(SubAgentGroupData {
+        let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "sa-collapse".into(),
             agent_name: "Agent".into(),
             view_models: tool_cards,
@@ -1659,32 +1660,32 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
-        // 8 个 ToolCard，collapse_count = 3
+        // 8 个 TuiToolCard，collapse_count = 3
         assert!(
             text.contains("▶ 3 collapsed tools"),
             "应显示折叠摘要行：{}",
             text
         );
-        // 前 3 个 ToolCard 不应出现
+        // 前 3 个 TuiToolCard 不应出现
         assert!(
             !text.contains("file_0.rs"),
-            "被折叠的 ToolCard 不应渲染：{}",
+            "被折叠的 TuiToolCard 不应渲染：{}",
             text
         );
-        // 最后 5 个 ToolCard 应正常渲染
+        // 最后 5 个 TuiToolCard 应正常渲染
         assert!(
             text.contains("file_5.rs"),
-            "最后 5 个 ToolCard 应正常渲染：{}",
+            "最后 5 个 TuiToolCard 应正常渲染：{}",
             text
         );
     }
 
     #[test]
     fn test_system_note_prefix_classification() {
-        let vm = ViewModel::SystemNote(peri_acp_types::view_model::SystemNoteData {
+        let vm = TuiRenderUnit::TuiSystemNote(crate::kit::tui_render_unit::TuiSystemNote {
             text: "✻ 元信息行\n⎿ 结果引用行\n  ⎿ 错误摘要行\n正常行含 ❌ 关键词\n含 warning 关键词的行\n其余普通行"
                 .into(),
-            level: NoteLevel::Info,
+            level: TuiNoteLevel::Info,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);

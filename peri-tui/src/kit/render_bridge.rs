@@ -1,6 +1,6 @@
 //! MessageArea 渲染缓存预处理桥。
 //!
-//! 独立 tokio task 监听 ACP 流式事件与宽度变化，预计算每条 ViewModel 的
+//! 独立 tokio task 监听 ACP 流式事件与宽度变化，预计算每条 TuiRenderUnit 的
 //! `Vec<Line<'static>>` 与可视高度，并写入 `RENDER_CACHE` atom。
 
 use std::sync::Arc;
@@ -60,7 +60,7 @@ pub fn spawn_render_bridge(
         let mut last_ct_ptr: usize = 0;
         let mut last_reset_counter: u64 = 0;
         let mut cache = RenderCache::default();
-        // 上次 rebuild 时所有 committed ViewModel 的 content_hash 列表
+        // 上次 rebuild 时所有 committed TuiRenderUnit 的 content_hash 列表
         let mut msg_hashes: Vec<u64> = Vec::new();
         // 上次 rebuild 时每条消息的渲染行缓存（按消息索引）
         let mut msg_lines_cache: Vec<Vec<ratatui::text::Line<'static>>> = Vec::new();
@@ -314,9 +314,9 @@ fn log_ct_snapshot(snapshot: &crate::kit::atoms::ViewModelsSnapshot, label: &str
         ct_len = snapshot.current_turn.len(),
     );
     for vm in snapshot.current_turn.iter() {
-        if let peri_acp_types::view_model::ViewModel::AssistantBubble(data) = vm {
+        if let crate::kit::tui_render_unit::TuiRenderUnit::TuiAssistantBubble(data) = vm {
             info!(
-                "  CT AssistantBubble text_len={} has_reasoning={}",
+                "  CT TuiAssistantBubble text_len={} has_reasoning={}",
                 data.text.len(),
                 data.reasoning.is_some()
             );
@@ -334,19 +334,19 @@ fn prefix_stable_len(new_hashes: &[u64], old_hashes: &[u64]) -> usize {
         .unwrap_or_else(|| old_hashes.len().min(new_hashes.len()))
 }
 
-/// 从 ViewModel 列表中提取 content_hash 集合。
-fn extract_hashes(vms: &[peri_acp_types::view_model::ViewModel]) -> Vec<u64> {
-    use peri_acp_types::view_model::ViewModel;
+/// 从 TuiRenderUnit 列表中提取 content_hash 集合。
+fn extract_hashes(vms: &[crate::kit::tui_render_unit::TuiRenderUnit]) -> Vec<u64> {
+    use crate::kit::tui_render_unit::TuiRenderUnit;
     vms.iter()
         .map(|vm| match vm {
-            ViewModel::UserBubble(d) => d.content_hash,
-            ViewModel::AssistantBubble(d) => d.content_hash,
-            ViewModel::ToolCard(d) => d.content_hash,
-            ViewModel::SubAgentGroup(d) => d.content_hash,
-            ViewModel::CollapsedGroup(d) => d.content_hash,
-            ViewModel::SystemNote(d) => d.content_hash,
-            ViewModel::Divider(d) => d.content_hash,
-            ViewModel::AskUserBlock(d) => d.content_hash,
+            TuiRenderUnit::TuiUserBubble(d) => d.content_hash,
+            TuiRenderUnit::TuiAssistantBubble(d) => d.content_hash,
+            TuiRenderUnit::TuiToolCard(d) => d.content_hash,
+            TuiRenderUnit::TuiSubAgentGroup(d) => d.content_hash,
+            TuiRenderUnit::TuiCollapsedGroup(d) => d.content_hash,
+            TuiRenderUnit::TuiSystemNote(d) => d.content_hash,
+            TuiRenderUnit::TuiDivider(d) => d.content_hash,
+            TuiRenderUnit::TuiAskUserBlock(d) => d.content_hash,
         })
         .collect()
 }
@@ -382,8 +382,8 @@ async fn rebuild_all(
 
 fn rebuild_entries(
     entries: &mut Vec<(VmKey, RenderedEntry)>,
-    committed: &[peri_acp_types::view_model::ViewModel],
-    current_turn: &[peri_acp_types::view_model::ViewModel],
+    committed: &[crate::kit::tui_render_unit::TuiRenderUnit],
+    current_turn: &[crate::kit::tui_render_unit::TuiRenderUnit],
     width: usize,
 ) -> impl std::future::Future<Output = ()> {
     entries.clear();
@@ -395,7 +395,7 @@ fn rebuild_entries(
 
 fn rebuild_current_turn(
     entries: &mut Vec<(VmKey, RenderedEntry)>,
-    current_turn: &[peri_acp_types::view_model::ViewModel],
+    current_turn: &[crate::kit::tui_render_unit::TuiRenderUnit],
     width: usize,
 ) -> impl std::future::Future<Output = ()> {
     entries.retain(|(key, _)| !matches!(key, VmKey::CurrentTurn(_)));
@@ -406,7 +406,7 @@ fn rebuild_current_turn(
 
 async fn append_entries(
     entries: &mut Vec<(VmKey, RenderedEntry)>,
-    items: &[peri_acp_types::view_model::ViewModel],
+    items: &[crate::kit::tui_render_unit::TuiRenderUnit],
     width: usize,
     start_index: usize,
     committed: bool,

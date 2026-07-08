@@ -548,16 +548,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_command_bypasses_prompt() {
-        use peri_acp_types::view_model::{AssistantBubbleData, ViewModel, hash_str};
+        use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit, tui_hash_str};
 
         crate::kit::atoms::init_atoms();
         *VIEW_MODELS.state().write() = ViewModelsSnapshot {
-            committed: std::sync::Arc::from(vec![ViewModel::AssistantBubble(
-                AssistantBubbleData {
+            committed: std::sync::Arc::from(vec![TuiRenderUnit::TuiAssistantBubble(
+                TuiAssistantBubble {
                     text: "existing".into(),
                     reasoning: None,
                     tool_card_ids: vec![],
-                    content_hash: hash_str("existing|"),
+                    content_hash: tui_hash_str("existing|"),
                 },
             )]),
             current_turn: std::sync::Arc::from([]),

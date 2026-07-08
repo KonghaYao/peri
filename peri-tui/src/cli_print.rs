@@ -292,7 +292,7 @@ impl peri_acp::session::event_sink::EventSink for PrintEventSink {
         }
     }
 
-    async fn push_done(&self, _session_id: &str) {}
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {}
 }
 
 /// 事件收集器

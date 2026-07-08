@@ -2,7 +2,7 @@
 //!
 //! H1g（Iteration 14）：聚合多源任务视图——
 //! - Cron 任务（从 CRON_JOBS atom）
-//! - SubAgent 运行时（从 VIEW_MODELS 扫描 SubAgentGroup）
+//! - SubAgent 运行时（从 VIEW_MODELS 扫描 TuiSubAgentGroup）
 //!
 //! 只读面板。Cron 任务的 enable/disable/delete 在 Cron 面板；SubAgent 详情
 //! 在 Agent 面板。本面板提供跨调度源的"任务总览"。
@@ -11,7 +11,7 @@ use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{BG_TASKS, CRON_JOBS, VIEW_MODELS};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
-use peri_acp_types::view_model::{SubAgentGroupData, ViewModel};
+use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -275,8 +275,8 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 }
 
 /// 从 ViewModelsSnapshot 派生去重 SubAgent 列表。
-fn collect_subagents(snap: &crate::kit::atoms::ViewModelsSnapshot) -> Vec<SubAgentGroupData> {
-    let mut out: Vec<SubAgentGroupData> = Vec::new();
+fn collect_subagents(snap: &crate::kit::atoms::ViewModelsSnapshot) -> Vec<TuiSubAgentGroup> {
+    let mut out: Vec<TuiSubAgentGroup> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for vm in snap.committed.iter().chain(snap.current_turn.iter()) {
         scan_vm_for_subagents(vm, &mut out, &mut seen);
@@ -285,18 +285,18 @@ fn collect_subagents(snap: &crate::kit::atoms::ViewModelsSnapshot) -> Vec<SubAge
 }
 
 fn scan_vm_for_subagents(
-    vm: &ViewModel,
-    out: &mut Vec<SubAgentGroupData>,
+    vm: &TuiRenderUnit,
+    out: &mut Vec<TuiSubAgentGroup>,
     seen: &mut std::collections::HashSet<String>,
 ) {
-    if let ViewModel::SubAgentGroup(d) = vm {
+    if let TuiRenderUnit::TuiSubAgentGroup(d) = vm {
         if seen.insert(d.agent_id.clone()) {
             out.push(d.clone());
         }
         for child in d.view_models.iter() {
             scan_vm_for_subagents(child, out, seen);
         }
-    } else if let ViewModel::CollapsedGroup(g) = vm {
+    } else if let TuiRenderUnit::TuiCollapsedGroup(g) = vm {
         for child in g.view_models.iter() {
             scan_vm_for_subagents(child, out, seen);
         }

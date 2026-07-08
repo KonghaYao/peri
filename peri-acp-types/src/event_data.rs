@@ -9,66 +9,6 @@
 use serde::{Deserialize, Serialize};
 
 // ===========================================================================
-// §4.1 Streaming events -- DEPRECATED. These events are now delivered via
-//     standard ACP `session/update` (agent_message_chunk, agent_thought_chunk,
-//     tool_call, tool_call_update). The corresponding Rust structs remain here
-//     as internal data containers for AcpEventData enum variants in
-//     `peri-tui/src/kit/acp_types.rs`. Serde derives are removed.
-// ===========================================================================
-
-/// Internal data container for `AcpEventData::TextChunk`.
-#[derive(Debug, Clone)]
-pub struct TextChunk {
-    pub text: String,
-    /// Present when the event originates from a sub-agent.
-    pub agent_id: Option<String>,
-}
-
-/// Internal data container for `AcpEventData::ReasoningChunk`.
-#[derive(Debug, Clone)]
-pub struct ReasoningChunk {
-    pub text: String,
-    /// Present when the event originates from a sub-agent.
-    pub agent_id: Option<String>,
-}
-
-/// Internal data container for `AcpEventData::ToolStarted`.
-#[derive(Debug, Clone)]
-pub struct ToolStarted {
-    pub tool_id: String,
-    pub tool_name: String,
-    pub input_summary: String,
-    /// Present when the event originates from a sub-agent.
-    pub agent_id: Option<String>,
-}
-
-/// Internal data container for `AcpEventData::ToolEnded`.
-#[derive(Debug, Clone)]
-pub struct ToolEnded {
-    pub tool_id: String,
-    pub output_summary: String,
-    pub is_error: bool,
-    /// Present when the event originates from a sub-agent.
-    pub agent_id: Option<String>,
-}
-
-// ===========================================================================
-// §4.2 Boundary events (low-frequency)
-// ===========================================================================
-
-/// `"turn-done"` — agent finished this turn, transition from Streaming to Idle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct TurnDone {}
-
-/// `"turn-interrupted"` — agent was interrupted (user cancel or timeout).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct TurnInterrupted {
-    pub reason: String,
-}
-
-// ===========================================================================
 // §4.3 Status events (update status bar, no message-area changes)
 // ===========================================================================
 
@@ -207,50 +147,12 @@ pub struct OauthNeeded {
 }
 
 // ===========================================================================
-// §4.6 Structure events (control message-area layout)
-// ===========================================================================
-
-/// `"subagent-started"` — sub-agent created, TUI opens a collapsible group.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct SubagentStarted {
-    pub agent_id: String,
-    pub agent_name: String,
-}
-
-/// `"subagent-stopped"` — sub-agent exited, TUI closes the group.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct SubagentStopped {
-    pub agent_id: String,
-}
-
-// ===========================================================================
 // Tests
 // ===========================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -- Boundary (§4.2) ---------------------------------------------------
-
-    #[test]
-    fn test_turn_done_roundtrip() {
-        let td = TurnDone {};
-        let json = serde_json::to_string(&td).unwrap();
-        let _back: TurnDone = serde_json::from_str(&json).unwrap();
-    }
-
-    #[test]
-    fn test_turn_interrupted_roundtrip() {
-        let ti = TurnInterrupted {
-            reason: "user cancelled".into(),
-        };
-        let json = serde_json::to_string(&ti).unwrap();
-        let back: TurnInterrupted = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.reason, "user cancelled");
-    }
 
     // -- Status (§4.3) -----------------------------------------------------
 
@@ -397,29 +299,6 @@ mod tests {
         let json = serde_json::to_string(&on).unwrap();
         let back: OauthNeeded = serde_json::from_str(&json).unwrap();
         assert_eq!(back.server_name, "github-mcp");
-    }
-
-    // -- Structure (§4.6) --------------------------------------------------
-
-    #[test]
-    fn test_subagent_started_roundtrip() {
-        let ss = SubagentStarted {
-            agent_id: "sa-1".into(),
-            agent_name: "file-searcher".into(),
-        };
-        let json = serde_json::to_string(&ss).unwrap();
-        let back: SubagentStarted = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.agent_name, "file-searcher");
-    }
-
-    #[test]
-    fn test_subagent_stopped_roundtrip() {
-        let ss = SubagentStopped {
-            agent_id: "sa-1".into(),
-        };
-        let json = serde_json::to_string(&ss).unwrap();
-        let back: SubagentStopped = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.agent_id, "sa-1");
     }
 
     // -- Snake_case serialization verification ------------------------------

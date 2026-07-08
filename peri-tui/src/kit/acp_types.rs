@@ -6,12 +6,13 @@
 //!
 //! - **纯数据 + 方法**：所有字段为 String/Vec/bool/u32/serde_json::Value，
 //!   天然 Send+Sync+'static
-//! - **依赖**：仅 `peri_acp_types::view_model::ViewModel` 和
+//! - **依赖**：仅 `crate::kit::tui_render_unit::TuiRenderUnit` 和
 //!   `peri_acp_types::event_data::*`（workspace crate，非 legacy）
 //! - **零运行时依赖**：无 terminal / network / IO，可独立测试
 
+use crate::kit::stream_data::*;
+use crate::kit::tui_render_unit::TuiRenderUnit;
 use peri_acp_types::event_data::*;
-use peri_acp_types::view_model::ViewModel;
 use std::time::Instant;
 
 // ---------------------------------------------------------------------------
@@ -50,7 +51,7 @@ pub struct CurrentTurn {
     ///
     /// Cleared whenever new streaming data arrives (text/reasoning/tool events),
     /// and rebuilt on the next call to `view_models()`.
-    cached_view_models: Vec<ViewModel>,
+    cached_view_models: Vec<TuiRenderUnit>,
 }
 
 impl CurrentTurn {
@@ -212,7 +213,7 @@ impl CurrentTurn {
     ///
     /// The cache is invalidated whenever streaming data changes (text/reasoning/
     /// tool events), so this always reflects the current turn state.
-    pub fn view_models(&mut self) -> &[ViewModel] {
+    pub fn view_models(&mut self) -> &[TuiRenderUnit] {
         if self.cached_view_models.is_empty()
             && (self.active
                 || !self.text.is_empty()
@@ -227,11 +228,11 @@ impl CurrentTurn {
 
     /// Build incremental ViewModels from accumulated streaming data into cache.
     fn build_view_models(&mut self) {
-        use peri_acp_types::view_model::{
-            AssistantBubbleData, ReasoningBlock, ToolCardData, hash_str,
+        use crate::kit::tui_render_unit::{
+            TuiAssistantBubble, TuiReasoningBlock, TuiToolCard, tui_hash_str,
         };
 
-        let mut vms: Vec<ViewModel> = Vec::new();
+        let mut vms: Vec<TuiRenderUnit> = Vec::new();
 
         let tool_ids: Vec<String> = self.tool_cards.iter().map(|t| t.tool_id.clone()).collect();
 
@@ -241,7 +242,7 @@ impl CurrentTurn {
             let reasoning = if self.reasoning.is_empty() {
                 None
             } else {
-                Some(ReasoningBlock {
+                Some(TuiReasoningBlock {
                     text: self.reasoning.clone(),
                     collapsed: false,
                 })
@@ -250,9 +251,9 @@ impl CurrentTurn {
                 .as_ref()
                 .map(|r| r.text.clone())
                 .unwrap_or_default();
-            let content_hash = hash_str(&format!("{}|{}", self.text, reasoning_text));
+            let content_hash = tui_hash_str(&format!("{}|{}", self.text, reasoning_text));
 
-            vms.push(ViewModel::AssistantBubble(AssistantBubbleData {
+            vms.push(TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
                 text: self.text.clone(),
                 reasoning,
                 tool_card_ids: tool_ids.clone(),
@@ -265,7 +266,7 @@ impl CurrentTurn {
             let running_duration_ms = is_running.then(|| t.started_at.elapsed().as_millis() as u64);
             let running_duration_bucket = running_duration_ms.map(|ms| ms / 1000).unwrap_or(0);
 
-            vms.push(ViewModel::ToolCard(ToolCardData {
+            vms.push(TuiRenderUnit::TuiToolCard(TuiToolCard {
                 tool_id: t.tool_id.clone(),
                 tool_name: t.tool_name.clone(),
                 input_summary: t.input_summary.clone(),
@@ -274,7 +275,7 @@ impl CurrentTurn {
                 is_running,
                 running_duration_ms,
                 diff: None,
-                content_hash: hash_str(&format!(
+                content_hash: tui_hash_str(&format!(
                     "{}|{}|{}|{}|{}|{}|{}",
                     t.tool_id,
                     t.tool_name,
@@ -371,16 +372,16 @@ impl SubAgentAccumulator {
         self.child_turn.end_tool(tool_id, output, is_error);
     }
 
-    pub(crate) fn view_model(&self) -> ViewModel {
+    pub(crate) fn view_model(&self) -> TuiRenderUnit {
         let mut child_turn = self.child_turn.clone();
         let child_vms = child_turn.view_models();
-        ViewModel::SubAgentGroup(peri_acp_types::view_model::SubAgentGroupData {
+        TuiRenderUnit::TuiSubAgentGroup(crate::kit::tui_render_unit::TuiSubAgentGroup {
             agent_id: self.agent_id.clone(),
             agent_name: self.agent_name.clone(),
             view_models: child_vms.to_vec(),
             collapsed: false,
             is_running: self.is_running,
-            content_hash: peri_acp_types::view_model::hash_str(&format!(
+            content_hash: crate::kit::tui_render_unit::tui_hash_str(&format!(
                 "{}|{}|{}|{}|{}",
                 self.agent_id,
                 self.agent_name,
@@ -408,23 +409,23 @@ impl SubAgentAccumulator {
 pub enum AcpEventData {
     // -- §4.1 Streaming (high-frequency) ------------------------------------
     /// `"text-chunk"` -- incremental text for the current assistant bubble.
-    TextChunk(TextChunk),
+    TextChunk(TuiTextChunk),
 
     /// `"reasoning-chunk"` -- incremental reasoning / thinking text.
-    ReasoningChunk(ReasoningChunk),
+    ReasoningChunk(TuiReasoningChunk),
 
     /// `"tool-started"` -- creates an in-progress tool card.
-    ToolStarted(ToolStarted),
+    ToolStarted(TuiToolStarted),
 
     /// `"tool-ended"` -- fills in the tool card result.
-    ToolEnded(ToolEnded),
+    ToolEnded(TuiToolEnded),
 
     // -- §4.2 Boundary (low-frequency) -------------------------------------
     /// `"turn-done"` -- agent finished this turn (Streaming -> Idle).
     TurnDone,
 
     /// `"turn-interrupted"` -- agent was interrupted (user cancel / timeout).
-    TurnInterrupted(TurnInterrupted),
+    TurnInterrupted { reason: String },
 
     /// `"replay-user-bubble"` -- user bubble from session history replay.
     ReplayUserBubble { text: String },
@@ -467,10 +468,13 @@ pub enum AcpEventData {
 
     // -- §4.6 Structure (control message-area layout) ------------------------
     /// `"subagent-started"` -- sub-agent created, TUI opens a collapsible group.
-    SubagentStarted(SubagentStarted),
+    SubagentStarted {
+        agent_id: String,
+        agent_name: String,
+    },
 
     /// `"subagent-stopped"` -- sub-agent exited, TUI closes the group.
-    SubagentStopped(SubagentStopped),
+    SubagentStopped { agent_id: String },
 
     /// Fallback for unknown / future event names.
     ///
@@ -511,11 +515,11 @@ impl AcpEventData {
             // 流式事件现在由 handle_session_update（acp_notifier.rs）处理。
 
             // §4.2 Boundary
-            "turn-done" => match serde_json::from_value::<TurnDone>(data.clone()) {
-                Ok(_) => AcpEventData::TurnDone,
-                Err(_) => AcpEventData::unknown(event, data),
-            },
-            "turn-interrupted" => decode_or_unknown(event, data, AcpEventData::TurnInterrupted),
+            "turn-done" => AcpEventData::TurnDone,
+            "turn-interrupted" => {
+                let reason = data["reason"].as_str().unwrap_or("").to_string();
+                AcpEventData::TurnInterrupted { reason }
+            }
             "replay-user-bubble" => AcpEventData::ReplayUserBubble {
                 text: data["text"].as_str().unwrap_or_default().to_string(),
             },
@@ -540,8 +544,18 @@ impl AcpEventData {
             "oauth-needed" => decode_or_unknown(event, data, AcpEventData::OauthNeeded),
 
             // §4.6 Structure
-            "subagent-started" => decode_or_unknown(event, data, AcpEventData::SubagentStarted),
-            "subagent-stopped" => decode_or_unknown(event, data, AcpEventData::SubagentStopped),
+            "subagent-started" => {
+                let agent_id = data["agent_id"].as_str().unwrap_or("").to_string();
+                let agent_name = data["agent_name"].as_str().unwrap_or("").to_string();
+                AcpEventData::SubagentStarted {
+                    agent_id,
+                    agent_name,
+                }
+            }
+            "subagent-stopped" => {
+                let agent_id = data["agent_id"].as_str().unwrap_or("").to_string();
+                AcpEventData::SubagentStopped { agent_id }
+            }
 
             // §4.7 Background Tasks
             "bg-task-started" => decode_or_unknown(event, data, AcpEventData::BgTaskStarted),
@@ -711,24 +725,24 @@ mod tests {
         ));
 
         let first_hash = match &ct.view_models()[0] {
-            ViewModel::ToolCard(card) => {
+            TuiRenderUnit::TuiToolCard(card) => {
                 assert!(card.is_running);
                 assert!(card.running_duration_ms.is_some());
                 card.content_hash
             }
-            other => panic!("expected ToolCard, got {other:?}"),
+            other => panic!("expected TuiToolCard, got {other:?}"),
         };
 
         std::thread::sleep(std::time::Duration::from_millis(1_100));
         ct.advance_spinner();
 
         let second_hash = match &ct.view_models()[0] {
-            ViewModel::ToolCard(card) => {
+            TuiRenderUnit::TuiToolCard(card) => {
                 assert!(card.is_running);
                 assert!(card.running_duration_ms.unwrap() >= 1_000);
                 card.content_hash
             }
-            other => panic!("expected ToolCard, got {other:?}"),
+            other => panic!("expected TuiToolCard, got {other:?}"),
         };
 
         assert_ne!(first_hash, second_hash);
@@ -745,24 +759,24 @@ mod tests {
         ct.end_tool("tc-bash", "ok".into(), false);
 
         let first_hash = match &ct.view_models()[0] {
-            ViewModel::ToolCard(card) => {
+            TuiRenderUnit::TuiToolCard(card) => {
                 assert!(!card.is_running);
                 assert_eq!(card.running_duration_ms, None);
                 card.content_hash
             }
-            other => panic!("expected ToolCard, got {other:?}"),
+            other => panic!("expected TuiToolCard, got {other:?}"),
         };
 
         std::thread::sleep(std::time::Duration::from_millis(1_100));
         ct.advance_spinner();
 
         let second_hash = match &ct.view_models()[0] {
-            ViewModel::ToolCard(card) => {
+            TuiRenderUnit::TuiToolCard(card) => {
                 assert!(!card.is_running);
                 assert_eq!(card.running_duration_ms, None);
                 card.content_hash
             }
-            other => panic!("expected ToolCard, got {other:?}"),
+            other => panic!("expected TuiToolCard, got {other:?}"),
         };
 
         assert_eq!(first_hash, second_hash);
@@ -793,12 +807,12 @@ mod tests {
         let vms = ct.view_models().to_vec();
         assert_eq!(vms.len(), 1);
         match &vms[0] {
-            ViewModel::SubAgentGroup(group) => {
+            TuiRenderUnit::TuiSubAgentGroup(group) => {
                 assert_eq!(group.agent_id, "agent-1");
                 assert_eq!(group.agent_name, "researcher");
                 assert_eq!(group.view_models.len(), 2);
             }
-            other => panic!("expected SubAgentGroup, got {other:?}"),
+            other => panic!("expected TuiSubAgentGroup, got {other:?}"),
         }
     }
 
@@ -843,7 +857,7 @@ mod tests {
         let data = serde_json::json!({"reason": "user cancelled"});
         let decoded = AcpEventData::decode("turn-interrupted", data);
         match decoded {
-            AcpEventData::TurnInterrupted(ti) => assert_eq!(ti.reason, "user cancelled"),
+            AcpEventData::TurnInterrupted { reason } => assert_eq!(reason, "user cancelled"),
             _ => panic!("expected TurnInterrupted"),
         }
     }
@@ -933,7 +947,9 @@ mod tests {
         });
         let decoded = AcpEventData::decode("subagent-started", data);
         match decoded {
-            AcpEventData::SubagentStarted(ss) => assert_eq!(ss.agent_name, "file-searcher"),
+            AcpEventData::SubagentStarted { agent_name, .. } => {
+                assert_eq!(agent_name, "file-searcher")
+            }
             _ => panic!("expected SubagentStarted"),
         }
     }
@@ -943,7 +959,7 @@ mod tests {
         let data = serde_json::json!({"agent_id": "sa-1"});
         let decoded = AcpEventData::decode("subagent-stopped", data);
         match decoded {
-            AcpEventData::SubagentStopped(ss) => assert_eq!(ss.agent_id, "sa-1"),
+            AcpEventData::SubagentStopped { agent_id } => assert_eq!(agent_id, "sa-1"),
             _ => panic!("expected SubagentStopped"),
         }
     }

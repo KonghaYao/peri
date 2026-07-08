@@ -17,7 +17,7 @@ use ratatui_kit::{
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{SERVICE_SNAPSHOT, VIEW_MODELS};
 use crate::kit::theme;
-use peri_acp_types::view_model::ViewModel;
+use crate::kit::tui_render_unit::TuiRenderUnit;
 
 const TAB_SERVICE: usize = 0;
 const TAB_CONTEXT: usize = 1;
@@ -32,7 +32,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = snapshot_store; // StoreState 是 Copy，无需显式 drop
 
     // H1a: 订阅 VIEW_MODELS，从派生 Context Tab 的消息计数（committed + current_turn
-    // 的 ViewModel 分类统计）。这避免了占位文本，让 Context Tab 反映真实状态。
+    // 的 TuiRenderUnit 分类统计）。这避免了占位文本，让 Context Tab 反映真实状态。
     let vm_store = hooks.use_atom(&VIEW_MODELS);
     let vm_stats = derive_vm_stats(&vm_store.read());
     let _ = vm_store;
@@ -283,7 +283,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     })
 }
 
-/// H1a：从 ViewModelsSnapshot 派生按 ViewModel 类型分类的统计。
+/// H1a：从 ViewModelsSnapshot 派生按 TuiRenderUnit 类型分类的统计。
 struct VmStats {
     total: usize,
     user_bubbles: usize,
@@ -310,19 +310,19 @@ fn derive_vm_stats(snap: &crate::kit::atoms::ViewModelsSnapshot) -> VmStats {
     s
 }
 
-fn count_vm(vm: &ViewModel, s: &mut VmStats) {
+fn count_vm(vm: &TuiRenderUnit, s: &mut VmStats) {
     match vm {
-        ViewModel::UserBubble(_) => s.user_bubbles += 1,
-        ViewModel::AssistantBubble(_) => s.assistant_bubbles += 1,
-        ViewModel::ToolCard(_) => s.tool_cards += 1,
-        ViewModel::SubAgentGroup(g) => {
+        TuiRenderUnit::TuiUserBubble(_) => s.user_bubbles += 1,
+        TuiRenderUnit::TuiAssistantBubble(_) => s.assistant_bubbles += 1,
+        TuiRenderUnit::TuiToolCard(_) => s.tool_cards += 1,
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
             s.subagent_groups += 1;
             for child in g.view_models.iter() {
                 count_vm(child, s);
             }
         }
-        ViewModel::SystemNote(_) => s.system_notes += 1,
-        ViewModel::CollapsedGroup(g) => {
+        TuiRenderUnit::TuiSystemNote(_) => s.system_notes += 1,
+        TuiRenderUnit::TuiCollapsedGroup(g) => {
             for child in g.view_models.iter() {
                 count_vm(child, s);
             }

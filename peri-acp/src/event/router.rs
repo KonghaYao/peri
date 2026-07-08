@@ -12,7 +12,9 @@
 //!
 //! Reference: `docs/design/peri-acp-protocol.md` section 5 "Event Router".
 
-use peri_acp_types::event_data::*;
+use peri_acp_types::event_data::BudgetWarning;
+use peri_acp_types::event_data::RewindMessage;
+use peri_acp_types::event_data::RewindPreview;
 use peri_agent::agent::events::ExecutorEvent;
 
 use super::truncate::truncate_text;
@@ -102,28 +104,6 @@ pub fn route(ev: &ExecutorEvent) -> Option<RoutingOutput> {
         // OAuth is handled via MCP server interaction.
         // Skipped here -- noted in issues.
 
-        // ── §4.6 Structure events ─────────────────────────────────────────────
-        ExecutorEvent::SubagentStarted {
-            agent_name,
-            instance_id,
-            ..
-        } => Some(RoutingOutput {
-            event_name: "subagent-started".into(),
-            data: serde_json::to_value(&SubagentStarted {
-                agent_id: instance_id.clone(),
-                agent_name: agent_name.clone(),
-            })
-            .unwrap(),
-        }),
-
-        ExecutorEvent::SubagentStopped { instance_id, .. } => Some(RoutingOutput {
-            event_name: "subagent-stopped".into(),
-            data: serde_json::to_value(&SubagentStopped {
-                agent_id: instance_id.clone(),
-            })
-            .unwrap(),
-        }),
-
         // ── §5.1 Discarded events ────────────────────────────────────────────
         ExecutorEvent::LlmCallEnd { .. }
         | ExecutorEvent::LlmRetrying { .. }
@@ -145,16 +125,10 @@ pub fn route(ev: &ExecutorEvent) -> Option<RoutingOutput> {
         | ExecutorEvent::AiReasoning { .. }
         | ExecutorEvent::ToolStart { .. }
         | ExecutorEvent::ToolEnd { .. }
-        | ExecutorEvent::TurnCommitted { .. } => None,
-
-        // ── §4.6 Terminal events ────────────────────────────────────────────
-        ExecutorEvent::AgentExecutionFailed { message } => Some(RoutingOutput {
-            event_name: "turn-interrupted".into(),
-            data: serde_json::to_value(TurnInterrupted {
-                reason: message.clone(),
-            })
-            .unwrap_or(serde_json::json!({ "reason": message })),
-        }),
+        | ExecutorEvent::TurnCommitted { .. }
+        | ExecutorEvent::SubagentStarted { .. }
+        | ExecutorEvent::SubagentStopped { .. }
+        | ExecutorEvent::AgentExecutionFailed { .. } => None,
     }
 }
 
@@ -220,32 +194,6 @@ mod tests {
         };
         let out = route(&ev).unwrap();
         assert_eq!(out.data["threshold"], "0.70");
-    }
-
-    #[test]
-    fn test_subagent_started_routes() {
-        let ev = ExecutorEvent::SubagentStarted {
-            agent_name: "researcher".into(),
-            instance_id: "sa-42".into(),
-            is_background: false,
-        };
-        let out = route(&ev).unwrap();
-        assert_eq!(out.event_name, "subagent-started");
-        assert_eq!(out.data["agent_id"], "sa-42");
-        assert_eq!(out.data["agent_name"], "researcher");
-    }
-
-    #[test]
-    fn test_subagent_stopped_routes() {
-        let ev = ExecutorEvent::SubagentStopped {
-            agent_name: "researcher".into(),
-            result: "done".into(),
-            is_error: false,
-            instance_id: "sa-42".into(),
-        };
-        let out = route(&ev).unwrap();
-        assert_eq!(out.event_name, "subagent-stopped");
-        assert_eq!(out.data["agent_id"], "sa-42");
     }
 
     #[test]
@@ -390,17 +338,6 @@ mod tests {
                 message: None,
             });
         assert!(route(&ev).is_none());
-    }
-
-    #[test]
-    fn test_agent_execution_failed_routes_to_turn_interrupted() {
-        let ev = ExecutorEvent::AgentExecutionFailed {
-            message: "oom".into(),
-        };
-        let output = route(&ev).expect("AgentExecutionFailed should route");
-        assert_eq!(output.event_name, "turn-interrupted");
-        let reason = output.data["reason"].as_str().unwrap();
-        assert_eq!(reason, "oom");
     }
 
     #[test]

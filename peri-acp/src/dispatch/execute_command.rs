@@ -31,6 +31,7 @@ use crate::transport::types::AcpError;
 /// - The command string does not match any registered command
 /// - The matched command is not `Immediate` (Passthrough/Transform commands
 ///   must go through `session/prompt`)
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_command(
     params: &Value,
     session_history: Vec<peri_agent::messages::BaseMessage>,
@@ -122,7 +123,7 @@ pub async fn execute_command(
     // Immediate command bypasses the agent event pump, so we must manually
     // signal completion. Otherwise the TUI stays in loading state.
     // [TRAP] See issue_2026-05-29-immediate-command-missing-push-done.
-    event_sink.push_done(&session_id).await;
+    event_sink.push_done(&session_id, "end_turn").await;
 
     // Serialize the result messages into a compact JSON array of { role, content }.
     let messages_json: Vec<Value> = result

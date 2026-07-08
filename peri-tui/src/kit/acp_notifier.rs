@@ -70,17 +70,13 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             agent_name,
             instance_id,
             ..
-        } => Some(AcpEventData::SubagentStarted(
-            peri_acp_types::event_data::SubagentStarted {
-                agent_id: instance_id,
-                agent_name,
-            },
-        )),
-        AcpEvent::SubagentStopped { instance_id, .. } => Some(AcpEventData::SubagentStopped(
-            peri_acp_types::event_data::SubagentStopped {
-                agent_id: instance_id,
-            },
-        )),
+        } => Some(AcpEventData::SubagentStarted {
+            agent_id: instance_id,
+            agent_name,
+        }),
+        AcpEvent::SubagentStopped { instance_id, .. } => Some(AcpEventData::SubagentStopped {
+            agent_id: instance_id,
+        }),
         _ => {
             debug!("kit ACP notifier: AcpEvent variant not yet mapped to AcpEventData, dropping");
             None
@@ -124,8 +120,14 @@ fn forward_notification(
                 }
             }
         }
-        AcpNotification::AgentDone { .. } => {
-            let decoded = AcpEventData::TurnDone;
+        AcpNotification::AgentDone { stop_reason, .. } => {
+            let decoded = if stop_reason == "cancelled" {
+                AcpEventData::TurnInterrupted {
+                    reason: "user cancelled".into(),
+                }
+            } else {
+                AcpEventData::TurnDone
+            };
             if let Err(e) = bridge_tx.send(decoded.clone()) {
                 warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping agent done");
             }
@@ -226,7 +228,7 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let text_chunk = peri_acp_types::event_data::TextChunk { text, agent_id };
+            let text_chunk = crate::kit::stream_data::TuiTextChunk { text, agent_id };
             Some(AcpEventData::TextChunk(text_chunk))
         }
         Some("agent_thought_chunk") => {
@@ -236,7 +238,7 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let reasoning_chunk = peri_acp_types::event_data::ReasoningChunk { text, agent_id };
+            let reasoning_chunk = crate::kit::stream_data::TuiReasoningChunk { text, agent_id };
             Some(AcpEventData::ReasoningChunk(reasoning_chunk))
         }
         Some("tool_call") => {
@@ -255,7 +257,7 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .get("rawInput")
                 .map(|v| serde_json::to_string(v).unwrap_or_default())
                 .unwrap_or_default();
-            let tool_started = peri_acp_types::event_data::ToolStarted {
+            let tool_started = crate::kit::stream_data::TuiToolStarted {
                 tool_id,
                 tool_name,
                 input_summary,
@@ -282,7 +284,7 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_str())
                 .map(|s| s == "failed")
                 .unwrap_or(false);
-            let tool_ended = peri_acp_types::event_data::ToolEnded {
+            let tool_ended = crate::kit::stream_data::TuiToolEnded {
                 tool_id,
                 output_summary,
                 is_error,
@@ -303,7 +305,7 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             *SPINNER_TOKEN_COUNT.state().write() = (input + output) as usize;
-            return None;
+            None
         }
         // ── session/replay: user_message_chunk → ReplayUserBubble ──
         // Session replay 通过 session/update 推送 user_message_chunk + agent_message_chunk，
@@ -689,9 +691,12 @@ mod tests {
             .await
             .expect("bridge 应收 到 SubagentStarted");
         match bridge_event {
-            AcpEventData::SubagentStarted(ss) => {
-                assert_eq!(ss.agent_id, "abc-123", "agent_id 应从 instance_id 映射");
-                assert_eq!(ss.agent_name, "explore");
+            AcpEventData::SubagentStarted {
+                agent_id,
+                agent_name,
+            } => {
+                assert_eq!(agent_id, "abc-123", "agent_id 应从 instance_id 映射");
+                assert_eq!(agent_name, "explore");
             }
             other => panic!("expected SubagentStarted, got {other:?}"),
         }
@@ -701,9 +706,12 @@ mod tests {
             .await
             .expect("render bridge 应收到 SubagentStarted");
         match render_event {
-            AcpEventData::SubagentStarted(ss) => {
-                assert_eq!(ss.agent_id, "abc-123");
-                assert_eq!(ss.agent_name, "explore");
+            AcpEventData::SubagentStarted {
+                agent_id,
+                agent_name,
+            } => {
+                assert_eq!(agent_id, "abc-123");
+                assert_eq!(agent_name, "explore");
             }
             other => panic!("expected SubagentStarted on render bridge, got {other:?}"),
         }
@@ -744,6 +752,7 @@ mod tests {
         notif_tx
             .send(AcpNotification::AgentDone {
                 session_id: "s1".into(),
+                stop_reason: "end_turn".into(),
             })
             .unwrap();
 

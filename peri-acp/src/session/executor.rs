@@ -39,6 +39,8 @@
 
 use std::sync::Arc;
 
+use tokio::sync::oneshot as exec_oneshot;
+
 use peri_agent::{
     agent::{
         events::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
@@ -522,7 +524,7 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
                 // is_loading=true 后永久卡住（与 Immediate 命令路径同模式，需手动
                 // 发 peri/agent_event_done 触发 acp_notifier 的 AgentDone→TurnDone）。
                 if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
-                    bg_cmd_sink.push_done(&bg_cmd_sid).await;
+                    bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn").await;
                 }
             }
         });
@@ -672,8 +674,10 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     };
 
     // Main event pump
+    let (stop_reason_tx, stop_reason_rx) = exec_oneshot::channel::<PromptStopReason>();
     let pump_handle = spawn_event_pump(SpawnPumpRequest {
         event_rx,
+        stop_reason_rx,
         sink: Arc::clone(&event_sink),
         session_id: session_id.clone(),
         effective_context_window,
@@ -734,6 +738,9 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         idle_should_wait,
     })
     .await;
+
+    // Send stop_reason to the event pump before it pushes done
+    let _ = stop_reason_tx.send(exec_outcome.stop_reason);
 
     let result = collect_result(CollectRequest {
         event_tx: &event_tx,
@@ -1065,7 +1072,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         workflow_middleware: workflow_middleware.cloned(),
         background_registry: session_manager
             .as_ref()
-            .and_then(|sm| sm.get_session(&session_id))
+            .and_then(|sm| sm.get_session(session_id))
             .map(|s| s.background_registry.clone()),
     };
 
@@ -1090,19 +1097,6 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
     .await;
 }
 
-/// 通过 [`crate::agent::builder_v2::build_stage_context`] 构造 StageContext，
-/// 再由 [`peri_agent::agent::stages::run_react_loop`] 驱动循环（P5 后的单一执行路径）。
-///
-/// 关键设计：
-/// - LLM/middleware 装配由 `build_agent` 完成（构造 `AgentComponents`）
-/// - 工具执行由 `stages/tool_dispatch` 完成（每轮从 `shared_tools` 取）
-/// - 事件出口：v2 stages 通过 EventBus emit 三层事件（Render/State/Observe），
-///   本函数 spawn forwarder 将其映射为 `ExecutorEvent`，复用 event_tx / pump 管线
-/// - 历史消息：seed 到 transcript；用户输入：作为 Prompt push 到 v2 queue
-///
-/// 调用前已完成 AcpAgentConfig 构造（含 register/deregister、event_handler、
-/// workflow 消费者 spawn、goal_controller）。所有副作用与 v1 一致。
-#[allow(clippy::too_many_arguments)]
 // ── Prediction facade ───────────────────────────────────────────────────────
 
 /// 预测失败原因，用于决定是否发送通知及日志级别。

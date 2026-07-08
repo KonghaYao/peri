@@ -12,9 +12,9 @@
 //! - REWIND_ACTION_TX: rewind popup → rewind_consumer
 //! - THREAD_LOAD_TX: thread browser → thread_load_consumer
 
+use crate::kit::tui_render_unit::TuiRenderUnit;
 use chrono::{DateTime, Utc};
 use peri_acp_types::event_data::{AskUser, HitlPending, OauthNeeded, RewindPreview};
-use peri_acp_types::view_model::ViewModel;
 use ratatui_kit::prelude::{Atom as AtomStatic, AtomState};
 use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
@@ -49,8 +49,8 @@ pub struct AcpStateSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct ViewModelsSnapshot {
-    pub committed: Arc<[ViewModel]>,
-    pub current_turn: Arc<[ViewModel]>,
+    pub committed: Arc<[TuiRenderUnit]>,
+    pub current_turn: Arc<[TuiRenderUnit]>,
 }
 
 impl Default for ViewModelsSnapshot {

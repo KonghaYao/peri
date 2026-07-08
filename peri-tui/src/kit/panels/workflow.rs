@@ -3,7 +3,7 @@
 //! Workflow 是 `@peri-workflow` npm CLI 工具驱动的多 agent 编排层——TUI 没有
 //! 内嵌运行时数据源（workflow 状态由外部工具维护）。本面板作为只读信息面板，
 //! 说明如何使用外部工具，并提供当前会话内可观察的 workflow hint（来自
-//! VIEW_MODELS 中的 SubAgentGroup 计数）。
+//! VIEW_MODELS 中的 TuiSubAgentGroup 计数）。
 
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::VIEW_MODELS;
@@ -31,7 +31,12 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .committed
         .iter()
         .chain(vm_store.read().current_turn.iter())
-        .filter(|vm| matches!(vm, peri_acp_types::view_model::ViewModel::SubAgentGroup(_)))
+        .filter(|vm| {
+            matches!(
+                vm,
+                crate::kit::tui_render_unit::TuiRenderUnit::TuiSubAgentGroup(_)
+            )
+        })
         .count();
     let _ = vm_store;
 

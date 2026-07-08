@@ -53,7 +53,8 @@ pub fn spawn_acp_bridge(
                         None => break,
                         Some(event) => {
                             let counter = atoms::BRIDGE_RESET_COUNTER.get();
-                            if counter != last_reset_counter {
+                            let just_reset = counter != last_reset_counter;
+                            if just_reset {
                                 let old_counter = last_reset_counter;
                                 last_reset_counter = counter;
                                 state.committed = Arc::from([]);
@@ -70,14 +71,78 @@ pub fn spawn_acp_bridge(
                                 tracing::info!(
                                     old = old_counter,
                                     new = counter,
-                                    "bridge: state reset by BRIDGE_RESET_COUNTER"
+                                    "[CLEAR_DEBUG] bridge: state reset by BRIDGE_RESET_COUNTER"
                                 );
                             }
+
+                            // === [CLEAR_DEBUG] 诊断 instrumentation（临时） ===
+                            // 目的：定位 /clear 后哪个事件把旧数据写回 committed。
+                            // 仅在状态变化或刚 reset 时打印，避免日志爆炸。
+                            let event_kind = event_kind_short(&event);
+                            let committed_before = state.committed.len();
+                            let current_turn_before = state.current_turn.view_models().len();
+                            let has_turn_done_before = state.has_turn_done;
+
                             acp_events::dispatch_and_notify(&mut state, &event);
+
+                            let committed_after = state.committed.len();
+                            let current_turn_after = state.current_turn.view_models().len();
+
+                            if committed_after != committed_before
+                                || current_turn_after != current_turn_before
+                                || just_reset
+                            {
+                                tracing::info!(
+                                    event_kind,
+                                    committed_before,
+                                    committed_after,
+                                    current_turn_before,
+                                    current_turn_after,
+                                    has_turn_done_before,
+                                    has_turn_done_after = state.has_turn_done,
+                                    just_reset,
+                                    "[CLEAR_DEBUG] dispatch event"
+                                );
+                            }
                         }
                     }
                 }
             }
         }
     })
+}
+
+/// [CLEAR_DEBUG] 诊断 helper：返回 AcpEventData 变体的短名字。
+///
+/// 临时 instrumentation——避免每条日志打印完整 event 内容。定位到 /clear 后
+/// 污染 committed 的事件类型后即可移除。
+fn event_kind_short(event: &AcpEventData) -> &'static str {
+    use AcpEventData::*;
+    match event {
+        TextChunk(_) => "TextChunk",
+        ReasoningChunk(_) => "ReasoningChunk",
+        ToolStarted(_) => "ToolStarted",
+        ToolEnded(_) => "ToolEnded",
+        TurnDone => "TurnDone",
+        TurnInterrupted { reason: _ } => "TurnInterrupted",
+        ReplayUserBubble { .. } => "ReplayUserBubble",
+        ReplayAssistantBubble { .. } => "ReplayAssistantBubble",
+        ToolCount(_) => "ToolCount",
+        Progress(_) => "Progress",
+        BudgetWarning(_) => "BudgetWarning",
+        SystemNotification(_) => "SystemNotification",
+        Prediction(_) => "Prediction",
+        FileSuggestions(_) => "FileSuggestions",
+        HitlPending(_) => "HitlPending",
+        AskUser(_) => "AskUser",
+        RewindPreview(_) => "RewindPreview",
+        OauthNeeded(_) => "OauthNeeded",
+        SubagentStarted { .. } => "SubagentStarted",
+        SubagentStopped { .. } => "SubagentStopped",
+        Unknown { .. } => "Unknown",
+        BgTaskStarted(_) => "BgTaskStarted",
+        BgTaskCompleted { .. } => "BgTaskCompleted",
+        BgTaskCancelled { .. } => "BgTaskCancelled",
+        BgTaskSnapshot(_) => "BgTaskSnapshot",
+    }
 }

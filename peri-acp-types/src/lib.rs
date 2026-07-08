@@ -10,4 +10,3 @@ pub mod permission;
 pub mod plugin_types;
 pub mod skill;
 pub mod summary;
-pub mod view_model;

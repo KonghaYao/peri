@@ -138,7 +138,7 @@ pub(super) async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Op
     };
     // Immediate 命令跳过 agent event pump，必须手动发送 push_done
     // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
-    req.event_sink.push_done(req.session_id).await;
+    req.event_sink.push_done(req.session_id, "end_turn").await;
     Some(PromptResult {
         messages: result.messages,
         ok: true,
@@ -152,6 +152,7 @@ pub(super) async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Op
 /// 事件泵启动请求（参数对象）。
 pub(super) struct SpawnPumpRequest {
     pub(super) event_rx: tokio::sync::mpsc::UnboundedReceiver<ExecutorEvent>,
+    pub(super) stop_reason_rx: tokio::sync::oneshot::Receiver<super::PromptStopReason>,
     pub(super) sink: Arc<dyn EventSink>,
     pub(super) session_id: String,
     pub(super) effective_context_window: u32,
@@ -174,6 +175,7 @@ pub(super) struct PumpHandle {
 pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
     let SpawnPumpRequest {
         mut event_rx,
+        stop_reason_rx,
         sink,
         session_id,
         effective_context_window,
@@ -215,12 +217,16 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
             None
         };
 
-        // Emit turn-done as an unstable event so the TUI v2 state machine
-        // can transition Streaming → Idle. Must come before push_done so
-        // TurnDone arrives before AgentDone in the notification channel.
-        sink.push_unstable_event(&session_id, "turn-done".into(), serde_json::json!({}))
-            .await;
-        sink.push_done(&session_id).await;
+        // Resolve stop_reason from the oneshot channel set by executor
+        let stop_reason = stop_reason_rx
+            .await
+            .unwrap_or(super::PromptStopReason::EndTurn);
+        let stop_reason_str = match stop_reason {
+            super::PromptStopReason::EndTurn => "end_turn",
+            super::PromptStopReason::Cancelled => "cancelled",
+            super::PromptStopReason::MaxTurnRequests => "max_turn_requests",
+        };
+        sink.push_done(&session_id, stop_reason_str).await;
 
         // Signal pump completion BEFORE Langfuse flush.
         // Langfuse is telemetry — it must never block the execution pipeline.

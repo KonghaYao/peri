@@ -2,7 +2,7 @@
 //!
 //! H1e（Iteration 14）：从 SERVICE_SNAPSHOT + PERI_CONFIG_HANDLE + VIEW_MODELS
 //! 派生当前 agent 会话的元信息（provider/model/permission_mode/cwd/subagent
-//! 数量）。SubAgent 列表从 VIEW_MODELS 中扫描 `SubAgentGroup` 变体派生——
+//! 数量）。SubAgent 列表从 VIEW_MODELS 中扫描 `TuiSubAgentGroup` 变体派生——
 //! 这是 v2 单路径架构下的权威数据源（子代理生命周期由 ACP 协议 + ViewCommit
 //! 替换语义维护）。
 //!
@@ -13,7 +13,7 @@ use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT, VIEW_MODELS};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
-use peri_acp_types::view_model::{SubAgentGroupData, ViewModel};
+use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -219,8 +219,8 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 }
 
 /// 从 ViewModelsSnapshot 派生 SubAgent 列表（按出现顺序，去重）。
-fn collect_subagents(snap: &crate::kit::atoms::ViewModelsSnapshot) -> Vec<SubAgentGroupData> {
-    let mut out: Vec<SubAgentGroupData> = Vec::new();
+fn collect_subagents(snap: &crate::kit::atoms::ViewModelsSnapshot) -> Vec<TuiSubAgentGroup> {
+    let mut out: Vec<TuiSubAgentGroup> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for vm in snap.committed.iter().chain(snap.current_turn.iter()) {
         scan_vm_for_subagents(vm, &mut out, &mut seen);
@@ -229,19 +229,19 @@ fn collect_subagents(snap: &crate::kit::atoms::ViewModelsSnapshot) -> Vec<SubAge
 }
 
 fn scan_vm_for_subagents(
-    vm: &ViewModel,
-    out: &mut Vec<SubAgentGroupData>,
+    vm: &TuiRenderUnit,
+    out: &mut Vec<TuiSubAgentGroup>,
     seen: &mut std::collections::HashSet<String>,
 ) {
-    if let ViewModel::SubAgentGroup(d) = vm {
+    if let TuiRenderUnit::TuiSubAgentGroup(d) = vm {
         if seen.insert(d.agent_id.clone()) {
             out.push(d.clone());
         }
-        // 递归扫描子 view_models（嵌套 SubAgentGroup 罕见但支持）
+        // 递归扫描子 view_models（嵌套 TuiSubAgentGroup 罕见但支持）
         for child in d.view_models.iter() {
             scan_vm_for_subagents(child, out, seen);
         }
-    } else if let ViewModel::CollapsedGroup(g) = vm {
+    } else if let TuiRenderUnit::TuiCollapsedGroup(g) = vm {
         for child in g.view_models.iter() {
             scan_vm_for_subagents(child, out, seen);
         }
@@ -257,10 +257,10 @@ fn close_panel() {
 mod tests {
     use super::*;
     use crate::kit::atoms::ViewModelsSnapshot;
-    use peri_acp_types::view_model::{CollapsedGroupData, SubAgentGroupData, UserBubbleData};
+    use crate::kit::tui_render_unit::{TuiCollapsedGroup, TuiSubAgentGroup, TuiUserBubble};
 
-    fn make_subagent(id: &str, name: &str) -> SubAgentGroupData {
-        SubAgentGroupData {
+    fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
+        TuiSubAgentGroup {
             agent_id: id.to_string(),
             agent_name: name.to_string(),
             view_models: Vec::new(),
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn test_collect_subagents_only_user_bubbles() {
         let snap = ViewModelsSnapshot {
-            committed: vec![ViewModel::UserBubble(UserBubbleData {
+            committed: vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: "hi".to_string(),
                 content_hash: 0,
                 is_system_reminder: false,
@@ -294,12 +294,12 @@ mod tests {
     fn test_collect_subagents_dedup_across_committed_and_current() {
         // 同一 agent_id 出现在 committed 和 current_turn——应只保留一次
         let snap = ViewModelsSnapshot {
-            committed: vec![ViewModel::SubAgentGroup(make_subagent(
+            committed: vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
                 "researcher",
                 "Researcher",
             ))]
             .into(),
-            current_turn: vec![ViewModel::SubAgentGroup(make_subagent(
+            current_turn: vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
                 "researcher",
                 "Researcher",
             ))]
@@ -314,9 +314,9 @@ mod tests {
     fn test_collect_subagents_preserves_insertion_order() {
         let snap = ViewModelsSnapshot {
             committed: vec![
-                ViewModel::SubAgentGroup(make_subagent("alpha", "Alpha")),
-                ViewModel::SubAgentGroup(make_subagent("beta", "Beta")),
-                ViewModel::SubAgentGroup(make_subagent("gamma", "Gamma")),
+                TuiRenderUnit::TuiSubAgentGroup(make_subagent("alpha", "Alpha")),
+                TuiRenderUnit::TuiSubAgentGroup(make_subagent("beta", "Beta")),
+                TuiRenderUnit::TuiSubAgentGroup(make_subagent("gamma", "Gamma")),
             ]
             .into(),
             current_turn: Vec::new().into(),
@@ -328,15 +328,17 @@ mod tests {
 
     #[test]
     fn test_collect_subagents_recurses_into_collapsed_group() {
-        // CollapsedGroup 内嵌 SubAgent——应被扫描到
-        let collapsed = CollapsedGroupData {
+        // TuiCollapsedGroup 内嵌 SubAgent——应被扫描到
+        let collapsed = TuiCollapsedGroup {
             title: "batch".to_string(),
             count: 1,
-            view_models: vec![ViewModel::SubAgentGroup(make_subagent("hidden", "Hidden"))],
+            view_models: vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
+                "hidden", "Hidden",
+            ))],
             content_hash: 0,
         };
         let snap = ViewModelsSnapshot {
-            committed: vec![ViewModel::CollapsedGroup(collapsed)].into(),
+            committed: vec![TuiRenderUnit::TuiCollapsedGroup(collapsed)].into(),
             current_turn: Vec::new().into(),
         };
         let result = collect_subagents(&snap);
@@ -350,9 +352,11 @@ mod tests {
         let mut outer = make_subagent("outer", "Outer");
         outer
             .view_models
-            .push(ViewModel::SubAgentGroup(make_subagent("inner", "Inner")));
+            .push(TuiRenderUnit::TuiSubAgentGroup(make_subagent(
+                "inner", "Inner",
+            )));
         let snap = ViewModelsSnapshot {
-            committed: vec![ViewModel::SubAgentGroup(outer)].into(),
+            committed: vec![TuiRenderUnit::TuiSubAgentGroup(outer)].into(),
             current_turn: Vec::new().into(),
         };
         let result = collect_subagents(&snap);
