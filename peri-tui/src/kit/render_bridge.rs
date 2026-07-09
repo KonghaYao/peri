@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::kit::acp_types::AcpEventWithEpoch;
-use crate::kit::atoms::{RENDER_CACHE, VIEW_MODELS};
+use crate::kit::atoms::{ACP_STATE, RENDER_CACHE, VIEW_MODELS};
 use crate::kit::view_render;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -86,7 +86,15 @@ pub fn spawn_render_bridge(
 
                     let snapshot = VIEW_MODELS.state().read().clone();
                     if snapshot.generation != last_generation {
-                        debug!(generation = snapshot.generation, last_generation, "render_bridge: tick FULL_REBUILD (generation changed)");
+                        // 活跃流式期间跳过 poll tick 全量重建。
+                        // ACP 事件已通过 event 分支增量更新 RENDER_CACHE，
+                        // 并发全量重建的 yield 点可能与事件分支产生竞态，
+                        // 导致缓存中间态被消息区读到并渲染为空白帧。
+                        let is_loading = ACP_STATE.state().read().is_loading;
+                        if is_loading {
+                            last_generation = snapshot.generation;
+                            continue;
+                        }
                         rebuild_entries(&mut cache.entries, &snapshot.items, last_resize_width).await;
                         msg_hashes = extract_hashes_from_im(&snapshot.items);
                         rebuild_cumulative_heights(&mut cache);

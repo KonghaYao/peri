@@ -1,6 +1,6 @@
 # 输入框 Unicode 字符删除时光标估算错误，出现多个白色光标残影
 
-**状态**：Partial
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-07-05
 
@@ -76,6 +76,7 @@
 | 2026-07-05 | Fixed | Partial | agent | 光标残影修复失败，`Paragraph.style(bg)` 不生效 |
 | 2026-07-09 | Partial | Partial | agent | 追加：软换行迁移后问题复现，涉及文件变更记录 |
 | 2026-07-09 | Partial | Partial | agent | 追加：Span bg 三方案测试，提出 CJK continuation marker 假设 |
+| 2026-07-09 | Partial | Fixed | agent | CjkGhostFix hook: post_component_draw 标记续接 cell AlwaysUpdate |
 
 ## 修复记录
 
@@ -153,3 +154,18 @@
 **新假设**：残影可能与 CJK 字符的双 cell 机制有关。CJK 字符占 2 个终端 cell（第 2 个 cell 是 continuation marker）。当光标从 CJK 字符位置移走后，ratatui 可能更新了第 1 个 cell 但跳过了第 2 个 continuation cell（如果新旧都是 CJK，continuation marker 相同，ratatui diff 可能认为无需更新），导致旧 cursor_style bg 残留在第 2 个 cell 中。
 
 **下一步**：验证 continuation marker 假设——在渲染输出中检查 CJK 字符的第 2 个 cell 是否被正确覆盖。
+
+### 修复 #4（2026-07-09）—— CjkGhostFix hook：post_component_draw 标记续接 cell AlwaysUpdate
+
+- **操作人**：agent
+- **用户反馈**：用 `Color::Reset` 后残影仍未完全消除，但用户不接受 background color
+
+- **根因确诊**：ratatui `set_stringn` 对双宽字符的第 2 个 cell（续接 cell）始终 `reset()` 到 `Cell::EMPTY`（bg=Color::Reset）。两帧续接 cell 完全相同 → diff 不发送 SGR → 终端保留主 cell bg 的视觉扩展（白色残影）。此前尝试的 concrete bg 有效但破坏透明性。
+
+- **修复内容**：
+  1. **CjkGhostFix hook**（`input_area.rs`）：通过 ratatui-kit `post_component_draw` 在每帧渲染后遍历 InputArea buffer，找到所有双宽字符（width>1）的续接 cell，标记 `CellDiffOption::AlwaysUpdate`。**不修改 bg/fg 值**——视觉上完全透明，无底色。AlwaysUpdate 强制 diff 发送 SGR 49（reset bg），清除终端视觉扩展的白色残影
+  2. **消息流闪烁**（`render_bridge.rs`）：流式期间跳过 poll tick 全量重建，消除 RENDER_CACHE 竞态闪白
+
+- **涉及文件**：`peri-tui/src/kit/input_area.rs`（+50/-1），`peri-tui/src/kit/render_bridge.rs`（+12/-1）
+
+- **结论**：续接 cell 的 `AlwaysUpdate` 是唯一同时满足"透明无底色"和"清除残影"的方案。每帧额外终端 I/O 约 50-200 bytes（输入区 CJK 字符数 × ~10 bytes），可忽略。

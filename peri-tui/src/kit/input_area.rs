@@ -12,6 +12,7 @@
 #![allow(clippy::needless_update)]
 
 use peri_widgets::textarea::{TextAreaState, wrap_text};
+use unicode_width::UnicodeWidthChar;
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
@@ -48,6 +49,50 @@ use crate::kit::theme;
 /// border 左右各 1 列，" ❯ " prompt 前缀占 3 列 → 共 5 列。
 const PROMPT_AND_BORDER_WIDTH: u16 = 5;
 
+/// 在 post_component_draw 时修复 CJK 续接 cell 的 diff 不可见性。
+///
+/// ratatui `set_stringn` 对双宽字符的续接 cell 始终 reset 到 `Cell::EMPTY`
+/// (bg=Color::Reset, 无 modifier)。两帧续接 cell 相同 → diff 跳过 → 终端保留
+/// 主 cell bg 的视觉扩展（光标白色残影）。
+///
+/// 此 hook 在每帧渲染后将续接 cell 标记 `AlwaysUpdate`，强制 diff 发送 SGR，
+/// 但 **不修改 bg/fg 值**——视觉上完全透明，无底色。
+struct CjkGhostFix;
+
+impl Hook for CjkGhostFix {
+    fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        use ratatui::buffer::CellDiffOption;
+        let area = drawer.area;
+        let buf = drawer.buffer_mut();
+        let right = area.right();
+        let bottom = area.bottom();
+        for y in area.y..bottom {
+            let mut x = area.x;
+            while x < right {
+                let w = {
+                    let symbol = buf[(x, y)].symbol();
+                    if symbol.is_empty() {
+                        0
+                    } else {
+                        symbol.chars().next().and_then(|c| c.width()).unwrap_or(0) as u16
+                    }
+                };
+                if w > 1 {
+                    for dx in 1..w {
+                        let cx = x + dx;
+                        if cx < right {
+                            buf[(cx, y)].diff_option = CellDiffOption::AlwaysUpdate;
+                        }
+                    }
+                    x += w;
+                } else {
+                    x += 1;
+                }
+            }
+        }
+    }
+}
+
 /// 追踪 composer 段落区域，供鼠标点击→光标定位使用。
 /// 仿照 MsgAreaTracker 模式：rect 是值类型，每帧 pre_component_draw 更新后在
 /// handler 注册前取出副本传给闭包。
@@ -82,6 +127,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         composer_area = tracker.rect; // 每帧取副本，区块结束即释放 &mut hooks 借用
     }
     let overlay_height = Arc::new(parking_lot::Mutex::new(0u16));
+
+    // CJK 光标残影修复：post_component_draw 时标记续接 cell AlwaysUpdate
+    hooks.use_hook(|| CjkGhostFix);
 
     // 终端焦点切换（tmux 窗格 / 终端标签切换）：FocusGained/FocusLost 更新 term_focused
     {
@@ -993,7 +1041,7 @@ fn render_multiline_with_cursor_for_themed(
         .bg(tokens.cursor_bg)
         .add_modifier(Modifier::DIM);
     let placeholder_style = Style::default().fg(tokens.placeholder);
-    let default_style = Style::default().bg(Color::Reset); // 显式 Reset 覆盖旧 cell bg，但不改变背景色
+    let default_style = Style::default().bg(Color::Reset);
     peri_widgets::textarea::render_multiline_with_cursor(
         text,
         cursor,
