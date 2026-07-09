@@ -198,6 +198,8 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         TurnInterrupted { reason: _ } => "TurnInterrupted",
         LocalUserBubble { .. } => "LocalUserBubble",
         CommittedAssistantText { .. } => "CommittedAssistantText",
+        ReplayToolStarted { .. } => "ReplayToolStarted",
+        ReplayToolEnded { .. } => "ReplayToolEnded",
         ToolCount(_) => "ToolCount",
         Progress(_) => "Progress",
         BudgetWarning(_) => "BudgetWarning",

@@ -325,8 +325,13 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
         return None;
     }
 
+    // ACP schema 的 ContentChunk / ToolCall / ToolCallUpdate 都标注了
+    // #[serde(rename = "_meta")]，运行时 key 是 "_meta"（带下划线），不是 "meta"。
+    // 检查顺序：_meta（生产格式）→ meta（兼容旧格式 / 测试格式）→ content._meta → content.meta
     let is_session_replay = update
-        .get("meta")
+        .get("_meta")
+        .or_else(|| update.get("meta"))
+        .or_else(|| update.get("content").and_then(|c| c.get("_meta")))
         .or_else(|| update.get("content").and_then(|c| c.get("meta")))
         .and_then(|m| m.get("periReplay"))
         .and_then(|v| v.as_bool())
@@ -378,12 +383,16 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .get("messageId")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let reasoning_chunk = crate::kit::stream_data::TuiReasoningChunk {
-                text,
-                message_id,
-                agent_id,
-            };
-            Some(AcpEventData::ReasoningChunk(reasoning_chunk))
+            if is_session_replay {
+                Some(AcpEventData::CommittedAssistantText { text })
+            } else {
+                let reasoning_chunk = crate::kit::stream_data::TuiReasoningChunk {
+                    text,
+                    message_id,
+                    agent_id,
+                };
+                Some(AcpEventData::ReasoningChunk(reasoning_chunk))
+            }
         }
         Some("tool_call") => {
             let tool_id = update
@@ -401,13 +410,21 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 let raw_input = update.get("rawInput").unwrap_or(&Value::Null);
                 summarize_input(&tool_name, raw_input)
             };
-            let tool_started = crate::kit::stream_data::TuiToolStarted {
-                tool_id,
-                tool_name,
-                input_summary,
-                agent_id,
-            };
-            Some(AcpEventData::ToolStarted(tool_started))
+            if is_session_replay {
+                Some(AcpEventData::ReplayToolStarted {
+                    tool_id,
+                    tool_name,
+                    input_summary,
+                })
+            } else {
+                let tool_started = crate::kit::stream_data::TuiToolStarted {
+                    tool_id,
+                    tool_name,
+                    input_summary,
+                    agent_id,
+                };
+                Some(AcpEventData::ToolStarted(tool_started))
+            }
         }
         Some("tool_call_update") => {
             let tool_id = update
@@ -429,13 +446,21 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_str())
                 .map(|s| s == "failed")
                 .unwrap_or(false);
-            let tool_ended = crate::kit::stream_data::TuiToolEnded {
-                tool_id,
-                output_summary,
-                is_error,
-                agent_id,
-            };
-            Some(AcpEventData::ToolEnded(tool_ended))
+            if is_session_replay {
+                Some(AcpEventData::ReplayToolEnded {
+                    tool_id,
+                    output_summary,
+                    is_error,
+                })
+            } else {
+                let tool_ended = crate::kit::stream_data::TuiToolEnded {
+                    tool_id,
+                    output_summary,
+                    is_error,
+                    agent_id,
+                };
+                Some(AcpEventData::ToolEnded(tool_ended))
+            }
         }
         Some("usage_update") if !is_session_replay => {
             // §C: token-usage deprecated, read from standard usage_update meta
@@ -861,7 +886,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_replay_agent_message_chunk_to_replay_assistant_bubble() {
+    async fn test_session_replay_agent_message_chunk_to_committed_assistant_text() {
         let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
 
         notif_tx
@@ -871,7 +896,8 @@ mod tests {
                     "sessionId": "s1",
                     "update": {
                         "sessionUpdate": "agent_message_chunk",
-                        "content": {"type": "text", "text": "历史回答", "meta": {"periReplay": true}}
+                        "content": {"type": "text", "text": "历史回答"},
+                        "_meta": {"periReplay": true}
                     }
                 }),
             })

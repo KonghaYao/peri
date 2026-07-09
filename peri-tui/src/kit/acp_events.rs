@@ -493,10 +493,43 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 crate::kit::tui_render_unit::TuiAssistantBubble {
                     text: text.clone(),
                     reasoning: None,
-                    content_hash: 0,
+                    content_hash: tui_hash_str(&format!("{}|", text)),
                 },
             );
             state.committed.push_back(vm);
+            push_view_models(state);
+            push_acp_state(state);
+        }
+        ReplayToolStarted {
+            tool_id,
+            tool_name,
+            input_summary,
+        } => {
+            use crate::kit::tui_render_unit::{TuiToolCard, tui_hash_str};
+            let card = TuiToolCard {
+                tool_id: tool_id.clone(),
+                tool_name: tool_name.clone(),
+                input_summary: input_summary.clone(),
+                output_summary: String::new(),
+                is_error: false,
+                is_running: true,
+                running_duration_ms: None,
+                diff: None,
+                content_hash: tui_hash_str(&format!(
+                    "{}|{}|{}||false|true",
+                    tool_id, tool_name, input_summary
+                )),
+            };
+            state.committed.push_back(TuiRenderUnit::TuiToolCard(card));
+            push_view_models(state);
+            push_acp_state(state);
+        }
+        ReplayToolEnded {
+            tool_id,
+            output_summary,
+            is_error,
+        } => {
+            update_committed_tool_card(state, tool_id, output_summary, *is_error);
             push_view_models(state);
             push_acp_state(state);
         }
@@ -534,6 +567,45 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         BgTaskCancelled { task_id, .. } => {
             BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
+        }
+    }
+}
+
+/// 在 `state.committed` 中按 `tool_id` 查找并更新 TuiToolCard。
+///
+/// 用于 replay 场景：`ReplayToolStarted` 先 push 一张 is_running=true 的卡片，
+/// 后续 `ReplayToolEnded` 到达时更新 output + is_running=false。
+/// 如果找不到对应 tool_id，静默忽略。
+fn update_committed_tool_card(
+    state: &mut BridgeState,
+    tool_id: &str,
+    output_summary: &str,
+    is_error: bool,
+) {
+    use crate::kit::tui_render_unit::{TuiToolCard, tui_hash_str};
+    for i in 0..state.committed.len() {
+        if let TuiRenderUnit::TuiToolCard(card) = &state.committed[i]
+            && card.tool_id == tool_id
+            && card.is_running
+        {
+            let updated = TuiToolCard {
+                tool_id: card.tool_id.clone(),
+                tool_name: card.tool_name.clone(),
+                input_summary: card.input_summary.clone(),
+                output_summary: output_summary.to_string(),
+                is_error,
+                is_running: false,
+                running_duration_ms: None,
+                diff: card.diff.clone(),
+                content_hash: tui_hash_str(&format!(
+                    "{}|{}|{}|{}|{is_error}|false",
+                    card.tool_id, card.tool_name, card.input_summary, output_summary,
+                )),
+            };
+            state.committed = state
+                .committed
+                .update(i, TuiRenderUnit::TuiToolCard(updated));
+            return;
         }
     }
 }

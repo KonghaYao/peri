@@ -623,6 +623,20 @@ pub enum AcpEventData {
     /// 用于 session/load replay 及任何需要旁路 current_turn 直接归档的场景。
     CommittedAssistantText { text: String },
 
+    /// replay 工具调用开始——直接写入 committed 的 TuiToolCard（is_running=true）。
+    ReplayToolStarted {
+        tool_id: String,
+        tool_name: String,
+        input_summary: String,
+    },
+
+    /// replay 工具调用结束——更新 committed 中对应 tool_id 的 TuiToolCard。
+    ReplayToolEnded {
+        tool_id: String,
+        output_summary: String,
+        is_error: bool,
+    },
+
     // -- §4.3 Status (status bar updates) ----------------------------------
     /// `"tool-count"` -- number of tool calls in the current turn.
     ToolCount(ToolCount),
