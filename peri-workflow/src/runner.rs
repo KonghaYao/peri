@@ -252,6 +252,9 @@ impl WorkflowRunner {
         let kill_script = input.script.clone();
         let kill_started_at = started_at_iso.clone();
 
+        // Clone done_tx for kill branch — must happen before async move consumes it
+        let done_tx_for_kill = done_tx.clone();
+
         let mut msg_loop = tokio::spawn(async move {
             let mut final_result = WorkflowResult {
                 run_id: run_id_clone.clone(),
@@ -304,16 +307,26 @@ impl WorkflowRunner {
                                 // Deregister (no-op if already removed by kill_agent)
                                 ch.deregister_agent(&agent_run_id, agent_id_num);
 
+                                // 仅 cancel_rx 的 killed 结果跳过响应（kill_agent 已发送 error response，
+                                // 避免双重 JSON-RPC 响应违反协议规范）
+                                // 其他 Dead 变体（no-structured-output / interrupted / runagent-threw）
+                                // 来自 executor 自身错误，仍需正常发送响应，否则 Node Promise 永远 hang
                                 if let Some(id) = id {
-                                    let result_val =
-                                        serde_json::to_value(&result).unwrap_or_else(|_| {
-                                            serde_json::json!({
-                                                "kind": "dead",
-                                                "reason": "runagent-threw",
-                                                "detail": "serialize failed"
-                                            })
-                                        });
-                                    let _ = ch.send_response(id, result_val).await;
+                                    let was_killed = matches!(
+                                        result,
+                                        AgentRunResult::Dead { reason: Some(ref r), .. } if r == "killed"
+                                    );
+                                    if !was_killed {
+                                        let result_val = serde_json::to_value(&result)
+                                            .unwrap_or_else(|_| {
+                                                serde_json::json!({
+                                                    "kind": "dead",
+                                                    "reason": "runagent-threw",
+                                                    "detail": "serialize failed"
+                                                })
+                                            });
+                                        let _ = ch.send_response(id, result_val).await;
+                                    }
                                 }
                             });
                         }
@@ -432,7 +445,12 @@ impl WorkflowRunner {
                 .await;
                 let _ = child.kill().await;
 
-                // 写入异常退出 state.json（此前仅在 msg_loop 写）
+                // Abort msg_loop 防止 state.json 和 done_tx 被覆写为 "failed"
+                // （msg_loop 检测到 stdout 关闭后会以默认 status="failed" 写 state.json + done_tx，
+                //  而 watch channel 后到值会覆盖先到值使 kill 事实丢失）
+                msg_loop.abort();
+
+                // 写入 killed state.json
                 let _stderr_tail = {
                     let lines = stderr_for_kill.lock();
                     if lines.is_empty() {
@@ -460,6 +478,16 @@ impl WorkflowRunner {
                     error: Some("workflow killed by user".to_string()),
                 };
                 let _ = journal_clone2.write_state(&run_id, &state);
+
+                // 发送 done_tx（kill 分支作为唯一出口，确保通知任务收到 "killed" 状态）
+                let killed_result = WorkflowResult {
+                    run_id: run_id.clone(),
+                    status: "killed".to_string(),
+                    return_value: None,
+                    error: Some("workflow killed by user".to_string()),
+                    stderr_tail: _stderr_tail,
+                };
+                let _ = done_tx_for_kill.send(Some(killed_result));
             }
             _ = &mut msg_loop => {
                 // Message loop completed naturally

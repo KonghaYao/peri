@@ -15,10 +15,11 @@ use peri_agent::{
     agent::{
         compact::CompactConfig,
         events::{AgentEventHandler, ExecutorEvent, FnEventHandler},
+        token::ContextBudget,
         AgentCancellationToken,
     },
     interaction::UserInteractionBroker,
-    llm::{BaseModelReactLLM, RetryConfig, RetryableLLM},
+    llm::{BaseModel, BaseModelReactLLM, RetryConfig, RetryableLLM},
 };
 use peri_middlewares::middleware::TodoMiddleware;
 use peri_middlewares::{
@@ -222,6 +223,22 @@ impl AgentExecutor for WorkflowAgentExecutor {
             self.ctx.provider.clone()
         };
         let model_name = effective_provider.model_name().to_string();
+
+        // ── compact 配置 ──
+        // 从 WorkflowAgentContext 读取 compact_config，与主 agent builder_v2.rs 模式一致。
+        // 必须在 effective_provider 被 consume 之前构建 compact_llm。
+        let compact_config = self.ctx.compact_config.clone();
+        let context_budget = compact_config.as_ref().map(|cc| {
+            ContextBudget::new(ContextBudget::DEFAULT_CONTEXT_WINDOW)
+                .with_auto_compact_threshold(cc.auto_compact_threshold)
+                .with_warning_threshold(cc.micro_compact_threshold)
+        });
+        let compact_llm: Option<Arc<dyn BaseModel>> = if compact_config.is_some() {
+            Some(Arc::from(effective_provider.clone().into_model()))
+        } else {
+            None
+        };
+
         let base_model: Arc<dyn peri_agent::llm::BaseModel> =
             if let Some(ref pool) = self.ctx.agent_pool {
                 let fp = format!(
@@ -373,7 +390,10 @@ impl AgentExecutor for WorkflowAgentExecutor {
             cancel_token.clone(),
             Vec::new(),
             Some(system_prompt),
-            None,
+            None, // shared_tools
+            compact_config,
+            context_budget,
+            compact_llm,
             Some(error_suggest_registry),
             Some(snapshot),
         );

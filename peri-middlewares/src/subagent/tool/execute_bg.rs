@@ -124,6 +124,9 @@ impl super::SubAgentTool {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         );
 
         // push prompt 到 queue

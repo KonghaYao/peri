@@ -191,6 +191,9 @@ pub async fn spawn_background_fork(
         None,
         None,
         None,
+        None,
+        None,
+        None,
     );
 
     // 9. push fork_directive 到 queue

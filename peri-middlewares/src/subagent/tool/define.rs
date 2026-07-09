@@ -486,6 +486,9 @@ impl BaseTool for SubAgentTool {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         );
 
         // 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id

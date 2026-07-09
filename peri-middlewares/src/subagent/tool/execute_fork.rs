@@ -117,9 +117,12 @@ impl super::SubAgentTool {
             cancel_token,
             parent_msgs,
             system_prompt,
-            None,
-            None,
-            None,
+            None, // shared_tools
+            None, // compact_config
+            None, // context_budget
+            None, // compact_llm
+            None, // error_suggest_registry
+            None, // tool_registry_snapshot
         );
 
         // 9.5. 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id

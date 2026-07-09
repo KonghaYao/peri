@@ -12,9 +12,11 @@ use peri_agent::{
         events_v2::{EventBus, EventBusConfig, EventHandles},
         react::ReactLLM,
         stages::{SharedToolMap, StageContext},
+        CompactConfig, ContextBudget,
     },
     error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot},
     group::pipeline::AgentId,
+    llm::BaseModel,
     messages::BaseMessage,
     middleware::chain::MiddlewareChain,
     session::{FrozenContext, MessageQueue, Session as V2Session},
@@ -43,9 +45,11 @@ pub struct V2SubagentContext {
 /// - `parent_messages`：fork 路径注入的父消息（非 fork 路径传空 Vec）
 /// - `system_prompt`：SubAgent system prompt
 /// - `shared_tools`：deferred tools 注册表（可选）
+/// - `compact_config`：auto-compact 阈值配置（None = 不启用）
+/// - `context_budget`：上下文预算（None = 不追踪 token 使用率）
+/// - `compact_llm`：Full Compact 专用 LLM（None 时 Full Compact 跳过）
 /// - `error_suggest_registry`：错误感知建议（可选）
 /// - `tool_registry_snapshot`：工具注册表快照（None 用 default）
-/// - `compact_config` / `context_budget`：可选配置
 #[allow(clippy::too_many_arguments)]
 pub fn build_v2_subagent_context(
     llm: Box<dyn ReactLLM + Send + Sync>,
@@ -56,6 +60,9 @@ pub fn build_v2_subagent_context(
     parent_messages: Vec<BaseMessage>,
     system_prompt: Option<String>,
     shared_tools: Option<SharedToolMap>,
+    compact_config: Option<CompactConfig>,
+    context_budget: Option<ContextBudget>,
+    compact_llm: Option<Arc<dyn BaseModel>>,
     error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
     tool_registry_snapshot: Option<ToolRegistrySnapshot>,
 ) -> V2SubagentContext {
@@ -127,6 +134,15 @@ pub fn build_v2_subagent_context(
 
     if let Some(reg) = error_suggest_registry {
         builder = builder.with_error_suggest_registry(reg);
+    }
+    if let Some(budget) = context_budget {
+        builder = builder.with_context_budget(budget);
+    }
+    if let Some(cc) = compact_config {
+        builder = builder.with_compact_config(cc);
+    }
+    if let Some(llm) = compact_llm {
+        builder = builder.with_compact_llm(llm);
     }
     // system_prompt 已作为 BaseMessage::System 注入 transcript（见上方 fork 路径后块）。
     // 不再写入 StageContext.system_prompt 死字段——peri-agent/src/agent/stages/ 内零代码读取该字段。

@@ -155,7 +155,10 @@ impl WorkflowTaskRegistry {
         if let Some(kill_tx) = run.kill_tx {
             let _ = kill_tx.send(());
         }
-        run.child_handle.abort();
+        // kill_tx 触发 runner 的 kill 分支（runner.rs:425），其中完成所有清理：
+        // workflow/kill RPC → child.kill().await → state.json → done_tx.send()
+        // → active_channels.remove() → progress_store.cleanup_completed()
+        // 不在此处 abort child_handle，避免中断 runner 清理路径。
         Ok(())
     }
 
