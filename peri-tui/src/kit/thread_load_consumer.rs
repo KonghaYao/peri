@@ -21,9 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::acp_client::AcpTuiClient;
-use crate::kit::acp_events;
-use crate::kit::atoms::{self, RENDER_CACHE};
-use crate::kit::render_bridge::RenderCache;
+use crate::kit::atoms;
 
 /// 启动 thread 切换消费者后台任务。
 pub fn spawn_thread_load_consumer(
@@ -119,9 +117,10 @@ async fn handle_load(
             .get()
             .wrapping_add(1),
     );
-    // 3. 先清空 UI/cache。后续 session/load replay 事件会重新追加历史消息。
-    acp_events::push_view_models_for_reset();
-    *RENDER_CACHE.state().write() = RenderCache::default();
+    // 3. BRIDGE_RESET_COUNTER 递增后 bridge 会在下一个事件到达时自动清空
+    //    committed。session/load replay 事件即为下一个事件——旧内容在 replay
+    //    到达前保持可见，replay 到达后 bridge 清空并重建，实现平滑过渡，
+    //    避免 push_view_models_for_reset 造成的空白闪烁。
     {
         let ref_guard = atoms::ACP_STATE.state();
         let mut acp = ref_guard.write();
