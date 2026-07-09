@@ -686,6 +686,25 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     for vm in state.current_turn.view_models() {
         items.push_back(vm.clone());
     }
+
+    // 只展开最后一个含 reasoning 的 assistant bubble，其余折叠
+    let mut found_last = false;
+    for i in (0..items.len()).rev() {
+        match &mut items[i] {
+            TuiRenderUnit::TuiAssistantBubble(bubble) => {
+                if let Some(ref mut reasoning) = bubble.reasoning {
+                    if !found_last {
+                        reasoning.collapsed = false;
+                        found_last = true;
+                    } else {
+                        reasoning.collapsed = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     state.generation = state.generation.wrapping_add(1);
     let snapshot = ViewModelsSnapshot {
         items,

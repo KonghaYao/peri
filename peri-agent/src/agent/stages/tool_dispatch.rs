@@ -18,14 +18,14 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use super::StageContext;
 use super::middleware_runner::{
     run_after_tool, run_after_tools_batch, run_before_tools_batch, run_on_error,
 };
+use super::StageContext;
 use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{Reasoning, ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
-use crate::messages::{BaseMessage, ToolCallRequest, message::MessageId};
+use crate::messages::{message::MessageId, BaseMessage, ToolCallRequest};
 use crate::tools::BaseTool;
 
 /// 连续失败检测阈值

@@ -203,8 +203,8 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
 mod tests {
     use super::*;
     use crate::agent::stages::StageContext;
-    use crate::session::Session;
     use crate::session::store::FrozenContext;
+    use crate::session::Session;
     use std::sync::Arc;
 
     fn make_context() -> StageContext {

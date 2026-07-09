@@ -64,7 +64,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     if !snap.provider_name.is_empty() && !model_display.is_empty() {
         spans.push(separator());
-        let mut style = Style::default().fg(statusbar().text);
+        let mut style = Style::default().fg(theme::semantic().accent);
         if provider_highlighted && model_highlighted {
             style = style.add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK);
         } else if provider_highlighted {
@@ -113,7 +113,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
         spans.push(Span::styled(
             parts.join(" "),
-            Style::default().fg(statusbar().text),
+            Style::default().fg(theme::semantic().loading),
         ));
     }
 

@@ -15,8 +15,8 @@ pub mod receive;
 pub mod tool_dispatch;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 
@@ -737,9 +737,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 mod tests {
     use super::*;
     use crate::messages::MessageContent;
-    use crate::session::Session;
     use crate::session::queue::MessageSource;
     use crate::session::store::FrozenContext;
+    use crate::session::Session;
 
     /// 构造测试用 StageContext
     fn make_stage_context() -> StageContext {

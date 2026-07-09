@@ -75,6 +75,7 @@
 | 2026-07-05 | Open | Fixed | agent | 修复空态双光标 + unicode-width 感知绑定 |
 | 2026-07-05 | Fixed | Partial | agent | 光标残影修复失败，`Paragraph.style(bg)` 不生效 |
 | 2026-07-09 | Partial | Partial | agent | 追加：软换行迁移后问题复现，涉及文件变更记录 |
+| 2026-07-09 | Partial | Partial | agent | 追加：Span bg 三方案测试，提出 CJK continuation marker 假设 |
 
 ## 修复记录
 
@@ -102,6 +103,17 @@
 - **结果**：❌ 残影仍存在。`Paragraph.style(bg)` 不足以覆盖残留。
 - **分析**：残影可能不来自 Paragraph 层，而是来自 ratatui-kit `View` 容器或 `AppShell` 根布局的帧间不清除。`element!` 宏树中的 `View` 容器可能未将 Paragraph 的显式背景传播到终端帧缓冲，残影发生在框架层而非 widget 层。需从 ratatui-kit 渲染管线或 `Frame` 层面排查。
 
+### 修复 #3（2026-07-09）—— Span 显式 bg + 行填充
+
+- **操作人**：agent
+- **用户原意**：删除 CJK 字符后光标残影未消除
+- **尝试**：
+  1. 给 `render_multiline_with_cursor` 新增 `default_style` 参数，非光标 Span 使用显式 bg
+  2. 行尾 padding 填满至 `max_width`，确保整行背景统一
+  3. 三次 bg 值测试：`Rgb(0,0,0)`（残影消失但背景色不一致）→ `Color::Reset`（视觉透明但残影复现）
+- **涉及 commit**：`392941c6`（当前保留 `Color::Reset` 版本）
+- **结论**：残影并非 cell bg 值问题——只有 `Rgb(0,0,0)` 等具体颜色有效，`Color::Reset` 无效。推测 ratatui 的 diff 引擎对 `Color::Reset` 做了优化跳过。残影可能需要从 **CJK continuation marker** 或**终端帧缓冲 diff** 层面解决。
+
 ### 现象 3（2026-07-09 复现）—— 软换行迁移后问题仍存
 
 **背景**：commit `9df8f6ce` 完成了 textarea 软换行（soft wrapping）重构，`render_multiline_with_cursor` 已从 `input_area.rs` 迁移至 `peri-widgets/src/textarea/render.rs`，`EditorState` 替换为 `TextAreaState`。渲染管线现在走 `wrap_text()` 折行 → `render_multiline_with_cursor`（视觉行渲染）。
@@ -121,3 +133,23 @@
 | `peri-tui/src/kit/input_area.rs` | 通过 `render_multiline_with_cursor_for_themed` 间接调用，已设 `Paragraph.style(bg)` |
 
 `Paragraph.style(bg)` 的背景色修复在旧管线和新管线中均未消除残影，进一步支持残影来自 ratatui-kit 框架层而非 widget 层的判断。
+
+### 现象 4（2026-07-09 二次调试）—— Span bg 修复部分有效但未根治
+
+**尝试 1**：给 `render_multiline_with_cursor` 增加 `default_style` 参数，非光标 Span 使用 `bg(surface.default = Rgb(0,0,0))`。
+
+- 结果：残影消失 ✅，但输入框背景色与周围 UI 不一致（文字区域黑底，空白区域终端默认色）
+
+**尝试 2**：行尾 padding 填满至 `max_width`，消除文字/空白区域分界。
+
+- 结果：背景色统一 ✅，但整个输入框变成 `Rgb(0,0,0)` 黑底，与终端默认背景色冲突
+
+**尝试 3**：改用 `bg(Color::Reset)` —— 显式 `Some(Color::Reset)` 覆盖旧 cell bg，同时视觉匹配终端默认。
+
+- 结果：commit `392941c6`，58 tests pass。但用户反馈残影**仍未完全消除**。
+
+**分析**：三种不同的显式 bg 方案中，只有 `Rgb(0,0,0)` 有效（方案 1），`Color::Reset`（方案 3）无效。这暗示问题不是"bg 值是什么"，而是 **ratatui 是否会写入该 cell**——`Rgb(0,0,0)` 强制写入，`Color::Reset` 可能被 ratatui 的 diff 优化跳过。
+
+**新假设**：残影可能与 CJK 字符的双 cell 机制有关。CJK 字符占 2 个终端 cell（第 2 个 cell 是 continuation marker）。当光标从 CJK 字符位置移走后，ratatui 可能更新了第 1 个 cell 但跳过了第 2 个 continuation cell（如果新旧都是 CJK，continuation marker 相同，ratatui diff 可能认为无需更新），导致旧 cursor_style bg 残留在第 2 个 cell 中。
+
+**下一步**：验证 continuation marker 假设——在渲染输出中检查 CJK 字符的第 2 个 cell 是否被正确覆盖。
