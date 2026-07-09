@@ -8,6 +8,8 @@
 //! （弹窗光标行和用户消息区除外）。信息层级用亮度区分（TEXT/MUTED/DIM），
 //! 颜色表达状态语义。
 
+pub mod markdown_palette;
+
 use ratatui::style::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

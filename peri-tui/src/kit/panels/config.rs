@@ -68,6 +68,7 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // bump：每次操作后递增，强制重渲染（PERI_CONFIG_HANDLE 是 RwLock 非 atom，
     // 写入不会自动触发 ratatui-kit 重渲染，需要手动 bump）
     let bump = hooks.use_state(|| 0u32);
+    let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         let row_count = CONFIG_ROWS.len();
@@ -111,7 +112,6 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 读取 bump 强制 ratatui-kit 把这个值当作依赖（无此 read 调用则不会重渲染）
     let _ = *bump.read();
-    let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
     // ---- Render ----
     let sel = *cursor.read();

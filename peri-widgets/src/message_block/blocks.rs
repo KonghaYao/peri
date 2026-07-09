@@ -32,34 +32,8 @@ pub fn render_block(
 ) -> Vec<Line<'static>> {
     match strategy {
         BlockRenderStrategy::Text { content, .. } => {
-            #[cfg(feature = "markdown")]
-            {
-                use super::highlight::is_diff_content;
-                use crate::markdown::ThemeMarkdownAdapter;
-
-                if is_diff_content(content) {
-                    let mut lines: Vec<Line<'static>> = Vec::new();
-                    for line in content.lines() {
-                        lines.push(Line::from(super::highlight::highlight_diff_line(
-                            line, theme,
-                        )));
-                    }
-                    if lines.is_empty() {
-                        lines.push(Line::raw(content.clone()));
-                    }
-                    lines
-                } else {
-                    let md_theme = ThemeMarkdownAdapter(theme);
-                    let text = crate::markdown::parse_markdown(content, &md_theme, width);
-                    text.lines.into_iter().collect()
-                }
-            }
-
-            #[cfg(not(feature = "markdown"))]
-            {
-                let _ = width;
-                content.lines().map(|l| Line::raw(l.to_string())).collect()
-            }
+            let _ = width;
+            content.lines().map(|l| Line::raw(l.to_string())).collect()
         }
         BlockRenderStrategy::ToolCall(state) => {
             let _ = width;

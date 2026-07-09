@@ -1,6 +1,11 @@
 //! 消息区文本拖拽选中——鼠标拖拽选中文本并自动复制到剪贴板。
 //!
 //! 移植自旧 v1 架构 `peri-tui/src/app/text_selection.rs`，简化为仅消息区用。
+//!
+//! 注意：迁移 ratatui-kit-markdown 后，RENDER_CACHE 已删除，文本选区功能暂时失效。
+//! 保留代码待后续基于 Markdown 组件重新实现选区逻辑。
+
+#![allow(dead_code)]
 //! 新 kit 架构无 wrap_map，直接基于已换行的 `Line<'static>` 做字符级文本提取。
 
 use ratatui::text::{Line, Span};

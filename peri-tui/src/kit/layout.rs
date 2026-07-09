@@ -24,14 +24,7 @@ pub fn SessionColumn(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 减去 4 列内边距（左右各 2）保留视觉透气感；下限 20 防极窄终端溢出。
     let (term_w, _) = hooks.use_terminal_size();
     let width: usize = (term_w as usize).saturating_sub(4).max(20);
-    let mut last_width = hooks.use_state(|| 0u16);
-    let next_width = width as u16;
-    if *last_width.read() != next_width {
-        last_width.set(next_width);
-        if let Some(tx) = atoms::RESIZE_TX.get() {
-            let _ = tx.send(next_width);
-        }
-    }
+    let _last_width = hooks.use_state(|| 0u16);
 
     element!(
         View(

@@ -1062,7 +1062,7 @@ fn render_multiline_with_cursor_for_themed(
 mod tests {
     use super::*;
     use crate::app::panel_types::PanelKind;
-    use crate::kit::atoms::{RENDER_CACHE, VIEW_MODELS, ViewModelsSnapshot};
+    use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
     use serial_test::serial;
 
     #[test]
@@ -1141,7 +1141,6 @@ mod tests {
     fn reset_submit_side_effect_state() {
         crate::kit::atoms::init_atoms();
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
-        *RENDER_CACHE.state().write() = crate::kit::render_bridge::RenderCache::default();
         INPUT_BUFFER.state().write().clear();
         crate::kit::atoms::INPUT_HISTORY.state().write().clear();
         crate::kit::atoms::INPUT_HISTORY_INDEX
