@@ -22,30 +22,49 @@ fn char_index_to_byte(s: &str, char_idx: usize) -> usize {
 
 /// 把文本按 \n 拆成多行 Line，光标以传入的 style 高亮，选区以 selection_style 高亮。
 ///
-/// I22-B：渲染窗口上限——只渲染光标附近的 MAX_RENDER_LINES 行。
-/// 原实现遍历整个 text 拆分并生成 Line，paste 大文本时每帧分配 O(n) Vec。
-/// 现改为以光标行为中心，仅渲染 MAX_RENDER_LINES 行（与 editor_height 上限一致），
-/// 渲染成本由 O(总行数) 降为 O(12)。光标始终落在渲染窗口内。
+/// I22-B：渲染窗口上限——只渲染 viewport_height 行（由调用方传入，等于 composer 可见行数）。
+/// 当总行数超出 viewport_height 时以光标行为中心构建窗口，光标始终落在渲染窗口内。
+/// viewport_height 最小值受 clamp(1) 保护以兼容 tests。
 ///
 /// selection_range 为 `(start, end)` 字符索引的半开区间，cursor_style 优先级高于 selection_style。
+/// placeholder 非空且 text 为空时，渲染占位符文本（类似 tui-textarea 风格：光标空间 + 占位文）。
 pub fn render_multiline_with_cursor(
     text: &str,
     cursor: usize,
     cursor_style: Style,
     selection_range: Option<(usize, usize)>,
     selection_style: Style,
+    placeholder: Option<&str>,
+    placeholder_style: Style,
+    viewport_height: usize,
     loading: bool,
+    show_cursor: bool,
 ) -> Vec<Line<'static>> {
-    // I22-B：渲染窗口上限。editor_height 最大 12，所以渲染 >12 行是浪费。
-    const MAX_RENDER_LINES: usize = 12;
+    let viewport_height = viewport_height.max(1);
 
     if text.is_empty() {
-        return vec![if loading {
-            Line::from("")
+        return if loading {
+            vec![Line::from("")]
+        } else if !show_cursor {
+            // 非聚焦态：无光标，仅渲染占位文本或空行
+            if let Some(ph) = placeholder.filter(|s| !s.is_empty()) {
+                vec![Line::from(vec![Span::styled(
+                    ph.to_string(),
+                    placeholder_style,
+                )])]
+            } else {
+                vec![Line::from("")]
+            }
+        } else if let Some(ph) = placeholder.filter(|s| !s.is_empty()) {
+            // 占位符：光标 styled space + 占位文本（tui-textarea 同款实现）
+            vec![Line::from(vec![
+                Span::styled(" ", cursor_style),
+                Span::styled(ph.to_string(), placeholder_style),
+            ])]
         } else {
             // 空态光标：styled space 与行尾光标保持一致，避免 ▓ 块与终端默认光标重叠产生"双光标"
-            Line::from(vec![Span::styled(" ", cursor_style)])
-        }];
+            vec![Line::from(vec![Span::styled(" ", cursor_style)])]
+        };
     }
 
     // 把光标位置映射到 (line_idx, col_idx)
@@ -74,17 +93,16 @@ pub fn render_multiline_with_cursor(
     }
 
     // I22-B：计算渲染窗口 [start, end)，确保光标行包含在内。
-    // 当总行数 <= MAX_RENDER_LINES 时展示全部；否则以光标行为中心构建窗口，
-    // 并在 end 被末尾钳位后向上扩展 start，保证窗口始终占满 MAX_RENDER_LINES 行
-    // （修复验证报告的"光标在末尾时窗口缩到 7 行"shrinkage bug）。
+    // 当总行数 <= viewport_height 时展示全部；否则以光标行为中心构建窗口，
+    // 并在 end 被末尾钳位后向上扩展 start，保证窗口始终占满 viewport_height 行。
     let total_line_count = text.matches('\n').count() + 1;
-    let (start, end) = if total_line_count <= MAX_RENDER_LINES {
+    let (start, end) = if total_line_count <= viewport_height {
         (0, total_line_count)
     } else {
-        let half_window = MAX_RENDER_LINES / 2;
+        let half_window = viewport_height / 2;
         let center_start = target_line.saturating_sub(half_window);
-        let end = (center_start + MAX_RENDER_LINES).min(total_line_count);
-        let start = end.saturating_sub(MAX_RENDER_LINES);
+        let end = (center_start + viewport_height).min(total_line_count);
+        let start = end.saturating_sub(viewport_height);
         (start, end)
     };
 
@@ -164,7 +182,7 @@ pub fn render_multiline_with_cursor(
                 }
 
                 // 样式优先级：光标（最高）> 选区 > 默认
-                let style = if seg_start >= cut_byte && seg_end <= cursor_end_byte {
+                let style = if show_cursor && seg_start >= cut_byte && seg_end <= cursor_end_byte {
                     cursor_style
                 } else if let Some((s_start, s_end)) = sel_in_line {
                     let s_s_byte = char_index_to_byte(line, s_start);
@@ -182,7 +200,7 @@ pub fn render_multiline_with_cursor(
             }
 
             // 光标在行尾时追加 styled space
-            if target_col >= line_chars {
+            if show_cursor && target_col >= line_chars {
                 spans.push(Span::styled(" ", cursor_style));
             }
             result.push(Line::from(spans));

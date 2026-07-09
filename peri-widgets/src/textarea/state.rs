@@ -30,6 +30,8 @@ pub struct TextAreaState {
     history: history::History,
     /// 最近被拉出（yank）的文本
     pub yank: Option<YankText>,
+    /// 占位符文本（内容为空时显示，空字符串=禁用）
+    pub placeholder: String,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -41,6 +43,7 @@ impl Default for TextAreaState {
             selection_start: None,
             history: history::History::default(),
             yank: None,
+            placeholder: String::new(),
         }
     }
 }
@@ -246,6 +249,11 @@ impl TextAreaState {
 
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
+    }
+
+    /// 设置占位符文本（空字符串清空）。
+    pub fn set_placeholder(&mut self, placeholder: impl Into<String>) {
+        self.placeholder = placeholder.into();
     }
 
     /// 把当前字符光标转换为字节偏移。

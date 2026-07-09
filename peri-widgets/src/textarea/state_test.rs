@@ -101,9 +101,24 @@ fn sel_style() -> Style {
     Style::default().bg(Color::DarkGray)
 }
 
+fn ph_style() -> Style {
+    Style::default().fg(Color::Gray)
+}
+
 #[test]
 fn test_render_multiline_empty_shows_cursor() {
-    let lines = render_multiline_with_cursor("", 0, cursor_style(), None, sel_style(), false);
+    let lines = render_multiline_with_cursor(
+        "",
+        0,
+        cursor_style(),
+        None,
+        sel_style(),
+        None,
+        ph_style(),
+        1,
+        false,
+        true,
+    );
     assert_eq!(lines.len(), 1);
     // 空态：单行，光标为反色 space（字符反色风格）
     let spans = &lines[0].spans;
@@ -113,7 +128,18 @@ fn test_render_multiline_empty_shows_cursor() {
 
 #[test]
 fn test_render_multiline_empty_loading_shows_blank() {
-    let lines = render_multiline_with_cursor("", 0, cursor_style(), None, sel_style(), true);
+    let lines = render_multiline_with_cursor(
+        "",
+        0,
+        cursor_style(),
+        None,
+        sel_style(),
+        None,
+        ph_style(),
+        1,
+        true,
+        true,
+    );
     assert_eq!(lines.len(), 1);
     assert!(lines[0].spans.is_empty() || lines[0].spans.iter().all(|s| s.content.is_empty()));
 }
@@ -121,8 +147,18 @@ fn test_render_multiline_empty_loading_shows_blank() {
 #[test]
 fn test_render_multiline_cjk_cursor_mid_line() {
     // "你好世界" (4 CJK chars, 8 display cols), cursor 在位置 2（"好"之后即"世"上）
-    let lines =
-        render_multiline_with_cursor("你好世界", 2, cursor_style(), None, sel_style(), false);
+    let lines = render_multiline_with_cursor(
+        "你好世界",
+        2,
+        cursor_style(),
+        None,
+        sel_style(),
+        None,
+        ph_style(),
+        12,
+        false,
+        true,
+    );
     assert_eq!(lines.len(), 1);
     // spans: [Span("你好"), Span("世", cursor_style), Span("界")]
     assert_eq!(lines[0].spans.len(), 3);
@@ -138,7 +174,18 @@ fn test_render_multiline_cjk_cursor_mid_line() {
 #[test]
 fn test_render_multiline_cjk_cursor_at_start() {
     // "你好", cursor 在位置 0（"你"上）
-    let lines = render_multiline_with_cursor("你好", 0, cursor_style(), None, sel_style(), false);
+    let lines = render_multiline_with_cursor(
+        "你好",
+        0,
+        cursor_style(),
+        None,
+        sel_style(),
+        None,
+        ph_style(),
+        12,
+        false,
+        true,
+    );
     assert_eq!(lines.len(), 1);
     // spans: [Span("你", cursor_style), Span("好")]
     assert_eq!(lines[0].spans.len(), 2);
@@ -152,7 +199,18 @@ fn test_render_multiline_cjk_cursor_at_start() {
 #[test]
 fn test_render_multiline_cjk_cursor_at_end() {
     // "你好", cursor 在位置 2（末尾）
-    let lines = render_multiline_with_cursor("你好", 2, cursor_style(), None, sel_style(), false);
+    let lines = render_multiline_with_cursor(
+        "你好",
+        2,
+        cursor_style(),
+        None,
+        sel_style(),
+        None,
+        ph_style(),
+        12,
+        false,
+        true,
+    );
     assert_eq!(lines.len(), 1);
     // spans: [Span("你好"), Span(" ", cursor_style)]
     assert_eq!(lines[0].spans.len(), 2);
@@ -163,8 +221,18 @@ fn test_render_multiline_cjk_cursor_at_end() {
 #[test]
 fn test_render_multiline_cjk_cursor_second_line() {
     // "abc\n你好", cursor 在位置 5（第二行"好"上）
-    let lines =
-        render_multiline_with_cursor("abc\n你好", 5, cursor_style(), None, sel_style(), false);
+    let lines = render_multiline_with_cursor(
+        "abc\n你好",
+        5,
+        cursor_style(),
+        None,
+        sel_style(),
+        None,
+        ph_style(),
+        12,
+        false,
+        true,
+    );
     assert_eq!(lines.len(), 2);
     // 第一行无光标
     assert_eq!(lines[0].spans.len(), 1);
@@ -189,8 +257,18 @@ fn test_display_width_before_cjk() {
 
 #[test]
 fn test_render_multiline_splits_newlines() {
-    let lines =
-        render_multiline_with_cursor("a\nb\nc", 0, cursor_style(), None, sel_style(), false);
+    let lines = render_multiline_with_cursor(
+        "a\nb\nc",
+        0,
+        cursor_style(),
+        None,
+        sel_style(),
+        None,
+        ph_style(),
+        12,
+        false,
+        true,
+    );
     assert_eq!(lines.len(), 3);
 }
 
@@ -391,7 +469,11 @@ fn test_render_selection_single_line() {
         cursor_style(),
         Some((0, 5)),
         sel_style(),
+        None,
+        ph_style(),
+        12,
         false,
+        true,
     );
     assert_eq!(lines.len(), 1);
     // 应该有带 bg=DarkGray 的 Span（选区部分）
@@ -404,7 +486,18 @@ fn test_render_selection_single_line() {
 
 #[test]
 fn test_render_selection_none_renders_normally() {
-    let lines = render_multiline_with_cursor("hello", 0, cursor_style(), None, sel_style(), false);
+    let lines = render_multiline_with_cursor(
+        "hello",
+        0,
+        cursor_style(),
+        None,
+        sel_style(),
+        None,
+        ph_style(),
+        12,
+        false,
+        true,
+    );
     assert_eq!(lines.len(), 1);
     // 无选区时，不应有 DarkGray bg span
     let has_dark_bg = lines[0]
@@ -412,4 +505,55 @@ fn test_render_selection_none_renders_normally() {
         .iter()
         .any(|sp| sp.style.bg == Some(Color::DarkGray));
     assert!(!has_dark_bg);
+}
+
+#[test]
+fn test_render_show_cursor_false_no_cursor_highlight() {
+    // show_cursor=false：光标位置字符不应用 cursor_style，无行尾 styled space
+    let lines = render_multiline_with_cursor(
+        "hello",
+        2,
+        cursor_style(),
+        None,
+        sel_style(),
+        None,
+        ph_style(),
+        12,
+        false,
+        false,
+    );
+    assert_eq!(lines.len(), 1);
+    // 所有 span 都应是默认 style（无 cursor_style 高亮）
+    for span in &lines[0].spans {
+        assert_eq!(
+            span.style,
+            Style::default(),
+            "show_cursor=false 时文本不应有光标高亮"
+        );
+    }
+}
+
+#[test]
+fn test_render_show_cursor_false_empty_with_placeholder() {
+    // show_cursor=false + 空文本 + placeholder：渲染占位文本，无光标 space
+    let lines = render_multiline_with_cursor(
+        "",
+        0,
+        cursor_style(),
+        None,
+        sel_style(),
+        Some("输入消息..."),
+        ph_style(),
+        1,
+        false,
+        false,
+    );
+    assert_eq!(lines.len(), 1);
+    // 第一个 span 是 placeholder 文本（作为当前行显示的 placeholder 不被 cursor_style 干扰）
+    // 不应该有 cursor_style 的 space
+    let has_cursor_styled = lines[0]
+        .spans
+        .iter()
+        .any(|s| s.content == " " && s.style != Style::default());
+    assert!(!has_cursor_styled, "show_cursor=false 空态不应有光标 space");
 }

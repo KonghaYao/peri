@@ -31,9 +31,10 @@ use std::sync::OnceLock;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::{
-    ACP_STATE, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST, INPUT_AREA_ESC_PREFIX,
-    INPUT_BUFFER, LOCAL_EVENT_TX, MENTION_PREFIX, MENTION_SELECTED_INDEX, PREDICTION, SKILL_NAMES,
-    SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX,
+    ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST,
+    INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LOCAL_EVENT_TX, MENTION_PREFIX, MENTION_SELECTED_INDEX,
+    POPUP_KIND, PREDICTION, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX,
+    SUBMIT_TX,
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
@@ -78,6 +79,8 @@ pub struct InputAreaProps {
 pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 单一编辑状态——闭包编辑 + 渲染读取共享同一实例
     let state = hooks.use_state(TextAreaState::default);
+    // 终端窗口焦点：FocusGained/FocusLost 事件驱动，切换 tmux 窗格/终端标签时隐藏光标
+    let term_focused = hooks.use_state(|| true);
 
     // 追踪 composer 区域 + overlay 高度，用于鼠标点击→光标定位
     // area_tracker: 值拷贝模式（仿 MsgAreaTracker），避免每帧 Arc 重建导致 handler 读到 None
@@ -87,6 +90,26 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         composer_area = tracker.rect; // 每帧取副本，区块结束即释放 &mut hooks 借用
     }
     let overlay_height = Arc::new(parking_lot::Mutex::new(0u16));
+
+    // 终端焦点切换（tmux 窗格 / 终端标签切换）：FocusGained/FocusLost 更新 term_focused
+    {
+        let tf = term_focused;
+        hooks.use_event_handler(
+            ratatui_kit::prelude::EventScope::Global,
+            ratatui_kit::prelude::EventPriority::Normal,
+            move |event| match event {
+                Event::FocusGained => {
+                    *tf.write() = true;
+                    EventResult::Consumed
+                }
+                Event::FocusLost => {
+                    *tf.write() = false;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            },
+        );
+    }
 
     hooks.use_event_handler(
         EventScope::Current,
@@ -444,6 +467,26 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let text = editor.text.clone();
     let cursor = editor.cursor;
     let loading = props.loading;
+    // 光标显示逻辑：loading 态始终显示；无面板/弹窗激活时显示；否则隐藏
+    // use_atom 确保面板/弹窗变化时触发重渲染；*解引用取最新值
+    let _panel_guard = hooks.use_atom(&ACTIVE_PANEL);
+    let _popup_guard = hooks.use_atom(&POPUP_KIND);
+    let active_panel = *ACTIVE_PANEL.state().read();
+    let popup_kind = *POPUP_KIND.state().read();
+    let show_cursor = loading
+        || (*term_focused.read() && active_panel.is_none() && popup_kind.is_none());
+
+    // 选区范围（从 TextAreaState 传递到渲染器）
+    let selection_range = editor.selection_range();
+    // 占位符文本：优先使用 prediction（Tab 补全），其次使用 editor 设定的占位符
+    let pred_text = hooks.use_atom(&PREDICTION).read().text.clone();
+    let placeholder_str: Option<&str> = if !pred_text.is_empty() {
+        Some(pred_text.as_str())
+    } else if !editor.placeholder.is_empty() {
+        Some(editor.placeholder.as_str())
+    } else {
+        None
+    };
 
     // 当前激活状态（驱动 popup 渲染）
     let mention_active = *AT_MENTION_ACTIVE.state().read();
@@ -460,12 +503,23 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         String::new()
     };
 
-    // 多行渲染——按 \n 拆分，每行作为独立 Line，光标高亮放在对应行
-    let lines = render_multiline_with_cursor_for_themed(&text, cursor, loading);
-
-    // 计算 composer 本体高度；popup 额外占位，避免被输入区自身裁切。
+    // 计算 editor 视口高度（用于渲染窗口裁剪）
     let line_count = text.matches('\n').count() + 1;
     let editor_rows = (line_count as u16).clamp(1, 10);
+
+    // 多行渲染——按 \n 拆分，每行作为独立 Line，光标高亮放在对应行
+    // viewport_height 传入实际显示行数，render 内部只渲染该窗口大小的行
+    let lines = render_multiline_with_cursor_for_themed(
+        &text,
+        cursor,
+        selection_range,
+        placeholder_str,
+        editor_rows as usize,
+        loading,
+        show_cursor,
+    );
+
+    // 计算 composer 本体高度；popup 额外占位，避免被输入区自身裁切。
     let composer_height = editor_rows + 2;
 
     // 只在 slash 激活时克隆整个 item 列表——非激活态跳过 50+ item × 3 String 的堆分配
@@ -495,13 +549,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     };
     let ov_height = slash_popup_height.max(mention_popup_height);
     *overlay_height.lock() = slash_popup_height.max(mention_popup_height);
-    // 预测文本（buffer 为空且 prediction 非空时显示为灰色占位符）
-    let pred_text = hooks.use_atom(&PREDICTION).read().text.clone();
-    let show_prediction = !hidden && !pred_text.is_empty() && text.is_empty();
     let total_height = if hidden {
         0
     } else {
-        composer_height + ov_height + if show_prediction { 1 } else { 0 }
+        composer_height + ov_height
     };
 
     let composer_lines = build_composer_lines(lines, loading);
@@ -580,19 +631,6 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         height: Constraint::Length(composer_height),
                     ) {
                         Text(text: composer_paragraph)
-                    }
-                ).into_any()
-            } else {
-                element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
-            } }
-            { if show_prediction {
-                let pred_line = Line::from(Span::styled(
-                    format!("  {}", pred_text),
-                    Style::default().fg(theme::component().statusbar.muted),
-                ));
-                element!(
-                    View(width: Constraint::Fill(1), height: Constraint::Length(1)) {
-                        Text(text: Paragraph::new(pred_line))
                     }
                 ).into_any()
             } else {
@@ -916,20 +954,33 @@ fn detect_slash_token(text: &str, cursor_byte: usize) -> Option<(String, usize)>
 fn render_multiline_with_cursor_for_themed(
     text: &str,
     cursor: usize,
+    selection_range: Option<(usize, usize)>,
+    placeholder: Option<&str>,
+    viewport_height: usize,
     loading: bool,
+    show_cursor: bool,
 ) -> Vec<ratatui::text::Line<'static>> {
     let tokens = input_tokens();
     let cursor_style = Style::default()
         .fg(tokens.cursor_fg)
         .bg(tokens.cursor_bg)
         .add_modifier(Modifier::BOLD);
+    let selection_style = Style::default()
+        .fg(tokens.cursor_fg)
+        .bg(tokens.cursor_bg)
+        .add_modifier(Modifier::DIM);
+    let placeholder_style = Style::default().fg(tokens.placeholder);
     peri_widgets::textarea::render_multiline_with_cursor(
         text,
         cursor,
         cursor_style,
-        None,
-        Style::default(),
+        selection_range,
+        selection_style,
+        placeholder,
+        placeholder_style,
+        viewport_height,
         loading,
+        show_cursor,
     )
 }
 
