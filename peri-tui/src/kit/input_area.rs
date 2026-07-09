@@ -473,8 +473,8 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let _popup_guard = hooks.use_atom(&POPUP_KIND);
     let active_panel = *ACTIVE_PANEL.state().read();
     let popup_kind = *POPUP_KIND.state().read();
-    let show_cursor = loading
-        || (*term_focused.read() && active_panel.is_none() && popup_kind.is_none());
+    let show_cursor =
+        loading || (*term_focused.read() && active_panel.is_none() && popup_kind.is_none());
 
     // 选区范围（从 TextAreaState 传递到渲染器）
     let selection_range = editor.selection_range();

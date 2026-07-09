@@ -488,6 +488,22 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_view_models(state);
             push_acp_state(state);
         }
+        BgCallbackBubble { .. } => {
+            // bg callback flush-only：把 current_turn 归档到 committed，
+            // 但不 push bg 回调气泡本身。气泡由标准 session/update 通道的
+            // LocalUserBubble 负责推送。这样保证：
+            // ① current_turn 内容在前（flush）
+            // ② bg 回调气泡在中间（LocalUserBubble 随后到达）
+            // ③ 后续 AI 内容在后（TurnDone 归档）
+            if !state.current_turn.committed && !state.current_turn.is_empty() {
+                for vm in state.current_turn.view_models() {
+                    state.committed.push_back(vm.clone());
+                }
+            }
+            state.current_turn.reset();
+            push_view_models(state);
+            push_acp_state(state);
+        }
         CommittedAssistantText { text } => {
             let vm = TuiRenderUnit::TuiAssistantBubble(
                 crate::kit::tui_render_unit::TuiAssistantBubble {

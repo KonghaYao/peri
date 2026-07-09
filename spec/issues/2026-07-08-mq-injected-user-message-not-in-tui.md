@@ -128,4 +128,60 @@ bg agent 完成 ─┬─ BgRegistryEvent::Completed → ACP unstable event
 
 ## 修复记录
 
-（由 fix-issue 或 issue-verify skill 追加，创建时留空）
+### 修复 #1：push_session_update 方案（2026-07-08）—— 失败
+
+- **操作人**：agent
+- **思路**：executor 的 registry event pump 中，`BgRegistryEvent::Completed` 分支调用 `event_sink.push_session_update("user_message_chunk", {text})`，利用标准 ACP `session/update` 通道直接推入 TUI bridge 的 `handle_session_update_peri` 处理
+- **结果**：bg callback 气泡出现在 position 2（用户输入之后、AI turn 之前）
+- **根因**：`push_session_update` → `session/update` → TUI bridge 立即 push 到 committed。但此时用户刚提交 `/bg` 命令，committed 只有 `LocalUserBubble`，bg callback 排在用户输入和 AI 回复之间
+
+### 修复 #2：pending_bg_message 延迟方案（2026-07-08）—— 失败
+
+- **操作人**：agent
+- **思路**：用 volatile `BridgeState.pending_bg_message: Option<String>` 暂存 bg callback 文本，`TurnDone` 归档 `current_turn` 之后再 push 到 committed。意图是保证 bg callback 位于当前 AI 回复**之后**
+- **改动**：新增 `AcpEventData::BgCallbackUserMessage`、`BridgeState.pending_bg_message` 字段、`TurnDone` 中的消费逻辑
+- **结果**：bg callback 出现在**队列末尾**（所有 turn 之后）
+- **根因**：`route_bg_result` 同步唤醒 agent + `push_unstable_event` 异步传输之间的竞争条件。`route_bg_result` 先执行（同步 push_defer → notify），agent 立即开始新 turn；`push_unstable_event` 在 transport 层 await 后才到达 bridge——此时可能已经是**后续 turn 的 PromptRunning**，被锚定到后续 turn 的 `TurnDone`，插入到了最后
+
+### 修复 #3：立即 push 方案（2026-07-08）—— 失败
+
+- **操作人**：agent
+- **思路**：回退到最简单策略——`BgCallbackUserMessage` 到达时不分 phase，立即 push 到 committed。利用 committed 已包含历史 turn 内容的特性，让 bg callback 自然排在历史内容之后
+- **改动**：删除 `pending_bg_message` 及相关全部逻辑（净减 ~33 行），改为无条件立即 push
+- **结果**：bg callback 回到 **position 2**（用户输入之后、AI turn 之前）
+- **根因**：当 bg agent 在 `/bg` 命令的 immediate command handler 执行期间或之后不久完成时，committed 只有用户的 `/bg` 输入气泡，还没有 AI 回复。立即 push 导致 bg callback 落在用户输入和 AI 回复之间
+
+### 修复 #4：agent 内部 EventBus 通道（2026-07-09）—— 日志确认位置不对
+
+- **操作人**：agent
+- **思路**：将 emit 点从 registry event pump 移到 agent 的 End 阶段（`append_messages_to_transcript` 前），通过 EventBus → forwarder → mapper 标准通路发送。同时覆盖两条 MQ drain 路径（End 的 `should_continue` + post-wake drain）。
+- **改动**：新增 `StateEvent::SyntheticUserMessage`、mapper_v2 映射、mapper 生成 `SessionUpdate::UserMessageChunk`、mod.rs 双处 emit
+- **结果**：bg callback 出现在 position 2（用户输入之后、AI turn 之前）
+- **根因分析（日志确证）**：TUI 日志 `[CLEAR_DEBUG]` 精确记录了时序——`LocalUserBubble` 到达时 `committed_before=1 committed_after=2`，而 agent 的 `TurnDone` 在 2 秒后才发生。agent ReAct 循环中，TurnDone（`push_done`）只在循环**退出**时触发，bg callback 消息在循环**内部**（post-wake drain 后）到达，早于 TurnDone。TurnDone 把整个 turn 的 AI 内容（包含 bg 前和 bg 后两段）**一次性归档**到 committed，bg callback 只能位于这整个块之前（position 2）或之后（末尾）。
+
+### 修复 #5：双通道 flush-then-push 方案（2026-07-09）—— ✅ 成功
+
+- **操作人**：agent
+- **思路**：双通道协同——
+  1. **unstable event 通道**：`push_unstable_event("bg-callback-user-message")` → `BgCallbackBubble` → **只 flush** current_turn 到 committed（切分 visual turn），不 push 自身
+  2. **session/update 通道**：`push_event` → mapper → `SessionUpdate::UserMessageChunk` → `LocalUserBubble` → **push** 气泡内容
+  3. 事件泵**先发 unstable event 再发 push_event**，保证 TUI bridge 先收到 flush 再收到气泡
+- **改动**：
+  - `peri-agent/src/agent/events_v2.rs`：新增 `StateEvent::SyntheticUserMessage` 变体（+17 行）
+  - `peri-agent/src/agent/events_v2_mapper.rs`：`SyntheticUserMessage → ExecutorEvent::MessageAdded`（+5 行）
+  - `peri-agent/src/agent/stages/mod.rs`：End 阶段 + post-wake drain 两处 emit（共 +52 行）
+  - `peri-acp/src/event/mapper.rs`：`MessageAdded` 生成 `SessionUpdate::UserMessageChunk`（+22 行）
+  - `peri-acp/src/session/executor_helpers.rs`：event pump 中 `MessageAdded` 额外发 `push_unstable_event`（+18 行）
+  - `peri-acp/src/session/event_sink.rs`：`push_session_update` trait 方法与实现（+18 行）
+  - `peri-tui/src/kit/acp_types.rs`：新增 `BgCallbackBubble` 变体 + decode（+11 行）
+  - `peri-tui/src/kit/acp_events.rs`：`BgCallbackBubble` handler（flush-only，+16 行）
+  - `peri-tui/src/kit/acp_bridge.rs`：`event_kind_short` 新增分支（+1 行）
+- **结果**：✅ 顺序正确（`[turn 1 AI] → [bg callback] → [turn 2 AI]`），无重复
+- **验证**：1309 tests pass（peri-agent 616 + peri-acp 278 + peri-tui 415）
+
+### 核心教训（写在 CLAUDE.md 中）
+
+详见 CLAUDE.md 新增「bg callback 气泡五次修复全记录」章节。核心点：
+1. TUI 的 `committed` vs `current_turn` 二分是根本约束——TurnDone 是唯一提交点，Turn 内 AI 内容不可分割
+2. 双通道（unstable + session/update）+ 控制发送顺序是唯一可靠方案
+3. 从日志中找真相（`[CLEAR_DEBUG]` committed_before/after），不要在脑子里建模

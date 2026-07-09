@@ -7,8 +7,12 @@
 //! - **Category ③** (TUI-only): StateSnapshot, Subagent*, Compact*, ContextWarning, LlmRetrying, etc.
 //!   → `forward_to_tui: true` only
 //! - **Category ④** (观测层): AgentLifecycle, TurnCompleted → `observable: true`
-//! - **Filtered**: MessageAdded, LlmCallStart, LlmCallEnd(usage:None)
+//! - **Filtered**: LlmCallStart, LlmCallEnd(usage:None), LlmRequestPayload
 //!   → empty
+//! - **Synthetic (Category ①)**: MessageAdded → `user_message_chunk` session/update
+//!   → injects synthetic human messages (bg agent callback etc.) into TUI committed.
+//!   Note: 同时走 unstable event 通道（executor_helpers）发送 BgCallbackBubble 做 flush，
+//!   session/update 通道负责推送气泡内容，unstable event 通道负责切分 visual turn。
 
 use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, SessionUpdate,
@@ -300,11 +304,24 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32) -> Vec<MappedEvent>
         // 此处预留路由位。未来扩展时启用。
 
         // ── Filtered: no output ───────────────────────────────────────────────────
-        ExecutorEvent::MessageAdded(_)
-        | ExecutorEvent::LlmCallStart { .. }
+        ExecutorEvent::LlmCallStart { .. }
         | ExecutorEvent::LlmCallEnd { usage: None, .. }
         | ExecutorEvent::LlmRequestPayload { .. } => {
             vec![MappedEvent::none()]
+        }
+
+        // ── Synthetic user message (Category ①) ─────────────────────────────────
+        ExecutorEvent::MessageAdded(msg) => {
+            let text = msg.content();
+            vec![MappedEvent {
+                updates: vec![SessionUpdate::UserMessageChunk(ContentChunk::new(
+                    ContentBlock::Text(TextContent::new(text.to_string())),
+                ))],
+                forward_to_tui: false,
+                hitl_pending: false,
+                observable: false,
+                source_agent_id: None,
+            }]
         }
     }
 }
@@ -455,6 +472,7 @@ pub fn executor_event_to_acp(event: &ExecutorEvent) -> Option<super::AcpEvent> {
         }),
         // Category ① events: already handled via session/update
         // Filtered events: not forwarded
+        // Note: MessageAdded is handled via session/update (above), not forwarded as AcpEvent.
         ExecutorEvent::TextChunk { .. }
         | ExecutorEvent::AiReasoning { .. }
         | ExecutorEvent::ToolStart { .. }

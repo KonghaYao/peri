@@ -200,20 +200,35 @@ pub enum StateEvent {
         /// 上下文窗口总量（ContextBudget.context_window），None 表示无配置
         context_total_tokens: Option<u64>,
     },
+    /// 合成用户消息——由 agent 内部注入的 human message（如 bg agent 完成回调）。
+    /// 通过 EventBus → mapper_v2 → ExecutorEvent::MessageAdded → ACP 映射到
+    /// session/update(user_message_chunk) → TUI 用户气泡。
+    /// 与 registry event pump 发 unstable-event 方案相比，本路径没有时序竞争窗口：
+    /// 消息 emit 与 agent 将 MQ 消息写入 transcript 在同一代码点（End 阶段），
+    /// 保证 TUI 气泡位于已于 committed 归档的 turn 之后、当前 turn 之前。
+    SyntheticUserMessage {
+        turn_id: TurnId,
+        agent_id: AgentId,
+        text: String,
+    },
 }
 
 impl StateEvent {
     /// 提取 turn_id
     pub fn turn_id(&self) -> TurnId {
         match self {
-            Self::StateSnapshot { turn_id, .. } => *turn_id,
+            Self::StateSnapshot { turn_id, .. } | Self::SyntheticUserMessage { turn_id, .. } => {
+                *turn_id
+            }
         }
     }
 
     /// 提取 agent_id
     pub fn agent_id(&self) -> AgentId {
         match self {
-            Self::StateSnapshot { agent_id, .. } => *agent_id,
+            Self::StateSnapshot { agent_id, .. } | Self::SyntheticUserMessage { agent_id, .. } => {
+                *agent_id
+            }
         }
     }
 }

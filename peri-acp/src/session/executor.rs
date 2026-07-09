@@ -577,6 +577,11 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
                         // 注意：此注入只对 Agent 工具 bg 模式有效（主 agent 在
                         // run_session_loop 内）；/bg 命令是 immediate command，
                         // 主 agent 不在 loop，注入对它无效（用户已接受此 trade-off）。
+                        //
+                        // bg callback 的 TUI 用户气泡现在由 agent ReAct 循环在
+                        // End 阶段消费 MQ Defer 消息时通过 EventBus 发出（见
+                        // peri-agent/src/agent/stages/mod.rs:607-631），不再由
+                        // registry event pump 单独发送——消除了异步竞争窗口。
                         tracing::info!(
                             task_id = %task_id,
                             "[bg-diag] registry event pump: Completed branch, calling route_bg_result"
@@ -996,9 +1001,12 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
                                 output: format!(
                                     "Workflow '{}' finished with status {:?} ({}ms, {} agents, {} tool calls). \
                                      Results in .claude/workflow-runs/{}/state.json",
-                                    task_result.workflow_name, task_result.status,
-                                    task_result.duration_ms, task_result.agent_count,
-                                    task_result.tool_calls_count, task_result.run_id
+                                    task_result.workflow_name,
+                                    task_result.status,
+                                    task_result.duration_ms,
+                                    task_result.agent_count,
+                                    task_result.tool_calls_count,
+                                    task_result.run_id
                                 ),
                                 tool_calls_count: task_result.tool_calls_count,
                                 duration_ms: task_result.duration_ms,

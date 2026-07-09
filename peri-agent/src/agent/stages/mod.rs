@@ -611,6 +611,24 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // 包裹，符合 CLAUDE.md "中途纠正消息必须用 human + reminder" 约定。
             if !end_out.awakened_messages.is_empty() {
                 let mut transcript = context.transcript.write();
+                // 4. 发送合成 user message 事件——在 agent 消费 MQ Defer 消息时（而非
+                //    在 executor registry event pump 中）发送，消除时序竞争窗口。
+                //    此时前一轮 turn 的 TurnDone 已由 ACP 层归档到 committed，
+                //    TUI bridge 收到事件后推入 committed 的顺序与 agent 内部状态严格一致。
+                //    见 spec/issues/2026-07-08-mq-injected-user-message-not-in-tui.md
+                for msg in &end_out.awakened_messages {
+                    use crate::session::queue::MessageSource;
+                    if msg.source == MessageSource::SubAgentComplete {
+                        let text = msg.message.content().to_string();
+                        context.event_bus.emit_state(
+                            crate::agent::events_v2::StateEvent::SyntheticUserMessage {
+                                turn_id: context.turn_id(),
+                                agent_id: context.agent_id,
+                                text,
+                            },
+                        );
+                    }
+                }
                 append_messages_to_transcript(&mut transcript, end_out.awakened_messages);
             }
             has_tool_calls = false;
@@ -659,6 +677,22 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                             // 多余续跑（否则本轮 Receive 跳过 Defer，Reason 看不到，End 才写入触发又一轮）。
                             if let Some(msgs) = context.queue.drain_for_end() {
                                 if !msgs.is_empty() {
+                                    // 4. 发送合成 user message 事件——与 End 阶段
+                                    //    should_continue 分支同模式：在 agent 消费
+                                    //    MQ Defer 消息时发送，消除时序竞争窗口。
+                                    for msg in &msgs {
+                                        use crate::session::queue::MessageSource;
+                                        if msg.source == MessageSource::SubAgentComplete {
+                                            let text = msg.message.content().to_string();
+                                            context.event_bus.emit_state(
+                                                crate::agent::events_v2::StateEvent::SyntheticUserMessage {
+                                                    turn_id: context.turn_id(),
+                                                    agent_id: context.agent_id,
+                                                    text,
+                                                },
+                                            );
+                                        }
+                                    }
                                     let mut transcript = context.transcript.write();
                                     append_messages_to_transcript(&mut transcript, msgs);
                                     tracing::info!(

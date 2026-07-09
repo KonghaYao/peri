@@ -573,11 +573,22 @@ fn assert_filtered(event: &ExecutorEvent, label: &str) {
 }
 
 #[test]
-fn test_message_added_produces_no_output() {
-    assert_filtered(
-        &ExecutorEvent::MessageAdded(BaseMessage::human("test message")),
-        "MessageAdded",
+fn test_message_added_produces_user_message_chunk() {
+    let result = map_event(
+        &ExecutorEvent::MessageAdded(BaseMessage::human("bg result text")),
+        200000,
     );
+    assert_eq!(result.len(), 1);
+    assert!(
+        !result[0].updates.is_empty(),
+        "MessageAdded 应产生 SessionUpdate"
+    );
+    match &result[0].updates[0] {
+        SessionUpdate::UserMessageChunk(_chunk) => {
+            // UserMessageChunk 携带 ContentChunk，由 ACP SDK 序列化——不测试内部结构
+        }
+        other => panic!("应为 UserMessageChunk，实际: {:?}", other),
+    }
 }
 
 #[test]

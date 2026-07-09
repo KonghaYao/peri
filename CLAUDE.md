@@ -215,3 +215,46 @@ TUI 纯 ACP client，通过 `MpscTransport` 通信。Frozen Data Flow：`frozen_
 - `std::sync::RwLockReadGuard` 不是 Send → async 跨 `.await` 用 `parking_lot::RwLock`
 - App 状态拆分：`ServiceRegistry`（跨会话）+ `GlobalUiState`（UI 临时）
 - **[TRAP]** u16 坐标偏移计算必须使用 `saturating_add`/`saturating_sub`，禁止裸 `+`/`-`；单一滚动机制，ScrollView 与 Paragraph 内置滚动不能叠加；剪贴板等阻塞系统 I/O 用 `std::thread::spawn` 独立线程。（详见 spec/global/domains/tui.md#issue_2026-07-05-message-area-crashes-and-rendering）
+
+## bg callback 气泡五次修复全记录（2026-07-09）
+
+**问题描述**：bg agent 完成后注入的合成 user message 不在 TUI 中渲染用户气泡，导致 AI 消息重叠。后续修复尝试中气泡在错误位置出现（position 2 或末尾）。
+
+**根因约束**：TUI 的 `BridgeState.committed` 和 `current_turn` 是二分结构。`TurnDone`（对应 ACP `push_done`）是 Turn 的**唯一提交点**，发生在 ReAct 循环退出时。同一轮 TurnDone 的 AI 内容是一个不可分割的整体——合成消息只能位于整个块之前或之后，无法插入中间。
+
+### 失败路径
+
+| # | 方案 | 结果 | 根因 |
+|---|------|------|------|
+| 1 | executor registry pump `push_session_update("user_message_chunk")` | position 2 | committed 只有 user 输入，无 AI 内容 |
+| 2 | `BridgeState.pending_bg_message` → TurnDone 后插入 | 末尾 | `route_bg_result` 同步唤醒 agent，unstable event 异步传输→锚定到后续 TurnDone |
+| 3 | 无条件立即 push committed | position 2 | bg agent 在 immediate command 期间完成，committed 无 AI 内容 |
+| 4 | agent End 阶段 EventBus → `SessionUpdate::UserMessageChunk` | position 2 | **日志确证**：Agent 循环内 post-wake drain 后 emit，此时 TurnDone 尚未发生，TurnDone 一次性归档全部 AI 内容 |
+| 5 | ✅ **双通道 flush-then-push** | 正确 | 见下文 |
+
+### 正确方案：双通道 flush-then-push
+
+**架构**：
+```
+agent End 阶段 MQ drain → emit SyntheticUserMessage
+  → EventBus → forwarder → mapper_v2 → ExecutorEvent::MessageAdded
+  → event pump:
+      ① push_unstable_event("bg-callback-user-message") → TUI: BgCallbackBubble → FLUSH current_turn → committed
+      ② push_event → mapper → SessionUpdate::UserMessageChunk → TUI: LocalUserBubble → PUSH 气泡
+```
+
+**关键点**：
+- **`BgCallbackBubble` 只 flush，不 push 自身**（避免重复）。flush 把当前 current_turn 归档到 committed。
+- **`LocalUserBubble` 由标准 session/update 通道推送**，复用了 session replay 已有的 handler（`acp_notifier.rs:483-491`，早已 unguarded）。
+- **事件泵先发 unstable 再发 push_event**，保证 TUI bridge 先收到 flush 再收到气泡。
+- **emit 点在 agent 的 `run_react_loop` 内部**（`stages/mod.rs` 两处：End 阶段 `should_continue` + post-wake `drain_for_end`），消除了 registry event pump 的异步竞争窗口。
+
+**涉及文件**：9 files in 4 crates（peri-agent: events_v2, events_v2_mapper, stages/mod; peri-acp: mapper, mapper_test, executor_helpers, event_sink; peri-tui: acp_types, acp_events, acp_bridge）
+
+**测试**：1309 pass（616 + 278 + 415）
+
+**[TRAP]** 在 TUI bridge 的 `dispatch_and_notify` 中，`committed` 是已归档的 turn 内容，`current_turn` 是当前未归档的 streaming 内容。**TurnDone 是唯一提交点**——发生在 ReAct 循环退出时。任何需要在 Turn 中间插入的合成消息，都必须通过 **flush current_turn → committed** 先行切分 visual turn，再 push 自身。单通道方案无论时序如何调整都无法解决此约束。
+
+**[TRAP]** 不要从 registry event pump（独立 tokio task）发送 TUI 气泡——时序不可控。必须在 agent 的 consumer 侧（MQ drain 点）emit，让 agent 内部状态作为时序锚点。
+
+**[TRAP]** 用 `[CLEAR_DEBUG]` 日志诊断 TUI 渲染顺序问题：`committed_before/after` + `current_turn_before/after` 精确记录了每次 dispatch 的 committed 和 current_turn 长度变化，是定位时序问题的唯一可靠依据。

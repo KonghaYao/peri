@@ -38,6 +38,13 @@ pub trait EventSink: Send + Sync {
         _data: serde_json::Value,
     ) {
     }
+
+    /// Push an arbitrary `session/update` notification to the transport.
+    ///
+    /// Used for events that don't originate from `ExecutorEvent` — e.g. bg agent
+    /// completion synthetic user messages. Default: no-op (non-TUI sinks have no
+    /// need for ad-hoc session/update emission).
+    async fn push_session_update(&self, _session_id: &str, _update: serde_json::Value) {}
 }
 
 // ── TUI transport-backed EventSink ──────────────────────────────────────────
@@ -207,6 +214,17 @@ impl EventSink for TransportEventSink {
                 "EventSink: push_unstable_event failed (non-critical)"
             );
         }
+    }
+
+    async fn push_session_update(&self, session_id: &str, update: serde_json::Value) {
+        let payload = serde_json::json!({
+            "sessionId": session_id,
+            "update": update,
+        });
+        let _ = self
+            .transport
+            .send_notification("session/update", payload)
+            .await;
     }
 }
 

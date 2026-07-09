@@ -205,6 +205,24 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
                 forward_langfuse_event(tracer, &exec_event, &provider_display_name);
             }
 
+            // 4. bg callback: MessageAdded → TUI flush-then-push.
+            //    agent ReAct 循环在消费 MQ Defer 消息时通过 EventBus 发出
+            //    SyntheticUserMessage → mapper → ExecutorEvent::MessageAdded。
+            //    TUI bridge 收到 BgCallbackBubble 后会先 flush current_turn 到
+            //    committed，再 push bg callback，把同一轮 TurnDone 的 AI 内容
+            //    分割为「bg 前」和「bg 后」两段。
+            if matches!(&exec_event, ExecutorEvent::MessageAdded(_)) {
+                if let ExecutorEvent::MessageAdded(msg) = &exec_event {
+                    let text = msg.content();
+                    sink.push_unstable_event(
+                        &session_id,
+                        "bg-callback-user-message".to_string(),
+                        serde_json::json!({ "text": text }),
+                    )
+                    .await;
+                }
+            }
+
             sink.push_event(&session_id, &exec_event, effective_context_window)
                 .await;
         }

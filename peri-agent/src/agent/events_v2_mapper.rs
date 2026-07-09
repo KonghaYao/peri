@@ -101,6 +101,9 @@ pub fn state_event_to_executor(event: StateEvent) -> Option<ExecutorEvent> {
             budget_pct,
             context_total_tokens,
         }),
+        StateEvent::SyntheticUserMessage { text, .. } => Some(ExecutorEvent::MessageAdded(
+            crate::messages::BaseMessage::human(crate::messages::MessageContent::text(text)),
+        )),
     }
 }
 

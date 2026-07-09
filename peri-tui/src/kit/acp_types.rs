@@ -619,6 +619,12 @@ pub enum AcpEventData {
     /// TUI 内部事件：本地用户提交的 UserBubble。仅 TUI 内部使用，不走 ACP 协议。
     LocalUserBubble { text: String },
 
+    /// bg agent 完成回调 user bubble——要求先 flush current_turn 到 committed，
+    /// 再 push 自身。与 LocalUserBubble 的纯追加不同，此变体主动切分视觉 turn：
+    /// 在 agent ReAct 循环中间插入用户气泡，把同一轮 TurnDone 的 AI 内容
+    /// 分割为「bg 回调前」和「bg 回调后」两段。
+    BgCallbackBubble { text: String },
+
     /// TUI 内部事件：直接将完整 AI 文本气泡追加到 committed。
     /// 用于 session/load replay 及任何需要旁路 current_turn 直接归档的场景。
     CommittedAssistantText { text: String },
@@ -828,6 +834,11 @@ impl AcpEventData {
                 }
             }),
             "bg-task-snapshot" => decode_or_unknown(event, data, AcpEventData::BgTaskSnapshot),
+
+            "bg-callback-user-message" => {
+                let text = data["text"].as_str().unwrap_or("").to_string();
+                AcpEventData::BgCallbackBubble { text }
+            }
 
             // Unknown / future event names -- forward-compatible fallback.
             _ => AcpEventData::unknown(event, data),
