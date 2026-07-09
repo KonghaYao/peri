@@ -306,8 +306,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                             })
                             .unwrap_or(80);
                         let moved = state.write().cursor_visual_down(tw);
-                        if !moved && let Some(historical) = history_down() {
-                            state.write().replace_all_no_undo(historical);
+                        if !moved {
+                            if let Some(historical) = history_down() {
+                                state.write().replace_all_no_undo(historical);
+                            }
                         }
                         EventResult::Consumed
                     }

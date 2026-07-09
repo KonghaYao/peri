@@ -53,11 +53,12 @@ impl KeyBinding {
         // macOS 路径：无修饰符（或仅有 ALT）+ 合成字符匹配
         if let Some(ch) = self.macos_char {
             let mods = key.modifiers;
-            if (mods == KeyModifiers::NONE || mods == KeyModifiers::ALT)
-                && let KeyCode::Char(c) = key.code
-                && c == ch
-            {
-                return true;
+            if mods == KeyModifiers::NONE || mods == KeyModifiers::ALT {
+                if let KeyCode::Char(c) = key.code {
+                    if c == ch {
+                        return true;
+                    }
+                }
             }
         }
         // 标准 Ctrl+(+Shift)+字母 路径
@@ -67,11 +68,12 @@ impl KeyBinding {
             } else {
                 KeyModifiers::CONTROL
             };
-            if key.modifiers == expected_mods
-                && let KeyCode::Char(c) = key.code
-                && c.eq_ignore_ascii_case(&ch)
-            {
-                return true;
+            if key.modifiers == expected_mods {
+                if let KeyCode::Char(c) = key.code {
+                    if c.eq_ignore_ascii_case(&ch) {
+                        return true;
+                    }
+                }
             }
         }
         false

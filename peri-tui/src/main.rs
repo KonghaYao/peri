@@ -298,10 +298,10 @@ fn inject_settings_override(source: &str) {
         return;
     };
 
-    if let Some(env_obj) = json.get("config").and_then(|c| c.get("env"))
-        && let Some(env_map) = env_obj.as_object()
-    {
-        inject_env_map(env_map);
+    if let Some(env_obj) = json.get("config").and_then(|c| c.get("env")) {
+        if let Some(env_map) = env_obj.as_object() {
+            inject_env_map(env_map);
+        }
     }
 }
 

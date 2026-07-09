@@ -125,7 +125,7 @@ fn render_user_bubble(text: &str, width: usize, is_system_reminder: bool) -> Vec
     let component = theme::component();
     let user_bg = component.message.user_bg;
     let parsed = crate::kit::markdown::parse_markdown(text, width);
-    let mut lines = Vec::with_capacity(parsed.lines.len() + 2);
+    let mut lines = Vec::with_capacity(parsed.lines.len() + 1);
     lines.push(Line::from(""));
     for (i, line) in parsed.lines.iter().enumerate() {
         if i == 0 {
@@ -148,7 +148,6 @@ fn render_user_bubble(text: &str, width: usize, is_system_reminder: bool) -> Vec
             lines.push(Line::from(spans));
         }
     }
-    lines.push(Line::from(""));
     lines
 }
 
@@ -384,10 +383,10 @@ fn trim_trailing_blank_lines(lines: &mut Vec<Line<'static>>) {
 
 fn with_message_spacing(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     trim_trailing_blank_lines(&mut lines);
-    let mut spaced = Vec::with_capacity(lines.len() + 2);
+    let mut spaced = Vec::with_capacity(lines.len() + 1);
     spaced.push(Line::from(""));
     spaced.extend(lines);
-    spaced.push(Line::from(""));
+    // 只加头部空行，尾部空行由下一条消息的头部空行提供——避免相邻消息间出现双空行
     spaced
 }
 
@@ -666,27 +665,28 @@ fn render_subagent_group(data: &TuiSubAgentGroup, width: usize) -> Vec<Line<'sta
     }
 
     // 显示 final_result 摘要（如果完成且有结果，最多前 3 行）
-    if let Some(ref s) = status
-        && !s.is_running
-        && let Some(ref result) = s.final_result
-    {
-        let color = if s.is_error {
-            semantic.status.error
-        } else {
-            semantic.text.muted
-        };
-        let preview_lines: Vec<&str> = result
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(3)
-            .collect();
-        for line_text in preview_lines {
-            let truncated: String = line_text.chars().take(80).collect();
-            if !truncated.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim)),
-                    Span::styled(truncated, Style::default().fg(color)),
-                ]));
+    if let Some(ref s) = status {
+        if !s.is_running {
+            if let Some(ref result) = s.final_result {
+                let color = if s.is_error {
+                    semantic.status.error
+                } else {
+                    semantic.text.muted
+                };
+                let preview_lines: Vec<&str> = result
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .take(3)
+                    .collect();
+                for line_text in preview_lines {
+                    let truncated: String = line_text.chars().take(80).collect();
+                    if !truncated.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim)),
+                            Span::styled(truncated, Style::default().fg(color)),
+                        ]));
+                    }
+                }
             }
         }
     }
@@ -765,7 +765,12 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
-        assert_eq!(lines.len(), 3, "用户消息前后应各有 1 行空行：{}", text);
+        assert_eq!(
+            lines.len(),
+            2,
+            "用户消息应 1 行头部空行 + 1 行内容：{}",
+            text
+        );
         assert!(
             text.contains("❯ hello world"),
             "首行应使用 ❯ 前缀：{}",
@@ -774,11 +779,6 @@ mod tests {
         assert!(
             lines
                 .first()
-                .is_some_and(|line| collect_text(std::slice::from_ref(line)).is_empty())
-        );
-        assert!(
-            lines
-                .last()
                 .is_some_and(|line| collect_text(std::slice::from_ref(line)).is_empty())
         );
     }
@@ -859,11 +859,6 @@ mod tests {
         assert!(
             lines
                 .first()
-                .is_some_and(|line| collect_text(std::slice::from_ref(line)).is_empty())
-        );
-        assert!(
-            lines
-                .last()
                 .is_some_and(|line| collect_text(std::slice::from_ref(line)).is_empty())
         );
     }
