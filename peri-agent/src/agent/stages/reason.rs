@@ -214,8 +214,8 @@ mod tests {
     use crate::messages::BaseMessage;
     #[cfg(test)]
     use crate::messages::MessageContent;
-    use crate::session::store::FrozenContext;
     use crate::session::Session;
+    use crate::session::store::FrozenContext;
     use std::sync::Arc;
 
     fn make_context() -> StageContext {

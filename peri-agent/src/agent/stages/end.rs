@@ -47,9 +47,9 @@ mod tests {
     use super::*;
     use crate::agent::stages::StageContext;
     use crate::messages::{BaseMessage, MessageContent};
+    use crate::session::Session;
     use crate::session::queue::MessageSource;
     use crate::session::store::FrozenContext;
-    use crate::session::Session;
     use std::sync::Arc;
 
     fn make_context() -> StageContext {

@@ -3,7 +3,7 @@
 //! 从 MessageQueue 中取出 Prompt + Info 消息，写入 Transcript。
 //! Defer 消息保留在队列中，等待 End 阶段或下个 turn。
 
-use crate::agent::stages::{append_messages_to_transcript, ReceiveInput, ReceiveOutput};
+use crate::agent::stages::{ReceiveInput, ReceiveOutput, append_messages_to_transcript};
 #[cfg(test)]
 use crate::session::QueuedMessage;
 
@@ -38,9 +38,9 @@ mod tests {
     use super::*;
     use crate::agent::stages::StageContext;
     use crate::messages::{BaseMessage, MessageContent};
+    use crate::session::Session;
     use crate::session::queue::MessageSource;
     use crate::session::store::FrozenContext;
-    use crate::session::Session;
     use std::sync::Arc;
 
     fn make_context() -> StageContext {

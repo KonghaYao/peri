@@ -146,8 +146,8 @@ mod tests {
     use super::*;
     use crate::agent::react::{Reasoning, ToolCall};
     use crate::agent::stages::StageContext;
-    use crate::session::store::FrozenContext;
     use crate::session::Session;
+    use crate::session::store::FrozenContext;
     use std::sync::Arc;
 
     fn make_context() -> StageContext {
