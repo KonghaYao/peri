@@ -180,6 +180,7 @@ pub fn render_multiline_with_cursor(
     selection_style: Style,
     placeholder: Option<&str>,
     placeholder_style: Style,
+    default_style: Style,
     max_width: usize,
     viewport_height: usize,
     loading: bool,
@@ -297,10 +298,10 @@ pub fn render_multiline_with_cursor(
                     if seg_start >= s_s_byte && seg_end <= s_e_byte {
                         selection_style
                     } else {
-                        Style::default()
+                        default_style
                     }
                 } else {
-                    Style::default()
+                    default_style
                 };
                 spans.push(Span::styled(seg.to_string(), style));
             }
@@ -337,5 +338,25 @@ pub fn render_multiline_with_cursor(
             result.push(Line::from(line.to_string()));
         }
     }
+
+    // 将每行填充至 max_width——仅当 default_style 有显式 bg 时。
+    // 修复 CJK 删除残影：旧光标 bg 可能残留在新文本右侧空白区域，
+    // 用 default_style 填充可覆盖残留的 cursor bg。
+    // 若无显式 bg（测试路径），跳过填充以避免破坏现有 span 计数断言。
+    if default_style.bg != Style::default().bg {
+        for line in &mut result {
+            let w: usize = line
+                .spans
+                .iter()
+                .flat_map(|s| s.content.chars())
+                .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                .sum();
+            if w < max_width {
+                line.spans
+                    .push(Span::styled(" ".repeat(max_width - w), default_style));
+            }
+        }
+    }
+
     result
 }

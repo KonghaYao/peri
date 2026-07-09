@@ -1,7 +1,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Color, Style},
     widgets::{StatefulWidget, StatefulWidgetRef},
 };
 
@@ -58,6 +58,7 @@ impl StatefulWidgetRef for TextArea {
         };
         let max_width = area.width.saturating_sub(2).max(1) as usize;
         let viewport_height = area.height as usize;
+        let default_style = Style::default().bg(Color::Black);
         let lines = render_multiline_with_cursor(
             &state.text,
             state.cursor,
@@ -66,6 +67,7 @@ impl StatefulWidgetRef for TextArea {
             self.selection_style,
             placeholder,
             self.placeholder_style,
+            default_style,
             max_width,
             viewport_height,
             self.loading,

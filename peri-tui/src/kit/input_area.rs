@@ -18,7 +18,7 @@ use ratatui_kit::{
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction, Rect},
-        style::{Modifier, Style},
+        style::{Color, Modifier, Style},
         text::{Line, Span},
         widgets::{Block, Borders, Paragraph},
     },
@@ -988,6 +988,7 @@ fn render_multiline_with_cursor_for_themed(
         .bg(tokens.cursor_bg)
         .add_modifier(Modifier::DIM);
     let placeholder_style = Style::default().fg(tokens.placeholder);
+    let default_style = Style::default().bg(Color::Reset); // 显式 Reset 覆盖旧 cell bg，但不改变背景色
     peri_widgets::textarea::render_multiline_with_cursor(
         text,
         cursor,
@@ -996,6 +997,7 @@ fn render_multiline_with_cursor_for_themed(
         selection_style,
         placeholder,
         placeholder_style,
+        default_style,
         max_width,
         viewport_height,
         loading,

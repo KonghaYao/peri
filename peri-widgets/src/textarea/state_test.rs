@@ -115,6 +115,7 @@ fn test_render_multiline_empty_shows_cursor() {
         sel_style(),
         None,
         ph_style(),
+        Style::default(),
         12,
         1,
         false,
@@ -137,6 +138,7 @@ fn test_render_multiline_empty_loading_shows_blank() {
         sel_style(),
         None,
         ph_style(),
+        Style::default(),
         12,
         1,
         true,
@@ -157,6 +159,7 @@ fn test_render_multiline_cjk_cursor_mid_line() {
         sel_style(),
         None,
         ph_style(),
+        Style::default(),
         12,
         12,
         false,
@@ -185,6 +188,7 @@ fn test_render_multiline_cjk_cursor_at_start() {
         sel_style(),
         None,
         ph_style(),
+        Style::default(),
         12,
         12,
         false,
@@ -211,6 +215,7 @@ fn test_render_multiline_cjk_cursor_at_end() {
         sel_style(),
         None,
         ph_style(),
+        Style::default(),
         12,
         12,
         false,
@@ -234,6 +239,7 @@ fn test_render_multiline_cjk_cursor_second_line() {
         sel_style(),
         None,
         ph_style(),
+        Style::default(),
         12,
         12,
         false,
@@ -271,6 +277,7 @@ fn test_render_multiline_splits_newlines() {
         sel_style(),
         None,
         ph_style(),
+        Style::default(),
         12,
         12,
         false,
@@ -478,6 +485,7 @@ fn test_render_selection_single_line() {
         sel_style(),
         None,
         ph_style(),
+        Style::default(),
         12,
         12,
         false,
@@ -502,6 +510,7 @@ fn test_render_selection_none_renders_normally() {
         sel_style(),
         None,
         ph_style(),
+        Style::default(),
         12,
         12,
         false,
@@ -527,6 +536,7 @@ fn test_render_show_cursor_false_no_cursor_highlight() {
         sel_style(),
         None,
         ph_style(),
+        Style::default(),
         12,
         12,
         false,
@@ -554,6 +564,7 @@ fn test_render_show_cursor_false_empty_with_placeholder() {
         sel_style(),
         Some("输入消息..."),
         ph_style(),
+        Style::default(),
         12,
         1,
         false,
@@ -631,4 +642,52 @@ fn test_desired_col_cleared_on_undo() {
     assert!(s.desired_col.is_some());
     s.undo();
     assert!(s.desired_col.is_none());
+}
+
+/// 删除 CJK 字符后，旧光标位置的 Span 不应残留 cursor_style。
+/// 验证 default_style 正确覆盖了旧 cursor bg。
+#[test]
+fn test_cjk_delete_no_cursor_ghost() {
+    let cs = cursor_style();
+    let ss = sel_style();
+    let ps = ph_style();
+    let ds = Style::default().bg(Color::Black);
+
+    // 模拟：输入 "你好世界"，cursor 在位置 1（'好' 上）
+    let before = render_multiline_with_cursor(
+        "你好世界", 1,
+        cs, None, ss, None, ps, ds,
+        12, 3, false, true,
+    );
+
+    // 模拟：删除 '你' 后，text="好世界"，cursor 移到位置 0（'好' 上）
+    let after = render_multiline_with_cursor(
+        "好世界", 0,
+        cs, None, ss, None, ps, ds,
+        12, 3, false, true,
+    );
+
+    // 旧光标在 "好"（before 中 index 1）上，bg 应为 CURSOR_BG
+    // 新光标在 "好"（after 中 index 0）上，bg 也应为 CURSOR_BG
+    // 关键是：旧光标位置右侧（"世界"部分）不应残留 cursor bg
+
+    // 检查 after 的第二个字符 "世" 不应有 cursor bg
+    let non_cursor_spans: Vec<_> = after[0].spans.iter()
+        .filter(|s| s.style != cs)
+        .collect();
+
+    // "世" 和 "界" 应在非光标 Span 中，且 bg 应为 ds.bg（Black），非 cs.bg（CURSOR_BG）
+    let text_after_cursor: String = non_cursor_spans.iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(text_after_cursor.contains("世界"),
+        "非光标区域应包含 '世界'，实际: '{text_after_cursor}'");
+
+    for span in &non_cursor_spans {
+        assert_ne!(
+            span.style.bg, cs.bg,
+            "非光标 Span '{content}' 不应有 cursor bg，但有 {bg:?}",
+            content = span.content, bg = span.style.bg,
+        );
+    }
 }

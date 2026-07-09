@@ -74,6 +74,7 @@
 | 2026-07-05 | — | Open | agent | 初始创建 |
 | 2026-07-05 | Open | Fixed | agent | 修复空态双光标 + unicode-width 感知绑定 |
 | 2026-07-05 | Fixed | Partial | agent | 光标残影修复失败，`Paragraph.style(bg)` 不生效 |
+| 2026-07-09 | Partial | Partial | agent | 追加：软换行迁移后问题复现，涉及文件变更记录 |
 
 ## 修复记录
 
@@ -100,3 +101,23 @@
   3. **尝试修复**：`Paragraph.style(Style::default().bg(theme::semantic().surface.default))` 设置显式背景色
 - **结果**：❌ 残影仍存在。`Paragraph.style(bg)` 不足以覆盖残留。
 - **分析**：残影可能不来自 Paragraph 层，而是来自 ratatui-kit `View` 容器或 `AppShell` 根布局的帧间不清除。`element!` 宏树中的 `View` 容器可能未将 Paragraph 的显式背景传播到终端帧缓冲，残影发生在框架层而非 widget 层。需从 ratatui-kit 渲染管线或 `Frame` 层面排查。
+
+### 现象 3（2026-07-09 复现）—— 软换行迁移后问题仍存
+
+**背景**：commit `9df8f6ce` 完成了 textarea 软换行（soft wrapping）重构，`render_multiline_with_cursor` 已从 `input_area.rs` 迁移至 `peri-widgets/src/textarea/render.rs`，`EditorState` 替换为 `TextAreaState`。渲染管线现在走 `wrap_text()` 折行 → `render_multiline_with_cursor`（视觉行渲染）。
+
+**复现**：
+1. 在 composer 输入 "你好世界"
+2. 光标移到中间位置
+3. 按 Backspace 删除一个中文
+4. 观察：光标残影与之前一致——被删除字符位置的白色反色高亮残留
+
+**当前版本涉及文件变更**（相比 2026-07-05 原始 issue）：
+
+| 文件 | 说明 |
+|------|------|
+| `peri-widgets/src/textarea/render.rs` | `render_multiline_with_cursor` 已迁入，使用 `display_width_before` 做光标定位 |
+| `peri-widgets/src/textarea/state.rs` | `TextAreaState` 替代 `EditorState`，cursor 仍为字符索引 |
+| `peri-tui/src/kit/input_area.rs` | 通过 `render_multiline_with_cursor_for_themed` 间接调用，已设 `Paragraph.style(bg)` |
+
+`Paragraph.style(bg)` 的背景色修复在旧管线和新管线中均未消除残影，进一步支持残影来自 ratatui-kit 框架层而非 widget 层的判断。
