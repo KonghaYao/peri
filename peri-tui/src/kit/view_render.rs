@@ -564,68 +564,7 @@ fn render_subagent_group(data: &TuiSubAgentGroup, width: usize) -> Vec<Line<'sta
     // 查询运行时状态（v2 DTO 缺失字段由 status probe 注入）
     let status = lookup_subagent_status(&data.agent_id);
 
-    // Agent 标签颜色：仅 error 态用红色。后台运行 warning 色依赖 is_background
-    // 数据通道（后续迭代），当前所有非 error 态统一 success 绿色
-    let agent_color = match status {
-        Some(ref s) if s.is_error => semantic.status.error,
-        _ => semantic.status.success,
-    };
-
-    let mut header_spans = vec![
-        Span::styled("❯ ", Style::default().fg(semantic.loading)),
-        Span::styled(
-            format!("Agent({})", data.agent_id),
-            Style::default()
-                .fg(agent_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-
-    let task_preview = truncate_str(&data.agent_name, 50);
-    if !task_preview.is_empty() {
-        header_spans.push(Span::styled(
-            format!(" {}", task_preview),
-            Style::default().fg(semantic.text.muted),
-        ));
-    }
-
-    // 运行时状态指示器
-    if let Some(ref s) = status {
-        if s.is_running {
-            header_spans.push(Span::styled(
-                " · ⏳",
-                Style::default().fg(semantic.status.running),
-            ));
-            if s.total_steps > 0 {
-                header_spans.push(Span::styled(
-                    format!(" {} 步", s.total_steps),
-                    Style::default().fg(semantic.text.muted),
-                ));
-            }
-        } else if s.is_error {
-            header_spans.push(Span::styled(
-                " · ❌",
-                Style::default().fg(semantic.status.error),
-            ));
-        } else {
-            header_spans.push(Span::styled(
-                " · ✅",
-                Style::default().fg(semantic.status.success),
-            ));
-        }
-    } else if data.is_running {
-        header_spans.push(Span::styled(
-            " · ⏳",
-            Style::default().fg(semantic.status.running),
-        ));
-    } else if data.view_models.is_empty() {
-        header_spans.push(Span::styled(
-            " · ✅",
-            Style::default().fg(semantic.status.success),
-        ));
-    }
-
-    let mut lines = vec![Line::from(header_spans)];
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
     // 子内容来源优先级：
     // 1. v2 DTO `view_models`（ACP 层填充，当前永久为空 placeholder）
@@ -1410,12 +1349,12 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
-        assert!(text.contains("Agent(sa-1) file-searcher"));
         assert!(
-            text.contains("find foo"),
-            "SubAgent 不再折叠，内容始终可见：{}",
+            !text.contains("Agent(sa-1)"),
+            "SubAgent 组不再渲染 ❯ 头行：{}",
             text
         );
+        assert!(text.contains("find foo"), "子内容应始终可见：{}", text);
     }
 
     #[test]
@@ -1526,8 +1465,16 @@ mod tests {
         });
         let lines = with_status_probe(probe, || render_v2_vm(&vm, 80));
         let text = collect_text(&lines);
-        assert!(text.contains("⏳"), "应显示运行中状态：{}", text);
-        assert!(text.contains("5 步"), "应显示步数：{}", text);
+        assert!(
+            !text.contains("❯"),
+            "SubAgent 组不再渲染 ❯ 箭头头行：{}",
+            text
+        );
+        assert!(
+            !text.contains("· ⏳"),
+            "运行状态指示器已随头行删除：{}",
+            text
+        );
     }
 
     #[test]
@@ -1551,7 +1498,11 @@ mod tests {
         });
         let lines = with_status_probe(probe, || render_v2_vm(&vm, 80));
         let text = collect_text(&lines);
-        assert!(text.contains("✅"), "应显示完成状态：{}", text);
+        assert!(
+            !text.contains("❯"),
+            "SubAgent 组不再渲染 ❯ 箭头头行：{}",
+            text
+        );
         assert!(
             text.contains("⎿ completed task"),
             "应显示结果预览：{}",
@@ -1580,13 +1531,18 @@ mod tests {
         });
         let lines = with_status_probe(probe, || render_v2_vm(&vm, 80));
         let text = collect_text(&lines);
-        assert!(text.contains("❌"), "应显示失败状态：{}", text);
+        assert!(
+            !text.contains("❯"),
+            "SubAgent 组不再渲染 ❯ 箭头头行：{}",
+            text
+        );
+        assert!(!text.contains("· ❌"), "错误指示器已随头行删除：{}", text);
         assert!(text.contains("⎿ Error"), "应显示错误结果：{}", text);
     }
 
     #[test]
     fn test_subagent_group_without_probe_shows_success_icon_for_committed_placeholder() {
-        // 不设置 probe → 已提交的 DTO placeholder 显示完成状态，避免历史消息看起来仍在运行。
+        // 不设置 probe → 已提交的 DTO placeholder
         let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
             agent_id: "fork".into(),
             agent_name: "Agent".into(),
@@ -1597,7 +1553,11 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
-        assert!(text.contains("✅"), "无 probe 时应显示完成状态：{}", text);
+        assert!(
+            !text.contains("❯"),
+            "SubAgent 组不再渲染 ❯ 箭头头行：{}",
+            text
+        );
     }
 
     #[test]
@@ -1612,7 +1572,11 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
-        assert!(text.contains("⏳"), "流式 DTO 应显示运行中状态：{}", text);
+        assert!(
+            !text.contains("❯"),
+            "SubAgent 组不再渲染 ❯ 箭头头行：{}",
+            text
+        );
     }
 
     #[test]
