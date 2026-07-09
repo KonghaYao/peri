@@ -139,7 +139,15 @@ pub(crate) async fn send_available_commands_update(
         return;
     }
     let commands = peri_acp::dispatch::build_available_commands(skills);
-    let update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(commands));
+    let meta = skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>();
+    let update = SessionUpdate::AvailableCommandsUpdate(
+        AvailableCommandsUpdate::new(commands).meta(
+            serde_json::json!({"skillNames": meta})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+    );
     let update_value = match serde_json::to_value(&update) {
         Ok(p) => p,
         Err(e) => {

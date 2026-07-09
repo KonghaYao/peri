@@ -105,6 +105,11 @@ impl AcpTuiClient {
         });
     }
 
+    /// 检查 session_id 是否匹配当前会话。
+    ///
+    /// 当 `current_session_id` 为 `None`（首次连接、尚未创建会话）时返回 `true`，
+    /// 确保 `AvailableCommandsUpdate` 等初始化通知不被丢弃。
+    /// 当已设置会话后，严格按 session_id 过滤。
     fn is_current_session(
         current_session_id: &Arc<Mutex<Option<String>>>,
         session_id: &str,
@@ -113,7 +118,7 @@ impl AcpTuiClient {
             .lock()
             .unwrap()
             .as_deref()
-            .is_some_and(|current| current == session_id)
+            .is_none_or(|current| current == session_id)
     }
 
     // ── Pump ──

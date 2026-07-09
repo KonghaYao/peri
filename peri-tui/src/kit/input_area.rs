@@ -844,6 +844,9 @@ fn build_slash_items() -> Vec<SlashCompletionItem> {
         SKILL_NAMES.state().read().iter().cloned().collect();
     let mut items = Vec::with_capacity(PANELS.len() + remote.len());
     for panel in PANELS {
+        if panel.slash_command.is_empty() {
+            continue;
+        }
         let slash_name = panel.slash_command.to_string();
         items.push(SlashCompletionItem {
             label_lowercase: slash_name.to_lowercase(),

@@ -21,7 +21,8 @@ use tracing::{debug, info, warn};
 use crate::acp_client::AcpNotification;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{
-    ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, HITL_REQUEST_ID, SPINNER_TOKEN_COUNT,
+    ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, HITL_REQUEST_ID, SKILL_NAMES,
+    SPINNER_TOKEN_COUNT,
 };
 use crate::kit::input_area::refresh_slash_items;
 use peri_acp::event::AcpEvent;
@@ -312,6 +313,18 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
         let len = entries.len();
         *AVAILABLE_SLASH_COMMANDS.state().write() = entries;
         refresh_slash_items();
+        // 从 meta 中提取 skill 名称，写入 SKILL_NAMES atom
+        if let Some(skill_names) = update
+            .get("meta")
+            .and_then(|m| m.get("skillNames"))
+            .and_then(|s| s.as_array())
+        {
+            let names: Vec<String> = skill_names
+                .iter()
+                .filter_map(|n| n.as_str().map(String::from))
+                .collect();
+            *SKILL_NAMES.state().write() = names;
+        }
         debug!(
             "kit ACP notifier: updated AVAILABLE_SLASH_COMMANDS ({})",
             len

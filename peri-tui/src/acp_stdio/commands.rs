@@ -20,9 +20,17 @@ pub(super) fn send_available_commands(
     );
     let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
     let cmds = peri_acp::dispatch::build_available_commands(&skills);
+    let meta = skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>();
     let notif = SessionNotification::new(
         session_id.clone(),
-        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(cmds)),
+        SessionUpdate::AvailableCommandsUpdate(
+            AvailableCommandsUpdate::new(cmds).meta(
+                serde_json::json!({"skillNames": meta})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        ),
     );
     let _ = cx.send_notification(notif);
 }
