@@ -47,7 +47,7 @@ thinking 阶段尤为明显：reasoning chunk 比普通 text chunk 更密集，e
 
 | 文件 | 角色 |
 |------|------|
-| `peri-tui/src/kit/message_area.rs` | I23-b 吸底 `use_effect`（lines 524-573）——流式期间每帧 `scroll_to_bottom()` 写入 `ScrollViewState` atom，形成 render↔effect 紧耦合环路导致闪烁 |
+| `peri-tui/src/kit/message_area.rs` | I23-b 吸底 `use_effect`——流式期间每帧 `scroll_to_bottom()` 写入 `ScrollViewState` atom，形成 render↔effect 紧耦合环路导致闪烁。修复 #3 用增量门控 `last_scrolled_at` + 底 guard 解决 |
 | `peri-tui/src/kit/render_bridge.rs` | ~~（误判）poll tick 全量重建竞态~~ 回退，与此 bug 无关 |
 
 ## 状态变更记录
@@ -56,6 +56,7 @@ thinking 阶段尤为明显：reasoning chunk 比普通 text chunk 更密集，e
 |------|-----|-----|--------|------|
 | 2026-07-09 | — | Open | agent | 创建 |
 | 2026-07-09 | Open | Fixed | agent | 根因确认：吸底 `use_effect` 的 `scroll_to_bottom()` 写入环路，移除 effect 后闪烁消失 |
+| 2026-07-09 | Fixed | Fixed | agent | 重新实现吸底逻辑：增量门控 + 跳写 guard + 就近跟随（距底 ≤3 行）。待用户验证 |
 
 ## 修复记录
 
@@ -71,3 +72,14 @@ thinking 阶段尤为明显：reasoning chunk 比普通 text chunk 更密集，e
 - **根因**：`message_area.rs` I23-b 吸底 `use_effect`（`(entries_len, raw_ch)` deps）在流式期间高频触发，每帧 `scroll_to_bottom()` 写入 `ScrollViewState` atom → ratatui-kit 检测 atom 变更 → 重渲染 → `total_visual_rows` 变化 → 下帧 effect 再次触发 → render↔effect 紧耦合环路
 - **修复**：完全移除 `use_effect` 吸底 block（lines 524-573），同时移除仅被该 effect 使用的 `prev_entries_len` state。手动滚动不受影响
 - **涉及文件**：`peri-tui/src/kit/message_area.rs`（-51 lines）
+- **结论**：✅ 暂时移除了吸底逻辑，闪烁消失——确认根因在吸底 effect。但需要恢复吸底功能。
+
+### 修复 #3（2026-07-09）
+
+- **根因**：旧 I23-b 代码两个问题：(a) 每 chunk 无条件调用 `scroll_to_bottom()` 写入 atom，即使已经在底部；(b) 阈值 (`vh/2`, ~20–30 行) 过大，流式期间几乎每帧都触发 atom 写入
+- **修复**：用 **`last_scrolled_at` 增量门控** 代替距离阈值门控：
+  1. **首次/收缩** → 无条件滚到底
+  2. **已在底部** (`scroll_y >= max_scroll`) → 跳写（`scroll_to_bottom()` 把 `offset.y` 设为 `content_height - 1`，远大于 `max_scroll`，即使内容增长 30+ 行仍满足这个 guard）
+  3. **就近跟随** → 仅当用户距底部 ≤3 行 **且** `total_visual_rows` 确实增长了才滚一次。`last_scrolled_at` 记录上次实际滚动时的内容高度，防止同一内容版本多次 atom 写入
+- **涉及文件**：`peri-tui/src/kit/message_area.rs`（新增 `last_scrolled_at` state，重写 effect 逻辑）
+- **待验证**：用户在实际流式场景中测试闪烁是否消除

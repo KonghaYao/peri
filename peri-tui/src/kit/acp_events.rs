@@ -336,11 +336,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                         let text = extract_message_text(&msg);
                         let content_hash = tui_hash_str(&text);
                         let vm = match role {
-                            "user" => TuiRenderUnit::TuiUserBubble(TuiUserBubble {
-                                text,
-                                content_hash,
-                                is_system_reminder: false,
-                            }),
+                            "user" => TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(text)),
                             "assistant" => TuiRenderUnit::TuiAssistantBubble(
                                 crate::kit::tui_render_unit::TuiAssistantBubble {
                                     text,
@@ -498,11 +494,9 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         LocalUserBubble { text } => {
             state
                 .committed
-                .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble {
-                    text: text.clone(),
-                    content_hash: tui_hash_str(text),
-                    is_system_reminder: false,
-                }));
+                .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
+                    text.clone(),
+                )));
             push_view_models(state);
             push_acp_state(state);
         }
@@ -1040,11 +1034,9 @@ mod tests {
     fn test_turn_interrupted_empty_skips_archive() {
         crate::kit::atoms::init_atoms();
         // 预置一条 committed 数据
-        let pre_existing = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
-            text: "existing".into(),
-            content_hash: 1,
-            is_system_reminder: false,
-        })]);
+        let pre_existing = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(
+            TuiUserBubble::new("existing".into()),
+        )]);
         *VIEW_MODELS.state().write() = ViewModelsSnapshot {
             items: pre_existing.clone(),
             generation: 0,
@@ -1085,11 +1077,9 @@ mod tests {
     fn test_push_view_models_uses_bridge_state() {
         crate::kit::atoms::init_atoms();
         // atom 中有旧数据
-        let old_items = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
-            text: "old data".into(),
-            content_hash: 1,
-            is_system_reminder: false,
-        })]);
+        let old_items = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
+            "old data".into(),
+        ))]);
         *VIEW_MODELS.state().write() = ViewModelsSnapshot {
             items: old_items,
             generation: 0,
@@ -1211,11 +1201,9 @@ mod tests {
         crate::kit::atoms::init_atoms();
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
         // 预置 committed 旧数据
-        let pre_existing = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
-            text: "old".into(),
-            content_hash: 1,
-            is_system_reminder: false,
-        })]);
+        let pre_existing = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(
+            TuiUserBubble::new("old".into()),
+        )]);
         let mut state = BridgeState {
             variant: 1,
             committed: pre_existing,

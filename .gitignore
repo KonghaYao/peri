@@ -200,3 +200,4 @@ settings.json
 !.claude/skills/start-devflow/
 !.claude/agents/
 !.claude/agents/coder.md
+.qoder/**/*

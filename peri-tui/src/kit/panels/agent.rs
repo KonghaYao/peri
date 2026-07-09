@@ -274,7 +274,7 @@ mod tests {
             items: im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: "hi".to_string(),
                 content_hash: 0,
-                is_system_reminder: false,
+                reminder: None,
             })]),
             generation: 0,
         };

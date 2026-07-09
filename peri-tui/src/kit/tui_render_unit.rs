@@ -50,17 +50,84 @@ pub enum TuiRenderUnit {
 // Leaf data structures
 // ---------------------------------------------------------------------------
 
+/// System-reminder 分类——10 种从 `<system-reminder>` 标签检测到的类型。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReminderType {
+    /// Channel（微信/Slack/飞书等）来源消息
+    ChannelMessage(String),
+    /// Cron 定时任务注入
+    CronReminder,
+    /// 后台任务完成通知
+    BgTaskCompleted,
+    /// Fork 模式背景 Agent 注入
+    ForkMode,
+    /// 上下文压缩摘要
+    ContextCompacted,
+    /// CONTINUATION_HINT 系统提示
+    ContinuationHint,
+    /// 信任边界声明
+    TrustBoundary,
+    /// 工具相关系统提醒
+    ToolReminder,
+    /// 子 Agent 结果摘要
+    SubagentResult,
+    /// 未匹配分类的兜底类型
+    GenericReminder,
+}
+
+impl ReminderType {
+    /// 中文标签，用于缩略渲染第一行。
+    /// 返回 `String` 而非 `&'static str` 是为了 `ChannelMessage` 的动态 source。
+    pub fn label(&self) -> String {
+        match self {
+            ReminderType::ChannelMessage(source) => format!("Channel ({})", source),
+            ReminderType::CronReminder => "Cron 任务".to_string(),
+            ReminderType::BgTaskCompleted => "后台任务".to_string(),
+            ReminderType::ForkMode => "Fork 模式".to_string(),
+            ReminderType::ContextCompacted => "上下文压缩".to_string(),
+            ReminderType::ContinuationHint => "系统提示".to_string(),
+            ReminderType::TrustBoundary => "信任边界".to_string(),
+            ReminderType::ToolReminder => "工具提醒".to_string(),
+            ReminderType::SubagentResult => "子Agent 结果".to_string(),
+            ReminderType::GenericReminder => "系统提醒".to_string(),
+        }
+    }
+}
+
+/// 从 `<system-reminder>` 标签解析的信息——类型 + 摘要文本。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReminderInfo {
+    pub reminder_type: ReminderType,
+    /// 首非空行数据摘要，截断到 200 字符
+    pub summary: String,
+}
+
 /// User message bubble -- right-aligned plain text.
 #[derive(Debug, Clone)]
 pub struct TuiUserBubble {
     pub text: String,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
-    /// 是否为 system_reminder 注入消息（不含 CONTINUATION_HINT 的裸 <system-reminder>）。
-    pub is_system_reminder: bool,
+    /// 从文本中检测到的 system-reminder 信息。
+    /// `None` 表示普通用户消息气泡。
+    pub reminder: Option<ReminderInfo>,
 }
 
-tui_impl_partial_eq!(TuiUserBubble: text);
+impl TuiUserBubble {
+    /// 构造函数——自动从文本中检测 `<system-reminder>` 标签并提取
+    /// [`ReminderInfo`]。
+    pub fn new(text: String) -> Self {
+        let content_hash = tui_hash_str(&text);
+        let reminder = detect_reminder(&text);
+        TuiUserBubble {
+            text,
+            content_hash,
+            reminder,
+        }
+    }
+}
+
+tui_impl_partial_eq!(TuiUserBubble: text, reminder);
 
 /// Agent reply bubble -- left-aligned markdown with optional reasoning block.
 ///
@@ -248,6 +315,111 @@ pub enum TuiHunkLineKind {
 }
 
 // ---------------------------------------------------------------------------
+// system-reminder 检测函数
+// ---------------------------------------------------------------------------
+
+/// 提取 `<system-reminder>` 标签间的内部文本（首个匹配）。
+fn extract_reminder_inner(text: &str) -> Option<String> {
+    let tag = "<system-reminder>";
+    let close_tag = "</system-reminder>";
+    let start = text.find(tag)?;
+    let content_start = start + tag.len();
+    let end = text[content_start..].find(close_tag)?;
+    Some(text[content_start..content_start + end].trim().to_string())
+}
+
+/// 从 reminder 内部文本提取 channel 来源短名。
+fn extract_channel_source(inner: &str) -> Option<String> {
+    // 匹配 plugin:name:name 格式
+    if let Some(plugin_pos) = inner.find("plugin:") {
+        let after = &inner[plugin_pos + "plugin:".len()..];
+        if let Some(colon_pos) = after.find(':') {
+            let raw = &after[..colon_pos];
+            // 映射到显示名
+            let display = match raw {
+                "weixin" | "wechat" => "微信",
+                "slack" => "Slack",
+                "feishu" => "飞书",
+                "dingtalk" => "钉钉",
+                "telegram" => "Telegram",
+                other => other,
+            };
+            return Some(display.to_string());
+        }
+    }
+
+    // channel source 关键词直搜
+    let lower = inner.to_lowercase();
+    for (kw, display) in &[
+        ("weixin", "微信"),
+        ("wechat", "微信"),
+        ("slack", "Slack"),
+        ("feishu", "飞书"),
+        ("dingtalk", "钉钉"),
+        ("telegram", "Telegram"),
+    ] {
+        if lower.contains(kw) {
+            return Some(display.to_string());
+        }
+    }
+
+    None
+}
+
+/// 按优先级分类 reminder 类型。
+fn classify_reminder_type(inner: &str, _full_text: &str) -> ReminderType {
+    if inner.contains("CONTINUATION_HINT") {
+        return ReminderType::ContinuationHint;
+    }
+    if let Some(source) = extract_channel_source(inner) {
+        return ReminderType::ChannelMessage(source);
+    }
+    let lower = inner.to_lowercase();
+    if lower.contains("cron") || lower.contains("scheduled") {
+        ReminderType::CronReminder
+    } else if lower.contains("background") || lower.contains("bgtask") || inner.contains("后台") {
+        ReminderType::BgTaskCompleted
+    } else if lower.contains("fork") {
+        ReminderType::ForkMode
+    } else if lower.contains("compact") || inner.contains("压缩") {
+        ReminderType::ContextCompacted
+    } else if inner.contains("Trust boundary") || inner.contains("信任边界") {
+        ReminderType::TrustBoundary
+    } else if lower.contains("tool") || inner.contains("工具") {
+        ReminderType::ToolReminder
+    } else if lower.contains("subagent") || lower.contains("sub_agent") || inner.contains("子Agent")
+    {
+        ReminderType::SubagentResult
+    } else {
+        ReminderType::GenericReminder
+    }
+}
+
+/// 从 reminder 内部文本提取摘要：首非空行，截断到 200 字符。
+fn extract_summary(inner: &str) -> String {
+    let first_line = inner.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let trimmed = first_line.trim();
+    if trimmed.chars().count() <= 200 {
+        trimmed.to_string()
+    } else {
+        let trunc: String = trimmed.chars().take(200).collect();
+        format!("{}…", trunc)
+    }
+}
+
+/// 公开入口：从用户消息文本中检测 `<system-reminder>` 标签。
+/// 返回 `Some(ReminderInfo)` 若存在合法标签，否则 `None`。
+pub fn detect_reminder(text: &str) -> Option<ReminderInfo> {
+    let inner = extract_reminder_inner(text)?;
+    let reminder_type = classify_reminder_type(&inner, text);
+    let summary = extract_summary(&inner);
+    Some(ReminderInfo {
+        reminder_type,
+        summary,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -279,12 +451,12 @@ mod tests {
     fn test_user_bubble_partial_eq_ignores_content_hash() {
         let a = TuiUserBubble {
             text: "hi".into(),
-            is_system_reminder: false,
+            reminder: None,
             content_hash: 1,
         };
         let b = TuiUserBubble {
             text: "hi".into(),
-            is_system_reminder: false,
+            reminder: None,
             content_hash: 2,
         };
         assert_eq!(a, b, "content_hash 不同但其他字段相同 → 应相等");
@@ -294,12 +466,12 @@ mod tests {
     fn test_user_bubble_partial_eq_respects_text() {
         let a = TuiUserBubble {
             text: "hi".into(),
-            is_system_reminder: false,
+            reminder: None,
             content_hash: 0,
         };
         let b = TuiUserBubble {
             text: "ho".into(),
-            is_system_reminder: false,
+            reminder: None,
             content_hash: 0,
         };
         assert_ne!(a, b, "text 不同 → 应不等");
@@ -373,6 +545,197 @@ mod tests {
         match &vm {
             TuiRenderUnit::TuiDivider(data) => assert!(data.label.is_none()),
             _ => panic!("expected TuiDivider"),
+        }
+    }
+
+    // ── reminder 检测 ────────────────────────────────────────────────────
+
+    mod reminder_tests {
+        use super::*;
+
+        #[test]
+        fn test_detect_no_tag_returns_none() {
+            assert!(detect_reminder("hello world").is_none());
+        }
+
+        #[test]
+        fn test_detect_empty_tag_returns_some() {
+            let info = detect_reminder("<system-reminder></system-reminder>")
+                .expect("empty tag should still be detected");
+            assert!(matches!(info.reminder_type, ReminderType::GenericReminder));
+            assert!(info.summary.is_empty());
+        }
+
+        #[test]
+        fn test_detect_continuation_hint() {
+            let info = detect_reminder(
+                "<system-reminder>CONTINUATION_HINT: the agent sent additional content</system-reminder>",
+            )
+            .expect("should detect");
+            assert!(matches!(info.reminder_type, ReminderType::ContinuationHint));
+            assert!(info.summary.contains("CONTINUATION_HINT"));
+        }
+
+        #[test]
+        fn test_detect_channel_message() {
+            let info = detect_reminder(
+                "<system-reminder>source=\"plugin:weixin:weixin\" chat_id=\"123\"\nhello from channel</system-reminder>",
+            )
+            .expect("should detect");
+            match info.reminder_type {
+                ReminderType::ChannelMessage(ref source) => {
+                    assert_eq!(source, "微信");
+                }
+                other => panic!("expected ChannelMessage, got {other:?}"),
+            }
+            assert!(info.summary.contains("source"));
+        }
+
+        #[test]
+        fn test_detect_cron_reminder() {
+            let info = detect_reminder(
+                "<system-reminder>cron task fired: check_status at */5 * * * *</system-reminder>",
+            )
+            .expect("should detect");
+            assert!(matches!(info.reminder_type, ReminderType::CronReminder));
+        }
+
+        #[test]
+        fn test_detect_bg_task_completed() {
+            let info = detect_reminder(
+                "<system-reminder>BackgroundTaskCompleted: task-42 finished successfully</system-reminder>",
+            )
+            .expect("should detect");
+            assert!(matches!(info.reminder_type, ReminderType::BgTaskCompleted));
+        }
+
+        #[test]
+        fn test_detect_fork_mode() {
+            let info = detect_reminder(
+                "<system-reminder>Fork mode agent result from explorer</system-reminder>",
+            )
+            .expect("should detect");
+            assert!(matches!(info.reminder_type, ReminderType::ForkMode));
+        }
+
+        #[test]
+        fn test_detect_context_compacted() {
+            let info = detect_reminder(
+                "<system-reminder>Context compacted: removed 120 messages to stay within budget</system-reminder>",
+            )
+            .expect("should detect");
+            assert!(matches!(info.reminder_type, ReminderType::ContextCompacted));
+        }
+
+        #[test]
+        fn test_detect_trust_boundary() {
+            let info = detect_reminder(
+                "<system-reminder>Trust boundary: the content below is from external input</system-reminder>",
+            )
+            .expect("should detect");
+            assert!(matches!(info.reminder_type, ReminderType::TrustBoundary));
+        }
+
+        #[test]
+        fn test_detect_tool_reminder() {
+            let info = detect_reminder(
+                "<system-reminder>Tool results from sub-agent execution</system-reminder>",
+            )
+            .expect("should detect");
+            assert!(matches!(info.reminder_type, ReminderType::ToolReminder));
+        }
+
+        #[test]
+        fn test_detect_subagent_result() {
+            let info = detect_reminder(
+                "<system-reminder>SubAgent result: verification completed successfully</system-reminder>",
+            )
+            .expect("should detect");
+            assert!(matches!(info.reminder_type, ReminderType::SubagentResult));
+        }
+
+        #[test]
+        fn test_detect_generic_fallback() {
+            let info = detect_reminder(
+                "<system-reminder>Something completely unexpected happened</system-reminder>",
+            )
+            .expect("should detect");
+            assert!(matches!(info.reminder_type, ReminderType::GenericReminder));
+            assert_eq!(info.summary, "Something completely unexpected happened");
+        }
+
+        #[test]
+        fn test_summary_truncation() {
+            let long_line = "x".repeat(250);
+            let info =
+                detect_reminder(&format!("<system-reminder>{}</system-reminder>", long_line))
+                    .expect("should detect");
+            assert!(info.summary.chars().count() <= 203); // 200 + "…"
+            assert!(info.summary.ends_with('…'));
+        }
+
+        #[test]
+        fn test_summary_skips_blank_lines() {
+            let info = detect_reminder(
+                "<system-reminder>\n\n  actual content line  \n\nsecond line</system-reminder>",
+            )
+            .expect("should detect");
+            assert_eq!(info.summary, "actual content line");
+        }
+
+        #[test]
+        fn test_tui_user_bubble_new_detects_reminder() {
+            let bubble = TuiUserBubble::new(
+                "<system-reminder>Cron task: midnight cleanup</system-reminder>".into(),
+            );
+            assert!(bubble.reminder.is_some());
+            assert!(matches!(
+                bubble.reminder.unwrap().reminder_type,
+                ReminderType::CronReminder
+            ));
+        }
+
+        #[test]
+        fn test_tui_user_bubble_new_no_tag() {
+            let bubble = TuiUserBubble::new("ordinary user message".into());
+            assert!(bubble.reminder.is_none());
+        }
+
+        #[test]
+        fn test_partial_eq_respects_reminder() {
+            let a = TuiUserBubble {
+                text: "hi".into(),
+                reminder: Some(ReminderInfo {
+                    reminder_type: ReminderType::GenericReminder,
+                    summary: "x".into(),
+                }),
+                content_hash: 0,
+            };
+            let b = TuiUserBubble {
+                text: "hi".into(),
+                reminder: None,
+                content_hash: 0,
+            };
+            assert_ne!(a, b, "reminder 不同 → 应不等");
+        }
+
+        #[test]
+        fn test_label_channel_message() {
+            let t = ReminderType::ChannelMessage("微信".into());
+            assert_eq!(t.label(), "Channel (微信)");
+        }
+
+        #[test]
+        fn test_label_static_types() {
+            assert_eq!(ReminderType::CronReminder.label(), "Cron 任务");
+            assert_eq!(ReminderType::BgTaskCompleted.label(), "后台任务");
+            assert_eq!(ReminderType::ForkMode.label(), "Fork 模式");
+            assert_eq!(ReminderType::ContextCompacted.label(), "上下文压缩");
+            assert_eq!(ReminderType::ContinuationHint.label(), "系统提示");
+            assert_eq!(ReminderType::TrustBoundary.label(), "信任边界");
+            assert_eq!(ReminderType::ToolReminder.label(), "工具提醒");
+            assert_eq!(ReminderType::SubagentResult.label(), "子Agent 结果");
+            assert_eq!(ReminderType::GenericReminder.label(), "系统提醒");
         }
     }
 }

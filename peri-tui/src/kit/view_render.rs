@@ -17,8 +17,8 @@ use crate::kit::tool_display;
 
 #[allow(unused_imports)]
 use crate::kit::tui_render_unit::{
-    TuiAskUserBlock, TuiCollapsedGroup, TuiDiffBlock, TuiDivider, TuiHunkLineKind, TuiNoteLevel,
-    TuiReasoningBlock, TuiRenderUnit, TuiSubAgentGroup,
+    ReminderInfo, TuiAskUserBlock, TuiCollapsedGroup, TuiDiffBlock, TuiDivider, TuiHunkLineKind,
+    TuiNoteLevel, TuiReasoningBlock, TuiRenderUnit, TuiSubAgentGroup,
 };
 
 use crate::kit::theme;
@@ -96,7 +96,7 @@ pub fn render_v2_vm(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>> {
     });
     match vm {
         TuiRenderUnit::TuiUserBubble(data) => {
-            render_user_bubble(&data.text, width, data.is_system_reminder)
+            render_user_bubble(&data.text, width, data.reminder.as_ref())
         }
         TuiRenderUnit::TuiAssistantBubble(data) => render_assistant_bubble(data, width),
         TuiRenderUnit::TuiToolCard(data) => render_tool_card(data),
@@ -110,15 +110,14 @@ pub fn render_v2_vm(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>> {
 
 // ── 各变体渲染 ────────────────────────────────────────────────────────────
 
-fn render_user_bubble(text: &str, width: usize, is_system_reminder: bool) -> Vec<Line<'static>> {
-    // is_system_reminder: 仅渲染 "📋 Context compacted"（dim + ITALIC），无 ❯ 前缀，无底色
-    if is_system_reminder {
-        return vec![Line::from(Span::styled(
-            "📋 Context compacted",
-            Style::default()
-                .fg(crate::kit::theme::semantic().text.dim)
-                .add_modifier(Modifier::ITALIC),
-        ))];
+fn render_user_bubble(
+    text: &str,
+    width: usize,
+    reminder: Option<&ReminderInfo>,
+) -> Vec<Line<'static>> {
+    // reminder 两行缩略渲染：L1 dim italic 类型标签，L2 ⎿ muted 数据摘要
+    if let Some(info) = reminder {
+        return render_reminder_condensed(info);
     }
 
     let semantic = theme::semantic();
@@ -147,6 +146,27 @@ fn render_user_bubble(text: &str, width: usize, is_system_reminder: bool) -> Vec
             }
             lines.push(Line::from(spans));
         }
+    }
+    lines
+}
+
+/// 两行缩略渲染 system-reminder：L1 类型标签（dim italic），L2 数据摘要（⎿ muted）。
+fn render_reminder_condensed(info: &ReminderInfo) -> Vec<Line<'static>> {
+    let semantic = theme::semantic();
+    let mut lines = vec![Line::from(Span::styled(
+        info.reminder_type.label(),
+        Style::default()
+            .fg(semantic.text.dim)
+            .add_modifier(Modifier::ITALIC),
+    ))];
+    if !info.summary.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim)),
+            Span::styled(
+                info.summary.clone(),
+                Style::default().fg(semantic.text.muted),
+            ),
+        ]));
     }
     lines
 }
@@ -309,10 +329,12 @@ fn render_tool_card(data: &crate::kit::tui_render_unit::TuiToolCard) -> Vec<Line
 
 fn format_running_duration(ms: u64) -> String {
     let secs = ms / 1000;
-    if secs < 60 {
-        format!("{}s", secs)
+    let mins = secs / 60;
+    let secs = secs % 60;
+    if mins > 0 {
+        format!("{}min {}s", mins, secs)
     } else {
-        format!("{}min", secs / 60)
+        format!("{}s", secs)
     }
 }
 
@@ -747,7 +769,7 @@ mod tests {
         let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
             text: "hello world".into(),
             content_hash: 0,
-            is_system_reminder: false,
+            reminder: None,
         });
         let lines = render_v2_vm(&vm, 80);
         assert!(
@@ -761,7 +783,7 @@ mod tests {
         let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
             text: "hello\nworld".into(),
             content_hash: 0,
-            is_system_reminder: false,
+            reminder: None,
         });
         let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
@@ -781,6 +803,42 @@ mod tests {
                 .first()
                 .is_some_and(|line| collect_text(std::slice::from_ref(line)).is_empty())
         );
+    }
+
+    #[test]
+    fn test_user_bubble_reminder_two_line_rendering() {
+        let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+            text: "<system-reminder>Cron task: cleanup</system-reminder>".into(),
+            content_hash: 0,
+            reminder: Some(ReminderInfo {
+                reminder_type: crate::kit::tui_render_unit::ReminderType::CronReminder,
+                summary: "Cron task: cleanup".into(),
+            }),
+        });
+        let lines = render_v2_vm(&vm, 80);
+        let text = collect_text(&lines);
+        assert!(text.contains("Cron 任务"), "首行应为类型标签：{}", text);
+        assert!(
+            text.contains("⎿ Cron task: cleanup"),
+            "第二行应为摘要：{}",
+            text
+        );
+        assert!(!text.contains("❯"), "reminder 不应有 ❯ 前缀：{}", text);
+    }
+
+    #[test]
+    fn test_user_bubble_reminder_no_summary() {
+        let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+            text: "<system-reminder></system-reminder>".into(),
+            content_hash: 0,
+            reminder: Some(ReminderInfo {
+                reminder_type: crate::kit::tui_render_unit::ReminderType::GenericReminder,
+                summary: String::new(),
+            }),
+        });
+        let lines = render_v2_vm(&vm, 80);
+        // 仅一行（无摘要行）
+        assert_eq!(lines.len(), 1, "空摘要应仅有一行");
     }
 
     #[test]
@@ -959,10 +1017,25 @@ mod tests {
             text
         );
         assert!(
-            text.contains("⎿ Running (1min)"),
-            "运行中 Bash 应显示耗时行：{}",
+            text.contains("⎿ Running (1min 1s)"),
+            "运行中 Bash 应显示耗时行（含秒数）：{}",
             text
         );
+    }
+
+    #[test]
+    fn test_format_running_duration_seconds_only() {
+        assert_eq!(format_running_duration(0), "0s");
+        assert_eq!(format_running_duration(45_000), "45s");
+        assert_eq!(format_running_duration(59_000), "59s");
+    }
+
+    #[test]
+    fn test_format_running_duration_minutes_and_seconds() {
+        assert_eq!(format_running_duration(60_000), "1min 0s");
+        assert_eq!(format_running_duration(61_000), "1min 1s");
+        assert_eq!(format_running_duration(85_000), "1min 25s");
+        assert_eq!(format_running_duration(3_600_000), "60min 0s");
     }
 
     #[test]
@@ -1242,7 +1315,7 @@ mod tests {
             view_models: im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: "find foo".into(),
                 content_hash: 0,
-                is_system_reminder: false,
+                reminder: None,
             })]),
             collapsed: true,
             is_running: false,
@@ -1266,7 +1339,7 @@ mod tests {
             view_models: im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: "test".into(),
                 content_hash: 0,
-                is_system_reminder: false,
+                reminder: None,
             })]),
             collapsed: false,
             is_running: false,
@@ -1309,7 +1382,7 @@ mod tests {
                 TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                     text: "visible user".into(),
                     content_hash: 0,
-                    is_system_reminder: false,
+                    reminder: None,
                 }),
             ]),
             collapsed: false,
@@ -1476,7 +1549,7 @@ mod tests {
                 recent_messages: vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                     text: "child content from probe".into(),
                     content_hash: 0,
-                    is_system_reminder: false,
+                    reminder: None,
                 })],
             }),
         });
@@ -1499,7 +1572,7 @@ mod tests {
             view_models: im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                 text: "dto child".into(),
                 content_hash: 0,
-                is_system_reminder: false,
+                reminder: None,
             })]),
             collapsed: false,
             is_running: false,
@@ -1514,7 +1587,7 @@ mod tests {
                 recent_messages: vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
                     text: "probe child (should not appear)".into(),
                     content_hash: 0,
-                    is_system_reminder: false,
+                    reminder: None,
                 })],
             }),
         });

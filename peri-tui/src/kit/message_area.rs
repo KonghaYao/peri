@@ -521,37 +521,52 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         });
     }
 
-    // I23-b：就近判断自动跟随——用户视口在底部附近时跟随内容增长，
-    // 往上滚动超出 vis_height/2 后停止吸底。无需 auto_scroll flag，
-    // 是否跟随完全由当前 scroll_y 与 bottom 的距离决定。
+    // ── 吸底自动跟随 ──
+    // 核心策略：用 last_scrolled_at 做增量门控，避免每 chunk 都原子写入促发多余渲染。
+    // 首次/收缩无条件滚到底；已在底部跳写；就近跟随仅当内容确实增长后才执行一次。
+    let last_scrolled_at = hooks.use_state(|| 0u16);
     hooks.use_effect(
         {
             let st = scroll_state;
             let pl = prev_entries_len;
+            let lsa = last_scrolled_at;
             let len = entries_len;
             move || {
                 let prev = *pl.read();
-                // 内容从空变为非空（history load / session 首条消息）→ 强制滚到底部
-                if prev == 0 && len > 0 {
-                    st.write().scroll_to_bottom();
-                }
                 *pl.write() = len;
 
-                let scroll_y = st.read().offset().y as u16;
-                let total = total_visual_rows;
-                let vh = vis_height;
-                if total == 0 {
+                if total_visual_rows == 0 || vis_height == 0 {
                     return;
                 }
-                let max_scroll = total.saturating_sub(vh);
-                if scroll_y >= max_scroll {
-                    // 已在或超出底部——scroll_to_bottom 是 no-op
-                    return;
-                }
-                let distance = max_scroll.saturating_sub(scroll_y);
-                let threshold = (vh / 2).max(5);
-                if distance <= threshold {
+                let max_scroll = total_visual_rows.saturating_sub(vis_height);
+
+                // 首次内容出现（空→非空）→ 强制滚到底
+                if prev == 0 && len > 0 {
                     st.write().scroll_to_bottom();
+                    *lsa.write() = total_visual_rows;
+                    return;
+                }
+                // 内容收缩（compact 后 len < prev）→ 滚到底，避免 scroll_y 悬空
+                if len < prev {
+                    st.write().scroll_to_bottom();
+                    *lsa.write() = total_visual_rows;
+                    return;
+                }
+
+                let scroll_y = st.read().offset().y as u16;
+                // 已在或超出底部 → 跳写，避免 no-op 原子写入促发多余渲染
+                if scroll_y >= max_scroll {
+                    return;
+                }
+                // 用户不在底部 3 行以内 → 不跟随
+                let distance = max_scroll.saturating_sub(scroll_y);
+                if distance > 3 {
+                    return;
+                }
+                // 用户靠近底部且内容增长了 → 跟随一次
+                if total_visual_rows > *lsa.read() {
+                    st.write().scroll_to_bottom();
+                    *lsa.write() = total_visual_rows;
                 }
             }
         },
