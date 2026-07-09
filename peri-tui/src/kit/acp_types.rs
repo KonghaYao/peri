@@ -437,7 +437,6 @@ impl CurrentTurn {
                         .filter(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(_)))
                         .count();
                     if tool_count > 0 {
-                        // 原地修改 TuiToolCard
                         let mut updated_card = agent_card.clone();
                         updated_card.tool_calls_count = tool_count;
                         vms[i] = TuiRenderUnit::TuiToolCard(updated_card);
@@ -657,7 +656,11 @@ pub enum AcpEventData {
 
     /// TUI 内部事件：直接将完整 AI 文本气泡追加到 committed。
     /// 用于 session/load replay 及任何需要旁路 current_turn 直接归档的场景。
-    CommittedAssistantText { text: String },
+    /// `reasoning` 非空时会创建独立的 reasoning 折叠块。
+    CommittedAssistantText {
+        text: String,
+        reasoning: Option<String>,
+    },
 
     /// replay 工具调用开始——直接写入 committed 的 TuiToolCard（is_running=true）。
     ReplayToolStarted {

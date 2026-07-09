@@ -375,7 +375,10 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             if is_session_replay {
-                Some(AcpEventData::CommittedAssistantText { text })
+                Some(AcpEventData::CommittedAssistantText {
+                    text,
+                    reasoning: None,
+                })
             } else {
                 let text_chunk = crate::kit::stream_data::TuiTextChunk {
                     text,
@@ -397,7 +400,10 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             if is_session_replay {
-                Some(AcpEventData::CommittedAssistantText { text })
+                Some(AcpEventData::CommittedAssistantText {
+                    text: String::new(),
+                    reasoning: Some(text),
+                })
             } else {
                 let reasoning_chunk = crate::kit::stream_data::TuiReasoningChunk {
                     text,
@@ -918,7 +924,13 @@ mod tests {
 
         let ev = bridge_rx.recv().await.expect("expected one event");
         match ev.event {
-            AcpEventData::CommittedAssistantText { text } => assert_eq!(text, "历史回答"),
+            AcpEventData::CommittedAssistantText { text, reasoning } => {
+                assert_eq!(text, "历史回答");
+                assert!(
+                    reasoning.is_none(),
+                    "agent_message_chunk replay 不应有 reasoning"
+                );
+            }
             other => panic!("expected CommittedAssistantText, got {other:?}"),
         }
 

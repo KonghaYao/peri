@@ -516,12 +516,21 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_view_models(state);
             push_acp_state(state);
         }
-        CommittedAssistantText { text } => {
+        CommittedAssistantText { text, reasoning } => {
+            let reason_block =
+                reasoning
+                    .as_ref()
+                    .map(|r| crate::kit::tui_render_unit::TuiReasoningBlock {
+                        text: r.clone(),
+                        collapsed: false,
+                    });
+            let content_hash =
+                tui_hash_str(&format!("{}|{}", text, reasoning.as_deref().unwrap_or("")));
             let vm = TuiRenderUnit::TuiAssistantBubble(
                 crate::kit::tui_render_unit::TuiAssistantBubble {
                     text: text.clone(),
-                    reasoning: None,
-                    content_hash: tui_hash_str(&format!("{}|", text)),
+                    reasoning: reason_block,
+                    content_hash,
                 },
             );
             state.committed.push_back(vm);
@@ -1233,6 +1242,135 @@ mod tests {
         match &state.committed[1] {
             TuiRenderUnit::TuiAssistantBubble(d) => assert_eq!(d.text, "rewound assistant"),
             other => panic!("expected TuiAssistantBubble, got {other:?}"),
+        }
+    }
+
+    /// 跨 turn 场景：第一轮 reasoning 在 committed 中保留，第二轮为最后一个展开。
+    #[test]
+    #[serial]
+    fn test_multi_turn_reasoning_preserved_in_committed() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: im::Vector::new(),
+            current_turn: CurrentTurn::new(),
+            phase: SessionPhase::Idle,
+            popup_kind: None,
+            generation: 0,
+            active_session_id: String::new(),
+        };
+
+        // === Turn 1: user bubble, reasoning + text → TurnDone ===
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::LocalUserBubble {
+                text: "第一个问题".into(),
+            },
+        );
+        dispatch_and_notify(&mut state, &AcpEventData::PromptStarted);
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ReasoningChunk(crate::kit::stream_data::TuiReasoningChunk {
+                text: "Turn 1 的思考内容".into(),
+                message_id: Some("msg_1".into()),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+                text: "Turn 1 的回复".into(),
+                message_id: Some("msg_1".into()),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+
+        // === Turn 2: user bubble, reasoning + text → TurnDone ===
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::LocalUserBubble {
+                text: "第二个问题".into(),
+            },
+        );
+        dispatch_and_notify(&mut state, &AcpEventData::PromptStarted);
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ReasoningChunk(crate::kit::stream_data::TuiReasoningChunk {
+                text: "Turn 2 的思考内容".into(),
+                message_id: Some("msg_2".into()),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+                text: "Turn 2 的回复".into(),
+                message_id: Some("msg_2".into()),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+
+        // 验证 committed 有 4 个 VM：User1, Assistant1, User2, Assistant2
+        assert_eq!(
+            state.committed.len(),
+            4,
+            "committed 应有 User1 + Assistant1 + User2 + Assistant2 = 4 个 VM"
+        );
+
+        // Turn 1 Assistant 应有 reasoning
+        let user1 = &state.committed[0];
+        assert!(
+            matches!(user1, TuiRenderUnit::TuiUserBubble(_)),
+            "committed[0] 应为 TuiUserBubble，实际是 {user1:?}"
+        );
+        match &state.committed[1] {
+            TuiRenderUnit::TuiAssistantBubble(d) => {
+                assert!(d.reasoning.is_some(), "Turn 1 Assistant 应有 reasoning 块");
+                assert_eq!(d.reasoning.as_ref().unwrap().text, "Turn 1 的思考内容");
+            }
+            other => panic!("expected TuiAssistantBubble at [1], got {other:?}"),
+        }
+
+        // Turn 2 Assistant 应有 reasoning
+        let user2 = &state.committed[2];
+        assert!(
+            matches!(user2, TuiRenderUnit::TuiUserBubble(_)),
+            "committed[2] 应为 TuiUserBubble，实际是 {user2:?}"
+        );
+        match &state.committed[3] {
+            TuiRenderUnit::TuiAssistantBubble(d) => {
+                assert!(d.reasoning.is_some(), "Turn 2 Assistant 应有 reasoning 块");
+                assert_eq!(d.reasoning.as_ref().unwrap().text, "Turn 2 的思考内容");
+            }
+            other => panic!("expected TuiAssistantBubble at [3], got {other:?}"),
+        }
+
+        // 验证 VIEW_MODELS snapshot
+        let snapshot = VIEW_MODELS.state().read().clone();
+        assert_eq!(snapshot.items.len(), 4);
+
+        // Turn 1 reasoning 应折叠（collapsed = true）——中间块
+        match &snapshot.items[1] {
+            TuiRenderUnit::TuiAssistantBubble(d) => {
+                let r = d.reasoning.as_ref().unwrap();
+                assert!(r.collapsed, "Turn 1 reasoning 应折叠（collapsed=true）");
+            }
+            other => panic!("expected TuiAssistantBubble at snapshot[1], got {other:?}"),
+        }
+
+        // Turn 2 reasoning 应展开（collapsed = false）——最后一个
+        match &snapshot.items[3] {
+            TuiRenderUnit::TuiAssistantBubble(d) => {
+                let r = d.reasoning.as_ref().unwrap();
+                assert!(
+                    !r.collapsed,
+                    "Turn 2 reasoning 应展开（collapsed=false）——最后一个"
+                );
+            }
+            other => panic!("expected TuiAssistantBubble at snapshot[3], got {other:?}"),
         }
     }
 }

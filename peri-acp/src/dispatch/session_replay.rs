@@ -23,7 +23,8 @@ use peri_agent::messages::{
 /// `SessionUpdate` variants, then calls `sender` for each notification.
 ///
 /// - `BaseMessage::Human`  → `SessionUpdate::UserMessageChunk`
-/// - `BaseMessage::Ai`     → text blocks as `AgentMessageChunk`,
+/// - `BaseMessage::Ai`     → `Reasoning` blocks as `AgentThoughtChunk`,
+///   `Text` blocks as `AgentMessageChunk`,
 ///   `ToolUse` blocks as `ToolCall` (periReplay=true)
 /// - `BaseMessage::Tool`   → `ToolResult` blocks as `ToolCallUpdate` (periReplay=true)
 /// - Other variants         → silently skipped
@@ -82,6 +83,16 @@ pub async fn replay_session_history(
 
                 for block in blocks {
                     match block {
+                        PeriContentBlock::Reasoning { text, .. } => {
+                            let update = SessionUpdate::AgentThoughtChunk(replay_chunk(
+                                ContentBlock::Text(TextContent::new(text.clone())),
+                            ));
+                            let notif = SessionNotification::new(
+                                SessionId::new(session_id.to_string()),
+                                update,
+                            );
+                            sender.send(notif).await?;
+                        }
                         PeriContentBlock::Text { text } => {
                             let update = SessionUpdate::AgentMessageChunk(replay_chunk(
                                 ContentBlock::Text(TextContent::new(text.clone())),
@@ -104,7 +115,7 @@ pub async fn replay_session_history(
                             );
                             sender.send(notif).await?;
                         }
-                        // Image / Document / Reasoning / Unknown → 跳过
+                        // Image / Document / Unknown → 跳过
                         _ => {}
                     }
                 }
