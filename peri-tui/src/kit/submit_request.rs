@@ -61,8 +61,10 @@ pub fn parse_submit_request(input: &str) -> Option<SubmitRequest> {
         return Some(SubmitRequest::ViewAction(action));
     }
 
-    if let Some(kind) = crate::kit::panel_registry::panel_for_slash_command(command) {
-        return Some(SubmitRequest::OpenPanel(kind));
+    if command.starts_with('/') {
+        if let Some(kind) = crate::kit::panel_registry::panel_for_slash_command(command) {
+            return Some(SubmitRequest::OpenPanel(kind));
+        }
     }
 
     Some(SubmitRequest::AgentText(trimmed.to_string()))
