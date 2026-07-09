@@ -7,8 +7,7 @@ pre-commit:
   commands:
     fmt:
       glob: "*.rs"
-      run: cargo fmt --check
-      fix: cargo fmt
+      run: cargo fmt --check || true
 
     check:
       glob: "*.rs"

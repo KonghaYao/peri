@@ -185,3 +185,4 @@ pub(crate) async fn send_session_info_update(
     });
     let _ = transport.send_notification("session/update", payload).await;
 }
+// test
