@@ -266,6 +266,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 缓存 key：仅 entries 数量/高度/loading/todo 变化时重建 ──
     let line_cache = hooks.use_state(|| LineCache::default());
     let scroll_state = hooks.use_state(ScrollViewState::default);
+    // 追踪上一次的 entries_len，用于检测「内容从空→非空」过渡（history load 后强制滚到底部）
+    let prev_entries_len = hooks.use_state(|| 0usize);
     let todo_hash = hash_todo_items(&todo_items);
     let new_key = {
         let h = raw_ch as u64;
@@ -525,7 +527,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     hooks.use_effect(
         {
             let st = scroll_state;
+            let pl = prev_entries_len;
+            let len = entries_len;
             move || {
+                let prev = *pl.read();
+                // 内容从空变为非空（history load / session 首条消息）→ 强制滚到底部
+                if prev == 0 && len > 0 {
+                    st.write().scroll_to_bottom();
+                }
+                *pl.write() = len;
+
                 let scroll_y = st.read().offset().y as u16;
                 let total = total_visual_rows;
                 let vh = vis_height;
