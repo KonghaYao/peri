@@ -42,6 +42,7 @@ use ratatui_kit::{
 /// ratatui-kit `ScrollViewState::handle_event` 每个 `ScrollDown`/`ScrollUp` 只移 1 行，
 /// 对于长对话来说太慢了。这自己接管鼠标滚动，乘以本倍数调用 `scroll_up`/`scroll_down`。
 /// 调大改滚轮速度，调整不需要重新编译其他模块（仅重编译本文件）。
+const SCROLL_LINES: u16 = 3;
 
 // ── 本地行缓存（仅 RENDER_CACHE 内容变化时重建，滚动不触发）─────────────────
 
@@ -431,11 +432,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
                         match mouse.kind {
                             // 滚轮事件：直接 scroll_up/scroll_down（write 触发 wake）。
+                            // 每格滚动 SCROLL_LINES 行，长对话下滚轮速度更跟手。
                             MouseEventKind::ScrollDown => {
-                                scroll_state.write().scroll_down();
+                                for _ in 0..SCROLL_LINES {
+                                    scroll_state.write().scroll_down();
+                                }
                             }
                             MouseEventKind::ScrollUp => {
-                                scroll_state.write().scroll_up();
+                                for _ in 0..SCROLL_LINES {
+                                    scroll_state.write().scroll_up();
+                                }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 // 开始文本拖拽选中
@@ -480,10 +486,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                         // Left click outside → 不消费，让 InputArea 等组件处理点击光标定位
                         match mouse.kind {
                             MouseEventKind::ScrollDown => {
-                                scroll_state.write().scroll_down();
+                                for _ in 0..SCROLL_LINES {
+                                    scroll_state.write().scroll_down();
+                                }
                             }
                             MouseEventKind::ScrollUp => {
-                                scroll_state.write().scroll_up();
+                                for _ in 0..SCROLL_LINES {
+                                    scroll_state.write().scroll_up();
+                                }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 return EventResult::Ignored;

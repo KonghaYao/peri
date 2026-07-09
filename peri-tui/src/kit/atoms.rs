@@ -24,6 +24,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::app::panel_types::PanelKind;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::ask_user_action::AskUserResponseAction;
+use crate::kit::hitl_response::HitlResponseAction;
 use crate::kit::render_bridge::RenderCache;
 use crate::kit::rewind_action::RewindAction;
 use crate::kit::submit_request::SubmitRequest;
@@ -230,6 +231,10 @@ pub static ASK_USER_PENDING: AtomStatic<Option<AskUser>> = AtomStatic::new(|| No
 /// Elicitation RequestId 临时存储——notifier 写入，popup Confirm/Esc 读取后通过 consumer 发回 ACP。
 pub static ASK_USER_REQUEST_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 
+/// HITL RequestPermission 的 RequestId 临时存储——notifier 写入，
+/// hitl_popup 读取后通过 HITL_RESPONSE_TX 发回 hitl_response_consumer。
+pub static HITL_REQUEST_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
 pub static LAST_ESC_TIME: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static QUIT_PENDING_SINCE: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 /// 防重入：记录上一次 Ctrl+C 事件被处理的时间。同一次按键在 200ms 内重复分发则忽略。
@@ -239,6 +244,7 @@ pub static LAST_CTRL_C_PROCESSED: AtomStatic<Option<Instant>> = AtomStatic::new(
 
 pub static REWIND_ACTION_TX: OnceLock<UnboundedSender<RewindAction>> = OnceLock::new();
 pub static ASK_USER_RESPONSE_TX: OnceLock<UnboundedSender<AskUserResponseAction>> = OnceLock::new();
+pub static HITL_RESPONSE_TX: OnceLock<UnboundedSender<HitlResponseAction>> = OnceLock::new();
 pub static THREAD_LOAD_TX: OnceLock<UnboundedSender<String>> = OnceLock::new();
 
 pub static PERI_CONFIG_HANDLE: OnceLock<

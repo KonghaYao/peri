@@ -122,6 +122,13 @@ async fn handle_clear_submit(
         let mut acp = ref_guard.write();
         acp.is_loading = false;
     }
+    // H1/M3/L5/L10：同步清空弹窗 payload、Todo 列表、输入历史指针，
+    // 防止旧 session 残留阻塞新会话。close_popup 在无弹窗时是 no-op，安全；
+    // TODO_ITEMS 会在新 session 的 SessionUpdate::Plan 事件到来时重新填充；
+    // reset_history_cursor 仅清浏览指针与草稿，INPUT_HISTORY 栈保留。
+    crate::kit::popup_overlay::close_popup();
+    *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
+    crate::kit::input_history::reset_history_cursor();
 
     let new_sid = acp_client.new_session(cwd, None).await?;
     ACTIVE_SESSION_ID.set(new_sid);
@@ -319,7 +326,6 @@ pub fn spawn_cancel_consumer(
 mod tests {
     use super::*;
     use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
-    use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit, tui_hash_str};
     use peri_acp::transport::mpsc::{
         MpscClientTransport, MpscServerTransport, mpsc_transport_pair,
     };
@@ -466,6 +472,67 @@ mod tests {
         assert!(
             result.is_err() || result.unwrap().is_err(),
             "expected timeout (clear → new_session with no server)"
+        );
+    }
+
+    /// 验证 handle_clear_submit 在调用 new_session 前已同步重置弹窗 / Todo / 历史指针。
+    ///
+    /// 覆盖 H1（弹窗 payload 残留）/ M3（Todo 残留）/ L5+L10（输入历史指针残留）。
+    /// new_session 无 server 会 hang，我们用 100ms 超时让控制流走到重置后即返回，
+    /// 断言此时 4 类 atom 已被清空。这些写入发生在 new_session await 之前，
+    /// 因此即使 RPC 失败也已完成。
+    #[tokio::test]
+    async fn test_handle_clear_submit_resets_popup_todo_history_atoms() {
+        crate::kit::atoms::init_atoms();
+        // Arrange：把 4 类 atom 填充为“旧 session 残留”。
+        *crate::kit::atoms::POPUP_KIND.state().write() = Some(crate::kit::atoms::PopupKind::Hitl);
+        *crate::kit::atoms::HITL_PENDING.state().write() =
+            Some(peri_acp_types::event_data::HitlPending {
+                tool_name: "old".into(),
+                tool_input: serde_json::Value::Null,
+                batch: None,
+            });
+        *crate::kit::atoms::TODO_ITEMS.state().write() = vec![crate::kit::message_area::TodoItem {
+            content: "stale".into(),
+            status: crate::kit::message_area::TodoStatus::Pending,
+        }];
+        *crate::kit::atoms::INPUT_HISTORY_INDEX.state().write() = Some(3);
+        *crate::kit::atoms::DRAFT.state().write() = Some("stale draft".to_string());
+
+        let (client, _server) = make_client_without_pump();
+        let cwd = ".".to_string();
+
+        // Act：handle_clear_submit 在 new_session 处会 hang（无 server），
+        // 我们只关心它 await 之前的同步重置块，所以 100ms 超时即返回。
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            handle_clear_submit(&client, &cwd),
+        )
+        .await;
+
+        // Assert：4 类残留已清空。
+        assert!(
+            crate::kit::atoms::POPUP_KIND.state().read().is_none(),
+            "POPUP_KIND should be None after /clear"
+        );
+        assert!(
+            crate::kit::atoms::HITL_PENDING.state().read().is_none(),
+            "HITL_PENDING should be cleared after /clear"
+        );
+        assert!(
+            crate::kit::atoms::TODO_ITEMS.state().read().is_empty(),
+            "TODO_ITEMS should be empty after /clear"
+        );
+        assert!(
+            crate::kit::atoms::INPUT_HISTORY_INDEX
+                .state()
+                .read()
+                .is_none(),
+            "INPUT_HISTORY_INDEX should be None after /clear"
+        );
+        assert!(
+            crate::kit::atoms::DRAFT.state().read().is_none(),
+            "DRAFT should be None after /clear"
         );
     }
 }

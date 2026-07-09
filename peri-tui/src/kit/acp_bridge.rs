@@ -10,6 +10,31 @@ use crate::kit::atoms;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// L6: 抽取 BRIDGE_RESET_COUNTER 变更时的 state 重置逻辑，rx.recv() 与
+/// tick_interval.tick() 两条分支共用。行为必须与原 rx 分支内联代码完全等价：
+/// 更新 last_reset_counter、刷 active_session_id、清空 committed /
+/// current_turn / generation / phase / popup_kind、清 INPUT_BUFFER、
+/// push_view_models_for_reset。
+fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, counter: u64) -> u64 {
+    let old = *last_reset_counter;
+    *last_reset_counter = counter;
+    state.active_session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
+    state.committed = im::Vector::new();
+    state.current_turn.reset();
+    state.generation = 0;
+    state.phase = SessionPhase::Idle;
+    state.popup_kind = None;
+    atoms::INPUT_BUFFER.state().write().clear();
+    acp_events::push_view_models_for_reset();
+    tracing::info!(
+        old,
+        new = counter,
+        sid = %state.active_session_id,
+        "[CLEAR_DEBUG] bridge: state reset by BRIDGE_RESET_COUNTER"
+    );
+    old
+}
+
 /// 启动 ACP 事件桥接后台任务。
 ///
 /// 从独立的 mpsc::UnboundedReceiver 读取 ACP 事件（main_loop 会 fan-out），
@@ -43,6 +68,14 @@ pub fn spawn_acp_bridge(
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = tick_interval.tick() => {
+                    // L6: tick 分支也需检测 BRIDGE_RESET_COUNTER——否则 /clear 或
+                    // thread_load 在 rx 空闲期递增 counter 时，tick 仍会把旧
+                    // committed 写回 VIEW_MODELS，造成旧 session 残留。
+                    let counter = atoms::BRIDGE_RESET_COUNTER.get();
+                    if counter != last_reset_counter {
+                        apply_bridge_reset(&mut state, &mut last_reset_counter, counter);
+                        continue;
+                    }
                     state.current_turn.advance_spinner();
                     if state.current_turn.has_running_bash_tool() {
                         acp_events::push_view_models(&mut state);
@@ -163,9 +196,8 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         SessionReplayDone => "SessionReplayDone",
         TurnDone => "TurnDone",
         TurnInterrupted { reason: _ } => "TurnInterrupted",
-        ReplayUserBubble { .. } => "ReplayUserBubble",
-        ReplayAssistantBubble { .. } => "ReplayAssistantBubble",
         LocalUserBubble { .. } => "LocalUserBubble",
+        CommittedAssistantText { .. } => "CommittedAssistantText",
         ToolCount(_) => "ToolCount",
         Progress(_) => "Progress",
         BudgetWarning(_) => "BudgetWarning",
@@ -190,5 +222,6 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         BackgroundTaskCompleted { .. } => "BackgroundTaskCompleted",
         AgentExecutionFailed { .. } => "AgentExecutionFailed",
         WorkflowProgress { .. } => "WorkflowProgress",
+        RewindCompleted { .. } => "RewindCompleted",
     }
 }

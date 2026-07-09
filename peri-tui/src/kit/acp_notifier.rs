@@ -20,11 +20,13 @@ use tracing::{debug, info, warn};
 
 use crate::acp_client::AcpNotification;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
-use crate::kit::atoms::{ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, SPINNER_TOKEN_COUNT};
+use crate::kit::atoms::{
+    ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, HITL_REQUEST_ID, SPINNER_TOKEN_COUNT,
+};
 use crate::kit::input_area::refresh_slash_items;
 use peri_acp::event::AcpEvent;
 use peri_acp::event::truncate::summarize_input;
-use peri_acp_types::event_data::{AskUser, Question, QuestionOption};
+use peri_acp_types::event_data::{AskUser, HitlPending, Question, QuestionOption};
 use serde_json::Value;
 
 /// 启动 kit ACP notifier 后台任务。
@@ -152,6 +154,10 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             run_status,
             message,
         }),
+        AcpEvent::RewindCompleted {
+            messages_json,
+            summary: _,
+        } => Some(AcpEventData::RewindCompleted { messages_json }),
         _ => {
             debug!("kit ACP notifier: AcpEvent variant not yet mapped to AcpEventData, dropping");
             None
@@ -245,10 +251,25 @@ fn forward_notification(
                 }
             }
         }
-        AcpNotification::RequestPermission { .. }
-        | AcpNotification::PredictionReady { .. }
-        | AcpNotification::Peri { .. }
-        | AcpNotification::Other { .. } => {
+        AcpNotification::PredictionReady { session_id, text } => {
+            // M4: PredictionReady 不再被丢弃，转换为 AcpEventData::Prediction 推入双 channel。
+            // dispatch_and_notify 仅写入 PREDICTION atom（input_area 订阅显示），不调
+            // push_view_models，但 render_bridge 仍需收到事件以维持事件流一致性
+            // （其他无 view_model 副作用的事件也走双 channel）。
+            use peri_acp_types::event_data::Prediction;
+            let decoded = AcpEventData::Prediction(Prediction { text });
+            let wrapped = wrap_with_session(decoded, session_id);
+            if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
+                warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, dropping prediction");
+            }
+            if let Err(e) = bridge_tx.send(wrapped) {
+                warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping prediction");
+            }
+        }
+        AcpNotification::RequestPermission { id, params } => {
+            handle_request_permission(&id, &params, bridge_tx, render_bridge_tx);
+        }
+        AcpNotification::Peri { .. } | AcpNotification::Other { .. } => {
             debug!("kit ACP notifier: notification variant not yet handled, dropping");
         }
     }
@@ -336,7 +357,7 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             if is_session_replay {
-                Some(AcpEventData::ReplayAssistantBubble { text })
+                Some(AcpEventData::CommittedAssistantText { text })
             } else {
                 let text_chunk = crate::kit::stream_data::TuiTextChunk {
                     text,
@@ -431,10 +452,9 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
             *SPINNER_TOKEN_COUNT.state().write() = (input + output) as usize;
             None
         }
-        // ── session/replay: user_message_chunk → ReplayUserBubble ──
+        // ── session/replay: user_message_chunk ──
         // Session replay 通过 session/update 推送 user_message_chunk + agent_message_chunk，
-        // 逐条重放历史。agent_message_chunk 已在上面映射为 TextChunk，
-        // user_message_chunk 映射为 ReplayUserBubble 追加到 committed。
+        // 逐条重放历史。user_message_chunk 复用 LocalUserBubble（与手动输入走相同路径）。
         Some("user_message_chunk") => {
             let text = update
                 .get("content")
@@ -442,7 +462,7 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            Some(AcpEventData::ReplayUserBubble { text })
+            Some(AcpEventData::LocalUserBubble { text })
         }
         _ => None, // unknown tags
     }
@@ -486,6 +506,65 @@ fn handle_elicitation(
     }
     if let Err(e) = bridge_tx.send(wrapped) {
         warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping AskUser");
+    }
+}
+
+/// 处理 RequestPermission 通知（HITL）：解析 params 为 HitlPending →
+/// 写入 HITL_REQUEST_ID atom（供 HitlPopup 回传）→ 构造 AcpEventData::HitlPending
+/// 推入双 bridge channel，由 dispatch_and_notify 写入 HITL_PENDING atom + 设 POPUP_KIND。
+///
+/// JSON 结构（CreatePermissionRequest ACP schema）:
+/// ```json
+/// {"sessionId": "sess_1", "toolCall": {"title": "Bash", "rawInput": {...}},
+///  "options": [{"id": "allow_once", ...}, ...]}
+/// ```
+fn handle_request_permission(
+    id: &peri_acp::transport::types::RequestId,
+    params: &Value,
+    bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    render_bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+) {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if let Ok(id_str) = serde_json::to_string(id) {
+        *HITL_REQUEST_ID.state().write() = Some(id_str);
+    } else {
+        warn!("kit ACP notifier: failed to serialize RequestPermission RequestId");
+        return;
+    }
+
+    // 从 params.toolCall 提取 tool_name + tool_input
+    let tool_call = params.get("toolCall").unwrap_or(&Value::Null);
+    let tool_name = tool_call
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let tool_input = tool_call.get("rawInput").cloned().unwrap_or(Value::Null);
+    let hp = HitlPending {
+        tool_name,
+        tool_input,
+        batch: None,
+    };
+
+    let event = AcpEventData::HitlPending(hp);
+    let wrapped = AcpEventWithEpoch {
+        event,
+        active_session_id: session_id,
+    };
+
+    info!("kit ACP notifier: forwarding RequestPermission as HitlPending event");
+
+    if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
+        warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may miss HitlPending");
+    }
+    if let Err(e) = bridge_tx.send(wrapped) {
+        warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping HitlPending");
     }
 }
 
@@ -800,8 +879,8 @@ mod tests {
 
         let ev = bridge_rx.recv().await.expect("expected one event");
         match ev.event {
-            AcpEventData::ReplayAssistantBubble { text } => assert_eq!(text, "历史回答"),
-            other => panic!("expected ReplayAssistantBubble, got {other:?}"),
+            AcpEventData::CommittedAssistantText { text } => assert_eq!(text, "历史回答"),
+            other => panic!("expected CommittedAssistantText, got {other:?}"),
         }
 
         shutdown.cancel();
@@ -1026,5 +1105,79 @@ mod tests {
         assert!(matches!(items[0].status, TodoStatus::InProgress));
         assert!(matches!(items[1].status, TodoStatus::Pending));
         assert!(matches!(items[2].status, TodoStatus::Completed));
+    }
+
+    /// M4: PredictionReady 不再被丢弃，转换为 AcpEventData::Prediction 推入 bridge channel。
+    #[tokio::test]
+    #[serial]
+    async fn test_prediction_ready_forwards_prediction_event() {
+        crate::kit::atoms::init_atoms();
+        let (notif_tx, mut bridge_rx, mut render_bridge_rx, shutdown) = spawn_test_notifier();
+
+        notif_tx
+            .send(AcpNotification::PredictionReady {
+                session_id: "s1".into(),
+                text: "next word".into(),
+            })
+            .unwrap();
+
+        let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 Prediction");
+        match bridge_event.event {
+            AcpEventData::Prediction(p) => assert_eq!(p.text, "next word"),
+            other => panic!("expected Prediction, got {other:?}"),
+        }
+
+        let render_event = render_bridge_rx
+            .recv()
+            .await
+            .expect("render bridge 应收到 Prediction");
+        match render_event.event {
+            AcpEventData::Prediction(p) => assert_eq!(p.text, "next word"),
+            other => panic!("expected Prediction on render bridge, got {other:?}"),
+        }
+
+        shutdown.cancel();
+    }
+
+    /// H2: RequestPermission 转换为 HitlPending 事件并写入 HITL_REQUEST_ID atom。
+    #[tokio::test]
+    #[serial]
+    async fn test_request_permission_forwards_hitl_pending_event() {
+        crate::kit::atoms::init_atoms();
+        let (notif_tx, mut bridge_rx, _render_bridge_rx, shutdown) = spawn_test_notifier();
+
+        let request_id = peri_acp::transport::types::RequestId::String("req-123".to_string());
+        notif_tx
+            .send(AcpNotification::RequestPermission {
+                id: request_id,
+                params: json!({
+                    "sessionId": "s1",
+                    "toolCall": {
+                        "title": "Bash",
+                        "rawInput": {"command": "rm -rf /"}
+                    },
+                    "options": []
+                }),
+            })
+            .unwrap();
+
+        let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 HitlPending");
+        match bridge_event.event {
+            AcpEventData::HitlPending(hp) => {
+                assert_eq!(hp.tool_name, "Bash");
+                assert_eq!(hp.tool_input["command"], "rm -rf /");
+            }
+            other => panic!("expected HitlPending, got {other:?}"),
+        }
+
+        // HITL_REQUEST_ID 应被写入
+        let id_str = HITL_REQUEST_ID.state().read().clone();
+        assert!(id_str.is_some(), "HITL_REQUEST_ID 应被写入");
+        assert!(
+            id_str.unwrap().contains("req-123"),
+            "HITL_REQUEST_ID 应包含原始 id"
+        );
+
+        shutdown.cancel();
     }
 }

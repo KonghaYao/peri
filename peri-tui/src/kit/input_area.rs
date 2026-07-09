@@ -132,10 +132,12 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
                     // ── 编辑快捷键 ──
                     KeyCode::Char('w') if is_ctrl => {
+                        exit_history_mode_if_active();
                         state.write().delete_word_backward();
                         EventResult::Consumed
                     }
                     KeyCode::Char('u') if is_ctrl => {
+                        exit_history_mode_if_active();
                         state.write().clear();
                         reset_mention_popup();
                         reset_slash_popup();
@@ -158,12 +160,14 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         EventResult::Consumed
                     }
                     KeyCode::Char('h') if is_ctrl && !mention_active && !slash_active => {
+                        exit_history_mode_if_active();
                         let mut s = state.write();
                         s.backspace();
                         update_popup_prefix(&s);
                         EventResult::Consumed
                     }
                     KeyCode::Char('d') if is_ctrl && !mention_active && !slash_active => {
+                        exit_history_mode_if_active();
                         let mut s = state.write();
                         s.delete_forward();
                         update_popup_prefix(&s);
@@ -172,6 +176,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     KeyCode::Char('z')
                         if is_ctrl && !is_alt && !mention_active && !slash_active =>
                     {
+                        exit_history_mode_if_active();
                         let mut s = state.write();
                         s.undo();
                         update_popup_prefix(&s);
@@ -180,6 +185,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     KeyCode::Char('r')
                         if is_ctrl && !is_alt && !mention_active && !slash_active =>
                     {
+                        exit_history_mode_if_active();
                         let mut s = state.write();
                         s.redo();
                         update_popup_prefix(&s);
@@ -188,6 +194,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     KeyCode::Char('y')
                         if is_ctrl && !is_alt && !mention_active && !slash_active =>
                     {
+                        exit_history_mode_if_active();
                         let mut s = state.write();
                         s.paste_yank();
                         update_popup_prefix(&s);
@@ -206,6 +213,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         EventResult::Consumed
                     }
                     KeyCode::Backspace if !mention_active && !slash_active => {
+                        exit_history_mode_if_active();
                         let mut s = state.write();
                         if is_alt {
                             s.delete_word_backward();
@@ -216,6 +224,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         EventResult::Consumed
                     }
                     KeyCode::Backspace => {
+                        exit_history_mode_if_active();
                         let mut s = state.write();
                         if is_alt {
                             s.delete_word_backward();
@@ -226,6 +235,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         EventResult::Consumed
                     }
                     KeyCode::Delete if !mention_active && !slash_active => {
+                        exit_history_mode_if_active();
                         let mut s = state.write();
                         if is_alt {
                             s.delete_word_forward();
@@ -291,9 +301,47 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
                     // ── 字符输入 ──
                     KeyCode::Char(ch) if !is_ctrl && !is_alt => {
+                        exit_history_mode_if_active();
                         let mut s = state.write();
                         s.insert_char(ch);
                         update_popup_prefix(&s);
+                        *PREDICTION.state().write() = PredictionState::default();
+                        EventResult::Consumed
+                    }
+
+                    // ── Ctrl+V 粘贴剪贴板（M6）──
+                    // 在独立线程读 arboard（阻塞系统 I/O 不卡 UI），通过 state clone 回写 editor。
+                    // 粘贴不应触发 slash/mention 弹窗（与 Event::Paste 分支一致）。
+                    KeyCode::Char('v')
+                        if is_ctrl && !is_alt && !is_shift && !mention_active && !slash_active =>
+                    {
+                        exit_history_mode_if_active();
+                        let state_clone = state.clone();
+                        std::thread::spawn(move || {
+                            let Ok(mut cb) = arboard::Clipboard::new() else {
+                                return;
+                            };
+                            let Ok(text) = cb.get_text() else {
+                                return;
+                            };
+                            if text.is_empty() {
+                                return;
+                            }
+                            const MAX: usize = 10_000;
+                            let total = text.chars().count();
+                            if total > MAX {
+                                *crate::kit::atoms::NOTIFICATION.state().write() =
+                                    Some(crate::kit::atoms::Notification {
+                                        message: format!("粘贴已截断至 {} 字符", MAX),
+                                        until: std::time::Instant::now()
+                                            + std::time::Duration::from_secs(2),
+                                    });
+                                let trunc: String = text.chars().take(MAX).collect();
+                                state_clone.write().insert_str(&trunc);
+                            } else {
+                                state_clone.write().insert_str(&text);
+                            }
+                        });
                         *PREDICTION.state().write() = PredictionState::default();
                         EventResult::Consumed
                     }
@@ -304,6 +352,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         if !pred.read().text.is_empty() {
                             let text = pred.read().text.clone();
                             *pred.write() = PredictionState::default();
+                            exit_history_mode_if_active();
                             state.write().replace_all_no_undo(text);
                             reset_mention_popup();
                             reset_slash_popup();
@@ -679,6 +728,18 @@ fn send_local_user_bubble(text: &str) {
             },
             active_session_id: String::new(),
         });
+    }
+}
+
+/// 退出 history 浏览模式（如果当前正在浏览）。
+///
+/// 任何改变编辑文本的 handler 都应在写入前调用：保留当前编辑内容作为新草稿，
+/// 但清掉 `INPUT_HISTORY_INDEX` 指针，避免下一次 history_up 复用陈旧的浏览位置。
+/// 非历史模式下调用为 no-op。
+fn exit_history_mode_if_active() {
+    use crate::kit::atoms::INPUT_HISTORY_INDEX;
+    if INPUT_HISTORY_INDEX.state().read().is_some() {
+        reset_history_cursor();
     }
 }
 
@@ -1177,5 +1238,51 @@ mod tests {
         ];
         let result = filter_files_for_mention("auth");
         assert_eq!(result.first().unwrap(), "auth.rs");
+    }
+
+    /// M5：`exit_history_mode_if_active` 在 `INPUT_HISTORY_INDEX` 为 Some 时调用
+    /// `reset_history_cursor`，清空 index 与 DRAFT。为 None 时为 no-op。
+    #[test]
+    #[serial]
+    fn test_exit_history_mode_helper_resets_index_and_keeps_draft_unused() {
+        use crate::kit::atoms::DRAFT as HISTORY_DRAFT;
+        use crate::kit::atoms::INPUT_HISTORY_INDEX;
+        crate::kit::atoms::init_atoms();
+        // 先推入一条历史并进入 history 浏览模式（history_up 会保存 DRAFT）。
+        crate::kit::input_history::push_history("a");
+        let _ = crate::kit::input_history::history_up(Some("orig"));
+        assert!(INPUT_HISTORY_INDEX.state().read().is_some());
+        assert!(HISTORY_DRAFT.state().read().is_some());
+
+        exit_history_mode_if_active();
+        // helper 应清空 index + DRAFT，回到"编辑新文本"状态。
+        assert!(INPUT_HISTORY_INDEX.state().read().is_none());
+        assert!(HISTORY_DRAFT.state().read().is_none());
+
+        // 非历史模式调用应为 no-op，不 panic。
+        exit_history_mode_if_active();
+        assert!(INPUT_HISTORY_INDEX.state().read().is_none());
+    }
+
+    /// L13：粘贴分支应清空 slash/mention 激活态而非重新检测。
+    ///
+    /// 构造 mention 激活（`see @auth`），随后调用 reset_mention_popup + reset_slash_popup
+    /// （与粘贴分支等价的清理路径），断言 AT_MENTION_ACTIVE / SLASH_HINT_ACTIVE 均为 false。
+    #[test]
+    #[serial]
+    fn test_paste_does_not_trigger_slash_or_mention_popup() {
+        crate::kit::atoms::init_atoms();
+        reset_popup_atoms();
+        let mut s = TextAreaState::default();
+        s.insert_str("see @auth");
+        update_popup_prefix(&s);
+        // 触发了 mention 弹窗。
+        assert!(*AT_MENTION_ACTIVE.state().read());
+
+        // 模拟粘贴分支：先 reset，而不是 update_popup_prefix。
+        reset_mention_popup();
+        reset_slash_popup();
+        assert!(!*AT_MENTION_ACTIVE.state().read());
+        assert!(!*SLASH_HINT_ACTIVE.state().read());
     }
 }

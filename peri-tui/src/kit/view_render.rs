@@ -358,13 +358,11 @@ fn tool_display(_tool_name: &str, is_error: bool, is_running: bool) -> ToolDispl
     }
 
     if is_running {
-        // 800ms 闪烁：((RENDER_CALL_COUNT/16) % 2) == 0 显示 ●，否则空格
-        // RENDER_CALL_COUNT 约每 50ms 递增一次，16 次 ≈ 800ms
-        let visible =
-            (RENDER_CALL_COUNT.with(|c| c.load(Ordering::Relaxed)) / 16).is_multiple_of(2);
-        let indicator = if visible { "●" } else { " " };
+        // 运行中：常量白色 ●。原 RENDER_CALL_COUNT 闪烁逻辑失效（计数器每批次
+        // 在 append_entries 末尾 reset 为 0，且 render 层禁止跨帧写 atom 状态）。
+        // 运行态视觉信号由 Bash 卡片的 "Running (duration)" 行独立提供。
         return ToolDisplay {
-            indicator,
+            indicator: "●",
             color: Color::White,
         };
     }
@@ -453,19 +451,28 @@ fn render_system_note(data: &crate::kit::tui_render_unit::TuiSystemNote) -> Vec<
                 "✻ ".to_string(),
                 Style::default().fg(semantic.text.dim),
             ));
-            line_text.strip_prefix('\u{273B}').unwrap_or(line_text)
+            line_text
+                .strip_prefix('\u{273B}')
+                .unwrap_or(line_text)
+                .trim_start()
         } else if prefix_str.contains("⎿") && prefix_str.starts_with("  ") {
             spans.push(Span::styled(
                 "  ⎿ ".to_string(),
                 Style::default().fg(semantic.text.dim),
             ));
-            line_text.strip_prefix("  ⎿").unwrap_or(line_text)
+            line_text
+                .strip_prefix("  ⎿")
+                .unwrap_or(line_text)
+                .trim_start()
         } else if prefix_str.contains("⎿") {
             spans.push(Span::styled(
                 "⎿ ".to_string(),
                 Style::default().fg(semantic.text.dim),
             ));
-            line_text.strip_prefix("⎿").unwrap_or(line_text)
+            line_text
+                .strip_prefix("⎿")
+                .unwrap_or(line_text)
+                .trim_start()
         } else {
             line_text
         };
@@ -908,7 +915,7 @@ mod tests {
 
     #[test]
     fn test_tool_card_running_shows_status() {
-        // 重置渲染计数器，确保 running 指示器可见（第 0 帧显示 ●）
+        // is_running 的 ● 现在是常量白色指示（不再依赖 RENDER_CALL_COUNT 闪烁）。
         RENDER_CALL_COUNT.with(|c| c.store(0, Ordering::Relaxed));
 
         let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
@@ -925,7 +932,7 @@ mod tests {
         let lines = render_v2_vm(&vm, 80);
         let text = collect_text(&lines);
         assert!(text.contains("●"), "运行中工具应显示状态 ●：{}", text);
-        // 运行中状态仅通过前导 ● 闪烁表示，不再追加尾部 · ●
+        // 运行中状态仅通过前导白色 ● 表示（常量，不闪烁），不再追加尾部 · ●
         assert!(
             !text.contains("· ●"),
             "运行中工具不应显示尾部标记：{}",
@@ -1712,5 +1719,89 @@ mod tests {
             s.content.contains("❌") && s.style.fg == Some(theme::semantic().status.error)
         });
         assert!(has_error, "含 ❌ 的行应 error 色");
+    }
+
+    #[test]
+    fn test_system_note_prefix_no_double_space() {
+        // L18：✻ / ⎿ / 缩进  ⎿ 前缀行渲染后内容前不应残留双空格
+        let vm = TuiRenderUnit::TuiSystemNote(crate::kit::tui_render_unit::TuiSystemNote {
+            text: "✻ meta\n⎿ result\n  ⎿ err".into(),
+            level: TuiNoteLevel::Info,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80);
+        assert_eq!(lines.len(), 3, "3 行输入应产生 3 行输出");
+
+        // 拼接每行 span 内容，检查 prefix 与内容之间是否残留双空格
+        let joined: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+
+        // ✻ 前缀 span 是 "✻ "（含一个空格），内容首字符不应再是空格
+        assert!(
+            !joined[0].contains("✻  "),
+            "✻ 前缀后不应有双空格：{}",
+            joined[0]
+        );
+        // ⎿ 前缀 span 是 "⎿ "，内容首字符不应再是空格
+        assert!(
+            !joined[1].contains("⎿  "),
+            "⎿ 前缀后不应有双空格：{}",
+            joined[1]
+        );
+        // 缩进  ⎿ 前缀 span 是 "  ⎿ "，内容首字符不应再是空格
+        assert!(
+            !joined[2].contains("⎿  "),
+            "缩进 ⎿ 前缀后不应有双空格：{}",
+            joined[2]
+        );
+    }
+
+    #[test]
+    fn test_tool_card_running_indicator_constant() {
+        // L20：运行中 ToolCard 头部首 span 为白色 ●（而非空格）
+        let mk = || {
+            TuiRenderUnit::TuiToolCard(TuiToolCard {
+                tool_id: "tc-run".into(),
+                tool_name: "Bash".into(),
+                input_summary: "echo hi".into(),
+                output_summary: String::new(),
+                is_error: false,
+                is_running: true,
+                running_duration_ms: None,
+                diff: None,
+                content_hash: 0,
+            })
+        };
+
+        // 连续调用两次（模拟批次重置），结果应一致
+        for i in 0..2 {
+            let lines = render_v2_vm(&mk(), 80);
+            assert!(!lines.is_empty(), "迭代 {} 应有输出", i);
+            // render_tool_card 经 with_message_spacing 在头部插入空行，● 在 lines[1]
+            assert!(
+                lines.len() >= 2,
+                "迭代 {} 应至少 2 行（空行 + 卡片首行）",
+                i
+            );
+            let first_span = &lines[1].spans[0];
+            assert_eq!(
+                first_span.content, "●",
+                "迭代 {} 运行中卡片首 span 应为 ●",
+                i
+            );
+            assert_eq!(
+                first_span.style.fg,
+                Some(Color::White),
+                "迭代 {} 运行中卡片首 span 应为白色",
+                i
+            );
+        }
     }
 }

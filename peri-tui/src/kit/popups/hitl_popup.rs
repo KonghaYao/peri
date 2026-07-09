@@ -8,9 +8,17 @@
 //!
 //! ## 用户路径
 //!
-//! - **Enter**：approve（关闭 popup——目前 ACP server 通过批次重新发起来吸收
-//!   审批；未来可通过新增 HITL_RESPONSE_TX channel 接入审批 RPC）
-//! - **Esc**：reject（同上，由全局 Esc 链 + close_popup 处理）
+//! - **Enter**：approve——读 `HITL_REQUEST_ID`，经 `HITL_RESPONSE_TX` 发 `Approve`
+//!   到 hitl_response_consumer，由其调用 `client.send_response(id, selected/allow_once)`。
+//! - **Esc**：reject——同样读 id 发 `Reject`（outcome=cancelled）。
+//!
+//! ## 事件优先级（H2 修复）
+//!
+//! HitlPopup 的 Enter/Esc handler 用 `EventPriority::High`，先于 `register_root_handlers`
+//! 的 Normal Esc handler 执行（root handler 在 `FocusLayer::Popup` 时会直接 `close_popup`
+//! 并 Consumed 截断）。High 优先级让 popup 有机会读 `HITL_REQUEST_ID` 并发响应；
+//! Consumed 后 root handler 不再执行，避免 close 在 send 之前清空 id。
+//! 其他 popup（AskUser/Rewind/OAuth）仍用 Normal，依赖 root handler 关闭。
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -18,7 +26,8 @@ use ratatui_kit::{
     ratatui::{style::Stylize, text::Line},
 };
 
-use crate::kit::atoms::HITL_PENDING;
+use crate::kit::atoms::{HITL_PENDING, HITL_REQUEST_ID, HITL_RESPONSE_TX};
+use crate::kit::hitl_response::HitlResponseAction;
 use crate::kit::popup_overlay::close_popup;
 use crate::kit::theme;
 
@@ -28,18 +37,42 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending = pending_store.read().clone();
     let _ = pending_store;
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
+    // High 优先级：先于 register_root_handlers 的 Normal Esc handler 执行，
+    // 避免 root close_popup 后 Consumed 截断本 handler（详见模块注释「事件优先级」）。
+    hooks.use_event_handler(EventScope::Current, EventPriority::High, move |event| {
         let Event::Key(key) = event else {
             return EventResult::Ignored;
         };
         if key.kind != KeyEventKind::Press {
             return EventResult::Ignored;
         }
-        if (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Enter) {
-            close_popup();
-            EventResult::Consumed
-        } else {
-            EventResult::Ignored
+        match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Enter) => {
+                // 读取 HITL_REQUEST_ID 并通过 channel 发送 Approve。
+                // 先读取 id_str，再 close_popup（close 会清空 HITL_REQUEST_ID）。
+                if let Some(id_str) = HITL_REQUEST_ID.state().read().clone() {
+                    if let Some(tx) = HITL_RESPONSE_TX.get() {
+                        let _ = tx.send(HitlResponseAction::Approve {
+                            request_id_str: id_str,
+                        });
+                    }
+                }
+                close_popup();
+                EventResult::Consumed
+            }
+            (KeyModifiers::NONE, KeyCode::Esc) => {
+                // Esc 同 Enter 路径——先读取 id_str 发送 Reject，再 close_popup。
+                if let Some(id_str) = HITL_REQUEST_ID.state().read().clone() {
+                    if let Some(tx) = HITL_RESPONSE_TX.get() {
+                        let _ = tx.send(HitlResponseAction::Reject {
+                            request_id_str: id_str,
+                        });
+                    }
+                }
+                close_popup();
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
         }
     });
 

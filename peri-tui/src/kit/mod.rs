@@ -15,6 +15,7 @@ pub mod atoms;
 pub mod entry;
 pub mod event_handlers;
 pub mod focus_router;
+pub mod hitl_response;
 pub mod inline_nav;
 pub mod input_area;
 pub mod input_history;

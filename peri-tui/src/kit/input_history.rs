@@ -147,20 +147,40 @@ pub fn load_history() {
     *INPUT_HISTORY.state().write() = history;
 }
 
-/// 原子写入历史到磁盘（先写 .tmp 再 rename）。
+/// 后台原子写入历史到磁盘（先写 .tmp 再 rename）。
+///
+/// L11：磁盘 I/O（create_dir_all / write / rename）放到独立 `std::thread::spawn`
+/// 执行，避免 Enter 提交后被阻塞。spawn 前先 clone history 快照，
+/// 确保 worker 线程不再访问 atom（避免 `parking_lot::RwLockReadGuard` 跨线程问题）。
+/// 连续多次 `push_history` 可能产生多个并发写入线程，依靠 `rename` 的原子替换保证
+/// 最终一致——最坏丢一条记录，不影响内存历史正确性。
 fn save_history() {
     let path = history_path();
+    let history = INPUT_HISTORY.state().read().clone();
+    std::thread::spawn(move || {
+        persist_history(&path, &history);
+    });
+}
+
+/// 实际执行磁盘持久化——错误以 `tracing::warn!` 记录，不向上传播。
+fn persist_history(path: &std::path::Path, history: &VecDeque<String>) {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(?path, error = %e, "input_history: create_dir_all failed");
+            return;
+        }
     }
     let tmp = path.with_extension("tmp");
-    let history_handle = INPUT_HISTORY.state();
-    let history = history_handle.read();
     let entries: Vec<&String> = history.iter().collect();
-    if let Ok(json) = serde_json::to_string(&entries) {
-        if std::fs::write(&tmp, &json).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
-        }
+    let Ok(json) = serde_json::to_string(&entries) else {
+        return;
+    };
+    if let Err(e) = std::fs::write(&tmp, &json) {
+        tracing::warn!(?tmp, error = %e, "input_history: write tmp failed");
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        tracing::warn!(error = %e, "input_history: rename failed");
     }
 }
 
@@ -309,5 +329,82 @@ mod tests {
         history_up(Some(""));
         // 空草稿也要保存，否则 Down 回到底部时无法清空旧历史项。
         assert_eq!(DRAFT.state().read().as_deref(), Some(""));
+    }
+
+    /// L11：`save_history` 在 `std::thread::spawn` 中异步写盘，push_history 立即返回。
+    ///
+    /// 通过临时改 `HOME` 指向 tempdir，push 一条 unique marker，等后台线程 rename 完成，
+    /// 读 `~/.peri/input-history.json` 断言内容已落盘。`#[serial]` 防止并发污染其他测试。
+    ///
+    /// 注意：edition 2024 中 `std::env::set_var`/`remove_var` 为 unsafe，
+    /// 需在 `unsafe` 块中调用。`#[serial]` 保证这些 mutation 与其他测试互斥。
+    #[test]
+    #[serial]
+    fn test_save_history_does_not_block_and_persists_async() {
+        setup();
+
+        // 临时 HOME：创建 tempdir 并 set_var。
+        let tempdir = std::env::temp_dir().join(format!(
+            "peri-input-history-async-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tempdir).unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        // SAFETY: #[serial] 保证与其他使用 HOME 的测试互斥；prev_home 用于后续恢复。
+        unsafe {
+            std::env::set_var("HOME", &tempdir);
+        }
+
+        // 用唯一 marker 避免与其他测试串扰。
+        let marker = "async-persist-marker-7E3A";
+        push_history(marker);
+
+        // spawn 线程 rename 通常 <10ms，给一个宽松的等待窗口。
+        let history_path = tempdir.join(".peri").join("input-history.json");
+        let mut waited_ms = 0u64;
+        let content = loop {
+            if let Ok(c) = std::fs::read_to_string(&history_path) {
+                break c;
+            }
+            if waited_ms >= 1000 {
+                // 恢复 HOME 再失败。
+                unsafe {
+                    if let Some(ref h) = prev_home {
+                        std::env::set_var("HOME", h);
+                    } else {
+                        std::env::remove_var("HOME");
+                    }
+                }
+                panic!(
+                    "input_history async persist 未在 1s 内落盘: {:?}",
+                    history_path
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            waited_ms += 10;
+        };
+
+        // 还原 HOME。
+        unsafe {
+            if let Some(h) = prev_home {
+                std::env::set_var("HOME", h);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+
+        assert!(
+            content.contains(marker),
+            "持久化文件应包含 marker {:?}，实际内容：{}",
+            marker,
+            content
+        );
+
+        // 清理 tempdir（best-effort）。
+        let _ = std::fs::remove_dir_all(&tempdir);
     }
 }

@@ -89,7 +89,10 @@ pub fn close_popup() -> Option<PopupKind> {
     // I21-C：根据关闭的 popup 类型清空对应 payload atom
     if let Some(kind) = prev {
         match kind {
-            PopupKind::Hitl => *atoms::HITL_PENDING.state().write() = None,
+            PopupKind::Hitl => {
+                *atoms::HITL_PENDING.state().write() = None;
+                *atoms::HITL_REQUEST_ID.state().write() = None;
+            }
             PopupKind::AskUser => {
                 *atoms::ASK_USER_PENDING.state().write() = None;
                 *atoms::ASK_USER_REQUEST_ID.state().write() = None;

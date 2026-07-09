@@ -20,6 +20,7 @@ use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::app_shell::AppShell;
 use crate::kit::ask_user_action::{AskUserResponseAction, spawn_ask_user_consumer};
 use crate::kit::atoms;
+use crate::kit::hitl_response::{HitlResponseAction, spawn_hitl_response_consumer};
 use crate::kit::input_history;
 use crate::kit::render_bridge::spawn_render_bridge;
 use crate::kit::rewind_action::spawn_rewind_consumer;
@@ -120,6 +121,10 @@ pub async fn run_kit_fullscreen(
         let (ask_user_tx, ask_user_rx) = mpsc::unbounded_channel::<AskUserResponseAction>();
         let _ = atoms::ASK_USER_RESPONSE_TX.set(ask_user_tx);
 
+        // 4b3. HITL_RESPONSE channel：HitlPopup → hitl_response_consumer
+        let (hitl_tx, hitl_rx) = mpsc::unbounded_channel::<HitlResponseAction>();
+        let _ = atoms::HITL_RESPONSE_TX.set(hitl_tx);
+
         // 4b2. THREAD_LOAD channel：ThreadBrowser → thread_load_consumer（H3）
         let (thread_load_tx, thread_load_rx) = mpsc::unbounded_channel::<String>();
         let _ = atoms::THREAD_LOAD_TX.set(thread_load_tx);
@@ -156,7 +161,25 @@ pub async fn run_kit_fullscreen(
             shutdown.clone(),
         );
         let _bridge_handle = spawn_acp_bridge(bridge_rx, shutdown.clone());
-        let _render_handle = spawn_render_bridge(render_bridge_rx, resize_rx, shutdown.clone());
+        let render_handle = spawn_render_bridge(render_bridge_rx, resize_rx, shutdown.clone());
+        // L1: supervisor task——spawn_render_bridge 返回的 JoinHandle 由独立
+        // tokio task 持有并 await。若 render_bridge task panic（JoinError），
+        // 原本静默导致 RENDER_CACHE 冻结；此处至少打 error 日志提升可观测性。
+        // 不做自动重启（render_bridge_rx / resize_rx 所有权已转移，重启需
+        // 重构 entry 内 channel 构造，复杂度高，留给后续 batch）。
+        tokio::spawn(async move {
+            match render_handle.await {
+                Ok(()) => {
+                    tracing::info!("render_bridge task exited cleanly");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "render_bridge task panicked — RENDER_CACHE will freeze, UI messages stop updating"
+                    );
+                }
+            }
+        });
         let cwd = app.services.cwd.clone();
         let cwd_for_init = cwd.clone();
         let _submit_handle =
@@ -164,6 +187,7 @@ pub async fn run_kit_fullscreen(
         let _rewind_handle = spawn_rewind_consumer(client.clone(), rewind_rx, shutdown.clone());
         let _ask_user_handle =
             spawn_ask_user_consumer(client.clone(), ask_user_rx, shutdown.clone());
+        let _hitl_handle = spawn_hitl_response_consumer(client.clone(), hitl_rx, shutdown.clone());
         let _thread_load_handle =
             spawn_thread_load_consumer(client.clone(), thread_load_rx, cwd, shutdown.clone());
         let _cancel_handle = spawn_cancel_consumer(client.clone(), cancel_rx, shutdown.clone());

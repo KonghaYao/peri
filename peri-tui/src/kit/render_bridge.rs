@@ -34,8 +34,6 @@ pub struct RenderedEntry {
 pub struct RenderCache {
     pub entries: Vec<(VmKey, RenderedEntry)>,
     pub cumulative_heights: Vec<usize>,
-    /// 每逻辑行的视觉行映射——message_area 视口裁剪用
-    pub wrap_map: Vec<WrappedLineInfo>,
 }
 
 /// 每条逻辑行的 wrap 信息——用于视口裁剪的二分查找
@@ -57,7 +55,11 @@ pub fn spawn_render_bridge(
         let mut last_reset_counter: u64 = 0;
         let mut cache = RenderCache::default();
         let mut msg_hashes: Vec<u64> = Vec::new();
-        let mut msg_lines_cache: Vec<Vec<ratatui::text::Line<'static>>> = Vec::new();
+
+        // H4: resize 去抖——记录上次 rebuild_all 时间 + 暂存被节流的宽度。
+        // 终端 resize 会触发 burst 风暴（每帧一个事件），节流到 80ms 避免重建抖动。
+        let mut last_rebuild_at: Option<std::time::Instant> = None;
+        let mut pending_resize: Option<usize> = None;
 
         // 每秒轮询 VIEW_MODELS atom——检测 generation 变化（如 running Bash 计时器）
         let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -67,31 +69,53 @@ pub fn spawn_render_bridge(
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = poll_interval.tick() => {
+                    // H4: 兑现被节流的 resize（距上次 rebuild >= 80ms 才补做）
+                    if let Some(w) = pending_resize
+                        && last_rebuild_at
+                            .map(|t| t.elapsed() >= std::time::Duration::from_millis(80))
+                            .unwrap_or(true)
+                        && w != last_resize_width
+                    {
+                        last_resize_width = w;
+                        let snapshot =
+                            rebuild_all(last_resize_width, &mut cache, &mut last_generation).await;
+                        msg_hashes = extract_hashes_from_im(&snapshot.items);
+                        last_rebuild_at = Some(std::time::Instant::now());
+                        pending_resize = None;
+                    }
+
                     let snapshot = VIEW_MODELS.state().read().clone();
                     if snapshot.generation != last_generation {
                         debug!(generation = snapshot.generation, last_generation, "render_bridge: tick FULL_REBUILD (generation changed)");
                         rebuild_entries(&mut cache.entries, &snapshot.items, last_resize_width).await;
                         msg_hashes = extract_hashes_from_im(&snapshot.items);
                         rebuild_cumulative_heights(&mut cache);
-                        let all_lines: Vec<Line<'static>> = cache
-                            .entries
-                            .iter()
-                            .flat_map(|(_, entry)| entry.lines.iter())
-                            .cloned()
-                            .collect();
-                        cache.wrap_map = build_wrap_map(&all_lines, last_resize_width as u16);
                         *RENDER_CACHE.state().write() = cache.clone();
                         last_generation = snapshot.generation;
                     }
                 }
                 Some(new_width) = resize_rx.recv() => {
-                    let new_width = usize::from(new_width).max(1);
-                    if new_width != last_resize_width {
-                        last_resize_width = new_width;
-                        rebuild_all(last_resize_width, &mut cache, &mut last_generation).await;
-                        let snapshot = VIEW_MODELS.state().read().clone();
+                    // H4: 排空 burst，取最后一个宽度（合并 resize 风暴）
+                    let mut w = usize::from(new_width).max(1);
+                    while let Ok(next) = resize_rx.try_recv() {
+                        w = usize::from(next).max(1);
+                    }
+                    if w == last_resize_width {
+                        continue;
+                    }
+                    // 节流：距上次 rebuild >= 80ms 才立即重建，否则暂存等下次 poll/事件补做
+                    let ready = last_rebuild_at
+                        .map(|t| t.elapsed() >= std::time::Duration::from_millis(80))
+                        .unwrap_or(true);
+                    if ready {
+                        last_resize_width = w;
+                        let snapshot =
+                            rebuild_all(last_resize_width, &mut cache, &mut last_generation).await;
                         msg_hashes = extract_hashes_from_im(&snapshot.items);
-                        msg_lines_cache.clear();
+                        last_rebuild_at = Some(std::time::Instant::now());
+                        pending_resize = None;
+                    } else {
+                        pending_resize = Some(w);
                     }
                 }
                 Some(_epoch_event) = rx.recv() => {
@@ -101,8 +125,10 @@ pub fn spawn_render_bridge(
                         last_reset_counter = counter;
                         cache = RenderCache::default();
                         msg_hashes.clear();
-                        msg_lines_cache.clear();
                         last_generation = 0;
+                        // H4: reset 时一并清空节流状态，避免 reset 后触发旧宽度的 rebuild
+                        pending_resize = None;
+                        last_rebuild_at = None;
                         *RENDER_CACHE.state().write() = cache.clone();
                         info!(counter, "render_bridge: cache cleared by BRIDGE_RESET_COUNTER");
                         true
@@ -111,7 +137,7 @@ pub fn spawn_render_bridge(
                     };
 
                     let Some(snapshot) = read_ready_snapshot(last_generation).await else {
-                        info!("render_bridge: event dropped (generation unchanged after 50 yields)");
+                        info!("render_bridge: event dropped (generation unchanged after 200 yields)");
                         continue;
                     };
 
@@ -154,7 +180,6 @@ pub fn spawn_render_bridge(
                     if new_len < old_len {
                         debug!("render_bridge: strategy=CLEAR_AND_REBUILD (len decreased)");
                         msg_hashes.clear();
-                        msg_lines_cache.clear();
                         cache.entries.clear();
                         rebuild_entries(&mut cache.entries, &snapshot.items, last_resize_width).await;
                     } else if stable > 0 && new_len >= old_len {
@@ -197,16 +222,8 @@ pub fn spawn_render_bridge(
                     msg_hashes = new_hashes;
 
                     rebuild_cumulative_heights(&mut cache);
-                    let all_lines: Vec<Line<'static>> = cache
-                        .entries
-                        .iter()
-                        .flat_map(|(_, entry)| entry.lines.iter())
-                        .cloned()
-                        .collect();
-                    cache.wrap_map = build_wrap_map(&all_lines, last_resize_width as u16);
                     debug!(
                         cache_entries = cache.entries.len(),
-                        wrap_map_len = cache.wrap_map.len(),
                         "render_bridge: writing RENDER_CACHE"
                     );
                     *RENDER_CACHE.state().write() = cache.clone();
@@ -222,16 +239,22 @@ pub fn spawn_render_bridge(
 async fn read_ready_snapshot(
     last_generation: u64,
 ) -> Option<crate::kit::atoms::ViewModelsSnapshot> {
-    for _ in 0..50 {
+    // L7: yield 上限从 50 提到 200，前 50 轮纯 yield，50-200 轮之间每 10 轮插入一次
+    // 1ms sleep（避免空转）。最坏情况 ~15ms 额外延迟，不影响吞吐。
+    for round in 0..200 {
         let snapshot = VIEW_MODELS.state().read().clone();
         if snapshot.generation != last_generation {
             return Some(snapshot);
         }
-        tokio::task::yield_now().await;
+        if round >= 50 && round % 10 == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        } else {
+            tokio::task::yield_now().await;
+        }
     }
     tracing::warn!(
         target = "render_bridge",
-        "snapshot not ready after 50 yields"
+        "snapshot not ready after 200 yields"
     );
     None
 }
@@ -263,19 +286,19 @@ fn prefix_stable_len(new_hashes: &[u64], old_hashes: &[u64]) -> usize {
         .unwrap_or_else(|| old_hashes.len().min(new_hashes.len()))
 }
 
-async fn rebuild_all(width: usize, cache: &mut RenderCache, last_generation: &mut u64) {
+/// L8: 返回内部读取的 snapshot，避免调用方在 rebuild_all 返回后再次读取
+/// VIEW_MODELS atom 造成 snapshot 不一致（generation 可能已推进）。
+async fn rebuild_all(
+    width: usize,
+    cache: &mut RenderCache,
+    last_generation: &mut u64,
+) -> crate::kit::atoms::ViewModelsSnapshot {
     let snapshot = VIEW_MODELS.state().read().clone();
     rebuild_entries(&mut cache.entries, &snapshot.items, width).await;
     rebuild_cumulative_heights(cache);
-    let all_lines: Vec<Line<'static>> = cache
-        .entries
-        .iter()
-        .flat_map(|(_, entry)| entry.lines.iter())
-        .cloned()
-        .collect();
-    cache.wrap_map = build_wrap_map(&all_lines, width as u16);
     *RENDER_CACHE.state().write() = cache.clone();
     *last_generation = snapshot.generation;
+    snapshot
 }
 
 fn rebuild_entries(
@@ -339,19 +362,63 @@ pub fn visual_height(lines: &[Line<'static>], width: usize) -> usize {
 
 pub fn build_wrap_map(lines: &[Line<'static>], width: u16) -> Vec<WrappedLineInfo> {
     let mut map = Vec::with_capacity(lines.len());
-    let mut row: u16 = 0;
+    // M2: 内部累加用 u32 避免大消息列表（>65535 视觉行）溢出。
+    // WrappedLineInfo.visual_row 字段仍为 u16——push 时 saturate cast。
+    let mut row: u32 = 0;
+    let mut saturated_warned = false;
     for (line_idx, line) in lines.iter().enumerate() {
         let text = Text::from(line.clone());
         let height = Paragraph::new(text)
             .wrap(Wrap { trim: false })
             .line_count(width) as u16;
         let visual_height = height.max(1);
+        if row > u16::MAX as u32 && !saturated_warned {
+            tracing::warn!(
+                target = "render_bridge",
+                line_idx,
+                row,
+                "build_wrap_map: visual_row saturated at u16::MAX, viewport clip may be inaccurate"
+            );
+            saturated_warned = true;
+        }
+        let visual_row = row.min(u16::MAX as u32) as u16;
         map.push(WrappedLineInfo {
             line_idx,
-            visual_row: row,
+            visual_row,
             visual_height,
         });
-        row = row.saturating_add(visual_height);
+        row = row.saturating_add(visual_height as u32);
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M2: 构造 70000 个单行 Line 喂 build_wrap_map，断言返回 Vec 长度正确，
+    /// 且末尾若干项 visual_row 停在 u16::MAX 不再错误增长（字段类型仍为 u16）。
+    #[test]
+    fn test_build_wrap_map_u16_saturation_keeps_field_type() {
+        let lines: Vec<Line<'static>> = (0..70_000).map(|_| Line::from("x")).collect();
+        let map = build_wrap_map(&lines, 80);
+        assert_eq!(map.len(), 70_000);
+        let last = map.last().expect("non-empty");
+        assert_eq!(last.visual_row, u16::MAX);
+        let _: u16 = last.visual_row;
+        let _: u16 = last.visual_height;
+    }
+
+    /// L2: RenderCache::default() 不应含 wrap_map 字段——
+    /// 构造一个仅含 entries + cumulative_heights 的 RenderCache，断言可编译。
+    #[test]
+    fn test_render_cache_default_has_no_wrap_map_field() {
+        let cache = RenderCache {
+            entries: vec![],
+            cumulative_heights: vec![],
+        };
+        assert_eq!(cache.entries.len(), 0);
+        assert_eq!(cache.cumulative_heights.len(), 0);
+        let _default: RenderCache = RenderCache::default();
+    }
 }

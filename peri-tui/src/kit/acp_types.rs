@@ -516,6 +516,14 @@ impl SubAgentAccumulator {
 
         let mut child_turn = self.child_turn.clone();
         let child_vms = child_turn.view_models();
+        // M1: content_hash 累加每个 child VM 的 content_hash，确保 child 文本
+        // 变化时（即使 child_vms.len() 不变）也能触发 render_bridge 增量重建。
+        let child_content_hash: String = child_vms
+            .iter()
+            .map(extract_vm_content_hash)
+            .map(|h| h.to_string())
+            .collect::<Vec<_>>()
+            .join("|");
         let vm = TuiRenderUnit::TuiSubAgentGroup(crate::kit::tui_render_unit::TuiSubAgentGroup {
             agent_id: self.agent_id.clone(),
             agent_name: self.agent_name.clone(),
@@ -523,16 +531,36 @@ impl SubAgentAccumulator {
             collapsed: false,
             is_running: self.is_running,
             content_hash: crate::kit::tui_render_unit::tui_hash_str(&format!(
-                "{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}",
                 self.agent_id,
                 self.agent_name,
                 child_vms.len(),
                 false,
                 self.is_running,
+                child_content_hash,
             )),
         });
         self.cached_view_model.replace(Some(vm.clone()));
         vm
+    }
+}
+
+/// 从 TuiRenderUnit 提取 content_hash 字段值（M1）。
+///
+/// content_hash 是每个 VM 变体的内部字段（u64），用于检测内容变化。
+/// SubAgentAccumulator::view_model 累加这些值构成 group 的 content_hash，
+/// 确保 child VM 文本变化时 group hash 也变化，触发 render_bridge 重建。
+fn extract_vm_content_hash(vm: &TuiRenderUnit) -> u64 {
+    use crate::kit::tui_render_unit::TuiRenderUnit::*;
+    match vm {
+        TuiUserBubble(d) => d.content_hash,
+        TuiAssistantBubble(d) => d.content_hash,
+        TuiToolCard(d) => d.content_hash,
+        TuiSystemNote(d) => d.content_hash,
+        TuiSubAgentGroup(d) => d.content_hash,
+        TuiCollapsedGroup(d) => d.content_hash,
+        TuiDivider(d) => d.content_hash,
+        TuiAskUserBlock(d) => d.content_hash,
     }
 }
 
@@ -588,14 +616,12 @@ pub enum AcpEventData {
     /// `"turn-interrupted"` -- agent was interrupted (user cancel / timeout).
     TurnInterrupted { reason: String },
 
-    /// `"replay-user-bubble"` -- user bubble from session history replay.
-    ReplayUserBubble { text: String },
-
-    /// `"replay-assistant-bubble"` -- assistant bubble from session history replay.
-    ReplayAssistantBubble { text: String },
-
     /// TUI 内部事件：本地用户提交的 UserBubble。仅 TUI 内部使用，不走 ACP 协议。
     LocalUserBubble { text: String },
+
+    /// TUI 内部事件：直接将完整 AI 文本气泡追加到 committed。
+    /// 用于 session/load replay 及任何需要旁路 current_turn 直接归档的场景。
+    CommittedAssistantText { text: String },
 
     // -- §4.3 Status (status bar updates) ----------------------------------
     /// `"tool-count"` -- number of tool calls in the current turn.
@@ -626,6 +652,11 @@ pub enum AcpEventData {
 
     /// `"rewind-preview"` -- preview of changes that will be undone.
     RewindPreview(RewindPreview),
+
+    /// Rewind 已完成——messages_json 为 BaseMessage 数组的 JSON。
+    /// 由 AcpEvent::RewindCompleted（peri/agent_event）转换而来，
+    /// dispatch_and_notify 反序列化后替换 state.committed。
+    RewindCompleted { messages_json: String },
 
     /// `"oauth-needed"` -- MCP server authorization required.
     OauthNeeded(OauthNeeded),
@@ -732,12 +763,6 @@ impl AcpEventData {
                 let reason = data["reason"].as_str().unwrap_or("").to_string();
                 AcpEventData::TurnInterrupted { reason }
             }
-            "replay-user-bubble" => AcpEventData::ReplayUserBubble {
-                text: data["text"].as_str().unwrap_or_default().to_string(),
-            },
-            "replay-assistant-bubble" => AcpEventData::ReplayAssistantBubble {
-                text: data["text"].as_str().unwrap_or_default().to_string(),
-            },
 
             // §4.3 Status
             "tool-count" => decode_or_unknown(event, data, AcpEventData::ToolCount),
@@ -753,6 +778,10 @@ impl AcpEventData {
 
             // §4.5 Interaction requests
             "rewind-preview" => decode_or_unknown(event, data, AcpEventData::RewindPreview),
+            "rewind-completed" => {
+                let messages_json = data["messages_json"].as_str().unwrap_or("").to_string();
+                AcpEventData::RewindCompleted { messages_json }
+            }
             "oauth-needed" => decode_or_unknown(event, data, AcpEventData::OauthNeeded),
 
             // §4.6 Structure
@@ -1036,26 +1065,6 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_replay_user_bubble() {
-        let data = serde_json::json!({"text": "hello from history"});
-        let decoded = AcpEventData::decode("replay-user-bubble", data);
-        match decoded {
-            AcpEventData::ReplayUserBubble { text } => assert_eq!(text, "hello from history"),
-            _ => panic!("expected ReplayUserBubble"),
-        }
-    }
-
-    #[test]
-    fn test_decode_replay_assistant_bubble() {
-        let data = serde_json::json!({"text": "assistant reply"});
-        let decoded = AcpEventData::decode("replay-assistant-bubble", data);
-        match decoded {
-            AcpEventData::ReplayAssistantBubble { text } => assert_eq!(text, "assistant reply"),
-            _ => panic!("expected ReplayAssistantBubble"),
-        }
-    }
-
-    #[test]
     fn test_decode_turn_done() {
         let decoded = AcpEventData::decode("turn-done", serde_json::json!({}));
         match decoded {
@@ -1294,5 +1303,31 @@ mod tests {
         assert!(matches!(&vms[0], TuiRenderUnit::TuiAssistantBubble(_)));
         assert!(matches!(&vms[1], TuiRenderUnit::TuiToolCard(_)));
         assert!(matches!(&vms[2], TuiRenderUnit::TuiAssistantBubble(_)));
+    }
+
+    /// M1: SubAgentAccumulator content_hash 随 child VM 内容变化。
+    /// 相同结构（1 个 child）但不同文本 → 不同 content_hash。
+    #[test]
+    fn test_subagent_content_hash_changes_with_child_content() {
+        let mut acc1 = SubAgentAccumulator::new("agent-1".into(), "worker".into());
+        acc1.append_text("hello");
+        let vm1 = acc1.view_model();
+        let hash1 = match &vm1 {
+            TuiRenderUnit::TuiSubAgentGroup(g) => g.content_hash,
+            _ => panic!("expected TuiSubAgentGroup"),
+        };
+
+        let mut acc2 = SubAgentAccumulator::new("agent-1".into(), "worker".into());
+        acc2.append_text("world");
+        let vm2 = acc2.view_model();
+        let hash2 = match &vm2 {
+            TuiRenderUnit::TuiSubAgentGroup(g) => g.content_hash,
+            _ => panic!("expected TuiSubAgentGroup"),
+        };
+
+        assert_ne!(
+            hash1, hash2,
+            "不同 child 内容应产出不同 content_hash（M1 修复前会相等）"
+        );
     }
 }

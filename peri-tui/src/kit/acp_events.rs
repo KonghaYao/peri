@@ -160,12 +160,16 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
 
         // ── §4.2 Boundary events ──
+        // 保留分支（无数据枚举变体必须被 match 覆盖，否则编译错误），
+        // 但标注 dead path：当前 notifier 从不发出此事件。
         PromptStarted => {
+            tracing::trace!("dead path: PromptStarted not emitted by notifier");
             state.phase = SessionPhase::PromptRunning;
             state.variant = 1;
             push_acp_state(state);
         }
         SessionReplayStarted => {
+            tracing::trace!("dead path: SessionReplayStarted not emitted by notifier");
             state.phase = SessionPhase::ReplayingHistory;
             state.variant = 0;
             state.current_turn.reset();
@@ -173,6 +177,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
         SessionReplayDone => {
+            tracing::trace!("dead path: SessionReplayDone not emitted by notifier");
             if state.phase == SessionPhase::ReplayingHistory {
                 state.phase = SessionPhase::Idle;
             }
@@ -262,8 +267,17 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
 
-        // ── §4.4 Input assist (no-op for now) ──
-        Prediction(_) | FileSuggestions(_) => {}
+        // ── §4.4 Input assist ──
+        // Prediction 不触发 push_view_models（不进入消息流），只更新 PREDICTION atom。
+        // input_area 通过 use_atom(&PREDICTION) 自动重渲染显示预测占位符。
+        // 也不调 push_acp_state（避免不必要的 AppShell 重渲染）。
+        Prediction(p) => {
+            *PREDICTION.state().write() = PredictionState {
+                text: p.text.clone(),
+                received_at: Some(Instant::now()),
+            };
+        }
+        FileSuggestions(_) => {}
 
         // ── §4.5 Interaction events ──
         // S7：把每个交互事件映射到具体 PopupKind，让 PopupOverlay 精确路由
@@ -289,6 +303,76 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.popup_kind = Some(PopupKind::Rewind);
             state.variant = 2;
             push_popup_kind(state);
+            push_acp_state(state);
+        }
+        RewindCompleted { messages_json } => {
+            // H3: rewind 完成——反序列化 messages_json 为 Vec<Value>，按 role
+            // 映射为 TuiRenderUnit，替换 state.committed。
+            tracing::info!("bridge: RewindCompleted, replacing committed");
+            state.committed.clear();
+            state.current_turn.reset();
+            match serde_json::from_str::<Vec<serde_json::Value>>(messages_json) {
+                Ok(messages) => {
+                    for msg in messages {
+                        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                        let text = extract_message_text(&msg);
+                        let content_hash = tui_hash_str(&text);
+                        let vm = match role {
+                            "user" => TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+                                text,
+                                content_hash,
+                                is_system_reminder: false,
+                            }),
+                            "assistant" => TuiRenderUnit::TuiAssistantBubble(
+                                crate::kit::tui_render_unit::TuiAssistantBubble {
+                                    text,
+                                    reasoning: None,
+                                    content_hash,
+                                },
+                            ),
+                            "system" => {
+                                // system 角色历史消息：rewind 不还原 system-reminder 标记
+                                // （统一以 assistant bubble 渲染，无前缀），罕见但可能。
+                                tracing::trace!(
+                                    role = role,
+                                    "RewindCompleted: system role rendered as assistant bubble"
+                                );
+                                TuiRenderUnit::TuiAssistantBubble(
+                                    crate::kit::tui_render_unit::TuiAssistantBubble {
+                                        text,
+                                        reasoning: None,
+                                        content_hash,
+                                    },
+                                )
+                            }
+                            other => {
+                                tracing::warn!(
+                                    role = other,
+                                    "RewindCompleted: unknown role, rendered as assistant bubble"
+                                );
+                                TuiRenderUnit::TuiAssistantBubble(
+                                    crate::kit::tui_render_unit::TuiAssistantBubble {
+                                        text,
+                                        reasoning: None,
+                                        content_hash,
+                                    },
+                                )
+                            }
+                        };
+                        state.committed.push_back(vm);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "RewindCompleted: failed to deserialize messages_json, \
+                         committed cleared; UI will show empty message list"
+                    );
+                }
+            }
+            state.phase = SessionPhase::Idle;
+            ACP_STATE.state().write().is_loading = false;
+            push_view_models(state);
             push_acp_state(state);
         }
         OauthNeeded(on) => {
@@ -317,30 +401,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.current_turn.stop_subagent(agent_id);
             state.variant = 1;
             state.phase = SessionPhase::PromptRunning;
-            push_view_models(state);
-            push_acp_state(state);
-        }
-
-        // ── Replay events ──
-        ReplayUserBubble { text } => {
-            let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
-                text: text.clone(),
-                content_hash: tui_hash_str(text),
-                is_system_reminder: false,
-            });
-            state.committed.push_back(vm);
-            push_view_models(state);
-            push_acp_state(state);
-        }
-        ReplayAssistantBubble { text } => {
-            let vm = TuiRenderUnit::TuiAssistantBubble(
-                crate::kit::tui_render_unit::TuiAssistantBubble {
-                    text: text.clone(),
-                    reasoning: None,
-                    content_hash: 0,
-                },
-            );
-            state.committed.push_back(vm);
             push_view_models(state);
             push_acp_state(state);
         }
@@ -428,6 +488,18 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_view_models(state);
             push_acp_state(state);
         }
+        CommittedAssistantText { text } => {
+            let vm = TuiRenderUnit::TuiAssistantBubble(
+                crate::kit::tui_render_unit::TuiAssistantBubble {
+                    text: text.clone(),
+                    reasoning: None,
+                    content_hash: 0,
+                },
+            );
+            state.committed.push_back(vm);
+            push_view_models(state);
+            push_acp_state(state);
+        }
 
         // ── §4.7 Background Tasks ──
         BgTaskSnapshot(tasks) => {
@@ -464,6 +536,35 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
         }
     }
+}
+
+/// 从 BaseMessage JSON 提取纯文本（H3 辅助函数）。
+///
+/// content 可能是 string 或 array of {type:text, text:...}，
+/// 两种格式都兼容。**仅提取 type=="text" 的 block**——tool_use / tool_result /
+/// reasoning / image 等非文本 block 在 rewind 视图下不还原（用户看不到历史工具
+/// 调用卡片与 reasoning），这是 display-only 的简化设计，避免在 H3 反序列化
+/// 路径重建完整 ViewModel（成本过高且非 rewind 主场景）。
+fn extract_message_text(msg: &serde_json::Value) -> String {
+    // content 为 string 的简单格式
+    if let Some(s) = msg.get("content").and_then(|v| v.as_str()) {
+        return s.to_string();
+    }
+    // content 为 array 的复杂格式
+    if let Some(arr) = msg.get("content").and_then(|v| v.as_array()) {
+        return arr
+            .iter()
+            .filter_map(|block| {
+                if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    block.get("text").and_then(|v| v.as_str()).map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+    }
+    String::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -719,66 +820,6 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_replay_user_bubble_appends_to_committed() {
-        crate::kit::atoms::init_atoms();
-        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
-        let mut state = BridgeState {
-            variant: 0,
-            committed: im::Vector::new(),
-            current_turn: CurrentTurn::new(),
-            phase: SessionPhase::Idle,
-            popup_kind: None,
-            generation: 0,
-            active_session_id: String::new(),
-        };
-
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::ReplayUserBubble {
-                text: "hello from replay".into(),
-            },
-        );
-
-        let snapshot = VIEW_MODELS.state().read().clone();
-        assert_eq!(snapshot.items.len(), 1);
-        match &snapshot.items[0] {
-            TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "hello from replay"),
-            other => panic!("expected TuiUserBubble, got {other:?}"),
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_replay_assistant_bubble_appends_to_committed() {
-        crate::kit::atoms::init_atoms();
-        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
-        let mut state = BridgeState {
-            variant: 0,
-            committed: im::Vector::new(),
-            current_turn: CurrentTurn::new(),
-            phase: SessionPhase::Idle,
-            popup_kind: None,
-            generation: 0,
-            active_session_id: String::new(),
-        };
-
-        dispatch_and_notify(
-            &mut state,
-            &AcpEventData::ReplayAssistantBubble {
-                text: "assistant from replay".into(),
-            },
-        );
-
-        let snapshot = VIEW_MODELS.state().read().clone();
-        assert_eq!(snapshot.items.len(), 1);
-        match &snapshot.items[0] {
-            TuiRenderUnit::TuiAssistantBubble(d) => assert_eq!(d.text, "assistant from replay"),
-            other => panic!("expected TuiAssistantBubble, got {other:?}"),
-        }
-    }
-
-    #[test]
-    #[serial]
     fn test_two_turn_done_accumulates_committed() {
         crate::kit::atoms::init_atoms();
         *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
@@ -913,8 +954,6 @@ mod tests {
         assert_eq!(state.phase, SessionPhase::Idle, "phase 应为 Idle");
     }
 
-    #[test]
-    #[serial]
     /// push_view_models 以 BridgeState 为准，不再 fallback 到 atom 旧值。
     #[test]
     #[serial]
@@ -1007,6 +1046,79 @@ mod tests {
         let items = crate::kit::atoms::TODO_ITEMS.state().read().clone();
         assert_eq!(items.len(), 1, "缺少 entries 不应覆盖已有列表");
         assert_eq!(items[0].content, "existing");
+    }
+
+    /// M4: dispatch_and_notify 对 Prediction 事件写入 PREDICTION atom。
+    #[test]
+    #[serial]
+    fn test_prediction_writes_prediction_atom() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        // 预清 PREDICTION
+        *PREDICTION.state().write() = PredictionState::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: im::Vector::new(),
+            current_turn: CurrentTurn::new(),
+            phase: SessionPhase::Idle,
+            popup_kind: None,
+            generation: 0,
+            active_session_id: String::new(),
+        };
+
+        use peri_acp_types::event_data::Prediction;
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::Prediction(Prediction {
+                text: "type this".into(),
+            }),
+        );
+
+        let pred = PREDICTION.state().read().clone();
+        assert_eq!(pred.text, "type this");
+        assert!(pred.received_at.is_some(), "received_at 应被设置");
+    }
+
+    /// H3: RewindCompleted 反序列化 messages_json 替换 state.committed。
+    #[test]
+    #[serial]
+    fn test_rewind_completed_replaces_committed() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        // 预置 committed 旧数据
+        let pre_existing = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+            text: "old".into(),
+            content_hash: 1,
+            is_system_reminder: false,
+        })]);
+        let mut state = BridgeState {
+            variant: 1,
+            committed: pre_existing,
+            current_turn: CurrentTurn::new(),
+            phase: SessionPhase::PromptRunning,
+            popup_kind: None,
+            generation: 0,
+            active_session_id: String::new(),
+        };
+
+        let messages_json = serde_json::json!([
+            {"role": "user", "content": "rewound user msg"},
+            {"role": "assistant", "content": [{"type": "text", "text": "rewound assistant"}]}
+        ])
+        .to_string();
+
+        dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
+
+        // committed 应被替换为 2 条（user + assistant）
+        assert_eq!(state.committed.len(), 2, "rewind 后 committed 应有 2 条 VM");
+        match &state.committed[0] {
+            TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "rewound user msg"),
+            other => panic!("expected TuiUserBubble, got {other:?}"),
+        }
+        match &state.committed[1] {
+            TuiRenderUnit::TuiAssistantBubble(d) => assert_eq!(d.text, "rewound assistant"),
+            other => panic!("expected TuiAssistantBubble, got {other:?}"),
+        }
     }
 }
 

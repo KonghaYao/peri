@@ -47,7 +47,6 @@ TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTran
 | `INPUT_BUFFER` | agent loading 时缓存的待提交输入队列（上限 32） |
 | `HITL_PENDING` / `ASK_USER_PENDING` / `OAUTH_INFO` | 3 popup 的真实 payload（由 dispatch_and_notify 写入，close_popup 统一清空） |
 | `REWIND_PREVIEW` / `LAST_ESC_TIME` | Rewind 弹窗数据 + 双击 Esc 检测（500ms 窗口） |
-| `DIFF_VISIBLE` | Ctrl+O toggle 的 diff 视图开关 |
 | `PREDICTION` | `PredictionState { text, received_at }` —— agent 预测文本（灰色占位，Tab 接受） |
 | `AT_MENTION_ACTIVE` / `MENTION_PREFIX` / `MENTION_SELECTED_INDEX` | @mention 状态 + SkimMatcherV2 模糊匹配 |
 | `SLASH_HINT_ACTIVE` / `SLASH_PREFIX` / `SLASH_SELECTED_INDEX` | slash 补全状态 |
@@ -114,7 +113,7 @@ message_area (ratatui-kit ScrollView)：
 
 `render_v2_vm` 处理 7 种变体（UserBubble / AssistantBubble / ToolCard / SystemNote / SubAgentGroup / CollapsedGroup / ReasoningBlock），外加 AskUserBlock、DiffBlock、DividerData 子类型。
 
-- **ToolCard**：format_tool_name 映射（Bash→Shell、WebFetch→Browse 等），format_tool_args 参数摘要提取，工具折叠/展开逻辑
+- **ToolCard**：format_tool_name 映射（Bash→Shell、folder_operations→Folder，其余原样透传），format_tool_args 参数摘要提取，工具折叠/展开逻辑
 - **SubAgentGroup**：DTO.view_models 优先；fallback probe.recent_messages；prefix ◆→❯，final_result→⎿
 - **CollapsedGroup**：emoji→● 前缀，折叠/展开切换
 - **SystemNote**：Info/Warning/Error 三级，SystemNote prefix 分类

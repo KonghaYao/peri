@@ -127,6 +127,14 @@ async fn handle_load(
         let mut acp = ref_guard.write();
         acp.is_loading = false;
     }
+    // H1/M3/L5/L10：同步清空弹窗 payload、Todo 列表、输入历史指针，
+    // 与 submit_consumer::handle_clear_submit 对称。load_session 的 replay
+    // 事件会通过 ViewCommit 重写 VIEW_MODELS、通过 SessionUpdate::Plan 重写
+    // TODO_ITEMS，无数据丢失。本 handle_load 仅在 bg-task 拦截分支（弹 Confirm
+    // 后 continue）之后才执行，不会误关用户刚看到的 Confirm 弹窗。
+    crate::kit::popup_overlay::close_popup();
+    *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
+    crate::kit::input_history::reset_history_cursor();
     // 4. 最后加载 session。replay notification 到达时 active session 已就绪，不会被误丢。
     acp_client.load_session(&thread_id, cwd, None).await?;
     // 5. session/load 已完成，显式回到 idle，避免 replay 或历史 usage 留下 loading 态。
@@ -180,5 +188,66 @@ mod tests {
         let handle = spawn_thread_load_consumer(client, rx, ".".into(), shutdown);
         drop(tx);
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
+    }
+
+    /// 验证 handle_load 在调用 load_session 前已同步重置弹窗 / Todo / 历史指针。
+    ///
+    /// 覆盖 H1/M3/L5/L10，与 submit_consumer::test_handle_clear_submit_*
+    /// 对称。load_session 无 server 会 hang，我们用 100ms 超时让控制流走到
+    /// 重置后即返回，断言此时 4 类 atom 已被清空。重置写入发生在
+    /// load_session await 之前，因此即使 RPC 失败也已完成。
+    #[tokio::test]
+    async fn test_handle_load_resets_popup_todo_history_atoms() {
+        crate::kit::atoms::init_atoms();
+        // Arrange：把 4 类 atom 填充为“旧 session 残留”。
+        *crate::kit::atoms::POPUP_KIND.state().write() = Some(crate::kit::atoms::PopupKind::Hitl);
+        *crate::kit::atoms::HITL_PENDING.state().write() =
+            Some(peri_acp_types::event_data::HitlPending {
+                tool_name: "old".into(),
+                tool_input: serde_json::Value::Null,
+                batch: None,
+            });
+        *crate::kit::atoms::TODO_ITEMS.state().write() = vec![crate::kit::message_area::TodoItem {
+            content: "stale".into(),
+            status: crate::kit::message_area::TodoStatus::Pending,
+        }];
+        *crate::kit::atoms::INPUT_HISTORY_INDEX.state().write() = Some(3);
+        *crate::kit::atoms::DRAFT.state().write() = Some("stale draft".to_string());
+
+        let (client, _server) = make_client_without_pump();
+        let cwd = ".".to_string();
+
+        // Act：handle_load 在 load_session 处会 hang（无 server），
+        // 我们只关心它 await 之前的同步重置块，所以 100ms 超时即返回。
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            handle_load(&client, &cwd, "thread-xyz".to_string()),
+        )
+        .await;
+
+        // Assert：4 类残留已清空。
+        assert!(
+            crate::kit::atoms::POPUP_KIND.state().read().is_none(),
+            "POPUP_KIND should be None after thread switch"
+        );
+        assert!(
+            crate::kit::atoms::HITL_PENDING.state().read().is_none(),
+            "HITL_PENDING should be cleared after thread switch"
+        );
+        assert!(
+            crate::kit::atoms::TODO_ITEMS.state().read().is_empty(),
+            "TODO_ITEMS should be empty after thread switch"
+        );
+        assert!(
+            crate::kit::atoms::INPUT_HISTORY_INDEX
+                .state()
+                .read()
+                .is_none(),
+            "INPUT_HISTORY_INDEX should be None after thread switch"
+        );
+        assert!(
+            crate::kit::atoms::DRAFT.state().read().is_none(),
+            "DRAFT should be None after thread switch"
+        );
     }
 }
