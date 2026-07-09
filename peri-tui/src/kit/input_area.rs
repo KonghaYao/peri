@@ -11,7 +11,7 @@
 // clippy 触发 needless_update 警告。该警告来自宏展开而非用户代码，模块级抑制。
 #![allow(clippy::needless_update)]
 
-use peri_widgets::textarea::TextAreaState;
+use peri_widgets::textarea::{TextAreaState, wrap_text};
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
@@ -44,6 +44,10 @@ use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashComple
 use crate::kit::submit_request::{SubmitRequest, parse_submit_request};
 use crate::kit::theme;
 
+/// 输入区域 prompt + border 占用的列宽常量。
+/// border 左右各 1 列，" ❯ " prompt 前缀占 3 列 → 共 5 列。
+const PROMPT_AND_BORDER_WIDTH: u16 = 5;
+
 /// 追踪 composer 段落区域，供鼠标点击→光标定位使用。
 /// 仿照 MsgAreaTracker 模式：rect 是值类型，每帧 pre_component_draw 更新后在
 /// handler 注册前取出副本传给闭包。
@@ -55,18 +59,6 @@ impl Hook for AreaTracker {
     fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
         self.rect = Some(drawer.area);
     }
-}
-
-/// 将终端显示列坐标转换为行内字符索引（处理 CJK 双宽字符）。
-fn display_col_to_char_idx(line: &str, display_col: usize) -> usize {
-    let mut col = 0usize;
-    for (char_idx, ch) in line.chars().enumerate() {
-        if col >= display_col {
-            return char_idx;
-        }
-        col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-    }
-    line.chars().count()
 }
 
 #[derive(Default, Props)]
@@ -292,7 +284,12 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     // 因此这里显式避开 Ctrl+ 组合，避免与消息区滚动键冲突。
                     KeyCode::Up if !is_ctrl && !mention_active && !slash_active => {
                         tracing::info!(?key, "input area consumed up");
-                        let moved = state.write().cursor_line_up();
+                        let tw = composer_area
+                            .map(|a| {
+                                a.width.saturating_sub(PROMPT_AND_BORDER_WIDTH).max(1) as usize
+                            })
+                            .unwrap_or(80);
+                        let moved = state.write().cursor_visual_up(tw);
                         if !moved {
                             let current = state.read().all_text();
                             if let Some(historical) = history_up(Some(&current)) {
@@ -303,7 +300,12 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     }
                     KeyCode::Down if !is_ctrl && !mention_active && !slash_active => {
                         tracing::info!(?key, "input area consumed down");
-                        let moved = state.write().cursor_line_down();
+                        let tw = composer_area
+                            .map(|a| {
+                                a.width.saturating_sub(PROMPT_AND_BORDER_WIDTH).max(1) as usize
+                            })
+                            .unwrap_or(80);
+                        let moved = state.write().cursor_visual_down(tw);
                         if !moved && let Some(historical) = history_down() {
                             state.write().replace_all_no_undo(historical);
                         }
@@ -436,19 +438,30 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         let composer_top = outer.y.saturating_add(ov_h).saturating_add(1);
                         let text_x = outer.x.saturating_add(3);
                         if mouse.row >= composer_top && mouse.column >= text_x {
-                            let line_idx = mouse.row.saturating_sub(composer_top) as usize;
-                            let display_col = mouse.column.saturating_sub(text_x) as usize;
+                            let click_visual_row = mouse.row.saturating_sub(composer_top) as usize;
+                            let click_display_col = mouse.column.saturating_sub(text_x) as usize;
                             let s = state_cl.read();
                             if !s.text.is_empty() {
-                                let lines: Vec<&str> = s.text.split('\n').collect();
-                                if line_idx < lines.len() {
-                                    let char_col =
-                                        display_col_to_char_idx(lines[line_idx], display_col);
-                                    let new_cursor = TextAreaState::line_col_to_cursor(
-                                        &s.text, line_idx, char_col,
-                                    );
+                                let tw = outer.width.saturating_sub(PROMPT_AND_BORDER_WIDTH).max(1)
+                                    as usize;
+                                let wr = wrap_text(&s.text, s.cursor, tw);
+                                if click_visual_row < wr.total_visual_rows {
+                                    let vl = &wr.visual_lines[click_visual_row];
+                                    let mut col = 0usize;
+                                    let mut target_char = vl.char_range.0;
+                                    for (i, ch) in vl.text.char_indices() {
+                                        let cw =
+                                            unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                                        if col + cw > click_display_col {
+                                            break;
+                                        }
+                                        col += cw;
+                                        target_char = vl.char_range.0
+                                            + vl.text[..i + ch.len_utf8()].chars().count();
+                                    }
                                     drop(s);
-                                    state_cl.write().cursor = new_cursor;
+                                    state_cl.write().desired_col = None;
+                                    state_cl.write().cursor = target_char;
                                     // 点击在 composer 内，消费事件，阻止 message_area 误处理
                                     return EventResult::Consumed;
                                 }
@@ -504,8 +517,11 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     };
 
     // 计算 editor 视口高度（用于渲染窗口裁剪）
-    let line_count = text.matches('\n').count() + 1;
-    let editor_rows = (line_count as u16).clamp(1, 10);
+    let text_width = composer_area
+        .map(|a| a.width.saturating_sub(PROMPT_AND_BORDER_WIDTH).max(1) as usize)
+        .unwrap_or(80);
+    let wrap = peri_widgets::textarea::wrap_text(&text, cursor, text_width);
+    let editor_rows = (wrap.total_visual_rows as u16).clamp(1, 10);
 
     // 多行渲染——按 \n 拆分，每行作为独立 Line，光标高亮放在对应行
     // viewport_height 传入实际显示行数，render 内部只渲染该窗口大小的行
@@ -514,6 +530,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         cursor,
         selection_range,
         placeholder_str,
+        text_width,
         editor_rows as usize,
         loading,
         show_cursor,
@@ -956,6 +973,7 @@ fn render_multiline_with_cursor_for_themed(
     cursor: usize,
     selection_range: Option<(usize, usize)>,
     placeholder: Option<&str>,
+    max_width: usize,
     viewport_height: usize,
     loading: bool,
     show_cursor: bool,
@@ -978,6 +996,7 @@ fn render_multiline_with_cursor_for_themed(
         selection_style,
         placeholder,
         placeholder_style,
+        max_width,
         viewport_height,
         loading,
         show_cursor,

@@ -12,6 +12,150 @@ pub fn display_width_before(s: &str, char_idx: usize) -> usize {
         .sum()
 }
 
+/// 一个视觉行——逻辑行折行后的一行。选中映射和光标定位依赖 char_range。
+#[derive(Debug, Clone)]
+pub struct VisualLine {
+    /// 来源逻辑行索引（text.split('\n') 中的行号）
+    pub source_line: usize,
+    /// 本视觉行的文本内容
+    pub text: String,
+    /// 本视觉行内字符范围（[start, end) 半开区间，全局坐标）
+    /// 同时充当第一个字符的全局索引（等价于旧 char_start 字段）
+    pub char_range: (usize, usize),
+}
+
+/// wrap_text 的返回值
+#[derive(Debug, Clone)]
+pub struct WrapResult {
+    /// 折行后的视觉行列表
+    pub visual_lines: Vec<VisualLine>,
+    /// 光标所在的视觉行索引
+    pub cursor_visual_row: usize,
+    /// 光标在视觉行内的视觉列偏移（display width）
+    pub cursor_visual_col: usize,
+    /// 总视觉行数（等于 visual_lines.len()）
+    pub total_visual_rows: usize,
+}
+
+/// 将文本按 max_width 做 display-width 感知的折行，返回视觉行列表和光标映射。
+///
+/// 折行策略：任意字符处断行（overflow-wrap: break-word），保证零宽字符
+/// 不单独成行，CJK 双宽字符不打散。max_width 最小 1。
+///
+/// 光标位置 cursor 为字符索引。返回的 cursor_visual_row/col 是视觉坐标。
+pub fn wrap_text(text: &str, cursor: usize, max_width: usize) -> WrapResult {
+    let max_width = max_width.max(1);
+    let cursor = cursor.min(text.chars().count());
+
+    let mut visual_lines: Vec<VisualLine> = Vec::new();
+    let mut cursor_visual_row = 0usize;
+    let mut cursor_visual_col = 0usize;
+    let mut global_char = 0usize;
+
+    for (source_line, logical_line) in text.split('\n').enumerate() {
+        let logical_start = global_char;
+        let mut line_char_offset = 0usize; // 本逻辑行内字符偏移
+
+        // 空逻辑行仍然产生一个空视觉行
+        if logical_line.is_empty() {
+            // 只在 global_char 精确匹配时设置光标（不在 +1 处——避免覆盖依赖）
+            if cursor == global_char {
+                cursor_visual_row = visual_lines.len();
+                cursor_visual_col = 0;
+            }
+            visual_lines.push(VisualLine {
+                source_line,
+                text: String::new(),
+                char_range: (global_char, global_char),
+            });
+            global_char += 1; // for \n
+            continue;
+        }
+
+        let mut current_text = String::new();
+        let mut current_width = 0usize;
+        let mut segment_char_start = line_char_offset;
+
+        for ch in logical_line.chars() {
+            let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+
+            // 当前行已有内容，加下一个字会超出 → 断行
+            if current_width > 0 && current_width + ch_w > max_width {
+                visual_lines.push(VisualLine {
+                    source_line,
+                    text: std::mem::take(&mut current_text),
+                    char_range: (
+                        logical_start + segment_char_start,
+                        logical_start + line_char_offset,
+                    ),
+                });
+                current_width = 0;
+                segment_char_start = line_char_offset;
+            }
+
+            current_text.push(ch);
+            current_width += ch_w;
+
+            // 光标检查：在视觉行构建过程中匹配全局坐标
+            let char_global = logical_start + line_char_offset;
+            if cursor == char_global {
+                cursor_visual_row = visual_lines.len();
+                cursor_visual_col = current_width - ch_w; // 此字符之前
+            } else if cursor == char_global + 1 {
+                // 光标在这个字符之后
+                cursor_visual_row = visual_lines.len();
+                cursor_visual_col = current_width;
+            }
+
+            line_char_offset += 1;
+        }
+
+        // 该行剩余部分
+        if !current_text.is_empty() || logical_line.is_empty() {
+            // 再次检查光标（可能在行尾）
+            let char_global = logical_start + line_char_offset;
+            if cursor == char_global {
+                cursor_visual_row = visual_lines.len();
+                cursor_visual_col = current_width;
+            }
+
+            visual_lines.push(VisualLine {
+                source_line,
+                text: current_text,
+                char_range: (
+                    logical_start + segment_char_start,
+                    logical_start + line_char_offset,
+                ),
+            });
+        }
+
+        global_char += logical_line.chars().count() + 1; // +1 for \n
+    }
+
+    // 光标可能在文本末尾（超出所有字符）
+    if cursor >= text.chars().count() {
+        cursor_visual_row = visual_lines.len().saturating_sub(1);
+        cursor_visual_col = visual_lines
+            .last()
+            .map(|vl| {
+                vl.text
+                    .chars()
+                    .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                    .sum()
+            })
+            .unwrap_or(0);
+    }
+
+    let total_visual_rows = visual_lines.len();
+
+    WrapResult {
+        visual_lines,
+        cursor_visual_row,
+        cursor_visual_col,
+        total_visual_rows,
+    }
+}
+
 /// 字符索引 → 字节偏移（行内辅助，复用 TextAreaState::char_to_byte 同逻辑）。
 fn char_index_to_byte(s: &str, char_idx: usize) -> usize {
     s.char_indices()
@@ -36,6 +180,7 @@ pub fn render_multiline_with_cursor(
     selection_style: Style,
     placeholder: Option<&str>,
     placeholder_style: Style,
+    max_width: usize,
     viewport_height: usize,
     loading: bool,
     show_cursor: bool,
@@ -46,7 +191,6 @@ pub fn render_multiline_with_cursor(
         return if loading {
             vec![Line::from("")]
         } else if !show_cursor {
-            // 非聚焦态：无光标，仅渲染占位文本或空行
             if let Some(ph) = placeholder.filter(|s| !s.is_empty()) {
                 vec![Line::from(vec![Span::styled(
                     ph.to_string(),
@@ -56,78 +200,43 @@ pub fn render_multiline_with_cursor(
                 vec![Line::from("")]
             }
         } else if let Some(ph) = placeholder.filter(|s| !s.is_empty()) {
-            // 占位符：光标 styled space + 占位文本（tui-textarea 同款实现）
             vec![Line::from(vec![
                 Span::styled(" ", cursor_style),
                 Span::styled(ph.to_string(), placeholder_style),
             ])]
         } else {
-            // 空态光标：styled space 与行尾光标保持一致，避免 ▓ 块与终端默认光标重叠产生"双光标"
             vec![Line::from(vec![Span::styled(" ", cursor_style)])]
         };
     }
 
-    // 把光标位置映射到 (line_idx, col_idx)
-    let mut chars_before_cursor = 0usize;
-    let mut done = false;
-    let mut target_line = 0usize;
-    let mut target_col = 0usize;
-    for (li, line) in text.split('\n').enumerate() {
-        let line_chars = line.chars().count();
-        if !done && chars_before_cursor + line_chars >= cursor {
-            target_line = li;
-            target_col = cursor - chars_before_cursor;
-            done = true;
-            break;
-        }
-        chars_before_cursor += line_chars + 1; // +1 for \n
-        if chars_before_cursor > cursor + 1 {
-            break;
-        }
-    }
-    if !done {
-        // 光标在文本末尾
-        let total_lines: Vec<&str> = text.split('\n').collect();
-        target_line = total_lines.len() - 1;
-        target_col = total_lines.last().map(|l| l.chars().count()).unwrap_or(0);
-    }
+    // 使用 wrap_text 做软换行
+    let wrap = wrap_text(text, cursor, max_width);
 
-    // I22-B：计算渲染窗口 [start, end)，确保光标行包含在内。
-    // 当总行数 <= viewport_height 时展示全部；否则以光标行为中心构建窗口，
-    // 并在 end 被末尾钳位后向上扩展 start，保证窗口始终占满 viewport_height 行。
-    let total_line_count = text.matches('\n').count() + 1;
-    let (start, end) = if total_line_count <= viewport_height {
-        (0, total_line_count)
+    // 视口裁剪基于视觉行
+    let (start, end) = if wrap.total_visual_rows <= viewport_height {
+        (0, wrap.total_visual_rows)
     } else {
         let half_window = viewport_height / 2;
-        let center_start = target_line.saturating_sub(half_window);
-        let end = (center_start + viewport_height).min(total_line_count);
+        let center_start = wrap.cursor_visual_row.saturating_sub(half_window);
+        let end = (center_start + viewport_height).min(wrap.total_visual_rows);
         let start = end.saturating_sub(viewport_height);
         (start, end)
     };
 
-    // 全局字符索引——遍历时递增，用于将 selection_range（全局坐标）映射到行内坐标。
-    let mut global_char_idx = 0usize;
-
     let mut result: Vec<Line<'static>> = Vec::with_capacity(end - start);
-    for (li, line) in text.split('\n').enumerate() {
-        // 跳过渲染窗口之前的行
-        if li < start {
-            global_char_idx += line.chars().count() + 1;
-            continue;
-        }
-        if li >= end {
-            break;
-        }
 
+    for vi in start..end {
+        let vl = &wrap.visual_lines[vi];
+        let line = &vl.text;
         let line_chars = line.chars().count();
-        let line_start_global = global_char_idx;
+        let is_cursor_line = vi == wrap.cursor_visual_row;
 
-        // 计算选区与本行的重叠区间（行内字符索引的半开区间）
+        // 计算选区与本视觉行的重叠区间（全局坐标 → 视觉行内坐标）
         let sel_in_line: Option<(usize, usize)> =
             selection_range.and_then(|(sel_start, sel_end)| {
-                let overlap_start = sel_start.saturating_sub(line_start_global);
-                let overlap_end = (sel_end - line_start_global).min(line_chars);
+                let (v_start, _v_end) = vl.char_range;
+                let overlap_start = sel_start.saturating_sub(v_start);
+                let overlap_end = (sel_end.saturating_sub(v_start)).min(line_chars);
                 if overlap_start < overlap_end {
                     Some((overlap_start, overlap_end))
                 } else {
@@ -135,21 +244,21 @@ pub fn render_multiline_with_cursor(
                 }
             });
 
-        if li == target_line {
+        if is_cursor_line && show_cursor {
             // ── 光标行：光标 + 选区合并渲染 ──
-            // 光标字符位置用 display_width 定位（兼容 CJK 双宽）。
-            let visual_col = display_width_before(line, target_col);
+            let target_col = wrap.cursor_visual_col;
+
+            // 将 visual_col 映射到字符位置和字节
             let mut col = 0usize;
             let mut cut_byte = 0usize;
             for (i, ch) in line.char_indices() {
                 let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-                if col + cw > visual_col {
+                if col + cw > target_col {
                     break;
                 }
                 col += cw;
                 cut_byte = i + ch.len_utf8();
             }
-            // 光标字符的字节结束位置
             let cursor_end_byte = if cut_byte < line.len() {
                 line[cut_byte..]
                     .chars()
@@ -160,7 +269,7 @@ pub fn render_multiline_with_cursor(
                 line.len()
             };
 
-            // 收集所有分段切点：选区边界 + 光标边界，排序去重后逐段构建 Span。
+            // 分段构建 spans
             let mut split_points: Vec<usize> = vec![0, line.len(), cut_byte, cursor_end_byte];
             if let Some((s_start, s_end)) = sel_in_line {
                 split_points.push(char_index_to_byte(line, s_start));
@@ -180,9 +289,7 @@ pub fn render_multiline_with_cursor(
                 if seg.is_empty() {
                     continue;
                 }
-
-                // 样式优先级：光标（最高）> 选区 > 默认
-                let style = if show_cursor && seg_start >= cut_byte && seg_end <= cursor_end_byte {
+                let style = if seg_start >= cut_byte && seg_end <= cursor_end_byte {
                     cursor_style
                 } else if let Some((s_start, s_end)) = sel_in_line {
                     let s_s_byte = char_index_to_byte(line, s_start);
@@ -195,38 +302,40 @@ pub fn render_multiline_with_cursor(
                 } else {
                     Style::default()
                 };
-
                 spans.push(Span::styled(seg.to_string(), style));
             }
 
-            // 光标在行尾时追加 styled space
-            if show_cursor && target_col >= line_chars {
+            // 光标在视觉行尾时追加 styled space。
+            // CR 修正：移除 !spans.is_empty() 条件——空视觉行（如空逻辑行）
+            // 上 spans 为空但光标仍需可见。
+            let line_display_w: usize = line
+                .chars()
+                .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                .sum();
+            if target_col >= line_display_w {
                 spans.push(Span::styled(" ", cursor_style));
             }
             result.push(Line::from(spans));
-        } else {
-            // ── 非光标行：仅选区高亮（无选区则纯文本） ──
-            if let Some((s_start, s_end)) = sel_in_line {
-                let s_s_byte = char_index_to_byte(line, s_start);
-                let s_e_byte = char_index_to_byte(line, s_end);
-                let mut spans: Vec<Span<'static>> = Vec::new();
-                if s_s_byte > 0 {
-                    spans.push(Span::raw(line[..s_s_byte].to_string()));
-                }
-                spans.push(Span::styled(
-                    line[s_s_byte..s_e_byte].to_string(),
-                    selection_style,
-                ));
-                if s_e_byte < line.len() {
-                    spans.push(Span::raw(line[s_e_byte..].to_string()));
-                }
-                result.push(Line::from(spans));
-            } else {
-                result.push(Line::from(line.to_string()));
+        } else if let Some((s_start, s_end)) = sel_in_line {
+            // ── 非光标行：仅选区高亮 ──
+            let s_s_byte = char_index_to_byte(line, s_start);
+            let s_e_byte = char_index_to_byte(line, s_end);
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if s_s_byte > 0 {
+                spans.push(Span::raw(line[..s_s_byte].to_string()));
             }
+            spans.push(Span::styled(
+                line[s_s_byte..s_e_byte].to_string(),
+                selection_style,
+            ));
+            if s_e_byte < line.len() {
+                spans.push(Span::raw(line[s_e_byte..].to_string()));
+            }
+            result.push(Line::from(spans));
+        } else {
+            // ── 纯文本行 ──
+            result.push(Line::from(line.to_string()));
         }
-
-        global_char_idx += line_chars + 1;
     }
     result
 }

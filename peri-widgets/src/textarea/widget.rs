@@ -56,6 +56,7 @@ impl StatefulWidgetRef for TextArea {
         } else {
             Some(state.placeholder.as_str())
         };
+        let max_width = area.width.saturating_sub(2).max(1) as usize;
         let viewport_height = area.height as usize;
         let lines = render_multiline_with_cursor(
             &state.text,
@@ -65,6 +66,7 @@ impl StatefulWidgetRef for TextArea {
             self.selection_style,
             placeholder,
             self.placeholder_style,
+            max_width,
             viewport_height,
             self.loading,
             self.show_cursor,

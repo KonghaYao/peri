@@ -32,6 +32,9 @@ pub struct TextAreaState {
     pub yank: Option<YankText>,
     /// 占位符文本（内容为空时显示，空字符串=禁用）
     pub placeholder: String,
+    /// 上下移动时记忆的视觉列（display-width 列）。
+    /// 水平移动或编辑时清除。
+    pub desired_col: Option<usize>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -44,6 +47,7 @@ impl Default for TextAreaState {
             history: history::History::default(),
             yank: None,
             placeholder: String::new(),
+            desired_col: None,
         }
     }
 }
@@ -53,6 +57,7 @@ impl TextAreaState {
 
     /// 在光标位置插入字符，返回新的光标位置
     pub fn insert_char(&mut self, ch: char) {
+        self.desired_col = None;
         self.delete_selection();
         let before = self.snapshot();
         let byte_idx = Self::char_to_byte(&self.text, self.cursor);
@@ -64,6 +69,7 @@ impl TextAreaState {
 
     /// 在光标位置插入字符串
     pub fn insert_str(&mut self, s: &str) {
+        self.desired_col = None;
         self.delete_selection();
         let before = self.snapshot();
         let byte_idx = Self::char_to_byte(&self.text, self.cursor);
@@ -75,6 +81,7 @@ impl TextAreaState {
 
     /// 删除光标前的字符（行首删除换行符时合并行）。
     pub fn backspace(&mut self) {
+        self.desired_col = None;
         self.delete_selection();
         let before = self.snapshot();
         if self.cursor > 0 {
@@ -90,6 +97,7 @@ impl TextAreaState {
 
     /// 删除光标后的字符（行尾删除换行符时合并行）。
     pub fn delete_forward(&mut self) {
+        self.desired_col = None;
         self.delete_selection();
         let before = self.snapshot();
         if self.cursor < self.len() {
@@ -107,6 +115,7 @@ impl TextAreaState {
     /// 左移光标
     pub fn cursor_left(&mut self) {
         self.cancel_selection();
+        self.desired_col = None;
         if self.cursor > 0 {
             self.cursor -= 1;
         }
@@ -115,6 +124,7 @@ impl TextAreaState {
     /// 右移光标
     pub fn cursor_right(&mut self) {
         self.cancel_selection();
+        self.desired_col = None;
         if self.cursor < self.len() {
             self.cursor += 1;
         }
@@ -123,24 +133,28 @@ impl TextAreaState {
     /// 左移到上一个词边界（使用 Space/Punct/Other 三分法）。
     pub fn cursor_word_left(&mut self) {
         self.cancel_selection();
+        self.desired_col = None;
         self.cursor = word::prev_word_boundary(&self.text, self.cursor);
     }
 
     /// 右移到下一个词边界（使用 Space/Punct/Other 三分法）。
     pub fn cursor_word_right(&mut self) {
         self.cancel_selection();
+        self.desired_col = None;
         self.cursor = word::next_word_boundary(&self.text, self.cursor);
     }
 
     /// 光标到文本首
     pub fn cursor_home(&mut self) {
         self.cancel_selection();
+        self.desired_col = None;
         self.cursor = 0;
     }
 
     /// 光标到文本尾
     pub fn cursor_end(&mut self) {
         self.cancel_selection();
+        self.desired_col = None;
         self.cursor = self.len();
     }
 
@@ -149,6 +163,7 @@ impl TextAreaState {
     /// 删除光标前一个词（Ctrl+W）。
     /// 行首时先合并上一行（删除换行符），再继续删词。
     pub fn delete_word_backward(&mut self) {
+        self.desired_col = None;
         self.delete_selection();
         let before = self.snapshot();
         if self.cursor == 0 {
@@ -174,6 +189,7 @@ impl TextAreaState {
 
     /// 删除光标后的一个词（Alt+Delete）。
     pub fn delete_word_forward(&mut self) {
+        self.desired_col = None;
         self.delete_selection();
         let before = self.snapshot();
         if self.cursor >= self.len() {
@@ -220,18 +236,19 @@ impl TextAreaState {
         text.chars().count()
     }
 
-    /// 上移一行，返回是否真的做了多行移动。
+    /// 上移一行（逻辑行，无软换行信息时的回退方法）。
     pub fn cursor_line_up(&mut self) -> bool {
         self.cancel_selection();
         let (line, col) = self.cursor_line_col();
         if line == 0 {
             return false;
         }
+        self.desired_col = None;
         self.cursor = Self::line_col_to_cursor(&self.text, line - 1, col);
         true
     }
 
-    /// 下移一行，返回是否真的做了多行移动。
+    /// 下移一行（逻辑行，无软换行信息时的回退方法）。
     pub fn cursor_line_down(&mut self) -> bool {
         self.cancel_selection();
         let (line, col) = self.cursor_line_col();
@@ -239,7 +256,42 @@ impl TextAreaState {
         if line >= last_line {
             return false;
         }
+        self.desired_col = None;
         self.cursor = Self::line_col_to_cursor(&self.text, line + 1, col);
+        true
+    }
+
+    /// 上移一个视觉行（使用软换行折行信息），返回是否真的移动了。
+    pub fn cursor_visual_up(&mut self, max_width: usize) -> bool {
+        self.cancel_selection();
+        if self.cursor == 0 {
+            self.desired_col = None;
+            return false;
+        }
+        let wrap = crate::textarea::render::wrap_text(&self.text, self.cursor, max_width.max(1));
+        if wrap.cursor_visual_row == 0 {
+            self.desired_col = None;
+            return false;
+        }
+        let target_row = wrap.cursor_visual_row - 1;
+        let desired = self.desired_col.unwrap_or(wrap.cursor_visual_col);
+        self.desired_col = Some(desired);
+        self.cursor = Self::visual_row_col_to_cursor(&wrap.visual_lines, target_row, desired);
+        true
+    }
+
+    /// 下移一个视觉行（使用软换行折行信息），返回是否真的移动了。
+    pub fn cursor_visual_down(&mut self, max_width: usize) -> bool {
+        self.cancel_selection();
+        let wrap = crate::textarea::render::wrap_text(&self.text, self.cursor, max_width.max(1));
+        if wrap.cursor_visual_row >= wrap.total_visual_rows.saturating_sub(1) {
+            self.desired_col = None;
+            return false;
+        }
+        let target_row = wrap.cursor_visual_row + 1;
+        let desired = self.desired_col.unwrap_or(wrap.cursor_visual_col);
+        self.desired_col = Some(desired);
+        self.cursor = Self::visual_row_col_to_cursor(&wrap.visual_lines, target_row, desired);
         true
     }
 
@@ -264,6 +316,7 @@ impl TextAreaState {
     /// 当前行首。
     pub fn cursor_line_home(&mut self) {
         self.cancel_selection();
+        self.desired_col = None;
         let (line, _) = self.cursor_line_col();
         self.cursor = Self::line_col_to_cursor(&self.text, line, 0);
     }
@@ -271,6 +324,7 @@ impl TextAreaState {
     /// 当前行尾。
     pub fn cursor_line_end(&mut self) {
         self.cancel_selection();
+        self.desired_col = None;
         let (line, _) = self.cursor_line_col();
         let line_len = self
             .text
@@ -286,6 +340,7 @@ impl TextAreaState {
 
     /// 替换字符区间，并把光标放在替换文本末尾。
     pub fn replace_char_range(&mut self, start: usize, end: usize, replacement: &str) {
+        self.desired_col = None;
         self.delete_selection();
         let before = self.snapshot();
         let start = start.min(self.len());
@@ -304,6 +359,7 @@ impl TextAreaState {
 
     /// 替换整个文本并把光标放到末尾（历史导航、提交后用）。
     pub fn replace_all(&mut self, text: String) {
+        self.desired_col = None;
         let before = self.snapshot();
         self.text = text;
         self.cursor = self.text.chars().count();
@@ -368,26 +424,24 @@ impl TextAreaState {
 
     /// 撤销上一次编辑。
     pub fn undo(&mut self) -> bool {
-        let Self {
-            text,
-            cursor,
-            selection_start,
-            history,
-            ..
-        } = self;
-        history.undo(text, cursor, selection_start)
+        let result = self
+            .history
+            .undo(&mut self.text, &mut self.cursor, &mut self.selection_start);
+        if result {
+            self.desired_col = None;
+        }
+        result
     }
 
     /// 重做上一次撤销。
     pub fn redo(&mut self) -> bool {
-        let Self {
-            text,
-            cursor,
-            selection_start,
-            history,
-            ..
-        } = self;
-        history.redo(text, cursor, selection_start)
+        let result = self
+            .history
+            .redo(&mut self.text, &mut self.cursor, &mut self.selection_start);
+        if result {
+            self.desired_col = None;
+        }
+        result
     }
 
     /// 提交后清空 undo/redo 栈。
@@ -399,6 +453,7 @@ impl TextAreaState {
 
     /// 粘贴最近 yank 的文本。
     pub fn paste_yank(&mut self) {
+        self.desired_col = None;
         if let Some(ref yank) = self.yank.clone() {
             let text = yank.text().to_string();
             if !text.is_empty() {
@@ -414,6 +469,7 @@ impl TextAreaState {
 
     /// 替换整个文本（不记录 undo 栈——历史导航专用）。
     pub fn replace_all_no_undo(&mut self, text: String) {
+        self.desired_col = None;
         self.text = text;
         self.cursor = self.text.chars().count();
         self.selection_start = None;
@@ -422,6 +478,7 @@ impl TextAreaState {
 
     /// 清除文本（Ctrl+U）。
     pub fn clear(&mut self) {
+        self.desired_col = None;
         let before = self.snapshot();
         self.text.clear();
         self.cursor = 0;
@@ -432,6 +489,7 @@ impl TextAreaState {
 
     /// 取出全部文本并重置状态（提交用）。
     pub fn take_text(&mut self) -> String {
+        self.desired_col = None;
         let text = std::mem::take(&mut self.text);
         self.cursor = 0;
         self.selection_start = None;
@@ -460,5 +518,29 @@ impl TextAreaState {
             .nth(char_idx)
             .map(|(i, _)| i)
             .unwrap_or(s.len())
+    }
+
+    /// 给定视觉行列表、目标视觉行索引、视觉列，返回对应的全局字符索引。
+    /// 若目标行比 desired_col 短，光标放在目标行尾。
+    fn visual_row_col_to_cursor(
+        visual_lines: &[crate::textarea::render::VisualLine],
+        target_row: usize,
+        desired_col: usize,
+    ) -> usize {
+        debug_assert!(
+            target_row < visual_lines.len(),
+            "visual_row_col_to_cursor: target_row out of bounds"
+        );
+        let vl = &visual_lines[target_row];
+        let mut col = 0usize;
+        for (i, ch) in vl.text.char_indices() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if col + cw > desired_col {
+                return vl.char_range.0 + vl.text[..i].chars().count();
+            }
+            col += cw;
+        }
+        // desired_col 超出或等于行宽 → 行尾
+        vl.char_range.0 + vl.text.chars().count()
     }
 }

@@ -115,6 +115,7 @@ fn test_render_multiline_empty_shows_cursor() {
         sel_style(),
         None,
         ph_style(),
+        12,
         1,
         false,
         true,
@@ -136,6 +137,7 @@ fn test_render_multiline_empty_loading_shows_blank() {
         sel_style(),
         None,
         ph_style(),
+        12,
         1,
         true,
         true,
@@ -155,6 +157,7 @@ fn test_render_multiline_cjk_cursor_mid_line() {
         sel_style(),
         None,
         ph_style(),
+        12,
         12,
         false,
         true,
@@ -183,6 +186,7 @@ fn test_render_multiline_cjk_cursor_at_start() {
         None,
         ph_style(),
         12,
+        12,
         false,
         true,
     );
@@ -208,6 +212,7 @@ fn test_render_multiline_cjk_cursor_at_end() {
         None,
         ph_style(),
         12,
+        12,
         false,
         true,
     );
@@ -229,6 +234,7 @@ fn test_render_multiline_cjk_cursor_second_line() {
         sel_style(),
         None,
         ph_style(),
+        12,
         12,
         false,
         true,
@@ -265,6 +271,7 @@ fn test_render_multiline_splits_newlines() {
         sel_style(),
         None,
         ph_style(),
+        12,
         12,
         false,
         true,
@@ -472,6 +479,7 @@ fn test_render_selection_single_line() {
         None,
         ph_style(),
         12,
+        12,
         false,
         true,
     );
@@ -494,6 +502,7 @@ fn test_render_selection_none_renders_normally() {
         sel_style(),
         None,
         ph_style(),
+        12,
         12,
         false,
         true,
@@ -518,6 +527,7 @@ fn test_render_show_cursor_false_no_cursor_highlight() {
         sel_style(),
         None,
         ph_style(),
+        12,
         12,
         false,
         false,
@@ -544,6 +554,7 @@ fn test_render_show_cursor_false_empty_with_placeholder() {
         sel_style(),
         Some("输入消息..."),
         ph_style(),
+        12,
         1,
         false,
         false,
@@ -556,4 +567,68 @@ fn test_render_show_cursor_false_empty_with_placeholder() {
         .iter()
         .any(|s| s.content == " " && s.style != Style::default());
     assert!(!has_cursor_styled, "show_cursor=false 空态不应有光标 space");
+}
+
+// ── 视觉行移动测试（soft wrapping）──────────────────
+
+#[test]
+fn test_visual_down_cjk_wrapped() {
+    let mut s = TextAreaState::default();
+    s.insert_str("你好世界");
+    s.cursor = 0;
+    assert!(s.cursor_visual_down(4));
+    assert_eq!(s.cursor, 2);
+}
+
+#[test]
+fn test_visual_down_at_last_visual_row_returns_false() {
+    let mut s = TextAreaState::default();
+    s.insert_str("你好世界");
+    s.cursor = 4;
+    assert!(!s.cursor_visual_down(4));
+    assert_eq!(s.cursor, 4);
+}
+
+#[test]
+fn test_visual_up_at_first_visual_row_returns_false() {
+    let mut s = TextAreaState::default();
+    s.insert_str("你好世界");
+    s.cursor = 2;
+    assert!(s.cursor_visual_up(4));
+    assert_eq!(s.cursor, 0);
+    assert!(!s.cursor_visual_up(4));
+}
+
+#[test]
+fn test_desired_col_cleared_on_edit() {
+    let mut s = TextAreaState::default();
+    s.insert_str("你好世界");
+    s.cursor = 0;
+    s.cursor_visual_down(4);
+    assert!(s.desired_col.is_some());
+    s.insert_char('x');
+    assert!(s.desired_col.is_none());
+}
+
+#[test]
+fn test_desired_col_cleared_on_horizontal_move() {
+    let mut s = TextAreaState::default();
+    s.insert_str("你好世界");
+    s.cursor = 0;
+    s.cursor_visual_down(4);
+    assert!(s.desired_col.is_some());
+    s.cursor_left();
+    assert!(s.desired_col.is_none());
+}
+
+/// undo 清除 desired_col
+#[test]
+fn test_desired_col_cleared_on_undo() {
+    let mut s = TextAreaState::default();
+    s.insert_str("你好世界");
+    s.cursor = 0;
+    s.cursor_visual_down(4);
+    assert!(s.desired_col.is_some());
+    s.undo();
+    assert!(s.desired_col.is_none());
 }
