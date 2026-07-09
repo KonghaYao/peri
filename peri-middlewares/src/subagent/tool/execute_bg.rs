@@ -9,7 +9,10 @@
 use std::sync::Arc;
 
 use peri_agent::{
-    agent::{events::ExecutorEvent, stages::run_react_loop},
+    agent::{
+        events::{ExecutorEvent, FnEventHandler},
+        stages::run_react_loop,
+    },
     messages::BaseMessage,
     tools::BaseTool,
 };
@@ -161,7 +164,6 @@ impl super::SubAgentTool {
             .await;
 
         // 捕获 spawn 所需资源
-        let event_handler = self.event_handler.clone();
         let registered_hooks = self.registered_hooks.clone();
         let thread_store = self.thread_store.clone();
         let deregister_runtime = self.deregister_runtime.clone();
@@ -182,10 +184,22 @@ impl super::SubAgentTool {
             // 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
             // 后转发到父 Agent 的事件处理器。让 TUI 能看到 SubAgent 内的工具调用 / AI 文本。
             // 必须在 run_react_loop 之前取出 event_handles（之后 v2_ctx 已被 move）。
+            //
+            // [CORRECT] bg SubAgent 的 forwarder 必须使用 bg_event_sender（独立泵），
+            // 而不是主 event_handler。主 event_handler → event_tx 在主 agent 的
+            // TurnSuspended/TurnDone 后被 close_channel 关闭，导致 bg SubAgent 在
+            // 主 turn 结束后执行的 ToolStart/ToolEnd 事件被丢弃。
+            let bg_forwarder_handler: Option<
+                Arc<dyn peri_agent::agent::events::AgentEventHandler>,
+            > = bg_event_sender.clone().map(|tx| {
+                Arc::new(FnEventHandler(move |ev: ExecutorEvent| {
+                    let _ = tx.send(ev);
+                })) as Arc<dyn peri_agent::agent::events::AgentEventHandler>
+            });
             let _forwarder_handle =
                 peri_agent::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
                     v2_ctx.event_handles,
-                    event_handler.clone(),
+                    bg_forwarder_handler,
                     child_thread_id_clone.clone(),
                 );
 
