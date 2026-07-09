@@ -63,6 +63,12 @@ pub async fn run_kit_fullscreen(
     // 2b. H2: 把 peri_config 共享句柄塞到全局 OnceLock，让 ModelPanel 等组件
     //     在 #[component] 闭包里能直接 write active_alias。ACP server 持同一 Arc。
     let _ = atoms::PERI_CONFIG_HANDLE.set(app.services.peri_config.clone());
+    // 2b2. i18n: 根据配置语言初始化 thread_local LcRegistry。
+    //     组件通过 crate::i18n::tr() / tr_args() 读取翻译文本。
+    {
+        let cfg = app.services.peri_config.read();
+        crate::i18n::init(cfg.config.language.as_deref());
+    }
     // 2c. H1a: 把 SharedPermissionMode 句柄塞到全局 OnceLock，让 ConfigPanel
     //     能切换 permission_mode。ServiceRegistry + ACP server 持同一 Arc。
     let _ = atoms::PERMISSION_MODE_HANDLE.set(app.services.permission_mode.clone());

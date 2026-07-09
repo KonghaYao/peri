@@ -26,7 +26,8 @@ use ratatui_kit::{
     ratatui::{style::Stylize, text::Line},
 };
 
-use crate::kit::atoms::REWIND_ACTION_TX;
+use crate::i18n;
+use crate::kit::atoms::{LANG_VERSION, REWIND_ACTION_TX};
 use crate::kit::list_nav::{ListNavAction, classify_list_nav, next_selection, previous_selection};
 use crate::kit::popup_overlay::close_popup;
 use crate::kit::rewind_action::RewindAction;
@@ -44,6 +45,8 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let preview_store = hooks.use_atom(&crate::kit::atoms::REWIND_PREVIEW);
     let preview = preview_store.read().clone();
     let _ = preview_store;
+
+    hooks.use_atom(&LANG_VERSION);
 
     // 当前视图（messages 默认；用户可 Tab 切到 files）
     let view = hooks.use_state(|| RewindView::Messages);
@@ -233,16 +236,11 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
 
             lines.push(Line::from(""));
-            lines.push(
-                Line::from(
-                    "  Tab: switch view  |  ↑↓: select  |  Enter: rewind to selected  |  Esc: cancel",
-                )
-                .fg(semantic.text.dim),
-            );
+            lines.push(Line::from(i18n::tr("rewind-confirm-hint")).fg(semantic.text.dim));
         }
     }
 
-    popup_text_shell!(" Rewind Changes ", semantic.status.warning, lines)
+    popup_text_shell!(i18n::tr("rewind-title"), semantic.status.warning, lines)
 }
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────

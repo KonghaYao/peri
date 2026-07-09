@@ -16,29 +16,31 @@ use ratatui_kit::{
 };
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{HOOK_LIST, HookSummary};
+use crate::i18n;
+use crate::kit::atoms::{HOOK_LIST, HookSummary, LANG_VERSION};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::theme;
+use fluent_bundle::FluentValue;
 
 /// Map event name to human-readable description。
-fn event_description(event: &str) -> &'static str {
+fn event_description(event: &str) -> String {
     match event {
-        "pretooluse" => "Before tool execution",
-        "posttooluse" => "After tool execution",
-        "posttoolusefailure" => "After tool execution fails",
-        "permissionrequest" => "Before auto mode classifier decides",
-        "userpromptsubmit" => "When user submits a prompt",
-        "sessionstart" => "When a new session starts",
-        "sessionend" => "When a session ends",
-        "stop" => "When agent stops",
-        "stopfailure" => "When agent stops with failure",
-        "posttoolbatch" => "When all parallel tools complete",
-        "subagentstart" => "When a subagent starts",
-        "subagentstop" => "When a subagent stops",
-        "precompact" => "Before context compaction",
-        "postcompact" => "After context compaction",
-        "notification" => "When agent needs user input",
-        _ => "",
+        "pretooluse" => i18n::tr("hook-event-before-tool"),
+        "posttooluse" => i18n::tr("hook-event-after-tool"),
+        "posttoolusefailure" => i18n::tr("hook-event-after-tool-fail"),
+        "permissionrequest" => i18n::tr("hook-event-before-auto-mode"),
+        "userpromptsubmit" => i18n::tr("hook-event-user-submit"),
+        "sessionstart" => i18n::tr("hook-event-session-start"),
+        "sessionend" => i18n::tr("hook-event-session-end"),
+        "stop" => i18n::tr("hook-event-agent-stop"),
+        "stopfailure" => i18n::tr("hook-event-agent-stop-fail"),
+        "posttoolbatch" => i18n::tr("hook-event-parallel-tools-done"),
+        "subagentstart" => i18n::tr("hook-event-subagent-start"),
+        "subagentstop" => i18n::tr("hook-event-subagent-stop"),
+        "precompact" => i18n::tr("hook-event-before-compact"),
+        "postcompact" => i18n::tr("hook-event-after-compact"),
+        "notification" => i18n::tr("hook-event-needs-input"),
+        _ => String::new(),
     }
 }
 
@@ -48,6 +50,7 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let store = hooks.use_atom(&HOOK_LIST);
     let hook_list: Vec<HookSummary> = store.read().clone();
     let _ = store;
+    let _lang_ver = hooks.use_atom(&LANG_VERSION);
     let count = hook_list.len();
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
@@ -96,22 +99,25 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Stats line
     lines.push(Line::from(vec![Span::styled(
-        format!("  {} hooks registered", count),
+        i18n::tr_args(
+            "hooks-configured-count",
+            &[("count".to_string(), FluentValue::from(count as i64))],
+        ),
         Style::new().fg(theme::semantic().text.primary).bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
-        "  (read-only — configured via plugins)",
+        i18n::tr("hooks-readonly-hint"),
         Style::new().fg(theme::semantic().text.muted).italic(),
     )]));
     lines.push(Line::from(""));
 
     if hook_list.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            "  No hooks configured",
+            i18n::tr("hooks-no-hooks"),
             Style::new().fg(theme::semantic().text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
-            "  Add hooks/<event>.json files to a plugin",
+            i18n::tr("hooks-no-hooks-hint"),
             Style::new().fg(theme::semantic().text.muted),
         )]));
     } else {

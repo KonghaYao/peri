@@ -15,13 +15,15 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, RENDER_CACHE};
+use crate::i18n;
+use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, LANG_VERSION, RENDER_CACHE};
 use crate::kit::focus_router;
 use crate::kit::panel_registry::clean_scrollbars;
 use crate::kit::render_bridge::WrappedLineInfo;
 use crate::kit::text_selection::{self, TextSelection};
 use crate::kit::theme;
 use crate::kit::welcome::Welcome;
+use fluent_bundle::FluentValue;
 use peri_widgets::spinner::{SpinnerMode, SpinnerState};
 use ratatui_kit::{
     components::ScrollViewState,
@@ -85,7 +87,7 @@ pub fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
         let prefix = Span::styled(format!("  {}  ", icon), prefix_style);
         let mut content = item.content.clone();
         if item.status == TodoStatus::Pending {
-            content.push_str(" (可开始)");
+            content.push_str(&i18n::tr("msg-todo-available"));
         }
         let text = Span::styled(content, text_style);
         lines.push(Line::from(vec![prefix, text]));
@@ -251,6 +253,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let render_cache = hooks.use_atom(&RENDER_CACHE);
     let acp_state = hooks.use_atom(&crate::kit::atoms::ACP_STATE);
     let todo_atom = hooks.use_atom(&crate::kit::atoms::TODO_ITEMS);
+    hooks.use_atom(&LANG_VERSION);
     let cache_snapshot = render_cache.read();
     let todo_items = todo_atom.read().clone();
     // is_loading 单数据源：ACP_STATE.is_loading（acp_bridge 在首条流式事件时置 true）。
@@ -744,7 +747,10 @@ fn build_footer_lines(
     } else if has_summary {
         let elapsed = peri_widgets::spinner::animation::format_elapsed(*summary_elapsed_ms.read());
         lines.push(Line::from(Span::styled(
-            format!("  ✻  Brewed for {elapsed}"),
+            i18n::tr_args(
+                "msg-spinner-brewed",
+                &[("duration".to_string(), FluentValue::from(elapsed))],
+            ),
             Style::default().fg(semantic.text.muted),
         )));
     }
@@ -1020,7 +1026,10 @@ mod tests {
         assert!(pending_icon.contains("◻"), "Pending 图标应为 ◻");
         let pending_text = lines[2].spans[1].content.as_ref();
         assert!(pending_text.contains("部署"), "Pending 文本应包含任务内容");
-        assert!(pending_text.contains("(可开始)"));
+        assert!(
+            pending_text.contains("(available)") || pending_text.contains("(可开始)"),
+            "Pending 文本应包含 i18n 可用标记"
+        );
     }
 
     /// 回归：空 todo 列表输出空行（仅 3 个 trailing blank lines）。

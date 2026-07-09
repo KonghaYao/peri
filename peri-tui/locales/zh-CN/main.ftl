@@ -203,9 +203,17 @@ config-field-persona = Persona
 config-field-tone = Tone
 config-field-proactiveness = Proactiveness
 config-field-cache-warning = 缓存警告
-config-field-diff = 内联 Diff
+config-field-diff = 显示 Diff
+config-field-1m-context = 1M 上下文
+config-field-active-alias = 当前别名
+config-field-permission-mode = 权限模式
 config-value-on = 开
 config-value-off = 关
+config-streaming-value-streaming = streaming
+config-streaming-value-block = 块式
+config-streaming-value-none = 无
+config-language-value-en = English
+config-language-value-zh = 中文
 config-saved = 配置已保存
 
 # Config panel groups
@@ -448,7 +456,7 @@ model-effort-max = 最大
 
 status-panel-title =  状态 
 status-tab-cost = 费用
-status-tab-context = 上下文
+status-tab-context =  上下文
 status-label-duration = 会话时长
 status-label-input-tokens = 输入 Tokens
 status-label-output-tokens = 输出 Tokens
@@ -463,12 +471,43 @@ status-label-messages = 消息
 status-label-tools = 工具
 status-empty-data = 暂无请求数据
 
+status-tab-service =  服务
+status-label-provider = 提供商:
+status-label-model = 模型:
+status-label-permission = 权限:
+status-label-cpu = CPU:
+status-label-memory = 内存:
+status-label-mcp = MCP:
+status-label-cron = Cron:
+status-label-cwd = 工作目录:
+status-label-total-vms = 视图总数:
+status-label-user-turns = 用户轮次:
+status-label-assistant-turns = 助手轮次:
+status-label-tool-calls = 工具调用:
+status-label-subagent-groups = 子代理组:
+status-label-system-notes = 系统注释:
+
 # ---- Agent 面板 ----
 
 agent-panel-title-none =  Agent 选择 (无) 
 agent-panel-title =  Agent 选择 
 agent-panel-none-label = 无 Agent（默认）
 agent-panel-empty-hint = 在 .claude/agents/ 目录中添加 Agent 定义文件
+
+# ---- Agent 会话信息面板 ----
+
+agent-panel-title-session =   当前 Agent 会话
+agent-label-provider = 提供商
+agent-label-model = 模型
+agent-label-permission-mode = 权限模式
+agent-label-cwd = 工作目录
+agent-label-messages = 消息数
+agent-label-total-messages = 总消息数
+agent-subagents-count =   子 Agent（{ $count }）
+agent-no-subagents =   此会话中未派生子 Agent
+agent-collapsed = （已折叠）
+agent-expanded = （已展开）
+agent-message-count =   { $count } 条消息
 
 # ---- Hook 面板 ----
 
@@ -478,6 +517,21 @@ hooks-configured-count = 已配置 { $count } 个 hook
 hooks-readonly-hint = 此面板为只读。要添加或修改 hook，请编辑插件的 hooks.json。
 hooks-no-hooks =   未配置 hook。
 hooks-no-hooks-hint =   Hook 可通过插件 hooks/hooks.json 添加。
+hook-event-before-tool = 工具执行前
+hook-event-after-tool = 工具执行后
+hook-event-after-tool-fail = 工具执行失败后
+hook-event-before-auto-mode = 自动模式决策前
+hook-event-user-submit = 用户提交提示词时
+hook-event-session-start = 新会话开始时
+hook-event-session-end = 会话结束时
+hook-event-agent-stop = Agent 停止时
+hook-event-agent-stop-fail = Agent 运行失败时
+hook-event-parallel-tools-done = 所有并行工具完成时
+hook-event-subagent-start = SubAgent 开始时
+hook-event-subagent-stop = SubAgent 停止时
+hook-event-before-compact = 上下文压缩前
+hook-event-after-compact = 上下文压缩后
+hook-event-needs-input = Agent 需要用户输入时
 
 # ---- 主题面板 ----
 

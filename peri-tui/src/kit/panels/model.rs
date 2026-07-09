@@ -6,7 +6,10 @@
 //! 需要 S11 解耦后通过 AcpClient 触发（暂留 TODO）。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{MODEL_HIGHLIGHT_UNTIL, PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT};
+use crate::i18n;
+use crate::kit::atoms::{
+    LANG_VERSION, MODEL_HIGHLIGHT_UNTIL, PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT,
+};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 use ratatui_kit::{
@@ -72,6 +75,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let active_alias = snapshot.read().model_alias.clone();
     let active_provider = snapshot.read().provider_name.clone();
     let _ = snapshot; // StoreState 是 Copy，无需显式 drop
+    let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         move |event| {
@@ -149,7 +153,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .unwrap_or(local_selected);
     let active_entry = &MODEL_ALIASES[active_idx];
     let provider_label = if active_provider.is_empty() {
-        "(unconfigured)".to_string()
+        i18n::tr("app-not-configured")
     } else {
         active_provider.clone()
     };
@@ -158,7 +162,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Header
     lines.push(Line::from(vec![Span::styled(
-        "  Model Alias Selection",
+        i18n::tr("model-panel-title"),
         Style::new().fg(theme::semantic().text.primary).bold(),
     )]));
     lines.push(Line::from(vec![
@@ -227,7 +231,10 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  Effort: ", Style::new().fg(theme::semantic().text.muted)),
+        Span::styled(
+            i18n::tr("model-field-effort"),
+            Style::new().fg(theme::semantic().text.muted),
+        ),
         Span::styled(
             active_entry.effort,
             Style::new().fg(theme::semantic().status.warning).bold(),
@@ -235,7 +242,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     ]));
     lines.push(Line::from(vec![
         Span::styled(
-            "  Max Tokens: ",
+            i18n::tr("model-field-max-token"),
             Style::new().fg(theme::semantic().text.muted),
         ),
         Span::styled(
@@ -245,11 +252,15 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     ]));
     lines.push(Line::from(vec![
         Span::styled(
-            "  1M Context: ",
+            i18n::tr("model-field-1m-context"),
             Style::new().fg(theme::semantic().text.muted),
         ),
         Span::styled(
-            if active_entry.context_1m { "ON" } else { "OFF" },
+            if active_entry.context_1m {
+                i18n::tr("config-value-on")
+            } else {
+                i18n::tr("config-value-off")
+            },
             if active_entry.context_1m {
                 Style::new().fg(theme::semantic().status.success)
             } else {

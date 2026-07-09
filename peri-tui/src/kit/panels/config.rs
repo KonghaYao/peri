@@ -6,7 +6,8 @@
 //! 设计如此，每次启动默认从 YOLO_MODE 环境变量派生）。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE};
+use crate::i18n;
+use crate::kit::atoms::{LANG_VERSION, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 use peri_middlewares::prelude::PermissionMode;
@@ -49,13 +50,16 @@ const ALIAS_OPTS: &[&str] = &["opus", "sonnet", "haiku"];
 const PERMISSION_OPTS: &[&str] = &["default", "accept-edit", "auto-mode", "bypass"];
 
 const CONFIG_ROWS: &[(&str, RowType)] = &[
-    ("Show Diff", RowType::Toggle),
-    ("Cache Warning", RowType::Toggle),
-    ("Streaming Mode", RowType::Cycle(STREAMING_OPTS)),
-    ("1M Context", RowType::Toggle),
-    ("Language", RowType::Cycle(LANGUAGE_OPTS)),
-    ("Active Alias", RowType::Cycle(ALIAS_OPTS)),
-    ("Permission Mode", RowType::Cycle(PERMISSION_OPTS)),
+    ("config-field-diff", RowType::Toggle),
+    ("config-field-cache-warning", RowType::Toggle),
+    ("config-field-streaming", RowType::Cycle(STREAMING_OPTS)),
+    ("config-field-1m-context", RowType::Toggle),
+    ("config-field-language", RowType::Cycle(LANGUAGE_OPTS)),
+    ("config-field-active-alias", RowType::Cycle(ALIAS_OPTS)),
+    (
+        "config-field-permission-mode",
+        RowType::Cycle(PERMISSION_OPTS),
+    ),
 ];
 
 #[component]
@@ -107,13 +111,14 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 读取 bump 强制 ratatui-kit 把这个值当作依赖（无此 read 调用则不会重渲染）
     let _ = *bump.read();
+    let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
     // ---- Render ----
     let sel = *cursor.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     lines.push(Line::from(vec![Span::styled(
-        "  Configuration (persisted to ~/.peri/settings.json)",
+        format!("  {}", i18n::tr("config-panel-title")),
         Style::new().fg(theme::semantic().text.muted).italic(),
     )]));
     lines.push(Line::from(""));
@@ -130,10 +135,12 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let value_line = match row_type {
             RowType::Toggle => {
                 let val = read_toggle(i);
+                let on_label = i18n::tr("config-value-on");
+                let off_label = i18n::tr("config-value-off");
                 let (on_text, off_text) = if val {
-                    ("[ON]", " OFF")
+                    (format!("[{}]", on_label), format!(" {}", off_label))
                 } else {
-                    (" ON ", "[OFF]")
+                    (format!(" {}", on_label), format!("[{}]", off_label))
                 };
                 let on_style = if val {
                     Style::new().fg(theme::semantic().status.success).bold()
@@ -147,7 +154,7 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 };
                 Line::from(vec![
                     Span::styled(cursor_mark, Style::new().fg(theme::component().panel.title)),
-                    Span::styled(format!("{:<22}", label), label_style),
+                    Span::styled(format!("{:<22}", i18n::tr(label)), label_style),
                     Span::styled(on_text, on_style),
                     Span::styled(" ", Style::new()),
                     Span::styled(off_text, off_style),
@@ -157,17 +164,18 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 let idx = read_cycle_idx(i, options);
                 let mut spans = vec![
                     Span::styled(cursor_mark, Style::new().fg(theme::component().panel.title)),
-                    Span::styled(format!("{:<22}", label), label_style),
+                    Span::styled(format!("{:<22}", i18n::tr(label)), label_style),
                 ];
                 for (j, opt) in options.iter().enumerate() {
+                    let label = cycle_display_label(opt);
                     if j == idx {
                         spans.push(Span::styled(
-                            format!("[{}]", opt),
+                            format!("[{}]", label),
                             Style::new().fg(theme::semantic().status.success).bold(),
                         ));
                     } else {
                         spans.push(Span::styled(
-                            format!(" {}", opt),
+                            format!(" {}", label),
                             Style::new().fg(theme::semantic().text.muted),
                         ));
                     }
@@ -315,6 +323,8 @@ fn activate_row(row: usize, forward: bool) {
                     let snap = cfg.clone();
                     drop(cfg);
                     let _ = crate::config::save(&snap);
+                    // i18n: 语言切换时重建 LcRegistry 并递增版本号，触发所有组件重渲染
+                    crate::i18n::switch(new_val);
                 }
                 ROW_ACTIVE_ALIAS => {
                     let mut cfg = handle.write();
@@ -334,6 +344,19 @@ fn activate_row(row: usize, forward: bool) {
                 _ => {}
             }
         }
+    }
+}
+
+/// 将 cycle 选项的内部值转换为 i18n 展示文本。
+/// 对于 streaming/language 选项走 i18n 翻译；alias/permission 等暂保持原样。
+fn cycle_display_label(opt: &str) -> String {
+    match opt {
+        "streaming" => i18n::tr("config-streaming-value-streaming").to_string(),
+        "block" => i18n::tr("config-streaming-value-block").to_string(),
+        "none" => i18n::tr("config-streaming-value-none").to_string(),
+        "en" => i18n::tr("config-language-value-en").to_string(),
+        "zh" => i18n::tr("config-language-value-zh").to_string(),
+        other => other.to_string(),
     }
 }
 

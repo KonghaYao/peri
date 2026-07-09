@@ -5,8 +5,10 @@
 //!   全部从 SERVICE_SNAPSHOT atom 派生（S5 落地）；高亮计时器控制闪烁。
 //! - **Row 2**：状态相关的快捷键 hints（popup/mention/slash/默认 4 态切换）。
 
+use crate::i18n;
 use crate::kit::atoms;
 use crate::kit::theme;
+use fluent_bundle::FluentValue;
 use ratatui_kit::{
     prelude::*,
     ratatui::{
@@ -21,6 +23,7 @@ use std::time::{Duration, Instant};
 /// 状态栏第 1 行：权限模式 · cwd · provider/model · CPU% · MEM · bg tasks
 #[component]
 fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let _lang = hooks.use_atom(&atoms::LANG_VERSION);
     let snap = hooks.use_atom(&atoms::SERVICE_SNAPSHOT);
     let model_hl = hooks.use_atom(&atoms::MODEL_HIGHLIGHT_UNTIL);
     let provider_hl = hooks.use_atom(&atoms::PROVIDER_HIGHLIGHT_UNTIL);
@@ -35,7 +38,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let mut spans: Vec<Span<'static>> = Vec::new();
 
-    // 1. 权限模式（Default 不显示）
+    // 1. 权限模式
     let mode_label = permission_mode_display(&snap.permission_mode);
     if !mode_label.is_empty() {
         let color = permission_mode_color(&snap.permission_mode);
@@ -131,6 +134,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// 状态栏第 2 行：状态相关的快捷键 hints + 复制提示
 #[component]
 fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let _lang = hooks.use_atom(&atoms::LANG_VERSION);
     // I19-C：原代码读 POPUP_ACTIVE（dead atom，open/close_popup 从不同步）
     // 导致 popup hints 永远不显示。改读 POPUP_KIND.is_some()。
     let popup_kind = hooks.use_atom(&atoms::POPUP_KIND);
@@ -151,7 +155,10 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let copy_active = copy_until.read().map_or(false, |until| now < until);
     if copy_active {
         let char_count = *copy_count.read();
-        let hint = format!(" 已复制 {} 字符 ", char_count);
+        let hint = i18n::tr_args(
+            "statusbar-copied",
+            &[("count".to_string(), FluentValue::from(char_count as u64))],
+        );
         return element!(
             View(
                 flex_direction: Direction::Horizontal,
@@ -208,6 +215,7 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 #[component]
 pub fn StatusBar(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let _lang = hooks.use_atom(&atoms::LANG_VERSION);
     // 通知条：渲染前检查过期——不写 atom，过期自动忽略。
     // 下次事件处理器写 NOTIFICATION 会用新值覆盖旧 Some。
     let notif_store = hooks.use_atom(&atoms::NOTIFICATION);
@@ -276,13 +284,12 @@ fn separator() -> Span<'static> {
 }
 
 /// 把 atom 中的 permission_mode 字符串映射为显示标签。
-/// "default" 返回空串（与 legacy 一致——Default 模式不显示标签）。
-fn permission_mode_display(mode: &str) -> &'static str {
+fn permission_mode_display(mode: &str) -> String {
     match mode {
-        "accept-edit" => "Accept Edit",
-        "auto-mode" => "Auto Mode",
-        "bypass" => "Bypass",
-        _ => "",
+        "accept-edit" => i18n::tr("statusbar-permission-accept-edit"),
+        "auto-mode" => i18n::tr("statusbar-permission-auto"),
+        "bypass" => i18n::tr("statusbar-permission-bypass"),
+        _ => i18n::tr("statusbar-permission-dont-ask"),
     }
 }
 
@@ -333,11 +340,11 @@ mod tests {
 
     #[test]
     fn test_permission_mode_display() {
-        assert_eq!(permission_mode_display("default"), "");
+        assert_eq!(permission_mode_display("default"), "Don't Ask");
         assert_eq!(permission_mode_display("accept-edit"), "Accept Edit");
         assert_eq!(permission_mode_display("auto-mode"), "Auto Mode");
         assert_eq!(permission_mode_display("bypass"), "Bypass");
-        assert_eq!(permission_mode_display("unknown"), "");
+        assert_eq!(permission_mode_display("unknown"), "Don't Ask");
     }
 
     #[test]
@@ -436,8 +443,8 @@ mod tests {
         assert!(snap.provider_name.is_empty());
         assert!(snap.model_alias.is_empty());
         assert!(snap.model_name.is_empty());
-        // Default mode → 空标签
-        assert_eq!(permission_mode_display(&snap.permission_mode), "");
+        // Default mode → Don't Ask 标签
+        assert_eq!(permission_mode_display(&snap.permission_mode), "Don't Ask");
         // 0% CPU 应被跳过
         assert_eq!(snap.cpu_percent, 0.0);
     }

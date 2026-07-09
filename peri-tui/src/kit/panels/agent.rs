@@ -10,10 +10,12 @@
 //! Config 面板。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT, VIEW_MODELS};
+use crate::i18n;
+use crate::kit::atoms::{LANG_VERSION, PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT, VIEW_MODELS};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::theme;
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
+use fluent_bundle::FluentValue;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -42,6 +44,7 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let subagents = collect_subagents(&vm_store.read());
     let _ = vm_store;
 
+    let _lang_ver = hooks.use_atom(&LANG_VERSION);
     let subagent_count = subagents.len();
 
     // 候选行数（仅用于 cursor 边界）
@@ -91,7 +94,7 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 头部
     lines.push(Line::from(vec![Span::styled(
-        "  Current Agent Session",
+        i18n::tr("agent-panel-title-session"),
         Style::new().fg(theme::semantic().text.primary).bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
@@ -101,19 +104,25 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     lines.push(Line::from(""));
 
     // 元信息行
-    let meta_rows: Vec<(&str, String)> = vec![
+    let meta_rows: Vec<(String, String)> = vec![
         (
-            "Provider",
+            i18n::tr("agent-label-provider"),
             format!("{} ({})", provider_name, active_provider_id),
         ),
         (
-            "Model",
+            i18n::tr("agent-label-model"),
             format!("{} (alias: {})", model_alias, active_alias),
         ),
-        ("Permission Mode", permission_mode),
-        ("CWD", cwd),
-        ("Messages", format!("Messages: {total_messages}",)),
-        ("Total Messages", format!("{}", total_messages)),
+        (i18n::tr("agent-label-permission-mode"), permission_mode),
+        (i18n::tr("agent-label-cwd"), cwd),
+        (
+            i18n::tr("agent-label-messages"),
+            format!("{total_messages}"),
+        ),
+        (
+            i18n::tr("agent-label-total-messages"),
+            format!("{total_messages}"),
+        ),
     ];
 
     for (i, (label, value)) in meta_rows.iter().enumerate() {
@@ -143,13 +152,19 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // SubAgent 列表标题
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
-        format!("  SubAgents ({})", subagent_count),
+        i18n::tr_args(
+            "agent-subagents-count",
+            &[(
+                "count".to_string(),
+                FluentValue::from(subagent_count as i64),
+            )],
+        ),
         Style::new().fg(theme::semantic().text.primary).bold(),
     )]));
 
     if subagents.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            "  No sub-agents spawned in this session",
+            i18n::tr("agent-no-subagents"),
             Style::new().fg(theme::semantic().text.muted).italic(),
         )]));
     } else {
@@ -164,12 +179,12 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             };
             let status_marker = if sa.collapsed {
                 Span::styled(
-                    " (collapsed)",
+                    i18n::tr("agent-collapsed"),
                     Style::new().fg(theme::semantic().text.muted),
                 )
             } else {
                 Span::styled(
-                    " (expanded)",
+                    i18n::tr("agent-expanded"),
                     Style::new().fg(theme::semantic().status.success),
                 )
             };
@@ -185,7 +200,13 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ),
                 status_marker,
                 Span::styled(
-                    format!("  {} msgs", sa.view_models.len()),
+                    i18n::tr_args(
+                        "agent-message-count",
+                        &[(
+                            "count".to_string(),
+                            FluentValue::from(sa.view_models.len() as i64),
+                        )],
+                    ),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
             ]));

@@ -15,7 +15,8 @@ use ratatui_kit::{
 };
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{SERVICE_SNAPSHOT, VIEW_MODELS};
+use crate::i18n;
+use crate::kit::atoms::{LANG_VERSION, SERVICE_SNAPSHOT, VIEW_MODELS};
 use crate::kit::theme;
 use crate::kit::tui_render_unit::TuiRenderUnit;
 
@@ -36,6 +37,8 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let vm_store = hooks.use_atom(&VIEW_MODELS);
     let vm_stats = derive_vm_stats(&vm_store.read());
     let _ = vm_store;
+
+    let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         move |event| {
@@ -65,7 +68,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // ── Tab bar ──────────────────────────────────────────────────────
     let tab_bar = Paragraph::new(Line::from(vec![
         Span::styled(
-            " Service ",
+            i18n::tr("status-tab-service"),
             if tab == TAB_SERVICE {
                 Style::new()
                     .fg(theme::semantic().text.primary)
@@ -76,7 +79,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             },
         ),
         Span::styled(
-            " Context ",
+            i18n::tr("status-tab-context"),
             if tab == TAB_CONTEXT {
                 Style::new()
                     .fg(theme::semantic().text.primary)
@@ -90,12 +93,12 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // ── Content ──────────────────────────────────────────────────────
     let provider_label = if snap.provider_name.is_empty() {
-        "(unconfigured)".to_string()
+        i18n::tr("app-not-configured")
     } else {
         snap.provider_name.clone()
     };
     let model_label = if snap.model_alias.is_empty() {
-        "(none)".to_string()
+        i18n::tr("app-empty")
     } else {
         snap.model_alias.clone()
     };
@@ -116,7 +119,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         TAB_SERVICE => vec![
             Line::from(vec![
                 Span::styled(
-                    "Provider:   ",
+                    i18n::tr("status-label-provider"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(
@@ -126,7 +129,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "Model:      ",
+                    i18n::tr("status-label-model"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(
@@ -136,7 +139,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "Permission: ",
+                    i18n::tr("status-label-permission"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(
@@ -147,7 +150,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Line::from(""),
             Line::from(vec![
                 Span::styled(
-                    "CPU:        ",
+                    i18n::tr("status-label-cpu"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(
@@ -157,7 +160,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "Memory:     ",
+                    i18n::tr("status-label-memory"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(
@@ -167,7 +170,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "MCP:        ",
+                    i18n::tr("status-label-mcp"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(mcp_label, Style::new().fg(theme::semantic().status.success)),
@@ -178,7 +181,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "Cron:       ",
+                    i18n::tr("status-label-cron"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(
@@ -188,7 +191,10 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("cwd: ", Style::new().fg(theme::semantic().text.muted)),
+                Span::styled(
+                    i18n::tr("status-label-cwd"),
+                    Style::new().fg(theme::semantic().text.muted),
+                ),
                 Span::styled(
                     snap.cwd.clone(),
                     Style::new().fg(theme::semantic().text.primary),
@@ -198,7 +204,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         TAB_CONTEXT => vec![
             Line::from(vec![
                 Span::styled(
-                    "Total VMs:        ",
+                    i18n::tr("status-label-total-vms"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(
@@ -208,7 +214,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "  User turns:     ",
+                    i18n::tr("status-label-user-turns"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(
@@ -218,7 +224,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "  Assistant turns:",
+                    i18n::tr("status-label-assistant-turns"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(
@@ -228,7 +234,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "  Tool calls:     ",
+                    i18n::tr("status-label-tool-calls"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(
@@ -238,7 +244,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "  SubAgent groups:",
+                    i18n::tr("status-label-subagent-groups"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(
@@ -248,7 +254,7 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "  System notes:   ",
+                    i18n::tr("status-label-system-notes"),
                     Style::new().fg(theme::semantic().text.muted),
                 ),
                 Span::styled(

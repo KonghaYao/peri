@@ -8,7 +8,8 @@
 //! 导航 + 选中高亮，不使用 VirtualList。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{THREAD_LIST, THREAD_LOAD_TX, ThreadSummary};
+use crate::i18n;
+use crate::kit::atoms::{LANG_VERSION, THREAD_LIST, THREAD_LOAD_TX, ThreadSummary};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::theme;
 use ratatui_kit::{
@@ -25,6 +26,7 @@ use ratatui_kit::{
 #[component]
 pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
+    hooks.use_atom(&LANG_VERSION);
 
     // S6c: 订阅 THREAD_LIST atom——后台 service_snapshot 2s 派生一次
     let threads_store = hooks.use_atom(&THREAD_LIST);
@@ -94,7 +96,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     if threads.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            "  No recent threads",
+            i18n::tr("thread-browser-empty"),
             item_meta_style,
         )]));
     } else {
@@ -116,7 +118,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let title = entry
                 .title
                 .clone()
-                .unwrap_or_else(|| format!("(untitled {})", id_short));
+                .unwrap_or_else(|| i18n::tr("thread-browser-untitled"));
             let updated = entry
                 .updated_at
                 .map(|dt| dt.format("%Y-%m-%d").to_string())

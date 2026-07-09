@@ -4,6 +4,8 @@
 
 #![allow(clippy::needless_update)]
 
+use crate::i18n;
+use crate::kit::atoms::LANG_VERSION;
 use crate::kit::theme;
 use ratatui_kit::{
     prelude::*,
@@ -32,7 +34,8 @@ pub struct WelcomeProps {
 }
 
 #[component]
-pub fn Welcome(props: &WelcomeProps) -> impl Into<AnyElement<'static>> {
+pub fn Welcome(props: &WelcomeProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let _lang_ver = hooks.use_atom(&LANG_VERSION);
     let semantic = theme::semantic();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let narrow = props.width < NARROW_THRESHOLD;
@@ -70,9 +73,9 @@ pub fn Welcome(props: &WelcomeProps) -> impl Into<AnyElement<'static>> {
 
     lines.push(Line::from(""));
     for feature in [
-        "Code across the repo with shared context",
-        "Open files, run tools, and inspect results",
-        "Delegate work to agents and workflows",
+        i18n::tr("welcome-feature-code"),
+        i18n::tr("welcome-feature-files"),
+        i18n::tr("welcome-feature-agents"),
     ] {
         lines.push(Line::from(vec![
             Span::styled(" • ", Style::default().fg(semantic.border.active)),

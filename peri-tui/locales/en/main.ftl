@@ -204,9 +204,17 @@ config-field-persona = Persona
 config-field-tone = Tone
 config-field-proactiveness = Proactiveness
 config-field-cache-warning = Cache Warning
-config-field-diff = Inline Diff
+config-field-diff = Show Diff
+config-field-1m-context = 1M Context
+config-field-active-alias = Active Alias
+config-field-permission-mode = Permission Mode
 config-value-on = ON
 config-value-off = OFF
+config-streaming-value-streaming = streaming
+config-streaming-value-block = block
+config-streaming-value-none = none
+config-language-value-en = English
+config-language-value-zh = 中文
 config-saved = Configuration saved
 
 # Config panel groups
@@ -449,7 +457,7 @@ model-effort-max = Max
 
 status-panel-title =  Status 
 status-tab-cost = Cost
-status-tab-context = Context
+status-tab-context =  Context
 status-label-duration = Session Duration
 status-label-input-tokens = Input Tokens
 status-label-output-tokens = Output Tokens
@@ -464,12 +472,43 @@ status-label-messages = Messages
 status-label-tools = Tools
 status-empty-data = No request data
 
+status-tab-service =  Service
+status-label-provider = Provider:
+status-label-model = Model:
+status-label-permission = Permission:
+status-label-cpu = CPU:
+status-label-memory = Memory:
+status-label-mcp = MCP:
+status-label-cron = Cron:
+status-label-cwd = cwd:
+status-label-total-vms = Total VMs:
+status-label-user-turns =   User turns:
+status-label-assistant-turns =   Assistant turns:
+status-label-tool-calls =   Tool calls:
+status-label-subagent-groups =   SubAgent groups:
+status-label-system-notes =   System notes:
+
 # ---- Agent Panel ----
 
 agent-panel-title-none =  Select Agent (None) 
 agent-panel-title =  Select Agent 
 agent-panel-none-label = No Agent (default)
 agent-panel-empty-hint = Add Agent definition files in .claude/agents/
+
+# ---- Agent Session Info Panel ----
+
+agent-panel-title-session =   Current Agent Session
+agent-label-provider = Provider
+agent-label-model = Model
+agent-label-permission-mode = Permission Mode
+agent-label-cwd = CWD
+agent-label-messages = Messages
+agent-label-total-messages = Total Messages
+agent-subagents-count =   SubAgents ({ $count })
+agent-no-subagents =   No sub-agents spawned in this session
+agent-collapsed =  (collapsed)
+agent-expanded =  (expanded)
+agent-message-count =   { $count } msgs
 
 # ---- Hooks Panel ----
 
@@ -479,6 +518,21 @@ hooks-configured-count = { $count } hooks configured
 hooks-readonly-hint = This panel is read-only. To add or modify hooks, edit plugin hooks.json.
 hooks-no-hooks =   No hooks configured.
 hooks-no-hooks-hint =   Hooks can be added via plugin hooks/hooks.json.
+hook-event-before-tool = Before tool execution
+hook-event-after-tool = After tool execution
+hook-event-after-tool-fail = After tool execution fails
+hook-event-before-auto-mode = Before auto mode classifier decides
+hook-event-user-submit = When user submits a prompt
+hook-event-session-start = When a new session starts
+hook-event-session-end = When a session ends
+hook-event-agent-stop = When agent stops
+hook-event-agent-stop-fail = When agent stops with failure
+hook-event-parallel-tools-done = When all parallel tools complete
+hook-event-subagent-start = When a subagent starts
+hook-event-subagent-stop = When a subagent stops
+hook-event-before-compact = Before context compaction
+hook-event-after-compact = After context compaction
+hook-event-needs-input = When agent needs user input
 
 # ---- Theme Panel ----
 

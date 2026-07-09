@@ -23,6 +23,9 @@ use crate::kit::tui_render_unit::{
 
 use crate::kit::theme;
 
+use crate::i18n;
+use fluent_bundle::FluentValue;
+
 // ── SubAgent 运行时状态探针（thread-local） ─────────────────────────────────
 
 /// V2 TuiSubAgentGroup 渲染所需的运行时状态（用于显示状态 emoji + total_steps）。
@@ -198,7 +201,10 @@ fn render_reasoning_block(reasoning: &TuiReasoningBlock) -> Vec<Line<'static>> {
     let char_count = reasoning.text.chars().count();
     let mut lines = vec![Line::from("")];
     lines.push(Line::from(vec![Span::styled(
-        format!("Thought for {} chars", char_count),
+        i18n::tr_args(
+            "render-thought-for",
+            &[("count".to_string(), FluentValue::from(char_count as u64))],
+        ),
         Style::default().fg(semantic.text.dim),
     )]));
 
@@ -539,7 +545,7 @@ fn render_ask_user_block(data: &TuiAskUserBlock) -> Vec<Line<'static>> {
         semantic.status.success
     };
     lines.push(Line::from(Span::styled(
-        "● User answered Peri's questions:",
+        i18n::tr("render-user-answered"),
         Style::default().fg(title_color),
     )));
 

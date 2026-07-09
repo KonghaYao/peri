@@ -256,6 +256,9 @@ pub static PERMISSION_MODE_HANDLE: OnceLock<
 pub static CRON_SCHEDULER_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>,
 > = OnceLock::new();
+/// i18n 语言版本计数器——语言切换时递增，订阅此 atom 的组件自动重渲染。
+/// LcRegistry 本体存于 thread_local!（FluentBundle !Send，无法进 static）。
+pub static LANG_VERSION: AtomStatic<u64> = AtomStatic::new(|| 0);
 
 pub static ACP_COMMANDS: AtomStatic<Vec<String>> = AtomStatic::new(|| Vec::new());
 pub static SKILL_NAMES: AtomStatic<Vec<String>> = AtomStatic::new(|| Vec::new());

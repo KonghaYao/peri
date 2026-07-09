@@ -11,13 +11,15 @@
 //! I20-D：替换原 mock_oauth_info() 写死数据——现在 popup 展示的是 agent 实际
 //! 触发 OAuth 的 server_name + auth_url，用户能据此判断该不该授权。
 
+use fluent_bundle::FluentValue;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
     ratatui::{style::Stylize, text::Line},
 };
 
-use crate::kit::atoms::OAUTH_INFO;
+use crate::i18n;
+use crate::kit::atoms::{LANG_VERSION, OAUTH_INFO};
 use crate::kit::popup_overlay::close_popup;
 use crate::kit::theme;
 
@@ -29,6 +31,8 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let info_store = hooks.use_atom(&OAUTH_INFO);
     let info = info_store.read().clone();
     let _ = info_store;
+
+    hooks.use_atom(&LANG_VERSION);
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         let info_for_open = info.clone();
@@ -83,14 +87,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     .bold(),
             );
             lines.push(Line::from(""));
-            lines.push(
-                Line::from("  MCP server requires authorization. Visit the URL below,")
-                    .fg(semantic.text.primary),
-            );
-            lines.push(
-                Line::from("  complete the flow, then press Enter to close this dialog.")
-                    .fg(semantic.text.primary),
-            );
+            lines.push(Line::from(i18n::tr("oauth-prompt")).fg(semantic.text.primary));
             lines.push(Line::from(""));
             // URL 截断用 chars().take(N) 避免 CJK 字节切片 panic（I19-C 同模式）
             let url_chars: Vec<char> = oauth.auth_url.chars().collect();
@@ -109,7 +106,18 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     }
 
-    popup_text_shell!(" OAuth Authorization ", popup_tokens.action_primary, lines)
+    let title = match &info {
+        Some(oauth) => i18n::tr_args(
+            "oauth-title",
+            &[(
+                "server".to_string(),
+                FluentValue::from(oauth.server_name.as_str()),
+            )],
+        ),
+        None => " OAuth Authorization ".to_string(),
+    };
+
+    popup_text_shell!(title, popup_tokens.action_primary, lines)
 }
 
 /// I20-D：用系统命令打开 auth_url——best-effort，失败仅记日志不报错。
