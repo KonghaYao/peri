@@ -166,6 +166,8 @@ pub struct TuiToolCard {
     pub diff: Option<TuiDiffBlock>,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
+    /// Agent 工具专用的子工具调用计数（由 build_view_models 后处理配对填充）。
+    pub tool_calls_count: usize,
 }
 
 tui_impl_partial_eq!(TuiToolCard: tool_id, tool_name, input_summary, output_summary, is_error, is_running, running_duration_ms, diff);
@@ -503,6 +505,7 @@ mod tests {
             is_running: false,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 1,
         };
         let b = TuiToolCard {

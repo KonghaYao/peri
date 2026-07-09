@@ -261,6 +261,25 @@ fn render_tool_card(data: &crate::kit::tui_render_unit::TuiToolCard) -> Vec<Line
         ]));
     }
 
+    // Agent 工具运行行：tool calls 计数 + 运行时长（仿 Shell Running 行）
+    if data.tool_name == "Agent" && data.is_running && !data.is_error {
+        let duration = data.running_duration_ms.unwrap_or(0);
+        let tool_count = data.tool_calls_count;
+        if tool_count > 0 {
+            lines.push(Line::from(vec![
+                Span::styled("  ⎿ ", Style::default().fg(semantic.text.dim)),
+                Span::styled(
+                    format!(
+                        "{} tool calls, running {}",
+                        tool_count,
+                        format_running_duration(duration)
+                    ),
+                    Style::default().fg(semantic.text.muted),
+                ),
+            ]));
+        }
+    }
+
     // 折叠/展开判断（纯 UI 决策，对应 TUI-TOOLCALL.md §1.3）
     let collapsed = if data.is_error {
         false // 错误不折叠
@@ -880,6 +899,7 @@ mod tests {
             is_running: false,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -900,6 +920,7 @@ mod tests {
             is_running: false,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -932,6 +953,7 @@ mod tests {
             is_running: false,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -950,6 +972,7 @@ mod tests {
             is_running: false,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -980,6 +1003,7 @@ mod tests {
             is_running: true,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1007,6 +1031,7 @@ mod tests {
             is_running: true,
             running_duration_ms: Some(61_000),
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1049,6 +1074,7 @@ mod tests {
             is_running: false,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1071,6 +1097,59 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_card_agent_running_shows_tool_calls_and_duration() {
+        RENDER_CALL_COUNT.with(|c| c.store(0, Ordering::Relaxed));
+
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
+            tool_id: "agent-tc-1".into(),
+            tool_name: "Agent".into(),
+            input_summary: "search rust patterns".into(),
+            output_summary: String::new(),
+            is_error: false,
+            is_running: true,
+            running_duration_ms: Some(85_000),
+            diff: None,
+            tool_calls_count: 5,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80);
+        let text = collect_text(&lines);
+        assert!(
+            text.contains("● Agent (search rust patterns)"),
+            "Agent 工具卡应使用 ● 原点前缀：{}",
+            text
+        );
+        assert!(
+            text.contains("⎿ 5 tool calls, running 1min 25s"),
+            "Agent 运行行应显示 tool calls 计数和时长：{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_tool_card_agent_not_running_shows_no_running_line() {
+        let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
+            tool_id: "agent-tc-done".into(),
+            tool_name: "Agent".into(),
+            input_summary: "search done".into(),
+            output_summary: "found matches".into(),
+            is_error: false,
+            is_running: false,
+            running_duration_ms: None,
+            diff: None,
+            tool_calls_count: 0,
+            content_hash: 0,
+        });
+        let lines = render_v2_vm(&vm, 80);
+        let text = collect_text(&lines);
+        assert!(
+            !text.contains("tool calls"),
+            "Agent 完成态不应显示 running 行：{}",
+            text
+        );
+    }
+
+    #[test]
     fn test_tool_card_output_is_compacted() {
         // Bash 默认折叠（COLLAPSED_BY_DEFAULT），max_lines=1，5 行输出 → 1 行 + "… 4 more lines"
         let vm = TuiRenderUnit::TuiToolCard(TuiToolCard {
@@ -1082,6 +1161,7 @@ mod tests {
             is_running: false,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1107,6 +1187,7 @@ mod tests {
                 is_too_large: false,
                 is_new_file: false,
             }),
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1135,6 +1216,7 @@ mod tests {
             is_running: false,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1157,6 +1239,7 @@ mod tests {
             is_running: false,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1195,6 +1278,7 @@ mod tests {
                 is_too_large: false,
                 is_new_file: false,
             }),
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1229,6 +1313,7 @@ mod tests {
                 is_too_large: false,
                 is_new_file: false,
             }),
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1250,6 +1335,7 @@ mod tests {
             is_running: false,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1273,6 +1359,7 @@ mod tests {
             is_running: false,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1652,6 +1739,7 @@ mod tests {
             is_running: true,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1685,6 +1773,7 @@ mod tests {
             is_running: true,
             running_duration_ms: None,
             diff: None,
+            tool_calls_count: 0,
             content_hash: 0,
         });
         let lines = render_v2_vm(&vm, 80);
@@ -1718,6 +1807,7 @@ mod tests {
                     is_running: false,
                     running_duration_ms: None,
                     diff: None,
+                    tool_calls_count: 0,
                     content_hash: 0,
                 })
             })
@@ -1844,6 +1934,7 @@ mod tests {
                 is_running: true,
                 running_duration_ms: None,
                 diff: None,
+                tool_calls_count: 0,
                 content_hash: 0,
             })
         };

@@ -389,6 +389,7 @@ impl CurrentTurn {
                             is_running,
                             running_duration_ms,
                             diff: None,
+                            tool_calls_count: 0,
                             content_hash: tui_hash_str(&format!(
                                 "{}|{}|{}|{}|{}|{}",
                                 t.tool_id,
@@ -419,6 +420,30 @@ impl CurrentTurn {
                 reasoning,
                 content_hash,
             }));
+        }
+
+        // 后处理：将 Agent 工具卡片的 tool_calls_count 与紧随的 SubAgent 组配对。
+        // 匹配逻辑：TuiToolCard(tool_name="Agent") 紧接着 TuiSubAgentGroup。
+        for i in 0..vms.len().saturating_sub(1) {
+            if let (
+                TuiRenderUnit::TuiToolCard(agent_card),
+                TuiRenderUnit::TuiSubAgentGroup(subagent_group),
+            ) = (&vms[i], &vms[i + 1])
+            {
+                if agent_card.tool_name == "Agent" && agent_card.is_running {
+                    let tool_count = subagent_group
+                        .view_models
+                        .iter()
+                        .filter(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(_)))
+                        .count();
+                    if tool_count > 0 {
+                        // 原地修改 TuiToolCard
+                        let mut updated_card = agent_card.clone();
+                        updated_card.tool_calls_count = tool_count;
+                        vms[i] = TuiRenderUnit::TuiToolCard(updated_card);
+                    }
+                }
+            }
         }
 
         self.cached_view_models = vms;

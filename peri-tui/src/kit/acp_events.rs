@@ -543,6 +543,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 is_running: true,
                 running_duration_ms: None,
                 diff: None,
+                tool_calls_count: 0,
                 content_hash: tui_hash_str(&format!(
                     "{}|{}|{}||false|true",
                     tool_id, tool_name, input_summary
@@ -625,6 +626,7 @@ fn update_committed_tool_card(
                 is_running: false,
                 running_duration_ms: None,
                 diff: card.diff.clone(),
+                tool_calls_count: card.tool_calls_count,
                 content_hash: tui_hash_str(&format!(
                     "{}|{}|{}|{}|{is_error}|false",
                     card.tool_id, card.tool_name, card.input_summary, output_summary,
