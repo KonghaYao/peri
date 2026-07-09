@@ -323,6 +323,12 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32) -> Vec<MappedEvent>
                 source_agent_id: None,
             }]
         }
+
+        // ── TurnSuspended: only routed via peri/unstable-event (router.rs) ──
+        // AgentEvent + session/update 通道跳过——router::route 处理 unstable event 投递。
+        ExecutorEvent::TurnSuspended => {
+            vec![MappedEvent::none()]
+        }
     }
 }
 
@@ -473,6 +479,7 @@ pub fn executor_event_to_acp(event: &ExecutorEvent) -> Option<super::AcpEvent> {
         // Category ① events: already handled via session/update
         // Filtered events: not forwarded
         // Note: MessageAdded is handled via session/update (above), not forwarded as AcpEvent.
+        // Note: TurnSuspended is routed via peri/unstable-event (router.rs), not AgentEvent.
         ExecutorEvent::TextChunk { .. }
         | ExecutorEvent::AiReasoning { .. }
         | ExecutorEvent::ToolStart { .. }
@@ -481,7 +488,8 @@ pub fn executor_event_to_acp(event: &ExecutorEvent) -> Option<super::AcpEvent> {
         | ExecutorEvent::LlmCallStart { .. }
         | ExecutorEvent::LlmCallEnd { .. }
         | ExecutorEvent::MessageAdded(_)
-        | ExecutorEvent::LlmRequestPayload { .. } => None,
+        | ExecutorEvent::LlmRequestPayload { .. }
+        | ExecutorEvent::TurnSuspended => None,
     }
 }
 

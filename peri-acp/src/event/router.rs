@@ -129,6 +129,11 @@ pub fn route(ev: &ExecutorEvent) -> Option<RoutingOutput> {
         | ExecutorEvent::SubagentStarted { .. }
         | ExecutorEvent::SubagentStopped { .. }
         | ExecutorEvent::AgentExecutionFailed { .. } => None,
+        // ── TurnSuspended: idle/await_wake 时发出，通知 TUI 停止 loading ──
+        ExecutorEvent::TurnSuspended => Some(RoutingOutput {
+            event_name: "turn-suspended".into(),
+            data: serde_json::Value::Object(serde_json::Map::new()),
+        }),
     }
 }
 

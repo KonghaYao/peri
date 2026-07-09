@@ -211,24 +211,33 @@ pub enum StateEvent {
         agent_id: AgentId,
         text: String,
     },
+    /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。
+    ///
+    /// Agent 在 idle/await_wake 路径中 emit 此事件，TUI 收到后：
+    /// - 归档 current_turn 到 committed（flush）
+    /// - 设置 is_loading = false（停止 loading spinner）
+    /// - Agent 保持存活（await_wake 阻塞）
+    ///
+    /// bg callback 到达时新 turn 的 TextChunk/ToolStarted 事件自动恢复 loading。
+    TurnSuspended { turn_id: TurnId, agent_id: AgentId },
 }
 
 impl StateEvent {
     /// 提取 turn_id
     pub fn turn_id(&self) -> TurnId {
         match self {
-            Self::StateSnapshot { turn_id, .. } | Self::SyntheticUserMessage { turn_id, .. } => {
-                *turn_id
-            }
+            Self::StateSnapshot { turn_id, .. }
+            | Self::SyntheticUserMessage { turn_id, .. }
+            | Self::TurnSuspended { turn_id, .. } => *turn_id,
         }
     }
 
     /// 提取 agent_id
     pub fn agent_id(&self) -> AgentId {
         match self {
-            Self::StateSnapshot { agent_id, .. } | Self::SyntheticUserMessage { agent_id, .. } => {
-                *agent_id
-            }
+            Self::StateSnapshot { agent_id, .. }
+            | Self::SyntheticUserMessage { agent_id, .. }
+            | Self::TurnSuspended { agent_id, .. } => *agent_id,
         }
     }
 }

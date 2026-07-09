@@ -15,8 +15,8 @@ pub mod receive;
 pub mod tool_dispatch;
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 
 use parking_lot::RwLock;
 
@@ -658,6 +658,16 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     tracing::info!(
                         "[bg-diag] End: queue empty, awaiting wake (idle_should_wait=true, first-time)"
                     );
+                    // 在 await_wake 阻塞之前 emit TurnSuspended：通知 TUI
+                    // flush current_turn + is_loading=false（停止 loading spinner）。
+                    // Agent 保持存活（await_wake 阻塞），bg callback 到达时
+                    // 新 turn 的 TextChunk/ToolStarted 自动恢复 loading。
+                    context.event_bus.emit_state(
+                        crate::agent::events_v2::StateEvent::TurnSuspended {
+                            turn_id: context.turn_id(),
+                            agent_id: context.agent_id,
+                        },
+                    );
                     // select cancel：用户中断时立即退出，避免 await_wake 永久阻塞
                     let cancel_fut = context.turn.cancel_token.cancelled();
                     tokio::pin!(cancel_fut);
@@ -727,9 +737,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 mod tests {
     use super::*;
     use crate::messages::MessageContent;
+    use crate::session::Session;
     use crate::session::queue::MessageSource;
     use crate::session::store::FrozenContext;
-    use crate::session::Session;
 
     /// 构造测试用 StageContext
     fn make_stage_context() -> StageContext {

@@ -238,6 +238,24 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_view_models(state);
             push_acp_state(state);
         }
+        TurnSuspended => {
+            // Turn 挂起（idle/await_wake）——与 TurnDone 类似但 Agent 保持存活。
+            // 归档 current_turn → committed，停止 loading，但不 drain_input_buffer
+            // （Agent 还在 await_wake，新 turn 的流事件会自动恢复 loading）。
+            if !state.current_turn.committed && !state.current_turn.is_empty() {
+                for vm in state.current_turn.view_models() {
+                    state.committed.push_back(vm.clone());
+                }
+            }
+            state.current_turn.reset();
+            state.variant = 0;
+            state.phase = SessionPhase::Idle;
+            ACP_STATE.state().write().is_loading = false;
+            push_view_models(state);
+            push_acp_state(state);
+            // 注意：不调用 drain_input_buffer()——Agent 保持存活，
+            // 输入缓冲在 Agent 真正完成（TurnDone）时再处理。
+        }
 
         // ── §4.3 Status events ──
         ToolCount(_tc) => {

@@ -196,6 +196,7 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         SessionReplayDone => "SessionReplayDone",
         TurnDone => "TurnDone",
         TurnInterrupted { reason: _ } => "TurnInterrupted",
+        TurnSuspended => "TurnSuspended",
         LocalUserBubble { .. } => "LocalUserBubble",
         BgCallbackBubble { .. } => "BgCallbackBubble",
         CommittedAssistantText { .. } => "CommittedAssistantText",

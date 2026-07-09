@@ -104,6 +104,7 @@ pub fn state_event_to_executor(event: StateEvent) -> Option<ExecutorEvent> {
         StateEvent::SyntheticUserMessage { text, .. } => Some(ExecutorEvent::MessageAdded(
             crate::messages::BaseMessage::human(crate::messages::MessageContent::text(text)),
         )),
+        StateEvent::TurnSuspended { .. } => Some(ExecutorEvent::TurnSuspended),
     }
 }
 

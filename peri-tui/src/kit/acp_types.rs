@@ -616,6 +616,11 @@ pub enum AcpEventData {
     /// `"turn-interrupted"` -- agent was interrupted (user cancel / timeout).
     TurnInterrupted { reason: String },
 
+    /// `"turn-suspended"` -- agent turn suspended, waiting for bg agent/cron/workflow.
+    /// TUI 收到后应归档 current_turn + 停止 loading spinner。
+    /// Agent 保持存活（await_wake），新 turn 的流事件自动恢复 loading。
+    TurnSuspended,
+
     /// TUI 内部事件：本地用户提交的 UserBubble。仅 TUI 内部使用，不走 ACP 协议。
     LocalUserBubble { text: String },
 
@@ -783,6 +788,7 @@ impl AcpEventData {
                 let reason = data["reason"].as_str().unwrap_or("").to_string();
                 AcpEventData::TurnInterrupted { reason }
             }
+            "turn-suspended" => AcpEventData::TurnSuspended,
 
             // §4.3 Status
             "tool-count" => decode_or_unknown(event, data, AcpEventData::ToolCount),

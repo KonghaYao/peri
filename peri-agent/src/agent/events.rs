@@ -262,6 +262,9 @@ pub enum ExecutorEvent {
     BgToolStep { child_thread_id: String },
     /// Workflow 进度更新（WorkflowRunner 发出，TUI 消费渲染面板）
     WorkflowProgress(WorkflowProgressPayload),
+    /// Turn 已挂起（idle/await_wake），等待 bg agent/cron/workflow 异步事件。
+    /// TUI 收到后应停止 loading spinner，但不终止 Agent（Agent 保持 await_wake 存活）。
+    TurnSuspended,
 }
 
 /// 事件回调 trait（应用层实现）
