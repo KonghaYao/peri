@@ -53,6 +53,7 @@ pub fn spawn_acp_bridge(
             popup_kind: None,
             generation: 0,
             active_session_id: String::new(),
+            compact_just_completed: false,
         };
 
         // 追踪 BRIDGE_RESET_COUNTER——submit_consumer 的 /clear / thread_load

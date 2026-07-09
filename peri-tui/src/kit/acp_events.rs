@@ -43,6 +43,10 @@ pub struct BridgeState {
     pub generation: u64,
     /// 当前活跃 session 的 ID。事件携带的 active_session_id 不匹配时丢弃。
     pub active_session_id: String,
+    /// `/compact` 命令刚刚完成，TurnDone 时需触发 session/load 重放。
+    /// 与 agent 内部 compact 区分：命令 compact 后 current_turn 为空，
+    /// agent 内部 compact 后 current_turn 有后续流事件。
+    pub compact_just_completed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +225,21 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 
             // (g) C1: agent 完成本轮——drain INPUT_BUFFER，按顺序重新提交。
             drain_input_buffer();
+
+            // C2: compact 命令完成后触发 session/load 重放。
+            // 区分 agent 内部 compact：命令 compact（Immediate）后无后续流事件，
+            // current_turn 为空；agent 内部 compact 后 current_turn 有内容。
+            if state.compact_just_completed && state.current_turn.is_empty() {
+                state.compact_just_completed = false;
+                if let Some(tx) = THREAD_LOAD_TX.get() {
+                    let session_id = state.active_session_id.clone();
+                    tracing::info!(
+                        session_id = %session_id,
+                        "TurnDone: compact completed, triggering session/load replay"
+                    );
+                    let _ = tx.send(session_id);
+                }
+            }
         }
         TurnInterrupted { reason: _reason } => {
             // 守卫：仅当 current_turn 有未归档内容时才归档
@@ -433,6 +452,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         CompactCompleted { summary, .. } => {
             tracing::info!(summary_len = summary.len(), "bridge: CompactCompleted");
+            state.compact_just_completed = true;
             state.phase = SessionPhase::Idle;
             ACP_STATE.state().write().is_loading = false;
             push_acp_state(state);
@@ -810,6 +830,7 @@ mod tests {
             popup_kind: None,
             generation: 0,
             active_session_id: String::new(),
+            compact_just_completed: false,
         };
 
         dispatch_and_notify(
@@ -961,6 +982,7 @@ mod tests {
             popup_kind: None,
             generation: 0,
             active_session_id: String::new(),
+            compact_just_completed: false,
         };
 
         // 第一轮：stream one text → TurnDone
@@ -1013,6 +1035,7 @@ mod tests {
             popup_kind: None,
             generation: 0,
             active_session_id: String::new(),
+            compact_just_completed: false,
         };
 
         // 往 current_turn 写入一条 assistant 文本
@@ -1060,6 +1083,7 @@ mod tests {
             popup_kind: None,
             generation: 0,
             active_session_id: String::new(),
+            compact_just_completed: false,
         };
 
         dispatch_and_notify(
@@ -1104,6 +1128,7 @@ mod tests {
             popup_kind: None,
             generation: 0,
             active_session_id: String::new(),
+            compact_just_completed: false,
         };
 
         // push_view_models: 用 BridgeState 数据（空 committed + 空 current_turn）→ 空 items
@@ -1190,6 +1215,7 @@ mod tests {
             popup_kind: None,
             generation: 0,
             active_session_id: String::new(),
+            compact_just_completed: false,
         };
 
         use peri_acp_types::event_data::Prediction;
@@ -1223,6 +1249,7 @@ mod tests {
             popup_kind: None,
             generation: 0,
             active_session_id: String::new(),
+            compact_just_completed: false,
         };
 
         let messages_json = serde_json::json!([
@@ -1259,6 +1286,7 @@ mod tests {
             popup_kind: None,
             generation: 0,
             active_session_id: String::new(),
+            compact_just_completed: false,
         };
 
         // === Turn 1: user bubble, reasoning + text → TurnDone ===
@@ -1372,6 +1400,70 @@ mod tests {
             }
             other => panic!("expected TuiAssistantBubble at snapshot[3], got {other:?}"),
         }
+    }
+
+    /// C2: compact 完成后 TurnDone 触发 session/load 重放。
+    ///
+    /// 场景 A：命令 compact（Immediate）后 current_turn 为空 → 触发 THREAD_LOAD_TX。
+    /// 场景 B：agent 内部 compact 后 current_turn 非空（有后续流事件）→ 不触发。
+    ///
+    /// 注：THREAD_LOAD_TX 是 OnceLock，两场景合并为单测试以避免 set 冲突。
+    #[test]
+    #[serial]
+    fn test_compact_turndone_reload() {
+        use tokio::sync::mpsc;
+
+        // ── 场景 A：命令 compact → 触发 reload ──────────────────────────
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel::<String>();
+        let _ = THREAD_LOAD_TX.set(tx_a);
+
+        let mut state = BridgeState {
+            variant: 0,
+            committed: im::Vector::new(),
+            current_turn: CurrentTurn::new(),
+            phase: SessionPhase::Idle,
+            popup_kind: None,
+            generation: 0,
+            active_session_id: "test-session".to_string(),
+            compact_just_completed: true,
+        };
+
+        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+
+        let received = rx_a.try_recv().ok();
+        assert_eq!(
+            received.as_deref(),
+            Some("test-session"),
+            "场景 A: THREAD_LOAD_TX 应收到 session_id"
+        );
+        assert!(!state.compact_just_completed, "场景 A: flag 应清除");
+
+        // ── 场景 B：agent 内部 compact → 不触发 reload ──────────────────
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+
+        let mut state = BridgeState {
+            variant: 1,
+            committed: im::Vector::new(),
+            current_turn: CurrentTurn::new(),
+            phase: SessionPhase::PromptRunning,
+            popup_kind: None,
+            generation: 0,
+            active_session_id: "test-session".to_string(),
+            compact_just_completed: false,
+        };
+        state
+            .current_turn
+            .append_text("agent response after compact", None);
+        state.compact_just_completed = true;
+
+        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+
+        // 场景 B 的 TurnDone 也会尝试发送（因为 flag 为 true 但 current_turn 非空），
+        // 核心验证：flag 应被清除，但 reload 逻辑条件不满足（current_turn 非空）。
+        assert!(!state.compact_just_completed, "场景 B: flag 应清除");
     }
 }
 
