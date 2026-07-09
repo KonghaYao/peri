@@ -196,10 +196,11 @@ fn render_assistant_bubble(
 fn render_reasoning_block(reasoning: &TuiReasoningBlock) -> Vec<Line<'static>> {
     let semantic = theme::semantic();
     let char_count = reasoning.text.chars().count();
-    let mut lines = vec![Line::from(vec![Span::styled(
+    let mut lines = vec![Line::from("")];
+    lines.push(Line::from(vec![Span::styled(
         format!("Thought for {} chars", char_count),
         Style::default().fg(semantic.text.dim),
-    )])];
+    )]));
 
     // 尾部预览（最后 3 行）
     if !reasoning.collapsed {
@@ -213,6 +214,7 @@ fn render_reasoning_block(reasoning: &TuiReasoningBlock) -> Vec<Line<'static>> {
             }
         }
     }
+    lines.push(Line::from(""));
 
     lines
 }
@@ -822,9 +824,9 @@ mod tests {
         });
         let lines = render_v2_vm(&vm, 80);
         assert!(!lines.is_empty());
-        // Should have "Thought for N chars" line
-        let first = &lines[0].spans;
-        assert!(first.iter().any(|s| s.content.contains("Thought for")));
+        // 首行为空行（间距），第二行为 "Thought for N chars"
+        let second = &lines[1].spans;
+        assert!(second.iter().any(|s| s.content.contains("Thought for")));
     }
 
     #[test]

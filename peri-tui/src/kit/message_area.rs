@@ -268,6 +268,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let scroll_state = hooks.use_state(ScrollViewState::default);
     // 追踪上一次的 entries_len，用于检测「内容从空→非空」过渡（history load 后强制滚到底部）
     let prev_entries_len = hooks.use_state(|| 0usize);
+    // 追踪上一次的 is_loading，用于检测 loading 开始时强制吸底
+    let prev_is_loading = hooks.use_state(|| false);
     let todo_hash = hash_todo_items(&todo_items);
     let new_key = {
         let h = raw_ch as u64;
@@ -529,16 +531,27 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         {
             let st = scroll_state;
             let pl = prev_entries_len;
+            let pil = prev_is_loading;
             let lsa = last_scrolled_at;
             let len = entries_len;
+            let loading = is_loading;
             move || {
                 let prev = *pl.read();
                 *pl.write() = len;
+                let was_loading = *pil.read();
+                *pil.write() = loading;
 
                 if total_visual_rows == 0 || vis_height == 0 {
                     return;
                 }
                 let max_scroll = total_visual_rows.saturating_sub(vis_height);
+
+                // loading 开始（false→true）→ 强制吸底，无论用户在什么位置
+                if !was_loading && loading {
+                    st.write().scroll_to_bottom();
+                    *lsa.write() = total_visual_rows;
+                    return;
+                }
 
                 // 首次内容出现（空→非空）→ 强制滚到底
                 if prev == 0 && len > 0 {
@@ -558,9 +571,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 if scroll_y >= max_scroll {
                     return;
                 }
-                // 用户不在底部 3 行以内 → 不跟随
+                // 用户不在底部附近 → 不跟随
                 let distance = max_scroll.saturating_sub(scroll_y);
-                if distance > 3 {
+                if distance > (vis_height / 4).max(5) {
                     return;
                 }
                 // 用户靠近底部且内容增长了 → 跟随一次
@@ -570,7 +583,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 }
             }
         },
-        (entries_len, raw_ch),
+        (entries_len, raw_ch, is_loading),
     );
 
     if empty {
