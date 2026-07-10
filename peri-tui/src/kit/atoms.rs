@@ -327,6 +327,37 @@ pub use crate::kit::acp_types::BgTaskEntry;
 /// 活跃的后台任务列表（由 bg-task-started/completed/cancelled 事件维护）
 pub static BG_TASKS: AtomStatic<Vec<BgTaskEntry>> = AtomStatic::new(|| Vec::new());
 
+// ── Background Display Area (后台显示区域) ────────────────────────────────────
+
+/// 后台显示区域条目（由 bg-task-* + subagent tool 事件维护）
+#[derive(Debug, Clone)]
+pub struct BgDisplayEntry {
+    /// 唯一标识：task_id 或 agent_id
+    pub id: String,
+    /// 任务类型标签："coder" / "explorer" / "bg-shell" / "workflow"
+    pub agent_type: String,
+    /// 任务描述（来自 BgTaskEntry.summary）
+    pub desc: String,
+    /// 当前执行的工具名（None 为空闲态）
+    pub current_tool: Option<String>,
+    /// 已完成工具调用计数
+    pub tool_count: u32,
+    /// false → 3s 倒计时中，到期后渲染层移除
+    pub is_active: bool,
+    /// 失败标志
+    pub is_error: bool,
+    /// 完成时间（3s 倒计时起点）
+    pub completed_at: Option<Instant>,
+}
+
+/// 后台显示区域条目列表（仅活跃 + 3s 缓冲中的任务）
+pub static BG_DISPLAY: AtomStatic<Vec<BgDisplayEntry>> = AtomStatic::new(|| Vec::new());
+
+/// 后台 agent_id 集合——用于判断 tool 事件是否属于后台任务
+/// key = SubagentStarted.instance_id (is_background=true)
+pub static BG_AGENT_IDS: AtomStatic<std::collections::HashSet<String>> =
+    AtomStatic::new(|| std::collections::HashSet::new());
+
 /// 通知消息（状态栏短暂显示，过期后自动忽略）
 pub struct Notification {
     pub message: String,
