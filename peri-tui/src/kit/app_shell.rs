@@ -26,9 +26,14 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 仅用于保证 ratatui-kit 在 wait() 时将本组件 waker 注入 heartbeat 的订阅表。
     let _heartbeat_val = *_heartbeat.read();
 
-    // FIXME: auto_quit_on_ctrl_c 不存在于官方 ratatui-kit 0.10.1。
-    // 待上游 PR 合并后恢复。当前依赖 peri fork 的 Ctrl+C 行为。
-    // 参见: https://github.com/yexiyue/ratatui-kit (用户已提 PR)
+    // 禁用 ratatui-kit 的 Ctrl+C 自动退出——peri 自行管理三级优先级链
+    // （Cancel→FirstQuit→Quit）。SystemContext 控制 fullscreen event loop 的
+    // Ctrl+C 行为，设为 false 后 Ctrl+C 键盘事件会经 dispatch 流入 Global handler，
+    // 由 event_handlers.rs 处理双击退出和 agent 取消。
+    {
+        let mut ctx = hooks.use_context_mut::<SystemContext>();
+        ctx.set_auto_quit_on_ctrl_c(false);
+    }
 
     // 注册事件处理器
     let mut exit_fn = hooks.use_exit();

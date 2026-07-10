@@ -28,7 +28,7 @@ peri-agent = { path = "../peri-agent" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-lsp = { path = "../peri-lsp" }
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info", "unstable-widget-ref"] }
-ratatui-kit = { version = "0.10.1", features = ["full"] }
+ratatui-kit = { version = "0.10.2", features = ["full"] }
 ratatui-kit-markdown = { path = "../../ratatui-kit-contrib/crates/ratatui-kit-markdown", features = ["markdown-highlight"] }
 tokio.workspace = true
 tokio-util.workspace = true
