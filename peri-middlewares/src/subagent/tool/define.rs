@@ -119,6 +119,8 @@ pub struct SubAgentTool {
     pub(crate) frozen_claude_local_md: Option<Arc<String>>,
     /// Frozen skills summary。
     pub(crate) frozen_skill_summary: Option<Arc<String>>,
+    /// bg 完成时的同步回调：在 invoke_background 路径调用 registry.complete() 之前执行
+    pub(crate) on_bg_complete: Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
 }
 
 impl SubAgentTool {
@@ -148,6 +150,7 @@ impl SubAgentTool {
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
+            on_bg_complete: None,
         }
     }
 
@@ -232,6 +235,16 @@ impl SubAgentTool {
         self.frozen_claude_md = claude_md;
         self.frozen_claude_local_md = claude_local_md;
         self.frozen_skill_summary = skill_summary;
+        self
+    }
+
+    /// 设置 bg 完成时的同步回调。
+    /// 在 invoke_background 路径调用 registry.complete() 之前执行。
+    pub fn with_on_bg_complete(
+        mut self,
+        cb: Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>,
+    ) -> Self {
+        self.on_bg_complete = Some(cb);
         self
     }
 

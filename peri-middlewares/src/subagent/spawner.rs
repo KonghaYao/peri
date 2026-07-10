@@ -77,6 +77,9 @@ pub struct BgForkConfig {
     pub bg_registry: Arc<BackgroundTaskRegistry>,
     /// Fork 指令类型：BGFork 使用中文 bg-fork directive，普通使用英文 fork directive
     pub fork_directive_kind: BgForkDirectiveKind,
+    /// bg 完成时的同步回调：在 registry.complete() 之前调用
+    /// 用于将 bg 结果（Defer 消息）同步推入主 agent 的 MQ
+    pub on_bg_complete: Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
     /// Frozen CLAUDE.md main content（session/new 时捕获，SubAgent 复用以避免漂移）
     pub frozen_claude_md: Option<Arc<String>>,
     /// Frozen CLAUDE.local.md content
@@ -220,6 +223,7 @@ pub async fn spawn_background_fork(
     };
 
     // 11. 捕获 spawn 资源
+    let on_bg_complete = config.on_bg_complete.clone();
     let thread_store = config.thread_store.clone();
     let deregister_runtime = config.deregister_runtime.clone();
     let bg_event_sender = config.bg_event_sender;
@@ -277,6 +281,10 @@ pub async fn spawn_background_fork(
                     duration_ms: started_at.elapsed().as_millis() as u64,
                     child_thread_id: Some(child_thread_id_clone.clone()),
                 };
+                // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
+                if let Some(ref on_complete) = on_bg_complete {
+                    on_complete(&result);
+                }
                 bg_registry.complete(&task_id_clone, result);
                 if let Some(deregister) = &deregister_runtime {
                     deregister(&child_thread_id_clone);
@@ -323,6 +331,11 @@ pub async fn spawn_background_fork(
             duration_ms: started_at.elapsed().as_millis() as u64,
             child_thread_id: Some(child_thread_id_clone.clone()),
         };
+        // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
+        // 确保 active_count 归零时 Defer 已在 MQ 中
+        if let Some(ref on_complete) = on_bg_complete {
+            on_complete(&result);
+        }
         // 先发射 SubagentStopped（与 SubagentStarted 配对），让 TUI 把 subagent_depth
         // 减 1（mod.rs SubAgentEnd 处理），避免 depth 永久累积导致 token tracker 失效。
         let _ = bg_event_sender.send(ExecutorEvent::SubagentStopped {

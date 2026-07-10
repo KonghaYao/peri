@@ -168,6 +168,7 @@ impl super::SubAgentTool {
         let thread_store = self.thread_store.clone();
         let deregister_runtime = self.deregister_runtime.clone();
         let bg_event_sender = self.bg_event_sender.clone();
+        let on_bg_complete = self.on_bg_complete.clone();
         let registry_spawn = Arc::clone(registry);
         let task_id_clone = task_id.clone();
         let child_thread_id_clone = child_thread_id.clone();
@@ -255,6 +256,10 @@ impl super::SubAgentTool {
                         duration_ms: started_at.elapsed().as_millis() as u64,
                         child_thread_id: Some(child_thread_id_clone.clone()),
                     };
+                    // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
+                    if let Some(ref on_complete) = on_bg_complete {
+                        on_complete(&result);
+                    }
                     registry_spawn.complete(&task_id_clone, result);
                     if let Some(deregister) = &deregister_runtime {
                         deregister(&child_thread_id_clone);
@@ -319,6 +324,11 @@ impl super::SubAgentTool {
                     task_id = %task_id_clone,
                     "bg_event_sender unavailable, BackgroundTaskCompleted event dropped"
                 );
+            }
+            // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
+            // 确保 active_count 归零时 Defer 已在 MQ 中
+            if let Some(ref on_complete) = on_bg_complete {
+                on_complete(&result);
             }
             registry_spawn.complete(&task_id_clone, result);
 
@@ -394,6 +404,7 @@ impl super::SubAgentTool {
             bg_event_sender: bg_sender,
             bg_registry: Arc::clone(registry),
             fork_directive_kind: crate::subagent::spawner::BgForkDirectiveKind::Fork,
+            on_bg_complete: self.on_bg_complete.clone(),
             frozen_claude_md: self.frozen_claude_md.clone(),
             frozen_claude_local_md: self.frozen_claude_local_md.clone(),
             frozen_skill_summary: self.frozen_skill_summary.clone(),

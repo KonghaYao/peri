@@ -182,6 +182,8 @@ pub struct SubAgentMiddleware {
     frozen_claude_local_md: Option<Arc<String>>,
     /// Frozen skills summary
     frozen_skill_summary: Option<Arc<String>>,
+    /// bg 完成时的同步回调
+    on_bg_complete: Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
 }
 
 impl SubAgentMiddleware {
@@ -213,6 +215,7 @@ impl SubAgentMiddleware {
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
+            on_bg_complete: None,
         }
     }
 
@@ -274,6 +277,16 @@ impl SubAgentMiddleware {
         sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>,
     ) -> Self {
         self.bg_event_sender = Some(sender);
+        self
+    }
+
+    /// 设置 bg 完成时的同步回调。
+    /// 在 registry.complete() 之前调用，用于同步推入 Defer 到 MQ。
+    pub fn with_on_bg_complete(
+        mut self,
+        cb: Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>,
+    ) -> Self {
+        self.on_bg_complete = Some(cb);
         self
     }
 
@@ -362,6 +375,9 @@ impl SubAgentMiddleware {
         }
         if let Some(ref deregister) = self.deregister_runtime {
             tool = tool.with_deregister_runtime(Arc::clone(deregister));
+        }
+        if let Some(ref cb) = self.on_bg_complete {
+            tool = tool.with_on_bg_complete(Arc::clone(cb));
         }
         // [TRAP] 透传 frozen 数据到 SubAgentTool，避免每轮 build_tool clone 大字符串。
         // Arc::clone 廉价，spawn 时再提取为 String 注入 SubAgentMiddlewareConfig。

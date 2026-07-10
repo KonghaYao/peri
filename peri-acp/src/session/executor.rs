@@ -537,7 +537,6 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         bg_registry_for_cmd.set_event_sender(registry_event_tx, session_id.clone());
         let registry_sink = Arc::clone(&event_sink);
         let registry_sid = session_id.clone();
-        let registry_async_router = async_router.clone();
         tokio::spawn(async move {
             while let Some(event) = registry_event_rx.recv().await {
                 tracing::info!(
@@ -570,29 +569,15 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
                         success,
                         output_preview,
                         duration_ms,
-                        result,
+                        result: _result,
                     } => {
-                        // 注入主 agent inbox，触发续跑（若 AsyncRouter 可用）。
-                        // 模式参照 workflow Path B（route_workflow_event）。
-                        // 注意：此注入只对 Agent 工具 bg 模式有效（主 agent 在
-                        // run_session_loop 内）；/bg 命令是 immediate command，
-                        // 主 agent 不在 loop，注入对它无效（用户已接受此 trade-off）。
-                        //
-                        // bg callback 的 TUI 用户气泡现在由 agent ReAct 循环在
-                        // End 阶段消费 MQ Defer 消息时通过 EventBus 发出（见
-                        // peri-agent/src/agent/stages/mod.rs:607-631），不再由
-                        // registry event pump 单独发送——消除了异步竞争窗口。
+                        // route_bg_result 现在在 spawner 中同步执行
+                        // （在 bg_registry.complete() 之前），
+                        // 不再需要 registry 事件泵异步注入
                         tracing::info!(
                             task_id = %task_id,
-                            "[bg-diag] registry event pump: Completed branch, calling route_bg_result"
+                            "[bg-diag] registry event pump: Completed (route_bg_result now sync in spawner)"
                         );
-                        if let Some(ref router) = registry_async_router {
-                            router.route_bg_result(result);
-                        } else {
-                            tracing::info!(
-                                "[bg-diag] registry event pump: async_router is None, skip inject"
-                            );
-                        }
 
                         (
                             "bg-task-completed",
@@ -1082,6 +1067,12 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
             .as_ref()
             .and_then(|sm| sm.get_session(session_id))
             .map(|s| s.background_registry.clone()),
+        on_bg_complete: async_router.as_ref().map(|router| {
+            let router = router.clone();
+            Arc::new(move |result: &BackgroundTaskResult| {
+                router.route_bg_result(result);
+            }) as Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>
+        }),
     };
 
     // v2 stages 唯一路径（P5 后 v1 已物理删除，PERI_USE_V1 不再生效）。
