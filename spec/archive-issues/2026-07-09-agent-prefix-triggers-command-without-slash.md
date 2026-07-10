@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-09-agent-prefix-triggers-command-without-slash.md
+
 # 输入 "agent " 开头触发 OpenPanel 命令，无需 / 前缀
 
 **状态**：Fixed

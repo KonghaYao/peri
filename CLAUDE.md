@@ -35,7 +35,7 @@ ACP 事件 → acp_notifier → acp_bridge → dispatch_and_notify → VIEW_MODE
 render_bridge 监听 ACP 事件 + 宽度变化，预计算每条 ViewModel 的 `Vec<Line<'static>>` + `WrappedLineInfo`（视觉行映射），写入 `RENDER_CACHE`。message_area 基于 `wrap_map` 做二分查找视口裁剪，只渲染可见行。
 
 **[TRAP]** `/clear` 命令必须同步重置 `RENDER_CACHE`，否则旧缓存残留。所有视图更新必须走统一事件渠道（本地提交也需触发渲染刷新），禁止旁路 RENDER_CACHE。（详见 spec/global/domains/tui.md#issue_2026-07-05-message-flow-render-sync-freeze）
-**[TRAP]** ratatui-kit 事件边界：消息区只处理鼠标滚轮 `Event::Mouse(MouseEventKind::Scroll*)`，编辑区只处理键盘编辑/导航事件。`InputArea` Up/Down 应先做多行光标移动，只在首/末行时才 history fallback。
+**[TRAP]** ratatui-kit 事件边界：消息区只处理鼠标滚轮 `Event::Mouse(MouseEventKind::Scroll*)`，编辑区只处理键盘编辑/导航事件。`InputArea` Up/Down 应先做多行光标移动，只在首/末行时才 history fallback。排查"事件去哪了"需逐层验证 Global/High → Global/Normal → Current/High → Current/Normal，每层都可能独立拦截事件。ScrollView 传 `active: false` 可关闭其内置键盘 handler。（详见 spec/global/domains/tui.md#issue_2026-07-04-message-area-scrollview-steals-input）
 
 ### 跨 task 共享状态排障铁律（2026-07-05 双 bug 教训）
 
@@ -53,7 +53,7 @@ render_bridge 监听 ACP 事件 + 宽度变化，预计算每条 ViewModel 的 `
 
 **[TRAP]** 涉及 ratatui-kit `#[component]` 或接收 `&mut Hooks` 的函数内部，**所有** `hooks.use_*` 调用必须在任何 `if`/`match`/`return` 之前——ratatui-kit 按调用顺序索引 hook，顺序/数量变化会触发 `"Hook type mismatch"` panic 或状态数据错位。（详见 spec/global/domains/tui.md#issue_2026-07-05-enter-clear-hook-mismatch-panic）
 
-**[TRAP]** ratatui-kit render body 中禁止写 atom——render 期间任何 atom 写入会与组件生命周期交互形成 render → state write → render 自激回路。事件处理器负责所有状态变更，render 仅做只读展示。（详见 spec/global/domains/tui.md#issue_2026-07-03-tui-double-slash-cpu-spike）
+**[TRAP]** ratatui-kit render body 中禁止写 atom——render 期间任何 atom 写入会与组件生命周期交互形成 render → state write → render 自激回路。事件处理器负责所有状态变更，render 仅做只读展示。**`use_effect` 中写 atom 等效危险**——流式期间每个 chunk 都触发 effect → scroll_to_bottom() 写 atom → 形成同款紧耦合环路。（详见 spec/global/domains/tui.md#issue_2026-07-03-tui-double-slash-cpu-spike、#issue_2026-07-06-message-area-copy-complex-content-crash、#issue_2026-07-09-message-area-periodic-white-flash-streaming）
 **[TRAP]** /clear 和 thread 切换时必须递增 `BRIDGE_RESET_COUNTER`，acp_bridge 在下次事件处理前检测到变更会自动清空 `committed`/`has_view_commit`/`current_turn`/`is_loading`。仅在 atom 层面重置不足以清除旧 session 残留。`BRIDGE_RESET_COUNTER` 是跨 session 的桥梁状态重置，/clear 或 thread 切换前必须先 +1。
 
 ### ratatui-kit overlay 白屏教训
@@ -258,3 +258,7 @@ agent End 阶段 MQ drain → emit SyntheticUserMessage
 **[TRAP]** 不要从 registry event pump（独立 tokio task）发送 TUI 气泡——时序不可控。必须在 agent 的 consumer 侧（MQ drain 点）emit，让 agent 内部状态作为时序锚点。
 
 **[TRAP]** 用 `[CLEAR_DEBUG]` 日志诊断 TUI 渲染顺序问题：`committed_before/after` + `current_turn_before/after` 精确记录了每次 dispatch 的 committed 和 current_turn 长度变化，是定位时序问题的唯一可靠依据。
+
+**[TRAP]** ACP SDK `meta` 字段标注 `#[serde(rename = "_meta")]`（含下划线），序列化后的 JSON key 是 `"_meta"` 而非 `"meta"`。`is_session_replay` 等关键分支检测必须用四级 fallback（`_meta` → `meta` → `content._meta` → `content.meta`），否则 replay 事件 `periReplay=true` 标记永远检测不到，走流式路径设 `is_loading=true` 后无 `TurnDone` 兜底，loading 永久卡死。（详见 spec/global/domains/tui.md#issue_2026-07-09-history-session-switch-loading-freeze）
+
+**[TRAP]** session replay 必须复用正常流式路径的数据结构（`CommittedAssistantText`/`ReplayToolStarted`/`ReplayToolEnded`），不要发明 replay 专用 DTO 变体——那会绕过后端逻辑。6 个已验证坑：`_meta` 序列化 key 不匹配、`BaseMessage::Tool` 是 `Text(String)` 非 `Blocks`、AI 消息两个工具调用来源需去重、空工具输出被跳过、`content_hash` 不一致、`agent_thought_chunk` 缺 replay 处理。（详见 spec/global/domains/tui.md#issue_2026-07-08-history-replay-missing-tool-interactions）

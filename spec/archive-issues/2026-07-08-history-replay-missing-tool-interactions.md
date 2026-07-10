@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-08-history-replay-missing-tool-interactions.md
+
 # History 面板恢复的对话历史缺少工具调用和工具结果，消息内容与原始对话不一致
 
 **状态**：Fixed

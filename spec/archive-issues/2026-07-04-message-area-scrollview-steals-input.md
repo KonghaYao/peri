@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-04-message-area-scrollview-steals-input.md
+
 # 主输入框无法输入——MessageArea ScrollView 事件处理器消费所有键盘事件
 
 **状态**：Fixed

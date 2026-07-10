@@ -104,7 +104,118 @@
 
 - [issue_2026-07-05-paste-newline-triggers-submit 输入框粘贴含换行文本时直接触发 Enter 提交](domains/tui.md#issue_2026-07-05-paste-newline-triggers-submit) — tui
 
+### _meta 序列化
+
+- [issue_2026-07-09-history-session-switch-loading-freeze History 面板切换 session 后 loading 永久卡死](domains/tui.md#issue_2026-07-09-history-session-switch-loading-freeze) — tui
+- [issue_2026-07-08-history-replay-missing-tool-interactions History 面板恢复的对话历史缺少工具调用](domains/tui.md#issue_2026-07-08-history-replay-missing-tool-interactions) — tui
+
+### session replay
+
+- [issue_2026-07-09-history-session-switch-loading-freeze History 面板切换 session 后 loading 永久卡死](domains/tui.md#issue_2026-07-09-history-session-switch-loading-freeze) — tui
+- [issue_2026-07-08-history-replay-missing-tool-interactions History 面板恢复的对话历史缺少工具调用](domains/tui.md#issue_2026-07-08-history-replay-missing-tool-interactions) — tui
+
+### render body 写 atom
+
+- [issue_2026-07-06-message-area-copy-complex-content-crash 复制操作导致 TUI 卡死——status_bar render body 写 atom 自激回路](domains/tui.md#issue_2026-07-06-message-area-copy-complex-content-crash) — tui
+
+### COPY_MESSAGE_UNTIL
+
+- [issue_2026-07-06-message-area-copy-complex-content-crash 复制操作导致 TUI 卡死——status_bar render body 写 atom 自激回路](domains/tui.md#issue_2026-07-06-message-area-copy-complex-content-crash) — tui
+
+### use_effect 自激回路
+
+- [issue_2026-07-09-message-area-periodic-white-flash-streaming 消息区流式回复中周期性闪白——吸底 use_effect 写入环路](domains/tui.md#issue_2026-07-09-message-area-periodic-white-flash-streaming) — tui
+
+### 吸底滚动
+
+- [issue_2026-07-09-message-area-periodic-white-flash-streaming 消息区流式回复中周期性闪白——吸底 use_effect 写入环路](domains/tui.md#issue_2026-07-09-message-area-periodic-white-flash-streaming) — tui
+
+### ScrollView 事件拦截
+
+- [issue_2026-07-04-message-area-scrollview-steals-input 主输入框无法输入——ScrollView 事件处理器消费所有键盘事件](domains/tui.md#issue_2026-07-04-message-area-scrollview-steals-input) — tui
+
+### active=false
+
+- [issue_2026-07-04-message-area-scrollview-steals-input 主输入框无法输入——ScrollView 事件处理器消费所有键盘事件](domains/tui.md#issue_2026-07-04-message-area-scrollview-steals-input) — tui
+
+### 事件路由
+
+- [issue_2026-07-04-message-area-scrollview-steals-input 主输入框无法输入——ScrollView 事件处理器消费所有键盘事件](domains/tui.md#issue_2026-07-04-message-area-scrollview-steals-input) — tui
+
+### trim_start_matches
+
+- [issue_2026-07-09-agent-prefix-triggers-command-without-slash 输入 agent 开头触发 OpenPanel 命令](domains/tui.md#issue_2026-07-09-agent-prefix-triggers-command-without-slash) — tui
+
+### slash 前缀检查
+
+- [issue_2026-07-09-agent-prefix-triggers-command-without-slash 输入 agent 开头触发 OpenPanel 命令](domains/tui.md#issue_2026-07-09-agent-prefix-triggers-command-without-slash) — tui
+
+### Arc 重建
+
+- [issue_2026-07-07-inputarea-mouse-click-cursor-positioning InputArea 鼠标点击光标定位——Arc 每帧重建导致 handler 读到 None](domains/tui.md#issue_2026-07-07-inputarea-mouse-click-cursor-positioning) — tui
+
+### AreaTracker
+
+- [issue_2026-07-07-inputarea-mouse-click-cursor-positioning InputArea 鼠标点击光标定位——AreaTracker hook 值拷贝模式](domains/tui.md#issue_2026-07-07-inputarea-mouse-click-cursor-positioning) — tui
+
+### ACP messageId
+
+- [issue_2026-07-08-tui-drop-acp-messageid-boundary TUI 丢弃 ACP messageId，消息边界靠推断](domains/tui.md#issue_2026-07-08-tui-drop-acp-messageid-boundary) — tui
+
+### 消息边界推断
+
+- [issue_2026-07-08-tui-drop-acp-messageid-boundary TUI 丢弃 ACP messageId，消息边界靠推断](domains/tui.md#issue_2026-07-08-tui-drop-acp-messageid-boundary) — tui
+
+### tool_call 重放
+
+- [issue_2026-07-08-history-replay-missing-tool-interactions History 面板恢复的对话历史缺少工具调用](domains/tui.md#issue_2026-07-08-history-replay-missing-tool-interactions) — tui
+
+### CJK 光标
+
+- [issue_2026-07-05-input-unicode-cursor-misalignment 输入框 Unicode 光标估算错误，多个白色光标残影](domains/tui.md#issue_2026-07-05-input-unicode-cursor-misalignment) — tui
+
+### CjkGhostFix
+
+- [issue_2026-07-05-input-unicode-cursor-misalignment 输入框 CJK 光标残影——CjkGhostFix: AlwaysUpdate 续接 cell](domains/tui.md#issue_2026-07-05-input-unicode-cursor-misalignment) — tui
+
+### AlwaysUpdate
+
+- [issue_2026-07-05-input-unicode-cursor-misalignment 输入框 CJK 光标残影——CjkGhostFix: AlwaysUpdate 续接 cell](domains/tui.md#issue_2026-07-05-input-unicode-cursor-misalignment) — tui
+
+### 选中项跟随
+
+- [issue_2026-07-06-panels-selection-no-scroll-follow 面板选中项超出可见行后看不到](domains/tui.md#issue_2026-07-06-panels-selection-no-scroll-follow) — tui
+
+### scroll_start_for_selected
+
+- [issue_2026-07-06-panels-selection-no-scroll-follow 面板选中项超出可见行后看不到——scroll_start_for_selected 算法复用](domains/tui.md#issue_2026-07-06-panels-selection-no-scroll-follow) — tui
+
+### content_text 丢失
+
+- [issue_2026-07-05-tool-call-ai-text-invisible-after-commit AI 消息文本在 ViewCommit 后消失——stream.rs content_text 丢失](domains/agent.md#issue_2026-07-05-tool-call-ai-text-invisible-after-commit) — agent
+
+### OpenAI 流式
+
+- [issue_2026-07-05-tool-call-ai-text-invisible-after-commit AI 消息文本在 ViewCommit 后消失——OpenAI stream.rs ToolUse 分支遗漏](domains/agent.md#issue_2026-07-05-tool-call-ai-text-invisible-after-commit) — agent
+
+### fork SubAgent
+
+- [issue_2026-07-07-fork-subagent-no-parent-conversation-history Fork SubAgent 收不到父对话历史](domains/agent.md#issue_2026-07-07-fork-subagent-no-parent-conversation-history) — agent
+
+### parent_messages
+
+- [issue_2026-07-07-fork-subagent-no-parent-conversation-history Fork SubAgent 收不到父对话历史——parent_messages 注入失败](domains/agent.md#issue_2026-07-07-fork-subagent-no-parent-conversation-history) — agent
+
+### background agent
+
+- [issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn Agent background 模式启动后 loading 不停止](domains/agent.md#issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn) — agent
+
+### loading 生命周期
+
+- [issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn Agent background 模式启动后 loading 不停止](domains/agent.md#issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn) — agent
+
 ## 更新记录
 
 - 2026-07-06: 首次创建，归档 8 个 issue
 - 2026-07-06: 从 spec/issues/ 归档 8 个 issue
+- 2026-07-10: 归档 13 个 issue，新增 agent 领域，新增 24 个关键词

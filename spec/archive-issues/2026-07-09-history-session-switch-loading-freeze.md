@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-09-history-session-switch-loading-freeze.md
+
 # History 面板切换 session 后 loading 永久卡死，界面完全无响应
 
 **状态**：Fixed

@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-05-input-unicode-cursor-misalignment.md
+
 # 输入框 Unicode 字符删除时光标估算错误，出现多个白色光标残影
 
 **状态**：Fixed

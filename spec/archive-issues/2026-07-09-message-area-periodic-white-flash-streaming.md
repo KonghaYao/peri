@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-09-message-area-periodic-white-flash-streaming.md
+
 # 消息区在 agent 流式回复中周期性闪白（每 2-5 秒）
 
 **状态**：Fixed

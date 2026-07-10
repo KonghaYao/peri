@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-06-message-area-copy-complex-content-crash.md
+
 # Message Area 复制操作导致 TUI 崩溃/卡死
 
 **状态**：Fixed

@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-05-tool-call-ai-text-invisible-after-commit.md
+
 # 消息流渲染中，AI 消息文本在多分支渲染路径下不可见
 
 **状态**：Fixed

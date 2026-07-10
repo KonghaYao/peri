@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-08-tui-drop-acp-messageid-boundary.md
+
 # TUI 丢弃 ACP agent_message_chunk 的 messageId，消息边界靠推断而非协议字段
 
 **状态**：Fixed

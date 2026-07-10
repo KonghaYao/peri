@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-07-inputarea-mouse-click-cursor-positioning.md
+
 # InputArea 鼠标点击光标快速定位——功能缺失
 
 **状态**：Fixed

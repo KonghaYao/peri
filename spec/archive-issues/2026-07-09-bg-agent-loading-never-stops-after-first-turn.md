@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-09-bg-agent-loading-never-stops-after-first-turn.md
+
 # Agent 工具（background 模式）启动 bg agent 后 loading 不停止
 
 **状态**：fixed

@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-07-fork-subagent-no-parent-conversation-history.md
+
 # Fork 模式 SubAgent 收不到父对话历史
 
 **状态**：fixed

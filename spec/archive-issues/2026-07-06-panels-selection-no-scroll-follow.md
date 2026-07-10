@@ -1,3 +1,5 @@
+> 归档于 2026-07-10，原路径 spec/issues/2026-07-06-panels-selection-no-scroll-follow.md
+
 # 面板选中项超出可见行后看不到（缺 scroll 跟随）
 
 **状态**：Fixed
