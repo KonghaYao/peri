@@ -9,8 +9,8 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{LANG_VERSION, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE};
 use crate::kit::list_nav::{next_selection, previous_selection};
-use crate::kit::theme;
 use peri_middlewares::prelude::PermissionMode;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -64,6 +64,7 @@ const CONFIG_ROWS: &[(&str, RowType)] = &[
 
 #[component]
 pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
     // bump：每次操作后递增，强制重渲染（PERI_CONFIG_HANDLE 是 RwLock 非 atom，
     // 写入不会自动触发 ratatui-kit 重渲染，需要手动 bump）
@@ -119,7 +120,9 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     lines.push(Line::from(vec![Span::styled(
         format!("  {}", i18n::tr("config-panel-title")),
-        Style::new().fg(theme::semantic().text.muted).italic(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.muted)
+            .italic(),
     )]));
     lines.push(Line::from(""));
 
@@ -127,9 +130,11 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let is_active = i == sel;
         let cursor_mark = if is_active { "> " } else { "  " };
         let label_style = if is_active {
-            Style::new().fg(theme::component().panel.title).bold()
+            Style::new()
+                .fg(theme_def.read().component.panel.title)
+                .bold()
         } else {
-            Style::new().fg(theme::semantic().text.primary)
+            Style::new().fg(theme_def.read().semantic.text.primary)
         };
 
         let value_line = match row_type {
@@ -143,17 +148,24 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     (format!(" {}", on_label), format!("[{}]", off_label))
                 };
                 let on_style = if val {
-                    Style::new().fg(theme::semantic().status.success).bold()
+                    Style::new()
+                        .fg(theme_def.read().semantic.status.success)
+                        .bold()
                 } else {
-                    Style::new().fg(theme::semantic().text.muted)
+                    Style::new().fg(theme_def.read().semantic.text.muted)
                 };
                 let off_style = if val {
-                    Style::new().fg(theme::semantic().text.muted)
+                    Style::new().fg(theme_def.read().semantic.text.muted)
                 } else {
-                    Style::new().fg(theme::semantic().status.error).bold()
+                    Style::new()
+                        .fg(theme_def.read().semantic.status.error)
+                        .bold()
                 };
                 Line::from(vec![
-                    Span::styled(cursor_mark, Style::new().fg(theme::component().panel.title)),
+                    Span::styled(
+                        cursor_mark,
+                        Style::new().fg(theme_def.read().component.panel.title),
+                    ),
                     Span::styled(format!("{:<22}", i18n::tr(label)), label_style),
                     Span::styled(on_text, on_style),
                     Span::styled(" ", Style::new()),
@@ -163,7 +175,10 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             RowType::Cycle(options) => {
                 let idx = read_cycle_idx(i, options);
                 let mut spans = vec![
-                    Span::styled(cursor_mark, Style::new().fg(theme::component().panel.title)),
+                    Span::styled(
+                        cursor_mark,
+                        Style::new().fg(theme_def.read().component.panel.title),
+                    ),
                     Span::styled(format!("{:<22}", i18n::tr(label)), label_style),
                 ];
                 for (j, opt) in options.iter().enumerate() {
@@ -171,12 +186,14 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     if j == idx {
                         spans.push(Span::styled(
                             format!("[{}]", label),
-                            Style::new().fg(theme::semantic().status.success).bold(),
+                            Style::new()
+                                .fg(theme_def.read().semantic.status.success)
+                                .bold(),
                         ));
                     } else {
                         spans.push(Span::styled(
                             format!(" {}", label),
-                            Style::new().fg(theme::semantic().text.muted),
+                            Style::new().fg(theme_def.read().semantic.text.muted),
                         ));
                     }
                     if j < options.len() - 1 {
@@ -194,15 +211,15 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     lines.push(Line::from(vec![
         Span::styled(
             "  ↑/↓::navigate  ",
-            Style::new().fg(theme::semantic().text.dim),
+            Style::new().fg(theme_def.read().semantic.text.dim),
         ),
         Span::styled(
             "Enter::toggle",
-            Style::new().fg(theme::semantic().border.active),
+            Style::new().fg(theme_def.read().semantic.border.active),
         ),
         Span::styled(
             "  ←/→::switch  Esc::close",
-            Style::new().fg(theme::semantic().text.dim),
+            Style::new().fg(theme_def.read().semantic.text.dim),
         ),
     ]));
 

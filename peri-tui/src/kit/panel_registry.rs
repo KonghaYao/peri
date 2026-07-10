@@ -9,6 +9,7 @@
 //! `open_panel(kind)` 在打开新面板前会关闭同组其他面板——这保证栈中
 //! `Vec<PanelKind>` 不会同时含两个同组面板。
 
+use peri_theme::atoms::THEME_ATOM;
 use ratatui::{
     style::Style,
     widgets::{Scrollbar, ScrollbarOrientation},
@@ -26,7 +27,7 @@ use crate::kit::panels::{
     agent::AgentPanel, ask_user::AskUserPanel, betas::BetasPanel, config::ConfigPanel,
     cron::CronPanel, hooks::HooksPanel, login::LoginPanel, mcp::McpPanel, memory::MemoryPanel,
     model::ModelPanel, plugin::PluginPanel, status::StatusPanel, tasks::TasksPanel,
-    thread_browser::ThreadBrowserPanel, workflow::WorkflowPanel,
+    theme::ThemePanel, thread_browser::ThreadBrowserPanel, workflow::WorkflowPanel,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +140,10 @@ fn render_workflow_panel() -> AnyElement<'static> {
 
 fn render_ask_user_panel() -> AnyElement<'static> {
     element!(AskUserPanel()).into()
+}
+
+fn render_theme_panel() -> AnyElement<'static> {
+    element!(ThemePanel()).into()
 }
 
 /// 所有 14 面板的元数据。
@@ -339,6 +344,18 @@ pub const PANELS: &[PanelMeta] = &[
         layout: PanelLayout::fixed(60, 18),
         render: render_ask_user_panel,
     },
+    PanelMeta {
+        kind: PanelKind::Theme,
+        title: "Theme",
+        shortcut_letter: 'e',
+        slash_command: "theme",
+        description: "Color theme selection",
+        priority: 15,
+        mutex_group: MutexGroup::Settings,
+        scope: PanelScope::Global,
+        layout: PanelLayout::fixed(50, 18),
+        render: render_theme_panel,
+    },
 ];
 
 pub fn slash_command_for_panel(kind: PanelKind) -> &'static str {
@@ -503,7 +520,7 @@ pub fn close_all_panels() {
 /// 注意：ratatui-kit ScrollView 内部 `.orientation()` 会把 thumb_symbol 重置为
 /// DEFAULT_VERTICAL 的 "█"，因此通过 fg==bg 同色方案实现"空白反色"视觉效果。
 pub fn clean_scrollbars() -> Scrollbars<'static> {
-    let thumb_bg = crate::kit::theme::semantic().text.dim;
+    let thumb_bg = THEME_ATOM.state().read().semantic.text.dim;
     Scrollbars {
         vertical_scrollbar: Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .thumb_symbol(" ")
@@ -512,13 +529,13 @@ pub fn clean_scrollbars() -> Scrollbars<'static> {
             .begin_symbol(Some("▲"))
             .begin_style(
                 Style::default()
-                    .fg(crate::kit::theme::semantic().text.muted)
+                    .fg(THEME_ATOM.state().read().semantic.text.muted)
                     .add_modifier(ratatui::style::Modifier::BOLD),
             )
             .end_symbol(Some("▼"))
             .end_style(
                 Style::default()
-                    .fg(crate::kit::theme::semantic().text.muted)
+                    .fg(THEME_ATOM.state().read().semantic.text.muted)
                     .add_modifier(ratatui::style::Modifier::BOLD),
             ),
         vertical_scrollbar_visibility: ScrollbarVisibility::Automatic,
@@ -540,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn test_meta_all_14_panels_present() {
+    fn test_meta_all_15_panels_present() {
         // 验证 PANELS 穷举所有 PanelKind
         for kind in ALL_PANEL_KINDS {
             assert!(
@@ -787,6 +804,7 @@ mod tests {
         PanelKind::Betas,
         PanelKind::Workflow,
         PanelKind::AskUser,
+        PanelKind::Theme,
     ];
 
     /// 编译期断言：MutexGroup 实现了 PartialEq（测试需要）。

@@ -17,14 +17,15 @@ use ratatui_kit::{
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{LANG_VERSION, SERVICE_SNAPSHOT, VIEW_MODELS};
-use crate::kit::theme;
 use crate::kit::tui_render_unit::TuiRenderUnit;
+use peri_theme::atoms::THEME_ATOM;
 
 const TAB_SERVICE: usize = 0;
 const TAB_CONTEXT: usize = 1;
 
 #[component]
 pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let active_tab = hooks.use_state(|| TAB_SERVICE);
 
     // S6c: 订阅 SERVICE_SNAPSHOT——后台 service_snapshot 2s 派生一次
@@ -71,22 +72,22 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             i18n::tr("status-tab-service"),
             if tab == TAB_SERVICE {
                 Style::new()
-                    .fg(theme::semantic().text.primary)
-                    .bg(theme::component().panel.title)
+                    .fg(theme_def.read().semantic.text.primary)
+                    .bg(theme_def.read().component.panel.title)
                     .bold()
             } else {
-                Style::new().fg(theme::semantic().text.muted)
+                Style::new().fg(theme_def.read().semantic.text.muted)
             },
         ),
         Span::styled(
             i18n::tr("status-tab-context"),
             if tab == TAB_CONTEXT {
                 Style::new()
-                    .fg(theme::semantic().text.primary)
-                    .bg(theme::component().panel.title)
+                    .fg(theme_def.read().semantic.text.primary)
+                    .bg(theme_def.read().component.panel.title)
                     .bold()
             } else {
-                Style::new().fg(theme::semantic().text.muted)
+                Style::new().fg(theme_def.read().semantic.text.muted)
             },
         ),
     ]));
@@ -120,84 +121,93 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-provider"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     provider_label,
-                    Style::new().fg(theme::semantic().text.primary).bold(),
+                    Style::new()
+                        .fg(theme_def.read().semantic.text.primary)
+                        .bold(),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-model"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     model_label,
-                    Style::new().fg(theme::semantic().text.primary).bold(),
+                    Style::new()
+                        .fg(theme_def.read().semantic.text.primary)
+                        .bold(),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-permission"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     mode_label,
-                    Style::new().fg(theme::semantic().border.active).bold(),
+                    Style::new()
+                        .fg(theme_def.read().semantic.border.active)
+                        .bold(),
                 ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-cpu"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     format!("{:.1}%", snap.cpu_percent),
-                    Style::new().fg(theme::semantic().text.primary),
+                    Style::new().fg(theme_def.read().semantic.text.primary),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-memory"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     format!("{} MB", snap.memory_mb),
-                    Style::new().fg(theme::semantic().text.primary),
+                    Style::new().fg(theme_def.read().semantic.text.primary),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-mcp"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
-                Span::styled(mcp_label, Style::new().fg(theme::semantic().status.success)),
+                Span::styled(
+                    mcp_label,
+                    Style::new().fg(theme_def.read().semantic.status.success),
+                ),
                 Span::styled(
                     format!("  [{}]", mcp_phase),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-cron"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     format!("{} ({} enabled)", snap.cron_total, snap.cron_enabled),
-                    Style::new().fg(theme::semantic().text.primary),
+                    Style::new().fg(theme_def.read().semantic.text.primary),
                 ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-cwd"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     snap.cwd.clone(),
-                    Style::new().fg(theme::semantic().text.primary),
+                    Style::new().fg(theme_def.read().semantic.text.primary),
                 ),
             ]),
         ],
@@ -205,74 +215,76 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-total-vms"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     format!("{}", vm_stats.total),
-                    Style::new().fg(theme::semantic().text.primary).bold(),
+                    Style::new()
+                        .fg(theme_def.read().semantic.text.primary)
+                        .bold(),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-user-turns"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     format!("{}", vm_stats.user_bubbles),
-                    Style::new().fg(theme::semantic().text.primary),
+                    Style::new().fg(theme_def.read().semantic.text.primary),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-assistant-turns"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     format!("{}", vm_stats.assistant_bubbles),
-                    Style::new().fg(theme::semantic().text.primary),
+                    Style::new().fg(theme_def.read().semantic.text.primary),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-tool-calls"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     format!("{}", vm_stats.tool_cards),
-                    Style::new().fg(theme::semantic().text.primary),
+                    Style::new().fg(theme_def.read().semantic.text.primary),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-subagent-groups"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     format!("{}", vm_stats.subagent_groups),
-                    Style::new().fg(theme::semantic().text.primary),
+                    Style::new().fg(theme_def.read().semantic.text.primary),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(
                     i18n::tr("status-label-system-notes"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
                 Span::styled(
                     format!("{}", vm_stats.system_notes),
-                    Style::new().fg(theme::semantic().text.primary),
+                    Style::new().fg(theme_def.read().semantic.text.primary),
                 ),
             ]),
             Line::from(""),
             Line::from(vec![Span::styled(
                 "  Token-level budget requires ACP stream; VM counts shown here are derived locally.",
-                Style::new().fg(theme::semantic().text.dim).italic(),
+                Style::new().fg(theme_def.read().semantic.text.dim).italic(),
             )]),
         ],
-        _ => vec![Line::from("  Unknown tab").fg(theme::semantic().text.muted)],
+        _ => vec![Line::from("  Unknown tab").fg(theme_def.read().semantic.text.muted)],
     };
 
     // ── Footer ───────────────────────────────────────────────────────
-    let footer = Line::from("  ←/→::switch  Esc::close").fg(theme::semantic().text.dim);
+    let footer = Line::from("  ←/→::switch  Esc::close").fg(theme_def.read().semantic.text.dim);
 
     let content = Paragraph::new(ratatui::text::Text::from({
         let mut all: Vec<Line> = Vec::new();

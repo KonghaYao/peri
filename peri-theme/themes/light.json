@@ -1,0 +1,137 @@
+{
+  "name": "peri-light",
+  "mode": "light",
+  "palette": {
+    "base": {
+      "bg": "#FAFAFA",
+      "fg": "#1E1E1E"
+    },
+    "brand": {
+      "primary": "#D77757"
+    },
+    "gray": {
+      "bright": "#1E1E1E",
+      "muted": "#787878",
+      "dim": "#C8C8C8",
+      "dark": "#E1E1E6"
+    },
+    "accent": {
+      "primary": "#D77757"
+    },
+    "success": {
+      "primary": "#4EBA65"
+    },
+    "warning": {
+      "primary": "#FFC107"
+    },
+    "danger": {
+      "primary": "#FF6B80"
+    },
+    "info": {
+      "primary": "#A2A9E4"
+    },
+    "diff": {
+      "add": "#4EBA65",
+      "remove": "#FF6B80",
+      "hunk": "#A2A9E4",
+      "add_bg": "#DCF5DC",
+      "remove_bg": "#F5DCDC",
+      "add_word_bg": "#C8EBC8",
+      "remove_word_bg": "#EBC8C8"
+    }
+  },
+  "semantic": {
+    "accent": "#D77757",
+    "text": {
+      "primary": "#1E1E1E",
+      "muted": "#787878",
+      "dim": "#C8C8C8"
+    },
+    "border": {
+      "default": "#B4B4B4",
+      "active": "#D77757",
+      "dim": "#E1E1E6"
+    },
+    "status": {
+      "running": "#93A5FF",
+      "success": "#4EBA65",
+      "warning": "#FFC107",
+      "error": "#FF6B80"
+    },
+    "surface": {
+      "default": "#F5F5F8",
+      "user": "#E6E6EB",
+      "popup": "#FAFAFA",
+      "selection": "#C8DCF5",
+      "cursor": "#DCDCE1"
+    },
+    "diff": {
+      "add": "#4EBA65",
+      "remove": "#FF6B80",
+      "hunk": "#A2A9E4",
+      "add_bg": "#DCF5DC",
+      "remove_bg": "#F5DCDC",
+      "add_word_bg": "#C8EBC8",
+      "remove_word_bg": "#EBC8C8"
+    },
+    "loading": "#93A5FF",
+    "thinking": "#A2A9E4",
+    "model_info": "#A0825F",
+    "bash_border": "#FD5DB1",
+    "selected_fg": "#B2B9F9"
+  },
+  "component": {
+    "message": {
+      "user_bg": "#E6E6EB",
+      "ai_prefix": "#1E1E1E",
+      "tool_indicator": "#4EBA65",
+      "reasoning": "#A2A9E4"
+    },
+    "input": {
+      "border": "#787878",
+      "border_loading": "#787878",
+      "cursor_fg": "#FAFAFA",
+      "cursor_bg": "#1E1E1E",
+      "prompt": "#787878",
+      "prompt_loading": "#787878",
+      "continuation": "#C8C8C8",
+      "placeholder": "#787878"
+    },
+    "panel": {
+      "border": "#D77757",
+      "title": "#1E1E1E",
+      "row_selected": "#B2B9F9",
+      "min_height": "8",
+      "max_height": "28"
+    },
+    "popup": {
+      "bg": "#FAFAFA",
+      "border": "#A2A9E4",
+      "action_primary": "#D77757",
+      "selected_fg": "#B2B9F9",
+      "modal_max_width": "90",
+      "modal_max_height": "28",
+      "inline_height": "10"
+    },
+    "statusbar": {
+      "text": "#1E1E1E",
+      "muted": "#787878",
+      "dim": "#C8C8C8",
+      "mode_accept_edit": "#A2A9E4",
+      "mode_auto": "#FFC107",
+      "mode_bypass": "#FF6B80",
+      "resource_good": "#4EBA65",
+      "resource_warn": "#FFC107",
+      "resource_bad": "#FF6B80"
+    },
+    "markdown": {
+      "text": "#1E1E1E",
+      "code": "#FFC107",
+      "quote": "#787878"
+    },
+    "scrollbar": {
+      "thumb": "#787878",
+      "track": "#C8C8C8"
+    }
+  }
+}

@@ -9,7 +9,7 @@
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{MEMORY_LIST, MemoryEntry};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -23,6 +23,7 @@ use ratatui_kit::{
 
 #[component]
 pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
     let store = hooks.use_atom(&MEMORY_LIST);
     let entries: Vec<MemoryEntry> = store.read().clone();
@@ -74,22 +75,26 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 头部摘要
     lines.push(Line::from(vec![Span::styled(
         format!("  {} memory files in ~/.claude/memory", count),
-        Style::new().fg(theme::semantic().text.primary).bold(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.primary)
+            .bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
         "  Enter) Edit in $EDITOR  Esc) Close",
-        Style::new().fg(theme::semantic().text.muted).italic(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.muted)
+            .italic(),
     )]));
     lines.push(Line::from(""));
 
     if entries.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "  No memory files found",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  Create ~/.claude/memory/<name>.md to persist cross-session notes",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     } else {
         for (i, entry) in entries
@@ -101,9 +106,11 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::component().panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
-                Style::new().fg(theme::semantic().text.primary)
+                Style::new().fg(theme_def.read().semantic.text.primary)
             };
 
             // size 人类可读
@@ -117,12 +124,12 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor),
-                    Style::new().fg(theme::component().panel.title),
+                    Style::new().fg(theme_def.read().component.panel.title),
                 ),
                 Span::styled(entry.path.clone(), name_style),
                 Span::styled(
                     format!("   {}  {}", size_str, time_str),
-                    Style::new().fg(theme::semantic().text.dim),
+                    Style::new().fg(theme_def.read().semantic.text.dim),
                 ),
             ]));
         }

@@ -11,7 +11,7 @@ use crate::kit::atoms::{
     LANG_VERSION, MODEL_HIGHLIGHT_UNTIL, PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT,
 };
 use crate::kit::list_nav::{next_selection, previous_selection};
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -66,6 +66,7 @@ const MODEL_ALIASES: &[ModelAliasEntry] = &[
 
 #[component]
 pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
     // selected_tab stores the index of the selected alias
     let selected_tab = hooks.use_state(|| 1usize); // default Sonnet
@@ -163,16 +164,20 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Header
     lines.push(Line::from(vec![Span::styled(
         i18n::tr("model-panel-title"),
-        Style::new().fg(theme::semantic().text.primary).bold(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.primary)
+            .bold(),
     )]));
     lines.push(Line::from(vec![
         Span::styled(
             "  Provider: ",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         ),
         Span::styled(
             provider_label,
-            Style::new().fg(theme::semantic().border.active).bold(),
+            Style::new()
+                .fg(theme_def.read().semantic.border.active)
+                .bold(),
         ),
     ]));
     lines.push(Line::from(""));
@@ -185,30 +190,34 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let check = if is_selected { "\u{2714}" } else { " " };
 
         let name_style = if is_selected {
-            Style::new().fg(theme::semantic().status.success).bold()
+            Style::new()
+                .fg(theme_def.read().semantic.status.success)
+                .bold()
         } else if is_cursor {
-            Style::new().fg(theme::component().panel.title).bold()
+            Style::new()
+                .fg(theme_def.read().component.panel.title)
+                .bold()
         } else {
-            Style::new().fg(theme::semantic().text.primary)
+            Style::new().fg(theme_def.read().semantic.text.primary)
         };
 
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {} ", cursor_mark),
-                Style::new().fg(theme::component().panel.title),
+                Style::new().fg(theme_def.read().component.panel.title),
             ),
             Span::styled(format!("{:<10}", entry.name), name_style),
             Span::styled(
                 format!(" {}", check),
                 if is_selected {
-                    Style::new().fg(theme::semantic().status.success)
+                    Style::new().fg(theme_def.read().semantic.status.success)
                 } else {
-                    Style::new().fg(theme::semantic().text.muted)
+                    Style::new().fg(theme_def.read().semantic.text.muted)
                 },
             ),
             Span::styled(
                 format!("  {}", entry.model_id),
-                Style::new().fg(theme::semantic().text.muted),
+                Style::new().fg(theme_def.read().semantic.text.muted),
             ),
         ]));
     }
@@ -218,42 +227,46 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Current selection details
     lines.push(Line::from(vec![Span::styled(
         format!("  Active: {}", active_entry.name),
-        Style::new().fg(theme::semantic().border.active).bold(),
+        Style::new()
+            .fg(theme_def.read().semantic.border.active)
+            .bold(),
     )]));
     lines.push(Line::from(vec![
         Span::styled(
             "  Model ID: ",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         ),
         Span::styled(
             active_entry.model_id,
-            Style::new().fg(theme::semantic().text.primary),
+            Style::new().fg(theme_def.read().semantic.text.primary),
         ),
     ]));
     lines.push(Line::from(vec![
         Span::styled(
             i18n::tr("model-field-effort"),
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         ),
         Span::styled(
             active_entry.effort,
-            Style::new().fg(theme::semantic().status.warning).bold(),
+            Style::new()
+                .fg(theme_def.read().semantic.status.warning)
+                .bold(),
         ),
     ]));
     lines.push(Line::from(vec![
         Span::styled(
             i18n::tr("model-field-max-token"),
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         ),
         Span::styled(
             active_entry.max_tokens.to_string(),
-            Style::new().fg(theme::semantic().text.primary),
+            Style::new().fg(theme_def.read().semantic.text.primary),
         ),
     ]));
     lines.push(Line::from(vec![
         Span::styled(
             i18n::tr("model-field-1m-context"),
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         ),
         Span::styled(
             if active_entry.context_1m {
@@ -262,9 +275,9 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 i18n::tr("config-value-off")
             },
             if active_entry.context_1m {
-                Style::new().fg(theme::semantic().status.success)
+                Style::new().fg(theme_def.read().semantic.status.success)
             } else {
-                Style::new().fg(theme::semantic().text.muted)
+                Style::new().fg(theme_def.read().semantic.text.muted)
             },
         ),
     ]));
@@ -272,7 +285,11 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Footer
     lines.push(Line::from(""));
     lines.push(
-        Line::from("  ↑/↓::navigate  Enter::open  ←/→::switch").fg(theme::semantic().text.dim),
+        Line::from("  ↑/↓::navigate  Enter::open  ←/→::switch").fg(theme_def
+            .read()
+            .semantic
+            .text
+            .dim),
     );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));

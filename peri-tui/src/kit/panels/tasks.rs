@@ -10,8 +10,8 @@
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{BG_TASKS, CRON_JOBS, VIEW_MODELS};
 use crate::kit::list_nav::{next_selection, previous_selection};
-use crate::kit::theme;
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -25,6 +25,7 @@ use ratatui_kit::{
 
 #[component]
 pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
 
     // Background Tasks（从 BG_TASKS atom）
@@ -96,17 +97,22 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 摘要
     lines.push(Line::from(vec![
-        Span::styled("  Total: ", Style::new().fg(theme::semantic().text.muted)),
+        Span::styled(
+            "  Total: ",
+            Style::new().fg(theme_def.read().semantic.text.muted),
+        ),
         Span::styled(
             format!("{}", total),
-            Style::new().fg(theme::semantic().text.primary).bold(),
+            Style::new()
+                .fg(theme_def.read().semantic.text.primary)
+                .bold(),
         ),
         Span::styled(
             format!(
                 "   ({} bg, {} cron, {} subagent)",
                 bg_count, cron_count, subagent_count
             ),
-            Style::new().fg(theme::semantic().text.dim),
+            Style::new().fg(theme_def.read().semantic.text.dim),
         ),
     ]));
     lines.push(Line::from(""));
@@ -115,16 +121,20 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if !bg_tasks.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             format!("  ▼ Background Tasks ({})", bg_count),
-            Style::new().fg(theme::semantic().border.active).bold(),
+            Style::new()
+                .fg(theme_def.read().semantic.border.active)
+                .bold(),
         )]));
         for (i, task) in bg_tasks.iter().enumerate() {
             let row_idx = i;
             let is_selected = row_idx == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::component().panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
-                Style::new().fg(theme::semantic().text.primary)
+                Style::new().fg(theme_def.read().semantic.text.primary)
             };
             let kind_str = match task.kind.as_str() {
                 "shell" => "[sh]",
@@ -136,9 +146,12 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor),
-                    Style::new().fg(theme::component().panel.title),
+                    Style::new().fg(theme_def.read().component.panel.title),
                 ),
-                Span::styled(kind_str, Style::new().fg(theme::semantic().text.dim)),
+                Span::styled(
+                    kind_str,
+                    Style::new().fg(theme_def.read().semantic.text.dim),
+                ),
                 Span::styled(format!(" {} ", task.task_id), name_style),
                 Span::styled(
                     format!(
@@ -146,7 +159,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         task.summary.chars().take(60).collect::<String>(),
                         pid_str
                     ),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
             ]));
         }
@@ -157,21 +170,25 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if !cron_jobs.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             format!("  ▼ Cron Jobs ({})", cron_count),
-            Style::new().fg(theme::semantic().border.active).bold(),
+            Style::new()
+                .fg(theme_def.read().semantic.border.active)
+                .bold(),
         )]));
         for (i, job) in cron_jobs.iter().enumerate() {
             let row_idx = bg_count + i;
             let is_selected = row_idx == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::component().panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
-                Style::new().fg(theme::semantic().text.primary)
+                Style::new().fg(theme_def.read().semantic.text.primary)
             };
             let (status_icon, status_color) = if job.enabled {
-                ("\u{25cf}", theme::semantic().status.success)
+                ("\u{25cf}", theme_def.read().semantic.status.success)
             } else {
-                ("\u{25cb}", theme::semantic().text.muted)
+                ("\u{25cb}", theme_def.read().semantic.text.muted)
             };
             let next_str = job
                 .next_fire
@@ -182,17 +199,17 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor),
-                    Style::new().fg(theme::component().panel.title),
+                    Style::new().fg(theme_def.read().component.panel.title),
                 ),
                 Span::styled(status_icon, Style::new().fg(status_color)),
                 Span::styled(
                     format!(" {} ", job.expression),
-                    Style::new().fg(theme::semantic().text.dim),
+                    Style::new().fg(theme_def.read().semantic.text.dim),
                 ),
                 Span::styled(prompt_preview, name_style),
                 Span::styled(
                     format!("  @{}", next_str),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
             ]));
         }
@@ -203,39 +220,46 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if !subagents.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             format!("  ▼ SubAgents ({})", subagent_count),
-            Style::new().fg(theme::semantic().border.active).bold(),
+            Style::new()
+                .fg(theme_def.read().semantic.border.active)
+                .bold(),
         )]));
         for (i, sa) in subagents.iter().enumerate() {
             let row_idx = bg_count + cron_count + i;
             let is_selected = row_idx == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::component().panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
-                Style::new().fg(theme::semantic().text.primary)
+                Style::new().fg(theme_def.read().semantic.text.primary)
             };
             let collapsed_marker = if sa.collapsed {
                 Span::styled(
                     " (collapsed)",
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 )
             } else {
-                Span::styled(" (live)", Style::new().fg(theme::semantic().status.success))
+                Span::styled(
+                    " (live)",
+                    Style::new().fg(theme_def.read().semantic.status.success),
+                )
             };
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor),
-                    Style::new().fg(theme::component().panel.title),
+                    Style::new().fg(theme_def.read().component.panel.title),
                 ),
                 Span::styled(sa.agent_name.clone(), name_style),
                 Span::styled(
                     format!("  [{}]", sa.agent_id),
-                    Style::new().fg(theme::semantic().text.dim),
+                    Style::new().fg(theme_def.read().semantic.text.dim),
                 ),
                 collapsed_marker,
                 Span::styled(
                     format!("  {} msgs", sa.view_models.len()),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
             ]));
         }
@@ -244,21 +268,27 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if total == 0 {
         lines.push(Line::from(vec![Span::styled(
             "  No active tasks",
-            Style::new().fg(theme::semantic().text.muted).italic(),
+            Style::new()
+                .fg(theme_def.read().semantic.text.muted)
+                .italic(),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  Cron jobs are scheduled via /loop command;",
-            Style::new().fg(theme::semantic().text.dim),
+            Style::new().fg(theme_def.read().semantic.text.dim),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  SubAgents are spawned by Task / SubAgent tools.",
-            Style::new().fg(theme::semantic().text.dim),
+            Style::new().fg(theme_def.read().semantic.text.dim),
         )]));
     }
 
     lines.push(Line::from(""));
     lines.push(
-        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme::semantic().text.dim),
+        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme_def
+            .read()
+            .semantic
+            .text
+            .dim),
     );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));

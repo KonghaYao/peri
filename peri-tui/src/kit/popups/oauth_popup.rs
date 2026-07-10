@@ -21,10 +21,11 @@ use ratatui_kit::{
 use crate::i18n;
 use crate::kit::atoms::{LANG_VERSION, OAUTH_INFO};
 use crate::kit::popup_overlay::close_popup;
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 #[component]
 pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     // I20-D：从 OAUTH_INFO atom 读取真实数据。atom 由 dispatch_and_notify 在
     // OauthNeeded 事件时写入。None 时显示占位（理论上不会发生——popup 只有在
     // POPUP_KIND=OAuth 时渲染，而该状态只在写入 OAUTH_INFO 同步设置）。
@@ -63,8 +64,9 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
-    let popup_tokens = &theme::component().popup;
-    let semantic = theme::semantic();
+    let popup_tokens = &theme_def.read().component.popup;
+    let guard = theme_def.read();
+    let semantic = &guard.semantic;
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     match &info {

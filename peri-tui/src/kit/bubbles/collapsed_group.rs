@@ -12,7 +12,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 /// 折叠组属性。
 #[derive(Props, Default)]
@@ -24,8 +24,13 @@ pub struct CollapsedGroupProps {
 }
 
 #[component]
-pub fn CollapsedGroup(props: &CollapsedGroupProps) -> impl Into<AnyElement<'static>> {
-    let semantic = theme::semantic();
+pub fn CollapsedGroup(
+    mut hooks: Hooks,
+    props: &CollapsedGroupProps,
+) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
+    let guard = theme_def.read();
+    let semantic = &guard.semantic;
     let lines = vec![Line::from(vec![
         Span::styled("● ", Style::default().fg(semantic.status.success)),
         Span::styled(

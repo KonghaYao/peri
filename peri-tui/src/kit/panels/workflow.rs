@@ -8,7 +8,7 @@
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::VIEW_MODELS;
 use crate::kit::list_nav::{next_selection, previous_selection};
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -22,6 +22,7 @@ use ratatui_kit::{
 
 #[component]
 pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
 
     // 从 VIEW_MODELS 派生 subagent group 数量（间接显示 workflow 活跃度）
@@ -82,11 +83,15 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     lines.push(Line::from(vec![Span::styled(
         "  Workflow Engine",
-        Style::new().fg(theme::semantic().text.primary).bold(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.primary)
+            .bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
         "  Multi-agent orchestration via @peri-workflow CLI",
-        Style::new().fg(theme::semantic().text.muted).italic(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.muted)
+            .italic(),
     )]));
     lines.push(Line::from(""));
 
@@ -94,20 +99,24 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let is_selected = i == sel;
         let cursor_mark = if is_selected { ">" } else { " " };
         let label_style = if is_selected {
-            Style::new().fg(theme::component().panel.title).bold()
+            Style::new()
+                .fg(theme_def.read().component.panel.title)
+                .bold()
         } else {
-            Style::new().fg(theme::semantic().text.muted)
+            Style::new().fg(theme_def.read().semantic.text.muted)
         };
         let value_style = if is_selected {
-            Style::new().fg(theme::semantic().text.primary).bold()
+            Style::new()
+                .fg(theme_def.read().semantic.text.primary)
+                .bold()
         } else {
-            Style::new().fg(theme::semantic().text.primary)
+            Style::new().fg(theme_def.read().semantic.text.primary)
         };
 
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {} ", cursor_mark),
-                Style::new().fg(theme::component().panel.title),
+                Style::new().fg(theme_def.read().component.panel.title),
             ),
             Span::styled(format!("{:<26}", format!("{}:", label)), label_style),
             Span::styled(value.chars().take(60).collect::<String>(), value_style),
@@ -117,15 +126,19 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
         "  Workflows are spawned from agent prompts;",
-        Style::new().fg(theme::semantic().text.dim),
+        Style::new().fg(theme_def.read().semantic.text.dim),
     )]));
     lines.push(Line::from(vec![Span::styled(
         "  progress surfaces here as SubAgent groups in the message stream.",
-        Style::new().fg(theme::semantic().text.dim),
+        Style::new().fg(theme_def.read().semantic.text.dim),
     )]));
     lines.push(Line::from(""));
     lines.push(
-        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme::semantic().text.dim),
+        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme_def
+            .read()
+            .semantic
+            .text
+            .dim),
     );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));

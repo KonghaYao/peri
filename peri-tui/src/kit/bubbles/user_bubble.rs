@@ -12,7 +12,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 /// 用户消息气泡属性。
 #[derive(Props, Default)]
@@ -22,9 +22,11 @@ pub struct UserBubbleProps {
 }
 
 #[component]
-pub fn UserBubble(props: &UserBubbleProps) -> impl Into<AnyElement<'static>> {
-    let semantic = theme::semantic();
-    let component = theme::component();
+pub fn UserBubble(mut hooks: Hooks, props: &UserBubbleProps) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
+    let guard = theme_def.read();
+    let semantic = &guard.semantic;
+    let component = &guard.component;
     let user_bg = component.message.user_bg;
     let lines: Vec<Line<'static>> = if props.content.is_empty() {
         vec![]

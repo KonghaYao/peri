@@ -23,7 +23,7 @@ use crate::kit::atoms::MENTION_SELECTED_INDEX;
 use crate::kit::inline_nav::{
     InlineNavAction, clamp_selection, classify_inline_nav, next_selection, previous_selection,
 };
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 #[derive(Default, Props)]
 pub struct MentionPopupProps {
@@ -105,8 +105,10 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
         }
     });
 
-    let popup_tokens = &theme::component().popup;
-    let semantic = theme::semantic();
+    let state = THEME_ATOM.state();
+    let guard = state.read();
+    let popup_tokens = &guard.component.popup;
+    let semantic = guard.semantic;
     let sel_idx = clamp_selection(*selection.read(), item_count);
     let display_lines: Vec<Line<'_>> = filtered
         .iter()
@@ -143,7 +145,7 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
         View(
             flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
-            height: Constraint::Length(theme::component().popup.inline_height),
+            height: Constraint::Length(THEME_ATOM.state().read().component.popup.inline_height),
         ) {
             Text(text: text_render)
         }

@@ -68,6 +68,16 @@ pub async fn run_kit_fullscreen(
     {
         let cfg = app.services.peri_config.read();
         crate::i18n::init(cfg.config.language.as_deref());
+        // 加载配置中的主题（默认 peri-dark）
+        let theme_name = cfg.config.theme.as_deref().unwrap_or("peri-dark");
+        match peri_theme::loader::load_theme(theme_name) {
+            Ok(theme) => peri_theme::atoms::init_theme_atoms(theme),
+            Err(e) => tracing::warn!(
+                "failed to load theme '{}': {}, using default",
+                theme_name,
+                e
+            ),
+        }
     }
     // 2c. H1a: 把 SharedPermissionMode 句柄塞到全局 OnceLock，让 ConfigPanel
     //     能切换 permission_mode。ServiceRegistry + ACP server 持同一 Arc。

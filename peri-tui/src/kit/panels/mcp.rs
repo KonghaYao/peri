@@ -7,7 +7,7 @@
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{MCP_SERVERS, McpServerSummary, SERVICE_SNAPSHOT};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -21,6 +21,7 @@ use ratatui_kit::{
 
 #[component]
 pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
     let store = hooks.use_atom(&MCP_SERVERS);
     let servers: Vec<McpServerSummary> = store.read().clone();
@@ -78,15 +79,17 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     lines.push(Line::from(vec![
         Span::styled(
             "  MCP Pool: ",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         ),
         Span::styled(
             phase_label,
-            Style::new().fg(theme::semantic().border.active).bold(),
+            Style::new()
+                .fg(theme_def.read().semantic.border.active)
+                .bold(),
         ),
         Span::styled(
             format!("   {}/{} connected", connected_total, config_total),
-            Style::new().fg(theme::semantic().text.primary),
+            Style::new().fg(theme_def.read().semantic.text.primary),
         ),
     ]));
     lines.push(Line::from(""));
@@ -94,11 +97,11 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if servers.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "  No MCP servers configured",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  Add servers via ~/.claude/settings.json (mcpServers)",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     } else {
         for (i, s) in servers
@@ -110,16 +113,18 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::component().panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
-                Style::new().fg(theme::semantic().text.primary)
+                Style::new().fg(theme_def.read().semantic.text.primary)
             };
             let (status_icon, status_color) = derive_status_style(&s.status);
 
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor),
-                    Style::new().fg(theme::component().panel.title),
+                    Style::new().fg(theme_def.read().component.panel.title),
                 ),
                 Span::styled(s.name.clone(), name_style),
                 Span::styled(format!("  {}", status_icon), Style::new().fg(status_color)),
@@ -127,14 +132,18 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]));
             lines.push(Line::from(vec![Span::styled(
                 format!("     transport: {}  tools: {}", s.transport, s.tools_count),
-                Style::new().fg(theme::semantic().text.dim),
+                Style::new().fg(theme_def.read().semantic.text.dim),
             )]));
         }
     }
 
     lines.push(Line::from(""));
     lines.push(
-        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme::semantic().text.dim),
+        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme_def
+            .read()
+            .semantic
+            .text
+            .dim),
     );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
@@ -152,11 +161,14 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 fn derive_status_style(status: &str) -> (&'static str, ratatui::style::Color) {
     if status.contains("connected") {
-        ("\u{2714}", theme::semantic().status.success)
+        (
+            "\u{2714}",
+            THEME_ATOM.state().read().semantic.status.success,
+        )
     } else if status.contains("error") || status.contains("failed") {
-        ("\u{2717}", theme::semantic().status.error)
+        ("\u{2717}", THEME_ATOM.state().read().semantic.status.error)
     } else {
-        ("\u{25ef}", theme::semantic().text.muted)
+        ("\u{25ef}", THEME_ATOM.state().read().semantic.text.muted)
     }
 }
 

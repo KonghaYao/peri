@@ -43,7 +43,7 @@ use crate::kit::mention_popup::MentionPopup;
 use crate::kit::panel_registry::{PANELS, open_panel, panel_for_slash_command};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
 use crate::kit::submit_request::{SubmitRequest, parse_submit_request};
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 /// 输入区域 prompt + border 占用的列宽常量。
 /// border 左右各 1 列，" ❯ " prompt 前缀占 3 列 → 共 5 列。
@@ -627,7 +627,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     // 未设背景时 ratatui 仅渲染文本 span，超出新文本的列保留终端原有像素。
     let composer_paragraph = Paragraph::new(composer_lines)
         .block(build_composer_block(loading))
-        .style(Style::default().bg(theme::semantic().surface.default));
+        .style(Style::default().bg(THEME_ATOM.state().read().semantic.surface.default));
 
     element!(
         View(
@@ -706,8 +706,8 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     )
 }
 
-fn input_tokens() -> &'static theme::InputTokens {
-    &theme::component().input
+fn input_tokens() -> peri_theme::component::InputTokens {
+    THEME_ATOM.state().read().component.input
 }
 
 fn build_composer_block(loading: bool) -> Block<'static> {
@@ -760,7 +760,7 @@ fn build_composer_lines(editor_lines: Vec<Line<'static>>, loading: bool) -> Vec<
 }
 
 fn popup_height(item_count: usize) -> u16 {
-    (item_count.max(1) as u16 + 2).min(theme::component().popup.inline_height)
+    (item_count.max(1) as u16 + 2).min(THEME_ATOM.state().read().component.popup.inline_height)
 }
 
 fn submit_text(submitted: String) {

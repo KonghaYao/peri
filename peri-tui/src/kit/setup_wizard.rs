@@ -17,7 +17,7 @@
 #![allow(clippy::needless_update)]
 
 use crate::kit::atoms;
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -31,8 +31,8 @@ use ratatui_kit::{
 
 #[component]
 pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let semantic = theme::semantic();
-    let component = theme::component();
+    let semantic = THEME_ATOM.state().read().semantic;
+    let component = THEME_ATOM.state().read().component;
     // 订阅 WIZARD_ACTIVE 以便 Esc 关闭后重渲染（虽然 app_shell 也会切走）
     let wizard_active = hooks.use_atom(&atoms::WIZARD_ACTIVE);
     let _ = *wizard_active.read();

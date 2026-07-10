@@ -6,7 +6,7 @@
 
 use crate::i18n;
 use crate::kit::atoms::LANG_VERSION;
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     prelude::*,
     ratatui::{
@@ -36,7 +36,7 @@ pub struct WelcomeProps {
 #[component]
 pub fn Welcome(props: &WelcomeProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
-    let semantic = theme::semantic();
+    let semantic = THEME_ATOM.state().read().semantic;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let narrow = props.width < NARROW_THRESHOLD;
 

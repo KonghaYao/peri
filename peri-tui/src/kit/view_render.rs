@@ -21,7 +21,7 @@ use crate::kit::tui_render_unit::{
     TuiNoteLevel, TuiReasoningBlock, TuiRenderUnit, TuiSubAgentGroup,
 };
 
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 use crate::i18n;
 use fluent_bundle::FluentValue;
@@ -123,10 +123,12 @@ fn render_user_bubble(
         return render_reminder_condensed(info);
     }
 
-    let semantic = theme::semantic();
-    let component = theme::component();
+    let semantic = THEME_ATOM.state().read().semantic;
+    let component = THEME_ATOM.state().read().component;
     let user_bg = component.message.user_bg;
-    let parsed = crate::kit::markdown::parse_markdown(text, width);
+    let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
+    let palette_guard = palette_state.read();
+    let parsed = crate::kit::markdown::parse_markdown(text, width, *palette_guard);
     let mut lines = Vec::with_capacity(parsed.lines.len() + 1);
     lines.push(Line::from(""));
     for (i, line) in parsed.lines.iter().enumerate() {
@@ -155,7 +157,7 @@ fn render_user_bubble(
 
 /// 两行缩略渲染 system-reminder：L1 类型标签（dim italic），L2 数据摘要（⎿ muted）。
 fn render_reminder_condensed(info: &ReminderInfo) -> Vec<Line<'static>> {
-    let semantic = theme::semantic();
+    let semantic = THEME_ATOM.state().read().semantic;
     let mut lines = vec![Line::from(Span::styled(
         info.reminder_type.label(),
         Style::default()
@@ -187,7 +189,9 @@ fn render_assistant_bubble(
 
     // Text body（markdown 解析）
     if !data.text.is_empty() {
-        let parsed = crate::kit::markdown::parse_markdown(&data.text, width);
+        let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
+        let palette_guard = palette_state.read();
+        let parsed = crate::kit::markdown::parse_markdown(&data.text, width, *palette_guard);
         for line in parsed.lines.iter() {
             lines.push(line.clone());
         }
@@ -197,7 +201,7 @@ fn render_assistant_bubble(
 }
 
 fn render_reasoning_block(reasoning: &TuiReasoningBlock) -> Vec<Line<'static>> {
-    let semantic = theme::semantic();
+    let semantic = THEME_ATOM.state().read().semantic;
     let char_count = reasoning.text.chars().count();
     let mut lines = vec![Line::from("")];
     lines.push(Line::from(vec![Span::styled(
@@ -233,7 +237,7 @@ const FORCE_EXPAND_ON_COMPLETE: &[&str] = &["Write", "Edit"];
 
 /// 工具调用卡片渲染（v2 TuiRenderUnit 渲染器）。
 fn render_tool_card(data: &crate::kit::tui_render_unit::TuiToolCard) -> Vec<Line<'static>> {
-    let semantic = theme::semantic();
+    let semantic = THEME_ATOM.state().read().semantic;
     let display = tool_display(&data.tool_name, data.is_error, data.is_running);
     let display_name = tool_display::format_tool_name(&data.tool_name).to_string();
 
@@ -397,7 +401,7 @@ struct ToolDisplay {
 }
 
 fn tool_display(_tool_name: &str, is_error: bool, is_running: bool) -> ToolDisplay {
-    let semantic = theme::semantic();
+    let semantic = THEME_ATOM.state().read().semantic;
     if is_error {
         return ToolDisplay {
             indicator: "●",
@@ -467,7 +471,7 @@ fn compact_output_lines(text: &str, max_lines: usize, max_chars: usize) -> Vec<S
 }
 
 fn render_system_note(data: &crate::kit::tui_render_unit::TuiSystemNote) -> Vec<Line<'static>> {
-    let semantic = theme::semantic();
+    let semantic = THEME_ATOM.state().read().semantic;
     let mut lines: Vec<Line<'static>> = Vec::new();
     for line_text in data.text.lines() {
         let (prefix_str, color) = if line_text.starts_with('\u{273B}') {
@@ -536,7 +540,7 @@ fn render_system_note(data: &crate::kit::tui_render_unit::TuiSystemNote) -> Vec<
 }
 
 fn render_ask_user_block(data: &TuiAskUserBlock) -> Vec<Line<'static>> {
-    let semantic = theme::semantic();
+    let semantic = THEME_ATOM.state().read().semantic;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     let title_color = if data.is_error {
@@ -567,7 +571,7 @@ fn render_ask_user_block(data: &TuiAskUserBlock) -> Vec<Line<'static>> {
 }
 
 fn render_subagent_group(data: &TuiSubAgentGroup, width: usize) -> Vec<Line<'static>> {
-    let semantic = theme::semantic();
+    let semantic = THEME_ATOM.state().read().semantic;
 
     // 查询运行时状态（v2 DTO 缺失字段由 status probe 注入）
     let status = lookup_subagent_status(&data.agent_id);
@@ -683,7 +687,7 @@ fn render_subagent_group(data: &TuiSubAgentGroup, width: usize) -> Vec<Line<'sta
 }
 
 fn render_collapsed_group(data: &TuiCollapsedGroup) -> Vec<Line<'static>> {
-    let semantic = theme::semantic();
+    let semantic = THEME_ATOM.state().read().semantic;
     vec![Line::from(vec![
         Span::styled("● ", Style::default().fg(semantic.status.success)),
         Span::styled(
@@ -694,7 +698,7 @@ fn render_collapsed_group(data: &TuiCollapsedGroup) -> Vec<Line<'static>> {
 }
 
 fn render_divider(data: &TuiDivider) -> Vec<Line<'static>> {
-    let semantic = theme::semantic();
+    let semantic = THEME_ATOM.state().read().semantic;
     if let Some(ref label) = data.label {
         vec![Line::from(vec![
             Span::styled("── ", Style::default().fg(semantic.text.dim)),
@@ -1846,7 +1850,8 @@ mod tests {
         // 第 4 行含 ❌ 应 error 色
         let error_color_line = &lines[3];
         let has_error = error_color_line.spans.iter().any(|s| {
-            s.content.contains("❌") && s.style.fg == Some(theme::semantic().status.error)
+            s.content.contains("❌")
+                && s.style.fg == Some(THEME_ATOM.state().read().semantic.status.error)
         });
         assert!(has_error, "含 ❌ 的行应 error 色");
     }

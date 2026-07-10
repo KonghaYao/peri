@@ -20,7 +20,7 @@ use crate::kit::atoms::SLASH_SELECTED_INDEX;
 use crate::kit::inline_nav::{
     InlineNavAction, clamp_selection, classify_inline_nav, next_selection, previous_selection,
 };
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashActionKind {
@@ -121,8 +121,10 @@ pub fn SlashCompletion(
         }
     });
 
-    let popup_tokens = &theme::component().popup;
-    let semantic = theme::semantic();
+    let state = THEME_ATOM.state();
+    let guard = state.read();
+    let popup_tokens = &guard.component.popup;
+    let semantic = guard.semantic;
     let sel_idx = clamp_selection(*selection.read(), item_count);
 
     // 双列布局：计算 label 列最大宽度（含 / 前缀），描述列自然对齐
@@ -181,7 +183,7 @@ pub fn SlashCompletion(
         );
 
     // 计算可见窗口：只渲染可见区域内的项，避免选中项滚出视野
-    let popup_h = theme::component().popup.inline_height;
+    let popup_h = THEME_ATOM.state().read().component.popup.inline_height;
     let visible_rows = popup_h.saturating_sub(2) as usize; // 减去上下边框
     let scroll_start = if item_count <= visible_rows {
         0

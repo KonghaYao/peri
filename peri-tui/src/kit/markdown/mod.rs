@@ -13,12 +13,10 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span, Text},
 };
-use ratatui_kit::ComponentTheme;
+use ratatui_kit::{ComponentTheme, prelude::Palette};
 use ratatui_kit_markdown::{ListItemData, MarkdownTheme, ParsedBlock, parse_markdown as rk_parse};
 use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet};
 use unicode_width::UnicodeWidthStr;
-
-use crate::kit::theme::markdown_palette::peri_markdown_palette;
 
 // ── syntect 全局单例 ───────────────────────────────────────────────
 
@@ -28,13 +26,12 @@ static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 // ── 公开 API ───────────────────────────────────────────────────────
 
 /// 解析 markdown 文本为 ratatui Text。
-pub fn parse_markdown(input: &str, max_width: usize) -> Text<'static> {
+pub fn parse_markdown(input: &str, max_width: usize, palette: Palette) -> Text<'static> {
     if input.is_empty() {
         return Text::default();
     }
 
     let parsed = rk_parse(input);
-    let palette = peri_markdown_palette();
     let theme = MarkdownTheme::from_palette(&palette);
     let mut lines = convert_blocks(&parsed.blocks, &theme, max_width);
 
@@ -48,7 +45,7 @@ pub fn parse_markdown(input: &str, max_width: usize) -> Text<'static> {
 
 /// 解析 markdown 文本为 ratatui Text（默认宽度 80）。
 pub fn parse_markdown_default(input: &str) -> Text<'static> {
-    parse_markdown(input, 80)
+    parse_markdown(input, 80, Palette::default())
 }
 
 // ── 块级转换 ────────────────────────────────────────────────────────
@@ -463,13 +460,13 @@ mod tests {
 
     #[test]
     fn test_empty_input() {
-        let result = parse_markdown("", 80);
+        let result = parse_markdown("", 80, Palette::default());
         assert!(result.lines.is_empty());
     }
 
     #[test]
     fn test_heading() {
-        let result = parse_markdown("# Hello", 80);
+        let result = parse_markdown("# Hello", 80, Palette::default());
         assert_eq!(result.lines.len(), 1);
         let line = &result.lines[0];
         // "#" + " " + "Hello"
@@ -480,14 +477,14 @@ mod tests {
 
     #[test]
     fn test_paragraph() {
-        let result = parse_markdown("hello world", 80);
+        let result = parse_markdown("hello world", 80, Palette::default());
         assert_eq!(result.lines.len(), 1);
         assert_eq!(result.lines[0].spans[0].content, "hello world");
     }
 
     #[test]
     fn test_adjacent_paragraphs() {
-        let result = parse_markdown("a\n\nb", 80);
+        let result = parse_markdown("a\n\nb", 80, Palette::default());
         assert_eq!(result.lines.len(), 3);
         assert_eq!(result.lines[0].spans[0].content, "a");
         assert!(result.lines[1].spans.is_empty());
@@ -496,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_inline_code() {
-        let result = parse_markdown("use `code` here", 80);
+        let result = parse_markdown("use `code` here", 80, Palette::default());
         let line = &result.lines[0];
         let code_span = line
             .spans
@@ -512,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_unordered_list() {
-        let result = parse_markdown("- item 1\n- item 2", 80);
+        let result = parse_markdown("- item 1\n- item 2", 80, Palette::default());
         // ratatui-kit-markdown parser 可能产出末尾空行，只校验非空行
         let non_empty: Vec<_> = result
             .lines
@@ -536,14 +533,14 @@ mod tests {
 
     #[test]
     fn test_code_block() {
-        let result = parse_markdown("```rust\nlet x = 1;\n```", 80);
+        let result = parse_markdown("```rust\nlet x = 1;\n```", 80, Palette::default());
         // 空行 + code 行 + 空行
         assert!(result.lines.len() >= 2);
     }
 
     #[test]
     fn test_rule() {
-        let result = parse_markdown("---", 80);
+        let result = parse_markdown("---", 80, Palette::default());
         assert_eq!(result.lines.len(), 1);
         // horizontal rule should be a line of dashes
         let content: String = result.lines[0]
@@ -556,7 +553,7 @@ mod tests {
 
     #[test]
     fn test_bold_text() {
-        let result = parse_markdown("**bold**", 80);
+        let result = parse_markdown("**bold**", 80, Palette::default());
         let line = &result.lines[0];
         assert!(
             line.spans

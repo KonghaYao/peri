@@ -31,7 +31,7 @@ use crate::kit::atoms::{LANG_VERSION, REWIND_ACTION_TX};
 use crate::kit::list_nav::{ListNavAction, classify_list_nav, next_selection, previous_selection};
 use crate::kit::popup_overlay::close_popup;
 use crate::kit::rewind_action::RewindAction;
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 /// 视图切换——messages ↔ files。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +42,7 @@ enum RewindView {
 
 #[component]
 pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let preview_store = hooks.use_atom(&crate::kit::atoms::REWIND_PREVIEW);
     let preview = preview_store.read().clone();
     let _ = preview_store;
@@ -132,8 +133,9 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         EventResult::Ignored
     });
 
-    let popup_tokens = &theme::component().popup;
-    let semantic = theme::semantic();
+    let popup_tokens = &theme_def.read().component.popup;
+    let guard = theme_def.read();
+    let semantic = &guard.semantic;
     let cur_view = *view.read();
     let cur_msg_sel = *msg_sel.read();
     let cur_file_sel = *file_sel.read();

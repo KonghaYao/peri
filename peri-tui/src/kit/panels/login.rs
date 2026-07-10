@@ -10,7 +10,7 @@
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{PERI_CONFIG_HANDLE, PROVIDER_LIST, ProviderSummary};
 use crate::kit::list_nav::{next_selection, previous_selection};
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -24,6 +24,7 @@ use ratatui_kit::{
 
 #[component]
 pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
     let store = hooks.use_atom(&PROVIDER_LIST);
     let providers: Vec<ProviderSummary> = store.read().clone();
@@ -80,37 +81,45 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // S16：TUI-PAGE.md §6.2 样式——Enter::activate · Esc::close
     lines.push(Line::from(vec![Span::styled(
         format!("  {} providers configured", count),
-        Style::new().fg(theme::semantic().text.primary).bold(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.primary)
+            .bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
         "  Enter::activate · Esc::close",
-        Style::new().fg(theme::semantic().text.muted).italic(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.muted)
+            .italic(),
     )]));
     lines.push(Line::from(""));
 
     if providers.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "  No providers configured",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  Run setup wizard or edit ~/.peri/settings.json",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     } else {
         for (i, p) in providers.iter().enumerate() {
             let is_cursor = i == sel;
             let cursor_mark = if is_cursor { ">" } else { " " };
             let row_style = if is_cursor {
-                Style::new().fg(theme::component().panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
-                Style::new().fg(theme::semantic().text.primary)
+                Style::new().fg(theme_def.read().semantic.text.primary)
             };
 
             let active_marker = if p.is_active {
                 Span::styled(
                     " \u{2714}",
-                    Style::new().fg(theme::semantic().status.success).bold(),
+                    Style::new()
+                        .fg(theme_def.read().semantic.status.success)
+                        .bold(),
                 )
             } else {
                 Span::styled("  ", Style::new())
@@ -120,7 +129,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor_mark),
-                    Style::new().fg(theme::component().panel.title),
+                    Style::new().fg(theme_def.read().component.panel.title),
                 ),
                 active_marker,
                 Span::styled(format!("{}  ({})", p.id, p.provider_type), row_style),
@@ -128,9 +137,12 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
             // API key 状态（configured / missing）
             let key_marker = if p.has_api_key {
-                ("api key: configured", theme::semantic().status.success)
+                (
+                    "api key: configured",
+                    theme_def.read().semantic.status.success,
+                )
             } else {
-                ("api key: missing", theme::semantic().status.error)
+                ("api key: missing", theme_def.read().semantic.status.error)
             };
             lines.push(Line::from(vec![Span::styled(
                 format!("     {}", key_marker.0),
@@ -140,7 +152,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 let url_display: String = url.chars().take(70).collect();
                 lines.push(Line::from(vec![Span::styled(
                     format!("     base url: {}", url_display),
-                    Style::new().fg(theme::semantic().text.dim),
+                    Style::new().fg(theme_def.read().semantic.text.dim),
                 )]));
             }
             lines.push(Line::from(""));
@@ -150,7 +162,9 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // S16：底部 hints
     lines.push(Line::from(vec![Span::styled(
         "  \u{2191}/\u{2193}::navigate  Enter::activate  Esc::close",
-        Style::new().fg(theme::semantic().text.muted).italic(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.muted)
+            .italic(),
     )]));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));

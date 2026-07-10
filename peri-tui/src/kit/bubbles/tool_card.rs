@@ -14,7 +14,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 /// 折叠/展开规则（TUI-PAGE.md §2.4.2）。
 const COLLAPSED_BY_DEFAULT: &[&str] = &["Bash", "Read", "Glob", "Grep", "AskUserQuestion"];
@@ -95,8 +95,10 @@ fn compact_output_lines(output: &str, max_lines: usize, max_chars: usize) -> Vec
 }
 
 #[component]
-pub fn ToolCard(_hooks: Hooks, props: &ToolCardProps) -> impl Into<AnyElement<'static>> {
-    let semantic = theme::semantic();
+pub fn ToolCard(mut hooks: Hooks, props: &ToolCardProps) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
+    let guard = theme_def.read();
+    let semantic = &guard.semantic;
 
     let collapsed = should_collapse(&props.tool_name, props.is_running, props.is_error);
 

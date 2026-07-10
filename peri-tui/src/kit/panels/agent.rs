@@ -13,9 +13,9 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{LANG_VERSION, PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT, VIEW_MODELS};
 use crate::kit::list_nav::{next_selection, previous_selection};
-use crate::kit::theme;
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
 use fluent_bundle::FluentValue;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -29,6 +29,7 @@ use ratatui_kit::{
 
 #[component]
 pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
 
     let snap_store = hooks.use_atom(&SERVICE_SNAPSHOT);
@@ -95,11 +96,13 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 头部
     lines.push(Line::from(vec![Span::styled(
         i18n::tr("agent-panel-title-session"),
-        Style::new().fg(theme::semantic().text.primary).bold(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.primary)
+            .bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
         "  ----------------------",
-        Style::new().fg(theme::semantic().text.dim),
+        Style::new().fg(theme_def.read().semantic.text.dim),
     )]));
     lines.push(Line::from(""));
 
@@ -129,20 +132,24 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let is_selected = i == sel;
         let cursor_mark = if is_selected { ">" } else { " " };
         let label_style = if is_selected {
-            Style::new().fg(theme::component().panel.title).bold()
+            Style::new()
+                .fg(theme_def.read().component.panel.title)
+                .bold()
         } else {
-            Style::new().fg(theme::semantic().text.muted)
+            Style::new().fg(theme_def.read().semantic.text.muted)
         };
         let value_style = if is_selected {
-            Style::new().fg(theme::semantic().text.primary).bold()
+            Style::new()
+                .fg(theme_def.read().semantic.text.primary)
+                .bold()
         } else {
-            Style::new().fg(theme::semantic().text.primary)
+            Style::new().fg(theme_def.read().semantic.text.primary)
         };
 
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {} ", cursor_mark),
-                Style::new().fg(theme::component().panel.title),
+                Style::new().fg(theme_def.read().component.panel.title),
             ),
             Span::styled(format!("{:<18}", format!("{}:", label)), label_style),
             Span::styled(value.chars().take(60).collect::<String>(), value_style),
@@ -159,13 +166,17 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 FluentValue::from(subagent_count as i64),
             )],
         ),
-        Style::new().fg(theme::semantic().text.primary).bold(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.primary)
+            .bold(),
     )]));
 
     if subagents.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             i18n::tr("agent-no-subagents"),
-            Style::new().fg(theme::semantic().text.muted).italic(),
+            Style::new()
+                .fg(theme_def.read().semantic.text.muted)
+                .italic(),
         )]));
     } else {
         for (i, sa) in subagents.iter().enumerate() {
@@ -173,30 +184,32 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let is_selected = row_idx == sel;
             let cursor_mark = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::component().panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
-                Style::new().fg(theme::semantic().text.primary)
+                Style::new().fg(theme_def.read().semantic.text.primary)
             };
             let status_marker = if sa.collapsed {
                 Span::styled(
                     i18n::tr("agent-collapsed"),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 )
             } else {
                 Span::styled(
                     i18n::tr("agent-expanded"),
-                    Style::new().fg(theme::semantic().status.success),
+                    Style::new().fg(theme_def.read().semantic.status.success),
                 )
             };
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor_mark),
-                    Style::new().fg(theme::component().panel.title),
+                    Style::new().fg(theme_def.read().component.panel.title),
                 ),
                 Span::styled(sa.agent_name.clone(), name_style),
                 Span::styled(
                     format!("  [{}]", sa.agent_id),
-                    Style::new().fg(theme::semantic().text.dim),
+                    Style::new().fg(theme_def.read().semantic.text.dim),
                 ),
                 status_marker,
                 Span::styled(
@@ -207,7 +220,7 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             FluentValue::from(sa.view_models.len() as i64),
                         )],
                     ),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
             ]));
         }
@@ -215,7 +228,11 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     lines.push(Line::from(""));
     lines.push(
-        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme::semantic().text.dim),
+        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme_def
+            .read()
+            .semantic
+            .text
+            .dim),
     );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));

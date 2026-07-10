@@ -21,9 +21,9 @@ use crate::kit::focus_router;
 use crate::kit::panel_registry::clean_scrollbars;
 use crate::kit::render_bridge::WrappedLineInfo;
 use crate::kit::text_selection::{self, TextSelection};
-use crate::kit::theme;
 use crate::kit::welcome::Welcome;
 use fluent_bundle::FluentValue;
+use peri_theme::atoms::THEME_ATOM;
 use peri_widgets::spinner::{SpinnerMode, SpinnerState};
 use ratatui_kit::{
     components::ScrollViewState,
@@ -71,7 +71,7 @@ fn hash_todo_items(items: &[TodoItem]) -> u64 {
 }
 
 pub fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
-    let sem = theme::semantic();
+    let sem = THEME_ATOM.state().read().semantic;
     let mut lines = Vec::new();
     for item in items {
         let (icon, icon_color, text_color, crossed) = match item.status {
@@ -706,7 +706,7 @@ fn build_footer_lines(
     is_loading: bool,
     todo_items: &[TodoItem],
 ) -> Vec<Line<'static>> {
-    let semantic = theme::semantic();
+    let semantic = THEME_ATOM.state().read().semantic;
 
     // [TRAP] 所有 hook 调用必须在任何 early return 之前，确保每帧 hook 调用顺序一致。
     // ratatui-kit 按调用顺序索引 hook，顺序变化会触发 "Hook type mismatch" panic。

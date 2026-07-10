@@ -24,11 +24,12 @@ use crate::kit::list_nav::{
     previous_selection,
 };
 use crate::kit::panel_registry;
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 use serde_json::json;
 
 #[component]
 pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let pending_store = hooks.use_atom(&ASK_USER_PENDING);
     let pending: Option<AskUser> = pending_store.read().clone();
     let _ = pending_store;
@@ -187,8 +188,9 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
-    let popup_tokens = &theme::component().popup;
-    let semantic = theme::semantic();
+    let popup_tokens = &theme_def.read().component.popup;
+    let guard = theme_def.read();
+    let semantic = &guard.semantic;
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     match &pending {

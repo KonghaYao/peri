@@ -11,7 +11,7 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{LANG_VERSION, THREAD_LIST, THREAD_LOAD_TX, ThreadSummary};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -25,6 +25,7 @@ use ratatui_kit::{
 
 #[component]
 pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
     hooks.use_atom(&LANG_VERSION);
 
@@ -74,12 +75,15 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // panel 高度 18 - border 2 - header 3 - footer 1 = 12 行；每项 3 行 → 可见 4 个。
     const VISIBLE_ITEMS: usize = 4;
     let scroll_start = scroll_start_for_selected(sel, item_count, VISIBLE_ITEMS);
-    let semantic = theme::semantic();
+    let guard = theme_def.read();
+    let semantic = &guard.semantic;
     let header_style = Style::new().fg(semantic.text.primary).bold();
     let muted_style = Style::new().fg(semantic.text.muted).italic();
     let dim_style = Style::new().fg(semantic.text.dim);
     let item_meta_style = Style::new().fg(semantic.text.muted);
-    let selected_style = Style::new().fg(theme::component().panel.title).bold();
+    let selected_style = Style::new()
+        .fg(theme_def.read().component.panel.title)
+        .bold();
 
     let mut lines: Vec<Line<'_>> = Vec::new();
 
@@ -129,7 +133,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor_mark),
-                    Style::new().fg(theme::component().panel.title),
+                    Style::new().fg(theme_def.read().component.panel.title),
                 ),
                 Span::styled(format!("{}  {}", updated, title), row_style),
             ]));

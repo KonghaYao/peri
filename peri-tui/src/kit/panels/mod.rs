@@ -5,13 +5,13 @@ macro_rules! panel_shell {
             Border(
                 flex_direction: ratatui_kit::ratatui::layout::Direction::Vertical,
                 border_style: ratatui_kit::ratatui::style::Style::new()
-                    .fg(crate::kit::theme::component().panel.border),
+                    .fg(peri_theme::atoms::THEME_ATOM.state().read().component.panel.border),
                 borders: ratatui_kit::ratatui::widgets::Borders::TOP
                     | ratatui_kit::ratatui::widgets::Borders::BOTTOM,
                 top_title: ratatui_kit::ratatui::text::Line::from(
                     crate::kit::panel_registry::panel_title($kind),
                 )
-                .fg(crate::kit::theme::component().panel.title)
+                .fg(peri_theme::atoms::THEME_ATOM.state().read().component.panel.title)
                 .bold()
                 .centered(),
                 width: ratatui_kit::ratatui::layout::Constraint::Fill(1),
@@ -35,5 +35,6 @@ pub mod model;
 pub mod plugin;
 pub mod status;
 pub mod tasks;
+pub mod theme;
 pub mod thread_browser;
 pub mod workflow;

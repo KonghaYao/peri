@@ -41,7 +41,6 @@ pub mod stream_data;
 pub mod submit_consumer;
 pub mod submit_request;
 pub mod text_selection;
-pub mod theme;
 pub mod thread_load_consumer;
 pub mod tool_display;
 pub mod tui_render_unit;

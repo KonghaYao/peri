@@ -29,10 +29,11 @@ use ratatui_kit::{
 use crate::kit::atoms::{HITL_PENDING, HITL_REQUEST_ID, HITL_RESPONSE_TX};
 use crate::kit::hitl_response::HitlResponseAction;
 use crate::kit::popup_overlay::close_popup;
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 #[component]
 pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let pending_store = hooks.use_atom(&HITL_PENDING);
     let pending = pending_store.read().clone();
     let _ = pending_store;
@@ -76,8 +77,9 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
-    let popup_tokens = &theme::component().popup;
-    let semantic = theme::semantic();
+    let popup_tokens = &theme_def.read().component.popup;
+    let guard = theme_def.read();
+    let semantic = &guard.semantic;
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     match &pending {

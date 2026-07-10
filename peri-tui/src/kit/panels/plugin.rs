@@ -7,7 +7,7 @@
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{PLUGIN_LIST, PluginSummary};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -21,6 +21,7 @@ use ratatui_kit::{
 
 #[component]
 pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
     let store = hooks.use_atom(&PLUGIN_LIST);
     let plugins: Vec<PluginSummary> = store.read().clone();
@@ -68,22 +69,26 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     lines.push(Line::from(vec![Span::styled(
         format!("  {} plugins loaded", count),
-        Style::new().fg(theme::semantic().text.primary).bold(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.primary)
+            .bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
         "  (read-only — toggle via ~/.claude/plugins/config.json)",
-        Style::new().fg(theme::semantic().text.muted).italic(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.muted)
+            .italic(),
     )]));
     lines.push(Line::from(""));
 
     if plugins.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "  No plugins installed",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  Install via: agm install <name>",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     } else {
         // viewport 裁剪：只渲染 [scroll_start, scroll_start + VISIBLE_ITEMS) 范围
@@ -96,15 +101,17 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::component().panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
-                Style::new().fg(theme::semantic().text.primary)
+                Style::new().fg(theme_def.read().semantic.text.primary)
             };
 
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor),
-                    Style::new().fg(theme::component().panel.title),
+                    Style::new().fg(theme_def.read().component.panel.title),
                 ),
                 Span::styled(p.name.clone(), name_style),
                 Span::styled(
@@ -116,13 +123,13 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             &p.version
                         }
                     ),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
             ]));
             if !p.description.is_empty() {
                 lines.push(Line::from(vec![Span::styled(
                     format!("     {}", p.description),
-                    Style::new().fg(theme::semantic().text.dim),
+                    Style::new().fg(theme_def.read().semantic.text.dim),
                 )]));
             } else {
                 // description 缺失时占位空行，保证每 plugin 固定 4 行（viewport 计算依赖）
@@ -132,14 +139,18 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let root: String = p.root.chars().take(76).collect();
             lines.push(Line::from(vec![Span::styled(
                 format!("     {}", root),
-                Style::new().fg(theme::semantic().text.dim),
+                Style::new().fg(theme_def.read().semantic.text.dim),
             )]));
             lines.push(Line::from(""));
         }
     }
 
     lines.push(
-        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme::semantic().text.dim),
+        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme_def
+            .read()
+            .semantic
+            .text
+            .dim),
     );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));

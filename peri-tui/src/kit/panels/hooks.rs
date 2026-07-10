@@ -19,8 +19,8 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{HOOK_LIST, HookSummary, LANG_VERSION};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
-use crate::kit::theme;
 use fluent_bundle::FluentValue;
+use peri_theme::atoms::THEME_ATOM;
 
 /// Map event name to human-readable description。
 fn event_description(event: &str) -> String {
@@ -46,6 +46,7 @@ fn event_description(event: &str) -> String {
 
 #[component]
 pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
     let store = hooks.use_atom(&HOOK_LIST);
     let hook_list: Vec<HookSummary> = store.read().clone();
@@ -103,22 +104,26 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             "hooks-configured-count",
             &[("count".to_string(), FluentValue::from(count as i64))],
         ),
-        Style::new().fg(theme::semantic().text.primary).bold(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.primary)
+            .bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
         i18n::tr("hooks-readonly-hint"),
-        Style::new().fg(theme::semantic().text.muted).italic(),
+        Style::new()
+            .fg(theme_def.read().semantic.text.muted)
+            .italic(),
     )]));
     lines.push(Line::from(""));
 
     if hook_list.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             i18n::tr("hooks-no-hooks"),
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
             i18n::tr("hooks-no-hooks-hint"),
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     } else {
         for (i, entry) in hook_list
@@ -130,9 +135,11 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::component().panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
-                Style::new().fg(theme::semantic().text.primary)
+                Style::new().fg(theme_def.read().semantic.text.primary)
             };
             let desc = event_description(&entry.event);
 
@@ -143,18 +150,18 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ),
                 Span::styled(
                     format!("  via {}", entry.plugin_name),
-                    Style::new().fg(theme::semantic().border.active),
+                    Style::new().fg(theme_def.read().semantic.border.active),
                 ),
                 Span::styled(
                     format!("  {}", desc),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
             ]));
 
             if let Some(m) = &entry.matcher {
                 lines.push(Line::from(vec![Span::styled(
                     format!("     matcher: {}", m),
-                    Style::new().fg(theme::semantic().text.dim),
+                    Style::new().fg(theme_def.read().semantic.text.dim),
                 )]));
             } else {
                 // matcher 缺失时占位空行，保证每项固定 3 行（视口计算依赖）
@@ -173,14 +180,18 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .collect();
             lines.push(Line::from(vec![Span::styled(
                 format!("     {}", cmd_summary),
-                Style::new().fg(theme::semantic().text.primary),
+                Style::new().fg(theme_def.read().semantic.text.primary),
             )]));
         }
     }
 
     lines.push(Line::from(""));
     lines.push(
-        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme::semantic().text.dim),
+        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme_def
+            .read()
+            .semantic
+            .text
+            .dim),
     );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));

@@ -3407,6 +3407,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "peri-theme"
+version = "0.2.0"
+dependencies = [
+ "ratatui",
+ "ratatui-kit",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "peri-tui"
 version = "0.2.0"
 dependencies = [
@@ -3431,6 +3442,7 @@ dependencies = [
  "peri-agent",
  "peri-lsp",
  "peri-middlewares",
+ "peri-theme",
  "peri-web-pty",
  "peri-widgets",
  "png",

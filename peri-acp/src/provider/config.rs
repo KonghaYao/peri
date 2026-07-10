@@ -161,6 +161,10 @@ pub struct AppConfig {
     /// 保留未知字段
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+    /// 主题名称（"peri-dark" | "peri-light" | 用户自定义主题名）
+    /// 默认 "peri-dark"，在 TUI 启动时加载
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
 }
 
 fn default_show_cache_warning() -> bool {
@@ -246,6 +250,7 @@ impl Default for AppConfig {
             streaming_mode: None,
             show_cache_warning: true,
             betas: BetasConfig::default(),
+            theme: None,
             extra: serde_json::Map::new(),
         }
     }

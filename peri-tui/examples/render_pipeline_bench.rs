@@ -12,10 +12,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use peri_tui::kit::markdown::parse_markdown;
-use peri_tui::kit::theme;
 use peri_tui::kit::tui_render_unit::{
     TuiAssistantBubble, TuiNoteLevel, TuiRenderUnit, TuiSystemNote, TuiToolCard, TuiUserBubble,
 };
+use ratatui_kit::prelude::Palette;
 
 fn make_user_text(i: usize) -> String {
     format!(
@@ -85,13 +85,14 @@ fn make_vm_list(count: usize) -> Vec<TuiRenderUnit> {
 }
 
 fn render_vm(vm: &TuiRenderUnit, width: usize) -> Vec<ratatui::text::Line<'static>> {
+    let palette = Palette::default();
     match vm {
         TuiRenderUnit::TuiUserBubble(d) => {
-            let parsed = parse_markdown(&d.text, width);
+            let parsed = parse_markdown(&d.text, width, palette);
             parsed.lines.into_iter().collect()
         }
         TuiRenderUnit::TuiAssistantBubble(d) => {
-            let parsed = parse_markdown(&d.text, width);
+            let parsed = parse_markdown(&d.text, width, palette);
             parsed.lines.into_iter().collect()
         }
         _ => Vec::new(),
@@ -100,7 +101,7 @@ fn render_vm(vm: &TuiRenderUnit, width: usize) -> Vec<ratatui::text::Line<'stati
 
 fn main() {
     // 触发主题初始化，避免首次访问的额外开销
-    let _ = theme::semantic();
+    let default_palette = Palette::default();
 
     println!("=== ViewModels → Vec<Line> 渲染管道基准 ===\n");
 
@@ -124,7 +125,7 @@ fn main() {
                     let bytes = b.text.as_bytes();
                     let take = (bytes.len() * (chunk_idx + 1) / chunk_count).max(1);
                     let truncated = String::from_utf8(bytes[..take].to_vec()).unwrap();
-                    let parsed = parse_markdown(&truncated, 100);
+                    let parsed = parse_markdown(&truncated, 100, default_palette);
                     all_lines.extend(parsed.lines.iter().cloned());
                 }
             } else {
@@ -146,7 +147,7 @@ fn main() {
             let bytes = b.text.as_bytes();
             let take = (bytes.len() * (chunk_idx + 1) / chunk_count).max(1);
             let truncated = String::from_utf8(bytes[..take].to_vec()).unwrap();
-            let parsed = parse_markdown(&truncated, 100);
+            let parsed = parse_markdown(&truncated, 100, default_palette);
             cached_lines[last_idx] = parsed.lines.into_iter().collect();
         }
         let _all_lines: Vec<&ratatui::text::Line<'static>> =

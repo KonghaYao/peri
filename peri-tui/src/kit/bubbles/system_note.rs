@@ -15,7 +15,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 /// 系统提示属性。
 #[derive(Props, Default)]
@@ -25,8 +25,10 @@ pub struct SystemNoteProps {
 }
 
 #[component]
-pub fn SystemNote(props: &SystemNoteProps) -> impl Into<AnyElement<'static>> {
-    let semantic = theme::semantic();
+pub fn SystemNote(mut hooks: Hooks, props: &SystemNoteProps) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
+    let guard = theme_def.read();
+    let semantic = &guard.semantic;
     let lines: Vec<Line<'static>> = props
         .content
         .lines()

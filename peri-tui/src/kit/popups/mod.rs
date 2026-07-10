@@ -8,7 +8,7 @@ macro_rules! popup_text_shell {
             )
             .border_style(
                 ratatui_kit::ratatui::style::Style::new()
-                    .fg(crate::kit::theme::component().popup.border),
+                    .fg(peri_theme::atoms::THEME_ATOM.state().read().component.popup.border),
             )
             .title_top(
                 ratatui_kit::ratatui::text::Line::from($title)

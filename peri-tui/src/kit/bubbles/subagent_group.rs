@@ -15,7 +15,7 @@ use ratatui_kit::{
     },
 };
 
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 /// 子 Agent 消息组属性。
 #[derive(Props, Default)]
@@ -35,8 +35,13 @@ pub struct SubAgentGroupProps {
 }
 
 #[component]
-pub fn SubAgentGroup(props: &SubAgentGroupProps) -> impl Into<AnyElement<'static>> {
-    let semantic = theme::semantic();
+pub fn SubAgentGroup(
+    mut hooks: Hooks,
+    props: &SubAgentGroupProps,
+) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
+    let guard = theme_def.read();
+    let semantic = &guard.semantic;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // ── Header 行 ─────────────────────────────────────────────────────────

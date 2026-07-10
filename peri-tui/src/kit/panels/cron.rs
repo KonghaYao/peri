@@ -18,10 +18,11 @@ use ratatui_kit::{
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{CRON_JOBS, CronJobSummary};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
-use crate::kit::theme;
+use peri_theme::atoms::THEME_ATOM;
 
 #[component]
 pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
     let confirm_delete = hooks.use_state(|| false);
 
@@ -112,7 +113,9 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if !jobs.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             format!("  {} configured, {} enabled", jobs.len(), enabled_count),
-            Style::new().fg(theme::semantic().text.primary).bold(),
+            Style::new()
+                .fg(theme_def.read().semantic.text.primary)
+                .bold(),
         )]));
     }
 
@@ -120,12 +123,12 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if is_confirming {
         lines.push(Line::from(vec![Span::styled(
             "  Enter::confirm  Esc::close",
-            Style::new().fg(theme::semantic().status.warning),
+            Style::new().fg(theme_def.read().semantic.status.warning),
         )]));
     } else {
         lines.push(Line::from(vec![Span::styled(
             "  ↑/↓::navigate  Enter::toggle  Esc::close",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     }
     lines.push(Line::from(""));
@@ -134,11 +137,11 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if jobs.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "  No cron tasks configured",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  Ask the agent to set up recurring tasks",
-            Style::new().fg(theme::semantic().text.muted),
+            Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     } else {
         for (i, entry) in jobs
@@ -150,15 +153,17 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
-                Style::new().fg(theme::component().panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
-                Style::new().fg(theme::semantic().text.primary)
+                Style::new().fg(theme_def.read().semantic.text.primary)
             };
             let enabled_label = if entry.enabled { "ON" } else { "OFF" };
             let enabled_style = if entry.enabled {
-                Style::new().fg(theme::semantic().status.success)
+                Style::new().fg(theme_def.read().semantic.status.success)
             } else {
-                Style::new().fg(theme::semantic().text.muted)
+                Style::new().fg(theme_def.read().semantic.text.muted)
             };
 
             // Label line: cursor + num + schedule + [ON/OFF]
@@ -183,14 +188,14 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .collect();
             lines.push(Line::from(vec![Span::styled(
                 format!("     {}", prompt_summary),
-                Style::new().fg(theme::semantic().text.primary),
+                Style::new().fg(theme_def.read().semantic.text.primary),
             )]));
 
             // Next fire timestamp (if available)
             if let Some(next) = entry.next_fire {
                 lines.push(Line::from(vec![Span::styled(
                     format!("     next: {}", next.format("%Y-%m-%d %H:%M")),
-                    Style::new().fg(theme::semantic().text.muted),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 )]));
             } else {
                 // next_fire 缺失时占位空行，保证每项固定 3 行（视口计算依赖）
@@ -200,7 +205,7 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     let content = if lines.is_empty() {
-        Paragraph::new(Line::from("  (empty)").fg(theme::semantic().text.muted))
+        Paragraph::new(Line::from("  (empty)").fg(theme_def.read().semantic.text.muted))
     } else {
         Paragraph::new(ratatui::text::Text::from(lines))
     };

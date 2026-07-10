@@ -7,8 +7,8 @@
 
 use crate::i18n;
 use crate::kit::atoms;
-use crate::kit::theme;
 use fluent_bundle::FluentValue;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     prelude::*,
     ratatui::{
@@ -67,7 +67,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     if !snap.provider_name.is_empty() && !model_display.is_empty() {
         spans.push(separator());
-        let mut style = Style::default().fg(theme::semantic().accent);
+        let mut style = Style::default().fg(THEME_ATOM.state().read().semantic.accent);
         if provider_highlighted && model_highlighted {
             style = style.add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK);
         } else if provider_highlighted {
@@ -116,7 +116,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
         spans.push(Span::styled(
             parts.join(" "),
-            Style::default().fg(theme::semantic().loading),
+            Style::default().fg(THEME_ATOM.state().read().semantic.loading),
         ));
     }
 
@@ -275,8 +275,8 @@ pub fn StatusBar(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────
 
-fn statusbar() -> &'static theme::StatusBarTokens {
-    &theme::component().statusbar
+fn statusbar() -> peri_theme::component::StatusBarTokens {
+    THEME_ATOM.state().read().component.statusbar
 }
 
 fn separator() -> Span<'static> {
