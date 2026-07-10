@@ -2,6 +2,8 @@
 
 > 验证 bg agent 消息回调触发会话
 
+请使用 subagent  say hello， 但是它要先 sleep 2s
+
 请使用 bg subagent  say hello， 但是它要先 sleep 2s
 
 > 验证 agent 树状聚合

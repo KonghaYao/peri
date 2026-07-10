@@ -201,3 +201,6 @@ settings.json
 !.claude/agents/
 !.claude/agents/coder.md
 .qoder/**/*
+.superpowers
+skills-lock.json
+.agents

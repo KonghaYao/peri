@@ -1,4 +1,4 @@
-# Perihelion TUI 工具调用显示设计
+# Perihelion TUI 工具调用 & 后台显示区域设计
 
 > 版本: 2.0 | 日期: 2026-07-06
 > 对应代码: `peri-tui/src/kit/view_render.rs` · `tool_display.rs` · `peri-acp-types/src/view_model.rs`
@@ -814,3 +814,346 @@ message_area.rs   ─── ratatui-kit ScrollView
 6. **流式友好** — `is_running` 支持逐行追加，指示器 800ms 闪烁
 7. **折叠独立** — 工具卡片折叠仅由 tool_name + is_running/is_error 决定，不再区分 diff 可见性
 8. **SubAgent 隔离** — 嵌套消息缩进处理，最多 5 个 ToolCard，跳过 AssistantBubble
+
+
+---
+
+## 10. 后台显示区域 (BgTaskArea)
+
+> 版本: 1.0 | 日期: 2026-07-10
+> 对应代码: `peri-tui/src/kit/bg_task_area.rs` · `app_shell.rs` · `acp_events.rs` · `atoms.rs`
+> 架构: v2 ratatui-kit 单路径
+
+### 10.1 设计总览
+
+后台显示区域位于 AppShell 根层，在 StatusBar **下方**，屏幕最底部。仅显示**后台异步任务**（bg subagent / bg shell / workflow），同步 Agent 工具调用不进入此区域。
+
+```
+┌─────────────────────────────────────────────────┐
+│  AppShell (Vertical, fill)                       │
+│                                                  │
+│  SessionColumn (fill)                            │
+│    MessageArea · PanelOverlay · InputArea        │
+│                                                  │
+│  StatusBar (height: 4)                           │
+│    yolo  peri   claude-4.5  CPU12%  MEM2G        │
+│    Ctrl+C Exit  Ctrl+N New  Ctrl+S Submit        │
+│                                                  │
+│  ┌────────────────────────────────────────────┐  │
+│  │ ★ 后台显示区域 (height: dynamic, max 5)    │  │  ← 新区域
+│  │   ● explorer  searching codebase  Grep · 3  │  │
+│  │   ◎ coder     waiting for LLM              │  │
+│  │   ✔ workflow  build pipeline    · 12        │  │
+│  │   … 2 more                                 │  │
+│  └────────────────────────────────────────────┘  │
+│                                                  │
+│  PopupOverlay (independent layer)                │
+└─────────────────────────────────────────────────┘
+```
+
+#### 关键约束
+
+| 约束 | 值 |
+|------|-----|
+| 位置 | AppShell 根层，StatusBar 下方 |
+| 仅显示 | 后台异步任务（is_background=true） |
+| 最大行数 | 5 行，超出显示 `… N more` |
+| 交互 | 纯展示，不响应键盘/鼠标 |
+| 消失行为 | 完成后保留 3 秒，到期直接移除 |
+
+### 10.2 单行格式
+
+```
+● explorer  searching codebase  Grep · 3 tools
+◎ coder     thinking            —
+✔ workflow  build completed     · 12 tools
+✗ bg-shell  npm install         · 0 tools
+```
+
+格式：**`状态符号 agent_type  desc  current_tool · N tools`**
+
+| 列 | 说明 | 截断 |
+|----|------|------|
+| 状态符号 | 见 §10.3 | — |
+| agent_type | 任务类型标签（bg_task.kind 或 subagent_type） | 不截断 |
+| desc | 任务描述（`BgTaskEntry.summary`） | 弹性，尾部 `…` |
+| current_tool | 当前执行的工具名，**空闲时不显示** | 不截断 |
+| tool_count | 已完成的工具调用计数 | `· N tools` |
+
+#### 空闲态（无工具在执行）
+
+当任务已启动但当前未执行工具（等待 LLM 响应），`current_tool` 列完全不渲染：
+
+```
+◎ coder  refactoring module
+```
+
+### 10.3 状态符号
+
+| 状态 | 符号 | 颜色 | 触发条件 |
+|------|------|------|----------|
+| 空闲 | `◎` | 黄色 (Yellow) | 已启动，未执行工具 |
+| 运行中 | `●` | 白色闪烁 (800ms) | 工具执行中 (current_tool 非空) |
+| 完成 | `✔` | 绿色 (Green) | 任务结束，3 秒倒计时中 |
+| 失败 | `✗` | 红色 (Red) | 任务失败 |
+
+运行中闪烁机制复用工具卡片逻辑：每约 50ms `RENDER_CALL_COUNT += 1`，以 `(count / 16) % 2 == 0` 判定可见/隐藏，周期约 800ms。
+
+**状态转换图**：
+
+```
+BgTaskStarted ──→ ◎ 空闲
+                    │
+      ToolStarted ──┘
+                    │
+                    ▼
+                  ● 运行中 (current_tool=Read)
+                    │
+      ToolEnded ────┘
+                    │
+                    ▼
+                  ◎ 空闲 (current_tool=None, tool_count+=1)
+                    │
+                    │ (下一次 ToolStarted)
+                    │
+                    ▼
+                  ● 运行中 (current_tool=Bash)
+                    │
+      BgTaskCompleted ──┘
+                    │
+                    ▼
+                  ✔ 完成 (3 秒倒计时 → 消失)
+
+      BgTaskCompleted(success=false) ──→ ✗ 失败 (3 秒倒计时 → 消失)
+```
+
+### 10.4 完成/失败后 3 秒倒计时
+
+- 完成瞬间切换符号为 `✔`（绿色）或 `✗`（红色）
+- `is_active=false`，启动 3 秒 timer
+- 3 秒期满，从 atom 中移除条目
+- 无渐变、无淡出——直接消失
+- timer 由渲染层或独立 tick 驱动，不阻塞渲染帧
+- 实现方案：`BgDisplayEntry` 存储 `completed_at: Instant`，每次 render 检查 `elapsed > 3s` 则移除
+
+### 10.5 溢出行为
+
+最多显示 5 行（5 条活跃/缓冲中的任务）。超出时最后一行替换为：
+
+```
+… 3 more
+```
+
+muted 色，不可交互。排序规则：**活跃任务在前（运行中 + 空闲），完成/失败缓冲任务在后**。
+
+### 10.6 布局计算
+
+BackgroundTaskArea 高度由内容决定：
+
+```
+height = min(active_entries, 5)
+```
+
+- 0 条任务 → 高度 0，不占屏幕空间
+- 1-5 条 → 高度 = 条目数
+- 6+ 条 → 高度 = 5（最后一行显示 `… N more`）
+
+AppShell 根层 flex 不变，BackgroundTaskArea 在 StatusBar 下方独立渲染，不参与 SessionColumn 高度竞争。
+
+### 10.7 数据模型
+
+#### 10.7.1 TUI 侧原子
+
+```rust
+// peri-tui/src/kit/atoms.rs
+
+/// 后台显示区域条目
+#[derive(Debug, Clone)]
+pub struct BgDisplayEntry {
+    pub id: String,              // task_id 或 agent_id，唯一标识
+    pub agent_type: String,      // "explorer" / "coder" / "bg-shell" / "workflow"
+    pub desc: String,            // 任务描述（来自 BgTaskEntry.summary）
+    pub current_tool: Option<String>,  // 当前工具名（None 为空闲态）
+    pub tool_count: u32,         // 已完成工具调用计数
+    pub is_active: bool,         // false → 3s 倒计时中
+    pub is_error: bool,          // 失败标志
+    pub completed_at: Option<Instant>,  // 完成时间（3s 倒计时起点）
+}
+
+/// 后台显示区域原子
+pub static BG_DISPLAY: AtomStatic<Vec<BgDisplayEntry>> = AtomStatic::new(|| Vec::new());
+
+/// 后台 agent_id 集合——用于判断 tool 事件是否属于后台任务
+pub static BG_AGENT_IDS: AtomStatic<HashSet<String>> = AtomStatic::new(|| HashSet::new());
+```
+
+#### 10.7.2 agent_type 值来源
+
+| 数据源 | kind 字段 | agent_type 显示 | desc 来源 |
+|--------|----------|----------------|-----------|
+| bg fork subagent | Agent | agent_def 的 type 名（如 `coder`、`explorer`） | `BgTaskEntry.summary` |
+| bg shell | Shell | `"bg-shell"` | 命令摘要（如 `"npm install"`） |
+| workflow | Workflow | `"workflow"` | workflow 名称 |
+
+### 10.8 事件写入路径
+
+所有写入集中在 `dispatch_and_notify` 中，分三类事件：
+
+#### 10.8.1 任务启动
+
+```rust
+// BgTaskStarted → 创建新条目
+BgTaskStarted(task) => {
+    // 现有逻辑：写入 BG_TASKS
+    BG_TASKS.state().write().push(task.clone());
+    // 新逻辑：写入 BG_DISPLAY
+    BG_DISPLAY.state().write().push(BgDisplayEntry {
+        id: task.task_id.clone(),
+        agent_type: task.kind.clone(),  // "Agent" / "Shell" / "Workflow"
+        desc: task.summary.clone(),
+        current_tool: None,   // 初始空闲
+        tool_count: 0,
+        is_active: true,
+        is_error: false,
+        completed_at: None,
+    });
+}
+```
+
+#### 10.8.2 工具事件（仅后台任务）
+
+```rust
+// SubagentStarted(is_background=true) → 注册 agent_id 到 BG_AGENT_IDS
+SubagentStarted(ss) if ss.is_background => {
+    BG_AGENT_IDS.state().write().insert(ss.instance_id.clone());
+}
+
+// ToolStarted → 更新对应后台条目的 current_tool
+ToolStarted(ts) if agent_id in BG_AGENT_IDS => {
+    if let Some(entry) = BG_DISPLAY.find_mut_by_id(agent_id) {
+        entry.current_tool = Some(ts.tool_name.clone());
+    }
+}
+
+// ToolEnded → 清除 current_tool，递增 tool_count
+ToolEnded(te) if agent_id in BG_AGENT_IDS => {
+    if let Some(entry) = BG_DISPLAY.find_mut_by_id(agent_id) {
+        entry.current_tool = None;      // 回空闲
+        entry.tool_count += 1;
+    }
+}
+```
+
+#### 10.8.3 任务完成/取消
+
+```rust
+// BgTaskCompleted → 标记完成，启动 3s 倒计时
+BgTaskCompleted { task_id, success, .. } => {
+    // 现有逻辑：从 BG_TASKS 移除
+    BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
+    // 新逻辑：标记完成
+    if let Some(entry) = BG_DISPLAY.find_mut_by_id(task_id) {
+        entry.is_active = false;
+        entry.is_error = !success;
+        entry.completed_at = Some(Instant::now());
+    }
+}
+
+// BgTaskCancelled → 同完成，标记为失败
+BgTaskCancelled { task_id, .. } => {
+    BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
+    if let Some(entry) = BG_DISPLAY.find_mut_by_id(task_id) {
+        entry.is_active = false;
+        entry.is_error = true;
+        entry.completed_at = Some(Instant::now());
+    }
+}
+
+// SubagentStopped → 清理 agent_id
+SubagentStopped(ss) => {
+    BG_AGENT_IDS.state().write().remove(&ss.instance_id);
+}
+```
+
+#### 事件路由决策表
+
+| AcpEventData | 写入 BG_DISPLAY? | 条件 |
+|-------------|-----------------|------|
+| BgTaskStarted | ✅ push | 无 |
+| BgTaskCompleted | ✅ mutate | 标记 done |
+| BgTaskCancelled | ✅ mutate | 标记 error |
+| BgTaskSnapshot | ✅ replace | 全量替换（session/load 场景） |
+| SubagentStarted | ❌ 仅注册 ID | is_background=true |
+| SubagentStopped | ❌ 仅清理 ID | — |
+| ToolStarted | ✅ mutate | agent_id ∈ BG_AGENT_IDS |
+| ToolEnded | ✅ mutate | agent_id ∈ BG_AGENT_IDS |
+
+### 10.9 渲染组件
+
+```
+BgTaskArea (ratatui-kit 函数组件)
+  ├── 从 BG_DISPLAY atom 读取条目
+  ├── 按 (is_active, completed_at) 排序
+  ├── 过滤：is_active==false 且 elapsed > 3s → 移除
+  ├── 限制最多 5 行
+  └── 逐行渲染：
+        [状态符号] [agent_type]  [desc (弹性)]  [current_tool · N tools]
+```
+
+**状态符号颜色**：
+- `◎` 空闲 → `Style::new().yellow()`
+- `●` 运行 → `Style::new().white()` + 闪烁（复用 `RENDER_CALL_COUNT`）
+- `✔` 完成 → `Style::new().green()`
+- `✗` 失败 → `Style::new().red()`
+
+**agent_type 列**：dim 色，固定宽度（最长类型 + 1 空格 padding）
+
+**desc 列**：弹性宽度，占满剩余空间，超出截断 `…`
+
+**tool_call 列**：右对齐或不显示。格式 `{name} · {N} tools`
+
+**溢出行**：`muted` 色，居中 `… N more`
+
+### 10.10 Session 切换 / 清空行为
+
+| 操作 | BG_DISPLAY 行为 |
+|------|----------------|
+| `/clear` | 清空（与 BRIDGE_RESET_COUNTER 递增同步） |
+| session 切换 | 清空（新 session 发送 BgTaskSnapshot） |
+| session/load (history replay) | BgTaskSnapshot → 全量替换 |
+
+### 10.11 与现有系统的关系
+
+| 系统 | 关系 | 说明 |
+|------|------|------|
+| BG_TASKS atom | 独立共存 | BG_DISPLAY 是追加层，BG_TASKS 继续维护（StatusBar bg 计数 + Tasks 面板） |
+| StatusBar bg 计数 | 不变 | StatusBarRow1 的 `N shell N agent N workflow` 继续显示 |
+| VIEW_MODELS | 无关 | 后台显示区域不读 VIEW_MODELS |
+| SubAgentGroup 气泡 | 互不干扰 | 消息区的 SubAgentGroup 继续渲染（含同步和异步 subagent），后台区域仅显示异步的 |
+| Tasks 面板 | 独立 | Tasks 面板继续显示详细列表，后台区域是一行摘要 |
+
+### 10.12 涉及文件清单（预估）
+
+| 文件 | 变更 |
+|------|------|
+| `peri-tui/src/kit/app_shell.rs` | 在 StatusBar 下方插入 BgTaskArea 组件 |
+| `peri-tui/src/kit/bg_task_area.rs` | **新文件**：BgTaskArea 组件 + render 逻辑 |
+| `peri-tui/src/kit/atoms.rs` | 新增 `BG_DISPLAY` + `BG_AGENT_IDS` atom |
+| `peri-tui/src/kit/acp_events.rs` | `dispatch_and_notify` 中追加 BG_DISPLAY 写入路径 |
+| `peri-tui/src/kit/acp_types.rs` | 可能需要：`SubagentStarted` 中补充 `is_background` 解析（如缺失） |
+| `peri-tui/src/kit/acp_bridge.rs` | 3 秒 timer 清理逻辑（或放在 render 层惰性清理） |
+
+### 10.13 设计决策汇总
+
+| 决策 | 选定 | 备选 |
+|------|------|------|
+| 位置 | StatusBar 下方（屏幕最底部） | StatusBar 上方 |
+| 范围 | 仅后台任务 | 含同步 subagent |
+| 最大行数 | 5（超出 `… N more`） | 3 行截断 / 无上限滚动 |
+| 完成后保留 | 3 秒后直接消失 | 逐秒变暗 |
+| 状态指示器 | `◎`/`●`/`✔`/`✗` 四态 | 三态（空闲复用完成色） |
+| 空闲时 tool_call | 不显示 | 显示占位符 `—` |
+| tool_call 格式 | `Read · 12 tools` | — |
+| desc 截断 | 弹性 + 尾部 `…` | 固定宽度 |
+| 交互 | 纯展示 | 可选中等 |
+| 数据源 | 独立 `BG_DISPLAY` atom + `dispatch_and_notify` 写入 | 从 VIEW_MODELS 派生 |
