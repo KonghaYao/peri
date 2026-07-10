@@ -310,11 +310,21 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // 构建全量行（entries + footer）。空态时不 extend footer_lines，
     // Brewed 总结行在 Welcome 下方独立渲染，避免 Welcome 早退分支丢弃 footer。
-    let mut all_lines: Vec<Line<'static>> = cache_snapshot
-        .entries
-        .iter()
-        .flat_map(|(_, entry)| entry.lines.iter().cloned())
-        .collect();
+    let table_border_style = Style::default().fg(ratatui::style::Color::Gray);
+    let mut all_lines: Vec<Line<'static>> = Vec::new();
+    for (_, entry) in &cache_snapshot.entries {
+        match entry {
+            crate::kit::render_bridge::RenderedEntry::Text { lines, .. } => {
+                all_lines.extend(lines.iter().cloned());
+            }
+            crate::kit::render_bridge::RenderedEntry::Table { data, .. } => {
+                all_lines.extend(crate::kit::markdown::table_data_to_lines(
+                    data,
+                    table_border_style,
+                ));
+            }
+        }
+    }
     if !empty {
         all_lines.extend(footer_lines);
     }
@@ -777,23 +787,11 @@ fn build_footer_lines(
             *was_loading.write() = is_loading;
         }
 
-        // 壁钟时间补偿步进：仅在 tick 确实落后时写 state。
-        // [TRAP] 禁止在 delta 上加 min(N) 上限。loading 卡死时壁钟落后可达数十万 tick，
-        // min(20) 会制造 12K+ 帧的 render → state write → render 自激循环，CPU 打满。
-        // advance_tick 内部仅为整数运算（wrapping_add + smooth_increment），
-        // 即使 250K 次迭代也在几毫秒内完成，一次写入即追上，无需多帧追赶。
-        if let Some(start) = *load_start.read() {
-            let elapsed = start.elapsed().as_millis() as u64;
-            let target = elapsed / 50;
-            let current = spinner_state.read().raw_tick();
-            let delta = target.saturating_sub(current);
-            if delta > 0 {
-                let mut spinner = spinner_state.write();
-                for _ in 0..delta {
-                    spinner.advance_tick();
-                }
-            }
-        }
+        // [TRAP] spinner 动画完全无副作用——frame 由 render_to_lines 内部基于
+        // start_time.elapsed() 纯计算（见 peri-widgets/src/spinner/mod.rs）。
+        // 历史上这里曾有壁钟补偿 advance_tick + set_token_count 写入 spinner_state，
+        // 形成 render → state write → render 自激回路（~20Hz），违反 render body
+        // 禁止写 atom 铁律，已于本次重构移除。
     }
 
     // 快速路径：无 loading、无 todo、无总结行时直接返回空。
@@ -811,17 +809,14 @@ fn build_footer_lines(
         lines.push(Line::from(""));
     }
     if is_loading {
-        // 同步 ACP 下发的 token 计数到 spinner state，驱动平滑追赶动画。
-        // 仅在数值变化时写 state，避免 render → state write → render 环路。
+        // token_count 直接从 atom 读后传入 render_to_lines——纯只读，不写 spinner state。
         let token_count = crate::kit::atoms::SPINNER_TOKEN_COUNT.get();
-        if token_count > 0 && spinner_state.read().token_count() != token_count {
-            spinner_state.write().set_token_count(token_count);
-        }
         lines.extend(spinner_state.read().render_to_lines(
             semantic.accent,
             semantic.text.muted,
             true,
             true,
+            token_count,
         ));
     } else if has_summary {
         let elapsed = peri_widgets::spinner::animation::format_elapsed(*summary_elapsed_ms.read());
@@ -1008,7 +1003,8 @@ mod tests {
     /// 用户提交 `hello` 后，`submit_text` 会先把 `ACP_STATE.is_loading` 置为 true，
     /// MessageArea 随后渲染 spinner。若 footer 每帧都写 `was_loading`/`load_start`，
     /// 会形成 render → state write → render 的自激循环，表现为 Enter 后 CPU 100%。
-    /// 稳态下只有 spinner tick 落后于壁钟时才允许写 `spinner_state`。
+    /// 稳态下 footer 不应写任何控制 state——spinner 动画由 render_to_lines 内部
+    /// 基于 start_time.elapsed() 纯计算，零 state write。
     #[test]
     fn test_footer_loading_steady_state_has_no_control_state_transition() {
         let prev_loading = true;
@@ -1019,16 +1015,6 @@ mod tests {
             !transition,
             "loading 稳态不应写 was_loading/load_start，否则会触发持续重渲染"
         );
-    }
-
-    /// 回归：spinner 补偿只有在 tick 落后壁钟时才写 state。
-    #[test]
-    fn test_spinner_catchup_skips_state_write_when_no_delta() {
-        let current_tick = 10u64;
-        let target_tick = 10u64;
-        let delta = target_tick.saturating_sub(current_tick).min(20);
-
-        assert_eq!(delta, 0);
     }
 
     /// 回归：仅有 todo 条目、无消息且非 loading 时，不应误判为 empty 而显示 Welcome。

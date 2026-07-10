@@ -26,9 +26,6 @@ pub struct SpinnerState {
     verb: String,
     start_time: Instant,
     token_count: usize,
-    displayed_tokens: usize,
-    tick: u64,
-    raw_tick: u64,
     /// 最后一次从非 Idle 切换到 Idle 时捕获的耗时（ms），0 表示无记录
     last_summary_elapsed_ms: u64,
 }
@@ -40,9 +37,6 @@ impl SpinnerState {
             verb: verb::pick_verb(None),
             start_time: Instant::now(),
             token_count: 0,
-            displayed_tokens: 0,
-            tick: 0,
-            raw_tick: 0,
             last_summary_elapsed_ms: 0,
         }
     }
@@ -75,26 +69,8 @@ impl SpinnerState {
         self.token_count = count;
     }
 
-    pub fn advance_tick(&mut self) {
-        self.raw_tick = self.raw_tick.wrapping_add(1);
-        self.displayed_tokens =
-            animation::smooth_increment(self.displayed_tokens, self.token_count);
-        // 每 2 个 raw tick 才推进一帧（星号旋转更快）
-        if self.raw_tick.is_multiple_of(2) {
-            self.tick += 1;
-        }
-    }
-
     pub fn elapsed_ms(&self) -> u64 {
         self.start_time.elapsed().as_millis() as u64
-    }
-
-    pub fn tick(&self) -> u64 {
-        self.tick
-    }
-
-    pub fn raw_tick(&self) -> u64 {
-        self.raw_tick
     }
 
     pub fn verb(&self) -> &str {
@@ -109,10 +85,6 @@ impl SpinnerState {
         self.last_summary_elapsed_ms
     }
 
-    pub fn displayed_tokens(&self) -> usize {
-        self.displayed_tokens
-    }
-
     /// 当前原始 token 计数（未经平滑追赶，等于最近一次 set_token_count 的值）。
     pub fn token_count(&self) -> usize {
         self.token_count
@@ -124,23 +96,30 @@ impl SpinnerState {
         self.verb = String::new();
         self.start_time = Instant::now();
         self.token_count = 0;
-        self.displayed_tokens = 0;
-        self.tick = 0;
-        self.raw_tick = 0;
         self.last_summary_elapsed_ms = 0;
     }
 
     /// 将 spinner 渲染为 Vec<Line>，供 TUI 消息区直接追加到 all_lines 中。
     ///
     /// 与 WidgetRef::render_ref 渲染逻辑一致，但不依赖 Buffer——产出纯数据 Line。
+    ///
+    /// `token_count` 由调用方从外部 atom（如 SPINNER_TOKEN_COUNT）读取后传入。
+    /// 本方法完全无副作用——frame 索引基于 `start_time.elapsed()` 纯计算，
+    /// 不读取也不写入任何动画驱动 state，可在 render body 中安全调用。
     pub fn render_to_lines(
         &self,
         primary: Color,
         secondary: Color,
         show_elapsed: bool,
         show_tokens: bool,
+        token_count: usize,
     ) -> Vec<Line<'static>> {
-        let frame = animation::tick_to_frame(self.tick());
+        // 帧索引纯计算：50ms 一个 raw tick，每 2 raw tick 推进一帧。
+        // 保留原 advance_tick 节奏（每帧 ~100ms）。
+        let elapsed_ms = self.start_time.elapsed().as_millis() as u64;
+        let raw_tick = elapsed_ms / 50;
+        let frame_tick = raw_tick / 2;
+        let frame = animation::tick_to_frame(frame_tick);
         let mut spans: Vec<Span<'static>> = vec![];
 
         spans.push(Span::styled(
@@ -156,10 +135,10 @@ impl SpinnerState {
         if show_elapsed {
             suffix_parts.push(animation::format_elapsed(self.elapsed_ms()));
         }
-        if show_tokens && self.displayed_tokens() > 0 {
+        if show_tokens && token_count > 0 {
             suffix_parts.push(format!(
                 "↓ {} tokens",
-                animation::format_tokens(self.displayed_tokens())
+                animation::format_tokens(token_count)
             ));
         }
         if !suffix_parts.is_empty() {
@@ -178,6 +157,7 @@ pub struct SpinnerWidget<'a> {
     state: &'a SpinnerState,
     show_elapsed: bool,
     show_tokens: bool,
+    token_count: usize,
     primary_color: Color,
     secondary_color: Color,
 }
@@ -188,6 +168,7 @@ impl<'a> SpinnerWidget<'a> {
             state,
             show_elapsed: true,
             show_tokens: true,
+            token_count: 0,
             primary_color: Color::Rgb(215, 119, 87), // ACCENT #D77757
             secondary_color: Color::Rgb(153, 153, 153), // MUTED #999999
         }
@@ -200,6 +181,13 @@ impl<'a> SpinnerWidget<'a> {
 
     pub fn show_tokens(mut self, show: bool) -> Self {
         self.show_tokens = show;
+        self
+    }
+
+    /// 设置当前 token 计数（替代旧的 SpinnerState::set_token_count）。
+    /// Widget 在 render 时把这个值传给 render_to_lines。
+    pub fn token_count(mut self, count: usize) -> Self {
+        self.token_count = count;
         self
     }
 
@@ -224,6 +212,7 @@ impl WidgetRef for SpinnerWidget<'_> {
             self.secondary_color,
             self.show_elapsed,
             self.show_tokens,
+            self.token_count,
         );
         Paragraph::new(lines.into_iter().next().unwrap_or_default()).render(area, buf);
     }

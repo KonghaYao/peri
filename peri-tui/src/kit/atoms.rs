@@ -304,8 +304,8 @@ pub static BRIDGE_RESET_COUNTER: AtomStatic<u64> = AtomStatic::new(|| 0);
 pub static LOCAL_EVENT_TX: OnceLock<UnboundedSender<AcpEventWithEpoch>> = OnceLock::new();
 
 /// Spinner token 计数——由 acp_bridge 在收到 TokenUsage 事件时写入（input+output），
-/// MessageArea 的 build_footer_lines 读取后调用 `spinner_state.set_token_count(count)`
-/// 驱动平滑动画追赶，最终在 spinner 行右侧显示 `↓ X.Xk tokens`。
+/// MessageArea 的 build_footer_lines 读取后作为参数传入 `render_to_lines(..., token_count)`，
+/// 最终在 spinner 行右侧显示 `↓ X.Xk tokens`。render body 纯只读，不写 spinner state。
 pub static SPINNER_TOKEN_COUNT: AtomStatic<usize> = AtomStatic::new(|| 0);
 
 /// 最近一次消息区视口快照。由 MessageArea 在 render 阶段计算后写入，
