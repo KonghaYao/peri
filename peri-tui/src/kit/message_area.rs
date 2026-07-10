@@ -271,8 +271,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let scroll_state = hooks.use_state(ScrollViewState::default);
     // 追踪上一次的 entries_len，用于检测「内容从空→非空」过渡（history load 后强制滚到底部）
     let prev_entries_len = hooks.use_state(|| 0usize);
-    // 追踪上一次的 is_loading，用于检测 loading 开始时强制吸底
-    let prev_is_loading = hooks.use_state(|| false);
+    // hook 占位——ratatui-kit 要求 hook 数量恒定不可增减
+    let _prev_is_loading = hooks.use_state(|| false);
     let todo_hash = hash_todo_items(&todo_items);
     let new_key = {
         let h = raw_ch as u64;
@@ -528,33 +528,36 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // ── 吸底自动跟随 ──
     // 核心策略：用 last_scrolled_at 做增量门控，避免每 chunk 都原子写入促发多余渲染。
-    // 首次/收缩无条件滚到底；已在底部跳写；就近跟随仅当内容确实增长后才执行一次。
+    // loading 期间强制跟随底部（因为 scroll_to_bottom() 只设 offset.y=viewport_height-1，
+    // 随后 render 会 clamp 到实际 content_height-viewport_height，导致 loading 开始时内容
+    // 不足视口时 scroll_y=0，后续内容暴涨后已在底部 guard 和 proximity 均兜不住）。
+    // 非 loading 期间：首次/收缩无条件滚到底；已在底部跳写；就近跟随仅当内容增长后执行一次。
     let last_scrolled_at = hooks.use_state(|| 0u16);
     hooks.use_effect(
         {
             let st = scroll_state;
             let pl = prev_entries_len;
-            let pil = prev_is_loading;
             let lsa = last_scrolled_at;
             let len = entries_len;
             let loading = is_loading;
             move || {
                 let prev = *pl.read();
                 *pl.write() = len;
-                let was_loading = *pil.read();
-                *pil.write() = loading;
 
                 if total_visual_rows == 0 || vis_height == 0 {
                     return;
                 }
-                let max_scroll = total_visual_rows.saturating_sub(vis_height);
 
-                // loading 开始（false→true）→ 强制吸底，无论用户在什么位置
-                if !was_loading && loading {
-                    st.write().scroll_to_bottom();
-                    *lsa.write() = total_visual_rows;
+                // loading 期间：每次内容增长都强制吸底。last_scrolled_at 门控避免同高多次写入。
+                if loading {
+                    if total_visual_rows > *lsa.read() {
+                        st.write().scroll_to_bottom();
+                        *lsa.write() = total_visual_rows;
+                    }
                     return;
                 }
+
+                // ── 以下仅非 loading 期间执行 ──
 
                 // 首次内容出现（空→非空）→ 强制滚到底
                 if prev == 0 && len > 0 {
@@ -569,6 +572,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     return;
                 }
 
+                let max_scroll = total_visual_rows.saturating_sub(vis_height);
                 let scroll_y = st.read().offset().y as u16;
                 // 已在或超出底部 → 跳写，避免 no-op 原子写入促发多余渲染
                 if scroll_y >= max_scroll {
@@ -683,8 +687,15 @@ fn build_footer_lines(
     let load_start = hooks.use_state(|| Option::<Instant>::None);
     let was_loading = hooks.use_state(|| false);
     // loading 结束时的耗时（ms）——用于渲染「✻ Brewed for Xm Xs」总结行。
-    // 下一次 loading 开始时清零。
+    // 保留最后一次 loading 的耗时，作为空态 footer 的展示内容（灰色），
+    // 避免空态时 footer 高度收缩为 0。
     let summary_elapsed_ms = hooks.use_state(|| 0u64);
+    // loading epoch 追踪：submit_consumer 每次发起新 prompt 时 LOADING_EPOCH 原子 +1。
+    // 组件以此检测新一轮 loading 会话，避免 rapid is_loading toggle（如 TurnDone
+    // → drain_input_buffer → 新 prompt 在同一渲染周期内完成）导致过渡检测丢失、
+    // load_start / spinner_state 残留旧值、计时持续累积。
+    let loading_epoch = hooks.use_atom(&crate::kit::atoms::LOADING_EPOCH);
+    let last_epoch = hooks.use_state(|| 0u64);
 
     // 快速路径：无 loading、无 todo、无总结行时直接返回空。
     let has_summary = *summary_elapsed_ms.read() > 0;
@@ -692,13 +703,28 @@ fn build_footer_lines(
         return Vec::new();
     }
     {
+        // epoch 检测：新 loading 会话 = 无条件重建 spinner + 重置计时器。
+        // 比 is_loading 过渡检测更可靠——不依赖组件是否观察到 false 中间态。
+        let current_epoch = *loading_epoch.read();
+        if is_loading && *last_epoch.read() != current_epoch {
+            *last_epoch.write() = current_epoch;
+            *load_start.write() = Some(Instant::now());
+            *spinner_state.write() = SpinnerState::new(SpinnerMode::Thinking);
+            // summary_elapsed_ms 不清零：保留上次 loading 的总结行作为空态 footer 展示。
+            *was_loading.write() = true;
+        }
+
         let prev_loading = *was_loading.read();
         if prev_loading != is_loading {
             let mut ls = load_start.write();
             if is_loading {
-                *ls = Some(Instant::now());
-                *spinner_state.write() = SpinnerState::new(SpinnerMode::Thinking);
-                *summary_elapsed_ms.write() = 0;
+                // epoch 检测已在上面处理了 is_loading=true 的初始化。
+                // 此分支仅在 epoch 未变但 is_loading 过渡时进入（罕见），做防御性重置。
+                if ls.is_none() {
+                    *ls = Some(Instant::now());
+                    *spinner_state.write() = SpinnerState::new(SpinnerMode::Thinking);
+                    // summary_elapsed_ms 不清零：保留上次 loading 的总结行。
+                }
             } else {
                 *summary_elapsed_ms.write() =
                     ls.map_or(0, |start| start.elapsed().as_millis() as u64);
@@ -707,14 +733,16 @@ fn build_footer_lines(
             *was_loading.write() = is_loading;
         }
 
-        // 壁钟时间补偿步进：仅在 tick 确实落后时写 state，避免 render → state write → render 自激循环。
+        // 壁钟时间补偿步进：仅在 tick 确实落后时写 state。
+        // [TRAP] 禁止在 delta 上加 min(N) 上限。loading 卡死时壁钟落后可达数十万 tick，
+        // min(20) 会制造 12K+ 帧的 render → state write → render 自激循环，CPU 打满。
+        // advance_tick 内部仅为整数运算（wrapping_add + smooth_increment），
+        // 即使 250K 次迭代也在几毫秒内完成，一次写入即追上，无需多帧追赶。
         if let Some(start) = *load_start.read() {
             let elapsed = start.elapsed().as_millis() as u64;
             let target = elapsed / 50;
-            let delta = {
-                let current = spinner_state.read().raw_tick();
-                target.saturating_sub(current).min(20)
-            };
+            let current = spinner_state.read().raw_tick();
+            let delta = target.saturating_sub(current);
             if delta > 0 {
                 let mut spinner = spinner_state.write();
                 for _ in 0..delta {

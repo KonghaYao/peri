@@ -1,6 +1,8 @@
-# TUI 页面能力设计图 v2
+# TUI 页面能力设计图 v2.1
 
-> 状态：v2 设计基线。本文档从当前可落地布局出发，继续承载未来 TUI 架构演进；后续所有 TUI 页面能力设计都应以本文件为入口，先更新设计，再落地代码。
+> 最后更新：2026-07-10。状态：v2 设计基线 + 部分能力已落地。本文档从当前可落地布局出发，继续承载未来 TUI 架构演进；后续所有 TUI 页面能力设计都应以本文件为入口，先更新设计，再落地代码。
+>
+> **近期主要落地能力**：BgTaskArea 组件、ratatui-kit-markdown + bubbles 组件族全量迁移、render_bridge/RENDER_CACHE 退役、ViewModel → TuiRenderUnit 内部化、Compact 通过 session/load replay 重放、用户输入统一事件管道、i18n 全量接入、textarea 软换行/视口跟随/placeholder。
 
 ## 目录
 
@@ -16,13 +18,14 @@
 - [3. InputArea 输入区域组件](#3-inputarea-输入区域组件)
 - [4. StatusBar 区域组件](#4-statusbar-区域组件)
 - [5. PanelOverlay 面板容器](#5-paneloverlay-面板容器)
+- [5b. BgTaskArea 后台任务区域](#5b-bgtaskarea-后台任务区域)
 - [6. 15 个 Panel 页面设计](#6-15-个-panel-页面设计)
 - [7. PopupOverlay 弹窗页面设计](#7-popupoverlay-弹窗页面设计)
 - [8. 面板导航与互斥关系](#8-面板导航与互斥关系)
 - [9. 快捷键设计规范](#9-快捷键设计规范)
 - [10. 设计落地注意事项](#10-设计落地注意事项)
 
-本文档描述 Peri TUI 的页面、面板、弹窗与局部组件能力。设计以当前 `peri-tui/src/kit/` 架构为基准：`AppShell → SessionColumn → MessageArea + PanelOverlay + InputArea`，`StatusBar` 与 `SessionColumn` 同级位于根布局底部。**InputArea 和 PanelOverlay 必须在 SessionColumn 内部**：PanelOverlay 位于消息流与输入区之间；面板打开时隐藏 InputArea。PopupOverlay 是 AppShell 根级覆盖层。
+本文档描述 Peri TUI 的页面、面板、弹窗与局部组件能力。设计以当前 `peri-tui/src/kit/` 架构为基准：`AppShell → SessionColumn → MessageArea + PanelOverlay + BgTaskArea + InputArea`，`StatusBar` 与 `SessionColumn` 同级位于根布局底部。**InputArea、PanelOverlay 和 BgTaskArea 必须在 SessionColumn 内部**：PanelOverlay 位于消息流与输入区之间，BgTaskArea 位于 PanelOverlay 和 InputArea 之间；面板打开时隐藏 BgTaskArea 和 InputArea。PopupOverlay 是 AppShell 根级覆盖层。
 
 ## v2 → 未来最优架构目标
 
@@ -72,20 +75,22 @@ Phase A：固化 v2 基线
   - 明确 SessionColumn 内部结构不可破坏
   - 为 Panel / Popup / Input / Message 建立统一命名与能力边界
 
-Phase B：ratatui-kit 组件范式统一
+Phase B：ratatui-kit 组件范式统一 ✅ ~~已基本完成~~
   - 所有旧组件标注 Legacy，并规划迁移到 #[component] / element! / hooks 范式
-  - 旧组件短期只能作为 adapter 被 ratatui-kit 页面包裹，不允许继续扩展旧 API
-  - 新增页面、Panel、Popup、Inline widget 必须直接使用 ratatui-kit 范式
+  - ~~旧组件短期只能作为 adapter 被 ratatui-kit 页面包裹，不允许继续扩展旧 API~~ → 已用 ratatui-kit-markdown + bubbles 组件族全量替代
+  - ~~新增页面、Panel、Popup、Inline widget 必须直接使用 ratatui-kit 范式~~ → 已完成 render_bridge/RENDER_CACHE 退役，全量走 bubbles 组件族
 
-Phase C：建立 Focus Graph
+Phase C：建立 Focus Graph（~~进行中~~）
   - Popup > InlineCompletion > Panel > Input > Message
   - Esc / Enter / Tab / arrows 走统一 focus router
   - 每个组件声明自己消费哪些事件
+  - 已完成：用户输入统一事件管道、slash command SubmitRequest 强类型统一
 
-Phase D：Theme System 1.0
-  - 建立可替换 theme palette：base / semantic / component tokens
+Phase D：Theme System 1.0（进行中）
+  - ~~建立可替换 theme palette：base / semantic / component tokens~~ → ratatui-kit-markdown PaletteProvider 已接入
   - 所有组件只消费 theme token，不直接写 Color / hex / ANSI 色
   - 支持内置主题、用户主题、运行时切换和 snapshot 校验
+  - 已完成：i18n 全量接入（LcRegistry + LANG_VERSION atom，50+ FTL key，en/zh-CN）
 
 Phase E：ACP-only Data Flow
   - TUI 数据入口统一为 ACP events / ACP view models
@@ -110,23 +115,22 @@ Phase H：UI Snapshot Verification
 
 ## TUI 事件分发与 MessagePipeline
 
-当前 TUI 仍处于双路径分发模型，未来 Focus Graph 必须映射到现有 Effect 体系，而不是另起一套事件系统。
+当前 TUI 已从双路径分发模型迁移为统一事件管道。用户输入（LocalUserBubble）走 LOCAL_EVENT_TX → acp_bridge → dispatch_and_notify 统一路径，消除旧旁路。未来 Focus Graph 必须映射到现有 Effect 体系。
 
 ```text
-TuiEvent
-  → state_machine::handle(State, Event) -> (State, Vec<Effect>)
-  → keyboard::handle_key_event legacy fallback
-  → merge/dedupe Effects
-  → execute Effects
-  → render
+ACP Events → acp_notifier → acp_bridge → dispatch_and_notify → VIEW_MODELS atom
+                                                            → BG_DISPLAY atom
+                                                            → other atoms
+Local Events → LOCAL_EVENT_TX → acp_bridge → dispatch_and_notify (same path)
 ```
 
 关键约束：
 
 - `OpenPanel` / `ClosePanel` / `SubmitMessage` / `PollAgent` / `Render` 等能力都必须落到 Effect，不允许组件直接操作 runtime。
-- MessagePipeline 单一数据源为 `transcript + Option<PartialAiMessage>`。
+- MessagePipeline 单一数据源为核心数据结构。
 - `commit_iteration` 是替换语义；禁止把 finalized messages extend 到 transcript。
-- 子 Agent 提交不得污染父 Agent transcript。
+- ~~子 Agent 提交不得污染父 Agent transcript~~ → bg SubAgent 使用独立 bg_event_sender。
+- 用户输入不再通过旁路写入 RENDER_CACHE，统一走事件管道。
 
 ## ratatui-kit 范式迁移标注
 
@@ -134,27 +138,29 @@ v2 之后所有 TUI 组件以 ratatui-kit 为唯一 UI 范式。旧组件可以�
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ ratatui-kit Component Tree                                                   │
+│ ratatui-kit Component Tree (current)                                         │
 │                                                                              │
 │  AppShell #[component]                                                       │
 │    ├─ SessionColumn #[component]                                             │
 │    │   ├─ MessageArea #[component]                                           │
+│    │   │   ├─ bubbles 组件族 (UserBubble/AssistantBubble/ToolCard/           │
+│    │   │   │   SystemNote/SubAgentGroup/CollapsedGroup/ReasoningBlock)       │
+│    │   │   └─ Vec<Line> 缓存 + 单 Paragraph 渲染                            │
 │    │   ├─ PanelOverlay #[component]                                          │
+│    │   ├─ BgTaskArea #[component]  ← 新增：后台 Agent 任务状态区             │
 │    │   └─ InputArea #[component]                                             │
 │    ├─ StatusBar #[component]                                                 │
 │    └─ PopupOverlay #[component]                                              │
 │                                                                              │
-│  Legacy widgets                                                               │
-│    └─ only via RatatuiWidgetAdapter / ViewModelRendererAdapter               │
+│  ~~Legacy widgets → 已全部消除~~                                             │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 迁移规则
+### 迁移规则（当前状态）
 
-- 新组件必须使用 ratatui-kit：`#[component]`、`element!`、props、hooks、context。
-- 旧 `Widget` / 手写 `Frame` 渲染只能作为 adapter 进入 ratatui-kit component tree。
-- 旧组件禁止直接读取全局状态；必须通过 props 或 context 接收派生 view state。
-- 旧组件禁止新增业务能力；新增能力先迁移到 ratatui-kit，再实现。
+- ✅ 新组件已全部使用 ratatui-kit：`#[component]`、`element!`、props、hooks、context。
+- ✅ Legacy `Widget` / 手写 `Frame` 渲染已全部消除——render_bridge/RENDER_CACHE 退役，全量走 bubbles 组件族。
+- ✅ ratatui-kit-markdown 替代 peri-widgets markdown（删除 ~1531 行，增量渲染 3.13µs/帧）。
 - 事件处理统一走 ratatui-kit component 边界与 Focus Graph，不允许组件私自捕获全局键盘事件。
 - Theme、ACP-only data、Panel Registry、Popup Registry 都必须以 ratatui-kit component 为消费端。
 
@@ -162,20 +168,21 @@ v2 之后所有 TUI 组件以 ratatui-kit 为唯一 UI 范式。旧组件可以�
 
 | 组件 | 目标状态 | 要求 |
 |------|----------|------|
-| AppShell | ratatui-kit native | 根组件，负责组合 SessionColumn / StatusBar / PopupOverlay |
-| SessionColumn | ratatui-kit native | InputArea 与 PanelOverlay 必须在内部 |
-| MessageArea | ratatui-kit native + adapter | 可短期包裹 legacy ViewModel renderer，但新 loading/todo 直接用 kit 组件 |
-| InputArea | ratatui-kit native | 手写 textarea 行为通过 props/state 进入组件，不暴露旧渲染入口 |
-| PanelOverlay | ratatui-kit native | 所有 Panel 由 registry 注入 component renderer |
-| PopupOverlay | ratatui-kit native | HITL / Rewind / OAuth 由 registry 注入 component renderer |
-| StatusBar | ratatui-kit native | 只消费 theme token 与 ACP snapshot |
-| Spinner | MessageArea 子组件，ratatui-kit wrapped widget | 使用 `peri-widgets/src/spinner`，通过 kit wrapper 接入 |
-| Todo / Plan | MessageArea 子组件，ratatui-kit native | 消费 `SessionUpdate::Plan` view state，显示在 Spinner 下方 |
-| Welcome | ratatui-kit native | 空会话 MessageArea 状态，窄屏需降级 |
-| SetupWizard | ratatui-kit native | 首启引导，禁止裸 `q` 关闭 |
-| 15 Panels | ratatui-kit native | 由 Panel Registry 注入，所有 Panel 只使用上下边框 |
-| 3 Popups | ratatui-kit native | 由 Popup Registry 注入；HITL / Rewind / OAuth 可按语义保留 modal 边框 |
-| MentionPopup / SlashCompletion | ratatui-kit native | 与 InputArea 同宽，只使用上下边框 |
+| AppShell | ✅ ratatui-kit native | 根组件，负责组合 SessionColumn / StatusBar / PopupOverlay / BgTaskArea |
+| SessionColumn | ✅ ratatui-kit native | InputArea / PanelOverlay / BgTaskArea 必须在内部 |
+| MessageArea | ✅ ratatui-kit native | bubbles 组件族渲染 UserBubble/AssistantBubble/ToolCard/SystemNote/SubAgentGroup/ReasoningBlock/CollapsedGroup |
+| InputArea | ✅ ratatui-kit native | 手写 textarea 行为通过 props/state 进入组件，支持软换行/视口跟随/placeholder/光标焦点 |
+| PanelOverlay | ✅ ratatui-kit native | 所有 Panel 由 registry 注入 component renderer |
+| PopupOverlay | ✅ ratatui-kit native | HITL / Rewind / OAuth 由 registry 注入 component renderer |
+| BgTaskArea | ✅ ratatui-kit native | 展示后台 Agent 任务状态，数据来自 BG_DISPLAY / BG_AGENT_IDS atom |
+| StatusBar | ✅ ratatui-kit native | 只消费 theme token 与 ACP snapshot |
+| Spinner | ✅ ratatui-kit native | 在 bubbles 组件族内实现 |
+| Todo / Plan | ✅ ratatui-kit native | 显示在 Spinner 下方 |
+| Welcome | ✅ ratatui-kit native | 空会话 MessageArea 状态，窄屏降级 |
+| SetupWizard | ✅ ratatui-kit native | 首启引导 |
+| 15 Panels | ✅ ratatui-kit native | 由 Panel Registry 注入 |
+| 4 Popups | ✅ ratatui-kit native | HITL / Rewind / OAuth / AskUser |
+| MentionPopup / SlashCompletion | ✅ ratatui-kit native | 与 InputArea 同宽，只使用上下边框 |
 
 ## Theme System v2
 
@@ -269,28 +276,36 @@ TUI 的所有业务数据来源只有一个途径：**从 ACP 来**。ACP 标准
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ ACP Layer                                                                    │
 │                                                                              │
-│  Standard ACP Events / ViewModels                                            │
-│    - message delta / view commit / done / error                              │
+│  Standard ACP Events                                                         │
+│    - session/update (message delta / tool call / done / error)               │
+│    - session/prompt (TurnDone with StopReason)                               │
 │    - permission / interaction / session events                               │
 │                                                                              │
 │  Peri Custom Events via `peri/unstable-event`                                │
-│    - event: "plugin-snapshot"     data: PluginSnapshot                       │
-│    - event: "mcp-snapshot"        data: McpSnapshot                          │
-│    - event: "cron-snapshot"       data: CronSnapshot                         │
-│    - event: "memory-snapshot"     data: MemorySnapshot                       │
-│    - event: "workflow-snapshot"   data: WorkflowSnapshot                     │
+│    - bg-callback-user-message  → 双通道 flush-then-push                      │
+│    - turn-suspended            → bg agent loading 停止                        │
+│    - budget-warning            → 上下文预算告警                              │
+│    - rewind-preview            → Rewind 预览数据                              │
+│    - plugin-snapshot                                                          │
+│    - mcp-snapshot                                                             │
+│    - cron-snapshot                                                            │
+│    - memory-snapshot                                                          │
+│    - workflow-snapshot                                                        │
+│                                                                              │
+│  TUI 内部类型（非 ACP）：TuiRenderUnit（8 变体）替代公有 ViewModel           │
 └───────────────────────────────┬──────────────────────────────────────────────┘
                                 │ single ingress
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ TUI Event Router                                                             │
-│  map ACP event → update Store → derive View State                            │
+│  map ACP event → update atoms (VIEW_MODELS, BG_DISPLAY, ...)                 │
 └───────────────────────────────┬──────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ Components                                                                   │
-│  MessageArea / PanelOverlay / InputArea / PopupOverlay / StatusBar           │
+│  MessageArea / PanelOverlay / InputArea / BgTaskArea / PopupOverlay /        │
+│  StatusBar                                                                   │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -302,6 +317,8 @@ TUI 的所有业务数据来源只有一个途径：**从 ACP 来**。ACP 标准
 - 非 ACP 标准字段不得偷塞到 UI 私有状态；必须定义 `peri/unstable-event` 自定义事件 schema。
 - TUI store 只做 UI 派生，不拥有业务生命周期。
 - 如果某项能力无法从 ACP 标准事件/方法进入，先补 `peri/unstable-event` 自定义事件，再做 UI。
+- **bg callback 合成消息**：bg agent 完成后走双通道 flush-then-push（`bg-callback-user-message` unstable event → flush current_turn，`session/update` → push 气泡），emit 点在 agent MQ drain 处保证时序。**禁止从 registry event pump（独立 tokio task）发送 TUI 气泡**。
+- Compact 完成后通过 `session/load` 重放压缩历史，不再直接操作 TUI ViewModel 集合。
 
 ### 自定义事件通道
 
@@ -326,18 +343,22 @@ TUI 的所有业务数据来源只有一个途径：**从 ACP 来**。ACP 标准
 - `data` 结构定义在 `peri-acp-types/src/event_data.rs` 或同等协议类型位置。
 - 完整事件目录以 `docs/design/peri-acp-protocol.md` 为准；TUI-PAGE 只记录页面数据需求。
 
-### 自定义事件命名建议
+### 自定义事件命名（已落地 + 计划中）
 
 ```text
-service-snapshot
-plugin-snapshot
-mcp-snapshot
-cron-snapshot
-memory-snapshot
-task-snapshot
-workflow-snapshot
-theme-changed
-panel-payload
+bg-callback-user-message     ← bg agent 回调合成用户消息（双通道 flush-then-push）
+turn-suspended               ← bg agent 启动后 Turn suspense 信号
+budget-warning               ← 上下文预算告警
+rewind-preview               ← Rewind 预览数据
+service-snapshot             ← ACP service snapshot
+plugin-snapshot              ← Plugin 状态
+mcp-snapshot                 ← MCP Server 状态
+cron-snapshot                ← Cron 定时任务
+memory-snapshot              ← Memory 文件
+task-snapshot                ← 后台任务状态（计划）
+workflow-snapshot            ← Workflow 运行状态
+theme-changed                ← 主题切换通知（计划）
+panel-payload                ← Panel 数据推送（计划）
 ```
 
 ### ACP-only 不妥协约束
@@ -367,22 +388,28 @@ panel-payload
 │ │ │ MessageArea                                                              │ │ │
 │ │ │ ┌──────────────────────────────────────────────────────────────────────┐ │ │ │
 │ │ │ │ MessageArea / Welcome                                                │ │ │ │
-│ │ │ │ - committed view models                                              │ │ │ │
-│ │ │ │ - current turn stream                                                │ │ │ │
-│ │ │ │ - tool / subagent / diff render                                      │ │ │ │
+│ │ │ │ - bubbles 组件族（UserBubble/AssistantBubble/ToolCard/SystemNote/   │ │ │ │
+│ │ │ │   SubAgentGroup/ReasoningBlock/CollapsedGroup）                       │ │ │ │
+│ │ │ │ - Vec<Line> 缓存 + 单 Paragraph 渲染                                │ │ │ │
 │ │ │ │ - mouse wheel scroll                                                 │ │ │ │
 │ │ │ └──────────────────────────────────────────────────────────────────────┘ │ │ │
 │ │ │ ┌──────────────────────────────────────────────────────────────────────┐ │ │ │
 │ │ │ │ LoadingFooter（固定在 ScrollView 之外）                              │ │ │ │
 │ │ │ │ - Spinner 动画（accent 橙色）                                       │ │ │ │
 │ │ │ │ - Todo 列表                                                         │ │ │ │
-│ │ │ │ - 空态时高度收缩为 0                                                │ │ │ │
+│ │ │ │ - 空态时保留「✻ Brewed for Xm Xs」（灰色 MUTED）                    │ │ │ │
 │ │ │ └──────────────────────────────────────────────────────────────────────┘ │ │ │
 │ │ └──────────────────────────────────────────────────────────────────────────┘ │ │
 │ │ ┌──────────────────────────────────────────────────────────────────────┐ │ │
 │ │ │ PanelOverlay：Model/Login/Agent/Hooks/Config/Threads/...             │ │ │
 │ │ │ - inside SessionColumn                                               │ │ │
 │ │ │ - between MessageArea and InputArea                                  │ │ │
+│ │ └──────────────────────────────────────────────────────────────────────┘ │ │
+│ │ ┌──────────────────────────────────────────────────────────────────────┐ │ │
+│ │ │ BgTaskArea：后台 Agent 任务状态区                                     │ │ │
+│ │ │ - inside SessionColumn, 位于 PanelOverlay 和 InputArea 之间          │ │ │
+│ │ │ - 展示后台 Agent 名称/状态/耗时                                      │ │ │
+│ │ │ - 空态时高度收缩为 0                                                 │ │ │
 │ │ └──────────────────────────────────────────────────────────────────────┘ │ │
 │ │ ┌──────────────────────────────────────────────────────────────────────┐ │ │
 │ │ │ InputArea：multiline prompt + @mention + slash completion            │ │ │
@@ -414,6 +441,9 @@ panel-payload
 │  ◜ 思考中… (12s · ↓ 1.2k tokens)                                             │
 │    ◼ 进行中  设计 Workflow Panel                                              │
 │                                                                              │
+│  ● agent (coder)  修改文档                                                    │
+│    N tool calls, running 2min 15s                                            │
+│                                                                              │
 │ ┌──────────────────────────────────────────────────────────────────────────┐ │
 │ │ ❯ 输入你的任务...                                                        │ │
 │ │ @ mention files    / commands                                           │ │
@@ -425,9 +455,10 @@ panel-payload
 
 能力：
 
-- 聚合展示对话、工具调用、工具结果、SubAgent、系统通知和当前 streaming turn。
-- 输入区支持多行编辑、历史、文件 mention、slash command。
+- 聚合展示对话、工具调用、工具结果、SubAgent、后台 Agent 状态、系统通知和当前 streaming turn。
+- 输入区支持多行编辑、历史、文件 mention、slash command、软换行、视口跟随、placeholder。
 - 状态栏持续暴露运行环境、权限模式、模型、资源占用和上下文快捷键。
+- BgTaskArea 展示后台 Agent（background subagent）的运行状态和耗时。
 
 ### 1.2 Setup Wizard 首次启动页
 
@@ -521,17 +552,18 @@ panel-payload
 
 能力：
 
-- 统一渲染 ACP view models，包括文本、工具、SubAgent、系统事件等。
+- 统一渲染 TUI 内部类型（`TuiRenderUnit` 8 变体），包括文本、工具、SubAgent、系统事件等。
+- 使用 bubbles 组件族（UserBubble/AssistantBubble/ToolCard/SystemNote/SubAgentGroup/CollapsedGroup/ReasoningBlock）进行渲染。
+- ratatui-kit-markdown 做 Markdown 解析 + 代码高亮（通过 PaletteProvider 接入 Theme System）。
+- Vec<Line> 缓存（`LinesCache` generation 增量检测）+ 单 Paragraph 渲染，消除每帧 N 个 widget 树开销。
 - 支持 diff 可见性切换，diff 内容自动使用增删行语义色。
 - 鼠标滚轮滚动消息区；键盘 Up/Down 保留给输入区。
-- loading 时底部使用 `peri-widgets/src/spinner` 的 `SpinnerWidget`，而不是手写 `● Thinking...`。
-- 若 TodoWrite 工具写入了 todo list，MessageArea 在 Spinner 下方显示 Todo 列表；Spinner 行本身只显示 spinner verb、elapsed time、token count。
 
 ### 2.3 Loading Spinner + Todo
 
 TUI loading 统一使用 `peri-widgets/src/spinner`，包括 `SpinnerState` / `SpinnerMode` / `SpinnerWidget`。禁止在 MessageArea 中手写独立 loading 文案或自造 spinner。
 
-**架构（v2.1）**：LoadingFooter 作为 MessageArea 的固定子区域，位于 ScrollView 之外、消息流底部。不随消息区滚动，空态时高度收缩为 0。数据流：`ACP_STATE.is_loading` + `TODO_ITEMS` atom → 每轮渲染按壁钟时间补偿步进（once 门控防 tight loop）。
+**架构（v2.1）**：LoadingFooter 作为 MessageArea 的固定子区域，位于 ScrollView 之外、消息流底部。不随消息区滚动，空态时显示灰色 Brewed 总结行（不复位为 0 高度）。数据流：`ACP_STATE.is_loading` + `TODO_ITEMS` atom → 每轮渲染按壁钟时间补偿步进（once 门控防 tight loop）。
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -679,17 +711,19 @@ AI 回复的 Markdown 内容段落，由 Markdown 渲染器处理。————
 | **表格** | `┌├└─│` BOX 绘制，CJK 对齐，`muted` 色边框 |
 | **空行去重** | `ensure_blank_line()`：仅上前一行非空时插入 |
 
-**Markdown 增量渲染器**（流式支持）：
-- `ensure_rendered_incremental()`：逐 chunk 增量解析
-- `ensure_rendered_flush()`：流结束后 flush 剩余内容
-- `find_last_block_boundary()`：块级边界检测，避免截断 mid-block
-- 表格 holdback 策略：流式中不完整表格行暂缓渲染
+**Markdown 渲染器**（ratatui-kit-markdown）：
+- 使用 `ratatui_kit_markdown` 的 `parse_markdown` + `ParsedBlock` 公开 API
+- 替代旧 `peri_widgets::markdown` 自研引擎（删除 13 文件 ~1531 行）
+- 通过 `PaletteProvider` trait 接入 Theme System，支持代码语法高亮
+- `LinesCache`（generation 增量检测）+ 单 `Paragraph` 渲染，消除每帧 N 个 widget 树开销
+- 增量渲染 3.13µs/帧（旧引擎 12.93ms/帧，4131x 加速）
 
 ##### 推理块（CoT Thinking）
 
 ```
 Thought for 1234 chars
  ⎿ 最后一行预览内容————————————————————————
+   更多预览行内容———————————————————————————
 ```
 
 | 属性 | 规格 |
@@ -697,7 +731,8 @@ Thought for 1234 chars
 | 首行 | `"Thought for N chars"`，`dim` 色 |
 | 预览行 | `" ⎿ "` 前缀（`dim`）+ 尾部内容（`dim`），最多 3 行 |
 | 折叠逻辑 | 默认折叠，仅显示首行和预览行 |
-| 注意 | `tail_lines` 字段当前始终为 `None`，预览行为未激活 |
+| message_id 透传 | reasoning chunk 携带 `message_id`，按段分配切片 |
+| 空行 | 首尾各加一个空行，保证与相邻消息块的间距 |
 
 ##### 工具调用 `ToolBlock`
 
@@ -738,12 +773,12 @@ Thought for 1234 chars
 | folder_operations | Folder |
 | TodoWrite | Todo |
 | AskUserQuestion | Ask |
-| Agent | Agent |
+| Agent | Agent | Agent ToolCard 同时显示 tool calls count + running duration |
 | LSP | LSP |
 | artifact | ArtUp |
 | WebSearch | Research |
 | WebFetch | Browse |
-| AgentResult | SubAgent |
+| AgentResult | SubAgent | 后台 agent 结果，自动展开 |
 | 其他 | PascalCase 转换 |
 
 **工具参数摘要规则** (`format_tool_args`)：
@@ -782,14 +817,19 @@ Thought for 1234 chars
 
 ##### SubAgent 消息 `SubAgentGroup`
 
+**主 Agent 工具卡片（Agent ToolCard）**：
+```
+● Agent(agent_id) 任务预览内容…————————————————
+  N tool calls, running Xmin Xs
+```
+
 **折叠态**：
 ```
-❯ Agent(agent_id) 任务预览内容…————————————————
+  嵌套消息首行内容——————————————————————————————
 ```
 
 **展开态**：
 ```
-❯ Agent(agent_id) 任务预览内容…————————————————
   嵌套消息首行内容——————————————————————————————
   嵌套消息续行内容——————————————————————————————
     ⎿ 最终结果内容—————————————————————
@@ -797,14 +837,13 @@ Thought for 1234 chars
 
 | 属性 | 规格 |
 |------|------|
-| 箭头前缀 | `❯`，`loading` 色 |
-| Agent 标签 | `Agent(agent_id)`，正常 `success`，错误 `error`，后台运行 `warning` |
-| 短 hash | `#hash`（后台 agent），`muted` 色 |
-| 任务预览 | 截断 50 字符 + `…`，`muted` 色 |
+| 工具调用指示器 | `●`，`success` 色，动画同 ToolBlock 规则（Running 态 800ms 闪烁） |
+| 主行 | `Agent(agent_id)`（正常 `success`，错误 `error`，后台运行 `warning`）+ 任务预览（`muted`，截断 50 字符） |
+| 工具计数+耗时 | 第二行 `"  N tool calls, running Xmin Xs"`（`muted`），与 SubAgent 组的 child 数量配对 |
+| 后台 Agent 短 hash | `#hash`（后台 agent），`muted` 色 |
+| ~~❯ Agent header~~ | **已移除**。Agent 工具使用统一的 `●` 前缀（与 ToolBlock/聚合组一致） |
 | 嵌套消息缩进 | 每行前 `"  "`（2 空格缩进） |
 | 最终结果行 | `"  ⎿ "`（`dim`）+ 第一行内容（`muted`），截断 80 字符 |
-| AssistantBubble | 在嵌套消息中**跳过不渲染** |
-| 尾部空行 | 展开态自动移除尾部空白行 |
 | 前空行 | 1 行 |
 | 后空行 | 1 行 |
 
@@ -888,7 +927,7 @@ Thought for 1234 chars
 |------|------|
 | 消息区宽度 | `inner.width - 1`（右侧 1 列留给滚动条） |
 | 视口裁剪 | 二分查找 `wrap_map` 定位可见行，只克隆视口内数据 |
-| 滚动跟随 | 默认跟随底部，用户手动滚离时取消（`scroll_follow = false`） |
+| 滚动跟随 | 默认跟随底部，用户手动滚离时取消（`scroll_follow = false`）。吸底自动跟随阈值 `max(5, vis_height/4)`。history load 时 entries_len 从 0→N 强制 scroll_to_bottom()。 |
 | 缩放去抖 | 记录 `last_resize_width`，防止 N 次/秒 resize 重渲染 |
 
 **滚动条**（右侧 1 列）：
@@ -933,9 +972,7 @@ Thought for 1234 chars
 | 符号 | 语义 | 位置 |
 |------|------|------|
 | `❯` | 用户消息头 | UserBubble 首行 |
-| `❯` | SubAgent 头 | SubAgentGroup 首行 |
-| `●` | 工具调用头 | ToolBlock 首行 |
-| `●` | 聚合组头 | ToolCallGroup 首行 |
+| `●` | 工具调用头 / 聚合组头 / Agent 工具头 | ToolBlock / ToolCallGroup / Agent ToolCard 首行 |
 | `◼` | Todo 进行中 | Todo InProgress |
 | `✗` | 工具失败 | ToolBlock 首行 |
 | `✔` | Todo 完成 | Todo Completed |
@@ -968,7 +1005,7 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 
 #### 2.4.8 设计哲学
 
-1. **前缀分层**：`❯`（用户/子Agent）> `●`（工具/聚合）> `·`/`⎿`（辅助信息），形成三级视觉缩进
+1. **前缀分层**：`❯`（用户消息）> `●`（工具/聚合/Agent）> `·`/`⎿`（辅助信息），形成三级视觉缩进
 2. **颜色语义化**：`success`=成功绿色、`error`=失败红色、`warning`=警告琥珀、`thinking`=思考蓝紫
 3. **背景约束**：除 `user_bg` / `subagent_bg` / `popup_bg` / `cursor_bg` / `selection_bg` 外，不使用任何背景色
 4. **空行去重**：`ensure_blank_line()` 保证相邻空行不重复
@@ -976,7 +1013,7 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 
 ## 3. InputArea 输入区域组件
 
-InputArea 是 TUI 的核心交互组件，承载文本编辑、4 种叠加模式、键盘事件分发和跨平台兼容层。底层依赖 `tui_textarea::TextArea` 提供完整的编辑器基元（光标控制、选择、剪切/粘贴等）。
+InputArea 是 TUI 的核心交互组件，承载文本编辑、4 种叠加模式、键盘事件分发和跨平台兼容层。底层提供完整的编辑器基元（光标控制、选择、剪切/粘贴、软换行、视口跟随、placeholder）。
 
 ### 3.1 键盘事件分发架构
 
@@ -1013,6 +1050,10 @@ InputArea 内所有按键事件通过优先级链分发，同一事件只被最�
 - InputArea 边框、`❯` 前缀统一使用 `muted` 灰色，与消息区形成弱对比，不抢注意力。
 - 多行 buffer，`Shift+Enter` / `Alt+Enter` 插入换行。
 - `Enter`（无修饰键）提交消息并写入输入历史。
+- **软换行**：通过 `wrap_text()` 做 display-width 感知的视觉行折叠（CJK 兼容）。
+- **视口跟随**：以光标行为中心构建渲染窗口，超出视口时自动跟随。
+- **Placeholder**：文本为空时渲染提示文本（与 tui-textarea 行为对齐）。
+- **光标焦点态**：loading 中始终显示光标；终端窗口聚焦时显示；面板/弹窗打开时隐藏。
 - `Ctrl+C`（有文本时）清空输入区全部内容（select-all + cut）。
 - `Ctrl+C`（纯文本为空时，2 秒内两次）退出应用。
 - `Ctrl+C`（loading 中）打断 Agent。
@@ -1075,12 +1116,13 @@ InputArea 内所有按键事件通过优先级链分发，同一事件只被最�
 - 在空白或行首后输入 `/` + 前缀激活命令补全。
 - 候选项合并三类来源，排序规则：**前缀精确匹配 > 命令 > Skill > Agent 命令 > 字母序**：
   - 命令注册表（`command_registry.match_prefix`）
-  - 插件 skill 名称（模糊匹配）
+  - 插件 skill 名称（模糊匹配，来自 `SKILL_NAMES` atom，启动时通过 `AvailableCommandsUpdate` 注入）
   - ACP agent 命令
 - 补全行为：`hint_complete()` 仅替换 `/token` 段，插入 `/名称 `，其余文本不丢失。
 - ↑/↓ 导航候选，Enter 确认选中项（默认选中第一个），Tab 循环候选，Esc 取消。
 - 面板命令（如 `/model`）直接映射到 `PanelKind`。
 - 远端命令如 `/bg`、`/clear`、`/compact`、`/rewind` 交给 ACP server。
+- **提交流程**：使用 `SubmitRequest` / `SessionControlRequest` / `ViewActionRequest` 强类型统一 parse，消除 input_area 和 submit_consumer 双重字符串解析。local panel slash 优先于远端 ACP command/skill。
 
 ### 3.5 输入历史浏览模式
 
@@ -1232,6 +1274,51 @@ InputArea 内所有按键事件通过优先级链分发，同一事件只被最�
 - Panel 与 InputArea 同样只有上下边框；禁止左右边框。
 - 面板打开时隐藏 InputArea。
 - 互斥组：Settings、Agent、Tools、Info、Thread；同组只保留一个。
+
+## 5b. BgTaskArea 后台任务区域
+
+`BgTaskArea` 是 `SessionColumn` 内部组件，位于 PanelOverlay 和 InputArea 之间。当面板打开时，BgTaskArea 和 InputArea 一起隐藏。数据来自 `BG_DISPLAY` 和 `BG_AGENT_IDS` atom，由 `dispatch_and_notify` 在 SubagentStarted/SubagentDone 事件时写入。
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ SessionColumn                                                                │
+│ ═══════════════════════════════════════════════════════════════════════════  │
+│ MessageArea                                                                  │
+│ ...                                                                          │
+│ ═══════════════════════════════════════════════════════════════════════════  │
+│ BgTaskArea                                                                   │
+│                                                                              │
+│  ● coder (bg)  修改 TUI-PAGE.md                                              │
+│    running 2min 15s                                                          │
+│                                                                              │
+│  ✓ reviewer (bg)  审查 agent 模块                                            │
+│    completed 45s                                                             │
+│                                                                              │
+│ ═══════════════════════════════════════════════════════════════════════════  │
+│ InputArea（panel open 或 bg task 区无内容时 hidden）                         │
+│ ═══════════════════════════════════════════════════════════════════════════  │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### BgTaskArea 视觉规格
+
+| 属性 | 规格 |
+|------|------|
+| 前缀 | `●`（running），`✓`（completed），`✗`（failed） |
+| 状态色 | running → `success`（绿色动画 800ms 闪烁），completed → `success`，failed → `error` |
+| Agent 名称 | `agent_type (bg)`（`text` 色） |
+| 任务预览 | `muted` 色，截断 |
+| 耗时 | `"running Xmin Xs"` / `"completed Xs"`（`muted` 色） |
+| 空态 | 无后台 Agent 时高度收缩为 0 |
+| 边框 | 与 Panel/InputArea 统一，只用上下边界分隔线（`border_dim`） |
+
+能力：
+
+- 展示所有活跃的后台 SubAgent 状态（名称、描述、耗时）。
+- bg agent 启动时通过 `SubagentStarted(is_background: true)` 事件添加条目。
+- bg agent 完成/失败时通过 `SubagentDone` 事件更新条目状态。
+- `Ctrl+B` 跳转焦点到 BgTaskArea（从 InputArea）。
+- 空态不占用布局空间。
 
 ## 6. 15 个 Panel 页面设计
 
