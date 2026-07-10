@@ -985,6 +985,7 @@ mod tests {
             AcpEventData::SubagentStarted {
                 agent_id,
                 agent_name,
+                ..
             } => {
                 assert_eq!(agent_id, "abc-123", "agent_id 应从 instance_id 映射");
                 assert_eq!(agent_name, "explore");

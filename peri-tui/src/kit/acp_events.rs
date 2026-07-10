@@ -918,6 +918,7 @@ mod tests {
             &AcpEventData::SubagentStarted {
                 agent_id: "agent-1".into(),
                 agent_name: "researcher".into(),
+                is_background: false,
             },
         );
         dispatch_and_notify(
