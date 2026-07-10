@@ -299,14 +299,25 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 否则 ratatui-kit 触发 "Hook type mismatch" panic。
     let footer_lines = build_footer_lines(&mut hooks, is_loading, &todo_items);
 
-    // 构建全量行（基于 cache_snapshot entries + footer，footer 位于同一个 ScrollView 底部）
+    let empty = cache_snapshot.entries.is_empty() && !is_loading && todo_items.is_empty();
+    // 空态且有 Brewed 总结行时，clone 一份用于 Welcome 下方独立渲染。
+    // footer_lines 可能为空（无历史、首次启动），此时不进入 Brewed 分支。
+    let brewed_lines = if empty && !footer_lines.is_empty() {
+        Some(footer_lines.clone())
+    } else {
+        None
+    };
+
+    // 构建全量行（entries + footer）。空态时不 extend footer_lines，
+    // Brewed 总结行在 Welcome 下方独立渲染，避免 Welcome 早退分支丢弃 footer。
     let mut all_lines: Vec<Line<'static>> = cache_snapshot
         .entries
         .iter()
         .flat_map(|(_, entry)| entry.lines.iter().cloned())
         .collect();
-    all_lines.extend(footer_lines);
-    let empty = cache_snapshot.entries.is_empty() && !is_loading && todo_items.is_empty();
+    if !empty {
+        all_lines.extend(footer_lines);
+    }
     let _all_line_count = all_lines.len();
     let content_lines = Arc::new(all_lines.clone());
     drop(cache_snapshot);
@@ -594,6 +605,22 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     );
 
     if empty {
+        // 空态有 Brewed 总结行时，Welcome 上方填充 + Brewed 在底部保留。
+        if let Some(lines) = brewed_lines {
+            return element!(
+                View(
+                    flex_direction: Direction::Vertical,
+                    width: Constraint::Fill(1),
+                    height: Constraint::Fill(1),
+                ) {
+                    View(height: Constraint::Fill(1)) {
+                        Welcome(width: props.width)
+                    }
+                    Text(text: Paragraph::new(RatText::from(lines)).wrap(Wrap { trim: false }))
+                }
+            )
+            .into_any();
+        }
         return element!(
             View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
                 Welcome(width: props.width)
@@ -697,12 +724,26 @@ fn build_footer_lines(
     let loading_epoch = hooks.use_atom(&crate::kit::atoms::LOADING_EPOCH);
     let last_epoch = hooks.use_state(|| 0u64);
 
-    // 快速路径：无 loading、无 todo、无总结行时直接返回空。
-    let has_summary = *summary_elapsed_ms.read() > 0;
-    if !is_loading && todo_items.is_empty() && !has_summary {
-        return Vec::new();
-    }
+    // ── /clear 检测：BRIDGE_RESET_COUNTER 递增时清零 summary_elapsed_ms ──
+    // /clear 代表用户主动清空会话——Brewed 总结行描述的是上一轮耗时，
+    // 清空后不应残留。
+    let last_reset_counter = hooks.use_state(|| crate::kit::atoms::BRIDGE_RESET_COUNTER.get());
     {
+        let current = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
+        if *last_reset_counter.read() != current {
+            *summary_elapsed_ms.write() = 0;
+            *last_reset_counter.write() = current;
+        }
+    }
+
+    {
+        // ── 状态变更块：loading 过渡检测、计时、tick 补偿 ──
+        // [TRAP] has_summary 的快速路径必须在此块**之后**检查，而非之前。
+        // 若在之前检查，loading 结束的那一帧 summary_elapsed_ms 还是旧值 0，
+        // 早退返回空 Vec → Brewed 总结行丢失一帧。等下一帧 has_summary 变为 true 时，
+        // auto-scroll effect deps (entries_len/raw_ch/is_loading) 未变，不再触发滚动，
+        // 导致 Brewed 行在 ScrollView 内容中但视口以下——永远不可见。
+        //
         // epoch 检测：新 loading 会话 = 无条件重建 spinner + 重置计时器。
         // 比 is_loading 过渡检测更可靠——不依赖组件是否观察到 false 中间态。
         let current_epoch = *loading_epoch.read();
@@ -710,7 +751,9 @@ fn build_footer_lines(
             *last_epoch.write() = current_epoch;
             *load_start.write() = Some(Instant::now());
             *spinner_state.write() = SpinnerState::new(SpinnerMode::Thinking);
-            // summary_elapsed_ms 不清零：保留上次 loading 的总结行作为空态 footer 展示。
+            // summary_elapsed_ms 不清零：保留上次 loading 的总结行。
+            // /clear 时通过 BRIDGE_RESET_COUNTER 检测独立清零。
+            // /clear 时通过 BRIDGE_RESET_COUNTER 检测独立清零（见上方）。
             *was_loading.write() = true;
         }
 
@@ -724,6 +767,7 @@ fn build_footer_lines(
                     *ls = Some(Instant::now());
                     *spinner_state.write() = SpinnerState::new(SpinnerMode::Thinking);
                     // summary_elapsed_ms 不清零：保留上次 loading 的总结行。
+                    // /clear 时通过 BRIDGE_RESET_COUNTER 检测独立清零。
                 }
             } else {
                 *summary_elapsed_ms.write() =
@@ -750,6 +794,13 @@ fn build_footer_lines(
                 }
             }
         }
+    }
+
+    // 快速路径：无 loading、无 todo、无总结行时直接返回空。
+    // 必须在状态变更块之后检查，确保 loading 结束那帧 summary_elapsed_ms 已被写入。
+    let has_summary = *summary_elapsed_ms.read() > 0;
+    if !is_loading && todo_items.is_empty() && !has_summary {
+        return Vec::new();
     }
 
     let mut lines: Vec<Line<'static>> = Vec::new();
