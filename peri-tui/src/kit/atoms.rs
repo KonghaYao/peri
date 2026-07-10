@@ -180,6 +180,10 @@ pub static PENDING_ATTACHMENTS: OnceLock<Handle<Vec<PendingAttachment>>> = OnceL
 
 pub static ACP_STATE: AtomStatic<AcpStateSnapshot> =
     AtomStatic::new(|| AcpStateSnapshot::default());
+/// loading 会话 epoch 计数器。每次 submit_consumer 发起新的 agent prompt 时递增。
+/// message_area 据此检测新的 loading 会话，即便 is_loading 的 false→true 过渡在
+/// 同一渲染周期内完成（如 drain_input_buffer 的立即续跑）也能可靠感知。
+pub static LOADING_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0u64);
 pub static VIEW_MODELS: AtomStatic<ViewModelsSnapshot> =
     AtomStatic::new(|| ViewModelsSnapshot::default());
 pub static RENDER_CACHE: AtomStatic<RenderCache> = AtomStatic::new(|| RenderCache::default());

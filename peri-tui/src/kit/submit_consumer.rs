@@ -22,8 +22,8 @@ use tracing::{error, info, warn};
 use crate::acp_client::AcpTuiClient;
 use crate::kit::acp_events;
 use crate::kit::atoms::{
-    ACP_STATE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, NOTIFICATION, PERI_CONFIG_HANDLE,
-    PERMISSION_MODE_HANDLE, RENDER_CACHE, RENDER_HEARTBEAT, REWIND_ACTION_TX,
+    ACP_STATE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, LOADING_EPOCH, NOTIFICATION,
+    PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE, RENDER_CACHE, RENDER_HEARTBEAT, REWIND_ACTION_TX,
 };
 use crate::kit::render_bridge::RenderCache;
 use crate::kit::submit_request::{
@@ -167,6 +167,10 @@ async fn handle_agent_text_submit(
         guard.variant = 1;
         guard.is_loading = true;
     }
+    // 递增 loading epoch：message_area 据此检测新一轮 loading 会话，
+    // 避免 rapid toggle（如 TurnDone → drain_input_buffer → 新 prompt）
+    // 在同一渲染周期内完成时组件错过 is_loading 的 false 中间态。
+    *LOADING_EPOCH.state().write() += 1;
 
     let content = MessageContent::text(trimmed.to_string());
     acp_client.prompt(&content).await.map_err(|e| {
