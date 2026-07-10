@@ -73,10 +73,11 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
         AcpEvent::SubagentStarted {
             agent_name,
             instance_id,
-            ..
+            is_background,
         } => Some(AcpEventData::SubagentStarted {
             agent_id: instance_id,
             agent_name,
+            is_background,
         }),
         AcpEvent::SubagentStopped { instance_id, .. } => Some(AcpEventData::SubagentStopped {
             agent_id: instance_id,

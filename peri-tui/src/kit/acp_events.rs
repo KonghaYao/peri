@@ -421,6 +421,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         SubagentStarted {
             agent_id,
             agent_name,
+            is_background: _,
         } => {
             state
                 .current_turn

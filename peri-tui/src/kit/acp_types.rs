@@ -719,6 +719,7 @@ pub enum AcpEventData {
     SubagentStarted {
         agent_id: String,
         agent_name: String,
+        is_background: bool,
     },
 
     /// `"subagent-stopped"` -- sub-agent exited, TUI closes the group.
@@ -842,9 +843,11 @@ impl AcpEventData {
             "subagent-started" => {
                 let agent_id = data["agent_id"].as_str().unwrap_or("").to_string();
                 let agent_name = data["agent_name"].as_str().unwrap_or("").to_string();
+                let is_background = data["is_background"].as_bool().unwrap_or(false);
                 AcpEventData::SubagentStarted {
                     agent_id,
                     agent_name,
+                    is_background,
                 }
             }
             "subagent-stopped" => {
