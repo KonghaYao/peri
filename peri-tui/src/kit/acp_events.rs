@@ -123,6 +123,17 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 if !routed {
                     tracing::trace!(agent_id, tool_id = %ts.tool_id, "kit bridge: subagent tool start has no active group");
                 }
+                // 后台任务工具更新：写 BG_DISPLAY
+                if BG_AGENT_IDS.state().read().contains(agent_id) {
+                    if let Some(entry) = BG_DISPLAY
+                        .state()
+                        .write()
+                        .iter_mut()
+                        .find(|e| e.id == agent_id)
+                    {
+                        entry.current_tool = Some(ts.tool_name.clone());
+                    }
+                }
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
@@ -148,6 +159,18 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 );
                 if !routed {
                     tracing::trace!(agent_id, tool_id = %te.tool_id, "kit bridge: subagent tool end has no active group");
+                }
+                // 后台任务工具完成：清除 current_tool，递增 tool_count
+                if BG_AGENT_IDS.state().read().contains(agent_id) {
+                    if let Some(entry) = BG_DISPLAY
+                        .state()
+                        .write()
+                        .iter_mut()
+                        .find(|e| e.id == agent_id)
+                    {
+                        entry.current_tool = None;
+                        entry.tool_count += 1;
+                    }
                 }
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
@@ -421,11 +444,15 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         SubagentStarted {
             agent_id,
             agent_name,
-            is_background: _,
+            is_background,
         } => {
             state
                 .current_turn
                 .start_subagent(agent_id.clone(), agent_name.clone());
+            // 仅后台 subagent 注册到 BG_AGENT_IDS——同步 subagent 不进入后台显示区域
+            if *is_background {
+                BG_AGENT_IDS.state().write().insert(agent_id.clone());
+            }
             state.variant = 1;
             state.phase = SessionPhase::PromptRunning;
             push_view_models(state);
@@ -433,6 +460,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         SubagentStopped { agent_id } => {
             state.current_turn.stop_subagent(agent_id);
+            // 清理后台 agent_id 注册
+            BG_AGENT_IDS.state().write().remove(agent_id);
             state.variant = 1;
             state.phase = SessionPhase::PromptRunning;
             push_view_models(state);
@@ -596,9 +625,35 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // ── §4.7 Background Tasks ──
         BgTaskSnapshot(tasks) => {
             BG_TASKS.state().write().clone_from(tasks);
+            // 从快照全量构造 BG_DISPLAY 条目
+            let entries: Vec<BgDisplayEntry> = tasks
+                .iter()
+                .map(|t| BgDisplayEntry {
+                    id: t.task_id.clone(),
+                    agent_type: t.kind.clone(),
+                    desc: t.summary.clone(),
+                    current_tool: None,
+                    tool_count: 0,
+                    is_active: true,
+                    is_error: false,
+                    completed_at: None,
+                })
+                .collect();
+            BG_DISPLAY.state().write().clone_from(&entries);
         }
         BgTaskStarted(task) => {
             BG_TASKS.state().write().push(task.clone());
+            // 创建后台显示条目
+            BG_DISPLAY.state().write().push(BgDisplayEntry {
+                id: task.task_id.clone(),
+                agent_type: task.kind.clone(),
+                desc: task.summary.clone(),
+                current_tool: None,
+                tool_count: 0,
+                is_active: true,
+                is_error: false,
+                completed_at: None,
+            });
         }
         BgTaskCompleted {
             task_id,
@@ -606,6 +661,18 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             duration_ms,
         } => {
             BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
+            // 标记后台显示条目为完成（3s 倒计时）
+            let now = Instant::now();
+            if let Some(entry) = BG_DISPLAY
+                .state()
+                .write()
+                .iter_mut()
+                .find(|e| e.id == *task_id)
+            {
+                entry.is_active = false;
+                entry.is_error = !*success;
+                entry.completed_at = Some(now);
+            }
             let msg = if *success {
                 format!(
                     "[✓] {} 完成 ({:.0}s)",
@@ -626,6 +693,18 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         BgTaskCancelled { task_id, .. } => {
             BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
+            // 标记后台显示条目为失败（3s 倒计时）
+            let now = Instant::now();
+            if let Some(entry) = BG_DISPLAY
+                .state()
+                .write()
+                .iter_mut()
+                .find(|e| e.id == *task_id)
+            {
+                entry.is_active = false;
+                entry.is_error = true;
+                entry.completed_at = Some(now);
+            }
         }
     }
 }
