@@ -39,6 +39,7 @@ use serde_json::Value;
 pub fn spawn_kit_notifier(
     mut notification_rx: mpsc::UnboundedReceiver<AcpNotification>,
     bridge_tx: mpsc::UnboundedSender<AcpEventWithEpoch>,
+    render_bridge_tx: mpsc::UnboundedSender<AcpEventWithEpoch>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -50,7 +51,7 @@ pub fn spawn_kit_notifier(
                 }
                 n = notification_rx.recv() => {
                     match n {
-                        Some(notif) => forward_notification(&bridge_tx, notif),
+                        Some(notif) => forward_notification(&bridge_tx, &render_bridge_tx, notif),
                         None => {
                             debug!("kit ACP notifier: notification channel closed (transport disconnected)");
                             break;
@@ -169,7 +170,11 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
 ///
 /// 设计决策：session/update 是流式主通道（agent_message_chunk / tool_call 等），
 /// AgentDone 通过 TurnDone 转换，AgentEvent 通过 `convert_agent_event` 转换。
-fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n: AcpNotification) {
+fn forward_notification(
+    bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    render_bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    n: AcpNotification,
+) {
     /// 将 AcpEventData 包装为 AcpEventWithEpoch（注入 session_id）。
     fn wrap_with_session(event: AcpEventData, session_id: String) -> AcpEventWithEpoch {
         AcpEventWithEpoch {
@@ -190,6 +195,9 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
                 return;
             }
             let wrapped = wrap_with_session(decoded, session_id);
+            if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
+                warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may stall");
+            }
             if let Err(e) = bridge_tx.send(wrapped) {
                 warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping event");
             }
@@ -200,6 +208,9 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
         AcpNotification::SessionUpdate { session_id, params } => {
             if let Some(decoded) = handle_session_update(params) {
                 let wrapped = wrap_with_session(decoded, session_id);
+                if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
+                    warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may stall");
+                }
                 if let Err(e) = bridge_tx.send(wrapped) {
                     warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping session/update streaming event");
                 }
@@ -217,12 +228,15 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
                 AcpEventData::TurnDone
             };
             let wrapped = wrap_with_session(decoded, session_id);
+            if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
+                warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may keep current turn");
+            }
             if let Err(e) = bridge_tx.send(wrapped) {
                 warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping agent done");
             }
         }
         AcpNotification::Elicitation { id, params } => {
-            handle_elicitation(&id, &params, bridge_tx);
+            handle_elicitation(&id, &params, bridge_tx, render_bridge_tx);
         }
         // peri/agent_event → AcpEvent → AcpEventData 转换
         // SubagentStarted/SubagentStopped 首先映射至此通道；通过 convert_agent_event
@@ -230,21 +244,31 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
         AcpNotification::AgentEvent { session_id, event } => {
             if let Some(decoded) = convert_agent_event(event) {
                 let wrapped = wrap_with_session(decoded, session_id);
+                if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
+                    warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may stall");
+                }
                 if let Err(e) = bridge_tx.send(wrapped) {
                     warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping AgentEvent");
                 }
             }
         }
         AcpNotification::PredictionReady { session_id, text } => {
+            // M4: PredictionReady 不再被丢弃，转换为 AcpEventData::Prediction 推入双 channel。
+            // dispatch_and_notify 仅写入 PREDICTION atom（input_area 订阅显示），不调
+            // push_view_models，但 render_bridge 仍需收到事件以维持事件流一致性
+            // （其他无 view_model 副作用的事件也走双 channel）。
             use peri_acp_types::event_data::Prediction;
             let decoded = AcpEventData::Prediction(Prediction { text });
             let wrapped = wrap_with_session(decoded, session_id);
+            if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
+                warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, dropping prediction");
+            }
             if let Err(e) = bridge_tx.send(wrapped) {
                 warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping prediction");
             }
         }
         AcpNotification::RequestPermission { id, params } => {
-            handle_request_permission(&id, &params, bridge_tx);
+            handle_request_permission(&id, &params, bridge_tx, render_bridge_tx);
         }
         AcpNotification::Peri { .. } | AcpNotification::Other { .. } => {
             debug!("kit ACP notifier: notification variant not yet handled, dropping");
@@ -494,6 +518,7 @@ fn handle_elicitation(
     id: &peri_acp::transport::types::RequestId,
     params: &Value,
     bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    render_bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
 ) {
     // 从 params 中提取 session_id
     let session_id = params
@@ -520,6 +545,9 @@ fn handle_elicitation(
 
     info!("kit ACP notifier: forwarding Elicitation as AskUser event");
 
+    if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
+        warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may miss AskUser");
+    }
     if let Err(e) = bridge_tx.send(wrapped) {
         warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping AskUser");
     }
@@ -538,6 +566,7 @@ fn handle_request_permission(
     id: &peri_acp::transport::types::RequestId,
     params: &Value,
     bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    render_bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
 ) {
     let session_id = params
         .get("sessionId")
@@ -575,6 +604,9 @@ fn handle_request_permission(
 
     info!("kit ACP notifier: forwarding RequestPermission as HitlPending event");
 
+    if let Err(e) = render_bridge_tx.send(wrapped.clone()) {
+        warn!(error = %e, "kit ACP notifier: render_bridge_tx closed, render cache may miss HitlPending");
+    }
     if let Err(e) = bridge_tx.send(wrapped) {
         warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping HitlPending");
     }
@@ -704,8 +736,9 @@ mod tests {
     ) {
         let (notif_tx, notif_rx) = mpsc::unbounded_channel::<AcpNotification>();
         let (bridge_tx, bridge_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
+        let (render_bridge_tx, _render_bridge_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
         let shutdown = CancellationToken::new();
-        let _handle = spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+        let _handle = spawn_kit_notifier(notif_rx, bridge_tx, render_bridge_tx, shutdown.clone());
         (notif_tx, bridge_rx, shutdown)
     }
 

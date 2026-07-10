@@ -43,7 +43,7 @@ parking_lot.workspace = true
 arboard = "3"
 png = "0.18"
 base64 = { version = "0.22", features = ["alloc"] }
-peri-widgets = { path = "../peri-widgets" }
+peri-widgets = { path = "../peri-widgets", features = ["markdown-highlight"] }
 peri-acp = { path = "../peri-acp" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-web-pty = { path = "../peri-web-pty" }

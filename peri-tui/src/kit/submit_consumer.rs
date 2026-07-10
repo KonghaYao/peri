@@ -23,8 +23,9 @@ use crate::acp_client::AcpTuiClient;
 use crate::kit::acp_events;
 use crate::kit::atoms::{
     ACP_STATE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, NOTIFICATION, PERI_CONFIG_HANDLE,
-    PERMISSION_MODE_HANDLE, RENDER_HEARTBEAT, REWIND_ACTION_TX,
+    PERMISSION_MODE_HANDLE, RENDER_CACHE, RENDER_HEARTBEAT, REWIND_ACTION_TX,
 };
+use crate::kit::render_bridge::RenderCache;
 use crate::kit::submit_request::{
     ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
 };
@@ -115,6 +116,7 @@ async fn handle_clear_submit(
     ACTIVE_SESSION_ID.set(String::new());
     BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
     acp_events::push_view_models_for_reset();
+    *RENDER_CACHE.state().write() = RenderCache::default();
     {
         let ref_guard = ACP_STATE.state();
         let mut acp = ref_guard.write();
@@ -133,6 +135,7 @@ async fn handle_clear_submit(
     BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
 
     acp_events::push_view_models_for_reset();
+    *RENDER_CACHE.state().write() = RenderCache::default();
     {
         let ref_guard = ACP_STATE.state();
         let mut acp = ref_guard.write();
@@ -235,13 +238,11 @@ fn export_debug_text(
 }
 
 fn collect_debug_export_lines(mode: ExportMode) -> Vec<Line<'static>> {
-    let state = crate::kit::atoms::VIEW_MODELS.state();
-    let snapshot = state.read();
-    let all_lines: Vec<Line<'static>> = snapshot
-        .items
+    let cache = RENDER_CACHE.state().read().clone();
+    let all_lines: Vec<Line<'static>> = cache
+        .entries
         .iter()
-        .flat_map(|vm| extract_vm_text(vm))
-        .map(|s| Line::raw(s))
+        .flat_map(|(_, entry)| entry.lines.iter().cloned())
         .collect();
     match mode {
         ExportMode::All => all_lines,
@@ -253,32 +254,6 @@ fn collect_debug_export_lines(mode: ExportMode) -> Vec<Line<'static>> {
             let end = viewport.last_line.min(all_lines.len()).max(start);
             all_lines[start..end].to_vec()
         }
-    }
-}
-
-fn extract_vm_text(vm: &crate::kit::tui_render_unit::TuiRenderUnit) -> Vec<String> {
-    use crate::kit::tui_render_unit::TuiRenderUnit;
-    match vm {
-        TuiRenderUnit::TuiUserBubble(b) => b.text.lines().map(|l| l.to_string()).collect(),
-        TuiRenderUnit::TuiAssistantBubble(b) => b.text.lines().map(|l| l.to_string()).collect(),
-        TuiRenderUnit::TuiToolCard(t) => vec![format!("[{}] {}", t.tool_name, t.output_summary)],
-        TuiRenderUnit::TuiSystemNote(n) => n.text.lines().map(|l| l.to_string()).collect(),
-        TuiRenderUnit::TuiSubAgentGroup(g) => g
-            .view_models
-            .iter()
-            .flat_map(|v| extract_vm_text(v))
-            .collect(),
-        TuiRenderUnit::TuiCollapsedGroup(g) => {
-            vec![format!("{} ({} items)", g.title, g.count)]
-        }
-        TuiRenderUnit::TuiDivider(d) => {
-            vec![d.label.clone().unwrap_or_default()]
-        }
-        TuiRenderUnit::TuiAskUserBlock(a) => a
-            .items
-            .iter()
-            .flat_map(|i| vec![format!("Q: {}", i.header), format!("A: {}", i.answer)])
-            .collect(),
     }
 }
 
