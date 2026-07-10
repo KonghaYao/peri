@@ -12,6 +12,7 @@ pub mod acp_types;
 pub mod app_shell;
 pub mod ask_user_action;
 pub mod atoms;
+pub mod bg_task_area;
 pub mod bubbles;
 pub mod entry;
 pub mod event_handlers;

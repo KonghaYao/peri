@@ -1,6 +1,7 @@
 //! ratatui-kit AppShell root component.
 
 use crate::kit::atoms;
+use crate::kit::bg_task_area::BgTaskArea;
 use crate::kit::event_handlers;
 use crate::kit::layout::SessionColumn;
 use crate::kit::popup_overlay::PopupOverlay;
@@ -70,6 +71,7 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     ) {
                         SessionColumn()
                         StatusBar()
+                        BgTaskArea()
                     }
                     PopupOverlay()
                 }
