@@ -40,6 +40,21 @@ pub use skill_preload::SkillPreloadMiddleware;
 pub use spawner::{spawn_background_fork, BgForkConfig, BgForkDirectiveKind, BgForkSpawned};
 pub use tool::SubAgentTool;
 
+/// 从 session transcript 统计 subagent 实际执行的工具调用次数。
+///
+/// 遍历 `visible_messages()` 中所有 `BaseMessage::Tool` 条目——每条对应一次
+/// 工具执行（含成功和失败）。与 `extract_last_ai_text` 模式一致：都从
+/// `session.transcript()` 读取完整消息历史。
+pub(crate) fn count_tool_calls_from_session(session: &Arc<peri_agent::session::Session>) -> usize {
+    use peri_agent::messages::BaseMessage;
+    let transcript = session.transcript();
+    let tx = transcript.read();
+    tx.visible_messages()
+        .iter()
+        .filter(|m| matches!(m, BaseMessage::Tool { .. }))
+        .count()
+}
+
 /// SubAgent 中间件链构造配置
 ///
 /// 中间件链顺序固定: AgentsMd -> Skills -> [SkillPreload] -> Todo

@@ -5,6 +5,7 @@ use peri_agent::{
     },
     messages::BaseMessage,
     middleware::r#trait::Middleware,
+    session,
 };
 
 use super::*;
@@ -270,4 +271,78 @@ fn test_scan_agents_with_extra_dirs_empty() {
     let result = scan_agents_with_extra_dirs("/nonexistent", &[]);
     let expected = scan_agents("/nonexistent");
     assert_eq!(result.len(), expected.len());
+}
+
+// ── count_tool_calls_from_session 单元测试 ──────────────
+
+#[test]
+fn test_count_tool_calls_from_session_zero_when_empty() {
+    let session = make_session();
+    assert_eq!(
+        count_tool_calls_from_session(&session),
+        0,
+        "空 transcript 应返回 0"
+    );
+}
+
+#[test]
+fn test_count_tool_calls_from_session_counts_multiple_tools() {
+    let session = make_session();
+    {
+        let transcript = session.transcript();
+        let mut tx = transcript.write();
+        tx.append(BaseMessage::tool_result("call_1", "result 1"));
+        tx.append(BaseMessage::tool_result("call_2", "result 2"));
+        tx.append(BaseMessage::tool_result("call_3", "result 3"));
+    }
+    assert_eq!(
+        count_tool_calls_from_session(&session),
+        3,
+        "3 条 Tool 消息应被正确统计"
+    );
+}
+
+#[test]
+fn test_count_tool_calls_from_session_ignores_non_tool_messages() {
+    let session = make_session();
+    {
+        let transcript = session.transcript();
+        let mut tx = transcript.write();
+        tx.append(BaseMessage::human("hello"));
+        tx.append(BaseMessage::tool_result("call_1", "result 1"));
+        tx.append(BaseMessage::ai("thinking..."));
+        tx.append(BaseMessage::tool_result("call_2", "result 2"));
+        tx.append(BaseMessage::system("system prompt"));
+    }
+    assert_eq!(
+        count_tool_calls_from_session(&session),
+        2,
+        "只应统计 Tool 消息，忽略 Human/Ai/System"
+    );
+}
+
+#[test]
+fn test_count_tool_calls_from_session_counts_error_tools() {
+    let session = make_session();
+    {
+        let transcript = session.transcript();
+        let mut tx = transcript.write();
+        tx.append(BaseMessage::tool_result("call_1", "success"));
+        tx.append(BaseMessage::tool_error(
+            "call_2",
+            "failed: permission denied",
+        ));
+    }
+    assert_eq!(
+        count_tool_calls_from_session(&session),
+        2,
+        "错误工具调用也应被统计（失败也是一次执行）"
+    );
+}
+
+fn make_session() -> std::sync::Arc<session::Session> {
+    use std::sync::Arc;
+    let cwd: Arc<str> = Arc::from("/tmp/test_count_tools");
+    let frozen = session::FrozenContext::builder().build();
+    session::Session::new(cwd, frozen, None)
 }

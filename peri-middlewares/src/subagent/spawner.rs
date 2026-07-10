@@ -273,7 +273,7 @@ pub async fn spawn_background_fork(
                     prompt_summary: prompt_summary_clone.clone(),
                     success: false,
                     output,
-                    tool_calls_count: 0,
+                    tool_calls_count: crate::subagent::count_tool_calls_from_session(&session),
                     duration_ms: started_at.elapsed().as_millis() as u64,
                     child_thread_id: Some(child_thread_id_clone.clone()),
                 };
@@ -319,7 +319,7 @@ pub async fn spawn_background_fork(
             } else {
                 final_text
             },
-            tool_calls_count: 0,
+            tool_calls_count: crate::subagent::count_tool_calls_from_session(&session),
             duration_ms: started_at.elapsed().as_millis() as u64,
             child_thread_id: Some(child_thread_id_clone.clone()),
         };
