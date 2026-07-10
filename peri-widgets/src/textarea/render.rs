@@ -183,15 +183,13 @@ pub fn render_multiline_with_cursor(
     default_style: Style,
     max_width: usize,
     viewport_height: usize,
-    loading: bool,
+    _loading: bool,
     show_cursor: bool,
 ) -> Vec<Line<'static>> {
     let viewport_height = viewport_height.max(1);
 
     if text.is_empty() {
-        return if loading {
-            vec![Line::from("")]
-        } else if !show_cursor {
+        return if !show_cursor {
             if let Some(ph) = placeholder.filter(|s| !s.is_empty()) {
                 vec![Line::from(vec![Span::styled(
                     ph.to_string(),

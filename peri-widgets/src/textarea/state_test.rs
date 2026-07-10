@@ -129,7 +129,8 @@ fn test_render_multiline_empty_shows_cursor() {
 }
 
 #[test]
-fn test_render_multiline_empty_loading_shows_blank() {
+fn test_render_multiline_empty_loading_shows_cursor() {
+    // loading + empty + focused 应显示光标（show_cursor=true 优先于 loading）
     let lines = render_multiline_with_cursor(
         "",
         0,
@@ -145,7 +146,7 @@ fn test_render_multiline_empty_loading_shows_blank() {
         true,
     );
     assert_eq!(lines.len(), 1);
-    assert!(lines[0].spans.is_empty() || lines[0].spans.iter().all(|s| s.content.is_empty()));
+    assert!(!lines[0].spans.is_empty(), "loading 时空文本应显示光标");
 }
 
 #[test]
