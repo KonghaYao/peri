@@ -8,7 +8,6 @@
 //! Channel 约定：
 //! - SUBMIT_TX: event_handlers 按键 → submit_consumer 消费
 //! - CANCEL_TX: event_handlers Ctrl+C → cancel_consumer 消费
-//! - RESIZE_TX: 终端 resize → render_bridge
 //! - REWIND_ACTION_TX: rewind popup → rewind_consumer
 //! - THREAD_LOAD_TX: thread browser → thread_load_consumer
 
@@ -25,7 +24,6 @@ use crate::app::panel_types::PanelKind;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::hitl_response::HitlResponseAction;
-use crate::kit::render_bridge::RenderCache;
 use crate::kit::rewind_action::RewindAction;
 use crate::kit::submit_request::SubmitRequest;
 
@@ -186,8 +184,6 @@ pub static ACP_STATE: AtomStatic<AcpStateSnapshot> =
 pub static LOADING_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0u64);
 pub static VIEW_MODELS: AtomStatic<ViewModelsSnapshot> =
     AtomStatic::new(|| ViewModelsSnapshot::default());
-pub static RENDER_CACHE: AtomStatic<RenderCache> = AtomStatic::new(|| RenderCache::default());
-
 pub static MODEL_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static PROVIDER_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static MODE_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);

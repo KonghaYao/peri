@@ -22,7 +22,6 @@ use crate::kit::ask_user_action::{AskUserResponseAction, spawn_ask_user_consumer
 use crate::kit::atoms;
 use crate::kit::hitl_response::{HitlResponseAction, spawn_hitl_response_consumer};
 use crate::kit::input_history;
-use crate::kit::render_bridge::spawn_render_bridge;
 use crate::kit::rewind_action::spawn_rewind_consumer;
 use crate::kit::service_snapshot::{SnapshotSource, spawn_service_snapshot};
 use crate::kit::submit_consumer::{spawn_cancel_consumer, spawn_submit_consumer};
@@ -151,51 +150,20 @@ pub async fn run_kit_fullscreen(
 
         // 4c. bridge channel：notifier → acp_bridge
         let (bridge_tx, bridge_rx) = mpsc::unbounded_channel();
-        let (render_bridge_tx, render_bridge_rx) = mpsc::unbounded_channel();
-        // 4c2. LOCAL_EVENT_TX：input_area 本地提交 → acp_bridge + render_bridge
-        // 双通道推送：bridge 处理状态（VIEW_MODELS），render_bridge 触发缓存重建。
-        // 缺一不可——缺 render_bridge 则用户气泡依赖 1s poll，延迟数百 ms。
+        // LOCAL_EVENT_TX：input_area 本地提交 → acp_bridge
         let (local_event_tx, mut local_event_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
         let _ = atoms::LOCAL_EVENT_TX.set(local_event_tx);
-        // Mini bridge task：转发 local event 到双 bridge channel
+        // Mini bridge task：转发 local event 到 bridge channel
         let bridge_tx_clone = bridge_tx.clone();
-        let render_bridge_tx_clone = render_bridge_tx.clone();
         tokio::spawn(async move {
             while let Some(ev) = local_event_rx.recv().await {
-                let _ = bridge_tx_clone.send(ev.clone());
-                let _ = render_bridge_tx_clone.send(ev);
+                let _ = bridge_tx_clone.send(ev);
             }
         });
-        let (resize_tx, resize_rx) = mpsc::unbounded_channel::<u16>();
-        let _ = atoms::RESIZE_TX.set(resize_tx);
 
-        // 4d. 启动四链路
-        let _notifier_handle = spawn_kit_notifier(
-            notification_rx,
-            bridge_tx,
-            render_bridge_tx,
-            shutdown.clone(),
-        );
+        // 4d. 启动三链路（render_bridge 已删除）
+        let _notifier_handle = spawn_kit_notifier(notification_rx, bridge_tx, shutdown.clone());
         let _bridge_handle = spawn_acp_bridge(bridge_rx, shutdown.clone());
-        let render_handle = spawn_render_bridge(render_bridge_rx, resize_rx, shutdown.clone());
-        // L1: supervisor task——spawn_render_bridge 返回的 JoinHandle 由独立
-        // tokio task 持有并 await。若 render_bridge task panic（JoinError），
-        // 原本静默导致 RENDER_CACHE 冻结；此处至少打 error 日志提升可观测性。
-        // 不做自动重启（render_bridge_rx / resize_rx 所有权已转移，重启需
-        // 重构 entry 内 channel 构造，复杂度高，留给后续 batch）。
-        tokio::spawn(async move {
-            match render_handle.await {
-                Ok(()) => {
-                    tracing::info!("render_bridge task exited cleanly");
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "render_bridge task panicked — RENDER_CACHE will freeze, UI messages stop updating"
-                    );
-                }
-            }
-        });
         let cwd = app.services.cwd.clone();
         let cwd_for_init = cwd.clone();
         let _submit_handle =

@@ -13,7 +13,6 @@ pub mod app_shell;
 pub mod ask_user_action;
 pub mod atoms;
 pub mod bg_task_area;
-pub mod bubbles;
 pub mod entry;
 pub mod event_handlers;
 pub mod focus_router;
@@ -31,7 +30,6 @@ pub mod panel_registry;
 pub mod panels;
 pub mod popup_overlay;
 pub mod popups;
-pub mod render_bridge;
 pub mod rewind_action;
 pub mod service_snapshot;
 pub mod setup_wizard;
@@ -44,7 +42,6 @@ pub mod text_selection;
 pub mod thread_load_consumer;
 pub mod tool_display;
 pub mod tui_render_unit;
-pub mod view_render;
 pub mod welcome;
 
 // Phase 3: 导出布局组件

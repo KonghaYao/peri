@@ -5,7 +5,6 @@
 //! 最大 5 行，超出显示 `… N more`。纯展示，不响应键盘/鼠标。
 
 use crate::kit::atoms::{self, BgDisplayEntry};
-use crate::kit::view_render;
 use ratatui_kit::{
     prelude::*,
     ratatui::{
@@ -15,6 +14,7 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
+use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
 /// 后台显示区域最大可见行数
@@ -22,6 +22,12 @@ const MAX_VISIBLE_ROWS: usize = 5;
 
 /// 完成后保留时长（秒）
 const DONE_KEEP_SECS: u64 = 3;
+
+thread_local! {
+    /// 渲染调用计数器，用于运行中条目的闪烁动画。
+    /// 原先定义在 view_render/probe.rs，view_render 删除后迁移至此。
+    static RENDER_CALL_COUNT: AtomicUsize = const { AtomicUsize::new(0) };
+}
 
 /// 状态符号
 mod status_symbol {
@@ -69,8 +75,7 @@ pub fn BgTaskArea(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let overflow_count = sorted.len().saturating_sub(MAX_VISIBLE_ROWS);
 
     // 渲染计数器用于运行中条目闪烁
-    let render_count =
-        view_render::RENDER_CALL_COUNT.with(|c| c.load(std::sync::atomic::Ordering::Relaxed));
+    let render_count = RENDER_CALL_COUNT.with(|c| c.load(std::sync::atomic::Ordering::Relaxed));
 
     // 构建可见行
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible_count + 1);
