@@ -46,6 +46,28 @@ use ratatui_kit::{
 /// 调大改滚轮速度，调整不需要重新编译其他模块（仅重编译本文件）。
 const SCROLL_LINES: u16 = 3;
 
+/// 鼠标滚轮滚动帧间隔（ms）。低于此阈值的连续滚动事件将累积增量，
+/// 只在新的一帧到达时一次性推入 scroll_state 并触发渲染。
+/// tmux 等终端复用器下 terminal.draw() 经 PTY 有额外开销，
+/// 需要限制重绘频率以避免事件积压。
+const SCROLL_FRAME_MS: u64 = 16;
+
+/// 滚动事件节流状态：跨事件累积增量，限帧刷新。
+#[derive(Debug, Clone)]
+struct ScrollThrottle {
+    last_flush: Instant,
+    pending_delta: i32, // positive = scroll_down, negative = scroll_up
+}
+
+impl Default for ScrollThrottle {
+    fn default() -> Self {
+        Self {
+            last_flush: Instant::now(),
+            pending_delta: 0,
+        }
+    }
+}
+
 // ── 本地行缓存（仅 RENDER_CACHE 内容变化时重建，滚动不触发）─────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -273,6 +295,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let prev_entries_len = hooks.use_state(|| 0usize);
     // hook 占位——ratatui-kit 要求 hook 数量恒定不可增减
     let _prev_is_loading = hooks.use_state(|| false);
+    let scroll_throttle = hooks.use_state(|| ScrollThrottle::default());
     let todo_hash = hash_todo_items(&todo_items);
     let new_key = {
         let h = raw_ch as u64;
@@ -440,6 +463,33 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 if matches!(mouse.kind, MouseEventKind::Moved) {
                     return EventResult::Ignored;
                 }
+
+                // 滚动节流：累积增量，仅超 SCROLL_FRAME_MS(16ms) 时推入 scroll_state。
+                // write_no_update 不触发原子通知——dispatch 后 loop 强制 render 会读最新 atom。
+                let apply_scroll = |delta: i32| {
+                    let mut st = scroll_throttle.write_no_update();
+                    st.pending_delta += delta;
+                    let now = Instant::now();
+                    if now.duration_since(st.last_flush) >= Duration::from_millis(SCROLL_FRAME_MS) {
+                        let pending = st.pending_delta;
+                        st.pending_delta = 0;
+                        st.last_flush = now;
+                        drop(st);
+                        if pending != 0 {
+                            let mut state = scroll_state.write_no_update();
+                            if pending > 0 {
+                                for _ in 0..(pending as u16) {
+                                    state.scroll_down();
+                                }
+                            } else {
+                                for _ in 0..((-pending) as u16) {
+                                    state.scroll_up();
+                                }
+                            }
+                        }
+                    }
+                };
+
                 // 判断鼠标是否在消息区内
                 if let Some(area) = area_rect {
                     let in_area = mouse_in_area(mouse.row, mouse.column, area);
@@ -459,18 +509,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                         .unwrap_or((visual_row as usize, visual_col));
 
                         match mouse.kind {
-                            // 滚轮事件：直接 scroll_up/scroll_down（write 触发 wake）。
-                            // 每格滚动 SCROLL_LINES 行，长对话下滚轮速度更跟手。
-                            MouseEventKind::ScrollDown => {
-                                for _ in 0..SCROLL_LINES {
-                                    scroll_state.write().scroll_down();
-                                }
-                            }
-                            MouseEventKind::ScrollUp => {
-                                for _ in 0..SCROLL_LINES {
-                                    scroll_state.write().scroll_up();
-                                }
-                            }
+                            MouseEventKind::ScrollDown => apply_scroll(SCROLL_LINES as i32),
+                            MouseEventKind::ScrollUp => apply_scroll(-(SCROLL_LINES as i32)),
                             MouseEventKind::Down(MouseButton::Left) => {
                                 // 开始文本拖拽选中
                                 text_sel.write().start_drag(line_idx as u16, col_in_line);
@@ -513,16 +553,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                         // 鼠标在消息区外：滚轮 + 其他鼠标事件委托 ScrollViewState
                         // Left click outside → 不消费，让 InputArea 等组件处理点击光标定位
                         match mouse.kind {
-                            MouseEventKind::ScrollDown => {
-                                for _ in 0..SCROLL_LINES {
-                                    scroll_state.write().scroll_down();
-                                }
-                            }
-                            MouseEventKind::ScrollUp => {
-                                for _ in 0..SCROLL_LINES {
-                                    scroll_state.write().scroll_up();
-                                }
-                            }
+                            MouseEventKind::ScrollDown => apply_scroll(SCROLL_LINES as i32),
+                            MouseEventKind::ScrollUp => apply_scroll(-(SCROLL_LINES as i32)),
                             MouseEventKind::Down(MouseButton::Left) => {
                                 return EventResult::Ignored;
                             }
