@@ -221,6 +221,11 @@ pub static INPUT_HISTORY_INDEX: AtomStatic<Option<usize>> = AtomStatic::new(|| N
 /// 进入历史模式时保存的用户当前输入文本草稿。
 pub static DRAFT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 pub static INPUT_BUFFER: AtomStatic<VecDeque<String>> = AtomStatic::new(|| VecDeque::new());
+/// 取消时需恢复到输入框的文本。TurnInterrupted 零产出时写入，input_area 消费后清空。
+/// 使用非 atom 存储（OnceLock + Mutex）避免 render body 中写 atom 产生自激回路。
+/// TurnInterrupted 写入后递增 RENDER_HEARTBEAT 触发重渲染，input_area 消费文本并清空。
+pub static INPUT_RESTORE_TEXT: std::sync::OnceLock<parking_lot::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
 
 pub static FILE_LIST: AtomStatic<Vec<String>> = AtomStatic::new(|| Vec::new());
 pub static MENTION_PREFIX: AtomStatic<String> = AtomStatic::new(|| String::new());

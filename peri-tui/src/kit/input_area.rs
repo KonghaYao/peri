@@ -538,6 +538,26 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let popup_kind = *POPUP_KIND.state().read();
     let show_cursor = *term_focused.read() && active_panel.is_none() && popup_kind.is_none();
 
+    // 取消回滚文本恢复：use_effect 在 render 后运行，避免 render body 中写状态。
+    // TurnInterrupted 递增 RENDER_HEARTBEAT → AppShell 重渲染 → InputArea 级联重渲染 → effect 执行。
+    {
+        let _hb = hooks.use_atom(&crate::kit::atoms::RENDER_HEARTBEAT);
+        let hb_val = *_hb.read();
+        let state_for_effect = state.clone();
+        hooks.use_effect(
+            move || {
+                if let Some(text) = crate::kit::atoms::INPUT_RESTORE_TEXT
+                    .get()
+                    .and_then(|mu| mu.try_lock())
+                    .and_then(|mut g| g.take())
+                {
+                    state_for_effect.write().replace_all_no_undo(text);
+                }
+            },
+            hb_val,
+        );
+    }
+
     // 选区范围（从 TextAreaState 传递到渲染器）
     let selection_range = editor.selection_range();
     // 占位符文本：优先使用 prediction（Tab 补全），其次使用 editor 设定的占位符

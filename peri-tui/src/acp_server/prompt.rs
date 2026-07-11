@@ -252,9 +252,12 @@ pub(crate) async fn run_prompt(
                     "Agent cancelled with progress, preserving history"
                 );
             } else {
-                // Execution failed, cancelled early (no tool calls), or MaxIterationsExceeded.
-                // Roll back to pre-submit state — the TUI's handle_interrupted will also
-                // truncate view_messages and restore text to input for the no-tool-call case.
+                // Execution failed, cancelled early (no AI output), or MaxIterationsExceeded.
+                // Roll back LLM-side history to pre-submit state.
+                // The TUI's TurnInterrupted handler detects zero AI output (current_turn empty)
+                // and performs the corresponding UI rollback: removes the user bubble from
+                // committed + restores text to the input area via INPUT_RESTORE_TEXT storage
+                // + RENDER_HEARTBEAT trigger.
                 state.history.truncate(history_len);
                 info!(session_id = %session_id, history_len, "Agent execution failed/cancelled, rolled back history");
             }

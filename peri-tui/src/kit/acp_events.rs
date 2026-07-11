@@ -47,6 +47,9 @@ pub struct BridgeState {
     /// 与 agent 内部 compact 区分：命令 compact 后 current_turn 为空，
     /// agent 内部 compact 后 current_turn 有后续流事件。
     pub compact_just_completed: bool,
+    /// 本轮用户提交的文本——TurnInterrupted 零产出回滚时用于恢复输入框。
+    /// LocalUserBubble 到达时写入，TurnInterrupted 零产出时消费并清空。
+    pub last_submitted_text: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +268,34 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             }
         }
         TurnInterrupted { reason: _reason } => {
+            // 零产出回滚：Agent 尚未产出任何 AI 内容时（current_turn 为空），
+            // 撤销本次用户气泡 + 恢复文本到输入框。
+            // 仅当有 last_submitted_text 时才执行（正常情况下 LocalUserBubble 已到达）。
+            if state.current_turn.is_empty() && state.last_submitted_text.is_some() {
+                let restore_text = state.last_submitted_text.take().unwrap();
+                // 移除 committed 中最后一条用户气泡
+                if let Some(last) = state.committed.last() {
+                    if matches!(last, TuiRenderUnit::TuiUserBubble(_)) {
+                        let last_idx = state.committed.len().saturating_sub(1);
+                        state.committed.remove(last_idx);
+                    }
+                }
+                // 将文本放入恢复存储，递增 RENDER_HEARTBEAT 触发 input_area 重渲染
+                let mu = crate::kit::atoms::INPUT_RESTORE_TEXT
+                    .get_or_init(|| parking_lot::Mutex::new(None));
+                *mu.lock() = Some(restore_text);
+                RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
+                // 清除排队输入缓冲——取消后不应继续处理排队的输入
+                INPUT_BUFFER.state().write().clear();
+                state.current_turn = CurrentTurn::new();
+                state.variant = 0;
+                state.phase = SessionPhase::Idle;
+                ACP_STATE.state().write().is_loading = false;
+                push_view_models(state);
+                push_acp_state(state);
+                return;
+            }
+
             // 守卫：仅当 current_turn 有未归档内容时才归档
             if !state.current_turn.committed && !state.current_turn.is_empty() {
                 state.current_turn.deactivate();
@@ -542,6 +573,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // ── Unknown / forward-compat ──
         Unknown { .. } => {}
         LocalUserBubble { text } => {
+            state.last_submitted_text = Some(text.clone());
             state
                 .committed
                 .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
@@ -911,6 +943,7 @@ mod tests {
             generation: 0,
             active_session_id: String::new(),
             compact_just_completed: false,
+            last_submitted_text: None,
         };
 
         dispatch_and_notify(
@@ -1064,6 +1097,7 @@ mod tests {
             generation: 0,
             active_session_id: String::new(),
             compact_just_completed: false,
+            last_submitted_text: None,
         };
 
         // 第一轮：stream one text → TurnDone
@@ -1117,6 +1151,7 @@ mod tests {
             generation: 0,
             active_session_id: String::new(),
             compact_just_completed: false,
+            last_submitted_text: None,
         };
 
         // 往 current_turn 写入一条 assistant 文本
@@ -1165,6 +1200,7 @@ mod tests {
             generation: 0,
             active_session_id: String::new(),
             compact_just_completed: false,
+            last_submitted_text: None,
         };
 
         dispatch_and_notify(
@@ -1210,6 +1246,7 @@ mod tests {
             generation: 0,
             active_session_id: String::new(),
             compact_just_completed: false,
+            last_submitted_text: None,
         };
 
         // push_view_models: 用 BridgeState 数据（空 committed + 空 current_turn）→ 空 items
@@ -1297,6 +1334,7 @@ mod tests {
             generation: 0,
             active_session_id: String::new(),
             compact_just_completed: false,
+            last_submitted_text: None,
         };
 
         use peri_acp_types::event_data::Prediction;
@@ -1331,6 +1369,7 @@ mod tests {
             generation: 0,
             active_session_id: String::new(),
             compact_just_completed: false,
+            last_submitted_text: None,
         };
 
         let messages_json = serde_json::json!([
@@ -1368,6 +1407,7 @@ mod tests {
             generation: 0,
             active_session_id: String::new(),
             compact_just_completed: false,
+            last_submitted_text: None,
         };
 
         // === Turn 1: user bubble, reasoning + text → TurnDone ===
@@ -1510,6 +1550,7 @@ mod tests {
             generation: 0,
             active_session_id: "test-session".to_string(),
             compact_just_completed: true,
+            last_submitted_text: None,
         };
 
         dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
@@ -1534,6 +1575,7 @@ mod tests {
             generation: 0,
             active_session_id: "test-session".to_string(),
             compact_just_completed: false,
+            last_submitted_text: None,
         };
         state
             .current_turn

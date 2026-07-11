@@ -24,6 +24,7 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     state.generation = 0;
     state.phase = SessionPhase::Idle;
     state.popup_kind = None;
+    state.last_submitted_text = None;
     atoms::INPUT_BUFFER.state().write().clear();
     acp_events::push_view_models_for_reset();
     tracing::info!(
@@ -54,6 +55,7 @@ pub fn spawn_acp_bridge(
             generation: 0,
             active_session_id: String::new(),
             compact_just_completed: false,
+            last_submitted_text: None,
         };
 
         // 追踪 BRIDGE_RESET_COUNTER——submit_consumer 的 /clear / thread_load
@@ -100,6 +102,7 @@ pub fn spawn_acp_bridge(
                                 state.generation = 0;
                                 state.phase = SessionPhase::Idle;
                                 state.popup_kind = None;
+                                state.last_submitted_text = None;
                                 // 同步清空 INPUT_BUFFER：/clear 和 thread_load 切换时，
                                 // 递增 BRIDGE_RESET_COUNTER 触发此分支，旧会话 loading
                                 // 期间缓存的输入必须丢弃，防止新会话首个 TurnDone 时

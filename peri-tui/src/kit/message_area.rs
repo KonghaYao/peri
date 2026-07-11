@@ -601,10 +601,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     return;
                 }
 
-                // loading 期间：每次内容增长都强制吸底。last_scrolled_at 门控避免同高多次写入。
+                // loading 期间：内容增长时吸底。已在底部只更新门控，不复写 atom。
                 if loading {
                     if total_visual_rows > *lsa.read() {
-                        st.write().scroll_to_bottom();
+                        let max_scroll = total_visual_rows.saturating_sub(vis_height);
+                        let scroll_y = st.read().offset().y as u16;
+                        if scroll_y < max_scroll {
+                            st.write().scroll_to_bottom();
+                        }
                         *lsa.write() = total_visual_rows;
                     }
                     return;
