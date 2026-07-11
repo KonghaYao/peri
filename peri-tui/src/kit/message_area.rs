@@ -248,11 +248,12 @@ fn vm_to_lines(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>> {
                             lines.extend(seg_lines);
                         }
                         crate::kit::markdown::MarkdownSegment::Table(data) => {
-                            let table_border_style =
-                                Style::default().fg(ratatui::style::Color::Gray);
+                            let table_theme =
+                                ratatui_kit::components::TableTheme::from_palette(&palette_guard);
                             lines.extend(crate::kit::markdown::table_data_to_lines(
                                 &data,
-                                table_border_style,
+                                &table_theme,
+                                width,
                             ));
                         }
                     }
@@ -311,9 +312,10 @@ fn vm_to_lines(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>> {
                             "  ",
                             Style::default().bg(user_bg),
                         )]));
-                        let table_border_style = Style::default().fg(ratatui::style::Color::Gray);
+                        let table_theme =
+                            ratatui_kit::components::TableTheme::from_palette(&palette_guard);
                         let table_lines =
-                            crate::kit::markdown::table_data_to_lines(&data, table_border_style);
+                            crate::kit::markdown::table_data_to_lines(&data, &table_theme, width);
                         for tl in table_lines {
                             let mut spans = vec![Span::styled("  ", Style::default().bg(user_bg))];
                             for span in tl.spans {

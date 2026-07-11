@@ -6,7 +6,7 @@ use ratatui::text::Span;
 pub enum MarkdownSegment {
     /// 纯文本行（段落、标题、代码块、列表、分隔线等）。
     Text(Vec<ratatui::text::Line<'static>>),
-    /// 表格数据，由上层用 ratatui-kit Table 或 `table_data_to_lines` 渲染。
+    /// 表格数据，由 `table_data_to_lines` (ratatui-kit 风格 unicode 网格线) 渲染。
     Table(TableData),
 }
 

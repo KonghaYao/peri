@@ -12,7 +12,7 @@
 //! - `heading`：heading_line, heading_level_num
 //! - `list`：list_item_line
 //! - `code_block`：highlight_code_block, code_block_lines, syntect 单例
-//! - `table`：compute_table_col_widths, table_data_to_lines, build_grid_*
+//! - `table`：compute_table_col_widths, table_data_to_lines (ratatui-kit 风格渲染)
 //! - `convert`：convert_to_segments（块级分发）
 
 mod code_block;
