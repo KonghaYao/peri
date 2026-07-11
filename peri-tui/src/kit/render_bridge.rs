@@ -210,7 +210,12 @@ pub fn spawn_render_bridge(
                         rebuild_entries(&mut cache.entries, &snapshot.items, last_resize_width).await;
                     } else if stable > 0 && new_len >= old_len {
                         debug!(stable, "render_bridge: strategy=HASH_DIFF_APPEND");
-                        while cache.entries.len() > stable {
+                        // 按 item 边界截断——stable 是 item 数不是 entry 数。
+                        // 一个 item（如 assistant bubble 含 reasoning+text）可能产生多个 entry，
+                        // 直接截断到 stable 个 entry 会丢弃多 entry item 的后续 entry。
+                        while cache.entries.last().map_or(false, |(k, _)| {
+                            matches!(k, VmKey::Item(idx) if *idx >= stable)
+                        }) {
                             cache.entries.pop();
                         }
                         let tail: Vec<crate::kit::tui_render_unit::TuiRenderUnit> =
@@ -443,6 +448,29 @@ pub fn build_wrap_map(lines: &[Line<'static>], width: u16) -> Vec<WrappedLineInf
 mod tests {
     use super::*;
 
+    // ── 测试辅助函数 ────────────────────────────────────────────────────────
+
+    /// 创建占位的 Text RenderedEntry。
+    fn dummy_text_entry(height: usize) -> RenderedEntry {
+        RenderedEntry::Text {
+            height,
+            lines: Arc::from(vec![Line::from("")]),
+        }
+    }
+
+    /// 模拟 HASH_DIFF_APPEND 中的 item 边界截断逻辑。
+    /// 从 entries 尾部移除所有 index >= stable 的 item 的 entry。
+    fn truncate_by_item_boundary(entries: &mut Vec<(VmKey, RenderedEntry)>, stable: usize) {
+        while entries.last().map_or(
+            false,
+            |(k, _)| matches!(k, VmKey::Item(idx) if *idx >= stable),
+        ) {
+            entries.pop();
+        }
+    }
+
+    // ── 测试 ─────────────────────────────────────────────────────────────────
+
     /// M2: 构造 70000 个单行 Line 喂 build_wrap_map，断言返回 Vec 长度正确，
     /// 且末尾若干项 visual_row 停在 u16::MAX 不再错误增长（字段类型仍为 u16）。
     #[test]
@@ -467,5 +495,84 @@ mod tests {
         assert_eq!(cache.entries.len(), 0);
         assert_eq!(cache.cumulative_heights.len(), 0);
         let _default: RenderCache = RenderCache::default();
+    }
+
+    /// H6: HASH_DIFF_APPEND 按 item 边界截断，不按 entry 数截断。
+    ///
+    /// 场景：assistant bubble (index 1) 含 reasoning+text，产生 2 个 entry。
+    /// 当 stable=2（前 2 个 item content_hash 未变）时，
+    /// 旧逻辑截断到 2 entries → text entry 丢失，只剩 reasoning entry。
+    /// 新逻辑按 VmKey::Item(idx) 边界截断 → 保留 item 0 和 item 1 的全部 3 entries。
+    #[test]
+    fn test_hash_diff_append_respects_item_boundary() {
+        // Arrange: 3 items → 5 entries（item 1 产生 3 entries，item 2 产生 1 entry）
+        let mut entries: Vec<(VmKey, RenderedEntry)> = vec![
+            (VmKey::Item(0), dummy_text_entry(1)),
+            (VmKey::Item(1), dummy_text_entry(2)), // reasoning entry
+            (VmKey::Item(1), dummy_text_entry(3)), // text entry —— 旧逻辑会丢弃此 entry
+            (VmKey::Item(1), dummy_text_entry(2)), // 第三个 entry（如 markdown 第二段）
+            (VmKey::Item(2), dummy_text_entry(1)),
+        ];
+
+        // Act: stable=2，应移除 index >= 2 的 item 的 entry
+        truncate_by_item_boundary(&mut entries, 2);
+
+        // Assert: 保留 item 0 (1 entry) + item 1 (3 entries) = 4 entries
+        assert_eq!(
+            entries.len(),
+            4,
+            "应保留 item 0 和 item 1 的全部 entry，丢弃 item 2"
+        );
+        // 按 item 索引验证
+        let item_indices: Vec<usize> = entries
+            .iter()
+            .map(|(k, _)| match k {
+                VmKey::Item(idx) => *idx,
+            })
+            .collect();
+        assert_eq!(item_indices, vec![0, 1, 1, 1], "entry 应属于正确的 item");
+    }
+
+    /// H6: 单条目单 entry 场景下行为不变。
+    /// 每个 item 都只产生 1 个 entry 时，按边界截断应与旧行为一致。
+    #[test]
+    fn test_item_boundary_truncate_single_entry_per_item() {
+        let mut entries: Vec<(VmKey, RenderedEntry)> = vec![
+            (VmKey::Item(0), dummy_text_entry(1)),
+            (VmKey::Item(1), dummy_text_entry(2)),
+            (VmKey::Item(2), dummy_text_entry(3)),
+            (VmKey::Item(3), dummy_text_entry(1)),
+        ];
+
+        truncate_by_item_boundary(&mut entries, 2);
+
+        assert_eq!(entries.len(), 2, "应保留 item 0 和 item 1");
+        let indices: Vec<usize> = entries
+            .iter()
+            .map(|(k, _)| match k {
+                VmKey::Item(idx) => *idx,
+            })
+            .collect();
+        assert_eq!(indices, vec![0, 1]);
+    }
+
+    /// H6: stable=0 时不清除任何 entry（因为 condition 不会进入此分支）。
+    #[test]
+    fn test_item_boundary_truncate_stable_zero_noop() {
+        let mut entries: Vec<(VmKey, RenderedEntry)> = vec![
+            (VmKey::Item(0), dummy_text_entry(1)),
+            (VmKey::Item(1), dummy_text_entry(2)),
+        ];
+
+        truncate_by_item_boundary(&mut entries, 0);
+
+        // 外层 condition stable > 0 已保证不会调用，
+        // 但函数本身在 stable=0 时会尝试 pop 所有 index >= 0 的 entry
+        // （即全部 entry）。此处仅验证函数不 panic。
+        assert_eq!(
+            entries.len(),
+            0,
+            "stable=0 会清空全部 entry，由外层 guard 防止"
+        );
     }
 }
