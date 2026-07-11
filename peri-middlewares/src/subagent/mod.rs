@@ -183,7 +183,8 @@ pub struct SubAgentMiddleware {
     /// Frozen skills summary
     frozen_skill_summary: Option<Arc<String>>,
     /// bg 完成时的同步回调
-    on_bg_complete: Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
+    on_bg_complete:
+        Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
 }
 
 impl SubAgentMiddleware {

@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use peri_tui::kit::markdown::parse_markdown;
+use peri_tui::kit::markdown::{MarkdownSegment, parse_markdown};
 use peri_tui::kit::tui_render_unit::{
     TuiAssistantBubble, TuiNoteLevel, TuiRenderUnit, TuiSystemNote, TuiToolCard, TuiUserBubble,
 };
@@ -86,17 +86,22 @@ fn make_vm_list(count: usize) -> Vec<TuiRenderUnit> {
 
 fn render_vm(vm: &TuiRenderUnit, width: usize) -> Vec<ratatui::text::Line<'static>> {
     let palette = Palette::default();
-    match vm {
+    let segments = match vm {
         TuiRenderUnit::TuiUserBubble(d) => {
-            let parsed = parse_markdown(&d.text, width, palette);
-            parsed.lines.into_iter().collect()
+            crate::kit::markdown::parse_markdown(&d.text, width, palette)
         }
         TuiRenderUnit::TuiAssistantBubble(d) => {
-            let parsed = parse_markdown(&d.text, width, palette);
-            parsed.lines.into_iter().collect()
+            crate::kit::markdown::parse_markdown(&d.text, width, palette)
         }
-        _ => Vec::new(),
-    }
+        _ => vec![],
+    };
+    segments
+        .iter()
+        .flat_map(|s| match s {
+            MarkdownSegment::Text(lines) => lines.clone(),
+            MarkdownSegment::Table(_) => vec![],
+        })
+        .collect()
 }
 
 fn main() {
@@ -126,7 +131,11 @@ fn main() {
                     let take = (bytes.len() * (chunk_idx + 1) / chunk_count).max(1);
                     let truncated = String::from_utf8(bytes[..take].to_vec()).unwrap();
                     let parsed = parse_markdown(&truncated, 100, default_palette);
-                    all_lines.extend(parsed.lines.iter().cloned());
+                    for seg in &parsed {
+                        if let MarkdownSegment::Text(lines) = seg {
+                            all_lines.extend(lines.iter().cloned());
+                        }
+                    }
                 }
             } else {
                 all_lines.extend(render_vm(vm, 100));
@@ -148,7 +157,13 @@ fn main() {
             let take = (bytes.len() * (chunk_idx + 1) / chunk_count).max(1);
             let truncated = String::from_utf8(bytes[..take].to_vec()).unwrap();
             let parsed = parse_markdown(&truncated, 100, default_palette);
-            cached_lines[last_idx] = parsed.lines.into_iter().collect();
+            cached_lines[last_idx] = parsed
+                .iter()
+                .flat_map(|s| match s {
+                    MarkdownSegment::Text(lines) => lines.clone(),
+                    MarkdownSegment::Table(_) => vec![],
+                })
+                .collect();
         }
         let _all_lines: Vec<&ratatui::text::Line<'static>> =
             cached_lines.iter().flat_map(|v| v.iter()).collect();

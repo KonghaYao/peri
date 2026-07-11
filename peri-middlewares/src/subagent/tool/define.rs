@@ -120,7 +120,8 @@ pub struct SubAgentTool {
     /// Frozen skills summary。
     pub(crate) frozen_skill_summary: Option<Arc<String>>,
     /// bg 完成时的同步回调：在 invoke_background 路径调用 registry.complete() 之前执行
-    pub(crate) on_bg_complete: Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
+    pub(crate) on_bg_complete:
+        Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
 }
 
 impl SubAgentTool {

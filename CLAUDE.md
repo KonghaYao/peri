@@ -209,6 +209,109 @@ TUI 纯 ACP client，通过 `MpscTransport` 通信。Frozen Data Flow：`frozen_
 
 命名 `test_<对象>_<场景>`；注释/断言用中文。Arrange-Act-Assert 无空行。Mock `make_` 前缀，不用 Mock struct。
 
+## Theme 颜色使用规范（2026-07-10）
+
+**统一入口**：所有颜色必须从 `peri-theme` crate 的三个 Atom 获取，禁止硬编码色值（`#4EBA65`/`Color::Rgb(...)` 等）。
+
+### 三个 Atom
+
+| Atom | 类型 | 用途 |
+|------|------|------|
+| `THEME_ATOM` | `Atom<Arc<ThemeDefinition>>` | 完整主题定义——semantic + component tokens，最常用 |
+| `PALETTE_ATOM` | `Atom<Palette>` (Copy) | ratatui-kit PaletteProvider 注入（AppShell 用） |
+| `PERI_COLORS_ATOM` | `Atom<Arc<PeriColors>>` | Palette 未覆盖的扩展色字段 |
+
+### 消费方式
+
+**`#[component]` 函数**：用 `hooks.use_atom(&THEME_ATOM)`。
+
+```rust
+use peri_theme::atoms::THEME_ATOM;
+
+#[component]
+fn MyComponent(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
+    // 方式 A：内联（适合少量调用，每处独立 read）
+    let primary = theme_def.read().semantic.text.primary;
+    // 方式 B：预取 guard（适合密集调用，一次 read 多次使用）
+    let guard = theme_def.read();
+    let semantic = &guard.semantic;
+    let component = &guard.component;
+    // ... 大量使用 semantic.xxx / component.xxx
+}
+```
+
+**非 `#[component]` 函数**：两步绑定，避免悬垂引用。
+
+```rust
+use peri_theme::atoms::THEME_ATOM;
+
+fn helper() -> Color {
+    // 正确：内联访问——guard 仅在当前语句存活，Color 为 Copy
+    THEME_ATOM.state().read().semantic.text.primary
+}
+
+fn helper_with_ref() {
+    // 正确：两步绑定拿引用
+    let state = THEME_ATOM.state();
+    let guard = state.read();
+    let popup = &guard.component.popup;
+    // popup 在 guard 存活期内有效
+}
+```
+
+### TRAP 集合
+
+**[TRAP]** `&THEME_ATOM.state().read().xxx` 产生悬垂引用——`.state()` 创建的临时值在语句末尾释放导致 `&` 引用失效。必须两步绑定：`let state = THEME_ATOM.state(); let guard = state.read();`。
+
+**[TRAP]** `let tokens = &theme_def.read().xxx` 中 `theme_def.read()` 返回 `ReactiveRef` 临时值，`&` 引用在语句末尾失效。须改为 `let guard = theme_def.read(); let tokens = &guard.xxx;`。
+
+**[TRAP]** `theme_def.semantic` 不能直接访问——`ReactiveHandle` 不实现 `Deref` 到内部类型。必须写 `theme_def.read().semantic`。
+
+**[TRAP]** 禁止在 render body 中调用 `THEME_ATOM.state().read()`——应在事件处理器或 hook 中预读，render 仅使用已读取的值。（见 ratatui-kit render 禁止写 atom 的铁律）
+
+### 面板组件模板
+
+新建面板时参考此结构：
+
+```rust
+use peri_theme::atoms::THEME_ATOM;
+use crate::app::panel_types::PanelKind;
+use crate::kit::list_nav::{next_selection, previous_selection};
+// ... other imports ...
+
+#[component]
+pub fn NewPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
+    let selected = hooks.use_state(|| 0usize);
+    // event_handler 中操作 selected，不要读 theme
+
+    let guard = theme_def.read();
+    // render logic: guard.semantic.xxx, guard.component.xxx
+
+    panel_shell!(PanelKind::NewPanel, {
+        // layout...
+    })
+}
+```
+
+### 主题切换
+
+| 触发方式 | 机制 |
+|----------|------|
+| 用户 `/theme` 命令 | Ctrl+E 或斜杠命令打开 ThemePanel，Enter 切换 |
+| 程序化 | `peri_theme::atoms::init_theme_atoms(theme_arc)` |
+| 启动加载 | `AppConfig.theme: Option<String>` 字段，`kit/entry.rs` 读取并调用 `load_theme()` |
+
+**切换时必须同时更新三个 atom**：
+```rust
+let palette = theme.to_palette();
+let peri = Arc::new(theme.to_peri_colors());
+THEME_ATOM.state().set(theme_arc);
+PALETTE_ATOM.state().set(palette);
+PERI_COLORS_ATOM.state().set(peri);
+```
+
 ## 开发注意事项
 
 - 测试隔离：`App::save_config(cfg, self.config_path_override.as_deref())`

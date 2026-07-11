@@ -246,7 +246,12 @@ fn collect_debug_export_lines(mode: ExportMode) -> Vec<Line<'static>> {
     let all_lines: Vec<Line<'static>> = cache
         .entries
         .iter()
-        .flat_map(|(_, entry)| entry.lines.iter().cloned())
+        .flat_map(|(_, entry)| match entry {
+            crate::kit::render_bridge::RenderedEntry::Text { lines, .. } => {
+                lines.iter().cloned().collect::<Vec<_>>()
+            }
+            crate::kit::render_bridge::RenderedEntry::Table { .. } => vec![],
+        })
         .collect();
     match mode {
         ExportMode::All => all_lines,

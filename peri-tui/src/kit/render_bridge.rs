@@ -17,6 +17,7 @@ use tracing::{debug, info};
 
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::{ACP_STATE, RENDER_CACHE, VIEW_MODELS};
+use crate::kit::markdown::MarkdownSegment;
 use crate::kit::view_render;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -24,10 +25,27 @@ pub enum VmKey {
     Item(usize),
 }
 
+/// 预渲染条目：文本行或表格数据。
 #[derive(Debug, Clone)]
-pub struct RenderedEntry {
-    pub height: usize,
-    pub lines: Arc<[Line<'static>]>,
+pub enum RenderedEntry {
+    /// 纯文本行（已转为 `Arc<[Line]>`）。
+    Text {
+        height: usize,
+        lines: Arc<[Line<'static>]>,
+    },
+    /// 表格数据，由 message_area 用 ratatui-kit Table 组件渲染。
+    Table {
+        height: usize,
+        data: Arc<crate::kit::markdown::TableData>,
+    },
+}
+
+impl RenderedEntry {
+    pub fn height(&self) -> usize {
+        match self {
+            RenderedEntry::Text { height, .. } | RenderedEntry::Table { height, .. } => *height,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -332,15 +350,30 @@ async fn append_entries(
     let mut next_yield_at: usize = YIELD_EVERY;
     for (offset, vm) in items.iter().enumerate() {
         let key = VmKey::Item(start_index + offset);
-        let lines = view_render::render_v2_vm(vm, width);
-        let height = visual_height(&lines, width);
-        entries.push((
-            key,
-            RenderedEntry {
-                height,
-                lines: Arc::from(lines),
-            },
-        ));
+        for seg in view_render::render_v2_vm(vm, width) {
+            match seg {
+                MarkdownSegment::Text(lines) => {
+                    let height = visual_height(&lines, width);
+                    entries.push((
+                        key.clone(),
+                        RenderedEntry::Text {
+                            height,
+                            lines: Arc::from(lines),
+                        },
+                    ));
+                }
+                MarkdownSegment::Table(table) => {
+                    let height = table_height(&table);
+                    entries.push((
+                        key.clone(),
+                        RenderedEntry::Table {
+                            height,
+                            data: Arc::new(table),
+                        },
+                    ));
+                }
+            }
+        }
         let call_count = view_render::RENDER_CALL_COUNT.with(|c| c.load(Ordering::Relaxed));
         if call_count >= next_yield_at {
             tokio::task::yield_now().await;
@@ -351,11 +384,17 @@ async fn append_entries(
     view_render::RENDER_CALL_COUNT.with(|c| c.store(0, Ordering::Relaxed));
 }
 
+/// 估算表格渲染高度（边框 + 表头 + 数据行）。
+fn table_height(table: &crate::kit::markdown::TableData) -> usize {
+    let header = usize::from(!table.headers.is_empty());
+    3 + header + table.rows.len()
+}
+
 fn rebuild_cumulative_heights(cache: &mut RenderCache) {
     cache.cumulative_heights.clear();
     let mut sum = 0usize;
     for (_, entry) in &cache.entries {
-        sum = sum.saturating_add(entry.height);
+        sum = sum.saturating_add(entry.height());
         cache.cumulative_heights.push(sum);
     }
 }

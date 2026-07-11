@@ -79,7 +79,8 @@ pub struct BgForkConfig {
     pub fork_directive_kind: BgForkDirectiveKind,
     /// bg 完成时的同步回调：在 registry.complete() 之前调用
     /// 用于将 bg 结果（Defer 消息）同步推入主 agent 的 MQ
-    pub on_bg_complete: Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
+    pub on_bg_complete:
+        Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
     /// Frozen CLAUDE.md main content（session/new 时捕获，SubAgent 复用以避免漂移）
     pub frozen_claude_md: Option<Arc<String>>,
     /// Frozen CLAUDE.local.md content
