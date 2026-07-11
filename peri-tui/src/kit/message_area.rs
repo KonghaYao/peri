@@ -9,7 +9,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::i18n;
 use crate::kit::atoms::{LANG_VERSION, VIEW_MODELS};
@@ -39,6 +39,24 @@ use ratatui_kit::{
 
 /// 鼠标滚轮每格的滚动行数倍数。
 const SCROLL_LINES: u16 = 3;
+
+/// 滚动节流窗口：≥16ms（≈60fps）才把累积 delta 推入 scroll_state。
+const SCROLL_FRAME_MS: u64 = 16;
+
+#[derive(Debug, Clone)]
+struct ScrollThrottle {
+    last_flush: Instant,
+    pending_delta: i32, // positive = scroll_down, negative = scroll_up
+}
+
+impl Default for ScrollThrottle {
+    fn default() -> Self {
+        Self {
+            last_flush: Instant::now(),
+            pending_delta: 0,
+        }
+    }
+}
 
 // ── Todo 类型 ─────────────────────────────────────────────────────────────
 
@@ -717,6 +735,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 渲染缓存：generation 不变则复用上次的 Lines，避免每帧做 markdown 解析+syntect ──
     let lines_cache = hooks.use_state(|| (0u64, 0usize, Vec::<Line<'static>>::new()));
 
+    // ── total_visual_rows 缓存：仅 (generation, width, lines_len) 变化时重算 line_count ──
+    // [TRAP] Paragraph::line_count 是 O(N·W)（unicode-width + wrap），每帧重算会拖垮长对话滚动。
+    // cache 仅供 render body 读，不作为响应式源——用 write_no_update 写入避免 wake 自激回路。
+    let total_rows_cache = hooks.use_state(|| (0u64, 0u16, 0usize, 0u16));
+
     // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
     let footer_lines = build_footer_lines(&mut hooks, is_loading, &todo_items);
 
@@ -758,7 +781,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let scroll_state = hooks.use_state(ScrollViewState::default);
     let prev_items_len = hooks.use_state(|| 0usize);
     let _prev_is_loading = hooks.use_state(|| false);
-    let _scroll_throttle = hooks.use_state(|| 0u8);
+    let scroll_throttle = hooks.use_state(ScrollThrottle::default);
     let _todo_hash = hash_todo_items(&todo_items);
 
     // ── 消息区位置追踪 ──
@@ -771,14 +794,34 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .max(1);
     let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
 
-    // ── 总视觉行数：使用 Paragraph wrap 预测 ──
-    let total_visual_rows: u16 = if all_lines.is_empty() {
-        if is_loading { 1 } else { 0 }
-    } else {
-        Paragraph::new(RatText::from(all_lines.clone()))
-            .wrap(Wrap { trim: false })
-            .line_count(vis_width as u16) as u16
+    // ── 总视觉行数：使用 Paragraph wrap 预测（带缓存）──
+    let lines_len = all_lines.len();
+    let cached = {
+        let g = total_rows_cache.read();
+        (g.0, g.1, g.2, g.3)
     };
+    let total_visual_rows: u16 =
+        if cached.0 == vm_generation && cached.1 == vis_width && cached.2 == lines_len {
+            cached.3
+        } else if all_lines.is_empty() {
+            let rows: u16 = if is_loading { 1 } else { 0 };
+            let mut g = total_rows_cache.write_no_update();
+            g.0 = vm_generation;
+            g.1 = vis_width;
+            g.2 = lines_len;
+            g.3 = rows;
+            rows
+        } else {
+            let rows = Paragraph::new(RatText::from(all_lines.clone()))
+                .wrap(Wrap { trim: false })
+                .line_count(vis_width as u16) as u16;
+            let mut g = total_rows_cache.write_no_update();
+            g.0 = vm_generation;
+            g.1 = vis_width;
+            g.2 = lines_len;
+            g.3 = rows;
+            rows
+        };
 
     // ── 鼠标事件处理（仅滚动，移除文本选中）──
     {
@@ -793,39 +836,45 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     return EventResult::Ignored;
                 }
 
+                // 滚动节流：累积 delta，仅在距上次 flush ≥ SCROLL_FRAME_MS(16ms) 时推入 scroll_state。
+                // write_no_update 不触发 notifier.wake()——依赖 dispatch 后 ratatui-kit loop 强制 render。
+                let apply_scroll = |delta: i32| {
+                    let mut st = scroll_throttle.write_no_update();
+                    st.pending_delta += delta;
+                    let now = Instant::now();
+                    if now.duration_since(st.last_flush) >= Duration::from_millis(SCROLL_FRAME_MS) {
+                        let pending = st.pending_delta;
+                        st.pending_delta = 0;
+                        st.last_flush = now;
+                        drop(st);
+                        if pending != 0 {
+                            let mut state = scroll_state.write_no_update();
+                            if pending > 0 {
+                                for _ in 0..(pending as u16) {
+                                    state.scroll_down();
+                                }
+                            } else {
+                                for _ in 0..((-pending) as u16) {
+                                    state.scroll_up();
+                                }
+                            }
+                        }
+                    }
+                };
+
                 if let Some(area) = area_rect {
                     let in_area = mouse_in_area(mouse.row, mouse.column, area);
 
                     if in_area {
                         match mouse.kind {
-                            MouseEventKind::ScrollDown => {
-                                let mut state = scroll_state.write();
-                                for _ in 0..SCROLL_LINES {
-                                    state.scroll_down();
-                                }
-                            }
-                            MouseEventKind::ScrollUp => {
-                                let mut state = scroll_state.write();
-                                for _ in 0..SCROLL_LINES {
-                                    state.scroll_up();
-                                }
-                            }
+                            MouseEventKind::ScrollDown => apply_scroll(SCROLL_LINES as i32),
+                            MouseEventKind::ScrollUp => apply_scroll(-(SCROLL_LINES as i32)),
                             _ => {}
                         }
                     } else {
                         match mouse.kind {
-                            MouseEventKind::ScrollDown => {
-                                let mut state = scroll_state.write();
-                                for _ in 0..SCROLL_LINES {
-                                    state.scroll_down();
-                                }
-                            }
-                            MouseEventKind::ScrollUp => {
-                                let mut state = scroll_state.write();
-                                for _ in 0..SCROLL_LINES {
-                                    state.scroll_up();
-                                }
-                            }
+                            MouseEventKind::ScrollDown => apply_scroll(SCROLL_LINES as i32),
+                            MouseEventKind::ScrollUp => apply_scroll(-(SCROLL_LINES as i32)),
                             MouseEventKind::Down(MouseButton::Left) => {
                                 return EventResult::Ignored;
                             }
