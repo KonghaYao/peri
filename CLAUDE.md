@@ -74,7 +74,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 | `kit/acp_bridge.rs` | BridgeState → Atom 写入 | acp_notifier |
 | `kit/acp_events.rs` | `push_view_models`: BridgeState → VIEW_MODELS | acp_bridge |
 | `kit/acp_notifier.rs` | ACP 通知 → AcpEventData → bridge_tx | entry |
-| `kit/message_area.rs` | 消息区渲染（视口裁剪+节流） | 读 VIEW_MODELS |
+| `kit/message_area/` | 消息区渲染（视口裁剪+节流）；子模块 mod/render/selection/scroll/footer/props | 读 VIEW_MODELS |
 | `kit/input_area.rs` | 输入框（多行/history/@mention/slash） | 写 SUBMIT_TX |
 | `kit/panels/` | 15 面板（Model/Config/Cron/ThreadBrowser...） | app/panel_types |
 | `kit/popups/` | 4 弹窗（HITL/AskUser/Rewind/OAuth） | acp_events |
@@ -159,7 +159,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 | 改 LLM Provider 调用 | `peri-agent/src/llm/{openai,anthropic}/invoke.rs` | System hoist 规则：禁止 `BaseMessage::system()` 中途注入 |
 | 新增 TUI 面板 | `peri-tui/src/kit/panels/` → `app/panel_types.rs:7` 的 `PanelKind` | 用 `panel_shell!` 宏 + `MutexGroup` 分组 |
 | 改 系统提示词 | `peri-acp/prompts/sections/`（14 个 .md 段落） | 静态段结构不可变（破坏 prompt cache） |
-| 改 TUI 渲染 | `message_area.rs`（主渲染）+ `acp_bridge.rs`（事件→状态）+ `acp_events.rs`（push_view_models） | VIEW_MODELS 是唯一数据源 |
+| 改 TUI 渲染 | `message_area/`（主渲染，子模块 mod/render/selection/scroll/footer/props）+ `acp_bridge.rs`（事件→状态）+ `acp_events.rs`（push_view_models） | VIEW_MODELS 是唯一数据源 |
 | 改 SubAgent | `peri-middlewares/src/subagent/`（工具/构建器/spawner/v2_bridge） | frozen 数据必须从 main agent 透传 |
 | 改 MCP 配置 | `peri-middlewares/src/mcp/`（initialize/reconnect）+ `~/.peri/settings.json` | 三层合并：全局→插件→项目 `.mcp.json` |
 | 改 Plugin 系统 | `peri-middlewares/src/plugin/`（installer/marketplace/config） | 兼容 Claude Code 生态 |

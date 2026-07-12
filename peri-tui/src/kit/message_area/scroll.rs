@@ -273,6 +273,7 @@ pub(super) struct AutoFollowCtx {
 /// 从 `use_effect` 闭包提取的吸底逻辑。
 /// 注意：use_effect body 不是 render body，所以 `write()` 是正确的（需要 wake 触发后续渲染）。
 pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
+    // [TRAP] parking_lot 同 thread 死锁规避：先 read copy 出 owned，guard 在语句末尾 drop，再 write。
     let prev = *ctx.prev_items_len.read();
     *ctx.prev_items_len.write() = ctx.items_len;
 
