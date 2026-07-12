@@ -29,7 +29,7 @@ peri-tui/src/kit/message_area/  ← 新建目录
 **搬迁铁律（来自 spec §3 trap 表）**：
 - `lines_cache.2` / `wrap_map_cache.2` 必须保持 `Arc<Vec<...>>`，**不得改为 `Vec`**
 - Drag/Up 事件中 `selection_down_pos.read()` / `text_sel.read()` 必须**先 copy 出 owned 值，drop guard，再 write**——parking_lot 同 thread 死锁
-- 所有缓存更新用 `write_no_update()`，不用 `write()`
+- **render body 或 wake 噪音路径内**的缓存更新用 `write_no_update()`，不用 `write()`。**例外**：`use_effect` body 内的 `prev_items_len`、`last_scrolled_at`、`init_frames` 等**必须保持 `write()`**——`use_effect` 不是 render body，需要 wake 触发后续渲染
 - 28 个 hook 调用顺序在 mod.rs 中 byte-for-byte 保持
 
 ---
@@ -172,8 +172,11 @@ use peri_theme::atoms::THEME_ATOM;
 
 ```rust
 mod props;
-use props::{MessageAreaProps, MsgAreaTracker, ScrollbarFields, ScrollbarHook, mouse_in_area};
+pub use props::MessageAreaProps;
+use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook, mouse_in_area};
 ```
+
+**注意**：`MessageAreaProps` 必须是 `pub use`，因为 `kit/text_selection.rs` 通过 `crate::kit::message_area::MessageAreaProps` 路径外部引用。其余 4 个仅 mod.rs 内部使用，普通 `use` 即可。
 
 (b) 删除 mod.rs 中已搬迁的代码块：226–306 行（mouse_in_area / MsgAreaTracker / ScrollbarFields / ScrollbarHook / MessageAreaProps）。删除后 mod.rs 行号会变化，后续 task 引用新行号。
 
@@ -833,7 +836,7 @@ wc -l peri-tui/src/kit/message_area/*.rs
 修改 `CLAUDE.md` 中"核心文件树"段。找到：
 
 ```
-peri-tui/src/kit/message_area.rs  # 消息区（ScrollView + 视口裁剪 + Todo）
+peri-tui/src/kit/message_area.rs  # 消息区（直接消费 VIEW_MODELS，视口裁剪 + ScrollThrottle）
 ```
 
 替换为：
@@ -891,7 +894,7 @@ git log --oneline main..HEAD
 grep -rn "crate::kit::message_area::" peri-tui/src/ | grep -v "peri-tui/src/kit/message_area/"
 ```
 
-确认 5 处外部调用（atoms.rs / acp_events.rs / acp_notifier.rs / thread_load_consumer.rs / submit_consumer.rs）都只引用 `TodoItem` 或 `TodoStatus`——这两个通过 mod.rs `pub use` 重导出，路径不变。
+确认 6 处外部调用（atoms.rs / acp_events.rs / acp_notifier.rs / thread_load_consumer.rs / submit_consumer.rs / layout.rs）都只引用 `TodoItem`、`TodoStatus` 或 `MessageAreaProps`——前两者通过 mod.rs `pub use` 重导出，`MessageAreaProps` 由 Task 2 已改为 `pub use props::MessageAreaProps`，路径均不变。
 
 - [ ] **Step 3: 完成报告**
 

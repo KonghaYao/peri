@@ -342,7 +342,7 @@ pub(super) fn extract_visual_range(
 当前写的是：
 
 ```
-peri-tui/src/kit/message_area.rs  # 消息区（ScrollView + 视口裁剪 + Todo）
+peri-tui/src/kit/message_area.rs  # 消息区（直接消费 VIEW_MODELS，视口裁剪 + ScrollThrottle）
 ```
 
 重组后更新为：
