@@ -9,16 +9,13 @@
 #![allow(clippy::needless_update)]
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use crate::kit::atoms::{LANG_VERSION, VIEW_MODELS};
-use crate::kit::focus_router;
 use crate::kit::text_selection::TextSelection;
 use crate::kit::welcome::Welcome;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     components::ScrollViewState,
-    crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
@@ -30,54 +27,15 @@ use ratatui_kit::{
 mod footer;
 mod props;
 mod render;
+mod scroll;
 mod selection;
 pub use footer::{TodoItem, TodoStatus};
 use footer::{build_footer_lines, hash_todo_items};
 pub use props::MessageAreaProps;
-use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook, mouse_in_area};
+use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
 use render::vm_to_lines;
-use selection::{
-    WrappedLineInfo, build_wrap_map, copy_to_clipboard, extract_visual_range, mark_copy_message,
-    viewport_logical_range, visual_to_logical,
-};
-
-// ── 滚动速度控制 ──────────────────────────────────────────────────────────
-
-/// 鼠标滚轮每格的滚动行数倍数。
-const SCROLL_LINES: u16 = 3;
-
-/// 滚动节流窗口：≥16ms（≈60fps）才把累积 delta 推入 scroll_state。
-const SCROLL_FRAME_MS: u64 = 16;
-
-#[derive(Debug, Clone)]
-struct ScrollThrottle {
-    last_flush: Instant,
-    pending_delta: i32, // positive = scroll_down, negative = scroll_up
-}
-
-impl Default for ScrollThrottle {
-    fn default() -> Self {
-        Self {
-            last_flush: Instant::now(),
-            pending_delta: 0,
-        }
-    }
-}
-
-// ── 拖拽选中节流 ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct DragThrottle {
-    last_flush: Instant,
-}
-
-impl Default for DragThrottle {
-    fn default() -> Self {
-        Self {
-            last_flush: Instant::now(),
-        }
-    }
-}
+use scroll::{DragThrottle, ScrollThrottle};
+use selection::{WrappedLineInfo, build_wrap_map, viewport_logical_range, visual_to_logical};
 
 // ── 组件 ──────────────────────────────────────────────────────────────────
 
@@ -249,181 +207,18 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     {
         hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
-            if let Event::Key(key) = &event {
-                let _ = focus_router::message_accepts_key(key);
-            }
-
-            if let Event::Mouse(mouse) = &event {
-                // 光标移动无操作——提前返回，不触发任何 state 写入或渲染
-                if matches!(mouse.kind, MouseEventKind::Moved) {
-                    return EventResult::Ignored;
-                }
-
-                // 滚动节流
-                let apply_scroll = |delta: i32| {
-                    let mut st = scroll_throttle.write_no_update();
-                    st.pending_delta += delta;
-                    let now = Instant::now();
-                    if now.duration_since(st.last_flush) >= Duration::from_millis(SCROLL_FRAME_MS) {
-                        let pending = st.pending_delta;
-                        st.pending_delta = 0;
-                        st.last_flush = now;
-                        drop(st);
-                        if pending != 0 {
-                            let mut state = scroll_state.write_no_update();
-                            if pending > 0 {
-                                for _ in 0..(pending as u16) {
-                                    state.scroll_down();
-                                }
-                            } else {
-                                for _ in 0..((-pending) as u16) {
-                                    state.scroll_up();
-                                }
-                            }
-                        }
-                    }
-                };
-
-                if let Some(area) = area_rect {
-                    let in_area = mouse_in_area(mouse.row, mouse.column, area);
-
-                    // [DEBUG] PERI_DISABLE_DRAG_SELECT=1 完全跳过 Drag 选中——验证是否是
-                    // Drag 处理逻辑引起卡死。
-                    let drag_select_disabled = std::env::var("PERI_DISABLE_DRAG_SELECT")
-                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                        .unwrap_or(false);
-
-                    // ── 文本选中处理（消息区内 Down/Drag/Up）──
-                    if in_area && !drag_select_disabled {
-                        match mouse.kind {
-                            MouseEventKind::Down(MouseButton::Left) => {
-                                // 仅记录按下的位置，不启动选区——真实拖动才开始选中
-                                // [TRAP] selection_down_pos 只在事件处理器内读写，render
-                                // 不依赖它——用 write_no_update 避免 wake 噪音（render 不需要
-                                // 因为这个状态变化而重渲染，后续 Drag 才是真正的渲染触发点）。
-                                let scroll_y = scroll_state.read().offset().y as u16;
-                                let visual_row =
-                                    mouse.row.saturating_sub(area.y).saturating_add(scroll_y);
-                                // 视口裁剪后无边框，visual_col 直接 = mouse.column - area.x
-                                let visual_col = mouse.column.saturating_sub(area.x);
-                                *selection_down_pos.write_no_update() =
-                                    Some((visual_row, visual_col));
-                                return EventResult::Consumed;
-                            }
-                            MouseEventKind::Drag(MouseButton::Left) => {
-                                // Drag 节流（16ms），write_no_update 避免自激回路
-                                let now = Instant::now();
-                                {
-                                    let dt = drag_throttle.read();
-                                    if dt.last_flush.elapsed()
-                                        < Duration::from_millis(SCROLL_FRAME_MS)
-                                    {
-                                        return EventResult::Consumed;
-                                    }
-                                }
-                                drag_throttle.write_no_update().last_flush = now;
-
-                                let scroll_y = scroll_state.read().offset().y as u16;
-                                let visual_row =
-                                    mouse.row.saturating_sub(area.y).saturating_add(scroll_y);
-                                let visual_col = mouse.column.saturating_sub(area.x);
-
-                                // 单次 write guard，drop 时只 wake 一次（不是两次）
-                                // start_drag + update_drag 合并到同一 guard 内
-                                //
-                                // [TRAP] ratatui-kit 用 parking_lot::RwLock——同一 thread 同时
-                                // 持有 read + write 时 try_write 返回 Err → expect panic。
-                                // 必须先把 selection_down_pos.read() 的值 copy 出来 drop guard，
-                                // 再 write selection_down_pos。
-                                let down_pos = *selection_down_pos.read();
-                                {
-                                    let mut sel_guard = text_sel.write();
-                                    if let Some((dr, dc)) = down_pos {
-                                        sel_guard.start_drag(dr, dc);
-                                        *selection_down_pos.write_no_update() = None;
-                                    }
-                                    sel_guard.update_drag(visual_row, visual_col);
-                                }
-                                return EventResult::Consumed;
-                            }
-                            MouseEventKind::Up(MouseButton::Left) => {
-                                *selection_down_pos.write_no_update() = None;
-                                // [TRAP] 同 Drag 处理：必须 copy 出 text_sel 状态后再 write，
-                                // 否则 read+write 同 thread 冲突 panic。
-                                let dragging = text_sel.read().dragging;
-                                if !dragging {
-                                    return EventResult::Consumed;
-                                }
-                                // 先 copy 出 normalized_bounds（owned Option），drop read guard
-                                let bounds = text_sel.read().normalized_bounds();
-                                let extracted: Option<String> =
-                                    if let Some(((sr, sc), (er, ec))) = bounds {
-                                        let wrap_guard = wrap_map_cache.read();
-                                        let lines_guard = lines_cache.read();
-                                        extract_visual_range(
-                                            &lines_guard.2,
-                                            &wrap_guard.2,
-                                            (sr, sc),
-                                            (er, ec),
-                                            vis_width,
-                                        )
-                                    } else {
-                                        None
-                                    };
-
-                                // 清除选区（start/end/dragging 全清），wake 触发重渲染清除 highlight
-                                {
-                                    let mut sel = text_sel.write();
-                                    sel.clear();
-                                }
-
-                                // 复制（独立线程，不阻塞）
-                                if let Some(text) = extracted {
-                                    let char_count = text.chars().count();
-                                    copy_to_clipboard(text);
-                                    mark_copy_message(char_count);
-                                }
-
-                                return EventResult::Consumed;
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        // 鼠标在消息区外
-                        match mouse.kind {
-                            MouseEventKind::Down(MouseButton::Left) => {
-                                // 清除选区和按下记录
-                                *text_sel.write() = TextSelection::new();
-                                *selection_down_pos.write_no_update() = None;
-                                return EventResult::Ignored;
-                            }
-                            _ => {
-                                if matches!(mouse.kind, MouseEventKind::Drag(_)) {
-                                    return EventResult::Ignored;
-                                }
-                            }
-                        }
-                    }
-
-                    // ── 滚动处理（区域内外通用）──
-                    match mouse.kind {
-                        MouseEventKind::ScrollDown => apply_scroll(SCROLL_LINES as i32),
-                        MouseEventKind::ScrollUp => apply_scroll(-(SCROLL_LINES as i32)),
-                        _ => {}
-                    }
-                }
-
-                // 所有非 Moved/Drag 鼠标事件标记为已消费（防止泄漏到下层组件）
-                return EventResult::Consumed;
-            }
-
-            if let Event::Key(key) = &event {
-                if key.kind == KeyEventKind::Press && focus_router::message_accepts_key(key) {
-                    scroll_state.write().handle_event(&event);
-                    return EventResult::Consumed;
-                }
-            }
-            EventResult::Ignored
+            scroll::handle_event(
+                &event,
+                area_rect,
+                vis_width,
+                &scroll_state,
+                &scroll_throttle,
+                &text_sel,
+                &selection_down_pos,
+                &drag_throttle,
+                &wrap_map_cache,
+                &lines_cache,
+            )
         });
     }
 
@@ -431,53 +226,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let last_scrolled_at = hooks.use_state(|| 0u16);
     hooks.use_effect(
         {
-            let st = scroll_state;
-            let pl = prev_items_len;
-            let lsa = last_scrolled_at;
-            let len = items_len;
-            let loading = is_loading;
             move || {
-                let prev = *pl.read();
-                *pl.write() = len;
-
-                if total_visual_rows == 0 || vis_height == 0 {
-                    return;
-                }
-
-                if loading {
-                    // [TRAP] read+write 同 state 同线程 = parking_lot 死锁——先 copy 出来
-                    let prev_lsa = *lsa.read();
-                    if total_visual_rows > prev_lsa {
-                        let max_scroll = total_visual_rows.saturating_sub(vis_height);
-                        let scroll_y = st.read().offset().y as u16;
-                        if scroll_y < max_scroll {
-                            st.write().scroll_to_bottom();
-                        }
-                        *lsa.write() = total_visual_rows;
-                    }
-                    return;
-                }
-
-                if len < prev {
-                    st.write().scroll_to_bottom();
-                    *lsa.write() = total_visual_rows;
-                    return;
-                }
-
-                let max_scroll = total_visual_rows.saturating_sub(vis_height);
-                let scroll_y = st.read().offset().y as u16;
-                if scroll_y >= max_scroll {
-                    return;
-                }
-                let distance = max_scroll.saturating_sub(scroll_y);
-                if distance > (vis_height / 4).max(5) {
-                    return;
-                }
-                let prev_lsa = *lsa.read();
-                if total_visual_rows > prev_lsa {
-                    st.write().scroll_to_bottom();
-                    *lsa.write() = total_visual_rows;
-                }
+                scroll::run_auto_follow(&scroll::AutoFollowCtx {
+                    total_visual_rows,
+                    vis_height,
+                    scroll_state: scroll_state.clone(),
+                    prev_items_len: prev_items_len.clone(),
+                    last_scrolled_at: last_scrolled_at.clone(),
+                    items_len,
+                    is_loading,
+                })
             }
         },
         (items_len, vm_generation, is_loading),
@@ -656,72 +414,5 @@ mod tests {
         let empty = entries_empty && !is_loading && todo_items_empty;
 
         assert!(empty);
-    }
-
-    fn proximity_check(total: u16, scroll_y: u16, vis_height: u16) -> bool {
-        if total == 0 {
-            return false;
-        }
-        let max_scroll = total.saturating_sub(vis_height);
-        if scroll_y >= max_scroll {
-            return false;
-        }
-        let distance = max_scroll.saturating_sub(scroll_y);
-        let threshold = (vis_height / 2).max(5);
-        distance <= threshold
-    }
-
-    #[test]
-    fn test_proximity_at_bottom_should_not_trigger_scroll() {
-        let total = 100;
-        let vis_height = 20;
-        let scroll_y = total - vis_height;
-        assert!(!proximity_check(total, scroll_y, vis_height));
-    }
-
-    #[test]
-    fn test_proximity_within_half_viewport_should_follow() {
-        let total = 100;
-        let vis_height = 20;
-        let scroll_y = total - vis_height - 10;
-        assert!(proximity_check(total, scroll_y, vis_height));
-    }
-
-    #[test]
-    fn test_proximity_beyond_half_viewport_should_not_follow() {
-        let total = 100;
-        let vis_height = 20;
-        let scroll_y = total - vis_height - 11;
-        assert!(!proximity_check(total, scroll_y, vis_height));
-    }
-
-    #[test]
-    fn test_proximity_near_top_should_not_follow() {
-        let total = 200;
-        let vis_height = 30;
-        let scroll_y = 20;
-        assert!(!proximity_check(total, scroll_y, vis_height));
-    }
-
-    #[test]
-    fn test_proximity_small_viewport_minimum_threshold() {
-        let total = 50;
-        let vis_height = 6;
-        let scroll_y = total - vis_height - 5;
-        assert!(proximity_check(total, scroll_y, vis_height));
-        let scroll_y = total - vis_height - 6;
-        assert!(!proximity_check(total, scroll_y, vis_height));
-    }
-
-    #[test]
-    fn test_proximity_empty_content_no_follow() {
-        assert!(!proximity_check(0, 0, 20));
-    }
-
-    #[test]
-    fn test_proximity_content_smaller_than_viewport_at_bottom() {
-        let total = 10;
-        let vis_height = 30;
-        assert!(!proximity_check(total, 0, vis_height));
     }
 }
