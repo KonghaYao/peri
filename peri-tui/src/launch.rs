@@ -129,7 +129,7 @@ pub async fn build_app_and_acp(
             &claude_dir,
         ));
         // (S13c-4b) plugin_commands + plugin_skills 注入已随 command/ 删除——
-        // 插件技能/命令注册由 ACP server 侧 SkillsMiddleware + PluginMiddleware 负责。
+        // 插件技能/命令注册由 ACP server 侧 SkillsMiddleware + PluginMiddleware + HookMiddleware 负责。
     }
 
     // ── ACP Server + Client ─────────────────────────────────────────────
@@ -164,6 +164,12 @@ pub async fn build_app_and_acp(
                 .plugin_data
                 .as_ref()
                 .map(|pd| pd.all_hooks.clone())
+                .unwrap_or_default();
+            let plugin_loaded = app
+                .services
+                .plugin_data
+                .as_ref()
+                .map(|pd| pd.plugins.clone())
                 .unwrap_or_default();
 
             let mut hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>> = Vec::new();
@@ -215,6 +221,7 @@ pub async fn build_app_and_acp(
                 plugin_skill_roots,
                 plugin_agent_dirs,
                 plugin_hooks: flat_hooks,
+                plugin_loaded,
                 hook_groups,
                 plugin_lsp_servers,
                 tool_search_index: tool_search_index.clone(),

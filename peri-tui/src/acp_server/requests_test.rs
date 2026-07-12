@@ -80,6 +80,7 @@ fn make_server_config(
         plugin_skill_roots: Vec::new(),
         plugin_agent_dirs: Vec::new(),
         plugin_hooks: Vec::new(),
+        plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
         plugin_lsp_servers: Vec::new(),
         tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),

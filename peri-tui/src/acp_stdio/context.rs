@@ -51,6 +51,7 @@ pub(super) struct StdioContext {
     pub(super) channel_state: Option<Arc<peri_agent::interaction::ChannelState>>,
     pub(super) plugin_skill_roots: Vec<peri_middlewares::skills::SkillRoot>,
     pub(super) plugin_agent_dirs: Vec<PathBuf>,
+    pub(super) plugin_loaded: Vec<peri_middlewares::plugin::LoadedPlugin>,
     pub(super) hook_groups: Vec<Vec<RegisteredHook>>,
     pub(super) plugin_lsp_servers: Vec<LspServerConfig>,
     pub(super) tool_search_index: Arc<ToolSearchIndex>,

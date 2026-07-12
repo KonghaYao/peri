@@ -295,6 +295,8 @@ pub struct PromptExecutionContext {
     pub plugin_skill_roots: Vec<peri_middlewares::skills::SkillRoot>,
     /// 插件 agent 目录列表。
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
+    /// 已加载插件列表（传递给 PluginMiddleware 做兼容性校验）。
+    pub plugin_loaded: Vec<peri_middlewares::plugin::LoadedPlugin>,
     /// Hook 组（按全局/项目/本地分层）。
     pub hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>>,
     /// Cron 调度器（共享，跨轮次复用）。
@@ -392,6 +394,7 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         bg_results,
         plugin_skill_roots,
         plugin_agent_dirs,
+        plugin_loaded,
         hook_groups,
         cron_scheduler,
         mcp_pool,
@@ -703,6 +706,7 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         history,
         plugin_skill_roots,
         plugin_agent_dirs,
+        plugin_loaded,
         hook_groups,
         cron_scheduler,
         mcp_pool,
@@ -756,6 +760,7 @@ struct BuildAgentRequest<'a> {
     // ── 会 move 的中间件资源 ────────────────────────────────────────────────
     plugin_skill_roots: Vec<peri_middlewares::skills::SkillRoot>,
     plugin_agent_dirs: Vec<std::path::PathBuf>,
+    plugin_loaded: Vec<peri_middlewares::plugin::LoadedPlugin>,
     hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>>,
     cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
     mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
@@ -815,6 +820,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         history,
         plugin_skill_roots,
         plugin_agent_dirs,
+        plugin_loaded,
         hook_groups,
         cron_scheduler,
         mcp_pool,
@@ -1045,6 +1051,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         broker: turn.broker.clone(),
         plugin_skill_roots,
         plugin_agent_dirs,
+        plugin_loaded: plugin_loaded.clone(),
         hook_groups,
         session_start_source: turn.session_start_source.clone(),
         mcp_pool,

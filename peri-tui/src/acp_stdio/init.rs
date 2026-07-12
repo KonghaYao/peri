@@ -81,6 +81,7 @@ pub(super) async fn init_stdio_context(cwd: String) -> anyhow::Result<Arc<StdioC
     let plugin_agent_dirs = plugin_data.all_agent_dirs.clone();
     let plugin_lsp_servers = plugin_data.all_lsp_servers.clone();
     let plugin_hooks = plugin_data.all_hooks.clone();
+    let plugin_loaded = plugin_data.plugins.clone();
 
     // 组装 hook groups
     let mut hook_groups: Vec<Vec<RegisteredHook>> = Vec::new();
@@ -150,6 +151,7 @@ pub(super) async fn init_stdio_context(cwd: String) -> anyhow::Result<Arc<StdioC
         channel_state: None,
         plugin_skill_roots,
         plugin_agent_dirs,
+        plugin_loaded,
         hook_groups,
         plugin_lsp_servers,
         tool_search_index,

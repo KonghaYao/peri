@@ -110,6 +110,7 @@ pub struct AcpAgentConfig {
     pub broker: Arc<dyn UserInteractionBroker>,
     pub plugin_skill_roots: Vec<SkillRoot>,
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
+    pub plugin_loaded: Vec<peri_middlewares::plugin::LoadedPlugin>,
     pub hook_groups: Vec<Vec<RegisteredHook>>,
     pub session_start_source: Option<String>,
     pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
@@ -209,6 +210,7 @@ pub fn build_agent(
         broker: permission_broker,
         plugin_skill_roots,
         plugin_agent_dirs,
+        plugin_loaded,
         hook_groups,
         session_start_source,
         mcp_pool,
@@ -496,6 +498,9 @@ pub fn build_agent(
         mw
     }));
     chain.add(Box::new(AgentDefineMiddleware::new()));
+    chain.add(Box::new(peri_middlewares::PluginMiddleware::new(
+        plugin_loaded,
+    )));
     chain.add(Box::new({
         let mut mw = SkillsMiddleware::new().with_plugin_roots(plugin_skill_roots.clone());
         if let Some(summary) = frozen_skill_summary {

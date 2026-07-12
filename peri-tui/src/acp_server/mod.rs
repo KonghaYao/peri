@@ -60,6 +60,7 @@ pub struct AcpServerConfig {
     pub plugin_skill_roots: Vec<peri_middlewares::skills::SkillRoot>,
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
     pub plugin_hooks: Vec<peri_middlewares::hooks::RegisteredHook>,
+    pub plugin_loaded: Vec<peri_middlewares::plugin::LoadedPlugin>,
     pub hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>>,
     pub plugin_lsp_servers: Vec<peri_lsp::config::LspServerConfig>,
     pub tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
@@ -108,6 +109,7 @@ pub async fn run_acp_server(
                     let cron_scheduler = cfg.cron_scheduler.clone();
                     let plugin_skill_roots = cfg.plugin_skill_roots.clone();
                     let plugin_agent_dirs = cfg.plugin_agent_dirs.clone();
+                    let plugin_loaded = cfg.plugin_loaded.clone();
                     let hook_groups = cfg.hook_groups.clone();
                     let mcp_pool = cfg.mcp_pool.clone();
                     let channel_state = cfg.channel_state.clone();
@@ -156,6 +158,7 @@ pub async fn run_acp_server(
                             cron_scheduler,
                             &plugin_skill_roots,
                             &plugin_agent_dirs,
+                            &plugin_loaded,
                             &hook_groups,
                             mcp_pool,
                             channel_state,
