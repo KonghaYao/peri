@@ -228,15 +228,23 @@ pub(super) fn handle_event(
                 if let Some(geo) = compute_thumb_geometry(&fields, area) {
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) if on_scrollbar_col => {
-                            // ▲ 端点（area 顶行）—— 单步上滚
+                            // ▲ 端点（area 顶行）—— 直接跳到顶部
                             if mouse.row == area.y {
-                                scroll_state.write_no_update().scroll_up();
+                                let cur = scroll_state.read().offset();
+                                scroll_state
+                                    .write_no_update()
+                                    .set_offset(Position::new(cur.x, 0));
                                 return EventResult::Consumed;
                             }
-                            // ▼ 端点（area 底行）—— 单步下滚
+                            // ▼ 端点（area 底行）—— 直接跳到底部
                             let bottom_row = area.y.saturating_add(area.height).saturating_sub(1);
                             if mouse.row == bottom_row {
-                                scroll_state.write_no_update().scroll_down();
+                                let max_scroll =
+                                    fields.content_length.saturating_sub(fields.viewport_length);
+                                let cur = scroll_state.read().offset();
+                                scroll_state
+                                    .write_no_update()
+                                    .set_offset(Position::new(cur.x, max_scroll as u16));
                                 return EventResult::Consumed;
                             }
                             // thumb / track
