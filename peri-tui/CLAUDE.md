@@ -14,17 +14,19 @@ TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTran
 
 **单一路径**：`use-kit` feature 默认 ON。`main.rs` 调用 `kit::entry::run_kit_fullscreen(opts, panic_notify_rx)`，legacy `runtime/main_loop` / `state_machine` / `command/` / `panel/` / `ui/` / `render/` / `event/` 已全部物理删除（净减 ~18000 行）。
 
-### kit 五链路（spawn 于 entry::run_kit_fullscreen）
+### kit 四链路（spawn 于 entry::run_kit_fullscreen）
 
 ```
-1. spawn_kit_notifier     : AcpNotification → AcpEventData → bridge_tx + render_bridge_tx
+1. spawn_kit_notifier     : AcpNotification → AcpEventData → bridge_tx
 2. spawn_acp_bridge       : bridge_rx → BridgeState → Atom 写入（VIEW_MODELS / ACP_STATE / POPUP_KIND ...）
-3. spawn_render_bridge    : render_bridge_rx + resize_rx → 预计算 Vec<Line> + wrap_map → RENDER_CACHE atom
-4. spawn_submit_consumer  : SUBMIT_TX (String) → acp_client.prompt()
-5. spawn_service_snapshot : 2s tick → SERVICE_SNAPSHOT / THREAD_LIST / CRON_JOBS / FILE_LIST atoms
+3. spawn_submit_consumer  : SUBMIT_TX (String) → acp_client.prompt()
+4. spawn_cancel_consumer  : CANCEL_TX → 清理 + BRIDGE_RESET_COUNTER 递增
 
 附加：
+- spawn_service_snapshot    : 2s tick → SERVICE_SNAPSHOT / THREAD_LIST / CRON_JOBS / FILE_LIST atoms
 - spawn_rewind_consumer     : REWIND_ACTION_TX → session/execute-command ("/rewind")
+- spawn_ask_user_consumer   : ASK_USER_TX → session/execute-command (AskUser 回答)
+- spawn_hitl_response_consumer : HITL_RESPONSE_TX → session/execute-command (HITL 审批)
 - spawn_thread_load_consumer : THREAD_LOAD_TX → acp_client.load_session(thread_id)
 ```
 
@@ -34,8 +36,7 @@ TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTran
 
 | Atom | 用途 |
 |------|------|
-| `VIEW_MODELS` | `ViewModelsSnapshot { committed: Arc<[ViewModel]>, current_turn: Arc<[ViewModel]> }` —— 消息流单一数据源 |
-| `RENDER_CACHE` | `RenderCache { entries, cumulative_heights, wrap_map }` —— render_bridge 预计算的 `Vec<Line<'static>>` + `WrappedLineInfo` 视觉行映射 |
+| `VIEW_MODELS` | `ViewModelsSnapshot { items: im::Vector<TuiRenderUnit>, generation: u64 }` —— 消息流单一数据源 |
 | `ACP_STATE` | `AcpStateSnapshot { variant, is_loading, ... }` —— popup_active 已退役，弹窗状态走 POPUP_KIND.is_some() |
 | `SERVICE_SNAPSHOT` | CPU/MEM/MCP/Cron/provider/model_name/permission_mode/cwd 投影 |
 | `THREAD_LIST` / `CRON_JOBS` / `FILE_LIST` | Thread / Cron / cwd 文件列表 |
@@ -61,7 +62,6 @@ TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTran
 - `SUBMIT_TX: String` —— InputArea Enter → submit_consumer
 - `REWIND_ACTION_TX: RewindAction` —— RewindPopup → rewind_consumer
 - `THREAD_LOAD_TX: String` —— ThreadBrowser Enter → thread_load_consumer
-- `RESIZE_TX: u16` —— 终端 resize → render_bridge（触发 Line 重建）
 
 **非 atom 全局句柄**：
 - `PERI_CONFIG_HANDLE: Arc<RwLock<PeriConfig>>` —— ModelPanel / LoginPanel / ConfigPanel 直接 write；ACP server 持同一 Arc，立即生效
@@ -85,38 +85,32 @@ TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTran
   - **loading 中** → push 到 `INPUT_BUFFER`（上限 32，FIFO），TurnDone 时 `drain_input_buffer()` 顺序重新提交
 - **slash Enter**：替换 editor 为命令并提交（同样检查 loading 入 buffer）
 
-## 消息渲染（kit/view_render.rs + render_bridge.rs + message_area.rs）
+## 消息渲染（kit/message_area.rs）
 
-### 渲染管道（三层分离）
+### 渲染管道（当前，render_bridge 已退役）
 
 ```
 ACP 事件 → VIEW_MODELS atom 写入
               ↓
-render_bridge (独立 tokio task) ：
-  ├─ 监听 ACP 事件 + RESIZE_TX 宽度变化
-  ├─ content_hash 增量检测：仅 hash 变化的 ViewModel 重建 Line
-  ├─ 预计算 Vec<Line<'static>> + WrappedLineInfo（视觉行 → 渲染行映射）
-  └─ 写入 RENDER_CACHE atom（entries + cumulative_heights + wrap_map）
-              ↓
-message_area (ratatui-kit ScrollView)：
-  ├─ LineCache：仅 RENDER_CACHE 内容变化时重建，滚动/选区复用缓存
-  ├─ 视口裁剪：基于 wrap_map 二分查找 (viewport_clip)，只传可见行给 Paragraph
-  ├─ Todo 渲染：TODO_ITEMS atom → ◼/✔/◻ 图标 + 状态行
-  ├─ Sticky Header + 滚动按钮：当前用户消息摘要在顶部固定 + ▲/▼ 按钮
-  └─ 智能跟随：CurrentTurn 出现时自动滚到底；用户主动上滚时不抢夺滚动位
+message_area 直接消费 VIEW_MODELS：
+  ├─ vm_to_lines: TuiRenderUnit → Vec<Line>
+  ├─ wrap_map_cache: 视觉行 → 渲染行映射（仅内容变化时重建）
+  ├─ total_rows_cache: O(N·W) line_count 结果缓存（key 变化时重算，write_no_update）
+  ├─ 视口裁剪：只 clone + highlight + 渲染视口内 ~60 行
+  ├─ ScrollThrottle: 鼠标滚轮 16ms 节流（≈60fps），键盘不节流
+  ├─ 智能跟随：VIEW_MODELS 变化时自动滚到底，用户主动上滚时不抢夺滚动位
+  ├─ Todo 渲染：TODO_ITEMS atom → 图标 + 状态行
+  └─ Sticky Header + 滚动按钮
 ```
 
-**[TRAP]** RENDER_CACHE 与 VIEW_MODELS 分离——渲染层不直接 touch ViewModel。
-**[TRAP]** `/clear` 命令必须同步重置 RENDER_CACHE，否则旧缓存残留。
+### ViewModel 变体
 
-### ViewModel 变体（view_render.rs）
-
-`render_v2_vm` 处理 7 种变体（UserBubble / AssistantBubble / ToolCard / SystemNote / SubAgentGroup / CollapsedGroup / ReasoningBlock），外加 AskUserBlock、DiffBlock、DividerData 子类型。
+7 种变体（UserBubble / AssistantBubble / ToolCard / SystemNote / SubAgentGroup / CollapsedGroup / ReasoningBlock），外加 AskUserBlock、DiffBlock、DividerData 子类型。
 
 - **ToolCard**：format_tool_name 映射（Bash→Shell、folder_operations→Folder，其余原样透传），format_tool_args 参数摘要提取，工具折叠/展开逻辑
-- **SubAgentGroup**：DTO.view_models 优先；fallback probe.recent_messages；prefix ◆→❯，final_result→⎿
-- **CollapsedGroup**：emoji→● 前缀，折叠/展开切换
-- **SystemNote**：Info/Warning/Error 三级，SystemNote prefix 分类
+- **SubAgentGroup**：prefix ◆→❯，final_result→⎿
+- **CollapsedGroup**：折叠/展开切换
+- **SystemNote**：Info/Warning/Error 三级
 
 ### 文本选中复制（kit/text_selection.rs）
 
@@ -203,11 +197,8 @@ message_area (ratatui-kit ScrollView)：
 
 - **绝不推远程** —— 见 `~/.claude/projects/-Users-konghayao-code-ai-perihelion/memory/never-push-remote.md`
 - **`AcpNotification::AgentEvent` 暂忽略** —— 携带的 AcpEvent DTO（TurnCommitted/StateSnapshotMeta/CompactCompleted）属于低频 v2 事件，kit 以 UnstableEvent 为主通道
-- **SUBMIT_TX / REWIND_ACTION_TX / THREAD_LOAD_TX / RESIZE_TX 必须 OnceLock 而非 lazy** —— rx 端在 entry::run_kit_fullscreen 中 spawn 任务，必须在 build_app_and_acp 完成后由 entry 显式 `set(tx)`
+- **SUBMIT_TX / REWIND_ACTION_TX / THREAD_LOAD_TX 必须 OnceLock 而非 lazy** —— rx 端在 entry::run_kit_fullscreen 中 spawn 任务，必须在 build_app_and_acp 完成后由 entry 显式 `set(tx)`
 - **`ACP_STATE.is_loading` 是 InputArea 判断 loading 的唯一来源** —— 不能依赖 `props.loading`（渲染时快照，事件触发时可能已变化）
-- **`RENDER_CACHE` 与 `VIEW_MODELS` 分离** —— message_area 不直接 touch ViewModel；渲染预计算在 render_bridge 独立 task 中完成
-- **`/clear` 必须同步重置 RENDER_CACHE** —— 否则旧缓存残留导致消息闪烁
-- **render_bridge 宽度变化触发全量重建** —— terminal resize 通过 RESIZE_TX 通知，rebuild_all 重建所有 entry
 - **PERI_CONFIG_HANDLE 共享 Arc** —— ACP server 持同一 Arc，write 后立即可见；service_snapshot 2s 内捕获变化刷新 SERVICE_SNAPSHOT
 - **drain_input_buffer 必须在 TurnDone 而非 TurnInterrupted** —— Interrupted 表示用户主动打断，不应自动续跑
 - **FILE_LIST 扫描深度=2** —— 浅扫避免 node_modules / target 等大目录爆栈；MAX_FILES=500 上限

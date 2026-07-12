@@ -1,6 +1,6 @@
 # peri-middlewares
 
-中间件实现 crate，依赖 `peri-agent` 和 `peri-lsp`。18 个中间件按固定顺序组成链。
+中间件实现 crate，依赖 `peri-agent` 和 `peri-lsp`。14 个基础中间件 + 5 个条件中间件（Hook/MCP/Workflow/LSP/Goal），按固定顺序组成链。
 
 ## 开发命令
 
@@ -26,9 +26,10 @@
 13. HumanInTheLoopMiddleware ← before_tool 拦截
 14. SubAgentMiddleware       ← Agent 工具
 15. McpMiddleware            ← MCP 工具和资源（pool 成功时注册）
-16. ToolSearchMiddleware     ← SearchExtraTools/ExecuteExtraTool 代理
-17. LspMiddleware            ← LSP 工具 + after_tool 文件变更同步
-18. GoalMiddleware           ← after_agent 注入递增紧迫感 steering + 设 block_continue 自驱循环（链最后）
+16. WorkflowMiddleware       ← WorkflowTool（条件注册，deferred tool）
+17. ToolSearchMiddleware     ← SearchExtraTools/ExecuteExtraTool 代理
+18. LspMiddleware            ← LSP 工具 + after_tool 文件变更同步
+19. GoalMiddleware           ← after_agent 注入递增紧迫感 steering + 设 block_continue 自驱循环（链最后）
 [with_system_prompt()]       ← prepend
 ```
 
