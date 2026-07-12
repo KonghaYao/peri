@@ -56,6 +56,19 @@ render_bridge 监听 ACP 事件 + 宽度变化，预计算每条 ViewModel 的 `
 **[TRAP]** ratatui-kit render body 中禁止写 atom——render 期间任何 atom 写入会与组件生命周期交互形成 render → state write → render 自激回路。事件处理器负责所有状态变更，render 仅做只读展示。**`use_effect` 中写 atom 等效危险**——流式期间每个 chunk 都触发 effect → scroll_to_bottom() 写 atom → 形成同款紧耦合环路。（详见 spec/global/domains/tui.md#issue_2026-07-03-tui-double-slash-cpu-spike、#issue_2026-07-06-message-area-copy-complex-content-crash、#issue_2026-07-09-message-area-periodic-white-flash-streaming）
 **[TRAP]** /clear 和 thread 切换时必须递增 `BRIDGE_RESET_COUNTER`，acp_bridge 在下次事件处理前检测到变更会自动清空 `committed`/`has_view_commit`/`current_turn`/`is_loading`。仅在 atom 层面重置不足以清除旧 session 残留。`BRIDGE_RESET_COUNTER` 是跨 session 的桥梁状态重置，/clear 或 thread 切换前必须先 +1。
 
+### 重构删除中间层必须列出隐式性能机制（2026-07-11 滚动卡顿教训）
+
+`3bfb9fff` 删除 `render_bridge` 三层管线（bubbles/render_bridge/view_render → message_area 直接消费 VIEW_MODELS）后，Welcome 屏 100% CPU、长对话滚动卡顿。根因不是单一 bug，而是重构时连带删除了三个隐藏在该层的性能机制：`ScrollThrottle` 16ms 节流 / `viewport_clip` 视口裁剪 / `cached_wrap_map` line_count 缓存。
+
+**铁律 1：删除中间层前先列清单。** 任何"管线简化"重构（删 task / 删 atom / 删模块）前，先列出该层提供的**非功能性**机制（节流、缓存、批量、视口裁剪、增量更新、防抖），逐个确认在新路径中有对应实现。功能性 bug 编译期会暴露，性能退化只能靠清单 + 手动测试发现。
+
+**铁律 2：render body 内 `use_state` 写入必须用 `write_no_update()`，不是 `write()`。** ratatui-kit `ReactiveMutRef::Drop` 在 `is_deref_mut=true` 时无条件 `notifier.wake()`（reactive_handle.rs:305-316）——**不检查值是否真的变化**。`render_loop`（render/tree.rs:78-107）是 select 事件驱动 + 状态驱动、无 fps 限制，状态 wake 立刻回到循环顶 render。render body 内 `*state.write() = ...` → wake → re-render → 又 write → 100% CPU 自激回路。已有 trap 只覆盖 atom，**`use_state` 走同一 Drop 机制同样适用**。
+
+典型案例 P1（100% CPU）：`lines_cache` key 误加 `guard.2.is_empty()`，Welcome 屏 items 为空时永远 `needs_rebuild=true`，每帧 `*lines_cache.write() = ...` → 100% CPU。修复：去掉 `is_empty()` 判定，空内容视为有效缓存。
+典型案例 P2（滚动卡顿）：`Paragraph::line_count(vis_width)` 是 O(N·W)（unicode-width + wrap），每帧重算拖垮长对话。修复：新增 `total_rows_cache: use_state<(gen, width, lines_len, rows)>`，仅在 key 变化时重算；**写入用 `write_no_update`** 避免自激回路。
+
+**铁律 3：鼠标滚轮事件必须节流。** 终端鼠标滚轮高频触发（每格 4 次 atom 通知 + 强制 render），tmux 下经 PTY 放大超出帧预算 → 卡顿。节流模式：跨事件累积 `pending_delta: i32`，距上次 flush ≥ 16ms（≈60fps）时一次性推入 `scroll_state`，flush 全程 `write_no_update()`。键盘事件低频，**不节流**保持响应。详见 `82858e80` / `ef47bf35`。
+
 ### ratatui-kit overlay 白屏教训
 
 `AppShell` 根层把主内容、`PanelOverlay`、`PopupOverlay` 作为兄弟节点渲染；overlay 空态绝不能返回普通 `View()`，也不要用 `Fragment` 当函数组件根空态。ratatui-kit 函数组件布局透明，会继承返回根节点的 layout；`View()` 会参与父级 flex，`Fragment` 空根在该场景也会退化成会挤布局的默认节点，表现为 `/ratatui-kit` 整屏白/主界面被挤没。
@@ -205,9 +218,19 @@ TUI 纯 ACP client，通过 `MpscTransport` 通信。Frozen Data Flow：`frozen_
 - 禁止 `ℹ`（U+2139）和 `[i]` 前缀。
 - `Event::Paste` 独立于 key event 链。需启用 BracketedPaste 确保粘贴内容合并为单个 Event::Paste，缺失会导致换行符被解析为 Enter 提交。（详见 spec/global/domains/tui.md#issue_2026-07-05-paste-newline-triggers-submit）
 
-## 测试风格
+## 测试规范
 
-命名 `test_<对象>_<场景>`；注释/断言用中文。Arrange-Act-Assert 无空行。Mock `make_` 前缀，不用 Mock struct。
+详见 `docs/design/testing-standards.md`。要点速查：
+
+- **文件位置**：`_test.rs`（≥30 行）或末尾 `#[cfg(test)] mod tests`（<30 行）；集成测试在 `tests/`
+- **命名**：`test_<对象>_<场景>`；注释/断言用中文；Arrange-Act-Assert 段间无空行
+- **Mock**：`make_` 前缀工厂函数，手写 trait impl，不用 Mock struct，不共享 mock 模块
+- **P0 必测**：serde 序列化、事件映射、纯逻辑函数、工具错误路径、中间件链、CLI/配置解析
+- **P1 应测**：复杂状态机、协议编解码、异步通道、安全敏感、Prompt 构建
+- **不测**：TUI render body、外部 API（mock 替代）、纯样板代码
+- **有效测试 4 条**：确定性、覆盖关键路径+错误路径、断言精确（含 error 消息）、独立可运行
+- **回归测试**：标注 `/// [回归测试]` + 历史背景
+- **新增功能 Checklist**：数据结构→serde、Event 变体→mapper_test、工具→core_tools_test、中间件→关键路径
 
 ## Theme 颜色使用规范（2026-07-10）
 

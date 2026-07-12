@@ -1,20 +1,23 @@
 //! MessageArea：直接读取 VIEW_MODELS，通过 vm_to_lines 将 TuiRenderUnit
-//! 转换为 Vec<Line>，在 ScrollView 中渲染。
+//! 转换为 Vec<Line>，按视口裁剪后渲染。
 //!
-//! - 滚动：由 ScrollViewState 处理键盘/鼠标事件
+//! - 滚动：由 ScrollViewState 处理键盘/鼠标事件（offset 管理）
+//! - 渲染：视口裁剪——只 clone + highlight + 渲染视口内 ~60 行，避免 O(N×W) per render
 //! - 智能跟随：use_effect 检测 VIEW_MODELS 变化
-//! - 不再使用 RENDER_CACHE / render_bridge / viewport_clip / wrap_map
+//! - 不再使用 RENDER_CACHE / render_bridge / ScrollView / wrap_map（已替换为 wrap_map_cache）
 
 #![allow(clippy::needless_update)]
 
+use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::i18n;
-use crate::kit::atoms::{LANG_VERSION, VIEW_MODELS};
+use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL, LANG_VERSION, VIEW_MODELS};
 use crate::kit::focus_router;
-use crate::kit::panel_registry::clean_scrollbars;
+use crate::kit::text_selection::{self, TextSelection};
 use crate::kit::tui_render_unit::{
     TuiAskUserBlock, TuiCollapsedGroup, TuiDivider, TuiHunkLineKind, TuiRenderUnit,
     TuiSubAgentGroup, TuiSystemNote, TuiToolCard,
@@ -56,6 +59,112 @@ impl Default for ScrollThrottle {
             pending_delta: 0,
         }
     }
+}
+
+// ── 拖拽选中节流 ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct DragThrottle {
+    last_flush: Instant,
+}
+
+impl Default for DragThrottle {
+    fn default() -> Self {
+        Self {
+            last_flush: Instant::now(),
+        }
+    }
+}
+
+// ── wrap_map 类型 ──────────────────────────────────────────────────────────
+
+/// 折行映射条目：逻辑行索引 + 该逻辑行占据的视觉行范围 [visual_start, visual_end)。
+#[derive(Debug, Clone)]
+struct WrappedLineInfo {
+    logical_idx: usize,
+    visual_start: usize,
+    visual_end: usize,
+}
+
+/// 为 all_lines 构建视觉行→逻辑行映射。
+/// 返回 (total_visual_rows, wrap_map)。wrap_map 按 visual_start 升序排列，可二分查找。
+fn build_wrap_map(lines: &[Line<'static>], width: u16) -> (usize, Vec<WrappedLineInfo>) {
+    let mut wrap_map = Vec::with_capacity(lines.len());
+    let mut visual_row = 0usize;
+    for (idx, line) in lines.iter().enumerate() {
+        let rows = Paragraph::new(RatText::from(line.clone()))
+            .wrap(Wrap { trim: false })
+            .line_count(width) as usize;
+        let rows = rows.max(1);
+        wrap_map.push(WrappedLineInfo {
+            logical_idx: idx,
+            visual_start: visual_row,
+            visual_end: visual_row + rows,
+        });
+        visual_row += rows;
+    }
+    (visual_row, wrap_map)
+}
+
+/// 二分查找：视觉行 → 逻辑行索引。
+fn visual_to_logical(visual_row: u16, wrap_map: &[WrappedLineInfo]) -> Option<usize> {
+    let vr = visual_row as usize;
+    match wrap_map.binary_search_by(|entry| {
+        if vr < entry.visual_start {
+            Ordering::Greater
+        } else if vr >= entry.visual_end {
+            Ordering::Less
+        } else {
+            Ordering::Equal
+        }
+    }) {
+        Ok(idx) => Some(wrap_map[idx].logical_idx),
+        Err(_) => None,
+    }
+}
+
+/// 计算视口 [scroll_y, scroll_y + vp_height) 对应的逻辑行范围 + 首行视觉偏移。
+///
+/// 返回 (start_logical, end_logical, first_line_visual_offset)。
+/// first_line_visual_offset 是首行在视口内向下推的视觉行数（Paragraph::scroll 第一参数）。
+/// 当 wrap_map 为空或视口在范围外时返回 None。
+fn viewport_logical_range(
+    wrap_map: &[WrappedLineInfo],
+    scroll_y: usize,
+    vp_height: usize,
+) -> Option<(usize, usize, u16)> {
+    if wrap_map.is_empty() || vp_height == 0 {
+        return None;
+    }
+    // 视口起始：第一个 visual_end > scroll_y 的 entry
+    let start_idx = wrap_map.iter().position(|e| e.visual_end > scroll_y)?;
+    let start_logical = wrap_map[start_idx].logical_idx;
+    let first_line_offset = scroll_y.saturating_sub(wrap_map[start_idx].visual_start);
+    // 视口结束：第一个 visual_start >= scroll_y + vp_height 的 entry 之前
+    let vp_visual_end = scroll_y.checked_add(vp_height)?;
+    let end_logical = wrap_map
+        .iter()
+        .take_while(|e| e.visual_start < vp_visual_end)
+        .last()
+        .map(|e| e.logical_idx)
+        .unwrap_or(start_logical);
+    Some((start_logical, end_logical, first_line_offset as u16))
+}
+
+// ── 剪贴板复制 ────────────────────────────────────────────────────────────
+
+/// 在独立线程中写入系统剪贴板，避免阻塞 tokio worker。
+fn copy_to_clipboard(text: String) {
+    std::thread::spawn(move || {
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            let _ = clipboard.set_text(&text);
+        }
+    });
+}
+
+pub(super) fn mark_copy_message(char_count: usize) {
+    COPY_CHAR_COUNT.set(char_count);
+    COPY_MESSAGE_UNTIL.set(Some(Instant::now() + Duration::from_secs(2)));
 }
 
 // ── Todo 类型 ─────────────────────────────────────────────────────────────
@@ -133,6 +242,56 @@ impl MsgAreaTracker {
 impl Hook for MsgAreaTracker {
     fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
         self.rect = Some(drawer.area);
+    }
+}
+
+// ── 滚动条 Hook ─────────────────────────────────────────────────────────
+
+/// 视口右侧滚动条字段——通过 use_state 存储，避免 use_hook 的 borrow 冲突。
+#[derive(Default, Clone, Copy)]
+struct ScrollbarFields {
+    content_length: usize,
+    position: usize,
+    viewport_length: usize,
+}
+
+/// 视口右侧滚动条——post_component_draw 时基于 fields 渲染。
+///
+/// 替代被移除的 ScrollView 内置滚动条。每帧 render body 更新 ScrollbarFields state。
+struct ScrollbarHook {
+    fields: State<ScrollbarFields>,
+}
+
+impl Hook for ScrollbarHook {
+    fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        let f = *self.fields.read();
+        // 仅当内容超出视口时才渲染滚动条
+        if f.content_length <= f.viewport_length {
+            return;
+        }
+        let sem = THEME_ATOM.state().read().semantic;
+        let thumb_bg = sem.text.dim;
+        let scrollbar =
+            ratatui::widgets::Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
+                .thumb_symbol(" ")
+                .thumb_style(Style::default().fg(thumb_bg).bg(thumb_bg))
+                .track_symbol(None)
+                .begin_symbol(Some("▲"))
+                .begin_style(
+                    Style::default()
+                        .fg(sem.text.muted)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .end_symbol(Some("▼"))
+                .end_style(
+                    Style::default()
+                        .fg(sem.text.muted)
+                        .add_modifier(Modifier::BOLD),
+                );
+        let mut state = ratatui::widgets::ScrollbarState::new(f.content_length)
+            .position(f.position)
+            .viewport_content_length(f.viewport_length);
+        drawer.render_stateful_widget(scrollbar, drawer.area, &mut state);
     }
 }
 
@@ -735,7 +894,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let vm_generation = snapshot.generation;
 
     // ── 渲染缓存：generation 不变则复用上次的 Lines，避免每帧做 markdown 解析+syntect ──
-    let lines_cache = hooks.use_state(|| (0u64, 0usize, Vec::<Line<'static>>::new()));
+    // [TRAP] 缓存必须用 Arc<Vec> 而非 Vec：ratatui-kit 每次 dispatch 后都触发 render，
+    // 鼠标 Drag 事件 60-120Hz 会反复读取此缓存。Vec 在每次读取时深拷贝 O(N)（每行多个
+    // Span + Cow<str>），直接拖满 CPU。Arc::clone 是 O(1) 引用计数。
+    let lines_cache = hooks.use_state(|| (0u64, 0usize, Arc::<Vec<Line<'static>>>::default()));
 
     // ── total_visual_rows 缓存：仅 (generation, width, lines_len) 变化时重算 line_count ──
     // [TRAP] Paragraph::line_count 是 O(N·W)（unicode-width + wrap），每帧重算会拖垮长对话滚动。
@@ -752,33 +914,46 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         None
     };
 
-    // ── 构建全量行（带缓存，footer 不参与缓存）──
+    // ── 构建 core_lines（带 Arc 缓存，footer 不参与缓存）──
     // [TRAP] 缓存 key 不能加 `lines.is_empty()` 之类的"空内容"判断——
     // Welcome 屏 items 为空时 vm_to_lines 永远返回空 Vec，写入后再读到
     // is_empty()=true，needs_rebuild 永远为 true，每帧都执行
     // `*lines_cache.write() = ...`。ratatui-kit 的 ReactiveMutRef::Drop 无条件
     // notifier.wake()（不检查值是否变化），wake 又触发 re-render → 自激回路
     // 100% CPU。空内容必须视为有效缓存，靠 generation/width 检测真实变化。
-    let mut all_lines: Vec<Line<'static>> = {
+    //
+    // [TRAP] core_lines_arc 用 Arc<Vec> —— Drag 60-120Hz 触发 render 时，
+    // Arc::clone 是 O(1)；如果用 Vec::clone 则每帧深拷贝数千行 Line+Span，
+    // 直接拖满 CPU。footer 后续单独 extend，避免 Arc 解引用后再 clone。
+    let core_lines_arc: Arc<Vec<Line<'static>>> = {
         let needs_rebuild = {
             let guard = lines_cache.read();
             guard.0 != vm_generation || guard.1 != props.width
-        }; // guard 在此释放，后续 write() 不会冲突
+        };
         if !needs_rebuild {
-            lines_cache.read().2.clone()
+            Arc::clone(&lines_cache.read().2)
         } else {
             let mut lines: Vec<Line<'static>> = Vec::new();
             for item in snapshot.items.iter() {
                 lines.extend(vm_to_lines(item, props.width));
             }
             drop(snapshot);
-            *lines_cache.write() = (vm_generation, props.width, lines.clone());
-            lines
+            let arc = Arc::new(lines);
+            *lines_cache.write() = (vm_generation, props.width, Arc::clone(&arc));
+            arc
         }
     };
-    if !empty {
-        all_lines.extend(footer_lines);
-    }
+
+    // all_lines 仅在需要时构建（lazy）：
+    // - wrap_map_cache 缓存未命中（generation/width 变化）
+    // - total_visual_rows 缓存未命中
+    // - 非 highlight 渲染路径（render_lines = all_lines）
+    // [TRAP] Drag 期间 highlight 路径下，wrap_map / total_visual_rows 都已命中缓存，
+    // 实际不需要 all_lines。每次构建需要 (*core_lines_arc).clone() O(N)——Drag 60-120Hz
+    // × O(N) 直接拉满 CPU。我们改为只在真正用到时构建。
+    let core_len = core_lines_arc.len();
+    let footer_len = if empty { 0 } else { footer_lines.len() };
+    let lines_len = core_len + footer_len;
 
     let scroll_state = hooks.use_state(ScrollViewState::default);
     let prev_items_len = hooks.use_state(|| 0usize);
@@ -786,9 +961,22 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let scroll_throttle = hooks.use_state(ScrollThrottle::default);
     let _todo_hash = hash_todo_items(&todo_items);
 
+    // ── 文本选区 + 折行映射缓存 ──
+    let text_sel = hooks.use_state(TextSelection::default);
+    let selection_down_pos = hooks.use_state(|| Option::<(u16, u16)>::None);
+    let drag_throttle = hooks.use_state(DragThrottle::default);
+    // [TRAP] Drag 60-120Hz 触发 render，wrap_map 必须用 Arc 避免 Vec 深拷贝。
+    // highlight 不再缓存——视口裁剪后只有 ~60 行，highlight 成本可忽略。
+    let wrap_map_cache = hooks.use_state(|| (0u64, 0u16, Arc::<Vec<WrappedLineInfo>>::default()));
+
     // ── 消息区位置追踪 ──
     let area_hook = hooks.use_hook(MsgAreaTracker::new);
     let area_rect = area_hook.rect;
+    // 滚动条 fields state（hook 通过引用读取，避免 borrow 冲突）
+    let scrollbar_fields = hooks.use_state(ScrollbarFields::default);
+    hooks.use_hook(move || ScrollbarHook {
+        fields: scrollbar_fields,
+    });
 
     let vis_width = area_rect
         .map(|r| r.width.saturating_sub(1))
@@ -796,8 +984,34 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .max(1);
     let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
 
+    // 更新 wrap_map 缓存（仅 generation / width 变化时，write_no_update 避免自激回路）
+    // [TRAP] wrap_map 只覆盖 core_lines_arc——footer 区域（spinner/todo）不需要选区，
+    // 鼠标拖拽到 footer 时 visual_to_logical 返回 None，不触发 highlight。
+    {
+        let needs_wmap = {
+            let g = wrap_map_cache.read();
+            g.0 != vm_generation || g.1 != vis_width
+        };
+        if needs_wmap {
+            if core_lines_arc.is_empty() {
+                // 空内容：直接设空缓存，不调用 build_wrap_map
+                let mut g = wrap_map_cache.write_no_update();
+                g.0 = vm_generation;
+                g.1 = vis_width;
+                g.2 = Arc::default();
+            } else {
+                let (_, wrap_map) = build_wrap_map(&core_lines_arc, vis_width);
+                let mut g = wrap_map_cache.write_no_update();
+                g.0 = vm_generation;
+                g.1 = vis_width;
+                g.2 = Arc::new(wrap_map);
+            }
+        }
+    }
+
     // ── 总视觉行数：使用 Paragraph wrap 预测（带缓存）──
-    let lines_len = all_lines.len();
+    // [TRAP] 仅在 (gen, width, lines_len) 变化时构建 all_lines 重算 line_count。
+    // Drag 期间 generation/width/lines_len 不变，缓存命中——跳过 O(N) 构建。
     let cached = {
         let g = total_rows_cache.read();
         (g.0, g.1, g.2, g.3)
@@ -805,7 +1019,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let total_visual_rows: u16 =
         if cached.0 == vm_generation && cached.1 == vis_width && cached.2 == lines_len {
             cached.3
-        } else if all_lines.is_empty() {
+        } else if lines_len == 0 {
             let rows: u16 = if is_loading { 1 } else { 0 };
             let mut g = total_rows_cache.write_no_update();
             g.0 = vm_generation;
@@ -814,7 +1028,12 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             g.3 = rows;
             rows
         } else {
-            let rows = Paragraph::new(RatText::from(all_lines.clone()))
+            // 构建 all_lines 用于 line_count（仅在 cache 未命中时）
+            let mut all_lines = (*core_lines_arc).clone();
+            if !empty {
+                all_lines.extend(footer_lines.iter().cloned());
+            }
+            let rows = Paragraph::new(RatText::from(all_lines))
                 .wrap(Wrap { trim: false })
                 .line_count(vis_width as u16) as u16;
             let mut g = total_rows_cache.write_no_update();
@@ -825,21 +1044,20 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             rows
         };
 
-    // ── 鼠标事件处理（仅滚动，移除文本选中）──
+    // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     {
-        let _vis_width_handler = vis_width;
         hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
             if let Event::Key(key) = &event {
                 let _ = focus_router::message_accepts_key(key);
             }
 
             if let Event::Mouse(mouse) = &event {
+                // 光标移动无操作——提前返回，不触发任何 state 写入或渲染
                 if matches!(mouse.kind, MouseEventKind::Moved) {
                     return EventResult::Ignored;
                 }
 
-                // 滚动节流：累积 delta，仅在距上次 flush ≥ SCROLL_FRAME_MS(16ms) 时推入 scroll_state。
-                // write_no_update 不触发 notifier.wake()——依赖 dispatch 后 ratatui-kit loop 强制 render。
+                // 滚动节流
                 let apply_scroll = |delta: i32| {
                     let mut st = scroll_throttle.write_no_update();
                     st.pending_delta += delta;
@@ -867,26 +1085,133 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 if let Some(area) = area_rect {
                     let in_area = mouse_in_area(mouse.row, mouse.column, area);
 
-                    if in_area {
+                    // [DEBUG] PERI_DISABLE_DRAG_SELECT=1 完全跳过 Drag 选中——验证是否是
+                    // Drag 处理逻辑引起卡死。
+                    let drag_select_disabled = std::env::var("PERI_DISABLE_DRAG_SELECT")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
+
+                    // ── 文本选中处理（消息区内 Down/Drag/Up）──
+                    if in_area && !drag_select_disabled {
                         match mouse.kind {
-                            MouseEventKind::ScrollDown => apply_scroll(SCROLL_LINES as i32),
-                            MouseEventKind::ScrollUp => apply_scroll(-(SCROLL_LINES as i32)),
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                // 仅记录按下的位置，不启动选区——真实拖动才开始选中
+                                // [TRAP] selection_down_pos 只在事件处理器内读写，render
+                                // 不依赖它——用 write_no_update 避免 wake 噪音（render 不需要
+                                // 因为这个状态变化而重渲染，后续 Drag 才是真正的渲染触发点）。
+                                let scroll_y = scroll_state.read().offset().y as u16;
+                                let visual_row =
+                                    mouse.row.saturating_sub(area.y).saturating_add(scroll_y);
+                                // 视口裁剪后无边框，visual_col 直接 = mouse.column - area.x
+                                let visual_col = mouse.column.saturating_sub(area.x);
+                                *selection_down_pos.write_no_update() =
+                                    Some((visual_row, visual_col));
+                                return EventResult::Consumed;
+                            }
+                            MouseEventKind::Drag(MouseButton::Left) => {
+                                // Drag 节流（16ms），write_no_update 避免自激回路
+                                let now = Instant::now();
+                                {
+                                    let dt = drag_throttle.read();
+                                    if dt.last_flush.elapsed()
+                                        < Duration::from_millis(SCROLL_FRAME_MS)
+                                    {
+                                        return EventResult::Consumed;
+                                    }
+                                }
+                                drag_throttle.write_no_update().last_flush = now;
+
+                                let scroll_y = scroll_state.read().offset().y as u16;
+                                let visual_row =
+                                    mouse.row.saturating_sub(area.y).saturating_add(scroll_y);
+                                let visual_col = mouse.column.saturating_sub(area.x);
+
+                                // 单次 write guard，drop 时只 wake 一次（不是两次）
+                                // start_drag + update_drag 合并到同一 guard 内
+                                //
+                                // [TRAP] ratatui-kit 用 parking_lot::RwLock——同一 thread 同时
+                                // 持有 read + write 时 try_write 返回 Err → expect panic。
+                                // 必须先把 selection_down_pos.read() 的值 copy 出来 drop guard，
+                                // 再 write selection_down_pos。
+                                let down_pos = *selection_down_pos.read();
+                                {
+                                    let mut sel_guard = text_sel.write();
+                                    if let Some((dr, dc)) = down_pos {
+                                        sel_guard.start_drag(dr, dc);
+                                        *selection_down_pos.write_no_update() = None;
+                                    }
+                                    sel_guard.update_drag(visual_row, visual_col);
+                                }
+                                return EventResult::Consumed;
+                            }
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                *selection_down_pos.write_no_update() = None;
+                                // [TRAP] 同 Drag 处理：必须 copy 出 text_sel 状态后再 write，
+                                // 否则 read+write 同 thread 冲突 panic。
+                                let dragging = text_sel.read().dragging;
+                                if !dragging {
+                                    return EventResult::Consumed;
+                                }
+                                // 先 copy 出 normalized_bounds（owned Option），drop read guard
+                                let bounds = text_sel.read().normalized_bounds();
+                                let extracted: Option<String> =
+                                    if let Some(((sr, sc), (er, ec))) = bounds {
+                                        let wrap_guard = wrap_map_cache.read();
+                                        let lines_guard = lines_cache.read();
+                                        extract_visual_range(
+                                            &lines_guard.2,
+                                            &wrap_guard.2,
+                                            (sr, sc),
+                                            (er, ec),
+                                            vis_width,
+                                        )
+                                    } else {
+                                        None
+                                    };
+
+                                // 清除选区（start/end/dragging 全清），wake 触发重渲染清除 highlight
+                                {
+                                    let mut sel = text_sel.write();
+                                    sel.clear();
+                                }
+
+                                // 复制（独立线程，不阻塞）
+                                if let Some(text) = extracted {
+                                    let char_count = text.chars().count();
+                                    copy_to_clipboard(text);
+                                    mark_copy_message(char_count);
+                                }
+
+                                return EventResult::Consumed;
+                            }
                             _ => {}
                         }
                     } else {
+                        // 鼠标在消息区外
                         match mouse.kind {
-                            MouseEventKind::ScrollDown => apply_scroll(SCROLL_LINES as i32),
-                            MouseEventKind::ScrollUp => apply_scroll(-(SCROLL_LINES as i32)),
                             MouseEventKind::Down(MouseButton::Left) => {
+                                // 清除选区和按下记录
+                                *text_sel.write() = TextSelection::new();
+                                *selection_down_pos.write_no_update() = None;
                                 return EventResult::Ignored;
                             }
                             _ => {
-                                scroll_state.write().handle_event(&event);
+                                if matches!(mouse.kind, MouseEventKind::Drag(_)) {
+                                    return EventResult::Ignored;
+                                }
                             }
                         }
                     }
+
+                    // ── 滚动处理（区域内外通用）──
+                    match mouse.kind {
+                        MouseEventKind::ScrollDown => apply_scroll(SCROLL_LINES as i32),
+                        MouseEventKind::ScrollUp => apply_scroll(-(SCROLL_LINES as i32)),
+                        _ => {}
+                    }
                 }
 
+                // 所有非 Moved/Drag 鼠标事件标记为已消费（防止泄漏到下层组件）
                 return EventResult::Consumed;
             }
 
@@ -898,6 +1223,80 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             }
             EventResult::Ignored
         });
+    }
+
+    /// 从逻辑行中按视觉坐标精确提取选中文本（字符级精度）。
+    ///
+    /// 折行偏移公式：column_in_logical = vis_col + (vis_row - visual_start) * width。
+    /// 用 `visual_col_to_byte_offset` 将列映射到字节偏移再切片。
+    ///
+    /// [TRAP] 选区可能超出 core 范围（footer 区域无 wrap_map）——clamp 到 wrap_map
+    /// 末尾，确保 footer 行的 visual_to_logical 不返回 None 导致整个提取失败。
+    fn extract_visual_range(
+        lines: &[Line<'static>],
+        wrap_map: &[WrappedLineInfo],
+        vis_start: (u16, u16),
+        vis_end: (u16, u16),
+        width: u16,
+    ) -> Option<String> {
+        let ((sr, sc), (er, ec)) = if vis_start <= vis_end {
+            (vis_start, vis_end)
+        } else {
+            (vis_end, vis_start)
+        };
+        // Clamp sr/er 到 wrap_map 视觉范围内（footer 区域无 wrap_map，避免 None）
+        let max_visual = wrap_map
+            .last()
+            .map(|e| (e.visual_end.saturating_sub(1)) as u16)
+            .unwrap_or(0);
+        let sr = sr.min(max_visual);
+        let er = er.min(max_visual);
+        let first_logical = visual_to_logical(sr, wrap_map)?;
+        let last_logical = visual_to_logical(er, wrap_map)?;
+        let first = first_logical.min(last_logical);
+        let last = first_logical.max(last_logical);
+
+        let mut parts: Vec<String> = Vec::new();
+        for li in first..=last {
+            let line = lines.get(li)?;
+            let plain = text_selection::line_to_plain_text(line);
+            let entry = wrap_map.get(li)?;
+
+            if first == last {
+                // 同一逻辑行
+                let c_start = sc.saturating_add(
+                    (sr as usize).saturating_sub(entry.visual_start) as u16 * width,
+                );
+                let c_end = ec.saturating_add(
+                    (er as usize).saturating_sub(entry.visual_start) as u16 * width,
+                );
+                let b0 = text_selection::visual_col_to_byte_offset(&plain, c_start);
+                let b1 = text_selection::visual_col_to_byte_offset(&plain, c_end);
+                if b0 >= b1 {
+                    continue;
+                }
+                parts.push(plain[b0..b1].to_string());
+            } else if li == first {
+                let c_start = sc.saturating_add(
+                    (sr as usize).saturating_sub(entry.visual_start) as u16 * width,
+                );
+                let b0 = text_selection::visual_col_to_byte_offset(&plain, c_start);
+                parts.push(plain[b0..].to_string());
+            } else if li == last {
+                let c_end = ec.saturating_add(
+                    (er as usize).saturating_sub(entry.visual_start) as u16 * width,
+                );
+                let b1 = text_selection::visual_col_to_byte_offset(&plain, c_end);
+                parts.push(plain[..b1].to_string());
+            } else {
+                parts.push(plain);
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
     }
 
     // ── 吸底自动跟随 ──
@@ -918,7 +1317,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 }
 
                 if loading {
-                    if total_visual_rows > *lsa.read() {
+                    // [TRAP] read+write 同 state 同线程 = parking_lot 死锁——先 copy 出来
+                    let prev_lsa = *lsa.read();
+                    if total_visual_rows > prev_lsa {
                         let max_scroll = total_visual_rows.saturating_sub(vis_height);
                         let scroll_y = st.read().offset().y as u16;
                         if scroll_y < max_scroll {
@@ -929,11 +1330,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     return;
                 }
 
-                if prev == 0 && len > 0 {
-                    st.write().scroll_to_bottom();
-                    *lsa.write() = total_visual_rows;
-                    return;
-                }
                 if len < prev {
                     st.write().scroll_to_bottom();
                     *lsa.write() = total_visual_rows;
@@ -949,7 +1345,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 if distance > (vis_height / 4).max(5) {
                     return;
                 }
-                if total_visual_rows > *lsa.read() {
+                let prev_lsa = *lsa.read();
+                if total_visual_rows > prev_lsa {
                     st.write().scroll_to_bottom();
                     *lsa.write() = total_visual_rows;
                 }
@@ -982,29 +1379,123 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .into_any();
     }
 
-    // ── ScrollView 渲染：全量内容传给 Paragraph，ScrollView 负责视口裁剪 ──
+    // ── 视口裁剪渲染（移除 ScrollView 的全量大 buffer）──
+    // [TRAP] 原 ScrollView + Paragraph-with-Wrap 组合是 100% CPU 的真凶：ScrollView 创建
+    // (width × total_visual_rows) 大 buffer，Paragraph 渲染所有 N 行到这个 buffer 是
+    // O(N×W) per render。Drag 60-120Hz × O(N×W) 直接拉满 CPU。
+    //
+    // 视口裁剪：只 clone + highlight + 渲染视口内 ~60 行（vis_height）。
+    //   1. 通过 wrap_map_cache 二分查找视口对应的逻辑行 [vp_start, vp_end]
+    //   2. vp_first_offset = scroll_y - wrap_map[vp_start].visual_start（首行视觉偏移）
+    //   3. viewport_lines = clone(core[vp_start..=vp_end]) + 必要时附加 footer_lines
+    //   4. Paragraph::scroll((vp_first_offset, 0)) 精确偏移首行
+    //
+    // highlight：视口内选区行用 sel_bg 背景。不再缓存 highlight 结果——视口裁剪后
+    // 只有 ~60 行，highlight 成本可忽略。Drag 期间频繁跨逻辑行变化也不会卡。
+    //
+    // [DEBUG] PERI_NO_HIGHLIGHT=1 紧急回退——完全不进入 highlight 路径。
+    let no_highlight = std::env::var("PERI_NO_HIGHLIGHT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    // clamp scroll_y 不超过 max_scroll（替代 ScrollView 渲染时的 clamp）
+    let max_scroll = (total_visual_rows as usize).saturating_sub(vis_height as usize);
+    let scroll_y_raw = scroll_state.read().offset().y as usize;
+    let scroll_y = scroll_y_raw.min(max_scroll);
+
+    // 更新 scrollbar fields——post_component_draw 时基于此渲染滚动条
+    {
+        let mut g = scrollbar_fields.write_no_update();
+        g.content_length = total_visual_rows as usize;
+        g.position = scroll_y;
+        g.viewport_length = vis_height as usize;
+    }
+
+    let vp_height = vis_height as usize;
+
+    // core 总视觉行数
+    let core_total_visual_rows: usize = {
+        let g = wrap_map_cache.read();
+        g.2.last().map(|e| e.visual_end).unwrap_or(0)
+    };
+
+    // 选区对应的逻辑行范围（视口外选区不参与 highlight，selection state 保留供复制）
+    let sel_bounds: Option<(usize, usize)> = if !no_highlight {
+        let sel = text_sel.read();
+        if let Some(((sr, _), (er, _))) = sel.normalized_bounds() {
+            let g = wrap_map_cache.read();
+            let f = visual_to_logical(sr, &g.2).unwrap_or(0);
+            let l = visual_to_logical(er, &g.2).unwrap_or(0);
+            Some((f.min(l), f.max(l)))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 视口对应的 core 逻辑行范围 + 首行视觉偏移
+    let (vp_core_start, vp_core_end, vp_first_offset): (usize, usize, u16) =
+        if scroll_y < core_total_visual_rows && !core_lines_arc.is_empty() {
+            let g = wrap_map_cache.read();
+            viewport_logical_range(&g.2, scroll_y, vp_height).unwrap_or((0, 0, 0))
+        } else {
+            // 视口完全在 footer 内（footer 占据末尾几行）
+            (0, 0, 0)
+        };
+
+    // 视口是否包含 footer（视口末尾超出 core 总视觉行数）
+    let viewport_has_footer =
+        !empty && !footer_lines.is_empty() && scroll_y + vp_height > core_total_visual_rows;
+
+    // 构建 viewport_lines：clone + highlight 视口内的 core 行，必要时附加 footer
+    let sel_bg = THEME_ATOM.state().read().semantic.surface.selection;
+    let core_len = core_lines_arc.len();
+    let mut viewport_lines: Vec<Line<'static>> = Vec::with_capacity(
+        (vp_core_end.saturating_sub(vp_core_start) + 1)
+            .min(vp_height + 2)
+            .saturating_add(footer_lines.len()),
+    );
+
+    if scroll_y < core_total_visual_rows && vp_core_start <= vp_core_end && core_len > 0 {
+        let end = vp_core_end.min(core_len - 1);
+        for i in vp_core_start..=end {
+            let line = &core_lines_arc[i];
+            let in_sel = sel_bounds.is_some_and(|(f, l)| i >= f && i <= l);
+            if in_sel {
+                let spans: Vec<Span<'static>> = line
+                    .spans
+                    .iter()
+                    .map(|s| Span::styled(s.content.clone(), s.style.bg(sel_bg)))
+                    .collect();
+                viewport_lines.push(Line::from(spans));
+            } else {
+                viewport_lines.push(line.clone());
+            }
+        }
+    }
+
+    if viewport_has_footer {
+        viewport_lines.extend(footer_lines.iter().cloned());
+    }
+
+    // Paragraph::scroll 偏移：core 内的偏移 = vp_first_offset
+    // 视口完全在 footer 内时（scroll_y >= core_total_visual_rows），按 footer 内偏移
+    let scroll_offset_y: u16 = if scroll_y >= core_total_visual_rows && core_total_visual_rows > 0 {
+        (scroll_y - core_total_visual_rows) as u16
+    } else {
+        vp_first_offset
+    };
+
     element!(
         View(
             flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
         ) {
-            ScrollView(
-                flex_direction: Direction::Vertical,
-                width: Constraint::Fill(1),
-                height: Constraint::Fill(1),
-                state: scroll_state,
-                scrollbars: clean_scrollbars(),
-                active: false,
-            ) {
-                View(
-                    flex_direction: Direction::Vertical,
-                    width: Constraint::Fill(1),
-                    height: Constraint::Length(total_visual_rows.max(1)),
-                ) {
-                    Text(text: Paragraph::new(RatText::from(all_lines)).wrap(Wrap { trim: false }))
-                }
-            }
+            Text(text: Paragraph::new(RatText::from(viewport_lines))
+                .wrap(Wrap { trim: false })
+                .scroll((scroll_offset_y, 0)))
         }
     )
     .into_any()
@@ -1029,7 +1520,10 @@ fn build_footer_lines(
     let last_reset_counter = hooks.use_state(|| crate::kit::atoms::BRIDGE_RESET_COUNTER.get());
     {
         let current = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
-        if *last_reset_counter.read() != current {
+        // [TRAP] read guard 必须 drop 后再 write——同线程 parking_lot::RwLock read+write 会死锁
+        // （deadlock_detection 默认关闭，静默卡死）。先把 read 值 copy 到 owned。
+        let prev_counter = *last_reset_counter.read();
+        if prev_counter != current {
             *summary_elapsed_ms.write() = 0;
             *last_reset_counter.write() = current;
         }
@@ -1037,7 +1531,9 @@ fn build_footer_lines(
 
     {
         let current_epoch = *loading_epoch.read();
-        if is_loading && *last_epoch.read() != current_epoch {
+        // [TRAP] 同上：read+write 同一 state 不可并存
+        let prev_epoch = *last_epoch.read();
+        if is_loading && prev_epoch != current_epoch {
             *last_epoch.write() = current_epoch;
             *load_start.write() = Some(Instant::now());
             *spinner_state.write() = SpinnerState::new(SpinnerMode::Thinking);
