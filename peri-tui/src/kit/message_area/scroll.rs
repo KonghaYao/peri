@@ -8,9 +8,9 @@ use crate::kit::text_selection::TextSelection;
 use ratatui_kit::components::ScrollViewState;
 use ratatui_kit::crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::*;
-use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::layout::{Position, Rect};
 
-use super::props::mouse_in_area;
+use super::props::{ScrollbarFields, mouse_in_area};
 use super::selection::{
     WrappedLineInfo, copy_to_clipboard, extract_visual_range, mark_copy_message,
 };
@@ -50,6 +50,101 @@ impl Default for DragThrottle {
         Self {
             last_flush: Instant::now(),
         }
+    }
+}
+
+// ── 滚动条拖拽状态 ────────────────────────────────────────────────────────
+
+/// 滚动条 thumb 拖拽状态。
+/// `thumb_offset` 是按下时鼠标 row 相对 thumb 顶部的偏移，拖动期间锁定——
+/// 让「点击 thumb 中央 → 拖拽」时 thumb 不跳变。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ScrollbarDragState {
+    pub(super) active: bool,
+    pub(super) thumb_offset: u16,
+    pub(super) last_flush: Instant,
+}
+
+impl Default for ScrollbarDragState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            thumb_offset: 0,
+            last_flush: Instant::now(),
+        }
+    }
+}
+
+// ── 滚动条几何 + 反推 ─────────────────────────────────────────────────────
+
+/// 判断鼠标列是否落在滚动条列（drawer.area 最右 1 列）。
+fn is_scrollbar_column(mouse_col: u16, area: Rect) -> bool {
+    mouse_col == area.x.saturating_add(area.width).saturating_sub(1)
+}
+
+/// ratatui Scrollbar 渲染所需的几何参数。源自 ratatui-widgets 0.3.2 的公式：
+/// - `track_length = area.height - 2`（去掉 ▲▼）
+/// - `thumb_length = round(viewport * track / max_viewport_position).clamp(1, track)`
+/// - `thumb_start  = round(position * track / max_viewport_position).clamp(0, track - thumb)`
+#[derive(Debug, Clone, Copy)]
+struct ThumbGeometry {
+    track_length: usize,
+    thumb_length: usize,
+    thumb_start: usize,
+    max_position: usize,
+    max_viewport_position: usize,
+}
+
+/// 四舍五入除法（与 ratatui 内部 `rounding_divide` 一致）。
+fn round_divide(numerator: usize, denominator: usize) -> usize {
+    if denominator == 0 {
+        0
+    } else {
+        (numerator + denominator / 2) / denominator
+    }
+}
+
+/// 从 ScrollbarFields + area 计算 thumb 几何。无溢出时返回 None（滚动条不渲染）。
+fn compute_thumb_geometry(fields: &ScrollbarFields, area: Rect) -> Option<ThumbGeometry> {
+    if fields.content_length <= fields.viewport_length {
+        return None;
+    }
+    let track_length = area.height.saturating_sub(2) as usize;
+    if track_length == 0 {
+        return None;
+    }
+    let max_position = fields.content_length.saturating_sub(1);
+    let max_viewport_position = max_position + fields.viewport_length;
+    let thumb_length = round_divide(fields.viewport_length * track_length, max_viewport_position)
+        .clamp(1, track_length);
+    let thumb_start = round_divide(fields.position * track_length, max_viewport_position)
+        .min(track_length.saturating_sub(thumb_length));
+    Some(ThumbGeometry {
+        track_length,
+        thumb_length,
+        thumb_start,
+        max_position,
+        max_viewport_position,
+    })
+}
+
+/// 把「目标 thumb_start（track 内偏移）」反推为「scroll position」。
+/// clamp 到合法 thumb 范围，再线性反推 + clamp 到 [0, max_position]。
+fn thumb_start_to_position(thumb_start: usize, geo: &ThumbGeometry) -> usize {
+    let clamped = thumb_start.min(geo.track_length.saturating_sub(geo.thumb_length));
+    round_divide(clamped * geo.max_viewport_position, geo.track_length).min(geo.max_position)
+}
+
+/// 把 ratatui 语义的「scroll position」反推为「scroll offset（scroll_state.offset().y）」。
+/// [Why] mod.rs 写入 `scrollbar_fields.position` 时做了线性映射
+/// `position = scroll_y * max_position / max_scroll`（修复 ratatui thumb 不到底）。
+/// 反推必须用相同公式的逆运算，否则点击位置和实际滚动错位——比如点击底部时
+/// set_offset 会超出 max_scroll 范围。
+fn position_to_scroll_y(position: usize, max_position: usize, max_scroll: usize) -> usize {
+    if max_position == 0 || max_scroll == 0 {
+        0
+    } else {
+        (position * max_scroll) / max_position
     }
 }
 
@@ -105,6 +200,8 @@ pub(super) fn handle_event(
         usize,
         Arc<Vec<ratatui_kit::ratatui::text::Line<'static>>>,
     )>,
+    scrollbar_fields: &State<ScrollbarFields>,
+    scrollbar_drag: &State<ScrollbarDragState>,
 ) -> EventResult {
     if let Event::Key(key) = &event {
         let _ = focus_router::message_accepts_key(key);
@@ -118,6 +215,125 @@ pub(super) fn handle_event(
 
         if let Some(area) = area_rect {
             let in_area = mouse_in_area(mouse.row, mouse.column, area);
+
+            // ── 滚动条点击/拖拽（优先于文本选区）──
+            // [Why] 滚动条列（drawer.area 最右 1 列）以前 fallthrough 到文本选区，
+            // 导致点击轨道触发空复制、▲▼ 无反应、拖拽 thumb 无反应。
+            // 拖拽中（drag_active）即使鼠标移出滚动条列也继续滚动条逻辑——
+            // 否则会 fallthrough 到文本选区，触发误复制。
+            let on_scrollbar_col = in_area && is_scrollbar_column(mouse.column, area);
+            let drag_active = scrollbar_drag.read().active;
+            if drag_active || on_scrollbar_col {
+                let fields = *scrollbar_fields.read();
+                if let Some(geo) = compute_thumb_geometry(&fields, area) {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) if on_scrollbar_col => {
+                            // ▲ 端点（area 顶行）—— 单步上滚
+                            if mouse.row == area.y {
+                                scroll_state.write_no_update().scroll_up();
+                                return EventResult::Consumed;
+                            }
+                            // ▼ 端点（area 底行）—— 单步下滚
+                            let bottom_row = area.y.saturating_add(area.height).saturating_sub(1);
+                            if mouse.row == bottom_row {
+                                scroll_state.write_no_update().scroll_down();
+                                return EventResult::Consumed;
+                            }
+                            // thumb / track
+                            let thumb_start_row = area
+                                .y
+                                .saturating_add(1)
+                                .saturating_add(geo.thumb_start as u16);
+                            let thumb_end_row =
+                                thumb_start_row.saturating_add(geo.thumb_length as u16);
+                            let on_thumb =
+                                mouse.row >= thumb_start_row && mouse.row < thumb_end_row;
+                            // 点击 thumb：锁定 thumb_offset、不跳转；
+                            // 点击轨道：thumb 中心对齐鼠标并立即跳转
+                            let thumb_offset = if on_thumb {
+                                mouse.row.saturating_sub(thumb_start_row)
+                            } else {
+                                (geo.thumb_length / 2) as u16
+                            };
+                            if !on_thumb {
+                                let track_click =
+                                    mouse.row.saturating_sub(area.y).saturating_sub(1) as usize;
+                                let target_thumb_start =
+                                    track_click.saturating_sub(geo.thumb_length / 2);
+                                let position = thumb_start_to_position(target_thumb_start, &geo);
+                                let max_scroll =
+                                    fields.content_length.saturating_sub(fields.viewport_length);
+                                let target =
+                                    position_to_scroll_y(position, geo.max_position, max_scroll);
+                                let cur = scroll_state.read().offset();
+                                scroll_state
+                                    .write_no_update()
+                                    .set_offset(Position::new(cur.x, target as u16));
+                            }
+                            // 记录拖拽状态——render 不依赖 active，用 write_no_update
+                            {
+                                let mut s = scrollbar_drag.write_no_update();
+                                s.active = true;
+                                s.thumb_offset = thumb_offset;
+                                s.last_flush = Instant::now();
+                            }
+                            // 清除文本选区按下记录，防止 fallthrough 冲突
+                            *selection_down_pos.write_no_update() = None;
+                            return EventResult::Consumed;
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) if drag_active => {
+                            // 16ms 节流——和滚轮 / 文本 Drag 保持一致
+                            let now = Instant::now();
+                            {
+                                let d = scrollbar_drag.read();
+                                if now.duration_since(d.last_flush)
+                                    < Duration::from_millis(SCROLL_FRAME_MS)
+                                {
+                                    return EventResult::Consumed;
+                                }
+                            }
+                            scrollbar_drag.write_no_update().last_flush = now;
+                            // 保持 thumb_offset：new_thumb_start_row = mouse.row - thumb_offset
+                            let thumb_offset = scrollbar_drag.read().thumb_offset;
+                            let new_thumb_start_row = mouse.row.saturating_sub(thumb_offset);
+                            let target_track_click =
+                                new_thumb_start_row.saturating_sub(area.y).saturating_sub(1)
+                                    as usize;
+                            let position = thumb_start_to_position(target_track_click, &geo);
+                            let max_scroll =
+                                fields.content_length.saturating_sub(fields.viewport_length);
+                            let target =
+                                position_to_scroll_y(position, geo.max_position, max_scroll);
+                            let cur = scroll_state.read().offset();
+                            scroll_state
+                                .write_no_update()
+                                .set_offset(Position::new(cur.x, target as u16));
+                            return EventResult::Consumed;
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            if drag_active {
+                                scrollbar_drag.write_no_update().active = false;
+                            }
+                            return EventResult::Consumed;
+                        }
+                        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                            // 滚轮在滚动条列也响应——fallthrough 到下面的滚动处理
+                        }
+                        _ => return EventResult::Consumed,
+                    }
+                } else if on_scrollbar_col
+                    && matches!(
+                        mouse.kind,
+                        MouseEventKind::Down(MouseButton::Left)
+                            | MouseEventKind::Drag(MouseButton::Left)
+                            | MouseEventKind::Up(MouseButton::Left)
+                    )
+                {
+                    // 无溢出（geo=None，ScrollbarHook 也不渲染），但鼠标在滚动条列——
+                    // 消费事件避免 fallthrough 到文本选区（否则点击最右列会清空选区）
+                    return EventResult::Consumed;
+                }
+            }
 
             // [DEBUG] PERI_DISABLE_DRAG_SELECT=1 完全跳过 Drag 选中——验证是否是
             // Drag 处理逻辑引起卡死。
@@ -268,11 +484,28 @@ pub(super) struct AutoFollowCtx {
     pub last_scrolled_at: State<u16>,
     pub items_len: usize,
     pub is_loading: bool,
+    /// 用于检测 resize：total_visual_rows 变化后钳制 scroll_state.offset 到有效范围。
+    pub prev_total_visual_rows: State<u16>,
 }
 
 /// 从 `use_effect` 闭包提取的吸底逻辑。
 /// 注意：use_effect body 不是 render body，所以 `write()` 是正确的（需要 wake 触发后续渲染）。
 pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
+    // [Fix] resize 后 total_visual_rows 变化时，主动钳制 scroll_state.offset 到有效范围。
+    // 避免 scroll_state.offset.y >> max_scroll 导致用户感知滚动完全卡死。
+    let prev_total = *ctx.prev_total_visual_rows.read();
+    *ctx.prev_total_visual_rows.write() = ctx.total_visual_rows;
+
+    if prev_total != ctx.total_visual_rows && ctx.total_visual_rows > 0 && ctx.vis_height > 0 {
+        let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height);
+        let current_y = ctx.scroll_state.read().offset().y as u16;
+        if current_y > max_scroll {
+            ctx.scroll_state
+                .write()
+                .set_offset(ratatui_kit::ratatui::layout::Position::new(0, max_scroll));
+        }
+    }
+
     // [TRAP] parking_lot 同 thread 死锁规避：先 read copy 出 owned，guard 在语句末尾 drop，再 write。
     let prev = *ctx.prev_items_len.read();
     *ctx.prev_items_len.write() = ctx.items_len;
@@ -394,5 +627,149 @@ mod tests {
         let total = 10;
         let vis_height = 30;
         assert!(!proximity_check(total, 0, vis_height));
+    }
+
+    // ── 滚动条几何 / 反推公式测试 ────────────────────────────────────────
+
+    fn make_rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
+        Rect::new(x, y, width, height)
+    }
+
+    #[test]
+    fn test_is_scrollbar_column_rightmost() {
+        // area: x=10, width=80 → scrollbar 列 = 10 + 80 - 1 = 89
+        let area = make_rect(10, 0, 80, 24);
+        assert!(is_scrollbar_column(89, area));
+    }
+
+    #[test]
+    fn test_is_scrollbar_column_text_area() {
+        let area = make_rect(10, 0, 80, 24);
+        assert!(!is_scrollbar_column(10, area));
+        assert!(!is_scrollbar_column(50, area));
+        assert!(!is_scrollbar_column(88, area));
+    }
+
+    #[test]
+    fn test_compute_thumb_geometry_no_overflow_returns_none() {
+        let fields = ScrollbarFields {
+            content_length: 50,
+            position: 0,
+            viewport_length: 60,
+        };
+        let area = make_rect(0, 0, 80, 24);
+        assert!(compute_thumb_geometry(&fields, area).is_none());
+    }
+
+    #[test]
+    fn test_compute_thumb_geometry_thumb_length_clamped_to_one() {
+        let fields = ScrollbarFields {
+            content_length: 1000,
+            position: 0,
+            viewport_length: 10,
+        };
+        let area = make_rect(0, 0, 80, 24);
+        let geo = compute_thumb_geometry(&fields, area).expect("应有溢出");
+        assert!(geo.thumb_length >= 1);
+        assert!(geo.thumb_length <= geo.track_length);
+        // content=1000, viewport=10, track=22 → thumb ≈ round(10*22/1009) = round(0.218) = 0 → clamp 到 1
+        assert_eq!(geo.thumb_length, 1);
+    }
+
+    #[test]
+    fn test_compute_thumb_geometry_track_length_minus_two() {
+        let fields = ScrollbarFields {
+            content_length: 200,
+            position: 100,
+            viewport_length: 20,
+        };
+        let area = make_rect(0, 0, 80, 24);
+        let geo = compute_thumb_geometry(&fields, area).expect("应有溢出");
+        assert_eq!(geo.track_length, 22); // 24 - 2
+    }
+
+    #[test]
+    fn test_thumb_start_to_position_at_top() {
+        let fields = ScrollbarFields {
+            content_length: 200,
+            position: 100,
+            viewport_length: 20,
+        };
+        let area = make_rect(0, 0, 80, 24);
+        let geo = compute_thumb_geometry(&fields, area).expect("应有溢出");
+        let pos = thumb_start_to_position(0, &geo);
+        assert_eq!(pos, 0);
+    }
+
+    #[test]
+    fn test_thumb_start_to_position_at_bottom() {
+        let fields = ScrollbarFields {
+            content_length: 200,
+            position: 0,
+            viewport_length: 20,
+        };
+        let area = make_rect(0, 0, 80, 24);
+        let geo = compute_thumb_geometry(&fields, area).expect("应有溢出");
+        let max_thumb_start = geo.track_length - geo.thumb_length;
+        let pos = thumb_start_to_position(max_thumb_start, &geo);
+        // thumb 到底 → position 应接近 max_position（=199），允许 ±2 舍入误差
+        assert!(
+            pos >= geo.max_position.saturating_sub(2),
+            "thumb 到底时 position 应接近 max_position，实际 = {}，max = {}",
+            pos,
+            geo.max_position
+        );
+    }
+
+    #[test]
+    fn test_thumb_start_to_position_clamps_to_max() {
+        let fields = ScrollbarFields {
+            content_length: 100,
+            position: 0,
+            viewport_length: 10,
+        };
+        let area = make_rect(0, 0, 80, 24);
+        let geo = compute_thumb_geometry(&fields, area).expect("应有溢出");
+        let pos = thumb_start_to_position(usize::MAX, &geo);
+        assert_eq!(pos, geo.max_position);
+    }
+
+    #[test]
+    fn test_round_divide_basic() {
+        assert_eq!(round_divide(10, 4), 3); // (10+2)/4 = 3
+        assert_eq!(round_divide(8, 4), 2); // (8+2)/4 = 2
+        assert_eq!(round_divide(7, 0), 0);
+        assert_eq!(round_divide(0, 5), 0);
+    }
+
+    #[test]
+    fn test_scrollbar_drag_state_default() {
+        let s = ScrollbarDragState::default();
+        assert!(!s.active);
+        assert_eq!(s.thumb_offset, 0);
+    }
+
+    #[test]
+    fn test_position_to_scroll_y_linear() {
+        // max_position=99, max_scroll=90（content=100, viewport=10）
+        // position=0 → scroll_y=0
+        assert_eq!(position_to_scroll_y(0, 99, 90), 0);
+        // position=99 → scroll_y=99*90/99 = 90
+        assert_eq!(position_to_scroll_y(99, 99, 90), 90);
+        // position=50 → scroll_y=50*90/99 = 45（整数除法）
+        assert_eq!(position_to_scroll_y(50, 99, 90), 45);
+    }
+
+    #[test]
+    fn test_position_to_scroll_y_zero_max_position() {
+        // max_position=0（content=1）→ 总是 0
+        assert_eq!(position_to_scroll_y(0, 0, 0), 0);
+        assert_eq!(position_to_scroll_y(5, 0, 10), 0);
+    }
+
+    #[test]
+    fn test_position_to_scroll_y_zero_max_scroll() {
+        // max_scroll=0（content <= viewport）→ 总是 0
+        assert_eq!(position_to_scroll_y(5, 100, 0), 0);
     }
 }

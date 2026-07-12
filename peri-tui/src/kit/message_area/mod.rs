@@ -8,6 +8,7 @@
 
 #![allow(clippy::needless_update)]
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::kit::atoms::{LANG_VERSION, VIEW_MODELS};
@@ -34,7 +35,7 @@ use footer::{build_footer_lines, hash_todo_items};
 pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
 use render::vm_to_lines;
-use scroll::{DragThrottle, ScrollThrottle};
+use scroll::{DragThrottle, ScrollThrottle, ScrollbarDragState};
 use selection::{
     WrappedLineInfo, build_wrap_map, highlight_line_in_selection, viewport_logical_range,
     visual_to_logical,
@@ -62,10 +63,12 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // Span + Cow<str>），直接拖满 CPU。Arc::clone 是 O(1) 引用计数。
     let lines_cache = hooks.use_state(|| (0u64, 0usize, Arc::<Vec<Line<'static>>>::default()));
 
-    // ── total_visual_rows 缓存：仅 (generation, width, lines_len) 变化时重算 line_count ──
+    // ── total_visual_rows 缓存：仅 (generation, width, lines_len, footer_hash) 变化时重算 line_count ──
     // [TRAP] Paragraph::line_count 是 O(N·W)（unicode-width + wrap），每帧重算会拖垮长对话滚动。
     // cache 仅供 render body 读，不作为响应式源——用 write_no_update 写入避免 wake 自激回路。
-    let total_rows_cache = hooks.use_state(|| (0u64, 0u16, 0usize, 0u16));
+    // [Fix] 新增 footer_hash key：footer 内容变化但行数相同时（如 spinner 文本变长），
+    // lines_len 不变但仍需 invalidate 缓存，否则 total_visual_rows 返回旧值导致末尾几行无法到达。
+    let total_rows_cache = hooks.use_state(|| (0u64, 0u16, 0usize, 0u64, 0u16));
 
     // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
     let footer_lines = build_footer_lines(&mut hooks, is_loading, &todo_items);
@@ -140,6 +143,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     hooks.use_hook(move || ScrollbarHook {
         fields: scrollbar_fields,
     });
+    // 滚动条 thumb 拖拽状态（点击/拖拽事件处理器读写）
+    let scrollbar_drag = hooks.use_state(ScrollbarDragState::default);
 
     let vis_width = area_rect
         .map(|r| r.width.saturating_sub(1))
@@ -173,39 +178,55 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     }
 
     // ── 总视觉行数：使用 Paragraph wrap 预测（带缓存）──
-    // [TRAP] 仅在 (gen, width, lines_len) 变化时构建 all_lines 重算 line_count。
-    // Drag 期间 generation/width/lines_len 不变，缓存命中——跳过 O(N) 构建。
+    // [TRAP] 仅在 (gen, width, lines_len, footer_hash) 变化时构建 all_lines 重算 line_count。
+    // Drag 期间 generation/width/lines_len/footer_hash 不变，缓存命中——跳过 O(N) 构建。
+    //
+    // footer_hash：对 footer 文本内容做 hash，捕获 spinner 文本变化（线数不变时也会 vary）。
+    let footer_hash = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for line in &footer_lines {
+            for span in &line.spans {
+                span.content.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    };
     let cached = {
         let g = total_rows_cache.read();
-        (g.0, g.1, g.2, g.3)
+        (g.0, g.1, g.2, g.3, g.4)
     };
-    let total_visual_rows: u16 =
-        if cached.0 == vm_generation && cached.1 == vis_width && cached.2 == lines_len {
-            cached.3
-        } else if lines_len == 0 {
-            let rows: u16 = if is_loading { 1 } else { 0 };
-            let mut g = total_rows_cache.write_no_update();
-            g.0 = vm_generation;
-            g.1 = vis_width;
-            g.2 = lines_len;
-            g.3 = rows;
-            rows
-        } else {
-            // 构建 all_lines 用于 line_count（仅在 cache 未命中时）
-            let mut all_lines = (*core_lines_arc).clone();
-            if !empty {
-                all_lines.extend(footer_lines.iter().cloned());
-            }
-            let rows = Paragraph::new(RatText::from(all_lines))
-                .wrap(Wrap { trim: false })
-                .line_count(vis_width as u16) as u16;
-            let mut g = total_rows_cache.write_no_update();
-            g.0 = vm_generation;
-            g.1 = vis_width;
-            g.2 = lines_len;
-            g.3 = rows;
-            rows
-        };
+    let total_visual_rows: u16 = if cached.0 == vm_generation
+        && cached.1 == vis_width
+        && cached.2 == lines_len
+        && cached.3 == footer_hash
+    {
+        cached.4
+    } else if lines_len == 0 {
+        let rows: u16 = if is_loading { 1 } else { 0 };
+        let mut g = total_rows_cache.write_no_update();
+        g.0 = vm_generation;
+        g.1 = vis_width;
+        g.2 = lines_len;
+        g.3 = footer_hash;
+        g.4 = rows;
+        rows
+    } else {
+        // 构建 all_lines 用于 line_count（仅在 cache 未命中时）
+        let mut all_lines = (*core_lines_arc).clone();
+        if !empty {
+            all_lines.extend(footer_lines.iter().cloned());
+        }
+        let rows = Paragraph::new(RatText::from(all_lines))
+            .wrap(Wrap { trim: false })
+            .line_count(vis_width as u16) as u16;
+        let mut g = total_rows_cache.write_no_update();
+        g.0 = vm_generation;
+        g.1 = vis_width;
+        g.2 = lines_len;
+        g.3 = footer_hash;
+        g.4 = rows;
+        rows
+    };
 
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     {
@@ -221,12 +242,15 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 &drag_throttle,
                 &wrap_map_cache,
                 &lines_cache,
+                &scrollbar_fields,
+                &scrollbar_drag,
             )
         });
     }
 
     // ── 吸底自动跟随 ──
     let last_scrolled_at = hooks.use_state(|| 0u16);
+    let prev_total_visual_rows = hooks.use_state(|| 0u16);
     hooks.use_effect(
         {
             move || {
@@ -238,10 +262,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     last_scrolled_at: last_scrolled_at.clone(),
                     items_len,
                     is_loading,
+                    prev_total_visual_rows: prev_total_visual_rows.clone(),
                 })
             }
         },
-        (items_len, vm_generation, is_loading),
+        (items_len, vm_generation, is_loading, total_visual_rows),
     );
 
     if empty {
@@ -292,11 +317,35 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let scroll_y_raw = scroll_state.read().offset().y as usize;
     let scroll_y = scroll_y_raw.min(max_scroll);
 
+    // [Fix] 每帧钳制 scroll_state.offset.y 到 [0, max_scroll]。
+    // apply_scroll 的 scroll_down() 无限递增 offset，没有上限感知——用户可以一直
+    // 往下滚直到 offset 远超 max_scroll。虽然 scroll_y = raw.min(max_scroll) 让
+    // 渲染正确，但 scroll_state 内部 offset 不被重置，往上滚时需要把多余 offset
+    // 消耗完（如 offset=100, max_scroll=40 → 需滚 60 次才恢复）。
+    // write_no_update 不触发 re-render，避免自激回路。
+    if scroll_y_raw > max_scroll {
+        scroll_state
+            .write_no_update()
+            .set_offset(ratatui_kit::ratatui::layout::Position::new(
+                0,
+                max_scroll as u16,
+            ));
+    }
+
     // 更新 scrollbar fields——post_component_draw 时基于此渲染滚动条
+    //
+    // [Fix] ratatui Scrollbar 的 position 模型是 "item index"，max_position =
+    // content_length - 1。但我们的 scroll_y 是 scroll offset，max = content_length -
+    // vis_height。直接传 scroll_y 会导致 thumb 永远到不了底部（因为 scroll_y <
+    // content_length - 1）。需要把 [0, max_scroll] 线性映射到 [0, content_length-1]。
     {
         let mut g = scrollbar_fields.write_no_update();
         g.content_length = total_visual_rows as usize;
-        g.position = scroll_y;
+        g.position = if max_scroll > 0 {
+            (scroll_y * (total_visual_rows as usize - 1)) / max_scroll
+        } else {
+            0
+        };
         g.viewport_length = vis_height as usize;
     }
 
