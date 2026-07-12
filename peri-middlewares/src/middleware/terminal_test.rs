@@ -207,14 +207,14 @@ async fn test_bash_default_timeout_is_120_seconds() {
 
 #[tokio::test]
 async fn test_bash_legacy_params_ignored() {
-    // P0-3: schema 已移除 description/run_in_background，旧 tool_call 中残留字段应被静默忽略
+    // description 是 schema 未声明的字段，残留应被静默忽略（不影响执行）
+    // 注：run_in_background 现已支持（见 issue bg-tasks-unified-management），不再是 legacy
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
         .invoke(
             serde_json::json!({
                 "command": "echo ok",
                 "description": "test description",
-                "run_in_background": true
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
@@ -225,20 +225,20 @@ async fn test_bash_legacy_params_ignored() {
 
 #[test]
 fn test_bash_schema_no_legacy_params() {
-    // P0-3: schema 不应声明 description/run_in_background
+    // description 从未声明为 BashTool 参数；run_in_background 现已支持（见 bg-tasks-unified-management）
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let params = tool.parameters();
     let props = params["properties"].as_object().unwrap();
     assert!(
         !props.contains_key("description"),
-        "schema 不应再声明 description 参数"
-    );
-    assert!(
-        !props.contains_key("run_in_background"),
-        "schema 不应再声明 run_in_background 参数"
+        "schema 不应声明 description 参数"
     );
     assert!(props.contains_key("command"), "command 应保留");
     assert!(props.contains_key("timeout"), "timeout 应保留");
+    assert!(
+        props.contains_key("run_in_background"),
+        "run_in_background 现已支持，schema 应声明"
+    );
 }
 
 #[test]

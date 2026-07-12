@@ -51,24 +51,24 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             (KeyModifiers::NONE, KeyCode::Enter) => {
                 // 读取 HITL_REQUEST_ID 并通过 channel 发送 Approve。
                 // 先读取 id_str，再 close_popup（close 会清空 HITL_REQUEST_ID）。
-                if let Some(id_str) = HITL_REQUEST_ID.state().read().clone() {
-                    if let Some(tx) = HITL_RESPONSE_TX.get() {
-                        let _ = tx.send(HitlResponseAction::Approve {
-                            request_id_str: id_str,
-                        });
-                    }
+                if let Some(id_str) = HITL_REQUEST_ID.state().read().clone()
+                    && let Some(tx) = HITL_RESPONSE_TX.get()
+                {
+                    let _ = tx.send(HitlResponseAction::Approve {
+                        request_id_str: id_str,
+                    });
                 }
                 close_popup();
                 EventResult::Consumed
             }
             (KeyModifiers::NONE, KeyCode::Esc) => {
                 // Esc 同 Enter 路径——先读取 id_str 发送 Reject，再 close_popup。
-                if let Some(id_str) = HITL_REQUEST_ID.state().read().clone() {
-                    if let Some(tx) = HITL_RESPONSE_TX.get() {
-                        let _ = tx.send(HitlResponseAction::Reject {
-                            request_id_str: id_str,
-                        });
-                    }
+                if let Some(id_str) = HITL_REQUEST_ID.state().read().clone()
+                    && let Some(tx) = HITL_RESPONSE_TX.get()
+                {
+                    let _ = tx.send(HitlResponseAction::Reject {
+                        request_id_str: id_str,
+                    });
                 }
                 close_popup();
                 EventResult::Consumed

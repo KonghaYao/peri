@@ -352,7 +352,6 @@ mod tests {
         // messages_mut 应只影响 cache，不写入 transcript
         let cache = ac.messages_mut();
         cache.push(BaseMessage::human(MessageContent::text("cache-only")));
-        drop(cache);
 
         // transcript 不应有 cache-only 消息
         let transcript = ctx.transcript.read();

@@ -172,6 +172,7 @@ fn char_index_to_byte(s: &str, char_idx: usize) -> usize {
 ///
 /// selection_range 为 `(start, end)` 字符索引的半开区间，cursor_style 优先级高于 selection_style。
 /// placeholder 非空且 text 为空时，渲染占位符文本（类似 tui-textarea 风格：光标空间 + 占位文）。
+#[allow(clippy::too_many_arguments)]
 pub fn render_multiline_with_cursor(
     text: &str,
     cursor: usize,

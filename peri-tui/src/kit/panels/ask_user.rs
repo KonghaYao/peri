@@ -53,12 +53,12 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     fn cancel_ask_user() {
-        if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone() {
-            if let Some(tx) = ASK_USER_RESPONSE_TX.get() {
-                let _ = tx.send(AskUserResponseAction::Cancel {
-                    request_id_str: id_str,
-                });
-            }
+        if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+            && let Some(tx) = ASK_USER_RESPONSE_TX.get()
+        {
+            let _ = tx.send(AskUserResponseAction::Cancel {
+                request_id_str: id_str,
+            });
         }
         panel_registry::close_panel(PanelKind::AskUser);
         *ASK_USER_PENDING.state().write() = None;
@@ -79,22 +79,20 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         if (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Char(' ')) {
             let q_idx = *focused.read();
             let opt_idx = *focused_option.read();
-            if let Some(au) = pending_for_closure.as_ref() {
-                if let Some(q) = au.questions.get(q_idx) {
-                    if opt_idx < q.options.len() {
-                        let new_val =
-                            if answers.read().get(q_idx).copied().flatten() == Some(opt_idx) {
-                                None
-                            } else {
-                                Some(opt_idx)
-                            };
-                        let mut a = answers.write();
-                        if q_idx >= a.len() {
-                            a.resize(q_idx + 1, None);
-                        }
-                        a[q_idx] = new_val;
-                    }
+            if let Some(au) = pending_for_closure.as_ref()
+                && let Some(q) = au.questions.get(q_idx)
+                && opt_idx < q.options.len()
+            {
+                let new_val = if answers.read().get(q_idx).copied().flatten() == Some(opt_idx) {
+                    None
+                } else {
+                    Some(opt_idx)
+                };
+                let mut a = answers.write();
+                if q_idx >= a.len() {
+                    a.resize(q_idx + 1, None);
                 }
+                a[q_idx] = new_val;
             }
             return EventResult::Consumed;
         }
@@ -166,13 +164,13 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let answers_snapshot = answers.read().clone();
                     let answers_map =
                         build_answers_map(pending_for_closure.as_ref(), &answers_snapshot);
-                    if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone() {
-                        if let Some(tx) = ASK_USER_RESPONSE_TX.get() {
-                            let _ = tx.send(AskUserResponseAction::Submit {
-                                request_id_str: id_str,
-                                answers: answers_map,
-                            });
-                        }
+                    if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+                        && let Some(tx) = ASK_USER_RESPONSE_TX.get()
+                    {
+                        let _ = tx.send(AskUserResponseAction::Submit {
+                            request_id_str: id_str,
+                            answers: answers_map,
+                        });
                     }
                     panel_registry::close_panel(PanelKind::AskUser);
                     *ASK_USER_PENDING.state().write() = None;

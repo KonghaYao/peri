@@ -11,6 +11,12 @@ use super::types::{MarkdownSegment, TableData};
 // ── 块级转换 ────────────────────────────────────────────────────────
 
 /// 将 ratatui-kit-markdown 的 ParsedBlock 列表转换为 MarkdownSegment 序列。
+///
+/// 间距规则（统一）：
+/// - 每个块级元素前加 **恰好一行**空行，除非：
+///   (a) 是第一个有内容的块
+///   (b) 是连续的列表项（列表项之间无空行）
+/// - parser 生成的空 `Paragraph` 是列表分隔哨兵，跳过（间距由本函数统一管理）
 pub(crate) fn convert_to_segments(
     blocks: &[ParsedBlock],
     theme: &MarkdownTheme,
@@ -18,65 +24,51 @@ pub(crate) fn convert_to_segments(
 ) -> Vec<MarkdownSegment> {
     let mut segments: Vec<MarkdownSegment> = Vec::new();
     let mut current_text: Vec<Line<'static>> = Vec::new();
-    let mut prev_added_trailing = false;
-    let mut prev_was_major = false;
-    let mut prev_was_real_para = false;
-
-    let flush_text = |text: &mut Vec<Line<'static>>, segs: &mut Vec<MarkdownSegment>| {
-        // 裁剪尾部空行
-        while text.last().is_some_and(|l| l.spans.is_empty()) {
-            text.pop();
-        }
-        if !text.is_empty() {
-            segs.push(MarkdownSegment::Text(std::mem::take(text)));
-        }
-    };
+    let mut prev_was_list_item = false;
 
     for block in blocks {
-        let is_major = matches!(
-            block,
-            ParsedBlock::Heading(..)
-                | ParsedBlock::CodeBlock(..)
-                | ParsedBlock::Table(..)
-                | ParsedBlock::Rule
-        );
-
-        if !prev_added_trailing && prev_was_major && is_major {
-            current_text.push(Line::default());
+        // 跳过 parser 生成的空 Paragraph（列表前后的哨兵）
+        if matches!(block, ParsedBlock::Paragraph(lines) if lines.is_empty()) {
+            prev_was_list_item = false;
+            continue;
         }
-        prev_added_trailing = false;
 
-        let is_real_para = matches!(block, ParsedBlock::Paragraph(ps) if !ps.is_empty());
-        if is_real_para && prev_was_real_para {
+        let is_list_item = matches!(block, ParsedBlock::ListItem(_));
+
+        // 分隔：非首块 + 非连续列表项 → 确保恰好一行空行
+        if !(current_text.is_empty()
+            || current_text.last().is_some_and(|l| l.spans.is_empty())
+            || is_list_item && prev_was_list_item)
+        {
             current_text.push(Line::default());
         }
 
         match block {
             ParsedBlock::Heading(level, line) => {
                 current_text.push(heading_line(level, line, theme));
-                current_text.push(Line::default());
-                prev_added_trailing = true;
             }
             ParsedBlock::Paragraph(para_lines) => {
-                if para_lines.is_empty() {
-                    current_text.push(Line::default());
-                } else {
-                    for line in para_lines {
-                        current_text.push(style_line(line, theme));
-                    }
+                for line in para_lines {
+                    current_text.push(style_line(line, theme));
                 }
             }
             ParsedBlock::CodeBlock(lang, code_lines) => {
-                current_text.push(Line::default());
                 current_text.extend(code_block_lines(lang, code_lines, theme));
-                current_text.push(Line::default());
-                prev_added_trailing = true;
             }
             ParsedBlock::ListItem(item) => {
                 current_text.push(list_item_line(item, theme));
             }
+            ParsedBlock::Rule => {
+                let rule_char = "─".repeat(max_width.min(80));
+                let rule_span = Span::styled(rule_char, theme.rule_style);
+                current_text.push(Line::from(rule_span));
+            }
             ParsedBlock::Table(headers, rows, alignments) => {
-                flush_text(&mut current_text, &mut segments);
+                // 表格前：冲刷已有文本为独立段
+                trim_trailing_blanks(&mut current_text);
+                if !current_text.is_empty() {
+                    segments.push(MarkdownSegment::Text(std::mem::take(&mut current_text)));
+                }
                 let col_widths =
                     compute_table_col_widths(headers, rows, alignments.len(), max_width);
                 segments.push(MarkdownSegment::Table(TableData {
@@ -86,21 +78,24 @@ pub(crate) fn convert_to_segments(
                     col_widths,
                 }));
             }
-            ParsedBlock::Rule => {
-                let rule_char = "─".repeat(max_width.min(80));
-                let rule_span = Span::styled(rule_char, theme.rule_style);
-                current_text.push(Line::from(rule_span));
-                current_text.push(Line::default());
-                prev_added_trailing = true;
-            }
         }
 
-        prev_was_major = is_major;
-        prev_was_real_para = is_real_para;
+        prev_was_list_item = is_list_item;
     }
 
-    flush_text(&mut current_text, &mut segments);
+    // 冲刷剩余文本
+    trim_trailing_blanks(&mut current_text);
+    if !current_text.is_empty() {
+        segments.push(MarkdownSegment::Text(current_text));
+    }
     segments
+}
+
+/// 裁剪尾部空行。
+fn trim_trailing_blanks(text: &mut Vec<Line<'static>>) {
+    while text.last().is_some_and(|l| l.spans.is_empty()) {
+        text.pop();
+    }
 }
 
 /// 通用段落行渲染。

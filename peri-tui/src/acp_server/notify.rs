@@ -23,11 +23,11 @@ pub(crate) fn handle_notification(
     match method {
         "session/cancel" => {
             let session_id = extract_session_id(params, "");
-            if let Some(state) = sessions.get(session_id) {
-                if let Some(ref token) = state.cancel_token {
-                    token.cancel();
-                    info!(session_id = %session_id, "Cancel requested");
-                }
+            if let Some(state) = sessions.get(session_id)
+                && let Some(ref token) = state.cancel_token
+            {
+                token.cancel();
+                info!(session_id = %session_id, "Cancel requested");
             }
         }
         "session/config_update" => {

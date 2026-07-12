@@ -56,8 +56,7 @@ pub(crate) fn compute_table_col_widths(
     // 公平分配：floor → 缺口排序 → remainder
     let mut alloc: Vec<usize> = col_widths
         .iter()
-        .enumerate()
-        .map(|(_, &w)| ((w * available / total).max(1)).min(w).max(2))
+        .map(|&w| ((w * available / total).max(1)).min(w).max(2))
         .collect();
 
     let allocated: usize = alloc.iter().sum();
@@ -285,6 +284,7 @@ fn render_table_to_buffer(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_hline(
     buf: &mut Buffer,
     x: u16,
@@ -312,6 +312,7 @@ fn render_hline(
     put(buf, cx, y, r, s);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_row_line(
     buf: &mut Buffer,
     x: u16,

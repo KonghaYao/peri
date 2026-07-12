@@ -112,13 +112,13 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             .unwrap_or_default(),
                         None => String::new(),
                     };
-                    if !target_id.is_empty() {
-                        if let Some(tx) = REWIND_ACTION_TX.get() {
-                            let _ = tx.send(RewindAction::Confirm {
-                                target_message_id: target_id,
-                                revert_files: true,
-                            });
-                        }
+                    if !target_id.is_empty()
+                        && let Some(tx) = REWIND_ACTION_TX.get()
+                    {
+                        let _ = tx.send(RewindAction::Confirm {
+                            target_message_id: target_id,
+                            revert_files: true,
+                        });
                     }
                     close_popup();
                     return EventResult::Consumed;

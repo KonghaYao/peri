@@ -172,7 +172,7 @@ fn test_render_multiline_cjk_cursor_mid_line() {
     assert_eq!(lines[0].spans[0].content, "你好");
     // 光标字符应为反色高亮
     assert!(
-        !lines[0].spans[1].style.bg.is_none() || !lines[0].spans[1].style.fg.is_none(),
+        lines[0].spans[1].style.bg.is_some() || lines[0].spans[1].style.fg.is_some(),
         "cursor span should have non-default style (reversed fg/bg)"
     );
     assert_eq!(lines[0].spans[2].content, "界");
@@ -199,7 +199,7 @@ fn test_render_multiline_cjk_cursor_at_start() {
     // spans: [Span("你", cursor_style), Span("好")]
     assert_eq!(lines[0].spans.len(), 2);
     assert!(
-        !lines[0].spans[0].style.bg.is_none(),
+        lines[0].spans[0].style.bg.is_some(),
         "cursor span should have background (reversed)"
     );
     assert_eq!(lines[0].spans[1].content, "好");
@@ -254,7 +254,7 @@ fn test_render_multiline_cjk_cursor_second_line() {
     assert_eq!(lines[1].spans.len(), 2);
     assert_eq!(lines[1].spans[0].content, "你");
     assert!(
-        !lines[1].spans[1].style.bg.is_none(),
+        lines[1].spans[1].style.bg.is_some(),
         "cursor span should have background"
     );
 }
@@ -655,7 +655,7 @@ fn test_cjk_delete_no_cursor_ghost() {
     let ds = Style::default().bg(Color::Black);
 
     // 模拟：输入 "你好世界"，cursor 在位置 1（'好' 上）
-    let before = render_multiline_with_cursor(
+    let _before = render_multiline_with_cursor(
         "你好世界",
         1,
         cs,

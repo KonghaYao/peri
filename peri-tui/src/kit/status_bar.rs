@@ -152,7 +152,7 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 复制提示优先于其他 hints。
     // [TRAP] 只读 atom 判断过期——禁止在 render body 中写 atom（render→write→render 自激）。
     // mark_copy_message 总是用新 Instant 覆盖 atom，旧 Some(until) 残留不影响下次显示。
-    let copy_active = copy_until.read().map_or(false, |until| now < until);
+    let copy_active = copy_until.read().is_some_and(|until| now < until);
     if copy_active {
         let char_count = *copy_count.read();
         let hint = i18n::tr_args(
@@ -176,7 +176,7 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Ctrl+C 退出待确认提示——在 hint 行显示，不挤占通知栏。
     let quit_active = quit_pending
         .read()
-        .map_or(false, |t| now.duration_since(t) < Duration::from_secs(1));
+        .is_some_and(|t| now.duration_since(t) < Duration::from_secs(1));
     if quit_active {
         let hint = " 再次按 Ctrl+C 退出，其他键取消 ";
         return element!(

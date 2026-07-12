@@ -100,10 +100,10 @@ impl LcRegistry {
         if let Some(value) = self.format_in_bundle(&self.current_lang, key, args) {
             return value;
         }
-        if self.current_lang != "en" {
-            if let Some(value) = self.format_in_bundle("en", key, args) {
-                return value;
-            }
+        if self.current_lang != "en"
+            && let Some(value) = self.format_in_bundle("en", key, args)
+        {
+            return value;
         }
         key.to_string()
     }

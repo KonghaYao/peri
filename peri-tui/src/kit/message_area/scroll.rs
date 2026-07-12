@@ -97,11 +97,9 @@ struct ThumbGeometry {
 
 /// 四舍五入除法（与 ratatui 内部 `rounding_divide` 一致）。
 fn round_divide(numerator: usize, denominator: usize) -> usize {
-    if denominator == 0 {
-        0
-    } else {
-        (numerator + denominator / 2) / denominator
-    }
+    (numerator + denominator / 2)
+        .checked_div(denominator)
+        .unwrap_or(0)
 }
 
 /// 从 ScrollbarFields + area 计算 thumb 几何。无溢出时返回 None（滚动条不渲染）。
@@ -185,6 +183,7 @@ fn apply_scroll(
 /// 从 `use_event_handler` 闭包提取的鼠标/键盘处理逻辑。
 /// 包含：鼠标滚轮节流、文本拖拽选中（Down/Drag/Up）、键盘滚动、
 /// PERI_DISABLE_DRAG_SELECT 分支、parking_lot 死锁规避。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_event(
     event: &Event,
     area_rect: Option<Rect>,
@@ -357,7 +356,7 @@ pub(super) fn handle_event(
                         // [TRAP] selection_down_pos 只在事件处理器内读写，render
                         // 不依赖它——用 write_no_update 避免 wake 噪音（render 不需要
                         // 因为这个状态变化而重渲染，后续 Drag 才是真正的渲染触发点）。
-                        let scroll_y = scroll_state.read().offset().y as u16;
+                        let scroll_y = scroll_state.read().offset().y;
                         let visual_row = mouse.row.saturating_sub(area.y).saturating_add(scroll_y);
                         // 视口裁剪后无边框，visual_col 直接 = mouse.column - area.x
                         let visual_col = mouse.column.saturating_sub(area.x);
@@ -375,7 +374,7 @@ pub(super) fn handle_event(
                         }
                         drag_throttle.write_no_update().last_flush = now;
 
-                        let scroll_y = scroll_state.read().offset().y as u16;
+                        let scroll_y = scroll_state.read().offset().y;
                         let visual_row = mouse.row.saturating_sub(area.y).saturating_add(scroll_y);
                         let visual_col = mouse.column.saturating_sub(area.x);
 
@@ -471,11 +470,12 @@ pub(super) fn handle_event(
         return EventResult::Consumed;
     }
 
-    if let Event::Key(key) = &event {
-        if key.kind == KeyEventKind::Press && focus_router::message_accepts_key(key) {
-            scroll_state.write().handle_event(&event);
-            return EventResult::Consumed;
-        }
+    if let Event::Key(key) = &event
+        && key.kind == KeyEventKind::Press
+        && focus_router::message_accepts_key(key)
+    {
+        scroll_state.write().handle_event(event);
+        return EventResult::Consumed;
     }
     EventResult::Ignored
 }
@@ -506,7 +506,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
 
     if prev_total != ctx.total_visual_rows && ctx.total_visual_rows > 0 && ctx.vis_height > 0 {
         let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height);
-        let current_y = ctx.scroll_state.read().offset().y as u16;
+        let current_y = ctx.scroll_state.read().offset().y;
         if current_y > max_scroll {
             ctx.scroll_state
                 .write()
@@ -527,7 +527,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
         let prev_lsa = *ctx.last_scrolled_at.read();
         if ctx.total_visual_rows > prev_lsa {
             let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height);
-            let scroll_y = ctx.scroll_state.read().offset().y as u16;
+            let scroll_y = ctx.scroll_state.read().offset().y;
             let distance = max_scroll.saturating_sub(scroll_y);
             // [Bug] 仅在用户当前接近底部时跟随——用户主动上滚浏览历史时不应被吸回。
             // 阈值与非 loading 分支保持一致（vis_height/4，至少 5 行）。
@@ -549,7 +549,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     }
 
     let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height);
-    let scroll_y = ctx.scroll_state.read().offset().y as u16;
+    let scroll_y = ctx.scroll_state.read().offset().y;
     if scroll_y >= max_scroll {
         return;
     }

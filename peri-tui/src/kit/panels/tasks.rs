@@ -62,14 +62,14 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     // 如果选中了 bg task，尝试取消
                     let sel = *selected.read();
                     let bg_count = BG_TASKS.state().read().len();
-                    if sel < bg_count {
-                        if let Some(task) = BG_TASKS.state().read().get(sel) {
-                            tracing::info!(
-                                task_id = %task.task_id,
-                                kind = %task.kind,
-                                "tasks panel: cancel bg task (RPC not yet wired)"
-                            );
-                        }
+                    if sel < bg_count
+                        && let Some(task) = BG_TASKS.state().read().get(sel)
+                    {
+                        tracing::info!(
+                            task_id = %task.task_id,
+                            kind = %task.kind,
+                            "tasks panel: cancel bg task (RPC not yet wired)"
+                        );
                     }
                     close_panel()
                 }

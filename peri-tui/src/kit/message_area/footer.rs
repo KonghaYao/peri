@@ -149,7 +149,7 @@ pub(super) fn build_footer_lines(
         )));
     }
     if !todo_items.is_empty() {
-        lines.extend(render_todo_lines(&todo_items));
+        lines.extend(render_todo_lines(todo_items));
     }
     if has_footer_content {
         lines.push(Line::from(""));

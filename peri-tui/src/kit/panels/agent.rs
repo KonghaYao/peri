@@ -373,10 +373,9 @@ mod tests {
     fn test_collect_subagents_recurses_into_nested_subagent() {
         // SubAgent 内嵌 SubAgent（嵌套）——内层也应被扫描
         let mut outer = make_subagent("outer", "Outer");
-        let mut outer_vms: Vec<TuiRenderUnit> = Vec::new();
-        outer_vms.push(TuiRenderUnit::TuiSubAgentGroup(make_subagent(
+        let outer_vms: Vec<TuiRenderUnit> = vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
             "inner", "Inner",
-        )));
+        ))];
         outer.view_models = im::Vector::from(outer_vms);
         let snap = ViewModelsSnapshot {
             items: im::Vector::from(vec![TuiRenderUnit::TuiSubAgentGroup(outer)]),

@@ -218,7 +218,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
         let rows = Paragraph::new(RatText::from(all_lines))
             .wrap(Wrap { trim: false })
-            .line_count(vis_width as u16) as u16;
+            .line_count(vis_width) as u16;
         let mut g = total_rows_cache.write_no_update();
         g.0 = vm_generation;
         g.1 = vis_width;
@@ -257,12 +257,12 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 scroll::run_auto_follow(&scroll::AutoFollowCtx {
                     total_visual_rows,
                     vis_height,
-                    scroll_state: scroll_state.clone(),
-                    prev_items_len: prev_items_len.clone(),
-                    last_scrolled_at: last_scrolled_at.clone(),
+                    scroll_state,
+                    prev_items_len,
+                    last_scrolled_at,
                     items_len,
                     is_loading,
-                    prev_total_visual_rows: prev_total_visual_rows.clone(),
+                    prev_total_visual_rows,
                 })
             }
         },
@@ -341,11 +341,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     {
         let mut g = scrollbar_fields.write_no_update();
         g.content_length = total_visual_rows as usize;
-        g.position = if max_scroll > 0 {
-            (scroll_y * (total_visual_rows as usize - 1)) / max_scroll
-        } else {
-            0
-        };
+        g.position = (scroll_y * (total_visual_rows as usize - 1))
+            .checked_div(max_scroll)
+            .unwrap_or(0);
         g.viewport_length = vis_height as usize;
     }
 
@@ -470,7 +468,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_empty_with_todo_items_shows_footer_not_welcome() {

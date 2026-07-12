@@ -86,7 +86,7 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         cron_toggle(&job.id);
                     }
                 }
-                KeyCode::Char('d') if CRON_JOBS.state().read().len() > 0 => {
+                KeyCode::Char('d') if !CRON_JOBS.state().read().is_empty() => {
                     *confirm_delete.write() = true;
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {

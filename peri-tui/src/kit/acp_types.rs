@@ -128,12 +128,11 @@ impl CurrentTurn {
     /// has started — the pending text is flushed as a separate segment so the
     /// renderer can show it in its own bubble rather than merging it into one blob.
     pub fn append_text(&mut self, t: &str, message_id: Option<&str>) {
-        if let Some(prev_id) = &self.last_message_id {
-            if let Some(new_id) = message_id {
-                if prev_id != new_id {
-                    self.flush_text_segment();
-                }
-            }
+        if let Some(prev_id) = &self.last_message_id
+            && let Some(new_id) = message_id
+            && prev_id != new_id
+        {
+            self.flush_text_segment();
         }
         self.last_message_id = message_id.map(|s| s.to_string());
         self.text.push_str(t);
@@ -147,12 +146,11 @@ impl CurrentTurn {
     /// a text segment flush so reasoning and text for different messages
     /// are separated.
     pub fn append_reasoning(&mut self, t: &str, message_id: Option<&str>) {
-        if let Some(prev_id) = &self.last_message_id {
-            if let Some(new_id) = message_id {
-                if prev_id != new_id {
-                    self.flush_text_segment();
-                }
-            }
+        if let Some(prev_id) = &self.last_message_id
+            && let Some(new_id) = message_id
+            && prev_id != new_id
+        {
+            self.flush_text_segment();
         }
         self.last_message_id = message_id.map(|s| s.to_string());
         self.reasoning.push_str(t);
@@ -429,18 +427,18 @@ impl CurrentTurn {
                 TuiRenderUnit::TuiToolCard(agent_card),
                 TuiRenderUnit::TuiSubAgentGroup(subagent_group),
             ) = (&vms[i], &vms[i + 1])
+                && agent_card.tool_name == "Agent"
+                && agent_card.is_running
             {
-                if agent_card.tool_name == "Agent" && agent_card.is_running {
-                    let tool_count = subagent_group
-                        .view_models
-                        .iter()
-                        .filter(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(_)))
-                        .count();
-                    if tool_count > 0 {
-                        let mut updated_card = agent_card.clone();
-                        updated_card.tool_calls_count = tool_count;
-                        vms[i] = TuiRenderUnit::TuiToolCard(updated_card);
-                    }
+                let tool_count = subagent_group
+                    .view_models
+                    .iter()
+                    .filter(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(_)))
+                    .count();
+                if tool_count > 0 {
+                    let mut updated_card = agent_card.clone();
+                    updated_card.tool_calls_count = tool_count;
+                    vms[i] = TuiRenderUnit::TuiToolCard(updated_card);
                 }
             }
         }

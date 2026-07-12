@@ -95,15 +95,22 @@ mod tests {
     fn test_inline_code() {
         let result = flatten(&parse_markdown("use `code` here", 80, Palette::default()));
         let line = &result[0];
-        // 不渲染 ` 符号的特殊样式，行内代码当普通文本
+        // 行内代码不含 backtick 标记，使用 inline_code_style 颜色
         let code_span = line
             .spans
             .iter()
-            .find(|s| s.content.as_ref() == "`code`")
-            .expect("inline code span should still contain backtick markers");
+            .find(|s| s.content.as_ref() == "code")
+            .expect("inline code span should not contain backtick markers");
+        // Palette::default().info = Color::Blue
         assert_eq!(
-            code_span.style.fg, None,
-            "inline code should not have special fg"
+            code_span.style.fg,
+            Some(ratatui::style::Color::Blue),
+            "inline code should use palette.info color"
+        );
+        // 不应有背景色
+        assert_eq!(
+            code_span.style.bg, None,
+            "inline code should not have background"
         );
     }
 
@@ -137,7 +144,23 @@ mod tests {
             80,
             Palette::default(),
         ));
-        assert!(result.len() >= 2);
+        // 单一代码块：至少渲染一行代码
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_code_block_spacing() {
+        let result = flatten(&parse_markdown(
+            "text\n\n```rust\nlet x = 1;\n```",
+            80,
+            Palette::default(),
+        ));
+        // 段落 + 空行分隔 + 代码行
+        assert!(result.len() >= 3);
+        // 第一行是段落文本
+        assert_eq!(result[0].spans[0].content, "text");
+        // 第二行是空行（分隔）
+        assert!(result[1].spans.is_empty());
     }
 
     #[test]

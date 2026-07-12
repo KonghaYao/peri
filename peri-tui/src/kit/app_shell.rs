@@ -49,7 +49,7 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 设置向导覆盖（最高优先级）；否则显示主布局 + 弹窗覆盖层。
     // 面板由 SessionColumn 放在消息流与输入区之间，不再作为根级浮层渲染。
     let palette_handle = hooks.use_atom(&PALETTE_ATOM);
-    let palette = palette_handle.read().clone();
+    let palette = *palette_handle.read();
 
     if wizard_active {
         element! {

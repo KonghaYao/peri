@@ -112,14 +112,20 @@ pub(super) fn vm_to_lines(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>
                 let palette_guard = palette_state.read();
                 let segments =
                     crate::kit::markdown::parse_markdown(&data.text, width, *palette_guard);
-                for seg in segments {
+                for (seg_idx, seg) in segments.into_iter().enumerate() {
+                    // segment 之间加空行（表格 ↔ 文本边界）
+                    if seg_idx > 0 && !lines.last().is_some_and(|l| l.spans.is_empty()) {
+                        lines.push(Line::default());
+                    }
                     match seg {
                         crate::kit::markdown::MarkdownSegment::Text(seg_lines) => {
                             lines.extend(seg_lines);
                         }
                         crate::kit::markdown::MarkdownSegment::Table(data) => {
-                            let table_theme =
+                            let mut table_theme =
                                 ratatui_kit::components::TableTheme::from_palette(&palette_guard);
+                            // 行文字使用终端默认色，而非纯白
+                            table_theme.row_style = Style::default();
                             lines.extend(crate::kit::markdown::table_data_to_lines(
                                 &data,
                                 &table_theme,
@@ -147,11 +153,18 @@ pub(super) fn vm_to_lines(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>
             let mut lines: Vec<Line<'static>> = Vec::new();
             lines.push(Line::from(""));
 
-            for seg in segments {
+            for (seg_idx, seg) in segments.into_iter().enumerate() {
+                // segment 之间加空行（带 bg）
+                if seg_idx > 0 {
+                    lines.push(Line::from(vec![Span::styled(
+                        "  ",
+                        Style::default().bg(user_bg),
+                    )]));
+                }
                 match seg {
                     crate::kit::markdown::MarkdownSegment::Text(mut seg_lines) => {
                         for (i, line) in seg_lines.drain(..).enumerate() {
-                            if i == 0 {
+                            if i == 0 && seg_idx == 0 {
                                 let mut spans = vec![Span::styled(
                                     "\u{276f} ",
                                     Style::default()
@@ -178,12 +191,10 @@ pub(super) fn vm_to_lines(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>
                         }
                     }
                     crate::kit::markdown::MarkdownSegment::Table(data) => {
-                        lines.push(Line::from(vec![Span::styled(
-                            "  ",
-                            Style::default().bg(user_bg),
-                        )]));
-                        let table_theme =
+                        let mut table_theme =
                             ratatui_kit::components::TableTheme::from_palette(&palette_guard);
+                        // 行文字使用终端默认色，而非纯白
+                        table_theme.row_style = Style::default();
                         let table_lines =
                             crate::kit::markdown::table_data_to_lines(&data, &table_theme, width);
                         for tl in table_lines {

@@ -259,9 +259,7 @@ impl AgentState {
 
     /// 标记已关闭，后续 add_message 不再入队
     pub fn is_persistence_shutdown(&self) -> bool {
-        self.persist_handle
-            .as_ref()
-            .map_or(true, |h| h.is_finished())
+        self.persist_handle.as_ref().is_none_or(|h| h.is_finished())
     }
 }
 

@@ -74,22 +74,20 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         if (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Char(' ')) {
             let q_idx = *focused.read();
             let opt_idx = *focused_option.read();
-            if let Some(au) = pending_for_closure.as_ref() {
-                if let Some(q) = au.questions.get(q_idx) {
-                    if opt_idx < q.options.len() {
-                        let new_val =
-                            if answers.read().get(q_idx).copied().flatten() == Some(opt_idx) {
-                                None // 取消选择
-                            } else {
-                                Some(opt_idx) // 选中
-                            };
-                        let mut a = answers.write();
-                        if q_idx >= a.len() {
-                            a.resize(q_idx + 1, None);
-                        }
-                        a[q_idx] = new_val;
-                    }
+            if let Some(au) = pending_for_closure.as_ref()
+                && let Some(q) = au.questions.get(q_idx)
+                && opt_idx < q.options.len()
+            {
+                let new_val = if answers.read().get(q_idx).copied().flatten() == Some(opt_idx) {
+                    None // 取消选择
+                } else {
+                    Some(opt_idx) // 选中
+                };
+                let mut a = answers.write();
+                if q_idx >= a.len() {
+                    a.resize(q_idx + 1, None);
                 }
+                a[q_idx] = new_val;
             }
             return EventResult::Consumed;
         }
@@ -168,14 +166,14 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 } else {
                     // 全部已确认 → 提交
                     let answers_map =
-                        build_answers_map(pending_for_closure.as_ref(), &*answers.read());
-                    if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone() {
-                        if let Some(tx) = ASK_USER_RESPONSE_TX.get() {
-                            let _ = tx.send(AskUserResponseAction::Submit {
-                                request_id_str: id_str,
-                                answers: answers_map,
-                            });
-                        }
+                        build_answers_map(pending_for_closure.as_ref(), &answers.read());
+                    if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+                        && let Some(tx) = ASK_USER_RESPONSE_TX.get()
+                    {
+                        let _ = tx.send(AskUserResponseAction::Submit {
+                            request_id_str: id_str,
+                            answers: answers_map,
+                        });
                     }
                     close_popup();
                     EventResult::Consumed
@@ -183,12 +181,12 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
             // Esc：取消
             Some(ListNavAction::Cancel) => {
-                if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone() {
-                    if let Some(tx) = ASK_USER_RESPONSE_TX.get() {
-                        let _ = tx.send(AskUserResponseAction::Cancel {
-                            request_id_str: id_str,
-                        });
-                    }
+                if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+                    && let Some(tx) = ASK_USER_RESPONSE_TX.get()
+                {
+                    let _ = tx.send(AskUserResponseAction::Cancel {
+                        request_id_str: id_str,
+                    });
                 }
                 close_popup();
                 EventResult::Consumed

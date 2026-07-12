@@ -135,6 +135,7 @@ pub struct AcpAgentConfig {
     /// Session 级 BackgroundTaskRegistry（跨 prompt 存活，取代 per-prompt 创建）
     pub background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
     /// bg 完成时的同步回调：在 registry.complete() 之前调用
+    #[allow(clippy::type_complexity)]
     pub on_bg_complete:
         Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
 }

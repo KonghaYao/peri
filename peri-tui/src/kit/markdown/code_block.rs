@@ -21,18 +21,31 @@ pub(crate) fn highlight_code_block(lang: &str, raw_lines: &[String]) -> Option<V
     let theme = &THEME_SET.themes["base16-ocean.dark"];
     let mut highlighter = HighlightLines::new(syntax, theme);
 
+    // 获取主题默认前景色，用于判断哪些文本未被语法高亮着色
+    let default_fg = theme.settings.foreground;
+
     let mut result = Vec::with_capacity(raw_lines.len());
     for line_text in raw_lines {
         let ranges = highlighter.highlight_line(line_text, ss).ok()?;
         let spans: Vec<Span<'static>> = ranges
             .iter()
             .map(|(style, text)| {
-                let color = ratatui::style::Color::Rgb(
-                    style.foreground.r,
-                    style.foreground.g,
-                    style.foreground.b,
-                );
-                Span::styled(text.to_string(), Style::default().fg(color))
+                // 未被语法高亮着色的文本 → 使用终端默认色（Color::Reset）
+                let is_default = default_fg.is_none_or(|df| {
+                    style.foreground.r == df.r
+                        && style.foreground.g == df.g
+                        && style.foreground.b == df.b
+                });
+                if is_default {
+                    Span::raw(text.to_string())
+                } else {
+                    let color = ratatui::style::Color::Rgb(
+                        style.foreground.r,
+                        style.foreground.g,
+                        style.foreground.b,
+                    );
+                    Span::styled(text.to_string(), Style::default().fg(color))
+                }
             })
             .collect();
         result.push(Line::from(spans));

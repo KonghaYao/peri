@@ -32,7 +32,7 @@ pub enum ThemeLoadError {
 /// 优先级：用户目录 > 内置 JSON > Rust builtin。
 pub fn load_theme(name: &str) -> Result<Arc<ThemeDefinition>, ThemeLoadError> {
     // 先查用户目录
-    if let Some(home) = std::env::var("HOME").ok() {
+    if let Ok(home) = std::env::var("HOME") {
         let user_path = std::path::PathBuf::from(&home)
             .join(".peri")
             .join("themes")
@@ -64,17 +64,17 @@ pub fn list_available_themes() -> Vec<String> {
     let mut themes: Vec<String> = vec!["peri-dark".to_string(), "peri-light".to_string()];
 
     // 扫描 ~/.peri/themes/
-    if let Some(home) = std::env::var("HOME").ok() {
+    if let Ok(home) = std::env::var("HOME") {
         let user_dir = std::path::PathBuf::from(&home).join(".peri").join("themes");
-        if user_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&user_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().is_some_and(|ext| ext == "json") {
-                        if let Some(stem) = path.file_stem() {
-                            themes.push(stem.to_string_lossy().to_string());
-                        }
-                    }
+        if user_dir.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&user_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "json")
+                    && let Some(stem) = path.file_stem()
+                {
+                    themes.push(stem.to_string_lossy().to_string());
                 }
             }
         }

@@ -164,11 +164,11 @@ fn save_history() {
 
 /// 实际执行磁盘持久化——错误以 `tracing::warn!` 记录，不向上传播。
 fn persist_history(path: &std::path::Path, history: &VecDeque<String>) {
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!(?path, error = %e, "input_history: create_dir_all failed");
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(?path, error = %e, "input_history: create_dir_all failed");
+        return;
     }
     let tmp = path.with_extension("tmp");
     let entries: Vec<&String> = history.iter().collect();

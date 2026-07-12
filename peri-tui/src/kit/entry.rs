@@ -234,10 +234,10 @@ pub async fn run_kit_fullscreen(
                         }
                     }
                 };
-                if let Some(id) = thread_id {
-                    if let Err(e) = tx.send(id) {
-                        tracing::warn!(error = %e, "kit 恢复：THREAD_LOAD_TX.send 失败");
-                    }
+                if let Some(id) = thread_id
+                    && let Err(e) = tx.send(id)
+                {
+                    tracing::warn!(error = %e, "kit 恢复：THREAD_LOAD_TX.send 失败");
                 }
             });
         }

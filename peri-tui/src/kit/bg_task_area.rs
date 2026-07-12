@@ -52,7 +52,7 @@ pub fn BgTaskArea(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .filter(|e| {
             e.is_active
                 || e.completed_at
-                    .map_or(true, |t| now.duration_since(t).as_secs() < DONE_KEEP_SECS)
+                    .is_none_or(|t| now.duration_since(t).as_secs() < DONE_KEEP_SECS)
         })
         .collect();
 
@@ -163,7 +163,7 @@ fn entry_state(entry: &BgDisplayEntry, render_count: usize) -> (&'static str, Co
         return (status_symbol::DONE, Color::Green, false);
     }
     if entry.current_tool.is_some() {
-        let blink = (render_count / 16) % 2 == 0;
+        let blink = (render_count / 16).is_multiple_of(2);
         return (status_symbol::RUNNING, Color::White, blink);
     }
     (status_symbol::IDLE, Color::Yellow, false)

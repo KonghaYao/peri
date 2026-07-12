@@ -176,14 +176,13 @@ pub struct PendingAttachment {
 
 pub static PENDING_ATTACHMENTS: OnceLock<Handle<Vec<PendingAttachment>>> = OnceLock::new();
 
-pub static ACP_STATE: AtomStatic<AcpStateSnapshot> =
-    AtomStatic::new(|| AcpStateSnapshot::default());
+pub static ACP_STATE: AtomStatic<AcpStateSnapshot> = AtomStatic::new(AcpStateSnapshot::default);
 /// loading 会话 epoch 计数器。每次 submit_consumer 发起新的 agent prompt 时递增。
 /// message_area 据此检测新的 loading 会话，即便 is_loading 的 false→true 过渡在
 /// 同一渲染周期内完成（如 drain_input_buffer 的立即续跑）也能可靠感知。
 pub static LOADING_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0u64);
 pub static VIEW_MODELS: AtomStatic<ViewModelsSnapshot> =
-    AtomStatic::new(|| ViewModelsSnapshot::default());
+    AtomStatic::new(ViewModelsSnapshot::default);
 pub static MODEL_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static PROVIDER_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static MODE_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
@@ -194,38 +193,38 @@ pub static CANCEL_TX: OnceLock<UnboundedSender<()>> = OnceLock::new();
 pub static RESIZE_TX: OnceLock<UnboundedSender<u16>> = OnceLock::new();
 
 pub static SERVICE_SNAPSHOT: AtomStatic<ServiceSnapshot> =
-    AtomStatic::new(|| ServiceSnapshot::default());
-pub static THREAD_LIST: AtomStatic<Vec<ThreadSummary>> = AtomStatic::new(|| Vec::new());
-pub static CRON_JOBS: AtomStatic<Vec<CronJobSummary>> = AtomStatic::new(|| Vec::new());
-pub static HOOK_LIST: AtomStatic<Vec<HookSummary>> = AtomStatic::new(|| Vec::new());
-pub static PLUGIN_LIST: AtomStatic<Vec<PluginSummary>> = AtomStatic::new(|| Vec::new());
-pub static MCP_SERVERS: AtomStatic<Vec<McpServerSummary>> = AtomStatic::new(|| Vec::new());
-pub static SUBAGENT_LIST: AtomStatic<Vec<SubagentSummary>> = AtomStatic::new(|| Vec::new());
-pub static PROVIDER_LIST: AtomStatic<Vec<ProviderSummary>> = AtomStatic::new(|| Vec::new());
-pub static MEMORY_LIST: AtomStatic<Vec<MemoryEntry>> = AtomStatic::new(|| Vec::new());
+    AtomStatic::new(ServiceSnapshot::default);
+pub static THREAD_LIST: AtomStatic<Vec<ThreadSummary>> = AtomStatic::new(Vec::new);
+pub static CRON_JOBS: AtomStatic<Vec<CronJobSummary>> = AtomStatic::new(Vec::new);
+pub static HOOK_LIST: AtomStatic<Vec<HookSummary>> = AtomStatic::new(Vec::new);
+pub static PLUGIN_LIST: AtomStatic<Vec<PluginSummary>> = AtomStatic::new(Vec::new);
+pub static MCP_SERVERS: AtomStatic<Vec<McpServerSummary>> = AtomStatic::new(Vec::new);
+pub static SUBAGENT_LIST: AtomStatic<Vec<SubagentSummary>> = AtomStatic::new(Vec::new);
+pub static PROVIDER_LIST: AtomStatic<Vec<ProviderSummary>> = AtomStatic::new(Vec::new);
+pub static MEMORY_LIST: AtomStatic<Vec<MemoryEntry>> = AtomStatic::new(Vec::new);
 
 /// Todo 列表数据（来自 ACP SessionUpdate::Plan）
 pub static TODO_ITEMS: AtomStatic<Vec<crate::kit::message_area::TodoItem>> =
-    AtomStatic::new(|| Vec::new());
+    AtomStatic::new(Vec::new);
 
-pub static OPEN_PANELS: AtomStatic<Vec<PanelKind>> = AtomStatic::new(|| Vec::new());
+pub static OPEN_PANELS: AtomStatic<Vec<PanelKind>> = AtomStatic::new(Vec::new);
 pub static ACTIVE_PANEL: AtomStatic<Option<PanelKind>> = AtomStatic::new(|| None);
 pub static POPUP_KIND: AtomStatic<Option<PopupKind>> = AtomStatic::new(|| None);
 
-pub static INPUT_HISTORY: AtomStatic<VecDeque<String>> = AtomStatic::new(|| VecDeque::new());
+pub static INPUT_HISTORY: AtomStatic<VecDeque<String>> = AtomStatic::new(VecDeque::new);
 pub static INPUT_HISTORY_INDEX: AtomStatic<Option<usize>> = AtomStatic::new(|| None);
 /// 进入历史模式时保存的用户当前输入文本草稿。
 pub static DRAFT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
-pub static INPUT_BUFFER: AtomStatic<VecDeque<String>> = AtomStatic::new(|| VecDeque::new());
+pub static INPUT_BUFFER: AtomStatic<VecDeque<String>> = AtomStatic::new(VecDeque::new);
 /// 取消时需恢复到输入框的文本。TurnInterrupted 零产出时写入，input_area 消费后清空。
 /// 使用非 atom 存储（OnceLock + Mutex）避免 render body 中写 atom 产生自激回路。
 /// TurnInterrupted 写入后递增 RENDER_HEARTBEAT 触发重渲染，input_area 消费文本并清空。
 pub static INPUT_RESTORE_TEXT: std::sync::OnceLock<parking_lot::Mutex<Option<String>>> =
     std::sync::OnceLock::new();
 
-pub static FILE_LIST: AtomStatic<Vec<String>> = AtomStatic::new(|| Vec::new());
-pub static MENTION_PREFIX: AtomStatic<String> = AtomStatic::new(|| String::new());
-pub static SLASH_PREFIX: AtomStatic<String> = AtomStatic::new(|| String::new());
+pub static FILE_LIST: AtomStatic<Vec<String>> = AtomStatic::new(Vec::new);
+pub static MENTION_PREFIX: AtomStatic<String> = AtomStatic::new(String::new);
+pub static SLASH_PREFIX: AtomStatic<String> = AtomStatic::new(String::new);
 
 pub static MENTION_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
 pub static SLASH_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
@@ -266,15 +265,14 @@ pub static CRON_SCHEDULER_HANDLE: OnceLock<
 /// LcRegistry 本体存于 thread_local!（FluentBundle !Send，无法进 static）。
 pub static LANG_VERSION: AtomStatic<u64> = AtomStatic::new(|| 0);
 
-pub static ACP_COMMANDS: AtomStatic<Vec<String>> = AtomStatic::new(|| Vec::new());
-pub static SKILL_NAMES: AtomStatic<Vec<String>> = AtomStatic::new(|| Vec::new());
+pub static ACP_COMMANDS: AtomStatic<Vec<String>> = AtomStatic::new(Vec::new);
+pub static SKILL_NAMES: AtomStatic<Vec<String>> = AtomStatic::new(Vec::new);
 /// ACP 服务器下发的可用 slash 命令列表（含 skills）。
 /// 键 = 命令名（不含 / 前缀），值 = 描述。
 /// 由 kit notifier 在收到 `SessionUpdate::AvailableCommandsUpdate` 后写入。
-pub static AVAILABLE_SLASH_COMMANDS: AtomStatic<Vec<(String, String)>> =
-    AtomStatic::new(|| Vec::new());
+pub static AVAILABLE_SLASH_COMMANDS: AtomStatic<Vec<(String, String)>> = AtomStatic::new(Vec::new);
 pub static WIZARD_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
-pub static PREDICTION: AtomStatic<PredictionState> = AtomStatic::new(|| PredictionState::default());
+pub static PREDICTION: AtomStatic<PredictionState> = AtomStatic::new(PredictionState::default);
 pub static INPUT_AREA_ESC_PREFIX: AtomStatic<bool> = AtomStatic::new(|| false);
 
 /// 最近一次复制到剪贴板的字符数（用于状态栏提示 "已复制 N 字符"）
@@ -289,7 +287,7 @@ pub static RENDER_HEARTBEAT: AtomStatic<u64> = AtomStatic::new(|| 0);
 
 /// 当前活跃 session 的 ID。由 submit_consumer/thread_load_consumer 在 session 变更时设置。
 /// acp_bridge 在 reset 后用于过滤陈旧事件（event.active_session_id != ACTIVE_SESSION_ID → 丢弃）。
-pub static ACTIVE_SESSION_ID: AtomStatic<String> = AtomStatic::new(|| String::new());
+pub static ACTIVE_SESSION_ID: AtomStatic<String> = AtomStatic::new(String::new);
 
 /// Bridge 重置计数器——/clear 或 thread 切换时 +1，acp_bridge 检测到变更时
 /// 清空 committed / has_view_commit / current_turn，防止旧 session 的 VM
@@ -330,7 +328,7 @@ pub fn message_viewport_snapshot() -> &'static parking_lot::RwLock<MessageViewpo
 pub use crate::kit::acp_types::BgTaskEntry;
 
 /// 活跃的后台任务列表（由 bg-task-started/completed/cancelled 事件维护）
-pub static BG_TASKS: AtomStatic<Vec<BgTaskEntry>> = AtomStatic::new(|| Vec::new());
+pub static BG_TASKS: AtomStatic<Vec<BgTaskEntry>> = AtomStatic::new(Vec::new);
 
 // ── Background Display Area (后台显示区域) ────────────────────────────────────
 
@@ -356,12 +354,12 @@ pub struct BgDisplayEntry {
 }
 
 /// 后台显示区域条目列表（仅活跃 + 3s 缓冲中的任务）
-pub static BG_DISPLAY: AtomStatic<Vec<BgDisplayEntry>> = AtomStatic::new(|| Vec::new());
+pub static BG_DISPLAY: AtomStatic<Vec<BgDisplayEntry>> = AtomStatic::new(Vec::new);
 
 /// 后台 agent_id 集合——用于判断 tool 事件是否属于后台任务
 /// key = SubagentStarted.instance_id (is_background=true)
 pub static BG_AGENT_IDS: AtomStatic<std::collections::HashSet<String>> =
-    AtomStatic::new(|| std::collections::HashSet::new());
+    AtomStatic::new(std::collections::HashSet::new);
 
 /// 通知消息（状态栏短暂显示，过期后自动忽略）
 pub struct Notification {

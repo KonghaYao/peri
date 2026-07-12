@@ -41,28 +41,28 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         let count = themes.len();
         move |event| {
-            if let Event::Key(key) = event {
-                if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
-                    match key.code {
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            let mut s = selected.write();
-                            *s = previous_selection(*s);
-                            return EventResult::Consumed;
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            let mut s = selected.write();
-                            *s = next_selection(*s, count);
-                            return EventResult::Consumed;
-                        }
-                        KeyCode::Enter => {
-                            let idx = *selected.read();
-                            if let Some(name) = themes.get(idx) {
-                                switch_theme(name);
-                            }
-                            return EventResult::Consumed;
-                        }
-                        _ => {}
+            if let Event::Key(key) = event
+                && (key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat)
+            {
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        let mut s = selected.write();
+                        *s = previous_selection(*s);
+                        return EventResult::Consumed;
                     }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        let mut s = selected.write();
+                        *s = next_selection(*s, count);
+                        return EventResult::Consumed;
+                    }
+                    KeyCode::Enter => {
+                        let idx = *selected.read();
+                        if let Some(name) = themes.get(idx) {
+                            switch_theme(name);
+                        }
+                        return EventResult::Consumed;
+                    }
+                    _ => {}
                 }
             }
             EventResult::Ignored

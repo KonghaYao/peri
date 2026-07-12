@@ -9,6 +9,10 @@ pub(crate) fn heading_line(
     line: &Line<'static>,
     theme: &MarkdownTheme,
 ) -> Line<'static> {
-    // 不渲染 # 前缀和标题样式，当普通段落处理
-    Line::from(apply_span_styles(&line.spans, theme, None))
+    // 不渲染 # 前缀，但应用标题样式（黄色 + BOLD）
+    Line::from(apply_span_styles(
+        &line.spans,
+        theme,
+        Some(theme.heading_style),
+    ))
 }

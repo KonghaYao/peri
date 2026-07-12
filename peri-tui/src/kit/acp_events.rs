@@ -127,15 +127,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     tracing::trace!(agent_id, tool_id = %ts.tool_id, "kit bridge: subagent tool start has no active group");
                 }
                 // 后台任务工具更新：写 BG_DISPLAY
-                if BG_AGENT_IDS.state().read().contains(agent_id) {
-                    if let Some(entry) = BG_DISPLAY
+                if BG_AGENT_IDS.state().read().contains(agent_id)
+                    && let Some(entry) = BG_DISPLAY
                         .state()
                         .write()
                         .iter_mut()
                         .find(|e| e.id == agent_id)
-                    {
-                        entry.current_tool = Some(ts.tool_name.clone());
-                    }
+                {
+                    entry.current_tool = Some(ts.tool_name.clone());
                 }
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
@@ -164,16 +163,15 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     tracing::trace!(agent_id, tool_id = %te.tool_id, "kit bridge: subagent tool end has no active group");
                 }
                 // 后台任务工具完成：清除 current_tool，递增 tool_count
-                if BG_AGENT_IDS.state().read().contains(agent_id) {
-                    if let Some(entry) = BG_DISPLAY
+                if BG_AGENT_IDS.state().read().contains(agent_id)
+                    && let Some(entry) = BG_DISPLAY
                         .state()
                         .write()
                         .iter_mut()
                         .find(|e| e.id == agent_id)
-                    {
-                        entry.current_tool = None;
-                        entry.tool_count += 1;
-                    }
+                {
+                    entry.current_tool = None;
+                    entry.tool_count += 1;
                 }
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
@@ -274,11 +272,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             if state.current_turn.is_empty() && state.last_submitted_text.is_some() {
                 let restore_text = state.last_submitted_text.take().unwrap();
                 // 移除 committed 中最后一条用户气泡
-                if let Some(last) = state.committed.last() {
-                    if matches!(last, TuiRenderUnit::TuiUserBubble(_)) {
-                        let last_idx = state.committed.len().saturating_sub(1);
-                        state.committed.remove(last_idx);
-                    }
+                if let Some(last) = state.committed.last()
+                    && matches!(last, TuiRenderUnit::TuiUserBubble(_))
+                {
+                    let last_idx = state.committed.len().saturating_sub(1);
+                    state.committed.remove(last_idx);
                 }
                 // 将文本放入恢复存储，递增 RENDER_HEARTBEAT 触发 input_area 重渲染
                 let mu = crate::kit::atoms::INPUT_RESTORE_TEXT
@@ -827,18 +825,15 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     // 只展开最后一个含 reasoning 的 assistant bubble，其余折叠
     let mut found_last = false;
     for i in (0..items.len()).rev() {
-        match &mut items[i] {
-            TuiRenderUnit::TuiAssistantBubble(bubble) => {
-                if let Some(ref mut reasoning) = bubble.reasoning {
-                    if !found_last {
-                        reasoning.collapsed = false;
-                        found_last = true;
-                    } else {
-                        reasoning.collapsed = true;
-                    }
-                }
+        if let TuiRenderUnit::TuiAssistantBubble(bubble) = &mut items[i]
+            && let Some(ref mut reasoning) = bubble.reasoning
+        {
+            if !found_last {
+                reasoning.collapsed = false;
+                found_last = true;
+            } else {
+                reasoning.collapsed = true;
             }
-            _ => {}
         }
     }
 
@@ -919,6 +914,55 @@ fn drain_input_buffer() {
             let _ = tx.send(SubmitRequest::AgentText(text));
         }
     }
+}
+
+/// 从 ACP SessionUpdate::Plan JSON 中提取 TodoItem 列表并写入 TODO_ITEMS atom。
+///
+/// 使用类型安全 serde 反序列化将 Plan JSON 映射为 TodoItem 列表。
+/// Plan JSON 格式:
+///   {"sessionUpdate":"plan","entries":[{"content":"Fix bug","status":"in_progress","priority":"medium"}]}
+pub fn handle_plan_update(update: &serde_json::Value) {
+    use crate::kit::message_area::{TodoItem, TodoStatus};
+
+    let plan: Plan = match serde_json::from_value(update.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "handle_plan_update: failed to deserialize Plan");
+            return;
+        }
+    };
+
+    tracing::debug!(
+        entries_count = plan.entries.len(),
+        "handle_plan_update: received Plan entries"
+    );
+
+    let items: Vec<TodoItem> = plan
+        .entries
+        .into_iter()
+        .map(|e| {
+            let status = match e.status {
+                PlanEntryStatus::InProgress => TodoStatus::InProgress,
+                PlanEntryStatus::Completed => TodoStatus::Completed,
+                PlanEntryStatus::Pending => TodoStatus::Pending,
+                _ => {
+                    tracing::warn!(status = ?e.status, "handle_plan_update: unknown PlanEntryStatus, fallback to Pending");
+                    TodoStatus::Pending
+                }
+            };
+            TodoItem {
+                status,
+                content: e.content,
+            }
+        })
+        .collect();
+
+    tracing::debug!(
+        items_count = items.len(),
+        "handle_plan_update: writing {} items to TODO_ITEMS",
+        items.len()
+    );
+    *crate::kit::atoms::TODO_ITEMS.state().write() = items;
 }
 
 #[cfg(test)]
@@ -1588,53 +1632,4 @@ mod tests {
         // 核心验证：flag 应被清除，但 reload 逻辑条件不满足（current_turn 非空）。
         assert!(!state.compact_just_completed, "场景 B: flag 应清除");
     }
-}
-
-/// 从 ACP SessionUpdate::Plan JSON 中提取 TodoItem 列表并写入 TODO_ITEMS atom。
-///
-/// 使用类型安全 serde 反序列化将 Plan JSON 映射为 TodoItem 列表。
-/// Plan JSON 格式:
-///   {"sessionUpdate":"plan","entries":[{"content":"Fix bug","status":"in_progress","priority":"medium"}]}
-pub fn handle_plan_update(update: &serde_json::Value) {
-    use crate::kit::message_area::{TodoItem, TodoStatus};
-
-    let plan: Plan = match serde_json::from_value(update.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "handle_plan_update: failed to deserialize Plan");
-            return;
-        }
-    };
-
-    tracing::debug!(
-        entries_count = plan.entries.len(),
-        "handle_plan_update: received Plan entries"
-    );
-
-    let items: Vec<TodoItem> = plan
-        .entries
-        .into_iter()
-        .map(|e| {
-            let status = match e.status {
-                PlanEntryStatus::InProgress => TodoStatus::InProgress,
-                PlanEntryStatus::Completed => TodoStatus::Completed,
-                PlanEntryStatus::Pending => TodoStatus::Pending,
-                _ => {
-                    tracing::warn!(status = ?e.status, "handle_plan_update: unknown PlanEntryStatus, fallback to Pending");
-                    TodoStatus::Pending
-                }
-            };
-            TodoItem {
-                status,
-                content: e.content,
-            }
-        })
-        .collect();
-
-    tracing::debug!(
-        items_count = items.len(),
-        "handle_plan_update: writing {} items to TODO_ITEMS",
-        items.len()
-    );
-    *crate::kit::atoms::TODO_ITEMS.state().write() = items;
 }

@@ -354,10 +354,8 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                             })
                             .unwrap_or(80);
                         let moved = state.write().cursor_visual_down(tw);
-                        if !moved {
-                            if let Some(historical) = history_down() {
-                                state.write().replace_all_no_undo(historical);
-                            }
+                        if !moved && let Some(historical) = history_down() {
+                            state.write().replace_all_no_undo(historical);
                         }
                         EventResult::Consumed
                     }
@@ -391,7 +389,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         if is_ctrl && !is_alt && !is_shift && !mention_active && !slash_active =>
                     {
                         exit_history_mode_if_active();
-                        let state_clone = state.clone();
+                        let state_clone = state;
                         std::thread::spawn(move || {
                             let Ok(mut cb) = arboard::Clipboard::new() else {
                                 return;
@@ -473,7 +471,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     );
     // ── 鼠标点击光标定位（Global scope，确保点击事件能到达）──
     {
-        let state_cl = state.clone();
+        let state_cl = state;
         let overlay_height_cl = overlay_height.clone();
         hooks.use_event_handler(
             ratatui_kit::prelude::EventScope::Global,
@@ -543,7 +541,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     {
         let _hb = hooks.use_atom(&crate::kit::atoms::RENDER_HEARTBEAT);
         let hb_val = *_hb.read();
-        let state_for_effect = state.clone();
+        let state_for_effect = state;
         hooks.use_effect(
             move || {
                 if let Some(text) = crate::kit::atoms::INPUT_RESTORE_TEXT
@@ -614,8 +612,8 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     } else {
         Vec::new()
     };
-    let mention_select_state = state.clone();
-    let slash_select_state = state.clone();
+    let mention_select_state = state;
+    let slash_select_state = state;
 
     let slash_popup_height = if slash_active {
         popup_height(slash_items.len())
@@ -1040,6 +1038,7 @@ fn detect_slash_token(text: &str, cursor_byte: usize) -> Option<(String, usize)>
     Some((after_slash.to_string(), slash_pos))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_multiline_with_cursor_for_themed(
     text: &str,
     cursor: usize,

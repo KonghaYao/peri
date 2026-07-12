@@ -92,13 +92,80 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - `lefthook run pre-commit`：fmt/check/clippy
 
 ### 编码规范
-- Rust 2021 + async-trait。库 `thiserror`/`tracing`，应用 `anyhow`。禁止 `println!`
-- 测试分离 `_test.rs`（≥30 行）/ `#[cfg(test)] mod tests`（<30 行）。每模块一目录 `mod.rs`
-- 字符串截断用 `chars().take(N)`（CJK 安全）。终端列宽用 `unicode-width`
-- 快捷键：禁止 `Shift+字母`/PageUp/Down；优先 `Ctrl+字母`；禁止 `ℹ`（U+2139）
+
+#### 通用
+- **Rust 2021** edition。crate 内根 `#![allow(clippy::xxx)]` 需注释原因
+- **禁止 `println!`/`eprintln!`/`dbg!`**，统一用 `tracing`（`tracing::info!(target: "xxx", ...)`）
+- **注释/断言用中文**；doc comment 用英文或中文均可，但同一模块内保持一致
+
+#### 错误处理
+- **库 crates**（peri-agent / peri-middlewares / peri-lsp ...）：用 `thiserror` 定义结构化 error enum + `type XxxResult<T> = Result<T, XxxError>`
+- **应用 crates**（peri-tui / peri-acp）：用 `anyhow::Result`
+- `#[error("...")]` 消息用英文（方便 grep），含上下文字段用 `{field}` 插值
+- `#[from]` 自动转换仅用于真正等价的错误类型，其余手动 map
+
+#### Async
+- trait 方法用 `#[async_trait]`；运行时 `tokio`（`features = ["full"]`）
+- 跨 `.await` 持锁用 `parking_lot::RwLock`（std `RwLockReadGuard` 不是 `Send`）
+- 阻塞系统 I/O（剪贴板等）用 `std::thread::spawn` 独立线程，禁止在 async 中直接阻塞
+
+#### 字符串与数值
+- **CJK 截断**：`s.chars().take(N).collect::<String>()`，禁止 `&s[..N]`（中文 panic）
+- **终端列宽**：用 `unicode_width::UnicodeWidthStr` / `UnicodeWidthChar`，禁止 `.len()` 当宽度
+- **u16 坐标**：`saturating_add` / `saturating_sub`，禁止裸 `+` / `-`
+
+#### 导入与模块
+- 每模块一个目录，`mod.rs` 中 `pub use` 做预导出缩短调用路径
+- `use crate::module::*` 通配导入排在单类型之前；跨 crate 同理（rustfmt 约定）
+- 不设 `rustfmt.toml`，依赖 cargo 默认格式化
+
+#### 快捷键
+- 禁止 `Shift+字母` / PageUp / Down；优先 `Ctrl+字母`；禁止 `ℹ`（U+2139）
 
 ### 测试规范
-详见 `docs/design/testing-standards.md`。P0：serde/事件映射/纯逻辑/工具错误路径/中间件链；P1：状态机/协议/异步/安全/Prompt；不测 TUI render body/外部 API。Mock 用 `make_` 前缀手写 trait impl。
+详见 `docs/design/testing-standards.md`。以下为速查摘要。
+
+#### 存放位置
+| 类型 | 位置 | 条件 |
+|------|------|------|
+| 单元测试 | 同目录 `_test.rs` | 测试代码 ≥ 30 行 |
+| 单元测试 | 同文件 `#[cfg(test)] mod tests` | 测试代码 < 30 行 |
+| 集成测试 | crate 根 `tests/` | 跨模块端到端，只访问 `pub` API |
+
+#### 优先级
+- **P0（必须测）**：serde roundtrip / 事件映射 / 纯逻辑函数 / 工具错误路径 / 中间件链顺序 / CLI 配置解析
+- **P1（应该测）**：复杂状态机 / 协议编解码 / 异步通道 / 安全敏感 / Prompt 构建
+- **不测**：TUI render body / 外部 API 调用 / 纯样板 getter / `side-projects/`
+
+#### 风格
+- **命名**：`test_<对象>_<场景>`（如 `test_serde_roundtrip`、`test_edit_file_old_string_not_found`）
+- **结构**：Arrange-Act-Assert 三段，**段间无空行**
+- **注释/断言**：中文
+- **一条断言法则**：每个 test 验证一个场景；多条 assert 必须验证同一场景的不同侧面
+- **异步测试**：`#[tokio::test]`
+- **全局状态测试**：`#[serial]` 或 `Mutex<()>` 加锁
+
+#### 质量标准
+1. **确定性**：无随机数、无时间依赖、无外部网络
+2. **错误路径**：正常路径 + ≥ 1 条错误路径，assert 错误**类型/消息内容**而非仅 `is_err()`
+3. **精确断言**：`assert!(err.to_string().contains("not found"))` 而非 `assert!(result.is_err())`
+4. **独立可运行**：`cargo test -p <crate> --lib -- <test_name>` 单独通过
+
+#### Mock 与 Fixture
+- **`make_` 前缀**工厂函数 + 手写 trait impl，禁止 `mockall` / `Mock struct`
+- **不共享**：所有 mock 在测试文件内部局部定义，不设共享 `test_helpers` 模块
+- 常用依赖：`tempfile::TempDir`（文件隔离）/ `serial_test`（独占资源）/ `temp-env`（环境变量）
+
+#### 回归测试
+标注 `/// [回归测试]` + 历史背景（哪个 bug / 哪次修复），参考 `peri-agent/src/agent/events_v2.rs:1128`。
+
+#### 新增功能 Checklist
+- [ ] 新增数据结构（含 serde）→ serde roundtrip + 不完全 JSON 测试
+- [ ] 新增 `ExecutorEvent` 变体 → `mapper_test.rs` 增加映射测试
+- [ ] 新增 Core 工具 → `core_tools_test.rs` 同步
+- [ ] 新增中间件 → before/after_agent + before/after_tool 各 ≥ 1 条
+- [ ] 文件系统工具 → 错误路径（not found / ambiguous / permission / not unique）
+- [ ] 回归修复 → `/// [回归测试]` 注释 + 历史背景
 
 ### 环境变量
 `~/.peri/settings.json` env 字段注入。Provider：`ANTHROPIC_*`/`OPENAI_*`。行为：`YOLO_MODE`/`DISABLE_COMPACT`。遥测：`LANGFUSE_*`。

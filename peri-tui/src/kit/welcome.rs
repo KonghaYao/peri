@@ -35,6 +35,7 @@ fn is_border(c: char) -> bool {
 /// - █ → 空白字符 + bg=color（反色填充）
 /// - ╗╔╝╚║═ → 保留字形 + fg=color（边框可见）
 /// - 空格 → 空白字符 + 默认样式
+///
 /// 相邻同 (内容, 样式) 的 span 会合并。
 fn logo_row_to_spans(row: &str, color: Color) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
