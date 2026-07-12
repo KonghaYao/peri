@@ -9,7 +9,7 @@
 //! 子模块组织：
 //! - `types`：MarkdownSegment, TableData
 //! - `span_style`：apply_span_styles, span_semantic_style
-//! - `heading`：heading_line, heading_level_num
+//! - `heading`：heading_line（不渲染 # 前缀）
 //! - `list`：list_item_line
 //! - `code_block`：highlight_code_block, code_block_lines, syntect 单例
 //! - `table`：compute_table_col_widths, table_data_to_lines (ratatui-kit 风格渲染)
@@ -70,10 +70,9 @@ mod tests {
         let result = flatten(&parse_markdown("# Hello", 80, Palette::default()));
         assert_eq!(result.len(), 1);
         let line = &result[0];
-        // "#" + " " + "Hello"
-        assert_eq!(line.spans[0].content, "#");
-        assert_eq!(line.spans[1].content, " ");
-        assert_eq!(line.spans[2].content, "Hello");
+        // 不渲染 # 前缀，标题文本当普通段落
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "Hello");
     }
 
     #[test]
@@ -96,14 +95,15 @@ mod tests {
     fn test_inline_code() {
         let result = flatten(&parse_markdown("use `code` here", 80, Palette::default()));
         let line = &result[0];
+        // 不渲染 ` 符号的特殊样式，行内代码当普通文本
         let code_span = line
             .spans
             .iter()
             .find(|s| s.content.as_ref() == "`code`")
-            .expect("inline code span");
-        assert!(
-            code_span.style.fg.is_some() || code_span.style.bg.is_some(),
-            "inline code should have non-default style"
+            .expect("inline code span should still contain backtick markers");
+        assert_eq!(
+            code_span.style.fg, None,
+            "inline code should not have special fg"
         );
     }
 

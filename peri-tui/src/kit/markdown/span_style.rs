@@ -27,14 +27,11 @@ pub(crate) fn apply_span_styles(
         .collect()
 }
 
-/// 判断 span 语义类型（链接/行内代码/URL）并返回对应样式。
+/// 判断 span 语义类型（链接/URL）并返回对应样式。
 fn span_semantic_style(span: &Span<'static>, theme: &MarkdownTheme) -> Option<Style> {
-    let text = span.content.as_ref();
     if span.style.add_modifier.contains(Modifier::REVERSED) {
         // LINK_URL_MARKER 哨兵 → link_url_style
         Some(theme.link_url_style)
-    } else if text.len() >= 2 && text.starts_with('`') && text.ends_with('`') {
-        Some(theme.inline_code_style)
     } else if span.style.add_modifier.contains(Modifier::UNDERLINED) {
         Some(theme.link_style)
     } else {
