@@ -1,6 +1,6 @@
 # 消息区滚动到底部时滚动条未抵达底部（偏差可达视口一半以上）+ 滚动条异常吸底
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-07-12
 
@@ -68,7 +68,45 @@
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-07-12 | — | Open | agent | 创建 |
+| 2026-07-12 | Open | Fixed | agent | 修复 A + B（见下） |
 
 ## 修复记录
 
-（由 fix-issue 或 issue-verify skill 追加，创建时留空）
+### 现象 A（滚动条 thumb 未抵达底部）根因
+
+`peri-tui/src/kit/message_area/mod.rs` 的 `vis_width` 用 `area.width - 1` 给
+`Paragraph::line_count(vis_width)` 计算 `total_visual_rows`（即滚动条 `content_length`），
+但主渲染分支的 `View` 用 `Constraint::Fill(1)` 占满 `area.width`，Paragraph **实际**
+wrap 宽度 = `area.width`。
+
+→ 估算的 `content_length` 偏大（更窄宽度需要更多视觉行），但视口实际只渲染 `area.width`
+列的内容——滚动条 thumb 永远在底部之上，看起来"没到底"。
+
+### 修复 A
+
+把主渲染分支 `View` 的 `width` 从 `Constraint::Fill(1)` 改为 `Constraint::Max(vis_width)`
+（`mod.rs:376-388`），让 Paragraph 实际 wrap 宽度 = `vis_width`，与 `line_count(vis_width)`
+的估算完全一致。Scrollbar 在 `area` 最右 1 列渲染，View 占 `vis_width` 列，两者不重叠。
+
+### 现象 B（滚动条异常吸底）根因
+
+`peri-tui/src/kit/message_area/scroll.rs::run_auto_follow` 的 `is_loading` 分支：
+只要 `scroll_y < max_scroll` 就 `scroll_to_bottom()`，**完全忽略用户是否主动上滚**。
+用户在 loading 期间向上滚动浏览历史时被立刻吸回底部。
+
+### 修复 B
+
+在 `is_loading` 分支加距离阈值（`scroll.rs:284-298`）：仅当
+`distance = max_scroll - scroll_y <= (vis_height / 4).max(5)` 时才 `scroll_to_bottom`——
+与非 loading 分支阈值一致。用户上滚超过阈值后停止跟随，`last_scrolled_at` 也不更新，
+下次 effect 重新检测；用户回到接近底部后自然恢复跟随。
+
+### 涉及文件
+
+- `peri-tui/src/kit/message_area/mod.rs`（View 宽度对齐 vis_width）
+- `peri-tui/src/kit/message_area/scroll.rs`（is_loading 分支加距离阈值）
+
+### 验证
+
+`cargo test -p peri-tui --lib` 全部 410 个测试通过。现象 B 的修复依赖现有
+`proximity_check` 阈值语义（已覆盖 7 个测试 case）。

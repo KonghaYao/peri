@@ -19,8 +19,8 @@ use ratatui_kit::{
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
-        text::{Line, Span, Text as RatText},
-        widgets::{Paragraph, Wrap},
+        text::{Line, Text as RatText},
+        widgets::{Block, Padding, Paragraph, Wrap},
     },
 };
 
@@ -35,7 +35,10 @@ pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
 use render::vm_to_lines;
 use scroll::{DragThrottle, ScrollThrottle};
-use selection::{WrappedLineInfo, build_wrap_map, viewport_logical_range, visual_to_logical};
+use selection::{
+    WrappedLineInfo, build_wrap_map, highlight_line_in_selection, viewport_logical_range,
+    visual_to_logical,
+};
 
 // ── 组件 ──────────────────────────────────────────────────────────────────
 
@@ -305,14 +308,26 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         g.2.last().map(|e| e.visual_end).unwrap_or(0)
     };
 
-    // 选区对应的逻辑行范围（视口外选区不参与 highlight，selection state 保留供复制）
-    let sel_bounds: Option<(usize, usize)> = if !no_highlight {
+    // 选区范围（字符级）：(first_logical, last_logical, sr, sc, er, ec)
+    // 视口外选区不参与 highlight，selection state 保留供复制
+    // [Why] 字符级高亮——旧版只存 (first_logical, last_logical) 整逻辑行范围，
+    // 导致整行背景色覆盖；与字符级复制提取不一致。现在保留完整 (sr, sc, er, ec)，
+    // highlight_line_in_selection 用 wrap_byte_starts 算 byte 范围，拆分 spans。
+    let sel_bounds: Option<(usize, usize, u16, u16, u16, u16)> = if !no_highlight {
         let sel = text_sel.read();
-        if let Some(((sr, _), (er, _))) = sel.normalized_bounds() {
+        if let Some(((sr, sc), (er, ec))) = sel.normalized_bounds() {
             let g = wrap_map_cache.read();
-            let f = visual_to_logical(sr, &g.2).unwrap_or(0);
-            let l = visual_to_logical(er, &g.2).unwrap_or(0);
-            Some((f.min(l), f.max(l)))
+            // Clamp sr/er 到 wrap_map 视觉范围内（footer 区域无 wrap_map）
+            let max_visual =
+                g.2.last()
+                    .map(|e| (e.visual_end.saturating_sub(1)) as u16)
+                    .unwrap_or(0);
+            let sr_c = sr.min(max_visual);
+            let er_c = er.min(max_visual);
+            match (visual_to_logical(sr_c, &g.2), visual_to_logical(er_c, &g.2)) {
+                (Some(f), Some(l)) => Some((f.min(l), f.max(l), sr_c, sc, er_c, ec)),
+                _ => None,
+            }
         } else {
             None
         }
@@ -345,16 +360,20 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     if scroll_y < core_total_visual_rows && vp_core_start <= vp_core_end && core_len > 0 {
         let end = vp_core_end.min(core_len - 1);
+        // 取 wrap_map arc clone 避免循环中重复 read guard
+        let wrap_map_arc = wrap_map_cache.read().2.clone();
         for i in vp_core_start..=end {
             let line = &core_lines_arc[i];
-            let in_sel = sel_bounds.is_some_and(|(f, l)| i >= f && i <= l);
+            let in_sel = sel_bounds.is_some_and(|(f, l, _, _, _, _)| i >= f && i <= l);
             if in_sel {
-                let spans: Vec<Span<'static>> = line
-                    .spans
-                    .iter()
-                    .map(|s| Span::styled(s.content.clone(), s.style.bg(sel_bg)))
-                    .collect();
-                viewport_lines.push(Line::from(spans));
+                let (_, _, sr, sc, er, ec) = sel_bounds.unwrap();
+                if let Some(entry) = wrap_map_arc.get(i) {
+                    let highlighted =
+                        highlight_line_in_selection(line, entry, sr, er, sc, ec, vis_width, sel_bg);
+                    viewport_lines.push(highlighted);
+                } else {
+                    viewport_lines.push(line.clone());
+                }
             } else {
                 viewport_lines.push(line.clone());
             }
@@ -373,6 +392,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         vp_first_offset
     };
 
+    // [Why] View 必须保持 `Fill(1)`——ScrollbarHook 在 MessageArea 的 drawer.area
+    // 最右 1 列渲染滚动条 thumb。若 View 改为 `Max(vis_width)`，View 自身 area 缩到
+    // vis_width，ScrollbarHook 的 drawer.area 也跟着缩，导致 thumb 渲染在 area.width-2
+    // 处（向左偏 1 列）。
+    //
+    // 让 Paragraph 实际 wrap 宽度 = vis_width 的正确做法：给 Paragraph 套
+    // `Block::default().padding(Padding::new(0, 1, 0, 0))`（右 padding 1）。Block 占满
+    // View 的 area.width，内部 wrap 宽度 = area.width - 1 = vis_width，与
+    // `total_visual_rows` / `wrap_map_cache` / `line_count(vis_width)` 的估算一致；
+    // 右 padding 1 列留给 scrollbar thumb（post_component_draw 时绘制覆盖 padding 空白）。
     element!(
         View(
             flex_direction: Direction::Vertical,
@@ -381,6 +410,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         ) {
             Text(text: Paragraph::new(RatText::from(viewport_lines))
                 .wrap(Wrap { trim: false })
+                .block(Block::default().padding(Padding::new(0, 1, 0, 0)))
                 .scroll((scroll_offset_y, 0)))
         }
     )

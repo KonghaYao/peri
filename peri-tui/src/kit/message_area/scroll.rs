@@ -287,10 +287,16 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
         if ctx.total_visual_rows > prev_lsa {
             let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height);
             let scroll_y = ctx.scroll_state.read().offset().y as u16;
-            if scroll_y < max_scroll {
+            let distance = max_scroll.saturating_sub(scroll_y);
+            // [Bug] 仅在用户当前接近底部时跟随——用户主动上滚浏览历史时不应被吸回。
+            // 阈值与非 loading 分支保持一致（vis_height/4，至少 5 行）。
+            let threshold = (ctx.vis_height / 4).max(5);
+            if distance <= threshold {
                 ctx.scroll_state.write().scroll_to_bottom();
+                *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
             }
-            *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+            // 用户上滚超过阈值（distance > threshold）时不抢夺滚动位——last_scrolled_at
+            // 也不更新，让下次 effect 重新检测；用户回到接近底部后自然恢复跟随。
         }
         return;
     }

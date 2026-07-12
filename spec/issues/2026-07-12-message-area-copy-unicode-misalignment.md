@@ -1,6 +1,6 @@
 # 消息区拖拽复制时 Unicode 字符后段错位（越往后偏移越大）
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-07-12
 
@@ -46,7 +46,44 @@
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-07-12 | — | Open | agent | 创建 |
+| 2026-07-12 | Open | Fixed | agent | 修复根因（见下） |
 
 ## 修复记录
 
-（由 fix-issue 或 issue-verify skill 追加，创建时留空）
+### 根因（两层）
+
+1. **折行偏移公式错误**（`peri-tui/src/kit/message_area/selection.rs:142-144`）：旧公式
+   `c = vis_col + (vis_row - visual_start) * width` 假设每个视觉行恰好占满 `width` 列。
+   但 ratatui 用 `WordWrapper` 做 word-level wrap——CJK 文本（无空格）被当成单个 word，
+   超宽也不拆分；ASCII 在空格处优先换行；每视觉行实际占列数不固定。按 `width×k` 推算会
+   累积偏移。
+
+2. **双宽字符半字符边界处理错误**（`peri-tui/src/kit/text_selection.rs:100-110`）：
+   `visual_col_to_byte_offset` 把落在双宽字符中间的 target_col 一律当作"字符起点不含"，
+   但终端鼠标报告 col 落在双宽字符右半（如 '你' 占 col 2-3 中的 col 3）时，光标实际已
+   越过该字符——选区应包含该字符。原逻辑会让复制结果少一个字符。
+
+### 修复
+
+1. **`selection.rs::wrap_byte_starts`**（新增）：直接用 `Paragraph::wrap` 渲染 `Line` 到
+   offscreen `Buffer`，按 cell 流匹配 plain text 字符，确定每个视觉行的 byte 起始偏移。
+   这是唯一能 100% 复刻 ratatui 实际 wrap 行为的方法。`extract_visual_range` 改用此函数
+   替代 `width×k` 公式。
+
+2. **`selection.rs::row_start_byte` + `row_end_byte`**（新增，替代 `row_col_to_byte`）：
+   区分选区起点（落在字符范围内时总返回字符起点，含字符）与终点（左半不含 / 右半含）。
+
+3. **`text_selection.rs::visual_col_to_byte_offset`**：加半字符规则——target_col 落在
+   `[col, col + ceil(cw/2))` 视为左半不含，落在 `[col + ceil(cw/2), col + cw)` 视为右半含。
+
+### 测试覆盖
+
+`peri-tui/src/kit/message_area/selection.rs::tests` 新增 16 个单元测试：
+- `wrap_byte_starts`：纯 ASCII / CJK / 混合 / 空 / 单 CJK / 跨宽度（5/4/3/10）
+- `wrap_byte_starts` 行数与 ratatui `Paragraph::line_count` 一致性（关键不变量）
+- `extract_visual_range`：CJK 同行左右半、CJK 跨视觉行、ASCII 同行/跨视觉行/跨逻辑行、反向拖拽规范化
+
+### 涉及文件
+
+- `peri-tui/src/kit/message_area/selection.rs`（核心修复 + 测试）
+- `peri-tui/src/kit/text_selection.rs`（半字符规则）
