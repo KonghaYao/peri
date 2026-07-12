@@ -17,47 +17,68 @@ use ratatui_kit::{
     },
 };
 
-// "peri" 四个字母的位图定义，每行用 '#' 表示实心、空格表示空白。
-// 每行渲染为空白字符 Span：'#' → bg=active 的空格，' ' → 默认背景的空格。
-const LETTER_P: &[&str] = &["######", "#    #", "######", "#     ", "#     "];
-const LETTER_E: &[&str] = &["######", "#     ", "##### ", "#     ", "######"];
-const LETTER_R: &[&str] = &["######", "#    #", "######", "#   # ", "#    #"];
-const LETTER_I: &[&str] = &["######", "  ##  ", "  ##  ", "  ##  ", "######"];
-const LETTERS: &[&[&str]] = &[LETTER_P, LETTER_E, LETTER_R, LETTER_I];
+const LOGO: &[&str] = &[
+    "██████╗ ███████╗██████╗ ██╗",
+    "██╔══██╗██╔════╝██╔══██╗██║",
+    "██████╔╝█████╗  ██████╔╝██║",
+    "██╔═══╝ ██╔══╝  ██╔══██╗██║",
+    "██║     ███████╗██║  ██║██║",
+    "╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝",
+];
 
-/// 将一个字母位图行转换为 Span 序列：'#' → 有色背景空格，' ' → 无背景空格。
-/// 相邻同类像素会合并为一个 Span。
-fn letter_row_to_spans(row: &str, color: Color) -> Vec<Span<'static>> {
+/// 判断是否为边界字符（非 █ 非空格的双线框字符）
+fn is_border(c: char) -> bool {
+    matches!(c, '╗' | '╔' | '╝' | '╚' | '║' | '═')
+}
+
+/// 将 LOGO 行转为 Span 序列：
+/// - █ → 空白字符 + bg=color（反色填充）
+/// - ╗╔╝╚║═ → 保留字形 + fg=color（边框可见）
+/// - 空格 → 空白字符 + 默认样式
+/// 相邻同 (内容, 样式) 的 span 会合并。
+fn logo_row_to_spans(row: &str, color: Color) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut current_filled: Option<bool> = None;
-    let mut run_len: usize = 0;
+    // 缓存上一个积累的 (ch_repr, style)，用于合并相邻同类 span
+    let mut pending_ch: Option<char> = None;
+    let mut pending_style: Option<Style> = None;
+    let mut pending_count: usize = 0;
+
+    let flush =
+        |spans: &mut Vec<Span<'static>>, ch: Option<char>, style: Option<Style>, count: usize| {
+            if count == 0 || ch.is_none() {
+                return;
+            }
+            let ch = ch.unwrap();
+            let s = if ch == ' ' {
+                " ".repeat(count)
+            } else {
+                ch.to_string().repeat(count)
+            };
+            spans.push(Span::styled(s, style.unwrap_or_default()));
+        };
 
     for ch in row.chars() {
-        let filled = ch == '#';
-        if current_filled == Some(filled) {
-            run_len += 1;
+        let (out_ch, style) = if ch == ' ' {
+            (' ', Style::default())
+        } else if ch == '█' {
+            (' ', Style::default().bg(color))
+        } else if is_border(ch) {
+            (ch, Style::default().fg(color))
         } else {
-            if let Some(was_filled) = current_filled {
-                let style = if was_filled {
-                    Style::default().bg(color)
-                } else {
-                    Style::default()
-                };
-                spans.push(Span::styled(" ".repeat(run_len), style));
-            }
-            current_filled = Some(filled);
-            run_len = 1;
+            (ch, Style::default().fg(color))
+        };
+
+        if pending_ch == Some(out_ch) && pending_style == Some(style) {
+            pending_count += 1;
+        } else {
+            flush(&mut spans, pending_ch, pending_style, pending_count);
+            pending_ch = Some(out_ch);
+            pending_style = Some(style);
+            pending_count = 1;
         }
     }
-    // flush last run
-    if let Some(filled) = current_filled {
-        let style = if filled {
-            Style::default().bg(color)
-        } else {
-            Style::default()
-        };
-        spans.push(Span::styled(" ".repeat(run_len), style));
-    }
+    flush(&mut spans, pending_ch, pending_style, pending_count);
+
     spans
 }
 
@@ -86,17 +107,8 @@ pub fn Welcome(props: &WelcomeProps, mut hooks: Hooks) -> impl Into<AnyElement<'
         )));
     } else {
         lines.push(Line::from(""));
-        // 逐行渲染四个字母，空白字符反色形成字母轮廓
-        for row_idx in 0..LETTER_P.len() {
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            for (li, letter) in LETTERS.iter().enumerate() {
-                if li > 0 {
-                    // 字母间一个空格的间隙
-                    spans.push(Span::styled(" ", Style::default()));
-                }
-                spans.extend(letter_row_to_spans(letter[row_idx], active_color));
-            }
-            lines.push(Line::from(spans));
+        for row in LOGO {
+            lines.push(Line::from(logo_row_to_spans(row, active_color)));
         }
     }
 
