@@ -159,6 +159,17 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             messages_json,
             summary: _,
         } => Some(AcpEventData::RewindCompleted { messages_json }),
+        // StateSnapshotMeta：从 budget_pct 写入 CONTEXT_USAGE atom（供 StatusBarRow1 显示）
+        AcpEvent::StateSnapshotMeta {
+            context_total_tokens,
+            budget_pct,
+            ..
+        } => {
+            if let (Some(pct), Some(total)) = (budget_pct, context_total_tokens) {
+                *crate::kit::atoms::CONTEXT_USAGE.state().write() = Some((pct * 100.0, total));
+            }
+            None
+        }
         _ => {
             debug!("kit ACP notifier: AcpEvent variant not yet mapped to AcpEventData, dropping");
             None
@@ -461,18 +472,33 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
             }
         }
         Some("usage_update") if !is_session_replay => {
-            // §C: token-usage deprecated, read from standard usage_update meta
-            let input = update
-                .get("meta")
+            // UsageUpdate.meta 序列化 key 是 "_meta"（ACP SDK #[serde(rename = "_meta")]），
+            // 带 fallback 兼容旧格式。
+            let meta_obj = update.get("_meta").or_else(|| update.get("meta"));
+            let input = meta_obj
                 .and_then(|m| m.get("inputTokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let output = update
-                .get("meta")
+            let output = meta_obj
                 .and_then(|m| m.get("outputTokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             *SPINNER_TOKEN_COUNT.state().write() = (input + output) as usize;
+            // 缓存命中率：读取 cacheReadTokens，写入 CACHE_HIT_INFO atom
+            // （acp_events 在 TurnDone/TurnSuspended 时检查并注入消息流警告）
+            let cache_read = meta_obj
+                .and_then(|m| m.get("cacheReadTokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if cache_read > 0 && input > 0 {
+                let hit_rate = cache_read as f64 / input as f64;
+                let req_id = meta_obj
+                    .and_then(|m| m.get("requestId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-")
+                    .to_string();
+                *crate::kit::atoms::CACHE_HIT_INFO.state().write() = Some((hit_rate, req_id));
+            }
             None
         }
         // ── session/replay: user_message_chunk ──
@@ -984,7 +1010,7 @@ mod tests {
             })
             .unwrap();
 
-        // StateSnapshotMeta 保持丢弃（纯信息性，不影响渲染）
+        // StateSnapshotMeta 只写 CONTEXT_USAGE atom（供 StatusBar），不转发 bridge 事件
         let result =
             tokio::time::timeout(std::time::Duration::from_millis(50), bridge_rx.recv()).await;
         assert!(

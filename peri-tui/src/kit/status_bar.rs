@@ -29,6 +29,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let provider_hl = hooks.use_atom(&atoms::PROVIDER_HIGHLIGHT_UNTIL);
     let mode_hl = hooks.use_atom(&atoms::MODE_HIGHLIGHT_UNTIL);
     let bg_tasks = hooks.use_atom(&atoms::BG_TASKS);
+    let ctx_usage = hooks.use_atom(&atoms::CONTEXT_USAGE);
 
     let snap = snap.read().clone();
     let now = Instant::now();
@@ -117,6 +118,29 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         spans.push(Span::styled(
             parts.join(" "),
             Style::default().fg(THEME_ATOM.state().read().semantic.loading),
+        ));
+    }
+
+    // 7. 上下文使用率（放最后，与旧架构 status_bar render_first_row 一致）
+    if let Some((pct, total)) = ctx_usage.read().as_ref() {
+        // pct 已经是百分比值（0-100），来自 StateSnapshotMeta.budget_pct * 100
+        let pct_display = *pct;
+        let total_display = if *total >= 1_000_000 {
+            format!("{:.0}M", *total as f64 / 1_000_000.0)
+        } else {
+            format!("{:.0}k", *total as f64 / 1000.0)
+        };
+        let color = if pct_display >= 85.0 {
+            statusbar().resource_bad
+        } else if pct_display >= 70.0 {
+            statusbar().resource_warn
+        } else {
+            statusbar().resource_good
+        };
+        spans.push(separator());
+        spans.push(Span::styled(
+            format!("{:.0}% {}", pct_display, total_display),
+            Style::default().fg(color),
         ));
     }
 

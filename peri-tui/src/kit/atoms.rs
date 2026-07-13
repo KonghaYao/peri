@@ -337,6 +337,16 @@ pub static LOCAL_EVENT_TX: OnceLock<UnboundedSender<AcpEventWithEpoch>> = OnceLo
 /// 最终在 spinner 行右侧显示 `↓ X.Xk tokens`。render body 纯只读，不写 spinner state。
 pub static SPINNER_TOKEN_COUNT: AtomStatic<usize> = AtomStatic::new(|| 0);
 
+/// 上下文窗口使用率信息：(pct 0.0-100.0, context_total_tokens)。
+/// 由 acp_notifier 在收到 StateSnapshotMeta 时从 budget_pct 写入。
+/// StatusBarRow1 订阅此 atom 显示。
+pub static CONTEXT_USAGE: AtomStatic<Option<(f64, u64)>> = AtomStatic::new(|| None);
+
+/// 最近一次 LLM 调用的 prompt cache 命中率信息：(rate 0.0-1.0, request_id)。
+/// 由 acp_notifier 在 usage_update 中写入，acp_events 在 TurnDone/TurnSuspended
+/// 时检查并注入消息流警告（命中率 < 80%）。
+pub static CACHE_HIT_INFO: AtomStatic<Option<(f64, String)>> = AtomStatic::new(|| None);
+
 /// 最近一次消息区视口快照。由 MessageArea 在 render 阶段计算后写入，
 /// 仅供调试导出命令读取；screen 模式按此范围导出当前可见文本。
 #[derive(Debug, Clone, Default)]

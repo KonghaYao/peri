@@ -246,6 +246,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.current_turn.reset();
             state.variant = 0;
 
+            // 检查并注入缓存命中率过低警告（本轮 usage_update 写入 CACHE_HIT_INFO 后，
+            // 在 TurnDone 时统一注入，确保警告出现在 AI 回复之后）
+            inject_cache_warning(state);
+
             state.phase = SessionPhase::Idle;
             // 显式清 loading：push_acp_state 的防御逻辑会在 atom is_loading=true
             // + phase=Idle 时自动提升 phase 为 PromptRunning。为避免此防御逻辑
@@ -336,6 +340,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             }
             state.current_turn.reset();
             state.variant = 0;
+            inject_cache_warning(state);
             state.phase = SessionPhase::Idle;
             ACP_STATE.state().write().is_loading = false;
             push_view_models(state);
@@ -951,9 +956,35 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     *VIEW_MODELS.state().write() = snapshot;
 }
 
+/// 检查 CACHE_HIT_INFO atom，若缓存命中率 < 80% 则注入 TuiSystemNote 到 committed。
+///
+/// 在 TurnDone / TurnSuspended 处理器中调用（当前轮次已归档到 committed 之后），
+/// 消费掉 atom 中的值（防止重复注入）。阈值 80% 与旧架构 `agent_ops.rs` 保持一致。
+fn inject_cache_warning(state: &mut BridgeState) {
+    let info = { CACHE_HIT_INFO.state().read().clone() };
+    if let Some((rate, req_id)) = info {
+        *CACHE_HIT_INFO.state().write() = None; // 消费
+        if rate < 0.8 {
+            let pct = (rate * 100.0) as u32;
+            let text = format!(
+                "\u{26a0} Prompt cache \u{547d}\u{4e2d}\u{7387} {pct}% < 80% (req: {req_id})"
+            );
+            let content_hash = tui_hash_str(&text);
+            state
+                .committed
+                .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+                    text,
+                    level: TuiNoteLevel::Warning,
+                    content_hash,
+                }));
+        }
+    }
+}
+
 /// 由 acp_bridge 在 BRIDGE_RESET_COUNTER 复位时调用——
 /// 立即将空快照写入 VIEW_MODELS atom，防止其他 reader 读到旧 session 数据。
 pub fn push_view_models_for_reset() {
+    *CACHE_HIT_INFO.state().write() = None;
     let snapshot = ViewModelsSnapshot {
         items: im::Vector::new(),
         generation: 0,
