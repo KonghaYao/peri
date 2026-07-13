@@ -808,6 +808,91 @@ panel-plugin-empty =   No plugins installed
 panel-plugin-empty-hint =   Install via: agm install <name>
 panel-plugin-version-unknown = ?
 
+# ---- Plugin Panel Tabs ----
+panel-plugin-tab-installed = Installed
+panel-plugin-tab-discover = Discover
+panel-plugin-tab-marketplaces = Marketplaces
+panel-plugin-tab-errors = Errors
+
+# ---- Plugin Panel Discover ----
+panel-plugin-discover-coming = Discover — coming in Phase 2
+panel-plugin-discover-hint = Search and install plugins from marketplaces
+
+# ---- Plugin Panel Marketplaces ----
+panel-plugin-marketplaces-coming = Marketplaces — coming in Phase 2
+panel-plugin-marketplaces-hint = Manage plugin marketplaces
+
+# ---- Plugin Panel Errors ----
+panel-plugin-errors-coming = Errors — coming in Phase 2
+panel-plugin-errors-hint = View plugin load errors
+
+# ---- Plugin Panel Detail ----
+panel-plugin-detail-title = Detail: { $name }
+panel-plugin-detail-marketplace = marketplace
+panel-plugin-detail-author = author
+panel-plugin-detail-path = path
+panel-plugin-detail-scope = scope
+panel-plugin-detail-error = load error
+
+# ---- Plugin Panel Actions ----
+panel-plugin-action-disable = Disable plugin
+panel-plugin-action-enable = Enable plugin
+panel-plugin-action-uninstall = Uninstall
+panel-plugin-action-back = Back to plugin list
+
+# ---- Plugin Panel Fields ----
+panel-plugin-field-skills = Skills
+panel-plugin-field-commands = Commands
+panel-plugin-field-agents = Agents
+panel-plugin-field-mcp = MCP
+
+# ---- Plugin Panel Discover ----
+panel-plugin-discover-search = Search plugins...
+panel-plugin-discover-empty = No results found
+
+# ---- Plugin Panel Marketplaces ----
+panel-plugin-marketplaces-add = Add marketplace...
+panel-plugin-marketplaces-delete = Delete
+panel-plugin-marketplaces-empty = No marketplaces configured
+
+# ---- Plugin Panel Errors ----
+panel-plugin-errors-title = Load Errors
+panel-plugin-errors-empty = No errors
+
+# ---- Plugin Panel Status ----
+panel-plugin-status-enabled = enabled
+panel-plugin-status-disabled = disabled
+
+# ---- Plugin Panel Confirm ----
+panel-plugin-confirm-uninstall = ⚠ Confirm uninstall? Enter to confirm, Esc to cancel
+panel-plugin-confirm-delete-mp = ⚠ Confirm delete marketplace? Enter to confirm, Esc to cancel
+panel-plugin-confirm-hint = Enter: confirm  Esc: cancel
+
+# ---- Plugin Panel Marketplace ----
+panel-plugin-marketplaces-online = online
+panel-plugin-marketplaces-offline = offline
+panel-plugin-marketplace-refreshing = Refreshing...
+panel-plugin-marketplace-hint-keys = Enter: refresh  |  d: delete  |  a: add
+panel-plugin-marketplace-add-url-hint = Enter URL (github.com/org/repo, /path/to/dir, etc.)
+panel-plugin-marketplace-add-input-footer = Enter: save  Esc: cancel
+
+# ---- Plugin Panel Search ----
+panel-plugin-discover-input = Type to search...
+
+# ---- Plugin Panel Search ----
+panel-plugin-search-loading = Searching...
+panel-plugin-search-no-results = No results found
+panel-plugin-search-error = Search failed: { $error }
+panel-plugin-operation-complete = operation complete
+panel-plugin-operation-failed = operation failed
+panel-plugin-discover-press-enter = Press Enter to search
+panel-plugin-action-install = Install
+panel-plugin-list-count = { $count } plugins found
+panel-plugin-discover-hint-keys = Enter: details  |  type: filter  |  ←/→/Tab: switch view
+
+# ---- Plugin Panel Navigation ----
+common-nav-tab-close = ←/→/Tab switch view · ↑/↓ navigate · Enter close · Esc close
+
 # ---- Tasks Panel ----
 panel-tasks-total-label =   Total: 
 panel-tasks-breakdown =    ({ $bg } bg, { $cron } cron, { $subagent } subagent)

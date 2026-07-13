@@ -116,6 +116,17 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
         ToolStarted(ts) => {
+            // [DIAG] 诊断同步 sub-agent 工具调用消失问题
+            tracing::warn!(
+                target: "subagent_tool_diag",
+                has_agent_id = ts.agent_id.is_some(),
+                agent_id = ts.agent_id.as_deref(),
+                tool_id = %ts.tool_id,
+                tool_name = %ts.tool_name,
+                subagent_count = state.current_turn.subagents.len(),
+                subagent_ids = ?state.current_turn.subagents.iter().map(|s| &s.agent_id).collect::<Vec<_>>(),
+                "ToolStarted DIAG",
+            );
             if let Some(agent_id) = ts.agent_id.as_deref() {
                 let routed = state.current_turn.start_subagent_tool(
                     agent_id,
@@ -125,8 +136,20 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                         ts.input_summary.clone(),
                     ),
                 );
+                tracing::warn!(
+                    target: "subagent_tool_diag",
+                    routed,
+                    agent_id,
+                    tool_id = %ts.tool_id,
+                    "ToolStarted DIAG: subagent tool routing result",
+                );
                 if !routed {
-                    tracing::trace!(agent_id, tool_id = %ts.tool_id, "kit bridge: subagent tool start has no active group");
+                    tracing::warn!(
+                        target: "subagent_tool_diag",
+                        agent_id,
+                        tool_id = %ts.tool_id,
+                        "ToolStarted DIAG: subagent tool start has no active group",
+                    );
                 }
                 // 后台任务工具更新：写 BG_DISPLAY
                 if BG_AGENT_IDS.state().read().contains(agent_id)
@@ -477,6 +500,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             agent_name,
             is_background,
         } => {
+            // [DIAG] 诊断同步 sub-agent 工具调用消失问题
+            tracing::warn!(
+                target: "subagent_tool_diag",
+                agent_id = %agent_id,
+                agent_name = %agent_name,
+                is_background,
+                "SubagentStarted DIAG",
+            );
             state
                 .current_turn
                 .start_subagent(agent_id.clone(), agent_name.clone());
@@ -569,6 +600,74 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 phase = ?phase,
                 "bridge: WorkflowProgress"
             );
+        }
+
+        // ── §4.9 Plugin events ──
+        PluginSnapshot(snapshot) => {
+            let plugins: Vec<PluginSummary> = snapshot
+                .plugins
+                .iter()
+                .map(|p| PluginSummary {
+                    name: p.name.clone(),
+                    version: p.version.clone(),
+                    enabled: p.enabled,
+                    root: p.root.clone(),
+                    description: p.description.clone(),
+                    marketplace: p.marketplace.clone(),
+                    author: p.author.clone(),
+                    skills_count: p.skills_count,
+                    commands_count: p.commands_count,
+                    agents_count: p.agents_count,
+                    mcp_count: p.mcp_count,
+                    install_scope: p.install_scope.clone(),
+                    load_error: p.load_error.clone(),
+                })
+                .collect();
+            PLUGIN_LIST.state().write().clone_from(&plugins);
+        }
+        PluginActionResult(result) => {
+            let msg = if result.success {
+                format!(
+                    "{} {}",
+                    result.plugin_name,
+                    i18n::tr("panel-plugin-operation-complete"),
+                )
+            } else {
+                format!(
+                    "{} {}: {}",
+                    result.plugin_name,
+                    i18n::tr("panel-plugin-operation-failed"),
+                    result.error.as_deref().unwrap_or("unknown error"),
+                )
+            };
+            NOTIFICATION.state().write().replace(Notification {
+                message: msg,
+                until: Instant::now() + Duration::from_secs(3),
+            });
+            // 触发 PluginPanel 重渲染以清除 operation_loading
+            RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
+        }
+        PluginSearchResult(result) => {
+            let items: Vec<PluginSummary> = result
+                .results
+                .iter()
+                .map(|r| PluginSummary {
+                    name: r.name.clone(),
+                    version: r.version.clone(),
+                    enabled: false,
+                    root: String::new(),
+                    description: r.description.clone(),
+                    marketplace: r.marketplace.clone(),
+                    author: r.author.clone(),
+                    skills_count: r.skills_count,
+                    commands_count: r.commands_count,
+                    agents_count: r.agents_count,
+                    mcp_count: r.mcp_count,
+                    install_scope: r.install_scope.clone(),
+                    load_error: None,
+                })
+                .collect();
+            PLUGIN_SEARCH_RESULTS.state().write().clone_from(&items);
         }
 
         // ── Unknown / forward-compat ──
@@ -1679,8 +1778,15 @@ mod tests {
 
         // 模拟 TurnDone：归档 + 重置 phase/loading
         dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
-        assert_eq!(state.phase, SessionPhase::Idle, "TurnDone 后 phase 应为 Idle");
-        assert!(!ACP_STATE.state().read().is_loading, "TurnDone 后 is_loading 应为 false");
+        assert_eq!(
+            state.phase,
+            SessionPhase::Idle,
+            "TurnDone 后 phase 应为 Idle"
+        );
+        assert!(
+            !ACP_STATE.state().read().is_loading,
+            "TurnDone 后 is_loading 应为 false"
+        );
 
         // SubagentStopped 到达——不应重新激活 loading
         dispatch_and_notify(

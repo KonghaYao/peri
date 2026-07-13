@@ -120,6 +120,20 @@ pub struct HookSummary {
     pub matcher: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginViewTab {
+    Installed = 0,
+    Discover = 1,
+    Marketplaces = 2,
+    Errors = 3,
+}
+
+impl Default for PluginViewTab {
+    fn default() -> Self {
+        PluginViewTab::Installed
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PluginSummary {
     pub name: String,
@@ -127,6 +141,14 @@ pub struct PluginSummary {
     pub enabled: bool,
     pub root: String,
     pub description: String,
+    pub marketplace: String,
+    pub author: Option<String>,
+    pub skills_count: usize,
+    pub commands_count: usize,
+    pub agents_count: usize,
+    pub mcp_count: usize,
+    pub install_scope: String,
+    pub load_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -199,6 +221,8 @@ pub static THREAD_LIST: AtomStatic<Vec<ThreadSummary>> = AtomStatic::new(Vec::ne
 pub static CRON_JOBS: AtomStatic<Vec<CronJobSummary>> = AtomStatic::new(Vec::new);
 pub static HOOK_LIST: AtomStatic<Vec<HookSummary>> = AtomStatic::new(Vec::new);
 pub static PLUGIN_LIST: AtomStatic<Vec<PluginSummary>> = AtomStatic::new(Vec::new);
+/// Discover 搜索结果的临时存储（plugin-search-result 事件写入）。
+pub static PLUGIN_SEARCH_RESULTS: AtomStatic<Vec<PluginSummary>> = AtomStatic::new(Vec::new);
 pub static MCP_SERVERS: AtomStatic<Vec<McpServerSummary>> = AtomStatic::new(Vec::new);
 pub static SUBAGENT_LIST: AtomStatic<Vec<SubagentSummary>> = AtomStatic::new(Vec::new);
 pub static PROVIDER_LIST: AtomStatic<Vec<ProviderSummary>> = AtomStatic::new(Vec::new);
@@ -262,6 +286,10 @@ pub static PERMISSION_MODE_HANDLE: OnceLock<
 pub static CRON_SCHEDULER_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>,
 > = OnceLock::new();
+/// ACP 客户端全局句柄——供 Plugin Panel 等面板调用 send_raw_request。
+/// 在 entry.rs 中 acp_client 就绪后 set。
+pub static ACP_CLIENT_HANDLE: OnceLock<std::sync::Arc<crate::acp_client::client::AcpTuiClient>> =
+    OnceLock::new();
 /// i18n 语言版本计数器——语言切换时递增，订阅此 atom 的组件自动重渲染。
 /// LcRegistry 本体存于 thread_local!（FluentBundle !Send，无法进 static）。
 pub static LANG_VERSION: AtomStatic<u64> = AtomStatic::new(|| 0);

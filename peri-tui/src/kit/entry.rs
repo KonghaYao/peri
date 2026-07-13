@@ -166,6 +166,8 @@ pub async fn run_kit_fullscreen(
         let _bridge_handle = spawn_acp_bridge(bridge_rx, shutdown.clone());
         let cwd = app.services.cwd.clone();
         let cwd_for_init = cwd.clone();
+        // 4dz. ACP client handle — for panels to send raw requests
+        let _ = atoms::ACP_CLIENT_HANDLE.set(std::sync::Arc::new(client.clone()));
         let _submit_handle =
             spawn_submit_consumer(client.clone(), submit_rx, cwd.clone(), shutdown.clone());
         let _rewind_handle = spawn_rewind_consumer(client.clone(), rewind_rx, shutdown.clone());
@@ -328,6 +330,14 @@ fn build_snapshot_source(app: &crate::app::App) -> SnapshotSource {
                     enabled: true, // 已加载的插件即视为 enabled
                     root: p.install_path.display().to_string(),
                     description: p.manifest.description.clone(),
+                    marketplace: p.marketplace.clone(),
+                    author: p.manifest.author.as_ref().map(|a| a.name.clone()),
+                    skills_count: p.skills_roots.len(),
+                    commands_count: p.commands.len(),
+                    agents_count: p.agents_dirs.len(),
+                    mcp_count: p.mcp_servers.len(),
+                    install_scope: "user".to_string(),
+                    load_error: None,
                 })
                 .collect();
             (hooks, plugins)

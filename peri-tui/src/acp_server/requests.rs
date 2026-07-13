@@ -12,6 +12,9 @@ use agent_client_protocol::schema::v1::{
 use peri_acp::dispatch::ReplaySender;
 use peri_acp::dispatch::config_update::make_config_options;
 use peri_acp::{dispatch, transport::types::AcpError};
+use peri_acp_types::event_data::{
+    PluginActionResult, PluginSearchResult, PluginSnapshot, PluginSnapshotEntry,
+};
 use peri_agent::thread::ThreadMeta;
 use serde_json::Value;
 use tracing::{debug, info, warn};
@@ -646,6 +649,203 @@ pub(crate) async fn handle_request(
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
 
+        "plugin/install" => {
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'name'"))?;
+            let marketplace = params
+                .get("marketplace")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'marketplace'"))?;
+            let scope_str = params
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user");
+            let scope = match scope_str {
+                "project" => peri_middlewares::plugin::InstallScope::Project,
+                "local" => peri_middlewares::plugin::InstallScope::Local,
+                _ => peri_middlewares::plugin::InstallScope::User,
+            };
+            let session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let claude_dir = dirs_next::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".claude");
+            let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
+
+            match peri_middlewares::plugin::install_plugin(
+                name,
+                marketplace,
+                scope,
+                &cache_dir,
+                &claude_dir,
+                None,
+            )
+            .await
+            {
+                Ok(installed) => {
+                    let _ = push_plugin_action_result(
+                        transport, session_id, "install", name, true, None,
+                    )
+                    .await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir).await;
+                    Ok(serde_json::json!({ "success": true, "plugin": installed.id }))
+                }
+                Err(e) => {
+                    let _ = push_plugin_action_result(
+                        transport,
+                        session_id,
+                        "install",
+                        name,
+                        false,
+                        Some(&e.to_string()),
+                    )
+                    .await;
+                    Err(AcpError::new(-32603, e.to_string()))
+                }
+            }
+        }
+
+        "plugin/uninstall" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'pluginId'"))?;
+            let session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let claude_dir = dirs_next::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".claude");
+
+            match peri_middlewares::plugin::uninstall_plugin(plugin_id, &claude_dir, None).await {
+                Ok(()) => {
+                    let _ = push_plugin_action_result(
+                        transport,
+                        session_id,
+                        "uninstall",
+                        plugin_id,
+                        true,
+                        None,
+                    )
+                    .await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir).await;
+                    Ok(serde_json::json!({ "success": true }))
+                }
+                Err(e) => {
+                    let _ = push_plugin_action_result(
+                        transport,
+                        session_id,
+                        "uninstall",
+                        plugin_id,
+                        false,
+                        Some(&e.to_string()),
+                    )
+                    .await;
+                    Err(AcpError::new(-32603, e.to_string()))
+                }
+            }
+        }
+
+        "plugin/toggle" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'pluginId'"))?;
+            let enable = params
+                .get("enable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let scope_str = params
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user");
+            let scope = match scope_str {
+                "project" => peri_middlewares::plugin::InstallScope::Project,
+                "local" => peri_middlewares::plugin::InstallScope::Local,
+                _ => peri_middlewares::plugin::InstallScope::User,
+            };
+            let session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let claude_dir = dirs_next::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".claude");
+
+            let result = if enable {
+                peri_middlewares::plugin::update_enabled_plugins(
+                    plugin_id,
+                    scope,
+                    &claude_dir,
+                    None,
+                )
+            } else {
+                peri_middlewares::plugin::remove_from_enabled_plugins(
+                    plugin_id,
+                    &scope,
+                    &claude_dir,
+                    None,
+                )
+            };
+
+            match result {
+                Ok(()) => {
+                    let action = if enable { "enable" } else { "disable" };
+                    let _ = push_plugin_action_result(
+                        transport, session_id, action, plugin_id, true, None,
+                    )
+                    .await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir).await;
+                    Ok(serde_json::json!({ "success": true }))
+                }
+                Err(e) => {
+                    let action = if enable { "enable" } else { "disable" };
+                    let _ = push_plugin_action_result(
+                        transport,
+                        session_id,
+                        action,
+                        plugin_id,
+                        false,
+                        Some(&e.to_string()),
+                    )
+                    .await;
+                    Err(AcpError::new(-32603, e.to_string()))
+                }
+            }
+        }
+
+        "plugin/search" => {
+            let query = params
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'query'"))?;
+            let session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
+            let results = search_marketplace_plugins(query, &cache_dir);
+
+            let _ = push_plugin_search_result(transport, session_id, query, &results).await;
+            Ok(serde_json::json!({ "results": results.iter().map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "version": r.version,
+                    "description": r.description,
+                    "marketplace": r.marketplace,
+                })
+            }).collect::<Vec<_>>() }))
+        }
+
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),
     }
 }
@@ -668,6 +868,173 @@ impl ReplaySender for TuiReplaySender<'_> {
             .await
             .map_err(|e| peri_acp::dispatch::ReplayError::SendFailed(e.to_string()))
     }
+}
+
+// ── Plugin event pushers ──────────────────────────────────────────────────
+
+async fn push_plugin_action_result(
+    transport: &dyn peri_acp::transport::AcpTransport,
+    session_id: &str,
+    action: &str,
+    plugin_name: &str,
+    success: bool,
+    error: Option<&str>,
+) {
+    let payload = PluginActionResult {
+        action: action.to_string(),
+        plugin_name: plugin_name.to_string(),
+        success,
+        error: error.map(|s| s.to_string()),
+    };
+    let data = serde_json::to_value(&payload).unwrap_or_default();
+    let envelope = serde_json::json!({
+        "sessionId": session_id,
+        "event": "plugin-action-result",
+        "data": data,
+    });
+    if let Err(e) = transport
+        .send_notification("peri/unstable-event", envelope)
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to push plugin-action-result");
+    }
+}
+
+async fn push_plugin_snapshot(
+    transport: &dyn peri_acp::transport::AcpTransport,
+    session_id: &str,
+    claude_dir: &std::path::Path,
+) {
+    let plugins = collect_plugin_snapshot(claude_dir);
+    let payload = PluginSnapshot { plugins };
+    let data = serde_json::to_value(&payload).unwrap_or_default();
+    let envelope = serde_json::json!({
+        "sessionId": session_id,
+        "event": "plugin-snapshot",
+        "data": data,
+    });
+    if let Err(e) = transport
+        .send_notification("peri/unstable-event", envelope)
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to push plugin-snapshot");
+    }
+}
+
+async fn push_plugin_search_result(
+    transport: &dyn peri_acp::transport::AcpTransport,
+    session_id: &str,
+    query: &str,
+    results: &[PluginSnapshotEntry],
+) {
+    let payload = PluginSearchResult {
+        query: query.to_string(),
+        results: results.to_vec(),
+        from_cache: true,
+    };
+    let data = serde_json::to_value(&payload).unwrap_or_default();
+    let envelope = serde_json::json!({
+        "sessionId": session_id,
+        "event": "plugin-search-result",
+        "data": data,
+    });
+    if let Err(e) = transport
+        .send_notification("peri/unstable-event", envelope)
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to push plugin-search-result");
+    }
+}
+
+fn collect_plugin_snapshot(claude_dir: &std::path::Path) -> Vec<PluginSnapshotEntry> {
+    let loaded = peri_middlewares::plugin::load_enabled_plugins_aggregated(claude_dir);
+
+    let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
+    let installed = peri_middlewares::plugin::load_installed_plugins(Some(&plugins_path))
+        .ok()
+        .unwrap_or_default();
+
+    loaded
+        .plugins
+        .iter()
+        .map(|p| PluginSnapshotEntry {
+            name: p.manifest.name.clone(),
+            version: p.manifest.version.clone(),
+            enabled: installed.plugins.iter().any(|ip| ip.name == p.name),
+            root: p.install_path.to_string_lossy().to_string(),
+            description: p.manifest.description.clone(),
+            marketplace: p.marketplace.clone(),
+            author: p.manifest.author.as_ref().map(|a| a.name.clone()),
+            skills_count: p.skills_roots.len(),
+            commands_count: p.commands.len(),
+            agents_count: p.agents_dirs.len(),
+            mcp_count: p.mcp_servers.len(),
+            install_scope: installed
+                .plugins
+                .iter()
+                .find(|ip| ip.name == p.name)
+                .map(|ip| format!("{:?}", ip.scope).to_lowercase())
+                .unwrap_or_default(),
+            load_error: None,
+        })
+        .collect()
+}
+
+fn search_marketplace_plugins(
+    query: &str,
+    cache_dir: &std::path::Path,
+) -> Vec<PluginSnapshotEntry> {
+    let query_lower = query.to_lowercase();
+    let mut results = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(cache_dir) {
+        for entry in entries.flatten() {
+            let mp_dir = entry.path();
+            let mp_name = mp_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let manifest_path = mp_dir.join("marketplace.json");
+            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(plugins) = manifest.get("plugins").and_then(|v| v.as_array()) {
+                        for p in plugins {
+                            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let desc = p.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                            if name.to_lowercase().contains(&query_lower)
+                                || desc.to_lowercase().contains(&query_lower)
+                            {
+                                results.push(PluginSnapshotEntry {
+                                    name: name.to_string(),
+                                    version: p
+                                        .get("version")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    enabled: false,
+                                    root: String::new(),
+                                    description: desc.to_string(),
+                                    marketplace: mp_name.clone(),
+                                    author: p
+                                        .get("author")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string()),
+                                    skills_count: 0,
+                                    commands_count: 0,
+                                    agents_count: 0,
+                                    mcp_count: 0,
+                                    install_scope: String::new(),
+                                    load_error: None,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    results
 }
 
 #[cfg(test)]

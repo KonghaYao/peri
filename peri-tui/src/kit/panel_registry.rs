@@ -252,13 +252,13 @@ pub const PANELS: &[PanelMeta] = &[
     PanelMeta {
         kind: PanelKind::Plugin,
         title: "Plugin",
-        shortcut_letter: 'p',
+        shortcut_letter: '\0',
         slash_command: "plugin",
         description: "Installed plugins",
         priority: 7,
         mutex_group: MutexGroup::Tools,
         scope: PanelScope::Global,
-        layout: PanelLayout::fixed(60, 18),
+        layout: PanelLayout::fixed(80, 24),
         render: render_plugin_panel,
     },
     PanelMeta {
@@ -609,6 +609,10 @@ mod tests {
     fn test_shortcuts_unique() {
         let mut seen = std::collections::HashSet::new();
         for m in PANELS {
+            // '\0' 表示无快捷键，允许多个面板共用
+            if m.shortcut_letter == '\0' {
+                continue;
+            }
             assert!(
                 seen.insert(m.shortcut_letter),
                 "duplicate shortcut letter {} for {:?}",
@@ -819,6 +823,10 @@ mod tests {
     #[test]
     fn test_from_shortcut_round_trip() {
         for m in PANELS {
+            // '\0' 表示无快捷键，跳过 round-trip 检查（多个面板共用 '\0'）
+            if m.shortcut_letter == '\0' {
+                continue;
+            }
             assert_eq!(from_shortcut(m.shortcut_letter), Some(m.kind));
         }
     }

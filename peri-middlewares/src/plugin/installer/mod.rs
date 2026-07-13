@@ -157,7 +157,7 @@ pub(crate) fn atomic_write_settings(
     Ok(())
 }
 
-pub(crate) fn update_enabled_plugins(
+pub fn update_enabled_plugins(
     plugin_id: &str,
     scope: InstallScope,
     claude_dir: &Path,
@@ -208,7 +208,7 @@ pub(crate) fn update_enabled_plugins(
     atomic_write_settings(&settings_path, &value)
 }
 
-pub(crate) fn remove_from_enabled_plugins(
+pub fn remove_from_enabled_plugins(
     plugin_id: &str,
     scope: &InstallScope,
     claude_dir: &Path,

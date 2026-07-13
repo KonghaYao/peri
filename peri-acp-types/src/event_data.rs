@@ -147,6 +147,54 @@ pub struct OauthNeeded {
 }
 
 // ===========================================================================
+// §4.9 Plugin events
+// ===========================================================================
+
+/// `"plugin-snapshot"` — 插件列表全量快照。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginSnapshot {
+    pub plugins: Vec<PluginSnapshotEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginSnapshotEntry {
+    pub name: String,
+    pub version: String,
+    pub enabled: bool,
+    pub root: String,
+    pub description: String,
+    pub marketplace: String,
+    pub author: Option<String>,
+    pub skills_count: usize,
+    pub commands_count: usize,
+    pub agents_count: usize,
+    pub mcp_count: usize,
+    pub install_scope: String,
+    pub load_error: Option<String>,
+}
+
+/// `"plugin-action-result"` — 操作结果通知。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginActionResult {
+    pub action: String,
+    pub plugin_name: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// `"plugin-search-result"` — Discover 搜索返回。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginSearchResult {
+    pub query: String,
+    pub results: Vec<PluginSnapshotEntry>,
+    pub from_cache: bool,
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 

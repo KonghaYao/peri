@@ -28,5 +28,5 @@
 
 > 验证 workflow 的
 
-请派发一个简单的 workflow， 其中有三个阶段，三个阶段都是 sleep 5s
+/ultracode 请派发一个简单的 workflow， 其中有三个阶段，三个阶段串行使用 agent sleep 5s
 

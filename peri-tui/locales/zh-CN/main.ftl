@@ -807,6 +807,91 @@ panel-plugin-empty =   暂未安装插件
 panel-plugin-empty-hint =   安装方式: agm install <名称>
 panel-plugin-version-unknown = ?
 
+# ---- Plugin Panel Tabs ----
+panel-plugin-tab-installed = 已安装
+panel-plugin-tab-discover = 探索
+panel-plugin-tab-marketplaces = 市场
+panel-plugin-tab-errors = 错误
+
+# ---- Plugin Panel Discover ----
+panel-plugin-discover-coming = 探索 — Phase 2 即将推出
+panel-plugin-discover-hint = 从市场中搜索和安装插件
+
+# ---- Plugin Panel Marketplaces ----
+panel-plugin-marketplaces-coming = 市场 — Phase 2 即将推出
+panel-plugin-marketplaces-hint = 管理插件市场
+
+# ---- Plugin Panel Errors ----
+panel-plugin-errors-coming = 错误 — Phase 2 即将推出
+panel-plugin-errors-hint = 查看插件加载错误
+
+# ---- Plugin Panel Detail ----
+panel-plugin-detail-title = 详情: { $name }
+panel-plugin-detail-marketplace = 来源市场
+panel-plugin-detail-author = 作者
+panel-plugin-detail-path = 路径
+panel-plugin-detail-scope = 作用域
+panel-plugin-detail-error = 加载错误
+
+# ---- Plugin Panel Actions ----
+panel-plugin-action-disable = 禁用插件
+panel-plugin-action-enable = 启用插件
+panel-plugin-action-uninstall = 卸载
+panel-plugin-action-back = 返回插件列表
+
+# ---- Plugin Panel Fields ----
+panel-plugin-field-skills = Skills
+panel-plugin-field-commands = Commands
+panel-plugin-field-agents = Agents
+panel-plugin-field-mcp = MCP
+
+# ---- Plugin Panel Discover ----
+panel-plugin-discover-search = 搜索插件...
+panel-plugin-discover-empty = 未找到结果
+
+# ---- Plugin Panel Marketplaces ----
+panel-plugin-marketplaces-add = 添加市场...
+panel-plugin-marketplaces-delete = 删除
+panel-plugin-marketplaces-empty = 未配置市场
+
+# ---- Plugin Panel Errors ----
+panel-plugin-errors-title = 加载错误
+panel-plugin-errors-empty = 无错误
+
+# ---- Plugin Panel Status ----
+panel-plugin-status-enabled = 已启用
+panel-plugin-status-disabled = 已禁用
+
+# ---- Plugin Panel Confirm ----
+panel-plugin-confirm-uninstall = ⚠ 确认卸载？Enter 确认，Esc 取消
+panel-plugin-confirm-delete-mp = ⚠ 确认删除市场？Enter 确认，Esc 取消
+panel-plugin-confirm-hint = Enter: 确认  Esc: 取消
+
+# ---- Plugin Panel Marketplace ----
+panel-plugin-marketplaces-online = 在线
+panel-plugin-marketplaces-offline = 离线
+panel-plugin-marketplace-refreshing = 刷新中...
+panel-plugin-marketplace-hint-keys = Enter: 刷新  |  d: 删除  |  a: 添加
+panel-plugin-marketplace-add-url-hint = 输入 URL (github.com/org/repo, /path/to/dir, 等)
+panel-plugin-marketplace-add-input-footer = Enter: 保存  Esc: 取消
+
+# ---- Plugin Panel Search ----
+panel-plugin-discover-input = 输入以搜索...
+
+# ---- Plugin Panel Search ----
+panel-plugin-search-loading = 搜索中...
+panel-plugin-search-no-results = 未找到结果
+panel-plugin-search-error = 搜索失败: { $error }
+panel-plugin-operation-complete = 操作完成
+panel-plugin-operation-failed = 操作失败
+panel-plugin-discover-press-enter = 按 Enter 搜索
+panel-plugin-action-install = 安装
+panel-plugin-list-count = 发现 { $count } 个插件
+panel-plugin-discover-hint-keys = Enter: 查看详情  |  输入: 过滤  |  ←/→/Tab: 切换视图
+
+# ---- Plugin Panel Navigation ----
+common-nav-tab-close = ←/→/Tab 切换视图 · ↑/↓ 导航 · Enter 查看 · Esc 关闭
+
 # ---- Tasks Panel ----
 panel-tasks-total-label =   总计: 
 panel-tasks-breakdown =    ({ $bg } 后台, { $cron } 定时, { $subagent } 子代理)

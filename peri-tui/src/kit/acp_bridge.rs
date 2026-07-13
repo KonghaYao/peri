@@ -231,5 +231,8 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         AgentExecutionFailed { .. } => "AgentExecutionFailed",
         WorkflowProgress { .. } => "WorkflowProgress",
         RewindCompleted { .. } => "RewindCompleted",
+        PluginSnapshot(_) => "PluginSnapshot",
+        PluginActionResult(_) => "PluginActionResult",
+        PluginSearchResult(_) => "PluginSearchResult",
     }
 }
