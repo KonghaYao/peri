@@ -969,3 +969,11 @@ popup-confirm-action-hint =   Enter: confirm  Esc: cancel
 popup-confirm-title =  Confirm 
 popup-confirm-reject-title = Reject Answer
 popup-confirm-reject-message = Reject answering? The Agent will receive a rejection signal and end the tool call.
+
+# ---- System Notes (app message stream) ----
+app-note-budget-warning = Context usage { NUMBER($pct, maximumFractionDigits: 0) }% ({ $used }/{ $limit })
+app-note-compact-completed = Context compaction completed{ $detail }
+app-note-compact-completed-summary = Context compaction completed{ $detail } — { $summary }
+app-note-compact-error = Context compaction failed: { $message }
+app-note-agent-failed = Agent execution failed: { $message }
+app-note-cache-hit-low = Prompt cache hit rate {$pct}% < 80% (req: { $req_id })

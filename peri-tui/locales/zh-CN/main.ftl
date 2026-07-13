@@ -968,3 +968,11 @@ popup-confirm-action-hint =   Enter: 确认  Esc: 取消
 popup-confirm-title =  确认
 popup-confirm-reject-title = 拒绝回答
 popup-confirm-reject-message = 是否拒绝回答？拒绝后 Agent 将收到拒绝信号并结束工具调用。
+
+# ---- System Notes (app message stream) ----
+app-note-budget-warning = 上下文窗口使用率 { NUMBER($pct, maximumFractionDigits: 0) }%（{ $used }/{ $limit }）
+app-note-compact-completed = 上下文压缩完成{ $detail }
+app-note-compact-completed-summary = 上下文压缩完成{ $detail } —— { $summary }
+app-note-compact-error = 上下文压缩失败: { $message }
+app-note-agent-failed = Agent 执行失败: { $message }
+app-note-cache-hit-low = Prompt cache 命中率 {$pct}% < 80%（req: { $req_id }）

@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::acp_client::AcpNotification;
+use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{
     ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, HITL_REQUEST_ID, SKILL_NAMES,
@@ -27,8 +28,9 @@ use crate::kit::atoms::{
 use crate::kit::input_area::refresh_slash_items;
 use peri_acp::event::AcpEvent;
 use peri_acp::event::truncate::summarize_input;
-use peri_acp_types::event_data::{AskUser, HitlPending, Question, QuestionOption};
+use peri_acp_types::event_data::{AskUser, HitlPending, Question, QuestionOption, SystemNotification};
 use serde_json::Value;
+use fluent_bundle::FluentValue;
 
 /// 启动 kit ACP notifier 后台任务。
 ///
@@ -165,9 +167,10 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             budget_pct,
             ..
         } => {
-            if let (Some(pct), Some(total)) = (budget_pct, context_total_tokens) {
+            if let Some(total) = context_total_tokens {
+                // budget_pct 可能为 None（首轮/token_tracker 无 last_usage），此时仅存总量
+                let pct = budget_pct.unwrap_or(0.0);
                 *crate::kit::atoms::CONTEXT_USAGE.state().write() = Some((pct, total));
-                // 递增心跳确保渲染线程即使 idle 也能立即响应 atom 变更
                 crate::kit::atoms::RENDER_HEARTBEAT.set(
                     crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1),
                 );
@@ -213,7 +216,7 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
         // kit notifier: extract AvailableCommandsUpdate / plan / streaming
         // from SessionUpdate.
         AcpNotification::SessionUpdate { session_id, params } => {
-            if let Some(decoded) = handle_session_update(params) {
+            if let Some(decoded) = handle_session_update(params, bridge_tx, &session_id) {
                 let wrapped = wrap_with_session(decoded, session_id);
                 if let Err(e) = bridge_tx.send(wrapped) {
                     warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping session/update streaming event");
@@ -276,7 +279,11 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
 /// agent_thought_chunk, tool_call, tool_call_update) so the caller can push
 /// to the dual-bridge channel. Returns `None` for status-only updates
 /// (available_commands_update, plan, usage_update).
-fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
+fn handle_session_update(
+    params: serde_json::Value,
+    bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    session_id: &str,
+) -> Option<AcpEventData> {
     // params: {"session_id": "...", "update": <SessionUpdate>}
     // SessionUpdate uses #[serde(tag = "sessionUpdate", rename_all = "snake_case")]
     // → AvailableCommandsUpdate serializes as:
@@ -488,20 +495,33 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             *SPINNER_TOKEN_COUNT.state().write() = (input + output) as usize;
-            // 缓存命中率：读取 cacheReadTokens，写入 CACHE_HIT_INFO atom
-            // （acp_events 在 TurnDone/TurnSuspended 时检查并注入消息流警告）
+            // 缓存命中率：低于 80% 时直接 push SystemNotification 到消息流
             let cache_read = meta_obj
                 .and_then(|m| m.get("cacheReadTokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             if cache_read > 0 && input > 0 {
                 let hit_rate = cache_read as f64 / input as f64;
-                let req_id = meta_obj
-                    .and_then(|m| m.get("requestId"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("-")
-                    .to_string();
-                *crate::kit::atoms::CACHE_HIT_INFO.state().write() = Some((hit_rate, req_id));
+                if hit_rate < 0.8 {
+                    let req_id = meta_obj
+                        .and_then(|m| m.get("requestId"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-");
+                    let pct = (hit_rate * 100.0) as u32;
+                    let text = i18n::tr_args("app-note-cache-hit-low", &[
+                        ("pct".into(), FluentValue::from(pct as u64)),
+                        ("req_id".into(), FluentValue::from(req_id)),
+                    ]);
+                    let data = SystemNotification { text, level: "warning".into() };
+                    let event = AcpEventData::SystemNotification(data);
+                    let wrapped = AcpEventWithEpoch {
+                        event,
+                        active_session_id: session_id.to_string(),
+                    };
+                    if let Err(e) = bridge_tx.send(wrapped) {
+                        warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping cache warning");
+                    }
+                }
             }
             None
         }
@@ -1073,7 +1093,8 @@ mod tests {
                 ]
             }
         });
-        let _ = handle_session_update(payload);
+        let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = handle_session_update(payload, &dummy_tx, "test");
         let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0], ("help".to_string(), "Show help".to_string()));
@@ -1101,7 +1122,8 @@ mod tests {
                 "total": 200000
             }
         });
-        let _ = handle_session_update(payload);
+        let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = handle_session_update(payload, &dummy_tx, "test");
         let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
         assert_eq!(entries.len(), 0, "非 commands update 不应写入 atom");
     }
@@ -1126,7 +1148,8 @@ mod tests {
             }
         });
 
-        let _ = handle_session_update(payload);
+        let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = handle_session_update(payload, &dummy_tx, "test");
 
         let items = crate::kit::atoms::TODO_ITEMS.state().read().clone();
         assert_eq!(items.len(), 3, "应包含 3 个条目，实际: {items:?}");
