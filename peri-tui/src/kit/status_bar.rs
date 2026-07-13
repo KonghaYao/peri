@@ -123,7 +123,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 7. 上下文使用率（放最后，与旧架构 status_bar render_first_row 一致）
     if let Some((pct, total)) = ctx_usage.read().as_ref() {
-        // pct 已经是百分比值（0-100），来自 StateSnapshotMeta.budget_pct * 100
+        // pct 已经是百分比值（0-100），来自 StateSnapshotMeta.budget_pct（agent 侧 context_usage_percent）
         let pct_display = *pct;
         let total_display = if *total >= 1_000_000 {
             format!("{:.0}M", *total as f64 / 1_000_000.0)

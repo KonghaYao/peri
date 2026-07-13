@@ -166,7 +166,11 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             ..
         } => {
             if let (Some(pct), Some(total)) = (budget_pct, context_total_tokens) {
-                *crate::kit::atoms::CONTEXT_USAGE.state().write() = Some((pct * 100.0, total));
+                *crate::kit::atoms::CONTEXT_USAGE.state().write() = Some((pct, total));
+                // 递增心跳确保渲染线程即使 idle 也能立即响应 atom 变更
+                crate::kit::atoms::RENDER_HEARTBEAT.set(
+                    crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1),
+                );
             }
             None
         }

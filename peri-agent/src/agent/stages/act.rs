@@ -20,6 +20,34 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
 
     tracing::trace!(step = ctx.turn.current_step(), has_tool_calls, "Act 阶段");
 
+    // emit StateSnapshot：每次 Act 阶段都推送，无论有无工具调用。
+    // 消费方（TUI 状态栏等）据此实时刷新上下文使用率。
+    let message_count = ctx.transcript.read().len();
+    let context_budget = ctx.context_budget.clone();
+    let context_total_tokens = context_budget.as_ref().map(|b| b.context_window as u64);
+    let (total_tokens, budget_pct) = match context_budget.as_ref() {
+        Some(budget) => {
+            let cx = AgentContext::from_stage(ctx);
+            let tracker = cx.token_tracker();
+            let used = tracker.estimated_context_tokens().unwrap_or(0);
+            let pct = tracker.context_usage_percent(budget.context_window);
+            (used, pct)
+        }
+        None => (0, None),
+    };
+    ctx.event_bus.emit_state(StateEvent::StateSnapshot {
+        turn_id: ctx.turn_id(),
+        agent_id: ctx.agent_id,
+        message_count,
+        total_tokens,
+        current_step: ctx.turn.current_step(),
+        consecutive_failures: ctx
+            .consecutive_failures
+            .load(std::sync::atomic::Ordering::Relaxed),
+        budget_pct,
+        context_total_tokens,
+    });
+
     if has_tool_calls {
         // 工具调用路径：dispatch_tools 处理审批 + 并发执行 + 写入 transcript
         let cancel = ctx.turn.cancel_token.clone();
@@ -100,36 +128,6 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
             steps: ctx.turn.current_step(),
             elapsed_secs: 0.0,
             finalized_messages,
-        });
-
-        // emit StateSnapshot 让消费方（持久化等）看到完成状态
-        // 注：v2 快照为轻量级元数据，不携带完整消息列表（避免 transcript 锁开销）
-        let message_count = ctx.transcript.read().len();
-        let context_budget = ctx.context_budget.clone();
-        let context_total_tokens = context_budget.as_ref().map(|b| b.context_window as u64);
-
-        // 读 token_tracker（只读操作）
-        let (total_tokens, budget_pct) = match context_budget.as_ref() {
-            Some(budget) => {
-                let cx = AgentContext::from_stage(ctx);
-                let tracker = cx.token_tracker();
-                let used = tracker.estimated_context_tokens().unwrap_or(0);
-                let pct = tracker.context_usage_percent(budget.context_window);
-                (used, pct)
-            }
-            None => (0, None),
-        };
-        ctx.event_bus.emit_state(StateEvent::StateSnapshot {
-            turn_id: ctx.turn_id(),
-            agent_id: ctx.agent_id,
-            message_count,
-            total_tokens,
-            current_step: ctx.turn.current_step(),
-            consecutive_failures: ctx
-                .consecutive_failures
-                .load(std::sync::atomic::Ordering::Relaxed),
-            budget_pct,
-            context_total_tokens,
         });
 
         Ok(ActOutput {

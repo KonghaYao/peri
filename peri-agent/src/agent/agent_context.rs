@@ -75,7 +75,7 @@ impl<'a> AgentContext<'a> {
             ctx,
             messages_cache,
             recall_buffer: Vec::new(),
-            token_tracker: TokenTracker::default(),
+            token_tracker: ctx.token_tracker.read().clone(),
             ancestor_len: 0,
             session_context,
         }
