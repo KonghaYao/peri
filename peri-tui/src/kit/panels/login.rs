@@ -13,7 +13,7 @@ use crate::kit::atoms::{
     NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PROVIDER_LIST, ProviderSummary,
     SERVICE_SNAPSHOT,
 };
-use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
@@ -75,11 +75,8 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             let snap = cfg.clone();
                             drop(cfg);
                             let resolved_name = {
-                                let active_prov = snap
-                                    .config
-                                    .providers
-                                    .iter()
-                                    .find(|p| p.id == provider_id);
+                                let active_prov =
+                                    snap.config.providers.iter().find(|p| p.id == provider_id);
                                 active_prov
                                     .and_then(|p| p.models.get_model(&snap.config.active_alias))
                                     .map(|s| s.to_string())
@@ -117,6 +114,11 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     });
 
     let sel = *cursor.read();
+    // 视口跟随：让选中项始终可见（仿 thread_browser 面板）。
+    // panel 高度 18 - border 2 - header 3 - footer 1 = 12 行；
+    // 每个 provider 约 3-4 行（provider 行 + API key 状态 + base URL + 空行）→ 可见 3 个。
+    const VISIBLE_ITEMS: usize = 3;
+    let scroll_start = scroll_start_for_selected(sel, count, VISIBLE_ITEMS);
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     // S16：TUI-PAGE.md §6.2 样式——Enter::select · Esc::close
@@ -144,7 +146,12 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     } else {
-        for (i, p) in providers.iter().enumerate() {
+        for (i, p) in providers
+            .iter()
+            .enumerate()
+            .skip(scroll_start)
+            .take(VISIBLE_ITEMS)
+        {
             let is_cursor = i == sel;
             let cursor_mark = if is_cursor { ">" } else { " " };
             let row_style = if is_cursor {

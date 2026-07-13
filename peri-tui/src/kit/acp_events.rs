@@ -356,7 +356,36 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         Progress(_) => {
             push_acp_state(state);
         }
-        BudgetWarning(_) => {
+        BudgetWarning(bw) => {
+            // 上下文使用率超过阈值警告——注入 TuiSystemNote 到消息流
+            let pct = bw.used as f64 / bw.limit as f64 * 100.0;
+            let used_display = if bw.used >= 1_000_000 {
+                format!("{:.1}M", bw.used as f64 / 1_000_000.0)
+            } else if bw.used >= 1_000 {
+                format!("{:.0}k", bw.used as f64 / 1000.0)
+            } else {
+                bw.used.to_string()
+            };
+            let limit_display = if bw.limit >= 1_000_000 {
+                format!("{:.1}M", bw.limit as f64 / 1_000_000.0)
+            } else if bw.limit >= 1_000 {
+                format!("{:.0}k", bw.limit as f64 / 1000.0)
+            } else {
+                bw.limit.to_string()
+            };
+            let text = format!(
+                "\u{26a0} 上下文窗口使用率 {:.0}%（{}/{}）",
+                pct, used_display, limit_display
+            );
+            let content_hash = tui_hash_str(&text);
+            state
+                .committed
+                .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+                    text,
+                    level: TuiNoteLevel::Warning,
+                    content_hash,
+                }));
+            push_view_models(state);
             push_acp_state(state);
         }
         SystemNotification(sn) => {
@@ -527,21 +556,79 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             tracing::info!(steps, "bridge: TurnCommitted ({steps} steps)");
         }
         CompactStarted => {
+            // 上下文压缩在后台自动进行，不做消息流注入（避免干扰用户）
             tracing::info!("bridge: CompactStarted");
             state.phase = SessionPhase::PromptRunning;
             push_acp_state(state);
         }
-        CompactCompleted { summary, .. } => {
-            tracing::info!(summary_len = summary.len(), "bridge: CompactCompleted");
+        CompactCompleted {
+            summary,
+            files,
+            skills,
+            micro_cleared,
+            ..
+        } => {
+            tracing::info!(
+                summary_len = summary.len(),
+                micro_cleared,
+                "bridge: CompactCompleted"
+            );
             state.compact_just_completed = true;
             state.phase = SessionPhase::Idle;
             ACP_STATE.state().write().is_loading = false;
+            // 仅全量压缩时注入消息流通知（微压缩太频繁，省略）
+            if *micro_cleared == 0 {
+                let mut parts = vec![];
+                let file_count = files.len();
+                let skill_count = skills.len();
+                if file_count > 0 {
+                    parts.push(format!("{file_count} 文件"));
+                }
+                if skill_count > 0 {
+                    parts.push(format!("{skill_count} skills"));
+                }
+                let detail = if parts.is_empty() {
+                    String::new()
+                } else {
+                    format!("（{}）", parts.join("，"))
+                };
+                let text = if summary.is_empty() {
+                    format!("\u{26a1} 上下文压缩完成{detail}")
+                } else {
+                    let brief: String = summary.chars().take(60).collect();
+                    let suffix = if summary.chars().count() > 60 {
+                        "…"
+                    } else {
+                        ""
+                    };
+                    format!("\u{26a1} 上下文压缩完成{detail} —— {brief}{suffix}")
+                };
+                let content_hash = tui_hash_str(&text);
+                state
+                    .committed
+                    .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+                        text,
+                        level: TuiNoteLevel::Info,
+                        content_hash,
+                    }));
+                push_view_models(state);
+            }
             push_acp_state(state);
         }
         CompactError { message } => {
             tracing::warn!(message, "bridge: CompactError");
+            let text = format!("\u{26a0} 上下文压缩失败: {message}");
+            let content_hash = tui_hash_str(&text);
+            state
+                .committed
+                .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+                    text,
+                    level: TuiNoteLevel::Warning,
+                    content_hash,
+                }));
             state.phase = SessionPhase::Idle;
             ACP_STATE.state().write().is_loading = false;
+            push_view_models(state);
             push_acp_state(state);
         }
         BackgroundTaskCompleted {
@@ -570,8 +657,18 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         AgentExecutionFailed { message } => {
             tracing::error!(message, "bridge: AgentExecutionFailed");
+            let text = format!("\u{26a0} Agent 执行失败: {message}");
+            let content_hash = tui_hash_str(&text);
+            state
+                .committed
+                .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+                    text,
+                    level: TuiNoteLevel::Error,
+                    content_hash,
+                }));
             state.phase = SessionPhase::Idle;
             ACP_STATE.state().write().is_loading = false;
+            push_view_models(state);
             push_acp_state(state);
         }
         WorkflowProgress {
