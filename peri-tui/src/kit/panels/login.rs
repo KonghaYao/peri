@@ -11,6 +11,7 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
     NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PROVIDER_LIST, ProviderSummary,
+    SERVICE_SNAPSHOT,
 };
 use crate::kit::list_nav::{next_selection, previous_selection};
 use fluent_bundle::FluentValue;
@@ -35,7 +36,6 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let providers: Vec<ProviderSummary> = store.read().clone();
     let _ = store;
     let count = providers.len();
-    let bump = hooks.use_state(|| 0u32);
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         // S16：不在闭包里捕获 providers（use_event_handler 无 deps 参数），
@@ -65,13 +65,26 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let latest_providers = PROVIDER_LIST.state().read().clone();
                     if let Some(p) = latest_providers.get(sel) {
                         let provider_id = p.id.clone();
-                        // 异步切换 + 持久化——在 tokio runtime 内执行，避免 OS 线程
-                        // 与事件循环竞速 parking_lot::RwLock（PERI_CONFIG_HANDLE）
+                        let provider_type = p.provider_type.clone();
+                        // 同步写 PERI_CONFIG_HANDLE，ACP server 共享同一 Arc 立即生效
+                        if let Some(handle) = PERI_CONFIG_HANDLE.get() {
+                            let mut cfg = handle.write();
+                            cfg.config.active_provider_id = provider_id.clone();
+                            drop(cfg);
+                            // 即时推送 SERVICE_SNAPSHOT，避免等待 2s 后台轮询
+                            let snap_handle = SERVICE_SNAPSHOT.state();
+                            let mut snap = snap_handle.read().clone();
+                            snap.provider_name = provider_type;
+                            *snap_handle.write() = snap;
+                        }
+                        // 异步持久化——apply_provider_switch 内部有相等性守卫，
+                        // 若同步已写入相同值则跳过磁盘 IO 和 NOTIFICATION
                         tokio::spawn(async move {
                             activate_provider(&provider_id);
                         });
                     }
-                    *bump.write() += 1;
+                    // 关闭面板——无论选择相同还是不同 provider 都关闭
+                    close_panel();
                 }
                 _ => {}
             }
@@ -79,11 +92,10 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
-    let _ = *bump.read();
     let sel = *cursor.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    // S16：TUI-PAGE.md §6.2 样式——Enter::activate · Esc::close
+    // S16：TUI-PAGE.md §6.2 样式——Enter::select · Esc::close
     lines.push(Line::from(vec![Span::styled(
         format!("  {} providers configured", count),
         Style::new()
@@ -91,7 +103,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             .bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
-        "  Enter::activate · Esc::close",
+        "  Enter::select · Esc::close",
         Style::new()
             .fg(theme_def.read().semantic.text.muted)
             .italic(),
@@ -166,7 +178,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // S16：底部 hints
     lines.push(Line::from(vec![Span::styled(
-        "  \u{2191}/\u{2193}::navigate  Enter::activate  Esc::close",
+        "  \u{2191}/\u{2193}::navigate  Enter::select  Esc::close",
         Style::new()
             .fg(theme_def.read().semantic.text.muted)
             .italic(),
