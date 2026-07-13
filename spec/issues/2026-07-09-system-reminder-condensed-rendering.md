@@ -1,6 +1,6 @@
 # 消息区 system-reminder 内容冗余，需改为缩略两行渲染
 
-**状态**：Open
+**状态**：Partial
 **优先级**：中
 **创建日期**：2026-07-09
 
@@ -64,6 +64,42 @@ Tool failure warning           (第一行：类型标签)
 - `<system-reminder>` 标签在 markdown 渲染层被剥离（`coordinator.rs:402-412`），内部文本以正常 markdown 渲染
 - 参考目标：ToolCard 两行渲染（`view_render.rs:207-231`）——第一行 `● ToolName (param)` + 第二行 `⎿ output`
 
+### bg agent 完成通知的冗余详情（2026-07-13 追加）
+
+**问题场景**：bg agent（`/bg`、`bg-fork`、background subagent）完成时，`BackgroundTaskResult::to_notification()`（`peri-agent/src/agent/events.rs:18-31`）把 agent 的**完整输出文本**塞进通知信息：
+
+```rust
+// 当前格式（events.rs:21-24）
+format!(
+    "[后台任务 {} 已完成] Agent: {} | 工具调用: {} | 耗时: {}ms\n结果:\n{}",
+    short_id, self.agent_name, self.tool_calls_count, self.duration_ms, self.output,
+)
+```
+
+`self.output` 是 bg agent 的完整回复文本（可能数千字符），导致 UserBubble 在消息区占据大量空间。
+
+**数据流**（双通道——TUI 和 LLM 走不同路径）：
+
+```
+bg agent 完成（to_notification() 生成纯文本，无 <system-reminder> 标签）
+    │
+    ├─ [LLM 通道] push_defer → append_messages_to_transcript → <system-reminder> 包裹 → LLM 上下文
+    │
+    └─ [TUI 通道] SyntheticUserMessage → MessageAdded → UserMessageChunk
+                   → LocalUserBubble { text } → TuiUserBubble::new(text)
+                   → detect_reminder() 返回 None（文本不含 <system-reminder> 标签）
+                   → 走普通 UserBubble 渲染 ❌
+```
+
+**关键发现**（2026-07-13 代码探索确认）：
+1. `to_notification()` 返回的是纯文本 `[后台任务 xxx 已完成] Agent: ...`，**不含** `<system-reminder>` 标签
+2. TUI 通过 `SyntheticUserMessage` → `LocalUserBubble` 独立通道接收，与 LLM 的 `<system-reminder>` 包裹路径完全分离
+3. `TuiUserBubble::new()` 中的 `detect_reminder()` 无法匹配（无标签），`reminder` 字段为 `None`
+4. 因此 `ReminderType::BgTaskCompleted` 和 `render_reminder_condensed()` 都是 **dead code**——它们被定义了但 bg agent 路径不走这里
+5. 实际渲染：bg agent 的完整 output 作为普通 UserBubble 完整显示
+
+**期望**：TUI 层缩略显示一句话（如 agent 名 + 耗时），LLM 层保持完整 output 用于上下文。TUI 不需要显示 `output` 全文，因为 bg agent 有独立的 subagent thread 可聚焦查看。
+
 ## 涉及文件
 
 **渲染层**：
@@ -89,7 +125,17 @@ Tool failure warning           (第一行：类型标签)
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-07-09 | — | Open | konghayao | 创建 |
+| 2026-07-13 | Open | Partial | agent | bg agent 缩略渲染已修复；其他 system-reminder 类型待后续处理 |
 
 ## 修复记录
 
-（待后续修复时追加）
+### 修复 #1（2026-07-13）bg agent 完成通知缩略渲染
+
+- **操作人**：agent
+- **用户原意**：bg agent 返回的 system reminder 文本报告很长，需简化，只缩略显示一句话
+- **修复内容**：
+  - **根因**：`stages/mod.rs` 中 `SyntheticUserMessage` emit 时未给 text 包裹 `<system-reminder>` 标签。LLM 通道（`append_messages_to_transcript`）有包裹，但 TUI 通道没有，导致 TUI 的 `detect_reminder()` 无法识别
+  - **改动**：`peri-agent/src/agent/stages/mod.rs:612,682` 两处 emit 点——在 `SyntheticUserMessage` 的 text 外用 `format!("<system-reminder>\n{}\n</system-reminder>", raw_text)` 包裹，与 LLM 通道一致
+  - **效果**：TUI 收到 `<system-reminder>` 包裹的文本 → `detect_reminder()` 自动识别 → `ReminderType::BgTaskCompleted` → `render_reminder_condensed()` 两行缩略渲染
+- **涉及文件**：`peri-agent/src/agent/stages/mod.rs`
+- **验证状态**：已验证（`cargo test -p peri-agent --lib -- stages` 53/53 pass，`cargo test -p peri-tui --lib` 437/437 pass）

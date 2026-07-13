@@ -23,7 +23,9 @@ pub fn init(lang: Option<&str>) {
 /// 切换语言并递增 LANG_VERSION，触发所有订阅组件重渲染。
 pub fn switch(lang: &str) {
     LC.with(|lc| {
-        let _ = lc.borrow_mut().switch(lang);
+        if let Err(e) = lc.borrow_mut().switch(lang) {
+            tracing::warn!("i18n switch failed: {e}");
+        }
     });
     crate::kit::atoms::LANG_VERSION.set(crate::kit::atoms::LANG_VERSION.get().wrapping_add(1));
 }

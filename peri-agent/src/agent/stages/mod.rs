@@ -609,7 +609,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 for msg in &end_out.awakened_messages {
                     use crate::session::queue::MessageSource;
                     if msg.source == MessageSource::SubAgentComplete {
-                        let text = msg.message.content().to_string();
+                        let raw_text = msg.message.content().to_string();
+                        let text = format!(
+                            "<system-reminder>\n{}\n</system-reminder>",
+                            raw_text
+                        );
                         context.event_bus.emit_state(
                             crate::agent::events_v2::StateEvent::SyntheticUserMessage {
                                 turn_id: context.turn_id(),
@@ -679,7 +683,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                                 for msg in &msgs {
                                     use crate::session::queue::MessageSource;
                                     if msg.source == MessageSource::SubAgentComplete {
-                                        let text = msg.message.content().to_string();
+                                        let raw_text = msg.message.content().to_string();
+                                        let text = format!(
+                                            "<system-reminder>\n{}\n</system-reminder>",
+                                            raw_text
+                                        );
                                         context.event_bus.emit_state(
                                             crate::agent::events_v2::StateEvent::SyntheticUserMessage {
                                                 turn_id: context.turn_id(),

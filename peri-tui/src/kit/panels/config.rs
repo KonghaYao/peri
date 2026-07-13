@@ -49,7 +49,7 @@ const ROW_ACTIVE_ALIAS: usize = 5;
 const ROW_PERMISSION_MODE: usize = 6;
 
 const STREAMING_OPTS: &[&str] = &["streaming", "block", "none"];
-const LANGUAGE_OPTS: &[&str] = &["en", "zh"];
+const LANGUAGE_OPTS: &[&str] = &["en", "zh-CN"];
 const ALIAS_OPTS: &[&str] = &["opus", "sonnet", "haiku"];
 const PERMISSION_OPTS: &[&str] = &["default", "accept-edit", "auto-mode", "bypass"];
 
@@ -452,7 +452,7 @@ fn cycle_display_label(opt: &str) -> String {
         "block" => i18n::tr("config-streaming-value-block").to_string(),
         "none" => i18n::tr("config-streaming-value-none").to_string(),
         "en" => i18n::tr("config-language-value-en").to_string(),
-        "zh" => i18n::tr("config-language-value-zh").to_string(),
+        "zh-CN" => i18n::tr("config-language-value-zh").to_string(),
         other => other.to_string(),
     }
 }
@@ -623,7 +623,7 @@ mod tests {
         cfg.config.language = Some("fr".into()); // 非合法选项
         let next = apply_cycle_row(&mut cfg, ROW_LANGUAGE, true);
         assert_eq!(next, Some(1));
-        assert_eq!(cfg.config.language.as_deref(), Some("zh"));
+        assert_eq!(cfg.config.language.as_deref(), Some("zh-CN"));
     }
 
     #[test]
