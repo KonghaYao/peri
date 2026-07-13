@@ -47,11 +47,23 @@
 
 （由 fix-issue 或 issue-verify skill 追加，创建时留空）
 
-### 修复 #1（2026-07-13）
+### 修复 #1（2026-07-13，部分修复——bg 路径）
 
 - **操作人**：agent
 - **用户原意**：同步 Agent 的子工具调用卡片完全不显示
-- **根因**：bg sub-agent 启动后，主 agent 的 `TurnSuspended` 清空了 `current_turn`（包括 SubAgentAccumulator）。后续 bg sub-agent 的工具事件（带 `agent_id`）到达时，`start_subagent_tool` 找不到匹配的 SubAgentAccumulator，`routed=false`，工具调用卡片被静默丢弃。同步 sub-agent 路径的数据流逻辑正确，但实际未触发验证（LLM 选择了 bg 模式）。
-- **修复内容**：在 `acp_events.rs` 的 `ToolStarted`/`ToolEnded` 分支中，当 `agent_id` 在 `BG_AGENT_IDS` 中时（bg sub-agent），跳过 SubAgentAccumulator 路由，仅更新 `BG_DISPLAY`。同步 sub-agent（不在 `BG_AGENT_IDS` 中）保持原有 SubAgentAccumulator 路由逻辑不变。
-- **涉及文件**：`peri-tui/src/kit/acp_events.rs`（ToolStarted/ToolEnded 分支）
+- **根因**（当时定位，非完整根因）：bg sub-agent 启动后 TurnSuspended 清空了 current_turn，后续 bg 工具事件 routed=false
+- **修复内容**：`acp_events.rs` ToolStarted/ToolEnded 分支按 BG_AGENT_IDS 分流
+- **涉及文件**：`peri-tui/src/kit/acp_events.rs`
+- **涉及 commit**：`584f680f`
+- **验证状态**：已验证（bg 路径修复正确，但同步路径问题持续）
+
+### 修复 #2（2026-07-13，根因修复）
+
+- **操作人**：agent
+- **用户原意**：同步 Agent 第一次调用时子工具卡片正常显示，**第二次调用时完全不显示**
+- **根因**：`builder_v2.rs:126` 用 `or_insert_with` 将每 turn 创建的 SubAgentTool 注册到 `shared_tools`。第二次 turn 时 `or_insert_with` 发现 "Agent" key 已存在（第一次 turn 注册的），保留了旧工具——旧工具的 `event_handler` 捕获的 `event_tx` 已被 `close_channel` 关闭，所有 `SubagentStarted` 和 forwarder 事件被静默丢弃。TUI 永远收不到 SubagentStarted → 不创建 SubAgentAccumulator → 子工具调用卡片无容器可放。
+- **现象**：第一次 Agent 调用工具卡片正常，第二次 Agent 调用时 SubagentStarted 从不到达 TUI（TUI 日志中仅第一次有 SubagentStarted 事件）
+- **修复内容**：`or_insert_with(|| arc)` → `insert(arc)`，每 turn 强制更新工具实例
+- **涉及文件**：`peri-acp/src/agent/builder_v2.rs`
+- **涉及 commit**：`26b9b89b`
 - **验证状态**：待验证
