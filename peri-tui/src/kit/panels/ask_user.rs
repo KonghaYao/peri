@@ -67,11 +67,16 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let pending_for_closure = pending.clone();
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
+    hooks.use_event_handler(EventScope::Current, EventPriority::High, move |event| {
         let Event::Key(key) = event else {
             return EventResult::Ignored;
         };
         if key.kind != KeyEventKind::Press {
+            return EventResult::Ignored;
+        }
+
+        // 如果当前有 popup 打开（如确认弹窗），让 popup 的 handler 处理事件
+        if crate::kit::atoms::POPUP_KIND.state().read().is_some() {
             return EventResult::Ignored;
         }
 
@@ -179,7 +184,16 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             }
             Some(ListNavAction::Cancel) => {
-                cancel_ask_user();
+                // ESC → 打开确认弹窗而非直接取消
+                let payload = crate::kit::atoms::ConfirmPayload {
+                    title: "拒绝回答".to_string(),
+                    message: "是否拒绝回答？拒绝后 Agent 将收到拒绝信号并结束工具调用。"
+                        .to_string(),
+                    details: vec![],
+                    pending_action: crate::kit::atoms::ConfirmAction::RejectAskUser,
+                };
+                *crate::kit::atoms::CONFIRM_PAYLOAD.state().write() = Some(payload);
+                crate::kit::popup_overlay::open_popup(crate::kit::atoms::PopupKind::Confirm);
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,

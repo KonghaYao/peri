@@ -161,8 +161,12 @@ impl AcpTransportBroker {
                             .collect();
                         InteractionResponse::Answers(answers)
                     }
-                    ElicitationAction::Decline | ElicitationAction::Cancel => {
-                        tracing::info!("Elicitation declined/cancelled by user");
+                    ElicitationAction::Decline => {
+                        tracing::info!("Elicitation declined by user");
+                        InteractionResponse::Rejected
+                    }
+                    ElicitationAction::Cancel => {
+                        tracing::info!("Elicitation cancelled by user");
                         InteractionResponse::Answers(empty_answers(requests))
                     }
                     _ => {

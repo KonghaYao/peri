@@ -21,7 +21,11 @@ use super::atoms::{
     MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, PERMISSION_MODE_HANDLE,
     PROVIDER_HIGHLIGHT_UNTIL, QUIT_PENDING_SINCE, REWIND_PREVIEW, SERVICE_SNAPSHOT,
 };
-use crate::kit::atoms::{Notification, PopupKind};
+use crate::app::panel_types::PanelKind;
+use crate::kit::ask_user_action::AskUserResponseAction;
+use crate::kit::atoms::{
+    ACTIVE_PANEL, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, Notification, PopupKind,
+};
 use crate::kit::focus_router::{
     FocusLayer, GlobalShortcut, active_layer, classify_global_shortcut,
 };
@@ -184,6 +188,17 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                         }
                         FocusLayer::InlineCompletion => return EventResult::Ignored,
                         FocusLayer::Panel => {
+                            // 防御性 guard：如果活跃面板是 AskUser，先通过 cancel_ask_user() 发送 Cancel
+                            // 防止因优先级回归导致 agent 永久挂起。正常情况下此分支不会执行
+                            // （AskUserPanel handler 使用 High 优先级，会先消费 ESC）。
+                            if *ACTIVE_PANEL.state().read() == Some(PanelKind::AskUser)
+                                && let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+                                && let Some(tx) = ASK_USER_RESPONSE_TX.get()
+                            {
+                                let _ = tx.send(AskUserResponseAction::Cancel {
+                                    request_id_str: id_str,
+                                });
+                            }
                             close_active_panel();
                             return EventResult::Consumed;
                         }

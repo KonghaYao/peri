@@ -375,6 +375,8 @@ pub static NOTIFICATION: AtomStatic<Option<Notification>> = AtomStatic::new(|| N
 pub enum ConfirmAction {
     /// 切换到指定 thread_id
     ThreadSwitch(String),
+    /// 用户确认拒绝回答 AskUser 提问
+    RejectAskUser,
 }
 
 /// 确认弹窗的 payload

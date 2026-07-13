@@ -9,7 +9,13 @@ use ratatui_kit::{
     ratatui::{style::Stylize, text::Line},
 };
 
-use crate::kit::atoms::{self, CONFIRM_PAYLOAD, ConfirmAction};
+use crate::app::panel_types::PanelKind;
+use crate::kit::ask_user_action::AskUserResponseAction;
+use crate::kit::atoms::{
+    self, ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, CONFIRM_PAYLOAD,
+    ConfirmAction,
+};
+use crate::kit::panel_registry::close_panel;
 use crate::kit::popup_overlay::close_popup;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -20,7 +26,7 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let payload = payload_store.read().clone();
     let _ = payload_store;
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
+    hooks.use_event_handler(EventScope::Current, EventPriority::High, move |event| {
         let Event::Key(key) = event else {
             return EventResult::Ignored;
         };
@@ -37,8 +43,29 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 let _ = tx.send(target_id.clone());
                             }
                         }
+                        ConfirmAction::RejectAskUser => {
+                            // 读取 request_id（必须在 close_panel 之前，因为 close_panel 可能清掉 atom）
+                            if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+                                && let Some(tx) = ASK_USER_RESPONSE_TX.get()
+                            {
+                                let _ = tx.send(AskUserResponseAction::Reject {
+                                    request_id_str: id_str,
+                                });
+                            }
+                            // 关闭面板并清空状态
+                            close_panel(PanelKind::AskUser);
+                            *ASK_USER_PENDING.state().write() = None;
+                            *ASK_USER_REQUEST_ID.state().write() = None;
+                        }
                     }
                 }
+                // 清空确认弹窗 payload 并关闭弹窗
+                *CONFIRM_PAYLOAD.state().write() = None;
+                close_popup();
+                EventResult::Consumed
+            }
+            (KeyModifiers::NONE, KeyCode::Esc) => {
+                // 用户选择返回继续作答
                 *CONFIRM_PAYLOAD.state().write() = None;
                 close_popup();
                 EventResult::Consumed

@@ -33,6 +33,8 @@ pub enum AskUserResponseAction {
     },
     /// 用户取消（Esc）
     Cancel { request_id_str: String },
+    /// 用户拒绝回答（ESC → 确认弹窗 → 确认拒绝）
+    Reject { request_id_str: String },
 }
 
 /// 启动 ask_user 响应消费者后台任务。
@@ -65,6 +67,9 @@ pub fn spawn_ask_user_consumer(
                         }
                         Some(AskUserResponseAction::Submit { request_id_str, answers }) => {
                             handle_submit(&acp_client, &request_id_str, &answers).await;
+                        }
+                        Some(AskUserResponseAction::Reject { request_id_str }) => {
+                            handle_reject(&acp_client, &request_id_str).await;
                         }
                     }
                 }
@@ -111,6 +116,25 @@ async fn handle_cancel(acp_client: &AcpTuiClient, request_id_str: &str) {
 
     if let Err(e) = acp_client.send_response(id, Ok(response)).await {
         error!(error = %e, "kit ask_user_consumer: send_response (cancel) failed");
+    }
+}
+
+/// 处理拒绝：发送 decline response，告诉 Agent 用户明确拒绝了回答。
+async fn handle_reject(acp_client: &AcpTuiClient, request_id_str: &str) {
+    let id = match serde_json::from_str::<peri_acp::transport::types::RequestId>(request_id_str) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(error = %e, request_id_str, "kit ask_user_consumer: failed to deserialize RequestId (reject)");
+            return;
+        }
+    };
+
+    let response = serde_json::json!({"action": "decline"});
+
+    tracing::info!(request_id = %request_id_str, "kit ask_user_consumer: sending Reject/Decline response");
+
+    if let Err(e) = acp_client.send_response(id, Ok(response)).await {
+        tracing::error!(error = %e, "kit ask_user_consumer: send_response (reject) failed");
     }
 }
 
@@ -181,11 +205,17 @@ mod tests {
                 assert_eq!(answers["q1"]["String"], "yes");
             }
             AskUserResponseAction::Cancel { .. } => panic!("expected Submit"),
+            AskUserResponseAction::Reject { .. } => panic!("expected Submit"),
         }
 
         let cancel = AskUserResponseAction::Cancel {
             request_id_str: "\"abc\"".into(),
         };
         assert!(matches!(cancel, AskUserResponseAction::Cancel { .. }));
+
+        let reject = AskUserResponseAction::Reject {
+            request_id_str: "\"abc\"".into(),
+        };
+        assert!(matches!(reject, AskUserResponseAction::Reject { .. }));
     }
 }
