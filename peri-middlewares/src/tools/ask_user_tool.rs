@@ -91,6 +91,10 @@ impl BaseTool for AskUserTool {
         ask_user_tool_definition().parameters
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         input: Value,

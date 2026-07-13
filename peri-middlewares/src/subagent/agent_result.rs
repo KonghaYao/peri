@@ -50,6 +50,10 @@ impl BaseTool for AgentResultTool {
         })
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         _input: serde_json::Value,

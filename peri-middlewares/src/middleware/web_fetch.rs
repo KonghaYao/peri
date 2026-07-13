@@ -127,6 +127,10 @@ impl BaseTool for WebFetchTool {
         })
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         input: Value,

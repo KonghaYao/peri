@@ -358,6 +358,10 @@ impl BaseTool for GrepTool {
         })
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         input: Value,

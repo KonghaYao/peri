@@ -79,6 +79,10 @@ impl BaseTool for McpResourceTool {
         &self.cached_description
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         input: serde_json::Value,

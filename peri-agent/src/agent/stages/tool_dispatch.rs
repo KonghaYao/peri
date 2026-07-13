@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
@@ -30,9 +29,6 @@ use crate::tools::BaseTool;
 
 /// 连续失败检测阈值
 const CONSECUTIVE_FAILURE_THRESHOLD: u32 = 5;
-
-/// 单个工具调用超时（秒），防止恶意/死循环工具调用永久阻塞 turn
-const TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// 工具名语义别名表：LLM 输出的名称 → 实际注册的工具名。
 const TOOL_ALIASES: &[(&str, &str)] = &[("task", "Agent"), ("shell", "Bash"), ("reading", "Read")];
@@ -352,6 +348,7 @@ async fn dispatch_concurrent(
                     tool.call_id = %call_id,
                 );
                 let _enter = span.enter();
+                let timeout_opt = tool.as_ref().and_then(|t| t.timeout());
                 let invoke_fut = async {
                     let ctx_param = crate::tools::ToolContext::new(&messages, &cwd);
                     match tool {
@@ -372,16 +369,23 @@ async fn dispatch_concurrent(
                             reason: "interrupted by user".to_string(),
                         })
                     }
-                    result = tokio::time::timeout(TOOL_CALL_TIMEOUT, invoke_fut) => {
+                    result = async {
+                        if let Some(d) = timeout_opt {
+                            tokio::time::timeout(d, invoke_fut).await
+                        } else {
+                            Ok(invoke_fut.await)
+                        }
+                    } => {
                         match result {
                             Ok(tool_result) => tool_result,
-                            Err(_elapsed) => Err(AgentError::ToolExecutionFailed {
-                                tool: tool_name.clone(),
-                                reason: format!(
-                                    "tool call timed out after {}s",
-                                    TOOL_CALL_TIMEOUT.as_secs()
-                                ),
-                            }),
+                            Err(_elapsed) => {
+                                // 安全：Err 分支仅在 timeout_opt 为 Some 时可达
+                                let secs = timeout_opt.unwrap().as_secs();
+                                Err(AgentError::ToolExecutionFailed {
+                                    tool: tool_name,
+                                    reason: format!("tool call timed out after {}s", secs),
+                                })
+                            }
                         }
                     }
                 }

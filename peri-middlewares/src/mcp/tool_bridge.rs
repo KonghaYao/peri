@@ -93,6 +93,10 @@ impl BaseTool for McpToolBridge {
         self.input_schema.clone()
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         input: serde_json::Value,
