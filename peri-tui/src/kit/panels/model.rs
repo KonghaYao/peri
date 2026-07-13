@@ -8,11 +8,11 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
-    LANG_VERSION, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, Notification,
-    PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT,
+    LANG_VERSION, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, Notification, PERI_CONFIG_HANDLE,
+    SERVICE_SNAPSHOT,
 };
-use fluent_bundle::FluentValue;
 use crate::kit::list_nav::{next_selection, previous_selection};
+use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -70,6 +70,9 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
     // selected_tab stores the index of the selected alias
     let selected_tab = hooks.use_state(|| 1usize); // default Sonnet
+    // 渲染版本计数器——cycle_effort/cycle_max_tokens/toggle_context_1m 修改
+    // PERI_CONFIG_HANDLE 后递增此计数，触发 ModelPanel 重渲染以显示最新值。
+    let render_version = hooks.use_state(|| 0u64);
 
     // S6c: 订阅 SERVICE_SNAPSHOT——active alias 来自 atom，确保面板和 status bar 一致
     let snapshot = hooks.use_atom(&SERVICE_SNAPSHOT);
@@ -110,12 +113,16 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .get()
         .map(|handle| {
             let cfg = handle.read();
-            let thinking = cfg.config.thinking.clone().unwrap_or_else(|| crate::config::ThinkingConfig {
-                enabled: true,
-                budget_tokens: 8000,
-                effort: "medium".to_string(),
-                max_tokens: 32000,
-            });
+            let thinking =
+                cfg.config
+                    .thinking
+                    .clone()
+                    .unwrap_or_else(|| crate::config::ThinkingConfig {
+                        enabled: true,
+                        budget_tokens: 8000,
+                        effort: "medium".to_string(),
+                        max_tokens: 32000,
+                    });
             let effort = thinking.effort;
             let max_tokens = thinking.max_tokens;
             let ctx = cfg.config.context_1m.unwrap_or(false);
@@ -123,6 +130,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         })
         .unwrap_or_else(|| ("medium".to_string(), 32000, false));
 
+    let rv = render_version.clone();
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         move |event| {
             let Event::Key(key) = event else {
@@ -163,14 +171,16 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         IDX_EFFORT => {
                             cycle_effort();
+                            *rv.write() += 1;
                         }
                         IDX_MAX_TOKENS => {
-                            let forward = key.code == KeyCode::Right
-                                || key.code == KeyCode::Enter;
+                            let forward = key.code == KeyCode::Right || key.code == KeyCode::Enter;
                             cycle_max_tokens(forward);
+                            *rv.write() += 1;
                         }
                         IDX_CONTEXT_1M => {
                             toggle_context_1m();
+                            *rv.write() += 1;
                         }
                         _ => {}
                     }
@@ -253,7 +263,13 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 },
             ),
             Span::styled(
-                format!("  {}", alias_names.get(entry.key).map(|s| s.as_str()).unwrap_or(entry.model_id)),
+                format!(
+                    "  {}",
+                    alias_names
+                        .get(entry.key)
+                        .map(|s| s.as_str())
+                        .unwrap_or(entry.model_id)
+                ),
                 Style::new().fg(theme_def.read().semantic.text.muted),
             ),
         ]));
@@ -263,7 +279,10 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Current selection info
     lines.push(Line::from(vec![Span::styled(
-        format!("  Active: {} → {}", active_entry.name, active_entry.model_id),
+        format!(
+            "  Active: {} → {}",
+            active_entry.name, active_entry.model_id
+        ),
         Style::new()
             .fg(theme_def.read().semantic.border.active)
             .bold(),
@@ -293,7 +312,9 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Span::styled(
             i18n::tr("model-field-effort"),
             if is_effort_cursor {
-                Style::new().fg(theme_def.read().component.panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
                 Style::new().fg(theme_def.read().semantic.text.muted)
             },
@@ -324,7 +345,9 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Span::styled(
             i18n::tr("model-field-max-token"),
             if is_max_cursor {
-                Style::new().fg(theme_def.read().component.panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
                 Style::new().fg(theme_def.read().semantic.text.muted)
             },
@@ -354,7 +377,9 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Span::styled(
             i18n::tr("model-field-1m-context"),
             if is_ctx_cursor {
-                Style::new().fg(theme_def.read().component.panel.title).bold()
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
             } else {
                 Style::new().fg(theme_def.read().semantic.text.muted)
             },
@@ -404,7 +429,9 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 }
 
 fn switch_alias(new_alias: &str) {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else { return };
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return;
+    };
     let mut cfg = handle.write();
     if cfg.config.active_alias != new_alias {
         cfg.config.active_alias = new_alias.to_string();
@@ -423,14 +450,19 @@ fn switch_alias(new_alias: &str) {
 }
 
 fn cycle_effort() {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else { return };
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return;
+    };
     let mut cfg = handle.write();
-    let thinking = cfg.config.thinking.get_or_insert_with(|| crate::config::ThinkingConfig {
-        enabled: true,
-        budget_tokens: 8000,
-        effort: "medium".to_string(),
-        max_tokens: 32000,
-    });
+    let thinking = cfg
+        .config
+        .thinking
+        .get_or_insert_with(|| crate::config::ThinkingConfig {
+            enabled: true,
+            budget_tokens: 8000,
+            effort: "medium".to_string(),
+            max_tokens: 32000,
+        });
     thinking.enabled = true;
     let cur_idx = EFFORT_LEVELS
         .iter()
@@ -443,14 +475,19 @@ fn cycle_effort() {
 }
 
 fn cycle_max_tokens(forward: bool) {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else { return };
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return;
+    };
     let mut cfg = handle.write();
-    let thinking = cfg.config.thinking.get_or_insert_with(|| crate::config::ThinkingConfig {
-        enabled: true,
-        budget_tokens: 8000,
-        effort: "medium".to_string(),
-        max_tokens: 32000,
-    });
+    let thinking = cfg
+        .config
+        .thinking
+        .get_or_insert_with(|| crate::config::ThinkingConfig {
+            enabled: true,
+            budget_tokens: 8000,
+            effort: "medium".to_string(),
+            max_tokens: 32000,
+        });
     let cur = MAX_TOKEN_PRESETS
         .iter()
         .position(|&v| v == thinking.max_tokens)
@@ -467,7 +504,9 @@ fn cycle_max_tokens(forward: bool) {
 }
 
 fn toggle_context_1m() {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else { return };
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return;
+    };
     let mut cfg = handle.write();
     let cur = cfg.config.context_1m.unwrap_or(false);
     cfg.config.context_1m = Some(!cur);
@@ -500,7 +539,10 @@ fn notify_save_result(result: Result<(), anyhow::Error>) {
             *NOTIFICATION.state().write() = Some(Notification {
                 message: i18n::tr_args(
                     "config-save-failed",
-                    &[("error".to_string(), FluentValue::from(e.to_string().as_str()))],
+                    &[(
+                        "error".to_string(),
+                        FluentValue::from(e.to_string().as_str()),
+                    )],
                 ),
                 until: Instant::now() + Duration::from_secs(2),
             });
