@@ -231,7 +231,7 @@ fn render_reasoning_block(
             "render-thought-for",
             &[("count".to_string(), FluentValue::from(char_count as u64))],
         ),
-        Style::default().fg(semantic.text.dim),
+        Style::default().fg(semantic.text.dim).italic(),
     )]));
 
     if !reasoning.collapsed {
@@ -240,7 +240,10 @@ fn render_reasoning_block(
             if !tail.is_empty() {
                 lines.push(Line::from(vec![
                     Span::styled(" \u{23bf} ", Style::default().fg(semantic.text.dim)),
-                    Span::styled(tail.to_string(), Style::default().fg(semantic.text.dim)),
+                    Span::styled(
+                        tail.to_string(),
+                        Style::default().fg(semantic.text.dim).italic(),
+                    ),
                 ]));
             }
         }
