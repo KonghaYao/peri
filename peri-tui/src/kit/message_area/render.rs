@@ -467,24 +467,6 @@ fn render_subagent_group_lines(data: &TuiSubAgentGroup, width: usize) -> Vec<Lin
     let semantic = THEME_ATOM.state().read().semantic;
 
     let children: Vec<TuiRenderUnit> = data.view_models.iter().cloned().collect();
-    // [DIAG] 诊断同步 sub-agent 工具调用消失问题
-    tracing::warn!(
-        target: "subagent_tool_diag",
-        agent_id = %data.agent_id,
-        children_count = children.len(),
-        tool_card_count = children.iter().filter(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(_))).count(),
-        child_types = ?children.iter().map(|vm| match vm {
-            TuiRenderUnit::TuiUserBubble(_) => "UserBubble",
-            TuiRenderUnit::TuiAssistantBubble(_) => "AssistantBubble",
-            TuiRenderUnit::TuiToolCard(_) => "ToolCard",
-            TuiRenderUnit::TuiSystemNote(_) => "SystemNote",
-            TuiRenderUnit::TuiSubAgentGroup(_) => "SubAgentGroup",
-            TuiRenderUnit::TuiCollapsedGroup(_) => "CollapsedGroup",
-            TuiRenderUnit::TuiDivider(_) => "Divider",
-            TuiRenderUnit::TuiAskUserBlock(_) => "AskUserBlock",
-        }).collect::<Vec<_>>(),
-        "render_subagent_group_lines DIAG",
-    );
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // 折叠摘要

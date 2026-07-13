@@ -46,3 +46,12 @@
 ## 修复记录
 
 （由 fix-issue 或 issue-verify skill 追加，创建时留空）
+
+### 修复 #1（2026-07-13）
+
+- **操作人**：agent
+- **用户原意**：同步 Agent 的子工具调用卡片完全不显示
+- **根因**：bg sub-agent 启动后，主 agent 的 `TurnSuspended` 清空了 `current_turn`（包括 SubAgentAccumulator）。后续 bg sub-agent 的工具事件（带 `agent_id`）到达时，`start_subagent_tool` 找不到匹配的 SubAgentAccumulator，`routed=false`，工具调用卡片被静默丢弃。同步 sub-agent 路径的数据流逻辑正确，但实际未触发验证（LLM 选择了 bg 模式）。
+- **修复内容**：在 `acp_events.rs` 的 `ToolStarted`/`ToolEnded` 分支中，当 `agent_id` 在 `BG_AGENT_IDS` 中时（bg sub-agent），跳过 SubAgentAccumulator 路由，仅更新 `BG_DISPLAY`。同步 sub-agent（不在 `BG_AGENT_IDS` 中）保持原有 SubAgentAccumulator 路由逻辑不变。
+- **涉及文件**：`peri-tui/src/kit/acp_events.rs`（ToolStarted/ToolEnded 分支）
+- **验证状态**：待验证

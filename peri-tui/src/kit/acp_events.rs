@@ -116,54 +116,38 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
         ToolStarted(ts) => {
-            // [DIAG] 诊断同步 sub-agent 工具调用消失问题
-            tracing::warn!(
-                target: "subagent_tool_diag",
-                has_agent_id = ts.agent_id.is_some(),
-                agent_id = ts.agent_id.as_deref(),
-                tool_id = %ts.tool_id,
-                tool_name = %ts.tool_name,
-                subagent_count = state.current_turn.subagents.len(),
-                subagent_ids = ?state.current_turn.subagents.iter().map(|s| &s.agent_id).collect::<Vec<_>>(),
-                "ToolStarted DIAG",
-            );
             if let Some(agent_id) = ts.agent_id.as_deref() {
-                let routed = state.current_turn.start_subagent_tool(
-                    agent_id,
-                    ToolCardAccumulator::new(
-                        ts.tool_id.clone(),
-                        ts.tool_name.clone(),
-                        ts.input_summary.clone(),
-                    ),
-                );
-                tracing::warn!(
-                    target: "subagent_tool_diag",
-                    routed,
-                    agent_id,
-                    tool_id = %ts.tool_id,
-                    "ToolStarted DIAG: subagent tool routing result",
-                );
-                if !routed {
-                    tracing::warn!(
-                        target: "subagent_tool_diag",
-                        agent_id,
-                        tool_id = %ts.tool_id,
-                        "ToolStarted DIAG: subagent tool start has no active group",
-                    );
-                }
-                // 后台任务工具更新：写 BG_DISPLAY
-                if BG_AGENT_IDS.state().read().contains(agent_id)
-                    && let Some(entry) = BG_DISPLAY
+                // bg sub-agent: TurnSuspended 后 SubAgentAccumulator 已被清除，
+                // 后续 bg 工具事件仅更新 BG_DISPLAY，不走 start_subagent_tool
+                if BG_AGENT_IDS.state().read().contains(agent_id) {
+                    if let Some(entry) = BG_DISPLAY
                         .state()
                         .write()
                         .iter_mut()
                         .find(|e| e.id == agent_id)
-                {
-                    entry.current_tool = Some(ts.tool_name.clone());
+                    {
+                        entry.current_tool = Some(ts.tool_name.clone());
+                    }
+                    state.variant = 1;
+                    state.phase = SessionPhase::PromptRunning;
+                    push_view_models(state);
+                } else {
+                    // 同步 sub-agent: 路由到 SubAgentAccumulator
+                    let routed = state.current_turn.start_subagent_tool(
+                        agent_id,
+                        ToolCardAccumulator::new(
+                            ts.tool_id.clone(),
+                            ts.tool_name.clone(),
+                            ts.input_summary.clone(),
+                        ),
+                    );
+                    if !routed {
+                        tracing::trace!(agent_id, tool_id = %ts.tool_id, "kit bridge: subagent tool start has no active group");
+                    }
+                    state.variant = 1;
+                    state.phase = SessionPhase::PromptRunning;
+                    push_view_models(state);
                 }
-                state.variant = 1;
-                state.phase = SessionPhase::PromptRunning;
-                push_view_models(state);
             } else {
                 state.current_turn.start_tool(ToolCardAccumulator::new(
                     ts.tool_id.clone(),
@@ -178,29 +162,36 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         ToolEnded(te) => {
             if let Some(agent_id) = te.agent_id.as_deref() {
-                let routed = state.current_turn.end_subagent_tool(
-                    agent_id,
-                    &te.tool_id,
-                    te.output_summary.clone(),
-                    te.is_error,
-                );
-                if !routed {
-                    tracing::trace!(agent_id, tool_id = %te.tool_id, "kit bridge: subagent tool end has no active group");
-                }
-                // 后台任务工具完成：清除 current_tool，递增 tool_count
-                if BG_AGENT_IDS.state().read().contains(agent_id)
-                    && let Some(entry) = BG_DISPLAY
+                // bg sub-agent: TurnSuspended 后 SubAgentAccumulator 已被清除，
+                // 后续 bg 工具事件仅更新 BG_DISPLAY，不走 end_subagent_tool
+                if BG_AGENT_IDS.state().read().contains(agent_id) {
+                    if let Some(entry) = BG_DISPLAY
                         .state()
                         .write()
                         .iter_mut()
                         .find(|e| e.id == agent_id)
-                {
-                    entry.current_tool = None;
-                    entry.tool_count += 1;
+                    {
+                        entry.current_tool = None;
+                        entry.tool_count += 1;
+                    }
+                    state.variant = 1;
+                    state.phase = SessionPhase::PromptRunning;
+                    push_view_models(state);
+                } else {
+                    // 同步 sub-agent: 路由到 SubAgentAccumulator
+                    let routed = state.current_turn.end_subagent_tool(
+                        agent_id,
+                        &te.tool_id,
+                        te.output_summary.clone(),
+                        te.is_error,
+                    );
+                    if !routed {
+                        tracing::trace!(agent_id, tool_id = %te.tool_id, "kit bridge: subagent tool end has no active group");
+                    }
+                    state.variant = 1;
+                    state.phase = SessionPhase::PromptRunning;
+                    push_view_models(state);
                 }
-                state.variant = 1;
-                state.phase = SessionPhase::PromptRunning;
-                push_view_models(state);
             } else {
                 state
                     .current_turn
@@ -500,14 +491,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             agent_name,
             is_background,
         } => {
-            // [DIAG] 诊断同步 sub-agent 工具调用消失问题
-            tracing::warn!(
-                target: "subagent_tool_diag",
-                agent_id = %agent_id,
-                agent_name = %agent_name,
-                is_background,
-                "SubagentStarted DIAG",
-            );
             state
                 .current_turn
                 .start_subagent(agent_id.clone(), agent_name.clone());
@@ -1897,5 +1880,78 @@ mod tests {
             ACP_STATE.state().read().is_loading,
             "SubagentStopped after SubagentStarted: is_loading 应保持 true"
         );
+    }
+
+    /// 同步 sub-agent 的 ToolStarted/ToolEnded 事件应路由到 SubAgentAccumulator，
+    /// 并反映在 VIEW_MODELS 的 TuiSubAgentGroup 中。
+    #[test]
+    #[serial]
+    fn test_dispatch_sync_subagent_tool_routed_to_group() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: im::Vector::new(),
+            current_turn: CurrentTurn::new(),
+            phase: SessionPhase::Idle,
+            popup_kind: None,
+            generation: 0,
+            active_session_id: String::new(),
+            compact_just_completed: false,
+            last_submitted_text: None,
+        };
+
+        // 启动同步 sub-agent
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::SubagentStarted {
+                agent_id: "sync-1".into(),
+                agent_name: "coder".into(),
+                is_background: false,
+            },
+        );
+        // 工具开始
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+                agent_id: Some("sync-1".into()),
+                tool_name: "Read".into(),
+                tool_id: "tc-1".into(),
+                input_summary: "path: foo.rs".into(),
+            }),
+        );
+        // 工具结束
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+                agent_id: Some("sync-1".into()),
+                tool_id: "tc-1".into(),
+                output_summary: "10 lines".into(),
+                is_error: false,
+            }),
+        );
+
+        let snapshot = VIEW_MODELS.state().read().clone();
+        // items 中应有 1 个 TuiSubAgentGroup
+        assert_eq!(snapshot.items.len(), 1, "items 应包含 1 个元素");
+        match &snapshot.items[0] {
+            TuiRenderUnit::TuiSubAgentGroup(group) => {
+                assert_eq!(group.agent_id, "sync-1");
+                assert!(
+                    group.view_models.len() >= 1,
+                    "group.view_models 应至少包含 1 个工具卡片，实际 {} 个",
+                    group.view_models.len()
+                );
+                let has_tool_card = group
+                    .view_models
+                    .iter()
+                    .any(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(_)));
+                assert!(
+                    has_tool_card,
+                    "group.view_models 应包含至少一个 TuiToolCard"
+                );
+            }
+            other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+        }
     }
 }

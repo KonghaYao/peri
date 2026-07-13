@@ -533,54 +533,11 @@ impl SubAgentAccumulator {
     pub(crate) fn view_model(&self) -> TuiRenderUnit {
         // 缓存命中——直接返回，避免 child_turn.clone() + view_models() 全量重建
         if let Some(vm) = self.cached_view_model.borrow().as_ref() {
-            // [DIAG] 碰缓存——说明之前构建过但后续 tool 事件未正确 invalidate
-            tracing::warn!(
-                target: "subagent_tool_diag",
-                agent_id = %self.agent_id,
-                cached_children = match vm {
-                    TuiRenderUnit::TuiSubAgentGroup(g) => g.view_models.len(),
-                    _ => 0,
-                },
-                "SubAgentAccumulator.view_model DIAG: cache hit (no rebuild)",
-            );
             return vm.clone();
         }
 
         let mut child_turn = self.child_turn.clone();
-        // [DIAG] 记录 child_turn 内部状态
-        tracing::warn!(
-            target: "subagent_tool_diag",
-            agent_id = %self.agent_id,
-            child_tool_cards = child_turn.tool_cards.len(),
-            child_segments = child_turn.segments.len(),
-            child_segments_detail = ?child_turn.segments.iter().map(|s| match s {
-                TurnSegment::AssistantText { .. } => "AssistantText",
-                TurnSegment::Tool { .. } => "Tool",
-                TurnSegment::SubAgent { .. } => "SubAgent",
-            }).collect::<Vec<_>>(),
-            child_text_len = child_turn.text.len(),
-            child_reasoning_len = child_turn.reasoning.len(),
-            child_active = child_turn.active,
-            "SubAgentAccumulator.view_model DIAG: building from child_turn",
-        );
         let child_vms = child_turn.view_models();
-        // [DIAG] 记录构建后的 child VM 数量
-        tracing::warn!(
-            target: "subagent_tool_diag",
-            agent_id = %self.agent_id,
-            child_vms_count = child_vms.len(),
-            child_vm_types = ?child_vms.iter().map(|vm| match vm {
-                TuiRenderUnit::TuiUserBubble(_) => "UserBubble",
-                TuiRenderUnit::TuiAssistantBubble(_) => "AssistantBubble",
-                TuiRenderUnit::TuiToolCard(_) => "ToolCard",
-                TuiRenderUnit::TuiSystemNote(_) => "SystemNote",
-                TuiRenderUnit::TuiSubAgentGroup(_) => "SubAgentGroup",
-                TuiRenderUnit::TuiCollapsedGroup(_) => "CollapsedGroup",
-                TuiRenderUnit::TuiDivider(_) => "Divider",
-                TuiRenderUnit::TuiAskUserBlock(_) => "AskUserBlock",
-            }).collect::<Vec<_>>(),
-            "SubAgentAccumulator.view_model DIAG: child_vms built",
-        );
         // M1: content_hash 累加每个 child VM 的 content_hash，确保 child 文本
         // 变化时（即使 child_vms.len() 不变）也能触发 render_bridge 增量重建。
         let child_content_hash: String = child_vms

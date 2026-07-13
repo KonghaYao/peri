@@ -338,15 +338,6 @@ fn handle_session_update(params: serde_json::Value) -> Option<AcpEventData> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // [DIAG] 诊断同步 sub-agent 工具调用消失问题
-    tracing::warn!(
-        target: "subagent_tool_diag",
-        tag = ?tag,
-        has_peri = params.get("_peri").is_some(),
-        source_agent_id = ?agent_id,
-        "acp_notifier handle_session_update DIAG: session/update event",
-    );
-
     match tag {
         Some("agent_message_chunk") => {
             // ACP SDK ContentChunk wraps text in content.text, not at update top-level.
