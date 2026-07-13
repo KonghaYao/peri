@@ -2,12 +2,14 @@
 //!
 //! 对应 TUI-PAGE.md §2.4.2 的工具名映射表和参数摘要规则。
 
+use crate::i18n;
+
 /// 将原始 `tool_name` 映射为用户友好的显示名。
-pub fn format_tool_name(raw: &str) -> &str {
+pub fn format_tool_name(raw: &str) -> String {
     match raw {
-        "Bash" => "Shell",
-        "folder_operations" => "Folder",
-        other => other,
+        "Bash" => i18n::tr("tool-name-shell"),
+        "folder_operations" => i18n::tr("tool-name-folder"),
+        other => other.to_string(),
     }
 }
 

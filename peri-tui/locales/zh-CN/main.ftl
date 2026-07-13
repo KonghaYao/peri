@@ -667,3 +667,224 @@ statusbar-rewind-action = 回滚对话
 statusbar-rewind-other-key = 其他键
 statusbar-rewind-move = 移动
 statusbar-rewind-switch-file = 切换回退文件
+
+# ---- Common (P0) ----
+common-esc-close =   Esc: close
+common-nav-enter-close =   ↑/↓::navigate  Enter::open  Esc::close
+common-empty =   (empty)
+
+# ---- Setup Wizard (P0) ----
+setup-no-provider = 未配置 Provider · Agent 功能暂不可用
+setup-config-hint-title = 可通过以下任一方式完成配置：
+setup-close-hint = Enter::close · Esc::close
+setup-step-1 =   1. 进入主界面后打开 Login 页面配置 API Key
+setup-step-2 =   2. 或打开 Settings 页面调整 Provider 配置
+setup-step-3 =   3. 或手动编辑 
+setup-skip-hint = Enter::skip · Esc::close
+setup-wizard-title =  Setup Wizard 
+setup-welcome = 欢迎使用 Peri TUI
+
+# ---- Notifications (P0) ----
+paste-truncated = 粘贴已截断至 { $max } 字符
+submit-blocked = 当前请求运行中，稍后再执行该命令
+export-success = 已导出消息文本：{ $path }
+export-fail = 导出消息文本失败：{ $error }
+cancel-request-sent = 已发送取消请求
+bg-task-notify-completed = [✓] { $name } 完成 ({ $duration }s)
+bg-task-notify-failed = [✗] { $name } 失败 ({ $duration }s)
+
+# ---- Thread Load (P0) ----
+thread-switch-confirm-title = 切换 thread 确认
+thread-switch-bg-tasks-message = 当前 thread 有 { $count } 个后台任务仍在运行
+thread-switch-task-counts =   { $shell } shell  { $agent } agent  { $workflow } workflow
+thread-switch-bg-note = 切换后这些任务继续在后台执行，但当前视图不再显示其状态。
+
+# ---- System Reminders (P0) ----
+reminder-cron-task = Cron 任务
+reminder-bg-task = 后台任务
+reminder-fork-mode = Fork 模式
+reminder-context-compaction = 上下文压缩
+reminder-system-prompt = 系统提示
+reminder-trust-boundary = 信任边界
+reminder-tool-reminder = 工具提醒
+reminder-subagent-result = 子Agent 结果
+reminder-system-reminder = 系统提醒
+channel-wechat = 微信
+channel-feishu = 飞书
+channel-dingtalk = 钉钉
+
+# ---- Common (P1) ----
+common-no-matches =   (no matches)
+common-na = —
+common-on = ON
+common-off = OFF
+
+# ---- Panel Titles ----
+panel-title-model = Model
+panel-title-login = Login
+panel-title-agent = Agent
+panel-title-hooks = Hooks
+panel-title-config = Config
+panel-title-threads = Threads
+panel-title-mcp = MCP
+panel-title-plugin = Plugin
+panel-title-cron = Cron
+panel-title-status = Status
+panel-title-memory = Memory
+panel-title-tasks = Tasks
+panel-title-betas = Betas
+panel-title-workflow = Workflow
+panel-title-ask-user = Ask User
+panel-title-theme = Theme
+
+# ---- Panel Descriptions ----
+panel-desc-model = Model 别名选择
+panel-desc-login = Provider 凭证管理
+panel-desc-agent = SubAgent 定义
+panel-desc-hooks = Hook 事件
+panel-desc-config = PeriConfig 编辑器
+panel-desc-threads = 历史对话浏览器
+panel-desc-mcp = MCP 服务器池
+panel-desc-plugin = 已安装插件
+panel-desc-cron = 定时任务
+panel-desc-status = 服务快照
+panel-desc-memory = 持久化记忆
+panel-desc-tasks = 后台任务
+panel-desc-betas = 功能开关
+panel-desc-workflow = Workflow 运行
+panel-desc-ask-user = Agent 用户提问（自动打开）
+panel-desc-theme = 配色方案选择
+
+# ---- Betas Panel ----
+panel-betas-readonly-hint =   (只读 — 功能开关在构建时配置)
+panel-betas-empty =   暂无可用的 Beta 功能
+panel-betas-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+
+# ---- Cron Panel ----
+panel-cron-stats =   { $configured } 个已配置，{ $enabled } 个已启用
+panel-cron-confirm-hint =   Enter::confirm  Esc::close
+panel-cron-nav-hint =   ↑/↓::navigate  Enter::toggle  Esc::close
+panel-cron-empty =   暂未配置定时任务
+panel-cron-empty-hint =   让 Agent 帮你设置定时任务
+panel-cron-next-fire =      next: { $time }
+panel-cron-status-on = ON
+panel-cron-status-off = OFF
+panel-cron-status-format = [{ $status }]
+
+# ---- MCP Panel ----
+panel-mcp-phase-pending = pending
+panel-mcp-phase-initializing = initializing
+panel-mcp-phase-ready = ready
+panel-mcp-phase-failed = failed
+panel-mcp-pool-label =   MCP Pool: 
+panel-mcp-connected =    { $connected }/{ $total } 已连接
+panel-mcp-empty =   暂未配置 MCP 服务器
+panel-mcp-empty-hint =   通过 ~/.claude/settings.json (mcpServers) 添加服务器
+panel-mcp-server-detail =      transport: { $transport }  tools: { $count }
+panel-mcp-icon-connected = ✔
+panel-mcp-icon-error = ✗
+panel-mcp-icon-unknown = ◯
+
+# ---- Memory Panel ----
+panel-memory-stats =   { $count } 个记忆文件在 ~/.claude/memory 中
+panel-memory-nav-hint =   Enter) 在 $EDITOR 中编辑  Esc) 关闭
+panel-memory-empty =   未找到记忆文件
+panel-memory-empty-hint =   创建 ~/.claude/memory/<名称>.md 以持久化跨会话笔记
+panel-memory-unit-b = B
+panel-memory-unit-kb = KB
+panel-memory-unit-mb = MB
+panel-memory-unit-gb = GB
+panel-memory-time-just-now = 刚刚
+panel-memory-time-min-ago = { $n } 分钟前
+panel-memory-time-hour-ago = { $n } 小时前
+panel-memory-time-day-ago = { $n } 天前
+
+# ---- Plugin Panel ----
+panel-plugin-stats =   { $count } 个插件已加载
+panel-plugin-readonly-hint =   (只读 — 通过 ~/.claude/plugins/config.json 切换)
+panel-plugin-empty =   暂未安装插件
+panel-plugin-empty-hint =   安装方式: agm install <名称>
+panel-plugin-version-unknown = ?
+
+# ---- Tasks Panel ----
+panel-tasks-total-label =   总计: 
+panel-tasks-breakdown =    ({ $bg } 后台, { $cron } 定时, { $subagent } 子代理)
+panel-tasks-section-bg =   ▼ 后台任务 ({ $count })
+panel-tasks-kind-sh = [sh]
+panel-tasks-kind-ag = [ag]
+panel-tasks-kind-wf = [wf]
+panel-tasks-kind-unknown = [?]
+panel-tasks-pid =  pid:{ $pid }
+panel-tasks-section-cron =   ▼ 定时任务 ({ $count })
+panel-tasks-section-subagent =   ▼ 子代理 ({ $count })
+panel-tasks-collapsed =  (已折叠)
+panel-tasks-live =  (运行中)
+panel-tasks-msgs =   { $count } 条消息
+panel-tasks-empty =   当前无活跃任务
+panel-tasks-empty-hint-1 =   通过 /loop 命令调度定时任务；
+panel-tasks-empty-hint-2 =   子代理由 Task / SubAgent 工具创建。
+panel-tasks-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+
+# ---- Theme Panel ----
+panel-theme-active-mark =  *
+panel-theme-nav-hint =   ↑/↓::navigate  Enter::switch  Esc::close
+panel-theme-empty =   (未找到主题)
+
+# ---- Workflow Panel ----
+panel-workflow-title =   Workflow 引擎
+panel-workflow-subtitle =   通过 @peri-workflow CLI 实现多 Agent 编排
+panel-workflow-label-engine = 引擎
+panel-workflow-label-binary = 二进制文件
+panel-workflow-label-subagents = 当前会话子代理
+panel-workflow-label-self-check = 自检
+panel-workflow-value-engine = @peri-workflow (外部 CLI)
+panel-workflow-value-binary = peri-workflow
+panel-workflow-value-self-check = 运行 `which peri-workflow` 以验证安装
+panel-workflow-info-1 =   Workflow 由 Agent 提示词创建；
+panel-workflow-info-2 =   进度会以消息流中的 SubAgent 组形式展示。
+
+# ---- AskUser Panel ----
+panel-ask-user-empty =   暂无待答问题。
+panel-ask-user-malformed =   Agent 询问了 0 个问题（请求异常）。
+panel-ask-user-answered-mark =  ✓ 
+panel-ask-user-no-options =   (无可用选项)
+panel-ask-user-hint-tab-multi-answered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+panel-ask-user-hint-tab-multi-unanswered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel
+panel-ask-user-hint-single-answered =   ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+panel-ask-user-hint-single-unanswered =   ↑/↓::navigate · Space::select · Esc::cancel
+
+# ---- Others ----
+bg-task-overflow = … { $count } more
+bg-task-tools-running = { $name } · { $count } tools
+bg-task-tools-done = · { $count } tools
+tool-name-shell = Shell
+tool-name-folder = Folder
+mention-popup-title =  @{ $name } 
+slash-completion-title =  /{ $name } 
+
+# ---- HITL Popup (P2) ----
+popup-hitl-empty =   暂无待审批请求。
+popup-hitl-tool-label =   工具: { $name }
+popup-hitl-non-serializable = <无法序列化>
+popup-hitl-truncated-info =     ... (共 { $chars } 字符)
+popup-hitl-batch-header =   批量 ({ $more } 项):
+popup-hitl-batch-item =     - { $name } ({ $input })
+popup-hitl-batch-more =     ... 还有 { $count } 项
+popup-hitl-action-hint =   Enter: 批准  |  Esc: 拒绝
+popup-hitl-title =  审批请求
+
+# ---- AskUser Popup (P2) ----
+popup-ask-user-empty =   暂无待答问题。
+popup-ask-user-malformed =   Agent 询问了 0 个问题（请求异常）。
+popup-ask-user-answered-mark =  ✓ 
+popup-ask-user-no-options =   (无可用选项)
+popup-ask-user-hint-multi-submit =   Tab::下一题 · ↑/↓::导航 · Space::选择 · Enter::提交 · Esc::取消
+popup-ask-user-hint-multi-next =   Tab::下一题 · ↑/↓::导航 · Space::选择 · Enter::下一题 · Esc::取消
+popup-ask-user-hint-single-submit =   ↑/↓::导航 · Space::选择 · Enter::提交 · Esc::取消
+popup-ask-user-hint-single-unsubmitted =   ↑/↓::导航 · Space::选择 · Esc::取消
+popup-ask-user-title =  用户问答
+
+# ---- Confirm Popup (P2) ----
+popup-confirm-empty =   暂无待确认项。
+popup-confirm-action-hint =   Enter: 确认  Esc: 取消
+popup-confirm-title =  确认

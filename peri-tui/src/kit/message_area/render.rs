@@ -274,7 +274,7 @@ fn render_reminder_condensed(
 
 fn render_tool_card_lines(data: &TuiToolCard) -> Vec<Line<'static>> {
     let semantic = THEME_ATOM.state().read().semantic;
-    let display_name = crate::kit::tool_display::format_tool_name(&data.tool_name).to_string();
+    let display_name = crate::kit::tool_display::format_tool_name(&data.tool_name);
 
     // 指示器 + 颜色
     let (indicator, indicator_color) = if data.is_error {

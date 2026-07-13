@@ -26,9 +26,11 @@ use ratatui_kit::{
     ratatui::{style::Stylize, text::Line},
 };
 
-use crate::kit::atoms::{HITL_PENDING, HITL_REQUEST_ID, HITL_RESPONSE_TX};
+use crate::i18n;
+use crate::kit::atoms::{HITL_PENDING, HITL_REQUEST_ID, HITL_RESPONSE_TX, LANG_VERSION};
 use crate::kit::hitl_response::HitlResponseAction;
 use crate::kit::popup_overlay::close_popup;
+use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
 #[component]
@@ -77,6 +79,8 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
+    let _ = hooks.use_atom(&LANG_VERSION);
+
     let popup_tokens = &theme_def.read().component.popup;
     let guard = theme_def.read();
     let semantic = &guard.semantic;
@@ -87,27 +91,30 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // 理论上不会渲染此分支——POPUP_KIND=Hitl 暗示 HITL_PENDING 已写入
             lines.push(Line::from(""));
             lines.push(
-                Line::from("  No pending approval request.")
+                Line::from(i18n::tr("popup-hitl-empty"))
                     .fg(semantic.text.muted)
                     .italic(),
             );
             lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
+            lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
         }
         Some(hp) => {
             lines.push(Line::from(""));
             // 工具名行
             lines.push(
-                Line::from(format!("  Tool: {}", hp.tool_name))
-                    .fg(popup_tokens.action_primary)
-                    .bold(),
+                Line::from(i18n::tr_args(
+                    "popup-hitl-tool-label",
+                    &[("name".to_string(), FluentValue::from(hp.tool_name.as_str()))],
+                ))
+                .fg(popup_tokens.action_primary)
+                .bold(),
             );
             lines.push(Line::from(""));
 
             // tool_input 字段渲染——序列化为 pretty JSON 后按行展示
             // 限制前 8 个字段避免超长 input 撑爆 popup 高度
             let input_str = serde_json::to_string_pretty(&hp.tool_input)
-                .unwrap_or_else(|_| "<non-serializable>".to_string());
+                .unwrap_or_else(|_| i18n::tr("popup-hitl-non-serializable"));
             let char_count = input_str.chars().count();
             let max_chars = 400;
             let truncated_str: String = input_str.chars().take(max_chars).collect();
@@ -122,8 +129,11 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
             if display_str.lines().count() > 8 || char_count > max_chars {
                 lines.push(
-                    Line::from(format!("    ... ({} chars total)", char_count))
-                        .fg(semantic.text.dim),
+                    Line::from(i18n::tr_args(
+                        "popup-hitl-truncated-info",
+                        &[("chars".to_string(), FluentValue::from(char_count as i64))],
+                    ))
+                    .fg(semantic.text.dim),
                 );
             }
 
@@ -133,27 +143,48 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             {
                 lines.push(Line::from(""));
                 lines.push(
-                    Line::from(format!("  Batch ({} more):", batch.len()))
-                        .fg(semantic.status.warning),
+                    Line::from(i18n::tr_args(
+                        "popup-hitl-batch-header",
+                        &[("more".to_string(), FluentValue::from(batch.len() as i64))],
+                    ))
+                    .fg(semantic.status.warning),
                 );
                 for tp in batch.iter().take(4) {
                     lines.push(
-                        Line::from(format!("    - {} ({})", tp.tool_name, tp.tool_id))
-                            .fg(semantic.text.muted),
+                        Line::from(i18n::tr_args(
+                            "popup-hitl-batch-item",
+                            &[
+                                ("name".to_string(), FluentValue::from(tp.tool_name.as_str())),
+                                ("input".to_string(), FluentValue::from(tp.tool_id.as_str())),
+                            ],
+                        ))
+                        .fg(semantic.text.muted),
                     );
                 }
                 if batch.len() > 4 {
                     lines.push(
-                        Line::from(format!("    ... and {} more", batch.len() - 4))
-                            .fg(semantic.text.dim),
+                        Line::from(i18n::tr_args(
+                            "popup-hitl-batch-more",
+                            &[(
+                                "count".to_string(),
+                                FluentValue::from((batch.len() - 4) as i64),
+                            )],
+                        ))
+                        .fg(semantic.text.dim),
                     );
                 }
             }
 
             lines.push(Line::from(""));
-            lines.push(Line::from("  Enter: approve  |  Esc: reject").fg(semantic.text.dim));
+            lines.push(
+                Line::from(i18n::tr("popup-hitl-action-hint")).fg(semantic.text.dim),
+            );
         }
     }
 
-    popup_text_shell!(" Approval Required ", semantic.status.warning, lines)
+    popup_text_shell!(
+        i18n::tr("popup-hitl-title"),
+        semantic.status.warning,
+        lines
+    )
 }

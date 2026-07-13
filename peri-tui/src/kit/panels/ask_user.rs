@@ -6,6 +6,7 @@
 //! 面板逻辑复用 ask_user_popup 的 Tab 交互模型，但通过 panel_shell! 渲染。
 
 use crate::app::panel_types::PanelKind;
+use crate::i18n;
 use peri_acp_types::event_data::AskUser;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -18,7 +19,7 @@ use ratatui_kit::{
 };
 
 use crate::kit::ask_user_action::AskUserResponseAction;
-use crate::kit::atoms::{ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX};
+use crate::kit::atoms::{ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, LANG_VERSION};
 use crate::kit::list_nav::{
     ListNavAction, classify_list_nav, cycle_next, cycle_previous, next_selection,
     previous_selection,
@@ -33,6 +34,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending_store = hooks.use_atom(&ASK_USER_PENDING);
     let pending: Option<AskUser> = pending_store.read().clone();
     let _ = pending_store;
+    let _ = hooks.use_atom(&LANG_VERSION);
 
     let focused = hooks.use_state(|| 0usize);
     let answers = hooks.use_state(Vec::<Option<usize>>::new);
@@ -209,7 +211,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         None => {
             lines.push(Line::from(""));
             lines.push(
-                Line::from("  No pending questions.")
+                Line::from(i18n::tr("panel-ask-user-empty"))
                     .fg(semantic.text.muted)
                     .italic(),
             );
@@ -217,7 +219,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Some(au) if au.questions.is_empty() => {
             lines.push(Line::from(""));
             lines.push(
-                Line::from("  Agent asked 0 questions (malformed request).")
+                Line::from(i18n::tr("panel-ask-user-malformed"))
                     .fg(semantic.status.warning),
             );
         }
@@ -233,7 +235,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .enumerate()
                 .map(|(i, q)| {
                     let answered = answers_read.get(i).copied().flatten().is_some();
-                    let mark = if answered { " ✓ " } else { "" };
+                    let mark = if answered { i18n::tr("panel-ask-user-answered-mark") } else { String::new() };
                     if i == focused_idx {
                         format!("[{}]{}", q.header, mark)
                     } else {
@@ -287,7 +289,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
 
                 if q.options.is_empty() {
-                    lines.push(Line::from("  (no options provided)").fg(semantic.text.dim));
+                    lines.push(Line::from(i18n::tr("panel-ask-user-no-options")).fg(semantic.text.dim));
                 }
             }
 
@@ -304,14 +306,14 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if all_answered {
                     lines.push(
                         Line::from(
-                            "  Tab::next-question · ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel",
+                            i18n::tr("panel-ask-user-hint-tab-multi-answered"),
                         )
                         .fg(semantic.text.dim),
                     );
                 } else {
                     lines.push(
                         Line::from(
-                            "  Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel",
+                            i18n::tr("panel-ask-user-hint-tab-multi-unanswered"),
                         )
                         .fg(semantic.text.dim),
                     );
@@ -325,12 +327,16 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         .unwrap_or(true);
                 if is_answered {
                     lines.push(
-                        Line::from("  ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel")
+                        Line::from(
+                            i18n::tr("panel-ask-user-hint-single-answered"),
+                        )
                             .fg(semantic.text.dim),
                     );
                 } else {
                     lines.push(
-                        Line::from("  ↑/↓::navigate · Space::select · Esc::cancel")
+                        Line::from(
+                            i18n::tr("panel-ask-user-hint-single-unanswered"),
+                        )
                             .fg(semantic.text.dim),
                     );
                 }

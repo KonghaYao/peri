@@ -29,18 +29,20 @@ use std::sync::{Arc, Mutex};
 use parking_lot::RwLock;
 use std::sync::OnceLock;
 
+use crate::i18n;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::{
     ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST,
-    INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LOCAL_EVENT_TX, MENTION_PREFIX, MENTION_SELECTED_INDEX,
-    POPUP_KIND, PREDICTION, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX,
-    SUBMIT_TX,
+    INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LANG_VERSION, LOCAL_EVENT_TX, MENTION_PREFIX,
+    MENTION_SELECTED_INDEX, POPUP_KIND, PREDICTION, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX,
+    SLASH_SELECTED_INDEX, SUBMIT_TX,
 };
+use fluent_bundle::FluentValue;
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
 use crate::kit::mention_popup::MentionPopup;
-use crate::kit::panel_registry::{PANELS, open_panel, panel_for_slash_command};
+use crate::kit::panel_registry::{PANELS, open_panel, panel_description, panel_for_slash_command};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
 use crate::kit::submit_request::{SubmitRequest, parse_submit_request};
 use peri_theme::atoms::THEME_ATOM;
@@ -118,6 +120,8 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let state = hooks.use_state(TextAreaState::default);
     // 终端窗口焦点：FocusGained/FocusLost 事件驱动，切换 tmux 窗格/终端标签时隐藏光标
     let term_focused = hooks.use_state(|| true);
+    // i18n 语言切换订阅
+    let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
     // 追踪 composer 区域 + overlay 高度，用于鼠标点击→光标定位
     // area_tracker: 值拷贝模式（仿 MsgAreaTracker），避免每帧 Arc 重建导致 handler 读到 None
@@ -405,7 +409,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                             if total > MAX {
                                 *crate::kit::atoms::NOTIFICATION.state().write() =
                                     Some(crate::kit::atoms::Notification {
-                                        message: format!("粘贴已截断至 {} 字符", MAX),
+                                        message: i18n::tr_args(
+                                            "paste-truncated",
+                                            &[("max".into(), FluentValue::from(MAX as i64))],
+                                        ),
                                         until: std::time::Instant::now()
                                             + std::time::Duration::from_secs(2),
                                     });
@@ -829,8 +836,8 @@ where
 
 fn show_submit_blocked_notification(request: &SubmitRequest) {
     let message = match request {
-        SubmitRequest::SessionControl(_) => "当前请求运行中，稍后再执行该命令".to_string(),
-        SubmitRequest::ViewAction(_) => "当前请求运行中，稍后再执行该命令".to_string(),
+        SubmitRequest::SessionControl(_) => i18n::tr("submit-blocked"),
+        SubmitRequest::ViewAction(_) => i18n::tr("submit-blocked"),
         _ => return,
     };
     *crate::kit::atoms::NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
@@ -919,7 +926,7 @@ fn build_slash_items() -> Vec<SlashCompletionItem> {
             label_lowercase: slash_name.to_lowercase(),
             label: slash_name.clone(),
             insert_text: slash_name,
-            description: panel.description.to_string(),
+            description: panel_description(panel.kind),
             kind: SlashActionKind::Panel,
         });
     }

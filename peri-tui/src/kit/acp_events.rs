@@ -3,6 +3,7 @@
 //! 将 AcpEventData 映射为全局 Atom 写入，供 kit 组件通过 use_store 订阅。
 //! Phase 2 桥接层——ACP 事件 → Atom 写入。
 
+use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, CurrentTurn, ToolCardAccumulator};
 use crate::kit::atoms::*;
 use crate::kit::submit_request::SubmitRequest;
@@ -10,6 +11,7 @@ use crate::kit::tui_render_unit::{
     TuiNoteLevel, TuiRenderUnit, TuiSystemNote, TuiUserBubble, tui_hash_str,
 };
 use agent_client_protocol::schema::v1::{Plan, PlanEntryStatus};
+use fluent_bundle::FluentValue;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -704,16 +706,20 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 entry.completed_at = Some(now);
             }
             let msg = if *success {
-                format!(
-                    "[✓] {} 完成 ({:.0}s)",
-                    task_id,
-                    *duration_ms as f64 / 1000.0
+                i18n::tr_args(
+                    "bg-task-notify-completed",
+                    &[
+                        ("name".into(), FluentValue::from(task_id.as_str())),
+                        ("duration".into(), FluentValue::from(*duration_ms as f64 / 1000.0)),
+                    ],
                 )
             } else {
-                format!(
-                    "[✗] {} 失败 ({:.0}s)",
-                    task_id,
-                    *duration_ms as f64 / 1000.0
+                i18n::tr_args(
+                    "bg-task-notify-failed",
+                    &[
+                        ("name".into(), FluentValue::from(task_id.as_str())),
+                        ("duration".into(), FluentValue::from(*duration_ms as f64 / 1000.0)),
+                    ],
                 )
             };
             NOTIFICATION.state().write().replace(Notification {

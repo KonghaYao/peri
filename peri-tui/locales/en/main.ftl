@@ -668,3 +668,224 @@ statusbar-rewind-action = Rewind
 statusbar-rewind-other-key = Other keys
 statusbar-rewind-move = Move
 statusbar-rewind-switch-file = Switch restore file
+
+# ---- Common (P0) ----
+common-esc-close =   Esc: close
+common-nav-enter-close =   ↑/↓::navigate  Enter::open  Esc::close
+common-empty =   (empty)
+
+# ---- Setup Wizard (P0) ----
+setup-no-provider = No provider configured · Agent features unavailable
+setup-config-hint-title = Configure via any of the following:
+setup-close-hint = Enter::close · Esc::close
+setup-step-1 =   1. Open the Login panel to configure API Key
+setup-step-2 =   2. Or open the Settings panel to adjust provider config
+setup-step-3 =   3. Or manually edit 
+setup-skip-hint = Enter::skip · Esc::close
+setup-wizard-title =  Setup Wizard 
+setup-welcome = Welcome to Peri TUI
+
+# ---- Notifications (P0) ----
+paste-truncated = Paste truncated to { $max } characters
+submit-blocked = Request in progress, try again later
+export-success = Exported messages to: { $path }
+export-fail = Failed to export messages: { $error }
+cancel-request-sent = Cancel request sent
+bg-task-notify-completed = [✓] { $name } completed ({ $duration }s)
+bg-task-notify-failed = [✗] { $name } failed ({ $duration }s)
+
+# ---- Thread Load (P0) ----
+thread-switch-confirm-title = Switch Thread Confirmation
+thread-switch-bg-tasks-message = Current thread has { $count } background tasks still running
+thread-switch-task-counts =   { $shell } shell  { $agent } agent  { $workflow } workflow
+thread-switch-bg-note = These tasks continue running after switch, but will not be visible in the current view.
+
+# ---- System Reminders (P0) ----
+reminder-cron-task = Cron Task
+reminder-bg-task = Background Task
+reminder-fork-mode = Fork Mode
+reminder-context-compaction = Context Compaction
+reminder-system-prompt = System Prompt
+reminder-trust-boundary = Trust Boundary
+reminder-tool-reminder = Tool Reminder
+reminder-subagent-result = SubAgent Result
+reminder-system-reminder = System Reminder
+channel-wechat = WeChat
+channel-feishu = Feishu
+channel-dingtalk = DingTalk
+
+# ---- Common (P1) ----
+common-no-matches =   (no matches)
+common-na = —
+common-on = ON
+common-off = OFF
+
+# ---- Panel Titles ----
+panel-title-model = Model
+panel-title-login = Login
+panel-title-agent = Agent
+panel-title-hooks = Hooks
+panel-title-config = Config
+panel-title-threads = Threads
+panel-title-mcp = MCP
+panel-title-plugin = Plugin
+panel-title-cron = Cron
+panel-title-status = Status
+panel-title-memory = Memory
+panel-title-tasks = Tasks
+panel-title-betas = Betas
+panel-title-workflow = Workflow
+panel-title-ask-user = Ask User
+panel-title-theme = Theme
+
+# ---- Panel Descriptions ----
+panel-desc-model = Model alias selection
+panel-desc-login = Provider credentials
+panel-desc-agent = Subagent definitions
+panel-desc-hooks = Hook events
+panel-desc-config = PeriConfig editor
+panel-desc-threads = Thread history browser
+panel-desc-mcp = MCP server pool
+panel-desc-plugin = Installed plugins
+panel-desc-cron = Scheduled tasks
+panel-desc-status = Service snapshot
+panel-desc-memory = Persisted memory
+panel-desc-tasks = Background tasks
+panel-desc-betas = Feature flags
+panel-desc-workflow = Workflow runs
+panel-desc-ask-user = Agent user questions (auto-open)
+panel-desc-theme = Color theme selection
+
+# ---- Betas Panel ----
+panel-betas-readonly-hint =   (read-only — feature flags are configured at build time)
+panel-betas-empty =   No active beta features
+panel-betas-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+
+# ---- Cron Panel ----
+panel-cron-stats =   { $configured } configured, { $enabled } enabled
+panel-cron-confirm-hint =   Enter::confirm  Esc::close
+panel-cron-nav-hint =   ↑/↓::navigate  Enter::toggle  Esc::close
+panel-cron-empty =   No cron tasks configured
+panel-cron-empty-hint =   Ask the agent to set up recurring tasks
+panel-cron-next-fire =      next: { $time }
+panel-cron-status-on = ON
+panel-cron-status-off = OFF
+panel-cron-status-format = [{ $status }]
+
+# ---- MCP Panel ----
+panel-mcp-phase-pending = pending
+panel-mcp-phase-initializing = initializing
+panel-mcp-phase-ready = ready
+panel-mcp-phase-failed = failed
+panel-mcp-pool-label =   MCP Pool: 
+panel-mcp-connected =    { $connected }/{ $total } connected
+panel-mcp-empty =   No MCP servers configured
+panel-mcp-empty-hint =   Add servers via ~/.claude/settings.json (mcpServers)
+panel-mcp-server-detail =      transport: { $transport }  tools: { $count }
+panel-mcp-icon-connected = ✔
+panel-mcp-icon-error = ✗
+panel-mcp-icon-unknown = ◯
+
+# ---- Memory Panel ----
+panel-memory-stats =   { $count } memory files in ~/.claude/memory
+panel-memory-nav-hint =   Enter) Edit in $EDITOR  Esc) Close
+panel-memory-empty =   No memory files found
+panel-memory-empty-hint =   Create ~/.claude/memory/<name>.md to persist cross-session notes
+panel-memory-unit-b = B
+panel-memory-unit-kb = KB
+panel-memory-unit-mb = MB
+panel-memory-unit-gb = GB
+panel-memory-time-just-now = just now
+panel-memory-time-min-ago = { $n }m ago
+panel-memory-time-hour-ago = { $n }h ago
+panel-memory-time-day-ago = { $n }d ago
+
+# ---- Plugin Panel ----
+panel-plugin-stats =   { $count } plugins loaded
+panel-plugin-readonly-hint =   (read-only — toggle via ~/.claude/plugins/config.json)
+panel-plugin-empty =   No plugins installed
+panel-plugin-empty-hint =   Install via: agm install <name>
+panel-plugin-version-unknown = ?
+
+# ---- Tasks Panel ----
+panel-tasks-total-label =   Total: 
+panel-tasks-breakdown =    ({ $bg } bg, { $cron } cron, { $subagent } subagent)
+panel-tasks-section-bg =   ▼ Background Tasks ({ $count })
+panel-tasks-kind-sh = [sh]
+panel-tasks-kind-ag = [ag]
+panel-tasks-kind-wf = [wf]
+panel-tasks-kind-unknown = [?]
+panel-tasks-pid =  pid:{ $pid }
+panel-tasks-section-cron =   ▼ Cron Jobs ({ $count })
+panel-tasks-section-subagent =   ▼ SubAgents ({ $count })
+panel-tasks-collapsed =  (collapsed)
+panel-tasks-live =  (live)
+panel-tasks-msgs =   { $count } msgs
+panel-tasks-empty =   No active tasks
+panel-tasks-empty-hint-1 =   Cron jobs are scheduled via /loop command;
+panel-tasks-empty-hint-2 =   SubAgents are spawned by Task / SubAgent tools.
+panel-tasks-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+
+# ---- Theme Panel ----
+panel-theme-active-mark =  *
+panel-theme-nav-hint =   ↑/↓::navigate  Enter::switch  Esc::close
+panel-theme-empty =   (no themes found)
+
+# ---- Workflow Panel ----
+panel-workflow-title =   Workflow Engine
+panel-workflow-subtitle =   Multi-agent orchestration via @peri-workflow CLI
+panel-workflow-label-engine = Engine
+panel-workflow-label-binary = Binary
+panel-workflow-label-subagents = Current session sub-agents
+panel-workflow-label-self-check = Self-check
+panel-workflow-value-engine = @peri-workflow (external CLI)
+panel-workflow-value-binary = peri-workflow
+panel-workflow-value-self-check = Run `which peri-workflow` to verify install
+panel-workflow-info-1 =   Workflows are spawned from agent prompts;
+panel-workflow-info-2 =   progress surfaces here as SubAgent groups in the message stream.
+
+# ---- AskUser Panel ----
+panel-ask-user-empty =   No pending questions.
+panel-ask-user-malformed =   Agent asked 0 questions (malformed request).
+panel-ask-user-answered-mark =  ✓ 
+panel-ask-user-no-options =   (no options provided)
+panel-ask-user-hint-tab-multi-answered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+panel-ask-user-hint-tab-multi-unanswered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel
+panel-ask-user-hint-single-answered =   ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+panel-ask-user-hint-single-unanswered =   ↑/↓::navigate · Space::select · Esc::cancel
+
+# ---- Others ----
+bg-task-overflow = … { $count } more
+bg-task-tools-running = { $name } · { $count } tools
+bg-task-tools-done = · { $count } tools
+tool-name-shell = Shell
+tool-name-folder = Folder
+mention-popup-title =  @{ $name } 
+slash-completion-title =  /{ $name } 
+
+# ---- HITL Popup (P2) ----
+popup-hitl-empty =   No pending approval request.
+popup-hitl-tool-label =   Tool: { $name }
+popup-hitl-non-serializable = <non-serializable>
+popup-hitl-truncated-info =     ... ({ $chars } chars total)
+popup-hitl-batch-header =   Batch ({ $more } more):
+popup-hitl-batch-item =     - { $name } ({ $input })
+popup-hitl-batch-more =     ... and { $count } more
+popup-hitl-action-hint =   Enter: approve  |  Esc: reject
+popup-hitl-title =  Approval Required 
+
+# ---- AskUser Popup (P2) ----
+popup-ask-user-empty =   No pending questions.
+popup-ask-user-malformed =   Agent asked 0 questions (malformed request).
+popup-ask-user-answered-mark =  ✓ 
+popup-ask-user-no-options =   (no options provided)
+popup-ask-user-hint-multi-submit =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+popup-ask-user-hint-multi-next =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel
+popup-ask-user-hint-single-submit =   ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+popup-ask-user-hint-single-unsubmitted =   ↑/↓::navigate · Space::select · Esc::cancel
+popup-ask-user-title =  Ask User 
+
+# ---- Confirm Popup (P2) ----
+popup-confirm-empty =   No pending confirmation.
+popup-confirm-action-hint =   Enter: confirm  Esc: cancel
+popup-confirm-title =  Confirm 

@@ -16,7 +16,9 @@
 
 #![allow(clippy::needless_update)]
 
+use crate::i18n;
 use crate::kit::atoms;
+use crate::kit::atoms::LANG_VERSION;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -40,6 +42,7 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 订阅 SERVICE_SNAPSHOT 显示当前 Provider 状态
     let snapshot = hooks.use_atom(&atoms::SERVICE_SNAPSHOT);
     let snapshot = snapshot.read().clone();
+    let _lang_ver = hooks.use_atom(&LANG_VERSION);
     let provider_name = snapshot.provider_name;
     let model_label = if !snapshot.model_name.is_empty() {
         &snapshot.model_name
@@ -83,13 +86,13 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Line::from(vec![
                 Span::styled("⚠ ", Style::new().fg(semantic.status.error).bold()),
                 Span::styled(
-                    "未配置 Provider · Agent 功能暂不可用",
+                    i18n::tr("setup-no-provider"),
                     Style::new().fg(semantic.status.error).bold(),
                 ),
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                "可通过以下任一方式完成配置：",
+                i18n::tr("setup-config-hint-title"),
                 Style::new().fg(semantic.text.primary),
             )),
         ]
@@ -99,30 +102,23 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         vec![
             Line::from(""),
             Line::from(Span::styled(
-                "Enter::close · Esc::close",
+                i18n::tr("setup-close-hint"),
                 Style::new().fg(semantic.text.dim),
             )),
         ]
     } else {
         vec![
             Line::from(""),
+            Line::from(Span::styled(
+                i18n::tr("setup-step-1"),
+                Style::new().fg(semantic.text.primary),
+            )),
+            Line::from(Span::styled(
+                i18n::tr("setup-step-2"),
+                Style::new().fg(semantic.text.primary),
+            )),
             Line::from(vec![
-                Span::styled("  1. ", Style::new().fg(semantic.border.active).bold()),
-                Span::styled(
-                    "进入主界面后打开 Login 页面配置 API Key",
-                    Style::new().fg(semantic.text.primary),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("  2. ", Style::new().fg(semantic.border.active).bold()),
-                Span::styled(
-                    "或打开 Settings 页面调整 Provider 配置",
-                    Style::new().fg(semantic.text.primary),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("  3. ", Style::new().fg(semantic.border.active).bold()),
-                Span::styled("或手动编辑 ", Style::new().fg(semantic.text.primary)),
+                Span::styled(i18n::tr("setup-step-3"), Style::new().fg(semantic.text.primary)),
                 Span::styled(
                     home_dir.clone(),
                     Style::new().fg(semantic.border.active).italic(),
@@ -130,7 +126,7 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                "Enter::skip · Esc::close",
+                i18n::tr("setup-skip-hint"),
                 Style::new().fg(semantic.text.dim),
             )),
         ]
@@ -152,7 +148,7 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Border(
                     flex_direction: Direction::Vertical,
                     border_style: Style::new().fg(semantic.border.default),
-                    top_title: Line::from(" Setup Wizard ")
+                    top_title: Line::from(i18n::tr("setup-wizard-title"))
                         .fg(component.message.reasoning)
                         .bold()
                         .centered(),
@@ -163,7 +159,7 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     Text(text: Paragraph::new(vec![
                         Line::from(""),
                         Line::from(Span::styled(
-                            "欢迎使用 Peri TUI",
+                            i18n::tr("setup-welcome"),
                             Style::new().fg(semantic.text.primary).bold(),
                         )).alignment(Alignment::Center),
                         Line::from(""),

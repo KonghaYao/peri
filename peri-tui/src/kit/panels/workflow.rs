@@ -6,7 +6,8 @@
 //! VIEW_MODELS 中的 TuiSubAgentGroup 计数）。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::VIEW_MODELS;
+use crate::i18n;
+use crate::kit::atoms::{VIEW_MODELS, LANG_VERSION};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
@@ -27,6 +28,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 从 VIEW_MODELS 派生 subagent group 数量（间接显示 workflow 活跃度）
     let vm_store = hooks.use_atom(&VIEW_MODELS);
+    let _ = hooks.use_atom(&LANG_VERSION);
     let subagent_count = vm_store
         .read()
         .items
@@ -40,13 +42,13 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .count();
     let _ = vm_store;
 
-    let rows: Vec<(&str, String)> = vec![
-        ("Engine", "@peri-workflow (external CLI)".to_string()),
-        ("Binary", "peri-workflow".to_string()),
-        ("Current session sub-agents", format!("{}", subagent_count)),
+    let rows: Vec<(String, String)> = vec![
+        (i18n::tr("panel-workflow-label-engine"), i18n::tr("panel-workflow-value-engine")),
+        (i18n::tr("panel-workflow-label-binary"), i18n::tr("panel-workflow-value-binary")),
+        (i18n::tr("panel-workflow-label-subagents"), format!("{}", subagent_count)),
         (
-            "Self-check",
-            "Run `which peri-workflow` to verify install".to_string(),
+            i18n::tr("panel-workflow-label-self-check"),
+            i18n::tr("panel-workflow-value-self-check"),
         ),
     ];
     let count = rows.len();
@@ -82,13 +84,13 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     lines.push(Line::from(vec![Span::styled(
-        "  Workflow Engine",
+        i18n::tr("panel-workflow-title"),
         Style::new()
             .fg(theme_def.read().semantic.text.primary)
             .bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
-        "  Multi-agent orchestration via @peri-workflow CLI",
+        i18n::tr("panel-workflow-subtitle"),
         Style::new()
             .fg(theme_def.read().semantic.text.muted)
             .italic(),
@@ -125,16 +127,16 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
-        "  Workflows are spawned from agent prompts;",
+        i18n::tr("panel-workflow-info-1"),
         Style::new().fg(theme_def.read().semantic.text.dim),
     )]));
     lines.push(Line::from(vec![Span::styled(
-        "  progress surfaces here as SubAgent groups in the message stream.",
+        i18n::tr("panel-workflow-info-2"),
         Style::new().fg(theme_def.read().semantic.text.dim),
     )]));
     lines.push(Line::from(""));
     lines.push(
-        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme_def
+        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def
             .read()
             .semantic
             .text

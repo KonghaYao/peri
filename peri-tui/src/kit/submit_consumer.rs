@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
+use fluent_bundle::FluentValue;
 use peri_agent::messages::MessageContent;
 use ratatui::text::Line;
 use tokio::sync::mpsc;
@@ -20,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
+use crate::i18n;
 use crate::kit::acp_events;
 use crate::kit::atoms::{
     ACP_STATE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, LOADING_EPOCH, NOTIFICATION,
@@ -215,8 +217,14 @@ fn execute_view_action(action: ViewActionRequest, acp_client: &AcpTuiClient, cwd
         }
         ViewActionRequest::ExportText(mode) => {
             let message = match export_debug_text(mode, cwd) {
-                Ok(path) => format!("已导出消息文本：{}", path.display()),
-                Err(err) => format!("导出消息文本失败：{err}"),
+                Ok(path) => i18n::tr_args(
+                    "export-success",
+                    &[("path".into(), FluentValue::from(path.display().to_string()))],
+                ),
+                Err(err) => i18n::tr_args(
+                    "export-fail",
+                    &[("error".into(), FluentValue::from(err.to_string()))],
+                ),
             };
             *NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
                 message,

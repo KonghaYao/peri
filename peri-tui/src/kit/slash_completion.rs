@@ -16,10 +16,12 @@ use ratatui_kit::{
     },
 };
 
+use crate::i18n;
 use crate::kit::atoms::SLASH_SELECTED_INDEX;
 use crate::kit::inline_nav::{
     InlineNavAction, clamp_selection, classify_inline_nav, next_selection, previous_selection,
 };
+use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,7 +179,7 @@ pub fn SlashCompletion(
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::new().fg(popup_tokens.border))
         .title_top(
-            Line::from(format!(" /{} ", props.prefix))
+            Line::from(i18n::tr_args("slash-completion-title", &[("name".to_string(), FluentValue::from(props.prefix.as_str()))]))
                 .fg(popup_tokens.action_primary)
                 .bold(),
         );
@@ -199,7 +201,7 @@ pub fn SlashCompletion(
         .collect();
 
     let text_render = if empty {
-        Paragraph::new(Line::from("  (no matches)").fg(semantic.text.muted))
+        Paragraph::new(Line::from(i18n::tr("common-no-matches")).fg(semantic.text.muted))
     } else {
         Paragraph::new(ratatui::text::Text::from(visible_lines))
     }
