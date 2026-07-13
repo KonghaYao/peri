@@ -888,3 +888,5 @@ popup-ask-user-title =  用户问答
 popup-confirm-empty =   暂无待确认项。
 popup-confirm-action-hint =   Enter: 确认  Esc: 取消
 popup-confirm-title =  确认
+popup-confirm-reject-title = 拒绝回答
+popup-confirm-reject-message = 是否拒绝回答？拒绝后 Agent 将收到拒绝信号并结束工具调用。

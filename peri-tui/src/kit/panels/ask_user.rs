@@ -188,9 +188,8 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Some(ListNavAction::Cancel) => {
                 // ESC → 打开确认弹窗而非直接取消
                 let payload = crate::kit::atoms::ConfirmPayload {
-                    title: "拒绝回答".to_string(),
-                    message: "是否拒绝回答？拒绝后 Agent 将收到拒绝信号并结束工具调用。"
-                        .to_string(),
+                    title: i18n::tr("popup-confirm-reject-title"),
+                    message: i18n::tr("popup-confirm-reject-message"),
                     details: vec![],
                     pending_action: crate::kit::atoms::ConfirmAction::RejectAskUser,
                 };

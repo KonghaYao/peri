@@ -889,3 +889,5 @@ popup-ask-user-title =  Ask User
 popup-confirm-empty =   No pending confirmation.
 popup-confirm-action-hint =   Enter: confirm  Esc: cancel
 popup-confirm-title =  Confirm 
+popup-confirm-reject-title = Reject Answer
+popup-confirm-reject-message = Reject answering? The Agent will receive a rejection signal and end the tool call.
