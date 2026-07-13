@@ -418,6 +418,15 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 peri_agent::messages::BaseMessage::human(params.prompt.clone()),
             ));
 
+        // flush prompt queue → transcript（before_agent 钩子依赖 messages()）
+        {
+            let consumed = v2_ctx.context.queue.drain_for_receive();
+            if !consumed.is_empty() {
+                let mut transcript = v2_ctx.context.transcript.write();
+                peri_agent::agent::stages::append_messages_to_transcript(&mut transcript, consumed);
+            }
+        }
+
         // 6. 运行 before_agent middleware hooks
         if let Err(e) =
             peri_agent::agent::stages::middleware_runner::run_before_agent(&v2_ctx.context).await

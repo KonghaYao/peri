@@ -546,6 +546,24 @@ pub(super) async fn build_and_execute_agent_v2(
     // run_react_loop 消费后仍可访问累积的 recall。
     let recall_buffer = Arc::clone(&v2_out.context.recall_buffer);
 
+    // Phase 6.6: flush prompt queue → transcript（before_agent 钩子依赖 messages()）
+    //
+    // SkillPreloadMiddleware / AtMentionMiddleware 的 before_agent 通过
+    // state.messages() 自动检测 /skill-name 和 @mention，但 Phase 6 仅将
+    // Human 消息 push 到 queue——Receive 阶段（在 run_react_loop 内部）才会
+    // drain 到 transcript。before_agent 在 Receive 之前运行，此时 transcript
+    // 中无 Human 消息，auto-detection 静默失败。
+    //
+    // 本 flush 将 Prompt 消息提前写入 transcript，确保 before_agent 能看到
+    // 用户输入。Receive 阶段后续再次 drain 时为 safe no-op（队列已空）。
+    {
+        let consumed = v2_out.context.queue.drain_for_receive();
+        if !consumed.is_empty() {
+            let mut transcript = v2_out.context.transcript.write();
+            peri_agent::agent::stages::append_messages_to_transcript(&mut transcript, consumed);
+        }
+    }
+
     // Phase 6.7: run before_agent middleware hooks
     // v1 在 execute() 开头调用 chain.run_before_agent，让 AgentsMd/Skills/
     // ToolSearch 等中间件缓存贡献数据。v2 在 run_react_loop 前调用以保持兼容。
