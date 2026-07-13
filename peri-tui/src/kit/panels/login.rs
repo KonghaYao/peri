@@ -8,8 +8,11 @@
 //! 通过 Setup Wizard 完成）。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{PERI_CONFIG_HANDLE, PROVIDER_LIST, ProviderSummary};
+use crate::i18n;
+use crate::kit::atoms::{NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PROVIDER_LIST, ProviderSummary};
 use crate::kit::list_nav::{next_selection, previous_selection};
+use fluent_bundle::FluentValue;
+use std::time::{Duration, Instant};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -191,7 +194,23 @@ fn activate_provider(provider_id: &str) {
     }
     let snap = cfg.clone();
     drop(cfg);
-    let _ = crate::config::save(&snap);
+    match crate::config::save(&snap) {
+        Ok(()) => {
+            *NOTIFICATION.state().write() = Some(Notification {
+                message: i18n::tr("config-saved").to_string(),
+                until: Instant::now() + Duration::from_secs(3),
+            });
+        }
+        Err(e) => {
+            *NOTIFICATION.state().write() = Some(Notification {
+                message: i18n::tr_args("config-save-failed", &[(
+                    "error".to_string(),
+                    FluentValue::from(e.to_string().as_str()),
+                )]),
+                until: Instant::now() + Duration::from_secs(5),
+            });
+        }
+    }
     tracing::info!(provider_id, "LoginPanel: active_provider_id switched");
 }
 

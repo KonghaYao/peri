@@ -7,10 +7,12 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{LANG_VERSION, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE};
+use fluent_bundle::FluentValue;
+use crate::kit::atoms::{LANG_VERSION, NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use peri_middlewares::prelude::PermissionMode;
 use peri_theme::atoms::THEME_ATOM;
+use std::time::{Duration, Instant};
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -316,7 +318,23 @@ fn activate_row(row: usize, forward: bool) {
             // drop guard before save（save 借 &cfg）
             let cfg_snapshot = cfg.clone();
             drop(cfg);
-            let _ = crate::config::save(&cfg_snapshot);
+            match crate::config::save(&cfg_snapshot) {
+                Ok(()) => {
+                    *NOTIFICATION.state().write() = Some(Notification {
+                        message: i18n::tr("config-saved").to_string(),
+                        until: Instant::now() + Duration::from_secs(3),
+                    });
+                }
+                Err(e) => {
+                    *NOTIFICATION.state().write() = Some(Notification {
+                        message: i18n::tr_args("config-save-failed", &[(
+                            "error".to_string(),
+                            FluentValue::from(e.to_string().as_str()),
+                        )]),
+                        until: Instant::now() + Duration::from_secs(5),
+                    });
+                }
+            }
         }
         RowType::Cycle(options) => {
             let cur_idx = read_cycle_idx(row, options);
@@ -332,14 +350,46 @@ fn activate_row(row: usize, forward: bool) {
                     cfg.config.streaming_mode = Some(new_val.to_string());
                     let snap = cfg.clone();
                     drop(cfg);
-                    let _ = crate::config::save(&snap);
+                    match crate::config::save(&snap) {
+                        Ok(()) => {
+                            *NOTIFICATION.state().write() = Some(Notification {
+                                message: i18n::tr("config-saved").to_string(),
+                                until: Instant::now() + Duration::from_secs(3),
+                            });
+                        }
+                        Err(e) => {
+                            *NOTIFICATION.state().write() = Some(Notification {
+                                message: i18n::tr_args("config-save-failed", &[(
+                                    "error".to_string(),
+                                    FluentValue::from(e.to_string().as_str()),
+                                )]),
+                                until: Instant::now() + Duration::from_secs(5),
+                            });
+                        }
+                    }
                 }
                 ROW_LANGUAGE => {
                     let mut cfg = handle.write();
                     cfg.config.language = Some(new_val.to_string());
                     let snap = cfg.clone();
                     drop(cfg);
-                    let _ = crate::config::save(&snap);
+                    match crate::config::save(&snap) {
+                        Ok(()) => {
+                            *NOTIFICATION.state().write() = Some(Notification {
+                                message: i18n::tr("config-saved").to_string(),
+                                until: Instant::now() + Duration::from_secs(3),
+                            });
+                        }
+                        Err(e) => {
+                            *NOTIFICATION.state().write() = Some(Notification {
+                                message: i18n::tr_args("config-save-failed", &[(
+                                    "error".to_string(),
+                                    FluentValue::from(e.to_string().as_str()),
+                                )]),
+                                until: Instant::now() + Duration::from_secs(5),
+                            });
+                        }
+                    }
                     // i18n: 语言切换时重建 LcRegistry 并递增版本号，触发所有组件重渲染
                     crate::i18n::switch(new_val);
                 }
@@ -348,7 +398,23 @@ fn activate_row(row: usize, forward: bool) {
                     cfg.config.active_alias = new_val.to_string();
                     let snap = cfg.clone();
                     drop(cfg);
-                    let _ = crate::config::save(&snap);
+                    match crate::config::save(&snap) {
+                        Ok(()) => {
+                            *NOTIFICATION.state().write() = Some(Notification {
+                                message: i18n::tr("config-saved").to_string(),
+                                until: Instant::now() + Duration::from_secs(3),
+                            });
+                        }
+                        Err(e) => {
+                            *NOTIFICATION.state().write() = Some(Notification {
+                                message: i18n::tr_args("config-save-failed", &[(
+                                    "error".to_string(),
+                                    FluentValue::from(e.to_string().as_str()),
+                                )]),
+                                until: Instant::now() + Duration::from_secs(5),
+                            });
+                        }
+                    }
                 }
                 ROW_PERMISSION_MODE => {
                     if let Some(mode_handle) = PERMISSION_MODE_HANDLE.get()
