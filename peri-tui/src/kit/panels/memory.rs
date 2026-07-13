@@ -7,8 +7,10 @@
 //! 执行，避免阻塞渲染线程。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{MEMORY_LIST, MemoryEntry};
+use crate::i18n;
+use crate::kit::atoms::{MEMORY_LIST, MemoryEntry, LANG_VERSION};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
+use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -28,6 +30,7 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let store = hooks.use_atom(&MEMORY_LIST);
     let entries: Vec<MemoryEntry> = store.read().clone();
     let _ = store;
+    let _ = hooks.use_atom(&LANG_VERSION);
     let count = entries.len();
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
@@ -74,13 +77,13 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 头部摘要
     lines.push(Line::from(vec![Span::styled(
-        format!("  {} memory files in ~/.claude/memory", count),
+        i18n::tr_args("panel-memory-stats", &[("count".to_string(), FluentValue::from(count as i64))]),
         Style::new()
             .fg(theme_def.read().semantic.text.primary)
             .bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
-        "  Enter) Edit in $EDITOR  Esc) Close",
+        i18n::tr("panel-memory-nav-hint"),
         Style::new()
             .fg(theme_def.read().semantic.text.muted)
             .italic(),
@@ -89,11 +92,11 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     if entries.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            "  No memory files found",
+            i18n::tr("panel-memory-empty"),
             Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
-            "  Create ~/.claude/memory/<name>.md to persist cross-session notes",
+            i18n::tr("panel-memory-empty-hint"),
             Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     } else {
@@ -119,7 +122,7 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let time_str = entry
                 .modified
                 .map(format_relative_time)
-                .unwrap_or_else(|| "—".to_string());
+                .unwrap_or_else(|| i18n::tr("common-na"));
 
             lines.push(Line::from(vec![
                 Span::styled(
@@ -151,14 +154,15 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// 人类可读的字节大小。
 fn format_size(bytes: u64) -> String {
     const UNITS: &[(&str, u64)] = &[
-        ("B", 1),
-        ("KB", 1024),
-        ("MB", 1024 * 1024),
-        ("GB", 1024 * 1024 * 1024),
+        ("panel-memory-unit-b", 1),
+        ("panel-memory-unit-kb", 1024),
+        ("panel-memory-unit-mb", 1024 * 1024),
+        ("panel-memory-unit-gb", 1024 * 1024 * 1024),
     ];
-    for (unit, threshold) in UNITS.iter().rev() {
+    for (key, threshold) in UNITS.iter().rev() {
         if bytes >= *threshold {
             let v = bytes as f64 / *threshold as f64;
+            let unit = i18n::tr(key);
             if v >= 10.0 {
                 return format!("{:.0} {}", v, unit);
             } else {
@@ -166,7 +170,7 @@ fn format_size(bytes: u64) -> String {
             }
         }
     }
-    format!("{} B", bytes)
+    format!("{} {}", bytes, i18n::tr("panel-memory-unit-b"))
 }
 
 /// 相对时间（"3m ago" / "2h ago" / "5d ago" / "2026-06-01"）。
@@ -176,19 +180,28 @@ fn format_relative_time(ts: chrono::DateTime<chrono::Utc>) -> String {
     let delta = now.signed_duration_since(ts);
     let secs = delta.num_seconds();
     if secs < 60 {
-        return "just now".to_string();
+        return i18n::tr("panel-memory-time-just-now");
     }
     let mins = secs / 60;
     if mins < 60 {
-        return format!("{}m ago", mins);
+        return i18n::tr_args(
+            "panel-memory-time-min-ago",
+            &[("n".to_string(), FluentValue::from(mins))],
+        );
     }
     let hours = mins / 60;
     if hours < 24 {
-        return format!("{}h ago", hours);
+        return i18n::tr_args(
+            "panel-memory-time-hour-ago",
+            &[("n".to_string(), FluentValue::from(hours))],
+        );
     }
     let days = hours / 24;
     if days < 30 {
-        return format!("{}d ago", days);
+        return i18n::tr_args(
+            "panel-memory-time-day-ago",
+            &[("n".to_string(), FluentValue::from(days))],
+        );
     }
     // 超过 30 天显示日期
     ts.format("%Y-%m-%d").to_string()

@@ -14,6 +14,8 @@ use ratatui_kit::{
 };
 
 use crate::app::panel_types::PanelKind;
+use crate::i18n;
+use crate::kit::atoms::LANG_VERSION;
 use crate::kit::list_nav::{next_selection, previous_selection};
 use peri_theme::atoms::THEME_ATOM;
 
@@ -50,6 +52,7 @@ const BETA_ENTRIES: &[BetaEntry] = &[
 #[component]
 pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
+    let _ = hooks.use_atom(&LANG_VERSION);
     let selected = hooks.use_state(|| 0usize);
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
@@ -92,7 +95,7 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Hint line
     lines.push(
-        Line::from("  (read-only — feature flags are configured at build time)").fg(theme_def
+        Line::from(i18n::tr("panel-betas-readonly-hint")).fg(theme_def
             .read()
             .semantic
             .text
@@ -110,7 +113,7 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         } else {
             Style::new().fg(theme_def.read().semantic.text.primary)
         };
-        let value_text = if entry.enabled { "on" } else { "off" };
+        let value_text = if entry.enabled { i18n::tr("common-on") } else { i18n::tr("common-off") };
         let value_style = if entry.enabled {
             Style::new()
                 .fg(theme_def.read().semantic.status.success)
@@ -136,13 +139,13 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if BETA_ENTRIES.is_empty() {
         lines.push(Line::from(""));
         lines
-            .push(Line::from("  No active beta features").fg(theme_def.read().semantic.text.muted));
+            .push(Line::from(i18n::tr("panel-betas-empty")).fg(theme_def.read().semantic.text.muted));
     }
 
     // Footer hints
     lines.push(Line::from(""));
     lines.push(
-        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme_def
+        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def
             .read()
             .semantic
             .text
@@ -150,7 +153,7 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     );
 
     let content = if lines.is_empty() {
-        Paragraph::new(Line::from("  (empty)").fg(theme_def.read().semantic.text.muted))
+        Paragraph::new(Line::from(i18n::tr("common-empty")).fg(theme_def.read().semantic.text.muted))
     } else {
         Paragraph::new(ratatui::text::Text::from(lines))
     };

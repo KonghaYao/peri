@@ -16,6 +16,7 @@ use ratatui_kit::{
     prelude::*,
 };
 
+use crate::i18n;
 use super::atoms::{
     ACP_STATE, CANCEL_TX, INPUT_AREA_ESC_PREFIX, LAST_CTRL_C_PROCESSED, LAST_ESC_TIME,
     MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, PERMISSION_MODE_HANDLE,
@@ -214,7 +215,7 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
 
 fn show_cancel_notification(now: std::time::Instant) {
     *NOTIFICATION.state().write() = Some(Notification {
-        message: "已发送取消请求".to_string(),
+        message: i18n::tr("cancel-request-sent"),
         until: now + std::time::Duration::from_secs(2),
     });
 }

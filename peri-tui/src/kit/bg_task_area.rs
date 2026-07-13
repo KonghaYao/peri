@@ -4,7 +4,9 @@
 //! 每行格式：`◎ agent_type desc current_tool · N tools`。
 //! 最大 5 行，超出显示 `… N more`。纯展示，不响应键盘/鼠标。
 
+use crate::i18n;
 use crate::kit::atoms::{self, BgDisplayEntry};
+use fluent_bundle::FluentValue;
 use ratatui_kit::{
     prelude::*,
     ratatui::{
@@ -88,7 +90,7 @@ pub fn BgTaskArea(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 溢出行
     if overflow_count > 0 {
         lines.push(Line::from(Span::styled(
-            format!("… {} more", overflow_count),
+            i18n::tr_args("bg-task-overflow", &[("count".to_string(), FluentValue::from(overflow_count as i64))]),
             Style::default()
                 .fg(Color::Gray)
                 .add_modifier(ratatui::style::Modifier::DIM),
@@ -137,7 +139,13 @@ fn render_entry_line(entry: &BgDisplayEntry, render_count: usize) -> Line<'stati
     if let Some(ref tool) = entry.current_tool {
         spans.push(Span::raw("  "));
         let tool_text = if entry.tool_count > 0 {
-            format!("{} · {} tools", tool, entry.tool_count)
+            i18n::tr_args(
+                "bg-task-tools-running",
+                &[
+                    ("name".to_string(), FluentValue::from(tool.as_str())),
+                    ("count".to_string(), FluentValue::from(entry.tool_count as i64)),
+                ],
+            )
         } else {
             tool.clone()
         };
@@ -146,7 +154,10 @@ fn render_entry_line(entry: &BgDisplayEntry, render_count: usize) -> Line<'stati
         // 已完成且无当前工具 → 显示工具计数
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
-            format!("· {} tools", entry.tool_count),
+            i18n::tr_args(
+                "bg-task-tools-done",
+                &[("count".to_string(), FluentValue::from(entry.tool_count as i64))],
+            ),
             Style::default().fg(Color::Green),
         ));
     }

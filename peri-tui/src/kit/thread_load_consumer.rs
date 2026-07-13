@@ -20,7 +20,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+use fluent_bundle::FluentValue;
+
 use crate::acp_client::AcpTuiClient;
+use crate::i18n;
 use crate::kit::atoms;
 
 /// 启动 thread 切换消费者后台任务。
@@ -56,18 +59,25 @@ pub fn spawn_thread_load_consumer(
 
                                     *atoms::CONFIRM_PAYLOAD.state().write() =
                                         Some(atoms::ConfirmPayload {
-                                            title: "切换 thread 确认".into(),
-                                            message: format!(
-                                                "当前 thread 有 {} 个后台任务仍在运行",
-                                                bg_tasks.len()
+                                            title: i18n::tr("thread-switch-confirm-title")
+                                                .into(),
+                                            message: i18n::tr_args(
+                                                "thread-switch-bg-tasks-message",
+                                                &[(
+                                                    "count".into(),
+                                                    FluentValue::from(bg_tasks.len() as i64),
+                                                )],
                                             ),
                                             details: vec![
-                                                format!(
-                                                    "  {} shell  {} agent  {} workflow",
-                                                    shell_c, agent_c, wf_c
+                                                i18n::tr_args(
+                                                    "thread-switch-task-counts",
+                                                    &[
+                                                        ("shell".into(), FluentValue::from(shell_c as i64)),
+                                                        ("agent".into(), FluentValue::from(agent_c as i64)),
+                                                        ("workflow".into(), FluentValue::from(wf_c as i64)),
+                                                    ],
                                                 ),
-                                                "切换后这些任务继续在后台执行，但当前视图不再显示其状态。"
-                                                    .into(),
+                                                i18n::tr("thread-switch-bg-note"),
                                             ],
                                             pending_action: atoms::ConfirmAction::ThreadSwitch(
                                                 thread_id.clone(),

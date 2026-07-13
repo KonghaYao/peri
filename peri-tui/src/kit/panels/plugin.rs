@@ -5,8 +5,10 @@
 //! 通过修改 ~/.claude/plugins/config.json，UI 暂不实现切换。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{PLUGIN_LIST, PluginSummary};
+use crate::i18n;
+use crate::kit::atoms::{PLUGIN_LIST, PluginSummary, LANG_VERSION};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
+use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -26,6 +28,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let store = hooks.use_atom(&PLUGIN_LIST);
     let plugins: Vec<PluginSummary> = store.read().clone();
     let _ = store;
+    let _ = hooks.use_atom(&LANG_VERSION);
     let count = plugins.len();
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
@@ -68,13 +71,13 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     lines.push(Line::from(vec![Span::styled(
-        format!("  {} plugins loaded", count),
+        i18n::tr_args("panel-plugin-stats", &[("count".to_string(), FluentValue::from(count as i64))]),
         Style::new()
             .fg(theme_def.read().semantic.text.primary)
             .bold(),
     )]));
     lines.push(Line::from(vec![Span::styled(
-        "  (read-only — toggle via ~/.claude/plugins/config.json)",
+        i18n::tr("panel-plugin-readonly-hint"),
         Style::new()
             .fg(theme_def.read().semantic.text.muted)
             .italic(),
@@ -83,11 +86,11 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     if plugins.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            "  No plugins installed",
+            i18n::tr("panel-plugin-empty"),
             Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
         lines.push(Line::from(vec![Span::styled(
-            "  Install via: agm install <name>",
+            i18n::tr("panel-plugin-empty-hint"),
             Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     } else {
@@ -118,9 +121,9 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     format!(
                         " v{}",
                         if p.version.is_empty() {
-                            "?"
+                            i18n::tr("panel-plugin-version-unknown")
                         } else {
-                            &p.version
+                            p.version.clone()
                         }
                     ),
                     Style::new().fg(theme_def.read().semantic.text.muted),
@@ -146,7 +149,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     lines.push(
-        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme_def
+        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def
             .read()
             .semantic
             .text

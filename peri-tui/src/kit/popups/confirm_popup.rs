@@ -9,7 +9,8 @@ use ratatui_kit::{
     ratatui::{style::Stylize, text::Line},
 };
 
-use crate::kit::atoms::{self, CONFIRM_PAYLOAD, ConfirmAction};
+use crate::i18n;
+use crate::kit::atoms::{self, CONFIRM_PAYLOAD, LANG_VERSION, ConfirmAction};
 use crate::kit::popup_overlay::close_popup;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -46,6 +47,7 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             _ => EventResult::Ignored,
         }
     });
+    let _ = hooks.use_atom(&LANG_VERSION);
 
     let popup_tokens = &theme_def.read().component.popup;
     let guard = theme_def.read();
@@ -56,12 +58,12 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         None => {
             lines.push(Line::from(""));
             lines.push(
-                Line::from("  No pending confirmation.")
+                Line::from(i18n::tr("popup-confirm-empty"))
                     .fg(semantic.text.muted)
                     .italic(),
             );
             lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
+            lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
         }
         Some(p) => {
             lines.push(Line::from(""));
@@ -76,7 +78,9 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 lines.push(Line::from(detail.clone()).fg(semantic.text.muted));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from("  Enter: confirm  Esc: cancel").fg(semantic.text.dim));
+            lines.push(
+                Line::from(i18n::tr("popup-confirm-action-hint")).fg(semantic.text.dim),
+            );
         }
     }
 
@@ -87,7 +91,7 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         )
         .border_style(ratatui_kit::ratatui::style::Style::new().fg(popup_tokens.border))
         .title_top(
-            Line::from(" Confirm ")
+            Line::from(i18n::tr("popup-confirm-title"))
                 .fg(popup_tokens.action_primary)
                 .bold()
                 .centered(),

@@ -8,9 +8,11 @@
 //! 在 Agent 面板。本面板提供跨调度源的"任务总览"。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{BG_TASKS, CRON_JOBS, VIEW_MODELS};
+use crate::i18n;
+use crate::kit::atoms::{BG_TASKS, CRON_JOBS, VIEW_MODELS, LANG_VERSION};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
+use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -42,6 +44,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let vm_store = hooks.use_atom(&VIEW_MODELS);
     let subagents = collect_subagents(&vm_store.read());
     let _ = vm_store;
+    let _ = hooks.use_atom(&LANG_VERSION);
 
     let bg_count = bg_tasks.len();
     let cron_count = cron_jobs.len();
@@ -98,7 +101,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 摘要
     lines.push(Line::from(vec![
         Span::styled(
-            "  Total: ",
+            i18n::tr("panel-tasks-total-label"),
             Style::new().fg(theme_def.read().semantic.text.muted),
         ),
         Span::styled(
@@ -108,9 +111,13 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .bold(),
         ),
         Span::styled(
-            format!(
-                "   ({} bg, {} cron, {} subagent)",
-                bg_count, cron_count, subagent_count
+            i18n::tr_args(
+                "panel-tasks-breakdown",
+                &[
+                    ("bg".to_string(), FluentValue::from(bg_count as i64)),
+                    ("cron".to_string(), FluentValue::from(cron_count as i64)),
+                    ("subagent".to_string(), FluentValue::from(subagent_count as i64)),
+                ],
             ),
             Style::new().fg(theme_def.read().semantic.text.dim),
         ),
@@ -120,7 +127,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Background Tasks section
     if !bg_tasks.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            format!("  ▼ Background Tasks ({})", bg_count),
+            i18n::tr_args("panel-tasks-section-bg", &[("count".to_string(), FluentValue::from(bg_count as i64))]),
             Style::new()
                 .fg(theme_def.read().semantic.border.active)
                 .bold(),
@@ -137,12 +144,15 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Style::new().fg(theme_def.read().semantic.text.primary)
             };
             let kind_str = match task.kind.as_str() {
-                "shell" => "[sh]",
-                "agent" => "[ag]",
-                "workflow" => "[wf]",
-                _ => "[?]",
+                "shell" => i18n::tr("panel-tasks-kind-sh"),
+                "agent" => i18n::tr("panel-tasks-kind-ag"),
+                "workflow" => i18n::tr("panel-tasks-kind-wf"),
+                _ => i18n::tr("panel-tasks-kind-unknown"),
             };
-            let pid_str = task.pid.map(|p| format!(" pid:{}", p)).unwrap_or_default();
+            let pid_str = task
+                .pid
+                .map(|p| i18n::tr_args("panel-tasks-pid", &[("pid".to_string(), FluentValue::from(p as i64))]))
+                .unwrap_or_default();
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor),
@@ -169,7 +179,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Cron section
     if !cron_jobs.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            format!("  ▼ Cron Jobs ({})", cron_count),
+            i18n::tr_args("panel-tasks-section-cron", &[("count".to_string(), FluentValue::from(cron_count as i64))]),
             Style::new()
                 .fg(theme_def.read().semantic.border.active)
                 .bold(),
@@ -193,7 +203,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let next_str = job
                 .next_fire
                 .map(|t| t.format("%H:%M:%S").to_string())
-                .unwrap_or_else(|| "—".to_string());
+                .unwrap_or_else(|| i18n::tr("common-na"));
 
             let prompt_preview: String = job.prompt.chars().take(50).collect();
             lines.push(Line::from(vec![
@@ -219,7 +229,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // SubAgent section
     if !subagents.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            format!("  ▼ SubAgents ({})", subagent_count),
+            i18n::tr_args("panel-tasks-section-subagent", &[("count".to_string(), FluentValue::from(subagent_count as i64))]),
             Style::new()
                 .fg(theme_def.read().semantic.border.active)
                 .bold(),
@@ -237,12 +247,12 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             };
             let collapsed_marker = if sa.collapsed {
                 Span::styled(
-                    " (collapsed)",
+                    i18n::tr("panel-tasks-collapsed"),
                     Style::new().fg(theme_def.read().semantic.text.muted),
                 )
             } else {
                 Span::styled(
-                    " (live)",
+                    i18n::tr("panel-tasks-live"),
                     Style::new().fg(theme_def.read().semantic.status.success),
                 )
             };
@@ -258,7 +268,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ),
                 collapsed_marker,
                 Span::styled(
-                    format!("  {} msgs", sa.view_models.len()),
+                    i18n::tr_args("panel-tasks-msgs", &[("count".to_string(), FluentValue::from(sa.view_models.len() as i64))]),
                     Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
             ]));
@@ -267,24 +277,24 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     if total == 0 {
         lines.push(Line::from(vec![Span::styled(
-            "  No active tasks",
+            i18n::tr("panel-tasks-empty"),
             Style::new()
                 .fg(theme_def.read().semantic.text.muted)
                 .italic(),
         )]));
         lines.push(Line::from(vec![Span::styled(
-            "  Cron jobs are scheduled via /loop command;",
+            i18n::tr("panel-tasks-empty-hint-1"),
             Style::new().fg(theme_def.read().semantic.text.dim),
         )]));
         lines.push(Line::from(vec![Span::styled(
-            "  SubAgents are spawned by Task / SubAgent tools.",
+            i18n::tr("panel-tasks-empty-hint-2"),
             Style::new().fg(theme_def.read().semantic.text.dim),
         )]));
     }
 
     lines.push(Line::from(""));
     lines.push(
-        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme_def
+        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def
             .read()
             .semantic
             .text

@@ -22,6 +22,7 @@ use ratatui_kit::{
 };
 
 use crate::app::panel_types::PanelKind;
+use crate::i18n;
 use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
 use crate::kit::panels::{
     agent::AgentPanel, ask_user::AskUserPanel, betas::BetasPanel, config::ConfigPanel,
@@ -378,12 +379,47 @@ pub fn panel_for_slash_command(command: &str) -> Option<PanelKind> {
 }
 
 pub fn panel_title(kind: PanelKind) -> String {
-    format!(
-        " {} ",
-        meta(kind)
-            .expect("all PanelKind variants must be registered")
-            .title
-    )
+    let key = match kind {
+        PanelKind::Model => "panel-title-model",
+        PanelKind::Login => "panel-title-login",
+        PanelKind::Agent => "panel-title-agent",
+        PanelKind::Hooks => "panel-title-hooks",
+        PanelKind::Config => "panel-title-config",
+        PanelKind::ThreadBrowser => "panel-title-threads",
+        PanelKind::Mcp => "panel-title-mcp",
+        PanelKind::Plugin => "panel-title-plugin",
+        PanelKind::Cron => "panel-title-cron",
+        PanelKind::Status => "panel-title-status",
+        PanelKind::Memory => "panel-title-memory",
+        PanelKind::Tasks => "panel-title-tasks",
+        PanelKind::Betas => "panel-title-betas",
+        PanelKind::Workflow => "panel-title-workflow",
+        PanelKind::AskUser => "panel-title-ask-user",
+        PanelKind::Theme => "panel-title-theme",
+    };
+    format!(" {} ", i18n::tr(key))
+}
+
+pub fn panel_description(kind: PanelKind) -> String {
+    let key = match kind {
+        PanelKind::Model => "panel-desc-model",
+        PanelKind::Login => "panel-desc-login",
+        PanelKind::Agent => "panel-desc-agent",
+        PanelKind::Hooks => "panel-desc-hooks",
+        PanelKind::Config => "panel-desc-config",
+        PanelKind::ThreadBrowser => "panel-desc-threads",
+        PanelKind::Mcp => "panel-desc-mcp",
+        PanelKind::Plugin => "panel-desc-plugin",
+        PanelKind::Cron => "panel-desc-cron",
+        PanelKind::Status => "panel-desc-status",
+        PanelKind::Memory => "panel-desc-memory",
+        PanelKind::Tasks => "panel-desc-tasks",
+        PanelKind::Betas => "panel-desc-betas",
+        PanelKind::Workflow => "panel-desc-workflow",
+        PanelKind::AskUser => "panel-desc-ask-user",
+        PanelKind::Theme => "panel-desc-theme",
+    };
+    i18n::tr(key)
 }
 
 pub fn panel_layout(kind: PanelKind) -> PanelLayout {

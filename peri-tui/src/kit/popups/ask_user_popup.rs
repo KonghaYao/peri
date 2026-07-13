@@ -20,8 +20,9 @@ use ratatui_kit::{
     },
 };
 
+use crate::i18n;
 use crate::kit::ask_user_action::AskUserResponseAction;
-use crate::kit::atoms::{ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX};
+use crate::kit::atoms::{ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, LANG_VERSION};
 use crate::kit::list_nav::{
     ListNavAction, classify_list_nav, cycle_next, cycle_previous, next_selection,
     previous_selection,
@@ -194,6 +195,7 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             _ => EventResult::Ignored,
         }
     });
+    let _ = hooks.use_atom(&LANG_VERSION);
 
     let popup_tokens = &theme_def.read().component.popup;
     let guard = theme_def.read();
@@ -204,21 +206,21 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         None => {
             lines.push(Line::from(""));
             lines.push(
-                Line::from("  No pending questions.")
+                Line::from(i18n::tr("popup-ask-user-empty"))
                     .fg(semantic.text.muted)
                     .italic(),
             );
             lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
+            lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
         }
         Some(au) if au.questions.is_empty() => {
             lines.push(Line::from(""));
             lines.push(
-                Line::from("  Agent asked 0 questions (malformed request).")
+                Line::from(i18n::tr("popup-ask-user-malformed"))
                     .fg(semantic.status.warning),
             );
             lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
+            lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
         }
         Some(au) => {
             let focused_idx = (*focused.read()).min(au.questions.len() - 1);
@@ -232,7 +234,11 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .enumerate()
                 .map(|(i, q)| {
                     let answered = answers_read.get(i).copied().flatten().is_some();
-                    let mark = if answered { " ✓ " } else { "" };
+                    let mark = if answered {
+                        i18n::tr("popup-ask-user-answered-mark")
+                    } else {
+                        String::new()
+                    };
                     if i == focused_idx {
                         format!("[{}]{}", q.header, mark)
                     } else {
@@ -292,7 +298,7 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
 
                 if q.options.is_empty() {
-                    lines.push(Line::from("  (no options provided)").fg(semantic.text.dim));
+                    lines.push(Line::from(i18n::tr("popup-ask-user-no-options")).fg(semantic.text.dim));
                 }
             }
 
@@ -309,17 +315,13 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 });
                 if all_answered {
                     lines.push(
-                        Line::from(
-                            "  Tab::next-question · ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel",
-                        )
-                        .fg(semantic.text.dim),
+                        Line::from(i18n::tr("popup-ask-user-hint-multi-submit"))
+                            .fg(semantic.text.dim),
                     );
                 } else {
                     lines.push(
-                        Line::from(
-                            "  Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel",
-                        )
-                        .fg(semantic.text.dim),
+                        Line::from(i18n::tr("popup-ask-user-hint-multi-next"))
+                            .fg(semantic.text.dim),
                     );
                 }
             } else {
@@ -331,12 +333,12 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         .unwrap_or(true);
                 if is_answered {
                     lines.push(
-                        Line::from("  ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel")
+                        Line::from(i18n::tr("popup-ask-user-hint-single-submit"))
                             .fg(semantic.text.dim),
                     );
                 } else {
                     lines.push(
-                        Line::from("  ↑/↓::navigate · Space::select · Esc::cancel")
+                        Line::from(i18n::tr("popup-ask-user-hint-single-unsubmitted"))
                             .fg(semantic.text.dim),
                     );
                 }
@@ -344,7 +346,11 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     }
 
-    popup_text_shell!(" Ask User ", popup_tokens.action_primary, lines)
+    popup_text_shell!(
+        i18n::tr("popup-ask-user-title"),
+        popup_tokens.action_primary,
+        lines
+    )
 }
 
 /// 将用户选中的答案映射为 serde_json::Value（CreateElicitationResponse content 格式）。

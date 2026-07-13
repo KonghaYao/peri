@@ -14,6 +14,8 @@ use ratatui_kit::{
 };
 
 use crate::app::panel_types::PanelKind;
+use crate::i18n;
+use crate::kit::atoms::LANG_VERSION;
 use crate::kit::list_nav::{next_selection, previous_selection};
 use peri_theme::atoms::{PALETTE_ATOM, PERI_COLORS_ATOM, THEME_ATOM};
 use peri_theme::bridge::ThemeDefinitionExt;
@@ -29,6 +31,7 @@ fn get_theme_list() -> &'static Vec<String> {
 #[component]
 pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
+    let _ = hooks.use_atom(&LANG_VERSION);
     let selected = hooks.use_state(|| {
         let themes = get_theme_list();
         let current = theme_def.read().name.to_string();
@@ -76,7 +79,7 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     for (i, name) in themes.iter().enumerate() {
         let is_current = *name == current_name;
         let cursor = if i == selection { ">" } else { " " };
-        let active_mark = if is_current { " *" } else { "" };
+        let active_mark = if is_current { i18n::tr("panel-theme-active-mark") } else { String::new() };
         let display = format!("{} {}{}", cursor, name, active_mark);
 
         let style = if i == selection {
@@ -91,10 +94,10 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     let footer =
-        Line::from("  ↑/↓::navigate  Enter::switch  Esc::close").fg(guard.semantic.text.dim);
+        Line::from(i18n::tr("panel-theme-nav-hint")).fg(guard.semantic.text.dim);
 
     let content = if lines.is_empty() {
-        Paragraph::new(Line::from("  (no themes found)").fg(guard.semantic.text.muted))
+        Paragraph::new(Line::from(i18n::tr("panel-theme-empty")).fg(guard.semantic.text.muted))
     } else {
         Paragraph::new(ratatui::text::Text::from(lines))
     };

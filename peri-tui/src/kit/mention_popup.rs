@@ -19,10 +19,12 @@ use ratatui_kit::{
     },
 };
 
+use crate::i18n;
 use crate::kit::atoms::MENTION_SELECTED_INDEX;
 use crate::kit::inline_nav::{
     InlineNavAction, clamp_selection, classify_inline_nav, next_selection, previous_selection,
 };
+use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
 #[derive(Default, Props)]
@@ -129,13 +131,13 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::new().fg(popup_tokens.border))
         .title_top(
-            Line::from(format!(" @{} ", props.prefix))
+            Line::from(i18n::tr_args("mention-popup-title", &[("name".to_string(), FluentValue::from(props.prefix.as_str()))]))
                 .fg(popup_tokens.action_primary)
                 .bold(),
         );
 
     let text_render = if empty {
-        Paragraph::new(Line::from("  (no matches)").fg(semantic.text.muted))
+        Paragraph::new(Line::from(i18n::tr("common-no-matches")).fg(semantic.text.muted))
     } else {
         Paragraph::new(ratatui::text::Text::from(display_lines))
     }

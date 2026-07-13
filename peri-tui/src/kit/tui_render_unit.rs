@@ -1,5 +1,6 @@
 //! TuiRenderUnit —— TUI 内部渲染单元类型，不共享给 ACP 层。
 
+use crate::i18n;
 use std::hash::{Hash, Hasher};
 
 // ---------------------------------------------------------------------------
@@ -81,15 +82,15 @@ impl ReminderType {
     pub fn label(&self) -> String {
         match self {
             ReminderType::ChannelMessage(source) => format!("Channel ({})", source),
-            ReminderType::CronReminder => "Cron 任务".to_string(),
-            ReminderType::BgTaskCompleted => "后台任务".to_string(),
-            ReminderType::ForkMode => "Fork 模式".to_string(),
-            ReminderType::ContextCompacted => "上下文压缩".to_string(),
-            ReminderType::ContinuationHint => "系统提示".to_string(),
-            ReminderType::TrustBoundary => "信任边界".to_string(),
-            ReminderType::ToolReminder => "工具提醒".to_string(),
-            ReminderType::SubagentResult => "子Agent 结果".to_string(),
-            ReminderType::GenericReminder => "系统提醒".to_string(),
+            ReminderType::CronReminder => i18n::tr("reminder-cron-task"),
+            ReminderType::BgTaskCompleted => i18n::tr("reminder-bg-task"),
+            ReminderType::ForkMode => i18n::tr("reminder-fork-mode"),
+            ReminderType::ContextCompacted => i18n::tr("reminder-context-compaction"),
+            ReminderType::ContinuationHint => i18n::tr("reminder-system-prompt"),
+            ReminderType::TrustBoundary => i18n::tr("reminder-trust-boundary"),
+            ReminderType::ToolReminder => i18n::tr("reminder-tool-reminder"),
+            ReminderType::SubagentResult => i18n::tr("reminder-subagent-result"),
+            ReminderType::GenericReminder => i18n::tr("reminder-system-reminder"),
         }
     }
 }
@@ -339,12 +340,12 @@ fn extract_channel_source(inner: &str) -> Option<String> {
             let raw = &after[..colon_pos];
             // 映射到显示名
             let display = match raw {
-                "weixin" | "wechat" => "微信",
-                "slack" => "Slack",
-                "feishu" => "飞书",
-                "dingtalk" => "钉钉",
-                "telegram" => "Telegram",
-                other => other,
+                "weixin" | "wechat" => i18n::tr("channel-wechat"),
+                "slack" => "Slack".to_string(),
+                "feishu" => i18n::tr("channel-feishu"),
+                "dingtalk" => i18n::tr("channel-dingtalk"),
+                "telegram" => "Telegram".to_string(),
+                other => other.to_string(),
             };
             return Some(display.to_string());
         }
@@ -353,12 +354,12 @@ fn extract_channel_source(inner: &str) -> Option<String> {
     // channel source 关键词直搜
     let lower = inner.to_lowercase();
     for (kw, display) in &[
-        ("weixin", "微信"),
-        ("wechat", "微信"),
-        ("slack", "Slack"),
-        ("feishu", "飞书"),
-        ("dingtalk", "钉钉"),
-        ("telegram", "Telegram"),
+        ("weixin", i18n::tr("channel-wechat")),
+        ("wechat", i18n::tr("channel-wechat")),
+        ("slack", "Slack".to_string()),
+        ("feishu", i18n::tr("channel-feishu")),
+        ("dingtalk", i18n::tr("channel-dingtalk")),
+        ("telegram", "Telegram".to_string()),
     ] {
         if lower.contains(kw) {
             return Some(display.to_string());
@@ -581,13 +582,14 @@ mod tests {
 
         #[test]
         fn test_detect_channel_message() {
+            i18n::init(None);
             let info = detect_reminder(
                 "<system-reminder>source=\"plugin:weixin:weixin\" chat_id=\"123\"\nhello from channel</system-reminder>",
             )
             .expect("should detect");
             match info.reminder_type {
                 ReminderType::ChannelMessage(ref source) => {
-                    assert_eq!(source, "微信");
+                    assert_eq!(source, "WeChat");
                 }
                 other => panic!("expected ChannelMessage, got {other:?}"),
             }
@@ -730,15 +732,16 @@ mod tests {
 
         #[test]
         fn test_label_static_types() {
-            assert_eq!(ReminderType::CronReminder.label(), "Cron 任务");
-            assert_eq!(ReminderType::BgTaskCompleted.label(), "后台任务");
-            assert_eq!(ReminderType::ForkMode.label(), "Fork 模式");
-            assert_eq!(ReminderType::ContextCompacted.label(), "上下文压缩");
-            assert_eq!(ReminderType::ContinuationHint.label(), "系统提示");
-            assert_eq!(ReminderType::TrustBoundary.label(), "信任边界");
-            assert_eq!(ReminderType::ToolReminder.label(), "工具提醒");
-            assert_eq!(ReminderType::SubagentResult.label(), "子Agent 结果");
-            assert_eq!(ReminderType::GenericReminder.label(), "系统提醒");
+            i18n::init(None);
+            assert_eq!(ReminderType::CronReminder.label(), "Cron Task");
+            assert_eq!(ReminderType::BgTaskCompleted.label(), "Background Task");
+            assert_eq!(ReminderType::ForkMode.label(), "Fork Mode");
+            assert_eq!(ReminderType::ContextCompacted.label(), "Context Compaction");
+            assert_eq!(ReminderType::ContinuationHint.label(), "System Prompt");
+            assert_eq!(ReminderType::TrustBoundary.label(), "Trust Boundary");
+            assert_eq!(ReminderType::ToolReminder.label(), "Tool Reminder");
+            assert_eq!(ReminderType::SubagentResult.label(), "SubAgent Result");
+            assert_eq!(ReminderType::GenericReminder.label(), "System Reminder");
         }
     }
 }
