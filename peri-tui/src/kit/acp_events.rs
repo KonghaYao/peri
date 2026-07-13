@@ -494,7 +494,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             // 清理后台 agent_id 注册
             BG_AGENT_IDS.state().write().remove(agent_id);
             state.variant = 1;
-            state.phase = SessionPhase::PromptRunning;
+            // phase 由 SubagentStarted + 流式事件维护，此处不再无条件覆盖
+            // （避免 bg agent 的场景 TurnDone/TurnSuspended 后被重新激活）
             push_view_models(state);
             push_acp_state(state);
         }
@@ -1654,5 +1655,141 @@ mod tests {
         // 场景 B 的 TurnDone 也会尝试发送（因为 flag 为 true 但 current_turn 非空），
         // 核心验证：flag 应被清除，但 reload 逻辑条件不满足（current_turn 非空）。
         assert!(!state.compact_just_completed, "场景 B: flag 应清除");
+    }
+
+    /// SubagentStopped 在 TurnDone 之后不应重新激活 loading。
+    /// 场景：bg subagent 在 TurnDone 归档完成后才触发 SubagentStopped，
+    /// SubagentStopped 不应将 phase 覆盖为 PromptRunning（不再设 is_loading=true）。
+    #[test]
+    #[serial]
+    fn test_subagent_stopped_after_turn_done_does_not_set_loading() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: im::Vector::new(),
+            current_turn: CurrentTurn::new(),
+            phase: SessionPhase::Idle,
+            popup_kind: None,
+            generation: 0,
+            active_session_id: String::new(),
+            compact_just_completed: false,
+            last_submitted_text: None,
+        };
+
+        // 模拟 TurnDone：归档 + 重置 phase/loading
+        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+        assert_eq!(state.phase, SessionPhase::Idle, "TurnDone 后 phase 应为 Idle");
+        assert!(!ACP_STATE.state().read().is_loading, "TurnDone 后 is_loading 应为 false");
+
+        // SubagentStopped 到达——不应重新激活 loading
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::SubagentStopped {
+                agent_id: "bg-agent-1".into(),
+            },
+        );
+
+        assert!(
+            !ACP_STATE.state().read().is_loading,
+            "SubagentStopped after TurnDone: is_loading 应保持 false"
+        );
+    }
+
+    /// SubagentStopped 在 TurnSuspended 之后不应重新激活 loading。
+    #[test]
+    #[serial]
+    fn test_subagent_stopped_after_turn_suspended_does_not_set_loading() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: im::Vector::new(),
+            current_turn: CurrentTurn::new(),
+            phase: SessionPhase::Idle,
+            popup_kind: None,
+            generation: 0,
+            active_session_id: String::new(),
+            compact_just_completed: false,
+            last_submitted_text: None,
+        };
+
+        // 模拟 TurnSuspended：归档 + 重置 phase/loading
+        dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+        assert_eq!(
+            state.phase,
+            SessionPhase::Idle,
+            "TurnSuspended 后 phase 应为 Idle"
+        );
+        assert!(
+            !ACP_STATE.state().read().is_loading,
+            "TurnSuspended 后 is_loading 应为 false"
+        );
+
+        // SubagentStopped 到达——不应重新激活 loading
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::SubagentStopped {
+                agent_id: "bg-agent-2".into(),
+            },
+        );
+
+        assert!(
+            !ACP_STATE.state().read().is_loading,
+            "SubagentStopped after TurnSuspended: is_loading 应保持 false"
+        );
+    }
+
+    /// SubagentStarted → SubagentStopped 路径（sync subagent）仍保持 loading。
+    /// 同步 subagent 的 SubagentStarted 已设 phase=PromptRunning，
+    /// SubagentStopped 不应破坏此状态。
+    #[test]
+    #[serial]
+    fn test_subagent_stopped_after_subagent_started_keeps_loading() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: im::Vector::new(),
+            current_turn: CurrentTurn::new(),
+            phase: SessionPhase::Idle,
+            popup_kind: None,
+            generation: 0,
+            active_session_id: String::new(),
+            compact_just_completed: false,
+            last_submitted_text: None,
+        };
+
+        // SubagentStarted 设置 phase=PromptRunning
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::SubagentStarted {
+                agent_id: "sync-agent-1".into(),
+                agent_name: "researcher".into(),
+                is_background: false,
+            },
+        );
+        assert_eq!(
+            state.phase,
+            SessionPhase::PromptRunning,
+            "SubagentStarted 后 phase 应为 PromptRunning"
+        );
+        assert!(
+            ACP_STATE.state().read().is_loading,
+            "SubagentStarted 后 is_loading 应为 true"
+        );
+
+        // SubagentStopped 到达——应保持 loading
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::SubagentStopped {
+                agent_id: "sync-agent-1".into(),
+            },
+        );
+
+        assert!(
+            ACP_STATE.state().read().is_loading,
+            "SubagentStopped after SubagentStarted: is_loading 应保持 true"
+        );
     }
 }

@@ -5,6 +5,9 @@
 
 use std::sync::{Arc, Mutex};
 
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
+
 use ratatui_kit::{
     crossterm::event::{Event, KeyEventKind},
     prelude::*,
@@ -56,16 +59,23 @@ pub fn SlashCompletion(
 ) -> impl Into<AnyElement<'static>> {
     let selection = hooks.use_atom(&SLASH_SELECTED_INDEX);
 
-    // 预计算一次 prefix_lower，避免过滤循环中反复分配。
-    let prefix_lower = props.prefix.to_lowercase();
-    let filtered: Vec<SlashCompletionItem> = props
-        .items
-        .iter()
-        .filter(|item| props.prefix.is_empty() || item.label_lowercase.starts_with(&prefix_lower))
-        .cloned()
-        .collect();
-
-    // items 已在 build_slash_items() 端字母序排序，此处不再重排
+    let filtered: Vec<SlashCompletionItem> = if props.prefix.is_empty() {
+        props.items.clone()
+    } else {
+        let matcher = SkimMatcherV2::default();
+        let query = props.prefix.to_lowercase();
+        let mut scored: Vec<(i64, SlashCompletionItem)> = props
+            .items
+            .iter()
+            .filter_map(|item| {
+                let score = matcher.fuzzy_match(&item.label_lowercase, &query)?;
+                Some((score, item.clone()))
+            })
+            .collect();
+        // 按模糊匹配分数降序排列
+        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
+        scored.into_iter().map(|(_, item)| item).collect()
+    };
 
     let item_count = filtered.len();
     let filtered_for_handler = filtered.clone();
