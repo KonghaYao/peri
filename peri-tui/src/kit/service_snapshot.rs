@@ -235,12 +235,12 @@ async fn tick_once(
     write_if_changed(&THREAD_LIST.state(), threads);
     write_if_changed(&CRON_JOBS.state(), cron_jobs);
     write_if_changed(&FILE_LIST.state(), files);
-    // H1 系列：静态数据来自 launch 时派生的 src；MCP server 详细列表每 tick
-    // 重新派生以反映连接状态；Memory 列表每 tick 重新扫描。所有 atom 都只在
-    // 值变化时写入，避免 ratatui-kit Atom 对相同值写入也唤醒订阅组件。
+    // H1 系列：hooks/plugins 来自 launch 时派生的静态数据；providers 每 tick
+    // 从 peri_config 动态派生以反映 is_active 最新状态。MCP server 详细列表
+    // 每 tick 重新派生以反映连接状态；Memory 列表每 tick 重新扫描。
     write_if_changed(&HOOK_LIST.state(), src.hooks.clone());
     write_if_changed(&PLUGIN_LIST.state(), src.plugins.clone());
-    write_if_changed(&PROVIDER_LIST.state(), src.providers.clone());
+    write_if_changed(&PROVIDER_LIST.state(), derive_providers(&src.peri_config));
     write_if_changed(&MCP_SERVERS.state(), mcp_servers);
     write_if_changed(&MEMORY_LIST.state(), memory_entries);
 
@@ -414,6 +414,34 @@ fn derive_provider_and_model(peri_config: &SharedPeriConfig) -> (String, String,
         .unwrap_or_else(|| active_alias.clone());
 
     (provider_type, active_alias, model_name)
+}
+
+/// 从 peri_config 动态派生 provider 列表——PROVIDER_LIST atom 的数据源。
+///
+/// 每次 tick 重新读取 active_provider_id，确保 is_active 标记反映最新状态。
+/// 之前使用 SnapshotSource.providers（启动时静态快照），导致 is_active 永不过期。
+fn derive_providers(peri_config: &SharedPeriConfig) -> Vec<ProviderSummary> {
+    let cfg = peri_config.read();
+    cfg.config
+        .providers
+        .iter()
+        .map(|p| {
+            let env_key = format!("{}_API_KEY", p.provider_type.to_uppercase());
+            let has_api_key = !p.api_key.is_empty() || std::env::var(env_key).is_ok();
+            let base_url = if p.base_url.is_empty() {
+                None
+            } else {
+                Some(p.base_url.clone())
+            };
+            ProviderSummary {
+                id: p.id.clone(),
+                provider_type: p.provider_type.clone(),
+                is_active: p.id == cfg.config.active_provider_id,
+                has_api_key,
+                base_url,
+            }
+        })
+        .collect()
 }
 
 /// 从 `McpClientPool` 派生详细 MCP server 列表（H1d）。
