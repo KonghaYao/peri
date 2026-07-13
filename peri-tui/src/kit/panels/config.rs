@@ -7,12 +7,13 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use fluent_bundle::FluentValue;
-use crate::kit::atoms::{LANG_VERSION, NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE};
+use crate::kit::atoms::{
+    LANG_VERSION, NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE,
+};
 use crate::kit::list_nav::{next_selection, previous_selection};
+use fluent_bundle::FluentValue;
 use peri_middlewares::prelude::PermissionMode;
 use peri_theme::atoms::THEME_ATOM;
-use std::time::{Duration, Instant};
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -23,6 +24,7 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Row type
@@ -322,16 +324,19 @@ fn activate_row(row: usize, forward: bool) {
                 Ok(()) => {
                     *NOTIFICATION.state().write() = Some(Notification {
                         message: i18n::tr("config-saved").to_string(),
-                        until: Instant::now() + Duration::from_secs(3),
+                        until: Instant::now() + Duration::from_secs(1),
                     });
                 }
                 Err(e) => {
                     *NOTIFICATION.state().write() = Some(Notification {
-                        message: i18n::tr_args("config-save-failed", &[(
-                            "error".to_string(),
-                            FluentValue::from(e.to_string().as_str()),
-                        )]),
-                        until: Instant::now() + Duration::from_secs(5),
+                        message: i18n::tr_args(
+                            "config-save-failed",
+                            &[(
+                                "error".to_string(),
+                                FluentValue::from(e.to_string().as_str()),
+                            )],
+                        ),
+                        until: Instant::now() + Duration::from_secs(2),
                     });
                 }
             }
@@ -354,16 +359,19 @@ fn activate_row(row: usize, forward: bool) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),
-                                until: Instant::now() + Duration::from_secs(3),
+                                until: Instant::now() + Duration::from_secs(1),
                             });
                         }
                         Err(e) => {
                             *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr_args("config-save-failed", &[(
-                                    "error".to_string(),
-                                    FluentValue::from(e.to_string().as_str()),
-                                )]),
-                                until: Instant::now() + Duration::from_secs(5),
+                                message: i18n::tr_args(
+                                    "config-save-failed",
+                                    &[(
+                                        "error".to_string(),
+                                        FluentValue::from(e.to_string().as_str()),
+                                    )],
+                                ),
+                                until: Instant::now() + Duration::from_secs(2),
                             });
                         }
                     }
@@ -377,16 +385,19 @@ fn activate_row(row: usize, forward: bool) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),
-                                until: Instant::now() + Duration::from_secs(3),
+                                until: Instant::now() + Duration::from_secs(1),
                             });
                         }
                         Err(e) => {
                             *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr_args("config-save-failed", &[(
-                                    "error".to_string(),
-                                    FluentValue::from(e.to_string().as_str()),
-                                )]),
-                                until: Instant::now() + Duration::from_secs(5),
+                                message: i18n::tr_args(
+                                    "config-save-failed",
+                                    &[(
+                                        "error".to_string(),
+                                        FluentValue::from(e.to_string().as_str()),
+                                    )],
+                                ),
+                                until: Instant::now() + Duration::from_secs(2),
                             });
                         }
                     }
@@ -402,16 +413,19 @@ fn activate_row(row: usize, forward: bool) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),
-                                until: Instant::now() + Duration::from_secs(3),
+                                until: Instant::now() + Duration::from_secs(1),
                             });
                         }
                         Err(e) => {
                             *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr_args("config-save-failed", &[(
-                                    "error".to_string(),
-                                    FluentValue::from(e.to_string().as_str()),
-                                )]),
-                                until: Instant::now() + Duration::from_secs(5),
+                                message: i18n::tr_args(
+                                    "config-save-failed",
+                                    &[(
+                                        "error".to_string(),
+                                        FluentValue::from(e.to_string().as_str()),
+                                    )],
+                                ),
+                                until: Instant::now() + Duration::from_secs(2),
                             });
                         }
                     }

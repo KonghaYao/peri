@@ -9,10 +9,11 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PROVIDER_LIST, ProviderSummary};
+use crate::kit::atoms::{
+    NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PROVIDER_LIST, ProviderSummary,
+};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use fluent_bundle::FluentValue;
-use std::time::{Duration, Instant};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -24,6 +25,7 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
+use std::time::{Duration, Instant};
 
 #[component]
 pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -198,16 +200,19 @@ fn activate_provider(provider_id: &str) {
         Ok(()) => {
             *NOTIFICATION.state().write() = Some(Notification {
                 message: i18n::tr("config-saved").to_string(),
-                until: Instant::now() + Duration::from_secs(3),
+                until: Instant::now() + Duration::from_secs(1),
             });
         }
         Err(e) => {
             *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr_args("config-save-failed", &[(
-                    "error".to_string(),
-                    FluentValue::from(e.to_string().as_str()),
-                )]),
-                until: Instant::now() + Duration::from_secs(5),
+                message: i18n::tr_args(
+                    "config-save-failed",
+                    &[(
+                        "error".to_string(),
+                        FluentValue::from(e.to_string().as_str()),
+                    )],
+                ),
+                until: Instant::now() + Duration::from_secs(2),
             });
         }
     }
