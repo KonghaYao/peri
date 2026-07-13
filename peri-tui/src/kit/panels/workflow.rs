@@ -7,7 +7,7 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{VIEW_MODELS, LANG_VERSION};
+use crate::kit::atoms::{LANG_VERSION, VIEW_MODELS};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
@@ -43,9 +43,18 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = vm_store;
 
     let rows: Vec<(String, String)> = vec![
-        (i18n::tr("panel-workflow-label-engine"), i18n::tr("panel-workflow-value-engine")),
-        (i18n::tr("panel-workflow-label-binary"), i18n::tr("panel-workflow-value-binary")),
-        (i18n::tr("panel-workflow-label-subagents"), format!("{}", subagent_count)),
+        (
+            i18n::tr("panel-workflow-label-engine"),
+            i18n::tr("panel-workflow-value-engine"),
+        ),
+        (
+            i18n::tr("panel-workflow-label-binary"),
+            i18n::tr("panel-workflow-value-binary"),
+        ),
+        (
+            i18n::tr("panel-workflow-label-subagents"),
+            format!("{}", subagent_count),
+        ),
         (
             i18n::tr("panel-workflow-label-self-check"),
             i18n::tr("panel-workflow-value-self-check"),
@@ -136,11 +145,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     )]));
     lines.push(Line::from(""));
     lines.push(
-        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def
-            .read()
-            .semantic
-            .text
-            .dim),
+        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def.read().semantic.text.dim),
     );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));

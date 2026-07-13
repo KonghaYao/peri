@@ -95,11 +95,7 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Hint line
     lines.push(
-        Line::from(i18n::tr("panel-betas-readonly-hint")).fg(theme_def
-            .read()
-            .semantic
-            .text
-            .muted),
+        Line::from(i18n::tr("panel-betas-readonly-hint")).fg(theme_def.read().semantic.text.muted),
     );
     lines.push(Line::from(""));
 
@@ -113,7 +109,11 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         } else {
             Style::new().fg(theme_def.read().semantic.text.primary)
         };
-        let value_text = if entry.enabled { i18n::tr("common-on") } else { i18n::tr("common-off") };
+        let value_text = if entry.enabled {
+            i18n::tr("common-on")
+        } else {
+            i18n::tr("common-off")
+        };
         let value_style = if entry.enabled {
             Style::new()
                 .fg(theme_def.read().semantic.status.success)
@@ -138,22 +138,21 @@ pub fn BetasPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     if BETA_ENTRIES.is_empty() {
         lines.push(Line::from(""));
-        lines
-            .push(Line::from(i18n::tr("panel-betas-empty")).fg(theme_def.read().semantic.text.muted));
+        lines.push(
+            Line::from(i18n::tr("panel-betas-empty")).fg(theme_def.read().semantic.text.muted),
+        );
     }
 
     // Footer hints
     lines.push(Line::from(""));
     lines.push(
-        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def
-            .read()
-            .semantic
-            .text
-            .dim),
+        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def.read().semantic.text.dim),
     );
 
     let content = if lines.is_empty() {
-        Paragraph::new(Line::from(i18n::tr("common-empty")).fg(theme_def.read().semantic.text.muted))
+        Paragraph::new(
+            Line::from(i18n::tr("common-empty")).fg(theme_def.read().semantic.text.muted),
+        )
     } else {
         Paragraph::new(ratatui::text::Text::from(lines))
     };

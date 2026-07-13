@@ -131,9 +131,12 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::new().fg(popup_tokens.border))
         .title_top(
-            Line::from(i18n::tr_args("mention-popup-title", &[("name".to_string(), FluentValue::from(props.prefix.as_str()))]))
-                .fg(popup_tokens.action_primary)
-                .bold(),
+            Line::from(i18n::tr_args(
+                "mention-popup-title",
+                &[("name".to_string(), FluentValue::from(props.prefix.as_str()))],
+            ))
+            .fg(popup_tokens.action_primary)
+            .bold(),
         );
 
     let text_render = if empty {

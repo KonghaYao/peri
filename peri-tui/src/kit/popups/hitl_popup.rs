@@ -176,15 +176,9 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
 
             lines.push(Line::from(""));
-            lines.push(
-                Line::from(i18n::tr("popup-hitl-action-hint")).fg(semantic.text.dim),
-            );
+            lines.push(Line::from(i18n::tr("popup-hitl-action-hint")).fg(semantic.text.dim));
         }
     }
 
-    popup_text_shell!(
-        i18n::tr("popup-hitl-title"),
-        semantic.status.warning,
-        lines
-    )
+    popup_text_shell!(i18n::tr("popup-hitl-title"), semantic.status.warning, lines)
 }

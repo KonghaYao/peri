@@ -79,7 +79,11 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     for (i, name) in themes.iter().enumerate() {
         let is_current = *name == current_name;
         let cursor = if i == selection { ">" } else { " " };
-        let active_mark = if is_current { i18n::tr("panel-theme-active-mark") } else { String::new() };
+        let active_mark = if is_current {
+            i18n::tr("panel-theme-active-mark")
+        } else {
+            String::new()
+        };
         let display = format!("{} {}{}", cursor, name, active_mark);
 
         let style = if i == selection {
@@ -93,8 +97,7 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         lines.push(Line::from(Span::styled(display, style)));
     }
 
-    let footer =
-        Line::from(i18n::tr("panel-theme-nav-hint")).fg(guard.semantic.text.dim);
+    let footer = Line::from(i18n::tr("panel-theme-nav-hint")).fg(guard.semantic.text.dim);
 
     let content = if lines.is_empty() {
         Paragraph::new(Line::from(i18n::tr("panel-theme-empty")).fg(guard.semantic.text.muted))

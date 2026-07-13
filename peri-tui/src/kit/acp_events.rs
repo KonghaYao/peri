@@ -710,7 +710,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     "bg-task-notify-completed",
                     &[
                         ("name".into(), FluentValue::from(task_id.as_str())),
-                        ("duration".into(), FluentValue::from(*duration_ms as f64 / 1000.0)),
+                        (
+                            "duration".into(),
+                            FluentValue::from(*duration_ms as f64 / 1000.0),
+                        ),
                     ],
                 )
             } else {
@@ -718,7 +721,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     "bg-task-notify-failed",
                     &[
                         ("name".into(), FluentValue::from(task_id.as_str())),
-                        ("duration".into(), FluentValue::from(*duration_ms as f64 / 1000.0)),
+                        (
+                            "duration".into(),
+                            FluentValue::from(*duration_ms as f64 / 1000.0),
+                        ),
                     ],
                 )
             };
@@ -823,6 +829,17 @@ fn extract_message_text(msg: &serde_json::Value) -> String {
 /// 从 `state.committed`（im::Vector）clone（O(1)引用计数）后逐条 push_back
 /// `current_turn.view_models()`，构成扁平单层列表。generation 每次调用递增+1。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
+    // [Diagnostic] 追踪 VIEW_MODELS 写入时机——配合 scroll diag 分析 submit/history 滚动问题
+    let is_loading = state.phase == SessionPhase::PromptRunning;
+    tracing::info!(
+        target: "msg_scroll_diag",
+        committed = state.committed.len(),
+        current_turn = state.current_turn.view_models().len(),
+        generation = state.generation,
+        phase = ?state.phase,
+        is_loading,
+        "push_view_models: writing VIEW_MODELS atom",
+    );
     let mut items = state.committed.clone();
     for vm in state.current_turn.view_models() {
         items.push_back(vm.clone());

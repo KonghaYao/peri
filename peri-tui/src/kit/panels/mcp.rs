@@ -6,7 +6,7 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{MCP_SERVERS, McpServerSummary, LANG_VERSION, SERVICE_SNAPSHOT};
+use crate::kit::atoms::{LANG_VERSION, MCP_SERVERS, McpServerSummary, SERVICE_SNAPSHOT};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
@@ -94,7 +94,10 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             i18n::tr_args(
                 "panel-mcp-connected",
                 &[
-                    ("connected".to_string(), FluentValue::from(connected_total as i64)),
+                    (
+                        "connected".to_string(),
+                        FluentValue::from(connected_total as i64),
+                    ),
                     ("total".to_string(), FluentValue::from(config_total as i64)),
                 ],
             ),
@@ -143,7 +146,10 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 i18n::tr_args(
                     "panel-mcp-server-detail",
                     &[
-                        ("transport".to_string(), FluentValue::from(s.transport.as_str())),
+                        (
+                            "transport".to_string(),
+                            FluentValue::from(s.transport.as_str()),
+                        ),
                         ("count".to_string(), FluentValue::from(s.tools_count as i64)),
                     ],
                 ),
@@ -154,11 +160,7 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     lines.push(Line::from(""));
     lines.push(
-        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def
-            .read()
-            .semantic
-            .text
-            .dim),
+        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def.read().semantic.text.dim),
     );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
@@ -181,9 +183,15 @@ fn derive_status_style(status: &str) -> (String, ratatui::style::Color) {
             THEME_ATOM.state().read().semantic.status.success,
         )
     } else if status.contains("error") || status.contains("failed") {
-        (i18n::tr("panel-mcp-icon-error"), THEME_ATOM.state().read().semantic.status.error)
+        (
+            i18n::tr("panel-mcp-icon-error"),
+            THEME_ATOM.state().read().semantic.status.error,
+        )
     } else {
-        (i18n::tr("panel-mcp-icon-unknown"), THEME_ATOM.state().read().semantic.text.muted)
+        (
+            i18n::tr("panel-mcp-icon-unknown"),
+            THEME_ATOM.state().read().semantic.text.muted,
+        )
     }
 }
 

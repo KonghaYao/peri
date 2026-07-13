@@ -38,13 +38,13 @@ use crate::kit::atoms::{
     MENTION_SELECTED_INDEX, POPUP_KIND, PREDICTION, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX,
     SLASH_SELECTED_INDEX, SUBMIT_TX,
 };
-use fluent_bundle::FluentValue;
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
 use crate::kit::mention_popup::MentionPopup;
 use crate::kit::panel_registry::{PANELS, open_panel, panel_description, panel_for_slash_command};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
 use crate::kit::submit_request::{SubmitRequest, parse_submit_request};
+use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
 /// 输入区域 prompt + border 占用的列宽常量。

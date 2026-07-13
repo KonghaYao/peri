@@ -179,9 +179,12 @@ pub fn SlashCompletion(
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::new().fg(popup_tokens.border))
         .title_top(
-            Line::from(i18n::tr_args("slash-completion-title", &[("name".to_string(), FluentValue::from(props.prefix.as_str()))]))
-                .fg(popup_tokens.action_primary)
-                .bold(),
+            Line::from(i18n::tr_args(
+                "slash-completion-title",
+                &[("name".to_string(), FluentValue::from(props.prefix.as_str()))],
+            ))
+            .fg(popup_tokens.action_primary)
+            .bold(),
         );
 
     // 计算可见窗口：只渲染可见区域内的项，避免选中项滚出视野

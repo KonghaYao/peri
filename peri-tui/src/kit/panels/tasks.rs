@@ -9,7 +9,7 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{BG_TASKS, CRON_JOBS, VIEW_MODELS, LANG_VERSION};
+use crate::kit::atoms::{BG_TASKS, CRON_JOBS, LANG_VERSION, VIEW_MODELS};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
 use fluent_bundle::FluentValue;
@@ -116,7 +116,10 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 &[
                     ("bg".to_string(), FluentValue::from(bg_count as i64)),
                     ("cron".to_string(), FluentValue::from(cron_count as i64)),
-                    ("subagent".to_string(), FluentValue::from(subagent_count as i64)),
+                    (
+                        "subagent".to_string(),
+                        FluentValue::from(subagent_count as i64),
+                    ),
                 ],
             ),
             Style::new().fg(theme_def.read().semantic.text.dim),
@@ -127,7 +130,10 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Background Tasks section
     if !bg_tasks.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            i18n::tr_args("panel-tasks-section-bg", &[("count".to_string(), FluentValue::from(bg_count as i64))]),
+            i18n::tr_args(
+                "panel-tasks-section-bg",
+                &[("count".to_string(), FluentValue::from(bg_count as i64))],
+            ),
             Style::new()
                 .fg(theme_def.read().semantic.border.active)
                 .bold(),
@@ -151,7 +157,12 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             };
             let pid_str = task
                 .pid
-                .map(|p| i18n::tr_args("panel-tasks-pid", &[("pid".to_string(), FluentValue::from(p as i64))]))
+                .map(|p| {
+                    i18n::tr_args(
+                        "panel-tasks-pid",
+                        &[("pid".to_string(), FluentValue::from(p as i64))],
+                    )
+                })
                 .unwrap_or_default();
             lines.push(Line::from(vec![
                 Span::styled(
@@ -179,7 +190,10 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Cron section
     if !cron_jobs.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            i18n::tr_args("panel-tasks-section-cron", &[("count".to_string(), FluentValue::from(cron_count as i64))]),
+            i18n::tr_args(
+                "panel-tasks-section-cron",
+                &[("count".to_string(), FluentValue::from(cron_count as i64))],
+            ),
             Style::new()
                 .fg(theme_def.read().semantic.border.active)
                 .bold(),
@@ -229,7 +243,13 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // SubAgent section
     if !subagents.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            i18n::tr_args("panel-tasks-section-subagent", &[("count".to_string(), FluentValue::from(subagent_count as i64))]),
+            i18n::tr_args(
+                "panel-tasks-section-subagent",
+                &[(
+                    "count".to_string(),
+                    FluentValue::from(subagent_count as i64),
+                )],
+            ),
             Style::new()
                 .fg(theme_def.read().semantic.border.active)
                 .bold(),
@@ -268,7 +288,13 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ),
                 collapsed_marker,
                 Span::styled(
-                    i18n::tr_args("panel-tasks-msgs", &[("count".to_string(), FluentValue::from(sa.view_models.len() as i64))]),
+                    i18n::tr_args(
+                        "panel-tasks-msgs",
+                        &[(
+                            "count".to_string(),
+                            FluentValue::from(sa.view_models.len() as i64),
+                        )],
+                    ),
                     Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
             ]));
@@ -294,11 +320,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     lines.push(Line::from(""));
     lines.push(
-        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def
-            .read()
-            .semantic
-            .text
-            .dim),
+        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def.read().semantic.text.dim),
     );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));

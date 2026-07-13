@@ -14,7 +14,7 @@ use crate::i18n;
 use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::atoms::{
     self, ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, CONFIRM_PAYLOAD,
-    LANG_VERSION, ConfirmAction,
+    ConfirmAction, LANG_VERSION,
 };
 use crate::kit::panel_registry::close_panel;
 use crate::kit::popup_overlay::close_popup;
@@ -105,9 +105,7 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 lines.push(Line::from(detail.clone()).fg(semantic.text.muted));
             }
             lines.push(Line::from(""));
-            lines.push(
-                Line::from(i18n::tr("popup-confirm-action-hint")).fg(semantic.text.dim),
-            );
+            lines.push(Line::from(i18n::tr("popup-confirm-action-hint")).fg(semantic.text.dim));
         }
     }
 

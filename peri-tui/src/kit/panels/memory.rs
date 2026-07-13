@@ -8,7 +8,7 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{MEMORY_LIST, MemoryEntry, LANG_VERSION};
+use crate::kit::atoms::{LANG_VERSION, MEMORY_LIST, MemoryEntry};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
@@ -77,7 +77,10 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 头部摘要
     lines.push(Line::from(vec![Span::styled(
-        i18n::tr_args("panel-memory-stats", &[("count".to_string(), FluentValue::from(count as i64))]),
+        i18n::tr_args(
+            "panel-memory-stats",
+            &[("count".to_string(), FluentValue::from(count as i64))],
+        ),
         Style::new()
             .fg(theme_def.read().semantic.text.primary)
             .bold(),

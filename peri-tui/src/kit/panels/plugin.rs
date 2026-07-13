@@ -6,7 +6,7 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{PLUGIN_LIST, PluginSummary, LANG_VERSION};
+use crate::kit::atoms::{LANG_VERSION, PLUGIN_LIST, PluginSummary};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
@@ -71,7 +71,10 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     lines.push(Line::from(vec![Span::styled(
-        i18n::tr_args("panel-plugin-stats", &[("count".to_string(), FluentValue::from(count as i64))]),
+        i18n::tr_args(
+            "panel-plugin-stats",
+            &[("count".to_string(), FluentValue::from(count as i64))],
+        ),
         Style::new()
             .fg(theme_def.read().semantic.text.primary)
             .bold(),
@@ -149,11 +152,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     lines.push(
-        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def
-            .read()
-            .semantic
-            .text
-            .dim),
+        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def.read().semantic.text.dim),
     );
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));

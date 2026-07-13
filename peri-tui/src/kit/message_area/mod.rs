@@ -11,7 +11,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::kit::atoms::{LANG_VERSION, VIEW_MODELS};
+use crate::kit::atoms::{BRIDGE_RESET_COUNTER, LANG_VERSION, LOADING_EPOCH, VIEW_MODELS};
 use crate::kit::text_selection::TextSelection;
 use crate::kit::welcome::Welcome;
 use peri_theme::atoms::THEME_ATOM;
@@ -251,6 +251,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 吸底自动跟随 ──
     let last_scrolled_at = hooks.use_state(|| 0u16);
     let prev_total_visual_rows = hooks.use_state(|| 0u16);
+    // [Fix] Submit 强制滚底 / History 切换强制滚底：订阅 atom 重新渲染
+    let _loading_epoch_atom = hooks.use_atom(&LOADING_EPOCH);
+    let _reset_counter_atom = hooks.use_atom(&BRIDGE_RESET_COUNTER);
+    let loading_epoch = LOADING_EPOCH.get();
+    let prev_loading_epoch = hooks.use_state(|| loading_epoch);
+    let bridge_reset_counter = BRIDGE_RESET_COUNTER.get();
+    let prev_reset_counter = hooks.use_state(|| bridge_reset_counter);
     hooks.use_effect(
         {
             move || {
@@ -263,6 +270,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     items_len,
                     is_loading,
                     prev_total_visual_rows,
+                    loading_epoch,
+                    prev_loading_epoch,
+                    bridge_reset_counter,
+                    prev_reset_counter,
                 })
             }
         },

@@ -118,8 +118,14 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             i18n::tr_args(
                 "panel-cron-stats",
                 &[
-                    ("configured".to_string(), FluentValue::from(jobs.len() as i64)),
-                    ("enabled".to_string(), FluentValue::from(enabled_count as i64)),
+                    (
+                        "configured".to_string(),
+                        FluentValue::from(jobs.len() as i64),
+                    ),
+                    (
+                        "enabled".to_string(),
+                        FluentValue::from(enabled_count as i64),
+                    ),
                 ],
             ),
             Style::new()
@@ -186,7 +192,12 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     name_style,
                 ),
                 Span::styled(
-                    i18n::tr_args("panel-cron-status-format", &[("status".to_string(), FluentValue::from(enabled_label))]), enabled_style),
+                    i18n::tr_args(
+                        "panel-cron-status-format",
+                        &[("status".to_string(), FluentValue::from(enabled_label))],
+                    ),
+                    enabled_style,
+                ),
             ]));
 
             // Detail line: prompt summary (indented)
@@ -209,7 +220,11 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Some(next) = entry.next_fire {
                 let ts = next.format("%Y-%m-%d %H:%M").to_string();
                 lines.push(Line::from(vec![Span::styled(
-                    i18n::tr_args("panel-cron-next-fire", &[("time".to_string(), FluentValue::from(ts))]),                    Style::new().fg(theme_def.read().semantic.text.muted),
+                    i18n::tr_args(
+                        "panel-cron-next-fire",
+                        &[("time".to_string(), FluentValue::from(ts))],
+                    ),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
                 )]));
             } else {
                 // next_fire 缺失时占位空行，保证每项固定 3 行（视口计算依赖）
@@ -219,7 +234,9 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     let content = if lines.is_empty() {
-        Paragraph::new(Line::from(i18n::tr("common-empty")).fg(theme_def.read().semantic.text.muted))
+        Paragraph::new(
+            Line::from(i18n::tr("common-empty")).fg(theme_def.read().semantic.text.muted),
+        )
     } else {
         Paragraph::new(ratatui::text::Text::from(lines))
     };

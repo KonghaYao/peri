@@ -145,6 +145,11 @@ async fn handle_load(
     *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
     crate::kit::input_history::reset_history_cursor();
     // 4. 最后加载 session。replay notification 到达时 active session 已就绪，不会被误丢。
+    tracing::info!(
+        target: "msg_scroll_diag",
+        thread_id = %thread_id,
+        "thread_load_consumer: about to call load_session() for history replay",
+    );
     acp_client.load_session(&thread_id, cwd, None).await?;
     // 5. session/load 已完成，显式回到 idle，避免 replay 或历史 usage 留下 loading 态。
     {

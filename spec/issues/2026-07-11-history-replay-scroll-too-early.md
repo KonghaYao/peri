@@ -33,15 +33,28 @@
   5. 必须手动按 Ctrl+End 才能看到最后一条消息
 - **环境**：macOS，ratatui-kit 架构
 
+## 现象 2（2026-07-13 追加）：replay 批次完成后仍不滚底
+
+消息区重构（拆分为 `message_area/` 子目录）后，`run_auto_follow` 中原来的 `prev==0 && len>0` 分支已被删除，非 loading 分支（scroll.rs:550-564）仅通过 proximity 检测（`distance <= vis_height/4`）触发吸底。history replay 是按批次到达的（第一批 1 条、后续大批次），每个批次 items_len 从 prev 增长，进入 proximity 检测。但当内容远超一屏时 `distance` 远大于 `vis_height/4`，proximity guard 永久阻止 `scroll_to_bottom()`。
+
+| 维度 | 观察 |
+|------|------|
+| 代码变化 | 20 帧强制吸底窗口方案**未被应用到当前代码**——`run_auto_follow` 中没有 `init_frames` counter、没有 `prev==0` 分支 |
+| 实际表现 | 恢复历史会话后，消息区停在第一屏顶部附近（scroll_y=0），完全看不到末尾消息 |
+| 对比旧行为 | 旧代码（`prev==0 && len>0`）至少在第一帧触发了 scroll_to_bottom，只是过早（布局未就绪）；现在的代码完全不触发 |
+
 ## 涉及文件
 
-- `peri-tui/src/kit/message_area.rs` —— `use_effect` 吸底逻辑（路径 B：`prev == 0 && len > 0` 在首帧触发 `scroll_to_bottom`），`total_visual_rows` 计算依赖 `area_rect`（首帧为 `None` 时用回退宽度）
+- `peri-tui/src/kit/message_area/scroll.rs` —— `run_auto_follow` 吸底逻辑（`prev==0 && len>0` 分支已删除，proximity 检测阻止了大距离吸底）
+- `peri-tui/src/kit/message_area/mod.rs` —— `use_effect` deps = `(items_len, vm_generation, is_loading)`；MessageArea 组件本体
+- `peri-tui/src/kit/thread_load_consumer.rs` —— `handle_load` 递增 `BRIDGE_RESET_COUNTER` → 调用 `load_session` RPC → replay 事件批次到达
 
 ## 状态变更记录
 
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-07-11 | — | Open | deepseek-v4-pro | 创建（issue-create skill） |
+| 2026-07-13 | Open | Open | deepseek-v4-pro | 追加现象 2（issue-create skill）：代码重构后 `prev==0` 分支已删除，proximity guard 永久阻止大距离吸底 |
 
 ## 修复记录
 

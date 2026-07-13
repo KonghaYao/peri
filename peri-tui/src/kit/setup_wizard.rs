@@ -118,7 +118,10 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Style::new().fg(semantic.text.primary),
             )),
             Line::from(vec![
-                Span::styled(i18n::tr("setup-step-3"), Style::new().fg(semantic.text.primary)),
+                Span::styled(
+                    i18n::tr("setup-step-3"),
+                    Style::new().fg(semantic.text.primary),
+                ),
                 Span::styled(
                     home_dir.clone(),
                     Style::new().fg(semantic.border.active).italic(),

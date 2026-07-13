@@ -19,7 +19,9 @@ use ratatui_kit::{
 };
 
 use crate::kit::ask_user_action::AskUserResponseAction;
-use crate::kit::atoms::{ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, LANG_VERSION};
+use crate::kit::atoms::{
+    ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, LANG_VERSION,
+};
 use crate::kit::list_nav::{
     ListNavAction, classify_list_nav, cycle_next, cycle_previous, next_selection,
     previous_selection,
@@ -217,10 +219,8 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
         Some(au) if au.questions.is_empty() => {
             lines.push(Line::from(""));
-            lines.push(
-                Line::from(i18n::tr("panel-ask-user-malformed"))
-                    .fg(semantic.status.warning),
-            );
+            lines
+                .push(Line::from(i18n::tr("panel-ask-user-malformed")).fg(semantic.status.warning));
         }
         Some(au) => {
             let focused_idx = (*focused.read()).min(au.questions.len() - 1);
@@ -234,7 +234,11 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .enumerate()
                 .map(|(i, q)| {
                     let answered = answers_read.get(i).copied().flatten().is_some();
-                    let mark = if answered { i18n::tr("panel-ask-user-answered-mark") } else { String::new() };
+                    let mark = if answered {
+                        i18n::tr("panel-ask-user-answered-mark")
+                    } else {
+                        String::new()
+                    };
                     if i == focused_idx {
                         format!("[{}]{}", q.header, mark)
                     } else {
@@ -288,7 +292,9 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
 
                 if q.options.is_empty() {
-                    lines.push(Line::from(i18n::tr("panel-ask-user-no-options")).fg(semantic.text.dim));
+                    lines.push(
+                        Line::from(i18n::tr("panel-ask-user-no-options")).fg(semantic.text.dim),
+                    );
                 }
             }
 
@@ -304,17 +310,13 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 });
                 if all_answered {
                     lines.push(
-                        Line::from(
-                            i18n::tr("panel-ask-user-hint-tab-multi-answered"),
-                        )
-                        .fg(semantic.text.dim),
+                        Line::from(i18n::tr("panel-ask-user-hint-tab-multi-answered"))
+                            .fg(semantic.text.dim),
                     );
                 } else {
                     lines.push(
-                        Line::from(
-                            i18n::tr("panel-ask-user-hint-tab-multi-unanswered"),
-                        )
-                        .fg(semantic.text.dim),
+                        Line::from(i18n::tr("panel-ask-user-hint-tab-multi-unanswered"))
+                            .fg(semantic.text.dim),
                     );
                 }
             } else {
@@ -326,16 +328,12 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         .unwrap_or(true);
                 if is_answered {
                     lines.push(
-                        Line::from(
-                            i18n::tr("panel-ask-user-hint-single-answered"),
-                        )
+                        Line::from(i18n::tr("panel-ask-user-hint-single-answered"))
                             .fg(semantic.text.dim),
                     );
                 } else {
                     lines.push(
-                        Line::from(
-                            i18n::tr("panel-ask-user-hint-single-unanswered"),
-                        )
+                        Line::from(i18n::tr("panel-ask-user-hint-single-unanswered"))
                             .fg(semantic.text.dim),
                     );
                 }

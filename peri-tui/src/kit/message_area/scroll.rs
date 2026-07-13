@@ -494,16 +494,34 @@ pub(super) struct AutoFollowCtx {
     pub is_loading: bool,
     /// 用于检测 resize：total_visual_rows 变化后钳制 scroll_state.offset 到有效范围。
     pub prev_total_visual_rows: State<u16>,
+    /// 用于检测 submit（用户主动发送 prompt）→ 强制滚底，不经过 proximity guard。
+    pub loading_epoch: u64,
+    pub prev_loading_epoch: State<u64>,
+    /// 用于检测 history 切换 / /clear → 重置 prev_items_len/last_scrolled_at，
+    /// 触发「新会话首次批量加载」的强制滚底路径。
+    pub bridge_reset_counter: u64,
+    pub prev_reset_counter: State<u64>,
 }
 
 /// 从 `use_effect` 闭包提取的吸底逻辑。
 /// 注意：use_effect body 不是 render body，所以 `write()` 是正确的（需要 wake 触发后续渲染）。
 pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
+    // [Diagnostic] 记录每次 effect 触发的关键参数——trace 历史/submit 两个滚动问题
+    tracing::info!(
+        target: "msg_scroll_diag",
+        items_len = ctx.items_len,
+        total_rows = ctx.total_visual_rows,
+        vis_h = ctx.vis_height,
+        is_loading = ctx.is_loading,
+        scroll_y = ctx.scroll_state.read().offset().y,
+        prev_lsa = *ctx.last_scrolled_at.read(),
+        prev_items = *ctx.prev_items_len.read(),
+        "auto_follow: entry",
+    );
+
     // [Fix] resize 后 total_visual_rows 变化时，主动钳制 scroll_state.offset 到有效范围。
-    // 避免 scroll_state.offset.y >> max_scroll 导致用户感知滚动完全卡死。
     let prev_total = *ctx.prev_total_visual_rows.read();
     *ctx.prev_total_visual_rows.write() = ctx.total_visual_rows;
-
     if prev_total != ctx.total_visual_rows && ctx.total_visual_rows > 0 && ctx.vis_height > 0 {
         let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height);
         let current_y = ctx.scroll_state.read().offset().y;
@@ -514,13 +532,70 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
         }
     }
 
+    // ── [Fix #1] Submit 强制滚底：用户主动发送 prompt 时 LOADING_EPOCH 递增 ──
+    // 当前 effect 可能在 user bubble 到达 VIEW_MODELS 之前触发（submit_consumer
+    // 先设 is_loading=true，再 call prompt() RPC）。此时 scroll_to_bottom 定位
+    // 到当前的底部位置即可——user bubble 到达后 proximity 自然跟随。
+    let prev_epoch = *ctx.prev_loading_epoch.read();
+    *ctx.prev_loading_epoch.write() = ctx.loading_epoch;
+    if ctx.loading_epoch != prev_epoch && ctx.total_visual_rows > 0 && ctx.vis_height > 0 {
+        tracing::info!(
+            target: "msg_scroll_diag",
+            prev_epoch,
+            new_epoch = ctx.loading_epoch,
+            "auto_follow: submit detected (LOADING_EPOCH changed) → force scroll_to_bottom",
+        );
+        ctx.scroll_state.write().scroll_to_bottom();
+        *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+        // 不 return——继续走后续逻辑处理 user bubble / 流式增长
+    }
+
+    // ── [Fix #2] History 切换 / /clear 检测：BRIDGE_RESET_COUNTER 递增时重置哨兵 ──
+    // prev_items_len←0 和 last_scrolled_at←0 一起作为「新会话首次批量加载」的哨兵：
+    // 后续的 prev==0 分支（在所有 proximity guard 之前）强制每批 scroll_to_bottom，
+    // 且不消费 prev==0（保持 trigger 活跃至 replay 结束）。
+    let prev_ctr = *ctx.prev_reset_counter.read();
+    *ctx.prev_reset_counter.write() = ctx.bridge_reset_counter;
+    if ctx.bridge_reset_counter != prev_ctr {
+        tracing::info!(
+            target: "msg_scroll_diag",
+            prev_ctr,
+            new_ctr = ctx.bridge_reset_counter,
+            "auto_follow: BRIDGE_RESET_COUNTER changed → arming prev==0 force-scroll",
+        );
+        *ctx.prev_items_len.write() = 0;
+        *ctx.last_scrolled_at.write() = 0;
+    }
+
     // [TRAP] parking_lot 同 thread 死锁规避：先 read copy 出 owned，guard 在语句末尾 drop，再 write。
     let prev = *ctx.prev_items_len.read();
-    *ctx.prev_items_len.write() = ctx.items_len;
 
+    // ── 零内容保护 ──
     if ctx.total_visual_rows == 0 || ctx.vis_height == 0 {
+        *ctx.prev_items_len.write() = ctx.items_len;
+        tracing::info!(target: "msg_scroll_diag", "auto_follow: early return (zero total or vis)");
         return;
     }
+
+    // ── [Fix #3] History replay 批量强制滚底（哨兵 prev==0）──
+    // 仅在 non-loading 且 「BRIDGE_RESET_COUNTER 递增触发了 prev_items_len 归零」时进入。
+    // 每批次都 force scroll + 再次将 prev_items_len 归零——直到 replay 结束，
+    // generation 不再增长、effect 停发，prev==0 自然消弭。
+    if prev == 0 && !ctx.is_loading && ctx.items_len > 0 {
+        tracing::info!(
+            target: "msg_scroll_diag",
+            items_len = ctx.items_len,
+            "auto_follow: prev==0 force-scroll (history replay batch) → scroll_to_bottom",
+        );
+        ctx.scroll_state.write().scroll_to_bottom();
+        *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+        // 不消费 prev==0——维持为 0 让后续 batch 也走此路径
+        *ctx.prev_items_len.write() = 0;
+        return;
+    }
+
+    // ── 正常路径：更新 prev_items_len ──
+    *ctx.prev_items_len.write() = ctx.items_len;
 
     if ctx.is_loading {
         // [TRAP] read+write 同 state 同线程 = parking_lot 死锁——先 copy 出来
@@ -529,20 +604,23 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
             let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height);
             let scroll_y = ctx.scroll_state.read().offset().y;
             let distance = max_scroll.saturating_sub(scroll_y);
-            // [Bug] 仅在用户当前接近底部时跟随——用户主动上滚浏览历史时不应被吸回。
-            // 阈值与非 loading 分支保持一致（vis_height/4，至少 5 行）。
+            // 仅在用户当前接近底部时跟随——用户主动上滚浏览历史时不应被吸回。
             let threshold = (ctx.vis_height / 4).max(5);
             if distance <= threshold {
+                tracing::info!(target: "msg_scroll_diag", distance, threshold, "auto_follow: loading → scroll_to_bottom");
                 ctx.scroll_state.write().scroll_to_bottom();
                 *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+            } else {
+                tracing::info!(target: "msg_scroll_diag", distance, threshold, "auto_follow: loading → skip (distance > threshold)");
             }
-            // 用户上滚超过阈值（distance > threshold）时不抢夺滚动位——last_scrolled_at
-            // 也不更新，让下次 effect 重新检测；用户回到接近底部后自然恢复跟随。
+        } else {
+            tracing::info!(target: "msg_scroll_diag", total = ctx.total_visual_rows, prev_lsa, "auto_follow: loading → skip (total_rows not greater than prev_lsa)");
         }
         return;
     }
 
     if ctx.items_len < prev {
+        tracing::info!(target: "msg_scroll_diag", items_len = ctx.items_len, prev, "auto_follow: shrink → scroll_to_bottom");
         ctx.scroll_state.write().scroll_to_bottom();
         *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
         return;
@@ -551,16 +629,22 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height);
     let scroll_y = ctx.scroll_state.read().offset().y;
     if scroll_y >= max_scroll {
+        tracing::info!(target: "msg_scroll_diag", scroll_y, max_scroll, "auto_follow: non-loading → skip (already at bottom)");
         return;
     }
     let distance = max_scroll.saturating_sub(scroll_y);
-    if distance > (ctx.vis_height / 4).max(5) {
+    let threshold = (ctx.vis_height / 4).max(5);
+    if distance > threshold {
+        tracing::info!(target: "msg_scroll_diag", distance, threshold, scroll_y, max_scroll, "auto_follow: non-loading → skip (distance > threshold)");
         return;
     }
     let prev_lsa = *ctx.last_scrolled_at.read();
     if ctx.total_visual_rows > prev_lsa {
+        tracing::info!(target: "msg_scroll_diag", distance, threshold, "auto_follow: non-loading proximity → scroll_to_bottom");
         ctx.scroll_state.write().scroll_to_bottom();
         *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+    } else {
+        tracing::info!(target: "msg_scroll_diag", total = ctx.total_visual_rows, prev_lsa, "auto_follow: non-loading proximity → skip (total_rows not greater than prev_lsa)");
     }
 }
 

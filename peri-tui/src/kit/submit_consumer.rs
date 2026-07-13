@@ -170,6 +170,10 @@ async fn handle_agent_text_submit(
     // 避免 rapid toggle（如 TurnDone → drain_input_buffer → 新 prompt）
     // 在同一渲染周期内完成时组件错过 is_loading 的 false 中间态。
     *LOADING_EPOCH.state().write() += 1;
+    tracing::info!(
+        target: "msg_scroll_diag",
+        "submit_consumer: set is_loading=true, LOADING_EPOCH incremented, about to call prompt()",
+    );
 
     let content = MessageContent::text(trimmed.to_string());
     acp_client.prompt(&content).await.map_err(|e| {

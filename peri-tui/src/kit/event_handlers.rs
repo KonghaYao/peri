@@ -16,13 +16,13 @@ use ratatui_kit::{
     prelude::*,
 };
 
-use crate::i18n;
 use super::atoms::{
     ACP_STATE, CANCEL_TX, INPUT_AREA_ESC_PREFIX, LAST_CTRL_C_PROCESSED, LAST_ESC_TIME,
     MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, PERMISSION_MODE_HANDLE,
     PROVIDER_HIGHLIGHT_UNTIL, QUIT_PENDING_SINCE, REWIND_PREVIEW, SERVICE_SNAPSHOT,
 };
 use crate::app::panel_types::PanelKind;
+use crate::i18n;
 use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::atoms::{
     ACTIVE_PANEL, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, Notification, PopupKind,

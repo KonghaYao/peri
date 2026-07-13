@@ -90,7 +90,13 @@ pub fn BgTaskArea(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 溢出行
     if overflow_count > 0 {
         lines.push(Line::from(Span::styled(
-            i18n::tr_args("bg-task-overflow", &[("count".to_string(), FluentValue::from(overflow_count as i64))]),
+            i18n::tr_args(
+                "bg-task-overflow",
+                &[(
+                    "count".to_string(),
+                    FluentValue::from(overflow_count as i64),
+                )],
+            ),
             Style::default()
                 .fg(Color::Gray)
                 .add_modifier(ratatui::style::Modifier::DIM),
@@ -143,7 +149,10 @@ fn render_entry_line(entry: &BgDisplayEntry, render_count: usize) -> Line<'stati
                 "bg-task-tools-running",
                 &[
                     ("name".to_string(), FluentValue::from(tool.as_str())),
-                    ("count".to_string(), FluentValue::from(entry.tool_count as i64)),
+                    (
+                        "count".to_string(),
+                        FluentValue::from(entry.tool_count as i64),
+                    ),
                 ],
             )
         } else {
@@ -156,7 +165,10 @@ fn render_entry_line(entry: &BgDisplayEntry, render_count: usize) -> Line<'stati
         spans.push(Span::styled(
             i18n::tr_args(
                 "bg-task-tools-done",
-                &[("count".to_string(), FluentValue::from(entry.tool_count as i64))],
+                &[(
+                    "count".to_string(),
+                    FluentValue::from(entry.tool_count as i64),
+                )],
             ),
             Style::default().fg(Color::Green),
         ));
