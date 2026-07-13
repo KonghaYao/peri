@@ -325,7 +325,7 @@ pub const PANELS: &[PanelMeta] = &[
         kind: PanelKind::Workflow,
         title: "Workflow",
         shortcut_letter: 'w',
-        slash_command: "workflow",
+        slash_command: "workflows",
         description: "Workflow runs",
         priority: 13,
         mutex_group: MutexGroup::Tools,

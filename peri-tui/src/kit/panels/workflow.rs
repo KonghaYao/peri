@@ -6,12 +6,15 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{LANG_VERSION, WORKFLOW_SNAPSHOT};
-use crate::kit::list_nav::{cycle_next, cycle_previous, previous_selection};
+use crate::kit::list_nav::{
+    cycle_next, cycle_previous, previous_selection, scroll_start_for_selected,
+};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
+        layout::{Constraint, Direction},
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -130,19 +133,34 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let current_run = &runs[sel_run];
 
     // ── Selection clamping (during render, not event handler) ────────────
-    // Gate writes with a change check to avoid infinite re-render loops
+    // 先 clamp phase 选择 → 据此过滤 agents → 再 clamp agent 选择
     let phase_count = current_run.phases.len();
-    let agent_count = current_run.agents.len();
     let clamped_phase = (*phase_sel.read()).min(phase_count.saturating_sub(1));
-    let clamped_agent = (*agent_sel.read()).min(agent_count.saturating_sub(1));
     if *phase_sel.read() != clamped_phase {
         *phase_sel.write() = clamped_phase;
     }
+
+    let sel_phase = *phase_sel.read();
+    let sel_phase_title = current_run
+        .phases
+        .get(sel_phase)
+        .map(|p| p.title.as_str())
+        .unwrap_or("");
+
+    let agent_count = if sel_phase_title.is_empty() {
+        current_run.agents.len()
+    } else {
+        current_run
+            .agents
+            .iter()
+            .filter(|a| a.phase.as_deref() == Some(sel_phase_title))
+            .count()
+    };
+    let clamped_agent = (*agent_sel.read()).min(agent_count.saturating_sub(1));
     if *agent_sel.read() != clamped_agent {
         *agent_sel.write() = clamped_agent;
     }
 
-    let sel_phase = *phase_sel.read();
     let sel_agent = *agent_sel.read();
     let focus = *focus_left.read();
 
@@ -173,11 +191,6 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // ── Phase lines ──────────────────────────────────────────────────────
     let mut phase_lines: Vec<Line<'_>> = Vec::new();
-    // Phase header
-    phase_lines.push(Line::from(vec![Span::styled(
-        " Phases",
-        Style::new().fg(theme.semantic.text.muted).bold(),
-    )]));
     for (pi, phase) in current_run.phases.iter().enumerate() {
         let is_sel = focus && pi == sel_phase;
         let arrow = if is_sel { ">" } else { " " };
@@ -217,13 +230,20 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         )]));
     }
 
-    // ── Agent lines ──────────────────────────────────────────────────────
+    // ── Agent lines（按选中 phase 过滤，去除重复 phase 标签）──────────
     let mut agent_lines: Vec<Line<'_>> = Vec::new();
-    agent_lines.push(Line::from(vec![Span::styled(
-        " Agents",
-        Style::new().fg(theme.semantic.text.muted).bold(),
-    )]));
-    for (ai, agent) in current_run.agents.iter().enumerate() {
+    let filtered_agents: Vec<_> = current_run
+        .agents
+        .iter()
+        .filter(|a| {
+            if sel_phase_title.is_empty() {
+                true
+            } else {
+                a.phase.as_deref() == Some(sel_phase_title)
+            }
+        })
+        .collect();
+    for (ai, agent) in filtered_agents.iter().enumerate() {
         let is_sel = !focus && ai == sel_agent;
         let arrow = if is_sel { ">" } else { " " };
         let arrow_style = Style::new().fg(theme.component.panel.title).bold();
@@ -234,15 +254,13 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             .as_deref()
             .unwrap_or("?")
             .chars()
-            .take(16)
+            .take(18)
             .collect::<String>();
         let name_style = if is_sel {
             Style::new().fg(theme.component.panel.title).bold()
         } else {
             Style::new().fg(theme.semantic.text.primary)
         };
-        let phase_tag = agent.phase.as_deref().unwrap_or("-");
-        let tag_style = Style::new().fg(theme.semantic.text.muted);
         let tokens = abbreviate_count(agent.token_count.unwrap_or(0));
         let tools = format!("{}", agent.tool_count.unwrap_or(0));
         let dim_style = Style::new().fg(theme.semantic.text.dim);
@@ -250,43 +268,73 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         agent_lines.push(Line::from(vec![
             Span::styled(arrow, arrow_style),
             Span::styled(format!(" {emoji} "), emoji_color),
-            Span::styled(format!("{name:16}"), name_style),
-            Span::styled(format!(" [{phase_tag}]"), tag_style),
+            Span::styled(format!("{name:18}"), name_style),
             Span::styled(format!(" {tokens:>8}"), dim_style),
-            Span::styled(format!("  {tools:>8}"), dim_style),
+            Span::styled(format!("  {tools:>4}"), dim_style),
         ]));
     }
-    if current_run.agents.is_empty() {
+    if filtered_agents.is_empty() {
         agent_lines.push(Line::from(vec![Span::styled(
-            "  (no agents)",
+            "  (no agents for this phase)",
             Style::new().fg(theme.semantic.text.muted),
         )]));
     }
 
-    // ── Interleave phases and agents side by side ────────────────────────
-    let max_rows = phase_lines.len().max(agent_lines.len());
-    let mut body_lines: Vec<Line<'_>> = Vec::new();
-    let sep_span = Span::styled(" │ ", Style::new().fg(theme.semantic.text.dim));
+    // ── Two-column layout via ratatui View + ScrollView ──────────────────────
+    //
+    // 左侧 Phase 列 40%，中部 │ 分隔线，右侧 Agents 列 60%。
+    // 每列独立 ScrollView，选中项跟随滚动。
 
-    for row in 0..max_rows {
-        let phase_span = if row < phase_lines.len() {
-            phase_lines[row].clone()
-        } else {
-            Line::from("")
-        };
-        let agent_span = if row < agent_lines.len() {
-            agent_lines[row].clone()
-        } else {
-            Line::from("")
-        };
+    // 计算各列可见行数。body height=18 - header(1) - separator(1) = 16 项。
+    const BODY_HEIGHT: u16 = 18;
+    const VISIBLE_ITEMS: usize = 16;
 
-        let mut combined_spans: Vec<Span<'_>> = Vec::new();
-        // Add phase spans (pad to ~30 wide)
-        combined_spans.extend(phase_span.spans);
-        combined_spans.push(sep_span.clone());
-        combined_spans.extend(agent_span.spans);
-        body_lines.push(Line::from(combined_spans));
-    }
+    let phase_scroll = scroll_start_for_selected(sel_phase, phase_lines.len(), VISIBLE_ITEMS);
+    let agent_scroll = scroll_start_for_selected(sel_agent, filtered_agents.len(), VISIBLE_ITEMS);
+
+    // Build phases Paragraph: header + separator + visible slice
+    let mut phase_text: Vec<Line<'_>> = Vec::new();
+    phase_text.push(Line::from(Span::styled(
+        " Phases",
+        Style::new().fg(theme.semantic.text.muted).bold(),
+    )));
+    phase_text.push(Line::from(Span::styled(
+        " ──────────────",
+        Style::new().fg(theme.semantic.border.default),
+    )));
+    phase_text.extend(
+        phase_lines
+            .into_iter()
+            .skip(phase_scroll)
+            .take(VISIBLE_ITEMS),
+    );
+
+    // Build agents Paragraph: header + separator + visible slice
+    let mut agent_text: Vec<Line<'_>> = Vec::new();
+    agent_text.push(Line::from(Span::styled(
+        " Agents",
+        Style::new().fg(theme.semantic.text.muted).bold(),
+    )));
+    agent_text.push(Line::from(Span::styled(
+        " ──────────────",
+        Style::new().fg(theme.semantic.border.default),
+    )));
+    agent_text.extend(
+        agent_lines
+            .into_iter()
+            .skip(agent_scroll)
+            .take(VISIBLE_ITEMS),
+    );
+
+    // Divider —— 渲染垂直 │ 线；高度固定为 body viewport
+    let divider_style = Style::new().fg(theme.semantic.border.default);
+    let divider_lines: Vec<Line<'_>> = (0..BODY_HEIGHT as usize)
+        .map(|_| Line::from(Span::styled("│", divider_style)))
+        .collect();
+
+    let phase_para = Paragraph::new(ratatui::text::Text::from(phase_text));
+    let agent_para = Paragraph::new(ratatui::text::Text::from(agent_text));
+    let divider_para = Paragraph::new(ratatui::text::Text::from(divider_lines));
 
     drop(theme);
 
@@ -294,18 +342,36 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let footer =
         Line::from(i18n::tr("workflow-footer-shortcuts")).fg(theme_def.read().semantic.text.dim);
 
-    let content = Paragraph::new(ratatui::text::Text::from({
-        let mut all: Vec<Line> = Vec::new();
-        all.push(Line::from(""));
-        all.extend(body_lines);
-        all.push(Line::from(""));
-        all.push(footer);
-        all
-    }));
-
     panel_shell!(PanelKind::Workflow, {
         Text(text: tab_bar)
-        Text(text: content)
+        View(
+            flex_direction: Direction::Horizontal,
+            width: Constraint::Fill(1),
+            height: Constraint::Length(BODY_HEIGHT),
+        ) {
+            View(width: Constraint::Percentage(40), height: Constraint::Fill(1)) {
+                ScrollView(
+                    scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                    width: Constraint::Fill(1),
+                    height: Constraint::Fill(1),
+                ) {
+                    Text(text: phase_para)
+                }
+            }
+            View(width: Constraint::Length(1), height: Constraint::Fill(1)) {
+                Text(text: divider_para)
+            }
+            View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
+                ScrollView(
+                    scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                    width: Constraint::Fill(1),
+                    height: Constraint::Fill(1),
+                ) {
+                    Text(text: agent_para)
+                }
+            }
+        }
+        Text(text: Paragraph::new(ratatui::text::Text::from(footer)))
     })
 }
 
