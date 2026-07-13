@@ -123,7 +123,10 @@ pub fn build_stage_context(
         let mut tools = shared_tools.write();
         for tool in middleware_tools {
             let arc: std::sync::Arc<dyn peri_agent::tools::BaseTool> = std::sync::Arc::from(tool);
-            tools.entry(arc.name().to_string()).or_insert_with(|| arc);
+            // [fix] 使用 insert 而非 or_insert_with：SubAgentTool 等有状态工具需
+            // 每 turn 更新（其 event_handler 捕获当轮 event_tx，跨 turn 复用会导致
+            // 事件被 close_channel 后的旧 event_tx 丢弃）。
+            tools.insert(arc.name().to_string(), arc);
         }
     }
 
