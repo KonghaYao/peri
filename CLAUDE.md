@@ -122,6 +122,42 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 #### 快捷键
 - 禁止 `Shift+字母` / PageUp / Down；优先 `Ctrl+字母`；禁止 `ℹ`（U+2139）
 
+#### i18n（TUI 界面翻译）
+
+**范围界定**：**只翻译 TUI 界面中用户会读到的文本**，其余一律保持英文原样。
+
+| 需要 i18n | 不需要 i18n |
+|-----------|-------------|
+| 面板标题/描述/导航提示 | `tracing` 日志（`info!`/`warn!`/`error!` 等） |
+| 弹窗标题/内容/操作提示 | `thiserror`/`anyhow` error message 字符串 |
+| 通知消息（写入 NOTIFICATION atom） | ACP 协议层错误字符串 |
+| 消息流内嵌标签（提醒 tag、渠道名、工具别名） | Markdown box-drawing 字符和格式符号 |
+| 向导/欢迎页/配置页文本 | 代码内变量名/字段名/路径字符串 |
+| 空态/占位符/统计文本 | `println!`/`eprintln!` CLI 终端输出 |
+
+**基础设施**：`peri-tui/src/i18n/mod.rs`（Fluent），API：
+- `i18n::tr("key")` — 无参翻译
+- `i18n::tr_args("key", &[("param".into(), val)])` — 带参翻译
+- `i18n::switch("zh-CN")` — 语言切换
+- `i18n::init(Some("zh-CN"))` — 启动初始化
+
+**新增 UI 文本时**：
+1. 在 `locales/en/main.ftl` 中新增英文 key（en 是 fallback，语法参考 Fluent）
+2. 在 `locales/zh-CN/main.ftl` 中新增对应的中文 key
+3. 代码中调用 `i18n::tr("key")` 或 `i18n::tr_args("key", args)`
+4. 组件中需 `hooks.use_atom(&LANG_VERSION)` 订阅语言变更以触发重渲染
+
+**Key 命名规范**：
+- 命令相关：`command-<name>-description`、`<name>-<status>`
+- 面板相关：`panel-title-<name>`、`panel-desc-<name>`、`panel-<name>-<element>`
+- 弹窗相关：`popup-<name>-<element>`
+- 状态栏：`statusbar-<element>`
+- 欢迎/向导：`welcome-<element>`、`setup-<element>`
+- 通用提示：`common-<element>`（如 `common-empty`、`common-esc-close`、`common-nav-enter-close`）
+- 参数用 `{ $param }` 语法，禁止拼接字符串生成 key
+
+**修改已有 UI 文本时**：若字符串已被硬编码在代码中，替换为 `i18n::tr()` 调用，同步新增 FTL key。
+
 ### 测试规范
 详见 `docs/design/testing-standards.md`。以下为速查摘要。
 

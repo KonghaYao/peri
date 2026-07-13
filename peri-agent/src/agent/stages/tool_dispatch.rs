@@ -204,6 +204,14 @@ async fn collect_tool_results(
     // 阶段一：批量 before_tool 审批
     let approval = run_before_tool_approvals(ctx, original_calls, cancel).await?;
 
+    // yield 使 EventBus forwarder task 排空 render_tx 中由阶段一 emit 的
+    // ToolStarted 事件（转发到 event_tx），保证在 SubAgent 工具 invoke 内部
+    // 通过 handler.on_event(SubagentStarted) 直发 event_tx 之前，ToolStart
+    // 已就位。否则 forwarder 的两个 hops 延迟会让 SubagentStarted 抢先到达
+    // event_tx，导致 TUI segment 顺序反转（SubAgent 段落在 ToolCard(Agent) 前），
+    // SubAgent 工具调用跑到 Agent 卡片上方。
+    tokio::task::yield_now().await;
+
     // 阶段二：并发执行（snapshot messages + ai_msg 只读视图）
     let tool_results =
         dispatch_concurrent(ctx, &approval.ready_calls, all_tools, cancel, ai_msg).await;
