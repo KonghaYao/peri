@@ -176,6 +176,12 @@ pub async fn run_kit_fullscreen(
             spawn_thread_load_consumer(client.clone(), thread_load_rx, cwd, shutdown.clone());
         let _cancel_handle = spawn_cancel_consumer(client.clone(), cancel_rx, shutdown.clone());
 
+        // 4e. workflow snapshot poll — periodic pull of workflow run state
+        let _workflow_poll_handle = crate::kit::workflow_snapshot::spawn_workflow_poll(
+            Arc::new(client.clone()),
+            shutdown.clone(),
+        );
+
         // 4e. 初始化会话——在 notifier/bridge 就绪后立即创建 session，
         //     触发服务器发送 AvailableCommandsUpdate（含 skills），确保
         //     slash 补全弹窗在首次输入前就有数据。

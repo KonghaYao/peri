@@ -43,6 +43,7 @@ pub mod thread_load_consumer;
 pub mod tool_display;
 pub mod tui_render_unit;
 pub mod welcome;
+pub mod workflow_snapshot;
 
 // Phase 3: 导出布局组件
 pub use app_shell::AppShell;

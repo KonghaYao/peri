@@ -264,6 +264,27 @@ impl BaseTool for WorkflowTool {
                     .as_ref()
                     .map(|s| format!("\n\nstderr (last 20 lines):\n{}", s))
                     .unwrap_or_default();
+
+                // 快速失败清理：update bg_registry so BgTaskArea transitions from ◎ to ✗
+                let fast_duration = started_at.elapsed().as_millis() as u64;
+                if let Some(ref bg) = self.bg_registry {
+                    bg.complete_workflow(&run_id, false, String::new(), fast_duration);
+                }
+                // 同步标记 registry 为失败，发送通知给 agent
+                self.registry.complete(
+                    &run_id,
+                    WorkflowTaskResult {
+                        run_id: run_id.clone(),
+                        workflow_name: workflow_name.clone(),
+                        success: false,
+                        status: WorkflowRunStatus::Failed,
+                        duration_ms: fast_duration,
+                        agent_count: 0,
+                        tool_calls_count: 0,
+                        error: Some(error_msg.clone()),
+                    },
+                );
+
                 return Err(format!(
                     "Workflow '{}' failed: {}{}",
                     workflow_name, error_msg, detail

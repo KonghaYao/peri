@@ -1,20 +1,17 @@
-//! ratatui-kit WorkflowPanel component.
+//! ratatui-kit WorkflowPanel kanban component.
 //!
-//! Workflow 是 `@peri-workflow` npm CLI 工具驱动的多 agent 编排层——TUI 没有
-//! 内嵌运行时数据源（workflow 状态由外部工具维护）。本面板作为只读信息面板，
-//! 说明如何使用外部工具，并提供当前会话内可观察的 workflow hint（来自
-//! VIEW_MODELS 中的 TuiSubAgentGroup 计数）。
+//! Displays workflow run status in a kanban-style layout: run tabs at top,
+//! phases on left, agents on right, footer shortcuts at bottom.
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{LANG_VERSION, VIEW_MODELS};
-use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::atoms::{LANG_VERSION, WORKFLOW_SNAPSHOT};
+use crate::kit::list_nav::{cycle_next, cycle_previous, previous_selection};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::Constraint,
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -23,45 +20,47 @@ use ratatui_kit::{
 
 #[component]
 pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    // ALL hooks BEFORE any logic
     let theme_def = hooks.use_atom(&THEME_ATOM);
-    let cursor = hooks.use_state(|| 0usize);
+    let _lang = hooks.use_atom(&LANG_VERSION);
+    let snapshot_store = hooks.use_atom(&WORKFLOW_SNAPSHOT);
+    let snapshot = snapshot_store.read().clone();
+    let _ = snapshot_store;
 
-    // 从 VIEW_MODELS 派生 subagent group 数量（间接显示 workflow 活跃度）
-    let vm_store = hooks.use_atom(&VIEW_MODELS);
-    let _ = hooks.use_atom(&LANG_VERSION);
-    let subagent_count = vm_store
-        .read()
-        .items
-        .iter()
-        .filter(|vm| {
-            matches!(
-                vm,
-                crate::kit::tui_render_unit::TuiRenderUnit::TuiSubAgentGroup(_)
-            )
-        })
-        .count();
-    let _ = vm_store;
+    let active_run = hooks.use_state(|| 0usize);
+    let focus_left = hooks.use_state(|| true);
+    let phase_sel = hooks.use_state(|| 0usize);
+    let agent_sel = hooks.use_state(|| 0usize);
 
-    let rows: Vec<(String, String)> = vec![
-        (
-            i18n::tr("panel-workflow-label-engine"),
-            i18n::tr("panel-workflow-value-engine"),
-        ),
-        (
-            i18n::tr("panel-workflow-label-binary"),
-            i18n::tr("panel-workflow-value-binary"),
-        ),
-        (
-            i18n::tr("panel-workflow-label-subagents"),
-            format!("{}", subagent_count),
-        ),
-        (
-            i18n::tr("panel-workflow-label-self-check"),
-            i18n::tr("panel-workflow-value-self-check"),
-        ),
-    ];
-    let count = rows.len();
+    // Determine panel state
+    let runs = match &snapshot {
+        None => {
+            // Loading state
+            let msg = Paragraph::new(Line::from(vec![Span::styled(
+                format!(
+                    "  {} {}...",
+                    i18n::tr("common-loading"),
+                    i18n::tr("workflow-loading-runs")
+                ),
+                Style::new().fg(theme_def.read().semantic.text.muted),
+            )]));
+            return panel_shell!(PanelKind::Workflow, { Text(text: msg) });
+        }
+        Some(s) => &s.runs,
+    };
 
+    if runs.is_empty() {
+        // Empty state
+        let msg = Paragraph::new(Line::from(vec![Span::styled(
+            format!("  {}", i18n::tr("workflow-no-runs")),
+            Style::new().fg(theme_def.read().semantic.text.muted),
+        )]));
+        return panel_shell!(PanelKind::Workflow, { Text(text: msg) });
+    }
+
+    let run_count = runs.len();
+
+    // ── Keyboard event handling ──────────────────────────────────────────
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         move |event| {
             let Event::Key(key) = event else {
@@ -71,97 +70,311 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
             match key.code {
-                KeyCode::Esc => close_panel(),
-                KeyCode::Enter => close_panel(),
+                KeyCode::Esc => {
+                    close_panel();
+                    return EventResult::Consumed;
+                }
+                KeyCode::Tab => {
+                    let mut r = active_run.write();
+                    *r = cycle_next(*r, run_count);
+                    *phase_sel.write() = 0;
+                    *agent_sel.write() = 0;
+                    return EventResult::Consumed;
+                }
+                KeyCode::BackTab => {
+                    let mut r = active_run.write();
+                    *r = cycle_previous(*r, run_count);
+                    *phase_sel.write() = 0;
+                    *agent_sel.write() = 0;
+                    return EventResult::Consumed;
+                }
+                KeyCode::Left => {
+                    *focus_left.write() = true;
+                    return EventResult::Consumed;
+                }
+                KeyCode::Right => {
+                    *focus_left.write() = false;
+                    return EventResult::Consumed;
+                }
                 KeyCode::Up => {
-                    let mut c = cursor.write();
-                    *c = previous_selection(*c);
+                    if *focus_left.read() {
+                        let mut p = phase_sel.write();
+                        *p = previous_selection(*p);
+                    } else {
+                        let mut a = agent_sel.write();
+                        *a = previous_selection(*a);
+                    }
+                    return EventResult::Consumed;
                 }
                 KeyCode::Down => {
-                    let mut c = cursor.write();
-                    if count > 0 {
-                        *c = next_selection(*c, count);
+                    if *focus_left.read() {
+                        let mut p = phase_sel.write();
+                        *p = p.saturating_add(1);
+                    } else {
+                        let mut a = agent_sel.write();
+                        *a = a.saturating_add(1);
                     }
+                    return EventResult::Consumed;
+                }
+                KeyCode::Enter => {
+                    // MVP: no-op
+                    return EventResult::Consumed;
                 }
                 _ => {}
             }
-            EventResult::Consumed
+            EventResult::Ignored
         }
     });
 
-    let sel = *cursor.read();
-    let mut lines: Vec<Line<'_>> = Vec::new();
+    let sel_run = *active_run.read();
+    let current_run = &runs[sel_run];
 
-    lines.push(Line::from(vec![Span::styled(
-        i18n::tr("panel-workflow-title"),
-        Style::new()
-            .fg(theme_def.read().semantic.text.primary)
-            .bold(),
-    )]));
-    lines.push(Line::from(vec![Span::styled(
-        i18n::tr("panel-workflow-subtitle"),
-        Style::new()
-            .fg(theme_def.read().semantic.text.muted)
-            .italic(),
-    )]));
-    lines.push(Line::from(""));
-
-    for (i, (label, value)) in rows.iter().enumerate() {
-        let is_selected = i == sel;
-        let cursor_mark = if is_selected { ">" } else { " " };
-        let label_style = if is_selected {
-            Style::new()
-                .fg(theme_def.read().component.panel.title)
-                .bold()
-        } else {
-            Style::new().fg(theme_def.read().semantic.text.muted)
-        };
-        let value_style = if is_selected {
-            Style::new()
-                .fg(theme_def.read().semantic.text.primary)
-                .bold()
-        } else {
-            Style::new().fg(theme_def.read().semantic.text.primary)
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {} ", cursor_mark),
-                Style::new().fg(theme_def.read().component.panel.title),
-            ),
-            Span::styled(format!("{:<26}", format!("{}:", label)), label_style),
-            Span::styled(value.chars().take(60).collect::<String>(), value_style),
-        ]));
+    // ── Selection clamping (during render, not event handler) ────────────
+    // Gate writes with a change check to avoid infinite re-render loops
+    let phase_count = current_run.phases.len();
+    let agent_count = current_run.agents.len();
+    let clamped_phase = (*phase_sel.read()).min(phase_count.saturating_sub(1));
+    let clamped_agent = (*agent_sel.read()).min(agent_count.saturating_sub(1));
+    if *phase_sel.read() != clamped_phase {
+        *phase_sel.write() = clamped_phase;
+    }
+    if *agent_sel.read() != clamped_agent {
+        *agent_sel.write() = clamped_agent;
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled(
-        i18n::tr("panel-workflow-info-1"),
-        Style::new().fg(theme_def.read().semantic.text.dim),
-    )]));
-    lines.push(Line::from(vec![Span::styled(
-        i18n::tr("panel-workflow-info-2"),
-        Style::new().fg(theme_def.read().semantic.text.dim),
-    )]));
-    lines.push(Line::from(""));
-    lines.push(
-        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def.read().semantic.text.dim),
-    );
+    let sel_phase = *phase_sel.read();
+    let sel_agent = *agent_sel.read();
+    let focus = *focus_left.read();
 
-    let content = Paragraph::new(ratatui::text::Text::from(lines));
+    // ── Tab bar ──────────────────────────────────────────────────────────
+    let theme = theme_def.read();
+    let tab_bar_spans: Vec<Span<'_>> = runs
+        .iter()
+        .enumerate()
+        .map(|(i, run)| {
+            let is_selected = i == sel_run;
+            let emoji = status_emoji_for_run(&run.status);
+            let name = &run.workflow_name;
+            let text = format!(" {emoji} {name} ");
+            if is_selected {
+                Span::styled(
+                    text,
+                    Style::new()
+                        .fg(theme.component.panel.title)
+                        .bg(theme.semantic.status.running)
+                        .bold(),
+                )
+            } else {
+                Span::styled(text, Style::new().fg(theme.semantic.text.muted))
+            }
+        })
+        .collect();
+    let tab_bar = Paragraph::new(Line::from(tab_bar_spans));
+
+    // ── Phase lines ──────────────────────────────────────────────────────
+    let mut phase_lines: Vec<Line<'_>> = Vec::new();
+    // Phase header
+    phase_lines.push(Line::from(vec![Span::styled(
+        " Phases",
+        Style::new().fg(theme.semantic.text.muted).bold(),
+    )]));
+    for (pi, phase) in current_run.phases.iter().enumerate() {
+        let is_sel = focus && pi == sel_phase;
+        let arrow = if is_sel { ">" } else { " " };
+        let arrow_style = Style::new().fg(theme.component.panel.title).bold();
+        let emoji = status_emoji_for_phase(&phase.status);
+        let emoji_color = phase_status_color(&phase.status, &theme);
+        let name = &phase.title;
+        let name_style = if is_sel {
+            Style::new().fg(theme.component.panel.title).bold()
+        } else {
+            Style::new().fg(theme.semantic.text.primary)
+        };
+        let agent_count = current_run
+            .agents
+            .iter()
+            .filter(|a| a.phase.as_deref() == Some(&phase.title))
+            .count();
+        let agent_tag = if agent_count > 0 {
+            format!(" [{agent_count}]")
+        } else {
+            String::new()
+        };
+        let tag_style = Style::new().fg(theme.semantic.text.muted);
+
+        phase_lines.push(Line::from(vec![
+            Span::styled(arrow, arrow_style),
+            Span::styled(format!(" {emoji} "), emoji_color),
+            Span::styled(name.chars().take(28).collect::<String>(), name_style),
+            Span::styled(agent_tag, tag_style),
+        ]));
+    }
+    // If no phases, show placeholder
+    if current_run.phases.is_empty() {
+        phase_lines.push(Line::from(vec![Span::styled(
+            "  (no phases)",
+            Style::new().fg(theme.semantic.text.muted),
+        )]));
+    }
+
+    // ── Agent lines ──────────────────────────────────────────────────────
+    let mut agent_lines: Vec<Line<'_>> = Vec::new();
+    agent_lines.push(Line::from(vec![Span::styled(
+        " Agents",
+        Style::new().fg(theme.semantic.text.muted).bold(),
+    )]));
+    for (ai, agent) in current_run.agents.iter().enumerate() {
+        let is_sel = !focus && ai == sel_agent;
+        let arrow = if is_sel { ">" } else { " " };
+        let arrow_style = Style::new().fg(theme.component.panel.title).bold();
+        let emoji = status_emoji_for_agent(&agent.status);
+        let emoji_color = agent_status_color(&agent.status, &theme);
+        let name = agent
+            .label
+            .as_deref()
+            .unwrap_or("?")
+            .chars()
+            .take(16)
+            .collect::<String>();
+        let name_style = if is_sel {
+            Style::new().fg(theme.component.panel.title).bold()
+        } else {
+            Style::new().fg(theme.semantic.text.primary)
+        };
+        let phase_tag = agent.phase.as_deref().unwrap_or("-");
+        let tag_style = Style::new().fg(theme.semantic.text.muted);
+        let tokens = abbreviate_count(agent.token_count.unwrap_or(0));
+        let tools = format!("{}", agent.tool_count.unwrap_or(0));
+        let dim_style = Style::new().fg(theme.semantic.text.dim);
+
+        agent_lines.push(Line::from(vec![
+            Span::styled(arrow, arrow_style),
+            Span::styled(format!(" {emoji} "), emoji_color),
+            Span::styled(format!("{name:16}"), name_style),
+            Span::styled(format!(" [{phase_tag}]"), tag_style),
+            Span::styled(format!(" {tokens:>8}"), dim_style),
+            Span::styled(format!("  {tools:>8}"), dim_style),
+        ]));
+    }
+    if current_run.agents.is_empty() {
+        agent_lines.push(Line::from(vec![Span::styled(
+            "  (no agents)",
+            Style::new().fg(theme.semantic.text.muted),
+        )]));
+    }
+
+    // ── Interleave phases and agents side by side ────────────────────────
+    let max_rows = phase_lines.len().max(agent_lines.len());
+    let mut body_lines: Vec<Line<'_>> = Vec::new();
+    let sep_span = Span::styled(" │ ", Style::new().fg(theme.semantic.text.dim));
+
+    for row in 0..max_rows {
+        let phase_span = if row < phase_lines.len() {
+            phase_lines[row].clone()
+        } else {
+            Line::from("")
+        };
+        let agent_span = if row < agent_lines.len() {
+            agent_lines[row].clone()
+        } else {
+            Line::from("")
+        };
+
+        let mut combined_spans: Vec<Span<'_>> = Vec::new();
+        // Add phase spans (pad to ~30 wide)
+        combined_spans.extend(phase_span.spans);
+        combined_spans.push(sep_span.clone());
+        combined_spans.extend(agent_span.spans);
+        body_lines.push(Line::from(combined_spans));
+    }
+
+    drop(theme);
+
+    // ── Footer ───────────────────────────────────────────────────────────
+    let footer =
+        Line::from(i18n::tr("workflow-footer-shortcuts")).fg(theme_def.read().semantic.text.dim);
+
+    let content = Paragraph::new(ratatui::text::Text::from({
+        let mut all: Vec<Line> = Vec::new();
+        all.push(Line::from(""));
+        all.extend(body_lines);
+        all.push(Line::from(""));
+        all.push(footer);
+        all
+    }));
 
     panel_shell!(PanelKind::Workflow, {
-            ScrollView(
-                scrollbars: crate::kit::panel_registry::clean_scrollbars(),
-                width: Constraint::Fill(1),
-                height: Constraint::Fill(1),
-            ) {
-                Text(text: content)
-            }
+        Text(text: tab_bar)
+        Text(text: content)
     })
 }
+
+// ── Helpers ─────────────────────────────────────────────────────────────
 
 fn close_panel() {
     // I19-A: 弹栈而非清空整个栈，避免同时打开多个不同组面板时关闭一个会全部关闭
     crate::kit::panel_registry::close_active_panel();
+}
+
+fn status_emoji_for_run(status: &str) -> &'static str {
+    match status {
+        "running" => "\u{25cf}",           // ●
+        "completed" => "\u{2713}",         // ✓
+        "failed" | "killed" => "\u{2717}", // ✗
+        _ => "\u{25cb}",                   // ○
+    }
+}
+
+fn status_emoji_for_phase(status: &str) -> &'static str {
+    match status {
+        "active" => "\u{25cf}",  // ●
+        "done" => "\u{2713}",    // ✓
+        "pending" => "\u{25cb}", // ○
+        _ => "\u{25cb}",         // ○
+    }
+}
+
+fn status_emoji_for_agent(status: &str) -> &'static str {
+    match status {
+        "running" => "\u{25cf}",          // ●
+        "done" => "\u{2713}",             // ✓
+        "pending" => "\u{25cb}",          // ○
+        "dead" | "skipped" => "\u{2717}", // ✗
+        _ => "\u{25cb}",                  // ○
+    }
+}
+
+fn phase_status_color(
+    status: &str,
+    theme: &peri_theme::theme::ThemeDefinition,
+) -> ratatui::style::Style {
+    Style::new().fg(match status {
+        "active" => theme.semantic.status.running,
+        "done" => theme.semantic.status.success,
+        "failed" => theme.semantic.status.error,
+        _ => theme.semantic.text.muted,
+    })
+}
+
+fn agent_status_color(
+    status: &str,
+    theme: &peri_theme::theme::ThemeDefinition,
+) -> ratatui::style::Style {
+    Style::new().fg(match status {
+        "running" => theme.semantic.status.running,
+        "done" => theme.semantic.status.success,
+        "dead" | "skipped" => theme.semantic.status.error,
+        _ => theme.semantic.text.muted,
+    })
+}
+
+/// Abbreviate a count into a human-readable short form.
+fn abbreviate_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        format!("{n}")
+    }
 }

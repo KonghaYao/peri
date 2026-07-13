@@ -670,6 +670,7 @@ statusbar-rewind-move = Move
 statusbar-rewind-switch-file = Switch restore file
 
 # ---- Common (P0) ----
+common-loading = Loading
 common-esc-close =   Esc: close
 common-nav-enter-close =   ↑/↓::navigate  Enter::open  Esc::close
 common-empty =   (empty)
@@ -831,18 +832,10 @@ panel-theme-active-mark =  *
 panel-theme-nav-hint =   ↑/↓::navigate  Enter::switch  Esc::close
 panel-theme-empty =   (no themes found)
 
-# ---- Workflow Panel ----
-panel-workflow-title =   Workflow Engine
-panel-workflow-subtitle =   Multi-agent orchestration via @peri-workflow CLI
-panel-workflow-label-engine = Engine
-panel-workflow-label-binary = Binary
-panel-workflow-label-subagents = Current session sub-agents
-panel-workflow-label-self-check = Self-check
-panel-workflow-value-engine = @peri-workflow (external CLI)
-panel-workflow-value-binary = peri-workflow
-panel-workflow-value-self-check = Run `which peri-workflow` to verify install
-panel-workflow-info-1 =   Workflows are spawned from agent prompts;
-panel-workflow-info-2 =   progress surfaces here as SubAgent groups in the message stream.
+# ---- Workflow Panel kanban ----
+workflow-loading-runs = Loading workflow runs
+workflow-no-runs = No workflow runs in current session
+workflow-footer-shortcuts = Tab::next-run · Shift+Tab::prev-run · ←/→::pane · ↑/↓::navigate · Enter::inspect · Esc::close
 
 # ---- AskUser Panel ----
 panel-ask-user-empty =   No pending questions.

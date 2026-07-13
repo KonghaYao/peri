@@ -25,3 +25,8 @@
 > 验证 bg agent 的能力
 
 派出 bg agent 执行下面的任务 ”说一句 1 然后调用两次 read， 然后说 2,两次 read， 重复直到 4“
+
+> 验证 workflow 的
+
+请派发一个简单的 workflow， 其中有三个阶段，三个阶段都是 sleep 5s
+

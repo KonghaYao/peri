@@ -669,6 +669,7 @@ statusbar-rewind-move = 移动
 statusbar-rewind-switch-file = 切换回退文件
 
 # ---- Common (P0) ----
+common-loading = 正在加载
 common-esc-close =   Esc: close
 common-nav-enter-close =   ↑/↓::navigate  Enter::open  Esc::close
 common-empty =   (empty)
@@ -830,18 +831,10 @@ panel-theme-active-mark =  *
 panel-theme-nav-hint =   ↑/↓::navigate  Enter::switch  Esc::close
 panel-theme-empty =   (未找到主题)
 
-# ---- Workflow Panel ----
-panel-workflow-title =   Workflow 引擎
-panel-workflow-subtitle =   通过 @peri-workflow CLI 实现多 Agent 编排
-panel-workflow-label-engine = 引擎
-panel-workflow-label-binary = 二进制文件
-panel-workflow-label-subagents = 当前会话子代理
-panel-workflow-label-self-check = 自检
-panel-workflow-value-engine = @peri-workflow (外部 CLI)
-panel-workflow-value-binary = peri-workflow
-panel-workflow-value-self-check = 运行 `which peri-workflow` 以验证安装
-panel-workflow-info-1 =   Workflow 由 Agent 提示词创建；
-panel-workflow-info-2 =   进度会以消息流中的 SubAgent 组形式展示。
+# ---- Workflow Panel kanban ----
+workflow-loading-runs = 正在加载工作流运行信息
+workflow-no-runs = 当前会话无工作流运行
+workflow-footer-shortcuts = Tab::切换运行 · Shift+Tab::上一个 · ←/→::切换面板 · ↑/↓::导航 · Enter::查看 · Esc::关闭
 
 # ---- AskUser Panel ----
 panel-ask-user-empty =   暂无待答问题。

@@ -330,7 +330,7 @@ pub const PANELS: &[PanelMeta] = &[
         priority: 13,
         mutex_group: MutexGroup::Tools,
         scope: PanelScope::Global,
-        layout: PanelLayout::fixed(60, 18),
+        layout: PanelLayout::fixed(90, 22),
         render: render_workflow_panel,
     },
     PanelMeta {
