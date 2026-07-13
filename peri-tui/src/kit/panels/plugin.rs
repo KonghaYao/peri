@@ -5,6 +5,7 @@
 //! 无 ScrollView——避免其内置 handler 与自定义 ↑/↓ 冲突。
 
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
@@ -24,6 +25,29 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
+
+// ── Discover cache (non-reactive, safe in render body) ────────────────
+
+/// Discover 插件列表缓存——避免 render body 中同步读盘。
+/// 首次访问时从 marketplace cache 加载，后续读取不触发磁盘 I/O。
+/// `clear()` / `set()` 用于刷新（安装/添加 marketplace 后）。
+static DISCOVER_CACHE: OnceLock<parking_lot::Mutex<Vec<PluginSearchResultItem>>> = OnceLock::new();
+
+fn get_discover_cache() -> Vec<PluginSearchResultItem> {
+    let cache = DISCOVER_CACHE.get_or_init(|| parking_lot::Mutex::new(Vec::new()));
+    let mut guard = cache.lock();
+    if guard.is_empty() {
+        *guard = load_discover_plugins_from_disk();
+    }
+    guard.clone()
+}
+
+fn refresh_discover_cache() {
+    if let Some(cache) = DISCOVER_CACHE.get() {
+        let mut guard = cache.lock();
+        *guard = load_discover_plugins_from_disk();
+    }
+}
 
 // ── Search state machine ───────────────────────────────────────────────
 
@@ -181,6 +205,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                             last_updated: String::new(),
                                         });
                                         let _ = peri_middlewares::plugin::save_known_marketplaces(&marketplaces, None);
+                                        refresh_discover_cache();
                                         if let Some(cl) = ACP_CLIENT_HANDLE.get() {
                                             let client = cl.clone();
                                             let sid = client.current_session_id().unwrap_or_default();
@@ -276,10 +301,9 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 },
                 // ── 未聚焦搜索框：Char/Backspace 启动实时过滤，Enter 进入详情 ──
                 KeyCode::Char(c) => {
-                    let mut t = search_text.write();
-                    t.push(c);
+                    search_text.write().push(c);
                     // 实时过滤 discover 列表
-                    let items = load_discover_plugins();
+                    let items = get_discover_cache();
                     let query = search_text.read().to_lowercase();
                     let filtered: Vec<usize> = items.iter().enumerate()
                         .filter(|(_, item)| {
@@ -295,7 +319,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::Backspace => {
                     search_text.write().pop();
-                    let items = load_discover_plugins();
+                    let items = get_discover_cache();
                     let query = search_text.read().to_lowercase();
                     let filtered: Vec<usize> = if query.is_empty() {
                         (0..items.len()).collect()
@@ -315,7 +339,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::Enter => {
                     // 进入 discover 详情页
-                    let items = load_discover_plugins();
+                    let items = get_discover_cache();
                     let filtered = discover_filtered.read().clone();
                     let cursor = *discover_cursor.read();
                     if let Some(&orig_idx) = filtered.get(cursor) {
@@ -348,6 +372,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // 任意键盘事件清除 operation_loading（操作完成后用户按任意键消除 loading 状态）
             if operation_loading.read().is_some() {
                 *operation_loading.write() = None;
+                refresh_discover_cache();
             }
 
             // ── Discover detail 模式 ──
@@ -373,7 +398,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         let idx = discover_detail_idx.read().unwrap_or(0);
                         match action {
                             Some(DiscoverDetailAction::InstallUser) => {
-                                let items = load_discover_plugins();
+                                let items = get_discover_cache();
                                 if let Some(dp) = items.get(idx) {
                                     let name = dp.name.clone();
                                     let marketplace = dp.marketplace.clone();
@@ -397,7 +422,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 *discover_detail_action.write() = 0;
                             }
                             Some(DiscoverDetailAction::InstallProject) => {
-                                let items = load_discover_plugins();
+                                let items = get_discover_cache();
                                 if let Some(dp) = items.get(idx) {
                                     let name = dp.name.clone();
                                     let marketplace = dp.marketplace.clone();
@@ -712,7 +737,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             *s = next_selection(*s, c);
                         }
                     } else if *active_tab.read() == PluginViewTab::Discover {
-                        let items = load_discover_plugins();
+                        let items = get_discover_cache();
                         let filtered = discover_filtered.read().clone();
                         let count = if search_text.read().is_empty() {
                             items.len()
@@ -815,7 +840,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 检查 discover detail 模式
     let dd_idx = *discover_detail_idx.read();
     if let Some(disc_idx) = dd_idx {
-        let items = load_discover_plugins();
+        let items = get_discover_cache();
         if let Some(dp) = items.get(disc_idx) {
             render_discover_detail(
                 &mut lines,
@@ -869,7 +894,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ),
             PluginViewTab::Discover => {
                 // Discover list: show cached marketplace plugins with real-time filtering
-                let items = load_discover_plugins();
+                let items = get_discover_cache();
                 let query = search_text.read().to_lowercase();
                 let filtered_items: Vec<&PluginSearchResultItem> = if query.is_empty() {
                     items.iter().collect()
@@ -1647,7 +1672,7 @@ fn load_marketplace_data() -> Vec<MsEntry> {
         .collect()
 }
 
-fn load_discover_plugins() -> Vec<PluginSearchResultItem> {
+fn load_discover_plugins_from_disk() -> Vec<PluginSearchResultItem> {
     use peri_middlewares::plugin::{
         MarketplaceManager, MarketplaceSource, load_known_marketplaces, marketplace,
     };
