@@ -270,6 +270,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     );
 
     if empty {
+        // 重置滚动条字段，避免 Welcome 页面残留旧会话的滚动条
+        *scrollbar_fields.write_no_update() = ScrollbarFields::default();
         if let Some(lines) = brewed_lines {
             return element!(
                 View(
