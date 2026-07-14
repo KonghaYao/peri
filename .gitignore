@@ -204,3 +204,4 @@ settings.json
 .superpowers
 skills-lock.json
 .agents
+!.peri/theme/
