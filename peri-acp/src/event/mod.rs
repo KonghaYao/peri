@@ -149,3 +149,6 @@ pub enum AcpEvent {
         message: Option<String>,
     },
 }
+
+#[cfg(test)]
+mod variant_coverage_test;

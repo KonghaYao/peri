@@ -138,15 +138,19 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // 0. GAP-08: 创建 Langfuse tracer（如果 session 可用）
         let langfuse_tracer = self.ctx.langfuse_session.as_ref().map(|s| {
+            let session_clone = Arc::clone(s);
+            let config = session_clone.config.clone();
+            let session: std::sync::Arc<dyn crate::langfuse::LangfuseSessionLike> = session_clone;
             Arc::new(parking_lot::Mutex::new(
                 crate::langfuse::tracer::LangfuseTracer::new(
-                    Arc::clone(s),
+                    session,
                     self.ctx.session_id.clone().unwrap_or_default(),
+                    config,
                 ),
             ))
         });
         if let Some(ref tracer) = langfuse_tracer {
-            tracer.lock().on_trace_start(&params.prompt);
+            tracer.lock().on_turn_start(&params.prompt);
         }
 
         // 0b. 创建日志 + Langfuse event handler
@@ -501,7 +505,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 AgentRunResult::Dead { detail, .. } => detail.as_deref(),
                 _ => None,
             };
-            let handle = tracer.lock().on_trace_end(error_output);
+            let handle = tracer.lock().on_turn_end(error_output);
             drop(handle); // fire-and-forget flush
         }
 

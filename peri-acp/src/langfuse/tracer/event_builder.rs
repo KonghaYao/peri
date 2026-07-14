@@ -6,6 +6,8 @@
 
 use langfuse_client::IngestionEvent;
 
+use super::super::session_like::LangfuseSessionLike;
+
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 生成 RFC3339 时间戳（毫秒精度，UTC）。
@@ -33,6 +35,25 @@ pub(crate) fn try_add_or_warn(
     context_msg: &str,
 ) {
     if let Err(e) = batcher.try_add(event) {
+        tracing::warn!(
+            error = %e,
+            trace_id = %trace_id,
+            "{}（背压丢弃）",
+            context_msg
+        );
+    }
+}
+
+/// 将事件同步入队 session（通过 trait），失败时 tracing::warn 丢弃（背压语义）。
+///
+/// [不变量] 所有事件通过 `session.try_add()` 同步入队，保证事件顺序与调用顺序一致。
+pub(crate) fn try_add_or_warn_via_session(
+    session: &dyn LangfuseSessionLike,
+    event: IngestionEvent,
+    trace_id: &str,
+    context_msg: &str,
+) {
+    if let Err(e) = session.try_add(event) {
         tracing::warn!(
             error = %e,
             trace_id = %trace_id,

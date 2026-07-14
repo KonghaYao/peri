@@ -11,7 +11,7 @@
 //!   除非 source_agent_id 不同于主 agent（SubAgent 路由），否则忽略
 //! - **不存在的方向**：v1 → v2 不需要（v1 是被替换方）
 
-use crate::agent::events::ExecutorEvent;
+use crate::agent::events::{CompactStrategy, CompactTrigger, ExecutorEvent};
 use crate::agent::events_v2::{ObserveEvent, RenderEvent, StateEvent};
 
 /// 将 v2 `RenderEvent` 转换为 0 或 1 个 `ExecutorEvent`
@@ -153,7 +153,13 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             }),
             stop_reason: None,
         }),
-        ObserveEvent::CompactStarted { .. } => Some(ExecutorEvent::CompactStarted),
+        ObserveEvent::CompactStarted { turn_id, agent_id, step, .. } => Some(ExecutorEvent::CompactStarted {
+            turn_id: turn_id.to_string(),
+            agent_id: agent_id.to_string(),
+            step,
+            strategy: CompactStrategy::Smart,
+            trigger: CompactTrigger::Auto,
+        }),
         ObserveEvent::MessagesCompacted {
             before_count,
             after_count,
@@ -168,6 +174,9 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             skills,
             micro_cleared: before_count.saturating_sub(after_count),
             messages,
+            token_before: 0,
+            token_after: 0,
+            strategy: CompactStrategy::Smart,
         }),
         ObserveEvent::TurnError { message, .. } => {
             Some(ExecutorEvent::AgentExecutionFailed { message })
@@ -197,6 +206,49 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
         ObserveEvent::LlmRequestPayload { step, body, .. } => {
             Some(ExecutorEvent::LlmRequestPayload { step, body })
         }
+        // ── langfuse v2：Reason 推理分片 ──
+        ObserveEvent::AiReasoningChunk {
+            turn_id,
+            text,
+            source_agent_id,
+            ..
+        } => Some(ExecutorEvent::AiReasoningChunk {
+            turn_id: turn_id.to_string(),
+            text,
+            source_agent_id,
+        }),
+        // ── langfuse v2：阶段生命周期 ──
+        ObserveEvent::StageStarted {
+            turn_id, stage, ..
+        } => Some(ExecutorEvent::StageStarted {
+            turn_id: turn_id.to_string(),
+            stage,
+        }),
+        ObserveEvent::StageEnded {
+            turn_id,
+            stage,
+            status,
+            duration_ms,
+            ..
+        } => Some(ExecutorEvent::StageEnded {
+            turn_id: turn_id.to_string(),
+            stage,
+            status,
+            duration_ms,
+        }),
+        // ── langfuse v2：Receive 队列排空 ──
+        ObserveEvent::MessageQueueDrained {
+            turn_id,
+            prompt,
+            defer,
+            info,
+            ..
+        } => Some(ExecutorEvent::MessageQueueDrained {
+            turn_id: turn_id.to_string(),
+            prompt,
+            defer,
+            info,
+        }),
     }
 }
 

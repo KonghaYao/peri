@@ -345,6 +345,38 @@ pub enum ObserveEvent {
         step: usize,
         body: std::sync::Arc<serde_json::Value>,
     },
+    // ── langfuse v2：Reason 推理分片 ──
+    /// AI 推理分片（流式 thinking chunk 的遥测投射）
+    AiReasoningChunk {
+        turn_id: TurnId,
+        agent_id: AgentId,
+        text: String,
+        source_agent_id: Option<String>,
+    },
+    // ── langfuse v2：阶段生命周期 ──
+    /// ReAct 阶段开始
+    StageStarted {
+        turn_id: TurnId,
+        agent_id: AgentId,
+        stage: crate::agent::events::Stage,
+    },
+    /// ReAct 阶段结束
+    StageEnded {
+        turn_id: TurnId,
+        agent_id: AgentId,
+        stage: crate::agent::events::Stage,
+        status: crate::agent::events::StageStatus,
+        duration_ms: u64,
+    },
+    // ── langfuse v2：Receive 队列排空 ──
+    /// MessageQueue 排空统计
+    MessageQueueDrained {
+        turn_id: TurnId,
+        agent_id: AgentId,
+        prompt: usize,
+        defer: usize,
+        info: usize,
+    },
 }
 
 impl ObserveEvent {
@@ -358,7 +390,11 @@ impl ObserveEvent {
             | Self::TurnError { turn_id, .. }
             | Self::SubagentStart { turn_id, .. }
             | Self::SubagentStop { turn_id, .. }
-            | Self::LlmRequestPayload { turn_id, .. } => *turn_id,
+            | Self::LlmRequestPayload { turn_id, .. }
+            | Self::AiReasoningChunk { turn_id, .. }
+            | Self::StageStarted { turn_id, .. }
+            | Self::StageEnded { turn_id, .. }
+            | Self::MessageQueueDrained { turn_id, .. } => *turn_id,
         }
     }
 
@@ -372,7 +408,11 @@ impl ObserveEvent {
             | Self::TurnError { agent_id, .. }
             | Self::SubagentStart { agent_id, .. }
             | Self::SubagentStop { agent_id, .. }
-            | Self::LlmRequestPayload { agent_id, .. } => *agent_id,
+            | Self::LlmRequestPayload { agent_id, .. }
+            | Self::AiReasoningChunk { agent_id, .. }
+            | Self::StageStarted { agent_id, .. }
+            | Self::StageEnded { agent_id, .. }
+            | Self::MessageQueueDrained { agent_id, .. } => *agent_id,
         }
     }
 }

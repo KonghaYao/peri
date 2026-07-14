@@ -94,6 +94,78 @@ pub struct WorkflowProgressPayload {
     pub message: Option<String>,
 }
 
+/// ReAct 循环 5 阶段
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    Compact,
+    Receive,
+    Reason,
+    Act,
+    End,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StageStatus {
+    Done,
+    Skipped,
+    Error,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStatus {
+    Done,
+    Interrupted,
+    Error,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnErrorKind {
+    Interrupted,
+    Timeout,
+    LlmFailure,
+    ToolFailure,
+    RateLimit,
+    MaxIterations,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactStrategy {
+    Micro,
+    Full,
+    Smart,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactTrigger {
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactThreshold {
+    Micro,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MiddlewareHook {
+    BeforeAgent, AfterAgent,
+    BeforeTool, AfterTool,
+    BeforeModel, AfterModel,
+    OnError, OnSessionStart, OnSessionEnd,
+    OnUserPrompt, BeforeCompact, AfterCompact,
+    OnPermissionRequest, OnSubagentStart, OnSubagentStop,
+    OnTurnEnd, OnNotification,
+}
+
 /// Agent 执行过程中的增量事件
 ///
 /// 历史名 `AgentEvent`，因与 `peri-tui::app::events::AgentEvent` 同名造成歧义，
@@ -225,7 +297,18 @@ pub enum ExecutorEvent {
         instance_id: String,
     },
     /// 上下文压缩开始
-    CompactStarted,
+    CompactStarted {
+        /// 所属 Turn ID
+        turn_id: String,
+        /// 触发压缩的 Agent ID
+        agent_id: String,
+        /// 当前 ReAct 步数
+        step: usize,
+        /// 压缩策略
+        strategy: CompactStrategy,
+        /// 压缩触发方式
+        trigger: CompactTrigger,
+    },
     /// 上下文压缩完成
     CompactCompleted {
         /// 摘要文本（full compact 时非空，micro compact 时为空）
@@ -238,6 +321,12 @@ pub enum ExecutorEvent {
         micro_cleared: usize,
         /// 压缩后的新消息列表（full compact 时非空）
         messages: Vec<crate::messages::BaseMessage>,
+        /// 压缩前 token 数
+        token_before: u64,
+        /// 压缩后 token 数
+        token_after: u64,
+        /// 本次使用的压缩策略
+        strategy: CompactStrategy,
     },
     /// 对话回退完成（rewind 命令，移除目标用户消息及其之后的所有消息）
     RewindCompleted {
@@ -265,6 +354,77 @@ pub enum ExecutorEvent {
     /// Turn 已挂起（idle/await_wake），等待 bg agent/cron/workflow 异步事件。
     /// TUI 收到后应停止 loading spinner，但不终止 Agent（Agent 保持 await_wake 存活）。
     TurnSuspended,
+    // ── langfuse v2：会话/Turn 生命周期 ──
+    SessionStarted {
+        session_id: String,
+        frozen_summary: serde_json::Value,
+    },
+    TurnStarted {
+        turn_id: String,
+        session_id: String,
+    },
+    TurnEnded {
+        turn_id: String,
+        session_id: String,
+        status: TurnStatus,
+        error_kind: Option<TurnErrorKind>,
+    },
+    StageStarted {
+        turn_id: String,
+        stage: Stage,
+    },
+    StageEnded {
+        turn_id: String,
+        stage: Stage,
+        status: StageStatus,
+        duration_ms: u64,
+    },
+    // ── langfuse v2：中间件链 ──
+    MiddlewareStarted {
+        turn_id: String,
+        mw_name: String,
+        hook: MiddlewareHook,
+    },
+    MiddlewareEnded {
+        turn_id: String,
+        mw_name: String,
+        hook: MiddlewareHook,
+        status: StageStatus,
+        error: Option<String>,
+    },
+    // ── langfuse v2：Reason ──
+    AiReasoningChunk {
+        turn_id: String,
+        text: String,
+        source_agent_id: Option<String>,
+    },
+    // ── langfuse v2：Compact ──
+    BudgetThresholdHit {
+        turn_id: String,
+        threshold: CompactThreshold,
+        current_pct: f64,
+        tokens_in: u64,
+        tokens_out: u64,
+    },
+    // ── langfuse v2：Receive ──
+    MessageQueueDrained {
+        turn_id: String,
+        prompt: usize,
+        defer: usize,
+        info: usize,
+    },
+    // ── langfuse v2：Act / Workflow ──
+    WorkflowStarted {
+        turn_id: String,
+        workflow_id: String,
+        plan_summary: String,
+    },
+    WorkflowEnded {
+        turn_id: String,
+        workflow_id: String,
+        agents_spawned: usize,
+        tool_calls: usize,
+    },
 }
 
 /// 事件回调 trait（应用层实现）

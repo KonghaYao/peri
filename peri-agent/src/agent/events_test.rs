@@ -104,11 +104,17 @@ fn test_subagent_stopped_serde_roundtrip() {
 
 #[test]
 fn test_compact_started_serde() {
-    let ev = ExecutorEvent::CompactStarted;
+    let ev = ExecutorEvent::CompactStarted {
+        turn_id: String::new(),
+        agent_id: String::new(),
+        step: 0,
+        strategy: CompactStrategy::Smart,
+        trigger: CompactTrigger::Auto,
+    };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(json.contains(r#""type":"compact_started""#));
     let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
-    assert!(matches!(deserialized, ExecutorEvent::CompactStarted));
+    assert!(matches!(deserialized, ExecutorEvent::CompactStarted { .. }));
 }
 
 #[test]
@@ -129,6 +135,9 @@ fn test_compact_completed_serde_roundtrip() {
         skills: vec!["code-review".to_string(), "refactor".to_string()],
         micro_cleared: 0,
         messages: vec![],
+        token_before: 0,
+        token_after: 0,
+        strategy: CompactStrategy::Smart,
     };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(json.contains(r#""type":"compact_completed""#));
@@ -141,7 +150,7 @@ fn test_compact_completed_serde_roundtrip() {
         files,
         skills,
         micro_cleared,
-        messages: _,
+        ..
     } = deserialized
     {
         assert_eq!(summary, "对话摘要内容");
@@ -166,6 +175,9 @@ fn test_compact_completed_micro_serde() {
         skills: vec![],
         micro_cleared: 8,
         messages: vec![],
+        token_before: 0,
+        token_after: 0,
+        strategy: CompactStrategy::Smart,
     };
     let json = serde_json::to_string(&ev).unwrap();
     let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
@@ -174,7 +186,7 @@ fn test_compact_completed_micro_serde() {
         files,
         skills,
         micro_cleared,
-        messages: _,
+        ..
     } = deserialized
     {
         assert!(summary.is_empty());

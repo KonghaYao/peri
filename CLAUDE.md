@@ -253,6 +253,13 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **Paste 事件**：`Event::Paste` 独立于 key event，需 BracketedPaste
 - **Theme 悬垂引用**：`&THEME_ATOM.state().read().xxx` 崩，须两步绑定；`theme_def.semantic` 不能直接访问，须 `theme_def.read().semantic`
 
+### Langfuse 监控 v2
+- **trace_id = turn_id**：tracer.new() 由 caller 传入 turn_id，禁止自生成。trace_id 不可变。
+- **sampled=false 时 silently no-op**：每个 on_* 入口检查 sampling，未采样时直接返回。caller 不感知。
+- **新增 ExecutorEvent 变体**：必须同步 (1) peri-acp/event/mapper.rs (2) peri-tui/kit/acp_events.rs (3) variant_coverage_test.rs，缺一会漏掉监控数据。
+- **ErrorSpan 兜底**：错误 turn 强制发 ErrorSpan 挂同 turn（trace_id = turn_id，不破坏契约）。
+- **子对象方法签名禁止接收 `&mut LangfuseTracer`**：否则破坏 disjoint borrow。
+
 ## 任务入口矩阵
 
 | 任务 | 入口文件 | 注意事项 |
@@ -267,3 +274,4 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 | 改 MCP 配置 | `peri-middlewares/src/mcp/`（initialize/reconnect）+ `~/.peri/settings.json` | 三层合并：全局→插件→项目 `.mcp.json` |
 | 改 Plugin 系统 | `peri-middlewares/src/plugin/`（installer/marketplace/config） | 兼容 Claude Code 生态 |
 | 改 Skills | `peri-middlewares/src/skills/`（扫描/叶子语义）+ `skills/builtin/`（编译期嵌入） | 搜索顺序：用户→项目→插件→Builtin |
+| 改 Langfuse 监控 | `peri-acp/src/langfuse/tracer/`（7 子对象 + 主 struct） + `langfuse-client/`（数据结构） + `peri-acp/src/session/executor_helpers.rs::forward_langfuse_event`（路由） | trace_id = turn_id 契约；新增 ExecutorEvent 必须扩 mapper_test + variant_coverage_test；sampled=false 时 tracer silently no-op |

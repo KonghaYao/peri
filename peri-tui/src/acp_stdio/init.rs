@@ -116,7 +116,7 @@ pub(super) async fn init_stdio_context(cwd: String) -> anyhow::Result<Arc<StdioC
 
     // 初始化 Langfuse
     let langfuse_session = if let Some(config) = peri_acp::langfuse::LangfuseConfig::from_env() {
-        peri_acp::langfuse::LangfuseSession::new(config)
+        peri_acp::langfuse::LangfuseSession::new(config, "live".into())
             .await
             .map(Arc::new)
     } else {

@@ -3,7 +3,9 @@
 //! 从 MessageQueue 中取出 Prompt + Info 消息，写入 Transcript。
 //! Defer 消息保留在队列中，等待 End 阶段或下个 turn。
 
+use crate::agent::events_v2::ObserveEvent;
 use crate::agent::stages::{append_messages_to_transcript, ReceiveInput, ReceiveOutput};
+use crate::session::MessageKind;
 #[cfg(test)]
 use crate::session::QueuedMessage;
 
@@ -15,6 +17,27 @@ use crate::session::QueuedMessage;
 pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<ReceiveOutput> {
     let consumed = input.context.queue.drain_for_receive();
     let count = consumed.len();
+
+    // emit MessageQueueDrained（langfuse v2 遥测）
+    {
+        let mut prompt_count = 0usize;
+        let mut defer_count = 0usize;
+        let mut info_count = 0usize;
+        for msg in &consumed {
+            match msg.kind {
+                MessageKind::Prompt => prompt_count += 1,
+                MessageKind::Defer => defer_count += 1,
+                MessageKind::Info => info_count += 1,
+            }
+        }
+        input.context.event_bus.emit_observe(ObserveEvent::MessageQueueDrained {
+            turn_id: input.context.turn_id(),
+            agent_id: input.context.agent_id,
+            prompt: prompt_count,
+            defer: defer_count,
+            info: info_count,
+        });
+    }
 
     if count > 0 {
         let mut transcript = input.context.transcript.write();

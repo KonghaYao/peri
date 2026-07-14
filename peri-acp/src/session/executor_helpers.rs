@@ -35,7 +35,11 @@
 use std::sync::Arc;
 
 use peri_agent::{
-    agent::{events::ExecutorEvent, state::AgentState, AgentCancellationToken},
+    agent::{
+        events::{ExecutorEvent, Stage, TurnErrorKind, TurnStatus},
+        state::AgentState,
+        AgentCancellationToken,
+    },
     error::AgentError,
     messages::{BaseMessage, MessageContent},
 };
@@ -188,7 +192,12 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
 
     let langfuse_tracer = langfuse_session
         .as_ref()
-        .map(|s| parking_lot::Mutex::new(LangfuseTracer::new(Arc::clone(s), session_id.clone())));
+        .map(|s| {
+            let session_clone = Arc::clone(s);
+            let config = session_clone.config.clone();
+            let session: std::sync::Arc<dyn crate::langfuse::LangfuseSessionLike> = session_clone;
+            parking_lot::Mutex::new(LangfuseTracer::new(session, session_id.clone(), config))
+        });
     if langfuse_tracer.is_some() {
         debug!(session_id = %session_id, "Langfuse tracer created for turn");
     }
@@ -196,10 +205,17 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
     tokio::spawn(async move {
         // Start Langfuse trace
         if let Some(ref tracer) = langfuse_tracer {
-            tracer.lock().on_trace_start(&trace_input);
+            tracer.lock().on_turn_start(&trace_input);
         }
 
+        let mut last_error: Option<String> = None;
+
         while let Some(exec_event) = event_rx.recv().await {
+            // Capture error_kind from TurnEnded for on_turn_end at pump tail
+            if let ExecutorEvent::TurnEnded { error_kind, .. } = &exec_event {
+                last_error = error_kind.as_ref().map(|k| format!("{:?}", k));
+            }
+
             // Langfuse tracing
             if let Some(ref tracer) = langfuse_tracer {
                 forward_langfuse_event(tracer, &exec_event, &provider_display_name);
@@ -229,7 +245,7 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
 
         // End Langfuse trace and flush
         let langfuse_flush = if let Some(tracer) = langfuse_tracer {
-            let handle = tracer.into_inner().on_trace_end(None);
+            let handle = tracer.into_inner().on_turn_end(last_error.as_deref());
             Some(handle)
         } else {
             None
@@ -328,7 +344,7 @@ pub(crate) fn forward_langfuse_event(
                 .lock()
                 .on_llm_retrying(*attempt, *max_attempts, *delay_ms, error);
         }
-        ExecutorEvent::CompactStarted => {
+        ExecutorEvent::CompactStarted { .. } => {
             tracer.lock().on_compact_start();
         }
         ExecutorEvent::CompactCompleted {
@@ -349,6 +365,78 @@ pub(crate) fn forward_langfuse_event(
         }
         ExecutorEvent::CompactError { message } => {
             tracer.lock().on_compact_end("", 0, 0, 0, true, message);
+        }
+        // ── langfuse v2 路由 ──
+        ExecutorEvent::SessionStarted { session_id, frozen_summary } => {
+            tracing::debug!(target: "langfuse::forward", %session_id, "SessionStarted → on_session_start");
+            tracer.lock().on_session_start(frozen_summary);
+        }
+        ExecutorEvent::TurnStarted { turn_id, .. } => {
+            tracing::debug!(target: "langfuse::forward", %turn_id, "TurnStarted");
+            // on_turn_start 已在外部调用，此处不重复
+        }
+        ExecutorEvent::TurnEnded { turn_id, status, error_kind, .. } => {
+            tracing::debug!(target: "langfuse::forward", %turn_id, ?status, ?error_kind, "TurnEnded (handled by pump tail)");
+            // on_turn_end is called by the pump tail after the event loop — do NOT call it here
+        }
+        ExecutorEvent::StageStarted { stage, turn_id } => {
+            tracer.lock().on_stage_start(*stage, turn_id);
+        }
+        ExecutorEvent::StageEnded { stage, status, .. } => {
+            // Extract handle fields under immutable borrow, then release lock
+            let handle_fields: Option<(String, Stage, String, String, String)> = {
+                let t = tracer.lock();
+                t.stages.active_handle().map(|h| {
+                    (h.span_id.clone(), h.stage, h.start_time.clone(), h.trace_id.clone(), h.parent_observation_id.clone())
+                })
+            };
+            if let Some((span_id, s, start_time, trace_id, parent_obs_id)) = handle_fields {
+                let handle = crate::langfuse::tracer::stages::StageHandle {
+                    span_id,
+                    stage: s,
+                    start_time,
+                    trace_id,
+                    parent_observation_id: parent_obs_id,
+                };
+                tracer.lock().on_stage_end(&handle, *status);
+            } else {
+                tracing::debug!(target: "langfuse::forward", ?stage, ?status, "StageEnded without active handle, skipping");
+            }
+        }
+        ExecutorEvent::MiddlewareStarted { mw_name, hook, .. } => {
+            tracer.lock().on_middleware_start(mw_name, *hook);
+        }
+        ExecutorEvent::MiddlewareEnded { mw_name, hook, status, error, .. } => {
+            let span_id = {
+                let t = tracer.lock();
+                t.middleware.find_active(mw_name, *hook)
+            };
+            if let Some(span_id) = span_id {
+                let handle = crate::langfuse::tracer::middleware::MiddlewareSpanHandle {
+                    span_id,
+                    name: mw_name.clone(),
+                    hook: *hook,
+                };
+                tracer.lock().on_middleware_end(&handle, *status, error.clone());
+            } else {
+                tracing::warn!(target: "langfuse::forward", %mw_name, ?hook, "MiddlewareEnded without active middleware span, skipping");
+            }
+        }
+        ExecutorEvent::AiReasoningChunk { text, .. } => {
+            tracer.lock().on_ai_reasoning_chunk(text);
+        }
+        ExecutorEvent::BudgetThresholdHit { threshold, current_pct, tokens_in, tokens_out, .. } => {
+            let threshold_str = format!("{:?}", threshold);
+            tracer.lock().on_budget_threshold_hit(&threshold_str, *current_pct, *tokens_in, *tokens_out);
+        }
+        ExecutorEvent::MessageQueueDrained { prompt, defer, info, .. } => {
+            tracer.lock().on_mq_drained(*prompt, *defer, *info);
+        }
+        ExecutorEvent::WorkflowStarted { workflow_id, plan_summary, .. } => {
+            tracer.lock().on_workflow_start(workflow_id, plan_summary);
+        }
+        ExecutorEvent::WorkflowEnded { workflow_id, agents_spawned, tool_calls, .. } => {
+            tracer.lock().on_workflow_end(workflow_id, *agents_spawned, *tool_calls);
         }
         _ => {}
     }
@@ -574,6 +662,16 @@ pub(super) async fn build_and_execute_agent_v2(
     }
 
     // Phase 7: 运行 v2 ReAct 循环（max_iterations 与 v1 一致 = 500）
+    // langfuse v2: capture turn_id before move, emit TurnStarted
+    let loop_turn_id = v2_out.context.turn_id().to_string();
+    {
+        if let Some(tx) = event_tx.lock().as_ref() {
+            let _ = tx.send(ExecutorEvent::TurnStarted {
+                turn_id: loop_turn_id.clone(),
+                session_id: session_id.to_string(),
+            });
+        }
+    }
     let loop_result = run_react_loop(v2_out.context, 500).await;
 
     // Phase 8: 从 transcript 提取最终消息列表，构造 AgentState（兼容下游 PromptResult）
@@ -625,6 +723,32 @@ pub(super) async fn build_and_execute_agent_v2(
             (false, reason)
         }
     };
+
+    // langfuse v2: emit TurnEnded
+    {
+        let (status, error_kind) = match loop_result {
+            LoopResult::Completed => (TurnStatus::Done, None),
+            LoopResult::Interrupted => (TurnStatus::Interrupted, Some(TurnErrorKind::Interrupted)),
+            LoopResult::Error(ref e) => {
+                let kind = if matches!(e, AgentError::Interrupted) {
+                    TurnErrorKind::Interrupted
+                } else if matches!(e, AgentError::MaxIterationsExceeded(_)) {
+                    TurnErrorKind::MaxIterations
+                } else {
+                    TurnErrorKind::LlmFailure
+                };
+                (TurnStatus::Error, Some(kind))
+            }
+        };
+        if let Some(tx) = event_tx.lock().as_ref() {
+            let _ = tx.send(ExecutorEvent::TurnEnded {
+                turn_id: loop_turn_id,
+                session_id: session_id.to_string(),
+                status,
+                error_kind,
+            });
+        }
+    }
 
     // Cancel cascade children when this agent is cancelled
     if stop_reason == PromptStopReason::Cancelled {

@@ -276,6 +276,39 @@
     }
 
     #[tokio::test]
+    async fn test_batcher_backpressure_drop_oldest() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/public/otel/v1/traces")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = create_test_client(&server.url());
+        let config = BatcherConfig {
+            max_events: 5,
+            flush_interval: Duration::from_secs(60),
+            backpressure: BackpressurePolicy::DropOldest,
+            max_retries: 0,
+        };
+        let batcher = Batcher::new(client, config);
+
+        for i in 0..5 {
+            batcher
+                .add(create_test_event(&format!("{}", i)))
+                .await
+                .unwrap();
+        }
+
+        batcher.flush().await.unwrap();
+        mock.assert_async().await;
+        drop(batcher);
+    }
+
+    #[tokio::test]
     async fn test_batcher_backpressure_drop_new() {
         let mut server = mockito::Server::new_async().await;
         let _mock = server

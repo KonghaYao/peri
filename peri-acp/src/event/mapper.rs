@@ -282,13 +282,25 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32) -> Vec<MappedEvent>
         | ExecutorEvent::StateSnapshot(_)
         | ExecutorEvent::StateSnapshotMeta { .. }
         | ExecutorEvent::TurnCommitted { .. }
-        | ExecutorEvent::CompactStarted
+        | ExecutorEvent::CompactStarted { .. }
         | ExecutorEvent::CompactCompleted { .. }
         | ExecutorEvent::CompactError { .. }
         | ExecutorEvent::RewindCompleted { .. }
         | ExecutorEvent::BackgroundTaskCompleted(_)
         | ExecutorEvent::BgToolStep { .. }
         | ExecutorEvent::LspDiagnostics { .. }
+        | ExecutorEvent::SessionStarted { .. }
+        | ExecutorEvent::TurnStarted { .. }
+        | ExecutorEvent::TurnEnded { .. }
+        | ExecutorEvent::StageStarted { .. }
+        | ExecutorEvent::StageEnded { .. }
+        | ExecutorEvent::MiddlewareStarted { .. }
+        | ExecutorEvent::MiddlewareEnded { .. }
+        | ExecutorEvent::AiReasoningChunk { .. }
+        | ExecutorEvent::BudgetThresholdHit { .. }
+        | ExecutorEvent::MessageQueueDrained { .. }
+        | ExecutorEvent::WorkflowStarted { .. }
+        | ExecutorEvent::WorkflowEnded { .. }
         | ExecutorEvent::AgentExecutionFailed { .. }
         | ExecutorEvent::WorkflowProgress(_) => {
             vec![MappedEvent::tui_only()]
@@ -385,13 +397,14 @@ pub fn executor_event_to_acp(event: &ExecutorEvent) -> Option<super::AcpEvent> {
             is_error: *is_error,
             instance_id: instance_id.clone(),
         }),
-        ExecutorEvent::CompactStarted => Some(AcpEvent::CompactStarted),
+        ExecutorEvent::CompactStarted { .. } => Some(AcpEvent::CompactStarted),
         ExecutorEvent::CompactCompleted {
             summary,
             files,
             skills,
             micro_cleared,
             messages,
+            ..
         } => {
             let files_dto: Vec<crate::event::dto::CompactFileInfoDto> = files
                 .iter()
@@ -463,6 +476,20 @@ pub fn executor_event_to_acp(event: &ExecutorEvent) -> Option<super::AcpEvent> {
             delay_ms: *delay_ms,
             error: error.clone(),
         }),
+        // ── langfuse v2 观测事件：不产生 TUI 输出 ──
+        ExecutorEvent::SessionStarted { .. }
+        | ExecutorEvent::TurnStarted { .. }
+        | ExecutorEvent::TurnEnded { .. }
+        | ExecutorEvent::StageStarted { .. }
+        | ExecutorEvent::StageEnded { .. }
+        | ExecutorEvent::MiddlewareStarted { .. }
+        | ExecutorEvent::MiddlewareEnded { .. }
+        | ExecutorEvent::AiReasoningChunk { .. }
+        | ExecutorEvent::BudgetThresholdHit { .. }
+        | ExecutorEvent::MessageQueueDrained { .. }
+        | ExecutorEvent::WorkflowStarted { .. }
+        | ExecutorEvent::WorkflowEnded { .. } => None,
+
         ExecutorEvent::WorkflowProgress(payload) => Some(AcpEvent::WorkflowProgress {
             run_id: payload.run_id.clone(),
             workflow_name: payload.workflow_name.clone(),

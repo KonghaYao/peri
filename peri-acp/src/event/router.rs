@@ -108,7 +108,7 @@ pub fn route(ev: &ExecutorEvent) -> Option<RoutingOutput> {
         ExecutorEvent::LlmCallEnd { .. }
         | ExecutorEvent::LlmRetrying { .. }
         | ExecutorEvent::LspDiagnostics { .. }
-        | ExecutorEvent::CompactStarted
+        | ExecutorEvent::CompactStarted { .. }
         | ExecutorEvent::CompactCompleted { .. }
         | ExecutorEvent::CompactError { .. }
         | ExecutorEvent::LlmCallStart { .. }
@@ -128,6 +128,18 @@ pub fn route(ev: &ExecutorEvent) -> Option<RoutingOutput> {
         | ExecutorEvent::TurnCommitted { .. }
         | ExecutorEvent::SubagentStarted { .. }
         | ExecutorEvent::SubagentStopped { .. }
+        | ExecutorEvent::SessionStarted { .. }
+        | ExecutorEvent::TurnStarted { .. }
+        | ExecutorEvent::TurnEnded { .. }
+        | ExecutorEvent::StageStarted { .. }
+        | ExecutorEvent::StageEnded { .. }
+        | ExecutorEvent::MiddlewareStarted { .. }
+        | ExecutorEvent::MiddlewareEnded { .. }
+        | ExecutorEvent::AiReasoningChunk { .. }
+        | ExecutorEvent::BudgetThresholdHit { .. }
+        | ExecutorEvent::MessageQueueDrained { .. }
+        | ExecutorEvent::WorkflowStarted { .. }
+        | ExecutorEvent::WorkflowEnded { .. }
         | ExecutorEvent::AgentExecutionFailed { .. } => None,
         // ── TurnSuspended: idle/await_wake 时发出，通知 TUI 停止 loading ──
         ExecutorEvent::TurnSuspended => Some(RoutingOutput {

@@ -230,7 +230,7 @@ pub async fn build_app_and_acp(
                 langfuse_session: {
                     if let Some(config) = peri_acp::langfuse::LangfuseConfig::from_env() {
                         tracing::info!("Langfuse tracing enabled (TUI mode)");
-                        peri_acp::langfuse::LangfuseSession::new(config)
+                        peri_acp::langfuse::LangfuseSession::new(config, "live".into())
                             .await
                             .map(Arc::new)
                     } else {

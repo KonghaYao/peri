@@ -143,6 +143,7 @@ impl LangfuseClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BackpressurePolicy;
     use crate::types::TraceBody;
     include!("client_test.rs");
 }

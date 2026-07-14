@@ -1,5 +1,6 @@
 use peri_agent::agent::events::{
-    BackgroundTaskResult, CompactFileInfo, ExecutorEvent, TodoEntry, TodoStatus,
+    BackgroundTaskResult, CompactFileInfo, CompactStrategy, CompactTrigger, ExecutorEvent,
+    TodoEntry, TodoStatus,
 };
 use peri_agent::llm::types::{StopReason, TokenUsage};
 use peri_agent::messages::{BaseMessage, MessageId};
@@ -489,7 +490,13 @@ fn test_subagent_stopped_is_tui_only() {
 
 #[test]
 fn test_compact_started_is_tui_only() {
-    assert_tui_only(&ExecutorEvent::CompactStarted, "CompactStarted");
+    assert_tui_only(&ExecutorEvent::CompactStarted {
+        turn_id: "turn_1".into(),
+        agent_id: "agent_1".into(),
+        step: 0,
+        strategy: CompactStrategy::Smart,
+        trigger: CompactTrigger::Auto,
+    }, "CompactStarted");
 }
 
 #[test]
@@ -504,6 +511,9 @@ fn test_compact_completed_is_tui_only() {
             skills: vec!["skill-a".to_string()],
             micro_cleared: 0,
             messages: vec![],
+            token_before: 0,
+            token_after: 0,
+            strategy: CompactStrategy::Smart,
         },
         "CompactCompleted",
     );

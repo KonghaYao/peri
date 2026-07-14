@@ -105,11 +105,21 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                 chunk,
             });
         }
-        ExecutorEvent::AiReasoning { text, .. } => {
+        ExecutorEvent::AiReasoning {
+            text,
+            source_agent_id,
+        } => {
             eb.emit_render(RenderEvent::ThinkingChunk {
                 turn_id,
                 agent_id,
-                chunk: text,
+                chunk: text.clone(),
+            });
+            // langfuse v2：同步 emit AiReasoningChunk（遥测用）
+            eb.emit_observe(ObserveEvent::AiReasoningChunk {
+                turn_id,
+                agent_id,
+                text,
+                source_agent_id,
             });
         }
         _ => {}

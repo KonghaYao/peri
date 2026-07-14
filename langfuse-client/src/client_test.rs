@@ -162,6 +162,11 @@
             public_key: "pk".into(),
             secret_key: "sk".into(),
             base_url: "https://cloud.langfuse.com".into(),
+            trace_sampling: 1.0,
+            error_span_always: true,
+            batch_max_events: 50,
+            batch_flush_interval_secs: 10,
+            batch_backpressure: BackpressurePolicy::DropNew,
         };
         let client = LangfuseClient::from_config(&config, 2);
         assert_eq!(client.auth_header, "Basic cGs6c2s=");

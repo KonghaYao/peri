@@ -21,7 +21,8 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::agent::compact::config::CompactConfig;
-use crate::agent::events_v2::EventBus;
+use crate::agent::events::{Stage, StageStatus};
+use crate::agent::events_v2::{EventBus, ObserveEvent};
 use crate::agent::react::ReactLLM;
 use crate::agent::token::ContextBudget;
 use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
@@ -528,45 +529,121 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         context.turn.advance_step();
 
         // ── Compact ──
+        let compact_start = std::time::Instant::now();
+        context
+            .event_bus
+            .emit_observe(ObserveEvent::StageStarted {
+                turn_id: context.turn_id(),
+                agent_id: context.agent_id,
+                stage: Stage::Compact,
+            });
         let _compact_out = match compact::run_compact(CompactInput {
             context: context.clone(),
             has_tool_calls,
         })
         .await
         {
-            Ok(out) => out,
+            Ok(out) => {
+                context
+                    .event_bus
+                    .emit_observe(ObserveEvent::StageEnded {
+                        turn_id: context.turn_id(),
+                        agent_id: context.agent_id,
+                        stage: Stage::Compact,
+                        status: StageStatus::Done,
+                        duration_ms: compact_start.elapsed().as_millis() as u64,
+                    });
+                out
+            }
             Err(e) => return LoopResult::Error(e),
         };
 
         // ── Receive ──
+        let receive_start = std::time::Instant::now();
+        context
+            .event_bus
+            .emit_observe(ObserveEvent::StageStarted {
+                turn_id: context.turn_id(),
+                agent_id: context.agent_id,
+                stage: Stage::Receive,
+            });
         let _receive_out = match receive::run_receive(ReceiveInput {
             context: context.clone(),
         })
         .await
         {
-            Ok(out) => out,
+            Ok(out) => {
+                context
+                    .event_bus
+                    .emit_observe(ObserveEvent::StageEnded {
+                        turn_id: context.turn_id(),
+                        agent_id: context.agent_id,
+                        stage: Stage::Receive,
+                        status: StageStatus::Done,
+                        duration_ms: receive_start.elapsed().as_millis() as u64,
+                    });
+                out
+            }
             Err(e) => return LoopResult::Error(e),
         };
 
         // ── Reason ──
+        let reason_start = std::time::Instant::now();
+        context
+            .event_bus
+            .emit_observe(ObserveEvent::StageStarted {
+                turn_id: context.turn_id(),
+                agent_id: context.agent_id,
+                stage: Stage::Reason,
+            });
         let reason_out = match reason::run_reason(ReasonInput {
             context: context.clone(),
             has_tool_calls,
         })
         .await
         {
-            Ok(out) => out,
+            Ok(out) => {
+                context
+                    .event_bus
+                    .emit_observe(ObserveEvent::StageEnded {
+                        turn_id: context.turn_id(),
+                        agent_id: context.agent_id,
+                        stage: Stage::Reason,
+                        status: StageStatus::Done,
+                        duration_ms: reason_start.elapsed().as_millis() as u64,
+                    });
+                out
+            }
             Err(e) => return LoopResult::Error(e),
         };
 
         // ── Act ──
+        let act_start = std::time::Instant::now();
+        context
+            .event_bus
+            .emit_observe(ObserveEvent::StageStarted {
+                turn_id: context.turn_id(),
+                agent_id: context.agent_id,
+                stage: Stage::Act,
+            });
         let act_out = match act::run_act(ActInput {
             context: context.clone(),
             reasoning: reason_out.reasoning,
         })
         .await
         {
-            Ok(out) => out,
+            Ok(out) => {
+                context
+                    .event_bus
+                    .emit_observe(ObserveEvent::StageEnded {
+                        turn_id: context.turn_id(),
+                        agent_id: context.agent_id,
+                        stage: Stage::Act,
+                        status: StageStatus::Done,
+                        duration_ms: act_start.elapsed().as_millis() as u64,
+                    });
+                out
+            }
             Err(e) => return LoopResult::Error(e),
         };
 
@@ -582,9 +659,26 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         }
 
         // ── End ──
+        let end_start = std::time::Instant::now();
+        context
+            .event_bus
+            .emit_observe(ObserveEvent::StageStarted {
+                turn_id: context.turn_id(),
+                agent_id: context.agent_id,
+                stage: Stage::End,
+            });
         let end_out = end::run_end(EndInput {
             context: context.clone(),
         });
+        context
+            .event_bus
+            .emit_observe(ObserveEvent::StageEnded {
+                turn_id: context.turn_id(),
+                agent_id: context.agent_id,
+                stage: Stage::End,
+                status: StageStatus::Done,
+                duration_ms: end_start.elapsed().as_millis() as u64,
+            });
 
         tracing::debug!(
             step = context.turn.current_step(),

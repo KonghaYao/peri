@@ -33,3 +33,5 @@ dirs-next.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+serial_test.workspace = true
+mockito = "1"

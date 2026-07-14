@@ -1,4 +1,5 @@
 use super::*;
+use peri_agent::agent::events::{CompactStrategy, CompactTrigger};
 
 #[test]
 fn test_llm_call_end_all_discarded() {
@@ -96,7 +97,13 @@ fn test_lsp_diagnostics_discarded() {
 
 #[test]
 fn test_compact_started_discarded() {
-    assert!(route(&ExecutorEvent::CompactStarted).is_none());
+    assert!(route(&ExecutorEvent::CompactStarted {
+        turn_id: String::new(),
+        agent_id: String::new(),
+        step: 0,
+        strategy: CompactStrategy::Smart,
+        trigger: CompactTrigger::Auto,
+    }).is_none());
 }
 
 #[test]
@@ -107,6 +114,9 @@ fn test_compact_completed_discarded() {
         skills: vec![],
         micro_cleared: 0,
         messages: vec![],
+        token_before: 0,
+        token_after: 0,
+        strategy: CompactStrategy::Smart,
     };
     assert!(route(&ev).is_none());
 }

@@ -453,6 +453,68 @@ pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> Otel
                     status: Some(OtelStatus::default()),
                 });
             }
+            super::IngestionEvent::SessionCreate { body, .. } => {
+                let mut attrs = vec![OtelAttribute::string("langfuse.session.id", &body.id)];
+                if let Some(ref user_id) = body.user_id {
+                    attrs.push(OtelAttribute::string("langfuse.user.id", user_id));
+                }
+                if let Some(ref release) = body.release {
+                    attrs.push(OtelAttribute::string("langfuse.release", release));
+                }
+                if let Some(ref version) = body.version {
+                    attrs.push(OtelAttribute::string("langfuse.version", version));
+                }
+                if let Some(ref source) = body.source {
+                    attrs.push(OtelAttribute::string("langfuse.session.source", source));
+                }
+                if let Some(ref metadata) = body.metadata {
+                    if let Ok(json) = serde_json::to_string(metadata) {
+                        attrs.push(OtelAttribute::string("langfuse.session.metadata", json));
+                    }
+                }
+                spans.push(OtelSpan {
+                    trace_id: None,
+                    span_id: None,
+                    parent_span_id: None,
+                    name: Some(format!("session-create:{}", body.id)),
+                    kind: Some(1),
+                    start_time_unix_nano: None,
+                    end_time_unix_nano: None,
+                    attributes: Some(attrs),
+                    status: Some(OtelStatus::default()),
+                });
+            }
+            super::IngestionEvent::SessionUpdate { body, .. } => {
+                let mut attrs = vec![OtelAttribute::string("langfuse.session.id", &body.id)];
+                if let Some(ref user_id) = body.user_id {
+                    attrs.push(OtelAttribute::string("langfuse.user.id", user_id));
+                }
+                if let Some(ref release) = body.release {
+                    attrs.push(OtelAttribute::string("langfuse.release", release));
+                }
+                if let Some(ref version) = body.version {
+                    attrs.push(OtelAttribute::string("langfuse.version", version));
+                }
+                if let Some(ref source) = body.source {
+                    attrs.push(OtelAttribute::string("langfuse.session.source", source));
+                }
+                if let Some(ref metadata) = body.metadata {
+                    if let Ok(json) = serde_json::to_string(metadata) {
+                        attrs.push(OtelAttribute::string("langfuse.session.metadata", json));
+                    }
+                }
+                spans.push(OtelSpan {
+                    trace_id: None,
+                    span_id: None,
+                    parent_span_id: None,
+                    name: Some(format!("session-update:{}", body.id)),
+                    kind: Some(1),
+                    start_time_unix_nano: None,
+                    end_time_unix_nano: None,
+                    attributes: Some(attrs),
+                    status: Some(OtelStatus::default()),
+                });
+            }
         }
     }
 
