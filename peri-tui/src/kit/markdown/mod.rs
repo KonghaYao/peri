@@ -23,6 +23,7 @@ mod span_style;
 mod table;
 pub mod types;
 
+use ratatui::style::Color;
 use ratatui_kit::{ComponentTheme, prelude::Palette};
 use ratatui_kit_markdown::{MarkdownTheme, parse_markdown as rk_parse};
 
@@ -32,7 +33,13 @@ pub use types::{MarkdownSegment, TableData};
 // ── 公开 API ───────────────────────────────────────────────────────
 
 /// 解析 markdown 为段落序列，表格作为独立 `Table` 段，不放 `Vec<Line>` 里。
-pub fn parse_markdown(input: &str, max_width: usize, palette: Palette) -> Vec<MarkdownSegment> {
+/// `base_fg` 作为普通段落文本的前景色（来自主题 `component.markdown.text`）。
+pub fn parse_markdown(
+    input: &str,
+    max_width: usize,
+    palette: Palette,
+    base_fg: Color,
+) -> Vec<MarkdownSegment> {
     if input.is_empty() {
         return vec![];
     }
@@ -42,7 +49,7 @@ pub fn parse_markdown(input: &str, max_width: usize, palette: Palette) -> Vec<Ma
     let sanitized = ensure_closed_code_fences(input);
     let parsed = rk_parse(&sanitized);
     let theme = MarkdownTheme::from_palette(&palette);
-    convert::convert_to_segments(&parsed.blocks, &theme, max_width)
+    convert::convert_to_segments(&parsed.blocks, &theme, max_width, base_fg)
 }
 
 /// 检测未闭合 fenced code block：逐行统计 ``` fence 数，奇数则末尾补一个闭合 fence。
@@ -116,10 +123,12 @@ impl MarkdownRenderCache {
 ///
 /// 调用方应将 cache 与 VM（AssistantBubble）一一绑定，避免跨 VM 复用。
 /// 在 message_area/mod.rs::VmCacheSlot 中嵌入。
+/// `base_fg` 作为普通段落文本的前景色（来自主题 `component.markdown.text`）。
 pub fn parse_markdown_cached(
     input: &str,
     max_width: usize,
     palette: Palette,
+    base_fg: Color,
     cache: &mut MarkdownRenderCache,
 ) -> Vec<MarkdownSegment> {
     if input.is_empty() {
@@ -128,6 +137,7 @@ pub fn parse_markdown_cached(
     let sanitized = ensure_closed_code_fences(input);
     let parsed = rk_parse(&sanitized);
     let theme = MarkdownTheme::from_palette(&palette);
+    let base_style = ratatui::style::Style::default().fg(base_fg);
 
     // 判断是否能复用 stable_state
     // [Table 缓存失效] Table 是动态块：追加行会改变同一 block 的内容（headers/rows），
@@ -146,8 +156,13 @@ pub fn parse_markdown_cached(
         convert::ConvertState::default()
     };
 
-    let segments =
-        convert::convert_to_segments_with_state(&parsed.blocks, &theme, max_width, &mut state);
+    let segments = convert::convert_to_segments_with_state(
+        &parsed.blocks,
+        &theme,
+        max_width,
+        base_style,
+        &mut state,
+    );
 
     // 只在 sanitized 以换行符结尾时持久化（保证最后一个 block 已闭合）
     // —— 这是续跑正确性的契约：stable_text 对应的所有 block 在新 text 中
@@ -168,7 +183,11 @@ pub fn parse_markdown_cached(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
     use ratatui::style::Modifier;
+
+    /// 测试辅助：主题正文色（段落文本默认前景）。
+    const TEST_BASE_FG: Color = Color::White;
 
     /// 测试辅助：将 parse_markdown 返回的段落展平为 Line 列表。
     fn flatten(segments: &[MarkdownSegment]) -> Vec<ratatui::text::Line<'static>> {
@@ -183,13 +202,18 @@ mod tests {
 
     #[test]
     fn test_empty_input() {
-        let result = flatten(&parse_markdown("", 80, Palette::default()));
+        let result = flatten(&parse_markdown("", 80, Palette::default(), TEST_BASE_FG));
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_heading() {
-        let result = flatten(&parse_markdown("# Hello", 80, Palette::default()));
+        let result = flatten(&parse_markdown(
+            "# Hello",
+            80,
+            Palette::default(),
+            TEST_BASE_FG,
+        ));
         assert_eq!(result.len(), 1);
         let line = &result[0];
         // 不渲染 # 前缀，标题文本当普通段落
@@ -199,14 +223,30 @@ mod tests {
 
     #[test]
     fn test_paragraph() {
-        let result = flatten(&parse_markdown("hello world", 80, Palette::default()));
+        let result = flatten(&parse_markdown(
+            "hello world",
+            80,
+            Palette::default(),
+            TEST_BASE_FG,
+        ));
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].spans[0].content, "hello world");
+        // 普通段落文本应有 base_fg 色
+        assert_eq!(
+            result[0].spans[0].style.fg,
+            Some(Color::White),
+            "paragraph text should have base_fg = White"
+        );
     }
 
     #[test]
     fn test_adjacent_paragraphs() {
-        let result = flatten(&parse_markdown("a\n\nb", 80, Palette::default()));
+        let result = flatten(&parse_markdown(
+            "a\n\nb",
+            80,
+            Palette::default(),
+            TEST_BASE_FG,
+        ));
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].spans[0].content, "a");
         assert!(result[1].spans.is_empty());
@@ -215,23 +255,40 @@ mod tests {
 
     #[test]
     fn test_inline_code() {
-        let result = flatten(&parse_markdown("use `code` here", 80, Palette::default()));
+        let result = flatten(&parse_markdown(
+            "use `code` here",
+            80,
+            Palette::default(),
+            TEST_BASE_FG,
+        ));
         let line = &result[0];
-        // v0.3.0: inline code 内容包含 backtick 标记，且不再使用 Palette 颜色
+        // backtick 已剥离，span 内容为纯代码文本
         let code_span = line
             .spans
             .iter()
-            .find(|s| s.content.as_ref().contains("code"))
-            .expect("inline code span should contain 'code'");
-        // v0.3.0 不应用 fg 颜色
+            .find(|s| s.content.as_ref() == "code")
+            .expect("inline code span content should be 'code' (backticks stripped)");
+        // Palette::default().info = Blue
         assert_eq!(
-            code_span.style.fg, None,
-            "inline code should not have explicit fg in v0.3.0"
+            code_span.style.fg,
+            Some(Color::Blue),
+            "inline code should have fg = palette.info (Blue)"
         );
-        // 不应有背景色
+        // 行内代码无背景色
         assert_eq!(
             code_span.style.bg, None,
             "inline code should not have background"
+        );
+        // 普通文本 span 应有 base_fg
+        let plain_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "use ")
+            .expect("should have plain text span");
+        assert_eq!(
+            plain_span.style.fg,
+            Some(Color::White),
+            "plain text should have base_fg"
         );
     }
 
@@ -241,6 +298,7 @@ mod tests {
             "- item 1\n- item 2",
             80,
             Palette::default(),
+            TEST_BASE_FG,
         ));
         let non_empty: Vec<_> = result.iter().filter(|l| !l.spans.is_empty()).collect();
         assert_eq!(non_empty.len(), 2, "expected 2 non-empty list item lines");
@@ -264,6 +322,7 @@ mod tests {
             "```rust\nlet x = 1;\n```",
             80,
             Palette::default(),
+            TEST_BASE_FG,
         ));
         // 单一代码块：至少渲染一行代码
         assert!(!result.is_empty());
@@ -275,6 +334,7 @@ mod tests {
             "text\n\n```rust\nlet x = 1;\n```",
             80,
             Palette::default(),
+            TEST_BASE_FG,
         ));
         // 段落 + 空行分隔 + 代码行
         assert!(result.len() >= 3);
@@ -286,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_rule() {
-        let result = flatten(&parse_markdown("---", 80, Palette::default()));
+        let result = flatten(&parse_markdown("---", 80, Palette::default(), TEST_BASE_FG));
         assert_eq!(result.len(), 1);
         let content: String = result[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(content.contains('─'));
@@ -294,7 +354,12 @@ mod tests {
 
     #[test]
     fn test_bold_text() {
-        let result = flatten(&parse_markdown("**bold**", 80, Palette::default()));
+        let result = flatten(&parse_markdown(
+            "**bold**",
+            80,
+            Palette::default(),
+            TEST_BASE_FG,
+        ));
         let line = &result[0];
         assert!(
             line.spans
@@ -310,7 +375,7 @@ mod tests {
     fn test_unclosed_code_block_content_visible() {
         // [回归测试] 流式输入末尾若 ``` 未闭合，内容不应被丢弃
         let input = "```rust\nlet x = 1;\nlet y = 2;";
-        let result = flatten(&parse_markdown(input, 80, Palette::default()));
+        let result = flatten(&parse_markdown(input, 80, Palette::default(), TEST_BASE_FG));
         let content: String = result
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -330,7 +395,7 @@ mod tests {
     fn test_closed_code_block_unchanged_after_fix() {
         // 闭合的代码块渲染结果稳定（验证修复不引入回归）
         let input = "```rust\nlet x = 1;\n```";
-        let result = flatten(&parse_markdown(input, 80, Palette::default()));
+        let result = flatten(&parse_markdown(input, 80, Palette::default(), TEST_BASE_FG));
         let content: String = result
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -401,8 +466,8 @@ mod tests {
         // 首次调用（cache 空）：输出应与全量 parse_markdown 一致
         let mut cache = MarkdownRenderCache::default();
         let input = "para1\n\npara2";
-        let cached = parse_markdown_cached(input, 80, Palette::default(), &mut cache);
-        let full = parse_markdown(input, 80, Palette::default());
+        let cached = parse_markdown_cached(input, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full = parse_markdown(input, 80, Palette::default(), TEST_BASE_FG);
         assert_eq!(
             segments_to_text(&cached),
             segments_to_text(&full),
@@ -417,7 +482,7 @@ mod tests {
 
         // 第一次：一个完整 paragraph（以 \n\n 结尾，触发持久化）
         let t1 = "para1\n\n";
-        let _r1 = parse_markdown_cached(t1, 80, Palette::default(), &mut cache);
+        let _r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
         assert!(
             cache.stable_text_len() > 0,
             "首次以 \\n\\n 结尾应持久化 stable_text"
@@ -430,8 +495,8 @@ mod tests {
 
         // 第二次：追加 para2，仍以 t1 为前缀
         let t2 = "para1\n\npara2";
-        let r2 = parse_markdown_cached(t2, 80, Palette::default(), &mut cache);
-        let full2 = parse_markdown(t2, 80, Palette::default());
+        let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
         assert_eq!(
             segments_to_text(&r2),
             segments_to_text(&full2),
@@ -450,13 +515,13 @@ mod tests {
         // width 变化 → cache 失效
         let mut cache = MarkdownRenderCache::default();
         let t1 = "para1\n\n";
-        let _r1 = parse_markdown_cached(t1, 80, Palette::default(), &mut cache);
+        let _r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
         assert!(cache.stable_text_len() > 0);
 
         // width 从 80 改到 60：cache 应失效（can_reuse = false）
         let t2 = "para1\n\npara2";
-        let r2 = parse_markdown_cached(t2, 60, Palette::default(), &mut cache);
-        let full2 = parse_markdown(t2, 60, Palette::default());
+        let r2 = parse_markdown_cached(t2, 60, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full2 = parse_markdown(t2, 60, Palette::default(), TEST_BASE_FG);
         assert_eq!(
             segments_to_text(&r2),
             segments_to_text(&full2),
@@ -470,15 +535,15 @@ mod tests {
         let mut cache = MarkdownRenderCache::default();
         let t1 = "para1\n\n";
         let p1 = Palette::default();
-        let _r1 = parse_markdown_cached(t1, 80, p1, &mut cache);
+        let _r1 = parse_markdown_cached(t1, 80, p1, TEST_BASE_FG, &mut cache);
         assert!(cache.stable_text_len() > 0);
 
         // 修改 palette（替换 fg 颜色）
         let mut p2 = Palette::default();
         p2.fg = ratatui::style::Color::Red;
         let t2 = "para1\n\npara2";
-        let r2 = parse_markdown_cached(t2, 80, p2, &mut cache);
-        let full2 = parse_markdown(t2, 80, p2);
+        let r2 = parse_markdown_cached(t2, 80, p2, TEST_BASE_FG, &mut cache);
+        let full2 = parse_markdown(t2, 80, p2, TEST_BASE_FG);
         assert_eq!(
             segments_to_text(&r2),
             segments_to_text(&full2),
@@ -494,8 +559,8 @@ mod tests {
 
         // 第一次：paragraph + list（以 \n\n 结尾）
         let t1 = "intro paragraph\n\n- item 1\n- item 2\n\n";
-        let r1 = parse_markdown_cached(t1, 80, Palette::default(), &mut cache);
-        let full1 = parse_markdown(t1, 80, Palette::default());
+        let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full1 = parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
         assert_eq!(
             segments_to_text(&r1),
             segments_to_text(&full1),
@@ -504,8 +569,8 @@ mod tests {
 
         // 第二次：追加新 paragraph
         let t2 = "intro paragraph\n\n- item 1\n- item 2\n\nnew paragraph";
-        let r2 = parse_markdown_cached(t2, 80, Palette::default(), &mut cache);
-        let full2 = parse_markdown(t2, 80, Palette::default());
+        let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
         assert_eq!(
             segments_to_text(&r2),
             segments_to_text(&full2),
@@ -520,12 +585,12 @@ mod tests {
 
         // 第一次：paragraph + table（以 \n\n 结尾）
         let t1 = "intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n";
-        let _r1 = parse_markdown_cached(t1, 80, Palette::default(), &mut cache);
+        let _r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
 
         // 第二次：table 后追加 paragraph
         let t2 = "intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nafter table para";
-        let r2 = parse_markdown_cached(t2, 80, Palette::default(), &mut cache);
-        let full2 = parse_markdown(t2, 80, Palette::default());
+        let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
         assert_eq!(
             segments_to_text(&r2),
             segments_to_text(&full2),
@@ -547,8 +612,9 @@ mod tests {
         ];
         let mut prev_stable_len = 0usize;
         for (i, text) in steps.iter().enumerate() {
-            let cached = parse_markdown_cached(text, 80, Palette::default(), &mut cache);
-            let full = parse_markdown(text, 80, Palette::default());
+            let cached =
+                parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+            let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
             assert_eq!(
                 segments_to_text(&cached),
                 segments_to_text(&full),
@@ -573,8 +639,8 @@ mod tests {
 
         // 第一次：未闭合 code block（末尾不是 \n）
         let t1 = "```rust\nlet x = 1;";
-        let r1 = parse_markdown_cached(t1, 80, Palette::default(), &mut cache);
-        let full1 = parse_markdown(t1, 80, Palette::default());
+        let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full1 = parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
         assert_eq!(
             segments_to_text(&r1),
             segments_to_text(&full1),
@@ -595,7 +661,7 @@ mod tests {
     fn test_cached_parse_empty_input_no_cache_pollution() {
         // 空输入不应污染 cache
         let mut cache = MarkdownRenderCache::default();
-        let _r = parse_markdown_cached("", 80, Palette::default(), &mut cache);
+        let _r = parse_markdown_cached("", 80, Palette::default(), TEST_BASE_FG, &mut cache);
         assert_eq!(cache.stable_text_len(), 0, "空输入不应持久化");
     }
 
@@ -607,13 +673,13 @@ mod tests {
 
         // Step 1：闭合 paragraph
         let t1 = "para1\n\n";
-        let _r1 = parse_markdown_cached(t1, 80, Palette::default(), &mut cache);
+        let _r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
         let stable_len_after_t1 = cache.stable_text_len();
         assert!(stable_len_after_t1 > 0);
 
         // Step 2：追加半个 paragraph（不以 \n 结尾）
         let t2 = "para1\n\npara2 half";
-        let _r2 = parse_markdown_cached(t2, 80, Palette::default(), &mut cache);
+        let _r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
         assert_eq!(
             cache.stable_text_len(),
             stable_len_after_t1,
@@ -622,8 +688,8 @@ mod tests {
 
         // Step 3：继续追加（仍以 t1 为前缀）
         let t3 = "para1\n\npara2 half continued";
-        let r3 = parse_markdown_cached(t3, 80, Palette::default(), &mut cache);
-        let full3 = parse_markdown(t3, 80, Palette::default());
+        let r3 = parse_markdown_cached(t3, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full3 = parse_markdown(t3, 80, Palette::default(), TEST_BASE_FG);
         assert_eq!(
             segments_to_text(&r3),
             segments_to_text(&full3),
@@ -643,7 +709,7 @@ mod tests {
     ) {
         use ratatui_kit::components::TableTheme;
 
-        let segments = parse_markdown(md, width, Palette::default());
+        let segments = parse_markdown(md, width, Palette::default(), TEST_BASE_FG);
         let table_data = segments
             .iter()
             .find_map(|s| match s {
@@ -825,7 +891,7 @@ mod tests {
 
         // Step 1: 缓存只有 header+separator 的表格
         let t1 = "| # | 测试场景 | 结果 |\n|---|---------|------|\n";
-        let r1 = parse_markdown_cached(t1, 80, Palette::default(), &mut cache);
+        let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
         let table1 = r1.iter().find_map(|s| match s {
             MarkdownSegment::Table(d) => Some(d),
             _ => None,
@@ -838,8 +904,8 @@ mod tests {
 
         // Step 2: 追加数据行
         let t2 = "| # | 测试场景 | 结果 |\n|---|---------|------|\n| 1 | 简单中文表 | ✅ |\n| 2 | 长中文内容 | ✅ |\n";
-        let r2 = parse_markdown_cached(t2, 80, Palette::default(), &mut cache);
-        let full2 = parse_markdown(t2, 80, Palette::default());
+        let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
 
         // 提取 Table 数据
         let table_cached = r2.iter().find_map(|s| match s {

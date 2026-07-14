@@ -1,4 +1,7 @@
-use ratatui::text::{Line, Span};
+use ratatui::{
+    style::Style,
+    text::{Line, Span},
+};
 use ratatui_kit_markdown::{MarkdownTheme, ParsedBlock};
 
 use super::code_block::code_block_lines;
@@ -47,13 +50,16 @@ pub(crate) struct ConvertState {
 ///   (a) 是第一个有内容的块
 ///   (b) 是连续的列表项（列表项之间无空行）
 /// - parser 生成的空 `Paragraph` 是列表分隔哨兵，跳过（间距由本函数统一管理）
+///   `base_fg` 作为普通段落/列表项文本的兜底前景色（来自 `component.markdown.text`）。
 pub(crate) fn convert_to_segments(
     blocks: &[ParsedBlock],
     theme: &MarkdownTheme,
     max_width: usize,
+    base_fg: ratatui::style::Color,
 ) -> Vec<MarkdownSegment> {
     let mut state = ConvertState::default();
-    convert_to_segments_with_state(blocks, theme, max_width, &mut state)
+    let base_style = Style::default().fg(base_fg);
+    convert_to_segments_with_state(blocks, theme, max_width, base_style, &mut state)
 }
 
 /// 与 `convert_to_segments` 同逻辑，但接受外部 `state` 以支持续跑。
@@ -70,6 +76,7 @@ pub(crate) fn convert_to_segments_with_state(
     blocks: &[ParsedBlock],
     theme: &MarkdownTheme,
     max_width: usize,
+    base_style: Style,
     state: &mut ConvertState,
 ) -> Vec<MarkdownSegment> {
     for (i, block) in blocks.iter().enumerate() {
@@ -103,7 +110,7 @@ pub(crate) fn convert_to_segments_with_state(
             }
             ParsedBlock::Paragraph(para_lines) => {
                 for line in para_lines {
-                    state.current_text.push(style_line(line, theme));
+                    state.current_text.push(style_line(line, theme, base_style));
                 }
             }
             ParsedBlock::CodeBlock(lang, code_lines) => {
@@ -112,7 +119,9 @@ pub(crate) fn convert_to_segments_with_state(
                     .extend(code_block_lines(lang, code_lines, theme));
             }
             ParsedBlock::ListItem(item) => {
-                state.current_text.push(list_item_line(item, theme));
+                state
+                    .current_text
+                    .push(list_item_line(item, theme, base_style));
             }
             ParsedBlock::Rule => {
                 let rule_char = "─".repeat(max_width.min(80));
@@ -162,7 +171,7 @@ fn trim_trailing_blanks(text: &mut Vec<Line<'static>>) {
     }
 }
 
-/// 通用段落行渲染。
-fn style_line(line: &Line<'static>, theme: &MarkdownTheme) -> Line<'static> {
-    Line::from(apply_span_styles(&line.spans, theme, None))
+/// 通用段落行渲染。`base_style` 作为普通文本的兜底前景色。
+fn style_line(line: &Line<'static>, theme: &MarkdownTheme, base_style: Style) -> Line<'static> {
+    Line::from(apply_span_styles(&line.spans, theme, Some(base_style)))
 }

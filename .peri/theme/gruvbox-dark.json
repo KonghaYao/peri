@@ -1,0 +1,138 @@
+{
+  "name": "gruvbox-dark",
+  "mode": "dark",
+  "palette": {
+    "base": {
+      "bg": "#282828",
+      "fg": "$semantic.text.primary"
+    },
+    "brand": {
+      "primary": "$semantic.accent"
+    },
+    "gray": {
+      "bright": "$semantic.text.primary",
+      "muted": "$semantic.text.muted",
+      "dim": "$semantic.text.dim",
+      "dark": "$semantic.border.dim"
+    },
+    "accent": {
+      "primary": "$semantic.accent"
+    },
+    "success": {
+      "primary": "#B8BB26"
+    },
+    "warning": {
+      "primary": "#FABD2F"
+    },
+    "danger": {
+      "primary": "#FB4934"
+    },
+    "info": {
+      "primary": "#83A598"
+    },
+    "diff": {
+      "add": "#B8BB26",
+      "remove": "#FB4934",
+      "hunk": "#83A598",
+      "add_bg": "#1A2E1A",
+      "remove_bg": "#321818",
+      "add_word_bg": "#284E28",
+      "remove_word_bg": "#4A2824"
+    }
+  },
+  "semantic": {
+    "accent": "#FE8019",
+    "text": {
+      "primary": "#EBDBB2",
+      "muted": "#A89984",
+      "dim": "#665C54"
+    },
+    "border": {
+      "default": "#504945",
+      "active": "$semantic.accent",
+      "dim": "#32302F"
+    },
+    "status": {
+      "running": "#83A598",
+      "info": "#83A598",
+      "success": "#B8BB26",
+      "warning": "#FABD2F",
+      "error": "#FB4934"
+    },
+    "surface": {
+      "default": "#282828",
+      "user": "#3C3836",
+      "popup": "#282828",
+      "selection": "#458588",
+      "cursor": "#504945"
+    },
+    "diff": {
+      "add": "#B8BB26",
+      "remove": "#FB4934",
+      "hunk": "#83A598",
+      "add_bg": "#1A2E1A",
+      "remove_bg": "#321818",
+      "add_word_bg": "#284E28",
+      "remove_word_bg": "#4A2824"
+    },
+    "loading": "#D3869B",
+    "thinking": "#D3869B",
+    "model_info": "#FABD2F",
+    "bash_border": "#FB4934",
+    "selected_fg": "#FBF1C7"
+  },
+  "component": {
+    "message": {
+      "user_bg": "#3C3836",
+      "ai_prefix": "$semantic.text.primary",
+      "tool_indicator": "$semantic.status.success",
+      "reasoning": "$semantic.thinking"
+    },
+    "input": {
+      "border": "$semantic.text.muted",
+      "border_loading": "$semantic.text.muted",
+      "cursor_fg": "#282828",
+      "cursor_bg": "#EBDBB2",
+      "prompt": "$semantic.text.muted",
+      "prompt_loading": "$semantic.text.muted",
+      "continuation": "$semantic.text.dim",
+      "placeholder": "$semantic.text.muted"
+    },
+    "panel": {
+      "border": "$semantic.accent",
+      "title": "$semantic.text.primary",
+      "row_selected": "$semantic.selected_fg",
+      "min_height": "8",
+      "max_height": "28"
+    },
+    "popup": {
+      "bg": "#282828",
+      "border": "$semantic.thinking",
+      "action_primary": "$semantic.accent",
+      "selected_fg": "$semantic.selected_fg",
+      "modal_max_width": "90",
+      "modal_max_height": "28",
+      "inline_height": "10"
+    },
+    "statusbar": {
+      "text": "$semantic.text.primary",
+      "muted": "$semantic.text.muted",
+      "dim": "$semantic.text.dim",
+      "mode_accept_edit": "#D3869B",
+      "mode_auto": "#FABD2F",
+      "mode_bypass": "#FB4934",
+      "resource_good": "#B8BB26",
+      "resource_warn": "#FABD2F",
+      "resource_bad": "#FB4934"
+    },
+    "markdown": {
+      "text": "$semantic.text.primary",
+      "code": "#FABD2F",
+      "quote": "$semantic.text.muted"
+    },
+    "scrollbar": {
+      "thumb": "$semantic.text.muted",
+      "track": "$semantic.text.dim"
+    }
+  }
+}

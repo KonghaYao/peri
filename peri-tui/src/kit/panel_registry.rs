@@ -354,7 +354,7 @@ pub const PANELS: &[PanelMeta] = &[
         priority: 15,
         mutex_group: MutexGroup::Settings,
         scope: PanelScope::Global,
-        layout: PanelLayout::fixed(50, 18),
+        layout: PanelLayout::fixed(50, 24),
         render: render_theme_panel,
     },
 ];

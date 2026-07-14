@@ -1,0 +1,137 @@
+{
+  "name": "solarized-light",
+  "mode": "light",
+  "palette": {
+    "base": {
+      "bg": "#FDF6E3",
+      "fg": "$semantic.text.primary"
+    },
+    "brand": {
+      "primary": "$semantic.accent"
+    },
+    "gray": {
+      "bright": "$semantic.text.primary",
+      "muted": "$semantic.text.muted",
+      "dim": "$semantic.text.dim",
+      "dark": "$semantic.border.dim"
+    },
+    "accent": {
+      "primary": "$semantic.accent"
+    },
+    "success": {
+      "primary": "#859900"
+    },
+    "warning": {
+      "primary": "#B58900"
+    },
+    "danger": {
+      "primary": "#DC322F"
+    },
+    "info": {
+      "primary": "$semantic.thinking"
+    },
+    "diff": {
+      "add": "#859900",
+      "remove": "#DC322F",
+      "hunk": "#B58900",
+      "add_bg": "#E8F0D0",
+      "remove_bg": "#F0DCD4",
+      "add_word_bg": "#D8E8B8",
+      "remove_word_bg": "#E8CCC0"
+    }
+  },
+  "semantic": {
+    "accent": "#268BD2",
+    "text": {
+      "primary": "#073642",
+      "muted": "#586E75",
+      "dim": "#93A1A1"
+    },
+    "border": {
+      "default": "#93A1A1",
+      "active": "$semantic.accent",
+      "dim": "#D5DED8"
+    },
+    "status": {
+      "running": "#6C71C4",
+      "success": "#859900",
+      "warning": "#B58900",
+      "error": "#DC322F"
+    },
+    "surface": {
+      "default": "#FDF6E3",
+      "user": "#EEE8D5",
+      "popup": "#FDF6E3",
+      "selection": "#D5DED8",
+      "cursor": "#EEE8D5"
+    },
+    "diff": {
+      "add": "#859900",
+      "remove": "#DC322F",
+      "hunk": "#B58900",
+      "add_bg": "#E8F0D0",
+      "remove_bg": "#F0DCD4",
+      "add_word_bg": "#D8E8B8",
+      "remove_word_bg": "#E8CCC0"
+    },
+    "loading": "#6C71C4",
+    "thinking": "#6C71C4",
+    "model_info": "#D33682",
+    "bash_border": "#DC322F",
+    "selected_fg": "#002B36"
+  },
+  "component": {
+    "message": {
+      "user_bg": "#EEE8D5",
+      "ai_prefix": "$semantic.text.primary",
+      "tool_indicator": "#859900",
+      "reasoning": "$semantic.thinking"
+    },
+    "input": {
+      "border": "$semantic.text.muted",
+      "border_loading": "$semantic.text.muted",
+      "cursor_fg": "#FDF6E3",
+      "cursor_bg": "#073642",
+      "prompt": "$semantic.text.muted",
+      "prompt_loading": "$semantic.text.muted",
+      "continuation": "$semantic.text.dim",
+      "placeholder": "$semantic.text.muted"
+    },
+    "panel": {
+      "border": "$semantic.accent",
+      "title": "$semantic.text.primary",
+      "row_selected": "$semantic.selected_fg",
+      "min_height": "8",
+      "max_height": "28"
+    },
+    "popup": {
+      "bg": "#FDF6E3",
+      "border": "$semantic.thinking",
+      "action_primary": "$semantic.accent",
+      "selected_fg": "$semantic.selected_fg",
+      "modal_max_width": "90",
+      "modal_max_height": "28",
+      "inline_height": "10"
+    },
+    "statusbar": {
+      "text": "$semantic.text.primary",
+      "muted": "$semantic.text.muted",
+      "dim": "$semantic.text.dim",
+      "mode_accept_edit": "$semantic.thinking",
+      "mode_auto": "#B58900",
+      "mode_bypass": "#DC322F",
+      "resource_good": "#859900",
+      "resource_warn": "#B58900",
+      "resource_bad": "#DC322F"
+    },
+    "markdown": {
+      "text": "$semantic.text.primary",
+      "code": "#CB4B16",
+      "quote": "$semantic.text.muted"
+    },
+    "scrollbar": {
+      "thumb": "$semantic.text.muted",
+      "track": "$semantic.text.dim"
+    }
+  }
+}

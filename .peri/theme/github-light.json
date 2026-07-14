@@ -1,0 +1,137 @@
+{
+  "name": "github-light",
+  "mode": "light",
+  "palette": {
+    "base": {
+      "bg": "#FFFFFF",
+      "fg": "$semantic.text.primary"
+    },
+    "brand": {
+      "primary": "$semantic.accent"
+    },
+    "gray": {
+      "bright": "$semantic.text.primary",
+      "muted": "$semantic.text.muted",
+      "dim": "$semantic.text.dim",
+      "dark": "$semantic.border.dim"
+    },
+    "accent": {
+      "primary": "$semantic.accent"
+    },
+    "success": {
+      "primary": "#1A7F37"
+    },
+    "warning": {
+      "primary": "#9A6700"
+    },
+    "danger": {
+      "primary": "#CF222E"
+    },
+    "info": {
+      "primary": "$semantic.thinking"
+    },
+    "diff": {
+      "add": "#1A7F37",
+      "remove": "#CF222E",
+      "hunk": "#8250DF",
+      "add_bg": "#DAFBE1",
+      "remove_bg": "#FFEBE9",
+      "add_word_bg": "#ACEFB2",
+      "remove_word_bg": "#FFC0B8"
+    }
+  },
+  "semantic": {
+    "accent": "#0969DA",
+    "text": {
+      "primary": "#1F2328",
+      "muted": "#656D76",
+      "dim": "#B9BBC1"
+    },
+    "border": {
+      "default": "#B9BBC1",
+      "active": "$semantic.accent",
+      "dim": "#D0D7DE"
+    },
+    "status": {
+      "running": "#8250DF",
+      "success": "#1A7F37",
+      "warning": "#9A6700",
+      "error": "#CF222E"
+    },
+    "surface": {
+      "default": "#FFFFFF",
+      "user": "#F6F8FA",
+      "popup": "#FFFFFF",
+      "selection": "#D0D7DE",
+      "cursor": "#F6F8FA"
+    },
+    "diff": {
+      "add": "#1A7F37",
+      "remove": "#CF222E",
+      "hunk": "#8250DF",
+      "add_bg": "#DAFBE1",
+      "remove_bg": "#FFEBE9",
+      "add_word_bg": "#ACEFB2",
+      "remove_word_bg": "#FFC0B8"
+    },
+    "loading": "#8250DF",
+    "thinking": "#8250DF",
+    "model_info": "#BF3989",
+    "bash_border": "#CF222E",
+    "selected_fg": "#1F2328"
+  },
+  "component": {
+    "message": {
+      "user_bg": "#F6F8FA",
+      "ai_prefix": "$semantic.text.primary",
+      "tool_indicator": "#1A7F37",
+      "reasoning": "$semantic.thinking"
+    },
+    "input": {
+      "border": "$semantic.text.muted",
+      "border_loading": "$semantic.text.muted",
+      "cursor_fg": "#FFFFFF",
+      "cursor_bg": "#1F2328",
+      "prompt": "$semantic.text.muted",
+      "prompt_loading": "$semantic.text.muted",
+      "continuation": "$semantic.text.dim",
+      "placeholder": "$semantic.text.muted"
+    },
+    "panel": {
+      "border": "$semantic.accent",
+      "title": "$semantic.text.primary",
+      "row_selected": "$semantic.selected_fg",
+      "min_height": "8",
+      "max_height": "28"
+    },
+    "popup": {
+      "bg": "#FFFFFF",
+      "border": "$semantic.thinking",
+      "action_primary": "$semantic.accent",
+      "selected_fg": "$semantic.selected_fg",
+      "modal_max_width": "90",
+      "modal_max_height": "28",
+      "inline_height": "10"
+    },
+    "statusbar": {
+      "text": "$semantic.text.primary",
+      "muted": "$semantic.text.muted",
+      "dim": "$semantic.text.dim",
+      "mode_accept_edit": "$semantic.thinking",
+      "mode_auto": "#9A6700",
+      "mode_bypass": "#CF222E",
+      "resource_good": "#1A7F37",
+      "resource_warn": "#9A6700",
+      "resource_bad": "#CF222E"
+    },
+    "markdown": {
+      "text": "$semantic.text.primary",
+      "code": "#0550AE",
+      "quote": "$semantic.text.muted"
+    },
+    "scrollbar": {
+      "thumb": "$semantic.text.muted",
+      "track": "$semantic.text.dim"
+    }
+  }
+}

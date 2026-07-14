@@ -8,12 +8,13 @@
 
 #![allow(clippy::needless_update)]
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::kit::atoms::{BRIDGE_RESET_COUNTER, LANG_VERSION, LOADING_EPOCH, VIEW_MODELS};
 use crate::kit::text_selection::TextSelection;
 use crate::kit::welcome::Welcome;
-use peri_theme::atoms::THEME_ATOM;
+use peri_theme::atoms::{PALETTE_ATOM, THEME_ATOM};
 use ratatui_kit::{
     components::ScrollViewState,
     prelude::*,
@@ -40,6 +41,23 @@ use selection::{
     viewport_logical_range, visual_to_logical,
 };
 
+/// 计算 palette 中影响 markdown 渲染的关键字段哈希。
+/// 当主题切换时，hash 变化 → 触发 vm_caches 重建 → markdown 色值更新。
+fn palette_markdown_key(p: &ratatui_kit::prelude::Palette) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    p.fg.hash(&mut h);
+    p.bg.hash(&mut h);
+    p.fg_dim.hash(&mut h);
+    p.accent.hash(&mut h);
+    p.surface.hash(&mut h);
+    p.border.hash(&mut h);
+    p.success.hash(&mut h);
+    p.warning.hash(&mut h);
+    p.error.hash(&mut h);
+    p.info.hash(&mut h);
+    h.finish()
+}
+
 // ── 按 VM 分片的渲染缓存 ──────────────────────────────────────────────────
 //
 // [Why] 旧版 lines_cache / wrap_map_cache / total_rows_cache 以 (vm_generation, width)
@@ -58,6 +76,8 @@ struct VmCacheSlot {
     content_hash: u64,
     /// 上次渲染时的视宽。width 变化（窗口 resize）时 wrap 规则改变，必须重建。
     width: u16,
+    /// 上次渲染时的 palette 关键字段哈希。主题切换时 hash 变化 → 强制重建所有 VM 的 markdown 渲染。
+    palette_key: u64,
     /// 该 VM 解析后的所有 Line（markdown + reasoning + tool card 渲染结果）。
     lines: Arc<Vec<Line<'static>>>,
     /// 该 VM 内部 wrap_map（visual_row 从 0 起）。拼接时累加 visual_offset 和 logical_idx 偏移。
@@ -77,6 +97,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let acp_state = hooks.use_atom(&crate::kit::atoms::ACP_STATE);
     let todo_atom = hooks.use_atom(&crate::kit::atoms::TODO_ITEMS);
     hooks.use_atom(&LANG_VERSION);
+    // 订阅 PALETTE_ATOM：主题切换时触发 MessageArea 重渲染，
+    // 配合 palette_key 使 vm_caches 失效，确保 markdown 色值随主题更新。
+    let _palette = hooks.use_atom(&PALETTE_ATOM);
+    let current_palette_key = palette_markdown_key(&_palette.read());
 
     let snapshot = view_models.read();
     let todo_items = todo_atom.read().clone();
@@ -155,7 +179,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             .enumerate()
             .filter_map(|(i, vm)| {
                 let slot = &caches_read[i];
-                if slot.content_hash != vm.content_hash() || slot.width != vis_width {
+                if slot.content_hash != vm.content_hash()
+                    || slot.width != vis_width
+                    || slot.palette_key != current_palette_key
+                {
                     Some(i)
                 } else {
                     None
@@ -185,6 +212,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             let visual_rows = wm.last().map(|e| e.visual_end).unwrap_or(0) as u16;
             slot.content_hash = vm_hash;
             slot.width = vis_width;
+            slot.palette_key = current_palette_key;
             slot.lines = lines;
             slot.wrap_map = Arc::new(wm);
             slot.visual_rows = visual_rows;

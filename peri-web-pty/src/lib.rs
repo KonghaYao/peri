@@ -34,7 +34,7 @@ pub async fn start_server(config: Config) -> anyhow::Result<()> {
         .route("/ws", axum::routing::get(ws_handler::ws_handler))
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{}", config.port);
+    let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .context("failed to bind TCP listener")?;
