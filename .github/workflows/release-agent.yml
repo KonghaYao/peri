@@ -45,6 +45,12 @@ jobs:
             - name: Checkout repository
               uses: actions/checkout@v4
 
+            - name: Checkout ratatui-kit-contrib
+              uses: actions/checkout@v4
+              with:
+                  repository: KonghaYao/ratatui-kit-contrib
+                  path: ${{ github.workspace }}/../ratatui-kit-contrib
+
             - name: Set version from tag
               shell: bash
               run: |
