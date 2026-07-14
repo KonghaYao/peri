@@ -60,7 +60,8 @@ fn build_preview(theme_name: &str) -> Vec<Line<'static>> {
         }
     };
     let palette = theme.to_palette();
-    let segments = markdown::parse_markdown(SAMPLE_MD, PREVIEW_WIDTH, palette);
+    let md_text_fg = theme.component.markdown.text;
+    let segments = markdown::parse_markdown(SAMPLE_MD, PREVIEW_WIDTH, palette, md_text_fg);
     segments
         .iter()
         .flat_map(|s| match s {

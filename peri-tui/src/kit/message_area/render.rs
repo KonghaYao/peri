@@ -128,12 +128,16 @@ pub(super) fn vm_to_lines_cached(
 
             // Markdown 文本
             if !data.text.is_empty() {
+                let theme_guard = peri_theme::atoms::THEME_ATOM.state();
+                let theme = theme_guard.read();
+                let md_text_fg = theme.component.markdown.text;
                 let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
                 let palette_guard = palette_state.read();
                 let segments = crate::kit::markdown::parse_markdown_cached(
                     &data.text,
                     width,
                     *palette_guard,
+                    md_text_fg,
                     md_cache,
                 );
                 for (seg_idx, seg) in segments.into_iter().enumerate() {
@@ -170,12 +174,14 @@ pub(super) fn vm_to_lines_cached(
             let semantic = THEME_ATOM.state().read().semantic;
             let component = THEME_ATOM.state().read().component;
             let user_bg = component.message.user_bg;
+            let md_text_fg = component.markdown.text;
             let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
             let palette_guard = palette_state.read();
             let segments = crate::kit::markdown::parse_markdown_cached(
                 &data.text,
                 width,
                 *palette_guard,
+                md_text_fg,
                 md_cache,
             );
 
@@ -312,7 +318,7 @@ fn render_tool_card_lines(data: &TuiToolCard) -> Vec<Line<'static>> {
     let (indicator, indicator_color) = if data.is_error {
         ("\u{25cf}", semantic.status.error)
     } else if data.is_running {
-        ("\u{25cf}", ratatui::style::Color::White)
+        ("\u{25cf}", semantic.status.running)
     } else {
         ("\u{25cf}", semantic.status.success)
     };
