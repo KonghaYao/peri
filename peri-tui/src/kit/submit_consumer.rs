@@ -93,6 +93,10 @@ async fn handle_submit(
             }
             Ok(())
         }
+        SubmitRequest::SessionControl(SessionControlRequest::ToggleSetup) => {
+            warn!("kit submit_consumer: unexpected ToggleSetup request in consumer");
+            Ok(())
+        }
         SubmitRequest::ViewAction(action) => {
             info!(action = ?action, "kit submit_consumer: view-layer command intercepted");
             execute_view_action(action, acp_client, cwd);

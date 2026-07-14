@@ -12,6 +12,7 @@ pub enum SubmitRequest {
 pub enum SessionControlRequest {
     Clear,
     Rewind(RewindRequest),
+    ToggleSetup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +52,12 @@ pub fn parse_submit_request(input: &str) -> Option<SubmitRequest> {
         return Some(SubmitRequest::SessionControl(SessionControlRequest::Clear));
     }
 
+    if is_setup_command(command) {
+        return Some(SubmitRequest::SessionControl(
+            SessionControlRequest::ToggleSetup,
+        ));
+    }
+
     if is_rewind_or_undo_command(command) {
         return Some(SubmitRequest::SessionControl(
             SessionControlRequest::Rewind(parse_rewind_args(trimmed)),
@@ -76,6 +83,10 @@ fn is_clear_command(command: &str) -> bool {
 
 fn is_rewind_or_undo_command(command: &str) -> bool {
     matches!(command, "/rewind" | "/undo")
+}
+
+fn is_setup_command(command: &str) -> bool {
+    matches!(command, "/setup")
 }
 
 fn parse_view_action(command: &str, input: &str) -> Option<ViewActionRequest> {
@@ -170,6 +181,23 @@ mod tests {
         assert_eq!(
             parse_submit_request("/reset"),
             Some(SubmitRequest::SessionControl(SessionControlRequest::Clear))
+        );
+    }
+
+    #[test]
+    fn test_parse_submit_request_matches_setup() {
+        assert_eq!(
+            parse_submit_request("/setup"),
+            Some(SubmitRequest::SessionControl(
+                SessionControlRequest::ToggleSetup
+            ))
+        );
+        // /setup 后跟参数也识别
+        assert_eq!(
+            parse_submit_request("/setup my-custom-arg"),
+            Some(SubmitRequest::SessionControl(
+                SessionControlRequest::ToggleSetup
+            ))
         );
     }
 

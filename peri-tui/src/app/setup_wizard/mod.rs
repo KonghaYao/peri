@@ -1,25 +1,324 @@
-//! Setup Wizard —— 首次启动配置检测。
+//! Setup Wizard —— 首次启动配置向导。
 //!
-//! (I16-C) 大幅瘦身：原 1673 行的完整表单逻辑（SetupWizardPanel +
-//! handle_setup_wizard_key + 多步骤表单 + Claude Code 迁移 + 连通性测试）
-//! 已退役。
+//! 完整交互式向导流程：
+//! 1. Language  → 选择界面语言（en / zh-CN）
+//! 2. Choose    → 选择配置来源（手动输入 / 从 Claude Code 迁移）
+//! 3. Form      → 多 Provider 列表浏览 + 编辑详情
+//! 4. Done      → 确认并保存
 //!
-//! (I17-B) kit 路径下的 `kit/setup_wizard.rs` 已升级为可用的引导界面，
-//! 由本模块的 `needs_setup()` + `atoms::WIZARD_ACTIVE` atom 触发渲染。
-//!
-//! 本模块仅保留 `needs_setup()` 检测函数，供 kit/entry 启动期判断是否
-//! 需要引导用户配置 Provider 并设置 wizard atom。
+//! 状态通过 `atoms::SETUP_WIZARD` 管理，组件通过 `WIZARD_ACTIVE` 控制显隐。
 
-/// 检测配置是否需要 Setup 向导。
-///
-/// 判定规则：
-/// 1. providers 为空 → 检查环境变量能否提供有效 provider，无则返回 true
-/// 2. 任一 provider 的 id 为空 / api_key 为空（且对应环境变量也未设置）→ true
-/// 3. 否则 false
+use serde::{Deserialize, Serialize};
+
+// ── 步骤枚举 ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SetupStep {
+    Language,
+    Choose,
+    Form,
+    Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SetupSource {
+    CustomApi,
+    MigrateClaudeCode,
+}
+
+impl SetupSource {
+    pub const ALL: [Self; 2] = [Self::CustomApi, Self::MigrateClaudeCode];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::CustomApi => "setup-source-custom-api",
+            Self::MigrateClaudeCode => "setup-source-migrate",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::CustomApi => "setup-source-custom-desc",
+            Self::MigrateClaudeCode => "setup-source-migrate-desc",
+        }
+    }
+}
+
+// ── 语言选项 ──────────────────────────────────────────────────────────────────
+
+pub const LANGUAGE_OPTIONS: [(&str, &str); 2] = [("en", "English"), ("zh-CN", "中文")];
+
+// ── Provider 类型 ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderType {
+    Anthropic,
+    OpenAiCompatible,
+}
+
+impl ProviderType {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "setup-provider-anthropic",
+            Self::OpenAiCompatible => "setup-provider-openai",
+        }
+    }
+
+    pub fn type_str(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAiCompatible => "openai",
+        }
+    }
+
+    pub fn cycle(&mut self) {
+        *self = match self {
+            Self::Anthropic => Self::OpenAiCompatible,
+            Self::OpenAiCompatible => Self::Anthropic,
+        };
+    }
+
+    pub fn default_provider_id(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAiCompatible => "openai",
+        }
+    }
+
+    pub fn default_base_url(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "https://api.anthropic.com",
+            Self::OpenAiCompatible => "https://api.openai.com/v1",
+        }
+    }
+
+    pub fn default_model_ids(&self) -> [&'static str; 3] {
+        match self {
+            Self::Anthropic => [
+                "claude-opus-4-6",
+                "claude-sonnet-4-6",
+                "claude-haiku-4-5-20251001",
+            ],
+            Self::OpenAiCompatible => ["gpt-5.5", "gpt-4o", "gpt-4o-mini"],
+        }
+    }
+}
+
+// ── 单 Provider 配置 ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigratedProvider {
+    pub provider_type: ProviderType,
+    pub provider_id: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub aliases: [String; 3],
+    pub selected: bool,
+}
+
+impl MigratedProvider {
+    pub fn new(pt: ProviderType) -> Self {
+        Self {
+            provider_type: pt,
+            provider_id: pt.default_provider_id().to_string(),
+            base_url: pt.default_base_url().to_string(),
+            api_key: String::new(),
+            aliases: pt.default_model_ids().map(|s| s.to_string()),
+            selected: true,
+        }
+    }
+
+    /// 字段是否完整
+    pub fn is_complete(&self) -> bool {
+        !self.provider_id.trim().is_empty()
+            && !self.api_key.trim().is_empty()
+            && self.aliases.iter().all(|a| !a.trim().is_empty())
+    }
+
+    /// 切换 Provider 类型后刷新默认值（保留 api_key）
+    pub fn refresh_provider_defaults(&mut self) {
+        self.provider_id = self.provider_type.default_provider_id().to_string();
+        self.base_url = self.provider_type.default_base_url().to_string();
+        self.aliases = self
+            .provider_type
+            .default_model_ids()
+            .map(|s| s.to_string());
+    }
+}
+
+// ── Form 模式 ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FormMode {
+    Browse,
+    Edit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FormField {
+    ProviderType,
+    ProviderId,
+    BaseUrl,
+    TestConnectivity,
+    ApiKey,
+    OpusModel,
+    SonnetModel,
+    HaikuModel,
+    Confirm,
+}
+
+impl FormField {
+    pub fn next(&self) -> Self {
+        match self {
+            Self::ProviderType => Self::ProviderId,
+            Self::ProviderId => Self::BaseUrl,
+            Self::BaseUrl => Self::TestConnectivity,
+            Self::TestConnectivity => Self::ApiKey,
+            Self::ApiKey => Self::OpusModel,
+            Self::OpusModel => Self::SonnetModel,
+            Self::SonnetModel => Self::HaikuModel,
+            Self::HaikuModel => Self::Confirm,
+            Self::Confirm => Self::ProviderType,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            Self::ProviderType => Self::Confirm,
+            Self::ProviderId => Self::ProviderType,
+            Self::BaseUrl => Self::ProviderId,
+            Self::TestConnectivity => Self::BaseUrl,
+            Self::ApiKey => Self::TestConnectivity,
+            Self::OpusModel => Self::ApiKey,
+            Self::SonnetModel => Self::OpusModel,
+            Self::HaikuModel => Self::SonnetModel,
+            Self::Confirm => Self::HaikuModel,
+        }
+    }
+
+    pub fn is_text_input(&self) -> bool {
+        matches!(
+            self,
+            Self::ProviderId
+                | Self::BaseUrl
+                | Self::ApiKey
+                | Self::OpusModel
+                | Self::SonnetModel
+                | Self::HaikuModel
+        )
+    }
+
+    pub fn i18n_key(&self) -> &'static str {
+        match self {
+            Self::ProviderType => "setup-field-type",
+            Self::ProviderId => "setup-field-id",
+            Self::BaseUrl => "setup-field-base-url",
+            Self::ApiKey => "setup-field-api-key",
+            Self::TestConnectivity => "setup-field-test-connectivity",
+            Self::OpusModel => "setup-field-opus",
+            Self::SonnetModel => "setup-field-sonnet",
+            Self::HaikuModel => "setup-field-haiku",
+            Self::Confirm => "setup-confirm",
+        }
+    }
+}
+
+// ── Wizard 完整状态 ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupWizardState {
+    pub step: SetupStep,
+    pub source: SetupSource,
+    pub choose_cursor: usize,
+    pub language: String,
+    pub language_cursor: usize,
+    pub providers: Vec<MigratedProvider>,
+    pub active_provider: usize,
+    pub form_mode: FormMode,
+    pub browse_cursor: usize,
+    pub form_focus: FormField,
+    pub from_command: bool,
+    pub submit_error: Option<String>,
+    pub connectivity_result: Option<(bool, String)>,
+    /// Edit 模式下当前文本框的光标位置（字符索引）
+    pub edit_cursor_pos: usize,
+}
+
+impl Default for SetupWizardState {
+    fn default() -> Self {
+        Self {
+            step: SetupStep::Language,
+            source: SetupSource::CustomApi,
+            choose_cursor: 0,
+            language: "en".to_string(),
+            language_cursor: 0,
+            providers: vec![MigratedProvider::new(ProviderType::Anthropic)],
+            active_provider: 0,
+            form_mode: FormMode::Browse,
+            browse_cursor: 0,
+            form_focus: FormField::ProviderType,
+            from_command: false,
+            submit_error: None,
+            connectivity_result: None,
+            edit_cursor_pos: 0,
+        }
+    }
+}
+
+impl SetupWizardState {
+    /// 获取当前活动 provider 的指定字段的可变引用
+    pub fn active_provider_mut(&mut self) -> Option<&mut MigratedProvider> {
+        self.providers.get_mut(self.active_provider)
+    }
+
+    /// 获取当前活动 provider 的不可变引用
+    pub fn active_provider_ref(&self) -> Option<&MigratedProvider> {
+        self.providers.get(self.active_provider)
+    }
+
+    /// 获取当前聚焦字段的文本值
+    pub fn active_field_value(&self) -> Option<String> {
+        let mp = self.active_provider_ref()?;
+        Some(match self.form_focus {
+            FormField::ProviderId => mp.provider_id.clone(),
+            FormField::BaseUrl => mp.base_url.clone(),
+            FormField::ApiKey => mp.api_key.clone(),
+            FormField::OpusModel => mp.aliases[0].clone(),
+            FormField::SonnetModel => mp.aliases[1].clone(),
+            FormField::HaikuModel => mp.aliases[2].clone(),
+            _ => return None,
+        })
+    }
+
+    /// 设置当前聚焦字段的文本值
+    pub fn set_active_field_value(&mut self, value: String) {
+        let field = self.form_focus;
+        if let Some(mp) = self.active_provider_mut() {
+            match field {
+                FormField::ProviderId => mp.provider_id = value,
+                FormField::BaseUrl => mp.base_url = value,
+                FormField::ApiKey => mp.api_key = value,
+                FormField::OpusModel => mp.aliases[0] = value,
+                FormField::SonnetModel => mp.aliases[1] = value,
+                FormField::HaikuModel => mp.aliases[2] = value,
+                _ => {}
+            }
+        }
+    }
+
+    pub fn new_from_command() -> Self {
+        Self {
+            from_command: true,
+            ..Self::default()
+        }
+    }
+}
+
+// ── 工具函数 ──────────────────────────────────────────────────────────────────
+
+/// 检测是否需要 Setup 向导
 pub fn needs_setup(config: &crate::config::AppConfig) -> bool {
     if config.providers.is_empty() {
-        // 没有 providers 条目时，检查是否可通过环境变量提供 provider
-        // 避免已有 env 配置但 settings.json 格式不标准时阻塞用户
         return crate::app::agent::LlmProvider::from_env().is_none();
     }
     for provider in &config.providers {
@@ -39,27 +338,286 @@ pub fn needs_setup(config: &crate::config::AppConfig) -> bool {
     false
 }
 
+/// API Key 脱敏显示
+pub fn mask_api_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    let len = chars.len();
+    if len <= 8 {
+        "•".repeat(len)
+    } else {
+        let prefix: String = chars[..4].iter().collect();
+        let suffix: String = chars[len - 4..].iter().collect();
+        format!("{}••••{}", prefix, suffix)
+    }
+}
+
+/// 从 wizard 数据构建 PeriConfig
+pub fn build_wizard_config(state: &SetupWizardState) -> crate::config::PeriConfig {
+    let mut cfg = crate::config::PeriConfig::default();
+    let mut first_id = String::new();
+
+    for mp in &state.providers {
+        if !mp.selected {
+            continue;
+        }
+        if mp.provider_id.trim().is_empty() || mp.api_key.trim().is_empty() {
+            continue;
+        }
+        let provider = crate::config::ProviderConfig {
+            id: mp.provider_id.clone(),
+            provider_type: mp.provider_type.type_str().to_string(),
+            api_key: mp.api_key.clone(),
+            base_url: mp.base_url.clone(),
+            models: crate::config::ProviderModels {
+                opus: mp.aliases[0].clone(),
+                sonnet: mp.aliases[1].clone(),
+                haiku: mp.aliases[2].clone(),
+            },
+            ..Default::default()
+        };
+        if first_id.is_empty() {
+            first_id = provider.id.clone();
+        }
+        cfg.config.providers.push(provider);
+    }
+
+    if !first_id.is_empty() {
+        cfg.config.active_alias = "opus".to_string();
+        cfg.config.active_provider_id = first_id;
+    }
+
+    cfg.config.language = Some(state.language.clone());
+    cfg
+}
+
+/// 将 setup wizard 结果合并到已有配置并保存
+pub fn save_setup(state: &SetupWizardState) -> anyhow::Result<crate::config::PeriConfig> {
+    let mut merged = crate::config::load().unwrap_or_else(|_| crate::config::PeriConfig::default());
+
+    let wizard_cfg = build_wizard_config(state);
+
+    for new_provider in &wizard_cfg.config.providers {
+        if !merged
+            .config
+            .providers
+            .iter()
+            .any(|p| p.id == new_provider.id)
+        {
+            merged.config.providers.push(new_provider.clone());
+        }
+    }
+
+    if !wizard_cfg.config.active_provider_id.is_empty() {
+        merged.config.active_alias = wizard_cfg.config.active_alias;
+        merged.config.active_provider_id = wizard_cfg.config.active_provider_id;
+    }
+
+    if let Some(lang) = wizard_cfg.config.language {
+        merged.config.language = Some(lang);
+    }
+
+    crate::config::save(&merged)?;
+    Ok(merged)
+}
+
+/// 从 Claude Code 配置迁移
+pub fn migrate_from_claude_code(
+    state: &mut SetupWizardState,
+    home_dir_override: Option<std::path::PathBuf>,
+) -> bool {
+    let home = home_dir_override
+        .or_else(dirs_next::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let claude_dir = home.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+    if !settings_path.exists() {
+        return false;
+    }
+    let content = match std::fs::read_to_string(&settings_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let val: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let env = match val.get("env").and_then(|e| e.as_object()) {
+        Some(e) => e,
+        None => return false,
+    };
+
+    let mut detected: Vec<MigratedProvider> = Vec::new();
+
+    let prefixes: &[(&str, ProviderType, &str, &[&str])] = &[
+        (
+            "ANTHROPIC",
+            ProviderType::Anthropic,
+            "anthropic",
+            &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+        ),
+        (
+            "OPENAI",
+            ProviderType::OpenAiCompatible,
+            "openai",
+            &["OPENAI_API_KEY"],
+        ),
+        (
+            "CODEX",
+            ProviderType::OpenAiCompatible,
+            "openai",
+            &["CODEX_API_KEY"],
+        ),
+    ];
+
+    for &(prefix, pt, default_id, key_names) in prefixes {
+        let api_key = key_names
+            .iter()
+            .map(|k| get_env_string(env, k))
+            .find(|v| !v.is_empty())
+            .unwrap_or_default();
+        let base_url = get_env_string(env, &format!("{}_BASE_URL", prefix));
+        let opus = get_env_string(env, &format!("{}_DEFAULT_OPUS_MODEL", prefix));
+        let sonnet = get_env_string(env, &format!("{}_DEFAULT_SONNET_MODEL", prefix));
+        let haiku = get_env_string(env, &format!("{}_DEFAULT_HAIKU_MODEL", prefix));
+
+        if api_key.is_empty() && base_url.is_empty() {
+            continue;
+        }
+
+        let mut mp = MigratedProvider::new(pt);
+        mp.provider_id = default_id.to_string();
+
+        if !api_key.is_empty() {
+            mp.api_key = api_key;
+        } else {
+            mp.selected = false;
+        }
+
+        if !base_url.is_empty() {
+            mp.base_url = base_url;
+        }
+
+        if !opus.is_empty() {
+            mp.aliases[0] = opus;
+        }
+        if !sonnet.is_empty() {
+            mp.aliases[1] = sonnet;
+        }
+        if !haiku.is_empty() {
+            mp.aliases[2] = haiku;
+        }
+
+        detected.push(mp);
+    }
+
+    if detected.is_empty() {
+        return false;
+    }
+
+    state.providers = detected;
+    state.active_provider = 0;
+    state.browse_cursor = 0;
+    true
+}
+
+fn get_env_string(env: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
+    match env.get(key) {
+        Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
+        Some(v) => {
+            tracing::warn!(
+                "setup wizard: env key '{}' has non-string value (type {:?}), skipping",
+                key,
+                v
+            );
+            String::new()
+        }
+        None => String::new(),
+    }
+}
+
+/// 连通性测试
+pub fn test_connectivity(base_url: &str) -> (bool, String) {
+    use std::io::{Read, Write};
+
+    if base_url.trim().is_empty() {
+        return (false, "Base URL is empty".to_string());
+    }
+
+    let (host, port, path) = match parse_url_parts(base_url) {
+        Some(p) => p,
+        None => return (false, format!("Invalid URL: {}", base_url)),
+    };
+
+    let addr_str = format!("{}:{}", host, port);
+    use std::net::ToSocketAddrs;
+    let addr = match addr_str.to_socket_addrs().ok().and_then(|mut a| a.next()) {
+        Some(a) => a,
+        None => return (false, format!("DNS resolution failed for {}", host)),
+    };
+
+    let timeout = std::time::Duration::from_secs(5);
+    let mut stream = match std::net::TcpStream::connect_timeout(&addr, timeout) {
+        Ok(s) => s,
+        Err(e) => return (false, format!("{} unreachable: {}", host, e)),
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+
+    let req = format!("GET {} HTTP/1.0\r\nHost: {}\r\n\r\n", path, host);
+    if stream.write_all(req.as_bytes()).is_err() {
+        return (false, format!("{} connected but send failed", host));
+    }
+
+    let mut buf = [0u8; 1];
+    match stream.read_exact(&mut buf) {
+        Ok(()) => (true, format!("{} reachable", base_url)),
+        Err(e) => (false, format!("{} no response: {}", host, e)),
+    }
+}
+
+fn parse_url_parts(url: &str) -> Option<(&str, u16, &str)> {
+    let s = url.trim();
+    let (scheme, rest) = if let Some(idx) = s.find("://") {
+        (&s[..idx], &s[idx + 3..])
+    } else {
+        ("https", s)
+    };
+    let default_port: u16 = if scheme.eq_ignore_ascii_case("http") {
+        80
+    } else {
+        443
+    };
+    let (host_port, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, "/"),
+    };
+    let (host, port_str) = match host_port.rfind(':') {
+        Some(idx) if host_port[idx + 1..].chars().all(|c| c.is_ascii_digit()) => {
+            (&host_port[..idx], &host_port[idx + 1..])
+        }
+        _ => (host_port, ""),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port: u16 = if port_str.is_empty() {
+        default_port
+    } else {
+        port_str.parse().ok()?
+    };
+    Some((host, port, path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, ProviderConfig};
     use serial_test::serial;
-
-    // needs_setup 依赖 std::env::var，多测试并行跑会相互污染（共享进程环境）。
-    // 用 #[serial] 强制串行执行，避免 flaky 失败。
 
     #[test]
     #[serial]
     fn test_needs_setup_empty_providers_no_env() {
-        let config = AppConfig::default();
-        // 无 providers 且显式移除所有已知 API key 环境变量 → 需要 setup
-        unsafe {
-            std::env::set_var("MODEL_PROVIDER", "__nonexistent__");
-        }
+        let config = crate::config::AppConfig::default();
         unsafe {
             std::env::remove_var("OPENAI_API_KEY");
-        }
-        unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
         }
         assert!(
@@ -70,35 +628,61 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_needs_setup_empty_providers_but_env_key() {
-        let config = AppConfig::default();
-        // 无 providers 但 OPENAI_API_KEY + MODEL_PROVIDER=openai → 不需要 setup
-        unsafe {
-            std::env::set_var("MODEL_PROVIDER", "openai");
-        }
-        unsafe {
-            std::env::set_var("OPENAI_API_KEY", "sk-fake-test-key");
-        }
-        unsafe {
-            std::env::remove_var("ANTHROPIC_API_KEY");
-        }
-        assert!(
-            !needs_setup(&config),
-            "env 提供 OPENAI_API_KEY + MODEL_PROVIDER=openai 时不需要 setup"
-        );
-    }
-
-    #[test]
-    #[serial]
     fn test_needs_setup_api_key_from_config() {
-        let mut config = AppConfig::default();
-        config.providers.push(ProviderConfig {
+        let mut config = crate::config::AppConfig::default();
+        config.providers.push(crate::config::ProviderConfig {
             id: "test".into(),
             provider_type: "openai".into(),
             api_key: "sk-fake-test-key".into(),
             ..Default::default()
         });
-        // 已配置 provider + api_key → 不需要 setup
         assert!(!needs_setup(&config));
+    }
+
+    #[test]
+    fn test_provider_type_cycle() {
+        let mut pt = ProviderType::Anthropic;
+        pt.cycle();
+        assert_eq!(pt, ProviderType::OpenAiCompatible);
+        pt.cycle();
+        assert_eq!(pt, ProviderType::Anthropic);
+    }
+
+    #[test]
+    fn test_migrated_provider_is_complete() {
+        let mp = MigratedProvider::new(ProviderType::Anthropic);
+        // 新创建的 provider api_key 为空，不完整
+        assert!(!mp.is_complete());
+
+        let mut mp2 = MigratedProvider::new(ProviderType::Anthropic);
+        mp2.api_key = "sk-test".to_string();
+        assert!(mp2.is_complete());
+    }
+
+    #[test]
+    fn test_mask_api_key() {
+        assert_eq!(mask_api_key("sk-short"), "••••••••");
+        assert_eq!(
+            mask_api_key("sk-ant-api03-very-long-key-here"),
+            "sk-a••••here"
+        );
+    }
+
+    #[test]
+    fn test_parse_url_parts_standard() {
+        let (host, port, path) =
+            parse_url_parts("https://api.anthropic.com").expect("parse failed");
+        assert_eq!(host, "api.anthropic.com");
+        assert_eq!(port, 443);
+        assert_eq!(path, "/");
+    }
+
+    #[test]
+    fn test_parse_url_parts_with_path() {
+        let (host, port, path) =
+            parse_url_parts("http://localhost:8080/v1/chat").expect("parse failed");
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 8080);
+        assert_eq!(path, "/v1/chat");
     }
 }

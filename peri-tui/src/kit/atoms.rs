@@ -22,6 +22,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::panel_types::PanelKind;
+use crate::app::setup_wizard::SetupWizardState;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::hitl_response::HitlResponseAction;
@@ -297,6 +298,8 @@ pub static SKILL_NAMES: AtomStatic<Vec<String>> = AtomStatic::new(Vec::new);
 /// 由 kit notifier 在收到 `SessionUpdate::AvailableCommandsUpdate` 后写入。
 pub static AVAILABLE_SLASH_COMMANDS: AtomStatic<Vec<(String, String)>> = AtomStatic::new(Vec::new);
 pub static WIZARD_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
+/// Setup Wizard 全量状态（步骤、Provider 列表、光标位置等）
+pub static SETUP_WIZARD: AtomStatic<SetupWizardState> = AtomStatic::new(SetupWizardState::default);
 pub static PREDICTION: AtomStatic<PredictionState> = AtomStatic::new(PredictionState::default);
 pub static INPUT_AREA_ESC_PREFIX: AtomStatic<bool> = AtomStatic::new(|| false);
 

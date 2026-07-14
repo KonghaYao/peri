@@ -36,14 +36,14 @@ use crate::kit::atoms::{
     ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST,
     INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LANG_VERSION, LOCAL_EVENT_TX, MENTION_PREFIX,
     MENTION_SELECTED_INDEX, POPUP_KIND, PREDICTION, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX,
-    SLASH_SELECTED_INDEX, SUBMIT_TX,
+    SLASH_SELECTED_INDEX, SUBMIT_TX, WIZARD_ACTIVE,
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
 use crate::kit::mention_popup::MentionPopup;
 use crate::kit::panel_registry::{PANELS, open_panel, panel_description, panel_for_slash_command};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
-use crate::kit::submit_request::{SubmitRequest, parse_submit_request};
+use crate::kit::submit_request::{SessionControlRequest, SubmitRequest, parse_submit_request};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -807,6 +807,9 @@ where
 {
     match request {
         SubmitRequest::OpenPanel(kind) => open_panel(kind),
+        SubmitRequest::SessionControl(SessionControlRequest::ToggleSetup) => {
+            *WIZARD_ACTIVE.state().write() = true;
+        }
         SubmitRequest::AgentText(text) => {
             push_history(&text);
             reset_history_cursor();
@@ -916,7 +919,7 @@ fn build_slash_items() -> Vec<SlashCompletionItem> {
     let remote = AVAILABLE_SLASH_COMMANDS.state().read().clone();
     let skill_names: std::collections::HashSet<String> =
         SKILL_NAMES.state().read().iter().cloned().collect();
-    let mut items = Vec::with_capacity(PANELS.len() + remote.len());
+    let mut items = Vec::with_capacity(PANELS.len() + remote.len() + 1);
     for panel in PANELS {
         if panel.slash_command.is_empty() {
             continue;
@@ -930,6 +933,14 @@ fn build_slash_items() -> Vec<SlashCompletionItem> {
             kind: SlashActionKind::Panel,
         });
     }
+    // /setup 命令：打开 Setup Wizard 引导界面
+    items.push(SlashCompletionItem {
+        label: "setup".to_string(),
+        insert_text: "setup".to_string(),
+        description: i18n::tr("command-setup-description"),
+        kind: SlashActionKind::Command,
+        label_lowercase: "setup".to_string(),
+    });
     for (name, description) in &remote {
         // S16：根据 SKILL_NAMES 区分 Skill vs Command
         let kind = if skill_names.contains(name) {
