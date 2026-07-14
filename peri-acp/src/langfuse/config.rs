@@ -172,6 +172,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_load_with_settings_langfuse_fields() {
         clear_langfuse_env();
         let cfg = LangfuseConfig::load_with_settings(&serde_json::json!({

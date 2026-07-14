@@ -142,7 +142,7 @@ impl CurrentTurn {
 
     /// Append a reasoning chunk from `"reasoning-chunk"`.
     ///
-    /// Same `message_id` semantics as `append_text`: a new ID triggeres
+    /// Same `message_id` semantics as `append_text`: a new ID triggers
     /// a text segment flush so reasoning and text for different messages
     /// are separated.
     pub fn append_reasoning(&mut self, t: &str, message_id: Option<&str>) {

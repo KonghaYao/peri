@@ -19,4 +19,4 @@ pre-commit:
       run: cargo clippy -- -W clippy::all
 
     typos:
-      run: typos --ignore-hidden 2>/dev/null || true
+      run: typos
