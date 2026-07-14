@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_agent::agent::events::AgentEvent as ExecutorEvent;
+use peri_agent::agent::events::ExecutorEvent;
 use peri_agent::messages::BaseMessage;
 
 use super::clear::ClearCommand;
@@ -95,7 +95,7 @@ impl crate::session::event_sink::EventSink for MockEventSink {
             .push((session_id.to_string(), json));
     }
 
-    async fn push_done(&self, _session_id: &str) {
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {
         *self.push_done_count.lock().unwrap() += 1;
     }
 }
@@ -214,6 +214,46 @@ fn test_registry_find_returns_none_for_double_slash() {
 
     // Act & Assert
     assert!(reg.find("//").is_none());
+}
+
+#[test]
+fn test_prefix_match() {
+    // Arrange: 注册 rewind 命令，别名为 r
+    let mut reg = CommandRegistry::new();
+    reg.register(Box::new(MockCommand::new("rewind").with_aliases(vec!["r"])));
+
+    // Act & Assert
+    // /rew 应前缀匹配 /rewind
+    let (cmd, args) = reg.find("/rew").unwrap();
+    assert_eq!(cmd.name(), "rewind");
+    assert_eq!(args, "");
+
+    // 精确匹配仍有效
+    let (cmd, args) = reg.find("/rewind").unwrap();
+    assert_eq!(cmd.name(), "rewind");
+    assert_eq!(args, "");
+
+    // alias 匹配仍有效
+    let (cmd, args) = reg.find("/r").unwrap();
+    assert_eq!(cmd.name(), "rewind");
+    assert_eq!(args, "");
+
+    // 无匹配返回 None
+    assert!(reg.find("/xyz").is_none());
+}
+
+#[test]
+fn test_prefix_ambiguous_returns_none() {
+    // Arrange: 两个共享前缀的命令
+    let mut reg = CommandRegistry::new();
+    reg.register(Box::new(MockCommand::new("rewind")));
+    reg.register(Box::new(MockCommand::new("rewrite")));
+
+    // Act & Assert: 歧义前缀不应匹配
+    assert!(reg.find("/rew").is_none());
+    // 但精确匹配仍有效
+    assert!(reg.find("/rewind").is_some());
+    assert!(reg.find("/rewrite").is_some());
 }
 
 #[test]

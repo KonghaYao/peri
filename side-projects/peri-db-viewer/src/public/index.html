@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Peri DB Viewer</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <nav id="top-nav">
+    <h1 class="nav-title">Peri DB Viewer</h1>
+    <div class="nav-tabs" id="nav-tabs">
+      <button class="nav-tab active" data-page="dashboard">Dashboard</button>
+      <button class="nav-tab" data-page="threads">Thread List</button>
+      <button class="nav-tab" data-page="detail">Detail</button>
+      <button class="nav-tab" data-page="tools">Tool Analysis</button>
+      <button class="nav-tab" data-page="search">Search</button>
+    </div>
+  </nav>
+
+  <main id="main-content">
+    <!-- Dashboard -->
+    <section id="page-dashboard" class="page active">
+      <div class="cards-row" id="stats-cards"></div>
+      <div class="charts-row">
+        <div class="chart-card"><h3>Role Distribution</h3><div id="chart-role-pie" class="chart-box"></div></div>
+        <div class="chart-card"><h3>Daily Active Sessions</h3><div id="chart-timeline" class="chart-box"></div></div>
+      </div>
+      <div class="charts-row">
+        <div class="chart-card"><h3>Top Tools</h3><div id="chart-top-tools" class="chart-box"></div></div>
+        <div class="chart-card"><h3>Agent Status</h3><div id="chart-status-ring" class="chart-box"></div></div>
+      </div>
+    </section>
+
+    <!-- Thread List -->
+    <section id="page-threads" class="page">
+      <div class="controls-bar">
+        <input type="text" id="thread-search" placeholder="Search threads..." class="search-input">
+        <select id="thread-cwd-filter" class="filter-select">
+          <option value="">All CWD</option>
+        </select>
+        <select id="thread-status-filter" class="filter-select">
+          <option value="">All Status</option>
+        </select>
+        <select id="thread-sort" class="filter-select">
+          <option value="updated_at">Sort: Updated</option>
+          <option value="created_at">Sort: Created</option>
+          <option value="message_count">Sort: Messages</option>
+        </select>
+        <select id="thread-order" class="filter-select">
+          <option value="DESC">DESC</option>
+          <option value="ASC">ASC</option>
+        </select>
+        <label class="checkbox-label">
+          <input type="checkbox" id="thread-hide-empty" checked>
+          Hide empty (0 msg)
+        </label>
+      </div>
+      <div class="table-wrapper">
+        <table id="threads-table">
+          <thead><tr><th>ID</th><th>Title</th><th>Status</th><th>Messages</th><th>Created</th><th>Updated</th><th>Sub-Agents</th></tr></thead>
+          <tbody id="threads-tbody"></tbody>
+        </table>
+      </div>
+      <div class="pagination" id="threads-pagination"></div>
+    </section>
+
+    <!-- Detail -->
+    <section id="page-detail" class="page">
+      <div id="detail-meta"></div>
+      <div id="detail-relations"></div>
+      <div class="detail-section"><h3>Message Timeline</h3>
+      <div id="detail-messages"></div></div>
+    </section>
+
+    <!-- Tool Analysis -->
+    <section id="page-tools" class="page">
+      <div class="charts-row">
+        <div class="chart-card"><h3>Tool Call Frequency</h3><div id="chart-tool-freq" class="chart-box chart-tall"></div></div>
+        <div class="chart-card"><h3>Error Distribution</h3><div id="chart-tool-error" class="chart-box chart-tall"></div></div>
+      </div>
+      <div class="detail-section"><h3>Recent Tool Errors</h3>
+      <div class="table-wrapper">
+        <table id="errors-table">
+          <thead><tr><th>Time</th><th>Thread</th><th>Content</th></tr></thead>
+          <tbody id="errors-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Search -->
+    <section id="page-search" class="page">
+      <div class="controls-bar">
+        <input type="text" id="search-input" placeholder="Search messages..." class="search-input search-wide">
+        <input type="text" id="search-thread-id" placeholder="Thread ID (optional)" class="search-input" style="max-width:300px;">
+        <button id="search-btn" class="btn-primary">Search</button>
+      </div>
+      <div class="table-wrapper">
+        <table id="search-table">
+          <thead><tr><th>Thread</th><th>Role</th><th>Content</th></tr></thead>
+          <tbody id="search-tbody"></tbody>
+        </table>
+      </div>
+      <div class="pagination" id="search-pagination"></div>
+    </section>
+  </main>
+
+  <!-- ECharts CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+
+  <!-- App JS -->
+  <script src="/js/app.js"></script>
+  <script src="/js/dashboard.js"></script>
+  <script src="/js/threads.js"></script>
+  <script src="/js/detail.js"></script>
+  <script src="/js/tools.js"></script>
+  <script src="/js/search.js"></script>
+</body>
+</html>

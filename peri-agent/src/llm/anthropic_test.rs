@@ -1149,3 +1149,62 @@ fn test_multiturn_with_errors_all_tool_results_have_id() {
         assert!(has_id, "第 {} 个 tool_result 缺少非空 id 字段: {:?}", i, tr);
     }
 }
+
+/// BaseModel::build_request_body 返回 Anthropic Provider-native 请求体
+/// （含 `{name, description, input_schema}` 工具格式和顶层 `system` 字段）。
+/// 关键不变量：与 Anthropic 实际 invoke 请求体完全一致。
+#[test]
+fn test_base_model_build_request_body_returns_provider_native_anthropic_format() {
+    use crate::llm::types::LlmRequest;
+    use crate::llm::BaseModel;
+    use crate::tools::ToolDefinition;
+
+    let llm = ChatAnthropic::new("sk-test", "claude-sonnet-4");
+    let tool_def = ToolDefinition {
+        name: "Read".to_string(),
+        description: "read a file".to_string(),
+        parameters: serde_json::json!({"type":"object"}),
+    };
+    let request = LlmRequest::new(vec![BaseMessage::human(MessageContent::text("hi"))])
+        .with_system("SYSTEM_PROMPT".to_string())
+        .with_tools(vec![tool_def]);
+
+    let body = llm
+        .build_request_body(&request)
+        .expect("ChatAnthropic 应 override build_request_body 返回 Some");
+    // 工具格式：Anthropic-native（无 type:function 嵌套，input_schema 而非 parameters）
+    let tools = body["tools"].as_array().expect("tools 应是 array");
+    assert_eq!(tools[0]["name"], "Read");
+    assert_eq!(tools[0]["description"], "read a file");
+    assert!(
+        tools[0].get("input_schema").is_some(),
+        "Anthropic 工具必须用 input_schema（而非 parameters）"
+    );
+    assert!(
+        tools[0].get("parameters").is_none(),
+        "Anthropic 工具不应有 parameters 字段（OpenAI 抽象格式）"
+    );
+    assert!(
+        tools[0].get("type").is_none(),
+        "Anthropic 工具不应有 type:function 嵌套（OpenAI 格式）"
+    );
+    // system 应在顶层（Anthropic 风格），而非 messages 内
+    let system = body.get("system").expect("Anthropic 应有顶层 system 字段");
+    let system_str = system.as_str().unwrap_or_else(|| {
+        // 启用 cache 时可能是 array，取第一个块的 text
+        system
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|b| b.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    });
+    assert!(
+        system_str.contains("SYSTEM_PROMPT"),
+        "顶层 system 应包含 base system，实际: {}",
+        system_str
+    );
+    let messages = body["messages"].as_array().expect("messages 应是 array");
+    // Anthropic 把 system 从 messages 移除，user 消息应在 messages[0]
+    assert_eq!(messages[0]["role"], "user");
+}

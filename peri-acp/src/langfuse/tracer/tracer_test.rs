@@ -1,299 +1,251 @@
-use std::{sync::Arc, time::Duration};
-
-use langfuse_client::{BackpressurePolicy, Batcher, BatcherConfig, LangfuseClient};
+//! LangfuseTracer 集成烟雾测试。
+//!
+//! 覆盖完整的 turn 生命周期、采样率控制、ErrorSpan 机制、
+//! text chunk 累积和 LLM generation 事件流。
+//!
+//! 注意：`on_turn_end()` 内部调用 `tokio::spawn`，因此需要 `#[tokio::test]`
+//! 提供异步运行时。
 
 use super::*;
+use peri_agent::agent::events::{Stage, StageStatus};
 
-fn make_tracer() -> LangfuseTracer {
-    let client = LangfuseClient::new("pk-test", "sk-test", "http://127.0.0.1:1", 0);
-    let config = BatcherConfig {
-        max_events: 1000,
-        flush_interval: Duration::from_secs(600),
-        backpressure: BackpressurePolicy::DropNew,
-        max_retries: 0,
+fn make_tracer(
+    rate: f64,
+) -> (
+    LangfuseTracer,
+    std::sync::Arc<crate::langfuse::fake_session::FakeLangfuseSession>,
+) {
+    // FakeLangfuseSession::new() 已返回 Arc<Self>，无需再包一层
+    let session = crate::langfuse::fake_session::FakeLangfuseSession::new("sess_smoke");
+    let config = crate::langfuse::config::LangfuseConfig {
+        public_key: None,
+        secret_key: None,
+        host: "https://cloud.langfuse.com".to_string(),
+        trace_sampling: rate,
+        error_span_always: true,
+        batch_max_events: 50,
+        batch_flush_interval_secs: 10,
     };
-    let batcher = Arc::new(Batcher::new(client, config));
-    let session = Arc::new(LangfuseSession {
-        client: Arc::new(LangfuseClient::new("pk", "sk", "http://127.0.0.1:1", 0)),
-        batcher,
+    let t = LangfuseTracer::new(session.clone(), "sess_smoke".to_string(), config);
+    (t, session)
+}
+
+// ── 烟雾测试：完整 turn 序列 ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_smoke_complete_turn_sequence() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+
+    // Stage: Receive
+    t.on_stage_start(Stage::Receive, "turn_1");
+    let recv_handle = t.stages.on_stage_start(
+        Stage::Receive,
+        &t.trace_id,
+        "turn_1",
+        &t.agent_observation_id,
+    );
+    t.on_stage_end(&recv_handle, StageStatus::Done);
+
+    // Stage: Reason + LLM
+    t.on_stage_start(Stage::Reason, "turn_1");
+    t.on_llm_start(0, &[], &[]);
+    t.on_llm_end(0, "claude-4.7", "anthropic", "hello", None);
+    let reason_handle = t.stages.on_stage_start(
+        Stage::Reason,
+        &t.trace_id,
+        "turn_1",
+        &t.agent_observation_id,
+    );
+    t.on_stage_end(&reason_handle, StageStatus::Done);
+
+    // Stage: End
+    t.on_stage_start(Stage::End, "turn_1");
+    let end_handle =
+        t.stages
+            .on_stage_start(Stage::End, &t.trace_id, "turn_1", &t.agent_observation_id);
+    t.on_stage_end(&end_handle, StageStatus::Done);
+
+    let _handle = t.on_turn_end(None);
+    // 等待 flush async 任务完成（FakeLangfuseSession 的 flush 是同步的，但 spawn 需要运行）
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+    assert!(!events.is_empty(), "应有至少一个事件");
+}
+
+// ── 采样率测试 ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_sampling_rate_0_emits_nothing() {
+    let (mut t, session) = make_tracer(0.0);
+    t.on_turn_start("turn_1");
+    t.on_stage_start(Stage::Reason, "turn_1");
+    t.on_llm_start(0, &[], &[]);
+    t.on_llm_end(0, "m", "p", "o", None);
+    let _handle = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+    assert!(
+        events.is_empty(),
+        "采样率 0 应不上报任何事件，实际有 {} 个",
+        events.len()
+    );
+}
+
+#[tokio::test]
+async fn test_sampling_rate_1_emits_events() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_stage_start(Stage::Reason, "turn_1");
+    let _handle = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+    assert!(!events.is_empty(), "采样率 1.0 应有事件");
+}
+
+// ── ErrorSpan 测试 ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_error_span_emitted_for_error_turn() {
+    let (mut t, session) = make_tracer(0.0);
+    t.on_turn_start("turn_1");
+    let _handle = t.on_turn_end(Some("TurnError"));
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let has_trace = events
+        .iter()
+        .any(|e| matches!(e, langfuse_client::IngestionEvent::TraceCreate { .. }));
+    let has_error_span = events.iter().any(|e| {
+        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
+            body.name.as_deref() == Some("ErrorTurn")
+        } else {
+            false
+        }
     });
-    LangfuseTracer::new(session, "test-session".to_string())
+    assert!(has_trace, "错误 turn 应补发 TraceCreate");
+    assert!(has_error_span, "错误 turn 应发 ErrorSpan");
 }
 
-fn agent_tool_input(subagent_type: &str, prompt: &str) -> serde_json::Value {
-    serde_json::json!({
-        "subagent_type": subagent_type,
-        "prompt": prompt,
-        "description": "test task"
-    })
-}
+// ── TextChunk 累积测试 ─────────────────────────────────────────────────────
 
-// === Test 1: Agent 工具 on_tool_start 压栈 ===
-#[tokio::test]
-async fn test_agent_tool_start_pushes_subagent_stack() {
-    let mut tracer = make_tracer();
-    let main_agent_id = tracer.agent_observation_id.clone();
-
-    assert!(tracer.subagent_stack.is_empty());
-    assert_eq!(tracer.current_agent_id(), main_agent_id);
-
-    let input = agent_tool_input("code-reviewer", "review this code");
-    tracer.on_tool_start("tc-1", "Agent", &input);
-
-    assert_eq!(tracer.subagent_stack.len(), 1);
-    let subagent_obs_id = tracer.subagent_stack[0].observation_id.clone();
-    assert_ne!(subagent_obs_id, main_agent_id);
-    assert_eq!(tracer.current_agent_id(), subagent_obs_id);
-    assert_eq!(tracer.subagent_stack[0].agent_id, "code-reviewer");
-}
-
-// === Test 2: 非 Agent 工具不影响栈 ===
-#[tokio::test]
-async fn test_non_agent_tool_does_not_push_subagent_stack() {
-    let mut tracer = make_tracer();
-    let input = serde_json::json!({"file_path": "/tmp/test.rs"});
-    tracer.on_tool_start("tc-1", "Read", &input);
-    assert!(tracer.subagent_stack.is_empty());
-}
-
-// === Test 3: Agent 工具 on_tool_end 弹出栈 ===
-#[tokio::test]
-async fn test_agent_tool_end_pops_subagent_stack() {
-    let mut tracer = make_tracer();
-    tracer.on_tool_start("tc-1", "Agent", &agent_tool_input("explorer", "find files"));
-    assert_eq!(tracer.subagent_stack.len(), 1);
-    tracer.on_tool_end("tc-1", "found 3 files", false);
-    assert!(tracer.subagent_stack.is_empty());
-}
-
-// === Test 4: 非 Agent 工具 on_tool_end 不弹栈 ===
-#[tokio::test]
-async fn test_non_agent_tool_end_does_not_pop_subagent_stack() {
-    let mut tracer = make_tracer();
-    tracer.on_tool_start("tc-agent", "Agent", &agent_tool_input("plan", "plan this"));
-    assert_eq!(tracer.subagent_stack.len(), 1);
-
-    let input = serde_json::json!({"pattern": "*.rs"});
-    tracer.on_tool_start("tc-glob", "Glob", &input);
-    tracer.on_tool_end("tc-glob", "file1.rs", false);
-
-    assert_eq!(tracer.subagent_stack.len(), 1);
-
-    tracer.on_tool_end("tc-agent", "plan done", false);
-    assert!(tracer.subagent_stack.is_empty());
-}
-
-// === Test 5: SubAgent 生命周期中内部事件路由正确 ===
-#[tokio::test]
-async fn test_subagent_internal_events_use_subagent_context() {
-    let mut tracer = make_tracer();
-    let main_agent_id = tracer.agent_observation_id.clone();
-
-    tracer.on_tool_start(
-        "tc-1",
-        "Agent",
-        &agent_tool_input("code-reviewer", "review"),
-    );
-    let subagent_obs_id = tracer.current_agent_id();
-    assert_ne!(subagent_obs_id, main_agent_id);
-
-    // SubAgent 内部 LLM 调用：parent 应为 subagent obs
-    tracer.on_llm_start(0, &[], &[]);
-    assert_eq!(tracer.current_agent_id(), subagent_obs_id);
-
-    // SubAgent 内部工具调用：使用 subagent 的 tools context
-    tracer.on_tool_start(
-        "tc-inner",
-        "Read",
-        &serde_json::json!({"file_path": "x.rs"}),
-    );
-    assert_eq!(tracer.subagent_stack[0].pending_tools.len(), 1);
-
-    tracer.on_tool_end("tc-inner", "content", false);
-    assert!(tracer.subagent_stack[0].tools_batch_end_time.is_some());
-
-    tracer.on_tool_end("tc-1", "review done", false);
-    assert!(tracer.subagent_stack.is_empty());
-    assert_eq!(tracer.current_agent_id(), main_agent_id);
-}
-
-// === Test 6: 嵌套 SubAgent ===
-#[tokio::test]
-async fn test_nested_subagent_stack_depth() {
-    let mut tracer = make_tracer();
-
-    tracer.on_tool_start("tc-a", "Agent", &agent_tool_input("planner", "plan"));
-    assert_eq!(tracer.subagent_stack.len(), 1);
-    let planner_obs_id = tracer.current_agent_id();
-
-    tracer.on_tool_start("tc-b", "Agent", &agent_tool_input("explorer", "find"));
-    assert_eq!(tracer.subagent_stack.len(), 2);
-    let explorer_obs_id = tracer.current_agent_id();
-    assert_ne!(explorer_obs_id, planner_obs_id);
-
-    tracer.on_llm_start(0, &[], &[]);
-    assert_eq!(tracer.current_agent_id(), explorer_obs_id);
-
-    tracer.on_tool_end("tc-b", "found files", false);
-    assert_eq!(tracer.subagent_stack.len(), 1);
-    assert_eq!(tracer.current_agent_id(), planner_obs_id);
-
-    tracer.on_tool_end("tc-a", "plan done", false);
-    assert!(tracer.subagent_stack.is_empty());
-}
-
-// === Test 7: 未知 tool_call_id 的 on_tool_end 不 panic ===
-#[tokio::test]
-async fn test_on_tool_end_unknown_tool_call_id_no_panic() {
-    let mut tracer = make_tracer();
-    tracer.on_tool_end("nonexistent", "output", false);
-    // Should return early without panicking
-}
-
-// === Test 8: Fork 类型识别 ===
 #[test]
-fn test_fork_subagent_identity() {
-    assert_eq!(
-        LangfuseTracer::subagent_identity(
-            &serde_json::json!({"prompt": "do something", "fork": true})
-        ),
-        "fork"
+fn test_on_text_chunk_accumulates() {
+    let (mut t, _session) = make_tracer(1.0);
+    t.on_text_chunk("Hello ");
+    t.on_text_chunk("World");
+    assert_eq!(t.final_answer, "Hello World");
+}
+
+// ── LLM Generation 事件测试 ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_llm_generation_emits_events() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_llm_start(0, &[], &[]);
+    t.on_llm_end(0, "gpt-4", "openai", "response", None);
+    let _handle = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let gen_count = events
+        .iter()
+        .filter(|e| matches!(e, langfuse_client::IngestionEvent::GenerationCreate { .. }))
+        .count();
+    assert!(gen_count > 0, "应有至少一个 GenerationCreate 事件");
+}
+
+#[tokio::test]
+async fn test_llm_retry_accumulates_metadata() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_llm_start(0, &[], &[]);
+    t.on_llm_retrying(1, 3, 500, "timeout");
+    t.on_llm_retrying(2, 3, 1000, "timeout");
+    t.on_llm_end(0, "gpt-4", "openai", "response", None);
+    let _handle = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    // 验证 GenerationCreate 包含重试 metadata（字段名为 retry_count）
+    let has_retry_meta = events.iter().any(|e| {
+        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = e {
+            body.metadata
+                .as_ref()
+                .map(|m| m.get("retry_count").is_some())
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    });
+    assert!(
+        has_retry_meta,
+        "GenerationCreate 应包含重试 metadata (retry_count)"
     );
-    assert_eq!(
-        LangfuseTracer::subagent_identity(
-            &serde_json::json!({"subagent_type": "code-reviewer", "fork": true, "prompt": "x"})
-        ),
-        "code-reviewer"
+}
+
+// ── Middleware 事件测试 ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_middleware_start_and_end() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_middleware_start(
+        "auth",
+        peri_agent::agent::events::MiddlewareHook::BeforeAgent,
     );
-    assert_eq!(
-        LangfuseTracer::subagent_identity(&serde_json::json!({"prompt": "x"})),
-        "fork"
+    let mw_handle = t.middleware.on_start(
+        "auth",
+        peri_agent::agent::events::MiddlewareHook::BeforeAgent,
     );
+    // 微小延迟确保 duration > 0（MiddlewareSpan 条件上报）
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    t.on_middleware_end(&mw_handle, StageStatus::Done, None);
+    let _handle = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let has_mw_span = events.iter().any(|e| {
+        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
+            body.name.as_deref() == Some("mw-auth")
+        } else {
+            false
+        }
+    });
+    assert!(has_mw_span, "应有 mw-auth SpanCreate 事件");
 }
 
-// === Test 9: 并发 SubAgent 独立上下文 ===
+// ── Compact 事件测试 ────────────────────────────────────────────────────────
+
 #[tokio::test]
-async fn test_concurrent_subagents_independent_context() {
-    let mut tracer = make_tracer();
-    let main_id = tracer.agent_observation_id.clone();
+async fn test_compact_lifecycle() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_compact_start();
+    // 微小延迟确保 duration > 0（Compact 条件上报）
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    t.on_compact_end("summary text", 3, 2, 5, false, "");
+    let _handle = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
 
-    // 启动第一个 subagent
-    tracer.on_tool_start("tc-1", "Agent", &agent_tool_input("explorer", "find files"));
-    assert_eq!(tracer.subagent_stack.len(), 1);
-    let sub1_id = tracer.current_agent_id();
+    let has_compact_span = events.iter().any(|e| {
+        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
+            body.name.as_deref() == Some("compact")
+        } else {
+            false
+        }
+    });
+    assert!(has_compact_span, "应有 compact SpanCreate 事件");
 
-    // 启动第二个 subagent（嵌套场景，flat model 下是兄弟关系）
-    tracer.on_tool_start(
-        "tc-2",
-        "Agent",
-        &agent_tool_input("code-reviewer", "review"),
-    );
-    assert_eq!(tracer.subagent_stack.len(), 2);
-    let sub2_id = tracer.current_agent_id();
-
-    // 两个 subagent 彼此不同，也不同于 main agent
-    assert_ne!(sub1_id, main_id);
-    assert_ne!(sub2_id, main_id);
-    assert_ne!(sub1_id, sub2_id);
-
-    // 第二个 subagent 结束后回到第一个
-    tracer.on_tool_end("tc-2", "review done", false);
-    assert_eq!(tracer.subagent_stack.len(), 1);
-    assert_eq!(tracer.current_agent_id(), sub1_id);
-
-    // 第一个 subagent 结束后回到 main agent
-    tracer.on_tool_end("tc-1", "found 5 files", false);
-    assert!(tracer.subagent_stack.is_empty());
-    assert_eq!(tracer.current_agent_id(), main_id);
-}
-
-// === Test 10: Compact 生命周期——full compact 正常完成 ===
-#[tokio::test]
-async fn test_compact_full_lifecycle() {
-    let mut tracer = make_tracer();
-
-    // Compact 开始前 compact_span 为空
-    assert!(tracer.compact_span.is_none());
-
-    tracer.on_compact_start();
-    assert!(tracer.compact_span.is_some());
-
-    tracer.on_compact_end("这是摘要内容", 3, 2, 0, false, "");
-    // 完成后 compact_span 被清空
-    assert!(tracer.compact_span.is_none());
-}
-
-// === Test 11: Compact 生命周期——错误路径 ===
-#[tokio::test]
-async fn test_compact_error_lifecycle() {
-    let mut tracer = make_tracer();
-
-    tracer.on_compact_start();
-    assert!(tracer.compact_span.is_some());
-
-    tracer.on_compact_end("", 0, 0, 0, true, "LLM 调用超时");
-    assert!(tracer.compact_span.is_none());
-}
-
-// === Test 12: Compact 生命周期——micro compact ===
-#[tokio::test]
-async fn test_compact_micro_lifecycle() {
-    let mut tracer = make_tracer();
-
-    // micro compact 不使用 on_compact_start（由 CompactCompleted 直接携带 micro_cleared）
-    // 但 on_compact_end 仍能正确识别
-    tracer.on_compact_end("", 0, 0, 8, false, "");
-    assert!(tracer.compact_span.is_none());
-}
-
-// === Test 13: LlmRetrying 累积 → generation metadata ===
-#[tokio::test]
-async fn test_llm_retry_accumulates_to_metadata() {
-    let mut tracer = make_tracer();
-
-    // 第一轮 LLM 调用，无重试
-    tracer.on_llm_start(0, &[], &[]);
-    assert!(tracer.retry_attempts.is_empty());
-    tracer.on_llm_end(0, "gpt-4o", "OpenAI", "result", None);
-    assert!(tracer.retry_attempts.is_empty());
-    assert!(tracer.active_step.is_none());
-
-    // 第二轮 LLM 调用，有 2 次重试
-    tracer.on_llm_start(1, &[], &[]);
-    assert_eq!(tracer.active_step, Some(1));
-    assert!(tracer.retry_attempts.is_empty());
-
-    tracer.on_llm_retrying(1, 3, 200, "timeout");
-    tracer.on_llm_retrying(2, 3, 400, "rate_limit");
-    assert_eq!(tracer.retry_attempts.len(), 2);
-    assert_eq!(tracer.retry_attempts[0].attempt, 1);
-    assert_eq!(tracer.retry_attempts[1].error, "rate_limit");
-
-    // on_llm_end 后重试记录被清空，active_step 重置
-    tracer.on_llm_end(1, "gpt-4o", "OpenAI", "result after retry", None);
-    assert!(tracer.retry_attempts.is_empty());
-    assert!(tracer.active_step.is_none());
-}
-
-// === Test 14: on_llm_start 清空上一轮的 retry_attempts ===
-#[tokio::test]
-async fn test_llm_start_clears_retry_attempts() {
-    let mut tracer = make_tracer();
-
-    tracer.on_llm_start(0, &[], &[]);
-    tracer.on_llm_retrying(1, 3, 100, "error");
-    assert_eq!(tracer.retry_attempts.len(), 1);
-
-    // 新一轮 LLM 调用清空 retry_attempts
-    tracer.on_llm_start(1, &[], &[]);
-    assert!(tracer.retry_attempts.is_empty());
-    assert_eq!(tracer.active_step, Some(1));
-}
-
-// === Test 15: on_compact_end 无 compact span 时静默返回 ===
-#[tokio::test]
-async fn test_compact_end_without_start_no_panic() {
-    let mut tracer = make_tracer();
-    tracer.on_compact_end("summary", 1, 0, 0, false, "");
-    // 不应 panic
+    // v2 条件上报：compact 改为延迟创建，不再发 SpanUpdate
+    let has_compact_update = events.iter().any(|e| {
+        if let langfuse_client::IngestionEvent::SpanUpdate { body, .. } = e {
+            body.name.as_deref() == Some("compact")
+        } else {
+            false
+        }
+    });
+    assert!(!has_compact_update, "v2 条件上报不应发 compact SpanUpdate");
 }

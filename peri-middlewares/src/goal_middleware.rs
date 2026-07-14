@@ -3,16 +3,19 @@
 //! goal active 时每轮注入提示 + 设 block_continue，executor 自动续跑。
 //! agent 必须调 goal(complete) 或 goal(block) 才能终止循环。
 //!
-//! 注入路径：add_message(Human, <goal-message>) 尾部追加。
-//! 绝不破坏 frozen_system_prompt。使用 <goal-message> 而非 <system-reminder>，
-//! 避免与 compact 摘要检测、14_system_reminder prompt 混淆。
+//! 注入路径：通过 v2 MessageQueue push Info kind（Receive 阶段消费）。
+//! 绝不破坏 frozen_system_prompt。使用 <system-reminder> 标签包裹，
+//! 与 compact 摘要检测、14_system_reminder prompt 协同。
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::{
-    agent::state::State, error::AgentResult, messages::BaseMessage, middleware::r#trait::Middleware,
+    error::AgentResult,
+    messages::{BaseMessage, MessageContent},
+    middleware::{r#trait::Middleware, state::MiddlewareState},
+    session::{MessageKind, MessageSource, QueuedMessage},
 };
 
 use crate::goal::GoalTool;
@@ -63,7 +66,7 @@ impl GoalMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for GoalMiddleware {
+impl Middleware for GoalMiddleware {
     fn name(&self) -> &str {
         "GoalMiddleware"
     }
@@ -79,7 +82,7 @@ impl<S: State> Middleware<S> for GoalMiddleware {
 
     async fn after_agent(
         &self,
-        state: &mut S,
+        state: &mut dyn MiddlewareState,
         output: &peri_agent::agent::react::AgentOutput,
     ) -> AgentResult<peri_agent::agent::react::AgentOutput> {
         // 1. 前面已有 block_continue（如 HookMiddleware stop block）→ 不干预
@@ -99,7 +102,16 @@ impl<S: State> Middleware<S> for GoalMiddleware {
         let round = self.pending_rounds.fetch_add(1, Ordering::Relaxed) + 1;
         let objective = snap.objective.as_deref().unwrap_or("(unknown)");
         let template = Self::render_steering(objective, round);
-        state.add_message(BaseMessage::human(template));
+        // [TRAP] 必须用 Human + <system-reminder> 注入，禁止 BaseMessage::system。
+        // System 消息会被 invoke hoist 到 system prompt 顶部，污染 frozen_system_prompt。
+        // （与 hooks/middleware.rs stop_hook_feedback、compact_v2.rs::re_inject_v2 注入路径一致）
+        // 走 v2 MessageQueue Info kind → Receive 阶段统一消费。
+        let reminder = format!("<system-reminder>\n{}\n</system-reminder>", template);
+        state.v2_queue().push(QueuedMessage::new(
+            MessageKind::Info,
+            MessageSource::GoalSteering,
+            BaseMessage::human(MessageContent::text(reminder)),
+        ));
 
         tracing::debug!(
             objective = %objective,

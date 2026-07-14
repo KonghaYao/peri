@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use peri_agent::{
-    agent::events::AgentEvent as ExecutorEvent,
+    agent::events::ExecutorEvent,
     messages::{BaseMessage, ContentBlock, ToolCallRequest},
 };
 
@@ -56,7 +56,7 @@ impl crate::session::event_sink::EventSink for MockEventSink {
             .push((session_id.to_string(), json));
     }
 
-    async fn push_done(&self, _session_id: &str) {
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {
         *self.push_done_count.lock().unwrap() += 1;
     }
 }

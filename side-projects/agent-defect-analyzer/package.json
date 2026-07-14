@@ -9,7 +9,8 @@
     "feature-adoption": "bun run src/metrics/feature_adoption.ts",
     "edit-quality": "bun run src/metrics/edit_quality.ts",
     "subagent-collab": "bun run src/metrics/subagent_collab.ts",
-    "search-hygiene": "bun run src/metrics/search_hygiene.ts"
+    "search-hygiene": "bun run src/metrics/search_hygiene.ts",
+    "llm-efficiency": "bun run src/metrics/llm_efficiency.ts"
   },
   "dependencies": {
     "chalk": "^5.3.0"

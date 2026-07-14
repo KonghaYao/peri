@@ -126,12 +126,12 @@ impl InputState {
                 let chars: Vec<char> = self.buffer.chars().collect();
                 format!(
                     "{}{}{}{}{}{}",
-                    &chars[..4].iter().collect::<String>(),
+                    chars[..4].iter().collect::<String>(),
                     mask_char,
                     mask_char,
                     mask_char,
                     mask_char,
-                    &chars[w - 4..].iter().collect::<String>()
+                    chars[w - 4..].iter().collect::<String>()
                 )
             }
         } else {

@@ -1,6 +1,10 @@
+// [TRAP] ChannelBroker 不支持 Questions 交互类型
+// 不应与 TUI broker 参与竞速。
+// 详见 spec/global/domains/agent.md#issue_2026-05-29-ask-user-tool-auto-complete
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 use crate::interaction::{
     ApprovalDecision, InteractionContext, InteractionResponse, UserInteractionBroker,
@@ -28,22 +32,24 @@ impl UserInteractionBroker for MultiplexBroker {
         }
 
         // Spawn all brokers in parallel, race via mpsc channel.
-        //
-        // [TRAP] Orphan task 行为：首个 broker 响应后，其他 spawned task 继续后台运行
-        // 直到完成或 ChannelBroker 的 5 分钟超时（channel_broker.rs:101）。
-        // 响应会发送到已无人读取的 mpsc channel，最终随 `tx` drop 而丢弃。
-        // ChannelBroker 自身会在成功/超时两条路径清理 pending_permissions（channel_broker.rs:103-107），
-        // 因此最坏情况是 5 分钟的"幽灵等待"，无永久资源泄漏。
-        // （CS#1 架构审查已确认：影响有限，加注释说明已知行为；未来可加 CancellationToken 提前取消）
+        // 首个响应到达后通过 CancellationToken 提前取消其余 broker。
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
         for (name, broker) in &self.brokers {
             let ctx = ctx.clone();
             let broker = broker.clone();
             let name = name.clone();
             let tx = tx.clone();
+            let cancel_child = cancel.child_token();
             tokio::spawn(async move {
-                let response = broker.request(ctx).await;
-                let _ = tx.send((name, response));
+                tokio::select! {
+                    _ = cancel_child.cancelled() => {
+                        // 被 cancel，不发送响应
+                    }
+                    response = broker.request(ctx) => {
+                        let _ = tx.send((name, response));
+                    }
+                }
             });
         }
         // Drop the original sender so rx.recv() returns None when all spawned tasks are done
@@ -54,7 +60,8 @@ impl UserInteractionBroker for MultiplexBroker {
             .await
             .unwrap_or_else(|| ("error".to_string(), InteractionResponse::Decisions(vec![])));
 
-        // Remaining spawned tasks continue in background; only first responder matters.
+        // 收到首个响应后取消其余 broker
+        cancel.cancel();
         tag_source(response, &source_name)
     }
 }
@@ -79,5 +86,6 @@ fn tag_source(response: InteractionResponse, source: &str) -> InteractionRespons
             InteractionResponse::Decisions(tagged)
         }
         InteractionResponse::Answers(answers) => InteractionResponse::Answers(answers),
+        InteractionResponse::Rejected => InteractionResponse::Rejected,
     }
 }

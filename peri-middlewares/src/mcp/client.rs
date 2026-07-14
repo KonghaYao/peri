@@ -370,7 +370,7 @@ impl McpClientPool {
                     c.name,
                     c.resources
                         .iter()
-                        .map(|r| r.raw.uri.clone())
+                        .map(|r| r.uri.clone())
                         .collect::<Vec<_>>()
                         .join(", "),
                     c.resources.len()

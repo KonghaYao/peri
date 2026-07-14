@@ -4,55 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     messages::BaseMessage,
+    session::MessageQueue,
     thread::{ThreadId, ThreadStore},
 };
 
-/// State trait - 所有 Agent 状态必须实现此 trait
-/// 与 TypeScript BaseAgentStateType 对齐
-pub trait State: Send + Sync + Clone + 'static {
-    fn cwd(&self) -> &str;
-    fn set_cwd(&mut self, cwd: impl Into<String>);
-    fn messages(&self) -> &[BaseMessage];
-    fn add_message(&mut self, message: BaseMessage);
-
-    /// 将消息前插到消息历史开头（系统消息置于最前）
-    fn prepend_message(&mut self, message: BaseMessage);
-
-    fn current_step(&self) -> usize;
-    fn set_current_step(&mut self, step: usize);
-
-    fn get_context(&self, key: &str) -> Option<&str>;
-    fn set_context(&mut self, key: impl Into<String>, value: impl Into<String>);
-
-    fn token_tracker(&self) -> &crate::agent::token::TokenTracker;
-    fn token_tracker_mut(&mut self) -> &mut crate::agent::token::TokenTracker;
-
-    /// 获取消息的可变引用（用于 micro_compact 等原地修改场景）
-    fn messages_mut(&mut self) -> &mut Vec<BaseMessage>;
-
-    /// Push a recall item into the session's recall buffer.
-    fn push_recall(&mut self, item: String);
-
-    /// Drain all recall items (one-time consumption).
-    fn drain_recall(&mut self) -> Vec<String>;
-
-    /// messages[..ancestor_len] = 只读祖先消息（compact 边界）
-    fn ancestor_len(&self) -> usize {
-        0
-    }
-
-    /// 持久化后端（compact 后 invalidate cache 用）
-    fn store(&self) -> Option<&Arc<dyn ThreadStore>> {
-        None
-    }
-
-    /// 持久化目标 thread id（compact 后 invalidate cache 用）
-    fn own_thread_id(&self) -> Option<&ThreadId> {
-        None
-    }
-}
-
 /// 基础 Agent 状态（与 TypeScript BaseAgentStateType 对齐）
+///
+/// middleware_runner 通过 `MiddlewareState` trait 桥接 v2 stages ↔ 钩子，
+/// `AgentState` 直接 impl `MiddlewareState`（不再经过 `State` trait 中间层）。
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct AgentState {
     pub cwd: String,
@@ -71,6 +30,9 @@ pub struct AgentState {
     /// 避免 tokio::spawn 的 fire-and-forget 模式因 .await 让步导致乱序。
     #[serde(skip)]
     persist_tx: Option<Arc<tokio::sync::mpsc::UnboundedSender<BaseMessage>>>,
+    /// 持久化 writer task 的 AbortHandle（用于 shutdown 时取消 + 检测 panic）
+    #[serde(skip)]
+    persist_handle: Option<tokio::task::AbortHandle>,
     /// 会话级 recall 缓冲区：收集运行时事件通知，executor 在构建用户消息前 drain 消费。
     /// 不随 session 持久化，仅存活于当前会话生命周期内。
     #[serde(skip)]
@@ -78,6 +40,15 @@ pub struct AgentState {
     /// messages[..ancestor_len] = 只读祖先消息（compact 边界标记）
     #[serde(skip)]
     ancestor_len: usize,
+    /// v2 MessageQueue 句柄——middleware（goal steering / stop-hook feedback）
+    /// 通过它向 session 级共享收件箱 push 异步消息。
+    ///
+    /// **共享语义**：`MessageQueue` 内部用 `Arc<Mutex<VecDeque>> + Arc<Notify>`，
+    /// clone 共享底层数据。`AgentState::new` 或 `AgentContext::from_stage` 构造时
+    /// 传入 `ctx.queue.clone()`，因此 middleware push 的消息直接进入 v2 queue，
+    /// Receive / End 阶段统一消费。
+    #[serde(skip)]
+    pub v2_queue: MessageQueue,
 }
 
 impl std::fmt::Debug for AgentState {
@@ -135,7 +106,7 @@ impl AgentState {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BaseMessage>();
         self.persist_tx = Some(Arc::new(tx));
         let tid = self.thread_id.clone().unwrap();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut processed: u64 = 0;
             let mut last_warn_at: u64 = 0;
             while let Some(msg) = rx.recv().await {
@@ -155,6 +126,7 @@ impl AgentState {
                 }
             }
         });
+        self.persist_handle = Some(handle.abort_handle());
         self
     }
 
@@ -192,39 +164,19 @@ impl AgentState {
         self
     }
 
-    /// messages[..ancestor_len] = 只读祖先消息
-    pub fn ancestor_len(&self) -> usize {
-        self.ancestor_len
-    }
-
-    pub fn with_ancestor_len(mut self, len: usize) -> Self {
-        self.ancestor_len = len;
-        self
-    }
-
-    pub fn store(&self) -> Option<&Arc<dyn ThreadStore>> {
-        self.store.as_ref()
-    }
-
-    pub fn own_thread_id(&self) -> Option<&ThreadId> {
-        self.thread_id.as_ref()
-    }
-}
-
-impl State for AgentState {
-    fn cwd(&self) -> &str {
+    pub fn cwd(&self) -> &str {
         &self.cwd
     }
 
-    fn set_cwd(&mut self, cwd: impl Into<String>) {
+    pub fn set_cwd(&mut self, cwd: impl Into<String>) {
         self.cwd = cwd.into();
     }
 
-    fn messages(&self) -> &[BaseMessage] {
+    pub fn messages(&self) -> &[BaseMessage] {
         &self.messages
     }
 
-    fn add_message(&mut self, message: BaseMessage) {
+    pub fn add_message(&mut self, message: BaseMessage) {
         // 有序持久化：通过通道发送到专用 writer 任务，保证写入顺序
         if let Some(ref tx) = self.persist_tx {
             if let Err(e) = tx.send(message.clone()) {
@@ -243,55 +195,71 @@ impl State for AgentState {
         }
     }
 
-    fn prepend_message(&mut self, message: BaseMessage) {
+    pub fn prepend_message(&mut self, message: BaseMessage) {
         self.messages.insert(0, message);
     }
 
-    fn current_step(&self) -> usize {
-        self.current_step
-    }
-
-    fn set_current_step(&mut self, step: usize) {
-        self.current_step = step;
-    }
-
-    fn get_context(&self, key: &str) -> Option<&str> {
-        self.context.get(key).map(|s| s.as_str())
-    }
-
-    fn set_context(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.context.insert(key.into(), value.into());
-    }
-
-    fn token_tracker(&self) -> &crate::agent::token::TokenTracker {
-        &self.token_tracker
-    }
-    fn token_tracker_mut(&mut self) -> &mut crate::agent::token::TokenTracker {
-        &mut self.token_tracker
-    }
-
-    fn messages_mut(&mut self) -> &mut Vec<BaseMessage> {
+    pub fn messages_mut(&mut self) -> &mut Vec<BaseMessage> {
         &mut self.messages
     }
 
-    fn push_recall(&mut self, item: String) {
+    pub fn current_step(&self) -> usize {
+        self.current_step
+    }
+
+    pub fn set_current_step(&mut self, step: usize) {
+        self.current_step = step;
+    }
+
+    pub fn token_tracker(&self) -> &crate::agent::token::TokenTracker {
+        &self.token_tracker
+    }
+
+    pub fn token_tracker_mut(&mut self) -> &mut crate::agent::token::TokenTracker {
+        &mut self.token_tracker
+    }
+
+    pub fn push_recall(&mut self, item: String) {
         self.recall_buffer.push(item);
     }
 
-    fn drain_recall(&mut self) -> Vec<String> {
+    pub fn drain_recall(&mut self) -> Vec<String> {
         std::mem::take(&mut self.recall_buffer)
     }
 
-    fn ancestor_len(&self) -> usize {
+    /// messages[..ancestor_len] = 只读祖先消息
+    pub fn ancestor_len(&self) -> usize {
         self.ancestor_len
     }
 
-    fn store(&self) -> Option<&Arc<dyn ThreadStore>> {
+    pub fn with_ancestor_len(mut self, len: usize) -> Self {
+        self.ancestor_len = len;
+        self
+    }
+
+    pub fn store(&self) -> Option<&Arc<dyn ThreadStore>> {
         self.store.as_ref()
     }
 
-    fn own_thread_id(&self) -> Option<&ThreadId> {
+    pub fn own_thread_id(&self) -> Option<&ThreadId> {
         self.thread_id.as_ref()
+    }
+
+    /// v2 MessageQueue 句柄（共享 session 级实例）
+    pub fn v2_queue(&self) -> &MessageQueue {
+        &self.v2_queue
+    }
+
+    /// 优雅关闭持久化 writer task
+    pub fn shutdown_persistence(&self) {
+        if let Some(ref handle) = self.persist_handle {
+            handle.abort();
+        }
+    }
+
+    /// 标记已关闭，后续 add_message 不再入队
+    pub fn is_persistence_shutdown(&self) -> bool {
+        self.persist_handle.as_ref().is_none_or(|h| h.is_finished())
     }
 }
 

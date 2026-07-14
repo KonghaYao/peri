@@ -254,6 +254,63 @@ impl ThreadStore for FilesystemThreadStore {
     ) -> Result<()> {
         Ok(())
     }
+
+    async fn update_message_flags(
+        &self,
+        _message_id: &crate::messages::MessageId,
+        _truncated: bool,
+        _excluded: bool,
+    ) -> Result<()> {
+        // FilesystemThreadStore 仅用于测试，未持久化 truncated/excluded 标记
+        // （JSONL 行为纯 BaseMessage，无 flags envelope）。
+        // 生产路径走 SqliteThreadStore（独立 truncated/excluded 列）。
+        // 此处保留 no-op 以满足 ThreadStore 契约；测试若需断言标记落库请改用
+        // in-memory SqliteThreadStore。
+        Ok(())
+    }
+
+    async fn delete_messages_since(
+        &self,
+        thread_id: &ThreadId,
+        message_id: &crate::messages::MessageId,
+    ) -> Result<()> {
+        // 重写 messages.jsonl：保留 message_id 所在位置（含）之前所有行。
+        let path = self.messages_path(thread_id);
+        if !path.exists() {
+            return Ok(());
+        }
+        let raw = fs::read_to_string(&path).await?;
+        let mut kept: Vec<String> = Vec::new();
+        let mut found = false;
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            kept.push(line.to_string());
+            if let Ok(msg) = serde_json::from_str::<BaseMessage>(trimmed) {
+                if msg.id() == *message_id {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            // 目标 message_id 不存在，按 ThreadStore trait 默认契约不执行任何操作
+            return Ok(());
+        }
+        let mut file = tokio::fs::File::create(&path).await?;
+        for line in &kept {
+            file.write_all(line.as_bytes()).await?;
+            file.write_all(b"\n").await?;
+        }
+        file.flush().await?;
+        // 同步 meta 的 message_count
+        let mut meta = self.load_meta(thread_id).await?;
+        meta.message_count = kept.len();
+        meta.updated_at = Utc::now();
+        self.update_meta(thread_id, meta).await
+    }
 }
 
 /// 从消息列表中提取标题（取第一条 Human 消息的前 50 字符）

@@ -1,3 +1,23 @@
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use async_trait::async_trait;
+use peri_agent::thread::ThreadStore;
+use peri_agent::{
+    agent::{events::AgentEventHandler, react::ReactLLM, AgentCancellationToken},
+    error::AgentResult,
+    messages::BaseMessage,
+    middleware::{r#trait::Middleware, state::MiddlewareState},
+    tools::BaseTool,
+};
+
+use crate::{
+    agent_define::AgentOverrides, claude_agent_parser::ClaudeAgentFrontmatter, parse_agent_file,
+    tools::BoxToolWrapper,
+};
+
 mod agent_result;
 mod background;
 mod built_in_agents;
@@ -5,8 +25,12 @@ mod fork;
 mod skill_preload;
 pub mod spawner;
 mod tool;
+pub mod v2_bridge;
 pub use agent_result::AgentResultTool;
-pub use background::{BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus};
+pub use background::{
+    BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle, BgRegistryEvent,
+    BgTaskInfo, BgTaskKind,
+};
 pub use built_in_agents::{
     built_in_agent_types, get_built_in_agent, list_built_in_agents, BuiltInAgent,
 };
@@ -16,11 +40,26 @@ pub use skill_preload::SkillPreloadMiddleware;
 pub use spawner::{spawn_background_fork, BgForkConfig, BgForkDirectiveKind, BgForkSpawned};
 pub use tool::SubAgentTool;
 
+/// 从 session transcript 统计 subagent 实际执行的工具调用次数。
+///
+/// 遍历 `visible_messages()` 中所有 `BaseMessage::Tool` 条目——每条对应一次
+/// 工具执行（含成功和失败）。与 `extract_last_ai_text` 模式一致：都从
+/// `session.transcript()` 读取完整消息历史。
+pub(crate) fn count_tool_calls_from_session(session: &Arc<peri_agent::session::Session>) -> usize {
+    use peri_agent::messages::BaseMessage;
+    let transcript = session.transcript();
+    let tx = transcript.read();
+    tx.visible_messages()
+        .iter()
+        .filter(|m| matches!(m, BaseMessage::Tool { .. }))
+        .count()
+}
+
 /// SubAgent 中间件链构造配置
 ///
 /// 中间件链顺序固定: AgentsMd -> Skills -> [SkillPreload] -> Todo
 /// 仅 `skill_names` 在不同执行路径间变化
-pub(crate) struct SubAgentMiddlewareConfig {
+pub struct SubAgentMiddlewareConfig {
     /// 需要预加载的 skill 名称列表，为空时跳过 SkillPreloadMiddleware
     pub skill_names: Vec<String>,
     /// 工作目录，用于解析 skill 文件路径
@@ -75,25 +114,6 @@ impl SubAgentMiddlewareConfig {
         self
     }
 }
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
-
-use async_trait::async_trait;
-use peri_agent::thread::ThreadStore;
-use peri_agent::{
-    agent::{events::AgentEventHandler, react::ReactLLM, state::State, AgentCancellationToken},
-    error::AgentResult,
-    messages::BaseMessage,
-    middleware::r#trait::Middleware,
-    tools::BaseTool,
-};
-
-use crate::{
-    agent_define::AgentOverrides, claude_agent_parser::ClaudeAgentFrontmatter, parse_agent_file,
-    tools::BoxToolWrapper,
-};
 
 /// SubAgentMiddleware - injects `Agent` tool into the parent agent
 ///
@@ -115,7 +135,7 @@ use crate::{
 /// });
 /// let middleware = SubAgentMiddleware::new(parent_tools, Some(event_handler), llm_factory)
 ///     .with_system_builder(system_builder);
-/// let agent = ReActAgent::new(llm).add_middleware(Box::new(middleware));
+/// // 注册到 middleware chain，由 v2 stages 自动 collect_tools 收集 SubAgentTool
 /// ```
 pub struct SubAgentMiddleware {
     /// Parent agent tool set (Arc shared, passed to child agent for use)
@@ -145,7 +165,7 @@ pub struct SubAgentMiddleware {
     child_handler_factory: Option<Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>>,
     /// 后台任务完成事件的���立发送通道（不随 executor 生命周期销毁）
     bg_event_sender:
-        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::AgentEvent>>,
+        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>>,
     /// Thread persistence store for child threads
     thread_store: Option<Arc<dyn ThreadStore>>,
     /// Parent thread ID for child thread hierarchy
@@ -162,6 +182,9 @@ pub struct SubAgentMiddleware {
     frozen_claude_local_md: Option<Arc<String>>,
     /// Frozen skills summary
     frozen_skill_summary: Option<Arc<String>>,
+    /// bg 完成时的同步回调
+    on_bg_complete:
+        Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
 }
 
 impl SubAgentMiddleware {
@@ -193,6 +216,7 @@ impl SubAgentMiddleware {
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
+            on_bg_complete: None,
         }
     }
 
@@ -251,9 +275,19 @@ impl SubAgentMiddleware {
     /// even after the main agent finishes.
     pub fn with_bg_event_sender(
         mut self,
-        sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::AgentEvent>,
+        sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>,
     ) -> Self {
         self.bg_event_sender = Some(sender);
+        self
+    }
+
+    /// 设置 bg 完成时的同步回调。
+    /// 在 registry.complete() 之前调用，用于同步推入 Defer 到 MQ。
+    pub fn with_on_bg_complete(
+        mut self,
+        cb: Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>,
+    ) -> Self {
+        self.on_bg_complete = Some(cb);
         self
     }
 
@@ -342,6 +376,9 @@ impl SubAgentMiddleware {
         }
         if let Some(ref deregister) = self.deregister_runtime {
             tool = tool.with_deregister_runtime(Arc::clone(deregister));
+        }
+        if let Some(ref cb) = self.on_bg_complete {
+            tool = tool.with_on_bg_complete(Arc::clone(cb));
         }
         // [TRAP] 透传 frozen 数据到 SubAgentTool，避免每轮 build_tool clone 大字符串。
         // Arc::clone 廉价，spawn 时再提取为 String 注入 SubAgentMiddlewareConfig。
@@ -645,7 +682,7 @@ pub fn scan_agents_detailed(
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for SubAgentMiddleware {
+impl Middleware for SubAgentMiddleware {
     fn name(&self) -> &str {
         "SubAgentMiddleware"
     }
@@ -658,7 +695,7 @@ impl<S: State> Middleware<S> for SubAgentMiddleware {
         tools
     }
 
-    async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // Snapshot current state.messages to shared reference for Fork child agent inheritance
         if let Some(ref pm) = self.parent_messages {
             *pm.write() = state.messages().to_vec();

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::tools::BaseTool;
-use rmcp::model::{Content, Tool};
+use rmcp::model::{ContentBlock, Tool};
 use thiserror::Error;
 
 use super::client::{McpClientHandle, McpClientPool};
@@ -93,6 +93,10 @@ impl BaseTool for McpToolBridge {
         self.input_schema.clone()
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         input: serde_json::Value,
@@ -169,29 +173,31 @@ impl BaseTool for McpToolBridge {
 }
 
 /// 将 content 列表格式化为纯文本字符串
-fn format_contents(contents: &[Content]) -> String {
+fn format_contents(contents: &[ContentBlock]) -> String {
     let mut parts = Vec::new();
     for content in contents {
-        match &content.raw {
-            rmcp::model::RawContent::Text(text_content) => {
+        match content {
+            rmcp::model::ContentBlock::Text(text_content) => {
                 parts.push(text_content.text.clone());
             }
-            rmcp::model::RawContent::Image(image_content) => {
+            rmcp::model::ContentBlock::Image(image_content) => {
                 parts.push(format!("[image: {}]", image_content.mime_type));
             }
-            rmcp::model::RawContent::Resource(resource_content) => {
-                let uri = match &resource_content.resource {
+            rmcp::model::ContentBlock::Resource(embedded) => {
+                let uri = match &embedded.resource {
                     rmcp::model::ResourceContents::TextResourceContents { uri, .. } => uri.clone(),
                     rmcp::model::ResourceContents::BlobResourceContents { uri, .. } => uri.clone(),
+                    _ => "unknown".to_string(),
                 };
                 parts.push(format!("[resource: {}]", uri));
             }
-            rmcp::model::RawContent::Audio(audio_content) => {
+            rmcp::model::ContentBlock::Audio(audio_content) => {
                 parts.push(format!("[audio: {}]", audio_content.mime_type));
             }
-            rmcp::model::RawContent::ResourceLink(link) => {
+            rmcp::model::ContentBlock::ResourceLink(link) => {
                 parts.push(format!("[resource_link: {}]", link.uri));
             }
+            _ => {}
         }
     }
     parts.join("\n")

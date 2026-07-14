@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use peri_agent::{
-    agent::events::{AgentEvent as ExecutorEvent, CompactFileInfo},
+    agent::events::{CompactFileInfo, CompactStrategy, CompactTrigger, ExecutorEvent},
     messages::BaseMessage,
 };
 
@@ -45,7 +45,13 @@ pub async fn emit_compact_error(
 pub async fn emit_compact_started(sink: &Arc<dyn EventSink>, session_id: &str) {
     sink.push_event(
         session_id,
-        &ExecutorEvent::CompactStarted,
+        &ExecutorEvent::CompactStarted {
+            turn_id: String::new(),
+            agent_id: String::new(),
+            step: 0,
+            strategy: CompactStrategy::Smart,
+            trigger: CompactTrigger::Auto,
+        },
         COMPACT_CONTEXT_WINDOW,
     )
     .await;
@@ -73,6 +79,9 @@ pub async fn emit_compact_completed(
             skills,
             micro_cleared,
             messages,
+            token_before: 0,
+            token_after: 0,
+            strategy: CompactStrategy::Smart,
         },
         COMPACT_CONTEXT_WINDOW,
     )

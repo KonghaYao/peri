@@ -79,6 +79,10 @@ impl BaseTool for McpResourceTool {
         &self.cached_description
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         input: serde_json::Value,
@@ -147,6 +151,7 @@ impl BaseTool for McpResourceTool {
                             output.push(format!("[blob/{}]", mime));
                             output.push(format!("<{} bytes of binary data>", blob.len()));
                         }
+                        _ => {}
                     }
                 }
                 let formatted = output.join("\n");

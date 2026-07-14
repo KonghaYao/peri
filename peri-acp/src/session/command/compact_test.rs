@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use peri_agent::{
-    agent::events::AgentEvent as ExecutorEvent,
+    agent::events::ExecutorEvent,
     error::AgentResult,
     llm::{
         types::{LlmRequest, LlmResponse, StopReason},
@@ -61,7 +61,7 @@ impl crate::session::event_sink::EventSink for MockEventSink {
             .push((session_id.to_string(), json));
     }
 
-    async fn push_done(&self, _session_id: &str) {
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {
         *self.push_done_count.lock().unwrap() += 1;
     }
 }
@@ -122,10 +122,9 @@ fn make_ctx_with_model(
 }
 
 // ── extract_file_info 测试 ───────────────────────────────────────────
-// 注意：extract_file_info / extract_skill_names 来自 peri-agent crate，
-// 通过 `use super::*` 间接可见（super::pipeline 重导出？否）。
-// 这里显式引用 peri_agent::agent::compact 以保持独立可读。
-use peri_agent::agent::compact::{extract_file_info, extract_skill_names};
+// 注意：[v2] extract_file_info / extract_skill_names 已迁移到 peri_agent::agent::compact_v2，
+// 通过 `use super::*` 间接可见。这里显式引用以保持独立可读。
+use peri_agent::agent::compact_v2::{extract_file_info, extract_skill_names};
 
 #[test]
 fn test_extract_file_info_single_file() {
@@ -524,15 +523,19 @@ async fn test_contract_compact_output_structure_human_then_system_only() {
     // Act
     let result = cmd.execute(ctx).await;
 
-    // Assert: 结构契约 — 首条 Human，其后只能是 System
+    // Assert: 结构契约 — 首条 Human（摘要），其后只能是 Human（re-inject 文件/Skills）
+    //
+    // [v2] re-inject 消息从 v1 `BaseMessage::system(...)` 改为 `BaseMessage::human(...)`，
+    // 避免 invoke.rs hoist 污染 frozen_system_prompt（CLAUDE.md [TRAP]）。
+    // 测试 contract 同步更新——首条 Human 后只能 Human（不再有 System）。
     assert!(
         matches!(result.messages[0], BaseMessage::Human { .. }),
         "首条必须为 Human"
     );
     for (i, msg) in result.messages.iter().enumerate().skip(1) {
         assert!(
-            matches!(msg, BaseMessage::System { .. }),
-            "compact 输出索引 {} 必须为 System（文件/Skills），实际: {:?}",
+            matches!(msg, BaseMessage::Human { .. }),
+            "compact 输出索引 {} 必须为 Human（v2 re-inject 避免 hoist），实际: {:?}",
             i,
             msg
         );

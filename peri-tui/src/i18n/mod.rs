@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use fluent::FluentResource;
@@ -5,6 +6,44 @@ use fluent_bundle::{FluentArgs, FluentBundle, FluentValue};
 
 const EN_FTL: &str = include_str!("../../locales/en/main.ftl");
 const ZH_CN_FTL: &str = include_str!("../../locales/zh-CN/main.ftl");
+
+thread_local! {
+    static LC: RefCell<LcRegistry> = RefCell::new(LcRegistry::new(None));
+}
+
+// ---------------------------------------------------------------------------
+// 公开 API——组件中直接调用
+// ---------------------------------------------------------------------------
+
+/// 初始化 thread_local LcRegistry（entry.rs 启动时调用一次）。
+pub fn init(lang: Option<&str>) {
+    LC.with(|lc| *lc.borrow_mut() = LcRegistry::new(lang));
+}
+
+/// 切换语言并递增 LANG_VERSION，触发所有订阅组件重渲染。
+pub fn switch(lang: &str) {
+    LC.with(|lc| {
+        if let Err(e) = lc.borrow_mut().switch(lang) {
+            tracing::warn!("i18n switch failed: {e}");
+        }
+    });
+    crate::kit::atoms::LANG_VERSION.set(crate::kit::atoms::LANG_VERSION.get().wrapping_add(1));
+}
+
+/// 翻译 key（无参数）。
+/// 组件需先 `hooks.use_atom(&LANG_VERSION)` 订阅以实现语言切换时自动重渲染。
+pub fn tr(key: &str) -> String {
+    LC.with(|lc| lc.borrow().tr(key))
+}
+
+/// 翻译 key（带参数）。
+pub fn tr_args(key: &str, args: &[(String, FluentValue<'_>)]) -> String {
+    LC.with(|lc| lc.borrow().tr_args(key, args))
+}
+
+// ---------------------------------------------------------------------------
+// LcRegistry
+// ---------------------------------------------------------------------------
 
 pub struct LcRegistry {
     current_lang: String,
@@ -63,10 +102,10 @@ impl LcRegistry {
         if let Some(value) = self.format_in_bundle(&self.current_lang, key, args) {
             return value;
         }
-        if self.current_lang != "en" {
-            if let Some(value) = self.format_in_bundle("en", key, args) {
-                return value;
-            }
+        if self.current_lang != "en"
+            && let Some(value) = self.format_in_bundle("en", key, args)
+        {
+            return value;
         }
         key.to_string()
     }

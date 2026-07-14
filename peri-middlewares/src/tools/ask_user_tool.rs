@@ -91,6 +91,10 @@ impl BaseTool for AskUserTool {
         ask_user_tool_definition().parameters
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         input: Value,
@@ -121,6 +125,12 @@ impl BaseTool for AskUserTool {
                     })
                     .collect();
                 Ok(parts.join("\n\n"))
+            }
+            InteractionResponse::Rejected => {
+                Err(Box::new(peri_agent::error::AgentError::ToolRejected {
+                    tool: "AskUserQuestion".to_string(),
+                    reason: "用户拒绝回答".to_string(),
+                }))
             }
             _ => Err("ask_user_question: unexpected response type".into()),
         }

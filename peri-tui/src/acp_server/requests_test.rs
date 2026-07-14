@@ -5,7 +5,7 @@ use peri_acp::provider::{PeriConfig, ProviderConfig, ProviderModels};
 use peri_acp::transport::types::{AcpError, IncomingMessage, RequestId};
 use peri_agent::thread::FilesystemThreadStore;
 use peri_middlewares::hitl::shared_mode::{PermissionMode, SharedPermissionMode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::*;
 use crate::app::agent::LlmProvider;
@@ -80,6 +80,7 @@ fn make_server_config(
         plugin_skill_roots: Vec::new(),
         plugin_agent_dirs: Vec::new(),
         plugin_hooks: Vec::new(),
+        plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
         plugin_lsp_servers: Vec::new(),
         tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),

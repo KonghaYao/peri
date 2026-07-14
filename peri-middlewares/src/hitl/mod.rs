@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::{
-    agent::{react::ToolCall, state::State},
+    agent::react::ToolCall,
     error::{AgentError, AgentResult},
     interaction::{
         ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse,
         UserInteractionBroker,
     },
-    middleware::r#trait::Middleware,
+    middleware::{r#trait::Middleware, state::MiddlewareState},
 };
 
 use crate::tool_search::core_tools::{
@@ -383,7 +383,7 @@ impl HumanInTheLoopMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for HumanInTheLoopMiddleware {
+impl Middleware for HumanInTheLoopMiddleware {
     fn name(&self) -> &str {
         "HumanInTheLoopMiddleware"
     }
@@ -392,13 +392,17 @@ impl<S: State> Middleware<S> for HumanInTheLoopMiddleware {
     /// 通过 broker 弹出一个 [多工具审批] 弹窗，避免逐个弹窗打断用户。
     async fn before_tools_batch(
         &self,
-        _state: &mut S,
+        _state: &mut dyn MiddlewareState,
         calls: &[ToolCall],
     ) -> Vec<AgentResult<ToolCall>> {
         self.process_batch(calls).await
     }
 
-    async fn before_tool(&self, _state: &mut S, tool_call: &ToolCall) -> AgentResult<ToolCall> {
+    async fn before_tool(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        tool_call: &ToolCall,
+    ) -> AgentResult<ToolCall> {
         // 1. 非敏感工具 → 所有模式都放行
         if !(self.requires_approval)(&effective_tool_name(&tool_call.name, &tool_call.input)) {
             return Ok(tool_call.clone());

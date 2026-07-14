@@ -1,14 +1,13 @@
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
-use peri_agent::interaction::ChannelState;
 use peri_middlewares::{
     mcp::{McpClientPool, McpInitStatus},
     plugin::PluginLoadResult,
     prelude::SharedPermissionMode,
 };
 
-use super::{cron_state::CronState, events::AgentEvent};
+use super::cron_state::CronState;
 use crate::{config::PeriConfig, thread::ThreadStore};
 
 /// `ServiceRegistry` 中共享的配置类型：单一来源（Single Source of Truth）。
@@ -27,6 +26,12 @@ pub struct ProcessResourceMonitor {
     memory_mb: u64,
     /// 缓存的 CPU 占用百分比（0.0-100.0，单核；可超过 100 表示多核）
     cpu_percent: f32,
+}
+
+impl Default for ProcessResourceMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProcessResourceMonitor {
@@ -66,28 +71,22 @@ impl ProcessResourceMonitor {
 }
 
 /// 全局服务/状态聚合：跨 session 共享的服务字段。
+///
+/// (I17-D) 大幅瘦身：model_name / config_path_override /
+/// claude_settings_override / lc / panic_notify_rx / acp_session_manager
+/// 6 字段退役——前者 service_snapshot 派生不需要，中两者仅 mod.rs 设为 None
+/// 无任何读写，lc 无 services.lc 访问，后两者 launch 写入后无消费者。
 pub struct ServiceRegistry {
     /// 共享配置：TUI 与 ACP Server 持有同一 `Arc`，写入即时传播。
     pub peri_config: SharedPeriConfig,
     pub cwd: String,
     pub provider_name: String,
-    pub model_name: String,
     pub permission_mode: Arc<SharedPermissionMode>,
     pub thread_store: Arc<dyn ThreadStore>,
     pub mcp_pool: Option<Arc<McpClientPool>>,
     pub mcp_init_rx: Option<tokio::sync::watch::Receiver<McpInitStatus>>,
     pub cron: CronState,
     pub plugin_data: Option<PluginLoadResult>,
-    pub bg_event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
-    pub bg_event_rx: Option<tokio::sync::mpsc::Receiver<AgentEvent>>,
-    pub config_path_override: Option<PathBuf>,
-    pub claude_settings_override: Option<PathBuf>,
     /// 进程内存监控（2s 刷新）
     pub resource_monitor: parking_lot::Mutex<ProcessResourceMonitor>,
-    /// i18n 语言注册表（跨 session 共享）
-    pub lc: crate::i18n::LcRegistry,
-    /// Channel 共享状态（MCP handler ↔ TUI/broker 桥接）
-    pub channel_state: Option<Arc<ChannelState>>,
-    /// panic hook 通知 receiver（TUI 模式专用，由 main.rs init_panic_notify 初始化）
-    pub panic_notify_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
 }

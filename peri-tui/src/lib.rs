@@ -15,13 +15,12 @@ pub mod acp_client;
 pub mod acp_server;
 pub mod alloc_config;
 pub mod app;
-pub mod command;
 pub mod config;
-pub mod event;
 pub mod i18n;
+pub mod kit;
+pub mod launch;
 pub mod sync;
 pub mod thread;
-pub mod ui;
 pub mod update;
 
 #[cfg(test)]

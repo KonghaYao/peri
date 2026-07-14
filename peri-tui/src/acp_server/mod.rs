@@ -25,7 +25,7 @@ mod prompt;
 mod requests;
 
 pub(crate) use notify::{extract_session_id, handle_notification, send_session_info_update};
-pub(crate) use prompt::execute_prompt;
+pub(crate) use prompt::run_prompt;
 pub(crate) use requests::handle_request;
 
 // ── Session state ────────────────────────────────────────────────────────────
@@ -43,6 +43,8 @@ pub(crate) struct SessionState {
     pub(crate) recall_items: Vec<String>,
     /// Session-scoped agent component pool for reusing heavy objects across prompts.
     pub(crate) agent_pool: peri_acp::session::agent_pool::AgentPool,
+    /// Session 级 WorkflowMiddleware（session/new 时创建，跨 turn 复用）。
+    pub(crate) workflow_middleware: Option<Arc<peri_middlewares::workflow::WorkflowMiddleware>>,
 }
 
 // ── Server config ────────────────────────────────────────────────────────────
@@ -58,6 +60,7 @@ pub struct AcpServerConfig {
     pub plugin_skill_roots: Vec<peri_middlewares::skills::SkillRoot>,
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
     pub plugin_hooks: Vec<peri_middlewares::hooks::RegisteredHook>,
+    pub plugin_loaded: Vec<peri_middlewares::plugin::LoadedPlugin>,
     pub hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>>,
     pub plugin_lsp_servers: Vec<peri_lsp::config::LspServerConfig>,
     pub tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
@@ -70,7 +73,7 @@ pub struct AcpServerConfig {
     ///
     /// TUI 本地仍维护 SessionState（history/frozen/agent_pool 等），但 SubAgent
     /// 注册/注销与 goal_state 通过 SessionManager 中的 AcpSession 记录管理，
-    /// 保证 `execute_prompt` 接收 `Some(session_manager)` 时 cascade cancel 生效。
+    /// 保证 `run_session_loop` 接收 `Some(session_manager)` 时 cascade cancel 生效。
     pub session_manager: peri_acp::session::SessionManager,
 }
 
@@ -106,6 +109,7 @@ pub async fn run_acp_server(
                     let cron_scheduler = cfg.cron_scheduler.clone();
                     let plugin_skill_roots = cfg.plugin_skill_roots.clone();
                     let plugin_agent_dirs = cfg.plugin_agent_dirs.clone();
+                    let plugin_loaded = cfg.plugin_loaded.clone();
                     let hook_groups = cfg.hook_groups.clone();
                     let mcp_pool = cfg.mcp_pool.clone();
                     let channel_state = cfg.channel_state.clone();
@@ -145,7 +149,7 @@ pub async fn run_acp_server(
                         // Serialize prompts per session: wait for any in-flight prompt to finish
                         // so that state.history is up-to-date when this prompt reads it.
                         let _guard = prompt_lock.lock().await;
-                        let result = execute_prompt(
+                        let result = run_prompt(
                             params,
                             &sessions,
                             &provider,
@@ -154,6 +158,7 @@ pub async fn run_acp_server(
                             cron_scheduler,
                             &plugin_skill_roots,
                             &plugin_agent_dirs,
+                            &plugin_loaded,
                             &hook_groups,
                             mcp_pool,
                             channel_state,
@@ -210,7 +215,7 @@ pub async fn run_acp_server(
                                 tracing::debug!("Prediction: LLM provider ready");
 
                                 // Facade：agent 构建与执行统一由 peri-acp executor 承担，
-                                // TUI 层不再直接构建 ReActAgent（遵守 CLAUDE.md [TRAP]）。
+                                // TUI 层不再直接构建 Agent（遵守 CLAUDE.md [TRAP]）。
                                 let result = peri_acp::session::executor::execute_prediction(
                                     llm_provider,
                                     recent,

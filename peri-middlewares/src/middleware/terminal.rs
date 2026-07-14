@@ -1,10 +1,17 @@
 use std::process::Stdio;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_agent::{agent::state::State, middleware::r#trait::Middleware, tools::BaseTool};
+use peri_agent::{
+    agent::events::BackgroundTaskResult, middleware::r#trait::Middleware, tools::BaseTool,
+};
 use serde_json::Value;
 use tokio::time::{timeout, Duration};
+use tracing::warn;
 
+use crate::subagent::{
+    BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
+};
 use crate::tools::output_persist::persist_truncated_output;
 use crate::tools::output_truncate::truncate_bytes;
 
@@ -37,11 +44,21 @@ Output handling:
 - Both stdout and stderr are captured"#;
 pub struct BashTool {
     pub cwd: String,
+    /// 后台任务注册表（用于 run_in_background 模式）
+    pub bg_registry: Option<Arc<BackgroundTaskRegistry>>,
 }
 
 impl BashTool {
     pub fn new(cwd: impl Into<String>) -> Self {
-        Self { cwd: cwd.into() }
+        Self {
+            cwd: cwd.into(),
+            bg_registry: None,
+        }
+    }
+
+    pub fn with_registry(mut self, registry: Arc<BackgroundTaskRegistry>) -> Self {
+        self.bg_registry = Some(registry);
+        self
     }
 }
 
@@ -116,10 +133,18 @@ impl BaseTool for BashTool {
                 "timeout": {
                     "type": "number",
                     "description": "Optional timeout in milliseconds (default 120000, max 600000). If the command takes longer than this, it will be killed and a timeout error returned"
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "If true, runs the command in the background and returns immediately with a task_id. Use for long-running servers (dev server, watcher, etc.). The task can be monitored in the Tasks panel."
                 }
             },
             "required": ["command"]
         })
+    }
+
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
     }
 
     async fn invoke(
@@ -131,6 +156,150 @@ impl BaseTool for BashTool {
             .as_str()
             .ok_or("Missing command parameter")?;
 
+        // ── 后台执行路径 ──
+        let run_in_background = input["run_in_background"].as_bool().unwrap_or(false);
+        if run_in_background {
+            let registry = self.bg_registry.as_ref().ok_or(
+                "run_in_background is not available: no background task registry configured",
+            )?;
+
+            let count = registry.count_by_kind(BgTaskKind::Shell);
+            if count >= BackgroundTaskRegistry::SHELL_LIMIT {
+                return Err(format!(
+                    "已达到 shell 后台任务并发上限 ({}/{})，请等待现有任务完成",
+                    count,
+                    BackgroundTaskRegistry::SHELL_LIMIT
+                )
+                .into());
+            }
+
+            let task_id = format!(
+                "shell-{}",
+                uuid::Uuid::now_v7()
+                    .to_string()
+                    .chars()
+                    .take(8)
+                    .collect::<String>()
+            );
+            let command_owned = command.to_string();
+            let cwd = self.cwd.clone();
+            let registry_clone = Arc::clone(registry);
+            let task_id_clone = task_id.clone();
+
+            tokio::spawn(async move {
+                let started = std::time::Instant::now();
+                let mut cmd = crate::process::shell_command(&command_owned, &[]);
+                cmd.current_dir(&cwd)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true);
+                #[cfg(unix)]
+                cmd.process_group(0);
+
+                let child = cmd.spawn();
+                let child = match child {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _task_id = task_id_clone.clone();
+                        let result = BackgroundTaskResult {
+                            task_id: task_id_clone.clone(),
+                            agent_name: "bg-shell".to_string(),
+                            prompt_summary: command_owned.chars().take(80).collect(),
+                            success: false,
+                            output: format!("Failed to spawn: {}", e),
+                            tool_calls_count: 0,
+                            duration_ms: started.elapsed().as_millis() as u64,
+                            child_thread_id: None,
+                        };
+                        // 注册 + 立即完成
+                        let bg_task = BackgroundTask {
+                            id: result.task_id.clone(),
+                            agent_name: "bg-shell".to_string(),
+                            prompt_summary: command_owned.chars().take(80).collect(),
+                            status: BackgroundTaskStatus::Running,
+                            started_at: std::time::Instant::now(),
+                            kind: BgTaskKind::Shell,
+                            cancel_handle: BgCancelHandle::Pid(0),
+                            pid: None,
+                            output_preview: None,
+                        };
+                        let _ = registry_clone.register_with_kind(bg_task);
+                        let complete_task_id = result.task_id.clone();
+                        registry_clone.complete(&complete_task_id, result);
+                        return;
+                    }
+                };
+                let pid = child.id();
+
+                let output = match child.wait_with_output().await {
+                    Ok(out) => {
+                        let success = out.status.success();
+                        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                        let mut combined = String::new();
+                        if !stdout.is_empty() {
+                            combined.push_str(&stdout);
+                        }
+                        if !stderr.is_empty() {
+                            if !combined.is_empty() {
+                                combined.push('\n');
+                            }
+                            combined.push_str("[stderr]\n");
+                            combined.push_str(&stderr);
+                        }
+                        if combined.is_empty() {
+                            combined = format!("[exit code: {}]", out.status.code().unwrap_or(-1));
+                        }
+                        BackgroundTaskResult {
+                            task_id: task_id_clone.clone(),
+                            agent_name: "bg-shell".to_string(),
+                            prompt_summary: command_owned.chars().take(80).collect(),
+                            success,
+                            output: combined,
+                            tool_calls_count: 0,
+                            duration_ms: started.elapsed().as_millis() as u64,
+                            child_thread_id: None,
+                        }
+                    }
+                    Err(e) => BackgroundTaskResult {
+                        task_id: task_id_clone.clone(),
+                        agent_name: "bg-shell".to_string(),
+                        prompt_summary: command_owned.chars().take(80).collect(),
+                        success: false,
+                        output: format!("Command failed: {}", e),
+                        tool_calls_count: 0,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                        child_thread_id: None,
+                    },
+                };
+
+                // 注册任务（向 registry 提供 pid 用于取消）
+                let bg_task = BackgroundTask {
+                    id: output.task_id.clone(),
+                    agent_name: "bg-shell".to_string(),
+                    prompt_summary: command_owned.chars().take(80).collect(),
+                    status: BackgroundTaskStatus::Running,
+                    started_at: std::time::Instant::now(),
+                    kind: BgTaskKind::Shell,
+                    cancel_handle: BgCancelHandle::Pid(pid.unwrap_or(0)),
+                    pid,
+                    output_preview: None,
+                };
+                if let Err(e) = registry_clone.register_with_kind(bg_task) {
+                    warn!(error = %e, task_id = %output.task_id, "bg shell: register_with_kind failed");
+                    return;
+                }
+                let complete_task_id = output.task_id.clone();
+                registry_clone.complete(&complete_task_id, output);
+            });
+
+            return Ok(format!(
+                "Background shell task started.\ntask_id: {}\nThe command is running in the background. Monitor in the Tasks panel.",
+                task_id
+            ));
+        }
+
+        // ── 同步执行路径（现有逻辑不变） ──
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(120_000)
@@ -185,18 +354,39 @@ impl BaseTool for BashTool {
             }
         }
     }
+
+    fn output_char_limit(&self) -> Option<usize> {
+        Some(10000)
+    }
 }
 
 /// TerminalMiddleware - 与 TypeScript TerminalMiddleware 对齐
-pub struct TerminalMiddleware;
+pub struct TerminalMiddleware {
+    bg_registry: Option<Arc<BackgroundTaskRegistry>>,
+}
 
 impl TerminalMiddleware {
     pub fn new() -> Self {
-        Self
+        Self { bg_registry: None }
+    }
+
+    pub fn with_registry(mut self, registry: Arc<BackgroundTaskRegistry>) -> Self {
+        self.bg_registry = Some(registry);
+        self
     }
 
     pub fn build_tools(cwd: &str) -> Vec<Box<dyn BaseTool>> {
         vec![Box::new(BashTool::new(cwd))]
+    }
+
+    pub fn build_tools_with_registry(
+        cwd: &str,
+        registry: Option<Arc<BackgroundTaskRegistry>>,
+    ) -> Vec<Box<dyn BaseTool>> {
+        vec![Box::new(BashTool {
+            cwd: cwd.to_string(),
+            bg_registry: registry,
+        })]
     }
 
     pub fn tool_names() -> Vec<&'static str> {
@@ -211,9 +401,12 @@ impl Default for TerminalMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for TerminalMiddleware {
+impl Middleware for TerminalMiddleware {
     fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        Self::build_tools(cwd)
+        vec![Box::new(BashTool {
+            cwd: cwd.to_string(),
+            bg_registry: self.bg_registry.clone(),
+        })]
     }
 
     fn name(&self) -> &str {

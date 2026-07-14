@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use agent_client_protocol::{
-    schema::{PromptResponse, SessionId, SessionInfoUpdate, SessionUpdate, StopReason},
     Client, ConnectionTo, Responder,
+    schema::v1::{PromptResponse, SessionId, SessionInfoUpdate, SessionUpdate, StopReason},
 };
 use peri_acp::session::{event_sink::StdioEventSink, executor};
 use peri_agent::{agent::AgentCancellationToken, messages::MessageContent};
@@ -58,7 +58,58 @@ pub(crate) async fn run(params: PromptExecParams) {
     let provider_snapshot = ctx.provider.read().clone();
     let peri_config_snapshot = Arc::new(ctx.peri_config.read().clone());
 
-    let result = executor::execute_prompt(executor::PromptExecutionContext {
+    // Create workflow executor (enables Workflow tool for multi-agent orchestration)
+    // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
+    let workflow_executor = peri_acp::agent::workflow_agent::create_executor(
+        peri_acp::agent::workflow_agent::WorkflowAgentContext {
+            provider: provider_snapshot.clone(),
+            cwd: agent_cwd.clone(),
+            frozen_claude_md: frozen
+                .as_ref()
+                .and_then(|f| f.claude_md().map(|s| s.to_string())),
+            frozen_claude_local_md: frozen
+                .as_ref()
+                .and_then(|f| f.claude_local_md().map(|s| s.to_string())),
+            frozen_skill_summary: frozen
+                .as_ref()
+                .and_then(|f| f.skill_summary().map(|s| s.to_string())),
+            session_id: Some(sid.clone()),
+            compact_config: {
+                let mut cc = peri_config_snapshot
+                    .config
+                    .compact
+                    .clone()
+                    .unwrap_or_default();
+                cc.apply_env_overrides();
+                Some(cc)
+            },
+            cancel: Some(cancel.clone()),
+            system_prompt: frozen.as_ref().map(|f| f.system_prompt().to_string()),
+            broker: None,
+            permission_mode: None,
+            frozen_date: frozen.as_ref().map(|f| f.date().to_string()),
+            frozen_language: frozen
+                .as_ref()
+                .and_then(|f| f.language().map(|s| s.to_string())),
+            agent_pool: None,
+            langfuse_session: None,
+            thread_store: None,
+            peri_config: Some(peri_config_snapshot.clone()),
+        },
+    );
+
+    // Read session-scoped workflow_middleware from SessionInfo
+    let workflow_middleware = {
+        let sessions = ctx.sessions.read();
+        sessions
+            .get(&sid)
+            .and_then(|s| s.workflow_middleware.clone())
+    };
+
+    // v2 路径下 MessageQueue 由 run_session_loop 从 session_manager.v2_message_queue
+    // 解析（executor.rs:368），不再作为 PromptExecutionContext 字段传入。
+
+    let result = executor::run_session_loop(executor::PromptExecutionContext {
         provider: provider_snapshot,
         peri_config: peri_config_snapshot,
         cwd: agent_cwd,
@@ -75,6 +126,7 @@ pub(crate) async fn run(params: PromptExecParams) {
         bg_results: vec![], // stdio 无后台任务
         plugin_skill_roots: ctx.plugin_skill_roots.clone(),
         plugin_agent_dirs: ctx.plugin_agent_dirs.clone(),
+        plugin_loaded: ctx.plugin_loaded.clone(),
         hook_groups: ctx.hook_groups.clone(),
         cron_scheduler: Some(ctx.cron_scheduler.clone()),
         mcp_pool: ctx.mcp_pool.clone(),
@@ -87,6 +139,9 @@ pub(crate) async fn run(params: PromptExecParams) {
         thread_store: Some(Arc::clone(&ctx.thread_store)),
         thread_id: Some(thread_id.clone()),
         session_manager: Some(ctx.session_manager.clone()),
+        workflow_executor: Some(workflow_executor),
+        workflow_middleware,
+        allow_await_wake: false,
     })
     .await;
 

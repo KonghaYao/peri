@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider::ThinkingConfig;
 
 fn make_openai_provider(model: &str) -> LlmProvider {
     LlmProvider::OpenAi {
@@ -127,6 +128,110 @@ fn test_subagent_cache_different_fingerprint_isolation() {
     });
     assert_ne!(m1.model_id(), m2.model_id());
     assert!(!Arc::ptr_eq(&m1, &m2));
+}
+
+/// fingerprint 包含 thinking 维度，不同 effort 产生不同 fingerprint
+#[test]
+fn test_fingerprint_includes_thinking() {
+    let provider_no_think = LlmProvider::Anthropic {
+        api_key: "k".into(),
+        model: "claude-sonnet-4-6".into(),
+        base_url: None,
+        thinking: None,
+    };
+    let provider_low = LlmProvider::Anthropic {
+        api_key: "k".into(),
+        model: "claude-sonnet-4-6".into(),
+        base_url: None,
+        thinking: Some(ThinkingConfig {
+            enabled: true,
+            budget_tokens: 8000,
+            effort: "low".to_string(),
+            max_tokens: 32000,
+        }),
+    };
+    let provider_high = LlmProvider::Anthropic {
+        api_key: "k".into(),
+        model: "claude-sonnet-4-6".into(),
+        base_url: None,
+        thinking: Some(ThinkingConfig {
+            enabled: true,
+            budget_tokens: 16000,
+            effort: "high".to_string(),
+            max_tokens: 32000,
+        }),
+    };
+
+    let fp_none = fingerprint(&provider_no_think);
+    let fp_low = fingerprint(&provider_low);
+    let fp_high = fingerprint(&provider_high);
+
+    assert!(fp_none.contains("Anthropic:claude-sonnet-4-6"));
+    assert!(
+        !fp_none.contains(":think="),
+        "无 thinking 时 fingerprint 不应含 :think="
+    );
+    assert!(
+        fp_low.contains(":think=low:8000"),
+        "thinking fingerprint 应包含 effort 和 budget"
+    );
+    assert!(fp_high.contains(":think=high:16000"));
+
+    // 不同 effort 产生不同 fingerprint
+    assert_ne!(fp_low, fp_high);
+    // 不同 thinking 状态产生不同 fingerprint
+    assert_ne!(fp_none, fp_low);
+}
+
+/// 同一 provider + model + thinking 配置产生相同 fingerprint
+#[test]
+fn test_fingerprint_same_thinking_stable() {
+    let a = LlmProvider::Anthropic {
+        api_key: "k1".into(), // api_key 不应影响 fingerprint
+        model: "sonnet".into(),
+        base_url: None,
+        thinking: Some(ThinkingConfig {
+            enabled: true,
+            budget_tokens: 8000,
+            effort: "medium".to_string(),
+            max_tokens: 32000,
+        }),
+    };
+    let b = LlmProvider::Anthropic {
+        api_key: "k2".into(), // 不同 api_key，fingerprint 应相同
+        model: "sonnet".into(),
+        base_url: Some("https://different.example.com".into()),
+        thinking: Some(ThinkingConfig {
+            enabled: true,
+            budget_tokens: 8000,
+            effort: "medium".to_string(),
+            max_tokens: 32000,
+        }),
+    };
+    assert_eq!(fingerprint(&a), fingerprint(&b));
+}
+
+/// thinking.enabled=false 等同于无 thinking
+#[test]
+fn test_fingerprint_thinking_disabled_equals_none() {
+    let none = LlmProvider::Anthropic {
+        api_key: "k".into(),
+        model: "sonnet".into(),
+        base_url: None,
+        thinking: None,
+    };
+    let disabled = LlmProvider::Anthropic {
+        api_key: "k".into(),
+        model: "sonnet".into(),
+        base_url: None,
+        thinking: Some(ThinkingConfig {
+            enabled: false,
+            budget_tokens: 8000,
+            effort: "low".to_string(),
+            max_tokens: 32000,
+        }),
+    };
+    assert_eq!(fingerprint(&none), fingerprint(&disabled));
 }
 
 // 简单的 mock BaseModel 用于测试

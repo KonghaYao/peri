@@ -45,7 +45,7 @@ impl Batcher {
         let flush_interval = config.flush_interval;
 
         let _handle = tokio::spawn(async move {
-            Self::run_loop(batch_client, rx, max_events, flush_interval).await;
+            Self::run_loop(batch_client, rx, max_events, flush_interval, backpressure).await;
         });
 
         Self { tx, backpressure }
@@ -57,8 +57,10 @@ impl Batcher {
         mut rx: mpsc::Receiver<BatcherCommand>,
         max_events: usize,
         flush_interval: Duration,
+        backpressure: BackpressurePolicy,
     ) {
-        let mut buffer: Vec<IngestionEvent> = Vec::with_capacity(max_events);
+        let mut buffer: std::collections::VecDeque<IngestionEvent> =
+            std::collections::VecDeque::with_capacity(max_events);
         let mut interval = interval(flush_interval);
         interval.tick().await;
 
@@ -67,7 +69,18 @@ impl Batcher {
                 cmd = rx.recv() => {
                     match cmd {
                         Some(BatcherCommand::Add(event)) => {
-                            buffer.push(event);
+                            // DropOldest：buffer 满时弹出最旧事件，为新事件腾出空间
+                            if buffer.len() >= max_events
+                                && backpressure == BackpressurePolicy::DropOldest
+                            {
+                                if let Some(_dropped) = buffer.pop_front() {
+                                    warn!(
+                                        target: "langfuse::batcher",
+                                        "DropOldest: 弹出最旧事件以容纳新事件"
+                                    );
+                                }
+                            }
+                            buffer.push_back(event);
                             if buffer.len() >= max_events {
                                 Self::do_flush(&client, &mut buffer).await;
                             }
@@ -105,12 +118,15 @@ impl Batcher {
     }
 
     /// 执行一次 flush：将 buffer 中的事件通过原生 Ingestion 端点发送到 Langfuse API
-    async fn do_flush(client: &LangfuseClient, buffer: &mut Vec<IngestionEvent>) {
+    async fn do_flush(
+        client: &LangfuseClient,
+        buffer: &mut std::collections::VecDeque<IngestionEvent>,
+    ) {
         if buffer.is_empty() {
             return;
         }
 
-        let events: Vec<IngestionEvent> = std::mem::take(buffer);
+        let events: Vec<IngestionEvent> = buffer.drain(..).collect();
         debug!("Batcher flushing {} events via OTLP", events.len());
 
         match client.ingest(events).await {
@@ -124,19 +140,33 @@ impl Batcher {
     }
 
     /// 添加事件到批量队列
+    ///
+    /// DropNew/DropOldest：使用 try_send 非阻塞发送，channel 满时 DropNew 直接丢弃，
+    /// DropOldest 由 run_loop 在 buffer 层面弹出最旧事件。
+    /// Block：使用 send 阻塞等待，直到 channel 有空位。
     pub async fn add(&self, event: IngestionEvent) -> Result<(), LangfuseError> {
         let cmd = BatcherCommand::Add(event);
         match self.backpressure {
-            BackpressurePolicy::DropNew => self.tx.try_send(cmd).map_err(|e| match e {
-                mpsc::error::TrySendError::Full(_) => {
-                    warn!("Batcher queue full, dropping event (DropNew policy)");
-                    LangfuseError::ChannelClosed
-                }
-                mpsc::error::TrySendError::Closed(_) => {
-                    warn!("Batcher channel closed, event dropped");
-                    LangfuseError::ChannelClosed
-                }
-            }),
+            BackpressurePolicy::DropNew | BackpressurePolicy::DropOldest => {
+                self.tx.try_send(cmd).map_err(|e| match e {
+                    mpsc::error::TrySendError::Full(_) => {
+                        let policy_name = if self.backpressure == BackpressurePolicy::DropOldest {
+                            "DropOldest"
+                        } else {
+                            "DropNew"
+                        };
+                        warn!(
+                            "Batcher queue full, dropping event ({} policy)",
+                            policy_name
+                        );
+                        LangfuseError::ChannelClosed
+                    }
+                    mpsc::error::TrySendError::Closed(_) => {
+                        warn!("Batcher channel closed, event dropped");
+                        LangfuseError::ChannelClosed
+                    }
+                })
+            }
             BackpressurePolicy::Block => self.tx.send(cmd).await.map_err(|_| {
                 warn!("Batcher channel closed during send");
                 LangfuseError::ChannelClosed
@@ -144,14 +174,21 @@ impl Batcher {
         }
     }
 
-    /// 同步添加事件到批量队列（非阻塞，仅支持 DropNew 背压策略）
+    /// 同步添加事件到批量队列（非阻塞，支持 DropNew/DropOldest 背压策略）
     ///
     /// 保证事件按调用顺序入队，适用于需要严格顺序的场景（如父 span 必须在子 span 之前）。
     pub fn try_add(&self, event: IngestionEvent) -> Result<(), LangfuseError> {
         let cmd = BatcherCommand::Add(event);
         self.tx.try_send(cmd).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => {
-                warn!("Batcher queue full, dropping event (DropNew policy)");
+                warn!(
+                    "Batcher queue full, dropping event ({} policy)",
+                    if self.backpressure == BackpressurePolicy::DropOldest {
+                        "DropOldest"
+                    } else {
+                        "DropNew"
+                    }
+                );
                 LangfuseError::ChannelClosed
             }
             mpsc::error::TrySendError::Closed(_) => {

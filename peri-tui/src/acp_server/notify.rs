@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use agent_client_protocol::schema::{AvailableCommandsUpdate, SessionUpdate};
+use agent_client_protocol::schema::v1::{AvailableCommandsUpdate, SessionUpdate};
 use peri_acp::dispatch::config_update;
 use peri_middlewares::skills::SkillMetadata;
 use serde_json::Value;
@@ -23,11 +23,11 @@ pub(crate) fn handle_notification(
     match method {
         "session/cancel" => {
             let session_id = extract_session_id(params, "");
-            if let Some(state) = sessions.get(session_id) {
-                if let Some(ref token) = state.cancel_token {
-                    token.cancel();
-                    info!(session_id = %session_id, "Cancel requested");
-                }
+            if let Some(state) = sessions.get(session_id)
+                && let Some(ref token) = state.cancel_token
+            {
+                token.cancel();
+                info!(session_id = %session_id, "Cancel requested");
             }
         }
         "session/config_update" => {
@@ -139,7 +139,15 @@ pub(crate) async fn send_available_commands_update(
         return;
     }
     let commands = peri_acp::dispatch::build_available_commands(skills);
-    let update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(commands));
+    let meta = skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>();
+    let update = SessionUpdate::AvailableCommandsUpdate(
+        AvailableCommandsUpdate::new(commands).meta(
+            serde_json::json!({"skillNames": meta})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+    );
     let update_value = match serde_json::to_value(&update) {
         Ok(p) => p,
         Err(e) => {
@@ -161,7 +169,7 @@ pub(crate) async fn send_session_info_update(
     transport: &dyn peri_acp::transport::AcpTransport,
     session_id: &str,
 ) {
-    use agent_client_protocol::schema::SessionInfoUpdate;
+    use agent_client_protocol::schema::v1::SessionInfoUpdate;
     let info = SessionInfoUpdate::new().updated_at(chrono::Utc::now().to_rfc3339());
     let update = SessionUpdate::SessionInfoUpdate(info);
     let update_value = match serde_json::to_value(&update) {
@@ -177,3 +185,4 @@ pub(crate) async fn send_session_info_update(
     });
     let _ = transport.send_notification("session/update", payload).await;
 }
+// test

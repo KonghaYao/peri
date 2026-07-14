@@ -1,7 +1,7 @@
 [package]
 name = "peri-tui"
 version.workspace = true
-edition.workspace = true
+edition = "2024"
 description = "TUI interface for Rust Agent - interactive terminal playground"
 
 [lib]
@@ -14,16 +14,24 @@ path = "src/main.rs"
 
 [features]
 headless = []
+# S12 起 use-kit 成为默认路径。Legacy runtime/state_machine/ui/panel 代码
+# 仍保留编译能力（通过 --no-default-features 启用），便于 S13 渐进删除。
+default = ["use-kit"]
+use-kit = []
 
 [dev-dependencies]
 tempfile.workspace = true
+serial_test.workspace = true
 [dependencies]
 serde.workspace = true
 peri-agent = { path = "../peri-agent" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-lsp = { path = "../peri-lsp" }
-ratatui = { version = "0.30.1", features = ["unstable-rendered-line-info", "unstable-widget-ref"] }
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info", "unstable-widget-ref"] }
+ratatui-kit = { version = "0.10.2", features = ["full"] }
+ratatui-kit-markdown = { version = "0.3.0", features = ["markdown-highlight"] }
 tokio.workspace = true
+tokio-util.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 uuid = { workspace = true, features = ["v7"] }
@@ -31,34 +39,36 @@ serde_json.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 dirs-next.workspace = true
-tui-textarea-2 = "0.11"
 parking_lot.workspace = true
 arboard = "3"
 png = "0.18"
 base64 = { version = "0.22", features = ["alloc"] }
-peri-widgets = { path = "../peri-widgets", features = ["markdown-highlight"] }
+peri-theme = { path = "../peri-theme" }
+peri-widgets = { path = "../peri-widgets" }
 peri-acp = { path = "../peri-acp" }
+peri-acp-types = { path = "../peri-acp-types" }
 peri-web-pty = { path = "../peri-web-pty" }
-agent-client-protocol = { version = "0.14", features = ["unstable"] }
-agent-client-protocol-schema = { version = "0.13", features = ["unstable_elicitation"] }
+agent-client-protocol = { version = "1.2", features = ["unstable"] }
+agent-client-protocol-schema = { version = "1.4", features = ["unstable_elicitation"] }
 unicode-width = "0.2"
 unicode-segmentation = "1"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+pulldown-cmark = "0.12"
 clap = { version = "4", features = ["derive"] }
 sysinfo.workspace = true
 fluent = "0.17"
 fluent-bundle = "0.16"
 unic-langid = { version = "0.9", features = ["macros"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 ring = "0.17"
 rmp-serde = "1.3"
 thiserror.workspace = true
 futures-util = "0.3"
 fuzzy-matcher = "0.3"
+im = "15"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-mimalloc.workspace = true
-libmimalloc-sys.workspace = true
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl.workspace = true
 tikv-jemalloc-sys.workspace = true

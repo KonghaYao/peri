@@ -1,0 +1,92 @@
+{
+    "lockfileVersion": 1,
+    "configVersion": 1,
+    "workspaces": {
+        "": {
+            "name": "@peri-code/workflow",
+            "devDependencies": {
+                "@claude-code-best/workflow-engine": "^0.1.0",
+                "@types/node": "^26.0.0",
+                "bun-types": "latest",
+            },
+        },
+    },
+    "packages": {
+        "@claude-code-best/workflow-engine": [
+            "@claude-code-best/workflow-engine@0.1.0",
+            "https://registry.npmmirror.com/@claude-code-best/workflow-engine/-/workflow-engine-0.1.0.tgz",
+            { "dependencies": { "ajv": "^8.18.0", "zod": "^4.3.6" } },
+            "sha512-roPTJ2HVa30STzdXUAY+YHzRddYVsIOfeJCwdzz+1rpyMthQ+JlJnpTkuKOZT2f1uc5wbQ8CfkvTnGgaZZ2B/A==",
+        ],
+
+        "@types/node": [
+            "@types/node@26.0.0",
+            "https://registry.npmmirror.com/@types/node/-/node-26.0.0.tgz",
+            { "dependencies": { "undici-types": "~8.3.0" } },
+            "sha512-vf2YFi1iY9lHGwNJMs01biZFbKJkrZR1T6/MlzjhJLPdntOHLhTrDSnSVcdtvjihi4VQNlrFRIxLsDBlQpAipA==",
+        ],
+
+        "ajv": [
+            "ajv@8.20.0",
+            "https://registry.npmmirror.com/ajv/-/ajv-8.20.0.tgz",
+            {
+                "dependencies": {
+                    "fast-deep-equal": "^3.1.3",
+                    "fast-uri": "^3.0.1",
+                    "json-schema-traverse": "^1.0.0",
+                    "require-from-string": "^2.0.2",
+                },
+            },
+            "sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==",
+        ],
+
+        "bun-types": [
+            "bun-types@1.3.14",
+            "https://registry.npmmirror.com/bun-types/-/bun-types-1.3.14.tgz",
+            { "dependencies": { "@types/node": "*" } },
+            "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ==",
+        ],
+
+        "fast-deep-equal": [
+            "fast-deep-equal@3.1.3",
+            "https://registry.npmmirror.com/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz",
+            {},
+            "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==",
+        ],
+
+        "fast-uri": [
+            "fast-uri@3.1.2",
+            "https://registry.npmmirror.com/fast-uri/-/fast-uri-3.1.2.tgz",
+            {},
+            "sha512-rVjf7ArG3LTk+FS6Yw81V1DLuZl1bRbNrev6Tmd/9RaroeeRRJhAt7jg/6YFxbvAQXUCavSoZhPPj6oOx+5KjQ==",
+        ],
+
+        "json-schema-traverse": [
+            "json-schema-traverse@1.0.0",
+            "https://registry.npmmirror.com/json-schema-traverse/-/json-schema-traverse-1.0.0.tgz",
+            {},
+            "sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==",
+        ],
+
+        "require-from-string": [
+            "require-from-string@2.0.2",
+            "https://registry.npmmirror.com/require-from-string/-/require-from-string-2.0.2.tgz",
+            {},
+            "sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw==",
+        ],
+
+        "undici-types": [
+            "undici-types@8.3.0",
+            "https://registry.npmmirror.com/undici-types/-/undici-types-8.3.0.tgz",
+            {},
+            "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==",
+        ],
+
+        "zod": [
+            "zod@4.4.3",
+            "https://registry.npmmirror.com/zod/-/zod-4.4.3.tgz",
+            {},
+            "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==",
+        ],
+    },
+}

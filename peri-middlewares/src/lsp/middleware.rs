@@ -2,12 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::{
-    agent::{
-        react::{ToolCall, ToolResult},
-        state::State,
-    },
+    agent::react::{ToolCall, ToolResult},
     error::AgentResult,
-    middleware::Middleware,
+    middleware::{r#trait::Middleware, state::MiddlewareState},
     tools::BaseTool,
 };
 use peri_lsp::{
@@ -41,7 +38,7 @@ impl LspMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for LspMiddleware {
+impl Middleware for LspMiddleware {
     fn name(&self) -> &str {
         "LspMiddleware"
     }
@@ -55,7 +52,7 @@ impl<S: State> Middleware<S> for LspMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut S,
+        _state: &mut dyn MiddlewareState,
         tool_call: &ToolCall,
         _result: &ToolResult,
     ) -> AgentResult<()> {
@@ -96,7 +93,6 @@ impl<S: State> Middleware<S> for LspMiddleware {
 mod tests {
     use std::collections::HashMap;
 
-    use peri_agent::agent::state::AgentState;
     use peri_lsp::config::LspServerConfig;
 
     use super::*;

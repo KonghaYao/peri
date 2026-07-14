@@ -198,9 +198,35 @@ impl LlmProvider {
         }
     }
 
+    /// 替换模型名，保持其他配置不变
+    pub fn with_model_name(&self, model: String) -> Self {
+        let mut clone = self.clone();
+        match &mut clone {
+            Self::OpenAi { model: m, .. } => *m = model,
+            Self::Anthropic { model: m, .. } => *m = model,
+        }
+        clone
+    }
+
     /// 获取模型的上下文窗口大小（不消费 self）
     pub fn context_window(&self) -> u32 {
         self.clone().into_model().context_window()
+    }
+
+    /// 返回 thinking 配置的稳定标识，用于 fingerprint。
+    ///
+    /// 格式：`:think=<effort>:<budget_tokens>`，无 thinking 时返回空字符串。
+    /// 不包含 max_tokens（max_tokens 由 into_model() 统一从 thinking.as_ref().map_or(32000, |t| t.max_tokens) 读取，
+    /// 且 32000 硬编码不会成为区分因子）。
+    pub fn thinking_key(&self) -> String {
+        let thinking = match self {
+            Self::OpenAi { thinking, .. } => thinking,
+            Self::Anthropic { thinking, .. } => thinking,
+        };
+        match thinking {
+            Some(ref t) if t.enabled => format!(":think={}:{}", t.effort, t.budget_tokens),
+            _ => String::new(),
+        }
     }
 
     pub fn into_model(self) -> Box<dyn BaseModel> {

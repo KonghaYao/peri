@@ -22,12 +22,9 @@ use std::{
 use async_trait::async_trait;
 pub use model_email::get_attribution_email;
 use peri_agent::{
-    agent::{
-        react::{ToolCall, ToolResult},
-        state::State,
-    },
+    agent::react::{ToolCall, ToolResult},
     error::AgentResult,
-    middleware::Middleware,
+    middleware::{r#trait::Middleware, state::MiddlewareState},
 };
 pub use state::AttributionState;
 
@@ -41,13 +38,17 @@ use crate::tool_search::core_tools::{TOOL_EDIT, TOOL_WRITE};
 pub struct GitAttributionMiddleware {
     state: Arc<Mutex<AttributionState>>,
     pending_old_content: Arc<Mutex<HashMap<String, String>>>,
+    /// Cached prompt contribution text.
+    attribution_text: String,
 }
 
 impl GitAttributionMiddleware {
     pub fn new(model_name: &str) -> Self {
+        let attribution_text = Self::attribution_text(model_name);
         Self {
             state: Arc::new(Mutex::new(AttributionState::new(model_name.to_string()))),
             pending_old_content: Arc::new(Mutex::new(HashMap::new())),
+            attribution_text,
         }
     }
 
@@ -68,12 +69,24 @@ impl GitAttributionMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for GitAttributionMiddleware {
+impl Middleware for GitAttributionMiddleware {
     fn name(&self) -> &str {
         "GitAttributionMiddleware"
     }
 
-    async fn before_tool(&self, _state: &mut S, tool_call: &ToolCall) -> AgentResult<ToolCall> {
+    fn prompt_contribution(&self) -> Option<String> {
+        let text = format!(
+            "\n\n## Git Attribution\n\nWhen the user asks you to commit, append the following line to the commit message:\n\n```\n{}\n```\n\nThis tracks AI contributions for code you authored. Only include it when you are already creating a commit at the user's request.",
+            self.attribution_text
+        );
+        Some(text)
+    }
+
+    async fn before_tool(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        tool_call: &ToolCall,
+    ) -> AgentResult<ToolCall> {
         // 仅处理 Write 和 Edit
         if tool_call.name != TOOL_WRITE && tool_call.name != TOOL_EDIT {
             return Ok(tool_call.clone());
@@ -92,7 +105,7 @@ impl<S: State> Middleware<S> for GitAttributionMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut S,
+        _state: &mut dyn MiddlewareState,
         tool_call: &ToolCall,
         _result: &ToolResult,
     ) -> AgentResult<()> {
@@ -121,7 +134,7 @@ impl<S: State> Middleware<S> for GitAttributionMiddleware {
         Ok(())
     }
 
-    async fn before_agent(&self, _state: &mut S) -> AgentResult<()> {
+    async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // Attribution 指令已在 system prompt 中注入，无需再向消息历史写入。
         Ok(())
     }

@@ -7,8 +7,8 @@
 //! ### Cached entries
 //! | Cache | Key | Entry | Lifetime |
 //! |-------|-----|-------|----------|
-//! | `cached_llm` | `"provider:model"` fingerprint | `auxiliary_model` + `auto_classifier_model` | Validated per-prompt via `has_valid_cache()` |
-//! | `subagent_llm_cache` | `"provider:model"` fingerprint | `Arc<dyn BaseModel>` (shared `reqwest::Client`) | Held until `invalidate()` or session close |
+//! | `cached_llm` | `"provider:model:think=effort:budget"` fingerprint | `auxiliary_model` + `auto_classifier_model` | Validated per-prompt via `has_valid_cache()` |
+//! | `subagent_llm_cache` | `"provider:model:think=effort:budget"` fingerprint | `Arc<dyn BaseModel>` (shared `reqwest::Client`) | Held until `invalidate()` or session close |
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -22,13 +22,13 @@ use crate::provider::LlmProvider;
 /// Reusing across prompts eliminates transient per-turn allocations.
 #[derive(Clone)]
 pub struct CachedLlmInstances {
-    /// 辅助 LLM（CompactMiddleware 摘要 + Goal 工具验证共用）。
+    /// 辅助 LLM（v2 stages/compact.rs 摘要 + Goal 工具验证共用）。
     /// Contains reqwest Client with connection pool.
     pub auxiliary_model: Arc<dyn BaseModel>,
     /// auto_classifier LLM (used by HITL HumanInTheLoopMiddleware).
     /// Contains a second reqwest Client.
     pub auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn BaseModel>>>,
-    /// Provider fingerprint at time of creation (`"provider_name:model_name"`).
+    /// Provider fingerprint at time of creation (`"provider_name:model_name:think=effort:budget"`).
     pub fingerprint: String,
 }
 
@@ -119,8 +119,13 @@ impl AgentPool {
     }
 }
 
-fn fingerprint(provider: &LlmProvider) -> String {
-    format!("{}:{}", provider.display_name(), provider.model_name())
+pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
+    format!(
+        "{}:{}{}",
+        provider.display_name(),
+        provider.model_name(),
+        provider.thinking_key()
+    )
 }
 
 #[cfg(test)]

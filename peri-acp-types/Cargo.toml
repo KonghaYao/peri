@@ -1,0 +1,10 @@
+[package]
+name = "peri-acp-types"
+version.workspace = true
+edition.workspace = true
+description = "Pure DTO crate for TUI <-> ACP contract. Depends only on serde."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid = { workspace = true, features = ["v7"] }

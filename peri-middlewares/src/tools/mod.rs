@@ -47,6 +47,10 @@ impl BaseTool for BoxToolWrapper {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         self.0.invoke(input, ctx).await
     }
+
+    fn timeout(&self) -> Option<std::time::Duration> {
+        self.0.timeout()
+    }
 }
 
 #[async_trait]
@@ -69,5 +73,9 @@ impl BaseTool for ArcToolWrapper {
         ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         self.0.invoke(input, ctx).await
+    }
+
+    fn timeout(&self) -> Option<std::time::Duration> {
+        self.0.timeout()
     }
 }

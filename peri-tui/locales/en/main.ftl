@@ -171,6 +171,7 @@ setup-edit-title =  ── Setup ── Edit: { $type } ({ $id })
 setup-field-type = Type
 setup-field-id = ID
 setup-field-base-url = Base URL
+setup-field-test-connectivity = Test connectivity
 setup-hint-base-url-v1 = OpenAI base URL needs /v1 suffix
 setup-field-api-key = API Key
 setup-field-opus = Opus
@@ -204,9 +205,17 @@ config-field-persona = Persona
 config-field-tone = Tone
 config-field-proactiveness = Proactiveness
 config-field-cache-warning = Cache Warning
-config-field-diff = Inline Diff
+config-field-diff = Show Diff
+config-field-1m-context = 1M Context
+config-field-active-alias = Active Alias
+config-field-permission-mode = Permission Mode
 config-value-on = ON
 config-value-off = OFF
+config-streaming-value-streaming = streaming
+config-streaming-value-block = block
+config-streaming-value-none = none
+config-language-value-en = English
+config-language-value-zh = 中文
 config-saved = Configuration saved
 
 # Config panel groups
@@ -449,7 +458,7 @@ model-effort-max = Max
 
 status-panel-title =  Status 
 status-tab-cost = Cost
-status-tab-context = Context
+status-tab-context =  Context
 status-label-duration = Session Duration
 status-label-input-tokens = Input Tokens
 status-label-output-tokens = Output Tokens
@@ -464,12 +473,43 @@ status-label-messages = Messages
 status-label-tools = Tools
 status-empty-data = No request data
 
+status-tab-service =  Service
+status-label-provider = Provider:
+status-label-model = Model:
+status-label-permission = Permission:
+status-label-cpu = CPU:
+status-label-memory = Memory:
+status-label-mcp = MCP:
+status-label-cron = Cron:
+status-label-cwd = cwd:
+status-label-total-vms = Total VMs:
+status-label-user-turns =   User turns:
+status-label-assistant-turns =   Assistant turns:
+status-label-tool-calls =   Tool calls:
+status-label-subagent-groups =   SubAgent groups:
+status-label-system-notes =   System notes:
+
 # ---- Agent Panel ----
 
 agent-panel-title-none =  Select Agent (None) 
 agent-panel-title =  Select Agent 
 agent-panel-none-label = No Agent (default)
 agent-panel-empty-hint = Add Agent definition files in .claude/agents/
+
+# ---- Agent Session Info Panel ----
+
+agent-panel-title-session =   Current Agent Session
+agent-label-provider = Provider
+agent-label-model = Model
+agent-label-permission-mode = Permission Mode
+agent-label-cwd = CWD
+agent-label-messages = Messages
+agent-label-total-messages = Total Messages
+agent-subagents-count =   SubAgents ({ $count })
+agent-no-subagents =   No sub-agents spawned in this session
+agent-collapsed =  (collapsed)
+agent-expanded =  (expanded)
+agent-message-count =   { $count } msgs
 
 # ---- Hooks Panel ----
 
@@ -479,6 +519,35 @@ hooks-configured-count = { $count } hooks configured
 hooks-readonly-hint = This panel is read-only. To add or modify hooks, edit plugin hooks.json.
 hooks-no-hooks =   No hooks configured.
 hooks-no-hooks-hint =   Hooks can be added via plugin hooks/hooks.json.
+hook-event-before-tool = Before tool execution
+hook-event-after-tool = After tool execution
+hook-event-after-tool-fail = After tool execution fails
+hook-event-before-auto-mode = Before auto mode classifier decides
+hook-event-user-submit = When user submits a prompt
+hook-event-session-start = When a new session starts
+hook-event-session-end = When a session ends
+hook-event-agent-stop = When agent stops
+hook-event-agent-stop-fail = When agent stops with failure
+hook-event-parallel-tools-done = When all parallel tools complete
+hook-event-subagent-start = When a subagent starts
+hook-event-subagent-stop = When a subagent stops
+hook-event-before-compact = Before context compaction
+hook-event-after-compact = After context compaction
+hook-event-needs-input = When agent needs user input
+
+# ---- Theme Panel ----
+
+theme-desc = Switch color theme
+theme-title = Theme
+theme-preview = Preview
+theme-list = Theme List
+theme-confirm = Confirm
+theme-cancel = Cancel
+theme-current = Current
+theme-source-builtin = Builtin
+theme-source-file = File
+theme-switched = Theme switched
+theme-navigate = Navigate
 
 # ---- Thread Browser ----
 
@@ -600,3 +669,312 @@ statusbar-rewind-action = Rewind
 statusbar-rewind-other-key = Other keys
 statusbar-rewind-move = Move
 statusbar-rewind-switch-file = Switch restore file
+
+# ---- Common (P0) ----
+common-loading = Loading
+common-esc-close =   Esc: close
+common-nav-enter-close =   ↑/↓::navigate  Enter::open  Esc::close
+common-empty =   (empty)
+
+# ---- Setup Wizard (P0) ----
+setup-no-provider = No provider configured · Agent features unavailable
+setup-config-hint-title = Configure via any of the following:
+setup-close-hint = Enter::close · Esc::close
+setup-step-1 =   1. Open the Login panel to configure API Key
+setup-step-2 =   2. Or open the Settings panel to adjust provider config
+setup-step-3 =   3. Or manually edit 
+setup-skip-hint = Enter::skip · Esc::close
+setup-wizard-title =  Setup Wizard 
+setup-welcome = Welcome to Peri TUI
+
+# ---- Notifications (P0) ----
+paste-truncated = Paste truncated to { $max } characters
+submit-blocked = Request in progress, try again later
+export-success = Exported messages to: { $path }
+export-fail = Failed to export messages: { $error }
+cancel-request-sent = Cancel request sent
+bg-task-notify-completed = [✓] { $name } completed ({ $duration }s)
+bg-task-notify-failed = [✗] { $name } failed ({ $duration }s)
+
+# ---- Thread Load (P0) ----
+thread-switch-confirm-title = Switch Thread Confirmation
+thread-switch-bg-tasks-message = Current thread has { $count } background tasks still running
+thread-switch-task-counts =   { $shell } shell  { $agent } agent  { $workflow } workflow
+thread-switch-bg-note = These tasks continue running after switch, but will not be visible in the current view.
+
+# ---- System Reminders (P0) ----
+reminder-cron-task = Cron Task
+reminder-bg-task = Background Task
+reminder-fork-mode = Fork Mode
+reminder-context-compaction = Context Compaction
+reminder-system-prompt = System Prompt
+reminder-trust-boundary = Trust Boundary
+reminder-tool-reminder = Tool Reminder
+reminder-subagent-result = SubAgent Result
+reminder-system-reminder = System Reminder
+channel-wechat = WeChat
+channel-feishu = Feishu
+channel-dingtalk = DingTalk
+
+# ---- Common (P1) ----
+common-no-matches =   (no matches)
+common-na = —
+common-on = ON
+common-off = OFF
+
+# ---- Panel Titles ----
+panel-title-model = Model
+panel-title-login = Login
+panel-title-agent = Agent
+panel-title-hooks = Hooks
+panel-title-config = Config
+panel-title-threads = Threads
+panel-title-mcp = MCP
+panel-title-plugin = Plugin
+panel-title-cron = Cron
+panel-title-status = Status
+panel-title-memory = Memory
+panel-title-tasks = Tasks
+panel-title-betas = Betas
+panel-title-workflow = Workflow
+panel-title-ask-user = Ask User
+panel-title-theme = Theme
+
+# ---- Panel Descriptions ----
+panel-desc-model = Model alias selection
+panel-desc-login = Provider credentials
+panel-desc-agent = Subagent definitions
+panel-desc-hooks = Hook events
+panel-desc-config = PeriConfig editor
+panel-desc-threads = Thread history browser
+panel-desc-mcp = MCP server pool
+panel-desc-plugin = Installed plugins
+panel-desc-cron = Scheduled tasks
+panel-desc-status = Service snapshot
+panel-desc-memory = Persisted memory
+panel-desc-tasks = Background tasks
+panel-desc-betas = Feature flags
+panel-desc-workflow = Workflow runs
+panel-desc-ask-user = Agent user questions (auto-open)
+panel-desc-theme = Color theme selection
+
+# ---- Betas Panel ----
+panel-betas-readonly-hint =   (read-only — feature flags are configured at build time)
+panel-betas-empty =   No active beta features
+panel-betas-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+
+# ---- Cron Panel ----
+panel-cron-stats =   { $configured } configured, { $enabled } enabled
+panel-cron-confirm-hint =   Enter::confirm  Esc::close
+panel-cron-nav-hint =   ↑/↓::navigate  Enter::toggle  Esc::close
+panel-cron-empty =   No cron tasks configured
+panel-cron-empty-hint =   Ask the agent to set up recurring tasks
+panel-cron-next-fire =      next: { $time }
+panel-cron-status-on = ON
+panel-cron-status-off = OFF
+panel-cron-status-format = [{ $status }]
+
+# ---- MCP Panel ----
+panel-mcp-phase-pending = pending
+panel-mcp-phase-initializing = initializing
+panel-mcp-phase-ready = ready
+panel-mcp-phase-failed = failed
+panel-mcp-pool-label =   MCP Pool: 
+panel-mcp-connected =    { $connected }/{ $total } connected
+panel-mcp-empty =   No MCP servers configured
+panel-mcp-empty-hint =   Add servers via ~/.claude/settings.json (mcpServers)
+panel-mcp-server-detail =      transport: { $transport }  tools: { $count }
+panel-mcp-icon-connected = ✔
+panel-mcp-icon-error = ✗
+panel-mcp-icon-unknown = ◯
+
+# ---- Memory Panel ----
+panel-memory-stats =   { $count } memory files in ~/.claude/memory
+panel-memory-nav-hint =   Enter) Edit in $EDITOR  Esc) Close
+panel-memory-empty =   No memory files found
+panel-memory-empty-hint =   Create ~/.claude/memory/<name>.md to persist cross-session notes
+panel-memory-unit-b = B
+panel-memory-unit-kb = KB
+panel-memory-unit-mb = MB
+panel-memory-unit-gb = GB
+panel-memory-time-just-now = just now
+panel-memory-time-min-ago = { $n }m ago
+panel-memory-time-hour-ago = { $n }h ago
+panel-memory-time-day-ago = { $n }d ago
+
+# ---- Plugin Panel ----
+panel-plugin-stats =   { $count } plugins loaded
+panel-plugin-readonly-hint =   (read-only — toggle via ~/.claude/plugins/config.json)
+panel-plugin-empty =   No plugins installed
+panel-plugin-empty-hint =   Install via: agm install <name>
+panel-plugin-version-unknown = ?
+
+# ---- Plugin Panel Tabs ----
+panel-plugin-tab-installed = Installed
+panel-plugin-tab-discover = Discover
+panel-plugin-tab-marketplaces = Marketplaces
+panel-plugin-tab-errors = Errors
+
+# ---- Plugin Panel Discover ----
+panel-plugin-discover-coming = Discover — coming in Phase 2
+panel-plugin-discover-hint = Search and install plugins from marketplaces
+
+# ---- Plugin Panel Marketplaces ----
+panel-plugin-marketplaces-coming = Marketplaces — coming in Phase 2
+panel-plugin-marketplaces-hint = Manage plugin marketplaces
+
+# ---- Plugin Panel Errors ----
+panel-plugin-errors-coming = Errors — coming in Phase 2
+panel-plugin-errors-hint = View plugin load errors
+
+# ---- Plugin Panel Detail ----
+panel-plugin-detail-title = Detail: { $name }
+panel-plugin-detail-marketplace = marketplace
+panel-plugin-detail-author = author
+panel-plugin-detail-path = path
+panel-plugin-detail-scope = scope
+panel-plugin-detail-error = load error
+
+# ---- Plugin Panel Actions ----
+panel-plugin-action-disable = Disable plugin
+panel-plugin-action-enable = Enable plugin
+panel-plugin-action-uninstall = Uninstall
+panel-plugin-action-back = Back to plugin list
+
+# ---- Plugin Panel Fields ----
+panel-plugin-field-skills = Skills
+panel-plugin-field-commands = Commands
+panel-plugin-field-agents = Agents
+panel-plugin-field-mcp = MCP
+
+# ---- Plugin Panel Discover ----
+panel-plugin-discover-search = Search plugins...
+panel-plugin-discover-empty = No results found
+
+# ---- Plugin Panel Marketplaces ----
+panel-plugin-marketplaces-add = Add marketplace...
+panel-plugin-marketplaces-delete = Delete
+panel-plugin-marketplaces-empty = No marketplaces configured
+
+# ---- Plugin Panel Errors ----
+panel-plugin-errors-title = Load Errors
+panel-plugin-errors-empty = No errors
+
+# ---- Plugin Panel Status ----
+panel-plugin-status-enabled = enabled
+panel-plugin-status-disabled = disabled
+
+# ---- Plugin Panel Confirm ----
+panel-plugin-confirm-uninstall = ⚠ Confirm uninstall? Enter to confirm, Esc to cancel
+panel-plugin-confirm-delete-mp = ⚠ Confirm delete marketplace? Enter to confirm, Esc to cancel
+panel-plugin-confirm-hint = Enter: confirm  Esc: cancel
+
+# ---- Plugin Panel Marketplace ----
+panel-plugin-marketplaces-online = online
+panel-plugin-marketplaces-offline = offline
+panel-plugin-marketplace-refreshing = Refreshing...
+panel-plugin-marketplace-hint-keys = Enter: refresh  |  d: delete  |  a: add
+panel-plugin-marketplace-add-url-hint = Enter URL (github.com/org/repo, /path/to/dir, etc.)
+panel-plugin-marketplace-add-input-footer = Enter: save  Esc: cancel
+
+# ---- Plugin Panel Search ----
+panel-plugin-discover-input = Type to search...
+
+# ---- Plugin Panel Search ----
+panel-plugin-search-loading = Searching...
+panel-plugin-search-no-results = No results found
+panel-plugin-search-error = Search failed: { $error }
+panel-plugin-operation-complete = operation complete
+panel-plugin-operation-failed = operation failed
+panel-plugin-discover-press-enter = Press Enter to search
+panel-plugin-action-install = Install
+panel-plugin-list-count = { $count } plugins found
+panel-plugin-discover-hint-keys = Enter: details  |  type: filter  |  ←/→/Tab: switch view
+
+# ---- Plugin Panel Navigation ----
+common-nav-tab-close = ←/→/Tab switch view · ↑/↓ navigate · Enter close · Esc close
+
+# ---- Tasks Panel ----
+panel-tasks-total-label =   Total: 
+panel-tasks-breakdown =    ({ $bg } bg, { $cron } cron, { $subagent } subagent)
+panel-tasks-section-bg =   ▼ Background Tasks ({ $count })
+panel-tasks-kind-sh = [sh]
+panel-tasks-kind-ag = [ag]
+panel-tasks-kind-wf = [wf]
+panel-tasks-kind-unknown = [?]
+panel-tasks-pid =  pid:{ $pid }
+panel-tasks-section-cron =   ▼ Cron Jobs ({ $count })
+panel-tasks-section-subagent =   ▼ SubAgents ({ $count })
+panel-tasks-collapsed =  (collapsed)
+panel-tasks-live =  (live)
+panel-tasks-msgs =   { $count } msgs
+panel-tasks-empty =   No active tasks
+panel-tasks-empty-hint-1 =   Cron jobs are scheduled via /loop command;
+panel-tasks-empty-hint-2 =   SubAgents are spawned by Task / SubAgent tools.
+panel-tasks-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+
+# ---- Theme Panel ----
+panel-theme-active-mark =  *
+panel-theme-nav-hint =   ↑/↓::navigate  Enter::switch  Esc::close
+panel-theme-empty =   (no themes found)
+
+# ---- Workflow Panel kanban ----
+workflow-loading-runs = Loading workflow runs
+workflow-no-runs = No workflow runs in current session
+workflow-footer-shortcuts = Tab::next-run · Shift+Tab::prev-run · ←/→::pane · ↑/↓::navigate · Enter::inspect · Esc::close
+
+# ---- AskUser Panel ----
+panel-ask-user-empty =   No pending questions.
+panel-ask-user-malformed =   Agent asked 0 questions (malformed request).
+panel-ask-user-answered-mark =  ✓ 
+panel-ask-user-no-options =   (no options provided)
+panel-ask-user-hint-tab-multi-answered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+panel-ask-user-hint-tab-multi-unanswered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel
+panel-ask-user-hint-single-answered =   ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+panel-ask-user-hint-single-unanswered =   ↑/↓::navigate · Space::select · Esc::cancel
+
+# ---- Others ----
+bg-task-overflow = … { $count } more
+bg-task-tools-running = { $name } · { $count } tools
+bg-task-tools-done = · { $count } tools
+tool-name-shell = Shell
+tool-name-folder = Folder
+mention-popup-title =  @{ $name } 
+slash-completion-title =  /{ $name } 
+
+# ---- HITL Popup (P2) ----
+popup-hitl-empty =   No pending approval request.
+popup-hitl-tool-label =   Tool: { $name }
+popup-hitl-non-serializable = <non-serializable>
+popup-hitl-truncated-info =     ... ({ $chars } chars total)
+popup-hitl-batch-header =   Batch ({ $more } more):
+popup-hitl-batch-item =     - { $name } ({ $input })
+popup-hitl-batch-more =     ... and { $count } more
+popup-hitl-action-hint =   Enter: approve  |  Esc: reject
+popup-hitl-title =  Approval Required 
+
+# ---- AskUser Popup (P2) ----
+popup-ask-user-empty =   No pending questions.
+popup-ask-user-malformed =   Agent asked 0 questions (malformed request).
+popup-ask-user-answered-mark =  ✓ 
+popup-ask-user-no-options =   (no options provided)
+popup-ask-user-hint-multi-submit =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+popup-ask-user-hint-multi-next =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel
+popup-ask-user-hint-single-submit =   ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+popup-ask-user-hint-single-unsubmitted =   ↑/↓::navigate · Space::select · Esc::cancel
+popup-ask-user-title =  Ask User 
+
+# ---- Confirm Popup (P2) ----
+popup-confirm-empty =   No pending confirmation.
+popup-confirm-action-hint =   Enter: confirm  Esc: cancel
+popup-confirm-title =  Confirm 
+popup-confirm-reject-title = Reject Answer
+popup-confirm-reject-message = Reject answering? The Agent will receive a rejection signal and end the tool call.
+
+# ---- System Notes (app message stream) ----
+app-note-budget-warning = Context usage { NUMBER($pct, maximumFractionDigits: 0) }% ({ $used }/{ $limit })
+app-note-compact-completed = Context compaction completed{ $detail }
+app-note-compact-completed-summary = Context compaction completed{ $detail } — { $summary }
+app-note-compact-error = Context compaction failed: { $message }
+app-note-agent-failed = Agent execution failed: { $message }
+app-note-cache-hit-low = Prompt cache hit rate {$pct}% < 80% (req: { $req_id })

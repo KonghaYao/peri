@@ -1,5 +1,6 @@
 mod conversion;
 mod otlp;
+pub mod session;
 
 use std::collections::HashMap;
 
@@ -22,6 +23,8 @@ impl IngestionEvent {
             IngestionEvent::ObservationCreate { timestamp, .. } => timestamp,
             IngestionEvent::ObservationUpdate { timestamp, .. } => timestamp,
             IngestionEvent::SdkLog { timestamp, .. } => timestamp,
+            IngestionEvent::SessionCreate { timestamp, .. } => timestamp,
+            IngestionEvent::SessionUpdate { timestamp, .. } => timestamp,
         }
     }
 }
@@ -393,8 +396,27 @@ pub enum IngestionEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
     },
+    SessionCreate {
+        id: String,
+        timestamp: String,
+        body: session::SessionBody,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
+    SessionUpdate {
+        id: String,
+        timestamp: String,
+        body: session::SessionBody,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
 }
 
 #[cfg(test)]
 #[path = "../types_test.rs"]
 mod tests;
+
+// session 测试单独 include
+#[cfg(test)]
+#[path = "session_test.rs"]
+mod session_tests;

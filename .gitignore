@@ -181,6 +181,9 @@ vendor/
 !peri-tui/vendor/
 
 .claude/skills/*-workspace
+
+# site-project workspace state (per-developer)
+side-projects/site-project/workspace.json
 .wrangler.worktrees/
 .worktrees/
 
@@ -193,3 +196,11 @@ settings.json
 .claude/skills/*
 !.claude/skills/learn-from-history/**
 !.claude/skills/learn-from-history/
+!.claude/skills/start-devflow/**
+!.claude/skills/start-devflow/
+!.claude/agents/
+!.claude/agents/coder.md
+.qoder/**/*
+.superpowers
+skills-lock.json
+.agents

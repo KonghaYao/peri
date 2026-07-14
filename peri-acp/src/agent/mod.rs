@@ -1,9 +1,11 @@
 //! Agent construction and lifecycle.
 //!
-//! Builds ReActAgent instances with the full middleware chain.
-//! Shared by TUI and ACP paths via [`build_agent`].
+//! Builds `AgentComponents` (middleware chain + LLM + system prompt) consumed by
+//! v2 `StageContext`. Shared by TUI and ACP paths via [`build_agent`].
 //!
 //! Migrated from peri-tui/src/app/agent.rs:build_bare_agent().
 
 pub mod builder;
+pub mod builder_v2;
+pub mod workflow_agent;
 pub use builder::*;

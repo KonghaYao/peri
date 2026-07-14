@@ -20,6 +20,7 @@
         let mut state = AgentState::new("/nonexistent/path");
         let result = mw.before_agent(&mut state).await;
         assert!(result.is_ok());
+        assert!(contribution(&mw).is_none());
         assert_eq!(state.messages().len(), 0);
     }
 
@@ -35,10 +36,8 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        assert_eq!(state.messages().len(), 1);
-        let msg = &state.messages()[0];
-        assert!(msg.is_system());
-        let content = msg.content();
+        assert_eq!(state.messages().len(), 0, "before_agent 不应再 prepend 消息");
+        let content = contribution(&mw).unwrap();
         assert!(content.contains("tui-dev"));
         assert!(content.contains("codebase-exploration"));
         assert!(content.contains("Skills"));
@@ -53,8 +52,8 @@
         let mut state = AgentState::new("/any/cwd");
         mw.before_agent(&mut state).await.unwrap();
 
-        assert_eq!(state.messages().len(), 1);
-        assert!(state.messages()[0].content().contains("custom-skill"));
+        let content = contribution(&mw).unwrap();
+        assert!(content.contains("custom-skill"));
     }
 
     #[tokio::test]
@@ -68,7 +67,7 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        let content = state.messages()[0].content();
+        let content = contribution(&mw).unwrap();
         assert!(
             content.contains("'/skill-name'"),
             "提示词应包含 '/skill-name' 格式，实际: {}",
@@ -87,7 +86,7 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        let content = state.messages()[0].content();
+        let content = contribution(&mw).unwrap();
         assert!(
             !content.contains("#skill_name"),
             "提示词不应包含旧 #skill_name 格式，实际: {}",
@@ -124,7 +123,7 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        let content = state.messages()[0].content();
+        let content = contribution(&mw).unwrap();
         assert!(
             content.contains("extra-skill-1"),
             "Should include skill from extra dir 1"
@@ -150,7 +149,7 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         let result = mw.before_agent(&mut state).await;
         assert!(result.is_ok());
-        assert_eq!(state.messages().len(), 0, "No skills should be injected");
+        assert!(contribution(&mw).is_none(), "No skills should be injected");
     }
 
     #[tokio::test]
@@ -177,7 +176,7 @@
         let mut state = AgentState::new("/nonexistent");
         mw.before_agent(&mut state).await.unwrap();
 
-        let content = state.messages()[0].content();
+        let content = contribution(&mw).unwrap();
         assert!(content.contains("project-skill"));
         assert!(content.contains("extra-skill"));
     }
@@ -264,10 +263,6 @@
     #[test]
     fn test_e2e_frozen_summary_contains_builtin_use_artifacts() {
         // 验证：disable_bundled=false 时 frozen summary 含 builtin use-artifacts
-        // 这覆盖了 Task 1-3 的整条链路：
-        //   resolve_skill_roots(末尾追加 Builtin root)
-        //   → scan_skill_roots(Builtin 特判从 BUILTIN_SKILLS 加载)
-        //   → build_summary(生成给 LLM 看的摘要)
         let summary = SkillsMiddleware::build_frozen_summary("/tmp", vec![], false);
         let summary = summary.expect("非空时应返回 Some");
         assert!(

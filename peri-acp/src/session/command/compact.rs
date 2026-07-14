@@ -9,14 +9,12 @@
 //! - [`pipeline`] 子模块实现各阶段：validate → resolve_model → run_full_compact
 //!   → re_inject → assemble_messages，每阶段一个纯函数 + 显式输入输出类型。
 //! - [`events`] 子模块统一 `event_sink.push_event` 模板（消除 4 处 CompactError 重复）。
-//! - [`invariant`] 子模块封装 compact 输出 Human-first 结构不变量（CLAUDE.md [TRAP]）。
 //!
 // [TRAP] Immediate 命令路径绕过 agent event pump，必须手动调用 `sink.push_done()`。
 // CompactCommand 自身不调用 push_done（由 executor.rs 的 Immediate 路径负责）。
 // （详见 spec/global/domains/agent.md#issue_2026-05-29-immediate-command-missing-push-done）
 
 mod events;
-mod invariant;
 mod pipeline;
 
 use async_trait::async_trait;

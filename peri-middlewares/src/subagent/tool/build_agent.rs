@@ -1,13 +1,16 @@
-use std::sync::Arc;
+//! SubAgent v2 装配：从 agent_def 构造 v2-ready 数据（LLM + middlewares + tools +
+//! cancel_token + child_thread_id + max_iterations + system_prompt），调用方直接
+//! 喂给 `build_v2_subagent_context` + `run_react_loop`。
+//!
+//! **P5.1 重构**：旧版本通过 `SubAgentBuilder.build()` 构造 v1 Agent，
+//! 现在直接产出 v2 字段。
 
 use peri_agent::{
-    agent::{
-        events::AgentEvent, react::ReactLLM, state::AgentState, AgentCancellationToken, ReActAgent,
-    },
-    thread::ThreadMeta,
+    agent::react::ReactLLM, middleware::r#trait::Middleware, thread::ThreadMeta, tools::BaseTool,
 };
+use tokio_util::sync::CancellationToken;
 
-use super::{build_subagent_middlewares, SourceAgentIdHandler};
+use super::build_subagent_middlewares;
 use crate::{
     claude_agent_parser::ClaudeAgent, hooks::types::HookEvent, subagent::SubAgentMiddlewareConfig,
 };
@@ -21,26 +24,33 @@ pub(crate) enum CancelPolicy {
     Independent,
 }
 
-/// Concrete builder type for subagents.
-type SubReActAgent = ReActAgent<Box<dyn ReactLLM + Send + Sync>, AgentState>;
-
-/// Result of building a subagent from an agent definition.
-/// The caller handles execute, result handling, and cleanup.
+/// v2-ready SubAgent 装配产物
 pub(crate) struct AgentBuildResult {
-    pub builder: SubReActAgent,
-    pub state: AgentState,
+    /// SubAgent LLM（RetryableLLM 包装）
+    pub llm: Box<dyn ReactLLM + Send + Sync>,
+    /// 已组装的中间件（含 frozen CLAUDE.md / Skills / TodoMiddleware）
+    pub middlewares: Vec<Box<dyn Middleware>>,
+    /// 过滤后的工具集（按 agent_def.tools/disallowed_tools）
+    pub tools: Vec<Box<dyn BaseTool>>,
+    /// SubAgent system prompt
+    pub system_prompt: Option<String>,
+    /// 子 agent 唯一标识（thread_id / instance_id）
     pub child_thread_id: String,
-    pub cancel_token: Option<AgentCancellationToken>,
+    /// 可选 cancel token（Cascade = parent.child_token()，Independent = new）
+    pub cancel_token: Option<CancellationToken>,
+    /// ReAct 循环最大迭代次数（来自 agent_def.max_turns，默认 200）
+    pub max_iterations: usize,
 }
 
 impl super::SubAgentTool {
-    /// Build a ReActAgent + AgentState from an agent definition.
+    /// 从 agent 定义构造 v2-ready SubAgent 数据。
     ///
     /// `skip_events`: if true, SubagentStarted/SubagentStart events are NOT emitted here
     /// (used by background path which emits them later in tokio::spawn).
     /// `setup_event_handler`: if true, sets up child_handler_factory or event_handler
     /// with the generated child_thread_id as instance_id (normal path). If false (background
     /// path), no event handler is configured here.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn build_agent_from_def(
         &self,
         agent_def: &ClaudeAgent,
@@ -48,7 +58,7 @@ impl super::SubAgentTool {
         cwd: &str,
         cancel_policy: CancelPolicy,
         skip_events: bool,
-        setup_event_handler: bool,
+        _setup_event_handler: bool,
     ) -> Result<AgentBuildResult, Box<dyn std::error::Error + Send + Sync>> {
         // 1. Generate child_thread_id
         let child_thread_id = uuid::Uuid::now_v7().to_string();
@@ -63,7 +73,6 @@ impl super::SubAgentTool {
             child_meta.id = child_thread_id.clone();
             child_meta.parent_thread_id = self.parent_thread_id.clone();
             child_meta.hidden = true;
-            // 强类型枚举赋值：经 FromStr 解析本地的 cancel_policy 字符串
             child_meta.cancel_policy = cancel_policy_str
                 .parse()
                 .expect("cancel_policy_str 由本枚举构造，解析不会失败");
@@ -106,10 +115,7 @@ impl super::SubAgentTool {
             raw_turns as usize
         };
 
-        // 6. Build agent
-        let mut agent_builder = ReActAgent::new(llm).max_iterations(max_iterations);
-
-        // 7. Middlewares
+        // 6. Middlewares
         let mw_config =
             SubAgentMiddlewareConfig::for_agent_def(agent_def.frontmatter.skills.clone(), cwd)
                 .with_frozen(
@@ -123,76 +129,30 @@ impl super::SubAgentTool {
                         .as_deref()
                         .map(|s| s.as_str().to_string()),
                 );
-        for mw in build_subagent_middlewares(mw_config) {
-            agent_builder = agent_builder.add_middleware(mw);
-        }
+        let middlewares = build_subagent_middlewares(mw_config);
 
-        // 8. System prompt
-        if let Some(ref builder) = self.system_builder {
+        // 7. System prompt
+        let system_prompt = if let Some(ref builder) = self.system_builder {
             let overrides = Self::overrides_from_agent_def(
                 &agent_def.system_prompt,
                 &agent_def.frontmatter.tone,
                 &agent_def.frontmatter.proactiveness,
             );
-            let system_content = builder(overrides.as_ref(), cwd);
-            agent_builder = agent_builder.with_system_prompt(system_content);
-        }
-
-        // 9. Register tools
-        // 先收集工具名（filtered_tools 会被 register_tool 消费）
-        let all_tool_names: Vec<String> = filtered_tools
-            .iter()
-            .map(|t| t.name().to_string())
-            .collect();
-        for tool in filtered_tools {
-            agent_builder = agent_builder.register_tool(tool);
-        }
-
-        // 9.5 Error suggestion wiring
-        let agents_dir = std::path::Path::new(cwd).join(".claude").join("agents");
-        let agents_dir_opt = if agents_dir.exists() {
-            Some(agents_dir.as_path())
+            Some(builder(overrides.as_ref(), cwd))
         } else {
             None
         };
-        let snapshot =
-            crate::error_suggest::build_tool_registry_snapshot(all_tool_names, agents_dir_opt);
-        let registry = crate::error_suggest::build_default_registry();
-        agent_builder = agent_builder
-            .with_tool_registry_snapshot(snapshot)
-            .with_error_suggest_registry(registry);
 
-        // 10. Event handler
-        if setup_event_handler {
-            if let Some(ref factory) = self.child_handler_factory {
-                agent_builder = agent_builder.with_event_handler(factory(child_thread_id.clone()));
-            } else if let Some(handler) = &self.event_handler {
-                let tagged = Arc::new(SourceAgentIdHandler::new(
-                    Arc::clone(handler),
-                    child_thread_id.clone(),
-                ));
-                agent_builder = agent_builder.with_event_handler(tagged);
-            }
-        }
-
-        // 11. Agent state
-        let state = if let Some(ref store) = self.thread_store {
-            AgentState::new(cwd.to_string())
-                .with_persistence(Arc::clone(store), child_thread_id.clone())
-        } else {
-            AgentState::new(cwd.to_string())
-        };
-
-        // 12-13. Cancel token (cascade → child_token, independent → new)
-        let cancel_token = match cancel_policy {
+        // 8. Cancel token
+        let cancel_token: Option<CancellationToken> = match cancel_policy {
             CancelPolicy::Cascade => self.cancel.as_ref().map(|t| t.child_token()),
-            CancelPolicy::Independent => Some(AgentCancellationToken::new()),
+            CancelPolicy::Independent => Some(CancellationToken::new()),
         };
 
-        // 14. Events (skip if background path)
+        // 9. Events (skip if background path)
         if !skip_events {
             if let Some(ref handler) = self.event_handler {
-                handler.on_event(AgentEvent::SubagentStarted {
+                handler.on_event(peri_agent::agent::events::ExecutorEvent::SubagentStarted {
                     agent_name: agent_name.to_string(),
                     instance_id: child_thread_id.clone(),
                     is_background: false,
@@ -203,10 +163,13 @@ impl super::SubAgentTool {
         }
 
         Ok(AgentBuildResult {
-            builder: agent_builder,
-            state,
+            llm,
+            middlewares,
+            tools: filtered_tools,
+            system_prompt,
             child_thread_id,
             cancel_token,
+            max_iterations,
         })
     }
 }

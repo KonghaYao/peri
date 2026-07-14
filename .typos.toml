@@ -1,0 +1,13 @@
+[default.extend-words]
+# ratatui is the name of the Rust TUI library, not a misspelling of ratatouille
+ratatui = "ratatui"
+# intentional abbreviations / variable names
+fo = "fo"
+hel = "hel"
+# test data and file references
+fle = "fle"
+gti = "gti"
+bulder = "bulder"
+
+[files]
+extend-exclude = ["Cargo.lock", "side-projects/", "worktrees/", "target/", ".git/"]

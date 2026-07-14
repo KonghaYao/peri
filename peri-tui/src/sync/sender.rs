@@ -8,7 +8,7 @@ use crate::sync::{
     packer::{self, PackedData},
     protocol::WsMessage,
     scanner,
-    ui::{println_overwrite, ProgressBar},
+    ui::{ProgressBar, println_overwrite},
 };
 
 pub async fn run_sync_sender(server_url: &str) -> Result<()> {

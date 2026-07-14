@@ -5,7 +5,7 @@ use rand::RngExt;
 
 use crate::{
     agent::{
-        events::{AgentEvent, AgentEventHandler},
+        events::{AgentEventHandler, ExecutorEvent},
         react::{ReactLLM, Reasoning},
     },
     error::AgentResult,
@@ -80,7 +80,7 @@ impl<L: ReactLLM> RetryableLLM<L> {
         self
     }
 
-    fn emit(&self, event: AgentEvent) {
+    fn emit(&self, event: ExecutorEvent) {
         if let Some(h) = &self.event_handler {
             h.on_event(event);
         }
@@ -118,7 +118,7 @@ impl<L: ReactLLM> ReactLLM for RetryableLLM<L> {
                         error = %e,
                         "LLM 调用失败，准备重试"
                     );
-                    self.emit(AgentEvent::LlmRetrying {
+                    self.emit(ExecutorEvent::LlmRetrying {
                         attempt: attempt + 1,
                         max_attempts: self.config.max_retries,
                         delay_ms: delay,
@@ -151,6 +151,21 @@ impl<L: ReactLLM> ReactLLM for RetryableLLM<L> {
 
     fn context_window(&self) -> u32 {
         self.inner.context_window()
+    }
+
+    fn inject_event_handler(
+        &mut self,
+        handler: Option<std::sync::Arc<dyn crate::agent::events::AgentEventHandler>>,
+    ) {
+        self.event_handler = handler;
+    }
+
+    fn build_provider_request_body(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+    ) -> Option<serde_json::Value> {
+        self.inner.build_provider_request_body(messages, tools)
     }
 }
 

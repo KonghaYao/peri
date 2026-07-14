@@ -5,6 +5,7 @@ use peri_agent::{
     },
     messages::BaseMessage,
     middleware::r#trait::Middleware,
+    session,
 };
 
 use super::*;
@@ -31,9 +32,9 @@ fn test_middleware_name() {
         None,
         Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
     );
-    // Call via Middleware<AgentState>, explicit generic parameter
+    // Call via Middleware, explicit trait path
     assert_eq!(
-        <SubAgentMiddleware as Middleware<AgentState>>::name(&m),
+        <SubAgentMiddleware as Middleware>::name(&m),
         "SubAgentMiddleware"
     );
 }
@@ -45,7 +46,7 @@ fn test_middleware_collect_tools() {
         None,
         Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
     );
-    let tools = <SubAgentMiddleware as Middleware<AgentState>>::collect_tools(&m, "/tmp");
+    let tools = <SubAgentMiddleware as Middleware>::collect_tools(&m, "/tmp");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name(), "Agent");
 }
@@ -70,8 +71,8 @@ fn test_scan_agents_no_dir() {
         "Built-in agents should always be present"
     );
     assert!(
-        result.iter().any(|(id, _, _)| id == "explore"),
-        "Built-in explore agent should be present"
+        result.iter().any(|(id, _, _)| id == "explorer"),
+        "Built-in explorer agent should be present"
     );
 }
 
@@ -141,7 +142,7 @@ async fn test_before_agent_no_longer_injects_summary() {
         Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
     );
     let mut state = AgentState::new(dir.path().to_str().unwrap());
-    <SubAgentMiddleware as Middleware<AgentState>>::before_agent(&m, &mut state)
+    <SubAgentMiddleware as Middleware>::before_agent(&m, &mut state)
         .await
         .unwrap();
 
@@ -161,7 +162,7 @@ async fn test_before_agent_no_agents_no_op() {
         Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
     );
     let mut state = AgentState::new("/nonexistent");
-    <SubAgentMiddleware as Middleware<AgentState>>::before_agent(&m, &mut state)
+    <SubAgentMiddleware as Middleware>::before_agent(&m, &mut state)
         .await
         .unwrap();
     assert_eq!(state.messages().len(), 0);
@@ -183,7 +184,7 @@ async fn test_before_agent_snapshots_messages() {
     state.add_message(BaseMessage::human("Hello"));
     state.add_message(BaseMessage::ai("Hi"));
 
-    <SubAgentMiddleware as Middleware<AgentState>>::before_agent(&m, &mut state)
+    <SubAgentMiddleware as Middleware>::before_agent(&m, &mut state)
         .await
         .unwrap();
 
@@ -270,4 +271,78 @@ fn test_scan_agents_with_extra_dirs_empty() {
     let result = scan_agents_with_extra_dirs("/nonexistent", &[]);
     let expected = scan_agents("/nonexistent");
     assert_eq!(result.len(), expected.len());
+}
+
+// ── count_tool_calls_from_session 单元测试 ──────────────
+
+#[test]
+fn test_count_tool_calls_from_session_zero_when_empty() {
+    let session = make_session();
+    assert_eq!(
+        count_tool_calls_from_session(&session),
+        0,
+        "空 transcript 应返回 0"
+    );
+}
+
+#[test]
+fn test_count_tool_calls_from_session_counts_multiple_tools() {
+    let session = make_session();
+    {
+        let transcript = session.transcript();
+        let mut tx = transcript.write();
+        tx.append(BaseMessage::tool_result("call_1", "result 1"));
+        tx.append(BaseMessage::tool_result("call_2", "result 2"));
+        tx.append(BaseMessage::tool_result("call_3", "result 3"));
+    }
+    assert_eq!(
+        count_tool_calls_from_session(&session),
+        3,
+        "3 条 Tool 消息应被正确统计"
+    );
+}
+
+#[test]
+fn test_count_tool_calls_from_session_ignores_non_tool_messages() {
+    let session = make_session();
+    {
+        let transcript = session.transcript();
+        let mut tx = transcript.write();
+        tx.append(BaseMessage::human("hello"));
+        tx.append(BaseMessage::tool_result("call_1", "result 1"));
+        tx.append(BaseMessage::ai("thinking..."));
+        tx.append(BaseMessage::tool_result("call_2", "result 2"));
+        tx.append(BaseMessage::system("system prompt"));
+    }
+    assert_eq!(
+        count_tool_calls_from_session(&session),
+        2,
+        "只应统计 Tool 消息，忽略 Human/Ai/System"
+    );
+}
+
+#[test]
+fn test_count_tool_calls_from_session_counts_error_tools() {
+    let session = make_session();
+    {
+        let transcript = session.transcript();
+        let mut tx = transcript.write();
+        tx.append(BaseMessage::tool_result("call_1", "success"));
+        tx.append(BaseMessage::tool_error(
+            "call_2",
+            "failed: permission denied",
+        ));
+    }
+    assert_eq!(
+        count_tool_calls_from_session(&session),
+        2,
+        "错误工具调用也应被统计（失败也是一次执行）"
+    );
+}
+
+fn make_session() -> std::sync::Arc<session::Session> {
+    use std::sync::Arc;
+    let cwd: Arc<str> = Arc::from("/tmp/test_count_tools");
+    let frozen = session::FrozenContext::builder().build();
+    session::Session::new(cwd, frozen, None)
 }

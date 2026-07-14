@@ -1,12 +1,9 @@
 use async_trait::async_trait;
 
 use crate::{
-    agent::{
-        react::{AgentOutput, ToolCall, ToolResult},
-        state::State,
-    },
+    agent::react::{AgentOutput, ToolCall, ToolResult},
     error::{AgentError, AgentResult},
-    middleware::r#trait::Middleware,
+    middleware::{r#trait::Middleware, state::MiddlewareState},
 };
 
 /// 日志中间件 - 记录 Agent 执行过程
@@ -37,27 +34,36 @@ impl Default for LoggingMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for LoggingMiddleware {
+impl Middleware for LoggingMiddleware {
     fn name(&self) -> &str {
         &self.name
     }
 
-    async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
-        println!("[{}] Agent starting | cwd: {}", self.name, state.cwd());
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        tracing::info!(name = %self.name, cwd = %state.cwd(), "Agent starting");
         Ok(())
     }
 
-    async fn before_tool(&self, state: &mut S, tool_call: &ToolCall) -> AgentResult<ToolCall> {
+    async fn before_tool(
+        &self,
+        state: &mut dyn MiddlewareState,
+        tool_call: &ToolCall,
+    ) -> AgentResult<ToolCall> {
         let step = state.current_step();
         if self.verbose {
-            println!(
-                "[{}] Step {step} | Calling tool: {} | input: {}",
-                self.name, tool_call.name, tool_call.input
+            tracing::info!(
+                name = %self.name,
+                step,
+                tool = %tool_call.name,
+                input = %tool_call.input,
+                "Calling tool"
             );
         } else {
-            println!(
-                "[{}] Step {step} | Calling tool: {}",
-                self.name, tool_call.name
+            tracing::info!(
+                name = %self.name,
+                step,
+                tool = %tool_call.name,
+                "Calling tool"
             );
         }
         Ok(tool_call.clone())
@@ -65,33 +71,49 @@ impl<S: State> Middleware<S> for LoggingMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut S,
+        _state: &mut dyn MiddlewareState,
         tool_call: &ToolCall,
         result: &ToolResult,
     ) -> AgentResult<()> {
         if result.is_error {
-            eprintln!(
-                "[{}] Tool {} failed: {}",
-                self.name, tool_call.name, result.output
+            tracing::warn!(
+                name = %self.name,
+                tool = %tool_call.name,
+                output = %result.output,
+                "Tool failed"
             );
         } else if self.verbose {
-            println!(
-                "[{}] Tool {} succeeded: {}",
-                self.name, tool_call.name, result.output
+            tracing::info!(
+                name = %self.name,
+                tool = %tool_call.name,
+                output = %result.output,
+                "Tool succeeded"
             );
         } else {
-            println!("[{}] Tool {} succeeded", self.name, tool_call.name);
+            tracing::info!(
+                name = %self.name,
+                tool = %tool_call.name,
+                "Tool succeeded"
+            );
         }
         Ok(())
     }
 
-    async fn after_agent(&self, _state: &mut S, output: &AgentOutput) -> AgentResult<AgentOutput> {
-        println!("[{}] Agent completed in {} steps", self.name, output.steps);
+    async fn after_agent(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        output: &AgentOutput,
+    ) -> AgentResult<AgentOutput> {
+        tracing::info!(name = %self.name, steps = output.steps, "Agent completed");
         Ok(output.clone())
     }
 
-    async fn on_error(&self, _state: &mut S, error: &AgentError) -> AgentResult<()> {
-        eprintln!("[{}] Agent error: {}", self.name, error);
+    async fn on_error(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        error: &AgentError,
+    ) -> AgentResult<()> {
+        tracing::warn!(name = %self.name, error = %error, "Agent error");
         Ok(())
     }
 }
@@ -116,17 +138,21 @@ impl Default for MetricsMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for MetricsMiddleware {
+impl Middleware for MetricsMiddleware {
     fn name(&self) -> &str {
         &self.name
     }
 
-    async fn after_agent(&self, _state: &mut S, output: &AgentOutput) -> AgentResult<AgentOutput> {
-        println!(
-            "[{}] Total tool calls: {} | Steps: {}",
-            self.name,
-            output.tool_calls.len(),
-            output.steps
+    async fn after_agent(
+        &self,
+        _state: &mut dyn MiddlewareState,
+        output: &AgentOutput,
+    ) -> AgentResult<AgentOutput> {
+        tracing::info!(
+            name = %self.name,
+            tool_calls = output.tool_calls.len(),
+            steps = output.steps,
+            "Total tool calls"
         );
         Ok(output.clone())
     }

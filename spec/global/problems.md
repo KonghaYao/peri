@@ -4,1890 +4,218 @@
 
 ## 关键词索引
 
-### HashMap 顺序
-- [多处 HashMap 非确定性顺序导致 Anthropic Prompt Cache 前缀不稳定](domains/message-pipeline.md#issue_2026-05-12-deferred-tool-list-nondeterministic-order) — message-pipeline
+### AgentDone → TurnDone
 
-### Prompt Cache
-- [多处 HashMap 非确定性顺序导致 Anthropic Prompt Cache 前缀不稳定](domains/message-pipeline.md#issue_2026-05-12-deferred-tool-list-nondeterministic-order) — message-pipeline
-- [Skill Preload 注入消息到历史最前面导致首轮 Prompt Cache 失效](domains/message-pipeline.md#issue_2026-05-12-skill-preload-invalidates-prompt-cache) — message-pipeline
-- [System prompt 动态内容导致 Anthropic prompt cache 频繁失效，边界标记拆分修复](domains/system-prompt.md#issue_2026-05-13-system-prompt-dynamic-cache-invalidation) — system-prompt
-- [AskUserQuestion 导致缓存命中率极速下降](domains/system-prompt.md#issue_2026-05-13-askuserquestion-cache-hit-rate-drop) — system-prompt
-- [82% system 未缓存 + 断点在 tool_result-only 消息上静默失效](domains/message-pipeline.md#issue_2026-05-14-cache-breakpoint-structural-inefficiency) — message-pipeline
+- [issue_2026-07-06-enter-hello-cpu-spike TUI 输入 hello 并 Enter 后 CPU 100%](domains/tui.md#issue_2026-07-06-enter-hello-cpu-spike) — tui
 
-### 缓存前缀
-- [多处 HashMap 非确定性顺序导致 Anthropic Prompt Cache 前缀不稳定](domains/message-pipeline.md#issue_2026-05-12-deferred-tool-list-nondeterministic-order) — message-pipeline
+### atom 写入副作用
 
-### ToolSearchIndex
-- [多处 HashMap 非确定性顺序导致 Anthropic Prompt Cache 前缀不稳定](domains/message-pipeline.md#issue_2026-05-12-deferred-tool-list-nondeterministic-order) — message-pipeline
+- [issue_2026-07-03-tui-double-slash-cpu-spike TUI 输入区输入 // 导致 CPU 持续高负载](domains/tui.md#issue_2026-07-03-tui-double-slash-cpu-spike) — tui
 
-### prepend_message
-- [Skill Preload 注入消息到历史最前面导致首轮 Prompt Cache 失效](domains/message-pipeline.md#issue_2026-05-12-skill-preload-invalidates-prompt-cache) — message-pipeline
-- [prepend_message 的 insert(0) 右移导致 StateSnapshot 包含 System 消息](domains/system-prompt.md#issue_2026-05-13-system-prompt-dynamic-parts-duplicated-in-consecutive-calls) — system-prompt
-- [System Prompt 每轮重复注入 prepend_message 导致上下文倍数膨胀](domains/system-prompt.md#issue_2026-05-20-rapid-context-expansion) — system-prompt
+### arboard 剪贴板线程
 
-### add_message
-- [Skill Preload 注入消息到历史最前面导致首轮 Prompt Cache 失效](domains/message-pipeline.md#issue_2026-05-12-skill-preload-invalidates-prompt-cache) — message-pipeline
+- [issue_2026-07-05-message-area-crashes-and-rendering 消息区多场景崩溃/白屏/滚动异常](domains/tui.md#issue_2026-07-05-message-area-crashes-and-rendering) — tui
 
-### cache_control
-- [Skill Preload 注入消息到历史最前面导致首轮 Prompt Cache 失效](domains/message-pipeline.md#issue_2026-05-12-skill-preload-invalidates-prompt-cache) — message-pipeline
-- [82% system 未缓存 + 断点在 tool_result-only 消息上静默失效](domains/message-pipeline.md#issue_2026-05-14-cache-breakpoint-structural-inefficiency) — message-pipeline
+### Bracketed Paste
 
-### SystemNote
-- [SystemNote 在 RebuildAll 后堆积到消息列表末尾](domains/message-pipeline.md#issue_2026-05-12-systemnote-position-drift-on-rebuild) — message-pipeline
+- [issue_2026-07-05-paste-newline-triggers-submit 输入框粘贴含换行文本时直接触发 Enter 提交](domains/tui.md#issue_2026-07-05-paste-newline-triggers-submit) — tui
 
-### RebuildAll
-- [SystemNote 在 RebuildAll 后堆积到消息列表末尾](domains/message-pipeline.md#issue_2026-05-12-systemnote-position-drift-on-rebuild) — message-pipeline
-- [CacheWarning 消息被 RebuildAll 立即丢弃，用户无法看到](domains/message-pipeline.md#issue_2026-05-12-cache-warning-discarded-by-rebuild) — message-pipeline
-- [Compact 完成后残留 "正在压缩上下文…" 系统通知](domains/message-pipeline.md#issue_2026-05-12-compact-ephemeral-notes-not-cleared) — message-pipeline
+### Event::Paste
 
-### ephemeral_notes
-- [SystemNote 在 RebuildAll 后堆积到消息列表末尾](domains/message-pipeline.md#issue_2026-05-12-systemnote-position-drift-on-rebuild) — message-pipeline
-- [Compact 完成后残留 "正在压缩上下文…" 系统通知](domains/message-pipeline.md#issue_2026-05-12-compact-ephemeral-notes-not-cleared) — message-pipeline
+- [issue_2026-07-05-paste-newline-triggers-submit 输入框粘贴含换行文本时直接触发 Enter 提交](domains/tui.md#issue_2026-07-05-paste-newline-triggers-submit) — tui
 
-### 锚点机制
-- [SystemNote 在 RebuildAll 后堆积到消息列表末尾](domains/message-pipeline.md#issue_2026-05-12-systemnote-position-drift-on-rebuild) — message-pipeline
+### Global scope
 
-### CacheWarning
-- [CacheWarning 消息被 RebuildAll 立即丢弃，用户无法看到](domains/message-pipeline.md#issue_2026-05-12-cache-warning-discarded-by-rebuild) — message-pipeline
+- [issue_2026-07-05-mouse-move-cpu-spike 鼠标晃动导致 CPU 暴涨](domains/tui.md#issue_2026-07-05-mouse-move-cpu-spike) — tui
 
-### AiReasoning
-- [流式过程中 AI 文本不可见（工具调用场景）](domains/agent.md#issue_2026-05-11-streaming-text-invisible-with-tools) — agent
+### history 草稿
 
-### TextChunk
-- [流式过程中 AI 文本不可见（工具调用场景）](domains/agent.md#issue_2026-05-11-streaming-text-invisible-with-tools) — agent
+- [issue_2026-07-05-message-flow-render-sync-freeze 消息流渲染同步问题——提交后用户输入不显示、loading 卡死、history 恢复异常](domains/tui.md#issue_2026-07-05-message-flow-render-sync-freeze) — tui
 
-### 事件类型语义
-- [流式过程中 AI 文本不可见（工具调用场景）](domains/agent.md#issue_2026-05-11-streaming-text-invisible-with-tools) — agent
+### hook state 稳态写入
 
-### frozen_subagent_vms
-- [Background Agent 三个 Bug：显示消失、subagent_type 限制、continuation 不触发](domains/agent.md#issue_2026-05-12-background-agent-display-and-continuation-bugs) — agent
+- [issue_2026-07-06-enter-hello-cpu-spike TUI 输入 hello 并 Enter 后 CPU 100%](domains/tui.md#issue_2026-07-06-enter-hello-cpu-spike) — tui
 
-### continuation 竞态
-- [Background Agent 三个 Bug：显示消失、subagent_type 限制、continuation 不触发](domains/agent.md#issue_2026-05-12-background-agent-display-and-continuation-bugs) — agent
+### Hook type mismatch
 
-### fork+background
-- [Background Agent 三个 Bug：显示消失、subagent_type 限制、continuation 不触发](domains/agent.md#issue_2026-05-12-background-agent-display-and-continuation-bugs) — agent
+- [issue_2026-07-05-enter-clear-hook-mismatch-panic Enter 提交 & /clear 清屏触发 Hook type mismatch panic 导致 TUI 崩溃](domains/tui.md#issue_2026-07-05-enter-clear-hook-mismatch-panic) — tui
 
-### SubAgent
-- [Background Agent 工具继承缺失——子 agent 仅能使用 TodoWrite](domains/agent.md#issue_2026-05-11-background-agent-missing-tools) — agent
-- [同步子 Agent（Normal/Fork）事件溢出到主 Agent 消息流](domains/agent.md#issue_2026-05-13-sync-subagent-events-leak-to-parent) — agent
-- [同步 SubAgent Ctrl+C 中断——handle_interrupted() 的 in_subagent() 守卫静默吞掉父 Agent 中断事件](domains/agent.md#issue_2026-05-26-sync-subagent-cancel-fix-attempts-log) — agent
+### loading 事实源
 
-### in_subagent
-- [同步子 Agent（Normal/Fork）事件溢出到主 Agent 消息流](domains/agent.md#issue_2026-05-13-sync-subagent-events-leak-to-parent) — agent
-- [同步 SubAgent Ctrl+C 中断——handle_interrupted() 的 in_subagent() 守卫静默吞掉父 Agent 中断事件](domains/agent.md#issue_2026-05-26-sync-subagent-cancel-fix-attempts-log) — agent
+- [issue_2026-07-05-message-flow-render-sync-freeze 消息流渲染同步问题——提交后用户输入不显示、loading 卡死、history 恢复异常](domains/tui.md#issue_2026-07-05-message-flow-render-sync-freeze) — tui
 
-### StateSnapshot 守卫
-- [同步子 Agent（Normal/Fork）事件溢出到主 Agent 消息流](domains/agent.md#issue_2026-05-13-sync-subagent-events-leak-to-parent) — agent
-- [流式渲染中 map_executor_event 丢弃中间 StateSnapshot](domains/message-pipeline.md#issue_2026-05-13-streaming-text-tool-aggregation-visual-issues) — message-pipeline
+### loading spinner 自激
 
-### 事件溢出
-- [同步子 Agent（Normal/Fork）事件溢出到主 Agent 消息流](domains/agent.md#issue_2026-05-13-sync-subagent-events-leak-to-parent) — agent
-- [并发前台SubAgent调用时UI感知延迟，SubAgentGroup卡片不可见](domains/tui.md#issue_2026-05-15-concurrent-subagent-display-delay) — tui
+- [issue_2026-07-06-enter-hello-cpu-spike TUI 输入 hello 并 Enter 后 CPU 100%](domains/tui.md#issue_2026-07-06-enter-hello-cpu-spike) — tui
 
-### map_executor_event
-- [流式渲染中 map_executor_event 丢弃中间 StateSnapshot](domains/message-pipeline.md#issue_2026-05-13-streaming-text-tool-aggregation-visual-issues) — message-pipeline
+### message_count 过滤
 
-### 双写路径
-- [后台 Agent 完成后 input_history 消息重复导致 Prompt Cache 失效](domains/agent.md#issue_2026-05-13-input-history-message-duplication-after-background-tasks) — agent
+- [issue_2026-07-05-hide-empty-threads-in-history-panel ThreadBrowser 面板应隐藏 message_count 为 0 的空线程](domains/tui.md#issue_2026-07-05-hide-empty-threads-in-history-panel) — tui
 
-### agent_state_messages
-- [后台 Agent 完成后 input_history 消息重复导致 Prompt Cache 失效](domains/agent.md#issue_2026-05-13-input-history-message-duplication-after-background-tasks) — agent
-- [prepend_message 的 insert(0) 右移导致 StateSnapshot 包含 System 消息](domains/system-prompt.md#issue_2026-05-13-system-prompt-dynamic-parts-duplicated-in-consecutive-calls) — system-prompt
-- [DeepSeek多轮对话中agent_state_messages消息重复导致API 400错误](domains/agent.md#issue_2026-05-14-deepseek-multi-turn-tool-result-duplication) — agent
+### MouseMove 高频事件
 
-### tool_call_id 重复
-- [后台 Agent 完成后 input_history 消息重复导致 Prompt Cache 失效](domains/agent.md#issue_2026-05-13-input-history-message-duplication-after-background-tasks) — agent
+- [issue_2026-07-05-mouse-move-cpu-spike 鼠标晃动导致 CPU 暴涨](domains/tui.md#issue_2026-07-05-mouse-move-cpu-spike) — tui
 
-### 流式渲染
-- [多轮对话中 AI message 和 thinking 在进行时不可见](domains/message-pipeline.md#issue_2026-05-13-ai-message-thinking-invisible-during-multi-turn) — message-pipeline
-- [流式渲染中 map_executor_event 丢弃中间 StateSnapshot](domains/message-pipeline.md#issue_2026-05-13-streaming-text-tool-aggregation-visual-issues) — message-pipeline
+### RENDER_CACHE 同步
 
-### has_snapshot_this_round
-- [多轮对话中 AI message 和 thinking 在进行时不可见](domains/message-pipeline.md#issue_2026-05-13-ai-message-thinking-invisible-during-multi-turn) — message-pipeline
-- [并发前台SubAgent调用时UI感知延迟，SubAgentGroup卡片不可见](domains/tui.md#issue_2026-05-15-concurrent-subagent-display-delay) — tui
+- [issue_2026-07-05-message-flow-render-sync-freeze 消息流渲染同步问题——提交后用户输入不显示、loading 卡死、history 恢复异常](domains/tui.md#issue_2026-07-05-message-flow-render-sync-freeze) — tui
 
-### 边界标记
-- [System prompt 动态内容导致 Anthropic prompt cache 频繁失效，边界标记拆分修复](domains/system-prompt.md#issue_2026-05-13-system-prompt-dynamic-cache-invalidation) — system-prompt
+### render 自激循环
 
-### __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__
-- [System prompt 动态内容导致 Anthropic prompt cache 频繁失效，边界标记拆分修复](domains/system-prompt.md#issue_2026-05-13-system-prompt-dynamic-cache-invalidation) — system-prompt
+- [issue_2026-07-03-tui-double-slash-cpu-spike TUI 输入区输入 // 导致 CPU 持续高负载](domains/tui.md#issue_2026-07-03-tui-double-slash-cpu-spike) — tui
 
-### split_system_blocks
-- [System prompt 动态内容导致 Anthropic prompt cache 频繁失效，边界标记拆分修复](domains/system-prompt.md#issue_2026-05-13-system-prompt-dynamic-cache-invalidation) — system-prompt
+### ScrollView 事件过滤
 
-### SkillPreloadMiddleware
-- [主 Agent 中间件链缺少 SkillPreloadMiddleware，预加载失效](domains/system-prompt.md#issue_2026-05-13-missing-skillpreload-in-main-agent) — system-prompt
-- [主 Agent SkillPreloadMiddleware preload_skills 硬编码为空，/skill-name 不注入全文](domains/agent.md#issue_2026-05-25-skill-preload-no-tool-calls-in-history) — agent
+- [issue_2026-07-05-mouse-move-cpu-spike 鼠标晃动导致 CPU 暴涨](domains/tui.md#issue_2026-07-05-mouse-move-cpu-spike) — tui
 
-### 中间件链缺失
-- [主 Agent 中间件链缺少 SkillPreloadMiddleware，预加载失效](domains/system-prompt.md#issue_2026-05-13-missing-skillpreload-in-main-agent) — system-prompt
+### ScrollView 双重滚动
 
-### 工具继承
-- [Background Agent 工具继承缺失——子 agent 仅能使用 TodoWrite](domains/agent.md#issue_2026-05-11-background-agent-missing-tools) — agent
+- [issue_2026-07-05-message-area-crashes-and-rendering 消息区多场景崩溃/白屏/滚动异常](domains/tui.md#issue_2026-07-05-message-area-crashes-and-rendering) — tui
 
-### register_tool
-- [Background Agent 工具继承缺失——子 agent 仅能使用 TodoWrite](domains/agent.md#issue_2026-05-11-background-agent-missing-tools) — agent
+### slash popup
 
-### merge_frozen_subagents
-- [并发前台SubAgent调用时UI感知延迟，SubAgentGroup卡片不可见](domains/tui.md#issue_2026-05-15-concurrent-subagent-display-delay) — tui
+- [issue_2026-07-03-tui-double-slash-cpu-spike TUI 输入区输入 // 导致 CPU 持续高负载](domains/tui.md#issue_2026-07-03-tui-double-slash-cpu-spike) — tui
 
-### reasoning
-- [GLM 模型 reasoning 字段未被解析，thinking 内容跨轮次丢失](domains/agent.md#issue_2026-05-12-glm-reasoning-field-not-parsed) — agent
+### ThreadBrowser
 
-### reasoning_content
-- [GLM 模型 reasoning 字段未被解析，thinking 内容跨轮次丢失](domains/agent.md#issue_2026-05-12-glm-reasoning-field-not-parsed) — agent
+- [issue_2026-07-05-hide-empty-threads-in-history-panel ThreadBrowser 面板应隐藏 message_count 为 0 的空线程](domains/tui.md#issue_2026-07-05-hide-empty-threads-in-history-panel) — tui
 
-### GLM
-- [GLM 模型 reasoning 字段未被解析，thinking 内容跨轮次丢失](domains/agent.md#issue_2026-05-12-glm-reasoning-field-not-parsed) — agent
+### u16 overflow
 
-### context_window
-- [OpenAI 兼容第三方 Provider 上下文用量计算不准确](domains/token-tracking.md#issue_2026-05-11-context-usage-miscalculation-openai-compatible) — token-tracking
-- [Model 面板添加 1M 上下文开关](domains/tui.md#issue_2026-05-16-model-panel-1m-context-toggle) — tui
+- [issue_2026-07-05-message-area-crashes-and-rendering 消息区多场景崩溃/白屏/滚动异常](domains/tui.md#issue_2026-07-05-message-area-crashes-and-rendering) — tui
 
-### 缓存命中率
-- [OpenAI 兼容第三方 Provider 上下文用量计算不准确](domains/token-tracking.md#issue_2026-05-11-context-usage-miscalculation-openai-compatible) — token-tracking
-- [状态栏缓存百分比在对话停止后消失](domains/token-tracking.md#issue_2026-05-12-cache-percentage-disappears-after-done) — token-tracking
+### use_state 调用顺序
 
-### last_user_input
-- [Auto Compact 后 Agent 未自动 Resubmit 继续执行](domains/compact.md#issue_2026-05-11-auto-compact-no-resubmit) — compact
+- [issue_2026-07-05-enter-clear-hook-mismatch-panic Enter 提交 & /clear 清屏触发 Hook type mismatch panic 导致 TUI 崩溃](domains/tui.md#issue_2026-07-05-enter-clear-hook-mismatch-panic) — tui
 
-### auto-compact
-- [Auto Compact 后 Agent 未自动 Resubmit 继续执行](domains/compact.md#issue_2026-05-11-auto-compact-no-resubmit) — compact
+### 本地提交 vs ACP 事件
 
-### CJK 宽度
-- [输入框鼠标点击光标定位不准](domains/tui.md#issue_2026-05-12-textarea-mouse-click-cursor-misposition-cjk) — tui
+- [issue_2026-07-05-message-flow-render-sync-freeze 消息流渲染同步问题——提交后用户输入不显示、loading 卡死、history 恢复异常](domains/tui.md#issue_2026-07-05-message-flow-render-sync-freeze) — tui
 
-### unicode-width
-- [输入框鼠标点击光标定位不准](domains/tui.md#issue_2026-05-12-textarea-mouse-click-cursor-misposition-cjk) — tui
-- [Form Edit 字段标签硬编码英文，未使用 i18n](domains/tui.md#issue_2026-05-16-setup-form-edit-labels-hardcoded) — tui
+### 空线程
 
-### 鼠标定位
-- [输入框鼠标点击光标定位不准](domains/tui.md#issue_2026-05-12-textarea-mouse-click-cursor-misposition-cjk) — tui
+- [issue_2026-07-05-hide-empty-threads-in-history-panel ThreadBrowser 面板应隐藏 message_count 为 0 的空线程](domains/tui.md#issue_2026-07-05-hide-empty-threads-in-history-panel) — tui
 
-### on_error 回调
-- [LSP transport 层错误处理缺陷（进程退出未更新状态 + 崩溃后无自动重连）](domains/lsp.md#issue_2026-05-12-lsp-transport-no-fast-fail-on-process-exit) — lsp
+### 条件早退
 
-### LSP 重连
-- [LSP transport 层错误处理缺陷（进程退出未更新状态 + 崩溃后无自动重连）](domains/lsp.md#issue_2026-05-12-lsp-transport-no-fast-fail-on-process-exit) — lsp
+- [issue_2026-07-05-enter-clear-hook-mismatch-panic Enter 提交 & /clear 清屏触发 Hook type mismatch panic 导致 TUI 崩溃](domains/tui.md#issue_2026-07-05-enter-clear-hook-mismatch-panic) — tui
 
-### parking_lot::MutexGuard !Send
-- [LSP transport 层错误处理缺陷（进程退出未更新状态 + 崩溃后无自动重连）](domains/lsp.md#issue_2026-05-12-lsp-transport-no-fast-fail-on-process-exit) — lsp
+### 终端模式
 
-### transport 断开
-- [LSP transport 层错误处理缺陷（进程退出未更新状态 + 崩溃后无自动重连）](domains/lsp.md#issue_2026-05-12-lsp-transport-no-fast-fail-on-process-exit) — lsp
+- [issue_2026-07-05-paste-newline-triggers-submit 输入框粘贴含换行文本时直接触发 Enter 提交](domains/tui.md#issue_2026-07-05-paste-newline-triggers-submit) — tui
 
-### Grep工具
-- [Grep 工具声明参数未实现 + 标准 grep 能力缺失](domains/agent.md#issue_2026-05-14-grep-tool-capability-gap) — agent
+### _meta 序列化
 
-### 参数声明
-- [Grep 工具声明参数未实现 + 标准 grep 能力缺失](domains/agent.md#issue_2026-05-14-grep-tool-capability-gap) — agent
+- [issue_2026-07-09-history-session-switch-loading-freeze History 面板切换 session 后 loading 永久卡死](domains/tui.md#issue_2026-07-09-history-session-switch-loading-freeze) — tui
+- [issue_2026-07-08-history-replay-missing-tool-interactions History 面板恢复的对话历史缺少工具调用](domains/tui.md#issue_2026-07-08-history-replay-missing-tool-interactions) — tui
 
-### 接口契约
-- [Grep 工具声明参数未实现 + 标准 grep 能力缺失](domains/agent.md#issue_2026-05-14-grep-tool-capability-gap) — agent
+### session replay
 
-### 工具标准能力
-- [Grep 工具声明参数未实现 + 标准 grep 能力缺失](domains/agent.md#issue_2026-05-14-grep-tool-capability-gap) — agent
+- [issue_2026-07-09-history-session-switch-loading-freeze History 面板切换 session 后 loading 永久卡死](domains/tui.md#issue_2026-07-09-history-session-switch-loading-freeze) — tui
+- [issue_2026-07-08-history-replay-missing-tool-interactions History 面板恢复的对话历史缺少工具调用](domains/tui.md#issue_2026-07-08-history-replay-missing-tool-interactions) — tui
 
-### thinking block
-- [SkillPreloadMiddleware 注入的伪 assistant 消息不含 thinking block，DeepSeek API 400](domains/agent.md#issue_2026-05-14-deepseek-anthropic-thinking-block-dropped) — agent
-- [Thinking/Reasoning数据流：占位thinking缺signature + AiReasoning死代码](domains/agent.md#issue_2026-05-12-thinking-reasoning-dataflow-issues) — agent
+### render body 写 atom
 
-### redacted_thinking
-- [SkillPreloadMiddleware 注入的伪 assistant 消息不含 thinking block，DeepSeek API 400](domains/agent.md#issue_2026-05-14-deepseek-anthropic-thinking-block-dropped) — agent
+- [issue_2026-07-06-message-area-copy-complex-content-crash 复制操作导致 TUI 卡死——status_bar render body 写 atom 自激回路](domains/tui.md#issue_2026-07-06-message-area-copy-complex-content-crash) — tui
 
-### SkillPreload
-- [SkillPreloadMiddleware 注入的伪 assistant 消息不含 thinking block，DeepSeek API 400](domains/agent.md#issue_2026-05-14-deepseek-anthropic-thinking-block-dropped) — agent
+### COPY_MESSAGE_UNTIL
 
-### DeepSeek
-- [SkillPreloadMiddleware 注入的伪 assistant 消息不含 thinking block，DeepSeek API 400](domains/agent.md#issue_2026-05-14-deepseek-anthropic-thinking-block-dropped) — agent
+- [issue_2026-07-06-message-area-copy-complex-content-crash 复制操作导致 TUI 卡死——status_bar render body 写 atom 自激回路](domains/tui.md#issue_2026-07-06-message-area-copy-complex-content-crash) — tui
 
-### tool_result闭合
-- [并发工具执行中部分路径提前返回导致 tool_result 缺失](domains/agent.md#issue_2026-05-14-orphaned-tool-use-without-tool-result) — agent
+### use_effect 自激回路
 
-### 并发工具
-- [并发工具执行中部分路径提前返回导致 tool_result 缺失](domains/agent.md#issue_2026-05-14-orphaned-tool-use-without-tool-result) — agent
+- [issue_2026-07-09-message-area-periodic-white-flash-streaming 消息区流式回复中周期性闪白——吸底 use_effect 写入环路](domains/tui.md#issue_2026-07-09-message-area-periodic-white-flash-streaming) — tui
 
-### 工具错误处理
-- [工具调用参数错误导致Agent停止而非自动重试](domains/agent.md#issue_2026-05-15-tool-execution-error-stops-agent) — agent
+### 吸底滚动
 
-### deferred_error
-- [并发工具执行中部分路径提前返回导致 tool_result 缺失](domains/agent.md#issue_2026-05-14-orphaned-tool-use-without-tool-result) — agent
+- [issue_2026-07-09-message-area-periodic-white-flash-streaming 消息区流式回复中周期性闪白——吸底 use_effect 写入环路](domains/tui.md#issue_2026-07-09-message-area-periodic-white-flash-streaming) — tui
 
-### 延迟写入
-- [stop_reason与内容不一致导致孤儿tool_use触发Anthropic API 400](domains/agent.md#issue_2026-05-15-orphaned-tool-use-after-concurrent-tool-error) — agent
+### ScrollView 事件拦截
 
-### stop_reason
-- [stop_reason与内容不一致导致孤儿tool_use触发Anthropic API 400](domains/agent.md#issue_2026-05-15-orphaned-tool-use-after-concurrent-tool-error) — agent
+- [issue_2026-07-04-message-area-scrollview-steals-input 主输入框无法输入——ScrollView 事件处理器消费所有键盘事件](domains/tui.md#issue_2026-07-04-message-area-scrollview-steals-input) — tui
 
-### 孤儿tool_use
-- [并发工具执行中部分路径提前返回导致 tool_result 缺失](domains/agent.md#issue_2026-05-14-orphaned-tool-use-without-tool-result) — agent
-- [stop_reason与内容不一致导致孤儿tool_use触发Anthropic API 400](domains/agent.md#issue_2026-05-15-orphaned-tool-use-after-concurrent-tool-error) — agent
+### active=false
 
-### tool_result id
-- [GLM Anthropic兼容端口tool_result block缺少id属性导致500错误](domains/agent.md#issue_2026-05-15-glm-anthropic-tool-result-id-attribute-error) — agent
-- [GLM Anthropic 兼容端口 500 回归: tool_result block 缺少 id 属性](domains/tui.md#issue_2026-06-06-glm-anthropic-tool-result-id-500-regression) — tui
-
-### 第三方API
-- [GLM Anthropic兼容端口tool_result block缺少id属性导致500错误](domains/agent.md#issue_2026-05-15-glm-anthropic-tool-result-id-attribute-error) — agent
-- [stop_reason与内容不一致导致孤儿tool_use触发Anthropic API 400](domains/agent.md#issue_2026-05-15-orphaned-tool-use-after-concurrent-tool-error) — agent
-
-### max_tokens
-- [Write工具超长内容触发max_tokens截断导致file_path缺失](domains/agent.md#issue_2026-05-15-write-tool-missing-filepath-max-tokens) — agent
-
-### 消息重复
-- [DeepSeek多轮对话中agent_state_messages消息重复导致API 400错误](domains/agent.md#issue_2026-05-14-deepseek-multi-turn-tool-result-duplication) — agent
-- [compact 持久化恢复时消息重复](domains/compact.md#issue_2026-06-02-session-restore-compact-message-duplication) — compact
-
-### last_message_count
-- [DeepSeek多轮对话中agent_state_messages消息重复导致API 400错误](domains/agent.md#issue_2026-05-14-deepseek-multi-turn-tool-result-duplication) — agent
-
-### 死代码
-- [24 处 #[allow(dead_code/unused)] 抑制了真正的死代码和未完成功能](domains/code-architecture.md#issue_2026-05-14-dead-code-unfinished-features-cleanup) — code-architecture
-
-### allow注解
-- [24 处 #[allow(dead_code/unused)] 抑制了真正的死代码和未完成功能](domains/code-architecture.md#issue_2026-05-14-dead-code-unfinished-features-cleanup) — code-architecture
-
-### 代码清理
-- [24 处 #[allow(dead_code/unused)] 抑制了真正的死代码和未完成功能](domains/code-architecture.md#issue_2026-05-14-dead-code-unfinished-features-cleanup) — code-architecture
-
-### 编译器警告
-- [24 处 #[allow(dead_code/unused)] 抑制了真正的死代码和未完成功能](domains/code-architecture.md#issue_2026-05-14-dead-code-unfinished-features-cleanup) — code-architecture
-
-### 测试分离
-- [89.8% 源文件内联测试违反规范，两轮分离后 152 个文件外部化](domains/code-architecture.md#issue_2026-05-14-test-separation-convention-debt) — code-architecture
-
-### include!
-- [89.8% 源文件内联测试违反规范，两轮分离后 152 个文件外部化](domains/code-architecture.md#issue_2026-05-14-test-separation-convention-debt) — code-architecture
-
-### #[path]
-- [89.8% 源文件内联测试违反规范，两轮分离后 152 个文件外部化](domains/code-architecture.md#issue_2026-05-14-test-separation-convention-debt) — code-architecture
-
-### 模块可见性
-- [89.8% 源文件内联测试违反规范，两轮分离后 152 个文件外部化](domains/code-architecture.md#issue_2026-05-14-test-separation-convention-debt) — code-architecture
-
-### Reasoning渲染
-- [最后一条 AI 消息无正文时展示思考最后 1 行](domains/message-pipeline.md#issue_2026-05-15-thinking-tail-preview) — message-pipeline
-
-### tail_lines
-- [最后一条 AI 消息无正文时展示思考最后 1 行](domains/message-pipeline.md#issue_2026-05-15-thinking-tail-preview) — message-pipeline
-
-### ContentBlockView
-- [最后一条 AI 消息无正文时展示思考最后 1 行](domains/message-pipeline.md#issue_2026-05-15-thinking-tail-preview) — message-pipeline
-
-### Hash设计
-- [最后一条 AI 消息无正文时展示思考最后 1 行](domains/message-pipeline.md#issue_2026-05-15-thinking-tail-preview) — message-pipeline
-
-### 断点回退
-- [82% system 未缓存 + 断点在 tool_result-only 消息上静默失效](domains/message-pipeline.md#issue_2026-05-14-cache-breakpoint-structural-inefficiency) — message-pipeline
-
-### 缓存驱逐
-- [82% system 未缓存 + 断点在 tool_result-only 消息上静默失效](domains/message-pipeline.md#issue_2026-05-14-cache-breakpoint-structural-inefficiency) — message-pipeline
-
-### system缓存
-- [82% system 未缓存 + 断点在 tool_result-only 消息上静默失效](domains/message-pipeline.md#issue_2026-05-14-cache-breakpoint-structural-inefficiency) — message-pipeline
-
-### Resize事件
-- [流式加载期间拖动窗口宽度，Resize 事件无节流导致 CPU 暴涨](domains/tui.md#issue_2026-05-14-streaming-resize-cpu-spike) — tui
-
-### 去抖/节流
-- [流式加载期间拖动窗口宽度，Resize 事件无节流导致 CPU 暴涨](domains/tui.md#issue_2026-05-14-streaming-resize-cpu-spike) — tui
-
-### 渲染线程
-- [流式加载期间拖动窗口宽度，Resize 事件无节流导致 CPU 暴涨](domains/tui.md#issue_2026-05-14-streaming-resize-cpu-spike) — tui
-
-### CPU暴涨
-- [流式加载期间拖动窗口宽度，Resize 事件无节流导致 CPU 暴涨](domains/tui.md#issue_2026-05-14-streaming-resize-cpu-spike) — tui
-
-### .get()
-- [active_provider 越界无保护可导致 render panic](domains/tui.md#issue_2026-05-16-setup-active-provider-oob-panic) — tui
-
-### _lc 参数
-- [Language 步骤完全硬编码中英混合文本，忽略 i18n](domains/tui.md#issue_2026-05-16-setup-language-step-hardcoded-no-i18n) — tui
-
-### agent_id 校验
-- [SubAgent 跨轮次 frozen_subagent_vms 累积导致批次与单个 SubAgentGroup 重复显示](domains/message-pipeline.md#issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication) — message-pipeline
-
-### begin_round 清理
-- [SubAgent 跨轮次 frozen_subagent_vms 累积导致批次与单个 SubAgentGroup 重复显示](domains/message-pipeline.md#issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication) — message-pipeline
-
-### chars().count()
-- [API Key 遮罩使用字节长度而非字符数](domains/tui.md#issue_2026-05-16-setup-api-key-mask-byte-vs-char) — tui
-
-### CJK 显示
-- [API Key 遮罩使用字节长度而非字符数](domains/tui.md#issue_2026-05-16-setup-api-key-mask-byte-vs-char) — tui
-
-### Ctrl+C 拦截
-- [Ctrl+C 在 Setup Wizard 中完全被拦截——无法退出](domains/tui.md#issue_2026-05-16-setup-ctrlc-blocked-cannot-exit) — tui
-
-### curl-pipe-bash
-- [update.rs 应简化为 curl 远程脚本 | bash](domains/cli.md#issue_2026-05-16-self-update-simplify-to-curl-pipe-bash) — cli
-
-### debug_assert
-- [Language 步骤空选项下取模 panic 风险](domains/tui.md#issue_2026-05-16-setup-mod-zero-empty-options) — tui
-
-### format_args_summary
-- [工具调用参数显示截断过短](domains/tui.md#issue_2026-05-16-tool-args-display-truncation-too-short) — tui
-
-### format_tool_args
-- [工具调用参数显示截断过短](domains/tui.md#issue_2026-05-16-tool-args-display-truncation-too-short) — tui
-
-### frozen_vms
-- [SubAgent 跨轮次 frozen_subagent_vms 累积导致批次与单个 SubAgentGroup 重复显示](domains/message-pipeline.md#issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication) — message-pipeline
-
-### FTL 未使用
-- [Language 步骤完全硬编码中英混合文本，忽略 i18n](domains/tui.md#issue_2026-05-16-setup-language-step-hardcoded-no-i18n) — tui
-
-### i18n 忽略
-- [Language 步骤完全硬编码中英混合文本，忽略 i18n](domains/tui.md#issue_2026-05-16-setup-language-step-hardcoded-no-i18n) — tui
-
-### i18n 未使用
-- [Form Edit 字段标签硬编码英文，未使用 i18n](domains/tui.md#issue_2026-05-16-setup-form-edit-labels-hardcoded) — tui
-
-### len() 陷阱
-- [API Key 遮罩使用字节长度而非字符数](domains/tui.md#issue_2026-05-16-setup-api-key-mask-byte-vs-char) — tui
-
-### output_persist
-- [工具输出超长时截断 + 持久化磁盘 + 提示 Read 读取剩余内容](domains/tools.md#issue_2026-05-15-tool-output-truncation-with-disk-persist) — tools
-
-### ProviderType
-- [Form Edit 字段标签硬编码英文，未使用 i18n](domains/tui.md#issue_2026-05-16-setup-form-edit-labels-hardcoded) — tui
-
-### save-before-load
-- [save_setup 覆盖已有配置文件导致数据永久丢失](domains/tui.md#issue_2026-05-16-setup-save-destroys-existing-config) — tui
-
-### 字节 vs 字符
-- [API Key 遮罩使用字节长度而非字符数](domains/tui.md#issue_2026-05-16-setup-api-key-mask-byte-vs-char) — tui
-
-### 磁盘持久化
-- [工具输出超长时截断 + 持久化磁盘 + 提示 Read 读取剩余内容](domains/tools.md#issue_2026-05-15-tool-output-truncation-with-disk-persist) — tools
-
-### 代码去重
-- [update.rs 应简化为 curl 远程脚本 | bash](domains/cli.md#issue_2026-05-16-self-update-simplify-to-curl-pipe-bash) — cli
-
-### 导航键冲突
-- [Edit 模式 ProviderType 切换静默重置所有已编辑数据](domains/tui.md#issue_2026-05-16-setup-provider-type-toggle-resets-data) — tui
-
-### 多层截断
-- [工具调用参数显示截断过短](domains/tui.md#issue_2026-05-16-tool-args-display-truncation-too-short) — tui
-
-### 防御性编程
-- [active_provider 越界无保护可导致 render panic](domains/tui.md#issue_2026-05-16-setup-active-provider-oob-panic) — tui
-- [Language 步骤空选项下取模 panic 风险](domains/tui.md#issue_2026-05-16-setup-mod-zero-empty-options) — tui
-
-### 工具输出
-- [工具输出超长时截断 + 持久化磁盘 + 提示 Read 读取剩余内容](domains/tools.md#issue_2026-05-15-tool-output-truncation-with-disk-persist) — tools
-
-### 键过载
-- [Edit 模式 ProviderType 切换静默重置所有已编辑数据](domains/tui.md#issue_2026-05-16-setup-provider-type-toggle-resets-data) — tui
-
-### 静默失败
-- [Browse 模式 Submit 失败时无任何反馈](domains/tui.md#issue_2026-05-16-setup-browse-submit-no-feedback) — tui
-
-### 裸索引
-- [active_provider 越界无保护可导致 render panic](domains/tui.md#issue_2026-05-16-setup-active-provider-oob-panic) — tui
-
-### 配置覆盖
-- [save_setup 覆盖已有配置文件导致数据永久丢失](domains/tui.md#issue_2026-05-16-setup-save-destroys-existing-config) — tui
-
-### 全局处理器
-- [Ctrl+C 在 Setup Wizard 中完全被拦截——无法退出](domains/tui.md#issue_2026-05-16-setup-ctrlc-blocked-cannot-exit) — tui
-
-### 确认提示
-- [Edit 模式 ProviderType 切换静默重置所有已编辑数据](domains/tui.md#issue_2026-05-16-setup-provider-type-toggle-resets-data) — tui
-
-### 输出截断
-- [工具输出超长时截断 + 持久化磁盘 + 提示 Read 读取剩余内容](domains/tools.md#issue_2026-05-15-tool-output-truncation-with-disk-persist) — tools
-
-### 事件拦截
-- [Ctrl+C 在 Setup Wizard 中完全被拦截——无法退出](domains/tui.md#issue_2026-05-16-setup-ctrlc-blocked-cannot-exit) — tui
-
-### 数据丢失
-- [save_setup 覆盖已有配置文件导致数据永久丢失](domains/tui.md#issue_2026-05-16-setup-save-destroys-existing-config) — tui
-- [Edit 模式 ProviderType 切换静默重置所有已编辑数据](domains/tui.md#issue_2026-05-16-setup-provider-type-toggle-resets-data) — tui
-
-### 双份实现
-- [update.rs 应简化为 curl 远程脚本 | bash](domains/cli.md#issue_2026-05-16-self-update-simplify-to-curl-pipe-bash) — cli
-
-### 退出流程
-- [Ctrl+C 在 Setup Wizard 中完全被拦截——无法退出](domains/tui.md#issue_2026-05-16-setup-ctrlc-blocked-cannot-exit) — tui
-
-### 维护负担
-- [update.rs 应简化为 curl 远程脚本 | bash](domains/cli.md#issue_2026-05-16-self-update-simplify-to-curl-pipe-bash) — cli
-
-### 位置匹配
-- [SubAgent 跨轮次 frozen_subagent_vms 累积导致批次与单个 SubAgentGroup 重复显示](domains/message-pipeline.md#issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication) — message-pipeline
-
-### 无反馈
-- [Browse 模式 Submit 失败时无任何反馈](domains/tui.md#issue_2026-05-16-setup-browse-submit-no-feedback) — tui
-
-### 先写后读
-- [save_setup 覆盖已有配置文件导致数据永久丢失](domains/tui.md#issue_2026-05-16-setup-save-destroys-existing-config) — tui
-
-### 显示阈值
-- [工具调用参数显示截断过短](domains/tui.md#issue_2026-05-16-tool-args-display-truncation-too-short) — tui
-
-### 用户体验
-- [Browse 模式 Submit 失败时无任何反馈](domains/tui.md#issue_2026-05-16-setup-browse-submit-no-feedback) — tui
-
-### 硬编码标签
-- [Form Edit 字段标签硬编码英文，未使用 i18n](domains/tui.md#issue_2026-05-16-setup-form-edit-labels-hardcoded) — tui
-
-### 硬编码混合文本
-- [Language 步骤完全硬编码中英混合文本，忽略 i18n](domains/tui.md#issue_2026-05-16-setup-language-step-hardcoded-no-i18n) — tui
-
-### 越界检查
-- [active_provider 越界无保护可导致 render panic](domains/tui.md#issue_2026-05-16-setup-active-provider-oob-panic) — tui
-
-### 跨轮次累积
-- [SubAgent 跨轮次 frozen_subagent_vms 累积导致批次与单个 SubAgentGroup 重复显示](domains/message-pipeline.md#issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication) — message-pipeline
-
-### 取模零除
-- [Language 步骤空选项下取模 panic 风险](domains/tui.md#issue_2026-05-16-setup-mod-zero-empty-options) — tui
-
-### 错误提示
-- [Browse 模式 Submit 失败时无任何反馈](domains/tui.md#issue_2026-05-16-setup-browse-submit-no-feedback) — tui
-
-### 1M context
-- [Model 面板添加 1M 上下文开关](domains/tui.md#issue_2026-05-16-model-panel-1m-context-toggle) — tui
-
-### ACP
-- [ACP 未实现 $/cancel_request 与 AvailableCommandsUpdate](domains/acp.md#issue_2026-05-16-acp-cancel-request-unimplemented) — acp
-
-### agent_id 匹配
-- [并发 SubAgent 工具调用路由错误 + 死锁修复](domains/agent.md#issue_2026-05-16-concurrent-subagent-tool-call-routing-and-background) — agent
-
-### AvailableCommandsUpdate
-- [ACP 未实现 $/cancel_request 与 AvailableCommandsUpdate](domains/acp.md#issue_2026-05-16-acp-cancel-request-unimplemented) — acp
-
-### cancel_request
-- [ACP 未实现 $/cancel_request 与 AvailableCommandsUpdate](domains/acp.md#issue_2026-05-16-acp-cancel-request-unimplemented) — acp
-
-### char vs byte
-- [Setup Wizard 波兰系列（8 个 UI 小修）](domains/tui.md#issue_2026-05-16-setup-polish-series) — tui
-
-### CODEX migrate
-- [Setup Wizard 波兰系列（8 个 UI 小修）](domains/tui.md#issue_2026-05-16-setup-polish-series) — tui
-
-### ContextBudget
-- [Model 面板添加 1M 上下文开关](domains/tui.md#issue_2026-05-16-model-panel-1m-context-toggle) — tui
-
-### Ctrl 修饰符
-- [Setup Wizard 波兰系列（8 个 UI 小修）](domains/tui.md#issue_2026-05-16-setup-polish-series) — tui
-
-### empty state
-- [Setup Wizard 波兰系列（8 个 UI 小修）](domains/tui.md#issue_2026-05-16-setup-polish-series) — tui
-
-### env_get
-- [Setup Wizard 波兰系列（8 个 UI 小修）](domains/tui.md#issue_2026-05-16-setup-polish-series) — tui
-
-### form validation
-- [Setup Wizard 波兰系列（8 个 UI 小修）](domains/tui.md#issue_2026-05-16-setup-polish-series) — tui
-
-### language
-- [Setup 向导缺少语言配置步骤](domains/tui.md#issue_2026-05-16-i18n-language-not-in-setup) — tui
-
-### model panel
-- [Model 面板添加 1M 上下文开关](domains/tui.md#issue_2026-05-16-model-panel-1m-context-toggle) — tui
-
-### needs_setup
-- [Setup Wizard 波兰系列（8 个 UI 小修）](domains/tui.md#issue_2026-05-16-setup-polish-series) — tui
-
-### oneshot
-- [ACP 未实现 $/cancel_request 与 AvailableCommandsUpdate](domains/acp.md#issue_2026-05-16-acp-cancel-request-unimplemented) — acp
-
-### paste newline
-- [Setup Wizard 波兰系列（8 个 UI 小修）](domains/tui.md#issue_2026-05-16-setup-polish-series) — tui
-
-### pending requests
-- [ACP 未实现 $/cancel_request 与 AvailableCommandsUpdate](domains/acp.md#issue_2026-05-16-acp-cancel-request-unimplemented) — acp
-
-### setup wizard
-- [Setup 向导缺少语言配置步骤](domains/tui.md#issue_2026-05-16-i18n-language-not-in-setup) — tui
-
-### setup wizard polish
-- [Setup Wizard 波兰系列（8 个 UI 小修）](domains/tui.md#issue_2026-05-16-setup-polish-series) — tui
-
-### SetupStep
-- [Setup 向导缺少语言配置步骤](domains/tui.md#issue_2026-05-16-i18n-language-not-in-setup) — tui
-
-### source_agent_id routing
-- [并发 SubAgent 工具调用路由错误 + 死锁修复](domains/agent.md#issue_2026-05-16-concurrent-subagent-tool-call-routing-and-background) — agent
-
-### streaming cancellation
-- [并发 SubAgent 工具调用路由错误 + 死锁修复](domains/agent.md#issue_2026-05-16-concurrent-subagent-tool-call-routing-and-background) — agent
-
-### SubAgent 并发
-- [并发 SubAgent 工具调用路由错误 + 死锁修复](domains/agent.md#issue_2026-05-16-concurrent-subagent-tool-call-routing-and-background) — agent
-- [多 Agent 工具调用串行执行而非并发](domains/agent.md#issue_2026-05-18-agent-tool-calls-execute-serially) — agent
-
-### 通道容量
-- [并发 SubAgent 工具调用路由错误 + 死锁修复](domains/agent.md#issue_2026-05-16-concurrent-subagent-tool-call-routing-and-background) — agent
-
-### LLM 适配器
-- [LLM 适配器模块化：anthropic.rs 1983 行、openai.rs 1065 行，按职责维度拆分为子模块](domains/agent.md#issue_2026-05-14-llm-adapter-modularization) — agent
-
-### agent_done_pending_bg
-- [Background task 完成后未触发 agent continuation（竞态条件）：pre_done_bg_completions 缓冲乱序到达](domains/agent.md#issue_2026-05-13-background-task-completion-race-condition) — agent
-
-### anthropic
-- [LLM 适配器模块化：anthropic.rs 1983 行、openai.rs 1065 行，按职责维度拆分为子模块](domains/agent.md#issue_2026-05-14-llm-adapter-modularization) — agent
-
-### background task
-- [Background task 完成后未触发 agent continuation（竞态条件）：pre_done_bg_completions 缓冲乱序到达](domains/agent.md#issue_2026-05-13-background-task-completion-race-condition) — agent
-
-### continuation
-- [Background task 完成后未触发 agent continuation（竞态条件）：pre_done_bg_completions 缓冲乱序到达](domains/agent.md#issue_2026-05-13-background-task-completion-race-condition) — agent
-
-### openai
-- [LLM 适配器模块化：anthropic.rs 1983 行、openai.rs 1065 行，按职责维度拆分为子模块](domains/agent.md#issue_2026-05-14-llm-adapter-modularization) — agent
-
-### 大文件拆分
-- [LLM 适配器模块化：anthropic.rs 1983 行、openai.rs 1065 行，按职责维度拆分为子模块](domains/agent.md#issue_2026-05-14-llm-adapter-modularization) — agent
-- [超长函数拆分：event.rs（1120 行）和 agent_ops.rs（890 行）等 5 个超长单函数拆分](domains/code-architecture.md#issue_2026-05-14-mega-functions-split) — code-architecture
-
-### 时序耦合
-- [Background task 完成后未触发 agent continuation（竞态条件）：pre_done_bg_completions 缓冲乱序到达](domains/agent.md#issue_2026-05-13-background-task-completion-race-condition) — agent
-
-### 模块化
-- [LLM 适配器模块化：anthropic.rs 1983 行、openai.rs 1065 行，按职责维度拆分为子模块](domains/agent.md#issue_2026-05-14-llm-adapter-modularization) — agent
-- [超长函数拆分：event.rs（1120 行）和 agent_ops.rs（890 行）等 5 个超长单函数拆分](domains/code-architecture.md#issue_2026-05-14-mega-functions-split) — code-architecture
-
-### 竞态条件
-- [Background task 完成后未触发 agent continuation（竞态条件）：pre_done_bg_completions 缓冲乱序到达](domains/agent.md#issue_2026-05-13-background-task-completion-race-condition) — agent
-- [HITL 审批与 Cancel 竞态条件缺少测试](domains/agent.md#issue_2026-06-06-test-gap-hitl-cancel-race) — agent
-
-### child_handler_factory
-- [多 Agent 工具调用串行执行而非并发](domains/agent.md#issue_2026-05-18-agent-tool-calls-execute-serially) — agent
-
-### tool_dispatch
-- [多 Agent 工具调用串行执行而非并发](domains/agent.md#issue_2026-05-18-agent-tool-calls-execute-serially) — agent
-
-### join_all
-- [多 Agent 工具调用串行执行而非并发](domains/agent.md#issue_2026-05-18-agent-tool-calls-execute-serially) — agent
-
-### session index 竞态
-- [分屏模式下非活跃 Session 命令浮层显示异常](domains/tui.md#issue_2026-05-12-split-session-command-hint-only-shows-active) — tui
-
-### 分屏
-- [分屏模式下非活跃 Session 命令浮层显示异常](domains/tui.md#issue_2026-05-12-split-session-command-hint-only-shows-active) — tui
-
-### 指示符号统一
-- [TUI 指示符号 ⏺ 与 ● 不统一，滚动条在部分终端有空隙](domains/tui.md#issue_2026-05-18-tui-dot-and-scrollbar-rendering) — tui
-
-### 滚动条 track
-- [TUI 指示符号 ⏺ 与 ● 不统一，滚动条在部分终端有空隙](domains/tui.md#issue_2026-05-18-tui-dot-and-scrollbar-rendering) — tui
-
-### box-drawing 字符
-- [TUI 指示符号 ⏺ 与 ● 不统一，滚动条在部分终端有空隙](domains/tui.md#issue_2026-05-18-tui-dot-and-scrollbar-rendering) — tui
-
-### mod.rs 内聚
-- [Mod.rs 子模块内聚度问题](domains/code-architecture.md#issue_2026-05-17-mod-rs-cohesion) — code-architecture
-
-### command 分组
-- [Mod.rs 子模块内聚度问题](domains/code-architecture.md#issue_2026-05-17-mod-rs-cohesion) — code-architecture
-
-### 插件懒初始化
-- [~/.claude 目录不存在时插件面板无法使用](domains/plugin.md#issue_2026-05-18-claude-dir-missing-plugin-panel-empty) — plugin
-
-### ~/.claude 自动创建
-- [~/.claude 目录不存在时插件面板无法使用](domains/plugin.md#issue_2026-05-18-claude-dir-missing-plugin-panel-empty) — plugin
-
-### marketplace 首次刷新
-- [~/.claude 目录不存在时插件面板无法使用](domains/plugin.md#issue_2026-05-18-claude-dir-missing-plugin-panel-empty) — plugin
-
-### std::mem::take
-- [分屏模式下非活跃 Session 命令浮层显示异常](domains/tui.md#issue_2026-05-12-split-session-command-hint-only-shows-active) — tui
-
-### ACP dispatch 拆分
-- [ACP dispatch.rs 请求分发逻辑过度集中（1044 行）](domains/acp.md#issue_2026-05-17-acp-dispatch-heavy-file) — acp
-
-### box-drawing 字符
-- [TUI 指示符号 ⏺ 与 ● 不统一，滚动条在部分终端有空隙](domains/tui.md#issue_2026-05-18-tui-dot-and-scrollbar-rendering) — tui
-
-### child_handler_factory
-- [多 Agent 工具调用串行执行而非并发](domains/agent.md#issue_2026-05-18-agent-tool-calls-execute-serially) — agent
-
-### command 分组
-- [Mod.rs 子模块内聚度问题：command/mod.rs + sync/mod.rs + panels/mod.rs + mcp/mod.rs](domains/code-architecture.md#issue_2026-05-17-mod-rs-cohesion) — code-architecture
-
-### CommandRegistry
-- [分屏模式下非活跃 Session 命令浮层显示异常](domains/tui.md#issue_2026-05-12-split-session-command-hint-only-shows-active) — tui
-
-### core/panel/session 组织
-- [Mod.rs 子模块内聚度问题：command/mod.rs + sync/mod.rs + panels/mod.rs + mcp/mod.rs](domains/code-architecture.md#issue_2026-05-17-mod-rs-cohesion) — code-architecture
-
-### GPU 终端兼容
-- [TUI 指示符号 ⏺ 与 ● 不统一，滚动条在部分终端有空隙](domains/tui.md#issue_2026-05-18-tui-dot-and-scrollbar-rendering) — tui
-
-### handler 分组
-- [ACP dispatch.rs 请求分发逻辑过度集中（1044 行）](domains/acp.md#issue_2026-05-17-acp-dispatch-heavy-file) — acp
-
-### initialize/session/prompt/permission
-- [ACP dispatch.rs 请求分发逻辑过度集中（1044 行）](domains/acp.md#issue_2026-05-17-acp-dispatch-heavy-file) — acp
-
-### join_all
-- [多 Agent 工具调用串行执行而非并发](domains/agent.md#issue_2026-05-18-agent-tool-calls-execute-serially) — agent
-
-### langfuse types 拆分
-- [langfuse-client/src/types.rs 所有类型定义集中（1008 行）](domains/langfuse.md#issue_2026-05-17-langfuse-types-monolithic) — langfuse
-
-### layout/event_handler 分离
-- [peri-tui/src/ui/main_ui.rs 主 UI 布局逻辑集中（852 行）](domains/tui.md#issue_2026-05-17-main-ui-heavy-file) — tui
-
-### marketplace 首次刷新
-- [~/.claude 目录不存在时插件面板 Discover/Marketplaces 视图无法使用](domains/plugin.md#issue_2026-05-18-claude-dir-missing-plugin-panel-empty) — plugin
-
-### message_pipeline 拆分
-- [Pipeline/渲染层大文件拆分：message_pipeline.rs + message_view.rs](domains/message-pipeline.md#issue_2026-05-17-pipeline-render-heavy-files) — message-pipeline
-
-### message_view 布局分离
-- [Pipeline/渲染层大文件拆分：message_pipeline.rs + message_view.rs](domains/message-pipeline.md#issue_2026-05-17-pipeline-render-heavy-files) — message-pipeline
-
-### middleware 拆分
-- [Middleware 层大文件：subagent/tool.rs + plugin/installer.rs + plugin/marketplace.rs](domains/code-architecture.md#issue_2026-05-17-middleware-heavy-files) — code-architecture
-
-### mod.rs 内聚
-- [Mod.rs 子模块内聚度问题：command/mod.rs + sync/mod.rs + panels/mod.rs + mcp/mod.rs](domains/code-architecture.md#issue_2026-05-17-mod-rs-cohesion) — code-architecture
-
-### PanelComponent
-- [Panel 文件过度肥大：mcp_panel.rs + login_panel.rs + setup_wizard.rs](domains/tui.md#issue_2026-05-17-panel-heavy-files) — tui
-
-### plugin/installer
-- [Middleware 层大文件：subagent/tool.rs + plugin/installer.rs + plugin/marketplace.rs](domains/code-architecture.md#issue_2026-05-17-middleware-heavy-files) — code-architecture
-
-### plugin/marketplace
-- [Middleware 层大文件：subagent/tool.rs + plugin/installer.rs + plugin/marketplace.rs](domains/code-architecture.md#issue_2026-05-17-middleware-heavy-files) — code-architecture
-
-### reconcile
-- [Pipeline/渲染层大文件拆分：message_pipeline.rs + message_view.rs](domains/message-pipeline.md#issue_2026-05-17-pipeline-render-heavy-files) — message-pipeline
-- [LLM 错误路径 round_start_vm_idx 被重置后视图清空闪烁](domains/message-pipeline.md#issue_2026-05-20-llm-error-message-area-clear-flicker) — message-pipeline
-
-### session index 竞态
-- [分屏模式下非活跃 Session 命令浮层显示异常](domains/tui.md#issue_2026-05-12-split-session-command-hint-only-shows-active) — tui
-
-### state/ops/ui 三层分离
-- [Panel 文件过度肥大：mcp_panel.rs + login_panel.rs + setup_wizard.rs](domains/tui.md#issue_2026-05-17-panel-heavy-files) — tui
-
-### subagent/tool
-- [Middleware 层大文件：subagent/tool.rs + plugin/installer.rs + plugin/marketplace.rs](domains/code-architecture.md#issue_2026-05-17-middleware-heavy-files) — code-architecture
-
-### tool_dispatch
-- [多 Agent 工具调用串行执行而非并发](domains/agent.md#issue_2026-05-18-agent-tool-calls-execute-serially) — agent
-
-### trace/span/generation/score
-- [langfuse-client/src/types.rs 所有类型定义集中（1008 行）](domains/langfuse.md#issue_2026-05-17-langfuse-types-monolithic) — langfuse
-
-### view_model
-- [Pipeline/渲染层大文件拆分：message_pipeline.rs + message_view.rs](domains/message-pipeline.md#issue_2026-05-17-pipeline-render-heavy-files) — message-pipeline
-
-### ~/.claude 自动创建
-- [~/.claude 目录不存在时插件面板 Discover/Marketplaces 视图无法使用](domains/plugin.md#issue_2026-05-18-claude-dir-missing-plugin-panel-empty) — plugin
-
-### 主 UI 拆分
-- [peri-tui/src/ui/main_ui.rs 主 UI 布局逻辑集中（852 行）](domains/tui.md#issue_2026-05-17-main-ui-heavy-file) — tui
-
-### 分屏
-- [分屏模式下非活跃 Session 命令浮层显示异常](domains/tui.md#issue_2026-05-12-split-session-command-hint-only-shows-active) — tui
-
-### 命令浮层
-- [分屏模式下非活跃 Session 命令浮层显示异常](domains/tui.md#issue_2026-05-12-split-session-command-hint-only-shows-active) — tui
-
-### 插件懒初始化
-- [~/.claude 目录不存在时插件面板 Discover/Marketplaces 视图无法使用](domains/plugin.md#issue_2026-05-18-claude-dir-missing-plugin-panel-empty) — plugin
-
-### 指示符号统一
-- [TUI 指示符号 ⏺ 与 ● 不统一，滚动条在部分终端有空隙](domains/tui.md#issue_2026-05-18-tui-dot-and-scrollbar-rendering) — tui
-
-### 滚动条 track
-- [TUI 指示符号 ⏺ 与 ● 不统一，滚动条在部分终端有空隙](domains/tui.md#issue_2026-05-18-tui-dot-and-scrollbar-rendering) — tui
-
-### 面板拆分
-- [Panel 文件过度肥大：mcp_panel.rs + login_panel.rs + setup_wizard.rs](domains/tui.md#issue_2026-05-17-panel-heavy-files) — tui
-
-### 领域类型分离
-- [langfuse-client/src/types.rs 所有类型定义集中（1008 行）](domains/langfuse.md#issue_2026-05-17-langfuse-types-monolithic) — langfuse
-
-### ACP 路由
-- [ACP 协议能力缺失：Session 生命周期路由、能力声明、SessionUpdate 通知变体](domains/acp.md#issue_2026-05-19-acp-missing-capabilities) — acp
-
-### CJK
-- [Markdown 表格第一列中文多时列宽过窄，CJK 字符显示为竖排](domains/tui-widgets.md#issue_2026-05-18-md-table-cjk-column-too-narrow) — tui-widgets
-
-### ConfigOptionUpdate
-- [ACP 状态变更后不发通知：ConfigOptionUpdate / AvailableCommandsUpdate / SessionInfoUpdate](domains/acp.md#issue_2026-05-19-acp-missing-state-notifications) — acp
-
-### PromptResult
-- [ACP PromptResponse 的 StopReason 全部硬编码为 EndTurn，无法区分取消/超限/正常完成](domains/acp.md#issue_2026-05-19-acp-stopreason-hardcoded-endturn) — acp
-
-### Session 生命周期
-- [ACP 协议能力缺失：Session 生命周期路由、能力声明、SessionUpdate 通知变体](domains/acp.md#issue_2026-05-19-acp-missing-capabilities) — acp
-
-### SessionUpdate
-- [ACP 协议能力缺失：Session 生命周期路由、能力声明、SessionUpdate 通知变体](domains/acp.md#issue_2026-05-19-acp-missing-capabilities) — acp
-- [ACP 状态变更后不发通知：ConfigOptionUpdate / AvailableCommandsUpdate / SessionInfoUpdate](domains/acp.md#issue_2026-05-19-acp-missing-state-notifications) — acp
-
-### StopReason
-- [ACP PromptResponse 的 StopReason 全部硬编码为 EndTurn，无法区分取消/超限/正常完成](domains/acp.md#issue_2026-05-19-acp-stopreason-hardcoded-endturn) — acp
-
-### SubAgent ID 重复
-- [并发同类型 SubAgent 共享相同 ID，导致事件路由错误到第一个实例](domains/agent.md#issue_2026-05-19-concurrent-subagent-duplicate-id) — agent
-
-### SubAgent 重复卡片
-- [SubAgent 完成后显示重复卡片：ToolStart 和 SubAgentStart 事件双重创建 SubAgentState](domains/message-pipeline.md#issue_2026-05-18-subagent-duplicate-state-on-completion) — message-pipeline
-
-### ToolStart/SubAgentStart 竞态
-- [SubAgent 完成后显示重复卡片：ToolStart 和 SubAgentStart 事件双重创建 SubAgentState](domains/message-pipeline.md#issue_2026-05-18-subagent-duplicate-state-on-completion) — message-pipeline
-
-### auto-continue
-- [Compact 自动继续功能在不应触发的场景（手动 /compact、Done 后 auto-compact）下仍然 resubmit](domains/compact.md#issue_2026-05-12-compact-auto-continue-scenarios) — compact
-
-### compact 触发来源
-- [Compact 自动继续功能在不应触发的场景（手动 /compact、Done 后 auto-compact）下仍然 resubmit](domains/compact.md#issue_2026-05-12-compact-auto-continue-scenarios) — compact
-
-### instructions 参数
-- [Compact 自动继续功能在不应触发的场景（手动 /compact、Done 后 auto-compact）下仍然 resubmit](domains/compact.md#issue_2026-05-12-compact-auto-continue-scenarios) — compact
-
-### resubmit 控制
-- [Compact 自动继续功能在不应触发的场景（手动 /compact、Done 后 auto-compact）下仍然 resubmit](domains/compact.md#issue_2026-05-12-compact-auto-continue-scenarios) — compact
-
-### tool_call_id
-- [并发同类型 SubAgent 共享相同 ID，导致事件路由错误到第一个实例](domains/agent.md#issue_2026-05-19-concurrent-subagent-duplicate-id) — agent
-
-### 列宽缩放
-- [Markdown 表格第一列中文多时列宽过窄，CJK 字符显示为竖排](domains/tui-widgets.md#issue_2026-05-18-md-table-cjk-column-too-narrow) — tui-widgets
-
-### 单函数过长
-- [超长函数拆分：event.rs（1120 行）和 agent_ops.rs（890 行）等 5 个超长单函数拆分](domains/code-architecture.md#issue_2026-05-14-mega-functions-split) — code-architecture
-
-### 双重创建
-- [SubAgent 完成后显示重复卡片：ToolStart 和 SubAgentStart 事件双重创建 SubAgentState](domains/message-pipeline.md#issue_2026-05-18-subagent-duplicate-state-on-completion) — message-pipeline
-
-### 多客户端
-- [ACP 状态变更后不发通知：ConfigOptionUpdate / AvailableCommandsUpdate / SessionInfoUpdate](domains/acp.md#issue_2026-05-19-acp-missing-state-notifications) — acp
-
-### 并发路由
-- [并发同类型 SubAgent 共享相同 ID，导致事件路由错误到第一个实例](domains/agent.md#issue_2026-05-19-concurrent-subagent-duplicate-id) — agent
-
-### 枚举映射
-- [ACP PromptResponse 的 StopReason 全部硬编码为 EndTurn，无法区分取消/超限/正常完成](domains/acp.md#issue_2026-05-19-acp-stopreason-hardcoded-endturn) — acp
-
-### 最小宽度
-- [Markdown 表格第一列中文多时列宽过窄，CJK 字符显示为竖排](domains/tui-widgets.md#issue_2026-05-18-md-table-cjk-column-too-narrow) — tui-widgets
-
-### 终止原因
-- [ACP PromptResponse 的 StopReason 全部硬编码为 EndTurn，无法区分取消/超限/正常完成](domains/acp.md#issue_2026-05-19-acp-stopreason-hardcoded-endturn) — acp
-
-### 能力声明
-- [ACP 协议能力缺失：Session 生命周期路由、能力声明、SessionUpdate 通知变体](domains/acp.md#issue_2026-05-19-acp-missing-capabilities) — acp
-
-### 认知复杂度
-- [超长函数拆分：event.rs（1120 行）和 agent_ops.rs（890 行）等 5 个超长单函数拆分](domains/code-architecture.md#issue_2026-05-14-mega-functions-split) — code-architecture
-
-### 表格渲染
-- [Markdown 表格第一列中文多时列宽过窄，CJK 字符显示为竖排](domains/tui-widgets.md#issue_2026-05-18-md-table-cjk-column-too-narrow) — tui-widgets
-
-### 身份传播
-- [并发同类型 SubAgent 共享相同 ID，导致事件路由错误到第一个实例](domains/agent.md#issue_2026-05-19-concurrent-subagent-duplicate-id) — agent
-
-### 状态同步
-- [ACP 状态变更后不发通知：ConfigOptionUpdate / AvailableCommandsUpdate / SessionInfoUpdate](domains/acp.md#issue_2026-05-19-acp-missing-state-notifications) — acp
-
-### session恢复
-- [Session 恢复后 System Prompt 和 Compact Summary 被渲染为可见消息](domains/message-pipeline.md#issue_2026-05-20-session-restore-renders-system-prompt) — message-pipeline
-- [compact 持久化恢复时消息重复](domains/compact.md#issue_2026-06-02-session-restore-compact-message-duplication) — compact
-
-### System消息过滤
-- [Session 恢复后 System Prompt 和 Compact Summary 被渲染为可见消息](domains/message-pipeline.md#issue_2026-05-20-session-restore-renders-system-prompt) — message-pipeline
-
-### messages_to_view_models
-- [Session 恢复后 System Prompt 和 Compact Summary 被渲染为可见消息](domains/message-pipeline.md#issue_2026-05-20-session-restore-renders-system-prompt) — message-pipeline
-
-### SystemNote泄漏
-- [Session 恢复后 System Prompt 和 Compact Summary 被渲染为可见消息](domains/message-pipeline.md#issue_2026-05-20-session-restore-renders-system-prompt) — message-pipeline
-
-### /compact 命令
-- [手动 /compact 命令作为普通文本发给 LLM 未触发压缩](domains/compact.md#issue_2026-05-20-compact-command-not-triggering) — compact
-
-### ACP compact 通道
-- [手动 /compact 命令作为普通文本发给 LLM 未触发压缩](domains/compact.md#issue_2026-05-20-compact-command-not-triggering) — compact
-
-### loading spinner
-- [手动 /compact 命令作为普通文本发给 LLM 未触发压缩](domains/compact.md#issue_2026-05-20-compact-command-not-triggering) — compact
-
-### session 同步
-- [手动 /compact 命令作为普通文本发给 LLM 未触发压缩](domains/compact.md#issue_2026-05-20-compact-command-not-triggering) — compact
-
-### compact messages 为空
-- [Auto compact 摘要放入 BaseMessage::system 导致 LLM 适配器提取后 messages 数组为空](domains/compact.md#issue_2026-05-20-auto-compact-empty-messages-400) — compact
-
-### BaseMessage::system vs human
-- [Auto compact 摘要放入 BaseMessage::system 导致 LLM 适配器提取后 messages 数组为空](domains/compact.md#issue_2026-05-20-auto-compact-empty-messages-400) — compact
-
-### LLM 适配器提取
-- [Auto compact 摘要放入 BaseMessage::system 导致 LLM 适配器提取后 messages 数组为空](domains/compact.md#issue_2026-05-20-auto-compact-empty-messages-400) — compact
-
-### DeepSeek 400
-- [Auto compact 摘要放入 BaseMessage::system 导致 LLM 适配器提取后 messages 数组为空](domains/compact.md#issue_2026-05-20-auto-compact-empty-messages-400) — compact
-
-### round_start_vm_idx
-- [LLM 错误路径 round_start_vm_idx 被重置后视图清空闪烁](domains/message-pipeline.md#issue_2026-05-20-llm-error-message-area-clear-flicker) — message-pipeline
-
-### AgentExecutionFailed
-- [LLM 错误路径 round_start_vm_idx 被重置后视图清空闪烁](domains/message-pipeline.md#issue_2026-05-20-llm-error-message-area-clear-flicker) — message-pipeline
-
-### 视图清空
-- [LLM 错误路径 round_start_vm_idx 被重置后视图清空闪烁](domains/message-pipeline.md#issue_2026-05-20-llm-error-message-area-clear-flicker) — message-pipeline
-
-### LLM 错误路径
-- [LLM 错误路径 round_start_vm_idx 被重置后视图清空闪烁](domains/message-pipeline.md#issue_2026-05-20-llm-error-message-area-clear-flicker) — message-pipeline
-
-### Frozen Session Data
-- [System Prompt 每轮重复注入 prepend_message 导致上下文倍数膨胀](domains/system-prompt.md#issue_2026-05-20-rapid-context-expansion) — system-prompt
-
-### system prompt 膨胀
-- [System Prompt 每轮重复注入 prepend_message 导致上下文倍数膨胀](domains/system-prompt.md#issue_2026-05-20-rapid-context-expansion) — system-prompt
-
-### StateSnapshot
-- [System Prompt 每轮重复注入 prepend_message 导致上下文倍数膨胀](domains/system-prompt.md#issue_2026-05-20-rapid-context-expansion) — system-prompt
-
-### 上下文爆炸
-- [System Prompt 每轮重复注入 prepend_message 导致上下文倍数膨胀](domains/system-prompt.md#issue_2026-05-20-rapid-context-expansion) — system-prompt
-
-### VS Code 终端
-- [Mac Option+Backspace 在 VS Code 终端被映射为 PageUp 导致滚动而非删除](domains/tui.md#issue_2026-05-12-macos-option-backspace-scrolls-when-content-present) — tui
-
-### Option+Backspace
-- [Mac Option+Backspace 在 VS Code 终端被映射为 PageUp 导致滚动而非删除](domains/tui.md#issue_2026-05-12-macos-option-backspace-scrolls-when-content-present) — tui
-
-### PageUp 映射
-- [Mac Option+Backspace 在 VS Code 终端被映射为 PageUp 导致滚动而非删除](domains/tui.md#issue_2026-05-12-macos-option-backspace-scrolls-when-content-present) — tui
-
-### 词删除
-- [Mac Option+Backspace 在 VS Code 终端被映射为 PageUp 导致滚动而非删除](domains/tui.md#issue_2026-05-12-macos-option-backspace-scrolls-when-content-present) — tui
-
-### TERM_PROGRAM
-- [Mac Option+Backspace 在 VS Code 终端被映射为 PageUp 导致滚动而非删除](domains/tui.md#issue_2026-05-12-macos-option-backspace-scrolls-when-content-present) — tui
-
-### AskUser弹窗
-- [AskUser 弹窗内容溢出不可滚动且选项描述丢失](domains/tui.md#issue_2026-05-23-ask-user-overflow-and-description-missing) — tui
-
-### Elicitation description
-- [AskUser 弹窗内容溢出不可滚动且选项描述丢失](domains/tui.md#issue_2026-05-23-ask-user-overflow-and-description-missing) — tui
-
-### Arc共享配置
-- [Setup 向导完成后 ACP Server 配置未刷新，API key 未生效](domains/tui.md#issue_2026-05-21-setup-wizard-settings-not-reloaded) — tui
-
-### Ctrl+C取消
-- [Ctrl+C 在流式输出和工具执行中 UI 中断但底层请求未停止](domains/tui.md#issue_2026-05-24-cancel-ineffective-during-streaming-and-tool-execution) — tui
-
-### /clear命令
-- [/clear 命令只清 TUI 界面，不清 ACP Server 上下文](domains/tui.md#issue_2026-05-21-clear-command-doesnt-clear-live-context) — tui
-
-### 历史消息清理
-- [/clear 命令只清 TUI 界面，不清 ACP Server 上下文](domains/tui.md#issue_2026-05-21-clear-command-doesnt-clear-live-context) — tui
-
-### AgentPool
-- [build_agent 每轮重建大对象产生瞬态分配碎片](domains/agent.md#issue_2026-05-24-build-agent-per-turn-arc-transient-fragmentation) — agent
-
-### LLM实例复用
-- [build_agent 每轮重建大对象产生瞬态分配碎片](domains/agent.md#issue_2026-05-24-build-agent-per-turn-arc-transient-fragmentation) — agent
-
-### jemalloc碎片
-- [build_agent 每轮重建大对象产生瞬态分配碎片](domains/agent.md#issue_2026-05-24-build-agent-per-turn-arc-transient-fragmentation) — agent
-
-### bg_event_sender
-- [Background Agent 完成后 SubAgent 卡片消失且无数据回传](domains/agent.md#issue_2026-05-23-background-agent-card-disappears-no-result) — agent
-
-### Compact后系统提示词
-- [Compact 后 Langfuse 遥测丢失系统提示词](domains/langfuse.md#issue_2026-05-23-langfuse-missing-system-prompt-after-compact) — langfuse
-
-### System消息前缀
-- [Compact 后 Langfuse 遥测丢失系统提示词](domains/langfuse.md#issue_2026-05-23-langfuse-missing-system-prompt-after-compact) — langfuse
-
-### Langfuse OTLP
-- [Langfuse agent-run 根节点缺失（native ingestion 迁移后回归）](domains/langfuse.md#issue_2026-05-23-langfuse-agent-run-root-missing) — langfuse
-
-### native ingestion
-- [Langfuse agent-run 根节点缺失（native ingestion 迁移后回归）](domains/langfuse.md#issue_2026-05-23-langfuse-agent-run-root-missing) — langfuse
-
-### skip_serializing_if
-- [Langfuse agent-run 根节点缺失（native ingestion 迁移后回归）](domains/langfuse.md#issue_2026-05-23-langfuse-agent-run-root-missing) — langfuse
-
-### Deferred Tools
-- [Deferred Tools 段注入 system prompt 动态区域导致跨会话 Cache 部分失效](domains/system-prompt.md#issue_2026-05-23-mcp-tools-instability-breaks-anthropic-cache) — system-prompt
-
-### -c/--continue
-- [-c/--continue 未实现：启动后显示空会话](domains/cli.md#issue_2026-05-23-continue-flag-not-implemented) — cli
-
-### 会话恢复
-- [-c/--continue 未实现：启动后显示空会话](domains/cli.md#issue_2026-05-23-continue-flag-not-implemented) — cli
-
-### 图片粘贴
-- [TUI 粘贴图片后 LLM 仅收到文本而非图片内容](domains/acp.md#issue_2026-05-23-tui-image-sent-as-text) — acp
-
-### MessageContent
-- [TUI 粘贴图片后 LLM 仅收到文本而非图片内容](domains/acp.md#issue_2026-05-23-tui-image-sent-as-text) — acp
-
-### 多模态数据流
-- [TUI 粘贴图片后 LLM 仅收到文本而非图片内容](domains/acp.md#issue_2026-05-23-tui-image-sent-as-text) — acp
-
-### ACP InitializeResponse
-- [ACP Stdio InitializeResponse 缺少 session 能力声明，Zed 客户端报错](domains/acp.md#issue_2026-05-21-acp-stdio-missing-session-capabilities) — acp
-
-### session_capabilities
-- [ACP Stdio InitializeResponse 缺少 session 能力声明，Zed 客户端报错](domains/acp.md#issue_2026-05-21-acp-stdio-missing-session-capabilities) — acp
-
-### ACP stdio权限
-- [ACP stdio 默认权限模式为 AutoMode，与 TUI/-p 模式不一致](domains/acp.md#issue_2026-05-21-acp-stdio-default-permission-should-be-bypass) — acp
-
-### 默认Bypass
-- [ACP stdio 默认权限模式为 AutoMode，与 TUI/-p 模式不一致](domains/acp.md#issue_2026-05-21-acp-stdio-default-permission-should-be-bypass) — acp
-
-### AvailableCommands
-- [Skills 未作为 ACP AvailableCommands 传递给 IDE 客户端](domains/acp.md#issue_2026-05-21-skills-not-passed-as-acp-commands) — acp
-
-### FrozenSessionData
-- [Skills 未作为 ACP AvailableCommands 传递给 IDE 客户端](domains/acp.md#issue_2026-05-21-skills-not-passed-as-acp-commands) — acp
-
-### include!宏分组
-- [TUI app/ 目录模块化拆分——48 个子模块、多个 1000+ 行文件](domains/code-architecture.md#issue_2026-05-14-tui-app-mod-decomposition) — code-architecture
-
-### Theme trait
-- [Markdown 与 Theme 颜色体系脱节，存在多处分叉硬编码](domains/tui-widgets.md#issue_2026-05-20-theme-markdown-color-decoupling) — tui-widgets
-
-### 颜色解耦
-- [Markdown 与 Theme 颜色体系脱节，存在多处分叉硬编码](domains/tui-widgets.md#issue_2026-05-20-theme-markdown-color-decoupling) — tui-widgets
-
-### MarkdownTheme
-- [Markdown 与 Theme 颜色体系脱节，存在多处分叉硬编码](domains/tui-widgets.md#issue_2026-05-20-theme-markdown-color-decoupling) — tui-widgets
-
-### 适配器模式
-- [Markdown 与 Theme 颜色体系脱节，存在多处分叉硬编码](domains/tui-widgets.md#issue_2026-05-20-theme-markdown-color-decoupling) — tui-widgets
-
-### Ctrl+C 中断
-- [Ctrl+C 中断后支持撤回并重发上一条用户消息](domains/agent.md#issue_2026-05-25-interrupt-undo-last-user-message) — agent
-
-### 消息撤回
-- [Ctrl+C 中断后支持撤回并重发上一条用户消息](domains/agent.md#issue_2026-05-25-interrupt-undo-last-user-message) — agent
+- [issue_2026-07-04-message-area-scrollview-steals-input 主输入框无法输入——ScrollView 事件处理器消费所有键盘事件](domains/tui.md#issue_2026-07-04-message-area-scrollview-steals-input) — tui
 
 ### 事件路由
-- [Ctrl+C 中断后支持撤回并重发上一条用户消息](domains/agent.md#issue_2026-05-25-interrupt-undo-last-user-message) — agent
-- [同步 SubAgent Ctrl+C 中断——handle_interrupted() 的 in_subagent() 守卫静默吞掉父 Agent 中断事件](domains/agent.md#issue_2026-05-26-sync-subagent-cancel-fix-attempts-log) — agent
 
-### 历史回滚
-- [Ctrl+C 中断后支持撤回并重发上一条用户消息](domains/agent.md#issue_2026-05-25-interrupt-undo-last-user-message) — agent
+- [issue_2026-07-04-message-area-scrollview-steals-input 主输入框无法输入——ScrollView 事件处理器消费所有键盘事件](domains/tui.md#issue_2026-07-04-message-area-scrollview-steals-input) — tui
 
-### 索引漂移
-- [Ctrl+C 中断后支持撤回并重发上一条用户消息](domains/agent.md#issue_2026-05-25-interrupt-undo-last-user-message) — agent
+### trim_start_matches
 
-### 并发 background agent
-- [并发 Background Agent 只收到一次完成通知，父 Agent 永久等待](domains/agent.md#issue_2026-05-24-concurrent-bg-agent-only-one-completion) — agent
+- [issue_2026-07-09-agent-prefix-triggers-command-without-slash 输入 agent 开头触发 OpenPanel 命令](domains/tui.md#issue_2026-07-09-agent-prefix-triggers-command-without-slash) — tui
 
-### TOCTOU
-- [并发 Background Agent 只收到一次完成通知，父 Agent 永久等待](domains/agent.md#issue_2026-05-24-concurrent-bg-agent-only-one-completion) — agent
+### slash 前缀检查
 
-### 事件丢失
-- [并发 Background Agent 只收到一次完成通知，父 Agent 永久等待](domains/agent.md#issue_2026-05-24-concurrent-bg-agent-only-one-completion) — agent
+- [issue_2026-07-09-agent-prefix-triggers-command-without-slash 输入 agent 开头触发 OpenPanel 命令](domains/tui.md#issue_2026-07-09-agent-prefix-triggers-command-without-slash) — tui
 
-### 竞态
-- [并发 Background Agent 只收到一次完成通知，父 Agent 永久等待](domains/agent.md#issue_2026-05-24-concurrent-bg-agent-only-one-completion) — agent
+### Arc 重建
 
-### SubAgent Ctrl+C
-- [同步 SubAgent Ctrl+C 中断——handle_interrupted() 的 in_subagent() 守卫静默吞掉父 Agent 中断事件](domains/agent.md#issue_2026-05-26-sync-subagent-cancel-fix-attempts-log) — agent
+- [issue_2026-07-07-inputarea-mouse-click-cursor-positioning InputArea 鼠标点击光标定位——Arc 每帧重建导致 handler 读到 None](domains/tui.md#issue_2026-07-07-inputarea-mouse-click-cursor-positioning) — tui
 
-### handle_interrupted
-- [同步 SubAgent Ctrl+C 中断——handle_interrupted() 的 in_subagent() 守卫静默吞掉父 Agent 中断事件](domains/agent.md#issue_2026-05-26-sync-subagent-cancel-fix-attempts-log) — agent
+### AreaTracker
 
-### 二分法追踪
-- [同步 SubAgent Ctrl+C 中断——handle_interrupted() 的 in_subagent() 守卫静默吞掉父 Agent 中断事件](domains/agent.md#issue_2026-05-26-sync-subagent-cancel-fix-attempts-log) — agent
+- [issue_2026-07-07-inputarea-mouse-click-cursor-positioning InputArea 鼠标点击光标定位——AreaTracker hook 值拷贝模式](domains/tui.md#issue_2026-07-07-inputarea-mouse-click-cursor-positioning) — tui
 
-### Anthropic 400
-- [AtMention/SkillPreload 注入的 fake Read 工具消息导致 Anthropic API 400 错误](domains/agent.md#issue_2026-05-25-fake-read-tool-message-anthropic-400) — agent
+### ACP messageId
 
-### fake Read
-- [AtMention/SkillPreload 注入的 fake Read 工具消息导致 Anthropic API 400 错误](domains/agent.md#issue_2026-05-25-fake-read-tool-message-anthropic-400) — agent
-- [主 Agent SkillPreloadMiddleware preload_skills 硬编码为空，/skill-name 不注入全文](domains/agent.md#issue_2026-05-25-skill-preload-no-tool-calls-in-history) — agent
+- [issue_2026-07-08-tui-drop-acp-messageid-boundary TUI 丢弃 ACP messageId，消息边界靠推断](domains/tui.md#issue_2026-07-08-tui-drop-acp-messageid-boundary) — tui
 
-### messages_to_anthropic
-- [AtMention/SkillPreload 注入的 fake Read 工具消息导致 Anthropic API 400 错误](domains/agent.md#issue_2026-05-25-fake-read-tool-message-anthropic-400) — agent
+### 消息边界推断
 
-### preload_skills
-- [主 Agent SkillPreloadMiddleware preload_skills 硬编码为空，/skill-name 不注入全文](domains/agent.md#issue_2026-05-25-skill-preload-no-tool-calls-in-history) — agent
+- [issue_2026-07-08-tui-drop-acp-messageid-boundary TUI 丢弃 ACP messageId，消息边界靠推断](domains/tui.md#issue_2026-07-08-tui-drop-acp-messageid-boundary) — tui
 
-### middleware self-detection
-- [主 Agent SkillPreloadMiddleware preload_skills 硬编码为空，/skill-name 不注入全文](domains/agent.md#issue_2026-05-25-skill-preload-no-tool-calls-in-history) — agent
+### tool_call 重放
 
-### compact loading
-- [手动 /compact 后聊天区域长时间显示 loading 骨架屏（30s+）](domains/compact.md#issue_2026-05-26-manual-compact-long-loading-skeleton) — compact
+- [issue_2026-07-08-history-replay-missing-tool-interactions History 面板恢复的对话历史缺少工具调用](domains/tui.md#issue_2026-07-08-history-replay-missing-tool-interactions) — tui
 
-### set_loading
-- [手动 /compact 后聊天区域长时间显示 loading 骨架屏（30s+）](domains/compact.md#issue_2026-05-26-manual-compact-long-loading-skeleton) — compact
+### CJK 光标
 
-### manual vs auto compact
-- [手动 /compact 后聊天区域长时间显示 loading 骨架屏（30s+）](domains/compact.md#issue_2026-05-26-manual-compact-long-loading-skeleton) — compact
+- [issue_2026-07-05-input-unicode-cursor-misalignment 输入框 Unicode 光标估算错误，多个白色光标残影](domains/tui.md#issue_2026-07-05-input-unicode-cursor-misalignment) — tui
 
-### 路径标志
-- [手动 /compact 后聊天区域长时间显示 loading 骨架屏（30s+）](domains/compact.md#issue_2026-05-26-manual-compact-long-loading-skeleton) — compact
+### CjkGhostFix
 
-### mimalloc
-- [mimalloc 替换 jemalloc 后内存峰值反而更高，回退到系统默认分配器](domains/code-architecture.md#issue_2026-05-25-mimalloc-worse-than-jemalloc) — code-architecture
+- [issue_2026-07-05-input-unicode-cursor-misalignment 输入框 CJK 光标残影——CjkGhostFix: AlwaysUpdate 续接 cell](domains/tui.md#issue_2026-07-05-input-unicode-cursor-misalignment) — tui
 
-### global allocator
-- [mimalloc 替换 jemalloc 后内存峰值反而更高，回退到系统默认分配器](domains/code-architecture.md#issue_2026-05-25-mimalloc-worse-than-jemalloc) — code-architecture
+### AlwaysUpdate
 
-### 内存分配器
-- [mimalloc 替换 jemalloc 后内存峰值反而更高，回退到系统默认分配器](domains/code-architecture.md#issue_2026-05-25-mimalloc-worse-than-jemalloc) — code-architecture
+- [issue_2026-07-05-input-unicode-cursor-misalignment 输入框 CJK 光标残影——CjkGhostFix: AlwaysUpdate 续接 cell](domains/tui.md#issue_2026-07-05-input-unicode-cursor-misalignment) — tui
 
-### 基准测试
-- [mimalloc 替换 jemalloc 后内存峰值反而更高，回退到系统默认分配器](domains/code-architecture.md#issue_2026-05-25-mimalloc-worse-than-jemalloc) — code-architecture
+### 选中项跟随
 
-### hardcoded Chinese
-- [Login 面板硬编码中文字符串未走 i18n，切换英文后仍显示中文](domains/tui.md#issue_2026-05-26-login-panel-hardcoded-chinese-no-i18n) — tui
+- [issue_2026-07-06-panels-selection-no-scroll-follow 面板选中项超出可见行后看不到](domains/tui.md#issue_2026-07-06-panels-selection-no-scroll-follow) — tui
 
-### login panel
-- [Login 面板硬编码中文字符串未走 i18n，切换英文后仍显示中文](domains/tui.md#issue_2026-05-26-login-panel-hardcoded-chinese-no-i18n) — tui
+### scroll_start_for_selected
 
-### LcRegistry
-- [Login 面板硬编码中文字符串未走 i18n，切换英文后仍显示中文](domains/tui.md#issue_2026-05-26-login-panel-hardcoded-chinese-no-i18n) — tui
+- [issue_2026-07-06-panels-selection-no-scroll-follow 面板选中项超出可见行后看不到——scroll_start_for_selected 算法复用](domains/tui.md#issue_2026-07-06-panels-selection-no-scroll-follow) — tui
 
+### content_text 丢失
 
-### Anthropic 400
-- [SkillPreload 触发 Anthropic 400 Bad Request：tool_result 缺少配对 tool_use](domains/agent.md#issue_2026-05-26-skillpreload-anthropic-400-tool-result-orphan) — agent
+- [issue_2026-07-05-tool-call-ai-text-invisible-after-commit AI 消息文本在 ViewCommit 后消失——stream.rs content_text 丢失](domains/agent.md#issue_2026-07-05-tool-call-ai-text-invisible-after-commit) — agent
 
-### AtomicBool
-- [Micro Compact 重复触发，每轮工具调用后都显示"自动清理"通知](domains/compact.md#issue_2026-05-23-micro-compact-repeated-triggering) — compact
+### OpenAI 流式
 
-### Ctrl+C interrupt
-- [Ctrl+C 中断后继续对话时 agent 丢失当前轮次上下文](domains/agent.md#issue_2026-05-26-ctrl-c-interrupt-causes-agent-amnesia) — agent
-- [Ctrl+C 无法中断同步 SubAgent，需等待其自然结束后父 Agent 才被中断](domains/agent.md#issue_2026-05-25-ctrl-c-cannot-interrupt-sync-subagent) — agent
+- [issue_2026-07-05-tool-call-ai-text-invisible-after-commit AI 消息文本在 ViewCommit 后消失——OpenAI stream.rs ToolUse 分支遗漏](domains/agent.md#issue_2026-07-05-tool-call-ai-text-invisible-after-commit) — agent
 
-### LLM language drift
-- [系统提示词缺少语言指示段落，AI 多轮对话后漂移至英文](domains/system-prompt.md#issue_2026-05-27-system-prompt-missing-language-instruction) — system-prompt
+### fork SubAgent
 
-### Language instruction
-- [系统提示词缺少语言指示段落，AI 多轮对话后漂移至英文](domains/system-prompt.md#issue_2026-05-27-system-prompt-missing-language-instruction) — system-prompt
+- [issue_2026-07-07-fork-subagent-no-parent-conversation-history Fork SubAgent 收不到父对话历史](domains/agent.md#issue_2026-07-07-fork-subagent-no-parent-conversation-history) — agent
 
-### MCP transport
-- [Windows 下 Command::new() 无法执行 .cmd 脚本，需统一跨平台 spawn 封装](domains/mcp.md#issue_2026-05-27-cross-platform-spawn-wrapper) — mcp
+### parent_messages
 
-### SubAgent language drift
-- [语言段落注入导致 SubAgent 语言漂移和缓存隔离失效](domains/agent.md#issue_2026-05-27-language-injection-subagent-drift-cache-isolation) — agent
+- [issue_2026-07-07-fork-subagent-no-parent-conversation-history Fork SubAgent 收不到父对话历史——parent_messages 注入失败](domains/agent.md#issue_2026-07-07-fork-subagent-no-parent-conversation-history) — agent
 
-### Windows cmd
-- [Windows 下 Command::new() 无法执行 .cmd 脚本，需统一跨平台 spawn 封装](domains/mcp.md#issue_2026-05-27-cross-platform-spawn-wrapper) — mcp
+### background agent
 
-### Windows paste
-- [Windows 输入框粘贴多行内容被截断为单行发送](domains/tui.md#issue_2026-05-26-windows-paste-multiline-truncated) — tui
+- [issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn Agent background 模式启动后 loading 不停止](domains/agent.md#issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn) — agent
 
-### add_message vs prepend_message
-- [SkillPreload 触发 Anthropic 400 Bad Request：tool_result 缺少配对 tool_use](domains/agent.md#issue_2026-05-26-skillpreload-anthropic-400-tool-result-orphan) — agent
+### loading 生命周期
 
-### agent amnesia
-- [Ctrl+C 中断后继续对话时 agent 丢失当前轮次上下文](domains/agent.md#issue_2026-05-26-ctrl-c-interrupt-causes-agent-amnesia) — agent
-
-### agent lifecycle
-- [Compact 后 Resubmit 缺少 Loading Spinner](domains/tui.md#issue_2026-05-25-compact-resubmit-missing-loading-spinner) — tui
-
-### bracketed paste
-- [Windows 输入框粘贴多行内容被截断为单行发送](domains/tui.md#issue_2026-05-26-windows-paste-multiline-truncated) — tui
-
-### cache isolation
-- [语言段落注入导致 SubAgent 语言漂移和缓存隔离失效](domains/agent.md#issue_2026-05-27-language-injection-subagent-drift-cache-isolation) — agent
-
-### cancel propagation
-- [Ctrl+C 无法中断同步 SubAgent，需等待其自然结束后父 Agent 才被中断](domains/agent.md#issue_2026-05-25-ctrl-c-cannot-interrupt-sync-subagent) — agent
-
-### cancel token
-- [Ctrl+C 无法中断同步 SubAgent，需等待其自然结束后父 Agent 才被中断](domains/agent.md#issue_2026-05-25-ctrl-c-cannot-interrupt-sync-subagent) — agent
-
-### cancelled state
-- [Ctrl+C 中断后继续对话时 agent 丢失当前轮次上下文](domains/agent.md#issue_2026-05-26-ctrl-c-interrupt-causes-agent-amnesia) — agent
-
-### compact resubmit
-- [Compact 后 Resubmit 缺少 Loading Spinner](domains/tui.md#issue_2026-05-25-compact-resubmit-missing-loading-spinner) — tui
-
-### cross-platform
-- [Windows 输入框粘贴多行内容被截断为单行发送](domains/tui.md#issue_2026-05-26-windows-paste-multiline-truncated) — tui
-
-### cross-platform spawn
-- [Windows 下 Command::new() 无法执行 .cmd 脚本，需统一跨平台 spawn 封装](domains/mcp.md#issue_2026-05-27-cross-platform-spawn-wrapper) — mcp
-
-### frozen_language
-- [语言段落注入导致 SubAgent 语言漂移和缓存隔离失效](domains/agent.md#issue_2026-05-27-language-injection-subagent-drift-cache-isolation) — agent
-- [系统提示词缺少语言指示段落，AI 多轮对话后漂移至英文](domains/system-prompt.md#issue_2026-05-27-system-prompt-missing-language-instruction) — system-prompt
-
-### history truncation
-- [Ctrl+C 中断后继续对话时 agent 丢失当前轮次上下文](domains/agent.md#issue_2026-05-26-ctrl-c-interrupt-causes-agent-amnesia) — agent
-
-### hooks executor
-- [Windows 下 Command::new() 无法执行 .cmd 脚本，需统一跨平台 spawn 封装](domains/mcp.md#issue_2026-05-27-cross-platform-spawn-wrapper) — mcp
-
-### last_idx fallback
-- [语言段落注入导致 SubAgent 语言漂移和缓存隔离失效](domains/agent.md#issue_2026-05-27-language-injection-subagent-drift-cache-isolation) — agent
-
-### layout jitter
-- [思考内容只显示最后一行导致自动换行布局抖动](domains/tui.md#issue_2026-05-23-thinking-tail-single-line-layout-jitter) — tui
-
-### loading spinner
-- [Compact 后 Resubmit 缺少 Loading Spinner](domains/tui.md#issue_2026-05-25-compact-resubmit-missing-loading-spinner) — tui
-
-### micro compact
-- [Micro Compact 重复触发，每轮工具调用后都显示"自动清理"通知](domains/compact.md#issue_2026-05-23-micro-compact-repeated-triggering) — compact
-
-### mouse drag
-- [消息区域滚动条滑块位置与鼠标可拖拽位置不对齐](domains/tui.md#issue_2026-05-27-message-area-scrollbar-thumb-misaligned) — tui
-
-### multiline input
-- [Windows 输入框粘贴多行内容被截断为单行发送](domains/tui.md#issue_2026-05-26-windows-paste-multiline-truncated) — tui
-
-### once-per-prompt guard
-- [Micro Compact 重复触发，每轮工具调用后都显示"自动清理"通知](domains/compact.md#issue_2026-05-23-micro-compact-repeated-triggering) — compact
-
-### prepended_ids
-- [SkillPreload 触发 Anthropic 400 Bad Request：tool_result 缺少配对 tool_use](domains/agent.md#issue_2026-05-26-skillpreload-anthropic-400-tool-result-orphan) — agent
-
-### ratatui formula
-- [消息区域滚动条滑块位置与鼠标可拖拽位置不对齐](domains/tui.md#issue_2026-05-27-message-area-scrollbar-thumb-misaligned) — tui
-
-### repeated triggering
-- [Micro Compact 重复触发，每轮工具调用后都显示"自动清理"通知](domains/compact.md#issue_2026-05-23-micro-compact-repeated-triggering) — compact
-
-### scrollbar alignment
-- [消息区域滚动条滑块位置与鼠标可拖拽位置不对齐](domains/tui.md#issue_2026-05-27-message-area-scrollbar-thumb-misaligned) — tui
-
-### shell_command
-- [Windows 下 Command::new() 无法执行 .cmd 脚本，需统一跨平台 spawn 封装](domains/mcp.md#issue_2026-05-27-cross-platform-spawn-wrapper) — mcp
-
-### single-line wrap
-- [思考内容只显示最后一行导致自动换行布局抖动](domains/tui.md#issue_2026-05-23-thinking-tail-single-line-layout-jitter) — tui
-
-### sync SubAgent
-- [Ctrl+C 无法中断同步 SubAgent，需等待其自然结束后父 Agent 才被中断](domains/agent.md#issue_2026-05-25-ctrl-c-cannot-interrupt-sync-subagent) — agent
-
-### system prompt
-- [系统提示词缺少语言指示段落，AI 多轮对话后漂移至英文](domains/system-prompt.md#issue_2026-05-27-system-prompt-missing-language-instruction) — system-prompt
-
-### tail_lines
-- [思考内容只显示最后一行导致自动换行布局抖动](domains/tui.md#issue_2026-05-23-thinking-tail-single-line-layout-jitter) — tui
-
-### thinking display
-- [思考内容只显示最后一行导致自动换行布局抖动](domains/tui.md#issue_2026-05-23-thinking-tail-single-line-layout-jitter) — tui
-
-### thumb geometry
-- [消息区域滚动条滑块位置与鼠标可拖拽位置不对齐](domains/tui.md#issue_2026-05-27-message-area-scrollbar-thumb-misaligned) — tui
-
-### tool_result orphan
-- [SkillPreload 触发 Anthropic 400 Bad Request：tool_result 缺少配对 tool_use](domains/agent.md#issue_2026-05-26-skillpreload-anthropic-400-tool-result-orphan) — agent
-
-### SSE UTF-8 截断
-- [SSE 流式解析跨 chunk UTF-8 截断产生乱码（U+FFFD）](domains/agent.md#issue_2026-05-29-sse-utf8-truncation-mojibake) — agent
-
-### from_utf8_lossy
-- [SSE 流式解析跨 chunk UTF-8 截断产生乱码（U+FFFD）](domains/agent.md#issue_2026-05-29-sse-utf8-truncation-mojibake) — agent
-
-### pending_bytes
-- [SSE 流式解析跨 chunk UTF-8 截断产生乱码（U+FFFD）](domains/agent.md#issue_2026-05-29-sse-utf8-truncation-mojibake) — agent
-
-### CJK 乱码
-- [SSE 流式解析跨 chunk UTF-8 截断产生乱码（U+FFFD）](domains/agent.md#issue_2026-05-29-sse-utf8-truncation-mojibake) — agent
-
-### push_done 缺失
-- [Immediate 命令（/compact、/clear）执行后 TUI 永久卡在 loading 状态](domains/agent.md#issue_2026-05-29-immediate-command-missing-push-done) — agent
-
-### Immediate 命令
-- [Immediate 命令（/compact、/clear）执行后 TUI 永久卡在 loading 状态](domains/agent.md#issue_2026-05-29-immediate-command-missing-push-done) — agent
-
-### 并发 prompt 竞争
-- [Immediate 命令（/compact、/clear）执行后 TUI 永久卡在 loading 状态](domains/agent.md#issue_2026-05-29-immediate-command-missing-push-done) — agent
-
-### JSON 格式不一致
-- [/compact 显示"未知命令"——AvailableCommandsUpdate 通知 JSON 格式不匹配被静默丢弃](domains/agent.md#issue_2026-05-29-available-commands-update-format-mismatch) — agent
-
-### SessionNotification
-- [/compact 显示"未知命令"——AvailableCommandsUpdate 通知 JSON 格式不匹配被静默丢弃](domains/agent.md#issue_2026-05-29-available-commands-update-format-mismatch) — agent
-
-### serde tag 字段名
-- [ACP 大重构后所有流式事件静默丢失——字段名 "type" vs "sessionUpdate" 不匹配](domains/agent.md#issue_2026-05-29-acp-session-update-field-name-mismatch) — agent
-
-### sessionUpdate vs type
-- [ACP 大重构后所有流式事件静默丢失——字段名 "type" vs "sessionUpdate" 不匹配](domains/agent.md#issue_2026-05-29-acp-session-update-field-name-mismatch) — agent
-
-### 事件静默丢失
-- [ACP 大重构后所有流式事件静默丢失——字段名 "type" vs "sessionUpdate" 不匹配](domains/agent.md#issue_2026-05-29-acp-session-update-field-name-mismatch) — agent
-
-### /clear session 泄漏
-- [/clear 后 ACP Server 端 history 未清理，新会话延续旧上下文](domains/agent.md#issue_2026-05-29-clear-keeps-acp-server-history) — agent
-
-### reset_session
-- [/clear 后 ACP Server 端 history 未清理，新会话延续旧上下文](domains/agent.md#issue_2026-05-29-clear-keeps-acp-server-history) — agent
-
-### ACP session 状态不一致
-- [/clear 后 ACP Server 端 history 未清理，新会话延续旧上下文](domains/agent.md#issue_2026-05-29-clear-keeps-acp-server-history) — agent
-
-### prompt_complete
-- [统一 Token Usage 传递：引入 prompt_complete 事件替代双路径冗余](domains/agent.md#issue_2026-05-29-unify-token-usage-prompt-complete) — agent
-
-### token usage 双路径
-- [统一 Token Usage 传递：引入 prompt_complete 事件替代双路径冗余](domains/agent.md#issue_2026-05-29-unify-token-usage-prompt-complete) — agent
-
-### ToolEnd 工具名
-- [ToolEnd 事件经 ACP bridge 后工具名丢失，显示为空字符串](domains/agent.md#issue_2026-05-29-tool-end-name-lost-in-acp-bridge) — agent
-
-### ToolCallUpdate title
-- [ToolEnd 事件经 ACP bridge 后工具名丢失，显示为空字符串](domains/agent.md#issue_2026-05-29-tool-end-name-lost-in-acp-bridge) — agent
-
-### ACP event mapping
-- [ToolEnd 事件经 ACP bridge 后工具名丢失，显示为空字符串](domains/agent.md#issue_2026-05-29-tool-end-name-lost-in-acp-bridge) — agent
-
-### 插件依赖 CC
-- [Peri 插件系统依赖 Claude Code 目录结构，未安装 CC 时安装/卸载不可用](domains/plugin.md#issue_2026-05-29-wsl-plugin-install-marketplace-uninstall-fail) — plugin
-
-### marketplace git clone
-- [Peri 插件系统依赖 Claude Code 目录结构，未安装 CC 时安装/卸载不可用](domains/plugin.md#issue_2026-05-29-wsl-plugin-install-marketplace-uninstall-fail) — plugin
-
-### 有界通道
-- [RenderThread 事件通道使用 UnboundedChannel，极端情况下可能内存膨胀](domains/tui.md#issue_2026-05-30-render-event-unbounded-channel) — tui
-
-### 背压
-- [RenderThread 事件通道使用 UnboundedChannel，极端情况下可能内存膨胀](domains/tui.md#issue_2026-05-30-render-event-unbounded-channel) — tui
-
-### 内存膨胀
-- [RenderThread 事件通道使用 UnboundedChannel，极端情况下可能内存膨胀](domains/tui.md#issue_2026-05-30-render-event-unbounded-channel) — tui
-
-### 渲染线程
-- [RenderThread 事件通道使用 UnboundedChannel，极端情况下可能内存膨胀](domains/tui.md#issue_2026-05-30-render-event-unbounded-channel) — tui
-
-### 帧率限制
-- [TUI 渲染缺少显式帧率限制，loading 动画期间持续满帧重绘](domains/tui.md#issue_2026-05-30-no-explicit-frame-rate-limit) — tui
-
-### CPU 占用
-- [TUI 渲染缺少显式帧率限制，loading 动画期间持续满帧重绘](domains/tui.md#issue_2026-05-30-no-explicit-frame-rate-limit) — tui
-
-### loading 动画
-- [TUI 渲染缺少显式帧率限制，loading 动画期间持续满帧重绘](domains/tui.md#issue_2026-05-30-no-explicit-frame-rate-limit) — tui
-
-### 渲染节流
-- [TUI 渲染缺少显式帧率限制，loading 动画期间持续满帧重绘](domains/tui.md#issue_2026-05-30-no-explicit-frame-rate-limit) — tui
-
-### WidgetRef
-- [peri-widgets 组件未使用 WidgetRef，渲染路径存在不必要克隆](domains/tui.md#issue_2026-05-30-migrate-widgets-to-widgetref) — tui
-
-### 所有权
-- [peri-widgets 组件未使用 WidgetRef，渲染路径存在不必要克隆](domains/tui.md#issue_2026-05-30-migrate-widgets-to-widgetref) — tui
-
-### ratatui
-- [peri-widgets 组件未使用 WidgetRef，渲染路径存在不必要克隆](domains/tui.md#issue_2026-05-30-migrate-widgets-to-widgetref) — tui
-
-### 弹窗
-- [交互弹窗激活时底部常驻输入框未失效](domains/tui.md#issue_2026-05-31-interaction-popup-textarea-not-disabled) — tui
-
-### Paste 事件
-- [交互弹窗激活时底部常驻输入框未失效](domains/tui.md#issue_2026-05-31-interaction-popup-textarea-not-disabled) — tui
-
-### IME
-- [交互弹窗激活时底部常驻输入框未失效](domains/tui.md#issue_2026-05-31-interaction-popup-textarea-not-disabled) — tui
-
-### 事件路由
-- [交互弹窗激活时底部常驻输入框未失效](domains/tui.md#issue_2026-05-31-interaction-popup-textarea-not-disabled) — tui
-- [AskUserQuestion 弹窗出现后工具调用自行结束，用户操作无效](domains/agent.md#issue_2026-05-29-ask-user-tool-auto-complete) — agent
-
-### 终端光标
-- [交互弹窗激活时底部常驻输入框未失效](domains/tui.md#issue_2026-05-31-interaction-popup-textarea-not-disabled) — tui
-
-### 表格
-- [流式 Markdown 表格渲染缺少 holdback 机制，显示不完整列](domains/tui.md#issue_2026-05-30-table-holdback-during-streaming) — tui
-
-### 流式
-- [流式 Markdown 表格渲染缺少 holdback 机制，显示不完整列](domains/tui.md#issue_2026-05-30-table-holdback-during-streaming) — tui
-
-### holdback
-- [流式 Markdown 表格渲染缺少 holdback 机制，显示不完整列](domains/tui.md#issue_2026-05-30-table-holdback-during-streaming) — tui
-
-### 列对齐
-- [流式 Markdown 表格渲染缺少 holdback 机制，显示不完整列](domains/tui.md#issue_2026-05-30-table-holdback-during-streaming) — tui
-
-### LRU 缓存
-- [TUI Markdown 解析缺少 LRU 缓存，每次渲染完整重解析](domains/tui.md#issue_2026-05-30-markdown-parse-lru-cache) — tui
-
-### pulldown-cmark
-- [TUI Markdown 解析缺少 LRU 缓存，每次渲染完整重解析](domains/tui.md#issue_2026-05-30-markdown-parse-lru-cache) — tui
-
-### 性能优化
-- [TUI Markdown 解析缺少 LRU 缓存，每次渲染完整重解析](domains/tui.md#issue_2026-05-30-markdown-parse-lru-cache) — tui
-
-### Ctrl+C
-- [Ctrl+C 改为优先级链：清空输入框 → 中断 Agent → 退出](domains/tui.md#issue_2026-05-29-ctrl-c-priority-chain-clear-input) — tui
-
-### 优先级链
-- [Ctrl+C 改为优先级链：清空输入框 → 中断 Agent → 退出](domains/tui.md#issue_2026-05-29-ctrl-c-priority-chain-clear-input) — tui
-
-### 交互设计
-- [Ctrl+C 改为优先级链：清空输入框 → 中断 Agent → 退出](domains/tui.md#issue_2026-05-29-ctrl-c-priority-chain-clear-input) — tui
-
-### prompt_capabilities
-- [ACP InitializeResponse 缺少 prompt_capabilities 声明](domains/acp.md#issue_2026-05-19-acp-missing-prompt-capabilities) — acp
-
-### 协议声明
-- [ACP InitializeResponse 缺少 prompt_capabilities 声明](domains/acp.md#issue_2026-05-19-acp-missing-prompt-capabilities) — acp
-
-### AskUserQuestion
-- [AskUserQuestion 弹窗出现后工具调用自行结束，用户操作无效](domains/agent.md#issue_2026-05-29-ask-user-tool-auto-complete) — agent
-
-### MultiplexBroker
-- [AskUserQuestion 弹窗出现后工具调用自行结束，用户操作无效](domains/agent.md#issue_2026-05-29-ask-user-tool-auto-complete) — agent
-
-### 竞速
-- [AskUserQuestion 弹窗出现后工具调用自行结束，用户操作无效](domains/agent.md#issue_2026-05-29-ask-user-tool-auto-complete) — agent
-
-### 空答案
-- [AskUserQuestion 弹窗出现后工具调用自行结束，用户操作无效](domains/agent.md#issue_2026-05-29-ask-user-tool-auto-complete) — agent
-
-### Broker 选择
-- [AskUserQuestion 弹窗出现后工具调用自行结束，用户操作无效](domains/agent.md#issue_2026-05-29-ask-user-tool-auto-complete) — agent
-
-### DeepSeek
-- [Windows + DeepSeek Anthropic 兼容模式 /skill 注入假 Read 调用触发 thinking 400 错误](domains/agent.md#issue_2026-05-27-windows-deepseek-skill-inject-thinking-400) — agent
-
-### SkillPreload
-- [Windows + DeepSeek Anthropic 兼容模式 /skill 注入假 Read 调用触发 thinking 400 错误](domains/agent.md#issue_2026-05-27-windows-deepseek-skill-inject-thinking-400) — agent
-
-### Anthropic 兼容
-- [Windows + DeepSeek Anthropic 兼容模式 /skill 注入假 Read 调用触发 thinking 400 错误](domains/agent.md#issue_2026-05-27-windows-deepseek-skill-inject-thinking-400) — agent
-
-### 400 错误
-- [Windows + DeepSeek Anthropic 兼容模式 /skill 注入假 Read 调用触发 thinking 400 错误](domains/agent.md#issue_2026-05-27-windows-deepseek-skill-inject-thinking-400) — agent
-
-### 假消息
-- [Windows + DeepSeek Anthropic 兼容模式 /skill 注入假 Read 调用触发 thinking 400 错误](domains/agent.md#issue_2026-05-27-windows-deepseek-skill-inject-thinking-400) — agent
-
-### Tavily
-- [WebSearch/WebFetch 后端迁移至 Tavily 兼容接口](domains/tools.md#issue_2026-05-23-migrate-web-tools-to-tavily-backend) — tools
-
-### WebSearch
-- [WebSearch/WebFetch 后端迁移至 Tavily 兼容接口](domains/tools.md#issue_2026-05-23-migrate-web-tools-to-tavily-backend) — tools
-
-### WebFetch
-- [WebSearch/WebFetch 后端迁移至 Tavily 兼容接口](domains/tools.md#issue_2026-05-23-migrate-web-tools-to-tavily-backend) — tools
-
-### Bing
-- [WebSearch/WebFetch 后端迁移至 Tavily 兼容接口](domains/tools.md#issue_2026-05-23-migrate-web-tools-to-tavily-backend) — tools
-
-### 后端迁移
-- [WebSearch/WebFetch 后端迁移至 Tavily 兼容接口](domains/tools.md#issue_2026-05-23-migrate-web-tools-to-tavily-backend) — tools
-
-### 安装脚本
-- [Shell 安装脚本完成后缺少旧版本清理交互](domains/cli.md#issue_2026-05-30-install-clean-old-versions-confirm) — cli
-
-### 旧版本清理
-- [Shell 安装脚本完成后缺少旧版本清理交互](domains/cli.md#issue_2026-05-30-install-clean-old-versions-confirm) — cli
-
-### 交互确认
-- [Shell 安装脚本完成后缺少旧版本清理交互](domains/cli.md#issue_2026-05-30-install-clean-old-versions-confirm) — cli
-
-### mimalloc
-- [重新引入 mimalloc 作为全局分配器（带 MI_OPTION 调参）](domains/code-architecture.md#issue_2026-05-30-retry-mimalloc-with-mi-options) — code-architecture
-
-### 分配器
-- [重新引入 mimalloc 作为全局分配器（带 MI_OPTION 调参）](domains/code-architecture.md#issue_2026-05-30-retry-mimalloc-with-mi-options) — code-architecture
-
-### MI_OPTION
-- [重新引入 mimalloc 作为全局分配器（带 MI_OPTION 调参）](domains/code-architecture.md#issue_2026-05-30-retry-mimalloc-with-mi-options) — code-architecture
-
-### RSS 增长
-- [重新引入 mimalloc 作为全局分配器（带 MI_OPTION 调参）](domains/code-architecture.md#issue_2026-05-30-retry-mimalloc-with-mi-options) — code-architecture
-
-### 内存管理
-- [重新引入 mimalloc 作为全局分配器（带 MI_OPTION 调参）](domains/code-architecture.md#issue_2026-05-30-retry-mimalloc-with-mi-options) — code-architecture
-
-### at-mention 文件搜索
-- [@ mention 文件搜索性能差 + 多目录搜不到](domains/tui.md#issue_2026-05-31-at-mention-blocking-glob-search) — tui
-
-### glob 性能
-- [@ mention 文件搜索性能差 + 多目录搜不到](domains/tui.md#issue_2026-05-31-at-mention-blocking-glob-search) — tui
-
-### walkdir
-- [@ mention 文件搜索性能差 + 多目录搜不到](domains/tui.md#issue_2026-05-31-at-mention-blocking-glob-search) — tui
-
-### 线程隔离
-- [@ mention 文件搜索性能差 + 多目录搜不到](domains/tui.md#issue_2026-05-31-at-mention-blocking-glob-search) — tui
-
-### Rewind 消息丢失
-- [Rewind 回退后前文消息全部丢失 + 双击 ESC 偶发无响应](domains/tui.md#issue_2026-06-02-rewind-loses-messages-esc-unresponsive) — tui
-
-### rewind_pending_since
-- [Rewind 回退后前文消息全部丢失 + 双击 ESC 偶发无响应](domains/tui.md#issue_2026-06-02-rewind-loses-messages-esc-unresponsive) — tui
-
-### 多 session 分屏
-- [移除 /split 多 session 分屏功能](domains/tui.md#issue_2026-06-01-remove-split-multi-session) — tui
-
-### SessionManager
-- [移除 /split 多 session 分屏功能](domains/tui.md#issue_2026-06-01-remove-split-multi-session) — tui
-
-### 架构简化
-- [移除 /split 多 session 分屏功能](domains/tui.md#issue_2026-06-01-remove-split-multi-session) — tui
-
-### /split 移除
-- [移除 /split 多 session 分屏功能](domains/tui.md#issue_2026-06-01-remove-split-multi-session) — tui
-
-### Agent 工具错误率
-- [Agent 工具调用 3.35% 错误率——93% 源于 subagent_type 参数缺失](domains/agent.md#issue_2026-06-05-agent-tool-3-percent-error-rate-subagent-type-missing) — agent
-
-### CJK 唯一性
-- [LineEdit 提示词压力测试方法论](domains/agent.md#issue_2026-06-06-lineedit-prompt-stress-testing) — agent
-
-### Config 面板
-- [Config 面板交互混乱，需整体重新设计](domains/tui.md#issue_2026-05-24-config-panel-interaction-redesign) — tui
-
-### LineEdit 提示词
-- [LineEdit 提示词压力测试方法论](domains/agent.md#issue_2026-06-06-lineedit-prompt-stress-testing) — agent
-
-### Ok-error 返回模式
-- [Agent 工具调用 3.35% 错误率——93% 源于 subagent_type 参数缺失](domains/agent.md#issue_2026-06-05-agent-tool-3-percent-error-rate-subagent-type-missing) — agent
-
-### start_word/end_word 语义
-- [LineEdit 提示词压力测试方法论](domains/agent.md#issue_2026-06-06-lineedit-prompt-stress-testing) — agent
-
-### subagent_type 参数缺失
-- [Agent 工具调用 3.35% 错误率——93% 源于 subagent_type 参数缺失](domains/agent.md#issue_2026-06-05-agent-tool-3-percent-error-rate-subagent-type-missing) — agent
-
-### tool_errors 分析器
-- [Agent 工具调用 3.35% 错误率——93% 源于 subagent_type 参数缺失](domains/agent.md#issue_2026-06-05-agent-tool-3-percent-error-rate-subagent-type-missing) — agent
-
-### 即时生效
-- [Config 面板交互混乱，需整体重新设计](domains/tui.md#issue_2026-05-24-config-panel-interaction-redesign) — tui
-
-### 按键一致性
-- [Config 面板交互混乱，需整体重新设计](domains/tui.md#issue_2026-05-24-config-panel-interaction-redesign) — tui
-
-### 提示词压力测试
-- [LineEdit 提示词压力测试方法论](domains/agent.md#issue_2026-06-06-lineedit-prompt-stress-testing) — agent
-
-### 编辑模式简化
-- [Config 面板交互混乱，需整体重新设计](domains/tui.md#issue_2026-05-24-config-panel-interaction-redesign) — tui
-
-### crossterm ESC 合并
-- [双击 ESC 偶发完全无响应（rewind 选择器不弹出）](domains/tui.md#issue_2026-06-06-double-esc-rewind-unresponsive) — tui
-
-### 双击 ESC
-- [双击 ESC 偶发完全无响应（rewind 选择器不弹出）](domains/tui.md#issue_2026-06-06-double-esc-rewind-unresponsive) — tui
-
-### 视觉反馈补偿
-- [双击 ESC 偶发完全无响应（rewind 选择器不弹出）](domains/tui.md#issue_2026-06-06-double-esc-rewind-unresponsive) — tui
-
-### 逻辑行 vs 视觉行
-- [AskUser 弹窗自定义输入 textarea 聚焦时比预期偏上一行](domains/tui.md#issue_2026-06-09-ask-user-textarea-position-one-line-too-high) — tui
-
-### ScrollableArea overlay
-- [AskUser 弹窗自定义输入 textarea 聚焦时比预期偏上一行](domains/tui.md#issue_2026-06-09-ask-user-textarea-position-one-line-too-high) — tui
-
-### Paragraph::line_count
-- [AskUser 弹窗自定义输入 textarea 聚焦时比预期偏上一行](domains/tui.md#issue_2026-06-09-ask-user-textarea-position-one-line-too-high) — tui
-
-### frozen_subagent_vms 过期
-- [消息区域 SubAgentGroup 卡片完成后残留、未聚合、状态错误](domains/tui.md#issue_2026-06-06-bg-agent-subagent-group-display) — tui
-
-### 后台 Agent 事件同步
-- [消息区域 SubAgentGroup 卡片完成后残留、未聚合、状态错误](domains/tui.md#issue_2026-06-06-bg-agent-subagent-group-display) — tui
-
-### reconcile 覆盖
-- [消息区域 SubAgentGroup 卡片完成后残留、未聚合、状态错误](domains/tui.md#issue_2026-06-06-bg-agent-subagent-group-display) — tui
-
-### 后台 Agent 事件转发
-- [BG Agent Bar 始终显示 0 calls](domains/tui.md#issue_2026-06-06-bg-agent-bar-tool-count-always-zero) — tui
-
-### BgToolStep
-- [BG Agent Bar 始终显示 0 calls](domains/tui.md#issue_2026-06-06-bg-agent-bar-tool-count-always-zero) — tui
-
-### 工具调用计数
-- [BG Agent Bar 始终显示 0 calls](domains/tui.md#issue_2026-06-06-bg-agent-bar-tool-count-always-zero) — tui
-
-### 名称提取不一致
-- [Plugin 面板 marketplace 删除后重新打开面板仍在](domains/tui.md#issue_2026-06-06-plugin-marketplace-delete-not-persisted) — tui
-
-### 持久化逻辑重复
-- [Plugin 面板 marketplace 删除后重新打开面板仍在](domains/tui.md#issue_2026-06-06-plugin-marketplace-delete-not-persisted) — tui
-
-### MarketplaceManager::extract_name
-- [Plugin 面板 marketplace 删除后重新打开面板仍在](domains/tui.md#issue_2026-06-06-plugin-marketplace-delete-not-persisted) — tui
-
-### 斜杠命令路由
-- [/plugin 命令缺少 marketplace add、install@marketplace、marketplace update 子命令](domains/tui.md#issue_2026-06-06-plugin-slash-command-marketplace-support) — tui
-
-### CLI/UI 一致性
-- [/plugin 命令缺少 marketplace add、install@marketplace、marketplace update 子命令](domains/tui.md#issue_2026-06-06-plugin-slash-command-marketplace-support) — tui
-
-### plugin 子命令
-- [/plugin 命令缺少 marketplace add、install@marketplace、marketplace update 子命令](domains/tui.md#issue_2026-06-06-plugin-slash-command-marketplace-support) — tui
-
-### snapshot_anchor 偏移
-- [Rewind 撤回消息后未将用户输入回填到输入框](domains/tui.md#issue_2026-06-10-rewind-text-not-restored-to-input) — tui
-
-### 文本回填
-- [Rewind 撤回消息后未将用户输入回填到输入框](domains/tui.md#issue_2026-06-10-rewind-text-not-restored-to-input) — tui
-
-### rewind 用户体验
-- [Rewind 撤回消息后未将用户输入回填到输入框](domains/tui.md#issue_2026-06-10-rewind-text-not-restored-to-input) — tui
-
-### 二进制体积
-- [移除 tree-sitter 依赖以减小二进制体积](domains/tui.md#issue_2026-06-08-remove-tree-sitter-dependency) — tui
-
-### 依赖评估
-- [移除 tree-sitter 依赖以减小二进制体积](domains/tui.md#issue_2026-06-08-remove-tree-sitter-dependency) — tui
-
-### tree-sitter AST
-- [移除 tree-sitter 依赖以减小二进制体积](domains/tui.md#issue_2026-06-08-remove-tree-sitter-dependency) — tui
-
-### escape_next
-- [LineEdit 工具在转义字符串和上下文匹配场景中的降效问题](domains/tui.md#issue_2026-06-06-lineedit-escape-and-context-matching-issues) — tui
-
-### Rust lifetime
-- [LineEdit 工具在转义字符串和上下文匹配场景中的降效问题](domains/tui.md#issue_2026-06-06-lineedit-escape-and-context-matching-issues) — tui
-
-### char literal 区分
-- [LineEdit 工具在转义字符串和上下文匹配场景中的降效问题](domains/tui.md#issue_2026-06-06-lineedit-escape-and-context-matching-issues) — tui
-
-### brackets 验证
-- [LineEdit 工具在转义字符串和上下文匹配场景中的降效问题](domains/tui.md#issue_2026-06-06-lineedit-escape-and-context-matching-issues) — tui
-
-### 行注释检测
-- [LineEdit bracket 校验对 Markdown 内容中 URL :// 的误报](domains/tui.md#issue_2026-06-06-lineedit-bracket-false-positive) — tui
-
-### URL ://
-- [LineEdit bracket 校验对 Markdown 内容中 URL :// 的误报](domains/tui.md#issue_2026-06-06-lineedit-bracket-false-positive) — tui
-
-### brackets 误报
-- [LineEdit bracket 校验对 Markdown 内容中 URL :// 的误报](domains/tui.md#issue_2026-06-06-lineedit-bracket-false-positive) — tui
-
-### update_config 静默返回
-- [Login 面板 / 快捷键切换 provider 后 ACP 侧实际未生效](domains/tui.md#issue_2026-05-31-login-panel-switch-provider-ignored) — tui
-
-### 无 session 路径
-- [Login 面板 / 快捷键切换 provider 后 ACP 侧实际未生效](domains/tui.md#issue_2026-05-31-login-panel-switch-provider-ignored) — tui
-
-### ACP notification
-- [Login 面板 / 快捷键切换 provider 后 ACP 侧实际未生效](domains/tui.md#issue_2026-05-31-login-panel-switch-provider-ignored) — tui
-
-### GLM 回归
-- [GLM Anthropic 兼容端口 500 回归: tool_result block 缺少 id 属性](domains/tui.md#issue_2026-06-06-glm-anthropic-tool-result-id-500-regression) — tui
-
-### Anthropic 兼容
-- [GLM Anthropic 兼容端口 500 回归: tool_result block 缺少 id 属性](domains/tui.md#issue_2026-06-06-glm-anthropic-tool-result-id-500-regression) — tui
-
-### 多轮工具调用
-- [GLM Anthropic 兼容端口 500 回归: tool_result block 缺少 id 属性](domains/tui.md#issue_2026-06-06-glm-anthropic-tool-result-id-500-regression) — tui
-
-### AgentResult 轮询
-- [Agent 反复轮询 AgentResult 而非等待后台任务通知](domains/agent.md#issue_2026-06-06-agent-polls-agentresult-repeatedly) — agent
-
-### 后台任务通知
-- [Agent 反复轮询 AgentResult 而非等待后台任务通知](domains/agent.md#issue_2026-06-06-agent-polls-agentresult-repeatedly) — agent
-
-### 系统提示词行为引导
-- [Agent 反复轮询 AgentResult 而非等待后台任务通知](domains/agent.md#issue_2026-06-06-agent-polls-agentresult-repeatedly) — agent
-
-### broker timeout
-- [HITL 审批与 Cancel 竞态条件缺少测试](domains/agent.md#issue_2026-06-06-test-gap-hitl-cancel-race) — agent
-
-### 无超时等待
-- [HITL 审批与 Cancel 竞态条件缺少测试](domains/agent.md#issue_2026-06-06-test-gap-hitl-cancel-race) — agent
-
-### cleanup_prepended 泄漏
-- [测试缺口：LLM 错误路径下 system 消息 cleanup 行为无测试](domains/agent.md#issue_2026-06-06-test-gap-llm-error-cleanup-prepended) — agent
-
-### try_break 宏
-- [测试缺口：LLM 错误路径下 system 消息 cleanup 行为无测试](domains/agent.md#issue_2026-06-06-test-gap-llm-error-cleanup-prepended) — agent
-
-### 循环内错误传播
-- [测试缺口：LLM 错误路径下 system 消息 cleanup 行为无测试](domains/agent.md#issue_2026-06-06-test-gap-llm-error-cleanup-prepended) — agent
-
-### preprocess_messages
-- [Full Compact 后 Agent 使用错误的项目路径前缀](domains/compact.md#issue_2026-06-07-full-compact-loses-project-path-context) — compact
-
-### 工具参数丢失
-- [Full Compact 后 Agent 使用错误的项目路径前缀](domains/compact.md#issue_2026-06-07-full-compact-loses-project-path-context) — compact
-
-### cwd 注入
-- [Full Compact 后 Agent 使用错误的项目路径前缀](domains/compact.md#issue_2026-06-07-full-compact-loses-project-path-context) — compact
-
-### compact 摘要质量
-- [Full Compact 后 Agent 使用错误的项目路径前缀](domains/compact.md#issue_2026-06-07-full-compact-loses-project-path-context) — compact
-
-### 插件 MCP 环境变量
-- [插件 MCP 子进程缺少 CLAUDE_PLUGIN_ROOT/DATA 环境变量注入](domains/mcp.md#issue_2026-06-07-hindsight-mcp-server-init-failed) — mcp
-
-### CLAUDE_PLUGIN_ROOT
-- [插件 MCP 子进程缺少 CLAUDE_PLUGIN_ROOT/DATA 环境变量注入](domains/mcp.md#issue_2026-06-07-hindsight-mcp-server-init-failed) — mcp
-
-### spawn_stdio_transport
-- [插件 MCP 子进程缺少 CLAUDE_PLUGIN_ROOT/DATA 环境变量注入](domains/mcp.md#issue_2026-06-07-hindsight-mcp-server-init-failed) — mcp
-
-### 子进程 env
-- [插件 MCP 子进程缺少 CLAUDE_PLUGIN_ROOT/DATA 环境变量注入](domains/mcp.md#issue_2026-06-07-hindsight-mcp-server-init-failed) — mcp
-
-### 截断落盘
-- [WebFetch 截断后未落盘，长网页内容直接丢弃](domains/tools.md#issue_2026-06-10-webfetch-truncation-no-disk-persist) — tools
-
-### persist_truncated_output
-- [WebFetch 截断后未落盘，长网页内容直接丢弃](domains/tools.md#issue_2026-06-10-webfetch-truncation-no-disk-persist) — tools
-
-### 工具一致性
-- [WebFetch 截断后未落盘，长网页内容直接丢弃](domains/tools.md#issue_2026-06-10-webfetch-truncation-no-disk-persist) — tools
-
-### 插件 skill 全文加载
-- [SkillPreloadMiddleware 无法加载插件提供的 Skill 全文](domains/plugin.md#issue_2026-06-10-skill-preload-cannot-load-plugin-skills) — plugin
-
-### resolve_dirs 硬编码
-- [SkillPreloadMiddleware 无法加载插件提供的 Skill 全文](domains/plugin.md#issue_2026-06-10-skill-preload-cannot-load-plugin-skills) — plugin
-
-### with_extra_dirs
-- [SkillPreloadMiddleware 无法加载插件提供的 Skill 全文](domains/plugin.md#issue_2026-06-10-skill-preload-cannot-load-plugin-skills) — plugin
-
-### Built-in Agent
-- [Web Researcher Agent 升级为 Built-in Agent，支持原生 WebFetch/WebSearch 及复杂研究工作流](domains/agent.md#issue_2026-06-12-web-researcher-builtin-upgrade) — agent
-- [Coder 升级为 Built-in Agent，工具减量和反循环 prompt](domains/agent.md#issue_2026-06-09-coder-builtin-agent) — agent
-
-### BUILT_IN_AGENTS
-- [Web Researcher Agent 升级为 Built-in Agent，支持原生 WebFetch/WebSearch 及复杂研究工作流](domains/agent.md#issue_2026-06-12-web-researcher-builtin-upgrade) — agent
-
-### parent_tools
-- [SubAgent 缺少 WebFetch 和 WebSearch 工具](domains/agent.md#issue_2026-06-12-subagent-missing-web-tools) — agent
-
-### SubAgent 工具继承
-- [SubAgent 缺少 WebFetch 和 WebSearch 工具](domains/agent.md#issue_2026-06-12-subagent-missing-web-tools) — agent
-
-### WebFetch/WebSearch
-- [SubAgent 缺少 WebFetch 和 WebSearch 工具](domains/agent.md#issue_2026-06-12-subagent-missing-web-tools) — agent
-
-### web-researcher
-- [Web Researcher Agent 升级为 Built-in Agent，支持原生 WebFetch/WebSearch 及复杂研究工作流](domains/agent.md#issue_2026-06-12-web-researcher-builtin-upgrade) — agent
-
-### Write 工具
-- [Write 工具超长内容流式输出时 LLM Provider 响应极慢](domains/agent.md#issue_2026-06-12-large-write-streaming-slow) — agent
-
-### append 模式
-- [Write 工具超长内容流式输出时 LLM Provider 响应极慢](domains/agent.md#issue_2026-06-12-large-write-streaming-slow) — agent
-- [Write 工具 append 模式分段写入减少上下文消耗](domains/agent.md#issue_2026-06-06-write-tool-append-mode) — agent
-
-### 大文件写入
-- [Write 工具超长内容流式输出时 LLM Provider 响应极慢](domains/agent.md#issue_2026-06-12-large-write-streaming-slow) — agent
-
-### 子Agent 工具传播
-- [SubAgent 缺少 WebFetch 和 WebSearch 工具](domains/agent.md#issue_2026-06-12-subagent-missing-web-tools) — agent
-
-### 子Agent 升级
-- [Web Researcher Agent 升级为 Built-in Agent，支持原生 WebFetch/WebSearch 及复杂研究工作流](domains/agent.md#issue_2026-06-12-web-researcher-builtin-upgrade) — agent
-
-### 原生工具
-- [Web Researcher Agent 升级为 Built-in Agent，支持原生 WebFetch/WebSearch 及复杂研究工作流](domains/agent.md#issue_2026-06-12-web-researcher-builtin-upgrade) — agent
-
-### 流式性能
-- [Write 工具超长内容流式输出时 LLM Provider 响应极慢](domains/agent.md#issue_2026-06-12-large-write-streaming-slow) — agent
-
-### 超时机制
-- [Write 工具超长内容流式输出时 LLM Provider 响应极慢](domains/agent.md#issue_2026-06-12-large-write-streaming-slow) — agent
-
-### system-reminder 标签
-- [system-reminder 标签导致 UserBubble 折叠和上下文注入](domains/compact.md#issue_2026-06-02-system-reminder-compact-summary) — compact
-
-### UserBubble 折叠
-- [system-reminder 标签导致 UserBubble 折叠和上下文注入](domains/compact.md#issue_2026-06-02-system-reminder-compact-summary) — compact
-
-### 上下文注入
-- [system-reminder 标签导致 UserBubble 折叠和上下文注入](domains/compact.md#issue_2026-06-02-system-reminder-compact-summary) — compact
-
-### compact 持久化
-- [compact 持久化恢复时消息重复](domains/compact.md#issue_2026-06-02-session-restore-compact-message-duplication) — compact
-
-### compact 渲染
-- [compact 渲染打破 text_selection 和 loading 状态](domains/compact.md#issue_2026-06-07-compact-breaks-rendering-selection-loading) — compact
-
-### text_selection
-- [compact 渲染打破 text_selection 和 loading 状态](domains/compact.md#issue_2026-06-07-compact-breaks-rendering-selection-loading) — compact
-
-### loading 丢失
-- [compact 渲染打破 text_selection 和 loading 状态](domains/compact.md#issue_2026-06-07-compact-breaks-rendering-selection-loading) — compact
-
-### 斜杠命令
-- [未知斜杠命令静默 fallback 吞掉用户输入](domains/tui.md#issue_2026-06-05-unknown-slash-command-input-swallowed) — tui
-
-### 命令分发
-- [未知斜杠命令静默 fallback 吞掉用户输入](domains/tui.md#issue_2026-06-05-unknown-slash-command-input-swallowed) — tui
-
-### 静默 fallback
-- [未知斜杠命令静默 fallback 吞掉用户输入](domains/tui.md#issue_2026-06-05-unknown-slash-command-input-swallowed) — tui
-
-### 内联补全
-- [Skills/Commands 内联补全触发与 SlashHintState 和 @mention 回溯](domains/tui.md#issue_2026-06-06-inline-slash-trigger-for-skills-and-commands) — tui
-
-### SlashHintState
-- [Skills/Commands 内联补全触发与 SlashHintState 和 @mention 回溯](domains/tui.md#issue_2026-06-06-inline-slash-trigger-for-skills-and-commands) — tui
-
-### @mention 回溯
-- [Skills/Commands 内联补全触发与 SlashHintState 和 @mention 回溯](domains/tui.md#issue_2026-06-06-inline-slash-trigger-for-skills-and-commands) — tui
-
-### 数据源去重
-- [数据源去重导致 ACP 命令和 skill hints 显示异常](domains/agent.md#issue_2026-06-01-skill-prefix-hints-unknown-command) — agent
-
-### ACP 命令
-- [数据源去重导致 ACP 命令和 skill hints 显示异常](domains/agent.md#issue_2026-06-01-skill-prefix-hints-unknown-command) — agent
-
-### skill hints
-- [数据源去重导致 ACP 命令和 skill hints 显示异常](domains/agent.md#issue_2026-06-01-skill-prefix-hints-unknown-command) — agent
-
-### 工具减量
-- [Coder 升级为 Built-in Agent，工具减量和反循环 prompt](domains/agent.md#issue_2026-06-09-coder-builtin-agent) — agent
-
-### 反循环 prompt
-- [Coder 升级为 Built-in Agent，工具减量和反循环 prompt](domains/agent.md#issue_2026-06-09-coder-builtin-agent) — agent
-
-### Langfuse flush
-- [Langfuse flush 阻塞 event pump 导致并发 BG Agent 后下一 prompt 挂起](domains/agent.md#issue_2026-06-03-concurrent-bg-agent-next-prompt-hangs) — agent
-
-### event pump 阻塞
-- [Langfuse flush 阻塞 event pump 导致并发 BG Agent 后下一 prompt 挂起](domains/agent.md#issue_2026-06-03-concurrent-bg-agent-next-prompt-hangs) — agent
-
-### 遥测死锁
-- [Langfuse flush 阻塞 event pump 导致并发 BG Agent 后下一 prompt 挂起](domains/agent.md#issue_2026-06-03-concurrent-bg-agent-next-prompt-hangs) — agent
-
-### Hook 权限
-- [Hook PermissionRequest 在 bypass 模式下错误触发](domains/agent.md#issue_2026-06-01-hook-permission-request-fires-in-bypass) — agent
-
-### PermissionRequest
-- [Hook PermissionRequest 在 bypass 模式下错误触发](domains/agent.md#issue_2026-06-01-hook-permission-request-fires-in-bypass) — agent
-
-### bypass 检查
-- [Hook PermissionRequest 在 bypass 模式下错误触发](domains/agent.md#issue_2026-06-01-hook-permission-request-fires-in-bypass) — agent
-
-### 全局 Hook
-- [全局 Hook 设置未从 settings.json 启动加载](domains/agent.md#issue_2026-06-06-global-settings-hooks-not-loaded) — agent
-
-### settings.json
-- [全局 Hook 设置未从 settings.json 启动加载](domains/agent.md#issue_2026-06-06-global-settings-hooks-not-loaded) — agent
-
-### 启动加载
-- [全局 Hook 设置未从 settings.json 启动加载](domains/agent.md#issue_2026-06-06-global-settings-hooks-not-loaded) — agent
-
-### LLM 流式错误
-- [LLM 流式错误导致 Agent 失忆，history 未保护](domains/agent.md#issue_2026-05-29-llm-stream-error-causes-amnesia) — agent
-
-### Agent 失忆
-- [LLM 流式错误导致 Agent 失忆，history 未保护](domains/agent.md#issue_2026-05-29-llm-stream-error-causes-amnesia) — agent
-
-### history 保护
-- [LLM 流式错误导致 Agent 失忆，history 未保护](domains/agent.md#issue_2026-05-29-llm-stream-error-causes-amnesia) — agent
-
-### block_in_place 死锁
-- [block_in_place 死锁、配置验证和持久化顺序不一致](domains/agent.md#issue_2026-05-29-new-thread-deadlock-and-update-config-inconsistency) — agent
-
-### 配置验证
-- [block_in_place 死锁、配置验证和持久化顺序不一致](domains/agent.md#issue_2026-05-29-new-thread-deadlock-and-update-config-inconsistency) — agent
-
-### 持久化顺序
-- [block_in_place 死锁、配置验证和持久化顺序不一致](domains/agent.md#issue_2026-05-29-new-thread-deadlock-and-update-config-inconsistency) — agent
-
-### 参数别名
-- [Read 工具 file_path 参数别名兼容](domains/agent.md#issue_2026-06-02-read-tool-path-alias-for-file_path) — agent
-
-### file_path
-- [Read 工具 file_path 参数别名兼容](domains/agent.md#issue_2026-06-02-read-tool-path-alias-for-file_path) — agent
-
-### 工具兼容
-- [Read 工具 file_path 参数别名兼容](domains/agent.md#issue_2026-06-02-read-tool-path-alias-for-file_path) — agent
-
-### 分段写入
-- [Write 工具 append 模式分段写入减少上下文消耗](domains/agent.md#issue_2026-06-06-write-tool-append-mode) — agent
-
-### 上下文消耗
-- [Write 工具 append 模式分段写入减少上下文消耗](domains/agent.md#issue_2026-06-06-write-tool-append-mode) — agent
-
-### 多层数据流
-- [多层数据流问题导致端到端 PredictionReady 建议不生效](domains/agent.md#issue_2026-06-10-prompt-suggestion-not-working) — agent
-
-### 端到端验证
-- [多层数据流问题导致端到端 PredictionReady 建议不生效](domains/agent.md#issue_2026-06-10-prompt-suggestion-not-working) — agent
-
-### PredictionReady
-- [多层数据流问题导致端到端 PredictionReady 建议不生效](domains/agent.md#issue_2026-06-10-prompt-suggestion-not-working) — agent
-
-### MCP 状态栏
-- [MCP 初始化失败后状态栏红色错误提示无法消失](domains/tui.md#issue_2026-06-16-mcp-failed-status-bar-persistent-error) — tui
-
-### 错误恢复
-- [MCP 初始化失败后状态栏红色错误提示无法消失](domains/tui.md#issue_2026-06-16-mcp-failed-status-bar-persistent-error) — tui
-
-### 状态持久化
-- [MCP 初始化失败后状态栏红色错误提示无法消失](domains/tui.md#issue_2026-06-16-mcp-failed-status-bar-persistent-error) — tui
-
-### Windows 跨平台
-- [Windows 环境下表单输入框 overlay textarea 水平偏移](domains/tui.md#issue_2026-06-16-form-textarea-overlay-offset-windows) — tui
-- [Windows 环境下鼠标滚轮消息区滚动时输入框优先截获滚动事件](domains/tui.md#issue_2026-06-16-mouse-wheel-scroll-textarea-priority-windows) — tui
-
-### textarea overlay
-- [Windows 环境下表单输入框 overlay textarea 水平偏移](domains/tui.md#issue_2026-06-16-form-textarea-overlay-offset-windows) — tui
-
-### 渲染偏移
-- [Windows 环境下表单输入框 overlay textarea 水平偏移](domains/tui.md#issue_2026-06-16-form-textarea-overlay-offset-windows) — tui
-
-### ConPTY 事件泄漏
-- [Windows 环境下鼠标滚轮消息区滚动时输入框优先截获滚动事件](domains/tui.md#issue_2026-06-16-mouse-wheel-scroll-textarea-priority-windows) — tui
-
-### 鼠标滚轮
-- [Windows 环境下鼠标滚轮消息区滚动时输入框优先截获滚动事件](domains/tui.md#issue_2026-06-16-mouse-wheel-scroll-textarea-priority-windows) — tui
-
-### 事件过滤
-- [Windows 环境下鼠标滚轮消息区滚动时输入框优先截获滚动事件](domains/tui.md#issue_2026-06-16-mouse-wheel-scroll-textarea-priority-windows) — tui
-
-### SQLite 全量查询
-- [ThreadBrowser 全量 SQLite 查询导致高内存占用](domains/storage.md#issue_2026-06-01-thread-browser-full-table-scan-high-memory) — storage
-
-### Lazy Loading
-- [ThreadBrowser 全量 SQLite 查询导致高内存占用](domains/storage.md#issue_2026-06-01-thread-browser-full-table-scan-high-memory) — storage
-
-### THREAD_META_COLUMNS
-- [ThreadBrowser 全量 SQLite 查询导致高内存占用](domains/storage.md#issue_2026-06-01-thread-browser-full-table-scan-high-memory) — storage
-
-### buffer 光标
-- [主输入框长行行尾终端光标消失](domains/tui.md#issue_2026-06-17-main-textarea-cursor-invisible-long-line) — tui
-
-### terminal 光标
-- [主输入框长行行尾终端光标消失](domains/tui.md#issue_2026-06-17-main-textarea-cursor-invisible-long-line) — tui
-
-### REVERSED 残影
-- [主输入框长行行尾终端光标消失](domains/tui.md#issue_2026-06-17-main-textarea-cursor-invisible-long-line) — tui
-
-### tui-textarea 光标
-- [主输入框长行行尾终端光标消失](domains/tui.md#issue_2026-06-17-main-textarea-cursor-invisible-long-line) — tui
-
-### IME 候选窗
-- [主输入框长行行尾终端光标消失](domains/tui.md#issue_2026-06-17-main-textarea-cursor-invisible-long-line) — tui
+- [issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn Agent background 模式启动后 loading 不停止](domains/agent.md#issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn) — agent
 
 ## 更新记录
 
-- 2026-06-19: 归档 1 个 issue（tui 1），新增 5 个关键词索引
-
-- 2026-06-16: 归档 4 个 issue（tui 3 + storage 1），新增 12 个关键词索引
-- 2026-06-14: 归档 27 个 Fixed/Done issue（本轮第二次大批量归档）
-- 2026-06-14: 归档 3 个 issue（SubAgent Web 工具缺失、web-researcher 升级、Write 大文件流式慢）
-
-- 2026-06-11: 归档 19 个 issue（tui 12 + agent 3 + compact 1 + mcp 1 + tools 1 + plugin 1），新增 56 个关键词索引
-
-- 2026-06-06: 归档 3 个 issue（agent 2 + tui 1），新增 12 个关键词索引
-- 2026-06-03: 归档 3 个 issue（at-mention 搜索、rewind 消息丢失、多 session 分屏移除）
-- 2026-05-29: 归档 8 个 issue（agent 7 + plugin 1），新增 22 个关键词索引
-- 2026-05-27: 归档 16 个 issue（agent 4 + system-prompt 2 + compact 1 + tui 4 + mcp 1），新增 42 个关键词索引
-- 2026-05-26: 归档 6 个 issue（agent 3 + compact 1 + code-architecture 1 + tui 1），新增 22 个关键词索引
-- 2026-05-25: 归档 4 个 issue，新增关键词索引
-- 2026-05-13: 首次创建，归档 22 个 issue，提取 14 条领域认知
-- 2026-05-14: 第二次归档，归档 12 个 issue，提取 8 条领域认知（agent 2 + message-pipeline 2 + system-prompt 4）
-- 2026-05-15: 第三次归档，归档 8 个 issue，提取 7 条领域认知（agent 3 + code-architecture 2 + message-pipeline 2 + tui 1）
-- 2026-05-16: 第四次归档，归档 11 个 issue，提取 7 条领域认知（agent 6 + tui 1）
-- 2026-05-16: 第五次归档，归档 13 个 issue，提取 11 条领域认知（tui 10 + message-pipeline 1 + cli 1 + tools 1）
-- 2026-05-18: 归档 11 个 issue，新增 36 个新关键词条目（agent/tui/message-pipeline/acp/langfuse/code-architecture/plugin）
-- 2026-05-17: 归档 12 个 issue，新增 ACP 领域，22 个新关键词条目
-- 2026-05-17: 补充归档 2 个 Fixed issue（LLM 适配器模块化 + 后台任务竞态）
-- 2026-05-18: 归档 11 个 Fixed issue（agent 1 + tui 4 + acp 1 + langfuse 1 + message-pipeline 1 + plugin 1 + code-architecture 2），13 个新关键词条目
-- 2026-05-20: 归档 7 个 issue，新增 27 个关键词索引
-- 2026-05-20: 归档 1 个 issue，新增 4 个关键词索引（session恢复/System消息过滤/messages_to_view_models/SystemNote泄漏）
-- 2026-05-20: 归档 5 个 issue（compact 2, message-pipeline 1, system-prompt 1, tui 1），新增 24 个关键词索引
-- 2026-05-24: 归档 15 个 issue（tui 4 + agent 2 + langfuse 2 + system-prompt 1 + cli 1 + acp 4 + code-architecture 1），新增 29 个关键词索引
+- 2026-07-06: 首次创建，归档 8 个 issue
+- 2026-07-06: 从 spec/issues/ 归档 8 个 issue
+- 2026-07-10: 归档 13 个 issue，新增 agent 领域，新增 24 个关键词

@@ -30,6 +30,7 @@ interface ToolEvent {
   toolName: string;
   isError: boolean;
   errorContent: string;
+  inputKeys: string[];
 }
 
 interface ThreadToolData {
@@ -56,6 +57,7 @@ analyzeToolFailureRate(allThreadData);
 analyzeErrorDistribution(allThreadData);
 analyzeConsecutiveFailures(allThreadData);
 analyzeGrepRepeatRate(allThreadData);
+analyzeParamErrorBreakdown(allThreadData);
 
 loader.close();
 
@@ -67,7 +69,7 @@ function collectThreadData(
 ): ThreadToolData[] {
   return threads.map((t) => {
     const messages = loader.loadMessages(t.id);
-    const toolUseMap = new Map<string, string>(); // tool_use_id → tool_name
+    const toolUseMap = new Map<string, { name: string; inputKeys: string[] }>(); // tool_use_id → meta
     const toolEvents: ToolEvent[] = [];
     const grepPatterns: string[] = [];
 
@@ -86,7 +88,7 @@ function collectThreadData(
               name: string;
               input: Record<string, any>;
             };
-            toolUseMap.set(tu.id, tu.name);
+            toolUseMap.set(tu.id, { name: tu.name, inputKeys: Object.keys(tu.input ?? {}) });
             if (tu.name === "Grep" && tu.input?.pattern) {
               grepPatterns.push(String(tu.input.pattern));
             }
@@ -94,14 +96,15 @@ function collectThreadData(
         }
       } else if (parsed.role === "tool") {
         const tc = parsed as ToolContent;
-        const toolName =
-          toolUseMap.get(tc.tool_call_id) ?? tc.tool_call_id ?? "unknown";
+        const tuMeta = toolUseMap.get(tc.tool_call_id);
+        const toolName = tuMeta?.name ?? tc.tool_call_id ?? "unknown";
         const errorContent =
           typeof tc.content === "string" ? tc.content : JSON.stringify(tc.content);
         const event: ToolEvent = {
           toolName,
           isError: tc.is_error,
           errorContent,
+          inputKeys: tuMeta?.inputKeys ?? [],
         };
         toolEvents.push(event);
       }
@@ -330,4 +333,94 @@ function analyzeGrepRepeatRate(data: ThreadToolData[]): void {
       printMetric(`（仅显示 Top 10，共 ${duplicatePatterns.length} 个重复 pattern）`, "");
     }
   }
+}
+
+// ── Metric 5: 参数错误细分 ──
+
+function analyzeParamErrorBreakdown(data: ThreadToolData[]): void {
+  printSection("5. 参数错误细分");
+
+  // 筛选参数类错误（排除同时命中系统错误的）
+  const paramErrors: { tool: string; snippet: string; inputKeys: string[] }[] = [];
+  for (const td of data) {
+    for (const ev of td.toolEvents) {
+      if (!ev.isError || !ev.errorContent) continue;
+      if (ERROR_SYSTEM.test(ev.errorContent)) continue;
+      if (!ERROR_PARAM.test(ev.errorContent)) continue;
+      paramErrors.push({
+        tool: ev.toolName,
+        snippet: extractErrorSnippet(ev.errorContent),
+        inputKeys: ev.inputKeys,
+      });
+    }
+  }
+
+  if (paramErrors.length === 0) {
+    printWarning("无参数错误", "未检测到参数类错误");
+    return;
+  }
+
+  printMetric("参数错误总数", paramErrors.length);
+
+  // 5.1 按工具分组
+  printSection("  5.1 按工具分组");
+  const byTool = new Map<string, number>();
+  for (const e of paramErrors) {
+    byTool.set(e.tool, (byTool.get(e.tool) ?? 0) + 1);
+  }
+  const toolRows = [...byTool.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([tool, cnt], i) => [String(i + 1), tool, String(cnt), pct(cnt, paramErrors.length)]);
+  printTable(["#", "工具", "参数错误数", "占比"], toolRows);
+
+  // 5.2 Top 错误模式（工具 × 错误摘要）
+  printSection("  5.2 Top 错误模式（工具 × 错误摘要）");
+  const byPattern = new Map<string, { tool: string; snippet: string; count: number }>();
+  for (const e of paramErrors) {
+    const key = `${e.tool}::${e.snippet}`;
+    const g = byPattern.get(key) ?? { tool: e.tool, snippet: e.snippet, count: 0 };
+    g.count++;
+    byPattern.set(key, g);
+  }
+  const patternRows = [...byPattern.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 15)
+    .map((g, i) => [String(i + 1), g.tool, truncateStr(g.snippet, 50), String(g.count)]);
+  printTable(["#", "工具", "错误摘要", "次数"], patternRows);
+
+  // 5.3 出错时参数 key 频率
+  printSection("  5.3 出错时参数 key 频率");
+  const keyFreq = new Map<string, number>();
+  for (const e of paramErrors) {
+    for (const k of e.inputKeys) {
+      keyFreq.set(k, (keyFreq.get(k) ?? 0) + 1);
+    }
+  }
+  if (keyFreq.size > 0) {
+    const keyRows = [...keyFreq.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([k, cnt]) => [k, String(cnt), pct(cnt, paramErrors.length)]);
+    printTable(["参数 key", "出现次数", "占参数错误比"], keyRows);
+  } else {
+    console.log("  无参数 key 信息");
+  }
+}
+
+/** 从错误消息提取关键摘要 */
+function extractErrorSnippet(content: string): string {
+  // 尝试提取引号内的字段名
+  const fieldMatch = content.match(/['"`]([^'"`]{2,40})['"`]/);
+  if (fieldMatch) {
+    return `${content.slice(0, 30).trim()}…"${fieldMatch[1]}"`;
+  }
+  // 截取首行前 80 字符
+  const firstLine = content.split("\n")[0];
+  return firstLine.length > 80 ? firstLine.slice(0, 77) + "…" : firstLine;
+}
+
+function truncateStr(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "…";
 }

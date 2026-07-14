@@ -37,6 +37,8 @@ pub(super) struct SessionInfo {
     pub(super) frozen: Option<FrozenSessionData>,
     /// Session-scoped agent pool for LLM instance reuse.
     pub(super) agent_pool: AgentPool,
+    /// Session 级 WorkflowMiddleware。
+    pub(super) workflow_middleware: Option<Arc<peri_middlewares::workflow::WorkflowMiddleware>>,
 }
 
 /// Stdio 传输环境的共享上下文
@@ -49,6 +51,7 @@ pub(super) struct StdioContext {
     pub(super) channel_state: Option<Arc<peri_agent::interaction::ChannelState>>,
     pub(super) plugin_skill_roots: Vec<peri_middlewares::skills::SkillRoot>,
     pub(super) plugin_agent_dirs: Vec<PathBuf>,
+    pub(super) plugin_loaded: Vec<peri_middlewares::plugin::LoadedPlugin>,
     pub(super) hook_groups: Vec<Vec<RegisteredHook>>,
     pub(super) plugin_lsp_servers: Vec<LspServerConfig>,
     pub(super) tool_search_index: Arc<ToolSearchIndex>,

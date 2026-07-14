@@ -3,7 +3,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use agent_client_protocol::schema::{PromptResponse, StopReason};
+use agent_client_protocol::schema::v1::{PromptResponse, StopReason};
 use parking_lot::RwLock;
 use peri_acp::{
     broker::AcpTransportBroker,
@@ -22,7 +22,7 @@ use crate::{app::agent::LlmProvider, config::PeriConfig};
 // ── Prompt execution (spawned into background task) ──────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn execute_prompt(
+pub(crate) async fn run_prompt(
     params: Value,
     sessions: &SharedSessions,
     provider: &Arc<RwLock<LlmProvider>>,
@@ -31,6 +31,7 @@ pub(crate) async fn execute_prompt(
     cron_scheduler: Option<Arc<parking_lot::Mutex<CronScheduler>>>,
     plugin_skill_roots: &[peri_middlewares::skills::SkillRoot],
     plugin_agent_dirs: &[std::path::PathBuf],
+    plugin_loaded: &[peri_middlewares::plugin::LoadedPlugin],
     hook_groups: &[Vec<peri_middlewares::hooks::RegisteredHook>],
     mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
     channel_state: Option<Arc<ChannelState>>,
@@ -49,6 +50,8 @@ pub(crate) async fn execute_prompt(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
         .to_string();
+    // v2 路径下 MessageQueue 由 run_session_loop 从 session_manager.v2_message_queue
+    // 解析（executor.rs:368），不再作为 PromptExecutionContext 字段传入。
     let message = params
         .get("message")
         .ok_or_else(|| AcpError::new(-32602, "missing message"))?;
@@ -74,7 +77,7 @@ pub(crate) async fn execute_prompt(
     }
 
     // Read session data under lock, then release immediately.
-    let (cwd, history, is_empty, thread_id, frozen, incoming_recalls) = {
+    let (cwd, history, is_empty, thread_id, frozen, incoming_recalls, workflow_middleware) = {
         let mut sessions = sessions.lock().await;
         let state = sessions
             .get_mut(&session_id)
@@ -86,10 +89,11 @@ pub(crate) async fn execute_prompt(
             state.thread_id.clone(),
             state.frozen.clone(),
             std::mem::take(&mut state.recall_items),
+            state.workflow_middleware.clone(),
         )
     };
     let history_len = history.len();
-    // Save message IDs for compact persistence path (history is moved into execute_prompt below).
+    // Save message IDs for compact persistence path (history is moved into run_session_loop below).
     let history_ids: Vec<peri_agent::messages::MessageId> =
         history.iter().map(|m| m.id()).collect();
 
@@ -101,10 +105,50 @@ pub(crate) async fn execute_prompt(
     let provider_snapshot = provider.read().clone();
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
 
+    // Create workflow executor (enables Workflow tool for multi-agent orchestration)
+    // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
+    let workflow_executor = peri_acp::agent::workflow_agent::create_executor(
+        peri_acp::agent::workflow_agent::WorkflowAgentContext {
+            provider: provider_snapshot.clone(),
+            cwd: cwd.clone(),
+            frozen_claude_md: frozen
+                .as_ref()
+                .and_then(|f| f.claude_md().map(|s| s.to_string())),
+            frozen_claude_local_md: frozen
+                .as_ref()
+                .and_then(|f| f.claude_local_md().map(|s| s.to_string())),
+            frozen_skill_summary: frozen
+                .as_ref()
+                .and_then(|f| f.skill_summary().map(|s| s.to_string())),
+            session_id: Some(session_id.clone()),
+            compact_config: {
+                let mut cc = peri_config_snapshot
+                    .config
+                    .compact
+                    .clone()
+                    .unwrap_or_default();
+                cc.apply_env_overrides();
+                Some(cc)
+            },
+            cancel: Some(cancel.clone()),
+            system_prompt: frozen.as_ref().map(|f| f.system_prompt().to_string()),
+            broker: None,
+            permission_mode: None,
+            frozen_date: frozen.as_ref().map(|f| f.date().to_string()),
+            frozen_language: frozen
+                .as_ref()
+                .and_then(|f| f.language().map(|s| s.to_string())),
+            agent_pool: None,
+            langfuse_session: None,
+            thread_store: None,
+            peri_config: Some(peri_config_snapshot.clone()),
+        },
+    );
+
     // Track first history message ID for cancel-with-progress path (history is moved below)
     // Uses Option<MessageId> (16 bytes) instead of cloning the entire history.
     let first_history_id = history.first().map(|m| m.id());
-    let result = executor::execute_prompt(executor::PromptExecutionContext {
+    let result = executor::run_session_loop(executor::PromptExecutionContext {
         provider: provider_snapshot,
         peri_config: peri_config_snapshot,
         cwd,
@@ -125,6 +169,7 @@ pub(crate) async fn execute_prompt(
         bg_results,
         plugin_skill_roots: plugin_skill_roots.to_vec(),
         plugin_agent_dirs: plugin_agent_dirs.to_vec(),
+        plugin_loaded: plugin_loaded.to_vec(),
         hook_groups: hook_groups.to_vec(),
         cron_scheduler,
         mcp_pool,
@@ -137,6 +182,9 @@ pub(crate) async fn execute_prompt(
         thread_store: Some(Arc::clone(thread_store)),
         thread_id: Some(thread_id.clone()),
         session_manager: Some(session_manager),
+        workflow_executor: Some(workflow_executor),
+        workflow_middleware,
+        allow_await_wake: true,
     })
     .await;
 
@@ -206,9 +254,12 @@ pub(crate) async fn execute_prompt(
                     "Agent cancelled with progress, preserving history"
                 );
             } else {
-                // Execution failed, cancelled early (no tool calls), or MaxIterationsExceeded.
-                // Roll back to pre-submit state — the TUI's handle_interrupted will also
-                // truncate view_messages and restore text to input for the no-tool-call case.
+                // Execution failed, cancelled early (no AI output), or MaxIterationsExceeded.
+                // Roll back LLM-side history to pre-submit state.
+                // The TUI's TurnInterrupted handler detects zero AI output (current_turn empty)
+                // and performs the corresponding UI rollback: removes the user bubble from
+                // committed + restores text to the input area via INPUT_RESTORE_TEXT storage
+                // + RENDER_HEARTBEAT trigger.
                 state.history.truncate(history_len);
                 info!(session_id = %session_id, history_len, "Agent execution failed/cancelled, rolled back history");
             }

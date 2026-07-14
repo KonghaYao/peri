@@ -3,28 +3,35 @@
 //! `spawn_background_fork()` 提取自 `SubAgentTool::invoke_background_fork`，
 //! 供 ACP 层（/bg 斜杠命令）和工具路径共同使用。
 //!
-//! 调用者负责提供所有需要的依赖，包括 LLM 实例、工具集、线程存储等。
+//! **P5.1 重构**：从 v1 `RetryableLLM + AgentState` 改为 v2 stages，
+//! 内部通过 `build_v2_subagent_context` 构造 StageContext，`tokio::spawn`
+//! 内运行 `run_react_loop`。
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use peri_agent::{
     agent::{
-        events::AgentEvent, react::AgentInput, state::AgentState, AgentCancellationToken,
-        BackgroundTaskResult, ReActAgent, State as _,
+        events::ExecutorEvent,
+        stages::{run_react_loop, LoopResult},
     },
     messages::BaseMessage,
+    middleware::chain::MiddlewareChain,
     thread::ThreadMeta,
+    tools::BaseTool,
 };
+use tokio_util::sync::CancellationToken;
 
-use super::tool::{build_subagent_middlewares, fire_subagent_lifecycle_hooks_static};
 use crate::{
     hooks::types::{HookEvent, RegisteredHook},
     subagent::{
-        background::{BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus},
+        background::{
+            BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle,
+            BgTaskKind,
+        },
+        v2_bridge::build_v2_subagent_context,
         SubAgentMiddlewareConfig,
     },
-    tools::ArcToolWrapper,
 };
 
 /// Fork 指令类型，决定 fork agent 使用的 system directive 模板
@@ -41,18 +48,18 @@ pub enum BgForkDirectiveKind {
 /// 所有字段为 spawn_background_fork 的必要依赖，
 /// 从 SubAgentMiddleware 或 ACP 层的对应字段映射而来。
 pub struct BgForkConfig {
-    /// 派发给子 Agent 的任务描述
+    /// 派发给子 Agent 的任务描述（不含 fork directive 包装）
     pub prompt: String,
     /// 父会话的消息历史（用于子 Agent 理解上下文）
     pub parent_messages: Vec<BaseMessage>,
     /// 工作目录
     pub cwd: PathBuf,
-    /// LLM 实例（ReactLLM trait object，spawner 内部包装 RetryableLLM）
+    /// LLM 实例（ReactLLM trait object）
     pub llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>,
     /// 最大 ReAct 迭代次数
     pub max_iterations: usize,
     /// 父 Agent 的工具集（子 Agent 继承）
-    pub parent_tools: Arc<Vec<Arc<dyn peri_agent::tools::BaseTool>>>,
+    pub parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
     /// 已注册的 hooks（用于 SubagentStart/SubagentStop 生命周期事件）
     pub registered_hooks: Arc<Vec<RegisteredHook>>,
     /// 线程持久化存储（可选）
@@ -61,15 +68,19 @@ pub struct BgForkConfig {
     pub parent_thread_id: Option<String>,
     /// 运行时注册回调：(thread_id, cancel_token, cancel_policy_str)
     #[allow(clippy::type_complexity)]
-    pub register_runtime: Option<Arc<dyn Fn(String, AgentCancellationToken, String) + Send + Sync>>,
+    pub register_runtime: Option<Arc<dyn Fn(String, CancellationToken, String) + Send + Sync>>,
     /// 运行时注销回调：&thread_id
     pub deregister_runtime: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     /// 后台任务完成事件的发送通道（必填）
-    pub bg_event_sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::AgentEvent>,
+    pub bg_event_sender: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
     /// 后台任务注册中心
     pub bg_registry: Arc<BackgroundTaskRegistry>,
     /// Fork 指令类型：BGFork 使用中文 bg-fork directive，普通使用英文 fork directive
     pub fork_directive_kind: BgForkDirectiveKind,
+    /// bg 完成时的同步回调：在 registry.complete() 之前调用
+    /// 用于将 bg 结果（Defer 消息）同步推入主 agent 的 MQ
+    pub on_bg_complete:
+        Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
     /// Frozen CLAUDE.md main content（session/new 时捕获，SubAgent 复用以避免漂移）
     pub frozen_claude_md: Option<Arc<String>>,
     /// Frozen CLAUDE.local.md content
@@ -84,22 +95,27 @@ pub struct BgForkSpawned {
     pub task_id: String,
     /// 子线程 ID（uuid v7）
     pub child_thread_id: String,
+    /// SubagentStarted 事件（构造好但**未发送**，由调用方决定推送路径）。
+    ///
+    /// - `/bg` 命令（BgCommand）：通过 `event_sink.push_event` 同步推送，保证
+    ///   TUI 在 Done 之前收到（避免 race condition）
+    /// - Agent 工具路径（SubAgentTool）：通过 `bg_event_sender` 异步推送
+    ///   （主 agent 在跑 `loading=true`，无 race）
+    pub started_event: ExecutorEvent,
 }
 
-/// 启动后台 fork agent
+/// 启动后台 fork agent（v2 stages）
 ///
-/// 复制 `SubAgentTool::invoke_background_fork` 的完整行为：
 /// 1. 并发检查（最多 3 个活跃任务）
 /// 2. 生成 task_id 和 child_thread_id
-/// 3. 创建子线程（通过 thread_store）
-/// 4. 构建 fork directive（根据 fork_directive_kind 选择模板）
-/// 5. 构建 ReActAgent + RetryableLLM + subagent middlewares
-/// 6. 注册 parent_tools
-/// 7. 设置 BgToolStep 事件转发
-/// 8. 创建 AgentState，注入 parent_messages + directive
-/// 9. tokio::spawn 执行
-/// 10. 注册到 BackgroundTaskRegistry（oneshot 信号量保证时序）
-/// 11. 返回 BgForkSpawned
+/// 3. 创建子线程（cancel_policy=independent）
+/// 4. 构建 fork directive
+/// 5. 组装 v2 middlewares + chain
+/// 6. 构造 StageContext（注入 parent_messages 到 transcript）
+/// 7. push directive 到 queue
+/// 8. tokio::spawn 运行 `run_react_loop`
+/// 9. 注册到 BackgroundTaskRegistry
+/// 10. 返回 BgForkSpawned
 pub async fn spawn_background_fork(
     config: BgForkConfig,
 ) -> Result<BgForkSpawned, Box<dyn std::error::Error + Send + Sync>> {
@@ -116,7 +132,6 @@ pub async fn spawn_background_fork(
     let cwd = config.cwd.to_string_lossy().to_string();
 
     // 3. 创建子线程
-    let has_thread_store = config.thread_store.is_some();
     if let Some(ref store) = config.thread_store {
         let snapshot_id = config
             .parent_messages
@@ -137,15 +152,12 @@ pub async fn spawn_background_fork(
 
     // 4. 根据 directive_kind 选择指令模板
     let fork_directive = match config.fork_directive_kind {
-        BgForkDirectiveKind::Bg => super::fork::build_bg_fork_directive(&config.prompt),
-        BgForkDirectiveKind::Fork => super::fork::build_fork_directive(&config.prompt),
+        BgForkDirectiveKind::Bg => crate::subagent::fork::build_bg_fork_directive(&config.prompt),
+        BgForkDirectiveKind::Fork => crate::subagent::fork::build_fork_directive(&config.prompt),
     };
 
-    // 5. 构建 ReActAgent（包装 RetryableLLM）
-    let llm =
-        peri_agent::llm::RetryableLLM::new(config.llm, peri_agent::llm::RetryConfig::default());
-    let mut agent_builder = ReActAgent::new(llm).max_iterations(config.max_iterations);
-    let mw_config = SubAgentMiddlewareConfig::for_fork(&cwd).with_frozen(
+    // 5. 组装 v2 middlewares + chain
+    let mw_config = SubAgentMiddlewareConfig::for_agent_def(Vec::new(), &cwd).with_frozen(
         config
             .frozen_claude_md
             .as_deref()
@@ -159,189 +171,250 @@ pub async fn spawn_background_fork(
             .as_deref()
             .map(|s| s.as_str().to_string()),
     );
-    for mw in build_subagent_middlewares(mw_config) {
-        agent_builder = agent_builder.add_middleware(mw);
+    let middlewares = crate::subagent::tool::build_subagent_middlewares(mw_config);
+    let mut chain = MiddlewareChain::new();
+    for mw in middlewares {
+        chain.add(mw);
     }
 
-    // 6. 注册父工具集
-    for tool in config.parent_tools.iter() {
-        agent_builder = agent_builder.register_tool(Box::new(ArcToolWrapper(Arc::clone(tool))));
-    }
+    // 6. tools：parent_tools 已是 Arc<Vec<Arc<dyn BaseTool>>>
+    let tools: Vec<Arc<dyn BaseTool>> = config.parent_tools.iter().cloned().collect();
 
-    // 7. 克隆 spawn 所需数据
-    let spawn_registry = Arc::clone(&config.bg_registry);
-    let spawn_hooks = Arc::clone(&config.registered_hooks);
-    let spawn_bg_sender = config.bg_event_sender.clone();
-    let spawn_task_id = task_id.clone();
-    let spawn_agent_name = agent_name.clone();
-    let spawn_prompt_summary = prompt_summary.clone();
-    let spawn_thread_store = config.thread_store.clone();
-    let spawn_child_thread_id = child_thread_id.clone();
-    let spawn_deregister_runtime = config.deregister_runtime.clone();
-    let spawn_parent_messages = config.parent_messages.clone();
-    let spawn_has_thread_store = has_thread_store;
+    // 7. Independent cancel token
+    let cancel_token = CancellationToken::new();
 
-    // 8. 注册 AgentRuntime
-    // Independent: child_cancel 不与父 cancel 关联，仅 session 级 cancel_all_agents 可取消
-    let child_cancel = if spawn_has_thread_store {
-        if let Some(ref register) = config.register_runtime {
-            let cc = AgentCancellationToken::new();
-            register(
-                child_thread_id.clone(),
-                cc.clone(),
-                "independent".to_string(),
-            );
-            Some(cc)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let cancel_token = child_cancel;
-
-    // 9. 触发 SubagentStart hook
-    fire_subagent_lifecycle_hooks_static(
-        &config.registered_hooks,
-        HookEvent::SubagentStart,
+    // 8. 构造 v2 StageContext（注入 parent_messages 到 transcript）
+    let v2_ctx = build_v2_subagent_context(
+        config.llm,
+        chain,
+        tools,
         &cwd,
-        &agent_name,
+        cancel_token.clone(),
+        config.parent_messages,
+        None, // fork 路径无 system_prompt（directive 在 prompt 里）
         None,
-    )
-    .await;
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
 
-    // 10. 设置 BgToolStep 事件转发（用于 TUI bg_agent_bar 实时计数）
-    let step_sender = config.bg_event_sender.clone();
-    let step_ctid = child_thread_id.clone();
-    agent_builder = agent_builder.with_event_handler(Arc::new(
-        peri_agent::agent::events::FnEventHandler(move |event: AgentEvent| {
-            if matches!(event, AgentEvent::ToolStart { .. }) {
-                let _ = step_sender.send(AgentEvent::BgToolStep {
-                    child_thread_id: step_ctid.clone(),
-                });
-            }
-        }),
-    ));
+    // 9. push fork_directive 到 queue
+    v2_ctx
+        .context
+        .queue
+        .push(peri_agent::session::queue::QueuedMessage::new(
+            peri_agent::session::queue::MessageKind::Prompt,
+            peri_agent::session::queue::MessageSource::UserInput,
+            BaseMessage::human(fork_directive),
+        ));
 
-    // 11. 注册到 BackgroundTaskRegistry（必须在 spawn 之前，避免竞态窗口）
-    let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
-    let handle = tokio::spawn(async move {
-        // 等待注册完成信号后才开始执行
-        let _ = start_rx.await;
+    // 10. 注册到 active_agents
+    if let Some(register) = &config.register_runtime {
+        register(child_thread_id.clone(), cancel_token, "independent".into());
+    }
 
-        let mut fork_state = if let Some(ref store) = spawn_thread_store {
-            AgentState::new(&cwd).with_persistence(Arc::clone(store), spawn_child_thread_id.clone())
-        } else {
-            AgentState::new(&cwd)
-        };
-        // 注入父消息历史
-        for msg in spawn_parent_messages {
-            fork_state.add_message(msg);
-        }
-        let start = std::time::Instant::now();
+    // 构造 SubagentStarted 事件（不发送——由调用方决定推送路径）。
+    // 见 BgForkSpawned::started_event 字段注释。
+    let started_event = ExecutorEvent::SubagentStarted {
+        agent_name: agent_name.clone(),
+        instance_id: child_thread_id.clone(),
+        is_background: true,
+    };
 
-        let result = match agent_builder
-            .execute(
-                AgentInput::text(&fork_directive),
-                &mut fork_state,
-                cancel_token,
-            )
-            .await
+    // 11. 捕获 spawn 资源
+    let on_bg_complete = config.on_bg_complete.clone();
+    let thread_store = config.thread_store.clone();
+    let deregister_runtime = config.deregister_runtime.clone();
+    let bg_event_sender = config.bg_event_sender;
+    let bg_registry = Arc::clone(&config.bg_registry);
+    let registered_hooks = Arc::clone(&config.registered_hooks);
+    let task_id_clone = task_id.clone();
+    let child_thread_id_clone = child_thread_id.clone();
+    let agent_name_clone = agent_name.clone();
+    let prompt_summary_clone = prompt_summary.clone();
+    let cwd_clone = cwd.clone();
+    let max_iterations = config.max_iterations;
+
+    // 12. tokio::spawn 执行
+    let join_handle = tokio::spawn(async move {
+        let started_at = std::time::Instant::now();
+        let context = v2_ctx.context;
+        let session = v2_ctx.session;
+
+        // run before_agent middleware hooks
+        if let Err(e) =
+            peri_agent::agent::stages::middleware_runner::run_before_agent(&context).await
         {
-            Ok(output) => {
-                let tool_calls_count = fork_state
-                    .messages
-                    .iter()
-                    .filter(|m| matches!(m, BaseMessage::Tool { .. }))
-                    .count();
-                BackgroundTaskResult {
-                    task_id: spawn_task_id.clone(),
-                    agent_name: spawn_agent_name.clone(),
-                    prompt_summary: spawn_prompt_summary.clone(),
-                    success: true,
-                    output: output.text,
-                    tool_calls_count,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    child_thread_id: Some(spawn_child_thread_id.clone()),
-                }
-            }
-            Err(e) => BackgroundTaskResult {
-                task_id: spawn_task_id.clone(),
-                agent_name: spawn_agent_name.clone(),
-                prompt_summary: spawn_prompt_summary.clone(),
-                success: false,
-                output: e.to_string(),
-                tool_calls_count: 0,
-                duration_ms: start.elapsed().as_millis() as u64,
-                child_thread_id: Some(spawn_child_thread_id.clone()),
-            },
-        };
-
-        // 更新子线程状态
-        if let Some(ref store) = spawn_thread_store {
-            let status = if result.success { "done" } else { "error" };
-            let _ = store
-                .update_thread_status(&spawn_child_thread_id, status)
-                .await;
+            tracing::warn!(error = %e, "[subagent:spawner] before_agent hook failed");
         }
 
-        spawn_registry.complete(&spawn_task_id, result.clone());
+        let loop_result = run_react_loop(context, max_iterations).await;
 
-        fire_subagent_lifecycle_hooks_static(
-            &spawn_hooks,
-            HookEvent::SubagentStop,
-            &cwd,
-            &spawn_agent_name,
-            Some(&result.output),
+        let (final_text, interrupted) = match loop_result {
+            LoopResult::Completed => (extract_last_ai_text(&session), false),
+            LoopResult::Interrupted => (String::new(), true),
+            LoopResult::Error(e) => {
+                let output = format!("Background fork agent failed: {}", e);
+                // 错误路径：lifecycle hook + thread_store + registry notification
+                fire_stop_hooks(&registered_hooks, &cwd_clone, &agent_name_clone, &output).await;
+                if let Some(ref store) = thread_store {
+                    let _ = store
+                        .update_thread_status(&child_thread_id_clone, "error")
+                        .await;
+                }
+                // 错误分支也必须发射 SubagentStopped（is_error=true），保证 depth 配对减 1。
+                // 必须在 BackgroundTaskResult 构造之前发射——后者会 move output。
+                let _ = bg_event_sender.send(ExecutorEvent::SubagentStopped {
+                    agent_name: agent_name_clone.clone(),
+                    result: output.clone(),
+                    is_error: true,
+                    instance_id: child_thread_id_clone.clone(),
+                });
+                let result = peri_agent::agent::events::BackgroundTaskResult {
+                    task_id: task_id_clone.clone(),
+                    agent_name: agent_name_clone.clone(),
+                    prompt_summary: prompt_summary_clone.clone(),
+                    success: false,
+                    output,
+                    tool_calls_count: crate::subagent::count_tool_calls_from_session(&session),
+                    duration_ms: started_at.elapsed().as_millis() as u64,
+                    child_thread_id: Some(child_thread_id_clone.clone()),
+                };
+                // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
+                if let Some(ref on_complete) = on_bg_complete {
+                    on_complete(&result);
+                }
+                bg_registry.complete(&task_id_clone, result);
+                if let Some(deregister) = &deregister_runtime {
+                    deregister(&child_thread_id_clone);
+                }
+                return;
+            }
+        };
+
+        let output_summary: String = if interrupted {
+            "interrupted".to_string()
+        } else {
+            final_text.chars().take(500).collect()
+        };
+
+        // SubagentStop lifecycle hook
+        fire_stop_hooks(
+            &registered_hooks,
+            &cwd_clone,
+            &agent_name_clone,
+            &output_summary,
         )
         .await;
 
-        // 通过独立通道发送完成事件
-        tracing::info!(
-            task_id = %spawn_task_id,
-            agent_name = %spawn_agent_name,
-            success = result.success,
-            "[bg-diag] bg-task sending BackgroundTaskCompleted via bg_event_tx"
-        );
-        let _ = spawn_bg_sender.send(AgentEvent::BackgroundTaskCompleted(result));
+        // thread_store 状态
+        if let Some(ref store) = thread_store {
+            let status = if interrupted { "cancelled" } else { "done" };
+            let _ = store
+                .update_thread_status(&child_thread_id_clone, status)
+                .await;
+        }
 
-        // 注销 AgentRuntime
-        if let Some(ref deregister) = spawn_deregister_runtime {
-            if spawn_has_thread_store {
-                deregister(&spawn_child_thread_id);
-            }
+        // 后台任务完成通知
+        let result = peri_agent::agent::events::BackgroundTaskResult {
+            task_id: task_id_clone.clone(),
+            agent_name: agent_name_clone.clone(),
+            prompt_summary: prompt_summary_clone.clone(),
+            success: !interrupted,
+            output: if interrupted {
+                "Background fork agent was interrupted".to_string()
+            } else {
+                final_text
+            },
+            tool_calls_count: crate::subagent::count_tool_calls_from_session(&session),
+            duration_ms: started_at.elapsed().as_millis() as u64,
+            child_thread_id: Some(child_thread_id_clone.clone()),
+        };
+        // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
+        // 确保 active_count 归零时 Defer 已在 MQ 中
+        if let Some(ref on_complete) = on_bg_complete {
+            on_complete(&result);
+        }
+        // 先发射 SubagentStopped（与 SubagentStarted 配对），让 TUI 把 subagent_depth
+        // 减 1（mod.rs SubAgentEnd 处理），避免 depth 永久累积导致 token tracker 失效。
+        let _ = bg_event_sender.send(ExecutorEvent::SubagentStopped {
+            agent_name: agent_name_clone.clone(),
+            result: output_summary.clone(),
+            is_error: interrupted,
+            instance_id: child_thread_id_clone.clone(),
+        });
+        if let Err(e) = bg_event_sender.send(ExecutorEvent::BackgroundTaskCompleted(result.clone()))
+        {
+            tracing::warn!(error = ?e, "bg fork: failed to send completion event");
+        }
+        bg_registry.complete(&task_id_clone, result);
+
+        if let Some(deregister) = &deregister_runtime {
+            deregister(&child_thread_id_clone);
         }
     });
 
-    // 注册到 BackgroundTaskRegistry（JoinHandle 已就绪）
-    config.bg_registry.register(BackgroundTask {
+    // 13. 注册到 BackgroundTaskRegistry
+    let bg_task = BackgroundTask {
         id: task_id.clone(),
         agent_name: agent_name.clone(),
         prompt_summary,
         status: BackgroundTaskStatus::Running,
         started_at: std::time::Instant::now(),
-        abort_handle: handle,
-    })?;
-
-    // 发送启动信号，解除 task 内的阻塞
-    let _ = start_tx.send(());
-
-    // 通知 TUI 后台任务启动（用于状态栏 bg 列表显示）
-    let _ = config.bg_event_sender.send(AgentEvent::SubagentStarted {
-        agent_name: agent_name.clone(),
-        instance_id: child_thread_id.clone(),
-        is_background: true,
-    });
-
-    tracing::info!(
-        task_id = %task_id,
-        child_thread_id = %child_thread_id,
-        agent_name = %agent_name,
-        "[bg-diag] background agent started via spawner"
-    );
+        kind: BgTaskKind::Agent,
+        cancel_handle: BgCancelHandle::Abort(join_handle.abort_handle()),
+        pid: None,
+        output_preview: None,
+    };
+    if let Err(e) = config.bg_registry.register_with_kind(bg_task) {
+        return Err(format!("Failed to register background fork task: {}", e).into());
+    }
 
     Ok(BgForkSpawned {
         task_id,
         child_thread_id,
+        started_event,
     })
+}
+
+/// 触发 SubagentStop 生命周期 hook
+async fn fire_stop_hooks(
+    registered_hooks: &Arc<Vec<RegisteredHook>>,
+    cwd: &str,
+    agent_name: &str,
+    result: &str,
+) {
+    crate::subagent::tool::fire_subagent_lifecycle_hooks_static(
+        registered_hooks,
+        HookEvent::SubagentStop,
+        cwd,
+        agent_name,
+        Some(result),
+    )
+    .await;
+}
+
+/// 从 session transcript 提取最后一条非空 AI 消息文本
+fn extract_last_ai_text(session: &Arc<peri_agent::session::Session>) -> String {
+    let transcript = session.transcript();
+    let tx = transcript.read();
+    tx.visible_messages()
+        .iter()
+        .rev()
+        .find_map(|m| {
+            if matches!(m, BaseMessage::Ai { .. }) {
+                let t = m.content();
+                let trimmed = t.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
 }

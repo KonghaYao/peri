@@ -143,32 +143,35 @@ pub async fn run_print(
     };
 
     // 插件（bare 时跳过）
-    let (plugin_skill_roots, plugin_agent_dirs, hook_groups, plugin_lsp_servers) = if bare {
-        (vec![], vec![], vec![], vec![])
-    } else {
-        let claude_dir = dirs_next::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".claude");
-        let plugin_data = peri_middlewares::plugin::load_enabled_plugins_aggregated(&claude_dir);
-        let mut hg: Vec<Vec<peri_middlewares::hooks::RegisteredHook>> = Vec::new();
-        if !plugin_data.all_hooks.is_empty() {
-            hg.push(plugin_data.all_hooks.clone());
-        }
-        let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
-        if !global_hooks.is_empty() {
-            hg.push(global_hooks);
-        }
-        let local_hooks = peri_middlewares::hooks::loader::load_settings_local_hooks(&cwd);
-        if !local_hooks.is_empty() {
-            hg.push(local_hooks);
-        }
-        (
-            plugin_data.all_skill_roots,
-            plugin_data.all_agent_dirs,
-            hg,
-            plugin_data.all_lsp_servers,
-        )
-    };
+    let (plugin_skill_roots, plugin_agent_dirs, hook_groups, plugin_lsp_servers, plugin_loaded) =
+        if bare {
+            (vec![], vec![], vec![], vec![], vec![])
+        } else {
+            let claude_dir = dirs_next::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".claude");
+            let plugin_data =
+                peri_middlewares::plugin::load_enabled_plugins_aggregated(&claude_dir);
+            let mut hg: Vec<Vec<peri_middlewares::hooks::RegisteredHook>> = Vec::new();
+            if !plugin_data.all_hooks.is_empty() {
+                hg.push(plugin_data.all_hooks.clone());
+            }
+            let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
+            if !global_hooks.is_empty() {
+                hg.push(global_hooks);
+            }
+            let local_hooks = peri_middlewares::hooks::loader::load_settings_local_hooks(&cwd);
+            if !local_hooks.is_empty() {
+                hg.push(local_hooks);
+            }
+            (
+                plugin_data.all_skill_roots,
+                plugin_data.all_agent_dirs,
+                hg,
+                plugin_data.all_lsp_servers,
+                plugin_data.plugins.clone(),
+            )
+        };
 
     let tool_search_index = Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
     let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
@@ -191,8 +194,8 @@ pub async fn run_print(
         peri_acp::session::agent_pool::AgentPool::new(),
     ));
 
-    // execute_prompt 是同步函数（返回 PromptResult，不是 async）
-    let result = peri_acp::session::executor::execute_prompt(
+    // run_session_loop 是 async 函数（返回 PromptResult）
+    let result = peri_acp::session::executor::run_session_loop(
         peri_acp::session::executor::PromptExecutionContext {
             provider,
             peri_config: peri_config_arc,
@@ -210,6 +213,7 @@ pub async fn run_print(
             bg_results: vec![], // print 模式无后台任务
             plugin_skill_roots,
             plugin_agent_dirs,
+            plugin_loaded,
             hook_groups,
             cron_scheduler: Some(cron_scheduler),
             mcp_pool,
@@ -222,6 +226,9 @@ pub async fn run_print(
             thread_store: None,    // print 模式不需要持久化
             thread_id: None,       // parent_thread_id
             session_manager: None, // print 模式不需要 cancel 级联
+            workflow_executor: None,
+            workflow_middleware: None,
+            allow_await_wake: false,
         },
     )
     .await;
@@ -277,7 +284,7 @@ impl peri_acp::session::event_sink::EventSink for PrintEventSink {
     async fn push_event(
         &self,
         _session_id: &str,
-        event: &peri_agent::agent::events::AgentEvent,
+        event: &peri_agent::agent::events::ExecutorEvent,
         _context_window: u32,
     ) {
         let mut c = self.collector.lock().unwrap();
@@ -289,7 +296,7 @@ impl peri_acp::session::event_sink::EventSink for PrintEventSink {
         }
     }
 
-    async fn push_done(&self, _session_id: &str) {}
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {}
 }
 
 /// 事件收集器
@@ -306,8 +313,8 @@ impl PrintCollector {
         }
     }
 
-    fn handle_event(&mut self, event: peri_agent::agent::AgentEvent) -> Option<String> {
-        use peri_agent::agent::AgentEvent as E;
+    fn handle_event(&mut self, event: peri_agent::agent::ExecutorEvent) -> Option<String> {
+        use peri_agent::agent::ExecutorEvent as E;
 
         match self.fmt {
             OutputFormat::StreamJson => match event {

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::invoke::{build_request_body, extract_openai_usage};
 use crate::{
-    agent::events::AgentEvent,
+    agent::events::ExecutorEvent,
     error::{AgentError, AgentResult},
     llm::{
         sse::SseParser,
@@ -142,8 +142,10 @@ pub(super) async fn do_invoke_streaming(
                 .or_else(|| delta["reasoning"].as_str())
             {
                 if !r.is_empty() {
-                    ctx.event_handler
-                        .on_event(AgentEvent::AiReasoning(r.to_string()));
+                    ctx.event_handler.on_event(ExecutorEvent::AiReasoning {
+                        text: r.to_string(),
+                        source_agent_id: None,
+                    });
                     reasoning_text.push_str(r);
                 }
             }
@@ -151,7 +153,7 @@ pub(super) async fn do_invoke_streaming(
             // Text delta
             if let Some(c) = delta["content"].as_str() {
                 if !c.is_empty() {
-                    ctx.event_handler.on_event(AgentEvent::TextChunk {
+                    ctx.event_handler.on_event(ExecutorEvent::TextChunk {
                         message_id: ctx.message_id,
                         chunk: c.to_string(),
                         source_agent_id: None,
@@ -230,7 +232,7 @@ pub(super) async fn do_invoke_streaming(
 ///
 /// ToolUse 和 text 两种 stop_reason 的 LlmResponse 构建逻辑合并，
 /// 差异仅在 content 和 message 类型上。
-fn build_stream_response(
+pub(super) fn build_stream_response(
     reasoning_text: &str,
     content_text: &str,
     tool_call_requests: Vec<crate::messages::ToolCallRequest>,
@@ -249,6 +251,9 @@ fn build_stream_response(
     }
 
     if stop_reason == StopReason::ToolUse {
+        if !content_text.is_empty() {
+            blocks.push(ContentBlock::text(content_text));
+        }
         for tc in &tool_call_requests {
             blocks.push(ContentBlock::tool_use(
                 &tc.id,
@@ -292,3 +297,7 @@ fn build_stream_response(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "stream_test.rs"]
+mod tests;

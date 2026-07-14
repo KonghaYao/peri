@@ -76,6 +76,8 @@ pub struct QuestionAnswer {
 pub enum InteractionResponse {
     Decisions(Vec<ApprovalDecision>),
     Answers(Vec<QuestionAnswer>),
+    /// 用户明确拒绝了交互（如在 AskUserQuestion 确认弹窗中选择拒绝）
+    Rejected,
 }
 
 // ─── UserInteractionBroker ─────────────────────────────────────────────────────

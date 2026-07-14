@@ -37,8 +37,8 @@ static BUILT_IN_AGENTS: [BuiltInAgent; 6] = [
         content: include_str!("built-in/coder.md"),
     },
     BuiltInAgent {
-        agent_id: "explore",
-        content: include_str!("built-in/explore.md"),
+        agent_id: "explorer",
+        content: include_str!("built-in/explorer.md"),
     },
     BuiltInAgent {
         agent_id: "general-purpose",

@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-use peri_agent::messages::MessageId;
-
 use super::*;
 use crate::hooks::types::HookEvent;
 
@@ -184,71 +182,6 @@ fn test_sanitize_env_var_brace_expansion() {
     let result = sanitize_header_value("token-${TEST_SANITIZE_HOOK_BRACE}", &allowed);
     assert_eq!(result, "token-expanded");
     std::env::remove_var("TEST_SANITIZE_HOOK_BRACE");
-}
-
-// === extract_structured_output tests ===
-
-#[test]
-fn test_extract_empty_messages() {
-    let action = extract_structured_output(&[]);
-    assert!(matches!(action, HookAction::Allow));
-}
-
-#[test]
-fn test_extract_no_tool_messages() {
-    let messages = vec![BaseMessage::system("no tools here")];
-    let action = extract_structured_output(&messages);
-    assert!(matches!(action, HookAction::Allow));
-}
-
-#[test]
-fn test_extract_ai_message_json() {
-    use peri_agent::messages::MessageContent;
-
-    let messages = vec![BaseMessage::Ai {
-        id: MessageId::new(),
-        content: MessageContent::text(r#"{"decision":"block","reason":"ai says no"}"#),
-        tool_calls: vec![],
-    }];
-    let action = extract_structured_output(&messages);
-    assert!(matches!(
-        action,
-        HookAction::Block {
-            reason: ref r
-        } if r == "ai says no"
-    ));
-}
-
-#[test]
-fn test_extract_ai_message_plain_text() {
-    use peri_agent::messages::MessageContent;
-
-    let messages = vec![BaseMessage::Ai {
-        id: MessageId::new(),
-        content: MessageContent::text("just some text"),
-        tool_calls: vec![],
-    }];
-    let action = extract_structured_output(&messages);
-    assert!(matches!(action, HookAction::Allow));
-}
-
-#[test]
-fn test_extract_tool_message_with_json() {
-    use peri_agent::messages::MessageContent;
-
-    let messages = vec![BaseMessage::Tool {
-        id: MessageId::new(),
-        tool_call_id: "tc-1".into(),
-        content: MessageContent::text(r#"{"continue":false,"stopReason":"agent stop"}"#),
-        is_error: false,
-    }];
-    let action = extract_structured_output(&messages);
-    assert!(matches!(
-        action,
-        HookAction::PreventContinuation {
-            stop_reason: Some(ref s)
-        } if s == "agent stop"
-    ));
 }
 
 // === HTTP hook tests (no mock server, just SSRF/blocking logic) ===

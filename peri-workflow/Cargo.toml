@@ -1,0 +1,22 @@
+[package]
+name = "peri-workflow"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+peri-agent = { path = "../peri-agent" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+parking_lot.workspace = true
+dashmap = "6"
+indexmap = { version = "2", features = ["serde"] }
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio-test = "0.4"

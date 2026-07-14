@@ -1,25 +1,25 @@
-    fn make_registry() -> (
-        BackgroundTaskRegistry,
-        tokio::sync::mpsc::UnboundedReceiver<BackgroundTaskResult>,
-    ) {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (BackgroundTaskRegistry::new(tx), rx)
+    fn make_registry() -> BackgroundTaskRegistry {
+        BackgroundTaskRegistry::new()
     }
 
     fn make_task(id: &str) -> BackgroundTask {
+        let handle = tokio::runtime::Handle::current().spawn(async {});
         BackgroundTask {
             id: id.to_string(),
             agent_name: "test-agent".to_string(),
             prompt_summary: "test task".to_string(),
             status: BackgroundTaskStatus::Running,
             started_at: std::time::Instant::now(),
-            abort_handle: tokio::runtime::Handle::current().spawn(async {}),
+            kind: BgTaskKind::Agent,
+            cancel_handle: BgCancelHandle::Abort(handle.abort_handle()),
+            pid: None,
+            output_preview: None,
         }
     }
 
     #[tokio::test]
     async fn test_register_and_active_count() {
-        let (registry, _rx) = make_registry();
+        let registry = make_registry();
         assert_eq!(registry.active_count(), 0);
 
         registry.register(make_task("bg-1")).unwrap();
@@ -28,7 +28,7 @@
 
     #[tokio::test]
     async fn test_max_concurrent_limit() {
-        let (registry, _rx) = make_registry();
+        let registry = make_registry();
 
         registry.register(make_task("bg-1")).unwrap();
         registry.register(make_task("bg-2")).unwrap();
@@ -40,8 +40,8 @@
     }
 
     #[tokio::test]
-    async fn test_complete_sends_notification() {
-        let (registry, mut rx) = make_registry();
+    async fn test_complete_updates_status() {
+        let registry = make_registry();
 
         registry.register(make_task("bg-1")).unwrap();
         assert_eq!(registry.active_count(), 1);
@@ -63,16 +63,11 @@
         let tasks = registry.list_tasks();
         assert_eq!(tasks.len(), 0, "completed tasks should be cleaned up immediately");
         assert_eq!(registry.active_count(), 0);
-
-        // 通知应已发送
-        let received = rx.try_recv().unwrap();
-        assert_eq!(received.task_id, "bg-1");
-        assert!(received.success);
     }
 
     #[tokio::test]
     async fn test_cancel_removes_task() {
-        let (registry, _rx) = make_registry();
+        let registry = make_registry();
 
         registry.register(make_task("bg-1")).unwrap();
         registry.register(make_task("bg-2")).unwrap();
@@ -91,7 +86,7 @@
     /// 验证 abort_handle.abort() 真正触发了 JoinHandle 的取消，而非仅从 registry 移除条目。
     #[tokio::test]
     async fn test_cancel_propagates_to_running_task() {
-        let (registry, _rx) = make_registry();
+        let registry = make_registry();
 
         // 构造一个会长时间阻塞的 JoinHandle（等待 oneshot，永不 resolve）
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -106,7 +101,10 @@
             prompt_summary: "blocking test".to_string(),
             status: BackgroundTaskStatus::Running,
             started_at: std::time::Instant::now(),
-            abort_handle: handle,
+            kind: BgTaskKind::Agent,
+            cancel_handle: BgCancelHandle::Abort(handle.abort_handle()),
+            pid: None,
+            output_preview: None,
         };
 
         registry.register(task).unwrap();
@@ -130,4 +128,74 @@
 
         // 清理：让 oneshot sender 释放，避免 JoinHandle 泄漏
         drop(tx);
+    }
+
+    // ── 新增：per-kind 上限测试 ──
+
+    #[tokio::test]
+    async fn test_count_by_kind_works() {
+        let registry = make_registry();
+
+        let mut shell_task = make_task("bg-shell-1");
+        shell_task.kind = BgTaskKind::Shell;
+        shell_task.id = "bg-shell-1".to_string();
+        registry.register(shell_task).unwrap();
+
+        let mut agent_task = make_task("bg-agent-1");
+        agent_task.kind = BgTaskKind::Agent;
+        agent_task.id = "bg-agent-1".to_string();
+        registry.register(agent_task).unwrap();
+
+        assert_eq!(registry.count_by_kind(BgTaskKind::Shell), 1);
+        assert_eq!(registry.count_by_kind(BgTaskKind::Agent), 1);
+        assert_eq!(registry.count_by_kind(BgTaskKind::Workflow), 0);
+    }
+
+    #[tokio::test]
+    async fn test_register_with_kind_shell_limit() {
+        let registry = make_registry();
+
+        for i in 0..5 {
+            let mut task = make_task(&format!("bg-shell-{}", i));
+            task.kind = BgTaskKind::Shell;
+            registry.register_with_kind(task).unwrap();
+        }
+
+        // 第 6 个应被拒绝
+        let mut task = make_task("bg-shell-over");
+        task.kind = BgTaskKind::Shell;
+        let result = registry.register_with_kind(task);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("已达 shell 并发上限"));
+    }
+
+    #[tokio::test]
+    async fn test_register_with_kind_agent_limit() {
+        let registry = make_registry();
+
+        for i in 0..3 {
+            let mut task = make_task(&format!("bg-agent-{}", i));
+            task.kind = BgTaskKind::Agent;
+            registry.register_with_kind(task).unwrap();
+        }
+
+        let mut task = make_task("bg-agent-over");
+        task.kind = BgTaskKind::Agent;
+        let result = registry.register_with_kind(task);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("已达 agent 并发上限"));
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_full_returns_info() {
+        let registry = make_registry();
+
+        let mut task = make_task("bg-agent-1");
+        task.kind = BgTaskKind::Agent;
+        registry.register(task).unwrap();
+
+        let tasks = registry.list_tasks_full();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "bg-agent-1");
+        assert_eq!(tasks[0].kind, BgTaskKind::Agent);
     }

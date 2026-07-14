@@ -1,5 +1,3 @@
-use rmcp::model::RawTextContent;
-
 use super::*;
 use crate::mcp::client::ClientStatus;
 
@@ -101,33 +99,15 @@ async fn test_invoke_not_connected() {
 
 #[test]
 fn test_format_content_text_only() {
-    let contents = vec![Content {
-        raw: rmcp::model::RawContent::Text(RawTextContent {
-            text: "hello".to_string(),
-            meta: None,
-        }),
-        annotations: None,
-    }];
+    let contents = vec![rmcp::model::ContentBlock::text("hello")];
     assert_eq!(format_contents(&contents), "hello");
 }
 
 #[test]
 fn test_format_content_mixed() {
     let contents = vec![
-        Content {
-            raw: rmcp::model::RawContent::Text(RawTextContent {
-                text: "line1".to_string(),
-                meta: None,
-            }),
-            annotations: None,
-        },
-        Content {
-            raw: rmcp::model::RawContent::Text(RawTextContent {
-                text: "line2".to_string(),
-                meta: None,
-            }),
-            annotations: None,
-        },
+        rmcp::model::ContentBlock::text("line1"),
+        rmcp::model::ContentBlock::text("line2"),
     ];
     assert_eq!(format_contents(&contents), "line1\nline2");
 }

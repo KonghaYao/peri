@@ -1,13 +1,6 @@
 use std::{collections::HashSet, process::Stdio, sync::Arc, time::Duration};
 
-use peri_agent::{
-    agent::{
-        react::{AgentInput, ReactLLM},
-        state::AgentState,
-        ReActAgent, State,
-    },
-    messages::BaseMessage,
-};
+use peri_agent::{agent::react::ReactLLM, messages::BaseMessage};
 use tokio::io::AsyncWriteExt;
 
 use crate::hooks::{
@@ -313,11 +306,15 @@ pub async fn execute_http_hook(hook: &HookType, input: &HookInput) -> HookAction
     }
 }
 
-/// Execute an agent hook (full ReAct agent loop).
+/// Execute an agent hook.
 ///
-/// - timeout default 60s, max_turns 50
-/// - No HookMiddleware, no SubAgentMiddleware (prevent recursion)
-/// - After execution, look for structured output in messages
+/// Hook agent 是 1-turn 无工具的 LLM 调用（用 prompt_template + HookInput JSON
+/// 作为输入，让 LLM 输出结构化 JSON 表达 Allow/Warn/Block 决策）。无需构造
+/// 完整 v2 stages，直接调 `ReactLLM::generate_reasoning` 一次。
+///
+/// - LLM 输出经 `parse_command_hook_output` 解析为 HookAction
+/// - timeout 外层包装（默认 60s）
+/// - LLM 失败 / 超时 → Allow（fail-open，与 command hook 一致）
 pub async fn execute_agent_hook(
     hook: &HookType,
     input: &HookInput,
@@ -333,8 +330,6 @@ pub async fn execute_agent_hook(
         }
     };
 
-    let max_turns: usize = 50;
-
     let input_json = match serde_json::to_string_pretty(input) {
         Ok(json) => json,
         Err(e) => {
@@ -343,32 +338,54 @@ pub async fn execute_agent_hook(
         }
     };
 
-    let prompt = format!(
-        "{}\n\nInput:\n```json\n{}\n```\n\nRespond with a JSON object describing the hook action.",
-        prompt_template, input_json
+    // 构造 messages：System（prompt_template） + Human（HookInput JSON）
+    // Hook agent 期望 LLM 按 prompt_template 指示输出结构化 JSON，parse 阶段提取。
+    let messages = vec![
+        BaseMessage::system(prompt_template),
+        BaseMessage::human(input_json),
+    ];
+
+    let llm = llm_factory();
+    let _ = cwd; // cwd 保留签名兼容；当前实现未使用（v1 亦仅用于 AgentState::new）
+
+    tracing::debug!(
+        timeout_secs,
+        "Hook agent: calling LLM directly (1-turn, no tools)"
     );
 
-    let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-        let llm = llm_factory();
-        let mut state = AgentState::new(cwd);
-
-        let agent = ReActAgent::new(llm).max_iterations(max_turns);
-
-        let output = agent
-            .execute(AgentInput::text(&prompt), &mut state, None)
-            .await?;
-        Ok::<_, peri_agent::error::AgentError>((output, state.messages().to_vec()))
-    })
+    // 外层 timeout 包装（与 v1 一致）
+    let result = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        llm.generate_reasoning(&messages, &[], None),
+    )
     .await;
 
     match result {
-        Ok(Ok((_output, messages))) => extract_structured_output(&messages),
+        Ok(Ok(reasoning)) => {
+            // 优先 final_answer，回落到 source_message
+            let text = reasoning
+                .final_answer
+                .clone()
+                .or_else(|| {
+                    reasoning
+                        .source_message
+                        .as_ref()
+                        .map(|m| m.content().to_string())
+                })
+                .unwrap_or_default();
+            if text.is_empty() {
+                tracing::warn!("Hook agent: LLM returned empty text, allowing");
+                return HookAction::Allow;
+            }
+            // 复用 command hook 的 output parser 解析 JSON 决策
+            parse_command_hook_output(&text)
+        }
         Ok(Err(e)) => {
-            tracing::warn!("Agent hook execution failed: {}", e);
+            tracing::warn!("Hook agent: LLM failed: {}, allowing", e);
             HookAction::Allow
         }
         Err(_) => {
-            tracing::warn!("Agent hook timed out after {}s", timeout_secs);
+            tracing::warn!("Hook agent: timed out ({}s), allowing", timeout_secs);
             HookAction::Allow
         }
     }
@@ -394,35 +411,6 @@ fn sanitize_header_value(value: &str, allowed_env_vars: &HashSet<String>) -> Str
     }
 
     result
-}
-
-/// Extract structured hook output from agent messages.
-///
-/// Looks through Tool messages for structured output and parses it.
-/// Falls back to the last AI message text if no structured output is found.
-fn extract_structured_output(messages: &[BaseMessage]) -> HookAction {
-    // Look for Tool message results in reverse order (most recent first)
-    for msg in messages.iter().rev() {
-        if let BaseMessage::Tool { content, .. } = msg {
-            let text = content.text_content();
-            let action = parse_command_hook_output(&text);
-            if !matches!(action, HookAction::Allow) {
-                return action;
-            }
-        }
-    }
-
-    // Fallback: check last AI message for JSON
-    for msg in messages.iter().rev() {
-        if let BaseMessage::Ai { content, .. } = msg {
-            let text = content.text_content();
-            if text.trim().starts_with('{') {
-                return parse_command_hook_output(&text);
-            }
-        }
-    }
-
-    HookAction::Allow
 }
 
 #[cfg(test)]

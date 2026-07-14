@@ -38,18 +38,18 @@ pub struct JemallocBreakdown {
 
 /// Set allocator environment variables before initialization.
 #[cfg(not(target_os = "windows"))]
-#[allow(dead_code)]
 pub fn init_alloc_conf() {
     if std::env::var("MALLOC_CONF").is_err() {
-        std::env::set_var(
-            "MALLOC_CONF",
-            "dirty_decay_ms:0,muzzy_decay_ms:0,background_thread:true",
-        );
+        unsafe {
+            std::env::set_var(
+                "MALLOC_CONF",
+                "dirty_decay_ms:0,muzzy_decay_ms:0,background_thread:true",
+            );
+        }
     }
 }
 
 #[cfg(target_os = "windows")]
-#[allow(dead_code)]
 pub fn init_alloc_conf() {}
 
 /// Force jemalloc to aggressively reclaim freed memory.

@@ -1,12 +1,16 @@
 //! ToolSearchMiddleware — 注册元工具并注入延迟工具列表到 system prompt
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock as StdRwLock},
+};
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use peri_agent::{
-    agent::state::State, error::AgentResult, messages::BaseMessage,
-    middleware::r#trait::Middleware, tools::BaseTool,
+    error::AgentResult,
+    middleware::{r#trait::Middleware, state::MiddlewareState},
+    tools::BaseTool,
 };
 
 use super::{
@@ -22,6 +26,8 @@ use super::{
 pub struct ToolSearchMiddleware {
     tool_search_index: Arc<ToolSearchIndex>,
     shared_tools: Arc<RwLock<HashMap<String, Arc<dyn BaseTool>>>>,
+    /// Cached prompt contribution (populated in before_agent, returned by prompt_contribution).
+    cached_contribution: Arc<StdRwLock<Option<String>>>,
 }
 
 impl ToolSearchMiddleware {
@@ -32,12 +38,13 @@ impl ToolSearchMiddleware {
         Self {
             tool_search_index,
             shared_tools,
+            cached_contribution: Arc::new(StdRwLock::new(None)),
         }
     }
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for ToolSearchMiddleware {
+impl Middleware for ToolSearchMiddleware {
     fn name(&self) -> &str {
         "ToolSearch"
     }
@@ -50,7 +57,11 @@ impl<S: State> Middleware<S> for ToolSearchMiddleware {
         ]
     }
 
-    async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
+    fn prompt_contribution(&self) -> Option<String> {
+        self.cached_contribution.read().unwrap().clone()
+    }
+
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // 检查 shared_tools 是否有变化（MCP 后续连接等场景）
         let tools = self.shared_tools.read();
         let deferred_arcs: Vec<Arc<dyn BaseTool>> = tools
@@ -64,15 +75,6 @@ impl<S: State> Middleware<S> for ToolSearchMiddleware {
         drop(tools);
 
         // P2-2: 用 content_version 比对取代简单 count 比对
-        //
-        // count 比对的盲区：MCP 重连/工具热更新场景，工具数量相同但内容
-        // （description / parameters）已变化。仅靠 count 比对会漏判，让 stale
-        // cached_prompt 继续注入到 system prompt，违反"系统提示词稳定性"派生
-        // 的"工具列表随实际工具同步"要求。
-        //
-        // 版本号语义：每次 `build()` 全量重建必然递增，content_version 永远
-        // 反映"最近一次构建"。cached_prompt_version 是 set_cached_prompt 时
-        // 记录的版本号，二者不一致即 stale。
         let current_version = self.tool_search_index.content_version();
         let cached_version = self.tool_search_index.cached_prompt_version();
         let old_count = self.tool_search_index.total_count();
@@ -93,8 +95,6 @@ impl<S: State> Middleware<S> for ToolSearchMiddleware {
                 self.tool_search_index.set_cached_prompt(list);
             }
         } else if cached_version != Some(current_version) && !deferred_arcs.is_empty() {
-            // P2-2: 同 count 但 content_version 已变（例如 cached_prompt 在前次
-            // build 之前生成），重新构建以确保 cached_prompt 与实际内容一致。
             self.tool_search_index.build(deferred_arcs);
             let list = self.tool_search_index.format_deferred_list();
             if !list.is_empty() {
@@ -102,11 +102,8 @@ impl<S: State> Middleware<S> for ToolSearchMiddleware {
             }
         }
 
-        // 每轮都注入缓存的提示词（System 消息在 agent 完成后被过滤，
-        // 不写入 agent_state_messages，所以每轮需重新注入以保证前缀一致）
-        if let Some(cached) = self.tool_search_index.cached_prompt() {
-            state.prepend_message(BaseMessage::system(cached));
-        }
+        // 缓存 prompt 贡献（由 prompt_contribution 同步返回）
+        *self.cached_contribution.write().unwrap() = self.tool_search_index.cached_prompt();
         Ok(())
     }
 }
@@ -114,5 +111,12 @@ impl<S: State> Middleware<S> for ToolSearchMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use peri_agent::middleware::r#trait::Middleware;
+
+    /// Helper: call prompt_contribution with concrete State type for testing.
+    fn contribution(mw: &ToolSearchMiddleware) -> Option<String> {
+        Middleware::prompt_contribution(mw)
+    }
+
     include!("middleware_test.rs");
 }

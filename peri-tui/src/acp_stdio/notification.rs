@@ -1,10 +1,10 @@
 //! 发送 config_options 更新通知，供 set_mode / set_model / set_config_option / update_config 复用。
 
 use agent_client_protocol::{
-    schema::{
+    Client, ConnectionTo,
+    schema::v1::{
         ConfigOptionUpdate, SessionConfigOption, SessionId, SessionNotification, SessionUpdate,
     },
-    Client, ConnectionTo,
 };
 use peri_acp::dispatch;
 

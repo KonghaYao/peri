@@ -621,4 +621,11 @@ impl BaseModel for super::ChatAnthropic {
     ) -> AgentResult<LlmResponse> {
         super::stream::do_invoke_streaming(self, request, ctx).await
     }
+
+    /// Langfuse Generation input：返回 Anthropic Provider-native 请求体
+    /// （含 `{name, description, input_schema}` 工具格式和顶层 `system` 字段）。
+    /// streaming 参数固定 false（Langfuse 不关心）。
+    fn build_request_body(&self, request: &LlmRequest) -> Option<serde_json::Value> {
+        Some(build_request_body(self, request, false))
+    }
 }

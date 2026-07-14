@@ -1,12 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
-use peri_agent::{
-    agent::{
-        events::{AgentEvent, AgentEventHandler},
-        state::AgentState,
-    },
-    middleware::r#trait::Middleware,
-};
+use peri_agent::middleware::r#trait::Middleware;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -17,67 +11,9 @@ use crate::{
     subagent::{skill_preload::SkillPreloadMiddleware, SubAgentMiddlewareConfig},
 };
 
-/// 事件处理器包装器：为子 Agent 事件注入 source_agent_id
-struct SourceAgentIdHandler {
-    inner: Arc<dyn AgentEventHandler>,
-    agent_id: String,
-}
-
-impl SourceAgentIdHandler {
-    fn new(inner: Arc<dyn AgentEventHandler>, agent_id: String) -> Self {
-        Self { inner, agent_id }
-    }
-}
-
-impl AgentEventHandler for SourceAgentIdHandler {
-    fn on_event(&self, event: AgentEvent) {
-        let tagged = match event {
-            AgentEvent::ToolStart {
-                message_id,
-                tool_call_id,
-                name,
-                input,
-                ..
-            } => AgentEvent::ToolStart {
-                message_id,
-                tool_call_id,
-                name,
-                input,
-                source_agent_id: Some(self.agent_id.clone()),
-            },
-            AgentEvent::ToolEnd {
-                message_id,
-                tool_call_id,
-                name,
-                output,
-                is_error,
-                ..
-            } => AgentEvent::ToolEnd {
-                message_id,
-                tool_call_id,
-                name,
-                output,
-                is_error,
-                source_agent_id: Some(self.agent_id.clone()),
-            },
-            AgentEvent::TextChunk {
-                message_id, chunk, ..
-            } => AgentEvent::TextChunk {
-                message_id,
-                chunk,
-                source_agent_id: Some(self.agent_id.clone()),
-            },
-            other => other,
-        };
-        self.inner.on_event(tagged);
-    }
-}
-
 /// 构造 SubAgent 标准中间件链
-pub(crate) fn build_subagent_middlewares(
-    config: SubAgentMiddlewareConfig,
-) -> Vec<Box<dyn Middleware<AgentState>>> {
-    let mut middlewares: Vec<Box<dyn Middleware<AgentState>>> = Vec::new();
+pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<dyn Middleware>> {
+    let mut middlewares: Vec<Box<dyn Middleware>> = Vec::new();
 
     // [TRAP] SubAgent 复用 main agent 在 session/new 时捕获的 frozen CLAUDE.md，
     // 避免文件中途变更导致 system prompt 漂移（第一优先级不变量）。

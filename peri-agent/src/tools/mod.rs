@@ -50,4 +50,21 @@ pub trait BaseTool: Send + Sync {
         input: serde_json::Value,
         ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// 工具调用的外层超时时间。None 表示不设外层超时（工具自行管理超时）。
+    /// 默认 120s，适用于 Read/Edit/Glob 等快速操作。Agent/Bash 等工具应返回
+    /// None，因为它们内部已有超时机制或需要长时间运行。
+    fn timeout(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(120))
+    }
+
+    /// 工具输出的默认截断长度（字符数）。None 表示不截断。
+    fn output_char_limit(&self) -> Option<usize> {
+        None
+    }
+
+    /// 工具输出是否偏向落盘而非内联返回。
+    fn prefers_persist(&self) -> bool {
+        false
+    }
 }

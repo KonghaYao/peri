@@ -1,7 +1,10 @@
 pub mod builtin;
 pub mod loader;
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
 
 use async_trait::async_trait;
 pub use loader::{
@@ -9,7 +12,8 @@ pub use loader::{
     SkillRoot, SkillSource, MAX_SCAN_DEPTH, MAX_SKILLS_DIRS_PER_ROOT,
 };
 use peri_agent::{
-    agent::state::State, error::AgentResult, messages::BaseMessage, middleware::r#trait::Middleware,
+    error::AgentResult,
+    middleware::{r#trait::Middleware, state::MiddlewareState},
 };
 
 /// 全局配置文件路径：~/.peri/settings.json
@@ -82,6 +86,8 @@ pub struct SkillsMiddleware {
     frozen_summary: Option<String>,
     /// 是否禁用 builtin skill（session/new 时一次性读取冻结）
     disable_bundled: bool,
+    /// Cached prompt contribution (populated in before_agent, returned by prompt_contribution).
+    cached_contribution: Arc<RwLock<Option<String>>>,
 }
 
 impl SkillsMiddleware {
@@ -93,6 +99,7 @@ impl SkillsMiddleware {
             plugin_roots: vec![],
             frozen_summary: None,
             disable_bundled: false,
+            cached_contribution: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -131,8 +138,14 @@ impl SkillsMiddleware {
 
     /// 注入冻结的 skills 摘要。设置后 `before_agent` 跳过目录扫描，
     /// 直接使用冻结内容。
+    ///
+    /// v2：构造时即填充 cached_contribution，使 prompt_contribution 立即可用，
+    /// 无需 before_agent 触发（builder 在 before_agent 前收集 prompt_contribution）。
     pub fn with_frozen_summary(mut self, summary: String) -> Self {
-        self.frozen_summary = Some(summary);
+        self.frozen_summary = Some(summary.clone());
+        if !summary.trim().is_empty() {
+            *self.cached_contribution.write().unwrap() = Some(summary);
+        }
         self
     }
 
@@ -250,16 +263,22 @@ impl Default for SkillsMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for SkillsMiddleware {
+impl Middleware for SkillsMiddleware {
     fn name(&self) -> &str {
         "SkillsMiddleware"
     }
 
-    async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
+    fn prompt_contribution(&self) -> Option<String> {
+        self.cached_contribution.read().unwrap().clone()
+    }
+
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // 使用冻结摘要时跳过所有磁盘 I/O
         if let Some(ref summary) = self.frozen_summary {
             if !summary.trim().is_empty() {
-                state.prepend_message(BaseMessage::system(summary.clone()));
+                *self.cached_contribution.write().unwrap() = Some(summary.clone());
+            } else {
+                *self.cached_contribution.write().unwrap() = None;
             }
             return Ok(());
         }
@@ -273,21 +292,27 @@ impl<S: State> Middleware<S> for SkillsMiddleware {
             })?;
 
         if skills.is_empty() {
+            *self.cached_contribution.write().unwrap() = None;
             return Ok(());
         }
 
         let summary = Self::build_summary(&skills);
-        state.prepend_message(BaseMessage::system(summary));
-
+        *self.cached_contribution.write().unwrap() = Some(summary);
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use peri_agent::agent::state::AgentState;
+    use peri_agent::{agent::state::AgentState, middleware::r#trait::Middleware};
     use tempfile::tempdir;
 
     use super::*;
+
+    /// Helper: call prompt_contribution with concrete State type for testing.
+    fn contribution(mw: &SkillsMiddleware) -> Option<String> {
+        Middleware::prompt_contribution(mw)
+    }
+
     include!("mod_test.rs");
 }

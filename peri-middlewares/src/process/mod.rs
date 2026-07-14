@@ -3,6 +3,9 @@
 //! On Unix, wraps commands in `bash -c "<command> <args...>"`.
 //! On Windows, wraps commands in PowerShell `-NoProfile -NonInteractive -NoLogo -Command`.
 
+// [TRAP] 所有子进程 spawn 必须通过 shell_command() 统一 wrapper
+// 新增 spawn 时必须复用，禁止直接用 std::process::Command 裸调。
+
 /// Escape an argument for PowerShell single-quoted literal string.
 ///
 /// In PowerShell, single-quoted strings treat all characters literally except

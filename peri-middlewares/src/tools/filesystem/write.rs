@@ -62,6 +62,10 @@ impl BaseTool for WriteFileTool {
         })
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         input: Value,
@@ -118,6 +122,15 @@ impl BaseTool for WriteFileTool {
                 let tmp_path = resolved.with_extension(tmp_ext);
                 if let Err(e) = std::fs::write(&tmp_path, content) {
                     return Err(format!("Error writing file: {e}").into());
+                }
+                // 恢复原文件的 Unix 权限位（含可执行位），防止原子写入后 +x 丢失
+                if let Ok(metadata) = std::fs::metadata(&resolved) {
+                    #[cfg(unix)]
+                    {
+                        let _ = std::fs::set_permissions(&tmp_path, metadata.permissions());
+                    }
+                    #[cfg(not(unix))]
+                    let _ = &metadata; // Windows 上 #[cfg(unix)] 排除后 metadata 未使用
                 }
                 match std::fs::rename(&tmp_path, &resolved) {
                     Ok(_) => {

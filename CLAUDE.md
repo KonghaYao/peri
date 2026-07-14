@@ -1,332 +1,279 @@
-# CLAUDE.md
+# CLAUDE.md — Perihelion（perī）
 
-## 项目概述
+终端 AI 编程助手。v2 单路径，`build_and_execute_agent_v2` → `run_react_loop`。
 
-Rust Agent 框架，8 个 Workspace Crate（含 `agm`）。
+## 架构速览
 
-| Crate | 职责 |
-|-------|------|
-| `peri-agent` | 核心：ReAct 循环、Middleware trait、LLM 适配器、工具系统、持久化（SQLite）、遥测 |
-| `peri-middlewares` | 中间件：文件系统、终端、HITL、SubAgent、Skills、Todo、Cron、MCP、Hooks、Plugin、LSP |
-| `peri-widgets` | Widget 组件库，核心依赖 ratatui + pulldown-cmark |
-| `peri-acp` | **ACP 服务层**：Agent Client Protocol 实现，通过 MpscTransport/StdioTransport 桥接 TUI/IDE 与 Agent |
-| `peri-tui` | TUI 应用，依赖 peri-acp（运行时通信）+ peri-agent/middlewares/widgets（类型依赖） |
-| `langfuse-client` | Langfuse 遥测客户端（独立） |
-| `peri-lsp` | LSP 客户端库（独立，被 middlewares 使用） |
-| `agm` | Agent Package Manager：pnpm 风格的 AI agent 依赖管理器（通过 agm.json 管理 Skills/Agents 安装） |
-
-`rmcp` crate（v1.7）直接引用，不再需要本地 patch。
-
-**其他目录**：`scripts/`（启动脚本）、`docs/`（博客、设计文档、协议规范，见下）、`side-projects/`（实验性项目）。
-
-## 依赖关系
-
-依赖关系（A → B 表示 A 依赖 B）：
-
-- `peri-widgets`、`peri-lsp`、`langfuse-client` → 无 workspace 内部依赖（独立基础库）
-- `peri-middlewares` → `peri-agent`、`peri-lsp`
-- `peri-acp` → `peri-agent`、`peri-middlewares`、`peri-lsp`、`langfuse-client`
-- `peri-tui` → `peri-acp`（运行时通信）+ `peri-agent`、`peri-middlewares`、`peri-lsp`、`peri-widgets`（类型依赖，用于 UI 渲染的类型如 `BaseMessage`/`ContentBlock`）
-
-**TUI→ACP 通信**: TUI 运行时仅通过 `peri-acp` 的 `MpscTransport`（in-memory channel pair）与 ACP Server 通信。ACP Server 持有 Agent 构建和执行逻辑，TUI 作为纯 ACP client 前端消费 `AcpNotification` 事件。
-
-## 开发命令
-
-```bash
-cargo build                          # 构建所有 crate
-cargo build -p <crate>               # 构建指定 crate
-cargo run -p peri-tui          # 运行 TUI
-cargo run -p peri-tui -- -a    # HITL 审批模式
-cargo test                           # 全量测试
-cargo test -p <crate> --lib -- <test_name>  # 单个测试
-lefthook install                     # 安装 git hooks
-lefthook run pre-commit              # pre-commit（fmt/check/clippy）
-scripts/start-tui.sh                 # 启动 TUI（RELAY_PORT=3001）
+### Crate 拓扑
+```
+peri-tui（TUI 前端） → peri-acp（服务层） → peri-agent（ReAct 引擎）
+                                               peri-middlewares（19 个中间件）
+peri-widgets（组件库）  langfuse-client  peri-lsp  peri-web-pty  agm
 ```
 
-## 架构要点
-
-**ReAct 循环**（`peri-agent`）：AgentInput → collect_tools → before_agent → loop(500) { before_model → LLM → after_model → [工具调用] before_tool → 并发执行 → after_tool → emit | [回答] → emit TextChunk + StateSnapshot → after_agent }。TUI 覆盖 `max_iterations(500)`（核心默认 10）。
-
-**[TRAP]** `tool_dispatch.rs` 延迟写入：`collect_tool_results` 执行 before_tool + 并发调用 + 收集结果，**不写 state**；`dispatch_tools` 最后统一写入 AI 消息 + 所有 tool_result。禁止在 `collect_tool_results` 中调用 `state.add_message`。错误路径：before_tool 错误/Cancel 返回 `Err`（state 未修改）；执行阶段 Cancel/deferred_error 返回 `Ok((.., true, ..))`，`dispatch_tools` 写入 state 后再返回 `Err`。链上 19 个中间件的 `before_tool`/`after_tool`/`on_error` 均不读 `state.messages()`，新增中间件必须遵守。`AgentEvent::MessageAdded` 被 TUI 丢弃，TUI 通过 `StateSnapshot` + 流式事件维护状态。（详见 spec/global/domains/agent.md#issue_2026-05-15-orphaned-tool-use-after-concurrent-tool-error）
-
-**[TRAP]** 新增/修改事件类型语义（如工具前文本从 AiReasoning 改为 TextChunk）时，必须同步检查 TUI 侧事件映射层（`map_executor_event`）。新增 AgentEvent 变体时必须同步更新映射，事件丢弃会导致下游状态不一致。（详见 spec/global/domains/agent.md#issue_2026-05-11-streaming-text-invisible-with-tools，spec/global/domains/message-pipeline.md#issue_2026-05-13-streaming-text-tool-aggregation-visual-issues）
-
-**[TRAP]** 多工具并发的结果处理循环中，P3/P4 错误路径提前返回会导致后续 tool_result 缺失。必须用 deferred_error 模式——先收集所有错误，循环结束后统一判断。所有 tool_result 必须始终写入 state。（详见 spec/global/domains/agent.md#issue_2026-05-14-orphaned-tool-use-without-tool-result，spec/global/domains/agent.md#issue_2026-05-15-tool-execution-error-stops-agent，spec/global/domains/agent.md#issue_2026-05-18-agent-tool-calls-execute-serially）
-
-**[TRAP]** `prepended_ids` 只追踪 `prepend_message`（头部 insert System），不能计入 `add_message`（尾部 push）。cleanup 用 `take_while(|m| m.is_system())` 只收集头部连续 System 消息，禁止用长度差计算。新增中间件的 `add_message` 注入不受 cleanup 影响，也不能假设 cleanup 会清理它们。（详见 spec/global/domains/agent.md#issue_2026-05-26-skillpreload-anthropic-400-tool-result-orphan）
-
-**消息类型**：`BaseMessage`（Human/Ai/System/Tool），`ContentBlock`（Text/Image/Document/ToolUse/ToolResult/Unknown）。`ReasoningContentBlock` 是独立 SDK 类型，不在 `ContentBlock` 枚举中。
-
-**LLM 适配层**：`BaseModel` trait（OpenAI/Anthropic）→ `BaseModelReactLLM` → `ReactLLM`。`RetryableLLM<L>` 指数退避重试。
-
-**[TRAP]** `Interrupted`/`Error` + `Done` 互斥：`Interrupted`/`Error` 先 `request_rebuild()` + 添加通知，设 `reconcile_already_done=true`，后续 `Done` 跳过 `request_rebuild()` 防止覆盖通知。（详见 spec/global/domains/agent.md#issue_2026-05-25-interrupt-undo-last-user-message）**[TRAP]** Cancel 后历史不应无条件截断：ACP server 在 `result.ok==false` 时无条件 truncate history 会丢失 agent 已写入 state 的消息。应检查 `result.messages.len()` 判断是否有进展，有则保留。（详见 spec/global/domains/agent.md#issue_2026-05-26-ctrl-c-interrupt-causes-agent-amnesia，spec/global/domains/agent.md#issue_2026-05-29-llm-stream-error-causes-amnesia）**[TRAP]** executor 中 `?` 传播会跳过 `cleanup_prepended`，导致 before_agent 注入的 system 消息泄漏到 state。循环内关键 cleanup 必须用 try_break 宏将错误捕获到变量，循环后无条件执行 cleanup。（详见 spec/global/domains/agent.md#issue_2026-06-06-test-gap-llm-error-cleanup-prepended）
-
-**系统提示词**：`build_system_prompt()` 在 `peri-acp/src/prompt/mod.rs` 中实现（通过 `concat!` 引用 `peri-tui/prompts/sections/`），`session/new` 时调用一次，产出 `frozen_system_prompt` 存入 `SessionState.frozen`，后续轮次直接复用。段落文件位于 `peri-tui/prompts/sections/`（01-06 静态 + 07, 10-15 动态，共 13 个，08/09 不存在），通过 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 边界标记分隔——标记前可缓存，标记后不影响前缀缓存。`PromptFeatures` 控制条件段落注入。Agent 构建在 system prompt 末尾追加 Git Attribution 段落（动态区域内不影响缓存前缀）。
-
-## Thinking/推理模式
-
-`ThinkingConfig` 控制推理参数。Anthropic 用 `thinking + output_config.effort`，OpenAI 用 `reasoning_effort`。`budget_tokens` 默认 8000，最小值 1024 的限制已移除（`--effort` 传 0 时可为 0）。`max_tokens` 必须 > `budget_tokens`。
-
-**OpenAI Reasoning 回传**（`openai.rs`）：
-
-- `reasoning_content` 顶层字段：所有模型无条件回传
-- content 数组 `thinking` 类型：默认关闭，通过 `with_thinking_content(true)` 手动开启（如 deepseek-v4-pro）
-
-**[TRAP]** DeepSeek `unknown variant 'thinking'`：不要把 `Reasoning` block 序列化为 `{"type":"thinking"}` 发给不支持的 provider。**[TRAP]** `reasoning_content must be passed back`：过滤 `Reasoning` 时必须同时作为顶层字段回传。两个陷阱互相关联。（详见 spec/global/domains/agent.md#issue_2026-05-12-glm-reasoning-field-not-parsed，spec/global/domains/agent.md#issue_2026-05-14-deepseek-anthropic-thinking-block-dropped，spec/global/domains/agent.md#issue_2026-05-12-thinking-reasoning-dataflow-issues）
-
-**OpenAI 兼容适配层 Provider 特定处理**（`invoke.rs` `build_request_body`/`messages_to_json`）：
-
-- **`reasoning` 字段已移除**：`messages_to_json` 中 assistant 消息仅回传 `reasoning_content`（OpenAI 标准字段），不再同时设置 `reasoning`。GLM 等需要 `reasoning` 字段的模型在接收端（`parse_assistant_message`）仍兼容双字段解析。
-- **`stream_options` 仅 Qwen**：`stream_options.include_usage` 仅在模型名含 `qwen` 时发送，其他 provider 不发送。
-- **Kimi thinking/reasoning_effort 互斥**：当 `thinking_enabled` 为 true 且模型名含 `kimi` 时，请求体中移除 `reasoning_effort`。
-
-## 系统提示词稳定性（第一优先级）
-
-**[原则] 系统提示词稳定性是第一优先级**：会话开始后，系统提示词必须完全稳定、不可变更。任何在会话进行中修改系统提示词的行为（包括通过 runtime config、模型切换、技能加载、中间件注入等方式间接改变其内容）都是禁止的。系统提示词内容的任何变化都会导致 Prompt Cache 失效、模型行为漂移，严重影响会话质量。
-
-唯一例外是 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 边界标记之后动态区域内的占位符值变化（如日期、cwd），但即使是动态区域，其**结构/模板/段落数量**也必须在会话内保持不变。新增中间件在 `before_agent` 阶段注入 System 消息时，必须确保注入内容和位置跨轮次稳定。
-
-**[TRAP]** 中途纠正/警告消息（工具连续失败提示、`<stop_hook_feedback>`、goal steering、compact 续接等）必须用 `BaseMessage::human("<system-reminder>...</system-reminder>")` 注入，**禁止** `BaseMessage::system(...)`。`anthropic/invoke.rs` 和 `openai/invoke.rs` 会遍历整个 `messages` 数组，把**所有** `BaseMessage::System` 消息（不分位置）hoist 到顶层 system prompt，导致 frozen system prompt 被污染、Prompt Cache 失效。已采用此模式的实现：`goal_middleware.rs`、`compact_middleware.rs`、`tool_dispatch.rs`（连续失败警告）、`hooks/middleware.rs`（stop_hook_feedback）。新增中途纠正路径必须复用同一模式。（详见 spec/global/domains/system-prompt.md#issue_2026-06-17-mid-conversation-system-message-breaks-frozen-prompt）
-
-**[TRAP]** SubAgent 中间件链必须复用 main agent 在 `session/new` 时捕获的 frozen CLAUDE.md/Skills 数据，禁止重新读盘。否则会话中 CLAUDE.md/skills 文件变更会让 SubAgent 看到与 main agent 不同的内容，违反第一优先级不变量。frozen 数据通过 `SubAgentMiddleware::with_frozen_data` → `SubAgentTool::with_frozen_data` → `SubAgentMiddlewareConfig::with_frozen` → `build_subagent_middlewares` 透传，最终调用 `AgentsMdMiddleware::with_frozen_content` / `SkillsMiddleware::with_frozen_summary`。`Option<Arc<String>>` 共享避免每轮 `build_tool` 重复 clone 大字符串。（详见 spec/global/domains/system-prompt.md#issue_2026-06-17-subagent-ignores-frozen-claude-md）
-
-## Tool Search 延迟加载
-
-工具分三层：**Core（12 个）**——Read/Write/Edit/Glob/Grep/folder_operations/Bash/WebFetch/WebSearch/Agent/AskUserQuestion/TodoWrite，始终对 LLM 可见；**Meta（2 个）**——`SearchExtraTools`/`ExecuteExtraTool`，始终可见，用于按需发现和执行 deferred tools；**Deferred（其余）**——Cron*、MCP 工具、LspTool 等，LLM 不直接可见，通过 Meta 工具桥接。核心工具定义以 `tool_search/core_tools.rs` 中的 `CORE_TOOLS` 为准。新增工具优先配置为 deferred tool，避免膨胀核心工具列表。
-
-**Builtin Skills（随二进制分发的 SKILL.md）**：参考 Claude Code bundled skills 特性，`SkillSource::Builtin` 是第 5 种 skill 来源，最低优先级（被 User/Global/Project/Plugin 同名覆盖）。`include_str!` 编译期嵌入（注册表 `skills::builtin::BUILTIN_SKILLS`），`scan_skill_roots_impl` 特判分支加载（虚拟路径 `<builtin>/<name>` 不走 `is_dir()` 检查），`SkillPreloadMiddleware` 通过 `source == Builtin` 路由常量查找（绕过磁盘读）。`settings.json::config.disableBundledSkills: true` 全局禁用——main agent 路径在 session/new 时一次性冻结（保持系统提示词稳定性），TUI/Stdio 显示路径每次调用读取最新值。详见 `docs/superpowers/specs/2026-06-20-builtin-skills-design.md`。
-
-**[TRAP]** `Box<dyn BaseTool>` 不能直接转 `Arc<dyn BaseTool>`，用 `box_to_arc()` 通过 `ToolWrapper(ManuallyDrop<Box>)` 透传。**绝不能用 `Box::into_raw` + `Arc::from_raw`**——布局不同导致 UB。
-
-**[TRAP]** Prompt Cache 前缀稳定性——通用原则：所有参与缓存前缀的数据（system prompt、tools 数组、消息顺序）必须保证跨请求稳定。具体规则：
-
-- （a）system prompt 中用 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 边界标记分隔静态/动态内容，标记前可缓存，标记后不缓存
-- （b）非 System 消息必须用 `add_message`（尾部追加），禁止 `prepend_message`（头部插入会改变 Anthropic cache_control 标记位置）；System 消息用 `prepend_message` 插入头部是安全的
-- （c）动态占位符（日期、cwd、环境变量）放在边界标记之后
-- （d）middleware 注入的 System 消息天然在边界标记之后（非缓存块）
-
-历史踩坑已全部修复并固化到 frozen_system_prompt + cached_prompt + boundary 标记机制中。（详见 spec/global/domains/message-pipeline.md，spec/global/domains/system-prompt.md#issue_2026-05-23-mcp-tools-instability-breaks-anthropic-cache）
-
-**[TRAP]** `prepend_message` 的 `insert(0)` 右移导致 StateSnapshot 快照范围扩大，泄露 System 消息到 `agent_state_messages`。StateSnapshot 应始终 `.filter(|m| !m.is_system())`。（详见 spec/global/domains/system-prompt.md#issue_2026-05-13-system-prompt-dynamic-parts-duplicated-in-consecutive-calls）
-
-### 新增/删除 Core 工具检查清单
-
-新增或删除 Core 工具时，必须同步更新以下触点（漏改任一项都会导致 LLM 工具列表与文档/MCP/HITL 不一致）：
-
-1. `peri-middlewares/src/tool_search/core_tools.rs` —— `CORE_TOOLS` HashSet + 对应 `TOOL_*` 常量
-2. `peri-middlewares/src/tool_search/search_tool.rs` & `execute_tool.rs` —— 已改为通过 `core_tools_sorted_csv()` 动态生成（P1-1），无需手改，但需确认 description 内容正确
-3. `peri-tui/prompts/sections/05_using_tools.md` —— 用户可见的"选择正确工具"指引，必须列出该工具
-4. `peri-middlewares/src/hitl/mod.rs` —— `is_edit_tool()` 与默认审批列表（如工具涉及文件修改/命令执行）
-5. `peri-acp/src/event/mapper.rs`（或对应路径）—— `ToolKind` 映射，决定 TUI 图标显示
-6. `peri-tui/src/tool_display.rs` —— TUI 简称/全称映射
-7. `core_tools_test.rs` —— 更新"动态生成 CSV 包含所有工具"的断言列表
-8. 若是 Edit/Write 类工具，额外检查 `GitAttributionMiddleware` 的 before_tool/after_tool 钩子是否需要追踪
-
-删除 Core 工具时反向操作，且必须 grep 全仓库确认无残留引用。
-
-## 中间件链执行顺序
-
-详见 `peri-middlewares/CLAUDE.md`。19 个中间件按固定顺序组成链，末尾 `[ReActAgent.with_system_prompt()]` prepend。
-
-## 错误感知建议层（Error Suggestion Layer）
-
-工具错误返回前，通过 `ErrorSuggestRegistry` 自动注入结构化建议文本（路径候选、参数修正、命令纠错等），让 LLM 直接消费，省去额外的探索工具调用。
-
-**集成点**：`peri-agent/src/agent/executor/tool_dispatch.rs::collect_tool_results`，run_after_tool 之后、写入 state 之前。**不是中间件**——因为 `after_tool` 的 `result: &ToolResult` 是不可变引用，且 [TRAP] 约束中间件不写 state。
-
-**[TRAP]** 错误建议注入路径必须遵守：
-- 只修改 `result.output` 文本，**不调** `state.add_message`（保持 collect_tool_results 延迟写入语义）
-- 不修改 `result.is_error` 标志（保持 PostToolUseFailure 事件触发，hook 链兼容）
-- 不修改 `result.tool_call_id` / `result.tool_name`（保持消息关联）
-- 性能：V1 path/bash suggester 用同步 `std::fs::read_dir`（毫秒级，executor 在 tokio runtime 内）。**未实施** `spawn_blocking + tokio::time::timeout` 保护——网络挂载目录等极端场景可能阻塞。后续 V2 async 化时统一加 timeout 预算（建议 100ms）
-
-**[TRAP]** `ToolEnd` 事件 emit 时机：`collect_tool_results` 中 `ToolEnd`（line 423-430）在 error_suggest 注入（line 441-456）**之前** emit，TUI 通过 `ToolEnd` 看到的是**原始错误**（不含建议），LLM 通过 state 中的 tool_result 看到的是**增强后文本**。这是 V1 设计意图（"纯 LLM 消费，不触碰 TUI/HITL"）。新增向 TUI 透传建议的路径时必须同步修改 emit 顺序，并验证 `EventSink` 下游不会重复渲染。
-
-**架构**：基础设施（trait/registry/context/matcher/format）在 `peri-agent/src/error_suggest/`，具体 suggester 在 `peri-middlewares/src/error_suggest/suggesters/`。`ErrorSuggestRegistry` 和 `ToolRegistrySnapshot` 作为 `ReActAgent` 字段，构造期注入（main agent 在 `peri-acp/src/agent/builder.rs`，subagent 在 `peri-middlewares/src/subagent/tool/build_agent.rs`）。
-
-**新增建议器流程**：
-1. 在 `peri-middlewares/src/error_suggest/suggesters/` 新建 `<name>_suggester.rs` + 测试
-2. 实现 `ErrorSuggester` trait（tool 白名单 + 关键词识别 + 候选生成）
-3. 在 `default_registry.rs::build_default_registry()` 注册（vec! 顺序决定短路优先级）
-4. 更新本文档章节
-
-## ACP/TUI 分层架构
-
-**概述**：`peri-acp` 是独立的 ACP 服务层 crate。`peri-tui` 为纯 ACP client 前端，通过 `MpscTransport` 与 `peri-acp` 通信。详见 `peri-tui/CLAUDE.md`。
-
-**数据流**（详见 `peri-tui/CLAUDE.md`）：
-- TUI 路径：TUI 输入 → AcpTuiClient → MpscTransport → ACP Server → executor → ExecutorEvent → TransportEventSink → TUI UI 更新
-- Stdio 路径：SDK → executor + StdioEventSink → stdout JSON-RPC
-
-Stdio 和 TUI 路径共享 `executor::execute_prompt()`。Stdio 当前支持：`session/new`、`session/prompt`、`session/cancel`、`session/set_config_option`。新增 ACP 方法时必须检查两条路径是否都需要实现。
-
-**[TRAP]** Stdio `initialize` 响应必须声明 session capabilities（与 TUI 路径的 `AcpServerConfig` 对齐）。
-
-**Frozen Data Flow**（会话内不可变数据）：
-
-**真正冻结（session/new 一次性捕获，存 SessionState.frozen_*）：**
+### ReAct 循环
 ```
-session/new → frozen_date → frozen_claude_md + frozen_claude_local_md
-            → frozen_skill_summary → frozen_system_prompt → SessionState.frozen_*
-            → executor::execute_prompt → AcpAgentConfig.frozen_*
+before_agent → loop(500):
+  Compact（ContextBudget: 0.70 micro / 0.85 full）
+  → Receive → Reason → Act（3 阶段工具分发） → End（检查 MessageQueue 续跑）
 ```
 
-**每轮 prompt 重新计算（非冻结）：**
-- `is_git_repo`：实时检查 `.git` 目录
-- `YOLO_MODE`：每次 SubAgent 构建时重新读取
-- `DISABLE_COMPACT` / `DISABLE_AUTO_COMPACT` / `COMPACT_THRESHOLD`：每轮读取 env
-- `peri_config`、Provider Snapshot、context_window：每轮从 `Arc<RwLock<>>` 克隆快照
-- 整个中间件链、AgentState、Cancel Token、Langfuse Tracer：每轮全新构造
+Compact 由 `stages/compact.rs` 统一处理；MessageQueue 作为 cron/channel/workflow/bg 统一异步消息通道。
 
-**[TRAP]** `PromptFeatures::detect()` 与 SubAgent 漂移：`PromptFeatures::detect()` 仍每轮重新读取 `YOLO_MODE`，`is_git_repo` 也每轮重新检查——两者未随 frozen 数据传递。这违反"系统提示词稳定性第一优先级"的派生不变量：SubAgent 在会话进行中可能因 env 变化或 git 状态变化而看到与 Main Agent 不同的 `PromptFeatures`，从而注入不同的 prompt 段落。新增依赖 `PromptFeatures` 的中间件时必须明确：（1）该特征应否被 frozen；（2）若不 frozen，SubAgent 链路是否会因此与 Main Agent 漂移；（3）漂移是否会破坏 prompt cache 前缀。详见 spec/global/domains/system-prompt.md#issue_2026-05-27-language-injection-subagent-drift-cache-isolation。
+### TUI 数据流
+```
+ACP 事件 → acp_notifier → acp_bridge → VIEW_MODELS atom
+                                            ↓
+                           message_area 直接消费
+                             ├─ vm_to_lines → Vec<Line>
+                             ├─ wrap_map_cache → 视口裁剪
+                             └─ ScrollThrottle 16ms 节流
+```
+VIEW_MODELS = `{ items: im::Vector<TuiRenderUnit>, generation: u64 }` 是唯一数据源。
 
-**ACP Slash Commands**（符合 agentclientprotocol.com）：
-- `CommandKind`（`Immediate`/`Passthrough`/`Transform`）分类执行
-- `/compact`：手动触发 full compact（`CommandKind::Immediate`，文件 `peri-acp/src/session/command/compact.rs`）
-- `/rewind <message_id>`：回滚对话到指定消息，逆向恢复 Write/Edit 文件变更（`CommandKind::Immediate`，文件 `peri-acp/src/session/command/rewind.rs`）
-- `/bg <任务描述>`：后台启动 Fork Agent 执行独立任务（`CommandKind::Immediate`，文件 `peri-acp/src/session/command/bg.rs`）
-- `/clear` 保留为 UICommand（`app.new_thread()` 创建新 session），不走 ACP
-- **[TRAP]** Immediate 命令路径绕过 agent event pump，必须手动调用 `sink.push_done()`。（详见 spec/global/domains/agent.md#issue_2026-05-29-immediate-command-missing-push-done）
+### 上下文缓存
+SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 分隔静态/动态。
+- Frozen Data Flow：`frozen_date → frozen_claude_md → frozen_skill_summary → frozen_system_prompt`
+- 中途纠正消息用 `BaseMessage::human()`，禁止 `BaseMessage::system()`
+- SubAgent 复用 main agent frozen 数据，禁止重新读盘
+- 非 System 消息用 `add_message`，禁止 `prepend_message`
 
-**[TRAP]** Agent 构建和执行统一通过 `peri_acp::session::executor::execute_prompt()`。禁止在 TUI 层直接构建 ReActAgent 或手写事件泵。`build_agent()` 每轮重建的大对象已通过 `AgentPool` session 级缓存复用。（详见 spec/global/domains/agent.md#issue_2026-05-24-build-agent-per-turn-arc-transient-fragmentation）
+### 中间件链
+14 基础 + 5 条件（Hook/MCP/Workflow/LSP/Goal），链末尾 `with_system_prompt()` prepend。顺序不可重排。
 
-**[TRAP]** TUI 层数据必须通过 ACP 协议到达 ACP 层，禁止直连。（详见 spec/global/domains/agent.md#issue_2026-05-29-clear-keeps-acp-server-history）
+### Tool Search
+三层：Core（12，始终可见）/ Meta（2，SearchExtraTools/ExecuteExtraTool）/ Deferred（Cron/MCP/LspTool 等）
 
-**[TRAP]** Session Config Options 覆盖旧的 Session Modes API。`build_config_options()` 必须按优先级顺序返回（mode → model → thinking_effort）。
+## 模块索引
 
-## 上下文压缩
+### peri-agent（ReAct 引擎）
+| 文件 | 职责 | 消费方 |
+|------|------|--------|
+| `agent/stages/` | ReAct 循环 5 阶段（reason/act/compact/receive/end） | run_react_loop |
+| `agent/compact_v2.rs` | compact 入口（micro + full） | stages/compact + /compact 命令 |
+| `llm/{openai,anthropic}/invoke.rs` | Provider 特定处理 + System hoist | BaseModelReactLLM |
+| `messages/` | BaseMessage + ContentBlock（含 Reasoning） | 全链 |
+| `middleware/chain.rs` | 链构造 + collect_tools | builder |
+| `error_suggest/` | 工具错误建议注入 | tool_dispatch |
 
-**架构**：Compact 由 `CompactMiddleware` 在 ReAct 循环内通过 `before_model` 钩子就地处理。
+### peri-acp（服务层）
+| 文件 | 职责 | 消费方 |
+|------|------|--------|
+| `agent/builder.rs:490` | 中间件链构造（14+5 固定顺序） | execute_prompt |
+| `agent/builder_v2.rs` | StageContext 构建 | builder |
+| `session/executor.rs` | `execute_prompt()` 统一入口 | TUI/Stdio |
+| `prompt/mod.rs` | `build_system_prompt()` + 动态边界 | session/new |
+| `event/{router,mapper,view_mapper}.rs` | ExecutorEvent → SessionUpdate 路由 | acp_notifier |
+| `langfuse/tracer/` | per-turn 追踪器：tool_batch（per-act flush）→ ObservationType::Tool | executor_helpers |
+| `prompts/sections/` | 14 个系统提示词段落（.md） | prompt/mod |
 
-**触发**：`CompactMiddleware::before_model` 检查 `ContextBudget`：0.70 micro-compact，0.85 full compact。环境变量覆盖：`DISABLE_COMPACT`、`DISABLE_AUTO_COMPACT`、`COMPACT_THRESHOLD`（0.0-1.0）。
+### peri-tui（TUI 前端）
+| 文件 | 职责 | 消费方 |
+|------|------|--------|
+| `kit/entry.rs` | 入口 + 4 主链路 spawn | main |
+| `kit/atoms.rs` | VIEW_MODELS/SERVICE_SNAPSHOT 等全局 Atom | 全 TUI |
+| `kit/acp_bridge.rs` | BridgeState → Atom 写入 | acp_notifier |
+| `kit/acp_events.rs` | `push_view_models`: BridgeState → VIEW_MODELS | acp_bridge |
+| `kit/acp_notifier.rs` | ACP 通知 → AcpEventData → bridge_tx | entry |
+| `kit/message_area/` | 消息区渲染（视口裁剪+节流）；子模块 mod/render/selection/scroll/footer/props | 读 VIEW_MODELS |
+| `kit/input_area.rs` | 输入框（多行/history/@mention/slash） | 写 SUBMIT_TX |
+| `kit/panels/` | 15 面板（Model/Config/Cron/ThreadBrowser...） | app/panel_types |
+| `kit/popups/` | 4 弹窗（HITL/AskUser/Rewind/OAuth） | acp_events |
 
-**核心文件**：
-| 文件 | 职责 |
-|------|------|
-| `peri-agent/src/agent/compact/` | `full_compact()`/`micro_compact_enhanced()`/`re_inject()`/`config`/`invariant` |
-| `peri-middlewares/src/compact_middleware.rs` | `CompactMiddleware`：`before_model` 钩子 |
-| `peri-acp/src/session/command/compact.rs` | `/compact` Slash Command（`CommandKind::Immediate`） |
-| `peri-acp/src/session/command/rewind.rs` | `/rewind` Slash Command（`CommandKind::Immediate`） |
-| `peri-acp/src/session/command/bg.rs` | `/bg` Slash Command（`CommandKind::Immediate`） |
+### peri-middlewares（中间件集合）
+详见 `peri-middlewares/CLAUDE.md`（完整链执行顺序、MCP 配置、插件系统、SubAgent、LSP）。
 
-**[TRAP]** compact 后消息结构必须以 `BaseMessage::human(summary + continuation)` 开头。禁止将摘要放在 `BaseMessage::system()` 中。compact 后的完整结构：`[Human(摘要+续接指令), System(文件)..., System(Skills)...]`。（详见 spec/global/domains/compact.md#issue_2026-05-20-auto-compact-empty-messages-400）
+## 开发
 
-**[TRAP]** full compact 后 `preprocess_messages` 处理 Ai 消息时只保留工具调用名称、完全丢弃参数（含 file_path 等路径信息），摘要 LLM 无法知道操作的是哪个文件。`full_compact()` 增加 `cwd` 参数为摘要 LLM 提供路径锚点。（详见 spec/global/domains/compact.md#issue_2026-06-07-full-compact-loses-project-path-context）
+### 命令
+- `cargo build --workspace` / `cargo build -p <crate>`：构建
+- `cargo test --workspace` / `cargo test -p <crate> --lib -- <test_name>`：测试
+- `cargo run -p peri-tui -- -a`：HITL 审批模式
+- `scripts/start-tui.sh`：启动（RELAY_PORT=3001）
+- `lefthook run pre-commit`：fmt/check/clippy
 
-## Sync 模块
+### 编码规范
 
-**[TRAP]** 路径穿越防护：`validate_and_resolve()` 是项目标准的路径穿越防护入口。任何需要接收用户侧相对路径并写入 base_dir 的场景都必须复用此函数。新增类似写入功能时禁止自行实现路径校验。
+#### 通用
+- **Rust 2021** edition。crate 内根 `#![allow(clippy::xxx)]` 需注释原因
+- **禁止 `println!`/`eprintln!`/`dbg!`**，统一用 `tracing`（`tracing::info!(target: "xxx", ...)`）
+- **注释/断言用中文**；doc comment 用英文或中文均可，但同一模块内保持一致
 
-**[TRAP]** `Path::strip_prefix()` + `to_string_lossy()` 在 Windows 上产生 `\` 分隔符，sync 协议要求 `/`。`scan_dir_recursive()` 构造 `FileEntry.path` 时必须 `.replace('\\', "/")`。（详见 spec/global/domains/sync.md#issue_2026-05-20-windows-path-separator-breaks-tests）
+#### 错误处理
+- **库 crates**（peri-agent / peri-middlewares / peri-lsp ...）：用 `thiserror` 定义结构化 error enum + `type XxxResult<T> = Result<T, XxxError>`
+- **应用 crates**（peri-tui / peri-acp）：用 `anyhow::Result`
+- `#[error("...")]` 消息用英文（方便 grep），含上下文字段用 `{field}` 插值
+- `#[from]` 自动转换仅用于真正等价的错误类型，其余手动 map
 
-`peri sync` 子命令使用标准终端 CLI（crossterm 交互），不经过 TUI 主循环。
+#### Async
+- trait 方法用 `#[async_trait]`；运行时 `tokio`（`features = ["full"]`）
+- 跨 `.await` 持锁用 `parking_lot::RwLock`（std `RwLockReadGuard` 不是 `Send`）
+- 阻塞系统 I/O（剪贴板等）用 `std::thread::spawn` 独立线程，禁止在 async 中直接阻塞
 
-## 文档目录
+#### 字符串与数值
+- **CJK 截断**：`s.chars().take(N).collect::<String>()`，禁止 `&s[..N]`（中文 panic）
+- **终端列宽**：用 `unicode_width::UnicodeWidthStr` / `UnicodeWidthChar`，禁止 `.len()` 当宽度
+- **u16 坐标**：`saturating_add` / `saturating_sub`，禁止裸 `+` / `-`
 
-| 目录 | 内容 |
-|------|------|
-| `docs/blogs/` | 技术博客（streaming-render、compact-mechanism、prompt-cache 等 31+ 篇） |
-| `.claude/skills/blog-writer/SKILL.md` | 博客写作风格指南，写博客时触发 blog-writer skill |
-| `docs/superpowers/specs/` | Superpowers 插件设计规范 |
-| `docs/acp/` | ACP 协议文档（实现报告、协议差距分析） |
+#### 导入与模块
+- 每模块一个目录，`mod.rs` 中 `pub use` 做预导出缩短调用路径
+- `use crate::module::*` 通配导入排在单类型之前；跨 crate 同理（rustfmt 约定）
+- 不设 `rustfmt.toml`，依赖 cargo 默认格式化
 
-## 环境变量
+#### 快捷键
+- 禁止 `Shift+字母` / PageUp / Down；优先 `Ctrl+字母`；禁止 `ℹ`（U+2139）
 
-| 变量 | 说明 |
-|------|------|
-| `ANTHROPIC_API_KEY` | Anthropic API Key |
-| `ANTHROPIC_BASE_URL` | Anthropic 自定义 Base URL |
-| `ANTHROPIC_MODEL` | 默认 Anthropic 模型名 |
-| `OPENAI_API_KEY` | OpenAI 兼容 API Key |
-| `OPENAI_API_BASE` | API Base URL（优先于 `OPENAI_BASE_URL`） |
-| `OPENAI_BASE_URL` | API Base URL（fallback） |
-| `OPENAI_MODEL` | 模型名称（默认 gpt-4o） |
-| `MODEL_PROVIDER` | Provider 选择提示（auto-detect） |
-| `YOLO_MODE=true/false` | 跳过/启用 HITL 审批 |
-| `RUST_LOG` | 日志级别（默认 info） |
-| `RUST_LOG_FORMAT` | `"json"` 时输出 JSON 格式日志 |
-| `RUST_LOG_FILE` | 日志文件路径 |
-| `LANGFUSE_PUBLIC_KEY` | Langfuse 公钥（缺一则禁用遥测） |
-| `LANGFUSE_SECRET_KEY` | Langfuse 密钥 |
-| `LANGFUSE_BASE_URL` | Langfuse 服务地址（默认 cloud.langfuse.com） |
-| `DISABLE_COMPACT` | 禁用所有 compact（含 auto + micro） |
-| `DISABLE_AUTO_COMPACT` | 仅禁用 auto compact |
-| `COMPACT_THRESHOLD` | 覆盖 auto compact 阈值（0.0-1.0，默认 0.85） |
+#### i18n（TUI 界面翻译）
 
-配置通过 `~/.peri/settings.json` 的 `env` 字段注入。
+**范围界定**：**只翻译 TUI 界面中用户会读到的文本**，其余一律保持英文原样。
 
-## Beta 功能开关
+| 需要 i18n | 不需要 i18n |
+|-----------|-------------|
+| 面板标题/描述/导航提示 | `tracing` 日志（`info!`/`warn!`/`error!` 等） |
+| 弹窗标题/内容/操作提示 | `thiserror`/`anyhow` error message 字符串 |
+| 通知消息（写入 NOTIFICATION atom） | ACP 协议层错误字符串 |
+| 消息流内嵌标签（提醒 tag、渠道名、工具别名） | Markdown box-drawing 字符和格式符号 |
+| 向导/欢迎页/配置页文本 | 代码内变量名/字段名/路径字符串 |
+| 空态/占位符/统计文本 | `println!`/`eprintln!` CLI 终端输出 |
 
-`settings.json` → `config.betas` 控制 beta 功能。所有字段默认 `false`。当前无活跃 beta 功能。
+**基础设施**：`peri-tui/src/i18n/mod.rs`（Fluent），API：
+- `i18n::tr("key")` — 无参翻译
+- `i18n::tr_args("key", &[("param".into(), val)])` — 带参翻译
+- `i18n::switch("zh-CN")` — 语言切换
+- `i18n::init(Some("zh-CN"))` — 启动初始化
 
-## CLI 参数
+**新增 UI 文本时**：
+1. 在 `locales/en/main.ftl` 中新增英文 key（en 是 fallback，语法参考 Fluent）
+2. 在 `locales/zh-CN/main.ftl` 中新增对应的中文 key
+3. 代码中调用 `i18n::tr("key")` 或 `i18n::tr_args("key", args)`
+4. 组件中需 `hooks.use_atom(&LANG_VERSION)` 订阅语言变更以触发重渲染
 
-对齐 Claude Code 核心参数体系。所有 camelCase 参数同时支持 kebab-case 别名。clap 4 derive 解析。
+**Key 命名规范**：
+- 命令相关：`command-<name>-description`、`<name>-<status>`
+- 面板相关：`panel-title-<name>`、`panel-desc-<name>`、`panel-<name>-<element>`
+- 弹窗相关：`popup-<name>-<element>`
+- 状态栏：`statusbar-<element>`
+- 欢迎/向导：`welcome-<element>`、`setup-<element>`
+- 通用提示：`common-<element>`（如 `common-empty`、`common-esc-close`、`common-nav-enter-close`）
+- 参数用 `{ $param }` 语法，禁止拼接字符串生成 key
 
-**参数列表**：
+**修改已有 UI 文本时**：若字符串已被硬编码在代码中，替换为 `i18n::tr()` 调用，同步新增 FTL key。
 
-| 参数 | 说明 | 模式 |
+### 测试规范
+详见 `docs/design/testing-standards.md`。以下为速查摘要。
+
+#### 存放位置
+| 类型 | 位置 | 条件 |
 |------|------|------|
-| `-p/--print [PROMPT]` | 非交互模式：执行单轮问答后输出到 stdout 并退出 | print only |
-| `--output-format` | 输出格式：text / json / stream-json（配合 `-p`） | print only |
-| `--max-turns` | 最大 agentic 轮数（配合 `-p`） | print only |
-| `--bare` | 极简模式：跳过 hooks/LSP/插件/MCP 初始化（配合 `-p`） | print only |
-| `--permission-mode` | 权限模式：bypass / default / dont-ask / accept-edit / auto-mode | both |
-| `--dangerously-skip-permissions` | 绕过所有权限检查（等同 permission-mode bypass） | both |
-| `--model` | 指定模型（别名如 sonnet 或全名） | both |
-| `--effort` | 推理强度：low / medium / high / max | both |
-| `-c/--continue` | 继续当前目录最近的对话 | TUI |
-| `-r/--resume [ID]` | 按 session ID 恢复对话 | TUI |
-| `--session-id` | 指定会话 ID | TUI |
-| `-n/--name` | 设置会话显示名称 | TUI |
-| `--no-session-persistence` | 禁用会话持久化 | TUI |
-| `--allowedTools` | 允许的工具列表 | both |
-| `--disallowedTools` | 禁止的工具列表 | both |
-| `--settings` | 加载额外 settings 文件或 JSON 字符串 | both |
-| `-a/--approve` | 启用 HITL 审批模式（等同 --permission-mode default） | TUI |
-| `-y/--yolo` | 向后兼容，无操作（YOLO 已是默认行为） | TUI |
+| 单元测试 | 同目录 `_test.rs` | 测试代码 ≥ 30 行 |
+| 单元测试 | 同文件 `#[cfg(test)] mod tests` | 测试代码 < 30 行 |
+| 集成测试 | crate 根 `tests/` | 跨模块端到端，只访问 `pub` API |
 
-**子命令**：`plugin list [--json]` / `plugin install <name@marketplace> [--scope user/project/local]` / `plugin uninstall <id>`。`acp`/`update`/`sync` 子命令保持不变。
+#### 优先级
+- **P0（必须测）**：serde roundtrip / 事件映射 / 纯逻辑函数 / 工具错误路径 / 中间件链顺序 / CLI 配置解析
+- **P1（应该测）**：复杂状态机 / 协议编解码 / 异步通道 / 安全敏感 / Prompt 构建
+- **不测**：TUI render body / 外部 API 调用 / 纯样板 getter / `side-projects/`
 
-**`-p` 模式架构**：复用 ACP executor，通过 `PrintEventSink` 收集事件并输出。不启动 TUI、不维持 session。`PrintBroker` 自动批准所有交互。
+#### 风格
+- **命名**：`test_<对象>_<场景>`（如 `test_serde_roundtrip`、`test_edit_file_old_string_not_found`）
+- **结构**：Arrange-Act-Assert 三段，**段间无空行**
+- **注释/断言**：中文
+- **一条断言法则**：每个 test 验证一个场景；多条 assert 必须验证同一场景的不同侧面
+- **异步测试**：`#[tokio::test]`
+- **全局状态测试**：`#[serial]` 或 `Mutex<()>` 加锁
 
-运行时 `Shift+Tab` 切换权限模式，`Ctrl+T` 切换模型，`Ctrl+Shift+T` 切换 Provider。
+#### 质量标准
+1. **确定性**：无随机数、无时间依赖、无外部网络
+2. **错误路径**：正常路径 + ≥ 1 条错误路径，assert 错误**类型/消息内容**而非仅 `is_err()`
+3. **精确断言**：`assert!(err.to_string().contains("not found"))` 而非 `assert!(result.is_err())`
+4. **独立可运行**：`cargo test -p <crate> --lib -- <test_name>` 单独通过
 
-## 编码规范
+#### Mock 与 Fixture
+- **`make_` 前缀**工厂函数 + 手写 trait impl，禁止 `mockall` / `Mock struct`
+- **不共享**：所有 mock 在测试文件内部局部定义，不设共享 `test_helpers` 模块
+- 常用依赖：`tempfile::TempDir`（文件隔离）/ `serial_test`（独占资源）/ `temp-env`（环境变量）
 
-- Rust 2021 edition，tokio async/await + async-trait
-- 库用 `thiserror`，应用层用 `anyhow::Result`
-- 日志用 `tracing`，禁止 `println!`/`eprintln!`
-- 测试与源码分离为同目录 `_test.rs` 文件（≥30 行必须分离）
-- bin crate 集成测试在 `src/` 内（不支持 `tests/` 目录）
-- 每模块一目录，`mod.rs` 入口；Workspace resolver = "2"，禁止下层依赖上层
-- 禁止 `ℹ`（U+2139）符号和 `[i]` 前缀
-- **字符串截断必须用字符级操作**：`s.chars().take(N).collect()` 或 `s.char_indices().nth(N)`，`&s[..N]` 对 CJK 会 panic
-- 终端列宽用 `unicode-width` crate（CJK 占 2 列）
-- **终端 UI 鼠标坐标转换**：鼠标事件坐标是显示列（unicode-width），光标位置是字符索引，需逐字符累加转换。（详见 spec/global/domains/tui.md#issue_2026-05-12-textarea-mouse-click-cursor-misposition-cjk）
-- **终端光标 vs Buffer 光标 [TRAP]**：禁用 tui-textarea 默认 REVERSED buffer 级光标改用终端光标（`set_cursor_position`）时，必须有准确的 textarea 水平滚动偏移读数。tui-textarea-2 的 `Viewport::scroll_top()` 是 `pub(crate)`，外部无法读取真实 `top_col`。推断公式在 sticky scroll 场景下（光标在视口中部移动、top_col 不变）算错，导致光标被钉在视口最右列，终端模拟器在最右列裁剪光标→完全消失。buffer 后处理方案（扫描 REVERSED 空格，移除 REVERSED + 设 bg=TEXT）可在不修改上游的情况下等效还原光标。未来恢复 IME 终端光标支持时，必须用方案 A（UI state 跨帧 sticky last_scroll_col + next_scroll_top 逻辑），禁止复刻 PR #34 的简单推断公式。（详见 spec/global/domains/tui.md#issue_2026-06-17-main-textarea-cursor-invisible-long-line）
-- **快捷键设计**：禁止 `Shift+字母`（编辑态等同大写输入）。全局用 `Ctrl+字母`，面板用方向键/Space/Enter/Esc。
-- **快捷键跨平台兼容 [TRAP]**：`Alt+Enter`/`Alt+M` 在 Windows 终端被截获，新增快捷键必须优先用 `Ctrl+字母`，避免 `Alt` 修饰键。
-- **面板系统**：`PanelManager` + `PanelComponent` trait，新增面板只需定义变体 + 实现 trait。面板内禁止渲染提示行，由 `status_bar_hints()` 统一描述。
-- **`Event::Paste`**：独立于 key event 链，必须单独拦截。
-- **翻页快捷键**：不使用 PageUp/PageDown。滚动统一用 `Ctrl+U`/`Ctrl+D`（textarea 空时）。禁止添加 PageUp/PageDown 滚动行为。
-- **鼠标事件合并**：`coalesce_mouse_events()` 对连续 Scroll/Drag 事件做非阻塞 drain 合并，只保留最后一个。
+#### 回归测试
+标注 `/// [回归测试]` + 历史背景（哪个 bug / 哪次修复），参考 `peri-agent/src/agent/events_v2.rs:1128`。
 
-## 测试编写风格
+#### 新增功能 Checklist
+- [ ] 新增数据结构（含 serde）→ serde roundtrip + 不完全 JSON 测试
+- [ ] 新增 `ExecutorEvent` 变体 → `mapper_test.rs` 增加映射测试
+- [ ] 新增 Core 工具 → `core_tools_test.rs` 同步
+- [ ] 新增中间件 → before/after_agent + before/after_tool 各 ≥ 1 条
+- [ ] 文件系统工具 → 错误路径（not found / ambiguous / permission / not unique）
+- [ ] 回归修复 → `/// [回归测试]` 注释 + 历史背景
 
-- 注释、断言消息用中文；命名 `test_<被测对象>_<场景>`
-- Arrange-Act-Assert，无空行分隔
-- 断言优先 `assert_eq!`/`assert!`，`.unwrap()` 仅用于构造测试数据
-- Mock 命名 `make_` 前缀（函数），`Mock` 前缀（结构体），不跨文件共享
-- 最小依赖：`assert!`/`assert_eq!`/`matches!` + `tempfile` + `tokio-test`
+### 环境变量
+`~/.peri/settings.json` env 字段注入。Provider：`ANTHROPIC_*`/`OPENAI_*`。行为：`YOLO_MODE`/`DISABLE_COMPACT`。遥测：`LANGFUSE_*`。
 
-## 开发注意事项
+### Theme
+颜色从 `peri-theme` 三 Atom（`THEME_ATOM`/`PALETTE_ATOM`/`PERI_COLORS_ATOM`）获取，禁止硬编码色值。`#[component]` 用 `hooks.use_atom`，非 component 两步绑定防悬垂引用。
 
-- **测试隔离**：禁止写入全局配置。用 `App::save_config(cfg, self.config_path_override.as_deref())`。
-- **`std::sync::RwLockReadGuard` 不是 `Send`**，async 中不能跨 `.await` 持有，用 `parking_lot::RwLock`。
-- **`CommandRegistry::dispatch` 借用限制 [TRAP]**：`&self` + `&mut App` 冲突，当前用 `std::mem::take` + put-back 解决。
-- **`ServiceRegistry` 与 `GlobalUiState`**：`App` 状态拆分为 `ServiceRegistry`（跨会话共享）和 `GlobalUiState`（纯 UI 临时状态）。面板 dispatch 宏位于 `event/macros.rs`。
-- **`app/mod.rs` 模块组织**：使用标准 `mod`/`pub mod` 声明按功能类别分组。
-- **跨平台 spawn [TRAP]**：所有子进程 spawn 必须通过 `shell_command()` 统一 wrapper，Windows 用 powershell `-NoProfile -NonInteractive -NoLogo -Command`、Unix 用 `bash -c`。新增 spawn 时必须复用。
-- **MultiplexBroker 竞速 [TRAP]**：ChannelBroker 不支持 Questions 交互类型，不应与 TUI broker 参与竞速。（详见 spec/global/domains/agent.md#issue_2026-05-29-ask-user-tool-auto-complete）
+### Workflow 排障
+"0 agents, 0 tool calls"：`which peri-workflow` 可用 → `npm install && npm run build` → `cargo build -p peri-workflow` → 重启。
+
+## 陷阱速查
+
+### Agent 循环
+- **drain_for_end**：executor 末尾禁止，消息物理丢失。idle 续跑由 TUI 负责
+- **await_wake**：`run_session_loop` 末尾禁止，stdio 收不到响应
+- **before_tool/after_tool**：不读 `state.messages()`，`tool_dispatch.rs` 延迟写入
+- **AgentEvent 变体**：新增需同步 `map_executor_event`（peri-acp/event + peri-tui/acp_events）
+- **Interrupted/Error vs Done 互斥**：前者 `request_rebuild()` + `reconcile_already_done=true`
+- **ACP 通知覆盖度**：所有事件（含 AgentDone→TurnDone）必须完整转发，遗漏→UI 卡死
+- **PromptFeatures**：`detect()` 每轮读 `YOLO_MODE`/`is_git_repo`，未 frozen
+- **Immediate 命令**：绕过 event pump，必须手动 `sink.push_done()`
+- **中途纠正消息**：用 `BaseMessage::human()`，禁止 `BaseMessage::system()`（invoke.rs 会 hoist 污染 frozen prompt）
+
+### ACP/TUI 分层
+- **execute_prompt**：Agent 构建统一入口，禁止 TUI 直连运行时
+- **SubAgent frozen**：必须复用 main agent frozen 数据，禁止重新读盘
+- **add_message vs prepend_message**：非 System 消息用 `add_message`（尾部追加）
+- **`_meta` key**：ACP SDK 序列化 key 是 `"_meta"` 非 `"meta"`。`is_session_replay` 检测用四级 fallback（`_meta`→`meta`→`content._meta`→`content.meta`）
+- **session replay DTO**：复用正常流式路径数据结构，不要发明 replay 专用变体
+
+### TUI 渲染
+- **use_* 顺序**：`hooks.use_*` 必须在 `if`/`match`/`return` 之前，顺序/数量变化→`"Hook type mismatch"` panic
+- **render body 写 atom**：禁止（含 `use_effect`），`ReactiveMutRef::Drop` 无条件 `wake()` → 自激回路
+- **use_state write_no_update**：render body 内 `use_state` 写入必须用 `write_no_update()`，不是 `write()`
+- **BRIDGE_RESET_COUNTER**：/clear 和 thread 切换前必须递增，仅 atom 重置不足
+- **overlay 空态**：返回 `Positioned(width:0, height:0)`，不要 `View()`/`Fragment` → 白屏
+- **事件边界**：消息区只处理鼠标滚轮，编辑区只处理键盘
+
+### SubAgent / Worktree
+- **coder cwd**：不遵守 `Agent(cwd=...)`，prompt 中必须用绝对路径。push 前 `git diff --stat` 确认
+- **文件白名单**：coding prompt 必须列文件白名单 + `DO NOT modify:` 禁止清单
+
+### Rust / 编码
+- **rustfmt import**：`use crate::module::*` 通配导入排在单类型之前；跨 crate 同理
+- **CJK 截断**：用 `chars().take(N)`，`&s[..N]` 对中文 panic
+- **u16 坐标**：用 `saturating_add`/`saturating_sub`，禁止裸 `+`/`-`
+- **RwLockReadGuard Send**：不是 Send，async 跨 `.await` 用 `parking_lot::RwLock`
+- **剪贴板**：阻塞系统 I/O 用 `std::thread::spawn` 独立线程
+- **Paste 事件**：`Event::Paste` 独立于 key event，需 BracketedPaste
+- **Theme 悬垂引用**：`&THEME_ATOM.state().read().xxx` 崩，须两步绑定；`theme_def.semantic` 不能直接访问，须 `theme_def.read().semantic`
+
+### Langfuse 监控 v2
+- **trace_id = turn_id**：tracer.new() 由 caller 传入 turn_id，禁止自生成。trace_id 不可变。
+- **sampled=false 时 silently no-op**：每个 on_* 入口检查 sampling，未采样时直接返回。caller 不感知。
+- **新增 ExecutorEvent 变体**：必须同步 (1) peri-acp/event/mapper.rs (2) peri-tui/kit/acp_events.rs (3) variant_coverage_test.rs，缺一会漏掉监控数据。
+- **ErrorSpan 兜底**：错误 turn 强制发 ErrorSpan 挂同 turn（trace_id = turn_id，不破坏契约）。
+- **子对象方法签名禁止接收 `&mut LangfuseTracer`**：否则破坏 disjoint borrow。
+- **ToolBatch per-act flush**：ToolBatch 在 Act stage 结束时自动 flush（`on_stage_end`），避免所有工具堆在第一个 Act 下。单个工具以 `ObservationCreate` + `ObservationType::Tool` 上报，含 input/output/end_time/level。batch span 的 parent 在首次 `on_tool_start` 时捕获 stage span_id（时序安全）。
+
+## 任务入口矩阵
+
+| 任务 | 入口文件 | 注意事项 |
+|------|---------|----------|
+| 新增/删除 Core 工具 | `tool_search/core_tools.rs:38` 的 `CORE_TOOLS` 常量 | 同步 6 处：prompt §05、HITL 审批列表、event/mapper、tool_display、core_tools_test、GitAttribution |
+| 新增中间件 | `peri-acp/src/agent/builder.rs:490` | 14+5 固定顺序，禁止重排 |
+| 改 LLM Provider 调用 | `peri-agent/src/llm/{openai,anthropic}/invoke.rs` | System hoist 规则：禁止 `BaseMessage::system()` 中途注入 |
+| 新增 TUI 面板 | `peri-tui/src/kit/panels/` → `app/panel_types.rs:7` 的 `PanelKind` | 用 `panel_shell!` 宏 + `MutexGroup` 分组 |
+| 改 系统提示词 | `peri-acp/prompts/sections/`（14 个 .md 段落） | 静态段结构不可变（破坏 prompt cache） |
+| 改 TUI 渲染 | `message_area/`（主渲染，子模块 mod/render/selection/scroll/footer/props）+ `acp_bridge.rs`（事件→状态）+ `acp_events.rs`（push_view_models） | VIEW_MODELS 是唯一数据源 |
+| 改 SubAgent | `peri-middlewares/src/subagent/`（工具/构建器/spawner/v2_bridge） | frozen 数据必须从 main agent 透传 |
+| 改 MCP 配置 | `peri-middlewares/src/mcp/`（initialize/reconnect）+ `~/.peri/settings.json` | 三层合并：全局→插件→项目 `.mcp.json` |
+| 改 Plugin 系统 | `peri-middlewares/src/plugin/`（installer/marketplace/config） | 兼容 Claude Code 生态 |
+| 改 Skills | `peri-middlewares/src/skills/`（扫描/叶子语义）+ `skills/builtin/`（编译期嵌入） | 搜索顺序：用户→项目→插件→Builtin |
+| 改 Langfuse 监控 | `peri-acp/src/langfuse/tracer/`（7 子对象 + 主 struct） + `langfuse-client/`（数据结构） + `peri-acp/src/session/executor_helpers.rs::forward_langfuse_event`（路由） | trace_id = turn_id 契约；新增 ExecutorEvent 必须扩 mapper_test + variant_coverage_test；sampled=false 时 tracer silently no-op |

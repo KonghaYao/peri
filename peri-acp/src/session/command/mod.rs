@@ -36,7 +36,7 @@ pub struct CommandContext {
     pub history: Vec<BaseMessage>,
     pub cwd: String,
     pub peri_config: Arc<PeriConfig>,
-    /// 辅助 LLM（CompactMiddleware 摘要 + Goal 工具验证共用）。由 executor 从 provider 构造后传入。
+    /// 辅助 LLM（v2 stages/compact.rs 摘要 + Goal 工具验证共用）。由 executor 从 provider 构造后传入。
     pub auxiliary_model: Option<Arc<dyn BaseModel>>,
     pub event_sink: Arc<dyn EventSink>,
     /// 命令参数（命令名之后的文本）。
@@ -50,7 +50,7 @@ pub struct CommandContext {
     /// 后台任务事件的发送通道（BgCommand 等 Immediate 命令依赖）。
     /// Option 因为非 bg 命令路径不需要。BgCommand 总是 expect 它是 Some。
     pub bg_event_sender:
-        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::AgentEvent>>,
+        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>>,
     /// 后台任务注册中心（BgCommand 等 Immediate 命令依赖）。
     /// Option 因为非 bg 命令路径不需要。BgCommand 总是 expect 它是 Some。
     pub bg_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
@@ -114,13 +114,22 @@ impl CommandRegistry {
             return None;
         }
 
-        // 精确匹配 name
+        // 1) 精确匹配 name
         for cmd in &self.commands {
             if cmd.name() == name {
                 return Some((cmd.as_ref(), args));
             }
         }
-        // 精确匹配 alias
+        // 2) 前缀匹配 name（/rew → /rewind）。仅当唯一前缀时生效，多个歧义前缀退化为无匹配。
+        let prefix_matches: Vec<&Box<dyn AgentCommand>> = self
+            .commands
+            .iter()
+            .filter(|cmd| cmd.name().starts_with(name) && cmd.name() != name)
+            .collect();
+        if prefix_matches.len() == 1 {
+            return Some((prefix_matches[0].as_ref(), args));
+        }
+        // 3) 精确匹配 alias
         for cmd in &self.commands {
             if cmd.aliases().contains(&name) {
                 return Some((cmd.as_ref(), args));
@@ -151,6 +160,15 @@ pub fn default_command_registry() -> CommandRegistry {
     reg.register(Box::new(compact::CompactCommand));
     reg.register(Box::new(clear::ClearCommand));
     reg.register(Box::new(rewind::RewindCommand));
+    reg
+}
+
+/// 创建仅包含 agent 内部命令的注册表（供 prompt 拦截用）。
+/// 视图层命令（/clear、/rewind）不在此注册表中——它们由 TUI kit 路径拦截处理。
+pub fn default_prompt_command_registry() -> CommandRegistry {
+    let mut reg = CommandRegistry::new();
+    reg.register(Box::new(compact::CompactCommand));
+    reg.register(Box::new(bg::BgCommand));
     reg
 }
 

@@ -92,26 +92,6 @@ impl Default for CompactConfig {
 }
 
 impl CompactConfig {
-    /// 从环境变量构建配置，未设置的环境变量使用默认值
-    pub fn from_env() -> Self {
-        let mut config = Self::default();
-        if env::var("DISABLE_COMPACT").is_ok() {
-            config.auto_compact_enabled = false;
-            config.micro_compact_threshold = 1.0;
-        }
-        if env::var("DISABLE_AUTO_COMPACT").is_ok() {
-            config.auto_compact_enabled = false;
-        }
-        if let Ok(val) = env::var("COMPACT_THRESHOLD") {
-            if let Ok(threshold) = val.parse::<f64>() {
-                if (0.0..=1.0).contains(&threshold) {
-                    config.auto_compact_threshold = threshold;
-                }
-            }
-        }
-        config
-    }
-
     /// 在已有配置基础上应用环境变量覆盖
     pub fn apply_env_overrides(&mut self) {
         if env::var("DISABLE_COMPACT").is_ok() {

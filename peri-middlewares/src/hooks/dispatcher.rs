@@ -50,12 +50,6 @@ impl HookDispatcher {
         }
     }
 
-    /// 测试 / 共享访问 hooks 表。
-    #[allow(dead_code)]
-    pub(crate) fn hooks_clone(&self) -> HashMap<HookEvent, Vec<RegisteredHook>> {
-        self.hooks.read().clone()
-    }
-
     /// 分发一次 hook 事件。
     ///
     /// 流程：
@@ -78,7 +72,7 @@ impl HookDispatcher {
         // 脚本从 stdin 读到的 hook_event_name 会是 "PreToolUse" 而非 "PermissionRequest"。
         //
         // [TRAP] 即便 input_builder 修复了硬编码，dispatcher 仍保留兜底逻辑
-        // （防御性编程）：外部代码（standalone、compact_middleware 等）可能传入
+        // （防御性编程）：外部代码（standalone hooks、stages::compact 等）可能传入
         // 未修正的 input。
         let input = if input.hook_event_name != event {
             let mut corrected = input.clone();

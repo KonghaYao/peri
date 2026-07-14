@@ -19,7 +19,7 @@ impl McpMiddleware {
 }
 
 #[async_trait]
-impl<S: peri_agent::agent::state::State> Middleware<S> for McpMiddleware {
+impl Middleware for McpMiddleware {
     fn name(&self) -> &str {
         "McpMiddleware"
     }
@@ -37,15 +37,13 @@ impl<S: peri_agent::agent::state::State> Middleware<S> for McpMiddleware {
 
 #[cfg(test)]
 mod tests {
-    use peri_agent::agent::state::AgentState;
-
     use super::*;
 
     #[test]
     fn test_name_returns_mcp_middleware() {
         let pool = Arc::new(McpClientPool::new_empty());
         let mw = McpMiddleware::new(pool);
-        let name = <McpMiddleware as Middleware<AgentState>>::name(&mw);
+        let name = <McpMiddleware as Middleware>::name(&mw);
         assert_eq!(name, "McpMiddleware");
     }
 
@@ -53,7 +51,7 @@ mod tests {
     fn test_collect_tools_empty_pool() {
         let pool = Arc::new(McpClientPool::new_empty());
         let mw = McpMiddleware::new(pool);
-        let tools = <McpMiddleware as Middleware<AgentState>>::collect_tools(&mw, "/tmp");
+        let tools = <McpMiddleware as Middleware>::collect_tools(&mw, "/tmp");
         assert!(tools.is_empty());
     }
 }

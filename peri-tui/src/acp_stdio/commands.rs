@@ -1,8 +1,8 @@
 //! AvailableCommands 通知辅助，供 session/new 和 session/load 复用。
 
 use agent_client_protocol::{
-    schema::{AvailableCommandsUpdate, SessionId, SessionNotification, SessionUpdate},
     Client, ConnectionTo,
+    schema::v1::{AvailableCommandsUpdate, SessionId, SessionNotification, SessionUpdate},
 };
 
 /// 扫描 skill 目录并发送 AvailableCommandsUpdate 通知。
@@ -20,9 +20,17 @@ pub(super) fn send_available_commands(
     );
     let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
     let cmds = peri_acp::dispatch::build_available_commands(&skills);
+    let meta = skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>();
     let notif = SessionNotification::new(
         session_id.clone(),
-        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(cmds)),
+        SessionUpdate::AvailableCommandsUpdate(
+            AvailableCommandsUpdate::new(cmds).meta(
+                serde_json::json!({"skillNames": meta})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        ),
     );
     let _ = cx.send_notification(notif);
 }

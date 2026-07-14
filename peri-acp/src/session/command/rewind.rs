@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use peri_agent::agent::events::AgentEvent as ExecutorEvent;
+use peri_agent::agent::events::ExecutorEvent;
 use peri_agent::messages::{BaseMessage, ContentBlock, MessageId};
 use tracing::{debug, warn};
 
@@ -30,11 +30,12 @@ struct RewindArgs {
 }
 
 /// 提取到的文件变更操作。
+///
+/// `Write` 变体的原 `content` 字段已删除：rewind 的文件恢复依赖 `git checkout HEAD`
+/// （见 `revert_files`），从未读取 `Write.content`。保留字段只会徒增内存 + 编译器静音。
 enum FileChange {
     Write {
         path: String,
-        #[allow(dead_code)]
-        content: String,
     },
     Edit {
         path: String,
@@ -207,12 +208,8 @@ fn parse_tool_call(name: &str, args: &serde_json::Value) -> Option<FileChange> {
     let path = args.get("file_path")?.as_str()?.to_string();
     match name {
         "Write" => {
-            let content = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Some(FileChange::Write { path, content })
+            // content 字段不再保留：rewind 不读取它（依赖 git checkout 恢复原始内容）
+            Some(FileChange::Write { path })
         }
         "Edit" => {
             let old_string = args

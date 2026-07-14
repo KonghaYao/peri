@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 use super::invoke::{build_request_body, parse_content_blocks};
 use crate::{
-    agent::events::AgentEvent,
+    agent::events::ExecutorEvent,
     error::{AgentError, AgentResult},
     llm::{
         sse::SseParser,
@@ -164,8 +164,10 @@ pub(super) async fn do_invoke_streaming(
                         "thinking_delta" => {
                             if let Some(t) = delta["thinking"].as_str() {
                                 if !t.is_empty() {
-                                    ctx.event_handler
-                                        .on_event(AgentEvent::AiReasoning(t.to_string()));
+                                    ctx.event_handler.on_event(ExecutorEvent::AiReasoning {
+                                        text: t.to_string(),
+                                        source_agent_id: None,
+                                    });
                                     reasoning_content.push_str(t);
                                 }
                             }
@@ -173,7 +175,7 @@ pub(super) async fn do_invoke_streaming(
                         "text_delta" => {
                             if let Some(t) = delta["text"].as_str() {
                                 if !t.is_empty() {
-                                    ctx.event_handler.on_event(AgentEvent::TextChunk {
+                                    ctx.event_handler.on_event(ExecutorEvent::TextChunk {
                                         message_id: ctx.message_id,
                                         chunk: t.to_string(),
                                         source_agent_id: None,

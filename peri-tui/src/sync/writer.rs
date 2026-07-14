@@ -1,3 +1,6 @@
+// [TRAP] 路径穿越防护：validate_and_resolve() 是项目标准入口
+// 任何需要接收用户侧相对路径并写入 base_dir 的场景都必须复用此函数。
+// 新增类似写入功能时禁止自行实现路径校验。
 use std::{
     fs,
     path::{Component, Path, PathBuf},

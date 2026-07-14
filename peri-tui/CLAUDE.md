@@ -1,112 +1,229 @@
 # peri-tui
 
-TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTransport`（in-memory channel pair）与 ACP Server 通信，不直接依赖 `peri-agent`/`peri-middlewares` 的运行时路径。
+TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTransport`（in-memory channel pair）与 ACP Server 通信，不直接依赖 `peri-agent`/`peri-middlewares` 的运行时路径（仅作为类型依赖）。
 
-## 依赖说明
+## 开发命令
 
-`Cargo.toml` 保留 `peri-agent`/`peri-middlewares` 作为**类型依赖**（UI 渲染所需的 `BaseMessage`/`ContentBlock` 等类型），运行时通信仅通过 `peri-acp`。
+- `cargo run -p peri-tui`：启动 TUI
+- `cargo run -p peri-tui -- -a`：HITL 审批模式
+- `scripts/start-tui.sh`：启动（RELAY_PORT=3001）
+- `cargo test -p peri-tui --lib`：运行 TUI 测试
+- `cargo build -p peri-tui`：构建
 
-## 核心文件
+## 当前架构（ratatui-kit 单路径，S1–S13 完成，I14–I23 增量 + 渲染管道重写）
 
-| 文件 | 职责 |
+**单一路径**：`use-kit` feature 默认 ON。`main.rs` 调用 `kit::entry::run_kit_fullscreen(opts, panic_notify_rx)`，legacy `runtime/main_loop` / `state_machine` / `command/` / `panel/` / `ui/` / `render/` / `event/` 已全部物理删除（净减 ~18000 行）。
+
+### kit 四链路（spawn 于 entry::run_kit_fullscreen）
+
+```
+1. spawn_kit_notifier     : AcpNotification → AcpEventData → bridge_tx
+2. spawn_acp_bridge       : bridge_rx → BridgeState → Atom 写入（VIEW_MODELS / ACP_STATE / POPUP_KIND ...）
+3. spawn_submit_consumer  : SUBMIT_TX (String) → acp_client.prompt()
+4. spawn_cancel_consumer  : CANCEL_TX → 清理 + BRIDGE_RESET_COUNTER 递增
+
+附加：
+- spawn_service_snapshot    : 2s tick → SERVICE_SNAPSHOT / THREAD_LIST / CRON_JOBS / FILE_LIST atoms
+- spawn_rewind_consumer     : REWIND_ACTION_TX → session/execute-command ("/rewind")
+- spawn_ask_user_consumer   : ASK_USER_TX → session/execute-command (AskUser 回答)
+- spawn_hitl_response_consumer : HITL_RESPONSE_TX → session/execute-command (HITL 审批)
+- spawn_thread_load_consumer : THREAD_LOAD_TX → acp_client.load_session(thread_id)
+```
+
+### 全局状态（atoms.rs，OnceLock 延迟初始化）
+
+类型别名：`pub type Atom<T> = ratatui_kit::prelude::StoreState<T>`。
+
+| Atom | 用途 |
 |------|------|
-| `src/acp_client/client.rs` | ACP client 封装，`AcpNotification` 变体定义 |
-| `src/acp_server/requests.rs` | ACP 请求路由 |
-| `src/app/agent.rs` | `ExecutorEvent → AgentEvent` 映射（`map_executor_event`） |
-| `src/app/agent_ops/acp_bridge.rs` | `AcpNotification → AgentEvent` 桥接 |
-| `src/app/agent_ops/lifecycle.rs` | Agent 生命周期处理 |
-| `src/app/agent_submit.rs` | 用户输入提交入口 |
-| `src/app/agent_compact.rs` | Compact 事件处理：pipeline 清理 + UI 通知 |
-| `src/app/message_pipeline.rs` | `MessagePipeline`：规范状态维护 + `messages_to_view_models()` |
-| `src/ui/main_ui/mod.rs` | 主布局 |
-| `src/i18n/` | 国际化模块（`LcRegistry` + Fluent） |
+| `VIEW_MODELS` | `ViewModelsSnapshot { items: im::Vector<TuiRenderUnit>, generation: u64 }` —— 消息流单一数据源 |
+| `ACP_STATE` | `AcpStateSnapshot { variant, is_loading, ... }` —— popup_active 已退役，弹窗状态走 POPUP_KIND.is_some() |
+| `SERVICE_SNAPSHOT` | CPU/MEM/MCP/Cron/provider/model_name/permission_mode/cwd 投影 |
+| `THREAD_LIST` / `CRON_JOBS` / `FILE_LIST` | Thread / Cron / cwd 文件列表 |
+| `HOOK_LIST` / `PLUGIN_LIST` / `MCP_SERVERS` / `PROVIDER_LIST` | Hook / Plugin / MCP / Provider 列表（供面板渲染） |
+| `SUBAGENT_LIST` / `MEMORY_LIST` | SubAgent 运行时状态 / Memory 文件条目 |
+| `TODO_ITEMS` | `Vec<TodoItem>` —— ACP SessionUpdate::Plan 下发的 Todo 列表 |
+| `OPEN_PANELS` / `ACTIVE_PANEL` / `POPUP_KIND` | 当前面板栈 + 激活面板 + 激活弹窗 |
+| `INPUT_HISTORY` / `INPUT_HISTORY_INDEX` / `DRAFT` | 输入历史栈 + 浏览指针 + 浏览前草稿保存（容量 1000） |
+| `INPUT_BUFFER` | agent loading 时缓存的待提交输入队列（上限 32） |
+| `HITL_PENDING` / `ASK_USER_PENDING` / `OAUTH_INFO` | 3 popup 的真实 payload（由 dispatch_and_notify 写入，close_popup 统一清空） |
+| `REWIND_PREVIEW` / `LAST_ESC_TIME` | Rewind 弹窗数据 + 双击 Esc 检测（500ms 窗口） |
+| `PREDICTION` | `PredictionState { text, received_at }` —— agent 预测文本（灰色占位，Tab 接受） |
+| `AT_MENTION_ACTIVE` / `MENTION_PREFIX` / `MENTION_SELECTED_INDEX` | @mention 状态 + SkimMatcherV2 模糊匹配 |
+| `SLASH_HINT_ACTIVE` / `SLASH_PREFIX` / `SLASH_SELECTED_INDEX` | slash 补全状态 |
+| `AVAILABLE_SLASH_COMMANDS` / `ACP_COMMANDS` / `SKILL_NAMES` | ACP 下发的命令/skill 列表 |
+| `MODEL_HIGHLIGHT_UNTIL` / `PROVIDER_HIGHLIGHT_UNTIL` / `MODE_HIGHLIGHT_UNTIL` | Status bar 瞬时高亮（1.5s） |
+| `COPY_CHAR_COUNT` / `COPY_MESSAGE_UNTIL` | 文本选中复制提示（"已复制 N 字符"，2s 消失） |
+| `WIZARD_ACTIVE` / `QUIT_PENDING_SINCE` | SetupWizard 激活 / 双击 q 退出 |
+| `INPUT_AREA_ESC_PREFIX` | Esc 清空输入提示前缀 |
+| `PENDING_ATTACHMENTS` | 待粘贴附件队列 |
+
+**Channels（OnceLock<UnboundedSender>）**：
+- `SUBMIT_TX: String` —— InputArea Enter → submit_consumer
+- `REWIND_ACTION_TX: RewindAction` —— RewindPopup → rewind_consumer
+- `THREAD_LOAD_TX: String` —— ThreadBrowser Enter → thread_load_consumer
+
+**非 atom 全局句柄**：
+- `PERI_CONFIG_HANDLE: Arc<RwLock<PeriConfig>>` —— ModelPanel / LoginPanel / ConfigPanel 直接 write；ACP server 持同一 Arc，立即生效
+- `PERMISSION_MODE_HANDLE: Arc<SharedPermissionMode>` —— ConfigPanel 切换 permission_mode 直接 store
+- `CRON_SCHEDULER_HANDLE: Arc<Mutex<CronScheduler>>` —— CronPanel 直接 toggle/remove；service_snapshot 下次 tick 自动刷新 CRON_JOBS atom
+
+## 输入框（InputArea，kit/input_area.rs）
+
+`#[component]` 组件，自管 EditorState（text + cursor）。完整功能：
+
+- **多行**：Shift/Alt+Enter 换行；高度动态（3~12 行）
+- **history**：Up/Down 浏览 `INPUT_HISTORY`（容量 1000，磁盘持久化 `~/.peri/input_history.json`）；进入历史模式时 `DRAFT` atom 保存当前草稿，Esc 或回到底部恢复
+- **prediction**：agent 预测文本以灰色占位符显示在光标后，Tab 键接受预测，Esc 或继续输入清除
+- **@mention**：`@` 触发 → MentionPopup 显示 `FILE_LIST`，`SkimMatcherV2` 模糊匹配过滤（大小写不敏感）
+- **slash 补全**：行首 `/` 触发 → SlashCompletion 显示 `AVAILABLE_SLASH_COMMANDS`（ACP 下发 + 内置 33 条静态命令）
+- **编辑快捷键**：Ctrl+W（删词）/ Ctrl+U（清空）/ Ctrl+Left/Right（跳词）/ Home/End / Backspace
+- **粘贴**：Event::Paste 整段插入；Ctrl+V 粘贴剪贴板
+- **macOS Option 键**：Option+Left/Right/Up/Down 映射为 Ctrl+ 对应功能（Alt 键兼容）
+- **提交**：Enter 检查 `ACP_STATE.is_loading`：
+  - **非 loading** → SUBMIT_TX.send(text)
+  - **loading 中** → push 到 `INPUT_BUFFER`（上限 32，FIFO），TurnDone 时 `drain_input_buffer()` 顺序重新提交
+- **slash Enter**：替换 editor 为命令并提交（同样检查 loading 入 buffer）
+
+## 消息渲染（kit/message_area.rs）
+
+### 渲染管道（当前，render_bridge 已退役）
+
+```
+ACP 事件 → VIEW_MODELS atom 写入
+              ↓
+message_area 直接消费 VIEW_MODELS：
+  ├─ vm_to_lines: TuiRenderUnit → Vec<Line>
+  ├─ wrap_map_cache: 视觉行 → 渲染行映射（仅内容变化时重建）
+  ├─ total_rows_cache: O(N·W) line_count 结果缓存（key 变化时重算，write_no_update）
+  ├─ 视口裁剪：只 clone + highlight + 渲染视口内 ~60 行
+  ├─ ScrollThrottle: 鼠标滚轮 16ms 节流（≈60fps），键盘不节流
+  ├─ 智能跟随：VIEW_MODELS 变化时自动滚到底，用户主动上滚时不抢夺滚动位
+  ├─ Todo 渲染：TODO_ITEMS atom → 图标 + 状态行
+  └─ Sticky Header + 滚动按钮
+```
+
+### ViewModel 变体
+
+7 种变体（UserBubble / AssistantBubble / ToolCard / SystemNote / SubAgentGroup / CollapsedGroup / ReasoningBlock），外加 AskUserBlock、DiffBlock、DividerData 子类型。
+
+- **ToolCard**：format_tool_name 映射（Bash→Shell、folder_operations→Folder，其余原样透传），format_tool_args 参数摘要提取，工具折叠/展开逻辑
+- **SubAgentGroup**：prefix ◆→❯，final_result→⎿
+- **CollapsedGroup**：折叠/展开切换
+- **SystemNote**：Info/Warning/Error 三级
+
+### 文本选中复制（kit/text_selection.rs）
+
+鼠标 Drag → 选区高亮（selection_bg 主题色） → 松开自动复制到剪贴板（arboard）。通过 `MsgAreaTracker` Hook 记录消息区外边界，`mouse_visual_position` 将终端坐标转为视觉坐标，`extract_selected_text` 提取纯文本。
+
+## 14 面板（kit/panels/，PanelKind 枚举）
+
+| Panel | 数据源 | 切换功能 |
+|-------|--------|----------|
+| **Model** | SERVICE_SNAPSHOT + 静态 MODEL_ALIASES | ✅ Enter 修改 `PERI_CONFIG_HANDLE.active_alias` |
+| **Login** | PROVIDER_LIST atom（H1f） | ✅ Enter 切换 `active_provider_id` + 持久化 |
+| **Agent** | SERVICE_SNAPSHOT + PERI_CONFIG_HANDLE + VIEW_MODELS（H1e） | 只读 |
+| **Hooks** | HOOK_LIST atom（H1b） | 只读 |
+| **Config** | PERI_CONFIG_HANDLE + PERMISSION_MODE_HANDLE（H1a） | ✅ 切换 + 持久化到 settings.json |
+| **ThreadBrowser** | THREAD_LIST atom | ✅ Enter 通过 THREAD_LOAD_TX 调用 `load_session` |
+| **Mcp** | MCP_SERVERS + SERVICE_SNAPSHOT.mcp（H1d） | 只读 |
+| **Plugin** | PLUGIN_LIST atom（H1c） | 只读 |
+| **Cron** | CRON_JOBS atom + CRON_SCHEDULER_HANDLE（H1g+） | ✅ Enter toggle / d+Enter delete |
+| **Tasks** | CRON_JOBS + VIEW_MODELS SubAgentGroup（H1g） | 只读总览 |
+| **Status** | SERVICE_SNAPSHOT + VIEW_MODELS 派生（H1a+） | 只读，Service + Context 双 Tab |
+| **Memory** | MEMORY_LIST atom（H1h） | ✅ Enter 调用 `$EDITOR` 打开文件 |
+| **Betas** | 构建期 feature flags | 只读 |
+| **Workflow** | VIEW_MODELS SubAgent 计数 + 外部 CLI 说明 | 只读 |
+| **SetupWizard** | App.global_ui | 配置向导（首次启动触发） |
+
+面板栈互斥组（MutexGroup）：Settings / Agent / Tools / Info / Thread。打开新面板按栈压入；关闭弹栈。
+
+## 4 弹窗（kit/popups/）
+
+由 ACP 事件触发，统一通过 `POPUP_KIND` atom 路由。dispatch_and_notify 在写入
+`POPUP_KIND` 的同时把完整 payload 写入对应 atom（I20-D / I21-A / I21-B）；
+`close_popup()` 关闭时根据 kind 统一清空 payload atom，避免陈旧数据残留（I21-C）。
+
+| Popup | 触发源 | payload atom | 功能 |
+|-------|--------|--------------|------|
+| **HITL** | `AcpEventData::HitlPending` | `HITL_PENDING: Option<HitlPending>` | 显示真实 tool_name + tool_input + batch；Enter approve / Esc reject（I21-A） |
+| **AskUser** | `AcpEventData::AskUser` | `ASK_USER_PENDING: Option<AskUser>` | Panel 内联渲染；Tab 切问题、↑↓ 导航、Space 选、Enter 下一题/提交、Esc 取消 |
+| **Rewind** | `AcpEventData::RewindPreview` 或双击 Esc | `REWIND_PREVIEW: Option<RewindPreview>` | 回退预览 + 确认；REWIND_ACTION_TX → /rewind RPC |
+| **OAuth** | `AcpEventData::OauthNeeded` | `OAUTH_INFO: Option<OauthNeeded>` | 显示真实 server_name + auth_url；Ctrl+O 开浏览器、Enter 关闭（I20-D） |
+
+## Status Bar（kit/status_bar.rs）
+
+双行布局：
+- 第一行：权限模式 → cwd → model alias → CPU% → MEM → context
+- 第二行：瞬时状态（复制提示 "已复制 N 字符" /MCP/LSP）→ 快捷键 hints
+
+瞬时高亮通过 `MODEL_HIGHLIGHT_UNTIL` 等 atom + Instant 控制 1.5s 消失。复制提示通过 `COPY_CHAR_COUNT` + `COPY_MESSAGE_UNTIL` 控制 2s 消失。
 
 ## ACP 数据流
 
 ```
-TUI 输入 → AcpTuiClient.new_session() / .prompt()
-         → MpscClientTransport.send_request/notification()
-         → MpscServerTransport.recv() (ACP Server, tokio::spawn)
-         → ExecutorEvent → TransportEventSink.push_event()
-         → AcpTuiClient.pump_notifications() → AcpNotification::AgentEvent
-         → agent_ops::acp_bridge::handle_acp_notification()
-         → map_executor_event() → AgentEvent
-         → handle_agent_event() → UI 更新
+用户 Enter → InputArea → SUBMIT_TX
+                            ↓
+            spawn_submit_consumer → acp_client.prompt()
+                            ↓
+                MpscClientTransport.send_request()
+                            ↓
+            ACP Server (tokio::spawn) → ExecutorEvent
+                            ↓
+                TransportEventSink.push_event()
+                            ↓
+            AcpTuiClient.pump_notifications() → AcpNotification
+                            ↓
+            spawn_kit_notifier → AcpEventData::decode
+                            ↓
+                bridge_tx → spawn_acp_bridge
+                            ↓
+            dispatch_and_notify → BridgeState → Atom 写入
+                            ↓
+            ratatui-kit 组件 use_store → 自动重渲染
 ```
 
-**[TRAP]** TUI 层数据必须通过 ACP 协议到达 ACP 层，禁止直连。所有 TUI → ACP Server 的状态变更必须通过 `acp_client` 的协议方法。TUI 本地清空状态（如 `new_thread()`）不等于 ACP Server 端状态同步——必须同时通过 ACP 协议通知 Server 侧。（详见 spec/global/domains/agent.md#issue_2026-05-29-clear-keeps-acp-server-history）
+**[TRAP]** TUI 层数据必须通过 ACP 协议到达 ACP 层，禁止直连 peri-agent / peri-middlewares 运行时。本地状态变更（如 ModelPanel 切 alias）通过共享 `Arc<RwLock<PeriConfig>>` 直接 write，ACP server 持同一 Arc。
 
-## 消息渲染
+## Rewind 完整路径
 
-所有消息更新通过统一 `RebuildAll` 路径触发（无增量更新）。`MessagePipeline` 维护规范状态，`build_tail_vms()` 构建尾部 VMs，`messages_to_view_models()` 是唯一转换入口。流式文本通过 16ms 间隔 + 自适应分块策略触发 RebuildAll。独立 `RenderThread` 处理渲染，通过 `RenderCache(RwLock)` 与 UI 线程同步。
+1. 双击 Esc（500ms 内）或 ACP `RewindPreview` 事件 → 设置 `REWIND_PREVIEW` + `POPUP_KIND = Rewind`
+2. RewindPopup 渲染预览：消息列表 / 文件改动（Tab 切换视图）
+3. Enter → `REWIND_ACTION_TX.send(Confirm { target_message_id, revert_files })`
+4. `spawn_rewind_consumer` → `acp_client.send_raw_request("session/execute-command", { command: "/rewind", args: {...} })`
+5. ACP server RewindCommand 完成 → 推送 `ExecutorEvent::RewindCompleted` → kit_notifier → ViewCommit → VIEW_MODELS 刷新
 
-**[TRAP]** Ephemeral VM（SystemNote/CacheWarning）依赖锚点机制：`ephemeral_notes: Vec<(usize, MessageViewModel)>` 记录插入时的 `view_messages.len()` 作为位置索引（非 MessageId）。RebuildAll 时通过 `(anchor - prefix_len).min(tail_len) + prefix_len` 计算插入位置。`retain()` 路径通过 `anchor >= prefix_len` 过滤过期锚点。新增 ephemeral VM 类型必须同步更新过滤逻辑。（详见 spec/global/domains/message-pipeline.md#issue_2026-05-12-systemnote-position-drift-on-rebuild）
+## 关键 [TRAP]
 
-**[TRAP]** BaseMessage vs MessageViewModel 维度混淆：`completed_len_at_round_start` 是 BaseMessage 长度，`prefix_len` 是 VM 索引，两者非 1:1。`prefix_len` 必须用 `round_start_vm_idx`，`drain` 必须钳位。**禁止 Pipeline 内部返回 `RebuildAll`**——Pipeline 不拥有 `round_start_vm_idx`。（详见 spec/global/domains/message-pipeline.md#issue_2026-05-20-llm-error-message-area-clear-flicker）
+- **绝不推远程** —— 见 `~/.claude/projects/-Users-konghayao-code-ai-perihelion/memory/never-push-remote.md`
+- **`AcpNotification::AgentEvent` 暂忽略** —— 携带的 AcpEvent DTO（TurnCommitted/StateSnapshotMeta/CompactCompleted）属于低频 v2 事件，kit 以 UnstableEvent 为主通道
+- **SUBMIT_TX / REWIND_ACTION_TX / THREAD_LOAD_TX 必须 OnceLock 而非 lazy** —— rx 端在 entry::run_kit_fullscreen 中 spawn 任务，必须在 build_app_and_acp 完成后由 entry 显式 `set(tx)`
+- **`ACP_STATE.is_loading` 是 InputArea 判断 loading 的唯一来源** —— 不能依赖 `props.loading`（渲染时快照，事件触发时可能已变化）
+- **PERI_CONFIG_HANDLE 共享 Arc** —— ACP server 持同一 Arc，write 后立即可见；service_snapshot 2s 内捕获变化刷新 SERVICE_SNAPSHOT
+- **drain_input_buffer 必须在 TurnDone 而非 TurnInterrupted** —— Interrupted 表示用户主动打断，不应自动续跑
+- **FILE_LIST 扫描深度=2** —— 浅扫避免 node_modules / target 等大目录爆栈；MAX_FILES=500 上限
+- **`scan_cwd_files_shallow` 必须 spawn_blocking 包裹** —— std::fs 同步操作阻塞 async runtime
+- **ModelPanel 切换不立即触发 status bar 刷新** —— 依赖 service_snapshot 2s tick；如需立即刷新可手动改 SERVICE_SNAPSHOT atom
+- **ThreadBrowser Enter 后必须手动关闭面板** —— load_session 的 ViewCommit 通知不会自动关面板
+- **process_resource_monitor 独立新建** —— service_snapshot 不复用 ServiceRegistry.resource_monitor（非 Arc），新建实例采样进程级数据不影响正确性
+- **面板 Up 键 deadlock 已修复** —— ReactiveHandle read/write 不能在同一个表达式中自死锁（bdf7bb55）
 
-**[INFO]** `MessageViewModel` 已不再包含 `message_id` 字段。SubAgentGroup 使用 `instance_id: Option<String>` 标识。
+## 测试风格
 
-**[TRAP]** frozen_subagent_vms 按 agent_id + 位置匹配（先 instance_id 精确匹配，失败后按顺序 agent_id 匹配）。`begin_round()` 清空 `frozen_subagent_vms`，但 `done()` 不清空（允许 Done→下一轮之间消费）。`ephemeral_notes` 位于 `MessageState`，仅 compact 时显式清空，日常通过 RebuildAll 的 `anchor >= prefix_len` 过滤隐式失效。（详见 spec/global/domains/message-pipeline.md#issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication）
+- `kit::input_area::tests` —— EditorState / 多行渲染 / @mention 触发 / slash 触发 / 文件过滤
+- `kit::acp_events::tests` —— drain_input_buffer 顺序 / 空队列 / SUBMIT_TX 缺失安全性
+- `kit::service_snapshot::tests` —— tick_once / 派生 provider+model / cwd 文件扫描 / MAX_FILES 上限
+- `kit::submit_consumer::tests` —— 空文本跳过 / 首次创建 session / shutdown / dropped tx
+- `kit::thread_load_consumer::tests` —— 空 thread_id 跳过 / shutdown / dropped tx
+- `kit::rewind_action::tests` —— /rewind RPC payload / has_session 检查 / 双击 Esc 时序
 
-## 主布局
+`#[serial]` 用于依赖全局 atom 的并发敏感测试。
 
-单 Session 垂直切分（Sticky Header → Messages → Attachment Bar → Panel Area → Input → Status Bar → BG Agent Bar）。高度优先级：Status Bar 固定 3 行 → Input 动态（3~40% 屏幕）→ 面板（60-75% 屏幕）→ 其余分配给消息区。
+## 编码规范
 
-### 界面组件
-
-| 组件 | 文件 | 说明 |
-|------|------|------|
-| Welcome Card | `ui/welcome.rs` | 空消息时替代显示，ASCII Art + 功能要点 + 命令提示 |
-| Sticky Header | `ui/main_ui/sticky_header.rs` | 滚动时顶部固定显示最后 Human 消息摘要 |
-| Attachment Bar | `ui/main_ui/attachment.rs` | 图片附件标签列表，Input 正上方 |
-| Input Area | `edit_utils.rs` | `tui_textarea::TextArea` 封装，高度动态 |
-| Hints 浮层 | `ui/main_ui/popups/hints.rs` | `/` 前缀命令匹配，输入框上方 |
-| @提及弹窗 | `app/at_mention/mod.rs` | `@` 触发文件搜索，200ms 节流 |
-| BG Agent Bar | `ui/main_ui/bg_agent_bar.rs` | 后台 Agent 列表，8 色循环 |
-
-### 弹窗系统
-
-统一通过 `InteractionPrompt` 枚举互斥管理（3 种：Approval/Questions/Rewind）。OAuth 授权和 Setup Wizard 通过 `GlobalUiState` 独立管理，不在 InteractionPrompt 中。
-- **HITL 审批**（`popups/hitl.rs`）：批量工具调用逐个审批（`InteractionPrompt::Approval`）
-- **AskUser 问答**（`popups/ask_user.rs`）：Tab 栏切换 + 选项列表 + 自定义输入（`InteractionPrompt::Questions`）
-- **Rewind 确认**（`popups/rewind.rs`）：双击 Esc 触发，确认后回滚到指定消息（`InteractionPrompt::Rewind`）
-- **OAuth 授权**（`popups/oauth.rs`）：通过 `GlobalUiState.oauth_prompt` 独立管理
-- **Setup Wizard**（`popups/setup_wizard.rs`）：通过 `GlobalUiState.setup_wizard` 独立管理
-
-### 面板系统
-
-13 种 `PanelKind`（分 Session/Global 作用域）：ModelPanel、LoginPanel、ConfigPanel、AgentPanel、HooksPanel、ThreadBrowser（Session）；McpPanel、PluginPanel、CronPanel、TasksPanel、StatusPanel、MemoryPanel、BetasPanel（Global）。
-
-互斥组（`MutexGroup`）：Settings（Model/Login/Config）、Agent（Agent/Hooks）、Tools（MCP/Plugin/Cron/Tasks）、Info（Status/Memory/Betas）、Thread（ThreadBrowser 独占）。
-
-`PanelManager` + `PanelComponent` trait（`panel_manager.rs`/`panel_component.rs`），新增面板只需定义变体 + 实现 trait。面板内禁止渲染提示行，由 `status_bar_hints()` 统一描述。
-
-### Status Bar
-
-双行布局（`ui/main_ui/status_bar.rs`）：
-- **第一行**：权限模式 → 工作目录 → 模型名 → CPU% → MEM → 上下文使用率
-- **第二行**：左侧瞬时状态（复制提示/后台 agent/LLM 重试/MCP/LSP）→ 右侧快捷键 hints
-
-瞬时提示用 `Instant` + Duration 控制消失；颜色分级用 `theme::ERROR`/`WARNING`/`SAGE`；面板 hints 通过 `PanelComponent::status_bar_hints()` trait 注入。
-
-### 消息区
-
-Welcome Card 或消息列表 + 滚动条 + spinner。视口裁剪渲染（`viewport_clip`）。`MessageViewModel` 7 种变体：`UserBubble` / `AssistantBubble`（含 Text/Reasoning/ToolUse） / `ToolBlock` / `SystemNote` / `CacheWarning` / `ToolCallGroup` / `SubAgentGroup`。
-
-## i18n
-
-`LcRegistry` 存储在 `ServiceRegistry.lc` 中，翻译资源通过 `include!` 编译时嵌入 `locales/{lang}/main.ftl`。
-
-`Command trait` 的 `description()` 接收 `&LcRegistry` 参数并返回 `String`。`CommandRegistry::match_prefix()` 和 `list()` 均需 `&LcRegistry`。
-
-## 状态管理
-
-**`ServiceRegistry` 与 `GlobalUiState`**：`App` 状态拆分为 `ServiceRegistry`（跨会话共享：config/MCP/cron/provider）和 `GlobalUiState`（纯 UI 临时状态：高亮计时器/弹窗/鼠标检测）。面板 dispatch 宏（`with_global_panels!`/`with_session_panels!`）位于 `event/macros.rs`。
-
-**`CommandRegistry::dispatch` 借用限制 [TRAP]**：`&self` + `&mut App` 冲突，用 `std::mem::take` + put-back 解决。dispatch 期间不可改变 `app.session_mgr` 的 session 实例。
-
-## Compact 事件处理
-
-**[TRAP]** `handle_compact_completed` 必须三步清理：① `pipeline.clear()` ② `pipeline.restore_completed(messages)` ③ `RebuildAll { prefix_len: 0 }`。缺少任一步都会导致旧消息残留或 system 消息泄漏。禁止在 TUI 层触发 auto-compact——所有触发判断在 executor 内部。（详见 spec/global/domains/compact.md#issue_2026-05-20-compact-command-not-triggering）
-
-**[TRAP]** `restore_completed(messages)` 会把 system 消息放入 completed 列表。re_inject 产生的 System 消息不应渲染。`round_start_vm_idx` 和 `completed_len_at_round_start` 必须正确设置。（详见 spec/global/domains/message-pipeline.md#issue_2026-05-20-session-restore-renders-system-prompt）
+- `#![allow(clippy::needless_update)]` —— ratatui-kit element! 宏展开触发，模块级抑制
+- 字符串截断用 `chars().take(N)`（CJK 安全）
+- 终端列宽用 `unicode-width`
+- 快捷键：禁止 `Shift+字母`；优先 `Ctrl+字母`；不用 PageUp/Down
+- 测试隔离：`App::save_config(cfg, self.config_path_override.as_deref())`
+- `std::sync::RwLockReadGuard` 不是 Send → async 跨 `.await` 用 `parking_lot::RwLock`

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use peri_agent::{agent::state::State, middleware::r#trait::Middleware, tools::BaseTool};
+use peri_agent::{middleware::r#trait::Middleware, tools::BaseTool};
 
 use crate::tools::{
     EditFileTool, FolderOperationsTool, GlobFilesTool, GrepTool, ReadFileTool, WriteFileTool,
@@ -35,7 +35,7 @@ impl Default for FilesystemMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for FilesystemMiddleware {
+impl Middleware for FilesystemMiddleware {
     fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
         Self::build_tools(cwd)
     }

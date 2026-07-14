@@ -1,0 +1,15 @@
+[package]
+name = "peri-theme"
+version.workspace = true
+edition = "2024"
+description = "统一主题系统 — 类型定义、内置主题、JSON loader、bridge、Atom"
+
+[dependencies]
+ratatui = "0.30.2"
+ratatui-kit = { version = "0.10.2", features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

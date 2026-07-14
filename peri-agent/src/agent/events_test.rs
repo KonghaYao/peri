@@ -2,14 +2,14 @@ use super::*;
 
 #[test]
 fn test_context_warning_serde_roundtrip() {
-    let ev = AgentEvent::ContextWarning {
+    let ev = ExecutorEvent::ContextWarning {
         used_tokens: 150000,
         total_tokens: 200000,
         percentage: 75.0,
     };
     let json = serde_json::to_string(&ev).unwrap();
-    let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-    if let AgentEvent::ContextWarning {
+    let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
+    if let ExecutorEvent::ContextWarning {
         used_tokens,
         total_tokens,
         percentage,
@@ -25,15 +25,15 @@ fn test_context_warning_serde_roundtrip() {
 
 #[test]
 fn test_llm_retrying_serde_roundtrip() {
-    let ev = AgentEvent::LlmRetrying {
+    let ev = ExecutorEvent::LlmRetrying {
         attempt: 2,
         max_attempts: 5,
         delay_ms: 2000,
         error: "API 错误 503: Service Unavailable".to_string(),
     };
     let json = serde_json::to_string(&ev).unwrap();
-    let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-    if let AgentEvent::LlmRetrying {
+    let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
+    if let ExecutorEvent::LlmRetrying {
         attempt,
         max_attempts,
         delay_ms,
@@ -51,7 +51,7 @@ fn test_llm_retrying_serde_roundtrip() {
 
 #[test]
 fn test_subagent_started_serde_roundtrip() {
-    let ev = AgentEvent::SubagentStarted {
+    let ev = ExecutorEvent::SubagentStarted {
         agent_name: "test-agent".to_string(),
         instance_id: "sub_test123".to_string(),
         is_background: false,
@@ -60,8 +60,8 @@ fn test_subagent_started_serde_roundtrip() {
     assert!(json.contains(r#""type":"subagent_started""#));
     assert!(json.contains(r#""agent_name":"test-agent""#));
     assert!(json.contains(r#""instance_id":"sub_test123""#));
-    let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-    if let AgentEvent::SubagentStarted {
+    let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
+    if let ExecutorEvent::SubagentStarted {
         agent_name,
         instance_id,
         is_background,
@@ -77,7 +77,7 @@ fn test_subagent_started_serde_roundtrip() {
 
 #[test]
 fn test_subagent_stopped_serde_roundtrip() {
-    let ev = AgentEvent::SubagentStopped {
+    let ev = ExecutorEvent::SubagentStopped {
         agent_name: "test-agent".to_string(),
         result: "done".to_string(),
         is_error: false,
@@ -85,8 +85,8 @@ fn test_subagent_stopped_serde_roundtrip() {
     };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(json.contains(r#""type":"subagent_stopped""#));
-    let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-    if let AgentEvent::SubagentStopped {
+    let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
+    if let ExecutorEvent::SubagentStopped {
         agent_name,
         result,
         is_error,
@@ -104,17 +104,23 @@ fn test_subagent_stopped_serde_roundtrip() {
 
 #[test]
 fn test_compact_started_serde() {
-    let ev = AgentEvent::CompactStarted;
+    let ev = ExecutorEvent::CompactStarted {
+        turn_id: String::new(),
+        agent_id: String::new(),
+        step: 0,
+        strategy: CompactStrategy::Smart,
+        trigger: CompactTrigger::Auto,
+    };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(json.contains(r#""type":"compact_started""#));
-    let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-    assert!(matches!(deserialized, AgentEvent::CompactStarted));
+    let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(deserialized, ExecutorEvent::CompactStarted { .. }));
 }
 
 #[test]
 fn test_compact_completed_serde_roundtrip() {
     // full compact 场景：summary 非空，micro_cleared 为 0
-    let ev = AgentEvent::CompactCompleted {
+    let ev = ExecutorEvent::CompactCompleted {
         summary: "对话摘要内容".to_string(),
         files: vec![
             CompactFileInfo {
@@ -129,19 +135,22 @@ fn test_compact_completed_serde_roundtrip() {
         skills: vec!["code-review".to_string(), "refactor".to_string()],
         micro_cleared: 0,
         messages: vec![],
+        token_before: 0,
+        token_after: 0,
+        strategy: CompactStrategy::Smart,
     };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(json.contains(r#""type":"compact_completed""#));
     assert!(json.contains(r#""summary":"对话摘要内容""#));
     assert!(json.contains(r#""path":"src/main.rs""#));
     assert!(json.contains(r#""skills":["code-review","refactor"]"#));
-    let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-    if let AgentEvent::CompactCompleted {
+    let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
+    if let ExecutorEvent::CompactCompleted {
         summary,
         files,
         skills,
         micro_cleared,
-        messages: _,
+        ..
     } = deserialized
     {
         assert_eq!(summary, "对话摘要内容");
@@ -160,21 +169,24 @@ fn test_compact_completed_serde_roundtrip() {
 #[test]
 fn test_compact_completed_micro_serde() {
     // micro-compact 场景：summary 为空，micro_cleared > 0
-    let ev = AgentEvent::CompactCompleted {
+    let ev = ExecutorEvent::CompactCompleted {
         summary: String::new(),
         files: vec![],
         skills: vec![],
         micro_cleared: 8,
         messages: vec![],
+        token_before: 0,
+        token_after: 0,
+        strategy: CompactStrategy::Smart,
     };
     let json = serde_json::to_string(&ev).unwrap();
-    let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-    if let AgentEvent::CompactCompleted {
+    let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
+    if let ExecutorEvent::CompactCompleted {
         summary,
         files,
         skills,
         micro_cleared,
-        messages: _,
+        ..
     } = deserialized
     {
         assert!(summary.is_empty());
@@ -188,14 +200,14 @@ fn test_compact_completed_micro_serde() {
 
 #[test]
 fn test_compact_error_serde_roundtrip() {
-    let ev = AgentEvent::CompactError {
+    let ev = ExecutorEvent::CompactError {
         message: "LLM 调用超时".to_string(),
     };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(json.contains(r#""type":"compact_error""#));
     assert!(json.contains(r#""message":"LLM 调用超时""#));
-    let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-    if let AgentEvent::CompactError { message } = deserialized {
+    let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
+    if let ExecutorEvent::CompactError { message } = deserialized {
         assert_eq!(message, "LLM 调用超时");
     } else {
         panic!("Deserialized to wrong variant");
@@ -204,13 +216,114 @@ fn test_compact_error_serde_roundtrip() {
 
 #[test]
 fn test_agent_execution_failed_serde_roundtrip() {
-    let event = AgentEvent::AgentExecutionFailed {
+    let event = ExecutorEvent::AgentExecutionFailed {
         message: "LLM HTTP 错误 (400): invalid request".to_string(),
     };
     let json = serde_json::to_string(&event).unwrap();
-    let de: AgentEvent = serde_json::from_str(&json).unwrap();
+    let de: ExecutorEvent = serde_json::from_str(&json).unwrap();
     assert!(
-        matches!(de, AgentEvent::AgentExecutionFailed { ref message } if message == "LLM HTTP 错误 (400): invalid request"),
+        matches!(de, ExecutorEvent::AgentExecutionFailed { ref message } if message == "LLM HTTP 错误 (400): invalid request"),
         "AgentExecutionFailed serde roundtrip failed"
     );
+}
+
+// ─── inject_source_agent_id 单测 ─────────────────────────────────────────────
+
+#[test]
+fn test_inject_source_agent_id_for_tool_start() {
+    // SubAgent 转发器核心契约：ToolStart 必须能注入 source_agent_id
+    let mut ev = ExecutorEvent::ToolStart {
+        message_id: Default::default(),
+        tool_call_id: "tc_1".to_string(),
+        name: "Read".to_string(),
+        input: serde_json::Value::Null,
+        source_agent_id: None,
+    };
+    inject_source_agent_id(&mut ev, "subagent_abc");
+    match ev {
+        ExecutorEvent::ToolStart {
+            source_agent_id, ..
+        } => {
+            assert_eq!(source_agent_id.as_deref(), Some("subagent_abc"));
+        }
+        _ => panic!("应为 ToolStart"),
+    }
+}
+
+#[test]
+fn test_inject_source_agent_id_for_tool_end() {
+    let mut ev = ExecutorEvent::ToolEnd {
+        message_id: Default::default(),
+        tool_call_id: "tc_2".to_string(),
+        name: "Bash".to_string(),
+        output: "done".to_string(),
+        is_error: false,
+        source_agent_id: None,
+    };
+    inject_source_agent_id(&mut ev, "subagent_xyz");
+    match ev {
+        ExecutorEvent::ToolEnd {
+            source_agent_id, ..
+        } => {
+            assert_eq!(source_agent_id.as_deref(), Some("subagent_xyz"));
+        }
+        _ => panic!("应为 ToolEnd"),
+    }
+}
+
+#[test]
+fn test_inject_source_agent_id_for_text_chunk() {
+    let mut ev = ExecutorEvent::TextChunk {
+        message_id: Default::default(),
+        chunk: "hi".to_string(),
+        source_agent_id: None,
+    };
+    inject_source_agent_id(&mut ev, "child_123");
+    match ev {
+        ExecutorEvent::TextChunk {
+            source_agent_id, ..
+        } => {
+            assert_eq!(source_agent_id.as_deref(), Some("child_123"));
+        }
+        _ => panic!("应为 TextChunk"),
+    }
+}
+
+#[test]
+fn test_inject_source_agent_id_for_ai_reasoning() {
+    let mut ev = ExecutorEvent::AiReasoning {
+        text: "thinking".to_string(),
+        source_agent_id: None,
+    };
+    inject_source_agent_id(&mut ev, "child_reasoning");
+    match ev {
+        ExecutorEvent::AiReasoning {
+            text,
+            source_agent_id,
+        } => {
+            assert_eq!(text, "thinking");
+            assert_eq!(source_agent_id.as_deref(), Some("child_reasoning"));
+        }
+        _ => panic!("应为 AiReasoning"),
+    }
+}
+
+#[test]
+fn test_inject_source_agent_id_no_op_for_other_variants() {
+    // 其他无 source_agent_id 字段的变体仍应保持 no-op。
+    let mut ev = ExecutorEvent::StateSnapshotMeta {
+        message_count: 1,
+        total_tokens: 100,
+        current_step: 0,
+        consecutive_failures: 0,
+        budget_pct: None,
+        context_total_tokens: None,
+    };
+    inject_source_agent_id(&mut ev, "ignored");
+    match ev {
+        ExecutorEvent::StateSnapshotMeta { message_count, .. } => {
+            assert_eq!(message_count, 1);
+        }
+        _ => panic!("StateSnapshotMeta 不应被改动"),
+    }
 }

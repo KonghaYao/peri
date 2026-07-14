@@ -5,8 +5,6 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(name = "peri")]
 struct TestCli {
-    #[arg(short = 'y', long = "yolo")]
-    yolo: bool,
     #[arg(short = 'a', long = "approve")]
     approve: bool,
     #[arg(short = 'p', long = "print")]

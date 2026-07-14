@@ -1,5 +1,6 @@
 use peri_agent::agent::events::{
-    AgentEvent as ExecutorEvent, BackgroundTaskResult, CompactFileInfo, TodoEntry, TodoStatus,
+    BackgroundTaskResult, CompactFileInfo, CompactStrategy, CompactTrigger, ExecutorEvent,
+    TodoEntry, TodoStatus,
 };
 use peri_agent::llm::types::{StopReason, TokenUsage};
 use peri_agent::messages::{BaseMessage, MessageId};
@@ -180,14 +181,17 @@ fn test_stop_reason_display_roundtrip() {
 #[test]
 fn test_ai_reasoning_maps_to_session_update() {
     // AiReasoning → AgentThoughtChunk SessionUpdate，forward_to_tui=false
-    let event = ExecutorEvent::AiReasoning("let me think...".to_string());
+    let event = ExecutorEvent::AiReasoning {
+        text: "let me think...".to_string(),
+        source_agent_id: None,
+    };
     let mapped = map_event(&event, 200_000);
     assert_eq!(mapped.len(), 1, "应产出 1 个 MappedEvent");
     assert!(!mapped[0].forward_to_tui, "AiReasoning 不应转发到 TUI");
     assert_eq!(mapped[0].updates.len(), 1, "应包含 1 个 SessionUpdate");
     assert!(
         mapped[0].source_agent_id.is_none(),
-        "AiReasoning 不应携带 source_agent_id"
+        "主 agent reasoning 无 source_agent_id"
     );
     match &mapped[0].updates[0] {
         SessionUpdate::AgentThoughtChunk(chunk) => {
@@ -200,6 +204,30 @@ fn test_ai_reasoning_maps_to_session_update() {
             }
         }
         other => panic!("预期 AgentThoughtChunk，实际: {:?}", other),
+    }
+}
+
+#[test]
+fn test_ai_reasoning_with_source_agent_id_forwards_to_notifier() {
+    // SubAgent reasoning → 应携带 source_agent_id，使 TUI notifier
+    // 的 agent_thought_chunk handler 正确路由到 SubAgentGroup
+    let event = ExecutorEvent::AiReasoning {
+        text: "subagent thinking...".to_string(),
+        source_agent_id: Some("sa-1".to_string()),
+    };
+    let mapped = map_event(&event, 200_000);
+    assert_eq!(mapped.len(), 1);
+    assert_eq!(
+        mapped[0].source_agent_id.as_deref(),
+        Some("sa-1"),
+        "SubAgent reasoning 应携带 source_agent_id"
+    );
+    match &mapped[0].updates[0] {
+        SessionUpdate::AgentThoughtChunk(chunk) => match &chunk.content {
+            ContentBlock::Text(tc) => assert_eq!(tc.text, "subagent thinking..."),
+            other => panic!("预期 Text，实际: {other:?}"),
+        },
+        other => panic!("预期 AgentThoughtChunk，实际: {other:?}"),
     }
 }
 
@@ -387,6 +415,55 @@ fn test_state_snapshot_is_tui_only() {
 }
 
 #[test]
+fn test_state_snapshot_meta_is_tui_only() {
+    // v2 路径的轻量级元数据快照应走 TUI-only 路由（不生成 SessionUpdate）
+    assert_tui_only(
+        &ExecutorEvent::StateSnapshotMeta {
+            message_count: 5,
+            total_tokens: 0,
+            current_step: 2,
+            consecutive_failures: 0,
+            budget_pct: Some(0.42),
+            context_total_tokens: Some(200_000),
+        },
+        "StateSnapshotMeta",
+    );
+}
+
+#[test]
+fn test_state_snapshot_meta_maps_to_acp_dto() {
+    // 验证元数据字段完整透传到 AcpEvent DTO（不丢字段）
+    let event = ExecutorEvent::StateSnapshotMeta {
+        message_count: 7,
+        total_tokens: 1234,
+        current_step: 3,
+        consecutive_failures: 1,
+        budget_pct: Some(0.55),
+        context_total_tokens: Some(100_000),
+    };
+    let acp =
+        crate::event::executor_event_to_acp(&event).expect("StateSnapshotMeta 应映射到 AcpEvent");
+    match acp {
+        crate::event::AcpEvent::StateSnapshotMeta {
+            message_count,
+            total_tokens,
+            current_step,
+            consecutive_failures,
+            budget_pct,
+            context_total_tokens,
+        } => {
+            assert_eq!(message_count, 7);
+            assert_eq!(total_tokens, 1234);
+            assert_eq!(current_step, 3);
+            assert_eq!(consecutive_failures, 1);
+            assert_eq!(budget_pct, Some(0.55));
+            assert_eq!(context_total_tokens, Some(100_000));
+        }
+        other => panic!("应为 StateSnapshotMeta，实际 {:?}", other),
+    }
+}
+
+#[test]
 fn test_subagent_started_is_tui_only() {
     assert_tui_only(
         &ExecutorEvent::SubagentStarted {
@@ -413,7 +490,16 @@ fn test_subagent_stopped_is_tui_only() {
 
 #[test]
 fn test_compact_started_is_tui_only() {
-    assert_tui_only(&ExecutorEvent::CompactStarted, "CompactStarted");
+    assert_tui_only(
+        &ExecutorEvent::CompactStarted {
+            turn_id: "turn_1".into(),
+            agent_id: "agent_1".into(),
+            step: 0,
+            strategy: CompactStrategy::Smart,
+            trigger: CompactTrigger::Auto,
+        },
+        "CompactStarted",
+    );
 }
 
 #[test]
@@ -428,6 +514,9 @@ fn test_compact_completed_is_tui_only() {
             skills: vec!["skill-a".to_string()],
             micro_cleared: 0,
             messages: vec![],
+            token_before: 0,
+            token_after: 0,
+            strategy: CompactStrategy::Smart,
         },
         "CompactCompleted",
     );
@@ -497,11 +586,22 @@ fn assert_filtered(event: &ExecutorEvent, label: &str) {
 }
 
 #[test]
-fn test_message_added_produces_no_output() {
-    assert_filtered(
-        &ExecutorEvent::MessageAdded(BaseMessage::human("test message")),
-        "MessageAdded",
+fn test_message_added_produces_user_message_chunk() {
+    let result = map_event(
+        &ExecutorEvent::MessageAdded(BaseMessage::human("bg result text")),
+        200000,
     );
+    assert_eq!(result.len(), 1);
+    assert!(
+        !result[0].updates.is_empty(),
+        "MessageAdded 应产生 SessionUpdate"
+    );
+    match &result[0].updates[0] {
+        SessionUpdate::UserMessageChunk(_chunk) => {
+            // UserMessageChunk 携带 ContentChunk，由 ACP SDK 序列化——不测试内部结构
+        }
+        other => panic!("应为 UserMessageChunk，实际: {:?}", other),
+    }
 }
 
 #[test]

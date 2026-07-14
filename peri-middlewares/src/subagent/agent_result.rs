@@ -2,13 +2,18 @@ use async_trait::async_trait;
 use peri_agent::tools::BaseTool;
 use serde_json::json;
 
-const AGENT_RESULT_DESCRIPTION: &str = r#"Query background agent task results. Returns the output of completed background agents. If no task_id is specified, returns all available results."#;
+const AGENT_RESULT_DESCRIPTION: &str = r#"DO NOT CALL. Background task results are injected into your context automatically when tasks complete (as a user message carrying the structured `bgResults` payload). This tool exists only as a type placeholder for the synthetic AgentResult tool_use blocks the system inserts before that user message. Calling it never returns real results—if you reach for it, you are misreading the protocol."#;
 
-/// AgentResult 工具：供主 Agent 查询后台任务结果
+/// AgentResult 工具：合成 tool_use 占位符
 ///
-/// 实际的后台任务结果通过合成消息注入（tool_use + tool_result），
-/// 此工具的 invoke 不执行真实查询，仅作为工具定义占位使 LLM
-/// 能识别 AgentResult 类型的 tool_use 块。
+/// 此工具**不**供 LLM 主动查询。后台任务完成时，系统通过
+/// `prompt_with_bg_results` 把结构化结果作为新一轮 user message 提交，
+/// server 端 `executor.rs` 把结果转成合成 `AgentResult` tool_use +
+/// tool_result 块插入 LLM 上下文。
+///
+/// 此工具存在的唯一目的是让 ToolRegistry 能识别 `AgentResult` 工具名，
+/// 从而在合成 tool_use 块出现时不会触发 "unknown tool" 错误。`invoke`
+/// 永远返回引导文本，提示 LLM 不要再调用。
 pub struct AgentResultTool;
 
 impl Default for AgentResultTool {
@@ -39,10 +44,14 @@ impl BaseTool for AgentResultTool {
             "properties": {
                 "task_id": {
                     "type": "string",
-                    "description": "Optional specific task ID to query. If omitted, returns all completed results."
+                    "description": "Ignored—results are auto-injected, not queried by task_id."
                 }
             }
         })
+    }
+
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
     }
 
     async fn invoke(
@@ -50,7 +59,7 @@ impl BaseTool for AgentResultTool {
         _input: serde_json::Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Ok("No results yet. Background tasks will notify you on completion — do not call this tool again until notified."
+        Ok("Background task results are delivered to you automatically when tasks complete—do not call this tool. If you cannot see results yet, the task is still running; wait for the completion notification before acting on its output."
             .to_string())
     }
 }

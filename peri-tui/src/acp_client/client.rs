@@ -5,23 +5,21 @@
 
 use std::sync::{Arc, Mutex};
 
+use peri_acp::event::AcpEvent;
 use peri_acp::transport::{
+    AcpTransport,
     mpsc::MpscClientTransport,
     types::{AcpError, IncomingMessage, RequestId},
-    AcpTransport,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 /// Notification events dispatched from the background pump to the TUI event loop.
 pub enum AcpNotification {
-    /// A `notifications/agent_event` notification carrying a peri-agent ExecutorEvent.
-    /// The TUI converts this to its own AgentEvent via `map_executor_event`.
-    AgentEvent {
-        session_id: String,
-        event: peri_agent::agent::events::AgentEvent,
-    },
+    /// A `notifications/agent_event` notification carrying an AcpEvent DTO.
+    /// The TUI converts this to its own AgentEvent via `map_acp_event`.
+    AgentEvent { session_id: String, event: AcpEvent },
     /// A `notifications/session_update` notification from the ACP server.
     SessionUpdate { session_id: String, params: Value },
     /// A `RequestPermission` request requiring HITL interaction.
@@ -31,7 +29,10 @@ pub enum AcpNotification {
     /// An unrecognized notification or request.
     Other { msg: String },
     /// Agent execution completed (synthetic notification from ACP server).
-    AgentDone { session_id: String },
+    AgentDone {
+        session_id: String,
+        stop_reason: String,
+    },
     /// Prediction fork 完成后的建议文本。
     PredictionReady { session_id: String, text: String },
     /// A `notifications/peri/*` custom notification (SubAgent, Compact, LSP, etc.)
@@ -39,6 +40,13 @@ pub enum AcpNotification {
         session_id: String,
         method: String,
         params: Value,
+    },
+    /// A `peri/unstable-event` notification carrying v2 state machine events
+    /// (text-chunk, tool-started, view-commit, turn-done, etc.).
+    UnstableEvent {
+        session_id: String,
+        event: String,
+        data: Value,
     },
 }
 
@@ -58,6 +66,17 @@ impl AcpTuiClient {
     /// Check whether a session has been created.
     pub fn has_session(&self) -> bool {
         self.current_session_id.lock().unwrap().is_some()
+    }
+
+    /// Get the current session ID, if any.
+    pub fn current_session_id(&self) -> Option<String> {
+        self.current_session_id.lock().unwrap().clone()
+    }
+
+    /// Send a raw ACP request and return the response.
+    /// Used for custom RPC methods like `workflow/list_runs`.
+    pub async fn send_raw_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
+        self.transport.send_request(method, params).await
     }
 
     /// Create a new client wrapping an existing `MpscClientTransport`.
@@ -80,9 +99,26 @@ impl AcpTuiClient {
     pub fn spawn_pump(&self) {
         let transport = self.transport.clone();
         let notification_tx = self.notification_tx.clone();
+        let current_session_id = self.current_session_id.clone();
         tokio::spawn(async move {
-            Self::run_pump(transport, notification_tx).await;
+            Self::run_pump(transport, notification_tx, current_session_id).await;
         });
+    }
+
+    /// 检查 session_id 是否匹配当前会话。
+    ///
+    /// 当 `current_session_id` 为 `None`（首次连接、尚未创建会话）时返回 `true`，
+    /// 确保 `AvailableCommandsUpdate` 等初始化通知不被丢弃。
+    /// 当已设置会话后，严格按 session_id 过滤。
+    fn is_current_session(
+        current_session_id: &Arc<Mutex<Option<String>>>,
+        session_id: &str,
+    ) -> bool {
+        current_session_id
+            .lock()
+            .unwrap()
+            .as_deref()
+            .is_none_or(|current| current == session_id)
     }
 
     // ── Pump ──
@@ -91,6 +127,7 @@ impl AcpTuiClient {
     async fn run_pump(
         transport: Arc<MpscClientTransport>,
         notification_tx: mpsc::UnboundedSender<AcpNotification>,
+        current_session_id: Arc<Mutex<Option<String>>>,
     ) {
         let mut event_count: u64 = 0;
         loop {
@@ -109,13 +146,13 @@ impl AcpTuiClient {
                         let event_result = if let Some(event_str) =
                             params.get("event_json").and_then(|v| v.as_str())
                         {
-                            serde_json::from_str::<peri_agent::agent::events::AgentEvent>(event_str)
+                            serde_json::from_str::<AcpEvent>(event_str)
                         } else if let Some(event_value) = params.get("event") {
-                            serde_json::from_value::<peri_agent::agent::events::AgentEvent>(
-                                event_value.clone(),
-                            )
+                            serde_json::from_value::<AcpEvent>(event_value.clone())
                         } else {
-                            warn!("ACP client pump: agent_event notification missing 'event_json' or 'event' field");
+                            warn!(
+                                "ACP client pump: agent_event notification missing 'event_json' or 'event' field"
+                            );
                             continue;
                         };
                         match event_result {
@@ -125,16 +162,9 @@ impl AcpTuiClient {
                                     session_id = %session_id,
                                     "ACP client pump: received agent_event"
                                 );
-                                if matches!(
-                                    &event,
-                                    peri_agent::agent::events::AgentEvent::BackgroundTaskCompleted(
-                                        _
-                                    )
-                                ) {
-                                    tracing::info!(
-                                        event_count = event_count,
-                                        "[bg-diag] client-pump: deserialized BackgroundTaskCompleted, sending to TUI"
-                                    );
+                                if !Self::is_current_session(&current_session_id, &session_id) {
+                                    debug!(session_id = %session_id, "ACP client pump: dropping stale agent_event");
+                                    continue;
                                 }
                                 let _ = notification_tx
                                     .send(AcpNotification::AgentEvent { session_id, event });
@@ -143,10 +173,10 @@ impl AcpTuiClient {
                                 error!(
                                     event_count = event_count,
                                     error = %e,
-                                    "ACP client pump: failed to parse AgentEvent — event LOST"
+                                    "ACP client pump: failed to parse AcpEvent — event LOST"
                                 );
                                 let _ = notification_tx.send(AcpNotification::Other {
-                                    msg: format!("failed to parse AgentEvent: {e}"),
+                                    msg: format!("failed to parse AcpEvent: {e}"),
                                 });
                             }
                         }
@@ -156,8 +186,38 @@ impl AcpTuiClient {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        if !Self::is_current_session(&current_session_id, &session_id) {
+                            debug!(session_id = %session_id, "ACP client pump: dropping stale session/update");
+                            continue;
+                        }
                         let _ = notification_tx
                             .send(AcpNotification::SessionUpdate { session_id, params });
+                    } else if method == "peri/unstable-event" {
+                        let session_id = params
+                            .get("sessionId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let event = params
+                            .get("event")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let data = params.get("data").cloned().unwrap_or(Value::Null);
+                        debug!(
+                            session_id = %session_id,
+                            event = %event,
+                            "ACP client pump: received unstable-event"
+                        );
+                        if !Self::is_current_session(&current_session_id, &session_id) {
+                            debug!(session_id = %session_id, event = %event, "ACP client pump: dropping stale unstable-event");
+                            continue;
+                        }
+                        let _ = notification_tx.send(AcpNotification::UnstableEvent {
+                            session_id,
+                            event,
+                            data,
+                        });
                     } else if method == "peri/agent_event_done" {
                         let session_id = params
                             .get("sessionId")
@@ -169,7 +229,19 @@ impl AcpTuiClient {
                             total_events = event_count,
                             "ACP client pump: received agent_event_done"
                         );
-                        let _ = notification_tx.send(AcpNotification::AgentDone { session_id });
+                        let stop_reason = params
+                            .get("stopReason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("end_turn")
+                            .to_string();
+                        if !Self::is_current_session(&current_session_id, &session_id) {
+                            debug!(session_id = %session_id, "ACP client pump: dropping stale agent_done");
+                            continue;
+                        }
+                        let _ = notification_tx.send(AcpNotification::AgentDone {
+                            session_id,
+                            stop_reason,
+                        });
                     } else if method == "peri/prediction_ready" {
                         let session_id = params
                             .get("sessionId")
@@ -181,6 +253,10 @@ impl AcpTuiClient {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        if !Self::is_current_session(&current_session_id, &session_id) {
+                            debug!(session_id = %session_id, "ACP client pump: dropping stale prediction_ready");
+                            continue;
+                        }
                         if !text.is_empty() {
                             let _ = notification_tx
                                 .send(AcpNotification::PredictionReady { session_id, text });
@@ -191,6 +267,10 @@ impl AcpTuiClient {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        if !Self::is_current_session(&current_session_id, &session_id) {
+                            debug!(session_id = %session_id, method = %method, "ACP client pump: dropping stale peri notification");
+                            continue;
+                        }
                         let _ = notification_tx.send(AcpNotification::Peri {
                             session_id,
                             method,
@@ -230,7 +310,7 @@ impl AcpTuiClient {
     /// Closes the previous session (if any) to release its history, AgentPool,
     /// and FrozenSessionData from the server-side sessions HashMap.
     pub async fn new_session(&self, cwd: &str, model: Option<&str>) -> Result<String, AcpError> {
-        // Close previous session to free server-side memory
+        // 先清空本地事实源，避免旧 session 的延迟 notification 在 /clear 创建新会话前回写 UI。
         let old_id = self.current_session_id.lock().unwrap().take();
         if let Some(ref old_sid) = old_id {
             let params = json!({ "sessionId": old_sid });
@@ -262,20 +342,23 @@ impl AcpTuiClient {
         cwd: &str,
         model: Option<&str>,
     ) -> Result<String, AcpError> {
-        // Close previous session (if different from the one being loaded)
-        let old_id = self.current_session_id.lock().unwrap().take();
-        if let Some(ref old_sid) = old_id {
-            if old_sid != session_id {
-                let params = json!({ "sessionId": old_sid });
-                if let Err(e) = self.transport.send_request("session/close", params).await {
-                    debug!(error = %e, "Failed to close previous session (non-fatal)");
-                }
+        // 先切换本地事实源，再发 close/load，避免旧 session 的延迟 notification 回写 UI。
+        let old_id = self
+            .current_session_id
+            .lock()
+            .unwrap()
+            .replace(session_id.to_string());
+        if let Some(ref old_sid) = old_id
+            && old_sid != session_id
+        {
+            let params = json!({ "sessionId": old_sid });
+            if let Err(e) = self.transport.send_request("session/close", params).await {
+                debug!(error = %e, "Failed to close previous session (non-fatal)");
             }
         }
 
         let params = json!({ "sessionId": session_id, "cwd": cwd, "model": model });
-        let _ = self.transport.send_request("session/load", params).await?;
-        *self.current_session_id.lock().unwrap() = Some(session_id.to_string());
+        self.transport.send_request("session/load", params).await?;
         Ok(session_id.to_string())
     }
 
@@ -302,10 +385,16 @@ impl AcpTuiClient {
             .map(|_| ())
     }
 
-    /// Submit background task results as synthetic tool_use + tool_result pairs.
-    /// The executor injects AgentResult tool calls with the results before the user message.
+    /// Submit a user message with background task results attached.
+    ///
+    /// The server-side executor injects the bg_results as `Defer` messages into the
+    /// v2 MessageQueue (see `peri-acp/src/session/executor.rs`). Defer is the
+    /// correct semantic for async-delayed results: Receive skips them, End drains
+    /// and awakens a new turn, and `run_react_loop` writes them to the transcript
+    /// wrapped in `<system-reminder>` (see `append_messages_to_transcript`).
     pub async fn prompt_with_bg_results(
         &self,
+        content: &peri_agent::messages::MessageContent,
         bg_results: Vec<peri_agent::agent::events::BackgroundTaskResult>,
     ) -> Result<(), AcpError> {
         let session_id = self
@@ -316,7 +405,7 @@ impl AcpTuiClient {
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let params = json!({
             "sessionId": session_id,
-            "message": { "role": "user", "content": "Background agents completed. Please review the results." },
+            "message": { "role": "user", "content": content },
             "bgResults": bg_results,
         });
         self.transport
@@ -431,6 +520,15 @@ impl AcpTuiClient {
         self.transport
             .send_notification("session/cancel", params)
             .await
+    }
+
+    /// Cancel a specific background task by task_id.
+    pub async fn cancel_bg_task(&self, session_id: &str, task_id: &str) -> Result<Value, AcpError> {
+        self.send_raw_request(
+            "session/cancel-bg-task",
+            json!({ "sessionId": session_id, "taskId": task_id }),
+        )
+        .await
     }
 
     /// Send a response to a server-initiated request (e.g. HITL approval).

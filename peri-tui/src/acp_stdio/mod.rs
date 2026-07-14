@@ -15,13 +15,13 @@ pub async fn run_acp_stdio(cwd: String) -> anyhow::Result<()> {
     let ctx = init::init_stdio_context(cwd).await?;
 
     use agent_client_protocol::{
-        schema::{
+        Agent, Client, ConnectionTo, Stdio,
+        schema::v1::{
             CancelNotification, CloseSessionRequest, CloseSessionResponse, ForkSessionRequest,
             InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
             PromptRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
             SetSessionModeRequest,
         },
-        Agent, Client, ConnectionTo, Stdio,
     };
 
     let ctx_clone = ctx.clone();

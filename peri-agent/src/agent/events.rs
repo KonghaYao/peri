@@ -59,12 +59,136 @@ pub enum TodoStatus {
     Completed,
 }
 
+/// Workflow 进度更新载荷（从 WorkflowRunner 推送到 TUI）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowProgressPayload {
+    /// Run ID (UUID v7)
+    pub run_id: String,
+    /// Workflow 名称
+    pub workflow_name: String,
+    /// 事件类型（run_started / phase_started / phase_done / agent_started / agent_progress / agent_done / run_done）
+    pub event_type: String,
+    /// Agent ID（仅 agent_* 事件有值）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<u64>,
+    /// Phase 名称（仅 phase_* 事件有值）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Agent 标签
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Agent 状态（started/progress/done/dead/skipped）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_status: Option<String>,
+    /// Token 计数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<u64>,
+    /// 工具调用计数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_count: Option<u64>,
+    /// Run 状态（completed/failed/killed）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_status: Option<String>,
+    /// 日志消息
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// ReAct 循环 5 阶段
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    Compact,
+    Receive,
+    Reason,
+    Act,
+    End,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StageStatus {
+    Done,
+    Skipped,
+    Error,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStatus {
+    Done,
+    Interrupted,
+    Error,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnErrorKind {
+    Interrupted,
+    Timeout,
+    LlmFailure,
+    ToolFailure,
+    RateLimit,
+    MaxIterations,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactStrategy {
+    Micro,
+    Full,
+    Smart,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactTrigger {
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactThreshold {
+    Micro,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MiddlewareHook {
+    BeforeAgent,
+    AfterAgent,
+    BeforeTool,
+    AfterTool,
+    BeforeModel,
+    AfterModel,
+    OnError,
+    OnSessionStart,
+    OnSessionEnd,
+    OnUserPrompt,
+    BeforeCompact,
+    AfterCompact,
+    OnPermissionRequest,
+    OnSubagentStart,
+    OnSubagentStop,
+    OnTurnEnd,
+    OnNotification,
+}
+
 /// Agent 执行过程中的增量事件
+///
+/// 历史名 `AgentEvent`，因与 `peri-tui::app::events::AgentEvent` 同名造成歧义，
+/// 重命名为 `ExecutorEvent`（更准确地反映其作为 executor 层事件类型的角色）。
+/// serde tag/content 序列化不含 enum 名，wire format 零变化。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
-pub enum AgentEvent {
+pub enum ExecutorEvent {
     /// AI 推理内容（reasoning/思考过程）
-    AiReasoning(String),
+    AiReasoning {
+        text: String,
+        source_agent_id: Option<String>,
+    },
     /// LLM 输出最终文字（非流式，整段答案），携带所属 AI 消息的 message_id
     TextChunk {
         message_id: crate::messages::MessageId,
@@ -90,14 +214,57 @@ pub enum AgentEvent {
     },
     /// 状态快照（含完整的消息历史），用于持久化和断点续跑
     StateSnapshot(Vec<crate::messages::BaseMessage>),
+    /// 单次 ReAct 迭代提交信号（v2）
+    ///
+    /// 由 v2 stages 在每次 Act 阶段结束时通过 `RenderEvent::TurnCompleted` 触发，
+    /// mapper_v2 将 `finalized_messages` 透传为本变体的 `messages` 字段。
+    ///
+    /// TUI 据此调用 `MessagePipeline::commit_iteration(messages)` 同步规范状态，
+    /// 避免 Render 事件流自洽重建 transcript 时多迭代文本/工具顺序错乱。
+    TurnCommitted {
+        /// 当前 transcript 的可见消息全量快照（owned，便于跨进程传递）
+        messages: Vec<crate::messages::BaseMessage>,
+        /// 当前 ReAct 步数
+        steps: usize,
+    },
+    /// 轻量级状态快照元数据（v2 路径专用）
+    ///
+    /// v2 `StateEvent::StateSnapshot` 不携带消息历史（设计上避免 transcript 锁开销），
+    /// mapper_v2 将其映射为本变体。TUI 据此区分「元数据快照」与「完整快照」：
+    /// 收到 `StateSnapshotMeta` 时**不应**清空 `MessagePipeline::completed`，
+    /// 仅用于刷新上下文使用率、步数等元数据。
+    StateSnapshotMeta {
+        /// 当前可见消息数（transcript.read().len()）
+        message_count: usize,
+        /// 累计 token 数（来自 token_tracker，v2 暂为 0）
+        total_tokens: u64,
+        /// 当前 ReAct 步数
+        current_step: usize,
+        /// 连续工具/compact 失败次数
+        consecutive_failures: u32,
+        /// 上下文窗口使用率（0.0-1.0），None 表示无 context_budget
+        budget_pct: Option<f64>,
+        /// 上下文窗口总量（ContextBudget.context_window），None 表示无配置
+        context_total_tokens: Option<u64>,
+    },
     /// 增量消息（BaseMessage），持久化和遥测的最小数据单元
     MessageAdded(crate::messages::BaseMessage),
     /// LLM 调用开始（携带完整 input messages 快照 + 工具定义，用于 Langfuse Generation）
     LlmCallStart {
         step: usize,
-        /// Arc 共享引用——Clone AgentEvent 时为浅拷贝（引用计数 +1），不产生独立副本
+        /// Arc 共享引用——Clone ExecutorEvent 时为浅拷贝（引用计数 +1），不产生独立副本
         messages: std::sync::Arc<Vec<crate::messages::BaseMessage>>,
         tools: Vec<crate::tools::ToolDefinition>,
+    },
+    /// LLM Provider 实际请求体（raw body），紧随 [`Self::LlmCallStart`] 之后 emit。
+    ///
+    /// 用于 Langfuse Generation input：携带 Provider-native 完整请求体（含正确工具
+    /// 格式与 system 位置）。tracer 在 `on_llm_start` 建 generation_data 缓存后写入
+    /// `raw_body` 字段；`on_llm_end` 时优先用 raw_body，fallback 到 messages+tools
+    /// 抽象序列化。`Arc<Value>` 浅拷贝，跨多层转发不重复 clone 大 JSON。
+    LlmRequestPayload {
+        step: usize,
+        body: std::sync::Arc<serde_json::Value>,
     },
     /// LLM 调用结束（携带模型名、输出文本、token 使用量）
     LlmCallEnd {
@@ -140,7 +307,18 @@ pub enum AgentEvent {
         instance_id: String,
     },
     /// 上下文压缩开始
-    CompactStarted,
+    CompactStarted {
+        /// 所属 Turn ID
+        turn_id: String,
+        /// 触发压缩的 Agent ID
+        agent_id: String,
+        /// 当前 ReAct 步数
+        step: usize,
+        /// 压缩策略
+        strategy: CompactStrategy,
+        /// 压缩触发方式
+        trigger: CompactTrigger,
+    },
     /// 上下文压缩完成
     CompactCompleted {
         /// 摘要文本（full compact 时非空，micro compact 时为空）
@@ -153,6 +331,12 @@ pub enum AgentEvent {
         micro_cleared: usize,
         /// 压缩后的新消息列表（full compact 时非空）
         messages: Vec<crate::messages::BaseMessage>,
+        /// 压缩前 token 数
+        token_before: u64,
+        /// 压缩后 token 数
+        token_after: u64,
+        /// 本次使用的压缩策略
+        strategy: CompactStrategy,
     },
     /// 对话回退完成（rewind 命令，移除目标用户消息及其之后的所有消息）
     RewindCompleted {
@@ -162,7 +346,9 @@ pub enum AgentEvent {
         messages: Vec<crate::messages::BaseMessage>,
     },
     /// 上下文压缩失败
-    CompactError { message: String },
+    CompactError {
+        message: String,
+    },
     /// Todo 列表更新
     TodoUpdate(Vec<TodoEntry>),
     /// LSP 诊断更新
@@ -171,18 +357,98 @@ pub enum AgentEvent {
         warnings: usize,
         files_with_errors: usize,
     },
-    /// Agent 执行失败（由 executor 在 agent.execute() 返回 Err 时发送）
-    AgentExecutionFailed { message: String },
+    /// Agent 执行失败（由 executor 在 run_react_loop 返回 Err 时发送）
+    AgentExecutionFailed {
+        message: String,
+    },
     /// 后台 agent 工具调用进度通知（轻量级，仅用于 TUI bg_agent_bar 实时计数）
-    BgToolStep { child_thread_id: String },
+    BgToolStep {
+        child_thread_id: String,
+    },
+    /// Workflow 进度更新（WorkflowRunner 发出，TUI 消费渲染面板）
+    WorkflowProgress(WorkflowProgressPayload),
+    /// Turn 已挂起（idle/await_wake），等待 bg agent/cron/workflow 异步事件。
+    /// TUI 收到后应停止 loading spinner，但不终止 Agent（Agent 保持 await_wake 存活）。
+    TurnSuspended,
+    // ── langfuse v2：会话/Turn 生命周期 ──
+    SessionStarted {
+        session_id: String,
+        frozen_summary: serde_json::Value,
+    },
+    TurnStarted {
+        turn_id: String,
+        session_id: String,
+    },
+    TurnEnded {
+        turn_id: String,
+        session_id: String,
+        status: TurnStatus,
+        error_kind: Option<TurnErrorKind>,
+    },
+    StageStarted {
+        turn_id: String,
+        stage: Stage,
+    },
+    StageEnded {
+        turn_id: String,
+        stage: Stage,
+        status: StageStatus,
+        duration_ms: u64,
+    },
+    // ── langfuse v2：中间件链 ──
+    MiddlewareStarted {
+        turn_id: String,
+        mw_name: String,
+        hook: MiddlewareHook,
+    },
+    MiddlewareEnded {
+        turn_id: String,
+        mw_name: String,
+        hook: MiddlewareHook,
+        status: StageStatus,
+        error: Option<String>,
+    },
+    // ── langfuse v2：Reason ──
+    AiReasoningChunk {
+        turn_id: String,
+        text: String,
+        source_agent_id: Option<String>,
+    },
+    // ── langfuse v2：Compact ──
+    BudgetThresholdHit {
+        turn_id: String,
+        threshold: CompactThreshold,
+        current_pct: f64,
+        tokens_in: u64,
+        tokens_out: u64,
+    },
+    // ── langfuse v2：Receive ──
+    MessageQueueDrained {
+        turn_id: String,
+        prompt: usize,
+        defer: usize,
+        info: usize,
+    },
+    // ── langfuse v2：Act / Workflow ──
+    WorkflowStarted {
+        turn_id: String,
+        workflow_id: String,
+        plan_summary: String,
+    },
+    WorkflowEnded {
+        turn_id: String,
+        workflow_id: String,
+        agents_spawned: usize,
+        tool_calls: usize,
+    },
 }
 
 /// 事件回调 trait（应用层实现）
 ///
-/// 在 `ReActAgent` 执行过程中，关键节点会调用 `on_event`。
+/// 在 Agent 执行过程中，关键节点会调用 `on_event`。
 /// 实现者通过 `mpsc::Sender` 等机制将事件转发给 UI 层。
 pub trait AgentEventHandler: Send + Sync {
-    fn on_event(&self, event: AgentEvent);
+    fn on_event(&self, event: ExecutorEvent);
 }
 
 /// 函数闭包适配器 —— 方便快速实现 `AgentEventHandler`
@@ -197,14 +463,42 @@ pub trait AgentEventHandler: Send + Sync {
 /// ```
 pub struct FnEventHandler<F>(pub F)
 where
-    F: Fn(AgentEvent) + Send + Sync;
+    F: Fn(ExecutorEvent) + Send + Sync;
 
 impl<F> AgentEventHandler for FnEventHandler<F>
 where
-    F: Fn(AgentEvent) + Send + Sync,
+    F: Fn(ExecutorEvent) + Send + Sync,
 {
-    fn on_event(&self, event: AgentEvent) {
+    fn on_event(&self, event: ExecutorEvent) {
         (self.0)(event)
+    }
+}
+
+/// 覆盖 ExecutorEvent 的 `source_agent_id` 字段（ToolStart / ToolEnd / TextChunk / AiReasoning）。
+///
+/// 用于 SubAgent 转发器：v2 RenderEvent 的 `agent_id` 字段在 mapper_v2 中被丢弃
+/// （main executor 路径不需要），但 SubAgent 转发器需要把 `source_agent_id` 设为
+/// `child_thread_id`，让 TUI 的 `find_running_subagent_mut(aid)` 按 instance_id 匹配。
+///
+/// 其他变体（TurnCommitted / SubagentStarted 等）没有 `source_agent_id`
+/// 字段，本函数对它们是 no-op。
+pub fn inject_source_agent_id(event: &mut ExecutorEvent, agent_id: &str) {
+    match event {
+        ExecutorEvent::ToolStart {
+            source_agent_id, ..
+        }
+        | ExecutorEvent::ToolEnd {
+            source_agent_id, ..
+        }
+        | ExecutorEvent::TextChunk {
+            source_agent_id, ..
+        }
+        | ExecutorEvent::AiReasoning {
+            source_agent_id, ..
+        } => {
+            *source_agent_id = Some(agent_id.to_string());
+        }
+        _ => {}
     }
 }
 

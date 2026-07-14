@@ -1,11 +1,13 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::{Arc, RwLock},
 };
 
 use async_trait::async_trait;
 use peri_agent::{
-    agent::state::State, error::AgentResult, messages::BaseMessage, middleware::r#trait::Middleware,
+    error::AgentResult,
+    middleware::{r#trait::Middleware, state::MiddlewareState},
 };
 
 /// AgentsMdMiddleware - 注入项目指引文件（AGENTS.md / CLAUDE.md）
@@ -24,6 +26,8 @@ pub struct AgentsMdMiddleware {
     frozen_main: Option<String>,
     /// Frozen CLAUDE.local.md content.
     frozen_local: Option<String>,
+    /// Cached prompt contribution (populated in before_agent, returned by prompt_contribution).
+    cached_contribution: Arc<RwLock<Option<String>>>,
 }
 
 impl AgentsMdMiddleware {
@@ -33,6 +37,7 @@ impl AgentsMdMiddleware {
             excludes: Vec::new(),
             frozen_main: None,
             frozen_local: None,
+            cached_contribution: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -54,6 +59,19 @@ impl AgentsMdMiddleware {
     /// When set, `before_agent` skips disk I/O entirely and uses the frozen
     /// content directly.
     pub fn with_frozen_content(mut self, main: String, local: Option<String>) -> Self {
+        // v2：构造时即填充 cached_contribution，使 prompt_contribution 立即可用，
+        // 无需 before_agent 触发（SubAgent 链构造时 prompt_contribution 在 before_agent 前被收集）。
+        // 保留 frozen_main / frozen_local 字段，让 before_agent 仍可走 build_contribution 兼容路径。
+        let mut combined = main.clone();
+        if let Some(ref local) = local {
+            if !local.trim().is_empty() {
+                combined.push_str("\n\n");
+                combined.push_str(local);
+            }
+        }
+        if !combined.trim().is_empty() {
+            *self.cached_contribution.write().unwrap() = Some(combined);
+        }
         self.frozen_main = Some(main);
         self.frozen_local = local;
         self
@@ -143,6 +161,108 @@ impl AgentsMdMiddleware {
             })
         })
     }
+
+    /// Build the CLAUDE.md / AGENTS.md contribution string.
+    /// When frozen content is set, uses it directly (no disk I/O).
+    async fn build_contribution(&self, cwd: &str) -> AgentResult<Option<String>> {
+        // Use frozen content when available — skip all disk I/O.
+        if let Some(ref main) = self.frozen_main {
+            let mut content = main.clone();
+            if let Some(ref local) = self.frozen_local {
+                if !local.trim().is_empty() {
+                    content = format!("{content}\n\n{local}");
+                }
+            }
+            if !content.trim().is_empty() {
+                return Ok(Some(content));
+            }
+            return Ok(None);
+        }
+
+        let Some(path) = self.find_file(cwd) else {
+            // 即使没有主文件，也尝试读取 CLAUDE.local.md
+            let local_path = Path::new(cwd).join("CLAUDE.local.md");
+            if local_path.is_file() {
+                let lp = local_path.clone();
+                let local_content =
+                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&lp))
+                        .await
+                        .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+                            middleware: "AgentsMdMiddleware".to_string(),
+                            reason: format!("spawn_blocking 失败: {e}"),
+                        })?
+                        .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+                            middleware: "AgentsMdMiddleware".to_string(),
+                            reason: format!("读取 CLAUDE.local.md 失败: {e}"),
+                        })?;
+                if !local_content.trim().is_empty() {
+                    return Ok(Some(local_content));
+                }
+            }
+            return Ok(None);
+        };
+
+        let path_display = path.display().to_string();
+        let is_claude_md = path
+            .file_name()
+            .map(|n| n.to_string_lossy().starts_with("CLAUDE"))
+            .unwrap_or(false);
+        let import_dir = path.parent().map(|p| p.to_path_buf());
+        let main_file_canonical = path.canonicalize().ok();
+        let content = tokio::task::spawn_blocking(move || std::fs::read_to_string(&path))
+            .await
+            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+                middleware: "AgentsMdMiddleware".to_string(),
+                reason: format!("spawn_blocking 失败: {e}"),
+            })?
+            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+                middleware: "AgentsMdMiddleware".to_string(),
+                reason: format!("读取 {} 失败: {e}", path_display),
+            })?;
+
+        let content = if content.trim().is_empty() {
+            return Ok(None);
+        } else {
+            content
+        };
+
+        // 追加 CLAUDE.local.md（个人项目级，不入库）
+        let local_path = Path::new(cwd).join("CLAUDE.local.md");
+        let content = if local_path.is_file() {
+            let lp = local_path.clone();
+            let local_content = tokio::task::spawn_blocking(move || std::fs::read_to_string(&lp))
+                .await
+                .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+                    middleware: "AgentsMdMiddleware".to_string(),
+                    reason: format!("spawn_blocking 失败: {e}"),
+                })?
+                .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+                    middleware: "AgentsMdMiddleware".to_string(),
+                    reason: format!("读取 CLAUDE.local.md 失败: {e}"),
+                })?;
+            if local_content.trim().is_empty() {
+                content
+            } else {
+                format!("{content}\n\n{local_content}")
+            }
+        } else {
+            content
+        };
+
+        // 仅对 CLAUDE.md 系列文件解析 @import（AGENTS.md 不处理）
+        let content = if is_claude_md {
+            let dir = import_dir.as_deref().unwrap_or(Path::new(cwd));
+            let mut visited = HashSet::new();
+            if let Some(canonical) = main_file_canonical {
+                visited.insert(canonical);
+            }
+            resolve_imports(&content, dir, 3, &mut visited)
+        } else {
+            content
+        };
+
+        Ok(Some(content))
+    }
 }
 
 /// 递归解析 `<!-- @import path -->` 引用，替换为引用文件内容。
@@ -203,121 +323,34 @@ impl Default for AgentsMdMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for AgentsMdMiddleware {
+impl Middleware for AgentsMdMiddleware {
     fn name(&self) -> &str {
         "AgentsMdMiddleware"
     }
 
-    async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
-        // Use frozen content when available — skip all disk I/O.
-        if let Some(ref main) = self.frozen_main {
-            let mut content = main.clone();
-            if let Some(ref local) = self.frozen_local {
-                if !local.trim().is_empty() {
-                    content = format!("{content}\n\n{local}");
-                }
-            }
-            if !content.trim().is_empty() {
-                state.prepend_message(BaseMessage::system(content));
-            }
-            return Ok(());
-        }
+    fn prompt_contribution(&self) -> Option<String> {
+        self.cached_contribution.read().unwrap().clone()
+    }
 
-        let Some(path) = self.find_file(state.cwd()) else {
-            // 即使没有主文件，也尝试读取 CLAUDE.local.md
-            let local_path = Path::new(state.cwd()).join("CLAUDE.local.md");
-            if local_path.is_file() {
-                let lp = local_path.clone();
-                let local_content =
-                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&lp))
-                        .await
-                        .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                            middleware: "AgentsMdMiddleware".to_string(),
-                            reason: format!("spawn_blocking 失败: {e}"),
-                        })?
-                        .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                            middleware: "AgentsMdMiddleware".to_string(),
-                            reason: format!("读取 CLAUDE.local.md 失败: {e}"),
-                        })?;
-                if !local_content.trim().is_empty() {
-                    state.prepend_message(BaseMessage::system(local_content));
-                }
-            }
-            return Ok(());
-        };
-
-        let path_display = path.display().to_string();
-        let is_claude_md = path
-            .file_name()
-            .map(|n| n.to_string_lossy().starts_with("CLAUDE"))
-            .unwrap_or(false);
-        let import_dir = path.parent().map(|p| p.to_path_buf());
-        let main_file_canonical = path.canonicalize().ok();
-        let content = tokio::task::spawn_blocking(move || std::fs::read_to_string(&path))
-            .await
-            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                middleware: "AgentsMdMiddleware".to_string(),
-                reason: format!("spawn_blocking 失败: {e}"),
-            })?
-            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                middleware: "AgentsMdMiddleware".to_string(),
-                reason: format!("读取 {} 失败: {e}", path_display),
-            })?;
-
-        let content = if content.trim().is_empty() {
-            return Ok(());
-        } else {
-            content
-        };
-
-        // 追加 CLAUDE.local.md（个人项目级，不入库）
-        let local_path = Path::new(state.cwd()).join("CLAUDE.local.md");
-        let content = if local_path.is_file() {
-            let lp = local_path.clone();
-            let local_content = tokio::task::spawn_blocking(move || std::fs::read_to_string(&lp))
-                .await
-                .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                    middleware: "AgentsMdMiddleware".to_string(),
-                    reason: format!("spawn_blocking 失败: {e}"),
-                })?
-                .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                    middleware: "AgentsMdMiddleware".to_string(),
-                    reason: format!("读取 CLAUDE.local.md 失败: {e}"),
-                })?;
-            if local_content.trim().is_empty() {
-                content
-            } else {
-                format!("{content}\n\n{local_content}")
-            }
-        } else {
-            content
-        };
-
-        // 仅对 CLAUDE.md 系列文件解析 @import（AGENTS.md 不处理）
-        let content = if is_claude_md {
-            let dir = import_dir
-                .as_deref()
-                .unwrap_or_else(|| Path::new(state.cwd()));
-            let mut visited = HashSet::new();
-            if let Some(canonical) = main_file_canonical {
-                visited.insert(canonical);
-            }
-            resolve_imports(&content, dir, 3, &mut visited)
-        } else {
-            content
-        };
-
-        // 前插系统消息（置于消息历史开头，优先于 Human 消息）
-        state.prepend_message(BaseMessage::system(content));
-
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        let contribution = self.build_contribution(state.cwd()).await?;
+        *self.cached_contribution.write().unwrap() = contribution;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use peri_agent::agent::state::AgentState;
+    use peri_agent::{
+        agent::state::AgentState, messages::BaseMessage, middleware::r#trait::Middleware,
+    };
 
     use super::*;
+
+    /// Helper: call prompt_contribution with concrete State type for testing.
+    fn contribution(mw: &AgentsMdMiddleware) -> Option<String> {
+        Middleware::prompt_contribution(mw)
+    }
+
     include!("agents_md_test.rs");
 }

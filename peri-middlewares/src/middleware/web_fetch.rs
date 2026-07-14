@@ -127,6 +127,10 @@ impl BaseTool for WebFetchTool {
         })
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         input: Value,
@@ -193,6 +197,15 @@ impl BaseTool for WebFetchTool {
         };
 
         Ok(result)
+    }
+
+    fn output_char_limit(&self) -> Option<usize> {
+        // WebFetch 已有自己的行级+字节级双重截断（2000 行 / 100KB），
+        // 且 truncate_content 内调用了 persist_truncated_output 生成落盘
+        // 路径提示。若在此处再设 output_char_limit，tool_dispatch.rs 的
+        // 二次截断会把末尾的路径提示吃掉。返回 None 让工具自身的截断+落盘
+        // 逻辑完整传递到 LLM。
+        None
     }
 }
 

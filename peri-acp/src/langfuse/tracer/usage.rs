@@ -1,12 +1,10 @@
-//! TokenUsage → langfuse_usage_details 转换 + LLM 重试 metadata 组装。
+//! TokenUsage → langfuse_usage_details 转换。
 //!
-//! 纯函数无状态。提取自原 tracer.rs::on_llm_end（383-425 行）。
+//! 纯函数无状态。提取自原 tracer.rs::on_llm_end。
 
 use std::collections::HashMap;
 
 use peri_agent::llm::types::TokenUsage;
-
-use super::context::RetryAttempt;
 
 /// 将 TokenUsage 转换为 Langfuse usage_details HashMap。
 ///
@@ -36,26 +34,4 @@ pub(crate) fn build_usage_details(usage: &TokenUsage) -> HashMap<String, i32> {
         map.insert("cache_read_input_tokens".to_string(), cache_read as i32);
     }
     map
-}
-
-/// 组装 LLM 重试 metadata（retry_count + retries 数组），无重试时返回 None。
-pub(crate) fn build_retry_metadata(retries: &[RetryAttempt]) -> Option<serde_json::Value> {
-    if retries.is_empty() {
-        return None;
-    }
-    let retry_values: Vec<serde_json::Value> = retries
-        .iter()
-        .map(|r| {
-            serde_json::json!({
-                "attempt": r.attempt,
-                "max_attempts": r.max_attempts,
-                "delay_ms": r.delay_ms,
-                "error": r.error,
-            })
-        })
-        .collect();
-    Some(serde_json::json!({
-        "retry_count": retries.len(),
-        "retries": retry_values,
-    }))
 }

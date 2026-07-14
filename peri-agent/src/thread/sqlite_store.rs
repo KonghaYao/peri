@@ -108,6 +108,8 @@ impl SqliteThreadStore {
             "ALTER TABLE threads ADD COLUMN config TEXT",
             "ALTER TABLE threads ADD COLUMN cached_context TEXT",
             "ALTER TABLE threads ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0",
         ];
         for sql in &alter_columns {
             // SQLite 返回 "duplicate column name" 时忽略
@@ -641,6 +643,58 @@ impl ThreadStore for SqliteThreadStore {
         .await?;
         tx.commit().await?;
         self.invalidate_context_cache(thread_id).await?;
+        Ok(())
+    }
+
+    async fn update_message_flags(
+        &self,
+        message_id: &crate::messages::MessageId,
+        truncated: bool,
+        excluded: bool,
+    ) -> Result<()> {
+        let id_str = message_id.as_uuid().to_string();
+        sqlx::query("UPDATE messages SET truncated = ?, excluded = ? WHERE message_id = ?")
+            .bind(truncated)
+            .bind(excluded)
+            .bind(&id_str)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_messages_since(
+        &self,
+        thread_id: &ThreadId,
+        message_id: &crate::messages::MessageId,
+    ) -> Result<()> {
+        // 通过 rowid 定位目标消息在时间线上的位置
+        let target_rowid: Option<(i64,)> =
+            sqlx::query_as("SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2")
+                .bind(thread_id.as_str())
+                .bind(message_id.as_uuid().to_string())
+                .fetch_optional(&self.pool)
+                .await?;
+
+        if let Some((rowid,)) = target_rowid {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("DELETE FROM messages WHERE thread_id = ?1 AND rowid > ?2")
+                .bind(thread_id.as_str())
+                .bind(rowid)
+                .execute(&mut *tx)
+                .await?;
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                "UPDATE threads SET updated_at = ?1,
+                    message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
+                 WHERE id = ?2",
+            )
+            .bind(&now)
+            .bind(thread_id.as_str())
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            self.invalidate_context_cache(thread_id).await?;
+        }
         Ok(())
     }
 }

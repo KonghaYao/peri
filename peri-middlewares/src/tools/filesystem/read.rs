@@ -219,6 +219,14 @@ impl BaseTool for ReadFileTool {
 
         Ok(output)
     }
+
+    fn output_char_limit(&self) -> Option<usize> {
+        Some(5000)
+    }
+
+    fn prefers_persist(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

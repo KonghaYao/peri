@@ -1,19 +1,23 @@
 //! Session 创建：new / load / resume / fork。
 
+use std::sync::Arc;
+
 use agent_client_protocol::{
-    schema::{
+    Client, ConnectionTo, Responder,
+    schema::v1::{
         ForkSessionRequest, ForkSessionResponse, LoadSessionRequest, LoadSessionResponse,
         NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
-        SessionId,
+        SessionId, SessionNotification,
     },
-    Client, ConnectionTo, Responder,
 };
 use peri_acp::{dispatch, session::state_builders::build_mode_state};
+
+use peri_acp::dispatch::ReplaySender;
 
 use super::super::{
     commands,
     context::{SessionInfo, StdioContext},
-    freeze,
+    freeze, notification,
 };
 
 /// session/new 处理器：创建 ThreadStore 线程、冻结系统提示词、返回模式/模型/配置选项。
@@ -41,6 +45,42 @@ pub(crate) async fn handle_new(
     ctx.session_manager.ensure_session(&sid, &cwd_str);
     let frozen_data = freeze::build(ctx, &cwd_str);
 
+    // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
+    let workflow_middleware = {
+        let provider_snap = ctx.provider.read().clone();
+        let mut compact_config = peri_agent::agent::compact::CompactConfig::default();
+        compact_config.apply_env_overrides();
+        let wf_executor = peri_acp::agent::workflow_agent::create_executor(
+            peri_acp::agent::workflow_agent::WorkflowAgentContext {
+                provider: provider_snap,
+                cwd: cwd_str.clone(),
+                frozen_claude_md: frozen_data.claude_md().map(|s| s.to_string()),
+                frozen_claude_local_md: frozen_data.claude_local_md().map(|s| s.to_string()),
+                frozen_skill_summary: frozen_data.skill_summary().map(|s| s.to_string()),
+                session_id: Some(sid.clone()),
+                compact_config: Some(compact_config),
+                cancel: None,
+                system_prompt: Some(frozen_data.system_prompt().to_string()),
+                broker: None,
+                permission_mode: None,
+                frozen_date: Some(frozen_data.date().to_string()),
+                frozen_language: frozen_data.language().map(|s| s.to_string()),
+                agent_pool: None,
+                langfuse_session: None,
+                thread_store: None,
+                peri_config: Some(Arc::new(ctx.peri_config.read().clone())),
+            },
+        );
+        let (notification_tx, _) = tokio::sync::broadcast::channel(32);
+        Some(Arc::new(
+            peri_middlewares::workflow::WorkflowMiddleware::new(
+                wf_executor,
+                &cwd_str,
+                notification_tx,
+            ),
+        ))
+    };
+
     {
         let mut sessions = ctx.sessions.write();
         sessions.insert(
@@ -53,6 +93,7 @@ pub(crate) async fn handle_new(
                 cancel_token: None,
                 frozen: Some(frozen_data),
                 agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                workflow_middleware,
             },
         );
     }
@@ -97,6 +138,12 @@ pub(crate) async fn handle_load(
     // Load history from ThreadStore via dispatch function
     let history = dispatch::load_session_messages(ctx.thread_store.as_ref(), &sid).await;
 
+    // ── ACP v1 spec: replay history via session/update BEFORE responding ──
+    let replay_sender = StdioReplaySender { cx: cx.clone() };
+    if let Err(e) = dispatch::replay_session_history(&sid, &history, &replay_sender).await {
+        tracing::warn!(session_id = %sid, error = %e, "session/load: history replay failed, continuing");
+    }
+
     // Insert into sessions if not already present
     {
         let mut sessions = ctx.sessions.write();
@@ -115,10 +162,14 @@ pub(crate) async fn handle_load(
                     cancel_token: None,
                     frozen: Some(frozen_data),
                     agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                    workflow_middleware: None,
                 },
             );
         }
     }
+
+    // Send config options via session/update notification (for async update)
+    notification::send_config_update(ctx, &SessionId::new(&*sid), &cx);
 
     let modes = build_mode_state(&ctx.permission_mode);
     let config_options = {
@@ -126,10 +177,11 @@ pub(crate) async fn handle_load(
         let p = ctx.provider.read();
         dispatch::config_update::make_config_options(&c, &p, ctx.permission_mode.load())
     };
-    let resp = LoadSessionResponse::new()
-        .modes(modes)
-        .config_options(config_options);
-    let _ = responder.respond(resp);
+    let _ = responder.respond(
+        LoadSessionResponse::new()
+            .modes(modes)
+            .config_options(config_options),
+    );
 
     // Scan skills for AvailableCommands notification
     commands::send_available_commands(
@@ -154,24 +206,38 @@ pub(crate) async fn handle_resume(
     ctx.session_manager.ensure_session(&sid, &cwd);
     // Build frozen data for session
     let frozen_data = freeze::build(ctx, &cwd);
-    let mut sessions = ctx.sessions.write();
-    if !sessions.contains_key(&sid) {
-        sessions.insert(
-            sid.clone(),
-            SessionInfo {
-                session_id: sid.clone(),
-                thread_id: sid.clone(),
-                cwd,
-                history: Vec::new(),
-                cancel_token: None,
-                frozen: Some(frozen_data),
-                agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
-            },
-        );
-        tracing::info!(session_id = %sid, "Session resumed (new)");
-    } else {
-        tracing::info!(session_id = %sid, "Session resumed (existing)");
+
+    // Load history from ThreadStore (deferred load — emit view-commit if any)
+    let history = dispatch::load_session_messages(ctx.thread_store.as_ref(), &sid).await;
+
+    {
+        let mut sessions = ctx.sessions.write();
+        if !sessions.contains_key(&sid) {
+            sessions.insert(
+                sid.clone(),
+                SessionInfo {
+                    session_id: sid.clone(),
+                    thread_id: sid.clone(),
+                    cwd,
+                    history,
+                    cancel_token: None,
+                    frozen: Some(frozen_data),
+                    agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                    workflow_middleware: None,
+                },
+            );
+            tracing::info!(session_id = %sid, "Session resumed (new)");
+        } else {
+            // Existing session: if history is empty, populate from ThreadStore
+            if let Some(s) = sessions.get_mut(&sid)
+                && s.history.is_empty()
+            {
+                s.history = history;
+            }
+            tracing::info!(session_id = %sid, "Session resumed (existing)");
+        }
     }
+
     let _ = responder.respond(ResumeSessionResponse::new());
     Ok(())
 }
@@ -244,6 +310,7 @@ pub(crate) async fn handle_fork(
                 cancel_token: None,
                 frozen: Some(frozen_data),
                 agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                workflow_middleware: None,
             },
         );
     }
@@ -251,4 +318,21 @@ pub(crate) async fn handle_fork(
     let resp = ForkSessionResponse::new(SessionId::new(new_session_id));
     let _ = responder.respond(resp);
     Ok(())
+}
+
+/// Adapts `ConnectionTo<Client>` into a `ReplaySender` for the stdio path.
+struct StdioReplaySender {
+    cx: ConnectionTo<Client>,
+}
+
+#[async_trait::async_trait]
+impl ReplaySender for StdioReplaySender {
+    async fn send(
+        &self,
+        notif: SessionNotification,
+    ) -> Result<(), peri_acp::dispatch::ReplayError> {
+        self.cx
+            .send_notification(notif)
+            .map_err(|e| peri_acp::dispatch::ReplayError::SendFailed(e.to_string()))
+    }
 }

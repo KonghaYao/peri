@@ -2,22 +2,27 @@
 //! Extracted from original acp_server.rs (2026-05-20 split).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     CloseSessionResponse, ForkSessionResponse, ListSessionsResponse, LoadSessionResponse,
-    NewSessionResponse, ResumeSessionResponse, SessionId, SessionInfo,
+    NewSessionResponse, ResumeSessionResponse, SessionId, SessionInfo, SessionNotification,
     SetSessionConfigOptionResponse, SetSessionModeResponse,
 };
+use peri_acp::dispatch::ReplaySender;
 use peri_acp::dispatch::config_update::make_config_options;
 use peri_acp::{dispatch, transport::types::AcpError};
+use peri_acp_types::event_data::{
+    PluginActionResult, PluginSearchResult, PluginSnapshot, PluginSnapshotEntry,
+};
 use peri_agent::thread::ThreadMeta;
 use serde_json::Value;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::{
-    apply_thinking_effort, build_mode_state,
+    AcpServerConfig, SessionState, apply_thinking_effort, build_mode_state,
     notify::{extract_session_id, send_available_commands_update, send_config_option_update},
-    parse_permission_mode, AcpServerConfig, SessionState,
+    parse_permission_mode,
 };
 use crate::{app::agent::LlmProvider, config::save_to};
 
@@ -60,6 +65,56 @@ pub(crate) async fn handle_request(
                 .await
                 .map_err(|e| AcpError::new(-32603, format!("Thread creation failed: {e}")))?;
             let session_id = thread_id.clone();
+
+            // ── Freeze system prompt data at session creation ──
+            // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
+            // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
+            // GAP-05: frozen data 在 WorkflowMiddleware 创建前构建，注入到 executor。
+            cfg.session_manager.ensure_session(&session_id, &cwd);
+            let frozen_data = cfg.session_manager.build_frozen_data(
+                &cwd,
+                &cfg.plugin_skill_roots,
+                &cfg.plugin_agent_dirs,
+            );
+
+            // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
+            let workflow_middleware = {
+                let provider_snap = cfg.provider.read().clone();
+                let mut compact_config = peri_agent::agent::compact::CompactConfig::default();
+                compact_config.apply_env_overrides();
+                let wf_executor = peri_acp::agent::workflow_agent::create_executor(
+                    peri_acp::agent::workflow_agent::WorkflowAgentContext {
+                        provider: provider_snap,
+                        cwd: cwd.clone(),
+                        frozen_claude_md: frozen_data.claude_md().map(|s| s.to_string()),
+                        frozen_claude_local_md: frozen_data
+                            .claude_local_md()
+                            .map(|s| s.to_string()),
+                        frozen_skill_summary: frozen_data.skill_summary().map(|s| s.to_string()),
+                        session_id: Some(session_id.clone()),
+                        compact_config: Some(compact_config),
+                        cancel: None,
+                        system_prompt: Some(frozen_data.system_prompt().to_string()),
+                        broker: None,
+                        permission_mode: None,
+                        frozen_date: Some(frozen_data.date().to_string()),
+                        frozen_language: frozen_data.language().map(|s| s.to_string()),
+                        agent_pool: None,
+                        langfuse_session: None,
+                        thread_store: None,
+                        peri_config: Some(Arc::new(cfg.peri_config.read().clone())),
+                    },
+                );
+                let (notification_tx, _) = tokio::sync::broadcast::channel(32);
+                Some(Arc::new(
+                    peri_middlewares::workflow::WorkflowMiddleware::new(
+                        wf_executor,
+                        &cwd,
+                        notification_tx,
+                    ),
+                ))
+            };
+
             sessions.insert(
                 session_id.clone(),
                 SessionState {
@@ -68,24 +123,13 @@ pub(crate) async fn handle_request(
                     cwd: cwd.clone(),
                     history: Vec::new(),
                     cancel_token: None,
-                    frozen: None,
+                    frozen: Some(frozen_data),
                     recall_items: Vec::new(),
                     agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                    workflow_middleware,
                 },
             );
 
-            // ── Freeze system prompt data at session creation ──
-            // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
-            // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
-            cfg.session_manager.ensure_session(&session_id, &cwd);
-            let frozen_data = cfg.session_manager.build_frozen_data(
-                &cwd,
-                &cfg.plugin_skill_roots,
-                &cfg.plugin_agent_dirs,
-            );
-
-            let state = sessions.get_mut(&session_id).unwrap();
-            state.frozen = Some(frozen_data);
             info!(session_id = %session_id, "ACP session created with ThreadStore");
             let modes = build_mode_state(&cfg.permission_mode);
             let config_options = {
@@ -105,6 +149,8 @@ pub(crate) async fn handle_request(
             );
             let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
             send_available_commands_update(transport, &session_id, &skills).await;
+
+            // BRIDGE_RESET_COUNTER handles stale committed cleanup; no explicit clear needed
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -158,8 +204,20 @@ pub(crate) async fn handle_request(
                 }
                 "thinking_effort" => {
                     apply_thinking_effort(&cfg.peri_config, value);
+                    // 同步更新 LlmProvider（thinking 变更需要重建 provider）
+                    let new_provider = {
+                        let c = cfg.peri_config.read();
+                        LlmProvider::from_config(&c)
+                    };
+                    if let Some(new_provider) = new_provider {
+                        *cfg.provider.write() = new_provider;
+                    }
+                    // Thinking 变更 → invalidate cached LLM 实例
+                    if let Some(s) = sessions.get_mut(session_id) {
+                        s.agent_pool.invalidate();
+                    }
                     persist_config(cfg);
-                    info!(effort = %value, "Thinking effort changed via configOption (persisted)");
+                    info!(effort = %value, "Thinking effort changed via configOption");
                 }
                 "context_1m" => {
                     let enabled = value == "true" || value == "1";
@@ -213,6 +271,7 @@ pub(crate) async fn handle_request(
                         frozen: None,
                         recall_items: Vec::new(),
                         agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                        workflow_middleware: None,
                     },
                 );
             }
@@ -227,6 +286,26 @@ pub(crate) async fn handle_request(
             if let Some(s) = sessions.get_mut(req_session_id) {
                 s.frozen = Some(frozen_data);
             }
+
+            // ── ACP v1 spec: replay history via session/update BEFORE responding ──
+            let history_for_replay: Vec<_> = sessions
+                .get(req_session_id)
+                .map(|s| s.history.clone())
+                .unwrap_or_default();
+            let replay_sender = TuiReplaySender { transport };
+            if let Err(e) = dispatch::replay_session_history(
+                req_session_id,
+                &history_for_replay,
+                &replay_sender,
+            )
+            .await
+            {
+                tracing::warn!(session_id = %req_session_id, error = %e, "session/load: history replay failed, continuing");
+            }
+
+            // modes/configOptions sent both via notification AND in response body
+            // (notification for async update, response body for immediate availability)
+            send_config_option_update(transport, req_session_id, cfg).await;
 
             let modes = build_mode_state(&cfg.permission_mode);
             let config_options = {
@@ -283,6 +362,115 @@ pub(crate) async fn handle_request(
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
 
+        "workflow/list_runs" => {
+            let req_session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+
+            let runs = sessions
+                .get(req_session_id)
+                .and_then(|s| s.workflow_middleware.as_ref())
+                .map(|mw| mw.progress_store().get_all_runs_snapshot())
+                .unwrap_or_default();
+
+            let resp = serde_json::json!({ "runs": runs });
+            Ok(resp)
+        }
+
+        "workflow/kill_agent" => {
+            let run_id = params
+                .get("runId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing runId"))?;
+            let agent_id = params
+                .get("agentId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| AcpError::new(-32602, "missing agentId"))?;
+
+            let killed = if let Some(mw) = sessions
+                .values()
+                .find_map(|s| s.workflow_middleware.as_ref())
+            {
+                mw.runner().kill_agent(run_id, agent_id).await
+            } else {
+                false
+            };
+
+            if killed {
+                info!(run_id, agent_id, "Workflow agent killed via ACP");
+            } else {
+                warn!(run_id, agent_id, "Workflow agent kill failed (not found)");
+            }
+            Ok(serde_json::json!({ "killed": killed }))
+        }
+
+        "workflow/kill_run" => {
+            let run_id = params
+                .get("runId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing runId"))?;
+
+            let killed = if let Some(mw) = sessions
+                .values()
+                .find_map(|s| s.workflow_middleware.as_ref())
+            {
+                mw.registry().kill(run_id).is_ok()
+            } else {
+                false
+            };
+
+            if killed {
+                info!(run_id, "Workflow run killed via ACP");
+            } else {
+                warn!(run_id, "Workflow run kill failed (not found)");
+            }
+            Ok(serde_json::json!({ "killed": killed }))
+        }
+
+        "workflow/resume" => {
+            let run_id = params
+                .get("runId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing runId"))?;
+
+            let mw = sessions
+                .values()
+                .find_map(|s| s.workflow_middleware.as_ref())
+                .ok_or_else(|| AcpError::new(-32602, "no workflow middleware found"))?;
+
+            let new_run_id = mw
+                .resume_workflow(run_id)
+                .await
+                .map_err(|e| AcpError::new(-32603, e))?;
+
+            info!(old_run = %run_id, new_run = %new_run_id, "Workflow resumed via ACP");
+            Ok(serde_json::json!({
+                "runId": new_run_id,
+                "resumedFrom": run_id
+            }))
+        }
+
+        "session/cancel-bg-task" => {
+            let req_session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+            let task_id = params
+                .get("taskId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing taskId"))?;
+
+            if let Some(session) = cfg.session_manager.get_session(req_session_id) {
+                session
+                    .background_registry
+                    .cancel(task_id)
+                    .map_err(|e| AcpError::new(-32603, e.to_string()))?;
+                info!(session_id = %req_session_id, task_id = %task_id, "Background task cancelled via ACP");
+            }
+            Ok(serde_json::json!({ "success": true }))
+        }
+
         "session/close" => {
             let req_session_id = params
                 .get("sessionId")
@@ -309,6 +497,10 @@ pub(crate) async fn handle_request(
                 .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
             let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
+            // Load history from ThreadStore (deferred load)
+            let history =
+                dispatch::load_session_messages(cfg.thread_store.as_ref(), req_session_id).await;
+
             if !sessions.contains_key(req_session_id) {
                 sessions.insert(
                     req_session_id.to_string(),
@@ -316,15 +508,22 @@ pub(crate) async fn handle_request(
                         session_id: req_session_id.to_string(),
                         thread_id: req_session_id.to_string(),
                         cwd: cwd.to_string(),
-                        history: Vec::new(),
+                        history,
                         cancel_token: None,
                         frozen: None,
                         recall_items: Vec::new(),
                         agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                        workflow_middleware: None,
                     },
                 );
                 info!(session_id = %req_session_id, "Session resumed (new)");
             } else {
+                // Existing session: if history still empty, populate from ThreadStore
+                if let Some(s) = sessions.get_mut(req_session_id)
+                    && s.history.is_empty()
+                {
+                    s.history = history;
+                }
                 info!(session_id = %req_session_id, "Session resumed (existing)");
             }
 
@@ -375,6 +574,7 @@ pub(crate) async fn handle_request(
                     frozen: None,
                     recall_items: Vec::new(),
                     agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+                    workflow_middleware: None,
                 },
             );
 
@@ -449,8 +649,391 @@ pub(crate) async fn handle_request(
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
 
+        "plugin/install" => {
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'name'"))?;
+            let marketplace = params
+                .get("marketplace")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'marketplace'"))?;
+            let scope_str = params
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user");
+            let scope = match scope_str {
+                "project" => peri_middlewares::plugin::InstallScope::Project,
+                "local" => peri_middlewares::plugin::InstallScope::Local,
+                _ => peri_middlewares::plugin::InstallScope::User,
+            };
+            let session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let claude_dir = dirs_next::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".claude");
+            let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
+
+            match peri_middlewares::plugin::install_plugin(
+                name,
+                marketplace,
+                scope,
+                &cache_dir,
+                &claude_dir,
+                None,
+            )
+            .await
+            {
+                Ok(installed) => {
+                    let _ = push_plugin_action_result(
+                        transport, session_id, "install", name, true, None,
+                    )
+                    .await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir).await;
+                    Ok(serde_json::json!({ "success": true, "plugin": installed.id }))
+                }
+                Err(e) => {
+                    let _ = push_plugin_action_result(
+                        transport,
+                        session_id,
+                        "install",
+                        name,
+                        false,
+                        Some(&e.to_string()),
+                    )
+                    .await;
+                    Err(AcpError::new(-32603, e.to_string()))
+                }
+            }
+        }
+
+        "plugin/uninstall" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'pluginId'"))?;
+            let session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let claude_dir = dirs_next::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".claude");
+
+            match peri_middlewares::plugin::uninstall_plugin(plugin_id, &claude_dir, None).await {
+                Ok(()) => {
+                    let _ = push_plugin_action_result(
+                        transport,
+                        session_id,
+                        "uninstall",
+                        plugin_id,
+                        true,
+                        None,
+                    )
+                    .await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir).await;
+                    Ok(serde_json::json!({ "success": true }))
+                }
+                Err(e) => {
+                    let _ = push_plugin_action_result(
+                        transport,
+                        session_id,
+                        "uninstall",
+                        plugin_id,
+                        false,
+                        Some(&e.to_string()),
+                    )
+                    .await;
+                    Err(AcpError::new(-32603, e.to_string()))
+                }
+            }
+        }
+
+        "plugin/toggle" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'pluginId'"))?;
+            let enable = params
+                .get("enable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let scope_str = params
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user");
+            let scope = match scope_str {
+                "project" => peri_middlewares::plugin::InstallScope::Project,
+                "local" => peri_middlewares::plugin::InstallScope::Local,
+                _ => peri_middlewares::plugin::InstallScope::User,
+            };
+            let session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let claude_dir = dirs_next::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".claude");
+
+            let result = if enable {
+                peri_middlewares::plugin::update_enabled_plugins(
+                    plugin_id,
+                    scope,
+                    &claude_dir,
+                    None,
+                )
+            } else {
+                peri_middlewares::plugin::remove_from_enabled_plugins(
+                    plugin_id,
+                    &scope,
+                    &claude_dir,
+                    None,
+                )
+            };
+
+            match result {
+                Ok(()) => {
+                    let action = if enable { "enable" } else { "disable" };
+                    let _ = push_plugin_action_result(
+                        transport, session_id, action, plugin_id, true, None,
+                    )
+                    .await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir).await;
+                    Ok(serde_json::json!({ "success": true }))
+                }
+                Err(e) => {
+                    let action = if enable { "enable" } else { "disable" };
+                    let _ = push_plugin_action_result(
+                        transport,
+                        session_id,
+                        action,
+                        plugin_id,
+                        false,
+                        Some(&e.to_string()),
+                    )
+                    .await;
+                    Err(AcpError::new(-32603, e.to_string()))
+                }
+            }
+        }
+
+        "plugin/search" => {
+            let query = params
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'query'"))?;
+            let session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
+            let results = search_marketplace_plugins(query, &cache_dir);
+
+            let _ = push_plugin_search_result(transport, session_id, query, &results).await;
+            Ok(serde_json::json!({ "results": results.iter().map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "version": r.version,
+                    "description": r.description,
+                    "marketplace": r.marketplace,
+                })
+            }).collect::<Vec<_>>() }))
+        }
+
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),
     }
+}
+
+/// Adapts `&dyn AcpTransport` into a `ReplaySender` for the TUI path.
+struct TuiReplaySender<'a> {
+    transport: &'a dyn peri_acp::transport::AcpTransport,
+}
+
+#[async_trait::async_trait]
+impl ReplaySender for TuiReplaySender<'_> {
+    async fn send(
+        &self,
+        notif: SessionNotification,
+    ) -> Result<(), peri_acp::dispatch::ReplayError> {
+        let payload = serde_json::to_value(&notif)
+            .map_err(|e| peri_acp::dispatch::ReplayError::SendFailed(e.to_string()))?;
+        self.transport
+            .send_notification("session/update", payload)
+            .await
+            .map_err(|e| peri_acp::dispatch::ReplayError::SendFailed(e.to_string()))
+    }
+}
+
+// ── Plugin event pushers ──────────────────────────────────────────────────
+
+async fn push_plugin_action_result(
+    transport: &dyn peri_acp::transport::AcpTransport,
+    session_id: &str,
+    action: &str,
+    plugin_name: &str,
+    success: bool,
+    error: Option<&str>,
+) {
+    let payload = PluginActionResult {
+        action: action.to_string(),
+        plugin_name: plugin_name.to_string(),
+        success,
+        error: error.map(|s| s.to_string()),
+    };
+    let data = serde_json::to_value(&payload).unwrap_or_default();
+    let envelope = serde_json::json!({
+        "sessionId": session_id,
+        "event": "plugin-action-result",
+        "data": data,
+    });
+    if let Err(e) = transport
+        .send_notification("peri/unstable-event", envelope)
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to push plugin-action-result");
+    }
+}
+
+async fn push_plugin_snapshot(
+    transport: &dyn peri_acp::transport::AcpTransport,
+    session_id: &str,
+    claude_dir: &std::path::Path,
+) {
+    let plugins = collect_plugin_snapshot(claude_dir);
+    let payload = PluginSnapshot { plugins };
+    let data = serde_json::to_value(&payload).unwrap_or_default();
+    let envelope = serde_json::json!({
+        "sessionId": session_id,
+        "event": "plugin-snapshot",
+        "data": data,
+    });
+    if let Err(e) = transport
+        .send_notification("peri/unstable-event", envelope)
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to push plugin-snapshot");
+    }
+}
+
+async fn push_plugin_search_result(
+    transport: &dyn peri_acp::transport::AcpTransport,
+    session_id: &str,
+    query: &str,
+    results: &[PluginSnapshotEntry],
+) {
+    let payload = PluginSearchResult {
+        query: query.to_string(),
+        results: results.to_vec(),
+        from_cache: true,
+    };
+    let data = serde_json::to_value(&payload).unwrap_or_default();
+    let envelope = serde_json::json!({
+        "sessionId": session_id,
+        "event": "plugin-search-result",
+        "data": data,
+    });
+    if let Err(e) = transport
+        .send_notification("peri/unstable-event", envelope)
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to push plugin-search-result");
+    }
+}
+
+fn collect_plugin_snapshot(claude_dir: &std::path::Path) -> Vec<PluginSnapshotEntry> {
+    let loaded = peri_middlewares::plugin::load_enabled_plugins_aggregated(claude_dir);
+
+    let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
+    let installed = peri_middlewares::plugin::load_installed_plugins(Some(&plugins_path))
+        .ok()
+        .unwrap_or_default();
+
+    loaded
+        .plugins
+        .iter()
+        .map(|p| PluginSnapshotEntry {
+            name: p.manifest.name.clone(),
+            version: p.manifest.version.clone(),
+            enabled: installed.plugins.iter().any(|ip| ip.name == p.name),
+            root: p.install_path.to_string_lossy().to_string(),
+            description: p.manifest.description.clone(),
+            marketplace: p.marketplace.clone(),
+            author: p.manifest.author.as_ref().map(|a| a.name.clone()),
+            skills_count: p.skills_roots.len(),
+            commands_count: p.commands.len(),
+            agents_count: p.agents_dirs.len(),
+            mcp_count: p.mcp_servers.len(),
+            install_scope: installed
+                .plugins
+                .iter()
+                .find(|ip| ip.name == p.name)
+                .map(|ip| format!("{:?}", ip.scope).to_lowercase())
+                .unwrap_or_default(),
+            load_error: None,
+        })
+        .collect()
+}
+
+fn search_marketplace_plugins(
+    query: &str,
+    cache_dir: &std::path::Path,
+) -> Vec<PluginSnapshotEntry> {
+    let query_lower = query.to_lowercase();
+    let mut results = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(cache_dir) {
+        for entry in entries.flatten() {
+            let mp_dir = entry.path();
+            let mp_name = mp_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let manifest_path = mp_dir.join("marketplace.json");
+            if let Ok(content) = std::fs::read_to_string(&manifest_path)
+                && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content)
+                && let Some(plugins) = manifest.get("plugins").and_then(|v| v.as_array())
+            {
+                for p in plugins {
+                    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let desc = p.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                    if name.to_lowercase().contains(&query_lower)
+                        || desc.to_lowercase().contains(&query_lower)
+                    {
+                        results.push(PluginSnapshotEntry {
+                            name: name.to_string(),
+                            version: p
+                                .get("version")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            enabled: false,
+                            root: String::new(),
+                            description: desc.to_string(),
+                            marketplace: mp_name.clone(),
+                            author: p
+                                .get("author")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            skills_count: 0,
+                            commands_count: 0,
+                            agents_count: 0,
+                            mcp_count: 0,
+                            install_scope: String::new(),
+                            load_error: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    results
 }
 
 #[cfg(test)]

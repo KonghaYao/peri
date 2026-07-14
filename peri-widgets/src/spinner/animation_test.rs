@@ -12,19 +12,6 @@
     }
 
     #[test]
-    fn test_smooth_increment_convergence() {
-        let mut displayed = 0;
-        let target = 100;
-        for _ in 0..200 {
-            displayed = smooth_increment(displayed, target);
-            if displayed >= target {
-                break;
-            }
-        }
-        assert_eq!(displayed, target);
-    }
-
-    #[test]
     fn test_format_elapsed() {
         assert_eq!(format_elapsed(90_000), "1m 30s");
         assert_eq!(format_elapsed(30_000), "30s");

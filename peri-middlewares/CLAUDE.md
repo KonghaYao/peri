@@ -1,6 +1,12 @@
 # peri-middlewares
 
-中间件实现 crate，依赖 `peri-agent` 和 `peri-lsp`。19 个中间件按固定顺序组成链。
+中间件实现 crate，依赖 `peri-agent` 和 `peri-lsp`。14 个基础中间件 + 5 个条件中间件（Hook/MCP/Workflow/LSP/Goal），按固定顺序组成链。
+
+## 开发命令
+
+- `cargo build -p peri-middlewares`：构建
+- `cargo test -p peri-middlewares --lib`：运行全部中间件测试
+- `cargo test -p peri-acp`：ACP 层集成测试（链构造验证）
 
 ## 中间件链执行顺序
 
@@ -20,11 +26,11 @@
 13. HumanInTheLoopMiddleware ← before_tool 拦截
 14. SubAgentMiddleware       ← Agent 工具
 15. McpMiddleware            ← MCP 工具和资源（pool 成功时注册）
-16. ToolSearchMiddleware     ← SearchExtraTools/ExecuteExtraTool 代理
-17. LspMiddleware            ← LSP 工具 + after_tool 文件变更同步
-18. CompactMiddleware        ← 上下文压缩（before_model 钩子，含 once-per-prompt 守卫）
+16. WorkflowMiddleware       ← WorkflowTool（条件注册，deferred tool）
+17. ToolSearchMiddleware     ← SearchExtraTools/ExecuteExtraTool 代理
+18. LspMiddleware            ← LSP 工具 + after_tool 文件变更同步
 19. GoalMiddleware           ← after_agent 注入递增紧迫感 steering + 设 block_continue 自驱循环（链最后）
-[ReActAgent.with_system_prompt()] ← prepend
+[with_system_prompt()]       ← prepend
 ```
 
 插件通过 `plugin_skill_roots: Vec<SkillRoot>` → `SkillsMiddleware.with_plugin_roots()`、`plugin_hooks` → `HookMiddleware` 注入，无独立 PluginMiddleware。
@@ -57,9 +63,15 @@
 
 **[TRAP]** 插件 MCP `.mcp.json` 回退：`extract_mcp_servers` 有两层加载逻辑——先处理 manifest `mcpServers` 字段，结果为空时回退加载 `install_path/.mcp.json`。MCP pool 初始化通过 `load_merged_config_full` 独立调用 `load_enabled_plugins_aggregated`，不依赖 TUI 层传递插件 MCP 数据。
 
-## Compact 中间件
+## Compact 处理（v2）
 
-`CompactMiddleware`：`before_model` 钩子，在 ReAct 循环内触发 compact。**[TRAP]** Micro compact 必须加 once-per-prompt 守卫（AtomicBool），否则每轮都重复触发。（详见 spec/global/domains/compact.md#issue_2026-05-23-micro-compact-repeated-triggering）
+**[v2] CompactMiddleware 已删除**。自动 compact 由 `peri-agent::agent::stages::compact` 阶段在 `run_react_loop` 每轮开头检查 `ContextBudget` 后触发 `compact_v2::run_compact`：
+
+- 0.70 触发 micro-compact（零 LLM，标 `truncated`）
+- 0.85 触发 full compact（LLM 摘要 + `excluded` 标记 + `re_inject_v2`）
+- Full compact 后 `stages/compact.rs` 显式 reset `token_tracker`
+
+**[TRAP]** Micro compact 重复触发问题：v2 通过 `MessageTranscript` 的 `truncated` 标记幂等——已经标 `truncated` 的消息不会被再次处理（由 `compact_v2::micro_compact` 内部跳过已标记消息实现，详见 spec/global/domains/compact.md#issue_2026-05-23-micro-compact-repeated-triggering）。
 
 ## LSP 中间件
 

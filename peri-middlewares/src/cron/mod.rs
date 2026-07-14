@@ -49,6 +49,9 @@ pub struct CronTrigger {
 pub struct CronScheduler {
     tasks: HashMap<String, CronTask>,
     trigger_tx: mpsc::UnboundedSender<CronTrigger>,
+    /// Additional trigger senders (for CronOwner bridge in ACP layer).
+    /// Each sender receives a clone of every CronTrigger fired.
+    extra_trigger_txs: Vec<mpsc::UnboundedSender<CronTrigger>>,
 }
 
 impl CronScheduler {
@@ -56,7 +59,19 @@ impl CronScheduler {
         Self {
             tasks: HashMap::new(),
             trigger_tx,
+            extra_trigger_txs: Vec::new(),
         }
+    }
+
+    /// Subscribe to cron triggers — returns a receiver that receives every trigger.
+    ///
+    /// The primary `trigger_tx` (from `new()`) is unaffected — this adds an additional
+    /// sender. Used by `CronOwner` in the ACP layer to bridge triggers directly to
+    /// the SessionInbox, bypassing TUI polling.
+    pub fn subscribe(&mut self) -> mpsc::UnboundedReceiver<CronTrigger> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.extra_trigger_txs.push(tx);
+        rx
     }
 
     /// 注册新任务
@@ -112,19 +127,29 @@ impl CronScheduler {
             }
             if let Some(next) = task.next_fire {
                 if now >= next {
-                    if self
-                        .trigger_tx
-                        .send(CronTrigger {
-                            task_id: task.id.clone(),
-                            prompt: task.prompt.clone(),
-                        })
-                        .is_err()
-                    {
+                    let trigger = CronTrigger {
+                        task_id: task.id.clone(),
+                        prompt: task.prompt.clone(),
+                    };
+                    // Send to primary trigger_tx (TUI polling path)
+                    if self.trigger_tx.send(trigger.clone()).is_err() {
                         warn!(
                             task_id = %task.id,
-                            "cron tick: failed to send trigger (channel closed)"
+                            "cron tick: failed to send trigger (primary channel closed)"
                         );
                     }
+                    // Send to extra trigger_txs (CronOwner bridge path)
+                    self.extra_trigger_txs.retain(|tx| {
+                        if tx.send(trigger.clone()).is_err() {
+                            warn!(
+                                task_id = %task.id,
+                                "cron tick: extra trigger sender closed, removing"
+                            );
+                            false
+                        } else {
+                            true
+                        }
+                    });
                     // 计算下次触发时间
                     task.next_fire = Self::calculate_next_fire(&task.expression, now);
                 }

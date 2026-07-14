@@ -166,3 +166,48 @@
         let msgs: Vec<BaseMessage> = vec![];
         assert!(extract_title(&msgs).is_none());
     }
+
+    #[tokio::test]
+    async fn test_delete_messages_since_truncates_jsonl() {
+        let dir = tempdir().unwrap();
+        let store = FilesystemThreadStore::new(dir.path());
+        let id = store.create_thread(make_meta("/test")).await.unwrap();
+
+        let msgs = vec![
+            BaseMessage::human("m1"),
+            BaseMessage::human("m2"),
+            BaseMessage::human("m3"),
+            BaseMessage::human("m4"),
+        ];
+        store.append_messages(&id, &msgs).await.unwrap();
+
+        let target_id = msgs[1].id();
+        store.delete_messages_since(&id, &target_id).await.unwrap();
+
+        let loaded = store.load_messages(&id).await.unwrap();
+        assert_eq!(loaded.len(), 2, "delete_messages_since 应保留 target 及之前");
+        assert_eq!(loaded[0].id(), msgs[0].id());
+        assert_eq!(loaded[1].id(), msgs[1].id());
+
+        // meta.message_count 应同步刷新
+        let meta = store.load_meta(&id).await.unwrap();
+        assert_eq!(meta.message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_messages_since_unknown_id_is_noop() {
+        let dir = tempdir().unwrap();
+        let store = FilesystemThreadStore::new(dir.path());
+        let id = store.create_thread(make_meta("/test")).await.unwrap();
+
+        store
+            .append_messages(&id, &[BaseMessage::human("only")])
+            .await
+            .unwrap();
+
+        let ghost = crate::messages::MessageId::new();
+        store.delete_messages_since(&id, &ghost).await.unwrap();
+
+        let loaded = store.load_messages(&id).await.unwrap();
+        assert_eq!(loaded.len(), 1, "未知 message_id 应为 no-op");
+    }
