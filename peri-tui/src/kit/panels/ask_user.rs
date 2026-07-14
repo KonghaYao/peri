@@ -208,8 +208,10 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     true
                 }
                 // 可见字符插入
-                KeyCode::Char(c) if key.modifiers == KeyModifiers::NONE
-                    || key.modifiers == KeyModifiers::SHIFT => {
+                KeyCode::Char(c)
+                    if key.modifiers == KeyModifiers::NONE
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
                     st.insert_char(c);
                     true
                 }
@@ -222,30 +224,30 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
         // ── 非 Typing 模式：选项导航 ──
 
-            // Space：选中/取消当前高亮的选项（或手动进入 typing）
-            if (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Char(' ')) {
-                let q_idx = *focused.read();
-                let opt_idx = *focused_option.read();
-                // 自定义输入选项：手动进入 Typing 模式
-                if let Some(au) = pending_for_closure.as_ref()
-                    && let Some(q) = au.questions.get(q_idx)
-                    && opt_idx == q.options.len()
-                {
-                    let existing = custom_answers
-                        .read()
-                        .get(q_idx)
-                        .cloned()
-                        .flatten()
-                        .unwrap_or_default();
-                    let mut ts = typing_state.write();
-                    ts.replace_all_no_undo(existing);
-                    ts.clear_undo_history();
-                    *is_typing.write() = true;
-                    return EventResult::Consumed;
-                }
-                if let Some(au) = pending_for_closure.as_ref()
-                    && let Some(q) = au.questions.get(q_idx)
-                    && opt_idx < q.options.len()
+        // Space：选中/取消当前高亮的选项（或手动进入 typing）
+        if (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Char(' ')) {
+            let q_idx = *focused.read();
+            let opt_idx = *focused_option.read();
+            // 自定义输入选项：手动进入 Typing 模式
+            if let Some(au) = pending_for_closure.as_ref()
+                && let Some(q) = au.questions.get(q_idx)
+                && opt_idx == q.options.len()
+            {
+                let existing = custom_answers
+                    .read()
+                    .get(q_idx)
+                    .cloned()
+                    .flatten()
+                    .unwrap_or_default();
+                let mut ts = typing_state.write();
+                ts.replace_all_no_undo(existing);
+                ts.clear_undo_history();
+                *is_typing.write() = true;
+                return EventResult::Consumed;
+            }
+            if let Some(au) = pending_for_closure.as_ref()
+                && let Some(q) = au.questions.get(q_idx)
+                && opt_idx < q.options.len()
             {
                 let mut a = answers.write();
                 if q_idx >= a.len() {
@@ -456,10 +458,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .iter()
                 .enumerate()
                 .flat_map(|(i, q)| {
-                    let answered = answers_read
-                        .get(i)
-                        .map(|v| !v.is_empty())
-                        .unwrap_or(false)
+                    let answered = answers_read.get(i).map(|v| !v.is_empty()).unwrap_or(false)
                         || custom_answers
                             .read()
                             .get(i)
@@ -510,10 +509,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     .unwrap_or(false);
 
                 // 预设选项列表
-                let selected_indices = answers_read
-                    .get(focused_idx)
-                    .cloned()
-                    .unwrap_or_default();
+                let selected_indices = answers_read.get(focused_idx).cloned().unwrap_or_default();
                 let fopt = *focused_option.read();
 
                 // Typing 模式下隐藏预设选项的选中状态
@@ -535,7 +531,9 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let style = if is_selected {
                         Style::new().fg(popup_tokens.action_primary).bold()
                     } else if is_focused_opt {
-                        Style::new().fg(popup_tokens.action_primary).add_modifier(Modifier::BOLD)
+                        Style::new()
+                            .fg(popup_tokens.action_primary)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::new().fg(semantic.text.primary)
                     };
@@ -601,13 +599,10 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         .flatten()
                         .unwrap_or_default();
                     let mark = if q.multi_select { "☑" } else { "●" };
-                    let custom_style = Style::new()
-                        .fg(popup_tokens.action_primary)
-                        .bold();
+                    let custom_style = Style::new().fg(popup_tokens.action_primary).bold();
                     for wrapped in wrap_text(&existing, WRAP_WIDTH.saturating_sub(4)) {
                         lines.push(
-                            Line::from(format!("    {} {}", mark, wrapped))
-                                .style(custom_style),
+                            Line::from(format!("    {} {}", mark, wrapped)).style(custom_style),
                         );
                     }
                 } else {
@@ -620,11 +615,8 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         Style::new().fg(semantic.text.dim)
                     };
                     lines.push(
-                        Line::from(format!(
-                            "    {}",
-                            i18n::tr("ask-user-placeholder")
-                        ))
-                        .style(custom_style),
+                        Line::from(format!("    {}", i18n::tr("ask-user-placeholder")))
+                            .style(custom_style),
                     );
                 }
 
@@ -638,10 +630,8 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(""));
             // 提示行：根据当前模式选择文本
             if typing {
-                lines.push(
-                    Line::from(i18n::tr("panel-ask-user-hint-typing"))
-                        .fg(semantic.text.dim),
-                );
+                lines
+                    .push(Line::from(i18n::tr("panel-ask-user-hint-typing")).fg(semantic.text.dim));
             } else {
                 let is_multi_select = au
                     .questions
@@ -651,8 +641,16 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if au.questions.len() > 1 {
                     let all_answered = answers_read.iter().enumerate().all(|(i, a)| {
                         !a.is_empty()
-                            || custom_answers.read().get(i).map(|ca| ca.is_some()).unwrap_or(false)
-                            || au.questions.get(i).map(|q| q.options.is_empty()).unwrap_or(true)
+                            || custom_answers
+                                .read()
+                                .get(i)
+                                .map(|ca| ca.is_some())
+                                .unwrap_or(false)
+                            || au
+                                .questions
+                                .get(i)
+                                .map(|q| q.options.is_empty())
+                                .unwrap_or(true)
                     });
                     let key = if all_answered {
                         if is_multi_select {
@@ -670,8 +668,16 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     lines.push(Line::from(i18n::tr(key)).fg(semantic.text.dim));
                 } else {
                     let is_answered = answers_read.first().map(|v| !v.is_empty()).unwrap_or(false)
-                        || custom_answers.read().first().map(|ca| ca.is_some()).unwrap_or(false)
-                        || au.questions.first().map(|q| q.options.is_empty()).unwrap_or(true);
+                        || custom_answers
+                            .read()
+                            .first()
+                            .map(|ca| ca.is_some())
+                            .unwrap_or(false)
+                        || au
+                            .questions
+                            .first()
+                            .map(|q| q.options.is_empty())
+                            .unwrap_or(true);
                     let key = if is_answered {
                         if is_multi_select {
                             "panel-ask-user-hint-single-multi-select-answered"
@@ -780,10 +786,10 @@ fn build_answers_map(
                     .iter()
                     .filter_map(|idx| q.options.get(*idx).map(|opt| json!(opt.label)))
                     .collect();
-                if let Some(custom_text) = custom {
-                    if !custom_text.is_empty() {
-                        labels.push(json!(custom_text));
-                    }
+                if let Some(custom_text) = custom
+                    && !custom_text.is_empty()
+                {
+                    labels.push(json!(custom_text));
                 }
                 if labels.is_empty() {
                     json!([])
