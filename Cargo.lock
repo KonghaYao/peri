@@ -4123,7 +4123,9 @@ dependencies = [
 
 [[package]]
 name = "ratatui-kit-markdown"
-version = "0.2.0"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70806224877251b3c83f5e79927714961817ad8aae99fa45c1b11bf81de6f1b0"
 dependencies = [
  "pulldown-cmark",
  "ratatui-kit",

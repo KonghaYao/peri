@@ -29,7 +29,7 @@ peri-middlewares = { path = "../peri-middlewares" }
 peri-lsp = { path = "../peri-lsp" }
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info", "unstable-widget-ref"] }
 ratatui-kit = { version = "0.10.2", features = ["full"] }
-ratatui-kit-markdown = { path = "../../ratatui-kit-contrib/crates/ratatui-kit-markdown", features = ["markdown-highlight"] }
+ratatui-kit-markdown = { version = "0.3.0", features = ["markdown-highlight"] }
 tokio.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true

@@ -213,17 +213,16 @@ mod tests {
     fn test_inline_code() {
         let result = flatten(&parse_markdown("use `code` here", 80, Palette::default()));
         let line = &result[0];
-        // 行内代码不含 backtick 标记，使用 inline_code_style 颜色
+        // v0.3.0: inline code 内容包含 backtick 标记，且不再使用 Palette 颜色
         let code_span = line
             .spans
             .iter()
-            .find(|s| s.content.as_ref() == "code")
-            .expect("inline code span should not contain backtick markers");
-        // Palette::default().info = Color::Blue
+            .find(|s| s.content.as_ref().contains("code"))
+            .expect("inline code span should contain 'code'");
+        // v0.3.0 不应用 fg 颜色
         assert_eq!(
-            code_span.style.fg,
-            Some(ratatui::style::Color::Blue),
-            "inline code should use palette.info color"
+            code_span.style.fg, None,
+            "inline code should not have explicit fg in v0.3.0"
         );
         // 不应有背景色
         assert_eq!(
