@@ -937,6 +937,7 @@ panel-ask-user-hint-tab-multi-select-answered =   Tab::next-question · ↑/↓:
 panel-ask-user-hint-tab-multi-select-unanswered =   Tab::next-question · ↑/↓::navigate · Space::toggle · Enter::next · Esc::cancel
 panel-ask-user-hint-single-multi-select-answered =   ↑/↓::navigate · Space::toggle · Enter::submit · Esc::cancel
 panel-ask-user-hint-single-multi-select-unanswered =   ↑/↓::navigate · Space::toggle · Esc::cancel
+panel-ask-user-hint-typing =   Typing · Ctrl+W::delete-word · Backspace::delete · Enter::confirm · Esc::cancel
 
 # ---- Others ----
 bg-task-overflow = … { $count } more

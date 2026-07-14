@@ -936,6 +936,7 @@ panel-ask-user-hint-tab-multi-select-answered =   Tab::下一题 · ↑/↓::导
 panel-ask-user-hint-tab-multi-select-unanswered =   Tab::下一题 · ↑/↓::导航 · Space::多选 · Enter::下一题 · Esc::取消
 panel-ask-user-hint-single-multi-select-answered =   ↑/↓::导航 · Space::多选 · Enter::提交 · Esc::取消
 panel-ask-user-hint-single-multi-select-unanswered =   ↑/↓::导航 · Space::多选 · Esc::取消
+panel-ask-user-hint-typing =   输入中 · Ctrl+W::删词 · Backspace::删字 · Enter::确认 · Esc::取消
 
 # ---- Others ----
 bg-task-overflow = … { $count } more
