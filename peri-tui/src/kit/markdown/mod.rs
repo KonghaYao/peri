@@ -130,11 +130,15 @@ pub fn parse_markdown_cached(
     let theme = MarkdownTheme::from_palette(&palette);
 
     // 判断是否能复用 stable_state
+    // [Table 缓存失效] Table 是动态块：追加行会改变同一 block 的内容（headers/rows），
+    // 而其他块（Paragraph/CodeBlock/ListItem）闭合后不变。因此若已处理块中曾含 Table，
+    // 必须全量重跑，否则旧 TableData（可能行数不足）会被复用。
     let can_reuse = cache.has_stable_prefix()
         && cache.stable_width == max_width as u16
         && cache.stable_palette == palette
         && sanitized.starts_with(&cache.stable_text)
-        && cache.stable_state.processed_block_count <= parsed.blocks.len();
+        && cache.stable_state.processed_block_count <= parsed.blocks.len()
+        && !cache.stable_state.has_table_in_processed_blocks;
 
     let mut state = if can_reuse {
         cache.stable_state.clone()
@@ -806,6 +810,62 @@ mod tests {
                 &["peri-tui", "可能修改", "新增字段"],
             ],
             "8-agent-output",
+        );
+    }
+
+    /// [回归测试] 表格增量缓存 bug：table header 被缓存后，追加数据行时
+    /// 缓存应失效（全量重跑），而非复用旧 TableData（行数不足）。
+    ///
+    /// 场景：agent 流式输出表格，第一步缓存了 header+separator（rows=[]），
+    /// 第二步追加数据行——若缓存不被踢掉，第二步仍使用旧 TableData 渲染，
+    /// 表现为"表头可见，数据行消失"。
+    #[test]
+    fn test_cached_table_rows_grow_correctly() {
+        let mut cache = MarkdownRenderCache::default();
+
+        // Step 1: 缓存只有 header+separator 的表格
+        let t1 = "| # | 测试场景 | 结果 |\n|---|---------|------|\n";
+        let r1 = parse_markdown_cached(t1, 80, Palette::default(), &mut cache);
+        let table1 = r1.iter().find_map(|s| match s {
+            MarkdownSegment::Table(d) => Some(d),
+            _ => None,
+        });
+        assert!(table1.is_some(), "t1 应含 Table segment");
+        assert!(
+            table1.unwrap().rows.is_empty(),
+            "t1 Table rows 应为空（仅有 header+separator，无数据行）"
+        );
+
+        // Step 2: 追加数据行
+        let t2 = "| # | 测试场景 | 结果 |\n|---|---------|------|\n| 1 | 简单中文表 | ✅ |\n| 2 | 长中文内容 | ✅ |\n";
+        let r2 = parse_markdown_cached(t2, 80, Palette::default(), &mut cache);
+        let full2 = parse_markdown(t2, 80, Palette::default());
+
+        // 提取 Table 数据
+        let table_cached = r2.iter().find_map(|s| match s {
+            MarkdownSegment::Table(d) => Some(d),
+            _ => None,
+        });
+        let table_full = full2.iter().find_map(|s| match s {
+            MarkdownSegment::Table(d) => Some(d),
+            _ => None,
+        });
+
+        let cached = table_cached.expect("cached 应含 Table segment");
+        let full = table_full.expect("full 应含 Table segment");
+
+        assert_eq!(
+            cached.rows.len(),
+            full.rows.len(),
+            "缓存续跑后 rows 数应与全量一致，actual={}, expected={}",
+            cached.rows.len(),
+            full.rows.len()
+        );
+        assert_eq!(
+            cached.rows.len(),
+            2,
+            "应有 2 行数据，actual={}",
+            cached.rows.len()
         );
     }
 }

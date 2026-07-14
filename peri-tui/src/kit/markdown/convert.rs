@@ -135,6 +135,9 @@ pub(crate) fn convert_to_segments_with_state(
                     alignments: alignments.clone(),
                     col_widths,
                 }));
+                // Table 是动态块：后续追加行会改变同一 block 的内容。
+                // 标记以便缓存层知道不能续跑此状态。
+                state.has_table_in_processed_blocks = true;
             }
         }
 
