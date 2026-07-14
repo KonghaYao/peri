@@ -95,8 +95,28 @@ pub(super) fn truncate_str(s: &str, max_chars: usize) -> String {
 // ── vm_to_lines：TuiRenderUnit → Vec<Line<'static>> ───────────────────────
 
 /// 将单个 TuiRenderUnit 变体转换为渲染行。
-/// 使用 kit::markdown 进行 markdown 解析。
+/// 使用 kit::markdown 进行 markdown 解析（无缓存，每次全量）。
+///
+/// 用于不需要增量缓存的场景（如 SubAgentGroup 内部递归）。
+/// 顶层 AssistantBubble / UserBubble 渲染应使用 [`vm_to_lines_cached`]。
 pub(super) fn vm_to_lines(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>> {
+    vm_to_lines_cached(
+        vm,
+        width,
+        &mut crate::kit::markdown::MarkdownRenderCache::default(),
+    )
+}
+
+/// 与 [`vm_to_lines`] 同逻辑，但接受 markdown 渲染缓存以支持增量续跑。
+///
+/// [Phase 2] 流式期间 text 末尾追加 token 时，前缀 blocks（已闭合的 paragraph /
+/// list item / code block）完全不变——cache 通过文本前缀比较复用上次处理到
+/// stable_state 的累积状态，仅处理新增 block。
+pub(super) fn vm_to_lines_cached(
+    vm: &TuiRenderUnit,
+    width: usize,
+    md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
+) -> Vec<Line<'static>> {
     match vm {
         TuiRenderUnit::TuiAssistantBubble(data) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
@@ -110,8 +130,12 @@ pub(super) fn vm_to_lines(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>
             if !data.text.is_empty() {
                 let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
                 let palette_guard = palette_state.read();
-                let segments =
-                    crate::kit::markdown::parse_markdown(&data.text, width, *palette_guard);
+                let segments = crate::kit::markdown::parse_markdown_cached(
+                    &data.text,
+                    width,
+                    *palette_guard,
+                    md_cache,
+                );
                 for (seg_idx, seg) in segments.into_iter().enumerate() {
                     // segment 之间加空行（表格 ↔ 文本边界）
                     if seg_idx > 0 && !lines.last().is_some_and(|l| l.spans.is_empty()) {
@@ -148,7 +172,12 @@ pub(super) fn vm_to_lines(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>
             let user_bg = component.message.user_bg;
             let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
             let palette_guard = palette_state.read();
-            let segments = crate::kit::markdown::parse_markdown(&data.text, width, *palette_guard);
+            let segments = crate::kit::markdown::parse_markdown_cached(
+                &data.text,
+                width,
+                *palette_guard,
+                md_cache,
+            );
 
             let mut lines: Vec<Line<'static>> = Vec::new();
             lines.push(Line::from(""));

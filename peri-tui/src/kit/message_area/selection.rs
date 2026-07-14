@@ -11,7 +11,7 @@ use ratatui_kit::ratatui::widgets::{Paragraph, Wrap};
 // ── wrap_map 类型 ──────────────────────────────────────────────────────────
 
 /// 折行映射条目：逻辑行索引 + 该逻辑行占据的视觉行范围 [visual_start, visual_end)。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct WrappedLineInfo {
     pub(super) logical_idx: usize,
     pub(super) visual_start: usize,
@@ -36,6 +36,29 @@ pub(super) fn build_wrap_map(lines: &[Line<'static>], width: u16) -> (usize, Vec
         visual_row += rows;
     }
     (visual_row, wrap_map)
+}
+
+/// 拼接多个 VM 的 wrap_map：每个分片内部 visual_row 从 0 起、logical_idx 从 0 起，
+/// 拼接时累加 visual_offset 和 lines_start（合并后 lines 中该分片的起始 logical_idx）。
+///
+/// 输入：每个分片的 (wrap_map, lines_start_offset)。
+/// 输出：扁平化 wrap_map，所有 entry 的 visual_start/end 是全量坐标，
+/// logical_idx 是合并 lines 中的索引，可直接传给 visual_to_logical / viewport_logical_range。
+pub(super) fn concat_wrap_maps(slots: &[(&[WrappedLineInfo], usize)]) -> Vec<WrappedLineInfo> {
+    let total: usize = slots.iter().map(|(wm, _)| wm.len()).sum();
+    let mut result = Vec::with_capacity(total);
+    let mut visual_offset = 0usize;
+    for (wm, lines_start) in slots {
+        for entry in wm.iter() {
+            result.push(WrappedLineInfo {
+                logical_idx: entry.logical_idx + lines_start,
+                visual_start: entry.visual_start + visual_offset,
+                visual_end: entry.visual_end + visual_offset,
+            });
+        }
+        visual_offset += wm.last().map(|e| e.visual_end).unwrap_or(0);
+    }
+    result
 }
 
 /// 二分查找：视觉行 → 逻辑行索引。
@@ -416,6 +439,83 @@ mod tests {
 
     fn make_line(s: &str) -> Line<'static> {
         Line::from(vec![Span::raw(s.to_string())])
+    }
+
+    // ── concat_wrap_maps ──
+
+    fn make_wrap_entry(logical: usize, start: usize, end: usize) -> WrappedLineInfo {
+        WrappedLineInfo {
+            logical_idx: logical,
+            visual_start: start,
+            visual_end: end,
+        }
+    }
+
+    #[test]
+    fn test_concat_wrap_maps_empty_input_returns_empty() {
+        let result = concat_wrap_maps(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_concat_wrap_maps_single_slot_preserves_entries() {
+        // 单个分片：偏移为 0，logical_idx 不变
+        let slot = vec![
+            make_wrap_entry(0, 0, 1),
+            make_wrap_entry(1, 1, 3),
+            make_wrap_entry(2, 3, 4),
+        ];
+        let result = concat_wrap_maps(&[(&slot, 0)]);
+        assert_eq!(
+            result,
+            vec![
+                make_wrap_entry(0, 0, 1),
+                make_wrap_entry(1, 1, 3),
+                make_wrap_entry(2, 3, 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_concat_wrap_maps_multi_slots_accumulates_offsets() {
+        // 3 个分片，各自内部 visual_row 从 0 起；拼接后累加 visual_offset 和 logical_idx
+        // slot0: 2 行（visual 0-2），lines_start=0
+        // slot1: 1 行（visual 0-1），lines_start=2（slot0 占用 2 个 logical line）
+        // slot2: 1 行（visual 0-1），lines_start=3
+        let slot0 = vec![make_wrap_entry(0, 0, 1), make_wrap_entry(1, 1, 2)];
+        let slot1 = vec![make_wrap_entry(0, 0, 1)];
+        let slot2 = vec![make_wrap_entry(0, 0, 1)];
+        let result = concat_wrap_maps(&[(&slot0, 0), (&slot1, 2), (&slot2, 3)]);
+        assert_eq!(
+            result,
+            vec![
+                // slot0 原样
+                make_wrap_entry(0, 0, 1),
+                make_wrap_entry(1, 1, 2),
+                // slot1: visual += 2, logical += 2
+                make_wrap_entry(2, 2, 3),
+                // slot2: visual += 3, logical += 3
+                make_wrap_entry(3, 3, 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_concat_wrap_maps_supports_multi_visual_rows_per_line() {
+        // 单条逻辑行 wrap 成多视觉行：分片 1 一条 line 占 visual 0-3
+        let slot0 = vec![make_wrap_entry(0, 0, 3)];
+        let slot1 = vec![make_wrap_entry(0, 0, 1), make_wrap_entry(1, 1, 2)];
+        let result = concat_wrap_maps(&[(&slot0, 0), (&slot1, 1)]);
+        assert_eq!(
+            result,
+            vec![
+                make_wrap_entry(0, 0, 3),
+                // slot1 第一行 visual_start += 3, logical_idx += 1
+                make_wrap_entry(1, 3, 4),
+                // slot1 第二行 visual_start/end += 3, logical_idx += 1
+                make_wrap_entry(2, 4, 5),
+            ]
+        );
     }
 
     // ── wrap_byte_starts ──

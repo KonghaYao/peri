@@ -8,7 +8,6 @@
 
 #![allow(clippy::needless_update)]
 
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::kit::atoms::{BRIDGE_RESET_COUNTER, LANG_VERSION, LOADING_EPOCH, VIEW_MODELS};
@@ -34,12 +33,41 @@ pub use footer::{TodoItem, TodoStatus};
 use footer::{build_footer_lines, hash_todo_items};
 pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
-use render::vm_to_lines;
+use render::vm_to_lines_cached;
 use scroll::{DragThrottle, ScrollThrottle, ScrollbarDragState};
 use selection::{
-    WrappedLineInfo, build_wrap_map, highlight_line_in_selection, viewport_logical_range,
-    visual_to_logical,
+    WrappedLineInfo, build_wrap_map, concat_wrap_maps, highlight_line_in_selection,
+    viewport_logical_range, visual_to_logical,
 };
+
+// ── 按 VM 分片的渲染缓存 ──────────────────────────────────────────────────
+//
+// [Why] 旧版 lines_cache / wrap_map_cache / total_rows_cache 以 (vm_generation, width)
+// 为 key，但 push_view_models 每个 token 都 generation += 1，流式期间缓存永远不命中，
+// 每个 token 都触发 O(N×W) 的全量 markdown 解析 + wrap_map 重建 + line_count → CPU 拉满。
+//
+// 现在按 VM 的 content_hash 分片：只有正在流式（hash 变化）的那个 VM 重新解析 markdown
+// + 重建 wrap_map，其余 VM 直接 Arc::clone 复用。流式单次成本从 O(N×W) 降至 O(W)。
+//
+// content_hash 由 build_view_models / TuiAssistantBubble::recompute_hash 维护，
+// 已覆盖 text / reasoning.text / reasoning.collapsed / tool duration(secs) 等可变字段。
+#[derive(Clone, Default)]
+struct VmCacheSlot {
+    /// 上次渲染时 VM 的 content_hash。变化时（流式追加 text、折叠/展开 reasoning、
+    /// tool duration 跨秒）触发 markdown 重新解析 + wrap_map 重建。
+    content_hash: u64,
+    /// 上次渲染时的视宽。width 变化（窗口 resize）时 wrap 规则改变，必须重建。
+    width: u16,
+    /// 该 VM 解析后的所有 Line（markdown + reasoning + tool card 渲染结果）。
+    lines: Arc<Vec<Line<'static>>>,
+    /// 该 VM 内部 wrap_map（visual_row 从 0 起）。拼接时累加 visual_offset 和 logical_idx 偏移。
+    wrap_map: Arc<Vec<WrappedLineInfo>>,
+    /// 该 VM 占据的视觉行数（= wrap_map 末项 visual_end）。
+    visual_rows: u16,
+    /// [Phase 2] markdown 增量渲染缓存——按文本前缀复用 stable_state，仅处理新增 block。
+    /// 仅 AssistantBubble / UserBubble 实际使用；其他 VM 类型保留默认值不消耗资源。
+    markdown_cache: crate::kit::markdown::MarkdownRenderCache,
+}
 
 // ── 组件 ──────────────────────────────────────────────────────────────────
 
@@ -57,18 +85,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let items_len = snapshot.items.len();
     let vm_generation = snapshot.generation;
 
-    // ── 渲染缓存：generation 不变则复用上次的 Lines，避免每帧做 markdown 解析+syntect ──
-    // [TRAP] 缓存必须用 Arc<Vec> 而非 Vec：ratatui-kit 每次 dispatch 后都触发 render，
-    // 鼠标 Drag 事件 60-120Hz 会反复读取此缓存。Vec 在每次读取时深拷贝 O(N)（每行多个
-    // Span + Cow<str>），直接拖满 CPU。Arc::clone 是 O(1) 引用计数。
-    let lines_cache = hooks.use_state(|| (0u64, 0usize, Arc::<Vec<Line<'static>>>::default()));
-
-    // ── total_visual_rows 缓存：仅 (generation, width, lines_len, footer_hash) 变化时重算 line_count ──
-    // [TRAP] Paragraph::line_count 是 O(N·W)（unicode-width + wrap），每帧重算会拖垮长对话滚动。
-    // cache 仅供 render body 读，不作为响应式源——用 write_no_update 写入避免 wake 自激回路。
-    // [Fix] 新增 footer_hash key：footer 内容变化但行数相同时（如 spinner 文本变长），
-    // lines_len 不变但仍需 invalidate 缓存，否则 total_visual_rows 返回旧值导致末尾几行无法到达。
-    let total_rows_cache = hooks.use_state(|| (0u64, 0u16, 0usize, 0u64, 0u16));
+    // ── 按 VM 分片的渲染缓存 ──────────────────────────────────────────────────
+    // vm_caches 与 snapshot.items 长度对齐，每个 slot 缓存一个 VM 的 lines + wrap_map。
+    // [TRAP] write_no_update 必须用——ratatui-kit ReactiveMutRef::Drop 无条件 wake()，
+    // render body 内 write 会自激回路 100% CPU。
+    let vm_caches: State<Vec<VmCacheSlot>> = hooks.use_state(Vec::new);
 
     // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
     let footer_lines = build_footer_lines(&mut hooks, is_loading, &todo_items);
@@ -80,60 +101,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         None
     };
 
-    // ── 构建 core_lines（带 Arc 缓存，footer 不参与缓存）──
-    // [TRAP] 缓存 key 不能加 `lines.is_empty()` 之类的"空内容"判断——
-    // Welcome 屏 items 为空时 vm_to_lines 永远返回空 Vec，写入后再读到
-    // is_empty()=true，needs_rebuild 永远为 true，每帧都执行
-    // `*lines_cache.write() = ...`。ratatui-kit 的 ReactiveMutRef::Drop 无条件
-    // notifier.wake()（不检查值是否变化），wake 又触发 re-render → 自激回路
-    // 100% CPU。空内容必须视为有效缓存，靠 generation/width 检测真实变化。
-    //
-    // [TRAP] core_lines_arc 用 Arc<Vec> —— Drag 60-120Hz 触发 render 时，
-    // Arc::clone 是 O(1)；如果用 Vec::clone 则每帧深拷贝数千行 Line+Span，
-    // 直接拖满 CPU。footer 后续单独 extend，避免 Arc 解引用后再 clone。
-    let core_lines_arc: Arc<Vec<Line<'static>>> = {
-        let needs_rebuild = {
-            let guard = lines_cache.read();
-            guard.0 != vm_generation || guard.1 != props.width
-        };
-        if !needs_rebuild {
-            Arc::clone(&lines_cache.read().2)
-        } else {
-            let mut lines: Vec<Line<'static>> = Vec::new();
-            for item in snapshot.items.iter() {
-                lines.extend(vm_to_lines(item, props.width));
-            }
-            drop(snapshot);
-            let arc = Arc::new(lines);
-            *lines_cache.write() = (vm_generation, props.width, Arc::clone(&arc));
-            arc
-        }
-    };
-
-    // all_lines 仅在需要时构建（lazy）：
-    // - wrap_map_cache 缓存未命中（generation/width 变化）
-    // - total_visual_rows 缓存未命中
-    // - 非 highlight 渲染路径（render_lines = all_lines）
-    // [TRAP] Drag 期间 highlight 路径下，wrap_map / total_visual_rows 都已命中缓存，
-    // 实际不需要 all_lines。每次构建需要 (*core_lines_arc).clone() O(N)——Drag 60-120Hz
-    // × O(N) 直接拉满 CPU。我们改为只在真正用到时构建。
-    let core_len = core_lines_arc.len();
-    let footer_len = if empty { 0 } else { footer_lines.len() };
-    let lines_len = core_len + footer_len;
-
     let scroll_state = hooks.use_state(ScrollViewState::default);
     let prev_items_len = hooks.use_state(|| 0usize);
     let _prev_is_loading = hooks.use_state(|| false);
     let scroll_throttle = hooks.use_state(ScrollThrottle::default);
     let _todo_hash = hash_todo_items(&todo_items);
 
-    // ── 文本选区 + 折行映射缓存 ──
+    // ── 文本选区 ──
     let text_sel = hooks.use_state(TextSelection::default);
     let selection_down_pos = hooks.use_state(|| Option::<(u16, u16)>::None);
     let drag_throttle = hooks.use_state(DragThrottle::default);
-    // [TRAP] Drag 60-120Hz 触发 render，wrap_map 必须用 Arc 避免 Vec 深拷贝。
-    // highlight 不再缓存——视口裁剪后只有 ~60 行，highlight 成本可忽略。
-    let wrap_map_cache = hooks.use_state(|| (0u64, 0u16, Arc::<Vec<WrappedLineInfo>>::default()));
 
     // ── 消息区位置追踪 ──
     let area_hook = hooks.use_hook(MsgAreaTracker::new);
@@ -152,84 +129,110 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .max(1);
     let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
 
-    // 更新 wrap_map 缓存（仅 generation / width 变化时，write_no_update 避免自激回路）
-    // [TRAP] wrap_map 只覆盖 core_lines_arc——footer 区域（spinner/todo）不需要选区，
-    // 鼠标拖拽到 footer 时 visual_to_logical 返回 None，不触发 highlight。
+    // ── 遍历每个 VM，按 (content_hash, vis_width) 命中判断 ──
+    // [Why] 流式期间只有最后一个 AssistantBubble 的 content_hash 变化（text 累积），
+    // 其余 committed VM hash 完全稳定——直接复用 Arc<Vec<Line>> 和 Arc<Vec<WrappedLineInfo>>。
+    // 单次成本从 O(N×W) 降至 O(W)。
+    //
+    // [TRAP] 必须先 clone 出 items 再 drop(snapshot)，否则 vm_caches.write 与
+    // view_models read guard 冲突。items_vec 仅在缓存未命中时使用，命中时直接 Arc::clone。
+    let items_vec: Vec<crate::kit::tui_render_unit::TuiRenderUnit> =
+        snapshot.items.iter().cloned().collect();
+    drop(snapshot);
+
+    // 同步 vm_caches 长度对齐 items_vec
+    if vm_caches.read().len() != items_vec.len() {
+        vm_caches
+            .write_no_update()
+            .resize(items_vec.len(), VmCacheSlot::default());
+    }
+
+    // 第一阶段：检测哪些 slot 需要 rebuild（content_hash 或 vis_width 变化）
+    let rebuild_indices: Vec<usize> = {
+        let caches_read = vm_caches.read();
+        items_vec
+            .iter()
+            .enumerate()
+            .filter_map(|(i, vm)| {
+                let slot = &caches_read[i];
+                if slot.content_hash != vm.content_hash() || slot.width != vis_width {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    // 第二阶段：rebuild 需要更新的 slot——只有这些 VM 调用 vm_to_lines + build_wrap_map
+    // [Phase 2] markdown_cache 在 slot 内部跨 rebuild 复用：即使 VM hash 变化（text 追加 token），
+    // cache 仍能命中上次 stable_text 前缀，仅处理新增 block。
+    // [Borrow] 单次 write_no_update 持锁整个 rebuild 循环——ratatui-kit State 仅在
+    // render body 单线程访问，无锁竞争。直接可变借用 slot.markdown_cache，避免 clone
+    // ConvertState（含 Vec<Line>，clone 成本高）。
     {
-        let needs_wmap = {
-            let g = wrap_map_cache.read();
-            g.0 != vm_generation || g.1 != vis_width
-        };
-        if needs_wmap {
-            if core_lines_arc.is_empty() {
-                // 空内容：直接设空缓存，不调用 build_wrap_map
-                let mut g = wrap_map_cache.write_no_update();
-                g.0 = vm_generation;
-                g.1 = vis_width;
-                g.2 = Arc::default();
-            } else {
-                let (_, wrap_map) = build_wrap_map(&core_lines_arc, vis_width);
-                let mut g = wrap_map_cache.write_no_update();
-                g.0 = vm_generation;
-                g.1 = vis_width;
-                g.2 = Arc::new(wrap_map);
-            }
+        let mut caches = vm_caches.write_no_update();
+        for i in &rebuild_indices {
+            let vm = &items_vec[*i];
+            let vm_hash = vm.content_hash();
+            let slot = &mut caches[*i];
+            let lines = Arc::new(vm_to_lines_cached(
+                vm,
+                vis_width as usize,
+                &mut slot.markdown_cache,
+            ));
+            let (_, wm) = build_wrap_map(&lines, vis_width);
+            let visual_rows = wm.last().map(|e| e.visual_end).unwrap_or(0) as u16;
+            slot.content_hash = vm_hash;
+            slot.width = vis_width;
+            slot.lines = lines;
+            slot.wrap_map = Arc::new(wm);
+            slot.visual_rows = visual_rows;
         }
     }
 
-    // ── 总视觉行数：使用 Paragraph wrap 预测（带缓存）──
-    // [TRAP] 仅在 (gen, width, lines_len, footer_hash) 变化时构建 all_lines 重算 line_count。
-    // Drag 期间 generation/width/lines_len/footer_hash 不变，缓存命中——跳过 O(N) 构建。
-    //
-    // footer_hash：对 footer 文本内容做 hash，捕获 spinner 文本变化（线数不变时也会 vary）。
-    let footer_hash = {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for line in &footer_lines {
-            for span in &line.spans {
-                span.content.hash(&mut hasher);
-            }
+    // 第三阶段：拼接 core_lines + concat_wrap_map（累加 visual_offset 和 logical_idx）
+    // [Why] 单次 O(N) 拼接成本（N=VM 数），远小于旧版 O(N×W) 的全量 line_count。
+    let mut core_lines: Vec<Line<'static>> = Vec::new();
+    let mut core_total_visual_rows: usize = 0;
+    let concat_wrap_map: Vec<WrappedLineInfo> = {
+        let caches_read = vm_caches.read();
+        core_lines.reserve(caches_read.iter().map(|s| s.lines.len()).sum());
+        // 先收集 (wrap_map 引用, lines_start_offset) 对，供 concat_wrap_maps 拼接
+        let mut slots: Vec<(&[WrappedLineInfo], usize)> = Vec::with_capacity(caches_read.len());
+        for slot in caches_read.iter() {
+            let lines_start = core_lines.len();
+            core_lines.extend(slot.lines.iter().cloned());
+            slots.push((&slot.wrap_map, lines_start));
+            core_total_visual_rows += slot.visual_rows as usize;
         }
-        hasher.finish()
+        concat_wrap_maps(&slots)
     };
-    let cached = {
-        let g = total_rows_cache.read();
-        (g.0, g.1, g.2, g.3, g.4)
-    };
-    let total_visual_rows: u16 = if cached.0 == vm_generation
-        && cached.1 == vis_width
-        && cached.2 == lines_len
-        && cached.3 == footer_hash
-    {
-        cached.4
-    } else if lines_len == 0 {
-        let rows: u16 = if is_loading { 1 } else { 0 };
-        let mut g = total_rows_cache.write_no_update();
-        g.0 = vm_generation;
-        g.1 = vis_width;
-        g.2 = lines_len;
-        g.3 = footer_hash;
-        g.4 = rows;
-        rows
+    let core_lines_arc: Arc<Vec<Line<'static>>> = Arc::new(core_lines);
+    let concat_wrap_map_arc: Arc<Vec<WrappedLineInfo>> = Arc::new(concat_wrap_map);
+
+    // ── 总视觉行数 = core + footer ──
+    // [Why] 分片缓存命中后 core_total_visual_rows 已是 sum(slot.visual_rows)，无需 line_count。
+    // footer 通常几行，单独 build_wrap_map 成本可忽略。
+    let footer_visual_rows: usize = if !empty && !footer_lines.is_empty() {
+        let (_, footer_map) = build_wrap_map(&footer_lines, vis_width);
+        footer_map.last().map(|e| e.visual_end).unwrap_or(0)
     } else {
-        // 构建 all_lines 用于 line_count（仅在 cache 未命中时）
-        let mut all_lines = (*core_lines_arc).clone();
-        if !empty {
-            all_lines.extend(footer_lines.iter().cloned());
-        }
-        let rows = Paragraph::new(RatText::from(all_lines))
-            .wrap(Wrap { trim: false })
-            .line_count(vis_width) as u16;
-        let mut g = total_rows_cache.write_no_update();
-        g.0 = vm_generation;
-        g.1 = vis_width;
-        g.2 = lines_len;
-        g.3 = footer_hash;
-        g.4 = rows;
-        rows
+        0
+    };
+    let total_visual_rows: u16 = if core_total_visual_rows == 0 && footer_visual_rows == 0 {
+        if is_loading { 1 } else { 0 }
+    } else {
+        (core_total_visual_rows + footer_visual_rows).min(u16::MAX as usize) as u16
     };
 
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
+    // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
+    // core_lines_arc 后续视口裁剪也要用。Arc::clone 是 O(1) 引用计数，闭包持 clone，
+    // 原值继续在 render body 内用。
     {
+        let wrap_map_for_closure = Arc::clone(&concat_wrap_map_arc);
+        let lines_for_closure = Arc::clone(&core_lines_arc);
         hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
             scroll::handle_event(
                 &event,
@@ -240,8 +243,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 &text_sel,
                 &selection_down_pos,
                 &drag_throttle,
-                &wrap_map_cache,
-                &lines_cache,
+                &wrap_map_for_closure,
+                &lines_for_closure,
                 &scrollbar_fields,
                 &scrollbar_drag,
             )
@@ -362,11 +365,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     let vp_height = vis_height as usize;
 
-    // core 总视觉行数
-    let core_total_visual_rows: usize = {
-        let g = wrap_map_cache.read();
-        g.2.last().map(|e| e.visual_end).unwrap_or(0)
-    };
+    // core_total_visual_rows 在前面拼接 wrap_map 时算出，直接复用。
 
     // 选区范围（字符级）：(first_logical, last_logical, sr, sc, er, ec)
     // 视口外选区不参与 highlight，selection state 保留供复制
@@ -376,15 +375,17 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let sel_bounds: Option<(usize, usize, u16, u16, u16, u16)> = if !no_highlight {
         let sel = text_sel.read();
         if let Some(((sr, sc), (er, ec))) = sel.normalized_bounds() {
-            let g = wrap_map_cache.read();
             // Clamp sr/er 到 wrap_map 视觉范围内（footer 区域无 wrap_map）
-            let max_visual =
-                g.2.last()
-                    .map(|e| (e.visual_end.saturating_sub(1)) as u16)
-                    .unwrap_or(0);
+            let max_visual = concat_wrap_map_arc
+                .last()
+                .map(|e| (e.visual_end.saturating_sub(1)) as u16)
+                .unwrap_or(0);
             let sr_c = sr.min(max_visual);
             let er_c = er.min(max_visual);
-            match (visual_to_logical(sr_c, &g.2), visual_to_logical(er_c, &g.2)) {
+            match (
+                visual_to_logical(sr_c, &concat_wrap_map_arc),
+                visual_to_logical(er_c, &concat_wrap_map_arc),
+            ) {
                 (Some(f), Some(l)) => Some((f.min(l), f.max(l), sr_c, sc, er_c, ec)),
                 _ => None,
             }
@@ -398,8 +399,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 视口对应的 core 逻辑行范围 + 首行视觉偏移
     let (vp_core_start, vp_core_end, vp_first_offset): (usize, usize, u16) =
         if scroll_y < core_total_visual_rows && !core_lines_arc.is_empty() {
-            let g = wrap_map_cache.read();
-            viewport_logical_range(&g.2, scroll_y, vp_height).unwrap_or((0, 0, 0))
+            viewport_logical_range(&concat_wrap_map_arc, scroll_y, vp_height).unwrap_or((0, 0, 0))
         } else {
             // 视口完全在 footer 内（footer 占据末尾几行）
             (0, 0, 0)
@@ -420,8 +420,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     if scroll_y < core_total_visual_rows && vp_core_start <= vp_core_end && core_len > 0 {
         let end = vp_core_end.min(core_len - 1);
-        // 取 wrap_map arc clone 避免循环中重复 read guard
-        let wrap_map_arc = wrap_map_cache.read().2.clone();
+        // concat_wrap_map_arc 已是 Arc，clone 引用计数 O(1)
+        let wrap_map_arc = Arc::clone(&concat_wrap_map_arc);
         for i in vp_core_start..=end {
             let line = &core_lines_arc[i];
             let in_sel = sel_bounds.is_some_and(|(f, l, _, _, _, _)| i >= f && i <= l);

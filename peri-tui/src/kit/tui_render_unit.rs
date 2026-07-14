@@ -47,6 +47,23 @@ pub enum TuiRenderUnit {
     TuiAskUserBlock(TuiAskUserBlock),
 }
 
+impl TuiRenderUnit {
+    /// 返回该 VM 内部存储的 content_hash。
+    /// 供按 VM 分片的渲染缓存作为 key 使用——hash 不变时直接 Arc::clone 复用渲染结果。
+    pub fn content_hash(&self) -> u64 {
+        match self {
+            Self::TuiUserBubble(d) => d.content_hash,
+            Self::TuiAssistantBubble(d) => d.content_hash,
+            Self::TuiToolCard(d) => d.content_hash,
+            Self::TuiSystemNote(d) => d.content_hash,
+            Self::TuiSubAgentGroup(d) => d.content_hash,
+            Self::TuiCollapsedGroup(d) => d.content_hash,
+            Self::TuiDivider(d) => d.content_hash,
+            Self::TuiAskUserBlock(d) => d.content_hash,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Leaf data structures
 // ---------------------------------------------------------------------------
@@ -142,6 +159,23 @@ pub struct TuiAssistantBubble {
     pub reasoning: Option<TuiReasoningBlock>,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
+}
+
+impl TuiAssistantBubble {
+    /// 计算包含 text + reasoning.text + reasoning.collapsed 的 hash。
+    /// build_view_models 和 push_view_models 都用同一公式，保证修改 collapsed 后 hash 一致。
+    pub fn compute_hash(text: &str, reasoning: Option<&TuiReasoningBlock>) -> u64 {
+        match reasoning {
+            Some(r) => tui_hash_str(&format!("{}|{}|{}", text, r.text, r.collapsed)),
+            None => tui_hash_str(text),
+        }
+    }
+
+    /// 根据 text + reasoning 当前值重算 content_hash。
+    /// 修改 reasoning.collapsed 后必须调用，否则按 hash 分片的渲染缓存会命中旧值。
+    pub fn recompute_hash(&mut self) {
+        self.content_hash = Self::compute_hash(&self.text, self.reasoning.as_ref());
+    }
 }
 
 tui_impl_partial_eq!(TuiAssistantBubble: text, reasoning);
@@ -446,6 +480,133 @@ mod tests {
     fn test_tui_hash_str_empty_string() {
         // 空字符串不 panic
         let _h = tui_hash_str("");
+    }
+
+    // ── TuiRenderUnit::content_hash() dispatch ──────────────────────────
+
+    #[test]
+    fn test_content_hash_returns_inner_field_for_each_variant() {
+        // 验证 content_hash() 方法正确派发到各变体的内部字段
+        let user = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
+            text: "u".into(),
+            reminder: None,
+            content_hash: 11,
+        });
+        assert_eq!(user.content_hash(), 11);
+        let assistant = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+            text: "a".into(),
+            reasoning: None,
+            content_hash: 22,
+        });
+        assert_eq!(assistant.content_hash(), 22);
+        let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
+            tool_id: "t1".into(),
+            tool_name: "Bash".into(),
+            input_summary: "ls".into(),
+            output_summary: String::new(),
+            is_error: false,
+            is_running: false,
+            running_duration_ms: None,
+            diff: None,
+            tool_calls_count: 0,
+            content_hash: 33,
+        });
+        assert_eq!(tool.content_hash(), 33);
+        let note = TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+            text: "n".into(),
+            level: TuiNoteLevel::Info,
+            content_hash: 44,
+        });
+        assert_eq!(note.content_hash(), 44);
+    }
+
+    // ── TuiAssistantBubble::compute_hash / recompute_hash ──────────────
+
+    #[test]
+    fn test_compute_hash_no_reasoning_only_hashes_text() {
+        // 无 reasoning：hash 只基于 text
+        let h1 = TuiAssistantBubble::compute_hash("hello", None);
+        let h2 = TuiAssistantBubble::compute_hash("hello", None);
+        let h3 = TuiAssistantBubble::compute_hash("world", None);
+        assert_eq!(h1, h2, "相同 text 应有相同 hash");
+        assert_ne!(h1, h3, "不同 text 应有不同 hash");
+    }
+
+    #[test]
+    fn test_compute_hash_includes_collapsed_state() {
+        // [回归测试] Bug 2 修复：reasoning.collapsed 必须纳入 hash，
+        // 否则按 hash 分片的渲染缓存命中旧值、折叠/展开后 UI 不刷新。
+        let reasoning_open = TuiReasoningBlock {
+            text: "thinking".into(),
+            collapsed: false,
+        };
+        let reasoning_collapsed = TuiReasoningBlock {
+            text: "thinking".into(),
+            collapsed: true,
+        };
+        let h_open = TuiAssistantBubble::compute_hash("reply", Some(&reasoning_open));
+        let h_collapsed = TuiAssistantBubble::compute_hash("reply", Some(&reasoning_collapsed));
+        assert_ne!(
+            h_open, h_collapsed,
+            "collapsed 状态变化时 content_hash 必须变化"
+        );
+    }
+
+    #[test]
+    fn test_compute_hash_includes_reasoning_text() {
+        let r1 = TuiReasoningBlock {
+            text: "thought A".into(),
+            collapsed: false,
+        };
+        let r2 = TuiReasoningBlock {
+            text: "thought B".into(),
+            collapsed: false,
+        };
+        let h1 = TuiAssistantBubble::compute_hash("reply", Some(&r1));
+        let h2 = TuiAssistantBubble::compute_hash("reply", Some(&r2));
+        assert_ne!(h1, h2, "reasoning.text 变化时 content_hash 必须变化");
+    }
+
+    #[test]
+    fn test_recompute_hash_after_collapse_change() {
+        // [回归测试] push_view_models 修改 collapsed 后必须调用 recompute_hash，
+        // 否则缓存命中旧 hash 渲染不更新。
+        let mut bubble = TuiAssistantBubble {
+            text: "reply".into(),
+            reasoning: Some(TuiReasoningBlock {
+                text: "thinking".into(),
+                collapsed: false,
+            }),
+            content_hash: 0,
+        };
+        bubble.content_hash =
+            TuiAssistantBubble::compute_hash(&bubble.text, bubble.reasoning.as_ref());
+        let initial_hash = bubble.content_hash;
+        // 修改 collapsed 状态
+        bubble.reasoning.as_mut().unwrap().collapsed = true;
+        // 不调用 recompute_hash → content_hash 仍是旧值（错误状态）
+        assert_eq!(bubble.content_hash, initial_hash);
+        // 调用 recompute_hash → content_hash 更新
+        bubble.recompute_hash();
+        assert_ne!(
+            bubble.content_hash, initial_hash,
+            "recompute_hash 后 content_hash 必须反映新 collapsed"
+        );
+        // 验证 recompute_hash 的结果与 compute_hash 一致
+        let expected = TuiAssistantBubble::compute_hash(&bubble.text, bubble.reasoning.as_ref());
+        assert_eq!(bubble.content_hash, expected);
+    }
+
+    #[test]
+    fn test_recompute_hash_no_reasoning_hashes_text_only() {
+        let mut bubble = TuiAssistantBubble {
+            text: "plain reply".into(),
+            reasoning: None,
+            content_hash: 0,
+        };
+        bubble.recompute_hash();
+        let expected = TuiAssistantBubble::compute_hash(&bubble.text, None);
+        assert_eq!(bubble.content_hash, expected);
     }
 
     // ── tui_impl_partial_eq! (content_hash excluded) ────────────────────

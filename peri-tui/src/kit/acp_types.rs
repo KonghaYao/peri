@@ -338,6 +338,9 @@ impl CurrentTurn {
         let mut prev_text_end: usize = 0;
         let mut prev_reasoning_end: usize = 0;
 
+        // build_reasoning 构造初始 reasoning block（collapsed=false），hash 由
+        // TuiAssistantBubble::compute_hash 计算——保证公式与 recompute_hash 一致，
+        // 后续 push_view_models 修改 collapsed 时重算结果可控。
         let build_reasoning = |text: &str, reasoning: &str| -> (Option<TuiReasoningBlock>, u64) {
             let block = if reasoning.is_empty() {
                 None
@@ -347,7 +350,7 @@ impl CurrentTurn {
                     collapsed: false,
                 })
             };
-            let content_hash = tui_hash_str(&format!("{}|{}", text, reasoning));
+            let content_hash = TuiAssistantBubble::compute_hash(text, block.as_ref());
             (block, content_hash)
         };
 
@@ -378,6 +381,9 @@ impl CurrentTurn {
                         let is_running = t.output_summary.is_none();
                         let running_duration_ms =
                             is_running.then(|| t.started_at.elapsed().as_millis() as u64);
+                        // duration 按秒取整后纳入 hash——避免每毫秒 hash 变化导致
+                        // 分片渲染缓存频繁失效；同时保证 duration 文本每秒刷新。
+                        let duration_secs = running_duration_ms.map(|ms| ms / 1000);
                         vms.push(TuiRenderUnit::TuiToolCard(TuiToolCard {
                             tool_id: t.tool_id.clone(),
                             tool_name: t.tool_name.clone(),
@@ -389,13 +395,14 @@ impl CurrentTurn {
                             diff: None,
                             tool_calls_count: 0,
                             content_hash: tui_hash_str(&format!(
-                                "{}|{}|{}|{}|{}|{}",
+                                "{}|{}|{}|{}|{}|{}|{:?}",
                                 t.tool_id,
                                 t.tool_name,
                                 t.input_summary,
                                 t.output_summary.as_deref().unwrap_or(""),
                                 t.is_error,
                                 is_running,
+                                duration_secs,
                             )),
                         }));
                     }
@@ -542,8 +549,7 @@ impl SubAgentAccumulator {
         // 变化时（即使 child_vms.len() 不变）也能触发 render_bridge 增量重建。
         let child_content_hash: String = child_vms
             .iter()
-            .map(extract_vm_content_hash)
-            .map(|h| h.to_string())
+            .map(|vm| vm.content_hash().to_string())
             .collect::<Vec<_>>()
             .join("|");
         let vm = TuiRenderUnit::TuiSubAgentGroup(crate::kit::tui_render_unit::TuiSubAgentGroup {
@@ -564,25 +570,6 @@ impl SubAgentAccumulator {
         });
         self.cached_view_model.replace(Some(vm.clone()));
         vm
-    }
-}
-
-/// 从 TuiRenderUnit 提取 content_hash 字段值（M1）。
-///
-/// content_hash 是每个 VM 变体的内部字段（u64），用于检测内容变化。
-/// SubAgentAccumulator::view_model 累加这些值构成 group 的 content_hash，
-/// 确保 child VM 文本变化时 group hash 也变化，触发 render_bridge 重建。
-fn extract_vm_content_hash(vm: &TuiRenderUnit) -> u64 {
-    use crate::kit::tui_render_unit::TuiRenderUnit::*;
-    match vm {
-        TuiUserBubble(d) => d.content_hash,
-        TuiAssistantBubble(d) => d.content_hash,
-        TuiToolCard(d) => d.content_hash,
-        TuiSystemNote(d) => d.content_hash,
-        TuiSubAgentGroup(d) => d.content_hash,
-        TuiCollapsedGroup(d) => d.content_hash,
-        TuiDivider(d) => d.content_hash,
-        TuiAskUserBlock(d) => d.content_hash,
     }
 }
 
@@ -1035,6 +1022,9 @@ mod tests {
 
     #[test]
     fn test_advance_spinner_invalidates_cache_for_running_bash() {
+        // [设计变更] ToolCard content_hash 现在纳入 duration（按秒向下取整）——
+        // 这是为了让按 hash 分片的渲染缓存每秒刷新一次 duration 文本。
+        // 此测试验证：跨秒后 content_hash 变化（触发缓存失效 + duration 文本更新）。
         let mut ct = CurrentTurn::new();
         ct.start_tool(ToolCardAccumulator::new(
             "tc-bash".into(),
@@ -1063,7 +1053,11 @@ mod tests {
             other => panic!("expected TuiToolCard, got {other:?}"),
         };
 
-        assert_eq!(first_hash, second_hash);
+        // 跨秒后 duration_secs 从 0 变为 1，content_hash 必须变化
+        assert_ne!(
+            first_hash, second_hash,
+            "跨秒后 duration_secs 变化，content_hash 必须变化以触发缓存失效"
+        );
     }
 
     #[test]

@@ -10,6 +10,32 @@ use super::types::{MarkdownSegment, TableData};
 
 // ── 块级转换 ────────────────────────────────────────────────────────
 
+/// convert 过程中的累积状态，可序列化为缓存以便续跑。
+///
+/// [Why] 流式 markdown 渲染期间，每个 token 触发整段 text 的 convert。
+/// 实际上前面已闭合的 blocks（paragraph / list item / code block / table）
+/// 内容完全不变——只需处理新增 block。
+///
+/// [续跑契约] 调用方必须保证：传入的 `state.processed_block_count` 对应到
+/// 当前 `blocks` 前 N 个，且这 N 个 block 的内容与上次缓存时一致。
+/// 这通过 `text.starts_with(cache.stable_text)` + `cache.stable_text` 以
+/// 换行符结尾（保证最后一个 block 已闭合）来保证。
+///
+/// [current_text 不 flush] 续跑时 state.current_text 保留累积状态——下一个
+/// block 的 spacing 决策基于 "current_text 是否为空 / 末尾是否空行 / prev_was_list_item"，
+/// 这些状态都是 spacing 正确决策的必要信息。最终输出时由调用方 clone + flush。
+#[derive(Clone, Default, Debug)]
+pub(crate) struct ConvertState {
+    /// 已处理的 block 数（跳过 blocks[..processed_block_count]）。
+    pub processed_block_count: usize,
+    /// 上一个处理的 block 是否为 ListItem（用于连续 list item 之间不加空行的规则）。
+    pub prev_was_list_item: bool,
+    /// 累积缓冲区（多个 block 合并到一个 Text segment）。续跑时**不 flush**。
+    pub current_text: Vec<Line<'static>>,
+    /// 已 flush 的 segments（包含 Table + 已闭合的 Text）。
+    pub segments: Vec<MarkdownSegment>,
+}
+
 /// 将 ratatui-kit-markdown 的 ParsedBlock 列表转换为 MarkdownSegment 序列。
 ///
 /// 间距规则（统一）：
@@ -22,56 +48,84 @@ pub(crate) fn convert_to_segments(
     theme: &MarkdownTheme,
     max_width: usize,
 ) -> Vec<MarkdownSegment> {
-    let mut segments: Vec<MarkdownSegment> = Vec::new();
-    let mut current_text: Vec<Line<'static>> = Vec::new();
-    let mut prev_was_list_item = false;
+    let mut state = ConvertState::default();
+    convert_to_segments_with_state(blocks, theme, max_width, &mut state)
+}
 
-    for block in blocks {
+/// 与 `convert_to_segments` 同逻辑，但接受外部 `state` 以支持续跑。
+///
+/// [行为]
+/// - 跳过 blocks[..state.processed_block_count]
+/// - 处理 blocks[state.processed_block_count..]，更新 state
+/// - 返回的 segments = state.segments clone + state.current_text flush
+/// - **state.current_text 不 flush**（保留供下次续跑）
+///
+/// 调用方应在 sanitized text 以换行结尾时（最后一个 block 已闭合）把
+/// state 持久化到 cache；否则 state 仅用于本次输出，不持久化。
+pub(crate) fn convert_to_segments_with_state(
+    blocks: &[ParsedBlock],
+    theme: &MarkdownTheme,
+    max_width: usize,
+    state: &mut ConvertState,
+) -> Vec<MarkdownSegment> {
+    for (i, block) in blocks.iter().enumerate() {
+        if i < state.processed_block_count {
+            continue;
+        }
+
         // 跳过 parser 生成的空 Paragraph（列表前后的哨兵）
         if matches!(block, ParsedBlock::Paragraph(lines) if lines.is_empty()) {
-            prev_was_list_item = false;
+            state.prev_was_list_item = false;
+            state.processed_block_count = i + 1;
             continue;
         }
 
         let is_list_item = matches!(block, ParsedBlock::ListItem(_));
 
         // 分隔：非首块 + 非连续列表项 → 确保恰好一行空行
-        if !(current_text.is_empty()
-            || current_text.last().is_some_and(|l| l.spans.is_empty())
-            || is_list_item && prev_was_list_item)
+        if !(state.current_text.is_empty()
+            || state
+                .current_text
+                .last()
+                .is_some_and(|l| l.spans.is_empty())
+            || is_list_item && state.prev_was_list_item)
         {
-            current_text.push(Line::default());
+            state.current_text.push(Line::default());
         }
 
         match block {
             ParsedBlock::Heading(level, line) => {
-                current_text.push(heading_line(level, line, theme));
+                state.current_text.push(heading_line(level, line, theme));
             }
             ParsedBlock::Paragraph(para_lines) => {
                 for line in para_lines {
-                    current_text.push(style_line(line, theme));
+                    state.current_text.push(style_line(line, theme));
                 }
             }
             ParsedBlock::CodeBlock(lang, code_lines) => {
-                current_text.extend(code_block_lines(lang, code_lines, theme));
+                state
+                    .current_text
+                    .extend(code_block_lines(lang, code_lines, theme));
             }
             ParsedBlock::ListItem(item) => {
-                current_text.push(list_item_line(item, theme));
+                state.current_text.push(list_item_line(item, theme));
             }
             ParsedBlock::Rule => {
                 let rule_char = "─".repeat(max_width.min(80));
                 let rule_span = Span::styled(rule_char, theme.rule_style);
-                current_text.push(Line::from(rule_span));
+                state.current_text.push(Line::from(rule_span));
             }
             ParsedBlock::Table(headers, rows, alignments) => {
                 // 表格前：冲刷已有文本为独立段
-                trim_trailing_blanks(&mut current_text);
-                if !current_text.is_empty() {
-                    segments.push(MarkdownSegment::Text(std::mem::take(&mut current_text)));
+                trim_trailing_blanks(&mut state.current_text);
+                if !state.current_text.is_empty() {
+                    state.segments.push(MarkdownSegment::Text(std::mem::take(
+                        &mut state.current_text,
+                    )));
                 }
                 let col_widths =
                     compute_table_col_widths(headers, rows, alignments.len(), max_width);
-                segments.push(MarkdownSegment::Table(TableData {
+                state.segments.push(MarkdownSegment::Table(TableData {
                     headers: headers.clone(),
                     rows: rows.clone(),
                     alignments: alignments.clone(),
@@ -80,15 +134,18 @@ pub(crate) fn convert_to_segments(
             }
         }
 
-        prev_was_list_item = is_list_item;
+        state.prev_was_list_item = is_list_item;
+        state.processed_block_count = i + 1;
     }
 
-    // 冲刷剩余文本
-    trim_trailing_blanks(&mut current_text);
-    if !current_text.is_empty() {
-        segments.push(MarkdownSegment::Text(current_text));
+    // 末尾 flush：clone state 并 flush current_text（state.current_text 不变）
+    let mut final_segments = state.segments.clone();
+    let mut final_text = state.current_text.clone();
+    trim_trailing_blanks(&mut final_text);
+    if !final_text.is_empty() {
+        final_segments.push(MarkdownSegment::Text(final_text));
     }
-    segments
+    final_segments
 }
 
 /// 裁剪尾部空行。

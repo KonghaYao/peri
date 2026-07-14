@@ -368,11 +368,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             } else {
                 bw.limit.to_string()
             };
-            let text = i18n::tr_args("app-note-budget-warning", &[
-                ("pct".into(), FluentValue::from(pct as u64)),
-                ("used".into(), FluentValue::from(used_display.as_str())),
-                ("limit".into(), FluentValue::from(limit_display.as_str())),
-            ]);
+            let text = i18n::tr_args(
+                "app-note-budget-warning",
+                &[
+                    ("pct".into(), FluentValue::from(pct as u64)),
+                    ("used".into(), FluentValue::from(used_display.as_str())),
+                    ("limit".into(), FluentValue::from(limit_display.as_str())),
+                ],
+            );
             let content_hash = tui_hash_str(&text);
             state
                 .committed
@@ -589,9 +592,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     format!("（{}）", parts.join("，"))
                 };
                 let text = if summary.is_empty() {
-                    i18n::tr_args("app-note-compact-completed", &[
-                        ("detail".into(), FluentValue::from(detail.as_str())),
-                    ])
+                    i18n::tr_args(
+                        "app-note-compact-completed",
+                        &[("detail".into(), FluentValue::from(detail.as_str()))],
+                    )
                 } else {
                     let brief: String = summary.chars().take(60).collect();
                     let suffix = if summary.chars().count() > 60 {
@@ -600,10 +604,16 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                         ""
                     };
                     let summary_display = format!("{brief}{suffix}");
-                    i18n::tr_args("app-note-compact-completed-summary", &[
-                        ("detail".into(), FluentValue::from(detail.as_str())),
-                        ("summary".into(), FluentValue::from(summary_display.as_str())),
-                    ])
+                    i18n::tr_args(
+                        "app-note-compact-completed-summary",
+                        &[
+                            ("detail".into(), FluentValue::from(detail.as_str())),
+                            (
+                                "summary".into(),
+                                FluentValue::from(summary_display.as_str()),
+                            ),
+                        ],
+                    )
                 };
                 let content_hash = tui_hash_str(&text);
                 state
@@ -619,9 +629,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         CompactError { message } => {
             tracing::warn!(message, "bridge: CompactError");
-            let text = i18n::tr_args("app-note-compact-error", &[
-                ("message".into(), FluentValue::from(message.as_str())),
-            ]);
+            let text = i18n::tr_args(
+                "app-note-compact-error",
+                &[("message".into(), FluentValue::from(message.as_str()))],
+            );
             let content_hash = tui_hash_str(&text);
             state
                 .committed
@@ -661,9 +672,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         AgentExecutionFailed { message } => {
             tracing::error!(message, "bridge: AgentExecutionFailed");
-            let text = i18n::tr_args("app-note-agent-failed", &[
-                ("message".into(), FluentValue::from(message.as_str())),
-            ]);
+            let text = i18n::tr_args(
+                "app-note-agent-failed",
+                &[("message".into(), FluentValue::from(message.as_str()))],
+            );
             let content_hash = tui_hash_str(&text);
             state
                 .committed
@@ -1036,17 +1048,23 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         items.push_back(vm.clone());
     }
 
-    // 只展开最后一个含 reasoning 的 assistant bubble，其余折叠
+    // 只展开最后一个含 reasoning 的 assistant bubble，其余折叠。
+    // [Bug 2 修复] 仅在 collapsed 实际改变时同步重算 content_hash——
+    // reasoning.collapsed 已纳入 hash 公式（见 TuiAssistantBubble::compute_hash），
+    // 不重算会导致按 hash 分片的渲染缓存命中旧值、折叠/展开后 UI 不刷新。
+    // 仅在变化时重算避免每次 token 到达都遍历 hash。
     let mut found_last = false;
     for i in (0..items.len()).rev() {
         if let TuiRenderUnit::TuiAssistantBubble(bubble) = &mut items[i]
             && let Some(ref mut reasoning) = bubble.reasoning
         {
+            let target_collapsed = found_last;
+            if reasoning.collapsed != target_collapsed {
+                reasoning.collapsed = target_collapsed;
+                bubble.recompute_hash();
+            }
             if !found_last {
-                reasoning.collapsed = false;
                 found_last = true;
-            } else {
-                reasoning.collapsed = true;
             }
         }
     }
