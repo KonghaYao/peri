@@ -79,13 +79,28 @@ fn test_build_answers_map_mixed_preset_and_custom() {
         make_question("q2", true, &["X", "Y", "Z"]),
         make_question("q3", false, &["P", "Q"]),
     ]);
-    let answers = vec![vec![], vec![0usize, 2], vec![1usize]];
-    let custom = vec![Some("custom answer".to_string()), None, None];
+    // q1: custom only, q2: multi-select + custom, q3: preset only
+    let answers = vec![vec![], vec![0usize, 1], vec![1usize]];
+    let custom = vec![
+        Some("custom answer".to_string()),
+        Some("extra note".to_string()),
+        None,
+    ];
     let result = build_answers_map(Some(&au), &answers, &custom);
     assert_eq!(
         result,
-        json!({"q1": "custom answer", "q2": ["X", "Z"], "q3": "Q"})
+        json!({"q1": "custom answer", "q2": ["X", "Y", "extra note"], "q3": "Q"})
     );
+}
+
+#[test]
+fn test_build_answers_map_multi_select_empty_with_custom() {
+    // 多选：仅自定义文本，无预设选项
+    let au = make_ask_user(vec![make_question("q1", true, &["A", "B"])]);
+    let answers = vec![vec![]];
+    let custom = vec![Some("only me".to_string())];
+    let result = build_answers_map(Some(&au), &answers, &custom);
+    assert_eq!(result, json!({"q1": ["only me"]}));
 }
 
 // ─── wrap_text ──────────────────────────────────────────────────
@@ -124,21 +139,42 @@ fn test_wrap_text_zero_width_returns_original() {
     assert_eq!(result, vec!["hello"]);
 }
 
-// ─── InputMode ──────────────────────────────────────────────────
+// ─── TextAreaState 基础行为 ─────────────────────────────────────
+// 验证 TextAreaState 满足自定义文本输入所需的基本操作
 
 #[test]
-fn test_input_mode_selecting_is_default() {
-    let mode = InputMode::Selecting;
-    assert_eq!(mode, InputMode::Selecting);
+fn test_textarea_state_insert_and_retrieve() {
+    use peri_widgets::textarea::TextAreaState;
+    let mut state = TextAreaState::default();
+    state.insert_char('h');
+    state.insert_char('i');
+    assert_eq!(state.text, "hi");
 }
 
 #[test]
-fn test_input_mode_typing_holds_buffer() {
-    let mode = InputMode::Typing {
-        buffer: "hello".to_string(),
-    };
-    match mode {
-        InputMode::Typing { buffer } => assert_eq!(buffer, "hello"),
-        _ => panic!("expected Typing mode"),
-    }
+fn test_textarea_state_backspace_clears() {
+    use peri_widgets::textarea::TextAreaState;
+    let mut state = TextAreaState::default();
+    state.insert_char('x');
+    state.backspace();
+    assert!(state.text.is_empty());
+}
+
+#[test]
+fn test_textarea_state_replace_all_no_undo_resets() {
+    use peri_widgets::textarea::TextAreaState;
+    let mut state = TextAreaState::default();
+    state.insert_str("old text");
+    state.replace_all_no_undo("new".to_string());
+    assert_eq!(state.text, "new");
+}
+
+#[test]
+fn test_textarea_state_delete_word_backward() {
+    use peri_widgets::textarea::TextAreaState;
+    let mut state = TextAreaState::default();
+    state.insert_str("hello");
+    state.cursor = state.text.len();
+    state.delete_word_backward();
+    assert!(state.text.is_empty());
 }

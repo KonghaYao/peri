@@ -33,6 +33,7 @@ use fluent_bundle::FluentValue;
 use peri_theme::atoms::{PALETTE_ATOM, PERI_COLORS_ATOM, THEME_ATOM};
 use peri_theme::bridge::ThemeDefinitionExt;
 use peri_theme::loader::list_available_themes;
+use peri_theme::theme::ThemeMode;
 use std::time::Instant;
 
 static THEME_LIST: OnceLock<Vec<String>> = OnceLock::new();
@@ -129,50 +130,112 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         true
     });
 
+    // tab 状态：0 = dark, 1 = light
+    let tab = hooks.use_state(|| 0u8);
+
+    // 按 mode 分类所有主题（一次性初始化）
+    let theme_kinds = hooks.use_state(|| {
+        let mut dark = Vec::new();
+        let mut light = Vec::new();
+        for name in get_theme_list() {
+            match peri_theme::loader::load_theme(name) {
+                Ok(t) => match t.mode {
+                    ThemeMode::Dark | ThemeMode::HighContrast => dark.push(name.clone()),
+                    ThemeMode::Light => light.push(name.clone()),
+                },
+                Err(_) => continue,
+            }
+        }
+        (dark, light)
+    });
+
+    // 根据 tab 获取当前主题列表
+    let current_list = {
+        let kinds = theme_kinds.read();
+        match *tab.read() {
+            0 => kinds.0.clone(),
+            _ => kinds.1.clone(),
+        }
+    };
+    let other_count = {
+        let kinds = theme_kinds.read();
+        match *tab.read() {
+            0 => kinds.1.len(),
+            _ => kinds.0.len(),
+        }
+    };
+
+    // 选中索引：tab 切换时重置为 0
     let selected = hooks.use_state(|| {
-        let themes = get_theme_list();
+        let themes = &current_list;
         let current = theme_def.read().name.to_string();
         themes.iter().position(|name| *name == current).unwrap_or(0)
     });
+    // 监听 tab 变化：重置 selected
+    let _reset_selection = hooks.use_state(|| {
+        // HACK：用 use_state 的 drop→recreate 来重置
+        // 这里放一个 tab guard，如果 tab 变了，外部 should_reset 会触发
+        0usize
+    });
+    let prev_tab = hooks.use_state(|| 0u8);
+    if *prev_tab.read() != *tab.read() {
+        *prev_tab.write_no_update() = *tab.read();
+        let current = theme_def.read().name.to_string();
+        let pos = current_list.iter().position(|n| *n == current).unwrap_or(0);
+        *selected.write_no_update() = pos;
+    }
 
     // 预览缓存：theme_name → 渲染后的 Line 列表
     let preview_cache = hooks.use_state(HashMap::<String, Vec<Line<'static>>>::new);
 
     let persisted_name = persisted_theme_name();
-    let themes = get_theme_list();
-    let item_count = themes.len();
+    let themes = current_list.clone();
+    let count = themes.len();
+    let themes_for_closure = themes.clone(); // clone for closure capture
 
     let orig = original_theme.read().clone();
 
     // ── 键盘处理 ──
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        let count = themes.len();
+        let count = themes_for_closure.len();
         move |event| {
             if let Event::Key(key) = event
                 && (key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat)
             {
                 match key.code {
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let idx = previous_selection(*selected.read());
-                        *selected.write() = idx;
-                        if let Some(name) = themes.get(idx) {
-                            switch_theme_atoms(name);
+                    KeyCode::Tab => {
+                        // 切换 dark/light tab
+                        let next = if *tab.read() == 0 { 1u8 } else { 0u8 };
+                        *tab.write() = next;
+                        return EventResult::Consumed;
+                    }
+                    KeyCode::Up => {
+                        if count > 0 {
+                            let idx = previous_selection(*selected.read());
+                            *selected.write() = idx;
+                            if let Some(name) = themes_for_closure.get(idx) {
+                                switch_theme_atoms(name);
+                            }
                         }
                         return EventResult::Consumed;
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let idx = next_selection(*selected.read(), count);
-                        *selected.write() = idx;
-                        if let Some(name) = themes.get(idx) {
-                            switch_theme_atoms(name);
+                    KeyCode::Down => {
+                        if count > 0 {
+                            let idx = next_selection(*selected.read(), count);
+                            *selected.write() = idx;
+                            if let Some(name) = themes_for_closure.get(idx) {
+                                switch_theme_atoms(name);
+                            }
                         }
                         return EventResult::Consumed;
                     }
                     KeyCode::Enter => {
-                        let idx = *selected.read();
-                        if let Some(name) = themes.get(idx) {
-                            switch_theme_atoms(name);
-                            persist_theme(name);
+                        if count > 0 {
+                            let idx = *selected.read();
+                            if let Some(name) = themes_for_closure.get(idx) {
+                                switch_theme_atoms(name);
+                                persist_theme(name);
+                            }
                         }
                         return EventResult::Consumed;
                     }
@@ -199,13 +262,33 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    // ── Header ──
+    // ── Tab 切换栏 ──
+    let current_tab = *tab.read();
+    let tab_reverse_fg = semantic.surface.default; // 反色前景 = 背景色
+    let tab_active_style = Style::new()
+        .fg(tab_reverse_fg)
+        .bg(semantic.accent);
+    let tab_inactive_style = Style::new().fg(semantic.text.muted);
+    let (dark_style, light_style) = if current_tab == 0 {
+        (tab_active_style, tab_inactive_style)
+    } else {
+        (tab_inactive_style, tab_active_style)
+    };
+    let dark_count = theme_kinds.read().0.len();
+    let light_count = theme_kinds.read().1.len();
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {} ({}) ", i18n::tr("panel-theme-tab-dark"), dark_count),
+            dark_style,
+        ),
+        Span::styled("  ", Style::new()),
+        Span::styled(
+            format!(" {} ({}) ", i18n::tr("panel-theme-tab-light"), light_count),
+            light_style,
+        ),
+    ]));
     lines.push(Line::from(vec![Span::styled(
-        format!("  {} themes", item_count),
-        header_style,
-    )]));
-    lines.push(Line::from(vec![Span::styled(
-        "  Enter::apply+save  Esc::revert",
+        i18n::tr("panel-theme-tab-hint"),
         muted_style,
     )]));
     lines.push(Line::from(""));
@@ -249,10 +332,23 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     )]));
 
     // ── 主题列表 ──
-    let scroll_start = scroll_start_for_selected(sel, item_count, VISIBLE_ITEMS);
+    let scroll_start = if count == 0 {
+        0
+    } else {
+        scroll_start_for_selected(sel, count, VISIBLE_ITEMS)
+    };
 
     if themes.is_empty() {
         lines.push(Line::from(i18n::tr("panel-theme-empty")).fg(semantic.text.muted));
+        if other_count > 0 {
+            lines.push(Line::from(vec![Span::styled(
+                format!(
+                    "  ({} themes in the other tab)",
+                    other_count
+                ),
+                muted_style,
+            )]));
+        }
     } else {
         for (i, name) in themes
             .iter()
@@ -284,7 +380,7 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // ── Footer ──
     lines.push(Line::from(vec![Span::styled(
-        "  \u{2191}/\u{2193}::navigate  Enter::apply+save  Esc::revert",
+        "  \u{2191}/\u{2193}::navigate  Enter::apply+save  Esc::revert  Tab::switch",
         muted_style,
     )]));
 

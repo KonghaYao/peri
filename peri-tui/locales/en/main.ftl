@@ -918,6 +918,9 @@ panel-theme-active-mark =  *
 panel-theme-nav-hint =   ↑/↓::navigate  Enter::switch  Esc::close
 panel-theme-empty =   (no themes found)
 panel-theme-preview = Preview
+panel-theme-tab-dark = Dark
+panel-theme-tab-light = Light
+panel-theme-tab-hint =   Tab::switch-category
 
 # ---- Workflow Panel kanban ----
 workflow-loading-runs = Loading workflow runs

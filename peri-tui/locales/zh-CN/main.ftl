@@ -917,6 +917,9 @@ panel-theme-active-mark =  *
 panel-theme-nav-hint =   ↑/↓::navigate  Enter::switch  Esc::close
 panel-theme-empty =   (未找到主题)
 panel-theme-preview = 预览
+panel-theme-tab-dark = 暗色
+panel-theme-tab-light = 浅色
+panel-theme-tab-hint =   Tab::切换分类
 
 # ---- Workflow Panel kanban ----
 workflow-loading-runs = 正在加载工作流运行信息

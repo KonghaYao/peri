@@ -8,12 +8,13 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use peri_acp_types::event_data::AskUser;
+use peri_widgets::textarea::{TextAreaState, wrap_text as textarea_wrap};
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
     ratatui::{
         layout::Constraint,
-        style::{Style, Stylize},
+        style::{Color, Modifier, Style, Stylize},
         text::Line,
     },
 };
@@ -32,14 +33,10 @@ use serde_json::json;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
-/// 面板交互模式：选项导航 vs 文本输入
-#[derive(Clone, Debug, PartialEq)]
-enum InputMode {
-    /// 正在选项列表中导航（默认模式）
-    Selecting,
-    /// 正在输入自定义文本；携带当前输入的文本 buffer
-    Typing { buffer: String },
-}
+/// 自定义文本输入的视口行数上限
+const TYPING_VIEWPORT_ROWS: usize = 3;
+/// 文本换行宽度（CJK 安全）
+const WRAP_WIDTH: usize = 80;
 
 #[component]
 pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -52,7 +49,10 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let focused = hooks.use_state(|| 0usize);
     let answers = hooks.use_state(Vec::<Vec<usize>>::new);
     let focused_option = hooks.use_state(|| 0usize);
-    let input_mode = hooks.use_state(|| InputMode::Selecting);
+    // 是否处于自定义文本输入模式
+    let is_typing = hooks.use_state(|| false);
+    // 自定义输入 textarea 状态（仅 typing 期间有效）
+    let typing_state = hooks.use_state(TextAreaState::default);
     // 每个问题的自定义文本答案（与 answers 并行，互不冲突）
     let custom_answers = hooks.use_state(Vec::<Option<String>>::new);
     let session_fingerprint = hooks.use_state(Vec::<String>::new);
@@ -67,7 +67,8 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         *focused.write() = 0;
         *answers.write() = vec![vec![]; question_count];
         *focused_option.write() = 0;
-        *input_mode.write() = InputMode::Selecting;
+        *is_typing.write() = false;
+        *typing_state.write() = TextAreaState::default();
         *custom_answers.write() = vec![None; question_count];
         *session_fingerprint.write() = current_fingerprint;
     }
@@ -88,6 +89,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let pending_for_closure = pending.clone();
 
+    // ── 事件处理 ────────────────────────────────────────────────────────────
     hooks.use_event_handler(EventScope::Current, EventPriority::High, move |event| {
         let Event::Key(key) = event else {
             return EventResult::Ignored;
@@ -101,96 +103,161 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             return EventResult::Ignored;
         }
 
-        // Typing 模式：捕获所有按键用于文本编辑
-        if let InputMode::Typing { ref buffer } = *input_mode.read() {
-            let mut buf = buffer.clone();
-            let mut consumed = true;
-            match (key.modifiers, key.code) {
-                // Enter → 确认输入，保存到 custom_answers
-                (KeyModifiers::NONE, KeyCode::Enter) => {
-                    if !buf.trim().is_empty() {
+        // ── Typing 模式：委托给 TextAreaState ──
+        if *is_typing.read() {
+            let mut st = typing_state.write();
+            let consumed = match key.code {
+                // Enter → 确认输入
+                KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
+                    let text = st.text.trim().to_string();
+                    if !text.is_empty() {
                         let q_idx = *focused.read();
                         let mut ca = custom_answers.write();
                         if q_idx >= ca.len() {
                             ca.resize(q_idx + 1, None);
                         }
-                        ca[q_idx] = Some(buf.trim().to_string());
+                        ca[q_idx] = Some(text);
                     }
-                    *input_mode.write() = InputMode::Selecting;
+                    *is_typing.write() = false;
+                    true
                 }
-                // ESC → 取消输入，丢弃 buffer
-                (KeyModifiers::NONE, KeyCode::Esc) => {
-                    *input_mode.write() = InputMode::Selecting;
+                // ESC → 取消输入
+                KeyCode::Esc if key.modifiers == KeyModifiers::NONE => {
+                    *is_typing.write() = false;
+                    true
                 }
-                // Backspace → 删除最后一个字符
-                (KeyModifiers::NONE, KeyCode::Backspace) => {
-                    buf.pop();
-                    *input_mode.write() = InputMode::Typing { buffer: buf };
+                // Backspace
+                KeyCode::Backspace if key.modifiers == KeyModifiers::NONE => {
+                    st.backspace();
+                    true
                 }
-                // Ctrl+W → 删除最后一个词
-                (KeyModifiers::CONTROL, KeyCode::Char('w'))
-                | (KeyModifiers::CONTROL, KeyCode::Char('W')) => {
-                    if let Some(pos) = buf.rfind(char::is_whitespace) {
-                        buf.truncate(pos);
-                    } else {
-                        buf.clear();
+                // Delete
+                KeyCode::Delete if key.modifiers == KeyModifiers::NONE => {
+                    st.delete_forward();
+                    true
+                }
+                // Ctrl+W → 删词
+                KeyCode::Char('w' | 'W') if key.modifiers == KeyModifiers::CONTROL => {
+                    st.delete_word_backward();
+                    true
+                }
+                // Ctrl+U → 清空行
+                KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                    st.clear();
+                    true
+                }
+                // Ctrl+A → 行首
+                KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => {
+                    st.cursor_line_home();
+                    true
+                }
+                // Ctrl+E → 行尾
+                KeyCode::Char('e') if key.modifiers == KeyModifiers::CONTROL => {
+                    st.cursor_line_end();
+                    true
+                }
+                // 左箭头
+                KeyCode::Left if key.modifiers == KeyModifiers::NONE => {
+                    st.cursor_left();
+                    true
+                }
+                KeyCode::Left if key.modifiers == KeyModifiers::CONTROL => {
+                    st.cursor_word_left();
+                    true
+                }
+                // 右箭头
+                KeyCode::Right if key.modifiers == KeyModifiers::NONE => {
+                    st.cursor_right();
+                    true
+                }
+                KeyCode::Right if key.modifiers == KeyModifiers::CONTROL => {
+                    st.cursor_word_right();
+                    true
+                }
+                // 上/下箭头：视觉行移动；到顶时回到选项列表
+                KeyCode::Up if key.modifiers == KeyModifiers::NONE => {
+                    let moved = st.cursor_visual_up(WRAP_WIDTH);
+                    if !moved {
+                        // 已在最顶：退出 typing，回到预设选项
+                        *is_typing.write() = false;
+                        let q = pending_for_closure
+                            .as_ref()
+                            .and_then(|au| au.questions.get(*focused.read()));
+                        if let Some(q) = q {
+                            *focused_option.write() = q.options.len().saturating_sub(1);
+                        }
                     }
-                    *input_mode.write() = InputMode::Typing { buffer: buf };
+                    true
                 }
-                // 可打印字符 → 追加
-                (KeyModifiers::NONE, KeyCode::Char(c)) => {
-                    buf.push(c);
-                    *input_mode.write() = InputMode::Typing { buffer: buf };
+                KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
+                    let _ = st.cursor_visual_down(WRAP_WIDTH);
+                    true
                 }
-                (KeyModifiers::SHIFT, KeyCode::Char(c)) => {
-                    buf.push(c);
-                    *input_mode.write() = InputMode::Typing { buffer: buf };
+                // Ctrl+Z → undo
+                KeyCode::Char('z') if key.modifiers == KeyModifiers::CONTROL => {
+                    st.undo();
+                    true
                 }
-                _ => {
-                    consumed = false;
+                // Ctrl+Shift+Z / Ctrl+Y → redo
+                KeyCode::Char('Z') if key.modifiers == KeyModifiers::CONTROL => {
+                    st.redo();
+                    true
                 }
-            }
+                KeyCode::Char('y') if key.modifiers == KeyModifiers::CONTROL => {
+                    st.redo();
+                    true
+                }
+                // 可见字符插入
+                KeyCode::Char(c) if key.modifiers == KeyModifiers::NONE
+                    || key.modifiers == KeyModifiers::SHIFT => {
+                    st.insert_char(c);
+                    true
+                }
+                _ => false,
+            };
             if consumed {
                 return EventResult::Consumed;
             }
         }
 
-        // Space：选中/取消当前高亮的选项（多选时 toggle 入 vec，单选时替换）
-        if (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Char(' ')) {
-            let q_idx = *focused.read();
-            let opt_idx = *focused_option.read();
-            // 自定义输入选项：进入 Typing 模式
-            if let Some(au) = pending_for_closure.as_ref()
-                && let Some(q) = au.questions.get(q_idx)
-                && opt_idx == q.options.len()
-            {
-                *input_mode.write() = InputMode::Typing {
-                    buffer: custom_answers
+        // ── 非 Typing 模式：选项导航 ──
+
+            // Space：选中/取消当前高亮的选项（或手动进入 typing）
+            if (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Char(' ')) {
+                let q_idx = *focused.read();
+                let opt_idx = *focused_option.read();
+                // 自定义输入选项：手动进入 Typing 模式
+                if let Some(au) = pending_for_closure.as_ref()
+                    && let Some(q) = au.questions.get(q_idx)
+                    && opt_idx == q.options.len()
+                {
+                    let existing = custom_answers
                         .read()
                         .get(q_idx)
                         .cloned()
                         .flatten()
-                        .unwrap_or_default(),
-                };
-                return EventResult::Consumed;
-            }
-            if let Some(au) = pending_for_closure.as_ref()
-                && let Some(q) = au.questions.get(q_idx)
-                && opt_idx < q.options.len()
+                        .unwrap_or_default();
+                    let mut ts = typing_state.write();
+                    ts.replace_all_no_undo(existing);
+                    ts.clear_undo_history();
+                    *is_typing.write() = true;
+                    return EventResult::Consumed;
+                }
+                if let Some(au) = pending_for_closure.as_ref()
+                    && let Some(q) = au.questions.get(q_idx)
+                    && opt_idx < q.options.len()
             {
                 let mut a = answers.write();
                 if q_idx >= a.len() {
                     a.resize(q_idx + 1, vec![]);
                 }
                 if q.multi_select {
-                    // 多选：toggle 选项索引在选中列表中
                     if let Some(pos) = a[q_idx].iter().position(|&x| x == opt_idx) {
                         a[q_idx].remove(pos);
                     } else {
                         a[q_idx].push(opt_idx);
                     }
                 } else {
-                    // 单选：替换为当前选项（再次按 Space 取消选中）
                     a[q_idx] = if a[q_idx].first() == Some(&opt_idx) {
                         vec![]
                     } else {
@@ -203,7 +270,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
         match classify_list_nav(&key) {
             Some(ListNavAction::MoveUp) => {
-                if matches!(*input_mode.read(), InputMode::Typing { .. }) {
+                if *is_typing.read() {
                     return EventResult::Consumed;
                 }
                 let mut fo = focused_option.write();
@@ -211,7 +278,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 EventResult::Consumed
             }
             Some(ListNavAction::MoveDown) => {
-                if matches!(*input_mode.read(), InputMode::Typing { .. }) {
+                if *is_typing.read() {
                     return EventResult::Consumed;
                 }
                 let limit = pending_for_closure
@@ -222,11 +289,32 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if limit > 0 {
                     let mut fo = focused_option.write();
                     *fo = next_selection(*fo, limit);
+                    // 到达自定义输入位置时自动激活 typing
+                    if *fo == limit.saturating_sub(1) {
+                        let q_idx = *focused.read();
+                        let existing = pending_for_closure
+                            .as_ref()
+                            .and_then(|au| au.questions.get(q_idx))
+                            .map(|_q| {
+                                custom_answers
+                                    .read()
+                                    .get(q_idx)
+                                    .cloned()
+                                    .flatten()
+                                    .unwrap_or_default()
+                            })
+                            .unwrap_or_default();
+                        let mut ts = typing_state.write();
+                        ts.replace_all_no_undo(existing);
+                        ts.clear_undo_history();
+                        *is_typing.write() = true;
+                    }
                 }
                 EventResult::Consumed
             }
+
             Some(ListNavAction::CycleForward) if question_count > 0 => {
-                if matches!(*input_mode.read(), InputMode::Typing { .. }) {
+                if *is_typing.read() {
                     return EventResult::Consumed;
                 }
                 let mut f = focused.write();
@@ -240,7 +328,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 EventResult::Consumed
             }
             Some(ListNavAction::CycleBackward) if question_count > 0 => {
-                if matches!(*input_mode.read(), InputMode::Typing { .. }) {
+                if *is_typing.read() {
                     return EventResult::Consumed;
                 }
                 let mut f = focused.write();
@@ -336,6 +424,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
+    // ── 渲染 ────────────────────────────────────────────────────────────────
     let popup_tokens = &theme_def.read().component.popup;
     let guard = theme_def.read();
     let semantic = &guard.semantic;
@@ -358,29 +447,48 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Some(au) => {
             let focused_idx = (*focused.read()).min(au.questions.len() - 1);
             let answers_read = answers.read();
+            let typing = *is_typing.read();
 
-            // Tab 行：已答表示 ✓，当前用 [header]
+            // Tab 行：反色高亮当前 tab（accent 底色 + surface 字色），禁用 [ ]
             lines.push(Line::from(""));
-            let tab_line = au
+            let tab_spans: Vec<ratatui::text::Span> = au
                 .questions
                 .iter()
                 .enumerate()
-                .map(|(i, q)| {
-                    let answered = answers_read.get(i).map(|v| !v.is_empty()).unwrap_or(false);
+                .flat_map(|(i, q)| {
+                    let answered = answers_read
+                        .get(i)
+                        .map(|v| !v.is_empty())
+                        .unwrap_or(false)
+                        || custom_answers
+                            .read()
+                            .get(i)
+                            .map(|ca| ca.is_some())
+                            .unwrap_or(false);
                     let mark = if answered {
                         i18n::tr("panel-ask-user-answered-mark")
                     } else {
                         String::new()
                     };
-                    if i == focused_idx {
-                        format!("[{}]{}", q.header, mark)
+                    let tab_key = format!("{}{}", q.header, mark);
+                    let styled = if i == focused_idx {
+                        ratatui::text::Span::styled(
+                            format!(" {} ", tab_key),
+                            Style::new()
+                                .fg(semantic.surface.default)
+                                .bg(popup_tokens.action_primary)
+                                .add_modifier(Modifier::BOLD),
+                        )
                     } else {
-                        format!(" {} {}", q.header, mark)
-                    }
+                        ratatui::text::Span::styled(
+                            format!(" {} ", tab_key),
+                            Style::new().fg(semantic.text.dim),
+                        )
+                    };
+                    vec![styled, ratatui::text::Span::from(" ")]
                 })
-                .collect::<Vec<_>>()
-                .join("  ");
-            lines.push(Line::from(format!("  {}", tab_line)).fg(semantic.text.dim));
+                .collect();
+            lines.push(Line::from(tab_spans));
             lines.push(Line::from("─".repeat(60)).fg(semantic.border.default));
 
             if let Some(q) = au.questions.get(focused_idx) {
@@ -390,27 +498,32 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 } else {
                     format!("  {}", q.question)
                 };
-                // 超长问题文本折行（CJK 安全）
-                for wrapped in wrap_text(&question_text, 80) {
+                for wrapped in wrap_text(&question_text, WRAP_WIDTH) {
                     lines.push(Line::from(wrapped).fg(semantic.text.primary));
                 }
                 lines.push(Line::from(""));
 
-                let selected_indices = answers_read.get(focused_idx).cloned().unwrap_or_default();
+                let has_custom_answer_current = custom_answers
+                    .read()
+                    .get(focused_idx)
+                    .map(|ca| ca.is_some())
+                    .unwrap_or(false);
+
+                // 预设选项列表
+                let selected_indices = answers_read
+                    .get(focused_idx)
+                    .cloned()
+                    .unwrap_or_default();
                 let fopt = *focused_option.read();
+
+                // Typing 模式下隐藏预设选项的选中状态
                 for (opt_i, opt) in q.options.iter().enumerate() {
-                    let typing = matches!(*input_mode.read(), InputMode::Typing { .. });
-                    let has_custom_answer_current = custom_answers
-                        .read()
-                        .get(focused_idx)
-                        .map(|ca| ca.is_some())
-                        .unwrap_or(false);
                     let is_selected = if typing || has_custom_answer_current {
                         false
                     } else {
                         selected_indices.contains(&opt_i)
                     };
-                    let is_focused_opt = opt_i == fopt;
+                    let is_focused_opt = !typing && opt_i == fopt;
                     let mark = if is_selected {
                         if q.multi_select { "☑" } else { "●" }
                     } else if q.multi_select {
@@ -422,73 +535,97 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let style = if is_selected {
                         Style::new().fg(popup_tokens.action_primary).bold()
                     } else if is_focused_opt {
-                        Style::new().fg(popup_tokens.selected_fg)
+                        Style::new().fg(popup_tokens.action_primary).add_modifier(Modifier::BOLD)
                     } else {
                         Style::new().fg(semantic.text.primary)
                     };
 
-                    // 选项 label 超长折行
                     let label_line = format!("  {} {}", mark, opt.label);
-                    for wrapped in wrap_text(&label_line, 80) {
+                    for wrapped in wrap_text(&label_line, WRAP_WIDTH) {
                         lines.push(Line::from(wrapped).style(style));
                     }
                     if !opt.description.is_empty() {
                         let desc_line = format!("    {}", opt.description);
-                        for wrapped in wrap_text(&desc_line, 80) {
+                        for wrapped in wrap_text(&desc_line, WRAP_WIDTH) {
                             lines.push(Line::from(wrapped).fg(semantic.text.dim));
                         }
                     }
                 }
 
-                // ── 自定义输入入口（附加在预设选项之后） ──
+                // ── 自定义输入入口 ──
                 let custom_option_index = q.options.len();
-                let has_custom_answer = custom_answers
-                    .read()
-                    .get(focused_idx)
-                    .map(|ca| ca.is_some())
-                    .unwrap_or(false);
-                let is_custom_focused = fopt == custom_option_index;
+                let is_custom_focused = !typing && fopt == custom_option_index;
 
-                let (custom_mark, custom_text) =
-                    if matches!(*input_mode.read(), InputMode::Typing { .. }) {
-                        let buf = match &*input_mode.read() {
-                            InputMode::Typing { buffer } => {
-                                if buffer.is_empty() {
-                                    "|".to_string()
-                                } else {
-                                    format!("{}|", buffer)
-                                }
-                            }
-                            _ => "|".to_string(),
-                        };
-                        ("✎".to_string(), format!("  {}", buf))
-                    } else if has_custom_answer {
-                        let existing = custom_answers
-                            .read()
-                            .get(focused_idx)
-                            .cloned()
-                            .flatten()
-                            .unwrap_or_default();
-                        let mark = if q.multi_select { "☑" } else { "●" };
-                        (mark.to_string(), format!("  {}", existing))
-                    } else {
-                        (
-                            "✎".to_string(),
-                            format!("  {}", i18n::tr("ask-user-placeholder")),
-                        )
-                    };
+                if typing {
+                    // Typing 模式：使用 TextArea 渲染
+                    let st_read = typing_state.read();
+                    let wrap = textarea_wrap(&st_read.text, st_read.cursor, WRAP_WIDTH);
+                    let total_rows = wrap.total_visual_rows.max(1);
+                    let viewport = total_rows.min(TYPING_VIEWPORT_ROWS);
 
-                let custom_style = if has_custom_answer {
-                    Style::new().fg(popup_tokens.action_primary).bold()
-                } else if is_custom_focused {
-                    Style::new().fg(popup_tokens.selected_fg)
+                    let cursor_style = Style::default()
+                        .fg(Color::Reset)
+                        .bg(popup_tokens.action_primary)
+                        .add_modifier(Modifier::BOLD);
+                    let placeholder_style = Style::default().fg(semantic.text.dim);
+                    let default_style = Style::default().bg(Color::Reset);
+
+                    let typed_lines = peri_widgets::textarea::render_multiline_with_cursor(
+                        &st_read.text,
+                        st_read.cursor,
+                        cursor_style,
+                        None,
+                        cursor_style,
+                        Some(&i18n::tr("ask-user-placeholder")),
+                        placeholder_style,
+                        default_style,
+                        WRAP_WIDTH,
+                        viewport,
+                        false,
+                        true,
+                    );
+                    for line in typed_lines {
+                        // 保留 textarea 返回的 Span 级样式（含光标高亮），仅前置缩进
+                        let indent = ratatui::text::Span::from("    ");
+                        let mut spans = vec![indent];
+                        spans.extend(line.spans.iter().cloned());
+                        lines.push(Line::from(spans));
+                    }
+                    let _ = st_read;
+                } else if has_custom_answer_current {
+                    // 已有自定义答案：显示为选中状态
+                    let existing = custom_answers
+                        .read()
+                        .get(focused_idx)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or_default();
+                    let mark = if q.multi_select { "☑" } else { "●" };
+                    let custom_style = Style::new()
+                        .fg(popup_tokens.action_primary)
+                        .bold();
+                    for wrapped in wrap_text(&existing, WRAP_WIDTH.saturating_sub(4)) {
+                        lines.push(
+                            Line::from(format!("    {} {}", mark, wrapped))
+                                .style(custom_style),
+                        );
+                    }
                 } else {
-                    Style::new().fg(semantic.text.dim)
-                };
-
-                let custom_label_line = format!("  {} {}", custom_mark, custom_text);
-                for wrapped in wrap_text(&custom_label_line, 80) {
-                    lines.push(Line::from(wrapped).style(custom_style));
+                    // 未输入：显示占位提示
+                    let custom_style = if is_custom_focused {
+                        Style::new()
+                            .fg(popup_tokens.action_primary)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::new().fg(semantic.text.dim)
+                    };
+                    lines.push(
+                        Line::from(format!(
+                            "    {}",
+                            i18n::tr("ask-user-placeholder")
+                        ))
+                        .style(custom_style),
+                    );
                 }
 
                 if q.options.is_empty() {
@@ -499,58 +636,54 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
 
             lines.push(Line::from(""));
-            // 确定当前问题的多选模式，选择对应的提示文本
-            let is_multi_select = au
-                .questions
-                .get(focused_idx)
-                .map(|q| q.multi_select)
-                .unwrap_or(false);
-            if matches!(*input_mode.read(), InputMode::Typing { .. }) {
-                lines
-                    .push(Line::from(i18n::tr("panel-ask-user-hint-typing")).fg(semantic.text.dim));
-            } else if au.questions.len() > 1 {
-                let all_answered = answers_read.iter().enumerate().all(|(i, a)| {
-                    !a.is_empty()
-                        || au
-                            .questions
-                            .get(i)
-                            .map(|q| q.options.is_empty())
-                            .unwrap_or(true)
-                });
-                if all_answered {
-                    let key = if is_multi_select {
-                        "panel-ask-user-hint-tab-multi-select-answered"
-                    } else {
-                        "panel-ask-user-hint-tab-multi-answered"
-                    };
-                    lines.push(Line::from(i18n::tr(key)).fg(semantic.text.dim));
-                } else {
-                    let key = if is_multi_select {
-                        "panel-ask-user-hint-tab-multi-select-unanswered"
-                    } else {
-                        "panel-ask-user-hint-tab-multi-unanswered"
-                    };
-                    lines.push(Line::from(i18n::tr(key)).fg(semantic.text.dim));
-                }
+            // 提示行：根据当前模式选择文本
+            if typing {
+                lines.push(
+                    Line::from(i18n::tr("panel-ask-user-hint-typing"))
+                        .fg(semantic.text.dim),
+                );
             } else {
-                let is_answered = answers_read.first().map(|v| !v.is_empty()).unwrap_or(false)
-                    || au
-                        .questions
-                        .first()
-                        .map(|q| q.options.is_empty())
-                        .unwrap_or(true);
-                if is_answered {
-                    let key = if is_multi_select {
-                        "panel-ask-user-hint-single-multi-select-answered"
+                let is_multi_select = au
+                    .questions
+                    .get(focused_idx)
+                    .map(|q| q.multi_select)
+                    .unwrap_or(false);
+                if au.questions.len() > 1 {
+                    let all_answered = answers_read.iter().enumerate().all(|(i, a)| {
+                        !a.is_empty()
+                            || custom_answers.read().get(i).map(|ca| ca.is_some()).unwrap_or(false)
+                            || au.questions.get(i).map(|q| q.options.is_empty()).unwrap_or(true)
+                    });
+                    let key = if all_answered {
+                        if is_multi_select {
+                            "panel-ask-user-hint-tab-multi-select-answered"
+                        } else {
+                            "panel-ask-user-hint-tab-multi-answered"
+                        }
                     } else {
-                        "panel-ask-user-hint-single-answered"
+                        if is_multi_select {
+                            "panel-ask-user-hint-tab-multi-select-unanswered"
+                        } else {
+                            "panel-ask-user-hint-tab-multi-unanswered"
+                        }
                     };
                     lines.push(Line::from(i18n::tr(key)).fg(semantic.text.dim));
                 } else {
-                    let key = if is_multi_select {
-                        "panel-ask-user-hint-single-multi-select-unanswered"
+                    let is_answered = answers_read.first().map(|v| !v.is_empty()).unwrap_or(false)
+                        || custom_answers.read().first().map(|ca| ca.is_some()).unwrap_or(false)
+                        || au.questions.first().map(|q| q.options.is_empty()).unwrap_or(true);
+                    let key = if is_answered {
+                        if is_multi_select {
+                            "panel-ask-user-hint-single-multi-select-answered"
+                        } else {
+                            "panel-ask-user-hint-single-answered"
+                        }
                     } else {
-                        "panel-ask-user-hint-single-unanswered"
+                        if is_multi_select {
+                            "panel-ask-user-hint-single-multi-select-unanswered"
+                        } else {
+                            "panel-ask-user-hint-single-unanswered"
+                        }
                     };
                     lines.push(Line::from(i18n::tr(key)).fg(semantic.text.dim));
                 }
@@ -641,17 +774,27 @@ fn build_answers_map(
         for (i, q) in au.questions.iter().enumerate() {
             let custom = custom_answers.get(i).cloned().flatten();
             let selected: Vec<usize> = answers.get(i).cloned().unwrap_or_default();
-            let val = if let Some(custom_text) = custom {
-                json!(custom_text)
-            } else if q.multi_select {
-                // 多选：返回 label 数组
-                let labels: Vec<serde_json::Value> = selected
+            let val = if q.multi_select {
+                // 多选：合并预设选项 labels + 自定义文本
+                let mut labels: Vec<serde_json::Value> = selected
                     .iter()
                     .filter_map(|idx| q.options.get(*idx).map(|opt| json!(opt.label)))
                     .collect();
-                json!(labels)
+                if let Some(custom_text) = custom {
+                    if !custom_text.is_empty() {
+                        labels.push(json!(custom_text));
+                    }
+                }
+                if labels.is_empty() {
+                    json!([])
+                } else {
+                    json!(labels)
+                }
+            } else if let Some(custom_text) = custom {
+                // 单选：自定义文本优先
+                json!(custom_text)
             } else {
-                // 单选：返回单个 label
+                // 单选：仅预设选项
                 selected
                     .first()
                     .and_then(|idx| q.options.get(*idx).map(|opt| json!(opt.label)))

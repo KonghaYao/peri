@@ -4,4 +4,4 @@
 
 > 测试 AskUserQuestion
 
-请你测试一下 AskUserQuestion 工具， 三个题目， 每个题目 4 个选项
+请你测试一下 AskUserQuestion 工具， 三个题目， 每个题目 4 个选项， 第一题单选， 第二题多选
