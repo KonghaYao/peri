@@ -340,7 +340,13 @@ impl LangfuseTracer {
                 map
             });
 
-        let current_agent_id = self.subagent.current_agent_id(&self.agent_observation_id);
+        // 优先使用当前活跃 stage span 作为父 observation
+        // Reason stage → Generation 挂在 stage-reason 下
+        let parent_id = self
+            .stages
+            .active_handle()
+            .map(|h| h.span_id.clone())
+            .unwrap_or_else(|| self.agent_observation_id.clone());
 
         let gen_body = GenerationBody {
             id: Some(gen_end.gen_id),
@@ -353,7 +359,7 @@ impl LangfuseTracer {
             metadata: gen_end.retry_metadata,
             level: None,
             status_message: None,
-            parent_observation_id: Some(current_agent_id),
+            parent_observation_id: Some(parent_id),
             version: Some(VERSION.to_string()),
             environment: None,
             completion_start_time: None,
@@ -434,7 +440,12 @@ impl LangfuseTracer {
                     start_time: Some(end.start_time),
                     end_time: Some(now_rfc3339()),
                     completion_start_time: None,
-                    parent_observation_id: Some(self.agent_observation_id.clone()),
+                    parent_observation_id: Some(
+                        self.stages
+                            .active_handle()
+                            .map(|h| h.span_id.clone())
+                            .unwrap_or_else(|| self.agent_observation_id.clone()),
+                    ),
                     input: Some(end.input),
                     output: Some(serde_json::json!(_output)),
                     metadata: None,
@@ -564,41 +575,23 @@ impl LangfuseTracer {
 
     // ── Stage 5 阶段 Span 事件 ──────────────────────────────────────────────
 
-    /// Stage 开始：创建 stage span
+    /// Stage 开始：注册 stage span（SpanCreate 延迟到 on_stage_end 发送，
+    /// 仅在 duration > 0 时上报，实现 v2 条件上报语义）
     pub fn on_stage_start(&mut self, stage: Stage, turn_id: &str) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        let handle =
-            self.stages
-                .on_stage_start(stage, &self.trace_id, turn_id, &self.agent_observation_id);
-
-        let span_body = SpanBody {
-            id: Some(handle.span_id),
-            trace_id: Some(handle.trace_id),
-            name: Some(format!("stage-{:?}", handle.stage).to_lowercase()),
-            start_time: Some(handle.start_time),
-            end_time: None,
-            input: None,
-            output: None,
-            metadata: None,
-            level: None,
-            status_message: None,
-            version: Some(VERSION.to_string()),
-            environment: None,
-            parent_observation_id: Some(handle.parent_observation_id),
-            session_id: Some(self.session_id.clone()),
-        };
-        let event = IngestionEvent::SpanCreate {
-            id: new_uuid(),
-            timestamp: now_rfc3339(),
-            body: span_body,
-            metadata: None,
-        };
-        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Stage SpanCreate");
+        let _handle = self.stages.on_stage_start(
+            stage,
+            &self.trace_id,
+            turn_id,
+            &self.agent_observation_id,
+        );
+        // SpanCreate 延迟到 on_stage_end：仅在 duration > 0 时发送
     }
 
-    /// Stage 结束：更新 stage span
+    /// Stage 结束：若 duration > 0 则发送 SpanCreate（合并 start+end），否则静默跳过。
+    /// 实现 v2 spec §1.2 条件上报：0ms stage span 不上报。
     pub(crate) fn on_stage_end(
         &mut self,
         handle: &crate::langfuse::tracer::stages::StageHandle,
@@ -610,10 +603,18 @@ impl LangfuseTracer {
         self.stages.on_stage_end(handle, status);
 
         let end_time = now_rfc3339();
+        let duration_ms = calculate_duration_ms(&handle.start_time, &end_time);
+
+        // v2 条件上报：0ms 不做 Span，跳过
+        if duration_ms == 0 {
+            return;
+        }
+
         let level = match status {
             StageStatus::Error => Some(ObservationLevel::Error),
             _ => Some(ObservationLevel::Default),
         };
+        // 合并 SpanCreate + SpanUpdate 为单个 SpanCreate（含 end_time）
         let span_body = SpanBody {
             id: Some(handle.span_id.clone()),
             trace_id: Some(handle.trace_id.clone()),
@@ -621,7 +622,10 @@ impl LangfuseTracer {
             start_time: Some(handle.start_time.clone()),
             end_time: Some(end_time.clone()),
             input: None,
-            output: Some(serde_json::json!({"status": format!("{:?}", status)})),
+            output: Some(serde_json::json!({
+                "status": format!("{:?}", status),
+                "duration_ms": duration_ms,
+            })),
             metadata: None,
             level,
             status_message: None,
@@ -630,13 +634,13 @@ impl LangfuseTracer {
             parent_observation_id: Some(handle.parent_observation_id.clone()),
             session_id: Some(self.session_id.clone()),
         };
-        let event = IngestionEvent::SpanUpdate {
+        let event = IngestionEvent::SpanCreate {
             id: new_uuid(),
             timestamp: end_time,
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Stage SpanUpdate");
+        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Stage SpanCreate");
     }
 
     /// 消息队列排空（Receive 阶段）
@@ -930,6 +934,18 @@ impl LangfuseTracer {
         let _ = self.subagent.end_subagent();
         let _ = self.tool_batch.flush();
     }
+}
+
+/// 计算两 RFC3339 时间戳之间的毫秒差。
+/// parse 失败时返回 0（保守：不上报 0ms span）。
+fn calculate_duration_ms(start: &str, end: &str) -> u64 {
+    use chrono::TimeZone;
+    let s = chrono::DateTime::parse_from_rfc3339(start)
+        .unwrap_or_else(|_| chrono::Utc.timestamp_opt(0, 0).unwrap().into());
+    let e = chrono::DateTime::parse_from_rfc3339(end)
+        .unwrap_or_else(|_| chrono::Utc.timestamp_opt(0, 0).unwrap().into());
+    let dur = e.signed_duration_since(s);
+    dur.num_milliseconds().max(0) as u64
 }
 
 #[cfg(test)]
