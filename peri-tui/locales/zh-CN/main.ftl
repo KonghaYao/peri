@@ -916,6 +916,7 @@ panel-tasks-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
 panel-theme-active-mark =  *
 panel-theme-nav-hint =   ↑/↓::navigate  Enter::switch  Esc::close
 panel-theme-empty =   (未找到主题)
+panel-theme-preview = 预览
 
 # ---- Workflow Panel kanban ----
 workflow-loading-runs = 正在加载工作流运行信息
@@ -931,6 +932,10 @@ panel-ask-user-hint-tab-multi-answered =   Tab::next-question · ↑/↓::naviga
 panel-ask-user-hint-tab-multi-unanswered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel
 panel-ask-user-hint-single-answered =   ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
 panel-ask-user-hint-single-unanswered =   ↑/↓::navigate · Space::select · Esc::cancel
+panel-ask-user-hint-tab-multi-select-answered =   Tab::下一题 · ↑/↓::导航 · Space::多选 · Enter::提交 · Esc::取消
+panel-ask-user-hint-tab-multi-select-unanswered =   Tab::下一题 · ↑/↓::导航 · Space::多选 · Enter::下一题 · Esc::取消
+panel-ask-user-hint-single-multi-select-answered =   ↑/↓::导航 · Space::多选 · Enter::提交 · Esc::取消
+panel-ask-user-hint-single-multi-select-unanswered =   ↑/↓::导航 · Space::多选 · Esc::取消
 
 # ---- Others ----
 bg-task-overflow = … { $count } more

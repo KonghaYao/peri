@@ -917,6 +917,7 @@ panel-tasks-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
 panel-theme-active-mark =  *
 panel-theme-nav-hint =   ↑/↓::navigate  Enter::switch  Esc::close
 panel-theme-empty =   (no themes found)
+panel-theme-preview = Preview
 
 # ---- Workflow Panel kanban ----
 workflow-loading-runs = Loading workflow runs
@@ -932,6 +933,10 @@ panel-ask-user-hint-tab-multi-answered =   Tab::next-question · ↑/↓::naviga
 panel-ask-user-hint-tab-multi-unanswered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel
 panel-ask-user-hint-single-answered =   ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
 panel-ask-user-hint-single-unanswered =   ↑/↓::navigate · Space::select · Esc::cancel
+panel-ask-user-hint-tab-multi-select-answered =   Tab::next-question · ↑/↓::navigate · Space::toggle · Enter::submit · Esc::cancel
+panel-ask-user-hint-tab-multi-select-unanswered =   Tab::next-question · ↑/↓::navigate · Space::toggle · Enter::next · Esc::cancel
+panel-ask-user-hint-single-multi-select-answered =   ↑/↓::navigate · Space::toggle · Enter::submit · Esc::cancel
+panel-ask-user-hint-single-multi-select-unanswered =   ↑/↓::navigate · Space::toggle · Esc::cancel
 
 # ---- Others ----
 bg-task-overflow = … { $count } more
