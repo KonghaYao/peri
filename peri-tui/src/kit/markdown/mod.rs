@@ -168,6 +168,7 @@ pub fn parse_markdown_cached(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
     use ratatui::style::Modifier;
 
     /// 测试辅助：将 parse_markdown 返回的段落展平为 Line 列表。
@@ -217,18 +218,19 @@ mod tests {
     fn test_inline_code() {
         let result = flatten(&parse_markdown("use `code` here", 80, Palette::default()));
         let line = &result[0];
-        // v0.3.0: inline code 内容包含 backtick 标记，且不再使用 Palette 颜色
+        // backtick 已剥离，span 内容为纯代码文本
         let code_span = line
             .spans
             .iter()
-            .find(|s| s.content.as_ref().contains("code"))
-            .expect("inline code span should contain 'code'");
-        // v0.3.0 不应用 fg 颜色
+            .find(|s| s.content.as_ref() == "code")
+            .expect("inline code span content should be 'code' (backticks stripped)");
+        // Palette::default().info = Blue
         assert_eq!(
-            code_span.style.fg, None,
-            "inline code should not have explicit fg in v0.3.0"
+            code_span.style.fg,
+            Some(Color::Blue),
+            "inline code should have fg = palette.info (Blue)"
         );
-        // 不应有背景色
+        // 行内代码无背景色
         assert_eq!(
             code_span.style.bg, None,
             "inline code should not have background"
