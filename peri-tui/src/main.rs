@@ -167,7 +167,14 @@ enum Commands {
         action: PluginAction,
     },
     /// 启动 Web PTY 终端服务
-    Web,
+    Web {
+        /// 监听地址（默认 0.0.0.0，监听所有网卡）
+        #[arg(long, default_value = "0.0.0.0", env = "HOST")]
+        host: String,
+        /// 监听端口（默认 0 = 随机分配）
+        #[arg(long, default_value_t = 0, env = "PORT")]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand)]
@@ -419,15 +426,20 @@ fn main() -> Result<()> {
                 }
             })
         }
-        Some(Commands::Web) => {
+        Some(Commands::Web { host, port }) => {
+            let mut config = peri_web_pty::config::Config::from_env();
+            config.host = host;
+            config.port = port;
+            // peri web 模式下默认启动 peri 对话
+            if config.initial_cmd.is_none() {
+                config.initial_cmd = Some("peri".to_string());
+            }
             let rt = build_runtime()?;
-            rt.block_on(async {
-                peri_web_pty::start_server(peri_web_pty::config::Config::from_env()).await
-            })
-            .map_err(|e| {
-                eprintln!("Web PTY server error: {e:#}");
-                std::process::exit(1);
-            })
+            rt.block_on(async { peri_web_pty::start_server(config).await })
+                .map_err(|e| {
+                    eprintln!("Web PTY server error: {e:#}");
+                    std::process::exit(1);
+                })
         }
     }
 }

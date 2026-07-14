@@ -4,6 +4,10 @@ use clap::Parser;
 #[derive(Debug, Clone, Parser)]
 #[command(name = "peri-web-pty", about = "Web PTY terminal server")]
 pub struct Config {
+    /// 监听地址（默认 0.0.0.0，监听所有网卡）
+    #[arg(long, env = "HOST", default_value = "0.0.0.0")]
+    pub host: String,
+
     /// 监听端口（默认 0 = 随机分配）
     #[arg(long, env = "PORT", default_value_t = 0)]
     pub port: u16,
@@ -39,6 +43,7 @@ impl Config {
     /// 默认 initial_cmd 为 "peri"（自动进入 Peri 对话）。
     pub fn from_env() -> Self {
         Self {
+            host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: std::env::var("PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
