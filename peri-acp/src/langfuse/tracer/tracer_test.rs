@@ -199,6 +199,8 @@ async fn test_middleware_start_and_end() {
         "auth",
         peri_agent::agent::events::MiddlewareHook::BeforeAgent,
     );
+    // 微小延迟确保 duration > 0（MiddlewareSpan 条件上报）
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     t.on_middleware_end(&mw_handle, StageStatus::Done, None);
     let _handle = t.on_turn_end(None);
     tokio::task::yield_now().await;
@@ -221,6 +223,8 @@ async fn test_compact_lifecycle() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");
     t.on_compact_start();
+    // 微小延迟确保 duration > 0（Compact 条件上报）
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     t.on_compact_end("summary text", 3, 2, 5, false, "");
     let _handle = t.on_turn_end(None);
     tokio::task::yield_now().await;
@@ -235,6 +239,7 @@ async fn test_compact_lifecycle() {
     });
     assert!(has_compact_span, "应有 compact SpanCreate 事件");
 
+    // v2 条件上报：compact 改为延迟创建，不再发 SpanUpdate
     let has_compact_update = events.iter().any(|e| {
         if let langfuse_client::IngestionEvent::SpanUpdate { body, .. } = e {
             body.name.as_deref() == Some("compact")
@@ -242,5 +247,5 @@ async fn test_compact_lifecycle() {
             false
         }
     });
-    assert!(has_compact_update, "应有 compact SpanUpdate 事件");
+    assert!(!has_compact_update, "v2 条件上报不应发 compact SpanUpdate");
 }

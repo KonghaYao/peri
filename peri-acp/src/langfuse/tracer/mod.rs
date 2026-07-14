@@ -348,6 +348,22 @@ impl LangfuseTracer {
             .map(|h| h.span_id.clone())
             .unwrap_or_else(|| self.agent_observation_id.clone());
 
+        // 合并 retry metadata + token 用量到 metadata 字段（Langfuse UI 可见）
+        let mut meta = gen_end.retry_metadata.unwrap_or(serde_json::json!({}));
+        let meta_obj = meta.as_object_mut();
+        if let Some(ref u) = usage {
+            if let Some(obj) = meta_obj {
+                obj.insert("model".to_string(), serde_json::json!(model));
+                obj.insert("input_tokens".to_string(), serde_json::json!(u.input_tokens));
+                obj.insert("output_tokens".to_string(), serde_json::json!(u.output_tokens));
+                obj.insert("cache_read_input_tokens".to_string(), serde_json::json!(u.cache_read_input_tokens));
+                obj.insert("cache_creation_input_tokens".to_string(), serde_json::json!(u.cache_creation_input_tokens));
+                obj.insert("total_tokens".to_string(), serde_json::json!(u.input_tokens + u.output_tokens));
+            }
+        } else if let Some(obj) = meta_obj {
+            obj.insert("model".to_string(), serde_json::json!(model));
+        }
+
         let gen_body = GenerationBody {
             id: Some(gen_end.gen_id),
             trace_id: Some(self.trace_id.clone()),
@@ -356,7 +372,7 @@ impl LangfuseTracer {
             end_time: Some(end_time.clone()),
             input: Some(gen_end.input_json),
             output: Some(serde_json::json!(output)),
-            metadata: gen_end.retry_metadata,
+            metadata: Some(meta),
             level: None,
             status_message: None,
             parent_observation_id: Some(parent_id),
@@ -476,41 +492,18 @@ impl LangfuseTracer {
 
     // ── Compact 事件 ────────────────────────────────────────────────────────
 
-    /// Compact 开始：创建 compact Span
+    /// Compact 开始：注册 compact span（SpanCreate 延迟到 on_compact_end 发送）
     pub fn on_compact_start(&mut self) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        // Use default strategy/trigger for backward compat
         let strategy = CompactStrategy::Full;
         let trigger = CompactTrigger::Auto;
-        let start = self.compact.on_start(strategy, trigger);
-        let span_body = SpanBody {
-            id: Some(start.span_id),
-            trace_id: Some(self.trace_id.clone()),
-            name: Some("compact".to_string()),
-            start_time: Some(start.start_time),
-            end_time: None,
-            input: None,
-            output: None,
-            metadata: None,
-            level: None,
-            status_message: None,
-            version: Some(VERSION.to_string()),
-            environment: None,
-            parent_observation_id: Some(self.agent_observation_id.clone()),
-            session_id: Some(self.session_id.clone()),
-        };
-        let event = IngestionEvent::SpanCreate {
-            id: new_uuid(),
-            timestamp: now_rfc3339(),
-            body: span_body,
-            metadata: None,
-        };
-        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Compact SpanCreate");
+        let _start = self.compact.on_start(strategy, trigger);
+        // SpanCreate 延迟到 on_compact_end：仅在 duration > 0 时发送
     }
 
-    /// Compact 完成/错误：更新 compact Span
+    /// Compact 完成/错误：若 duration > 0 则发送 SpanCreate（合并 start+end），否则跳过。
     pub fn on_compact_end(
         &mut self,
         summary: &str,
@@ -529,6 +522,13 @@ impl LangfuseTracer {
         };
 
         let end_time = now_rfc3339();
+        let duration_ms = calculate_duration_ms(&ctx.start_time, &end_time);
+
+        // 0ms compact span 不上报
+        if duration_ms == 0 && !is_error {
+            return;
+        }
+
         let output = if is_error {
             serde_json::json!({"error": error_message})
         } else {
@@ -537,6 +537,7 @@ impl LangfuseTracer {
                 "files_count": files_count,
                 "skills_count": skills_count,
                 "micro_cleared": micro_cleared,
+                "duration_ms": duration_ms,
             })
         };
         let level = if is_error {
@@ -556,6 +557,7 @@ impl LangfuseTracer {
             metadata: Some(serde_json::json!({
                 "strategy": format!("{:?}", ctx.strategy),
                 "trigger": format!("{:?}", ctx.trigger),
+                "duration_ms": duration_ms,
             })),
             level,
             status_message: None,
@@ -564,13 +566,13 @@ impl LangfuseTracer {
             parent_observation_id: Some(self.agent_observation_id.clone()),
             session_id: Some(self.session_id.clone()),
         };
-        let event = IngestionEvent::SpanUpdate {
+        let event = IngestionEvent::SpanCreate {
             id: new_uuid(),
             timestamp: end_time,
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Compact SpanUpdate");
+        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Compact SpanCreate");
     }
 
     // ── Stage 5 阶段 Span 事件 ──────────────────────────────────────────────
@@ -728,44 +730,17 @@ impl LangfuseTracer {
 
     // ── 中间件链事件 ────────────────────────────────────────────────────────
 
-    /// 中间件开始
+    /// 中间件开始：注册 span（SpanCreate 延迟到 on_middleware_end 发送）
     pub fn on_middleware_start(&mut self, name: &str, hook: MiddlewareHook) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        let handle = self.middleware.on_start(name, hook);
-
-        let span_body = SpanBody {
-            id: Some(handle.span_id),
-            trace_id: Some(self.trace_id.clone()),
-            name: Some(format!("mw-{}", handle.name)),
-            start_time: Some(now_rfc3339()),
-            end_time: None,
-            input: Some(serde_json::json!({"hook": format!("{:?}", handle.hook)})),
-            output: None,
-            metadata: None,
-            level: None,
-            status_message: None,
-            version: Some(VERSION.to_string()),
-            environment: None,
-            parent_observation_id: Some(self.agent_observation_id.clone()),
-            session_id: Some(self.session_id.clone()),
-        };
-        let event = IngestionEvent::SpanCreate {
-            id: new_uuid(),
-            timestamp: now_rfc3339(),
-            body: span_body,
-            metadata: None,
-        };
-        try_add_or_warn_via_session(
-            &*self.session,
-            event,
-            &self.trace_id,
-            "Middleware SpanCreate",
-        );
+        let _handle = self.middleware.on_start(name, hook);
+        // SpanCreate 延迟到 on_middleware_end：仅在 duration > 0 时发送
     }
 
-    /// 中间件结束
+    /// 中间件结束：若 duration > 0 则发送 SpanCreate（合并 start+end），否则静默跳过。
+    /// 大多数中间件执行时间 < 1ms，跳过可大幅减少噪音 span。
     pub(crate) fn on_middleware_end(
         &mut self,
         handle: &crate::langfuse::tracer::middleware::MiddlewareSpanHandle,
@@ -781,6 +756,13 @@ impl LangfuseTracer {
         };
 
         let end_time = now_rfc3339();
+        let duration_ms = calculate_duration_ms(&record.start_time, &end_time);
+
+        // 0ms middleware span 不上报（绝大多数中间件 < 1ms）
+        if duration_ms == 0 {
+            return;
+        }
+
         let level = match record.status {
             StageStatus::Error => Some(ObservationLevel::Error),
             _ => Some(ObservationLevel::Default),
@@ -788,6 +770,7 @@ impl LangfuseTracer {
         let mut output_json = serde_json::json!({
             "hook": format!("{:?}", record.hook),
             "status": format!("{:?}", record.status),
+            "duration_ms": duration_ms,
         });
         if let Some(ref err) = record.error {
             output_json["error"] = serde_json::json!(err);
@@ -808,7 +791,7 @@ impl LangfuseTracer {
             parent_observation_id: Some(self.agent_observation_id.clone()),
             session_id: Some(self.session_id.clone()),
         };
-        let event = IngestionEvent::SpanUpdate {
+        let event = IngestionEvent::SpanCreate {
             id: new_uuid(),
             timestamp: end_time,
             body: span_body,
@@ -818,7 +801,7 @@ impl LangfuseTracer {
             &*self.session,
             event,
             &self.trace_id,
-            "Middleware SpanUpdate",
+            "Middleware SpanCreate",
         );
     }
 
