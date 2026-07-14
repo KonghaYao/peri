@@ -49,7 +49,7 @@ fn test_end_subagent_empty_returns_none() {
 fn test_is_agent_tool_anywhere_checks_main_and_stack() {
     let s = SubagentStack::new();
     let mut main_tb = ToolBatch::new();
-    main_tb.on_tool_start("main_call", "Read", serde_json::json!({}));
+    main_tb.on_tool_start("main_call", "Read", serde_json::json!({}), "span_stage_act");
     assert!(!s.is_agent_tool_anywhere(&main_tb, "main_call"));
     assert!(!s.is_agent_tool_anywhere(&main_tb, "nope"));
 }

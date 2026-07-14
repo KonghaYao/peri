@@ -160,8 +160,12 @@ impl LangfuseTracer {
     pub fn on_turn_end(&mut self, error_output: Option<&str>) -> tokio::task::JoinHandle<()> {
         use std::sync::Arc;
 
-        // 先 flush tools batch，确保所有工具 span 在 ObservationUpdate 之前入队
-        let _tools_record = self.tool_batch.flush();
+        // 先 flush tools batch，发出 batch span + 所有工具 span
+        let flush = self.tool_batch.flush();
+        self.emit_tools_flush(flush);
+
+        // 结束子 agent 栈（如有残余）
+        let _ = self.subagent.end_subagent();
 
         let is_error = error_output.is_some();
         let sampled = self.sampling.should_emit(&self.trace_id, &self.session_id);
@@ -354,11 +358,26 @@ impl LangfuseTracer {
         if let Some(ref u) = usage {
             if let Some(obj) = meta_obj {
                 obj.insert("model".to_string(), serde_json::json!(model));
-                obj.insert("input_tokens".to_string(), serde_json::json!(u.input_tokens));
-                obj.insert("output_tokens".to_string(), serde_json::json!(u.output_tokens));
-                obj.insert("cache_read_input_tokens".to_string(), serde_json::json!(u.cache_read_input_tokens));
-                obj.insert("cache_creation_input_tokens".to_string(), serde_json::json!(u.cache_creation_input_tokens));
-                obj.insert("total_tokens".to_string(), serde_json::json!(u.input_tokens + u.output_tokens));
+                obj.insert(
+                    "input_tokens".to_string(),
+                    serde_json::json!(u.input_tokens),
+                );
+                obj.insert(
+                    "output_tokens".to_string(),
+                    serde_json::json!(u.output_tokens),
+                );
+                obj.insert(
+                    "cache_read_input_tokens".to_string(),
+                    serde_json::json!(u.cache_read_input_tokens),
+                );
+                obj.insert(
+                    "cache_creation_input_tokens".to_string(),
+                    serde_json::json!(u.cache_creation_input_tokens),
+                );
+                obj.insert(
+                    "total_tokens".to_string(),
+                    serde_json::json!(u.input_tokens + u.output_tokens),
+                );
             }
         } else if let Some(obj) = meta_obj {
             obj.insert("model".to_string(), serde_json::json!(model));
@@ -430,9 +449,16 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
+        // 捕获当前活跃 stage span_id 作为 tool-batch 的父节点
+        // （必须在 on_tool_start 时获取，因为 emit_tools_flush 可能在 stage 结束后才调用）
+        let parent_id = self
+            .stages
+            .active_handle()
+            .map(|h| h.span_id.clone())
+            .unwrap_or_else(|| self.agent_observation_id.clone());
         let _record = self
             .tool_batch
-            .on_tool_start(tool_call_id, name, input.clone());
+            .on_tool_start(tool_call_id, name, input.clone(), &parent_id);
         // 如果是 Agent 工具调用，压入 subagent 栈
         if name == "Agent" || name == "Task" {
             self.subagent.begin_subagent(input);
@@ -440,7 +466,7 @@ impl LangfuseTracer {
     }
 
     /// 工具调用结束：同步创建 tool observation
-    pub fn on_tool_end(&mut self, tool_call_id: &str, _output: &str, _is_error: bool) {
+    pub fn on_tool_end(&mut self, tool_call_id: &str, output: &str, is_error: bool) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
@@ -463,7 +489,7 @@ impl LangfuseTracer {
                             .unwrap_or_else(|| self.agent_observation_id.clone()),
                     ),
                     input: Some(end.input),
-                    output: Some(serde_json::json!(_output)),
+                    output: Some(serde_json::json!(output)),
                     metadata: None,
                     model: None,
                     model_parameters: None,
@@ -487,7 +513,7 @@ impl LangfuseTracer {
                 );
             }
         }
-        let _pending = self.tool_batch.on_tool_end(tool_call_id);
+        let _pending = self.tool_batch.on_tool_end(tool_call_id, output, is_error);
     }
 
     // ── Compact 事件 ────────────────────────────────────────────────────────
@@ -583,12 +609,9 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        let _handle = self.stages.on_stage_start(
-            stage,
-            &self.trace_id,
-            turn_id,
-            &self.agent_observation_id,
-        );
+        let _handle =
+            self.stages
+                .on_stage_start(stage, &self.trace_id, turn_id, &self.agent_observation_id);
         // SpanCreate 延迟到 on_stage_end：仅在 duration > 0 时发送
     }
 
@@ -603,6 +626,13 @@ impl LangfuseTracer {
             return;
         }
         self.stages.on_stage_end(handle, status);
+
+        // Act stage 结束时自动 flush 工具批次（确保工具挂在正确的 act 下，
+        // 而非全部堆在第一个 act 中）
+        if handle.stage == Stage::Act {
+            let flush = self.tool_batch.flush();
+            self.emit_tools_flush(flush);
+        }
 
         let end_time = now_rfc3339();
         let duration_ms = calculate_duration_ms(&handle.start_time, &end_time);
@@ -915,7 +945,76 @@ impl LangfuseTracer {
     /// 提交当前批次 Tools Span（end subagent first, then flush tool batch）
     pub(crate) fn flush_tools_batch(&mut self) {
         let _ = self.subagent.end_subagent();
-        let _ = self.tool_batch.flush();
+        let flush = self.tool_batch.flush();
+        self.emit_tools_flush(flush);
+    }
+
+    /// 将 ToolsBatchFlush 转换为 Langfuse SpanCreate 事件并入队
+    fn emit_tools_flush(&self, flush: tool_batch::ToolsBatchFlush) {
+        if let Some(ref batch) = flush.batch {
+            // 使用 on_tool_start 时捕获的 stage span_id（而非运行时动态查找）
+            let parent_id = &flush.parent_observation_id;
+            // 批量工具父 span（tool-batch）
+            let batch_body = SpanBody {
+                id: Some(batch.batch_span_id.clone()),
+                trace_id: Some(self.trace_id.clone()),
+                name: Some("tool-batch".to_string()),
+                start_time: Some(batch.batch_start_time.clone()),
+                end_time: Some(batch.batch_end_time.clone()),
+                parent_observation_id: Some(parent_id.clone()),
+                version: Some(VERSION.to_string()),
+                session_id: Some(self.session_id.clone()),
+                ..Default::default()
+            };
+            let batch_event = IngestionEvent::SpanCreate {
+                id: new_uuid(),
+                timestamp: batch.batch_end_time.clone(),
+                body: batch_body,
+                metadata: None,
+            };
+            try_add_or_warn_via_session(
+                &*self.session,
+                batch_event,
+                &self.trace_id,
+                "tool-batch SpanCreate",
+            );
+
+            // 每个工具以 ObservationCreate + ObservationType::Tool 上报
+            for tool in &flush.tools {
+                let level = if tool.is_error {
+                    Some(ObservationLevel::Error)
+                } else {
+                    None
+                };
+                let obs_body = ObservationBody {
+                    id: Some(tool.span_id.clone()),
+                    trace_id: Some(self.trace_id.clone()),
+                    r#type: ObservationType::Tool,
+                    name: Some(tool.name.clone()),
+                    start_time: Some(tool.start_time.clone()),
+                    end_time: Some(tool.end_time.clone()),
+                    input: Some(tool.input.clone()),
+                    output: Some(serde_json::json!(tool.output)),
+                    parent_observation_id: Some(batch.batch_span_id.clone()),
+                    level,
+                    version: Some(VERSION.to_string()),
+                    session_id: Some(self.session_id.clone()),
+                    ..Default::default()
+                };
+                let tool_event = IngestionEvent::ObservationCreate {
+                    id: new_uuid(),
+                    timestamp: tool.end_time.clone(),
+                    body: obs_body,
+                    metadata: None,
+                };
+                try_add_or_warn_via_session(
+                    &*self.session,
+                    tool_event,
+                    &self.trace_id,
+                    "tool ObservationCreate",
+                );
+            }
+        }
     }
 }
 
