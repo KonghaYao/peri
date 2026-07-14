@@ -64,6 +64,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 | `session/executor.rs` | `execute_prompt()` 统一入口 | TUI/Stdio |
 | `prompt/mod.rs` | `build_system_prompt()` + 动态边界 | session/new |
 | `event/{router,mapper,view_mapper}.rs` | ExecutorEvent → SessionUpdate 路由 | acp_notifier |
+| `langfuse/tracer/` | per-turn 追踪器：tool_batch（per-act flush）→ ObservationType::Tool | executor_helpers |
 | `prompts/sections/` | 14 个系统提示词段落（.md） | prompt/mod |
 
 ### peri-tui（TUI 前端）
@@ -259,6 +260,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **新增 ExecutorEvent 变体**：必须同步 (1) peri-acp/event/mapper.rs (2) peri-tui/kit/acp_events.rs (3) variant_coverage_test.rs，缺一会漏掉监控数据。
 - **ErrorSpan 兜底**：错误 turn 强制发 ErrorSpan 挂同 turn（trace_id = turn_id，不破坏契约）。
 - **子对象方法签名禁止接收 `&mut LangfuseTracer`**：否则破坏 disjoint borrow。
+- **ToolBatch per-act flush**：ToolBatch 在 Act stage 结束时自动 flush（`on_stage_end`），避免所有工具堆在第一个 Act 下。单个工具以 `ObservationCreate` + `ObservationType::Tool` 上报，含 input/output/end_time/level。batch span 的 parent 在首次 `on_tool_start` 时捕获 stage span_id（时序安全）。
 
 ## 任务入口矩阵
 
