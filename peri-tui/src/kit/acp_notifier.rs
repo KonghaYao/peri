@@ -26,11 +26,13 @@ use crate::kit::atoms::{
     SPINNER_TOKEN_COUNT,
 };
 use crate::kit::input_area::refresh_slash_items;
+use fluent_bundle::FluentValue;
 use peri_acp::event::AcpEvent;
 use peri_acp::event::truncate::summarize_input;
-use peri_acp_types::event_data::{AskUser, HitlPending, Question, QuestionOption, SystemNotification};
+use peri_acp_types::event_data::{
+    AskUser, HitlPending, Question, QuestionOption, SystemNotification,
+};
 use serde_json::Value;
-use fluent_bundle::FluentValue;
 
 /// 启动 kit ACP notifier 后台任务。
 ///
@@ -171,9 +173,8 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
                 // budget_pct 可能为 None（首轮/token_tracker 无 last_usage），此时仅存总量
                 let pct = budget_pct.unwrap_or(0.0);
                 *crate::kit::atoms::CONTEXT_USAGE.state().write() = Some((pct, total));
-                crate::kit::atoms::RENDER_HEARTBEAT.set(
-                    crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1),
-                );
+                crate::kit::atoms::RENDER_HEARTBEAT
+                    .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
             }
             None
         }
@@ -508,11 +509,17 @@ fn handle_session_update(
                         .and_then(|v| v.as_str())
                         .unwrap_or("-");
                     let pct = (hit_rate * 100.0) as u32;
-                    let text = i18n::tr_args("app-note-cache-hit-low", &[
-                        ("pct".into(), FluentValue::from(pct as u64)),
-                        ("req_id".into(), FluentValue::from(req_id)),
-                    ]);
-                    let data = SystemNotification { text, level: "warning".into() };
+                    let text = i18n::tr_args(
+                        "app-note-cache-hit-low",
+                        &[
+                            ("pct".into(), FluentValue::from(pct as u64)),
+                            ("req_id".into(), FluentValue::from(req_id)),
+                        ],
+                    );
+                    let data = SystemNotification {
+                        text,
+                        level: "warning".into(),
+                    };
                     let event = AcpEventData::SystemNotification(data);
                     let wrapped = AcpEventWithEpoch {
                         event,
