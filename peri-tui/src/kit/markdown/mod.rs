@@ -79,7 +79,7 @@ fn ensure_closed_code_fences(input: &str) -> String {
 // 完整保留这些状态。续跑时新 block 的 spacing 决策与"全量重跑"完全一致。
 
 /// 单个 markdown 渲染缓存（每个 AssistantBubble / UserBubble 一个）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MarkdownRenderCache {
     /// 已稳定处理的文本前缀（必须以换行符结尾，保证最后一个 block 已闭合）。
     /// 空字符串表示缓存无效。
@@ -91,17 +91,6 @@ pub struct MarkdownRenderCache {
     /// 上次处理 stable_text 后的累积状态（processed_block_count / current_text /
     /// segments / prev_was_list_item）。current_text 未 flush，保留累积状态供续跑。
     stable_state: convert::ConvertState,
-}
-
-impl Default for MarkdownRenderCache {
-    fn default() -> Self {
-        Self {
-            stable_text: String::new(),
-            stable_width: 0,
-            stable_palette: Palette::default(),
-            stable_state: convert::ConvertState::default(),
-        }
-    }
 }
 
 impl MarkdownRenderCache {

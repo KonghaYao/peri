@@ -2,7 +2,7 @@ use pulldown_cmark::Alignment;
 use ratatui::text::Span;
 
 /// Markdown 解析输出的一个段落。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MarkdownSegment {
     /// 纯文本行（段落、标题、代码块、列表、分隔线等）。
     Text(Vec<ratatui::text::Line<'static>>),
@@ -11,7 +11,7 @@ pub enum MarkdownSegment {
 }
 
 /// 表格结构化数据。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TableData {
     pub headers: Vec<Vec<Span<'static>>>,
     pub rows: Vec<Vec<Vec<Span<'static>>>>,
