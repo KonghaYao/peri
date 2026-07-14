@@ -4,7 +4,7 @@ use super::*;
 fn test_on_llm_start_sets_active_step() {
     let mut t = GenerationTracker::new();
     let start = t.on_llm_start(0, vec![], vec![]);
-    assert_eq!(start.gen_id.starts_with("gen_"), true);
+    assert!(start.gen_id.starts_with("gen_"));
 }
 
 #[test]

@@ -1,10 +1,11 @@
 //! Langfuse 单轮追踪器（per-turn）。
+#![allow(dead_code)]
 //!
 //! 本模块采用 Layered + Module-per-Feature 模式拆分：
 //!
 //! - `mod.rs`（本文件）：Facade，定义 `LangfuseTracer` 结构体与全部
 //!   `on_*` 事件处理方法。持有 config + 5 个简单字段 + 7 个子对象。
-//! （context.rs 已删除，数据结构迁移至各子对象模块）
+//!   （context.rs 已删除，数据结构迁移至各子对象模块）
 //! - `event_builder.rs`：基础设施层，统一时间戳、UUID、try_add + warn 样板。
 //! - `usage.rs`：TokenUsage → langfuse_usage_details 转换 + 重试 metadata 组装。
 //! - `sampling.rs`：采样决策器。
@@ -355,7 +356,7 @@ impl LangfuseTracer {
         // 合并 retry metadata + token 用量到 metadata 字段（Langfuse UI 可见）
         let mut meta = gen_end.retry_metadata.unwrap_or(serde_json::json!({}));
         let meta_obj = meta.as_object_mut();
-        if let Some(ref u) = usage {
+        if let Some(u) = usage {
             if let Some(obj) = meta_obj {
                 obj.insert("model".to_string(), serde_json::json!(model));
                 obj.insert(

@@ -70,7 +70,7 @@ async fn test_smoke_complete_turn_sequence() {
     // 等待 flush async 任务完成（FakeLangfuseSession 的 flush 是同步的，但 spawn 需要运行）
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
-    assert!(events.len() > 0, "应有至少一个事件");
+    assert!(!events.is_empty(), "应有至少一个事件");
 }
 
 // ── 采样率测试 ──────────────────────────────────────────────────────────────

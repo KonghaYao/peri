@@ -2064,7 +2064,7 @@ mod tests {
             TuiRenderUnit::TuiSubAgentGroup(group) => {
                 assert_eq!(group.agent_id, "sync-1");
                 assert!(
-                    group.view_models.len() >= 1,
+                    !group.view_models.is_empty(),
                     "group.view_models 应至少包含 1 个工具卡片，实际 {} 个",
                     group.view_models.len()
                 );

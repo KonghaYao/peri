@@ -56,6 +56,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         *session_fingerprint.write() = current_fingerprint;
     }
 
+    #[allow(dead_code)]
     fn cancel_ask_user() {
         if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
             && let Some(tx) = ASK_USER_RESPONSE_TX.get()

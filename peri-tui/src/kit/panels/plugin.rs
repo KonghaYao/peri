@@ -95,6 +95,7 @@ struct PluginSearchResultItem {
 // ── Marketplace view types ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 enum MsStatus {
     Fresh,
     Cached,
@@ -105,6 +106,7 @@ enum MsStatus {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct MsEntry {
     name: String,
     source_label: String,
@@ -1019,6 +1021,7 @@ fn action_label(action: &str) -> String {
 
 // ── Render: Installed list ────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn render_installed(
     lines: &mut Vec<Line<'_>>,
     plugins: &[PluginSummary],
@@ -1147,6 +1150,7 @@ fn render_installed(
 
 // ── Render: Detail + Actions ─────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn render_detail(
     lines: &mut Vec<Line<'_>>,
     p: &PluginSummary,
@@ -1278,6 +1282,7 @@ fn render_detail(
 
 // ── Render: Discover List ─────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn render_discover_list(
     lines: &mut Vec<Line<'_>>,
     search_text: &str,
@@ -1376,6 +1381,7 @@ fn render_discover_list(
 
 // ── Render: Discover Detail ───────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn render_discover_detail(
     lines: &mut Vec<Line<'_>>,
     dp: &PluginSearchResultItem,
@@ -1441,6 +1447,7 @@ fn render_discover_detail(
 
 // ── Render: Marketplaces ─────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn render_marketplaces(
     lines: &mut Vec<Line<'_>>,
     sel: usize,
