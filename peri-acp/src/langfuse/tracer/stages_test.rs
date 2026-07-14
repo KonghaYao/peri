@@ -70,7 +70,9 @@ fn test_on_workflow_end_returns_stats() {
     let mut s = StageSpans::new();
     let _h = s.on_stage_start(Stage::Act, "turn_1", "trace_1", "agent_obs");
     s.on_workflow_start("wf_1", "plan");
-    let end = s.on_workflow_end("wf_1", 3, 10).expect("should return Some");
+    let end = s
+        .on_workflow_end("wf_1", 3, 10)
+        .expect("should return Some");
     assert_eq!(end.agents_spawned, 3);
     assert_eq!(end.tool_calls, 10);
 }

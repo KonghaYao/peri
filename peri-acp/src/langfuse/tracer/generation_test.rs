@@ -50,7 +50,10 @@ fn test_on_llm_end_unknown_step_returns_none() {
 fn test_on_llm_request_payload_supplements_body() {
     let mut t = GenerationTracker::new();
     t.on_llm_start(0, vec![], vec![]);
-    t.on_llm_request_payload(0, std::sync::Arc::new(serde_json::json!({"model": "claude-4.7"})));
+    t.on_llm_request_payload(
+        0,
+        std::sync::Arc::new(serde_json::json!({"model": "claude-4.7"})),
+    );
     let end = t.on_llm_end(0).expect("should return Some");
     assert_eq!(end.input_json["model"], "claude-4.7");
 }

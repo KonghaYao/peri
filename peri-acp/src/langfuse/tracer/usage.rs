@@ -35,4 +35,3 @@ pub(crate) fn build_usage_details(usage: &TokenUsage) -> HashMap<String, i32> {
     }
     map
 }
-

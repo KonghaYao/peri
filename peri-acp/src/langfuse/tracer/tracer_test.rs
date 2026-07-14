@@ -11,7 +11,10 @@ use peri_agent::agent::events::{Stage, StageStatus};
 
 fn make_tracer(
     rate: f64,
-) -> (LangfuseTracer, std::sync::Arc<crate::langfuse::fake_session::FakeLangfuseSession>) {
+) -> (
+    LangfuseTracer,
+    std::sync::Arc<crate::langfuse::fake_session::FakeLangfuseSession>,
+) {
     // FakeLangfuseSession::new() 已返回 Arc<Self>，无需再包一层
     let session = crate::langfuse::fake_session::FakeLangfuseSession::new("sess_smoke");
     let config = crate::langfuse::config::LangfuseConfig {
@@ -58,12 +61,9 @@ async fn test_smoke_complete_turn_sequence() {
 
     // Stage: End
     t.on_stage_start(Stage::End, "turn_1");
-    let end_handle = t.stages.on_stage_start(
-        Stage::End,
-        &t.trace_id,
-        "turn_1",
-        &t.agent_observation_id,
-    );
+    let end_handle =
+        t.stages
+            .on_stage_start(Stage::End, &t.trace_id, "turn_1", &t.agent_observation_id);
     t.on_stage_end(&end_handle, StageStatus::Done);
 
     let _handle = t.on_turn_end(None);
@@ -179,7 +179,10 @@ async fn test_llm_retry_accumulates_metadata() {
             false
         }
     });
-    assert!(has_retry_meta, "GenerationCreate 应包含重试 metadata (retry_count)");
+    assert!(
+        has_retry_meta,
+        "GenerationCreate 应包含重试 metadata (retry_count)"
+    );
 }
 
 // ── Middleware 事件测试 ─────────────────────────────────────────────────────
@@ -188,8 +191,14 @@ async fn test_llm_retry_accumulates_metadata() {
 async fn test_middleware_start_and_end() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");
-    t.on_middleware_start("auth", peri_agent::agent::events::MiddlewareHook::BeforeAgent);
-    let mw_handle = t.middleware.on_start("auth", peri_agent::agent::events::MiddlewareHook::BeforeAgent);
+    t.on_middleware_start(
+        "auth",
+        peri_agent::agent::events::MiddlewareHook::BeforeAgent,
+    );
+    let mw_handle = t.middleware.on_start(
+        "auth",
+        peri_agent::agent::events::MiddlewareHook::BeforeAgent,
+    );
     t.on_middleware_end(&mw_handle, StageStatus::Done, None);
     let _handle = t.on_turn_end(None);
     tokio::task::yield_now().await;

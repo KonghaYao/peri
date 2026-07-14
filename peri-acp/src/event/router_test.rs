@@ -103,7 +103,8 @@ fn test_compact_started_discarded() {
         step: 0,
         strategy: CompactStrategy::Smart,
         trigger: CompactTrigger::Auto,
-    }).is_none());
+    })
+    .is_none());
 }
 
 #[test]

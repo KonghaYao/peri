@@ -996,39 +996,38 @@ fn search_marketplace_plugins(
                 .to_string_lossy()
                 .to_string();
             let manifest_path = mp_dir.join("marketplace.json");
-            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-                if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(plugins) = manifest.get("plugins").and_then(|v| v.as_array()) {
-                        for p in plugins {
-                            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                            let desc = p.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                            if name.to_lowercase().contains(&query_lower)
-                                || desc.to_lowercase().contains(&query_lower)
-                            {
-                                results.push(PluginSnapshotEntry {
-                                    name: name.to_string(),
-                                    version: p
-                                        .get("version")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    enabled: false,
-                                    root: String::new(),
-                                    description: desc.to_string(),
-                                    marketplace: mp_name.clone(),
-                                    author: p
-                                        .get("author")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string()),
-                                    skills_count: 0,
-                                    commands_count: 0,
-                                    agents_count: 0,
-                                    mcp_count: 0,
-                                    install_scope: String::new(),
-                                    load_error: None,
-                                });
-                            }
-                        }
+            if let Ok(content) = std::fs::read_to_string(&manifest_path)
+                && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content)
+                && let Some(plugins) = manifest.get("plugins").and_then(|v| v.as_array())
+            {
+                for p in plugins {
+                    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let desc = p.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                    if name.to_lowercase().contains(&query_lower)
+                        || desc.to_lowercase().contains(&query_lower)
+                    {
+                        results.push(PluginSnapshotEntry {
+                            name: name.to_string(),
+                            version: p
+                                .get("version")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            enabled: false,
+                            root: String::new(),
+                            description: desc.to_string(),
+                            marketplace: mp_name.clone(),
+                            author: p
+                                .get("author")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            skills_count: 0,
+                            commands_count: 0,
+                            agents_count: 0,
+                            mcp_count: 0,
+                            install_scope: String::new(),
+                            load_error: None,
+                        });
                     }
                 }
             }

@@ -120,18 +120,13 @@ pub struct HookSummary {
     pub matcher: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PluginViewTab {
+    #[default]
     Installed = 0,
     Discover = 1,
     Marketplaces = 2,
     Errors = 3,
-}
-
-impl Default for PluginViewTab {
-    fn default() -> Self {
-        PluginViewTab::Installed
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

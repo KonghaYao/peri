@@ -153,7 +153,12 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             }),
             stop_reason: None,
         }),
-        ObserveEvent::CompactStarted { turn_id, agent_id, step, .. } => Some(ExecutorEvent::CompactStarted {
+        ObserveEvent::CompactStarted {
+            turn_id,
+            agent_id,
+            step,
+            ..
+        } => Some(ExecutorEvent::CompactStarted {
             turn_id: turn_id.to_string(),
             agent_id: agent_id.to_string(),
             step,
@@ -218,9 +223,7 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             source_agent_id,
         }),
         // ── langfuse v2：阶段生命周期 ──
-        ObserveEvent::StageStarted {
-            turn_id, stage, ..
-        } => Some(ExecutorEvent::StageStarted {
+        ObserveEvent::StageStarted { turn_id, stage, .. } => Some(ExecutorEvent::StageStarted {
             turn_id: turn_id.to_string(),
             stage,
         }),

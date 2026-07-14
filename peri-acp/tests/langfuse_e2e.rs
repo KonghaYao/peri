@@ -5,9 +5,9 @@
 // 提供异步运行时。
 
 mod tests {
+    use peri_acp::langfuse::config::LangfuseConfig;
     use peri_acp::langfuse::fake_session::FakeLangfuseSession;
     use peri_acp::langfuse::LangfuseTracer;
-    use peri_acp::langfuse::config::LangfuseConfig;
     use peri_agent::agent::events::Stage;
 
     fn make_config(rate: f64) -> LangfuseConfig {
@@ -27,11 +27,7 @@ mod tests {
         // FakeLangfuseSession::new() 已返回 Arc<Self>
         let session = FakeLangfuseSession::new("sess_e2e");
         let config = make_config(1.0);
-        let mut tracer = LangfuseTracer::new(
-            session.clone(),
-            "sess_e2e".to_string(),
-            config,
-        );
+        let mut tracer = LangfuseTracer::new(session.clone(), "sess_e2e".to_string(), config);
 
         tracer.on_turn_start("turn_e2e");
         tracer.on_stage_start(Stage::Receive, "turn_e2e");
@@ -61,11 +57,7 @@ mod tests {
         // FakeLangfuseSession::new() 已返回 Arc<Self>
         let session = FakeLangfuseSession::new("sess_e2e_error");
         let config = make_config(0.0); // 采样率 0
-        let mut tracer = LangfuseTracer::new(
-            session.clone(),
-            "sess_e2e_error".to_string(),
-            config,
-        );
+        let mut tracer = LangfuseTracer::new(session.clone(), "sess_e2e_error".to_string(), config);
 
         tracer.on_turn_start("turn_err");
         let _handle = tracer.on_turn_end(Some("SomeError"));

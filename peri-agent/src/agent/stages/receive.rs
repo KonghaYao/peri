@@ -30,13 +30,16 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
                 MessageKind::Info => info_count += 1,
             }
         }
-        input.context.event_bus.emit_observe(ObserveEvent::MessageQueueDrained {
-            turn_id: input.context.turn_id(),
-            agent_id: input.context.agent_id,
-            prompt: prompt_count,
-            defer: defer_count,
-            info: info_count,
-        });
+        input
+            .context
+            .event_bus
+            .emit_observe(ObserveEvent::MessageQueueDrained {
+                turn_id: input.context.turn_id(),
+                agent_id: input.context.agent_id,
+                prompt: prompt_count,
+                defer: defer_count,
+                info: info_count,
+            });
     }
 
     if count > 0 {

@@ -12,7 +12,9 @@ fn test_on_start_returns_handle() {
 fn test_on_end_returns_stats() {
     let mut m = MiddlewareTracer::new();
     let h = m.on_start("HookMW", MiddlewareHook::BeforeAgent);
-    let end = m.on_end(&h, StageStatus::Done, None).expect("should return Some");
+    let end = m
+        .on_end(&h, StageStatus::Done, None)
+        .expect("should return Some");
     assert_eq!(end.name, "HookMW");
     assert_eq!(end.status, StageStatus::Done);
 }

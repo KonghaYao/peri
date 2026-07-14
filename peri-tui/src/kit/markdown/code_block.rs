@@ -61,11 +61,12 @@ impl HlCache {
 
     /// 插入新条目；若已满则淘汰 order 头部最旧条目。
     fn insert(&mut self, key: (String, u64), val: CacheValue) {
-        if !self.entries.contains_key(&key) && self.entries.len() >= self.cap {
-            if let Some(evicted) = self.order.first().cloned() {
-                self.entries.remove(&evicted);
-                self.order.remove(0);
-            }
+        if !self.entries.contains_key(&key)
+            && self.entries.len() >= self.cap
+            && let Some(evicted) = self.order.first().cloned()
+        {
+            self.entries.remove(&evicted);
+            self.order.remove(0);
         }
         self.entries.insert(key.clone(), val);
         self.order.retain(|k| k != &key);

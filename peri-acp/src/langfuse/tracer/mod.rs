@@ -31,10 +31,8 @@ mod usage;
 use super::config::LangfuseConfig;
 use super::session_like::LangfuseSessionLike;
 use event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
-use langfuse_client::{
-    IngestionEvent, ObservationBody, ObservationType, SpanBody, GenerationBody,
-};
 use langfuse_client::types::{ObservationLevel, TraceBody};
+use langfuse_client::{GenerationBody, IngestionEvent, ObservationBody, ObservationType, SpanBody};
 use peri_agent::agent::events::{
     CompactStrategy, CompactTrigger, MiddlewareHook, Stage, StageStatus,
 };
@@ -297,7 +295,8 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        self.generation.on_llm_start(step, messages.to_vec(), tools.to_vec());
+        self.generation
+            .on_llm_start(step, messages.to_vec(), tools.to_vec());
     }
 
     /// LLM 请求体接收：紧随 on_llm_start 之后，缓存 Provider 实际请求体
@@ -328,18 +327,20 @@ impl LangfuseTracer {
 
         let end_time = now_rfc3339();
         let usage_details: Option<std::collections::HashMap<String, i32>> =
-            usage.map(|u| usage::build_usage_details(u));
-        let usage_map: Option<std::collections::HashMap<String, serde_json::Value>> = usage.map(|u| {
-            let mut map = std::collections::HashMap::new();
-            map.insert("input".to_string(), serde_json::json!(u.input_tokens));
-            map.insert("output".to_string(), serde_json::json!(u.output_tokens));
-            map.insert("total".to_string(), serde_json::json!(u.input_tokens + u.output_tokens));
-            map
-        });
+            usage.map(usage::build_usage_details);
+        let usage_map: Option<std::collections::HashMap<String, serde_json::Value>> =
+            usage.map(|u| {
+                let mut map = std::collections::HashMap::new();
+                map.insert("input".to_string(), serde_json::json!(u.input_tokens));
+                map.insert("output".to_string(), serde_json::json!(u.output_tokens));
+                map.insert(
+                    "total".to_string(),
+                    serde_json::json!(u.input_tokens + u.output_tokens),
+                );
+                map
+            });
 
-        let current_agent_id = self
-            .subagent
-            .current_agent_id(&self.agent_observation_id);
+        let current_agent_id = self.subagent.current_agent_id(&self.agent_observation_id);
 
         let gen_body = GenerationBody {
             id: Some(gen_end.gen_id),
@@ -403,12 +404,7 @@ impl LangfuseTracer {
     }
 
     /// 工具调用开始
-    pub fn on_tool_start(
-        &mut self,
-        tool_call_id: &str,
-        name: &str,
-        input: &serde_json::Value,
-    ) {
+    pub fn on_tool_start(&mut self, tool_call_id: &str, name: &str, input: &serde_json::Value) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
@@ -448,8 +444,8 @@ impl LangfuseTracer {
                     status_message: None,
                     version: Some(VERSION.to_string()),
                     environment: None,
-            session_id: Some(self.session_id.clone()),
-        };
+                    session_id: Some(self.session_id.clone()),
+                };
                 let event = IngestionEvent::ObservationCreate {
                     id: new_uuid(),
                     timestamp: now_rfc3339(),
@@ -500,12 +496,7 @@ impl LangfuseTracer {
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
-            &*self.session,
-            event,
-            &self.trace_id,
-            "Compact SpanCreate",
-        );
+        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Compact SpanCreate");
     }
 
     /// Compact 完成/错误：更新 compact Span
@@ -568,12 +559,7 @@ impl LangfuseTracer {
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
-            &*self.session,
-            event,
-            &self.trace_id,
-            "Compact SpanUpdate",
-        );
+        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Compact SpanUpdate");
     }
 
     // ── Stage 5 阶段 Span 事件 ──────────────────────────────────────────────
@@ -583,12 +569,9 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        let handle = self.stages.on_stage_start(
-            stage,
-            &self.trace_id,
-            turn_id,
-            &self.agent_observation_id,
-        );
+        let handle =
+            self.stages
+                .on_stage_start(stage, &self.trace_id, turn_id, &self.agent_observation_id);
 
         let span_body = SpanBody {
             id: Some(handle.span_id),
@@ -612,12 +595,7 @@ impl LangfuseTracer {
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
-            &*self.session,
-            event,
-            &self.trace_id,
-            "Stage SpanCreate",
-        );
+        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Stage SpanCreate");
     }
 
     /// Stage 结束：更新 stage span
@@ -658,12 +636,7 @@ impl LangfuseTracer {
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
-            &*self.session,
-            event,
-            &self.trace_id,
-            "Stage SpanUpdate",
-        );
+        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Stage SpanUpdate");
     }
 
     /// 消息队列排空（Receive 阶段）
@@ -705,21 +678,11 @@ impl LangfuseTracer {
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
-            &*self.session,
-            event,
-            &self.trace_id,
-            "Workflow SpanCreate",
-        );
+        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Workflow SpanCreate");
     }
 
     /// Workflow 结束（Act 阶段）
-    pub fn on_workflow_end(
-        &mut self,
-        workflow_id: &str,
-        agents_spawned: usize,
-        tool_calls: usize,
-    ) {
+    pub fn on_workflow_end(&mut self, workflow_id: &str, agents_spawned: usize, tool_calls: usize) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
@@ -756,12 +719,7 @@ impl LangfuseTracer {
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
-            &*self.session,
-            event,
-            &self.trace_id,
-            "Workflow SpanUpdate",
-        );
+        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Workflow SpanUpdate");
     }
 
     // ── 中间件链事件 ────────────────────────────────────────────────────────
@@ -916,8 +874,7 @@ impl LangfuseTracer {
 
     /// 获取当前活动的 agent observation ID
     pub(crate) fn current_agent_id(&self) -> String {
-        self.subagent
-            .current_agent_id(&self.agent_observation_id)
+        self.subagent.current_agent_id(&self.agent_observation_id)
     }
 
     /// 创建 SubAgent 上下文并压入 subagent 栈
@@ -951,7 +908,7 @@ impl LangfuseTracer {
                 status_message: None,
                 version: Some(VERSION.to_string()),
                 environment: None,
-            session_id: Some(self.session_id.clone()),
+                session_id: Some(self.session_id.clone()),
             };
             let event = IngestionEvent::ObservationCreate {
                 id: new_uuid(),

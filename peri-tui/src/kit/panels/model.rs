@@ -130,7 +130,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         })
         .unwrap_or_else(|| ("medium".to_string(), 32000, false));
 
-    let rv = render_version.clone();
+    let rv = render_version;
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         move |event| {
             let Event::Key(key) = event else {

@@ -147,19 +147,19 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let confirm_action = hooks.use_state(|| Option::<String>::None);
     let cursor_visible = hooks.use_state(|| true);
     let cursor_last_toggle = hooks.use_state(std::time::Instant::now);
-    let search_text = hooks.use_state(|| String::new());
+    let search_text = hooks.use_state(String::new);
     let search_focus = hooks.use_state(|| false);
     let search_state = hooks.use_state(|| SearchState::Idle);
     let operation_loading = hooks.use_state(|| Option::<String>::None);
-    let add_marketplace_input = hooks.use_state(|| String::new());
+    let add_marketplace_input = hooks.use_state(String::new);
     let add_marketplace_active = hooks.use_state(|| false);
     let marketplace_refreshing = hooks.use_state(|| false);
     // Discover list state
     let discover_cursor = hooks.use_state(|| 0usize);
-    let discover_filtered = hooks.use_state(|| Vec::<usize>::new());
+    let discover_filtered = hooks.use_state(Vec::<usize>::new);
     let discover_detail_idx = hooks.use_state(|| Option::<usize>::None);
     let discover_detail_action = hooks.use_state(|| 0usize);
-    let installing = hooks.use_state(|| HashSet::<String>::new());
+    let installing = hooks.use_state(HashSet::<String>::new);
     let store = hooks.use_atom(&PLUGIN_LIST);
     let plugins: Vec<PluginSummary> = store.read().clone();
     hooks.use_atom(&LANG_VERSION);
@@ -342,12 +342,11 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let items = get_discover_cache();
                     let filtered = discover_filtered.read().clone();
                     let cursor = *discover_cursor.read();
-                    if let Some(&orig_idx) = filtered.get(cursor) {
-                        if orig_idx < items.len() {
+                    if let Some(&orig_idx) = filtered.get(cursor)
+                        && orig_idx < items.len() {
                             *discover_detail_idx.write() = Some(orig_idx);
                             *discover_detail_action.write() = 0;
                         }
-                    }
                     EventResult::Consumed
                 }
                 // Left/Right 透明传给 Normal handler（保持 tab 切换）
@@ -1712,49 +1711,48 @@ fn load_discover_plugins_from_disk() -> Vec<PluginSearchResultItem> {
             Some(path) => path,
             None => continue,
         };
-        if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-            if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(plugin_list) = manifest.get("plugins").and_then(|v| v.as_array()) {
-                    for p in plugin_list {
-                        let name = p
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        if name.is_empty() {
-                            continue;
-                        }
-                        let plugin_id = format!("{}@{}", name, mp_name);
-                        if installed_ids.contains(&plugin_id) {
-                            continue;
-                        }
-                        // author 可能是字符串或 {"name": "..."} 对象
-                        let author = p.get("author").and_then(|v| {
-                            v.as_str().map(|s| s.to_string()).or_else(|| {
-                                v.get("name")
-                                    .and_then(|n| n.as_str())
-                                    .map(|s| s.to_string())
-                            })
-                        });
-                        let version = p
-                            .get("version")
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("—")
-                            .to_string();
-                        plugins.push(PluginSearchResultItem {
-                            name,
-                            version,
-                            marketplace: mp_name.clone(),
-                            description: p
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            author,
-                        });
-                    }
+        if let Ok(content) = std::fs::read_to_string(&manifest_path)
+            && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(plugin_list) = manifest.get("plugins").and_then(|v| v.as_array())
+        {
+            for p in plugin_list {
+                let name = p
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if name.is_empty() {
+                    continue;
                 }
+                let plugin_id = format!("{}@{}", name, mp_name);
+                if installed_ids.contains(&plugin_id) {
+                    continue;
+                }
+                // author 可能是字符串或 {"name": "..."} 对象
+                let author = p.get("author").and_then(|v| {
+                    v.as_str().map(|s| s.to_string()).or_else(|| {
+                        v.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string())
+                    })
+                });
+                let version = p
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("—")
+                    .to_string();
+                plugins.push(PluginSearchResultItem {
+                    name,
+                    version,
+                    marketplace: mp_name.clone(),
+                    description: p
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    author,
+                });
             }
         }
     }

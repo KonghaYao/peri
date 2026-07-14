@@ -74,11 +74,7 @@ impl SubagentStack {
         }
     }
 
-    pub(crate) fn is_agent_tool_anywhere(
-        &self,
-        main_tb: &ToolBatch,
-        tool_call_id: &str,
-    ) -> bool {
+    pub(crate) fn is_agent_tool_anywhere(&self, main_tb: &ToolBatch, tool_call_id: &str) -> bool {
         if main_tb.is_agent_tool(tool_call_id) {
             return true;
         }

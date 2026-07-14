@@ -118,7 +118,10 @@ impl Batcher {
     }
 
     /// 执行一次 flush：将 buffer 中的事件通过原生 Ingestion 端点发送到 Langfuse API
-    async fn do_flush(client: &LangfuseClient, buffer: &mut std::collections::VecDeque<IngestionEvent>) {
+    async fn do_flush(
+        client: &LangfuseClient,
+        buffer: &mut std::collections::VecDeque<IngestionEvent>,
+    ) {
         if buffer.is_empty() {
             return;
         }
@@ -152,7 +155,10 @@ impl Batcher {
                         } else {
                             "DropNew"
                         };
-                        warn!("Batcher queue full, dropping event ({} policy)", policy_name);
+                        warn!(
+                            "Batcher queue full, dropping event ({} policy)",
+                            policy_name
+                        );
                         LangfuseError::ChannelClosed
                     }
                     mpsc::error::TrySendError::Closed(_) => {
@@ -175,8 +181,14 @@ impl Batcher {
         let cmd = BatcherCommand::Add(event);
         self.tx.try_send(cmd).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => {
-                warn!("Batcher queue full, dropping event ({} policy)",
-                    if self.backpressure == BackpressurePolicy::DropOldest { "DropOldest" } else { "DropNew" });
+                warn!(
+                    "Batcher queue full, dropping event ({} policy)",
+                    if self.backpressure == BackpressurePolicy::DropOldest {
+                        "DropOldest"
+                    } else {
+                        "DropNew"
+                    }
+                );
                 LangfuseError::ChannelClosed
             }
             mpsc::error::TrySendError::Closed(_) => {

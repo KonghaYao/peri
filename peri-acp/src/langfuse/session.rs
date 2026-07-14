@@ -1,6 +1,6 @@
-use std::{sync::Arc, time::Duration};
 use std::future::Future;
 use std::pin::Pin;
+use std::{sync::Arc, time::Duration};
 
 use langfuse_client::{
     BackpressurePolicy, Batcher, BatcherConfig, IngestionEvent, LangfuseClient, LangfuseError,

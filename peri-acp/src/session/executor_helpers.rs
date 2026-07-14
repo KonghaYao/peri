@@ -190,14 +190,12 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
 
     let (pump_done_tx, pump_done_rx) = oneshot::channel();
 
-    let langfuse_tracer = langfuse_session
-        .as_ref()
-        .map(|s| {
-            let session_clone = Arc::clone(s);
-            let config = session_clone.config.clone();
-            let session: std::sync::Arc<dyn crate::langfuse::LangfuseSessionLike> = session_clone;
-            parking_lot::Mutex::new(LangfuseTracer::new(session, session_id.clone(), config))
-        });
+    let langfuse_tracer = langfuse_session.as_ref().map(|s| {
+        let session_clone = Arc::clone(s);
+        let config = session_clone.config.clone();
+        let session: std::sync::Arc<dyn crate::langfuse::LangfuseSessionLike> = session_clone;
+        parking_lot::Mutex::new(LangfuseTracer::new(session, session_id.clone(), config))
+    });
     if langfuse_tracer.is_some() {
         debug!(session_id = %session_id, "Langfuse tracer created for turn");
     }
@@ -367,7 +365,10 @@ pub(crate) fn forward_langfuse_event(
             tracer.lock().on_compact_end("", 0, 0, 0, true, message);
         }
         // ── langfuse v2 路由 ──
-        ExecutorEvent::SessionStarted { session_id, frozen_summary } => {
+        ExecutorEvent::SessionStarted {
+            session_id,
+            frozen_summary,
+        } => {
             tracing::debug!(target: "langfuse::forward", %session_id, "SessionStarted → on_session_start");
             tracer.lock().on_session_start(frozen_summary);
         }
@@ -375,7 +376,12 @@ pub(crate) fn forward_langfuse_event(
             tracing::debug!(target: "langfuse::forward", %turn_id, "TurnStarted");
             // on_turn_start 已在外部调用，此处不重复
         }
-        ExecutorEvent::TurnEnded { turn_id, status, error_kind, .. } => {
+        ExecutorEvent::TurnEnded {
+            turn_id,
+            status,
+            error_kind,
+            ..
+        } => {
             tracing::debug!(target: "langfuse::forward", %turn_id, ?status, ?error_kind, "TurnEnded (handled by pump tail)");
             // on_turn_end is called by the pump tail after the event loop — do NOT call it here
         }
@@ -387,7 +393,13 @@ pub(crate) fn forward_langfuse_event(
             let handle_fields: Option<(String, Stage, String, String, String)> = {
                 let t = tracer.lock();
                 t.stages.active_handle().map(|h| {
-                    (h.span_id.clone(), h.stage, h.start_time.clone(), h.trace_id.clone(), h.parent_observation_id.clone())
+                    (
+                        h.span_id.clone(),
+                        h.stage,
+                        h.start_time.clone(),
+                        h.trace_id.clone(),
+                        h.parent_observation_id.clone(),
+                    )
                 })
             };
             if let Some((span_id, s, start_time, trace_id, parent_obs_id)) = handle_fields {
@@ -406,7 +418,13 @@ pub(crate) fn forward_langfuse_event(
         ExecutorEvent::MiddlewareStarted { mw_name, hook, .. } => {
             tracer.lock().on_middleware_start(mw_name, *hook);
         }
-        ExecutorEvent::MiddlewareEnded { mw_name, hook, status, error, .. } => {
+        ExecutorEvent::MiddlewareEnded {
+            mw_name,
+            hook,
+            status,
+            error,
+            ..
+        } => {
             let span_id = {
                 let t = tracer.lock();
                 t.middleware.find_active(mw_name, *hook)
@@ -417,7 +435,9 @@ pub(crate) fn forward_langfuse_event(
                     name: mw_name.clone(),
                     hook: *hook,
                 };
-                tracer.lock().on_middleware_end(&handle, *status, error.clone());
+                tracer
+                    .lock()
+                    .on_middleware_end(&handle, *status, error.clone());
             } else {
                 tracing::warn!(target: "langfuse::forward", %mw_name, ?hook, "MiddlewareEnded without active middleware span, skipping");
             }
@@ -425,18 +445,45 @@ pub(crate) fn forward_langfuse_event(
         ExecutorEvent::AiReasoningChunk { text, .. } => {
             tracer.lock().on_ai_reasoning_chunk(text);
         }
-        ExecutorEvent::BudgetThresholdHit { threshold, current_pct, tokens_in, tokens_out, .. } => {
+        ExecutorEvent::BudgetThresholdHit {
+            threshold,
+            current_pct,
+            tokens_in,
+            tokens_out,
+            ..
+        } => {
             let threshold_str = format!("{:?}", threshold);
-            tracer.lock().on_budget_threshold_hit(&threshold_str, *current_pct, *tokens_in, *tokens_out);
+            tracer.lock().on_budget_threshold_hit(
+                &threshold_str,
+                *current_pct,
+                *tokens_in,
+                *tokens_out,
+            );
         }
-        ExecutorEvent::MessageQueueDrained { prompt, defer, info, .. } => {
+        ExecutorEvent::MessageQueueDrained {
+            prompt,
+            defer,
+            info,
+            ..
+        } => {
             tracer.lock().on_mq_drained(*prompt, *defer, *info);
         }
-        ExecutorEvent::WorkflowStarted { workflow_id, plan_summary, .. } => {
+        ExecutorEvent::WorkflowStarted {
+            workflow_id,
+            plan_summary,
+            ..
+        } => {
             tracer.lock().on_workflow_start(workflow_id, plan_summary);
         }
-        ExecutorEvent::WorkflowEnded { workflow_id, agents_spawned, tool_calls, .. } => {
-            tracer.lock().on_workflow_end(workflow_id, *agents_spawned, *tool_calls);
+        ExecutorEvent::WorkflowEnded {
+            workflow_id,
+            agents_spawned,
+            tool_calls,
+            ..
+        } => {
+            tracer
+                .lock()
+                .on_workflow_end(workflow_id, *agents_spawned, *tool_calls);
         }
         _ => {}
     }

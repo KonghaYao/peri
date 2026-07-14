@@ -6,8 +6,8 @@
 //! - on_mq_drained：记录消息队列排空计数（Receive 阶段专用）
 //! - on_workflow_start / on_workflow_end：管理 Act 阶段的 Workflow 子 span
 
-use std::collections::HashMap;
 use peri_agent::agent::events::{Stage, StageStatus};
+use std::collections::HashMap;
 
 pub(crate) struct StageHandle {
     pub span_id: String,

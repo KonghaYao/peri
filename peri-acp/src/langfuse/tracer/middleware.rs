@@ -6,8 +6,8 @@
 //!
 //! 支持同一 hook 并发执行多个中间件（通过 span_id 保证配对正确）。
 
-use std::collections::HashMap;
 use peri_agent::agent::events::{MiddlewareHook, StageStatus};
+use std::collections::HashMap;
 
 pub(crate) struct MiddlewareSpanHandle {
     pub span_id: String,
@@ -41,11 +41,7 @@ impl MiddlewareTracer {
         }
     }
 
-    pub(crate) fn on_start(
-        &mut self,
-        name: &str,
-        hook: MiddlewareHook,
-    ) -> MiddlewareSpanHandle {
+    pub(crate) fn on_start(&mut self, name: &str, hook: MiddlewareHook) -> MiddlewareSpanHandle {
         let span_id = format!("span_{}", uuid::Uuid::now_v7());
         let start_time = chrono::Utc::now().to_rfc3339();
         self.active.insert(

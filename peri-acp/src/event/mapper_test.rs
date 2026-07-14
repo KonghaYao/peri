@@ -490,13 +490,16 @@ fn test_subagent_stopped_is_tui_only() {
 
 #[test]
 fn test_compact_started_is_tui_only() {
-    assert_tui_only(&ExecutorEvent::CompactStarted {
-        turn_id: "turn_1".into(),
-        agent_id: "agent_1".into(),
-        step: 0,
-        strategy: CompactStrategy::Smart,
-        trigger: CompactTrigger::Auto,
-    }, "CompactStarted");
+    assert_tui_only(
+        &ExecutorEvent::CompactStarted {
+            turn_id: "turn_1".into(),
+            agent_id: "agent_1".into(),
+            step: 0,
+            strategy: CompactStrategy::Smart,
+            trigger: CompactTrigger::Auto,
+        },
+        "CompactStarted",
+    );
 }
 
 #[test]

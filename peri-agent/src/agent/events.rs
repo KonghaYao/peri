@@ -157,13 +157,23 @@ pub enum CompactThreshold {
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MiddlewareHook {
-    BeforeAgent, AfterAgent,
-    BeforeTool, AfterTool,
-    BeforeModel, AfterModel,
-    OnError, OnSessionStart, OnSessionEnd,
-    OnUserPrompt, BeforeCompact, AfterCompact,
-    OnPermissionRequest, OnSubagentStart, OnSubagentStop,
-    OnTurnEnd, OnNotification,
+    BeforeAgent,
+    AfterAgent,
+    BeforeTool,
+    AfterTool,
+    BeforeModel,
+    AfterModel,
+    OnError,
+    OnSessionStart,
+    OnSessionEnd,
+    OnUserPrompt,
+    BeforeCompact,
+    AfterCompact,
+    OnPermissionRequest,
+    OnSubagentStart,
+    OnSubagentStop,
+    OnTurnEnd,
+    OnNotification,
 }
 
 /// Agent 执行过程中的增量事件
@@ -336,7 +346,9 @@ pub enum ExecutorEvent {
         messages: Vec<crate::messages::BaseMessage>,
     },
     /// 上下文压缩失败
-    CompactError { message: String },
+    CompactError {
+        message: String,
+    },
     /// Todo 列表更新
     TodoUpdate(Vec<TodoEntry>),
     /// LSP 诊断更新
@@ -346,9 +358,13 @@ pub enum ExecutorEvent {
         files_with_errors: usize,
     },
     /// Agent 执行失败（由 executor 在 run_react_loop 返回 Err 时发送）
-    AgentExecutionFailed { message: String },
+    AgentExecutionFailed {
+        message: String,
+    },
     /// 后台 agent 工具调用进度通知（轻量级，仅用于 TUI bg_agent_bar 实时计数）
-    BgToolStep { child_thread_id: String },
+    BgToolStep {
+        child_thread_id: String,
+    },
     /// Workflow 进度更新（WorkflowRunner 发出，TUI 消费渲染面板）
     WorkflowProgress(WorkflowProgressPayload),
     /// Turn 已挂起（idle/await_wake），等待 bg agent/cron/workflow 异步事件。

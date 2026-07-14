@@ -59,8 +59,7 @@ pub fn spawn_thread_load_consumer(
 
                                     *atoms::CONFIRM_PAYLOAD.state().write() =
                                         Some(atoms::ConfirmPayload {
-                                            title: i18n::tr("thread-switch-confirm-title")
-                                                .into(),
+                                            title: i18n::tr("thread-switch-confirm-title"),
                                             message: i18n::tr_args(
                                                 "thread-switch-bg-tasks-message",
                                                 &[(

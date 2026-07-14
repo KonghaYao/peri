@@ -4,9 +4,7 @@ use super::*;
 fn test_lazy_create_batch_span_on_first_start() {
     let mut tb = ToolBatch::new();
     let r = tb.on_tool_start("call_1", "Read", serde_json::json!({}));
-    assert!(
-        r.parent_span_id.starts_with("batch_") || r.parent_span_id.starts_with("agent_")
-    );
+    assert!(r.parent_span_id.starts_with("batch_") || r.parent_span_id.starts_with("agent_"));
     assert!(r.tool_span_id.starts_with("obs_"));
 }
 
@@ -15,7 +13,10 @@ fn test_second_start_shares_batch_span() {
     let mut tb = ToolBatch::new();
     let r1 = tb.on_tool_start("call_1", "Read", serde_json::json!({}));
     let r2 = tb.on_tool_start("call_2", "Write", serde_json::json!({}));
-    assert_eq!(r1.parent_span_id, r2.parent_span_id, "同批次共享 batch span");
+    assert_eq!(
+        r1.parent_span_id, r2.parent_span_id,
+        "同批次共享 batch span"
+    );
 }
 
 #[test]
