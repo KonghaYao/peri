@@ -12,10 +12,10 @@
 
 1. **三层映射**：1 个 peri Session → 1 个 Langfuse Session；1 个 turn → 1 个 Trace（trace_id = turn_id）；5 阶段 → 5 个顶层 Span。
 2. **12 个新增 ExecutorEvent 变体 + 2 个扩充**，覆盖 ReAct 5 阶段、中间件链、ContextBudget 阈值点、AiReasoning、MessageQueue 排空、Workflow 调用。
-3. **LangfuseTracer 内部重构**：14 字段收敛为 5 简单字段 + 9 子状态机（4 个复用架构 review 02 设计 + 5 个新增：SamplingDecider / StageSpans / MiddlewareTracer / MqDrainTracker / WorkflowSpan）。
+3. **LangfuseTracer 内部重构**：14 字段收敛为 5 简单字段 + 7 子状态机（4 个复用架构 review 02 设计 + 3 个新增：SamplingDecider / StageSpans（含 MQ 排空 + Workflow 子能力）/ MiddlewareTracer）。
 4. **Sampling**：turn 级采样（hash + rate），错误 turn 强制发 ErrorSpan 挂同 turn。
 5. **配置**：5 新增环境变量全部支持 `~/.peri/settings.json`。
-6. **测试**：660 行子对象单测 + trait 抽取（架构 review 02 候选 06）+ e2e mock 端到端验证。
+6. **测试**：680 行子对象单测 + trait 抽取（架构 review 02 候选 06）+ e2e mock 端到端验证。
 
 ---
 
@@ -183,14 +183,12 @@ peri-acp/executor_helpers.rs::forward_langfuse_event
 LangfuseTracer.on_xxx（parking_lot::Mutex 保护）
     │
     ├─ SamplingDecider    turn 开始决定 sampled=true/false（被动，不通知 caller）
-    ├─ StageSpans         5 阶段 Span 生命周期
+    ├─ StageSpans         5 阶段 Span 生命周期 + MQ 排空计数（Receive 子能力）+ Workflow Span（Act 子能力）
     ├─ GenerationTracker  LLM 调用
     ├─ ToolBatch          工具组 Span
     ├─ SubagentStack      SubAgent 嵌套
     ├─ CompactSpan        Compact Span
-    ├─ MiddlewareTracer   中间件 Span
-    ├─ MqDrainTracker     MQ 排空计数
-    └─ WorkflowSpan       Workflow 调用 Span
+    └─ MiddlewareTracer   中间件 Span
     │
     ▼
 batcher.try_add (IngestionEvent)
@@ -222,12 +220,10 @@ pub struct LangfuseTracer {
     // ── 累积字段（单字段，无内聚类） ──
     final_answer: String,
 
-    // ── 9 个子状态机（全私有） ──
+    // ── 7 个子状态机（全私有） ──
     sampling: SamplingDecider,        // 新增
-    stages: StageSpans,               // 新增
+    stages: StageSpans,               // 新增（含 MQ 排空 + Workflow 子能力）
     middleware: MiddlewareTracer,     // 新增
-    mq_drain: MqDrainTracker,         // 新增
-    workflow: WorkflowSpan,           // 新增
     generation: GenerationTracker,    // 复用 review 02 设计
     tool_batch: ToolBatch,            // 复用 review 02 设计
     subagent: SubagentStack,          // 复用 review 02 设计
@@ -235,19 +231,19 @@ pub struct LangfuseTracer {
 }
 ```
 
-**14 字段，其中 9 个是子对象**（全私有），5 个简单字段。从"14 pub(crate) 散字段"→"5 简单 + 9 子对象私有字段"。所有跨字段不变量收口在子对象 impl 内。
+**12 字段，其中 7 个是子对象**（全私有），5 个简单字段。从"14 pub(crate) 散字段"→"5 简单 + 7 子对象私有字段"。所有跨字段不变量收口在子对象 impl 内。
 
-### 3.2 9 个子状态机的职责契约
+**设计取舍**：MqDrainTracker 与 WorkflowSpan 仅在特定阶段（Receive / Act）生效，与 StageSpans 强耦合，独立子对象过度拆分。合并入 StageSpans 后内聚类更紧、字段更少。代价是 StageSpans 文件略大（约 200-300 LOC），但仍可独立测试。
+
+### 3.2 7 个子状态机的职责契约
 
 每个子对象回答 what / how / depends on：
 
 | 子对象 | What（职责） | How（关键方法） | Depends on |
 |--------|--------------|----------------|------------|
 | `SamplingDecider` | turn 开始决定是否上报；错误 span 兜底 | `should_emit(turn_id, session_id) -> bool`、`cleanup_turn(turn_id)` | session_id（hash 种子）、rate |
-| `StageSpans` | 5 阶段（Compact/Receive/Reason/Act/End）Span 生命周期；当前活动阶段栈 | `on_stage_start(stage) -> StageHandle`、`on_stage_end(handle, status)` | session.batcher、trace_id、agent_observation_id（parent） |
+| `StageSpans` | 5 阶段（Compact/Receive/Reason/Act/End）Span 生命周期；当前活动阶段栈；Receive 阶段 MQ 排空计数；Act 阶段 Workflow 调用 Span | `on_stage_start(stage) -> StageHandle`、`on_stage_end(handle, status)`、`on_mq_drained(counts)`（仅 Receive）、`on_workflow_start(plan)` / `on_workflow_end(stats)`（仅 Act） | session.batcher、trace_id、agent_observation_id（parent） |
 | `MiddlewareTracer` | 14+5 中间件调用 Span；按 hook 分组 | `on_start(name, hook)`、`on_end(name, status)` | 当前活动 StageHandle（决定挂哪个阶段下） |
-| `MqDrainTracker` | Receive 阶段 MQ 排空计数（prompt/defer/info） | `on_drained(counts)`，写入 Receive Span metadata | 当前 Receive StageHandle |
-| `WorkflowSpan` | Workflow 调用 Span（SubAgent 数、tool call 数） | `on_start(plan)`、`on_end(stats)` | 当前 Act StageHandle |
 | `GenerationTracker` | LLM step 生命周期（active_step + retry） | `on_llm_start/end/retrying`、返回 `GenerationStart/End` | trace_id |
 | `ToolBatch` | 工具组 Span 批次（lazy 创建、累积、flush） | `on_tool_start/end`、`flush()` | trace_id |
 | `SubagentStack` | SubAgent 嵌套栈（每层含独立 ToolBatch） | `begin_subagent`、`end_subagent`、`current_agent_id` | trace_id |
@@ -455,16 +451,14 @@ if status.is_error() && env_error_span_always {
 | 测试模块 | 测什么 | 预估 LOC |
 |---------|--------|---------|
 | `sampling_test.rs` | hash 一致性、rate=0/1.0 边界、cleanup_turn 清理 | ~60 |
-| `stages_test.rs` | 5 阶段生命周期、嵌套禁止、重复 end 早返回、Compact 阈值以下不上报 | ~60 |
+| `stages_test.rs` | 5 阶段生命周期、嵌套禁止、重复 end 早返回、Compact 阈值以下不上报、MQ 排空计数（仅 Receive 阶段）、Workflow start/end（仅 Act 阶段） | ~150 |
 | `middleware_test.rs` | 14+5 链按 hook 分组、并行同 hook 顺序、status 传递 | ~70 |
-| `mq_drain_test.rs` | counts 写入 metadata、多次 drain 累计 | ~30 |
-| `workflow_test.rs` | start/end 配对、stats 累积 | ~40 |
 | `generation_test.rs` | 现有 6 个 test 迁入（review 02 §7.1） | ~80 |
 | `tool_batch_test.rs` | lazy 创建/flush/is_agent_tool（review 02） | ~60 |
 | `subagent_test.rs` | 嵌套栈/current_agent_id（review 02） | ~200 |
 | `compact_test.rs` | on/off + 三级策略 metadata + token_before/after | ~60 |
 
-**新增约 660 行子对象单测**，独立可跑、跑得快。
+**新增约 680 行子对象单测**，独立可跑、跑得快。MQ 与 Workflow 测试合并入 `stages_test.rs`（与子对象合并方案对齐）。
 
 ### 5.2 forward_langfuse_event 集成测试
 
@@ -474,7 +468,7 @@ if status.is_error() && env_error_span_always {
 - 21 个 on_* 方法每个 1 个冒烟 test
 - 重点测**子对象协作**：如 `on_stage_start(Reason) → on_llm_start → on_ai_reasoning_chunk → on_llm_end → on_stage_end(Reason)` 序列生成的事件树结构正确（parent 关系、顺序）
 
-**`tracer_test.rs` 现有 356 LOC 的处理**：按 review 02 §7.2 的迁移方案——19 处字段白盒访问改读子对象公开方法返回值，test 按归属拆分到 9 个子对象 `_test.rs`，集成层保留约 80 行冒烟用例。
+**`tracer_test.rs` 现有 356 LOC 的处理**：按 review 02 §7.2 的迁移方案——19 处字段白盒访问改读子对象公开方法返回值，test 按归属拆分到 7 个子对象 `_test.rs`，集成层保留约 80 行冒烟用例。
 
 ### 5.3 端到端冒烟测试
 
@@ -531,10 +525,10 @@ if status.is_error() && env_error_span_always {
 1. **commit 1**：langfuse-client crate（加 Session/ScoreBody 等数据结构、config 扩展、BackpressurePolicy 可配置）
 2. **commit 2**：peri-agent ExecutorEvent 新变体（12 新 + 2 扩充）+ event/mapper.rs + acp_events.rs + `variant_coverage_test.rs`
 3. **commit 3**：peri-agent/stages/* 实际 emit 新事件（Compact/Receive/Reason/Act/End 阶段、middleware/chain.rs）
-4. **commit 4**：LangfuseTracer 内部重构（9 子对象 + `LangfuseSessionLike` trait 抽取）+ 21 on_* 方法（含 `on_trace_*` 重命名为 `on_turn_*`）
+4. **commit 4**：LangfuseTracer 内部重构（7 子对象 + `LangfuseSessionLike` trait 抽取）+ 21 on_* 方法（含 `on_trace_*` 重命名为 `on_turn_*`）
 5. **commit 5**：`forward_langfuse_event` 扩展路由 + `workflow_agent.rs:142-504` 改挂主 Trace Act Span 下
 6. **commit 6**：Sampling + ErrorSpan + 配置加载 + `~/.peri/settings.json` 支持
-7. **commit 7**：测试（660 行子对象单测 + 集成 + e2e + mapper_test 同步）
+7. **commit 7**：测试（680 行子对象单测 + 集成 + e2e + mapper_test 同步）
 8. **commit 8**：删除旧 tracer 文件、文档更新（CLAUDE.md + ADR + langfuse-monitoring-v2.md）
 
 每个 commit 独立可编译、独立 `cargo test`。整体作为一个 PR 提交。
@@ -550,7 +544,7 @@ if status.is_error() && env_error_span_always {
 | 风险 | 缓解 |
 |------|------|
 | ExecutorEvent 新变体忘记同步 mapper/acp_events | `variant_coverage_test.rs`：枚举所有变体，断言每个在 mapper_test 有对应 test |
-| 9 子对象的 `&mut self` 借用冲突 | `ToolBatchRef` 枚举 / disjoint borrow；CI 加 compile-only check |
+| 7 子对象的 `&mut self` 借用冲突 | `ToolBatchRef` 枚举 / disjoint borrow；CI 加 compile-only check |
 | SamplingDecider HashMap 内存增长（长会话） | turn_end 时 remove；`decided.len() > 1000` 时清理最旧条目 |
 | 错误 turn 信息少（仅 ErrorSpan，无子事件） | 文档说明：要看错误 turn 全貌需调高 sampling |
 | WorkflowAgent 独立 tracer pump 的 trace 不挂主 trace | workflow_agent.rs:142-504 改为挂主 Trace 的 Act Span 下，不创建独立 trace |
@@ -563,7 +557,7 @@ if status.is_error() && env_error_span_always {
 建议写 `ADR-2026-07-14-langfuse-architecture-revamp`：
 
 - **Context**：监控盲区 + 14 字段散 + turn_id 脱节 + 无 Sampling
-- **Decision**：方案 B 一次性重构 + 9 子状态机 + Session 对象 + trace_id = turn_id + Turn 级 Sampling + ErrorSpan 兜底
+- **Decision**：方案 B 一次性重构 + 7 子状态机 + Session 对象 + trace_id = turn_id + Turn 级 Sampling + ErrorSpan 兜底
 - **Alternatives**：
   - 方案 A 分阶段（被否决：残留中间状态、用户明确要求激进）
   - 方案 C 最小补丁（被否决：盲区仍在）
@@ -590,7 +584,7 @@ if status.is_error() && env_error_span_always {
 - 测试迁移策略复用 review 02 §7.2
 - 不变量升级对照表复用 review 02 §3
 
-本设计在 review 02 基础上**追加**：5 个新子状态机（SamplingDecider / StageSpans / MiddlewareTracer / MqDrainTracker / WorkflowSpan）、Langfuse Session 对象引入、trace_id = turn_id 契约、Sampling 与 ErrorSpan 机制。
+本设计在 review 02 基础上**追加**：3 个新子状态机（SamplingDecider / StageSpans（含 MQ 排空 + Workflow 子能力）/ MiddlewareTracer）、Langfuse Session 对象引入、trace_id = turn_id 契约、Sampling 与 ErrorSpan 机制。
 
 ---
 
