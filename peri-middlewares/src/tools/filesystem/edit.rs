@@ -206,6 +206,8 @@ impl BaseTool for EditFileTool {
                 {
                     let _ = std::fs::set_permissions(&tmp_path, metadata.permissions());
                 }
+                #[cfg(not(unix))]
+                let _ = &metadata; // Windows 上 #[cfg(unix)] 排除后 metadata 未使用
             }
             match std::fs::rename(&tmp_path, &resolved) {
                 Ok(_) => Ok(format!(
@@ -273,6 +275,8 @@ impl BaseTool for EditFileTool {
                 {
                     let _ = std::fs::set_permissions(&tmp_path, metadata.permissions());
                 }
+                #[cfg(not(unix))]
+                let _ = &metadata; // Windows 上 #[cfg(unix)] 排除后 metadata 未使用
             }
             match std::fs::rename(&tmp_path, &resolved) {
                 Ok(_) => Ok(format!("{} to {}", diff_desc, rel)),
