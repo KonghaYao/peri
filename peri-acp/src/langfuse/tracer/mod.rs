@@ -180,7 +180,7 @@ impl LangfuseTracer {
                 // 未采样时创建合成 Trace（复用 trace_id），让 error span 有父 trace
                 let trace_body = TraceBody {
                     id: Some(turn_id.clone()),
-                    name: Some(format!("turn {}", &turn_id)),
+                    name: Some(format!("turn {}", turn_id)),
                     user_id: None,
                     input: None,
                     output: Some(serde_json::json!({"error": &error_msg})),

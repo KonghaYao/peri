@@ -34,6 +34,10 @@ pub(crate) struct ConvertState {
     pub current_text: Vec<Line<'static>>,
     /// 已 flush 的 segments（包含 Table + 已闭合的 Text）。
     pub segments: Vec<MarkdownSegment>,
+    /// 已处理的 block 中是否包含 Table——用于缓存失效检查。
+    /// Table 是动态块：后续追加行（数据行）会改变同一个 block 的内容，
+    /// 而其他块（Paragraph/CodeBlock/ListItem）在闭合后内容不变。
+    pub has_table_in_processed_blocks: bool,
 }
 
 /// 将 ratatui-kit-markdown 的 ParsedBlock 列表转换为 MarkdownSegment 序列。
