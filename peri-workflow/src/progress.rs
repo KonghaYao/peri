@@ -116,11 +116,7 @@ impl WorkflowProgressStore {
         let mut runs = self.runs.write();
 
         match event {
-            ProgressEvent::RunStarted {
-                workflow_name,
-                meta: _,
-                ..
-            } => {
+            ProgressEvent::RunStarted { workflow_name, .. } => {
                 let run = RunProgress {
                     run_id: run_id.clone(),
                     workflow_name: workflow_name.clone(),
