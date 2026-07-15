@@ -10,9 +10,9 @@
 //! - Esc → 恢复原始主题色并关闭面板
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::time::Duration;
 
+use ratatui_kit::prelude::Atom as AtomStatic;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
@@ -40,10 +40,36 @@ use peri_theme::loader::list_available_themes;
 use peri_theme::theme::ThemeMode;
 use std::time::Instant;
 
-static THEME_LIST: OnceLock<Vec<String>> = OnceLock::new();
+static THEME_LIST: AtomStatic<Vec<String>> = AtomStatic::new(list_available_themes);
 
-fn get_theme_list() -> &'static Vec<String> {
-    THEME_LIST.get_or_init(list_available_themes)
+/// 按主题模式将当前目录快照分为深色和浅色主题。
+fn classify_theme_catalog(
+    catalog: &[String],
+    mut mode_for_theme: impl FnMut(&str) -> Option<ThemeMode>,
+) -> (Vec<String>, Vec<String>) {
+    let mut dark = Vec::new();
+    let mut light = Vec::new();
+
+    for name in catalog {
+        match mode_for_theme(name) {
+            Some(ThemeMode::Dark | ThemeMode::HighContrast) => dark.push(name.clone()),
+            Some(ThemeMode::Light) => light.push(name.clone()),
+            None => continue,
+        }
+    }
+
+    (dark, light)
+}
+
+/// 下载至少一个主题后，以重新扫描的目录快照替换当前 catalog。
+fn refresh_theme_catalog_after_download(
+    catalog: &mut Vec<String>,
+    success_count: usize,
+    scan_catalog: impl FnOnce() -> Vec<String>,
+) {
+    if success_count > 0 {
+        *catalog = scan_catalog();
+    }
 }
 
 /// 预览用样本 markdown，覆盖主要样式（标题、粗体/斜体/删除线、行内代码、引用）。
@@ -342,6 +368,12 @@ async fn download_themes_from_github() {
         }
     }
 
+    if success_count > 0 {
+        let theme_catalog = THEME_LIST.state();
+        let mut catalog = theme_catalog.write();
+        refresh_theme_catalog_after_download(&mut catalog, success_count, list_available_themes);
+    }
+
     // 4. 标记下载完成
     let finish_msg = i18n::tr_args(
         "popup-download-finished-notify",
@@ -408,36 +440,25 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // tab 状态：0 = dark, 1 = light
     let tab = hooks.use_state(|| 0u8);
 
-    // 按 mode 分类所有主题（一次性初始化）
-    let theme_kinds = hooks.use_state(|| {
-        let mut dark = Vec::new();
-        let mut light = Vec::new();
-        for name in get_theme_list() {
-            match peri_theme::loader::load_theme(name) {
-                Ok(t) => match t.mode {
-                    ThemeMode::Dark | ThemeMode::HighContrast => dark.push(name.clone()),
-                    ThemeMode::Light => light.push(name.clone()),
-                },
-                Err(_) => continue,
-            }
-        }
-        (dark, light)
-    });
+    // 订阅主题目录快照；下载成功后的写入会唤醒当前已打开的面板。
+    let theme_catalog = hooks.use_atom(&THEME_LIST);
+    let theme_kinds = {
+        let catalog = theme_catalog.read();
+        classify_theme_catalog(&catalog, |name| {
+            peri_theme::loader::load_theme(name)
+                .ok()
+                .map(|theme| theme.mode)
+        })
+    };
 
     // 根据 tab 获取当前主题列表
-    let current_list = {
-        let kinds = theme_kinds.read();
-        match *tab.read() {
-            0 => kinds.0.clone(),
-            _ => kinds.1.clone(),
-        }
+    let current_list = match *tab.read() {
+        0 => theme_kinds.0.clone(),
+        _ => theme_kinds.1.clone(),
     };
-    let other_count = {
-        let kinds = theme_kinds.read();
-        match *tab.read() {
-            0 => kinds.1.len(),
-            _ => kinds.0.len(),
-        }
+    let other_count = match *tab.read() {
+        0 => theme_kinds.1.len(),
+        _ => theme_kinds.0.len(),
     };
 
     // 选中索引：tab 切换时重置为 0
@@ -558,8 +579,8 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     } else {
         (tab_inactive_style, tab_active_style)
     };
-    let dark_count = theme_kinds.read().0.len();
-    let light_count = theme_kinds.read().1.len();
+    let dark_count = theme_kinds.0.len();
+    let light_count = theme_kinds.1.len();
     lines.push(Line::from(vec![
         Span::styled(
             format!(" {} ({}) ", i18n::tr("panel-theme-tab-dark"), dark_count),
@@ -705,3 +726,7 @@ fn switch_theme_atoms(name: &str) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "theme_test.rs"]
+mod theme_test;
