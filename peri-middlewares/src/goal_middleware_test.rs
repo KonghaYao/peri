@@ -19,6 +19,9 @@ impl GoalController for MockController {
     async fn block_goal(&self, _reason: String) -> Result<(), String> {
         Ok(())
     }
+    async fn clear_goal(&self) -> Result<(), String> {
+        Ok(())
+    }
     fn snapshot(&self) -> GoalViewSnapshot {
         self.snapshot.lock().clone()
     }
@@ -87,9 +90,14 @@ async fn test_after_agent_goal_active_注入_steering_并设_block_continue() {
     // 设 block_continue 触发 executor 续跑
     assert_eq!(result.block_continue.as_deref(), Some("goal_active"));
 
-    // 注入路径：v2 MessageQueue 应收到 1 条 Info（GoalSteering）
-    let drained = state.v2_queue().drain_for_receive();
-    assert_eq!(drained.len(), 1, "应 push 1 条 goal steering Info 消息");
+    // 注入路径：v2 MessageQueue 应收到 1 条 Defer（GoalSteering）
+    // Defer 在 Receive 阶段保留在队列，需用 drain_for_end 验证
+    let drained = state.v2_queue().drain_for_end();
+    assert_eq!(
+        drained.unwrap_or_default().len(),
+        1,
+        "应 push 1 条 goal steering Defer 消息"
+    );
 }
 
 #[tokio::test]
@@ -191,11 +199,12 @@ async fn test_after_agent_terminal_重置_pending_rounds() {
         "终态后重新 active 应从 round 1 开始（递增紧迫感计数器已重置）"
     );
 
-    // 验证 queue 累积：两次 active（r1 / r3）各 push 1 条 Info，r2 终态不 push
-    let drained = state.v2_queue().drain_for_receive();
+    // 验证 queue 累积：两次 active（r1 / r3）各 push 1 条 Defer，r2 终态不 push
+    // Defer 在 Receive 阶段保留在队列，需用 drain_for_end 验证
+    let drained_msg = state.v2_queue().drain_for_end();
     assert_eq!(
-        drained.len(),
+        drained_msg.unwrap_or_default().len(),
         2,
-        "应累积 2 条 goal steering（两次 active），终态 r2 不 push"
+        "应累积 2 条 goal steering Defer（两次 active），终态 r2 不 push"
     );
 }

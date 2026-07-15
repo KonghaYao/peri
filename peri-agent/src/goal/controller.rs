@@ -20,6 +20,9 @@ pub trait GoalController: Send + Sync {
     /// 声明阻塞。reason 必填。状态转换非法时返回 Err。
     async fn block_goal(&self, reason: String) -> Result<(), String>;
 
+    /// 清除当前 goal（释放 singleton 槽位，终态也可清除）。
+    async fn clear_goal(&self) -> Result<(), String>;
+
     /// 只读快照（get action + after_agent 判断用）
     fn snapshot(&self) -> GoalViewSnapshot;
 }

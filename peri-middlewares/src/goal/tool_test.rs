@@ -38,6 +38,11 @@ impl GoalController for MockController {
         Ok(())
     }
 
+    async fn clear_goal(&self) -> Result<(), String> {
+        *self.has_goal.lock() = false;
+        Ok(())
+    }
+
     fn snapshot(&self) -> GoalViewSnapshot {
         let guard = self.has_goal.lock();
         if *guard {
@@ -360,4 +365,48 @@ fn test_parse_verdict_非法输入_默认未达成() {
     let v = GoalTool::parse_verdict("完全不是 JSON 的纯文本");
     assert!(!v.achieved);
     assert!(v.missing.contains("Failed to parse"));
+}
+
+#[tokio::test]
+async fn test_goal_clear() {
+    let controller = Arc::new(MockController::new()) as Arc<dyn GoalController>;
+    let tool = GoalTool::new(Arc::clone(&controller), None);
+
+    // 先 create
+    tool.invoke(
+        json!({"action": "create", "objective": "目标"}),
+        ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+
+    // clear
+    let result = tool
+        .invoke(json!({"action": "clear"}), ToolContext::new(&[], "."))
+        .await
+        .unwrap();
+    assert!(result.contains("Goal cleared"));
+
+    // clear 后再 get 应返回 No active goal
+    let get_result = tool
+        .invoke(json!({"action": "get"}), ToolContext::new(&[], "."))
+        .await
+        .unwrap();
+    assert!(
+        get_result.contains("No active goal"),
+        "clear 后应无 goal，实际：{get_result}"
+    );
+}
+
+#[tokio::test]
+async fn test_goal_clear_no_goal_also_succeeds() {
+    // 无 goal 时 clear 也应成功（幂等）
+    let controller = Arc::new(MockController::new()) as Arc<dyn GoalController>;
+    let tool = GoalTool::new(controller, None);
+
+    let result = tool
+        .invoke(json!({"action": "clear"}), ToolContext::new(&[], "."))
+        .await
+        .unwrap();
+    assert!(result.contains("Goal cleared"));
 }

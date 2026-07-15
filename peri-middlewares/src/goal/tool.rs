@@ -35,6 +35,7 @@ impl GoalTool {
 - create: Create a goal (objective required). Only one goal per session.\n\
 - complete: Declare the goal complete (verified by an auxiliary LLM; returns reason if not met)\n\
 - block: Declare an unsolvable blocker (reason required)\n\
+- clear: Clear the current goal (releases the singleton slot, works on terminal states too)\n\
 - get: Query current goal status";
 
     async fn handle_create(
@@ -125,6 +126,14 @@ impl GoalTool {
         Ok(format!("Goal marked as blocked: {reason}"))
     }
 
+    async fn handle_clear(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.controller
+            .clear_goal()
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        Ok("Goal cleared. You can now create a new goal.".to_string())
+    }
+
     fn handle_get(controller: &dyn GoalController) -> String {
         let snap = controller.snapshot();
         match (&snap.objective, snap.status) {
@@ -138,8 +147,7 @@ impl GoalTool {
         }
     }
 
-    const VERIFY_SYSTEM_PROMPT: &'static str =
-        "You are a goal completion evaluator. Determine whether the agent has achieved the user's goal.\n\
+    const VERIFY_SYSTEM_PROMPT: &'static str = "You are a goal completion evaluator. Determine whether the agent has achieved the user's goal.\n\
         Be strict — only return true if there is concrete evidence the goal was met.\n\n\
         Output JSON in this format:\n\
         {\"achieved\": true/false, \"evidence\": \"evidence supporting the judgment\", \"missing\": \"if not achieved, what is still missing\"}";
@@ -231,7 +239,7 @@ impl BaseTool for GoalTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "complete", "block", "get"],
+                    "enum": ["create", "complete", "block", "clear", "get"],
                     "description": "Operation type"
                 },
                 "objective": {
@@ -273,6 +281,7 @@ impl BaseTool for GoalTool {
                     .ok_or("goal: block requires 'reason' parameter")?;
                 self.handle_block(reason).await
             }
+            "clear" => self.handle_clear().await,
             "get" => Ok(Self::handle_get(self.controller.as_ref())),
             other => Err(format!("goal: unknown action '{other}'").into()),
         }
