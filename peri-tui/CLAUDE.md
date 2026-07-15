@@ -116,7 +116,7 @@ message_area 直接消费 VIEW_MODELS：
 
 鼠标 Drag → 选区高亮（selection_bg 主题色） → 松开自动复制到剪贴板（arboard）。通过 `MsgAreaTracker` Hook 记录消息区外边界，`mouse_visual_position` 将终端坐标转为视觉坐标，`extract_selected_text` 提取纯文本。
 
-## 14 面板（kit/panels/，PanelKind 枚举）
+## 16 面板（kit/panels/，PanelKind 枚举）
 
 | Panel | 数据源 | 切换功能 |
 |-------|--------|----------|
@@ -134,11 +134,13 @@ message_area 直接消费 VIEW_MODELS：
 | **Memory** | MEMORY_LIST atom（H1h） | ✅ Enter 调用 `$EDITOR` 打开文件 |
 | **Betas** | 构建期 feature flags | 只读 |
 | **Workflow** | VIEW_MODELS SubAgent 计数 + 外部 CLI 说明 | 只读 |
-| **SetupWizard** | App.global_ui | 配置向导（首次启动触发） |
+| **AskUser** | ASK_USER_PENDING（内联渲染 + Confirm 二次确认） | 表单填写 |
+| **Theme** | THEME_ATOM/PALETTE_ATOM/PERI_COLORS_ATOM | ✅ Enter 应用+持久化；Tab 切 Dark/Light；触发 Download 弹窗下载主题 |
+| **SetupWizard**（非 PanelKind） | App.global_ui | 配置向导（首次启动触发，独立流程） |
 
 面板栈互斥组（MutexGroup）：Settings / Agent / Tools / Info / Thread。打开新面板按栈压入；关闭弹栈。
 
-## 4 弹窗（kit/popups/）
+## 6 弹窗（kit/popups/）
 
 由 ACP 事件触发，统一通过 `POPUP_KIND` atom 路由。dispatch_and_notify 在写入
 `POPUP_KIND` 的同时把完整 payload 写入对应 atom（I20-D / I21-A / I21-B）；
@@ -150,6 +152,8 @@ message_area 直接消费 VIEW_MODELS：
 | **AskUser** | `AcpEventData::AskUser` | `ASK_USER_PENDING: Option<AskUser>` | Panel 内联渲染；Tab 切问题、↑↓ 导航、Space 选、Enter 下一题/提交、Esc 取消 |
 | **Rewind** | `AcpEventData::RewindPreview` 或双击 Esc | `REWIND_PREVIEW: Option<RewindPreview>` | 回退预览 + 确认；REWIND_ACTION_TX → /rewind RPC |
 | **OAuth** | `AcpEventData::OauthNeeded` | `OAUTH_INFO: Option<OauthNeeded>` | 显示真实 server_name + auth_url；Ctrl+O 开浏览器、Enter 关闭（I20-D） |
+| **Confirm** | AskUser Panel 内 Elicitation 二次确认 / ThreadBrowser 切线程 | `CONFIRM_PAYLOAD: Option<ConfirmPayload>` | 通用确认对话框；Enter/Esc 通过 consumer 回发 ACP 响应 |
+| **Download** | Theme Panel 下载主题 | 文件下载状态枚举 | 显示下载进度 + 完成提示 |
 
 ## Status Bar（kit/status_bar.rs）
 
