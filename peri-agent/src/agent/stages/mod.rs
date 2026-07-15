@@ -681,8 +681,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 //    TUI bridge 收到事件后推入 committed 的顺序与 agent 内部状态严格一致。
                 //    见 spec/issues/2026-07-08-mq-injected-user-message-not-in-tui.md
                 for msg in &end_out.awakened_messages {
-                    use crate::session::queue::MessageSource;
-                    if msg.source == MessageSource::SubAgentComplete {
+                    use crate::session::queue::MessageKind;
+                    // 对所有 Defer-kind 消息（goal steering / cron / workflow / hook feedback）
+                    // emit SyntheticUserMessage，让 TUI bridge 能刷新 committed 视图。
+                    if msg.kind == MessageKind::Defer {
                         let raw_text = msg.message.content().to_string();
                         let text = format!("<system-reminder>\n{}\n</system-reminder>", raw_text);
                         context.event_bus.emit_state(
@@ -752,8 +754,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                                 //    should_continue 分支同模式：在 agent 消费
                                 //    MQ Defer 消息时发送，消除时序竞争窗口。
                                 for msg in &msgs {
-                                    use crate::session::queue::MessageSource;
-                                    if msg.source == MessageSource::SubAgentComplete {
+                                    use crate::session::queue::MessageKind;
+                                    // 对所有 Defer-kind 消息（goal steering / cron / workflow / hook feedback）
+                                    // emit SyntheticUserMessage，让 TUI bridge 能刷新 committed 视图。
+                                    if msg.kind == MessageKind::Defer {
                                         let raw_text = msg.message.content().to_string();
                                         let text = format!(
                                             "<system-reminder>\n{}\n</system-reminder>",

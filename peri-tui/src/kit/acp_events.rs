@@ -553,6 +553,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             steps,
         } => {
             tracing::info!(steps, "bridge: TurnCommitted ({steps} steps)");
+            // 在 goal 自驱场景下 TurnDone 只在最终循环退出时触发，
+            // TurnCommitted 作为每次 ReAct 迭代边界的刷新检查点，防止 TUI atom 漂移。
+            push_view_models(state);
+            push_acp_state(state);
         }
         CompactStarted => {
             // 上下文压缩在后台自动进行，不做消息流注入（避免干扰用户）

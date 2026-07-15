@@ -3,7 +3,7 @@
 //! goal active 时每轮注入提示 + 设 block_continue，executor 自动续跑。
 //! agent 必须调 goal(complete) 或 goal(block) 才能终止循环。
 //!
-//! 注入路径：通过 v2 MessageQueue push Info kind（Receive 阶段消费）。
+//! 注入路径：通过 v2 MessageQueue push Defer kind（Receive 保留 → End 消费唤醒续跑）。
 //! 绝不破坏 frozen_system_prompt。使用 <system-reminder> 标签包裹，
 //! 与 compact 摘要检测、14_system_reminder prompt 协同。
 
@@ -105,10 +105,10 @@ impl Middleware for GoalMiddleware {
         // [TRAP] 必须用 Human + <system-reminder> 注入，禁止 BaseMessage::system。
         // System 消息会被 invoke hoist 到 system prompt 顶部，污染 frozen_system_prompt。
         // （与 hooks/middleware.rs stop_hook_feedback、compact_v2.rs::re_inject_v2 注入路径一致）
-        // 走 v2 MessageQueue Info kind → Receive 阶段统一消费。
+        // 走 v2 MessageQueue Defer kind → End 阶段 drain_for_end 唤醒新 turn。
         let reminder = format!("<system-reminder>\n{}\n</system-reminder>", template);
         state.v2_queue().push(QueuedMessage::new(
-            MessageKind::Info,
+            MessageKind::Defer,
             MessageSource::GoalSteering,
             BaseMessage::human(MessageContent::text(reminder)),
         ));
