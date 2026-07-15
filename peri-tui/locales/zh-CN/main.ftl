@@ -920,6 +920,9 @@ panel-theme-preview = 预览
 panel-theme-tab-dark = 暗色
 panel-theme-tab-light = 浅色
 panel-theme-tab-hint =   Tab::切换分类
+panel-theme-daily-on = 开
+panel-theme-daily-off = 关
+panel-theme-download-label = 从 GitHub 下载
 
 # ---- Workflow Panel kanban ----
 workflow-loading-runs = 正在加载工作流运行信息
@@ -978,6 +981,15 @@ popup-confirm-action-hint =   Enter: 确认  Esc: 取消
 popup-confirm-title =  确认
 popup-confirm-reject-title = 拒绝回答
 popup-confirm-reject-message = 是否拒绝回答？拒绝后 Agent 将收到拒绝信号并结束工具调用。
+
+# ---- 下载进度弹窗 ----
+
+popup-download-title-active = 正在下载主题 ({ $done }/{ $total })
+popup-download-title-done = 下载完成 ({ $total } 个文件, { $success } 成功, { $failed } 失败)
+popup-download-footer-active = 下载中，请稍候...
+popup-download-footer-done = 按 Esc 关闭
+popup-download-empty = （无可下载的文件）
+popup-download-finished-notify = 主题下载完成: { $success }/{ $total } 成功, { $failed } 失败
 
 # ---- System Notes (app message stream) ----
 app-note-budget-warning = 上下文窗口使用率 { NUMBER($pct, maximumFractionDigits: 0) }%（{ $used }/{ $limit }）

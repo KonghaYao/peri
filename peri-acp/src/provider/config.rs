@@ -165,6 +165,12 @@ pub struct AppConfig {
     /// 默认 "peri-dark"，在 TUI 启动时加载
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+    /// 是否启用每日色彩自动切换（同 mode 内轮换）
+    #[serde(default)]
+    pub daily_color: bool,
+    /// 上次执行每日色彩切换的日期（"YYYY-MM-DD"），用于启动时判断是否需要切换
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_color_date: Option<String>,
 }
 
 fn default_show_cache_warning() -> bool {
@@ -225,6 +231,16 @@ impl AppConfig {
         }
         // show_cache_warning: bool 直接覆盖
         self.show_cache_warning = workspace.show_cache_warning;
+        // theme: Option<String>
+        if workspace.theme.is_some() {
+            self.theme = workspace.theme;
+        }
+        // daily_color: bool 直接覆盖
+        self.daily_color = workspace.daily_color;
+        // daily_color_date: Option<String>
+        if workspace.daily_color_date.is_some() {
+            self.daily_color_date = workspace.daily_color_date;
+        }
         // 保留未知字段
         self.extra.extend(workspace.extra);
     }
@@ -251,6 +267,8 @@ impl Default for AppConfig {
             show_cache_warning: true,
             betas: BetasConfig::default(),
             theme: None,
+            daily_color: false,
+            daily_color_date: None,
             extra: serde_json::Map::new(),
         }
     }

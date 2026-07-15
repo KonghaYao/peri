@@ -6,6 +6,7 @@
 //! 用户提交则反向：InputArea → SUBMIT_TX → submit_consumer → acp_client.prompt()。
 //! 服务快照：service_snapshot task → SERVICE_SNAPSHOT / THREAD_LIST / CRON_JOBS atoms。
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -76,6 +77,56 @@ pub async fn run_kit_fullscreen(
                 theme_name,
                 e
             ),
+        }
+        // 每日色彩：启动时自动检查日期，若需更换则在同 mode 内 deterministic 选取
+        if cfg.config.daily_color {
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let needs_switch = cfg
+                .config
+                .daily_color_date
+                .as_deref()
+                .is_none_or(|d| d != today);
+            if needs_switch {
+                let current_mode = peri_theme::atoms::THEME_ATOM.state().read().mode;
+                // 收集同 mode 的所有可用主题
+                let same_mode_themes: Vec<String> = peri_theme::loader::list_available_themes()
+                    .into_iter()
+                    .filter(|name| {
+                        peri_theme::loader::load_theme(name)
+                            .map(|t| t.mode == current_mode)
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                if !same_mode_themes.is_empty() {
+                    let mut hasher = std::hash::DefaultHasher::new();
+                    format!("{}-{:?}", today, current_mode).hash(&mut hasher);
+                    let hash_val = hasher.finish();
+                    let idx = (hash_val as usize) % same_mode_themes.len();
+                    let selected = &same_mode_themes[idx];
+                    if selected != theme_name {
+                        tracing::info!(
+                            "daily color: switching from '{}' to '{}' for {}",
+                            theme_name,
+                            selected,
+                            today
+                        );
+                        match peri_theme::loader::load_theme(selected) {
+                            Ok(theme) => peri_theme::atoms::init_theme_atoms(theme),
+                            Err(e) => {
+                                tracing::warn!("daily color: failed to load '{}': {}", selected, e)
+                            }
+                        }
+                    }
+                }
+                // 更新日期（无论是否切换成功）
+                let mut w = app.services.peri_config.write();
+                w.config.daily_color_date = Some(today);
+                let snap = w.clone();
+                drop(w);
+                if let Err(e) = crate::config::save(&snap) {
+                    tracing::warn!("daily color: failed to save updated date: {}", e);
+                }
+            }
         }
     }
     // 2c. H1a: 把 SharedPermissionMode 句柄塞到全局 OnceLock，让 ConfigPanel
