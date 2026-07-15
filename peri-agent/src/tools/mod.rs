@@ -58,6 +58,12 @@ pub trait BaseTool: Send + Sync {
         Some(std::time::Duration::from_secs(120))
     }
 
+    /// 工具声明的别名列表。当 LLM 输出的工具名匹配这些别名（大小写无关）时，
+    /// 由 resolve_tool() 解析到本工具。典型用例：BashTool → aliases=["Shell"]。
+    fn aliases(&self) -> &[&str] {
+        &[]
+    }
+
     /// 工具输出的默认截断长度（字符数）。None 表示不截断。
     fn output_char_limit(&self) -> Option<usize> {
         None

@@ -119,6 +119,10 @@ impl BaseTool for ReadFileTool {
         })
     }
 
+    fn aliases(&self) -> &[&str] {
+        &["reading"]
+    }
+
     async fn invoke(
         &self,
         input: Value,

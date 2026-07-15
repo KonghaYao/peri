@@ -56,6 +56,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 | `messages/` | BaseMessage + ContentBlock（含 Reasoning） | 全链 |
 | `middleware/chain.rs` | 链构造 + collect_tools | builder |
 | `error_suggest/` | 工具错误建议注入 | tool_dispatch |
+| `tools/mod.rs` | BaseTool trait（含 `aliases()` 工具别名声明） | 全链 |
 
 ### peri-acp（服务层）
 | 文件 | 职责 | 消费方 |
@@ -268,6 +269,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 | 任务 | 入口文件 | 注意事项 |
 |------|---------|----------|
 | 新增/删除 Core 工具 | `tool_search/core_tools.rs:38` 的 `CORE_TOOLS` 常量 | 同步 6 处：prompt §05、HITL 审批列表、event/mapper、tool_display、core_tools_test、GitAttribution |
+| 新增工具别名 | override `BaseTool::aliases() → &["alias1", ...]` | 工具自声明别名，由 `resolve_tool()` 统一解析（大小写无关），无需修改集中式常量表。别让工具变成"隐性第二名字"——只设 LLM 可能输出的同义词（如 Bash→"Shell", Read→"reading", Agent→"task"） |
 | 新增中间件 | `peri-acp/src/agent/builder.rs:490` | 15+5 固定顺序，禁止重排 |
 | 改 LLM Provider 调用 | `peri-agent/src/llm/{openai,anthropic}/invoke.rs` | System hoist 规则：禁止 `BaseMessage::system()` 中途注入 |
 | 新增 TUI 面板 | `peri-tui/src/kit/panels/` → `app/panel_types.rs:7` 的 `PanelKind` | 用 `panel_shell!` 宏 + `MutexGroup` 分组 |

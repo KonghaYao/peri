@@ -30,9 +30,6 @@ use crate::tools::BaseTool;
 /// 连续失败检测阈值
 const CONSECUTIVE_FAILURE_THRESHOLD: u32 = 5;
 
-/// 工具名语义别名表：LLM 输出的名称 → 实际注册的工具名。
-const TOOL_ALIASES: &[(&str, &str)] = &[("task", "Agent"), ("shell", "Bash"), ("reading", "Read")];
-
 /// 工具参数名别名表：LLM 输出的参数名 → 实际参数名。
 const PARAM_ALIASES: &[(&str, &str)] = &[("path", "file_path")];
 
@@ -56,23 +53,26 @@ fn normalize_params(input: serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(obj)
 }
 
-/// 工具名解析：精确匹配 → 大小写无关匹配 → 语义别名。
+/// 工具名解析：精确匹配 → 大小写无关匹配 → 工具自声明别名。
 fn resolve_tool<'a>(
     name: &str,
     all_tools: &'a HashMap<String, Arc<dyn BaseTool>>,
 ) -> Option<&'a Arc<dyn BaseTool>> {
+    // 1. 精确匹配
     if let Some(tool) = all_tools.get(name) {
         return Some(tool);
     }
+    // 2. 大小写无关匹配（注册 key）
     for (key, tool) in all_tools {
         if key.eq_ignore_ascii_case(name) {
             return Some(tool);
         }
     }
-    for (alias, real_name) in TOOL_ALIASES {
-        if name.eq_ignore_ascii_case(alias) {
-            if let Some(tool) = all_tools.get(*real_name) {
-                tracing::debug!(alias = %name, resolved = %real_name, "工具名别名匹配");
+    // 3. 工具自声明别名（BaseTool::aliases()）
+    for tool in all_tools.values() {
+        for alias in tool.aliases() {
+            if name.eq_ignore_ascii_case(alias) {
+                tracing::debug!(alias = %name, resolved = %tool.name(), "工具自声明别名匹配");
                 return Some(tool);
             }
         }
@@ -626,19 +626,24 @@ mod tests {
     // ── resolve_tool ──
 
     fn make_tools() -> HashMap<String, Arc<dyn BaseTool>> {
-        // 用空 ToolStub 占位以验证名字解析
-        #[derive(Default)]
-        struct ToolStub;
+        /// 可指定 name 和 aliases 的测试用 ToolStub
+        struct NamedToolStub {
+            name: &'static str,
+            aliases: &'static [&'static str],
+        }
         #[async_trait::async_trait]
-        impl BaseTool for ToolStub {
+        impl BaseTool for NamedToolStub {
             fn name(&self) -> &str {
-                "stub"
+                self.name
             }
             fn description(&self) -> &str {
                 ""
             }
             fn parameters(&self) -> serde_json::Value {
                 serde_json::json!({})
+            }
+            fn aliases(&self) -> &[&str] {
+                self.aliases
             }
             async fn invoke(
                 &self,
@@ -649,9 +654,27 @@ mod tests {
             }
         }
         let mut map: HashMap<String, Arc<dyn BaseTool>> = HashMap::new();
-        map.insert("Read".to_string(), Arc::new(ToolStub));
-        map.insert("Bash".to_string(), Arc::new(ToolStub));
-        map.insert("Agent".to_string(), Arc::new(ToolStub));
+        map.insert(
+            "Read".to_string(),
+            Arc::new(NamedToolStub {
+                name: "Read",
+                aliases: &["reading"],
+            }),
+        );
+        map.insert(
+            "Bash".to_string(),
+            Arc::new(NamedToolStub {
+                name: "Bash",
+                aliases: &["Shell"],
+            }),
+        );
+        map.insert(
+            "Agent".to_string(),
+            Arc::new(NamedToolStub {
+                name: "Agent",
+                aliases: &["task"],
+            }),
+        );
         map
     }
 
@@ -670,17 +693,17 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_tool_semantic_alias_reading() {
+    fn test_resolve_tool_alias_reading() {
         let tools = make_tools();
-        // "reading" 别名应解析为 "Read"
+        // "reading" 通过 Read 工具的 aliases() 解析为 "Read"
         let tool = resolve_tool("reading", &tools);
         assert!(tool.is_some());
     }
 
     #[test]
-    fn test_resolve_tool_semantic_alias_task() {
+    fn test_resolve_tool_alias_task() {
         let tools = make_tools();
-        // "task" 别名应解析为 "Agent"
+        // "task" 通过 Agent 工具的 aliases() 解析为 "Agent"
         let tool = resolve_tool("task", &tools);
         assert!(tool.is_some());
     }
@@ -695,9 +718,57 @@ mod tests {
     #[test]
     fn test_resolve_tool_alias_case_insensitive() {
         let tools = make_tools();
-        // 别名大小写无关：SHELL → Bash
+        // 工具自声明别名大小写无关：SHELL → Bash (aliases 含 "Shell")
         let tool = resolve_tool("SHELL", &tools);
         assert!(tool.is_some());
+    }
+
+    /// 工具自声明别名（BaseTool::aliases()）应能被 resolve_tool 解析。
+    #[test]
+    fn test_resolve_tool_self_declared_alias() {
+        struct ToolWithAlias;
+        #[async_trait::async_trait]
+        impl BaseTool for ToolWithAlias {
+            fn name(&self) -> &str {
+                "MyTool"
+            }
+            fn description(&self) -> &str {
+                ""
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            fn aliases(&self) -> &[&str] {
+                &["Alternative"]
+            }
+            async fn invoke(
+                &self,
+                _input: serde_json::Value,
+                _ctx: crate::tools::ToolContext<'_>,
+            ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+                Ok(String::new())
+            }
+        }
+        let mut tools: HashMap<String, Arc<dyn BaseTool>> = HashMap::new();
+        let arc: Arc<dyn BaseTool> = Arc::new(ToolWithAlias);
+        tools.insert("MyTool".to_string(), arc);
+
+        // 精确匹配仍生效
+        let tool = resolve_tool("MyTool", &tools);
+        assert!(tool.is_some(), "精确匹配应成功");
+
+        // 自声明别名应能解析
+        let tool = resolve_tool("Alternative", &tools);
+        assert!(tool.is_some(), "工具自声明别名'Alternative'应能解析");
+        assert_eq!(tool.unwrap().name(), "MyTool");
+
+        // 自声明别名大小写无关
+        let tool = resolve_tool("ALTERNATIVE", &tools);
+        assert!(tool.is_some(), "自声明别名应大小写无关");
+
+        // 未声明的名称不应匹配
+        let tool = resolve_tool("Unknown", &tools);
+        assert!(tool.is_none(), "未声明名称不应匹配");
     }
 
     // ── dispatch_concurrent / settle_results / post_process_result / handle_consecutive_failures ──
