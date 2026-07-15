@@ -1,5 +1,4 @@
-//! 消息区渲染边界条件测试：极小宽度、空内容等边缘场景。
-
+// 消息区渲染边界条件测试：极小宽度、空内容等边缘场景。
 use crate::kit::message_area::render::vm_to_lines;
 use crate::kit::message_area::selection::build_wrap_map;
 use crate::kit::tui_render_unit::{
