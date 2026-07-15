@@ -35,8 +35,6 @@ use unicode_width::UnicodeWidthStr;
 
 /// 自定义文本输入的视口行数上限
 const TYPING_VIEWPORT_ROWS: usize = 3;
-/// 文本换行宽度（CJK 安全）
-const WRAP_WIDTH: usize = 80;
 
 #[component]
 pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -45,6 +43,9 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending: Option<AskUser> = pending_store.read().clone();
     let _ = pending_store;
     let _ = hooks.use_atom(&LANG_VERSION);
+    // 动态换行宽度：跟随终端实际宽度，避免宽终端下内容被压缩在 80 列内
+    let (term_w, _) = hooks.use_terminal_size();
+    let wrap_width = (term_w as usize).saturating_sub(2).max(40);
 
     let focused = hooks.use_state(|| 0usize);
     let answers = hooks.use_state(Vec::<Vec<usize>>::new);
@@ -176,7 +177,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 // 上/下箭头：视觉行移动；到顶时回到选项列表
                 KeyCode::Up if key.modifiers == KeyModifiers::NONE => {
-                    let moved = st.cursor_visual_up(WRAP_WIDTH);
+                    let moved = st.cursor_visual_up(wrap_width);
                     if !moved {
                         // 已在最顶：退出 typing，回到预设选项
                         *is_typing.write() = false;
@@ -190,7 +191,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     true
                 }
                 KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
-                    let _ = st.cursor_visual_down(WRAP_WIDTH);
+                    let _ = st.cursor_visual_down(wrap_width);
                     true
                 }
                 // Ctrl+Z → undo
@@ -488,7 +489,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 })
                 .collect();
             lines.push(Line::from(tab_spans));
-            lines.push(Line::from("─".repeat(60)).fg(semantic.border.default));
+            lines.push(Line::from("─".repeat(wrap_width)).fg(semantic.border.default));
 
             if let Some(q) = au.questions.get(focused_idx) {
                 lines.push(Line::from(""));
@@ -497,7 +498,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 } else {
                     format!("  {}", q.question)
                 };
-                for wrapped in wrap_text(&question_text, WRAP_WIDTH) {
+                for wrapped in wrap_text(&question_text, wrap_width) {
                     lines.push(Line::from(wrapped).fg(semantic.text.primary));
                 }
                 lines.push(Line::from(""));
@@ -539,12 +540,12 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     };
 
                     let label_line = format!("  {} {}", mark, opt.label);
-                    for wrapped in wrap_text(&label_line, WRAP_WIDTH) {
+                    for wrapped in wrap_text(&label_line, wrap_width) {
                         lines.push(Line::from(wrapped).style(style));
                     }
                     if !opt.description.is_empty() {
                         let desc_line = format!("    {}", opt.description);
-                        for wrapped in wrap_text(&desc_line, WRAP_WIDTH) {
+                        for wrapped in wrap_text(&desc_line, wrap_width) {
                             lines.push(Line::from(wrapped).fg(semantic.text.dim));
                         }
                     }
@@ -557,7 +558,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if typing {
                     // Typing 模式：使用 TextArea 渲染
                     let st_read = typing_state.read();
-                    let wrap = textarea_wrap(&st_read.text, st_read.cursor, WRAP_WIDTH);
+                    let wrap = textarea_wrap(&st_read.text, st_read.cursor, wrap_width);
                     let total_rows = wrap.total_visual_rows.max(1);
                     let viewport = total_rows.min(TYPING_VIEWPORT_ROWS);
 
@@ -577,7 +578,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         Some(&i18n::tr("ask-user-placeholder")),
                         placeholder_style,
                         default_style,
-                        WRAP_WIDTH,
+                        wrap_width,
                         viewport,
                         false,
                         true,
@@ -600,7 +601,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         .unwrap_or_default();
                     let mark = if q.multi_select { "☑" } else { "●" };
                     let custom_style = Style::new().fg(popup_tokens.action_primary).bold();
-                    for wrapped in wrap_text(&existing, WRAP_WIDTH.saturating_sub(4)) {
+                    for wrapped in wrap_text(&existing, wrap_width.saturating_sub(4)) {
                         lines.push(
                             Line::from(format!("    {} {}", mark, wrapped)).style(custom_style),
                         );

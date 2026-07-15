@@ -249,7 +249,7 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .join("  ");
             lines.push(Line::from(format!("  {}", tab_line)).fg(semantic.text.dim));
             // 分隔线
-            lines.push(Line::from("─".repeat(60)).fg(semantic.border.default));
+            lines.push(Line::from("─".repeat(80)).fg(semantic.border.default));
 
             // ── 当前问题的 content ──
             if let Some(q) = au.questions.get(focused_idx) {

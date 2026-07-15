@@ -921,6 +921,9 @@ panel-theme-preview = Preview
 panel-theme-tab-dark = Dark
 panel-theme-tab-light = Light
 panel-theme-tab-hint =   Tab::switch-category
+panel-theme-daily-on = ON
+panel-theme-daily-off = OFF
+panel-theme-download-label = download from github
 
 # ---- Workflow Panel kanban ----
 workflow-loading-runs = Loading workflow runs
@@ -979,6 +982,15 @@ popup-confirm-action-hint =   Enter: confirm  Esc: cancel
 popup-confirm-title =  Confirm 
 popup-confirm-reject-title = Reject Answer
 popup-confirm-reject-message = Reject answering? The Agent will receive a rejection signal and end the tool call.
+
+# ---- Download Progress Popup ----
+
+popup-download-title-active = Downloading themes ({ $done }/{ $total })
+popup-download-title-done = Download completed ({ $total } files, { $success } success, { $failed } failed)
+popup-download-footer-active = Downloading... please wait
+popup-download-footer-done = Esc::close
+popup-download-empty = (no files to download)
+popup-download-finished-notify = Theme download complete: { $success }/{ $total } success, { $failed } failed
 
 # ---- System Notes (app message stream) ----
 app-note-budget-warning = Context usage { NUMBER($pct, maximumFractionDigits: 0) }% ({ $used }/{ $limit })

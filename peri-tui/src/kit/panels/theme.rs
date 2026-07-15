@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
+    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
     ratatui::{
         layout::Constraint,
@@ -26,9 +26,13 @@ use ratatui_kit::{
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{LANG_VERSION, NOTIFICATION, Notification, PERI_CONFIG_HANDLE};
+use crate::kit::atoms::{
+    DOWNLOAD_PROGRESS, DownloadProgressPayload, FileDownloadStatus, LANG_VERSION, NOTIFICATION,
+    Notification, PERI_CONFIG_HANDLE,
+};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::markdown::{self, MarkdownSegment};
+use crate::kit::popup_overlay::open_popup;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::{PALETTE_ATOM, PERI_COLORS_ATOM, THEME_ATOM};
 use peri_theme::bridge::ThemeDefinitionExt;
@@ -112,7 +116,278 @@ fn persist_theme(name: &str) {
     }
 }
 
-/// 主题列表中每个条目一行，面板高度 24 - border 2 - header 3 - preview 9 - separator 1 - footer 1 = 8。
+/// 读取持久化配置中的 daily_color 开关状态。
+fn daily_color_enabled() -> bool {
+    PERI_CONFIG_HANDLE
+        .get()
+        .map(|h| h.read().config.daily_color)
+        .unwrap_or(false)
+}
+
+/// 切换每日色彩的开关状态，并持久化到 settings.json。
+fn toggle_daily_color() {
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return;
+    };
+    let mut cfg = handle.write();
+    cfg.config.daily_color = !cfg.config.daily_color;
+    // 开启时清除旧日期，使启动时立即生效
+    if cfg.config.daily_color {
+        cfg.config.daily_color_date = None;
+    }
+    let snap = cfg.clone();
+    drop(cfg);
+    match crate::config::save(&snap) {
+        Ok(()) => {
+            *NOTIFICATION.state().write() = Some(Notification {
+                message: i18n::tr("config-saved").to_string(),
+                until: Instant::now() + Duration::from_secs(1),
+            });
+        }
+        Err(e) => {
+            tracing::error!("failed to toggle daily_color: {}", e);
+            *NOTIFICATION.state().write() = Some(Notification {
+                message: i18n::tr_args(
+                    "config-save-failed",
+                    &[(
+                        "error".to_string(),
+                        FluentValue::from(e.to_string().as_str()),
+                    )],
+                ),
+                until: Instant::now() + Duration::from_secs(2),
+            });
+        }
+    }
+}
+
+/// 异步从 GitHub 下载仓库 .peri/theme/ 下的所有 JSON 主题文件到 ~/.peri/themes/。
+async fn download_themes_from_github() {
+    let user_theme_dir = match std::env::var("HOME") {
+        Ok(home) => std::path::PathBuf::from(&home).join(".peri").join("themes"),
+        Err(e) => {
+            tracing::error!("download themes: HOME not set: {}", e);
+            return;
+        }
+    };
+
+    // 确保目标目录存在
+    if let Err(e) = std::fs::create_dir_all(&user_theme_dir) {
+        tracing::error!(
+            "download themes: failed to create dir {:?}: {}",
+            user_theme_dir,
+            e
+        );
+        return;
+    }
+
+    // 1. 获取目录下的文件列表
+    let contents_url =
+        "https://api.github.com/repos/konghayao/perihelion/contents/.peri/theme?ref=main";
+    let client = match reqwest::Client::builder()
+        .user_agent("peri-tui/0.1")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("download themes: failed to create HTTP client: {}", e);
+            let dl = DOWNLOAD_PROGRESS.state();
+            *dl.write() = DownloadProgressPayload {
+                finished: true,
+                fail_count: 1,
+                ..Default::default()
+            };
+            return;
+        }
+    };
+
+    let resp = match client.get(contents_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("download themes: GitHub API request failed: {}", e);
+            let dl = DOWNLOAD_PROGRESS.state();
+            *dl.write() = DownloadProgressPayload {
+                finished: true,
+                fail_count: 1,
+                ..Default::default()
+            };
+            return;
+        }
+    };
+
+    let entries: Vec<serde_json::Value> = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                "download themes: failed to parse GitHub API response: {}",
+                e
+            );
+            let dl = DOWNLOAD_PROGRESS.state();
+            *dl.write() = DownloadProgressPayload {
+                finished: true,
+                fail_count: 1,
+                ..Default::default()
+            };
+            return;
+        }
+    };
+
+    // 2. 过滤出 JSON 文件
+    let json_files: Vec<&str> = entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("name")?.as_str()?;
+            if name.ends_with(".json") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // 初始化进度状态
+    let items: Vec<crate::kit::atoms::DownloadItem> = json_files
+        .iter()
+        .map(|name| crate::kit::atoms::DownloadItem {
+            filename: name.to_string(),
+            status: FileDownloadStatus::Pending,
+        })
+        .collect();
+    {
+        let dl = DOWNLOAD_PROGRESS.state();
+        *dl.write() = DownloadProgressPayload {
+            items: items.clone(),
+            finished: false,
+            success_count: 0,
+            fail_count: 0,
+        };
+    }
+
+    let mut success_count = 0usize;
+    let mut fail_count = 0usize;
+    let total = json_files.len();
+
+    // 3. 逐个下载
+    for (i, &filename) in json_files.iter().enumerate() {
+        // 更新当前文件状态为 Downloading
+        {
+            let dl = DOWNLOAD_PROGRESS.state();
+            let mut state = dl.write();
+            if let Some(item) = state.items.get_mut(i) {
+                item.status = FileDownloadStatus::Downloading;
+            }
+        }
+
+        let raw_url = format!(
+            "https://raw.githubusercontent.com/konghayao/perihelion/main/.peri/theme/{filename}"
+        );
+
+        match client.get(&raw_url).send().await {
+            Ok(resp) => {
+                let target_path = user_theme_dir.join(filename);
+                match resp.text().await {
+                    Ok(body) => match std::fs::write(&target_path, &body) {
+                        Ok(()) => {
+                            success_count += 1;
+                            let dl = DOWNLOAD_PROGRESS.state();
+                            let mut state = dl.write();
+                            if let Some(item) = state.items.get_mut(i) {
+                                item.status = FileDownloadStatus::Done;
+                            }
+                            state.success_count = success_count;
+                            tracing::info!(
+                                "download themes: downloaded {} ({}/{})",
+                                filename,
+                                i + 1,
+                                total
+                            );
+                        }
+                        Err(e) => {
+                            fail_count += 1;
+                            let dl = DOWNLOAD_PROGRESS.state();
+                            let mut state = dl.write();
+                            if let Some(item) = state.items.get_mut(i) {
+                                item.status =
+                                    FileDownloadStatus::Failed(format!("write error: {e}"));
+                            }
+                            state.fail_count = fail_count;
+                            tracing::warn!("download themes: failed to write {}: {}", filename, e);
+                        }
+                    },
+                    Err(e) => {
+                        fail_count += 1;
+                        let dl = DOWNLOAD_PROGRESS.state();
+                        let mut state = dl.write();
+                        if let Some(item) = state.items.get_mut(i) {
+                            item.status = FileDownloadStatus::Failed(format!("read error: {e}"));
+                        }
+                        state.fail_count = fail_count;
+                        tracing::warn!(
+                            "download themes: failed to read body for {}: {}",
+                            filename,
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                fail_count += 1;
+                let dl = DOWNLOAD_PROGRESS.state();
+                let mut state = dl.write();
+                if let Some(item) = state.items.get_mut(i) {
+                    item.status = FileDownloadStatus::Failed(format!("HTTP error: {e}"));
+                }
+                state.fail_count = fail_count;
+                tracing::warn!("download themes: failed to download {}: {}", filename, e);
+            }
+        }
+    }
+
+    // 4. 标记下载完成
+    let finish_msg = i18n::tr_args(
+        "popup-download-finished-notify",
+        &[
+            ("total".to_string(), FluentValue::from(total as i64)),
+            (
+                "success".to_string(),
+                FluentValue::from(success_count as i64),
+            ),
+            ("failed".to_string(), FluentValue::from(fail_count as i64)),
+        ],
+    )
+    .to_string();
+    {
+        let dl = DOWNLOAD_PROGRESS.state();
+        let mut state = dl.write();
+        state.finished = true;
+        state.success_count = success_count;
+        state.fail_count = fail_count;
+    }
+    *NOTIFICATION.state().write() = Some(Notification {
+        message: finish_msg,
+        until: Instant::now() + Duration::from_secs(3),
+    });
+}
+
+/// 同步触发下载主题（从事件处理器中调用，通过 tokio::spawn 进入异步）。
+/// 包含防重入检查：如果已有未完成的下载进度，则忽略本次触发。
+fn trigger_download_themes() {
+    // 防重入：检查是否有未完成的下载
+    {
+        let dl = DOWNLOAD_PROGRESS.state();
+        let current = dl.read();
+        if !current.finished && !current.items.is_empty() {
+            tracing::info!("download themes: download already in progress, skipping");
+            return;
+        }
+    }
+
+    // 打开下载进度弹窗
+    open_popup(crate::kit::atoms::PopupKind::Download);
+
+    tokio::spawn(async move {
+        download_themes_from_github().await;
+    });
+}
 const VISIBLE_ITEMS: usize = 8;
 
 #[component]
@@ -243,6 +518,17 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         switch_theme_atoms(&orig);
                         return EventResult::Ignored;
                     }
+                    _ if key.modifiers == KeyModifiers::CONTROL => match key.code {
+                        KeyCode::Char('t') | KeyCode::Char('T') => {
+                            toggle_daily_color();
+                            return EventResult::Consumed;
+                        }
+                        KeyCode::Char('d') | KeyCode::Char('D') => {
+                            trigger_download_themes();
+                            return EventResult::Consumed;
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
             }
@@ -265,9 +551,7 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // ── Tab 切换栏 ──
     let current_tab = *tab.read();
     let tab_reverse_fg = semantic.surface.default; // 反色前景 = 背景色
-    let tab_active_style = Style::new()
-        .fg(tab_reverse_fg)
-        .bg(semantic.accent);
+    let tab_active_style = Style::new().fg(tab_reverse_fg).bg(semantic.accent);
     let tab_inactive_style = Style::new().fg(semantic.text.muted);
     let (dark_style, light_style) = if current_tab == 0 {
         (tab_active_style, tab_inactive_style)
@@ -342,10 +626,7 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         lines.push(Line::from(i18n::tr("panel-theme-empty")).fg(semantic.text.muted));
         if other_count > 0 {
             lines.push(Line::from(vec![Span::styled(
-                format!(
-                    "  ({} themes in the other tab)",
-                    other_count
-                ),
+                format!("  ({} themes in the other tab)", other_count),
                 muted_style,
             )]));
         }
@@ -379,10 +660,16 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     // ── Footer ──
-    lines.push(Line::from(vec![Span::styled(
-        "  \u{2191}/\u{2193}::navigate  Enter::apply+save  Esc::revert  Tab::switch",
-        muted_style,
-    )]));
+    let daily_status = if daily_color_enabled() {
+        i18n::tr("panel-theme-daily-on")
+    } else {
+        i18n::tr("panel-theme-daily-off")
+    };
+    let download_label = i18n::tr("panel-theme-download-label");
+    lines.push(Line::from(vec![
+        Span::styled(format!("  Ctrl+T::daily({})  ", daily_status), muted_style),
+        Span::styled(format!("Ctrl+D::{}", download_label), selected_style),
+    ]));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 

@@ -143,12 +143,17 @@ pub fn parse_markdown_cached(
     // [Table 缓存失效] Table 是动态块：追加行会改变同一 block 的内容（headers/rows），
     // 而其他块（Paragraph/CodeBlock/ListItem）闭合后不变。因此若已处理块中曾含 Table，
     // 必须全量重跑，否则旧 TableData（可能行数不足）会被复用。
+    //
+    // [表头翻转缓存失效] 流式期间 `| a | b |\n` 先被 pulldown-cmark 解析为 Paragraph，
+    // 分隔符到达后同一文本前缀翻转为 Table。此时缓存的 processed_block_count 与旧
+    // Paragraph block 绑定，但 block 类型已变——必须全量重跑，否则原始 pipe 格式永久残留。
     let can_reuse = cache.has_stable_prefix()
         && cache.stable_width == max_width as u16
         && cache.stable_palette == palette
         && sanitized.starts_with(&cache.stable_text)
         && cache.stable_state.processed_block_count <= parsed.blocks.len()
-        && !cache.stable_state.has_table_in_processed_blocks;
+        && !cache.stable_state.has_table_in_processed_blocks
+        && !cache.stable_state.has_potential_table_header;
 
     let mut state = if can_reuse {
         cache.stable_state.clone()
@@ -932,6 +937,47 @@ mod tests {
             2,
             "应有 2 行数据，actual={}",
             cached.rows.len()
+        );
+    }
+
+    /// [回归测试] 流式场景：表头先到达（无分隔符），分隔符+数据后到达。
+    ///
+    /// 当表头 `| a | b |\n` 先单独到达时，pulldown-cmark 将其识别为 Paragraph
+    /// （而非 Table，因为没有分隔符行）。增量缓存持久化此状态。
+    /// 后续分隔符+数据到达后，同一文本前缀的 block 类型从 [Paragraph] 变为 [Table]，
+    /// 但 cached processed_block_count=1 导致 Table block 被跳过。
+    /// 结果：表格永远以原始 pipe 格式显示。
+    #[test]
+    fn test_cached_table_header_streamed_before_separator() {
+        let mut cache = MarkdownRenderCache::default();
+
+        // Step 1: 表头单独到达（无分隔符），pulldown-cmark → Paragraph
+        let t1 = "| a | b |\n";
+        let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        // 验证：t1 被解析为 Text（Paragraph），不是 Table
+        let has_table_t1 = r1.iter().any(|s| matches!(s, MarkdownSegment::Table(_)));
+        assert!(
+            !has_table_t1,
+            "t1（仅表头）不应被解析为 Table，应为 Paragraph"
+        );
+
+        // Step 2: 分隔符 + 数据行到达，此时完整表格应被识别为 Table
+        let t2 = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+
+        // 断言：续跑后应解析出 Table segment
+        let has_table_r2 = r2.iter().any(|s| matches!(s, MarkdownSegment::Table(_)));
+        assert!(
+            has_table_r2,
+            "续跑后应解析出 Table segment，但仅得到原始文本"
+        );
+
+        // 断言：续跑输出应与全量一致
+        assert_eq!(
+            segments_to_text(&r2),
+            segments_to_text(&full2),
+            "表头先于分隔符到达的续跑输出应与全量一致"
         );
     }
 }

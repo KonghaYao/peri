@@ -20,10 +20,10 @@
 //! 全局 Esc 由 `event_handlers::register_root_handlers` 处理——优先级最高，
 //! 即使面板或 @mention 也开着，先关弹窗。
 
-use crate::kit::atoms::{self, PopupKind};
+use crate::kit::atoms::{self, DownloadProgressPayload, PopupKind};
 use crate::kit::popups::{
-    confirm_popup::ConfirmPopup, hitl_popup::HitlPopup, oauth_popup::OAuthPopup,
-    rewind_popup::RewindPopup,
+    confirm_popup::ConfirmPopup, download_progress::DownloadProgressPopup, hitl_popup::HitlPopup,
+    oauth_popup::OAuthPopup, rewind_popup::RewindPopup,
 };
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{prelude::*, ratatui::layout::Constraint};
@@ -43,6 +43,9 @@ pub fn PopupOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Some(PopupKind::Rewind) => render_popup(element!(RewindPopup()).into(), term_w, term_h),
         Some(PopupKind::OAuth) => render_popup(element!(OAuthPopup()).into(), term_w, term_h),
         Some(PopupKind::Confirm) => render_popup(element!(ConfirmPopup()).into(), term_w, term_h),
+        Some(PopupKind::Download) => {
+            render_popup(element!(DownloadProgressPopup()).into(), term_w, term_h)
+        }
         None => render_empty(),
     }
 }
@@ -102,6 +105,9 @@ pub fn close_popup() -> Option<PopupKind> {
             PopupKind::Rewind => *atoms::REWIND_PREVIEW.state().write() = None,
             PopupKind::OAuth => *atoms::OAUTH_INFO.state().write() = None,
             PopupKind::Confirm => *atoms::CONFIRM_PAYLOAD.state().write() = None,
+            PopupKind::Download => {
+                *atoms::DOWNLOAD_PROGRESS.state().write() = DownloadProgressPayload::default()
+            }
         }
     }
     prev

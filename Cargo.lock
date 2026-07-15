@@ -3452,6 +3452,7 @@ dependencies = [
  "ratatui",
  "ratatui-kit",
  "ratatui-kit-markdown",
+ "reqwest",
  "ring",
  "rmp-serde",
  "serde",

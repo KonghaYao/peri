@@ -5,3 +5,8 @@
 > 测试 AskUserQuestion
 
 请你测试一下 AskUserQuestion 工具， 三个题目， 每个题目 4 个选项， 第一题单选， 第二题多选
+
+
+> 测试 Goal
+
+ /goal 我们来测试 goal 工具， 你要数到 10 ，但是中间中断， 让 goal 唤醒你

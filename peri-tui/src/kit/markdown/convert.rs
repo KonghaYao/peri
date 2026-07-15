@@ -41,6 +41,11 @@ pub(crate) struct ConvertState {
     /// Table 是动态块：后续追加行（数据行）会改变同一个 block 的内容，
     /// 而其他块（Paragraph/CodeBlock/ListItem）在闭合后内容不变。
     pub has_table_in_processed_blocks: bool,
+    /// 已处理的 block 中是否包含「可能是表头行」的 Paragraph——用于缓存失效检查。
+    /// 流式场景下，`| a | b |\n` 先到达时 pulldown-cmark 解析为 Paragraph，
+    /// 分隔符到达后同一前缀翻转为 Table。此时缓存必须失效，否则原始 pipe 格式
+    /// 会永远停留在输出中。
+    pub has_potential_table_header: bool,
 }
 
 /// 将 ratatui-kit-markdown 的 ParsedBlock 列表转换为 MarkdownSegment 序列。
@@ -109,6 +114,16 @@ pub(crate) fn convert_to_segments_with_state(
                 state.current_text.push(heading_line(level, line, theme));
             }
             ParsedBlock::Paragraph(para_lines) => {
+                // 检测「可能是表头行」的 Paragraph：首行以 | 开头，
+                // 流式期间分隔符未到达时被误判为 Paragraph，后续 block 类型会翻转为 Table。
+                if !state.has_potential_table_header
+                    && para_lines
+                        .first()
+                        .and_then(|l| l.spans.first())
+                        .is_some_and(|s| s.content.starts_with('|'))
+                {
+                    state.has_potential_table_header = true;
+                }
                 for line in para_lines {
                     state.current_text.push(style_line(line, theme, base_style));
                 }

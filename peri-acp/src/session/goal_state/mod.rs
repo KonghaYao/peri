@@ -285,6 +285,10 @@ impl peri_agent::goal::GoalController for GoalState {
             .await
     }
 
+    async fn clear_goal(&self) -> Result<(), String> {
+        self.clear().await.map_err(|e| e.to_string())
+    }
+
     fn snapshot(&self) -> peri_agent::goal::GoalViewSnapshot {
         peri_agent::goal::GoalStateView::snapshot(self)
     }

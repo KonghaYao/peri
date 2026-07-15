@@ -67,6 +67,7 @@ thiserror.workspace = true
 futures-util = "0.3"
 fuzzy-matcher = "0.3"
 im = "15"
+reqwest.workspace = true
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator.workspace = true
