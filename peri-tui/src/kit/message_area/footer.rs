@@ -2,10 +2,10 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
+use crate::components::spinner::{SpinnerMode, SpinnerState};
 use crate::i18n;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
-use peri_widgets::spinner::{SpinnerMode, SpinnerState};
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
@@ -139,7 +139,8 @@ pub(super) fn build_footer_lines(
             token_count,
         ));
     } else if has_summary {
-        let elapsed = peri_widgets::spinner::animation::format_elapsed(*summary_elapsed_ms.read());
+        let elapsed =
+            crate::components::spinner::animation::format_elapsed(*summary_elapsed_ms.read());
         lines.push(Line::from(Span::styled(
             i18n::tr_args(
                 "msg-spinner-brewed",
@@ -221,7 +222,7 @@ mod tests {
     #[test]
     fn test_spinner_summary_after_loading_ends() {
         let elapsed_ms: u64 = 30_000;
-        let elapsed_str = peri_widgets::spinner::animation::format_elapsed(elapsed_ms);
+        let elapsed_str = crate::components::spinner::animation::format_elapsed(elapsed_ms);
         assert_eq!(elapsed_str, "30s");
 
         let summary = format!("  ✻  Brewed for {elapsed_str}");

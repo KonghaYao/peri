@@ -1,5 +1,5 @@
-use crate::textarea::{classify_char, prev_word_boundary, CharCategory};
-use crate::textarea::{display_width_before, render_multiline_with_cursor, TextAreaState};
+use super::{CharCategory, classify_char, prev_word_boundary};
+use super::{TextAreaState, display_width_before, render_multiline_with_cursor};
 use ratatui::style::{Color, Style};
 
 #[test]
@@ -303,8 +303,8 @@ fn test_word_boundary_punct_vs_alpha() {
 fn test_word_boundary_cjk_punct() {
     let s = "你好好。世界";
     let total = s.chars().count(); // 6
-                                   // 末尾 cursor=6: 跳过 世界(Other)→pos=4；'。'为全角 Punct 被当"词"跳过→3
-                                   // prev_word_boundary 在 step3 将 '。' 作为 Punct 词整体回退
+    // 末尾 cursor=6: 跳过 世界(Other)→pos=4；'。'为全角 Punct 被当"词"跳过→3
+    // prev_word_boundary 在 step3 将 '。' 作为 Punct 词整体回退
     assert_eq!(prev_word_boundary(s, total), 3);
 }
 

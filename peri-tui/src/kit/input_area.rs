@@ -11,7 +11,7 @@
 // clippy 触发 needless_update 警告。该警告来自宏展开而非用户代码，模块级抑制。
 #![allow(clippy::needless_update)]
 
-use peri_widgets::textarea::{TextAreaState, wrap_text};
+use crate::components::textarea::{TextAreaState, wrap_text};
 use unicode_width::UnicodeWidthChar;
 
 use ratatui_kit::{
@@ -594,7 +594,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let text_width = composer_area
         .map(|a| a.width.saturating_sub(PROMPT_AND_BORDER_WIDTH).max(1) as usize)
         .unwrap_or(80);
-    let wrap = peri_widgets::textarea::wrap_text(&text, cursor, text_width);
+    let wrap = crate::components::textarea::wrap_text(&text, cursor, text_width);
     let editor_rows = (wrap.total_visual_rows as u16).clamp(1, 10);
 
     // 多行渲染——按 \n 拆分，每行作为独立 Line，光标高亮放在对应行
@@ -889,7 +889,7 @@ fn reset_slash_popup() {
 
 fn replace_last_mention(state: &mut TextAreaState, replacement: &str) {
     if let Some(at_byte) = state.text.rfind('@') {
-        let before = peri_widgets::textarea::History::snapshot(state);
+        let before = crate::components::textarea::History::snapshot(state);
         let after_at_byte = at_byte + 1;
         let keep_until_byte = state.text[after_at_byte..]
             .char_indices()
@@ -1078,7 +1078,7 @@ fn render_multiline_with_cursor_for_themed(
         .add_modifier(Modifier::DIM);
     let placeholder_style = Style::default().fg(tokens.placeholder);
     let default_style = Style::default().bg(Color::Reset);
-    peri_widgets::textarea::render_multiline_with_cursor(
+    crate::components::textarea::render_multiline_with_cursor(
         text,
         cursor,
         cursor_style,

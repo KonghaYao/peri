@@ -1,4 +1,4 @@
-use crate::textarea::{render_multiline_with_cursor, wrap_text};
+use super::{render_multiline_with_cursor, wrap_text};
 use ratatui::style::{Color, Style};
 
 fn cursor_style() -> Style {

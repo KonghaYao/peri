@@ -1,4 +1,4 @@
-use crate::textarea::state::TextAreaState;
+use super::state::TextAreaState;
 
 /// 编辑快照（用于 undo/redo）
 #[derive(Debug, Clone)]

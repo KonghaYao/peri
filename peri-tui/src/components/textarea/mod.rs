@@ -5,11 +5,11 @@ pub mod widget;
 mod word;
 pub use history::{History, Snapshot};
 pub use render::{
-    display_width_before, render_multiline_with_cursor, wrap_text, VisualLine, WrapResult,
+    VisualLine, WrapResult, display_width_before, render_multiline_with_cursor, wrap_text,
 };
 pub use state::{TextAreaState, YankText};
 pub use widget::TextArea;
-pub use word::{classify_char, next_word_boundary, prev_word_boundary, CharCategory};
+pub use word::{CharCategory, classify_char, next_word_boundary, prev_word_boundary};
 #[cfg(test)]
 #[path = "render_test.rs"]
 mod render_tests;

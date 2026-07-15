@@ -1,5 +1,5 @@
-use crate::textarea::history;
-use crate::textarea::word;
+use super::history;
+use super::word;
 
 /// Yank 缓冲——记录最近删除的文本，支持 Ctrl+Y 粘贴。
 #[derive(Debug, Clone)]
@@ -268,7 +268,7 @@ impl TextAreaState {
             self.desired_col = None;
             return false;
         }
-        let wrap = crate::textarea::render::wrap_text(&self.text, self.cursor, max_width.max(1));
+        let wrap = super::render::wrap_text(&self.text, self.cursor, max_width.max(1));
         if wrap.cursor_visual_row == 0 {
             self.desired_col = None;
             return false;
@@ -283,7 +283,7 @@ impl TextAreaState {
     /// 下移一个视觉行（使用软换行折行信息），返回是否真的移动了。
     pub fn cursor_visual_down(&mut self, max_width: usize) -> bool {
         self.cancel_selection();
-        let wrap = crate::textarea::render::wrap_text(&self.text, self.cursor, max_width.max(1));
+        let wrap = super::render::wrap_text(&self.text, self.cursor, max_width.max(1));
         if wrap.cursor_visual_row >= wrap.total_visual_rows.saturating_sub(1) {
             self.desired_col = None;
             return false;
@@ -523,7 +523,7 @@ impl TextAreaState {
     /// 给定视觉行列表、目标视觉行索引、视觉列，返回对应的全局字符索引。
     /// 若目标行比 desired_col 短，光标放在目标行尾。
     fn visual_row_col_to_cursor(
-        visual_lines: &[crate::textarea::render::VisualLine],
+        visual_lines: &[super::render::VisualLine],
         target_row: usize,
         desired_col: usize,
     ) -> usize {

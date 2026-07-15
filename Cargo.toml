@@ -6,7 +6,6 @@ members = [
     "peri-middlewares",
     "peri-tui",
     "langfuse-client",
-    "peri-widgets",
     "peri-lsp",
     "peri-web-pty",
     "agm",
