@@ -143,6 +143,10 @@ impl BaseTool for BashTool {
         })
     }
 
+    fn aliases(&self) -> &[&str] {
+        &["Shell"]
+    }
+
     fn timeout(&self) -> Option<std::time::Duration> {
         None
     }

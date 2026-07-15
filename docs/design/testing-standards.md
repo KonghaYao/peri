@@ -1,7 +1,7 @@
 # Perihelion 测试规范
 
-> 最后更新：2026-07-12
-> 全工作区现状：~170 个测试文件，~1500 个测试函数，覆盖 12 个 crate。
+> 最后更新：2026-07-15
+> 全工作区现状：~200 个测试文件，~2500 个测试函数，覆盖 12 个 crate。
 
 ---
 
@@ -103,7 +103,7 @@ fn test_edit_file_single_replace() {
 
 ### 3.3 回归测试
 
-标注 `/// [回归测试]` 注释，包含**历史背景**（哪个 bug / 哪次修复）。参考 `peri-agent/src/agent/events_v2.rs:1128`：
+标注 `/// [回归测试]` 注释，包含**历史背景**（哪个 bug / 哪次修复）。参考 `peri-agent/src/agent/events_v2.rs:1168`：
 
 ```rust
 /// [回归测试] TurnCompleted 必须在 render_tx 通道中，与同迭代 Render 事件 FIFO。
@@ -184,13 +184,15 @@ fn make_ids() -> (TurnId, AgentId) {
     (TurnId::new(), AgentId::new())
 }
 
-// 中等 mock：手写 trait impl
-struct AlwaysSuggest { label: &'static str }
-impl ErrorSuggester for AlwaysSuggest {
+// 中等 mock：手写 trait impl（具体 suggester）
+struct MockBashCommandSuggester;
+impl ErrorSuggester for MockBashCommandSuggester {
     fn suggest(&self, _ctx: &ErrorContext) -> Option<Suggestion> {
-        Some(Suggestion { summary: format!("来自 {}", self.label), details: None })
+        Some(Suggestion { summary: "来自 MockBashCommandSuggester".into(), details: None })
     }
 }
+// 注：实际 suggester 共 7 个（BashCommand / GlobPattern / Path / Range / Subagent / Regex / JsonSchema），
+// 测试时按需 mock 具体类型即可。
 
 // 复杂 mock（如 LLM）：手写 trait impl + 返回固定/echo 数据
 struct EchoLLM;
@@ -238,12 +240,13 @@ impl ReactLLM for EchoLLM {
 ## 七、新增功能 Checklist
 
 - [ ] 新增数据结构（含 serde） → serde roundtrip + 不完全 JSON 反序列化测试
-- [ ] 新增 `ExecutorEvent`/`ObserveEvent` 变体 → `mapper_test.rs` 增加映射测试
+- [ ] 新增 `ExecutorEvent`/`ObserveEvent` 变体 → `mapper_test.rs` 增加映射测试 + `variant_coverage_test.rs` 扩展覆盖
+- [ ] 新增 v2 事件变体（`RenderEvent`/`StateEvent`/`ObserveEvent`） → `events_v2.rs` 内 36 个测试保持覆盖，`events_v2_mapper_test.rs` 同步（如 peri-acp/event 层有对应映射）
 - [ ] 新增 Core 工具 → `core_tools_test.rs` 同步
 - [ ] 新增中间件 → `before_agent`/`after_agent`/`before_tool`/`after_tool` 关键路径各 ≥1 条
 - [ ] 文件系统工具操作 → 各错误路径（not found / ambiguous / permission / not unique）
 - [ ] 回归修复 → 带 `/// [回归测试]` 注释 + 历史背景
-- [ ] 新增 SessionUpdate 变体 → 同步 TUI 侧 `acp_notifier.rs` handler
+- [ ] 新增 `SessionUpdate` 变体 → 同步 TUI 侧 `acp_notifier.rs` handler
 
 ---
 
@@ -272,16 +275,16 @@ lefthook run pre-commit    # fmt + check + clippy + typos
 
 | Crate | 测试文件数 | 估算测试数 | 主要测试类型 |
 |-------|-----------|-----------|------------|
-| peri-middlewares | ~65 | ~550 | 工具、中间件、MCP、hooks、plugin、subagent |
-| peri-acp | ~17 | ~230 | 事件映射、session、命令、prompt |
-| peri-agent | ~30 | ~174 | 事件、线程、LLM 适配、中间件链 |
+| peri-middlewares | ~74 | ~550 | 工具、中间件、MCP、hooks、plugin、subagent |
+| peri-acp | ~25（含 8 个 langfuse/tracer/）+ 3 集成测试 | ~400+ | 事件映射、session、命令、prompt、langfuse tracer（compact/generation/middleware/sampling/stages/subagent/tool_batch/tracer） |
+| peri-agent | ~37 | ~174 | 事件（v2 EventBus 36 个测试）、线程、LLM 适配、中间件链 |
 | peri-widgets | ~22 | ~170 | widget 渲染、textarea 状态、diff |
 | peri-tui | ~12 | ~130 | 配置、同步、CLI、ACP server |
-| langfuse-client | ~5 | ~60 | 客户端、类型、batcher |
+| langfuse-client | ~6 | ~60 | 客户端、类型、batcher |
 | agm | ~6 | ~37 | 安装器、存储、过滤 |
 | peri-workflow | ~1+ 内嵌 | ~30 | runner、protocol、registry |
 | peri-lsp | ~6 | ~30 | 诊断、池、编解码 |
 | peri-web-pty | ~5 | ~25 | PTY session、WebSocket、HTTP |
 | peri-acp-types | ~1 | ~11 | DTO serde roundtrip |
-| peri-theme | ~2 | ~5 | 主题加载器 |
+| peri-theme | 0（src 内 _test.rs）+ 2（tests/ 集成测试） | ~5 | 主题加载器 |
 | side-projects/git-stats | 0 | 0 | — |

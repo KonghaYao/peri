@@ -360,6 +360,10 @@ impl BaseTool for SubAgentTool {
         })
     }
 
+    fn aliases(&self) -> &[&str] {
+        &["task"]
+    }
+
     fn timeout(&self) -> Option<std::time::Duration> {
         None
     }

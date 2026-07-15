@@ -1,10 +1,28 @@
 # Workflow 系统设计文档
 
-**版本**: 2.0
-**日期**: 2026-06-23
+**版本**: 2.1
+**日期**: 2026-07-15
 **关联分支**: `feature/workflow-ultracode`
-**状态**: 已实现 / 已与代码同步
+**状态**: 已实现 / 已与代码同步（v2.1）
 
+> **v2.1 变更**（2026-07-15）：基于代码审计修正约 10 处事实性差异。主要变更：
+> §3.1 请求参数移除 workflowName（WorkflowStartParams 中不存在该字段）、
+> §3.2 Node 进程启动改为 `Command::new("peri-workflow")` 依赖 PATH 查找、
+> §3.2 log 级别映射修正（无独立 debug 映射）、
+> §3.2 kill 分支描述修正为 5s 超时 RPC + child.kill + msg_loop.abort + state.json、
+> §3.4 kill() 方法修正为两层清理（kill_tx + runs.remove）、
+> §3.4 移除不存在的 status() 方法、
+> §3.5 RunProgress 结构修正（meta 类型为 Option<WorkflowMeta>，agents 为 IndexMap）、
+> §3.5 新增 completed_at 字段和 cleanup_completed() 5 分钟保留策略、
+> §3.5 新增 get_run_stats() 方法、
+> §3.7 CompactMiddleware 已移除（v2 统一接管）、
+> §3.8 新增快速失败检测（1s timeout）和 bg_registry 注册步骤、
+> §3.8 新增 WorkflowResult.stderr_tail 字段说明、
+> 新增 §3.4a WorkflowMiddlewareAdaptor 适配器模式、
+> §7 新增 bg_registry 延迟注入说明、
+> §8.1/§8.3 重写为 WorkflowSnapshot + WORKFLOW_SNAPSHOT atom + 2s 轮询、
+> §8.2 标注为未实现功能。
+>
 > **v2.0 变更**（2026-06-23）：基于实现代码的逐模块对比，修正 60+ 处差异。主要变更：
 > §3.1 协议字段补全、§3.2 消息循环实际模型、§3.4 Registry 职责纠错、§3.5 AgentStatus 5 变体、
 > §3.7 System prompt 非精简版、§3.8 Tool 参数补全 + deferred 层级修正、§4.4 防重复机制完全重写、
@@ -43,7 +61,7 @@ Workflow 系统是 Peri 的多 Agent 编排子系统，允许用户通过 JavaSc
 ┌──────────────────────────────────────────────────────────────────────┐
 │  peri-tui (ratatui 终端界面)                                          │
 │  ├─ WorkflowPanel        三级树实时展示 (run/phase/agent)              │
-│  ├─ WorkflowTracker      事件累积器 (HashMap<run_id, Snapshot>)        │
+│  ├─ WorkflowSnapshot     WORKFLOW_SNAPSHOT atom (2s ACP 轮询)            │
 │  ├─ /workflow 命令       自动发现 .claude/workflows/*.js               │
 │  └─ BackgroundTaskCompleted 通知条渲染                                  │
 ├──────────────────────────────────────────────────────────────────────┤
@@ -52,7 +70,7 @@ Workflow 系统是 Peri 的多 Agent 编排子系统，允许用户通过 JavaSc
 │  │  SessionState ─── 持有 session 级共享状态                           │
 │  │  ├─ WorkflowMiddleware      聚合容器（持有 Runner/Registry/          │
 │  │  │                          Progress/Journal 等所有 workflow 状态）  │
-│  │  ├─ WorkflowRunner          子进程管理器（含 Node binary 查找）       │
+│  │  ├─ WorkflowRunner          子进程管理器（PATH 查找 peri-workflow）    │
 │  │  ├─ WorkflowTaskRegistry    并发控制 + 完成广播                      │
 │  │  ├─ WorkflowProgressStore   reducer 内存状态                        │
 │  │  └─ WorkflowJournalStore    磁盘持久化 (.claude/workflow-runs/)      │
@@ -92,7 +110,7 @@ Workflow 系统是 Peri 的多 Agent 编排子系统，允许用户通过 JavaSc
 
 | 方法 | 用途 | 关键参数 |
 |------|------|----------|
-| `workflow/start` | 启动脚本执行 | runId, script, args, maxConcurrency, resume, cwd, budgetTotal, workflowName |
+| `workflow/start` | 启动脚本执行 | runId, script, args, maxConcurrency, resume, cwd, budgetTotal |
 | `workflow/kill` | 终止执行 | runId |
 
 **请求消息**（Node → Rust）：
@@ -138,8 +156,8 @@ pub struct WorkflowRunner {
 
 1. 生成 `run_id` (UUID v7)
 2. `journal_store.init_run(run_id)` — 创建 `.claude/workflow-runs/{run_id}/script.js`
-3. `resolve_binary()` — 三段式查找 Node 执行文件（环境变量 → PATH → `~/.peri/peri-workflow`）
-4. `spawn_node_process()` — 启动 `node` 子进程，继承 cwd 和 PATH
+3. `Command::new("peri-workflow")` — 依赖 PATH 查找 peri-workflow 可执行文件
+4. 启动子进程，继承 cwd 和 PATH
 5. 创建 `RpcChannel`（绑定 child stdin/stdout，启动 `spawn_stdout_reader()` 线程）
 6. `send_request("workflow/start")`，**15 秒超时** — Node runner.js 开始执行
 7. **消息循环**（`tokio::spawn` 内 `while let Some(msg) = msg_rx.recv().await`，外层 `select!` 竞速 `kill_rx` 和消息循环 join_handle）：
@@ -147,12 +165,24 @@ pub struct WorkflowRunner {
    - `progress/event` → `progress_store.apply_event(event)`
    - `journal/append` → `journal_store.append(entry)`
    - `journal/truncate` → `journal_store.truncate(run_id)`
-   - `log` → 按 level 字段（error/warn/info/debug）映射到 tracing 级别
-   - `workflow/done` → **break** 退出循环 → 记录 `finished_at` 时间戳 → 写入 `state.json` → `done_tx.send()`
-   - `kill_tx` 信号 → `send_request("workflow/kill")` + `child.kill()`
-8. 清理：`child.kill().await`、移除 `active_channels`、`cleanup_old_runs()`
+   - `log` → 按 level 字段映射：`error`/`warn` → `warn!`，`info` → `info!`，其他 → `debug!`
+   - `workflow/done` → **break** 退出循环 → 收集 stderr_tail（最后 20 行）→ 写入 `state.json`（含 finished_at 时间戳）→ `done_tx.send(WorkflowResult)`（含 stderr_tail）
+   - `kill_rx` 信号 → 5s 超时发送 `workflow/kill` RPC → `child.kill()` → `msg_loop.abort()`（防止覆写 state.json）→ 写入 `killed` state.json → `done_tx.send(WorkflowResult)`
+8. 清理：`child.kill().await`（防止僵尸进程）、移除 `active_channels`、`cleanup_old_runs()`、`progress_store.cleanup_completed()`
 
 **Agent 执行 spawn**：每个 `agent/run` 请求触发 `tokio::spawn`，通过 `AgentExecutor` trait 回调到 `peri-acp` 的 `WorkflowAgentExecutor`。RpcChannel 通过 `pending_agents` 追踪所有活跃 agent（用于单 agent kill 查找）。
+
+**WorkflowResult 结构体**（`runner.rs`）：
+```rust
+pub struct WorkflowResult {
+    pub run_id: String,
+    pub status: String,
+    pub return_value: Option<Value>,
+    pub error: Option<String>,
+    pub stderr_tail: Option<String>,  // Node 进程 stderr 最后 20 行，用于诊断快速失败
+}
+```
+`stderr_tail` 在消息循环正常退出和 kill 路径中均有收集（stderr_lines 缓冲区 + `.rev().take(20)`），仅在 status 为 `"failed"` 或 `"killed"` 时可能有值。用于 `tool.rs` 的快速失败检测中向 LLM 报告脚本加载/沙箱错误。
 
 ### 3.3 RpcChannel — 双向 RPC 通道
 
@@ -215,14 +245,32 @@ pub enum RegistryError { ConcurrentLimit, NotFound }
 |------|------|
 | `register(run)` | 并发限流检查（`active_count() < max_concurrent`）→ 插入 runs map |
 | `complete(run_id, result)` | 更新 run.status → 通过 broadcast channel 发送 WorkflowTaskResult |
-| `kill(run_id)` | 触发 kill_tx + `runs.remove()` + `child_handle.abort()`（三层清理） |
+| `kill(run_id)` | 触发 `kill_tx.send()` + `runs.remove()`（两层清理）。`child_handle.abort()` 已被有意移除，由 `runner.rs` 的 kill 分支统一处理清理 |
 | `list_runs()` | 返回运行中任务列表 |
-| `status(run_id)` | 返回给定 run 的状态 |
 | `active_count()` | 返回当前活跃 run 数 |
 
-**完成通知**：`tool.rs` 的 notification_task 在 done_rx 收到后，从 `ProgressStore::get_run()` 读取 `agent_count` 和 `tool_calls_count`，连同 `status`/`duration_ms`/`error` 构造 `WorkflowTaskResult`，调用 `registry.complete()` **仅做广播**（不读 ProgressStore，不移除 run——history 保留供调试）。`WorkflowTaskResult::to_notification()` 方法格式化 `<system-reminder>` 文本块。
+**完成通知**：`tool.rs` 的 notification_task 在 done_rx 收到后，从 `ProgressStore::get_run_stats()` 读取 `agent_count` 和 `tool_calls_count`，连同 `status`/`duration_ms`/`error` 构造 `WorkflowTaskResult`，调用 `registry.complete()` **仅做广播**（不读 ProgressStore，不移除 run——history 保留供调试）。`WorkflowTaskResult::to_notification()` 方法格式化 `<system-reminder>` 文本块。
 
 **广播消费**：broadcast receiver 在 `peri-acp/src/session/executor.rs` 被唯一 consumer（session 级 forwarder）消费——单一消费者确保无重复通知。
+
+### 3.4a WorkflowMiddlewareAdaptor — 中间件链适配器
+
+`peri-middlewares/src/workflow/mod.rs` — Per-turn 中间件适配器，将 session 级 `WorkflowMiddleware` 接入中间件链。
+
+```rust
+pub struct WorkflowMiddlewareAdaptor {
+    inner: Arc<WorkflowMiddleware>,
+}
+
+impl Middleware for WorkflowMiddlewareAdaptor {
+    fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
+        vec![Box::new(self.inner.create_tool())]
+    }
+    // before_agent 为空实现
+}
+```
+
+**适配器模式**：`builder.rs` 每轮创建此适配器（持有 `Arc<WorkflowMiddleware>`），通过 `collect_tools()` 让 executor 自动收集 `WorkflowTool` 到 `shared_tools`。`create_tool()` 内部根据 `bg_registry` 是否注入来决定是否附加 `BgTaskRegistry`。
 
 ### 3.5 ProgressStore — 内存进度状态
 
@@ -237,9 +285,18 @@ pub struct RunProgress {
     run_id: String,
     workflow_name: String,
     status: RunStatus,        // Running | Completed | Failed | Killed
-    meta: Option<Value>,      // 原始 JSON，未结构化（始终为 None，转换未实现）
+    meta: Option<WorkflowMeta>,  // 结构化类型 { name, description?, phases[] }，当前 run_started 处理时始终设为 None——转换未实现
     phases: Vec<PhaseProgress>,
-    agents: Vec<AgentProgress>,
+    #[serde(with = "agents_as_map")]
+    agents: IndexMap<u64, AgentProgress>,  // serde 序列化为 JSON 数组格式，O(1) 按 agent_id 查找
+    #[serde(skip)]
+    completed_at: Option<Instant>,         // 完成时间戳，仅用于 cleanup_completed() 时间判断，不序列化
+}
+
+pub struct WorkflowMeta {
+    name: String,
+    description: Option<String>,
+    phases: Vec<MetaPhase>,
 }
 
 pub struct AgentProgress {
@@ -257,7 +314,7 @@ pub struct AgentProgress {
 
 | 事件 | 处理 |
 |------|------|
-| `run_started` | 创建 RunProgress（meta 设为 None——原始 JSON 携带但未结构化） |
+| `run_started` | 创建 RunProgress（`meta` 始终设为 None——`WorkflowMeta` 转换未实现） |
 | `phase_started/done` | 创建/更新阶段 |
 | `agent_started` | 创建 AgentProgress（**Pending** 状态）→ 然后设为 **Running** |
 | `agent_progress` | 更新 token_count/tool_count |
@@ -265,7 +322,11 @@ pub struct AgentProgress {
 | `log` | 无需存储（tracing 转日志） |
 | `run_done` | 更新 RunStatus |
 
-**额外方法**（未在设计初期体现）：`get_all_runs_snapshot()` — ACP 序列化用；`cleanup_completed()` — 清理已完成 runs；`active_runs()` — 仅返回活跃 runs。
+**额外方法**（未在设计初期体现）：
+- `get_all_runs_snapshot()` — ACP 序列化用
+- `active_runs()` — 仅返回活跃 runs
+- `get_run_stats(run_id) -> Option<(usize, usize)>` — 返回 `(agent_count, tool_calls_count)`，避免 clone 整个 RunProgress。被 `tool.rs` 和 `workflow/mod.rs` 用于构造 `WorkflowTaskResult`
+- `cleanup_completed()` — 清理已完成 runs。使用 `completed_at` 时间戳，保留完成状态 runs **5 分钟**（`COMPLETED_RETENTION = 300s`）后清理，与 journal 的 `KEEP_MAX_RUNS=50` 磁盘策略独立
 
 **关键修复**：`agent_done` 处理中，`tool_count` 从 `AgentRunResult::Ok{ tool_count }` 提取到 `AgentProgress.tool_count`，采用 `.or(agent.tool_count)` 语义——若 result 中有值则更新，否则保留 AgentProgress 事件已设的值。
 
@@ -303,9 +364,9 @@ pub struct AgentProgress {
 
 | 方面 | Main Agent | Workflow Agent |
 |------|-----------|----------------|
-| 中间件数量 | 19 个 | ~10 个（不含条件注册的 CompactMiddleware 时为 10，含则 11） |
+| 中间件数量 | 20 个（15 基础 + 5 条件） | ~10 个（CompactMiddleware 已在 v2 中移除，由 `stages/compact.rs` 统一接管） |
 | Frozen data | 完整 | **透传**（从 session frozen） |
-| System prompt | 完整（13 段） | **完整 frozen system prompt**（`ctx.system_prompt.clone()`，非精简版） |
+| System prompt | 完整（14 段） | **完整 frozen system prompt**（`ctx.system_prompt.clone()`，非精简版） |
 | LLM Model | 用户选择 | 跟随 session provider（`ctx.provider.clone().into_model()`，无 Anthropic 回退） |
 | max_iterations | 500 | 200 |
 | HITL | 完整 | 共享 session 权限模式 |
@@ -320,7 +381,7 @@ pub struct AgentProgress {
 - ThreadStore（持久化）
 
 **条件注册**：
-- `CompactMiddleware`：仅当未设置 `DISABLE_AUTO_COMPACT` 时
+- `CompactMiddleware`：**已移除**。Workflow agent 的自动 compact 由 v2 `stages/compact.rs` 统一接管（`run_react_loop` 在每轮开头调 `compact_v2::run_compact`）
 - `SkillPreloadMiddleware`：允许预加载
 - `GitAttributionMiddleware`：跟随 git 贡献格式
 
@@ -343,9 +404,11 @@ fn parameters() -> JSON Schema { script, scriptPath, name, args, maxConcurrency,
 2. `extract_workflow_name(script)` — 启发式从脚本中提取 `name:` 字段（可选）
 3. 生成 `run_id` (UUID v7)
 4. `registry.register(run, ...)` — 并发限流检查
-5. `tokio::spawn(runner.run())` — 后台启动执行
-6. `tokio::spawn(notification_task(receiver))` — 等待 done_rx
-7. **立即返回**（多行格式）：
+5. `tokio::spawn(runner.run())` — 后台启动执行（watch channel: done_tx/done_rx + kill_tx/kill_rx）
+6. `bg_registry.register_workflow()` — 注册到统一后台任务系统（BackgroundTaskRegistry），可选步骤
+7. **快速失败检测**（1s timeout）：clone watch channel `fast_rx` + `tokio::select!` + `sleep(1s)`，在 spawn 后 1 秒内检测 workflow 是否快速失败（如 Node 二进制不存在、脚本语法错误）。快速失败时同步报错给 LLM（返回 `Err` 含 `stderr_tail`），并清理 `bg_registry`（`complete_workflow` 标记失败）和 `registry`（`complete()` 发送失败通知）
+8. `tokio::spawn(notification_task(receiver))` — 等待 done_rx，完成后调用 `registry.complete()` + `bg_registry.complete_workflow()`
+9. **立即返回**（多行格式）：
    ```
    Workflow 'xxx' started.
    run_id: {uuid}
@@ -376,7 +439,7 @@ workflow 完成
     ├─ Path A (TUI 通知) ─────────────────────────────────────┐
     │   notify_sink.push_event(BackgroundTaskCompleted)        │
     │   → MpscTransport → peri-tui 事件泵                      │
-    │   → 通知条渲染 + WorkflowTracker 更新                     │
+    │   → 通知条渲染 + WorkflowSnapshot 更新                     │
     │                                                          │
     └─ Path B (Agent 感知) ────────────────────────────────────┤
         agent_notify_tx.send(notification_text)                │
@@ -436,7 +499,7 @@ TUI 在 `handle_background_task_completed()` 检测 `agent_name.starts_with("wor
 
 | 层级 | 触发方式 | 实现 |
 |------|----------|------|
-| **整个 workflow** | `registry.kill(run_id)` / TUI `d` 键 | `kill_tx.send(())` → select! 分支 → `send_request("workflow/kill")` + `runs.remove()` + `child_handle.abort()` + `child.kill().await` |
+| **整个 workflow** | `registry.kill(run_id)` / TUI `d` 键 | `registry.kill()` → `kill_tx.send()` + `runs.remove()` → runner 的 kill 分支：5s 超时发送 `workflow/kill` RPC → `child.kill()` → `msg_loop.abort()`（防止覆写 state.json）→ 写入 `killed` state.json → `done_tx.send()` |
 | **单 agent** | `runner.kill_agent(run_id, agent_id)` / TUI `x` 键 | 从 `pending_agents` 查找 → `cancel_tx.send()` + `send_error(-32000)` → `deregister_agent()` |
 | **用户 cancel** | TUI cancel 信号 | 转发为 `workflow/kill` |
 
@@ -464,7 +527,7 @@ TUI 在 `handle_background_task_completed()` 检测 `agent_name.starts_with("wor
 
 | 组件 | 作用域 | 创建 | 销毁 |
 |------|--------|------|------|
-| `WorkflowMiddleware` | session | `session/new` | session end |
+| `WorkflowMiddleware` | session | `session/new` | session end（支持 `set_bg_registry()` 延迟注入统一后台任务注册表） |
 | `WorkflowProgressStore` | session | `session/new` | session end |
 | `WorkflowTaskRegistry` | session | `session/new` | session end |
 | `WorkflowJournalStore` | session | `session/new` | session end |
@@ -494,11 +557,9 @@ TUI 在 `handle_background_task_completed()` 检测 `agent_name.starts_with("wor
 
 **注**：`x`/`d`/`r` 三键目前标记为 "integration pending"（GAP-07/GAP-04），快捷键已注册但实际 kill/resume 逻辑尚未接入。
 
-**实时更新**：面板通过**双路径**获取数据：
-1. **Pull 路径**（主要）：1s 间隔 ACP 轮询（`poll_workflow_runs()`）→ `workflow/list_runs` RPC → 从 `progress_store` 拉取快照 → `deserialize_snapshot()` 更新面板
-2. **Push 路径**（辅助）：`AgentEvent::WorkflowProgress` → `tracker.apply()` 用于在面板打开时初始化初始数据。实时更新主要依赖 Pull 轮询（事件管线 PULL 架构的结果）
+**实时更新**：面板完全依赖 **Pull 路径**——2s 间隔 ACP 轮询（`spawn_workflow_poll()` → `workflow/list_runs` RPC → `WORKFLOW_SNAPSHOT` atom 更新）。无 Push 路径。
 
-### 8.2 命名 Workflow 命令
+### 8.2 命名 Workflow 命令（未实现）
 
 扫描 `.claude/workflows/` 目录，自动发现 `{name}.js|mjs|ts` 文件，注册 `/{name}` slash command。流程：
 
@@ -508,27 +569,27 @@ TUI 在 `handle_background_task_completed()` 检测 `agent_name.starts_with("wor
 
 注：存在一个独立的 `/workflows` 面板命令（`WorkflowsCommand`，`command/panel/workflows.rs`），用于打开 WorkflowPanel。与命名 `/{name}` 命令是两条独立命令。
 
-### 8.3 WorkflowProgressTracker
+### 8.3 WorkflowSnapshot — TUI 快照数据
 
-事件累积器，位于 `peri-tui/src/app/workflow_tracker.rs`：
+位于 `peri-tui/src/kit/workflow_snapshot.rs`：
 
 ```rust
-pub struct WorkflowProgressTracker {
-    runs: HashMap<String, WorkflowRunSnapshot>,  // 字段名为 runs（非 snapshots）
+pub struct WorkflowSnapshot {
+    pub runs: Vec<TuiRunProgress>,
 }
 
-pub struct WorkflowRunSnapshot {
-    run_id: String,
-    workflow_name: String,
-    status: String,          // 简化：用 String 而非 RunStatus 枚举
-    phases: Vec<PhaseSnapshot>,     // PhaseSnapshot 用 String status
-    agents: Vec<AgentSnapshot>,     // AgentSnapshot 用 String status
-    // 注：不含 agent_count/tool_calls_count/duration_ms 字段
-    // 注：不含 result: Option<AgentRunResult> 字段
+pub struct TuiRunProgress {
+    pub run_id: String,
+    pub workflow_name: String,
+    pub status: String,          // "running" | "completed" | "failed" | "killed"
+    pub phases: Vec<TuiPhaseProgress>,
+    pub agents: Vec<TuiAgentProgress>,
 }
 ```
 
-通过 `apply(WorkflowProgressPayload)` 更新快照（**不接受** `BackgroundTaskCompleted`——完成通知由 `agent_events_bg.rs` 独立处理）。`snapshots()` 按活跃状态优先 + run_id 排序。`clear()` 方法清空所有数据。
+DTO 类型镜像 `peri_workflow::progress::RunProgress`（避免直接 crate 依赖）。`agents` 字段使用 JSON 数组格式（服务端 `agents_as_map` serde helper 将 `IndexMap` 转为 `Vec`）。
+
+**数据获取**：通过 `WORKFLOW_SNAPSHOT` atom 存储，由 `spawn_workflow_poll()` 后台任务以 **2s 间隔**轮询 `workflow/list_runs` RPC 更新。`CancellationToken` 控制生命周期（session 结束时取消）。无 session 时写入空 `WorkflowSnapshot`，使 WorkflowPanel 从 loading 状态过渡到空态。
 
 ---
 

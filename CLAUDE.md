@@ -7,8 +7,9 @@
 ### Crate 拓扑
 ```
 peri-tui（TUI 前端） → peri-acp（服务层） → peri-agent（ReAct 引擎）
-                                               peri-middlewares（19 个中间件）
+                                               peri-middlewares（20 个中间件）
 peri-widgets（组件库）  langfuse-client  peri-lsp  peri-web-pty  agm
+peri-acp-types（协议类型）  peri-workflow（Workflow CLI，独立构建）
 ```
 
 ### ReAct 循环
@@ -39,7 +40,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - 非 System 消息用 `add_message`，禁止 `prepend_message`
 
 ### 中间件链
-14 基础 + 5 条件（Hook/MCP/Workflow/LSP/Goal），链末尾 `with_system_prompt()` prepend。顺序不可重排。
+15 基础 + 5 条件（Hook/MCP/Workflow/LSP/Goal），链末尾 `with_system_prompt()` prepend。顺序不可重排。
 
 ### Tool Search
 三层：Core（12，始终可见）/ Meta（2，SearchExtraTools/ExecuteExtraTool）/ Deferred（Cron/MCP/LspTool 等）
@@ -55,11 +56,12 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 | `messages/` | BaseMessage + ContentBlock（含 Reasoning） | 全链 |
 | `middleware/chain.rs` | 链构造 + collect_tools | builder |
 | `error_suggest/` | 工具错误建议注入 | tool_dispatch |
+| `tools/mod.rs` | BaseTool trait（含 `aliases()` 工具别名声明） | 全链 |
 
 ### peri-acp（服务层）
 | 文件 | 职责 | 消费方 |
 |------|------|--------|
-| `agent/builder.rs:490` | 中间件链构造（14+5 固定顺序） | execute_prompt |
+| `agent/builder.rs:490` | 中间件链构造（15+5 固定顺序） | execute_prompt |
 | `agent/builder_v2.rs` | StageContext 构建 | builder |
 | `session/executor.rs` | `execute_prompt()` 统一入口 | TUI/Stdio |
 | `prompt/mod.rs` | `build_system_prompt()` + 动态边界 | session/new |
@@ -77,8 +79,8 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 | `kit/acp_notifier.rs` | ACP 通知 → AcpEventData → bridge_tx | entry |
 | `kit/message_area/` | 消息区渲染（视口裁剪+节流）；子模块 mod/render/selection/scroll/footer/props | 读 VIEW_MODELS |
 | `kit/input_area.rs` | 输入框（多行/history/@mention/slash） | 写 SUBMIT_TX |
-| `kit/panels/` | 15 面板（Model/Config/Cron/ThreadBrowser...） | app/panel_types |
-| `kit/popups/` | 4 弹窗（HITL/AskUser/Rewind/OAuth） | acp_events |
+| `kit/panels/` | 16 面板（Model/Config/Cron/ThreadBrowser/Theme...） | app/panel_types |
+| `kit/popups/` | 6 弹窗（HITL/AskUser/Rewind/OAuth/Confirm/Download） | acp_events |
 
 ### peri-middlewares（中间件集合）
 详见 `peri-middlewares/CLAUDE.md`（完整链执行顺序、MCP 配置、插件系统、SubAgent、LSP）。
@@ -267,7 +269,8 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 | 任务 | 入口文件 | 注意事项 |
 |------|---------|----------|
 | 新增/删除 Core 工具 | `tool_search/core_tools.rs:38` 的 `CORE_TOOLS` 常量 | 同步 6 处：prompt §05、HITL 审批列表、event/mapper、tool_display、core_tools_test、GitAttribution |
-| 新增中间件 | `peri-acp/src/agent/builder.rs:490` | 14+5 固定顺序，禁止重排 |
+| 新增工具别名 | override `BaseTool::aliases() → &["alias1", ...]` | 工具自声明别名，由 `resolve_tool()` 统一解析（大小写无关），无需修改集中式常量表。别让工具变成"隐性第二名字"——只设 LLM 可能输出的同义词（如 Bash→"Shell", Read→"reading", Agent→"task"） |
+| 新增中间件 | `peri-acp/src/agent/builder.rs:490` | 15+5 固定顺序，禁止重排 |
 | 改 LLM Provider 调用 | `peri-agent/src/llm/{openai,anthropic}/invoke.rs` | System hoist 规则：禁止 `BaseMessage::system()` 中途注入 |
 | 新增 TUI 面板 | `peri-tui/src/kit/panels/` → `app/panel_types.rs:7` 的 `PanelKind` | 用 `panel_shell!` 宏 + `MutexGroup` 分组 |
 | 改 Theme Panel | `peri-tui/src/kit/panels/theme.rs` | 主题按 `ThemeMode` 自动分为 Dark/Light 两 tab，`Tab` 切换分类，`↑/↓` 导航，`Enter` 应用+持久化，`Esc` 恢复原主题。选中 tab 用反色（accent 底色+surface 字色），禁止 `[ ]` 包裹。面板内禁止单字母快捷键（j/k/q 等），仅允许方向键 + Tab + Esc + Enter |
@@ -277,4 +280,4 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 | 改 MCP 配置 | `peri-middlewares/src/mcp/`（initialize/reconnect）+ `~/.peri/settings.json` | 三层合并：全局→插件→项目 `.mcp.json` |
 | 改 Plugin 系统 | `peri-middlewares/src/plugin/`（installer/marketplace/config） | 兼容 Claude Code 生态 |
 | 改 Skills | `peri-middlewares/src/skills/`（扫描/叶子语义）+ `skills/builtin/`（编译期嵌入） | 搜索顺序：用户→项目→插件→Builtin |
-| 改 Langfuse 监控 | `peri-acp/src/langfuse/tracer/`（7 子对象 + 主 struct） + `langfuse-client/`（数据结构） + `peri-acp/src/session/executor_helpers.rs::forward_langfuse_event`（路由） | trace_id = turn_id 契约；新增 ExecutorEvent 必须扩 mapper_test + variant_coverage_test；sampled=false 时 tracer silently no-op |
+| 改 Langfuse 监控 | `peri-acp/src/langfuse/tracer/`（9 子对象 + 主 struct：compact/event_builder/generation/middleware/sampling/stages/subagent/tool_batch/usage） + `langfuse-client/`（数据结构） + `peri-acp/src/session/executor_helpers.rs::forward_langfuse_event`（路由） | trace_id = turn_id 契约；新增 ExecutorEvent 必须扩 mapper_test + variant_coverage_test；sampled=false 时 tracer silently no-op |

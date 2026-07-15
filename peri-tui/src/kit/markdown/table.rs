@@ -485,6 +485,39 @@ pub fn table_data_to_lines(
 
     let cw = wa.iter().sum::<u16>() + 2 * wa.len() as u16 + (wa.len() as u16).saturating_sub(1);
     let tw = (cw + 2).min(max_width as u16).max(4);
+    // [Fix] 终端极窄时（max_width < 边框开销），列宽 + 边框超出 buffer 宽度，
+    // 导致 render_hline / render_row_line 写入越界 → ratatui Buffer panic。
+    // 此时按比例缩减列宽以适配 buffer。
+    let wa = if cw + 2 > tw {
+        let n = wa.len() as u16;
+        // 边框开销：左右 2 + cell padding*2*n + n-1 列间分隔 = 3*n + 1
+        let border_overhead: u16 = 3 * n + 1;
+        let content_space = tw.saturating_sub(border_overhead);
+        // 每列至少 1 宽 → n 列至少需要 n
+        if content_space < n {
+            return vec![Line::default()];
+        }
+        let total: u16 = wa.iter().sum();
+        if total == 0 {
+            return vec![Line::default()];
+        }
+        // 按比例分配，每列至少 1，sum 可能超过 content_space
+        let mut new_wa: Vec<u16> = wa
+            .iter()
+            .map(|&w| ((w as u32 * content_space as u32 / total as u32) as u16).max(1))
+            .collect();
+        // 二次归一化：如果 sum > content_space，等比例压缩
+        let actual: u16 = new_wa.iter().sum();
+        if actual > content_space {
+            new_wa = new_wa
+                .iter()
+                .map(|&w| ((w as u32 * content_space as u32 / actual as u32) as u16).max(1))
+                .collect();
+        }
+        new_wa
+    } else {
+        wa
+    };
     let th = (rows.iter().map(|r| r.height() as usize).sum::<usize>() + 2) as u16;
     let area = Rect::new(0, 0, tw, th);
     let mut buf = Buffer::empty(area);

@@ -1,6 +1,6 @@
 # peri-middlewares
 
-中间件实现 crate，依赖 `peri-agent` 和 `peri-lsp`。14 个基础中间件 + 5 个条件中间件（Hook/MCP/Workflow/LSP/Goal），按固定顺序组成链。
+中间件实现 crate，依赖 `peri-agent` 和 `peri-lsp`。15 个基础中间件 + 5 个条件中间件（Hook/MCP/Workflow/LSP/Goal），按固定顺序组成链。
 
 ## 开发命令
 
@@ -13,27 +13,28 @@
 ```
 1.  AgentsMdMiddleware       ← CLAUDE.md/AGENTS.md 注入
 2.  AgentDefineMiddleware    ← agent 定义，model/maxTurns 覆盖
-3.  SkillsMiddleware         ← Skills 摘要注入（含插件 plugin_roots）
-4.  SkillPreloadMiddleware   ← #skill-name 全文注入
-5.  AtMentionMiddleware      ← @path 解析，注入 Read 工具调用
-6.  FilesystemMiddleware     ← 6 个文件系统工具
-7.  GitAttributionMiddleware ← before_tool/after_tool 追踪 Write/Edit 贡献字符数
-8.  TerminalMiddleware       ← Bash
-9.  WebMiddleware            ← WebFetch/WebSearch
-10. TodoMiddleware           ← after_tool 解析 TodoWrite
-11. CronMiddleware           ← Cron 调度
-12. HookMiddleware           ← hooks 事件拦截（多组实例）
-13. HumanInTheLoopMiddleware ← before_tool 拦截
-14. SubAgentMiddleware       ← Agent 工具
-15. McpMiddleware            ← MCP 工具和资源（pool 成功时注册）
-16. WorkflowMiddleware       ← WorkflowTool（条件注册，deferred tool）
-17. ToolSearchMiddleware     ← SearchExtraTools/ExecuteExtraTool 代理
-18. LspMiddleware            ← LSP 工具 + after_tool 文件变更同步
-19. GoalMiddleware           ← after_agent 注入递增紧迫感 steering + 设 block_continue 自驱循环（链最后）
+3.  PluginMiddleware         ← 插件兼容性校验（before_agent），加载状态门控后续插件相关中间件
+4.  SkillsMiddleware         ← Skills 摘要注入（含插件 plugin_roots）
+5.  SkillPreloadMiddleware   ← #skill-name 全文注入
+6.  AtMentionMiddleware      ← @path 解析，注入 Read 工具调用
+7.  FilesystemMiddleware     ← 6 个文件系统工具
+8.  GitAttributionMiddleware ← before_tool/after_tool 追踪 Write/Edit 贡献字符数
+9.  TerminalMiddleware       ← Bash
+10. WebMiddleware            ← WebFetch/WebSearch
+11. TodoMiddleware           ← after_tool 解析 TodoWrite
+12. CronMiddleware           ← Cron 调度
+13. HookMiddleware           ← hooks 事件拦截（多组实例）
+14. HumanInTheLoopMiddleware ← before_tool 拦截
+15. SubAgentMiddleware       ← Agent 工具
+16. McpMiddleware            ← MCP 工具和资源（pool 成功时注册）
+17. WorkflowMiddleware       ← WorkflowTool（条件注册，deferred tool）
+18. ToolSearchMiddleware     ← SearchExtraTools/ExecuteExtraTool 代理
+19. LspMiddleware            ← LSP 工具 + after_tool 文件变更同步
+20. GoalMiddleware           ← after_agent 注入递增紧迫感 steering + 设 block_continue 自驱循环（链最后）
 [with_system_prompt()]       ← prepend
 ```
 
-插件通过 `plugin_skill_roots: Vec<SkillRoot>` → `SkillsMiddleware.with_plugin_roots()`、`plugin_hooks` → `HookMiddleware` 注入，无独立 PluginMiddleware。
+插件扩展点：`plugin_skill_roots: Vec<SkillRoot>` → `SkillsMiddleware.with_plugin_roots()`（skills）、`plugin_hooks` → `HookMiddleware`（hooks）、`plugin_loaded: Arc<AtomicBool>` → `PluginMiddleware`（门控）。
 
 ## MCP 中间件
 

@@ -736,6 +736,19 @@ fn render_done_step(
 // ── 事件处理 ──────────────────────────────────────────────────────────────────
 
 fn handle_wizard_event(event: Event, mut state: SetupWizardState) -> EventResult {
+    // 处理粘贴事件（仅 Form 编辑模式下且当前字段为文本输入时）
+    if let Event::Paste(paste_text) = &event {
+        if state.step == SetupStep::Form
+            && state.form_mode == FormMode::Edit
+            && state.form_focus.is_text_input()
+        {
+            handle_paste_to_text_input(&mut state, paste_text);
+            *SETUP_WIZARD.state().write() = state;
+            return EventResult::Consumed;
+        }
+        return EventResult::Ignored;
+    }
+
     let Event::Key(key) = event else {
         return EventResult::Ignored;
     };
@@ -1047,4 +1060,28 @@ fn handle_text_input(
         }
         _ => false,
     }
+}
+
+/// 将剪贴板内容插入当前文本输入字段的光标位置。
+/// 归一化换行符（\r\n → \n），截断至 10k 字符（CJK 安全），超出时记录警告。
+fn handle_paste_to_text_input(state: &mut SetupWizardState, paste_text: &str) {
+    const MAX_PASTE_CHARS: usize = 10_000;
+    let normalized = paste_text.replace("\r\n", "\n").replace('\r', "\n");
+    let truncated: String = normalized.chars().take(MAX_PASTE_CHARS).collect();
+    if normalized.chars().count() != truncated.chars().count() {
+        tracing::warn!(
+            "setup wizard: paste truncated from {} to {MAX_PASTE_CHARS} chars (CJK-safe)",
+            normalized.chars().count()
+        );
+    }
+
+    let mut val = get_raw_field_value(state);
+    let chars: Vec<char> = val.chars().collect();
+    let pos = state.edit_cursor_pos.min(chars.len());
+    let prefix: String = chars[..pos].iter().collect();
+    let suffix: String = chars[pos..].iter().collect();
+    let paste_len = truncated.chars().count();
+    val = format!("{}{}{}", prefix, truncated, suffix);
+    state.edit_cursor_pos = pos + paste_len;
+    state.set_active_field_value(val);
 }

@@ -6,29 +6,31 @@
 
 ## 1. InputArea 编辑交互
 
-- [ ] 正常中英文输入
-- [ ] Enter 提交消息
-- [ ] Shift+Enter / Alt+Enter 插入换行（多行编辑）
-- [ ] Delete 删除字符
-- [ ] Ctrl+W 删除光标前一个词
-- [ ] Ctrl+Backspace 删除前一个词（等价 Ctrl+W）
-- [ ] Ctrl+Delete / Alt+Delete 删除光标后一个词
-- [ ] Alt+←/→ 按词跳转光标
+- [x] 正常中英文输入
+- [x] Enter 提交消息
+- [x] Shift+Enter / Alt+Enter 插入换行（多行编辑）
+- [x] Delete 删除字符
+- [x] alt+Backspace 删除前一个词（等价 Ctrl+W）
+- [x] Ctrl+Delete / Alt+Delete 删除光标后一个词
+- [x] Alt+←/→ 按词跳转光标
 - [ ] Home / End 跳转到行首/行尾
-- [ ] 输入框多行时上下移动光标
-- [ ] 超长文本正常处理
-- [ ] IME 显示正常（macOS）
+- [x] 输入框多行时上下移动光标
+- [x] 超长文本自动换行
+- [x] IME 显示正常（macOS）
 - [ ] Ctrl+U：有文本时删到行首；无文本时消息区向上翻页
 - [ ] Ctrl+D：消息区向下翻页
-- [ ] Ctrl+C：有文本时清空；loading 中打断 Agent；空闲 +2s 内双击退出
-- [ ] Esc：关闭 @mention/slash popup；双击打开 Rewind 选择器
+- [x] meta+C：有文本时清空；
+  - [x] loading 中打断 Agent
+  - [x] 空闲 +2s 内双击退出
+- [x] Esc：关闭 @mention/slash popup
+  - [ ] 双击打开 Rewind 选择器
 - [ ] Ctrl+T 循环切换模型
 - [ ] Ctrl+Shift+T 循环切换 Provider
-- [ ] Shift+Tab 循环切换权限模式
+- [x] Shift+Tab 循环切换权限模式
 
 ## 2. Slash / Mention 补全
 
-- [ ] 输入 `/` 弹出 slash completion，显示可用命令和 skills
+- [x] 输入 `/` 弹出 slash completion，显示可用命令和 skills
 - [ ] 输入 `//` 不导致 CPU 飙高、卡死或持续重绘
 - [ ] 以下命令能打开对应 panel：
 

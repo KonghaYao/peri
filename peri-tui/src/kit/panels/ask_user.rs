@@ -6,9 +6,9 @@
 //! 面板逻辑复用 ask_user_popup 的 Tab 交互模型，但通过 panel_shell! 渲染。
 
 use crate::app::panel_types::PanelKind;
+use crate::components::textarea::{TextAreaState, wrap_text as textarea_wrap};
 use crate::i18n;
 use peri_acp_types::event_data::AskUser;
-use peri_widgets::textarea::{TextAreaState, wrap_text as textarea_wrap};
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
@@ -569,7 +569,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let placeholder_style = Style::default().fg(semantic.text.dim);
                     let default_style = Style::default().bg(Color::Reset);
 
-                    let typed_lines = peri_widgets::textarea::render_multiline_with_cursor(
+                    let typed_lines = crate::components::textarea::render_multiline_with_cursor(
                         &st_read.text,
                         st_read.cursor,
                         cursor_style,
