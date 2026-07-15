@@ -4,14 +4,9 @@ pub mod verb;
 use std::time::Instant;
 
 use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Widget, WidgetRef},
 };
-
-use crate::theme::Theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpinnerMode {
@@ -150,76 +145,5 @@ impl SpinnerState {
         }
 
         vec![Line::from(spans)]
-    }
-}
-
-pub struct SpinnerWidget<'a> {
-    state: &'a SpinnerState,
-    show_elapsed: bool,
-    show_tokens: bool,
-    token_count: usize,
-    primary_color: Color,
-    secondary_color: Color,
-}
-
-impl<'a> SpinnerWidget<'a> {
-    pub fn new(state: &'a SpinnerState) -> Self {
-        Self {
-            state,
-            show_elapsed: true,
-            show_tokens: true,
-            token_count: 0,
-            primary_color: Color::Rgb(215, 119, 87), // ACCENT #D77757
-            secondary_color: Color::Rgb(153, 153, 153), // MUTED #999999
-        }
-    }
-
-    pub fn show_elapsed(mut self, show: bool) -> Self {
-        self.show_elapsed = show;
-        self
-    }
-
-    pub fn show_tokens(mut self, show: bool) -> Self {
-        self.show_tokens = show;
-        self
-    }
-
-    /// 设置当前 token 计数（替代旧的 SpinnerState::set_token_count）。
-    /// Widget 在 render 时把这个值传给 render_to_lines。
-    pub fn token_count(mut self, count: usize) -> Self {
-        self.token_count = count;
-        self
-    }
-
-    pub fn theme_colors(mut self, primary: Color, secondary: Color) -> Self {
-        self.primary_color = primary;
-        self.secondary_color = secondary;
-        self
-    }
-
-    /// 从 `Theme` trait 派生 spinner 颜色，替代硬编码默认值。
-    pub fn with_theme(mut self, theme: &dyn Theme) -> Self {
-        self.primary_color = theme.accent();
-        self.secondary_color = theme.muted();
-        self
-    }
-}
-
-impl WidgetRef for SpinnerWidget<'_> {
-    fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        let lines = self.state.render_to_lines(
-            self.primary_color,
-            self.secondary_color,
-            self.show_elapsed,
-            self.show_tokens,
-            self.token_count,
-        );
-        Paragraph::new(lines.into_iter().next().unwrap_or_default()).render(area, buf);
-    }
-}
-
-impl Widget for SpinnerWidget<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        self.render_ref(area, buf);
     }
 }
