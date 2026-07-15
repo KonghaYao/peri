@@ -636,3 +636,8 @@ pub(super) fn with_message_spacing(mut lines: Vec<Line<'static>>) -> Vec<Line<'s
     spaced.extend(lines);
     spaced
 }
+
+#[cfg(test)]
+mod tests {
+    include!("render_test.rs");
+}
