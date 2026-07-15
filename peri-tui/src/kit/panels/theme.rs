@@ -265,9 +265,7 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // ── Tab 切换栏 ──
     let current_tab = *tab.read();
     let tab_reverse_fg = semantic.surface.default; // 反色前景 = 背景色
-    let tab_active_style = Style::new()
-        .fg(tab_reverse_fg)
-        .bg(semantic.accent);
+    let tab_active_style = Style::new().fg(tab_reverse_fg).bg(semantic.accent);
     let tab_inactive_style = Style::new().fg(semantic.text.muted);
     let (dark_style, light_style) = if current_tab == 0 {
         (tab_active_style, tab_inactive_style)
@@ -342,10 +340,7 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         lines.push(Line::from(i18n::tr("panel-theme-empty")).fg(semantic.text.muted));
         if other_count > 0 {
             lines.push(Line::from(vec![Span::styled(
-                format!(
-                    "  ({} themes in the other tab)",
-                    other_count
-                ),
+                format!("  ({} themes in the other tab)", other_count),
                 muted_style,
             )]));
         }
