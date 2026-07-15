@@ -1,15 +1,17 @@
 # peri-agent v2 会话消息存储架构设计
 
-> 全新设计，不考虑向后兼容 | 日期：2026-06-24 | 修订：v1.2
+> BaseMessage、ContentBlock 枚举、MessageTranscript 与 staging 事务写
+>
+> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v1.3
 
 ## 1. 设计原则
 
 1. **永远 id 寻址**：每条消息拥有唯一 `MessageId`（UUID v7，时间有序）。所有外部操作——rewind、compact、持久化恢复——一律按 id 定位消息。禁止使用 Vec 下标定位——下标可因消息标记漂移而引入隐性错误。
 2. **只追加优先**：正常 ReAct 循环中消息仅尾部追加，禁止 prepend 或中间插入。保证 Prompt Cache 前缀稳定，LLM 请求构造路径简单无分支。Compact 是唯一例外——读取后重建新 Transcript，非增量追加。
-3. **修改即新消息**：消息内容不可原地修改。需要变更时，正常路径产生新消息（新 id）。Compact 在重建 Transcript 时通过标记实现——Micro 标 `truncated`（LLM 请求时截断输出）、Full 标 `excluded`（LLM 请求时跳过）——标记不改变消息内容本身。
+3. **修改即新消息**：消息内容不可原地修改。需要变更时，正常路径产生新消息（新 id）。Compact 在重建 Transcript 时通过标记实现——Micro 标 `truncated`（LLM 请求时截断输出）、Full 标 `excluded`（LLM 请求时跳过）——标记不改变消息内容本身。（Smart Compact 尚未实现，见 §2.6）
 4. **Transcript 为权威源**：Transcript 是会话全部消息的唯一真相源。持久化是 Transcript 的镜像——落后时以 Transcript 为准重建。不持久化 MessageQueue——Queue 是临时收件箱。
 5. **持久化不阻塞循环**：消息追加到 Transcript 后异步触发持久化。持久化失败不阻塞 Agent 循环——仅记录错误，内存 Transcript 始终可用。
-6. **标记代替删除**：Compact 不删除、不修改消息内容。Micro 标 `truncated`（LLM 请求时截断输出），Full 和 Smart 标 `excluded`（LLM 请求时跳过该消息）。标记可撤销，消息本体不变。仅 rewind 允许真删除。
+6. **标记代替删除**：Compact 不删除、不修改消息内容。Micro 标 `truncated`（LLM 请求时截断输出），Full 标 `excluded`（LLM 请求时跳过该消息）。（Smart Compact 尚未实现，见 §2.6）标记可撤销，消息本体不变。仅 rewind 允许真删除。
 
 ---
 
@@ -31,7 +33,7 @@ graph TB
 
     subgraph COMPACT["Compact 例外操作"]
         MICRO["Micro<br/>标记 truncated"]
-        SMART["Smart<br/>筛选保留 + system-reminder"]
+        SMART["Smart（未实现）<br/>筛选保留 + system-reminder"]
         FULL["Full<br/>追加摘要·标记 excluded"]
     end
 
@@ -55,23 +57,58 @@ graph TB
 - **BaseMessage**：统一消息类型。`content` 为 `MessageContent`（纯文本、ContentBlock 列表、Provider 原生格式）。`content_blocks()` 懒解析，Provider 按需选择最优格式。
 - **ContentBlock**：七种变体——Text、Image、Document、ToolUse、ToolResult、Reasoning、Unknown。Transcript 存储完整 ContentBlock。
 - **只追加规则**：
-  - ✅ Reason 产出的 AI 消息、Act 产出的 ToolResult、SystemReminder → 尾部追加
+  - ✅ Reason 产出的 AI 消息、Act 产出的 ToolResult → 尾部追加
+  - ✅ Info 类型消息（含 SystemReminder）经 MessageQueue 中转后尾部追加
+  - ✅ `append_batch()` 批量追加——逐条触发独立 `PersistOp::Append`
   - ❌ 禁止 prepend 或中间插入——破坏 Prompt Cache 前缀
   - ❌ 禁止删除或修改——Compact 通过重建 Transcript 实现，标记不改变消息内容本身
+- **代码位置**：`BaseMessage` / `ContentBlock` / `MessageContent` 定义于 `peri-agent/src/messages/`；`MessageTranscript` 定义于 `peri-agent/src/session/transcript.rs`；`MessageQueue` 定义于 `peri-agent/src/session/queue.rs`。Transcript 和 Queue 属于 session 模块，messages 模块仅含消息数据类型定义。
 - **ancestor 边界**：Fork/Background Agent 从父 Agent 继承消息时，Transcript 维护 `ancestor_len` 边界。继承的祖先消息只读——Compact 仅操作边界之后的自有消息，祖先消息不可压缩、不可删除。
 - **Staging 两阶段写入**：Reason 阶段产出的 AI 消息（含 tool_calls）不直接追加到 Transcript——先 Staging。Act 阶段收集所有 ToolResult 后，AI 消息 + ToolResult 作为一组原子提交到 Transcript。Staging 期间的消息 LLM 请求不可见。提交后触发持久化。若 Act 阶段异常终止（Cancel/Error），staging 消息丢弃——Transcript 回到本轮开始前的状态，不留半个 AI 消息。
 
 ### 2.3 MessageQueue
 
-临时收件箱，独立于 Transcript，**不持久化**。Session 重建时 Queue 从空开始。
+临时收件箱，独立于 Transcript，**不持久化**。Session 重建时 Queue 从空开始。代码位置：`peri-agent/src/session/queue.rs`。
+
+#### MessageKind 三类消息
+
+消息按 Kind 分为三类，控制循环唤醒和消费行为：
+
+| Kind | 来源示例 | Receive 行为 | End 行为 | 唤醒新 turn |
+|------|---------|-------------|---------|------------|
+| `Prompt` | 用户输入、外部主动请求 | 消费（写入 Transcript） | 可唤醒 | ✅ |
+| `Defer` | SubAgent 完成、Cron 触发、延迟结果 | 跳过（保留在队列中） | 消费 + 唤醒 | ✅ |
+| `Info` | SystemReminder、Hook 注入 | 消费（写入 Transcript） | 不唤醒 | ❌ |
+
+#### MessageSource 九种来源
+
+每条 `QueuedMessage` 携带 `MessageSource` 标注来源，用于调试和事件追踪：`UserInput` / `SubAgentComplete` / `GoalSteering` / `CronTrigger` / `StopHookFeedback` / `ChannelMessage` / `SystemInjected` / `ToolFailureWarning` / `WorkflowComplete`。
+
+#### 双排空 API
+
+- **`drain_for_receive()`**：Receive 阶段调用，消费所有 Prompt + Info（写入 Transcript），Defer 保留在队列中等待 End 阶段。
+- **`drain_for_end()`**：End 阶段调用，检查队列是否有能唤醒循环的消息（Prompt 或 Defer）。若有，取出全部 Prompt + Defer 返回 `Some(messages)` 激活新 turn；若无（队列空或仅有 Info），返回 `None`，循环退出。Info 永远不会被 End 阶段单独消费——必须被 Prompt 带出。
 
 ### 2.4 持久化
 
-ThreadStore 负责 Transcript 的完整持久化。
+ThreadStore 负责 Transcript 的完整持久化。代码位置：`peri-agent/src/thread/store.rs`。
+
+#### ThreadStore trait 核心方法概览
+
+| 方法 | 职责 |
+|------|------|
+| `create_thread` / `delete_thread` | Thread 生命周期管理 |
+| `append_messages` / `append_message` | 增量追加消息（append_message 默认复用 append_messages） |
+| `load_messages` / `load_context` | 加载全部消息 / 含祖先链 + 缓存的完整上下文 |
+| `load_meta` / `update_meta` / `update_title` | 元数据读写 |
+| `list_threads` / `list_child_threads` / `list_session_threads` | Thread 列举与层级遍历 |
+| `update_thread_status` / `invalidate_context_cache` | 状态与缓存管理 |
+| `delete_messages` / `delete_messages_since` | 精确删除 / 按 id 后缀删除（rewind 用） |
+| `update_message_flags` | 更新 compact 标记（truncated / excluded），默认 no-op |
 
 - **触发时机**：消息追加到 Transcript 后**异步**触发持久化——Transcript 先更新，持久化随后跟进。不阻塞 Agent 循环。
 - **增量持久化**：仅持久化新消息（按 id 对比）。Transcript 中已持久化的消息跳过，只写增量。Compact 重建 Transcript 后，持久化层同步变更——标记变更 UPDATE、新增消息 INSERT。rewind 触发 DELETE。
-- **Compact 标记**：Micro 标记 `truncated`、Full 和 Smart 标记 `excluded`。标记持久化同步（UPDATE 标记字段，不修改 content）。Full 追加新 Human 消息（INSERT），Smart 追加 system-reminder（INSERT）。
+- **Compact 标记**：Micro 标记 `truncated`、Full 标记 `excluded`。标记持久化同步（UPDATE 标记字段，不修改 content）。Full 追加新 Human 消息（INSERT）。注意：Smart Compact 当前未实现（见 §2.6）。
 - **崩溃保护**：Transcript 始终是权威源。恢复时检测 Transcript 与持久化的差异——Transcript 有而持久化无的消息从 Transcript 补写，持久化有而 Transcript 无的消息视为脏数据丢弃。
 
 ### 2.5 Rewind
@@ -90,19 +127,19 @@ Compact 不修改现有 Transcript，而是读取后**重建新 Transcript**。�
 |-------------|---------|-----------|
 | Micro | 保留全部消息，部分标 `truncated: true` | UPDATE 标记字段 |
 | Full | 追加新摘要消息，旧消息标 `excluded: true` | INSERT 摘要 + UPDATE 旧消息标记 |
-| Smart | 保留 LLM 选中的消息，未选中标 `excluded: true`，追加 system-reminder | UPDATE 标记 + INSERT system-reminder |
+| Smart（未实现） | 枚举变体已定义，分支逻辑为 stub——计划：保留 LLM 选中的消息，未选中标 `excluded: true`，追加 system-reminder | UPDATE 标记 + INSERT system-reminder |
 
-- 三种模式均通过标记实现——Micro 标 `truncated`，Full 和 Smart 标 `excluded`。消息不删，标记可撤销。rewind 清标记恢复原状
-- Smart 追加 system-reminder 告知 LLM 被移除的内容概要
+- Micro 和 Full 两种已实现模式通过标记实现——Micro 标 `truncated`，Full 标 `excluded`。消息不删，标记可撤销。rewind 清标记恢复原状
+- Smart Compact 计划追加 system-reminder 告知 LLM 被移除的内容概要，但当前分支逻辑为空（见 `peri-agent/src/agent/compact_v2.rs:57`）
 - Full 追加新 Human 消息（新 id），摘要和旧消息并存于新 Transcript
 
 ### 2.7 与 v2 其他模块的关系
 
 | 模块 | 关系 |
 |------|------|
-| **Session** | Transcript 是 Session 核心实体之一。Session 创建时 Transcript 为空，销毁时丢弃 |
-| **LLM 适配器** | Reason 阶段从 Transcript 读取全量消息构造 LlmRequest |
+| **Session** | Transcript 是 Session 核心实体之一。Session 创建时 Transcript 为空，销毁时丢弃。Session 可选持有 AsyncOwners（`SessionInbox` + `CronOwner` + `ChannelOwner`），使 cron/channel 事件直接桥接到 inbox 唤醒 executor，绕过 TUI 轮询 |
+| **LLM 适配器** | Reason 阶段从 Transcript 读取全量消息构造 LlmRequest。Token 计数在 LLM adapter 层完成，不属于 MessageTranscript 职责 |
 | **ReAct 循环** | Receive 将 Queue 消息写入 Transcript。Act 将工具结果写入 Transcript |
 | **AgentGroup** | Fork Agent 创建时 Transcript 全量 Copy |
 | **Hook 系统** | Hook 不能直接写 Transcript——通过 MessageQueue 注入 |
-| **事件流** | Transcript 变更产生事件，外部据此刷新 UI |
+| **事件流 / TUI** | `visible_messages()` 过滤 excluded 标记返回可见消息（LLM 请求构造用）；`visible_snapshot()` 返回 `Arc<Vec<BaseMessage>>` 快照，用于 TUI 事件传递（如 TurnCompleted 事件）。Transcript 变更产生事件，外部据此刷新 UI |

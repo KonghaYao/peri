@@ -1,6 +1,6 @@
 # peri-agent v2 System Prompt 构建系统设计
 
-> 全新设计，不考虑向后兼容 | 日期：2026-06-24 | 修订：v1.0
+> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v1.1
 
 ## 1. 设计原则
 
@@ -18,7 +18,7 @@
 graph TB
     subgraph SESSION_NEW["session/new 一次性构建"]
         FEATURES["PromptFeatures<br/>运行时功能开关"]
-        SECTIONS["prompts/sections/<br/>13 个段落文件"]
+        SECTIONS["prompts/sections/<br/>14 个段落文件"]
         OVERRIDES["AgentOverrides<br/>SubAgent persona/tone"]
         ENV["PromptEnv<br/>cwd/date/platform"]
 
@@ -91,15 +91,20 @@ build_system_prompt(overrides, cwd, features, extra_agent_dirs, frozen_date, lan
 │
 └─ 7. 占位符替换
       └─ {{cwd}} → cwd, {{date}} → date, {{is_git_repo}} → Yes/No
-         {{platform}} → OS, {{os_version}} → macOS 26.5.1, {{available_agents}} → agent 列表
+         {{platform}} → OS, {{os_version}} → macOS 26.5.1
+         {{available_agents}} → agent 列表（来自 11_subagent.md，feature-gated 段落）
 
-frozen_system_prompt 构建完成后：
+frozen_system_prompt 构建完成。
 
-├─ 8. 追加中间件切面贡献
-│     └─ Agent 构建时，遍历链中所有切面的 prompt_contribution 声明
-│        拼接后追加到 frozen_system_prompt 尾部
+> **步骤 8 不属于 `build_system_prompt()` 内部流程**，而是 `build_agent()` 中的独立步骤，
+> 发生在 `build_system_prompt()` 返回之后：
+
+├─ 8. 追加中间件切面贡献（build_agent() 中执行）
+│     └─ 遍历链中所有切面的 prompt_contribution 声明
+│        拼接后合并：format!("{system_prompt}\n\n{contributions}")
 │        如：CLAUDE.md 摘要、Skills 摘要、Git Co-Authored-By 行等
 │        不同 Agent（主 Agent vs SubAgent）的切面集合不同，贡献也不同
+│        合并结果通过 BaseModelReactLLM::with_system() 传入 LLM
 ```
 
 ### 2.3 PromptFeatures
@@ -108,7 +113,7 @@ frozen_system_prompt 构建完成后：
 
 ```rust
 pub struct PromptFeatures {
-    pub hitl_enabled: bool,      // 权限模式非 Bypass 时启用
+    pub hitl_enabled: bool,      // YOLO_MODE="false" 时启用（非 YOLO 模式）
     pub subagent_enabled: bool,  // 始终 true
     pub cron_enabled: bool,      // 始终 true
     pub skills_enabled: bool,    // 始终 true
@@ -116,7 +121,7 @@ pub struct PromptFeatures {
 }
 ```
 
-- `detect()`：根据当前权限模式（PermissionMode）推断——非 Bypass 时 `hitl_enabled=true`
+- `detect()`：检查环境变量 `YOLO_MODE`，当 `YOLO_MODE="false"` 时 `hitl_enabled=true`（即非 YOLO 模式时启用 HITL）
 - `none()`：测试用，全部关闭
 - 关闭的段落完全不出现在 System Prompt 中，节省上下文
 
@@ -130,8 +135,8 @@ pub struct PromptFeatures {
 
 ## 3. 与 v2 其他模块的关系
 
-- **Session**：`session/new` 调用 `build_system_prompt()` 产出 `frozen_system_prompt`，后续轮次复用。详见主架构文档
-- **LLM 适配器**：`split_system_blocks()` 按 boundary 拆分为静态/动态块，Provider 各自处理。详见 LLM 适配器文档
+- **Session / FrozenContext**：`session/new` 调用 `build_system_prompt()` 产出 `frozen_system_prompt`，封装进 `FrozenContext`（`peri-agent/src/session/store.rs`）。FrozenContext 由 `FrozenContextBuilder` 构建，包含 5 个字段：`system_prompt`（完整提示词）、`claude_md`（项目级+用户级 CLAUDE.md 合并）、`skill_summary`（Skills 摘要）、`date`（会话日期）、`language`（语言偏好）。所有字段均为 `Arc<str>` 以避免跨 Agent/Turn 复制大字符串。后续轮次直接复用，禁止重新构建
+- **LLM 适配器**：`split_system_blocks()` 按 boundary 拆分为静态/动态块，Provider 各自处理。Anthropic 适配器（`invoke.rs`）中 `messages_to_anthropic()` 还会执行 System 消息分离——将含边界标记的 System 消息（来自 `build_system_prompt()`）排在最前面作为可缓存前缀，不含边界标记的 middleware 注入内容排在边界之后。这确保 middleware contributions 变化不会破坏 Anthropic prompt cache 前缀。详见 LLM 适配器文档
 - **中间件系统**：切面通过 `prompt_contribution` 声明贡献 System Prompt 片段。Executor 在 Agent 构建时收集并追加到 `frozen_system_prompt` 尾部。详见中间件设计文档
 - **SubAgent**：复用 main agent 的 frozen 数据，仅 AgentOverrides 不同，禁止重新读盘
 - **Compact**：不触碰 System Prompt。摘要以 Human 消息注入，不被 hoist

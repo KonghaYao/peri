@@ -12,23 +12,26 @@ graph TB
         direction LR
         INPUT["InputArea<br/>用户输入 / @mention / 历史"]
         MSG["MessageArea<br/>消息流渲染 + 滚动"]
-        POPUP["Overlay 层<br/>HITL / OAuth / Rewind"]
+        POPUP["Overlay 层<br/>HITL / AskUser / Rewind<br/>OAuth / Confirm / Download"]
         PANEL["Panel 层<br/>Tasks / Cron / Agent / Model"]
     end
 
-    subgraph KIT["🧩 kit 五链路（tokio task）"]
+    subgraph KIT["🧩 kit 九链路（tokio task）"]
         direction LR
         NOTIFIER["acp_notifier<br/>AcpNotification → AcpEventData"]
         BRIDGE["acp_bridge<br/>BridgeState → Atom 写入"]
-        RENDER["render_bridge<br/>预计算 Line + wrap_map"]
         SUBMIT["submit_consumer<br/>SUBMIT_TX → acp_client.prompt()"]
         SNAPSHOT["service_snapshot<br/>CPU/MEM/MCP 快照 2s 轮询"]
+        CANCEL["cancel_consumer<br/>CANCEL_TX → 清理"]
+        REWIND["rewind_consumer<br/>REWIND_ACTION_TX → /rewind"]
+        ASK_USER_C["ask_user_consumer<br/>ASK_USER_RESPONSE_TX"]
+        HITL_C["hitl_response_consumer<br/>HITL_RESPONSE_TX"]
+        THREAD_LOAD["thread_load_consumer<br/>THREAD_LOAD_TX"]
     end
 
     subgraph ATOM["📦 全局状态（atoms）"]
         direction LR
         VM["VIEW_MODELS<br/>items: im::Vector + generation<br/>消息流单一数据源"]
-        RC["RENDER_CACHE<br/>预计算 Vec〈Line〉<br/>+ wrap_map 视口映射"]
         AC["ACP_STATE<br/>variant / is_loading<br/>模式 / 状态"]
     end
 
@@ -43,7 +46,7 @@ graph TB
     subgraph AGENT["🤖 Agent 层 — peri-agent + peri-middlewares"]
         direction LR
         REACT["ReAct Loop<br/>Compact → Receive →<br/>Reason → Act → End"]
-        MW["19 Middleware<br/>FS / Terminal / SubAgent<br/>Todo / MCP / HITL / Skills"]
+        MW["20 Middleware (15+5)<br/>FS / Terminal / SubAgent<br/>Todo / MCP / HITL / Skills"]
         TOOLS["Tool System<br/>Core(12) / Meta(2)<br/>Deferred / Search"]
     end
 
@@ -65,9 +68,7 @@ graph TB
     TRANSPORT -->|"AcpNotification"| NOTIFIER
     NOTIFIER -->|"AcpEventData"| BRIDGE
     BRIDGE -->|"dispatch_and_notify"| VM
-    VM -->|"read"| RENDER
-    RENDER -->|"预计算 Line"| RC
-    RC -->|"read"| MSG
+    VM -->|"直接读取"| MSG
 
     %% 交互路由
     POPUP -->|"HITL 审批"| TRANSPORT
@@ -83,23 +84,27 @@ graph TB
 | **TUI** | `peri-tui` | 终端 UI 渲染、用户输入、消息展示 | 无 |
 | **ACP** | `peri-acp` | 会话管理、事件路由、prompt 执行、ViewModel 映射 | `AcpNotification` / `AcpEventData` |
 | **Agent** | `peri-agent` | ReAct 循环、LLM 适配、工具系统、中间件 trait | `ExecutorEvent` |
-| **Middleware** | `peri-middlewares` | 19 个中间件实现（FS/终端/SubAgent/Todo/MCP…） | `BaseTool` / `Middleware` trait |
+| **Middleware** | `peri-middlewares` | 20 个中间件实现（15 基础 + 5 条件：Hook/MCP/Workflow/LSP/Goal） | `BaseTool` / `Middleware` trait |
 
 数据依赖方向：**TUI → ACP → Agent/Middleware**。反向通过 EventBus 事件通道回流。
 
 ---
 
-## 2. kit 五链路 — TUI 核心数据管道
+## 2. kit 九链路 — TUI 核心数据管道
 
-TUI 通过 5 个独立 tokio task 组成完整数据管道，在 `run_kit_fullscreen` 中一并 spawn：
+TUI 通过 9 个独立 tokio task 组成完整数据管道，在 `run_kit_fullscreen` 中一并 spawn：
 
 | # | 链路 | 输入 → 输出 | 职责 |
 |---|------|------------|------|
 | 1 | **acp_notifier** | `AcpNotification` → `AcpEventData` | ACP 协议消息 → kit 内部事件 |
-| 2 | **acp_bridge** | `AcpEventData` → Atom 写入 | 事件分发 + BridgeState 状态维护 |
-| 3 | **render_bridge** | ACP 事件 + resize → `RENDER_CACHE` | 消息预渲染（markdown → Line + wrap_map） |
-| 4 | **submit_consumer** | `SUBMIT_TX` → `acp_client.prompt()` | 用户输入 → ACP prompt 请求 |
-| 5 | **service_snapshot** | 2s tick → 快照 atoms | CPU/MEM/MCP/Cron 状态轮询 |
+| 2 | **acp_bridge** | `AcpEventData` → Atom 写入 | 事件分发 + BridgeState 状态维护 + 1s tick（spinner + running Bash 计时） |
+| 3 | **submit_consumer** | `SUBMIT_TX` → `acp_client.prompt()` | 用户输入 → ACP prompt 请求 |
+| 4 | **service_snapshot** | 2s tick → 快照 atoms | CPU/MEM/MCP/Cron 状态轮询 |
+| 5 | **cancel_consumer** | `CANCEL_TX` → 清理 + `BRIDGE_RESET_COUNTER` 递增 | Ctrl+C 中断时重置桥接状态 |
+| 6 | **rewind_consumer** | `REWIND_ACTION_TX` → `/rewind` RPC | Rewind 确认回传 ACP 服务端 |
+| 7 | **ask_user_consumer** | `ASK_USER_RESPONSE_TX` → AskUser 回答 RPC | AskUser 表单提交回传 |
+| 8 | **hitl_response_consumer** | `HITL_RESPONSE_TX` → HITL 审批 RPC | HITL approve/reject 回传 |
+| 9 | **thread_load_consumer** | `THREAD_LOAD_TX` → `acp_client.load_session()` | ThreadBrowser 切线程加载 |
 
 ```mermaid
 sequenceDiagram
@@ -107,8 +112,7 @@ sequenceDiagram
     participant SUBMIT as submit_consumer
     participant NOTIFIER as acp_notifier
     participant BRIDGE as acp_bridge
-    participant RENDER as render_bridge
-    participant MSG as MessageArea
+    participant MSG as message_area
 
     Note over INPUT,MSG: 用户提交 → 流式响应完整链路
 
@@ -122,13 +126,10 @@ sequenceDiagram
     BRIDGE->>BRIDGE: ⑥ dispatch_and_notify
     BRIDGE->>BRIDGE: ⑦ VIEW_MODELS atom 写入
 
-    BRIDGE-->>RENDER: ⑧ render_bridge_tx.send(event)
-    RENDER->>RENDER: ⑨ 读取 VIEW_MODELS
-    RENDER->>RENDER: ⑩ render_v2_vm → Vec〈Line〉
-    RENDER->>RENDER: ⑪ RENDER_CACHE atom 写入
-
-    MSG->>MSG: ⑫ 读取 RENDER_CACHE
-    MSG->>MSG: ⑬ 视口裁剪 + ratatui Paragraph 渲染
+    Note over MSG: message_area 直接读取 VIEW_MODELS
+    MSG->>MSG: ⑧ vm_caches 增量检测（content_hash）
+    MSG->>MSG: ⑨ vm_to_lines_cached + build_wrap_map
+    MSG->>MSG: ⑩ 视口裁剪 + ratatui Paragraph 渲染
 ```
 
 ---
@@ -144,21 +145,24 @@ pub type Atom<T> = ratatui_kit::prelude::StoreState<T>;
 // 消息流单一数据源
 pub static VIEW_MODELS: Atom<ViewModelsSnapshot>;
 
-// 渲染预计算缓存
-pub static RENDER_CACHE: Atom<RenderCache>;
-
 // UI 状态快照
 pub static ACP_STATE: Atom<AcpStateSnapshot>;
+
+// 上下文使用率（供 StatusBar 显示）
+pub static CONTEXT_USAGE: Atom<Option<(f64, u64)>>;  // (budget_pct, total_tokens)
+
+// 瞬时通知（PluginActionResult / BgTaskCompleted 等，1.5-3s 自动消失）
+pub static NOTIFICATION: Atom<Option<Notification>>;
 ```
 
 ### 3.1 ViewModelsSnapshot — 消息流核心结构
 
 ```rust
-/// 消息流单一数据源。render_bridge 从此读取 → 预计算 → 写入 RENDER_CACHE。
+/// 消息流单一数据源。message_area 直接从此读取 → vm_caches 增量渲染。
 pub struct ViewModelsSnapshot {
     /// 全部消息的单一容器。使用 im::Vector —— O(1) clone，O(log n) push_back。
     pub items: im::Vector<TuiRenderUnit>,
-    /// 递增版本号。每次 push_view_models 写入 +1，render_bridge 据此检测变更。
+    /// 递增版本号。每次 push_view_models 写入 +1，message_area 据此检测变更。
     pub generation: u64,
 }
 ```
@@ -193,10 +197,14 @@ pub struct BridgeState {
     pub committed: im::Vector<TuiRenderUnit>,
     pub current_turn: CurrentTurn,
     pub phase: SessionPhase,       // Idle / PromptRunning / ReplayingHistory
-    /// 递增版本号，每次 push_view_models +1。render_bridge 据此检测变更。
+    /// 递增版本号，每次 push_view_models +1。
     pub generation: u64,
     pub popup_kind: Option<PopupKind>,
     pub active_session_id: String,
+    /// `/compact` 命令刚刚完成，TurnDone 时需触发 session/load 重放。
+    pub compact_just_completed: bool,
+    /// 本轮用户提交的文本——TurnInterrupted 零产出回滚时用于恢复输入框。
+    pub last_submitted_text: Option<String>,
 }
 ```
 
@@ -209,11 +217,14 @@ pub struct BridgeState {
 ### 4.1 事件层次
 
 ```
-Agent 层产出        ACP 层路由          TUI 层消费
-──────────        ──────────          ─────────
-ExecutorEvent  →  MappedEvent      →  AcpEventData
-                 session/update    →  AcpNotification
-                 peri/agent_event  →  AcpNotification
+Agent 层产出        ACP 层路由                          TUI 层消费
+──────────        ──────────                          ─────────
+ExecutorEvent  →  MappedEvent                        →  AcpEventData
+                 session/update                      →  AcpNotification
+                 peri/agent_event                      →  AcpNotification
+                 AcpNotification::RequestPermission    →  HitlPending（HITL 审批）
+                 AcpNotification::PredictionReady      →  AcpEventData::Prediction
+                 AcpNotification::Elicitation          →  AcpEventData::AskUser
 ```
 
 ### 4.2 session/update 流式事件 — 标准 ACP 通道
@@ -225,21 +236,69 @@ ExecutorEvent  →  MappedEvent      →  AcpEventData
 | `tool_call` | ACP → TUI | `ToolStarted` | `tool_id`, `title`(tool_name), `rawInput` |
 | `tool_call_update` | ACP → TUI | `ToolEnded` | `tool_id`, `rawOutput`, `status` |
 | `plan` | ACP → TUI | `handle_plan_update` | `entries[{content, status}]` |
-| `usage_update` | ACP → TUI | 写入 `SPINNER_TOKEN_COUNT` | `inputTokens`, `outputTokens` |
+| `usage_update` | ACP → TUI | 写入 `SPINNER_TOKEN_COUNT`；cache hit rate < 80% 时推送 `SystemNotification` 到消息流 | `inputTokens`, `outputTokens`, `cacheReadTokens` |
 | `user_message_chunk` | ACP → TUI | `ReplayUserBubble` | `text` (session replay) |
 | `session/input` | TUI → ACP | `acp_client.prompt()` | `MessageContent` |
 
+**StateSnapshotMeta**（`peri/agent_event` → `AcpNotification::AgentEvent`）：写入 `CONTEXT_USAGE` atom（`budget_pct` + `total_tokens`），供 StatusBarRow1 显示上下文使用率。不产生 AcpEventData。
+
+**Agent Event Extensions**（`peri/agent_event` → `convert_agent_event`）：以下 7 个 AcpEvent 变体通过 `AcpNotification::AgentEvent` 路由，由 `convert_agent_event` 转换为 AcpEventData：
+
+| AcpEvent 变体 | → AcpEventData | TUI 行为 |
+|---------------|----------------|----------|
+| `TurnCommitted` | `TurnCommitted` | push_view_models（goal 自驱刷新检查点） |
+| `CompactStarted` | `CompactStarted` | 设 PromptRunning |
+| `CompactCompleted` | `CompactCompleted` | 注入 SystemNote（仅全量压缩） |
+| `CompactError` | `CompactError` | 注入 SystemNote |
+| `BackgroundTaskCompleted` | `BackgroundTaskCompleted` | 日志 |
+| `AgentExecutionFailed` | `AgentExecutionFailed` | 注入 SystemNote(Error) |
+| `WorkflowProgress` | `WorkflowProgress` | 日志 |
+
 ### 4.3 交互请求事件 — 标准 ACP 通道（TUI 消费）
 
-> 注：交互类事件已统一走 ACP 标准通道。`ask-user` 走 `Elicitation` 协议，`hitl-pending`/`rewind-preview` 等走 `peri/unstable-event`。
+> 注：交互类事件已统一走 ACP 标准通道。`ask-user` 走 `Elicitation` 协议，`hitl-pending` 走 `AcpNotification::RequestPermission`（ACP 标准 HITL 审批协议），`rewind-preview` 等走 `peri/unstable-event`。
 
-| 事件名 | 方向 | 通道 | TUI Atom |
+| 事件名 | 方向 | 通道 | TUI Atom / 弹窗 |
 |--------|------|------|----------|
-| `ask-user` | ACP → TUI | ACP `Elicitation` | `ASK_USER_PENDING` |
+| `ask-user` | ACP → TUI | ACP `Elicitation` | `ASK_USER_PENDING` + `PanelKind::AskUser` 面板（非弹窗） |
 | `rewind-preview` | ACP → TUI | `peri/unstable-event` | `REWIND_PREVIEW` |
 | `oauth-needed` | ACP → TUI | `peri/unstable-event` | `OAUTH_INFO` |
 | `budget-warning` | ACP → TUI | `peri/unstable-event` | ACP_STATE 写入 |
-| `hitl-pending` | ACP → TUI | *(内部变体，`decode` 待完善)* | `HITL_PENDING` |
+| `hitl-pending` | ACP → TUI | `AcpNotification::RequestPermission` → `HitlPending` | `HITL_PENDING` + `HITL_REQUEST_ID` |
+| `confirm` | TUI 内部 | AskUser Panel 二次确认 / ThreadBrowser 切线程 | `CONFIRM_PAYLOAD`（第 6 个 popup） |
+
+### 4.4 Background Tasks 事件
+
+后台 agent/cron/workflow 任务通过 4 个 `BgTask*` 变体管理，写入 `BG_TASKS`、`BG_DISPLAY`、`BG_AGENT_IDS` atoms：
+
+| AcpEventData 变体 | TUI 行为 |
+|-------------------|----------|
+| `BgTaskStarted(task)` | 追加到 `BG_TASKS` + 创建 `BG_DISPLAY` 条目 |
+| `BgTaskCompleted { task_id, success, duration_ms }` | 从 `BG_TASKS` 移除 + 标记 `BG_DISPLAY` 完成（3s 倒计时） + `NOTIFICATION` 通知 |
+| `BgTaskCancelled { task_id, reason }` | 从 `BG_TASKS` 移除 + 标记 `BG_DISPLAY` 失败 |
+| `BgTaskSnapshot(tasks)` | 全量替换 `BG_TASKS` + 重建 `BG_DISPLAY` |
+
+### 4.5 Agent Event Extensions 事件
+
+通过 `AcpNotification::AgentEvent` → `convert_agent_event` 路由的低频事件。见上方 §4.2 表格。
+
+### 4.6 Plugin 事件
+
+插件系统通过 3 个变体与 TUI 交互：
+
+| AcpEventData 变体 | TUI Atom |
+|-------------------|----------|
+| `PluginSnapshot(snapshot)` | `PLUGIN_LIST`（全量替换） |
+| `PluginActionResult(result)` | `NOTIFICATION`（3s 消失）+ `RENDER_HEARTBEAT`（触发 PluginPanel 重渲染） |
+| `PluginSearchResult(result)` | `PLUGIN_SEARCH_RESULTS`（全量替换） |
+
+### 4.7 其他特殊事件
+
+| AcpEventData 变体 | 说明 |
+|-------------------|------|
+| `BgCallbackBubble { text }` | bg agent 完成回调：先 flush current_turn → committed，等待后续 `LocalUserBubble` 推送用户气泡 |
+| `RewindCompleted { messages_json }` | Rewind 完成：反序列化 messages_json 替换 state.committed |
+| `StateSnapshotMeta` | `peri/agent_event` → 写入 `CONTEXT_USAGE` atom（budget_pct + total_tokens），不产生 AcpEventData |
 
 ---
 
@@ -259,9 +318,10 @@ stateDiagram-v2
     Streaming --> Streaming: SubagentStopped → stop_subagent()
     Streaming --> Idle: AgentDone(end_turn/max_turn) → archive + reset()
     Streaming --> Idle: AgentDone(cancelled) → deactivate() + archive
+    Streaming --> Idle: TurnSuspended → 归档 + 不 drain（Agent 保持存活）
 ```
 
-> 注："Streaming" 是 `BridgeState.variant == 1` 渲染指示，非 `SessionPhase` 枚举变体。`SessionPhase` 仅三种：Idle / PromptRunning / ReplayingHistory。AgentDone 两条路径都回到 Idle，区别在于归档行为（正常结束先 `reset()` 再归档；中断先 `deactivate()` 保留已归档，再新建空 `CurrentTurn`）。
+> 注："Streaming" 是 `BridgeState.variant == 1` 渲染指示，非 `SessionPhase` 枚举变体。`SessionPhase` 仅三种：Idle / PromptRunning / ReplayingHistory。AgentDone 两条路径 + TurnSuspended 第三条路径都回到 Idle：正常结束先 `reset()` 再归档；中断先 `deactivate()` 保留已归档；TurnSuspended 归档但不 `drain_input_buffer`（Agent 保持 await_wake 存活）。
 
 ### 5.2 CurrentTurn → ViewModels 构建
 
@@ -314,16 +374,17 @@ graph LR
     subgraph BRIDGE["acp_bridge"]
         CT["CurrentTurn<br/>segments (Vec〈TurnSegment〉)<br/>reasoning / text / subagents"]
         BV["build_view_models()<br/>→ segments 顺序展开<br/>→ Vec〈TuiRenderUnit〉"]
+        TICK["1s tick<br/>advance_spinner<br/>running Bash 检测"]
     end
 
     subgraph ATOM["VIEW_MODELS atom"]
         VM["ViewModelsSnapshot<br/>items: im::Vector + generation"]
     end
 
-    subgraph RENDER["render_bridge"]
-        CV["content_hash 增量检测<br/>→ 跳过未变更项"]
-        RL["render_v2_vm()<br/>→ Vec〈Line〈'static〉〉"]
-        WM["build_wrap_map()<br/>→ 视口二分查找索引"]
+    subgraph MSG["message_area（直接消费）"]
+        CACHE["vm_caches<br/>按 VM content_hash 增量检测<br/>未变更 VM → Arc::clone"]
+        LINES["vm_to_lines_cached<br/>→ Vec〈Line〈'static〉〉"]
+        WRAP["build_wrap_map<br/>→ WrappedLineInfo 映射"]
     end
 
     TC --> CT
@@ -331,9 +392,10 @@ graph LR
     TE --> CT
     CT --> BV
     BV --> VM
-    VM --> CV
-    CV --> RL
-    RL --> WM
+    TICK --> VM
+    VM --> CACHE
+    CACHE --> LINES
+    LINES --> WRAP
 ```
 
 ---
@@ -350,9 +412,7 @@ sequenceDiagram
     participant BRIDGE as acp_bridge<br/>(dispatch_and_notify)
     participant CT as CurrentTurn<br/>(segments 状态机)
     participant ATOM as VIEW_MODELS atom<br/>(im::Vector〈TuiRenderUnit〉)
-    participant RB as render_bridge<br/>(VM → Line 预计算)
-    participant CACHE as RENDER_CACHE atom
-    participant MSG as message_area<br/>(ratatui 渲染)
+    participant MSG as message_area<br/>(直接消费 VIEW_MODELS)
 
     Note over USER,MSG: ─── 场景：用户说"请你说 1，read 文件，说 2" ───
 
@@ -418,14 +478,13 @@ sequenceDiagram
         BRIDGE->>ATOM: push_view_models()
     end
 
-    Note over ATOM,MSG: ─── 预计算渲染管道 ───
+    Note over ATOM,MSG: ─── message_area 直接消费 VIEW_MODELS ───
 
-    RB->>ATOM: 读取 VIEW_MODELS.items<br/>[UserBubble, AsstBubble("1"), ToolCard, AsstBubble("2")]
-    RB->>RB: render_v2_vm() 逐个转换 → Vec<Line>
-    RB->>CACHE: RENDER_CACHE atom 写入
-
-    MSG->>CACHE: 读取 cached entries + wrap_map
-    MSG->>MSG: 视口裁剪 + Paragraph 渲染
+    MSG->>ATOM: 读取 VIEW_MODELS.items<br/>[UserBubble, AsstBubble("1"), ToolCard, AsstBubble("2")]
+    MSG->>MSG: vm_caches 按 content_hash 增量检测
+    MSG->>MSG: vm_to_lines_cached() → Vec<Line>
+    MSG->>MSG: build_wrap_map() + 视口裁剪
+    MSG->>MSG: ratatui Paragraph 渲染
 
     Note over MSG: ╔══════════════════════════════╗<br/>║ ❯ 请你说 1，read 两个文件，说 2<br/>║ Thought for 12 chars<br/>║ 1<br/>║<br/>║ ● Read (a.txt)<br/>║   ⎿ 10 lines<br/>║<br/>║ 2<br/>╚══════════════════════════════╝
 
@@ -456,6 +515,8 @@ Agent 完成 ReAct 循环后，Executor 调用 `EventSink.push_done(stop_reason)
 - `stop_reason = "end_turn"` → `AcpEventData::TurnDone`（正常结束，归档消息）
 - `stop_reason = "cancelled"` → `AcpEventData::TurnInterrupted { reason }`（中断，清空未完成消息）
 - `stop_reason = "max_turn_requests"` → 同 `TurnDone`
+
+此外，Agent turn 可能被挂起（idle/await_wake），此时发送 `AcpEventData::TurnSuspended`：归档 current_turn → committed，停止 loading，但**不** `drain_input_buffer`（Agent 保持存活，等待后续唤醒继续）。
 
 > **历史**：旧版通过 `peri/unstable-event` 通道发送自定义 `turn-done` / `turn-interrupted` 事件，已于 2026-07-08 废弃，统一改为 ACP 标准 `StopReason` 通道。
 
@@ -505,7 +566,8 @@ TurnDone 后将 current_turn 的 VM 逐条 `push_back` 到 `BridgeState.committe
 | LoopResult | PromptStopReason | stop_reason 字符串 | TUI 事件 | 行为 |
 |------------|-----------------|--------------------|-----------|------|
 | Completed | EndTurn | `"end_turn"` | `TurnDone` | 归档 current_turn → committed |
-| Interrupted | Cancelled | `"cancelled"` | `TurnInterrupted { reason }` | 清空 current_turn，保留已归档 |
+| Interrupted | Cancelled | `"cancelled"` | `TurnInterrupted { reason }` | 若 current_turn 为空（零产出）→ 撤销用户气泡 + 恢复输入框文本；若有内容 → deactivate + 归档 |
+| Suspended | — | — | `TurnSuspended` | 归档 current_turn → committed，不 drain_input_buffer（Agent 保持 await_wake 存活） |
 | MaxTurnRequests | MaxTurnRequests | `"max_turn_requests"` | `TurnDone` | 归档，上限保护 |
 
 ### 6.3 INPUT_BUFFER 缓存机制
@@ -661,16 +723,14 @@ graph TB
         CT["CurrentTurn 状态机<br/>segments (TurnSegment 交错)<br/>reasoning / text / subagents"]
         BV["build_view_models()<br/>→ segments 顺序展开<br/>→ Vec〈TuiRenderUnit〉"]
         PS["push_view_models()<br/>→ VIEW_MODELS atom"]
+        TICK["1s tick<br/>advance_spinner<br/>running Bash 检测"]
     end
 
-    subgraph RENDER["render_bridge — 预计算"]
-        DH["content_hash 增量检测<br/>跳过未变更 VM"]
-        MARK["render_v2_vm()<br/>→ Vec〈Line〈'static〉〉"]
+    subgraph MSG["message_area — 直接消费 + 增量渲染"]
+        CACHE["vm_caches<br/>按 VM content_hash 分片<br/>未变更 VM → Arc::clone"]
+        LINES["vm_to_lines_cached()<br/>→ Vec〈Line〈'static〉〉"]
         WRAP["build_wrap_map()<br/>→ WrappedLineInfo 映射"]
-        RC["RENDER_CACHE atom<br/>{ entries, cumulative_heights, wrap_map }"]
-    end
-
-    subgraph MSG["message_area — 视口渲染"]
+        TOTAL["total_rows_cache<br/>O(N·W) 结果缓存"]
         VP["viewport_clip()<br/>二分查找可见范围"]
         PARA["ratatui Paragraph<br/>可见 Line + Wrap 渲染"]
     end
@@ -678,21 +738,21 @@ graph TB
     ACP --> CT
     CT --> BV
     BV --> PS
-    PS --> DH
-    DH --> MARK
-    MARK --> WRAP
-    WRAP --> RC
-    RC --> VP
+    TICK --> PS
+    PS --> CACHE
+    CACHE --> LINES
+    LINES --> WRAP
+    WRAP --> TOTAL
+    TOTAL --> VP
     VP --> PARA
 ```
 
 ### 10.1 增量渲染策略
 
-`render_bridge` 通过三层检测避免全量重建：
+`message_area` 的 `vm_caches` 通过两层检测避免全量重建：
 
-1. **generation 比较**：`snapshot.generation != last_generation` → 无变更跳过（替代旧版 `Arc::as_ptr` 比较）
-2. **content_hash diff**：计算每个 VM 的 content_hash，取稳定前缀（stable prefix），仅对变化部分重新 `render_v2_vm()`
-3. **running Bash timer**：1s 轮询检测 `generation` 变化，仅重建 items 尾部条目
+1. **content_hash 增量检测**：每个 VM 持有 `content_hash`（覆盖 text/reasoning.collapsed/tool duration 等可变字段），`vm_caches` 按 VM 粒度分片——仅 `content_hash` 变化的 VM 重新解析 markdown + 重建 wrap_map，未变更 VM 直接 `Arc::clone` 复用。流式单次成本从 O(N×W) 降至 O(W)。
+2. **acp_bridge 1s tick**：每秒 `advance_spinner()` 更新工具计时器，若有 `has_running_bash_tool()` 则额外调用 `push_view_models` 推送更新到 VIEW_MODELS。
 
 ### 10.2 视口裁剪
 
@@ -718,6 +778,7 @@ stateDiagram-v2
     Idle --> PromptRunning: PromptStarted 事件
     PromptRunning --> Idle: AgentDone(end_turn/max_turn) → archive + drain
     PromptRunning --> Idle: AgentDone(cancelled) → deactivate + 清空
+    PromptRunning --> Idle: TurnSuspended → archive（不 drain）
     Idle --> ReplayingHistory: SessionReplayStarted
     ReplayingHistory --> Idle: SessionReplayDone
 
@@ -730,7 +791,6 @@ state.committed = im::Vector::new()
 state.current_turn = CurrentTurn::new()
 state.generation = 0
 INPUT_BUFFER 清空
-RENDER_CACHE 清空
 ```
 
 **铁律**：`BRIDGE_RESET_COUNTER` 必须在 `/clear` 或 thread 切换前先 +1。仅在 atom 层面重置不足以清除旧 session 残留。
@@ -747,6 +807,9 @@ RENDER_CACHE 清空
 | 快捷命令 | `SUBMIT_TX` → `submit_consumer` | `SubmitRequest::SessionControl / ViewAction / OpenPanel` |
 | Rewind 请求 | `REWIND_ACTION_TX` → `rewind_consumer` | `RewindAction::Confirm` |
 | Thread 切换 | `THREAD_LOAD_TX` → `thread_load_consumer` | `thread_id: String` |
+| AskUser 回答 | `ASK_USER_RESPONSE_TX` → `ask_user_consumer` | `AskUserResponseAction` |
+| HITL 审批 | `HITL_RESPONSE_TX` → `hitl_response_consumer` | `HitlResponseAction` |
+| 取消/中断 | `CANCEL_TX` → `cancel_consumer` | `()`（清理 + BRIDGE_RESET_COUNTER 递增） |
 
 ### 12.2 ACP → TUI 事件
 
@@ -761,7 +824,17 @@ RENDER_CACHE 清空
 | SubAgent 结束 | `peri/agent_event` | `AcpEvent::SubagentStopped` | `TuiSubAgentGroup.is_running=false` |
 | Plan 更新 | `session/update` → `plan` | `Plan` | `TODO_ITEMS` atom |
 | 回合完成 | `push_done` → `peri/agent_event_done` | `AcpNotification::AgentDone { stop_reason: "end_turn" }` → `TurnDone` | current_turn VMs push_back → committed |
-| 回合中断 | `push_done` → `peri/agent_event_done` | `AcpNotification::AgentDone { stop_reason: "cancelled" }` → `TurnInterrupted` | deactivate + push_back → committed |
+| 回合中断 | `push_done` → `peri/agent_event_done` | `AcpNotification::AgentDone { stop_reason: "cancelled" }` → `TurnInterrupted` | 若 current_turn 为空（零产出）→ 撤销用户气泡 + 恢复输入框文本；若有内容 → deactivate + 归档到 committed |
+| 回合挂起 | `peri/agent_event` | `AcpEvent` → `TurnSuspended` | 归档 current_turn → committed，不 drain_input_buffer |
+| Bg 回调气泡 | `peri/unstable-event` | `AcpEventData::BgCallbackBubble` | flush current_turn → committed，等待后续 LocalUserBubble 推送用户气泡 |
+| Rewind 完成 | `peri/agent_event` | `AcpEvent::RewindCompleted` → `RewindCompleted` | 反序列化 messages_json 替换 committed |
+| 后台任务启动 | `peri/unstable-event` | `BgTaskStarted` | 写入 BG_TASKS / BG_DISPLAY atoms |
+| 后台任务完成 | `peri/unstable-event` | `BgTaskCompleted` | 从 BG_TASKS 移除 + 标记 BG_DISPLAY 完成 + NOTIFICATION |
+| 后台任务取消 | `peri/unstable-event` | `BgTaskCancelled` | 从 BG_TASKS 移除 + 标记 BG_DISPLAY 失败 |
+| 插件快照 | `peri/unstable-event` | `PluginSnapshot` | 写入 PLUGIN_LIST atom |
+| 插件操作结果 | `peri/unstable-event` | `PluginActionResult` | 写入 NOTIFICATION（3s 消失） |
+| 插件搜索结果 | `peri/unstable-event` | `PluginSearchResult` | 写入 PLUGIN_SEARCH_RESULTS atom |
+| Prediction | `AcpNotification::PredictionReady` | `Prediction` | 写入 PREDICTION atom |
 ---
 
 ## 13. 关键设计原则
@@ -771,4 +844,4 @@ RENDER_CACHE 清空
 3. **ACP 层是唯一全知层**：唯一同时依赖 `peri-agent` + `peri-middlewares` + `peri-tui` 的层，负责协议适配
 4. **All events → Atom → Render**：所有数据变更走统一事件渠道 → atom 写入 → 渲染消费者读取，禁止旁路
 5. **BridgeState 单一事实源**：`VIEW_MODELS` atom 仅通过 `push_view_models` 写入，所有状态变更必须经过 BridgeState
-6. **增量优于全量**：render_bridge 通过 generation + content_hash 做增量，避免 O(n) 全量 markdown 重解析
+6. **增量优于全量**：message_area 的 vm_caches 按 VM content_hash 分片增量渲染，流式单次成本从 O(N×W) 降至 O(W)

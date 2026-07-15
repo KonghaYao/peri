@@ -108,11 +108,11 @@ fn format_available_agents(cwd: &str, extra_agent_dirs: &[std::path::PathBuf]) -
 
 /// 构建系统提示词。
 ///
-/// 从 `prompts/sections/` 目录加载静态段落（01-07），根据 `PromptFeatures`
-/// 条件注入 feature-gated 段落（10-13），将环境占位符替换为运行时值。
+/// 从 `prompts/sections/` 目录加载静态段落（01-06, 16），根据 `PromptFeatures`
+/// 条件注入 feature-gated 段落（10-15），将环境占位符替换为运行时值。
 ///
 /// `overrides` 存在时，将 agent.md 中定义的角色/风格/主动性拼成一个覆盖块，
-/// 注入到提示词最前面；为 `None` 时覆盖块为空（默认行为已由静态段落覆盖）。
+/// 注入到边界标记之后；为 `None` 时覆盖块为空（默认行为已由静态段落覆盖）。
 pub fn build_system_prompt(
     overrides: Option<&AgentOverrides>,
     cwd: &str,

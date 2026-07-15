@@ -1,16 +1,15 @@
-# peri-tui v2 MessagePipeline 渲染架构设计
+# peri-tui v2 消息渲染架构设计
 
-> 全新设计，不考虑向后兼容 | 日期：2026-06-27 | 修订：v2.0 | uncheck by KonghaYao
+> 日期：2026-07-15 | 修订：v3.0 | uncheck by KonghaYao
 
 ## 1. 设计原则
 
-1. **单一数据源**：MessagePipeline 只持有两类状态——规范 `transcript`（会话级权威历史）与 `partial`（当前 ReAct 迭代的流式增量）。视图是状态的纯函数，不存在第二份"流式专用"的消息副本。
-2. **迭代边界显式提交**：v2 stages 在每次迭代结束时显式 emit TurnCompleted 事件，**携带全量 transcript 快照**。TUI 收到后用替换语义吸收。迭代边界是低频事件，全量快照的引用计数克隆成本可接受；高频渲染事件继续走轻量路径。
-3. **替换而非累积**：每次 commit 用全量快照整体替换 transcript，而非追加。v2 的快照本身就是全量——若用追加会让 transcript 在多次 commit 后无限翻倍，也消除了重复 commit 的隐患。
-4. **视图派生是纯函数**：流式渲染和历史恢复走**同一条路径**——历史恢复等价于一次 commit，无分支。这是单一数据源的本质保证。
-5. **迭代内 partial 保留至下一边界**：单次 ReAct 迭代中的流式文本、推理、工具调用都累积在 partial 里。commit 到达前 partial 始终存活，确保迭代内文本与工具按时序正确渲染。
-6. **SubAgent 状态解耦**：SubAgent 的状态不与父 Agent 的 partial 共享生命周期，由 SubAgent 事件独立管理。子 Agent 的流式/工具事件路由到对应 SubAgentState 的内部 VM 列表，不污染父 Agent 的 partial。
-7. **Pipeline 不返回 RebuildAll**：所有事件处理仅更新内部状态。重建动作由外部 agent_ops 显式触发——Pipeline 不持有 VM 索引维度，避免与 BaseMessage 维度混淆。
+1. **单一数据源**：`VIEW_MODELS` atom（`ViewModelsSnapshot { items: im::Vector<TuiRenderUnit>, generation: u64 }`）是消息流唯一数据源。`BridgeState` 在中间持有 `committed`（已归档历史）与 `current_turn`（当前轮次增量），通过 `push_view_models()` 统一写入 atom。视图组件直接读 atom 渲染，不存在第二份消息副本。
+2. **追加归档语义**：轮次结束（`TurnDone`/`TurnInterrupted`/`TurnSuspended`）时将 `current_turn.view_models()` **逐条追加**到 `committed`，然后 `reset()` current_turn。追加而非全量替换——因为 committed 内部已包含历史归档，只需追加本轮增量。
+3. **视图派生是方法**：`CurrentTurn::build_view_models()` 从内部 `segments` 派生 `Vec<TuiRenderUnit>`，`push_view_models()` 将 `committed + current_turn.view_models()` 拼接写入 atom。不存在独立的纯函数或 transcript 切片。
+4. **段交叉时序保证**：`CurrentTurn.segments`（`Vec<TurnSegment>`）记录文本/工具/SubAgent 的时序交叉，`build_view_models()` 遍历 segments 产生正确时序的 VM 序列。单 turn 内多迭代的内容通过 segments 自然排序。
+5. **SubAgent 状态内聚**：SubAgent 的流式状态由 `SubAgentAccumulator` 在 `CurrentTurn.subagents` 内管理，事件按 `agent_id` 路由。TurnCommitted 在 TUI 层统一处理不区分 SubAgent。
+6. **渲染性能按 VM 分片缓存**：`VmCacheSlot` 按 `content_hash + width + palette_key` 缓存每个 VM 的 lines/wrap_map/visual_rows/markdown_cache。流式期间仅最后一个气泡的 hash 变化触发重建，其余 `Arc::clone` 复用，单次成本从 O(N×W) 降至 O(W)。
 
 ---
 
@@ -23,194 +22,259 @@ graph TB
         ACT["Act 阶段<br/>工具分发 / 最终回答"]
     end
 
-    REASON -->|"TextChunk / ThinkingChunk"| PIPELINE
-    ACT -->|"ToolStarted / ToolEnded"| PIPELINE
-    ACT -->|"TurnCompleted<br/>finalized_messages 全量快照"| PIPELINE
+    REASON -->|"TextChunk / ThinkingChunk"| BRIDGE
+    ACT -->|"ToolStarted / ToolEnded"| BRIDGE
+    ACT -->|"TurnDone"| BRIDGE
 
-    subgraph BRIDGE["跨进程桥接 (peri-acp)"]
-        MAPPER["事件映射<br/>StateEvent → ExecutorEvent → AcpEvent"]
+    subgraph BRIDGE["peri-acp → BridgeState (acp_events.rs)"]
+        MAPPER["事件映射<br/>ExecutorEvent → AcpEventData"]
+        STATE["BridgeState<br/>committed: im::Vector<TuiRenderUnit><br/>current_turn: CurrentTurn"]
+        PUSH["push_view_models()<br/>committed + current_turn.view_models() → atom"]
     end
 
-    ACT --> MAPPER
-    MAPPER -->|"AcpEvent::TurnCommitted"| TUI
+    MAPPER -->|"AcpEventData"| STATE
+    STATE --> PUSH
 
-    subgraph TUI["peri-tui MessagePipeline"]
-        TRANSCRIPT["transcript<br/>规范历史 (替换语义)"]
-        PARTIAL["partial<br/>当前迭代增量"]
-        COMMIT["commit_iteration<br/>替换 + 清空 partial"]
-        RENDER["build_tail_vms<br/>(纯函数)"]
-
-        COMMIT --> TRANSCRIPT
-        PARTIAL -.->|"迭代结束清空"| COMMIT
-        TRANSCRIPT --> RENDER
-        PARTIAL --> RENDER
+    subgraph ATOM["全局 Atom (atoms.rs)"]
+        VM["VIEW_MODELS<br/>ViewModelsSnapshot<br/>{ items, generation }"]
     end
 
-    PIPELINE -.->|"流式 / 工具事件<br/>更新 partial"| PARTIAL
-    PIPELINE -.->|"TurnCommitted<br/>触发 commit_iteration"| COMMIT
+    PUSH -->|"写入"| VM
 
-    RENDER -->|"Vec<MessageViewModel>"| VIEW["view_messages"]
+    subgraph TUI["MessageArea 组件 (message_area/mod.rs)"]
+        CACHE["VmCacheSlot 分片缓存<br/>content_hash + width + palette_key"]
+        RENDER["vm_to_lines_cached + wrap_map + 视口裁剪"]
+        SCROLL["ScrollThrottle 16ms + 智能跟随"]
+    end
+
+    VM -->|"use_atom 订阅"| CACHE
+    CACHE --> RENDER
+    SCROLL -.->|"鼠标滚轮"| RENDER
 ```
 
-### 2.1 两类状态的边界
+### 2.1 两类状态（committed + current_turn）
+
+`BridgeState`（`acp_events.rs`）维护两类状态，每条 ACP 事件到达时同步更新：
 
 | 状态 | 类型 | 生命周期 | 写入时机 |
 |------|------|---------|---------|
-| `transcript` | `Vec<BaseMessage>` | 跨迭代持久（直到下一次 commit） | 仅 commit / restore |
-| `partial` | `Option<PartialAiMessage>` | 单次迭代内，commit 时整体丢弃 | 流式事件（文本/推理/工具） |
+| `committed` | `im::Vector<TuiRenderUnit>` | 跨轮次持久（直到 rewind/compact） | TurnDone/TurnInterrupted/TurnSuspended 归档；SystemNotification/BudgetWarning/RewindCompleted/CompactCompleted/LocalUserBubble/BgCallbackBubble/CommittedAssistantText/ReplayToolStarted 等 push |
+| `current_turn` | `CurrentTurn`（非 Option） | 单轮次内，轮次结束时 reset() | 流式事件（TextChunk/ThinkingChunk/ToolStarted/ToolEnded/SubagentStarted 等） |
 
-关键不变式：**partial 永远不会跨 commit 存活**。每次 commit 后 partial 被设为 None，下一个流式事件懒初始化。这保证 partial 内的工具调用永远是"当前迭代"的工具调用，不会与上一轮的工具混淆。
+关键不变式：**current_turn 在轮次结束后必须 reset()**。TurnDone/TurnInterrupted/TurnSuspended 归档后清空 current_turn，下一个流式事件自然开始新轮次。
 
-### 2.2 PartialAiMessage 内部结构
+### 2.2 CurrentTurn 内部结构
 
-partial 合并了 v1 散落的五个 `current_ai_*` 字段为单一结构，按职责分组：
+`CurrentTurn`（`acp_types.rs`）合并了文本/推理/工具/SubAgent 为单一结构，通过 segments 记录时序：
 
 | 字段 | 用途 |
 |------|------|
-| `text` | 流式 AI 文本（工具调用前的回复） |
+| `text` | 流式 AI 文本（累积，tool call 前后的文本会按 segments 分割为独立气泡） |
 | `reasoning` | 推理内容（Anthropic extended thinking） |
-| `tool_calls` | 已 finalize 的工具调用，按时间顺序——渲染时遍历保证时序 |
-| `pending_tools` | ToolStart 后等待 ToolEnd 的工具索引 |
-| `completed_tools` | ToolEnd 后等待 commit 的工具索引 |
+| `tool_cards` | `Vec<ToolCardAccumulator>`：工具卡片列表，`output_summary.is_none()` 表示 pending |
+| `subagents` | `Vec<SubAgentAccumulator>`：SubAgent 卡片列表 |
+| `segments` | `Vec<TurnSegment>`：段交叉时序记录（AssistantText/Tool/SubAgent 三种变体） |
+| `cached_view_models` | 缓存的 VM 列表，流式数据变化时清除，下次 `view_models()` 重建 |
+| `last_text_flush` / `last_reasoning_flush` | 文本/推理的字节偏移追踪，用于检测新文本是否需要新 segment |
+| `last_message_id` | 最近 TextChunk 的 messageId，变化时 flush pending 文本为新 segment |
 
-`tool_calls` 是时间线，`pending_tools` / `completed_tools` 是状态索引。渲染时遍历 `tool_calls` 保持时序，按 id 查 pending 或 completed 取最新状态。
+`segments` 是时序核心——Agent 文本、工具调用、SubAgent 启动在协议层交错到达，`build_view_models()` 遍历 segments 产生正确交叉时序的 `TuiRenderUnit` 序列。
 
-### 2.3 替换语义的必然性
+### 2.3 追加归档语义
 
-v2 的 TurnCompleted 携带全量 transcript 快照。若用 v1 的 extend 语义追加，单 turn 内多次 ReAct 迭代会让 transcript 翻倍：iter1 commit 后 2 条，iter2 commit 后 4 条（前 2 条重复）……最终爆炸性累积。
+轮次结束时（TurnDone），将 `current_turn.view_models()` 逐条 `push_back` 到 `committed`（追加），然后 `reset()` current_turn。这是追加而非全量替换——committed 已持有全部历史，本轮只需追加增量。
 
-替换语义让每次 commit 幂等——同样的全量快照多次 commit 结果一致。这也消除了"v1 set_completed 被多次调用导致消息重复"的隐患。
+TurnInterrupted 的特殊处理：零产出时（current_turn 为空）回滚 committed 中最后一条用户气泡 + 恢复输入文本；非零产出时与 TurnDone 相同归档。
+
+TurnSuspended：归档但不 drain input buffer（Agent 保持 await_wake 存活）。
 
 ---
 
-## 3. 事件契约：TurnCompleted 跨层透传
+## 3. 事件契约
 
-### 3.1 设计张力
+### 3.1 TurnCommitted 的实际职责
 
-**原始 v2 设计**：避免在 StateEvent 中持有 transcript 引用——理由是锁开销 + 拷贝成本，影响高频渲染事件。
+TurnCommitted 在 TUI 层仅做刷新检查点——在 goal 自驱场景下 TurnDone 只在最终循环退出时触发，TurnCommitted 作为每次 ReAct 迭代边界的刷新检查点，防止 atom 漂移。不解析 `messages_json`，不触发 commit/替换。
 
-**问题**：TUI 是独立进程，无法访问 Agent 内部 MessageTranscript。v2 的轻量 StateSnapshot 只携带元数据（message_count / total_tokens），TUI 无法重建规范状态，只能从渲染事件流自洽推导——而渲染事件流缺少明确的迭代边界，导致单 turn 内多迭代的流式文本与工具调用无法按时序提交。
+### 3.2 三路归档模型
 
-**决策**：将迭代边界信号与高频渲染信号**分层处理**：
+三种 turn 结束事件各有不同归档策略：
 
-| 信号类型 | 频率 | 携带数据 |
-|---------|------|---------|
-| 渲染事件（TextChunk / ToolStarted / ToolEnded） | 高频（每秒数十次） | 轻量字段，无 transcript 拷贝 |
-| 迭代边界事件（TurnCompleted） | 低频（每秒个位数） | `Arc<Vec<BaseMessage>>` 全量快照 |
+| 事件 | 归档行为 | drain_input_buffer | 恢复输入 |
+|------|---------|-------------------|---------|
+| `TurnDone` | 归档 + reset | 是 | 否 |
+| `TurnInterrupted` | 零产出回滚 / 非零产出归档 | 否（清除 INPUT_BUFFER） | 零产出时恢复文本到输入框 |
+| `TurnSuspended` | 归档 + reset | 否 | 否 |
 
-`Arc` 克隆仅增加引用计数，无数据拷贝；消费方按需 deref clone。边界判定：迭代边界是低频事件——一次 turn 内通常 1-10 次（取决于工具调用次数），不会成为性能瓶颈。
+### 3.3 回放 / Background 事件
 
-### 3.2 双路径 emit
-
-v2 stages 的 Act 阶段有两条路径，都必须 emit TurnCompleted：
-
-| 路径 | 触发时机 | transcript 已含 |
-|------|---------|---------------|
-| 工具调用路径 | 所有工具执行完毕、commit_staged 之后 | AI 消息 + 全部 ToolResult |
-| 最终回答路径 | LLM 返回纯文本回答、append 之后 | 最终 AI 回答消息 |
-
-元数据（token 使用率、message_count）继续单独 emit StateSnapshot——但不再承担 transcript 同步职责，仅用于状态栏刷新。
-
-### 3.3 四层贯通
-
-TurnCompleted 跨四个 crate 透传，变体名逐层调整以匹配各层语义：
-
-| 层 | 变体 | 携带字段 |
-|----|------|---------|
-| peri-agent StateEvent | `TurnCompleted` | `finalized_messages: Arc<Vec<BaseMessage>>` |
-| peri-agent ExecutorEvent | `TurnCommitted` | `messages: Vec<BaseMessage>` |
-| peri-acp AcpEvent | `TurnCommitted` | `messages_json: String`（跨进程序列化） |
-| peri-tui AgentEvent | `TurnCommitted` | `messages: Vec<BaseMessage>` |
-
-命名差异反映语义差异：StateEvent 关注"轮次完成"的状态变化，ExecutorEvent 及下游关注"消息已提交"的指令语义。
+| 事件 | 行为 |
+|------|------|
+| `BgCallbackBubble` | 触发 current_turn flush 归档到 committed（不 push bg 回调气泡本身，由 LocalUserBubble 负责） |
+| `CommittedAssistantText` | 直接 push 到 committed（用于 compact replay 场景） |
+| `ReplayToolStarted` / `ReplayToolEnded` | 直接 push/更新 committed 中的工具卡片（历史回放场景） |
+| `RewindCompleted` | 清空 committed + 重建（重放全部历史消息） |
 
 ---
 
 ## 4. 视图派生
 
-### 4.1 build_tail_vms 纯函数
+### 4.1 CurrentTurn::build_view_models()
 
-视图派生只读不写。从 transcript 与 partial 派生 MessageViewModel 序列：
+`build_view_models()` 是 `CurrentTurn` 的方法（非独立纯函数），从内部 segments/text/reasoning/tool_cards/subagents 构建 `Vec<TuiRenderUnit>`：
 
-1. **已提交的 transcript**：从 round 起点切片，调用唯一的 `messages_to_view_models` 转换
-2. **当前迭代 partial**：流式 AssistantBubble + 按 `tool_calls` 时间线追加工具 VMs
-3. **SubAgent 合并**：冻结 VM 按 instance_id 精确匹配替换 reconcile 占位符
-4. **聚合**：工具组聚合、批次组聚合、思考尾部快照
+1. **遍历 segments**：按时序产生 `TuiAssistantBubble`（文本）、`TuiToolCard`（工具）、`TuiSubAgentGroup`（SubAgent）
+2. **Flush 剩余文本**：segments 之后的残余文本/推理生成最终气泡
+3. **后处理**：Agent 工具卡片的 `tool_calls_count` 与紧随的 SubAgent 组配对
 
-### 4.2 时序正确性
+### 4.2 push_view_models() — 统一 atom 写入
 
-考虑多迭代场景：
+`push_view_models()`（`acp_events.rs`）是唯一的 VIEW_MODELS atom 写入函数：
 
-| 阶段 | transcript 含 | partial 含 | 渲染顺序 |
-|------|-------------|-----------|---------|
-| iter1 流式中 | 空 | T1 bubble, G1 tool | T1 → G1 |
-| iter1 commit 后 | T1, G1 | 空 | T1 → G1 |
-| iter2 流式中 | T1, G1 | T2 bubble, G2 tool | T1 → G1 → T2 → G2 |
-| iter2 commit 后 | T1, G1, T2, G2 | 空 | T1 → G1 → T2 → G2 |
+```
+committed.clone() + current_turn.view_models() → 扁平 im::Vector<TuiRenderUnit>
+→ reasoning 折叠处理（仅最后一个含 reasoning 的 bubble 展开）
+→ generation += 1
+→ VIEW_MODELS.state().write() = ViewModelsSnapshot { items, generation }
+```
 
-**关键不变式**：partial 内的内容始终追加在 transcript **之后**——因为 partial 是"当前迭代"，transcript 是"已提交历史"，二者天然时序正确。
+所有路径（流式渲染、turn 归档、历史恢复、system notification）统一走此函数，不存在分支。
 
-v1 的 bug 根因：v1 用独立的跨迭代累积字段（所有文本在一起、所有工具在一起），无法区分迭代边界，导致所有文本渲染在所有工具之前。
+### 4.3 TuiRenderUnit 变体体系
 
-### 4.3 双路径统一
+`TuiRenderUnit`（`tui_render_unit.rs`）有 8 个变体，替代文档旧版的 MessageViewModel：
 
-| 路径 | 入口 | 行为 |
-|------|------|------|
-| 流式渲染 | commit + partial 流式 | transcript 切片 VMs + partial 气泡 |
-| 历史恢复 | restore_completed | transcript 切片 VMs + 空气泡 |
+| 变体 | 用途 |
+|------|------|
+| `TuiUserBubble` | 用户输入气泡（含 `ReminderInfo`，从 `system-reminder` 标签自动检测 10 种 ReminderType） |
+| `TuiAssistantBubble` | AI 回复气泡（含 text + reasoning） |
+| `TuiToolCard` | 工具调用卡片（含运行态/完成态/diff） |
+| `TuiSystemNote` | 系统通知（Info/Warning/Error 三级） |
+| `TuiSubAgentGroup` | SubAgent 分组（含内部 VM 列表） |
+| `TuiCollapsedGroup` | 折叠组（多条 VM 折叠/展开切换） |
+| `TuiDivider` | 分隔线 |
+| `TuiAskUserBlock` | AskUser 弹窗气泡 |
 
-两条路径**完全同构**——历史恢复后开始新一轮流式时，partial 自然附加到 transcript 之后，时序正确。这是单一数据源架构的本质保证。
+### 4.4 时序正确性
+
+`segments` 保证时序：每个流式事件（文本 flush / ToolStarted / SubagentStarted）追加一个 TurnSegment，`build_view_models()` 遍历 segments 产生交叉时序的 VM 序列。
+
+v1 的 bug 根因：v1 用独立的跨迭代累积字段（所有文本在一起、所有工具在一起），无法区分迭代边界。v2 通过 segments 记录每段事件的精确时序，build_view_models 直接按 segments 顺序输出。
 
 ---
 
-## 5. SubAgent 状态解耦
+## 5. SubAgent 状态管理
 
-SubAgent 不与父 Agent 共享 partial。事件路由按 `source_agent_id` 与 subagent 栈状态分流：
+SubAgent 的流式状态由 `SubAgentAccumulator` 在 `CurrentTurn.subagents` 内管理，事件路由按 `agent_id` 分流：
 
 | 事件来源 | 路由目标 |
 |---------|---------|
-| `source_agent_id = Some(aid)` | 按 instance_id 精确路由到对应 SubAgentState |
-| `source_agent_id = None` 且在 SubAgent 内 | 路由到栈顶 SubAgentState（顺序执行） |
-| `source_agent_id = None` 且在父 Agent 内 | 更新父 Agent partial |
+| `ToolStarted` 带 `agent_id` 且 agent 在 `BG_AGENT_IDS` 中 | 更新 `BG_DISPLAY` atom（后台 Agent） |
+| `ToolStarted` 带 `agent_id` 且 agent 在 current_turn.subagents 中 | 路由到对应 `SubAgentAccumulator`（同步 SubAgent） |
+| `ToolStarted` 无 `agent_id` | `current_turn.start_tool()`（父 Agent 工具） |
 
-SubAgentEnd 时构建完整 SubAgentGroup VM（含内部消息和最终结果），固化为 frozen VM。下次 build_tail_vms 通过 instance_id 精确匹配替换 reconcile 中的占位符，防止 Done 后 SubAgent 显示退化。
+`SubagentStarted` 创建 `SubAgentAccumulator` 并追加 SubAgent segment；`SubagentStopped` 关闭 SubAgent 组。
 
-**关键边界**：TurnCommitted 在 SubAgent 内时直接忽略——子 Agent 的迭代提交不应污染父 Agent 的 transcript。
+TurnCommitted 在 TUI 层统一处理——`push_view_models()` 不区分 SubAgent。
 
 ---
 
-## 6. 与 v2 其他模块的关系
+## 6. 渲染管道（message_area/mod.rs）
+
+### 6.1 按 VM 分片缓存（VmCacheSlot）
+
+```mermaid
+graph LR
+    VM["TuiRenderUnit"] -->|"content_hash"| SLOT["VmCacheSlot"]
+    SLOT -->|"hash 不变<br/>Arc::clone"| RENDER["渲染复用"]
+    SLOT -->|"hash 变化<br/>重建"| REBUILD["vm_to_lines_cached<br/>+ build_wrap_map"]
+    REBUILD --> RENDER
+```
+
+每个 `VmCacheSlot` 缓存一个 VM 的渲染结果，key = `content_hash + width + palette_key`：
+
+| 字段 | 用途 |
+|------|------|
+| `content_hash` | VM 的内容哈希，流式文本追加 / 折叠展开 / tool duration 变化时改变 |
+| `width` | 视宽，窗口 resize 时改变 |
+| `palette_key` | 主题关键色值哈希，主题切换时改变 |
+| `lines: Arc<Vec<Line>>` | 解析后的渲染行 |
+| `wrap_map: Arc<Vec<WrappedLineInfo>>` | 视觉行→逻辑行映射 |
+| `visual_rows: u16` | 该 VM 占据的视觉行数 |
+| `markdown_cache` | Markdown 增量渲染缓存 |
+
+### 6.2 Markdown 增量渲染
+
+`vm_to_lines_cached`（`render.rs`）接受 `MarkdownRenderCache`，流式 text 追加时复用 `stable_state` 前缀，只处理新增 block。前缀 blocks（已闭合的 paragraph / list item / code block）完全不变，避免重复解析。
+
+### 6.3 视口裁剪
+
+MessageArea 只 clone + highlight + 渲染视口内约 60 行，通过 `wrap_map` 二分查找定位视口对应的逻辑行范围，避免 O(N) 全量渲染。
+
+---
+
+## 7. 文本选中与复制
+
+`selection.rs` 实现了完整的文本选中系统：
+
+| 组件 | 用途 |
+|------|------|
+| `WrappedLineInfo` | 折行映射条目（logical_idx + visual_start/end） |
+| `build_wrap_map` | 为 lines 构建视觉行→逻辑行映射 |
+| `concat_wrap_maps` | 拼接多个 VM 的 wrap_map（累加 visual_offset + lines_start） |
+| `highlight_line_in_selection` | 字符级 span 拆分 + 选区高亮（CJK 安全） |
+| `extract_visual_range` | 精确提取选中文本到剪贴板（通过 arboard） |
+
+选中通过 `wrap_byte_starts`（CJK 安全的字节偏移数组）实现字符级精度，避免 `&s[..N]` 对中文 panic。
+
+---
+
+## 8. 滚动与视口交互
+
+`scroll.rs` 实现了滚动相关的交互机制：
+
+| 组件 | 用途 |
+|------|------|
+| `ScrollThrottle` | 鼠标滚轮 16ms 节流（≈60fps），键盘不节流 |
+| `ScrollbarDragState` | 滚动条 thumb 拖拽（锁定 thumb_offset 避免跳变） |
+| `DragThrottle` | 拖拽选中节流 |
+| 智能跟随 | VIEW_MODELS 变化时自动滚底；用户主动上滚时不抢夺滚动位 |
+
+---
+
+## 9. 与 v2 其他模块的关系
 
 | 模块 | 关系 |
 |------|------|
-| **stages/act.rs** | 双路径 emit TurnCompleted。工具路径在 commit_staged 后 emit，最终回答路径在 append 后 emit。两者共享 `ctx.transcript.read().visible_snapshot()` |
-| **stages/tool_dispatch.rs** | commit_staged 原子写入保证 transcript 已含本轮全部消息，act.rs 直接快照即可 |
-| **session/transcript.rs** | 新增 `visible_snapshot()` 方法。复用既有 `visible_messages()` 过滤逻辑，仅改返回类型为 `Arc<Vec>` |
-| **event mapper** | TurnCompleted → ExecutorEvent::TurnCommitted → AcpEvent::TurnCommitted → AgentEvent::TurnCommitted 四层透传 |
-| **agent_ops** | TurnCommitted 分支镜像 StateSnapshot 处理：extend origin_messages + 触发 pipeline commit + request_rebuild。SubAgent 深度 > 0 时忽略 |
-| **Compact** | handle_compact_completed 复用 restore_completed 的同构路径——clear + restore + RebuildAll 三步 |
-| **RenderThread** | RebuildAll 触发 RenderCache 增量更新。prefix_len 标记不变前缀长度，由外部 agent_ops 显式传递 |
+| **acp_notifier / acp_bridge** | AcpNotification → AcpEventData → bridge_tx → BridgeState → Atom 写入 |
+| **atoms.rs** | `VIEW_MODELS` atom 是消息流单一数据源，`ACP_STATE` 控制加载状态 |
+| **message_area/** | 直接消费 VIEW_MODELS atom，VmCacheSlot 分片缓存 + 视口裁剪 |
+| **tui_render_unit.rs** | `TuiRenderUnit` 8 变体定义，含 content_hash 用于渲染缓存 key |
+| **acp_types.rs** | `CurrentTurn` + `ToolCardAccumulator` + `SubAgentAccumulator` 流式数据类型 |
+| **Compact** | `CompactCompleted` 重建 committed；`compact_just_completed` 标记触发 session/load replay |
 
 ---
 
-## 7. 关键约束
+## 10. 关键约束
 
-- **commit 必须用替换语义**——v2 的 finalized_messages 是全量快照，extend 会让 transcript 翻倍
-- **Pipeline 永远不返回 RebuildAll**——不持有 VM 索引维度，重建由外部 agent_ops 显式触发
-- **BaseMessage 维度与 VM 维度非 1:1**——一条 BaseMessage 可能产生 0~N 个 VM。内部切片用 transcript_len，外部 drain 用 vm_idx 且钳位
-- **TurnCommitted 在 SubAgent 内必须忽略**——子 Agent 的提交不应污染父 Agent 状态
-- **begin_round 不清空 frozen_subagent_vms**——允许 Done → 下一轮之间消费冻结 VM
-- **restore_completed 后 system 消息不应渲染**——re_inject 产生的 System 消息由 messages_to_view_models 内部过滤
+- **TurnDone 归档用追加语义**——将 current_turn.view_models() 逐条 push_back 到 committed，然后 reset()
+- **TurnInterrupted 零产出回滚**——current_turn 为空时移除 committed 最后一条用户气泡 + 恢复输入文本
+- **drain_input_buffer 仅在 TurnDone**——Interrupted 表示用户主动打断，不应自动续跑
+- **push_view_models 是唯一 atom 写入路径**——不存在分支或独立纯函数
+- **VmCacheSlot 按 content_hash 分片**——流式期间仅最后一个气泡 hash 变化触发重建
+- **CJK 截断用 chars().take(N)**——禁止 &s[..N]
+- **u16 坐标用 saturating_add/sub**——禁止裸 +/-，防止溢出
+- **TuiRenderUnit content_hash 必须 recompute**——折叠/展开 reasoning 或 tool duration 变化时
 
 ---
 
 ## 附录：核心抽象检查清单
 
-1. `PartialAiMessage` 结构按职责分组（text / reasoning / tool_calls / pending / completed）
-2. `commit_iteration` 用替换语义，清空 partial
-3. `restore_completed` 与 `commit_iteration` 同构
-4. `build_tail_vms` 是纯函数，双路径统一
-5. TurnCompleted 在 act.rs 双路径 emit
-6. `visible_snapshot` 复用 `visible_messages` 过滤逻辑
-7. 事件变体跨四层透传，命名匹配各层语义
-8. SubAgent 事件按 source_agent_id 路由，不污染父 Agent
+1. `BridgeState` 持有 `committed: im::Vector<TuiRenderUnit>` + `current_turn: CurrentTurn`
+2. `CurrentTurn.segments`（`Vec<TurnSegment>`）记录文本/工具/SubAgent 的时序交叉
+3. `CurrentTurn::build_view_models()` 从 segments 派生 `Vec<TuiRenderUnit>`
+4. `push_view_models()` 统一将 committed + current_turn.view_models() 写入 VIEW_MODELS atom
+5. TurnDone/TurnInterrupted/TurnSuspended 三路归档，各自不同策略
+6. `VmCacheSlot` 按 content_hash + width + palette_key 分片缓存，流式单次 O(W)
+7. `TuiRenderUnit` 8 变体，含 content_hash 作为渲染缓存 key
+8. SubAgent 事件按 agent_id 路由到 `SubAgentAccumulator`，TurnCommitted 在 TUI 统一处理

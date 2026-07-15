@@ -1,6 +1,6 @@
 # ACP 协议功能清单
 
-> 生成日期：2026-07-08 | 数据来源：`peri-acp/`、`peri-acp-types/`、`peri-tui/src/kit/tui_render_unit.rs`
+> 生成日期：2026-07-15 | 数据来源：`peri-acp/`、`peri-acp-types/`、`peri-tui/src/kit/tui_render_unit.rs`
 
 ## 一、标准 ACP 方法（TUI → Agent，JSON-RPC request/response）
 
@@ -205,7 +205,7 @@
 | 功能 | 作用 | 状态 |
 |------|------|------|
 | AvailableCommands | 返回内置命令 + 动态 skill 列表 | ✅ 已实现 |
-| `session/replay` | 加载会话时重放完整历史（UserMessageChunk + AgentMessageChunk） | ✅ 已实现 |
+| `session/replay` | 加载会话时重放完整历史（`dispatch/session_replay.rs:replay_session_history()`，通过标准 `session/update` notification 发射 UserMessageChunk、AgentMessageChunk、AgentThoughtChunk、ToolCall、ToolCallUpdate 等事件，非独立 JSON-RPC 方法） | ✅ 已实现 |
 
 ---
 
@@ -231,8 +231,10 @@
 | 事件名 | 作用 | 状态 |
 |--------|------|------|
 | `view-commit` | 完整 ViewModel 列表全量替换 UI | 🗑 废弃（改用 `session/update` 增量） |
+| `turn-suspended` | Agent turn 挂起（等待 bg agent/cron/workflow），通知 TUI 停止 loading spinner | ✅ 已实现 |
 
 > **决策（2026-07-08）**：`turn-done` / `turn-interrupted` 改用 ACP 标准 `session/prompt` 响应 `StopReason`（EndTurn / Cancelled），不再作为 `peri/unstable-event` 发送。push_done 签名扩展，AgentDone 通知携带 `stopReason` 字段。
+> 注意：TUI 侧 `acp_types.rs:808-812` 仍 decode `turn-done` / `turn-interrupted` 作为 `AcpEventData` 变体，它们可能通过 `peri/agent_event` 等其他通道到达。
 
 ### §4.3 状态事件（更新状态栏）
 
@@ -300,7 +302,7 @@
 | `subagent-started` | SubAgent 创建，TUI 打开折叠组 | ✅ 已实现（走 `peri/agent_event`，非 `peri/unstable-event` router） |
 | `subagent-stopped` | SubAgent 退出，TUI 关闭组 | ✅ 已实现（同上） |
 
-> **决策（2026-07-08）**：SubAgent 事件不再走 `peri/unstable-event` router（已从 router.rs 删除），改走 `peri/agent_event`（mapper.rs → AcpEvent）通道。router.rs 仅保留 2 个分支：`budget-warning` + `rewind-preview`。
+> **决策（2026-07-08）**：SubAgent 事件不再走 `peri/unstable-event` router（已从 router.rs 删除），改走 `peri/agent_event`（mapper.rs → AcpEvent）通道。router.rs 仅保留 3 个分支：`budget-warning` + `rewind-preview` + `turn-suspended`。
 
 #### JSON 结构
 
@@ -320,6 +322,7 @@
 | `bg-task-completed` | 后台任务完成 | ✅ 已实现 |
 | `bg-task-cancelled` | 后台任务取消 | ✅ 已实现 |
 | `bg-task-snapshot` | 活跃后台任务快照列表 | ✅ 已实现 |
+| `bg-callback-user-message` | 后台 agent 完成后在消息区插入用户气泡（`AcpEventData::BgCallbackBubble`） | ✅ 已实现 |
 
 #### JSON 结构
 
@@ -347,7 +350,34 @@
 { "event": "bg-task-snapshot", "data": [
     { "task_id": "bg-1", "kind": "subagent", "summary": "running...", "started_at": "..." }
 ] }
+
+// bg-callback-user-message
+{ "event": "bg-callback-user-message", "data": { "text": "Background agent completed: 0 issues found" } }
 ```
+
+### §4.8 Agent Event Extensions（`peri/agent_event` 通道）
+
+> 以下事件通过 `peri/agent_event` 通道（mapper.rs → AcpEvent）传递，不经过 `peri/unstable-event` router。TUI 侧在 `acp_types.rs:739-785` 定义为 `AcpEventData` 变体。
+
+| 事件名 | 作用 | 状态 |
+|--------|------|------|
+| `turn-committed` | ReAct 迭代提交信号 | ✅ 已实现 |
+| `compact-started` | 上下文压缩开始 | ✅ 已实现 |
+| `compact-completed` | 上下文压缩完成（含 summary/files/skills） | ✅ 已实现 |
+| `compact-error` | 上下文压缩失败 | ✅ 已实现 |
+| `background-task-completed` | 后台 agent 任务完成 | ✅ 已实现 |
+| `agent-execution-failed` | agent 执行失败 | ✅ 已实现 |
+| `workflow-progress` | 工作流进度更新 | ✅ 已实现 |
+
+### §4.9 Plugin 事件
+
+> Plugin 事件在 TUI 侧 `acp_types.rs:788-793` 定义，`acp_events.rs:713-768` 有渲染逻辑。
+
+| 事件名 | 作用 | 状态 |
+|--------|------|------|
+| `plugin-snapshot` | 插件列表全量快照 | ✅ 已实现 |
+| `plugin-action-result` | 插件操作结果通知 | ✅ 已实现 |
+| `plugin-search-result` | Discover 搜索返回 | ✅ 已实现 |
 
 ---
 
@@ -360,7 +390,7 @@
 | `TuiUserBubble` | 用户消息气泡 | `session/update` → `user_message_chunk`（replay） |
 | `TuiAssistantBubble` | AI 回复气泡（含 reasoning 折叠） | `session/update` → `agent_message_chunk` + `agent_thought_chunk` |
 | `TuiToolCard` | 工具调用卡片（含 diff、运行时长） | `session/update` → `tool_call` + `tool_call_update` |
-| `TuiSystemNote` | 系统提示/通知（Info/Warning/Error） | TUI 端从 `config_option_update` / `session_info_update` 等派生 |
+| `TuiSystemNote` | 系统提示/通知（Info/Warning/Error），内含 `ReminderType` 子分类（10 种：ChannelMessage、CronReminder、BgTaskCompleted、ForkMode、ContextCompacted、ContinuationHint、TrustBoundary、ToolReminder、SubagentResult、GenericReminder） | TUI 端从 `config_option_update` / `session_info_update` 等派生 |
 | `TuiSubAgentGroup` | SubAgent 折叠组（含内嵌 TuiRenderUnit[]） | `peri/agent_event` → SubagentStarted/Stopped + 流式事件 |
 | `TuiCollapsedGroup` | 通用折叠组 | TUI 端连续同类事件合并逻辑 |
 | `TuiDivider` | 分隔线（可选 label） | TUI 端在 TurnDone 后自动插入 |
@@ -374,7 +404,7 @@
 
 | 通知名 | 作用 | 通道类型 |
 |--------|------|----------|
-| `peri/agent_event` | AcpEvent DTO 推送（SubAgent/Compact/LSP 等） | notification |
+| `peri/agent_event` | AcpEvent DTO 推送（SubAgent/Compact/LSP/BgTask/WorkflowProgress 等，详见 §4.8） | notification |
 | `peri/agent_event_done` | Agent 执行结束信号（含 `stopReason` 字段） | notification |
 | `peri/hitl_pending` | HITL 审批专用通道 | notification |
 | `peri/observable` | SubAgent 启动/停止观测 | notification |
@@ -401,4 +431,4 @@
 
 ---
 
-**总结**：标准 ACP 方法 17 个 = 全部已实现 | `peri/unstable-event` 路由器仅剩 2 个（`budget-warning` + `rewind-preview`）| `turn-done` / `turn-interrupted` 改用标准 `session/prompt` StopReason | ViewModel 已内部化为 TUI 端 TuiRenderUnit，不再跨 crate 共享。
+**总结**：标准 ACP 方法 17 个 = 全部已实现 | `peri/unstable-event` 路由器仅剩 3 个（`budget-warning` + `rewind-preview` + `turn-suspended`）| `turn-done` / `turn-interrupted` 改用标准 `session/prompt` StopReason | ViewModel 已内部化为 TUI 端 TuiRenderUnit，不再跨 crate 共享 | §4.8 Agent Event Extensions 通过 `peri/agent_event` 通道传递 7 种事件 | §4.9 Plugin 事件 3 种。

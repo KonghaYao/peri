@@ -1,18 +1,18 @@
 # Langfuse 监控 v2 架构重设计
 
-> 日期：2026-07-14 | 模块：`langfuse-client` + `peri-acp/src/langfuse/` + `peri-agent/ExecutorEvent` | 类型：架构重设计（方案 B：一次性大重构）
+> 日期：2026-07-15（v2.1 修订） | 模块：`langfuse-client` + `peri-acp/src/langfuse/` + `peri-agent/ExecutorEvent` | 类型：架构重设计（方案 B：一次性大重构）
 
 ---
 
 ## 0. 摘要
 
-当前 Langfuse 监控对 `docs/design/` 核心架构覆盖弱：仅 LLM 调用、工具调用、Compact Span、SubAgent 嵌套被上报；ReAct 5 阶段、14+5 中间件链、ContextBudget 阈值点、Compact 三级策略、MessageQueue 续跑、Workflow 调用、AiReasoning 思考过程、TurnError 原因等核心架构动态在 Langfuse UI 上不可见。同时 trace_id 与 turn_id 脱节、无 Sampling 机制、LangfuseTracer 内部 14 字段 `pub(crate)` 散在 6 handler 文件（架构 review 02 候选）。
+当前 Langfuse 监控对 `docs/design/` 核心架构覆盖弱：仅 LLM 调用、工具调用、Compact Span、SubAgent 嵌套被上报；ReAct 5 阶段、15+5 中间件链、ContextBudget 阈值点、Compact 三级策略、MessageQueue 续跑、Workflow 调用、AiReasoning 思考过程、TurnError 原因等核心架构动态在 Langfuse UI 上不可见。同时 trace_id 与 turn_id 脱节、无 Sampling 机制、LangfuseTracer 内部 13 字段 `pub(crate)` 散在 6 handler 文件（架构 review 02 候选）。
 
 本设计采用**方案 B 一次性大重构**：
 
 1. **三层映射**：1 个 peri Session → 1 个 Langfuse Session；1 个 turn → 1 个 Trace（trace_id = turn_id）；5 阶段 → 5 个顶层 Span。
 2. **12 个新增 ExecutorEvent 变体 + 2 个扩充**，覆盖 ReAct 5 阶段、中间件链、ContextBudget 阈值点、AiReasoning、MessageQueue 排空、Workflow 调用。
-3. **LangfuseTracer 内部重构**：14 字段收敛为 5 简单字段 + 7 子状态机（4 个复用架构 review 02 设计 + 3 个新增：SamplingDecider / StageSpans（含 MQ 排空 + Workflow 子能力）/ MiddlewareTracer）。
+3. **LangfuseTracer 内部重构**：13 字段收敛为 6 简单字段 + 7 子状态机（4 个复用架构 review 02 设计 + 3 个新增：SamplingDecider / StageSpans（含 MQ 排空 + Workflow 子能力）/ MiddlewareTracer）。
 4. **Sampling**：turn 级采样（hash + rate），错误 turn 强制发 ErrorSpan 挂同 turn。
 5. **配置**：5 新增环境变量全部支持 `~/.peri/settings.json`。
 6. **测试**：680 行子对象单测 + trait 抽取（架构 review 02 候选 06）+ e2e mock 端到端验证。
@@ -76,6 +76,8 @@ Session: sess_abc  (会话："帮我重构 langfuse")
 
 `forward_langfuse_event` 接收的所有 ExecutorEvent 必须携带 turn_id（peri-agent 已有该字段）。Tracer 不再自己生成 trace_id。
 
+> **⚠️ 生产路径偏差（待修复）**：`executor_helpers.rs:197` 实际调用 `LangfuseTracer::new()` 而非 `new_with_turn_id()`，导致 `trace_id` 仍为 `uuid::Uuid::now_v7()` 独立生成，不等于 `turn_id`。`new_with_turn_id()` 方法已实现（`tracer/mod.rs:95-105`）但未在生产代码中被调用。此偏差需在后续 commit 中修复（改用 `new_with_turn_id` 并从 turn context 传入 turn_id）。
+
 ---
 
 ## 2. 接入点与事件流
@@ -98,7 +100,7 @@ Session: sess_abc  (会话："帮我重构 langfuse")
 | **Reason** | `AiReasoningChunk { turn_id, text }` | 替代当前被丢弃的 `AiReasoning`，挂 Reason Span 下 |
 | **Act** | `WorkflowStarted { turn_id, workflow_id, plan_summary }` | Workflow 中间件 |
 | | `WorkflowEnded { turn_id, workflow_id, agents_spawned, tool_calls }` | 同上 |
-| **跨阶段** | `MiddlewareStarted { turn_id, mw_name, hook }` | `middleware/chain.rs` 14+5 链 dispatch 前 |
+| **跨阶段** | `MiddlewareStarted { turn_id, mw_name, hook }` | `agent/events.rs` 15+5 链 dispatch 前 |
 | | `MiddlewareEnded { turn_id, mw_name, status, error? }` | dispatch 后 |
 
 **总计**：12 个新变体 + 扩充 2 个现有变体（CompactStarted/Completed）。
@@ -111,7 +113,7 @@ Session: sess_abc  (会话："帮我重构 langfuse")
 |------|------|------|
 | `SessionStarted/TurnStarted/TurnEnded` | `peri-agent/src/agent/events_v2.rs` | 会话/turn 生命周期归 peri-agent |
 | `StageStarted/StageEnded` | `peri-agent/src/agent/events_v2.rs` | ReAct 阶段归 peri-agent |
-| `MiddlewareStarted/Ended` | `peri-agent/src/middleware/chain.rs` | 链 dispatch 归中间件链 |
+| `MiddlewareStarted/Ended` | `peri-agent/src/agent/events.rs` | 链 dispatch 归中间件链 |
 | `AiReasoningChunk` | `peri-agent/src/agent/events_v2.rs` | 替代 `AiReasoning` |
 | `MessageQueueDrained` | `peri-agent/src/agent/stages/receive.rs` | MQ 排空归 receive 阶段 |
 | `BudgetThresholdHit` | `peri-agent/src/agent/stages/compact.rs` | 阈值检测归 compact |
@@ -125,7 +127,7 @@ CLAUDE.md 陷阱速查「AgentEvent 变体」明确要求。新增 `variant_cove
 
 ### 2.3 forward_langfuse_event 路由扩展
 
-`peri-acp/src/session/executor_helpers.rs:273-355` 的 match 扩展为：
+`peri-acp/src/session/executor_helpers.rs:287-490` 的 match 扩展为：
 
 ```rust
 match event {
@@ -216,11 +218,12 @@ pub struct LangfuseTracer {
     session_id: String,
     trace_id: String,                // == turn_id，由 caller 传入，禁止自生成
     agent_observation_id: String,
+    config: LangfuseConfig,           // 采样率、ErrorSpan 策略等
 
     // ── 累积字段（单字段，无内聚类） ──
     final_answer: String,
 
-    // ── 7 个子状态机（全私有） ──
+    // ── 7 个子状态机（pub(crate)） ──
     sampling: SamplingDecider,        // 新增
     stages: StageSpans,               // 新增（含 MQ 排空 + Workflow 子能力）
     middleware: MiddlewareTracer,     // 新增
@@ -231,7 +234,7 @@ pub struct LangfuseTracer {
 }
 ```
 
-**12 字段，其中 7 个是子对象**（全私有），5 个简单字段。从"14 pub(crate) 散字段"→"5 简单 + 7 子对象私有字段"。所有跨字段不变量收口在子对象 impl 内。
+**13 字段，其中 7 个是子对象**（pub(crate)），6 个简单字段。从"14 pub(crate) 散字段"→"6 简单 + 7 子对象 pub(crate) 字段"。所有跨字段不变量收口在子对象 impl 内。
 
 **设计取舍**：MqDrainTracker 与 WorkflowSpan 仅在特定阶段（Receive / Act）生效，与 StageSpans 强耦合，独立子对象过度拆分。合并入 StageSpans 后内聚类更紧、字段更少。代价是 StageSpans 文件略大（约 200-300 LOC），但仍可独立测试。
 
@@ -243,7 +246,7 @@ pub struct LangfuseTracer {
 |--------|--------------|----------------|------------|
 | `SamplingDecider` | turn 开始决定是否上报；错误 span 兜底 | `should_emit(turn_id, session_id) -> bool`、`cleanup_turn(turn_id)` | session_id（hash 种子）、rate |
 | `StageSpans` | 5 阶段（Compact/Receive/Reason/Act/End）Span 生命周期；当前活动阶段栈；Receive 阶段 MQ 排空计数；Act 阶段 Workflow 调用 Span | `on_stage_start(stage) -> StageHandle`、`on_stage_end(handle, status)`、`on_mq_drained(counts)`（仅 Receive）、`on_workflow_start(plan)` / `on_workflow_end(stats)`（仅 Act） | session.batcher、trace_id、agent_observation_id（parent） |
-| `MiddlewareTracer` | 14+5 中间件调用 Span；按 hook 分组 | `on_start(name, hook)`、`on_end(name, status)` | 当前活动 StageHandle（决定挂哪个阶段下） |
+| `MiddlewareTracer` | 15+5 中间件调用 Span；按 hook 分组 | `on_start(name, hook)`、`on_end(name, status)` | 当前活动 StageHandle（决定挂哪个阶段下） |
 | `GenerationTracker` | LLM step 生命周期（active_step + retry） | `on_llm_start/end/retrying`、返回 `GenerationStart/End` | trace_id |
 | `ToolBatch` | 工具组 Span 批次（lazy 创建、累积、flush） | `on_tool_start/end`、`flush()` | trace_id |
 | `SubagentStack` | SubAgent 嵌套栈（每层含独立 ToolBatch） | `begin_subagent`、`end_subagent`、`current_agent_id` | trace_id |
@@ -256,16 +259,16 @@ pub struct LangfuseTracer {
 ```rust
 impl LangfuseTracer {
     // ── Session/Turn 生命周期 ──
-    pub fn on_session_start(&mut self, frozen_summary: serde_json::Value);
-    pub fn on_turn_start(&mut self, turn_id: &str);                    // 返回 ()，sampled 内部决定
-    pub fn on_turn_end(&mut self, turn_id: &str, status: TurnStatus) -> JoinHandle<()>;
+    pub fn on_session_start(&mut self, frozen_summary: serde_json::Value); // 当前为 stub：仅 debug log，不发送 SessionCreate 事件
+    pub fn on_turn_start(&mut self, input: &str);                       // 返回 ()，sampled 内部决定
+    pub fn on_turn_end(&mut self, error_output: Option<&str>) -> JoinHandle<()>;
 
     // ── 5 阶段 ──
-    pub fn on_stage_start(&mut self, stage: Stage);
-    pub fn on_stage_end(&mut self, stage: Stage, status: StageStatus);
+    pub fn on_stage_start(&mut self, stage: Stage, turn_id: &str);
+    pub(crate) fn on_stage_end(&mut self, handle: &StageHandle, status: StageStatus);
 
     // ── Reason 子事件 ──
-    pub fn on_ai_reasoning_chunk(&mut self, text: &str);               // 新
+    pub fn on_ai_reasoning_chunk(&mut self, text: &str);               // 新（当前为 stub：仅 debug log，不生成 Langfuse 事件）
     pub fn on_llm_start(&mut self, step, messages, tools);             // 现有
     pub fn on_llm_request_payload(&mut self, step, body);              // 现有
     pub fn on_llm_end(&mut self, step, model, output, usage);          // 现有
@@ -278,9 +281,9 @@ impl LangfuseTracer {
     pub fn on_workflow_end(&mut self, workflow_id, stats);             // 新
 
     // ── Compact 子事件 ──
-    pub fn on_budget_threshold_hit(&mut self, threshold, pct, tokens); // 新
-    pub fn on_compact_start(&mut self, strategy, trigger);             // 现有，签名扩
-    pub fn on_compact_end(&mut self, result: CompactResult);           // 现有，签名扩
+    pub fn on_budget_threshold_hit(&mut self, threshold, pct, tokens); // 新（当前为 stub：仅 debug log，不生成 Langfuse 事件）
+    pub fn on_compact_start(&mut self);                                // strategy/trigger 内部硬编码为 Full/Auto，未参数化
+    pub fn on_compact_end(&mut self, summary: &str, files_count: usize, skills_count: usize, micro_cleared: usize, is_error: bool, error_message: &str);
 
     // ── Receive 子事件 ──
     pub fn on_mq_drained(&mut self, prompt, defer, info);              // 新
@@ -314,13 +317,15 @@ impl LangfuseTracer {
 
 ```rust
 pub trait LangfuseSessionLike: Send + Sync {
-    fn try_add(&self, event: IngestionEvent) -> Result<(), Backpressure>;
-    fn flush(&self) -> JoinHandle<()>;
+    fn try_add(&self, event: IngestionEvent) -> Result<(), LangfuseError>;
+    fn flush(&self) -> Pin<Box<dyn Future<Output = Result<(), LangfuseError>> + Send + '_>>;
     fn session_id(&self) -> &str;
 }
 ```
 
 `LangfuseSession`（生产）和 `FakeLangfuseSession`（测试）都 impl。`LangfuseTracer` 持有 `Arc<dyn LangfuseSessionLike>`。
+
+> **IngestionEvent 变体**：`langfuse-client/src/types/mod.rs` 代码注释写"10 种变体"，但实际枚举有 12 个变体——在原有 10 个基础上新增 `SessionCreate` 和 `SessionUpdate`（对应 Langfuse v4 Session API）。文档后续若涉及事件类型枚举需注意此差异。
 
 **测试 fake**：
 
@@ -331,7 +336,7 @@ pub(crate) struct FakeLangfuseSession {
 }
 
 impl LangfuseSessionLike for FakeLangfuseSession {
-    fn try_add(&self, event: IngestionEvent) -> Result<(), Backpressure> {
+    fn try_add(&self, event: IngestionEvent) -> Result<(), LangfuseError> {
         self.events.lock().push(event);
         Ok(())
     }
@@ -358,10 +363,11 @@ impl FakeLangfuseSession {
 | **`LANGFUSE_TRACE_SAMPLING`** | `1.0` | turn 级采样率，0.0~1.0，1.0=全报 |
 | **`LANGFUSE_ERROR_SPAN_ALWAYS`** | `true` | 错误 turn 强制发 ErrorSpan 挂同 turn（即使 sampled=false） |
 | **`LANGFUSE_BATCH_MAX_EVENTS`** | `50` | 保留现有，改为可配置 |
-| **`LANGFUSE_BATCH_FLUSH_INTERVAL_SECS`** | `10` | 保留现有，改为可配置 |
-| **`LANGFUSE_BATCH_BACKPRESSURE`** | `drop_new` | `drop_new` / `block` / `drop_oldest` |
+| **`LANGFUSE_BATCH_FLUSH_INTERVAL`** | `10` | 保留现有，改为可配置 |
 
-新增 5 个，原有 3 个保留。**全部支持** `~/.peri/settings.json` 中 `langfuse.*` 字段。
+新增 4 个，原有 3 个保留（`LANGFUSE_BATCH_BACKPRESSURE` 未暴露为环境变量，见下方注释）。**全部支持** `~/.peri/settings.json` 中 `langfuse.*` 字段。
+
+> **注意**：`LANGFUSE_BATCH_BACKPRESSURE`（`drop_new` / `block` / `drop_oldest`）在 langfuse-client 的 `ClientConfig` 中存在内部默认值 `DropNew`，但当前不从环境变量读取，也不在 peri-acp 的 `LangfuseConfig` 中暴露。如需自定义背压策略，需修改 langfuse-client 源码。
 
 ### 4.2 SamplingDecider 算法
 
@@ -435,8 +441,8 @@ if status.is_error() && env_error_span_always {
   1. 显式 env 变量
   2. `~/.peri/settings.json` 中 `langfuse.*` 字段
   3. 默认值
-- 全部解析后构造 `LangfuseConfig` struct（字段全私有，构造期一次性）
-- Tracer 持有 `Arc<LangfuseConfig>` 共享
+- 全部解析后构造 `LangfuseConfig` struct（字段 `pub`，支持 `Clone`）
+- Tracer 持有 `config: LangfuseConfig`（值，非 Arc）
 
 `from_env()` 返回 None 的情况不变：仅当 `LANGFUSE_PUBLIC_KEY` 或 `LANGFUSE_SECRET_KEY` 缺失。
 
@@ -452,7 +458,7 @@ if status.is_error() && env_error_span_always {
 |---------|--------|---------|
 | `sampling_test.rs` | hash 一致性、rate=0/1.0 边界、cleanup_turn 清理 | ~60 |
 | `stages_test.rs` | 5 阶段生命周期、嵌套禁止、重复 end 早返回、Compact 阈值以下不上报、MQ 排空计数（仅 Receive 阶段）、Workflow start/end（仅 Act 阶段） | ~150 |
-| `middleware_test.rs` | 14+5 链按 hook 分组、并行同 hook 顺序、status 传递 | ~70 |
+| `middleware_test.rs` | 15+5 链按 hook 分组、并行同 hook 顺序、status 传递 | ~70 |
 | `generation_test.rs` | 现有 6 个 test 迁入（review 02 §7.1） | ~80 |
 | `tool_batch_test.rs` | lazy 创建/flush/is_agent_tool（review 02） | ~60 |
 | `subagent_test.rs` | 嵌套栈/current_agent_id（review 02） | ~200 |
@@ -549,12 +555,13 @@ if status.is_error() && env_error_span_always {
 | 错误 turn 信息少（仅 ErrorSpan，无子事件） | 文档说明：要看错误 turn 全貌需调高 sampling |
 | WorkflowAgent 独立 tracer pump 的 trace 不挂主 trace | workflow_agent.rs:142-504 改为挂主 Trace 的 Act Span 下，不创建独立 trace |
 | trace_id == turn_id 破坏现有持久化 | 旧 trace 用旧 ID，新 trace 用 turn_id；langfuse 后端不冲突 |
+| trace_id = turn_id 契约生产路径未执行 | `executor_helpers.rs:197` 调用 `new()` 而非 `new_with_turn_id()`，trace_id 仍为独立 UUID v7。需改用 `new_with_turn_id` 并传入 turn_id（见 §1.3 ⚠️ 注） |
 | 借用冲突（多个子对象同时 mut） | 禁止子对象方法签名接收 `&mut LangfuseTracer`，CI 加 grep check |
 | `on_trace_*` 重命名漏改调用点 | 全文 search "on_trace_start" / "on_trace_end"，CI 加 grep check |
 
 ### 6.4 ADR
 
-建议写 `ADR-2026-07-14-langfuse-architecture-revamp`：
+建议写 `ADR-2026-07-15-langfuse-architecture-revamp`：
 
 - **Context**：监控盲区 + 14 字段散 + turn_id 脱节 + 无 Sampling
 - **Decision**：方案 B 一次性重构 + 7 子状态机 + Session 对象 + trace_id = turn_id + Turn 级 Sampling + ErrorSpan 兜底
