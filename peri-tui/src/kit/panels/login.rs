@@ -410,7 +410,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 format!(
                                     "{}...{}",
                                     "*".repeat(4),
-                                    &raw.chars()
+                                    raw.chars()
                                         .rev()
                                         .take(4)
                                         .collect::<String>()
@@ -804,6 +804,7 @@ fn make_hint_line_for_login(
 }
 
 /// 渲染编辑模式下的单行字段（简化自 setup_wizard 的 render_editable_line）。
+#[allow(clippy::too_many_arguments)]
 fn render_login_edit_line(
     label: String,
     display_value: String,
