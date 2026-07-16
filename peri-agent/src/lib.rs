@@ -2,6 +2,23 @@
 //!
 //! Rust Agent framework with middleware system.
 //! Aligned with `@langgraph-js/standard-agent` (TypeScript).
+//!
+//! ## API Stability（P1-8）
+//!
+//! peri-agent 公开 70+ 类型，目前无显式 stability 分层。以下为非正式约定：
+//!
+//! | 层级 | 含义 | 示例 |
+//! |------|------|------|
+//! | **stable** | 向后兼容保证，跨 minor 版本不变 | `BaseMessage`, `MessageContent`, `AgentError`, `Middleware` trait |
+//! | **unstable** | 内部实现细节，可能在任何版本改变 | `StageContext`, `AgentContext`, `LoopState`, `compact_v2` 内部函数 |
+//! | **internal** | 仅供 peri-middlewares/peri-acp 桥接使用 | `GoalController`, `GoalStateView`, `AgentEventBus` |
+//!
+//! **使用约定**：
+//! - 外部消费者（`peri-tui` 应通过 ACP transport 通信）：仅依赖 `stable`
+//! - `peri-middlewares`：可依赖 `stable` + `internal`
+//! - `peri-acp`：可依赖所有层级
+//!
+//! 后续计划：正式引入 `#[doc(hidden)]` / feature gates 做编译期 enforcement。
 
 pub mod agent;
 pub mod ask_user;

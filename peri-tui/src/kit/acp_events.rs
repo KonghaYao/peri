@@ -352,7 +352,16 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
         BudgetWarning(bw) => {
-            // 上下文使用率超过阈值警告——注入 TuiSystemNote 到消息流
+            // 上下文使用率超过阈值警告——注入 TuiSystemNote 到消息流。
+            // 先将 current_turn 已产出内容 flush 到 committed，使 system note
+            // 出现在正确的时序位置（已产出 AI 内容之后、后续 AI 内容之前），
+            // 而非永远排在最前面（https://example.com/issue/NNN）。
+            if !state.current_turn.committed && !state.current_turn.is_empty() {
+                for vm in state.current_turn.view_models() {
+                    state.committed.push_back(vm.clone());
+                }
+            }
+            state.current_turn.reset();
             let pct = bw.used as f64 / bw.limit as f64 * 100.0;
             let used_display = if bw.used >= 1_000_000 {
                 format!("{:.1}M", bw.used as f64 / 1_000_000.0)
@@ -388,6 +397,16 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
         SystemNotification(sn) => {
+            // 系统通知（如 cache 命中率警告）——注入 TuiSystemNote 到消息流。
+            // 先将 current_turn 已产出内容 flush 到 committed，使 system note
+            // 出现在正确的时序位置（已产出 AI 内容之后、后续 AI 内容之前），
+            // 而非永远排在最前面（https://example.com/issue/NNN）。
+            if !state.current_turn.committed && !state.current_turn.is_empty() {
+                for vm in state.current_turn.view_models() {
+                    state.committed.push_back(vm.clone());
+                }
+            }
+            state.current_turn.reset();
             let level = match sn.level.as_str() {
                 "warning" => TuiNoteLevel::Warning,
                 "error" => TuiNoteLevel::Error,
