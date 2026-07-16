@@ -30,7 +30,7 @@
 npm install -g @peri-code/workflow
 ```
 
-安装后 `peri-workflow` 命令可用。
+或通过 npx / bunx 自动下载（无需全局安装）：`npx -y @peri-code/workflow` / `bunx @peri-code/workflow`
 
 ## 快速开始
 
@@ -64,8 +64,10 @@ export default async function(workflow) {
 **A) spawn Node 子进程**：
 
 ```rust
-// 伪代码 (Rust)
-let child = Command::new("peri-workflow")
+// 伪代码 (Rust) — bun 环境优先 bunx，否则 npx
+let cmd = if has_bun() { ("bunx", &["@peri-code/workflow"]) } else { ("npx", &["-y", "@peri-code/workflow"]) };
+let child = Command::new(cmd.0)
+    .args(cmd.1)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .spawn()?;
@@ -134,7 +136,7 @@ if method == "agent/run" {
 
 想对接 `@peri-code/workflow`，你的宿主需要实现：
 
-- [ ] spawn Node.js 子进程（`peri-workflow` 命令）
+- [ ] spawn 子进程（`npx -y @peri-code/workflow` 或 `bunx @peri-code/workflow`）
 - [ ] 在 `stdin` 上写 newline-delimited JSON，在 `stdout` 上读 newline-delimited JSON
 - [ ] 发送 `workflow/start` 请求（含脚本源码）
 - [ ] 处理 `agent/run` 请求：执行 LLM agent 并返回 `AgentRunResult`

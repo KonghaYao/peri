@@ -7,7 +7,7 @@
 
 > **v2.1 变更**（2026-07-15）：基于代码审计修正约 10 处事实性差异。主要变更：
 > §3.1 请求参数移除 workflowName（WorkflowStartParams 中不存在该字段）、
-> §3.2 Node 进程启动改为 `Command::new("peri-workflow")` 依赖 PATH 查找、
+> §3.2 Node 进程改为 npx/bunx 自动下载（bun 环境优先 bunx）、
 > §3.2 log 级别映射修正（无独立 debug 映射）、
 > §3.2 kill 分支描述修正为 5s 超时 RPC + child.kill + msg_loop.abort + state.json、
 > §3.4 kill() 方法修正为两层清理（kill_tx + runs.remove）、
@@ -70,7 +70,7 @@ Workflow 系统是 Peri 的多 Agent 编排子系统，允许用户通过 JavaSc
 │  │  SessionState ─── 持有 session 级共享状态                           │
 │  │  ├─ WorkflowMiddleware      聚合容器（持有 Runner/Registry/          │
 │  │  │                          Progress/Journal 等所有 workflow 状态）  │
-│  │  ├─ WorkflowRunner          子进程管理器（PATH 查找 peri-workflow）    │
+│  │  ├─ WorkflowRunner          子进程管理器（npx / bunx）                 │
 │  │  ├─ WorkflowTaskRegistry    并发控制 + 完成广播                      │
 │  │  ├─ WorkflowProgressStore   reducer 内存状态                        │
 │  │  └─ WorkflowJournalStore    磁盘持久化 (.claude/workflow-runs/)      │
@@ -156,7 +156,7 @@ pub struct WorkflowRunner {
 
 1. 生成 `run_id` (UUID v7)
 2. `journal_store.init_run(run_id)` — 创建 `.claude/workflow-runs/{run_id}/script.js`
-3. `Command::new("peri-workflow")` — 依赖 PATH 查找 peri-workflow 可执行文件
+3. 检测 bun 环境 → 优先 `bunx @peri-code/workflow`，否则 `npx -y @peri-code/workflow`
 4. 启动子进程，继承 cwd 和 PATH
 5. 创建 `RpcChannel`（绑定 child stdin/stdout，启动 `spawn_stdout_reader()` 线程）
 6. `send_request("workflow/start")`，**15 秒超时** — Node runner.js 开始执行

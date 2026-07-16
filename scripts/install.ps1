@@ -256,17 +256,16 @@ function Main {
     # --- Workflow dependency check ---
     Write-Host ""
     step "Checking workflow runner..."
-    $wfCmd = Get-Command peri-workflow -ErrorAction SilentlyContinue
-    if ($wfCmd) {
-        info "Workflow runner found: $($wfCmd.Source)"
+    $npxCmd = Get-Command npx -ErrorAction SilentlyContinue
+    $bunxCmd = Get-Command bunx -ErrorAction SilentlyContinue
+    if ($npxCmd -or $bunxCmd) {
+        info "npx/bunx found - workflow will auto-download via npx/bunx @peri-code/workflow"
     } else {
-        warn "peri-workflow not found. Install for multi-agent workflow support:"
-        Write-Host "    npm install -g @peri-code/workflow"
-        if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-            Write-Host ""
-            warn "Node.js is also required. Install it from https://nodejs.org/"
-        }
         Write-Host ""
+        warn "npx/bunx not found. Install Node.js or Bun for multi-agent workflow support:"
+        Write-Host "    https://nodejs.org/  or  https://bun.sh/"
+        Write-Host ""
+    }
     }
 
     Write-Host ""

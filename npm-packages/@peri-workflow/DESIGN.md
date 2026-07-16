@@ -253,31 +253,33 @@ npm install -g @peri-code/workflow
 # bin: peri-workflow → dist/peri-workflow.js
 ```
 
-或直接使用构建产物：
+或通过 npx / bunx 自动下载（无需全局安装）：
 
 ```bash
-node dist/peri-workflow.js
+npx -y @peri-code/workflow     # Node.js 环境
+bunx @peri-code/workflow       # Bun 环境
 ```
 
 ### 宿主发现
 
-宿主的 `resolve_binary()` 逻辑：
-
-1. 在 PATH 中搜索 `peri-workflow`
-2. 判断 `$HOME/.peri/peri-workflow` 是否存在
-
-找到后可执行文件后：
+宿主自动检测 bun 环境，优先用 bunx：
 
 ```rust
-Command::new(binary)
-    .env_clear()
-    .envs(safe_child_env())  // 仅注入 HOME/PATH/USER 等基本变量
+fn workflow_cmd() -> (&'static str, &'static [&'static str]) {
+    if has_bun() {
+        ("bunx", &["@peri-code/workflow"])
+    } else {
+        ("npx", &["-y", "@peri-code/workflow"])
+    }
+}
+Command::new(cmd_bin)
+    .args(cmd_args)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .kill_on_drop(true)
     .spawn()
 ```
+
+`-y` 标志自动确认首次下载，无需用户交互。
 
 **安全要点**：
 - 必须 `env_clear()` 清除父进程环境变量

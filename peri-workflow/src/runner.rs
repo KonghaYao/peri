@@ -1,6 +1,6 @@
 //! WorkflowRunner —— spawn node 子进程 + 消息循环 + agent 回调。
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -13,6 +13,37 @@ use crate::journal::WorkflowJournalStore;
 use crate::progress::WorkflowProgressStore;
 use crate::protocol::*;
 use crate::rpc::{IncomingMessage, RpcChannel};
+
+// ─── 运行时检测 ────────────────────────────────────────────
+
+/// 检测当前环境是否安装了 bun。
+/// 使用 OnceLock 缓存结果，仅首次调用时执行 `which bun`。
+static HAS_BUN: OnceLock<bool> = OnceLock::new();
+
+fn has_bun() -> bool {
+    *HAS_BUN.get_or_init(|| {
+        let ok = std::process::Command::new("bun")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok();
+        if ok {
+            info!(target: "workflow", "detected bun runtime, will use bunx");
+        }
+        ok
+    })
+}
+
+/// 返回 workflow 触发命令：(binary, args)。
+/// bun 环境下用 bunx，否则回退 npx。
+fn workflow_cmd() -> (&'static str, &'static [&'static str]) {
+    if has_bun() {
+        ("bunx", &["-y", "@peri-code/workflow"])
+    } else {
+        ("npx", &["-y", "@peri-code/workflow"])
+    }
+}
 
 // ─── Agent 回调 trait ─────────────────────────────────────────
 
@@ -140,8 +171,10 @@ impl WorkflowRunner {
             None
         };
 
-        // 3. Spawn node process
-        let mut child = match Command::new("peri-workflow")
+        // 3. Spawn workflow runner（bun 环境用 bunx，否则 npx）
+        let (cmd_bin, cmd_args) = workflow_cmd();
+        let mut child = match Command::new(cmd_bin)
+            .args(cmd_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

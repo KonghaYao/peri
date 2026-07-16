@@ -284,17 +284,11 @@ main() {
     # --- Workflow dependency check ---
     echo ""
     step "Checking workflow runner..."
-    if command -v peri-workflow &>/dev/null; then
-        local wf_version
-        wf_version=$(peri-workflow --version 2>/dev/null || echo "installed")
-        info "Workflow runner found: ${wf_version}"
+    if command -v npx &>/dev/null || command -v bunx &>/dev/null; then
+        info "npx/bunx found — workflow will auto-download via npx/bunx @peri-code/workflow"
     else
-        warn "peri-workflow not found. Install for multi-agent workflow support:"
-        echo "    npm install -g @peri-code/workflow"
-        if ! command -v node &>/dev/null; then
-            echo ""
-            warn "Node.js is also required. Install it from https://nodejs.org/"
-        fi
+        warn "npx/bunx not found. Install Node.js or Bun for multi-agent workflow support:"
+        echo "    https://nodejs.org/  or  https://bun.sh/"
         echo ""
     fi
 
