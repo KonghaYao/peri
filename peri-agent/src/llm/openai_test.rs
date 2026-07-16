@@ -48,7 +48,7 @@ fn test_reasoning_only_block_becomes_empty() {
 #[test]
 fn test_messages_to_json_with_reasoning_filtered() {
     let llm = ChatOpenAI::new("sk-test", "gpt-4o");
-    assert!(!llm.supports_thinking_content);
+    assert!(!llm.supports_thinking_content());
     let msgs = vec![BaseMessage::ai_from_blocks(vec![
         ContentBlock::reasoning("r1"),
         ContentBlock::text("t1"),
@@ -72,7 +72,7 @@ fn test_messages_to_json_with_reasoning_filtered() {
 fn test_messages_to_json_with_reasoning_included_for_deepseek_v4() {
     let llm = ChatOpenAI::new("sk-test", "deepseek-v4-pro");
     assert!(
-        !llm.supports_thinking_content,
+        !llm.supports_thinking_content(),
         "DeepSeek V4 OpenAI API 不支持 content 数组中的 thinking 块"
     );
     let msgs = vec![BaseMessage::ai_from_blocks(vec![
@@ -156,29 +156,29 @@ fn test_context_window_all_models() {
 #[test]
 fn test_with_base_url() {
     let llm = ChatOpenAI::new("key", "model").with_base_url("https://proxy.example.com/v1");
-    assert_eq!(llm.base_url, "https://proxy.example.com/v1");
+    assert_eq!(llm.base_url(), "https://proxy.example.com/v1");
 }
 
 #[test]
 fn test_with_reasoning_effort() {
     let llm = ChatOpenAI::new("key", "o1-preview").with_reasoning_effort("high");
-    assert_eq!(llm.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(llm.reasoning_effort().as_deref(), Some("high"));
 }
 
 #[test]
 fn test_with_thinking_content() {
     let llm = ChatOpenAI::new("key", "gpt-4o").with_thinking_content(true);
-    assert!(llm.supports_thinking_content);
+    assert!(llm.supports_thinking_content());
 }
 
 #[test]
 fn test_with_thinking_enabled() {
     let llm = ChatOpenAI::new("key", "deepseek-v4-pro").with_thinking_enabled();
-    assert!(llm.thinking_enabled, "thinking_enabled 应为 true");
+    assert!(llm.thinking_enabled(), "thinking_enabled 应为 true");
     // DeepSeek V4 OpenAI API 不支持 content 数��中的 thinking 块，
     // supports_thinking_content 应为 false，reasoning 仅通过顶层 reasoning_content 回传
     assert!(
-        !llm.supports_thinking_content,
+        !llm.supports_thinking_content(),
         "deepseek-v4-pro 的 OpenAI API 不支持 content 中的 thinking 块，应通过 reasoning_content 顶层字段回传"
     );
 }
@@ -187,9 +187,9 @@ fn test_with_thinking_enabled() {
 fn test_with_thinking_enabled_non_v4() {
     // 非 v4 模型：thinking_enabled 开启但 supports_thinking_content 保持 false
     let llm = ChatOpenAI::new("key", "deepseek-chat").with_thinking_enabled();
-    assert!(llm.thinking_enabled);
+    assert!(llm.thinking_enabled());
     assert!(
-            !llm.supports_thinking_content,
+            !llm.supports_thinking_content(),
             "非 v4 模型不应开启 supports_thinking_content，否则 content 数组中会发送不支持的 thinking 块"
         );
 }
@@ -216,8 +216,8 @@ fn test_detect_thinking_content_deepseek_v4() {
 #[test]
 fn test_new_default_no_reasoning_effort() {
     let llm = ChatOpenAI::new("key", "gpt-4o");
-    assert!(llm.reasoning_effort.is_none());
-    assert_eq!(llm.base_url, "https://api.openai.com/v1");
+    assert!(llm.reasoning_effort().is_none());
+    assert_eq!(llm.base_url(), "https://api.openai.com/v1");
 }
 
 /// 验证多轮 tool call 对话的消息序列：每个 tool 消息前面必须是 assistant with tool_calls

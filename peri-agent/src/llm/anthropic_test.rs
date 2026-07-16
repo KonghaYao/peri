@@ -249,36 +249,37 @@ fn test_cache_control_fallback_finds_earlier_text_user() {
 #[test]
 fn test_with_base_url() {
     let llm = ChatAnthropic::new("key", "model").with_base_url("https://proxy.example.com");
-    assert_eq!(llm.base_url.as_deref(), Some("https://proxy.example.com"));
+    assert_eq!(llm.base_url().as_deref(), Some("https://proxy.example.com"));
 }
 
 #[test]
 fn test_with_base_url_empty_is_none() {
     let llm = ChatAnthropic::new("key", "model").with_base_url("");
-    assert!(llm.base_url.is_none());
+    assert!(llm.base_url().is_none());
 }
 
 #[test]
 fn test_with_extended_thinking_passes_through_budget() {
     let llm = ChatAnthropic::new("key", "model").with_extended_thinking(100, "high");
-    assert!(llm.extended_thinking);
+    assert!(llm.extended_thinking());
     assert_eq!(
-        llm.thinking_budget, 100,
+        llm.thinking_budget(),
+        100,
         "budget_tokens 应原样传递，不做截断"
     );
-    assert_eq!(llm.thinking_effort, "high");
+    assert_eq!(llm.thinking_effort(), "high");
 }
 
 #[test]
 fn test_with_extended_thinking_valid_budget() {
     let llm = ChatAnthropic::new("key", "model").with_extended_thinking(5000, "low");
-    assert_eq!(llm.thinking_budget, 5000);
+    assert_eq!(llm.thinking_budget(), 5000);
 }
 
 #[test]
 fn test_without_cache() {
     let llm = ChatAnthropic::new("key", "model").without_cache();
-    assert!(!llm.enable_cache);
+    assert!(!llm.enable_cache());
 }
 
 // ── split_system_blocks 测试 ─────────────────────────────────────────
@@ -391,11 +392,11 @@ fn test_messages_to_anthropic_middleware_after_boundary() {
 #[test]
 fn test_default_values() {
     let llm = ChatAnthropic::new("key", "claude-sonnet-4-6");
-    assert!(!llm.extended_thinking);
-    assert_eq!(llm.thinking_budget, 10000);
-    assert_eq!(llm.thinking_effort, "medium");
-    assert!(llm.enable_cache);
-    assert!(llm.base_url.is_none());
+    assert!(!llm.extended_thinking());
+    assert_eq!(llm.thinking_budget(), 10000);
+    assert_eq!(llm.thinking_effort(), "medium");
+    assert!(llm.enable_cache());
+    assert!(llm.base_url().is_none());
 }
 
 /// 验证 assistant 消息含 thinking + tool_use 时，thinking blocks 被正确回传
@@ -1019,7 +1020,7 @@ fn test_tool_result_and_tool_error_both_have_id_field() {
         BaseMessage::tool_error("call_2", "permission denied"),
     ];
 
-    let (msgs, _) = super::invoke::messages_to_anthropic(&messages);
+    let (msgs, _) = ChatAnthropic::messages_to_anthropic(&messages);
 
     // 找到所有 tool_result block
     let mut tool_results: Vec<&serde_json::Value> = Vec::new();
@@ -1118,7 +1119,7 @@ fn test_multiturn_with_errors_all_tool_results_have_id() {
         BaseMessage::tool_result("call_3b", "file1.rs\nfile2.rs"),
     ];
 
-    let (msgs, _) = super::invoke::messages_to_anthropic(&messages);
+    let (msgs, _) = ChatAnthropic::messages_to_anthropic(&messages);
 
     // 收集所有 tool_result block
     let mut tool_results: Vec<serde_json::Value> = Vec::new();
