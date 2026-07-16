@@ -54,6 +54,22 @@ pub struct BridgeState {
     pub last_submitted_text: Option<String>,
 }
 
+impl BridgeState {
+    /// 将 current_turn 已产出内容 flush 到 committed，然后 reset。
+    ///
+    /// 用于 BudgetWarning / SystemNotification / BgCallbackBubble / TurnDone
+    /// 四个需要保证时序正确性的位置：在注入中间事件或结束当前 turn 之前，
+    /// 必须先将已产出的 AI 内容归档到 committed，确保消息流时间顺序一致。
+    fn flush_current_turn(&mut self) {
+        if !self.current_turn.committed && !self.current_turn.is_empty() {
+            for vm in self.current_turn.view_models() {
+                self.committed.push_back(vm.clone());
+            }
+        }
+        self.current_turn.reset();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 核心分发函数
 // ---------------------------------------------------------------------------
@@ -237,13 +253,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             // (b) current_turn.reset() + push_view_models
             // buffered_text 已由 LocalUserBubble 事件提前入队 committed，
             // TurnDone 不再代为搬运。
-            if !state.current_turn.committed && !state.current_turn.is_empty() {
-                for vm in state.current_turn.view_models() {
-                    state.committed.push_back(vm.clone());
-                }
-            }
-
-            state.current_turn.reset();
+            state.flush_current_turn();
             state.variant = 0;
 
             state.phase = SessionPhase::Idle;
@@ -353,15 +363,9 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         BudgetWarning(bw) => {
             // 上下文使用率超过阈值警告——注入 TuiSystemNote 到消息流。
-            // 先将 current_turn 已产出内容 flush 到 committed，使 system note
-            // 出现在正确的时序位置（已产出 AI 内容之后、后续 AI 内容之前），
-            // 而非永远排在最前面（https://example.com/issue/NNN）。
-            if !state.current_turn.committed && !state.current_turn.is_empty() {
-                for vm in state.current_turn.view_models() {
-                    state.committed.push_back(vm.clone());
-                }
-            }
-            state.current_turn.reset();
+            // flush_current_turn 确保 system note 出现在正确的时序位置
+            //（已产出 AI 内容之后、后续 AI 内容之前）。
+            state.flush_current_turn();
             let pct = bw.used as f64 / bw.limit as f64 * 100.0;
             let used_display = if bw.used >= 1_000_000 {
                 format!("{:.1}M", bw.used as f64 / 1_000_000.0)
@@ -398,15 +402,9 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         }
         SystemNotification(sn) => {
             // 系统通知（如 cache 命中率警告）——注入 TuiSystemNote 到消息流。
-            // 先将 current_turn 已产出内容 flush 到 committed，使 system note
-            // 出现在正确的时序位置（已产出 AI 内容之后、后续 AI 内容之前），
-            // 而非永远排在最前面（https://example.com/issue/NNN）。
-            if !state.current_turn.committed && !state.current_turn.is_empty() {
-                for vm in state.current_turn.view_models() {
-                    state.committed.push_back(vm.clone());
-                }
-            }
-            state.current_turn.reset();
+            // flush_current_turn 确保 system note 出现在正确的时序位置
+            //（已产出 AI 内容之后、后续 AI 内容之前）。
+            state.flush_current_turn();
             let level = match sn.level.as_str() {
                 "warning" => TuiNoteLevel::Warning,
                 "error" => TuiNoteLevel::Error,
@@ -815,12 +813,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             // ① current_turn 内容在前（flush）
             // ② bg 回调气泡在中间（LocalUserBubble 随后到达）
             // ③ 后续 AI 内容在后（TurnDone 归档）
-            if !state.current_turn.committed && !state.current_turn.is_empty() {
-                for vm in state.current_turn.view_models() {
-                    state.committed.push_back(vm.clone());
-                }
-            }
-            state.current_turn.reset();
+            state.flush_current_turn();
             push_view_models(state);
             push_acp_state(state);
         }

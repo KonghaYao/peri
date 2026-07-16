@@ -30,7 +30,8 @@ pub trait ProviderAdapter: Send + Sync {
     fn serialize_messages(&self, messages: &[BaseMessage]) -> Vec<Value>;
 
     /// 将单个 ContentBlock 序列化为 Provider 格式的 JSON fragment。
-    /// 用于 streaming 路径中工具结果回放等场景。
+    /// 目前仅通过静态分发调用（adapter 内部 `block_to_xxx_part` 函数），
+    /// trait 方法入口保留供未来 streaming 路径中动态分发工具结果回放等场景。
     fn serialize_content_block(&self, block: &ContentBlock) -> Option<Value>;
 
     // ─── 2. 请求体构建 ───
@@ -234,7 +235,8 @@ impl GenericInvoker {
     }
 
     /// (blocks, tool_calls) → BaseMessage（跨 Provider 共享逻辑）
-    fn build_base_message(
+    /// 也从 Anthropic streaming 路径调用（避免重复实现）。
+    pub(crate) fn build_base_message(
         blocks: Vec<ContentBlock>,
         tool_calls: Vec<ToolCallRequest>,
         stop_reason: &StopReason,

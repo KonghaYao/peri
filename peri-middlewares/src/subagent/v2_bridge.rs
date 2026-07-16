@@ -146,7 +146,7 @@ pub fn build_v2_subagent_context(
     }
     // system_prompt 已作为 BaseMessage::System 注入 transcript（见上方 fork 路径后块）。
     // 不再写入 StageContext.system_prompt 死字段——peri-agent/src/agent/stages/ 内零代码读取该字段。
-    // 保留 StageContextBuilder::with_system_prompt 方法本身，可能有其他调用方使用。
+    // StageContextBuilder::with_system_prompt 已随字段移除，无残余调用方。
 
     let context = builder.build();
 

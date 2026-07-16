@@ -6,11 +6,10 @@ use crate::{
     agent::events::ExecutorEvent,
     error::{AgentError, AgentResult},
     llm::{
-        provider_adapter::ProviderAdapter,
+        provider_adapter::{GenericInvoker, ProviderAdapter},
         sse::SseParser,
         types::{LlmResponse, StopReason, StreamingContext},
     },
-    messages::{BaseMessage, MessageContent},
 };
 
 /// Anthropic SSE 流式处理
@@ -253,28 +252,7 @@ pub(super) async fn do_invoke_streaming(
     let stop_reason = StopReason::from_display(&stop_reason_str);
     let (blocks, tool_calls) = AnthropicAdapter::parse_content_blocks(&accumulated_blocks);
 
-    let message = if !tool_calls.is_empty() {
-        let content = if let [single] = blocks.as_slice() {
-            if let Some(text) = single.as_text() {
-                MessageContent::text(text)
-            } else {
-                MessageContent::Blocks(blocks)
-            }
-        } else {
-            MessageContent::Blocks(blocks)
-        };
-        BaseMessage::ai_with_tool_calls(content, tool_calls)
-    } else if let [single] = blocks.as_slice() {
-        if let Some(text) = single.as_text() {
-            BaseMessage::ai(text)
-        } else {
-            BaseMessage::ai(MessageContent::Blocks(blocks))
-        }
-    } else if blocks.is_empty() {
-        BaseMessage::ai("")
-    } else {
-        BaseMessage::ai(MessageContent::Blocks(blocks))
-    };
+    let message = GenericInvoker::build_base_message(blocks, tool_calls, &stop_reason);
 
     // 规范化 input_tokens：Anthropic 的 input_tokens 不含缓存 token，
     // 加上 cache_creation + cache_read 使其与 OpenAI 语义一致（总输入）。

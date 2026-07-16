@@ -352,6 +352,14 @@ impl ProviderAdapter for OpenAiAdapter {
             .to_string()
     }
 
+    fn extract_error_type(&self, response_json: &Value) -> Option<String> {
+        // OpenAI 的 error_code（如 "context_length_exceeded"、"rate_limit_exceeded"）
+        // 落在 response["error"]["code"]——与 Anthropic 的 "type" 字段语义一致。
+        response_json["error"]["code"]
+            .as_str()
+            .map(|s| s.to_string())
+    }
+
     fn extract_request_id_from_headers(
         &self,
         _headers: &reqwest::header::HeaderMap,

@@ -34,9 +34,11 @@ pub(super) async fn do_invoke_streaming(
 
     let body = adapter.build_request_body(&request, true);
 
-    let resp = client
-        .post(adapter.build_chat_url())
-        .bearer_auth(&adapter.api_key)
+    let resp = adapter
+        .apply_auth_headers(
+            client.post(adapter.build_chat_url()),
+            request.session_id.as_deref(),
+        )
         .json(&body)
         .send()
         .await
