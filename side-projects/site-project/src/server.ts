@@ -6,6 +6,11 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 
 import { initWorkspace } from "./lib/workspace.js";
+import { FileService } from "./services/file-service.js";
+import { ScmService } from "./services/scm-service.js";
+import { GraphService } from "./services/graph-service.js";
+import { GetmanService } from "./services/getman-service.js";
+import { WorkspaceService } from "./services/workspace-service.js";
 import { registerFileRoutes } from "./routes/files.js";
 import { registerScmRoutes } from "./routes/scm.js";
 import { registerGraphRoutes } from "./routes/graph.js";
@@ -30,13 +35,20 @@ if (!existsSync(DOCS_DIR)) {
 const WORKSPACE_FILE = join(ROOT, "workspace.json");
 initWorkspace(WORKSPACE_FILE);
 
+// ---------- Service 层 ----------
+const fileService = new FileService(DOCS_DIR);
+const scmService = new ScmService(DOCS_DIR);
+const graphService = new GraphService(DOCS_DIR);
+const getmanService = new GetmanService();
+const workspaceService = new WorkspaceService(terminalSessions);
+
 // ---------- 应用 + 路由 ----------
 const app = new Hono();
-registerFileRoutes(app, DOCS_DIR);
-registerScmRoutes(app, DOCS_DIR);
-registerGraphRoutes(app, DOCS_DIR);
-registerGetmanRoutes(app);
-registerWorkspaceRoutes(app, PUBLIC_DIR, terminalSessions);
+registerFileRoutes(app, fileService);
+registerScmRoutes(app, scmService);
+registerGraphRoutes(app, graphService);
+registerGetmanRoutes(app, getmanService);
+registerWorkspaceRoutes(app, workspaceService, PUBLIC_DIR);
 
 // ---------- 启动 ----------
 const nodeServer = serve({ fetch: app.fetch, port: PORT });

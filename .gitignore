@@ -179,6 +179,7 @@ deploy/peri-arm32-*.tar.gz
 
 vendor/
 !peri-tui/vendor/
+!side-projects/site-project/public/vendor/
 
 .claude/skills/*-workspace
 

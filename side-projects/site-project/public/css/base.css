@@ -1,0 +1,16 @@
+/* ========== 基础 reset（Tailwind preflight 已接管大部分，这里只补 Tailwind 不做的） ========== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  overflow: hidden;
+}
+
+/* ========== 非颜色变量（供 inline style 引用） ========== */
+:root {
+  --sidebar-width: 280px;
+}

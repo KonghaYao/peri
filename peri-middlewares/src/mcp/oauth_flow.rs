@@ -152,7 +152,7 @@ impl OAuthFlowManager {
         let callback_result = tokio::select! {
             result = callback_server.wait_for_code() => {
                 match result {
-                    Ok((code, state_param)) => Ok(OAuthCallbackResult { code, state: state_param }),
+                    Ok((code, state)) => Ok(OAuthCallbackResult { code, state }),
                     Err(CallbackError::Timeout) => Err(OAuthFlowError::CallbackTimeout),
                     Err(e) => Err(OAuthFlowError::CallbackError(e)),
                 }

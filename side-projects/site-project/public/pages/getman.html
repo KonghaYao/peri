@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <link rel="stylesheet" href="/css/base.css">
+  <style type="text/tailwindcss">
+    @theme {
+      --color-bg: #0d1117;
+      --color-bg-secondary: #161b22;
+      --color-bg-hover: #1c2128;
+      --color-bg-active: rgba(31,111,235,0.12);
+      --color-text: #e6edf3;
+      --color-text-secondary: #8b949e;
+      --color-text-muted: #6e7681;
+      --color-border: #30363d;
+      --color-accent: #58a6ff;
+      --color-accent-hover: #79c0ff;
+      --color-success: #3fb950;
+      --color-warning: #d29922;
+      --color-error: #f85149;
+      --font-mono: "JetBrains Mono", "Fira Code", Menlo, monospace;
+    }
+    [data-theme="light"] {
+      --color-bg: #ffffff;
+      --color-bg-secondary: #f6f8fa;
+      --color-bg-hover: #e8eaed;
+      --color-bg-active: rgba(9,105,218,0.12);
+      --color-text: #1f2328;
+      --color-text-secondary: #57606a;
+      --color-text-muted: #656d76;
+      --color-border: #d0d7de;
+      --color-accent: #0969da;
+      --color-accent-hover: #0550ae;
+      --color-success: #1a7f37;
+      --color-warning: #9a6700;
+      --color-error: #cf222e;
+    }
+    /* 表单元素共享样式（跨元素选择器，无法用工具类直接表达） */
+    select, input[type=text], textarea { background: var(--color-bg-secondary); border: 1px solid var(--color-border); color: var(--color-text); padding: 6px 8px; border-radius: 4px; font-size: 13px; font-family: inherit; }
+    select:focus, input:focus, textarea:focus { outline: none; border-color: var(--color-accent); }
+    /* response 块（含 white-space / word-break 等无法工具类表达的属性） */
+    .response { background: var(--color-bg-secondary); padding: 12px; border-radius: 4px; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 400px; overflow: auto; border: 1px solid var(--color-border); }
+    .response.error { border-color: var(--color-error); color: var(--color-error); }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "solid-js": "https://unpkg.com/solid-js@1.9.3/dist/solid.js",
+      "solid-js/web": "https://unpkg.com/solid-js@1.9.3/web/dist/web.js",
+      "solid-js/html": "https://unpkg.com/solid-js@1.9.3/html/dist/html.js",
+      "comlink": "https://unpkg.com/comlink@4.4.1/dist/esm/comlink.mjs"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app" class="flex flex-col h-full"></div>
+
+  <script type="module">
+    import { render } from 'solid-js/web';
+    import html from 'solid-js/html';
+    import { Getman } from '/lib/getman/Getman.js';
+    import { exposeAPI } from '/lib/comlink-bridge.js';
+
+    render(() => html`<${Getman} />`, document.getElementById('app'));
+
+    exposeAPI({
+      reload: () => window.location.reload(),
+    });
+  </script>
+</body>
+</html>

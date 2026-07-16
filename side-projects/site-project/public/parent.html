@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Peri Site Preview</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <link rel="stylesheet" href="/css/base.css">
+  <style type="text/tailwindcss">
+    @theme {
+      --color-bg: #0d1117;
+      --color-bg-secondary: #161b22;
+      --color-bg-hover: #1c2128;
+      --color-bg-active: rgba(31,111,235,0.12);
+      --color-text: #e6edf3;
+      --color-text-secondary: #8b949e;
+      --color-text-muted: #6e7681;
+      --color-border: #30363d;
+      --color-accent: #58a6ff;
+      --color-accent-hover: #79c0ff;
+      --color-success: #3fb950;
+      --color-warning: #d29922;
+      --color-error: #f85149;
+      --font-mono: "JetBrains Mono", "Fira Code", Menlo, monospace;
+    }
+    [data-theme="light"] {
+      --color-bg: #ffffff;
+      --color-bg-secondary: #f6f8fa;
+      --color-bg-hover: #e8eaed;
+      --color-bg-active: rgba(9,105,218,0.12);
+      --color-text: #1f2328;
+      --color-text-secondary: #57606a;
+      --color-text-muted: #656d76;
+      --color-border: #d0d7de;
+      --color-accent: #0969da;
+      --color-accent-hover: #0550ae;
+      --color-success: #1a7f37;
+      --color-warning: #9a6700;
+      --color-error: #cf222e;
+    }
+
+    /* iframe 子元素（兄弟选择器无法用工具类表达） */
+    #sidebar iframe { flex: 1; min-height: 0; border: none; }
+    #sidebar iframe + iframe { border-top: 1px solid var(--color-border); }
+    #center-area iframe { flex: 1; min-width: 0; border: none; }
+
+    /* overlay（全屏浮窗，最高层级） */
+    .overlay { position: fixed; inset: 0; z-index: 9999; width: 100%; height: 100%; border: none; background: var(--color-bg); display: none; }
+    .overlay.visible { display: block; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "solid-js": "https://unpkg.com/solid-js@1.9.3/dist/solid.js",
+      "solid-js/web": "https://unpkg.com/solid-js@1.9.3/web/dist/web.js",
+      "solid-js/html": "https://unpkg.com/solid-js@1.9.3/html/dist/html.js",
+      "comlink": "https://unpkg.com/comlink@4.4.1/dist/esm/comlink.mjs"
+    }
+  }
+  </script>
+</head>
+<body class="flex flex-col">
+  <div id="app"></div>
+
+  <script type="module">
+    import { render } from 'solid-js/web';
+    import html from 'solid-js/html';
+    import { createSignal } from 'solid-js';
+    import { createSharedStore } from '/lib/shared-state-core.js';
+    import { HostedIframe } from '/lib/components/HostedIframe.js';
+    import { getJSON, sendJSON } from '/lib/api.js';
+
+    // ====== bootstrap：从后端 hydrate 共享状态 ======
+    let initial = {};
+    try { initial = await getJSON('/api/workspace/ui'); } catch (e) { console.warn('workspace load failed', e); }
+
+    let graphHost = null, getmanHost = null;
+
+    const store = createSharedStore({
+      currentFile: null,
+      theme: 'dark',
+      sidebarWidth: 280,
+      scmFlex: 3,
+      terminalFlex: 2,
+      scmVersion: 0,
+      ...initial,
+    }, async (keys, state) => {
+      // scmVersion 不入盘（运行时计数）
+      const persistKeys = keys.filter(k => k !== 'scmVersion');
+      if (!persistKeys.length) return;
+      const patch = Object.fromEntries(persistKeys.map(k => [k, state[k]]));
+      try { await sendJSON('/api/workspace/ui', 'PATCH', patch); }
+      catch (e) { console.error('[parent] persist failed:', e); }
+    });
+
+    // 父端额外方法（通过 store 暴露给所有子）
+    store.openGraph     = () => graphHost?.open();
+    store.closeGraph    = () => graphHost?.close();
+    store.openGetman    = () => getmanHost?.open();
+    store.closeGetman   = () => getmanHost?.close();
+    store.setStatusText = (text) => { const el = document.getElementById('status-text'); if (el) el.textContent = text; };
+
+    // 同步 theme 到 documentElement（用 store.subscribe，store.get 不是 Solid signal 无法用 createEffect）
+    store.subscribe('theme', (t) => {
+      if (t) document.documentElement.dataset.theme = t;
+    });
+    // 初始化一次（subscribe 不会立即触发）
+    if (store.get('theme')) document.documentElement.dataset.theme = store.get('theme');
+
+    // ====== 布局组件 ======
+    function App() {
+      const [graphVisible, setGraphVisible] = createSignal(false);
+      const [getmanVisible, setGetmanVisible] = createSignal(false);
+
+      // CSS class 控制显隐 + lazy iframe 首次打开需加载 src
+      store.openGraph = () => { setGraphVisible(true); graphHost?.open(); };
+      store.closeGraph = () => setGraphVisible(false);
+      store.openGetman = () => { setGetmanVisible(true); getmanHost?.open(); };
+      store.closeGetman = () => setGetmanVisible(false);
+
+      const onGraphReady = (api) => {};
+      const onGetmanReady = (api) => {};
+
+      return html`
+        <div class="flex flex-1 min-h-0 h-screen" id="main-row">
+          <aside class="flex flex-col flex-shrink-0 border-r border-border" id="sidebar" style=${() => `width:${store.get('sidebarWidth')}px`}>
+            <${HostedIframe} store=${store} src="/pages/file-tree.html" name="file-tree" />
+            <${HostedIframe} store=${store} src="/pages/scm.html" name="scm" />
+          </aside>
+          <div class="w-1 flex-shrink-0 cursor-col-resize hover:bg-accent" id="sidebar-resizer"></div>
+          <div class="flex flex-1 min-w-0" id="center-area">
+            <${HostedIframe} store=${store} src="/pages/terminal.html" name="terminal" />
+            <div class="w-1 flex-shrink-0 cursor-col-resize hover:bg-accent" id="center-resizer"></div>
+            <${HostedIframe} store=${store} src="/pages/preview.html" name="preview" />
+          </div>
+        </div>
+        <div class="flex items-center justify-between px-3 text-[11px] border-t border-border bg-bg-secondary text-text-muted flex-shrink-0 h-[22px]" id="statusbar">
+          <span>Peri Site Preview</span>
+          <span id="status-text"></span>
+        </div>
+
+        <${HostedIframe} ref=${api => (graphHost = api)}
+          store=${store} src="/pages/graph.html" name="graph"
+          lazy=${true}
+          onReady=${onGraphReady}
+          class=${() => 'overlay' + (graphVisible() ? ' visible' : '')} />
+        <${HostedIframe} ref=${api => (getmanHost = api)}
+          store=${store} src="/pages/getman.html" name="getman"
+          lazy=${true}
+          onReady=${onGetmanReady}
+          class=${() => 'overlay' + (getmanVisible() ? ' visible' : '')} />
+      `;
+    }
+
+    render(App, document.getElementById('app'));
+
+    // ====== 拖拽分割线（保留原逻辑） ======
+    function startDrag(type, e) {
+      const sx = e.clientX;
+      const sw = document.getElementById('sidebar').offsetWidth;
+      const tw = document.querySelector('[name="terminal"]').offsetWidth;
+      const move = (ev) => {
+        if (type === 'sidebar') {
+          const nw = Math.min(500, Math.max(180, sw + ev.clientX - sx));
+          document.getElementById('sidebar').style.width = nw + 'px';
+          store.set('sidebarWidth', nw);
+        } else {
+          const nw = Math.max(200, tw + ev.clientX - sx);
+          const tframe = document.querySelector('[name="terminal"]');
+          tframe.style.flex = 'none';
+          tframe.style.width = nw + 'px';
+          store.set('terminalFlex', nw);   // 简化：直接存 px
+        }
+      };
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        document.body.style.userSelect = '';
+      };
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('sidebar-resizer').addEventListener('mousedown', e => startDrag('sidebar', e));
+      document.getElementById('center-resizer').addEventListener('mousedown', e => startDrag('center', e));
+    });
+  </script>
+</body>
+</html>

@@ -11,6 +11,7 @@ let workspaceFile = "";
 
 export function initWorkspace(filePath: string) {
   workspaceFile = filePath;
+  workspaceState = loadWorkspace();   // 重新加载，确保 workspace.json 内容生效
 }
 
 export function loadWorkspace(): WorkspaceState {
@@ -38,7 +39,10 @@ export function deepMerge(target: any, source: any): any {
   return result;
 }
 
-export let workspaceState = loadWorkspace();
+export let workspaceState: WorkspaceState = {
+  fileTree: { expandedDirs: [], activeFilePath: null },
+  ui: { sidebarWidth: 280, scmFlex: 3 },
+};
 
 // ---------- 文本 / MIME 工具 ----------
 
@@ -140,7 +144,13 @@ export async function hasVisibleChildren(dirPath: string, docsDir: string): Prom
 }
 
 export async function listDir(dirPath: string, docsDir: string): Promise<FileNode[]> {
-  const entries = await readdir(dirPath, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(dirPath, { withFileTypes: true });
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') return [];   // 目录不存在时返回空数组
+    throw e;
+  }
   const nodes: FileNode[] = [];
 
   for (const entry of entries) {
@@ -161,4 +171,23 @@ export async function listDir(dirPath: string, docsDir: string): Promise<FileNod
     return a.name.localeCompare(b.name);
   });
   return nodes;
+}
+
+// ---------- 子键读写（供子键路由调用） ----------
+
+export function getWorkspaceKey(key: string) {
+  return (workspaceState as any)[key];
+}
+
+export function setWorkspaceKey(key: string, patch: any) {
+  const current = (workspaceState as any)[key] ?? {};
+  // 对象 deepMerge；primitive / array 直接覆盖
+  (workspaceState as any)[key] = deepMerge(current, patch);
+  saveWorkspaceFile(workspaceState);
+  return (workspaceState as any)[key];
+}
+
+export function deleteWorkspaceKey(key: string) {
+  delete (workspaceState as any)[key];
+  saveWorkspaceFile(workspaceState);
 }

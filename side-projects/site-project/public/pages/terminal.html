@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="https://unpkg.com/xterm@5.3.0/css/xterm.css">
+  <style type="text/tailwindcss">
+    @theme {
+      --color-bg: #0d1117;
+      --color-bg-secondary: #161b22;
+      --color-bg-hover: #1c2128;
+      --color-bg-active: rgba(31,111,235,0.12);
+      --color-text: #e6edf3;
+      --color-text-secondary: #8b949e;
+      --color-text-muted: #6e7681;
+      --color-border: #30363d;
+      --color-accent: #58a6ff;
+      --color-accent-hover: #79c0ff;
+      --color-success: #3fb950;
+      --color-warning: #d29922;
+      --color-error: #f85149;
+      --font-mono: "JetBrains Mono", "Fira Code", Menlo, monospace;
+    }
+    [data-theme="light"] {
+      --color-bg: #ffffff;
+      --color-bg-secondary: #f6f8fa;
+      --color-bg-hover: #e8eaed;
+      --color-bg-active: rgba(9,105,218,0.12);
+      --color-text: #1f2328;
+      --color-text-secondary: #57606a;
+      --color-text-muted: #656d76;
+      --color-border: #d0d7de;
+      --color-accent: #0969da;
+      --color-accent-hover: #0550ae;
+      --color-success: #1a7f37;
+      --color-warning: #9a6700;
+      --color-error: #cf222e;
+    }
+    /* xterm 第三方覆盖（无法用工具类表达） */
+    .xterm { height: 100%; }
+    .xterm-viewport::-webkit-scrollbar { display: none; }
+    .xterm-viewport { scrollbar-width: none; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "solid-js": "https://unpkg.com/solid-js@1.9.3/dist/solid.js",
+      "solid-js/web": "https://unpkg.com/solid-js@1.9.3/web/dist/web.js",
+      "solid-js/html": "https://unpkg.com/solid-js@1.9.3/html/dist/html.js",
+      "comlink": "https://unpkg.com/comlink@4.4.1/dist/esm/comlink.mjs"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app" class="flex flex-col h-full"></div>
+
+  <script src="https://unpkg.com/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://unpkg.com/@xterm/addon-fit@0.11.0/lib/addon-fit.js"></script>
+  <script src="https://unpkg.com/@xterm/addon-web-links@0.12.0/lib/addon-web-links.js"></script>
+
+  <script type="module">
+    import { render } from 'solid-js/web';
+    import html from 'solid-js/html';
+    import { TerminalTabs } from '/lib/terminal/TerminalTabs.js';
+
+    render(() => html`<${TerminalTabs} />`, document.getElementById('app'));
+  </script>
+</body>
+</html>

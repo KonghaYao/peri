@@ -18,7 +18,7 @@ fn test_bind_returns_valid_redirect_uri() {
 
 #[test]
 fn test_parse_callback_url_valid() {
-    let result = parse_callback_url("/callback?code=abc123&state=mystate", "mystate");
+    let result = parse_callback_url("/callback?code=abc123&state=mystate");
     assert!(result.is_ok());
     let (code, state) = result.unwrap();
     assert_eq!(code, "abc123");
@@ -27,26 +27,36 @@ fn test_parse_callback_url_valid() {
 
 #[test]
 fn test_parse_callback_url_missing_code() {
-    let result = parse_callback_url("/callback?state=mystate", "mystate");
+    let result = parse_callback_url("/callback?state=mystate");
     assert!(result.is_err());
 }
 
 #[test]
 fn test_parse_callback_url_missing_state() {
-    let result = parse_callback_url("/callback?code=abc123", "mystate");
+    let result = parse_callback_url("/callback?code=abc123");
     assert!(result.is_err());
 }
 
 #[test]
 fn test_parse_callback_url_invalid_path() {
-    let result = parse_callback_url("not-a-url", "mystate");
+    let result = parse_callback_url("not-a-url");
     assert!(result.is_err());
 }
 
+/// [回归测试] parse_callback_url 不做 CSRF 校验
+///
+/// 历史背景：曾经存在 state_param 字段做伪校验，但因为从未赋值
+/// 导致校验永远跳过。修复后 CSRF 完全委托 rmcp 在 token 交换阶段
+/// 通过 state_store 查找完成。本测试明确断言：传入任意 state 都能
+/// 成功解析返回，不再有「state 不匹配」错误路径。
 #[test]
-fn test_parse_callback_url_state_mismatch() {
-    let result = parse_callback_url("/callback?code=abc&state=wrong", "correct");
-    assert!(result.is_err());
+fn test_parse_callback_url_does_not_validate_csrf() {
+    // 任意 state（包括看起来「错误」的）都应原样返回
+    let result = parse_callback_url("/callback?code=abc&state=any_value");
+    assert!(result.is_ok());
+    let (code, state) = result.unwrap();
+    assert_eq!(code, "abc");
+    assert_eq!(state, "any_value");
 }
 
 #[test]
