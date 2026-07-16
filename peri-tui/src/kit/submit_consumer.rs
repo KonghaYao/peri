@@ -24,8 +24,8 @@ use crate::acp_client::AcpTuiClient;
 use crate::i18n;
 use crate::kit::acp_events;
 use crate::kit::atoms::{
-    ACP_STATE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, LOADING_EPOCH, NOTIFICATION,
-    PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE, RENDER_HEARTBEAT, REWIND_ACTION_TX,
+    ACP_STATE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, EXIT_REQUESTED, LOADING_EPOCH,
+    NOTIFICATION, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE, RENDER_HEARTBEAT, REWIND_ACTION_TX,
 };
 use crate::kit::submit_request::{
     ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
@@ -239,6 +239,10 @@ fn execute_view_action(action: ViewActionRequest, acp_client: &AcpTuiClient, cwd
                 until: Instant::now() + Duration::from_secs(5),
             });
             RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
+        }
+        ViewActionRequest::Exit => {
+            info!("kit submit_consumer: /exit command received, requesting app exit");
+            EXIT_REQUESTED.set(true);
         }
     }
 }

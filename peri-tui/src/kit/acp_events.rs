@@ -875,6 +875,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     tool_count: 0,
                     is_active: true,
                     is_error: false,
+                    created_at: Instant::now(),
                     completed_at: None,
                 })
                 .collect();
@@ -891,6 +892,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 tool_count: 0,
                 is_active: true,
                 is_error: false,
+                created_at: Instant::now(),
                 completed_at: None,
             });
         }

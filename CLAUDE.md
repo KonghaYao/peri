@@ -213,7 +213,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 颜色从 `peri-theme` 三 Atom（`THEME_ATOM`/`PALETTE_ATOM`/`PERI_COLORS_ATOM`）获取，禁止硬编码色值。`#[component]` 用 `hooks.use_atom`，非 component 两步绑定防悬垂引用。
 
 ### Workflow 排障
-"0 agents, 0 tool calls"：`which peri-workflow` 可用 → `npm install && npm run build` → `cargo build -p peri-workflow` → 重启。
+"0 agents, 0 tool calls"：确认 `npx --version` 或 `bun --version` 可用 → 重启。
 
 ## 陷阱速查
 
@@ -227,6 +227,8 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **PromptFeatures**：`detect()` 每轮读 `YOLO_MODE`/`is_git_repo`，未 frozen
 - **Immediate 命令**：绕过 event pump，必须手动 `sink.push_done()`
 - **中途纠正消息**：用 `BaseMessage::human()`，禁止 `BaseMessage::system()`（invoke.rs 会 hoist 污染 frozen prompt）
+- **诊断优先于修复**：根因未被日志/复现步骤/代码证据定位前，禁止超过 20 行的代码修改。添加诊断日志优先于修改业务逻辑
+- **3 次尝试上限**：同一 bug 修复超过 3 次仍失败时，禁止继续猜测式修复。要求用户提供运行时数据（RUST_LOG=debug 等）后再动手
 
 ### ACP/TUI 分层
 - **execute_prompt**：Agent 构建统一入口，禁止 TUI 直连运行时
@@ -234,6 +236,8 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **add_message vs prepend_message**：非 System 消息用 `add_message`（尾部追加）
 - **`_meta` key**：ACP SDK 序列化 key 是 `"_meta"` 非 `"meta"`。`is_session_replay` 检测用四级 fallback（`_meta`→`meta`→`content._meta`→`content.meta`）
 - **session replay DTO**：复用正常流式路径数据结构，不要发明 replay 专用变体
+- **ACP 协议字段优先**：数据流设计时先查 ACP 协议已有字段（如 `StateSnapshotMeta.budget_pct`、goal_state `block_continue`），禁止自己从 raw 数据重新计算
+- **工具别名**：通过 `BaseTool::aliases()` trait 方法自声明，禁止重复注册或集中式静态表。别名仅用于 LLM 可能输出的同义词（如 Bash→"Shell"）
 
 ### TUI 渲染
 - **use_* 顺序**：`hooks.use_*` 必须在 `if`/`match`/`return` 之前，顺序/数量变化→`"Hook type mismatch"` panic
@@ -242,10 +246,15 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **BRIDGE_RESET_COUNTER**：/clear 和 thread 切换前必须递增，仅 atom 重置不足
 - **overlay 空态**：返回 `Positioned(width:0, height:0)`，不要 `View()`/`Fragment` → 白屏
 - **事件边界**：消息区只处理鼠标滚轮，编辑区只处理键盘
+- **面板交互规范**：选中 tab 用反色（accent 底色+surface 字色），禁止 `[ ]` 包裹。面板内禁止单字母快捷键（j/k/q 等），仅允许方向键 + Tab + Esc + Enter。文本输入用 `TextAreaState`，禁止手工键盘事件处理
 
 ### SubAgent / Worktree
 - **coder cwd**：不遵守 `Agent(cwd=...)`，prompt 中必须用绝对路径。push 前 `git diff --stat` 确认
 - **文件白名单**：coding prompt 必须列文件白名单 + `DO NOT modify:` 禁止清单
+- **Agent 任务粒度**：单次 Agent 调用最多处理 8 个文件，超过则拆分批次
+- **批量机械替换用 perl**：超过 10 个文件的模式替换（重命名、import 路径等），用 `perl -i -pe`/`find ... -exec sed` 脚本，禁止逐个 Edit 或委托 coder subagent
+- **bg agent 构建检查**：后台 agent 完成后必须 `cargo build` 验证。失败则 `git checkout -- <modified files>` 恢复文件，切换到手动模式
+- **AgentResult 禁止轮询**：后台任务结果通过 system-reminder 自动推送。禁止调用 `AgentResult()` 轮询——浪费 token 且结果会重复推送
 
 ### Rust / 编码
 - **rustfmt import**：`use crate::module::*` 通配导入排在单类型之前；跨 crate 同理
@@ -255,6 +264,10 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **剪贴板**：阻塞系统 I/O 用 `std::thread::spawn` 独立线程
 - **Paste 事件**：`Event::Paste` 独立于 key event，需 BracketedPaste
 - **Theme 悬垂引用**：`&THEME_ATOM.state().read().xxx` 崩，须两步绑定；`theme_def.semantic` 不能直接访问，须 `theme_def.read().semantic`
+- **Edit 前必 Read**：连续编辑同一文件时，每次 Edit 前必须 Read 确认 old_string 匹配当前文件状态。同文件修改超过 3 处，用 Write 整体重写替代逐块 Edit
+- **commit 消息特殊字符**：含 `{}`、`\`` 等 shell 特殊字符时，用 `git commit -F /tmp/msg.txt` 而非 `-m`。提交前 `git diff --cached --stat` 确认 scope
+- **cargo fmt 参数**：`cargo fmt -- -p peri-tui`（注意 `--`），非 `cargo fmt -p peri-tui`
+- **let-chains + rustfmt 不兼容**：peri-tui/peri-theme edition=2024 的 let chains 语法导致 `cargo fmt` 报错。提交时若卡 fmt 可 `--no-verify` 跳过
 
 ### Langfuse 监控 v2
 - **trace_id = turn_id**：tracer.new() 由 caller 传入 turn_id，禁止自生成。trace_id 不可变。

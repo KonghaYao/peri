@@ -45,7 +45,11 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = hooks.use_atom(&LANG_VERSION);
     // 动态换行宽度：跟随终端实际宽度，避免宽终端下内容被压缩在 80 列内
     let (term_w, _) = hooks.use_terminal_size();
-    let wrap_width = (term_w as usize).saturating_sub(2).max(40);
+    let wrap_width = if term_w > 0 {
+        (term_w as usize).saturating_sub(2).max(40)
+    } else {
+        80
+    };
 
     let focused = hooks.use_state(|| 0usize);
     let answers = hooks.use_state(Vec::<Vec<usize>>::new);

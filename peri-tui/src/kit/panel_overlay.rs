@@ -17,6 +17,7 @@
 
 use crate::kit::atoms;
 use crate::kit::panel_registry;
+use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     prelude::*,
     ratatui::layout::{Constraint, Direction, Flex},
@@ -29,29 +30,43 @@ use ratatui_kit::{
 pub fn PanelOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let active_panel = hooks.use_atom(&atoms::ACTIVE_PANEL);
     let active = *active_panel.read();
-    let (_term_w, _term_h) = hooks.use_terminal_size();
+    let (_term_w, term_h) = hooks.use_terminal_size();
     match active {
         Some(kind) => match panel_registry::render(kind) {
-            Some(panel) => render_panel(kind, panel),
+            Some(panel) => render_panel(kind, panel, term_h),
             None => render_empty(),
         },
         None => render_empty(),
     }
 }
 
-/// 包裹面板——在消息流和输入区之间占据注册表声明的固定高度，水平居中显示面板内容。
+/// 预留 MessageArea 的最小行数
+const MESSAGE_RESERVE: u16 = 4;
+
+/// 包裹面板——动态高度自适应终端尺寸，水平居中显示面板内容。
 fn render_panel(
     kind: crate::app::panel_types::PanelKind,
     panel: AnyElement<'static>,
+    term_h: u16,
 ) -> AnyElement<'static> {
-    let layout = panel_registry::panel_layout(kind);
+    let _layout = panel_registry::panel_layout(kind);
+
+    let theme_guard = THEME_ATOM.state();
+    let theme = theme_guard.read();
+    let max_h = theme.component.panel.max_height;
+    let min_h = theme.component.panel.min_height;
+    drop(theme);
+    let _ = theme_guard;
+
+    let available = term_h.saturating_sub(MESSAGE_RESERVE);
+    let height = max_h.min(available).max(min_h.min(available));
 
     element!(
         View(
             flex_direction: Direction::Horizontal,
             justify_content: Flex::Center,
             width: Constraint::Fill(1),
-            height: panel_registry::panel_constraint(layout.height),
+            height: Constraint::Length(height),
         ) {
             View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
                 { panel }

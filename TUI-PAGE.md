@@ -25,7 +25,7 @@
 - [9. 快捷键设计规范](#9-快捷键设计规范)
 - [10. 设计落地注意事项](#10-设计落地注意事项)
 
-本文档描述 Peri TUI 的页面、面板、弹窗与局部组件能力。设计以当前 `peri-tui/src/kit/` 架构为基准：`AppShell → SessionColumn → MessageArea + PanelOverlay + BgTaskArea + InputArea`，`StatusBar` 与 `SessionColumn` 同级位于根布局底部。**InputArea、PanelOverlay 和 BgTaskArea 必须在 SessionColumn 内部**：PanelOverlay 位于消息流与输入区之间，BgTaskArea 位于 PanelOverlay 和 InputArea 之间；面板打开时隐藏 BgTaskArea 和 InputArea。PopupOverlay 是 AppShell 根级覆盖层。
+本文档描述 Peri TUI 的页面、面板、弹窗与局部组件能力。设计以当前 `peri-tui/src/kit/` 架构为基准：`AppShell → SessionColumn → MessageArea + PanelOverlay + InputArea`，`StatusBar` + `BgTaskArea` 与 `SessionColumn` 同级位于根布局底部（BgTaskArea 在 StatusBar 下方）。PanelOverlay 位于消息流与输入区之间；面板打开时隐藏 InputArea。PopupOverlay 是 AppShell 根级覆盖层。
 
 ## v2 → 未来最优架构目标
 
@@ -406,12 +406,6 @@ panel-payload                ← Panel 数据推送（计划）
 │ │ │ - between MessageArea and InputArea                                  │ │ │
 │ │ └──────────────────────────────────────────────────────────────────────┘ │ │
 │ │ ┌──────────────────────────────────────────────────────────────────────┐ │ │
-│ │ │ BgTaskArea：后台 Agent 任务状态区                                     │ │ │
-│ │ │ - inside SessionColumn, 位于 PanelOverlay 和 InputArea 之间          │ │ │
-│ │ │ - 展示后台 Agent 名称/状态/耗时                                      │ │ │
-│ │ │ - 空态时高度收缩为 0                                                 │ │ │
-│ │ └──────────────────────────────────────────────────────────────────────┘ │ │
-│ │ ┌──────────────────────────────────────────────────────────────────────┐ │ │
 │ │ │ InputArea：multiline prompt + @mention + slash completion            │ │ │
 │ │ │ - inside SessionColumn                                               │ │ │
 │ │ │ - hidden while panel is open                                         │ │ │
@@ -419,6 +413,11 @@ panel-payload                ← Panel 数据推送（计划）
 │ └──────────────────────────────────────────────────────────────────────────┘ │
 │ ┌──────────────────────────────────────────────────────────────────────────┐ │
 │ │ StatusBar：permission · cwd · provider/model · CPU · MEM + hints         │ │
+│ └──────────────────────────────────────────────────────────────────────────┘ │
+│ ┌──────────────────────────────────────────────────────────────────────────┐ │
+│ │ BgTaskArea：后台任务状态区，每行一个 agent，格式　● coder  desc  2m15s    │ │
+│ │ - 位于 AppShell 根层 StatusBar 下方                                      │ │
+│ │ - 空态时高度收缩为 0                                                     │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
 │ PopupOverlay：Hitl / Rewind / OAuth，居中覆盖，优先级最高           │
@@ -441,8 +440,7 @@ panel-payload                ← Panel 数据推送（计划）
 │  ◜ 思考中… (12s · ↓ 1.2k tokens)                                             │
 │    ◼ 进行中  设计 Workflow Panel                                              │
 │                                                                              │
-│  ● agent (coder)  修改文档                                                    │
-│    N tool calls, running 2min 15s                                            │
+│  ● agent (coder)  修改文档                                   2min 15s       │
 │                                                                              │
 │ ┌──────────────────────────────────────────────────────────────────────────┐ │
 │ │ ❯ 输入你的任务...                                                        │ │
@@ -1277,26 +1275,24 @@ InputArea 内所有按键事件通过优先级链分发，同一事件只被最�
 
 ## 5b. BgTaskArea 后台任务区域
 
-`BgTaskArea` 是 `SessionColumn` 内部组件，位于 PanelOverlay 和 InputArea 之间。当面板打开时，BgTaskArea 和 InputArea 一起隐藏。数据来自 `BG_DISPLAY` 和 `BG_AGENT_IDS` atom，由 `dispatch_and_notify` 在 SubagentStarted/SubagentDone 事件时写入。
+`BgTaskArea` 是 `AppShell` 根层组件，位于 StatusBar 下方（屏幕最底部）。数据来自 `BG_DISPLAY` atom，由 `dispatch_and_notify` 在 bg 任务事件时写入。
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ SessionColumn                                                                │
+│ AppShell root                                                                 │
 │ ═══════════════════════════════════════════════════════════════════════════  │
-│ MessageArea                                                                  │
-│ ...                                                                          │
+│ SessionColumn                                                                 │
+│   MessageArea                                                                 │
+│   PanelOverlay                                                                │
+│   InputArea                                                                   │
 │ ═══════════════════════════════════════════════════════════════════════════  │
-│ BgTaskArea                                                                   │
+│ StatusBar：Auto · perihelion · anthropic/…                                    │
+│ ═══════════════════════════════════════════════════════════════════════════  │
+│ BgTaskArea                                                                    │
 │                                                                              │
-│  ● coder (bg)  修改 TUI-PAGE.md                                              │
-│    running 2min 15s                                                          │
+│  ● coder  修改 TUI-PAGE.md                                  2min 15s         │
+│  ✓ reviewer  审查 agent 模块                                     45s         │
 │                                                                              │
-│  ✓ reviewer (bg)  审查 agent 模块                                            │
-│    completed 45s                                                             │
-│                                                                              │
-│ ═══════════════════════════════════════════════════════════════════════════  │
-│ InputArea（panel open 或 bg task 区无内容时 hidden）                         │
-│ ═══════════════════════════════════════════════════════════════════════════  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1304,20 +1300,23 @@ InputArea 内所有按键事件通过优先级链分发，同一事件只被最�
 
 | 属性 | 规格 |
 |------|------|
-| 前缀 | `●`（running），`✓`（completed），`✗`（failed） |
-| 状态色 | running → `success`（绿色动画 800ms 闪烁），completed → `success`，failed → `error` |
-| Agent 名称 | `agent_type (bg)`（`text` 色） |
-| 任务预览 | `muted` 色，截断 |
-| 耗时 | `"running Xmin Xs"` / `"completed Xs"`（`muted` 色） |
-| 空态 | 无后台 Agent 时高度收缩为 0 |
-| 边框 | 与 Panel/InputArea 统一，只用上下边界分隔线（`border_dim`） |
+| 每行格式 | `状态符号 + agent_type + desc + 右侧耗时`，一行一个 agent |
+| 状态符号 | `●`（running），`✓`（completed），`✗`（failed） |
+| 状态色 | running → white，completed → green，failed → red |
+| agent_type | dim 灰色 |
+| desc | 终端宽减去固定开销后 CJK 安全截断，超长尾部加 `…` |
+| 耗时 | 右对齐，dim 灰色。格式 `Xs` / `XmXs` / `XhXm`；已完成显示总运行时长 |
+| 空态 | 无活跃任务时高度收缩为 0 |
+| 排序 | 活跃任务在前，已完成/失败在后 |
+| 完成保留 | 3 秒后移除 |
 
 能力：
 
-- 展示所有活跃的后台 SubAgent 状态（名称、描述、耗时）。
-- bg agent 启动时通过 `SubagentStarted(is_background: true)` 事件添加条目。
-- bg agent 完成/失败时通过 `SubagentDone` 事件更新条目状态。
-- `Ctrl+B` 跳转焦点到 BgTaskArea（从 InputArea）。
+- 每行展示一个后台任务的状态（名称、描述、运行或总耗时）。
+- 运行中任务通过 `RENDER_HEARTBEAT` 持续更新耗时显示。
+- bg agent 启动时通过 `BgTaskStarted` 事件添加条目（含 `created_at` 时间戳）。
+- bg agent 完成/失败时通过 `BgTaskCompleted` / `BgTaskCancelled` 更新条目状态。
+- `duration_since()` 使用 `safe_elapsed()` 安全包装，避免时钟倒流 panic。
 - 空态不占用布局空间。
 
 ## 6. 15 个 Panel 页面设计

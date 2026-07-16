@@ -1,5 +1,9 @@
 //! ratatui-kit AppShell root component.
 
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+
 use crate::kit::atoms;
 use crate::kit::bg_task_area::BgTaskArea;
 use crate::kit::event_handlers;
@@ -12,6 +16,7 @@ use ratatui_kit::{
     prelude::*,
     ratatui::layout::{Constraint, Direction},
 };
+use tracing::info;
 
 #[component]
 pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -35,10 +40,41 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ctx.set_auto_quit_on_ctrl_c(false);
     }
 
-    // 注册事件处理器
-    let mut exit_fn = hooks.use_exit();
-    event_handlers::register_global_handlers(&mut hooks, Handler::from(move |_: ()| exit_fn()));
+    // exit_fn 是 ratatui-kit 的退出闭包，调用后 fullscreen event loop 结束，
+    // 随后 entry.rs 执行终端恢复 + shutdown + teardown_app。
+    // 将它包在 Arc<Mutex<Option<...>>> 中共享给两个消费端：
+    //   1. Ctrl+C 全局处理器（event_handlers）
+    //   2. /exit 命令 effect（use_effect 订阅 EXIT_REQUESTED 原子）
+    let exit_fn = hooks.use_exit();
+    let exit_shared = Arc::new(Mutex::new(Some(exit_fn)));
+
+    // 注册 Ctrl+C 全局事件处理器
+    let exit_for_ctrl_c = exit_shared.clone();
+    event_handlers::register_global_handlers(
+        &mut hooks,
+        Handler::from(move |_: ()| {
+            if let Some(mut f) = exit_for_ctrl_c.lock().take() {
+                f();
+            }
+        }),
+    );
     event_handlers::register_root_handlers(&mut hooks);
+
+    // /exit 命令——订阅 EXIT_REQUESTED 原子，submit_consumer 设为 true 时触发。
+    let exit_requested_handle = hooks.use_atom(&atoms::EXIT_REQUESTED);
+    let exit_requested_val = *exit_requested_handle.read();
+    let exit_for_cmd = exit_shared.clone();
+    hooks.use_effect(
+        move || {
+            if exit_requested_val {
+                info!("app_shell: /exit received, calling exit_fn");
+                if let Some(mut f) = exit_for_cmd.lock().take() {
+                    f();
+                }
+            }
+        },
+        (exit_requested_val,),
+    );
 
     // 读取状态值（AcpStateSnapshot 非 Copy，用 .read()）
     let state = acp_state.read();

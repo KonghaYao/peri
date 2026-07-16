@@ -211,6 +211,8 @@ pub static AT_MENTION_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static SLASH_HINT_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static SUBMIT_TX: OnceLock<UnboundedSender<SubmitRequest>> = OnceLock::new();
 pub static CANCEL_TX: OnceLock<UnboundedSender<()>> = OnceLock::new();
+/// /exit 命令：submit_consumer 设为 true，app_shell use_effect 消费并调用 exit_fn()。
+pub static EXIT_REQUESTED: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static RESIZE_TX: OnceLock<UnboundedSender<u16>> = OnceLock::new();
 
 pub static SERVICE_SNAPSHOT: AtomStatic<ServiceSnapshot> =
@@ -384,6 +386,8 @@ pub struct BgDisplayEntry {
     pub is_active: bool,
     /// 失败标志
     pub is_error: bool,
+    /// 创建时间（用于显示运行时长）
+    pub created_at: Instant,
     /// 完成时间（3s 倒计时起点）
     pub completed_at: Option<Instant>,
 }

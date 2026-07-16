@@ -26,6 +26,8 @@ pub enum ViewActionRequest {
     CycleProvider,
     CyclePermissionMode,
     ExportText(ExportMode),
+    /// /exit 命令：退出程序。
+    Exit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +96,7 @@ fn parse_view_action(command: &str, input: &str) -> Option<ViewActionRequest> {
         "/provider" => Some(ViewActionRequest::CycleProvider),
         "/mode" => Some(ViewActionRequest::CyclePermissionMode),
         "/debug-export-text" => Some(ViewActionRequest::ExportText(parse_export_mode(input))),
+        "/exit" | "/quit" => Some(ViewActionRequest::Exit),
         _ => None,
     }
 }
@@ -246,6 +249,14 @@ mod tests {
             Some(SubmitRequest::ViewAction(ViewActionRequest::ExportText(
                 ExportMode::Screen,
             )))
+        );
+        assert_eq!(
+            parse_submit_request("/exit"),
+            Some(SubmitRequest::ViewAction(ViewActionRequest::Exit))
+        );
+        assert_eq!(
+            parse_submit_request("/quit"),
+            Some(SubmitRequest::ViewAction(ViewActionRequest::Exit))
         );
     }
 }
