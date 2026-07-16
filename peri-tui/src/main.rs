@@ -209,6 +209,27 @@ enum PluginAction {
         #[arg(short = 's', long)]
         scope: Option<String>,
     },
+    /// 管理 marketplace 注册
+    Marketplace {
+        #[command(subcommand)]
+        action: MarketplaceAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum MarketplaceAction {
+    /// 添加一个 marketplace
+    Add {
+        /// marketplace 来源（GitHub 简写 "user/repo"、URL、本地路径等）
+        source: String,
+    },
+    /// 列出已注册的 marketplace
+    List,
+    /// 删除一个 marketplace
+    Remove {
+        /// marketplace 名称
+        name: String,
+    },
 }
 
 // ─── 环境变量注入 ──────────────────────────────────────────────────────────
@@ -423,6 +444,15 @@ fn main() -> Result<()> {
                     PluginAction::Uninstall { plugin, scope } => {
                         cli_plugin::run_plugin_uninstall(&plugin, scope.as_deref()).await
                     }
+                    PluginAction::Marketplace { action } => match action {
+                        MarketplaceAction::Add { source } => {
+                            cli_plugin::run_marketplace_add(&source)
+                        }
+                        MarketplaceAction::List => cli_plugin::run_marketplace_list(),
+                        MarketplaceAction::Remove { name } => {
+                            cli_plugin::run_marketplace_remove(&name)
+                        }
+                    },
                 }
             })
         }

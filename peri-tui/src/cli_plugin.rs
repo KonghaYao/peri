@@ -1,8 +1,13 @@
-//! plugin 子命令实现：list / install / uninstall
+//! plugin 子命令实现：list / install / uninstall / marketplace add/list/remove
 
 use anyhow::Result;
+use chrono::Local;
 
 use crate::cli_args::PluginScope;
+use peri_middlewares::plugin::{
+    KnownMarketplace, MarketplaceManager, MarketplaceSource, load_known_marketplaces,
+    parse_marketplace_input, save_known_marketplaces,
+};
 
 struct PluginListEntry {
     id: String,
@@ -113,5 +118,83 @@ pub async fn run_plugin_uninstall(plugin_id: &str, _scope_str: Option<&str>) -> 
         .map_err(|e| anyhow::anyhow!("卸载失败: {e}"))?;
 
     println!("已卸载: {}", plugin_id);
+    Ok(())
+}
+
+pub fn run_marketplace_add(source: &str) -> Result<()> {
+    let marketplace_source = parse_marketplace_input(source)
+        .map_err(|e| anyhow::anyhow!("无效的 marketplace source: {e}"))?;
+
+    let name = MarketplaceManager::extract_name(&marketplace_source);
+
+    let mut marketplaces =
+        load_known_marketplaces(None).map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
+
+    for mkt in &marketplaces {
+        if MarketplaceManager::extract_name(&mkt.source) == name {
+            anyhow::bail!("marketplace \"{}\" 已存在", name);
+        }
+    }
+
+    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    marketplaces.push(KnownMarketplace {
+        source: marketplace_source,
+        install_location: String::new(),
+        auto_update: false,
+        last_updated: now,
+    });
+
+    save_known_marketplaces(&marketplaces, None)
+        .map_err(|e| anyhow::anyhow!("保存 marketplace 失败: {e}"))?;
+
+    println!("已添加 marketplace: {}", name);
+    Ok(())
+}
+
+pub fn run_marketplace_list() -> Result<()> {
+    let marketplaces =
+        load_known_marketplaces(None).map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
+
+    if marketplaces.is_empty() {
+        println!("没有注册的 marketplace。");
+        return Ok(());
+    }
+
+    println!("{:<30} {:<60} {:<20}", "名称", "来源", "最后更新");
+    println!("{}", "-".repeat(112));
+    for mkt in &marketplaces {
+        let name = MarketplaceManager::extract_name(&mkt.source);
+        let source_str = match &mkt.source {
+            MarketplaceSource::GitHub { repo } => format!("github:{}", repo),
+            MarketplaceSource::Git { url } => format!("git:{}", url),
+            MarketplaceSource::Url { url } => url.clone(),
+            MarketplaceSource::File { path } => format!("file:{}", path),
+            MarketplaceSource::Directory { path } => format!("dir:{}", path),
+            MarketplaceSource::Npm { package } => format!("npm:{}", package),
+        };
+        println!("{:<30} {:<60} {:<20}", name, source_str, mkt.last_updated);
+    }
+    Ok(())
+}
+
+pub fn run_marketplace_remove(name: &str) -> Result<()> {
+    let marketplaces =
+        load_known_marketplaces(None).map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
+
+    let original_len = marketplaces.len();
+
+    let filtered: Vec<KnownMarketplace> = marketplaces
+        .into_iter()
+        .filter(|mkt| MarketplaceManager::extract_name(&mkt.source) != name)
+        .collect();
+
+    if filtered.len() == original_len {
+        anyhow::bail!("未找到名为 \"{}\" 的 marketplace", name);
+    }
+
+    save_known_marketplaces(&filtered, None)
+        .map_err(|e| anyhow::anyhow!("保存 marketplace 失败: {e}"))?;
+
+    println!("已删除 marketplace: {}", name);
     Ok(())
 }
