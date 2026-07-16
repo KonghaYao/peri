@@ -415,6 +415,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
         // push prompt 到 queue
         v2_ctx
             .context
+            .session
             .queue
             .push(peri_agent::session::queue::QueuedMessage::new(
                 peri_agent::session::queue::MessageKind::Prompt,
@@ -424,9 +425,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // flush prompt queue → transcript（before_agent 钩子依赖 messages()）
         {
-            let consumed = v2_ctx.context.queue.drain_for_receive();
+            let consumed = v2_ctx.context.session.queue.drain_for_receive();
             if !consumed.is_empty() {
-                let mut transcript = v2_ctx.context.transcript.write();
+                let mut transcript = v2_ctx.context.session.transcript.write();
                 peri_agent::agent::stages::append_messages_to_transcript(&mut transcript, consumed);
             }
         }

@@ -7,9 +7,10 @@
 //! 4. 从 SQLite 持久化中删除被移除的消息
 //! 5. 发送 CompactCompleted 事件通知 TUI 刷新
 
+mod events;
+
 use std::path::Path;
 
-use peri_agent::agent::events::ExecutorEvent;
 use peri_agent::messages::{BaseMessage, ContentBlock, MessageId};
 use tracing::{debug, warn};
 
@@ -71,13 +72,7 @@ impl AgentCommand for RewindCommand {
             Err(e) => {
                 let msg = format!("rewind 参数解析失败: {e}");
                 warn!(msg);
-                ctx.event_sink
-                    .push_event(
-                        &ctx.session_id,
-                        &ExecutorEvent::CompactError { message: msg },
-                        0,
-                    )
-                    .await;
+                events::emit_rewind_parse_error(&ctx.event_sink, &ctx.session_id, &e).await;
                 return CommandResult {
                     messages: ctx.history,
                     stop_reason: PromptStopReason::EndTurn,
@@ -95,13 +90,12 @@ impl AgentCommand for RewindCommand {
             None => {
                 let msg = format!("rewind: 未找到目标消息 {}", args.target_message_id);
                 warn!(msg);
-                ctx.event_sink
-                    .push_event(
-                        &ctx.session_id,
-                        &ExecutorEvent::CompactError { message: msg },
-                        0,
-                    )
-                    .await;
+                events::emit_rewind_not_found(
+                    &ctx.event_sink,
+                    &ctx.session_id,
+                    &args.target_message_id,
+                )
+                .await;
                 return CommandResult {
                     messages: ctx.history,
                     stop_reason: PromptStopReason::EndTurn,
@@ -146,16 +140,13 @@ impl AgentCommand for RewindCommand {
         if !revert_warnings.is_empty() {
             summary.push_str(&format!("（警告: {}）", revert_warnings.join("; ")));
         }
-        ctx.event_sink
-            .push_event(
-                &ctx.session_id,
-                &ExecutorEvent::RewindCompleted {
-                    summary,
-                    messages: retained_messages.clone(),
-                },
-                0,
-            )
-            .await;
+        events::emit_rewind_completed(
+            &ctx.event_sink,
+            &ctx.session_id,
+            summary,
+            retained_messages.clone(),
+        )
+        .await;
 
         CommandResult {
             messages: retained_messages,

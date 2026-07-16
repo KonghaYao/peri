@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use chrono::Local;
 use fluent_bundle::FluentValue;
 use peri_agent::messages::MessageContent;
+use peri_middlewares::hitl::PermissionMode;
 use ratatui::text::Line;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -210,8 +211,6 @@ fn execute_view_action(action: ViewActionRequest, acp_client: &AcpTuiClient, cwd
             }
         }
         ViewActionRequest::CyclePermissionMode => {
-            use peri_middlewares::hitl::PermissionMode;
-
             if let Some(mode_handle) = PERMISSION_MODE_HANDLE.get() {
                 let current = mode_handle.load();
                 let next = match current {

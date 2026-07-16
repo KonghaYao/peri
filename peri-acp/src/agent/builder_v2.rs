@@ -104,9 +104,9 @@ pub fn build_stage_context(
         shared_tools: shared_tools_opt,
         error_suggest_registry,
         tool_registry_snapshot,
-        system_prompt,
         context_budget,
         compact_config,
+        ..
     } = agent_output.components;
 
     let shared_tools: SharedToolMap =
@@ -249,9 +249,6 @@ pub fn build_stage_context(
     if let Some(llm) = compact_llm_for_v2 {
         builder = builder.with_compact_llm(llm);
     }
-    if let Some(sp) = system_prompt {
-        builder = builder.with_system_prompt(sp);
-    }
 
     // 注入 idle_inbox（transport-aware await_wake）
     if let Some(inbox) = idle_inbox {
@@ -339,6 +336,6 @@ mod tests {
         let turn = session.start_turn();
         let ctx =
             StageContext::builder(turn, session.transcript(), session.queue().clone()).build();
-        assert_eq!(ctx.llm.model_name(), "null");
+        assert_eq!(ctx.runtime.llm.model_name(), "null");
     }
 }

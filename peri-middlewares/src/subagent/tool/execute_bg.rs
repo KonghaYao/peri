@@ -18,6 +18,7 @@ use peri_agent::{
 };
 
 use super::build_agent::CancelPolicy;
+use super::lifecycle::emit_subagent_stop_bg;
 use crate::{
     hooks::types::{HookEvent, RegisteredHook},
     subagent::{
@@ -135,6 +136,7 @@ impl super::SubAgentTool {
         // push prompt 到 queue
         v2_ctx
             .context
+            .session
             .queue
             .push(peri_agent::session::queue::QueuedMessage::new(
                 peri_agent::session::queue::MessageKind::Prompt,
@@ -239,12 +241,13 @@ impl super::SubAgentTool {
                     // 保证 subagent_depth 配对减 1（参考 fork 路径 spawner.rs:251-256）。
                     // 必须在 BackgroundTaskResult 构造之前发射——后者会 move output。
                     if let Some(ref sender) = bg_event_sender {
-                        let _ = sender.send(ExecutorEvent::SubagentStopped {
-                            agent_name: agent_name_clone.clone(),
-                            result: output.clone(),
-                            is_error: true,
-                            instance_id: child_thread_id_clone.clone(),
-                        });
+                        emit_subagent_stop_bg(
+                            sender,
+                            &agent_name_clone,
+                            output.clone(),
+                            true,
+                            &child_thread_id_clone,
+                        );
                     }
                     let result = peri_agent::agent::events::BackgroundTaskResult {
                         task_id: task_id_clone.clone(),
@@ -278,12 +281,13 @@ impl super::SubAgentTool {
             // [arch-align] 通过 bg_event_sender（BG pump）发送，与 fork 路径（spawner.rs:315）对齐。
             // 保证 subagent_depth 配对递减（handle_subagent_stop 处理）。
             if let Some(ref sender) = bg_event_sender {
-                let _ = sender.send(ExecutorEvent::SubagentStopped {
-                    agent_name: agent_name_clone.clone(),
-                    result: output_summary.clone(),
-                    is_error: interrupted,
-                    instance_id: child_thread_id_clone.clone(),
-                });
+                emit_subagent_stop_bg(
+                    sender,
+                    &agent_name_clone,
+                    output_summary.clone(),
+                    interrupted,
+                    &child_thread_id_clone,
+                );
             }
             fire_subagent_stop_hooks(
                 &registered_hooks,
@@ -453,23 +457,6 @@ async fn fire_subagent_stop_hooks(
 
 /// 从 session transcript 提取最后一条非空 AI 消息文本
 fn extract_last_ai_text(session: &Arc<peri_agent::session::Session>) -> String {
-    let transcript = session.transcript();
-    let tx = transcript.read();
-    tx.visible_messages()
-        .iter()
-        .rev()
-        .find_map(|m| {
-            if matches!(m, BaseMessage::Ai { .. }) {
-                let t = m.content();
-                let trimmed = t.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default()
+    // P1-11: 委托给 super::extract_last_ai_text（tool/mod.rs 共用实现）
+    super::extract_last_ai_text(session)
 }

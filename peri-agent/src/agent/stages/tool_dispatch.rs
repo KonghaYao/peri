@@ -3,8 +3,8 @@
 //! 关键设计：
 //! - **state 来源**：v2 用 `StageContext.transcript`（通过 middleware_runner 桥接
 //!   AgentState 调用 middleware chain）
-//! - **事件总线**：v2 用 `ctx.event_bus.emit_render(RenderEvent::*)`
-//! - **写入语义**：v2 用 `ctx.transcript.write().append()`
+//! - **事件总线**：v2 用 `ctx.runtime.event_bus.emit_render(RenderEvent::*)`
+//! - **写入语义**：v2 用 `ctx.session.transcript.write().append()`
 //!
 //! 不变量（与 v1 一致）：
 //! - **延迟写入**：before_tool / after_tool 期间 transcript 不含本轮 AI 消息
@@ -93,7 +93,7 @@ pub async fn dispatch_tools(
     cancel: &CancellationToken,
 ) -> AgentResult<DispatchOutcome> {
     let turn_id = ctx.turn_id();
-    let agent_id = ctx.agent_id;
+    let agent_id = ctx.session.agent_id;
 
     let tc_reqs: Vec<ToolCallRequest> = reasoning
         .tool_calls
@@ -108,7 +108,7 @@ pub async fn dispatch_tools(
 
     // emit AI 工具前文本（非流式；流式由 LLM 适配器通过 StreamingContext emit）
     if !reasoning.streamed && !reasoning.thought.trim().is_empty() {
-        ctx.event_bus.emit_render(RenderEvent::TextChunk {
+        ctx.runtime.event_bus.emit_render(RenderEvent::TextChunk {
             turn_id,
             agent_id,
             chunk: reasoning.thought.clone(),
@@ -116,7 +116,7 @@ pub async fn dispatch_tools(
     }
 
     let all_tools: HashMap<String, Arc<dyn BaseTool>> = {
-        let tools_guard = ctx.tools.read();
+        let tools_guard = ctx.runtime.tools.read();
         tools_guard
             .iter()
             .map(|(k, v)| (k.clone(), Arc::clone(v)))
@@ -136,7 +136,7 @@ pub async fn dispatch_tools(
 
     // 阶段 B：原子写入 transcript（staging 模式）
     {
-        let mut tx = ctx.transcript.write();
+        let mut tx = ctx.session.transcript.write();
         tx.stage_ai_message(ai_msg);
         for (_, result) in &collect_outcome.results {
             let tool_msg = if result.is_error {
@@ -241,7 +241,7 @@ async fn run_before_tool_approvals(
     cancel: &CancellationToken,
 ) -> AgentResult<ApprovalOutcome> {
     let turn_id = ctx.turn_id();
-    let agent_id = ctx.agent_id;
+    let agent_id = ctx.session.agent_id;
 
     let mut ready_calls: Vec<ToolCall> = Vec::with_capacity(original_calls.len());
     let mut settled_results: Vec<(ToolCall, ToolResult)> = Vec::new();
@@ -252,7 +252,7 @@ async fn run_before_tool_approvals(
         if cancel.is_cancelled() {
             // 为已 emit ToolStart 的 ready_calls 补发 ToolEnd
             for tc in &ready_calls {
-                ctx.event_bus.emit_render(RenderEvent::ToolEnded {
+                ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
                     turn_id,
                     agent_id,
                     tool_call_id: tc.id.clone(),
@@ -265,7 +265,7 @@ async fn run_before_tool_approvals(
         }
         match before_result {
             Ok(modified_call) => {
-                ctx.event_bus.emit_render(RenderEvent::ToolStarted {
+                ctx.runtime.event_bus.emit_render(RenderEvent::ToolStarted {
                     turn_id,
                     agent_id,
                     tool_call_id: modified_call.id.clone(),
@@ -277,14 +277,14 @@ async fn run_before_tool_approvals(
             Err(AgentError::ToolRejected { ref reason, .. }) => {
                 let rejection_result =
                     ToolResult::error(&tool_call.id, &tool_call.name, reason.clone());
-                ctx.event_bus.emit_render(RenderEvent::ToolStarted {
+                ctx.runtime.event_bus.emit_render(RenderEvent::ToolStarted {
                     turn_id,
                     agent_id,
                     tool_call_id: tool_call.id.clone(),
                     name: tool_call.name.clone(),
                     input: tool_call.input.clone(),
                 });
-                ctx.event_bus.emit_render(RenderEvent::ToolEnded {
+                ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
                     turn_id,
                     agent_id,
                     tool_call_id: tool_call.id.clone(),
@@ -297,7 +297,7 @@ async fn run_before_tool_approvals(
             Err(e) => {
                 let _ = run_on_error(ctx, &e).await;
                 for tc in &ready_calls {
-                    ctx.event_bus.emit_render(RenderEvent::ToolEnded {
+                    ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
                         turn_id,
                         agent_id,
                         tool_call_id: tc.id.clone(),
@@ -415,7 +415,7 @@ async fn settle_results(
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
 ) -> CollectOutcome {
     let turn_id = ctx.turn_id();
-    let agent_id = ctx.agent_id;
+    let agent_id = ctx.session.agent_id;
     let all_tools_ref = all_tools;
 
     let ApprovalOutcome {
@@ -450,8 +450,13 @@ async fn settle_results(
                 error_len = result.output.len(),
                 "tool call failed"
             );
-            let session_id = ctx.session_context.read().get("session_id").cloned();
-            let run_id = ctx.session_context.read().get("run_id").cloned();
+            let session_id = ctx
+                .session
+                .session_context
+                .read()
+                .get("session_id")
+                .cloned();
+            let run_id = ctx.session.session_context.read().get("run_id").cloned();
             let input_summary: String = modified_call
                 .input
                 .as_str()
@@ -466,7 +471,7 @@ async fn settle_results(
                     "tool_call_id": modified_call.id,
                     "error": result.output,
                     "input_summary": input_summary,
-                    "step": ctx.turn.current_step(),
+                    "step": ctx.session.turn.current_step(),
                 }),
                 session_id.as_deref(),
                 run_id.as_deref(),
@@ -474,7 +479,7 @@ async fn settle_results(
         }
 
         // ToolEnd emit 在 error_suggest 注入之前
-        ctx.event_bus.emit_render(RenderEvent::ToolEnded {
+        ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
             turn_id,
             agent_id,
             tool_call_id: modified_call.id.clone(),
@@ -514,13 +519,13 @@ fn post_process_result(
 ) {
     // error_suggest 注入：仅修改 output 文本
     if result.is_error {
-        if let Some(registry) = &ctx.error_suggest_registry {
+        if let Some(registry) = &ctx.runtime.error_suggest_registry {
             let ec = crate::error_suggest::ErrorContext::new(
                 &modified_call.name,
                 &modified_call.input,
                 &result.output,
                 std::path::Path::new(ctx.cwd()),
-                &ctx.tool_registry_snapshot,
+                &ctx.runtime.tool_registry_snapshot,
             );
             if let Some(sug) = registry.suggest(&ec) {
                 result.output =
@@ -548,6 +553,7 @@ fn handle_consecutive_failures(ctx: &StageContext, results: &[(ToolCall, ToolRes
     for (_, result) in results {
         if result.is_error {
             let current = ctx
+                .compact
                 .consecutive_failures
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 + 1;
@@ -563,14 +569,17 @@ fn handle_consecutive_failures(ctx: &StageContext, results: &[(ToolCall, ToolRes
                     result.tool_name, current
                 );
                 let content = format!("<system-reminder>\n{}\n</system-reminder>", warning);
-                ctx.queue.push(crate::session::queue::QueuedMessage::info(
-                    crate::session::queue::MessageSource::ToolFailureWarning,
-                    BaseMessage::human(crate::messages::MessageContent::text(content)),
-                ));
+                ctx.session
+                    .queue
+                    .push(crate::session::queue::QueuedMessage::info(
+                        crate::session::queue::MessageSource::ToolFailureWarning,
+                        BaseMessage::human(crate::messages::MessageContent::text(content)),
+                    ));
             }
         } else {
             // 任一成功 → 重置计数
-            ctx.consecutive_failures
+            ctx.compact
+                .consecutive_failures
                 .store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -911,7 +920,8 @@ mod tests {
     async fn test_handle_consecutive_failures_success_resets() {
         let ctx = make_test_ctx();
         // 先设置失败计数为非 0
-        ctx.consecutive_failures
+        ctx.compact
+            .consecutive_failures
             .store(4, std::sync::atomic::Ordering::Relaxed);
         let ok_call = ToolCall {
             id: "call_1".to_string(),
@@ -921,7 +931,8 @@ mod tests {
         let ok_result = ToolResult::success("call_1", "Read", "ok");
         handle_consecutive_failures(&ctx, &[(ok_call, ok_result)]);
         assert_eq!(
-            ctx.consecutive_failures
+            ctx.compact
+                .consecutive_failures
                 .load(std::sync::atomic::Ordering::Relaxed),
             0,
             "成功执行后失败计数器应重置为 0"

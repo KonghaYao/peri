@@ -3,10 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use peri_agent::{
-    agent::{
-        events::{AgentEventHandler, ExecutorEvent},
-        react::ReactLLM,
-    },
+    agent::{events::AgentEventHandler, react::ReactLLM},
     messages::BaseMessage,
     thread::ThreadStore,
     tools::BaseTool,
@@ -14,7 +11,9 @@ use peri_agent::{
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::{
-    build_agent::CancelPolicy, fire_subagent_lifecycle_hooks_static, format_subagent_result,
+    build_agent::CancelPolicy,
+    fire_subagent_lifecycle_hooks_static, format_subagent_result,
+    lifecycle::{on_subagent_stop_handler, DeregisterGuard},
 };
 use crate::tool_search::core_tools::TOOL_AGENT;
 use crate::{
@@ -23,20 +22,6 @@ use crate::{
     hooks::types::{HookEvent, RegisteredHook},
     subagent::{background::BackgroundTaskRegistry, built_in_agents::get_built_in_agent},
 };
-
-/// RAII guard that calls deregister on drop (panic-safe cleanup).
-pub(crate) struct DeregisterGuard {
-    pub(crate) thread_id: String,
-    pub(crate) deregister: Option<Arc<dyn Fn(&str) + Send + Sync>>,
-}
-
-impl Drop for DeregisterGuard {
-    fn drop(&mut self) {
-        if let Some(ref deregister) = self.deregister {
-            deregister(&self.thread_id);
-        }
-    }
-}
 
 /// SubAgentTool - implements the `Agent` tool, allowing LLM to delegate sub-tasks to specialized sub-agents
 const AGENT_DESCRIPTION: &str = r#"Launch a sub-agent with an independent context to handle a specialized sub-task. The sub-agent executes based on the configuration defined in .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md.
@@ -458,7 +443,6 @@ impl BaseTool for SubAgentTool {
             .await?;
 
         let child_thread_id = build_result.child_thread_id.clone();
-        let instance_id = child_thread_id.clone();
         let max_iterations = build_result.max_iterations;
 
         // 注册到 active_agents（cancel_policy=cascade）
@@ -526,6 +510,7 @@ impl BaseTool for SubAgentTool {
         // push prompt 到 queue（Receive 阶段消费）
         v2_ctx
             .context
+            .session
             .queue
             .push(peri_agent::session::queue::QueuedMessage::new(
                 peri_agent::session::queue::MessageKind::Prompt,
@@ -551,69 +536,43 @@ impl BaseTool for SubAgentTool {
             }
             peri_agent::agent::stages::LoopResult::Interrupted => (String::new(), true),
             peri_agent::agent::stages::LoopResult::Error(e) => {
-                // Cron #32: emit SubagentStopped on error path so TUI decrements
-                // subagent_depth (mod.rs SubAgentEnd handler). Without this emit,
-                // parent's subagent_depth stays > 0 forever — handle_done/error
-                // early-return on depth > 0, permanently freezing the parent.
-                // Mirrors execute_bg.rs:220-227 error-path pattern.
                 let error_summary = format!("Sub-agent execution failed: {}", e);
                 let error_result: String = error_summary.chars().take(500).collect();
-                if let Some(ref handler) = self.event_handler {
-                    handler.on_event(ExecutorEvent::SubagentStopped {
-                        agent_name: agent_id.clone(),
-                        result: error_result.clone(),
-                        is_error: true,
-                        instance_id: instance_id.clone(),
-                    });
-                }
-                self.fire_subagent_lifecycle_hook(
-                    crate::hooks::types::HookEvent::SubagentStop,
-                    &cwd,
+                on_subagent_stop_handler(
+                    &self.event_handler,
+                    &self.registered_hooks,
+                    &self.thread_store,
                     &agent_id,
-                    Some(&error_result),
+                    &child_thread_id,
+                    &error_result,
+                    true,
+                    &cwd,
                 )
                 .await;
-                if let Some(ref store) = self.thread_store {
-                    let _ = store.update_thread_status(&child_thread_id, "error").await;
-                }
                 return Err(error_summary.into());
             }
         };
 
-        // SubagentStopped 事件 + lifecycle hook
+        // SubagentStopped 事件 + lifecycle hook + thread_store
         let output_summary: String = if interrupted {
             "interrupted".to_string()
         } else {
             final_text.chars().take(500).collect()
         };
-        if let Some(ref handler) = self.event_handler {
-            handler.on_event(ExecutorEvent::SubagentStopped {
-                agent_name: agent_id.clone(),
-                result: output_summary.clone(),
-                is_error: interrupted,
-                instance_id: instance_id.clone(),
-            });
-        }
-        self.fire_subagent_lifecycle_hook(
-            crate::hooks::types::HookEvent::SubagentStop,
-            &cwd,
+        on_subagent_stop_handler(
+            &self.event_handler,
+            &self.registered_hooks,
+            &self.thread_store,
             &agent_id,
-            Some(&output_summary),
+            &child_thread_id,
+            &output_summary,
+            interrupted,
+            &cwd,
         )
         .await;
 
-        // thread_store 状态更新 + 返回
         if interrupted {
-            if let Some(ref store) = self.thread_store {
-                let _ = store
-                    .update_thread_status(&child_thread_id, "cancelled")
-                    .await;
-            }
             return Ok("Sub-agent execution was interrupted".to_string());
-        }
-
-        if let Some(ref store) = self.thread_store {
-            let _ = store.update_thread_status(&child_thread_id, "done").await;
         }
 
         // 复用 format_subagent_result 的格式（构造 AgentOutput）
@@ -639,23 +598,6 @@ impl BaseTool for SubAgentTool {
 
 /// 从 session transcript 提取最后一条非空 AI 消息文本
 fn extract_last_ai_text(session: &Arc<peri_agent::session::Session>) -> String {
-    let transcript = session.transcript();
-    let tx = transcript.read();
-    tx.visible_messages()
-        .iter()
-        .rev()
-        .find_map(|m| {
-            if matches!(m, BaseMessage::Ai { .. }) {
-                let t = m.content();
-                let trimmed = t.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default()
+    // P1-11: 委托给 super::extract_last_ai_text（tool/mod.rs 共用实现）
+    super::extract_last_ai_text(session)
 }

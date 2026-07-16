@@ -11,7 +11,7 @@
 //!   除非 source_agent_id 不同于主 agent（SubAgent 路由），否则忽略
 //! - **不存在的方向**：v1 → v2 不需要（v1 是被替换方）
 
-use crate::agent::events::{CompactStrategy, CompactTrigger, ExecutorEvent};
+use crate::agent::events::{CompactTrigger, ExecutorEvent};
 use crate::agent::events_v2::{ObserveEvent, RenderEvent, StateEvent};
 
 /// 将 v2 `RenderEvent` 转换为 0 或 1 个 `ExecutorEvent`
@@ -157,12 +157,13 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             turn_id,
             agent_id,
             step,
+            strategy,
             ..
         } => Some(ExecutorEvent::CompactStarted {
             turn_id: turn_id.to_string(),
             agent_id: agent_id.to_string(),
             step,
-            strategy: CompactStrategy::Smart,
+            strategy,
             trigger: CompactTrigger::Auto,
         }),
         ObserveEvent::MessagesCompacted {
@@ -172,6 +173,7 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             messages,
             files,
             skills,
+            strategy,
             ..
         } => Some(ExecutorEvent::CompactCompleted {
             summary,
@@ -181,7 +183,7 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             messages,
             token_before: 0,
             token_after: 0,
-            strategy: CompactStrategy::Smart,
+            strategy,
         }),
         ObserveEvent::TurnError { message, .. } => {
             Some(ExecutorEvent::AgentExecutionFailed { message })
@@ -643,6 +645,7 @@ mod tests {
             files: vec![],
             skills: vec![],
             re_inject_count: 0,
+            strategy: crate::agent::events::CompactStrategy::Micro,
         };
         match observe_event_to_executor(o).unwrap() {
             ExecutorEvent::CompactCompleted {

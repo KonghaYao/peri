@@ -16,6 +16,8 @@ use ratatui_kit::{
     prelude::*,
 };
 
+use peri_middlewares::hitl::PermissionMode;
+
 use super::atoms::{
     ACP_STATE, CANCEL_TX, INPUT_AREA_ESC_PREFIX, LAST_CTRL_C_PROCESSED, LAST_ESC_TIME,
     MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, PERMISSION_MODE_HANDLE,
@@ -159,7 +161,6 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                 // 执行权限模式循环，并即时推送 SERVICE_SNAPSHOT 避免等待 2s 后台轮询
                 if let Some(mode_handle) = PERMISSION_MODE_HANDLE.get() {
                     let new_mode = mode_handle.cycle();
-                    use peri_middlewares::hitl::PermissionMode;
                     let label = match new_mode {
                         PermissionMode::Default => "default",
                         PermissionMode::AcceptEdit => "accept-edit",

@@ -29,6 +29,7 @@ use crate::{
             BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle,
             BgTaskKind,
         },
+        tool::lifecycle::emit_subagent_stop_bg,
         v2_bridge::build_v2_subagent_context,
         SubAgentMiddlewareConfig,
     },
@@ -203,6 +204,7 @@ pub async fn spawn_background_fork(
     // 9. push fork_directive 到 queue
     v2_ctx
         .context
+        .session
         .queue
         .push(peri_agent::session::queue::QueuedMessage::new(
             peri_agent::session::queue::MessageKind::Prompt,
@@ -266,12 +268,13 @@ pub async fn spawn_background_fork(
                 }
                 // 错误分支也必须发射 SubagentStopped（is_error=true），保证 depth 配对减 1。
                 // 必须在 BackgroundTaskResult 构造之前发射——后者会 move output。
-                let _ = bg_event_sender.send(ExecutorEvent::SubagentStopped {
-                    agent_name: agent_name_clone.clone(),
-                    result: output.clone(),
-                    is_error: true,
-                    instance_id: child_thread_id_clone.clone(),
-                });
+                emit_subagent_stop_bg(
+                    &bg_event_sender,
+                    &agent_name_clone,
+                    output.clone(),
+                    true,
+                    &child_thread_id_clone,
+                );
                 let result = peri_agent::agent::events::BackgroundTaskResult {
                     task_id: task_id_clone.clone(),
                     agent_name: agent_name_clone.clone(),
@@ -339,12 +342,13 @@ pub async fn spawn_background_fork(
         }
         // 先发射 SubagentStopped（与 SubagentStarted 配对），让 TUI 把 subagent_depth
         // 减 1（mod.rs SubAgentEnd 处理），避免 depth 永久累积导致 token tracker 失效。
-        let _ = bg_event_sender.send(ExecutorEvent::SubagentStopped {
-            agent_name: agent_name_clone.clone(),
-            result: output_summary.clone(),
-            is_error: interrupted,
-            instance_id: child_thread_id_clone.clone(),
-        });
+        emit_subagent_stop_bg(
+            &bg_event_sender,
+            &agent_name_clone,
+            output_summary.clone(),
+            interrupted,
+            &child_thread_id_clone,
+        );
         if let Err(e) = bg_event_sender.send(ExecutorEvent::BackgroundTaskCompleted(result.clone()))
         {
             tracing::warn!(error = ?e, "bg fork: failed to send completion event");
@@ -398,23 +402,6 @@ async fn fire_stop_hooks(
 
 /// 从 session transcript 提取最后一条非空 AI 消息文本
 fn extract_last_ai_text(session: &Arc<peri_agent::session::Session>) -> String {
-    let transcript = session.transcript();
-    let tx = transcript.read();
-    tx.visible_messages()
-        .iter()
-        .rev()
-        .find_map(|m| {
-            if matches!(m, BaseMessage::Ai { .. }) {
-                let t = m.content();
-                let trimmed = t.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default()
+    // P1-11: 委托给 tool::extract_last_ai_text（tool/mod.rs 共用实现）
+    super::tool::extract_last_ai_text(session)
 }

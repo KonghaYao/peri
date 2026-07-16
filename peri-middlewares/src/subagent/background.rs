@@ -162,6 +162,12 @@ impl BackgroundTaskRegistry {
     }
 
     /// 注册新任务（保留旧 API 兼容，仍用 max_concurrent 全局上限）
+    ///
+    /// P1-12: 已废弃，请使用 register_with_kind() 以支持按类型独立上限。
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use register_with_kind() for per-kind concurrency limits"
+    )]
     pub fn register(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
         let mut tasks = self.tasks.lock();
         let active = tasks

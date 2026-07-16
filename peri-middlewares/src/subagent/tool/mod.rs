@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use peri_agent::middleware::r#trait::Middleware;
+use peri_agent::{messages::BaseMessage, middleware::r#trait::Middleware, session::Session};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -12,6 +12,26 @@ use crate::{
 };
 
 /// 构造 SubAgent 标准中间件链
+///
+/// ## 与主 Agent 中间件链的差异（P1-13）
+///
+/// 以下中间件**有意不在 SubAgent 链中注册**：
+///
+/// | 中间件 | 省略原因 |
+/// |--------|----------|
+/// | `GitAttributionMiddleware` | SubAgent 工具调用无需 git 贡献追踪 |
+/// | `AtMentionMiddleware` | @path 解析仅在主 Agent 用户交互中生效 |
+/// | `AgentDefineMiddleware` | SubAgent 定义由调用方单独注入 system_prompt |
+/// | `PluginMiddleware` | 插件仅在主 Agent 中加载 |
+/// | `CronMiddleware` | SubAgent 独立生命周期，不参与调度 |
+/// | `HITLMiddleware` | SubAgent 工具执行沿用父 Agent 的审批模式 |
+///
+/// 以下中间件通过**参数注入**方式支持 SubAgent：
+///
+/// | 中间件 | 注入方式 |
+/// |--------|----------|
+/// | `ErrorSuggest` | 通过 `build_v2_subagent_context(error_suggest_registry)` 注入 |
+/// | `Hook` (生命周期) | 通过 `fire_subagent_lifecycle_hooks_static()` 独立触发 |
 pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<dyn Middleware>> {
     let mut middlewares: Vec<Box<dyn Middleware>> = Vec::new();
 
@@ -115,10 +135,34 @@ fn format_subagent_result(output: &peri_agent::agent::react::AgentOutput) -> Str
     )
 }
 
+/// 从 session transcript 提取最后一条非空 AI 消息文本（P1-11: define/execute_fork/execute_bg/spawner 共用）。
+pub(crate) fn extract_last_ai_text(session: &std::sync::Arc<Session>) -> String {
+    let transcript = session.transcript();
+    let tx = transcript.read();
+    tx.visible_messages()
+        .iter()
+        .rev()
+        .find_map(|m| {
+            if matches!(m, BaseMessage::Ai { .. }) {
+                let t = m.content();
+                let trimmed = t.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
 mod build_agent;
 mod define;
 mod execute_bg;
 mod execute_fork;
+pub(crate) mod lifecycle;
 pub use define::SubAgentTool;
 
 #[cfg(test)]

@@ -4,12 +4,12 @@
 //! fork 当前会话上下文，使用定制 bg-fork directive 隔离执行。
 //! 结果按现有 bg agent 机制自动注入主 Agent 下一轮对话。
 
+mod events;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_agent::agent::events::ExecutorEvent;
-use peri_agent::messages::MessageId;
 use peri_middlewares::prelude::*;
 use peri_middlewares::tools::BoxToolWrapper;
 
@@ -47,17 +47,7 @@ impl AgentCommand for BgCommand {
 
         // 空参数：返回用法提示
         if prompt.is_empty() {
-            ctx.event_sink
-                .push_event(
-                    &ctx.session_id,
-                    &ExecutorEvent::TextChunk {
-                        message_id: MessageId::new(),
-                        chunk: "用法: /bg <任务描述>\n".into(),
-                        source_agent_id: None,
-                    },
-                    0,
-                )
-                .await;
+            events::emit_bg_usage_hint(&ctx.event_sink, &ctx.session_id).await;
             return CommandResult {
                 messages: ctx.history,
                 stop_reason: PromptStopReason::EndTurn,
@@ -71,17 +61,7 @@ impl AgentCommand for BgCommand {
                     provider.into_model(),
                 )),
                 None => {
-                    ctx.event_sink
-                        .push_event(
-                            &ctx.session_id,
-                            &ExecutorEvent::TextChunk {
-                                message_id: MessageId::new(),
-                                chunk: "✗ 后台任务启动失败: 无法构造 LLM 实例（请检查 peri-config.toml 的 Provider 配置）\n".into(),
-                                source_agent_id: None,
-                            },
-                            0,
-                        )
-                        .await;
+                    events::emit_bg_llm_error(&ctx.event_sink, &ctx.session_id).await;
                     return CommandResult {
                         messages: ctx.history,
                         stop_reason: PromptStopReason::EndTurn,
@@ -141,17 +121,7 @@ impl AgentCommand for BgCommand {
         {
             Ok(s) => s,
             Err(e) => {
-                ctx.event_sink
-                    .push_event(
-                        &ctx.session_id,
-                        &ExecutorEvent::TextChunk {
-                            message_id: MessageId::new(),
-                            chunk: format!("✗ 后台任务启动失败: {e}\n"),
-                            source_agent_id: None,
-                        },
-                        0,
-                    )
-                    .await;
+                events::emit_bg_spawn_error(&ctx.event_sink, &ctx.session_id, &e).await;
                 return CommandResult {
                     messages: ctx.history,
                     stop_reason: PromptStopReason::EndTurn,
@@ -159,32 +129,10 @@ impl AgentCommand for BgCommand {
             }
         };
 
-        // 同步推送 SubagentStarted 到 ACP transport——必须在 push_done 之前
-        // 完成（本命令是 CommandKind::Immediate，execute 返回后立即 push_done）。
-        // 走 event_sink 直接入 TransportEventSink channel（in-memory mpsc），
-        // 保证 TUI 端按 FIFO 顺序处理：SubagentStarted 必先先于 Done 到达，
-        // handle_subagent_start 先注册 background_agents，handle_done 才能正确
-        // 设置 agent_done_pending。
-        //
-        // 不走 bg_event_sender（pump task 异步推送）——pump 与 push_done 并发，
-        // 事件到达 TUI 的顺序无保证（race condition 已通过此同步路径根治）。
-        ctx.event_sink
-            .push_event(&ctx.session_id, &spawned.started_event, 0)
-            .await;
+        events::emit_bg_started(&ctx.event_sink, &ctx.session_id, &spawned.started_event).await;
 
         // 确认消息（CJK-safe truncation: chars().take(80)）
-        let truncated: String = prompt.chars().take(80).collect();
-        ctx.event_sink
-            .push_event(
-                &ctx.session_id,
-                &ExecutorEvent::TextChunk {
-                    message_id: MessageId::new(),
-                    chunk: format!("◆ 后台任务已启动: {truncated}\n"),
-                    source_agent_id: None,
-                },
-                0,
-            )
-            .await;
+        events::emit_bg_confirmation(&ctx.event_sink, &ctx.session_id, &prompt).await;
 
         CommandResult {
             messages: ctx.history,

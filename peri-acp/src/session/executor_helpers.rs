@@ -24,14 +24,10 @@
 //! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"，
 //!   顺序不变（pump 必须先 close sender 才能退出 recv 循环）
 
-// 通过 `use super::*` 复用 executor.rs 顶部的所有 `use` 与 struct/enum 定义
-// （PromptStopReason / PromptResult / TurnConfig / ExecOutcome / FrozenSessionData 等）。
-// 本文件不重新声明这些跨函数共享类型。
-//
-// 注：Rust 中 `use` 默认私有，子模块无法通过 `use super::*` 继承父模块的 use 语句。
-// 因此这里显式 `use super::{...}` 引入 executor.rs 中的共享类型（包括私有 struct
-// —— 子模块对父模块所有项均有可见性）。其余外部依赖（peri_agent / crate::*）
-// 在本文件单独 use。
+// 显式 `use super::{...}` 引入 executor.rs 中的共享类型（包括私有 struct——
+// 子模块对父模块所有项均有可见性）。子模块无法通过 `use super::*` 继承父模块
+// 的 use 语句（Rust `use` 默认私有），因此不在此使用 `use super::*`。
+// 其余外部依赖（peri_agent / crate::*）单独 use。
 use std::sync::Arc;
 
 use peri_agent::{
@@ -63,18 +59,23 @@ use super::{ExecOutcome, FrozenSessionData, PromptResult, PromptStopReason, Turn
 
 /// 命令拦截请求（参数对象，避免 12 个位置参数）。
 pub(super) struct InterceptRequest<'a> {
+    // ── 消息上下文 ──
     pub(super) content: &'a MessageContent,
     pub(super) history: &'a [BaseMessage],
+    // ── 会话上下文 ──
     pub(super) cwd: &'a str,
     pub(super) session_id: &'a str,
     pub(super) cancel: &'a AgentCancellationToken,
+    pub(super) thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
+    pub(super) thread_id: Option<String>,
+    // ── 运行时服务 ──
     pub(super) peri_config: &'a Arc<crate::provider::PeriConfig>,
     pub(super) event_sink: &'a Arc<dyn EventSink>,
     pub(super) auxiliary_model: &'a Option<Arc<dyn peri_agent::llm::BaseModel>>,
-    pub(super) thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
-    pub(super) thread_id: Option<String>,
+    // ── 异步服务 ──
     pub(super) bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
     pub(super) bg_registry: &'a Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
+    // ── 冻结数据 ──
     pub(super) frozen: Option<&'a FrozenSessionData>,
 }
 
@@ -671,7 +672,7 @@ pub(super) async fn build_and_execute_agent_v2(
     }
 
     // Phase 6: push 用户输入到 v2 queue（Receive 阶段消费）
-    v2_out.context.queue.push(QueuedMessage::new(
+    v2_out.context.session.queue.push(QueuedMessage::new(
         MessageKind::Prompt,
         V2MessageSource::UserInput,
         BaseMessage::human(agent_input.content),
@@ -692,9 +693,9 @@ pub(super) async fn build_and_execute_agent_v2(
     // 本 flush 将 Prompt 消息提前写入 transcript，确保 before_agent 能看到
     // 用户输入。Receive 阶段后续再次 drain 时为 safe no-op（队列已空）。
     {
-        let consumed = v2_out.context.queue.drain_for_receive();
+        let consumed = v2_out.context.session.queue.drain_for_receive();
         if !consumed.is_empty() {
-            let mut transcript = v2_out.context.transcript.write();
+            let mut transcript = v2_out.context.session.transcript.write();
             peri_agent::agent::stages::append_messages_to_transcript(&mut transcript, consumed);
         }
     }

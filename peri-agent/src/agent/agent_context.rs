@@ -13,7 +13,7 @@
 //! - **messages_cache**：`from_stage()` 时从 transcript 克隆 visible_messages（一次性开销）
 //! - **recall_buffer**：内部缓冲区，每个 hook 执行后由 runner drain 到 `ctx.recall_buffer`
 //! - **token_tracker**：自有 `TokenTracker::default()`，与当前 `snapshot_to_agent_state` 语义一致
-//! - **session_context**：自有 `HashMap`，从 `ctx.session_context` 克隆
+//! - **session_context**：自有 `HashMap`，从 `ctx.session.session_context` 克隆
 //!
 //! 与旧 `AgentState` 方案的关键区别：**不再 restore**——middleware 通过 `add_message()`
 //! 直接双写 transcript + cache，消除 `restore_from_agent_state.rebuild()` 的 O(n) 开销。
@@ -52,7 +52,7 @@ pub struct AgentContext<'a> {
     /// compact 边界标记（内部维护）
     ancestor_len: usize,
 
-    /// session 上下文键值对（自有 HashMap，克隆自 ctx.session_context）
+    /// session 上下文键值对（自有 HashMap，克隆自 ctx.session.session_context）
     session_context: HashMap<String, String>,
 }
 
@@ -64,18 +64,19 @@ impl<'a> AgentContext<'a> {
     /// - TokenTracker 为默认值（P0 #2 将迁移到 StageContext）
     pub fn from_stage(ctx: &'a StageContext) -> Self {
         let messages_cache = ctx
+            .session
             .transcript
             .read()
             .visible_messages()
             .into_iter()
             .cloned()
             .collect();
-        let session_context = ctx.session_context.read().clone();
+        let session_context = ctx.session.session_context.read().clone();
         Self {
             ctx,
             messages_cache,
             recall_buffer: Vec::new(),
-            token_tracker: ctx.token_tracker.read().clone(),
+            token_tracker: ctx.compact.token_tracker.read().clone(),
             ancestor_len: 0,
             session_context,
         }
@@ -84,7 +85,7 @@ impl<'a> AgentContext<'a> {
 
 impl MiddlewareState for AgentContext<'_> {
     fn cwd(&self) -> &str {
-        &self.ctx.turn.cwd
+        &self.ctx.session.turn.cwd
     }
 
     fn set_cwd(&mut self, _cwd: String) {
@@ -101,7 +102,7 @@ impl MiddlewareState for AgentContext<'_> {
     /// 当前 `Vec::push` 在内存耗尽外不会失败，因此无需 rollback。
     fn add_message(&mut self, message: BaseMessage) {
         // INVARIANT: transcript.append 和 cache.push 必须同时成功或同时失败
-        self.ctx.transcript.write().append(message.clone());
+        self.ctx.session.transcript.write().append(message.clone());
         self.messages_cache.push(message);
     }
 
@@ -120,7 +121,7 @@ impl MiddlewareState for AgentContext<'_> {
     }
 
     fn current_step(&self) -> usize {
-        self.ctx.turn.current_step()
+        self.ctx.session.turn.current_step()
     }
 
     fn set_current_step(&mut self, _step: usize) {
@@ -164,7 +165,7 @@ impl MiddlewareState for AgentContext<'_> {
     }
 
     fn v2_queue(&self) -> &MessageQueue {
-        &self.ctx.queue
+        &self.ctx.session.queue
     }
 }
 
@@ -190,7 +191,8 @@ mod tests {
     #[test]
     fn test_from_stage_copies_visible_messages() {
         let ctx = make_context();
-        ctx.transcript
+        ctx.session
+            .transcript
             .write()
             .append(BaseMessage::human(MessageContent::text("hello")));
 
@@ -203,11 +205,13 @@ mod tests {
     fn test_from_stage_excluded_messages_filtered() {
         let ctx = make_context();
         let id = ctx
+            .session
             .transcript
             .write()
             .append(BaseMessage::human(MessageContent::text("excluded")));
-        ctx.transcript.write().set_excluded(id, true);
-        ctx.transcript
+        ctx.session.transcript.write().set_excluded(id, true);
+        ctx.session
+            .transcript
             .write()
             .append(BaseMessage::human(MessageContent::text("visible")));
 
@@ -223,7 +227,8 @@ mod tests {
     #[test]
     fn test_add_message_dual_writes_transcript_and_cache() {
         let ctx = make_context();
-        ctx.transcript
+        ctx.session
+            .transcript
             .write()
             .append(BaseMessage::human(MessageContent::text("old")));
 
@@ -235,7 +240,7 @@ mod tests {
         assert_eq!(ac.messages()[1].content(), "new");
 
         // transcript 也应包含 new（双写同步）
-        let transcript = ctx.transcript.read();
+        let transcript = ctx.session.transcript.read();
         assert_eq!(transcript.len(), 2, "transcript 应同时包含 old + new");
         assert_eq!(transcript.entries()[0].message.content(), "old");
         assert_eq!(transcript.entries()[1].message.content(), "new");
@@ -277,7 +282,7 @@ mod tests {
     fn test_get_set_context_on_owned_hashmap() {
         let ctx = make_context();
         {
-            let mut guard = ctx.session_context.write();
+            let mut guard = ctx.session.session_context.write();
             guard.insert("session_id".to_string(), "s1".to_string());
         }
         let mut ac = AgentContext::from_stage(&ctx);
@@ -289,8 +294,8 @@ mod tests {
         ac.set_context("key".to_string(), "value".to_string());
         assert_eq!(ac.get_context("key"), Some("value"));
 
-        // ctx.session_context 不受影响（自有克隆）
-        let guard = ctx.session_context.read();
+        // ctx.session.session_context 不受影响（自有克隆）
+        let guard = ctx.session.session_context.read();
         assert_eq!(guard.get("key"), None);
     }
 
@@ -354,7 +359,7 @@ mod tests {
         cache.push(BaseMessage::human(MessageContent::text("cache-only")));
 
         // transcript 不应有 cache-only 消息
-        let transcript = ctx.transcript.read();
+        let transcript = ctx.session.transcript.read();
         assert_eq!(transcript.len(), 1, "messages_mut 不应写入 transcript");
         assert!(!transcript
             .entries()
@@ -375,7 +380,7 @@ mod tests {
         assert_eq!(ac.messages()[0].content(), "prepended");
 
         // transcript 不应有 prepended 消息
-        let transcript = ctx.transcript.read();
+        let transcript = ctx.session.transcript.read();
         assert_eq!(transcript.len(), 1);
     }
 }
