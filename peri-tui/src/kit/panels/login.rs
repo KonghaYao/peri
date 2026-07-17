@@ -10,8 +10,8 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
-    NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PROVIDER_LIST, ProviderSummary,
-    SERVICE_SNAPSHOT,
+    ACP_CLIENT_HANDLE, NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PROVIDER_LIST,
+    ProviderSummary, SERVICE_SNAPSHOT,
 };
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use fluent_bundle::FluentValue;
@@ -243,9 +243,17 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 })
                                 .collect();
                             *PROVIDER_LIST.state().write() = updated_providers;
-                            // 异步持久化
+                            // 异步持久化 + 推送配置到 ACP 服务端（使切换立即生效）
                             tokio::spawn(async move {
                                 activate_provider(&provider_id);
+                                if let Some(client) = ACP_CLIENT_HANDLE.get()
+                                    && let Some(handle) = PERI_CONFIG_HANDLE.get()
+                                {
+                                    let snap = handle.read().clone();
+                                    if let Err(e) = client.update_config(&snap).await {
+                                        tracing::warn!(error = %e, "LoginPanel: update_config push failed");
+                                    }
+                                }
                             });
                         }
                         // 关闭面板

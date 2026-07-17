@@ -143,7 +143,7 @@ pub(super) async fn init_stdio_context(cwd: String) -> anyhow::Result<Arc<StdioC
 
     // 构建共享的 ServerContext，所有请求处理器通过 Arc 共享
     Ok(Arc::new(StdioContext {
-        provider: RwLock::new(provider),
+        provider: Arc::new(RwLock::new(provider)),
         peri_config: RwLock::new(peri_config),
         permission_mode,
         cron_scheduler,

@@ -8,8 +8,8 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
-    LANG_VERSION, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, Notification, PERI_CONFIG_HANDLE,
-    SERVICE_SNAPSHOT,
+    ACP_CLIENT_HANDLE, LANG_VERSION, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, Notification,
+    PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT,
 };
 use crate::kit::list_nav::{next_selection, previous_selection};
 use fluent_bundle::FluentValue;
@@ -447,6 +447,14 @@ fn switch_alias(new_alias: &str) {
     svc_snap.model_name = resolved_name;
     *s_handle.write() = svc_snap;
     *MODEL_HIGHLIGHT_UNTIL.state().write() = Some(Instant::now() + Duration::from_secs(2));
+    // 推送配置到 ACP 服务端，使 alias 切换立即生效
+    tokio::spawn(async move {
+        if let Some(client) = ACP_CLIENT_HANDLE.get()
+            && let Err(e) = client.update_config(&snap).await
+        {
+            tracing::warn!(error = %e, "ModelPanel: update_config push failed");
+        }
+    });
 }
 
 fn cycle_effort() {

@@ -43,7 +43,7 @@ pub(super) struct SessionInfo {
 
 /// Stdio 传输环境的共享上下文
 pub(super) struct StdioContext {
-    pub(super) provider: RwLock<LlmProvider>,
+    pub(super) provider: Arc<RwLock<LlmProvider>>,
     pub(super) peri_config: RwLock<PeriConfig>,
     pub(super) permission_mode: Arc<SharedPermissionMode>,
     pub(super) cron_scheduler: Arc<Mutex<CronScheduler>>,
