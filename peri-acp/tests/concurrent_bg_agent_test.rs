@@ -93,10 +93,19 @@ async fn test_bg_event_pump_receives_all_completions() {
     };
 
     let (client_transport, server_transport) = mpsc_transport_pair();
-    let sink = Arc::new(TransportEventSink::new(Arc::new(server_transport)));
-    let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
+    let caps_registry = std::sync::Arc::new(dashmap::DashMap::new());
 
     let session_id = "test-session".to_string();
+    // 注册 session 的 PeriCaps，否则 push_event 使用 default()（全 false）
+    // 会跳过 peri/agent_event 通知，导致 transport 上零消息到达
+    use peri_acp_types::PeriCaps;
+    caps_registry.insert(session_id.clone(), PeriCaps::all_enabled());
+
+    let sink = Arc::new(TransportEventSink::new(
+        Arc::new(server_transport),
+        caps_registry,
+    ));
+    let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     let context_window = 200_000u32;
     let bg_sink = Arc::clone(&sink);
     let bg_session_id = session_id.clone();

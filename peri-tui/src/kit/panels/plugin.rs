@@ -966,7 +966,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // ── footer ──
     let footer_text = if *add_marketplace_active.read() {
-        "Enter: save  Esc: cancel".to_string()
+        i18n::tr("panel-plugin-marketplace-add-input-footer").to_string()
     } else if let Some(ref op) = *operation_loading.read() {
         match op.as_str() {
             "uninstall" => format!("{}...", i18n::tr("panel-plugin-action-uninstall")),
@@ -1474,7 +1474,7 @@ fn render_marketplaces(
             Span::styled(format!("Add: {}", display), bold_style),
         ]));
         lines.push(Line::from(vec![Span::styled(
-            "    Enter URL (github.com/org/repo, /path/to/dir, etc.)",
+            i18n::tr("panel-plugin-marketplace-add-url-hint"),
             muted_style,
         )]));
     } else {
@@ -1538,12 +1538,12 @@ fn render_marketplaces(
     // Footer hints
     if refreshing {
         lines.push(Line::from(vec![Span::styled(
-            "  Refreshing...",
+            i18n::tr("panel-plugin-marketplace-refreshing"),
             Style::new().fg(warning_color),
         )]));
     } else {
         lines.push(Line::from(vec![Span::styled(
-            "  Enter: refresh  |  d: delete  |  a: add",
+            i18n::tr("panel-plugin-marketplace-hint-keys"),
             muted_style,
         )]));
     }

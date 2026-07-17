@@ -60,6 +60,8 @@ pub struct CommandContext {
     pub frozen_claude_local_md: Option<Arc<String>>,
     /// Frozen skills summary
     pub frozen_skill_summary: Option<Arc<String>>,
+    /// Frozen system prompt（fork 路径复用以避免重建）。
+    pub frozen_system_prompt: Option<Arc<String>>,
 }
 
 /// 命令执行结果。

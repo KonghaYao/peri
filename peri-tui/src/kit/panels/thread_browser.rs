@@ -93,7 +93,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         header_style,
     )]));
     lines.push(Line::from(vec![Span::styled(
-        "  Enter::open · Esc::close",
+        i18n::tr("panel-threads-header-hint"),
         muted_style,
     )]));
     lines.push(Line::from(""));
@@ -158,7 +158,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // footer
     lines.push(Line::from(vec![Span::styled(
-        "  \u{2191}/\u{2193}::navigate  Enter::open  Esc::close",
+        i18n::tr("common-nav-enter-close"),
         muted_style,
     )]));
 

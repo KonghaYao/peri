@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-15-markdown-table-raw-text-streaming.md
 # Markdown 表格流式输出时显示为原始 pipe 格式
 
 **状态**：Fixed

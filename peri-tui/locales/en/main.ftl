@@ -89,30 +89,12 @@ statusbar-mcp-ready =  MCP ready ({ $total } servers)
 statusbar-mcp-failed =  MCP failed: { $msg }
 statusbar-lsp-diag = diag: { $errors }E/{ $warnings }W
 
-# ---- Status Bar Shortcut Hints (main view) ----
+# ---- Status Bar Shortcut Hints ----
 
-key-command = command
-key-switch-session = :Switch Session
-key-close = :Close
-key-scroll = :Scroll
-key-cancel = :Cancel
-key-newline = :NewLine
-key-open-browser = :Open browser
-key-submit = :Submit
-key-switch = :Switch
-key-switch-tab = :Switch Tab
-key-move = :Move
-key-select = :Select
-key-confirm = :Confirm
-key-delete = :Delete
-key-reconnect = :Reconnect
-key-detail = :Detail
-key-execute = :Execute
-key-back = :Back
-key-install = :Install
-key-tab = :Tab
-key-effort = :Effort
-key-switch-model = :Switch Model
+statusbar-hint-quit-pending =  Press Ctrl+C again to quit, other keys cancel 
+statusbar-hint-popup =  Esc: close | Enter: confirm 
+statusbar-hint-menu =  Esc: close | Tab: navigate | Enter: select 
+statusbar-hint-main =  /: commands | Shift+Enter: newline | Shift+Tab: mode 
 
 # ---- Welcome Page ----
 
@@ -123,6 +105,7 @@ welcome-feature-files = Manage files and run terminal commands
 welcome-feature-agents = Delegate tasks to specialized sub-agents
 welcome-login-hint-1 = Please type
 welcome-login-hint-2 = to configure API Key to get started
+welcome-shortcuts = Enter send  |  Shift+Enter newline  |  @ mention files
 welcome-shortcut-quit = :Quit
 welcome-shortcut-stop = :Stop
 welcome-shortcut-newline = :NewLine
@@ -217,6 +200,7 @@ config-streaming-value-none = none
 config-language-value-en = English
 config-language-value-zh = 中文
 config-saved = Configuration saved
+panel-config-nav-hint =   ↑/↓::navigate  Enter::toggle  ←/→::switch  Esc::close
 
 # Config panel groups
 config-group-general = General
@@ -453,6 +437,8 @@ model-effort-medium = Medium
 model-effort-high = High
 model-effort-xhigh = XHigh
 model-effort-max = Max
+panel-model-nav-hint =   ↑/↓::navigate  Enter/←/→::edit  Esc::close
+panel-model-inline-toggle-hint =   Enter toggle
 
 # ---- Status Panel ----
 
@@ -472,6 +458,7 @@ status-label-used = Used
 status-label-messages = Messages
 status-label-tools = Tools
 status-empty-data = No request data
+panel-status-nav-hint =   ←/→::switch  Esc::close
 
 status-tab-service =  Service
 status-label-provider = Provider:
@@ -495,6 +482,7 @@ agent-panel-title-none =  Select Agent (None)
 agent-panel-title =  Select Agent 
 agent-panel-none-label = No Agent (default)
 agent-panel-empty-hint = Add Agent definition files in .claude/agents/
+panel-agent-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
 
 # ---- Agent Session Info Panel ----
 
@@ -519,6 +507,7 @@ hooks-configured-count = { $count } hooks configured
 hooks-readonly-hint = This panel is read-only. To add or modify hooks, edit plugin hooks.json.
 hooks-no-hooks =   No hooks configured.
 hooks-no-hooks-hint =   Hooks can be added via plugin hooks/hooks.json.
+panel-hooks-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
 hook-event-before-tool = Before tool execution
 hook-event-after-tool = After tool execution
 hook-event-after-tool-fail = After tool execution fails
@@ -560,6 +549,7 @@ thread-browser-time-just-now = just now
 thread-browser-time-minutes = { $count } minute{ $suffix } ago
 thread-browser-time-hours = { $count } hour{ $suffix } ago
 thread-browser-time-days = { $count } day{ $suffix } ago
+panel-threads-header-hint =   Enter::open · Esc::close
 
 # ---- Rewind Popup ----
 
@@ -578,6 +568,7 @@ rewind-edit-op = Edit → Restore
 oauth-title =  OAuth Authorization — { $server } 
 oauth-prompt = Press Ctrl+O to open in browser, then paste callback URL:
 oauth-callback-label = Callback URL > 
+popup-oauth-action-hint =   Ctrl+O: open in browser  |  Enter: close  |  Esc: cancel
 
 # ---- Login Panel ----
 
@@ -924,6 +915,7 @@ panel-theme-tab-hint =   Tab::switch-category
 panel-theme-daily-on = ON
 panel-theme-daily-off = OFF
 panel-theme-download-label = download from github
+panel-theme-footer-hint =   Ctrl+T::daily({ $status })  Ctrl+D::{ $download }
 
 # ---- Workflow Panel kanban ----
 workflow-loading-runs = Loading workflow runs

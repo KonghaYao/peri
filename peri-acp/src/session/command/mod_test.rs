@@ -118,6 +118,7 @@ fn make_command_context(sink: Arc<dyn crate::session::event_sink::EventSink>) ->
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
+        frozen_system_prompt: None,
     }
 }
 
@@ -378,6 +379,7 @@ async fn test_clear_command_ignores_existing_history() {
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
+        frozen_system_prompt: None,
     };
     let cmd = ClearCommand;
 

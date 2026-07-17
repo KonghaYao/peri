@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use agent_client_protocol::schema::v1::{AvailableCommandsUpdate, SessionUpdate};
 use peri_acp::dispatch::config_update;
+use peri_acp_types::PeriCaps;
 use peri_middlewares::skills::SkillMetadata;
 use serde_json::Value;
 use tracing::{debug, info};
@@ -134,20 +135,25 @@ pub(crate) async fn send_available_commands_update(
     transport: &dyn peri_acp::transport::AcpTransport,
     session_id: &str,
     skills: &[SkillMetadata],
+    caps: &PeriCaps,
 ) {
     if session_id.is_empty() {
         return;
     }
     let commands = peri_acp::dispatch::build_available_commands(skills);
-    let meta = skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>();
-    let update = SessionUpdate::AvailableCommandsUpdate(
-        AvailableCommandsUpdate::new(commands).meta(
-            serde_json::json!({"skillNames": meta})
-                .as_object()
-                .unwrap()
-                .clone(),
-        ),
-    );
+    let update = if caps.skill_names {
+        let meta = skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>();
+        SessionUpdate::AvailableCommandsUpdate(
+            AvailableCommandsUpdate::new(commands).meta(
+                serde_json::json!({"skillNames": meta})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+    } else {
+        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(commands))
+    };
     let update_value = match serde_json::to_value(&update) {
         Ok(p) => p,
         Err(e) => {

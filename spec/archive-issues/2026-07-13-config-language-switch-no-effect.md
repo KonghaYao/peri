@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-13-config-language-switch-no-effect.md
 # Config 面板语言切换无效，始终显示英文
 
 **状态**：Fixed

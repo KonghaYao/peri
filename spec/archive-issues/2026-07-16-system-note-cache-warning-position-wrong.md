@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-16-system-note-cache-warning-position-wrong.md
 # Cache 命中率警告 SystemNote 在消息流中位置错位——被积压到上一个 user/AI message 后面
 
 **状态**：Fixed

@@ -88,6 +88,8 @@ pub struct BgForkConfig {
     pub frozen_claude_local_md: Option<Arc<String>>,
     /// Frozen skills summary
     pub frozen_skill_summary: Option<Arc<String>>,
+    /// Frozen system prompt（fork 路径复用以避免重建）。
+    pub frozen_system_prompt: Option<Arc<String>>,
 }
 
 /// 后台 fork agent spawn 结果
@@ -192,7 +194,10 @@ pub async fn spawn_background_fork(
         &cwd,
         cancel_token.clone(),
         config.parent_messages,
-        None, // fork 路径无 system_prompt（directive 在 prompt 里）
+        config
+            .frozen_system_prompt
+            .clone()
+            .map(|sp| sp.as_ref().to_string()),
         None,
         None,
         None,

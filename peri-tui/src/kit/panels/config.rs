@@ -210,22 +210,10 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         lines.push(value_line);
     }
 
-    // Footer hints
+    // Footer hints — use single i18n key for consistency
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "  ↑/↓::navigate  ",
-            Style::new().fg(theme_def.read().semantic.text.dim),
-        ),
-        Span::styled(
-            "Enter::toggle",
-            Style::new().fg(theme_def.read().semantic.border.active),
-        ),
-        Span::styled(
-            "  ←/→::switch  Esc::close",
-            Style::new().fg(theme_def.read().semantic.text.dim),
-        ),
-    ]));
+    lines
+        .push(Line::from(i18n::tr("panel-config-nav-hint")).fg(theme_def.read().semantic.text.dim));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 

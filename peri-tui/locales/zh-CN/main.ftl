@@ -88,30 +88,12 @@ statusbar-mcp-ready =  MCP 就绪 ({ $total } 个服务器)
 statusbar-mcp-failed =  MCP 失败: { $msg }
 statusbar-lsp-diag = 诊断: { $errors }E/{ $warnings }W
 
-# ---- Status Bar Shortcut Hints (main view) ----
+# ---- Status Bar Shortcut Hints ----
 
-key-command = 命令
-key-switch-session = :切换Session
-key-close = :关闭
-key-scroll = :滚动
-key-cancel = :取消
-key-newline = :换行
-key-open-browser = :打开浏览器
-key-submit = :提交
-key-switch = :切换
-key-switch-tab = :切换标签
-key-move = :移动
-key-select = :选择
-key-confirm = :确认
-key-delete = :删除
-key-reconnect = :重连
-key-detail = :详情
-key-execute = :执行
-key-back = :返回
-key-install = :安装
-key-tab = :切换
-key-effort = :力度
-key-switch-model = :切换模型
+statusbar-hint-quit-pending =  再次按 Ctrl+C 退出，其他键取消 
+statusbar-hint-popup =  Esc: 关闭 | Enter: 确认 
+statusbar-hint-menu =  Esc: 关闭 | Tab: 导航 | Enter: 选择 
+statusbar-hint-main =  /: 命令 | Shift+Enter: 换行 | Shift+Tab: 模式 
 
 # ---- Welcome Page ----
 
@@ -122,6 +104,7 @@ welcome-feature-files = 管理文件和运行终端命令
 welcome-feature-agents = 将任务委派给专业子 Agent
 welcome-login-hint-1 = 请输入
 welcome-login-hint-2 = 配置 API Key 开始使用
+welcome-shortcuts = Enter 发送  |  Shift+Enter 换行  |  @ 提及文件
 welcome-shortcut-quit = :退出
 welcome-shortcut-stop = :停止
 welcome-shortcut-newline = :换行
@@ -216,6 +199,7 @@ config-streaming-value-none = 无
 config-language-value-en = English
 config-language-value-zh = 中文
 config-saved = 配置已保存
+panel-config-nav-hint =   ↑/↓::导航  Enter::切换  ←/→::切换  Esc::关闭
 
 # Config panel groups
 config-group-general = 通用
@@ -452,6 +436,8 @@ model-effort-medium = 中
 model-effort-high = 高
 model-effort-xhigh = 超高
 model-effort-max = 最大
+panel-model-nav-hint =   ↑/↓::导航  Enter/←/→::编辑  Esc::关闭
+panel-model-inline-toggle-hint =   Enter 切换
 
 # ---- 状态面板 ----
 
@@ -471,6 +457,7 @@ status-label-used = 已用
 status-label-messages = 消息
 status-label-tools = 工具
 status-empty-data = 暂无请求数据
+panel-status-nav-hint =   ←/→::切换  Esc::关闭
 
 status-tab-service =  服务
 status-label-provider = 提供商:
@@ -494,6 +481,7 @@ agent-panel-title-none =  Agent 选择 (无)
 agent-panel-title =  Agent 选择 
 agent-panel-none-label = 无 Agent（默认）
 agent-panel-empty-hint = 在 .claude/agents/ 目录中添加 Agent 定义文件
+panel-agent-nav-hint =   ↑/↓::导航  Enter::打开  Esc::关闭
 
 # ---- Agent 会话信息面板 ----
 
@@ -518,6 +506,7 @@ hooks-configured-count = 已配置 { $count } 个 hook
 hooks-readonly-hint = 此面板为只读。要添加或修改 hook，请编辑插件的 hooks.json。
 hooks-no-hooks =   未配置 hook。
 hooks-no-hooks-hint =   Hook 可通过插件 hooks/hooks.json 添加。
+panel-hooks-nav-hint =   ↑/↓::导航  Enter::打开  Esc::关闭
 hook-event-before-tool = 工具执行前
 hook-event-after-tool = 工具执行后
 hook-event-after-tool-fail = 工具执行失败后
@@ -559,6 +548,7 @@ thread-browser-time-just-now = 刚刚
 thread-browser-time-minutes = { $count } 分钟前
 thread-browser-time-hours = { $count } 小时前
 thread-browser-time-days = { $count } 天前
+panel-threads-header-hint =   Enter::打开 · Esc::关闭
 
 # ---- Rewind 弹窗 ----
 
@@ -577,6 +567,7 @@ rewind-edit-op = Edit → 恢复
 oauth-title =  OAuth 授权 — { $server } 
 oauth-prompt = 按 Ctrl+O 在浏览器中打开链接，完成后粘贴回调 URL：
 oauth-callback-label = 回调 URL > 
+popup-oauth-action-hint =   Ctrl+O: 浏览器打开  |  Enter: 关闭  |  Esc: 取消
 
 # ---- Login 面板 ----
 
@@ -923,6 +914,7 @@ panel-theme-tab-hint =   Tab::切换分类
 panel-theme-daily-on = 开
 panel-theme-daily-off = 关
 panel-theme-download-label = 从 GitHub 下载
+panel-theme-footer-hint =   Ctrl+T::daily({ $status })  Ctrl+D::{ $download }
 
 # ---- Workflow Panel kanban ----
 workflow-loading-runs = 正在加载工作流运行信息

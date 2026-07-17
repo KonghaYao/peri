@@ -233,6 +233,9 @@ pub fn build_agent(
         on_bg_complete,
     } = cfg;
 
+    // Capture system_prompt before it may be overridden below (for SubAgent fork reuse).
+    let system_prompt_for_sub = system_prompt.clone();
+
     // 应用 agent overrides 到系统提示词
     let system_prompt = agent_overrides.as_ref().map_or_else(
         || system_prompt.clone(),
@@ -448,6 +451,7 @@ pub fn build_agent(
         sub_frozen_claude_md,
         sub_frozen_claude_local_md,
         sub_frozen_skill_summary,
+        Some(Arc::new(system_prompt_for_sub)),
     );
     if let Some(ref cb) = on_bg_complete {
         subagent = subagent.with_on_bg_complete(Arc::clone(cb));

@@ -126,6 +126,14 @@ Use the Read tool to examine the results after completion.
 
 Use `/workflows` to open the workflow panel and see real-time progress (phases, agents, token counts).
 
+## Prerequisites
+
+The Workflow tool requires **Node.js** (provides `npx`) or **Bun** (provides `bunx`). If neither is available, the tool returns an error:
+
+> Failed to spawn workflow runner: bun and npx are both unavailable. Install Node.js (https://nodejs.org/) or Bun (https://bun.sh/) to enable multi-agent workflow support.
+
+In that case, tell the user to install one of them and retry.
+
 ## Best Practices
 
 - Keep agent prompts focused and specific

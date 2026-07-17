@@ -227,13 +227,7 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.push(
-        Line::from("  ↑/↓::navigate  Enter::open  Esc::close").fg(theme_def
-            .read()
-            .semantic
-            .text
-            .dim),
-    );
+    lines.push(Line::from(i18n::tr("panel-agent-nav-hint")).fg(theme_def.read().semantic.text.dim));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 

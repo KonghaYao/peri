@@ -284,10 +284,7 @@ impl ProviderAdapter for AnthropicAdapter {
         let mut system_blocks = system_from_msgs;
         if let Some(ref base) = request.system {
             if !base.is_empty() {
-                system_blocks.push(SystemPromptBlock {
-                    text: base.clone(),
-                    cache_control: false,
-                });
+                system_blocks.extend(cache::split_system_blocks(base));
             }
         }
         let max_tokens = request.max_tokens.unwrap_or(self.max_tokens);

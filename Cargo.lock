@@ -3390,6 +3390,7 @@ dependencies = [
  "peri-agent",
  "peri-lsp",
  "peri-workflow",
+ "pulldown-cmark",
  "regex",
  "reqwest",
  "rmcp",

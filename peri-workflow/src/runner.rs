@@ -17,7 +17,7 @@ use crate::rpc::{IncomingMessage, RpcChannel};
 // ─── 运行时检测 ────────────────────────────────────────────
 
 /// 检测当前环境是否安装了 bun。
-/// 使用 OnceLock 缓存结果，仅首次调用时执行 `which bun`。
+/// 使用 OnceLock 缓存结果，仅首次调用时执行 `bun --version`。
 static HAS_BUN: OnceLock<bool> = OnceLock::new();
 
 fn has_bun() -> bool {
@@ -35,14 +35,42 @@ fn has_bun() -> bool {
     })
 }
 
+/// 检测当前环境是否安装了 npx。
+/// 使用 OnceLock 缓存结果，仅首次调用时执行 `npx --version`。
+static HAS_NPX: OnceLock<bool> = OnceLock::new();
+
+fn has_npx() -> bool {
+    *HAS_NPX.get_or_init(|| {
+        let ok = std::process::Command::new("npx")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok();
+        if ok {
+            info!(target: "workflow", "detected npx runtime, will use npx");
+        }
+        ok
+    })
+}
+
 /// 返回 workflow 触发命令：(binary, args)。
 /// bun 环境下用 bunx，否则回退 npx。
-fn workflow_cmd() -> (&'static str, &'static [&'static str]) {
+/// 两者都不可用时返回可操作的错误信息。
+fn workflow_cmd() -> Result<(&'static str, &'static [&'static str]), WorkflowError> {
     if has_bun() {
-        ("bunx", &["-y", "@peri-code/workflow"])
-    } else {
-        ("npx", &["-y", "@peri-code/workflow"])
+        return Ok(("bunx", &["-y", "@peri-code/workflow"]));
     }
+    // 回退 npx 前先检查是否可用
+    if has_npx() {
+        return Ok(("npx", &["-y", "@peri-code/workflow"]));
+    }
+    Err(WorkflowError::SpawnFailed(
+        "bun and npx are both unavailable. \
+         Install Node.js (https://nodejs.org/) or Bun (https://bun.sh/) \
+         to enable multi-agent workflow support."
+            .to_string(),
+    ))
 }
 
 // ─── Agent 回调 trait ─────────────────────────────────────────
@@ -172,7 +200,13 @@ impl WorkflowRunner {
         };
 
         // 3. Spawn workflow runner（bun 环境用 bunx，否则 npx）
-        let (cmd_bin, cmd_args) = workflow_cmd();
+        let (cmd_bin, cmd_args) = match workflow_cmd() {
+            Ok(c) => c,
+            Err(e) => {
+                send_failure(&done_tx, &run_id, &e);
+                return Err(e);
+            }
+        };
         let mut child = match Command::new(cmd_bin)
             .args(cmd_args)
             .stdin(std::process::Stdio::piped())

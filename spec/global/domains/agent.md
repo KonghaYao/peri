@@ -55,3 +55,25 @@ Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、Su
 **通用模式:** ReAct 循环中 background agent 的 loading 生命周期需要显式的 TurnDone→TurnStart 过渡：background agent 启动后当前 turn 应正常 TurnDone（loading 停止），callback 唤醒时创建新的 TurnStart（loading 重新开始）。二者必须独立发送，不能合并为连续 loading。
 **涉及文件:** peri-agent/src/agent/stages/mod.rs, peri-tui/src/kit/acp_bridge.rs, peri-tui/src/kit/acp_events.rs
 **CLAUDE.md 链接:** false
+
+### issue_2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks
+**摘要:** 工具调用统一 300s 超时导致 Agent/SubAgent 正常任务被强制中断
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** 工具超时, 差异化超时, BaseTool::timeout, Agent/SubAgent
+**问题本质:** dispatch_concurrent 对所有工具统一使用 TOOL_CALL_TIMEOUT=300s。Agent/SubAgent 可跑 200 轮 ReAct，正常任务 >300s 时被硬性 kill。
+**通用模式:** 超时策略应按工具类型差异化——BaseTool trait 提供 timeout() 方法让每个工具自声明超时需求。快工具（Read/Edit/Glob 等）默认 120s，需要长运行的工具（Agent/Bash/Workflow 等）返回 None 自管超时。新增工具时必须明确其超时策略。
+**技术决策:** 从一刀切超时改为 per-tool 的 timeout() trait 方法，12 个工具覆写为 None（自管），12 个继承默认 120s。
+**涉及文件:** peri-agent/src/agent/stages/tool_dispatch.rs, peri-agent/src/tools/mod.rs
+**CLAUDE.md 链接:** true
+
+### issue_2026-07-16-eventbus-unified-emission
+**摘要:** 统一事件发射路径：所有 Agent 事件走 v2 EventBus
+**状态:** Done
+**归档日期:** 2026-07-17
+**关键词:** EventBus, 事件路径统一, 三层EventBus, CompactStrategy, ObserveEvent
+**问题本质:** v2 EventBus 仅覆盖 ReAct 5 阶段，LLM 流式/SubAgent/ACP Turn/斜杠命令等路径直接构造 ExecutorEvent 绕过 EventBus——三条独立发射路径并存。
+**通用模式:** 事件发射应有单一入口（EventBus），避免分散的 ExecutorEvent 直接构造。新增 AgentEvent 变体时只需在 events_v2.rs 加变体 + events_v2_mapper.rs 加映射。CompactStrategy 等枚举只保留一份定义，通过 EventBus 传递真实策略值而非 hardcode。
+**架构影响:** EventBus 是 peri-agent 内部的事件优化层，ExecutorEvent 保留为稳定跨 crate 边界类型。统一事件路径让 Langfuse 等观测层只订阅一个 EventBus 即可获取完整 trace 数据。
+**涉及文件:** peri-agent/src/agent/events_v2.rs, peri-agent/src/agent/stages/*
+**CLAUDE.md 链接:** true

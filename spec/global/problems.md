@@ -214,8 +214,150 @@
 
 - [issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn Agent background 模式启动后 loading 不停止](domains/agent.md#issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn) — agent
 
+### Buffer越界
+
+- [issue_2026-07-15-terminal-rapid-shrink-width-crash 终端极窄宽度时表格渲染 buffer 越界崩溃](domains/tui.md#issue_2026-07-15-terminal-rapid-shrink-width-crash) — tui
+
+### 鼠标拖拽
+
+- [issue_2026-07-11-message-area-mouse-selection-regression 消息区鼠标拖拽选中因重构回归 + CPU 暴涨](domains/tui.md#issue_2026-07-11-message-area-mouse-selection-regression) — tui
+
+### Drag事件过滤
+
+- [issue_2026-07-11-message-area-mouse-selection-regression 消息区鼠标 Drag 事件穿透导致 CPU 暴涨](domains/tui.md#issue_2026-07-11-message-area-mouse-selection-regression) — tui
+
+### 文本选中
+
+- [issue_2026-07-11-message-area-mouse-selection-regression 消息区鼠标拖拽选中复制功能回归修复](domains/tui.md#issue_2026-07-11-message-area-mouse-selection-regression) — tui
+
+### ratatui-kit迁移
+
+- [issue_2026-07-11-message-area-mouse-selection-regression 大规模重构依赖标记与迁移回归](domains/tui.md#issue_2026-07-11-message-area-mouse-selection-regression) — tui
+
+### Event过滤
+
+- [issue_2026-07-15-setup-wizard-no-paste-login-no-edit 向导用 `let Event::Key` 过滤丢弃 Paste 事件](domains/tui.md#issue_2026-07-15-setup-wizard-no-paste-login-no-edit) — tui
+
+### Paste事件
+
+- [issue_2026-07-05-paste-newline-triggers-submit 输入框粘贴含换行文本时直接触发 Enter 提交](domains/tui.md#issue_2026-07-05-paste-newline-triggers-submit) — tui
+- [issue_2026-07-15-setup-wizard-no-paste-login-no-edit Setup 向导表单不支持粘贴](domains/tui.md#issue_2026-07-15-setup-wizard-no-paste-login-no-edit) — tui
+
+### i18n
+
+- [issue_2026-07-13-config-language-switch-no-effect 语言切换 key 不匹配导致无效](domains/tui.md#issue_2026-07-13-config-language-switch-no-effect) — tui
+
+### bundle key不匹配
+
+- [issue_2026-07-13-config-language-switch-no-effect i18n bundle key "zh" vs "zh-CN" 不匹配](domains/tui.md#issue_2026-07-13-config-language-switch-no-effect) — tui
+
+### SystemNote
+
+- [issue_2026-07-16-system-note-cache-warning-position-wrong Cache 警告 SystemNote 消息流位置错位](domains/tui.md#issue_2026-07-16-system-note-cache-warning-position-wrong) — tui
+
+### committed
+
+- [issue_2026-07-16-system-note-cache-warning-position-wrong SystemNote 直接 push committed 绕过 TurnSegment](domains/tui.md#issue_2026-07-16-system-note-cache-warning-position-wrong) — tui
+
+### flush-then-push
+
+- [issue_2026-07-16-system-note-cache-warning-position-wrong 消息推 committed 前需先 flush current_turn](domains/tui.md#issue_2026-07-16-system-note-cache-warning-position-wrong) — tui
+
+### 保存失败
+
+- [issue_2026-07-13-config-panel-save-silently-discards-errors Config 保存失败静默丢弃无提示](domains/tui.md#issue_2026-07-13-config-panel-save-silently-discards-errors) — tui
+
+### 错误提示
+
+- [issue_2026-07-13-config-panel-save-silently-discards-errors 用户 I/O 操作必须有结果反馈](domains/tui.md#issue_2026-07-13-config-panel-save-silently-discards-errors) — tui
+
+### 滚动条
+
+- [issue_2026-07-12-message-area-scrollbar-not-reaching-bottom 滚动条 thumb 未抵达底部 + 宽度变化失效](domains/tui.md#issue_2026-07-12-message-area-scrollbar-not-reaching-bottom) — tui
+
+### vis_width对齐
+
+- [issue_2026-07-12-message-area-scrollbar-not-reaching-bottom vis_width 与实际渲染宽度不一致](domains/tui.md#issue_2026-07-12-message-area-scrollbar-not-reaching-bottom) — tui
+
+### Unicode宽度
+
+- [issue_2026-07-12-message-area-copy-unicode-misalignment Unicode 字符宽度导致复制后段错位](domains/tui.md#issue_2026-07-12-message-area-copy-unicode-misalignment) — tui
+
+### CJK偏移
+
+- [issue_2026-07-12-message-area-copy-unicode-misalignment CJK 字符累积偏移——视觉坐标转逻辑偏移](domains/tui.md#issue_2026-07-12-message-area-copy-unicode-misalignment) — tui
+
+### 增量缓存
+
+- [issue_2026-07-15-markdown-table-raw-text-streaming Markdown 增量缓存 block 类型翻转导致表格不渲染](domains/tui.md#issue_2026-07-15-markdown-table-raw-text-streaming) — tui
+
+### can_reuse
+
+- [issue_2026-07-15-markdown-table-raw-text-streaming can_reuse 未检测 block 类型变更](domains/tui.md#issue_2026-07-15-markdown-table-raw-text-streaming) — tui
+
+### block类型变更
+
+- [issue_2026-07-15-markdown-table-raw-text-streaming 增量缓存需覆盖 block 类型变更场景](domains/tui.md#issue_2026-07-15-markdown-table-raw-text-streaming) — tui
+
+### Brewed总结
+
+- [issue_2026-07-10-brewed-summary-missing-in-empty-state 空态不显示 Brewed 总结行](domains/tui.md#issue_2026-07-10-brewed-summary-missing-in-empty-state) — tui
+
+### 单帧延迟
+
+- [issue_2026-07-10-brewed-summary-missing-in-empty-state 状态读取在 mutation 前导致单帧延迟](domains/tui.md#issue_2026-07-10-brewed-summary-missing-in-empty-state) — tui
+
+### 持久化丢失
+
+- [issue_2026-07-13-model-login-panel-persistence-lost Model/Login 面板切换后重启配置丢失](domains/tui.md#issue_2026-07-13-model-login-panel-persistence-lost) — tui
+
+### Ctrl+C回滚
+
+- [issue_2026-07-11-cancel-no-rollback-no-restore Ctrl+C 取消后未回滚用户消息和文本](domains/tui.md#issue_2026-07-11-cancel-no-rollback-no-restore) — tui
+
+### TurnInterrupted
+
+- [issue_2026-07-11-cancel-no-rollback-no-restore TurnInterrupted 处理器缺少零产出回滚](domains/tui.md#issue_2026-07-11-cancel-no-rollback-no-restore) — tui
+
+### 零产出
+
+- [issue_2026-07-11-cancel-no-rollback-no-restore 零 AI 产出时的回滚判定条件](domains/tui.md#issue_2026-07-11-cancel-no-rollback-no-restore) — tui
+
+### 工具超时
+
+- [issue_2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks 统一 300s 超时导致 Agent/SubAgent 中断](domains/agent.md#issue_2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks) — agent
+
+### 差异化超时
+
+- [issue_2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks 按工具类型差异化超时策略](domains/agent.md#issue_2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks) — agent
+
+### BaseTool::timeout
+
+- [issue_2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks BaseTool trait 提供 timeout() 方法](domains/agent.md#issue_2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks) — agent
+
+### EventBus
+
+- [issue_2026-07-16-eventbus-unified-emission 统一事件发射路径走 v2 EventBus](domains/agent.md#issue_2026-07-16-eventbus-unified-emission) — agent
+
+### 事件路径统一
+
+- [issue_2026-07-16-eventbus-unified-emission 三条独立发射路径合并为单一 EventBus 入口](domains/agent.md#issue_2026-07-16-eventbus-unified-emission) — agent
+
+### 配置推送
+
+- [issue_2026-07-16-model-login-switch-not-effective-until-restart 面板配置未推到 agent 需重启生效](domains/tui.md#issue_2026-07-16-model-login-switch-not-effective-until-restart) — tui
+
+### update_config
+
+- [issue_2026-07-16-model-login-switch-not-effective-until-restart client.update_config() 推送配置到 ACP 服务端](domains/tui.md#issue_2026-07-16-model-login-switch-not-effective-until-restart) — tui
+
+### AgentPool
+
+- [issue_2026-07-16-model-login-switch-not-effective-until-restart AgentPool 缓存未失效导致旧配置复用](domains/tui.md#issue_2026-07-16-model-login-switch-not-effective-until-restart) — tui
+
 ## 更新记录
 
 - 2026-07-06: 首次创建，归档 8 个 issue
 - 2026-07-06: 从 spec/issues/ 归档 8 个 issue
 - 2026-07-10: 归档 13 个 issue，新增 agent 领域，新增 24 个关键词
+- 2026-07-17: 归档 16 个 issue，新增 35 个关键词

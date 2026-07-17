@@ -65,6 +65,7 @@ fn make_ctx(sink: Arc<dyn crate::session::event_sink::EventSink>, args: &str) ->
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
+        frozen_system_prompt: None,
     }
 }
 

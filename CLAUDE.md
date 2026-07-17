@@ -230,6 +230,8 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **中途纠正消息**：用 `BaseMessage::human()`，禁止 `BaseMessage::system()`（invoke.rs 会 hoist 污染 frozen prompt）
 - **诊断优先于修复**：根因未被日志/复现步骤/代码证据定位前，禁止超过 20 行的代码修改。添加诊断日志优先于修改业务逻辑
 - **3 次尝试上限**：同一 bug 修复超过 3 次仍失败时，禁止继续猜测式修复。要求用户提供运行时数据（RUST_LOG=debug 等）后再动手
+- **工具超时差异化**：超时策略按工具类型差异化——BaseTool::timeout() 自声明，快工具 120s，长运行工具（Agent/Bash/Workflow）返回 None 自管。禁止一刀切硬编码（[issue](spec/archive-issues/2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks.md)）
+- **事件路径统一**：新增事件变体走 EventBus 单一入口，避免分散 ExecutorEvent 直接构造。SubAgent/LLM 流式/斜杠命令等路径须进入 EventBus（[issue](spec/archive-issues/2026-07-16-eventbus-unified-emission.md)）
 
 ### ACP/TUI 分层
 - **execute_prompt**：Agent 构建统一入口，禁止 TUI 直连运行时
@@ -239,6 +241,49 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **session replay DTO**：复用正常流式路径数据结构，不要发明 replay 专用变体
 - **ACP 协议字段优先**：数据流设计时先查 ACP 协议已有字段（如 `StateSnapshotMeta.budget_pct`、goal_state `block_continue`），禁止自己从 raw 数据重新计算
 - **工具别名**：通过 `BaseTool::aliases()` trait 方法自声明，禁止重复注册或集中式静态表。别名仅用于 LLM 可能输出的同义词（如 Bash→"Shell"）
+- **面板配置必须推送**：任何修改全局配置的面板操作后必须：save 持久化 + client.update_config() 推送 + invalidate pool + 重建 provider。workflow/SubAgent 的 provider 须共享 Arc（[issue](spec/archive-issues/2026-07-16-model-login-switch-not-effective-until-restart.md)）
+
+### PeriCaps 能力协商（标准模式）
+
+**PeriCaps** 是 ACP 自定义通知通道的能力标志集（`peri-acp-types/src/peri_caps.rs`），10 个 bool 字段：`token_stats`、`skill_names`、`replay`、`source_agent_id`、`context_usage`、`agent_event`、`agent_event_done`、`unstable_event`、`prediction`、`hitl_pending`。
+
+存储于 `SessionManager.caps_registry: Arc<DashMap<String, PeriCaps>>`，per-session 粒度。
+
+**生命周期**：
+```
+initialize（stdio）或 跳过（TUI MpscTransport）
+    ↓
+pending_caps: Mutex<Option<PeriCaps>>  // 暂存
+    ↓
+session/new → consume or default → caps_registry[session_id]
+    ↓
+push_event / push_done / replay / notify 等发送点读取 → if caps.xxx { ... }
+```
+
+**两条传输路径的默认值差异**：
+
+| 路径 | initialize | session/new 默认 | 原因 |
+|------|:---------:|:--------------:|------|
+| Stdio（IDE） | ✅ 有 | `consume_pending_caps` → 协商值 | 外部 client 显式声明能力 |
+| MpscTransport（TUI 内部） | ❌ 无 | `PeriCaps::all_enabled()` | TUI 需要接收所有自定义事件 |
+
+**标准 API**（`SessionManager`）：
+
+| 方法 | 用途 | 调用时机 |
+|------|------|---------|
+| `set_pending_caps(caps)` | initialize handler 暂存协商值 | initialize |
+| `consume_pending_caps(sid) → PeriCaps` | 取走 pending_caps 并写入 registry | session/new（仅 stdio） |
+| `get_caps(sid) → PeriCaps` | 只读查询（未注册返回 `default()`=全 false） | 发送点 |
+| `ensure_session_caps(sid) → PeriCaps` | **幂等注册**：已有则返回，无则从 pending 取或 fallback `all_enabled()` | session/new/load/resume/fork（**所有路径标准调用**） |
+| `caps_registry() → Arc<DashMap<...>>` | 获取 registry 克隆引用（供 TransportEventSink） | session/prompt 启动时 |
+| `pending_caps_was_set() → bool` | 判断 initialize 是否已调用 | 路径判断（已弃用，`ensure_session_caps` 内部原子化） |
+
+**关键规则**：
+1. **新增 session/new/load/resume/fork 时**：在 `ensure_session()` 后立即调用 `ensure_session_caps()`。**这是标准**——缺少会导致 `push_done()` 读到 `default()`，`agent_event_done` 被抑制，TUI 永久 loading。
+2. **stdio 路径 session/new**：继续用 `consume_pending_caps`（因 initialize 保证 pending_caps 非空）。
+3. **新增发送点**：`EventSink::push_event`/`push_done`/`push_unstable_event` 入口必须读 caps 做 if-check。
+4. **`PeriCaps::default()` = 全 false**：未注册 session 的返回值，静默抑制所有自定义功能。
+5. **新增 cap 字段**：同步 (1) `peri_caps.rs` struct 定义 (2) `from_client_meta` 解析 (3) `to_agent_meta` 序列化 (4) `all_enabled()` 工厂 (5) 对应的发送点 if-check。
 
 ### TUI 渲染
 - **use_* 顺序**：`hooks.use_*` 必须在 `if`/`match`/`return` 之前，顺序/数量变化→`"Hook type mismatch"` panic
@@ -247,6 +292,8 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **BRIDGE_RESET_COUNTER**：/clear 和 thread 切换前必须递增，仅 atom 重置不足
 - **overlay 空态**：返回 `Positioned(width:0, height:0)`，不要 `View()`/`Fragment` → 白屏
 - **事件边界**：消息区只处理鼠标滚轮，编辑区只处理键盘
+- **committed push**：所有需时序定位的消息须先 flush current_turn → committed 再 push（flush-then-push 模式）。禁止直接 push committed 绕过 TurnSegment（[issue](spec/archive-issues/2026-07-16-system-note-cache-warning-position-wrong.md)）
+- **增量缓存 can_reuse**：条件须覆盖 block 类型变更场景——输入前缀可能导致 pulldown-cmark 重解析出不同 block 类型时，缓存必须失效全量重跑（[issue](spec/archive-issues/2026-07-15-markdown-table-raw-text-streaming.md)）
 - **面板交互规范**：选中 tab 用反色（accent 底色+surface 字色），禁止 `[ ]` 包裹。面板内禁止单字母快捷键（j/k/q 等），仅允许方向键 + Tab + Esc + Enter。文本输入用 `TextAreaState`，禁止手工键盘事件处理
 
 ### SubAgent / Worktree
@@ -263,7 +310,8 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **u16 坐标**：用 `saturating_add`/`saturating_sub`，禁止裸 `+`/`-`
 - **RwLockReadGuard Send**：不是 Send，async 跨 `.await` 用 `parking_lot::RwLock`
 - **剪贴板**：阻塞系统 I/O 用 `std::thread::spawn` 独立线程
-- **Paste 事件**：`Event::Paste` 独立于 key event，需 BracketedPaste
+- **Paste 事件**：`Event::Paste` 独立于 key event，需 BracketedPaste；事件过滤禁止 `if let Event::Key` 独占模式丢弃 Paste（[issue](spec/archive-issues/2026-07-15-setup-wizard-no-paste-login-no-edit.md)）
+- **鼠标 Drag 事件**：高频 Drag(Left) 必须在入口处及早 Ignored（与 Moved 同级过滤），否则穿透触发 state 读写 → 组件重渲染 → CPU 暴涨（[issue](spec/archive-issues/2026-07-11-message-area-mouse-selection-regression.md)）
 - **Theme 悬垂引用**：`&THEME_ATOM.state().read().xxx` 崩，须两步绑定；`theme_def.semantic` 不能直接访问，须 `theme_def.read().semantic`
 - **Edit 前必 Read**：连续编辑同一文件时，每次 Edit 前必须 Read 确认 old_string 匹配当前文件状态。同文件修改超过 3 处，用 Write 整体重写替代逐块 Edit
 - **commit 消息特殊字符**：含 `{}`、`\`` 等 shell 特殊字符时，用 `git commit -F /tmp/msg.txt` 而非 `-m`。提交前 `git diff --cached --stat` 确认 scope

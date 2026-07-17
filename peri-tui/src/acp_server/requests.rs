@@ -12,6 +12,7 @@ use agent_client_protocol::schema::v1::{
 use peri_acp::dispatch::ReplaySender;
 use peri_acp::dispatch::config_update::make_config_options;
 use peri_acp::{dispatch, transport::types::AcpError};
+use peri_acp_types::PeriCaps;
 use peri_acp_types::event_data::{
     PluginActionResult, PluginSearchResult, PluginSnapshot, PluginSnapshotEntry,
 };
@@ -47,7 +48,19 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1);
             info!(protocol_version = %version, "ACP initialize");
-            let resp = dispatch::build_initialize_response();
+
+            // 解析 clientCapabilities._meta 中的 peri 自定义 flag
+            let peri_caps = params
+                .get("clientCapabilities")
+                .and_then(|c| c.get("_meta"))
+                .and_then(|m| m.as_object())
+                .map(PeriCaps::from_client_meta)
+                .unwrap_or_default();
+
+            // 暂存 caps，session/new 时 consume
+            cfg.session_manager.set_pending_caps(peri_caps.clone());
+
+            let resp = dispatch::build_initialize_response(&peri_caps);
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -147,7 +160,13 @@ pub(crate) async fn handle_request(
                 disable_bundled, // TUI 侧仅用于显示
             );
             let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
-            send_available_commands_update(transport, &session_id, &skills).await;
+
+            // 将暂存的 peri caps 关联到新 session。
+            // MpscTransport 路径：若未显式调用 initialize（TUI 内部连接），
+            // 默认全部 cap=true（TUI 需要接收所有自定义事件）。
+            let peri_caps = cfg.session_manager.ensure_session_caps(&session_id);
+
+            send_available_commands_update(transport, &session_id, &skills, &peri_caps).await;
 
             // BRIDGE_RESET_COUNTER handles stale committed cleanup; no explicit clear needed
             serde_json::to_value(resp)
@@ -277,6 +296,8 @@ pub(crate) async fn handle_request(
 
             // ── Freeze session data at load time ──
             cfg.session_manager.ensure_session(req_session_id, cwd);
+            // 确保 caps 已在 registry 中注册（MpscTransport 无 initialize，默认全 true）
+            let caps = cfg.session_manager.ensure_session_caps(req_session_id);
             let frozen_data = cfg.session_manager.build_frozen_data(
                 cwd,
                 &cfg.plugin_skill_roots,
@@ -296,6 +317,7 @@ pub(crate) async fn handle_request(
                 req_session_id,
                 &history_for_replay,
                 &replay_sender,
+                &caps,
             )
             .await
             {
@@ -323,7 +345,7 @@ pub(crate) async fn handle_request(
                 disable_bundled, // TUI 侧仅用于显示
             );
             let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
-            send_available_commands_update(transport, req_session_id, &skills).await;
+            send_available_commands_update(transport, req_session_id, &skills, &caps).await;
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -528,6 +550,8 @@ pub(crate) async fn handle_request(
 
             // ── Freeze session data at resume time ──
             cfg.session_manager.ensure_session(req_session_id, cwd);
+            // 确保 caps 已在 registry 中注册（MpscTransport 无 initialize，默认全 true）
+            cfg.session_manager.ensure_session_caps(req_session_id);
             let frozen_data = cfg.session_manager.build_frozen_data(
                 cwd,
                 &cfg.plugin_skill_roots,
@@ -579,6 +603,8 @@ pub(crate) async fn handle_request(
 
             // ── Freeze session data at fork time ──
             cfg.session_manager.ensure_session(&new_session_id, cwd);
+            // 确保 caps 已在 registry 中注册（MpscTransport 无 initialize，默认全 true）
+            cfg.session_manager.ensure_session_caps(&new_session_id);
             let frozen_data = cfg.session_manager.build_frozen_data(
                 cwd,
                 &cfg.plugin_skill_roots,
@@ -676,6 +702,8 @@ pub(crate) async fn handle_request(
                 .join(".claude");
             let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
 
+            let caps = cfg.session_manager.get_caps(session_id);
+
             match peri_middlewares::plugin::install_plugin(
                 name,
                 marketplace,
@@ -688,10 +716,10 @@ pub(crate) async fn handle_request(
             {
                 Ok(installed) => {
                     let _ = push_plugin_action_result(
-                        transport, session_id, "install", name, true, None,
+                        transport, session_id, "install", name, true, None, &caps,
                     )
                     .await;
-                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir).await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir, &caps).await;
                     Ok(serde_json::json!({ "success": true, "plugin": installed.id }))
                 }
                 Err(e) => {
@@ -702,6 +730,7 @@ pub(crate) async fn handle_request(
                         name,
                         false,
                         Some(&e.to_string()),
+                        &caps,
                     )
                     .await;
                     Err(AcpError::new(-32603, e.to_string()))
@@ -723,6 +752,8 @@ pub(crate) async fn handle_request(
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join(".claude");
 
+            let caps = cfg.session_manager.get_caps(session_id);
+
             match peri_middlewares::plugin::uninstall_plugin(plugin_id, &claude_dir, None).await {
                 Ok(()) => {
                     let _ = push_plugin_action_result(
@@ -732,9 +763,10 @@ pub(crate) async fn handle_request(
                         plugin_id,
                         true,
                         None,
+                        &caps,
                     )
                     .await;
-                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir).await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir, &caps).await;
                     Ok(serde_json::json!({ "success": true }))
                 }
                 Err(e) => {
@@ -745,6 +777,7 @@ pub(crate) async fn handle_request(
                         plugin_id,
                         false,
                         Some(&e.to_string()),
+                        &caps,
                     )
                     .await;
                     Err(AcpError::new(-32603, e.to_string()))
@@ -795,14 +828,16 @@ pub(crate) async fn handle_request(
                 )
             };
 
+            let caps = cfg.session_manager.get_caps(session_id);
+
             match result {
                 Ok(()) => {
                     let action = if enable { "enable" } else { "disable" };
                     let _ = push_plugin_action_result(
-                        transport, session_id, action, plugin_id, true, None,
+                        transport, session_id, action, plugin_id, true, None, &caps,
                     )
                     .await;
-                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir).await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir, &caps).await;
                     Ok(serde_json::json!({ "success": true }))
                 }
                 Err(e) => {
@@ -814,6 +849,7 @@ pub(crate) async fn handle_request(
                         plugin_id,
                         false,
                         Some(&e.to_string()),
+                        &caps,
                     )
                     .await;
                     Err(AcpError::new(-32603, e.to_string()))
@@ -834,7 +870,8 @@ pub(crate) async fn handle_request(
             let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
             let results = search_marketplace_plugins(query, &cache_dir);
 
-            let _ = push_plugin_search_result(transport, session_id, query, &results).await;
+            let caps = cfg.session_manager.get_caps(session_id);
+            let _ = push_plugin_search_result(transport, session_id, query, &results, &caps).await;
             Ok(serde_json::json!({ "results": results.iter().map(|r| {
                 serde_json::json!({
                     "name": r.name,
@@ -878,7 +915,11 @@ async fn push_plugin_action_result(
     plugin_name: &str,
     success: bool,
     error: Option<&str>,
+    caps: &PeriCaps,
 ) {
+    if !caps.unstable_event {
+        return;
+    }
     let payload = PluginActionResult {
         action: action.to_string(),
         plugin_name: plugin_name.to_string(),
@@ -903,7 +944,11 @@ async fn push_plugin_snapshot(
     transport: &dyn peri_acp::transport::AcpTransport,
     session_id: &str,
     claude_dir: &std::path::Path,
+    caps: &PeriCaps,
 ) {
+    if !caps.unstable_event {
+        return;
+    }
     let plugins = collect_plugin_snapshot(claude_dir);
     let payload = PluginSnapshot { plugins };
     let data = serde_json::to_value(&payload).unwrap_or_default();
@@ -925,7 +970,11 @@ async fn push_plugin_search_result(
     session_id: &str,
     query: &str,
     results: &[PluginSnapshotEntry],
+    caps: &PeriCaps,
 ) {
+    if !caps.unstable_event {
+        return;
+    }
     let payload = PluginSearchResult {
         query: query.to_string(),
         results: results.to_vec(),

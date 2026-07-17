@@ -96,6 +96,8 @@ pub(crate) async fn handle_new(
             },
         );
     }
+    // 将 initialize 时暂存的 peri caps 关联到新 session
+    let peri_caps = ctx.session_manager.consume_pending_caps(&sid);
     tracing::info!(session_id = %sid, "ACP session created with ThreadStore");
     let modes = build_mode_state(&ctx.permission_mode);
     let config_options = {
@@ -114,6 +116,7 @@ pub(crate) async fn handle_new(
         &ctx.plugin_skill_roots,
         &SessionId::new(&*sid),
         &cx,
+        &peri_caps,
     );
     Ok(())
 }
@@ -131,6 +134,8 @@ pub(crate) async fn handle_load(
 
     // 登记到 SessionManager 以支撑 cascade cancel / goal_state
     ctx.session_manager.ensure_session(&sid, &cwd);
+    // 确保 caps 已在 registry 中注册
+    let caps = ctx.session_manager.ensure_session_caps(&sid);
     // Build frozen data for session
     let frozen_data = freeze::build(ctx, &cwd);
 
@@ -139,7 +144,7 @@ pub(crate) async fn handle_load(
 
     // ── ACP v1 spec: replay history via session/update BEFORE responding ──
     let replay_sender = StdioReplaySender { cx: cx.clone() };
-    if let Err(e) = dispatch::replay_session_history(&sid, &history, &replay_sender).await {
+    if let Err(e) = dispatch::replay_session_history(&sid, &history, &replay_sender, &caps).await {
         tracing::warn!(session_id = %sid, error = %e, "session/load: history replay failed, continuing");
     }
 
@@ -188,6 +193,7 @@ pub(crate) async fn handle_load(
         &ctx.plugin_skill_roots,
         &SessionId::new(&*sid),
         &cx,
+        &caps,
     );
     Ok(())
 }
@@ -203,6 +209,8 @@ pub(crate) async fn handle_resume(
     let cwd = req.cwd.to_string_lossy().to_string();
     // 登记到 SessionManager 以支撑 cascade cancel / goal_state
     ctx.session_manager.ensure_session(&sid, &cwd);
+    // 确保 caps 已在 registry 中注册
+    ctx.session_manager.ensure_session_caps(&sid);
     // Build frozen data for session
     let frozen_data = freeze::build(ctx, &cwd);
 
@@ -295,6 +303,8 @@ pub(crate) async fn handle_fork(
     // 登记到 SessionManager 以支撑 cascade cancel / goal_state
     ctx.session_manager
         .ensure_session(&new_session_id, &cwd_str);
+    // 确保 caps 已在 registry 中注册
+    ctx.session_manager.ensure_session_caps(&new_session_id);
     // Build frozen data for forked session
     let frozen_data = freeze::build(ctx, &cwd_str);
     {

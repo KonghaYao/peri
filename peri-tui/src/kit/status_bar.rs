@@ -12,7 +12,7 @@ use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction, Flex},
+        layout::{Alignment, Constraint, Direction, Flex},
         style::{Modifier, Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -202,7 +202,7 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .read()
         .is_some_and(|t| now.duration_since(t) < Duration::from_secs(1));
     if quit_active {
-        let hint = " 再次按 Ctrl+C 退出，其他键取消 ";
+        let hint = i18n::tr("statusbar-hint-quit-pending");
         return element!(
             View(
                 flex_direction: Direction::Horizontal,
@@ -218,11 +218,11 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     let hints = if is_popup {
-        Line::from(" Esc: close | Enter: confirm ").fg(statusbar().muted)
+        Line::from(i18n::tr("statusbar-hint-popup")).fg(statusbar().muted)
     } else if is_at || is_slash {
-        Line::from(" Esc: close | Tab: navigate | Enter: select ").fg(statusbar().muted)
+        Line::from(i18n::tr("statusbar-hint-menu")).fg(statusbar().muted)
     } else {
-        Line::from(" /: commands | Shift+Enter: newline | Shift+Tab: mode ").fg(statusbar().muted)
+        Line::from(i18n::tr("statusbar-hint-main")).fg(statusbar().muted)
     };
 
     element!(
@@ -230,9 +230,9 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             flex_direction: Direction::Horizontal,
             width: Constraint::Fill(1),
             height: Constraint::Length(1),
-            justify_content: Flex::Center,
+            justify_content: Flex::End,
         ) {
-            Text(text: Paragraph::new(hints).centered())
+            Text(text: Paragraph::new(hints), alignment: Alignment::Right)
         }
     )
 }

@@ -10,8 +10,11 @@ pub use agent_client_protocol::{
     Client, ConnectionTo,
 };
 use async_trait::async_trait;
+use dashmap::DashMap;
+use peri_acp_types::PeriCaps;
 use peri_agent::agent::events::ExecutorEvent;
 use serde_json::json;
+use std::sync::Arc;
 use tracing::{debug, error};
 
 use crate::{event::map_event, event::router, transport::AcpTransport};
@@ -57,11 +60,18 @@ pub trait EventSink: Send + Sync {
 /// `peri/unstable-event` notifications for new-protocol consumers.
 pub struct TransportEventSink {
     transport: std::sync::Arc<dyn AcpTransport>,
+    caps_registry: Arc<DashMap<String, PeriCaps>>,
 }
 
 impl TransportEventSink {
-    pub fn new(transport: std::sync::Arc<dyn AcpTransport>) -> Self {
-        Self { transport }
+    pub fn new(
+        transport: std::sync::Arc<dyn AcpTransport>,
+        caps_registry: Arc<DashMap<String, PeriCaps>>,
+    ) -> Self {
+        Self {
+            transport,
+            caps_registry,
+        }
     }
 
     /// Push a `{event, data}` custom event through `peri/unstable-event` channel.
@@ -91,7 +101,12 @@ impl TransportEventSink {
 #[async_trait]
 impl EventSink for TransportEventSink {
     async fn push_event(&self, session_id: &str, event: &ExecutorEvent, context_window: u32) {
-        let mapped = map_event(event, context_window);
+        let caps = self
+            .caps_registry
+            .get(session_id)
+            .map(|r| r.clone())
+            .unwrap_or_default();
+        let mapped = map_event(event, context_window, &caps);
 
         for m in mapped {
             // 1. session/update — 标准 ACP 通知（Category ①）
@@ -110,9 +125,11 @@ impl EventSink for TransportEventSink {
                     "update": update_value,
                 });
                 // Inject _peri metadata for TUI consumption (source_agent_id)
-                if let Some(ref aid) = m.source_agent_id {
-                    if let serde_json::Value::Object(ref mut map) = payload {
-                        map.insert("_peri".to_string(), json!({ "sourceAgentId": aid }));
+                if caps.source_agent_id {
+                    if let Some(ref aid) = m.source_agent_id {
+                        if let serde_json::Value::Object(ref mut map) = payload {
+                            map.insert("_peri".to_string(), json!({ "sourceAgentId": aid }));
+                        }
                     }
                 }
                 let _ = self
@@ -122,26 +139,33 @@ impl EventSink for TransportEventSink {
             }
 
             // 2. peri/agent_event — TUI 专用事件（Category ③）
-            // Convert ExecutorEvent → AcpEvent DTO before serialization.
-            if m.forward_to_tui {
-                if let Some(acp_event) = crate::event::executor_event_to_acp(event) {
-                    let event_json = match serde_json::to_string(&acp_event) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!(error = %e, "EventSink: serialize AcpEvent failed");
-                            continue;
+            // 仅在 agentEvent cap 为 true 时发送整个通道。
+            // StateSnapshotMeta 仍需额外的 contextUsage cap（细分权限）。
+            if caps.agent_event && m.forward_to_tui {
+                let should_forward = match event {
+                    ExecutorEvent::StateSnapshotMeta { .. } => caps.context_usage,
+                    _ => true,
+                };
+                if should_forward {
+                    if let Some(acp_event) = crate::event::executor_event_to_acp(event) {
+                        let event_json = match serde_json::to_string(&acp_event) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                error!(error = %e, "EventSink: serialize AcpEvent failed");
+                                continue;
+                            }
+                        };
+                        let agent_event_params = json!({
+                            "sessionId": session_id,
+                            "event_json": event_json,
+                        });
+                        if let Err(e) = self
+                            .transport
+                            .send_notification("peri/agent_event", agent_event_params)
+                            .await
+                        {
+                            error!(error = %e, "EventSink: send peri/agent_event failed");
                         }
-                    };
-                    let agent_event_params = json!({
-                        "sessionId": session_id,
-                        "event_json": event_json,
-                    });
-                    if let Err(e) = self
-                        .transport
-                        .send_notification("peri/agent_event", agent_event_params)
-                        .await
-                    {
-                        error!(error = %e, "EventSink: send peri/agent_event failed");
                     }
                 }
             }
@@ -149,7 +173,7 @@ impl EventSink for TransportEventSink {
             // 3. peri/hitl_pending — HITL 审批事件（Category ②）
             // 预留：当前 HITL 通过 UserInteractionBroker 直接交互，
             // 未来 ExecutorEvent 扩展 HitlPending 时启用此通道。
-            if m.hitl_pending {
+            if caps.hitl_pending && m.hitl_pending {
                 let _ = self
                     .transport
                     .send_notification("peri/hitl_pending", json!({ "sessionId": session_id }))
@@ -167,20 +191,19 @@ impl EventSink for TransportEventSink {
             }
 
             // 5. peri/unstable-event — new-protocol event routing (Category ⑤)
-            // Route each ExecutorEvent through the event router. Events that
-            // map to a RoutingOutput are forwarded as unstable events; discarded
-            // events return None and are silently dropped.
-            let routing_out = router::route(event);
-            if let Some(out) = routing_out {
-                if let Err(e) = self
-                    .push_unstable_event(session_id, out.event_name, out.data)
-                    .await
-                {
-                    tracing::trace!(
-                        session_id = %session_id,
-                        error = %e,
-                        "EventSink: peri/unstable-event send failed (non-critical)"
-                    );
+            if caps.unstable_event {
+                let routing_out = router::route(event);
+                if let Some(out) = routing_out {
+                    if let Err(e) = self
+                        .push_unstable_event(session_id, out.event_name, out.data)
+                        .await
+                    {
+                        tracing::trace!(
+                            session_id = %session_id,
+                            error = %e,
+                            "EventSink: peri/unstable-event send failed (non-critical)"
+                        );
+                    }
                 }
             }
         }
@@ -192,20 +215,37 @@ impl EventSink for TransportEventSink {
     // acp_notifier.rs:127 再将 AgentDone 转换为 AcpEventData::TurnDone 推入双 bridge。
     // 若未来 ACP 标准协议新增 turn_done tag，应迁移至 session/update 标准通道。
     async fn push_done(&self, session_id: &str, stop_reason: &str) {
-        debug!(session_id = %session_id, "EventSink: sending agent_event_done");
-        if let Err(e) = self
-            .transport
-            .send_notification(
-                "peri/agent_event_done",
-                json!({ "sessionId": session_id, "stopReason": stop_reason }),
-            )
-            .await
-        {
-            error!(session_id = %session_id, error = %e, "EventSink: agent_event_done send failed")
+        let caps = self
+            .caps_registry
+            .get(session_id)
+            .map(|r| r.clone())
+            .unwrap_or_default();
+        if caps.agent_event_done {
+            debug!(session_id = %session_id, "EventSink: sending agent_event_done");
+            if let Err(e) = self
+                .transport
+                .send_notification(
+                    "peri/agent_event_done",
+                    json!({ "sessionId": session_id, "stopReason": stop_reason }),
+                )
+                .await
+            {
+                error!(session_id = %session_id, error = %e, "EventSink: agent_event_done send failed")
+            }
+        } else {
+            debug!(session_id = %session_id, "EventSink: agent_event_done suppressed (cap not declared)");
         }
     }
 
     async fn push_unstable_event(&self, session_id: &str, event: String, data: serde_json::Value) {
+        let caps = self
+            .caps_registry
+            .get(session_id)
+            .map(|r| r.clone())
+            .unwrap_or_default();
+        if !caps.unstable_event {
+            return;
+        }
         if let Err(e) = TransportEventSink::push_unstable_event(self, session_id, event, data).await
         {
             tracing::trace!(
@@ -257,7 +297,7 @@ impl StdioEventSink {
 #[async_trait]
 impl EventSink for StdioEventSink {
     async fn push_event(&self, _session_id: &str, event: &ExecutorEvent, context_window: u32) {
-        let mapped = map_event(event, context_window);
+        let mapped = map_event(event, context_window, &PeriCaps::default());
         for m in mapped {
             for update in m.updates {
                 let notif = SessionNotification::new(self.session_id.clone(), update);

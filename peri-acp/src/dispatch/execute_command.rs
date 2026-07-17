@@ -49,6 +49,7 @@ pub async fn execute_command(
     frozen_claude_md: Option<std::sync::Arc<String>>,
     frozen_claude_local_md: Option<std::sync::Arc<String>>,
     frozen_skill_summary: Option<std::sync::Arc<String>>,
+    frozen_system_prompt: Option<std::sync::Arc<String>>,
 ) -> Result<Value, AcpError> {
     let session_id = params
         .get("sessionId")
@@ -104,6 +105,7 @@ pub async fn execute_command(
         frozen_claude_md,
         frozen_claude_local_md,
         frozen_skill_summary,
+        frozen_system_prompt,
     };
 
     let result = tokio::select! {

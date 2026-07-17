@@ -100,7 +100,10 @@ pub(crate) async fn run_prompt(
     let broker: Arc<dyn peri_agent::interaction::UserInteractionBroker> = Arc::new(
         AcpTransportBroker::new(Arc::clone(transport), session_id.clone().into()),
     );
-    let event_sink = Arc::new(TransportEventSink::new(Arc::clone(transport)));
+    let event_sink = Arc::new(TransportEventSink::new(
+        Arc::clone(transport),
+        session_manager.caps_registry(),
+    ));
 
     let provider_snapshot = provider.read().clone();
     let peri_config_snapshot = Arc::new(peri_config.read().clone());

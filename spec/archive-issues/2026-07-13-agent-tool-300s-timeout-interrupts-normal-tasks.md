@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks.md
 # 工具调用统一 300s 超时导致 Agent/SubAgent 正常任务被强制中断
 
 **状态**：Fixed

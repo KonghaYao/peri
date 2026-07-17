@@ -73,8 +73,12 @@ impl super::SubAgentTool {
             chain.add(mw);
         }
 
-        // 4. system prompt（fork 无 agent_def，无 overrides）
-        let system_prompt = self.system_builder.as_ref().map(|b| b(None, cwd));
+        // 4. system prompt（frozen 优先 + system_builder 回退）
+        let system_prompt = self
+            .frozen_system_prompt
+            .clone()
+            .map(|sp| sp.as_ref().to_string())
+            .or_else(|| self.system_builder.as_ref().map(|b| b(None, cwd)));
 
         // 5. 工具集：父工具 clone 为 Vec<Arc<dyn BaseTool>>
         let tools: Vec<Arc<dyn peri_agent::tools::BaseTool>> =

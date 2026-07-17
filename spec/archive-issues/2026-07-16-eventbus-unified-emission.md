@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-16-eventbus-unified-emission.md
 # 统一事件发射路径：所有 Agent 事件走 v2 EventBus
 
 **状态**：Done（方案 B 已完成 CompactStrategy 硬编码 + Path D 代码组织改善全部实施；方案 A 主体 NOT READY，4 项经两轮对抗评审判定搁置）

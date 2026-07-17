@@ -1,3 +1,4 @@
+use peri_acp_types::PeriCaps;
 use peri_agent::agent::events::{
     BackgroundTaskResult, CompactFileInfo, CompactStrategy, CompactTrigger, ExecutorEvent,
     TodoEntry, TodoStatus,
@@ -23,8 +24,11 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
         }),
         stop_reason: Some(StopReason::EndTurn),
     };
-
-    let mapped = map_event(&event, 200_000);
+    let caps = PeriCaps {
+        token_stats: true,
+        ..Default::default()
+    };
+    let mapped = map_event(&event, 200_000, &caps);
     assert_eq!(mapped.len(), 1, "应产出 1 个 MappedEvent");
 
     let m = &mapped[0];
@@ -66,8 +70,11 @@ fn test_llm_call_end_no_optional_fields() {
         }),
         stop_reason: None,
     };
-
-    let mapped = map_event(&event, 128_000);
+    let caps = PeriCaps {
+        token_stats: true,
+        ..Default::default()
+    };
+    let mapped = map_event(&event, 128_000, &caps);
     assert_eq!(mapped.len(), 1);
     assert!(!mapped[0].forward_to_tui);
 
@@ -92,7 +99,7 @@ fn test_llm_call_end_no_usage_filtered() {
         usage: None,
         stop_reason: None,
     };
-    let mapped = map_event(&event, 200_000);
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert!(
         mapped.is_empty()
             || mapped
@@ -109,7 +116,7 @@ fn test_context_warning_is_tui_only() {
         total_tokens: 200_000,
         percentage: 75.0,
     };
-    let mapped = map_event(&event, 200_000);
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1);
     assert!(mapped[0].forward_to_tui, "ContextWarning 应转发到 TUI");
     assert!(
@@ -126,7 +133,7 @@ fn test_llm_retrying_is_tui_only() {
         delay_ms: 1000,
         error: "timeout".to_string(),
     };
-    let mapped = map_event(&event, 200_000);
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1);
     assert!(mapped[0].forward_to_tui, "LlmRetrying 应转发到 TUI");
     assert!(
@@ -146,7 +153,7 @@ fn test_tool_end_carries_title() {
         is_error: false,
         source_agent_id: None,
     };
-    let mapped = map_event(&event, 200_000);
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1);
     assert!(!mapped[0].forward_to_tui, "ToolEnd 不应转发到 TUI");
     assert_eq!(mapped[0].updates.len(), 1);
@@ -185,7 +192,7 @@ fn test_ai_reasoning_maps_to_session_update() {
         text: "let me think...".to_string(),
         source_agent_id: None,
     };
-    let mapped = map_event(&event, 200_000);
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1, "应产出 1 个 MappedEvent");
     assert!(!mapped[0].forward_to_tui, "AiReasoning 不应转发到 TUI");
     assert_eq!(mapped[0].updates.len(), 1, "应包含 1 个 SessionUpdate");
@@ -215,7 +222,7 @@ fn test_ai_reasoning_with_source_agent_id_forwards_to_notifier() {
         text: "subagent thinking...".to_string(),
         source_agent_id: Some("sa-1".to_string()),
     };
-    let mapped = map_event(&event, 200_000);
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1);
     assert_eq!(
         mapped[0].source_agent_id.as_deref(),
@@ -239,7 +246,7 @@ fn test_text_chunk_maps_to_session_update_with_source() {
         chunk: "Hello world".to_string(),
         source_agent_id: Some("sub-agent-1".to_string()),
     };
-    let mapped = map_event(&event, 200_000);
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1);
     assert!(!mapped[0].forward_to_tui, "TextChunk 不应转发到 TUI");
     assert_eq!(mapped[0].updates.len(), 1);
@@ -267,7 +274,7 @@ fn test_text_chunk_without_source_agent_id() {
         chunk: "main text".to_string(),
         source_agent_id: None,
     };
-    let mapped = map_event(&event, 200_000);
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1);
     assert!(mapped[0].source_agent_id.is_none());
 }
@@ -282,7 +289,7 @@ fn test_tool_start_maps_to_session_update_with_tool_info() {
         input: serde_json::json!({"command": "ls -la"}),
         source_agent_id: Some("sub-agent-2".to_string()),
     };
-    let mapped = map_event(&event, 200_000);
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1);
     assert!(!mapped[0].forward_to_tui, "ToolStart 不应转发到 TUI");
     assert_eq!(mapped[0].updates.len(), 1);
@@ -326,7 +333,7 @@ fn test_tool_start_infer_tool_kind_variants() {
             input: serde_json::Value::Null,
             source_agent_id: None,
         };
-        let mapped = map_event(&event, 200_000);
+        let mapped = map_event(&event, 200_000, &PeriCaps::default());
         match &mapped[0].updates[0] {
             SessionUpdate::ToolCall(tc) => {
                 assert_eq!(
@@ -361,7 +368,7 @@ fn test_todo_update_maps_to_session_update() {
         },
     ];
     let event = ExecutorEvent::TodoUpdate(entries);
-    let mapped = map_event(&event, 200_000);
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1);
     assert!(!mapped[0].forward_to_tui, "TodoUpdate 不应转发到 TUI");
     assert_eq!(mapped[0].updates.len(), 1);
@@ -385,7 +392,7 @@ fn test_todo_update_maps_to_session_update() {
 fn test_todo_update_empty_entries() {
     // 空 TodoUpdate → 空 Plan（条目数为 0）
     let event = ExecutorEvent::TodoUpdate(vec![]);
-    let mapped = map_event(&event, 200_000);
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1);
     match &mapped[0].updates[0] {
         SessionUpdate::Plan(plan) => {
@@ -399,7 +406,7 @@ fn test_todo_update_empty_entries() {
 // 所有 TUI-only 变体应满足: forward_to_tui=true, updates 为空
 
 fn assert_tui_only(event: &ExecutorEvent, label: &str) {
-    let mapped = map_event(event, 200_000);
+    let mapped = map_event(event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1, "{} 应产出 1 个 MappedEvent", label);
     assert!(mapped[0].forward_to_tui, "{} 应转发到 TUI", label);
     assert!(
@@ -575,7 +582,7 @@ fn test_agent_execution_failed_is_tui_only() {
 // 所有 filtered 变体应满足: forward_to_tui=false, updates 为空
 
 fn assert_filtered(event: &ExecutorEvent, label: &str) {
-    let mapped = map_event(event, 200_000);
+    let mapped = map_event(event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1, "{} 应产出 1 个 MappedEvent", label);
     assert!(!mapped[0].forward_to_tui, "{} 不应转发到 TUI", label);
     assert!(
@@ -590,6 +597,7 @@ fn test_message_added_produces_user_message_chunk() {
     let result = map_event(
         &ExecutorEvent::MessageAdded(BaseMessage::human("bg result text")),
         200000,
+        &PeriCaps::default(),
     );
     assert_eq!(result.len(), 1);
     assert!(

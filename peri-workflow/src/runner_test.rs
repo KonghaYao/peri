@@ -59,6 +59,23 @@ return { output: result }
 
     let _ = done_rx.changed().await; // 等待完成信号
     let result = done_rx.borrow().clone().unwrap();
+    // 打印调试信息
+    eprintln!("=== WORKFLOW RESULT ===");
+    eprintln!("status: {}", result.status);
+    eprintln!("error: {:?}", result.error);
+    eprintln!("stderr_tail: {:?}", result.stderr_tail);
+    eprintln!("========================");
     assert_eq!(result.status, "completed");
-    assert!(result.stderr_tail.is_none(), "正常执行不应有 stderr");
+    // bunx 启动时会输出 "Resolving dependencies" 等正常信息到 stderr，
+    // npx 不会。因此 stderr 非空也可能是正常情况。
+    if let Some(ref stderr) = result.stderr_tail {
+        // 仅当 stderr 不全是 bun 解析信息时才算异常
+        let is_bunx_noise = stderr.lines().all(|l| {
+            l.is_empty()
+                || l.contains("Resolving dependencies")
+                || l.contains("Resolved, downloaded and extracted")
+                || l.contains("Saved lockfile")
+        });
+        assert!(is_bunx_noise, "stderr 含非预期的错误输出:\n{}", stderr);
+    }
 }

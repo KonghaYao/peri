@@ -79,7 +79,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     .italic(),
             );
             lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
+            lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
         }
         Some(oauth) => {
             lines.push(Line::from(""));
@@ -101,10 +101,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             };
             lines.push(Line::from(format!("  {}", truncated_url)).fg(semantic.text.muted));
             lines.push(Line::from(""));
-            lines.push(
-                Line::from("  Ctrl+O: open in browser  |  Enter: close  |  Esc: cancel")
-                    .fg(semantic.text.dim),
-            );
+            lines.push(Line::from(i18n::tr("popup-oauth-action-hint")).fg(semantic.text.dim));
         }
     }
 

@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-16-model-login-switch-not-effective-until-restart.md
 # /login 和 /model 面板切换后不立即生效，需重启
 
 **状态**：Fixed

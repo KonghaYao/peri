@@ -182,6 +182,8 @@ pub struct SubAgentMiddleware {
     frozen_claude_local_md: Option<Arc<String>>,
     /// Frozen skills summary
     frozen_skill_summary: Option<Arc<String>>,
+    /// Frozen system prompt（session/new 时捕获，fork 路径复用以避免重建）。
+    frozen_system_prompt: Option<Arc<String>>,
     /// bg 完成时的同步回调
     on_bg_complete:
         Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
@@ -216,6 +218,7 @@ impl SubAgentMiddleware {
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
+            frozen_system_prompt: None,
             on_bg_complete: None,
         }
     }
@@ -329,10 +332,12 @@ impl SubAgentMiddleware {
         claude_md: Option<Arc<String>>,
         claude_local_md: Option<Arc<String>>,
         skill_summary: Option<Arc<String>>,
+        system_prompt: Option<Arc<String>>,
     ) -> Self {
         self.frozen_claude_md = claude_md;
         self.frozen_claude_local_md = claude_local_md;
         self.frozen_skill_summary = skill_summary;
+        self.frozen_system_prompt = system_prompt;
         self
     }
 
@@ -391,6 +396,9 @@ impl SubAgentMiddleware {
                 self.frozen_claude_local_md.clone(),
                 self.frozen_skill_summary.clone(),
             );
+        }
+        if let Some(ref sp) = self.frozen_system_prompt {
+            tool = tool.with_frozen_system_prompt(Arc::clone(sp));
         }
         tool
     }
