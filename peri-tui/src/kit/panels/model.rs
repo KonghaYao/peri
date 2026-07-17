@@ -398,7 +398,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ),
         if is_ctx_cursor {
             Span::styled(
-                "  Enter toggle",
+                i18n::tr("panel-model-inline-toggle-hint"),
                 Style::new().fg(theme_def.read().semantic.text.dim).italic(),
             )
         } else {
@@ -408,13 +408,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Footer
     lines.push(Line::from(""));
-    lines.push(
-        Line::from("  ↑/↓::navigate  Enter/←/→::edit  Esc::close").fg(theme_def
-            .read()
-            .semantic
-            .text
-            .dim),
-    );
+    lines.push(Line::from(i18n::tr("panel-model-nav-hint")).fg(theme_def.read().semantic.text.dim));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
     panel_shell!(PanelKind::Model, {

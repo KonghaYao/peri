@@ -687,10 +687,20 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         i18n::tr("panel-theme-daily-off")
     };
     let download_label = i18n::tr("panel-theme-download-label");
-    lines.push(Line::from(vec![
-        Span::styled(format!("  Ctrl+T::daily({})  ", daily_status), muted_style),
-        Span::styled(format!("Ctrl+D::{}", download_label), selected_style),
-    ]));
+    let footer_hint = i18n::tr_args(
+        "panel-theme-footer-hint",
+        &[
+            (
+                "status".to_string(),
+                FluentValue::String(daily_status.into()),
+            ),
+            (
+                "download".to_string(),
+                FluentValue::String(download_label.into()),
+            ),
+        ],
+    );
+    lines.push(Line::from(vec![Span::styled(footer_hint, muted_style)]));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 

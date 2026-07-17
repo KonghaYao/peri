@@ -156,7 +156,7 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .push(Line::from("  Rewind 通常由 Agent 在工具调用前触发；").fg(semantic.text.dim));
             lines.push(Line::from("  或由历史面板右键选择消息后回退。").fg(semantic.text.dim));
             lines.push(Line::from(""));
-            lines.push(Line::from("  Esc: close").fg(semantic.text.dim));
+            lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
         }
         Some(p) => {
             lines.push(Line::from(""));

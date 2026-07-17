@@ -149,16 +149,13 @@ pub fn Welcome(props: &WelcomeProps, mut hooks: Hooks) -> impl Into<AnyElement<'
     ]));
 
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(semantic.text.dim)),
-        Span::styled(" send", Style::default().fg(semantic.text.dim)),
-        Span::styled("  ", Style::default().fg(semantic.text.dim)),
-        Span::styled("Shift+Enter", Style::default().fg(semantic.text.dim)),
-        Span::styled(" newline", Style::default().fg(semantic.text.dim)),
-        Span::styled("  ", Style::default().fg(semantic.text.dim)),
-        Span::styled("@", Style::default().fg(semantic.text.dim)),
-        Span::styled(" mention files", Style::default().fg(semantic.text.dim)),
-    ]));
+    lines.push(
+        Line::from(vec![Span::styled(
+            i18n::tr("welcome-shortcuts"),
+            Style::default().fg(semantic.text.dim),
+        )])
+        .centered(),
+    );
 
     let centered_lines: Vec<Line<'static>> =
         lines.into_iter().map(|line| line.centered()).collect();

@@ -284,7 +284,8 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
 
     // ── Footer ───────────────────────────────────────────────────────
-    let footer = Line::from("  ←/→::switch  Esc::close").fg(theme_def.read().semantic.text.dim);
+    let footer =
+        Line::from(i18n::tr("panel-status-nav-hint")).fg(theme_def.read().semantic.text.dim);
 
     let content = Paragraph::new(ratatui::text::Text::from({
         let mut all: Vec<Line> = Vec::new();
