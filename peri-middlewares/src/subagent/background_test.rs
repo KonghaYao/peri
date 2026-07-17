@@ -22,7 +22,7 @@
         let registry = make_registry();
         assert_eq!(registry.active_count(), 0);
 
-        registry.register(make_task("bg-1")).unwrap();
+        registry.register_with_kind(make_task("bg-1")).unwrap();
         assert_eq!(registry.active_count(), 1);
     }
 
@@ -30,20 +30,20 @@
     async fn test_max_concurrent_limit() {
         let registry = make_registry();
 
-        registry.register(make_task("bg-1")).unwrap();
-        registry.register(make_task("bg-2")).unwrap();
-        registry.register(make_task("bg-3")).unwrap();
+        registry.register_with_kind(make_task("bg-1")).unwrap();
+        registry.register_with_kind(make_task("bg-2")).unwrap();
+        registry.register_with_kind(make_task("bg-3")).unwrap();
 
-        let result = registry.register(make_task("bg-4"));
+        let result = registry.register_with_kind(make_task("bg-4"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Maximum 3"));
+        assert!(result.unwrap_err().contains("已达 agent 并发上限"));
     }
 
     #[tokio::test]
     async fn test_complete_updates_status() {
         let registry = make_registry();
 
-        registry.register(make_task("bg-1")).unwrap();
+        registry.register_with_kind(make_task("bg-1")).unwrap();
         assert_eq!(registry.active_count(), 1);
 
         let result = BackgroundTaskResult {
@@ -69,8 +69,8 @@
     async fn test_cancel_removes_task() {
         let registry = make_registry();
 
-        registry.register(make_task("bg-1")).unwrap();
-        registry.register(make_task("bg-2")).unwrap();
+        registry.register_with_kind(make_task("bg-1")).unwrap();
+        registry.register_with_kind(make_task("bg-2")).unwrap();
 
         registry.cancel("bg-1").unwrap();
         let tasks = registry.list_tasks();
@@ -107,7 +107,7 @@
             output_preview: None,
         };
 
-        registry.register(task).unwrap();
+        registry.register_with_kind(task).unwrap();
         assert_eq!(registry.active_count(), 1);
 
         // 取消任务：应 abort JoinHandle 并从 registry 移除
@@ -139,12 +139,12 @@
         let mut shell_task = make_task("bg-shell-1");
         shell_task.kind = BgTaskKind::Shell;
         shell_task.id = "bg-shell-1".to_string();
-        registry.register(shell_task).unwrap();
+        registry.register_with_kind(shell_task).unwrap();
 
         let mut agent_task = make_task("bg-agent-1");
         agent_task.kind = BgTaskKind::Agent;
         agent_task.id = "bg-agent-1".to_string();
-        registry.register(agent_task).unwrap();
+        registry.register_with_kind(agent_task).unwrap();
 
         assert_eq!(registry.count_by_kind(BgTaskKind::Shell), 1);
         assert_eq!(registry.count_by_kind(BgTaskKind::Agent), 1);
@@ -192,7 +192,7 @@
 
         let mut task = make_task("bg-agent-1");
         task.kind = BgTaskKind::Agent;
-        registry.register(task).unwrap();
+        registry.register_with_kind(task).unwrap();
 
         let tasks = registry.list_tasks_full();
         assert_eq!(tasks.len(), 1);
