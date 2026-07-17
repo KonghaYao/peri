@@ -240,6 +240,48 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **ACP 协议字段优先**：数据流设计时先查 ACP 协议已有字段（如 `StateSnapshotMeta.budget_pct`、goal_state `block_continue`），禁止自己从 raw 数据重新计算
 - **工具别名**：通过 `BaseTool::aliases()` trait 方法自声明，禁止重复注册或集中式静态表。别名仅用于 LLM 可能输出的同义词（如 Bash→"Shell"）
 
+### PeriCaps 能力协商（标准模式）
+
+**PeriCaps** 是 ACP 自定义通知通道的能力标志集（`peri-acp-types/src/peri_caps.rs`），10 个 bool 字段：`token_stats`、`skill_names`、`replay`、`source_agent_id`、`context_usage`、`agent_event`、`agent_event_done`、`unstable_event`、`prediction`、`hitl_pending`。
+
+存储于 `SessionManager.caps_registry: Arc<DashMap<String, PeriCaps>>`，per-session 粒度。
+
+**生命周期**：
+```
+initialize（stdio）或 跳过（TUI MpscTransport）
+    ↓
+pending_caps: Mutex<Option<PeriCaps>>  // 暂存
+    ↓
+session/new → consume or default → caps_registry[session_id]
+    ↓
+push_event / push_done / replay / notify 等发送点读取 → if caps.xxx { ... }
+```
+
+**两条传输路径的默认值差异**：
+
+| 路径 | initialize | session/new 默认 | 原因 |
+|------|:---------:|:--------------:|------|
+| Stdio（IDE） | ✅ 有 | `consume_pending_caps` → 协商值 | 外部 client 显式声明能力 |
+| MpscTransport（TUI 内部） | ❌ 无 | `PeriCaps::all_enabled()` | TUI 需要接收所有自定义事件 |
+
+**标准 API**（`SessionManager`）：
+
+| 方法 | 用途 | 调用时机 |
+|------|------|---------|
+| `set_pending_caps(caps)` | initialize handler 暂存协商值 | initialize |
+| `consume_pending_caps(sid) → PeriCaps` | 取走 pending_caps 并写入 registry | session/new（仅 stdio） |
+| `get_caps(sid) → PeriCaps` | 只读查询（未注册返回 `default()`=全 false） | 发送点 |
+| `ensure_session_caps(sid) → PeriCaps` | **幂等注册**：已有则返回，无则从 pending 取或 fallback `all_enabled()` | session/new/load/resume/fork（**所有路径标准调用**） |
+| `caps_registry() → Arc<DashMap<...>>` | 获取 registry 克隆引用（供 TransportEventSink） | session/prompt 启动时 |
+| `pending_caps_was_set() → bool` | 判断 initialize 是否已调用 | 路径判断（已弃用，`ensure_session_caps` 内部原子化） |
+
+**关键规则**：
+1. **新增 session/new/load/resume/fork 时**：在 `ensure_session()` 后立即调用 `ensure_session_caps()`。**这是标准**——缺少会导致 `push_done()` 读到 `default()`，`agent_event_done` 被抑制，TUI 永久 loading。
+2. **stdio 路径 session/new**：继续用 `consume_pending_caps`（因 initialize 保证 pending_caps 非空）。
+3. **新增发送点**：`EventSink::push_event`/`push_done`/`push_unstable_event` 入口必须读 caps 做 if-check。
+4. **`PeriCaps::default()` = 全 false**：未注册 session 的返回值，静默抑制所有自定义功能。
+5. **新增 cap 字段**：同步 (1) `peri_caps.rs` struct 定义 (2) `from_client_meta` 解析 (3) `to_agent_meta` 序列化 (4) `all_enabled()` 工厂 (5) 对应的发送点 if-check。
+
 ### TUI 渲染
 - **use_* 顺序**：`hooks.use_*` 必须在 `if`/`match`/`return` 之前，顺序/数量变化→`"Hook type mismatch"` panic
 - **render body 写 atom**：禁止（含 `use_effect`），`ReactiveMutRef::Drop` 无条件 `wake()` → 自激回路
