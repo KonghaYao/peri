@@ -62,7 +62,7 @@ pub(crate) async fn run(params: PromptExecParams) {
     // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
     let workflow_executor = peri_acp::agent::workflow_agent::create_executor(
         peri_acp::agent::workflow_agent::WorkflowAgentContext {
-            provider: provider_snapshot.clone(),
+            provider: Arc::clone(&ctx.provider),
             cwd: agent_cwd.clone(),
             frozen_claude_md: frozen
                 .as_ref()

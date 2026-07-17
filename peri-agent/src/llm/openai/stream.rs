@@ -3,11 +3,12 @@ use std::collections::BTreeMap;
 use futures::StreamExt;
 use serde_json::{json, Value};
 
-use super::invoke::{build_request_body, extract_openai_usage};
+use super::adapter::OpenAiAdapter;
 use crate::{
     agent::events::ExecutorEvent,
     error::{AgentError, AgentResult},
     llm::{
+        provider_adapter::ProviderAdapter,
         sse::SseParser,
         types::{LlmRequest, LlmResponse, StopReason, StreamingContext},
     },
@@ -22,34 +23,28 @@ struct ToolCallAccumulator {
 }
 
 /// OpenAI SSE 流式处理
-///
-/// 从 `invoke_streaming()` 中提取的流式解析逻辑，
-/// 负责发送请求、解析 SSE 事件流、构建最终响应。
 pub(super) async fn do_invoke_streaming(
-    adapter: &super::ChatOpenAI,
+    adapter: &OpenAiAdapter,
+    client: &reqwest::Client,
     request: LlmRequest,
     ctx: StreamingContext,
 ) -> AgentResult<LlmResponse> {
     let msg_count = request.messages.len();
     let start = std::time::Instant::now();
 
-    let body = build_request_body(adapter, &request, true);
-
-    let chat_url = format!(
-        "{}/chat/completions",
-        adapter.base_url.trim_end_matches('/')
-    );
+    let body = adapter.build_request_body(&request, true);
 
     let resp = adapter
-        .client
-        .post(&chat_url)
-        .bearer_auth(&adapter.api_key)
+        .apply_auth_headers(
+            client.post(adapter.build_chat_url()),
+            request.session_id.as_deref(),
+        )
         .json(&body)
         .send()
         .await
         .map_err(|e| {
             tracing::error!(
-                provider = "openai", model = %adapter.model,
+                provider = "openai", model = %adapter.model_id(),
                 elapsed_ms = start.elapsed().as_millis() as u64, error = %e,
                 "LLM 流式网络请求失败"
             );
@@ -64,7 +59,7 @@ pub(super) async fn do_invoke_streaming(
             .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "未知错误".to_string());
         tracing::error!(
-            provider = "openai", model = %adapter.model, status = %status,
+            provider = "openai", model = %adapter.model_id(), status = %status,
             error_message = %error_msg,
             elapsed_ms = start.elapsed().as_millis() as u64,
             msg_count,
@@ -86,13 +81,12 @@ pub(super) async fn do_invoke_streaming(
     let mut stream_request_id: Option<String> = None;
 
     loop {
-        // 在接收每个 SSE chunk 前检查取消（支持 Ctrl+C 中断长时间 LLM 调用）
         let chunk = tokio::select! {
             biased;
             _ = ctx.cancel.cancelled() => {
                 tracing::info!(
                     provider = "openai",
-                    model = %adapter.model,
+                    model = %adapter.model_id(),
                     "LLM streaming cancelled by user"
                 );
                 return Err(AgentError::Interrupted);
@@ -216,7 +210,7 @@ pub(super) async fn do_invoke_streaming(
     let stop_reason = StopReason::from_openai(finish_reason.as_deref().unwrap_or("stop"));
     let usage = final_usage
         .as_ref()
-        .and_then(|u| extract_openai_usage(u, stream_request_id.clone()));
+        .and_then(|u| adapter.extract_usage(&json!({"usage": u}), stream_request_id.clone()));
 
     Ok(build_stream_response(
         &reasoning_text,
@@ -229,9 +223,6 @@ pub(super) async fn do_invoke_streaming(
 }
 
 /// 从流式累积状态构建最终 LlmResponse
-///
-/// ToolUse 和 text 两种 stop_reason 的 LlmResponse 构建逻辑合并，
-/// 差异仅在 content 和 message 类型上。
 pub(super) fn build_stream_response(
     reasoning_text: &str,
     content_text: &str,

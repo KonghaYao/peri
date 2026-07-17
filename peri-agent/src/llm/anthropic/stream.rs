@@ -1,15 +1,15 @@
 use futures::StreamExt;
 use serde_json::{json, Value};
 
-use super::invoke::{build_request_body, parse_content_blocks};
+use super::adapter::AnthropicAdapter;
 use crate::{
     agent::events::ExecutorEvent,
     error::{AgentError, AgentResult},
     llm::{
+        provider_adapter::{GenericInvoker, ProviderAdapter},
         sse::SseParser,
         types::{LlmResponse, StopReason, StreamingContext},
     },
-    messages::{BaseMessage, MessageContent},
 };
 
 /// Anthropic SSE 流式处理
@@ -17,43 +17,31 @@ use crate::{
 /// 从 `invoke_streaming()` 中提取的流式解析逻辑，
 /// 负责发送请求、解析 SSE 事件流、构建最终响应。
 pub(super) async fn do_invoke_streaming(
-    adapter: &super::ChatAnthropic,
+    adapter: &AnthropicAdapter,
+    client: &reqwest::Client,
     request: crate::llm::types::LlmRequest,
     ctx: StreamingContext,
 ) -> AgentResult<LlmResponse> {
     let msg_count = request.messages.len();
     let start = std::time::Instant::now();
 
-    let body = build_request_body(adapter, &request, true);
+    let body = adapter.build_request_body(&request, true);
 
-    let chat_url = match &adapter.base_url {
-        Some(base) => format!("{}/v1/messages", base.trim_end_matches('/')),
-        None => "https://api.anthropic.com/v1/messages".to_string(),
-    };
-
-    let mut req = adapter
-        .client
-        .post(chat_url)
-        .header("x-api-key", &adapter.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json");
-
-    if adapter.enable_cache {
-        req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
-    }
-
-    if let Some(ref sid) = request.session_id {
-        req = req.header("x-session-id", sid.as_str());
-    }
-
-    let resp = req.json(&body).send().await.map_err(|e| {
-        tracing::error!(
-            provider = "anthropic", model = %adapter.model,
-            elapsed_ms = start.elapsed().as_millis() as u64, error = %e,
-            "LLM 流式网络请求失败"
-        );
-        AgentError::LlmError(e.to_string())
-    })?;
+    let session_id = request.session_id.as_deref();
+    let req = adapter.apply_auth_headers(client.post(adapter.build_chat_url()), session_id);
+    let resp = req
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                provider = "anthropic", model = %adapter.model_id(),
+                elapsed_ms = start.elapsed().as_millis() as u64, error = %e,
+                "LLM 流式网络请求失败"
+            );
+            AgentError::LlmError(e.to_string())
+        })?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -63,7 +51,7 @@ pub(super) async fn do_invoke_streaming(
             .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "未知错误".to_string());
         tracing::error!(
-            provider = "anthropic", model = %adapter.model, status = %status,
+            provider = "anthropic", model = %adapter.model_id(), status = %status,
             error_message = %error_msg,
             elapsed_ms = start.elapsed().as_millis() as u64, msg_count,
             "LLM 流式 API 错误"
@@ -101,7 +89,7 @@ pub(super) async fn do_invoke_streaming(
             _ = ctx.cancel.cancelled() => {
                 tracing::info!(
                     provider = "anthropic",
-                    model = %adapter.model,
+                    model = %adapter.model_id(),
                     "LLM streaming cancelled by user"
                 );
                 return Err(AgentError::Interrupted);
@@ -260,32 +248,11 @@ pub(super) async fn do_invoke_streaming(
         }
     }
 
-    // Build final response using parse_content_blocks
+    // Build final response using adapter's parse_content_blocks
     let stop_reason = StopReason::from_display(&stop_reason_str);
-    let (blocks, tool_calls) = parse_content_blocks(&accumulated_blocks);
+    let (blocks, tool_calls) = AnthropicAdapter::parse_content_blocks(&accumulated_blocks);
 
-    let message = if !tool_calls.is_empty() {
-        let content = if let [single] = blocks.as_slice() {
-            if let Some(text) = single.as_text() {
-                MessageContent::text(text)
-            } else {
-                MessageContent::Blocks(blocks)
-            }
-        } else {
-            MessageContent::Blocks(blocks)
-        };
-        BaseMessage::ai_with_tool_calls(content, tool_calls)
-    } else if let [single] = blocks.as_slice() {
-        if let Some(text) = single.as_text() {
-            BaseMessage::ai(text)
-        } else {
-            BaseMessage::ai(MessageContent::Blocks(blocks))
-        }
-    } else if blocks.is_empty() {
-        BaseMessage::ai("")
-    } else {
-        BaseMessage::ai(MessageContent::Blocks(blocks))
-    };
+    let message = GenericInvoker::build_base_message(blocks, tool_calls, &stop_reason);
 
     // 规范化 input_tokens：Anthropic 的 input_tokens 不含缓存 token，
     // 加上 cache_creation + cache_read 使其与 OpenAI 语义一致（总输入）。
@@ -301,7 +268,7 @@ pub(super) async fn do_invoke_streaming(
 
     tracing::info!(
         provider = "anthropic",
-        model = %adapter.model,
+        model = %adapter.model_id(),
         elapsed_ms = start.elapsed().as_millis() as u64,
         msg_count,
         input_tokens = normalized_input,

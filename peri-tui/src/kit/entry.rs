@@ -172,6 +172,27 @@ pub async fn run_kit_fullscreen(
         });
     }
 
+    // 3c. Spinner 高频 tick——仅在 loading 态以 50ms 间隔写入 RENDER_HEARTBEAT，
+    //     驱动 spinner 组件重渲染。spinner 帧由壁钟计算，频率越高越流畅。
+    //     非 loading 态不写 heartbeat，避免不必要的 CPU 唤醒。
+    {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                        if atoms::ACP_STATE.state().read().is_loading {
+                            atoms::RENDER_HEARTBEAT.set(
+                                atoms::RENDER_HEARTBEAT.get().wrapping_add(1)
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // 4. 接通 kit 四链路（仅当 ACP provider 配置成功——acp_client 为 None 时
     //    走最小可用路径：UI 可显示但无 agent 交互）。
     if let Some((client, notification_rx)) = acp_client {

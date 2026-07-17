@@ -31,7 +31,11 @@ fn make_context_from_stage(ctx: &StageContext) -> AgentContext<'_> {
 /// 调用 middleware chain 的 `before_compact` 钩子（只读，无 drain）
 pub async fn run_before_compact(ctx: &StageContext) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx.middleware_chain.run_before_compact(&mut cx).await;
+    let result = ctx
+        .runtime
+        .middleware_chain
+        .run_before_compact(&mut cx)
+        .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -42,7 +46,11 @@ pub async fn run_before_compact(ctx: &StageContext) -> crate::error::AgentResult
 /// 调用 middleware chain 的 `after_compact` 钩子（只读，无 drain）
 pub async fn run_after_compact(ctx: &StageContext) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx.middleware_chain.run_after_compact(&mut cx).await;
+    let result = ctx
+        .runtime
+        .middleware_chain
+        .run_after_compact(&mut cx)
+        .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -53,7 +61,7 @@ pub async fn run_after_compact(ctx: &StageContext) -> crate::error::AgentResult<
 /// 调用 middleware chain 的 `before_agent` 钩子
 pub async fn run_before_agent(ctx: &StageContext) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx.middleware_chain.run_before_agent(&mut cx).await;
+    let result = ctx.runtime.middleware_chain.run_before_agent(&mut cx).await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -64,7 +72,7 @@ pub async fn run_before_agent(ctx: &StageContext) -> crate::error::AgentResult<(
 /// 调用 middleware chain 的 `before_model` 钩子
 pub async fn run_before_model(ctx: &StageContext) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx.middleware_chain.run_before_model(&mut cx).await;
+    let result = ctx.runtime.middleware_chain.run_before_model(&mut cx).await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -79,6 +87,7 @@ pub async fn run_after_model(
 ) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
     let result = ctx
+        .runtime
         .middleware_chain
         .run_after_model(&mut cx, reasoning)
         .await;
@@ -96,6 +105,7 @@ pub async fn run_before_tools_batch(
 ) -> Vec<crate::error::AgentResult<crate::agent::react::ToolCall>> {
     let mut cx = make_context_from_stage(ctx);
     let result = ctx
+        .runtime
         .middleware_chain
         .run_before_tools_batch(&mut cx, calls.to_vec())
         .await;
@@ -114,6 +124,7 @@ pub async fn run_after_tool(
 ) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
     let res = ctx
+        .runtime
         .middleware_chain
         .run_after_tool(&mut cx, call, result)
         .await;
@@ -134,6 +145,7 @@ pub async fn run_after_tools_batch(
 ) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
     let result = ctx
+        .runtime
         .middleware_chain
         .run_after_tools_batch(&mut cx, results)
         .await;
@@ -150,7 +162,11 @@ pub async fn run_after_agent(
     output: crate::agent::react::AgentOutput,
 ) -> crate::error::AgentResult<crate::agent::react::AgentOutput> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx.middleware_chain.run_after_agent(&mut cx, output).await;
+    let result = ctx
+        .runtime
+        .middleware_chain
+        .run_after_agent(&mut cx, output)
+        .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -164,7 +180,11 @@ pub async fn run_on_error(
     error: &crate::error::AgentError,
 ) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx.middleware_chain.run_on_error(&mut cx, error).await;
+    let result = ctx
+        .runtime
+        .middleware_chain
+        .run_on_error(&mut cx, error)
+        .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -194,7 +214,8 @@ mod tests {
     #[test]
     fn test_agent_context_add_message_dual_writes() {
         let ctx = make_context();
-        ctx.transcript
+        ctx.session
+            .transcript
             .write()
             .append(BaseMessage::human(MessageContent::text("old")));
 
@@ -202,7 +223,7 @@ mod tests {
         cx.add_message(BaseMessage::human(MessageContent::text("new")));
 
         assert_eq!(cx.messages().len(), 2);
-        let transcript = ctx.transcript.read();
+        let transcript = ctx.session.transcript.read();
         assert_eq!(transcript.len(), 2);
     }
 

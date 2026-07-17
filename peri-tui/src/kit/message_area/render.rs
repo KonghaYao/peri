@@ -2,7 +2,7 @@
 
 use crate::i18n;
 use crate::kit::tui_render_unit::{
-    TuiAskUserBlock, TuiCollapsedGroup, TuiDivider, TuiHunkLineKind, TuiRenderUnit,
+    TuiAskUserBlock, TuiCollapsedGroup, TuiDivider, TuiHunkLineKind, TuiNoteLevel, TuiRenderUnit,
     TuiSubAgentGroup, TuiSystemNote, TuiToolCard,
 };
 use fluent_bundle::FluentValue;
@@ -441,23 +441,21 @@ fn render_tool_card_lines(data: &TuiToolCard) -> Vec<Line<'static>> {
 
 fn render_system_note_lines(data: &TuiSystemNote) -> Vec<Line<'static>> {
     let semantic = THEME_ATOM.state().read().semantic;
+    let content_color = match data.level {
+        TuiNoteLevel::Info => semantic.text.muted,
+        TuiNoteLevel::Warning => semantic.status.warning,
+        TuiNoteLevel::Error => semantic.status.error,
+    };
     let mut lines: Vec<Line<'static>> = Vec::new();
     for line_text in data.text.lines() {
-        let (prefix_str, color) = if line_text.starts_with('\u{273b}') {
-            ("\u{273b} ", semantic.text.dim)
+        let prefix_str = if line_text.starts_with('\u{273b}') {
+            "\u{273b} "
         } else if line_text.starts_with("\u{23bf}") {
-            ("\u{23bf} ", semantic.text.muted)
+            "\u{23bf} "
         } else if line_text.starts_with("  \u{23bf}") {
-            ("  \u{23bf} ", semantic.status.error)
-        } else if line_text.contains('\u{274c}')
-            || line_text.contains("\u{5931}\u{8d25}")
-            || line_text.contains("error")
-        {
-            ("", semantic.status.error)
-        } else if line_text.contains("warning") || line_text.contains("warn") {
-            ("", semantic.status.warning)
+            "  \u{23bf} "
         } else {
-            ("", semantic.text.muted)
+            ""
         };
         let mut spans: Vec<Span<'static>> = Vec::new();
         let content_text = if prefix_str.contains('\u{273b}') {
@@ -493,7 +491,7 @@ fn render_system_note_lines(data: &TuiSystemNote) -> Vec<Line<'static>> {
         if !content_text.is_empty() {
             spans.push(Span::styled(
                 content_text.to_string(),
-                Style::default().fg(color),
+                Style::default().fg(content_color),
             ));
         }
         lines.push(Line::from(spans));

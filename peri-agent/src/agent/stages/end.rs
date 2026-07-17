@@ -12,13 +12,13 @@ use crate::session::QueuedMessage;
 ///
 /// 调用 `drain_for_end()` 检查队列唤醒条件。
 pub fn run_end(input: EndInput) -> EndOutput {
-    let result = input.context.queue.drain_for_end();
+    let result = input.context.session.queue.drain_for_end();
 
     match result {
         Some(messages) => {
             let count = messages.len();
             tracing::debug!(
-                turn_id = %input.context.turn.turn_id,
+                turn_id = %input.context.session.turn.turn_id,
                 awakened = count,
                 "End 阶段：有新消息，激活新 turn"
             );
@@ -29,7 +29,7 @@ pub fn run_end(input: EndInput) -> EndOutput {
         }
         None => {
             tracing::debug!(
-                turn_id = %input.context.turn.turn_id,
+                turn_id = %input.context.session.turn.turn_id,
                 "End 阶段：队列为空或仅有 Info，退出循环"
             );
             EndOutput {
@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn test_end_prompt_wakes() {
         let ctx = make_context();
-        ctx.queue.push(QueuedMessage::prompt(
+        ctx.session.queue.push(QueuedMessage::prompt(
             MessageSource::UserInput,
             BaseMessage::human(MessageContent::text("new question")),
         ));
@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn test_end_defer_wakes() {
         let ctx = make_context();
-        ctx.queue.push(QueuedMessage::defer(
+        ctx.session.queue.push(QueuedMessage::defer(
             MessageSource::SubAgentComplete,
             BaseMessage::human(MessageContent::text("deferred")),
         ));
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn test_end_info_only_does_not_wake() {
         let ctx = make_context();
-        ctx.queue.push(QueuedMessage::info(
+        ctx.session.queue.push(QueuedMessage::info(
             MessageSource::SystemInjected,
             BaseMessage::human(MessageContent::text("info")),
         ));
@@ -107,17 +107,17 @@ mod tests {
         let output = run_end(input);
         assert!(!output.should_continue, "仅有 Info 不应唤醒");
         // Info 保留在队列
-        assert_eq!(ctx.queue.len(), 1);
+        assert_eq!(ctx.session.queue.len(), 1);
     }
 
     #[test]
     fn test_end_prompt_plus_info_wakes_only_prompt() {
         let ctx = make_context();
-        ctx.queue.push(QueuedMessage::info(
+        ctx.session.queue.push(QueuedMessage::info(
             MessageSource::SystemInjected,
             BaseMessage::human(MessageContent::text("info")),
         ));
-        ctx.queue.push(QueuedMessage::prompt(
+        ctx.session.queue.push(QueuedMessage::prompt(
             MessageSource::UserInput,
             BaseMessage::human(MessageContent::text("prompt")),
         ));
@@ -127,6 +127,6 @@ mod tests {
         let output = run_end(input);
         assert!(output.should_continue);
         // 只消费 Prompt，Info 保留
-        assert_eq!(ctx.queue.len(), 1, "Info 应保留在队列");
+        assert_eq!(ctx.session.queue.len(), 1, "Info 应保留在队列");
     }
 }

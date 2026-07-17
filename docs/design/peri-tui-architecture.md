@@ -141,7 +141,7 @@ Agent 在 Streaming 期间不是一次给出完整回答，而是逐 token 产�
 - ToolStarted — 创建新的 TuiToolCard，状态标记为"执行中"
 - ToolEnded — 填充 TuiToolCard 的执行结果，状态标记为完成或失败
 
-这些事件不带完整 TuiRenderUnit 结构。acp_bridge 在 BridgeState 内部维护 `current_turn` 结构——累积文本、管理工具卡片列表、追踪 spinner 状态（`spinner_frame`）。
+这些事件不带完整 TuiRenderUnit 结构。acp_bridge 在 BridgeState 内部维护 `current_turn` 结构——累积文本、管理工具卡片列表。
 
 渲染时从两部分派生最终视图：
 
@@ -162,7 +162,7 @@ ACP_STATE Atom 的 `variant` 字段（0=Idle/1=Streaming/2=Modal）和 `phase` �
 
 **代码围栏块模式**：流式输出进入 Markdown 代码围栏时，渲染层检测围栏边界，在围栏内部缓冲段落，等闭合标记到达后一次性渲染。避免代码块逐字出现造成的闪烁。此逻辑是渲染层内部实现，状态机不感知。
 
-**Spinner 动画**：spinner 状态由 `BridgeState.current_turn.spinner_frame` 维护（非 16ms 节流的 Tick），渲染层只读当前帧字符。token 计数通过 `SPINNER_TOKEN_COUNT` Atom 写入（由 acp_bridge 在收到 TokenUsage 事件时更新），MessageArea 的 build_footer_lines 读取后显示 `↓ X.Xk tokens`。
+**Spinner 动画**：spinner 帧完全基于壁钟计算（`start_time.elapsed() / 50 → raw_tick → frame`），不依赖外部计数器。重渲染由 TUI 侧独立 50ms tick 驱动——仅在 loading 态（`ACP_STATE.is_loading`）时递增 `RENDER_HEARTBEAT` atom，触发 AppShell 级联渲染。token 计数通过 `SPINNER_TOKEN_COUNT` Atom 写入（由 acp_bridge 在收到 TokenUsage 事件时更新），MessageArea 的 build_footer_lines 读取后显示 `↓ X.Xk tokens`。
 
 **Sticky Header**：消息区顶部固定显示最近一条用户消息。滚动到顶部时自动消失，向下滚动后重新出现。
 

@@ -47,12 +47,11 @@ pub(crate) async fn handle_new(
 
     // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
     let workflow_middleware = {
-        let provider_snap = ctx.provider.read().clone();
         let mut compact_config = peri_agent::agent::compact::CompactConfig::default();
         compact_config.apply_env_overrides();
         let wf_executor = peri_acp::agent::workflow_agent::create_executor(
             peri_acp::agent::workflow_agent::WorkflowAgentContext {
-                provider: provider_snap,
+                provider: Arc::clone(&ctx.provider),
                 cwd: cwd_str.clone(),
                 frozen_claude_md: frozen_data.claude_md().map(|s| s.to_string()),
                 frozen_claude_local_md: frozen_data.claude_local_md().map(|s| s.to_string()),

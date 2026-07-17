@@ -5,19 +5,62 @@
 
 use super::middleware_runner::{run_after_model, run_before_model, run_on_error};
 use super::{ReasonInput, ReasonOutput};
-use crate::agent::events::{ExecutorEvent, FnEventHandler};
-use crate::agent::events_v2::{ObserveEvent, RenderEvent};
+use crate::agent::events_v2::ObserveEvent;
 use crate::agent::react::Reasoning;
 use crate::error::{AgentError, AgentResult};
 use crate::llm::types::StreamingContext;
 use crate::messages::MessageId;
 
-/// 运行 Reason 阶段
+/// SSE 流式事件 → EventBus 桥接器。
+///
+/// LLM 适配器在 SSE 解析过程中通过 AgentEventHandler 发射 ExecutorEvent，
+/// 此桥接器将其映射为 RenderEvent/ObserveEvent 并通过 EventBus 推送到 TUI。
+struct StreamingEventBridge {
+    event_bus: std::sync::Arc<crate::agent::events_v2::EventBus>,
+    turn_id: crate::session::turn::TurnId,
+    agent_id: crate::group::pipeline::AgentId,
+}
+
+impl crate::agent::events::AgentEventHandler for StreamingEventBridge {
+    fn on_event(&self, event: crate::agent::events::ExecutorEvent) {
+        match event {
+            crate::agent::events::ExecutorEvent::TextChunk { chunk, .. } => {
+                self.event_bus
+                    .emit_render(crate::agent::events_v2::RenderEvent::TextChunk {
+                        turn_id: self.turn_id,
+                        agent_id: self.agent_id,
+                        chunk,
+                    });
+            }
+            crate::agent::events::ExecutorEvent::AiReasoning {
+                text,
+                source_agent_id,
+            } => {
+                self.event_bus
+                    .emit_render(crate::agent::events_v2::RenderEvent::ThinkingChunk {
+                        turn_id: self.turn_id,
+                        agent_id: self.agent_id,
+                        chunk: text.clone(),
+                    });
+                self.event_bus.emit_observe(
+                    crate::agent::events_v2::ObserveEvent::AiReasoningChunk {
+                        turn_id: self.turn_id,
+                        agent_id: self.agent_id,
+                        text,
+                        source_agent_id,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     let ctx = &input.context;
-    let step = ctx.turn.current_step();
+    let step = ctx.session.turn.current_step();
     let turn_id = ctx.turn_id();
-    let agent_id = ctx.agent_id;
+    let agent_id = ctx.session.agent_id;
 
     tracing::trace!(step, has_tool_calls = input.has_tool_calls, "Reason 阶段");
 
@@ -30,7 +73,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // 截断策略：只保留前 100 字符 + "[truncated]" 标记。
     for msg in &mut messages_snapshot {
         let is_truncated = {
-            let guard = ctx.transcript.read();
+            let guard = ctx.session.transcript.read();
             guard
                 .get_flags(msg.id())
                 .map(|f| f.truncated)
@@ -45,7 +88,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
 
     // 取出 tools 的 Arc clone（避免跨 await 持有 RwLockReadGuard）
     let tools_owned: Vec<std::sync::Arc<dyn crate::tools::BaseTool>> = {
-        let guard = ctx.tools.read();
+        let guard = ctx.runtime.tools.read();
         guard.values().cloned().collect()
     };
     let tool_refs: Vec<&dyn crate::tools::BaseTool> =
@@ -64,13 +107,15 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         std::sync::Arc::new(messages_snapshot.clone());
     let start_tools: Vec<crate::tools::ToolDefinition> =
         tool_refs.iter().map(|t| t.definition()).collect();
-    ctx.event_bus.emit_observe(ObserveEvent::LlmCallStart {
-        turn_id,
-        agent_id,
-        step,
-        messages: start_messages,
-        tools: start_tools,
-    });
+    ctx.runtime
+        .event_bus
+        .emit_observe(ObserveEvent::LlmCallStart {
+            turn_id,
+            agent_id,
+            step,
+            messages: start_messages,
+            tools: start_tools,
+        });
 
     // emit LlmRequestPayload（Provider 实际请求体，紧随 LlmCallStart 之后）
     //
@@ -79,15 +124,18 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // 时序约束：LlmCallStart 必须先到（on_llm_start 建 generation_data 缓存），
     // LlmRequestPayload 紧随其后写 raw_body 字段。
     if let Some(body) = ctx
+        .runtime
         .llm
         .build_provider_request_body(&messages_snapshot, &tool_refs)
     {
-        ctx.event_bus.emit_observe(ObserveEvent::LlmRequestPayload {
-            turn_id,
-            agent_id,
-            step,
-            body: std::sync::Arc::new(body),
-        });
+        ctx.runtime
+            .event_bus
+            .emit_observe(ObserveEvent::LlmRequestPayload {
+                turn_id,
+                agent_id,
+                step,
+                body: std::sync::Arc::new(body),
+            });
     }
 
     // 构造 StreamingContext（桥接 v1 ExecutorEvent → v2 RenderEvent）
@@ -95,63 +143,40 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // 此 handler 将其映射为 RenderEvent 并通过 EventBus::emit_render 推送到 TUI。
     let message_id = MessageId::new();
     let turn_id = ctx.turn_id();
-    let agent_id = ctx.agent_id;
-    let eb = std::sync::Arc::clone(&ctx.event_bus);
-    let handler = FnEventHandler(move |event: ExecutorEvent| match event {
-        ExecutorEvent::TextChunk { chunk, .. } => {
-            eb.emit_render(RenderEvent::TextChunk {
-                turn_id,
-                agent_id,
-                chunk,
-            });
-        }
-        ExecutorEvent::AiReasoning {
-            text,
-            source_agent_id,
-        } => {
-            eb.emit_render(RenderEvent::ThinkingChunk {
-                turn_id,
-                agent_id,
-                chunk: text.clone(),
-            });
-            // langfuse v2：同步 emit AiReasoningChunk（遥测用）
-            eb.emit_observe(ObserveEvent::AiReasoningChunk {
-                turn_id,
-                agent_id,
-                text,
-                source_agent_id,
-            });
-        }
-        _ => {}
+    let agent_id = ctx.session.agent_id;
+    let bridge = std::sync::Arc::new(StreamingEventBridge {
+        event_bus: std::sync::Arc::clone(&ctx.runtime.event_bus),
+        turn_id,
+        agent_id,
     });
     let streaming = Some(StreamingContext {
-        event_handler: std::sync::Arc::new(handler),
+        event_handler: bridge,
         message_id,
-        cancel: tokio_util::sync::CancellationToken::clone(&ctx.turn.cancel_token),
+        cancel: tokio_util::sync::CancellationToken::clone(&ctx.session.turn.cancel_token),
     });
 
     // LLM 调用（与 cancel 竞争）
     let reasoning: Reasoning = tokio::select! {
         biased;
-        _ = ctx.turn.cancel_token.cancelled() => {
+        _ = ctx.session.turn.cancel_token.cancelled() => {
             return Err(AgentError::Interrupted);
         }
-        result = ctx.llm.generate_reasoning(&messages_snapshot, &tool_refs, streaming) => {
+        result = ctx.runtime.llm.generate_reasoning(&messages_snapshot, &tool_refs, streaming) => {
             match result {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!(
                         step,
-                        model = %ctx.llm.model_name(),
+                        model = %ctx.runtime.llm.model_name(),
                         error = %e,
                         "LLM generate_reasoning 失败"
                     );
                     // LLM 报错时 emit LlmCallEnd，让消费者可见
-                    ctx.event_bus.emit_observe(ObserveEvent::LlmCallEnd {
+                    ctx.runtime.event_bus.emit_observe(ObserveEvent::LlmCallEnd {
                         turn_id,
                         agent_id,
                         step,
-                        model: ctx.llm.model_name(),
+                        model: ctx.runtime.llm.model_name(),
                         output: format!("ERROR: {}", e),
                         input_tokens: 0,
                         output_tokens: 0,
@@ -187,22 +212,24 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         .final_answer
         .clone()
         .unwrap_or_else(|| reasoning.thought.clone());
-    ctx.event_bus.emit_observe(ObserveEvent::LlmCallEnd {
-        turn_id,
-        agent_id,
-        step,
-        model: reasoning.model.clone(),
-        output: llm_output,
-        input_tokens: in_tok,
-        output_tokens: out_tok,
-        cache_creation_input_tokens: cache_create,
-        cache_read_input_tokens: cache_read,
-        request_id: req_id,
-    });
+    ctx.runtime
+        .event_bus
+        .emit_observe(ObserveEvent::LlmCallEnd {
+            turn_id,
+            agent_id,
+            step,
+            model: reasoning.model.clone(),
+            output: llm_output,
+            input_tokens: in_tok,
+            output_tokens: out_tok,
+            cache_creation_input_tokens: cache_create,
+            cache_read_input_tokens: cache_read,
+            request_id: req_id,
+        });
 
     // 累积 token_tracker（P0 #2 修复：v2 路径下 token tracker 从未累积）
     if let Some(ref usage) = reasoning.usage {
-        ctx.token_tracker.write().accumulate(usage);
+        ctx.compact.token_tracker.write().accumulate(usage);
     }
 
     // after_model middleware（hook_middleware / git_attribution 等在此）
@@ -238,7 +265,7 @@ mod tests {
 
     /// 验证 run_reason 在多步 turn 中 emit 的 LlmCallEnd.step 与 turn.current_step() 一致
     ///
-    /// Top 10 回归锁定：reason.rs:17 `let step = ctx.turn.current_step();`，
+    /// Top 10 回归锁定：reason.rs:17 `let step = ctx.session.turn.current_step();`，
     /// 错误路径（reason.rs:66）与成功路径（reason.rs:88）均必须 emit 此 step。
     /// 使用 NullReactLLM（默认 fallback）触发错误路径。
     #[tokio::test]
@@ -256,7 +283,7 @@ mod tests {
             .build();
 
         // Act 1：step=0（turn 初始）→ NullReactLLM 触发错误路径 emit
-        assert_eq!(ctx.turn.current_step(), 0);
+        assert_eq!(ctx.session.turn.current_step(), 0);
         let _ = run_reason(ReasonInput {
             context: ctx.clone(),
             has_tool_calls: false,
@@ -278,8 +305,8 @@ mod tests {
         );
 
         // Act 2：推进 step → step=1，再次 run_reason
-        ctx.turn.advance_step();
-        assert_eq!(ctx.turn.current_step(), 1);
+        ctx.session.turn.advance_step();
+        assert_eq!(ctx.session.turn.current_step(), 1);
         let _ = run_reason(ReasonInput {
             context: ctx,
             has_tool_calls: false,
@@ -316,7 +343,8 @@ mod tests {
     async fn test_reason_captures_message_snapshot() {
         // 使用自定义 MockLLM 测试 snapshot
         let ctx = make_context();
-        ctx.transcript
+        ctx.session
+            .transcript
             .write()
             .append(BaseMessage::human(MessageContent::text("user message")));
 

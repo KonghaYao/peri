@@ -69,6 +69,13 @@ pub enum BaseMessage {
     Ai {
         id: MessageId,
         content: MessageContent,
+        /// P1-6: tool_calls 是从 ContentBlock::ToolUse 派生的只读缓存。
+        ///
+        /// 同一个 tool use 在 message 中以两种形式存在：
+        /// 1. `content` 中的 `ContentBlock::ToolUse` 块（规范来源）
+        /// 2. `tool_calls: Vec<ToolCallRequest>` 派生字段（便利查询）
+        ///
+        /// `has_tool_calls()` 和 `tool_calls()` 都以此字段为准——确保两者始终同步。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCallRequest>,
     },
@@ -202,7 +209,7 @@ impl BaseMessage {
         self.message_content().content_blocks()
     }
 
-    /// 是否包含工具调用
+    /// 是否包含工具调用（P1-6: 仅检查 `tool_calls` 派生字段，与 ContentBlock::ToolUse 块同步）
     pub fn has_tool_calls(&self) -> bool {
         match self {
             Self::Ai { tool_calls, .. } => !tool_calls.is_empty(),
@@ -211,6 +218,9 @@ impl BaseMessage {
     }
 
     /// 获取工具调用列表（仅 Ai 变体有效）
+    ///
+    /// P1-6: 返回 `tool_calls` 派生字段，与 `content_blocks()` 中的 `ContentBlock::ToolUse` 块同步。
+    /// LLM 适配器层负责保持两者一致。
     pub fn tool_calls(&self) -> &[ToolCallRequest] {
         match self {
             Self::Ai { tool_calls, .. } => tool_calls,

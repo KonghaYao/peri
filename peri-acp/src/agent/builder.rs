@@ -163,8 +163,6 @@ pub struct AgentComponents {
     pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
     /// 工具注册表快照（工具名 + subagent 类型）
     pub tool_registry_snapshot: Arc<ToolRegistrySnapshot>,
-    /// Frozen system prompt
-    pub system_prompt: Option<String>,
     /// 上下文预算（token 监控）
     pub context_budget: Option<ContextBudget>,
     /// Compact 配置
@@ -490,7 +488,10 @@ pub fn build_agent(
     // 并显式调 chain.collect_tools 把 middleware 提供的工具填充到 shared_tools。
     //
     // 中间件顺序是 [TRAP] 守护契约（禁止重排），详见 peri-middlewares/CLAUDE.md。
+    // P1-10: 按功能分组注释，降低读取 70 行围墙式构造的心智负担。
     let mut chain = MiddlewareChain::new();
+
+    // ── 第一组：上下文注入器（system prompt 段落 / agent 定义 / 插件 / skills） ──
     chain.add(Box::new({
         let mut mw = AgentsMdMiddleware::new().with_excludes(claude_md_excludes);
         if let Some(main) = frozen_claude_md {
@@ -516,6 +517,8 @@ pub fn build_agent(
     chain.add(Box::new(peri_middlewares::AtMentionMiddleware::new(
         cwd.clone().into(),
     )));
+
+    // ── 第二组：文件/终端/Web 工具提供器 ──
     chain.add(Box::new(filesystem_middleware));
     chain.add(Box::new(peri_middlewares::GitAttributionMiddleware::new(
         &model_name,
@@ -526,6 +529,8 @@ pub fn build_agent(
         tm
     }));
     chain.add(Box::new(WebMiddleware::new()));
+
+    // ── 第三组：Todo / Cron ──
     chain.add(Box::new(TodoMiddleware::new(todo_tx)));
     chain.add(Box::new(CronMiddleware::new(
         cron_scheduler.unwrap_or_else(|| {
@@ -535,7 +540,7 @@ pub fn build_agent(
         }),
     )));
 
-    // Hook middleware groups
+    // ── 第四组：Hook 中间件（插件 hooks + 自定义 hooks） ──
     tracing::info!(
         groups = hook_groups.len(),
         total_hooks = hook_groups.iter().map(|g| g.len()).sum::<usize>(),
@@ -575,10 +580,11 @@ pub fn build_agent(
         }
     }
 
+    // ── 第五组：HITL + SubAgent（条件中间件） ──
     chain.add(Box::new(hitl));
     chain.add(Box::new(subagent));
 
-    // MCP 中间件
+    // ── 第六组：MCP / Workflow / ToolSearch（工具提供器） ──
     if let Some(pool) = mcp_pool {
         chain.add(Box::new(peri_middlewares::mcp::McpMiddleware::new(pool)));
     }
@@ -616,7 +622,7 @@ pub fn build_agent(
     );
     let registry = peri_middlewares::error_suggest::build_default_registry();
 
-    // LSP 中间件（条件注册，当有 LSP 服务器配置时）
+    // ── 第七组：LSP / ErrorSuggest（辅助诊断中间件） ──
     if !lsp_servers.is_empty() {
         let lsp_config = peri_lsp::config::LspConfigFile {
             lsp_servers: lsp_servers
@@ -660,7 +666,6 @@ pub fn build_agent(
     };
 
     // 构造 BaseModelReactLLM（带系统提示词）
-    let merged_for_storage = merged_system_prompt.clone();
     let mut base_llm =
         peri_agent::llm::BaseModelReactLLM::new(base_model).with_system(merged_system_prompt);
     if let Some(ref sid) = session_id {
@@ -686,7 +691,6 @@ pub fn build_agent(
         shared_tools: Some(Arc::clone(&shared_tools)),
         error_suggest_registry: Some(registry),
         tool_registry_snapshot: Arc::new(snapshot),
-        system_prompt: Some(merged_for_storage),
         context_budget: Some(context_budget),
         compact_config: Some(compact_config),
     };

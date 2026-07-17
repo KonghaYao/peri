@@ -16,7 +16,10 @@ use peri_agent::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::format_subagent_result;
+use super::{
+    format_subagent_result,
+    lifecycle::{on_subagent_stop_handler, DeregisterGuard},
+};
 use crate::subagent::{v2_bridge::build_v2_subagent_context, SubAgentMiddlewareConfig};
 
 impl super::SubAgentTool {
@@ -91,6 +94,12 @@ impl super::SubAgentTool {
             );
         }
 
+        // RAII guard：scope 退出时自动 deregister
+        let _deregister_guard = DeregisterGuard {
+            thread_id: child_thread_id.clone(),
+            deregister: self.deregister_runtime.clone(),
+        };
+
         // 8. SubagentStarted 事件 + lifecycle hook
         let instance_id = child_thread_id.clone();
         if let Some(ref handler) = self.event_handler {
@@ -142,6 +151,7 @@ impl super::SubAgentTool {
         let fork_directive = crate::subagent::fork::build_fork_directive(prompt);
         v2_ctx
             .context
+            .session
             .queue
             .push(peri_agent::session::queue::QueuedMessage::new(
                 peri_agent::session::queue::MessageKind::Prompt,
@@ -168,79 +178,43 @@ impl super::SubAgentTool {
             }
             LoopResult::Interrupted => (String::new(), true),
             LoopResult::Error(e) => {
-                // Cron #32: emit SubagentStopped on error path so TUI decrements
-                // subagent_depth (mod.rs SubAgentEnd handler). Without this emit,
-                // parent's subagent_depth stays > 0 forever — handle_done/error
-                // early-return on depth > 0, permanently freezing the parent
-                // (spinner stuck, agent unrecoverable without /new thread).
-                // Mirrors execute_bg.rs:220-227 error-path pattern.
                 let error_summary = format!("Fork sub-agent execution failed: {}", e);
                 let error_result: String = error_summary.chars().take(500).collect();
-                if let Some(ref handler) = self.event_handler {
-                    handler.on_event(ExecutorEvent::SubagentStopped {
-                        agent_name: "fork".to_string(),
-                        result: error_result.clone(),
-                        is_error: true,
-                        instance_id: instance_id.clone(),
-                    });
-                }
-                self.fire_subagent_lifecycle_hook(
-                    crate::hooks::types::HookEvent::SubagentStop,
-                    cwd,
+                on_subagent_stop_handler(
+                    &self.event_handler,
+                    &self.registered_hooks,
+                    &self.thread_store,
                     "fork",
-                    Some(&error_result),
+                    &child_thread_id,
+                    &error_result,
+                    true,
+                    cwd,
                 )
                 .await;
-                // deregister before error return
-                if let Some(deregister) = &self.deregister_runtime {
-                    deregister(&child_thread_id);
-                }
-                if let Some(ref store) = self.thread_store {
-                    let _ = store.update_thread_status(&child_thread_id, "error").await;
-                }
                 return Err(error_summary.into());
             }
         };
 
-        // 13. deregister
-        if let Some(deregister) = &self.deregister_runtime {
-            deregister(&child_thread_id);
-        }
-
-        // 14. SubagentStopped 事件 + lifecycle hook
+        // 14. SubagentStopped 事件 + lifecycle hook + thread_store
         let output_summary: String = if interrupted {
             "interrupted".to_string()
         } else {
             final_text.chars().take(500).collect()
         };
-        if let Some(ref handler) = self.event_handler {
-            handler.on_event(ExecutorEvent::SubagentStopped {
-                agent_name: "fork".to_string(),
-                result: output_summary.clone(),
-                is_error: interrupted,
-                instance_id: instance_id.clone(),
-            });
-        }
-        self.fire_subagent_lifecycle_hook(
-            crate::hooks::types::HookEvent::SubagentStop,
-            cwd,
+        on_subagent_stop_handler(
+            &self.event_handler,
+            &self.registered_hooks,
+            &self.thread_store,
             "fork",
-            Some(&output_summary),
+            &child_thread_id,
+            &output_summary,
+            interrupted,
+            cwd,
         )
         .await;
 
-        // 15. thread_store 状态 + 返回
         if interrupted {
-            if let Some(ref store) = self.thread_store {
-                let _ = store
-                    .update_thread_status(&child_thread_id, "cancelled")
-                    .await;
-            }
             return Ok("Fork sub-agent execution was interrupted".to_string());
-        }
-
-        if let Some(ref store) = self.thread_store {
-            let _ = store.update_thread_status(&child_thread_id, "done").await;
         }
 
         // 复用 format_subagent_result 的格式（构造 AgentOutput）
@@ -265,23 +239,6 @@ impl super::SubAgentTool {
 
 /// 从 session transcript 提取最后一条非空 AI 消息文本
 fn extract_last_ai_text(session: &std::sync::Arc<peri_agent::session::Session>) -> String {
-    let transcript = session.transcript();
-    let tx = transcript.read();
-    tx.visible_messages()
-        .iter()
-        .rev()
-        .find_map(|m| {
-            if matches!(m, BaseMessage::Ai { .. }) {
-                let t = m.content();
-                let trimmed = t.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default()
+    // P1-11: 委托给 super::extract_last_ai_text（tool/mod.rs 共用实现）
+    super::extract_last_ai_text(session)
 }

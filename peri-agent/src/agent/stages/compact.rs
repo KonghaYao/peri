@@ -8,17 +8,15 @@
 //! Full Compact 失败时 `consecutive_failures` 累加，达上限后降级跳过。
 
 use super::{CompactInput, CompactOutput};
-use crate::agent::agent_context::AgentContext;
 use crate::agent::compact::config::CompactConfig;
-use crate::middleware::state::MiddlewareState;
 
 /// 运行 Compact 阶段
 pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<CompactOutput> {
     let ctx = &input.context;
-    let step = ctx.turn.current_step();
+    let step = ctx.session.turn.current_step();
 
     // PreCompact 插件 hook 回调（fire-and-forget）
-    if let Some(ref hook) = ctx.compact_pre_hook {
+    if let Some(ref hook) = ctx.compact.compact_pre_hook {
         hook();
     }
 
@@ -35,7 +33,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
     // 用 labeled block + break 收敛所有返回路径，确保 after_compact 在函数末尾统一触发。
     let output = 'compact_core: {
         // 必备条件：context_budget + compact_config
-        let (budget, config) = match (&ctx.context_budget, &ctx.compact_config) {
+        let (budget, config) = match (&ctx.compact.context_budget, &ctx.compact.compact_config) {
             (Some(b), Some(c)) => (b, c),
             _ => {
                 // 未配置预算或 compact_config → 跳过
@@ -58,9 +56,9 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
         }
 
         // 读 token_tracker（只读操作，无需 drain recall）
-        let cx = AgentContext::from_stage(ctx);
+        // P1-3: 直接读 StageContext.token_tracker，无需经过 AgentContext 适配层
         let budget_pct = {
-            let tracker = cx.token_tracker();
+            let tracker = ctx.compact.token_tracker.read();
             tracker.context_usage_percent(budget.context_window)
         };
 
@@ -69,29 +67,39 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             None => break 'compact_core Ok(CompactOutput { compacted: false }),
         };
 
+        // 在 emit CompactStarted 前估算策略（P1-5: 使用 compact_v2 的统一策略函数）
+        let compact_strategy = crate::agent::compact_v2::determine_compact_strategy(
+            pct, config, false, // force 恒为 false（自动触发路径）
+        )
+        .unwrap_or(crate::agent::events::CompactStrategy::Micro);
+
         tracing::trace!(step, budget_pct = %pct, "Compact 预算检查");
 
         // 调用 compact_v2：取出 transcript 所有权，运行后放回（避免跨 await 持锁）
         let compact_llm_ref: Option<&dyn crate::llm::BaseModel> = ctx
+            .compact
             .compact_llm
             .as_ref()
             .map(|arc| arc.as_ref() as &dyn crate::llm::BaseModel);
 
         let mut transcript_owned = {
-            let mut guard = ctx.transcript.write();
+            let mut guard = ctx.session.transcript.write();
             std::mem::take(&mut *guard)
         };
 
         let mut consecutive = ctx
+            .compact
             .consecutive_failures
             .load(std::sync::atomic::Ordering::Relaxed);
 
         // emit CompactStarted 观测事件（Start→End 成对原则，修复 Langfuse compact_span 断裂）
-        ctx.event_bus
+        ctx.runtime
+            .event_bus
             .emit_observe(crate::agent::events_v2::ObserveEvent::CompactStarted {
                 turn_id: ctx.turn_id(),
-                agent_id: ctx.agent_id,
+                agent_id: ctx.session.agent_id,
                 step,
+                strategy: compact_strategy,
             });
 
         let config_clone: CompactConfig = config.clone();
@@ -99,10 +107,11 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
         // 注：run_compact 内部不感知 turn cancel_token，必须在此层显式 select。
         let result = tokio::select! {
             biased;
-            _ = ctx.turn.cancel_token.cancelled() => {
+            _ = ctx.session.turn.cancel_token.cancelled() => {
                 // 把 transcript 放回 RwLock（与正常路径一致，避免遗失消息）
-                *ctx.transcript.write() = transcript_owned;
-                ctx.consecutive_failures
+                *ctx.session.transcript.write() = transcript_owned;
+                ctx.compact
+                    .consecutive_failures
                     .store(consecutive, std::sync::atomic::Ordering::Relaxed);
                 break 'compact_core Err(crate::error::AgentError::Interrupted);
             }
@@ -118,11 +127,12 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
         };
 
         // 写回 consecutive_failures
-        ctx.consecutive_failures
+        ctx.compact
+            .consecutive_failures
             .store(consecutive, std::sync::atomic::Ordering::Relaxed);
 
         // 把 transcript 放回 RwLock
-        *ctx.transcript.write() = transcript_owned;
+        *ctx.session.transcript.write() = transcript_owned;
 
         let compacted = {
             let r = result; // compact_v2::run_compact 直接返回 CompactResult
@@ -137,10 +147,10 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                     "Compact 完成"
                 );
                 // 取出 visible_messages 快照供 TUI 重建（必须在 transcript 还在 owned 时读）
-                // 注：run_compact 内部已把 transcript_owned 还给 ctx.transcript.write()，
+                // 注：run_compact 内部已把 transcript_owned 还给 ctx.session.transcript.write()，
                 // 此处从 ctx 重新读
                 let (messages_snapshot, files, skills) = {
-                    let guard = ctx.transcript.read();
+                    let guard = ctx.session.transcript.read();
                     let visible: Vec<crate::messages::BaseMessage> =
                         guard.visible_messages().into_iter().cloned().collect();
                     // 从最后几条消息提取 re_inject 元信息（CompactFileInfo / Skills 名称）
@@ -154,17 +164,17 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 // Full Compact 后必须 reset token_tracker——否则下轮 budget 计算会基于
                 // compact 前的累积 token 数，导致每轮都触发 compact
                 // 注：与 v1 CompactMiddleware 行为对齐（v1 已删除）
-                if r.strategy == crate::agent::compact_v2::CompactStrategy::Full {
-                    let mut cx = AgentContext::from_stage(ctx);
-                    cx.token_tracker_mut().reset();
+                if r.strategy == crate::agent::events::CompactStrategy::Full {
+                    // P1-3: 直接操作 StageContext.token_tracker
+                    ctx.compact.token_tracker.write().reset();
                     // 注：token_tracker reset 为只读 token 操作，无需 drain recall
                 }
 
                 // emit 观测事件（携带 messages 快照供 TUI 重建 pipeline）
-                ctx.event_bus.emit_observe(
+                ctx.runtime.event_bus.emit_observe(
                     crate::agent::events_v2::ObserveEvent::MessagesCompacted {
                         turn_id: ctx.turn_id(),
-                        agent_id: ctx.agent_id,
+                        agent_id: ctx.session.agent_id,
                         before_count: r.before_len,
                         after_count: r.after_visible_len,
                         summary: r.summary.clone().unwrap_or_default(),
@@ -172,6 +182,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                         files,
                         skills,
                         re_inject_count: 0,
+                        strategy: r.strategy,
                     },
                 );
                 true
@@ -189,7 +200,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
     }
 
     // PostCompact 插件 hook 回调（所有返回路径统一触发）
-    if let Some(ref hook) = ctx.compact_post_hook {
+    if let Some(ref hook) = ctx.compact.compact_post_hook {
         let compacted = output.as_ref().map(|o| o.compacted).unwrap_or(false);
         hook(compacted, affected_count);
     }

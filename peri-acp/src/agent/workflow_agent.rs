@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use peri_agent::{
     agent::{
         compact::CompactConfig,
@@ -40,7 +40,8 @@ use crate::session::agent_pool::AgentPool;
 /// CLAUDE.md / skills 与主会话一致（系统提示词稳定性第一优先级）。
 #[derive(Clone)]
 pub struct WorkflowAgentContext {
-    pub provider: LlmProvider,
+    /// LLM provider——通过 Arc<RwLock<>> 共享，provider/model 切换后自动感知，无需重建 executor。
+    pub provider: Arc<RwLock<LlmProvider>>,
     pub cwd: String,
     /// Frozen CLAUDE.md content（含解析的 @import），None = 无文件。
     pub frozen_claude_md: Option<String>,
@@ -104,7 +105,7 @@ pub fn create_executor(ctx: WorkflowAgentContext) -> Arc<dyn AgentExecutor> {
 /// 便捷工厂：创建无 frozen data 的 workflow agent executor。
 pub fn create_default_executor(provider: LlmProvider, cwd: &str) -> Arc<dyn AgentExecutor> {
     Arc::new(WorkflowAgentExecutor::new(WorkflowAgentContext {
-        provider,
+        provider: Arc::new(RwLock::new(provider)),
         cwd: cwd.to_string(),
         frozen_claude_md: None,
         frozen_claude_local_md: None,
@@ -155,7 +156,25 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // 0b. 创建日志 + Langfuse event handler
         let tracer_for_handler = langfuse_tracer.clone();
-        let provider_display_name = self.ctx.provider.display_name().to_string();
+        // 合并 3 次 provider.read() 为一次，避免中间切换导致 display_name 与实际 provider 不一致。
+        // 用块作用域确保 RwLockReadGuard 在第一个 .await 前释放。
+        // 如 workflow 脚本指定了 model 参数：
+        //   1) 有 PeriConfig → 尝试 alias 解析（haiku/sonnet/opus → 真实模型名）
+        //   2) 解析失败或无 PeriConfig → 替换 provider 的 model name 按字面量使用
+        let (provider_display_name, effective_provider) = {
+            let provider_read = self.ctx.provider.read();
+            let display_name = provider_read.display_name().to_string();
+            let effective = if let Some(ref model) = params.model {
+                self.ctx
+                    .peri_config
+                    .as_ref()
+                    .and_then(|cfg| LlmProvider::from_config_for_alias(cfg, model))
+                    .unwrap_or_else(|| provider_read.with_model_name(model.clone()))
+            } else {
+                provider_read.clone()
+            };
+            (display_name, effective)
+        };
 
         // Agent usage 累积器：从 LlmCallEnd 事件收集实际 token 用量
         // (output_tokens, model_name)
@@ -213,19 +232,6 @@ impl AgentExecutor for WorkflowAgentExecutor {
             },
         ));
 
-        // 1. 构建 LLM（GAP-13: 复用 AgentPool 缓存的 BaseModel）
-        // 如 workflow 脚本指定了 model 参数：
-        //   1) 有 PeriConfig → 尝试 alias 解析（haiku/sonnet/opus → 真实模型名）
-        //   2) 解析失败或无 PeriConfig → 替换 provider 的 model name 按字面量使用
-        let effective_provider = if let Some(ref model) = params.model {
-            self.ctx
-                .peri_config
-                .as_ref()
-                .and_then(|cfg| LlmProvider::from_config_for_alias(cfg, model))
-                .unwrap_or_else(|| self.ctx.provider.with_model_name(model.clone()))
-        } else {
-            self.ctx.provider.clone()
-        };
         let model_name = effective_provider.model_name().to_string();
 
         // ── compact 配置 ──
@@ -415,6 +421,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
         // push prompt 到 queue
         v2_ctx
             .context
+            .session
             .queue
             .push(peri_agent::session::queue::QueuedMessage::new(
                 peri_agent::session::queue::MessageKind::Prompt,
@@ -424,9 +431,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // flush prompt queue → transcript（before_agent 钩子依赖 messages()）
         {
-            let consumed = v2_ctx.context.queue.drain_for_receive();
+            let consumed = v2_ctx.context.session.queue.drain_for_receive();
             if !consumed.is_empty() {
-                let mut transcript = v2_ctx.context.transcript.write();
+                let mut transcript = v2_ctx.context.session.transcript.write();
                 peri_agent::agent::stages::append_messages_to_transcript(&mut transcript, consumed);
             }
         }

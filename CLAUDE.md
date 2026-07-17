@@ -90,6 +90,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 ### 命令
 - `cargo build --workspace` / `cargo build -p <crate>`：构建
 - `cargo test --workspace` / `cargo test -p <crate> --lib -- <test_name>`：测试
+- `cargo test --workspace --doc`：doc test（`cargo build`/`check`/`clippy` 不编译 doc test，lefthook 也不跑，需显式验证）
 - `cargo run -p peri-tui -- -a`：HITL 审批模式
 - `scripts/start-tui.sh`：启动（RELAY_PORT=3001）
 - `lefthook run pre-commit`：fmt/check/clippy
@@ -268,6 +269,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **commit 消息特殊字符**：含 `{}`、`\`` 等 shell 特殊字符时，用 `git commit -F /tmp/msg.txt` 而非 `-m`。提交前 `git diff --cached --stat` 确认 scope
 - **cargo fmt 参数**：`cargo fmt -- -p peri-tui`（注意 `--`），非 `cargo fmt -p peri-tui`
 - **let-chains + rustfmt 不兼容**：peri-tui/peri-theme edition=2024 的 let chains 语法导致 `cargo fmt` 报错。提交时若卡 fmt 可 `--no-verify` 跳过
+- **doc test 盲区**：`cargo build`/`check`/`clippy` 不编译文档中的 ` ``` ` 代码块，lefthook 也不跑。修改 doc comment（含 ASCII 图）后必须 `cargo test -p <crate> --doc` 验证。非代码块（架构图、示意图）用 ` ```text` 标记，避免被当作 Rust 编译
 
 ### Langfuse 监控 v2
 - **trace_id = turn_id**：tracer.new() 由 caller 传入 turn_id，禁止自生成。trace_id 不可变。

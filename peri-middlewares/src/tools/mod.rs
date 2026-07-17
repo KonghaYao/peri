@@ -51,6 +51,10 @@ impl BaseTool for BoxToolWrapper {
     fn timeout(&self) -> Option<std::time::Duration> {
         self.0.timeout()
     }
+
+    fn aliases(&self) -> &[&str] {
+        self.0.aliases()
+    }
 }
 
 #[async_trait]
@@ -77,5 +81,9 @@ impl BaseTool for ArcToolWrapper {
 
     fn timeout(&self) -> Option<std::time::Duration> {
         self.0.timeout()
+    }
+
+    fn aliases(&self) -> &[&str] {
+        self.0.aliases()
     }
 }

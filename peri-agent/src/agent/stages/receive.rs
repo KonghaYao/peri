@@ -15,7 +15,7 @@ use crate::session::QueuedMessage;
 /// （通过共享 helper `append_messages_to_transcript`，与 End 阶段的 Defer 写入
 /// 保持一致的包裹语义）。
 pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<ReceiveOutput> {
-    let consumed = input.context.queue.drain_for_receive();
+    let consumed = input.context.session.queue.drain_for_receive();
     let count = consumed.len();
 
     // emit MessageQueueDrained（langfuse v2 遥测）
@@ -32,10 +32,11 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
         }
         input
             .context
+            .runtime
             .event_bus
             .emit_observe(ObserveEvent::MessageQueueDrained {
                 turn_id: input.context.turn_id(),
-                agent_id: input.context.agent_id,
+                agent_id: input.context.session.agent_id,
                 prompt: prompt_count,
                 defer: defer_count,
                 info: info_count,
@@ -43,10 +44,10 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
     }
 
     if count > 0 {
-        let mut transcript = input.context.transcript.write();
+        let mut transcript = input.context.session.transcript.write();
         append_messages_to_transcript(&mut transcript, consumed);
         tracing::debug!(
-            turn_id = %input.context.turn.turn_id,
+            turn_id = %input.context.session.turn.turn_id,
             count,
             "Receive 阶段消费消息"
         );
@@ -85,13 +86,13 @@ mod tests {
         };
         let output = run_receive(input).await.unwrap();
         assert_eq!(output.consumed_count, 0);
-        assert!(ctx.transcript.read().is_empty());
+        assert!(ctx.session.transcript.read().is_empty());
     }
 
     #[tokio::test]
     async fn test_receive_consumes_prompt() {
         let ctx = make_context();
-        ctx.queue.push(QueuedMessage::prompt(
+        ctx.session.queue.push(QueuedMessage::prompt(
             MessageSource::UserInput,
             BaseMessage::human(MessageContent::text("hello")),
         ));
@@ -101,13 +102,13 @@ mod tests {
         };
         let output = run_receive(input).await.unwrap();
         assert_eq!(output.consumed_count, 1);
-        assert_eq!(ctx.transcript.read().len(), 1);
+        assert_eq!(ctx.session.transcript.read().len(), 1);
     }
 
     #[tokio::test]
     async fn test_receive_consumes_info_wrapped_in_reminder() {
         let ctx = make_context();
-        ctx.queue.push(QueuedMessage::info(
+        ctx.session.queue.push(QueuedMessage::info(
             MessageSource::SystemInjected,
             BaseMessage::human(MessageContent::text("system info")),
         ));
@@ -118,7 +119,7 @@ mod tests {
         let output = run_receive(input).await.unwrap();
         assert_eq!(output.consumed_count, 1);
 
-        let transcript = ctx.transcript.read();
+        let transcript = ctx.session.transcript.read();
         assert_eq!(transcript.len(), 1);
         let content = transcript.entries()[0].message.content();
         assert!(
@@ -131,11 +132,11 @@ mod tests {
     #[tokio::test]
     async fn test_receive_keeps_defer() {
         let ctx = make_context();
-        ctx.queue.push(QueuedMessage::defer(
+        ctx.session.queue.push(QueuedMessage::defer(
             MessageSource::SubAgentComplete,
             BaseMessage::human(MessageContent::text("deferred")),
         ));
-        ctx.queue.push(QueuedMessage::prompt(
+        ctx.session.queue.push(QueuedMessage::prompt(
             MessageSource::UserInput,
             BaseMessage::human(MessageContent::text("prompt")),
         ));
@@ -146,7 +147,7 @@ mod tests {
         let output = run_receive(input).await.unwrap();
         // 只消费 Prompt，Defer 保留
         assert_eq!(output.consumed_count, 1);
-        assert_eq!(ctx.queue.len(), 1, "Defer 应保留在队列");
-        assert_eq!(ctx.transcript.read().len(), 1);
+        assert_eq!(ctx.session.queue.len(), 1, "Defer 应保留在队列");
+        assert_eq!(ctx.session.transcript.read().len(), 1);
     }
 }

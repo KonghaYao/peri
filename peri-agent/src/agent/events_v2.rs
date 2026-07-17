@@ -285,6 +285,8 @@ pub enum ObserveEvent {
         turn_id: TurnId,
         agent_id: AgentId,
         step: usize,
+        /// 压缩策略（Micro / Full / Smart）
+        strategy: crate::agent::events::CompactStrategy,
     },
     /// 消息被压缩
     MessagesCompacted {
@@ -306,6 +308,8 @@ pub enum ObserveEvent {
         /// Re-inject 还原的消息（Human/文件/Skills）——已包含在 messages 中，
         /// 此字段仅供调试/遥测，TUI 不直接使用
         re_inject_count: usize,
+        /// 压缩策略（Micro / Full / Smart）
+        strategy: crate::agent::events::CompactStrategy,
     },
     /// Turn 异常中止
     TurnError {
@@ -806,6 +810,7 @@ mod tests {
             turn_id,
             agent_id,
             step: 3,
+            strategy: crate::agent::events::CompactStrategy::Micro,
         };
         assert_eq!(event.turn_id(), turn_id);
         assert_eq!(event.agent_id(), agent_id);
@@ -824,6 +829,7 @@ mod tests {
             files: vec![],
             skills: vec![],
             re_inject_count: 0,
+            strategy: crate::agent::events::CompactStrategy::Full,
         };
         assert_eq!(event.turn_id(), turn_id);
         assert_eq!(event.agent_id(), agent_id);
@@ -1055,6 +1061,7 @@ mod tests {
             files: vec![],
             skills: vec![],
             re_inject_count: 0,
+            strategy: crate::agent::events::CompactStrategy::Full,
         });
 
         // 两个接收者都能收到
@@ -1288,6 +1295,7 @@ mod tests {
             turn_id,
             agent_id,
             step: 7,
+            strategy: crate::agent::events::CompactStrategy::Micro,
         };
         let json = serde_json::to_string(&event).unwrap();
         let back: ObserveEvent = serde_json::from_str(&json).unwrap();

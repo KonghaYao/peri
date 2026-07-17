@@ -63,7 +63,7 @@ pub fn spawn_acp_bridge(
         // 防止旧 session 的 ViewModel 在新 session 中残留。
         let mut last_reset_counter: u64 = 0;
 
-        // 每秒触发 spinner 推进 + 耗时刷新（含 running Bash 的 Running(Ns) 计时器）
+        // 每秒检测 BRIDGE_RESET_COUNTER + 刷新 running Bash 计时
         let mut tick_interval = tokio::time::interval(std::time::Duration::from_secs(1));
         tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -79,8 +79,8 @@ pub fn spawn_acp_bridge(
                         apply_bridge_reset(&mut state, &mut last_reset_counter, counter);
                         continue;
                     }
-                    state.current_turn.advance_spinner();
                     if state.current_turn.has_running_bash_tool() {
+                        state.current_turn.invalidate_cache();
                         acp_events::push_view_models(&mut state);
                     }
                 }

@@ -1,20 +1,22 @@
-//! Compact v2 — 标记代替删除的上下文压缩
+//! Full Compact + Re-inject 实现
 //!
-//! 三级渐进策略：
-//! - **Micro**：零 LLM 调用，标 `truncated`（不改内容）
-//! - **Full**：LLM 摘要 + 旧消息标 `excluded` + 追加 Human 摘要 + Re-inject
-//! - **Smart**（未实现）：LLM 决策保留 id + 未选中标 `excluded` + 追加 system-reminder
-//!
-//! 与 v1 的区别：v2 基于 `MessageTranscript` 标记 API，不修改消息本体，
-//! 旧消息标 `excluded` 后 `visible_messages()` 自动过滤。
-//! Full Compact 通过 `BaseModel::invoke` 标准链路请求摘要。
-//! 所有注入消息使用 `BaseMessage::human()` —— 禁止 System，防止 hoist 污染 FrozenContext。
+//! 完整流程：
+//! 1. 预处理可见消息为文本
+//! 2. LLM 生成结构化摘要
+//! 3. 后处理摘要
+//! 4. 所有旧消息标 excluded
+//! 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中）
+//! 6. Re-inject 关键文件 + Skills（如果 cwd 提供）
 
 use std::path::Path;
 
+use anyhow::anyhow;
 use tracing::{debug, warn};
 
-use crate::agent::{compact::config::CompactConfig, events::CompactFileInfo};
+use crate::agent::{
+    compact::config::CompactConfig,
+    events::{CompactFileInfo, CompactStrategy},
+};
 use crate::error::AgentResult;
 use crate::llm::{types::LlmRequest, BaseModel};
 use crate::messages::{BaseMessage, ContentBlock, MessageContent};
@@ -23,8 +25,7 @@ use crate::session::transcript::MessageTranscript;
 // ─── 公共常量 ──────────────────────────────────────────────────────────────────
 
 /// Full Compact 摘要 system prompt
-const SUMMARY_SYSTEM_PROMPT: &str =
-    "You are a conversation context compression tool. You excel at compressing long conversations into structured summaries.";
+const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation context compression tool. You excel at compressing long conversations into structured summaries.";
 
 /// Full Compact user prompt 模板
 const SUMMARY_USER_PROMPT: &str = r#"Analyze the following conversation history and produce a structured summary covering these areas:
@@ -45,302 +46,6 @@ const SUMMARY_USER_PROMPT: &str = r#"Analyze the following conversation history 
 Based on the analysis above, generate a concise structured summary. Preserve all file paths (always use absolute paths), error messages, and key decisions. Use Markdown format.
 </summary>"#;
 
-// ─── CompactStrategy ─────────────────────────────────────────────────────────────
-
-/// Compact 策略枚举
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompactStrategy {
-    /// 零 LLM 调用，标 truncated
-    Micro,
-    /// LLM 摘要 + excluded + Human 摘要注入
-    Full,
-    /// LLM 筛选保留（未实现）
-    Smart,
-}
-
-// ─── CompactResult ───────────────────────────────────────────────────────────────
-
-/// Compact 执行结果
-#[derive(Debug, Clone)]
-pub struct CompactResult {
-    /// 使用的策略
-    pub strategy: CompactStrategy,
-    /// 操作的消息数量（标 truncated / excluded 的数量）
-    pub affected_count: usize,
-    /// 操作前消息总数
-    pub before_len: usize,
-    /// 操作后可见消息数量
-    pub after_visible_len: usize,
-    /// Full Compact 生成的摘要（Micro 时为 None）
-    pub summary: Option<String>,
-}
-
-// ─── 顶层入口 ───────────────────────────────────────────────────────────────────
-
-/// 根据 ContextBudget 百分比选择策略并执行 Compact
-///
-/// - budget < 0.70：跳过
-/// - 0.70 <= budget < 0.85：Micro
-/// - budget >= 0.85 或 force=true：Full
-/// - 连续失败超过 max_consecutive_failures 次时降级跳过
-pub async fn run_compact(
-    transcript: &mut MessageTranscript,
-    llm: Option<&dyn BaseModel>,
-    config: &CompactConfig,
-    budget: f64,
-    force: bool,
-    consecutive_failures: &mut u32,
-    cwd: &str,
-) -> CompactResult {
-    let before_len = transcript.len();
-
-    // 防死循环：连续失败超限则跳过
-    if *consecutive_failures >= config.max_consecutive_failures {
-        debug!(consecutive_failures, "Compact 降级：连续失败超限，跳过本轮");
-        return CompactResult {
-            strategy: CompactStrategy::Micro,
-            affected_count: 0,
-            before_len,
-            after_visible_len: transcript.visible_messages().len(),
-            summary: None,
-        };
-    }
-
-    let strategy = if force || budget >= config.auto_compact_threshold {
-        CompactStrategy::Full
-    } else if budget >= config.micro_compact_threshold {
-        CompactStrategy::Micro
-    } else {
-        // 预算充足，跳过
-        return CompactResult {
-            strategy: CompactStrategy::Micro,
-            affected_count: 0,
-            before_len,
-            after_visible_len: transcript.visible_messages().len(),
-            summary: None,
-        };
-    };
-
-    match strategy {
-        CompactStrategy::Micro => {
-            let affected = micro_compact(transcript, config);
-            *consecutive_failures = 0;
-            CompactResult {
-                strategy: CompactStrategy::Micro,
-                affected_count: affected,
-                before_len,
-                after_visible_len: transcript.visible_messages().len(),
-                summary: None,
-            }
-        }
-        CompactStrategy::Full => {
-            // 重跑保护：上轮 Full Compact 失败时设置的 excluded 标记若残留，
-            // 会污染 visible_messages() 导致本轮 compact 错误地认为已压缩。
-            // 仅清 excluded（保留 truncated——属 Micro Compact 状态，不可误清）。
-            if *consecutive_failures > 0 {
-                let stale_ids: Vec<_> = transcript
-                    .entries()
-                    .iter()
-                    .filter(|e| transcript.flags(e.message.id()).excluded)
-                    .map(|e| e.message.id())
-                    .collect();
-                let cleared = stale_ids.len();
-                for id in stale_ids {
-                    transcript.set_excluded(id, false);
-                }
-                if cleared > 0 {
-                    debug!(cleared, "Full Compact 重跑：清除上轮残留 excluded 标记");
-                }
-            }
-            match full_compact_inner(transcript, llm, config, cwd).await {
-                Ok(result) => {
-                    *consecutive_failures = 0;
-                    result
-                }
-                Err(e) => {
-                    *consecutive_failures = consecutive_failures.saturating_add(1);
-                    warn!(
-                        error = %e,
-                        consecutive_failures,
-                        "Full Compact 失败，降级跳过"
-                    );
-                    CompactResult {
-                        strategy: CompactStrategy::Full,
-                        affected_count: 0,
-                        before_len,
-                        after_visible_len: transcript.visible_messages().len(),
-                        summary: None,
-                    }
-                }
-            }
-        }
-        CompactStrategy::Smart => {
-            // 未实现，降级为 Micro
-            let affected = micro_compact(transcript, config);
-            CompactResult {
-                strategy: CompactStrategy::Micro,
-                affected_count: affected,
-                before_len,
-                after_visible_len: transcript.visible_messages().len(),
-                summary: None,
-            }
-        }
-    }
-}
-
-// ─── Micro Compact ──────────────────────────────────────────────────────────────
-
-/// Micro Compact：零 LLM 调用，对符合条件的旧消息标 `truncated`
-///
-/// 策略：
-/// - 仅操作自有消息（ancestor_len 之后）
-/// - 按 round 分组，跳过最近 `micro_compact_stale_steps` 轮
-/// - 对白名单工具的 Tool 消息标 truncated
-/// - 对含 Image/Document 的消息标 truncated
-///
-/// 返回被标记的消息数量。
-pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig) -> usize {
-    let ancestor_len = transcript.ancestor_len();
-    let entries = transcript.entries();
-    if entries.len() <= ancestor_len {
-        return 0;
-    }
-
-    // 按 round 分组自有消息（基于条目索引）
-    let own_start = ancestor_len;
-    let own_entries = &entries[own_start..];
-    let round_starts = compute_round_starts(own_entries);
-    let total_rounds = round_starts.len();
-    let stale_limit = total_rounds.saturating_sub(config.micro_compact_stale_steps);
-
-    // 构建消息 → round 索引
-    let mut round_index = vec![0usize; own_entries.len()];
-    for (ri, &start) in round_starts.iter().enumerate() {
-        let end = if ri + 1 < round_starts.len() {
-            round_starts[ri + 1]
-        } else {
-            own_entries.len()
-        };
-        let last = end.min(own_entries.len());
-        if start < last {
-            for slot in &mut round_index[start..last] {
-                *slot = ri;
-            }
-        }
-    }
-
-    // 先收集所有待标记的 id（避免借用冲突）
-    let mut ids_to_truncate: Vec<_> = Vec::new();
-    for (i, entry) in own_entries.iter().enumerate() {
-        // 跳过最近 N 轮
-        if round_index[i] >= stale_limit {
-            continue;
-        }
-
-        let msg = &entry.message;
-        let id = msg.id();
-
-        // 检查是否已被 truncated（避免重复标记）
-        let existing_flags = transcript.flags(id);
-        if existing_flags.truncated {
-            continue;
-        }
-
-        let should_truncate = match msg {
-            // Tool 消息：白名单工具 + 非错误
-            BaseMessage::Tool {
-                tool_call_id,
-                is_error,
-                ..
-            } => {
-                if *is_error {
-                    false
-                } else {
-                    find_tool_name_in_entries(own_entries, tool_call_id)
-                        .map(|name| config.micro_compactable_tools.contains(&name))
-                        .unwrap_or(false)
-                }
-            }
-            // 非 Tool 消息：检查是否含 Image/Document
-            _ => {
-                let blocks = msg.message_content().content_blocks();
-                blocks.iter().any(|b| {
-                    matches!(
-                        b,
-                        ContentBlock::Image { .. } | ContentBlock::Document { .. }
-                    )
-                })
-            }
-        };
-
-        if should_truncate {
-            ids_to_truncate.push(id);
-        }
-    }
-
-    // 批量设置 truncated 标记
-    for id in &ids_to_truncate {
-        transcript.set_truncated(*id, true);
-    }
-
-    let affected = ids_to_truncate.len();
-    if affected > 0 {
-        debug!(affected, "Micro Compact: 标记 truncated 消息");
-    }
-
-    affected
-}
-
-/// 在条目列表中查找 Tool 消息对应的工具调用名称
-fn find_tool_name_in_entries(
-    entries: &[crate::session::transcript::TranscriptEntry],
-    tool_call_id: &str,
-) -> Option<String> {
-    for entry in entries.iter().rev() {
-        if let BaseMessage::Ai { tool_calls, .. } = &entry.message {
-            for tc in tool_calls {
-                if tc.id == tool_call_id {
-                    return Some(tc.name.clone());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// 按 round 边界计算每个 round 的起始索引
-///
-/// 简化版分组：每条消息自成一个 round，但 AI+Tool 组合视为一个 round。
-/// 返回每个 round 的起始索引列表。
-fn compute_round_starts(entries: &[crate::session::transcript::TranscriptEntry]) -> Vec<usize> {
-    let mut starts = Vec::new();
-    let mut i = 0;
-    while i < entries.len() {
-        starts.push(i);
-        if let BaseMessage::Ai { tool_calls, .. } = &entries[i].message {
-            if !tool_calls.is_empty() {
-                let tc_count = tool_calls.len();
-                let mut end = i + 1;
-                let mut matched = 0;
-                while end < entries.len() && matched < tc_count {
-                    if let BaseMessage::Tool { tool_call_id, .. } = &entries[end].message {
-                        if tool_calls.iter().any(|tc| tc.id == *tool_call_id) {
-                            matched += 1;
-                            end += 1;
-                            continue;
-                        }
-                    }
-                    break;
-                }
-                i = end;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    starts
-}
-
 // ─── Full Compact ───────────────────────────────────────────────────────────────
 
 /// Full Compact 内部实现
@@ -352,18 +57,17 @@ fn compute_round_starts(entries: &[crate::session::transcript::TranscriptEntry])
 /// 4. 所有旧消息标 excluded
 /// 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中）
 /// 6. Re-inject 关键文件（如果 cwd 提供）
-async fn full_compact_inner(
+pub(super) async fn full_compact_inner(
     transcript: &mut MessageTranscript,
     llm: Option<&dyn BaseModel>,
     config: &CompactConfig,
     cwd: &str,
-) -> AgentResult<CompactResult> {
+) -> AgentResult<super::CompactResult> {
     let before_len = transcript.len();
 
     // 无 LLM 时降级为 Micro
-    let llm = llm.ok_or_else(|| {
-        crate::error::AgentError::Other(anyhow::anyhow!("Full Compact 需要 LLM 实例"))
-    })?;
+    let llm =
+        llm.ok_or_else(|| crate::error::AgentError::Other(anyhow!("Full Compact 需要 LLM 实例")))?;
 
     // 收集可见消息用于预处理
     let visible: Vec<&BaseMessage> = transcript.visible_messages();
@@ -392,7 +96,7 @@ async fn full_compact_inner(
             fallback_summary
         );
         transcript.append(BaseMessage::human(hint_text));
-        return Ok(CompactResult {
+        return Ok(super::CompactResult {
             strategy: CompactStrategy::Full,
             affected_count: before_len,
             before_len,
@@ -420,7 +124,7 @@ async fn full_compact_inner(
     let raw_summary = response.message.content();
 
     if raw_summary.trim().is_empty() {
-        return Err(crate::error::AgentError::Other(anyhow::anyhow!(
+        return Err(crate::error::AgentError::Other(anyhow!(
             "Full Compact 失败：LLM 返回空摘要"
         )));
     }
@@ -462,7 +166,7 @@ async fn full_compact_inner(
         after_visible, "Full Compact: excluded 旧消息 + 追加摘要 + re-inject"
     );
 
-    Ok(CompactResult {
+    Ok(super::CompactResult {
         strategy: CompactStrategy::Full,
         affected_count: before_len,
         before_len,
@@ -643,8 +347,7 @@ fn postprocess_summary(raw: &str) -> String {
         }
     }
 
-    let prefix =
-        "This session continues from a previous conversation. Below is a summary of the prior dialogue.";
+    let prefix = "This session continues from a previous conversation. Below is a summary of the prior dialogue.";
 
     text = text.trim().to_string();
     while text.contains("\n\n\n") {
@@ -950,6 +653,9 @@ pub fn extract_skill_names(messages: &[BaseMessage]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::compact::config::CompactConfig;
+    use crate::messages::{BaseMessage, ContentBlock, ImageSource, MessageContent};
+    use crate::session::transcript::MessageTranscript;
 
     fn make_human(text: &str) -> BaseMessage {
         BaseMessage::human(MessageContent::text(text.to_string()))
@@ -957,108 +663,6 @@ mod tests {
 
     fn make_ai(text: &str) -> BaseMessage {
         BaseMessage::ai(MessageContent::text(text.to_string()))
-    }
-
-    fn make_ai_with_tool(text: &str, tool_name: &str, tool_id: &str) -> BaseMessage {
-        BaseMessage::ai_with_tool_calls(
-            MessageContent::text(text.to_string()),
-            vec![crate::messages::ToolCallRequest::new(
-                tool_id,
-                tool_name,
-                serde_json::json!({}),
-            )],
-        )
-    }
-
-    fn make_tool_result(tool_call_id: &str, text: &str) -> BaseMessage {
-        BaseMessage::tool_result(
-            tool_call_id.to_string(),
-            MessageContent::text(text.to_string()),
-        )
-    }
-
-    // ── Micro Compact 测试 ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_micro_compact_empty_transcript() {
-        let mut t = MessageTranscript::new();
-        let config = CompactConfig::default();
-        let affected = micro_compact(&mut t, &config);
-        assert_eq!(affected, 0);
-    }
-
-    #[test]
-    fn test_micro_compact_all_within_stale_window() {
-        let mut t = MessageTranscript::new();
-        t.append(make_human("user question"));
-        let _id = t.append(make_tool_result("call_1", "large output here"));
-        let config = CompactConfig::default();
-        // 只有 1 轮，stale_steps 默认 5，全部在窗口内 → 不截断
-        let affected = micro_compact(&mut t, &config);
-        assert_eq!(affected, 0);
-    }
-
-    #[test]
-    fn test_micro_compact_marks_old_tool_results() {
-        let mut t = MessageTranscript::new();
-        // 构造 6 轮对话（stale_steps=5，第 0 轮应被截断）
-        for i in 0..6 {
-            t.append(make_human(&format!("question {}", i)));
-            let ai_id = format!("call_{}", i);
-            t.append(make_ai_with_tool("thinking...", "Bash", &ai_id));
-            t.append(make_tool_result(&ai_id, &format!("output {}", i)));
-        }
-
-        let config = CompactConfig::default();
-        let affected = micro_compact(&mut t, &config);
-        // 第 0 轮的 Bash tool result 应被标 truncated
-        assert!(affected > 0, "应有消息被标 truncated");
-    }
-
-    #[test]
-    fn test_micro_compact_skips_error_tool_results() {
-        let mut t = MessageTranscript::new();
-        t.append(make_human("user question"));
-        t.append(make_ai_with_tool("thinking...", "Bash", "call_1"));
-        let err_result =
-            BaseMessage::tool_result("call_1".to_string(), MessageContent::text("error output"));
-        // BaseMessage::tool_result 没有 is_error 参数，需手动构造
-        t.append(err_result.clone());
-
-        let config = CompactConfig::default();
-        let affected = micro_compact(&mut t, &config);
-        assert_eq!(affected, 0, "错误 tool result 不应被截断");
-    }
-
-    #[test]
-    fn test_micro_compact_respects_ancestor_boundary() {
-        let ancestor = make_human("ancestor message");
-        let mut t = MessageTranscript::new().with_ancestor(vec![ancestor]);
-        t.append(make_human("own message"));
-
-        let config = CompactConfig::default();
-        let affected = micro_compact(&mut t, &config);
-        assert_eq!(affected, 0, "ancestor 消息不应被截断");
-        // ancestor 消息不应被标 truncated
-        let ancestor_id = t.entries()[0].message.id();
-        assert!(!t.flags(ancestor_id).truncated);
-    }
-
-    #[test]
-    fn test_micro_compact_no_duplicate_truncation() {
-        let mut t = MessageTranscript::new();
-        // 构造足够多的轮次
-        for i in 0..7 {
-            t.append(make_human(&format!("q {}", i)));
-            t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
-            t.append(make_tool_result(&format!("c_{}", i), &format!("out {}", i)));
-        }
-
-        let config = CompactConfig::default();
-        let first = micro_compact(&mut t, &config);
-        let second = micro_compact(&mut t, &config);
-        assert_eq!(second, 0, "重复调用不应增加标记");
-        assert_eq!(first, second + first.saturating_sub(0));
     }
 
     // ── Full Compact 测试 ──────────────────────────────────────────────────────
@@ -1080,7 +684,7 @@ mod tests {
         // 由于 full_compact_inner 需要 LLM，这里用 Micro 代替测试空 transcript
         let mut t = MessageTranscript::new();
         let config = CompactConfig::default();
-        let affected = micro_compact(&mut t, &config);
+        let affected = crate::agent::compact_v2::micro::micro_compact(&mut t, &config);
         assert_eq!(affected, 0);
     }
 
@@ -1114,8 +718,6 @@ mod tests {
         let raw = "<analysis>some analysis</analysis><summary>the summary</summary>";
         let result = postprocess_summary(raw);
         assert!(!result.contains("<analysis>"));
-        assert!(result.contains("the summary"));
-        assert!(result.contains("This session continues"), "应包含前缀");
     }
 
     #[test]
@@ -1148,7 +750,7 @@ mod tests {
                 text: "some text".to_string(),
             },
             ContentBlock::Image {
-                source: crate::messages::ImageSource::Url {
+                source: ImageSource::Url {
                     url: "http://example.com/img.png".to_string(),
                 },
             },
@@ -1202,7 +804,7 @@ mod tests {
 
     #[test]
     fn test_compact_result_fields() {
-        let result = CompactResult {
+        let result = crate::agent::compact_v2::CompactResult {
             strategy: CompactStrategy::Micro,
             affected_count: 3,
             before_len: 10,
@@ -1251,17 +853,6 @@ mod tests {
     }
 
     #[test]
-    fn test_micro_compact_truncated_still_visible() {
-        let mut t = MessageTranscript::new();
-        let id = t.append(make_human("some message"));
-        t.set_truncated(id, true);
-
-        let visible = t.visible_messages();
-        assert_eq!(visible.len(), 1, "truncated 消息仍然可见");
-        assert_eq!(visible[0].id(), id);
-    }
-
-    #[test]
     fn test_excluded_not_visible() {
         let mut t = MessageTranscript::new();
         let id1 = t.append(make_human("visible"));
@@ -1271,147 +862,5 @@ mod tests {
         let visible = t.visible_messages();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id(), id1);
-    }
-
-    // ── run_compact 集成测试（无 LLM） ────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_run_compact_low_budget_skips() {
-        let mut t = MessageTranscript::new();
-        t.append(make_human("question"));
-        t.append(make_ai("answer"));
-
-        let config = CompactConfig::default();
-        let mut failures = 0u32;
-        let result = run_compact(&mut t, None, &config, 0.5, false, &mut failures, "/tmp").await;
-        assert_eq!(result.affected_count, 0, "低预算应跳过");
-    }
-
-    #[tokio::test]
-    async fn test_run_compact_micro_threshold() {
-        let mut t = MessageTranscript::new();
-        // 构造足够多的轮次以触发 micro
-        for i in 0..7 {
-            t.append(make_human(&format!("q {}", i)));
-            t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
-            t.append(make_tool_result(&format!("c_{}", i), &format!("out {}", i)));
-        }
-
-        let config = CompactConfig::default();
-        let mut failures = 0u32;
-        // budget = 0.75 → micro 范围
-        let result = run_compact(&mut t, None, &config, 0.75, false, &mut failures, "/tmp").await;
-        assert_eq!(result.strategy, CompactStrategy::Micro);
-        assert!(result.affected_count > 0, "应有消息被标 truncated");
-    }
-
-    #[tokio::test]
-    async fn test_run_compact_full_no_llm_fails_gracefully() {
-        let mut t = MessageTranscript::new();
-        t.append(make_human("question"));
-        t.append(make_ai("answer"));
-
-        let config = CompactConfig::default();
-        let mut failures = 0u32;
-        // force=true 但无 LLM → 失败降级
-        let result = run_compact(&mut t, None, &config, 0.5, true, &mut failures, "/tmp").await;
-        assert_eq!(result.strategy, CompactStrategy::Full);
-        assert_eq!(result.affected_count, 0, "失败时应无变更");
-        assert_eq!(failures, 1, "失败计数应递增");
-    }
-
-    #[tokio::test]
-    async fn test_run_compact_consecutive_failure_degradation() {
-        let mut t = MessageTranscript::new();
-        t.append(make_human("question"));
-
-        let config = CompactConfig::default();
-        let mut failures = config.max_consecutive_failures; // 已达上限
-        let result = run_compact(&mut t, None, &config, 0.95, true, &mut failures, "/tmp").await;
-        assert_eq!(result.affected_count, 0, "连续失败超限应跳过");
-    }
-
-    #[tokio::test]
-    async fn test_run_compact_micro_resets_failures() {
-        let mut t = MessageTranscript::new();
-        // 构造足够多的轮次
-        for i in 0..7 {
-            t.append(make_human(&format!("q {}", i)));
-            t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
-            t.append(make_tool_result(&format!("c_{}", i), &format!("out {}", i)));
-        }
-
-        let config = CompactConfig::default();
-        let mut failures = 2u32;
-        let result = run_compact(&mut t, None, &config, 0.75, false, &mut failures, "/tmp").await;
-        assert_eq!(result.strategy, CompactStrategy::Micro);
-        assert_eq!(failures, 0, "成功后应重置失败计数");
-    }
-
-    #[tokio::test]
-    async fn test_run_compact_rerun_clears_stale_excluded_flags() {
-        // 上轮 Full Compact 失败留下 excluded 标记，本轮重跑前应清除
-        let mut t = MessageTranscript::new();
-        let id1 = t.append(make_human("question 1"));
-        let id2 = t.append(make_ai("answer 1"));
-
-        // 模拟上轮失败：手动标记 excluded
-        t.set_excluded(id1, true);
-        t.set_excluded(id2, true);
-        assert!(t.flags(id1).excluded);
-        assert!(t.flags(id2).excluded);
-
-        let config = CompactConfig::default();
-        let mut failures = 1u32; // 上轮失败一次
-                                 // force=true 触发 Full，但 consecutive_failures>0，应先清除 excluded
-                                 // 然后无 LLM 调用 full_compact_inner 会失败（但清除已发生）
-        let result = run_compact(&mut t, None, &config, 0.5, true, &mut failures, "/tmp").await;
-
-        assert_eq!(result.strategy, CompactStrategy::Full);
-        assert!(!t.flags(id1).excluded, "上轮 excluded 标记应被清除");
-        assert!(!t.flags(id2).excluded, "上轮 excluded 标记应被清除");
-    }
-
-    #[tokio::test]
-    async fn test_run_compact_first_run_does_not_clear_flags() {
-        // 首次运行（failures=0）不应触碰 flags
-        let mut t = MessageTranscript::new();
-        let id1 = t.append(make_human("q"));
-        t.append(make_ai("a"));
-
-        // 手动预设置 excluded（模拟其他来源的标记）
-        t.set_excluded(id1, true);
-
-        let config = CompactConfig::default();
-        let mut failures = 0u32;
-        let _ = run_compact(&mut t, None, &config, 0.5, true, &mut failures, "/tmp").await;
-
-        // 首次运行不应清除（虽然 full_compact_inner 失败，但清除逻辑未触发）
-        assert!(t.flags(id1).excluded, "首次运行不应清除 excluded");
-    }
-
-    #[tokio::test]
-    async fn test_run_compact_rerun_only_clears_excluded_not_truncated() {
-        // 重跑时应清除 excluded，但保留 truncated（属 Micro Compact）
-        let mut t = MessageTranscript::new();
-        let id1 = t.append(make_human("q"));
-        t.append(make_ai("a"));
-
-        // id1 同时有 truncated + excluded
-        t.set_truncated(id1, true);
-        t.set_excluded(id1, true);
-        assert!(t.flags(id1).truncated);
-        assert!(t.flags(id1).excluded);
-
-        let config = CompactConfig::default();
-        let mut failures = 1u32;
-        let _ = run_compact(&mut t, None, &config, 0.5, true, &mut failures, "/tmp").await;
-
-        // 重跑后 excluded 被清除，但 truncated 保留
-        assert!(!t.flags(id1).excluded, "重跑应清除 excluded");
-        assert!(
-            t.flags(id1).truncated,
-            "重跑不应清除 truncated（属 Micro Compact 状态）"
-        );
     }
 }

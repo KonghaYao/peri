@@ -7,10 +7,7 @@
 use super::middleware_runner::run_after_agent;
 use super::tool_dispatch::dispatch_tools;
 use super::{ActInput, ActOutput};
-use crate::agent::agent_context::AgentContext;
 use crate::agent::events_v2::{RenderEvent, StateEvent};
-use crate::middleware::state::MiddlewareState;
-// StateEvent 仍用于 StateSnapshot（轻量级元数据快照，含 token_tracker 真实值）
 use crate::error::AgentResult;
 
 /// 运行 Act 阶段
@@ -18,30 +15,35 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
     let ctx = &input.context;
     let has_tool_calls = input.reasoning.needs_tool_call();
 
-    tracing::trace!(step = ctx.turn.current_step(), has_tool_calls, "Act 阶段");
+    tracing::trace!(
+        step = ctx.session.turn.current_step(),
+        has_tool_calls,
+        "Act 阶段"
+    );
 
     // emit StateSnapshot：每次 Act 阶段都推送，无论有无工具调用。
     // 消费方（TUI 状态栏等）据此实时刷新上下文使用率。
-    let message_count = ctx.transcript.read().len();
-    let context_budget = ctx.context_budget.clone();
+    let message_count = ctx.session.transcript.read().len();
+    let context_budget = ctx.compact.context_budget.clone();
     let context_total_tokens = context_budget.as_ref().map(|b| b.context_window as u64);
     let (total_tokens, budget_pct) = match context_budget.as_ref() {
         Some(budget) => {
-            let cx = AgentContext::from_stage(ctx);
-            let tracker = cx.token_tracker();
+            // P1-3: 直接读 StageContext.token_tracker，无需经过 AgentContext 适配层
+            let tracker = ctx.compact.token_tracker.read();
             let used = tracker.estimated_context_tokens().unwrap_or(0);
             let pct = tracker.context_usage_percent(budget.context_window);
             (used, pct)
         }
         None => (0, None),
     };
-    ctx.event_bus.emit_state(StateEvent::StateSnapshot {
+    ctx.runtime.event_bus.emit_state(StateEvent::StateSnapshot {
         turn_id: ctx.turn_id(),
-        agent_id: ctx.agent_id,
+        agent_id: ctx.session.agent_id,
         message_count,
         total_tokens,
-        current_step: ctx.turn.current_step(),
+        current_step: ctx.session.turn.current_step(),
         consecutive_failures: ctx
+            .compact
             .consecutive_failures
             .load(std::sync::atomic::Ordering::Relaxed),
         budget_pct,
@@ -50,7 +52,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
 
     if has_tool_calls {
         // 工具调用路径：dispatch_tools 处理审批 + 并发执行 + 写入 transcript
-        let cancel = ctx.turn.cancel_token.clone();
+        let cancel = ctx.session.turn.cancel_token.clone();
         let outcome = dispatch_tools(ctx, &input.reasoning, &cancel).await?;
 
         tracing::debug!(tool_count = outcome.results.len(), "Act 阶段执行了工具调用");
@@ -63,14 +65,16 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         // 若放到 state_tx 独立通道，TUI forwarder 的 biased select! 会优先消费
         // 下一迭代的 TextChunk，把本轮 TurnCompleted 拖到后面，导致 partial 混合
         // 两轮内容，渲染出"新文本在旧工具之前"的顺序错乱（详见 RenderEvent::TurnCompleted）。
-        let finalized_messages = ctx.transcript.read().visible_snapshot();
-        ctx.event_bus.emit_render(RenderEvent::TurnCompleted {
-            turn_id: ctx.turn_id(),
-            agent_id: ctx.agent_id,
-            steps: ctx.turn.current_step(),
-            elapsed_secs: 0.0,
-            finalized_messages,
-        });
+        let finalized_messages = ctx.session.transcript.read().visible_snapshot();
+        ctx.runtime
+            .event_bus
+            .emit_render(RenderEvent::TurnCompleted {
+                turn_id: ctx.turn_id(),
+                agent_id: ctx.session.agent_id,
+                steps: ctx.session.turn.current_step(),
+                elapsed_secs: 0.0,
+                finalized_messages,
+            });
 
         Ok(ActOutput {
             has_tool_calls: true,
@@ -90,20 +94,22 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
                 final_answer.clone(),
             ))
         });
-        ctx.transcript.write().append(ai_msg);
+        ctx.session.transcript.write().append(ai_msg);
 
         // 非流式时 emit TextChunk（流式由 LLM 适配器直接 emit）
         if !input.reasoning.streamed && !final_answer.trim().is_empty() {
-            ctx.event_bus.emit_render(RenderEvent::TextChunk {
+            ctx.runtime.event_bus.emit_render(RenderEvent::TextChunk {
                 turn_id: ctx.turn_id(),
-                agent_id: ctx.agent_id,
+                agent_id: ctx.session.agent_id,
                 chunk: final_answer.clone(),
             });
         }
 
         // 构造 AgentOutput 并触发 after_agent（允许 middleware 修改输出）
-        let mut output =
-            crate::agent::react::AgentOutput::new(final_answer.clone(), ctx.turn.current_step());
+        let mut output = crate::agent::react::AgentOutput::new(
+            final_answer.clone(),
+            ctx.session.turn.current_step(),
+        );
         output.tool_calls = input
             .reasoning
             .tool_calls
@@ -121,14 +127,16 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         // 迭代边界提交信号：emit TurnCompleted 携带 transcript 快照（含本轮最终回答）
         //
         // 必须用 emit_render（详见上方工具路径 同款注释）——保证与同迭代 Render 事件 FIFO。
-        let finalized_messages = ctx.transcript.read().visible_snapshot();
-        ctx.event_bus.emit_render(RenderEvent::TurnCompleted {
-            turn_id: ctx.turn_id(),
-            agent_id: ctx.agent_id,
-            steps: ctx.turn.current_step(),
-            elapsed_secs: 0.0,
-            finalized_messages,
-        });
+        let finalized_messages = ctx.session.transcript.read().visible_snapshot();
+        ctx.runtime
+            .event_bus
+            .emit_render(RenderEvent::TurnCompleted {
+                turn_id: ctx.turn_id(),
+                agent_id: ctx.session.agent_id,
+                steps: ctx.session.turn.current_step(),
+                elapsed_secs: 0.0,
+                finalized_messages,
+            });
 
         Ok(ActOutput {
             has_tool_calls: false,
@@ -170,7 +178,7 @@ mod tests {
 
         // transcript 应包含 final_answer 消息
         let messages: Vec<_> = {
-            let guard = ctx.transcript.read();
+            let guard = ctx.session.transcript.read();
             guard.visible_messages().into_iter().cloned().collect()
         };
         assert!(
@@ -195,7 +203,7 @@ mod tests {
 
         // transcript 应包含 AI 消息 + tool_result
         let messages: Vec<_> = {
-            let guard = ctx.transcript.read();
+            let guard = ctx.session.transcript.read();
             guard.visible_messages().into_iter().cloned().collect()
         };
         assert!(

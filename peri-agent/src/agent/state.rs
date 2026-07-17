@@ -45,7 +45,7 @@ pub struct AgentState {
     ///
     /// **共享语义**：`MessageQueue` 内部用 `Arc<Mutex<VecDeque>> + Arc<Notify>`，
     /// clone 共享底层数据。`AgentState::new` 或 `AgentContext::from_stage` 构造时
-    /// 传入 `ctx.queue.clone()`，因此 middleware push 的消息直接进入 v2 queue，
+    /// 传入 `ctx.session.queue.clone()`，因此 middleware push 的消息直接进入 v2 queue，
     /// Receive / End 阶段统一消费。
     #[serde(skip)]
     pub v2_queue: MessageQueue,

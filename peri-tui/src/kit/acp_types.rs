@@ -46,9 +46,6 @@ pub struct CurrentTurn {
     /// Whether a ViewCommit already replaced the canonical view for this turn.
     pub committed: bool,
 
-    /// Spinner animation frame counter (advanced by `Tick`).
-    pub spinner_frame: u32,
-
     /// Whether the turn is actively streaming (any text / tool event arrived).
     pub active: bool,
 
@@ -118,7 +115,7 @@ impl CurrentTurn {
     }
 
     /// Invalidate the cached ViewModels (call after any streaming data mutation).
-    fn invalidate_cache(&mut self) {
+    pub(crate) fn invalidate_cache(&mut self) {
         self.cached_view_models.clear();
     }
 
@@ -259,14 +256,6 @@ impl CurrentTurn {
             true
         } else {
             false
-        }
-    }
-
-    /// Advance the spinner frame counter (called on `Tick`).
-    pub fn advance_spinner(&mut self) {
-        self.spinner_frame = self.spinner_frame.wrapping_add(1);
-        if self.has_running_bash_tool() {
-            self.invalidate_cache();
         }
     }
 
@@ -951,7 +940,6 @@ mod tests {
         assert!(ct.text.is_empty());
         assert!(ct.reasoning.is_empty());
         assert!(ct.tool_cards.is_empty());
-        assert_eq!(ct.spinner_frame, 0);
         assert!(!ct.active);
         assert!(ct.view_models().is_empty());
     }
@@ -1013,15 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn test_advance_spinner_wraps() {
-        let mut ct = CurrentTurn::new();
-        ct.spinner_frame = u32::MAX;
-        ct.advance_spinner();
-        assert_eq!(ct.spinner_frame, 0);
-    }
-
-    #[test]
-    fn test_advance_spinner_invalidates_cache_for_running_bash() {
+    fn test_bash_timer_hash_changes_over_time() {
         // [设计变更] ToolCard content_hash 现在纳入 duration（按秒向下取整）——
         // 这是为了让按 hash 分片的渲染缓存每秒刷新一次 duration 文本。
         // 此测试验证：跨秒后 content_hash 变化（触发缓存失效 + duration 文本更新）。
@@ -1042,7 +1022,7 @@ mod tests {
         };
 
         std::thread::sleep(std::time::Duration::from_millis(1_100));
-        ct.advance_spinner();
+        ct.invalidate_cache();
 
         let second_hash = match &ct.view_models()[0] {
             TuiRenderUnit::TuiToolCard(card) => {
@@ -1061,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn test_advance_spinner_keeps_completed_bash_duration_none() {
+    fn test_completed_bash_hash_stays_same() {
         let mut ct = CurrentTurn::new();
         ct.start_tool(ToolCardAccumulator::new(
             "tc-bash".into(),
@@ -1080,7 +1060,7 @@ mod tests {
         };
 
         std::thread::sleep(std::time::Duration::from_millis(1_100));
-        ct.advance_spinner();
+        ct.invalidate_cache();
 
         let second_hash = match &ct.view_models()[0] {
             TuiRenderUnit::TuiToolCard(card) => {

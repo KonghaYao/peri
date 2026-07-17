@@ -59,6 +59,54 @@ pub enum LoopResult {
     Error(crate::error::AgentError),
 }
 
+// ─── 阶段间共享上下文子结构 ─────────────────────────────────────────────────
+
+/// 会话级实体（生命周期 = 整个 Agent Session）
+#[derive(Clone)]
+pub struct SessionHandle {
+    pub turn: Arc<TurnContext>,
+    pub transcript: Arc<RwLock<MessageTranscript>>,
+    pub queue: MessageQueue,
+    pub agent_id: AgentId,
+    /// metrics/tracing 用键值对（AgentContext 在 from_stage 时克隆）
+    pub session_context: Arc<RwLock<HashMap<String, String>>>,
+}
+
+/// LLM 调用 + 工具执行运行时服务
+#[derive(Clone)]
+pub struct RuntimeServices {
+    pub llm: Arc<dyn ReactLLM + Send + Sync>,
+    /// LLM 可见 + 可执行的工具（Reason 读列表传 LLM，tool_dispatch 按名执行）
+    pub tools: SharedToolMap,
+    pub middleware_chain: Arc<MiddlewareChain>,
+    pub event_bus: Arc<EventBus>,
+    /// Deferred tools 外部注册表（ExecuteExtraTool 代理执行用）
+    pub shared_tools: Option<SharedToolMap>,
+    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
+    pub tool_registry_snapshot: Arc<ToolRegistrySnapshot>,
+}
+
+/// Compact 系统上下文（含跨阶段计数器）
+#[derive(Clone)]
+pub struct CompactContext {
+    pub context_budget: Option<ContextBudget>,
+    pub compact_config: Option<CompactConfig>,
+    pub compact_llm: Option<Arc<dyn BaseModel>>,
+    pub compact_pre_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub compact_post_hook: Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
+    /// 会话级 Token 追踪器（Compact 写 reset/estimated_tokens，Act 读用于 StateSnapshot）
+    pub token_tracker: Arc<RwLock<crate::agent::token::TokenTracker>>,
+    /// 连续失败计数（tool_dispatch 递增/重置，Compact 读用于降级跳过，Act 读用于 StateSnapshot）
+    pub consecutive_failures: Arc<AtomicU32>,
+}
+
+/// 异步传输控制（仅 run_react_loop idle 路径）
+#[derive(Clone)]
+pub struct AsyncContext {
+    pub idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,
+    pub idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
 // ─── 阶段间共享上下文 ───────────────────────────────────────────────────────
 
 /// 阶段间共享的会话资源引用
@@ -69,70 +117,16 @@ pub enum LoopResult {
 /// 让 stages 可以自驱完整 ReAct 循环，由 [`run_react_loop`] 入口统一驱动。
 #[derive(Clone)]
 pub struct StageContext {
-    // ── 会话级实体（v2 原生）──
-    /// Turn 上下文（turn_id / step / cancel）
-    pub turn: Arc<TurnContext>,
-    /// 对话笔录（RwLock 保护，标记代替删除）
-    pub transcript: Arc<RwLock<MessageTranscript>>,
-    /// 收件箱
-    pub queue: MessageQueue,
-    /// 当前 Agent 标识（事件总线路由用）
-    pub agent_id: AgentId,
-
-    // ── 运行时依赖（P2 扩展）──
-    /// LLM 适配器（Reason 阶段调用）
-    pub llm: Arc<dyn ReactLLM + Send + Sync>,
-    /// 工具注册表（LLM 可见 + 可执行）
-    pub tools: Arc<RwLock<HashMap<String, Arc<dyn BaseTool>>>>,
-    /// 中间件链（驱动 before_model / after_tool 等钩子）
-    pub middleware_chain: Arc<MiddlewareChain>,
-    /// 事件总线（三层事件流）
-    pub event_bus: Arc<EventBus>,
-    /// 上下文预算（token 监控 + auto compact 触发）
-    pub context_budget: Option<ContextBudget>,
-    /// Compact 配置（Compact 阶段使用）
-    pub compact_config: Option<CompactConfig>,
-    /// Compact 专用 LLM（Full Compact 摘要请求；None 时 Full Compact 跳过）
-    pub compact_llm: Option<Arc<dyn BaseModel>>,
-    /// 共享工具注册表（供 ExecuteExtraTool 代理执行 deferred tools）
-    pub shared_tools: Option<SharedToolMap>,
-    /// 错误感知建议注册表（None = 不启用）
-    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    /// 工具注册表快照（工具名 + subagent 类型，供 suggester 查询）
-    pub tool_registry_snapshot: Arc<ToolRegistrySnapshot>,
-    /// Frozen system prompt（构造时一次性确定）
-    pub system_prompt: Option<String>,
-    /// 会话级 TokenTracker（每次 LLM 调用后累积，compact/act 读取）.
-    /// P0 #2 修复：从 AgentContext 自有默认值迁移到 StageContext 共享实例。
-    pub token_tracker: Arc<parking_lot::RwLock<crate::agent::token::TokenTracker>>,
-    /// 连续失败计数（工具失败检测，跨 step 共享）
-    pub consecutive_failures: Arc<AtomicU32>,
-    /// 会话上下文键值（session_id / run_id 等，metrics/tracing 用）
-    pub session_context: Arc<RwLock<HashMap<String, String>>>,
+    pub session: SessionHandle,
+    pub runtime: RuntimeServices,
+    pub compact: CompactContext,
+    pub async_ctx: AsyncContext,
     /// Recall 累加器（跨 middleware hook 共享）。
     ///
     /// 每次 middleware hook 都会构造临时 [`AgentContext`]，
     /// 调用结束后由 middleware_runner 把 AgentContext 内部
     /// recall_buffer drain 到本缓冲区，循环结束后由 executor 统一取出。
     pub recall_buffer: Arc<RwLock<Vec<String>>>,
-
-    // ── Compact hook 回调（插件 PreCompact/PostCompact 触发）──
-    /// Pre-compact 插件 hook 回调（可选）。由 ACP 层注入。
-    pub compact_pre_hook: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// Post-compact 插件 hook 回调（可选）。由 ACP 层注入。
-    /// 参数: (compacted, affected_count)
-    pub compact_post_hook: Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
-
-    // ── Transport-aware async wake ───────────────────────────────────────────
-    /// Idle 时等待异步事件的 inbox（可选；ACP 层注入）。
-    /// TUI 路径传 Some，stdio/print 路径传 None（保持 c9dbfb18 的 stdio 不卡死保证）。
-    /// run_react_loop 在 queue 空时调 await_wake 阻塞，等 AsyncRouter 推送的 Defer 触发 wake。
-    pub idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,
-    /// Idle 时是否应该 await_wake 的判断 closure（可选）。
-    /// 返回 true → 主 agent 有未完成的异步任务（bg subagent），需要 await_wake 等结果。
-    /// 返回 false 或 None → 直接退出 loop，避免正常对话 loading 卡死。
-    /// peri-acp 注入：检查 background_registry.active_count() > 0。
-    pub idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl StageContext {
@@ -144,32 +138,48 @@ impl StageContext {
         transcript: Arc<RwLock<MessageTranscript>>,
         queue: MessageQueue,
     ) -> Self {
+        let turn_arc = Arc::new(turn);
+        let tools_map: SharedToolMap = Arc::new(RwLock::new(HashMap::new()));
+        let mw_chain = Arc::new(MiddlewareChain::new());
+        let ebus = Arc::new(EventBus::new(Default::default()).0);
+        let ttracker = Arc::new(parking_lot::RwLock::new(
+            crate::agent::token::TokenTracker::default(),
+        ));
+        let cfail = Arc::new(AtomicU32::new(0));
+        let sctx = Arc::new(RwLock::new(HashMap::new()));
+        let rbuf = Arc::new(RwLock::new(Vec::new()));
+        let tool_snapshot = Arc::new(ToolRegistrySnapshot::default());
         Self {
-            turn: Arc::new(turn),
-            transcript,
-            queue,
-            agent_id: AgentId::new(),
-            llm: Arc::new(NullReactLLM),
-            tools: Arc::new(RwLock::new(HashMap::new())),
-            middleware_chain: Arc::new(MiddlewareChain::new()),
-            event_bus: Arc::new(EventBus::new(Default::default()).0),
-            context_budget: None,
-            compact_config: None,
-            compact_llm: None,
-            shared_tools: None,
-            error_suggest_registry: None,
-            tool_registry_snapshot: Arc::new(ToolRegistrySnapshot::default()),
-            system_prompt: None,
-            token_tracker: Arc::new(parking_lot::RwLock::new(
-                crate::agent::token::TokenTracker::default(),
-            )),
-            consecutive_failures: Arc::new(AtomicU32::new(0)),
-            session_context: Arc::new(RwLock::new(HashMap::new())),
-            recall_buffer: Arc::new(RwLock::new(Vec::new())),
-            compact_pre_hook: None,
-            compact_post_hook: None,
-            idle_inbox: None,
-            idle_should_wait: None,
+            session: SessionHandle {
+                turn: turn_arc,
+                transcript,
+                queue,
+                agent_id: AgentId::new(),
+                session_context: sctx,
+            },
+            runtime: RuntimeServices {
+                llm: Arc::new(NullReactLLM),
+                tools: tools_map,
+                middleware_chain: mw_chain,
+                event_bus: ebus,
+                shared_tools: None,
+                error_suggest_registry: None,
+                tool_registry_snapshot: tool_snapshot,
+            },
+            compact: CompactContext {
+                context_budget: None,
+                compact_config: None,
+                compact_llm: None,
+                compact_pre_hook: None,
+                compact_post_hook: None,
+                token_tracker: ttracker,
+                consecutive_failures: cfail,
+            },
+            async_ctx: AsyncContext {
+                idle_inbox: None,
+                idle_should_wait: None,
+            },
+            recall_buffer: rbuf,
         }
     }
 
@@ -180,27 +190,54 @@ impl StageContext {
         queue: MessageQueue,
     ) -> StageContextBuilder {
         StageContextBuilder {
-            turn: Arc::new(turn),
-            transcript,
-            queue,
-            agent_id: None,
-            inner: Default::default(),
+            session: SessionHandle {
+                turn: Arc::new(turn),
+                transcript,
+                queue,
+                agent_id: AgentId::new(),
+                session_context: Arc::new(RwLock::new(HashMap::new())),
+            },
+            runtime: RuntimeServices {
+                llm: Arc::new(NullReactLLM),
+                tools: Arc::new(RwLock::new(HashMap::new())),
+                middleware_chain: Arc::new(MiddlewareChain::new()),
+                event_bus: Arc::new(EventBus::new(Default::default()).0),
+                shared_tools: None,
+                error_suggest_registry: None,
+                tool_registry_snapshot: Arc::new(ToolRegistrySnapshot::default()),
+            },
+            compact: CompactContext {
+                context_budget: None,
+                compact_config: None,
+                compact_llm: None,
+                compact_pre_hook: None,
+                compact_post_hook: None,
+                token_tracker: Arc::new(parking_lot::RwLock::new(
+                    crate::agent::token::TokenTracker::default(),
+                )),
+                consecutive_failures: Arc::new(AtomicU32::new(0)),
+            },
+            async_ctx: AsyncContext {
+                idle_inbox: None,
+                idle_should_wait: None,
+            },
         }
     }
 
     /// 便捷访问：当前 turn_id
     pub fn turn_id(&self) -> crate::session::turn::TurnId {
-        self.turn.turn_id
+        self.session.turn.turn_id
     }
 
     /// 便捷访问：当前 cwd
     pub fn cwd(&self) -> &str {
-        &self.turn.cwd
+        &self.session.turn.cwd
     }
 
     /// 取出可见消息快照（已过滤 excluded 标记）
     pub fn visible_messages(&self) -> Vec<BaseMessage> {
-        self.transcript
+        self.session
+            .transcript
             .read()
             .visible_messages()
             .into_iter()
@@ -238,111 +275,85 @@ impl ReactLLM for NullReactLLM {
 /// 必填：turn / transcript / queue / llm（生产场景）
 /// 可选：tools / middleware_chain / event_bus / budget / compact_config 等
 pub struct StageContextBuilder {
-    turn: Arc<TurnContext>,
-    transcript: Arc<RwLock<MessageTranscript>>,
-    queue: MessageQueue,
-    agent_id: Option<AgentId>,
-    inner: StageContextInner,
-}
-
-#[derive(Default)]
-struct StageContextInner {
-    llm: Option<Arc<dyn ReactLLM + Send + Sync>>,
-    tools: Option<SharedToolMap>,
-    middleware_chain: Option<Arc<MiddlewareChain>>,
-    event_bus: Option<Arc<EventBus>>,
-    context_budget: Option<ContextBudget>,
-    compact_config: Option<CompactConfig>,
-    compact_llm: Option<Arc<dyn BaseModel>>,
-    shared_tools: Option<SharedToolMap>,
-    error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    tool_registry_snapshot: Option<Arc<ToolRegistrySnapshot>>,
-    system_prompt: Option<String>,
-    session_context: Option<Arc<RwLock<HashMap<String, String>>>>,
-    compact_pre_hook: Option<Arc<dyn Fn() + Send + Sync>>,
-    compact_post_hook: Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
-    idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,
-    idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    session: SessionHandle,
+    runtime: RuntimeServices,
+    compact: CompactContext,
+    async_ctx: AsyncContext,
 }
 
 impl StageContextBuilder {
     pub fn with_llm(mut self, llm: Arc<dyn ReactLLM + Send + Sync>) -> Self {
-        self.inner.llm = Some(llm);
+        self.runtime.llm = llm;
         self
     }
 
     pub fn with_tools(mut self, tools: SharedToolMap) -> Self {
-        self.inner.tools = Some(tools);
+        self.runtime.tools = tools;
         self
     }
 
     pub fn with_middleware_chain(mut self, chain: Arc<MiddlewareChain>) -> Self {
-        self.inner.middleware_chain = Some(chain);
+        self.runtime.middleware_chain = chain;
         self
     }
 
     pub fn with_event_bus(mut self, bus: Arc<EventBus>) -> Self {
-        self.inner.event_bus = Some(bus);
+        self.runtime.event_bus = bus;
         self
     }
 
     pub fn with_context_budget(mut self, budget: ContextBudget) -> Self {
-        self.inner.context_budget = Some(budget);
+        self.compact.context_budget = Some(budget);
         self
     }
 
     pub fn with_compact_config(mut self, config: CompactConfig) -> Self {
-        self.inner.compact_config = Some(config);
+        self.compact.compact_config = Some(config);
         self
     }
 
     pub fn with_compact_llm(mut self, llm: Arc<dyn BaseModel>) -> Self {
-        self.inner.compact_llm = Some(llm);
+        self.compact.compact_llm = Some(llm);
         self
     }
 
     pub fn with_shared_tools(mut self, shared: SharedToolMap) -> Self {
-        self.inner.shared_tools = Some(shared);
+        self.runtime.shared_tools = Some(shared);
         self
     }
 
     pub fn with_error_suggest_registry(mut self, registry: Arc<ErrorSuggestRegistry>) -> Self {
-        self.inner.error_suggest_registry = Some(registry);
+        self.runtime.error_suggest_registry = Some(registry);
         self
     }
 
     pub fn with_tool_registry_snapshot(mut self, snapshot: ToolRegistrySnapshot) -> Self {
-        self.inner.tool_registry_snapshot = Some(Arc::new(snapshot));
-        self
-    }
-
-    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.inner.system_prompt = Some(prompt.into());
+        self.runtime.tool_registry_snapshot = Arc::new(snapshot);
         self
     }
 
     pub fn with_agent_id(mut self, agent_id: AgentId) -> Self {
-        self.agent_id = Some(agent_id);
+        self.session.agent_id = agent_id;
         self
     }
 
     pub fn with_session_context(mut self, ctx: Arc<RwLock<HashMap<String, String>>>) -> Self {
-        self.inner.session_context = Some(ctx);
+        self.session.session_context = ctx;
         self
     }
 
     pub fn with_compact_pre_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
-        self.inner.compact_pre_hook = Some(hook);
+        self.compact.compact_pre_hook = Some(hook);
         self
     }
 
     pub fn with_compact_post_hook(mut self, hook: Arc<dyn Fn(bool, usize) + Send + Sync>) -> Self {
-        self.inner.compact_post_hook = Some(hook);
+        self.compact.compact_post_hook = Some(hook);
         self
     }
 
     pub fn with_idle_inbox(mut self, inbox: Arc<crate::agent::session::SessionInbox>) -> Self {
-        self.inner.idle_inbox = Some(inbox);
+        self.async_ctx.idle_inbox = Some(inbox);
         self
     }
 
@@ -350,52 +361,17 @@ impl StageContextBuilder {
     /// 返回 true → 主 agent 有未完成异步任务，需要 await_wake 等结果续跑。
     /// 返回 false → 直接退出 loop，避免正常对话 loading 卡死。
     pub fn with_idle_should_wait(mut self, probe: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
-        self.inner.idle_should_wait = Some(probe);
+        self.async_ctx.idle_should_wait = Some(probe);
         self
     }
 
     pub fn build(self) -> StageContext {
         StageContext {
-            turn: self.turn,
-            transcript: self.transcript,
-            queue: self.queue,
-            agent_id: self.agent_id.unwrap_or_default(),
-            llm: self.inner.llm.unwrap_or_else(|| Arc::new(NullReactLLM)),
-            tools: self
-                .inner
-                .tools
-                .unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new()))),
-            middleware_chain: self
-                .inner
-                .middleware_chain
-                .unwrap_or_else(|| Arc::new(MiddlewareChain::new())),
-            event_bus: self
-                .inner
-                .event_bus
-                .unwrap_or_else(|| Arc::new(EventBus::new(Default::default()).0)),
-            context_budget: self.inner.context_budget,
-            compact_config: self.inner.compact_config,
-            compact_llm: self.inner.compact_llm,
-            shared_tools: self.inner.shared_tools,
-            error_suggest_registry: self.inner.error_suggest_registry,
-            tool_registry_snapshot: self
-                .inner
-                .tool_registry_snapshot
-                .unwrap_or_else(|| Arc::new(ToolRegistrySnapshot::default())),
-            system_prompt: self.inner.system_prompt,
-            token_tracker: Arc::new(parking_lot::RwLock::new(
-                crate::agent::token::TokenTracker::default(),
-            )),
-            consecutive_failures: Arc::new(AtomicU32::new(0)),
-            session_context: self
-                .inner
-                .session_context
-                .unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new()))),
+            session: self.session,
+            runtime: self.runtime,
+            compact: self.compact,
+            async_ctx: self.async_ctx,
             recall_buffer: Arc::new(RwLock::new(Vec::new())),
-            compact_pre_hook: self.inner.compact_pre_hook,
-            compact_post_hook: self.inner.compact_post_hook,
-            idle_inbox: self.inner.idle_inbox,
-            idle_should_wait: self.inner.idle_should_wait,
         }
     }
 }
@@ -511,44 +487,60 @@ pub fn append_messages_to_transcript(
 
 // ─── 控制流编排 ──────────────────────────────────────────────────────────────
 
+/// 循环运行时状态（P1-2: 显式封装 has_tool_calls，替代游离的局部变量）。
+///
+/// 后续扩展方向（P1-1）：与 StageContext 的 LoopState 职责统一，
+/// 将更多迭代级别状态（consecutive_failures 等）迁入此结构。
+#[derive(Debug, Default)]
+struct LoopState {
+    /// 上一轮 Act 是否产出了 tool_calls
+    has_tool_calls: bool,
+}
+
 /// 运行 ReAct v2 五阶段循环
 ///
 /// 返回循环最终结果（Completed / Interrupted / Error）。
 pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
-    let mut has_tool_calls = false;
+    let mut loop_state = LoopState::default();
     // await_wake 在主 agent idle 时启用，反复等待异步事件续跑（cron/bg/workflow）。
     // idle_should_wait probe 检 active_count>0，保证无挂起任务时不会永久阻塞。
 
     for _ in 0..max_iterations {
         // 检查 cancel
-        if context.turn.is_cancelled() {
+        if context.session.turn.is_cancelled() {
             return LoopResult::Interrupted;
         }
 
         // 推进 step
-        context.turn.advance_step();
+        context.session.turn.advance_step();
 
         // ── Compact ──
         let compact_start = std::time::Instant::now();
-        context.event_bus.emit_observe(ObserveEvent::StageStarted {
-            turn_id: context.turn_id(),
-            agent_id: context.agent_id,
-            stage: Stage::Compact,
-        });
+        context
+            .runtime
+            .event_bus
+            .emit_observe(ObserveEvent::StageStarted {
+                turn_id: context.turn_id(),
+                agent_id: context.session.agent_id,
+                stage: Stage::Compact,
+            });
         let _compact_out = match compact::run_compact(CompactInput {
             context: context.clone(),
-            has_tool_calls,
+            has_tool_calls: loop_state.has_tool_calls,
         })
         .await
         {
             Ok(out) => {
-                context.event_bus.emit_observe(ObserveEvent::StageEnded {
-                    turn_id: context.turn_id(),
-                    agent_id: context.agent_id,
-                    stage: Stage::Compact,
-                    status: StageStatus::Done,
-                    duration_ms: compact_start.elapsed().as_millis() as u64,
-                });
+                context
+                    .runtime
+                    .event_bus
+                    .emit_observe(ObserveEvent::StageEnded {
+                        turn_id: context.turn_id(),
+                        agent_id: context.session.agent_id,
+                        stage: Stage::Compact,
+                        status: StageStatus::Done,
+                        duration_ms: compact_start.elapsed().as_millis() as u64,
+                    });
                 out
             }
             Err(e) => return LoopResult::Error(e),
@@ -556,24 +548,30 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 
         // ── Receive ──
         let receive_start = std::time::Instant::now();
-        context.event_bus.emit_observe(ObserveEvent::StageStarted {
-            turn_id: context.turn_id(),
-            agent_id: context.agent_id,
-            stage: Stage::Receive,
-        });
+        context
+            .runtime
+            .event_bus
+            .emit_observe(ObserveEvent::StageStarted {
+                turn_id: context.turn_id(),
+                agent_id: context.session.agent_id,
+                stage: Stage::Receive,
+            });
         let _receive_out = match receive::run_receive(ReceiveInput {
             context: context.clone(),
         })
         .await
         {
             Ok(out) => {
-                context.event_bus.emit_observe(ObserveEvent::StageEnded {
-                    turn_id: context.turn_id(),
-                    agent_id: context.agent_id,
-                    stage: Stage::Receive,
-                    status: StageStatus::Done,
-                    duration_ms: receive_start.elapsed().as_millis() as u64,
-                });
+                context
+                    .runtime
+                    .event_bus
+                    .emit_observe(ObserveEvent::StageEnded {
+                        turn_id: context.turn_id(),
+                        agent_id: context.session.agent_id,
+                        stage: Stage::Receive,
+                        status: StageStatus::Done,
+                        duration_ms: receive_start.elapsed().as_millis() as u64,
+                    });
                 out
             }
             Err(e) => return LoopResult::Error(e),
@@ -581,25 +579,31 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 
         // ── Reason ──
         let reason_start = std::time::Instant::now();
-        context.event_bus.emit_observe(ObserveEvent::StageStarted {
-            turn_id: context.turn_id(),
-            agent_id: context.agent_id,
-            stage: Stage::Reason,
-        });
+        context
+            .runtime
+            .event_bus
+            .emit_observe(ObserveEvent::StageStarted {
+                turn_id: context.turn_id(),
+                agent_id: context.session.agent_id,
+                stage: Stage::Reason,
+            });
         let reason_out = match reason::run_reason(ReasonInput {
             context: context.clone(),
-            has_tool_calls,
+            has_tool_calls: loop_state.has_tool_calls,
         })
         .await
         {
             Ok(out) => {
-                context.event_bus.emit_observe(ObserveEvent::StageEnded {
-                    turn_id: context.turn_id(),
-                    agent_id: context.agent_id,
-                    stage: Stage::Reason,
-                    status: StageStatus::Done,
-                    duration_ms: reason_start.elapsed().as_millis() as u64,
-                });
+                context
+                    .runtime
+                    .event_bus
+                    .emit_observe(ObserveEvent::StageEnded {
+                        turn_id: context.turn_id(),
+                        agent_id: context.session.agent_id,
+                        stage: Stage::Reason,
+                        status: StageStatus::Done,
+                        duration_ms: reason_start.elapsed().as_millis() as u64,
+                    });
                 out
             }
             Err(e) => return LoopResult::Error(e),
@@ -607,11 +611,14 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 
         // ── Act ──
         let act_start = std::time::Instant::now();
-        context.event_bus.emit_observe(ObserveEvent::StageStarted {
-            turn_id: context.turn_id(),
-            agent_id: context.agent_id,
-            stage: Stage::Act,
-        });
+        context
+            .runtime
+            .event_bus
+            .emit_observe(ObserveEvent::StageStarted {
+                turn_id: context.turn_id(),
+                agent_id: context.session.agent_id,
+                stage: Stage::Act,
+            });
         let act_out = match act::run_act(ActInput {
             context: context.clone(),
             reasoning: reason_out.reasoning,
@@ -619,24 +626,27 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         .await
         {
             Ok(out) => {
-                context.event_bus.emit_observe(ObserveEvent::StageEnded {
-                    turn_id: context.turn_id(),
-                    agent_id: context.agent_id,
-                    stage: Stage::Act,
-                    status: StageStatus::Done,
-                    duration_ms: act_start.elapsed().as_millis() as u64,
-                });
+                context
+                    .runtime
+                    .event_bus
+                    .emit_observe(ObserveEvent::StageEnded {
+                        turn_id: context.turn_id(),
+                        agent_id: context.session.agent_id,
+                        stage: Stage::Act,
+                        status: StageStatus::Done,
+                        duration_ms: act_start.elapsed().as_millis() as u64,
+                    });
                 out
             }
             Err(e) => return LoopResult::Error(e),
         };
 
-        has_tool_calls = act_out.has_tool_calls;
+        loop_state.has_tool_calls = act_out.has_tool_calls;
 
         // 有 tool_calls → 回 Compact（跳过 End）
-        if has_tool_calls {
+        if loop_state.has_tool_calls {
             tracing::debug!(
-                step = context.turn.current_step(),
+                step = context.session.turn.current_step(),
                 "tool_calls 存在，回到 Compact"
             );
             continue;
@@ -644,27 +654,33 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 
         // ── End ──
         let end_start = std::time::Instant::now();
-        context.event_bus.emit_observe(ObserveEvent::StageStarted {
-            turn_id: context.turn_id(),
-            agent_id: context.agent_id,
-            stage: Stage::End,
-        });
+        context
+            .runtime
+            .event_bus
+            .emit_observe(ObserveEvent::StageStarted {
+                turn_id: context.turn_id(),
+                agent_id: context.session.agent_id,
+                stage: Stage::End,
+            });
         let end_out = end::run_end(EndInput {
             context: context.clone(),
         });
-        context.event_bus.emit_observe(ObserveEvent::StageEnded {
-            turn_id: context.turn_id(),
-            agent_id: context.agent_id,
-            stage: Stage::End,
-            status: StageStatus::Done,
-            duration_ms: end_start.elapsed().as_millis() as u64,
-        });
+        context
+            .runtime
+            .event_bus
+            .emit_observe(ObserveEvent::StageEnded {
+                turn_id: context.turn_id(),
+                agent_id: context.session.agent_id,
+                stage: Stage::End,
+                status: StageStatus::Done,
+                duration_ms: end_start.elapsed().as_millis() as u64,
+            });
 
         tracing::debug!(
-            step = context.turn.current_step(),
+            step = context.session.turn.current_step(),
             should_continue = end_out.should_continue,
             awakened_count = end_out.awakened_messages.len(),
-            queue_len_after = context.queue.len(),
+            queue_len_after = context.session.queue.len(),
             "End stage: should_continue decision"
         );
 
@@ -674,7 +690,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // Defer（bg_results / WorkflowComplete / cron）用 <system-reminder>
             // 包裹，符合 CLAUDE.md "中途纠正消息必须用 human + reminder" 约定。
             if !end_out.awakened_messages.is_empty() {
-                let mut transcript = context.transcript.write();
+                let mut transcript = context.session.transcript.write();
                 // 4. 发送合成 user message 事件——在 agent 消费 MQ Defer 消息时（而非
                 //    在 executor registry event pump 中）发送，消除时序竞争窗口。
                 //    此时前一轮 turn 的 TurnDone 已由 ACP 层归档到 committed，
@@ -687,10 +703,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     if msg.kind == MessageKind::Defer {
                         let raw_text = msg.message.content().to_string();
                         let text = format!("<system-reminder>\n{}\n</system-reminder>", raw_text);
-                        context.event_bus.emit_state(
+                        context.runtime.event_bus.emit_state(
                             crate::agent::events_v2::StateEvent::SyntheticUserMessage {
                                 turn_id: context.turn_id(),
-                                agent_id: context.agent_id,
+                                agent_id: context.session.agent_id,
                                 text,
                             },
                         );
@@ -698,7 +714,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 }
                 append_messages_to_transcript(&mut transcript, end_out.awakened_messages);
             }
-            has_tool_calls = false;
+            loop_state.has_tool_calls = false;
             tracing::debug!("End: should_continue=true, loop continue new turn");
             continue;
         }
@@ -713,6 +729,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         // 反复进入 await_wake，直到所有异步任务完成（idle_should_wait=false 时
         // 自然退出）。修复多 bg agent 同轮场景。
         let should_wait = context
+            .async_ctx
             .idle_should_wait
             .as_ref()
             .map(|probe| probe())
@@ -720,35 +737,35 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         // 只有当 idle_should_wait closure 返回 true（主 agent 有未完成异步任务）
         // 才 await_wake。否则直接退出，避免正常对话 loading 卡死。
         if should_wait {
-            if let Some(inbox) = &context.idle_inbox {
+            if let Some(inbox) = &context.async_ctx.idle_inbox {
                 tracing::debug!("End: queue empty, awaiting wake (idle_should_wait=true)");
                 // 在 await_wake 阻塞之前 emit TurnSuspended：通知 TUI
                 // flush current_turn + is_loading=false（停止 loading spinner）。
                 // Agent 保持存活（await_wake 阻塞），bg callback 到达时
                 // 新 turn 的 TextChunk/ToolStarted 自动恢复 loading。
-                context
-                    .event_bus
-                    .emit_state(crate::agent::events_v2::StateEvent::TurnSuspended {
+                context.runtime.event_bus.emit_state(
+                    crate::agent::events_v2::StateEvent::TurnSuspended {
                         turn_id: context.turn_id(),
-                        agent_id: context.agent_id,
-                    });
+                        agent_id: context.session.agent_id,
+                    },
+                );
                 // select cancel：用户中断时立即退出，避免 await_wake 永久阻塞
-                let cancel_fut = context.turn.cancel_token.cancelled();
+                let cancel_fut = context.session.turn.cancel_token.cancelled();
                 tokio::pin!(cancel_fut);
                 tokio::select! {
                     _ = inbox.await_wake() => {
-                        if context.turn.is_cancelled() {
+                        if context.session.turn.is_cancelled() {
                             return LoopResult::Interrupted;
                         }
                         tracing::debug!(
-                            turn_id = %context.turn.turn_id,
-                            queue_len_after_wake = context.queue.len(),
+                            turn_id = %context.session.turn.turn_id,
+                            queue_len_after_wake = context.session.queue.len(),
                             "run_react_loop: idle inbox woken, continue new turn"
                         );
                         // 醒来后立即 drain_for_end 消费已 push 的 Defer/Prompt 写入 transcript，
                         // 让新一轮 Reason 阶段就能看到 bg/workflow 结果，避免 hallucination +
                         // 多余续跑（否则本轮 Receive 跳过 Defer，Reason 看不到，End 才写入触发又一轮）。
-                        if let Some(msgs) = context.queue.drain_for_end() {
+                        if let Some(msgs) = context.session.queue.drain_for_end() {
                             if !msgs.is_empty() {
                                 // 4. 发送合成 user message 事件——与 End 阶段
                                 //    should_continue 分支同模式：在 agent 消费
@@ -763,16 +780,16 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                                             "<system-reminder>\n{}\n</system-reminder>",
                                             raw_text
                                         );
-                                        context.event_bus.emit_state(
+                                        context.runtime.event_bus.emit_state(
                                             crate::agent::events_v2::StateEvent::SyntheticUserMessage {
                                                 turn_id: context.turn_id(),
-                                                agent_id: context.agent_id,
+                                                agent_id: context.session.agent_id,
                                                 text,
                                             },
                                         );
                                     }
                                 }
-                                let mut transcript = context.transcript.write();
+                                let mut transcript = context.session.transcript.write();
                                 append_messages_to_transcript(&mut transcript, msgs);
                                 tracing::debug!(
                                     "post-wake drain_for_end wrote messages to transcript"
@@ -787,7 +804,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         }
         tracing::debug!(
             idle_should_wait = should_wait,
-            queue_len = context.queue.len(),
+            queue_len = context.session.queue.len(),
             "run_react_loop: exit (idle_should_wait=false or no idle_inbox)"
         );
         return LoopResult::Completed;
@@ -917,10 +934,10 @@ mod tests {
     #[test]
     fn test_stage_context_construction() {
         let ctx = make_stage_context();
-        assert_eq!(&*ctx.turn.cwd, "/tmp/test");
-        assert_eq!(ctx.turn.current_step(), 0);
-        assert!(ctx.queue.is_empty());
-        assert!(ctx.transcript.read().is_empty());
+        assert_eq!(&*ctx.session.turn.cwd, "/tmp/test");
+        assert_eq!(ctx.session.turn.current_step(), 0);
+        assert!(ctx.session.queue.is_empty());
+        assert!(ctx.session.transcript.read().is_empty());
     }
 
     #[test]
@@ -932,7 +949,7 @@ mod tests {
         let turn = session.start_turn();
         let ctx =
             StageContext::builder(turn, session.transcript(), session.queue().clone()).build();
-        assert_eq!(ctx.llm.model_name(), "null");
+        assert_eq!(ctx.runtime.llm.model_name(), "null");
     }
 
     #[tokio::test]
@@ -948,7 +965,7 @@ mod tests {
     async fn test_end_stage_prompt_wakes() {
         // 队列有 Prompt → should_continue = true
         let ctx = make_stage_context();
-        ctx.queue.push(QueuedMessage::prompt(
+        ctx.session.queue.push(QueuedMessage::prompt(
             MessageSource::UserInput,
             BaseMessage::human(MessageContent::text("new question")),
         ));
@@ -961,7 +978,7 @@ mod tests {
     async fn test_end_stage_defer_wakes() {
         // 队列有 Defer → should_continue = true
         let ctx = make_stage_context();
-        ctx.queue.push(QueuedMessage::defer(
+        ctx.session.queue.push(QueuedMessage::defer(
             MessageSource::SubAgentComplete,
             BaseMessage::human(MessageContent::text("deferred result")),
         ));
@@ -973,7 +990,7 @@ mod tests {
     async fn test_end_stage_info_does_not_wake() {
         // 队列仅有 Info → should_continue = false
         let ctx = make_stage_context();
-        ctx.queue.push(QueuedMessage::info(
+        ctx.session.queue.push(QueuedMessage::info(
             MessageSource::SystemInjected,
             BaseMessage::human(MessageContent::text("info only")),
         ));
@@ -1019,7 +1036,7 @@ mod tests {
             .build();
 
         // 推入用户输入
-        ctx.queue.push(QueuedMessage::prompt(
+        ctx.session.queue.push(QueuedMessage::prompt(
             MessageSource::UserInput,
             BaseMessage::human(MessageContent::text("do the task")),
         ));
@@ -1032,7 +1049,7 @@ mod tests {
         );
 
         // transcript 应包含：[user_prompt, ai_final_answer]
-        let transcript = ctx.transcript.read();
+        let transcript = ctx.session.transcript.read();
         let visible: Vec<_> = transcript.visible_messages().into_iter().collect();
         assert_eq!(
             visible.len(),
@@ -1058,7 +1075,7 @@ mod tests {
             .build();
 
         // 立即 cancel
-        ctx.turn.cancel_token.cancel();
+        ctx.session.turn.cancel_token.cancel();
 
         let result = run_react_loop(ctx, 10).await;
         assert!(
@@ -1089,7 +1106,7 @@ mod tests {
         );
 
         // transcript 应只有 ai 回答（无 user prompt）
-        let transcript = ctx.transcript.read();
+        let transcript = ctx.session.transcript.read();
         let visible: Vec<_> = transcript.visible_messages().into_iter().collect();
         assert!(
             visible.iter().any(|m| matches!(m, BaseMessage::Ai { .. })),
@@ -1108,10 +1125,10 @@ mod tests {
             BaseMessage::human(MessageContent::text("hello user")),
         )];
         {
-            let mut transcript = ctx.transcript.write();
+            let mut transcript = ctx.session.transcript.write();
             append_messages_to_transcript(&mut transcript, msgs);
         }
-        let transcript = ctx.transcript.read();
+        let transcript = ctx.session.transcript.read();
         assert_eq!(transcript.len(), 1);
         let content = transcript.entries()[0].message.content();
         assert_eq!(content, "hello user");
@@ -1126,10 +1143,10 @@ mod tests {
             BaseMessage::human(MessageContent::text("system info")),
         )];
         {
-            let mut transcript = ctx.transcript.write();
+            let mut transcript = ctx.session.transcript.write();
             append_messages_to_transcript(&mut transcript, msgs);
         }
-        let transcript = ctx.transcript.read();
+        let transcript = ctx.session.transcript.read();
         assert_eq!(transcript.len(), 1);
         let content = transcript.entries()[0].message.content();
         assert!(content.contains("<system-reminder>"));
@@ -1147,10 +1164,10 @@ mod tests {
             BaseMessage::human(MessageContent::text("bg-result-payload")),
         )];
         {
-            let mut transcript = ctx.transcript.write();
+            let mut transcript = ctx.session.transcript.write();
             append_messages_to_transcript(&mut transcript, msgs);
         }
-        let transcript = ctx.transcript.read();
+        let transcript = ctx.session.transcript.read();
         assert_eq!(transcript.len(), 1);
         let content = transcript.entries()[0].message.content();
         assert!(
@@ -1180,7 +1197,7 @@ mod tests {
             .with_llm(Arc::new(FinalAnswerLLM { answer: "ok" }))
             .build();
 
-        ctx.queue.push(QueuedMessage::defer(
+        ctx.session.queue.push(QueuedMessage::defer(
             MessageSource::SubAgentComplete,
             BaseMessage::human(MessageContent::text("bg-result-payload")),
         ));
@@ -1193,7 +1210,7 @@ mod tests {
         );
 
         // transcript 应包含 Defer 内容（reminder 包裹）
-        let transcript = ctx.transcript.read();
+        let transcript = ctx.session.transcript.read();
         let combined: String = transcript
             .visible_messages()
             .iter()

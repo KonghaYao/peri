@@ -2,7 +2,7 @@
 use crate::kit::message_area::render::vm_to_lines;
 use crate::kit::message_area::selection::build_wrap_map;
 use crate::kit::tui_render_unit::{
-    TuiAssistantBubble, TuiAskUserBlock, TuiCollapsedGroup, TuiDivider, TuiNoteLevel,
+    TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDivider, TuiNoteLevel,
     TuiRenderUnit, TuiSubAgentGroup, TuiSystemNote, TuiToolCard,
 };
 
@@ -23,8 +23,7 @@ fn test_vm_to_lines_all_variants_width_1() {
     });
 
     let table_bubble = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
-        text: "| col1 | col2 |\n|------|------|\n| a    | b    |\n| c    | d    |"
-            .to_string(),
+        text: "| col1 | col2 |\n|------|------|\n| a    | b    |\n| c    | d    |".to_string(),
         reasoning: None,
         content_hash: 44,
     });
@@ -98,9 +97,13 @@ fn test_vm_to_lines_all_variants_width_1() {
 fn test_build_wrap_map_width_1_no_panic() {
     // 模拟一段典型对话文本（含 CJK）
     let lines = vec![
-        ratatui_kit::ratatui::text::Line::from("这是一段包含中英文 mixed content 的代表性消息，模拟真实对话内容。"),
+        ratatui_kit::ratatui::text::Line::from(
+            "这是一段包含中英文 mixed content 的代表性消息，模拟真实对话内容。",
+        ),
         ratatui_kit::ratatui::text::Line::from("第二行：包含各种字符 hello world 12345 !@#$%"),
-        ratatui_kit::ratatui::text::Line::from("Third line: purely ASCII text for comparison purposes."),
+        ratatui_kit::ratatui::text::Line::from(
+            "Third line: purely ASCII text for comparison purposes.",
+        ),
     ];
     for width in [1u16, 2, 3, 5, 10] {
         let _ = build_wrap_map(&lines, width);
@@ -119,4 +122,51 @@ fn test_empty_assistant_bubble_returns_zero_lines() {
     });
     let lines = vm_to_lines(&vm, 80);
     assert!(lines.is_empty(), "空 AssistantBubble 应返回 0 行");
+}
+
+/// SystemNote 应根据 data.level 渲染不同正文颜色：Info→muted, Warning→warning, Error→error。
+#[test]
+fn test_system_note_level_colors() {
+    use peri_theme::atoms::THEME_ATOM;
+    let semantic = THEME_ATOM.state().read().semantic;
+
+    // Info 级别
+    let info_vm = TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+        text: "info message".to_string(),
+        level: TuiNoteLevel::Info,
+        content_hash: 200,
+    });
+    let info_lines = vm_to_lines(&info_vm, 80);
+    assert!(!info_lines.is_empty());
+    assert!(!info_lines[0].spans.is_empty());
+    assert_eq!(
+        info_lines[0].spans.last().unwrap().style.fg,
+        Some(semantic.text.muted),
+    );
+
+    // Warning 级别——文字不含 "warning" 关键词，验证颜色来自 level
+    let warn_vm = TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+        text: "deprecation notice".to_string(),
+        level: TuiNoteLevel::Warning,
+        content_hash: 201,
+    });
+    let warn_lines = vm_to_lines(&warn_vm, 80);
+    assert!(!warn_lines.is_empty() && !warn_lines[0].spans.is_empty());
+    assert_eq!(
+        warn_lines[0].spans.last().unwrap().style.fg,
+        Some(semantic.status.warning),
+    );
+
+    // Error 级别——文字不含 "error"/"失败"/❌，验证颜色来自 level
+    let err_vm = TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+        text: "something went wrong".to_string(),
+        level: TuiNoteLevel::Error,
+        content_hash: 202,
+    });
+    let err_lines = vm_to_lines(&err_vm, 80);
+    assert!(!err_lines.is_empty() && !err_lines[0].spans.is_empty());
+    assert_eq!(
+        err_lines[0].spans.last().unwrap().style.fg,
+        Some(semantic.status.error),
+    );
 }

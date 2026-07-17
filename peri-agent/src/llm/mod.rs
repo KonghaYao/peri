@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod openai;
+pub mod provider_adapter;
 pub mod retry;
 pub mod sse;
 pub mod types;
