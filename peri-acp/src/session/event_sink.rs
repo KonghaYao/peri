@@ -139,9 +139,9 @@ impl EventSink for TransportEventSink {
             }
 
             // 2. peri/agent_event — TUI 专用事件（Category ③）
-            // Convert ExecutorEvent → AcpEvent DTO before serialization.
-            // StateSnapshotMeta 仅在 contextUsage cap 为 true 时转发。
-            if m.forward_to_tui {
+            // 仅在 agentEvent cap 为 true 时发送整个通道。
+            // StateSnapshotMeta 仍需额外的 contextUsage cap（细分权限）。
+            if caps.agent_event && m.forward_to_tui {
                 let should_forward = match event {
                     ExecutorEvent::StateSnapshotMeta { .. } => caps.context_usage,
                     _ => true,
@@ -173,7 +173,7 @@ impl EventSink for TransportEventSink {
             // 3. peri/hitl_pending — HITL 审批事件（Category ②）
             // 预留：当前 HITL 通过 UserInteractionBroker 直接交互，
             // 未来 ExecutorEvent 扩展 HitlPending 时启用此通道。
-            if m.hitl_pending {
+            if caps.hitl_pending && m.hitl_pending {
                 let _ = self
                     .transport
                     .send_notification("peri/hitl_pending", json!({ "sessionId": session_id }))
@@ -191,20 +191,19 @@ impl EventSink for TransportEventSink {
             }
 
             // 5. peri/unstable-event — new-protocol event routing (Category ⑤)
-            // Route each ExecutorEvent through the event router. Events that
-            // map to a RoutingOutput are forwarded as unstable events; discarded
-            // events return None and are silently dropped.
-            let routing_out = router::route(event);
-            if let Some(out) = routing_out {
-                if let Err(e) = self
-                    .push_unstable_event(session_id, out.event_name, out.data)
-                    .await
-                {
-                    tracing::trace!(
-                        session_id = %session_id,
-                        error = %e,
-                        "EventSink: peri/unstable-event send failed (non-critical)"
-                    );
+            if caps.unstable_event {
+                let routing_out = router::route(event);
+                if let Some(out) = routing_out {
+                    if let Err(e) = self
+                        .push_unstable_event(session_id, out.event_name, out.data)
+                        .await
+                    {
+                        tracing::trace!(
+                            session_id = %session_id,
+                            error = %e,
+                            "EventSink: peri/unstable-event send failed (non-critical)"
+                        );
+                    }
                 }
             }
         }
@@ -230,6 +229,14 @@ impl EventSink for TransportEventSink {
     }
 
     async fn push_unstable_event(&self, session_id: &str, event: String, data: serde_json::Value) {
+        let caps = self
+            .caps_registry
+            .get(session_id)
+            .map(|r| r.clone())
+            .unwrap_or_default();
+        if !caps.unstable_event {
+            return;
+        }
         if let Err(e) = TransportEventSink::push_unstable_event(self, session_id, event, data).await
         {
             tracing::trace!(
