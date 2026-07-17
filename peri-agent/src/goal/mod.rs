@@ -8,7 +8,7 @@
 //! `GoalController` / `GoalStateView` 是为破解 peri-middlewares → peri-acp
 //! 循环依赖而设计的桥接抽象：
 //!
-//! ```
+//! ```text
 //! peri-agent (trait 定义) ← peri-middlewares (依赖 trait)
 //!        ↑ impl                         ↑ 调用
 //! peri-acp (GoalState 实现)    peri-middlewares (GoalMiddleware)
