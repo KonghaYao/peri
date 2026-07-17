@@ -374,7 +374,7 @@ graph LR
     subgraph BRIDGE["acp_bridge"]
         CT["CurrentTurn<br/>segments (Vec〈TurnSegment〉)<br/>reasoning / text / subagents"]
         BV["build_view_models()<br/>→ segments 顺序展开<br/>→ Vec〈TuiRenderUnit〉"]
-        TICK["1s tick<br/>advance_spinner<br/>running Bash 检测"]
+        TICK["1s tick<br/>BRIDGE_RESET + Bash invalidate"]
     end
 
     subgraph ATOM["VIEW_MODELS atom"]
@@ -723,7 +723,7 @@ graph TB
         CT["CurrentTurn 状态机<br/>segments (TurnSegment 交错)<br/>reasoning / text / subagents"]
         BV["build_view_models()<br/>→ segments 顺序展开<br/>→ Vec〈TuiRenderUnit〉"]
         PS["push_view_models()<br/>→ VIEW_MODELS atom"]
-        TICK["1s tick<br/>advance_spinner<br/>running Bash 检测"]
+        TICK["1s tick<br/>BRIDGE_RESET + Bash invalidate"]
     end
 
     subgraph MSG["message_area — 直接消费 + 增量渲染"]
@@ -752,7 +752,7 @@ graph TB
 `message_area` 的 `vm_caches` 通过两层检测避免全量重建：
 
 1. **content_hash 增量检测**：每个 VM 持有 `content_hash`（覆盖 text/reasoning.collapsed/tool duration 等可变字段），`vm_caches` 按 VM 粒度分片——仅 `content_hash` 变化的 VM 重新解析 markdown + 重建 wrap_map，未变更 VM 直接 `Arc::clone` 复用。流式单次成本从 O(N×W) 降至 O(W)。
-2. **acp_bridge 1s tick**：每秒 `advance_spinner()` 更新工具计时器，若有 `has_running_bash_tool()` 则额外调用 `push_view_models` 推送更新到 VIEW_MODELS。
+2. **acp_bridge 1s tick**：保活检测 `BRIDGE_RESET_COUNTER` 变更，若有 `has_running_bash_tool()` 则调用 `invalidate_cache()` + `push_view_models` 推送更新到 VIEW_MODELS（刷新 `Running(Ns)` 计时）。spinner 帧推进已解耦至 TUI 侧 50ms `RENDER_HEARTBEAT` tick，不再经由此路径。
 
 ### 10.2 视口裁剪
 
