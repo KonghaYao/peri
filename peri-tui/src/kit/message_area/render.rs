@@ -10,6 +10,8 @@ use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 // ── 工具卡片辅助函数（内联自 view_render/tool_card.rs）─────────────────
 
@@ -123,7 +125,7 @@ pub(super) fn vm_to_lines_cached(
 
             // 推理块
             if let Some(ref reasoning) = data.reasoning {
-                lines.extend(render_reasoning_block(reasoning));
+                lines.extend(render_reasoning_block(reasoning, width));
             }
 
             // Markdown 文本
@@ -257,6 +259,7 @@ pub(super) fn vm_to_lines_cached(
 
 fn render_reasoning_block(
     reasoning: &crate::kit::tui_render_unit::TuiReasoningBlock,
+    width: usize,
 ) -> Vec<Line<'static>> {
     let semantic = THEME_ATOM.state().read().semantic;
     let char_count = reasoning.text.chars().count();
@@ -270,22 +273,78 @@ fn render_reasoning_block(
     )]));
 
     if !reasoning.collapsed {
+        let style = Style::default().fg(semantic.text.dim).italic();
+        let prefix = " \u{23bf} ";
+        let cont_prefix = "   "; // 3 空格，视觉宽度与 prefix 一致
+        let max_text_width = width.saturating_sub(3); // prefix " ⏿ " 占 3 列
         let tail_lines: Vec<&str> = reasoning.text.lines().rev().take(3).collect();
+
         for tail in tail_lines.into_iter().rev() {
-            if !tail.is_empty() {
+            if tail.is_empty() {
+                continue;
+            }
+            let text_width = tail.width();
+            if text_width <= max_text_width {
                 lines.push(Line::from(vec![
-                    Span::styled(" \u{23bf} ", Style::default().fg(semantic.text.dim)),
-                    Span::styled(
-                        tail.to_string(),
-                        Style::default().fg(semantic.text.dim).italic(),
-                    ),
+                    Span::styled(prefix.to_string(), style),
+                    Span::styled(tail.to_string(), style),
                 ]));
+            } else {
+                // [Fix] 手动按视觉宽度 pre-split，不让 Paragraph::wrap 自动换行。
+                // 段落层面的自动换行会导致每 token 到达时视觉行数变化（"推出去又拉回"），
+                // 预分割后每个 Line ≤ width，Paragraph 不再参与换行，视觉行数稳定。
+                lines.extend(split_to_lines(
+                    tail,
+                    prefix,
+                    cont_prefix,
+                    max_text_width,
+                    style,
+                ));
             }
         }
     }
     lines.push(Line::from(""));
 
     lines
+}
+
+/// 按视觉宽度 pre-split 文本，返回 ≤max_text_width 的 Line 列表。
+/// 首行用 `prefix`，后续行用 `cont_prefix`。Paragraph 不会对 ≤width 的 Line 自动换行。
+fn split_to_lines(
+    text: &str,
+    prefix: &str,
+    cont_prefix: &str,
+    max_text_width: usize,
+    style: Style,
+) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut char_width = 0;
+    let mut first = true;
+
+    for (i, c) in text.char_indices() {
+        let cw = c.width().unwrap_or(1);
+        if char_width + cw > max_text_width && char_width > 0 {
+            let p = if first { prefix } else { cont_prefix };
+            out.push(Line::from(vec![
+                Span::styled(p.to_string(), style),
+                Span::styled(text[start..i].to_string(), style),
+            ]));
+            first = false;
+            start = i;
+            char_width = cw;
+        } else {
+            char_width += cw;
+        }
+    }
+    if start < text.len() {
+        let p = if first { prefix } else { cont_prefix };
+        out.push(Line::from(vec![
+            Span::styled(p.to_string(), style),
+            Span::styled(text[start..].to_string(), style),
+        ]));
+    }
+    out
 }
 
 fn render_reminder_condensed(
