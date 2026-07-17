@@ -97,7 +97,7 @@ pub(crate) async fn handle_new(
         );
     }
     // 将 initialize 时暂存的 peri caps 关联到新 session
-    let _peri_caps = ctx.session_manager.consume_pending_caps(&sid);
+    let peri_caps = ctx.session_manager.consume_pending_caps(&sid);
     tracing::info!(session_id = %sid, "ACP session created with ThreadStore");
     let modes = build_mode_state(&ctx.permission_mode);
     let config_options = {
@@ -116,6 +116,7 @@ pub(crate) async fn handle_new(
         &ctx.plugin_skill_roots,
         &SessionId::new(&*sid),
         &cx,
+        &peri_caps,
     );
     Ok(())
 }
@@ -191,6 +192,7 @@ pub(crate) async fn handle_load(
         &ctx.plugin_skill_roots,
         &SessionId::new(&*sid),
         &cx,
+        &caps,
     );
     Ok(())
 }

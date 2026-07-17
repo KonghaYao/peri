@@ -162,9 +162,9 @@ pub(crate) async fn handle_request(
             let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
 
             // 将暂存的 peri caps 关联到新 session
-            let _peri_caps = cfg.session_manager.consume_pending_caps(&session_id);
+            let peri_caps = cfg.session_manager.consume_pending_caps(&session_id);
 
-            send_available_commands_update(transport, &session_id, &skills).await;
+            send_available_commands_update(transport, &session_id, &skills, &peri_caps).await;
 
             // BRIDGE_RESET_COUNTER handles stale committed cleanup; no explicit clear needed
             serde_json::to_value(resp)
@@ -342,7 +342,7 @@ pub(crate) async fn handle_request(
                 disable_bundled, // TUI 侧仅用于显示
             );
             let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
-            send_available_commands_update(transport, req_session_id, &skills).await;
+            send_available_commands_update(transport, req_session_id, &skills, &caps).await;
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
