@@ -6,17 +6,32 @@ use agent_client_protocol::{
     Client, ConnectionTo, LineDirection, Responder, schema::v1::InitializeRequest,
 };
 use peri_acp::dispatch;
+use peri_acp_types::PeriCaps;
 
 use super::context::StdioContext;
 
 /// initialize 请求处理器。
 pub(super) async fn handle_initialize(
-    _req: InitializeRequest,
+    ctx: &StdioContext,
+    req: InitializeRequest,
     responder: Responder<agent_client_protocol::schema::v1::InitializeResponse>,
     _cx: ConnectionTo<Client>,
 ) -> Result<(), agent_client_protocol::Error> {
     tracing::info!("ACP initialize");
-    responder.respond(dispatch::build_initialize_response())
+
+    // 解析 clientCapabilities._meta 中的 peri 自定义 flag
+    let peri_caps = req
+        .client_capabilities
+        .meta
+        .as_ref()
+        .map(PeriCaps::from_client_meta)
+        .unwrap_or_default();
+
+    // 暂存到 SessionManager，session/new 时 consume
+    ctx.session_manager.set_pending_caps(peri_caps.clone());
+
+    let resp = dispatch::build_initialize_response(&peri_caps);
+    responder.respond(resp)
 }
 
 /// 构建 type:cancel 中断钩子（供 Stdio::new().with_debug() 使用）。

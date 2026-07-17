@@ -31,8 +31,11 @@ pub async fn run_acp_stdio(cwd: String) -> anyhow::Result<()> {
         .name("peri-acp")
         // ── initialize ──
         .on_receive_request(
-            async move |req: InitializeRequest, responder, cx| {
-                transport::handle_initialize(req, responder, cx).await
+            {
+                let ctx = ctx_clone.clone();
+                async move |req: InitializeRequest, responder, cx| {
+                    transport::handle_initialize(&ctx, req, responder, cx).await
+                }
             },
             agent_client_protocol::on_receive_request!(),
         )
