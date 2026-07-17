@@ -412,6 +412,7 @@ impl super::SubAgentTool {
             frozen_claude_md: self.frozen_claude_md.clone(),
             frozen_claude_local_md: self.frozen_claude_local_md.clone(),
             frozen_skill_summary: self.frozen_skill_summary.clone(),
+            frozen_system_prompt: self.frozen_system_prompt.clone(),
         };
 
         let spawned = crate::subagent::spawner::spawn_background_fork(config).await?;

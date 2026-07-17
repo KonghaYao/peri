@@ -130,6 +130,10 @@ pub(super) async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Op
             .frozen
             .as_ref()
             .and_then(|f| f.skill_summary().map(|s| Arc::new(s.to_string()))),
+        frozen_system_prompt: req
+            .frozen
+            .as_ref()
+            .map(|f| Arc::new(f.system_prompt().to_string())),
     };
     let result = tokio::select! {
         r = cmd.execute(ctx) => r,

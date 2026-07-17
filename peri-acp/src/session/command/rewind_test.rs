@@ -134,6 +134,7 @@ fn make_ctx(
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
+        frozen_system_prompt: None,
     }
 }
 
