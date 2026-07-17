@@ -12,6 +12,7 @@ use agent_client_protocol::schema::v1::{
 use peri_acp::dispatch::ReplaySender;
 use peri_acp::dispatch::config_update::make_config_options;
 use peri_acp::{dispatch, transport::types::AcpError};
+use peri_acp_types::PeriCaps;
 use peri_acp_types::event_data::{
     PluginActionResult, PluginSearchResult, PluginSnapshot, PluginSnapshotEntry,
 };
@@ -47,7 +48,19 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1);
             info!(protocol_version = %version, "ACP initialize");
-            let resp = dispatch::build_initialize_response();
+
+            // 解析 clientCapabilities._meta 中的 peri 自定义 flag
+            let peri_caps = params
+                .get("clientCapabilities")
+                .and_then(|c| c.get("_meta"))
+                .and_then(|m| m.as_object())
+                .map(PeriCaps::from_client_meta)
+                .unwrap_or_default();
+
+            // 暂存 caps，session/new 时 consume
+            cfg.session_manager.set_pending_caps(peri_caps.clone());
+
+            let resp = dispatch::build_initialize_response(&peri_caps);
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -147,6 +160,10 @@ pub(crate) async fn handle_request(
                 disable_bundled, // TUI 侧仅用于显示
             );
             let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
+
+            // 将暂存的 peri caps 关联到新 session
+            let _peri_caps = cfg.session_manager.consume_pending_caps(&session_id);
+
             send_available_commands_update(transport, &session_id, &skills).await;
 
             // BRIDGE_RESET_COUNTER handles stale committed cleanup; no explicit clear needed
