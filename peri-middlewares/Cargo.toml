@@ -43,6 +43,7 @@ tar = "0.4"
 
 shellexpand = "3"
 ipnet = "2.10"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 peri-lsp = { path = "../peri-lsp" }
 lsp-types.workspace = true
 peri-workflow = { path = "../peri-workflow" }
