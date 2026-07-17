@@ -43,6 +43,7 @@ enum LoginPanelMode {
 /// 编辑模式下可编辑的字段
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoginEditField {
+    ProviderType,
     ProviderId,
     ApiKey,
     BaseUrl,
@@ -54,18 +55,20 @@ enum LoginEditField {
 impl LoginEditField {
     fn next(self) -> Self {
         match self {
+            Self::ProviderType => Self::ProviderId,
             Self::ProviderId => Self::ApiKey,
             Self::ApiKey => Self::BaseUrl,
             Self::BaseUrl => Self::OpusModel,
             Self::OpusModel => Self::SonnetModel,
             Self::SonnetModel => Self::HaikuModel,
-            Self::HaikuModel => Self::ProviderId,
+            Self::HaikuModel => Self::ProviderType,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::ProviderId => Self::HaikuModel,
+            Self::ProviderType => Self::HaikuModel,
+            Self::ProviderId => Self::ProviderType,
             Self::ApiKey => Self::ProviderId,
             Self::BaseUrl => Self::ApiKey,
             Self::OpusModel => Self::BaseUrl,
@@ -76,6 +79,7 @@ impl LoginEditField {
 
     fn i18n_key(self) -> &'static str {
         match self {
+            Self::ProviderType => "login-field-type",
             Self::ProviderId => "login-field-name",
             Self::ApiKey => "login-field-api-key",
             Self::BaseUrl => "login-field-base-url",
@@ -91,6 +95,7 @@ impl LoginEditField {
 struct LoginEditState {
     /// 进入编辑时的原始 provider_id（用于 save 时定位配置项）
     original_provider_id: String,
+    provider_type: String,
     provider_id: String,
     api_key: String,
     base_url: String,
@@ -103,6 +108,7 @@ impl LoginEditState {
     fn from_provider_config(config: &ProviderConfig) -> Self {
         Self {
             original_provider_id: config.id.clone(),
+            provider_type: config.provider_type.clone(),
             provider_id: config.id.clone(),
             api_key: config.api_key.clone(),
             base_url: config.base_url.clone(),
@@ -114,6 +120,7 @@ impl LoginEditState {
 
     fn field_value(&self, field: LoginEditField) -> &str {
         match field {
+            LoginEditField::ProviderType => &self.provider_type,
             LoginEditField::ProviderId => &self.provider_id,
             LoginEditField::ApiKey => &self.api_key,
             LoginEditField::BaseUrl => &self.base_url,
@@ -125,6 +132,7 @@ impl LoginEditState {
 
     fn field_value_mut(&mut self, field: LoginEditField) -> &mut String {
         match field {
+            LoginEditField::ProviderType => &mut self.provider_type,
             LoginEditField::ProviderId => &mut self.provider_id,
             LoginEditField::ApiKey => &mut self.api_key,
             LoginEditField::BaseUrl => &mut self.base_url,
@@ -143,7 +151,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor = hooks.use_state(|| 0usize);
     let mode = hooks.use_state(|| LoginPanelMode::Browse);
     let edit_state = hooks.use_state(|| None::<LoginEditState>);
-    let edit_focus = hooks.use_state(|| LoginEditField::ProviderId);
+    let edit_focus = hooks.use_state(|| LoginEditField::ProviderType);
     let edit_cursor = hooks.use_state(|| 0usize);
     let store = hooks.use_atom(&PROVIDER_LIST);
     let providers: Vec<ProviderSummary> = store.read().clone();
@@ -154,7 +162,9 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         move |event| {
             // 粘贴事件：仅编辑模式下处理
             if let Event::Paste(paste_text) = &event {
-                if *mode.read() == LoginPanelMode::Edit {
+                if *mode.read() == LoginPanelMode::Edit
+                    && *edit_focus.read() != LoginEditField::ProviderType
+                {
                     let mut es_guard = edit_state.write();
                     let mut ec_guard = edit_cursor.write();
                     if let Some(ref mut es) = *es_guard {
@@ -395,8 +405,9 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 )]));
                 lines.push(Line::from(""));
 
-                // 6 个可编辑字段
+                // 7 个可编辑字段（ProviderType 为 toggle，其余为文本输入）
                 for field in &[
+                    LoginEditField::ProviderType,
                     LoginEditField::ProviderId,
                     LoginEditField::ApiKey,
                     LoginEditField::BaseUrl,
@@ -405,42 +416,65 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     LoginEditField::HaikuModel,
                 ] {
                     let is_focused = *field == ef;
-                    let display_val = if *field == LoginEditField::ApiKey {
-                        // API Key 脱敏显示（编辑时也只显示脱敏版本 + 实际输入体现在光标位置）
-                        let raw = es.field_value(*field);
-                        if raw.is_empty() {
-                            String::new()
+                    if *field == LoginEditField::ProviderType {
+                        // ProviderType 渲染为 toggle（参考 setup_wizard 模式）
+                        let type_prefix = if is_focused { "❯ " } else { "  " };
+                        let type_style = if is_focused {
+                            Style::default()
+                                .fg(focus_color)
+                                .add_modifier(Modifier::BOLD)
                         } else {
-                            // 脱敏：显示最后 4 个字符，其余用 * 代替
-                            if raw.len() <= 4 {
-                                "*".repeat(raw.len())
-                            } else {
+                            Style::default().fg(dim)
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(type_prefix, Style::default().fg(cursor_color)),
+                            Span::styled(format!("{}: ", i18n::tr(field.i18n_key())), type_style),
+                            Span::styled(
                                 format!(
-                                    "{}...{}",
-                                    "*".repeat(4),
-                                    raw.chars()
-                                        .rev()
-                                        .take(4)
-                                        .collect::<String>()
-                                        .chars()
-                                        .rev()
-                                        .collect::<String>()
-                                )
-                            }
-                        }
+                                    "[{}]",
+                                    i18n::tr(provider_type_label(es.field_value(*field)))
+                                ),
+                                Style::default().fg(text_color).add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
                     } else {
-                        es.field_value(*field).to_string()
-                    };
-                    lines.push(render_login_edit_line(
-                        i18n::tr(field.i18n_key()),
-                        display_val,
-                        is_focused,
-                        ec,
-                        cursor_color,
-                        dim,
-                        text_color,
-                        focus_color,
-                    ));
+                        let display_val = if *field == LoginEditField::ApiKey {
+                            // API Key 脱敏显示（编辑时也只显示脱敏版本 + 实际输入体现在光标位置）
+                            let raw = es.field_value(*field);
+                            if raw.is_empty() {
+                                String::new()
+                            } else {
+                                // 脱敏：显示最后 4 个字符，其余用 * 代替
+                                if raw.len() <= 4 {
+                                    "*".repeat(raw.len())
+                                } else {
+                                    format!(
+                                        "{}...{}",
+                                        "*".repeat(4),
+                                        raw.chars()
+                                            .rev()
+                                            .take(4)
+                                            .collect::<String>()
+                                            .chars()
+                                            .rev()
+                                            .collect::<String>()
+                                    )
+                                }
+                            }
+                        } else {
+                            es.field_value(*field).to_string()
+                        };
+                        lines.push(render_login_edit_line(
+                            i18n::tr(field.i18n_key()),
+                            display_val,
+                            is_focused,
+                            ec,
+                            cursor_color,
+                            dim,
+                            text_color,
+                            focus_color,
+                        ));
+                    }
                 }
 
                 lines.push(Line::from(""));
@@ -449,6 +483,10 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         (
                             "\u{2191}/\u{2193}".to_string(),
                             i18n::tr("hint-login-field"),
+                        ),
+                        (
+                            "\u{2190}/\u{2192}".to_string(),
+                            i18n::tr("hint-login-toggle"),
                         ),
                         ("Ctrl+S".to_string(), i18n::tr("hint-login-save")),
                         ("Esc".to_string(), i18n::tr("hint-login-back")),
@@ -535,8 +573,8 @@ fn enter_login_edit_mode(
     let cfg = handle.read();
     if let Some(config) = cfg.config.providers.iter().find(|p| p.id == provider_id) {
         *edit_state = Some(LoginEditState::from_provider_config(config));
-        *edit_focus = LoginEditField::ProviderId;
-        *edit_cursor = config.id.chars().count();
+        *edit_focus = LoginEditField::ProviderType;
+        *edit_cursor = 0;
     }
     drop(cfg);
 }
@@ -565,15 +603,44 @@ fn handle_login_edit_keys(
         return;
     }
 
+    // ProviderType toggle（Left/Right/Space 切换，参考 setup_wizard 模式）
+    if *edit_focus == LoginEditField::ProviderType {
+        match key.code {
+            KeyCode::Left | KeyCode::Right if !is_ctrl => {
+                es.provider_type = match es.provider_type.as_str() {
+                    "anthropic" => "openai".to_string(),
+                    _ => "anthropic".to_string(),
+                };
+                return;
+            }
+            KeyCode::Char(' ') if !is_ctrl => {
+                es.provider_type = match es.provider_type.as_str() {
+                    "anthropic" => "openai".to_string(),
+                    _ => "anthropic".to_string(),
+                };
+                return;
+            }
+            _ => {}
+        }
+    }
+
     // 导航 / 保存 / 放弃
     match key.code {
         KeyCode::Up if !is_ctrl => {
             *edit_focus = edit_focus.prev();
-            *edit_cursor = es.field_value(*edit_focus).chars().count();
+            *edit_cursor = if *edit_focus == LoginEditField::ProviderType {
+                0
+            } else {
+                es.field_value(*edit_focus).chars().count()
+            };
         }
         KeyCode::Down if !is_ctrl => {
             *edit_focus = edit_focus.next();
-            *edit_cursor = es.field_value(*edit_focus).chars().count();
+            *edit_cursor = if *edit_focus == LoginEditField::ProviderType {
+                0
+            } else {
+                es.field_value(*edit_focus).chars().count()
+            };
         }
         KeyCode::Esc => {
             // 放弃编辑，回到 Browse
@@ -597,6 +664,11 @@ fn handle_login_text_input(
     edit_cursor: &mut usize,
     key: &ratatui_kit::crossterm::event::KeyEvent,
 ) -> bool {
+    // ProviderType 是 toggle，不接受文本输入
+    if field == LoginEditField::ProviderType {
+        return false;
+    }
+
     use KeyCode::*;
     let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -717,6 +789,7 @@ fn save_login_edit(es: &LoginEditState) {
             .iter_mut()
             .find(|p| p.id == es.original_provider_id)
         {
+            provider.provider_type = es.provider_type.clone();
             provider.id = es.provider_id.clone();
             provider.api_key = es.api_key.clone();
             provider.base_url = es.base_url.clone();
@@ -867,6 +940,14 @@ fn render_login_edit_line(
         spans.push(Span::styled(" ", Style::default().bg(cursor_color)));
     }
     Line::from(spans)
+}
+
+/// 将 ProviderConfig::provider_type（"anthropic"|"openai"）映射为 i18n 标签 key。
+fn provider_type_label(provider_type: &str) -> &'static str {
+    match provider_type {
+        "anthropic" => "setup-provider-anthropic",
+        _ => "setup-provider-openai",
+    }
 }
 
 #[cfg(test)]
