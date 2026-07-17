@@ -161,8 +161,16 @@ pub(crate) async fn handle_request(
             );
             let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
 
-            // 将暂存的 peri caps 关联到新 session
+            // 将暂存的 peri caps 关联到新 session。
+            // MpscTransport 路径：若未显式调用 initialize（TUI 内部连接），
+            // 默认全部 cap=true（TUI 需要接收所有自定义事件）。
+            let had_initialize = cfg.session_manager.pending_caps_was_set();
             let peri_caps = cfg.session_manager.consume_pending_caps(&session_id);
+            let peri_caps = if had_initialize {
+                peri_caps
+            } else {
+                PeriCaps::all_enabled()
+            };
 
             send_available_commands_update(transport, &session_id, &skills, &peri_caps).await;
 
@@ -695,6 +703,8 @@ pub(crate) async fn handle_request(
                 .join(".claude");
             let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
 
+            let caps = cfg.session_manager.get_caps(session_id);
+
             match peri_middlewares::plugin::install_plugin(
                 name,
                 marketplace,
@@ -707,10 +717,10 @@ pub(crate) async fn handle_request(
             {
                 Ok(installed) => {
                     let _ = push_plugin_action_result(
-                        transport, session_id, "install", name, true, None,
+                        transport, session_id, "install", name, true, None, &caps,
                     )
                     .await;
-                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir).await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir, &caps).await;
                     Ok(serde_json::json!({ "success": true, "plugin": installed.id }))
                 }
                 Err(e) => {
@@ -721,6 +731,7 @@ pub(crate) async fn handle_request(
                         name,
                         false,
                         Some(&e.to_string()),
+                        &caps,
                     )
                     .await;
                     Err(AcpError::new(-32603, e.to_string()))
@@ -742,6 +753,8 @@ pub(crate) async fn handle_request(
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join(".claude");
 
+            let caps = cfg.session_manager.get_caps(session_id);
+
             match peri_middlewares::plugin::uninstall_plugin(plugin_id, &claude_dir, None).await {
                 Ok(()) => {
                     let _ = push_plugin_action_result(
@@ -751,9 +764,10 @@ pub(crate) async fn handle_request(
                         plugin_id,
                         true,
                         None,
+                        &caps,
                     )
                     .await;
-                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir).await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir, &caps).await;
                     Ok(serde_json::json!({ "success": true }))
                 }
                 Err(e) => {
@@ -764,6 +778,7 @@ pub(crate) async fn handle_request(
                         plugin_id,
                         false,
                         Some(&e.to_string()),
+                        &caps,
                     )
                     .await;
                     Err(AcpError::new(-32603, e.to_string()))
@@ -814,14 +829,16 @@ pub(crate) async fn handle_request(
                 )
             };
 
+            let caps = cfg.session_manager.get_caps(session_id);
+
             match result {
                 Ok(()) => {
                     let action = if enable { "enable" } else { "disable" };
                     let _ = push_plugin_action_result(
-                        transport, session_id, action, plugin_id, true, None,
+                        transport, session_id, action, plugin_id, true, None, &caps,
                     )
                     .await;
-                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir).await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir, &caps).await;
                     Ok(serde_json::json!({ "success": true }))
                 }
                 Err(e) => {
@@ -833,6 +850,7 @@ pub(crate) async fn handle_request(
                         plugin_id,
                         false,
                         Some(&e.to_string()),
+                        &caps,
                     )
                     .await;
                     Err(AcpError::new(-32603, e.to_string()))
@@ -853,7 +871,8 @@ pub(crate) async fn handle_request(
             let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
             let results = search_marketplace_plugins(query, &cache_dir);
 
-            let _ = push_plugin_search_result(transport, session_id, query, &results).await;
+            let caps = cfg.session_manager.get_caps(session_id);
+            let _ = push_plugin_search_result(transport, session_id, query, &results, &caps).await;
             Ok(serde_json::json!({ "results": results.iter().map(|r| {
                 serde_json::json!({
                     "name": r.name,
@@ -897,7 +916,11 @@ async fn push_plugin_action_result(
     plugin_name: &str,
     success: bool,
     error: Option<&str>,
+    caps: &PeriCaps,
 ) {
+    if !caps.unstable_event {
+        return;
+    }
     let payload = PluginActionResult {
         action: action.to_string(),
         plugin_name: plugin_name.to_string(),
@@ -922,7 +945,11 @@ async fn push_plugin_snapshot(
     transport: &dyn peri_acp::transport::AcpTransport,
     session_id: &str,
     claude_dir: &std::path::Path,
+    caps: &PeriCaps,
 ) {
+    if !caps.unstable_event {
+        return;
+    }
     let plugins = collect_plugin_snapshot(claude_dir);
     let payload = PluginSnapshot { plugins };
     let data = serde_json::to_value(&payload).unwrap_or_default();
@@ -944,7 +971,11 @@ async fn push_plugin_search_result(
     session_id: &str,
     query: &str,
     results: &[PluginSnapshotEntry],
+    caps: &PeriCaps,
 ) {
+    if !caps.unstable_event {
+        return;
+    }
     let payload = PluginSearchResult {
         query: query.to_string(),
         results: results.to_vec(),

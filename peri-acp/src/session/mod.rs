@@ -299,6 +299,12 @@ impl SessionManager {
         *self.inner.pending_caps.lock() = Some(caps);
     }
 
+    /// 查询 initialize 是否已被调用（pending_caps 是否被设置过）。
+    /// 用于 MpscTransport 路径判断：若未调用 initialize，默认全部 cap=true。
+    pub fn pending_caps_was_set(&self) -> bool {
+        self.inner.pending_caps.lock().is_some()
+    }
+
     /// session/new 时调用：将暂存的 caps 关联到 session_id，返回 caps 副本。
     /// 如果 initialize 时未声明任何 caps，返回默认值（全 false）。
     pub fn consume_pending_caps(&self, session_id: &str) -> PeriCaps {

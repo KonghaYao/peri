@@ -120,6 +120,7 @@ pub async fn run_acp_server(
                     let prompt_session_id = extract_session_id(&params, "").to_string();
                     let langfuse_session = cfg.langfuse_session.clone();
                     let session_manager = cfg.session_manager.clone();
+                    let pred_caps_registry = session_manager.caps_registry();
 
                     // Extract AgentPool from session, wrap in Arc<Mutex> for
                     // in-place modification inside executor.
@@ -226,16 +227,26 @@ pub async fn run_acp_server(
                                 match result {
                                     Ok(text) => {
                                         if !text.is_empty() {
-                                            tracing::debug!(%text, "Prediction ready, sending notification");
-                                            let _ = pred_transport
-                                                .send_notification(
-                                                    "peri/prediction_ready",
-                                                    serde_json::json!({
-                                                        "sessionId": pred_session_id,
-                                                        "text": text,
-                                                    }),
-                                                )
-                                                .await;
+                                            let caps = pred_caps_registry
+                                                .get(&pred_session_id)
+                                                .map(|r| r.clone())
+                                                .unwrap_or_default();
+                                            if caps.prediction {
+                                                tracing::debug!(%text, "Prediction ready, sending notification");
+                                                let _ = pred_transport
+                                                    .send_notification(
+                                                        "peri/prediction_ready",
+                                                        serde_json::json!({
+                                                            "sessionId": pred_session_id,
+                                                            "text": text,
+                                                        }),
+                                                    )
+                                                    .await;
+                                            } else {
+                                                tracing::debug!(
+                                                    "Prediction ready but cap not declared, suppressing notification"
+                                                );
+                                            }
                                         } else {
                                             tracing::debug!("Prediction: LLM returned empty text");
                                         }
