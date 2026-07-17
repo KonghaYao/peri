@@ -9,8 +9,12 @@ path = "src/main.rs"
 
 [[bin]]
 name = "test-child"
-path = "tests/test_child.rs"
+path = "src/bin/test_child.rs"
 test = false  # 不是测试目标，是独立二进制
+
+[lib]
+name = "acp_hub"
+path = "src/lib.rs"
 
 [dependencies]
 tokio = { workspace = true, features = ["full"] }
