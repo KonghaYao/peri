@@ -24,9 +24,11 @@ use tracing::{error, info, warn};
 use crate::acp_client::AcpTuiClient;
 use crate::i18n;
 use crate::kit::acp_events;
+use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{
     ACP_STATE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, EXIT_REQUESTED, LOADING_EPOCH,
-    NOTIFICATION, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE, RENDER_HEARTBEAT, REWIND_ACTION_TX,
+    LOCAL_EVENT_TX, NOTIFICATION, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE, RENDER_HEARTBEAT,
+    REWIND_ACTION_TX,
 };
 use crate::kit::submit_request::{
     ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
@@ -165,11 +167,17 @@ async fn handle_agent_text_submit(
         BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
     }
 
+    // 通过 LOCAL_EVENT_TX 发送 PromptSubmitted 事件到 acp_bridge，
+    // 由 bridge 统一管理 phase/variant/is_loading 状态。
     {
-        let acp = ACP_STATE.state();
-        let mut guard = acp.write();
-        guard.variant = 1;
-        guard.is_loading = true;
+        if let Some(tx) = LOCAL_EVENT_TX.get() {
+            let _ = tx.send(AcpEventWithEpoch {
+                event: AcpEventData::PromptSubmitted,
+                active_session_id: String::new(),
+            });
+        } else {
+            warn!("LOCAL_EVENT_TX not initialized, PromptSubmitted event dropped");
+        }
     }
     // 递增 loading epoch：message_area 据此检测新一轮 loading 会话，
     // 避免 rapid toggle（如 TurnDone → drain_input_buffer → 新 prompt）
@@ -177,7 +185,7 @@ async fn handle_agent_text_submit(
     *LOADING_EPOCH.state().write() += 1;
     tracing::info!(
         target: "msg_scroll_diag",
-        "submit_consumer: set is_loading=true, LOADING_EPOCH incremented, about to call prompt()",
+        "submit_consumer: emitted PromptSubmitted event, LOADING_EPOCH incremented, about to call prompt()",
     );
 
     let content = MessageContent::text(trimmed.to_string());

@@ -602,6 +602,10 @@ pub enum AcpEventData {
     /// 本地提交已进入当前 ACP session，开始一轮真实 agent turn。
     PromptStarted,
 
+    /// TUI 内部事件：用户已提交 prompt，loading spinner 应立即显示。
+    /// submit_consumer 发出，bridge 收到后设 phase=PromptRunning, variant=1。
+    PromptSubmitted,
+
     /// session/load 历史恢复开始。Replay 不是 agent turn，不能触发 loading。
     SessionReplayStarted,
 

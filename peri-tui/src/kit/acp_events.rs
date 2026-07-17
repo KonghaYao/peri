@@ -228,6 +228,12 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.variant = 1;
             push_acp_state(state);
         }
+        PromptSubmitted => {
+            // submit_consumer 在 prompt RPC 之前发出此事件，让 bridge 统一管理 loading 状态。
+            state.phase = SessionPhase::PromptRunning;
+            state.variant = 1;
+            push_acp_state(state);
+        }
         SessionReplayStarted => {
             tracing::trace!("dead path: SessionReplayStarted not emitted by notifier");
             state.phase = SessionPhase::ReplayingHistory;
@@ -243,7 +249,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             }
             state.variant = 0;
             state.current_turn.reset();
-            ACP_STATE.state().write().is_loading = false;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -257,11 +262,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.variant = 0;
 
             state.phase = SessionPhase::Idle;
-            // 显式清 loading：push_acp_state 的防御逻辑会在 atom is_loading=true
-            // + phase=Idle 时自动提升 phase 为 PromptRunning。为避免此防御逻辑
-            // 阻挡正常的 loading 结束，必须在 push_acp_state 之前将 atom 的
-            // is_loading 置为 false。
-            ACP_STATE.state().write().is_loading = false;
 
             tracing::info!(
                 is_loading = state.phase == SessionPhase::PromptRunning,
@@ -314,7 +314,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 state.current_turn = CurrentTurn::new();
                 state.variant = 0;
                 state.phase = SessionPhase::Idle;
-                ACP_STATE.state().write().is_loading = false;
                 push_view_models(state);
                 push_acp_state(state);
                 return;
@@ -330,8 +329,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.current_turn = CurrentTurn::new();
             state.variant = 0;
             state.phase = SessionPhase::Idle;
-            // 同 TurnDone 注释：显式清 loading，防 push_acp_state 防御逻辑阻挡。
-            ACP_STATE.state().write().is_loading = false;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -347,7 +344,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.current_turn.reset();
             state.variant = 0;
             state.phase = SessionPhase::Idle;
-            ACP_STATE.state().write().is_loading = false;
             push_view_models(state);
             push_acp_state(state);
             // 注意：不调用 drain_input_buffer()——Agent 保持存活，
@@ -522,7 +518,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 }
             }
             state.phase = SessionPhase::Idle;
-            ACP_STATE.state().write().is_loading = false;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -595,7 +590,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             );
             state.compact_just_completed = true;
             state.phase = SessionPhase::Idle;
-            ACP_STATE.state().write().is_loading = false;
             // 仅全量压缩时注入消息流通知（微压缩太频繁，省略）
             if *micro_cleared == 0 {
                 let mut parts = vec![];
@@ -663,7 +657,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     content_hash,
                 }));
             state.phase = SessionPhase::Idle;
-            ACP_STATE.state().write().is_loading = false;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -706,7 +699,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     content_hash,
                 }));
             state.phase = SessionPhase::Idle;
-            ACP_STATE.state().write().is_loading = false;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -1112,19 +1104,6 @@ pub fn push_view_models_for_reset() {
 /// popup 状态由各自的独立 atom 追踪（SLASH_HINT_ACTIVE 等），
 /// 不应写入 ACP_STATE 导致 AppShell 重渲染。
 fn push_acp_state(state: &mut BridgeState) {
-    let ref_guard = ACP_STATE.state();
-    let acp = ref_guard.read();
-
-    // 防御：submit_consumer 已将 is_loading 直接置 true（ACP_STATE atom 写入），
-    // 但 bridge 侧 phase 可能仍是 Idle（首次流事件尚未到达）。此时若被非流事件
-    // （如 ToolCount/Progress）调用 push_acp_state，会因 phase = Idle 而错误地
-    // 将 is_loading 覆盖为 false。此检查自动提升 phase 为 PromptRunning，
-    // 确保 atom 中已有的 is_loading=true 不被覆盖。
-    if acp.is_loading && state.phase == SessionPhase::Idle {
-        state.phase = SessionPhase::PromptRunning;
-    }
-    drop(acp);
-
     let snapshot = AcpStateSnapshot {
         variant: state.variant,
         view_count: state.committed.len() + state.current_turn.view_models().len(),
@@ -1133,7 +1112,8 @@ fn push_acp_state(state: &mut BridgeState) {
         at_mention_active: *AT_MENTION_ACTIVE.state().read(),
         slash_hint_active: *SLASH_HINT_ACTIVE.state().read(),
     };
-    let mut acp = ref_guard.write();
+    let state_ref = ACP_STATE.state();
+    let mut acp = state_ref.write();
     if *acp != snapshot {
         *acp = snapshot;
     }
@@ -2024,6 +2004,32 @@ mod tests {
             ACP_STATE.state().read().is_loading,
             "SubagentStopped after SubagentStarted: is_loading 应保持 true"
         );
+    }
+
+    /// PromptSubmitted 事件应设 phase=PromptRunning + variant=1，
+    /// push_acp_state 派生 is_loading=true。
+    #[test]
+    #[serial]
+    fn test_prompt_submitted_sets_loading() {
+        crate::kit::atoms::init_atoms();
+        *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+        let mut state = BridgeState {
+            variant: 0,
+            committed: im::Vector::new(),
+            current_turn: CurrentTurn::new(),
+            phase: SessionPhase::Idle,
+            popup_kind: None,
+            generation: 0,
+            active_session_id: String::new(),
+            compact_just_completed: false,
+            last_submitted_text: None,
+        };
+
+        dispatch_and_notify(&mut state, &AcpEventData::PromptSubmitted);
+
+        assert_eq!(state.phase, SessionPhase::PromptRunning);
+        assert_eq!(state.variant, 1);
+        assert!(ACP_STATE.state().read().is_loading);
     }
 
     /// 同步 sub-agent 的 ToolStarted/ToolEnded 事件应路由到 SubAgentAccumulator，

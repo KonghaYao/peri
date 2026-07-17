@@ -196,6 +196,7 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         ToolStarted(_) => "ToolStarted",
         ToolEnded(_) => "ToolEnded",
         PromptStarted => "PromptStarted",
+        PromptSubmitted => "PromptSubmitted",
         SessionReplayStarted => "SessionReplayStarted",
         SessionReplayDone => "SessionReplayDone",
         TurnDone => "TurnDone",
