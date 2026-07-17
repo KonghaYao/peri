@@ -164,13 +164,7 @@ pub(crate) async fn handle_request(
             // 将暂存的 peri caps 关联到新 session。
             // MpscTransport 路径：若未显式调用 initialize（TUI 内部连接），
             // 默认全部 cap=true（TUI 需要接收所有自定义事件）。
-            let had_initialize = cfg.session_manager.pending_caps_was_set();
-            let peri_caps = cfg.session_manager.consume_pending_caps(&session_id);
-            let peri_caps = if had_initialize {
-                peri_caps
-            } else {
-                PeriCaps::all_enabled()
-            };
+            let peri_caps = cfg.session_manager.ensure_session_caps(&session_id);
 
             send_available_commands_update(transport, &session_id, &skills, &peri_caps).await;
 
@@ -302,6 +296,8 @@ pub(crate) async fn handle_request(
 
             // ── Freeze session data at load time ──
             cfg.session_manager.ensure_session(req_session_id, cwd);
+            // 确保 caps 已在 registry 中注册（MpscTransport 无 initialize，默认全 true）
+            let caps = cfg.session_manager.ensure_session_caps(req_session_id);
             let frozen_data = cfg.session_manager.build_frozen_data(
                 cwd,
                 &cfg.plugin_skill_roots,
@@ -317,7 +313,6 @@ pub(crate) async fn handle_request(
                 .map(|s| s.history.clone())
                 .unwrap_or_default();
             let replay_sender = TuiReplaySender { transport };
-            let caps = cfg.session_manager.get_caps(req_session_id);
             if let Err(e) = dispatch::replay_session_history(
                 req_session_id,
                 &history_for_replay,
@@ -555,6 +550,8 @@ pub(crate) async fn handle_request(
 
             // ── Freeze session data at resume time ──
             cfg.session_manager.ensure_session(req_session_id, cwd);
+            // 确保 caps 已在 registry 中注册（MpscTransport 无 initialize，默认全 true）
+            cfg.session_manager.ensure_session_caps(req_session_id);
             let frozen_data = cfg.session_manager.build_frozen_data(
                 cwd,
                 &cfg.plugin_skill_roots,
@@ -606,6 +603,8 @@ pub(crate) async fn handle_request(
 
             // ── Freeze session data at fork time ──
             cfg.session_manager.ensure_session(&new_session_id, cwd);
+            // 确保 caps 已在 registry 中注册（MpscTransport 无 initialize，默认全 true）
+            cfg.session_manager.ensure_session_caps(&new_session_id);
             let frozen_data = cfg.session_manager.build_frozen_data(
                 cwd,
                 &cfg.plugin_skill_roots,
