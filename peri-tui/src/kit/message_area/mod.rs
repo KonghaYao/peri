@@ -106,7 +106,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let todo_items = todo_atom.read().clone();
     let is_loading = acp_state.read().is_loading;
 
-    let items_len = snapshot.items.len();
     let vm_generation = snapshot.generation;
 
     // ── 按 VM 分片的渲染缓存 ──────────────────────────────────────────────────
@@ -158,28 +157,32 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 其余 committed VM hash 完全稳定——直接复用 Arc<Vec<Line>> 和 Arc<Vec<WrappedLineInfo>>。
     // 单次成本从 O(N×W) 降至 O(W)。
     //
-    // [TRAP] 必须先 clone 出 items 再 drop(snapshot)，否则 vm_caches.write 与
-    // view_models read guard 冲突。items_vec 仅在缓存未命中时使用，命中时直接 Arc::clone。
-    let items_vec: Vec<crate::kit::tui_render_unit::TuiRenderUnit> =
-        snapshot.items.iter().cloned().collect();
+    // [Opt B] hash-only clone：只收集 content_hash (u64)，避免每帧全量 clone TuiRenderUnit。
+    // rebuild 阶段按需通过 snapshot 重读 VM 数据（流式期间只追加，索引有效）。
+    //
+    // [TRAP] 必须先提取 hashes 再 drop(snapshot)，否则 vm_caches.write_no_update 与
+    // view_models read guard 冲突。
+    let item_hashes: Vec<u64> = snapshot.items.iter().map(|vm| vm.content_hash()).collect();
+    let items_len = item_hashes.len();
     drop(snapshot);
 
-    // 同步 vm_caches 长度对齐 items_vec
-    if vm_caches.read().len() != items_vec.len() {
+    // 同步 vm_caches 长度对齐 item_hashes
+    if vm_caches.read().len() != items_len {
         vm_caches
             .write_no_update()
-            .resize(items_vec.len(), VmCacheSlot::default());
+            .resize(items_len, VmCacheSlot::default());
     }
 
     // 第一阶段：检测哪些 slot 需要 rebuild（content_hash 或 vis_width 变化）
+    // [Opt B] 用 item_hashes (Vec<u64>) 替代 items_vec 迭代，避免持有 TuiRenderUnit clone。
     let rebuild_indices: Vec<usize> = {
         let caches_read = vm_caches.read();
-        items_vec
+        item_hashes
             .iter()
             .enumerate()
-            .filter_map(|(i, vm)| {
+            .filter_map(|(i, hash)| {
                 let slot = &caches_read[i];
-                if slot.content_hash != vm.content_hash()
+                if slot.content_hash != *hash
                     || slot.width != vis_width
                     || slot.palette_key != current_palette_key
                 {
@@ -197,10 +200,18 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [Borrow] 单次 write_no_update 持锁整个 rebuild 循环——ratatui-kit State 仅在
     // render body 单线程访问，无锁竞争。直接可变借用 slot.markdown_cache，避免 clone
     // ConvertState（含 Vec<Line>，clone 成本高）。
-    {
+    //
+    // [Opt B] 仅 rebuild_indices 非空时才重新 read snapshot 获取 VM 引用。
+    // safe_len 防御 TOCTOU 索引越界（Rewind/Reset 可能缩短 items）。
+    if !rebuild_indices.is_empty() {
+        let snapshot2 = view_models.read();
+        let safe_len = snapshot2.items.len().min(items_len);
         let mut caches = vm_caches.write_no_update();
         for i in &rebuild_indices {
-            let vm = &items_vec[*i];
+            if *i >= safe_len {
+                continue; // TOCTOU 防御：跳过不可用索引，下帧重新同步
+            }
+            let vm = &snapshot2.items[*i];
             let vm_hash = vm.content_hash();
             let slot = &mut caches[*i];
             let lines = Arc::new(vm_to_lines_cached(
@@ -219,24 +230,32 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     }
 
-    // 第三阶段：拼接 core_lines + concat_wrap_map（累加 visual_offset 和 logical_idx）
-    // [Why] 单次 O(N) 拼接成本（N=VM 数），远小于旧版 O(N×W) 的全量 line_count。
-    let mut core_lines: Vec<Line<'static>> = Vec::new();
+    // 第三阶段：拼接 concat_wrap_map（累加 visual_offset 和 logical_idx）。
+    // [Scheme D] 不再构建全量 core_lines——仅收集每个 slot 的 Arc<Vec<Line>> 引用
+    // 和 slot_offsets（累积偏移）。视口循环按需从 slot 中提取行。
+    // [Why] per-frame clone 全量 core_lines 是 Phase 1 之后的首要瓶颈。
     let mut core_total_visual_rows: usize = 0;
+    let mut total_logical_lines: usize = 0;
+    let mut slot_arcs: Vec<Arc<Vec<Line<'static>>>> = Vec::new();
+    let mut slot_offsets: Vec<usize> = Vec::new();
     let concat_wrap_map: Vec<WrappedLineInfo> = {
         let caches_read = vm_caches.read();
-        core_lines.reserve(caches_read.iter().map(|s| s.lines.len()).sum());
-        // 先收集 (wrap_map 引用, lines_start_offset) 对，供 concat_wrap_maps 拼接
-        let mut slots: Vec<(&[WrappedLineInfo], usize)> = Vec::with_capacity(caches_read.len());
-        for slot in caches_read.iter() {
-            let lines_start = core_lines.len();
-            core_lines.extend(slot.lines.iter().cloned());
-            slots.push((&slot.wrap_map, lines_start));
+        slot_arcs.reserve(caches_read.len());
+        slot_offsets.reserve(caches_read.len());
+        let mut slots: Vec<(&[WrappedLineInfo], usize, usize)> =
+            Vec::with_capacity(caches_read.len());
+        for (slot_index, slot) in caches_read.iter().enumerate() {
+            let lines_start = total_logical_lines;
+            slot_offsets.push(lines_start);
+            total_logical_lines += slot.lines.len();
+            slot_arcs.push(Arc::clone(&slot.lines));
+            slots.push((&slot.wrap_map, lines_start, slot_index));
             core_total_visual_rows += slot.visual_rows as usize;
         }
         concat_wrap_maps(&slots)
     };
-    let core_lines_arc: Arc<Vec<Line<'static>>> = Arc::new(core_lines);
+    let slot_arcs_arc: Arc<Vec<Arc<Vec<Line<'static>>>>> = Arc::new(slot_arcs);
+    let slot_offsets_arc: Arc<Vec<usize>> = Arc::new(slot_offsets);
     let concat_wrap_map_arc: Arc<Vec<WrappedLineInfo>> = Arc::new(concat_wrap_map);
 
     // ── 总视觉行数 = core + footer ──
@@ -256,11 +275,12 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
-    // core_lines_arc 后续视口裁剪也要用。Arc::clone 是 O(1) 引用计数，闭包持 clone，
-    // 原值继续在 render body 内用。
+    // slot_arcs_arc / slot_offsets_arc 后续视口裁剪也要用。Arc::clone 是 O(1) 引用计数，
+    // 闭包持 clone，原值继续在 render body 内用。
     {
         let wrap_map_for_closure = Arc::clone(&concat_wrap_map_arc);
-        let lines_for_closure = Arc::clone(&core_lines_arc);
+        let slot_arcs_for_closure = Arc::clone(&slot_arcs_arc);
+        let slot_offsets_for_closure = Arc::clone(&slot_offsets_arc);
         hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
             scroll::handle_event(
                 &event,
@@ -272,7 +292,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 &selection_down_pos,
                 &drag_throttle,
                 &wrap_map_for_closure,
-                &lines_for_closure,
+                &slot_arcs_for_closure,
+                &slot_offsets_for_closure,
                 &scrollbar_fields,
                 &scrollbar_drag,
             )
@@ -426,7 +447,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // 视口对应的 core 逻辑行范围 + 首行视觉偏移
     let (vp_core_start, vp_core_end, vp_first_offset): (usize, usize, u16) =
-        if scroll_y < core_total_visual_rows && !core_lines_arc.is_empty() {
+        if scroll_y < core_total_visual_rows && total_logical_lines > 0 {
             viewport_logical_range(&concat_wrap_map_arc, scroll_y, vp_height).unwrap_or((0, 0, 0))
         } else {
             // 视口完全在 footer 内（footer 占据末尾几行）
@@ -439,7 +460,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // 构建 viewport_lines：clone + highlight 视口内的 core 行，必要时附加 footer
     let sel_bg = THEME_ATOM.state().read().semantic.surface.selection;
-    let core_len = core_lines_arc.len();
+    let core_len = total_logical_lines;
     let mut viewport_lines: Vec<Line<'static>> = Vec::with_capacity(
         (vp_core_end.saturating_sub(vp_core_start) + 1)
             .min(vp_height + 2)
@@ -450,20 +471,22 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         let end = vp_core_end.min(core_len - 1);
         // concat_wrap_map_arc 已是 Arc，clone 引用计数 O(1)
         let wrap_map_arc = Arc::clone(&concat_wrap_map_arc);
+        // [Scheme D] 通过 slot_index + slot_offsets 按需从 slot 中提取行
+        let slots_arc = Arc::clone(&slot_arcs_arc);
+        let offsets_arc = Arc::clone(&slot_offsets_arc);
         for i in vp_core_start..=end {
-            let line = &core_lines_arc[i];
             let in_sel = sel_bounds.is_some_and(|(f, l, _, _, _, _)| i >= f && i <= l);
-            if in_sel {
-                let (_, _, sr, sc, er, ec) = sel_bounds.unwrap();
-                if let Some(entry) = wrap_map_arc.get(i) {
+            if let Some(entry) = wrap_map_arc.get(i) {
+                let local_idx = i - offsets_arc[entry.slot_index];
+                let line = &slots_arc[entry.slot_index][local_idx];
+                if in_sel {
+                    let (_, _, sr, sc, er, ec) = sel_bounds.unwrap();
                     let highlighted =
                         highlight_line_in_selection(line, entry, sr, er, sc, ec, vis_width, sel_bg);
                     viewport_lines.push(highlighted);
                 } else {
                     viewport_lines.push(line.clone());
                 }
-            } else {
-                viewport_lines.push(line.clone());
             }
         }
     }

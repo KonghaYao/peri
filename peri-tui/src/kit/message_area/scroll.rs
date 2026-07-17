@@ -195,8 +195,9 @@ pub(super) fn handle_event(
     drag_throttle: &State<DragThrottle>,
     // 拼接后的全量 wrap_map（按 visual_start 升序）。mod.rs 渲染前已拼接好。
     wrap_map: &Arc<Vec<WrappedLineInfo>>,
-    // 拼接后的全量 core_lines。mod.rs 渲染前已拼接好。
-    lines: &Arc<Vec<ratatui_kit::ratatui::text::Line<'static>>>,
+    // [Scheme D] slot 行数据 + 累积偏移，按需解析视口行，不再传全量 clone。
+    slot_arcs: &Arc<Vec<Arc<Vec<ratatui_kit::ratatui::text::Line<'static>>>>>,
+    slot_offsets: &Arc<Vec<usize>>,
     scrollbar_fields: &State<ScrollbarFields>,
     scrollbar_drag: &State<ScrollbarDragState>,
 ) -> EventResult {
@@ -405,7 +406,14 @@ pub(super) fn handle_event(
                         // 先 copy 出 normalized_bounds（owned Option），drop read guard
                         let bounds = text_sel.read().normalized_bounds();
                         let extracted: Option<String> = if let Some(((sr, sc), (er, ec))) = bounds {
-                            extract_visual_range(lines, wrap_map, (sr, sc), (er, ec), vis_width)
+                            extract_visual_range(
+                                slot_arcs.as_ref(),
+                                slot_offsets.as_ref(),
+                                wrap_map,
+                                (sr, sc),
+                                (er, ec),
+                                vis_width,
+                            )
                         } else {
                             None
                         };
