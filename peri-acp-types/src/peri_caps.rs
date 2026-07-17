@@ -22,6 +22,21 @@ pub struct PeriCaps {
     /// 控制 `peri/agent_event` 通道中 `AcpEvent::StateSnapshotMeta` 的发送
     #[serde(default)]
     pub context_usage: bool,
+    /// 控制 `peri/agent_event` 通知通道的发送（Category ③ 全部）
+    #[serde(default)]
+    pub agent_event: bool,
+    /// 控制 `peri/agent_event_done`（TurnDone）通知的发送
+    #[serde(default)]
+    pub agent_event_done: bool,
+    /// 控制 `peri/unstable-event` 通知通道的发送（Category ⑤ 全部）
+    #[serde(default)]
+    pub unstable_event: bool,
+    /// 控制 `peri/prediction_ready` 预测输入的发送
+    #[serde(default)]
+    pub prediction: bool,
+    /// 控制 `peri/hitl_pending` HITL 审批通知的发送
+    #[serde(default)]
+    pub hitl_pending: bool,
 }
 
 impl PeriCaps {
@@ -36,6 +51,11 @@ impl PeriCaps {
             replay: meta_bool(meta, "peri.replay"),
             source_agent_id: meta_bool(meta, "peri.sourceAgentId"),
             context_usage: meta_bool(meta, "peri.contextUsage"),
+            agent_event: meta_bool(meta, "peri.agentEvent"),
+            agent_event_done: meta_bool(meta, "peri.agentEventDone"),
+            unstable_event: meta_bool(meta, "peri.unstableEvent"),
+            prediction: meta_bool(meta, "peri.prediction"),
+            hitl_pending: meta_bool(meta, "peri.hitlPending"),
         }
     }
 
@@ -50,7 +70,35 @@ impl PeriCaps {
             Value::Bool(self.source_agent_id),
         );
         m.insert("peri.contextUsage".into(), Value::Bool(self.context_usage));
+        m.insert("peri.agentEvent".into(), Value::Bool(self.agent_event));
+        m.insert(
+            "peri.agentEventDone".into(),
+            Value::Bool(self.agent_event_done),
+        );
+        m.insert(
+            "peri.unstableEvent".into(),
+            Value::Bool(self.unstable_event),
+        );
+        m.insert("peri.prediction".into(), Value::Bool(self.prediction));
+        m.insert("peri.hitlPending".into(), Value::Bool(self.hitl_pending));
         m
+    }
+
+    /// 返回全部 cap 启用的实例。
+    /// 用于 MpscTransport 内部路径（TUI 默认想接收所有自定义事件）。
+    pub fn all_enabled() -> Self {
+        Self {
+            token_stats: true,
+            skill_names: true,
+            replay: true,
+            source_agent_id: true,
+            context_usage: true,
+            agent_event: true,
+            agent_event_done: true,
+            unstable_event: true,
+            prediction: true,
+            hitl_pending: true,
+        }
     }
 }
 
