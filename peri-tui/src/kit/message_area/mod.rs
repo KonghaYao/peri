@@ -19,9 +19,9 @@ use ratatui_kit::{
     components::ScrollViewState,
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction},
+        layout::{Constraint, Direction, Position},
         text::{Line, Text as RatText},
-        widgets::{Block, Padding, Paragraph, Wrap},
+        widgets::{Paragraph, Wrap},
     },
 };
 
@@ -485,21 +485,23 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // vis_width，ScrollbarHook 的 drawer.area 也跟着缩，导致 thumb 渲染在 area.width-2
     // 处（向左偏 1 列）。
     //
-    // 让 Paragraph 实际 wrap 宽度 = vis_width 的正确做法：给 Paragraph 套
-    // `Block::default().padding(Padding::new(0, 1, 0, 0))`（右 padding 1）。Block 占满
-    // View 的 area.width，内部 wrap 宽度 = area.width - 1 = vis_width，与
-    // `total_visual_rows` / `wrap_map_cache` / `line_count(vis_width)` 的估算一致；
-    // 右 padding 1 列留给 scrollbar thumb（post_component_draw 时绘制覆盖 padding 空白）。
+    // Paragraph wrap 宽度 = vis_width 的正确做法：
+    // View width = Length(vis_width)，Paragraph 在 View 内 wrap 到 vis_width，
+    // 与 `total_visual_rows` / `wrap_map_cache` / `line_count(vis_width)` 的估算一致。
+    // 最右 1 列（area_rect.width - 1）留给 scrollbar thumb
+    // （post_component_draw 时绘制在 View 右侧）。
+    // [Fix] 显式传 scroll prop 给 Text，绕过 ratatui-kit Text 组件对 Paragraph.scroll 的 (0,0) 覆盖。
     element!(
         View(
             flex_direction: Direction::Vertical,
-            width: Constraint::Fill(1),
+            width: Constraint::Length(vis_width),
             height: Constraint::Fill(1),
         ) {
-            Text(text: Paragraph::new(RatText::from(viewport_lines))
-                .wrap(Wrap { trim: false })
-                .block(Block::default().padding(Padding::new(0, 1, 0, 0)))
-                .scroll((scroll_offset_y, 0)))
+            Text(
+                text: Paragraph::new(RatText::from(viewport_lines))
+                    .wrap(Wrap { trim: false }),
+                scroll: Position::new(scroll_offset_y as u16, 0),
+            )
         }
     )
     .into_any()
