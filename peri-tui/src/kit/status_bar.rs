@@ -12,7 +12,7 @@ use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction, Flex},
+        layout::{Alignment, Constraint, Direction, Flex},
         style::{Modifier, Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -230,9 +230,9 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             flex_direction: Direction::Horizontal,
             width: Constraint::Fill(1),
             height: Constraint::Length(1),
-            justify_content: Flex::Center,
+            justify_content: Flex::End,
         ) {
-            Text(text: Paragraph::new(hints).centered())
+            Text(text: Paragraph::new(hints), alignment: Alignment::Right)
         }
     )
 }
