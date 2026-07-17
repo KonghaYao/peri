@@ -33,6 +33,8 @@ use peri_middlewares::{
 };
 use tokio_util::sync::CancellationToken;
 
+use peri_acp_types::PeriCaps;
+
 use crate::{
     provider::{
         config::{PeriConfig, ThinkingConfig},
@@ -94,6 +96,12 @@ struct SessionManagerInner {
     permission_mode: Arc<SharedPermissionMode>,
     /// Global agent overrides from CLI --agent flag (applied to all sessions)
     pub agent_overrides: Option<AgentOverrides>,
+    /// initialize 阶段暂存的 peri caps（尚未关联到具体 session）。
+    /// session/new 时取出写入 caps_registry，然后清空。
+    pub pending_caps: parking_lot::Mutex<Option<PeriCaps>>,
+    /// Peri 自定义能力注册表（per-session）。
+    /// Key: session_id。使用 Arc<DashMap<...>> 以支持 clone 共享。
+    pub caps_registry: Arc<DashMap<String, PeriCaps>>,
 }
 
 #[derive(Clone)]
@@ -117,6 +125,8 @@ impl SessionManager {
                 peri_config,
                 permission_mode,
                 agent_overrides,
+                pending_caps: parking_lot::Mutex::new(None),
+                caps_registry: Arc::new(DashMap::new()),
             }),
         }
     }
@@ -282,6 +292,31 @@ impl SessionManager {
 
     pub fn agent_overrides(&self) -> Option<&AgentOverrides> {
         self.inner.agent_overrides.as_ref()
+    }
+
+    /// initialize handler 调用：暂存 clientCapabilities 中的 peri caps。
+    pub fn set_pending_caps(&self, caps: PeriCaps) {
+        *self.inner.pending_caps.lock() = Some(caps);
+    }
+
+    /// session/new 时调用：将暂存的 caps 关联到 session_id，返回 caps 副本。
+    /// 如果 initialize 时未声明任何 caps，返回默认值（全 false）。
+    pub fn consume_pending_caps(&self, session_id: &str) -> PeriCaps {
+        let caps = self.inner.pending_caps.lock().take().unwrap_or_default();
+        self.inner
+            .caps_registry
+            .insert(session_id.to_string(), caps.clone());
+        caps
+    }
+
+    /// Sending point 调用：读取 session 的 peri caps。
+    /// 未设置时返回默认值（全 false）。
+    pub fn get_caps(&self, session_id: &str) -> PeriCaps {
+        self.inner
+            .caps_registry
+            .get(session_id)
+            .map(|r| r.clone())
+            .unwrap_or_default()
     }
 
     /// 构建会话级 frozen 数据（统一构造入口，消除 TUI/stdio 重复 5 处）。
