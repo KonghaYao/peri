@@ -309,10 +309,12 @@ pub(crate) async fn handle_request(
                 .map(|s| s.history.clone())
                 .unwrap_or_default();
             let replay_sender = TuiReplaySender { transport };
+            let caps = cfg.session_manager.get_caps(req_session_id);
             if let Err(e) = dispatch::replay_session_history(
                 req_session_id,
                 &history_for_replay,
                 &replay_sender,
+                &caps,
             )
             .await
             {

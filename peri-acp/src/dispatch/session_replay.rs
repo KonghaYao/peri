@@ -13,6 +13,7 @@ use agent_client_protocol_schema::v1::{
     ContentBlock, ContentChunk, SessionId, SessionNotification, SessionUpdate, TextContent,
     ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
+use peri_acp_types::PeriCaps;
 use peri_agent::messages::{
     BaseMessage, ContentBlock as PeriContentBlock, MessageContent as PeriMessageContent,
 };
@@ -32,13 +33,15 @@ pub async fn replay_session_history(
     session_id: &str,
     history: &[BaseMessage],
     sender: &dyn ReplaySender,
+    caps: &PeriCaps,
 ) -> Result<(), ReplayError> {
     for msg in history.iter().filter(|m| !m.is_system()) {
         match msg {
             BaseMessage::Human { content, .. } => {
-                let update = SessionUpdate::UserMessageChunk(replay_chunk(ContentBlock::Text(
-                    TextContent::new(extract_text(content)),
-                )));
+                let update = SessionUpdate::UserMessageChunk(replay_chunk(
+                    ContentBlock::Text(TextContent::new(extract_text(content))),
+                    caps,
+                ));
                 let notif =
                     SessionNotification::new(SessionId::new(session_id.to_string()), update);
                 sender.send(notif).await?;
@@ -56,6 +59,7 @@ pub async fn replay_session_history(
                     PeriMessageContent::Text(s) => {
                         let update = SessionUpdate::AgentMessageChunk(replay_chunk(
                             ContentBlock::Text(TextContent::new(s.clone())),
+                            caps,
                         ));
                         let notif = SessionNotification::new(
                             SessionId::new(session_id.to_string()),
@@ -68,7 +72,7 @@ pub async fn replay_session_history(
                                 ToolCall::new(ToolCallId::new(tc.id.clone()), tc.name.clone())
                                     .raw_input(Some(tc.arguments.clone()))
                                     .status(ToolCallStatus::InProgress);
-                            let update = SessionUpdate::ToolCall(replay_tool(tool_call));
+                            let update = SessionUpdate::ToolCall(replay_tool(tool_call, caps));
                             let notif = SessionNotification::new(
                                 SessionId::new(session_id.to_string()),
                                 update,
@@ -86,6 +90,7 @@ pub async fn replay_session_history(
                         PeriContentBlock::Reasoning { text, .. } => {
                             let update = SessionUpdate::AgentThoughtChunk(replay_chunk(
                                 ContentBlock::Text(TextContent::new(text.clone())),
+                                caps,
                             ));
                             let notif = SessionNotification::new(
                                 SessionId::new(session_id.to_string()),
@@ -96,6 +101,7 @@ pub async fn replay_session_history(
                         PeriContentBlock::Text { text } => {
                             let update = SessionUpdate::AgentMessageChunk(replay_chunk(
                                 ContentBlock::Text(TextContent::new(text.clone())),
+                                caps,
                             ));
                             let notif = SessionNotification::new(
                                 SessionId::new(session_id.to_string()),
@@ -108,7 +114,7 @@ pub async fn replay_session_history(
                             let tc = ToolCall::new(ToolCallId::new(id.clone()), name.clone())
                                 .raw_input(Some(input.clone()))
                                 .status(ToolCallStatus::InProgress);
-                            let update = SessionUpdate::ToolCall(replay_tool(tc));
+                            let update = SessionUpdate::ToolCall(replay_tool(tc, caps));
                             let notif = SessionNotification::new(
                                 SessionId::new(session_id.to_string()),
                                 update,
@@ -127,7 +133,7 @@ pub async fn replay_session_history(
                             ToolCall::new(ToolCallId::new(tc.id.clone()), tc.name.clone())
                                 .raw_input(Some(tc.arguments.clone()))
                                 .status(ToolCallStatus::InProgress);
-                        let update = SessionUpdate::ToolCall(replay_tool(tool_call));
+                        let update = SessionUpdate::ToolCall(replay_tool(tool_call, caps));
                         let notif = SessionNotification::new(
                             SessionId::new(session_id.to_string()),
                             update,
@@ -152,6 +158,7 @@ pub async fn replay_session_history(
                     .raw_output(Some(serde_json::Value::String(result_text)));
                 let update = SessionUpdate::ToolCallUpdate(replay_tool_update(
                     ToolCallUpdate::new(ToolCallId::new(tool_call_id.clone()), fields),
+                    caps,
                 ));
                 let notif =
                     SessionNotification::new(SessionId::new(session_id.to_string()), update);
@@ -163,27 +170,33 @@ pub async fn replay_session_history(
     Ok(())
 }
 
-fn replay_chunk(content: ContentBlock) -> ContentChunk {
+fn replay_chunk(content: ContentBlock, caps: &PeriCaps) -> ContentChunk {
     let mut chunk = ContentChunk::new(content);
-    let mut meta = serde_json::Map::new();
-    meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));
-    chunk.meta = Some(meta);
+    if caps.replay {
+        let mut meta = serde_json::Map::new();
+        meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));
+        chunk.meta = Some(meta);
+    }
     chunk
 }
 
 /// 给 `ToolCall` 打上 periReplay meta 标记。
-fn replay_tool(mut tc: ToolCall) -> ToolCall {
-    let mut meta = serde_json::Map::new();
-    meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));
-    tc.meta = Some(meta);
+fn replay_tool(mut tc: ToolCall, caps: &PeriCaps) -> ToolCall {
+    if caps.replay {
+        let mut meta = serde_json::Map::new();
+        meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));
+        tc.meta = Some(meta);
+    }
     tc
 }
 
 /// 给 `ToolCallUpdate` 打上 periReplay meta 标记。
-fn replay_tool_update(mut tu: ToolCallUpdate) -> ToolCallUpdate {
-    let mut meta = serde_json::Map::new();
-    meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));
-    tu.meta = Some(meta);
+fn replay_tool_update(mut tu: ToolCallUpdate, caps: &PeriCaps) -> ToolCallUpdate {
+    if caps.replay {
+        let mut meta = serde_json::Map::new();
+        meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));
+        tu.meta = Some(meta);
+    }
     tu
 }
 

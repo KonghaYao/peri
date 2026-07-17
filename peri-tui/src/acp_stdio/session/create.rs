@@ -141,7 +141,8 @@ pub(crate) async fn handle_load(
 
     // ── ACP v1 spec: replay history via session/update BEFORE responding ──
     let replay_sender = StdioReplaySender { cx: cx.clone() };
-    if let Err(e) = dispatch::replay_session_history(&sid, &history, &replay_sender).await {
+    let caps = ctx.session_manager.get_caps(&sid);
+    if let Err(e) = dispatch::replay_session_history(&sid, &history, &replay_sender, &caps).await {
         tracing::warn!(session_id = %sid, error = %e, "session/load: history replay failed, continuing");
     }
 
