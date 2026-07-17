@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-13-model-login-panel-persistence-lost.md
 # Model/Login 面板切换后重启配置丢失 + 状态栏更新延迟
 
 **状态**：Fixed

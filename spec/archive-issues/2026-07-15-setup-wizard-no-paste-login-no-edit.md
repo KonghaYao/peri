@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-15-setup-wizard-no-paste-login-no-edit.md
 # Setup 向导 Form 不支持粘贴，Login 面板不支持编辑 Provider
 
 **状态**：Fixed

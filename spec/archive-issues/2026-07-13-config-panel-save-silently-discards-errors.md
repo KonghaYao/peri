@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-13-config-panel-save-silently-discards-errors.md
 # Config 面板保存失败时无错误提示、UI 仍显示修改成功
 
 **状态**：Fixed

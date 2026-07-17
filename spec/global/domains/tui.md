@@ -211,3 +211,143 @@ Peri TUI 的前端渲染与交互系统，基于 ratatui-kit 框架。负责终�
 **通用模式:** 当框架组件（如 ratatui-kit `Select`）在视觉风格上不兼容，但数据流逻辑（`selected` index + scroll offset）是普适的时，提取纯算法辅助函数（`scroll_start_for_selected(selected, item_count, visible_items) -> usize`）在各面板复用，保留原有渲染逻辑不变。算法复用的成本远低于组件替换。
 **涉及文件:** peri-tui/src/kit/list_nav.rs, peri-tui/src/kit/panels/ (6 panels)
 **CLAUDE.md 链接:** false
+
+### issue_2026-07-15-terminal-rapid-shrink-width-crash
+**摘要:** 快速缩小终端宽度到极小值时程序直接退出崩溃
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** Buffer越界, 表格渲染, 列宽redistribution, 极窄终端
+**问题本质:** table_data_to_lines 中 buffer 宽度与列宽不匹配——compute_table_col_widths 在 available=0 时返回 [1,1,...]，但 buffer 被 max_width 钳制而列宽 wa 未被同步缩减，render 按原始列宽写 buffer → 越界 panic。
+**通用模式:** 所有渲染路径必须在极端输入（宽度 0/1）下做防御性检查。buffer 分配宽度与内容写入宽度必须严格一致，涉及列宽 redistribution 的代码需要通过二次归一化确保 sum(column_widths) ≤ buffer_width。
+**涉及文件:** peri-tui/src/kit/markdown/table.rs, peri-tui/src/kit/message_area/render.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-11-message-area-mouse-selection-regression
+**摘要:** 消息区鼠标拖拽选中复制功能因重构回归 + 鼠标拖拽 CPU 暴涨
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** 鼠标拖拽, ratatui-kit迁移, 文本选中, CPU暴涨, Drag事件过滤
+**问题本质:** commit 3bfb9fff 删除了 render_bridge 管线，text_selection 的数据结构依赖被切断。同时鼠标事件处理器仅过滤 Moved，Drag(Left) 穿透后触发组件重渲染 → 每帧 clone 数千行 Line → CPU 飙升。
+**通用模式:** (1) 大规模重构时必须明确标记依赖关系，迁移文档中的"后续补回"需有追踪机制。(2) 所有 Drag 类鼠标事件必须在入口处及早 return Ignored，否则高频 Drag 事件触发 state 读写 → 重渲染 → CPU 暴涨。(3) 使用 write_no_update 替代 write 避免 render body 中的 state 写入形成自激回路。
+**涉及文件:** peri-tui/src/kit/message_area.rs, peri-tui/src/kit/text_selection.rs, peri-tui/src/kit/atoms.rs
+**CLAUDE.md 链接:** true
+
+### issue_2026-07-15-setup-wizard-no-paste-login-no-edit
+**摘要:** Setup 向导 Form 不支持粘贴，Login 面板不支持编辑 Provider
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** Paste事件, BracketedPaste, 向导表单, Event过滤
+**问题本质:** handle_wizard_event 用 `let Event::Key(key) = event` 过滤了所有非按键事件，crossterm 的 Event::Paste 被直接丢弃。TUI 入口已启用 BracketedPaste，但向导未消费 Paste 事件。
+**通用模式:** 文本输入组件必须消费 Event::Paste（当 BracketedPaste 启用时）。事件过滤不应使用 `if let Event::Key` 独占模式——应同时匹配 Paste 事件。这是 BracketedPaste 基础设施就绪后应用层消费的通用模式。
+**涉及文件:** peri-tui/src/kit/setup_wizard.rs, peri-tui/src/kit/panels/login.rs
+**CLAUDE.md 链接:** true
+
+### issue_2026-07-13-config-language-switch-no-effect
+**摘要:** Config 面板语言切换无效，始终显示英文
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** i18n, 语言切换, bundle key不匹配, 错误静默丢弃
+**问题本质:** LANGUAGE_OPTS 使用 "zh"，但 i18n bundle 注册的 key 是 "zh-CN"，switch() 返回 Err 被 `let _ =` 丢弃，LANG_VERSION 递增但实际 bundle 未切换。
+**通用模式:** i18n bundle key 与 UI 选项值必须严格一致。所有可能失败的 Result 必须消费（match/log/返回），禁止 `let _ =` 丢弃——尤其当后续逻辑依赖其副作用时。
+**涉及文件:** peri-tui/src/kit/panels/config.rs, peri-tui/src/i18n/mod.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-16-system-note-cache-warning-position-wrong
+**摘要:** Cache 命中率警告 SystemNote 在消息流中位置错位
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** SystemNote, committed, current_turn flush, 消息时序, flush-then-push
+**问题本质:** SystemNotification 直接 push 到 committed（持久化队列），绕过 current_turn 的 TurnSegment 分段系统。push_view_models 按 committed + current_turn.view_models() 拼接，SystemNote 永远排在所有 current_turn 内容之前。
+**通用模式:** 所有需要时序定位的消息应先 flush current_turn → committed 再 push 新消息。遵循 "flush-then-push" 模式（与 BgCallbackBubble 一致）。直接 push committed 的消息无法与 current_turn 内容正确排序。
+**涉及文件:** peri-tui/src/kit/acp_events.rs
+**CLAUDE.md 链接:** true
+
+### issue_2026-07-11-final-ai-reply-disappear-after-turn-done
+**摘要:** 工具调用吞掉前面 AI 消息文本的显示
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** HASH_DIFF_APPEND, assistant bubble, 文本截断, VmKey::Item
+**问题本质:** render_bridge 的 HASH_DIFF_APPEND 策略按 entry 数量截断，同一 assistant bubble 可产出 2+ 个 RenderedEntry（reasoning+text），按 entry 数量截断会丢弃同 item 内的后续 entry。
+**通用模式:** 截断/分页逻辑必须在逻辑边界（如 item/fragment）而非物理边界（如 entry 数量）进行。（render_bridge 已随重构删除，本认知保留为历史参考）
+**涉及文件:** peri-tui/src/kit/render_bridge.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-13-config-panel-save-silently-discards-errors
+**摘要:** Config 面板保存失败时无错误提示、UI 仍显示修改成功
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** 保存失败, 静默丢弃, NOTIFICATION, 错误提示
+**问题本质:** 5 处 config::save() 用 `let _ =` 丢弃错误——文件权限、磁盘满等场景下保存失败但 UI 无任何反馈，重启后配置回退。
+**通用模式:** 所有用户发起的 I/O 操作必须有结果反馈：成功→通知，失败→警告+错误详情。NOTIFICATION atom 是标准反馈通道。
+**涉及文件:** peri-tui/src/kit/panels/config.rs, peri-tui/src/kit/panels/login.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-12-message-area-scrollbar-not-reaching-bottom
+**摘要:** 消息区滚动不到最末尾 + 宽度变化后滚动失效
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** 滚动条, vis_width对齐, line_count估算, 智能跟随, resize clamp
+**问题本质:** vis_width 与实际 Paragraph 渲染宽度不一致导致 content_length 估算偏大；is_loading 分支无条件 scroll_to_bottom() 忽略用户主动上滚。
+**通用模式:** (1) 任何宽度估算必须与实际渲染宽度严格一致。(2) 智能跟随需距离阈值门控，loading 和非 loading 状态共用同一阈值逻辑。
+**涉及文件:** peri-tui/src/kit/message_area/mod.rs, peri-tui/src/kit/message_area/scroll.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-12-message-area-copy-unicode-misalignment
+**摘要:** 消息区拖拽复制时 Unicode 字符后段错位
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** Unicode宽度, CJK偏移, wrap_byte_starts, visual_col, Paragraph::wrap
+**问题本质:** 折行偏移公式用 width×k 估算，未对齐 ratatui 实际 WordWrapper 行为——CJK 被当作无空格长 word，超宽不拆分，每视觉行占列数不固定。
+**通用模式:** Unicode 文本的视觉坐标→逻辑偏移转换必须使用与渲染引擎一致的计算方式。ratatui 场景下用 Paragraph::wrap 渲染到 offscreen Buffer 后按 cell 流匹配是唯一 100% 复刻实际 wrap 行为的方法。双宽字符要区分左半/右半边界。
+**涉及文件:** peri-tui/src/kit/message_area/selection.rs, peri-tui/src/kit/text_selection.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-15-markdown-table-raw-text-streaming
+**摘要:** Markdown 表格流式输出时显示为原始 pipe 格式
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** 增量缓存, pulldown-cmark, 表格header, can_reuse, block类型变更
+**问题本质:** 流式输出时表格 header 先到→pulldown-cmark 解析为 Paragraph→增量缓存持久化。分隔符+数据行到达后 block 从 Paragraph 翻转为 Table，但 can_reuse 仅检查 block 数量（1≤1），未检测到类型变更→Table 被跳过，旧 Paragraph 中的 pipe 文本残留。
+**通用模式:** 增量缓存的 can_reuse 条件必须覆盖 block 类型变更场景——当输入文本前缀可能导致 pulldown-cmark 重新解析出不同 block 类型时，缓存必须失效全量重跑。对"可能是某种特殊语法的段落"标记潜在类型，纳入缓存失效条件。
+**涉及文件:** peri-tui/src/kit/markdown/convert.rs, peri-tui/src/kit/markdown/mod.rs
+**CLAUDE.md 链接:** true
+
+### issue_2026-07-10-brewed-summary-missing-in-empty-state
+**摘要:** MessageArea 空态时不显示 Brewed 总结行
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** Brewed总结, 单帧延迟, footer耦合, 空态Welcome
+**问题本质:** has_summary 检查在 mutation block 之前→loading 结束那帧读到旧值早退；footer 内嵌 ScrollView 内容中→空态 Welcome 早退分支丢弃 footer。
+**通用模式:** 状态读取应在 mutation 之后而非之前，避免单帧延迟。footer 应从 ScrollView 内容中解耦——空态时独立渲染 footer。
+**涉及文件:** peri-tui/src/kit/message_area.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-13-model-login-panel-persistence-lost
+**摘要:** Model/Login 面板切换后重启配置丢失 + 状态栏更新延迟
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** 持久化丢失, config::save(), 状态栏延迟, SERVICE_SNAPSHOT, PROVIDER_LIST
+**问题本质:** model 面板切换后未调用 config::save()，login 面板过快同步写导致 PROVIDER_LIST.is_active 未同步更新。
+**通用模式:** 任何修改全局配置的面板操作后必须同时：① 更新内存 config handle ② 调 save() 持久化 ③ 更新 SERVICE_SNAPSHOT ④ 推送 update_config 到 agent。
+**涉及文件:** peri-tui/src/kit/panels/model.rs, peri-tui/src/kit/panels/login.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-11-cancel-no-rollback-no-restore
+**摘要:** Ctrl+C 取消后未回滚用户消息、未恢复文本到输入框
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** Ctrl+C回滚, TurnInterrupted, 零产出, 文本恢复, v1回归
+**问题本质:** kit 单路径迁移丢失 v1 的回滚逻辑。TurnInterrupted 处理器缺少零产出分支：移除用户气泡 + 恢复文本到输入框。
+**通用模式:** 架构迁移需做功能回归矩阵——迁移文档中的"后续补回"标记不能替代回归测试。取消操作的零产出回滚是标准 UX 模式：无 AI 产出时 undo 用户操作。
+**涉及文件:** peri-tui/src/kit/acp_events.rs, peri-tui/src/kit/atoms.rs, peri-tui/src/kit/input_area.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-16-model-login-switch-not-effective-until-restart
+**摘要:** /login 和 /model 面板切换后不立即生效，需重启
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** 配置推送, update_config, AgentPool, WorkflowAgentContext, provider共享
+**问题本质:** (1) 面板写了 PERI_CONFIG_HANDLE 但 agent 的 ctx.provider 是独立 RwLock，pool 缓存未失效。(2) WorkflowAgentContext.provider 是裸值复制，非共享 Arc，配置变更后不可见。
+**通用模式:** 配置变更必须同时：更新持久化存储 → client.update_config() 推送 → invalidate agent_pool 缓存 → 重建 provider。对 workflow/SubAgent，provider 必须共享 Arc<RwLock<>> 而非裸值复制。
+**涉及文件:** peri-tui/src/kit/panels/login.rs, peri-tui/src/kit/panels/model.rs, peri-acp/src/agent/workflow_agent.rs, peri-tui/src/acp_server/, peri-tui/src/acp_stdio/
+**CLAUDE.md 链接:** true

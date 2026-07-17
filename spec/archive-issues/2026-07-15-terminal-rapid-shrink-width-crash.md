@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-15-terminal-rapid-shrink-width-crash.md
 # 快速缩小终端宽度到极小值时程序直接退出崩溃
 
 **状态**：Fixed

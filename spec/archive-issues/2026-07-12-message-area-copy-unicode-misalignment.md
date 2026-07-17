@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-12-message-area-copy-unicode-misalignment.md
 # 消息区拖拽复制时 Unicode 字符后段错位（越往后偏移越大）
 
 **状态**：Fixed

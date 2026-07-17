@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-12-message-area-scrollbar-not-reaching-bottom.md
 # 消息区滚动不到最末尾（内容+滚动条均未到底）+ 宽度变化后滚动失效
 
 **状态**：Fixed

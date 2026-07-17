@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-11-final-ai-reply-disappear-after-turn-done.md
 # 工具调用吞掉前面 AI 消息文本的显示
 
 **状态**：Fixed

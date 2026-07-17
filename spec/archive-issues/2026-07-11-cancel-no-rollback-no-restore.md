@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-11-cancel-no-rollback-no-restore.md
 # Ctrl+C 取消后未回滚用户消息、未恢复文本到输入框
 
 **状态**：fixed

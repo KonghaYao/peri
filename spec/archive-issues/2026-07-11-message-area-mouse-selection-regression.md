@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-11-message-area-mouse-selection-regression.md
 # 消息区鼠标拖拽选中复制功能因重构回归 + 鼠标拖拽 CPU 暴涨
 
 **状态**：Fixed

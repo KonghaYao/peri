@@ -1,3 +1,4 @@
+> 归档于 2026-07-17，原路径 spec/issues/2026-07-10-brewed-summary-missing-in-empty-state.md
 # MessageArea 空态时不显示「✻ Brewed for Xm Xs」总结行
 
 **状态**：Fixed
