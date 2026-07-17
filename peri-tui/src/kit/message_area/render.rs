@@ -275,32 +275,27 @@ fn render_reasoning_block(
     if !reasoning.collapsed {
         let style = Style::default().fg(semantic.text.dim).italic();
         let prefix = " \u{23bf} ";
-        let cont_prefix = "   "; // 3 空格，视觉宽度与 prefix 一致
         let max_text_width = width.saturating_sub(3); // prefix " ⏿ " 占 3 列
+        // “…” 占 1 列（U+2026），当线条被截断时需要保留
+        let ellipsis_width = 1usize;
         let tail_lines: Vec<&str> = reasoning.text.lines().rev().take(3).collect();
 
         for tail in tail_lines.into_iter().rev() {
             if tail.is_empty() {
                 continue;
             }
-            let text_width = tail.width();
-            if text_width <= max_text_width {
-                lines.push(Line::from(vec![
-                    Span::styled(prefix.to_string(), style),
-                    Span::styled(tail.to_string(), style),
-                ]));
+            // [Fix] thinking 预览行不折行、不 pre-split——直接按 visual width 截断。
+            // 每条 thinking 行强制占 1 个 visual row，流式期间 block 高度完全稳定，
+            // 不会把下方响应文本"推出视野又拉回"。
+            let truncated = if tail.width() <= max_text_width {
+                tail.to_string()
             } else {
-                // [Fix] 手动按视觉宽度 pre-split，不让 Paragraph::wrap 自动换行。
-                // 段落层面的自动换行会导致每 token 到达时视觉行数变化（"推出去又拉回"），
-                // 预分割后每个 Line ≤ width，Paragraph 不再参与换行，视觉行数稳定。
-                lines.extend(split_to_lines(
-                    tail,
-                    prefix,
-                    cont_prefix,
-                    max_text_width,
-                    style,
-                ));
-            }
+                truncate_to_width(tail, max_text_width.saturating_sub(ellipsis_width)) + "\u{2026}"
+            };
+            lines.push(Line::from(vec![
+                Span::styled(prefix.to_string(), style),
+                Span::styled(truncated, style),
+            ]));
         }
     }
     lines.push(Line::from(""));
@@ -308,43 +303,18 @@ fn render_reasoning_block(
     lines
 }
 
-/// 按视觉宽度 pre-split 文本，返回 ≤max_text_width 的 Line 列表。
-/// 首行用 `prefix`，后续行用 `cont_prefix`。Paragraph 不会对 ≤width 的 Line 自动换行。
-fn split_to_lines(
-    text: &str,
-    prefix: &str,
-    cont_prefix: &str,
-    max_text_width: usize,
-    style: Style,
-) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    let mut char_width = 0;
-    let mut first = true;
-
+/// 按 visual width 截断文本，返回 ≤max_width 列的 prefix-free 字符串。
+/// CJK 安全：使用 UnicodeWidthStr::width() 而非字节/字符计数。
+fn truncate_to_width(text: &str, max_width: usize) -> String {
+    let mut w = 0usize;
     for (i, c) in text.char_indices() {
         let cw = c.width().unwrap_or(1);
-        if char_width + cw > max_text_width && char_width > 0 {
-            let p = if first { prefix } else { cont_prefix };
-            out.push(Line::from(vec![
-                Span::styled(p.to_string(), style),
-                Span::styled(text[start..i].to_string(), style),
-            ]));
-            first = false;
-            start = i;
-            char_width = cw;
-        } else {
-            char_width += cw;
+        if w + cw > max_width {
+            return text[..i].to_string();
         }
+        w += cw;
     }
-    if start < text.len() {
-        let p = if first { prefix } else { cont_prefix };
-        out.push(Line::from(vec![
-            Span::styled(p.to_string(), style),
-            Span::styled(text[start..].to_string(), style),
-        ]));
-    }
-    out
+    text.to_string()
 }
 
 fn render_reminder_condensed(
