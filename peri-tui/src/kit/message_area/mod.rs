@@ -500,7 +500,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             Text(
                 text: Paragraph::new(RatText::from(viewport_lines))
                     .wrap(Wrap { trim: false }),
-                scroll: Position::new(scroll_offset_y as u16, 0),
+                scroll: Position::new(scroll_offset_y, 0),
             )
         }
     )
