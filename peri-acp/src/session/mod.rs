@@ -333,25 +333,26 @@ impl SessionManager {
 
     /// 确保指定 session 的 caps 已在 registry 中注册。
     ///
-    /// - 如果 registry 中已有条目 → 直接返回已有值（load/resume 已注册过）。
-    /// - 如果 `pending_caps_was_set()`（stdio 路径有 initialize）→ consume 暂存值。
-    /// - 否则（MpscTransport / TUI 内部路径，无 initialize）→ 使用 `all_enabled()`。
+    /// - registry 已有条目 → 直接返回（幂等）。
+    /// - `pending_caps` 有值（stdio 路径经过 initialize）→ take 并写入。
+    /// - 否则（MpscTransport / TUI 内部路径，无 initialize）→ 写入 `all_enabled()`。
     ///
     /// 幂等：重复调用不会覆盖已有值。
+    /// 与 `consume_pending_caps` 的 lock 独立操作，避免 TOCTOU 竞态。
     pub fn ensure_session_caps(&self, session_id: &str) -> PeriCaps {
         // 已有注册 → 直接返回（幂等）
         if let Some(caps) = self.inner.caps_registry.get(session_id) {
             return caps.clone();
         }
-        if self.pending_caps_was_set() {
-            self.consume_pending_caps(session_id)
-        } else {
-            let caps = PeriCaps::all_enabled();
-            self.inner
-                .caps_registry
-                .insert(session_id.to_string(), caps.clone());
-            caps
-        }
+        // 原子地 take pending_caps：有 → 用协商值，无 → 默认全启用
+        let caps = {
+            let mut pending = self.inner.pending_caps.lock();
+            pending.take().unwrap_or_else(PeriCaps::all_enabled)
+        };
+        self.inner
+            .caps_registry
+            .insert(session_id.to_string(), caps.clone());
+        caps
     }
 
     /// 构建会话级 frozen 数据（统一构造入口，消除 TUI/stdio 重复 5 处）。
