@@ -3,6 +3,7 @@
 //! Tests key components end-to-end: transport, broker, event mapping.
 
 use agent_client_protocol::schema::v1::SessionId;
+use peri_acp_types::PeriCaps;
 use serde_json::json;
 
 #[tokio::test]
@@ -83,7 +84,7 @@ async fn test_event_mapper_tool_start() {
         source_agent_id: None,
     };
 
-    let mapped = map_event(&event, 200000);
+    let mapped = map_event(&event, 200000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1, "ToolStart must produce one MappedEvent");
     assert!(
         !mapped[0].updates.is_empty(),
@@ -107,7 +108,7 @@ async fn test_event_mapper_text_chunk() {
         source_agent_id: None,
     };
 
-    let mapped = map_event(&event, 200000);
+    let mapped = map_event(&event, 200000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1, "TextChunk must produce one MappedEvent");
     assert!(
         !mapped[0].updates.is_empty(),
@@ -144,7 +145,7 @@ fn test_event_mapper_todo_update_maps_to_plan() {
         },
     ]);
 
-    let mapped = map_event(&event, 200000);
+    let mapped = map_event(&event, 200000, &PeriCaps::default());
     assert_eq!(
         mapped.len(),
         1,

@@ -93,7 +93,11 @@ async fn test_bg_event_pump_receives_all_completions() {
     };
 
     let (client_transport, server_transport) = mpsc_transport_pair();
-    let sink = Arc::new(TransportEventSink::new(Arc::new(server_transport)));
+    let caps_registry = std::sync::Arc::new(dashmap::DashMap::new());
+    let sink = Arc::new(TransportEventSink::new(
+        Arc::new(server_transport),
+        caps_registry,
+    ));
     let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
 
     let session_id = "test-session".to_string();

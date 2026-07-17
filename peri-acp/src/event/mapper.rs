@@ -19,6 +19,7 @@ use agent_client_protocol::schema::v1::{
     TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     UsageUpdate,
 };
+use peri_acp_types::PeriCaps;
 use peri_agent::agent::events::ExecutorEvent;
 
 /// Result of mapping a single [`ExecutorEvent`].
@@ -137,7 +138,7 @@ impl MappedEvent {
 /// - ② HITL 审批：broadcast 独立审批通道
 /// - ③ TUI 专用：peri/agent_event 通知
 /// - ④ 观测层：broadcast 给外部监听器
-pub fn map_event(event: &ExecutorEvent, context_window: u32) -> Vec<MappedEvent> {
+pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) -> Vec<MappedEvent> {
     match event {
         // ── Category ①: Full SessionUpdate ─────────────────────────────────────────
         ExecutorEvent::TextChunk {
@@ -244,29 +245,35 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32) -> Vec<MappedEvent>
             stop_reason,
             ..
         } => {
-            let mut meta = serde_json::Map::new();
-            meta.insert("inputTokens".into(), serde_json::json!(u.input_tokens));
-            meta.insert("outputTokens".into(), serde_json::json!(u.output_tokens));
-            if let Some(v) = u.cache_creation_input_tokens {
-                meta.insert("cacheCreationTokens".into(), serde_json::json!(v));
-            }
-            if let Some(v) = u.cache_read_input_tokens {
-                meta.insert("cacheReadTokens".into(), serde_json::json!(v));
-            }
-            if let Some(ref rid) = u.request_id {
-                meta.insert("requestId".into(), serde_json::json!(rid));
-            }
-            meta.insert("model".into(), serde_json::json!(model));
-            if let Some(ref sr) = stop_reason {
-                meta.insert("stopReason".into(), serde_json::json!(sr.to_string()));
-            }
+            let update = UsageUpdate::new(
+                u64::from(u.input_tokens) + u64::from(u.output_tokens),
+                u64::from(context_window),
+            );
+            // 只有当 tokenStats cap 为 true 时才附加 _meta
+            let update = if caps.token_stats {
+                let mut meta = serde_json::Map::new();
+                meta.insert("inputTokens".into(), serde_json::json!(u.input_tokens));
+                meta.insert("outputTokens".into(), serde_json::json!(u.output_tokens));
+                if let Some(v) = u.cache_creation_input_tokens {
+                    meta.insert("cacheCreationTokens".into(), serde_json::json!(v));
+                }
+                if let Some(v) = u.cache_read_input_tokens {
+                    meta.insert("cacheReadTokens".into(), serde_json::json!(v));
+                }
+                if let Some(ref rid) = u.request_id {
+                    meta.insert("requestId".into(), serde_json::json!(rid));
+                }
+                meta.insert("model".into(), serde_json::json!(model));
+                if let Some(ref sr) = stop_reason {
+                    meta.insert("stopReason".into(), serde_json::json!(sr.to_string()));
+                }
+                update.meta(meta)
+            } else {
+                update
+            };
 
             vec![MappedEvent::standard(vec![SessionUpdate::UsageUpdate(
-                UsageUpdate::new(
-                    u64::from(u.input_tokens) + u64::from(u.output_tokens),
-                    u64::from(context_window),
-                )
-                .meta(meta),
+                update,
             )])]
         }
 

@@ -319,6 +319,12 @@ impl SessionManager {
             .unwrap_or_default()
     }
 
+    /// 获取 caps_registry 的 Arc clone，用于传递给 TransportEventSink
+    /// 等需独立访问 registry 的组件。
+    pub fn caps_registry(&self) -> Arc<DashMap<String, PeriCaps>> {
+        self.inner.caps_registry.clone()
+    }
+
     /// 构建会话级 frozen 数据（统一构造入口，消除 TUI/stdio 重复 5 处）。
     ///
     /// 封装 [`crate::session::frozen::build_frozen_session_data`]，

@@ -10,8 +10,11 @@ pub use agent_client_protocol::{
     Client, ConnectionTo,
 };
 use async_trait::async_trait;
+use dashmap::DashMap;
+use peri_acp_types::PeriCaps;
 use peri_agent::agent::events::ExecutorEvent;
 use serde_json::json;
+use std::sync::Arc;
 use tracing::{debug, error};
 
 use crate::{event::map_event, event::router, transport::AcpTransport};
@@ -57,11 +60,18 @@ pub trait EventSink: Send + Sync {
 /// `peri/unstable-event` notifications for new-protocol consumers.
 pub struct TransportEventSink {
     transport: std::sync::Arc<dyn AcpTransport>,
+    caps_registry: Arc<DashMap<String, PeriCaps>>,
 }
 
 impl TransportEventSink {
-    pub fn new(transport: std::sync::Arc<dyn AcpTransport>) -> Self {
-        Self { transport }
+    pub fn new(
+        transport: std::sync::Arc<dyn AcpTransport>,
+        caps_registry: Arc<DashMap<String, PeriCaps>>,
+    ) -> Self {
+        Self {
+            transport,
+            caps_registry,
+        }
     }
 
     /// Push a `{event, data}` custom event through `peri/unstable-event` channel.
@@ -91,7 +101,12 @@ impl TransportEventSink {
 #[async_trait]
 impl EventSink for TransportEventSink {
     async fn push_event(&self, session_id: &str, event: &ExecutorEvent, context_window: u32) {
-        let mapped = map_event(event, context_window);
+        let caps = self
+            .caps_registry
+            .get(session_id)
+            .map(|r| r.clone())
+            .unwrap_or_default();
+        let mapped = map_event(event, context_window, &caps);
 
         for m in mapped {
             // 1. session/update — 标准 ACP 通知（Category ①）
@@ -110,9 +125,11 @@ impl EventSink for TransportEventSink {
                     "update": update_value,
                 });
                 // Inject _peri metadata for TUI consumption (source_agent_id)
-                if let Some(ref aid) = m.source_agent_id {
-                    if let serde_json::Value::Object(ref mut map) = payload {
-                        map.insert("_peri".to_string(), json!({ "sourceAgentId": aid }));
+                if caps.source_agent_id {
+                    if let Some(ref aid) = m.source_agent_id {
+                        if let serde_json::Value::Object(ref mut map) = payload {
+                            map.insert("_peri".to_string(), json!({ "sourceAgentId": aid }));
+                        }
                     }
                 }
                 let _ = self
@@ -123,25 +140,32 @@ impl EventSink for TransportEventSink {
 
             // 2. peri/agent_event — TUI 专用事件（Category ③）
             // Convert ExecutorEvent → AcpEvent DTO before serialization.
+            // StateSnapshotMeta 仅在 contextUsage cap 为 true 时转发。
             if m.forward_to_tui {
-                if let Some(acp_event) = crate::event::executor_event_to_acp(event) {
-                    let event_json = match serde_json::to_string(&acp_event) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!(error = %e, "EventSink: serialize AcpEvent failed");
-                            continue;
+                let should_forward = match event {
+                    ExecutorEvent::StateSnapshotMeta { .. } => caps.context_usage,
+                    _ => true,
+                };
+                if should_forward {
+                    if let Some(acp_event) = crate::event::executor_event_to_acp(event) {
+                        let event_json = match serde_json::to_string(&acp_event) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                error!(error = %e, "EventSink: serialize AcpEvent failed");
+                                continue;
+                            }
+                        };
+                        let agent_event_params = json!({
+                            "sessionId": session_id,
+                            "event_json": event_json,
+                        });
+                        if let Err(e) = self
+                            .transport
+                            .send_notification("peri/agent_event", agent_event_params)
+                            .await
+                        {
+                            error!(error = %e, "EventSink: send peri/agent_event failed");
                         }
-                    };
-                    let agent_event_params = json!({
-                        "sessionId": session_id,
-                        "event_json": event_json,
-                    });
-                    if let Err(e) = self
-                        .transport
-                        .send_notification("peri/agent_event", agent_event_params)
-                        .await
-                    {
-                        error!(error = %e, "EventSink: send peri/agent_event failed");
                     }
                 }
             }
@@ -257,7 +281,7 @@ impl StdioEventSink {
 #[async_trait]
 impl EventSink for StdioEventSink {
     async fn push_event(&self, _session_id: &str, event: &ExecutorEvent, context_window: u32) {
-        let mapped = map_event(event, context_window);
+        let mapped = map_event(event, context_window, &PeriCaps::default());
         for m in mapped {
             for update in m.updates {
                 let notif = SessionNotification::new(self.session_id.clone(), update);
