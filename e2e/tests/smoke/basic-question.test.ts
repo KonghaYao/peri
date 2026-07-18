@@ -3,7 +3,7 @@
  *
  * 这是 e2e 管线的最小可验证单元。
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
 import { judge } from "../../helpers/judge.js";
 import { updateJudgeResult } from "../../helpers/recorder.js";
@@ -22,41 +22,35 @@ describe("peri e2e smoke", () => {
     "启动后提问并验证回答",
     { timeout: 300_000 },
     async () => {
-      // 启动 peri
       tester = await launchPeri({ debug: true });
 
-      // 发送问题
+      // 记录初始屏幕
+      const initial = await tester.getScreenText();
+
       await sendPrompt(tester, "hello");
 
-      // 等待 AI 回答完成
-      // 策略：先等待屏幕内容发生显著变化（说明输入被处理），再等待屏幕稳定
-      const initialLen = (await tester.getScreenText()).length;
-      let changed = false;
+      // 两阶段等待（利用 tui-tester 的 waitFor 内置轮询）
+      // 1. 等待屏幕变化（输入被处理）
+      await tester.waitFor(
+        (screen) => screen !== initial,
+        { timeout: 30_000, interval: 500, message: "屏幕未发生变化，输入可能未被处理" },
+      );
 
-      for (let i = 0; i < 60; i++) {
-        await tester.sleep(2000);
-        const screen = await tester.getScreenText();
-        const len = screen.length;
-        // 屏幕长度变化超过 200 字符认为发生了内容变化
-        if (!changed && Math.abs(len - initialLen) > 200) {
-          changed = true;
-        }
-        if (changed && len > 50 && i > 2) {
-          break; // 变化后等 2 轮确认
-        }
-      }
+      // 2. 等待屏幕稳定（LLM 回复完成）
+      await waitForStableScreen(tester, 120_000);
+
+      // 基本断言
+      await tester.assertScreenContains("hello", { ignoreAnsi: true });
 
       // 抓 snapshot
       const capture = await takePeriSnapshot(tester, "basic-question-response");
 
-      // 简单断言：屏幕不应为空
-      expect(capture.text.length).toBeGreaterThan(0);
+      // 简单断言
+      expect(capture.text.length).toBeGreaterThan(100);
 
-      // LLM judge 断言：检查关键元素
-      // judge 失败不阻断测试（e2e judge 是辅助性的）
-      let judgeResult: Awaited<ReturnType<typeof judge>> | null = null;
+      // LLM judge
       try {
-        judgeResult = await judge({
+        const judgeResult = await judge({
           ansiRaw: capture.raw,
           criteria: [
             "消息区域应该有 AI 的回复内容（不只是空白或加载状态）",
@@ -77,18 +71,35 @@ describe("peri e2e smoke", () => {
         if (!judgeResult.pass) {
           console.warn(
             "⚠ LLM judge 判定不通过:",
-            judgeResult.checks
-              .filter((c) => !c.pass)
-              .map((c) => c.detail)
-              .join("; "),
+            judgeResult.checks.filter((c) => !c.pass).map((c) => c.detail).join("; "),
           );
         }
       } catch (err: any) {
         console.warn("⚠ LLM judge 调用失败（不影响测试结果）:", err.message);
       }
-
-      // 基础断言确保核心流程跑通了
-      expect(capture.text.length).toBeGreaterThan(0);
     },
   );
 });
+
+/**
+ * 等待屏幕内容稳定（连续 3 次轮询无变化）
+ * 利用 tui-tester 的 waitFor 内置轮询，外层 wrapper 存储状态
+ */
+async function waitForStableScreen(tester: TmuxTester, timeout: number): Promise<void> {
+  let lastLen = 0;
+  let stableCount = 0;
+
+  await tester.waitFor(
+    (screen) => {
+      const len = screen.length;
+      if (len > 50 && len === lastLen) {
+        stableCount++;
+      } else {
+        stableCount = 0;
+      }
+      lastLen = len;
+      return stableCount >= 4;
+    },
+    { timeout, interval: 1500, message: "屏幕未能在超时时间内稳定" },
+  );
+}
