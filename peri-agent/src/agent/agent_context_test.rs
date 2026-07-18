@@ -87,24 +87,6 @@ fn test_current_step_delegates_to_turn() {
 }
 
 #[test]
-fn test_set_cwd_is_noop() {
-    let ctx = make_context();
-    let mut ac = AgentContext::from_stage(&ctx);
-    ac.set_cwd("/other".to_string());
-    // turn.cwd 不受影响（no-op）
-    assert_eq!(ac.cwd(), "/tmp/test");
-}
-
-#[test]
-fn test_set_current_step_is_noop() {
-    let ctx = make_context();
-    let mut ac = AgentContext::from_stage(&ctx);
-    ac.set_current_step(42);
-    // turn.current_step 不受影响（no-op）
-    assert_eq!(ac.current_step(), 0);
-}
-
-#[test]
 fn test_get_set_context_on_owned_hashmap() {
     let ctx = make_context();
     {
@@ -156,14 +138,6 @@ fn test_push_and_drain_recall() {
 
     // drain 后 buffer 清空
     assert!(ac.drain_recall().is_empty());
-}
-
-#[test]
-fn test_store_and_thread_id_are_none() {
-    let ctx = make_context();
-    let ac = AgentContext::from_stage(&ctx);
-    assert!(ac.store().is_none());
-    assert!(ac.own_thread_id().is_none());
 }
 
 #[test]

@@ -6,8 +6,6 @@
 use crate::agent::events_v2::ObserveEvent;
 use crate::agent::stages::{append_messages_to_transcript, ReceiveInput, ReceiveOutput};
 use crate::session::MessageKind;
-#[cfg(test)]
-use crate::session::QueuedMessage;
 
 /// 运行 Receive 阶段
 ///

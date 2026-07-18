@@ -1259,7 +1259,7 @@ fn test_consecutive_tool_results_preserve_order() {
         m["role"] == "user"
             && m["content"]
                 .as_array()
-                .map_or(false, |arr| arr.iter().any(|b| b["type"] == "tool_result"))
+                .is_some_and(|arr| arr.iter().any(|b| b["type"] == "tool_result"))
     });
     let content = user_msg.unwrap()["content"].as_array().unwrap();
 
