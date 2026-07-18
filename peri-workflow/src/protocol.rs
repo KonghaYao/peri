@@ -63,6 +63,14 @@ impl AgentRunResult {
             _ => None,
         }
     }
+
+    /// 提取 agent 执行中的 token 消耗（仅 Ok 变体有值）
+    pub fn token_count(&self) -> Option<u64> {
+        match self {
+            AgentRunResult::Ok { token_count, .. } => *token_count,
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

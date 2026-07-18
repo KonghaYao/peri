@@ -145,6 +145,7 @@ pub(crate) async fn run_prompt(
             langfuse_session: None,
             thread_store: None,
             peri_config: Some(peri_config_snapshot.clone()),
+            progress_tx: None,
         },
     );
 

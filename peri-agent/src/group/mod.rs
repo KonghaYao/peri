@@ -26,17 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::events::ExecutorEvent;
 use crate::session::queue::QueuedMessage;
-
-// ─── CancelPolicy ─────────────────────────────────────────────────────────
-
-/// Cancel 策略——创建 Agent 时指定
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CancelPolicy {
-    /// 子 Agent 独立 Cancel Token，父取消不影响子
-    Independent,
-    /// 父取消级联取消子 Agent（通过 child_token 关联）
-    Cascade,
-}
+use crate::thread::CancelPolicy;
 
 // ─── AgentHandle ──────────────────────────────────────────────────────────
 

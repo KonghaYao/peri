@@ -20,6 +20,7 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
+use unicode_width::UnicodeWidthStr;
 
 #[component]
 pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -256,21 +257,28 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             .chars()
             .take(18)
             .collect::<String>();
+        // 使用 unicode_width 计算终端列宽，而非 Rust char 计数
+        let name_display_width = UnicodeWidthStr::width(name.as_str());
+        let name_pad = if name_display_width < 18 {
+            " ".repeat(18 - name_display_width)
+        } else {
+            String::new()
+        };
+        let tokens_padded = format!("{:>8}", abbreviate_count(agent.token_count.unwrap_or(0)));
+        let tools_padded = format!("{:>4}", agent.tool_count.unwrap_or(0));
         let name_style = if is_sel {
             Style::new().fg(theme.component.panel.title).bold()
         } else {
             Style::new().fg(theme.semantic.text.primary)
         };
-        let tokens = abbreviate_count(agent.token_count.unwrap_or(0));
-        let tools = format!("{}", agent.tool_count.unwrap_or(0));
         let dim_style = Style::new().fg(theme.semantic.text.dim);
 
         agent_lines.push(Line::from(vec![
             Span::styled(arrow, arrow_style),
             Span::styled(format!(" {emoji} "), emoji_color),
-            Span::styled(format!("{name:18}"), name_style),
-            Span::styled(format!(" {tokens:>8}"), dim_style),
-            Span::styled(format!("  {tools:>4}"), dim_style),
+            Span::styled(format!("{name}{name_pad}"), name_style),
+            Span::styled(format!(" {tokens_padded}"), dim_style),
+            Span::styled(format!("  {tools_padded}"), dim_style),
         ]));
     }
     if filtered_agents.is_empty() {
@@ -312,11 +320,11 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Build agents Paragraph: header + separator + visible slice
     let mut agent_text: Vec<Line<'_>> = Vec::new();
     agent_text.push(Line::from(Span::styled(
-        " Agents",
+        " Agents                 Tokens Tools",
         Style::new().fg(theme.semantic.text.muted).bold(),
     )));
     agent_text.push(Line::from(Span::styled(
-        " ──────────────",
+        " ────────────────────────────────",
         Style::new().fg(theme.semantic.border.default),
     )));
     agent_text.extend(

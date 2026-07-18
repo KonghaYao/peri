@@ -18,11 +18,172 @@
 //! - **三通道全部关闭时 task 自动退出**：`else => break` 防止 task 泄漏。
 
 use peri_agent::agent::events::ExecutorEvent;
-use peri_agent::agent::events_v2::EventHandles;
+use peri_agent::agent::events_v2::{EventHandles, ObserveEvent, RenderEvent, StateEvent};
+use peri_agent::agent::events_v2_mapper::V2Event;
+use peri_agent::llm::types::TokenUsage;
 
-use crate::event::mapper_v2::{
-    observe_event_to_executor, render_event_to_executor, state_event_to_executor,
-};
+use crate::langfuse::tracer::stages::StageHandle;
+use crate::langfuse::tracer::LangfuseTracer;
+
+use super::{observe_event_to_executor, render_event_to_executor, state_event_to_executor};
+
+// ── Langfuse v2 辅助转发函数 ──────────────────────────────────────────────
+
+/// 从 RenderEvent 转发 Langfuse 追踪事件。
+///
+/// 处理 TextChunk（累积 final_answer）与 BudgetWarning（近似映射为 budget threshold hit）。
+/// `tracer` 为 `None`（遥测禁用）时立即返回。
+fn forward_langfuse_render(
+    tracer: &Option<std::sync::Arc<parking_lot::Mutex<LangfuseTracer>>>,
+    ev: &RenderEvent,
+) {
+    let Some(ref tracer) = tracer else {
+        return;
+    };
+    match ev {
+        RenderEvent::TextChunk { chunk, .. } => {
+            tracer.lock().on_text_chunk(chunk);
+        }
+        RenderEvent::BudgetWarning {
+            percentage,
+            used_tokens,
+            total_tokens,
+            ..
+        } => {
+            tracer.lock().on_budget_threshold_hit(
+                "context_window",
+                *percentage,
+                *used_tokens,
+                *total_tokens,
+            );
+        }
+        _ => {}
+    }
+}
+
+/// 从 StateEvent 转发 Langfuse 追踪事件。
+///
+/// 当前为 no-op：StateEvent 无对应的 Langfuse tracer 方法。
+fn forward_langfuse_state(
+    _tracer: &Option<std::sync::Arc<parking_lot::Mutex<LangfuseTracer>>>,
+    _ev: &StateEvent,
+) {
+    // no-op: StateEvent 无 Langfuse 映射
+}
+
+/// 从 ObserveEvent 转发 Langfuse 追踪事件。
+///
+/// 处理 LlmCallStart/End/Payload、CompactStarted/MessagesCompacted、
+/// StageStarted/Ended、MessageQueueDrained、AiReasoningChunk。
+///
+/// `active_stage` 用于在 StageStarted/StageEnded 间传递 `StageHandle`，
+/// 实现 stage span 的条件上报语义。
+fn forward_langfuse_observe(
+    tracer: &Option<std::sync::Arc<parking_lot::Mutex<LangfuseTracer>>>,
+    ev: &ObserveEvent,
+    provider_display_name: &str,
+    active_stage: &mut Option<StageHandle>,
+) {
+    let Some(ref tracer) = tracer else {
+        return;
+    };
+    match ev {
+        ObserveEvent::LlmCallStart {
+            step,
+            messages,
+            tools,
+            ..
+        } => {
+            tracer.lock().on_llm_start(*step, messages, tools);
+        }
+        ObserveEvent::LlmCallEnd {
+            step,
+            model,
+            output,
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            request_id,
+            ..
+        } => {
+            let usage = TokenUsage {
+                input_tokens: *input_tokens as u32,
+                output_tokens: *output_tokens as u32,
+                cache_creation_input_tokens: if *cache_creation_input_tokens > 0 {
+                    Some(*cache_creation_input_tokens as u32)
+                } else {
+                    None
+                },
+                cache_read_input_tokens: if *cache_read_input_tokens > 0 {
+                    Some(*cache_read_input_tokens as u32)
+                } else {
+                    None
+                },
+                request_id: request_id.clone(),
+            };
+            tracer
+                .lock()
+                .on_llm_end(*step, model, provider_display_name, output, Some(&usage));
+        }
+        ObserveEvent::LlmRequestPayload { step, body, .. } => {
+            tracer
+                .lock()
+                .on_llm_request_payload(*step, std::sync::Arc::clone(body));
+        }
+        ObserveEvent::CompactStarted { .. } => {
+            tracer.lock().on_compact_start();
+        }
+        ObserveEvent::MessagesCompacted {
+            summary,
+            files,
+            skills,
+            ..
+        } => {
+            tracer.lock().on_compact_end(
+                summary,
+                files.len(),
+                skills.len(),
+                0,     // micro_cleared: v2 无此字段，用 0
+                false, // is_error
+                "",
+            );
+        }
+        ObserveEvent::StageStarted { stage, turn_id, .. } => {
+            let (trace_id, agent_observation_id) = {
+                let t = tracer.lock();
+                (t.trace_id.clone(), t.agent_observation_id.clone())
+            };
+            let mut t = tracer.lock();
+            let handle = t.stages.on_stage_start(
+                *stage,
+                &trace_id,
+                &turn_id.to_string(),
+                &agent_observation_id,
+            );
+            *active_stage = Some(handle);
+        }
+        ObserveEvent::StageEnded { status, .. } => {
+            if let Some(handle) = active_stage.take() {
+                tracer.lock().on_stage_end(&handle, *status);
+            }
+        }
+        ObserveEvent::MessageQueueDrained {
+            prompt,
+            defer,
+            info,
+            ..
+        } => {
+            tracer.lock().on_mq_drained(*prompt, *defer, *info);
+        }
+        ObserveEvent::AiReasoningChunk { text, .. } => {
+            tracer.lock().on_ai_reasoning_chunk(text);
+        }
+        // TurnError / SubagentStart / SubagentStop → 无 v1 Langfuse 映射，
+        // 通过 v2→v1 mapper 产生 ExecutorEvent 到达 pump tail。
+        _ => {}
+    }
+}
 
 /// 启动 EventBus forwarder task。
 ///
@@ -42,22 +203,34 @@ use crate::event::mapper_v2::{
 /// # 不变量
 ///
 /// 见模块顶部文档——biased select 顺序、render 先于 state、observe Lagged 容错。
-pub fn spawn_eventbus_forwarder<F>(mut handles: EventHandles, on_event: F)
-where
+pub fn spawn_eventbus_forwarder<F>(
+    mut handles: EventHandles,
+    on_event: F,
+    langfuse_tracer: Option<std::sync::Arc<parking_lot::Mutex<LangfuseTracer>>>,
+    provider_display_name: String,
+) where
     F: Fn(ExecutorEvent) + Send + Sync + 'static,
 {
     tokio::spawn(async move {
+        let mut active_stage: Option<StageHandle> = None;
         loop {
             // biased + render 优先：保证 Render 通道（含 TurnCompleted）先于 State 通道
             // 被消费，否则 partial 污染（详见模块顶部不变量注释）。
             tokio::select! {
                 biased;
                 Some(ev) = handles.render_rx.recv() => {
+                    // Phase A: 扇出到 TUI v2 直连通道（双轨运行，与 ACP 路径并存）
+                    crate::event::v2_channel::try_send_v2_event(V2Event::from_render(ev.clone()));
+                    // Langfuse v2: render 层追踪（TextChunk, BudgetWarning）
+                    forward_langfuse_render(&langfuse_tracer, &ev);
                     if let Some(exec_ev) = render_event_to_executor(ev) {
                         on_event(exec_ev);
                     }
                 }
                 Some(ev) = handles.state_rx.recv() => {
+                    crate::event::v2_channel::try_send_v2_event(V2Event::from_state(ev.clone()));
+                    // Langfuse v2: state 层追踪（当前 no-op）
+                    forward_langfuse_state(&langfuse_tracer, &ev);
                     if let Some(exec_ev) = state_event_to_executor(ev) {
                         on_event(exec_ev);
                     }
@@ -65,6 +238,9 @@ where
                 ev_res = handles.observe_rx.recv() => {
                     match ev_res {
                         Ok(ev) => {
+                            crate::event::v2_channel::try_send_v2_event(V2Event::from_observe(ev.clone()));
+                            // Langfuse v2: observe 层追踪（LLM/Tool/Stage/Compact）
+                            forward_langfuse_observe(&langfuse_tracer, &ev, &provider_display_name, &mut active_stage);
                             if let Some(exec_ev) = observe_event_to_executor(ev) {
                                 on_event(exec_ev);
                             }

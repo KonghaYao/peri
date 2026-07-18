@@ -57,8 +57,7 @@ use tracing::debug;
 
 use crate::{
     agent::builder::{self, AcpAgentConfig},
-    langfuse::LangfuseSession,
-    prompt::{build_system_prompt, PromptFeatures},
+    langfuse::{LangfuseSession, LangfuseTracer},
     provider::LlmProvider,
     session::{
         agent_pool::{AgentPool, CachedLlmInstances},
@@ -657,6 +656,21 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         effective_context_window,
     };
 
+    // Lift Langfuse tracer creation to inject it into both
+    // spawn_event_pump (pump head/tail) and build_and_execute_agent_v2 (forwarder).
+    let provider_display_name = provider.display_name().to_string();
+    let langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>> =
+        langfuse_session.as_ref().map(|s| {
+            let session_clone = Arc::clone(s);
+            let config = session_clone.config.clone();
+            let session: std::sync::Arc<dyn crate::langfuse::LangfuseSessionLike> = session_clone;
+            Arc::new(parking_lot::Mutex::new(LangfuseTracer::new(
+                session,
+                session_id.clone(),
+                config,
+            )))
+        });
+
     // Main event pump
     let (stop_reason_tx, stop_reason_rx) = exec_oneshot::channel::<PromptStopReason>();
     let pump_handle = spawn_event_pump(SpawnPumpRequest {
@@ -665,9 +679,8 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         sink: Arc::clone(&event_sink),
         session_id: session_id.clone(),
         effective_context_window,
-        langfuse_session: langfuse_session.clone(),
+        langfuse_tracer: langfuse_tracer.clone(),
         trace_input: trace_input.to_string(),
-        provider_display_name: provider.display_name().to_string(),
     });
 
     // transport-aware: 仅 TUI 路径（allow_await_wake=true）注入 idle_inbox，
@@ -706,6 +719,8 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         shared_tools,
         lsp_servers,
         langfuse_session,
+        langfuse_tracer,
+        provider_display_name,
         pool,
         thread_store,
         thread_id,
@@ -764,6 +779,10 @@ struct BuildAgentRequest<'a> {
     >,
     lsp_servers: Vec<peri_lsp::config::LspServerConfig>,
     langfuse_session: Option<Arc<LangfuseSession>>,
+    /// Langfuse tracer (lifted from pump to inject into EventBus forwarder).
+    langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
+    /// Provider display name for Langfuse Generation model attribution.
+    provider_display_name: String,
     pool: Arc<parking_lot::Mutex<AgentPool>>,
     thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
     thread_id: Option<String>,
@@ -820,6 +839,8 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         shared_tools,
         lsp_servers,
         langfuse_session: _langfuse_session,
+        langfuse_tracer,
+        provider_display_name,
         pool,
         thread_store,
         thread_id,
@@ -1067,7 +1088,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         }),
     };
 
-    // v2 stages 唯一路径（P5 后 v1 已物理删除，PERI_USE_V1 不再生效）。
+    // v2 单一路径。
     // v2 MessageQueue 已由 run_session_loop 解析并透传（避免重复解析 + 统一 bg_results/Path B 注入）。
     return build_and_execute_agent_v2(
         cfg,
@@ -1084,6 +1105,8 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         async_router,
         idle_inbox,
         idle_should_wait,
+        provider_display_name,
+        langfuse_tracer,
     )
     .await;
 }

@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use peri_agent::{
     agent::{
-        events::{ExecutorEvent, Stage, TurnErrorKind, TurnStatus},
+        events::{ExecutorEvent, TurnErrorKind, TurnStatus},
         state::AgentState,
         AgentCancellationToken,
     },
@@ -44,7 +44,7 @@ use tracing::{debug, error};
 
 use crate::{
     agent::builder::AcpAgentConfig,
-    langfuse::{LangfuseSession, LangfuseTracer},
+    langfuse::LangfuseTracer,
     session::{
         agent_pool::CachedLlmInstances, async_router::AsyncRouter, event_sink::EventSink,
         SessionManager,
@@ -165,9 +165,8 @@ pub(super) struct SpawnPumpRequest {
     pub(super) sink: Arc<dyn EventSink>,
     pub(super) session_id: String,
     pub(super) effective_context_window: u32,
-    pub(super) langfuse_session: Option<Arc<LangfuseSession>>,
+    pub(super) langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
     pub(super) trace_input: String,
-    pub(super) provider_display_name: String,
 }
 
 /// 后台事件泵句柄，通过 oneshot channel 与 pump_done_rx 配对。
@@ -188,21 +187,14 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
         sink,
         session_id,
         effective_context_window,
-        langfuse_session,
+        langfuse_tracer,
         trace_input,
-        provider_display_name,
     } = req;
 
     let (pump_done_tx, pump_done_rx) = oneshot::channel();
 
-    let langfuse_tracer = langfuse_session.as_ref().map(|s| {
-        let session_clone = Arc::clone(s);
-        let config = session_clone.config.clone();
-        let session: std::sync::Arc<dyn crate::langfuse::LangfuseSessionLike> = session_clone;
-        parking_lot::Mutex::new(LangfuseTracer::new(session, session_id.clone(), config))
-    });
     if langfuse_tracer.is_some() {
-        debug!(session_id = %session_id, "Langfuse tracer created for turn");
+        debug!(session_id = %session_id, "Langfuse tracer received for turn");
     }
 
     tokio::spawn(async move {
@@ -217,11 +209,6 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
             // Capture error_kind from TurnEnded for on_turn_end at pump tail
             if let ExecutorEvent::TurnEnded { error_kind, .. } = &exec_event {
                 last_error = error_kind.as_ref().map(|k| format!("{:?}", k));
-            }
-
-            // Langfuse tracing
-            if let Some(ref tracer) = langfuse_tracer {
-                forward_langfuse_event(tracer, &exec_event, &provider_display_name);
             }
 
             // 4. bg callback: MessageAdded → TUI flush-then-push.
@@ -247,8 +234,8 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
         }
 
         // End Langfuse trace and flush
-        let langfuse_flush = if let Some(tracer) = langfuse_tracer {
-            let handle = tracer.into_inner().on_turn_end(last_error.as_deref());
+        let langfuse_flush = if let Some(ref tracer) = langfuse_tracer {
+            let handle = tracer.lock().on_turn_end(last_error.as_deref());
             Some(handle)
         } else {
             None
@@ -289,6 +276,7 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
 /// `pub(crate)` 因被 `crate::agent::workflow_agent` 跨模块复用——
 /// workflow_agent 自身也跑一个独立的 langfuse tracer pump，事件→tracer
 /// 映射与主 executor 完全一致，避免重复实现。
+#[allow(dead_code)]
 pub(crate) fn forward_langfuse_event(
     tracer: &parking_lot::Mutex<LangfuseTracer>,
     exec_event: &ExecutorEvent,
@@ -390,36 +378,6 @@ pub(crate) fn forward_langfuse_event(
             tracing::debug!(target: "langfuse::forward", %turn_id, ?status, ?error_kind, "TurnEnded (handled by pump tail)");
             // on_turn_end is called by the pump tail after the event loop — do NOT call it here
         }
-        ExecutorEvent::StageStarted { stage, turn_id } => {
-            tracer.lock().on_stage_start(*stage, turn_id);
-        }
-        ExecutorEvent::StageEnded { stage, status, .. } => {
-            // Extract handle fields under immutable borrow, then release lock
-            let handle_fields: Option<(String, Stage, String, String, String)> = {
-                let t = tracer.lock();
-                t.stages.active_handle().map(|h| {
-                    (
-                        h.span_id.clone(),
-                        h.stage,
-                        h.start_time.clone(),
-                        h.trace_id.clone(),
-                        h.parent_observation_id.clone(),
-                    )
-                })
-            };
-            if let Some((span_id, s, start_time, trace_id, parent_obs_id)) = handle_fields {
-                let handle = crate::langfuse::tracer::stages::StageHandle {
-                    span_id,
-                    stage: s,
-                    start_time,
-                    trace_id,
-                    parent_observation_id: parent_obs_id,
-                };
-                tracer.lock().on_stage_end(&handle, *status);
-            } else {
-                tracing::debug!(target: "langfuse::forward", ?stage, ?status, "StageEnded without active handle, skipping");
-            }
-        }
         ExecutorEvent::MiddlewareStarted { mw_name, hook, .. } => {
             tracer.lock().on_middleware_start(mw_name, *hook);
         }
@@ -447,9 +405,6 @@ pub(crate) fn forward_langfuse_event(
                 tracing::warn!(target: "langfuse::forward", %mw_name, ?hook, "MiddlewareEnded without active middleware span, skipping");
             }
         }
-        ExecutorEvent::AiReasoningChunk { text, .. } => {
-            tracer.lock().on_ai_reasoning_chunk(text);
-        }
         ExecutorEvent::BudgetThresholdHit {
             threshold,
             current_pct,
@@ -464,14 +419,6 @@ pub(crate) fn forward_langfuse_event(
                 *tokens_in,
                 *tokens_out,
             );
-        }
-        ExecutorEvent::MessageQueueDrained {
-            prompt,
-            defer,
-            info,
-            ..
-        } => {
-            tracer.lock().on_mq_drained(*prompt, *defer, *info);
         }
         ExecutorEvent::WorkflowStarted {
             workflow_id,
@@ -548,7 +495,7 @@ pub(super) async fn wait_for_pump(pump_done_rx: oneshot::Receiver<()>, session_i
 
 // ── v2 stages 装配与 ReAct 循环驱动 ────────────────────────────────────────
 
-/// 通过 [`crate::agent::builder_v2::build_stage_context`] 构造 StageContext，
+/// 通过 [`crate::agent::builder::build_stage_context`] 构造 StageContext，
 /// 再由 [`peri_agent::agent::stages::run_react_loop`] 驱动循环（P5 后的单一执行路径）。
 ///
 /// 关键设计：
@@ -576,6 +523,8 @@ pub(super) async fn build_and_execute_agent_v2(
     _async_router: Option<AsyncRouter>,
     idle_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
     idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    provider_display_name: String,
+    langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
 ) -> ExecOutcome {
     use peri_agent::agent::stages::{run_react_loop, LoopResult};
     use peri_agent::session::queue::{
@@ -588,7 +537,7 @@ pub(super) async fn build_and_execute_agent_v2(
     let parent_thread_id: Option<String> = cfg.thread_persistence.parent_thread_id.clone();
 
     // Phase 1: build StageContext（内部消费 AgentComponents；传入会话级共享 v2_queue）
-    let (v2_out, new_cache) = crate::agent::builder_v2::build_stage_context(
+    let (v2_out, new_cache) = crate::agent::builder::build_stage_context(
         cfg,
         cached_llm,
         pool,
@@ -668,11 +617,16 @@ pub(super) async fn build_and_execute_agent_v2(
     // 以保证 biased select 顺序不变量与 workflow_agent 调用点一致。
     {
         let tx_for_v2 = event_tx.clone();
-        crate::event::spawn_eventbus_forwarder(v2_out.event_handles, move |exec_ev| {
-            if let Some(tx) = tx_for_v2.lock().as_ref() {
-                let _ = tx.send(exec_ev);
-            }
-        });
+        crate::event::spawn_eventbus_forwarder(
+            v2_out.event_handles,
+            move |exec_ev| {
+                if let Some(tx) = tx_for_v2.lock().as_ref() {
+                    let _ = tx.send(exec_ev);
+                }
+            },
+            langfuse_tracer.clone(),
+            provider_display_name.clone(),
+        );
     }
 
     // Phase 5: seed transcript（history 作为 ancestor 之外的自有消息）
@@ -792,11 +746,6 @@ pub(super) async fn build_and_execute_agent_v2(
         LoopResult::Interrupted => (false, PromptStopReason::Cancelled),
         LoopResult::Error(ref e) => {
             error!(session_id = %session_id, error = %e, "[v2] loop failed");
-            if let Some(tx) = event_tx.lock().as_ref() {
-                let _ = tx.send(ExecutorEvent::AgentExecutionFailed {
-                    message: e.to_string(),
-                });
-            }
             let reason = if turn.cancel.is_cancelled() || matches!(e, AgentError::Interrupted) {
                 PromptStopReason::Cancelled
             } else if matches!(e, AgentError::MaxIterationsExceeded(_)) {

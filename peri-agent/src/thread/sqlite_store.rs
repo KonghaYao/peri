@@ -40,7 +40,8 @@ impl SqliteThreadStore {
         let db_path = db_path.into();
         // 确保父目录存在
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)
+            tokio::fs::create_dir_all(parent)
+                .await
                 .with_context(|| format!("创建目录失败: {}", parent.display()))?;
         }
         let options = SqliteConnectOptions::new()
@@ -211,6 +212,7 @@ fn role_of(msg: &BaseMessage) -> &'static str {
     }
 }
 
+// meta_from_row 从行列提取 8+ 字段；拆分参数列表不具可读性优势，此处抑制 `too_many_arguments`
 #[allow(clippy::too_many_arguments)]
 fn meta_from_row(
     id: String,

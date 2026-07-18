@@ -12,16 +12,18 @@
 
 use tracing::{debug, warn};
 
-use crate::agent::{compact::config::CompactConfig, events::CompactStrategy};
+use crate::agent::events::CompactStrategy;
 use crate::llm::BaseModel;
 use crate::session::transcript::MessageTranscript;
 
+pub mod config;
 pub mod full;
 pub mod micro;
 pub mod smart;
 
 // ─── 公共重导出：保持外部调用路径不变 ─────────────────────────────────────────────
 
+pub use config::{CompactConfig, CONTINUATION_HINT};
 pub use full::{extract_file_info, extract_skill_names, re_inject_v2, ReInjectResult};
 pub use micro::micro_compact;
 

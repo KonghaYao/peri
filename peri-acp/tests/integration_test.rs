@@ -90,7 +90,6 @@ async fn test_event_mapper_tool_start() {
         !mapped[0].updates.is_empty(),
         "ToolStart must produce SessionUpdate"
     );
-    assert!(!mapped[0].forward_to_tui, "ToolStart is category ①");
     assert!(
         mapped[0].source_agent_id.is_none(),
         "ToolStart has no source_agent_id"
@@ -114,7 +113,6 @@ async fn test_event_mapper_text_chunk() {
         !mapped[0].updates.is_empty(),
         "TextChunk must produce SessionUpdate"
     );
-    assert!(!mapped[0].forward_to_tui, "TextChunk is category ①");
     assert!(
         mapped[0].source_agent_id.is_none(),
         "TextChunk has no source_agent_id"
@@ -151,7 +149,6 @@ fn test_event_mapper_todo_update_maps_to_plan() {
         1,
         "TodoUpdate must produce exactly one MappedEvent"
     );
-    assert!(!mapped[0].forward_to_tui, "TodoUpdate is category ①");
 
     match &mapped[0].updates[0] {
         SessionUpdate::Plan(plan) => {

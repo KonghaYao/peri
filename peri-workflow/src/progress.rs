@@ -181,8 +181,9 @@ impl WorkflowProgressStore {
                             AgentRunResult::Dead { .. } => AgentStatus::Dead,
                         };
                         agent.result = Some(result.clone());
-                        // 只在 result 携带 tool_count 时才更新，保留 AgentProgress 已设的值
+                        // 只在 result 携带 tool_count/token_count 时才更新，保留 AgentProgress 已设的值
                         agent.tool_count = result.tool_count().or(agent.tool_count);
+                        agent.token_count = result.token_count().or(agent.token_count);
                     });
                 }
             }

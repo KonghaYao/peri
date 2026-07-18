@@ -3,6 +3,10 @@ use tokio::sync::oneshot;
 // ─── AskUserQuestionData ───────────────────────────────────────────────────────
 
 /// 问题选项
+#[deprecated(
+    since = "0.2.0",
+    note = "已迁移到 interaction 模块；请使用 peri_agent::interaction::QuestionOption 等类型"
+)]
 #[derive(Debug, Clone)]
 pub struct AskUserOption {
     pub label: String,
@@ -10,6 +14,10 @@ pub struct AskUserOption {
 }
 
 /// 单个问题的纯数据（无 channel，供 agent 层解析并批量聚合）
+#[deprecated(
+    since = "0.2.0",
+    note = "已迁移到 interaction 模块；请使用 peri_agent::interaction::QuestionItem 等类型"
+)]
 #[derive(Debug, Clone)]
 pub struct AskUserQuestionData {
     pub tool_call_id: String,
@@ -25,6 +33,10 @@ pub struct AskUserQuestionData {
 ///
 /// 通过 [`AskUserBatchRequest::new`] 构建，自动创建 oneshot channel，
 /// 返回 `(request, receiver)` 二元组。
+#[deprecated(
+    since = "0.2.0",
+    note = "已迁移到 interaction 模块；请使用 peri_agent::interaction::InteractionContext::Questions 等类型"
+)]
 pub struct AskUserBatchRequest {
     pub questions: Vec<AskUserQuestionData>,
     pub response_tx: oneshot::Sender<Vec<String>>,

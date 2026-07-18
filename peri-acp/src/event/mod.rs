@@ -7,20 +7,18 @@
 pub mod dto;
 pub mod forwarder;
 pub mod mapper;
-pub mod mapper_v2;
-pub mod router;
 pub mod truncate;
+pub mod v2_channel;
 
 pub use dto::{
     CompactFileInfoDto, StopReasonDto, TodoItemDto, TodoStatusDto, TokenUsageDto,
     WorkflowProgressDto,
 };
 pub(crate) use forwarder::spawn_eventbus_forwarder;
-pub use mapper::{executor_event_to_acp, map_event, MappedEvent};
-pub use mapper_v2::{
+pub use mapper::{map_event, MappedEvent};
+pub use peri_agent::agent::events_v2_mapper::{
     observe_event_to_executor, render_event_to_executor, state_event_to_executor, V2Event,
 };
-pub use router::{route, RoutingOutput};
 
 use serde::{Deserialize, Serialize};
 

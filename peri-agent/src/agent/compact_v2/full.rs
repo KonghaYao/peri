@@ -14,7 +14,7 @@ use anyhow::anyhow;
 use tracing::{debug, warn};
 
 use crate::agent::{
-    compact::config::CompactConfig,
+    compact_v2::config::CompactConfig,
     events::{CompactFileInfo, CompactStrategy},
 };
 use crate::error::AgentResult;
@@ -92,7 +92,7 @@ pub(super) async fn full_compact_inner(
         }
         let hint_text = format!(
             "<system-reminder>\n{}\n\n{}\n</system-reminder>",
-            crate::agent::compact::CONTINUATION_HINT,
+            crate::agent::compact_v2::CONTINUATION_HINT,
             fallback_summary
         );
         transcript.append(BaseMessage::human(hint_text));
@@ -145,7 +145,7 @@ pub(super) async fn full_compact_inner(
     // 6. 追加 Human 摘要消息（使用 v1 统一常量，wrap 在 <system-reminder> 中以触发 TUI 折叠）
     let hint_text = format!(
         "<system-reminder>\n{}\n\n{}\n</system-reminder>",
-        crate::agent::compact::CONTINUATION_HINT,
+        crate::agent::compact_v2::CONTINUATION_HINT,
         summary
     );
     transcript.append(BaseMessage::human(hint_text));
@@ -317,6 +317,12 @@ fn truncate_str(s: &str, max: usize) -> String {
 }
 
 /// 后处理 LLM 摘要输出：移除 analysis 块，提取 summary 块，添加前缀
+///
+/// # Safety
+///
+/// 本函数内部使用 `str::find` 返回的字节索引进行切片（`&text[..start]` 等）。
+/// `<analysis>`、`</analysis>`、`<summary>`、`</summary>` 均为纯 ASCII 标签，
+/// `find()` 返回的字节索引即字符边界，不会导致 panic。
 fn postprocess_summary(raw: &str) -> String {
     let mut text = raw.to_string();
 
@@ -327,8 +333,10 @@ fn postprocess_summary(raw: &str) -> String {
         if let Some(start) = text.find(start_tag) {
             if let Some(end) = text[start..].find(end_tag) {
                 let remove_end = start + end + end_tag.len();
+                // Safety: <analysis> 为纯 ASCII 标签，字节索引即字符边界
                 text = format!("{}{}", &text[..start], &text[remove_end..]);
             } else {
+                // Safety: <analysis> 为纯 ASCII 标签，字节索引即字符边界
                 text = text[..start].to_string();
                 break;
             }
@@ -341,8 +349,10 @@ fn postprocess_summary(raw: &str) -> String {
     if let Some(start) = text.find("<summary>") {
         let content_start = start + "<summary>".len();
         if let Some(end) = text[content_start..].find("</summary>") {
+            // Safety: <summary>/</summary> 为纯 ASCII 标签，字节索引即字符边界
             text = text[content_start..content_start + end].trim().to_string();
         } else {
+            // Safety: <summary> 为纯 ASCII 标签，字节索引即字符边界
             text = text[content_start..].trim().to_string();
         }
     }
@@ -653,7 +663,7 @@ pub fn extract_skill_names(messages: &[BaseMessage]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::compact::config::CompactConfig;
+    use crate::agent::compact_v2::config::CompactConfig;
     use crate::messages::{BaseMessage, ContentBlock, ImageSource, MessageContent};
     use crate::session::transcript::MessageTranscript;
 
@@ -839,7 +849,7 @@ mod tests {
         // 追加 Human 摘要（与 full_compact_inner 中的格式一致）
         let summary_text = format!(
             "<system-reminder>\n{}\n\n## Summary\nPrevious conversation about X.\n</system-reminder>",
-            crate::agent::compact::CONTINUATION_HINT
+            crate::agent::compact_v2::CONTINUATION_HINT
         );
         t.append(BaseMessage::human(summary_text));
 

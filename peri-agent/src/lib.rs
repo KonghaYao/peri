@@ -53,7 +53,7 @@ pub mod prelude {
         },
         ask_user::{AskUserBatchRequest, AskUserOption, AskUserQuestionData},
         error::{AgentError, AgentResult},
-        group::{AgentGroup, CancelPolicy},
+        group::AgentGroup,
         hitl::{BatchItem, HitlDecision},
         llm::{BaseModel, BaseModelReactLLM, ChatAnthropic, ChatOpenAI, MockLLM},
         messages::{

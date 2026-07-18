@@ -129,14 +129,23 @@ pub struct WorkflowRunner {
     cwd: String,
     /// 活跃 workflow run 的 RPC 通道（run_id → channel），供 kill_agent 查找（GAP-07）。
     active_channels: dashmap::DashMap<String, Arc<RpcChannel>>,
+    /// 进度事件接收通道（从 workflow agent 内部发送，合并到 msg_loop）
+    progress_rx: parking_lot::Mutex<
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::protocol::ProgressEvent>>,
+    >,
 }
 
 impl WorkflowRunner {
-    pub fn new(agent_executor: Arc<dyn AgentExecutor>, cwd: &str) -> Self {
+    pub fn new(
+        agent_executor: Arc<dyn AgentExecutor>,
+        cwd: &str,
+        progress_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::protocol::ProgressEvent>>,
+    ) -> Self {
         Self {
             agent_executor,
             cwd: cwd.to_string(),
             active_channels: dashmap::DashMap::new(),
+            progress_rx: parking_lot::Mutex::new(progress_rx),
         }
     }
 
@@ -321,6 +330,19 @@ impl WorkflowRunner {
 
         // Clone done_tx for kill branch — must happen before async move consumes it
         let done_tx_for_kill = done_tx.clone();
+
+        // 提取 progress_rx 供独立转发任务使用（Mutex::lock().take() 消费 Option 内的 receiver）
+        let progress_rx_for_loop = self.progress_rx.lock().take();
+
+        // 独立的 progress 转发任务：从 workflow agent 内部接收实时进度事件并写入 progress_store
+        if let Some(mut progress_rx) = progress_rx_for_loop {
+            let progress_store_for_progress = Arc::clone(&progress_store);
+            let _progress_task = tokio::spawn(async move {
+                while let Some(event) = progress_rx.recv().await {
+                    progress_store_for_progress.apply_event(&event);
+                }
+            });
+        }
 
         let mut msg_loop = tokio::spawn(async move {
             let mut final_result = WorkflowResult {

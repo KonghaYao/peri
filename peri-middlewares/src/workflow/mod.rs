@@ -96,8 +96,11 @@ impl WorkflowMiddleware {
         notification_tx: tokio::sync::broadcast::Sender<
             peri_workflow::registry::WorkflowTaskResult,
         >,
+        progress_rx: Option<
+            tokio::sync::mpsc::UnboundedReceiver<peri_workflow::protocol::ProgressEvent>,
+        >,
     ) -> Self {
-        let runner = Arc::new(WorkflowRunner::new(agent_executor, cwd));
+        let runner = Arc::new(WorkflowRunner::new(agent_executor, cwd, progress_rx));
         let registry = Arc::new(WorkflowTaskRegistry::new(notification_tx));
         let progress_store = Arc::new(WorkflowProgressStore::new());
         let journal_store = Arc::new(WorkflowJournalStore::new(cwd));

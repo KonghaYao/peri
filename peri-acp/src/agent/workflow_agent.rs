@@ -13,7 +13,7 @@ use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 use peri_agent::{
     agent::{
-        compact::CompactConfig,
+        compact_v2::CompactConfig,
         events::{AgentEventHandler, ExecutorEvent, FnEventHandler},
         token::ContextBudget,
         AgentCancellationToken,
@@ -27,7 +27,7 @@ use peri_middlewares::{
     prelude::*,
     tools::TodoItem,
 };
-use peri_workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
+use peri_workflow::protocol::{AgentRunParams, AgentRunResult, ProgressEvent, Usage};
 use peri_workflow::runner::AgentExecutor;
 use tracing::{debug, warn};
 
@@ -84,6 +84,10 @@ pub struct WorkflowAgentContext {
     // GAP-18: ThreadStore（持久化 workflow agent 消息到统一存储）。
     // None = 不持久化（内存中运行，当前行为）。
     pub thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
+
+    /// 进度事件发送通道（None = 不发送 agent_progress 事件）
+    pub progress_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<peri_workflow::protocol::ProgressEvent>>,
 }
 
 /// Workflow agent executor — builds and runs v2 stages for workflow agent() calls.
@@ -122,6 +126,7 @@ pub fn create_default_executor(provider: LlmProvider, cwd: &str) -> Arc<dyn Agen
         langfuse_session: None,
         thread_store: None,
         peri_config: None,
+        progress_tx: None,
     }))
 }
 
@@ -181,11 +186,33 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let usage_stats: Arc<Mutex<(u64, Option<String>)>> = Arc::new(Mutex::new((0, None)));
         let usage_stats_for_handler = Arc::clone(&usage_stats);
 
+        // 工具调用次数计数器
+        let tool_call_count: std::sync::Arc<std::sync::Mutex<u64>> =
+            std::sync::Arc::new(std::sync::Mutex::new(0));
+        let tool_call_count_for_handler = Arc::clone(&tool_call_count);
+        let progress_tx_for_handler = self.ctx.progress_tx.clone();
+        let run_id_for_handler = params.run_id.clone();
+        let agent_id_for_handler = params.agent_id;
+
         let event_handler: Arc<dyn AgentEventHandler> = Arc::new(FnEventHandler(
             move |event: ExecutorEvent| {
                 match &event {
                     ExecutorEvent::ToolStart { name, .. } => {
+                        *tool_call_count_for_handler.lock().unwrap() += 1;
                         debug!(tool = %name, "workflow agent: tool started");
+                        // 发送实时进度更新
+                        if let Some(ref tx) = progress_tx_for_handler {
+                            let s = usage_stats_for_handler.lock();
+                            let tc = tool_call_count_for_handler.lock().unwrap();
+                            let _ = tx.send(ProgressEvent::AgentProgress {
+                                run_id: run_id_for_handler.clone(),
+                                agent_id: agent_id_for_handler,
+                                label: None,
+                                phase: None,
+                                token_count: s.0,
+                                tool_count: *tc,
+                            });
+                        }
                     }
                     ExecutorEvent::ToolEnd { name, is_error, .. } => {
                         if *is_error {
@@ -201,11 +228,26 @@ impl AgentExecutor for WorkflowAgentExecutor {
                             "workflow agent: llm call completed"
                         );
                         // 累积真实 token 用量，供 AgentRunResult 上报
-                        let mut s = usage_stats_for_handler.lock();
-                        if let Some(u) = usage {
-                            s.0 += u.output_tokens as u64;
+                        {
+                            let mut s = usage_stats_for_handler.lock();
+                            if let Some(u) = usage {
+                                s.0 += u.output_tokens as u64;
+                            }
+                            s.1 = Some(model.clone());
                         }
-                        s.1 = Some(model.clone());
+                        // 发送实时进度更新
+                        if let Some(ref tx) = progress_tx_for_handler {
+                            let s = usage_stats_for_handler.lock();
+                            let tc = tool_call_count_for_handler.lock().unwrap();
+                            let _ = tx.send(ProgressEvent::AgentProgress {
+                                run_id: run_id_for_handler.clone(),
+                                agent_id: agent_id_for_handler,
+                                label: None,
+                                phase: None,
+                                token_count: s.0,
+                                tool_count: *tc,
+                            });
+                        }
                     }
                     ExecutorEvent::LlmRetrying {
                         attempt,
@@ -214,9 +256,6 @@ impl AgentExecutor for WorkflowAgentExecutor {
                         ..
                     } => {
                         warn!(attempt, max_attempts, error = %error, "workflow agent: llm retrying");
-                    }
-                    ExecutorEvent::AgentExecutionFailed { message } => {
-                        warn!(error = %message, "workflow agent: execution failed");
                     }
                     _ => {}
                 }
@@ -235,7 +274,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let model_name = effective_provider.model_name().to_string();
 
         // ── compact 配置 ──
-        // 从 WorkflowAgentContext 读取 compact_config，与主 agent builder_v2.rs 模式一致。
+        // 从 WorkflowAgentContext 读取 compact_config，与主 agent builder 模式一致。
         // 必须在 effective_provider 被 consume 之前构建 compact_llm。
         let compact_config = self.ctx.compact_config.clone();
         let context_budget = compact_config.as_ref().map(|cc| {
@@ -414,9 +453,14 @@ impl AgentExecutor for WorkflowAgentExecutor {
         // 循环实现抽取至 `crate::event::forwarder::spawn_eventbus_forwarder`，
         // 以保证 biased select 顺序不变量与 main executor 调用点一致。
         let handler_for_forwarder = Arc::clone(&event_handler);
-        crate::event::spawn_eventbus_forwarder(v2_ctx.event_handles, move |exec_ev| {
-            handler_for_forwarder.on_event(exec_ev);
-        });
+        crate::event::spawn_eventbus_forwarder(
+            v2_ctx.event_handles,
+            move |exec_ev| {
+                handler_for_forwarder.on_event(exec_ev);
+            },
+            None,
+            String::new(),
+        );
 
         // push prompt 到 queue
         v2_ctx
@@ -474,7 +518,10 @@ impl AgentExecutor for WorkflowAgentExecutor {
                                 output_tokens: total_output_tokens,
                             },
                             model: last_model,
-                            tool_count: None,
+                            tool_count: {
+                                let c = tool_call_count.lock().unwrap();
+                                Some(*c)
+                            },
                             token_count: Some(total_output_tokens),
                         }
                     }
@@ -485,7 +532,10 @@ impl AgentExecutor for WorkflowAgentExecutor {
                             output_tokens: total_output_tokens,
                         },
                         model: last_model,
-                        tool_count: None,
+                        tool_count: {
+                            let c = tool_call_count.lock().unwrap();
+                            Some(*c)
+                        },
                         token_count: Some(total_output_tokens),
                     }
                 }

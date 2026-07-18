@@ -47,8 +47,10 @@ pub(crate) async fn handle_new(
 
     // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
     let workflow_middleware = {
-        let mut compact_config = peri_agent::agent::compact::CompactConfig::default();
+        let mut compact_config = peri_agent::agent::CompactConfig::default();
         compact_config.apply_env_overrides();
+        let (progress_tx, progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<peri_workflow::protocol::ProgressEvent>();
         let wf_executor = peri_acp::agent::workflow_agent::create_executor(
             peri_acp::agent::workflow_agent::WorkflowAgentContext {
                 provider: Arc::clone(&ctx.provider),
@@ -68,6 +70,7 @@ pub(crate) async fn handle_new(
                 langfuse_session: None,
                 thread_store: None,
                 peri_config: Some(Arc::new(ctx.peri_config.read().clone())),
+                progress_tx: Some(progress_tx),
             },
         );
         let (notification_tx, _) = tokio::sync::broadcast::channel(32);
@@ -76,6 +79,7 @@ pub(crate) async fn handle_new(
                 wf_executor,
                 &cwd_str,
                 notification_tx,
+                Some(progress_rx),
             ),
         ))
     };

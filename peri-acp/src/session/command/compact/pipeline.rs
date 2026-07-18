@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use peri_agent::{
-    agent::{compact::CompactConfig, compact_v2, AgentCancellationToken},
+    agent::{compact_v2, compact_v2::CompactConfig, AgentCancellationToken},
     llm::BaseModel,
     messages::BaseMessage,
     session::transcript::MessageTranscript,

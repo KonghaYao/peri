@@ -1,56 +1,32 @@
-/// 验证每个 ExecutorEvent 变体都在 mapper.rs 中有对应处理（防止漏映射）。
-/// 用字符串 grep 验证 mapper.rs 覆盖，新增变体时手动在 variants 列表追加。
+/// 验证 mapper.rs 对所有 ExecutorEvent 变体的处理：
+/// - 7 个 Category ① 变体显式映射为 SessionUpdate
+/// - 其余变体通过 wildcard `_ =>` 安全处理（无 SessionUpdate）
 #[test]
 fn test_all_executor_event_variants_mapped() {
     let mapper_source = include_str!("mapper.rs");
 
-    // 列举所有应该被 mapper 处理的变体名
-    let variants = [
-        "SessionStarted",
-        "TurnStarted",
-        "TurnEnded",
-        "StageStarted",
-        "StageEnded",
-        "MiddlewareStarted",
-        "MiddlewareEnded",
-        "AiReasoningChunk",
-        "BudgetThresholdHit",
-        "MessageQueueDrained",
-        "WorkflowStarted",
-        "WorkflowEnded",
-        "CompactStarted",
-        "CompactCompleted",
-        "LlmCallStart",
-        "LlmCallEnd",
-        "LlmRetrying",
-        "LlmRequestPayload",
-        "ToolStart",
-        "ToolEnd",
+    // Category ①: 必须显式处理的变体
+    let explicit_variants = [
         "TextChunk",
         "AiReasoning",
-        "SubagentStarted",
-        "SubagentStopped",
-        "ContextWarning",
-        "StateSnapshot",
-        "StateSnapshotMeta",
-        "TurnCommitted",
-        "TurnSuspended",
-        "RewindCompleted",
-        "BackgroundTaskCompleted",
-        "BgToolStep",
-        "LspDiagnostics",
-        "AgentExecutionFailed",
-        "WorkflowProgress",
+        "ToolStart",
+        "ToolEnd",
         "TodoUpdate",
+        "LlmCallEnd",
         "MessageAdded",
-        "CompactError",
     ];
 
-    for v in variants {
+    for v in explicit_variants {
         assert!(
             mapper_source.contains(v),
-            "mapper.rs 缺少 ExecutorEvent::{} 的处理分支",
+            "mapper.rs 缺少 ExecutorEvent::{} 的 Category ① 显式处理分支",
             v
         );
     }
+
+    // 验证 wildcard 存在（覆盖其余所有变体）
+    assert!(
+        mapper_source.contains("_ =>"),
+        "mapper.rs 缺少 wildcard 分支 `_ =>` 覆盖非 Category ① 变体"
+    );
 }
