@@ -234,6 +234,7 @@ e2e/
 ├── tests/
 │   ├── setup.ts            # 全局 setup（dotenv 加载 / tmux 检查清理 / testName 注入）
 │   └── smoke/              # 冒烟测试
+│   └── scenarios/          # 场景测试（流式+工具交错 / AskUserQuestion / Goal 续跑）
 ├── recordings/             # 运行时生成（gitignored）
 │   ├── *.ansi              # ANSI 原始屏幕
 │   └── index.jsonl         # 录制索引

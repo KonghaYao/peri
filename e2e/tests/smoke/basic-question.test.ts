@@ -4,7 +4,7 @@
  * 这是 e2e 管线的最小可验证单元。
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import { launchPeri, sendPrompt, takePeriSnapshot, waitForStableScreen } from "../../helpers/peri.js";
 import { judge } from "../../helpers/judge.js";
 import { updateJudgeResult } from "../../helpers/recorder.js";
 import type { TmuxTester } from "tui-tester";
@@ -80,26 +80,3 @@ describe("peri e2e smoke", () => {
     },
   );
 });
-
-/**
- * 等待屏幕内容稳定（连续 3 次轮询无变化）
- * 利用 tui-tester 的 waitFor 内置轮询，外层 wrapper 存储状态
- */
-async function waitForStableScreen(tester: TmuxTester, timeout: number): Promise<void> {
-  let lastLen = 0;
-  let stableCount = 0;
-
-  await tester.waitFor(
-    (screen) => {
-      const len = screen.length;
-      if (len > 50 && len === lastLen) {
-        stableCount++;
-      } else {
-        stableCount = 0;
-      }
-      lastLen = len;
-      return stableCount >= 4;
-    },
-    { timeout, interval: 1500, message: "屏幕未能在超时时间内稳定" },
-  );
-}

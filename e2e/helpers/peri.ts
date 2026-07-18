@@ -117,3 +117,29 @@ export async function takePeriSnapshot(
 
   return capture;
 }
+
+/**
+ * 等待屏幕内容稳定（连续 4 次轮询无变化）
+ * 用于确保 LLM 流式输出或工具调用完成后屏幕不再更新
+ */
+export async function waitForStableScreen(
+  tester: TmuxTester,
+  timeout: number = 120_000,
+): Promise<void> {
+  let lastLen = 0;
+  let stableCount = 0;
+
+  await tester.waitFor(
+    (screen: string) => {
+      const len = screen.length;
+      if (len > 50 && len === lastLen) {
+        stableCount++;
+      } else {
+        stableCount = 0;
+      }
+      lastLen = len;
+      return stableCount >= 4;
+    },
+    { timeout, interval: 1500, message: "屏幕未能在超时时间内稳定" },
+  );
+}
