@@ -37,7 +37,7 @@ export interface SnapshotRecord {
   name: string;
   /** ISO 时间戳 */
   timestamp: string;
-  /** ANSI 文件相对路径（相对于 recordings/） */
+  /** 快照文件相对路径（相对于 recordings/），扩展名取决于 recorderConfig.ansi */
   snapshotFile: string;
   /** 屏幕尺寸 */
   size: { cols: number; rows: number };
@@ -53,6 +53,25 @@ export interface JudgeCheckRecord {
   criterion: string;
   pass: boolean;
   detail?: string;
+}
+
+// ---- 录制配置 ----
+
+export interface RecorderConfig {
+  /** 是否生成 .ansi 文件（含颜色 escape codes），默认 false，只生成 .txt 纯文本 */
+  ansi: boolean;
+}
+
+export const recorderConfig: RecorderConfig = {
+  ansi: false,
+};
+
+// ---- 工具函数 ----
+
+/** 剥离 ANSI escape sequences，保留纯文本 */
+function stripAnsi(str: string): string {
+  // eslint-disable-next-line no-control-regex
+  return str.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 // ---- 内部计数器 ----
@@ -73,7 +92,12 @@ export function resetCounters(): void {
 // ---- 写入函数 ----
 
 /**
- * 将 ANSI 原始内容写入文件，返回文件名
+ * 将屏幕内容写入文件
+ *
+ * - 始终写入 .txt（剥离 ANSI 的纯文本，方便编辑器内阅读）
+ * - 根据 recorderConfig.ansi 决定是否额外写入 .ansi（含颜色 escape codes）
+ *
+ * 返回主文件名（.txt）
  */
 export async function writeAnsiSnapshot(
   name: string,
@@ -81,10 +105,20 @@ export async function writeAnsiSnapshot(
 ): Promise<string> {
   await fs.mkdir(RECORDINGS_DIR, { recursive: true });
   const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const fileName = `${safeName}.ansi`;
-  const filePath = path.join(RECORDINGS_DIR, fileName);
-  await fs.writeFile(filePath, capture.raw, "utf-8");
-  return fileName;
+
+  // 始终写纯文本 .txt
+  const txtFileName = `${safeName}.txt`;
+  const txtPath = path.join(RECORDINGS_DIR, txtFileName);
+  await fs.writeFile(txtPath, stripAnsi(capture.raw), "utf-8");
+
+  // 按配置可选写 .ansi
+  if (recorderConfig.ansi) {
+    const ansiFileName = `${safeName}.ansi`;
+    const ansiPath = path.join(RECORDINGS_DIR, ansiFileName);
+    await fs.writeFile(ansiPath, capture.raw, "utf-8");
+  }
+
+  return txtFileName;
 }
 
 /**
@@ -96,12 +130,15 @@ export async function appendToIndex(
 ): Promise<void> {
   await fs.mkdir(RECORDINGS_DIR, { recursive: true });
 
+  const safeName = snapshotName.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const ext = recorderConfig.ansi ? ".ansi" : ".txt";
+
   const record: SnapshotRecord = {
     test: _currentTestName,
     step: getNextStep(_currentTestName),
     name: snapshotName,
     timestamp: new Date().toISOString(),
-    snapshotFile: `${snapshotName.replace(/[^a-zA-Z0-9_-]/g, "_")}.ansi`,
+    snapshotFile: `${safeName}${ext}`,
     size: capture.size,
     textPreview: capture.text.slice(0, 200),
   };
