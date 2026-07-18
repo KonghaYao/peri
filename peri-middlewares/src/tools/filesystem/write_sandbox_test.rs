@@ -104,56 +104,47 @@ async fn test_write_sandbox_outside_dir_rejected() {
 #[tokio::test]
 async fn test_write_sandbox_symlink_escape_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = make_tool(&dir, vec!["sandbox"]);
-    // 在沙箱内创建指向外部文件的 symlink
+    // 在沙箱外写入恶意文件
     std::fs::write(dir.path().join("outside.txt"), "evil").unwrap();
     #[cfg(unix)]
     {
+        let tool = make_tool(&dir, vec!["sandbox"]);
         std::os::unix::fs::symlink(
             dir.path().join("outside.txt"),
             dir.path().join("sandbox/escape_link.txt"),
         )
         .unwrap();
+        let result = tool
+            .invoke(
+                serde_json::json!({"path": "sandbox/escape_link.txt", "content": "bypass"}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await;
+        assert!(result.is_err(), "symlink 逃逸应被拒绝");
     }
-    #[cfg(not(unix))]
-    {
-        // Windows: symlink 测试跳过
-        return;
-    }
-    let result = tool
-        .invoke(
-            serde_json::json!({"path": "sandbox/escape_link.txt", "content": "bypass"}),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await;
-    assert!(result.is_err(), "symlink 逃逸应被拒绝");
 }
 
 #[tokio::test]
 async fn test_write_sandbox_parent_symlink_escape_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = make_tool(&dir, vec!["sandbox"]);
     // sandbox/sub 是外部目录的 symlink
     std::fs::create_dir_all(dir.path().join("outside_dir")).unwrap();
     #[cfg(unix)]
     {
+        let tool = make_tool(&dir, vec!["sandbox"]);
         std::os::unix::fs::symlink(
             dir.path().join("outside_dir"),
             dir.path().join("sandbox/sub"),
         )
         .unwrap();
+        let result = tool
+            .invoke(
+                serde_json::json!({"path": "sandbox/sub/evil.txt", "content": "bypass"}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await;
+        assert!(result.is_err(), "父目录 symlink 逃逸应被拒绝");
     }
-    #[cfg(not(unix))]
-    {
-        return;
-    }
-    let result = tool
-        .invoke(
-            serde_json::json!({"path": "sandbox/sub/evil.txt", "content": "bypass"}),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await;
-    assert!(result.is_err(), "父目录 symlink 逃逸应被拒绝");
 }
 
 #[test]
