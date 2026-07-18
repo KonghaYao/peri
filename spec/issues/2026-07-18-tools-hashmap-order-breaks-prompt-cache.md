@@ -1,6 +1,6 @@
 # tools 数组顺序随 HashMap 迭代顺序，新增工具触发 rehash 后 prompt cache 前缀全断
 
-**状态**：Open
+**状态**：Done
 **优先级**：中
 **创建日期**：2026-07-18
 

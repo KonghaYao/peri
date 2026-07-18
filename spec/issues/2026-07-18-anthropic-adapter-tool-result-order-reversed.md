@@ -1,6 +1,6 @@
 # Anthropic adapter 合并连续 Tool 消息时 tool_result 顺序反转
 
-**状态**：Open
+**状态**：Done
 **优先级**：中
 **创建日期**：2026-07-18
 
