@@ -1,3 +1,6 @@
+// 本模块内的类型已全部标记 #[deprecated]，内部交叉引用产生 warning 属预期行为。
+#![allow(deprecated)]
+
 use tokio::sync::oneshot;
 
 // ─── AskUserQuestionData ───────────────────────────────────────────────────────
