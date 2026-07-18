@@ -233,6 +233,7 @@ login-key-new = :New
 login-key-delete = :Delete
 login-key-paste = :Paste
 login-confirm-delete = :Confirm delete
+login-confirm-delete-warning =   This action cannot be undone.
 
 # ---- HITL Popup ----
 

@@ -232,6 +232,7 @@ login-key-new = :新建
 login-key-delete = :删除
 login-key-paste = :粘贴
 login-confirm-delete = :确认删除
+login-confirm-delete-warning =   此操作不可撤销。
 
 # ---- HITL Popup ----
 
