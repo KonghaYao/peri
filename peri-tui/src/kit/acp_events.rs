@@ -590,11 +590,18 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             );
             state.compact_just_completed = true;
             state.phase = SessionPhase::Idle;
-            // 仅全量压缩时注入消息流通知（微压缩太频繁，省略）
-            if *micro_cleared == 0 {
+            // 全量压缩和有效微压缩都注入消息流通知
+            // micro_cleared == 0: 完整压缩（总是显示），或 no-op 微压缩（罕见，无害）
+            // micro_cleared > 0: 微压缩且有实质性清理
+            {
                 let mut parts = vec![];
                 let file_count = files.len();
                 let skill_count = skills.len();
+                let compact_type = if *micro_cleared > 0 {
+                    i18n::tr("app-note-compact-type-micro")
+                } else {
+                    i18n::tr("app-note-compact-type-full")
+                };
                 if file_count > 0 {
                     parts.push(format!("{file_count} 文件"));
                 }
@@ -609,7 +616,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 let text = if summary.is_empty() {
                     i18n::tr_args(
                         "app-note-compact-completed",
-                        &[("detail".into(), FluentValue::from(detail.as_str()))],
+                        &[
+                            ("detail".into(), FluentValue::from(detail.as_str())),
+                            ("type".into(), FluentValue::from(compact_type.as_str())),
+                        ],
                     )
                 } else {
                     let brief: String = summary.chars().take(60).collect();
@@ -627,6 +637,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                                 "summary".into(),
                                 FluentValue::from(summary_display.as_str()),
                             ),
+                            ("type".into(), FluentValue::from(compact_type.as_str())),
                         ],
                     )
                 };

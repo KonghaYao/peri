@@ -155,6 +155,7 @@ claude-blog-cn
 *.py
 build
 .tmp
+tmp/
 target
 
 .idea/*

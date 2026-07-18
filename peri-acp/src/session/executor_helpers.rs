@@ -582,6 +582,11 @@ pub(super) async fn build_and_execute_agent_v2(
         MessageKind, MessageSource as V2MessageSource, QueuedMessage,
     };
 
+    // 在 cfg 被 Phase 1 消费前提取 thread persistence 字段
+    let thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>> =
+        cfg.thread_persistence.store.clone();
+    let parent_thread_id: Option<String> = cfg.thread_persistence.parent_thread_id.clone();
+
     // Phase 1: build StageContext（内部消费 AgentComponents；传入会话级共享 v2_queue）
     let (v2_out, new_cache) = crate::agent::builder_v2::build_stage_context(
         cfg,
@@ -673,6 +678,31 @@ pub(super) async fn build_and_execute_agent_v2(
         let transcript_arc = v2_out.session.transcript();
         let mut transcript = transcript_arc.write();
         transcript.append_batch(history);
+    }
+
+    // Phase 5.5: restore compact flags from persistence (if available)
+    {
+        if let (Some(store), Some(tid)) = (thread_store.as_ref(), parent_thread_id.as_ref()) {
+            match store.load_message_flags(tid).await {
+                Ok(flags) if !flags.is_empty() => {
+                    let transcript_arc = v2_out.session.transcript();
+                    let mut transcript = transcript_arc.write();
+                    transcript.set_flags_batch(flags);
+                    tracing::debug!(
+                        thread_id = %tid,
+                        "Phase 5.5: restored compact flags from persistence"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        thread_id = %tid,
+                        error = %e,
+                        "Phase 5.5: failed to load compact flags"
+                    );
+                }
+            }
+        }
     }
 
     // Phase 6: push 用户输入到 v2 queue（Receive 阶段消费）

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -11,6 +12,7 @@ use sqlx::{
 
 use crate::{
     messages::BaseMessage,
+    session::MessageFlags,
     thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta, ThreadStore},
 };
 
@@ -660,6 +662,33 @@ impl ThreadStore for SqliteThreadStore {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    async fn load_message_flags(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<HashMap<crate::messages::MessageId, MessageFlags>> {
+        let rows: Vec<(String, bool, bool)> = sqlx::query_as(
+            "SELECT message_id, truncated, excluded FROM messages \
+             WHERE thread_id = ?1 AND (truncated = 1 OR excluded = 1)",
+        )
+        .bind(thread_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut flags = HashMap::with_capacity(rows.len());
+        for (id_str, truncated, excluded) in rows {
+            if let Ok(uid) = uuid::Uuid::parse_str(&id_str) {
+                flags.insert(
+                    uid.into(),
+                    MessageFlags {
+                        truncated,
+                        excluded,
+                    },
+                );
+            }
+        }
+        Ok(flags)
     }
 
     async fn delete_messages_since(

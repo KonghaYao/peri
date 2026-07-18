@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use async_trait::async_trait;
 
 use super::types::{ThreadId, ThreadMeta};
 use crate::messages::{BaseMessage, MessageId};
+use crate::session::MessageFlags;
 
 #[async_trait]
 pub trait ThreadStore: Send + Sync {
@@ -66,6 +69,14 @@ pub trait ThreadStore: Send + Sync {
     ) -> Result<()> {
         let _ = (message_id, truncated, excluded);
         Ok(()) // 默认 no-op
+    }
+
+    /// 加载 thread 中所有非默认 compact 标记
+    async fn load_message_flags(
+        &self,
+        _thread_id: &ThreadId,
+    ) -> Result<HashMap<MessageId, MessageFlags>> {
+        Ok(HashMap::new())
     }
 
     /// 删除指定消息之后的所有记录（用于 rewind）

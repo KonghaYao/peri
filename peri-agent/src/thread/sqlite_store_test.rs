@@ -378,3 +378,47 @@
         assert_eq!(ctx[2].content(), "L2-a");
         assert_eq!(ctx[3].content(), "L3-a");
     }
+
+    #[tokio::test]
+    async fn test_update_and_load_message_flags() {
+        let (store, _dir) = make_store().await;
+        let meta = ThreadMeta::new("/tmp");
+        let id = store.create_thread(meta).await.unwrap();
+
+        let msgs = vec![
+            BaseMessage::human("msg1"),
+            BaseMessage::ai("msg2"),
+            BaseMessage::human("msg3"),
+        ];
+        store.append_messages(&id, &msgs).await.unwrap();
+
+        // Set flags: msg1 truncated, msg2 excluded, msg3 no flags
+        store
+            .update_message_flags(&msgs[0].id(), true, false)
+            .await
+            .unwrap();
+        store
+            .update_message_flags(&msgs[1].id(), false, true)
+            .await
+            .unwrap();
+
+        let flags = store.load_message_flags(&id).await.unwrap();
+        assert_eq!(flags.len(), 2, "only 2 messages have non-default flags");
+        assert!(flags[&msgs[0].id()].truncated, "msg1 should be truncated");
+        assert!(!flags[&msgs[0].id()].excluded, "msg1 should not be excluded");
+        assert!(!flags[&msgs[1].id()].truncated, "msg2 should not be truncated");
+        assert!(flags[&msgs[1].id()].excluded, "msg2 should be excluded");
+    }
+
+    #[tokio::test]
+    async fn test_load_message_flags_empty_when_no_flags() {
+        let (store, _dir) = make_store().await;
+        let meta = ThreadMeta::new("/tmp");
+        let id = store.create_thread(meta).await.unwrap();
+
+        let msgs = vec![BaseMessage::human("hello"), BaseMessage::ai("world")];
+        store.append_messages(&id, &msgs).await.unwrap();
+
+        let flags = store.load_message_flags(&id).await.unwrap();
+        assert!(flags.is_empty(), "no flags set, should return empty map");
+    }
