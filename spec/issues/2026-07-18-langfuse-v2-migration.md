@@ -1,6 +1,6 @@
 # Langfuse 追踪迁移到 v2 事件体系
 
-**状态**：Done
+**状态**：Partial
 **优先级**：中
 **创建日期**：2026-07-18
 **父 issue**：`spec/issues/2026-07-18-v1-executor-event-retirement.md` (后续)

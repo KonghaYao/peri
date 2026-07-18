@@ -1,6 +1,6 @@
 # AskUserQuestion 弹窗不出现，agent 卡死
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-07-07
 

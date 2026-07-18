@@ -1,6 +1,6 @@
 # Anthropic adapter 未对 request.system 调用 split_system_blocks，导致 main agent 系统提示词边界标记失效
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-07-17
 

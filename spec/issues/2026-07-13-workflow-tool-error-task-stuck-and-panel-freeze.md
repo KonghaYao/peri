@@ -1,6 +1,6 @@
 # Workflow Tool 快速失败后，BgTaskArea 任务条目永久卡在黄色 ◎
 
-**状态**：Open
+**状态**：Fixed
 **Triage**：ready-for-agent
 **优先级**：中
 **分类**：Bug

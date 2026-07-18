@@ -1,6 +1,6 @@
 # Compact 标记（truncated/excluded）在 Session 恢复后丢失，导致上下文直接到 100%
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：高
 **创建日期**：2026-07-17
 

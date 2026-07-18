@@ -1,6 +1,6 @@
 # SubAgent 卡片完全不显示（SubagentStarted 事件被 notifier 丢弃）
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：高
 **创建日期**：2026-07-07
 
