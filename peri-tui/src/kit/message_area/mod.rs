@@ -127,8 +127,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let scroll_state = hooks.use_state(ScrollViewState::default);
     let prev_items_len = hooks.use_state(|| 0usize);
     let _prev_is_loading = hooks.use_state(|| false);
-    // [Fix] 防止 idle 过渡时 total_visual_rows 下降导致的画面跳变
-    let prev_total_state = hooks.use_state(|| 0u16);
     let scroll_throttle = hooks.use_state(ScrollThrottle::default);
     let _todo_hash = hash_todo_items(&todo_items);
 
@@ -269,35 +267,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     } else {
         0
     };
-    let total_visual_rows_raw: u16 = if core_total_visual_rows == 0 && footer_visual_rows == 0 {
+    let total_visual_rows: u16 = if core_total_visual_rows == 0 && footer_visual_rows == 0 {
         if is_loading { 1 } else { 0 }
     } else {
         (core_total_visual_rows + footer_visual_rows).min(u16::MAX as usize) as u16
     };
-
-    // ── [Fix] 防止 idle 过渡时 total_visual_rows 下降导致的画面跳变 ──
-    // 流式结束 (loading→idle) 时, spinner 折行 vs summary 不折行可能导致
-    // total_visual_rows 微降 1-2 行 → max_scroll 微降 → render body clamp
-    // 将 scroll_y 钳制移动 1-2 行 → 画面位移 → 用户感知为"跳变"。
-    // 在 idle 期间抑制 ≤3 行的微降（吸收 spinner→summary 折行差异），
-    // 保留更大降幅的真实值（如工具卡片折叠等）。下轮 loading 自然重置。
-    let total_visual_rows = if !is_loading {
-        let prev = *prev_total_state.read();
-        // prev==0 为首帧, 走 raw 避免 total_visual_rows=0 导致下游 panic
-        if prev == 0 || total_visual_rows_raw >= prev {
-            total_visual_rows_raw
-        } else {
-            let drop = prev.saturating_sub(total_visual_rows_raw);
-            if drop <= 3 {
-                prev
-            } else {
-                total_visual_rows_raw
-            }
-        }
-    } else {
-        total_visual_rows_raw
-    };
-    *prev_total_state.write_no_update() = total_visual_rows;
 
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
