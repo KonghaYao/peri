@@ -219,8 +219,11 @@ pub fn spawn_eventbus_forwarder<F>(
             tokio::select! {
                 biased;
                 Some(ev) = handles.render_rx.recv() => {
-                    // Phase A: 扇出到 TUI v2 直连通道（双轨运行，与 ACP 路径并存）
-                    crate::event::v2_channel::try_send_v2_event(V2Event::from_render(ev.clone()));
+                    // [Fix] Phase A 双轨迁移期：render 事件（TextChunk/ToolStarted 等）
+                    // 不通过 v2_channel 扇出——ACP 路径（render_event_to_executor → event_tx
+                    // → session/update → acp_notifier → bridge_tx）已完整覆盖所有 render 事件。
+                    // 双轨扇出导致同一事件被 bridge_tx 接收两次，TextChunk 的 append_text 无
+                    // 去重保护，产生流式期间 md 重复渲染（文本以字节偏移交错重复）。
                     // Langfuse v2: render 层追踪（TextChunk, BudgetWarning）
                     forward_langfuse_render(&langfuse_tracer, &ev);
                     if let Some(exec_ev) = render_event_to_executor(ev) {

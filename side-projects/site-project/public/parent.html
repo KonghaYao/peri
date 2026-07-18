@@ -1,14 +1,25 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Peri Site Preview</title>
+  <title>Perihelion</title>
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/css/base.css">
   <link rel="stylesheet" href="/css/theme.css">
   <style type="text/tailwindcss">
-    /* AppShell 专用样式（兄弟选择器/伪类，无法用工具类表达） */
+    /* ===== 浮层动画（keyframes，无法用工具类表达） ===== */
+    @keyframes overlay-fade { from { opacity: 0; } }
+    @keyframes overlay-pop {
+      from { opacity: 0; transform: translateY(12px) scale(0.97); }
+    }
+    .overlay-fade { animation: overlay-fade 0.16s ease both; }
+    .overlay-pop { animation: overlay-pop 0.24s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+    /* ===== 拖拽调整尺寸时禁止 iframe 吞掉指针事件 ===== */
+    .shell-dragging iframe { pointer-events: none; }
+    .shell-dragging { user-select: none; }
   </style>
   <script type="importmap">
   {
@@ -21,8 +32,8 @@
   }
   </script>
 </head>
-<body class="flex flex-col">
-  <div id="app"></div>
+<body>
+  <div id="app" class="h-full"></div>
 
   <script type="module">
     import { render } from 'solid-js/web';
@@ -37,10 +48,12 @@
 
     const store = createSharedStore({
       currentFile: null,
-      theme: 'light',
-      sidebarWidth: 280,
-      scmFlex: 3,
-      terminalFlex: 2,
+      theme: 'dark',
+      sidebarWidth: 272,
+      sidebarOpen: true,
+      activeSideView: 'files',
+      terminalOpen: true,
+      panelHeight: 260,
       scmVersion: 0,
       ...initial,
     }, async (keys, state) => {
@@ -52,32 +65,32 @@
       catch (e) { console.error('[parent] persist failed:', e); }
     });
 
-    // 父端额外方法（通过 store 暴露给所有子）
-    store.setStatusText = (text) => { const el = document.getElementById('status-text'); if (el) el.textContent = text; };
-
-    // 监听子 iframe 的 postMessage 请求
+    // ====== 子 iframe postMessage 桥 ======
+    // （主题广播走 postMessage 比 Comlink 订阅更可靠；快捷键由 iframe 捕获转发）
     window.addEventListener('message', (e) => {
-      if (e.data?.type === 'peri:closeGraph') {
+      const d = e.data;
+      if (!d?.type) return;
+      if (d.type === 'peri:closeGraph') {
         store.closeGraph?.();
-      } else if (e.data?.type === 'peri:closeGetman') {
+      } else if (d.type === 'peri:closeGetman') {
         store.closeGetman?.();
-      } else if (e.data?.type === 'peri:getTheme') {
-        // 子 iframe 请求当前主题
-        const current = store.get('theme') || 'light';
+      } else if (d.type === 'peri:getTheme') {
+        const current = store.get('theme') || 'dark';
         e.source?.postMessage({ type: 'peri:setTheme', theme: current }, '*');
-      } else if (e.data?.type === 'peri:setTheme' && e.data?.theme) {
-        // 子 iframe 请求切换主题 → 更新 store（触发自动广播）
-        if (e.data.theme !== store.get('theme')) {
-          store.set('theme', e.data.theme);
-        }
+      } else if (d.type === 'peri:setTheme' && d.theme) {
+        if (d.theme !== store.get('theme')) store.set('theme', d.theme);
+      } else if (d.type === 'peri:key') {
+        // 子 iframe 转发的快捷键
+        if (d.action === 'toggle-terminal') store.toggleTerminal?.();
+        else if (d.action === 'toggle-sidebar') store.toggleSidebar?.();
+        else if (d.action === 'escape') store.closeOverlays?.();
       }
     });
 
-    // 同步 theme 到 documentElement + 广播到所有子 iframe
+    // ====== 同步 theme 到 documentElement + 广播到所有子 iframe ======
     store.subscribe('theme', (t) => {
       if (t) {
         document.documentElement.dataset.theme = t;
-        // 广播到所有子 iframe（postMessage 比 Comlink 订阅更可靠）
         document.querySelectorAll('iframe').forEach(iframe => {
           iframe.contentWindow?.postMessage({ type: 'peri:setTheme', theme: t }, '*');
         });
@@ -86,7 +99,7 @@
     // 初始化一次（subscribe 不会立即触发）
     if (store.get('theme')) document.documentElement.dataset.theme = store.get('theme');
 
-    // ====== App Shell 布局 ======
+    // ====== App Shell ======
     render(() => html`<${AppShell} store=${store} />`, document.getElementById('app'));
   </script>
 </body>

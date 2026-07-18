@@ -762,6 +762,7 @@ pub(crate) struct V2AgentOutput {
 ///
 /// MessageQueue 内部 Arc<Mutex<VecDeque>> + Arc<Notify>，clone 共享底层；
 /// 传入引用只是为了避免在签名里 move。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_stage_context(
     cfg: AcpAgentConfig,
     cached_llm: Option<&CachedLlmInstances>,

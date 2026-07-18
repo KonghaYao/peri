@@ -172,15 +172,13 @@ fn process_v2_event(ev: V2Event, bridge_tx: &mpsc::UnboundedSender<AcpEventWithE
     // StateSnapshot 副作用（不推 bridge 事件，直接写 atom）
     if let V2Event::State(StateEvent::StateSnapshot {
         budget_pct,
-        context_total_tokens,
+        context_total_tokens: Some(total),
         ..
     }) = &ev
     {
-        if let Some(total) = context_total_tokens {
-            let pct = budget_pct.unwrap_or(0.0);
-            *CONTEXT_USAGE.state().write() = Some((pct, *total));
-            RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
-        }
+        let pct = budget_pct.unwrap_or(0.0);
+        *CONTEXT_USAGE.state().write() = Some((pct, *total));
+        RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
     }
 
     // 映射为 AcpEventData
