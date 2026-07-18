@@ -1,0 +1,52 @@
+/* ========== 共享主题颜色（唯一来源，供所有 HTML 页面引用） ========== */
+/* 亮色默认（无 data-theme 或 data-theme="light"） */
+@theme {
+  --color-bg: #ffffff;
+  --color-bg-secondary: #f6f8fa;
+  --color-bg-hover: #e8eaed;
+  --color-bg-active: rgba(9,105,218,0.12);
+  --color-text: #1f2328;
+  --color-text-secondary: #57606a;
+  --color-text-muted: #656d76;
+  --color-border: #d0d7de;
+  --color-accent: #0969da;
+  --color-accent-hover: #0550ae;
+  --color-success: #1a7f37;
+  --color-warning: #9a6700;
+  --color-error: #cf222e;
+  --font-mono: "JetBrains Mono", "Fira Code", Menlo, monospace;
+}
+
+/* 显式亮色（与 @theme 默认值一致，确保 data-theme="light" 时正常） */
+[data-theme="light"] {
+  --color-bg: #ffffff;
+  --color-bg-secondary: #f6f8fa;
+  --color-bg-hover: #e8eaed;
+  --color-bg-active: rgba(9,105,218,0.12);
+  --color-text: #1f2328;
+  --color-text-secondary: #57606a;
+  --color-text-muted: #656d76;
+  --color-border: #d0d7de;
+  --color-accent: #0969da;
+  --color-accent-hover: #0550ae;
+  --color-success: #1a7f37;
+  --color-warning: #9a6700;
+  --color-error: #cf222e;
+}
+
+/* 暗色主题 */
+[data-theme="dark"] {
+  --color-bg: #0d1117;
+  --color-bg-secondary: #161b22;
+  --color-bg-hover: #1c2128;
+  --color-bg-active: rgba(31,111,235,0.12);
+  --color-text: #e6edf3;
+  --color-text-secondary: #8b949e;
+  --color-text-muted: #6e7681;
+  --color-border: #30363d;
+  --color-accent: #58a6ff;
+  --color-accent-hover: #79c0ff;
+  --color-success: #3fb950;
+  --color-warning: #d29922;
+  --color-error: #f85149;
+}

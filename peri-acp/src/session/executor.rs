@@ -41,6 +41,7 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot as exec_oneshot;
 
+use chrono::Local;
 use peri_agent::{
     agent::{
         events::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
@@ -130,8 +131,6 @@ pub struct FrozenSessionData {
     /// Frozen content of CLAUDE.local.md, None if no file.
     /// v2 FrozenContext 未包含 local_md，保留此处。
     claude_local_md: Option<Arc<str>>,
-    /// Whether cwd was a git repo at session creation time.
-    is_git_repo: bool,
 }
 
 impl FrozenSessionData {
@@ -169,8 +168,6 @@ impl FrozenSessionData {
             language,
         );
 
-        let is_git_repo = std::path::Path::new(cwd).join(".git").exists();
-
         // 构建 v2 FrozenContext
         let v2_frozen = peri_agent::session::FrozenContext {
             system_prompt: Arc::from(system_prompt),
@@ -183,7 +180,6 @@ impl FrozenSessionData {
         Self {
             v2_frozen,
             claude_local_md: claude_local_md.map(Arc::from),
-            is_git_repo,
         }
     }
 
@@ -226,11 +222,6 @@ impl FrozenSessionData {
     /// 会话创建日期（YYYY-MM-DD 格式）。
     pub fn date(&self) -> &str {
         &self.v2_frozen.date
-    }
-
-    /// 会话创建时 cwd 是否为 git 仓库。
-    pub fn is_git_repo(&self) -> bool {
-        self.is_git_repo
     }
 
     /// 会话创建时的语言偏好（如 "zh-CN"、"en"）。None 表示 auto-detect。
@@ -862,29 +853,23 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
             Some(f.date().to_string()),
         )
     } else {
-        // Legacy 路径：未提供 frozen 数据时每轮重建 system prompt。
-        //
-        // [TRAP] 当前仅 print mode (`-p`, cli_print.rs:207 `frozen: None`) 进入此分支，
-        // 单轮执行后退出，因此 "per-turn rebuild" 实际不会发生。
-        // SubAgent 不走此路径——它们的 system prompt 由 builder.rs:356-366 的
-        // system_builder closure 独立构造。
-        //
-        // 加 warn! 提升可观测性：如果未来有新调用方忘记传 frozen 数据，
-        // 日志会立刻暴露（违反 frozen 不变量 = 第一优先级）。
-        tracing::warn!(
-            cwd = %turn.cwd,
-            "run_session_loop: frozen data 未提供，回退到 per-turn rebuild 路径（仅 print mode 合法）"
-        );
-        let features = PromptFeatures::detect();
-        let sp = build_system_prompt(
-            None,
+        // 调用方未提供 frozen 数据时，在此一次性构建。
+        // -p print mode 已在 cli_print.rs 迁移为提前构建 FrozenSessionData，
+        // 此分支仅作防御性编程保留。
+        let frozen_data = FrozenSessionData::build(
             turn.cwd,
-            features,
-            &plugin_agent_dirs,
-            None,
             turn.language.as_deref(),
+            &plugin_skill_roots,
+            &plugin_agent_dirs,
+            &Local::now().format("%Y-%m-%d").to_string(),
         );
-        (sp, None, None, None, None)
+        (
+            frozen_data.system_prompt().to_string(),
+            frozen_data.claude_md().map(|s| s.to_string()),
+            frozen_data.claude_local_md().map(|s| s.to_string()),
+            frozen_data.skill_summary().map(|s| s.to_string()),
+            Some(frozen_data.date().to_string()),
+        )
     };
 
     // Build register/deregister closures for SubAgentMiddleware

@@ -1,5 +1,5 @@
 import html from 'solid-js/html';
-import { createSignal, createEffect, createResource, For, Show, onMount, onCleanup } from 'solid-js';
+import { createSignal, createEffect, For, Show, onMount, onCleanup } from 'solid-js';
 import { useTheme, useScmVersion, useParentMethod } from '/lib/solid-hooks.js';
 import { getJSON, sendJSON } from '/lib/api.js';
 import { Header, IconButton, Button, Badge, Empty, Tabs } from '/lib/ui/index.js';
@@ -30,20 +30,39 @@ export function ScmPanel() {
   const [committing, setCommitting] = createSignal(false);
   const [activeTab, setActiveTab] = createSignal('changes');
 
-  // 轮询 tick：每 5 秒自增触发 resource 重取
-  const [tick, setTick] = createSignal(0);
+  // SCM 状态：手动管理（避免 createResource 内部 createRenderEffect 引发响应式循环）
+  const [status, setStatus] = createSignal(null);
+  // 并发请求去重 + 浅比较避免无意义 DOM 重建
+  let fetching = false;
+  let lastData = null;
+  const refresh = async () => {
+    if (fetching) return;
+    fetching = true;
+    try {
+      const d = await getJSON('/api/scm/status');
+      // 浅比较：若数据未变则不触发 signal 更新，避免 <For> DOM 重建
+      if (!lastData || lastData.branch !== d.branch
+        || lastData.staged?.length !== d.staged?.length
+        || lastData.unstaged?.length !== d.unstaged?.length
+        || lastData.hasRepo !== d.hasRepo) {
+        lastData = d;
+        setStatus(d);
+      }
+    } catch (e) {
+      // 忽略单次失败，保持旧状态
+      console.error('[scm] refresh failed:', e);
+    } finally {
+      fetching = false;
+    }
+  };
+  // 初始拉取 + 定时轮询（不可见时 SKIP）
   onMount(() => {
-    const id = setInterval(() => setTick(t => t + 1), 5000);
+    refresh();
+    const id = setInterval(refresh, 10000);
     onCleanup(() => clearInterval(id));
   });
 
-  // SCM 状态（createResource 自带请求去重——前一个请求未完成时不发新请求）
-  const [status, { refetch: refresh }] = createResource(tick, async () => {
-    const d = await getJSON('/api/scm/status');
-    return d;
-  });
-
-  // 从 resource 派生信号（保持与原 API 兼容）
+  // 从 signal 派生
   const branch = () => status()?.branch || '';
   const staged = () => status()?.staged || [];
   const unstaged = () => status()?.unstaged || [];

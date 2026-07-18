@@ -1,13 +1,17 @@
 import html from 'solid-js/html';
 import { createSignal, createResource, createEffect, createMemo, For, Show, onMount, onCleanup } from 'solid-js';
-import { useTheme, useParentMethod } from '/lib/solid-hooks.js';
+import { useTheme } from '/lib/solid-hooks.js';
 import { getJSON } from '/lib/api.js';
 import { Header, IconButton } from '/lib/ui/index.js';
 import { Graph, drawGraph, LANE_W, ROW_H } from '/lib/scm/graph-layout.js';
 
 export function ScmGraph() {
   const [theme] = useTheme();
-  const closeGraph = useParentMethod('closeGraph');
+
+  // 通过 postMessage 直接通知父窗口关闭（比 Comlink 更可靠）
+  const closeGraph = () => {
+    window.parent?.postMessage({ type: 'peri:closeGraph' }, '*');
+  };
 
   const [commits, setCommits] = createSignal([]);
   const [loadError, setLoadError] = createSignal('');

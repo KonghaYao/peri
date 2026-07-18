@@ -84,9 +84,9 @@ impl GrepInput {
             "files_without_matches" => OutputMode::FilesWithoutMatch,
             other => {
                 return Err(format!(
-                "Invalid output_mode: '{}'. Must be 'content', 'files_with_matches', 'count', or 'files_without_matches'",
-                other
-                ))
+                    "Invalid output_mode: '{}'. Must be 'content', 'files_with_matches', 'count', or 'files_without_matches'",
+                    other
+                ));
             }
         };
 

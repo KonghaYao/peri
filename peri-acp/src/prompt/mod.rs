@@ -85,7 +85,8 @@ impl PromptEnv {
 ///
 /// 格式：`- {agent_id} [{model_tier}] [{access}]: {description}`
 /// 其中 `model_tier` 为 haiku/sonnet/opus/inherit，
-/// `access` 为 readonly/writes（标识该 agent 是否会修改文件）。
+/// `access` 为 readonly/writes（标识该 agent 是否会修改项目代码。
+/// 带 allowedWriteDirs 的 agent 仍标为 readonly，因其仅写沙箱目录）。
 /// agent_id 即 subagent_type 参数值（文件名去掉 .md），作为主标识符。
 /// 无 agent 时返回提示信息。
 fn format_available_agents(cwd: &str, extra_agent_dirs: &[std::path::PathBuf]) -> String {

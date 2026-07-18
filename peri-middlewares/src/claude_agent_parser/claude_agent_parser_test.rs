@@ -163,3 +163,33 @@ prompt"#;
     let agent = parse_agent_file(content).unwrap();
     assert!(agent.tools().is_empty());
 }
+
+/// [回归测试] allowedWriteDirs roundtrip——plan agent 声明沙箱目录
+#[test]
+fn test_parse_allowed_write_dirs() {
+    let content = r#"---
+name: planner
+description: A planner agent
+allowedWriteDirs:
+  - ".peri/plans/"
+  - ".peri/output/"
+---
+prompt"#;
+    let agent = parse_agent_file(content).unwrap();
+    assert_eq!(
+        agent.frontmatter.allowed_write_dirs,
+        vec![".peri/plans/", ".peri/output/"]
+    );
+}
+
+/// [回归测试] allowedWriteDirs 缺失时默认为空
+#[test]
+fn test_parse_allowed_write_dirs_missing_defaults_empty() {
+    let content = r#"---
+name: basic
+description: test
+---
+prompt"#;
+    let agent = parse_agent_file(content).unwrap();
+    assert!(agent.frontmatter.allowed_write_dirs.is_empty());
+}
