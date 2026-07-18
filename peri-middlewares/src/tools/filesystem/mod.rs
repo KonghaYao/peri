@@ -6,6 +6,7 @@ pub(crate) mod grep_args;
 pub(crate) mod grep_format;
 pub mod read;
 pub mod write;
+pub mod write_sandbox;
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,7 @@ pub use glob::GlobFilesTool;
 pub use grep::GrepTool;
 pub use read::ReadFileTool;
 pub use write::WriteFileTool;
+pub use write_sandbox::WriteSandboxTool;
 
 /// 统一路径解析：相对路径基于 cwd，绝对路径直接使用。
 ///

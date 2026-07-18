@@ -719,7 +719,142 @@ npm test    # → tsx --test tests/**/*.test.ts
 
 ---
 
-## 8. 明确不做的事（YAGNI）
+## 8. App Shell 架构（macOS 风格桌面）
+
+> **状态**: 设计阶段 · **目标**: 将静态分栏布局替换为 macOS 风格的桌面 + Dock + 浮动窗口范式。
+
+### 8.1 设计理念
+
+当前 `parent.html` 是一个**固定分栏布局**：左侧边栏（文件树 + SCM）/ 中间（终端 + 预览）/ 覆盖层（Graph + Getman）。所有区域始终占用屏幕空间，不可移动、不可关闭。
+
+新设计模仿 macOS 桌面范式：
+- **桌面**是工作空间（浮动窗口的容器）
+- **Dock** 是应用启动器（底部常驻图标栏）
+- **AppWindow** 是每个应用的独立容器（可拖拽、缩放、最小化）
+- 只打开你需要的 app，未打开的 app 不占用空间
+
+### 8.2 视觉隐喻
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Desktop（工作区）                                          │
+│                                                           │
+│   ┌─ Terminal ────────[─][□][×]─┐  ┌─ Preview ─[─][□][×] │
+│   │                              │  │                      │
+│   │  >_                          │  │  📄 README.md         │
+│   │                              │  │                      │
+│   └──────────────────────────────┘  └──────────────────────┘
+│   ┌─ 版本控制 ────────[─][□][×]─┐
+│   │  staged / unstaged / diff    │
+│   │                              │
+│   └──────────────────────────────┘
+│                                                           │
+│                        ┌─── Dock ────────────────────┐    │
+│  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ │
+│  │ 📁    │ │ 📄    │ │ >_    │ │ ⎇    │ │ ◉    │ │ ⚡   │ │
+│  │文件   │ │预览   │ │终端   │ │版本   │ │图谱   │ │ API  │ │
+│  └──────┘ └──────┘ └──────┘ └──────┘ └──────┘ └──────┘ │
+│     ●                   ●                               │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 8.3 组件树
+
+```
+parent.html
+└── AppShell
+    ├── Desktop                        # 浮动窗口容器（flex-1, relative）
+    │   └── AppWindow × N              # 每个打开的 app 一个窗口
+    │       ├── TitleBar               # 可拖拽标题栏 + 红绿灯
+    │       └── iframe (app 内容)      # 首次 open 时加载 src
+    └── Dock                           # 底部固定，36px 高
+        └── AppIcon × 6              # 点击打开/激活对应 app
+```
+
+### 8.4 App 定义（6 个）
+
+| id | 名称 | 图标 | src | 默认打开 | 备注 |
+|----|------|------|-----|----------|------|
+| `files` | 文件 | 📁 | `/pages/file-tree.html` | ✅ | 文件树，点击文件可打开 Preview |
+| `preview` | 预览 | 📄 | `/pages/preview.html` | ❌ | 文件内容预览，由文件树触发 |
+| `terminal` | 终端 | `>_` | `/pages/terminal.html` | ✅ | xterm 多 tab 终端 |
+| `scm` | 版本控制 | `⎇` | `/pages/scm.html` | ❌ | Git 暂存/提交/diff |
+| `graph` | Git 图谱 | `◉` | `/pages/graph.html` | ❌ | Git 历史图谱可视化 |
+| `getman` | API 测试 | `⚡` | `/pages/getman.html` | ❌ | HTTP 请求构造与响应查看 |
+
+### 8.5 AppWindow 行为契约
+
+| 操作 | 触发 | 行为 |
+|------|------|------|
+| 打开 | 点击 Dock 图标 | 创建窗口（默认位置／大小），首次加载 iframe src |
+| 聚焦 | 点击窗口任意位置 | 提升 z-index 到最前，标题栏高亮 |
+| 关闭 | 点击红绿灯 × | 关闭窗口，卸载 iframe。再次打开时重新加载 |
+| 最小化 | 点击红绿灯 − | 窗口收起（仅 Dock 图标下面的 ● 指示运行中） |
+| 全屏 | 点击红绿灯 □ | 窗口扩展到整个 Desktop 区域 |
+| 拖拽 | 拖拽标题栏 | 重定位窗口（x, y 存入 state） |
+| 缩放 | 拖拽窗口边缘 | 调整大小（w, h 存入 state） |
+
+### 8.6 状态模型
+
+```js
+// store 新增 keys
+'appWindows'  // AppWindowState[]
+'appOrder'    // string[]   z-index 排序（id 列表，最后面的最前）
+
+// AppWindowState
+{
+  id: string,           // 'terminal'
+  x: number,            // 窗口 left（px，相对于 Desktop）
+  y: number,            // 窗口 top（px）
+  w: number,            // 窗口宽度（px）
+  h: number,            // 窗口高度（px）
+  minimized: boolean,   // 是否最小化
+  fullscreen: boolean,  // 是否全屏
+}
+```
+
+**持久化**：`appWindows` 存到 workspace `/api/workspace/ui`，重启恢复窗口布局。`appOrder` 不持久化（重启后默认 z-order）。
+
+### 8.7 AppIcon 交互
+
+| 操作 | 行为 |
+|------|------|
+| 点击已关闭的 app | 创建默认位置/大小的窗口，加载 src |
+| 点击已打开但非活跃的 app | 提升该窗口到最前 |
+| 点击已打开且活跃的 app | 最小化（macOS 行为） |
+| 右键 / 长按 | 未来扩展：关闭、重新加载 |
+
+### 8.8 渐进迁移计划
+
+**Phase 1（立即）**：
+1. 新建 `AppShell` 组件替换当前 `parent.html` 固定布局
+2. 新建 `Dock` + `AppIcon` 组件
+3. 新建 `AppWindow` 组件（基本版：标题栏 + iframe，暂不支持拖拽/缩放）
+4. 将全部 6 个 iframe 页面转为 AppWindow
+5. `files`、`terminal` 默认打开（布局模拟当前分栏效果）
+
+**Phase 2（窗口管理）**：
+6. 拖拽标题栏 → 窗口移动
+7. 边缘/角落 resize 手柄
+8. 最小化/全屏按钮
+9. z-index 层叠管理
+
+**Phase 3（持久化）**：
+10. 窗口位置/大小/最小化状态 → persist
+11. 重启恢复布局
+
+### 8.9 与原架构的兼容点
+
+| 保留 | 修改 |
+|------|------|
+| 所有 iframe 子页面（HTML + JS 业务组件）**不改动** | `parent.html` 布局完全重建 |
+| `HostedIframe` 组件可复用（`lazy` + `open`/`close`） | `useParentMethod` 的 `openGraph`/`closeGraph` → 改为 `toggleApp` |
+| store / Comlink / postMessage 机制不变 | 新增 `appWindows` / `appOrder` 状态 key |
+| theme 穿透机制不变 | overlay 概念移除（Graph/Getman 不再全屏浮窗） |
+| API 路由不变 | 无 |
+
+---
+## 9. 明确不做的事（YAGNI）
 
 | 不做 | 理由 |
 |------|------|
@@ -739,7 +874,7 @@ npm test    # → tsx --test tests/**/*.test.ts
 
 ---
 
-## 9. 关键约束速查
+## 10. 关键约束速查
 
 修改代码前对照检查：
 

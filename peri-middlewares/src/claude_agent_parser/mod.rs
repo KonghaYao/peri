@@ -63,6 +63,11 @@ pub struct ClaudeAgentFrontmatter {
     /// Git worktree 隔离模式
     #[serde(default)]
     pub isolation: Option<String>,
+    /// 沙箱写目录白名单——声明后 subagent 可获得 WriteSandbox 工具，
+    /// 只能写入这些相对目录（基于 cwd），不能碰项目代码。
+    /// 不影响 can_mutate 推断（agent 仍视为 readonly）。
+    #[serde(default)]
+    pub allowed_write_dirs: Vec<String>,
 }
 
 /// 工具列表，可以是逗号分隔字符串或数组

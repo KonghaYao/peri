@@ -474,7 +474,7 @@ async fn test_contract_compact_output_starts_with_human_summary() {
     // 首条内容必须包含续接指令标记
     let first_text = result.messages[0].content();
     assert!(
-        first_text.contains(peri_agent::agent::compact::CONTINUATION_HINT),
+        first_text.contains(peri_agent::agent::compact_v2::CONTINUATION_HINT),
         "首条 Human 必须包含续接指令，实际内容: {}",
         first_text.chars().take(200).collect::<String>()
     );

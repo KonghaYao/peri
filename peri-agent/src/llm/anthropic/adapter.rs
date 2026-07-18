@@ -176,7 +176,7 @@ pub(super) fn messages_to_anthropic(
                 let appended = if let Some(last) = result.last_mut() {
                     if last["role"] == "user" {
                         if let Some(arr) = last["content"].as_array_mut() {
-                            arr.insert(0, tool_result_block.clone());
+                            arr.push(tool_result_block.clone());
                             true
                         } else {
                             false

@@ -347,3 +347,59 @@ fn test_rebuild_clears_staging() {
     let t2 = t.rebuild(entries);
     assert!(!t2.has_staged(), "rebuild 应清空 staging");
 }
+
+// ── set_flags_batch ───────────────────────────────────────────────────────
+
+#[test]
+fn test_set_flags_batch() {
+    let mut t = MessageTranscript::new();
+    let id1 = t.append(make_human("msg-1"));
+    let id2 = t.append(make_human("msg-2"));
+    let id3 = t.append(make_human("msg-3"));
+
+    let mut batch = std::collections::HashMap::new();
+    batch.insert(
+        id1,
+        MessageFlags {
+            truncated: true,
+            excluded: false,
+        },
+    );
+    batch.insert(
+        id2,
+        MessageFlags {
+            truncated: false,
+            excluded: true,
+        },
+    );
+    batch.insert(
+        id3,
+        MessageFlags {
+            truncated: true,
+            excluded: true,
+        },
+    );
+
+    t.set_flags_batch(batch);
+
+    assert!(t.flags(id1).truncated, "id1 truncated");
+    assert!(!t.flags(id1).excluded, "id1 not excluded");
+    assert!(!t.flags(id2).truncated, "id2 not truncated");
+    assert!(t.flags(id2).excluded, "id2 excluded");
+    assert!(t.flags(id3).truncated, "id3 truncated");
+    assert!(t.flags(id3).excluded, "id3 excluded");
+}
+
+#[test]
+fn test_set_flags_batch_ignores_default() {
+    let mut t = MessageTranscript::new();
+    let id = t.append(make_human("msg"));
+
+    let mut batch = std::collections::HashMap::new();
+    batch.insert(id, MessageFlags::default());
+
+    t.set_flags_batch(batch);
+
+    // Default flags should not be stored; flags() returns default
+    assert_eq!(t.flags(id), MessageFlags::default());
+}

@@ -1,0 +1,32 @@
+[package]
+name = "acp-hub"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "acp-hub"
+path = "src/main.rs"
+
+[[bin]]
+name = "test-child"
+path = "src/bin/test_child.rs"
+test = false  # 不是测试目标，是独立二进制
+
+[lib]
+name = "acp_hub"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+agent-client-protocol-schema = { version = "1.4", features = ["unstable_elicitation"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,5 +1,5 @@
 // 从核心库导入 trait 和数据类型
-pub use peri_agent::ask_user::{AskUserBatchRequest, AskUserOption, AskUserQuestionData};
+pub use peri_agent::interaction::{InteractionContext, QuestionItem, QuestionOption};
 use peri_agent::{agent::react::ToolCall, error::AgentError};
 
 use crate::tool_search::core_tools::TOOL_ASK_USER;
@@ -27,8 +27,8 @@ struct AskUserInput {
     questions: Vec<InputQuestion>,
 }
 
-/// 将一个 ToolCall 解析为 AskUserQuestionData 列表；非 ask_user_question 工具返回空 Vec。
-pub fn parse_ask_user(tool_call: &ToolCall) -> Result<Vec<AskUserQuestionData>, AgentError> {
+/// 将一个 ToolCall 解析为 QuestionItem 列表；非 ask_user_question 工具返回空 Vec。
+pub fn parse_ask_user(tool_call: &ToolCall) -> Result<Vec<QuestionItem>, AgentError> {
     if tool_call.name != TOOL_ASK_USER {
         return Ok(vec![]);
     }
@@ -41,19 +41,20 @@ pub fn parse_ask_user(tool_call: &ToolCall) -> Result<Vec<AskUserQuestionData>, 
     Ok(input
         .questions
         .into_iter()
-        .map(|q| AskUserQuestionData {
-            tool_call_id: tool_call.id.clone(),
+        .enumerate()
+        .map(|(i, q)| QuestionItem {
+            id: format!("ask_user_question_{i}"),
             question: q.question,
             header: q.header,
-            multi_select: q.multi_select,
             options: q
                 .options
                 .into_iter()
-                .map(|o| AskUserOption {
+                .map(|o| QuestionOption {
                     label: o.label,
                     description: o.description,
                 })
                 .collect(),
+            multi_select: q.multi_select,
         })
         .collect())
 }

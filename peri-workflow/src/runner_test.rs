@@ -30,7 +30,7 @@ async fn test_e2e_simple_workflow() {
     let cwd = tmp.path().to_str().unwrap();
 
     let executor = Arc::new(MockAgentExecutor) as Arc<dyn AgentExecutor>;
-    let runner = WorkflowRunner::new(executor, cwd);
+    let runner = WorkflowRunner::new(executor, cwd, None);
     let journal = Arc::new(WorkflowJournalStore::new(cwd));
     let progress = Arc::new(WorkflowProgressStore::new());
     let (done_tx, mut done_rx) = tokio::sync::watch::channel(None);

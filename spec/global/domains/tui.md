@@ -351,3 +351,227 @@ Peri TUI 的前端渲染与交互系统，基于 ratatui-kit 框架。负责终�
 **通用模式:** 配置变更必须同时：更新持久化存储 → client.update_config() 推送 → invalidate agent_pool 缓存 → 重建 provider。对 workflow/SubAgent，provider 必须共享 Arc<RwLock<>> 而非裸值复制。
 **涉及文件:** peri-tui/src/kit/panels/login.rs, peri-tui/src/kit/panels/model.rs, peri-acp/src/agent/workflow_agent.rs, peri-tui/src/acp_server/, peri-tui/src/acp_stdio/
 **CLAUDE.md 链接:** true
+
+### issue_2026-07-13-statusbar-context-cache-display-regression
+**摘要:** 状态栏上下文消耗显示 + 消息流缓存命中率警告，ratatui-kit 迁移后全部丢失
+**状态:** Done
+**归档日期:** 2026-07-18
+**关键词:** ratatui-kit 迁移, 功能回归, 状态栏, 缓存命中率
+**问题本质:** ratatui-kit 迁移时状态栏直接读取 session_tracker 的旧代码被替换，新架构未接入上下文使用率和缓存命中率的数据通道
+**通用模式:** UI 框架迁移需要系统性的功能回归清单——每个旧实现的 UI 元素需确认在新架构中有对应数据通道和渲染路径
+**涉及文件:** peri-tui/src/kit/status_bar.rs, peri-tui/src/kit/acp_notifier.rs
+**CLAUDE.md 链接:** true
+
+### issue_2026-07-13-submit-no-scroll-to-bottom
+**摘要:** 用户发送 prompt 后消息区不自动跳转到最底部
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** scroll_to_bottom, UserBubble, 提交交互
+**问题本质:** 提交后 `is_loading=true` 但 VIEW_MODELS 尚未包含 UserBubble（RPC 飞行中），use_effect 触发时 items_len 未变，proximity guard 阻止滚底
+**通用模式:** 用户主动操作（提交）应触发"强制滚底"而非依赖 proximity 检测；时序问题需要明确的"强制滚底"信号而非间接条件
+**涉及文件:** peri-tui/src/kit/message_area/scroll.rs, peri-tui/src/kit/submit_consumer.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-18-duplicate-streaming-text-and-tool-cards
+**摘要:** 流式输出时文本和工具调用卡片重复显示
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** 流式输出, 双轨扇出, 重复渲染, forwarder
+**问题本质:** render 事件→ExecutorEvent 映射存在双轨扇出（两个路径同时 push 同一内容到 VIEW_MODELS）
+**通用模式:** 事件扇出时需要确保每条内容只走一个路径进入最终数据模型——双轨扇出必然导致重复
+**涉及文件:** peri-acp/src/event/forwarder.rs, peri-tui/src/kit/acp_events.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-07-ask-user-popup-never-appears
+**摘要:** AskUserQuestion 弹窗不出现，agent 卡死
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** AskUserQuestion, 弹窗, HITL, TUI 交互
+**问题本质:** agent 调用 AskUserQuestion 后 TUI 未弹出问答窗口，agent 陷入等待
+**通用模式:** 无可提炼认知——TUI 交互 bug，修复后功能正常
+**涉及文件:** peri-tui/src/kit/panels/ask_user.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-09-textarea-no-soft-wrap
+**摘要:** textarea 缺少软换行（soft wrapping），长行被截断且视口跟随异常
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** 软换行, textarea, 视口跟随, CJK 折行
+**问题本质:** textarea 渲染只按 `\n` 拆分逻辑行，不支持按终端宽度自动折行
+**通用模式:** 终端 textarea 需要浏览器 textarea 式的软换行体验——折行在渲染层做（纯视觉），不存储到状态层。光标移动需基于视觉行而非逻辑行
+**技术决策:** 折行策略 `overflow-wrap: break-word`（任意字符处断行），与浏览器默认一致
+**涉及文件:** peri-widgets/src/textarea/render.rs, peri-widgets/src/textarea/state.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-13-clear-scrollbar-persists-at-welcome
+**摘要:** /clear 后回到 Welcome 页面，滚动条仍然可见
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** /clear, 滚动条, Welcome 页, ScrollbarFields 重置
+**问题本质:** Welcome 分支提前 return 跳过了 scrollbar_fields 更新，旧值保留导致僵尸滚动条
+**通用模式:** 组件提前 return 的分支需确保所有副作用状态已重置
+**涉及文件:** peri-tui/src/kit/message_area/mod.rs, peri-tui/src/kit/message_area/props.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-17-system-note-level-color-not-rendered
+**摘要:** SystemNote 的 Warning/Error 等级字体颜色未区分，全部显示为灰色
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** SystemNote, TuiNoteLevel, 颜色渲染, 启发式判断
+**问题本质:** 渲染函数忽略 `data.level` 字段，改用文本关键词启发式判断颜色，默认 fallback 为 muted
+**通用模式:** 数据结构已有枚举字段时应直接使用而非通过文本关键词反推——后者不可靠且维护成本高
+**涉及文件:** peri-tui/src/kit/message_area/render.rs, peri-tui/src/kit/tui_render_unit.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-07-message-area-scroll-proximity-follow
+**摘要:** 消息区自动吸底应基于滚动位置就近判断，而非二元开关
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** 自动吸底, proximity 跟随, 二元开关, distance_to_bottom
+**问题本质:** 二元 `auto_scroll` flag 导致用户任何滚动都失去跟随能力——改为一滚就永久不回
+**通用模式:** 自动跟随应基于当前位置与底部的距离（proximity）决定，而非记住"上次是否滚过"。距离≤阈值→吸底；距离>阈值→不抢
+**技术决策:** 阈值取 `max(vis_height/2, 5)`，底部半屏内跟随
+**涉及文件:** peri-tui/src/kit/message_area/mod.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-13-login-panel-enter-does-not-close
+**摘要:** Login 面板 Enter 选择 provider 后不关闭面板
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** Login 面板, Enter 关闭, close_active_panel, 状态刷新
+**问题本质:** Enter handler 只切换 active_provider_id，未调用 `close_active_panel()` + 推送 SERVICE_SNAPSHOT
+**通用模式:** 面板选择操作后的标准步骤：close_active_panel() + 推送状态 snapshot + invalidate pool
+**涉及文件:** peri-tui/src/kit/panels/login.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-13-main-agent-done-loading-persists-bg-still-running
+**摘要:** 主 agent 完成回复后 loading 不退，因后台 agent 仍在运行
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** loading 生命周期, bg agent, SubagentStopped, phase=PromptRunning
+**问题本质:** `SubagentStopped` 无条件设 `phase=PromptRunning`→`is_loading=true`——覆盖了之前的 TurnDone/TurnSuspended 清除的 loading
+**通用模式:** loading 状态应由"是否有活跃的流式 agent"而非"是否有 SubagentStopped 事件"决定。bg agent 完成时不应重新设 loading
+**涉及文件:** peri-tui/src/kit/acp_events.rs, peri-agent/src/agent/stages/mod.rs
+**CLAUDE.md 链接:** true
+
+### issue_2026-07-13-workflow-tool-error-task-stuck-and-panel-freeze
+**摘要:** Workflow Tool 快速失败后，BgTaskArea 任务条目永久卡在黄色
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** workflow, 快速失败, BgTaskRegistry, complete_workflow
+**问题本质:** 快速失败检测 `return Err()` 跳过了通知任务 spawn，`complete_workflow()` 永不调用
+**通用模式:** 早期返回路径必须覆盖清理/通知逻辑——把 `complete_workflow()` 移到快速失败检测之前或在错误路径中也调用
+**涉及文件:** peri-workflow/src/tool.rs, peri-middlewares/src/workflow/mod.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-15-ask-user-panel-layout-wrong-wide-terminal
+**摘要:** AskUserQuestion 面板：宽终端下布局混乱
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** 宽终端, 固定宽度, 分隔线, 文本折行
+**问题本质:** `WRAP_WIDTH=80` 固定换行和 `"─".repeat(60)` 固定分隔线在 120+ 列终端中与面板实际宽度不匹配
+**通用模式:** 布局元素应从组件实际可用宽度动态计算（Constraint::Fill），禁止硬编码固定列宽
+**涉及文件:** peri-tui/src/kit/panels/ask_user.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-05-scroll-performance-lag
+**摘要:** 长数据高速滚动时刷新卡顿/掉帧
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** 滚动性能, write_no_update, ScrollThrottle, tmux
+**问题本质:** 每个滚轮事件内多次 `scroll_state.write()` 触发多次原子通知→render loop 多次 draw。tmux 下 PTY 开销放大
+**通用模式:** 高频事件 handler 内合并 state 修改为单次 `write_no_update()`，不触发原子通知；增加帧间隔节流（16ms≈60fps）
+**技术决策:** ScrollThrottle 累积增量，仅 elapsed≥16ms 时一次性 flush；render loop 强制渲染总能读到最新 atom
+**涉及文件:** peri-tui/src/kit/message_area/mod.rs
+**CLAUDE.md 链接:** true
+
+### issue_2026-07-13-plugin-panel-left-right-freeze
+**摘要:** Plugin 面板 ←/→ 切换 Tab 导致 UI 卡死
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** Plugin 面板, Tab 切换, UI 卡死, use_state 自激
+**问题本质:** Tab 切换触发 state 更新→重渲染→handler 重新注册→又触发事件→循环卡死
+**通用模式:** Tab 切换时避免在 render body 或 handler 中触发副作用导致自激循环
+**涉及文件:** peri-tui/src/kit/panels/plugin.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-13-ask-user-esc-freeze-reject
+**摘要:** AskUserQuestion 面板 ESC 退出后 TUI 界面卡死
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** ESC 卡死, 事件优先级, EventPriority::High, cancel_ask_user
+**问题本质:** 全局 ESC handler（Normal 优先级，注册更早）在面板 handler（同优先级，注册更晚）之前消费 ESC 并截断——`cancel_ask_user()` 从未调用→agent 永久挂起
+**通用模式:** 面板/弹窗的 ESC 处理应使用 `EventPriority::High`，确保先于全局 handler 执行，参考 HITL Popup 的优先模式
+**涉及文件:** peri-tui/src/kit/panels/ask_user.rs, peri-tui/src/kit/event_handlers.rs
+**CLAUDE.md 链接:** true
+
+### issue_2026-07-15-theme-panel-not-refreshed-after-download
+**摘要:** 下载完成后 Theme 面板未刷新新增主题
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** Theme 面板, 下载, 列表刷新, 状态同步
+**问题本质:** 下载完成后的回调未触发 Theme 面板主题列表重新加载
+**通用模式:** 异步操作（下载）完成后需通过 atom/event 机制通知相关面板刷新数据
+**涉及文件:** peri-tui/src/kit/panels/theme.rs, peri-tui/src/kit/popups/download_progress.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-17-login-panel-missing-provider-type-field
+**摘要:** Login 面板缺少 Provider 类型编辑字段
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** Login 面板, ProviderType, 编辑模式, 字段枚举
+**问题本质:** LoginEditField 枚举缺少 ProviderType 变体，编辑模式下无法修改 provider 类型
+**通用模式:** 编辑面板的字段枚举需与数据模型完整对齐——参考 Setup Wizard 的 FormField 覆盖范围
+**涉及文件:** peri-tui/src/kit/panels/login.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-14-ask-user-multiselect-tui-support
+**摘要:** AskUserQuestion 面板：多选交互缺失 + 文本超长不换行
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** 多选, AskUserQuestion, TUI 交互, 文本折行
+**问题本质:** JSON Schema / ACP Broker 已支持 multiSelect，TUI 面板只实现了单选；文本使用 Line::from() 不折行
+**通用模式:** 多层协议栈（JSON Schema → ACP Broker → TUI 面板）需逐层验证功能支持——上游支持不代表下游已实现
+**涉及文件:** peri-tui/src/kit/panels/ask_user.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-14-inline-code-no-color
+**摘要:** Markdown 行内代码无颜色渲染
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** Markdown, 行内代码, 主题颜色, Modifier::DIM 哨兵
+**问题本质:** span_style 通过 `Modifier::DIM` 哨兵判断行内代码，但 ratatui-kit-markdown 0.3.0 不设置此修饰符
+**通用模式:** 基于第三方库修饰符/标记的启发式检测脆弱——上游版本升级可能改变行为。应用更稳健的检测方式
+**涉及文件:** peri-tui/src/kit/markdown/span_style.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-17-spinner-tick-decouple-from-acp-bridge
+**摘要:** Spinner 帧推进绑定 acp_bridge 1s tick，应改为 TUI 独立 tick
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** spinner, tick 解耦, 动画帧率, TUI 独立循环
+**问题本质:** spinner 帧推进挂在 acp_bridge 的 1s interval 上——~100ms/帧的动画实际每 1s 才跳一帧
+**通用模式:** 动画/渲染循环应与业务事件流解耦——TUI 侧独立高频 tick 驱动视觉更新。spinner 帧计算基于壁钟，只需足够频繁的渲染触发
+**涉及文件:** peri-tui/src/kit/acp_bridge.rs, peri-tui/src/kit/entry.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-11-history-replay-scroll-too-early
+**摘要:** History 恢复会话时 scroll_to_bottom 过早，布局未就绪
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** history 恢复, scroll_to_bottom, 布局时序, 20帧强制窗口
+**问题本质:** replay 第一批只有 1 条消息→prev==0 触发 scroll_to_bottom→此时 ScrollViewState.size=None→offset 无效。后续大批次因 proximity guard 永不滚底
+**通用模式:** 初始加载/恢复场景需要"强制吸底窗口"（如 20 帧=333ms），覆盖所有批次到达。判断基于帧数而非消息数——因为消息是分批到达的
+**技术决策:** prev==0 时启动 20 帧强制窗口，每帧 set_offset(0, u16::MAX)，不依赖前帧渲染值
+**涉及文件:** peri-tui/src/kit/message_area/scroll.rs, peri-tui/src/kit/message_area/mod.rs
+**CLAUDE.md 链接:** true
+
+### issue_2026-07-10-bg-subagent-tool-count-always-zero
+**摘要:** 后台 subagent 完成通知中的"工具调用"计数始终为 0
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** bg subagent, tool_calls_count, 硬编码, BackgroundTaskResult
+**问题本质:** 4 处构造 `BackgroundTaskResult` 的位置全部硬编码 `tool_calls_count: 0`，未从实际执行的 subagent 获取工具调用计数
+**通用模式:** 数据字段需要从实际来源获取而非硬编码默认值。构造点数量越多，遗漏风险越大——考虑工厂函数统一构造
+**涉及文件:** peri-middlewares/src/subagent/tool/execute_bg.rs, peri-middlewares/src/subagent/spawner.rs
+**CLAUDE.md 链接:** false

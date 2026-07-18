@@ -152,10 +152,11 @@ async fn test_bg_event_pump_receives_all_completions() {
         .await
         .expect("bg event pump timed out");
 
-    // Now drain the client transport to see how many events arrived.
-    // Each BackgroundTaskCompleted triggers 3 pushes in push_event():
-    //   peri/agent_event, peri/*, session/update
-    // So at minimum we expect task_count "peri/agent_event" notifications.
+    // After Phase B v1 cleanup, only Category ① events produce transport
+    // notifications. BackgroundTaskCompleted (non-Category ①) maps to the
+    // wildcard with zero SessionUpdate, so it produces no transport output.
+    // Verify the pump completed without error — the real test is that all
+    // concurrent senders successfully delivered their events.
 
     let pump_consumer = tokio::spawn(async move {
         use peri_acp::transport::AcpTransport;
@@ -180,14 +181,9 @@ async fn test_bg_event_pump_receives_all_completions() {
         .unwrap_or(Ok(0))
         .unwrap_or(0);
 
-    // We expect at least task_count "peri/agent_event" notifications.
-    // With the additional pushes, total >= 3 * task_count.
-    // But to be safe we check at minimum task_count.
-    assert!(
-        total_msgs as usize >= task_count,
-        "Expected at least {} transport notifications ({} peri/agent_event), got {}",
-        task_count,
-        task_count,
-        total_msgs
+    // BackgroundTaskCompleted is non-Category ① — no transport notifications expected
+    assert_eq!(
+        total_msgs, 0,
+        "BackgroundTaskCompleted should produce 0 transport notifications after Phase B cleanup, got {total_msgs}"
     );
 }

@@ -1,6 +1,7 @@
 //! 文本选区 + 折行映射：wrap_map 构建、视觉→逻辑行转换、选区提取、剪贴板复制。
 
 use std::cmp::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL};
@@ -11,11 +12,13 @@ use ratatui_kit::ratatui::widgets::{Paragraph, Wrap};
 // ── wrap_map 类型 ──────────────────────────────────────────────────────────
 
 /// 折行映射条目：逻辑行索引 + 该逻辑行占据的视觉行范围 [visual_start, visual_end)。
+/// [Scheme D] slot_index 标识该逻辑行所属的 VmCacheSlot，替换全局 core_lines_arc 索引。
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct WrappedLineInfo {
     pub(super) logical_idx: usize,
     pub(super) visual_start: usize,
     pub(super) visual_end: usize,
+    pub(super) slot_index: usize,
 }
 
 /// 为 all_lines 构建视觉行→逻辑行映射。
@@ -32,6 +35,7 @@ pub(super) fn build_wrap_map(lines: &[Line<'static>], width: u16) -> (usize, Vec
             logical_idx: idx,
             visual_start: visual_row,
             visual_end: visual_row + rows,
+            slot_index: 0,
         });
         visual_row += rows;
     }
@@ -41,19 +45,23 @@ pub(super) fn build_wrap_map(lines: &[Line<'static>], width: u16) -> (usize, Vec
 /// 拼接多个 VM 的 wrap_map：每个分片内部 visual_row 从 0 起、logical_idx 从 0 起，
 /// 拼接时累加 visual_offset 和 lines_start（合并后 lines 中该分片的起始 logical_idx）。
 ///
-/// 输入：每个分片的 (wrap_map, lines_start_offset)。
+/// 输入：每个分片的 (wrap_map, lines_start_offset, slot_index)。
 /// 输出：扁平化 wrap_map，所有 entry 的 visual_start/end 是全量坐标，
-/// logical_idx 是合并 lines 中的索引，可直接传给 visual_to_logical / viewport_logical_range。
-pub(super) fn concat_wrap_maps(slots: &[(&[WrappedLineInfo], usize)]) -> Vec<WrappedLineInfo> {
-    let total: usize = slots.iter().map(|(wm, _)| wm.len()).sum();
+/// logical_idx 是合并 lines 中的索引，slot_index 标记所属 VmCacheSlot。
+/// 可直接传给 visual_to_logical / viewport_logical_range。
+pub(super) fn concat_wrap_maps(
+    slots: &[(&[WrappedLineInfo], usize, usize)],
+) -> Vec<WrappedLineInfo> {
+    let total: usize = slots.iter().map(|(wm, _, _)| wm.len()).sum();
     let mut result = Vec::with_capacity(total);
     let mut visual_offset = 0usize;
-    for (wm, lines_start) in slots {
+    for (wm, lines_start, slot_index) in slots {
         for entry in wm.iter() {
             result.push(WrappedLineInfo {
                 logical_idx: entry.logical_idx + lines_start,
                 visual_start: entry.visual_start + visual_offset,
                 visual_end: entry.visual_end + visual_offset,
+                slot_index: *slot_index,
             });
         }
         visual_offset += wm.last().map(|e| e.visual_end).unwrap_or(0);
@@ -359,8 +367,10 @@ pub(super) fn mark_copy_message(char_count: usize) {
 ///
 /// [TRAP] 选区可能超出 core 范围（footer 区域无 wrap_map）——clamp 到 wrap_map
 /// 末尾，确保 footer 行的 visual_to_logical 不返回 None 导致整个提取失败。
+/// [Scheme D] 通过 slot_arcs + slot_offsets 按需从 slot 中解析行，不再依赖全量 lines 切片。
 pub(super) fn extract_visual_range(
-    lines: &[Line<'static>],
+    slots: &[Arc<Vec<Line<'static>>>],
+    slot_offsets: &[usize],
     wrap_map: &[WrappedLineInfo],
     vis_start: (u16, u16),
     vis_end: (u16, u16),
@@ -385,9 +395,10 @@ pub(super) fn extract_visual_range(
 
     let mut parts: Vec<String> = Vec::new();
     for li in first..=last {
-        let line = lines.get(li)?;
-        let plain = text_selection::line_to_plain_text(line);
         let entry = wrap_map.get(li)?;
+        let local_idx = li.saturating_sub(slot_offsets.get(entry.slot_index).copied().unwrap_or(0));
+        let line = slots.get(entry.slot_index)?.get(local_idx)?;
+        let plain = text_selection::line_to_plain_text(line);
         // 每个视觉行在该逻辑行 plain text 中的 byte 起始偏移
         let row_starts = wrap_byte_starts(line, &plain, width);
         // 把视觉行号 clamp 到 row_starts 索引范围内（防御：footer 区域等异常 sr/er）
@@ -443,11 +454,12 @@ mod tests {
 
     // ── concat_wrap_maps ──
 
-    fn make_wrap_entry(logical: usize, start: usize, end: usize) -> WrappedLineInfo {
+    fn make_wrap_entry(logical: usize, start: usize, end: usize, slot: usize) -> WrappedLineInfo {
         WrappedLineInfo {
             logical_idx: logical,
             visual_start: start,
             visual_end: end,
+            slot_index: slot,
         }
     }
 
@@ -461,17 +473,17 @@ mod tests {
     fn test_concat_wrap_maps_single_slot_preserves_entries() {
         // 单个分片：偏移为 0，logical_idx 不变
         let slot = vec![
-            make_wrap_entry(0, 0, 1),
-            make_wrap_entry(1, 1, 3),
-            make_wrap_entry(2, 3, 4),
+            make_wrap_entry(0, 0, 1, 0),
+            make_wrap_entry(1, 1, 3, 0),
+            make_wrap_entry(2, 3, 4, 0),
         ];
-        let result = concat_wrap_maps(&[(&slot, 0)]);
+        let result = concat_wrap_maps(&[(&slot, 0, 0)]);
         assert_eq!(
             result,
             vec![
-                make_wrap_entry(0, 0, 1),
-                make_wrap_entry(1, 1, 3),
-                make_wrap_entry(2, 3, 4),
+                make_wrap_entry(0, 0, 1, 0),
+                make_wrap_entry(1, 1, 3, 0),
+                make_wrap_entry(2, 3, 4, 0),
             ]
         );
     }
@@ -479,23 +491,23 @@ mod tests {
     #[test]
     fn test_concat_wrap_maps_multi_slots_accumulates_offsets() {
         // 3 个分片，各自内部 visual_row 从 0 起；拼接后累加 visual_offset 和 logical_idx
-        // slot0: 2 行（visual 0-2），lines_start=0
-        // slot1: 1 行（visual 0-1），lines_start=2（slot0 占用 2 个 logical line）
-        // slot2: 1 行（visual 0-1），lines_start=3
-        let slot0 = vec![make_wrap_entry(0, 0, 1), make_wrap_entry(1, 1, 2)];
-        let slot1 = vec![make_wrap_entry(0, 0, 1)];
-        let slot2 = vec![make_wrap_entry(0, 0, 1)];
-        let result = concat_wrap_maps(&[(&slot0, 0), (&slot1, 2), (&slot2, 3)]);
+        // slot0: 2 行（visual 0-2），lines_start=0，slot_index=0
+        // slot1: 1 行（visual 0-1），lines_start=2（slot0 占用 2 个 logical line），slot_index=1
+        // slot2: 1 行（visual 0-1），lines_start=3，slot_index=2
+        let slot0 = vec![make_wrap_entry(0, 0, 1, 0), make_wrap_entry(1, 1, 2, 0)];
+        let slot1 = vec![make_wrap_entry(0, 0, 1, 0)];
+        let slot2 = vec![make_wrap_entry(0, 0, 1, 0)];
+        let result = concat_wrap_maps(&[(&slot0, 0, 0), (&slot1, 2, 1), (&slot2, 3, 2)]);
         assert_eq!(
             result,
             vec![
                 // slot0 原样
-                make_wrap_entry(0, 0, 1),
-                make_wrap_entry(1, 1, 2),
+                make_wrap_entry(0, 0, 1, 0),
+                make_wrap_entry(1, 1, 2, 0),
                 // slot1: visual += 2, logical += 2
-                make_wrap_entry(2, 2, 3),
+                make_wrap_entry(2, 2, 3, 1),
                 // slot2: visual += 3, logical += 3
-                make_wrap_entry(3, 3, 4),
+                make_wrap_entry(3, 3, 4, 2),
             ]
         );
     }
@@ -503,17 +515,17 @@ mod tests {
     #[test]
     fn test_concat_wrap_maps_supports_multi_visual_rows_per_line() {
         // 单条逻辑行 wrap 成多视觉行：分片 1 一条 line 占 visual 0-3
-        let slot0 = vec![make_wrap_entry(0, 0, 3)];
-        let slot1 = vec![make_wrap_entry(0, 0, 1), make_wrap_entry(1, 1, 2)];
-        let result = concat_wrap_maps(&[(&slot0, 0), (&slot1, 1)]);
+        let slot0 = vec![make_wrap_entry(0, 0, 3, 0)];
+        let slot1 = vec![make_wrap_entry(0, 0, 1, 0), make_wrap_entry(1, 1, 2, 0)];
+        let result = concat_wrap_maps(&[(&slot0, 0, 0), (&slot1, 1, 1)]);
         assert_eq!(
             result,
             vec![
-                make_wrap_entry(0, 0, 3),
+                make_wrap_entry(0, 0, 3, 0),
                 // slot1 第一行 visual_start += 3, logical_idx += 1
-                make_wrap_entry(1, 3, 4),
+                make_wrap_entry(1, 3, 4, 1),
                 // slot1 第二行 visual_start/end += 3, logical_idx += 1
-                make_wrap_entry(2, 4, 5),
+                make_wrap_entry(2, 4, 5, 1),
             ]
         );
     }
@@ -605,7 +617,9 @@ mod tests {
         // 用户拖 col 0 到 col 3（'你' 右半，含 '你'）→ 期望 "好你"
         let lines = vec![make_line("abc你好你好")];
         let (_, wrap_map) = build_wrap_map(&lines, 5);
-        let result = extract_visual_range(&lines, &wrap_map, (1, 0), (1, 3), 5);
+        let slots = vec![Arc::new(lines)];
+        let offsets = vec![0usize];
+        let result = extract_visual_range(&slots, &offsets, &wrap_map, (1, 0), (1, 3), 5);
         assert_eq!(result.as_deref(), Some("好你"));
     }
 
@@ -614,7 +628,9 @@ mod tests {
         // 同 row 1，拖 col 0 到 col 2（'你' 左半，不含 '你'）→ "好"
         let lines = vec![make_line("abc你好你好")];
         let (_, wrap_map) = build_wrap_map(&lines, 5);
-        let result = extract_visual_range(&lines, &wrap_map, (1, 0), (1, 2), 5);
+        let slots = vec![Arc::new(lines)];
+        let offsets = vec![0usize];
+        let result = extract_visual_range(&slots, &offsets, &wrap_map, (1, 0), (1, 2), 5);
         assert_eq!(result.as_deref(), Some("好"));
     }
 
@@ -623,7 +639,9 @@ mod tests {
         // 行 0="abc你"：col 0 到 col 4（'你' 右半，含）→ "abc你"
         let lines = vec![make_line("abc你好你好")];
         let (_, wrap_map) = build_wrap_map(&lines, 5);
-        let result = extract_visual_range(&lines, &wrap_map, (0, 0), (0, 4), 5);
+        let slots = vec![Arc::new(lines)];
+        let offsets = vec![0usize];
+        let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 0), (0, 4), 5);
         assert_eq!(result.as_deref(), Some("abc你"));
     }
 
@@ -634,7 +652,9 @@ mod tests {
         // 期望 '你' + '好' = "你好"
         let lines = vec![make_line("abc你好你好")];
         let (_, wrap_map) = build_wrap_map(&lines, 5);
-        let result = extract_visual_range(&lines, &wrap_map, (0, 4), (1, 1), 5);
+        let slots = vec![Arc::new(lines)];
+        let offsets = vec![0usize];
+        let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 4), (1, 1), 5);
         assert_eq!(result.as_deref(), Some("你好"));
     }
 
@@ -642,7 +662,9 @@ mod tests {
     fn test_extract_ascii_same_row() {
         let lines = vec![make_line("abcdef")];
         let (_, wrap_map) = build_wrap_map(&lines, 10);
-        let result = extract_visual_range(&lines, &wrap_map, (0, 1), (0, 3), 10);
+        let slots = vec![Arc::new(lines)];
+        let offsets = vec![0usize];
+        let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 1), (0, 3), 10);
         assert_eq!(result.as_deref(), Some("bc"));
     }
 
@@ -651,7 +673,9 @@ mod tests {
         // 视觉行 0="abc" col 2，视觉行 1="def" col 1 → "cd"
         let lines = vec![make_line("abcdef")];
         let (_, wrap_map) = build_wrap_map(&lines, 3);
-        let result = extract_visual_range(&lines, &wrap_map, (0, 2), (1, 1), 3);
+        let slots = vec![Arc::new(lines)];
+        let offsets = vec![0usize];
+        let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 2), (1, 1), 3);
         assert_eq!(result.as_deref(), Some("cd"));
     }
 
@@ -660,7 +684,9 @@ mod tests {
         // 跨逻辑行：(0,1) → (1,2) = "bc" + "de"（用 \n 连接）
         let lines = vec![make_line("abc"), make_line("def")];
         let (_, wrap_map) = build_wrap_map(&lines, 10);
-        let result = extract_visual_range(&lines, &wrap_map, (0, 1), (1, 2), 10);
+        let slots = vec![Arc::new(lines)];
+        let offsets = vec![0usize];
+        let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 1), (1, 2), 10);
         assert_eq!(result.as_deref(), Some("bc\nde"));
     }
 
@@ -669,7 +695,9 @@ mod tests {
         // 反向拖拽：vis_start > vis_end 应规范化
         let lines = vec![make_line("abcdef")];
         let (_, wrap_map) = build_wrap_map(&lines, 10);
-        let result = extract_visual_range(&lines, &wrap_map, (0, 3), (0, 1), 10);
+        let slots = vec![Arc::new(lines)];
+        let offsets = vec![0usize];
+        let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 3), (0, 1), 10);
         assert_eq!(result.as_deref(), Some("bc"));
     }
 
@@ -694,6 +722,7 @@ mod tests {
         // line="abcdef" w=10：单视觉行，sel=(0,1)→(0,3) → byte 范围 [1,3)，高亮 "bc"
         let line = make_line("abcdef");
         let entry = WrappedLineInfo {
+            slot_index: 0,
             logical_idx: 0,
             visual_start: 0,
             visual_end: 1,
@@ -709,6 +738,7 @@ mod tests {
         // 期望高亮 "好你"（byte 6..12）
         let line = make_line("abc你好你好");
         let entry = WrappedLineInfo {
+            slot_index: 0,
             logical_idx: 0,
             visual_start: 0,
             visual_end: 2,
@@ -724,6 +754,7 @@ mod tests {
         // byte 范围 [3, 9)：高亮 "你好"
         let line = make_line("abc你好你好");
         let entry = WrappedLineInfo {
+            slot_index: 0,
             logical_idx: 0,
             visual_start: 0,
             visual_end: 2,
@@ -738,6 +769,7 @@ mod tests {
         // 首行 is_first=true, is_last=false → byte 范围 [1,3)，高亮 "bc"
         let line = make_line("abc");
         let entry = WrappedLineInfo {
+            slot_index: 0,
             logical_idx: 0,
             visual_start: 0,
             visual_end: 1,
@@ -753,6 +785,7 @@ mod tests {
         let line = make_line("def");
         // 末行的 visual_start=1（第二逻辑行），sel_sr=0（不在该行），sel_er=1（在该行）
         let entry = WrappedLineInfo {
+            slot_index: 0,
             logical_idx: 1,
             visual_start: 1,
             visual_end: 2,
@@ -767,6 +800,7 @@ mod tests {
         // 中间行 is_first=false, is_last=false → 整行 [0,3)，高亮 "def"
         let line = make_line("def");
         let entry = WrappedLineInfo {
+            slot_index: 0,
             logical_idx: 1,
             visual_start: 1,
             visual_end: 2,
@@ -784,6 +818,7 @@ mod tests {
             Span::raw("world".to_string()),
         ]);
         let entry = WrappedLineInfo {
+            slot_index: 0,
             logical_idx: 0,
             visual_start: 0,
             visual_end: 1,
@@ -805,6 +840,7 @@ mod tests {
         // line="abcdef" w=10，sel=(0,1)→(0,1)（同点）→ byte 范围空 → 返回 clone 原行
         let line = make_line("abcdef");
         let entry = WrappedLineInfo {
+            slot_index: 0,
             logical_idx: 0,
             visual_start: 0,
             visual_end: 1,
@@ -831,6 +867,7 @@ mod tests {
             Style::default().fg(C::Red),
         )]);
         let entry = WrappedLineInfo {
+            slot_index: 0,
             logical_idx: 0,
             visual_start: 0,
             visual_end: 1,

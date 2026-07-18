@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use chrono::Local;
 
 use crate::cli_args::OutputFormat;
 
@@ -174,7 +175,7 @@ pub async fn run_print(
         };
 
     let tool_search_index = Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
-    let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
+    let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
 
     // broker（自动批准所有）
     let broker: Arc<dyn peri_agent::interaction::UserInteractionBroker> = Arc::new(PrintBroker);
@@ -194,6 +195,16 @@ pub async fn run_print(
         peri_acp::session::agent_pool::AgentPool::new(),
     ));
 
+    // 构建 frozen data（-p 模式与正常路径一致，保证 system prompt 稳定性）
+    let frozen_date = Local::now().format("%Y-%m-%d").to_string();
+    let frozen_data = peri_acp::session::executor::FrozenSessionData::build(
+        &cwd,
+        None, // print 模式无语言偏好
+        &plugin_skill_roots,
+        &plugin_agent_dirs,
+        &frozen_date,
+    );
+
     // run_session_loop 是 async 函数（返回 PromptResult）
     let result = peri_acp::session::executor::run_session_loop(
         peri_acp::session::executor::PromptExecutionContext {
@@ -206,7 +217,7 @@ pub async fn run_print(
             broker,
             permission_mode: shared_permission,
             content: peri_agent::messages::MessageContent::text(prompt_text),
-            frozen: None, // no frozen data
+            frozen: Some(frozen_data),
             history: vec![],
             incoming_recalls: vec![],
             session_start_source: Some("startup".to_string()),

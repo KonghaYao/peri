@@ -9,7 +9,10 @@
 //! `session/cancel` notifications. Sessions are shared via
 //! `Arc<tokio::sync::Mutex<HashMap>>`.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 pub use peri_acp::session::state_builders::{
     apply_thinking_effort, build_config_options, build_mode_state, parse_permission_mode,
@@ -65,7 +68,7 @@ pub struct AcpServerConfig {
     pub plugin_lsp_servers: Vec<peri_lsp::config::LspServerConfig>,
     pub tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
     pub shared_tools:
-        Arc<parking_lot::RwLock<HashMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
+        Arc<parking_lot::RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
     pub thread_store: Arc<dyn peri_agent::thread::ThreadStore>,
     pub langfuse_session: Option<Arc<peri_acp::langfuse::LangfuseSession>>,
     pub config_path: std::path::PathBuf,

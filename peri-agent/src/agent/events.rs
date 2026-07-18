@@ -357,19 +357,13 @@ pub enum ExecutorEvent {
         warnings: usize,
         files_with_errors: usize,
     },
-    /// Agent 执行失败（由 executor 在 run_react_loop 返回 Err 时发送）
-    AgentExecutionFailed {
-        message: String,
-    },
+
     /// 后台 agent 工具调用进度通知（轻量级，仅用于 TUI bg_agent_bar 实时计数）
     BgToolStep {
         child_thread_id: String,
     },
     /// Workflow 进度更新（WorkflowRunner 发出，TUI 消费渲染面板）
     WorkflowProgress(WorkflowProgressPayload),
-    /// Turn 已挂起（idle/await_wake），等待 bg agent/cron/workflow 异步事件。
-    /// TUI 收到后应停止 loading spinner，但不终止 Agent（Agent 保持 await_wake 存活）。
-    TurnSuspended,
     // ── langfuse v2：会话/Turn 生命周期 ──
     SessionStarted {
         session_id: String,
@@ -385,16 +379,6 @@ pub enum ExecutorEvent {
         status: TurnStatus,
         error_kind: Option<TurnErrorKind>,
     },
-    StageStarted {
-        turn_id: String,
-        stage: Stage,
-    },
-    StageEnded {
-        turn_id: String,
-        stage: Stage,
-        status: StageStatus,
-        duration_ms: u64,
-    },
     // ── langfuse v2：中间件链 ──
     MiddlewareStarted {
         turn_id: String,
@@ -408,12 +392,6 @@ pub enum ExecutorEvent {
         status: StageStatus,
         error: Option<String>,
     },
-    // ── langfuse v2：Reason ──
-    AiReasoningChunk {
-        turn_id: String,
-        text: String,
-        source_agent_id: Option<String>,
-    },
     // ── langfuse v2：Compact ──
     BudgetThresholdHit {
         turn_id: String,
@@ -421,13 +399,6 @@ pub enum ExecutorEvent {
         current_pct: f64,
         tokens_in: u64,
         tokens_out: u64,
-    },
-    // ── langfuse v2：Receive ──
-    MessageQueueDrained {
-        turn_id: String,
-        prompt: usize,
-        defer: usize,
-        info: usize,
     },
     // ── langfuse v2：Act / Workflow ──
     WorkflowStarted {
@@ -471,34 +442,6 @@ where
 {
     fn on_event(&self, event: ExecutorEvent) {
         (self.0)(event)
-    }
-}
-
-/// 覆盖 ExecutorEvent 的 `source_agent_id` 字段（ToolStart / ToolEnd / TextChunk / AiReasoning）。
-///
-/// 用于 SubAgent 转发器：v2 RenderEvent 的 `agent_id` 字段在 mapper_v2 中被丢弃
-/// （main executor 路径不需要），但 SubAgent 转发器需要把 `source_agent_id` 设为
-/// `child_thread_id`，让 TUI 的 `find_running_subagent_mut(aid)` 按 instance_id 匹配。
-///
-/// 其他变体（TurnCommitted / SubagentStarted 等）没有 `source_agent_id`
-/// 字段，本函数对它们是 no-op。
-pub fn inject_source_agent_id(event: &mut ExecutorEvent, agent_id: &str) {
-    match event {
-        ExecutorEvent::ToolStart {
-            source_agent_id, ..
-        }
-        | ExecutorEvent::ToolEnd {
-            source_agent_id, ..
-        }
-        | ExecutorEvent::TextChunk {
-            source_agent_id, ..
-        }
-        | ExecutorEvent::AiReasoning {
-            source_agent_id, ..
-        } => {
-            *source_agent_id = Some(agent_id.to_string());
-        }
-        _ => {}
     }
 }
 

@@ -1,42 +1,12 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
   <link rel="stylesheet" href="/css/base.css">
   <script src="https://unpkg.com/marked@15.0.9/marked.min.js"></script>
+  <link rel="stylesheet" href="/css/theme.css">
   <style type="text/tailwindcss">
-    @theme {
-      --color-bg: #0d1117;
-      --color-bg-secondary: #161b22;
-      --color-bg-hover: #1c2128;
-      --color-bg-active: rgba(31,111,235,0.12);
-      --color-text: #e6edf3;
-      --color-text-secondary: #8b949e;
-      --color-text-muted: #6e7681;
-      --color-border: #30363d;
-      --color-accent: #58a6ff;
-      --color-accent-hover: #79c0ff;
-      --color-success: #3fb950;
-      --color-warning: #d29922;
-      --color-error: #f85149;
-      --font-mono: "JetBrains Mono", "Fira Code", Menlo, monospace;
-    }
-    [data-theme="light"] {
-      --color-bg: #ffffff;
-      --color-bg-secondary: #f6f8fa;
-      --color-bg-hover: #e8eaed;
-      --color-bg-active: rgba(9,105,218,0.12);
-      --color-text: #1f2328;
-      --color-text-secondary: #57606a;
-      --color-text-muted: #656d76;
-      --color-border: #d0d7de;
-      --color-accent: #0969da;
-      --color-accent-hover: #0550ae;
-      --color-success: #1a7f37;
-      --color-warning: #9a6700;
-      --color-error: #cf222e;
-    }
     .markdown-body { line-height: 1.6; }
     .markdown-body h1, .markdown-body h2, .markdown-body h3 { margin: 16px 0 8px; }
     .markdown-body pre { background: var(--color-bg-secondary); padding: 12px; border-radius: 4px; overflow: auto; }

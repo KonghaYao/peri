@@ -1,6 +1,6 @@
 //! ExecuteExtraTool 元工具 — 代理执行延迟加载的工具
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -17,13 +17,13 @@ use super::core_tools::{
 /// 输入目标工具名称和参数，从共享工具注册表中查找并执行。
 pub struct ExecuteExtraTool {
     /// 共享工具注册表（由 executor 在工具收集后填充）
-    shared_tools: Arc<RwLock<HashMap<String, Arc<dyn BaseTool>>>>,
+    shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
     /// description 含动态生成的 Core 工具列表，构造时一次性生成（P1-1）。
     description: String,
 }
 
 impl ExecuteExtraTool {
-    pub fn new(shared_tools: Arc<RwLock<HashMap<String, Arc<dyn BaseTool>>>>) -> Self {
+    pub fn new(shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>) -> Self {
         let description = format!(
             "ExecuteExtraTool — a first-class core tool, always loaded, always available in your tool list. Runs locally with full permissions — NOT a remote or external tool. You do NOT need to search for it.\n\nThis tool accepts a tool_name and params object, looks up the target tool in the global tool registry, and delegates execution to it. The target tool runs with the same permissions and capabilities as if it were called directly.\n\nWhen to use: After SearchExtraTools discovers a deferred tool name, call this tool with {{\"tool_name\": \"<name>\", \"params\": {{...}}}} to invoke it immediately.\nWhen NOT to use: For core tools already in your tool list ({}, etc.) — call those directly.",
             core_tools_sorted_csv()

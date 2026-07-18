@@ -1,0 +1,77 @@
+/* ========== Perihelion 设计 token（唯一来源，供所有 HTML 页面引用） ========== */
+/* 暗色默认（近日点：深空底色 + 太阳琥珀 accent） */
+@theme {
+  /* 背景层级：bg(最深) → secondary(面板) → tertiary(浮起卡片/输入框) */
+  --color-bg: #0a0c12;
+  --color-bg-secondary: #10141d;
+  --color-bg-tertiary: #171c28;
+  --color-bg-hover: #1c2331;
+  --color-bg-active: rgba(240, 168, 53, 0.10);
+
+  --color-text: #e9edf5;
+  --color-text-secondary: #9ca7ba;
+  --color-text-muted: #5d6b82;
+
+  --color-border: #1f2735;
+  --color-border-strong: #2c3648;
+
+  --color-accent: #f0a835;
+  --color-accent-hover: #ffbf4d;
+  --color-accent-contrast: #241800;
+  --color-accent-subtle: rgba(240, 168, 53, 0.14);
+
+  --color-success: #4cc38a;
+  --color-warning: #e5c07b;
+  --color-error: #e5534b;
+  --color-info: #5da9e9;
+
+  --color-overlay: rgba(4, 6, 10, 0.6);
+
+  --font-mono: "JetBrains Mono", "Fira Code", Menlo, monospace;
+}
+
+/* 显式暗色 */
+[data-theme="dark"] {
+  --color-bg: #0a0c12;
+  --color-bg-secondary: #10141d;
+  --color-bg-tertiary: #171c28;
+  --color-bg-hover: #1c2331;
+  --color-bg-active: rgba(240, 168, 53, 0.10);
+  --color-text: #e9edf5;
+  --color-text-secondary: #9ca7ba;
+  --color-text-muted: #5d6b82;
+  --color-border: #1f2735;
+  --color-border-strong: #2c3648;
+  --color-accent: #f0a835;
+  --color-accent-hover: #ffbf4d;
+  --color-accent-contrast: #241800;
+  --color-accent-subtle: rgba(240, 168, 53, 0.14);
+  --color-success: #4cc38a;
+  --color-warning: #e5c07b;
+  --color-error: #e5534b;
+  --color-info: #5da9e9;
+  --color-overlay: rgba(4, 6, 10, 0.6);
+}
+
+/* 亮色主题 */
+[data-theme="light"] {
+  --color-bg: #f5f6f8;
+  --color-bg-secondary: #eceef2;
+  --color-bg-tertiary: #ffffff;
+  --color-bg-hover: #e2e6ec;
+  --color-bg-active: rgba(180, 83, 9, 0.08);
+  --color-text: #232a36;
+  --color-text-secondary: #55617a;
+  --color-text-muted: #8a94a6;
+  --color-border: #dce1e9;
+  --color-border-strong: #c6ceda;
+  --color-accent: #b45309;
+  --color-accent-hover: #92400e;
+  --color-accent-contrast: #ffffff;
+  --color-accent-subtle: rgba(180, 83, 9, 0.10);
+  --color-success: #178a50;
+  --color-warning: #9a6700;
+  --color-error: #d92d20;
+  --color-info: #0969da;
+  --color-overlay: rgba(35, 42, 54, 0.35);
+}

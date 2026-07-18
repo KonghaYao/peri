@@ -22,6 +22,10 @@ use crate::{
 /// 这让 `trait Middleware` 可以改为非泛型，钩子签名用 `&mut dyn MiddlewareState`。
 pub trait MiddlewareState: Send + Sync {
     fn cwd(&self) -> &str;
+    #[deprecated(
+        since = "0.2.0",
+        note = "v1→v2 桥接层 no-op；请使用 StageContext 对应方法"
+    )]
     fn set_cwd(&mut self, cwd: String);
 
     fn messages(&self) -> &[BaseMessage];
@@ -30,6 +34,10 @@ pub trait MiddlewareState: Send + Sync {
     fn messages_mut(&mut self) -> &mut Vec<BaseMessage>;
 
     fn current_step(&self) -> usize;
+    #[deprecated(
+        since = "0.2.0",
+        note = "v1→v2 桥接层 no-op；请使用 StageContext 对应方法"
+    )]
     fn set_current_step(&mut self, step: usize);
 
     fn get_context(&self, key: &str) -> Option<&str>;
@@ -43,8 +51,16 @@ pub trait MiddlewareState: Send + Sync {
 
     fn ancestor_len(&self) -> usize;
 
+    #[deprecated(
+        since = "0.2.0",
+        note = "v1→v2 桥接层 no-op；请使用 StageContext 对应方法"
+    )]
     fn store(&self) -> Option<&Arc<dyn ThreadStore>>;
 
+    #[deprecated(
+        since = "0.2.0",
+        note = "v1→v2 桥接层 no-op；请使用 StageContext 对应方法"
+    )]
     fn own_thread_id(&self) -> Option<&ThreadId>;
 
     /// 返回共享的 v2 MessageQueue 引用（用于 goal steering / stop-hook feedback 等异步注入）

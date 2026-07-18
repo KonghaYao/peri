@@ -62,7 +62,7 @@ pub struct AcpSession {
     pub active_agents: HashMap<ThreadId, AgentRuntime>,
     /// Goal steering 状态（session 级，跨 prompt 共享）
     pub goal_state: crate::session::goal_state::GoalState,
-    /// v2 统一收件箱（session 级共享，所有路径用；P5 后 v1 已删，无回退）
+    /// 统一收件箱（session 级共享，所有路径用）
     ///
     /// v2 stages 使用独立类型
     /// `peri_agent::session::MessageQueue`（富类型，带 Kind/Source）。

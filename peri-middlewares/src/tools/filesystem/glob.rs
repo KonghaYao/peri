@@ -74,8 +74,12 @@ fn should_skip_dir(name: &str) -> bool {
 /// Soft-warn pattern — still executes, but prepends a warning. A hit strongly suggests the caller actually wanted to list a directory.
 fn soft_warn_pattern(pattern: &str) -> Option<&'static str> {
     match pattern.trim() {
-        "*" => Some("Bare `*` matches every entry in the current directory; use folder_operations or Bash ls to list a directory instead."),
-        "**" | "**/*" => Some("`**/*` recursively expands the entire subtree (including every worktree/plugin copy); prefer folder_operations or a more specific pattern."),
+        "*" => Some(
+            "Bare `*` matches every entry in the current directory; use folder_operations or Bash ls to list a directory instead.",
+        ),
+        "**" | "**/*" => Some(
+            "`**/*` recursively expands the entire subtree (including every worktree/plugin copy); prefer folder_operations or a more specific pattern.",
+        ),
         _ => None,
     }
 }

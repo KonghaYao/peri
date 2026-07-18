@@ -9,7 +9,7 @@
 
 use tracing::debug;
 
-use crate::agent::compact::config::CompactConfig;
+use crate::agent::compact_v2::config::CompactConfig;
 use crate::messages::{BaseMessage, ContentBlock};
 use crate::session::transcript::{MessageTranscript, TranscriptEntry};
 
@@ -164,7 +164,7 @@ fn compute_round_starts(entries: &[TranscriptEntry]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::compact::config::CompactConfig;
+    use crate::agent::compact_v2::config::CompactConfig;
     use crate::messages::{BaseMessage, MessageContent};
     use crate::session::transcript::MessageTranscript;
 

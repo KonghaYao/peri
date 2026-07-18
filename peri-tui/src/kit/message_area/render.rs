@@ -10,6 +10,8 @@ use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 // ── 工具卡片辅助函数（内联自 view_render/tool_card.rs）─────────────────
 
@@ -123,7 +125,7 @@ pub(super) fn vm_to_lines_cached(
 
             // 推理块
             if let Some(ref reasoning) = data.reasoning {
-                lines.extend(render_reasoning_block(reasoning));
+                lines.extend(render_reasoning_block(reasoning, width));
             }
 
             // Markdown 文本
@@ -257,6 +259,7 @@ pub(super) fn vm_to_lines_cached(
 
 fn render_reasoning_block(
     reasoning: &crate::kit::tui_render_unit::TuiReasoningBlock,
+    width: usize,
 ) -> Vec<Line<'static>> {
     let semantic = THEME_ATOM.state().read().semantic;
     let char_count = reasoning.text.chars().count();
@@ -270,22 +273,48 @@ fn render_reasoning_block(
     )]));
 
     if !reasoning.collapsed {
+        let style = Style::default().fg(semantic.text.dim).italic();
+        let prefix = " \u{23bf} ";
+        let max_text_width = width.saturating_sub(3); // prefix " ⏿ " 占 3 列
+        // “…” 占 1 列（U+2026），当线条被截断时需要保留
+        let ellipsis_width = 1usize;
         let tail_lines: Vec<&str> = reasoning.text.lines().rev().take(3).collect();
+
         for tail in tail_lines.into_iter().rev() {
-            if !tail.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::styled(" \u{23bf} ", Style::default().fg(semantic.text.dim)),
-                    Span::styled(
-                        tail.to_string(),
-                        Style::default().fg(semantic.text.dim).italic(),
-                    ),
-                ]));
+            if tail.is_empty() {
+                continue;
             }
+            // [Fix] thinking 预览行不折行、不 pre-split——直接按 visual width 截断。
+            // 每条 thinking 行强制占 1 个 visual row，流式期间 block 高度完全稳定，
+            // 不会把下方响应文本"推出视野又拉回"。
+            let truncated = if tail.width() <= max_text_width {
+                tail.to_string()
+            } else {
+                truncate_to_width(tail, max_text_width.saturating_sub(ellipsis_width)) + "\u{2026}"
+            };
+            lines.push(Line::from(vec![
+                Span::styled(prefix.to_string(), style),
+                Span::styled(truncated, style),
+            ]));
         }
     }
     lines.push(Line::from(""));
 
     lines
+}
+
+/// 按 visual width 截断文本，返回 ≤max_width 列的 prefix-free 字符串。
+/// CJK 安全：使用 UnicodeWidthStr::width() 而非字节/字符计数。
+fn truncate_to_width(text: &str, max_width: usize) -> String {
+    let mut w = 0usize;
+    for (i, c) in text.char_indices() {
+        let cw = c.width().unwrap_or(1);
+        if w + cw > max_width {
+            return text[..i].to_string();
+        }
+        w += cw;
+    }
+    text.to_string()
 }
 
 fn render_reminder_condensed(

@@ -45,6 +45,7 @@ png = "0.18"
 base64 = { version = "0.22", features = ["alloc"] }
 peri-theme = { path = "../peri-theme" }
 peri-acp = { path = "../peri-acp" }
+peri-workflow = { path = "../peri-workflow" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-web-pty = { path = "../peri-web-pty" }
 agent-client-protocol = { version = "1.2", features = ["unstable"] }

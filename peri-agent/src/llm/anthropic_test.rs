@@ -1149,6 +1149,16 @@ fn test_multiturn_with_errors_all_tool_results_have_id() {
             .unwrap_or(false);
         assert!(has_id, "第 {} 个 tool_result 缺少非空 id 字段: {:?}", i, tr);
     }
+
+    // 验证 tool_result 顺序与 tool_use 顺序一致
+    // call_1 → call_2 → call_3a → call_3b
+    assert_eq!(tool_results[0]["tool_use_id"], "call_1");
+    assert_eq!(tool_results[1]["tool_use_id"], "call_2");
+    assert_eq!(
+        tool_results[2]["tool_use_id"], "call_3a",
+        "call_3a 应在 call_3b 之前"
+    );
+    assert_eq!(tool_results[3]["tool_use_id"], "call_3b");
 }
 
 /// BaseModel::build_request_body 返回 Anthropic Provider-native 请求体
@@ -1208,4 +1218,67 @@ fn test_base_model_build_request_body_returns_provider_native_anthropic_format()
     let messages = body["messages"].as_array().expect("messages 应是 array");
     // Anthropic 把 system 从 messages 移除，user 消息应在 messages[0]
     assert_eq!(messages[0]["role"], "user");
+}
+
+/// 验证连续多条 Tool 消息合并后 tool_result 顺序与 tool_use 一致
+#[test]
+fn test_consecutive_tool_results_preserve_order() {
+    use crate::messages::ToolCallRequest;
+
+    let messages = vec![
+        BaseMessage::human("run three commands"),
+        BaseMessage::ai_with_tool_calls(
+            "",
+            vec![
+                ToolCallRequest::new(
+                    "call_a".to_string(),
+                    "Bash".to_string(),
+                    json!({"command": "echo a"}),
+                ),
+                ToolCallRequest::new(
+                    "call_b".to_string(),
+                    "Bash".to_string(),
+                    json!({"command": "echo b"}),
+                ),
+                ToolCallRequest::new(
+                    "call_c".to_string(),
+                    "Bash".to_string(),
+                    json!({"command": "echo c"}),
+                ),
+            ],
+        ),
+        BaseMessage::tool_result("call_a", "a"),
+        BaseMessage::tool_result("call_b", "b"),
+        BaseMessage::tool_result("call_c", "c"),
+    ];
+
+    let (msgs, _) = ChatAnthropic::messages_to_anthropic(&messages);
+
+    // 找到 user 消息中的 tool_result blocks
+    let user_msg = msgs.iter().find(|m| {
+        m["role"] == "user"
+            && m["content"]
+                .as_array()
+                .is_some_and(|arr| arr.iter().any(|b| b["type"] == "tool_result"))
+    });
+    let content = user_msg.unwrap()["content"].as_array().unwrap();
+
+    let tool_results: Vec<_> = content
+        .iter()
+        .filter(|b| b["type"] == "tool_result")
+        .collect();
+
+    assert_eq!(tool_results.len(), 3, "应有 3 个 tool_result");
+    assert_eq!(
+        tool_results[0]["tool_use_id"], "call_a",
+        "第一个应为 call_a"
+    );
+    assert_eq!(
+        tool_results[1]["tool_use_id"], "call_b",
+        "第二个应为 call_b"
+    );
+    assert_eq!(
+        tool_results[2]["tool_use_id"], "call_c",
+        "第三个应为 call_c"
+    );
 }

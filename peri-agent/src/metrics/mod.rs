@@ -53,6 +53,7 @@ pub fn emit(event: &str, data: serde_json::Value, sid: Option<&str>, rid: Option
 }
 
 /// 获取当前进程 RSS（MB），通过 sysinfo 获取实时值。
+#[doc(hidden)]
 pub fn current_rss_mb() -> Option<u64> {
     #[cfg(unix)]
     {
@@ -69,6 +70,7 @@ pub fn current_rss_mb() -> Option<u64> {
 }
 
 /// 获取系统总物理内存（MB），跨平台
+#[doc(hidden)]
 pub fn total_system_memory_mb() -> Option<u64> {
     let sys = sysinfo::System::new_all();
     Some(sys.total_memory() / (1024 * 1024))

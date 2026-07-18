@@ -54,8 +54,7 @@ pub mod workflow;
 pub use agent_define::{AgentDefineMiddleware, AgentOverrides};
 pub use agents_md::AgentsMdMiddleware;
 pub use ask_user::{
-    ask_user_tool_definition, parse_ask_user, AskUserBatchRequest, AskUserOption,
-    AskUserQuestionData,
+    ask_user_tool_definition, parse_ask_user, InteractionContext, QuestionItem, QuestionOption,
 };
 pub use at_mention::AtMentionMiddleware;
 pub use attribution::GitAttributionMiddleware;
@@ -92,8 +91,8 @@ pub mod prelude {
         agent_define::AgentDefineMiddleware,
         agents_md::AgentsMdMiddleware,
         ask_user::{
-            ask_user_tool_definition, parse_ask_user, AskUserBatchRequest, AskUserOption,
-            AskUserQuestionData,
+            ask_user_tool_definition, parse_ask_user, InteractionContext, QuestionItem,
+            QuestionOption,
         },
         attribution::GitAttributionMiddleware,
         cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger},

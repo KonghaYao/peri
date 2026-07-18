@@ -8,7 +8,7 @@
 //! Full Compact 失败时 `consecutive_failures` 累加，达上限后降级跳过。
 
 use super::{CompactInput, CompactOutput};
-use crate::agent::compact::config::CompactConfig;
+use crate::agent::compact_v2::config::CompactConfig;
 
 /// 运行 Compact 阶段
 pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<CompactOutput> {

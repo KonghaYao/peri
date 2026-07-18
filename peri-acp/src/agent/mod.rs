@@ -6,6 +6,5 @@
 //! Migrated from peri-tui/src/app/agent.rs:build_bare_agent().
 
 pub mod builder;
-pub mod builder_v2;
 pub mod workflow_agent;
 pub use builder::*;

@@ -84,10 +84,47 @@ impl super::SubAgentTool {
         }
 
         // 3. Filter tools
-        let filtered_tools = self.filter_tools(
+        let mut filtered_tools = self.filter_tools(
             &agent_def.frontmatter.tools,
             &agent_def.frontmatter.disallowed_tools,
         );
+
+        // 注入 WriteSandbox（per-agent 实例，不走父工具继承）
+        let allowed_write_dirs = &agent_def.frontmatter.allowed_write_dirs;
+        if !allowed_write_dirs.is_empty() {
+            let disallowed_list = agent_def.frontmatter.disallowed_tools.to_vec();
+            let is_disallowed = disallowed_list
+                .iter()
+                .any(|n| n.to_lowercase() == "writesandbox");
+            if is_disallowed {
+                tracing::debug!(
+                    agent_id = %agent_name,
+                    "WriteSandbox 被 disallowedTools 否决，跳过注入"
+                );
+            } else {
+                match crate::tools::filesystem::WriteSandboxTool::new(
+                    cwd.to_string(),
+                    allowed_write_dirs.clone(),
+                ) {
+                    Ok(tool) => {
+                        filtered_tools.push(Box::new(tool));
+                        tracing::debug!(
+                            agent_id = %agent_name,
+                            sandbox_dirs = ?allowed_write_dirs,
+                            "WriteSandbox 工具已注入"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_id = %agent_name,
+                            error = %e,
+                            sandbox_dirs = ?allowed_write_dirs,
+                            "WriteSandbox 构造失败，跳过注入"
+                        );
+                    }
+                }
+            }
+        }
 
         tracing::debug!(
             agent_id = %agent_name,

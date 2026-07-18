@@ -2,7 +2,7 @@
 //!
 //! 测试顶层入口 run_compact 在不同条件下的行为。
 
-use crate::agent::compact::config::CompactConfig;
+use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::compact_v2::run_compact;
 use crate::agent::events::CompactStrategy;
 use crate::messages::{BaseMessage, MessageContent};

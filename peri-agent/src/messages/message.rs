@@ -14,6 +14,12 @@ impl MessageId {
     }
 }
 
+impl From<uuid::Uuid> for MessageId {
+    fn from(u: uuid::Uuid) -> Self {
+        Self(u)
+    }
+}
+
 impl Default for MessageId {
     fn default() -> Self {
         Self::new()

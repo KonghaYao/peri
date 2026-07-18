@@ -170,3 +170,53 @@ fn test_system_note_level_colors() {
         Some(semantic.status.error),
     );
 }
+
+/// 验证 render_reasoning_block 的截断逻辑：每条 thinking tail 行在
+/// build_wrap_map 中应占恰好 1 个 visual row（不折行）。
+#[test]
+fn test_reasoning_truncate_no_wrap() {
+    use crate::kit::tui_render_unit::TuiReasoningBlock;
+
+    // 构造超长推理文本，验证每条 tail 行被截断到 ≤width
+    let long_line = "a".repeat(200);
+    let reasoning = TuiReasoningBlock {
+        text: long_line,
+        collapsed: false,
+    };
+    let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+        text: String::new(),
+        reasoning: Some(reasoning),
+        content_hash: 1,
+    });
+
+    let mut failures = Vec::new();
+    for width in [20u16, 40, 60, 80] {
+        let lines = vm_to_lines(&vm, width as usize);
+        let (_, wm) = build_wrap_map(&lines, width);
+
+        // 跳过空行 0，header 行 1。验证 tail 行（≥2）
+        for logical_idx in 2..lines.len() {
+            let info = &wm[logical_idx];
+            let rows = info.visual_end - info.visual_start;
+            if lines[logical_idx].spans.is_empty() {
+                continue;
+            }
+            let text: String = lines[logical_idx]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            if rows != 1 {
+                failures.push(format!(
+                    "width={width}: tail line {logical_idx} (\"{text}\") has {rows} visual rows, expected 1"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "截断后仍被 Paragraph 换行:\n{}",
+        failures.join("\n")
+    );
+}

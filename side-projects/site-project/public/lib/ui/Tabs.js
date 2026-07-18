@@ -13,13 +13,15 @@ function resolve(prop) {
 
 export function Tabs(props) {
   return html`
-    <div class=${() => 'flex gap-0.5 ' + (props.class || '')}>
+    <div class=${() => 'inline-flex items-center gap-0.5 p-0.5 rounded-md bg-bg-secondary ' + (props.class || '')}>
       <${For} each=${() => resolve(props.tabs) || []}>
         ${(tab) => html`
           <button
             class=${() => [
-              'px-3 py-1.5 text-[11px] font-medium uppercase cursor-pointer border-b-2 border-transparent',
-              resolve(props.activeId) === tab.id ? 'text-text border-accent' : 'text-text-muted hover:text-text',
+              'px-2.5 h-6 text-[11px] font-medium rounded cursor-pointer border-none transition-colors duration-150',
+              resolve(props.activeId) === tab.id
+                ? 'bg-bg-tertiary text-text shadow-sm'
+                : 'bg-transparent text-text-muted hover:text-text',
             ].join(' ')}
             onClick=${() => props.onChange?.(tab.id)}
           >

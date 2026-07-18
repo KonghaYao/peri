@@ -9,6 +9,7 @@
 use peri_agent::agent::events::{Stage, StageStatus};
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub(crate) struct StageHandle {
     pub span_id: String,
     pub stage: Stage,

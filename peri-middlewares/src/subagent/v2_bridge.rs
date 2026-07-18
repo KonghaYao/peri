@@ -99,8 +99,8 @@ pub fn build_v2_subagent_context(
     }
 
     // tools → SharedToolMap（即使外部传 shared_tools，本地 tools 也合并进去）
-    let mut tools_map: std::collections::HashMap<String, Arc<dyn BaseTool>> =
-        std::collections::HashMap::new();
+    let mut tools_map: std::collections::BTreeMap<String, Arc<dyn BaseTool>> =
+        std::collections::BTreeMap::new();
     for tool in tools {
         tools_map.insert(tool.name().to_string(), tool);
     }

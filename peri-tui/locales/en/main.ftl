@@ -986,8 +986,10 @@ popup-download-finished-notify = Theme download complete: { $success }/{ $total 
 
 # ---- System Notes (app message stream) ----
 app-note-budget-warning = Context usage { NUMBER($pct, maximumFractionDigits: 0) }% ({ $used }/{ $limit })
-app-note-compact-completed = Context compaction completed{ $detail }
-app-note-compact-completed-summary = Context compaction completed{ $detail } — { $summary }
+app-note-compact-completed = { $type } completed{ $detail }
+app-note-compact-completed-summary = { $type } completed{ $detail } — { $summary }
 app-note-compact-error = Context compaction failed: { $message }
+app-note-compact-type-full = Full compaction
+app-note-compact-type-micro = Micro compaction
 app-note-agent-failed = Agent execution failed: { $message }
 app-note-cache-hit-low = Prompt cache hit rate {$pct}% < 80% (req: { $req_id })

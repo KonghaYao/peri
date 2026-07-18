@@ -138,11 +138,15 @@ fn thumb_start_to_position(thumb_start: usize, geo: &ThumbGeometry) -> usize {
 /// `position = scroll_y * max_position / max_scroll`（修复 ratatui thumb 不到底）。
 /// 反推必须用相同公式的逆运算，否则点击位置和实际滚动错位——比如点击底部时
 /// set_offset 会超出 max_scroll 范围。
+///
+/// [Why ceil] 正向映射用的是 floor（整数除法），反推用 ceil 才是正确的逆运算：
+/// floor(a*b/c) 的逆运算是 ceil(x*c/b)。用 floor 做反推会导致 thumb 拖到接近底部
+/// 时（如 99%）无法滚动到最后一行——只有恰好拖到 100% 位置才能到底。
 fn position_to_scroll_y(position: usize, max_position: usize, max_scroll: usize) -> usize {
     if max_position == 0 || max_scroll == 0 {
         0
     } else {
-        (position * max_scroll) / max_position
+        (position * max_scroll).div_ceil(max_position)
     }
 }
 
@@ -195,8 +199,9 @@ pub(super) fn handle_event(
     drag_throttle: &State<DragThrottle>,
     // 拼接后的全量 wrap_map（按 visual_start 升序）。mod.rs 渲染前已拼接好。
     wrap_map: &Arc<Vec<WrappedLineInfo>>,
-    // 拼接后的全量 core_lines。mod.rs 渲染前已拼接好。
-    lines: &Arc<Vec<ratatui_kit::ratatui::text::Line<'static>>>,
+    // [Scheme D] slot 行数据 + 累积偏移，按需解析视口行，不再传全量 clone。
+    slot_arcs: &Arc<Vec<Arc<Vec<ratatui_kit::ratatui::text::Line<'static>>>>>,
+    slot_offsets: &Arc<Vec<usize>>,
     scrollbar_fields: &State<ScrollbarFields>,
     scrollbar_drag: &State<ScrollbarDragState>,
 ) -> EventResult {
@@ -405,7 +410,14 @@ pub(super) fn handle_event(
                         // 先 copy 出 normalized_bounds（owned Option），drop read guard
                         let bounds = text_sel.read().normalized_bounds();
                         let extracted: Option<String> = if let Some(((sr, sc), (er, ec))) = bounds {
-                            extract_visual_range(lines, wrap_map, (sr, sc), (er, ec), vis_width)
+                            extract_visual_range(
+                                slot_arcs.as_ref(),
+                                slot_offsets.as_ref(),
+                                wrap_map,
+                                (sr, sc),
+                                (er, ec),
+                                vis_width,
+                            )
                         } else {
                             None
                         };
@@ -838,8 +850,23 @@ mod tests {
         assert_eq!(position_to_scroll_y(0, 99, 90), 0);
         // position=99 → scroll_y=99*90/99 = 90
         assert_eq!(position_to_scroll_y(99, 99, 90), 90);
-        // position=50 → scroll_y=50*90/99 = 45（整数除法）
-        assert_eq!(position_to_scroll_y(50, 99, 90), 45);
+        // position=50 → ceil(50*90/99) = ceil(45.45) = 46（ceil 反推，与正向 floor 互逆）
+        assert_eq!(position_to_scroll_y(50, 99, 90), 46);
+    }
+
+    #[test]
+    fn test_position_to_scroll_y_ceil_hits_bottom() {
+        // [Fix] 用 ceil 后，thumb 拖到接近底部时就该映射到 max_scroll，
+        // 而不是必须恰好拖到 max_position。例如 max_scroll=2, max_position=9 时，
+        // position=8（89%）应映射到 scroll_y=2（到底）
+        // ceil(8*2/9) = ceil(1.78) = 2
+        assert_eq!(position_to_scroll_y(8, 9, 2), 2);
+        // ceil(7*2/9) = ceil(1.56) = 2
+        assert_eq!(position_to_scroll_y(7, 9, 2), 2);
+        // ceil(6*2/9) = ceil(1.33) = 2
+        assert_eq!(position_to_scroll_y(6, 9, 2), 2);
+        // ceil(4*2/9) = ceil(0.89) = 1
+        assert_eq!(position_to_scroll_y(4, 9, 2), 1);
     }
 
     #[test]

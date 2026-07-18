@@ -55,13 +55,42 @@ export function useParentState(key) {
 /** 语义糖 */
 export const useCurrentFile = () => useParentState('currentFile');
 
-/** 自动同步 document.documentElement.dataset.theme */
+// ========== 主题同步（postMessage 广播，替代 Comlink 长链路） ==========
+// 模块级 signal：一个 iframe 内所有组件共享同一个主题状态
+const _initialTheme = document.documentElement.dataset.theme || 'light';
+const [_theme, _setTheme] = createSignal(_initialTheme);
+
+// 监听父窗口主题广播
+window.addEventListener('message', (e) => {
+  if (e.data?.type === 'peri:setTheme' && e.data?.theme) {
+    const t = e.data.theme;
+    if (t !== _theme()) {
+      _setTheme(t);
+      document.documentElement.dataset.theme = t;
+    }
+  }
+});
+
+// 启动时向父窗口请求当前主题
+function _requestTheme() {
+  if (window.parent && window.parent !== window) {
+    window.parent.postMessage({ type: 'peri:getTheme' }, '*');
+  }
+}
+setTimeout(_requestTheme, 0);
+
+/**
+ * 跨 iframe 主题 hook。
+ * 返回 [accessor, setter]，setter 通过 postMessage 通知父窗口切换主题。
+ */
 export function useTheme() {
-  const [theme, setTheme] = useParentState('theme');
-  createEffect(() => {
-    if (theme() != null) document.documentElement.dataset.theme = theme();
-  });
-  return [theme, setTheme];
+  const setTheme = (val) => {
+    if (val === _theme()) return;
+    _setTheme(val);
+    document.documentElement.dataset.theme = val;
+    window.parent?.postMessage({ type: 'peri:setTheme', theme: val }, '*');
+  };
+  return [_theme, setTheme];
 }
 
 /** 瞬时事件用（scm commit 后自增） */

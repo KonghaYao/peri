@@ -564,7 +564,9 @@ pub fn scan_agents_with_extra_dirs(
 pub struct AgentCapability {
     /// 模型级别：`haiku` / `sonnet` / `opus` / `inherit`
     pub model_tier: String,
-    /// 该 agent 是否会修改文件（有 Write/Edit 权限 = true）
+    /// 该 agent 是否会修改项目代码（有 Write/Edit 权限 = true）。
+    /// 注意：`allowedWriteDirs` 声明的 WriteSandbox 工具不计入 can_mutate，
+    /// 因为沙箱目录不在项目代码范围内，agent 仍可并行调度。
     pub can_mutate: bool,
 }
 

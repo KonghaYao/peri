@@ -159,9 +159,13 @@ impl MessageTranscript {
                     PersistOp::Append(msg) => store.append_message(&tid, msg).await,
                     PersistOp::RewindTo(id) => store.delete_messages_since(&tid, &id).await,
                     PersistOp::UpdateFlags(id, flags) => {
-                        store
+                        let res = store
                             .update_message_flags(&id, flags.truncated, flags.excluded)
-                            .await
+                            .await;
+                        if res.is_ok() {
+                            let _ = store.invalidate_context_cache(&tid).await;
+                        }
+                        res
                     }
                 };
                 if let Err(e) = result {
@@ -374,6 +378,17 @@ impl MessageTranscript {
     pub fn clear_flags(&mut self, id: MessageId) {
         self.flags.remove(&id);
         self.send_persist(PersistOp::UpdateFlags(id, MessageFlags::default()));
+    }
+
+    /// 批量恢复消息标记（用于 session 恢复时从持久化存储加载 flags）
+    ///
+    /// 仅插入非默认标记，不触发持久化（持久化已有完整 flags 数据）。
+    pub fn set_flags_batch(&mut self, batch: std::collections::HashMap<MessageId, MessageFlags>) {
+        for (id, flags) in batch {
+            if flags != MessageFlags::default() {
+                self.flags.insert(id, flags);
+            }
+        }
     }
 
     // ── 重建 ──────────────────────────────────────────────────────────────────
