@@ -20,7 +20,8 @@ fn test_initialize() {
 
     let resp = send_and_recv(&mut stdin, &mut reader);
     assert_eq!(resp["id"], 1);
-    assert_eq!(resp["result"]["serverInfo"]["name"], "acp-hub");
+    // Hub 使用标准 ACP InitializeResponse，字段名为 agentCapabilities
+    assert!(resp["result"].get("agentCapabilities").is_some());
 
     let _ = child.kill();
 }
@@ -44,7 +45,7 @@ fn test_session_new_and_prompt() {
     );
     let resp = send_and_recv(&mut stdin, &mut reader);
     assert_eq!(resp["id"], 2);
-    let session_id = resp["result"]["session_id"].as_str().unwrap().to_string();
+    let session_id = resp["result"]["sessionId"].as_str().unwrap().to_string();
     assert!(!session_id.is_empty());
 
     // 3. prompt
@@ -53,7 +54,7 @@ fn test_session_new_and_prompt() {
         3,
         "prompt",
         &serde_json::json!({
-            "session_id": session_id,
+            "sessionId": session_id,
             "messages": [{"role": "user", "content": "hello"}]
         }),
     );
@@ -67,7 +68,7 @@ fn test_session_new_and_prompt() {
         4,
         "session/close",
         &serde_json::json!({
-            "session_id": session_id,
+            "sessionId": session_id,
         }),
     );
     let resp = send_and_recv(&mut stdin, &mut reader);
@@ -116,7 +117,7 @@ fn test_prompt_unknown_session() {
         2,
         "prompt",
         &serde_json::json!({
-            "session_id": "nonexistent-xyz",
+            "sessionId": "nonexistent-xyz",
             "messages": []
         }),
     );
@@ -186,13 +187,13 @@ fn test_child_crash_detection() {
 
     // 尝试后续请求 → 应该失败
     if resp.get("result").is_some() {
-        let sid = resp["result"]["session_id"].as_str().unwrap_or("unknown");
+        let sid = resp["result"]["sessionId"].as_str().unwrap_or("unknown");
         send_req(
             &mut stdin,
             3,
             "prompt",
             &serde_json::json!({
-                "session_id": sid,
+                "sessionId": sid,
                 "messages": [{"role": "user", "content": "hello"}]
             }),
         );
@@ -225,7 +226,7 @@ fn test_concurrent_requests_id_mapping() {
         &serde_json::json!({"cwd": "."}),
     );
     let resp2 = send_and_recv(&mut stdin, &mut reader);
-    let sid_a = resp2["result"]["session_id"].as_str().unwrap().to_string();
+    let sid_a = resp2["result"]["sessionId"].as_str().unwrap().to_string();
 
     // 向 session A 发 prompt
     send_req(
@@ -233,7 +234,7 @@ fn test_concurrent_requests_id_mapping() {
         3,
         "prompt",
         &serde_json::json!({
-            "session_id": sid_a,
+            "sessionId": sid_a,
             "messages": [{"role": "user", "content": "to A"}]
         }),
     );
@@ -248,7 +249,7 @@ fn test_concurrent_requests_id_mapping() {
         &serde_json::json!({"cwd": "."}),
     );
     let resp4 = send_and_recv(&mut stdin, &mut reader);
-    let sid_b = resp4["result"]["session_id"].as_str().unwrap().to_string();
+    let sid_b = resp4["result"]["sessionId"].as_str().unwrap().to_string();
 
     // 向 session B 发 prompt
     send_req(
@@ -256,7 +257,7 @@ fn test_concurrent_requests_id_mapping() {
         5,
         "prompt",
         &serde_json::json!({
-            "session_id": sid_b,
+            "sessionId": sid_b,
             "messages": [{"role": "user", "content": "to B"}]
         }),
     );
@@ -286,7 +287,7 @@ fn test_graceful_shutdown() {
         &serde_json::json!({"cwd": "."}),
     );
     let resp = send_and_recv(&mut stdin, &mut reader);
-    let _sid = resp["result"]["session_id"].as_str().unwrap().to_string();
+    let _sid = resp["result"]["sessionId"].as_str().unwrap().to_string();
 
     // 直接 kill Hub 进程（模拟 SIGTERM）
     child.kill().expect("Hub 进程应能正常终止");

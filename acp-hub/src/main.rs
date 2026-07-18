@@ -12,9 +12,9 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser)]
 #[command(name = "acp-hub", about = "ACP Session 分流器")]
 struct Cli {
-    /// 人类可读日志格式（默认 JSON）
+    /// JSON 格式日志（默认人类可读）
     #[arg(long)]
-    pretty: bool,
+    json_log: bool,
 
     /// 日志级别 (trace/debug/info/warn/error)
     #[arg(long, default_value = "info")]
@@ -45,17 +45,17 @@ fn main() -> anyhow::Result<()> {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(format!("acp_hub={}", cli.log_level)));
 
-    if cli.pretty {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_target(false)
-            .with_writer(std::io::stderr)
-            .init();
-    } else {
+    if cli.json_log {
         tracing_subscriber::fmt()
             .json()
             .with_env_filter(env_filter)
             .with_target(true)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_target(false)
             .with_writer(std::io::stderr)
             .init();
     }

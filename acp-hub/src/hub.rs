@@ -110,6 +110,9 @@ async fn handle_ide_message(
         // === 全局请求 ===
         Some("initialize") => {
             let id = id.unwrap_or(&Value::Null);
+            let params = msg.get("params").cloned().unwrap_or(Value::Null);
+            // 缓存 IDE 的 initialize params，后续创建子进程时透传
+            router.set_client_init_params(params);
             let resp = handle_initialize(id);
             write_response(stdout, &resp).await?;
         }

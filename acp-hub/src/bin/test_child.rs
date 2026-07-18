@@ -68,7 +68,7 @@ fn main() {
                 send_response(
                     &id,
                     &serde_json::json!({
-                        "session_id": format!("test-sid-{}-{}", std::process::id(), session_counter)
+                        "sessionId": format!("test-sid-{}-{}", std::process::id(), session_counter)
                     }),
                 );
             }
@@ -79,7 +79,7 @@ fn main() {
                     send_notification(
                         "session/update",
                         &serde_json::json!({
-                            "session_id": "test-sid-001",
+                            "sessionId": "test-sid-001",
                             "update": {
                                 "type": "text_chunk",
                                 "text": format!("chunk_{}", i)

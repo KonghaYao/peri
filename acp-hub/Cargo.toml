@@ -26,6 +26,7 @@ clap = { version = "4", features = ["derive"] }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
+agent-client-protocol-schema = { version = "1.4", features = ["unstable_elicitation"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

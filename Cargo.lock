@@ -3,6 +3,23 @@
 version = 4
 
 [[package]]
+name = "acp-hub"
+version = "0.2.0"
+dependencies = [
+ "agent-client-protocol-schema",
+ "anyhow",
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

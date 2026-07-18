@@ -29,8 +29,7 @@ pub fn start_hub(
     let hub_path = env!("CARGO_BIN_EXE_acp-hub");
 
     let mut cmd = std::process::Command::new(hub_path);
-    cmd.arg("--pretty")
-        .arg("--spawn-timeout")
+    cmd.arg("--spawn-timeout")
         .arg("5")
         .arg("--child-timeout")
         .arg("5")

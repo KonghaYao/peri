@@ -50,10 +50,10 @@ pub fn extract_method(msg: &serde_json::Value) -> Option<&str> {
     msg.get("method").and_then(|v| v.as_str())
 }
 
-/// 从 JSON-RPC 消息的 params 中提取 session_id
+/// 从 JSON-RPC 消息的 params 中提取 sessionId（ACP v1 camelCase 规范）
 pub fn extract_session_id(msg: &serde_json::Value) -> Option<&str> {
     msg.get("params")
-        .and_then(|p| p.get("session_id"))
+        .and_then(|p| p.get("sessionId"))
         .and_then(|v| v.as_str())
 }
 
@@ -94,12 +94,12 @@ mod tests {
     #[test]
     fn test_extract_session_id() {
         let msg = serde_json::json!({
-            "method": "prompt",
-            "params": {"session_id": "abc-123"}
+            "method": "session/prompt",
+            "params": {"sessionId": "abc-123"}
         });
         assert_eq!(extract_session_id(&msg), Some("abc-123"));
 
-        let no_sid = serde_json::json!({"method": "prompt", "params": {}});
+        let no_sid = serde_json::json!({"method": "session/prompt", "params": {}});
         assert_eq!(extract_session_id(&no_sid), None);
     }
 
