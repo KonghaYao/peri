@@ -1,3 +1,6 @@
 [submodule "peri-cool"]
 	path = peri-cool
 	url = git@github.com:KonghaYao/peri-cool.git
+[submodule "e2e/tui-tester"]
+	path = e2e/tui-tester
+	url = git@github.com:KonghaYao/tui-tester.git

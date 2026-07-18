@@ -1,0 +1,21 @@
+{
+  "name": "peri-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "report": "tsx scripts/generate-report.ts"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "openai": "^6.48.0",
+    "tui-tester": "file:./tui-tester"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
