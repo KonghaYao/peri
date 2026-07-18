@@ -119,6 +119,39 @@ export async function takePeriSnapshot(
 }
 
 /**
+ * 启动 peri TUI（HITL 审批模式，等同 -a 参数）
+ *
+ * 用于测试 HITL 审批弹窗交互。
+ */
+export async function launchPeriHITL(
+  options: PeriLaunchOptions = {},
+): Promise<TmuxTester> {
+  const size = options.size ?? DEFAULT_SIZE;
+
+  const tester = new TmuxTester({
+    command: [DEV_SH, "-a"],
+    size,
+    cwd: PROJECT_ROOT,
+    env: options.env ?? {},
+    debug: options.debug ?? false,
+    snapshotDir: path.join(PROJECT_ROOT, "e2e", "recordings"),
+  });
+
+  await tester.start();
+  await tester.sleep(5000);
+  try {
+    await tester.waitForText("AI operating system", {
+      timeout: 30_000,
+      interval: 1000,
+    });
+  } catch {
+    await tester.sleep(5000);
+  }
+
+  return tester;
+}
+
+/**
  * 等待屏幕内容稳定（连续 4 次轮询无变化）
  * 用于确保 LLM 流式输出或工具调用完成后屏幕不再更新
  *

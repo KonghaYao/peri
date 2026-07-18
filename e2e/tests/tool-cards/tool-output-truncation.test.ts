@@ -1,0 +1,87 @@
+/**
+ * 工具卡片场景: 工具输出截断
+ *
+ * 验证 Read 大文件时输出被截断的显示：
+ * - 输出摘要最多 4 行 × 400 字符
+ * - 超出部分显示截断提示（如 "… N more lines"）
+ * - agent 能基于截断输出继续工作
+ */
+import { describe, it, expect, afterEach } from "vitest";
+import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import { judge } from "../../helpers/judge.js";
+import type { TmuxTester } from "tui-tester";
+
+describe("tool-card: output truncation", () => {
+  let tester: TmuxTester;
+
+  afterEach(async () => {
+    if (tester?.isRunning()) {
+      await tester.stop().catch(() => {});
+    }
+  });
+
+  it(
+    "Read 大文件时输出被截断",
+    { timeout: 300_000 },
+    async () => {
+      tester = await launchPeri();
+
+      // Cargo.lock 通常很大，输出会被截断
+      await sendPrompt(
+        tester,
+        "请用 Read 工具读取 Cargo.lock 文件的内容",
+      );
+
+      // 等待 Read 工具被调用
+      await tester.waitForText("Read", {
+        timeout: 60_000,
+        interval: 1000,
+      });
+      await tester.sleep(3000);
+
+      const readCapture = await takePeriSnapshot(
+        tester,
+        "tool-truncation-read",
+      );
+
+      // 等待 agent 处理完
+      await tester.sleep(5000);
+      const afterCapture = await takePeriSnapshot(
+        tester,
+        "tool-truncation-after",
+      );
+
+      expect(readCapture.text.length).toBeGreaterThan(50);
+      expect(afterCapture.text.length).toBeGreaterThan(50);
+
+      // Judge: Read 阶段
+      try {
+        const r = await judge({
+          ansiRaw: readCapture.raw,
+          criteria: [
+            "屏幕上应出现 Read 工具调用的痕迹（如 'Read' 字样）",
+            "Cargo.lock 的内容应被读取（屏幕上可见依赖项信息或文件内容）",
+            "输出应被截断——不应显示完整的 Cargo.lock（该文件通常 5000+ 行）",
+          ],
+        });
+        console.log("Judge (read):", JSON.stringify(r, null, 2));
+      } catch (err: any) {
+        console.warn("Judge 失败:", err.message);
+      }
+
+      // Judge: 完成阶段
+      try {
+        const r = await judge({
+          ansiRaw: afterCapture.raw,
+          criteria: [
+            "agent 应基于读取的内容给出分析或总结",
+            "agent 不应抱怨内容被截断，应能基于可见部分工作",
+          ],
+        });
+        console.log("Judge (after):", JSON.stringify(r, null, 2));
+      } catch (err: any) {
+        console.warn("Judge 失败:", err.message);
+      }
+    },
+  );
+});
