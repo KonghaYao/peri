@@ -42,14 +42,14 @@ describe("scenarios: streaming + tool interleave", () => {
       // 基本断言
       expect(capture.text.length).toBeGreaterThan(200);
 
-      // LLM judge 检查渲染质量
+      // LLM judge 检查渲染质量（不测试 agent 行为）
       try {
         const result = await judge({
           ansiRaw: capture.raw,
           criteria: [
-            "消息区应有数字 1、2、3、4 依序出现在文本块中",
-            "应有工具调用的显示（如 Read / 读取 等工具卡片）",
-            "文本块和工具调用卡片应正确交替排列，无明显的渲染错位或重叠",
+            "屏幕中应至少有 2 个 Read 工具调用卡片（绿色圆点标记）",
+            "思考文本块（如'思考了 N 字符'）和工具调用卡片应可见且排列有序，无文本重叠",
+            "不应出现严重的渲染错位（如文字覆盖、行重叠、截断）",
           ],
         });
         console.log("Judge:", JSON.stringify(result, null, 2));

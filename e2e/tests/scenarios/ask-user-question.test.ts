@@ -37,18 +37,15 @@ describe("scenarios: ask user question", () => {
         interval: 500,
       });
 
-      // 额外等待弹窗完整渲染
-      await tester.sleep(2000);
-
-      // 抓弹窗 snapshot（ANSI 原样）
+      // 立即抓弹窗 snapshot（弹窗可能自动关闭）
       const popupCapture = await takePeriSnapshot(tester, "ask-user-question-popup");
 
       // 尝试与弹窗交互：选择第一个选项 → 确认
       // 弹窗交互: Tab 切换选项，Enter 确认
       await tester.sendKey("Tab");
-      await tester.sleep(300);
+      await tester.sleep(200);
       await tester.sendKey("Enter");
-      await tester.sleep(500);
+      await tester.sleep(300);
 
       // 等待弹窗关闭、agent 恢复并完成
       await waitForStableScreen(tester, 120_000);
@@ -56,6 +53,7 @@ describe("scenarios: ask user question", () => {
       const capture = await takePeriSnapshot(tester, "ask-user-question-complete");
 
       // 基本断言
+      expect(popupCapture.text).toContain("AskUserQuestion");
       expect(capture.text.length).toBeGreaterThan(100);
 
       // LLM judge
