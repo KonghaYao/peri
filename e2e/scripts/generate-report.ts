@@ -40,28 +40,16 @@ async function generate(): Promise<void> {
     return;
   }
 
-  // 读取每个 snapshot 的原始文本，嵌入 report
-  // 优先读 snapshotFile 指向的文件，若不存在则尝试另一扩展名
+  // 读取每个 snapshot 的 ANSI 全量文本，嵌入 report
   const records: ReportRecord[] = await Promise.all(
     baseRecords.map(async (r) => {
-      let ansiRaw: string | undefined;
-      const primaryPath = path.join(RECORDINGS_DIR, r.snapshotFile);
       try {
-        ansiRaw = await fs.readFile(primaryPath, "utf-8");
+        const ansiPath = path.join(RECORDINGS_DIR, r.snapshotFile);
+        const ansiRaw = await fs.readFile(ansiPath, "utf-8");
+        return { ...r, ansiRaw };
       } catch {
-        // 回退：尝试另一扩展名（.txt ↔ .ansi）
-        const altExt = r.snapshotFile.endsWith(".txt") ? ".ansi" : ".txt";
-        const altPath = path.join(
-          RECORDINGS_DIR,
-          r.snapshotFile.replace(/\.(txt|ansi)$/, altExt),
-        );
-        try {
-          ansiRaw = await fs.readFile(altPath, "utf-8");
-        } catch {
-          // 两个扩展名都不存在
-        }
+        return { ...r };
       }
-      return { ...r, ansiRaw };
     }),
   );
 

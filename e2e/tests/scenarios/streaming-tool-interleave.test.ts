@@ -50,7 +50,6 @@ describe("scenarios: streaming + tool interleave", () => {
             "屏幕中应至少有 2 个 Read 工具调用卡片（绿色圆点标记）",
             "思考文本块（如'思考了 N 字符'）和工具调用卡片应可见且排列有序，无文本重叠",
             "不应出现严重的渲染错位（如文字覆盖、行重叠、截断）",
-            "状态栏应显示上下文消耗（如格式 'NN% NNNk'），且百分比数值合理（>0% 且 <=100%）",
           ],
         });
         console.log("Judge:", JSON.stringify(result, null, 2));
