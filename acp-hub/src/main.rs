@@ -1,7 +1,8 @@
 //! acp-hub —— ACP Session 分流器
 //!
-//! 用法: acp-hub [OPTIONS] -- <child-command> [child-args...]
+//! 用法: acp-hub [OPTIONS] [-- <child-command> ...]
 //!
+//! 默认子进程命令为 `peri acp`。
 //! Hub 作为主进程暴露单一 stdio，将不同 session 的请求
 //! 路由到独立的 ACP 子进程中执行。
 
@@ -27,13 +28,18 @@ struct Cli {
     #[arg(long, default_value = "300")]
     child_timeout: u64,
 
-    /// 子进程启动命令及参数（-- 之后）
-    #[arg(last = true, required = true)]
+    /// 子进程启动命令及参数（-- 之后），默认 `peri acp`
+    #[arg(last = true)]
     child_command: Vec<String>,
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // 默认子进程命令：peri acp
+    if cli.child_command.is_empty() {
+        cli.child_command = vec!["peri".to_string(), "acp".to_string()];
+    }
 
     // 日志初始化（输出到 stderr）
     let env_filter = EnvFilter::try_from_default_env()
