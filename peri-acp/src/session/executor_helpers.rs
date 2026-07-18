@@ -595,6 +595,8 @@ pub(super) async fn build_and_execute_agent_v2(
         v2_queue,
         idle_inbox,
         idle_should_wait,
+        thread_store.clone(),
+        parent_thread_id.clone(),
     );
     if let Some(cache) = new_cache {
         pool.lock().store_llm(cache);

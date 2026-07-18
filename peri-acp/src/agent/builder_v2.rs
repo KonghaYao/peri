@@ -71,6 +71,8 @@ pub fn build_stage_context(
     shared_queue: &peri_agent::session::MessageQueue,
     idle_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
     idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
+    thread_id: Option<String>,
 ) -> (V2AgentOutput, Option<CachedLlmInstances>) {
     // 提取 LLM 用字段（在 cfg 被 build_agent 消费前）
     let cwd = cfg.cwd.clone();
@@ -143,6 +145,16 @@ pub fn build_stage_context(
         cancel_arc.clone(),
         shared_queue.clone(),
     );
+
+    // ── 激活 transcript persistence（compact flags 跨 prompt 持久化）─────────
+    // with_persistence 内部 spawn tokio writer task，须在 async context 中调用。
+    // 此时 transcript 刚创建为空，mem::take 无数据丢失。
+    if let (Some(store), Some(tid)) = (thread_store.as_ref(), thread_id.as_ref()) {
+        let transcript_arc = session.transcript();
+        let mut transcript = transcript_arc.write();
+        let old = std::mem::take(&mut *transcript);
+        *transcript = old.with_persistence(store.clone(), tid.clone());
+    }
 
     // ── Async Owners（SessionInbox + CronOwner）─────────────────────────────
     // 创建 SessionInbox 包装 shared_queue，提供 await-wake 能力。
