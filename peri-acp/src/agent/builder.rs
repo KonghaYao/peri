@@ -7,7 +7,7 @@
 //! 删除 TUI 特有依赖（ExecutorEvent channel、map_executor_event），
 //! 改为通过 `child_handler_factory` 参数从外部注入。
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use parking_lot::RwLock;
 use peri_agent::{
@@ -117,7 +117,7 @@ pub struct AcpAgentConfig {
     /// Channel 共享状态（None = 不启用 channel 功能，不使用 MultiplexBroker）
     pub channel_state: Option<Arc<ChannelState>>,
     pub tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
-    pub shared_tools: Arc<RwLock<HashMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
+    pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
     /// 子 Agent 专用事件 handler factory（由调用方提供，取代 TUI 的 child_event_tx）
     pub child_handler_factory: Option<ChildHandlerFactory>,
     /// LSP 服务器配置（由调用方从 settings.json + 插件配置组装）
@@ -158,7 +158,7 @@ pub struct AgentComponents {
     pub chain: MiddlewareChain,
     /// 共享工具注册表（deferred tools，供 ExecuteExtraTool 代理）
     #[allow(clippy::type_complexity)]
-    pub shared_tools: Option<Arc<parking_lot::RwLock<HashMap<String, Arc<dyn BaseTool>>>>>,
+    pub shared_tools: Option<Arc<parking_lot::RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>>,
     /// 错误感知建议注册表
     pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
     /// 工具注册表快照（工具名 + subagent 类型）

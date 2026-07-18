@@ -14,7 +14,7 @@ pub mod reason;
 pub mod receive;
 pub mod tool_dispatch;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
@@ -35,7 +35,7 @@ use crate::session::{MessageQueue, MessageTranscript, QueuedMessage};
 use crate::tools::BaseTool;
 
 /// 共享工具注册表类型别名（避免 clippy::type_complexity）
-pub type SharedToolMap = Arc<RwLock<HashMap<String, Arc<dyn BaseTool>>>>;
+pub type SharedToolMap = Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>;
 
 // ─── 循环控制 ───────────────────────────────────────────────────────────────
 
@@ -139,14 +139,14 @@ impl StageContext {
         queue: MessageQueue,
     ) -> Self {
         let turn_arc = Arc::new(turn);
-        let tools_map: SharedToolMap = Arc::new(RwLock::new(HashMap::new()));
+        let tools_map: SharedToolMap = Arc::new(RwLock::new(BTreeMap::new()));
         let mw_chain = Arc::new(MiddlewareChain::new());
         let ebus = Arc::new(EventBus::new(Default::default()).0);
         let ttracker = Arc::new(parking_lot::RwLock::new(
             crate::agent::token::TokenTracker::default(),
         ));
         let cfail = Arc::new(AtomicU32::new(0));
-        let sctx = Arc::new(RwLock::new(HashMap::new()));
+        let sctx = Arc::new(RwLock::new(std::collections::HashMap::new()));
         let rbuf = Arc::new(RwLock::new(Vec::new()));
         let tool_snapshot = Arc::new(ToolRegistrySnapshot::default());
         Self {
@@ -195,11 +195,11 @@ impl StageContext {
                 transcript,
                 queue,
                 agent_id: AgentId::new(),
-                session_context: Arc::new(RwLock::new(HashMap::new())),
+                session_context: Arc::new(RwLock::new(std::collections::HashMap::new())),
             },
             runtime: RuntimeServices {
                 llm: Arc::new(NullReactLLM),
-                tools: Arc::new(RwLock::new(HashMap::new())),
+                tools: Arc::new(RwLock::new(BTreeMap::new())),
                 middleware_chain: Arc::new(MiddlewareChain::new()),
                 event_bus: Arc::new(EventBus::new(Default::default()).0),
                 shared_tools: None,

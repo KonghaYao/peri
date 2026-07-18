@@ -174,7 +174,7 @@ pub async fn run_print(
         };
 
     let tool_search_index = Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
-    let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
+    let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
 
     // broker（自动批准所有）
     let broker: Arc<dyn peri_agent::interaction::UserInteractionBroker> = Arc::new(PrintBroker);

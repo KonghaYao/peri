@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use peri_acp::provider::{PeriConfig, ProviderConfig, ProviderModels};
@@ -84,7 +87,7 @@ fn make_server_config(
         hook_groups: Vec::new(),
         plugin_lsp_servers: Vec::new(),
         tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
-        shared_tools: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+        shared_tools: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
         thread_store: arc_thread_store,
         langfuse_session: None,
         config_path: tmp.path().join("test_config.json"),

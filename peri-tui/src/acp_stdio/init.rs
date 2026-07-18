@@ -1,6 +1,6 @@
 //! ACP Stdio 环境的初始化逻辑。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -99,7 +99,7 @@ pub(super) async fn init_stdio_context(cwd: String) -> anyhow::Result<Arc<StdioC
 
     let permission_mode = SharedPermissionMode::new(PermissionMode::Bypass);
     let tool_search_index = Arc::new(ToolSearchIndex::new());
-    let shared_tools = Arc::new(RwLock::new(HashMap::new()));
+    let shared_tools = Arc::new(RwLock::new(BTreeMap::new()));
 
     // 初始化 thread 存储（失败时 fallback 到临时目录）
     let thread_store: Arc<dyn ThreadStore> =

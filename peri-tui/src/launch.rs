@@ -195,7 +195,8 @@ pub async fn build_app_and_acp(
             );
 
             let tool_search_index = Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
-            let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
+            let shared_tools =
+                Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
 
             let shared_peri_config = app.services.peri_config.clone();
             let session_manager_peri_config_snapshot =

@@ -46,8 +46,8 @@
         }
     }
 
-    fn build_test_registry() -> Arc<RwLock<HashMap<String, Arc<dyn BaseTool>>>> {
-        let mut map = HashMap::new();
+    fn build_test_registry() -> Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> {
+        let mut map = BTreeMap::new();
         map.insert(
             "CronRegister".to_string(),
             Arc::new(MockTool::new("CronRegister", "Register a cron task")) as Arc<dyn BaseTool>,

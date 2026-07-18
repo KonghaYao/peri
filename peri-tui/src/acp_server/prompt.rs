@@ -1,7 +1,7 @@
 //! ACP Prompt execution — builds and executes the agent via peri_acp::executor.
 //! Extracted from original acp_server.rs (2026-05-20 split).
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use agent_client_protocol::schema::v1::{PromptResponse, StopReason};
 use parking_lot::RwLock;
@@ -36,7 +36,7 @@ pub(crate) async fn run_prompt(
     mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
     channel_state: Option<Arc<ChannelState>>,
     tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
-    shared_tools: Arc<RwLock<HashMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
+    shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
     plugin_lsp_servers: &[peri_lsp::config::LspServerConfig],
     transport: &Arc<dyn peri_acp::transport::AcpTransport>,
     thread_store: &Arc<dyn peri_agent::thread::ThreadStore>,

@@ -1,6 +1,6 @@
 //! ACP Stdio 传输的共享上下文和 session 状态。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -55,7 +55,7 @@ pub(super) struct StdioContext {
     pub(super) hook_groups: Vec<Vec<RegisteredHook>>,
     pub(super) plugin_lsp_servers: Vec<LspServerConfig>,
     pub(super) tool_search_index: Arc<ToolSearchIndex>,
-    pub(super) shared_tools: Arc<RwLock<HashMap<String, Arc<dyn BaseTool>>>>,
+    pub(super) shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
     pub(super) sessions: RwLock<HashMap<String, SessionInfo>>,
     pub(super) thread_store: Arc<dyn ThreadStore>,
     pub(super) langfuse_session: Option<Arc<LangfuseSession>>,

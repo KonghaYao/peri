@@ -1,7 +1,7 @@
 //! ToolSearchMiddleware — 注册元工具并注入延迟工具列表到 system prompt
 
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     sync::{Arc, RwLock as StdRwLock},
 };
 
@@ -25,7 +25,7 @@ use super::{
 /// 2. 在 before_agent 时注入延迟工具列表到 system prompt
 pub struct ToolSearchMiddleware {
     tool_search_index: Arc<ToolSearchIndex>,
-    shared_tools: Arc<RwLock<HashMap<String, Arc<dyn BaseTool>>>>,
+    shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
     /// Cached prompt contribution (populated in before_agent, returned by prompt_contribution).
     cached_contribution: Arc<StdRwLock<Option<String>>>,
 }
@@ -33,7 +33,7 @@ pub struct ToolSearchMiddleware {
 impl ToolSearchMiddleware {
     pub fn new(
         tool_search_index: Arc<ToolSearchIndex>,
-        shared_tools: Arc<RwLock<HashMap<String, Arc<dyn BaseTool>>>>,
+        shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
     ) -> Self {
         Self {
             tool_search_index,

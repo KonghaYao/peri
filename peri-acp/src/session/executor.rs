@@ -310,7 +310,7 @@ pub struct PromptExecutionContext {
     /// 共享工具表（运行时动态注册的工具）。
     pub shared_tools: Arc<
         parking_lot::RwLock<
-            std::collections::HashMap<String, Arc<dyn peri_agent::tools::BaseTool>>,
+            std::collections::BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>,
         >,
     >,
     /// LSP server 配置。
@@ -768,7 +768,7 @@ struct BuildAgentRequest<'a> {
     tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
     shared_tools: Arc<
         parking_lot::RwLock<
-            std::collections::HashMap<String, Arc<dyn peri_agent::tools::BaseTool>>,
+            std::collections::BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>,
         >,
     >,
     lsp_servers: Vec<peri_lsp::config::LspServerConfig>,

@@ -111,8 +111,8 @@ pub fn build_stage_context(
         ..
     } = agent_output.components;
 
-    let shared_tools: SharedToolMap =
-        shared_tools_opt.unwrap_or_else(|| Arc::new(RwLock::new(std::collections::HashMap::new())));
+    let shared_tools: SharedToolMap = shared_tools_opt
+        .unwrap_or_else(|| Arc::new(RwLock::new(std::collections::BTreeMap::new())));
 
     // run_react_loop 每轮从 shared_tools 按名读取工具，不会每轮重新填充。
     // 这里一次性把 middleware 提供的工具（FilesystemTools / Terminal / Web /

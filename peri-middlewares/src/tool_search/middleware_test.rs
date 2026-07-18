@@ -34,7 +34,7 @@
 
     fn build_test_components() -> (
         Arc<ToolSearchIndex>,
-        Arc<RwLock<HashMap<String, Arc<dyn BaseTool>>>>,
+        Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
     ) {
         let index = Arc::new(ToolSearchIndex::new());
         index.build(vec![
@@ -42,7 +42,7 @@
             Arc::new(MockTool::new("mcp__slack__send", "Send Slack message")),
         ]);
 
-        let mut shared = HashMap::new();
+        let mut shared = BTreeMap::new();
         shared.insert(
             "CronRegister".to_string(),
             Arc::new(MockTool::new("CronRegister", "Register a cron task")) as Arc<dyn BaseTool>,
