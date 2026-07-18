@@ -129,3 +129,33 @@ fn test_text_content_with_tool_calls_serializes_correctly() {
     assert!(tool_block.is_some(), "应从 tool_calls 重建 tool_use block");
     assert_eq!(tool_block.unwrap()["id"], "tc2");
 }
+
+/// 验证连续 Tool 消息合并后顺序保持不变
+#[test]
+fn test_tool_results_order_preserved() {
+    let msgs = vec![
+        BaseMessage::ai_with_tool_calls(
+            "",
+            vec![
+                ToolCallRequest::new("t1", "Read", json!({"file_path": "a.rs"})),
+                ToolCallRequest::new("t2", "Read", json!({"file_path": "b.rs"})),
+            ],
+        ),
+        BaseMessage::tool_result("t1", "content a"),
+        BaseMessage::tool_result("t2", "content b"),
+    ];
+    let val = AnthropicAdapter::from_base_messages(&msgs);
+    let arr = val.as_array().unwrap();
+
+    // tool results 应合并到第二条 user 消息
+    let user_msg = &arr[1];
+    assert_eq!(user_msg["role"], "user");
+    let content = user_msg["content"].as_array().unwrap();
+    let results: Vec<_> = content
+        .iter()
+        .filter(|b| b["type"] == "tool_result")
+        .collect();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["tool_use_id"], "t1");
+    assert_eq!(results[1]["tool_use_id"], "t2");
+}
