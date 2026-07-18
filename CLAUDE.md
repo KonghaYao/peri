@@ -224,7 +224,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **before_tool/after_tool**：不读 `state.messages()`，`tool_dispatch.rs` 延迟写入
 - **AgentEvent 变体**：新增需同步 `map_executor_event`（peri-acp/event + peri-tui/acp_events）
 - **Interrupted/Error vs Done 互斥**：前者 `request_rebuild()` + `reconcile_already_done=true`
-- **ACP 通知覆盖度**：所有事件（含 AgentDone→TurnDone）必须完整转发，遗漏→UI 卡死
+- **ACP 通知覆盖度**：所有事件（含 AgentDone→TurnDone）必须完整转发，遗漏→UI 卡死。架构迁移时新增事件通道必须同步更新 notifier 分发，否则静默丢弃（详见 spec/global/domains/agent.md#issue_2026-07-07-subagent-group-header-shows-agent-instead-of-task-description）
 - **PromptFeatures**：`detect()` 每轮读 `YOLO_MODE`/`is_git_repo`，未 frozen
 - **Immediate 命令**：绕过 event pump，必须手动 `sink.push_done()`
 - **中途纠正消息**：用 `BaseMessage::human()`，禁止 `BaseMessage::system()`（invoke.rs 会 hoist 污染 frozen prompt）
@@ -232,6 +232,10 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **3 次尝试上限**：同一 bug 修复超过 3 次仍失败时，禁止继续猜测式修复。要求用户提供运行时数据（RUST_LOG=debug 等）后再动手
 - **工具超时差异化**：超时策略按工具类型差异化——BaseTool::timeout() 自声明，快工具 120s，长运行工具（Agent/Bash/Workflow）返回 None 自管。禁止一刀切硬编码（[issue](spec/archive-issues/2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks.md)）
 - **事件路径统一**：新增事件变体走 EventBus 单一入口，避免分散 ExecutorEvent 直接构造。SubAgent/LLM 流式/斜杠命令等路径须进入 EventBus（[issue](spec/archive-issues/2026-07-16-eventbus-unified-emission.md)）
+- **序列化确定性**：跨进程/跨请求复用的序列化内容必须保证顺序稳定——`HashMap.values()` 迭代顺序不确定，tools 数组顺序变化会破坏 Anthropic 前缀缓存。应使用 BTreeMap 或固定收集顺序（详见 spec/global/domains/agent.md#issue_2026-07-18-tools-hashmap-order-breaks-prompt-cache）
+- **Goal 续跑**：注入控制消息时需理解 MessageKind 语义——Info（不唤醒）vs Defer（唤醒续跑）。ActOutput 须保留 `block_continue` 字段，否则中间件设置的续跑信号在 act 阶段被吞掉（详见 spec/global/domains/agent.md#issue_2026-07-15-goal-continuation-loop-broken-in-v2）
+- **Compact 标记持久化**：持久化标记（truncated/excluded）须独立于内容字段存储和恢复。cached_context 缓存命中时跳过 DB 查询会漏掉标记；v2 路径 `persist_tx=None` 导致 compact flags 全丢（详见 spec/global/domains/agent.md#issue_2026-07-17-compact-flags-lost-on-session-restore）（详见 spec/global/domains/agent.md#issue_2026-07-18-compact-effect-lost-between-prompts-v2）
+- **or_insert_with 复用陷阱**：`or_insert_with` 不适合需要每 turn 重建的有状态对象（含 channel/sender）。SubAgentTool 实例的 `event_tx` 在第二 turn 时可能已被 close，所有 SubagentStarted 事件静默丢弃（详见 spec/global/domains/agent.md#issue_2026-07-13-sync-agent-tool-cards-not-showing）
 
 ### ACP/TUI 分层
 - **execute_prompt**：Agent 构建统一入口，禁止 TUI 直连运行时
@@ -240,7 +244,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - **`_meta` key**：ACP SDK 序列化 key 是 `"_meta"` 非 `"meta"`。`is_session_replay` 检测用四级 fallback（`_meta`→`meta`→`content._meta`→`content.meta`）
 - **session replay DTO**：复用正常流式路径数据结构，不要发明 replay 专用变体
 - **ACP 协议字段优先**：数据流设计时先查 ACP 协议已有字段（如 `StateSnapshotMeta.budget_pct`、goal_state `block_continue`），禁止自己从 raw 数据重新计算
-- **工具别名**：通过 `BaseTool::aliases()` trait 方法自声明，禁止重复注册或集中式静态表。别名仅用于 LLM 可能输出的同义词（如 Bash→"Shell"）
+- **工具别名**：通过 `BaseTool::aliases()` trait 方法自声明，禁止重复注册或集中式静态表。别名仅用于 LLM 可能输出的同义词（如 Bash→"Shell"）。工具包装/过滤层必须完整透传所有 trait 方法（详见 spec/global/domains/agent.md#issue_2026-07-16-subagent-tool-alias-not-resolved）
 - **面板配置必须推送**：任何修改全局配置的面板操作后必须：save 持久化 + client.update_config() 推送 + invalidate pool + 重建 provider。workflow/SubAgent 的 provider 须共享 Arc（[issue](spec/archive-issues/2026-07-16-model-login-switch-not-effective-until-restart.md)）
 
 ### PeriCaps 能力协商（标准模式）
@@ -295,6 +299,11 @@ push_event / push_done / replay / notify 等发送点读取 → if caps.xxx { ..
 - **committed push**：所有需时序定位的消息须先 flush current_turn → committed 再 push（flush-then-push 模式）。禁止直接 push committed 绕过 TurnSegment（[issue](spec/archive-issues/2026-07-16-system-note-cache-warning-position-wrong.md)）
 - **增量缓存 can_reuse**：条件须覆盖 block 类型变更场景——输入前缀可能导致 pulldown-cmark 重解析出不同 block 类型时，缓存必须失效全量重跑（[issue](spec/archive-issues/2026-07-15-markdown-table-raw-text-streaming.md)）
 - **面板交互规范**：选中 tab 用反色（accent 底色+surface 字色），禁止 `[ ]` 包裹。面板内禁止单字母快捷键（j/k/q 等），仅允许方向键 + Tab + Esc + Enter。文本输入用 `TextAreaState`，禁止手工键盘事件处理
+- **ratatui-kit 迁移回归**：UI 框架迁移需要系统性功能回归清单——状态栏上下文消耗显示和缓存命中率警告在 ratatui-kit 迁移后丢失（详见 spec/global/domains/tui.md#issue_2026-07-13-statusbar-context-cache-display-regression）
+- **Loading 状态**：loading 应由"是否有活跃流式 agent"决定，而非"是否有 SubagentStopped 事件"。bg agent 完成时 SubagentStopped 无条件设 `phase=PromptRunning` 覆盖了之前 TurnDone 清除的 loading（详见 spec/global/domains/tui.md#issue_2026-07-13-main-agent-done-loading-persists-bg-still-running）
+- **滚动性能**：高频事件 handler 内状态修改合并为单次 `write_no_update()`，不触发多次原子通知→render loop。ScrollThrottle 16ms 节流，tmux 下 PTY 开销放大（详见 spec/global/domains/tui.md#issue_2026-07-05-scroll-performance-lag）
+- **ESC 事件优先级**：面板/弹窗的 ESC 处理应使用 `EventPriority::High`，确保先于全局 handler 执行。否则全局 ESC 截断面板 handler，`cancel_ask_user()` 不调用→agent 永久挂起（详见 spec/global/domains/tui.md#issue_2026-07-13-ask-user-esc-freeze-reject）
+- **History 恢复滚动**：初始加载/恢复场景需"强制吸底窗口"（如 20 帧=333ms），覆盖所有批次到达。`scroll_to_bottom` 过早执行时 ScrollViewState.size=None→offset 无效，后续因 proximity guard 永不滚底（详见 spec/global/domains/tui.md#issue_2026-07-11-history-replay-scroll-too-early）
 
 ### SubAgent / Worktree
 - **coder cwd**：不遵守 `Agent(cwd=...)`，prompt 中必须用绝对路径。push 前 `git diff --stat` 确认
