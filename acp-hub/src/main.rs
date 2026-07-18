@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
 
     // 日志初始化（输出到 stderr）
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&format!("acp_hub={}", cli.log_level)));
+        .unwrap_or_else(|_| EnvFilter::new(format!("acp_hub={}", cli.log_level)));
 
     if cli.pretty {
         tracing_subscriber::fmt()

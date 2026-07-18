@@ -21,6 +21,7 @@ fn main() {
     let stdin = std::io::stdin();
     let reader = BufReader::new(stdin.lock());
     let mut message_count: usize = 0;
+    let mut session_counter: usize = 0;
 
     for line in reader.lines() {
         let line = match line {
@@ -62,10 +63,12 @@ fn main() {
             }
 
             Some("session/new") => {
+                session_counter += 1;
+                // 使用 PID + 计数器确保不同进程返回唯一 ID
                 send_response(
                     &id,
                     &serde_json::json!({
-                        "session_id": "test-sid-001"
+                        "session_id": format!("test-sid-{}-{}", std::process::id(), session_counter)
                     }),
                 );
             }
