@@ -121,11 +121,25 @@ export async function takePeriSnapshot(
 /**
  * 等待屏幕内容稳定（连续 4 次轮询无变化）
  * 用于确保 LLM 流式输出或工具调用完成后屏幕不再更新
+ *
+ * @param tester
+ * @param baseScreen  对比基准（提交 prompt 前的屏幕），若传入则先等屏幕变化
+ * @param timeout     超时（默认 120s）
  */
 export async function waitForStableScreen(
   tester: TmuxTester,
   timeout: number = 120_000,
+  baseScreen?: string,
 ): Promise<void> {
+  // 阶段 1：等待屏幕变化（如果有基准）
+  if (baseScreen !== undefined) {
+    await tester.waitFor(
+      (screen) => screen !== baseScreen,
+      { timeout: 30_000, interval: 500, message: "屏幕未发生变化，输入可能未被处理" },
+    );
+  }
+
+  // 阶段 2：等待屏幕不再变化
   let lastLen = 0;
   let stableCount = 0;
 

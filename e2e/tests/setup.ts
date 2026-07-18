@@ -1,7 +1,9 @@
 /**
  * e2e 测试全局 setup
  */
-import "dotenv/config"; // 加载 e2e/.env
+import dotenv from "dotenv";
+
+dotenv.config({ override: true }); // 加载 e2e/.env，覆盖全局环境变量
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { beforeAll, afterAll, beforeEach, afterEach } from "vitest";

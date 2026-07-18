@@ -13,6 +13,7 @@ export default defineConfig({
     fileParallelism: false,
     maxConcurrency: 1,
     bail: 0,
+    exclude: ["node_modules/**", "tui-tester/**", "dist/**"],
     setupFiles: ["./tests/setup.ts"],
     teardownTimeout: 10_000,
     env: {

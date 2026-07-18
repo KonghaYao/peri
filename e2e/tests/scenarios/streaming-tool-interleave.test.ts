@@ -26,13 +26,16 @@ describe("scenarios: streaming + tool interleave", () => {
     async () => {
       tester = await launchPeri();
 
+      // 记录提交前的屏幕作为基准
+      const base = await tester.getScreenText();
+
       // 要求 agent: 说 1 → 两次 Read → 说 2 → 两次 Read → 到 4
       await sendPrompt(
         tester,
         "请你说一句 1 然后调用两次 read 工具读取 README.md 找附近的文件，然后说 2，两次 read 读取 package.json 中的项目路径，重复直到 4。注意每次 read 都要读不同的文件。",
       );
 
-      await waitForStableScreen(tester, 180_000);
+      await waitForStableScreen(tester, 180_000, base);
 
       const capture = await takePeriSnapshot(tester, "streaming-tool-interleave");
 

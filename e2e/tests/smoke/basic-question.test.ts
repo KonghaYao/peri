@@ -24,20 +24,13 @@ describe("peri e2e smoke", () => {
     async () => {
       tester = await launchPeri({ debug: true });
 
-      // 记录初始屏幕
+      // 记录提交前的屏幕作为基准（用于 waitForStableScreen 先等变化）
       const initial = await tester.getScreenText();
 
       await sendPrompt(tester, "hello");
 
-      // 两阶段等待（利用 tui-tester 的 waitFor 内置轮询）
-      // 1. 等待屏幕变化（输入被处理）
-      await tester.waitFor(
-        (screen) => screen !== initial,
-        { timeout: 30_000, interval: 500, message: "屏幕未发生变化，输入可能未被处理" },
-      );
-
-      // 2. 等待屏幕稳定（LLM 回复完成）
-      await waitForStableScreen(tester, 120_000);
+      // 两阶段等待：先等变化，再等稳定
+      await waitForStableScreen(tester, 120_000, initial);
 
       // 基本断言
       await tester.assertScreenContains("hello", { ignoreAnsi: true });
