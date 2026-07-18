@@ -160,6 +160,15 @@ impl CurrentTurn {
     /// Flushes any pending text as a segment BEFORE pushing the tool,
     /// so text spoken before the tool call appears in its own bubble.
     pub fn start_tool(&mut self, tool: ToolCardAccumulator) {
+        // 防御：相同 tool_id 不应重复 start（同一轮内 tool_id 唯一）
+        if self.tool_cards.iter().any(|t| t.tool_id == tool.tool_id) {
+            tracing::debug!(
+                tool_id = %tool.tool_id,
+                tool_name = %tool.tool_name,
+                "CurrentTurn::start_tool: 重复 tool_id，跳过"
+            );
+            return;
+        }
         self.flush_text_segment();
         let idx = self.tool_cards.len();
         self.segments.push(TurnSegment::Tool { tool_idx: idx });
