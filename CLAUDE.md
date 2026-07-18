@@ -236,7 +236,8 @@ e2e/
 │   └── smoke/              # 冒烟测试
 │   └── scenarios/          # 场景测试（流式+工具交错 / AskUserQuestion / Goal 续跑）
 ├── recordings/             # 运行时生成（gitignored）
-│   ├── *.ansi              # ANSI 原始屏幕
+│   ├── *.txt               # 纯文本快照（默认，人类可读）
+│   ├── *.ansi              # ANSI 原始屏幕（recorderConfig.ansi=true 时生成）
 │   └── index.jsonl         # 录制索引
 ├── .env.example            # Judge 环境变量模板
 ├── .env                    # 实际配置（gitignored）
@@ -268,10 +269,12 @@ generate-report.ts → 读 index.jsonl → 单文件 HTML（ansi_up 渲染）
 
 ### 命令
 
-- `npm run test`：运行全部 e2e 测试
-- `npm run test:watch`：vitest watch 模式
+- `npx vitest run tests/<path>.test.ts`：**始终跑单个测试**——全量跑耗时 200s+ 且消耗 LLM Judge API token
+- `npm run test`：全量（仅发布前使用）
 - `npm run report`：手动生成 HTML 报告
 - `npx tsx scripts/generate-report.ts --watch`：监听 index.jsonl 变化自动刷新报告
+
+> **详细开发指南见 `e2e/CLAUDE.md`**（含常见陷阱：按键名、Judge 正向断言、面板交互等）
 
 ### 环境变量（`.env`）
 
