@@ -241,6 +241,10 @@ pub fn spawn_eventbus_forwarder<F>(
                 ev_res = handles.observe_rx.recv() => {
                     match ev_res {
                         Ok(ev) => {
+                            // SubAgent 事件（SubagentStart/SubagentStop）不在 v2_bridge 映射。
+                            // 规范路径：on_event → event_sink → peri/agent_event → acp_notifier → bridge_tx。
+                            // 此处 try_send_v2_event 若与 on_event 同时发送同一 SubAgent 事件会造成双重发送陷阱。
+                            // v2_bridge.rs 有意对这些变体返回 None 作为防御性兜底。
                             crate::event::v2_channel::try_send_v2_event(V2Event::from_observe(ev.clone()));
                             // Langfuse v2: observe 层追踪（LLM/Tool/Stage/Compact）
                             forward_langfuse_observe(&langfuse_tracer, &ev, &provider_display_name, &mut active_stage);
