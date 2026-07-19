@@ -60,8 +60,26 @@ impl BridgeState {
     /// 用于 BudgetWarning / SystemNotification / BgCallbackBubble / TurnDone
     /// 四个需要保证时序正确性的位置：在注入中间事件或结束当前 turn 之前，
     /// 必须先将已产出的 AI 内容归档到 committed，确保消息流时间顺序一致。
+    ///
+    /// 安全守卫：如果 current_turn 中存在正在运行的 SubAgentAccumulator，
+    /// 跳过 flush 以避免清除容器——否则后续工具事件无法路由到已清除的容器，
+    /// 造成 SubAgentGroup 内部卡片空白（具体现象：外壳可见但内部工具条目缺失）。
+    /// 回归参考：与 SystemNotification/BudgetWarning 的时序竞态。
     fn flush_current_turn(&mut self) {
         if !self.current_turn.committed && !self.current_turn.is_empty() {
+            let has_running_subagent = self.current_turn.subagents.iter().any(|s| s.is_running);
+            if has_running_subagent {
+                tracing::debug!(
+                    running_count = self
+                        .current_turn
+                        .subagents
+                        .iter()
+                        .filter(|s| s.is_running)
+                        .count(),
+                    "flush_current_turn: 跳过 flush——存在正在运行的 SubAgentAccumulator"
+                );
+                return;
+            }
             for vm in self.current_turn.view_models() {
                 self.committed.push_back(vm.clone());
             }
@@ -158,15 +176,25 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                         ),
                     );
                     if !routed {
-                        tracing::trace!(agent_id, tool_id = %ts.tool_id, "kit bridge: subagent tool start has no active group");
+                        // [诊断] 收集当前所有 SubAgentAccumulator 的 agent_id
+                        let registered_ids: Vec<&str> = state.current_turn.subagent_ids();
                         tracing::warn!(
                             target: "tui.acp_events",
                             agent_id = ?agent_id,
                             tool_id = %ts.tool_id,
                             tool_name = %ts.tool_name,
                             routed = false,
+                            registered_count = registered_ids.len(),
+                            registered_agent_ids = ?registered_ids,
                             "subagent tool start NOT ROUTED to SubAgentGroup"
                         );
+                        // [修复] 兜底：路由失败时将工具卡作为普通 ToolCard 展示，
+                        // 确保第二个 SubAgent 的工具调用不会完全丢失
+                        state.current_turn.start_tool(ToolCardAccumulator::new(
+                            ts.tool_id.clone(),
+                            ts.tool_name.clone(),
+                            ts.input_summary.clone(),
+                        ));
                     }
                     state.variant = 1;
                     state.phase = SessionPhase::PromptRunning;
@@ -544,6 +572,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             agent_name,
             is_background,
         } => {
+            tracing::info!(
+                target: "tui.acp_events",
+                agent_id = %agent_id,
+                agent_name = %agent_name,
+                is_background = %is_background,
+                existing_subagent_count = state.current_turn.subagent_ids().len(),
+                "SubagentStarted: creating SubAgentGroup container"
+            );
             state
                 .current_turn
                 .start_subagent(agent_id.clone(), agent_name.clone());
@@ -557,6 +593,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
         SubagentStopped { agent_id } => {
+            tracing::info!(
+                target: "tui.acp_events",
+                agent_id = %agent_id,
+                "SubagentStopped: marking SubAgentGroup as done"
+            );
             state.current_turn.stop_subagent(agent_id);
             // 清理后台 agent_id 注册
             BG_AGENT_IDS.state().write().remove(agent_id);

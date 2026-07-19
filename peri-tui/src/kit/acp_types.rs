@@ -205,6 +205,11 @@ impl CurrentTurn {
         self.invalidate_cache();
     }
 
+    /// [诊断] 返回当前所有 SubAgentAccumulator 的 agent_id 列表。
+    pub fn subagent_ids(&self) -> Vec<&str> {
+        self.subagents.iter().map(|s| s.agent_id.as_str()).collect()
+    }
+
     /// Mark a sub-agent group as done from `"subagent-stopped"`.
     pub fn stop_subagent(&mut self, agent_id: &str) {
         if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
@@ -246,6 +251,14 @@ impl CurrentTurn {
             self.invalidate_cache();
             true
         } else {
+            // [诊断] 路由失败时记录所有已注册的 agent_id
+            let registered: Vec<&str> =
+                self.subagents.iter().map(|s| s.agent_id.as_str()).collect();
+            tracing::debug!(
+                agent_id = %agent_id,
+                registered = ?registered,
+                "start_subagent_tool: agent_id not found in registered SubAgentAccumulators"
+            );
             false
         }
     }
