@@ -15,6 +15,99 @@ use fluent_bundle::FluentValue;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
+// StreamingMode — 流式渲染模式控制
+// ---------------------------------------------------------------------------
+
+/// streaming_mode 配置映射。命名与 settings.json 中的值一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamingMode {
+    /// 逐 token 推送（默认行为）
+    Streaming,
+    /// 按 Markdown 块边界推送
+    Block,
+    /// 不推送中间内容，仅 TurnDone 时推送
+    None,
+}
+
+/// 从 PERI_CONFIG_HANDLE 即地读取当前 streaming_mode。
+/// 每次流式事件进入时调用——配置热切换即时生效。
+fn current_streaming_mode() -> StreamingMode {
+    match crate::kit::atoms::PERI_CONFIG_HANDLE
+        .get()
+        .and_then(|h| h.try_read())
+        .and_then(|cfg| cfg.config.streaming_mode.as_deref().map(|s| s.to_string()))
+        .as_deref()
+    {
+        Some("block") => StreamingMode::Block,
+        Some("none") => StreamingMode::None,
+        _ => StreamingMode::Streaming,
+    }
+}
+
+/// 检测 full_text 中 since_chars 之后是否出现了 Markdown 块边界。
+///
+/// 块边界定义：
+/// - 两个连续换行（段落分隔）
+/// - 以 `#` 开头的行（标题）
+/// - 以 ``` 开头的行（代码块开始/结束）
+/// - 以 `---`、`***`、`___` 开头的行（水平线）
+///
+/// since_chars 为 0 时始终返回 true（首次推送）。
+fn has_md_block_boundary_since(full_text: &str, since_chars: usize) -> bool {
+    // 首次推送
+    if since_chars == 0 {
+        return true;
+    }
+
+    let full_len = full_text.chars().count();
+    if since_chars >= full_len {
+        return false;
+    }
+
+    // 取 since_chars 之后的文本部分
+    let tail: String = full_text.chars().skip(since_chars).collect();
+
+    // 在新内容中查找块边界
+    let mut prev_was_newline = false;
+    for line in tail.lines() {
+        let trimmed = line.trim();
+
+        // 空行 → 段落边界（但需要前一行也是空行或这是连续空行的一部分）
+        if line.is_empty() {
+            if prev_was_newline {
+                return true; // 双空行 = 段落边界
+            }
+            prev_was_newline = true;
+            continue;
+        }
+
+        // 如果是空行后的第一个非空行 → 段落边界（前一行是空行则前一行就是边界）
+        if prev_was_newline {
+            return true;
+        }
+
+        // 标题
+        if trimmed.starts_with('#') {
+            return true;
+        }
+
+        // 代码块边界
+        if trimmed.starts_with("```") {
+            return true;
+        }
+
+        // 水平线
+        if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+            return true;
+        }
+
+        prev_was_newline = false;
+    }
+
+    false
+}
+
+// ---------------------------------------------------------------------------
 // BridgeState — ACP 事件桥接内部状态
 // ---------------------------------------------------------------------------
 
@@ -52,6 +145,11 @@ pub struct BridgeState {
     /// 本轮用户提交的文本——TurnInterrupted 零产出回滚时用于恢复输入框。
     /// LocalUserBubble 到达时写入，TurnInterrupted 零产出时消费并清空。
     pub last_submitted_text: Option<String>,
+    /// streaming_mode=block 时追踪上次推送后主 agent 文本的字符数。
+    /// 用于 `has_md_block_boundary_since` 的比较基点。
+    pub last_pushed_text_len: usize,
+    /// streaming_mode=block 时追踪上次推送后主 agent 推理的字符数。
+    pub last_pushed_reasoning_len: usize,
 }
 
 impl BridgeState {
@@ -110,14 +208,29 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 }
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
-                push_view_models(state);
+                // SubAgent 文本：Streaming/Block→always push, None→skip
+                // 不做块边界检测——subagent 输出相对短且不是主要闪烁来源。
+                if current_streaming_mode() != StreamingMode::None {
+                    push_view_models(state);
+                }
             } else {
                 state
                     .current_turn
                     .append_text(&tc.text, tc.message_id.as_deref());
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
-                push_view_models(state);
+                let should_push = match current_streaming_mode() {
+                    StreamingMode::Streaming => true,
+                    StreamingMode::Block => has_md_block_boundary_since(
+                        &state.current_turn.text,
+                        state.last_pushed_text_len,
+                    ),
+                    StreamingMode::None => false,
+                };
+                if should_push {
+                    state.last_pushed_text_len = state.current_turn.text.chars().count();
+                    push_view_models(state);
+                }
             }
             push_acp_state(state);
         }
@@ -134,7 +247,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 }
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
-                push_view_models(state);
+                // SubAgent 推理：Streaming/Block→always push, None→skip
+                if current_streaming_mode() != StreamingMode::None {
+                    push_view_models(state);
+                }
             } else {
                 state
                     .current_turn
@@ -145,7 +261,18 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 );
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
-                push_view_models(state);
+                let should_push = match current_streaming_mode() {
+                    StreamingMode::Streaming => true,
+                    StreamingMode::Block => has_md_block_boundary_since(
+                        &state.current_turn.reasoning,
+                        state.last_pushed_reasoning_len,
+                    ),
+                    StreamingMode::None => false,
+                };
+                if should_push {
+                    state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+                    push_view_models(state);
+                }
             }
             push_acp_state(state);
         }
@@ -1278,6 +1405,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         dispatch_and_notify(
@@ -1432,6 +1561,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // 第一轮：stream one text → TurnDone
@@ -1486,6 +1617,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // 往 current_turn 写入一条 assistant 文本
@@ -1535,6 +1668,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         dispatch_and_notify(
@@ -1581,6 +1716,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // push_view_models: 用 BridgeState 数据（空 committed + 空 current_turn）→ 空 items
@@ -1669,6 +1806,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         use peri_acp_types::event_data::Prediction;
@@ -1704,6 +1843,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         let messages_json = serde_json::json!([
@@ -1742,6 +1883,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // === Turn 1: user bubble, reasoning + text → TurnDone ===
@@ -1885,6 +2028,8 @@ mod tests {
             active_session_id: "test-session".to_string(),
             compact_just_completed: true,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
@@ -1910,6 +2055,8 @@ mod tests {
             active_session_id: "test-session".to_string(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
         state
             .current_turn
@@ -1941,6 +2088,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // 模拟 TurnDone：归档 + 重置 phase/loading
@@ -1985,6 +2134,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // 模拟 TurnSuspended：归档 + 重置 phase/loading
@@ -2031,6 +2182,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // SubagentStarted 设置 phase=PromptRunning
@@ -2083,6 +2236,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         dispatch_and_notify(&mut state, &AcpEventData::PromptSubmitted);
@@ -2109,6 +2264,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // 启动同步 sub-agent
