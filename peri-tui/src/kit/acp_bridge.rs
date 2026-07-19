@@ -25,6 +25,8 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     state.phase = SessionPhase::Idle;
     state.popup_kind = None;
     state.last_submitted_text = None;
+    state.last_pushed_text_len = 0;
+    state.last_pushed_reasoning_len = 0;
     atoms::INPUT_BUFFER.state().write().clear();
     acp_events::push_view_models_for_reset();
     tracing::info!(
@@ -83,7 +85,17 @@ pub fn spawn_acp_bridge(
                     }
                     if state.current_turn.has_running_bash_tool() {
                         state.current_turn.invalidate_cache();
-                        acp_events::push_view_models(&mut state);
+                        let mode_is_none = atoms::PERI_CONFIG_HANDLE
+                            .get()
+                            .and_then(|h| h.try_read())
+                            .and_then(|cfg| {
+                                cfg.config.streaming_mode.as_deref().map(|s| s.to_string())
+                            })
+                            .as_deref()
+                            == Some("none");
+                        if !mode_is_none {
+                            acp_events::push_view_models(&mut state);
+                        }
                     }
                 }
                 event = rx.recv() => {
@@ -105,6 +117,8 @@ pub fn spawn_acp_bridge(
                                 state.phase = SessionPhase::Idle;
                                 state.popup_kind = None;
                                 state.last_submitted_text = None;
+                                state.last_pushed_text_len = 0;
+                                state.last_pushed_reasoning_len = 0;
                                 // 同步清空 INPUT_BUFFER：/clear 和 thread_load 切换时，
                                 // 递增 BRIDGE_RESET_COUNTER 触发此分支，旧会话 loading
                                 // 期间缓存的输入必须丢弃，防止新会话首个 TurnDone 时

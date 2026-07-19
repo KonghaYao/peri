@@ -402,6 +402,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.phase = SessionPhase::ReplayingHistory;
             state.variant = 0;
             state.current_turn.reset();
+            state.last_pushed_text_len = 0;
+            state.last_pushed_reasoning_len = 0;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -412,6 +414,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             }
             state.variant = 0;
             state.current_turn.reset();
+            state.last_pushed_text_len = 0;
+            state.last_pushed_reasoning_len = 0;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -422,6 +426,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             // buffered_text 已由 LocalUserBubble 事件提前入队 committed，
             // TurnDone 不再代为搬运。
             state.flush_current_turn();
+            state.last_pushed_text_len = 0;
+            state.last_pushed_reasoning_len = 0;
             state.variant = 0;
 
             state.phase = SessionPhase::Idle;
@@ -475,6 +481,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 // 清除排队输入缓冲——取消后不应继续处理排队的输入
                 INPUT_BUFFER.state().write().clear();
                 state.current_turn = CurrentTurn::new();
+                state.last_pushed_text_len = 0;
+                state.last_pushed_reasoning_len = 0;
                 state.variant = 0;
                 state.phase = SessionPhase::Idle;
                 push_view_models(state);
@@ -490,6 +498,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 }
             }
             state.current_turn = CurrentTurn::new();
+            state.last_pushed_text_len = 0;
+            state.last_pushed_reasoning_len = 0;
             state.variant = 0;
             state.phase = SessionPhase::Idle;
             push_view_models(state);
@@ -505,6 +515,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 }
             }
             state.current_turn.reset();
+            state.last_pushed_text_len = 0;
+            state.last_pushed_reasoning_len = 0;
             state.variant = 0;
             state.phase = SessionPhase::Idle;
             push_view_models(state);
