@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 /// streaming_mode 配置映射。命名与 settings.json 中的值一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StreamingMode {
+pub(crate) enum StreamingMode {
     /// 逐 token 推送（默认行为）
     Streaming,
     /// 按 Markdown 块边界推送
@@ -31,13 +31,16 @@ enum StreamingMode {
 
 /// 从 PERI_CONFIG_HANDLE 即地读取当前 streaming_mode。
 /// 每次流式事件进入时调用——配置热切换即时生效。
-fn current_streaming_mode() -> StreamingMode {
-    match crate::kit::atoms::PERI_CONFIG_HANDLE
-        .get()
-        .and_then(|h| h.try_read())
-        .and_then(|cfg| cfg.config.streaming_mode.as_deref().map(|s| s.to_string()))
-        .as_deref()
-    {
+pub(crate) fn current_streaming_mode() -> StreamingMode {
+    let handle = match crate::kit::atoms::PERI_CONFIG_HANDLE.get() {
+        Some(h) => h,
+        None => return StreamingMode::Streaming,
+    };
+    let guard = match handle.try_read() {
+        Some(g) => g,
+        None => return StreamingMode::Streaming,
+    };
+    match guard.config.streaming_mode.as_deref() {
         Some("block") => StreamingMode::Block,
         Some("none") => StreamingMode::None,
         _ => StreamingMode::Streaming,
@@ -64,8 +67,11 @@ fn has_md_block_boundary_since(full_text: &str, since_chars: usize) -> bool {
         return false;
     }
 
-    // 从 since_chars 开始逐字符扫描，检测块边界
+    // 从 since_chars 开始逐字符扫描，检测块边界。
+    // 同时追踪行数——fallback：累计 ≥ 3 行时也返回 true，
+    // 防止无格式长段落导致 block 模式下 UI 永久冻结。
     let mut i = since_chars;
+    let mut line_count = 0usize;
     while i < chars.len() {
         // 判断当前位置是否为一行的开头
         let is_line_start = i == 0 || chars[i - 1] == '\n';
@@ -96,6 +102,11 @@ fn has_md_block_boundary_since(full_text: &str, since_chars: usize) -> bool {
             }
         }
 
+        // 追踪换行：每遇到一个 \n 递增行计数
+        if chars[i] == '\n' {
+            line_count += 1;
+        }
+
         // 段落边界：双换行 \n\n
         if i > 0 && chars[i] == '\n' && i + 1 < chars.len() && chars[i + 1] == '\n' {
             return true;
@@ -104,7 +115,9 @@ fn has_md_block_boundary_since(full_text: &str, since_chars: usize) -> bool {
         i += 1;
     }
 
-    false
+    // Fallback：增量文本累计 ≥ 3 行时也刷新，防止单段长文本永不推送
+    // 2 个换行 = 至少 3 行（与 str::lines().count() >= 3 语义一致）
+    line_count >= 2
 }
 
 // ---------------------------------------------------------------------------

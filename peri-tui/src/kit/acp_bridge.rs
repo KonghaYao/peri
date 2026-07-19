@@ -85,14 +85,10 @@ pub fn spawn_acp_bridge(
                     }
                     if state.current_turn.has_running_bash_tool() {
                         state.current_turn.invalidate_cache();
-                        let mode_is_none = atoms::PERI_CONFIG_HANDLE
-                            .get()
-                            .and_then(|h| h.try_read())
-                            .and_then(|cfg| {
-                                cfg.config.streaming_mode.as_deref().map(|s| s.to_string())
-                            })
-                            .as_deref()
-                            == Some("none");
+                        use crate::kit::acp_events::current_streaming_mode;
+                        use crate::kit::acp_events::StreamingMode;
+                        let mode_is_none =
+                            matches!(current_streaming_mode(), StreamingMode::None);
                         if !mode_is_none {
                             acp_events::push_view_models(&mut state);
                         }
