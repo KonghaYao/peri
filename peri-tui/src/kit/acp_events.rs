@@ -59,49 +59,49 @@ fn has_md_block_boundary_since(full_text: &str, since_chars: usize) -> bool {
         return true;
     }
 
-    let full_len = full_text.chars().count();
-    if since_chars >= full_len {
+    let chars: Vec<char> = full_text.chars().collect();
+    if since_chars >= chars.len() {
         return false;
     }
 
-    // 取 since_chars 之后的文本部分
-    let tail: String = full_text.chars().skip(since_chars).collect();
+    // 从 since_chars 开始逐字符扫描，检测块边界
+    let mut i = since_chars;
+    while i < chars.len() {
+        // 判断当前位置是否为一行的开头
+        let is_line_start = i == 0 || chars[i - 1] == '\n';
 
-    // 在新内容中查找块边界
-    let mut prev_was_newline = false;
-    for line in tail.lines() {
-        let trimmed = line.trim();
+        if is_line_start && i < chars.len() {
+            let ch = chars[i];
 
-        // 空行 → 段落边界（但需要前一行也是空行或这是连续空行的一部分）
-        if line.is_empty() {
-            if prev_was_newline {
-                return true; // 双空行 = 段落边界
+            // 标题：以 # 开头（且后跟空格或行尾）
+            if ch == '#' {
+                let next_is_space_or_end = i + 1 >= chars.len() || chars[i + 1] == ' ';
+                if next_is_space_or_end {
+                    return true;
+                }
             }
-            prev_was_newline = true;
-            continue;
+
+            // 代码块边界：以 ``` 开头
+            if ch == '`' && i + 2 < chars.len() && chars[i + 1] == '`' && chars[i + 2] == '`' {
+                return true;
+            }
+
+            // 水平线：以 ---、***、___ 开头（三个相同字符）
+            if i + 2 < chars.len()
+                && chars[i] == chars[i + 1]
+                && chars[i + 1] == chars[i + 2]
+                && (ch == '-' || ch == '*' || ch == '_')
+            {
+                return true;
+            }
         }
 
-        // 如果是空行后的第一个非空行 → 段落边界（前一行是空行则前一行就是边界）
-        if prev_was_newline {
+        // 段落边界：双换行 \n\n
+        if i > 0 && chars[i] == '\n' && i + 1 < chars.len() && chars[i + 1] == '\n' {
             return true;
         }
 
-        // 标题
-        if trimmed.starts_with('#') {
-            return true;
-        }
-
-        // 代码块边界
-        if trimmed.starts_with("```") {
-            return true;
-        }
-
-        // 水平线
-        if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-            return true;
-        }
-
-        prev_was_newline = false;
+        i += 1;
     }
 
     false
@@ -2332,5 +2332,69 @@ mod tests {
             }
             other => panic!("expected TuiSubAgentGroup, got {other:?}"),
         }
+    }
+
+    // ── has_md_block_boundary_since 单元测试 ──
+
+    #[test]
+    fn test_boundary_since_chars_zero_always_true() {
+        assert!(
+            has_md_block_boundary_since("hello", 0),
+            "since_chars=0 应始终返回 true"
+        );
+    }
+
+    #[test]
+    fn test_boundary_empty_string() {
+        assert!(!has_md_block_boundary_since("", 1), "空字符串不应触发边界");
+    }
+
+    #[test]
+    fn test_boundary_paragraph_double_newline() {
+        let text = "first paragraph\n\nsecond paragraph";
+        // since_chars=0 已推送；从字符 1 开始检查应有双换行
+        assert!(has_md_block_boundary_since(text, 1), "双换行应触发段落边界");
+    }
+
+    #[test]
+    fn test_boundary_code_block() {
+        let text = "some text\n```rust\nfn main() {}\n```";
+        // 从 "some" 开始检查
+        assert!(has_md_block_boundary_since(text, 1), "代码块起止应触发边界");
+    }
+
+    #[test]
+    fn test_boundary_heading() {
+        let text = "intro\n# Heading\ncontent";
+        assert!(has_md_block_boundary_since(text, 1), "标题应触发边界");
+    }
+
+    #[test]
+    fn test_boundary_horizontal_rule() {
+        let text = "text\n---\nmore";
+        assert!(has_md_block_boundary_since(text, 1), "水平线应触发边界");
+    }
+
+    #[test]
+    fn test_boundary_no_boundary_in_tail() {
+        let text = "one line of text\nanother line without boundary";
+        // since_chars 越过已推送部分，尾部无边界
+        let pushed = "one line of text".chars().count();
+        assert!(
+            !has_md_block_boundary_since(text, pushed),
+            "无分隔的连续文本不应触发边界"
+        );
+    }
+
+    // ── current_streaming_mode 测试 ──
+
+    /// 默认（未设置 streaming_mode 或 PERI_CONFIG_HANDLE 未初始化）应返回 Streaming。
+    #[test]
+    fn test_mode_default_is_streaming() {
+        // PERI_CONFIG_HANDLE 在测试中未初始化 → get() 返回 None → fallback 到 Streaming
+        assert!(
+            matches!(current_streaming_mode(), StreamingMode::Streaming),
+            "未设置 streaming_mode 时应默认 Streaming"
+        );
     }
 }
