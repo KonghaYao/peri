@@ -361,6 +361,13 @@ fn handle_session_update(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    tracing::debug!(
+        target: "tui.acp_notifier",
+        session_id = %session_id,
+        agent_id = ?agent_id,
+        "notifier: extracted agent_id from _peri.sourceAgentId"
+    );
+
     match tag {
         Some("agent_message_chunk") => {
             // ACP SDK ContentChunk wraps text in content.text, not at update top-level.

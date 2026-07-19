@@ -70,6 +70,7 @@ describe("tool-card: agent output and nested position", () => {
           ansiRaw: runningCapture.raw,
           criteria: [
             "屏幕应显示 SubAgent 正在工作的痕迹（如工具调用卡片或加载指示器）",
+            "Agent 卡片内部应有具体的工具调用条目（如 ● Grep 或 ● Read，包含工具名称），而非仅展示空的 Agent 卡片外壳",
             "SubAgent 相关的内容（工具调用或状态信息）应出现在 Agent 卡片下方，而非上方历史消息中",
           ],
         });

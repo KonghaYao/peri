@@ -159,6 +159,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     );
                     if !routed {
                         tracing::trace!(agent_id, tool_id = %ts.tool_id, "kit bridge: subagent tool start has no active group");
+                        tracing::warn!(
+                            target: "tui.acp_events",
+                            agent_id = ?agent_id,
+                            tool_id = %ts.tool_id,
+                            tool_name = %ts.tool_name,
+                            routed = false,
+                            "subagent tool start NOT ROUTED to SubAgentGroup"
+                        );
                     }
                     state.variant = 1;
                     state.phase = SessionPhase::PromptRunning;
