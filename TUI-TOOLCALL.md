@@ -37,13 +37,14 @@
 
 | 工具 | 默认状态 | 何时展开 |
 |------|---------|----------|
-| **Read** | 折叠 | 用户按 Enter |
-| **Glob** | 折叠 | 用户按 Enter |
-| **Grep** | 折叠 | 用户按 Enter |
+| **Read** | 折叠 | 头行后缀 |
+| **Edit** | 折叠 | 头行后缀 |
+| **Write** | 折叠 | 头行后缀 |
+| **Glob** | 折叠 | 头行后缀 |
+| **Grep** | 折叠 | 头行后缀 |
 | **AskUserQuestion** | 折叠 | 用户按 Enter |
 | **Bash** | 折叠 | 用户按 Enter |
 | **TodoWrite** | 展开 | 始终 |
-| **Write / Edit** | 完成后展开 | 自动；运行中折叠 |
 | **AgentResult** | 展开 | 始终（自动） |
 | **ExecuteExtraTool** | 展开 | 始终（自动） |
 | **任何 is_error** | 展开 | 始终（强制，错误必须可见） |
@@ -74,28 +75,16 @@ TUI 内部通过 `format_tool_name()` 做少量名称简化：
 ● Read (src/main.rs)
 ```
 
-#### 完成（折叠）
+#### 完成
 
 ```
-● Read (src/main.rs)
-  ⎿ 47 lines
-```
-
-#### 完成（展开）
-
-```
-● Read (src/main.rs)
-  ⎿ fn main() {
-  ⎿     println!("Hello, world!");
-  ⎿ }
-  ⎿
-  ⎿ … 47 more lines
+● Read (src/main.rs) — 47 lines
 ```
 
 **设计要点**：
 - 参数摘要提取 `file_path`，不截断
-- 折叠态显示行数摘要（"N lines"），由 ACP 层 `summarize_output` 生成
-- 展开后输出摘要最多 4 行，每行最多 400 字符，超出折叠并显示剩余行数
+- 头行后缀显示行数（"— N lines"），无独立输出行
+- 行数从 `output_summary`（原始文件内容）动态计算非空行数
 
 #### 错误
 
@@ -116,19 +105,16 @@ TUI 内部通过 `format_tool_name()` 做少量名称简化：
 ● Write (src/new_module.rs)
 ```
 
-#### 完成（自动展开）
+#### 完成
 
 ```
-● Write (src/new_module.rs)
-  ⎿ 12 lines changed
-  ⎿ +12
+● Write (src/new_module.rs) — 12 lines changed · +12
 ```
 
 **设计要点**：
-- 完成后**强制展开**（`FORCE_EXPAND_ON_COMPLETE`），直接显示 output_summary
-- output_summary 由 ACP 层 `summarize_output` 生成，格式为 "N lines changed"
-- 额外显示 `diff_change_summary`：从 diff hunk 统计 +/- 行数（如 "+12" / "-100" / "+3 · -100"）
-- diff 块渲染已于 2026-07-06 移除，不再展示逐行 diff 内容
+- 头行后缀显示变更摘要，与 Edit 一致
+- 摘要从 `output_summary` 计算，≤3 行原样截断，>3 行显示 "N lines changed"
+- diff 增减统计通过 `diff_change_summary` 追加在摘要后
 
 #### 错误
 
@@ -147,15 +133,16 @@ TUI 内部通过 `format_tool_name()` 做少量名称简化：
 ● Edit (src/main.rs)
 ```
 
-#### 完成（自动展开）
+#### 完成
 
 ```
-● Edit (config.toml)
-  ⎿ 3 lines changed
-  ⎿ +3 · -2
+● Edit (config.toml) — 3 lines changed · +3 · -2
 ```
 
-**设计要点**：与 Write 完全一致。额外显示 `diff_change_summary` 展示增减行数。
+**设计要点**：
+- 头行后缀显示变更摘要（"— N lines changed"），有 diff 则追加增减统计
+- 摘要从 `output_summary` 计算，≤3 行原样截断，>3 行显示 "N lines changed"
+- diff 增减统计通过 `diff_change_summary` 从 hunk 统计，追加在摘要后
 
 #### 错误
 
@@ -174,23 +161,13 @@ TUI 内部通过 `format_tool_name()` 做少量名称简化：
 ● Glob (pattern: "**/*.rs")
 ```
 
-#### 完成（折叠）
+#### 完成
 
 ```
-● Glob (pattern: "**/*.rs")
-  ⎿ 23 lines
+● Glob (pattern: "**/*.rs") — 23 matches
 ```
 
-#### 完成（展开）
-
-```
-● Glob (pattern: "**/*.md")
-  ⎿ README.md
-  ⎿ CHANGELOG.md
-  ⎿ CLAUDE.md
-  ⎿ TUI-TOOLCALL.md
-  ⎿ … 12 more lines
-```
+**设计要点**：头行后缀显示匹配数量（"— N matches"），从输出非空行数动态计算。
 
 #### 错误
 
@@ -199,7 +176,7 @@ TUI 内部通过 `format_tool_name()` 做少量名称简化：
   ⎿ Error: Invalid glob pattern
 ```
 
-**设计要点**：参数摘要提取 `pattern`，截断 200 字符。Glob 默认折叠（结果可能很长）。
+**设计要点**：参数摘要提取 `pattern`，截断 200 字符。
 
 ---
 
@@ -211,24 +188,15 @@ TUI 内部通过 `format_tool_name()` 做少量名称简化：
 ● Grep (pattern: "fn render_tool")
 ```
 
-#### 完成（折叠）
+#### 完成
 
 ```
-● Grep (pattern: "fn render_tool")
-  ⎿ 8 lines
+● Grep (pattern: "fn render_tool") — 8 matches
 ```
 
-#### 完成（展开）
+**设计要点**：头行后缀显示匹配数量（"— N matches"），从输出非空行数动态计算。
 
-```
-● Grep (pattern: "fn render_tool")
-  ⎿ peri-tui/src/kit/view_render.rs:209    fn render_tool_card(
-  ⎿ peri-tui/src/kit/view_render.rs:546    fn render_subagent_group(
-  ⎿ peri-tui/src/kit/view_render.rs:759    mod tests {
-  ⎿ … 5 more lines
-```
-
-**设计要点**：Grep 默认折叠（搜索结果可能极长）。参数 `pattern` 截断 200 字符。
+#### 错误
 
 ---
 
