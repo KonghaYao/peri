@@ -124,3 +124,92 @@
         );
         assert!(desc.len() > 200, "description 应为扩展后的多段落文本");
     }
+
+    #[tokio::test]
+    async fn test_deep_scan_depth_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("README.md"), "").unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("main.rs"), "").unwrap();
+        let tool = FolderOperationsTool::new(dir.path().to_str().unwrap());
+        let result = tool
+            .invoke(
+                serde_json::json!({"operation": "deep_scan", "folder_path": "proj", "max_depth": 1}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap();
+        assert!(result.contains("README.md"), "should show root file: {result}");
+        assert!(result.contains("src"), "should show root dir: {result}");
+        // depth=1 -> 不应进入 src/
+        assert!(
+            !result.contains("main.rs"),
+            "depth=1 should not show nested files: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deep_scan_depth_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        std::fs::write(root.join("src").join("main.rs"), "").unwrap();
+        std::fs::write(root.join("tests").join("test.rs"), "").unwrap();
+        let tool = FolderOperationsTool::new(dir.path().to_str().unwrap());
+        let result = tool
+            .invoke(
+                serde_json::json!({"operation": "deep_scan", "folder_path": "app", "max_depth": 2}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap();
+        assert!(result.contains("Cargo.toml"), "should show root: {result}");
+        assert!(result.contains("main.rs"), "depth=2 should show nested: {result}");
+        assert!(result.contains("test.rs"), "should show other subdir: {result}");
+    }
+
+    #[tokio::test]
+    async fn test_deep_scan_skips_ignored_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("pkg");
+        std::fs::create_dir_all(root.join("node_modules").join("lodash")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("package.json"), "").unwrap();
+        std::fs::write(root.join("node_modules").join("lodash").join("index.js"), "").unwrap();
+        std::fs::write(root.join("src").join("app.ts"), "").unwrap();
+        let tool = FolderOperationsTool::new(dir.path().to_str().unwrap());
+        let result = tool
+            .invoke(
+                serde_json::json!({"operation": "deep_scan", "folder_path": "pkg", "max_depth": 3}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap();
+        assert!(result.contains("package.json"), "should show root: {result}");
+        assert!(result.contains("app.ts"), "should show src: {result}");
+        assert!(
+            !result.contains("lodash") && !result.contains("index.js"),
+            "should skip node_modules contents: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deep_scan_nonexistent_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = FolderOperationsTool::new(dir.path().to_str().unwrap());
+        let result = tool
+            .invoke(
+                serde_json::json!({"operation": "deep_scan", "folder_path": "ghost_dir"}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await;
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Folder not found"),
+            "should report missing: {err_msg}"
+        );
+    }

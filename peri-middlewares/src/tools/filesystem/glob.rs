@@ -4,6 +4,7 @@ use peri_agent::tools::BaseTool;
 use serde_json::Value;
 
 use super::resolve_path;
+use super::should_skip_dir;
 use crate::tools::output_persist::persist_truncated_output;
 
 /// Glob tool — aligned with the TypeScript glob_tool.
@@ -47,29 +48,6 @@ Anti-patterns (will be warned):
 Output-size protection (always active, no opt-in):
 - Directories named node_modules, .git, target, dist, build, worktrees, and similar caches/copies are skipped during the walk, so globbing the project root won't enumerate worktree or build copies.
 - Results exceeding 1000 entries or 20000 bytes are truncated inline; the full payload is persisted to a temp file and the path is returned in the output."#;
-
-fn should_skip_dir(name: &str) -> bool {
-    matches!(
-        name,
-        "node_modules"
-            | ".git"
-            | "dist"
-            | "build"
-            | ".next"
-            | ".turbo"
-            | "coverage"
-            | ".nyc_output"
-            | "temp"
-            | ".cache"
-            | "vendor"
-            | "venv"
-            | "__pycache__"
-            | "target"
-            | "out"
-            | ".output"
-            | "worktrees"
-    )
-}
 
 /// Soft-warn pattern — still executes, but prepends a warning. A hit strongly suggests the caller actually wanted to list a directory.
 fn soft_warn_pattern(pattern: &str) -> Option<&'static str> {

@@ -15,9 +15,17 @@ use unicode_width::UnicodeWidthStr;
 
 // ── 工具卡片辅助函数（内联自 view_render/tool_card.rs）─────────────────
 
-const COLLAPSED_BY_DEFAULT: &[&str] = &["Bash", "Read", "Glob", "Grep", "AskUserQuestion"];
+const COLLAPSED_BY_DEFAULT: &[&str] = &[
+    "Bash",
+    "Read",
+    "Edit",
+    "Write",
+    "Glob",
+    "Grep",
+    "AskUserQuestion",
+];
 const AUTO_EXPAND: &[&str] = &["AgentResult", "ExecuteExtraTool", "SearchExtraTools"];
-const FORCE_EXPAND_ON_COMPLETE: &[&str] = &["Write", "Edit"];
+const FORCE_EXPAND_ON_COMPLETE: &[&str] = &[];
 
 pub(super) fn compact_summary(text: &str, max_chars: usize) -> String {
     let joined = text
@@ -371,6 +379,50 @@ fn render_tool_card_lines(data: &TuiToolCard) -> Vec<Line<'static>> {
         ));
     }
 
+    // Read/Edit/Write/Glob/Grep 完成后在头行显示摘要后缀，不另起输出行
+    let mut has_header_suffix = false;
+    if !data.is_running && !data.is_error && !data.output_summary.is_empty() {
+        let suffix = match data.tool_name.as_str() {
+            "Read" => {
+                let total_lines = data
+                    .output_summary
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .count();
+                format!(" \u{2014} {} lines", total_lines)
+            }
+            "Glob" | "Grep" => {
+                let total = data
+                    .output_summary
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .count();
+                format!(" \u{2014} {} matches", total)
+            }
+            "Edit" | "Write" => {
+                let trimmed = data.output_summary.trim();
+                let lines = trimmed.lines().count();
+                let base = if lines <= 3 {
+                    truncate_str(trimmed, 200)
+                } else {
+                    format!("{} lines changed", lines)
+                };
+                let diff_suffix = data
+                    .diff
+                    .as_ref()
+                    .and_then(diff_change_summary)
+                    .map(|s| format!(" · {}", s))
+                    .unwrap_or_default();
+                format!(" \u{2014} {}{}", base, diff_suffix)
+            }
+            _ => String::new(),
+        };
+        if !suffix.is_empty() {
+            header_spans.push(Span::styled(suffix, Style::default().fg(semantic.text.dim)));
+            has_header_suffix = true;
+        }
+    }
+
     let mut lines = vec![Line::from(header_spans)];
 
     // Bash 运行中
@@ -407,6 +459,8 @@ fn render_tool_card_lines(data: &TuiToolCard) -> Vec<Line<'static>> {
     // 折叠/展开判断
     let collapsed = if data.is_error {
         false
+    } else if data.is_running {
+        false
     } else if AUTO_EXPAND.contains(&data.tool_name.as_str()) {
         false
     } else if FORCE_EXPAND_ON_COMPLETE.contains(&data.tool_name.as_str()) {
@@ -416,7 +470,8 @@ fn render_tool_card_lines(data: &TuiToolCard) -> Vec<Line<'static>> {
     };
 
     if collapsed {
-        if !data.output_summary.is_empty() {
+        // 头行已显示摘要后缀的工具无需额外输出行
+        if !has_header_suffix && !data.output_summary.is_empty() {
             let color = if data.is_error {
                 semantic.status.error
             } else {

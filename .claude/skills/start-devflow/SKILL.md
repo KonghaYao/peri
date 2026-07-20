@@ -61,7 +61,7 @@ Completion criterion: `00-context.md` states `Mode: relaxed` or `Mode: cautious`
 Create one directory per devflow:
 
 ```text
-.tmp/devflow/<slug>/
+.peri/plans/<title>/
   00-context.md
   01-explore.md
   02-plan.md
@@ -71,7 +71,7 @@ Create one directory per devflow:
   05-verification.md
 ```
 
-`<slug>` should be short and stable: issue id if available, otherwise a kebab-case task name.
+`<title>` 用任务标题的 kebab-case 形式（如 `fix-auth-timeout`、`add-pagination`），有 issue id 时附加 id。
 
 Each handoff file must contain:
 
@@ -233,9 +233,9 @@ Keep the main context small: read handoff summaries, not every file, unless you 
 ### Explorer
 
 ```text
-Goal: explore the codebase for <task>. Read .tmp/devflow/<slug>/00-context.md first.
+Goal: explore the codebase for <task>. Read .peri/plans/<title>/00-context.md first.
 
-Write .tmp/devflow/<slug>/01-explore.md using the required handoff template.
+Write .peri/plans/<title>/01-explore.md using the required handoff template.
 Do not edit files. Focus on relevant paths, conventions, tests, and risks.
 Completion: the next planner can create an implementation plan without additional search.
 ```
@@ -245,7 +245,7 @@ Completion: the next planner can create an implementation plan without additiona
 ```text
 Goal: plan <task>. Read 00-context.md and 01-explore.md first.
 
-Write .tmp/devflow/<slug>/02-plan.md using the required handoff template.
+Write .peri/plans/<title>/02-plan.md using the required handoff template.
 Do not edit files. Include ordered steps, exact files, verification commands, risks, and stop/ask conditions.
 Completion: a coder can implement from the plan without guessing.
 ```
@@ -255,7 +255,7 @@ Completion: a coder can implement from the plan without guessing.
 ```text
 Goal: review the plan for <task>. Read 00-context.md, 01-explore.md, and 02-plan.md first.
 
-Write .tmp/devflow/<slug>/02-plan-review.md. Return APPROVED or list issues with severity, file references, and fix guidance.
+Write .peri/plans/<title>/02-plan-review.md. Return APPROVED or list issues with severity, file references, and fix guidance.
 Challenge assumptions, hidden risks, missing verification, rollback gaps, unsafe operations, and scope creep.
 Do not edit files.
 ```
@@ -277,7 +277,7 @@ CRITICAL — Scope boundary:
 - If you see a related improvement not in the plan, record it in 03-code.md Open Questions — DO NOT implement it.
 
 Edit only files required by the plan. Follow repository style. Run targeted checks if practical.
-Write .tmp/devflow/<slug>/03-code.md using the required handoff template.
+Write .peri/plans/<title>/03-code.md using the required handoff template.
 If blocked or the plan is wrong, stop and report instead of broadening scope.
 ```
 
@@ -286,7 +286,7 @@ If blocked or the plan is wrong, stop and report instead of broadening scope.
 ```text
 Goal: review the implementation for <task>. Read all handoff files and inspect the current diff.
 
-Write .tmp/devflow/<slug>/04-review.md. Return APPROVED or list issues with severity, file references, and fix guidance.
+Write .peri/plans/<title>/04-review.md. Return APPROVED or list issues with severity, file references, and fix guidance.
 Check spec compliance first, then code quality. Do not edit files.
 ```
 
@@ -295,7 +295,7 @@ Check spec compliance first, then code quality. Do not edit files.
 ```text
 Goal: verify <task> is complete. Read all handoff files and inspect changed files.
 
-Run appropriate checks or explain why they cannot run. Write .tmp/devflow/<slug>/05-verification.md with evidence and verdict.
+Run appropriate checks or explain why they cannot run. Write .peri/plans/<title>/05-verification.md with evidence and verdict.
 Do not edit files.
 ```
 

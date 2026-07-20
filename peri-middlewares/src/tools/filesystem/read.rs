@@ -1,6 +1,7 @@
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
 
+use super::folder::list_folder;
 use super::resolve_path;
 use crate::tools::output_persist::persist_truncated_output;
 use crate::tools::output_truncate::truncate_bytes;
@@ -42,7 +43,8 @@ Error handling:
 - File not found: returns an error message indicating the path does not exist
 - Binary files: detected by extension and returns a message indicating the file cannot be displayed as text
 - Files exceeding 32 MB: returns an error suggesting use of offset/limit parameters
-- Offset exceeds file length: returns an error indicating the line range is invalid"#;
+- Offset exceeds file length: returns an error indicating the line range is invalid
+- Directories: detected and returns a listing of directory contents with a hint to use folder_operations for advanced folder operations"#;
 
 fn is_binary_extension(ext: &str) -> bool {
     matches!(
@@ -171,6 +173,14 @@ impl BaseTool for ReadFileTool {
                 return Err(format!("Error: File not found at {file_path}").into());
             }
             Err(e) => return Err(e.into()),
+            Ok(meta) if meta.is_dir() => {
+                return list_folder(&resolved).map(|listing| {
+                    format!(
+                        "[DIRECTORY DETECTED]\n\nThis path is a directory, not a file. Below are its contents:\n\n{}",
+                        listing
+                    )
+                });
+            }
             _ => match std::fs::read_to_string(&resolved) {
                 Ok(c) => c,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

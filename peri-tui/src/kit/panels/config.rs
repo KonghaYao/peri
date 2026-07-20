@@ -432,7 +432,6 @@ fn activate_row(row: usize, forward: bool) {
                             });
                         }
                     }
-                    return;
                 }
                 ROW_LANGUAGE => {
                     let mut cfg = handle.write();
@@ -530,7 +529,6 @@ fn activate_row(row: usize, forward: bool) {
                             });
                         }
                     }
-                    return;
                 }
                 _ => {}
             }
@@ -638,6 +636,33 @@ fn parse_permission_mode(s: &str) -> Option<PermissionMode> {
     }
 }
 
+/// 纯函数：cycle 行前进/后退并写入 TuiConfig 新值。返回新选项在 options 中的索引。
+#[allow(dead_code)]
+fn apply_cycle_row_tui(cfg: &mut TuiConfig, row: usize, forward: bool) -> Option<usize> {
+    let options: &[&str] = match row {
+        ROW_STREAMING => STREAMING_OPTS,
+        _ => return None,
+    };
+    let cur_idx = match row {
+        ROW_STREAMING => STREAMING_OPTS
+            .iter()
+            .position(|s| cfg.streaming_mode.as_deref() == Some(*s))
+            .unwrap_or(0),
+        _ => return None,
+    };
+    let next = if forward {
+        (cur_idx + 1) % options.len()
+    } else {
+        (cur_idx + options.len() - 1) % options.len()
+    };
+    let new_val = options[next];
+    match row {
+        ROW_STREAMING => cfg.streaming_mode = Some(new_val.to_string()),
+        _ => return None,
+    }
+    Some(next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,8 +712,10 @@ mod tests {
 
     #[test]
     fn test_apply_cycle_row_streaming_forward_wraps() {
-        let mut cfg = TuiConfig::default();
-        cfg.streaming_mode = Some("none".into()); // idx=2
+        let mut cfg = TuiConfig {
+            streaming_mode: Some("none".into()),
+            ..Default::default()
+        };
         let next = apply_cycle_row_tui(&mut cfg, ROW_STREAMING, true);
         assert_eq!(next, Some(0)); // wrap to streaming
         assert_eq!(cfg.streaming_mode.as_deref(), Some("streaming"));
@@ -736,31 +763,4 @@ mod tests {
         assert!(parse_permission_mode("invalid").is_none());
         assert!(parse_permission_mode("").is_none());
     }
-}
-
-/// 纯函数：cycle 行前进/后退并写入 TuiConfig 新值。返回新选项在 options 中的索引。
-#[allow(dead_code)]
-fn apply_cycle_row_tui(cfg: &mut TuiConfig, row: usize, forward: bool) -> Option<usize> {
-    let options: &[&str] = match row {
-        ROW_STREAMING => STREAMING_OPTS,
-        _ => return None,
-    };
-    let cur_idx = match row {
-        ROW_STREAMING => STREAMING_OPTS
-            .iter()
-            .position(|s| cfg.streaming_mode.as_deref() == Some(*s))
-            .unwrap_or(0),
-        _ => return None,
-    };
-    let next = if forward {
-        (cur_idx + 1) % options.len()
-    } else {
-        (cur_idx + options.len() - 1) % options.len()
-    };
-    let new_val = options[next];
-    match row {
-        ROW_STREAMING => cfg.streaming_mode = Some(new_val.to_string()),
-        _ => return None,
-    }
-    Some(next)
 }

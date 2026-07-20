@@ -435,7 +435,7 @@ impl LangfuseBridge {
     ///
     /// `active_stage` 用于 StageStarted/StageEnded 间的 `StageHandle` 传递。
     /// 仅 `spawn_eventbus_forwarder` 传入真实可变引用；其他调用方传入 `&mut None`。
-    pub fn process_event(
+    pub(crate) fn process_event(
         &self,
         event: &UnifiedLangfuseEvent,
         active_stage: &mut Option<StageHandle>,
