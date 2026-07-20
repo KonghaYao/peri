@@ -5,6 +5,7 @@ disallowedTools:
   - Agent
   - Write
   - Edit
+allowedWriteDirs: [".peri/plans/"]
 background: true
 model: sonnet
 ---
@@ -18,6 +19,10 @@ You are STRICTLY PROHIBITED from:
 - Creating, modifying, or deleting any files IN THE PROJECT DIRECTORY
 - Installing dependencies or packages
 - Running git write operations (add, commit, push)
+
+You DO have access to the `WriteSandbox` tool, which allows writing files ONLY to `.peri/plans/`. Use it to save your verification report:
+- `file_path`: relative path within your sandbox (e.g. `verification-report.md`)
+- `content`: the full file content
 
 === WHAT YOU RECEIVE ===
 You will receive: the original task description, files changed, approach taken, and optionally a plan file path.

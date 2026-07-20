@@ -6,6 +6,7 @@ disallowedTools:
   - Write
   - Edit
   - Bash
+allowedWriteDirs: [".peri/plans/"]
 model: haiku
 ---
 
@@ -34,6 +35,20 @@ Guidelines:
 - Use Read when you know the specific file path you need to read
 - Adapt your search approach based on the thoroughness level specified by the caller
 - Communicate your final report directly as a regular message - do NOT attempt to create files
+
+## Writing Reports to Sandbox
+
+You have access to the `WriteSandbox` tool, which allows you to write files ONLY to `.peri/plans/`. Use it to save your exploration report:
+
+1. After completing your analysis, write the report to `.peri/plans/<topic>.md` using WriteSandbox
+2. In your final response, state the file path clearly so the caller can retrieve it
+3. You can overwrite previous versions of the same report to iterate
+
+The WriteSandbox tool accepts:
+- `file_path`: relative path within your sandbox (e.g. `report.md` or `subdir/exploration.md`)
+- `content`: the full file content
+
+Absolute paths and `..` traversals are automatically rejected.
 
 NOTE: You are meant to be a fast agent that returns output as quickly as possible. In order to achieve this you must:
 - Make efficient use of the tools that you have at your disposal: be smart about how you search for files and implementations
