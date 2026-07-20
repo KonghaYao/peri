@@ -19,7 +19,6 @@ fn make_global() -> AppConfig {
             max_tokens: 32000,
         }),
         language: Some("zh".to_string()),
-        diff_enabled: true,
         ..Default::default()
     }
 }
@@ -32,9 +31,6 @@ fn test_merge_workspace_default_preserves_most_fields() {
     assert_eq!(global.active_alias, "sonnet");
     assert_eq!(global.providers.len(), 1);
     assert!(global.thinking.is_some());
-    // diff_enabled is bool (not Option<bool>), so default=false overrides global's true.
-    // This is deliberate — the design chose "direct override" for bool fields.
-    assert!(!global.diff_enabled);
 }
 
 #[test]
@@ -50,7 +46,6 @@ fn test_merge_workspace_complete_overrides_all() {
             ..Default::default()
         }],
         language: Some("en".to_string()),
-        diff_enabled: false,
         ..Default::default()
     };
     global.merge_overrides(workspace);
@@ -59,7 +54,6 @@ fn test_merge_workspace_complete_overrides_all() {
     assert_eq!(global.providers.len(), 1);
     assert_eq!(global.providers[0].provider_type, "anthropic");
     assert_eq!(global.language, Some("en".to_string()));
-    assert!(!global.diff_enabled);
     assert!(global.thinking.is_some());
 }
 
@@ -105,26 +99,15 @@ fn test_merge_env_override() {
 }
 
 #[test]
-fn test_merge_diff_enabled_false_overrides_global_true() {
-    let mut global = make_global(); // diff_enabled: true
-    let workspace = AppConfig {
-        diff_enabled: false,
-        ..Default::default()
-    };
-    global.merge_overrides(workspace);
-    assert!(!global.diff_enabled);
-}
-
-#[test]
 fn test_merge_json_workspace_overrides_single_field() {
-    let mut global = make_global(); // diff_enabled: true, active_alias: "sonnet"
+    let mut global = make_global(); // active_alias: "sonnet"
     let json = r#"{"active_alias":"haiku"}"#;
     let workspace: AppConfig = serde_json::from_str(json).unwrap();
     global.merge_overrides(workspace);
     assert_eq!(global.active_alias, "haiku");
-    // diff_enabled is bool (not Option<bool>), so default=false from JSON
-    // directly overrides global's true — this is deliberate behavior (design choice B)
-    assert!(!global.diff_enabled);
+    // show_cache_warning defaults to true in both global and workspace,
+    // so merge retains true (no unintended override from default deserialization)
+    assert!(global.show_cache_warning);
     // Other fields preserved from global
     assert_eq!(global.providers.len(), 1);
     assert!(global.thinking.is_some());

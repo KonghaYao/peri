@@ -63,14 +63,24 @@ pub async fn run_kit_fullscreen(
     // 2b. H2: 把 peri_config 共享句柄塞到全局 OnceLock，让 ModelPanel 等组件
     //     在 #[component] 闭包里能直接 write active_alias。ACP server 持同一 Arc。
     let _ = atoms::PERI_CONFIG_HANDLE.set(app.services.peri_config.clone());
+    // 2b0. 从 AppConfig.extra 提取旧 TUI 键初始化 TuiConfig（向后兼容）
+    {
+        let cfg = app.services.peri_config.read();
+        let tui_config = crate::config::TuiConfig::from_extra(&cfg.config.extra);
+        let _ =
+            atoms::TUI_CONFIG_HANDLE.set(std::sync::Arc::new(parking_lot::RwLock::new(tui_config)));
+    }
     // 2b2. i18n: 根据配置语言初始化 thread_local LcRegistry。
     //     组件通过 crate::i18n::tr() / tr_args() 读取翻译文本。
     {
         let cfg = app.services.peri_config.read();
         crate::i18n::init(cfg.config.language.as_deref());
         // 加载配置中的主题（默认 peri-dark）
-        let theme_name = cfg.config.theme.as_deref().unwrap_or("peri-dark");
-        match peri_theme::loader::load_theme(theme_name) {
+        let theme_name = atoms::TUI_CONFIG_HANDLE
+            .get()
+            .and_then(|h| h.read().theme.clone())
+            .unwrap_or_else(|| "peri-dark".to_string());
+        match peri_theme::loader::load_theme(&theme_name) {
             Ok(theme) => peri_theme::atoms::init_theme_atoms(theme),
             Err(e) => tracing::warn!(
                 "failed to load theme '{}': {}, using default",
@@ -79,13 +89,19 @@ pub async fn run_kit_fullscreen(
             ),
         }
         // 每日色彩：启动时自动检查日期，若需更换则在同 mode 内 deterministic 选取
-        if cfg.config.daily_color {
+        let daily_enabled = atoms::TUI_CONFIG_HANDLE
+            .get()
+            .map(|h| h.read().daily_color)
+            .unwrap_or(false);
+        if daily_enabled {
             let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-            let needs_switch = cfg
-                .config
-                .daily_color_date
-                .as_deref()
-                .is_none_or(|d| d != today);
+            let needs_switch = atoms::TUI_CONFIG_HANDLE
+                .get()
+                .map(|h| {
+                    let tui = h.read();
+                    tui.daily_color_date.as_deref().is_none_or(|d| d != today)
+                })
+                .unwrap_or(true);
             if needs_switch {
                 let current_mode = peri_theme::atoms::THEME_ATOM.state().read().mode;
                 // 收集同 mode 的所有可用主题
@@ -103,7 +119,7 @@ pub async fn run_kit_fullscreen(
                     let hash_val = hasher.finish();
                     let idx = (hash_val as usize) % same_mode_themes.len();
                     let selected = &same_mode_themes[idx];
-                    if selected != theme_name {
+                    if selected != &theme_name {
                         tracing::info!(
                             "daily color: switching from '{}' to '{}' for {}",
                             theme_name,
@@ -118,13 +134,23 @@ pub async fn run_kit_fullscreen(
                         }
                     }
                 }
-                // 更新日期（无论是否切换成功）
-                let mut w = app.services.peri_config.write();
-                w.config.daily_color_date = Some(today);
-                let snap = w.clone();
-                drop(w);
-                if let Err(e) = crate::config::save(&snap) {
-                    tracing::warn!("daily color: failed to save updated date: {}", e);
+                // 更新日期到 TUI_CONFIG_HANDLE
+                if let Some(handle) = atoms::TUI_CONFIG_HANDLE.get() {
+                    let mut tui = handle.write();
+                    tui.daily_color_date = Some(today);
+                    drop(tui);
+                }
+                // 同步到 PeriConfig.extra 并保存
+                if let Some(peri_handle) = atoms::PERI_CONFIG_HANDLE.get() {
+                    let tui = atoms::TUI_CONFIG_HANDLE.get().unwrap().read();
+                    let mut peri = peri_handle.write();
+                    tui.sync_to_extra(&mut peri.config.extra);
+                    drop(tui);
+                    drop(peri);
+                    // re-read for save
+                    let peri = peri_handle.read();
+                    crate::config::save(&peri)
+                        .unwrap_or_else(|e| tracing::warn!("Failed to save daily color date: {e}"));
                 }
             }
         }

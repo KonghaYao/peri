@@ -280,6 +280,10 @@ pub static THREAD_LOAD_TX: OnceLock<UnboundedSender<String>> = OnceLock::new();
 pub static PERI_CONFIG_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::RwLock<crate::config::PeriConfig>>,
 > = OnceLock::new();
+/// TUI 渲染配置共享句柄（仅 UI 字段，与 PERI_CONFIG_HANDLE 独立）
+pub static TUI_CONFIG_HANDLE: OnceLock<
+    std::sync::Arc<parking_lot::RwLock<crate::config::TuiConfig>>,
+> = OnceLock::new();
 pub static PERMISSION_MODE_HANDLE: OnceLock<
     std::sync::Arc<peri_middlewares::prelude::SharedPermissionMode>,
 > = OnceLock::new();

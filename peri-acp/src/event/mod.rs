@@ -6,7 +6,6 @@
 
 pub mod forwarder;
 pub mod mapper;
-pub mod truncate;
 
 pub(crate) use forwarder::spawn_eventbus_forwarder;
 pub use mapper::{map_event, MappedEvent};

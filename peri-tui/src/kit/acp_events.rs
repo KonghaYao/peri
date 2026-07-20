@@ -29,10 +29,10 @@ pub(crate) enum StreamingMode {
     None,
 }
 
-/// 从 PERI_CONFIG_HANDLE 即地读取当前 streaming_mode。
+/// 从 TUI_CONFIG_HANDLE 即地读取当前 streaming_mode。
 /// 每次流式事件进入时调用——配置热切换即时生效。
 pub(crate) fn current_streaming_mode() -> StreamingMode {
-    let handle = match crate::kit::atoms::PERI_CONFIG_HANDLE.get() {
+    let handle = match crate::kit::atoms::TUI_CONFIG_HANDLE.get() {
         Some(h) => h,
         None => return StreamingMode::Streaming,
     };
@@ -40,7 +40,7 @@ pub(crate) fn current_streaming_mode() -> StreamingMode {
         Some(g) => g,
         None => return StreamingMode::Streaming,
     };
-    match guard.config.streaming_mode.as_deref() {
+    match guard.streaming_mode.as_deref() {
         Some("block") => StreamingMode::Block,
         Some("none") => StreamingMode::None,
         _ => StreamingMode::Streaming,

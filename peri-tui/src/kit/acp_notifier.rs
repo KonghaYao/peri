@@ -26,9 +26,9 @@ use crate::kit::atoms::{
     SPINNER_TOKEN_COUNT,
 };
 use crate::kit::input_area::refresh_slash_items;
+use crate::truncate::summarize_input;
 use fluent_bundle::FluentValue;
 use peri_acp::event::AcpEvent;
-use peri_acp::event::truncate::summarize_input;
 use peri_acp_types::event_data::{
     AskUser, HitlPending, Question, QuestionOption, SystemNotification,
 };

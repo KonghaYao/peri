@@ -78,27 +78,7 @@ impl ThinkingConfig {
         &self.effort
     }
 
-    /// effort 循环切换：low → medium → high → xhigh → max → low
-    pub fn next_effort(&self) -> &'static str {
-        match self.effort.as_str() {
-            "low" => "medium",
-            "medium" => "high",
-            "high" => "xhigh",
-            "xhigh" => "max",
-            _ => "low",
-        }
-    }
-
-    /// effort 反向循环切换：low → max → xhigh → high → medium → low
-    pub fn prev_effort(&self) -> &'static str {
-        match self.effort.as_str() {
-            "low" => "max",
-            "max" => "xhigh",
-            "xhigh" => "high",
-            "high" => "medium",
-            _ => "low",
-        }
-    }
+    // next_effort / prev_effort moved to peri-tui (TUI-only concern)
 }
 
 /// Beta 功能开关配置
@@ -146,15 +126,6 @@ pub struct AppConfig {
     /// 是否启用 1M 上下文模式
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_1m: Option<bool>,
-    /// Write/Edit 工具结果内联 diff 默认是否可见
-    #[serde(default)]
-    pub diff_enabled: bool,
-    /// 流式渲染模式：streaming / block / none
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub streaming_mode: Option<String>,
-    /// 消息区滚动绘制帧率：60 | 30 | 20。None=默认 20fps（50ms）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scroll_fps: Option<u32>,
     /// 是否在消息流中显示缓存命中率过低警告
     #[serde(default = "default_show_cache_warning")]
     pub show_cache_warning: bool,
@@ -164,16 +135,6 @@ pub struct AppConfig {
     /// 保留未知字段
     #[serde(flatten)]
     pub extra: Map<String, Value>,
-    /// 主题名称（"peri-dark" | "peri-light" | 用户自定义主题名）
-    /// 默认 "peri-dark"，在 TUI 启动时加载
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub theme: Option<String>,
-    /// 是否启用每日色彩自动切换（同 mode 内轮换）
-    #[serde(default)]
-    pub daily_color: bool,
-    /// 上次执行每日色彩切换的日期（"YYYY-MM-DD"），用于启动时判断是否需要切换
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub daily_color_date: Option<String>,
 }
 
 fn default_show_cache_warning() -> bool {
@@ -226,24 +187,8 @@ impl AppConfig {
         if workspace.context_1m.is_some() {
             self.context_1m = workspace.context_1m;
         }
-        // diff_enabled: bool 直接覆盖（无法区分"未写 false"和"写了 false"）
-        self.diff_enabled = workspace.diff_enabled;
-        // streaming_mode: Option<String>
-        if workspace.streaming_mode.is_some() {
-            self.streaming_mode = workspace.streaming_mode;
-        }
         // show_cache_warning: bool 直接覆盖
         self.show_cache_warning = workspace.show_cache_warning;
-        // theme: Option<String>
-        if workspace.theme.is_some() {
-            self.theme = workspace.theme;
-        }
-        // daily_color: bool 直接覆盖
-        self.daily_color = workspace.daily_color;
-        // daily_color_date: Option<String>
-        if workspace.daily_color_date.is_some() {
-            self.daily_color_date = workspace.daily_color_date;
-        }
         // 保留未知字段
         self.extra.extend(workspace.extra);
     }
@@ -265,14 +210,8 @@ impl Default for AppConfig {
             proactiveness: None,
             context_1m: None,
             claude_md_excludes: None,
-            diff_enabled: false,
-            streaming_mode: None,
-            scroll_fps: None,
             show_cache_warning: true,
             betas: BetasConfig::default(),
-            theme: None,
-            daily_color: false,
-            daily_color_date: None,
             extra: serde_json::Map::new(),
         }
     }

@@ -28,7 +28,7 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
     DOWNLOAD_PROGRESS, DownloadProgressPayload, FileDownloadStatus, LANG_VERSION, NOTIFICATION,
-    Notification, PERI_CONFIG_HANDLE,
+    Notification, PERI_CONFIG_HANDLE, TUI_CONFIG_HANDLE,
 };
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::markdown::{self, MarkdownSegment};
@@ -104,21 +104,28 @@ fn build_preview(theme_name: &str) -> Vec<Line<'static>> {
 
 /// 读取持久化配置中的主题名。
 fn persisted_theme_name() -> String {
-    PERI_CONFIG_HANDLE
+    TUI_CONFIG_HANDLE
         .get()
-        .and_then(|h| h.read().config.theme.clone())
+        .and_then(|h| h.read().theme.clone())
         .unwrap_or_else(|| "peri-dark".to_string())
 }
 
 /// 持久化当前选中主题到 settings.json。
 fn persist_theme(name: &str) {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+    let Some(tui_handle) = TUI_CONFIG_HANDLE.get() else {
         return;
     };
-    let mut cfg = handle.write();
-    cfg.config.theme = Some(name.to_string());
-    let snap = cfg.clone();
-    drop(cfg);
+    let Some(peri_handle) = PERI_CONFIG_HANDLE.get() else {
+        return;
+    };
+    let mut tui = tui_handle.write();
+    tui.theme = Some(name.to_string());
+    let tui_snapshot = tui.clone();
+    drop(tui);
+    let mut peri = peri_handle.write();
+    tui_snapshot.sync_to_extra(&mut peri.config.extra);
+    let snap = peri.clone();
+    drop(peri);
     match crate::config::save(&snap) {
         Ok(()) => {
             *NOTIFICATION.state().write() = Some(Notification {
@@ -144,25 +151,32 @@ fn persist_theme(name: &str) {
 
 /// 读取持久化配置中的 daily_color 开关状态。
 fn daily_color_enabled() -> bool {
-    PERI_CONFIG_HANDLE
+    TUI_CONFIG_HANDLE
         .get()
-        .map(|h| h.read().config.daily_color)
+        .map(|h| h.read().daily_color)
         .unwrap_or(false)
 }
 
 /// 切换每日色彩的开关状态，并持久化到 settings.json。
 fn toggle_daily_color() {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+    let Some(tui_handle) = TUI_CONFIG_HANDLE.get() else {
         return;
     };
-    let mut cfg = handle.write();
-    cfg.config.daily_color = !cfg.config.daily_color;
+    let Some(peri_handle) = PERI_CONFIG_HANDLE.get() else {
+        return;
+    };
+    let mut tui = tui_handle.write();
+    tui.daily_color = !tui.daily_color;
     // 开启时清除旧日期，使启动时立即生效
-    if cfg.config.daily_color {
-        cfg.config.daily_color_date = None;
+    if tui.daily_color {
+        tui.daily_color_date = None;
     }
-    let snap = cfg.clone();
-    drop(cfg);
+    let tui_snapshot = tui.clone();
+    drop(tui);
+    let mut peri = peri_handle.write();
+    tui_snapshot.sync_to_extra(&mut peri.config.extra);
+    let snap = peri.clone();
+    drop(peri);
     match crate::config::save(&snap) {
         Ok(()) => {
             *NOTIFICATION.state().write() = Some(Notification {

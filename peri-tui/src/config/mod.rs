@@ -5,6 +5,9 @@ pub use peri_acp::provider::{
 };
 pub use peri_acp::provider::{config_path, load, load_from, save, save_to, workspace_config_path};
 
+pub mod tui_config;
+pub use tui_config::TuiConfig;
+
 #[cfg(test)]
 #[path = "types_test.rs"]
 mod tests;

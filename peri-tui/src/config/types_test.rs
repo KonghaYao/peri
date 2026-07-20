@@ -13,78 +13,7 @@ fn test_thinking_effort_direct() {
     assert_eq!(c.openai_effort(), "low");
 }
 
-#[test]
-fn test_thinking_effort_next_prev() {
-    let c = ThinkingConfig {
-        enabled: true,
-        budget_tokens: 8000,
-        effort: "medium".to_string(),
-        max_tokens: 32000,
-    };
-    assert_eq!(c.next_effort(), "high");
-    assert_eq!(c.prev_effort(), "low");
-}
-
-#[test]
-fn test_thinking_effort_full_cycle() {
-    // forward: low → medium → high → xhigh → max → low
-    let c = ThinkingConfig {
-        enabled: true,
-        budget_tokens: 8000,
-        effort: "low".to_string(),
-        max_tokens: 32000,
-    };
-    assert_eq!(c.next_effort(), "medium");
-    let c = ThinkingConfig {
-        effort: "medium".to_string(),
-        ..c.clone()
-    };
-    assert_eq!(c.next_effort(), "high");
-    let c = ThinkingConfig {
-        effort: "high".to_string(),
-        ..c.clone()
-    };
-    assert_eq!(c.next_effort(), "xhigh");
-    let c = ThinkingConfig {
-        effort: "xhigh".to_string(),
-        ..c.clone()
-    };
-    assert_eq!(c.next_effort(), "max");
-    let c = ThinkingConfig {
-        effort: "max".to_string(),
-        ..c.clone()
-    };
-    assert_eq!(c.next_effort(), "low");
-
-    // reverse: low → max → xhigh → high → medium → low
-    let c = ThinkingConfig {
-        effort: "low".to_string(),
-        ..c.clone()
-    };
-    assert_eq!(c.prev_effort(), "max");
-    let c = ThinkingConfig {
-        effort: "max".to_string(),
-        ..c.clone()
-    };
-    assert_eq!(c.prev_effort(), "xhigh");
-    let c = ThinkingConfig {
-        effort: "xhigh".to_string(),
-        ..c.clone()
-    };
-    assert_eq!(c.prev_effort(), "high");
-    let c = ThinkingConfig {
-        effort: "high".to_string(),
-        ..c.clone()
-    };
-    assert_eq!(c.prev_effort(), "medium");
-    let c = ThinkingConfig {
-        effort: "medium".to_string(),
-        ..c.clone()
-    };
-    assert_eq!(c.prev_effort(), "low");
-}
-
-// ── ThinkingConfig 序列化 / 反序列化 ─────────────────────────────────────
+// next_effort / prev_effort removed — TUI-only dead code// ── ThinkingConfig 序列化 / 反序列化 ─────────────────────────────────────
 
 #[test]
 fn test_thinking_config_serde_roundtrip() {

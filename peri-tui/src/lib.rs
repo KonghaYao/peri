@@ -22,6 +22,7 @@ pub mod kit;
 pub mod launch;
 pub mod sync;
 pub mod thread;
+pub mod truncate;
 pub mod update;
 
 #[cfg(test)]

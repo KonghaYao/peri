@@ -39,8 +39,7 @@ fn test_merge_global_and_workspace_via_load_from() {
         "config": {
             "active_alias": "sonnet",
             "active_provider_id": "openai-1",
-            "providers": [{"id": "openai-1", "type": "openai", "apiKey": "sk-global"}],
-            "diff_enabled": true
+            "providers": [{"id": "openai-1", "type": "openai", "apiKey": "sk-global"}]
         }
     }"#;
     write_settings(&global_dir, global_content);
@@ -48,8 +47,7 @@ fn test_merge_global_and_workspace_via_load_from() {
     // 写工作区配置
     let ws_content = r#"{
         "config": {
-            "active_alias": "haiku",
-            "diff_enabled": false
+            "active_alias": "haiku"
         }
     }"#;
     write_settings(&ws_dir, ws_content);
@@ -65,8 +63,6 @@ fn test_merge_global_and_workspace_via_load_from() {
 
     // 验证工作区字段覆盖
     assert_eq!(global.config.active_alias, "haiku");
-    // diff_enabled 是 bool，直接覆盖
-    assert!(!global.config.diff_enabled);
     // 全局字段保留
     assert_eq!(global.config.active_provider_id, "openai-1");
     assert_eq!(global.config.providers.len(), 1);

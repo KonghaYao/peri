@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::kit::atoms::PERI_CONFIG_HANDLE;
+use crate::kit::atoms::TUI_CONFIG_HANDLE;
 use crate::kit::focus_router;
 use crate::kit::text_selection::TextSelection;
 use ratatui_kit::components::ScrollViewState;
@@ -34,14 +34,14 @@ fn fps_to_ms(fps: u32) -> u64 {
     }
 }
 
-/// 优先级：Config.scroll_fps > PERI_SCROLL_THROTTLE_MS 环境变量 > 默认 50ms（20fps）。
+/// 优先级：TuiConfig.scroll_fps > PERI_SCROLL_THROTTLE_MS 环境变量 > 默认 50ms（20fps）。
 /// 下限 1ms 防止零值导致无节流。
-/// Config 每次读取（try_read 代价 ~5ns，无争用时），因为用户可能运行时切换。
+/// TuiConfig 每次读取（try_read 代价 ~5ns，无争用时），因为用户可能运行时切换。
 fn scroll_frame_ms() -> u64 {
-    // 优先读 Config
-    if let Some(handle) = PERI_CONFIG_HANDLE.get()
-        && let Some(cfg) = handle.try_read()
-        && let Some(fps) = cfg.config.scroll_fps
+    // 优先读 TuiConfig
+    if let Some(handle) = TUI_CONFIG_HANDLE.get()
+        && let Some(tui) = handle.try_read()
+        && let Some(fps) = tui.scroll_fps
     {
         return fps_to_ms(fps).max(1);
     }

@@ -48,7 +48,7 @@ fn v2_event_to_acp_event_data(event: V2Event) -> Option<AcpEventData> {
                 input,
                 ..
             } => {
-                let input_summary = peri_acp::event::truncate::summarize_input(&name, &input);
+                let input_summary = crate::truncate::summarize_input(&name, &input);
                 Some(AcpEventData::ToolStarted(
                     crate::kit::stream_data::TuiToolStarted {
                         tool_id: tool_call_id,

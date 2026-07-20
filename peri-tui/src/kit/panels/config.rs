@@ -6,9 +6,11 @@
 //! 设计如此，每次启动默认从 YOLO_MODE 环境变量派生）。
 
 use crate::app::panel_types::PanelKind;
+use crate::config::TuiConfig;
 use crate::i18n;
 use crate::kit::atoms::{
     LANG_VERSION, NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE,
+    TUI_CONFIG_HANDLE,
 };
 use crate::kit::list_nav::{next_selection, previous_selection};
 use fluent_bundle::FluentValue;
@@ -237,14 +239,19 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 /// 读取 toggle 字段当前值（true=ON / false=OFF）。
 fn read_toggle(row: usize) -> bool {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return false;
-    };
-    let cfg = handle.read();
     match row {
-        ROW_SHOW_DIFF => cfg.config.diff_enabled,
-        ROW_CACHE_WARN => cfg.config.show_cache_warning,
-        ROW_1M_CONTEXT => cfg.config.context_1m.unwrap_or(false),
+        ROW_SHOW_DIFF => TUI_CONFIG_HANDLE
+            .get()
+            .map(|h| h.read().diff_enabled)
+            .unwrap_or(false),
+        ROW_CACHE_WARN => PERI_CONFIG_HANDLE
+            .get()
+            .map(|h| h.read().config.show_cache_warning)
+            .unwrap_or(false),
+        ROW_1M_CONTEXT => PERI_CONFIG_HANDLE
+            .get()
+            .map(|h| h.read().config.context_1m.unwrap_or(false))
+            .unwrap_or(false),
         _ => false,
     }
 }
@@ -253,9 +260,9 @@ fn read_toggle(row: usize) -> bool {
 fn read_cycle_idx(row: usize, options: &[&str]) -> usize {
     match row {
         ROW_STREAMING => {
-            let cur = PERI_CONFIG_HANDLE
+            let cur = TUI_CONFIG_HANDLE
                 .get()
-                .map(|h| h.read().config.streaming_mode.clone())
+                .map(|h| h.read().streaming_mode.clone())
                 .unwrap_or_default()
                 .unwrap_or_else(|| "streaming".to_string());
             options.iter().position(|o| *o == cur.as_str()).unwrap_or(0)
@@ -287,11 +294,10 @@ fn read_cycle_idx(row: usize, options: &[&str]) -> usize {
             options.iter().position(|o| *o == cur).unwrap_or(0)
         }
         ROW_SCROLL_FPS => {
-            let cur = PERI_CONFIG_HANDLE
+            let cur = TUI_CONFIG_HANDLE
                 .get()
                 .map(|h| {
                     h.read()
-                        .config
                         .scroll_fps
                         .map(|fps| fps.to_string())
                         .unwrap_or_else(|| "20".to_string())
@@ -313,7 +319,45 @@ fn activate_row(row: usize, forward: bool) {
         RowType::Toggle => {
             let mut cfg = handle.write();
             match row {
-                ROW_SHOW_DIFF => cfg.config.diff_enabled = !cfg.config.diff_enabled,
+                ROW_SHOW_DIFF => {
+                    // TUI field: write to TUI_CONFIG_HANDLE + sync to PeriConfig.extra
+                    drop(cfg);
+                    let tui_handle = TUI_CONFIG_HANDLE.get();
+                    let tui_handle = match tui_handle {
+                        Some(h) => h,
+                        None => return,
+                    };
+                    let mut tui = tui_handle.write();
+                    tui.diff_enabled = !tui.diff_enabled;
+                    let tui_snapshot = tui.clone();
+                    drop(tui);
+                    // sync to PeriConfig.extra and save
+                    let mut peri = handle.write();
+                    tui_snapshot.sync_to_extra(&mut peri.config.extra);
+                    let cfg_snapshot = peri.clone();
+                    drop(peri);
+                    match crate::config::save(&cfg_snapshot) {
+                        Ok(()) => {
+                            *NOTIFICATION.state().write() = Some(Notification {
+                                message: i18n::tr("config-saved").to_string(),
+                                until: Instant::now() + Duration::from_secs(1),
+                            });
+                        }
+                        Err(e) => {
+                            *NOTIFICATION.state().write() = Some(Notification {
+                                message: i18n::tr_args(
+                                    "config-save-failed",
+                                    &[(
+                                        "error".to_string(),
+                                        FluentValue::from(e.to_string().as_str()),
+                                    )],
+                                ),
+                                until: Instant::now() + Duration::from_secs(2),
+                            });
+                        }
+                    }
+                    return;
+                }
                 ROW_CACHE_WARN => cfg.config.show_cache_warning = !cfg.config.show_cache_warning,
                 ROW_1M_CONTEXT => {
                     let cur = cfg.config.context_1m.unwrap_or(false);
@@ -355,10 +399,19 @@ fn activate_row(row: usize, forward: bool) {
             let new_val = options[next];
             match row {
                 ROW_STREAMING => {
-                    let mut cfg = handle.write();
-                    cfg.config.streaming_mode = Some(new_val.to_string());
-                    let snap = cfg.clone();
-                    drop(cfg);
+                    // TUI field: write to TUI_CONFIG_HANDLE + sync to PeriConfig.extra
+                    let tui_handle = match TUI_CONFIG_HANDLE.get() {
+                        Some(h) => h,
+                        None => return,
+                    };
+                    let mut tui = tui_handle.write();
+                    tui.streaming_mode = Some(new_val.to_string());
+                    let tui_snapshot = tui.clone();
+                    drop(tui);
+                    let mut peri = handle.write();
+                    tui_snapshot.sync_to_extra(&mut peri.config.extra);
+                    let snap = peri.clone();
+                    drop(peri);
                     match crate::config::save(&snap) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
@@ -379,6 +432,7 @@ fn activate_row(row: usize, forward: bool) {
                             });
                         }
                     }
+                    return;
                 }
                 ROW_LANGUAGE => {
                     let mut cfg = handle.write();
@@ -443,10 +497,19 @@ fn activate_row(row: usize, forward: bool) {
                     // permission_mode 不持久化到 settings.json（运行时状态）
                 }
                 ROW_SCROLL_FPS => {
-                    let mut cfg = handle.write();
-                    cfg.config.scroll_fps = Some(new_val.parse::<u32>().unwrap_or(20));
-                    let snap = cfg.clone();
-                    drop(cfg);
+                    // TUI field: write to TUI_CONFIG_HANDLE + sync to PeriConfig.extra
+                    let tui_handle = match TUI_CONFIG_HANDLE.get() {
+                        Some(h) => h,
+                        None => return,
+                    };
+                    let mut tui = tui_handle.write();
+                    tui.scroll_fps = Some(new_val.parse::<u32>().unwrap_or(20));
+                    let tui_snapshot = tui.clone();
+                    drop(tui);
+                    let mut peri = handle.write();
+                    tui_snapshot.sync_to_extra(&mut peri.config.extra);
+                    let snap = peri.clone();
+                    drop(peri);
                     match crate::config::save(&snap) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
@@ -467,6 +530,7 @@ fn activate_row(row: usize, forward: bool) {
                             });
                         }
                     }
+                    return;
                 }
                 _ => {}
             }
@@ -505,14 +569,10 @@ fn permission_mode_label(m: PermissionMode) -> &'static str {
 }
 
 /// 纯函数：toggle 行的值反转。返回反转后的新值（无效 row 返回 None）。
-/// 提取为独立函数便于单测——避免依赖全局 atom。
+/// 仅处理 PeriConfig 上的非 TUI 字段。
 #[allow(dead_code)]
 fn apply_toggle_row(cfg: &mut crate::config::PeriConfig, row: usize) -> Option<bool> {
     let new_val = match row {
-        ROW_SHOW_DIFF => {
-            cfg.config.diff_enabled = !cfg.config.diff_enabled;
-            cfg.config.diff_enabled
-        }
         ROW_CACHE_WARN => {
             cfg.config.show_cache_warning = !cfg.config.show_cache_warning;
             cfg.config.show_cache_warning
@@ -527,7 +587,8 @@ fn apply_toggle_row(cfg: &mut crate::config::PeriConfig, row: usize) -> Option<b
     Some(new_val)
 }
 
-/// 纯函数：cycle 行前进/后退并写入新值。返回新选项在 options 中的索引。
+/// 纯函数：cycle 行前进/后退并写入 PeriConfig 新值。返回新选项在 options 中的索引。
+/// 仅处理 PeriConfig 上的非 TUI 字段。
 #[allow(dead_code)]
 fn apply_cycle_row(
     cfg: &mut crate::config::PeriConfig,
@@ -535,17 +596,12 @@ fn apply_cycle_row(
     forward: bool,
 ) -> Option<usize> {
     let options: &[&str] = match row {
-        ROW_STREAMING => STREAMING_OPTS,
         ROW_LANGUAGE => LANGUAGE_OPTS,
         ROW_ACTIVE_ALIAS => ALIAS_OPTS,
         ROW_PERMISSION_MODE => PERMISSION_OPTS,
         _ => return None,
     };
     let cur_idx = match row {
-        ROW_STREAMING => STREAMING_OPTS
-            .iter()
-            .position(|s| cfg.config.streaming_mode.as_deref() == Some(*s))
-            .unwrap_or(0),
         ROW_LANGUAGE => LANGUAGE_OPTS
             .iter()
             .position(|s| cfg.config.language.as_deref() == Some(*s))
@@ -564,7 +620,6 @@ fn apply_cycle_row(
     };
     let new_val = options[next];
     match row {
-        ROW_STREAMING => cfg.config.streaming_mode = Some(new_val.to_string()),
         ROW_LANGUAGE => cfg.config.language = Some(new_val.to_string()),
         ROW_ACTIVE_ALIAS => cfg.config.active_alias = new_val.to_string(),
         ROW_PERMISSION_MODE => {} // 由 PERMISSION_MODE_HANDLE 处理
@@ -586,18 +641,17 @@ fn parse_permission_mode(s: &str) -> Option<PermissionMode> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::PeriConfig;
+    use crate::config::{PeriConfig, TuiConfig};
 
     #[test]
     fn test_apply_toggle_row_show_diff_flips() {
-        let mut cfg = PeriConfig::default();
-        assert!(!cfg.config.diff_enabled);
-        let new = apply_toggle_row(&mut cfg, ROW_SHOW_DIFF);
-        assert_eq!(new, Some(true));
-        assert!(cfg.config.diff_enabled);
-        let new = apply_toggle_row(&mut cfg, ROW_SHOW_DIFF);
-        assert_eq!(new, Some(false));
-        assert!(!cfg.config.diff_enabled);
+        let mut cfg = TuiConfig::default();
+        assert!(!cfg.diff_enabled);
+        assert!(!cfg.diff_enabled);
+        cfg.diff_enabled = !cfg.diff_enabled;
+        assert!(cfg.diff_enabled);
+        cfg.diff_enabled = !cfg.diff_enabled;
+        assert!(!cfg.diff_enabled);
     }
 
     #[test]
@@ -633,11 +687,11 @@ mod tests {
 
     #[test]
     fn test_apply_cycle_row_streaming_forward_wraps() {
-        let mut cfg = PeriConfig::default();
-        cfg.config.streaming_mode = Some("none".into()); // idx=2
-        let next = apply_cycle_row(&mut cfg, ROW_STREAMING, true);
+        let mut cfg = TuiConfig::default();
+        cfg.streaming_mode = Some("none".into()); // idx=2
+        let next = apply_cycle_row_tui(&mut cfg, ROW_STREAMING, true);
         assert_eq!(next, Some(0)); // wrap to streaming
-        assert_eq!(cfg.config.streaming_mode.as_deref(), Some("streaming"));
+        assert_eq!(cfg.streaming_mode.as_deref(), Some("streaming"));
     }
 
     #[test]
@@ -682,4 +736,31 @@ mod tests {
         assert!(parse_permission_mode("invalid").is_none());
         assert!(parse_permission_mode("").is_none());
     }
+}
+
+/// 纯函数：cycle 行前进/后退并写入 TuiConfig 新值。返回新选项在 options 中的索引。
+#[allow(dead_code)]
+fn apply_cycle_row_tui(cfg: &mut TuiConfig, row: usize, forward: bool) -> Option<usize> {
+    let options: &[&str] = match row {
+        ROW_STREAMING => STREAMING_OPTS,
+        _ => return None,
+    };
+    let cur_idx = match row {
+        ROW_STREAMING => STREAMING_OPTS
+            .iter()
+            .position(|s| cfg.streaming_mode.as_deref() == Some(*s))
+            .unwrap_or(0),
+        _ => return None,
+    };
+    let next = if forward {
+        (cur_idx + 1) % options.len()
+    } else {
+        (cur_idx + options.len() - 1) % options.len()
+    };
+    let new_val = options[next];
+    match row {
+        ROW_STREAMING => cfg.streaming_mode = Some(new_val.to_string()),
+        _ => return None,
+    }
+    Some(next)
 }
