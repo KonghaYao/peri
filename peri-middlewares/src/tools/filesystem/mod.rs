@@ -46,6 +46,30 @@ pub async fn parse_json_input(input: &str) -> serde_json::Value {
     serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()))
 }
 
+/// 递归扫描时跳过的目录名
+pub(crate) fn should_skip_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "node_modules"
+            | ".git"
+            | "dist"
+            | "build"
+            | ".next"
+            | ".turbo"
+            | "coverage"
+            | ".nyc_output"
+            | "temp"
+            | ".cache"
+            | "vendor"
+            | "venv"
+            | "__pycache__"
+            | "target"
+            | "out"
+            | ".output"
+            | "worktrees"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

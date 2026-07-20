@@ -6,6 +6,7 @@ use serde_json::Value;
 use tracing::debug;
 
 use super::resolve_path;
+use super::should_skip_dir;
 use crate::tools::output_persist::persist_truncated_output;
 
 /// folder_operations tool - 与 TypeScript folder_tool 对齐
@@ -21,30 +22,6 @@ impl FolderOperationsTool {
 
 /// 列表操作最多返回的条目数，防止撑爆 LLM context window
 const MAX_LIST_ENTRIES: usize = 500;
-
-/// 递归扫描时跳过的目录名（与 Glob 的 should_skip_dir 保持一致，两处需同步维护）
-fn should_skip_dir(name: &str) -> bool {
-    matches!(
-        name,
-        "node_modules"
-            | ".git"
-            | "dist"
-            | "build"
-            | ".next"
-            | ".turbo"
-            | "coverage"
-            | ".nyc_output"
-            | "temp"
-            | ".cache"
-            | "vendor"
-            | "venv"
-            | "__pycache__"
-            | "target"
-            | "out"
-            | ".output"
-            | "worktrees"
-    )
-}
 
 const FOLDER_OPERATIONS_DESCRIPTION: &str = r#"Unified folder operations tool supporting create, list, and existence check.
 
