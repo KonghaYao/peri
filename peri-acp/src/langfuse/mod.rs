@@ -3,6 +3,7 @@
 //! Provides session-level and turn-level tracing via Langfuse API.
 //! Trace → Span → Generation hierarchy captures full agent execution.
 
+pub mod bridge;
 pub mod config;
 pub mod fake_session;
 pub mod session;

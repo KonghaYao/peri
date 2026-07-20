@@ -160,7 +160,6 @@ impl AgentExecutor for WorkflowAgentExecutor {
         }
 
         // 0b. 创建日志 + Langfuse event handler
-        let tracer_for_handler = langfuse_tracer.clone();
         // 合并 3 次 provider.read() 为一次，避免中间切换导致 display_name 与实际 provider 不一致。
         // 用块作用域确保 RwLockReadGuard 在第一个 .await 前释放。
         // 如 workflow 脚本指定了 model 参数：
@@ -180,6 +179,16 @@ impl AgentExecutor for WorkflowAgentExecutor {
             };
             (display_name, effective)
         };
+
+        // 构造统一 Langfuse 桥接器（替代 forward_langfuse_event）
+        let langfuse_bridge: Option<crate::langfuse::bridge::LangfuseBridge> =
+            langfuse_tracer.as_ref().map(|t| {
+                crate::langfuse::bridge::LangfuseBridge::new(
+                    std::sync::Arc::clone(t),
+                    provider_display_name.clone(),
+                )
+            });
+        let bridge_for_handler = langfuse_bridge.clone();
 
         // Agent usage 累积器：从 LlmCallEnd 事件收集实际 token 用量
         // (output_tokens, model_name)
@@ -260,13 +269,16 @@ impl AgentExecutor for WorkflowAgentExecutor {
                     _ => {}
                 }
 
-                // Langfuse 事件转发
-                if let Some(ref tracer) = tracer_for_handler {
-                    crate::session::executor::forward_langfuse_event(
-                        tracer,
-                        &event,
-                        &provider_display_name,
-                    );
+                // Langfuse 事件转发（统一桥接器）
+                if let Some(ref bridge) = bridge_for_handler {
+                    if let Some(u) =
+                        crate::langfuse::bridge::UnifiedLangfuseEvent::from_executor_event(
+                            event.clone(),
+                        )
+                    {
+                        let mut dummy_stage = None;
+                        bridge.process_event(&u, &mut dummy_stage);
+                    }
                 }
             },
         ));
@@ -458,9 +470,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
             move |exec_ev| {
                 handler_for_forwarder.on_event(exec_ev);
             },
-            None,
-            String::new(),
-            None,
+            None, // bridge: workflow 在外部 handler 中处理 Langfuse
+            None, // v2_tx
         );
 
         // push prompt 到 queue

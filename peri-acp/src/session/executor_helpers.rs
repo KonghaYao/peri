@@ -272,176 +272,6 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
     PumpHandle { pump_done_rx }
 }
 
-/// 转发单个 executor 事件到 Langfuse tracer（pump 内的纯函数，便于测试）。
-///
-/// `pub(crate)` 因被 `crate::agent::workflow_agent` 跨模块复用——
-/// workflow_agent 自身也跑一个独立的 langfuse tracer pump，事件→tracer
-/// 映射与主 executor 完全一致，避免重复实现。
-#[allow(dead_code)]
-pub(crate) fn forward_langfuse_event(
-    tracer: &parking_lot::Mutex<LangfuseTracer>,
-    exec_event: &ExecutorEvent,
-    provider_display_name: &str,
-) {
-    match exec_event {
-        ExecutorEvent::LlmCallStart {
-            step,
-            messages,
-            tools,
-        } => {
-            tracer.lock().on_llm_start(*step, messages, tools);
-        }
-        ExecutorEvent::LlmRequestPayload { step, body } => {
-            tracer
-                .lock()
-                .on_llm_request_payload(*step, std::sync::Arc::clone(body));
-        }
-        ExecutorEvent::LlmCallEnd {
-            step,
-            model,
-            output,
-            usage,
-            stop_reason: _,
-        } => {
-            tracer
-                .lock()
-                .on_llm_end(*step, model, provider_display_name, output, usage.as_ref());
-        }
-        ExecutorEvent::ToolStart {
-            tool_call_id,
-            name,
-            input,
-            ..
-        } => {
-            tracer.lock().on_tool_start(tool_call_id, name, input);
-        }
-        ExecutorEvent::ToolEnd {
-            tool_call_id,
-            output,
-            is_error,
-            ..
-        } => {
-            tracer.lock().on_tool_end(tool_call_id, output, *is_error);
-        }
-        ExecutorEvent::TextChunk { chunk, .. } => {
-            tracer.lock().on_text_chunk(chunk);
-        }
-        ExecutorEvent::LlmRetrying {
-            attempt,
-            max_attempts,
-            delay_ms,
-            error,
-        } => {
-            tracer
-                .lock()
-                .on_llm_retrying(*attempt, *max_attempts, *delay_ms, error);
-        }
-        ExecutorEvent::CompactStarted { .. } => {
-            tracer.lock().on_compact_start();
-        }
-        ExecutorEvent::CompactCompleted {
-            summary,
-            files,
-            skills,
-            micro_cleared,
-            ..
-        } => {
-            tracer.lock().on_compact_end(
-                summary,
-                files.len(),
-                skills.len(),
-                *micro_cleared,
-                false,
-                "",
-            );
-        }
-        ExecutorEvent::CompactError { message } => {
-            tracer.lock().on_compact_end("", 0, 0, 0, true, message);
-        }
-        // ── langfuse v2 路由 ──
-        ExecutorEvent::SessionStarted {
-            session_id,
-            frozen_summary,
-        } => {
-            tracing::debug!(target: "langfuse::forward", %session_id, "SessionStarted → on_session_start");
-            tracer.lock().on_session_start(frozen_summary);
-        }
-        ExecutorEvent::TurnStarted { turn_id, .. } => {
-            tracing::debug!(target: "langfuse::forward", %turn_id, "TurnStarted");
-            // on_turn_start 已在外部调用，此处不重复
-        }
-        ExecutorEvent::TurnEnded {
-            turn_id,
-            status,
-            error_kind,
-            ..
-        } => {
-            tracing::debug!(target: "langfuse::forward", %turn_id, ?status, ?error_kind, "TurnEnded (handled by pump tail)");
-            // on_turn_end is called by the pump tail after the event loop — do NOT call it here
-        }
-        ExecutorEvent::MiddlewareStarted { mw_name, hook, .. } => {
-            tracer.lock().on_middleware_start(mw_name, *hook);
-        }
-        ExecutorEvent::MiddlewareEnded {
-            mw_name,
-            hook,
-            status,
-            error,
-            ..
-        } => {
-            let span_id = {
-                let t = tracer.lock();
-                t.middleware.find_active(mw_name, *hook)
-            };
-            if let Some(span_id) = span_id {
-                let handle = crate::langfuse::tracer::middleware::MiddlewareSpanHandle {
-                    span_id,
-                    name: mw_name.clone(),
-                    hook: *hook,
-                };
-                tracer
-                    .lock()
-                    .on_middleware_end(&handle, *status, error.clone());
-            } else {
-                tracing::warn!(target: "langfuse::forward", %mw_name, ?hook, "MiddlewareEnded without active middleware span, skipping");
-            }
-        }
-        ExecutorEvent::BudgetThresholdHit {
-            threshold,
-            current_pct,
-            tokens_in,
-            tokens_out,
-            ..
-        } => {
-            let threshold_str = format!("{:?}", threshold);
-            tracer.lock().on_budget_threshold_hit(
-                &threshold_str,
-                *current_pct,
-                *tokens_in,
-                *tokens_out,
-            );
-        }
-        ExecutorEvent::WorkflowStarted {
-            workflow_id,
-            plan_summary,
-            ..
-        } => {
-            tracer.lock().on_workflow_start(workflow_id, plan_summary);
-        }
-        ExecutorEvent::WorkflowEnded {
-            workflow_id,
-            agents_spawned,
-            tool_calls,
-            ..
-        } => {
-            tracer
-                .lock()
-                .on_workflow_end(workflow_id, *agents_spawned, *tool_calls);
-        }
-        _ => {}
-    }
-}
-
 // ── Collect Result Request parameter object ─────────────────────────────────
 
 /// 结果收集请求（参数对象）。
@@ -623,6 +453,9 @@ pub(super) async fn build_and_execute_agent_v2(
     // 以保证 biased select 顺序不变量与 workflow_agent 调用点一致。
     {
         let tx_for_v2 = event_tx.clone();
+        let bridge = langfuse_tracer.clone().map(|t| {
+            crate::langfuse::bridge::LangfuseBridge::new(t, ctx.provider.display_name().to_string())
+        });
         crate::event::spawn_eventbus_forwarder(
             v2_out.event_handles,
             move |exec_ev| {
@@ -630,8 +463,7 @@ pub(super) async fn build_and_execute_agent_v2(
                     let _ = tx.send(exec_ev);
                 }
             },
-            langfuse_tracer.clone(),
-            ctx.provider.display_name().to_string(),
+            bridge,
             ctx.v2_event_tx.clone(),
         );
     }

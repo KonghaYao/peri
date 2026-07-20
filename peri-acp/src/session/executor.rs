@@ -19,7 +19,6 @@
 //! 子流程已抽到本模块的子模块 `executor_helpers`：
 //! - [`intercept_immediate_command`]：slash 命令拦截
 //! - [`spawn_event_pump`]：后台事件泵 + Langfuse tracer
-//! - [`forward_langfuse_event`]：单个 executor 事件 → Langfuse tracer
 //! - [`build_and_execute_agent_v2`]：v2 stages 装配与 ReAct 循环驱动（9 个 phase）
 //! - [`collect_result`] / [`close_channel`] / [`wait_for_pump`]：结果收集
 //!
@@ -69,25 +68,18 @@ use crate::{
 };
 
 // 引入子流程 helper：intercept_immediate_command / InterceptRequest /
-// spawn_event_pump / SpawnPumpRequest / PumpHandle / forward_langfuse_event /
+// spawn_event_pump / SpawnPumpRequest / PumpHandle /
 // collect_result / CollectRequest / close_channel / wait_for_pump /
 // build_and_execute_agent_v2 在本模块命名空间可见——executor_test.rs 通过
 // `super::` 访问的 helper 路径保持不变。
 //
-// 这些 helper 标 `pub(super)`（仅本模块可见）；其中 `forward_langfuse_event`
-// 是 `pub(crate)`（被 `crate::agent::workflow_agent` 跨模块复用），通过下方的
-// `pub(crate) use executor_helpers::forward_langfuse_event;` 重导出保持
-// `crate::session::executor::forward_langfuse_event` 路径不变。
+// 这些 helper 标 `pub(super)`（仅本模块可见）。
 #[allow(unused_imports)]
 use executor_helpers::{
     build_and_execute_agent_v2, close_channel, collect_result, intercept_immediate_command,
     spawn_event_pump, wait_for_pump, CollectRequest, InterceptRequest, PumpHandle,
     SpawnPumpRequest,
 };
-// 重导出 langfuse 转发器，保持 `crate::session::executor::forward_langfuse_event`
-// 路径对 `agent::workflow_agent` 可见（跨模块复用——workflow_agent 自跑独立 langfuse
-// tracer pump，事件→tracer 映射与主 executor 完全一致）。
-pub(crate) use executor_helpers::forward_langfuse_event;
 
 /// High-level reason why prompt execution stopped, used to derive ACP `StopReason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
