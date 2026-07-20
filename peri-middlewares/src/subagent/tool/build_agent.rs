@@ -89,29 +89,32 @@ impl super::SubAgentTool {
             &agent_def.frontmatter.disallowed_tools,
         );
 
-        // 注入 WriteSandbox（per-agent 实例，不走父工具继承）
+        // 注入 sandboxed Write（替代 WriteSandbox，per-agent 实例）
+        // 当 allowedWriteDirs 非空且 Write 未被 disallowedTools 排除时，
+        // 移除父工具集中未经限制的 Write，注入受目录限制的沙箱版 Write。
         let allowed_write_dirs = &agent_def.frontmatter.allowed_write_dirs;
         if !allowed_write_dirs.is_empty() {
             let disallowed_list = agent_def.frontmatter.disallowed_tools.to_vec();
-            let is_disallowed = disallowed_list
-                .iter()
-                .any(|n| n.to_lowercase() == "writesandbox");
-            if is_disallowed {
+            let is_write_disallowed = disallowed_list.iter().any(|n| n.to_lowercase() == "write");
+            if is_write_disallowed {
                 tracing::debug!(
                     agent_id = %agent_name,
-                    "WriteSandbox 被 disallowedTools 否决，跳过注入"
+                    "Write 被 disallowedTools 否决，跳过 sandboxed Write 注入"
                 );
             } else {
-                match crate::tools::filesystem::WriteSandboxTool::new(
+                match crate::tools::filesystem::SandboxedWriteTool::new(
                     cwd.to_string(),
                     allowed_write_dirs.clone(),
                 ) {
                     Ok(tool) => {
+                        // 移除父工具集中未经限制的 Write
+                        filtered_tools.retain(|t| t.name() != "Write");
+                        // 注入受目录限制的沙箱版 Write
                         filtered_tools.push(Box::new(tool));
                         tracing::debug!(
                             agent_id = %agent_name,
                             sandbox_dirs = ?allowed_write_dirs,
-                            "WriteSandbox 工具已注入"
+                            "SandboxedWrite 工具已注入（替换 Write）"
                         );
                     }
                     Err(e) => {
@@ -119,7 +122,7 @@ impl super::SubAgentTool {
                             agent_id = %agent_name,
                             error = %e,
                             sandbox_dirs = ?allowed_write_dirs,
-                            "WriteSandbox 构造失败，跳过注入"
+                            "SandboxedWrite 构造失败，跳过注入。Agent 将无 Write 能力"
                         );
                     }
                 }

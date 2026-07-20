@@ -76,7 +76,7 @@ async fn test_write_sandbox_absolute_rejected() {
     assert!(result.is_err(), "绝对路径应被拒绝");
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("绝对"),
+        err.contains("Absolute"),
         "错误消息应说明拒绝原因: {}",
         err
     );
@@ -95,7 +95,7 @@ async fn test_write_sandbox_outside_dir_rejected() {
     assert!(result.is_err(), "沙箱外路径应被拒绝");
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("sandbox") || err.contains("沙箱"),
+        err.contains("outside"),
         "错误消息应提示沙箱限制: {}",
         err
     );

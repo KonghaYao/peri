@@ -5,6 +5,8 @@ pub mod grep;
 pub(crate) mod grep_args;
 pub(crate) mod grep_format;
 pub mod read;
+pub mod sandbox_guard;
+pub mod sandboxed_write;
 pub mod write;
 pub mod write_sandbox;
 
@@ -15,6 +17,8 @@ pub use folder::FolderOperationsTool;
 pub use glob::GlobFilesTool;
 pub use grep::GrepTool;
 pub use read::ReadFileTool;
+pub use sandbox_guard::{validate_sandbox_path, SandboxPathError};
+pub use sandboxed_write::SandboxedWriteTool;
 pub use write::WriteFileTool;
 pub use write_sandbox::WriteSandboxTool;
 

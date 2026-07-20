@@ -52,8 +52,8 @@ fn test_explore_agent_disallows_write_tools() {
     let parsed = parse_agent_file(agent.content).unwrap();
     let disallowed = parsed.disallowed_tools();
     assert!(
-        disallowed.iter().any(|t| t.eq_ignore_ascii_case("Write")),
-        "Explore agent should disallow Write"
+        !disallowed.iter().any(|t| t.eq_ignore_ascii_case("Write")),
+        "Explore agent should NOT disallow Write (sandboxed via allowedWriteDirs)"
     );
     assert!(
         disallowed.iter().any(|t| t.eq_ignore_ascii_case("Edit")),

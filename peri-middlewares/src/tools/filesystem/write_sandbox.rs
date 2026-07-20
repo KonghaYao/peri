@@ -8,6 +8,8 @@ use peri_agent::tools::BaseTool;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+use super::sandbox_guard::validate_sandbox_path;
+
 const WRITE_SANDBOX_DESC_PREFIX: &str = "Write a file into your sandbox directories: ";
 
 const WRITE_SANDBOX_DESC_SUFFIX: &str = r#"
@@ -15,6 +17,10 @@ const WRITE_SANDBOX_DESC_SUFFIX: &str = r#"
  Absolute paths and '..' are rejected."#;
 
 /// 沙箱写工具——只能写入构造时指定的目录白名单。
+#[deprecated(
+    since = "0.1.0",
+    note = "Use SandboxedWriteTool (name='Write') with allowedWriteDirs instead"
+)]
 pub struct WriteSandboxTool {
     /// 工作目录（项目根）
     pub cwd: String,
@@ -74,107 +80,10 @@ impl WriteSandboxTool {
 
     /// 全路径安全校验链。
     ///
+    /// 委托给公共 guard `validate_sandbox_path`。
     /// 返回 canonicalized 目标路径，或错误描述。
     fn validate_path(&self, path: &str) -> Result<PathBuf, String> {
-        // ① 词法拒绝绝对路径
-        if Path::new(path).is_absolute() {
-            return Err(format!(
-                "WriteSandbox: 拒绝绝对路径 '{}'。请使用基于项目根的相对路径。",
-                path
-            ));
-        }
-        // ② 词法拒绝路径穿越（含 ../、..\\ 等变体）
-        let normalized = path.replace('\\', "/");
-        for segment in normalized.split('/') {
-            if segment == ".." {
-                return Err(format!(
-                    "WriteSandbox: 拒绝路径穿越 '{}'（含 '..'）。请使用沙箱目录内的相对路径。",
-                    path
-                ));
-            }
-        }
-
-        let raw = Path::new(&self.cwd).join(path);
-
-        // ③ 寻找最长存在祖先并 canonicalize + 沙箱校验，防止 create_dir_all
-        //    跟随 symlink 在沙箱外创建目录（副作用逃逸）
-        // ④ 然后创建剩余父目录 + canonicalize 目标（防 symlink 逃逸）
-        let canonical_target = if raw.exists() {
-            // 文件已存在：直接 canonicalize 目标本身
-            raw.canonicalize()
-                .map_err(|e| format!("WriteSandbox: canonicalize 失败 '{}': {}", path, e))?
-        } else {
-            // 文件不存在：找到最长存在的祖先路径
-            let ancestor = {
-                let mut p = raw.as_path();
-                loop {
-                    match p.parent() {
-                        Some(parent) if !parent.exists() => p = parent,
-                        Some(parent) => break parent.to_path_buf(),
-                        None => break p.to_path_buf(),
-                    }
-                }
-            };
-            // canonicalize 已有祖先 + 校验沙箱前缀
-            let canon_ancestor = ancestor.canonicalize().map_err(|e| {
-                format!(
-                    "WriteSandbox: 无法 canonicalize 路径 '{}': {}",
-                    ancestor.display(),
-                    e
-                )
-            })?;
-            let is_ancestor_in_sandbox = self
-                .sandbox_roots
-                .iter()
-                .any(|root| canon_ancestor.starts_with(root));
-            if !is_ancestor_in_sandbox {
-                return Err(format!(
-                    "WriteSandbox: 路径 '{}' 的已有祖先不在沙箱目录内",
-                    path
-                ));
-            }
-            // 创建剩余父目录（祖先已校验，新创建的目录在祖先子树内 = 安全）
-            if let Some(parent) = raw.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("WriteSandbox: 创建父目录失败 '{}': {}", path, e))?;
-            }
-            // 再 canonicalize 父目录 + 文件名
-            if let (Some(parent), Some(file_name)) = (raw.parent(), raw.file_name()) {
-                match parent.canonicalize() {
-                    Ok(canon_parent) => canon_parent.join(file_name),
-                    Err(e) => {
-                        return Err(format!(
-                            "WriteSandbox: 无法 canonicalize 父目录 '{}': {}",
-                            parent.display(),
-                            e
-                        ));
-                    }
-                }
-            } else {
-                return Err(format!(
-                    "WriteSandbox: 无法解析路径 '{}'——缺少父目录或文件名",
-                    path
-                ));
-            }
-        };
-
-        // ⑤ 最终以沙箱根为前缀校验
-        let is_in_sandbox = self
-            .sandbox_roots
-            .iter()
-            .any(|root| canonical_target.starts_with(root));
-        if !is_in_sandbox {
-            return Err(format!(
-                "WriteSandbox: 路径 '{}' 不在沙箱目录内。允许的目录: {:?}",
-                path,
-                self.sandbox_roots
-                    .iter()
-                    .map(|r| r.display().to_string())
-                    .collect::<Vec<_>>()
-            ));
-        }
-
-        Ok(canonical_target)
+        validate_sandbox_path(&self.cwd, path, &self.sandbox_roots).map_err(|e| e.to_string())
     }
 }
 
