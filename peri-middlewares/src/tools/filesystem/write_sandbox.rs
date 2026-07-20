@@ -192,7 +192,7 @@ impl BaseTool for WriteSandboxTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {
+                "file_path": {
                     "type": "string",
                     "description": "The file path relative to the project root (within your sandbox).\
                      Do NOT use absolute paths or '..'. Overwriting is allowed."
@@ -202,7 +202,7 @@ impl BaseTool for WriteSandboxTool {
                     "description": "The full content to write to the file"
                 }
             },
-            "required": ["path", "content"]
+            "required": ["file_path", "content"]
         })
     }
 
@@ -215,9 +215,9 @@ impl BaseTool for WriteSandboxTool {
         input: Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let path = input["path"]
+        let path = input["file_path"]
             .as_str()
-            .ok_or("WriteSandbox: 'path' 参数必填")?;
+            .ok_or("WriteSandbox: 'file_path' 参数必填")?;
         let content = input["content"]
             .as_str()
             .ok_or("WriteSandbox: 'content' 参数必填")?;

@@ -69,7 +69,7 @@ You have access to the `WriteSandbox` tool, which allows you to write files ONLY
 3. You can overwrite previous versions of the same plan to iterate
 
 The WriteSandbox tool accepts:
-- `path`: relative path within your sandbox (e.g. `plan.md` or `subdir/design.md`)
+- `file_path`: relative path within your sandbox (e.g. `plan.md` or `subdir/design.md`)
 - `content`: the full file content
 
 Absolute paths and `..` traversals are automatically rejected.

@@ -16,7 +16,7 @@ async fn test_write_sandbox_normal_create() {
     let tool = make_tool(&dir, vec!["sandbox"]);
     let result = tool
         .invoke(
-            serde_json::json!({"path": "sandbox/hello.md", "content": "# Plan"}),
+            serde_json::json!({"file_path": "sandbox/hello.md", "content": "# Plan"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
@@ -34,7 +34,7 @@ async fn test_write_sandbox_overwrite() {
     std::fs::write(dir.path().join("sandbox/v2.md"), "v1").unwrap();
     // 再覆盖写
     tool.invoke(
-        serde_json::json!({"path": "sandbox/v2.md", "content": "v2"}),
+        serde_json::json!({"file_path": "sandbox/v2.md", "content": "v2"}),
         peri_agent::tools::ToolContext::new(&[], "."),
     )
     .await
@@ -49,7 +49,7 @@ async fn test_write_sandbox_dotdot_rejected() {
     let tool = make_tool(&dir, vec!["sandbox"]);
     let result = tool
         .invoke(
-            serde_json::json!({"path": "sandbox/../outside.txt", "content": "evil"}),
+            serde_json::json!({"file_path": "sandbox/../outside.txt", "content": "evil"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await;
@@ -69,7 +69,7 @@ async fn test_write_sandbox_absolute_rejected() {
     let abs = dir.path().join("outside.txt");
     let result = tool
         .invoke(
-            serde_json::json!({"path": abs.to_str().unwrap(), "content": "evil"}),
+            serde_json::json!({"file_path": abs.to_str().unwrap(), "content": "evil"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await;
@@ -88,7 +88,7 @@ async fn test_write_sandbox_outside_dir_rejected() {
     let tool = make_tool(&dir, vec!["sandbox"]);
     let result = tool
         .invoke(
-            serde_json::json!({"path": "other/outside.txt", "content": "nope"}),
+            serde_json::json!({"file_path": "other/outside.txt", "content": "nope"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await;
@@ -116,7 +116,7 @@ async fn test_write_sandbox_symlink_escape_rejected() {
         .unwrap();
         let result = tool
             .invoke(
-                serde_json::json!({"path": "sandbox/escape_link.txt", "content": "bypass"}),
+                serde_json::json!({"file_path": "sandbox/escape_link.txt", "content": "bypass"}),
                 peri_agent::tools::ToolContext::new(&[], "."),
             )
             .await;
@@ -139,7 +139,7 @@ async fn test_write_sandbox_parent_symlink_escape_rejected() {
         .unwrap();
         let result = tool
             .invoke(
-                serde_json::json!({"path": "sandbox/sub/evil.txt", "content": "bypass"}),
+                serde_json::json!({"file_path": "sandbox/sub/evil.txt", "content": "bypass"}),
                 peri_agent::tools::ToolContext::new(&[], "."),
             )
             .await;
@@ -173,13 +173,13 @@ async fn test_write_sandbox_multi_dir() {
     let dir = tempfile::tempdir().unwrap();
     let tool = make_tool(&dir, vec!["plans", "output"]);
     tool.invoke(
-        serde_json::json!({"path": "plans/design.md", "content": "# Design"}),
+        serde_json::json!({"file_path": "plans/design.md", "content": "# Design"}),
         peri_agent::tools::ToolContext::new(&[], "."),
     )
     .await
     .unwrap();
     tool.invoke(
-        serde_json::json!({"path": "output/result.json", "content": "{\"ok\": true}"}),
+        serde_json::json!({"file_path": "output/result.json", "content": "{\"ok\": true}"}),
         peri_agent::tools::ToolContext::new(&[], "."),
     )
     .await
@@ -213,7 +213,7 @@ fn test_write_sandbox_auto_create_dir() {
     let tool = result.unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(tool.invoke(
-        serde_json::json!({"path": "plans/test.md", "content": "# Auto created"}),
+        serde_json::json!({"file_path": "plans/test.md", "content": "# Auto created"}),
         peri_agent::tools::ToolContext::new(&[], "."),
     ))
     .unwrap();
