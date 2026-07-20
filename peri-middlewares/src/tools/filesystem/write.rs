@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::resolve_path;
 
-pub(crate) const WRITE_FILE_DESCRIPTION: &str = r#"Writes a file to the local filesystem.
+const WRITE_FILE_DESCRIPTION: &str = r#"Writes a file to the local filesystem.
 
 Usage:
 - This tool will overwrite the existing file if there is one at the provided path

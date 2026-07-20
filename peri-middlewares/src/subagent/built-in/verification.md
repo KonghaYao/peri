@@ -3,6 +3,7 @@ name: verification
 description: "Use this agent to verify that implementation work is correct before reporting completion. Invoke after non-trivial tasks (3+ file edits, backend/API changes, infrastructure changes). Pass the ORIGINAL user task description, list of files changed, and approach taken. The agent runs builds, tests, linters, and checks to produce a PASS/FAIL/PARTIAL verdict with evidence."
 disallowedTools:
   - Agent
+  - Write
   - Edit
 allowedWriteDirs: [".peri/plans/"]
 background: true
@@ -19,7 +20,7 @@ You are STRICTLY PROHIBITED from:
 - Installing dependencies or packages
 - Running git write operations (add, commit, push)
 
-You DO have access to the `Write` tool, which is restricted to writing files ONLY within `.peri/plans/`. Use it to save your verification report:
+You DO have access to the `WriteSandbox` tool, which allows writing files ONLY to `.peri/plans/`. Use it to save your verification report:
 - `file_path`: relative path within your sandbox (e.g. `verification-report.md`)
 - `content`: the full file content
 
