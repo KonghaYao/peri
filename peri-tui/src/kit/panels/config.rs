@@ -432,7 +432,6 @@ fn activate_row(row: usize, forward: bool) {
                             });
                         }
                     }
-                    return;
                 }
                 ROW_LANGUAGE => {
                     let mut cfg = handle.write();
@@ -530,7 +529,6 @@ fn activate_row(row: usize, forward: bool) {
                             });
                         }
                     }
-                    return;
                 }
                 _ => {}
             }
