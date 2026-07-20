@@ -121,7 +121,8 @@ Each fix that reveals a non-obvious constraint gets written back into `CLAUDE.md
 - [Superpowers](https://github.com/obra/superpowers) & [Matt Pocock's Skills](https://github.com/mattpocock/skills) — the skill suites that drive Peri's AI engineering workflow
 - [ACP](https://agentclientprotocol.com) — open protocol for agent-IDE communication
 - [rmcp](https://github.com/anthropics/rmcp) — Rust MCP client library
-- [Ratatui](https://ratatui.rs) & [Tokio](https://tokio.rs)
+- [Ratatui](https://ratatui.rs) — terminal rendering backend; [ratatui-kit](https://github.com/KonghaYao/ratatui-kit) — React-style component framework powering Peri's entire TUI (components, hooks, state atoms, routing, the `element!` macro)
+- [Tokio](https://tokio.rs)
 - [Langfuse](https://langfuse.com) — LLM observability
 - [Zed](https://zed.dev) — first ACP-compatible IDE
 
