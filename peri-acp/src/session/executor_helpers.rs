@@ -509,6 +509,7 @@ pub(super) async fn wait_for_pump(pump_done_rx: oneshot::Receiver<()>, session_i
 /// workflow 消费者 spawn、goal_controller）。所有副作用与 v1 一致。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn build_and_execute_agent_v2(
+    ctx: &super::SessionContext,
     cfg: AcpAgentConfig,
     cached_llm: Option<&CachedLlmInstances>,
     pool: &Arc<parking_lot::Mutex<crate::session::agent_pool::AgentPool>>,
@@ -538,6 +539,7 @@ pub(super) async fn build_and_execute_agent_v2(
 
     // Phase 1: build StageContext（内部消费 AgentComponents；传入会话级共享 v2_queue）
     let (v2_out, new_cache) = crate::agent::builder::build_stage_context(
+        ctx,
         cfg,
         cached_llm,
         pool,

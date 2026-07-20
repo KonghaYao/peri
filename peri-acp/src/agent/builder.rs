@@ -86,6 +86,7 @@ pub(crate) struct ThreadPersistence {
 ///
 /// **结构稳定性**：中间件添加顺序是 `[TRAP]` 守护契约，禁止重排。
 /// 本结构仅做字段分组，`build_agent` 函数体保持单体。
+#[allow(dead_code)] // 过渡：字段逐步迁移到 SessionContext，完成后删除
 pub(crate) struct AcpAgentConfig {
     pub provider: LlmProvider,
     pub cwd: String,
@@ -174,57 +175,61 @@ pub struct AgentComponents {
 /// `pool` 提供 SubAgent LLM 缓存，跨 SubAgent 调用复用 `Arc<dyn BaseModel>`
 /// （含共享的 `reqwest::Client`）。首次同模型 SubAgent 调用时创建新实例并插入缓存，
 /// 后续调用直接命中缓存，避免每 SubAgent 分配 ~1-2 MB 的 HTTP client。
+#[allow(clippy::too_many_arguments)] // 过渡：AAC 字段已拆分为独立参数
 pub(crate) fn build_agent(
-    cfg: AcpAgentConfig,
+    ctx: &crate::session::executor::SessionContext,
+    system_prompt: String,
+    frozen: FrozenData,
+    event_handler: Arc<dyn AgentEventHandler>,
+    agent_overrides: Option<peri_middlewares::agent_define::AgentOverrides>,
+    preload_skills: Vec<String>,
+    child_handler_factory: Option<ChildHandlerFactory>,
+    auxiliary_model: Option<Arc<dyn BaseModel>>,
+    thread_persistence: ThreadPersistence,
+    goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>>,
+    background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
+    on_bg_complete: Option<
+        Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>,
+    >,
     cached_llm: Option<&CachedLlmInstances>,
-    pool: &Arc<parking_lot::Mutex<AgentPool>>,
 ) -> (AcpAgentOutput, Option<CachedLlmInstances>) {
-    // destructure background_registry from config at the top
-    let AcpAgentConfig {
-        provider,
-        cwd,
-        system_prompt,
-        frozen:
-            FrozenData {
-                claude_md: frozen_claude_md,
-                claude_local_md: frozen_claude_local_md,
-                skill_summary: frozen_skill_summary,
-                date: frozen_date,
-            },
-        event_handler,
-        cancel,
-        permission_mode,
-        peri_config,
-        cron_scheduler,
-        agent_overrides,
-        preload_skills,
-        session_id,
-        broker: permission_broker,
-        plugin_skill_roots,
-        plugin_agent_dirs,
-        plugin_loaded,
-        hook_groups,
-        session_start_source,
-        mcp_pool,
-        channel_state,
-        tool_search_index,
-        shared_tools,
-        child_handler_factory,
-        lsp_servers,
-        auxiliary_model: mw_auxiliary_model,
-        thread_persistence:
-            ThreadPersistence {
-                store: thread_store,
-                parent_thread_id,
-                register_runtime,
-                deregister_runtime,
-            },
-        goal_controller,
-        workflow_executor,
-        workflow_middleware,
-        background_registry,
-        on_bg_complete,
-    } = cfg;
+    let FrozenData {
+        claude_md: frozen_claude_md,
+        claude_local_md: frozen_claude_local_md,
+        skill_summary: frozen_skill_summary,
+        date: frozen_date,
+    } = frozen;
+
+    let ThreadPersistence {
+        store: thread_store,
+        parent_thread_id,
+        register_runtime,
+        deregister_runtime,
+    } = thread_persistence;
+
+    // 从 SessionContext 提取共享字段
+    let provider = ctx.provider.clone();
+    let cwd = ctx.cwd.clone();
+    let cancel = ctx.cancel.clone();
+    let permission_mode = ctx.permission_mode.clone();
+    let peri_config = ctx.peri_config.clone();
+    let cron_scheduler = ctx.cron_scheduler.clone();
+    let session_id = Some(ctx.session_id.clone());
+    let permission_broker = ctx.broker.clone();
+    let plugin_skill_roots = ctx.plugin_skill_roots.clone();
+    let plugin_agent_dirs = ctx.plugin_agent_dirs.clone();
+    let plugin_loaded = ctx.plugin_loaded.clone();
+    let hook_groups = ctx.hook_groups.clone();
+    let session_start_source = ctx.session_start_source.clone();
+    let mcp_pool = ctx.mcp_pool.clone();
+    let channel_state = ctx.channel_state.clone();
+    let tool_search_index = ctx.tool_search_index.clone();
+    let shared_tools = ctx.shared_tools.clone();
+    let lsp_servers = ctx.lsp_servers.clone();
+    let workflow_executor = ctx.workflow_executor.clone();
+    let workflow_middleware = ctx.workflow_middleware.clone();
+    let mw_auxiliary_model = auxiliary_model;
+    let pool = &ctx.pool;
 
     // Capture system_prompt before it may be overridden below (for SubAgent fork reuse).
     let system_prompt_for_sub = system_prompt.clone();
@@ -764,9 +769,10 @@ pub(crate) struct V2AgentOutput {
 /// 传入引用只是为了避免在签名里 move。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_stage_context(
+    ctx: &crate::session::executor::SessionContext,
     cfg: AcpAgentConfig,
     cached_llm: Option<&CachedLlmInstances>,
-    pool: &Arc<parking_lot::Mutex<AgentPool>>,
+    _pool: &Arc<parking_lot::Mutex<AgentPool>>,
     shared_queue: &peri_agent::session::MessageQueue,
     idle_inbox: Option<Arc<SessionInbox>>,
     idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
@@ -774,9 +780,9 @@ pub(crate) fn build_stage_context(
     thread_id: Option<String>,
 ) -> (V2AgentOutput, Option<CachedLlmInstances>) {
     // 提取 LLM 用字段（在 cfg 被 build_agent 消费前）
-    let cwd = cfg.cwd.clone();
-    let session_id = cfg.session_id.clone();
-    let cancel_token = cfg.cancel.clone();
+    let cwd = ctx.cwd.clone();
+    let session_id = ctx.session_id.clone();
+    let cancel_token = ctx.cancel.clone();
     // compact_llm：优先取 cfg.auxiliary_model，否则回落到 cached auxiliary_model。
     let compact_llm_for_v2 = cfg
         .auxiliary_model
@@ -787,13 +793,40 @@ pub(crate) fn build_stage_context(
     let hook_groups_flat: Vec<peri_middlewares::hooks::types::RegisteredHook> =
         cfg.hook_groups.iter().flatten().cloned().collect();
     let hook_model = cfg.provider.model_name().to_string();
-    let hook_session_id = session_id.clone().unwrap_or_default();
+    let hook_session_id = session_id.clone();
 
     // 提取 cron_scheduler（在 cfg 被 build_agent 消费前）
     let cron_scheduler = cfg.cron_scheduler.clone();
 
+    // 从 cfg 提取非 SessionContext 字段，用于 build_agent
+    let system_prompt = cfg.system_prompt;
+    let frozen = cfg.frozen;
+    let event_handler = cfg.event_handler;
+    let agent_overrides = cfg.agent_overrides;
+    let preload_skills = cfg.preload_skills;
+    let child_handler_factory = cfg.child_handler_factory;
+    let auxiliary_model = cfg.auxiliary_model;
+    let thread_persistence = cfg.thread_persistence;
+    let goal_controller = cfg.goal_controller;
+    let background_registry = cfg.background_registry;
+    let on_bg_complete = cfg.on_bg_complete;
+
     // 调用 build_agent 构造完整 agent（含中间件链 + LLM）
-    let (agent_output, new_cached) = build_agent(cfg, cached_llm, pool);
+    let (agent_output, new_cached) = build_agent(
+        ctx,
+        system_prompt,
+        frozen,
+        event_handler,
+        agent_overrides,
+        preload_skills,
+        child_handler_factory,
+        auxiliary_model,
+        thread_persistence,
+        goal_controller,
+        background_registry,
+        on_bg_complete,
+        cached_llm,
+    );
 
     // 直接消费 AgentComponents
     let AgentComponents {
@@ -902,9 +935,7 @@ pub(crate) fn build_stage_context(
     // session_context 键值
     let session_context = Arc::new(RwLock::new({
         let mut map = std::collections::HashMap::new();
-        if let Some(sid) = &session_id {
-            map.insert("session_id".to_string(), sid.clone());
-        }
+        map.insert("session_id".to_string(), session_id.clone());
         map
     }));
 

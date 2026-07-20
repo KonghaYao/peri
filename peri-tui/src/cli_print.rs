@@ -206,43 +206,43 @@ pub async fn run_print(
     );
 
     // run_session_loop 是 async 函数（返回 PromptResult）
-    let result = peri_acp::session::executor::run_session_loop(
-        peri_acp::session::executor::PromptExecutionContext {
-            provider,
-            peri_config: peri_config_arc,
-            cwd,
-            session_id: String::new(), // print 模式不需要
-            cancel,
-            event_sink,
-            broker,
-            permission_mode: shared_permission,
-            content: peri_agent::messages::MessageContent::text(prompt_text),
-            frozen: Some(frozen_data),
-            history: vec![],
-            incoming_recalls: vec![],
-            session_start_source: Some("startup".to_string()),
-            bg_results: vec![], // print 模式无后台任务
-            plugin_skill_roots,
-            plugin_agent_dirs,
-            plugin_loaded,
-            hook_groups,
-            cron_scheduler: Some(cron_scheduler),
-            mcp_pool,
-            channel_state: None,
-            tool_search_index,
-            shared_tools,
-            lsp_servers: plugin_lsp_servers,
-            langfuse_session: None, // print 模式暂不启用
-            pool,
-            thread_store: None,    // print 模式不需要持久化
-            thread_id: None,       // parent_thread_id
-            session_manager: None, // print 模式不需要 cancel 级联
-            workflow_executor: None,
-            workflow_middleware: None,
-            allow_await_wake: false,
-        },
-    )
-    .await;
+    let ctx = peri_acp::session::executor::SessionContext {
+        provider,
+        peri_config: peri_config_arc,
+        cwd,
+        session_id: String::new(), // print 模式不需要
+        cancel,
+        broker,
+        permission_mode: shared_permission,
+        plugin_skill_roots,
+        plugin_agent_dirs,
+        plugin_loaded,
+        hook_groups,
+        cron_scheduler: Some(cron_scheduler),
+        mcp_pool,
+        channel_state: None,
+        tool_search_index,
+        shared_tools,
+        lsp_servers: plugin_lsp_servers,
+        pool,
+        thread_store: None,    // print 模式不需要持久化
+        thread_id: None,       // parent_thread_id
+        session_manager: None, // print 模式不需要 cancel 级联
+        workflow_executor: None,
+        workflow_middleware: None,
+        session_start_source: Some("startup".to_string()),
+        allow_await_wake: false,
+    };
+    let turn = peri_acp::session::executor::TurnInput {
+        event_sink,
+        content: peri_agent::messages::MessageContent::text(prompt_text),
+        frozen: Some(frozen_data),
+        history: vec![],
+        incoming_recalls: vec![],
+        bg_results: vec![],     // print 模式无后台任务
+        langfuse_session: None, // print 模式暂不启用
+    };
+    let result = peri_acp::session::executor::run_session_loop(ctx, turn).await;
     let c = collector.lock().unwrap();
     c.output_final(result.ok);
 

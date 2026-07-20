@@ -110,21 +110,14 @@ pub(crate) async fn run(params: PromptExecParams) {
     // v2 路径下 MessageQueue 由 run_session_loop 从 session_manager.v2_message_queue
     // 解析（executor.rs:368），不再作为 PromptExecutionContext 字段传入。
 
-    let result = executor::run_session_loop(executor::PromptExecutionContext {
+    let cx = executor::SessionContext {
         provider: provider_snapshot,
         peri_config: peri_config_snapshot,
         cwd: agent_cwd,
         session_id: sid.clone(),
         cancel,
-        event_sink,
         broker,
         permission_mode: ctx.permission_mode.clone(),
-        content,
-        frozen,
-        history,
-        incoming_recalls: vec![],
-        session_start_source,
-        bg_results: vec![], // stdio 无后台任务
         plugin_skill_roots: ctx.plugin_skill_roots.clone(),
         plugin_agent_dirs: ctx.plugin_agent_dirs.clone(),
         plugin_loaded: ctx.plugin_loaded.clone(),
@@ -135,16 +128,25 @@ pub(crate) async fn run(params: PromptExecParams) {
         tool_search_index: ctx.tool_search_index.clone(),
         shared_tools: ctx.shared_tools.clone(),
         lsp_servers: ctx.plugin_lsp_servers.clone(),
-        langfuse_session: ctx.langfuse_session.clone(),
         pool: pool.clone(),
         thread_store: Some(Arc::clone(&ctx.thread_store)),
         thread_id: Some(thread_id.clone()),
         session_manager: Some(ctx.session_manager.clone()),
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
+        session_start_source,
         allow_await_wake: false,
-    })
-    .await;
+    };
+    let turn = executor::TurnInput {
+        event_sink,
+        content,
+        frozen,
+        history,
+        incoming_recalls: vec![],
+        bg_results: vec![], // stdio 无后台任务
+        langfuse_session: ctx.langfuse_session.clone(),
+    };
+    let result = executor::run_session_loop(cx, turn).await;
 
     // Restore AgentPool back into session
     if let Ok(mutex) = Arc::try_unwrap(pool) {

@@ -56,7 +56,7 @@ use peri_agent::{
 use tracing::debug;
 
 use crate::{
-    agent::builder::{self, AcpAgentConfig},
+    agent::builder::{self},
     langfuse::{LangfuseSession, LangfuseTracer},
     provider::LlmProvider,
     session::{
@@ -229,110 +229,57 @@ impl FrozenSessionData {
     }
 }
 
-/// Parameter Object for [`run_session_loop`].
+/// Session-scoped context shared across all executor pipeline functions.
 ///
-/// Groups 30 positional parameters into a single struct to eliminate
-/// `#[allow(clippy::too_many_arguments)]` and reduce call-site placeholder
-/// noise. Construction uses named-field syntax; default values are explicit
-/// at each call site (no builder hiding required state).
-///
-/// # Fields by concern
-/// - **Session-level identity & transport**：`provider` / `peri_config` / `cwd`
-///   / `session_id` / `cancel` / `event_sink` / `broker` / `permission_mode`
-/// - **Per-turn content**：`content` / `frozen` / `history` / `incoming_recalls`
-///   / `session_start_source` / `bg_results`
-/// - **Middleware chain resources**：`plugin_skill_roots` / `plugin_agent_dirs`
-///   / `hook_groups` / `cron_scheduler` / `mcp_pool` / `channel_state`
-///   / `tool_search_index` / `shared_tools` / `lsp_servers` / `langfuse_session`
-/// - **Session-scoped caches & persistence**：`pool` / `thread_store` / `thread_id`
-///   / `session_manager`
-pub struct PromptExecutionContext {
-    // ── Session-level identity & transport ───────────────────────────────────
-    /// 当前激活的 LLM provider（snapshot，每轮从 `Arc<RwLock<>>` 克隆）。
+/// Replaces both [`PromptExecutionContext`] and [`crate::agent::builder::AcpAgentConfig`].
+/// Fields grouped by subsystem for clarity.
+#[allow(dead_code)]
+pub struct SessionContext {
+    // ── config: provider & global configuration ────────────────────────────
     pub provider: LlmProvider,
-    /// 全局 peri 配置（snapshot，每轮从 `Arc<RwLock<>>` 克隆）。
     pub peri_config: Arc<crate::provider::PeriConfig>,
-    /// 会话工作目录。
     pub cwd: String,
-    /// 会话 ID（用于事件路由、SessionManager 查询、Langfuse trace）。
+
+    // ── session: session identity & transport ──────────────────────────────
     pub session_id: String,
-    /// 取消令牌（由 SessionManager 管理，clone 后传入 executor）。
     pub cancel: AgentCancellationToken,
-    /// 事件出口（TUI 用 TransportEventSink，stdio 用 StdioEventSink）。
-    pub event_sink: Arc<dyn EventSink>,
-    /// 用户交互 broker（HITL/AskUser 通道）。
     pub broker: Arc<dyn UserInteractionBroker>,
-    /// 权限模式共享句柄。
     pub permission_mode: Arc<peri_middlewares::prelude::SharedPermissionMode>,
 
-    // ── Per-turn content ──────────────────────────────────────────────────────
-    /// 用户本轮输入。
-    pub content: MessageContent,
-    /// 会话级 frozen 数据（system prompt 稳定性锚点）。
-    pub frozen: Option<FrozenSessionData>,
-    /// 现有历史消息（执行前）。
-    pub history: Vec<BaseMessage>,
-    /// 上一轮 recall 注入项。
-    pub incoming_recalls: Vec<String>,
-    /// SessionStart matcher：startup / resume / clear / compact。
-    /// None 表示不触发 SessionStart。
-    pub session_start_source: Option<String>,
-    /// 后台任务结果（注入合成的 AgentResult tool_use/tool_result）。
-    pub bg_results: Vec<peri_agent::agent::events::BackgroundTaskResult>,
+    // ── infra: session-level infrastructure ────────────────────────────────
+    pub session_manager: Option<SessionManager>,
+    pub pool: Arc<parking_lot::Mutex<AgentPool>>,
+    pub thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
+    pub thread_id: Option<String>,
 
-    // ── Middleware chain resources ────────────────────────────────────────────
-    /// 插件 skill 根列表（携带 source/plugin_name）。
+    // ── middleware: middleware chain resources ─────────────────────────────
     pub plugin_skill_roots: Vec<peri_middlewares::skills::SkillRoot>,
-    /// 插件 agent 目录列表。
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
-    /// 已加载插件列表（传递给 PluginMiddleware 做兼容性校验）。
     pub plugin_loaded: Vec<peri_middlewares::plugin::LoadedPlugin>,
-    /// Hook 组（按全局/项目/本地分层）。
     pub hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>>,
-    /// Cron 调度器（共享，跨轮次复用）。
     pub cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
-    /// MCP client 池。
     pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
-    /// Channel broker 共享状态（AskUser 走 channel 时使用）。
     pub channel_state: Option<Arc<ChannelState>>,
-    /// 工具搜索索引（Deferred Tools 发现）。
     pub tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
-    /// 共享工具表（运行时动态注册的工具）。
     pub shared_tools: Arc<
         parking_lot::RwLock<
             std::collections::BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>,
         >,
     >,
-    /// LSP server 配置。
     pub lsp_servers: Vec<peri_lsp::config::LspServerConfig>,
-    /// Langfuse 会话级句柄（None 表示禁用遥测）。
-    pub langfuse_session: Option<Arc<LangfuseSession>>,
 
-    // ── Session-scoped caches & persistence ───────────────────────────────────
-    /// AgentPool（LLM/Compact model 缓存，session 级）。
-    pub pool: Arc<parking_lot::Mutex<AgentPool>>,
-    /// 持久化存储（None 表示 print 模式不持久化）。
-    pub thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
-    /// 当前 thread ID（持久化 + SubAgent 注册）。
-    pub thread_id: Option<String>,
-    /// SessionManager（用于 cascade cancel 子 agent + register/deregister runtime）。
-    pub session_manager: Option<SessionManager>,
-    /// Workflow agent 执行器（None = 不启用 workflow 功能）
+    // ── workflow: workflow agents ──────────────────────────────────────────
     pub workflow_executor: Option<Arc<dyn peri_workflow::runner::AgentExecutor>>,
-    /// Session 级 WorkflowMiddleware（None = 该会话不启用 workflow 或临时创建）。
-    /// session/new 时创建，存入 SessionState/SessionInfo，每轮复用。
     pub workflow_middleware: Option<Arc<peri_middlewares::workflow::WorkflowMiddleware>>,
 
-    // ── Transport-aware async wake ───────────────────────────────────────────
-    /// 是否允许主 agent idle 时 await_wake 等异步事件续跑。
-    /// TUI（MpscTransport）路径设 true → run_react_loop 在 queue 空时阻塞等异步事件。
-    /// stdio/print 路径设 false → run_react_loop 直接退出，保持 PromptResponse 响应性。
-    /// 这是 c9dbfb18 移除 run_session_loop 末尾 await_wake 后的替代方案：通过 transport
-    /// 分流避免 stdio/IDE 卡死，同时让 TUI 续跑机制恢复。
+    // ── turn: per-turn metadata ────────────────────────────────────────────
+    pub session_start_source: Option<String>,
+
+    // ── transport: transport-aware flags ───────────────────────────────────
     pub allow_await_wake: bool,
 }
 
-/// Per-turn computed configuration derived from `PromptExecutionContext`.
+/// Per-turn computed configuration derived from [`SessionContext`].
 ///
 /// Built once at the top of [`run_session_loop`], passed by reference to
 /// [`build_and_execute_agent`] to avoid recomputing and to keep the agent
@@ -351,6 +298,27 @@ struct TurnConfig<'a> {
     effective_context_window: u32,
 }
 
+/// Per-turn data passed alongside [`SessionContext`] to [`run_session_loop`].
+///
+/// Separated from session-level fields to clarify lifecycle: these values are
+/// specific to a single prompt invocation and are not reused across turns.
+pub struct TurnInput {
+    /// 事件出口（TUI 用 TransportEventSink，stdio 用 StdioEventSink）。
+    pub event_sink: Arc<dyn EventSink>,
+    /// 用户本轮输入。
+    pub content: MessageContent,
+    /// 会话级 frozen 数据（system prompt 稳定性锚点）。
+    pub frozen: Option<FrozenSessionData>,
+    /// 现有历史消息（执行前）。
+    pub history: Vec<BaseMessage>,
+    /// 上一轮 recall 注入项。
+    pub incoming_recalls: Vec<String>,
+    /// 后台任务结果（注入合成的 AgentResult tool_use/tool_result）。
+    pub bg_results: Vec<peri_agent::agent::events::BackgroundTaskResult>,
+    /// Langfuse 会话级句柄（None 表示禁用遥测）。
+    pub langfuse_session: Option<Arc<LangfuseSession>>,
+}
+
 /// Shared agent execution pipeline with auto-compact support.
 ///
 /// This is the orchestrator. The actual work is split across four private
@@ -364,46 +332,19 @@ struct TurnConfig<'a> {
 /// - Session management (storing/retrieving cwd, history, cancel_token)
 /// - Choosing the broker (HITL/AskUser handler)
 /// - Providing the correct `EventSink` implementation
-pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
-    // 解构 ctx：所有字段一次性 move，避免后续部分 move 导致的借用冲突。
-    // 注意：history/content/bg_results 在 move 前先用引用读取（compact_config 等不需要 move）。
-    let PromptExecutionContext {
-        provider,
-        peri_config,
-        cwd,
-        session_id,
-        cancel,
+pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptResult {
+    let TurnInput {
         event_sink,
-        broker,
-        permission_mode,
         content,
         frozen,
         history,
         incoming_recalls,
-        session_start_source,
         bg_results,
-        plugin_skill_roots,
-        plugin_agent_dirs,
-        plugin_loaded,
-        hook_groups,
-        cron_scheduler,
-        mcp_pool,
-        channel_state,
-        tool_search_index,
-        shared_tools,
-        lsp_servers,
         langfuse_session,
-        pool,
-        thread_store,
-        thread_id,
-        session_manager,
-        workflow_executor,
-        workflow_middleware,
-        allow_await_wake,
-    } = ctx;
+    } = turn;
 
     // Compact config — computed early for command interception and agent building.
-    let mut compact_config = peri_config.config.compact.clone().unwrap_or_default();
+    let mut compact_config = ctx.peri_config.config.compact.clone().unwrap_or_default();
     compact_config.apply_env_overrides();
     let disable_compact = std::env::var("DISABLE_COMPACT").is_ok()
         || std::env::var("DISABLE_AUTO_COMPACT").is_ok()
@@ -415,9 +356,10 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     //
     // 在 run_session_loop 开头解析而非 build_and_execute_agent 内部，
     // 是为了让 bg_results / workflow Path B 等会话级注入能在此处统一 push。
-    let v2_message_queue = session_manager
+    let v2_message_queue = ctx
+        .session_manager
         .as_ref()
-        .and_then(|sm| sm.get_session(&session_id))
+        .and_then(|sm| sm.get_session(&ctx.session_id))
         .map(|s| s.v2_message_queue.clone())
         .unwrap_or_else(peri_agent::session::MessageQueue::new);
 
@@ -425,9 +367,10 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     // 用于：(1) executor idle 期间 await_wake 阻塞等待异步事件，
     // (2) AsyncRouter 推送 bg_results/workflow 事件时触发 wake。
     // None 表示不支持 async wake（如 print mode），保持向后兼容。
-    let session_inbox = session_manager
+    let session_inbox = ctx
+        .session_manager
         .as_ref()
-        .and_then(|sm| sm.session_inbox_for(&session_id));
+        .and_then(|sm| sm.session_inbox_for(&ctx.session_id));
 
     // 构建 AsyncRouter（统一异步事件路由到 inbox）。
     // 通过 InboxHandle 推送 Defer 消息并触发 wake Notify，
@@ -468,8 +411,8 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     // Auxiliary model — reuse AgentPool cache if available, otherwise create fresh.
     // 共享于 v2 stages/compact.rs（摘要）与 Goal 工具（完成度验证）。
     let cached_llm = {
-        let pool_guard = pool.lock();
-        if pool_guard.has_valid_cache(&provider) {
+        let pool_guard = ctx.pool.lock();
+        if pool_guard.has_valid_cache(&ctx.provider) {
             pool_guard.get_cached_llm().cloned()
         } else {
             None
@@ -481,12 +424,12 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         cached_llm
             .as_ref()
             .map(|c| c.auxiliary_model.clone())
-            .or_else(|| Some(provider.clone().into_model().into()))
+            .or_else(|| Some(ctx.provider.clone().into_model().into()))
     };
 
     // Context window (前置计算，供 bg event pump 和 compact 使用)
-    let context_window = provider.context_window();
-    let context_1m = peri_config.config.context_1m.unwrap_or(false);
+    let context_window = ctx.provider.context_window();
+    let context_1m = ctx.peri_config.config.context_1m.unwrap_or(false);
     let effective_context_window = if context_1m {
         1_000_000
     } else {
@@ -497,16 +440,17 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     let (bg_event_tx_for_cmd, mut bg_event_rx_for_cmd) =
         tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     // session 级 registry（跨 prompt 存活，由 executor 从 session 获取）
-    let bg_registry_for_cmd = session_manager
+    let bg_registry_for_cmd = ctx
+        .session_manager
         .as_ref()
-        .and_then(|sm| sm.get_session(&session_id))
+        .and_then(|sm| sm.get_session(&ctx.session_id))
         .map(|s| s.background_registry.clone())
         .unwrap_or_else(|| Arc::new(peri_middlewares::subagent::BackgroundTaskRegistry::new()));
 
     // BgCommand 事件的 bg event pump（必须在命令拦截之前启动，Immediate 命令才能发事件）
     {
         let bg_cmd_sink = Arc::clone(&event_sink);
-        let bg_cmd_sid = session_id.clone();
+        let bg_cmd_sid = ctx.session_id.clone();
         let bg_cmd_cw = effective_context_window;
         tokio::spawn(async move {
             while let Some(bg_event) = bg_event_rx_for_cmd.recv().await {
@@ -527,9 +471,9 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     {
         let (registry_event_tx, mut registry_event_rx) =
             tokio::sync::mpsc::unbounded_channel::<peri_middlewares::subagent::BgRegistryEvent>();
-        bg_registry_for_cmd.set_event_sender(registry_event_tx, session_id.clone());
+        bg_registry_for_cmd.set_event_sender(registry_event_tx, ctx.session_id.clone());
         let registry_sink = Arc::clone(&event_sink);
-        let registry_sid = session_id.clone();
+        let registry_sid = ctx.session_id.clone();
         tokio::spawn(async move {
             while let Some(event) = registry_event_rx.recv().await {
                 tracing::info!(
@@ -601,14 +545,14 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     if let Some(immediate) = intercept_immediate_command(InterceptRequest {
         content: &content,
         history: &history,
-        cwd: &cwd,
-        session_id: &session_id,
-        cancel: &cancel,
-        peri_config: &peri_config,
+        cwd: &ctx.cwd,
+        session_id: &ctx.session_id,
+        cancel: &ctx.cancel,
+        peri_config: &ctx.peri_config,
         event_sink: &event_sink,
         auxiliary_model: &auxiliary_model,
-        thread_store: thread_store.clone(),
-        thread_id: thread_id.clone(),
+        thread_store: ctx.thread_store.clone(),
+        thread_id: ctx.thread_id.clone(),
         bg_event_tx: &bg_event_tx_for_cmd,
         bg_registry: &bg_registry_for_cmd,
         frozen: frozen.as_ref(),
@@ -637,28 +581,28 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     let event_tx = Arc::new(parking_lot::Mutex::new(Some(event_tx)));
 
-    // 将会 move 进 BuildAgentRequest 的 middleware resources（无法借用，必须 move）。
+    // 将会 move 的 middleware resources（无法借用，必须 move）。
     // turn 仍以引用形式借用 provider/peri_config/cwd/cancel/permission_mode/broker。
     let turn = TurnConfig {
-        provider: &provider,
-        peri_config: &peri_config,
-        cwd: &cwd,
+        provider: &ctx.provider,
+        peri_config: &ctx.peri_config,
+        cwd: &ctx.cwd,
         frozen: frozen.as_ref(),
         language: frozen
             .as_ref()
             .and_then(|f| f.language().map(|s| s.to_string()))
-            .or_else(|| peri_config.config.language.clone()),
-        cancel: &cancel,
-        permission_mode: &permission_mode,
-        broker: &broker,
-        session_start_source,
+            .or_else(|| ctx.peri_config.config.language.clone()),
+        cancel: &ctx.cancel,
+        permission_mode: &ctx.permission_mode,
+        broker: &ctx.broker,
+        session_start_source: ctx.session_start_source.clone(),
         auxiliary_model: auxiliary_model.clone(),
         effective_context_window,
     };
 
     // Lift Langfuse tracer creation to inject it into both
     // spawn_event_pump (pump head/tail) and build_and_execute_agent_v2 (forwarder).
-    let provider_display_name = provider.display_name().to_string();
+    let provider_display_name = ctx.provider.display_name().to_string();
     let langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>> =
         langfuse_session.as_ref().map(|s| {
             let session_clone = Arc::clone(s);
@@ -666,7 +610,7 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
             let session: std::sync::Arc<dyn crate::langfuse::LangfuseSessionLike> = session_clone;
             Arc::new(parking_lot::Mutex::new(LangfuseTracer::new(
                 session,
-                session_id.clone(),
+                ctx.session_id.clone(),
                 config,
             )))
         });
@@ -677,7 +621,7 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         event_rx,
         stop_reason_rx,
         sink: Arc::clone(&event_sink),
-        session_id: session_id.clone(),
+        session_id: ctx.session_id.clone(),
         effective_context_window,
         langfuse_tracer: langfuse_tracer.clone(),
         trace_input: trace_input.to_string(),
@@ -686,7 +630,7 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     // transport-aware: 仅 TUI 路径（allow_await_wake=true）注入 idle_inbox，
     // 让 run_react_loop 在 queue 空时 await_wake 等异步事件。
     // stdio/print 路径 None，保持 run_react_loop 直接退出。
-    let idle_inbox = if allow_await_wake {
+    let idle_inbox = if ctx.allow_await_wake {
         session_inbox.as_ref().map(Arc::clone)
     } else {
         None
@@ -700,43 +644,26 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
         Some(Arc::new(move || probe_registry.active_count() > 0))
     };
 
-    // 把会 move 的资源打包成 struct，turn + event_tx + cached_llm 仍借用。
-    // 由于 prompt builder 需要的所有资源都在这里 move 进 BuildAgentRequest，
-    // 调用方后续不再访问这些字段（session_id 在 collect_result 借用，
-    // 此时 BuildAgentRequest 已 drop）。
-    let exec_outcome = build_and_execute_agent(BuildAgentRequest {
-        turn: &turn,
+    // 把会 move/借用 的资源直接传入 build_and_execute_agent。
+    // 由于 prompt builder 需要的所有资源都已提供，调用方后续不再访问这些已 move 字段
+    // （session_id 在 collect_result 借用，此时 build_and_execute_agent 已完成）。
+    let exec_outcome = build_and_execute_agent(
+        &ctx,
+        &turn,
         agent_input,
         history,
-        plugin_skill_roots,
-        plugin_agent_dirs,
-        plugin_loaded,
-        hook_groups,
-        cron_scheduler,
-        mcp_pool,
-        channel_state,
-        tool_search_index,
-        shared_tools,
-        lsp_servers,
-        langfuse_session,
-        langfuse_tracer,
-        provider_display_name,
-        pool,
-        thread_store,
-        thread_id,
-        session_manager,
-        workflow_executor,
-        workflow_middleware: workflow_middleware.as_ref(),
-        bg_registry: Arc::clone(&bg_registry_for_cmd),
-        event_sink: &event_sink,
-        session_id: &session_id,
-        event_tx: &event_tx,
-        cached_llm: cached_llm.as_ref(),
-        v2_message_queue: &v2_message_queue,
-        async_router: async_router.clone(),
+        event_sink,
+        &ctx.session_id,
+        &event_tx,
+        cached_llm.as_ref(),
+        &v2_message_queue,
+        async_router.clone(),
         idle_inbox,
         idle_should_wait,
-    })
+        langfuse_tracer,
+        provider_display_name,
+        bg_registry_for_cmd,
+    )
     .await;
 
     // Send stop_reason to the event pump before it pushes done
@@ -745,68 +672,12 @@ pub async fn run_session_loop(ctx: PromptExecutionContext) -> PromptResult {
     let result = collect_result(CollectRequest {
         event_tx: &event_tx,
         pump_handle,
-        session_id: &session_id,
+        session_id: &ctx.session_id,
         exec_outcome,
     })
     .await;
 
     result
-}
-
-// ── Build Agent Request parameter object ────────────────────────────────────
-
-/// Agent 构建请求（参数对象）。
-///
-/// `turn` 携带本轮计算出的紧凑配置（provider/config/compact 等），
-/// 其余字段是中间件链所需的所有共享资源。
-struct BuildAgentRequest<'a> {
-    turn: &'a TurnConfig<'a>,
-    agent_input: peri_agent::agent::react::AgentInput,
-    history: Vec<BaseMessage>,
-    // ── 会 move 的中间件资源 ────────────────────────────────────────────────
-    plugin_skill_roots: Vec<peri_middlewares::skills::SkillRoot>,
-    plugin_agent_dirs: Vec<std::path::PathBuf>,
-    plugin_loaded: Vec<peri_middlewares::plugin::LoadedPlugin>,
-    hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>>,
-    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
-    mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
-    channel_state: Option<Arc<ChannelState>>,
-    tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
-    shared_tools: Arc<
-        parking_lot::RwLock<
-            std::collections::BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>,
-        >,
-    >,
-    lsp_servers: Vec<peri_lsp::config::LspServerConfig>,
-    langfuse_session: Option<Arc<LangfuseSession>>,
-    /// Langfuse tracer (lifted from pump to inject into EventBus forwarder).
-    langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
-    /// Provider display name for Langfuse Generation model attribution.
-    provider_display_name: String,
-    pool: Arc<parking_lot::Mutex<AgentPool>>,
-    thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
-    thread_id: Option<String>,
-    session_manager: Option<SessionManager>,
-    workflow_executor: Option<Arc<dyn peri_workflow::runner::AgentExecutor>>,
-    workflow_middleware: Option<&'a Arc<peri_middlewares::workflow::WorkflowMiddleware>>,
-    bg_registry: Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
-    // ── 借用的引用 ──────────────────────────────────────────────────────────
-    event_sink: &'a Arc<dyn EventSink>,
-    session_id: &'a str,
-    event_tx:
-        &'a Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>,
-    cached_llm: Option<&'a CachedLlmInstances>,
-    /// 会话级共享 v2 MessageQueue（run_session_loop 解析后透传，
-    /// 避免 build_and_execute_agent 重复解析；MessageQueue 内部 Arc 共享）。
-    v2_message_queue: &'a peri_agent::session::MessageQueue,
-    /// AsyncRouter（统一异步事件路由到 inbox，触发 wake）。
-    /// None 表示无 inbox（print mode / 无 SessionManager），回退到直接 push。
-    async_router: Option<AsyncRouter>,
-    /// Transport-aware idle inbox（await_wake）。TUI 路径 Some，stdio/print 路径 None。
-    idle_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
-    /// idle_should_wait probe：检查 background_registry.active_count > 0。
-    /// gate await_wake，避免正常对话 loading 卡死。
-    idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 /// Agent 执行后的最终输出（state + 停止原因）。
@@ -823,41 +694,24 @@ struct ExecOutcome {
 /// - bg event pump + todo 转发 pump 启动
 /// - `build_and_execute_agent_v2` 调用 + 错误事件转发
 /// - cancel cascade 子 agent
-async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
-    let BuildAgentRequest {
-        turn,
-        agent_input,
-        history,
-        plugin_skill_roots,
-        plugin_agent_dirs,
-        plugin_loaded,
-        hook_groups,
-        cron_scheduler,
-        mcp_pool,
-        channel_state,
-        tool_search_index,
-        shared_tools,
-        lsp_servers,
-        langfuse_session: _langfuse_session,
-        langfuse_tracer,
-        provider_display_name,
-        pool,
-        thread_store,
-        thread_id,
-        session_manager,
-        workflow_executor,
-        workflow_middleware,
-        bg_registry,
-        event_sink,
-        session_id,
-        event_tx,
-        cached_llm,
-        v2_message_queue,
-        async_router,
-        idle_inbox,
-        idle_should_wait,
-    } = req;
-
+#[allow(clippy::too_many_arguments)]
+async fn build_and_execute_agent(
+    ctx: &SessionContext,
+    turn: &TurnConfig<'_>,
+    agent_input: peri_agent::agent::react::AgentInput,
+    history: Vec<BaseMessage>,
+    event_sink: Arc<dyn EventSink>,
+    session_id: &str,
+    event_tx: &Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>,
+    cached_llm: Option<&CachedLlmInstances>,
+    v2_message_queue: &peri_agent::session::MessageQueue,
+    async_router: Option<AsyncRouter>,
+    idle_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
+    idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
+    provider_display_name: String,
+    bg_registry: Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
+) -> ExecOutcome {
     let (
         system_prompt,
         frozen_claude_md,
@@ -880,8 +734,8 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         let frozen_data = FrozenSessionData::build(
             turn.cwd,
             turn.language.as_deref(),
-            &plugin_skill_roots,
-            &plugin_agent_dirs,
+            &ctx.plugin_skill_roots,
+            &ctx.plugin_agent_dirs,
             &Local::now().format("%Y-%m-%d").to_string(),
         );
         (
@@ -894,7 +748,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
     };
 
     // Build register/deregister closures for SubAgentMiddleware
-    let register_runtime = session_manager.clone().map(|sm| {
+    let register_runtime = ctx.session_manager.clone().map(|sm| {
         let sid = session_id.to_string();
         Arc::new(
             move |thread_id: String, cancel_token: AgentCancellationToken, policy: String| {
@@ -913,7 +767,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
             },
         ) as crate::agent::builder::RegisterRuntimeFn
     });
-    let deregister_runtime = session_manager.clone().map(|sm| {
+    let deregister_runtime = ctx.session_manager.clone().map(|sm| {
         let sid = session_id.to_string();
         Arc::new(move |thread_id: &str| {
             if let Some(mut session) = sm.get_session_mut(&sid) {
@@ -938,7 +792,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
     //   Path B (Agent): 通过 AsyncRouter → InboxHandle → push_defer（Defer kind）→ End 阶段唤醒新 turn
     //
     // [NOTE] 自动 continuation 需 TUI 侧处理 BackgroundTaskCompleted 事件（参考 bg task auto-continuation）。
-    if let Some(wf_mw) = workflow_middleware {
+    if let Some(wf_mw) = ctx.workflow_middleware.as_ref() {
         // 将 session 级 bg_registry 注入 WorkflowMiddleware（延迟注入，支持内部可变性）
         wf_mw.set_bg_registry(bg_registry.clone());
 
@@ -947,7 +801,7 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         // 因此每个 session 的消费者只 spawn 一次，无跨 session 污染。
         if wf_mw.init_notification_buffer() {
             let wf_mw_for_notify = Arc::clone(wf_mw);
-            let notify_sink = Arc::clone(event_sink);
+            let notify_sink = Arc::clone(&event_sink);
             let notify_sid = session_id.to_string();
             let notify_cw = turn.effective_context_window;
             // AsyncRouter（v2 路径：push_defer + wake Notify）
@@ -1031,12 +885,13 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
     }
 
     // 从 session_manager 获取 goal_state（实现 GoalController trait）
-    let goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>> = session_manager
+    let goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>> = ctx
+        .session_manager
         .as_ref()
         .and_then(|sm| sm.goal_state_for(session_id))
         .map(|gs| Arc::new(gs) as Arc<dyn peri_agent::goal::GoalController>);
 
-    let cfg = AcpAgentConfig {
+    let cfg = crate::agent::builder::AcpAgentConfig {
         provider: turn.provider.clone(),
         cwd: turn.cwd.to_string(),
         system_prompt,
@@ -1050,33 +905,34 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
         cancel: turn.cancel.clone(),
         permission_mode: turn.permission_mode.clone(),
         peri_config: Arc::new(turn.peri_config.as_ref().clone()),
-        cron_scheduler,
+        cron_scheduler: ctx.cron_scheduler.clone(),
         agent_overrides: None,
         preload_skills: Vec::new(),
         session_id: Some(session_id.to_string()),
         broker: turn.broker.clone(),
-        plugin_skill_roots,
-        plugin_agent_dirs,
-        plugin_loaded: plugin_loaded.clone(),
-        hook_groups,
+        plugin_skill_roots: ctx.plugin_skill_roots.clone(),
+        plugin_agent_dirs: ctx.plugin_agent_dirs.clone(),
+        plugin_loaded: ctx.plugin_loaded.clone(),
+        hook_groups: ctx.hook_groups.clone(),
         session_start_source: turn.session_start_source.clone(),
-        mcp_pool,
-        channel_state,
-        tool_search_index,
-        shared_tools,
+        mcp_pool: ctx.mcp_pool.clone(),
+        channel_state: ctx.channel_state.clone(),
+        tool_search_index: ctx.tool_search_index.clone(),
+        shared_tools: ctx.shared_tools.clone(),
         child_handler_factory: None,
-        lsp_servers,
+        lsp_servers: ctx.lsp_servers.clone(),
         auxiliary_model: turn.auxiliary_model.clone(),
         thread_persistence: builder::ThreadPersistence {
-            store: thread_store,
-            parent_thread_id: thread_id,
+            store: ctx.thread_store.clone(),
+            parent_thread_id: ctx.thread_id.clone(),
             register_runtime,
             deregister_runtime,
         },
         goal_controller,
-        workflow_executor: workflow_executor.clone(),
-        workflow_middleware: workflow_middleware.cloned(),
-        background_registry: session_manager
+        workflow_executor: ctx.workflow_executor.clone(),
+        workflow_middleware: ctx.workflow_middleware.clone(),
+        background_registry: ctx
+            .session_manager
             .as_ref()
             .and_then(|sm| sm.get_session(session_id))
             .map(|s| s.background_registry.clone()),
@@ -1091,16 +947,17 @@ async fn build_and_execute_agent(req: BuildAgentRequest<'_>) -> ExecOutcome {
     // v2 单一路径。
     // v2 MessageQueue 已由 run_session_loop 解析并透传（避免重复解析 + 统一 bg_results/Path B 注入）。
     return build_and_execute_agent_v2(
+        ctx,
         cfg,
         cached_llm,
-        &pool,
+        &ctx.pool,
         turn,
         agent_input,
         history,
         session_id,
         event_tx,
-        event_sink,
-        session_manager,
+        &event_sink,
+        ctx.session_manager.clone(),
         v2_message_queue,
         async_router,
         idle_inbox,

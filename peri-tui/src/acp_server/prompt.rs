@@ -152,25 +152,14 @@ pub(crate) async fn run_prompt(
     // Track first history message ID for cancel-with-progress path (history is moved below)
     // Uses Option<MessageId> (16 bytes) instead of cloning the entire history.
     let first_history_id = history.first().map(|m| m.id());
-    let result = executor::run_session_loop(executor::PromptExecutionContext {
+    let ctx = executor::SessionContext {
         provider: provider_snapshot,
         peri_config: peri_config_snapshot,
         cwd,
         session_id: session_id.clone(),
         cancel,
-        event_sink,
         broker,
         permission_mode: permission_mode.clone(),
-        content,
-        frozen,
-        history,
-        incoming_recalls,
-        session_start_source: if is_empty {
-            Some("startup".to_string())
-        } else {
-            None
-        },
-        bg_results,
         plugin_skill_roots: plugin_skill_roots.to_vec(),
         plugin_agent_dirs: plugin_agent_dirs.to_vec(),
         plugin_loaded: plugin_loaded.to_vec(),
@@ -181,16 +170,29 @@ pub(crate) async fn run_prompt(
         tool_search_index,
         shared_tools,
         lsp_servers: plugin_lsp_servers.to_vec(),
-        langfuse_session,
         pool,
         thread_store: Some(Arc::clone(thread_store)),
         thread_id: Some(thread_id.clone()),
         session_manager: Some(session_manager),
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
+        session_start_source: if is_empty {
+            Some("startup".to_string())
+        } else {
+            None
+        },
         allow_await_wake: true,
-    })
-    .await;
+    };
+    let turn = executor::TurnInput {
+        event_sink,
+        content,
+        frozen,
+        history,
+        incoming_recalls,
+        bg_results,
+        langfuse_session,
+    };
+    let result = executor::run_session_loop(ctx, turn).await;
 
     // Persist new messages to ThreadStore and update in-memory state.
     {
