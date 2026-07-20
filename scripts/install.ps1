@@ -266,7 +266,6 @@ function Main {
         Write-Host "    https://nodejs.org/  or  https://bun.sh/"
         Write-Host ""
     }
-    }
 
     Write-Host ""
     info "Installation complete! Version: $VersionTag"
