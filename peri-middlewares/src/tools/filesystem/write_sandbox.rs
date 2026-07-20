@@ -28,7 +28,7 @@ impl WriteSandboxTool {
     /// 构造 WriteSandbox 工具。
     ///
     /// `allowed_dirs` 是 frontmatter 声明的相对目录列表（基于 cwd）。
-    /// 构造时 canonicalize 每个目录，失败则报错。
+    /// 目录不存在时自动创建，创建失败才报错。
     pub fn new(
         cwd: impl Into<String>,
         allowed_dirs: Vec<String>,
@@ -39,10 +39,15 @@ impl WriteSandboxTool {
             .canonicalize()
             .map(|p| p.display().to_string())
             .unwrap_or(cwd_raw);
-        // 构造时 canonicalize 沙箱根路径
+        // 构造沙箱根路径：目录不存在则自动创建
         let mut sandbox_roots = Vec::new();
         for dir in &allowed_dirs {
             let raw = Path::new(&cwd).join(dir);
+            // 目录不存在则自动创建（避免 subagent 启动时因目录不存在而缺少工具）
+            if !raw.exists() {
+                std::fs::create_dir_all(&raw)
+                    .map_err(|e| format!("WriteSandbox: 无法创建沙箱目录 '{}': {}", dir, e))?;
+            }
             let canonical = raw.canonicalize().map_err(|e| {
                 format!("WriteSandbox: 无法 canonicalize 沙箱目录 '{}': {}", dir, e)
             })?;

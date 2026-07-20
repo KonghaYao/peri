@@ -187,3 +187,36 @@ async fn test_write_sandbox_multi_dir() {
     assert!(dir.path().join("plans/design.md").exists());
     assert!(dir.path().join("output/result.json").exists());
 }
+
+/// [回归测试] 沙箱目录不存在时构造应自动创建，而非失败。
+/// 对应 spec/issues/2026-07-20-plan-agent-writesandbox-not-found.md
+#[test]
+fn test_write_sandbox_auto_create_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    // 不预创建沙箱目录——WriteSandboxTool::new 应自动创建
+    assert!(
+        !dir.path().join("plans").exists(),
+        "开始前沙箱目录不应存在"
+    );
+    let result = WriteSandboxTool::new(
+        cwd,
+        vec!["plans".into()],
+    );
+    assert!(result.is_ok(), "目录不存在时构造应成功: {:?}", result.err());
+    // 验证目录确实被创建
+    assert!(
+        dir.path().join("plans").is_dir(),
+        "构造后沙箱目录应被自动创建"
+    );
+    // 验证可正常写入
+    let tool = result.unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(tool.invoke(
+        serde_json::json!({"path": "plans/test.md", "content": "# Auto created"}),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    ))
+    .unwrap();
+    let content = std::fs::read_to_string(dir.path().join("plans/test.md")).unwrap();
+    assert_eq!(content, "# Auto created");
+}
