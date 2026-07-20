@@ -218,6 +218,12 @@ config-desc-diff = (ON/OFF — show inline diff for Write/Edit tools)
 config-field-streaming = Streaming Mode
 config-desc-streaming = streaming / block / none — render granularity for LLM output
 
+# Scroll FPS
+config-field-scroll-fps = Scroll FPS
+config-fps-value-60 = 60fps
+config-fps-value-30 = 30fps
+config-fps-value-20 = 20fps
+
 # ---- Login Panel ----
 
 login-panel-title-browse =  /login — Provider Management

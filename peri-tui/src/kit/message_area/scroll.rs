@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::kit::atoms::PERI_CONFIG_HANDLE;
 use crate::kit::focus_router;
 use crate::kit::text_selection::TextSelection;
 use ratatui_kit::components::ScrollViewState;
@@ -20,8 +21,42 @@ use super::selection::{
 /// 鼠标滚轮每格的滚动行数倍数。
 pub(super) const SCROLL_LINES: u16 = 3;
 
-/// 滚动节流窗口：≥16ms（≈60fps）才把累积 delta 推入 scroll_state。
-pub(super) const SCROLL_FRAME_MS: u64 = 16;
+/// scroll_frame_ms() 的默认值。fps=20 → 50ms。
+const DEFAULT_SCROLL_FRAME_MS: u64 = 50;
+
+/// fps 值转换为毫秒间隔
+fn fps_to_ms(fps: u32) -> u64 {
+    match fps {
+        60 => 16,
+        30 => 33,
+        20 => 50,
+        _ => 16,
+    }
+}
+
+/// 优先级：Config.scroll_fps > PERI_SCROLL_THROTTLE_MS 环境变量 > 默认 50ms（20fps）。
+/// 下限 1ms 防止零值导致无节流。
+/// Config 每次读取（try_read 代价 ~5ns，无争用时），因为用户可能运行时切换。
+fn scroll_frame_ms() -> u64 {
+    // 优先读 Config
+    if let Some(handle) = PERI_CONFIG_HANDLE.get()
+        && let Some(cfg) = handle.try_read()
+        && let Some(fps) = cfg.config.scroll_fps
+    {
+        return fps_to_ms(fps).max(1);
+    }
+    // fallback: 环境变量
+    thread_local! {
+        static ENV_VAL: Option<u64> = std::env::var("PERI_SCROLL_THROTTLE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(|v: u64| v.max(1));
+    }
+    if let Some(ms) = ENV_VAL.with(|v| *v) {
+        return ms;
+    }
+    DEFAULT_SCROLL_FRAME_MS
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct ScrollThrottle {
@@ -152,7 +187,7 @@ fn position_to_scroll_y(position: usize, max_position: usize, max_scroll: usize)
 
 // ── 滚动节流（私有）────────────────────────────────────────────────────
 
-/// 滚动节流：累积 delta，仅在距上次 flush ≥ SCROLL_FRAME_MS(16ms) 时推入 scroll_state。
+/// 滚动节流：累积 delta，仅在距上次 flush ≥ scroll_frame_ms() 时推入 scroll_state。
 /// write_no_update 不触发 notifier.wake()——依赖 dispatch 后 ratatui-kit loop 强制 render。
 fn apply_scroll(
     delta: i32,
@@ -162,7 +197,7 @@ fn apply_scroll(
     let mut st = scroll_throttle.write_no_update();
     st.pending_delta += delta;
     let now = Instant::now();
-    if now.duration_since(st.last_flush) >= Duration::from_millis(SCROLL_FRAME_MS) {
+    if now.duration_since(st.last_flush) >= Duration::from_millis(scroll_frame_ms()) {
         let pending = st.pending_delta;
         st.pending_delta = 0;
         st.last_flush = now;
@@ -297,7 +332,7 @@ pub(super) fn handle_event(
                             {
                                 let d = scrollbar_drag.read();
                                 if now.duration_since(d.last_flush)
-                                    < Duration::from_millis(SCROLL_FRAME_MS)
+                                    < Duration::from_millis(scroll_frame_ms())
                                 {
                                     return EventResult::Consumed;
                                 }
@@ -371,7 +406,7 @@ pub(super) fn handle_event(
                         let now = Instant::now();
                         {
                             let dt = drag_throttle.read();
-                            if dt.last_flush.elapsed() < Duration::from_millis(SCROLL_FRAME_MS) {
+                            if dt.last_flush.elapsed() < Duration::from_millis(scroll_frame_ms()) {
                                 return EventResult::Consumed;
                             }
                         }

@@ -217,6 +217,12 @@ config-desc-diff = （开/关 — 显示 Write/Edit 工具的内联 diff）
 config-field-streaming = 渲染模式
 config-desc-streaming = streaming / block / none — LLM 输出渲染粒度
 
+# Scroll FPS
+config-field-scroll-fps = 滚动帧率
+config-fps-value-60 = 60fps
+config-fps-value-30 = 30fps
+config-fps-value-20 = 20fps
+
 # ---- Login Panel ----
 
 login-panel-title-browse =  /login — Provider 管理
