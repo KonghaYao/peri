@@ -203,3 +203,123 @@ Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、Su
 **通用模式:** 已有基础设施（`with_persistence`、`load_message_flags` 等）就位但未被上游调用——架构迁移时需确认新路径是否激活了所有持久化通道
 **涉及文件:** peri-acp/src/agent/builder_v2.rs, peri-agent/src/session/transcript.rs
 **CLAUDE.md 链接:** true
+
+### issue_2026-07-18-subagent-tool-cards-regression-empty
+**摘要:** SubAgent 工具调用卡片回归不显示——Agent 卡片容器可见但内部为空壳
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** SubAgent 卡片回归, 工具调用卡片, 竞态条件, AgentGroup
+**问题本质:** `event_tx` 的替换（or_insert_with→insert）解决了多轮复用问题，但引入了新的竞态——SubAgent 在 tool group 注册到 accumulator 之前就发送了 ToolStart 事件，卡片创建时目标 group 不存在
+**通用模式:** channel 替换修复可能引入时序依赖——子线程事件可能在注册完成前到达。需要在 accumulator 中缓存早到事件，待 group 就绪后重放
+**涉及文件:** peri-acp/src/agent/builder_v2.rs, peri-tui/src/kit/acp_types.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-18-cleanup-subagent-eventbus-dead-code
+**摘要:** 清理 SubagentStarted EventBus 残留死代码和双重发送陷阱
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** EventBus, SubagentStarted, 死代码, 双重发送, 架构清理
+**问题本质:** EventBus 迁改时 SubagentStarted 因时序死结保留在旧路径，但预先铺设的 v2_bridge→bridge_tx 通道未彻底清除——形成"有收有发但无双发"的死代码。若未来补齐发射端，forwarder.rs 会双路径重复发送
+**通用模式:** 架构迁移中部分保留旧路径时，必须同步清理新路径中的对应接收分支——避免形成"幽灵通道"。死代码本身无害，但会让后来者误认为通道已就绪
+**涉及文件:** peri-tui/src/kit/v2_bridge.rs, peri-acp/src/event/forwarder.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-11-hung-bg-agent-await-wake-block-forever
+**摘要:** 后台 agent 在 await_wake 中永久阻塞导致 session 卡死
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** await_wake, 后台 agent, 超时防御, Notify 机制
+**问题本质:** await_wake 无超时——若 bg agent hung 住永不 wake，主 agent 在 await_wake 中永久阻塞。Notify 机制依赖完成链：bg agent 完成→wake→主 agent 继续，但 hung agent 永远不触发唤醒
+**通用模式:** 需两层防御——bg agent 级超时（600s，覆盖最长 SubAgent 执行）拦截 hung 任务；await_wake 空闲超时（如 180s）确保主 agent 不会永久阻塞
+**涉及文件:** peri-agent/src/agent/stages/receive.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-11-bg-multi-agent-loading-freeze-last-callback-lost
+**摘要:** 多个 bg agent 同轮场景：最后 callback 丢失 + loading 卡死
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** 多 bg agent, callback 丢失, loading 卡死, 全局追踪
+**问题本质:** 多个 bg agent 同轮时，前 N-1 个 callback 正常处理，但最后一个触发时机已越过生命周期边界——多实例终结/清理逻辑不完整
+**通用模式:** 多 bg agent 同轮场景需全局追踪所有活跃实例的完成状态。loading 由主 Agent TurnDone 而非 bg 完成事件驱动——bg callback 只推送结果，不清 loading
+**涉及文件:** peri-middlewares/src/subagent/, peri-tui/src/kit/message_area/
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-08-mq-injected-user-message-not-in-tui
+**摘要:** 后台 callback 合成消息未在 TUI 显示——五次修复迭代
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** 后台消息注入, 双通道 flush-then-push, TurnDone 边界
+**问题本质:** bg callback 需要将合成消息注入消息区，但直接 push committed 绕过 TurnSegment→位置错乱。核心约束：TurnDone 是唯一切分点，turn 内 AI 内容不可分割
+**通用模式:** 最终方案采用双通道 flush-then-push——unstable event 先 flush 当前 turn 切分边界，再用标准 session/update 通道推送气泡。Push committed 前必须先 flush current_turn
+**涉及文件:** peri-tui/src/kit/acp_notifier.rs, peri-acp/src/session/
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-07-bg-tasks-unified-management
+**摘要:** 后台任务统一管理架构——BackgroundTaskRegistry 从 per-prompt 升级到 SessionState 级
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** 后台任务, BackgroundTaskRegistry, SessionState, 跨 prompt
+**问题本质:** 旧版 registry 生命周期绑定到单次 prompt——bg agent/workflow 在 prompt 结束后丢失追踪，无法统一管理
+**通用模式:** 后台任务 registry 应提升到 SessionState 级别（跨 prompt 存活），统一管理 bg agent/workflow/bg shell 三类任务。共享统一 registry 抽象 + 独立并发上限
+**涉及文件:** peri-acp/src/session/, peri-middlewares/src/subagent/
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-07-acp-protocol-refactor
+**摘要:** ACP 协议重构——废弃 11 个冗余自定义事件，复用标准 session/update
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** ACP 协议, 自定义事件废弃, 标准话, view-commit 增量
+**问题本质:** 11 个自定义 ACP 事件为标准协议已覆盖的冗余——view-commit 全量推送导致无效传输
+**通用模式:** "标准有的走标准，真没有的才自定义"。view-commit 全量推送改为增量 session/update。新增事件前先查 ACP 协议是否有等效机制
+**涉及文件:** peri-acp/src/event/, peri-acp-types/
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-08-viewmodel-elimination
+**摘要:** 消灭 8 种共享 ViewModel 类型——TUI 直接从 ACP 事件派生渲染结构
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** ViewModel 消除, 中间层精简, ACP 直通 TUI
+**问题本质:** peri-agent 和 peri-tui 共享 8 种 ViewModel 类型形成紧耦合，自定义事件数从 11 个精简到 2 个
+**通用模式:** TUI 应从标准 ACP session/update 事件直接派生渲染结构，不要经过中间共享类型层——每层翻译都是耦合点。Agent 层只产 ACP 标准事件，TUI 层自行解释渲染
+**涉及文件:** peri-agent/src/types/, peri-tui/src/kit/
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-08-peri-agent-architecture-improvement
+**摘要:** Agent 架构升级——统一存储、中间件排序、StageContext 聚合
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** AgentState, MessageTranscript, 中间件链, StageContext
+**问题本质:** AgentState/MessageTranscript 双轨存储导致 per-hook O(n²) clone；中间件缺少声明性优先级约束
+**通用模式:** 统一 AgentContext 为唯一真相源消除双轨 clone。中间件需声明性优先级而非隐式插入顺序。StageContext 聚合为子结构减少参数传递
+**涉及文件:** peri-agent/src/agent/, peri-acp/src/agent/builder.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-09-peri-agent-comprehensive-code-quality-review
+**摘要:** Agent 代码质量全面审查——panic 防护、取消令牌、版本化
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** 代码质量, panic 防护, CancellationToken, schema 版本化
+**问题本质:** 多处 panic!/unwrap 在异常路径触发→TUI 崩溃；重试循环无取消令牌→死循环
+**通用模式:** 事件映射层禁止 panic!，用 tracing::error + 降级值。所有重试循环必须检查 CancellationToken。事件类型和 SQLite schema 需要版本号避免迁移不兼容
+**涉及文件:** peri-agent/src/, peri-acp/src/event/
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-08-peri-agent-code-quality-improvement
+**摘要:** Agent 代码质量提升——JoinHandle 监控、concurrent 超时、serde 失败不静默
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** JoinHandle, dispatch_concurrent, serde 失败, unwrap_or_else
+**问题本质:** 后台 writer task 无 JoinHandle→panick 静默。dispatch_concurrent 无 per-invoke 超时→慢工具阻塞整批。serde 反序列化失败静默丢弃
+**通用模式:** 所有 spawn 必须保存 JoinHandle 检测 panic。dispatch_concurrent 必须 per-invoke 超时。serde 失败必须 tracing::error 而非静默丢弃。unwrap_or_else 需确认覆盖的是正常降级路径而非掩盖不变量
+**涉及文件:** peri-agent/src/, peri-middlewares/src/
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-08-peri-agent-maintainability-improvement
+**摘要:** Agent 可维护性提升——集成测试、版本化、feature flag、长函数拆分
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** 集成测试, 版本化, feature flag, 长函数拆分
+**问题本质:** 编排函数缺少集成测试→重构高风险。事件和 schema 无版本号→跨版本迁移断裂
+**通用模式:** 核心编排函数必须有集成测试。事件 enum 和 SQLite schema 需要语义化版本号（如 `V1_Event` vs `V2_Event`）。用 feature flag 分离编译依赖。单函数超过 150 行需拆分为步骤级函数
+**涉及文件:** peri-agent/src/, peri-acp/src/
+**CLAUDE.md 链接:** false

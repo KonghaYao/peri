@@ -575,3 +575,154 @@ Peri TUI 的前端渲染与交互系统，基于 ratatui-kit 框架。负责终�
 **通用模式:** 数据字段需要从实际来源获取而非硬编码默认值。构造点数量越多，遗漏风险越大——考虑工厂函数统一构造
 **涉及文件:** peri-middlewares/src/subagent/tool/execute_bg.rs, peri-middlewares/src/subagent/spawner.rs
 **CLAUDE.md 链接:** false
+
+### issue_2026-07-18-duplicate-streaming-tool-cards
+**摘要:** 流式输出时工具调用卡片重复显示——render 事件双轨扇出
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** 工具卡片重复, 流式渲染, 去重, tool_id
+**问题本质:** start_tool 事件可能被多个 render 路径触发，导致同一个 tool_id 的工具卡片被重复推入 VIEW_MODELS
+**通用模式:** 增量推入类事件（非幂等覆盖）必须做去重——`tool_id` 去重是低成本方案。同步追踪已处理的 tool_id 集合，避免同一卡片多次创建
+**涉及文件:** peri-tui/src/kit/acp_events.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-19-streaming-mode-config-not-effective
+**摘要:** streaming_mode 配置切换无效——用户切换模型后流式模式不跟随
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** streaming_mode, 配置切换, 模式同步, BridgeState
+**问题本质:** streaming_mode 在模型切换时未通过配置通道同步到 BridgeState，TUI 端用旧的模式值处理流式事件
+**通用模式:** 运行时配置变更需双端同步——ACP 服务端和 TUI 前端各维护一份状态，任一端未更新都会导致行为不一致。配置变更应走统一通道（如 update_config push）
+**涉及文件:** peri-tui/src/kit/acp_bridge.rs, peri-tui/src/kit/acp_events.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-18-login-panel-missing-new-delete-crud
+**摘要:** Login 面板缺少新建/删除功能，CRUD 不完整
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** Login 面板, CRUD, 新建, 删除, Provider 管理
+**问题本质:** LoginPanelMode 枚举仅 Browse/Edit 两个变体，缺少 New/Delete/ConfirmDelete——用户无法在面板内完成 Provider 完整生命周期
+**通用模式:** 数据管理面板应覆盖完整 CRUD 而非仅 RU 两环。i18n key 提前定义但代码未用，说明设计意图与实现存在 gap——需要补齐
+**涉及文件:** peri-tui/src/kit/panels/login.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-17-loading-state-split-brain
+**摘要:** TUI Loading 状态由三个写入源造成分裂——submit_consumer 乐观写入、acp_bridge phase 派生、TurnDone 手动兜底
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** loading 状态, split-brain, phase 派生, PromptSubmitted 事件, 状态统一
+**问题本质:** ACP_STATE.is_loading 由三条路径分别写入，形成三层 workaround 互相修补的脆弱结构——submit_consumer 绕开 bridge 直接写 atom，push_acp_state 的防御性 phase 提升 hack，7 处事件手动清 atom
+**通用模式:** 全局 UI 状态应由单一数据源派生——submit 改为发 PromptSubmitted 事件→bridge 统一设 phase→push_acp_state 派生 is_loading。删除防御性 hack 和手动 atom 写入。多写源状态管理 = split-brain bug 工厂
+**技术决策:** 采用事件驱动（PromptSubmitted）替代直接 atom 写入，bridge 统一处理所有 loading 状态变更
+**涉及文件:** peri-tui/src/kit/acp_events.rs, peri-tui/src/kit/submit_consumer.rs, peri-tui/src/kit/acp_bridge.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-18-workflow-panel-agent-token-tool-display-zero
+**摘要:** Workflow Panel Agent 进度列（token 消耗/工具调用数）始终显示 0，列未对齐
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** Workflow Panel, token 计数, tool 计数, agent_progress, 列对齐
+**问题本质:** 4 个独立 bug——agent 运行期间无 agent_progress 事件发送、AgentDone handler 不读 token_count、tool_count 硬编码 None、列标题缺失+对齐用 char 而非终端列宽
+**通用模式:** 进度面板的数据流需要持续推进事件（agent_progress）而非仅依赖最终事件（AgentDone）——用户需要实时反馈。面板列对齐应使用 unicode_width 而非 Rust char 计数
+**涉及文件:** peri-tui/src/kit/panels/workflow.rs, peri-acp/src/agent/workflow_agent.rs, peri-workflow/src/progress.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-08-viewmodels-flatten-refactor
+**摘要:** ViewModels 扁平化重构——单层 im::Vector 替代 committed/current_turn 分裂
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** VIEW_MODELS, committed/current_turn, 冻结线消除, 单层架构
+**问题本质:** TUI 渲染层维护 committed（已确认）和 current_turn（流式中）两条 im::Vector 路径—写入点混乱、冻结线概念泄漏到 UI 层
+**通用模式:** 单层 im::Vector 替代双轨——冻结线是 Agent 层概念，UI 不需要。所有写入走同一入口，消除旁路和死字段。VIEW_MODELS 是唯一数据源
+**涉及文件:** peri-tui/src/kit/acp_events.rs, peri-tui/src/kit/acp_bridge.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-07-slash-clear-messages-reappear-after-1s
+**摘要:** /clear 后旧消息 1s 后自动恢复
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** /clear, ViewCommit, FIFO 管道, BRIDGE_RESET_COUNTER
+**问题本质:** /clear 的多个侧信道 hack（BRIDGE_RESET_COUNTER 等）不能可靠清除状态——旧消息在下次事件到达时重新渲染
+**通用模式:** 用标准事件 + FIFO 管道清状态——session/new 后推送空 ViewCommit，利用消息管道自然排列覆盖旧数据。不要发明 BRIDGE_RESET_COUNTER 等侧信道机制
+**涉及文件:** peri-tui/src/kit/acp_bridge.rs, peri-tui/src/kit/acp_events.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-03-slash-popup-missing-skills
+**摘要:** Slash 弹窗缺少 skills——ACP 已推送但 TUI 未消费
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** slash popup, skills 显示, ACP→TUI 数据通道
+**问题本质:** ACP 服务端已通过事件推送 skill 列表，但 TUI 端未订阅对应的事件通道→skill 从未出现在弹窗中
+**通用模式:** ACP 层数据推送后必须验证 TUI 层订阅了对应事件通道——单向推送不等于显示。每新增 AgentEvent 变体需同步检查 acp_notifier→acp_events→VIEW_MODELS 完整链路
+**涉及文件:** peri-tui/src/kit/acp_notifier.rs, peri-tui/src/kit/panels/slash.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-06-slash-popup-duplicate-commands
+**摘要:** Slash 弹窗命令重复——PANELS + AVAILABLE_SLASH_COMMANDS 双源未去重
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** slash commands, 双源合并, 去重, 硬编码残留
+**问题本质:** PANELS 和 AVAILABLE_SLASH_COMMANDS 两个来源合并时未去重→8 条 panel 命令出现两次。ACP 侧硬编码 panel 列表的残留代码与动态来源形成双源
+**通用模式:** 双源合并必须去重（按命令名）。确定唯一规范来源后（如动态 panel 列表），删除另一方的硬编码残留——避免"改一处漏一处"
+**涉及文件:** peri-tui/src/kit/panels/slash.rs, peri-acp/src/
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-06-history-session-switch-data-mix
+**摘要:** History 切换 session 后新旧数据混合显示
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** session 切换, 数据混合, ViewCommit, BRIDGE_RESET_COUNTER
+**问题本质:** 空 session 不发送 ViewCommit→TUI 读到旧 atom 值未清除。状态重置链（BRIDGE_RESET_COUNTER→加载→ViewCommit）有空 session 未处理的断环
+**通用模式:** 状态重置链的每环必须验证——空 session 也需要 emit ViewCommit 清空旧数据。fallback 读旧 atom 值是静默数据污染的常见来源
+**涉及文件:** peri-tui/src/kit/acp_bridge.rs, peri-acp/src/session/
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-12-agent-nested-toolcall-misplaced-into-history
+**摘要:** Agent 子工具卡片渲染位置错误——在 Agent 卡片上方而非嵌套内
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** 工具卡片, 嵌套位置, items 平面列表, 事件时序
+**问题本质:** 消息区用平面 im::Vector 存储所有 TuiRenderUnit——工具事件在 Agent turn 内到达，按时间戳排在 items 末尾，而非嵌套在 AgentGroup 下面
+**通用模式:** 平面列表结构需要渲染层的分组逻辑来模拟嵌套——事件到达时序不等于视觉层级。render 阶段需要按 agent_id/group 重新编排 items 的呈现位置
+**涉及文件:** peri-tui/src/kit/acp_events.rs, peri-tui/src/kit/message_area/render.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-09-system-reminder-condensed-rendering
+**摘要:** system-reminder 消息 LLM 通道和 TUI 通道格式不一致
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** system-reminder, 跨通道格式, LLM 包裹标签, TUI 渲染
+**问题本质:** system-reminder 走 LLM 通道（包裹 `<system-reminder>` 标签）和 TUI 通道（无标签）两条独立路径，格式不一致→用户看到的内容和 LLM 理解的内容对不齐
+**通用模式:** 跨通道消息格式必须维护唯一事实源——LLM 上下文和 TUI 渲染的 packaging 策略需同步。考虑用统一的结构化 message 类型，各通道自行提取所需字段
+**涉及文件:** peri-agent/src/messages/, peri-tui/src/kit/acp_events.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-08-loading-indicator-never-displays
+**摘要:** ViewModel 消除重构后 loading spinner 不再显示
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** loading spinner, 重构回归, 传播链验证
+**问题本质:** ViewModels 扁平化重构中 loading 传播链断裂——spinner 渲染依赖 submit→bridge→ACP_STATE atom→footer render 的完整链路，重构后中间环断开
+**通用模式:** 大规模重构后必须逐环验证 loading 传播链是否完整。loading 是跨模块的全局状态，增加覆盖测试确认各路径的终态消费
+**涉及文件:** peri-tui/src/kit/acp_bridge.rs, peri-tui/src/kit/message_area/footer.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-04-model-panel-enter-statusbar-delay
+**摘要:** Model 面板切换后状态栏延迟 1-2s 才更新
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** 状态栏延迟, SERVICE_SNAPSHOT, 轮询, 面板配置
+**问题本质:** 状态栏的 model 信息由 SERVICE_SNAPSHOT atom 驱动——该 atom 由 2s 轮询 task 更新。面板切换 model 后轮询周期未到，新 model 名不显示
+**通用模式:** 面板修改全局配置后必须主动推送更新所有依赖 atom，不能依赖异步轮询。交互式面板操作→即时 atom 写→即时 UI 反馈，轮询仅用于外部变更检测
+**涉及文件:** peri-tui/src/kit/panels/model.rs, peri-tui/src/kit/atoms.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-07-ctrl-c-exits-during-loading
+**摘要:** Ctrl+C 在 loading 状态中直接退出应用而非中断 agent
+**状态:** Fixed
+**归档日期:** 2026-07-20
+**关键词:** Ctrl+C, loading 上下文, 事件优先级, 中断 vs 退出
+**问题本质:** Ctrl+C 处理器不区分上下文——loading 中应中断 agent，空闲时应退出应用（或双击退出）。统一处理导致 loading 中误退出
+**通用模式:** 全局快捷键处理器必须上下文感知。Ctrl+C 的行为根据应用状态动态调整：loading→中断 agent，空闲→退出确认。事件优先级需根据当前模态动态调整
+**涉及文件:** peri-tui/src/kit/event_handlers.rs
+**CLAUDE.md 链接:** false
