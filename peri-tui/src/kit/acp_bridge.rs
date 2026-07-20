@@ -25,6 +25,8 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     state.phase = SessionPhase::Idle;
     state.popup_kind = None;
     state.last_submitted_text = None;
+    state.last_pushed_text_len = 0;
+    state.last_pushed_reasoning_len = 0;
     atoms::INPUT_BUFFER.state().write().clear();
     acp_events::push_view_models_for_reset();
     tracing::info!(
@@ -56,6 +58,8 @@ pub fn spawn_acp_bridge(
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // 追踪 BRIDGE_RESET_COUNTER——submit_consumer 的 /clear / thread_load
@@ -81,7 +85,13 @@ pub fn spawn_acp_bridge(
                     }
                     if state.current_turn.has_running_bash_tool() {
                         state.current_turn.invalidate_cache();
-                        acp_events::push_view_models(&mut state);
+                        use crate::kit::acp_events::current_streaming_mode;
+                        use crate::kit::acp_events::StreamingMode;
+                        let mode_is_none =
+                            matches!(current_streaming_mode(), StreamingMode::None);
+                        if !mode_is_none {
+                            acp_events::push_view_models(&mut state);
+                        }
                     }
                 }
                 event = rx.recv() => {
@@ -103,6 +113,8 @@ pub fn spawn_acp_bridge(
                                 state.phase = SessionPhase::Idle;
                                 state.popup_kind = None;
                                 state.last_submitted_text = None;
+                                state.last_pushed_text_len = 0;
+                                state.last_pushed_reasoning_len = 0;
                                 // 同步清空 INPUT_BUFFER：/clear 和 thread_load 切换时，
                                 // 递增 BRIDGE_RESET_COUNTER 触发此分支，旧会话 loading
                                 // 期间缓存的输入必须丢弃，防止新会话首个 TurnDone 时

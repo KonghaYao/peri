@@ -2,6 +2,17 @@
 //! 后推入现有的 bridge_tx 通道（复用 spawn_acp_bridge 的分发与渲染逻辑）。
 //!
 //! Phase A：与 ACP 路径双轨运行。Phase B 下线 ACP 路径后本模块成为唯一事件源。
+//!
+//! ## 有意排除的 ObserveEvent 变体
+//!
+//! SubAgent 生命周期事件（SubagentStart、SubagentStop）不在 v2_bridge 中映射。
+//! 其活跃路径为：
+//!   handler.on_event(ExecutorEvent) → event_sink → peri/agent_event → acp_notifier → bridge_tx
+//!
+//! ObserveEvent::SubagentStart / SubagentStop 在生产代码中从不被 emit
+//!（参见 2026-07-16 eventbus 统一发射架构——EventBus 在 SubagentStarted 之后创建，存在时序死结）。
+//! v2_event_to_acp_event_data 中这些变体返回 None，作为防御性兜底——防止未来
+//! forwarder.rs 的 try_send_v2_event 与 handler.on_event 两条路径同时触发造成双重发送。
 
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{CONTEXT_USAGE, RENDER_HEARTBEAT};
@@ -12,7 +23,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// 映射单个 v2 事件到 AcpEventData。返回 None 表示该事件不需要推送到 bridge
-/// （如 HitlPending 走 ACP 独立通道、Langfuse-only 事件如 LlmCallStart）。
+/// （如 HitlPending 走 ACP 独立通道、SubAgent 事件走 event_sink→acp_notifier 路径、
+/// Langfuse-only 事件如 LlmCallStart）。
 fn v2_event_to_acp_event_data(event: V2Event) -> Option<AcpEventData> {
     match event {
         V2Event::Render(ev) => match ev {
@@ -92,21 +104,6 @@ fn v2_event_to_acp_event_data(event: V2Event) -> Option<AcpEventData> {
             StateEvent::TurnSuspended { .. } => Some(AcpEventData::TurnSuspended),
         },
         V2Event::Observe(ev) => match ev {
-            ObserveEvent::SubagentStart {
-                agent_name,
-                child_agent_id,
-                is_background,
-                ..
-            } => Some(AcpEventData::SubagentStarted {
-                agent_id: child_agent_id.to_string(),
-                agent_name,
-                is_background,
-            }),
-            ObserveEvent::SubagentStop { child_agent_id, .. } => {
-                Some(AcpEventData::SubagentStopped {
-                    agent_id: child_agent_id.to_string(),
-                })
-            }
             ObserveEvent::CompactStarted { .. } => Some(AcpEventData::CompactStarted),
             ObserveEvent::MessagesCompacted {
                 summary,
@@ -132,8 +129,14 @@ fn v2_event_to_acp_event_data(event: V2Event) -> Option<AcpEventData> {
             ObserveEvent::TurnError { message, .. } => {
                 Some(AcpEventData::AgentExecutionFailed { message })
             }
+            // SubAgent 生命周期事件 — 不走 v2_bridge。
+            // 活跃路径: handler.on_event → event_sink → peri/agent_event → acp_notifier → bridge_tx。
+            // ObserveEvent::SubagentStart / SubagentStop 在生产代码中从不被 emit；
+            // 此处返回 None 作为防御性兜底，防止 forwarder.rs 未来启用发射后造成双重发送。
+            ObserveEvent::SubagentStart { .. }
+            | ObserveEvent::SubagentStop { .. }
             // Langfuse/Tracer-only events — not rendered in TUI
-            ObserveEvent::LlmCallStart { .. }
+            | ObserveEvent::LlmCallStart { .. }
             | ObserveEvent::LlmCallEnd { .. }
             | ObserveEvent::AiReasoningChunk { .. }
             | ObserveEvent::StageStarted { .. }

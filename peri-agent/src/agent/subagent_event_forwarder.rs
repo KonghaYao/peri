@@ -49,7 +49,14 @@ pub fn spawn_subagent_event_forwarder(
     event_handler: Option<Arc<dyn AgentEventHandler>>,
     child_thread_id: String,
 ) -> JoinHandle<()> {
+    let has_handler = event_handler.is_some();
     tokio::spawn(async move {
+        tracing::info!(
+            target: "agent.subagent_forwarder",
+            child_thread_id = %child_thread_id,
+            has_event_handler = has_handler,
+            "forwarder spawned"
+        );
         loop {
             // biased + render 优先：保证同一 ReAct 迭代的 Render 事件在 State 事件
             // 之前被消费，避免 commit_iteration 与残留 Render 事件乱序导致的 partial 污染。
@@ -67,7 +74,18 @@ pub fn spawn_subagent_event_forwarder(
                     );
                     if should_forward {
                         if let Some(mut exec_ev) = render_event_to_executor(ev) {
+                            tracing::trace!(
+                                target: "agent.subagent_forwarder",
+                                child_thread_id = %child_thread_id,
+                                ev = ?exec_ev,
+                                "forwarder: received render event, forwarding to parent"
+                            );
                             set_source_agent_id(&mut exec_ev, &child_thread_id);
+                            tracing::debug!(
+                                target: "agent.subagent_forwarder",
+                                child_thread_id = %child_thread_id,
+                                "forwarder: tool event sourced from SubAgent"
+                            );
                             if let Some(h) = &event_handler {
                                 h.on_event(exec_ev);
                             }

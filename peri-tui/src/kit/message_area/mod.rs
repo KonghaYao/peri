@@ -10,6 +10,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::kit::atoms::{BRIDGE_RESET_COUNTER, LANG_VERSION, LOADING_EPOCH, VIEW_MODELS};
 use crate::kit::text_selection::TextSelection;
@@ -56,6 +57,27 @@ fn palette_markdown_key(p: &ratatui_kit::prelude::Palette) -> u64 {
     p.error.hash(&mut h);
     p.info.hash(&mut h);
     h.finish()
+}
+
+// ── 渲染性能诊断（PERI_RENDER_TIMING=1 启用）──────────────────────────────
+
+fn render_timing_enabled() -> bool {
+    thread_local! {
+        static ENABLED: bool = std::env::var("PERI_RENDER_TIMING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    }
+    ENABLED.with(|&e| e)
+}
+
+/// 如果启用诊断，打印阶段耗时。
+#[track_caller]
+fn trace_phase(phase: &str, start: Instant, detail: Option<&str>) {
+    if render_timing_enabled() {
+        let elapsed_us = start.elapsed().as_micros();
+        let extra = detail.map(|d| format!(" | {d}")).unwrap_or_default();
+        tracing::info!(target: "perf.render", "[{phase}] {elapsed_us}μs{extra}");
+    }
 }
 
 // ── 按 VM 分片的渲染缓存 ──────────────────────────────────────────────────
@@ -105,6 +127,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let snapshot = view_models.read();
     let todo_items = todo_atom.read().clone();
     let is_loading = acp_state.read().is_loading;
+
+    // [PERI_RENDER_TIMING] 帧计时起点
+    let frame_t0 = if render_timing_enabled() {
+        Some(Instant::now())
+    } else {
+        None
+    };
 
     let vm_generation = snapshot.generation;
 
@@ -193,6 +222,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             })
             .collect()
     };
+    // [PERI_RENDER_TIMING] hash 比对耗时
+    let t_hash = Instant::now();
+    trace_phase(
+        "hash+detect",
+        frame_t0.unwrap_or(t_hash),
+        Some(&format!(
+            "items={items_len}, rebuilds={}",
+            rebuild_indices.len()
+        )),
+    );
 
     // 第二阶段：rebuild 需要更新的 slot——只有这些 VM 调用 vm_to_lines + build_wrap_map
     // [Phase 2] markdown_cache 在 slot 内部跨 rebuild 复用：即使 VM hash 变化（text 追加 token），
@@ -229,6 +268,15 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             slot.visual_rows = visual_rows;
         }
     }
+    // [PERI_RENDER_TIMING] rebuild 耗时（仅 rebuild_indices 非空时有意义）
+    let t_rebuild = Instant::now();
+    if !rebuild_indices.is_empty() {
+        trace_phase(
+            "rebuild",
+            t_hash,
+            Some(&format!("{} slots", rebuild_indices.len())),
+        );
+    }
 
     // 第三阶段：拼接 concat_wrap_map（累加 visual_offset 和 logical_idx）。
     // [Scheme D] 不再构建全量 core_lines——仅收集每个 slot 的 Arc<Vec<Line>> 引用
@@ -257,6 +305,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let slot_arcs_arc: Arc<Vec<Arc<Vec<Line<'static>>>>> = Arc::new(slot_arcs);
     let slot_offsets_arc: Arc<Vec<usize>> = Arc::new(slot_offsets);
     let concat_wrap_map_arc: Arc<Vec<WrappedLineInfo>> = Arc::new(concat_wrap_map);
+    // [PERI_RENDER_TIMING] concat 阶段耗时
+    let num_slots = slot_arcs_arc.len();
+    let t_concat = Instant::now();
+    trace_phase(
+        "concat",
+        t_rebuild,
+        Some(&format!(
+            "slots={num_slots}, logic_lines={total_logical_lines}, vis_rows={core_total_visual_rows}"
+        )),
+    );
 
     // ── 总视觉行数 = core + footer ──
     // [Why] 分片缓存命中后 core_total_visual_rows 已是 sum(slot.visual_rows)，无需 line_count。
@@ -494,6 +552,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     if viewport_has_footer {
         viewport_lines.extend(footer_lines.iter().cloned());
     }
+    // [PERI_RENDER_TIMING] 视口裁剪耗时
+    let t_viewport = Instant::now();
+    trace_phase(
+        "viewport",
+        t_concat,
+        Some(&format!("vp_lines={}", viewport_lines.len())),
+    );
 
     // Paragraph::scroll 偏移：core 内的偏移 = vp_first_offset
     // 视口完全在 footer 内时（scroll_y >= core_total_visual_rows），按 footer 内偏移
@@ -513,6 +578,12 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // View 的 area.width，内部 wrap 宽度 = area.width - 1 = vis_width，与
     // `total_visual_rows` / `wrap_map_cache` / `line_count(vis_width)` 的估算一致；
     // 右 padding 1 列留给 scrollbar thumb（post_component_draw 时绘制覆盖 padding 空白）。
+    // [PERI_RENDER_TIMING] 帧总耗时
+    trace_phase(
+        "frame-total",
+        frame_t0.unwrap_or(t_viewport),
+        Some(&format!("gen={vm_generation}")),
+    );
     element!(
         View(
             flex_direction: Direction::Vertical,

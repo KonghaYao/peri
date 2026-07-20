@@ -216,6 +216,86 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 ### Workflow 排障
 "0 agents, 0 tool calls"：确认 `npx --version` 或 `bun --version` 可用 → 重启。
 
+## E2E 测试（`e2e/`）
+
+基于 [tui-tester](https://github.com/KonghaYao/tui-tester)（tmux 黑盒方案），TypeScript + vitest。
+
+### 架构
+
+```
+e2e/
+├── tui-tester/          # Terminal E2E 测试框架（TmuxTester + SnapshotManager）
+├── helpers/
+│   ├── peri.ts          # launchPeri() / sendPrompt() / takePeriSnapshot()
+│   ├── recorder.ts      # index.jsonl 录制（writeAnsiSnapshot / appendToIndex / updateJudgeResult）
+│   └── judge.ts         # LLM-as-Judge（ANSI → OpenAI → 结构化检查清单）
+├── scripts/
+│   └── generate-report.ts  # 单文件 HTML 报告（unpkg ansi_up CDN）
+├── tests/
+│   ├── setup.ts            # 全局 setup（dotenv 加载 / tmux 检查清理 / testName 注入）
+│   └── smoke/              # 冒烟测试
+│   └── scenarios/          # 场景测试（流式+工具交错 / AskUserQuestion / Goal 续跑）
+├── recordings/             # 运行时生成（gitignored）
+│   ├── *.txt               # 纯文本快照（默认，人类可读）
+│   ├── *.ansi              # ANSI 原始屏幕（recorderConfig.ansi=true 时生成）
+│   └── index.jsonl         # 录制索引
+├── .env.example            # Judge 环境变量模板
+├── .env                    # 实际配置（gitignored）
+└── package.json
+```
+
+### 数据流
+
+```
+TmuxTester.start() → tmux new-session → dev.sh → cargo run -p peri-tui
+    ↓
+sendPrompt("hello") → tmux send-keys → crossterm KeyEvent → ratatui-kit
+    ↓
+takePeriSnapshot() → tmux capture-pane -p -e → ANSI 文件 + index.jsonl
+    ↓
+judge({ansiRaw, criteria}) → OpenAI chat.completions → JudgeResult {pass, checks[]}
+    ↓
+generate-report.ts → 读 index.jsonl → 单文件 HTML（ansi_up 渲染）
+```
+
+### 关键决策
+
+- **纯黑盒**：不测试 ratatui-kit 组件内部，只测 tmux 下的真实 TUI 行为
+- **每测试重启 peri**：避免跨测试 session 状态污染（`afterEach` 清理 tmux session）
+- **LLM judge 是兜底**：日常用字符串匹配，复杂场景才用 judge；judge 失败不阻断测试
+- **录制 = 独立存储**：不与 vitest reporter 耦合，ANSI 文件 + index.jsonl 自包含
+- **单文件 HTML 报告**：unpkg CDN 加载 ansi_up，所有数据内联
+- **tui-tester 保持专一**：LLM judge / HTML 报告 / peri helper 都在 e2e/ 层，不改 tui-tester
+
+### 命令
+
+- `npx vitest run tests/<path>.test.ts`：**始终跑单个测试**——全量跑耗时 200s+ 且消耗 LLM Judge API token
+- `npm run test`：全量（仅发布前使用）
+- `npm run report`：手动生成 HTML 报告
+- `npx tsx scripts/generate-report.ts --watch`：监听 index.jsonl 变化自动刷新报告
+
+> **详细开发指南见 `e2e/CLAUDE.md`**（含常见陷阱：按键名、Judge 正向断言、面板交互等）
+
+### 环境变量（`.env`）
+
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `OPENAI_API_KEY` | 是 | Judge 调用的 API key |
+| `OPENAI_BASE_URL` | 否 | API 端点（默认 OpenAI） |
+| `JUDGE_MODEL` | 否 | Judge 模型（默认 gpt-4.1-mini） |
+
+### 断言模式
+
+1. **字符串匹配**（日常）：`expect(screen.text).toContain("hello")`
+2. **LLM judge**（复杂场景）：
+```ts
+const result = await judge({
+  ansiRaw: capture.raw,
+  criteria: ["消息区应有回复内容", "状态栏应显示上下文用量"]
+});
+// result.pass: boolean, result.checks: [{criterion, pass, detail}]
+```
+
 ## 陷阱速查
 
 ### Agent 循环

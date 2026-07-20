@@ -152,6 +152,9 @@ pub struct AppConfig {
     /// 流式渲染模式：streaming / block / none
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub streaming_mode: Option<String>,
+    /// 消息区滚动绘制帧率：60 | 30 | 20。None=默认 20fps（50ms）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll_fps: Option<u32>,
     /// 是否在消息流中显示缓存命中率过低警告
     #[serde(default = "default_show_cache_warning")]
     pub show_cache_warning: bool,
@@ -264,6 +267,7 @@ impl Default for AppConfig {
             claude_md_excludes: None,
             diff_enabled: false,
             streaming_mode: None,
+            scroll_fps: None,
             show_cache_warning: true,
             betas: BetasConfig::default(),
             theme: None,

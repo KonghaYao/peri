@@ -15,7 +15,7 @@ use crate::kit::atoms::{
 };
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use fluent_bundle::FluentValue;
-use peri_acp::provider::config::ProviderConfig;
+use peri_acp::provider::config::{ProviderConfig, ProviderModels};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -34,10 +34,12 @@ use std::time::{Duration, Instant};
 /// Login 面板操作模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoginPanelMode {
-    /// 浏览模式：上下导航 + Enter 激活 + E 编辑
+    /// 浏览模式：上下导航 + Enter 激活 + E/Ctrl+N/Ctrl+D 编辑/新建/删除
     Browse,
     /// 编辑模式：文本编辑 + 字段导航 + Ctrl+S 保存 + Esc 放弃
     Edit,
+    /// 删除确认模式：Enter 确认删除 + Esc 取消
+    ConfirmDelete,
 }
 
 /// 编辑模式下可编辑的字段
@@ -118,6 +120,19 @@ impl LoginEditState {
         }
     }
 
+    fn default_empty() -> Self {
+        Self {
+            original_provider_id: String::new(),
+            provider_type: "anthropic".to_string(),
+            provider_id: String::new(),
+            api_key: String::new(),
+            base_url: String::new(),
+            opus_model: String::new(),
+            sonnet_model: String::new(),
+            haiku_model: String::new(),
+        }
+    }
+
     fn field_value(&self, field: LoginEditField) -> &str {
         match field {
             LoginEditField::ProviderType => &self.provider_type,
@@ -182,6 +197,21 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
 
+            // ConfirmDelete 模式：优先处理（不依赖 mode match）
+            if *mode.read() == LoginPanelMode::ConfirmDelete {
+                match key.code {
+                    KeyCode::Enter => {
+                        delete_provider(*cursor.read());
+                        *mode.write() = LoginPanelMode::Browse;
+                    }
+                    _ => {
+                        // Esc 或任意其他键：取消删除
+                        *mode.write() = LoginPanelMode::Browse;
+                    }
+                }
+                return EventResult::Consumed;
+            }
+
             let current_mode = *mode.read();
 
             match current_mode {
@@ -196,6 +226,19 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         let mut c = cursor.write();
                         if latest > 0 {
                             *c = next_selection(*c, latest);
+                        }
+                    }
+                    // Ctrl+N：新建 provider（进入编辑模式，空表单）
+                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        *edit_state.write() = Some(LoginEditState::default_empty());
+                        *edit_focus.write() = LoginEditField::ProviderType;
+                        *edit_cursor.write() = 0;
+                        *mode.write() = LoginPanelMode::Edit;
+                    }
+                    // Ctrl+D：删除当前选中的 provider（进入确认模式）
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if count > 0 {
+                            *mode.write() = LoginPanelMode::ConfirmDelete;
                         }
                     }
                     // E 或 Ctrl+E：进入编辑模式
@@ -284,6 +327,9 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         &key,
                     );
                 }
+                LoginPanelMode::ConfirmDelete => {
+                    // 在 match 之前已处理并 return；编译器需要匹配臂以保持穷尽性
+                }
             }
             EventResult::Consumed
         }
@@ -311,11 +357,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
             if providers.is_empty() {
                 lines.push(Line::from(vec![Span::styled(
-                    "  No providers configured",
-                    Style::new().fg(muted),
-                )]));
-                lines.push(Line::from(vec![Span::styled(
-                    "  Run setup wizard or edit ~/.peri/settings.json",
+                    format!("  {}", i18n::tr("login-empty-hint")),
                     Style::new().fg(muted),
                 )]));
             } else {
@@ -383,6 +425,8 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     ),
                     ("Enter".to_string(), i18n::tr("hint-login-activate")),
                     ("E".to_string(), i18n::tr("hint-login-edit")),
+                    ("Ctrl+N".to_string(), i18n::tr("hint-login-new")),
+                    ("Ctrl+D".to_string(), i18n::tr("hint-login-delete")),
                     ("Esc".to_string(), i18n::tr("hint-login-close")),
                 ],
                 dim,
@@ -395,12 +439,19 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 let ef = *edit_focus.read();
                 let ec = *edit_cursor.read();
 
+                let is_new = es.original_provider_id.is_empty();
+                let title_key = if is_new {
+                    "login-panel-title-new"
+                } else {
+                    "login-panel-title-edit"
+                };
+                let title_text = if is_new {
+                    format!("  {}", i18n::tr(title_key))
+                } else {
+                    format!("  {}: {}", i18n::tr(title_key), es.original_provider_id)
+                };
                 lines.push(Line::from(vec![Span::styled(
-                    format!(
-                        "  {}: {}",
-                        i18n::tr("login-panel-title-edit"),
-                        es.original_provider_id
-                    ),
+                    title_text,
                     Style::new().fg(focus_color).bold(),
                 )]));
                 lines.push(Line::from(""));
@@ -502,6 +553,36 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 )]));
                 *mode.write() = LoginPanelMode::Browse;
             }
+        }
+        LoginPanelMode::ConfirmDelete => {
+            let sel = *cursor.read();
+            let provider_name = providers
+                .get(sel)
+                .map(|p| p.id.as_str())
+                .unwrap_or("(unknown)");
+
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {}", i18n::tr("login-panel-title-confirm-delete")),
+                Style::new().fg(semantic.status.error).bold(),
+            )]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                format!("  Provider: {}", provider_name),
+                Style::new().fg(text_color),
+            )]));
+            lines.push(Line::from(vec![Span::styled(
+                i18n::tr("login-confirm-delete-warning"),
+                Style::new().fg(semantic.status.warning),
+            )]));
+            lines.push(Line::from(""));
+            lines.push(make_hint_line_for_login(
+                vec![
+                    ("Enter".to_string(), i18n::tr("login-confirm-delete")),
+                    ("Esc".to_string(), i18n::tr("hint-login-back")),
+                ],
+                dim,
+                focus_color,
+            ));
         }
     }
 
@@ -776,90 +857,194 @@ fn handle_login_paste(
     *edit_cursor = pos + paste_len;
 }
 
-/// 保存编辑结果：写 PERI_CONFIG_HANDLE + 持久化 + 刷新 PROVIDER_LIST
+/// 保存编辑结果：写 PERI_CONFIG_HANDLE + 持久化 + 刷新 PROVIDER_LIST + 推送 ACP
 fn save_login_edit(es: &LoginEditState) {
     let Some(handle) = PERI_CONFIG_HANDLE.get() else {
         return;
     };
+
+    let is_new = es.original_provider_id.is_empty();
+
     {
         let mut cfg = handle.write();
-        if let Some(provider) = cfg
-            .config
-            .providers
-            .iter_mut()
-            .find(|p| p.id == es.original_provider_id)
-        {
-            provider.provider_type = es.provider_type.clone();
-            provider.id = es.provider_id.clone();
-            provider.api_key = es.api_key.clone();
-            provider.base_url = es.base_url.clone();
-            provider.models.opus = es.opus_model.clone();
-            provider.models.sonnet = es.sonnet_model.clone();
-            provider.models.haiku = es.haiku_model.clone();
 
-            // 如果 id 变化且该 provider 是当前激活的，同步更新 active_provider_id
-            if cfg.config.active_provider_id == es.original_provider_id
-                && es.provider_id != es.original_provider_id
+        if is_new {
+            // New 路径：校验 provider_id 非空后 push 新 ProviderConfig，自动激活
+            if es.provider_id.trim().is_empty() {
+                *NOTIFICATION.state().write() = Some(Notification {
+                    message: i18n::tr("app-provider-name-empty"),
+                    until: Instant::now() + Duration::from_secs(2),
+                });
+                return;
+            }
+            let new_config = ProviderConfig {
+                provider_type: es.provider_type.clone(),
+                id: es.provider_id.clone(),
+                api_key: es.api_key.clone(),
+                base_url: es.base_url.clone(),
+                models: ProviderModels {
+                    opus: es.opus_model.clone(),
+                    sonnet: es.sonnet_model.clone(),
+                    haiku: es.haiku_model.clone(),
+                },
+                ..Default::default()
+            };
+            cfg.config.providers.push(new_config);
+            cfg.config.active_provider_id = es.provider_id.clone();
+        } else {
+            // Edit 路径：查找并更新已有 provider
+            if let Some(provider) = cfg
+                .config
+                .providers
+                .iter_mut()
+                .find(|p| p.id == es.original_provider_id)
             {
-                cfg.config.active_provider_id = es.provider_id.clone();
+                provider.provider_type = es.provider_type.clone();
+                provider.id = es.provider_id.clone();
+                provider.api_key = es.api_key.clone();
+                provider.base_url = es.base_url.clone();
+                provider.models.opus = es.opus_model.clone();
+                provider.models.sonnet = es.sonnet_model.clone();
+                provider.models.haiku = es.haiku_model.clone();
+
+                // 如果 id 变化且该 provider 是当前激活的，同步更新 active_provider_id
+                if cfg.config.active_provider_id == es.original_provider_id
+                    && es.provider_id != es.original_provider_id
+                {
+                    cfg.config.active_provider_id = es.provider_id.clone();
+                }
             }
         }
+
         let snap = cfg.clone();
         drop(cfg);
 
-        // 刷新 PROVIDER_LIST
-        {
-            let cfg = handle.read();
-            let updated_providers: Vec<ProviderSummary> = cfg
-                .config
-                .providers
-                .iter()
-                .map(|p| {
-                    let env_key = format!("{}_API_KEY", p.provider_type.to_uppercase());
-                    let has_api_key = !p.api_key.is_empty() || std::env::var(env_key).is_ok();
-                    let base_url = if p.base_url.is_empty() {
-                        None
-                    } else {
-                        Some(p.base_url.clone())
-                    };
-                    ProviderSummary {
-                        id: p.id.clone(),
-                        provider_type: p.provider_type.clone(),
-                        is_active: p.id == cfg.config.active_provider_id,
-                        has_api_key,
-                        base_url,
-                    }
-                })
-                .collect();
-            *PROVIDER_LIST.state().write() = updated_providers;
-        }
+        // 刷新 PROVIDER_LIST（去重提取）
+        refresh_provider_list();
 
         // 持久化
-        match crate::config::save(&snap) {
-            Ok(()) => {
-                *NOTIFICATION.state().write() = Some(Notification {
-                    message: i18n::tr("config-saved").to_string(),
-                    until: Instant::now() + Duration::from_secs(1),
-                });
+        persist_and_notify(&snap);
+
+        // 推送 ACP（使变更立即生效）
+        if let Some(client) = ACP_CLIENT_HANDLE.get() {
+            tokio::spawn(async move {
+                if let Err(e) = client.update_config(&snap).await {
+                    tracing::warn!(error = %e, "LoginPanel: update_config push failed");
+                }
+            });
+        }
+    }
+
+    if is_new {
+        tracing::info!(
+            provider_id = %es.provider_id,
+            "LoginPanel: new provider created"
+        );
+    } else {
+        tracing::info!(
+            provider_id = %es.original_provider_id,
+            "LoginPanel: provider edit saved"
+        );
+    }
+}
+
+/// 从 PERI_CONFIG_HANDLE 刷新 PROVIDER_LIST atom（避免多处重复 25 行）
+fn refresh_provider_list() {
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return;
+    };
+    let cfg = handle.read();
+    let updated_providers: Vec<ProviderSummary> = cfg
+        .config
+        .providers
+        .iter()
+        .map(|p| {
+            let env_key = format!("{}_API_KEY", p.provider_type.to_uppercase());
+            let has_api_key = !p.api_key.is_empty() || std::env::var(env_key).is_ok();
+            let base_url = if p.base_url.is_empty() {
+                None
+            } else {
+                Some(p.base_url.clone())
+            };
+            ProviderSummary {
+                id: p.id.clone(),
+                provider_type: p.provider_type.clone(),
+                is_active: p.id == cfg.config.active_provider_id,
+                has_api_key,
+                base_url,
             }
-            Err(e) => {
-                *NOTIFICATION.state().write() = Some(Notification {
-                    message: i18n::tr_args(
-                        "config-save-failed",
-                        &[(
-                            "error".to_string(),
-                            FluentValue::from(e.to_string().as_str()),
-                        )],
-                    ),
-                    until: Instant::now() + Duration::from_secs(2),
+        })
+        .collect();
+    *PROVIDER_LIST.state().write() = updated_providers;
+}
+
+/// 持久化 PeriConfig 快照并显示通知
+fn persist_and_notify(snap: &crate::config::PeriConfig) {
+    match crate::config::save(snap) {
+        Ok(()) => {
+            *NOTIFICATION.state().write() = Some(Notification {
+                message: i18n::tr("config-saved").to_string(),
+                until: Instant::now() + Duration::from_secs(1),
+            });
+        }
+        Err(e) => {
+            *NOTIFICATION.state().write() = Some(Notification {
+                message: i18n::tr_args(
+                    "config-save-failed",
+                    &[(
+                        "error".to_string(),
+                        FluentValue::from(e.to_string().as_str()),
+                    )],
+                ),
+                until: Instant::now() + Duration::from_secs(2),
+            });
+        }
+    }
+}
+
+/// 删除当前选中的 provider：从 PERI_CONFIG_HANDLE 移除 + 刷新 + 持久化 + 推送 ACP
+fn delete_provider(selected_index: usize) {
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return;
+    };
+
+    let provider_id = {
+        let provider_state = PROVIDER_LIST.state();
+        let store_read = provider_state.read();
+        match store_read.get(selected_index) {
+            Some(p) => p.id.clone(),
+            None => return,
+        }
+    };
+
+    let removed = {
+        let mut cfg = handle.write();
+        let len_before = cfg.config.providers.len();
+        cfg.config.providers.retain(|p| p.id != provider_id);
+        let removed = cfg.config.providers.len() < len_before;
+        let snap = cfg.clone();
+        drop(cfg);
+
+        if removed {
+            refresh_provider_list();
+            persist_and_notify(&snap);
+
+            // 推送 ACP
+            if let Some(client) = ACP_CLIENT_HANDLE.get() {
+                tokio::spawn(async move {
+                    if let Err(e) = client.update_config(&snap).await {
+                        tracing::warn!(error = %e, "LoginPanel: update_config push failed after delete");
+                    }
                 });
             }
         }
+
+        removed
+    };
+
+    if removed {
+        tracing::info!(provider_id = %provider_id, "LoginPanel: provider deleted");
     }
-    tracing::info!(
-        provider_id = %es.original_provider_id,
-        "LoginPanel: provider edit saved"
-    );
 }
 
 // ── 渲染辅助函数 ──────────────────────────────────────────────────────────────

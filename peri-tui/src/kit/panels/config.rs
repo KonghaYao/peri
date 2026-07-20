@@ -47,11 +47,13 @@ const ROW_1M_CONTEXT: usize = 3;
 const ROW_LANGUAGE: usize = 4;
 const ROW_ACTIVE_ALIAS: usize = 5;
 const ROW_PERMISSION_MODE: usize = 6;
+const ROW_SCROLL_FPS: usize = 7;
 
 const STREAMING_OPTS: &[&str] = &["streaming", "block", "none"];
 const LANGUAGE_OPTS: &[&str] = &["en", "zh-CN"];
 const ALIAS_OPTS: &[&str] = &["opus", "sonnet", "haiku"];
 const PERMISSION_OPTS: &[&str] = &["default", "accept-edit", "auto-mode", "bypass"];
+const FPS_OPTS: &[&str] = &["60", "30", "20"];
 
 const CONFIG_ROWS: &[(&str, RowType)] = &[
     ("config-field-diff", RowType::Toggle),
@@ -64,6 +66,7 @@ const CONFIG_ROWS: &[(&str, RowType)] = &[
         "config-field-permission-mode",
         RowType::Cycle(PERMISSION_OPTS),
     ),
+    ("config-field-scroll-fps", RowType::Cycle(FPS_OPTS)),
 ];
 
 #[component]
@@ -283,6 +286,19 @@ fn read_cycle_idx(row: usize, options: &[&str]) -> usize {
                 .unwrap_or("default");
             options.iter().position(|o| *o == cur).unwrap_or(0)
         }
+        ROW_SCROLL_FPS => {
+            let cur = PERI_CONFIG_HANDLE
+                .get()
+                .map(|h| {
+                    h.read()
+                        .config
+                        .scroll_fps
+                        .map(|fps| fps.to_string())
+                        .unwrap_or_else(|| "20".to_string())
+                })
+                .unwrap_or_else(|| "20".to_string());
+            options.iter().position(|o| *o == cur.as_str()).unwrap_or(0)
+        }
         _ => 0,
     }
 }
@@ -426,6 +442,32 @@ fn activate_row(row: usize, forward: bool) {
                     }
                     // permission_mode 不持久化到 settings.json（运行时状态）
                 }
+                ROW_SCROLL_FPS => {
+                    let mut cfg = handle.write();
+                    cfg.config.scroll_fps = Some(new_val.parse::<u32>().unwrap_or(20));
+                    let snap = cfg.clone();
+                    drop(cfg);
+                    match crate::config::save(&snap) {
+                        Ok(()) => {
+                            *NOTIFICATION.state().write() = Some(Notification {
+                                message: i18n::tr("config-saved").to_string(),
+                                until: Instant::now() + Duration::from_secs(1),
+                            });
+                        }
+                        Err(e) => {
+                            *NOTIFICATION.state().write() = Some(Notification {
+                                message: i18n::tr_args(
+                                    "config-save-failed",
+                                    &[(
+                                        "error".to_string(),
+                                        FluentValue::from(e.to_string().as_str()),
+                                    )],
+                                ),
+                                until: Instant::now() + Duration::from_secs(2),
+                            });
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -441,6 +483,9 @@ fn cycle_display_label(opt: &str) -> String {
         "none" => i18n::tr("config-streaming-value-none").to_string(),
         "en" => i18n::tr("config-language-value-en").to_string(),
         "zh-CN" => i18n::tr("config-language-value-zh").to_string(),
+        "60" => i18n::tr("config-fps-value-60").to_string(),
+        "30" => i18n::tr("config-fps-value-30").to_string(),
+        "20" => i18n::tr("config-fps-value-20").to_string(),
         other => other.to_string(),
     }
 }

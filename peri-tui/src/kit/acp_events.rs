@@ -15,6 +15,112 @@ use fluent_bundle::FluentValue;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
+// StreamingMode — 流式渲染模式控制
+// ---------------------------------------------------------------------------
+
+/// streaming_mode 配置映射。命名与 settings.json 中的值一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamingMode {
+    /// 逐 token 推送（默认行为）
+    Streaming,
+    /// 按 Markdown 块边界推送
+    Block,
+    /// 不推送中间内容，仅 TurnDone 时推送
+    None,
+}
+
+/// 从 PERI_CONFIG_HANDLE 即地读取当前 streaming_mode。
+/// 每次流式事件进入时调用——配置热切换即时生效。
+pub(crate) fn current_streaming_mode() -> StreamingMode {
+    let handle = match crate::kit::atoms::PERI_CONFIG_HANDLE.get() {
+        Some(h) => h,
+        None => return StreamingMode::Streaming,
+    };
+    let guard = match handle.try_read() {
+        Some(g) => g,
+        None => return StreamingMode::Streaming,
+    };
+    match guard.config.streaming_mode.as_deref() {
+        Some("block") => StreamingMode::Block,
+        Some("none") => StreamingMode::None,
+        _ => StreamingMode::Streaming,
+    }
+}
+
+/// 检测 full_text 中 since_chars 之后是否出现了 Markdown 块边界。
+///
+/// 块边界定义：
+/// - 两个连续换行（段落分隔）
+/// - 以 `#` 开头的行（标题）
+/// - 以 ``` 开头的行（代码块开始/结束）
+/// - 以 `---`、`***`、`___` 开头的行（水平线）
+///
+/// since_chars 为 0 时始终返回 true（首次推送）。
+fn has_md_block_boundary_since(full_text: &str, since_chars: usize) -> bool {
+    // 首次推送
+    if since_chars == 0 {
+        return true;
+    }
+
+    let chars: Vec<char> = full_text.chars().collect();
+    if since_chars >= chars.len() {
+        return false;
+    }
+
+    // 从 since_chars 开始逐字符扫描，检测块边界。
+    // 同时追踪行数——fallback：累计 ≥ 3 行时也返回 true，
+    // 防止无格式长段落导致 block 模式下 UI 永久冻结。
+    let mut i = since_chars;
+    let mut line_count = 0usize;
+    while i < chars.len() {
+        // 判断当前位置是否为一行的开头
+        let is_line_start = i == 0 || chars[i - 1] == '\n';
+
+        if is_line_start && i < chars.len() {
+            let ch = chars[i];
+
+            // 标题：以 # 开头（且后跟空格或行尾）
+            if ch == '#' {
+                let next_is_space_or_end = i + 1 >= chars.len() || chars[i + 1] == ' ';
+                if next_is_space_or_end {
+                    return true;
+                }
+            }
+
+            // 代码块边界：以 ``` 开头
+            if ch == '`' && i + 2 < chars.len() && chars[i + 1] == '`' && chars[i + 2] == '`' {
+                return true;
+            }
+
+            // 水平线：以 ---、***、___ 开头（三个相同字符）
+            if i + 2 < chars.len()
+                && chars[i] == chars[i + 1]
+                && chars[i + 1] == chars[i + 2]
+                && (ch == '-' || ch == '*' || ch == '_')
+            {
+                return true;
+            }
+        }
+
+        // 追踪换行：每遇到一个 \n 递增行计数
+        if chars[i] == '\n' {
+            line_count += 1;
+        }
+
+        // 段落边界：双换行 \n\n
+        if i > 0 && chars[i] == '\n' && i + 1 < chars.len() && chars[i + 1] == '\n' {
+            return true;
+        }
+
+        i += 1;
+    }
+
+    // Fallback：增量文本累计 ≥ 3 行时也刷新，防止单段长文本永不推送
+    // 2 个换行 = 至少 3 行（与 str::lines().count() >= 3 语义一致）
+    line_count >= 2
+}
+
+// ---------------------------------------------------------------------------
 // BridgeState — ACP 事件桥接内部状态
 // ---------------------------------------------------------------------------
 
@@ -52,6 +158,11 @@ pub struct BridgeState {
     /// 本轮用户提交的文本——TurnInterrupted 零产出回滚时用于恢复输入框。
     /// LocalUserBubble 到达时写入，TurnInterrupted 零产出时消费并清空。
     pub last_submitted_text: Option<String>,
+    /// streaming_mode=block 时追踪上次推送后主 agent 文本的字符数。
+    /// 用于 `has_md_block_boundary_since` 的比较基点。
+    pub last_pushed_text_len: usize,
+    /// streaming_mode=block 时追踪上次推送后主 agent 推理的字符数。
+    pub last_pushed_reasoning_len: usize,
 }
 
 impl BridgeState {
@@ -60,8 +171,26 @@ impl BridgeState {
     /// 用于 BudgetWarning / SystemNotification / BgCallbackBubble / TurnDone
     /// 四个需要保证时序正确性的位置：在注入中间事件或结束当前 turn 之前，
     /// 必须先将已产出的 AI 内容归档到 committed，确保消息流时间顺序一致。
+    ///
+    /// 安全守卫：如果 current_turn 中存在正在运行的 SubAgentAccumulator，
+    /// 跳过 flush 以避免清除容器——否则后续工具事件无法路由到已清除的容器，
+    /// 造成 SubAgentGroup 内部卡片空白（具体现象：外壳可见但内部工具条目缺失）。
+    /// 回归参考：与 SystemNotification/BudgetWarning 的时序竞态。
     fn flush_current_turn(&mut self) {
         if !self.current_turn.committed && !self.current_turn.is_empty() {
+            let has_running_subagent = self.current_turn.subagents.iter().any(|s| s.is_running);
+            if has_running_subagent {
+                tracing::debug!(
+                    running_count = self
+                        .current_turn
+                        .subagents
+                        .iter()
+                        .filter(|s| s.is_running)
+                        .count(),
+                    "flush_current_turn: 跳过 flush——存在正在运行的 SubAgentAccumulator"
+                );
+                return;
+            }
             for vm in self.current_turn.view_models() {
                 self.committed.push_back(vm.clone());
             }
@@ -92,14 +221,29 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 }
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
-                push_view_models(state);
+                // SubAgent 文本：Streaming/Block→always push, None→skip
+                // 不做块边界检测——subagent 输出相对短且不是主要闪烁来源。
+                if current_streaming_mode() != StreamingMode::None {
+                    push_view_models(state);
+                }
             } else {
                 state
                     .current_turn
                     .append_text(&tc.text, tc.message_id.as_deref());
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
-                push_view_models(state);
+                let should_push = match current_streaming_mode() {
+                    StreamingMode::Streaming => true,
+                    StreamingMode::Block => has_md_block_boundary_since(
+                        &state.current_turn.text,
+                        state.last_pushed_text_len,
+                    ),
+                    StreamingMode::None => false,
+                };
+                if should_push {
+                    state.last_pushed_text_len = state.current_turn.text.chars().count();
+                    push_view_models(state);
+                }
             }
             push_acp_state(state);
         }
@@ -116,7 +260,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 }
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
-                push_view_models(state);
+                // SubAgent 推理：Streaming/Block→always push, None→skip
+                if current_streaming_mode() != StreamingMode::None {
+                    push_view_models(state);
+                }
             } else {
                 state
                     .current_turn
@@ -127,7 +274,18 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 );
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
-                push_view_models(state);
+                let should_push = match current_streaming_mode() {
+                    StreamingMode::Streaming => true,
+                    StreamingMode::Block => has_md_block_boundary_since(
+                        &state.current_turn.reasoning,
+                        state.last_pushed_reasoning_len,
+                    ),
+                    StreamingMode::None => false,
+                };
+                if should_push {
+                    state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+                    push_view_models(state);
+                }
             }
             push_acp_state(state);
         }
@@ -147,6 +305,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     state.variant = 1;
                     state.phase = SessionPhase::PromptRunning;
                     push_view_models(state);
+                    // block 模式：ToolStarted 时已推送缓冲文本到视图，
+                    // 同步追踪变量，确保工具执行完毕后新 TextChunk 的块边界检测从正确位置开始。
+                    state.last_pushed_text_len = state.current_turn.text.chars().count();
+                    state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
                 } else {
                     // 同步 sub-agent: 路由到 SubAgentAccumulator
                     let routed = state.current_turn.start_subagent_tool(
@@ -158,11 +320,31 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                         ),
                     );
                     if !routed {
-                        tracing::trace!(agent_id, tool_id = %ts.tool_id, "kit bridge: subagent tool start has no active group");
+                        // [诊断] 收集当前所有 SubAgentAccumulator 的 agent_id
+                        let registered_ids: Vec<&str> = state.current_turn.subagent_ids();
+                        tracing::warn!(
+                            target: "tui.acp_events",
+                            agent_id = ?agent_id,
+                            tool_id = %ts.tool_id,
+                            tool_name = %ts.tool_name,
+                            routed = false,
+                            registered_count = registered_ids.len(),
+                            registered_agent_ids = ?registered_ids,
+                            "subagent tool start NOT ROUTED to SubAgentGroup"
+                        );
+                        // [修复] 兜底：路由失败时将工具卡作为普通 ToolCard 展示，
+                        // 确保第二个 SubAgent 的工具调用不会完全丢失
+                        state.current_turn.start_tool(ToolCardAccumulator::new(
+                            ts.tool_id.clone(),
+                            ts.tool_name.clone(),
+                            ts.input_summary.clone(),
+                        ));
                     }
                     state.variant = 1;
                     state.phase = SessionPhase::PromptRunning;
                     push_view_models(state);
+                    state.last_pushed_text_len = state.current_turn.text.chars().count();
+                    state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
                 }
             } else {
                 state.current_turn.start_tool(ToolCardAccumulator::new(
@@ -173,6 +355,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
+                state.last_pushed_text_len = state.current_turn.text.chars().count();
+                state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
             }
             push_acp_state(state);
         }
@@ -193,6 +377,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     state.variant = 1;
                     state.phase = SessionPhase::PromptRunning;
                     push_view_models(state);
+                    state.last_pushed_text_len = state.current_turn.text.chars().count();
+                    state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
                 } else {
                     // 同步 sub-agent: 路由到 SubAgentAccumulator
                     let routed = state.current_turn.end_subagent_tool(
@@ -207,6 +393,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     state.variant = 1;
                     state.phase = SessionPhase::PromptRunning;
                     push_view_models(state);
+                    state.last_pushed_text_len = state.current_turn.text.chars().count();
+                    state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
                 }
             } else {
                 state
@@ -215,6 +403,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
+                state.last_pushed_text_len = state.current_turn.text.chars().count();
+                state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
             }
             push_acp_state(state);
         }
@@ -239,6 +429,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             state.phase = SessionPhase::ReplayingHistory;
             state.variant = 0;
             state.current_turn.reset();
+            state.last_pushed_text_len = 0;
+            state.last_pushed_reasoning_len = 0;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -249,6 +441,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             }
             state.variant = 0;
             state.current_turn.reset();
+            state.last_pushed_text_len = 0;
+            state.last_pushed_reasoning_len = 0;
             push_view_models(state);
             push_acp_state(state);
         }
@@ -259,6 +453,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             // buffered_text 已由 LocalUserBubble 事件提前入队 committed，
             // TurnDone 不再代为搬运。
             state.flush_current_turn();
+            state.last_pushed_text_len = 0;
+            state.last_pushed_reasoning_len = 0;
             state.variant = 0;
 
             state.phase = SessionPhase::Idle;
@@ -312,6 +508,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 // 清除排队输入缓冲——取消后不应继续处理排队的输入
                 INPUT_BUFFER.state().write().clear();
                 state.current_turn = CurrentTurn::new();
+                state.last_pushed_text_len = 0;
+                state.last_pushed_reasoning_len = 0;
                 state.variant = 0;
                 state.phase = SessionPhase::Idle;
                 push_view_models(state);
@@ -327,6 +525,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 }
             }
             state.current_turn = CurrentTurn::new();
+            state.last_pushed_text_len = 0;
+            state.last_pushed_reasoning_len = 0;
             state.variant = 0;
             state.phase = SessionPhase::Idle;
             push_view_models(state);
@@ -342,6 +542,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 }
             }
             state.current_turn.reset();
+            state.last_pushed_text_len = 0;
+            state.last_pushed_reasoning_len = 0;
             state.variant = 0;
             state.phase = SessionPhase::Idle;
             push_view_models(state);
@@ -536,6 +738,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             agent_name,
             is_background,
         } => {
+            tracing::info!(
+                target: "tui.acp_events",
+                agent_id = %agent_id,
+                agent_name = %agent_name,
+                is_background = %is_background,
+                existing_subagent_count = state.current_turn.subagent_ids().len(),
+                "SubagentStarted: creating SubAgentGroup container"
+            );
             state
                 .current_turn
                 .start_subagent(agent_id.clone(), agent_name.clone());
@@ -549,6 +759,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
         SubagentStopped { agent_id } => {
+            tracing::info!(
+                target: "tui.acp_events",
+                agent_id = %agent_id,
+                "SubagentStopped: marking SubAgentGroup as done"
+            );
             state.current_turn.stop_subagent(agent_id);
             // 清理后台 agent_id 注册
             BG_AGENT_IDS.state().write().remove(agent_id);
@@ -1229,6 +1444,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         dispatch_and_notify(
@@ -1383,6 +1600,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // 第一轮：stream one text → TurnDone
@@ -1437,6 +1656,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // 往 current_turn 写入一条 assistant 文本
@@ -1486,6 +1707,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         dispatch_and_notify(
@@ -1532,6 +1755,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // push_view_models: 用 BridgeState 数据（空 committed + 空 current_turn）→ 空 items
@@ -1620,6 +1845,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         use peri_acp_types::event_data::Prediction;
@@ -1655,6 +1882,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         let messages_json = serde_json::json!([
@@ -1693,6 +1922,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // === Turn 1: user bubble, reasoning + text → TurnDone ===
@@ -1836,6 +2067,8 @@ mod tests {
             active_session_id: "test-session".to_string(),
             compact_just_completed: true,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
@@ -1861,6 +2094,8 @@ mod tests {
             active_session_id: "test-session".to_string(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
         state
             .current_turn
@@ -1892,6 +2127,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // 模拟 TurnDone：归档 + 重置 phase/loading
@@ -1936,6 +2173,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // 模拟 TurnSuspended：归档 + 重置 phase/loading
@@ -1982,6 +2221,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // SubagentStarted 设置 phase=PromptRunning
@@ -2034,6 +2275,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         dispatch_and_notify(&mut state, &AcpEventData::PromptSubmitted);
@@ -2060,6 +2303,8 @@ mod tests {
             active_session_id: String::new(),
             compact_just_completed: false,
             last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
         };
 
         // 启动同步 sub-agent
@@ -2114,5 +2359,69 @@ mod tests {
             }
             other => panic!("expected TuiSubAgentGroup, got {other:?}"),
         }
+    }
+
+    // ── has_md_block_boundary_since 单元测试 ──
+
+    #[test]
+    fn test_boundary_since_chars_zero_always_true() {
+        assert!(
+            has_md_block_boundary_since("hello", 0),
+            "since_chars=0 应始终返回 true"
+        );
+    }
+
+    #[test]
+    fn test_boundary_empty_string() {
+        assert!(!has_md_block_boundary_since("", 1), "空字符串不应触发边界");
+    }
+
+    #[test]
+    fn test_boundary_paragraph_double_newline() {
+        let text = "first paragraph\n\nsecond paragraph";
+        // since_chars=0 已推送；从字符 1 开始检查应有双换行
+        assert!(has_md_block_boundary_since(text, 1), "双换行应触发段落边界");
+    }
+
+    #[test]
+    fn test_boundary_code_block() {
+        let text = "some text\n```rust\nfn main() {}\n```";
+        // 从 "some" 开始检查
+        assert!(has_md_block_boundary_since(text, 1), "代码块起止应触发边界");
+    }
+
+    #[test]
+    fn test_boundary_heading() {
+        let text = "intro\n# Heading\ncontent";
+        assert!(has_md_block_boundary_since(text, 1), "标题应触发边界");
+    }
+
+    #[test]
+    fn test_boundary_horizontal_rule() {
+        let text = "text\n---\nmore";
+        assert!(has_md_block_boundary_since(text, 1), "水平线应触发边界");
+    }
+
+    #[test]
+    fn test_boundary_no_boundary_in_tail() {
+        let text = "one line of text\nanother line without boundary";
+        // since_chars 越过已推送部分，尾部无边界
+        let pushed = "one line of text".chars().count();
+        assert!(
+            !has_md_block_boundary_since(text, pushed),
+            "无分隔的连续文本不应触发边界"
+        );
+    }
+
+    // ── current_streaming_mode 测试 ──
+
+    /// 默认（未设置 streaming_mode 或 PERI_CONFIG_HANDLE 未初始化）应返回 Streaming。
+    #[test]
+    fn test_mode_default_is_streaming() {
+        // PERI_CONFIG_HANDLE 在测试中未初始化 → get() 返回 None → fallback 到 Streaming
+        assert!(
+            matches!(current_streaming_mode(), StreamingMode::Streaming),
+            "未设置 streaming_mode 时应默认 Streaming"
+        );
     }
 }

@@ -17,7 +17,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, error};
 
-use crate::{event::map_event, transport::AcpTransport};
+use crate::{event::map_event, event::AcpEvent, transport::AcpTransport};
 
 /// Receives [`ExecutorEvent`]s produced during agent execution and routes them
 /// to the appropriate transport.
@@ -106,6 +106,12 @@ impl EventSink for TransportEventSink {
             .get(session_id)
             .map(|r| r.clone())
             .unwrap_or_default();
+        tracing::debug!(
+            target: "acp.event_sink",
+            session_id = %session_id,
+            caps_found = self.caps_registry.contains_key(session_id),
+            "push_event: caps registry lookup"
+        );
         let mapped = map_event(event, context_window, &caps);
 
         for m in mapped {
@@ -125,16 +131,73 @@ impl EventSink for TransportEventSink {
                     "update": update_value,
                 });
                 // Inject _peri metadata for TUI consumption (source_agent_id)
-                if caps.source_agent_id {
-                    if let Some(ref aid) = m.source_agent_id {
-                        if let serde_json::Value::Object(ref mut map) = payload {
-                            map.insert("_peri".to_string(), json!({ "sourceAgentId": aid }));
-                        }
+                tracing::debug!(
+                    target: "acp.event_sink",
+                    session_id = %session_id,
+                    caps.source_agent_id = %caps.source_agent_id,
+                    caps.agent_event = %caps.agent_event,
+                    mapped.source_agent_id = ?m.source_agent_id,
+                    "push_event: caps check for source_agent_id injection"
+                );
+                // _peri.sourceAgentId 是事件路由语义字段，不应受 caps gating——
+                // 否则 SubAgent 内部工具事件无法路由到正确的卡片容器。
+                // MappedEvent 已有该字段时，无条件注入。
+                if let Some(ref aid) = m.source_agent_id {
+                    if let serde_json::Value::Object(ref mut map) = payload {
+                        map.insert("_peri".to_string(), json!({ "sourceAgentId": aid }));
                     }
                 }
                 let _ = self
                     .transport
                     .send_notification("session/update", payload)
+                    .await;
+            }
+        }
+
+        // 2. peri/agent_event — TUI 专用通知（Category ③）
+        // SubagentStarted/SubagentStopped 等事件不产生 SessionUpdate，
+        // 但必须通过 peri/agent_event 通道送达 TUI 以创建/销毁 SubAgentGroup 容器。
+        if caps.agent_event {
+            let acp_event = match event {
+                ExecutorEvent::SubagentStarted {
+                    agent_name,
+                    instance_id,
+                    is_background,
+                } => Some(AcpEvent::SubagentStarted {
+                    agent_name: agent_name.clone(),
+                    instance_id: instance_id.clone(),
+                    is_background: *is_background,
+                }),
+                ExecutorEvent::SubagentStopped {
+                    agent_name,
+                    result,
+                    is_error,
+                    instance_id,
+                } => Some(AcpEvent::SubagentStopped {
+                    agent_name: agent_name.clone(),
+                    result: result.clone(),
+                    is_error: *is_error,
+                    instance_id: instance_id.clone(),
+                }),
+                _ => None,
+            };
+            if let Some(acp_event) = acp_event {
+                let event_json = match serde_json::to_string(&acp_event) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        error!(error = %e, "EventSink: serialize AcpEvent failed");
+                        return;
+                    }
+                };
+                let _ = self
+                    .transport
+                    .send_notification(
+                        "peri/agent_event",
+                        json!({
+                            "sessionId": session_id,
+                            "event_json": event_json,
+                        }),
+                    )
                     .await;
             }
         }
