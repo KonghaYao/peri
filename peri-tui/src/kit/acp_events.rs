@@ -62,57 +62,64 @@ fn has_md_block_boundary_since(full_text: &str, since_chars: usize) -> bool {
         return true;
     }
 
-    let chars: Vec<char> = full_text.chars().collect();
-    if since_chars >= chars.len() {
+    // 将 since_chars（字符偏移）转换为字节偏移
+    let start_byte = full_text
+        .char_indices()
+        .nth(since_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(full_text.len());
+
+    // 无增量文本
+    if start_byte >= full_text.len() {
         return false;
     }
+
+    let new = &full_text[start_byte..];
 
     // 从 since_chars 开始逐字符扫描，检测块边界。
     // 同时追踪行数——fallback：累计 ≥ 3 行时也返回 true，
     // 防止无格式长段落导致 block 模式下 UI 永久冻结。
-    let mut i = since_chars;
+    let mut is_line_start = start_byte == 0 || full_text.as_bytes()[start_byte - 1] == b'\n';
+
+    let mut chars = new.char_indices().peekable();
     let mut line_count = 0usize;
-    while i < chars.len() {
-        // 判断当前位置是否为一行的开头
-        let is_line_start = i == 0 || chars[i - 1] == '\n';
 
-        if is_line_start && i < chars.len() {
-            let ch = chars[i];
-
+    while let Some((_byte_i, ch)) = chars.next() {
+        if is_line_start {
             // 标题：以 # 开头（且后跟空格或行尾）
-            if ch == '#' {
-                let next_is_space_or_end = i + 1 >= chars.len() || chars[i + 1] == ' ';
-                if next_is_space_or_end {
+            if ch == '#' && chars.peek().is_none_or(|(_, c)| *c == ' ') {
+                return true;
+            }
+
+            // 代码块边界：以 ``` 开头
+            if ch == '`' {
+                let mut peek = chars.clone();
+                if let (Some((_, '`')), Some((_, '`'))) = (peek.next(), peek.next()) {
                     return true;
                 }
             }
 
-            // 代码块边界：以 ``` 开头
-            if ch == '`' && i + 2 < chars.len() && chars[i + 1] == '`' && chars[i + 2] == '`' {
-                return true;
-            }
-
             // 水平线：以 ---、***、___ 开头（三个相同字符）
-            if i + 2 < chars.len()
-                && chars[i] == chars[i + 1]
-                && chars[i + 1] == chars[i + 2]
-                && (ch == '-' || ch == '*' || ch == '_')
+            if (ch == '-' || ch == '*' || ch == '_')
+                && {
+                    let mut peek = chars.clone();
+                    matches!((peek.next(), peek.next()), (Some((_, c2)), Some((_, c3))) if c2 == ch && c3 == ch)
+                }
             {
                 return true;
             }
         }
 
-        // 追踪换行：每遇到一个 \n 递增行计数
-        if chars[i] == '\n' {
+        // 追踪换行 + 段落边界 \n\n
+        if ch == '\n' {
             line_count += 1;
+            let mut peek = chars.clone();
+            if let Some((_, '\n')) = peek.next() {
+                return true;
+            }
         }
 
-        // 段落边界：双换行 \n\n
-        if i > 0 && chars[i] == '\n' && i + 1 < chars.len() && chars[i + 1] == '\n' {
-            return true;
-        }
-
-        i += 1;
+        is_line_start = ch == '\n';
     }
 
     // Fallback：增量文本累计 ≥ 3 行时也刷新，防止单段长文本永不推送
