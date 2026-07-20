@@ -231,7 +231,7 @@ impl FrozenSessionData {
 
 /// Session-scoped context shared across all executor pipeline functions.
 ///
-/// Replaces both [`PromptExecutionContext`] and [`crate::agent::builder::AcpAgentConfig`].
+/// Replaces [`PromptExecutionContext`].
 /// Fields grouped by subsystem for clarity.
 #[allow(dead_code)]
 pub struct SessionContext {
@@ -284,6 +284,8 @@ pub struct SessionContext {
 /// Built once at the top of [`run_session_loop`], passed by reference to
 /// [`build_and_execute_agent`] to avoid recomputing and to keep the agent
 /// builder function signature manageable.
+#[allow(dead_code)] // 字段逐步迁移到 SessionContext，完成后删除
+#[allow(dead_code)]
 struct TurnConfig<'a> {
     provider: &'a LlmProvider,
     peri_config: &'a Arc<crate::provider::PeriConfig>,
@@ -361,7 +363,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         .as_ref()
         .and_then(|sm| sm.get_session(&ctx.session_id))
         .map(|s| s.v2_message_queue.clone())
-        .unwrap_or_else(peri_agent::session::MessageQueue::new);
+        .unwrap_or_default();
 
     // 解析 session-level SessionInbox（await-wake wrapper）。
     // 用于：(1) executor idle 期间 await_wake 阻塞等待异步事件，
@@ -602,7 +604,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
 
     // Lift Langfuse tracer creation to inject it into both
     // spawn_event_pump (pump head/tail) and build_and_execute_agent_v2 (forwarder).
-    let provider_display_name = ctx.provider.display_name().to_string();
     let langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>> =
         langfuse_session.as_ref().map(|s| {
             let session_clone = Arc::clone(s);
@@ -627,23 +628,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         trace_input: trace_input.to_string(),
     });
 
-    // transport-aware: 仅 TUI 路径（allow_await_wake=true）注入 idle_inbox，
-    // 让 run_react_loop 在 queue 空时 await_wake 等异步事件。
-    // stdio/print 路径 None，保持 run_react_loop 直接退出。
-    let idle_inbox = if ctx.allow_await_wake {
-        session_inbox.as_ref().map(Arc::clone)
-    } else {
-        None
-    };
-
-    // idle_should_wait probe：检查 background_registry 是否有未完成的 bg subagent。
-    // TUI 路径注入，run_react_loop 用它 gate await_wake（避免正常对话 loading 卡死）。
-    // stdio/print 路径 idle_inbox=None，probe 即使有也不影响（gate 双层保险）。
-    let idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>> = {
-        let probe_registry = Arc::clone(&bg_registry_for_cmd);
-        Some(Arc::new(move || probe_registry.active_count() > 0))
-    };
-
     // 把会 move/借用 的资源直接传入 build_and_execute_agent。
     // 由于 prompt builder 需要的所有资源都已提供，调用方后续不再访问这些已 move 字段
     // （session_id 在 collect_result 借用，此时 build_and_execute_agent 已完成）。
@@ -658,10 +642,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         cached_llm.as_ref(),
         &v2_message_queue,
         async_router.clone(),
-        idle_inbox,
-        idle_should_wait,
         langfuse_tracer,
-        provider_display_name,
         bg_registry_for_cmd,
     )
     .await;
@@ -694,6 +675,7 @@ struct ExecOutcome {
 /// - bg event pump + todo 转发 pump 启动
 /// - `build_and_execute_agent_v2` 调用 + 错误事件转发
 /// - cancel cascade 子 agent
+#[allow(clippy::too_many_arguments)] // 收拢 AAC-only 字段，后续可进一步分组
 #[allow(clippy::too_many_arguments)]
 async fn build_and_execute_agent(
     ctx: &SessionContext,
@@ -706,10 +688,7 @@ async fn build_and_execute_agent(
     cached_llm: Option<&CachedLlmInstances>,
     v2_message_queue: &peri_agent::session::MessageQueue,
     async_router: Option<AsyncRouter>,
-    idle_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
-    idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
-    provider_display_name: String,
     bg_registry: Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
 ) -> ExecOutcome {
     let (
@@ -891,79 +870,53 @@ async fn build_and_execute_agent(
         .and_then(|sm| sm.goal_state_for(session_id))
         .map(|gs| Arc::new(gs) as Arc<dyn peri_agent::goal::GoalController>);
 
-    let cfg = crate::agent::builder::AcpAgentConfig {
-        provider: turn.provider.clone(),
-        cwd: turn.cwd.to_string(),
+    let thread_persistence = builder::ThreadPersistence {
+        store: ctx.thread_store.clone(),
+        parent_thread_id: ctx.thread_id.clone(),
+        register_runtime,
+        deregister_runtime,
+    };
+
+    let background_registry = ctx
+        .session_manager
+        .as_ref()
+        .and_then(|sm| sm.get_session(session_id))
+        .map(|s| s.background_registry.clone());
+
+    let on_bg_complete = async_router.as_ref().map(|router| {
+        let router = router.clone();
+        Arc::new(move |result: &BackgroundTaskResult| {
+            router.route_bg_result(result);
+        }) as Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>
+    });
+
+    // v2 单一路径。
+    return build_and_execute_agent_v2(
+        ctx,
+        cached_llm,
+        agent_input,
+        history,
+        event_tx,
+        &event_sink,
+        langfuse_tracer,
+        // ── AAC-only ──
         system_prompt,
-        frozen: builder::FrozenData {
+        builder::FrozenData {
             claude_md: frozen_claude_md,
             claude_local_md: frozen_claude_local_md,
             skill_summary: frozen_skill_summary,
             date: frozen_date,
         },
         event_handler,
-        cancel: turn.cancel.clone(),
-        permission_mode: turn.permission_mode.clone(),
-        peri_config: Arc::new(turn.peri_config.as_ref().clone()),
-        cron_scheduler: ctx.cron_scheduler.clone(),
-        agent_overrides: None,
-        preload_skills: Vec::new(),
-        session_id: Some(session_id.to_string()),
-        broker: turn.broker.clone(),
-        plugin_skill_roots: ctx.plugin_skill_roots.clone(),
-        plugin_agent_dirs: ctx.plugin_agent_dirs.clone(),
-        plugin_loaded: ctx.plugin_loaded.clone(),
-        hook_groups: ctx.hook_groups.clone(),
-        session_start_source: turn.session_start_source.clone(),
-        mcp_pool: ctx.mcp_pool.clone(),
-        channel_state: ctx.channel_state.clone(),
-        tool_search_index: ctx.tool_search_index.clone(),
-        shared_tools: ctx.shared_tools.clone(),
-        child_handler_factory: None,
-        lsp_servers: ctx.lsp_servers.clone(),
-        auxiliary_model: turn.auxiliary_model.clone(),
-        thread_persistence: builder::ThreadPersistence {
-            store: ctx.thread_store.clone(),
-            parent_thread_id: ctx.thread_id.clone(),
-            register_runtime,
-            deregister_runtime,
-        },
+        None,       // agent_overrides
+        Vec::new(), // preload_skills
+        None,       // child_handler_factory
+        turn.auxiliary_model.clone(),
+        thread_persistence,
         goal_controller,
-        workflow_executor: ctx.workflow_executor.clone(),
-        workflow_middleware: ctx.workflow_middleware.clone(),
-        background_registry: ctx
-            .session_manager
-            .as_ref()
-            .and_then(|sm| sm.get_session(session_id))
-            .map(|s| s.background_registry.clone()),
-        on_bg_complete: async_router.as_ref().map(|router| {
-            let router = router.clone();
-            Arc::new(move |result: &BackgroundTaskResult| {
-                router.route_bg_result(result);
-            }) as Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>
-        }),
-    };
-
-    // v2 单一路径。
-    // v2 MessageQueue 已由 run_session_loop 解析并透传（避免重复解析 + 统一 bg_results/Path B 注入）。
-    return build_and_execute_agent_v2(
-        ctx,
-        cfg,
-        cached_llm,
-        &ctx.pool,
-        turn,
-        agent_input,
-        history,
-        session_id,
-        event_tx,
-        &event_sink,
-        ctx.session_manager.clone(),
-        v2_message_queue,
-        async_router,
-        idle_inbox,
-        idle_should_wait,
-        provider_display_name,
-        langfuse_tracer,
+        background_registry,
+        on_bg_complete,
+        turn.effective_context_window,
     )
     .await;
 }

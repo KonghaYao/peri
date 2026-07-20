@@ -32,28 +32,29 @@ use std::sync::Arc;
 
 use peri_agent::{
     agent::{
-        events::{ExecutorEvent, TurnErrorKind, TurnStatus},
+        events::{
+            AgentEventHandler, BackgroundTaskResult, ExecutorEvent, TurnErrorKind, TurnStatus,
+        },
         state::AgentState,
         AgentCancellationToken,
     },
     error::AgentError,
+    goal::GoalController,
+    llm::BaseModel,
     messages::{BaseMessage, MessageContent},
 };
+use peri_middlewares::{agent_define::AgentOverrides, subagent::BackgroundTaskRegistry};
 use tokio::sync::oneshot;
 use tracing::{debug, error};
 
 use crate::{
-    agent::builder::AcpAgentConfig,
     langfuse::LangfuseTracer,
-    session::{
-        agent_pool::CachedLlmInstances, async_router::AsyncRouter, event_sink::EventSink,
-        SessionManager,
-    },
+    session::{agent_pool::CachedLlmInstances, event_sink::EventSink},
 };
 
 // 共享类型从 executor 模块（super）显式引入——这些类型在 executor.rs 中
 // 是 `struct`（默认 private）但子模块对父模块所有项可见。
-use super::{ExecOutcome, FrozenSessionData, PromptResult, PromptStopReason, TurnConfig};
+use super::{ExecOutcome, FrozenSessionData, PromptResult, PromptStopReason};
 
 // ── Intercept Request parameter object ─────────────────────────────────────
 
@@ -505,60 +506,63 @@ pub(super) async fn wait_for_pump(pump_done_rx: oneshot::Receiver<()>, session_i
 ///   本函数 spawn forwarder 将其映射为 `ExecutorEvent`，复用 event_tx / pump 管线
 /// - 历史消息：seed 到 transcript；用户输入：作为 Prompt push 到 v2 queue
 ///
-/// 调用前已完成 AcpAgentConfig 构造（含 register/deregister、event_handler、
+/// 调用前已完成副作用（register/deregister、event_handler、
 /// workflow 消费者 spawn、goal_controller）。所有副作用与 v1 一致。
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(super) async fn build_and_execute_agent_v2(
     ctx: &super::SessionContext,
-    cfg: AcpAgentConfig,
     cached_llm: Option<&CachedLlmInstances>,
-    pool: &Arc<parking_lot::Mutex<crate::session::agent_pool::AgentPool>>,
-    turn: &TurnConfig<'_>,
     agent_input: peri_agent::agent::react::AgentInput,
     history: Vec<BaseMessage>,
-    session_id: &str,
     event_tx: &Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>,
     event_sink: &Arc<dyn EventSink>,
-    session_manager: Option<SessionManager>,
-    v2_queue: &peri_agent::session::MessageQueue,
-    _async_router: Option<AsyncRouter>,
-    idle_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
-    idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
-    provider_display_name: String,
     langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
+    // ── AAC-only ──
+    system_prompt: String,
+    frozen: crate::agent::builder::FrozenData,
+    event_handler: Arc<dyn AgentEventHandler>,
+    agent_overrides: Option<AgentOverrides>,
+    preload_skills: Vec<String>,
+    child_handler_factory: Option<crate::agent::builder::ChildHandlerFactory>,
+    auxiliary_model: Option<Arc<dyn BaseModel>>,
+    thread_persistence: crate::agent::builder::ThreadPersistence,
+    goal_controller: Option<Arc<dyn GoalController>>,
+    background_registry: Option<Arc<BackgroundTaskRegistry>>,
+    on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    effective_context_window: u32,
 ) -> ExecOutcome {
     use peri_agent::agent::stages::{run_react_loop, LoopResult};
     use peri_agent::session::queue::{
         MessageKind, MessageSource as V2MessageSource, QueuedMessage,
     };
 
-    // 在 cfg 被 Phase 1 消费前提取 thread persistence 字段
-    let thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>> =
-        cfg.thread_persistence.store.clone();
-    let parent_thread_id: Option<String> = cfg.thread_persistence.parent_thread_id.clone();
-
-    // Phase 1: build StageContext（内部消费 AgentComponents；传入会话级共享 v2_queue）
+    // Phase 1: build StageContext（内部消费 AgentComponents）
     let (v2_out, new_cache) = crate::agent::builder::build_stage_context(
         ctx,
-        cfg,
         cached_llm,
-        pool,
-        v2_queue,
-        idle_inbox,
-        idle_should_wait,
-        thread_store.clone(),
-        parent_thread_id.clone(),
+        system_prompt,
+        frozen,
+        event_handler,
+        agent_overrides,
+        preload_skills,
+        child_handler_factory,
+        auxiliary_model,
+        thread_persistence,
+        goal_controller,
+        background_registry,
+        on_bg_complete,
     );
     if let Some(cache) = new_cache {
-        pool.lock().store_llm(cache);
+        ctx.pool.lock().store_llm(cache);
     }
 
     // Phase 2: bg event pump（复用 V2AgentOutput.bg_event_rx）
     {
         let mut bg_event_rx = v2_out.bg_event_rx;
-        let bg_session_id = session_id.to_string();
+        let bg_session_id = ctx.session_id.clone();
         let bg_sink = Arc::clone(event_sink);
-        let bg_cw = turn.effective_context_window;
+        let bg_cw = effective_context_window;
         tokio::spawn(async move {
             let mut bg_event_count: u64 = 0;
             while let Some(bg_event) = bg_event_rx.recv().await {
@@ -627,7 +631,7 @@ pub(super) async fn build_and_execute_agent_v2(
                 }
             },
             langfuse_tracer.clone(),
-            provider_display_name.clone(),
+            ctx.provider.display_name().to_string(),
         );
     }
 
@@ -640,7 +644,7 @@ pub(super) async fn build_and_execute_agent_v2(
 
     // Phase 5.5: restore compact flags from persistence (if available)
     {
-        if let (Some(store), Some(tid)) = (thread_store.as_ref(), parent_thread_id.as_ref()) {
+        if let (Some(store), Some(tid)) = (ctx.thread_store.as_ref(), ctx.thread_id.as_ref()) {
             match store.load_message_flags(tid).await {
                 Ok(flags) if !flags.is_empty() => {
                     let transcript_arc = v2_out.session.transcript();
@@ -708,7 +712,7 @@ pub(super) async fn build_and_execute_agent_v2(
         if let Some(tx) = event_tx.lock().as_ref() {
             let _ = tx.send(ExecutorEvent::TurnStarted {
                 turn_id: loop_turn_id.clone(),
-                session_id: session_id.to_string(),
+                session_id: ctx.session_id.clone(),
             });
         }
     }
@@ -723,8 +727,8 @@ pub(super) async fn build_and_execute_agent_v2(
         .into_iter()
         .cloned()
         .collect();
-    let mut agent_state = AgentState::with_messages(turn.cwd.to_string(), messages);
-    agent_state.set_context("session_id", session_id);
+    let mut agent_state = AgentState::with_messages(ctx.cwd.clone(), messages);
+    agent_state.set_context("session_id", &ctx.session_id);
     agent_state.set_context("run_id", uuid::Uuid::now_v7().to_string());
 
     // Phase 8.5: 把 v2 recall_buffer（middleware hook 期间累积）灌入 agent_state。
@@ -747,8 +751,8 @@ pub(super) async fn build_and_execute_agent_v2(
         LoopResult::Completed => (true, PromptStopReason::EndTurn),
         LoopResult::Interrupted => (false, PromptStopReason::Cancelled),
         LoopResult::Error(ref e) => {
-            error!(session_id = %session_id, error = %e, "[v2] loop failed");
-            let reason = if turn.cancel.is_cancelled() || matches!(e, AgentError::Interrupted) {
+            error!(session_id = %ctx.session_id, error = %e, "[v2] loop failed");
+            let reason = if ctx.cancel.is_cancelled() || matches!(e, AgentError::Interrupted) {
                 PromptStopReason::Cancelled
             } else if matches!(e, AgentError::MaxIterationsExceeded(_)) {
                 PromptStopReason::MaxTurnRequests
@@ -778,7 +782,7 @@ pub(super) async fn build_and_execute_agent_v2(
         if let Some(tx) = event_tx.lock().as_ref() {
             let _ = tx.send(ExecutorEvent::TurnEnded {
                 turn_id: loop_turn_id,
-                session_id: session_id.to_string(),
+                session_id: ctx.session_id.clone(),
                 status,
                 error_kind,
             });
@@ -787,8 +791,8 @@ pub(super) async fn build_and_execute_agent_v2(
 
     // Cancel cascade children when this agent is cancelled
     if stop_reason == PromptStopReason::Cancelled {
-        if let Some(ref sm) = session_manager {
-            if let Some(session) = sm.get_session(session_id) {
+        if let Some(ref sm) = ctx.session_manager {
+            if let Some(session) = sm.get_session(&ctx.session_id) {
                 session.cancel_cascade_children();
             }
         }

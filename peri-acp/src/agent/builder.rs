@@ -1,6 +1,6 @@
 //! Shared Agent builder（ACP 和 TUI 共用）
 //!
-//! 提供 `AcpAgentConfig` 配置结构和 `build_agent()` 构建函数，
+//! 提供 Agent 构建相关结构和 `build_agent()` 构建函数，
 //! 组装完整的中间件链并产出 `AgentComponents`（供 v2 builder 消费）。
 //!
 //! 本模块从 peri-tui/src/app/agent.rs:build_bare_agent() 迁移而来，
@@ -35,19 +35,17 @@ pub type SystemPromptBuilder = Arc<
     dyn Fn(Option<&peri_middlewares::agent_define::AgentOverrides>, &str) -> String + Send + Sync,
 >;
 use peri_agent::{
-    agent::AgentCancellationToken,
-    interaction::{ChannelBroker, ChannelState, MultiplexBroker, UserInteractionBroker},
+    interaction::{ChannelBroker, MultiplexBroker, UserInteractionBroker},
     llm::BaseModelReactLLM,
 };
 use peri_middlewares::{
     prelude::*,
-    skills::SkillRoot,
     tools::{AskUserTool, TodoItem},
 };
 
 use crate::{
-    provider::{config::PeriConfig, LlmProvider},
-    session::agent_pool::{fingerprint, AgentPool, CachedLlmInstances},
+    provider::LlmProvider,
+    session::agent_pool::{fingerprint, CachedLlmInstances},
 };
 
 // ── 共享 Agent 构建（ACP 和 TUI 共用）─────────────────────────────────────────
@@ -80,58 +78,6 @@ pub(crate) struct ThreadPersistence {
     pub register_runtime: Option<RegisterRuntimeFn>,
     /// Deregister callback: called when a child agent finishes.
     pub deregister_runtime: Option<DeregisterRuntimeFn>,
-}
-
-/// 共享 Agent 构建配置（ACP 和 TUI 共用）
-///
-/// **结构稳定性**：中间件添加顺序是 `[TRAP]` 守护契约，禁止重排。
-/// 本结构仅做字段分组，`build_agent` 函数体保持单体。
-#[allow(dead_code)] // 过渡：字段逐步迁移到 SessionContext，完成后删除
-pub(crate) struct AcpAgentConfig {
-    pub provider: LlmProvider,
-    pub cwd: String,
-    pub system_prompt: String,
-    /// Frozen 会话数据（FrozenData 分组，零跨依赖）
-    pub frozen: FrozenData,
-    pub event_handler: Arc<dyn AgentEventHandler>,
-    pub cancel: AgentCancellationToken,
-    pub permission_mode: Arc<SharedPermissionMode>,
-    pub peri_config: Arc<PeriConfig>,
-    pub cron_scheduler: Option<Arc<parking_lot::Mutex<CronScheduler>>>,
-    pub agent_overrides: Option<peri_middlewares::agent_define::AgentOverrides>,
-    pub preload_skills: Vec<String>,
-    pub session_id: Option<String>,
-    pub broker: Arc<dyn UserInteractionBroker>,
-    pub plugin_skill_roots: Vec<SkillRoot>,
-    pub plugin_agent_dirs: Vec<std::path::PathBuf>,
-    pub plugin_loaded: Vec<peri_middlewares::plugin::LoadedPlugin>,
-    pub hook_groups: Vec<Vec<RegisteredHook>>,
-    pub session_start_source: Option<String>,
-    pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
-    /// Channel 共享状态（None = 不启用 channel 功能，不使用 MultiplexBroker）
-    pub channel_state: Option<Arc<ChannelState>>,
-    pub tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
-    pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
-    /// 子 Agent 专用事件 handler factory（由调用方提供，取代 TUI 的 child_event_tx）
-    pub child_handler_factory: Option<ChildHandlerFactory>,
-    /// LSP 服务器配置（由调用方从 settings.json + 插件配置组装）
-    pub lsp_servers: Vec<peri_lsp::config::LspServerConfig>,
-    /// Auxiliary LLM 模型（v2 stages compact + goal middleware 复用）
-    pub auxiliary_model: Option<Arc<dyn BaseModel>>,
-    /// 子 Agent 线程持久化分组（ThreadPersistence 分组，零跨依赖）
-    pub thread_persistence: ThreadPersistence,
-    /// Goal controller（None = 不启用 goal 功能）
-    pub goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>>,
-    /// Workflow agent 执行器（None = 不启用 workflow 功能）
-    pub workflow_executor: Option<Arc<dyn peri_workflow::runner::AgentExecutor>>,
-    /// Session 级 WorkflowMiddleware（None = 每轮创建临时实例）。
-    pub workflow_middleware: Option<Arc<peri_middlewares::workflow::WorkflowMiddleware>>,
-    /// Session 级 BackgroundTaskRegistry（跨 prompt 存活，取代 per-prompt 创建）
-    pub background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
-    /// bg 完成时的同步回调：在 registry.complete() 之前调用
-    #[allow(clippy::type_complexity)]
-    pub on_bg_complete:
-        Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
 }
 
 pub(crate) struct AcpAgentOutput {
@@ -723,7 +669,7 @@ pub(crate) fn build_agent(
 //
 // ## Async Owners
 //
-// 当 AcpAgentConfig.cron_scheduler 为 Some 时：
+// 当 cron_scheduler 为 Some 时：
 // 1. 创建 SessionInbox（await-wake wrapper around shared_queue）。
 // 2. 从 CronScheduler 订阅 trigger_rx（通过 subscribe()）。
 // 3. 启动 CronTrigger→String 桥接任务。
@@ -756,7 +702,7 @@ pub(crate) struct V2AgentOutput {
     pub bg_event_rx: tokio::sync::mpsc::UnboundedReceiver<ExecutorEvent>,
 }
 
-/// 从 AcpAgentConfig 构造 StageContext
+/// 从 SessionContext 构造 StageContext
 ///
 /// 内部调用 build_agent 提取 middleware chain + LLM + 共享组件（AgentComponents），
 /// 然后构造 StageContext。
@@ -768,48 +714,66 @@ pub(crate) struct V2AgentOutput {
 /// MessageQueue 内部 Arc<Mutex<VecDeque>> + Arc<Notify>，clone 共享底层；
 /// 传入引用只是为了避免在签名里 move。
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(crate) fn build_stage_context(
     ctx: &crate::session::executor::SessionContext,
-    cfg: AcpAgentConfig,
     cached_llm: Option<&CachedLlmInstances>,
-    _pool: &Arc<parking_lot::Mutex<AgentPool>>,
-    shared_queue: &peri_agent::session::MessageQueue,
-    idle_inbox: Option<Arc<SessionInbox>>,
-    idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
-    thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
-    thread_id: Option<String>,
+    system_prompt: String,
+    frozen: FrozenData,
+    event_handler: Arc<dyn AgentEventHandler>,
+    agent_overrides: Option<peri_middlewares::agent_define::AgentOverrides>,
+    preload_skills: Vec<String>,
+    child_handler_factory: Option<ChildHandlerFactory>,
+    auxiliary_model: Option<Arc<dyn BaseModel>>,
+    thread_persistence: ThreadPersistence,
+    goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>>,
+    background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
+    on_bg_complete: Option<
+        Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>,
+    >,
 ) -> (V2AgentOutput, Option<CachedLlmInstances>) {
     // 提取 LLM 用字段（在 cfg 被 build_agent 消费前）
     let cwd = ctx.cwd.clone();
     let session_id = ctx.session_id.clone();
     let cancel_token = ctx.cancel.clone();
-    // compact_llm：优先取 cfg.auxiliary_model，否则回落到 cached auxiliary_model。
-    let compact_llm_for_v2 = cfg
-        .auxiliary_model
+    // compact_llm：优先取 auxiliary_model，否则回落到 cached auxiliary_model。
+    let compact_llm_for_v2 = auxiliary_model
         .clone()
         .or_else(|| cached_llm.map(|c| c.auxiliary_model.clone()));
 
-    // 提取 hooks 和模型名（在 cfg 被 build_agent 消费前）
+    // 提取 hooks 和模型名
     let hook_groups_flat: Vec<peri_middlewares::hooks::types::RegisteredHook> =
-        cfg.hook_groups.iter().flatten().cloned().collect();
-    let hook_model = cfg.provider.model_name().to_string();
+        ctx.hook_groups.iter().flatten().cloned().collect();
+    let hook_model = ctx.provider.model_name().to_string();
     let hook_session_id = session_id.clone();
 
-    // 提取 cron_scheduler（在 cfg 被 build_agent 消费前）
-    let cron_scheduler = cfg.cron_scheduler.clone();
+    // 提取 cron_scheduler
+    let cron_scheduler = ctx.cron_scheduler.clone();
 
-    // 从 cfg 提取非 SessionContext 字段，用于 build_agent
-    let system_prompt = cfg.system_prompt;
-    let frozen = cfg.frozen;
-    let event_handler = cfg.event_handler;
-    let agent_overrides = cfg.agent_overrides;
-    let preload_skills = cfg.preload_skills;
-    let child_handler_factory = cfg.child_handler_factory;
-    let auxiliary_model = cfg.auxiliary_model;
-    let thread_persistence = cfg.thread_persistence;
-    let goal_controller = cfg.goal_controller;
-    let background_registry = cfg.background_registry;
-    let on_bg_complete = cfg.on_bg_complete;
+    // 从 SessionContext 推导会话级共享变量
+    let shared_queue = ctx
+        .session_manager
+        .as_ref()
+        .and_then(|sm| sm.v2_queue_for(&ctx.session_id))
+        .unwrap_or_default();
+
+    let session_inbox_from_mgr = ctx
+        .session_manager
+        .as_ref()
+        .and_then(|sm| sm.session_inbox_for(&ctx.session_id));
+
+    let idle_inbox: Option<Arc<SessionInbox>> = if ctx.allow_await_wake {
+        session_inbox_from_mgr.as_ref().map(Arc::clone)
+    } else {
+        None
+    };
+
+    let idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>> = {
+        let probe_bg = background_registry.clone();
+        probe_bg.map(|reg| {
+            Arc::new(move || reg.active_count() > 0) as Arc<dyn Fn() -> bool + Send + Sync>
+        })
+    };
 
     // 调用 build_agent 构造完整 agent（含中间件链 + LLM）
     let (agent_output, new_cached) = build_agent(
@@ -868,7 +832,7 @@ pub(crate) fn build_stage_context(
     );
 
     // 激活 transcript persistence（compact flags 跨 prompt 持久化）
-    if let (Some(store), Some(tid)) = (thread_store.as_ref(), thread_id.as_ref()) {
+    if let (Some(store), Some(tid)) = (ctx.thread_store.as_ref(), ctx.thread_id.as_ref()) {
         let transcript_arc = session.transcript();
         let mut transcript = transcript_arc.write();
         let old = std::mem::take(&mut *transcript);

@@ -1,6 +1,6 @@
 //! Hook system integration.
 //!
-//! Hook middleware is configured through `AcpAgentConfig::hook_groups`.
+//! Hook middleware is configured through `SessionContext::hook_groups`.
 //! Each group becomes a separate `HookMiddleware` instance in the agent pipeline.
 //!
 //! Hooks are event-driven callbacks (Command/Prompt/Http/Agent) for 14 event types,
