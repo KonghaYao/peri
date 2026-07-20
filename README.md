@@ -1,6 +1,6 @@
 <div align="center">
 
-# Peri Code
+# Perihelion
 
 **A Rust-built coding agent — fast, lean, Claude Code compatible, any LLM.**
 
@@ -12,64 +12,73 @@
 
 </div>
 
-One **13 MB binary**, **~50 MB of RAM**, **98% cache hits**. Bring your own API key — DeepSeek, GLM, Qwen, or Anthropic, switch on the fly. Your existing Claude Code config works today, not eventually: skills, hooks, MCP, plugins, sub-agents. **Zero migration, zero lock-in.**
+One **13 MB binary**, **~50 MB of RAM**, **98% cache hits** — bring any API key (DeepSeek, GLM, Qwen, Anthropic) and switch on the fly. Your Claude Code config works today: skills, hooks, MCP, plugins, sub-agents. **Zero migration, zero lock-in.**
 
-99% of the codebase was written by AI (DeepSeek & GLM-5.2), shipped by humans who decided *what* to build. The agent files its own bugs, fixes them, and writes the lessons back into the repo. More on that [below](#built-by-ai-published-by-human).
+We believe the agent pattern is proven — planning, tool use, context management, delegation. What's missing is a harness that makes this complexity feel simple: fast startup, any provider, every surface. So we rebuilt it from scratch in Rust, with ACP at the core. We are the best like Claude Code. The foundation every agent deserves. Three things we bet on:
 
----
+## Why Perihelion
 
-## Why Peri
+### ⚡ Perf Care
 
-- 🦀 **Rust, not Node.js**
-  - 13 MB binary, ~50 MB RAM. Won't sneak up to 1 GB while you're not looking
-- ⚡ **95–99% cache hit rate**
-  - Frozen system prompt + boundary marker = near-zero wasted tokens
-- 🌐 **Any LLM**
-  - Anthropic, OpenAI, DeepSeek, GLM, Qwen. Swap mid-session, no restart
-- 🪟 **Cross-platform**
-  - macOS, Linux, Windows — one binary. ConPTY-aware event handling, unified overlay textarea, cross-platform spawn
-- 🔌 **Drop-in Claude Code compatible**
-  - Existing Claude Code config just works. Skills, hooks, MCP, plugins — zero migration
-- 🔍 **Tool Search**
-  - The LLM only sees what it needs. ~14 core tools, rest discovered on demand — lean prompts, fat cache hits
-- 📝 **Streaming Markdown**
-  - Code blocks, tables, diffs — fully rendered as the agent types, not after
-- 🤖 **Sub-agents & background agents**
-  - 7 built-in specialists (coder, explorer, code-reviewer, web-researcher…). Fork work to the background and keep going
-- 🗜️ **Auto Compact**
-  - Hours-long sessions stay fast and cheap, automatically
-- 📦 **agm**
-  - `agm install` any skill or agent. One lockfile, any tool
-- 🌐 **Web Terminal (`peri web`)**
-  - Browser-based remote shell, one command. xterm.js + multi-pane split, auto open browser
-- 🔧 **Built-in LSP & observability**
-  - Language-aware intelligence out of the box. Langfuse traces, token usage, cache monitor
+The agent that respects your machine — not the one that borrows it.
+
+- 🦀 **Rust, not Node.js** — 13 MB binary, ~50 MB RAM. Starts instantly, stays out of your way
+- ⚡ **95–99% cache hit rate** — Frozen system prompt never recomputes. Tokens you don't pay for
+- 🗜️ **Auto Compact** — Hours-long sessions stay lean automatically. Micro at 70%, full at 85% budget
+
+### 🧠 Harness Design
+
+Built for agents that plan, delegate, and finish — not just reply.
+
+- 🤖 **7 Sub-agents + Fork Mode** — coder, explorer, plan, code-reviewer, web-researcher, verification, general-purpose. Fork clones context for deep follow-up. All run in background
+- 🔄 **Ultracode Workflow** — Split one task into N agents, merge results. Pipeline, parallel, or sequential — one command
+- 🎯 **Goal Tracking** — Declare a goal, the agent keeps going across turns. No babysitting
+- 🔍 **Deferred Tool Search** — 12 core tools visible, the rest on demand. Lean prompt, hot cache, cheap tokens
+- 🌐 **Any LLM, no lock-in** — Anthropic, OpenAI, DeepSeek, GLM, Qwen. Swap mid-session, bring your own key
+- 🔌 **Claude Code compatible** — Skills, hooks, MCP, plugins. Point at your config and it just works
+
+### 🖥️ TUI & Ecosystem
+
+Every surface you need, everywhere you work.
+
+- 🪟 **macOS · Linux · Windows** — One binary. Native ConPTY, true color, cross-platform spawn
+- 📝 **Streaming Markdown** — Code blocks, tables, diffs render as the agent types. Read while it writes
+- 📡 **Channel Support** — WeChat, Slack, Feishu. Reply in-thread, terminal stays synced
+- 🌐 **Web Terminal** (`peri web`) — Browser shell, one command. xterm.js + split panes
+- 🔧 **LSP + Langfuse** — Code intelligence and per-turn tracing out of the box
+- 📦 **agm** — `agm install` any skill. One lockfile, reproducible
 
 ---
 
 ## Architecture
 
-Peri is not just a TUI. It's a layered platform where the **agent core** is decoupled from the **frontend** via the [Agent Client Protocol](https://agentclientprotocol.com). The same core powers three entry points:
+Perihelion is not just a TUI. It's a layered platform where the **agent core** is decoupled from the **frontend** via the [Agent Client Protocol](https://agentclientprotocol.com). The same core powers three entry points:
 
 ```mermaid
 graph TD
-    TUI["**peri-tui**<br/>Terminal (ratatui)"]
-    IDE["**Zed / JetBrains**<br/>IDE (ACP client)"]
-    STDIO["**Stdio**<br/>Headless / CI / Cloud"]
+    TUI["peri-tui<br/>Terminal (ratatui-kit)"]
+    IDE["Zed / JetBrains<br/>IDE (ACP client)"]
+    STDIO["Stdio<br/>Headless / CI / Cloud"]
 
     TUI -->|MpscTransport| ACP
     IDE -->|ACP Stdio| ACP
     STDIO -->|ACP Stdio| ACP
 
-    ACP["**peri-acp** — ACP Server<br/>session · executor · prompt · commands"]
+    ACP["peri-acp — ACP Server<br/>session · executor · prompt · commands"]
 
-    ACP --> AGENT["**peri-agent**<br/>ReAct loop · LLM adapter · tools · SQLite storage"]
-    ACP --> MW["**peri-middlewares**<br/>18 middlewares: FS · HITL · SubAgent · Skills · MCP · Hooks · Compact"]
-    ACP --> LSP["**peri-lsp**<br/>LSP client"]
+    ACP --> AGENT["peri-agent<br/>ReAct loop · LLM adapter · tools · SQLite storage"]
+    ACP --> MW["peri-middlewares<br/>20 middlewares: FS · HITL · SubAgent · Skills · MCP · Hooks · Compact · Goal · Workflow"]
+    ACP --> LSP["peri-lsp<br/>LSP client"]
 
-    AGENT -.->|telemetry| LF["**langfuse-client**"]
-    MW -.->|renders with| WIDGETS["**peri-widgets**<br/>Markdown · code blocks · tables"]
+    AGENT -.->|telemetry| LF["langfuse-client"]
+    MW -.->|renders with| WIDGETS["peri-widgets<br/>Markdown · code blocks · tables"]
+
+    TUI --> THEME["peri-theme<br/>Dark/Light · palette"]
+    ACP --> WORKFLOW["peri-workflow<br/>Multi-agent pipelines"]
+    TUI --> E2E["e2e<br/>tmux black-box tests"]
 ```
+
+**Crate topology**: `peri-tui` → `peri-acp` → `peri-agent` / `peri-middlewares` · `peri-widgets` · `langfuse-client` · `peri-lsp` · `peri-web-pty` · `agm` · `peri-acp-types` · `peri-workflow` · `peri-theme`
 
 **One core, three frontends.** Terminal users get `peri-tui`. IDE users connect via ACP (Zed today, more to come). Headless / CI / cloud scenarios use the Stdio transport. Change the agent logic once — every frontend benefits.
 
@@ -83,9 +92,14 @@ Binaries available for macOS (x86_64 / Apple Silicon), Linux (x86_64 / aarch64 /
 # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.sh | bash
 
+```
+
+```bash
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.ps1 | iex
+```
 
+```bash
 # start peri
 peri
 
@@ -99,7 +113,7 @@ First launch guides you through model and API key configuration — no config fi
 
 ## Built by AI, Published by Human
 
-Peri's code is 99% AI-generated, primarily by DeepSeek and GLM-5.2. The development workflow is a closed loop the agent drives itself:
+Perihelion's code is 99% AI-generated, primarily by DeepSeek and GLM-5.2. The development workflow is a closed loop the agent drives itself:
 
 | When you... | The loop kicks off |
 |---|---|
@@ -113,15 +127,14 @@ Each fix that reveals a non-obvious constraint gets written back into `CLAUDE.md
 
 ---
 
----
-
 ## Acknowledgments
 
 - [Claude Code Best](https://github.com/claude-code-best/claude-code) — community support and feedback
-- [Superpowers](https://github.com/obra/superpowers) & [Matt Pocock's Skills](https://github.com/mattpocock/skills) — the skill suites that drive Peri's AI engineering workflow
+- [Superpowers](https://github.com/obra/superpowers) & [Matt Pocock's Skills](https://github.com/mattpocock/skills) — the skill suites that drive Perihelion's AI engineering workflow
 - [ACP](https://agentclientprotocol.com) — open protocol for agent-IDE communication
 - [rmcp](https://github.com/anthropics/rmcp) — Rust MCP client library
-- [Ratatui](https://ratatui.rs) — terminal rendering backend; [ratatui-kit](https://github.com/KonghaYao/ratatui-kit) — React-style component framework powering Peri's entire TUI (components, hooks, state atoms, routing, the `element!` macro)
+- [ratatui-kit](https://github.com/KonghaYao/ratatui-kit) — React-style component framework powering the entire TUI (components, hooks, state atoms, routing, the `element!` macro)
+- [Ratatui](https://ratatui.rs) — terminal rendering backend
 - [Tokio](https://tokio.rs)
 - [Langfuse](https://langfuse.com) — LLM observability
 - [Zed](https://zed.dev) — first ACP-compatible IDE
