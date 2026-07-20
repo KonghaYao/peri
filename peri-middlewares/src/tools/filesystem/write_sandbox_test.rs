@@ -75,11 +75,7 @@ async fn test_write_sandbox_absolute_rejected() {
         .await;
     assert!(result.is_err(), "绝对路径应被拒绝");
     let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("绝对"),
-        "错误消息应说明拒绝原因: {}",
-        err
-    );
+    assert!(err.contains("绝对"), "错误消息应说明拒绝原因: {}", err);
 }
 
 #[tokio::test]
@@ -154,16 +150,13 @@ fn test_write_sandbox_description_contains_dirs() {
     let desc = tool.description();
     assert!(desc.contains("sandbox"));
     assert!(desc.contains("output"));
-    assert!(desc.contains("Write a file into your sandbox directories"));
+    assert!(desc.contains("Write a file ONLY into your sandbox directories"));
 }
 
 #[test]
 fn test_write_sandbox_empty_allowed_dirs_ok() {
     let cwd = tempfile::tempdir().unwrap();
-    let result = WriteSandboxTool::new(
-        cwd.path().to_str().unwrap().to_string(),
-        vec![],
-    );
+    let result = WriteSandboxTool::new(cwd.path().to_str().unwrap().to_string(), vec![]);
     // 空白名单应可构造（不注入时不报错）
     assert!(result.is_ok());
 }
@@ -195,14 +188,8 @@ fn test_write_sandbox_auto_create_dir() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap().to_string();
     // 不预创建沙箱目录——WriteSandboxTool::new 应自动创建
-    assert!(
-        !dir.path().join("plans").exists(),
-        "开始前沙箱目录不应存在"
-    );
-    let result = WriteSandboxTool::new(
-        cwd,
-        vec!["plans".into()],
-    );
+    assert!(!dir.path().join("plans").exists(), "开始前沙箱目录不应存在");
+    let result = WriteSandboxTool::new(cwd, vec!["plans".into()]);
     assert!(result.is_ok(), "目录不存在时构造应成功: {:?}", result.err());
     // 验证目录确实被创建
     assert!(

@@ -89,17 +89,18 @@ impl super::SubAgentTool {
             &agent_def.frontmatter.disallowed_tools,
         );
 
-        // 注入 WriteSandbox（per-agent 实例，不走父工具继承）
+        // 注入 SandboxWrite（per-agent 实例，不走父工具继承）
         let allowed_write_dirs = &agent_def.frontmatter.allowed_write_dirs;
         if !allowed_write_dirs.is_empty() {
             let disallowed_list = agent_def.frontmatter.disallowed_tools.to_vec();
-            let is_disallowed = disallowed_list
-                .iter()
-                .any(|n| n.to_lowercase() == "writesandbox");
+            let is_disallowed = disallowed_list.iter().any(|n| {
+                let n = n.to_lowercase();
+                n == "sandboxwrite" || n == "writesandbox"
+            });
             if is_disallowed {
                 tracing::debug!(
                     agent_id = %agent_name,
-                    "WriteSandbox 被 disallowedTools 否决，跳过注入"
+                    "SandboxWrite 被 disallowedTools 否决，跳过注入"
                 );
             } else {
                 match crate::tools::filesystem::WriteSandboxTool::new(
@@ -111,7 +112,7 @@ impl super::SubAgentTool {
                         tracing::debug!(
                             agent_id = %agent_name,
                             sandbox_dirs = ?allowed_write_dirs,
-                            "WriteSandbox 工具已注入"
+                            "SandboxWrite 工具已注入"
                         );
                     }
                     Err(e) => {
@@ -119,7 +120,7 @@ impl super::SubAgentTool {
                             agent_id = %agent_name,
                             error = %e,
                             sandbox_dirs = ?allowed_write_dirs,
-                            "WriteSandbox 构造失败，跳过注入"
+                            "SandboxWrite 构造失败，跳过注入"
                         );
                     }
                 }

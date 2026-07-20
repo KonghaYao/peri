@@ -8,11 +8,12 @@ use peri_agent::tools::BaseTool;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-const WRITE_SANDBOX_DESC_PREFIX: &str = "Write a file into your sandbox directories: ";
+const WRITE_SANDBOX_DESC_PREFIX: &str = "Write a file ONLY into your sandbox directories: ";
 
 const WRITE_SANDBOX_DESC_SUFFIX: &str = r#"
  Paths are relative to the project root. Overwriting is allowed.
- Absolute paths and '..' are rejected."#;
+ Absolute paths and '..' are rejected.
+ Do NOT use this tool for files outside the sandbox directories listed above."#;
 
 /// 沙箱写工具——只能写入构造时指定的目录白名单。
 pub struct WriteSandboxTool {
@@ -72,6 +73,16 @@ impl WriteSandboxTool {
         })
     }
 
+    /// 格式化允许的沙箱目录列表，用于错误信息。
+    fn allowed_dirs_display(&self) -> String {
+        let dirs: Vec<String> = self
+            .sandbox_roots
+            .iter()
+            .map(|r| r.display().to_string())
+            .collect();
+        format!("允许的目录: {:?}", dirs)
+    }
+
     /// 全路径安全校验链。
     ///
     /// 返回 canonicalized 目标路径，或错误描述。
@@ -79,8 +90,9 @@ impl WriteSandboxTool {
         // ① 词法拒绝绝对路径
         if Path::new(path).is_absolute() {
             return Err(format!(
-                "WriteSandbox: 拒绝绝对路径 '{}'。请使用基于项目根的相对路径。",
-                path
+                "WriteSandbox: 拒绝绝对路径 '{}'。请使用基于项目根的相对路径。{}",
+                path,
+                self.allowed_dirs_display()
             ));
         }
         // ② 词法拒绝路径穿越（含 ../、..\\ 等变体）
@@ -88,8 +100,9 @@ impl WriteSandboxTool {
         for segment in normalized.split('/') {
             if segment == ".." {
                 return Err(format!(
-                    "WriteSandbox: 拒绝路径穿越 '{}'（含 '..'）。请使用沙箱目录内的相对路径。",
-                    path
+                    "WriteSandbox: 拒绝路径穿越 '{}'（含 '..'）。请使用沙箱目录内的相对路径。{}",
+                    path,
+                    self.allowed_dirs_display()
                 ));
             }
         }
@@ -101,8 +114,14 @@ impl WriteSandboxTool {
         // ④ 然后创建剩余父目录 + canonicalize 目标（防 symlink 逃逸）
         let canonical_target = if raw.exists() {
             // 文件已存在：直接 canonicalize 目标本身
-            raw.canonicalize()
-                .map_err(|e| format!("WriteSandbox: canonicalize 失败 '{}': {}", path, e))?
+            raw.canonicalize().map_err(|e| {
+                format!(
+                    "WriteSandbox: canonicalize 失败 '{}': {}。{}",
+                    path,
+                    e,
+                    self.allowed_dirs_display()
+                )
+            })?
         } else {
             // 文件不存在：找到最长存在的祖先路径
             let ancestor = {
@@ -118,9 +137,10 @@ impl WriteSandboxTool {
             // canonicalize 已有祖先 + 校验沙箱前缀
             let canon_ancestor = ancestor.canonicalize().map_err(|e| {
                 format!(
-                    "WriteSandbox: 无法 canonicalize 路径 '{}': {}",
+                    "WriteSandbox: 无法 canonicalize 路径 '{}': {}。{}",
                     ancestor.display(),
-                    e
+                    e,
+                    self.allowed_dirs_display()
                 )
             })?;
             let is_ancestor_in_sandbox = self
@@ -129,14 +149,21 @@ impl WriteSandboxTool {
                 .any(|root| canon_ancestor.starts_with(root));
             if !is_ancestor_in_sandbox {
                 return Err(format!(
-                    "WriteSandbox: 路径 '{}' 的已有祖先不在沙箱目录内",
-                    path
+                    "WriteSandbox: 路径 '{}' 的已有祖先不在沙箱目录内。{}",
+                    path,
+                    self.allowed_dirs_display()
                 ));
             }
             // 创建剩余父目录（祖先已校验，新创建的目录在祖先子树内 = 安全）
             if let Some(parent) = raw.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("WriteSandbox: 创建父目录失败 '{}': {}", path, e))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!(
+                        "WriteSandbox: 创建父目录失败 '{}': {}。{}",
+                        path,
+                        e,
+                        self.allowed_dirs_display()
+                    )
+                })?;
             }
             // 再 canonicalize 父目录 + 文件名
             if let (Some(parent), Some(file_name)) = (raw.parent(), raw.file_name()) {
@@ -144,16 +171,18 @@ impl WriteSandboxTool {
                     Ok(canon_parent) => canon_parent.join(file_name),
                     Err(e) => {
                         return Err(format!(
-                            "WriteSandbox: 无法 canonicalize 父目录 '{}': {}",
+                            "WriteSandbox: 无法 canonicalize 父目录 '{}': {}。{}",
                             parent.display(),
-                            e
+                            e,
+                            self.allowed_dirs_display()
                         ));
                     }
                 }
             } else {
                 return Err(format!(
-                    "WriteSandbox: 无法解析路径 '{}'——缺少父目录或文件名",
-                    path
+                    "WriteSandbox: 无法解析路径 '{}'——缺少父目录或文件名。{}",
+                    path,
+                    self.allowed_dirs_display()
                 ));
             }
         };
@@ -181,7 +210,11 @@ impl WriteSandboxTool {
 #[async_trait::async_trait]
 impl BaseTool for WriteSandboxTool {
     fn name(&self) -> &str {
-        "WriteSandbox"
+        "SandboxWrite"
+    }
+
+    fn aliases(&self) -> &[&str] {
+        &["WriteSandbox"]
     }
 
     fn description(&self) -> &str {
