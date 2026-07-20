@@ -459,6 +459,8 @@ fn render_tool_card_lines(data: &TuiToolCard) -> Vec<Line<'static>> {
     // 折叠/展开判断
     let collapsed = if data.is_error {
         false
+    } else if data.is_running {
+        false
     } else if AUTO_EXPAND.contains(&data.tool_name.as_str()) {
         false
     } else if FORCE_EXPAND_ON_COMPLETE.contains(&data.tool_name.as_str()) {

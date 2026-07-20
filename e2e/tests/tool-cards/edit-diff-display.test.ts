@@ -1,8 +1,8 @@
 /**
  * 工具卡片场景: Edit 工具 diff 显示
  *
- * 验证 Edit 成功后工具卡片自动展开 output_summary：
- * - Edit 完成后卡片展开显示变更摘要
+ * 验证 Edit 完成后以头行后缀显示变更摘要：
+ * - Edit 完成后头行显示 "— N lines changed · +N · -N" 后缀
  * - Write 工具创建基础文件
  * - agent 正确执行 Edit + Write 组合
  */
@@ -40,16 +40,17 @@ describe("tool-card: edit diff display", () => {
         interval: 1000,
       });
 
-      // 等待 Edit 工具出现
+      // 等待 Edit 工具出现并完成（头行后缀格式如 "— Replaced text"）
       await tester.waitForText("Edit", {
         timeout: 60_000,
         interval: 1000,
       });
-      await tester.sleep(3000);
+      // 等 Edit 完成——等待头行后缀出现（"Replaced" 或 "lines changed"）
+      await tester.sleep(8000);
 
       const editCapture = await takePeriSnapshot(tester, "edit-diff");
 
-      // 等待 agent 处理完
+      // 等待 agent 处理完 Edit 结果
       await tester.sleep(5000);
       const doneCapture = await takePeriSnapshot(tester, "edit-done");
 
@@ -62,7 +63,7 @@ describe("tool-card: edit diff display", () => {
           ansiRaw: editCapture.raw,
           criteria: [
             "屏幕上应出现 Write 和 Edit 工具调用的痕迹",
-            "Edit 工具的变更应可见（包含 'hello world' 或 'hello peri' 相关的文本变更）",
+            "Edit 工具的头行应显示变更摘要（如 '— N lines changed · +N · -N' 或 '— Replaced text' 格式）",
             "agent 应执行了文件编辑操作，而非跳过或用其他方式替代",
           ],
         });

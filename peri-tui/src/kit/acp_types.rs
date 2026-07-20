@@ -1407,4 +1407,70 @@ mod tests {
             "不同 child 内容应产出不同 content_hash（M1 修复前会相等）"
         );
     }
+
+    /// [回归测试] 每个 batch 的第一个工具调用应在完成后 is_running=false。
+    ///
+    /// 场景复现 issue #2026-07-20-first-tool-call-per-batch-stuck-running：
+    /// reasoning → tool1 启动 → 更多 reasoning → tool2 启动 →
+    /// tool1 结束 → tool2 结束。
+    /// 预期两个工具完成后 is_running 都为 false。
+    #[test]
+    fn test_first_tool_in_batch_is_running_false_after_end() {
+        let mut ct = CurrentTurn::new();
+
+        // 第一批 reasoning
+        ct.append_reasoning("思考了 653 字符...", None);
+        // 第一个工具启动
+        ct.start_tool(ToolCardAccumulator::new(
+            "tc-shell-1".into(),
+            "Shell".into(),
+            "git log --oneline -15".into(),
+        ));
+        // 第二批 reasoning（在工具 1 启动后到达）
+        ct.append_reasoning("思考了 302 字符...", None);
+        // 第二个工具启动
+        ct.start_tool(ToolCardAccumulator::new(
+            "tc-shell-2".into(),
+            "Shell".into(),
+            "git show --stat e5239171".into(),
+        ));
+        // 第一个工具结束
+        ct.end_tool("tc-shell-1", "c4596722 refactor...".into(), false);
+        // 第二个工具结束
+        ct.end_tool("tc-shell-2", "commit e5239171...".into(), false);
+
+        let vms: Vec<_> = ct.view_models().to_vec();
+
+        // 期望：2 个 reasoning bubble + 2 个 tool card = 4 个 VM
+        assert_eq!(vms.len(), 4, "应为 2 个 AssistantBubble + 2 个 ToolCard");
+
+        // 验证第一个工具卡片：is_running 应为 false
+        match &vms[1] {
+            TuiRenderUnit::TuiToolCard(card) => {
+                assert_eq!(card.tool_id, "tc-shell-1");
+                assert!(
+                    !card.is_running,
+                    "[回归测试] 第一个工具调用完成后的 is_running 应为 false，实际为 true"
+                );
+                assert!(
+                    !card.output_summary.is_empty(),
+                    "第一个工具完成后的 output_summary 不应为空"
+                );
+            }
+            _ => panic!("vms[1] 应为 TuiToolCard"),
+        }
+
+        // 验证第二个工具卡片：is_running 也应为 false
+        match &vms[3] {
+            TuiRenderUnit::TuiToolCard(card) => {
+                assert_eq!(card.tool_id, "tc-shell-2");
+                assert!(
+                    !card.is_running,
+                    "第二个工具调用完成后的 is_running 也应为 false"
+                );
+                assert!(!card.output_summary.is_empty());
+            }
+            _ => panic!("vms[3] 应为 TuiToolCard"),
+        }
+    }
 }

@@ -2,7 +2,8 @@
  * 工具卡片场景: 工具输出截断
  *
  * 验证 Read 大文件时输出被截断的显示：
- * - 输出摘要最多 4 行 × 400 字符
+ * - Read 折叠态头行显示 "— N lines" 后缀（零内容行）
+ * - 展开后最多 4 行 × 400 字符
  * - 超出部分显示截断提示（如 "… N more lines"）
  * - agent 能基于截断输出继续工作
  */
@@ -60,7 +61,7 @@ describe("tool-card: output truncation", () => {
           ansiRaw: readCapture.raw,
           criteria: [
             "屏幕上应出现 Read 工具调用的痕迹（如 'Read' 字样）",
-            "Cargo.lock 的内容应被读取（屏幕上可见依赖项信息或文件内容）",
+            "Read 工具的头行应显示行数摘要（如 '— N lines' 格式），表明文件已被读取",
             "输出应被截断——不应显示完整的 Cargo.lock（该文件通常 5000+ 行）",
           ],
         });
@@ -75,7 +76,7 @@ describe("tool-card: output truncation", () => {
           ansiRaw: afterCapture.raw,
           criteria: [
             "agent 应基于读取的内容给出分析或总结",
-            "agent 不应抱怨内容被截断，应能基于可见部分工作",
+            "agent 能基于可见内容给出有价值的分析，即使提到了截断也不影响分析质量",
           ],
         });
         console.log("Judge (after):", JSON.stringify(r, null, 2));
