@@ -305,6 +305,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     state.variant = 1;
                     state.phase = SessionPhase::PromptRunning;
                     push_view_models(state);
+                    // block 模式：ToolStarted 时已推送缓冲文本到视图，
+                    // 同步追踪变量，确保工具执行完毕后新 TextChunk 的块边界检测从正确位置开始。
+                    state.last_pushed_text_len = state.current_turn.text.chars().count();
+                    state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
                 } else {
                     // 同步 sub-agent: 路由到 SubAgentAccumulator
                     let routed = state.current_turn.start_subagent_tool(
@@ -339,6 +343,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     state.variant = 1;
                     state.phase = SessionPhase::PromptRunning;
                     push_view_models(state);
+                    state.last_pushed_text_len = state.current_turn.text.chars().count();
+                    state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
                 }
             } else {
                 state.current_turn.start_tool(ToolCardAccumulator::new(
@@ -349,6 +355,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
+                state.last_pushed_text_len = state.current_turn.text.chars().count();
+                state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
             }
             push_acp_state(state);
         }
@@ -369,6 +377,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     state.variant = 1;
                     state.phase = SessionPhase::PromptRunning;
                     push_view_models(state);
+                    state.last_pushed_text_len = state.current_turn.text.chars().count();
+                    state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
                 } else {
                     // 同步 sub-agent: 路由到 SubAgentAccumulator
                     let routed = state.current_turn.end_subagent_tool(
@@ -383,6 +393,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     state.variant = 1;
                     state.phase = SessionPhase::PromptRunning;
                     push_view_models(state);
+                    state.last_pushed_text_len = state.current_turn.text.chars().count();
+                    state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
                 }
             } else {
                 state
@@ -391,6 +403,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 state.variant = 1;
                 state.phase = SessionPhase::PromptRunning;
                 push_view_models(state);
+                state.last_pushed_text_len = state.current_turn.text.chars().count();
+                state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
             }
             push_acp_state(state);
         }
