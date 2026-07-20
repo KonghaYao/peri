@@ -162,3 +162,54 @@
             "should return binary: {result}"
         );
     }
+
+    #[tokio::test]
+    async fn test_read_directory_returns_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+        let result = tool
+            .invoke(
+                serde_json::json!({"file_path": dir.path().to_str().unwrap()}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap();
+        // 应返回 Ok 而非 Err
+        assert!(
+            result.contains("DIRECTORY DETECTED"),
+            "should contain directory hint: {result}"
+        );
+        assert!(
+            result.contains("a.txt"),
+            "should list a.txt: {result}"
+        );
+        assert!(
+            result.contains("subdir"),
+            "should list subdir: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_directory_returns_listing_for_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("readme.md"), "docs").unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+        let result = tool
+            .invoke(
+                serde_json::json!({"file_path": "."}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.contains("DIRECTORY DETECTED"),
+            "should detect directory for relative path: {result}"
+        );
+        assert!(
+            result.contains("readme.md") || result.contains("src"),
+            "should list contents: {result}"
+        );
+    }
