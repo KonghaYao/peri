@@ -460,6 +460,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             },
             None,
             String::new(),
+            None,
         );
 
         // push prompt 到 queue

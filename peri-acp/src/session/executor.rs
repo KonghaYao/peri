@@ -277,6 +277,11 @@ pub struct SessionContext {
 
     // ── transport: transport-aware flags ───────────────────────────────────
     pub allow_await_wake: bool,
+
+    /// v2 事件发送通道（替代原 event::v2_channel 全局 OnceLock）。
+    /// TUI 入口置入，None 表示无 v2 消费方（如 stdio 模式）。
+    pub v2_event_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events_v2_mapper::V2Event>>,
 }
 
 /// Per-turn computed configuration derived from [`SessionContext`].

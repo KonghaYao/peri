@@ -13,7 +13,6 @@ pub mod async_router;
 pub mod command;
 pub mod event_sink;
 pub mod executor;
-pub mod frozen;
 pub mod goal_state;
 pub mod prediction;
 pub mod state_builders;
@@ -357,8 +356,7 @@ impl SessionManager {
 
     /// 构建会话级 frozen 数据（统一构造入口，消除 TUI/stdio 重复 5 处）。
     ///
-    /// 封装 [`crate::session::frozen::build_frozen_session_data`]，
-    /// 使用 manager 内部捕获的 `peri_config.language` 和当前日期。
+    /// 直接委托给 [`FrozenSessionData::build`]（Immutable Value Object 的唯一构造入口）。
     pub fn build_frozen_data(
         &self,
         cwd: &str,
@@ -367,7 +365,7 @@ impl SessionManager {
     ) -> crate::session::executor::FrozenSessionData {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let frozen_language = self.inner.peri_config.config.language.clone();
-        crate::session::frozen::build_frozen_session_data(
+        crate::session::executor::FrozenSessionData::build(
             cwd,
             frozen_language.as_deref(),
             plugin_skill_roots,

@@ -182,6 +182,7 @@ pub(crate) async fn run_prompt(
             None
         },
         allow_await_wake: true,
+        v2_event_tx: crate::kit::atoms::V2_EVENT_TX.get().cloned(),
     };
     let turn = executor::TurnInput {
         event_sink,

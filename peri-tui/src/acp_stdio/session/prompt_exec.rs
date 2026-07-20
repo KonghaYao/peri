@@ -136,6 +136,7 @@ pub(crate) async fn run(params: PromptExecParams) {
         workflow_middleware,
         session_start_source,
         allow_await_wake: false,
+        v2_event_tx: None,
     };
     let turn = executor::TurnInput {
         event_sink,

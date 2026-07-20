@@ -194,6 +194,7 @@ fn forward_langfuse_observe(
 ///
 /// - `handles`：v2 [`EventHandles`]（调用方取出所有权后传入，本函数内部 `mut` 消费）
 /// - `on_event`：每条映射后的 `ExecutorEvent` 的消费闭包。签名 `Fn(ExecutorEvent) + Send + Sync + 'static`
+/// - `v2_tx`：v2 事件直连发送通道（TUI 消费路径）。`None` 表示无 v2 消费方。
 ///
 /// # 返回
 ///
@@ -208,6 +209,7 @@ pub fn spawn_eventbus_forwarder<F>(
     on_event: F,
     langfuse_tracer: Option<std::sync::Arc<parking_lot::Mutex<LangfuseTracer>>>,
     provider_display_name: String,
+    v2_tx: Option<tokio::sync::mpsc::UnboundedSender<V2Event>>,
 ) where
     F: Fn(ExecutorEvent) + Send + Sync + 'static,
 {
@@ -231,7 +233,9 @@ pub fn spawn_eventbus_forwarder<F>(
                     }
                 }
                 Some(ev) = handles.state_rx.recv() => {
-                    crate::event::v2_channel::try_send_v2_event(V2Event::from_state(ev.clone()));
+                    if let Some(ref tx) = v2_tx {
+                        let _ = tx.send(V2Event::from_state(ev.clone()));
+                    }
                     // Langfuse v2: state 层追踪（当前 no-op）
                     forward_langfuse_state(&langfuse_tracer, &ev);
                     if let Some(exec_ev) = state_event_to_executor(ev) {
@@ -245,7 +249,9 @@ pub fn spawn_eventbus_forwarder<F>(
                             // 规范路径：on_event → event_sink → peri/agent_event → acp_notifier → bridge_tx。
                             // 此处 try_send_v2_event 若与 on_event 同时发送同一 SubAgent 事件会造成双重发送陷阱。
                             // v2_bridge.rs 有意对这些变体返回 None 作为防御性兜底。
-                            crate::event::v2_channel::try_send_v2_event(V2Event::from_observe(ev.clone()));
+                            if let Some(ref tx) = v2_tx {
+                                let _ = tx.send(V2Event::from_observe(ev.clone()));
+                            }
                             // Langfuse v2: observe 层追踪（LLM/Tool/Stage/Compact）
                             forward_langfuse_observe(&langfuse_tracer, &ev, &provider_display_name, &mut active_stage);
                             if let Some(exec_ev) = observe_event_to_executor(ev) {

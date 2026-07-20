@@ -632,6 +632,7 @@ pub(super) async fn build_and_execute_agent_v2(
             },
             langfuse_tracer.clone(),
             ctx.provider.display_name().to_string(),
+            ctx.v2_event_tx.clone(),
         );
     }
 

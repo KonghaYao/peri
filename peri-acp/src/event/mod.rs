@@ -4,18 +4,16 @@
 //! `peri/agent_event` channel. It contains only the fields that TUI consumers need,
 //! avoiding a direct `peri_agent::agent::events::ExecutorEvent` dependency in the TUI.
 
-pub mod dto;
 pub mod forwarder;
 pub mod mapper;
 pub mod truncate;
-pub mod v2_channel;
 
-pub use dto::{
+pub(crate) use forwarder::spawn_eventbus_forwarder;
+pub use mapper::{map_event, MappedEvent};
+pub use peri_acp_types::summary::{
     CompactFileInfoDto, StopReasonDto, TodoItemDto, TodoStatusDto, TokenUsageDto,
     WorkflowProgressDto,
 };
-pub(crate) use forwarder::spawn_eventbus_forwarder;
-pub use mapper::{map_event, MappedEvent};
 pub use peri_agent::agent::events_v2_mapper::{
     observe_event_to_executor, render_event_to_executor, state_event_to_executor, V2Event,
 };

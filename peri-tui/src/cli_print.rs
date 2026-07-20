@@ -232,6 +232,7 @@ pub async fn run_print(
         workflow_middleware: None,
         session_start_source: Some("startup".to_string()),
         allow_await_wake: false,
+        v2_event_tx: None,
     };
     let turn = peri_acp::session::executor::TurnInput {
         event_sink,
