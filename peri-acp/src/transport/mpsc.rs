@@ -10,17 +10,15 @@
 
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicI64, Ordering},
-        Arc,
-    },
+    sync::{atomic::AtomicI64, Arc},
 };
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, Mutex};
 
 use super::{
+    router::RequestRouter,
     types::{AcpError, IncomingMessage, RequestId},
     AcpTransport,
 };
@@ -46,34 +44,16 @@ enum ChannelMessage {
 
 // ---------- shared pending map ----------
 
-type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, AcpError>>>>>;
-
-/// Background pump that reads from the incoming channel and dispatches
-/// Response messages to the pending request map.
-async fn pump_incoming(
-    mut rx: mpsc::UnboundedReceiver<ChannelMessage>,
-    pending: PendingMap,
-    outgoing_tx: mpsc::UnboundedSender<IncomingMessage>,
-) {
-    while let Some(msg) = rx.recv().await {
-        match msg {
-            ChannelMessage::Response { id, result } => {
-                if let RequestId::Number(n) = &id {
-                    if let Some(tx) = pending.lock().await.remove(n) {
-                        let _ = tx.send(result);
-                        continue; // consumed internally
-                    }
-                }
-                // Unmatched response — forward to caller
-                let _ = outgoing_tx.send(IncomingMessage::Response { id, result });
-            }
-            ChannelMessage::Request { id, method, params } => {
-                let _ = outgoing_tx.send(IncomingMessage::Request { id, method, params });
-            }
-            ChannelMessage::Notification { method, params } => {
-                let _ = outgoing_tx.send(IncomingMessage::Notification { method, params });
-            }
+/// Convert an internal `ChannelMessage` into a public `IncomingMessage` for dispatch.
+fn channel_to_incoming(msg: ChannelMessage) -> IncomingMessage {
+    match msg {
+        ChannelMessage::Request { id, method, params } => {
+            IncomingMessage::Request { id, method, params }
         }
+        ChannelMessage::Notification { method, params } => {
+            IncomingMessage::Notification { method, params }
+        }
+        ChannelMessage::Response { id, result } => IncomingMessage::Response { id, result },
     }
 }
 
@@ -85,33 +65,35 @@ pub struct MpscClientTransport {
     client_tx: mpsc::UnboundedSender<ChannelMessage>,
     /// Receives processed incoming messages from the pump.
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<IncomingMessage>>,
-    /// Pending requests awaiting response.
-    pending: PendingMap,
-    /// Next request ID.
-    next_id: Arc<AtomicI64>,
+    /// Shared request-response router.
+    router: RequestRouter,
 }
 
 impl MpscClientTransport {
     fn new(
         client_tx: mpsc::UnboundedSender<ChannelMessage>,
         server_rx: mpsc::UnboundedReceiver<ChannelMessage>,
-        pending: PendingMap,
-        next_id: Arc<AtomicI64>,
+        router: RequestRouter,
     ) -> Self {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let pending_clone = pending.clone();
+        let pump_router = router.clone();
 
         // Background pump: dispatches Response messages to the pending map,
         // forwards Requests and Notifications to incoming_rx.
         tokio::spawn(async move {
-            pump_incoming(server_rx, pending_clone, incoming_tx).await;
+            let mut rx = server_rx;
+            while let Some(msg) = rx.recv().await {
+                let incoming = channel_to_incoming(msg);
+                if !pump_router.dispatch(&incoming).await {
+                    let _ = incoming_tx.send(incoming);
+                }
+            }
         });
 
         Self {
             client_tx,
             incoming_rx: tokio::sync::Mutex::new(incoming_rx),
-            pending,
-            next_id,
+            router,
         }
     }
 }
@@ -119,15 +101,12 @@ impl MpscClientTransport {
 #[async_trait]
 impl AcpTransport for MpscClientTransport {
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        let id_num = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (id_num, response_rx) = self.router.register().await;
         let id = RequestId::Number(id_num);
-        let (response_tx, response_rx) = oneshot::channel();
-
-        self.pending.lock().await.insert(id_num, response_tx);
 
         self.client_tx
             .send(ChannelMessage::Request {
-                id: id.clone(),
+                id,
                 method: method.to_string(),
                 params,
             })
@@ -170,32 +149,34 @@ pub struct MpscServerTransport {
     server_tx: mpsc::UnboundedSender<ChannelMessage>,
     /// Receives processed incoming messages from the pump.
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<IncomingMessage>>,
-    /// Pending responses from client (for server-initiated requests).
-    pending: PendingMap,
-    /// Next server request ID.
-    next_id: Arc<AtomicI64>,
+    /// Shared request-response router.
+    router: RequestRouter,
 }
 
 impl MpscServerTransport {
     fn new(
         client_rx: mpsc::UnboundedReceiver<ChannelMessage>,
         server_tx: mpsc::UnboundedSender<ChannelMessage>,
-        pending: PendingMap,
-        next_id: Arc<AtomicI64>,
+        router: RequestRouter,
     ) -> Self {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let pending_clone = pending.clone();
+        let pump_router = router.clone();
 
         // Background pump
         tokio::spawn(async move {
-            pump_incoming(client_rx, pending_clone, incoming_tx).await;
+            let mut rx = client_rx;
+            while let Some(msg) = rx.recv().await {
+                let incoming = channel_to_incoming(msg);
+                if !pump_router.dispatch(&incoming).await {
+                    let _ = incoming_tx.send(incoming);
+                }
+            }
         });
 
         Self {
             server_tx,
             incoming_rx: tokio::sync::Mutex::new(incoming_rx),
-            pending,
-            next_id,
+            router,
         }
     }
 }
@@ -203,15 +184,12 @@ impl MpscServerTransport {
 #[async_trait]
 impl AcpTransport for MpscServerTransport {
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        let id_num = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (id_num, response_rx) = self.router.register().await;
         let id = RequestId::Number(id_num);
-        let (response_tx, response_rx) = oneshot::channel();
-
-        self.pending.lock().await.insert(id_num, response_tx);
 
         self.server_tx
             .send(ChannelMessage::Request {
-                id: id.clone(),
+                id,
                 method: method.to_string(),
                 params,
             })
@@ -263,8 +241,11 @@ pub fn mpsc_transport_pair() -> (MpscClientTransport, MpscServerTransport) {
     let pending = Arc::new(Mutex::new(HashMap::new()));
     let next_id = Arc::new(AtomicI64::new(1));
 
-    let client = MpscClientTransport::new(client_tx, server_rx, pending.clone(), next_id.clone());
-    let server = MpscServerTransport::new(client_rx, server_tx, pending, next_id);
+    let client_router = RequestRouter::new_shared(pending.clone(), next_id.clone());
+    let server_router = RequestRouter::new_shared(pending, next_id);
+
+    let client = MpscClientTransport::new(client_tx, server_rx, client_router);
+    let server = MpscServerTransport::new(client_rx, server_tx, server_router);
 
     (client, server)
 }

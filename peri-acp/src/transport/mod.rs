@@ -8,6 +8,7 @@
 //! - [`StdioTransport`](stdio) — stdio-based transport for external IDE clients
 
 pub mod mpsc;
+pub mod router;
 pub mod stdio;
 pub mod types;
 

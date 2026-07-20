@@ -4,27 +4,20 @@
 //! Background pump task dispatches Response messages to the pending request map,
 //! forwards Requests/Notifications to the incoming channel.
 
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicI64, Ordering},
-        Arc,
-    },
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
-    sync::{mpsc, oneshot, Mutex},
+    sync::{mpsc, Mutex},
 };
 
 use super::{
+    router::RequestRouter,
     types::{AcpError, IncomingMessage, RequestId},
     AcpTransport,
 };
-
-type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, AcpError>>>>>;
 
 /// JSON-RPC 2.0 envelope for (de)serialization over stdio.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -50,8 +43,7 @@ struct JsonRpcEnvelope {
 /// requests/notifications to the `recv()` channel.
 pub struct StdioTransport {
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<IncomingMessage>>,
-    pending: PendingMap,
-    next_id: Arc<AtomicI64>,
+    router: RequestRouter,
     writer: Arc<Mutex<BufWriter<tokio::io::Stdout>>>,
 }
 
@@ -65,8 +57,8 @@ impl StdioTransport {
     /// Create a new stdio transport. Must be called within a tokio runtime.
     pub fn new() -> Self {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let pending_clone = pending.clone();
+        let router = RequestRouter::new();
+        let pump_router = router.clone();
 
         // Background pump: read stdin → dispatch responses / forward messages
         tokio::spawn(async move {
@@ -93,25 +85,16 @@ impl StdioTransport {
                 match (envelope.id, has_method) {
                     // Response to a server-initiated request (has id, no method)
                     (Some(id), false) => {
-                        if let Some(num_id) = id.as_i64() {
-                            if let Some(tx) = pending_clone.lock().await.remove(&num_id) {
-                                let result = if let Some(error) = error_val {
-                                    Err(error)
-                                } else {
-                                    Ok(result_val.unwrap_or(Value::Null))
-                                };
-                                let _ = tx.send(result);
-                                continue;
-                            }
-                        }
-                        // Unmatched response — forward to recv()
                         let req_id = value_to_request_id(&id);
                         let result = if let Some(error) = error_val {
                             Err(error)
                         } else {
                             Ok(result_val.unwrap_or(Value::Null))
                         };
-                        let _ = incoming_tx.send(IncomingMessage::Response { id: req_id, result });
+                        let msg = IncomingMessage::Response { id: req_id, result };
+                        if !pump_router.dispatch(&msg).await {
+                            let _ = incoming_tx.send(msg);
+                        }
                     }
                     // Request (has id + method)
                     (Some(id), true) => {
@@ -142,8 +125,7 @@ impl StdioTransport {
 
         Self {
             incoming_rx: tokio::sync::Mutex::new(incoming_rx),
-            pending,
-            next_id: Arc::new(AtomicI64::new(1)),
+            router,
             writer: Arc::new(Mutex::new(BufWriter::new(tokio::io::stdout()))),
         }
     }
@@ -152,10 +134,7 @@ impl StdioTransport {
 #[async_trait]
 impl AcpTransport for StdioTransport {
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        let id_num = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (response_tx, response_rx) = oneshot::channel();
-
-        self.pending.lock().await.insert(id_num, response_tx);
+        let (id_num, response_rx) = self.router.register().await;
 
         let envelope = JsonRpcEnvelope {
             jsonrpc: "2.0".to_string(),
