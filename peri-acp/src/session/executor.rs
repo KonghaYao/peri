@@ -285,7 +285,6 @@ pub struct SessionContext {
 /// [`build_and_execute_agent`] to avoid recomputing and to keep the agent
 /// builder function signature manageable.
 #[allow(dead_code)] // 字段逐步迁移到 SessionContext，完成后删除
-#[allow(dead_code)]
 struct TurnConfig<'a> {
     provider: &'a LlmProvider,
     peri_config: &'a Arc<crate::provider::PeriConfig>,
@@ -676,7 +675,6 @@ struct ExecOutcome {
 /// - `build_and_execute_agent_v2` 调用 + 错误事件转发
 /// - cancel cascade 子 agent
 #[allow(clippy::too_many_arguments)] // 收拢 AAC-only 字段，后续可进一步分组
-#[allow(clippy::too_many_arguments)]
 async fn build_and_execute_agent(
     ctx: &SessionContext,
     turn: &TurnConfig<'_>,

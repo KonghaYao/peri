@@ -30,6 +30,9 @@ pub(crate) type RegisterRuntimeFn =
     Arc<dyn Fn(String, peri_agent::agent::AgentCancellationToken, String) + Send + Sync>;
 /// Deregister callback: &str (thread_id) → ()
 pub(crate) type DeregisterRuntimeFn = Arc<dyn Fn(&str) + Send + Sync>;
+/// 后台任务完成回调类型
+pub(crate) type OnBgCompleteFn =
+    Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>;
 /// System prompt 构建器类型
 pub type SystemPromptBuilder = Arc<
     dyn Fn(Option<&peri_middlewares::agent_define::AgentOverrides>, &str) -> String + Send + Sync,
@@ -134,9 +137,7 @@ pub(crate) fn build_agent(
     thread_persistence: ThreadPersistence,
     goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>>,
     background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
-    on_bg_complete: Option<
-        Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>,
-    >,
+    on_bg_complete: Option<OnBgCompleteFn>,
     cached_llm: Option<&CachedLlmInstances>,
 ) -> (AcpAgentOutput, Option<CachedLlmInstances>) {
     let FrozenData {
@@ -728,9 +729,7 @@ pub(crate) fn build_stage_context(
     thread_persistence: ThreadPersistence,
     goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>>,
     background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
-    on_bg_complete: Option<
-        Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>,
-    >,
+    on_bg_complete: Option<OnBgCompleteFn>,
 ) -> (V2AgentOutput, Option<CachedLlmInstances>) {
     // 提取 LLM 用字段（在 cfg 被 build_agent 消费前）
     let cwd = ctx.cwd.clone();
