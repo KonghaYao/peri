@@ -421,8 +421,11 @@ impl WorkflowRunner {
                         }
                         "progress/event" => {
                             if let Some(p) = params {
-                                if let Ok(event) = serde_json::from_value::<ProgressEvent>(p) {
-                                    progress_store_clone.apply_event(&event);
+                                match serde_json::from_value::<ProgressEvent>(p) {
+                                    Ok(event) => progress_store_clone.apply_event(&event),
+                                    Err(e) => {
+                                        warn!(target: "workflow", error = %e, "progress/event: parse failed")
+                                    }
                                 }
                             }
                         }
@@ -430,7 +433,11 @@ impl WorkflowRunner {
                             if let Some(p) = params {
                                 if let Ok(parsed) = serde_json::from_value::<JournalAppendParams>(p)
                                 {
-                                    let _ = journal_clone.append(&parsed.run_id, &parsed.entry);
+                                    if let Err(e) =
+                                        journal_clone.append(&parsed.run_id, &parsed.entry)
+                                    {
+                                        warn!(target: "workflow", run_id = %parsed.run_id, error = %e, "journal/append: write failed");
+                                    }
                                 }
                             }
                         }
@@ -439,7 +446,9 @@ impl WorkflowRunner {
                                 if let Ok(parsed) =
                                     serde_json::from_value::<JournalTruncateParams>(p)
                                 {
-                                    let _ = journal_clone.truncate(&parsed.run_id);
+                                    if let Err(e) = journal_clone.truncate(&parsed.run_id) {
+                                        warn!(target: "workflow", run_id = %parsed.run_id, error = %e, "journal/truncate: write failed");
+                                    }
                                 }
                             }
                         }
@@ -520,7 +529,9 @@ impl WorkflowRunner {
                 finished_at: Some(chrono::Utc::now().to_rfc3339()),
                 error: final_result.error.clone(),
             };
-            let _ = journal_clone.write_state(&final_result.run_id, &state);
+            if let Err(e) = journal_clone.write_state(&final_result.run_id, &state) {
+                warn!(target: "workflow", run_id = %final_result.run_id, error = %e, "write_state failed");
+            }
 
             final_result.stderr_tail = stderr_tail;
             let _ = done_tx.send(Some(final_result));

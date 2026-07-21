@@ -13,10 +13,10 @@ use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 use peri_agent::{
     agent::{
+        AgentCancellationToken,
         compact_v2::CompactConfig,
         events::{AgentEventHandler, ExecutorEvent, FnEventHandler},
         token::ContextBudget,
-        AgentCancellationToken,
     },
     interaction::UserInteractionBroker,
     llm::{BaseModel, BaseModelReactLLM, RetryConfig, RetryableLLM},
@@ -213,14 +213,16 @@ impl AgentExecutor for WorkflowAgentExecutor {
                         if let Some(ref tx) = progress_tx_for_handler {
                             let s = usage_stats_for_handler.lock();
                             let tc = tool_call_count_for_handler.lock().unwrap();
-                            let _ = tx.send(ProgressEvent::AgentProgress {
+                            if let Err(e) = tx.send(ProgressEvent::AgentProgress {
                                 run_id: run_id_for_handler.clone(),
                                 agent_id: agent_id_for_handler,
                                 label: None,
                                 phase: None,
                                 token_count: s.0,
                                 tool_count: *tc,
-                            });
+                            }) {
+                                warn!(target: "workflow", run_id = %run_id_for_handler, agent_id = agent_id_for_handler, error = %e, "progress_tx.send failed (ToolStart)");
+                            }
                         }
                     }
                     ExecutorEvent::ToolEnd { name, is_error, .. } => {
@@ -248,14 +250,16 @@ impl AgentExecutor for WorkflowAgentExecutor {
                         if let Some(ref tx) = progress_tx_for_handler {
                             let s = usage_stats_for_handler.lock();
                             let tc = tool_call_count_for_handler.lock().unwrap();
-                            let _ = tx.send(ProgressEvent::AgentProgress {
+                            if let Err(e) = tx.send(ProgressEvent::AgentProgress {
                                 run_id: run_id_for_handler.clone(),
                                 agent_id: agent_id_for_handler,
                                 label: None,
                                 phase: None,
                                 token_count: s.0,
                                 tool_count: *tc,
-                            });
+                            }) {
+                                warn!(target: "workflow", run_id = %run_id_for_handler, agent_id = agent_id_for_handler, error = %e, "progress_tx.send failed (LlmCallEnd)");
+                            }
                         }
                     }
                     ExecutorEvent::LlmRetrying {

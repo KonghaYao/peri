@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::warn;
 
 /// Registry 层错误。
 #[derive(Debug, Error)]
@@ -142,7 +143,9 @@ impl WorkflowTaskRegistry {
         if let Some(run) = runs.get_mut(run_id) {
             run.status = result.status.clone();
         }
-        let _ = self.notification_tx.send(result);
+        if let Err(e) = self.notification_tx.send(result) {
+            warn!(target: "workflow", run_id = %run_id, error = %e, "registry: notification send failed (no subscribers)");
+        }
     }
 
     /// 终止指定 workflow，移除记录并发送 kill 信号。
