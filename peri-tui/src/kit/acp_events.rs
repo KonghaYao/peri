@@ -811,7 +811,9 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 "bridge: CompactCompleted"
             );
             state.compact_just_completed = true;
-            state.phase = SessionPhase::Idle;
+            // 不重置 phase——auto compact 后 ReAct 循环继续运行，
+            // loading 由流式事件（TextChunk/ToolStarted）和 TurnDone 管理。
+            // 手动 /compact 路径由 push_done → TurnDone 兜底清除。
             // 全量压缩和有效微压缩都注入消息流通知
             // micro_cleared == 0: 完整压缩（总是显示），或 no-op 微压缩（罕见，无害）
             // micro_cleared > 0: 微压缩且有实质性清理
