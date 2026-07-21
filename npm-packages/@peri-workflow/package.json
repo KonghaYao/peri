@@ -1,6 +1,6 @@
 {
   "name": "@peri-code/workflow",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Workflow runner for the Perihelion agent — JSON-RPC 2.0 stdio bridge. Host-language-agnostic: any language that can spawn a Node child process and speak JSON-RPC over stdin/stdout can integrate.",
   "bin": {
     "peri-workflow": "dist/peri-workflow.js"

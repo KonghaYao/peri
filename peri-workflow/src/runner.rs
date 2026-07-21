@@ -1,5 +1,6 @@
 //! WorkflowRunner —— spawn node 子进程 + 消息循环 + agent 回调。
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
@@ -353,7 +354,22 @@ impl WorkflowRunner {
                 stderr_tail: None,
             };
 
+            let mut msg_count: usize = 0;
+            let mut request_count: usize = 0;
+            let mut response_count: usize = 0;
+            let mut method_counts: HashMap<String, usize> = HashMap::new();
+
             while let Some(msg) = msg_rx.recv().await {
+                msg_count += 1;
+                match &msg {
+                    IncomingMessage::Request { method, .. } => {
+                        request_count += 1;
+                        *method_counts.entry(method.clone()).or_default() += 1;
+                    }
+                    IncomingMessage::Response { .. } => {
+                        response_count += 1;
+                    }
+                }
                 match msg {
                     IncomingMessage::Request { id, method, params } => match method.as_str() {
                         "agent/run" => {
@@ -433,10 +449,18 @@ impl WorkflowRunner {
                         }
                         "progress/event" => {
                             if let Some(p) = params {
-                                match serde_json::from_value::<ProgressEvent>(p) {
-                                    Ok(event) => progress_store_clone.apply_event(&event),
+                                match serde_json::from_value::<ProgressEvent>(p.clone()) {
+                                    Ok(event) => {
+                                        let run_id = event.run_id().to_string();
+                                        debug!(
+                                            target: "workflow.rpc",
+                                            run_id,
+                                            "progress/event: applied to store",
+                                        );
+                                        progress_store_clone.apply_event(&event);
+                                    }
                                     Err(e) => {
-                                        warn!(target: "workflow", error = %e, "progress/event: parse failed")
+                                        warn!(target: "workflow", error = %e, params = %p, "progress/event: parse failed")
                                     }
                                 }
                             }
@@ -526,6 +550,17 @@ impl WorkflowRunner {
                 }
             }
 
+            tracing::info!(
+                target: "workflow",
+                run_id = %run_id_clone,
+                total_msgs = msg_count,
+                requests = request_count,
+                responses = response_count,
+                ?method_counts,
+                final_status = %final_result.status,
+                "msg_loop exiting — summary"
+            );
+
             // Write state.json
             let stderr_tail = {
                 let lines = stderr_for_loop.lock();
@@ -553,8 +588,19 @@ impl WorkflowRunner {
                 finished_at: Some(chrono::Utc::now().to_rfc3339()),
                 error: final_result.error.clone(),
             };
+            tracing::debug!(
+                target: "workflow",
+                run_id = %final_result.run_id,
+                "calling write_state"
+            );
             if let Err(e) = journal_clone.write_state(&final_result.run_id, &state) {
                 warn!(target: "workflow", run_id = %final_result.run_id, error = %e, "write_state failed");
+            } else {
+                tracing::info!(
+                    target: "workflow",
+                    run_id = %final_result.run_id,
+                    "write_state succeeded"
+                );
             }
 
             final_result.stderr_tail = stderr_tail;
