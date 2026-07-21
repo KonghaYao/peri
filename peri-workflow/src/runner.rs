@@ -479,7 +479,12 @@ impl WorkflowRunner {
                             }
                         }
                         _ => {
-                            debug!(target: "workflow", "unknown method: {method}");
+                            warn!(target: "workflow", "unknown method from node: {method}");
+                            if let Some(id) = id {
+                                let _ = channel_clone
+                                    .send_error(id, ERR_METHOD_NOT_FOUND, "Method not found")
+                                    .await;
+                            }
                         }
                     },
                     IncomingMessage::Response { .. } => {
