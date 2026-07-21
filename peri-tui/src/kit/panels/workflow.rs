@@ -172,7 +172,11 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .enumerate()
         .map(|(i, run)| {
             let is_selected = i == sel_run;
-            let emoji = status_emoji_for_run(&run.status);
+            let emoji: String = if run.status == "running" {
+                running_indicator()
+            } else {
+                status_emoji_for_run(&run.status).to_string()
+            };
             let name = &run.workflow_name;
             let text = format!(" {emoji} {name} ");
             if is_selected {
@@ -196,7 +200,11 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let is_sel = focus && pi == sel_phase;
         let arrow = if is_sel { ">" } else { " " };
         let arrow_style = Style::new().fg(theme.component.panel.title).bold();
-        let emoji = status_emoji_for_phase(&phase.status);
+        let emoji: String = if phase.status == "active" {
+            running_indicator()
+        } else {
+            status_emoji_for_phase(&phase.status).to_string()
+        };
         let emoji_color = phase_status_color(&phase.status, &theme);
         let name = &phase.title;
         let name_style = if is_sel {
@@ -248,7 +256,11 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let is_sel = !focus && ai == sel_agent;
         let arrow = if is_sel { ">" } else { " " };
         let arrow_style = Style::new().fg(theme.component.panel.title).bold();
-        let emoji = status_emoji_for_agent(&agent.status);
+        let emoji: String = if agent.status == "running" {
+            running_indicator()
+        } else {
+            status_emoji_for_agent(&agent.status).to_string()
+        };
         let emoji_color = agent_status_color(&agent.status, &theme);
         let name = agent
             .label
@@ -293,22 +305,17 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 左侧 Phase 列 40%，中部 │ 分隔线，右侧 Agents 列 60%。
     // 每列独立 ScrollView，选中项跟随滚动。
 
-    // 计算各列可见行数。body height=18 - header(1) - separator(1) = 16 项。
-    const BODY_HEIGHT: u16 = 18;
-    const VISIBLE_ITEMS: usize = 16;
+    // 各列占满剩余空间，ScrollView 动态裁剪可见项。
+    const VISIBLE_ITEMS: usize = 20;
 
     let phase_scroll = scroll_start_for_selected(sel_phase, phase_lines.len(), VISIBLE_ITEMS);
     let agent_scroll = scroll_start_for_selected(sel_agent, filtered_agents.len(), VISIBLE_ITEMS);
 
-    // Build phases Paragraph: header + separator + visible slice
+    // Build phases Paragraph: header + visible slice
     let mut phase_text: Vec<Line<'_>> = Vec::new();
     phase_text.push(Line::from(Span::styled(
         " Phases",
         Style::new().fg(theme.semantic.text.muted).bold(),
-    )));
-    phase_text.push(Line::from(Span::styled(
-        " ──────────────",
-        Style::new().fg(theme.semantic.border.default),
     )));
     phase_text.extend(
         phase_lines
@@ -317,15 +324,11 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             .take(VISIBLE_ITEMS),
     );
 
-    // Build agents Paragraph: header + separator + visible slice
+    // Build agents Paragraph: header + visible slice
     let mut agent_text: Vec<Line<'_>> = Vec::new();
     agent_text.push(Line::from(Span::styled(
         " Agents                 Tokens Tools",
         Style::new().fg(theme.semantic.text.muted).bold(),
-    )));
-    agent_text.push(Line::from(Span::styled(
-        " ────────────────────────────────",
-        Style::new().fg(theme.semantic.border.default),
     )));
     agent_text.extend(
         agent_lines
@@ -336,7 +339,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Divider —— 渲染垂直 │ 线；高度固定为 body viewport
     let divider_style = Style::new().fg(theme.semantic.border.default);
-    let divider_lines: Vec<Line<'_>> = (0..BODY_HEIGHT as usize)
+    let divider_lines: Vec<Line<'_>> = (0..30_usize)
         .map(|_| Line::from(Span::styled("│", divider_style)))
         .collect();
 
@@ -351,11 +354,14 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Line::from(i18n::tr("workflow-footer-shortcuts")).fg(theme_def.read().semantic.text.dim);
 
     panel_shell!(PanelKind::Workflow, {
-        Text(text: tab_bar)
+        View(height: Constraint::Length(1)) {
+            Text(text: tab_bar)
+        }
+        View(height: Constraint::Length(1)) {}
         View(
             flex_direction: Direction::Horizontal,
             width: Constraint::Fill(1),
-            height: Constraint::Length(BODY_HEIGHT),
+            height: Constraint::Fill(1),
         ) {
             View(width: Constraint::Percentage(40), height: Constraint::Fill(1)) {
                 ScrollView(
@@ -379,7 +385,9 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             }
         }
-        Text(text: Paragraph::new(ratatui::text::Text::from(footer)))
+        View(height: Constraint::Length(1)) {
+            Text(text: Paragraph::new(ratatui::text::Text::from(footer)))
+        }
     })
 }
 
@@ -440,6 +448,20 @@ fn agent_status_color(
         "dead" | "skipped" => theme.semantic.status.error,
         _ => theme.semantic.text.muted,
     })
+}
+
+/// 壁钟驱动的运行中动画帧指示器。每 100ms 推进一帧。
+fn running_indicator() -> String {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    const FRAMES: &[char] = &[
+        '✳', '✴', '✵', '✶', '✷', '✸', '✹', '✺', '✻', '✼', '❃', '❊', '✼', '✻', '✺', '✸',
+    ];
+    let start = START.get_or_init(Instant::now);
+    let tick = (start.elapsed().as_millis() / 100) as usize;
+    let frame = FRAMES[tick % FRAMES.len()];
+    format!("{frame}")
 }
 
 /// Abbreviate a count into a human-readable short form.
