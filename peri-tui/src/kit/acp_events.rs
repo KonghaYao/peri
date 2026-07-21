@@ -567,10 +567,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             push_acp_state(state);
         }
         BudgetWarning(bw) => {
-            // 上下文使用率超过阈值警告——注入 TuiSystemNote 到消息流。
-            // flush_current_turn 确保 system note 出现在正确的时序位置
-            //（已产出 AI 内容之后、后续 AI 内容之前）。
-            state.flush_current_turn();
+            // 上下文使用率超过阈值警告——注入 TuiSystemNote 到 current_turn 内部。
+            // 与 SystemNotification 采用相同的 current_turn 注入策略，确保
+            // system note 在其出现的时序位置——已产出 AI 内容之后、后续内容之前。
+            // 不再依赖 flush_current_turn()，从而与 has_running_subagent 守卫解耦。
             let pct = bw.used as f64 / bw.limit as f64 * 100.0;
             let used_display = if bw.used >= 1_000_000 {
                 format!("{:.1}M", bw.used as f64 / 1_000_000.0)
@@ -596,20 +596,18 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             );
             let content_hash = tui_hash_str(&text);
             state
-                .committed
-                .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
-                    text,
-                    level: TuiNoteLevel::Warning,
-                    content_hash,
-                }));
+                .current_turn
+                .push_system_note(text, TuiNoteLevel::Warning, content_hash);
             push_view_models(state);
             push_acp_state(state);
         }
         SystemNotification(sn) => {
-            // 系统通知（如 cache 命中率警告）——注入 TuiSystemNote 到消息流。
-            // flush_current_turn 确保 system note 出现在正确的时序位置
-            //（已产出 AI 内容之后、后续 AI 内容之前）。
-            state.flush_current_turn();
+            // 系统通知（如 cache 命中率警告）——注入 TuiSystemNote 到 current_turn 内部。
+            // 先 flush 挂起的 text segment，再将 SystemNote 作为独立 segment 追加到
+            // current_turn，而非 push 到 committed。
+            // 这样 SystemNote 天然位于其出现时刻的时序位置（已产出内容之后、
+            // 后续内容之前），不再依赖 flush_current_turn() 及其
+            // has_running_subagent 守卫。
             let level = match sn.level.as_str() {
                 "warning" => TuiNoteLevel::Warning,
                 "error" => TuiNoteLevel::Error,
@@ -617,12 +615,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             };
             let content_hash = tui_hash_str(&format!("{}|{:?}", sn.text, level));
             state
-                .committed
-                .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
-                    text: sn.text.clone(),
-                    level,
-                    content_hash,
-                }));
+                .current_turn
+                .push_system_note(sn.text.clone(), level, content_hash);
             push_view_models(state);
             push_acp_state(state);
         }

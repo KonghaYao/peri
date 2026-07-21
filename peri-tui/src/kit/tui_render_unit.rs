@@ -219,7 +219,7 @@ pub struct TuiSystemNote {
 tui_impl_partial_eq!(TuiSystemNote: text, level);
 
 /// Severity of a system note.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiNoteLevel {
     Info,
     Warning,

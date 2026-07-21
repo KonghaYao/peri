@@ -11,7 +11,7 @@
 //! - **零运行时依赖**：无 terminal / network / IO，可独立测试
 
 use crate::kit::stream_data::*;
-use crate::kit::tui_render_unit::TuiRenderUnit;
+use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit};
 use peri_acp_types::event_data::*;
 use std::time::Instant;
 
@@ -91,6 +91,13 @@ enum TurnSegment {
     Tool { tool_idx: usize },
     /// Sub-agent reference to `CurrentTurn.subagents[subagent_idx]`.
     SubAgent { subagent_idx: usize },
+    /// System note（如 cache 命中率警告、budget 警告）——直接嵌入当前 turn 时序位置。
+    /// 与 Tool/SubAgent 不同，SystemNote 数据完全自包含，无需外部 Vec 索引。
+    SystemNote {
+        text: String,
+        level: TuiNoteLevel,
+        content_hash: u64,
+    },
 }
 
 impl CurrentTurn {
@@ -201,6 +208,22 @@ impl CurrentTurn {
             .push(TurnSegment::SubAgent { subagent_idx: idx });
         self.subagents
             .push(SubAgentAccumulator::new(agent_id, agent_name));
+        self.active = true;
+        self.invalidate_cache();
+    }
+
+    /// 在 current_turn 内部时序位置注入一条 SystemNote（如 cache 命中率警告）。
+    ///
+    /// 先 flush 挂起的 text segment，再将 SystemNote 作为独立 segment 追加。
+    /// 这样 SystemNote 天然位于已产出 AI 内容之后、后续内容之前，
+    /// 不再依赖 `flush_current_turn()` 及其 `has_running_subagent` 守卫。
+    pub fn push_system_note(&mut self, text: String, level: TuiNoteLevel, content_hash: u64) {
+        self.flush_text_segment();
+        self.segments.push(TurnSegment::SystemNote {
+            text,
+            level,
+            content_hash,
+        });
         self.active = true;
         self.invalidate_cache();
     }
@@ -342,7 +365,7 @@ impl CurrentTurn {
     /// Any trailing content past the last segment is rendered as a final bubble.
     fn build_view_models(&mut self) {
         use crate::kit::tui_render_unit::{
-            TuiAssistantBubble, TuiReasoningBlock, TuiToolCard, tui_hash_str,
+            TuiAssistantBubble, TuiReasoningBlock, TuiSystemNote, TuiToolCard, tui_hash_str,
         };
 
         let mut vms: Vec<TuiRenderUnit> = Vec::new();
@@ -422,6 +445,17 @@ impl CurrentTurn {
                     if let Some(s) = self.subagents.get(*subagent_idx) {
                         vms.push(s.view_model());
                     }
+                }
+                TurnSegment::SystemNote {
+                    text,
+                    level,
+                    content_hash,
+                } => {
+                    vms.push(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+                        text: text.clone(),
+                        level: level.clone(),
+                        content_hash: *content_hash,
+                    }));
                 }
             }
         }
