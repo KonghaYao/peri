@@ -330,14 +330,13 @@ impl AgentExecutor for WorkflowAgentExecutor {
         // 4. GAP-05: 使用标准 system prompt（复用 frozen 或运行时构建）
         let system_prompt = self.ctx.system_prompt.clone().unwrap_or_else(|| {
             let features = crate::prompt::PromptFeatures::detect();
-            crate::prompt::build_system_prompt(
-                None,
-                &self.ctx.cwd,
-                features,
-                &[],
-                self.ctx.frozen_date.as_deref(),
-                self.ctx.frozen_language.as_deref(),
-            )
+            let template = crate::prompt::PromptTemplate::new();
+            let env = if let Some(ref date) = self.ctx.frozen_date {
+                crate::prompt::PromptEnv::with_frozen_date(&self.ctx.cwd, date)
+            } else {
+                crate::prompt::PromptEnv::detect(&self.ctx.cwd)
+            };
+            template.render(&env, &features, &[], self.ctx.frozen_language.as_deref())
         });
 
         // 5. 构建中间件链

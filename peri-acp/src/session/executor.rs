@@ -150,14 +150,9 @@ impl FrozenSessionData {
         );
 
         let features = crate::prompt::PromptFeatures::detect();
-        let system_prompt = crate::prompt::build_system_prompt(
-            None,
-            cwd,
-            features,
-            plugin_agent_dirs,
-            Some(frozen_date),
-            language,
-        );
+        let template = crate::prompt::PromptTemplate::new();
+        let env = crate::prompt::PromptEnv::with_frozen_date(cwd, frozen_date);
+        let system_prompt = template.render(&env, &features, plugin_agent_dirs, language);
 
         // 构建 v2 FrozenContext
         let v2_frozen = peri_agent::session::FrozenContext {

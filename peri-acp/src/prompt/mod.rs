@@ -9,6 +9,7 @@
 use peri_middlewares::AgentOverrides;
 
 /// 控制 Feature-gated 提示词段落的注入
+#[derive(Debug, Clone, Copy)]
 pub struct PromptFeatures {
     pub hitl_enabled: bool,
     pub subagent_enabled: bool,
@@ -81,6 +82,222 @@ impl PromptEnv {
     }
 }
 
+/// 功能门控标识——将 section 与 PromptFeatures 字段显式关联
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeatureGate {
+    Hitl,
+    Subagent,
+    Cron,
+    Skills,
+    Channel,
+}
+
+impl FeatureGate {
+    const fn is_enabled(&self, f: &PromptFeatures) -> bool {
+        match self {
+            Self::Hitl => f.hitl_enabled,
+            Self::Subagent => f.subagent_enabled,
+            Self::Cron => f.cron_enabled,
+            Self::Skills => f.skills_enabled,
+            Self::Channel => f.channel_enabled,
+        }
+    }
+}
+
+/// 静态段（01-06, 16）—— 在 boundary 之前，Anthropic 缓存命中区域
+const STATIC_SECTIONS: [&str; 7] = [
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/prompts/sections/01_intro.md"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/prompts/sections/02_system.md"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/prompts/sections/03_doing_tasks.md"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/prompts/sections/04_actions.md"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/prompts/sections/05_using_tools.md"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/prompts/sections/06_tone_style.md"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/prompts/sections/16_workflow.md"
+    )),
+];
+
+/// 始终启用的动态段（07, 14）—— 在 boundary 之后
+const ALWAYS_DYNAMIC_SECTIONS: [&str; 2] = [
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/prompts/sections/07_env.md"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/prompts/sections/14_system_reminder.md"
+    )),
+];
+
+/// 功能门控动态段 + 对应门控标识（按 section 号顺序：10→11→12→13→15）
+const GATED_SECTIONS: [(&str, FeatureGate); 5] = [
+    (
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/prompts/sections/10_hitl.md"
+        )),
+        FeatureGate::Hitl,
+    ),
+    (
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/prompts/sections/11_subagent.md"
+        )),
+        FeatureGate::Subagent,
+    ),
+    (
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/prompts/sections/12_cron.md"
+        )),
+        FeatureGate::Cron,
+    ),
+    (
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/prompts/sections/13_skills.md"
+        )),
+        FeatureGate::Skills,
+    ),
+    (
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/prompts/sections/15_channel.md"
+        )),
+        FeatureGate::Channel,
+    ),
+];
+
+/// 结构化系统提示词模板
+///
+/// 将 section 顺序、boundary 位置、feature gate 映射编码为数据。
+/// `with_overrides()` 返回带 overrides 的新模板（增量 patch，不复建 section 结构）。
+/// `render()` 按照与 `build_system_prompt()` 完全相同的顺序和分隔符拼接。
+#[derive(Debug, Clone)]
+pub struct PromptTemplate {
+    /// 预计算的 AgentOverrides 块（空字符串 = 无 overrides）
+    overrides_block: String,
+}
+
+impl PromptTemplate {
+    /// 创建基础模板（无 agent overrides）
+    pub fn new() -> Self {
+        Self {
+            overrides_block: String::new(),
+        }
+    }
+
+    /// 创建带 AgentOverrides 的模板。
+    ///
+    /// 用于 SubAgent define 路径：无需重建 section 结构，仅预计算 overrides 文本。
+    /// 调用 `build_agent_overrides_block()`（与当前 build_system_prompt 使用同一函数）。
+    pub fn with_overrides(overrides: &AgentOverrides) -> Self {
+        Self {
+            overrides_block: build_agent_overrides_block(overrides),
+        }
+    }
+
+    /// 渲染完整系统提示词
+    ///
+    /// 拼接顺序与 `build_system_prompt()` 完全一致：
+    ///   静态段(01-06,16) → BOUNDARY → [overrides] → 动态段(07,14) → 门控段(10-15) → [Language]
+    ///
+    /// 之后应用占位符替换（cwd, is_git_repo, platform, os_version, date, available_agents）。
+    /// 保证与当前 `build_system_prompt()` 输出字节完全一致。
+    pub fn render(
+        &self,
+        env: &PromptEnv,
+        features: &PromptFeatures,
+        extra_agent_dirs: &[std::path::PathBuf],
+        language: Option<&str>,
+    ) -> String {
+        use std::fmt::Write;
+        let mut result = String::new();
+
+        // 静态段（01 → 02 → ... → 06 → 16）
+        for (i, section) in STATIC_SECTIONS.iter().enumerate() {
+            if i > 0 {
+                result.push_str("\n\n");
+            }
+            result.push_str(section);
+        }
+
+        // 边界标记
+        result.push_str("\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__");
+
+        // Agent overrides 块（边界之后，非空时插入）
+        if !self.overrides_block.is_empty() {
+            result.push_str("\n\n");
+            result.push_str(&self.overrides_block);
+        }
+
+        // 始终启用的动态段（07 → 14）
+        for section in &ALWAYS_DYNAMIC_SECTIONS {
+            result.push_str("\n\n");
+            result.push_str(section);
+        }
+
+        // 功能门控动态段（按 GATED_SECTIONS 声明顺序遍历）
+        for &(section, gate) in &GATED_SECTIONS {
+            if gate.is_enabled(features) {
+                result.push_str("\n\n");
+                result.push_str(section);
+            }
+        }
+
+        // Language 指令（动态，边界之后保留缓存前缀）
+        if let Some(lang) = language {
+            let lang_name = map_language_to_instruction(lang);
+            result.push_str("\n\n# Language\n\n");
+            let _ = write!(
+                result,
+                "Always respond in {}. Use {} for all explanations, comments, and communications with the user. Technical terms and code identifiers should remain in their original form (e.g. API names, function/variable/type names, CLI tool names, library names, file paths, HTTP status codes, configuration keys, git commands).",
+                lang_name, lang_name
+            );
+        }
+
+        // 占位符替换（顺序与 build_system_prompt 完全一致）
+        result
+            .replace("{{cwd}}", &env.cwd)
+            .replace(
+                "{{is_git_repo}}",
+                if env.is_git_repo { "Yes" } else { "No" },
+            )
+            .replace("{{platform}}", &env.platform)
+            .replace("{{os_version}}", &env.os_version)
+            .replace("{{date}}", &env.date)
+            .replace(
+                "{{available_agents}}",
+                &format_available_agents(&env.cwd, extra_agent_dirs),
+            )
+    }
+}
+
+impl Default for PromptTemplate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 扫描 `.claude/agents/` 目录，格式化为 agent 列表字符串。
 ///
 /// 格式：`- {agent_id} [{model_tier}] [{access}]: {description}`
@@ -122,134 +339,13 @@ pub fn build_system_prompt(
     frozen_date: Option<&str>,
     language: Option<&str>,
 ) -> String {
+    let template = overrides.map_or_else(PromptTemplate::new, PromptTemplate::with_overrides);
     let env = if let Some(date) = frozen_date {
         PromptEnv::with_frozen_date(cwd, date)
     } else {
         PromptEnv::detect(cwd)
     };
-
-    // 静态段落（编译时嵌入，按编号顺序）—— 01-06 为缓存稳定内容
-    // include_str! 路径相对于 source file，从 peri-acp/src/prompt/mod.rs 出发
-    let static_sections: &[&str] = &[
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/01_intro.md"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/02_system.md"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/03_doing_tasks.md"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/04_actions.md"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/05_using_tools.md"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/06_tone_style.md"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/16_workflow.md"
-        )),
-    ];
-
-    // 动态段落（含环境变量占位符、feature-gated 段落）—— 边界标记之后，不参与缓存
-    let mut dynamic_sections: Vec<&str> = Vec::new();
-    dynamic_sections.push(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/prompts/sections/07_env.md"
-    )));
-    dynamic_sections.push(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/prompts/sections/14_system_reminder.md"
-    )));
-    if features.hitl_enabled {
-        dynamic_sections.push(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/10_hitl.md"
-        )));
-    }
-    if features.subagent_enabled {
-        dynamic_sections.push(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/11_subagent.md"
-        )));
-    }
-    if features.cron_enabled {
-        dynamic_sections.push(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/12_cron.md"
-        )));
-    }
-    if features.skills_enabled {
-        dynamic_sections.push(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/13_skills.md"
-        )));
-    }
-    if features.channel_enabled {
-        dynamic_sections.push(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/15_channel.md"
-        )));
-    }
-
-    let overrides_block = overrides
-        .map(build_agent_overrides_block)
-        .unwrap_or_default();
-
-    // 合成：静态段落 + 边界标记 + 覆盖块 + 动态段落
-    // 边界标记之前的全部内容可被 Anthropic prompt cache 命中；
-    // 边界标记之后的内容（overrides、日期、cwd 等）变化不会破坏前缀缓存。
-    // overrides_block 放在边界之后——不同 SubAgent 的 persona/tone 不同，
-    // 若放在静态段之前会导致每个 agent 的缓存前缀完全失效。
-    let mut result = String::new();
-    for (i, section) in static_sections.iter().enumerate() {
-        if i > 0 {
-            result.push_str("\n\n");
-        }
-        result.push_str(section);
-    }
-    result.push_str("\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__");
-    if !overrides_block.is_empty() {
-        result.push_str("\n\n");
-        result.push_str(&overrides_block);
-    }
-    for section in &dynamic_sections {
-        result.push_str("\n\n");
-        result.push_str(section);
-    }
-    // Language instruction (dynamic, after boundary to preserve cache prefix)
-    if let Some(lang) = language {
-        let lang_name = map_language_to_instruction(lang);
-        result.push_str("\n\n# Language\n\n");
-        result.push_str(&format!(
-            "Always respond in {}. Use {} for all explanations, comments, and communications with the user. Technical terms and code identifiers should remain in their original form (e.g. API names, function/variable/type names, CLI tool names, library names, file paths, HTTP status codes, configuration keys, git commands).",
-            lang_name, lang_name
-        ));
-    }
-
-    result
-        .replace("{{cwd}}", &env.cwd)
-        .replace(
-            "{{is_git_repo}}",
-            if env.is_git_repo { "Yes" } else { "No" },
-        )
-        .replace("{{platform}}", &env.platform)
-        .replace("{{os_version}}", &env.os_version)
-        .replace("{{date}}", &env.date)
-        .replace(
-            "{{available_agents}}",
-            &format_available_agents(&env.cwd, extra_agent_dirs),
-        )
+    template.render(&env, &features, extra_agent_dirs, language)
 }
 
 /// 将 `AgentOverrides` 拼成注入到提示词顶部的覆盖块。
