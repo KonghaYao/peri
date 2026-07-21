@@ -3,7 +3,6 @@
 //! H1a（Iteration 14）：从 PERI_CONFIG_HANDLE 读取真实 PeriConfig，操作时
 //! write + 调用 config::save 持久化到 ~/.peri/settings.json。permission_mode
 //! 通过 PERMISSION_MODE_HANDLE 写运行时 SharedPermissionMode（非持久化——
-//! 设计如此，每次启动默认从 YOLO_MODE 环境变量派生）。
 
 use crate::app::panel_types::PanelKind;
 use crate::config::TuiConfig;

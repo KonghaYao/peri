@@ -19,6 +19,8 @@ impl AgentExecutor for MockAgentExecutor {
             model: None,
             tool_count: None,
             token_count: None,
+            phase: None,
+            duration_ms: None,
         }
     }
 }

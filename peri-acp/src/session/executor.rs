@@ -136,6 +136,7 @@ impl FrozenSessionData {
         plugin_skill_roots: &[peri_middlewares::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
         frozen_date: &str,
+        permission_mode: peri_middlewares::prelude::PermissionMode,
     ) -> Self {
         let (claude_md, claude_local_md) =
             peri_middlewares::AgentsMdMiddleware::read_frozen_content(cwd);
@@ -149,15 +150,10 @@ impl FrozenSessionData {
             disable_bundled,
         );
 
-        let features = crate::prompt::PromptFeatures::detect();
-        let system_prompt = crate::prompt::build_system_prompt(
-            None,
-            cwd,
-            features,
-            plugin_agent_dirs,
-            Some(frozen_date),
-            language,
-        );
+        let features = crate::prompt::PromptFeatures::detect(permission_mode);
+        let template = crate::prompt::PromptTemplate::new();
+        let env = crate::prompt::PromptEnv::with_frozen_date(cwd, frozen_date);
+        let system_prompt = template.render(&env, &features, plugin_agent_dirs, language);
 
         // 构建 v2 FrozenContext
         let v2_frozen = peri_agent::session::FrozenContext {
@@ -711,6 +707,7 @@ async fn build_and_execute_agent(
             &ctx.plugin_skill_roots,
             &ctx.plugin_agent_dirs,
             &Local::now().format("%Y-%m-%d").to_string(),
+            peri_middlewares::prelude::PermissionMode::AutoMode,
         );
         (
             frozen_data.system_prompt().to_string(),
@@ -797,18 +794,38 @@ async fn build_and_execute_agent(
                                     task_result.duration_ms,
                                     task_result.agent_count,
                                     task_result.tool_calls_count,
+                                    &task_result.phase_summaries,
                                 );
                             } else {
                                 // 回退：直接 push（无 wake，兼容无 inbox 场景）
-                                let short_id =
-                                    &task_result.run_id[..8.min(task_result.run_id.len())];
+                                let mut phase_lines = String::new();
+                                for s in &task_result.phase_summaries {
+                                    let token_info = if s.token_count > 0 {
+                                        format!(", {} tokens", s.token_count)
+                                    } else {
+                                        String::new()
+                                    };
+                                    let dur_info = if let Some(d) = s.duration_ms {
+                                        format!(", {}ms", d)
+                                    } else {
+                                        String::new()
+                                    };
+                                    phase_lines.push_str(&format!(
+                                        "- {}: {} agents{}{}\n",
+                                        s.name, s.agent_count, token_info, dur_info
+                                    ));
+                                }
                                 let notif_text = format!(
-                                    "[后台任务 {} 已完成] {} ({}ms, {} agents, {} tool calls)",
-                                    short_id,
+                                    "<system-reminder>\n\
+                                    Workflow '{}' completed. ({}ms, {} agents, {} tool calls)\n\
+                                    {}Results saved to .claude/workflow-runs/{}/state.json\n\
+                                    </system-reminder>",
                                     task_result.workflow_name,
                                     task_result.duration_ms,
                                     task_result.agent_count,
                                     task_result.tool_calls_count,
+                                    phase_lines,
+                                    task_result.run_id,
                                 );
                                 fallback_queue.push(QueuedMessage::new(
                                     peri_agent::session::queue::MessageKind::Defer,

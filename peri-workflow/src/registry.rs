@@ -4,6 +4,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::warn;
+
+use crate::progress::PhaseSummary;
 
 /// Registry 层错误。
 #[derive(Debug, Error)]
@@ -47,39 +50,47 @@ pub struct WorkflowTaskResult {
     pub tool_calls_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phase_summaries: Vec<PhaseSummary>,
 }
 
 impl WorkflowTaskResult {
-    /// 格式化为 `<system-reminder>` 块，注入 ReAct 循环。
+    /// 格式化为 `<system-reminder>` 块，含 phase breakdown。
     pub fn to_notification(&self) -> String {
-        let short_id = &self.run_id[..8.min(self.run_id.len())];
-        let error_line = self
-            .error
-            .as_ref()
-            .map(|e| format!("Error: {}\n", e))
-            .unwrap_or_default();
+        let success_msg = if self.success { "completed" } else { "failed" };
+
+        let mut phase_lines = String::new();
+        if !self.phase_summaries.is_empty() {
+            for s in &self.phase_summaries {
+                let token_info = if s.token_count > 0 {
+                    format!(", {} tokens", s.token_count)
+                } else {
+                    String::new()
+                };
+                let dur_info = if let Some(d) = s.duration_ms {
+                    format!(", {}ms", d)
+                } else {
+                    String::new()
+                };
+                phase_lines.push_str(&format!(
+                    "- {}: {} agents{}{}\n",
+                    s.name, s.agent_count, token_info, dur_info
+                ));
+            }
+        }
+
         format!(
             "<system-reminder>\n\
-            Workflow {} {}.\n\
-            Workflow: {}\n\
-            Status: {:?}\n\
-            Duration: {}ms\n\
-            Agents: {}\n\
-            Tool calls: {}\n\
-            Run ID: {}\n\
-            {}\
-            Result saved to .claude/workflow-runs/{}/state.json\n\
+            Workflow '{}' {}. ({}ms, {} agents, {} tool calls)\n\
+            {}Results saved to .claude/workflow-runs/{}/state.json\n\
             Use Read tool to view full results.\n\
             </system-reminder>",
-            short_id,
-            if self.success { "completed" } else { "failed" },
             self.workflow_name,
-            self.status,
+            success_msg,
             self.duration_ms,
             self.agent_count,
             self.tool_calls_count,
-            self.run_id,
-            error_line,
+            phase_lines,
             self.run_id,
         )
     }
@@ -142,7 +153,9 @@ impl WorkflowTaskRegistry {
         if let Some(run) = runs.get_mut(run_id) {
             run.status = result.status.clone();
         }
-        let _ = self.notification_tx.send(result);
+        if let Err(e) = self.notification_tx.send(result) {
+            warn!(target: "workflow", run_id = %run_id, error = %e, "registry: notification send failed (no subscribers)");
+        }
     }
 
     /// 终止指定 workflow，移除记录并发送 kill 信号。

@@ -200,6 +200,8 @@ settings.json
 !.claude/skills/learn-from-history/
 !.claude/skills/start-devflow/**
 !.claude/skills/start-devflow/
+!.claude/skills/auto-issue-fixer/**
+!.claude/skills/auto-issue-fixer/
 !.claude/agents/
 !.claude/agents/coder.md
 .qoder/**/*

@@ -86,6 +86,14 @@ pub enum AgentRunResult {
         tool_count: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none", rename = "tokenCount")]
         token_count: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "durationMs"
+        )]
+        duration_ms: Option<u64>,
     },
     #[serde(rename = "skipped")]
     Skipped,

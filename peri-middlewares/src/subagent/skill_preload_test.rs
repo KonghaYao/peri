@@ -294,8 +294,8 @@
 
     #[test]
     fn test_extract_skill_names_multiple() {
-        let names = extract_skill_names_from_text("/diagnose /fix-issue /caveman");
-        assert_eq!(names, vec!["diagnose", "fix-issue", "caveman"]);
+        let names = extract_skill_names_from_text("/diagnose /auto-issue-fixer /caveman");
+        assert_eq!(names, vec!["diagnose", "auto-issue-fixer", "caveman"]);
     }
 
     #[test]

@@ -378,6 +378,7 @@ impl WorkflowRunner {
                             let agent_id_num = params.agent_id;
                             let exec = Arc::clone(&agent_executor);
                             let ch = Arc::clone(&channel_clone);
+                            let progress_for_agent = Arc::clone(&progress_store_clone);
                             tokio::spawn(async move {
                                 // Register agent for single-agent kill (GAP-07)
                                 let cancel_rx = ch.register_agent(&agent_run_id, agent_id_num, id);
@@ -395,6 +396,17 @@ impl WorkflowRunner {
 
                                 // Deregister (no-op if already removed by kill_agent)
                                 ch.deregister_agent(&agent_run_id, agent_id_num);
+
+                                // 从 progress store 补注 phase：engine 的 phase() 上下文仅通过
+                                // progress 事件传递，不进入 AgentRunParams.phase（hooks.js:21 漏了）
+                                // → agent_started 事件包含 phase，进度 store 先收到，此处补入结果。
+                                let mut result = result;
+                                if let AgentRunResult::Ok { ref mut phase, .. } = &mut result {
+                                    if phase.is_none() {
+                                        *phase = progress_for_agent
+                                            .get_agent_phase(&agent_run_id, agent_id_num);
+                                    }
+                                }
 
                                 // 仅 cancel_rx 的 killed 结果跳过响应（kill_agent 已发送 error response，
                                 // 避免双重 JSON-RPC 响应违反协议规范）
@@ -421,8 +433,11 @@ impl WorkflowRunner {
                         }
                         "progress/event" => {
                             if let Some(p) = params {
-                                if let Ok(event) = serde_json::from_value::<ProgressEvent>(p) {
-                                    progress_store_clone.apply_event(&event);
+                                match serde_json::from_value::<ProgressEvent>(p) {
+                                    Ok(event) => progress_store_clone.apply_event(&event),
+                                    Err(e) => {
+                                        warn!(target: "workflow", error = %e, "progress/event: parse failed")
+                                    }
                                 }
                             }
                         }
@@ -430,7 +445,11 @@ impl WorkflowRunner {
                             if let Some(p) = params {
                                 if let Ok(parsed) = serde_json::from_value::<JournalAppendParams>(p)
                                 {
-                                    let _ = journal_clone.append(&parsed.run_id, &parsed.entry);
+                                    if let Err(e) =
+                                        journal_clone.append(&parsed.run_id, &parsed.entry)
+                                    {
+                                        warn!(target: "workflow", run_id = %parsed.run_id, error = %e, "journal/append: write failed");
+                                    }
                                 }
                             }
                         }
@@ -439,7 +458,9 @@ impl WorkflowRunner {
                                 if let Ok(parsed) =
                                     serde_json::from_value::<JournalTruncateParams>(p)
                                 {
-                                    let _ = journal_clone.truncate(&parsed.run_id);
+                                    if let Err(e) = journal_clone.truncate(&parsed.run_id) {
+                                        warn!(target: "workflow", run_id = %parsed.run_id, error = %e, "journal/truncate: write failed");
+                                    }
                                 }
                             }
                         }
@@ -467,10 +488,22 @@ impl WorkflowRunner {
                                             "workflow ended non-completed"
                                         );
                                     }
+                                    let processed_return_value = done.return_value.map(|mut v| {
+                                        if v.is_object() {
+                                            let journal_for_extract = Arc::clone(&journal_clone);
+                                            let _extracted = crate::journal::extract_long_texts(
+                                                &mut v,
+                                                &done.run_id,
+                                                &journal_for_extract,
+                                                200,
+                                            );
+                                        }
+                                        v
+                                    });
                                     final_result = WorkflowResult {
                                         run_id: done.run_id.clone(),
                                         status: done.status.clone(),
-                                        return_value: done.return_value.clone(),
+                                        return_value: processed_return_value,
                                         error: done.error.clone(),
                                         stderr_tail: None,
                                     };
@@ -479,7 +512,12 @@ impl WorkflowRunner {
                             }
                         }
                         _ => {
-                            debug!(target: "workflow", "unknown method: {method}");
+                            warn!(target: "workflow", "unknown method from node: {method}");
+                            if let Some(id) = id {
+                                let _ = channel_clone
+                                    .send_error(id, ERR_METHOD_NOT_FOUND, "Method not found")
+                                    .await;
+                            }
                         }
                     },
                     IncomingMessage::Response { .. } => {
@@ -515,7 +553,9 @@ impl WorkflowRunner {
                 finished_at: Some(chrono::Utc::now().to_rfc3339()),
                 error: final_result.error.clone(),
             };
-            let _ = journal_clone.write_state(&final_result.run_id, &state);
+            if let Err(e) = journal_clone.write_state(&final_result.run_id, &state) {
+                warn!(target: "workflow", run_id = %final_result.run_id, error = %e, "write_state failed");
+            }
 
             final_result.stderr_tail = stderr_tail;
             let _ = done_tx.send(Some(final_result));

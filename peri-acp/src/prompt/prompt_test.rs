@@ -1,4 +1,5 @@
 use super::*;
+use peri_middlewares::PermissionMode;
 
 #[test]
 fn test_no_overrides_contains_all_sections() {
@@ -201,9 +202,9 @@ fn test_all_features_enabled_includes_all() {
 
 #[test]
 fn test_detect_default_values() {
-    let features = PromptFeatures::detect();
-    // 默认环境（无 YOLO_MODE 或 YOLO_MODE=true）下 hitl_enabled 为 false
-    // 注意：测试环境中 YOLO_MODE 可能未设置
+    let features = PromptFeatures::detect(PermissionMode::Bypass);
+    // 默认环境下 hitl_enabled 取决于 permission_mode
+    // 注意：Bypass 模式下 hitl_enabled 为 false
     assert!(features.subagent_enabled);
     assert!(features.cron_enabled);
     assert!(features.skills_enabled);
@@ -487,5 +488,145 @@ fn test_language_custom_code_passthrough() {
     assert!(
         result.contains("Always respond in fr"),
         "未知语言代码应原样保留"
+    );
+}
+
+// ─── snapshot tests ───────────────────────────────────────────────────────
+
+/// 验证 PromptTemplate::render() 与 build_system_prompt() 输出字节完全一致
+/// [回归测试] 确保 PromptTemplate 重构不改变系统提示词字节
+#[test]
+fn test_prompt_template_byte_identical_to_build_system_prompt() {
+    let frozen_date = "2026-01-01";
+    let cwd = "/test/project";
+    let no_overrides: Option<&AgentOverrides> = None;
+    let with_overrides = AgentOverrides {
+        persona: Some("You are a test bot".into()),
+        tone: Some("Be concise".into()),
+        proactiveness: Some("Ask before acting".into()),
+    };
+    let empty_overrides = AgentOverrides {
+        persona: None,
+        tone: None,
+        proactiveness: None,
+    };
+
+    // 覆盖多种 features 组合
+    let features_combos = [
+        PromptFeatures::none(),
+        {
+            let mut f = PromptFeatures::none();
+            f.subagent_enabled = true;
+            f
+        },
+        {
+            let mut f = PromptFeatures::none();
+            f.hitl_enabled = true;
+            f
+        },
+        {
+            let mut f = PromptFeatures::none();
+            f.skills_enabled = true;
+            f
+        },
+        PromptFeatures::detect(PermissionMode::Bypass),
+    ];
+
+    let language_combos: [Option<&str>; 3] = [None, Some("zh-CN"), Some("fr")];
+
+    for features in &features_combos {
+        for language in &language_combos {
+            // No overrides
+            {
+                let old = build_system_prompt(
+                    no_overrides,
+                    cwd,
+                    *features,
+                    &[],
+                    Some(frozen_date),
+                    *language,
+                );
+                let env = PromptEnv::with_frozen_date(cwd, frozen_date);
+                let new = PromptTemplate::new().render(&env, features, &[], *language);
+                assert_eq!(
+                    old, new,
+                    "byte mismatch: features={:?}, lang={:?}, overrides=None",
+                    features, language
+                );
+            }
+            // With non-empty overrides
+            {
+                let old = build_system_prompt(
+                    Some(&with_overrides),
+                    cwd,
+                    *features,
+                    &[],
+                    Some(frozen_date),
+                    *language,
+                );
+                let env = PromptEnv::with_frozen_date(cwd, frozen_date);
+                let new = PromptTemplate::with_overrides(&with_overrides).render(
+                    &env,
+                    features,
+                    &[],
+                    *language,
+                );
+                assert_eq!(
+                    old, new,
+                    "byte mismatch: features={:?}, lang={:?}, overrides=Some",
+                    features, language
+                );
+            }
+            // With empty overrides (should behave same as None)
+            {
+                let old = build_system_prompt(
+                    Some(&empty_overrides),
+                    cwd,
+                    *features,
+                    &[],
+                    Some(frozen_date),
+                    *language,
+                );
+                let env = PromptEnv::with_frozen_date(cwd, frozen_date);
+                let new = PromptTemplate::with_overrides(&empty_overrides).render(
+                    &env,
+                    features,
+                    &[],
+                    *language,
+                );
+                assert_eq!(
+                    old, new,
+                    "byte mismatch: features={:?}, lang={:?}, overrides=Some(empty)",
+                    features, language
+                );
+            }
+        }
+    }
+}
+
+/// 验证边界标记位置在新旧路径中完全一致
+#[test]
+fn test_template_boundary_position_identical() {
+    let old = build_system_prompt(
+        None,
+        "/tmp",
+        PromptFeatures::detect(PermissionMode::Bypass),
+        &[],
+        None,
+        None,
+    );
+    let env = PromptEnv::detect("/tmp");
+    let new = PromptTemplate::new().render(
+        &env,
+        &PromptFeatures::detect(PermissionMode::Bypass),
+        &[],
+        None,
+    );
+
+    let old_boundary = old.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
+    let new_boundary = new.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
+    assert_eq!(
+        old_boundary, new_boundary,
+        "boundary offset must be identical for Anthropic cache hit"
     );
 }

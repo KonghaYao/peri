@@ -79,6 +79,8 @@ pub struct AgentProgress {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<AgentRunResult>,
 }
 
@@ -90,6 +92,16 @@ pub enum AgentStatus {
     Done,
     Dead,
     Skipped,
+}
+
+/// Per-phase agent count and token summary for notification formatting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseSummary {
+    pub name: String,
+    pub agent_count: usize,
+    pub token_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 // ─── Store ──────────────────────────────────────────────────
@@ -181,6 +193,11 @@ impl WorkflowProgressStore {
                             AgentRunResult::Dead { .. } => AgentStatus::Dead,
                         };
                         agent.result = Some(result.clone());
+                        // 从 AgentRunResult::Ok 提取 duration（P2 新增字段）
+                        agent.duration_ms = match result {
+                            AgentRunResult::Ok { duration_ms, .. } => *duration_ms,
+                            _ => None,
+                        };
                         // 只在 result 携带 tool_count/token_count 时才更新，保留 AgentProgress 已设的值
                         agent.tool_count = result.tool_count().or(agent.tool_count);
                         agent.token_count = result.token_count().or(agent.token_count);
@@ -270,6 +287,7 @@ where
         status: AgentStatus::Pending,
         token_count: None,
         tool_count: None,
+        duration_ms: None,
         result: None,
     });
     f(agents.get_mut(&agent_id).unwrap());
@@ -321,6 +339,65 @@ impl WorkflowProgressStore {
                 .sum::<u64>() as usize;
             (agent_count, tool_calls_count)
         })
+    }
+
+    /// 获取按 phase 分组的统计摘要（供通知格式化）。
+    pub fn get_phase_summaries(&self, run_id: &str) -> Vec<PhaseSummary> {
+        let runs = self.runs.read();
+        let Some(run) = runs.get(run_id) else {
+            return Vec::new();
+        };
+        let mut phase_map: std::collections::HashMap<String, (usize, u64, u64)> =
+            std::collections::HashMap::new();
+        for agent in run.agents.values() {
+            let phase = agent.phase.as_deref().unwrap_or("(no phase)");
+            let entry = phase_map.entry(phase.to_string()).or_insert((0, 0, 0));
+            entry.0 += 1;
+            entry.1 += agent
+                .token_count
+                .or_else(|| agent.result.as_ref().and_then(|r| r.token_count()))
+                .unwrap_or(0);
+            entry.2 += agent
+                .duration_ms
+                .or(
+                    if let Some(AgentRunResult::Ok {
+                        duration_ms: Some(d),
+                        ..
+                    }) = &agent.result
+                    {
+                        Some(*d)
+                    } else {
+                        None
+                    },
+                )
+                .unwrap_or(0);
+        }
+        // 将 "(no phase)" 组排到最后
+        let mut summaries: Vec<PhaseSummary> = phase_map
+            .into_iter()
+            .map(
+                |(name, (agent_count, token_count, duration_sum))| PhaseSummary {
+                    name,
+                    agent_count,
+                    token_count,
+                    duration_ms: if duration_sum > 0 {
+                        Some(duration_sum)
+                    } else {
+                        None
+                    },
+                },
+            )
+            .collect();
+        summaries.sort_by_key(|s| if s.name == "(no phase)" { 1 } else { 0 });
+        summaries
+    }
+
+    /// 获取指定 agent 的 phase（供 journal 注入）。
+    pub fn get_agent_phase(&self, run_id: &str, agent_id: u64) -> Option<String> {
+        let runs = self.runs.read();
+        let run = runs.get(run_id)?;
+        let agent = run.agents.get(&agent_id)?;
+        agent.phase.clone()
     }
 }
 

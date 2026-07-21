@@ -25,18 +25,6 @@ pub use auto_classifier::{AutoClassifier, Classification, LlmAutoClassifier};
 pub use peri_agent::hitl::{BatchItem, HitlDecision};
 pub use shared_mode::{PermissionMode, SharedPermissionMode};
 
-// ─── YOLO 模式检测 ─────────────────────────────────────────────────────────────
-
-/// 检测是否处于 YOLO 模式（默认启用）
-///
-/// - `YOLO_MODE` 未设置或为 `true`/`1` → YOLO（跳过审批）
-/// - `YOLO_MODE=false`/`0` → 启用 HITL 审批
-pub fn is_yolo_mode() -> bool {
-    std::env::var("YOLO_MODE")
-        .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
-        .unwrap_or(true)
-}
-
 // ─── 默认规则 ──────────────────────────────────────────────────────────────────
 
 /// 默认敏感工具判断规则
@@ -85,7 +73,7 @@ pub use crate::tool_search::core_tools::resolve_effective_tool_name as effective
 /// 在 `before_tool` 时拦截工具调用，通过注入的 [`UserInteractionBroker`] 请求用户审批。
 ///
 /// # HITL 模式
-/// 通过 `HumanInTheLoopMiddleware::new(...)` 或环境变量 `YOLO_MODE=false` 启用审批。
+/// 通过 `HumanInTheLoopMiddleware::new(...)` 或权限模式启用审批。
 pub struct HumanInTheLoopMiddleware {
     broker: Option<Arc<dyn UserInteractionBroker>>,
     requires_approval: fn(&str) -> bool,
@@ -112,7 +100,7 @@ impl HumanInTheLoopMiddleware {
         }
     }
 
-    /// YOLO 模式：所有工具调用直接放行
+    /// 禁用模式：所有工具调用直接放行（无审批）
     pub fn disabled() -> Self {
         Self {
             broker: None,
@@ -120,18 +108,6 @@ impl HumanInTheLoopMiddleware {
             mode: None,
             auto_classifier: None,
             broker_timeout: BROKER_TIMEOUT,
-        }
-    }
-
-    /// 从环境变量决定是否启用（默认 YOLO；`YOLO_MODE=false` 则启用审批）
-    pub fn from_env(
-        broker: Arc<dyn UserInteractionBroker>,
-        requires_approval: fn(&str) -> bool,
-    ) -> Self {
-        if is_yolo_mode() {
-            Self::disabled()
-        } else {
-            Self::new(broker, requires_approval)
         }
     }
 

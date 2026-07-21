@@ -56,31 +56,20 @@ pub async fn build_app_and_acp(
         let initial_mode = if opts.skip_permissions {
             PermissionMode::Bypass
         } else if let Some(ref mode_str) = opts.permission_mode {
-            match mode_str.as_str() {
+            match mode_str.to_lowercase().as_str() {
                 "bypass" => PermissionMode::Bypass,
                 "default" => PermissionMode::Default,
                 "accept-edit" => PermissionMode::AcceptEdit,
                 "auto-mode" => PermissionMode::AutoMode,
-                _ => {
-                    if std::env::var("YOLO_MODE")
-                        .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
-                        .unwrap_or(true)
-                    {
-                        PermissionMode::Bypass
-                    } else {
-                        PermissionMode::Default
-                    }
+                other => {
+                    eprintln!("未知权限模式 '{}'，使用 Bypass", other);
+                    PermissionMode::Bypass
                 }
             }
         } else if opts.approve {
             PermissionMode::Default
-        } else if std::env::var("YOLO_MODE")
-            .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
-            .unwrap_or(true)
-        {
-            PermissionMode::Bypass
         } else {
-            PermissionMode::Default
+            PermissionMode::Bypass
         };
         app.services.permission_mode.store(initial_mode);
     }

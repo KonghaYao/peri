@@ -142,6 +142,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
             "Workflow agent: starting execution"
         );
 
+        let started_at = std::time::Instant::now();
+
         // 0. GAP-08: 创建 Langfuse tracer（如果 session 可用）
         let langfuse_tracer = self.ctx.langfuse_session.as_ref().map(|s| {
             let session_clone = Arc::clone(s);
@@ -213,14 +215,16 @@ impl AgentExecutor for WorkflowAgentExecutor {
                         if let Some(ref tx) = progress_tx_for_handler {
                             let s = usage_stats_for_handler.lock();
                             let tc = tool_call_count_for_handler.lock().unwrap();
-                            let _ = tx.send(ProgressEvent::AgentProgress {
+                            if let Err(e) = tx.send(ProgressEvent::AgentProgress {
                                 run_id: run_id_for_handler.clone(),
                                 agent_id: agent_id_for_handler,
                                 label: None,
                                 phase: None,
                                 token_count: s.0,
                                 tool_count: *tc,
-                            });
+                            }) {
+                                warn!(target: "workflow", run_id = %run_id_for_handler, agent_id = agent_id_for_handler, error = %e, "progress_tx.send failed (ToolStart)");
+                            }
                         }
                     }
                     ExecutorEvent::ToolEnd { name, is_error, .. } => {
@@ -248,14 +252,16 @@ impl AgentExecutor for WorkflowAgentExecutor {
                         if let Some(ref tx) = progress_tx_for_handler {
                             let s = usage_stats_for_handler.lock();
                             let tc = tool_call_count_for_handler.lock().unwrap();
-                            let _ = tx.send(ProgressEvent::AgentProgress {
+                            if let Err(e) = tx.send(ProgressEvent::AgentProgress {
                                 run_id: run_id_for_handler.clone(),
                                 agent_id: agent_id_for_handler,
                                 label: None,
                                 phase: None,
                                 token_count: s.0,
                                 tool_count: *tc,
-                            });
+                            }) {
+                                warn!(target: "workflow", run_id = %run_id_for_handler, agent_id = agent_id_for_handler, error = %e, "progress_tx.send failed (LlmCallEnd)");
+                            }
                         }
                     }
                     ExecutorEvent::LlmRetrying {
@@ -329,15 +335,16 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // 4. GAP-05: 使用标准 system prompt（复用 frozen 或运行时构建）
         let system_prompt = self.ctx.system_prompt.clone().unwrap_or_else(|| {
-            let features = crate::prompt::PromptFeatures::detect();
-            crate::prompt::build_system_prompt(
-                None,
-                &self.ctx.cwd,
-                features,
-                &[],
-                self.ctx.frozen_date.as_deref(),
-                self.ctx.frozen_language.as_deref(),
-            )
+            let features = crate::prompt::PromptFeatures::detect(
+                peri_middlewares::prelude::PermissionMode::Bypass,
+            );
+            let template = crate::prompt::PromptTemplate::new();
+            let env = if let Some(ref date) = self.ctx.frozen_date {
+                crate::prompt::PromptEnv::with_frozen_date(&self.ctx.cwd, date)
+            } else {
+                crate::prompt::PromptEnv::detect(&self.ctx.cwd)
+            };
+            template.render(&env, &features, &[], self.ctx.frozen_language.as_deref())
         });
 
         // 5. 构建中间件链
@@ -512,7 +519,16 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 // 获取 agent 执行期间累积的 token 用量
                 let (total_output_tokens, last_model) = {
                     let s = usage_stats.lock();
-                    (s.0, s.1.clone())
+                    let mut tokens = s.0;
+                    // P0 fallback: haiku 等模型 usage=None 时 token 累积为 0，
+                    // 按 output_text 长度启发式估算（每个 token ~4 字符）
+                    if tokens == 0 && !output_text.is_empty() {
+                        tokens = (output_text.len() as u64 / 4).max(1);
+                    }
+                    // P0 fallback: 如果事件从未 emit LlmCallEnd（如纯工具调用），
+                    // 回退到 Node 传入的 model 参数
+                    let model = s.1.clone().or_else(|| params.model.clone());
+                    (tokens, model)
                 };
 
                 // Schema 校验
@@ -535,6 +551,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
                                 Some(*c)
                             },
                             token_count: Some(total_output_tokens),
+                            phase: params.phase.clone(),
+                            duration_ms: Some(started_at.elapsed().as_millis() as u64),
                         }
                     }
                 } else {
@@ -549,6 +567,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
                             Some(*c)
                         },
                         token_count: Some(total_output_tokens),
+                        phase: params.phase.clone(),
+                        duration_ms: Some(started_at.elapsed().as_millis() as u64),
                     }
                 }
             }

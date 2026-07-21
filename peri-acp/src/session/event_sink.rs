@@ -105,7 +105,13 @@ impl EventSink for TransportEventSink {
             .caps_registry
             .get(session_id)
             .map(|r| r.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                tracing::error!(
+                    session_id = %session_id,
+                    "event_sink: session not found in caps_registry, falling back to all_enabled"
+                );
+                PeriCaps::all_enabled()
+            });
         tracing::debug!(
             target: "acp.event_sink",
             session_id = %session_id,
@@ -213,7 +219,13 @@ impl EventSink for TransportEventSink {
             .caps_registry
             .get(session_id)
             .map(|r| r.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                tracing::error!(
+                    session_id = %session_id,
+                    "event_sink: session not found in caps_registry, falling back to all_enabled"
+                );
+                PeriCaps::all_enabled()
+            });
         if caps.agent_event_done {
             debug!(session_id = %session_id, "EventSink: sending agent_event_done");
             if let Err(e) = self
@@ -236,8 +248,19 @@ impl EventSink for TransportEventSink {
             .caps_registry
             .get(session_id)
             .map(|r| r.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                tracing::error!(
+                    session_id = %session_id,
+                    "event_sink: session not found in caps_registry, falling back to all_enabled"
+                );
+                PeriCaps::all_enabled()
+            });
         if !caps.unstable_event {
+            tracing::warn!(
+                session_id = %session_id,
+                event_name = %event,
+                "[caps] push_unstable_event: unstable_event cap not declared, event dropped"
+            );
             return;
         }
         if let Err(e) = TransportEventSink::push_unstable_event(self, session_id, event, data).await

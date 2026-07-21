@@ -185,15 +185,10 @@ pub(crate) fn build_agent(
     let system_prompt = agent_overrides.as_ref().map_or_else(
         || system_prompt.clone(),
         |ov| {
-            let features = crate::prompt::PromptFeatures::detect();
-            crate::prompt::build_system_prompt(
-                Some(ov),
-                &cwd,
-                features,
-                &plugin_agent_dirs,
-                None,
-                None,
-            )
+            let features = crate::prompt::PromptFeatures::detect(permission_mode.load());
+            let template = crate::prompt::PromptTemplate::with_overrides(ov);
+            let env = crate::prompt::PromptEnv::detect(&cwd);
+            template.render(&env, &features, &plugin_agent_dirs, None)
         },
     );
 
@@ -319,14 +314,24 @@ pub(crate) fn build_agent(
     // 系统提示构建器
     let frozen_language_for_sub = peri_config.config.language.clone();
     let frozen_date_for_sub = frozen_date.clone();
+    // PromptFeatures is detected at build-time, based on permission mode
+    // which does not change during agent operation.
+    let features_for_sub = crate::prompt::PromptFeatures::detect(permission_mode.load());
+    let template_for_sub = crate::prompt::PromptTemplate::new();
     let system_builder: SystemPromptBuilder = Arc::new(move |overrides, cwd_dir| {
-        let features = crate::prompt::PromptFeatures::detect();
-        crate::prompt::build_system_prompt(
-            overrides,
-            cwd_dir,
-            features,
+        let t = overrides.map_or_else(
+            || template_for_sub.clone(),
+            crate::prompt::PromptTemplate::with_overrides,
+        );
+        let env = if let Some(ref date) = frozen_date_for_sub {
+            crate::prompt::PromptEnv::with_frozen_date(cwd_dir, date)
+        } else {
+            crate::prompt::PromptEnv::detect(cwd_dir)
+        };
+        t.render(
+            &env,
+            &features_for_sub,
             &[],
-            frozen_date_for_sub.as_deref(),
             frozen_language_for_sub.as_deref(),
         )
     });
