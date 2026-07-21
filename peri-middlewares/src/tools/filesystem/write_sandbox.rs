@@ -21,6 +21,8 @@ pub struct WriteSandboxTool {
     pub cwd: String,
     /// canonicalized 沙箱根路径列表（构造时已校验合法性）
     sandbox_roots: Vec<PathBuf>,
+    /// 原始相对路径列表（用于错误消息展示，避免绝对路径与工具要求矛盾）
+    allowed_dirs: Vec<String>,
     /// 动态生成的 description
     description: String,
 }
@@ -69,18 +71,16 @@ impl WriteSandboxTool {
         Ok(Self {
             cwd,
             sandbox_roots,
+            allowed_dirs,
             description,
         })
     }
 
     /// 格式化允许的沙箱目录列表，用于错误信息。
+    /// 使用原始相对路径（如 `.peri/plans/`），而非 canonicalized 绝对路径，
+    /// 因为工具只接受相对路径，展示绝对路径会与约束矛盾。
     fn allowed_dirs_display(&self) -> String {
-        let dirs: Vec<String> = self
-            .sandbox_roots
-            .iter()
-            .map(|r| r.display().to_string())
-            .collect();
-        format!("允许的目录: {:?}", dirs)
+        format!("允许的目录: {:?}", self.allowed_dirs)
     }
 
     /// 全路径安全校验链。

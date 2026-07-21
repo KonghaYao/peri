@@ -1,6 +1,6 @@
 # WriteSandbox 工具仍容易被 subagent 误认为 Write——路径不在沙箱白名单内反复报错
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-07-20
 
@@ -62,6 +62,33 @@ agent 需要写文件
 
 agent 连续 4 次调用 WriteSandbox 写同一个非白名单路径，报错后不切换工具、不调整路径，陷入死循环。
 
+### 验证 #1（2026-07-21）—— 修复 #1 后错误率仍高
+
+修复 #1（改名 SandboxWrite + 错误消息追加允许目录 + 描述加否定边界）已应用，但 agent 仍需 3 轮试错才能用对路径：
+
+```
+● SandboxWrite (path: "agent-capability-topics-report.md")
+  ⎿ Tool execution failed: SandboxWrite - WriteSandbox: 路径 'agent-capability-topics-report.md'
+     的已有祖先不在沙箱目录内。允许的目录: ["/Users/.../perihelion/.peri/plans"]
+● Shell (ls -la /Users/.../perihelion/.peri/plans/ 2>/dev/null || mkdir -p ...)
+  ⎿ Tool 'Bash' not found
+● SandboxWrite (path: "agent-capability-topics-report.md")
+  ⎿ [同上错误，盲重试]
+● SandboxWrite (path: "/Users/.../perihelion/.peri/plans/agent-capability-topics-report.md")
+  ⎿ Tool execution failed: 拒绝绝对路径 '...'。请使用基于项目根的相对路径。
+     允许的目录: ["/Users/.../perihelion/.peri/plans"]
+● SandboxWrite (path: ".peri/plans/agent-capability-topics-report.md")
+  ⎿ Wrote 69 lines .peri/plans/agent-capability-topics-report.md
+```
+
+**残余问题分析**：
+
+1. **`allowed_dirs_display()` 显示绝对路径，但工具拒绝绝对路径**——矛盾信息导致 agent 在第 4 轮尝试绝对路径。`sandbox_roots` 是 canonicalized 的绝对路径，但 tool description 要求相对路径。错误消息中显示绝对路径目录 + 提示"请使用基于项目根的相对路径" = LLM 收到自相矛盾的信号。
+
+2. **"已有祖先不在沙箱目录内"错误不够可操作**——当 agent 传入裸文件名 `agent-capability-topics-report.md`，错误只说"不在沙箱内"并列出允许目录（绝对路径版），但 agent 不清楚**具体应该用什么格式**。它需要自己推断 `裸文件名 → .peri/plans/裸文件名`。
+
+**根因**：修复 #1 追加了允许目录到错误消息中，但用的是 `sandbox_roots`（canonicalized 绝对路径），与工具只接受相对路径的约束矛盾。应改为使用 `allowed_dirs`（原始相对路径）。
+
 ## 与历史修复的区别
 
 | 历史 issue | 修了什么 | 本次的区别 |
@@ -81,6 +108,7 @@ agent 连续 4 次调用 WriteSandbox 写同一个非白名单路径，报错后
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-07-20 | — | Open | agent | 创建 |
+| 2026-07-21 | Open | Fixed | agent | 修复 #2：allowed_dirs_display 改用相对路径 |
 
 ## 修复记录
 
@@ -96,3 +124,19 @@ agent 连续 4 次调用 WriteSandbox 写同一个非白名单路径，报错后
   4. **工具名改名**（`write_sandbox.rs`）：`name()` 从 `"WriteSandbox"` 改为 `"SandboxWrite"`（限制词在前，LLM 按前缀处理时优先激活沙箱语义）。`aliases()` 返回 `["WriteSandbox"]` 保持向后兼容。`build_agent.rs` disallowed 检查同时接受 `"sandboxwrite"` 和 `"writesandbox"`
 - **涉及文件**：`write_sandbox.rs`, `write_sandbox_test.rs`, `build_agent.rs`, `explorer.md`, `plan.md`, `verification.md`
 - **测试**：`cargo test -p peri-middlewares --lib` — 994 passed, 0 failed
+
+### 修复 #2（2026-07-21）
+
+- **操作人**：agent
+- **用户原意**：修复 #1 后 SandboxWrite 错误率仍高，agent 需 3 轮试错才能用对路径
+- **修复内容**：
+
+  1. **`allowed_dirs_display()` 改用相对路径**（`write_sandbox.rs`）：原实现遍历 `sandbox_roots`（canonicalized 绝对路径），展示如 `/Users/.../.peri/plans`。但工具只接受相对路径，LLM 看到"允许绝对路径目录"后会尝试绝对路径然后被拒绝。改为直接使用 `allowed_dirs`（原始相对路径 `.peri/plans/`），消除矛盾信号。
+
+  2. **`WriteSandboxTool` 新增 `allowed_dirs` 字段**：存储原始相对路径列表，供 `allowed_dirs_display()` 使用。`sandbox_roots` 保留用于路径校验。
+
+  3. **新增回归测试** `test_write_sandbox_error_displays_relative_dirs`：验证错误消息展示相对路径而非绝对路径。
+
+- **涉及文件**：`write_sandbox.rs`, `write_sandbox_test.rs`
+- **测试**：`cargo test -p peri-middlewares --lib` — 995 passed, 0 failed
+- **验证状态**：待验证

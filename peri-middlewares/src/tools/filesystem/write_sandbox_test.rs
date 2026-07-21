@@ -207,3 +207,34 @@ fn test_write_sandbox_auto_create_dir() {
     let content = std::fs::read_to_string(dir.path().join("plans/test.md")).unwrap();
     assert_eq!(content, "# Auto created");
 }
+
+/// [回归测试] 错误消息中的允许目录应使用原始相对路径，而非 canonicalized 绝对路径。
+/// 对应 spec/issues/2026-07-20-writesandbox-still-confused-with-write.md 修复 #2
+#[tokio::test]
+async fn test_write_sandbox_error_displays_relative_dirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = make_tool(&dir, vec!["plans"]);
+    // 裸文件名——已有祖先（cwd）不在沙箱目录内
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "bare.md", "content": "test"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    // 错误消息应包含相对路径 "plans"，而非 canonicalized 绝对路径
+    assert!(
+        err.contains("\"plans\""),
+        "错误消息应展示相对路径 'plans'，而非绝对路径: {}",
+        err
+    );
+    // 不应包含 tempdir 的绝对路径
+    let abs_path = dir.path().display().to_string();
+    assert!(
+        !err.contains(&abs_path),
+        "错误消息不应包含绝对路径 '{}': {}",
+        abs_path,
+        err
+    );
+}
