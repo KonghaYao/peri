@@ -24,7 +24,7 @@ use peri_workflow::{
     journal::WorkflowJournalStore,
     progress::WorkflowProgressStore,
     registry::{WorkflowRun, WorkflowRunStatus, WorkflowTaskRegistry, WorkflowTaskResult},
-    runner::{AgentExecutor, WorkflowInput, WorkflowRunner},
+    runner::{AgentExecutor, WorkflowInput, WorkflowResult, WorkflowRunner},
     tool::WorkflowTool,
 };
 
@@ -224,6 +224,60 @@ impl WorkflowMiddleware {
                 kill_tx: Some(kill_tx),
             })
             .map_err(|e| format!("Failed to register resumed workflow: {e}"))?;
+
+        // ─── 快速失败检测（1s 内 done 到来即同步报错）───
+        let mut fast_rx = done_rx.clone();
+        let fast_result = tokio::select! {
+            _ = fast_rx.changed() => {
+                let val = fast_rx.borrow().clone();
+                if val.is_none() {
+                    Some(WorkflowResult {
+                        run_id: new_run_id.clone(),
+                        status: "failed".to_string(),
+                        return_value: None,
+                        error: Some("workflow process exited before reporting result".to_string()),
+                        stderr_tail: None,
+                    })
+                } else {
+                    val
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => None,
+        };
+
+        if let Some(ref result) = fast_result {
+            if result.status != "completed" {
+                let error_msg = result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "workflow failed with no error details".to_string());
+                let detail = result
+                    .stderr_tail
+                    .as_ref()
+                    .map(|s| format!("\n\nstderr (last 20 lines):\n{}", s))
+                    .unwrap_or_default();
+
+                self.registry.complete(
+                    &new_run_id,
+                    WorkflowTaskResult {
+                        run_id: new_run_id.clone(),
+                        workflow_name: wf_name.clone(),
+                        success: false,
+                        status: WorkflowRunStatus::Failed,
+                        duration_ms: started_at.elapsed().as_millis() as u64,
+                        agent_count: 0,
+                        tool_calls_count: 0,
+                        error: Some(error_msg.clone()),
+                    },
+                );
+
+                return Err(format!(
+                    "Workflow resume '{}' failed: {}{}",
+                    wf_name, error_msg, detail
+                ));
+            }
+        }
+        // ─── 快速失败检测结束 ───
 
         // 完成后通知任务
         let registry_for_complete = Arc::clone(&self.registry);
