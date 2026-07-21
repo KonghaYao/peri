@@ -1,6 +1,6 @@
 <div align="center">
 
-# Perihelion
+# Peri Code
 
 **A Rust-built coding agent — fast, lean, Claude Code compatible, any LLM.**
 
@@ -117,7 +117,7 @@ Perihelion's code is 99% AI-generated, primarily by DeepSeek and GLM-5.2. The de
 
 | When you... | The loop kicks off |
 |---|---|
-| **Find a bug or tech debt** | `issue-create` → `systematic-debugging` → `writing-plans` → `subagent-driven-development` → `issue-archive` → update `CLAUDE.md` |
+| **Find a bug or tech debt** | `auto-issue-fixer` → `systematic-debugging` → `writing-plans` → `subagent-driven-development` → `auto-issue-fixer`（归档）→ update `CLAUDE.md` |
 | **Want a new feature** | `grill-me` → `writing-plans` → `subagent-driven-development` |
 | **Codebase getting messy** | `slop-cleaner` → `improve-codebase-architecture` → `writing-plans` → `subagent-driven-development` |
 
