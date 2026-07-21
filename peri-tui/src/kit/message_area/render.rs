@@ -187,9 +187,12 @@ pub(super) fn vm_to_lines_cached(
             let md_text_fg = component.markdown.text;
             let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
             let palette_guard = palette_state.read();
+            // 预留 2 列给 ❯ 前缀 / 续行缩进，确保折行后的文本 + 前缀总宽 ≤ vis_width，
+            // 避免 build_wrap_map 的 Paragraph::line_count(vis_width) 把含前缀行多计一行。
+            let user_text_width = width.saturating_sub(2).max(1);
             let segments = crate::kit::markdown::parse_markdown_cached(
                 &data.text,
-                width,
+                user_text_width,
                 *palette_guard,
                 md_text_fg,
                 md_cache,
@@ -240,8 +243,12 @@ pub(super) fn vm_to_lines_cached(
                             ratatui_kit::components::TableTheme::from_palette(&palette_guard);
                         // 行文字使用终端默认色，而非纯白
                         table_theme.row_style = Style::default();
-                        let table_lines =
-                            crate::kit::markdown::table_data_to_lines(&data, &table_theme, width);
+                        // 同样预留 2 列给续行缩进，与文本段对称
+                        let table_lines = crate::kit::markdown::table_data_to_lines(
+                            &data,
+                            &table_theme,
+                            user_text_width,
+                        );
                         for tl in table_lines {
                             let mut spans = vec![Span::styled("  ", Style::default().bg(user_bg))];
                             for span in tl.spans {
