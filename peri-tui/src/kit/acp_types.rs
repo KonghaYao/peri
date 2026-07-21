@@ -204,8 +204,31 @@ impl CurrentTurn {
         }
         self.flush_text_segment();
         let idx = self.subagents.len();
-        self.segments
-            .push(TurnSegment::SubAgent { subagent_idx: idx });
+
+        // 前向扫描找第一个未 claim 的 Agent ToolCard，在其后插入 SubAgent 段。
+        // 防止多 Agent 同 turn 时 SubAgent 段全部 append 到末尾导致
+        // "agent agent tools tools" 而非 "agent tools agent tools"。
+        let mut insert_at: Option<(usize, usize)> = None; // (seg_pos, tool_idx)
+        for (i, seg) in self.segments.iter().enumerate() {
+            if let TurnSegment::Tool { tool_idx } = seg
+                && let Some(tc) = self.tool_cards.get(*tool_idx)
+                && tc.tool_name == "Agent"
+                && !tc.claimed_by_subagent
+            {
+                insert_at = Some((i + 1, *tool_idx));
+                break;
+            }
+        }
+
+        if let Some((seg_pos, tool_idx)) = insert_at {
+            self.tool_cards[tool_idx].claimed_by_subagent = true;
+            self.segments
+                .insert(seg_pos, TurnSegment::SubAgent { subagent_idx: idx });
+        } else {
+            self.segments
+                .push(TurnSegment::SubAgent { subagent_idx: idx });
+        }
+
         self.subagents
             .push(SubAgentAccumulator::new(agent_id, agent_name));
         self.active = true;
@@ -524,6 +547,9 @@ pub struct ToolCardAccumulator {
     pub is_error: bool,
     /// When the tool started on the TUI side.
     pub started_at: Instant,
+    /// 是否已有 SubAgent segment 声明与此 ToolCard 关联。
+    /// 防止多 Agent 场景下 SubAgent 段错配到错误的 ToolCard。
+    pub claimed_by_subagent: bool,
 }
 
 impl ToolCardAccumulator {
@@ -536,6 +562,7 @@ impl ToolCardAccumulator {
             output_summary: None,
             is_error: false,
             started_at: Instant::now(),
+            claimed_by_subagent: false,
         }
     }
 }
