@@ -1,3 +1,20 @@
+//! Tests for chain
+
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+
+use super::*;
+use crate::{
+    agent::state::AgentState,
+    error::{AgentError, AgentResult},
+    messages::{BaseMessage, ContentBlock, MessageId},
+    middleware::{
+        r#trait::{Middleware, NoopMiddleware},
+        state::MiddlewareState,
+    },
+};
+
     /// 记录调用顺序的中间件
     struct OrderRecorder {
         name: String,

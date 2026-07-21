@@ -324,20 +324,5 @@ impl Default for MiddlewareChain {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use async_trait::async_trait;
-
-    use super::*;
-    use crate::{
-        agent::state::AgentState,
-        error::{AgentError, AgentResult},
-        messages::{BaseMessage, ContentBlock, MessageId},
-        middleware::{
-            r#trait::{Middleware, NoopMiddleware},
-            state::MiddlewareState,
-        },
-    };
-    include!("chain_test.rs");
-}
+#[path = "chain_test.rs"]
+mod tests;

@@ -1,4 +1,13 @@
-    fn make_loaded_plugin(name: &str) -> LoadedPlugin {
+//! Tests for mid_plugin
+
+use std::{collections::HashMap, path::PathBuf};
+
+use peri_agent::{agent::state::AgentState, middleware::r#trait::Middleware};
+
+use super::*;
+use crate::plugin::loader::tests::make_manifest_with_commands;
+
+fn make_loaded_plugin(name: &str) -> LoadedPlugin {
         LoadedPlugin {
             name: name.into(),
             version: "1.0.0".into(),

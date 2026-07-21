@@ -1,3 +1,5 @@
+use super::*;
+
     fn temp_store() -> (Arc<FileCredentialStore>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("oauth_tokens.json");

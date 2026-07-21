@@ -1,4 +1,11 @@
-    fn make_config() -> LspConfigFile {
+//! Tests for pool
+
+use std::collections::HashMap;
+
+use super::*;
+use crate::config::{LspConfigFile, LspServerConfig};
+
+fn make_config() -> LspConfigFile {
         let mut servers = HashMap::new();
         servers.insert(
             "rust-analyzer".to_string(),

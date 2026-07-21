@@ -1,3 +1,5 @@
+use super::*;
+
     #[test]
     fn test_split_camel_case() {
         assert_eq!(split_camel_case("CronCreate"), vec!["cron", "create"]);

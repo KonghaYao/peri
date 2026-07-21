@@ -344,9 +344,5 @@ fn extract_title(msgs: &[BaseMessage]) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use tempfile::tempdir;
-
-    use super::*;
-    include!("filesystem_test.rs");
-}
+#[path = "filesystem_test.rs"]
+mod tests;

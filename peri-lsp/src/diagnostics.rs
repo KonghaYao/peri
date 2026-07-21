@@ -214,9 +214,5 @@ impl DiagnosticsRegistry {
 }
 
 #[cfg(test)]
-mod tests {
-    use lsp_types::{Diagnostic, Position, Range};
-
-    use super::*;
-    include!("diagnostics_test.rs");
-}
+#[path = "diagnostics_test.rs"]
+mod tests;

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use peri_agent::tools::BaseTool;
 use serde_json::json;
 
-const AGENT_RESULT_DESCRIPTION: &str = r#"DO NOT CALL. Background task results are injected into your context automatically when tasks complete (as a user message carrying the structured `bgResults` payload). This tool exists only as a type placeholder for the synthetic AgentResult tool_use blocks the system inserts before that user message. Calling it never returns real results—if you reach for it, you are misreading the protocol."#;
+const AGENT_RESULT_DESCRIPTION: &str = include_str!("descriptions/agent_result.md");
 
 /// AgentResult 工具：合成 tool_use 占位符
 ///

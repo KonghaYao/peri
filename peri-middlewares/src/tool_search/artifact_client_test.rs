@@ -1,5 +1,6 @@
-// 测试通过 include! 嵌入 artifact_client.rs 的 #[cfg(test)] mod tests 块，
-// tests 块有 `use super::*;`，因此 ArtifactClient/ArtifactResponse 等类型已自动导入。
+//! Tests for artifact_client
+
+use super::*;
 
 #[tokio::test]
 async fn test_build_url_default() {

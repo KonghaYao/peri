@@ -71,9 +71,5 @@ pub(crate) fn should_skip_dir(name: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::*;
-    include!("mod_test.rs");
-}
+#[path = "mod_test.rs"]
+mod tests;

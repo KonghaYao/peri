@@ -138,7 +138,5 @@ pub fn keyword_score(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("keyword_search_test.rs");
-}
+#[path = "keyword_search_test.rs"]
+mod tests;

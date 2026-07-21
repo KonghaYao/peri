@@ -90,11 +90,5 @@ impl Middleware for LspMiddleware {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use peri_lsp::config::LspServerConfig;
-
-    use super::*;
-    include!("middleware_test.rs");
-}
+#[path = "middleware_test.rs"]
+mod tests;

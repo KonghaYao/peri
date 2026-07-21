@@ -109,14 +109,5 @@ impl Middleware for ToolSearchMiddleware {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use peri_agent::middleware::r#trait::Middleware;
-
-    /// Helper: call prompt_contribution with concrete State type for testing.
-    fn contribution(mw: &ToolSearchMiddleware) -> Option<String> {
-        Middleware::prompt_contribution(mw)
-    }
-
-    include!("middleware_test.rs");
-}
+#[path = "middleware_test.rs"]
+mod tests;

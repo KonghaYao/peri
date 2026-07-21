@@ -170,13 +170,5 @@ impl<L: ReactLLM> ReactLLM for RetryableLLM<L> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-
-    use super::*;
-    use crate::error::AgentError;
-    include!("retry_test.rs");
-}
+#[path = "retry_test.rs"]
+mod tests;

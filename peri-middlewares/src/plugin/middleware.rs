@@ -112,12 +112,5 @@ impl Middleware for PluginMiddleware {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{collections::HashMap, path::PathBuf};
-
-    use peri_agent::{agent::state::AgentState, middleware::r#trait::Middleware};
-
-    use super::*;
-    use crate::plugin::loader::tests::make_manifest_with_commands;
-    include!("middleware_test.rs");
-}
+#[path = "middleware_test.rs"]
+mod tests;

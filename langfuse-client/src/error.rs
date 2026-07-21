@@ -19,7 +19,5 @@ pub enum LangfuseError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("error_test.rs");
-}
+#[path = "error_test.rs"]
+mod tests;

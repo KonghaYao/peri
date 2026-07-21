@@ -1,3 +1,14 @@
+//! Tests for mid_toolsearch
+
+use async_trait::async_trait;
+use super::*;
+use peri_agent::middleware::r#trait::Middleware;
+
+/// Helper: call prompt_contribution with concrete State type for testing.
+fn contribution(mw: &ToolSearchMiddleware) -> Option<String> {
+    Middleware::prompt_contribution(mw)
+}
+
     struct MockTool {
         name_str: String,
         desc_str: String,

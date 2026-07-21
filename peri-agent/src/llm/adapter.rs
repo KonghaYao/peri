@@ -67,7 +67,5 @@ impl ReactLLM for MockLLM {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("adapter_test.rs");
-}
+#[path = "adapter_test.rs"]
+mod tests;

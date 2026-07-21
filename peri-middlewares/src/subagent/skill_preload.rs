@@ -183,10 +183,5 @@ impl Middleware for SkillPreloadMiddleware {
 }
 
 #[cfg(test)]
-mod tests {
-    use peri_agent::{agent::state::AgentState, middleware::r#trait::Middleware};
-    use tempfile::tempdir;
-
-    use super::*;
-    include!("skill_preload_test.rs");
-}
+#[path = "skill_preload_test.rs"]
+mod tests;

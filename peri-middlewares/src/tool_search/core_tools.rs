@@ -110,7 +110,5 @@ pub fn core_tools_sorted_csv() -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("core_tools_test.rs");
-}
+#[path = "core_tools_test.rs"]
+mod tests;

@@ -730,12 +730,6 @@ impl ThreadStore for SqliteThreadStore {
     }
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
-mod tests {
-    use tempfile::tempdir;
-
-    use super::*;
-    include!("sqlite_store_test.rs");
-}
+#[path = "sqlite_store_test.rs"]
+mod tests;

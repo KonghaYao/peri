@@ -1,5 +1,6 @@
-// 测试通过 include! 嵌入 artifact_tool.rs 的 #[cfg(test)] mod tests 块，
-// tests 块有 `use super::*;`，因此 ArtifactTool 等类型已自动导入。
+//! Tests for artifact_tool
+
+use super::*;
 
 #[test]
 fn test_artifact_tool_name() {

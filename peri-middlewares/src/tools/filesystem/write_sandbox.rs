@@ -305,6 +305,5 @@ impl BaseTool for WriteSandboxTool {
 }
 
 #[cfg(test)]
-mod tests {
-    include!("write_sandbox_test.rs");
-}
+#[path = "write_sandbox_test.rs"]
+mod tests;

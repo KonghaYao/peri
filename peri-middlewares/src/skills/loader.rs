@@ -325,9 +325,5 @@ pub fn resolve_skill_roots(
 }
 
 #[cfg(test)]
-mod tests {
-    use tempfile::tempdir;
-
-    use super::*;
-    include!("loader_test.rs");
-}
+#[path = "loader_test.rs"]
+mod tests;

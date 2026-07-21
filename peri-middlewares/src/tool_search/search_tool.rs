@@ -85,8 +85,5 @@ impl BaseTool for SearchExtraTools {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tool_search::tool_index::ToolSearchIndex;
-    include!("search_tool_test.rs");
-}
+#[path = "search_tool_test.rs"]
+mod tests;
