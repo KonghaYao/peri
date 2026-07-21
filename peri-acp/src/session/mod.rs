@@ -365,12 +365,14 @@ impl SessionManager {
     ) -> crate::session::executor::FrozenSessionData {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let frozen_language = self.inner.peri_config.config.language.clone();
+        let pm = self.inner.permission_mode.load();
         crate::session::executor::FrozenSessionData::build(
             cwd,
             frozen_language.as_deref(),
             plugin_skill_roots,
             plugin_agent_dirs,
             &frozen_date,
+            pm,
         )
     }
 

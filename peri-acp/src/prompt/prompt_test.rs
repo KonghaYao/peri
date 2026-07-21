@@ -1,4 +1,5 @@
 use super::*;
+use peri_middlewares::PermissionMode;
 
 #[test]
 fn test_no_overrides_contains_all_sections() {
@@ -201,9 +202,9 @@ fn test_all_features_enabled_includes_all() {
 
 #[test]
 fn test_detect_default_values() {
-    let features = PromptFeatures::detect();
-    // 默认环境（无 YOLO_MODE 或 YOLO_MODE=true）下 hitl_enabled 为 false
-    // 注意：测试环境中 YOLO_MODE 可能未设置
+    let features = PromptFeatures::detect(PermissionMode::Bypass);
+    // 默认环境下 hitl_enabled 取决于 permission_mode
+    // 注意：Bypass 模式下 hitl_enabled 为 false
     assert!(features.subagent_enabled);
     assert!(features.cron_enabled);
     assert!(features.skills_enabled);
@@ -528,7 +529,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
             f.skills_enabled = true;
             f
         },
-        PromptFeatures::detect(),
+        PromptFeatures::detect(PermissionMode::Bypass),
     ];
 
     let language_combos: [Option<&str>; 3] = [None, Some("zh-CN"), Some("fr")];
@@ -606,9 +607,21 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
 /// 验证边界标记位置在新旧路径中完全一致
 #[test]
 fn test_template_boundary_position_identical() {
-    let old = build_system_prompt(None, "/tmp", PromptFeatures::detect(), &[], None, None);
+    let old = build_system_prompt(
+        None,
+        "/tmp",
+        PromptFeatures::detect(PermissionMode::Bypass),
+        &[],
+        None,
+        None,
+    );
     let env = PromptEnv::detect("/tmp");
-    let new = PromptTemplate::new().render(&env, &PromptFeatures::detect(), &[], None);
+    let new = PromptTemplate::new().render(
+        &env,
+        &PromptFeatures::detect(PermissionMode::Bypass),
+        &[],
+        None,
+    );
 
     let old_boundary = old.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
     let new_boundary = new.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();

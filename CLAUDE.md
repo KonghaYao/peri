@@ -208,7 +208,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - [ ] 回归修复 → `/// [回归测试]` 注释 + 历史背景
 
 ### 环境变量
-`~/.peri/settings.json` env 字段注入。Provider：`ANTHROPIC_*`/`OPENAI_*`。行为：`YOLO_MODE`/`DISABLE_COMPACT`。遥测：`LANGFUSE_*`。
+`~/.peri/settings.json` env 字段注入。Provider：`ANTHROPIC_*`/`OPENAI_*`。行为：`DISABLE_COMPACT`。权限：`PermissionMode`（通过 `--approve`/`--permission-mode`/`--skip-permissions` CLI 或 `Shift+Tab` 切换）。遥测：`LANGFUSE_*`。
 
 ### Theme
 颜色从 `peri-theme` 三 Atom（`THEME_ATOM`/`PALETTE_ATOM`/`PERI_COLORS_ATOM`）获取，禁止硬编码色值。`#[component]` 用 `hooks.use_atom`，非 component 两步绑定防悬垂引用。
@@ -305,7 +305,7 @@ const result = await judge({
 - **AgentEvent 变体**：新增需同步 `map_executor_event`（peri-acp/event + peri-tui/acp_events）
 - **Interrupted/Error vs Done 互斥**：前者 `request_rebuild()` + `reconcile_already_done=true`
 - **ACP 通知覆盖度**：所有事件（含 AgentDone→TurnDone）必须完整转发，遗漏→UI 卡死。架构迁移时新增事件通道必须同步更新 notifier 分发，否则静默丢弃（详见 spec/global/domains/agent.md#issue_2026-07-07-subagent-group-header-shows-agent-instead-of-task-description）
-- **PromptFeatures**：`detect()` 每轮读 `YOLO_MODE`/`is_git_repo`，未 frozen
+- **PromptFeatures**：`detect(permission_mode)` 根据当前权限模式决定功能开关，未 frozen
 - **Immediate 命令**：绕过 event pump，必须手动 `sink.push_done()`
 - **中途纠正消息**：用 `BaseMessage::human()`，禁止 `BaseMessage::system()`（invoke.rs 会 hoist 污染 frozen prompt）
 - **诊断优先于修复**：根因未被日志/复现步骤/代码证据定位前，禁止超过 20 行的代码修改。添加诊断日志优先于修改业务逻辑

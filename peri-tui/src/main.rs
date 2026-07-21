@@ -499,18 +499,6 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
         inject_settings_override(settings_path);
     }
 
-    if opts.approve {
-        unsafe {
-            std::env::set_var("YOLO_MODE", "false");
-        }
-    }
-
-    if opts.skip_permissions {
-        unsafe {
-            std::env::set_var("YOLO_MODE", "true");
-        }
-    }
-
     // 在创建 tokio runtime 之前初始化 tracing，确保 reqwest::blocking::Client
     // 的内部 runtime 与应用 runtime 完全隔离，避免嵌套 runtime drop panic。
     let _telemetry = peri_agent::telemetry::init_tracing("agent-tui");

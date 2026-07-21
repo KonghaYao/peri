@@ -61,8 +61,8 @@ pub use attribution::GitAttributionMiddleware;
 pub use cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger};
 pub use goal_middleware::GoalMiddleware;
 pub use hitl::{
-    default_requires_approval, effective_tool_name, is_yolo_mode, AutoClassifier, BatchItem,
-    Classification, HitlDecision, HumanInTheLoopMiddleware, LlmAutoClassifier, PermissionMode,
+    default_requires_approval, effective_tool_name, AutoClassifier, BatchItem, Classification,
+    HitlDecision, HumanInTheLoopMiddleware, LlmAutoClassifier, PermissionMode,
     SharedPermissionMode,
 };
 pub use lsp::{LspMiddleware, LspTool};
@@ -97,9 +97,8 @@ pub mod prelude {
         attribution::GitAttributionMiddleware,
         cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger},
         hitl::{
-            default_requires_approval, is_yolo_mode, AutoClassifier, BatchItem, Classification,
-            HitlDecision, HumanInTheLoopMiddleware, LlmAutoClassifier, PermissionMode,
-            SharedPermissionMode,
+            default_requires_approval, AutoClassifier, BatchItem, Classification, HitlDecision,
+            HumanInTheLoopMiddleware, LlmAutoClassifier, PermissionMode, SharedPermissionMode,
         },
         hooks::{HookMiddleware, RegisteredHook},
         middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},

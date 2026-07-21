@@ -136,6 +136,7 @@ impl FrozenSessionData {
         plugin_skill_roots: &[peri_middlewares::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
         frozen_date: &str,
+        permission_mode: peri_middlewares::prelude::PermissionMode,
     ) -> Self {
         let (claude_md, claude_local_md) =
             peri_middlewares::AgentsMdMiddleware::read_frozen_content(cwd);
@@ -149,7 +150,7 @@ impl FrozenSessionData {
             disable_bundled,
         );
 
-        let features = crate::prompt::PromptFeatures::detect();
+        let features = crate::prompt::PromptFeatures::detect(permission_mode);
         let template = crate::prompt::PromptTemplate::new();
         let env = crate::prompt::PromptEnv::with_frozen_date(cwd, frozen_date);
         let system_prompt = template.render(&env, &features, plugin_agent_dirs, language);
@@ -706,6 +707,7 @@ async fn build_and_execute_agent(
             &ctx.plugin_skill_roots,
             &ctx.plugin_agent_dirs,
             &Local::now().format("%Y-%m-%d").to_string(),
+            peri_middlewares::prelude::PermissionMode::AutoMode,
         );
         (
             frozen_data.system_prompt().to_string(),

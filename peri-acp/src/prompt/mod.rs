@@ -6,7 +6,7 @@
 //! Sections are loaded from `prompts/sections/` directory using
 //! `include_str!` with paths relative to the peri-acp crate root.
 
-use peri_middlewares::AgentOverrides;
+use peri_middlewares::{AgentOverrides, PermissionMode};
 
 /// 控制 Feature-gated 提示词段落的注入
 #[derive(Debug, Clone, Copy)]
@@ -19,10 +19,10 @@ pub struct PromptFeatures {
 }
 
 impl PromptFeatures {
-    /// 根据运行时环境推断功能开关
-    pub fn detect() -> Self {
+    /// 根据权限模式推断功能开关
+    pub fn detect(permission_mode: PermissionMode) -> Self {
         Self {
-            hitl_enabled: std::env::var("YOLO_MODE").as_deref() == Ok("false"),
+            hitl_enabled: permission_mode != PermissionMode::Bypass,
             subagent_enabled: true,
             cron_enabled: true,
             skills_enabled: true,

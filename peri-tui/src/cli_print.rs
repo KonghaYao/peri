@@ -2,10 +2,9 @@
 
 use std::sync::Arc;
 
+use crate::cli_args::OutputFormat;
 use anyhow::Result;
 use chrono::Local;
-
-use crate::cli_args::OutputFormat;
 
 /// -p 模式执行入口
 #[allow(clippy::too_many_arguments)]
@@ -203,6 +202,7 @@ pub async fn run_print(
         &plugin_skill_roots,
         &plugin_agent_dirs,
         &frozen_date,
+        permission_mode,
     );
 
     // run_session_loop 是 async 函数（返回 PromptResult）
