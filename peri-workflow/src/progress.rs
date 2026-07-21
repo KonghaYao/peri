@@ -391,6 +391,14 @@ impl WorkflowProgressStore {
         summaries.sort_by_key(|s| if s.name == "(no phase)" { 1 } else { 0 });
         summaries
     }
+
+    /// 获取指定 agent 的 phase（供 journal 注入）。
+    pub fn get_agent_phase(&self, run_id: &str, agent_id: u64) -> Option<String> {
+        let runs = self.runs.read();
+        let run = runs.get(run_id)?;
+        let agent = run.agents.get(&agent_id)?;
+        agent.phase.clone()
+    }
 }
 
 // ─── Tests ──────────────────────────────────────────────────

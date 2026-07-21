@@ -378,6 +378,7 @@ impl WorkflowRunner {
                             let agent_id_num = params.agent_id;
                             let exec = Arc::clone(&agent_executor);
                             let ch = Arc::clone(&channel_clone);
+                            let progress_for_agent = Arc::clone(&progress_store_clone);
                             tokio::spawn(async move {
                                 // Register agent for single-agent kill (GAP-07)
                                 let cancel_rx = ch.register_agent(&agent_run_id, agent_id_num, id);
@@ -395,6 +396,17 @@ impl WorkflowRunner {
 
                                 // Deregister (no-op if already removed by kill_agent)
                                 ch.deregister_agent(&agent_run_id, agent_id_num);
+
+                                // 从 progress store 补注 phase：engine 的 phase() 上下文仅通过
+                                // progress 事件传递，不进入 AgentRunParams.phase（hooks.js:21 漏了）
+                                // → agent_started 事件包含 phase，进度 store 先收到，此处补入结果。
+                                let mut result = result;
+                                if let AgentRunResult::Ok { ref mut phase, .. } = &mut result {
+                                    if phase.is_none() {
+                                        *phase = progress_for_agent
+                                            .get_agent_phase(&agent_run_id, agent_id_num);
+                                    }
+                                }
 
                                 // 仅 cancel_rx 的 killed 结果跳过响应（kill_agent 已发送 error response，
                                 // 避免双重 JSON-RPC 响应违反协议规范）
