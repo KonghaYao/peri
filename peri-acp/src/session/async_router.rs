@@ -17,6 +17,7 @@ use peri_agent::agent::events::BackgroundTaskResult;
 use peri_agent::agent::session::inbox::InboxHandle;
 use peri_agent::messages::{BaseMessage, MessageContent};
 use peri_agent::session::MessageSource;
+use peri_workflow::progress::PhaseSummary;
 use tracing::debug;
 
 /// Routes async results (bg SubAgent completion, workflow events) into the Session inbox.
@@ -81,11 +82,31 @@ impl AsyncRouter {
         duration_ms: u64,
         agent_count: usize,
         tool_calls_count: usize,
+        phase_summaries: &[PhaseSummary],
     ) {
-        let short_id = &run_id[..8.min(run_id.len())];
+        let mut phase_lines = String::new();
+        for s in phase_summaries {
+            let token_info = if s.token_count > 0 {
+                format!(", {} tokens", s.token_count)
+            } else {
+                String::new()
+            };
+            let dur_info = if let Some(d) = s.duration_ms {
+                format!(", {}ms", d)
+            } else {
+                String::new()
+            };
+            phase_lines.push_str(&format!(
+                "- {}: {} agents{}{}\n",
+                s.name, s.agent_count, token_info, dur_info
+            ));
+        }
         let notif_text = format!(
-            "[后台任务 {} 已完成] {} ({}ms, {} agents, {} tool calls)",
-            short_id, workflow_name, duration_ms, agent_count, tool_calls_count,
+            "<system-reminder>\n\
+            Workflow '{}' completed. ({}ms, {} agents, {} tool calls)\n\
+            {}Results saved to .claude/workflow-runs/{}/state.json\n\
+            </system-reminder>",
+            workflow_name, duration_ms, agent_count, tool_calls_count, phase_lines, run_id,
         );
         let msg = BaseMessage::human(MessageContent::text(notif_text));
         self.inbox.push_defer(MessageSource::WorkflowComplete, msg);
@@ -176,7 +197,7 @@ mod tests {
         let (inbox, handle) = make_inbox();
         let router = AsyncRouter::new(handle);
 
-        router.route_workflow_event("wf-run-999", "deploy-pipeline", 5000, 4, 12);
+        router.route_workflow_event("wf-run-999", "deploy-pipeline", 5000, 4, 12, &[]);
 
         assert_eq!(inbox.queue().len(), 1);
         assert!(inbox.queue().has_wake_up(), "Defer should wake the inbox");
@@ -187,7 +208,7 @@ mod tests {
         let (inbox, handle) = make_inbox();
         let router = AsyncRouter::new(handle);
 
-        router.route_workflow_event("wf-run-999", "deploy-pipeline", 5000, 4, 12);
+        router.route_workflow_event("wf-run-999", "deploy-pipeline", 5000, 4, 12, &[]);
 
         let msgs = inbox.queue().drain_for_end().unwrap();
         assert_eq!(msgs.len(), 1);
@@ -199,7 +220,7 @@ mod tests {
         let (inbox, handle) = make_inbox();
         let router = AsyncRouter::new(handle);
 
-        router.route_workflow_event("wf-run-999", "deploy-pipeline", 5000, 4, 12);
+        router.route_workflow_event("wf-run-999", "deploy-pipeline", 5000, 4, 12, &[]);
 
         let msgs = inbox.queue().drain_for_end().unwrap();
         let text = msgs[0].message.content();
@@ -224,7 +245,7 @@ mod tests {
         let result1 = make_bg_result("task-1", "agent-a", "output-a");
         let result2 = make_bg_result("task-2", "agent-b", "output-b");
         router.route_bg_result(&result1);
-        router.route_workflow_event("wf-3", "test-wf", 100, 1, 2);
+        router.route_workflow_event("wf-3", "test-wf", 100, 1, 2, &[]);
         router.route_bg_result(&result2);
 
         assert_eq!(inbox.queue().len(), 3);

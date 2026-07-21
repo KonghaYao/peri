@@ -57,6 +57,7 @@ async fn test_complete_sends_notification() {
             agent_count: 3,
             tool_calls_count: 5,
             error: None,
+            phase_summaries: Vec::new(),
         },
     );
     let result = rx.recv().await.unwrap();
@@ -81,6 +82,7 @@ async fn test_complete_retains_history_with_status() {
             agent_count: 3,
             tool_calls_count: 5,
             error: None,
+            phase_summaries: Vec::new(),
         },
     );
 
@@ -105,12 +107,20 @@ fn test_notification_includes_error_when_failed() {
         agent_count: 0,
         tool_calls_count: 0,
         error: Some("parallel thunk #0 failed: t is not a function".into()),
+        phase_summaries: Vec::new(),
     };
     let notification = result.to_notification();
-    assert!(notification.contains("failed"), "通知应含 failed");
     assert!(
-        notification.contains("parallel thunk #0 failed"),
-        "通知应含真实 error 文本，实际：{notification}"
+        notification.contains("Workflow 'haiku-smoke-test' failed"),
+        "failed 通知应包含 workflow name 和 failed 状态，实际：{notification}"
+    );
+    assert!(
+        notification.starts_with("<system-reminder>"),
+        "通知应以 <system-reminder> 开头，实际：{notification}"
+    );
+    assert!(
+        notification.ends_with("</system-reminder>"),
+        "通知应以 </system-reminder> 结尾"
     );
 }
 
@@ -126,10 +136,11 @@ fn test_notification_omits_error_line_when_completed() {
         agent_count: 2,
         tool_calls_count: 0,
         error: None,
+        phase_summaries: Vec::new(),
     };
     let notification = result.to_notification();
     assert!(
-        !notification.contains("Error:"),
-        "completed 不应有 Error 行"
+        notification.contains("Workflow 'test' completed"),
+        "completed 通知应包含 workflow name 和 completed 状态"
     );
 }

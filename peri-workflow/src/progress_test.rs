@@ -58,6 +58,8 @@ fn test_agent_lifecycle_started_progress_done() {
             model: None,
             tool_count: None,
             token_count: None,
+            phase: None,
+            duration_ms: None,
         },
     });
     let run = store.get_run("r1").expect("run 应存在");
@@ -125,6 +127,8 @@ fn test_concurrent_agents_no_race() {
             model: None,
             tool_count: None,
             token_count: None,
+            phase: None,
+            duration_ms: None,
         },
     });
     // agent 0 完成
@@ -139,6 +143,8 @@ fn test_concurrent_agents_no_race() {
             model: None,
             tool_count: None,
             token_count: None,
+            phase: None,
+            duration_ms: None,
         },
     });
 

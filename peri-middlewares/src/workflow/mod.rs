@@ -268,6 +268,7 @@ impl WorkflowMiddleware {
                         agent_count: 0,
                         tool_calls_count: 0,
                         error: Some(error_msg.clone()),
+                        phase_summaries: Vec::new(),
                     },
                 );
 
@@ -290,6 +291,7 @@ impl WorkflowMiddleware {
                 let (agent_count, tool_calls_count) = notify_progress_store
                     .get_run_stats(&notify_run_id)
                     .unwrap_or((0, 0));
+                let phase_summaries = notify_progress_store.get_phase_summaries(&notify_run_id);
                 registry_for_complete.complete(
                     &notify_run_id,
                     WorkflowTaskResult {
@@ -301,6 +303,7 @@ impl WorkflowMiddleware {
                         agent_count,
                         tool_calls_count,
                         error: Some("workflow process exited unexpectedly".to_string()),
+                        phase_summaries,
                     },
                 );
                 return;
@@ -312,6 +315,7 @@ impl WorkflowMiddleware {
             let (agent_count, tool_calls_count) = notify_progress_store
                 .get_run_stats(&notify_run_id)
                 .unwrap_or((0, 0));
+            let phase_summaries = notify_progress_store.get_phase_summaries(&notify_run_id);
             let success = result.status == "completed";
             let status = match result.status.as_str() {
                 "completed" => WorkflowRunStatus::Completed,
@@ -329,6 +333,7 @@ impl WorkflowMiddleware {
                     agent_count,
                     tool_calls_count,
                     error: result.error,
+                    phase_summaries,
                 },
             );
         });

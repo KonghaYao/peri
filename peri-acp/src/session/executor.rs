@@ -794,18 +794,38 @@ async fn build_and_execute_agent(
                                     task_result.duration_ms,
                                     task_result.agent_count,
                                     task_result.tool_calls_count,
+                                    &task_result.phase_summaries,
                                 );
                             } else {
                                 // 回退：直接 push（无 wake，兼容无 inbox 场景）
-                                let short_id =
-                                    &task_result.run_id[..8.min(task_result.run_id.len())];
+                                let mut phase_lines = String::new();
+                                for s in &task_result.phase_summaries {
+                                    let token_info = if s.token_count > 0 {
+                                        format!(", {} tokens", s.token_count)
+                                    } else {
+                                        String::new()
+                                    };
+                                    let dur_info = if let Some(d) = s.duration_ms {
+                                        format!(", {}ms", d)
+                                    } else {
+                                        String::new()
+                                    };
+                                    phase_lines.push_str(&format!(
+                                        "- {}: {} agents{}{}\n",
+                                        s.name, s.agent_count, token_info, dur_info
+                                    ));
+                                }
                                 let notif_text = format!(
-                                    "[后台任务 {} 已完成] {} ({}ms, {} agents, {} tool calls)",
-                                    short_id,
+                                    "<system-reminder>\n\
+                                    Workflow '{}' completed. ({}ms, {} agents, {} tool calls)\n\
+                                    {}Results saved to .claude/workflow-runs/{}/state.json\n\
+                                    </system-reminder>",
                                     task_result.workflow_name,
                                     task_result.duration_ms,
                                     task_result.agent_count,
                                     task_result.tool_calls_count,
+                                    phase_lines,
+                                    task_result.run_id,
                                 );
                                 fallback_queue.push(QueuedMessage::new(
                                     peri_agent::session::queue::MessageKind::Defer,

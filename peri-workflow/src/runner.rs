@@ -476,10 +476,22 @@ impl WorkflowRunner {
                                             "workflow ended non-completed"
                                         );
                                     }
+                                    let processed_return_value = done.return_value.map(|mut v| {
+                                        if v.is_object() {
+                                            let journal_for_extract = Arc::clone(&journal_clone);
+                                            let _extracted = crate::journal::extract_long_texts(
+                                                &mut v,
+                                                &done.run_id,
+                                                &journal_for_extract,
+                                                200,
+                                            );
+                                        }
+                                        v
+                                    });
                                     final_result = WorkflowResult {
                                         run_id: done.run_id.clone(),
                                         status: done.status.clone(),
-                                        return_value: done.return_value.clone(),
+                                        return_value: processed_return_value,
                                         error: done.error.clone(),
                                         stderr_tail: None,
                                     };

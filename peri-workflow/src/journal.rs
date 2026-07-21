@@ -10,6 +10,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::protocol::JournalEntry;
 
@@ -163,6 +164,86 @@ impl WorkflowJournalStore {
         let content = fs::read_to_string(path)?;
         serde_json::from_str(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    /// 将 agent 输出写入独立文件 outputs/{label}.txt。
+    pub fn write_output(&self, run_id: &str, label: &str, content: &str) -> std::io::Result<()> {
+        // 防御性检查：label 不含路径遍历字符
+        let safe_label = if label.contains("..") || label.contains('/') || label.contains('\\') {
+            "unnamed"
+        } else {
+            label
+        };
+        let dir = self.run_dir(run_id).join("outputs");
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join(format!("{}.txt", safe_label)), content)
+    }
+}
+
+/// 递归遍历 JSON Value，将长度超过 threshold 的字符串写入 outputs/ 目录，
+/// 原位置替换为 "${label}" 占位符。返回提取的文件标签列表。
+pub fn extract_long_texts(
+    value: &mut serde_json::Value,
+    run_id: &str,
+    store: &WorkflowJournalStore,
+    threshold: usize,
+) -> Vec<String> {
+    let mut extracted = Vec::new();
+    extract_long_texts_inner(value, run_id, store, threshold, "", &mut extracted);
+    extracted
+}
+
+fn extract_long_texts_inner(
+    value: &mut serde_json::Value,
+    run_id: &str,
+    store: &WorkflowJournalStore,
+    threshold: usize,
+    key_hint: &str,
+    extracted: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for key in keys {
+                let child_hint = if key_hint.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{}.{}", key_hint, key)
+                };
+                let child = map.get_mut(&key).unwrap();
+                if let serde_json::Value::String(s) = child {
+                    if s.len() > threshold {
+                        let label = child_hint;
+                        if let Err(e) = store.write_output(run_id, &label, s) {
+                            warn!(target: "workflow", run_id = %run_id, label = %label, error = %e, "write_output failed");
+                        } else {
+                            extracted.push(label.clone());
+                        }
+                        *child = serde_json::Value::String(format!("${{{}}}", label));
+                    }
+                } else {
+                    extract_long_texts_inner(
+                        child,
+                        run_id,
+                        store,
+                        threshold,
+                        &child_hint,
+                        extracted,
+                    );
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for (i, item) in arr.iter_mut().enumerate() {
+                let child_hint = if key_hint.is_empty() {
+                    format!("[{}]", i)
+                } else {
+                    format!("{}[{}]", key_hint, i)
+                };
+                extract_long_texts_inner(item, run_id, store, threshold, &child_hint, extracted);
+            }
+        }
+        _ => {}
     }
 }
 

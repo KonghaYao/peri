@@ -13,10 +13,10 @@ use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 use peri_agent::{
     agent::{
-        AgentCancellationToken,
         compact_v2::CompactConfig,
         events::{AgentEventHandler, ExecutorEvent, FnEventHandler},
         token::ContextBudget,
+        AgentCancellationToken,
     },
     interaction::UserInteractionBroker,
     llm::{BaseModel, BaseModelReactLLM, RetryConfig, RetryableLLM},
@@ -141,6 +141,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
             allowed_tools = ?params.allowed_tools,
             "Workflow agent: starting execution"
         );
+
+        let started_at = std::time::Instant::now();
 
         // 0. GAP-08: 创建 Langfuse tracer（如果 session 可用）
         let langfuse_tracer = self.ctx.langfuse_session.as_ref().map(|s| {
@@ -517,7 +519,16 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 // 获取 agent 执行期间累积的 token 用量
                 let (total_output_tokens, last_model) = {
                     let s = usage_stats.lock();
-                    (s.0, s.1.clone())
+                    let mut tokens = s.0;
+                    // P0 fallback: haiku 等模型 usage=None 时 token 累积为 0，
+                    // 按 output_text 长度启发式估算（每个 token ~4 字符）
+                    if tokens == 0 && !output_text.is_empty() {
+                        tokens = (output_text.len() as u64 / 4).max(1);
+                    }
+                    // P0 fallback: 如果事件从未 emit LlmCallEnd（如纯工具调用），
+                    // 回退到 Node 传入的 model 参数
+                    let model = s.1.clone().or_else(|| params.model.clone());
+                    (tokens, model)
                 };
 
                 // Schema 校验
@@ -540,6 +551,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
                                 Some(*c)
                             },
                             token_count: Some(total_output_tokens),
+                            phase: params.phase.clone(),
+                            duration_ms: Some(started_at.elapsed().as_millis() as u64),
                         }
                     }
                 } else {
@@ -554,6 +567,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
                             Some(*c)
                         },
                         token_count: Some(total_output_tokens),
+                        phase: params.phase.clone(),
+                        duration_ms: Some(started_at.elapsed().as_millis() as u64),
                     }
                 }
             }

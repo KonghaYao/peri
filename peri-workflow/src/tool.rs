@@ -282,6 +282,7 @@ impl BaseTool for WorkflowTool {
                         agent_count: 0,
                         tool_calls_count: 0,
                         error: Some(error_msg.clone()),
+                        phase_summaries: Vec::new(),
                     },
                 );
 
@@ -310,6 +311,7 @@ impl BaseTool for WorkflowTool {
                 let (agent_count, tool_calls_count) = notify_progress_store
                     .get_run_stats(&notify_run_id)
                     .unwrap_or((0, 0));
+                let phase_summaries = notify_progress_store.get_phase_summaries(&notify_run_id);
                 let duration = notify_started.elapsed().as_millis() as u64;
                 registry_for_complete.complete(
                     &notify_run_id,
@@ -322,6 +324,7 @@ impl BaseTool for WorkflowTool {
                         agent_count,
                         tool_calls_count,
                         error: Some("workflow process exited unexpectedly".to_string()),
+                        phase_summaries,
                     },
                 );
                 if let Some(ref bg) = bg_for_complete {
@@ -339,6 +342,7 @@ impl BaseTool for WorkflowTool {
             let (agent_count, tool_calls_count) = notify_progress_store
                 .get_run_stats(&notify_run_id)
                 .unwrap_or((0, 0));
+            let phase_summaries = notify_progress_store.get_phase_summaries(&notify_run_id);
             let success = result.status == "completed";
             let status = match result.status.as_str() {
                 "completed" => WorkflowRunStatus::Completed,
@@ -356,6 +360,7 @@ impl BaseTool for WorkflowTool {
                     agent_count,
                     tool_calls_count,
                     error: result.error,
+                    phase_summaries,
                 },
             );
             if let Some(ref bg) = bg_for_complete {
