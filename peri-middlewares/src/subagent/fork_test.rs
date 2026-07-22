@@ -222,6 +222,7 @@ fn test_overrides_all_fields() {
         "You are a reviewer.",
         &Some("Be thorough.".to_string()),
         &Some("Proactively suggest.".to_string()),
+        &None,
     );
     let ov = ov.unwrap();
     assert_eq!(ov.persona.as_deref().unwrap(), "You are a reviewer.");
@@ -231,13 +232,13 @@ fn test_overrides_all_fields() {
 
 #[test]
 fn test_overrides_empty_returns_none() {
-    let ov = overrides_from_agent_def("", &None, &None);
+    let ov = overrides_from_agent_def("", &None, &None, &None);
     assert!(ov.is_none(), "All-empty fields should return None");
 }
 
 #[test]
 fn test_overrides_persona_only() {
-    let ov = overrides_from_agent_def("I am a helper.", &None, &None);
+    let ov = overrides_from_agent_def("I am a helper.", &None, &None, &None);
     let ov = ov.unwrap();
     assert_eq!(ov.persona.as_deref().unwrap(), "I am a helper.");
     assert!(ov.tone.is_none());
@@ -246,7 +247,7 @@ fn test_overrides_persona_only() {
 
 #[test]
 fn test_overrides_tone_only() {
-    let ov = overrides_from_agent_def("", &Some("Be concise.".to_string()), &None);
+    let ov = overrides_from_agent_def("", &Some("Be concise.".to_string()), &None, &None);
     let ov = ov.unwrap();
     assert!(ov.persona.is_none());
     assert_eq!(ov.tone.as_deref().unwrap(), "Be concise.");

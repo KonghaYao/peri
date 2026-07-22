@@ -307,7 +307,8 @@ pub(crate) fn load_merged_config_full(
 
     // 2. 加载插件 MCP 配置（~/.claude/ 目录下的已启用插件）
     // 每插件独立上下文展开 env 变量，同时构建 plugin_sources（marketing 追踪）
-    let plugin_load_result = crate::plugin::loader::load_enabled_plugins_aggregated(claude_home);
+    let plugin_load_result =
+        crate::plugin::loader::load_enabled_plugins_aggregated(claude_home, None);
 
     let mut plugin_servers: HashMap<String, McpServerConfig> = HashMap::new();
     for plugin in &plugin_load_result.plugins {

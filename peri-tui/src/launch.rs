@@ -116,6 +116,7 @@ pub async fn build_app_and_acp(
             .join(".claude");
         app.services.plugin_data = Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
             &claude_dir,
+            Some(std::path::Path::new(&app.services.cwd)),
         ));
         // (S13c-4b) plugin_commands + plugin_skills 注入已随 command/ 删除——
         // 插件技能/命令注册由 ACP server 侧 SkillsMiddleware + PluginMiddleware + HookMiddleware 负责。
@@ -168,6 +169,11 @@ pub async fn build_app_and_acp(
             let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
             if !global_hooks.is_empty() {
                 hook_groups.push(global_hooks);
+            }
+            let project_hooks =
+                peri_middlewares::hooks::loader::load_settings_project_hooks(&app.services.cwd);
+            if !project_hooks.is_empty() {
+                hook_groups.push(project_hooks);
             }
             let local_hooks =
                 peri_middlewares::hooks::loader::load_settings_local_hooks(&app.services.cwd);
@@ -267,6 +273,9 @@ pub async fn teardown_app(app: &mut App) {
             .map(|pd| pd.all_hooks.clone())
             .unwrap_or_default();
         hooks.extend(peri_middlewares::hooks::loader::load_global_settings_hooks());
+        hooks.extend(
+            peri_middlewares::hooks::loader::load_settings_project_hooks(&app.services.cwd),
+        );
         hooks.extend(peri_middlewares::hooks::loader::load_settings_local_hooks(
             &app.services.cwd,
         ));

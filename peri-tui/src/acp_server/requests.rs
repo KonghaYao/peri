@@ -1040,7 +1040,7 @@ async fn push_plugin_search_result(
 }
 
 fn collect_plugin_snapshot(claude_dir: &std::path::Path) -> Vec<PluginSnapshotEntry> {
-    let loaded = peri_middlewares::plugin::load_enabled_plugins_aggregated(claude_dir);
+    let loaded = peri_middlewares::plugin::load_enabled_plugins_aggregated(claude_dir, None);
 
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let installed = peri_middlewares::plugin::load_installed_plugins(Some(&plugins_path))

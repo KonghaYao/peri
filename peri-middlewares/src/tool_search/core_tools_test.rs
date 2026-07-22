@@ -8,6 +8,13 @@ fn test_core_tool_not_deferred() {
 }
 
 #[test]
+fn test_skill_tools_not_deferred() {
+    // P1-3: SkillTool 和 DiscoverSkillsTool 是 Core 工具，不应标记为 deferred
+    assert!(!is_deferred_tool("SkillTool"));
+    assert!(!is_deferred_tool("DiscoverSkillsTool"));
+}
+
+#[test]
 fn test_meta_tool_not_deferred() {
     assert!(!is_deferred_tool("SearchExtraTools"));
     assert!(!is_deferred_tool("ExecuteExtraTool"));
@@ -33,8 +40,8 @@ fn test_unknown_tool_deferred() {
 }
 
 #[test]
-fn test_core_tools_sorted_csv_includes_all_13_tools() {
-    // P1-1: 动态生成必须覆盖全部 13 个 Core 工具（含 folder_operations, Skill）
+fn test_core_tools_sorted_csv_includes_all_14_tools() {
+    // P1-3: 动态生成必须覆盖全部 14 个 Core 工具（含 SkillTool / DiscoverSkillsTool）
     let csv = core_tools_sorted_csv();
     for tool in [
         TOOL_READ,
@@ -50,6 +57,7 @@ fn test_core_tools_sorted_csv_includes_all_13_tools() {
         TOOL_ASK_USER,
         TOOL_TODO,
         TOOL_SKILL,
+        TOOL_DISCOVER_SKILLS,
     ] {
         assert!(
             csv.contains(tool),

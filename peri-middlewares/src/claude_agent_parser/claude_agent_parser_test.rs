@@ -193,3 +193,55 @@ prompt"#;
     let agent = parse_agent_file(content).unwrap();
     assert!(agent.frontmatter.allowed_write_dirs.is_empty());
 }
+
+// ─── prompt_mode tests ───────────────────────────────────────────────────
+
+/// 验证 prompt_mode 字段缺失时默认值为 None（下游视为 extend 行为）
+#[test]
+fn test_prompt_mode_extend_default() {
+    let content = r#"---
+name: basic
+description: test
+---
+prompt"#;
+    let agent = parse_agent_file(content).unwrap();
+    assert_eq!(
+        agent.frontmatter.prompt_mode, None,
+        "prompt_mode 缺失时应默认为 None（extend 行为）"
+    );
+}
+
+/// 验证 prompt_mode: full 时正确解析
+#[test]
+fn test_prompt_mode_full() {
+    let content = r#"---
+name: full-mode
+description: A full mode agent
+promptMode: full
+---
+prompt"#;
+    let agent = parse_agent_file(content).unwrap();
+    assert_eq!(
+        agent.frontmatter.prompt_mode,
+        Some("full".to_string()),
+        "prompt_mode: full 应正确解析为 Some(\"full\")"
+    );
+}
+
+/// 验证未知 prompt_mode 值不 panic，保持原始值以允许下游 fallback
+#[test]
+fn test_prompt_mode_unknown_fallback() {
+    let content = r#"---
+name: weird-agent
+description: test
+promptMode: some-weird-value
+---
+prompt"#;
+    // 解析不应 panic
+    let agent = parse_agent_file(content).unwrap();
+    assert_eq!(
+        agent.frontmatter.prompt_mode,
+        Some("some-weird-value".to_string()),
+        "未知 prompt_mode 值应保留原始值，下游 with_overrides() 会 fallback 到 extend"
+    );
+}

@@ -150,8 +150,10 @@ pub async fn run_print(
             let claude_dir = dirs_next::home_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join(".claude");
-            let plugin_data =
-                peri_middlewares::plugin::load_enabled_plugins_aggregated(&claude_dir);
+            let plugin_data = peri_middlewares::plugin::load_enabled_plugins_aggregated(
+                &claude_dir,
+                Some(std::path::Path::new(&cwd)),
+            );
             let mut hg: Vec<Vec<peri_middlewares::hooks::RegisteredHook>> = Vec::new();
             if !plugin_data.all_hooks.is_empty() {
                 hg.push(plugin_data.all_hooks.clone());
@@ -159,6 +161,10 @@ pub async fn run_print(
             let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
             if !global_hooks.is_empty() {
                 hg.push(global_hooks);
+            }
+            let project_hooks = peri_middlewares::hooks::loader::load_settings_project_hooks(&cwd);
+            if !project_hooks.is_empty() {
+                hg.push(project_hooks);
             }
             let local_hooks = peri_middlewares::hooks::loader::load_settings_local_hooks(&cwd);
             if !local_hooks.is_empty() {

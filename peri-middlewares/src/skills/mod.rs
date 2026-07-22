@@ -1,5 +1,6 @@
 pub mod builtin;
 pub mod loader;
+pub mod tools;
 
 use std::{
     path::PathBuf,
@@ -14,6 +15,7 @@ pub use loader::{
 use peri_agent::{
     error::AgentResult,
     middleware::{r#trait::Middleware, state::MiddlewareState},
+    tools::BaseTool,
 };
 
 /// 全局配置文件路径：~/.peri/settings.json
@@ -270,6 +272,20 @@ impl Middleware for SkillsMiddleware {
 
     fn prompt_contribution(&self) -> Option<String> {
         self.cached_contribution.read().unwrap().clone()
+    }
+
+    fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
+        let plugin_roots = Arc::new(self.plugin_roots.clone());
+        vec![
+            Box::new(tools::SkillTool::new(
+                plugin_roots.clone(),
+                self.disable_bundled,
+            )),
+            Box::new(tools::DiscoverSkillsTool::new(
+                plugin_roots,
+                self.disable_bundled,
+            )),
+        ]
     }
 
     async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {

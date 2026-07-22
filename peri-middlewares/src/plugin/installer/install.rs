@@ -6,7 +6,7 @@ use super::{
 };
 use crate::plugin::{
     config::{load_installed_plugins, load_plugin_manifest, save_installed_plugins},
-    types::{InstallScope, InstalledPlugin},
+    types::{InstallScope, InstalledPlugin, PluginOrigin},
 };
 
 pub async fn install_plugin(
@@ -151,6 +151,7 @@ pub async fn install_plugin(
         install_path: target_dir,
         scope,
         project_path,
+        origin: PluginOrigin::PeriInstalled,
     };
 
     installed.plugins.retain(|p| {

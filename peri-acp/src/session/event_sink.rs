@@ -334,11 +334,16 @@ impl EventSink for TransportEventSink {
 pub struct StdioEventSink {
     cx: ConnectionTo<Client>,
     session_id: SdkSessionId,
+    caps: PeriCaps,
 }
 
 impl StdioEventSink {
-    pub fn new(cx: ConnectionTo<Client>, session_id: SdkSessionId) -> Self {
-        Self { cx, session_id }
+    pub fn new(cx: ConnectionTo<Client>, session_id: SdkSessionId, caps: PeriCaps) -> Self {
+        Self {
+            cx,
+            session_id,
+            caps,
+        }
     }
 
     /// Send an arbitrary `SessionUpdate` notification through the SDK connection.
@@ -353,7 +358,7 @@ impl StdioEventSink {
 #[async_trait]
 impl EventSink for StdioEventSink {
     async fn push_event(&self, _session_id: &str, event: &ExecutorEvent, context_window: u32) {
-        let mapped = map_event(event, context_window, &PeriCaps::default());
+        let mapped = map_event(event, context_window, &self.caps);
         for m in mapped {
             for update in m.updates {
                 let notif = SessionNotification::new(self.session_id.clone(), update);

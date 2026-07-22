@@ -7,6 +7,7 @@ use agent_client_protocol::{
     schema::v1::{PromptResponse, SessionId, SessionInfoUpdate, SessionUpdate, StopReason},
 };
 use peri_acp::session::{event_sink::StdioEventSink, executor};
+use peri_acp_types::PeriCaps;
 use peri_agent::{agent::AgentCancellationToken, messages::MessageContent};
 
 use super::super::context::StdioContext;
@@ -27,6 +28,7 @@ pub(crate) struct PromptExecParams {
     pub pool: Arc<parking_lot::Mutex<peri_acp::session::agent_pool::AgentPool>>,
     pub thread_id: String,
     pub responder: Responder<PromptResponse>,
+    pub peri_caps: PeriCaps,
 }
 
 /// 执行 agent 管线：executor → pool 恢复 → 持久化 → 内存更新 → 响应。
@@ -46,12 +48,17 @@ pub(crate) async fn run(params: PromptExecParams) {
         pool,
         thread_id,
         responder,
+        peri_caps,
     } = params;
 
     let broker: Arc<dyn peri_agent::interaction::UserInteractionBroker> =
         Arc::new(super::super::context::StdioBroker::new());
 
-    let event_sink = Arc::new(StdioEventSink::new(cx.clone(), session_id.clone()));
+    let event_sink = Arc::new(StdioEventSink::new(
+        cx.clone(),
+        session_id.clone(),
+        peri_caps,
+    ));
     let event_sink_for_notif = Arc::clone(&event_sink);
 
     // Snapshot provider / config (release guards before await).

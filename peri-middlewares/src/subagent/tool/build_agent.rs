@@ -175,6 +175,7 @@ impl super::SubAgentTool {
                 &agent_def.system_prompt,
                 &agent_def.frontmatter.tone,
                 &agent_def.frontmatter.proactiveness,
+                &agent_def.frontmatter.prompt_mode,
             );
             Some(builder(overrides.as_ref(), cwd))
         } else {

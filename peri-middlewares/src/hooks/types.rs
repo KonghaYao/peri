@@ -25,6 +25,35 @@ pub enum HookEvent {
     PostCompact,
     /// Agent 等待用户输入时触发（PermissionRequest / Stop 后）
     Notification,
+
+    // === P1-5: 新增 13 个 Claude Code hook 事件 ===
+    /// 项目初始化/维护 hooks
+    Setup,
+    /// 实验性 agent teams（CC 实验性功能，peri 暂无 teams 系统）
+    TeammateIdle,
+    /// 任务创建通知
+    TaskCreated,
+    /// 任务完成通知
+    TaskCompleted,
+    /// 配置变化检测
+    ConfigChange,
+    /// Git worktree 创建
+    WorktreeCreate,
+    /// Git worktree 移除
+    WorktreeRemove,
+    /// 规则/指令加载
+    InstructionsLoaded,
+    /// MCP 交互请求
+    Elicitation,
+    /// MCP 交互结果
+    ElicitationResult,
+    /// 工作目录变更
+    CwdChanged,
+    /// 文件监控变更（依赖文件监控基础设施，暂无触发点）
+    FileChanged,
+    /// 权限拒绝后重试
+    PermissionDenied,
+
     /// settings.local.json 中尚未实现的事件（如 Setup 等）
     Unknown(String),
 }
@@ -50,8 +79,61 @@ impl Serialize for HookEvent {
             HookEvent::PreCompact => serializer.serialize_str("PreCompact"),
             HookEvent::PostCompact => serializer.serialize_str("PostCompact"),
             HookEvent::Notification => serializer.serialize_str("Notification"),
+            // === P1-5 新增事件序列化 ===
+            HookEvent::Setup => serializer.serialize_str("Setup"),
+            HookEvent::TeammateIdle => serializer.serialize_str("TeammateIdle"),
+            HookEvent::TaskCreated => serializer.serialize_str("TaskCreated"),
+            HookEvent::TaskCompleted => serializer.serialize_str("TaskCompleted"),
+            HookEvent::ConfigChange => serializer.serialize_str("ConfigChange"),
+            HookEvent::WorktreeCreate => serializer.serialize_str("WorktreeCreate"),
+            HookEvent::WorktreeRemove => serializer.serialize_str("WorktreeRemove"),
+            HookEvent::InstructionsLoaded => serializer.serialize_str("InstructionsLoaded"),
+            HookEvent::Elicitation => serializer.serialize_str("Elicitation"),
+            HookEvent::ElicitationResult => serializer.serialize_str("ElicitationResult"),
+            HookEvent::CwdChanged => serializer.serialize_str("CwdChanged"),
+            HookEvent::FileChanged => serializer.serialize_str("FileChanged"),
+            HookEvent::PermissionDenied => serializer.serialize_str("PermissionDenied"),
             HookEvent::Unknown(s) => serializer.serialize_str(s),
         }
+    }
+}
+
+impl HookEvent {
+    /// 宽松解析 hook 事件名，仅返回已知事件。
+    /// 未知事件返回 `None`（应在调用侧跳过并记录 warn 日志）。
+    pub fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "PreToolUse" => HookEvent::PreToolUse,
+            "PostToolUse" => HookEvent::PostToolUse,
+            "PostToolUseFailure" => HookEvent::PostToolUseFailure,
+            "PermissionRequest" => HookEvent::PermissionRequest,
+            "UserPromptSubmit" => HookEvent::UserPromptSubmit,
+            "SessionStart" => HookEvent::SessionStart,
+            "SessionEnd" => HookEvent::SessionEnd,
+            "Stop" => HookEvent::Stop,
+            "StopFailure" => HookEvent::StopFailure,
+            "PostToolBatch" => HookEvent::PostToolBatch,
+            "SubagentStart" => HookEvent::SubagentStart,
+            "SubagentStop" => HookEvent::SubagentStop,
+            "PreCompact" => HookEvent::PreCompact,
+            "PostCompact" => HookEvent::PostCompact,
+            "Notification" => HookEvent::Notification,
+            // === P1-5 新增事件解析 ===
+            "Setup" => HookEvent::Setup,
+            "TeammateIdle" => HookEvent::TeammateIdle,
+            "TaskCreated" => HookEvent::TaskCreated,
+            "TaskCompleted" => HookEvent::TaskCompleted,
+            "ConfigChange" => HookEvent::ConfigChange,
+            "WorktreeCreate" => HookEvent::WorktreeCreate,
+            "WorktreeRemove" => HookEvent::WorktreeRemove,
+            "InstructionsLoaded" => HookEvent::InstructionsLoaded,
+            "Elicitation" => HookEvent::Elicitation,
+            "ElicitationResult" => HookEvent::ElicitationResult,
+            "CwdChanged" => HookEvent::CwdChanged,
+            "FileChanged" => HookEvent::FileChanged,
+            "PermissionDenied" => HookEvent::PermissionDenied,
+            _ => return None,
+        })
     }
 }
 
@@ -77,6 +159,20 @@ impl<'de> Deserialize<'de> for HookEvent {
             "PreCompact" => HookEvent::PreCompact,
             "PostCompact" => HookEvent::PostCompact,
             "Notification" => HookEvent::Notification,
+            // === P1-5 新增事件反序列化 ===
+            "Setup" => HookEvent::Setup,
+            "TeammateIdle" => HookEvent::TeammateIdle,
+            "TaskCreated" => HookEvent::TaskCreated,
+            "TaskCompleted" => HookEvent::TaskCompleted,
+            "ConfigChange" => HookEvent::ConfigChange,
+            "WorktreeCreate" => HookEvent::WorktreeCreate,
+            "WorktreeRemove" => HookEvent::WorktreeRemove,
+            "InstructionsLoaded" => HookEvent::InstructionsLoaded,
+            "Elicitation" => HookEvent::Elicitation,
+            "ElicitationResult" => HookEvent::ElicitationResult,
+            "CwdChanged" => HookEvent::CwdChanged,
+            "FileChanged" => HookEvent::FileChanged,
+            "PermissionDenied" => HookEvent::PermissionDenied,
             other => HookEvent::Unknown(other.to_string()),
         })
     }
@@ -220,6 +316,12 @@ pub struct HookInput {
     /// 压缩前的消息数量
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_count: Option<usize>,
+
+    // === 通用扩展字段（P1-5 新增）===
+    /// 事件特定数据，避免 struct 字段膨胀。
+    /// 不同事件通过此字段携带额外上下文（如 CwdChanged 的 old_cwd/new_cwd）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_data: Option<serde_json::Value>,
 }
 
 /// Hook 执行结果——对齐 Claude Code src/types/hooks.ts syncHookResponseSchema
@@ -442,6 +544,7 @@ impl HookInput {
             subagent_name: None,
             subagent_result: None,
             message_count: None,
+            additional_data: None,
         }
     }
 
@@ -472,6 +575,7 @@ impl HookInput {
             subagent_name: None,
             subagent_result: None,
             message_count: None,
+            additional_data: None,
         }
     }
 
@@ -508,6 +612,7 @@ impl HookInput {
             subagent_name: None,
             subagent_result: None,
             message_count: None,
+            additional_data: None,
         }
     }
 
@@ -535,6 +640,7 @@ impl HookInput {
             subagent_name: None,
             subagent_result: None,
             message_count: None,
+            additional_data: None,
         }
     }
 
@@ -562,6 +668,7 @@ impl HookInput {
             subagent_name: Some(subagent_name.to_string()),
             subagent_result: None,
             message_count: None,
+            additional_data: None,
         }
     }
 
@@ -590,6 +697,7 @@ impl HookInput {
             subagent_name: Some(subagent_name.to_string()),
             subagent_result: Some(result.to_string()),
             message_count: None,
+            additional_data: None,
         }
     }
 
@@ -618,6 +726,7 @@ impl HookInput {
             subagent_name: None,
             subagent_result: None,
             message_count: Some(message_count),
+            additional_data: None,
         }
     }
 }

@@ -1,6 +1,7 @@
 use tempfile::tempdir;
 
 use super::*;
+use crate::plugin::PluginOrigin;
 
 fn setup_marketplace_cache(cache_dir: &Path) {
     let mkt_dir = cache_dir.join("test-mkt");
@@ -297,6 +298,7 @@ async fn test_check_updates() {
         install_path: claude_dir.path().join("fake").into(),
         scope: InstallScope::User,
         project_path: None,
+        origin: PluginOrigin::PeriInstalled,
     });
     // Add a plugin with no update
     installed.plugins.push(InstalledPlugin {
@@ -307,6 +309,7 @@ async fn test_check_updates() {
         install_path: claude_dir.path().join("fake2").into(),
         scope: InstallScope::User,
         project_path: None,
+        origin: PluginOrigin::PeriInstalled,
     });
 
     let updates = check_updates(&installed, cache_dir.path()).await;
@@ -666,6 +669,7 @@ async fn test_cleanup_preserves_installed_version() {
                 install_path: version_dir.clone(),
                 scope: InstallScope::User,
                 project_path: None,
+                origin: PluginOrigin::PeriInstalled,
             }],
         },
         Some(&plugins_dir.join("installed_plugins.json")),

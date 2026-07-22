@@ -243,8 +243,9 @@ impl SubAgentTool {
         system_prompt: &str,
         tone: &Option<String>,
         proactiveness: &Option<String>,
+        mode: &Option<String>,
     ) -> Option<AgentOverrides> {
-        crate::subagent::fork::overrides_from_agent_def(system_prompt, tone, proactiveness)
+        crate::subagent::fork::overrides_from_agent_def(system_prompt, tone, proactiveness, mode)
     }
 
     pub(crate) async fn fire_subagent_lifecycle_hook(

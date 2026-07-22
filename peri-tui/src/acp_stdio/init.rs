@@ -75,7 +75,10 @@ pub(super) async fn init_stdio_context(cwd: String) -> anyhow::Result<Arc<StdioC
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude");
-    let plugin_data = peri_middlewares::plugin::load_enabled_plugins_aggregated(&claude_dir);
+    let plugin_data = peri_middlewares::plugin::load_enabled_plugins_aggregated(
+        &claude_dir,
+        Some(std::path::Path::new(&cwd)),
+    );
 
     let plugin_skill_roots = plugin_data.all_skill_roots.clone();
     let plugin_agent_dirs = plugin_data.all_agent_dirs.clone();
@@ -91,6 +94,10 @@ pub(super) async fn init_stdio_context(cwd: String) -> anyhow::Result<Arc<StdioC
     let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
     if !global_hooks.is_empty() {
         hook_groups.push(global_hooks);
+    }
+    let project_hooks = peri_middlewares::hooks::loader::load_settings_project_hooks(&cwd);
+    if !project_hooks.is_empty() {
+        hook_groups.push(project_hooks);
     }
     let local_hooks = peri_middlewares::hooks::loader::load_settings_local_hooks(&cwd);
     if !local_hooks.is_empty() {
