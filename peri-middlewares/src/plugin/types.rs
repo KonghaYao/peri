@@ -169,6 +169,10 @@ pub struct PluginManifest {
     pub channels: Option<Vec<PluginChannel>>,
     pub options: Option<Vec<PluginOption>>,
     pub settings: Option<serde_json::Value>,
+    /// 保留 plugin.json 中未声明的字段，确保前向兼容（read→write roundtrip 不丢字段）。
+    /// 参考：MarketplacePlugin.extra（同一文件 line 192-193）。
+    #[serde(flatten)]
+    pub extra: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

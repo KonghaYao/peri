@@ -22,6 +22,7 @@ fn make_manifest_with_hooks(hooks: Option<HooksConfig>) -> PluginManifest {
         channels: None,
         options: None,
         settings: None,
+        extra: serde_json::json!({}),
     }
 }
 

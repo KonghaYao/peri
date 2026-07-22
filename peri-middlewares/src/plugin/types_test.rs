@@ -281,6 +281,7 @@ fn test_plugin_manifest_serialization_roundtrip() {
         channels: None,
         options: None,
         settings: None,
+        extra: serde_json::json!({}),
     };
     let json = serde_json::to_string(&original).unwrap();
     let deserialized: PluginManifest = serde_json::from_str(&json).unwrap();
@@ -420,3 +421,45 @@ fn test_claude_code_format_deserialize_sets_origin() {
         PluginOrigin::ClaudeCodeInstalled
     );
 }
+
+// === PluginManifest extra 字段测试 ===
+
+#[test]
+fn test_plugin_manifest_extra_fields_preserved_on_roundtrip() {
+    // 含未知字段的 JSON
+    let json = r#"{
+        "name": "p",
+        "version": "1.0.0",
+        "customField": "value",
+        "anotherNewField": 42
+    }"#;
+    let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+    // 未知字段收集到 extra
+    assert_eq!(manifest.extra["customField"], "value");
+    assert_eq!(manifest.extra["anotherNewField"], 42);
+    // roundtrip 不丢字段
+    let out = serde_json::to_string(&manifest).unwrap();
+    let manifest2: PluginManifest = serde_json::from_str(&out).unwrap();
+    assert_eq!(manifest2.extra["customField"], "value");
+    assert_eq!(manifest2.extra["anotherNewField"], 42);
+}
+
+#[test]
+fn test_plugin_manifest_unknown_field_stored_in_extra() {
+    let json = r#"{"name":"p","version":"1.0.0","unknownSetting":"yes"}"#;
+    let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+    // extra 非空，含未知字段
+    assert!(manifest.extra.is_object());
+    assert_eq!(manifest.extra["unknownSetting"].as_str().unwrap(), "yes");
+}
+
+#[test]
+fn test_plugin_manifest_extra_default_empty_object() {
+    // 最小 JSON（仅已知字段）
+    let json = r#"{"name":"p","version":"1.0"}"#;
+    let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+    // extra == {}（空 Object）
+    assert_eq!(manifest.extra, serde_json::json!({}));
+}
+
+// === PluginManifest extra 字段测试结束 ===

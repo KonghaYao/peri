@@ -27,6 +27,7 @@ pub(crate) fn make_manifest_with_commands(commands: Vec<PluginCommand>) -> Plugi
         channels: None,
         options: None,
         settings: None,
+        extra: serde_json::json!({}),
     }
 }
 
