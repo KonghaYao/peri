@@ -116,6 +116,7 @@ pub async fn build_app_and_acp(
             .join(".claude");
         app.services.plugin_data = Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
             &claude_dir,
+            Some(std::path::Path::new(&app.services.cwd)),
         ));
         // (S13c-4b) plugin_commands + plugin_skills 注入已随 command/ 删除——
         // 插件技能/命令注册由 ACP server 侧 SkillsMiddleware + PluginMiddleware + HookMiddleware 负责。
