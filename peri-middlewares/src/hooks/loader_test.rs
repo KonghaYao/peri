@@ -442,14 +442,14 @@ fn test_tolerant_unknown_event_skipped() {
 
     let settings = serde_json::json!({
         "hooks": {
-            "FileChanged": [
+            "NonExistentEvent1": [
                 {
                     "hooks": [
                         {"type": "command", "command": "echo changed"}
                     ]
                 }
             ],
-            "Setup": [
+            "NonExistentEvent2": [
                 {
                     "hooks": [
                         {"type": "command", "command": "echo setup"}

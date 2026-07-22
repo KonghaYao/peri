@@ -238,3 +238,122 @@ fn test_post_tool_batch_serialization() {
     let back = serde_json::to_string(&event).unwrap();
     assert_eq!(back, json);
 }
+
+// === P1-5: 新增 13 个事件 roundtrip 测试 ===
+
+#[test]
+fn test_hookevent_setup_roundtrip() {
+    let event = HookEvent::Setup;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"Setup\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::Setup);
+}
+
+#[test]
+fn test_hookevent_teammate_idle_roundtrip() {
+    let event = HookEvent::TeammateIdle;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"TeammateIdle\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::TeammateIdle);
+}
+
+#[test]
+fn test_hookevent_task_created_roundtrip() {
+    let event = HookEvent::TaskCreated;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"TaskCreated\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::TaskCreated);
+}
+
+#[test]
+fn test_hookevent_task_completed_roundtrip() {
+    let event = HookEvent::TaskCompleted;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"TaskCompleted\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::TaskCompleted);
+}
+
+#[test]
+fn test_hookevent_config_change_roundtrip() {
+    let event = HookEvent::ConfigChange;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"ConfigChange\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::ConfigChange);
+}
+
+#[test]
+fn test_hookevent_worktree_create_roundtrip() {
+    let event = HookEvent::WorktreeCreate;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"WorktreeCreate\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::WorktreeCreate);
+}
+
+#[test]
+fn test_hookevent_worktree_remove_roundtrip() {
+    let event = HookEvent::WorktreeRemove;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"WorktreeRemove\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::WorktreeRemove);
+}
+
+#[test]
+fn test_hookevent_instructions_loaded_roundtrip() {
+    let event = HookEvent::InstructionsLoaded;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"InstructionsLoaded\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::InstructionsLoaded);
+}
+
+#[test]
+fn test_hookevent_elicitation_roundtrip() {
+    let event = HookEvent::Elicitation;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"Elicitation\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::Elicitation);
+}
+
+#[test]
+fn test_hookevent_elicitation_result_roundtrip() {
+    let event = HookEvent::ElicitationResult;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"ElicitationResult\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::ElicitationResult);
+}
+
+#[test]
+fn test_hookevent_cwd_changed_roundtrip() {
+    let event = HookEvent::CwdChanged;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"CwdChanged\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::CwdChanged);
+}
+
+#[test]
+fn test_hookevent_file_changed_roundtrip() {
+    let event = HookEvent::FileChanged;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"FileChanged\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::FileChanged);
+}
+
+#[test]
+fn test_hookevent_permission_denied_roundtrip() {
+    let event = HookEvent::PermissionDenied;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, "\"PermissionDenied\"");
+    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, HookEvent::PermissionDenied);
+}
