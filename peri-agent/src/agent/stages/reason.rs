@@ -5,7 +5,7 @@
 
 use super::middleware_runner::{run_after_model, run_before_model, run_on_error};
 use super::{ReasonInput, ReasonOutput};
-use crate::agent::events_v2::ObserveEvent;
+use crate::agent::events_v2::{ObserveEvent, TurnErrorReason};
 use crate::agent::react::Reasoning;
 use crate::error::{AgentError, AgentResult};
 use crate::llm::types::StreamingContext;
@@ -183,6 +183,19 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
                         request_id: None,
+                    });
+                    // TurnError：通知 TUI 显示错误 SystemNote（v2_bridge → AgentExecutionFailed → 红色消息）
+                    let reason = match &e {
+                        AgentError::LlmHttpError { .. } | AgentError::LlmError(..) => {
+                            TurnErrorReason::LlmFailure
+                        }
+                        _ => TurnErrorReason::LlmFailure,
+                    };
+                    ctx.runtime.event_bus.emit_observe(ObserveEvent::TurnError {
+                        turn_id,
+                        agent_id,
+                        reason,
+                        message: e.to_string(),
                     });
                     // 通过 middleware chain 触发 on_error
                     let _ = run_on_error(ctx, &e).await;

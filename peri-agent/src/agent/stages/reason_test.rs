@@ -1,6 +1,6 @@
 //! 从 reason.rs 分离的测试模块
 use super::*;
-use crate::agent::events_v2::{EventBus, EventBusConfig, ObserveEvent};
+use crate::agent::events_v2::{EventBus, EventBusConfig, ObserveEvent, TurnErrorReason};
 use crate::agent::stages::StageContext;
 use crate::messages::BaseMessage;
 #[cfg(test)]
@@ -58,6 +58,9 @@ async fn test_run_reason_emits_llm_call_end_with_correct_step() {
         ev_end0
     );
 
+    // 排空 step 0 的 TurnError 事件（新增的 TurnError emit 会在同一步中产生 3 个事件）
+    let _ = handles.try_observe();
+
     // Act 2：推进 step → step=1，再次 run_reason
     ctx.session.turn.advance_step();
     assert_eq!(ctx.session.turn.current_step(), 1);
@@ -110,4 +113,45 @@ async fn test_reason_captures_message_snapshot() {
     };
     let result = run_reason(input).await;
     assert!(result.is_err());
+}
+
+/// 验证 LLM 调用失败时 TurnError 事件被 emit 到 EventBus
+///
+/// 覆盖：reason.rs 错误分支 → TurnErrorReason::LlmFailure → v2_bridge → AgentExecutionFailed
+#[tokio::test]
+async fn test_run_reason_emits_turn_error_on_llm_failure() {
+    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
+    let event_bus = Arc::new(bus);
+
+    let cwd: Arc<str> = Arc::from("/tmp/llm_failure");
+    let frozen = FrozenContext::builder().build();
+    let session = Session::new(cwd, frozen, None);
+    let turn = session.start_turn();
+    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_event_bus(event_bus)
+        .build();
+
+    let _ = run_reason(ReasonInput {
+        context: ctx,
+        has_tool_calls: false,
+    })
+    .await;
+
+    // 收集所有 ObserveEvent，检查 TurnError 是否存在
+    let mut found_turn_error = false;
+    let mut found_llm_call_end = false;
+    while let Some(ev) = handles.try_observe() {
+        match ev {
+            ObserveEvent::TurnError { reason, .. } => {
+                assert_eq!(reason, TurnErrorReason::LlmFailure);
+                found_turn_error = true;
+            }
+            ObserveEvent::LlmCallEnd { .. } => {
+                found_llm_call_end = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(found_turn_error, "应在 LLM 失败时 emit TurnError");
+    assert!(found_llm_call_end, "应同时 emit LlmCallEnd（现有行为）");
 }
