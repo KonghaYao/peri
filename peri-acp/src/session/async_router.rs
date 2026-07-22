@@ -101,11 +101,10 @@ impl AsyncRouter {
                 s.name, s.agent_count, token_info, dur_info
             ));
         }
+        // 不包裹 <system-reminder>：append_messages_to_transcript 统一包裹所有 Defer/Info
         let notif_text = format!(
-            "<system-reminder>\n\
-            Workflow '{}' completed. ({}ms, {} agents, {} tool calls)\n\
-            {}Results saved to .claude/workflow-runs/{}/state.json\n\
-            </system-reminder>",
+            "Workflow '{}' completed. ({}ms, {} agents, {} tool calls)\n\
+            {}Results saved to .claude/workflow-runs/{}/state.json",
             workflow_name, duration_ms, agent_count, tool_calls_count, phase_lines, run_id,
         );
         let msg = BaseMessage::human(MessageContent::text(notif_text));

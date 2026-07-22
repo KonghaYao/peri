@@ -779,6 +779,8 @@ async fn build_and_execute_agent(
             // 或回退 v2 queue clone（无 inbox 时直接 push，无 wake）
             let wf_router = async_router.clone();
             let fallback_queue = v2_message_queue.clone();
+            // bg_registry 用于在 Defer 入队后递减 active_count，消除竞态窗口
+            let notify_bg = bg_registry.clone();
             tokio::spawn(async move {
                 let mut rx = wf_mw_for_notify.subscribe_notifications();
                 loop {
@@ -815,11 +817,10 @@ async fn build_and_execute_agent(
                                         s.name, s.agent_count, token_info, dur_info
                                     ));
                                 }
+                                // 不包裹 <system-reminder>：append_messages_to_transcript 统一包裹所有 Defer/Info
                                 let notif_text = format!(
-                                    "<system-reminder>\n\
-                                    Workflow '{}' completed. ({}ms, {} agents, {} tool calls)\n\
-                                    {}Results saved to .claude/workflow-runs/{}/state.json\n\
-                                    </system-reminder>",
+                                    "Workflow '{}' completed. ({}ms, {} agents, {} tool calls)\n\
+                                    {}Results saved to .claude/workflow-runs/{}/state.json",
                                     task_result.workflow_name,
                                     task_result.duration_ms,
                                     task_result.agent_count,
@@ -854,6 +855,12 @@ async fn build_and_execute_agent(
                                 duration_ms: task_result.duration_ms,
                                 child_thread_id: None,
                             };
+                            // 在 Defer 入队后递减 active_count，消除 tool.rs 通知 task 中的竞态窗口：
+                            // 原实现在 registry.complete() broadcast 后立即调用 bg.complete_workflow()，
+                            // 若 broadcast consumer 尚未被调度，agent 的 idle_should_wait probe
+                            // (active_count > 0) 提前归零 → agent 退出 ReAct loop → Defer 堆积在队列中。
+                            // [修复] 将 complete_workflow 移至 consumer 内 Defer push 之后执行。
+                            notify_bg.complete(&task_result.run_id, bg.clone());
                             notify_sink
                                 .push_event(
                                     &notify_sid,
