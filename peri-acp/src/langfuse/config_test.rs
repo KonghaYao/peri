@@ -11,6 +11,7 @@ fn clear_langfuse_env() {
     std::env::remove_var("LANGFUSE_ERROR_SPAN_ALWAYS");
     std::env::remove_var("LANGFUSE_BATCH_MAX_EVENTS");
     std::env::remove_var("LANGFUSE_BATCH_FLUSH_INTERVAL");
+    std::env::remove_var("LANGFUSE_USER_ID");
 }
 
 #[test]
@@ -78,4 +79,20 @@ fn test_load_with_settings_clamp_sampling() {
         "langfuse": { "trace_sampling": 2.5 }
     }));
     assert!((cfg.trace_sampling - 1.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_default_user_id_none() {
+    let cfg = LangfuseConfig::default();
+    assert!(cfg.user_id.is_none());
+}
+
+#[test]
+#[serial]
+fn test_user_id_from_env() {
+    clear_langfuse_env();
+    std::env::set_var("LANGFUSE_USER_ID", "env-user");
+    let cfg = LangfuseConfig::load_with_settings(&serde_json::json!({}));
+    assert_eq!(cfg.user_id.as_deref(), Some("env-user"));
+    clear_langfuse_env();
 }

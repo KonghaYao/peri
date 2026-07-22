@@ -19,6 +19,7 @@ mod tests {
             error_span_always: true,
             batch_max_events: 50,
             batch_flush_interval_secs: 10,
+            user_id: None,
         }
     }
 

@@ -56,6 +56,8 @@ pub struct LangfuseTracer {
     pub(crate) final_answer: String,
     /// 配置（采样率、ErrorSpan 策略等）
     pub(crate) config: LangfuseConfig,
+    /// 自定义 user 维度（来自 LANGFUSE_USER_ID 或 settings.json）
+    pub(crate) user_id: Option<String>,
     // 7 个子对象
     pub(crate) sampling: crate::langfuse::tracer::sampling::SamplingDecider,
     pub(crate) stages: crate::langfuse::tracer::stages::StageSpans,
@@ -74,6 +76,7 @@ impl LangfuseTracer {
         config: LangfuseConfig,
     ) -> Self {
         let rate = config.trace_sampling;
+        let user_id = config.user_id.clone();
         Self {
             session,
             session_id,
@@ -81,6 +84,7 @@ impl LangfuseTracer {
             agent_observation_id: uuid::Uuid::now_v7().to_string(),
             final_answer: String::new(),
             config,
+            user_id,
             sampling: crate::langfuse::tracer::sampling::SamplingDecider::new(rate),
             stages: crate::langfuse::tracer::stages::StageSpans::new(),
             middleware: crate::langfuse::tracer::middleware::MiddlewareTracer::new(),
@@ -106,7 +110,8 @@ impl LangfuseTracer {
 
     // ── Turn 生命周期 ──────────────────────────────────────────────────────
 
-    /// 对话轮次开始：创建 agent-run Observation（根 observation）
+    /// 对话轮次开始：创建 agent-run Observation（根 observation）。
+    /// 如有 user_id 配置，先发 TraceCreate 设置 user 维度。
     pub fn on_turn_start(&mut self, input: &str) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
@@ -118,6 +123,30 @@ impl LangfuseTracer {
             agent_obs_id = %self.agent_observation_id,
             "langfuse: on_trace_start called"
         );
+
+        // 有条件地发送 TraceCreate 以设置 user_id
+        if let Some(ref uid) = self.user_id {
+            let trace_body = TraceBody {
+                id: Some(self.trace_id.clone()),
+                user_id: Some(uid.clone()),
+                name: Some(format!("turn {}", self.trace_id)),
+                session_id: Some(self.session_id.clone()),
+                version: Some(VERSION.to_string()),
+                ..Default::default()
+            };
+            let trace_event = IngestionEvent::TraceCreate {
+                id: new_uuid(),
+                timestamp: now_rfc3339(),
+                body: trace_body,
+                metadata: None,
+            };
+            try_add_or_warn_via_session(
+                &*self.session,
+                trace_event,
+                &self.trace_id,
+                "turn TraceCreate (user_id)",
+            );
+        }
 
         let body = ObservationBody {
             id: Some(self.agent_observation_id.clone()),
@@ -181,7 +210,7 @@ impl LangfuseTracer {
                 let trace_body = TraceBody {
                     id: Some(turn_id.clone()),
                     name: Some(format!("turn {}", turn_id)),
-                    user_id: None,
+                    user_id: self.user_id.clone(),
                     input: None,
                     output: Some(serde_json::json!({"error": &error_msg})),
                     session_id: Some(self.session_id.clone()),
