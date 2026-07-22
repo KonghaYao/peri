@@ -160,6 +160,10 @@ pub async fn run_print(
             if !global_hooks.is_empty() {
                 hg.push(global_hooks);
             }
+            let project_hooks = peri_middlewares::hooks::loader::load_settings_project_hooks(&cwd);
+            if !project_hooks.is_empty() {
+                hg.push(project_hooks);
+            }
             let local_hooks = peri_middlewares::hooks::loader::load_settings_local_hooks(&cwd);
             if !local_hooks.is_empty() {
                 hg.push(local_hooks);

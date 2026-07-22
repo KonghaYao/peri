@@ -169,6 +169,11 @@ pub async fn build_app_and_acp(
             if !global_hooks.is_empty() {
                 hook_groups.push(global_hooks);
             }
+            let project_hooks =
+                peri_middlewares::hooks::loader::load_settings_project_hooks(&app.services.cwd);
+            if !project_hooks.is_empty() {
+                hook_groups.push(project_hooks);
+            }
             let local_hooks =
                 peri_middlewares::hooks::loader::load_settings_local_hooks(&app.services.cwd);
             if !local_hooks.is_empty() {
@@ -267,6 +272,9 @@ pub async fn teardown_app(app: &mut App) {
             .map(|pd| pd.all_hooks.clone())
             .unwrap_or_default();
         hooks.extend(peri_middlewares::hooks::loader::load_global_settings_hooks());
+        hooks.extend(
+            peri_middlewares::hooks::loader::load_settings_project_hooks(&app.services.cwd),
+        );
         hooks.extend(peri_middlewares::hooks::loader::load_settings_local_hooks(
             &app.services.cwd,
         ));

@@ -295,3 +295,100 @@ fn test_load_global_settings_hooks_real_file() {
         }
     }
 }
+
+// ===== load_settings_project_hooks 测试 =====
+
+#[test]
+fn test_load_settings_project_hooks_basic() {
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+
+    let settings = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": "echo pre"}
+                    ]
+                }
+            ],
+            "Notification": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": "echo notify"}
+                    ]
+                }
+            ]
+        }
+    });
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    assert_eq!(hooks.len(), 2);
+
+    // 验证插件来源标识
+    for h in &hooks {
+        assert_eq!(h.plugin_name, "project-settings.json");
+    }
+
+    // 验证两个事件都存在（顺序不保证）
+    let has_pre = hooks
+        .iter()
+        .any(|h| matches!(&h.event, HookEvent::PreToolUse));
+    let has_notification = hooks
+        .iter()
+        .any(|h| matches!(&h.event, HookEvent::Notification));
+    assert!(has_pre, "should have PreToolUse hook");
+    assert!(has_notification, "should have Notification hook");
+}
+
+#[test]
+fn test_load_settings_project_hooks_no_file() {
+    let hooks = load_settings_project_hooks("/nonexistent/path");
+    assert!(hooks.is_empty());
+}
+
+#[test]
+fn test_load_settings_project_hooks_no_hooks_field() {
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(claude_dir.join("settings.json"), "{}").unwrap();
+
+    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    assert!(hooks.is_empty());
+}
+
+#[test]
+fn test_load_settings_project_hooks_with_matcher() {
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+
+    let settings = serde_json::json!({
+        "hooks": {
+            "FileChanged": [
+                {
+                    "matcher": ".env|.env.local",
+                    "hooks": [
+                        {"type": "command", "command": "echo changed"}
+                    ]
+                }
+            ]
+        }
+    });
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    assert_eq!(hooks.len(), 1);
+    assert_eq!(hooks[0].matcher.as_deref(), Some(".env|.env.local"));
+}

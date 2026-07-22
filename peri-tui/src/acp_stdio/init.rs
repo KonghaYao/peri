@@ -92,6 +92,10 @@ pub(super) async fn init_stdio_context(cwd: String) -> anyhow::Result<Arc<StdioC
     if !global_hooks.is_empty() {
         hook_groups.push(global_hooks);
     }
+    let project_hooks = peri_middlewares::hooks::loader::load_settings_project_hooks(&cwd);
+    if !project_hooks.is_empty() {
+        hook_groups.push(project_hooks);
+    }
     let local_hooks = peri_middlewares::hooks::loader::load_settings_local_hooks(&cwd);
     if !local_hooks.is_empty() {
         hook_groups.push(local_hooks);

@@ -200,6 +200,80 @@ pub fn load_settings_local_hooks(cwd: &str) -> Vec<RegisteredHook> {
     hooks
 }
 
+/// 从 `{cwd}/.claude/settings.json` 加载项目级 hooks 配置。
+///
+/// 返回 `RegisteredHook` 列表，`plugin_name = "project-settings.json"`。
+pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
+    let settings_path = Path::new(cwd).join(".claude").join("settings.json");
+    if !settings_path.exists() {
+        tracing::debug!("No settings.json at {}", settings_path.display());
+        return Vec::new();
+    }
+
+    let content = match fs::read_to_string(&settings_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Failed to read {}: {}", settings_path.display(), e);
+            return Vec::new();
+        }
+    };
+
+    // 解析顶层 JSON，提取 `hooks` 字段
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Failed to parse {}: {}", settings_path.display(), e);
+            return Vec::new();
+        }
+    };
+
+    let hooks_value = match value.get("hooks") {
+        Some(h) if h.is_object() => h,
+        _ => return Vec::new(),
+    };
+
+    let hooks_config: HooksConfig = match serde_json::from_value(hooks_value.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to parse hooks config from {}: {}",
+                settings_path.display(),
+                e
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut hooks = Vec::new();
+    for (event, rules) in &hooks_config {
+        for rule in rules {
+            for hook_def in &rule.hooks {
+                hooks.push(RegisteredHook {
+                    hook: hook_def.clone(),
+                    event: event.clone(),
+                    matcher: rule
+                        .matcher
+                        .clone()
+                        .or_else(|| hook_def.get_matcher().cloned()),
+                    plugin_name: "project-settings.json".to_string(),
+                    plugin_id: "settings.project".to_string(),
+                    plugin_root: Path::new(cwd).to_path_buf(),
+                    plugin_data_dir: Path::new(cwd).join(".claude"),
+                    plugin_options: std::collections::HashMap::new(),
+                });
+            }
+        }
+    }
+
+    tracing::info!(
+        "Loaded {} hooks from project settings.json ({} events)",
+        hooks.len(),
+        hooks_config.len()
+    );
+
+    hooks
+}
+
 #[cfg(test)]
 #[path = "loader_test.rs"]
 mod tests;
