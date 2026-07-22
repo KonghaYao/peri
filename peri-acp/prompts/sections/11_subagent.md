@@ -60,6 +60,6 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 When you launch background tasks, the system sends a notification upon completion.
 - Inform the user that tasks are running
 - If you have other pending work, continue with it
-- Otherwise, output a brief waiting message and **do not call any tools** until the notification arrives
+- Otherwise, output a brief waiting message and **do not call any tools** until the notification arrives. This includes Bash/Shell — do NOT use `sleep`, `timeout`, or any polling loop to wait for results. The system will wake you automatically when results are ready.
 - **AgentResult is NOT a polling tool** — it only returns already-completed results
 - **⚠️ Caution**: Background agents operate asynchronously. If you spawn a `[writes]` background agent, avoid editing the same files in the foreground — file state may become inconsistent when the background result arrives.
