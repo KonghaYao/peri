@@ -1,7 +1,5 @@
 //! Tests
 
-use super::*;
-
 #[test]
 fn test_empty_with_todo_items_shows_footer_not_welcome() {
     let entries_empty = true;

@@ -1,5 +1,4 @@
 //! Tests
-use super::*;
 use peri_acp_types::event_data::QuestionOption;
 
 /// 编译期断言：QuestionOption 字段可读（防止上游 DTO 变更未发现）

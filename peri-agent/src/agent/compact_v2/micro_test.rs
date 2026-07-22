@@ -132,7 +132,7 @@ fn test_micro_compact_truncates_tool_use_arguments() {
         t.append(BaseMessage::ai_with_tool_calls(
             MessageContent::text("I'll write the file"),
             vec![crate::messages::ToolCallRequest::new(
-                &format!("call_{}", i),
+                format!("call_{}", i),
                 "Write",
                 serde_json::json!({"file_path": "/tmp/test.txt", "content": "very long content here"}),
             )],
@@ -159,9 +159,11 @@ fn test_micro_compact_truncates_tool_use_arguments() {
 
 #[test]
 fn test_micro_compact_respects_blacklist() {
-    let mut config = CompactConfig::default();
     // 将 Bash 加入黑名单——Bash tool_use 和 tool_result 都不应截断
-    config.micro_excluded_tools = vec!["Bash".to_string()];
+    let config = CompactConfig {
+        micro_excluded_tools: vec!["Bash".to_string()],
+        ..Default::default()
+    };
 
     let mut t = MessageTranscript::new();
     for i in 0..7 {
@@ -179,8 +181,10 @@ fn test_micro_compact_respects_blacklist() {
 
 #[test]
 fn test_micro_compact_blacklist_case_insensitive() {
-    let mut config = CompactConfig::default();
-    config.micro_excluded_tools = vec!["bash".to_string()];
+    let config = CompactConfig {
+        micro_excluded_tools: vec!["bash".to_string()],
+        ..Default::default()
+    };
 
     let mut t = MessageTranscript::new();
     for i in 0..7 {
