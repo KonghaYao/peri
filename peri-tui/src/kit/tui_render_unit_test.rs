@@ -117,8 +117,7 @@ fn test_recompute_hash_after_collapse_change() {
         }),
         content_hash: 0,
     };
-    bubble.content_hash =
-        TuiAssistantBubble::compute_hash(&bubble.text, bubble.reasoning.as_ref());
+    bubble.content_hash = TuiAssistantBubble::compute_hash(&bubble.text, bubble.reasoning.as_ref());
     let initial_hash = bubble.content_hash;
     // 修改 collapsed 状态
     bubble.reasoning.as_mut().unwrap().collapsed = true;
@@ -371,9 +370,8 @@ mod reminder_tests {
     #[test]
     fn test_summary_truncation() {
         let long_line = "x".repeat(250);
-        let info =
-            detect_reminder(&format!("<system-reminder>{}</system-reminder>", long_line))
-                .expect("should detect");
+        let info = detect_reminder(&format!("<system-reminder>{}</system-reminder>", long_line))
+            .expect("should detect");
         assert!(info.summary.chars().count() <= 203); // 200 + "…"
         assert!(info.summary.ends_with('…'));
     }

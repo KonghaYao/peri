@@ -62,9 +62,7 @@ fn test_popup_kind_is_copy() {
 #[test]
 #[serial]
 fn test_close_popup_clears_payload_atoms() {
-    use peri_acp_types::event_data::{
-        AskUser, HitlPending, OauthNeeded, Question, RewindPreview,
-    };
+    use peri_acp_types::event_data::{AskUser, HitlPending, OauthNeeded, Question, RewindPreview};
 
     setup_atoms();
 

@@ -111,7 +111,10 @@ async fn test_tool_not_found_returns_error() {
     let tool = ExecuteExtraTool::new(registry);
 
     let result = tool
-        .invoke(json!({"tool_name": "UnknownTool", "params": {}}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            json!({"tool_name": "UnknownTool", "params": {}}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     assert!(result.is_err());
     assert!(result
@@ -125,7 +128,12 @@ async fn test_missing_tool_name() {
     let registry = build_test_registry();
     let tool = ExecuteExtraTool::new(registry);
 
-    let result = tool.invoke(json!({"params": {}}), peri_agent::tools::ToolContext::new(&[], ".")).await;
+    let result = tool
+        .invoke(
+            json!({"params": {}}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -138,7 +146,12 @@ async fn test_missing_params() {
     let registry = build_test_registry();
     let tool = ExecuteExtraTool::new(registry);
 
-    let result = tool.invoke(json!({"tool_name": "CronRegister"}), peri_agent::tools::ToolContext::new(&[], ".")).await;
+    let result = tool
+        .invoke(
+            json!({"tool_name": "CronRegister"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -152,7 +165,10 @@ async fn test_target_tool_error_propagates() {
     let tool = ExecuteExtraTool::new(registry);
 
     let result = tool
-        .invoke(json!({"tool_name": "FailingTool", "params": {}}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            json!({"tool_name": "FailingTool", "params": {}}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().to_string(), "mock tool error");

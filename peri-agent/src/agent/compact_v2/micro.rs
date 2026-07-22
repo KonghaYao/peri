@@ -23,6 +23,11 @@ use crate::session::transcript::{MessageTranscript, TranscriptEntry};
 ///
 /// 返回被标记的消息数量。
 pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig) -> usize {
+    /// 检查工具名是否应被截断（不在黑名单中）
+    fn tool_should_truncate(tool_name: &str, excluded: &[String]) -> bool {
+        !excluded.iter().any(|e| e.eq_ignore_ascii_case(tool_name))
+    }
+
     let ancestor_len = transcript.ancestor_len();
     let entries = transcript.entries();
     if entries.len() <= ancestor_len {
@@ -70,21 +75,26 @@ pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig)
         }
 
         let should_truncate = match msg {
-            // Tool 消息：白名单工具 + 非错误
+            // Tool 消息（tool_result 输出）→ 工具名不在黑名单则截断
             BaseMessage::Tool {
                 tool_call_id,
                 is_error,
                 ..
             } => {
                 if *is_error {
-                    false
+                    false // 错误输出不截断，保留诊断信息
                 } else {
-                    find_tool_name_in_entries(own_entries, tool_call_id)
-                        .map(|name| config.micro_compactable_tools.contains(&name))
+                    let tool_name = find_tool_name_for_result(own_entries, i, tool_call_id);
+                    tool_name
+                        .map(|n| tool_should_truncate(&n, &config.micro_excluded_tools))
                         .unwrap_or(false)
                 }
             }
-            // 非 Tool 消息：检查是否含 Image/Document
+            // Ai 消息（tool_use 输入 arguments）→ 任一 tool_call 不在黑名单则截断
+            BaseMessage::Ai { tool_calls, .. } => tool_calls
+                .iter()
+                .any(|tc| tool_should_truncate(&tc.name, &config.micro_excluded_tools)),
+            // 其他消息：检查 Image/Document 块
             _ => {
                 let blocks = msg.message_content().content_blocks();
                 blocks.iter().any(|b| {
@@ -114,9 +124,25 @@ pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig)
     affected
 }
 
-/// 在条目列表中查找 Tool 消息对应的工具调用名称
-fn find_tool_name_in_entries(entries: &[TranscriptEntry], tool_call_id: &str) -> Option<String> {
-    for entry in entries.iter().rev() {
+/// 在 0..pos 范围内向前查找 tool_call_id 对应的工具名称。
+fn find_tool_name_for_result(
+    entries: &[TranscriptEntry],
+    result_pos: usize,
+    tool_call_id: &str,
+) -> Option<String> {
+    // 就近查找：Ai 消息通常在 tool_result 之前 1-2 条
+    let _start = result_pos.saturating_sub(5);
+    for entry in entries[..result_pos].iter().rev().take(5) {
+        if let BaseMessage::Ai { tool_calls, .. } = &entry.message {
+            for tc in tool_calls {
+                if tc.id == tool_call_id {
+                    return Some(tc.name.clone());
+                }
+            }
+        }
+    }
+    // 全范围回退（兼容异常排序）
+    for entry in entries[..result_pos].iter().rev() {
         if let BaseMessage::Ai { tool_calls, .. } = &entry.message {
             for tc in tool_calls {
                 if tc.id == tool_call_id {

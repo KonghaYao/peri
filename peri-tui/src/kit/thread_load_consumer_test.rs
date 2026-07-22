@@ -2,9 +2,7 @@
 
 #[cfg(test)]
 use super::*;
-use peri_acp::transport::mpsc::{
-    MpscClientTransport, MpscServerTransport, mpsc_transport_pair,
-};
+use peri_acp::transport::mpsc::{MpscClientTransport, MpscServerTransport, mpsc_transport_pair};
 
 fn make_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
     let (client_transport, server_transport): (MpscClientTransport, MpscServerTransport) =

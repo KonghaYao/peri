@@ -15,7 +15,7 @@ peri-acp-types（协议类型）  peri-workflow（Workflow CLI，独立构建）
 ### ReAct 循环
 ```
 before_agent → loop(500):
-  Compact（ContextBudget: 0.70 micro / 0.85 full）
+  Compact（ContextBudget: 0.75 micro / 0.95 full）
   → Receive → Reason → Act（3 阶段工具分发） → End（检查 MessageQueue 续跑）
 ```
 
@@ -169,7 +169,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 | 类型 | 位置 | 条件 |
 |------|------|------|
 | 单元测试 | 同目录 `_test.rs` | 测试代码 ≥ 30 行 |
-| 单元测试 | 同文件 `#[cfg(test)] mod tests` | 测试代码 < 30 行 |
+| 单元测试 | 同文件 `#[cfg(test)] mod tests` |  永远不允许文件内联测试 |
 | 集成测试 | crate 根 `tests/` | 跨模块端到端，只访问 `pub` API |
 
 #### 优先级

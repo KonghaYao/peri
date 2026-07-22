@@ -30,10 +30,7 @@ fn test_middleware_name() {
         lsp_servers: HashMap::new(),
     };
     let mw = LspMiddleware::new("/tmp".to_string(), config);
-    assert_eq!(
-        <LspMiddleware as Middleware>::name(&mw),
-        "LspMiddleware"
-    );
+    assert_eq!(<LspMiddleware as Middleware>::name(&mw), "LspMiddleware");
 }
 
 #[test]
@@ -81,9 +78,6 @@ fn test_shared_pool() {
 fn test_from_configs() {
     let configs = vec![make_config("rust-analyzer", vec![(".rs", "rust")])];
     let mw = LspMiddleware::from_configs("/tmp".to_string(), configs);
-    assert_eq!(
-        <LspMiddleware as Middleware>::name(&mw),
-        "LspMiddleware"
-    );
+    assert_eq!(<LspMiddleware as Middleware>::name(&mw), "LspMiddleware");
     assert!(mw.pool.has_servers());
 }

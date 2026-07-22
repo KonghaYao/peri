@@ -10,7 +10,10 @@ async fn test_glob_match_simple() {
     std::fs::write(dir.path().join("c.txt"), "").unwrap();
     let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"pattern": "*.rs"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"pattern": "*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("a.rs"), "should find a.rs: {result}");
@@ -24,7 +27,10 @@ async fn test_glob_no_match() {
     std::fs::write(dir.path().join("a.rs"), "").unwrap();
     let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"pattern": "*.go"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"pattern": "*.go"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert_eq!(result, "No files found.");
@@ -37,7 +43,10 @@ async fn test_glob_recursive() {
     std::fs::write(dir.path().join("sub/d.rs"), "").unwrap();
     let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"pattern": "**/*.rs"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"pattern": "**/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("d.rs"), "should find nested d.rs: {result}");
@@ -48,7 +57,10 @@ async fn test_glob_dir_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"pattern": "*.rs", "path": "nonexistent_dir"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"pattern": "*.rs", "path": "nonexistent_dir"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -84,7 +96,10 @@ async fn test_glob_truncation_persists_full_output() {
     }
     let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"pattern": "*.rs"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"pattern": "*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -170,7 +185,10 @@ async fn test_glob_byte_level_persists_when_over_20kb() {
     }
     let tool = GlobFilesTool::new(base.to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"pattern": "**/*.rs"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"pattern": "**/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -190,7 +208,10 @@ async fn test_glob_soft_warning_prepended_in_output() {
     std::fs::write(dir.path().join("a.rs"), "").unwrap();
     let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"pattern": "*"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"pattern": "*"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -217,10 +238,13 @@ async fn test_glob_worktree_path_does_not_warn() {
     std::fs::write(worktree_path.join("src/b.rs"), "").unwrap();
     let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "pattern": "src/**/*.rs",
-            "path": ".claude/worktrees/fake-branch",
-        }), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({
+                "pattern": "src/**/*.rs",
+                "path": ".claude/worktrees/fake-branch",
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .expect("显式 path 进 worktree 应正常执行，不报错");
     assert!(
@@ -246,7 +270,10 @@ async fn test_glob_from_project_root_skips_worktree_copy() {
     std::fs::write(worktree_copy.join("extra.rs"), "").unwrap();
     let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"pattern": "**/*.rs"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"pattern": "**/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     // Windows 绝对路径使用 \ 分隔符，统一规范化为 / 再断言
@@ -274,7 +301,9 @@ async fn test_glob_invalid_pattern_returns_error() {
         "pattern": "[unclosed",
         "path": ".",
     });
-    let result = tool.invoke(input, peri_agent::tools::ToolContext::new(&[], ".")).await;
+    let result = tool
+        .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
+        .await;
     assert!(result.is_err(), "语法错误应该返回 Err");
     let err = result.unwrap_err().to_string();
     assert!(

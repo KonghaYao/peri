@@ -52,14 +52,21 @@ fn test_token_tracker_accumulate() {
 fn test_recall_push_and_drain() {
     let mut state = AgentState::new("/workspace");
     // 初始状态 recall buffer 为空
-    assert!(state.drain_recall().is_empty(), "新创建的 state recall 应为空");
+    assert!(
+        state.drain_recall().is_empty(),
+        "新创建的 state recall 应为空"
+    );
     // push 两条记录
     state.push_recall("MCP Sentry connected".to_string());
     state.push_recall("Cron task registered".to_string());
     assert_eq!(state.recall_buffer.len(), 2, "push 后应有 2 条记录");
     // drain 返回所有记录并清空
     let items = state.drain_recall();
-    assert_eq!(items, vec!["MCP Sentry connected", "Cron task registered"], "drain 应按顺序返回所有记录");
+    assert_eq!(
+        items,
+        vec!["MCP Sentry connected", "Cron task registered"],
+        "drain 应按顺序返回所有记录"
+    );
     // 第二次 drain 为空（drain 是破坏性操作）
     assert!(state.drain_recall().is_empty(), "drain 后再次 drain 应为空");
 }
@@ -70,10 +77,16 @@ fn test_recall_not_persisted() {
     state.push_recall("some event".to_string());
     // 序列化后不应包含 recall_buffer 字段
     let json = serde_json::to_string(&state).unwrap();
-    assert!(!json.contains("recall_buffer"), "recall_buffer 不应出现在序列化结果中");
+    assert!(
+        !json.contains("recall_buffer"),
+        "recall_buffer 不应出现在序列化结果中"
+    );
     // 反序列化后 recall buffer 为空
     let mut restored: AgentState = serde_json::from_str(&json).unwrap();
-    assert!(restored.drain_recall().is_empty(), "反序列化后 recall 应为空");
+    assert!(
+        restored.drain_recall().is_empty(),
+        "反序列化后 recall 应为空"
+    );
 }
 
 #[test]

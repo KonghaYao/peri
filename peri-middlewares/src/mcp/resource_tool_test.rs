@@ -38,7 +38,10 @@ fn test_description_empty_pool() {
 async fn test_invoke_missing_server_name() {
     let tool = McpResourceTool::new(empty_pool());
     let result = tool
-        .invoke(serde_json::json!({"uri": "file:///test"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"uri": "file:///test"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("server_name"));
@@ -48,7 +51,10 @@ async fn test_invoke_missing_server_name() {
 async fn test_invoke_missing_uri() {
     let tool = McpResourceTool::new(empty_pool());
     let result = tool
-        .invoke(serde_json::json!({"server_name": "test"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"server_name": "test"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("uri"));
@@ -58,7 +64,10 @@ async fn test_invoke_missing_uri() {
 async fn test_invoke_server_not_found() {
     let tool = McpResourceTool::new(empty_pool());
     let result = tool
-        .invoke(serde_json::json!({"server_name": "nonexistent", "uri": "test://x"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"server_name": "nonexistent", "uri": "test://x"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("未找到"));

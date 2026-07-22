@@ -9,7 +9,10 @@ async fn test_read_file_basic() {
     std::fs::write(&path, "hello\nworld").unwrap();
     let tool = ReadFileTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"file_path": "file.txt"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": "file.txt"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -27,7 +30,10 @@ async fn test_read_file_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let tool = ReadFileTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"file_path": "nonexistent.txt"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": "nonexistent.txt"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -43,7 +49,10 @@ async fn test_read_file_offset_limit() {
     std::fs::write(&path, "L1\nL2\nL3\nL4\nL5").unwrap();
     let tool = ReadFileTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"file_path": "lines.txt", "offset": 2, "limit": 2}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": "lines.txt", "offset": 2, "limit": 2}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     // offset=2 → starts at index 2 (L3), limit=2 → L3 and L4
@@ -59,7 +68,10 @@ async fn test_read_file_binary_extension() {
     // Binary extension check happens before file read, no need to create the file
     let tool = ReadFileTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"file_path": "image.png"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": "image.png"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -75,7 +87,10 @@ async fn test_read_file_absolute_path() {
     std::fs::write(&path, "absolute").unwrap();
     let tool = ReadFileTool::new("/tmp");
     let result = tool
-        .invoke(serde_json::json!({"file_path": path.to_str().unwrap()}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": path.to_str().unwrap()}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -90,7 +105,10 @@ async fn test_read_file_offset_exceeds_length() {
     std::fs::write(dir.path().join("short.txt"), "one\ntwo").unwrap();
     let tool = ReadFileTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"file_path": "short.txt", "offset": 999}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": "short.txt", "offset": 999}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -109,7 +127,10 @@ async fn test_read_file_too_large() {
     drop(f);
     let tool = ReadFileTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"file_path": "huge.txt"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": "huge.txt"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -145,7 +166,10 @@ fn test_tool_name_is_Read() {
 async fn test_pdf_with_pages_returns_placeholder() {
     let tool = ReadFileTool::new("/tmp");
     let result = tool
-        .invoke(serde_json::json!({"file_path": "test.pdf", "pages": "1-5"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": "test.pdf", "pages": "1-5"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -158,7 +182,10 @@ async fn test_pdf_with_pages_returns_placeholder() {
 async fn test_pdf_without_pages_returns_binary() {
     let tool = ReadFileTool::new("/tmp");
     let result = tool
-        .invoke(serde_json::json!({"file_path": "test.pdf"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": "test.pdf"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(
@@ -185,14 +212,8 @@ async fn test_read_directory_returns_listing() {
         result.contains("DIRECTORY DETECTED"),
         "should contain directory hint: {result}"
     );
-    assert!(
-        result.contains("a.txt"),
-        "should list a.txt: {result}"
-    );
-    assert!(
-        result.contains("subdir"),
-        "should list subdir: {result}"
-    );
+    assert!(result.contains("a.txt"), "should list a.txt: {result}");
+    assert!(result.contains("subdir"), "should list subdir: {result}");
 }
 
 #[tokio::test]

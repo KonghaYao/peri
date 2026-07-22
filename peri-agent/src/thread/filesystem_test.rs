@@ -1,7 +1,7 @@
 //! Tests for filesystem_th
 
-use tempfile::tempdir;
 use super::*;
+use tempfile::tempdir;
 
 fn make_meta(cwd: &str) -> ThreadMeta {
     ThreadMeta::new(cwd)
@@ -190,7 +190,11 @@ async fn test_delete_messages_since_truncates_jsonl() {
     store.delete_messages_since(&id, &target_id).await.unwrap();
 
     let loaded = store.load_messages(&id).await.unwrap();
-    assert_eq!(loaded.len(), 2, "delete_messages_since 应保留 target 及之前");
+    assert_eq!(
+        loaded.len(),
+        2,
+        "delete_messages_since 应保留 target 及之前"
+    );
     assert_eq!(loaded[0].id(), msgs[0].id());
     assert_eq!(loaded[1].id(), msgs[1].id());
 

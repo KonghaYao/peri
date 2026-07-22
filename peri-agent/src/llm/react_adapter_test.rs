@@ -147,7 +147,10 @@ async fn test_stop_reason_end_turn_without_tool_use_treated_as_answer() {
         !result.needs_tool_call(),
         "stop_reason=EndTurn 且无 tool_use 时，应走最终回答路径"
     );
-    assert_eq!(result.final_answer.as_deref(), Some("This is a normal response"));
+    assert_eq!(
+        result.final_answer.as_deref(),
+        Some("This is a normal response")
+    );
 }
 
 /// 验证：`build_provider_request_body` 应透传 BaseModel 返回的 raw body，
@@ -177,10 +180,7 @@ fn test_build_provider_request_body_includes_system_and_delegates_to_base_model(
             "mock-model"
         }
         // 关键：override build_request_body 返回 Provider-native 完整 body
-        fn build_request_body(
-            &self,
-            request: &LlmRequest,
-        ) -> Option<serde_json::Value> {
+        fn build_request_body(&self, request: &LlmRequest) -> Option<serde_json::Value> {
             // 模拟 OpenAI-style：system 在 messages[0]，tools 是 function wrapper
             let messages = serde_json::json!({
                 "role": "system",
@@ -194,8 +194,8 @@ fn test_build_provider_request_body_includes_system_and_delegates_to_base_model(
         }
     }
 
-    let llm = BaseModelReactLLM::new(Box::new(RawBodyMock))
-        .with_system("SYSTEM_PROMPT_BODY".to_string());
+    let llm =
+        BaseModelReactLLM::new(Box::new(RawBodyMock)).with_system("SYSTEM_PROMPT_BODY".to_string());
     let body = llm
         .build_provider_request_body(&[], &[])
         .expect("BaseModel override 后应返回 Some(body)");

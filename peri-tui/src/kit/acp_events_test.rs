@@ -267,9 +267,9 @@ fn test_turndone_archives_assistant_to_committed() {
 fn test_turn_interrupted_empty_skips_archive() {
     crate::kit::atoms::init_atoms();
     // 预置一条 committed 数据
-    let pre_existing = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(
-        TuiUserBubble::new("existing".into()),
-    )]);
+    let pre_existing = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
+        "existing".into(),
+    ))]);
     *VIEW_MODELS.state().write() = ViewModelsSnapshot {
         items: pre_existing.clone(),
         generation: 0,
@@ -446,9 +446,9 @@ fn test_rewind_completed_replaces_committed() {
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     // 预置 committed 旧数据
-    let pre_existing = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(
-        TuiUserBubble::new("old".into()),
-    )]);
+    let pre_existing = im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
+        "old".into(),
+    ))]);
     let mut state = BridgeState {
         variant: 1,
         committed: pre_existing,

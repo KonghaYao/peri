@@ -161,11 +161,17 @@ async fn test_child_thread_create_and_list() {
     let children = store.list_child_threads(&parent_id).await.unwrap();
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].id, child_id);
-    assert_eq!(children[0].parent_thread_id.as_deref(), Some(parent_id.as_str()));
+    assert_eq!(
+        children[0].parent_thread_id.as_deref(),
+        Some(parent_id.as_str())
+    );
 
     // 子线程的 meta 应正确读取 parent_thread_id 和 hidden
     let child_meta_loaded = store.load_meta(&child_id).await.unwrap();
-    assert_eq!(child_meta_loaded.parent_thread_id.as_deref(), Some(parent_id.as_str()));
+    assert_eq!(
+        child_meta_loaded.parent_thread_id.as_deref(),
+        Some(parent_id.as_str())
+    );
     assert!(child_meta_loaded.hidden);
 }
 
@@ -261,7 +267,10 @@ async fn test_load_context_with_snapshot() {
         BaseMessage::ai("p2"),
         BaseMessage::human("p3"),
     ];
-    store.append_messages(&parent_id, &parent_msgs).await.unwrap();
+    store
+        .append_messages(&parent_id, &parent_msgs)
+        .await
+        .unwrap();
 
     // 快照截止到第 2 条消息（p2）的 message_id
     let parent_loaded = store.load_messages(&parent_id).await.unwrap();
@@ -310,7 +319,10 @@ async fn test_cached_context_invalidation() {
     // 清除缓存
     store.invalidate_context_cache(&id).await.unwrap();
     let meta = store.load_meta(&id).await.unwrap();
-    assert!(meta.cached_context.is_none(), "清除缓存后 cached_context 应为 None");
+    assert!(
+        meta.cached_context.is_none(),
+        "清除缓存后 cached_context 应为 None"
+    );
 
     // 再次加载仍然正常工作（从零重建）
     let ctx2 = store.load_context(&id).await.unwrap();
@@ -342,7 +354,10 @@ async fn test_load_context_three_level_nesting() {
     let (store, _dir) = make_store().await;
 
     // L1 根线程：3 条消息，快照到第 2 条
-    let l1_id = store.create_thread(ThreadMeta::new("/project")).await.unwrap();
+    let l1_id = store
+        .create_thread(ThreadMeta::new("/project"))
+        .await
+        .unwrap();
     let l1_msgs = vec![
         BaseMessage::human("L1-a"),
         BaseMessage::ai("L1-b"),
@@ -378,7 +393,11 @@ async fn test_load_context_three_level_nesting() {
 
     // load_context(L3) 应返回：L1 快照 2 条 + L2 快照 1 条 + L3 全部 1 条 = 4 条
     let ctx = store.load_context(&l3_id).await.unwrap();
-    assert_eq!(ctx.len(), 4, "三层嵌套应返回 L1(2) + L2(1) + L3(1) = 4 条消息");
+    assert_eq!(
+        ctx.len(),
+        4,
+        "三层嵌套应返回 L1(2) + L2(1) + L3(1) = 4 条消息"
+    );
     assert_eq!(ctx[0].content(), "L1-a");
     assert_eq!(ctx[1].content(), "L1-b");
     assert_eq!(ctx[2].content(), "L2-a");
@@ -411,8 +430,14 @@ async fn test_update_and_load_message_flags() {
     let flags = store.load_message_flags(&id).await.unwrap();
     assert_eq!(flags.len(), 2, "only 2 messages have non-default flags");
     assert!(flags[&msgs[0].id()].truncated, "msg1 should be truncated");
-    assert!(!flags[&msgs[0].id()].excluded, "msg1 should not be excluded");
-    assert!(!flags[&msgs[1].id()].truncated, "msg2 should not be truncated");
+    assert!(
+        !flags[&msgs[0].id()].excluded,
+        "msg1 should not be excluded"
+    );
+    assert!(
+        !flags[&msgs[1].id()].truncated,
+        "msg2 should not be truncated"
+    );
     assert!(flags[&msgs[1].id()].excluded, "msg2 should be excluded");
 }
 

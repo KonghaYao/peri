@@ -63,7 +63,11 @@ async fn test_complete_updates_status() {
 
     // 已完成任务应被立即清理，list_tasks 不再返回
     let tasks = registry.list_tasks();
-    assert_eq!(tasks.len(), 0, "completed tasks should be cleaned up immediately");
+    assert_eq!(
+        tasks.len(),
+        0,
+        "completed tasks should be cleaned up immediately"
+    );
     assert_eq!(registry.active_count(), 0);
 }
 
@@ -122,11 +126,7 @@ async fn test_cancel_propagates_to_running_task() {
         "cancel 后任务应从 registry 移除，实际: {}",
         tasks.len()
     );
-    assert_eq!(
-        registry.active_count(),
-        0,
-        "cancel 后 active_count 应为 0"
-    );
+    assert_eq!(registry.active_count(), 0, "cancel 后 active_count 应为 0");
 
     // 清理：让 oneshot sender 释放，避免 JoinHandle 泄漏
     drop(tx);

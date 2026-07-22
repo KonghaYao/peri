@@ -85,5 +85,4 @@ fn test_end_prompt_plus_info_wakes_only_prompt() {
     assert!(output.should_continue);
     // 只消费 Prompt，Info 保留
     assert_eq!(ctx.session.queue.len(), 1, "Info 应保留在队列");
-    }
-
+}

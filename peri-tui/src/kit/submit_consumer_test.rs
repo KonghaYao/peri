@@ -4,9 +4,7 @@
 use super::*;
 
 use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
-use peri_acp::transport::mpsc::{
-    MpscClientTransport, MpscServerTransport, mpsc_transport_pair,
-};
+use peri_acp::transport::mpsc::{MpscClientTransport, MpscServerTransport, mpsc_transport_pair};
 
 /// 用真实 mpsc transport 对创建 AcpTuiClient（不启动 pump）。
 fn make_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {

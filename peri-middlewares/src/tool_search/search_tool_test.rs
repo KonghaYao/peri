@@ -78,7 +78,10 @@ async fn test_invoke_search_returns_results() {
     let tool = SearchExtraTools::new(index);
 
     let result = tool
-        .invoke(json!({"query": "slack message"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            json!({"query": "slack message"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     let parsed: Value = serde_json::from_str(&result).unwrap();
@@ -96,7 +99,10 @@ async fn test_invoke_empty_results() {
     let tool = SearchExtraTools::new(index);
 
     let result = tool
-        .invoke(json!({"query": "nonexistent_tool_xyz"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            json!({"query": "nonexistent_tool_xyz"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     let parsed: Value = serde_json::from_str(&result).unwrap();
@@ -110,7 +116,9 @@ async fn test_invoke_missing_query() {
     let index = build_test_index();
     let tool = SearchExtraTools::new(index);
 
-    let result = tool.invoke(json!({}), peri_agent::tools::ToolContext::new(&[], ".")).await;
+    let result = tool
+        .invoke(json!({}), peri_agent::tools::ToolContext::new(&[], "."))
+        .await;
     assert!(result.is_err());
     assert!(result
         .unwrap_err()

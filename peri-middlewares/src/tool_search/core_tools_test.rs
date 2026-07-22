@@ -74,8 +74,5 @@ fn test_core_tools_sorted_csv_is_alphabetically_sorted() {
     let parts: Vec<&str> = csv.split(", ").collect();
     let mut sorted = parts.clone();
     sorted.sort();
-    assert_eq!(
-        parts, sorted,
-        "csv 应按字典序排序，实际: {csv}"
-    );
+    assert_eq!(parts, sorted, "csv 应按字典序排序，实际: {csv}");
 }

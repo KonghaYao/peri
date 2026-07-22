@@ -1,8 +1,11 @@
 //! Compact v2 — 标记代替删除的上下文压缩
 //!
-//! 三级渐进策略：
-//! - **Micro**：零 LLM 调用，标 `truncated`（不改内容）
-//! - **Full**：LLM 摘要 + 旧消息标 `excluded` + 追加 Human 摘要 + Re-inject
+//! 触发流程：
+//! - budget < 0.75：跳过
+//! - budget ≥ 0.75：Micro Compact（标记 truncated）
+//!   - affected_count ≥ micro_min_affected → Micro 有效，budget ≥ 0.95 时叠加 Full
+//!   - affected_count < micro_min_affected → Micro 无效，升级为 Full
+//! - force=true：直接 Full（跳过 Micro）
 //! - **Smart**（未实现）：LLM 决策保留 id + 未选中标 `excluded` + 追加 system-reminder
 //!
 //! 与 v1 的区别：v2 基于 `MessageTranscript` 标记 API，不修改消息本体，
@@ -46,32 +49,38 @@ pub struct CompactResult {
 
 // ─── 顶层入口 ───────────────────────────────────────────────────────────────────
 
-/// 根据 ContextBudget 百分比和配置确定 Compact 策略。
+/// Compact 阶段动作
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactAction {
+    /// 跳过 compact（预算充足）
+    Skip,
+    /// 执行 Micro Compact
+    Micro,
+}
+
+/// 检查是否应执行 Micro Compact。
 ///
-/// 返回 `None` 表示"不需要 compact"（预算充足，跳过）。
-/// 返回 `Some(strategy)` 表示应执行的策略（Micro 或 Full）。
+/// 返回 `Skip` 表示预算未到 75%，跳过 compact。
+/// 返回 `Micro` 表示预算 ≥ 75%，应执行 Micro。
 ///
-/// P1-5: stages/compact 和 compact_v2::run_compact 统一使用此函数，
-/// 消除两处策略判断的重复逻辑。
-pub fn determine_compact_strategy(
-    budget: f64,
-    config: &CompactConfig,
-    force: bool,
-) -> Option<CompactStrategy> {
-    if force || budget >= config.auto_compact_threshold {
-        Some(CompactStrategy::Full)
-    } else if budget >= config.micro_compact_threshold {
-        Some(CompactStrategy::Micro)
+/// Full Compact 的触发不在本函数内判定——由 run_compact 在 Micro 执行后
+/// 根据 affected_count 和 budget 动态决策。
+pub fn should_micro_compact(budget: f64, config: &CompactConfig) -> CompactAction {
+    if budget >= config.micro_compact_threshold {
+        CompactAction::Micro
     } else {
-        None
+        CompactAction::Skip
     }
 }
 
 /// 根据 ContextBudget 百分比选择策略并执行 Compact
 ///
-/// - budget < 0.70：跳过
-/// - 0.70 <= budget < 0.85：Micro
-/// - budget >= 0.85 或 force=true：Full
+/// 触发流程：
+/// - budget < 0.75：跳过
+/// - budget ≥ 0.75：Micro Compact（标记 truncated）
+///   - affected_count ≥ micro_min_affected → Micro 有效，budget ≥ 0.95 时叠加 Full
+///   - affected_count < micro_min_affected → Micro 无效，升级为 Full
+/// - force=true：直接 Full（跳过 Micro）
 /// - 连续失败超过 max_consecutive_failures 次时降级跳过
 pub async fn run_compact(
     transcript: &mut MessageTranscript,
@@ -96,79 +105,110 @@ pub async fn run_compact(
         };
     }
 
-    let strategy = match determine_compact_strategy(budget, config, force) {
-        Some(s) => s,
-        None => {
-            // 预算充足，跳过
-            return CompactResult {
-                strategy: CompactStrategy::Micro,
-                affected_count: 0,
-                before_len,
-                after_visible_len: transcript.visible_messages().len(),
-                summary: None,
-            };
-        }
-    };
+    // 手动触发 → 直接 Full
+    if force {
+        return run_full_or_degrade(
+            transcript,
+            llm,
+            config,
+            before_len,
+            consecutive_failures,
+            cwd,
+        )
+        .await;
+    }
 
-    match strategy {
-        CompactStrategy::Micro => {
+    // 检查 Micro 触发条件
+    match should_micro_compact(budget, config) {
+        CompactAction::Skip => CompactResult {
+            strategy: CompactStrategy::Micro,
+            affected_count: 0,
+            before_len,
+            after_visible_len: transcript.visible_messages().len(),
+            summary: None,
+        },
+        CompactAction::Micro => {
+            // 执行 Micro
             let affected = micro::micro_compact(transcript, config);
             *consecutive_failures = 0;
-            CompactResult {
-                strategy: CompactStrategy::Micro,
-                affected_count: affected,
-                before_len,
-                after_visible_len: transcript.visible_messages().len(),
-                summary: None,
-            }
-        }
-        CompactStrategy::Full => {
-            // 重跑保护：上轮 Full Compact 失败时设置的 excluded 标记若残留，
-            // 会污染 visible_messages() 导致本轮 compact 错误地认为已压缩。
-            // 仅清 excluded（保留 truncated——属 Micro Compact 状态，不可误清）。
-            if *consecutive_failures > 0 {
-                let stale_ids: Vec<_> = transcript
-                    .entries()
-                    .iter()
-                    .filter(|e| transcript.flags(e.message.id()).excluded)
-                    .map(|e| e.message.id())
-                    .collect();
-                let cleared = stale_ids.len();
-                for id in stale_ids {
-                    transcript.set_excluded(id, false);
-                }
-                if cleared > 0 {
-                    debug!(cleared, "Full Compact 重跑：清除上轮残留 excluded 标记");
-                }
-            }
-            match full::full_compact_inner(transcript, llm, config, cwd).await {
-                Ok(result) => {
-                    *consecutive_failures = 0;
-                    result
-                }
-                Err(e) => {
-                    *consecutive_failures = consecutive_failures.saturating_add(1);
-                    warn!(
-                        error = %e,
+
+            if affected >= config.micro_min_affected {
+                // Micro 有效
+                if budget >= config.auto_compact_threshold {
+                    // budget 高位 → 叠加 Full
+                    debug!(affected, budget, "Micro 有效 + budget 高位 → 叠加 Full");
+                    run_full_or_degrade(
+                        transcript,
+                        llm,
+                        config,
+                        before_len,
                         consecutive_failures,
-                        "Full Compact 失败，降级跳过"
-                    );
+                        cwd,
+                    )
+                    .await
+                } else {
+                    // Micro 够了
                     CompactResult {
-                        strategy: CompactStrategy::Full,
-                        affected_count: 0,
+                        strategy: CompactStrategy::Micro,
+                        affected_count: affected,
                         before_len,
                         after_visible_len: transcript.visible_messages().len(),
                         summary: None,
                     }
                 }
+            } else {
+                // Micro 无效 → 升级 Full
+                debug!(affected, budget, "Micro 无效 → 升级为 Full");
+                run_full_or_degrade(
+                    transcript,
+                    llm,
+                    config,
+                    before_len,
+                    consecutive_failures,
+                    cwd,
+                )
+                .await
             }
         }
-        CompactStrategy::Smart => {
-            // 未实现，降级为 Micro
-            let affected = micro::micro_compact(transcript, config);
+    }
+}
+
+/// 运行 Full Compact（含失败降级逻辑）
+async fn run_full_or_degrade(
+    transcript: &mut MessageTranscript,
+    llm: Option<&dyn BaseModel>,
+    config: &CompactConfig,
+    before_len: usize,
+    consecutive_failures: &mut u32,
+    cwd: &str,
+) -> CompactResult {
+    // 重跑保护：清除上轮残留 excluded 标记
+    if *consecutive_failures > 0 {
+        let stale_ids: Vec<_> = transcript
+            .entries()
+            .iter()
+            .filter(|e| transcript.flags(e.message.id()).excluded)
+            .map(|e| e.message.id())
+            .collect();
+        for id in &stale_ids {
+            transcript.set_excluded(*id, false);
+        }
+        if !stale_ids.is_empty() {
+            debug!(count = stale_ids.len(), "清除上轮残留 excluded 标记");
+        }
+    }
+
+    match full::full_compact_inner(transcript, llm, config, cwd).await {
+        Ok(result) => {
+            *consecutive_failures = 0;
+            result
+        }
+        Err(e) => {
+            warn!(error = %e, "Full Compact 失败");
+            *consecutive_failures += 1;
             CompactResult {
-                strategy: CompactStrategy::Micro,
-                affected_count: affected,
+                strategy: CompactStrategy::Full,
+                affected_count: 0,
                 before_len,
                 after_visible_len: transcript.visible_messages().len(),
                 summary: None,
@@ -179,3 +219,7 @@ pub async fn run_compact(
 
 #[cfg(test)]
 mod _test;
+
+#[cfg(test)]
+#[path = "trigger_test.rs"]
+mod trigger_test;

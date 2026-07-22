@@ -31,8 +31,7 @@ fn test_response_deserialization_success() {
 
 #[test]
 fn test_response_deserialization_error() {
-    let json =
-        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
+    let json = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
     let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
     assert!(resp.result.is_none());
     let err = resp.error.unwrap();

@@ -48,9 +48,7 @@ async fn test_format_output_success() {
     };
     let output = ArtifactClient::format_output(&resp);
     assert!(output.contains("Artifact uploaded:"));
-    assert!(output.contains(
-        "https://cloud-artifacts.claude-code-best.win/7d/abc123.html"
-    ));
+    assert!(output.contains("https://cloud-artifacts.claude-code-best.win/7d/abc123.html"));
     assert!(output.contains("2026-06-27T12:00:00Z"));
     // tool_result 不应含 OSC 8 转义序列（避免 LLM 把 ESC 字符当字面文本回显）
     assert!(

@@ -224,8 +224,7 @@ async fn test_unstable_event_unknown_dropped() {
         .unwrap();
 
     // Unknown 事件被丢弃——bridge_rx 在短时间内应无数据
-    let result =
-        tokio::time::timeout(std::time::Duration::from_millis(50), bridge_rx.recv()).await;
+    let result = tokio::time::timeout(std::time::Duration::from_millis(50), bridge_rx.recv()).await;
     assert!(
         matches!(result, Ok(None)) || result.is_err(),
         "expected no event (channel idle or timeout), got {result:?}"
@@ -290,8 +289,7 @@ async fn test_agent_event_unknown_variant_dropped() {
         .unwrap();
 
     // StateSnapshotMeta 只写 CONTEXT_USAGE atom（供 StatusBar），不转发 bridge 事件
-    let result =
-        tokio::time::timeout(std::time::Duration::from_millis(50), bridge_rx.recv()).await;
+    let result = tokio::time::timeout(std::time::Duration::from_millis(50), bridge_rx.recv()).await;
     assert!(
         matches!(result, Ok(None)) || result.is_err(),
         "expected unmapped AgentEvent to be dropped, got {result:?}"

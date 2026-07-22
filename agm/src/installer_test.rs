@@ -90,7 +90,10 @@ fn test_remove_package_symlinks_uses_canonical_paths() {
 
     remove_package_symlinks(&target_dir, &store_alias.join("pkg@1.0.0")).unwrap();
 
-    assert!(!link_path.exists(), "应通过 canonicalize 匹配到 store 并删除 symlink");
+    assert!(
+        !link_path.exists(),
+        "应通过 canonicalize 匹配到 store 并删除 symlink"
+    );
 }
 
 #[cfg(windows)]
@@ -110,8 +113,5 @@ fn test_remove_package_symlinks_dir_symlink_does_not_follow_target() {
     remove_package_symlinks(&target_dir, store_path.parent().unwrap()).unwrap();
 
     assert!(!link_path.exists(), "目录 symlink 本身应被删除");
-    assert!(
-        protected_file.exists(),
-        "不应跟随 symlink 删除目标目录内容"
-    );
+    assert!(protected_file.exists(), "不应跟随 symlink 删除目标目录内容");
 }

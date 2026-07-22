@@ -48,7 +48,11 @@ async fn test_injects_summary() {
     let mut state = AgentState::new(dir.path().to_str().unwrap());
     mw.before_agent(&mut state).await.unwrap();
 
-    assert_eq!(state.messages().len(), 0, "before_agent 不应再 prepend 消息");
+    assert_eq!(
+        state.messages().len(),
+        0,
+        "before_agent 不应再 prepend 消息"
+    );
     let content = contribution(&mw).unwrap();
     assert!(content.contains("tui-dev"));
     assert!(content.contains("codebase-exploration"));
@@ -198,11 +202,7 @@ fn test_load_disable_bundled_skills_defaults_false_when_missing() {
     // settings.json 无 disableBundledSkills 字段时返回 false
     let tmp = tempdir().unwrap();
     let settings_path = tmp.path().join("settings.json");
-    std::fs::write(
-        &settings_path,
-        r#"{"config": {}}"#,
-    )
-    .unwrap();
+    std::fs::write(&settings_path, r#"{"config": {}}"#).unwrap();
 
     let value = super::load_disable_bundled_skills_from_path(&settings_path);
     assert!(!value, "缺字段时应默认 false");
@@ -249,11 +249,7 @@ fn test_load_disable_bundled_skills_reads_flat_true() {
     // 扁平 JSON（无 config 包裹）也应支持
     let tmp = tempdir().unwrap();
     let settings_path = tmp.path().join("settings.json");
-    std::fs::write(
-        &settings_path,
-        r#"{"disableBundledSkills": true}"#,
-    )
-    .unwrap();
+    std::fs::write(&settings_path, r#"{"disableBundledSkills": true}"#).unwrap();
 
     let value = super::load_disable_bundled_skills_from_path(&settings_path);
     assert!(value, "扁平 JSON disableBundledSkills=true 时应返回 true");
@@ -264,7 +260,11 @@ fn test_load_disable_bundled_skills_handles_malformed_json() {
     // 畸形 JSON（如崩溃留下的半截文件）应默认 false
     let tmp = tempdir().unwrap();
     let settings_path = tmp.path().join("settings.json");
-    std::fs::write(&settings_path, r#"{"config": {"disableBundledSkills": broken}"#).unwrap();
+    std::fs::write(
+        &settings_path,
+        r#"{"config": {"disableBundledSkills": broken}"#,
+    )
+    .unwrap();
 
     let value = super::load_disable_bundled_skills_from_path(&settings_path);
     assert!(!value, "畸形 JSON 应默认 false");

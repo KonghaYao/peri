@@ -85,11 +85,17 @@ impl OAuthCallbackServer {
         let response = match &callback_result {
             Ok((code, _)) => {
                 info!(code = %code, "OAuth 回调成功");
-                &format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}", OAUTH_SUCCESS_BODY)[..]
+                &format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+                    OAUTH_SUCCESS_BODY
+                )[..]
             }
             Err(e) => {
                 warn!(error = %e, "OAuth 回调处理失败");
-                &format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}", OAUTH_FAILURE_BODY.replace("{error}", &e.to_string()))[..]
+                &format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+                    OAUTH_FAILURE_BODY.replace("{error}", &e.to_string())
+                )[..]
             }
         };
 

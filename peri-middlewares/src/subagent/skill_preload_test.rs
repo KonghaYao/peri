@@ -37,10 +37,8 @@ async fn test_inject_single_skill() {
     std::fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "api-guide", "API 开发指南");
 
-    let mw = SkillPreloadMiddleware::new(
-        vec!["api-guide".to_string()],
-        dir.path().to_str().unwrap(),
-    );
+    let mw =
+        SkillPreloadMiddleware::new(vec!["api-guide".to_string()], dir.path().to_str().unwrap());
     let mut state = AgentState::new(dir.path().to_str().unwrap());
 
     // Act
@@ -230,8 +228,15 @@ async fn test_auto_detect_skill_from_human_message() {
     mw.before_agent(&mut state).await.unwrap();
 
     // Assert: 应自动检测并注入 Ai + Tool = 2 条消息，加上原始 Human 消息共 3 条
-    assert_eq!(state.messages().len(), 3, "应注入 2 条消息（Ai + Tool），加上原始 Human 消息共 3 条");
-    assert!(matches!(&state.messages()[0], BaseMessage::Human { .. }), "第一条应为 Human");
+    assert_eq!(
+        state.messages().len(),
+        3,
+        "应注入 2 条消息（Ai + Tool），加上原始 Human 消息共 3 条"
+    );
+    assert!(
+        matches!(&state.messages()[0], BaseMessage::Human { .. }),
+        "第一条应为 Human"
+    );
     assert!(
         matches!(&state.messages()[1], BaseMessage::Ai { .. }),
         "第二条应为 Ai（fake Read）"
@@ -262,8 +267,16 @@ async fn test_auto_detect_multiple_skills() {
     mw.before_agent(&mut state).await.unwrap();
 
     // 1 Human + 1 Ai + 2 Tool = 4 条
-    assert_eq!(state.messages().len(), 4, "2 个 skill 应注入 Ai + 2 Tool = 3 条，加 Human 共 4 条");
-    assert_eq!(state.messages()[1].tool_calls().len(), 2, "Ai 消息应有 2 个 ToolUse");
+    assert_eq!(
+        state.messages().len(),
+        4,
+        "2 个 skill 应注入 Ai + 2 Tool = 3 条，加 Human 共 4 条"
+    );
+    assert_eq!(
+        state.messages()[1].tool_calls().len(),
+        2,
+        "Ai 消息应有 2 个 ToolUse"
+    );
 }
 
 #[tokio::test]
@@ -353,7 +366,11 @@ async fn test_preload_from_extra_dirs() {
     mw.before_agent(&mut state).await.unwrap();
 
     // Assert: 应从 extra_dirs 找到并注入 Ai + Tool = 2 条消息
-    assert_eq!(state.messages().len(), 2, "应从 extra_dirs 找到 skill 并注入");
+    assert_eq!(
+        state.messages().len(),
+        2,
+        "应从 extra_dirs 找到 skill 并注入"
+    );
     let tool_content = state.messages()[1].content();
     assert!(
         tool_content.contains("Skill content for plugin-skill"),
@@ -367,10 +384,7 @@ async fn test_preload_loads_builtin_skill_content() {
     let mut state = peri_agent::agent::state::AgentState::new("/tmp");
     state.add_message(peri_agent::messages::BaseMessage::human("hi"));
 
-    let mw = super::SkillPreloadMiddleware::new(
-        vec!["use-artifacts".to_string()],
-        "/tmp",
-    );
+    let mw = super::SkillPreloadMiddleware::new(vec!["use-artifacts".to_string()], "/tmp");
 
     mw.before_agent(&mut state).await.unwrap();
 

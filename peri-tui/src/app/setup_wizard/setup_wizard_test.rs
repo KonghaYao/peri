@@ -60,8 +60,7 @@ fn test_mask_api_key() {
 
 #[test]
 fn test_parse_url_parts_standard() {
-    let (host, port, path) =
-        parse_url_parts("https://api.anthropic.com").expect("parse failed");
+    let (host, port, path) = parse_url_parts("https://api.anthropic.com").expect("parse failed");
     assert_eq!(host, "api.anthropic.com");
     assert_eq!(port, 443);
     assert_eq!(path, "/");

@@ -8,12 +8,11 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 fn test_default_values() {
     let config = CompactConfig::default();
     assert!(config.auto_compact_enabled);
-    assert!((config.auto_compact_threshold - 0.85).abs() < 0.001);
-    assert!((config.micro_compact_threshold - 0.70).abs() < 0.001);
+    assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
+    assert!((config.micro_compact_threshold - 0.75).abs() < 0.001);
     assert_eq!(config.micro_compact_stale_steps, 5);
-    assert_eq!(config.micro_compactable_tools.len(), 6);
-    assert!(config.micro_compactable_tools.contains(&"Bash".to_string()));
-    assert!(config.micro_compactable_tools.contains(&"Read".to_string()));
+    assert_eq!(config.micro_excluded_tools.len(), 0, "黑名单默认空");
+    assert_eq!(config.micro_min_affected, 5);
     assert_eq!(config.summary_max_tokens, 16000);
     assert_eq!(config.re_inject_max_files, 5);
     assert_eq!(config.re_inject_max_tokens_per_file, 5000);
@@ -36,7 +35,7 @@ fn test_serde_roundtrip() {
     assert!((deserialized.auto_compact_threshold - 0.90).abs() < 0.001);
     assert_eq!(deserialized.micro_compact_stale_steps, 10);
     assert_eq!(deserialized.summary_max_tokens, 8000);
-    assert!((deserialized.micro_compact_threshold - 0.70).abs() < 0.001);
+    assert!((deserialized.micro_compact_threshold - 0.75).abs() < 0.001);
 }
 
 #[test]
@@ -45,7 +44,7 @@ fn test_serde_partial_deserialize() {
     let config: CompactConfig = serde_json::from_str(json).unwrap();
     assert!((config.auto_compact_threshold - 0.90).abs() < 0.001);
     assert!(config.auto_compact_enabled);
-    assert!((config.micro_compact_threshold - 0.70).abs() < 0.001);
+    assert!((config.micro_compact_threshold - 0.75).abs() < 0.001);
 }
 
 #[test]
@@ -53,7 +52,7 @@ fn test_serde_empty_object() {
     let json = "{}";
     let config: CompactConfig = serde_json::from_str(json).unwrap();
     assert!(config.auto_compact_enabled);
-    assert!((config.auto_compact_threshold - 0.85).abs() < 0.001);
+    assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
 }
 
 #[test]
@@ -72,17 +71,7 @@ fn test_apply_env_overrides_on_custom_config() {
 }
 
 #[test]
-fn test_compactable_tools_default_content() {
+fn test_excluded_tools_default_empty() {
     let config = CompactConfig::default();
-    assert_eq!(
-        config.micro_compactable_tools,
-        vec![
-            "Bash".to_string(),
-            "Read".to_string(),
-            "Glob".to_string(),
-            "Grep".to_string(),
-            "Write".to_string(),
-            "Edit".to_string(),
-        ]
-    );
+    assert!(config.micro_excluded_tools.is_empty(), "黑名单默认应为空");
 }

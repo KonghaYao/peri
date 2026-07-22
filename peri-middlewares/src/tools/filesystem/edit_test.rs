@@ -10,14 +10,12 @@ async fn test_edit_file_single_replace() {
     let result = tool
         .invoke(
             serde_json::json!({"file_path": "f.txt", "old_string": "foo", "new_string": "bar"}),
-         peri_agent::tools::ToolContext::new(&[], "."))
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     // "foo" → "bar": same line count, one occurrence
-    assert!(
-        result.contains("Replaced text"),
-        "unexpected: {result}"
-    );
+    assert!(result.contains("Replaced text"), "unexpected: {result}");
     let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
     assert_eq!(content, "hello bar world");
 }
@@ -28,7 +26,10 @@ async fn test_edit_file_old_string_not_found() {
     std::fs::write(dir.path().join("f.txt"), "hello world").unwrap();
     let tool = EditFileTool::new(dir.path().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"file_path": "f.txt", "old_string": "missing", "new_string": "x"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": "f.txt", "old_string": "missing", "new_string": "x"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err = result.unwrap_err();
     assert!(
@@ -42,12 +43,15 @@ async fn test_edit_file_replace_all() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f.txt"), "x x x").unwrap();
     let tool = EditFileTool::new(dir.path().to_str().unwrap());
-    tool.invoke(serde_json::json!({
-        "file_path": "f.txt",
-        "old_string": "x",
-        "new_string": "y",
-        "replace_all": true
-    }), peri_agent::tools::ToolContext::new(&[], "."))
+    tool.invoke(
+        serde_json::json!({
+            "file_path": "f.txt",
+            "old_string": "x",
+            "new_string": "y",
+            "replace_all": true
+        }),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
     .await
     .unwrap();
     let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
@@ -62,7 +66,8 @@ async fn test_edit_file_ambiguous() {
     let result = tool
         .invoke(
             serde_json::json!({"file_path": "f.txt", "old_string": "foo", "new_string": "bar"}),
-         peri_agent::tools::ToolContext::new(&[], "."))
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err = result.unwrap_err();
     assert!(
@@ -78,7 +83,8 @@ async fn test_edit_file_not_found() {
     let result = tool
         .invoke(
             serde_json::json!({"file_path": "ghost.txt", "old_string": "x", "new_string": "y"}),
-         peri_agent::tools::ToolContext::new(&[], "."))
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err = result.unwrap_err();
     assert!(
@@ -134,11 +140,14 @@ async fn test_edit_not_found_with_fuzzy_prefix_match() {
     std::fs::write(dir.path().join("f.txt"), file_content).unwrap();
     let tool = EditFileTool::new(dir.path().to_str().unwrap());
     let err = tool
-        .invoke(serde_json::json!({
-            "file_path": "f.txt",
-            "old_string": "a\nb\nc\nd\ne\nDIFFERENT\nextra\n",
-            "new_string": "x"
-        }), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({
+                "file_path": "f.txt",
+                "old_string": "a\nb\nc\nd\ne\nDIFFERENT\nextra\n",
+                "new_string": "x"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -163,11 +172,14 @@ async fn test_edit_not_found_with_line_diff_hint() {
     .unwrap();
     let tool = EditFileTool::new(dir.path().to_str().unwrap());
     let err = tool
-        .invoke(serde_json::json!({
-            "file_path": "f.txt",
-            "old_string": "line1\nline2\nline3\n",
-            "new_string": "x"
-        }), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({
+                "file_path": "f.txt",
+                "old_string": "line1\nline2\nline3\n",
+                "new_string": "x"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -187,11 +199,14 @@ async fn test_edit_not_found_long_old_string_skip_fuzzy() {
     let giant_old = "y".repeat(6000);
     let tool = EditFileTool::new(dir.path().to_str().unwrap());
     let err = tool
-        .invoke(serde_json::json!({
-            "file_path": "f.txt",
-            "old_string": giant_old,
-            "new_string": "x"
-        }), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({
+                "file_path": "f.txt",
+                "old_string": giant_old,
+                "new_string": "x"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -211,20 +226,20 @@ async fn test_edit_not_unique_shows_line_ranges() {
     std::fs::write(dir.path().join("f.txt"), "aaa\nfoo\nbbb\nfoo\nccc\n").unwrap();
     let tool = EditFileTool::new(dir.path().to_str().unwrap());
     let err = tool
-        .invoke(serde_json::json!({
-            "file_path": "f.txt",
-            "old_string": "foo",
-            "new_string": "bar"
-        }), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({
+                "file_path": "f.txt",
+                "old_string": "foo",
+                "new_string": "bar"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("line 2"), "应报告第一个匹配行号: {msg}");
     assert!(msg.contains("line 4"), "应报告第二个匹配行号: {msg}");
-    assert!(
-        msg.contains("Match locations"),
-        "应包含匹配位置标签: {msg}"
-    );
+    assert!(msg.contains("Match locations"), "应包含匹配位置标签: {msg}");
 }
 
 #[tokio::test]
@@ -235,11 +250,14 @@ async fn test_edit_not_unique_many_occurrences_truncated() {
     std::fs::write(dir.path().join("f.txt"), &content).unwrap();
     let tool = EditFileTool::new(dir.path().to_str().unwrap());
     let err = tool
-        .invoke(serde_json::json!({
-            "file_path": "f.txt",
-            "old_string": "x",
-            "new_string": "y"
-        }), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({
+                "file_path": "f.txt",
+                "old_string": "x",
+                "new_string": "y"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap_err();
     let msg = err.to_string();

@@ -313,7 +313,9 @@ fn test_resolve_skill_roots_skips_nonexistent_plugin_roots() {
     };
     let roots = resolve_skill_roots("/tmp", vec![nonexistent], false);
     assert!(
-        !roots.iter().any(|r| r.path.to_str() == Some("/nonexistent/path")),
+        !roots
+            .iter()
+            .any(|r| r.path.to_str() == Some("/nonexistent/path")),
         "不存在的 plugin root 应被跳过"
     );
 }
