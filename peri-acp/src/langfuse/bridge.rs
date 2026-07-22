@@ -307,6 +307,26 @@ impl UnifiedLangfuseEvent {
                 total_tokens,
                 threshold_label: "context_window".to_string(),
             }),
+            RenderEvent::ToolStarted {
+                tool_call_id,
+                name,
+                input,
+                ..
+            } => Some(UnifiedLangfuseEvent::ToolStart {
+                tool_call_id,
+                name,
+                input,
+            }),
+            RenderEvent::ToolEnded {
+                tool_call_id,
+                output,
+                is_error,
+                ..
+            } => Some(UnifiedLangfuseEvent::ToolEnd {
+                tool_call_id,
+                output,
+                is_error,
+            }),
             // 其余 RenderEvent 变体无 Langfuse 映射
             _ => None,
         }

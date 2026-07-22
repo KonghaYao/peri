@@ -66,6 +66,12 @@ pub struct LangfuseTracer {
     pub(crate) tool_batch: crate::langfuse::tracer::tool_batch::ToolBatch,
     pub(crate) subagent: crate::langfuse::tracer::subagent::SubagentStack,
     pub(crate) compact: crate::langfuse::tracer::compact::CompactSpan,
+    /// 当前 stage-compact 阶段中是否有实际 compact 工作（micro/full）
+    pub(crate) compact_work_done: bool,
+    /// agent-run observation 的开始时间（推迟到 on_turn_end 创建时设置）
+    pub(crate) agent_start_time: Option<String>,
+    /// agent-run observation 的输入（推迟到 on_turn_end 创建时设置）
+    pub(crate) agent_input: Option<String>,
 }
 
 impl LangfuseTracer {
@@ -92,6 +98,9 @@ impl LangfuseTracer {
             tool_batch: crate::langfuse::tracer::tool_batch::ToolBatch::new(),
             subagent: crate::langfuse::tracer::subagent::SubagentStack::new(),
             compact: crate::langfuse::tracer::compact::CompactSpan::new(),
+            compact_work_done: false,
+            agent_start_time: None,
+            agent_input: None,
         }
     }
 
@@ -148,35 +157,10 @@ impl LangfuseTracer {
             );
         }
 
-        let body = ObservationBody {
-            id: Some(self.agent_observation_id.clone()),
-            trace_id: Some(self.trace_id.clone()),
-            r#type: ObservationType::Agent,
-            name: Some("agent-run".to_string()),
-            start_time: Some(start_time),
-            end_time: None,
-            completion_start_time: None,
-            parent_observation_id: None,
-            input: Some(serde_json::json!(input)),
-            output: None,
-            metadata: None,
-            model: None,
-            model_parameters: None,
-            level: None,
-            status_message: None,
-            version: Some(VERSION.to_string()),
-            environment: None,
-            session_id: Some(self.session_id.clone()),
-        };
-        let event = IngestionEvent::ObservationCreate {
-            id: new_uuid(),
-            timestamp: now_rfc3339(),
-            body,
-            metadata: None,
-        };
-        if let Err(e) = self.session.try_add(event) {
-            tracing::warn!(error = %e, trace_id = %self.trace_id, "langfuse: agent-run observation 入队失败（背压丢弃）");
-        }
+        // 推迟 agent-run ObservationCreate 到 on_turn_end，
+        // 避免 OTEL span 不可变导致 end_time 无法更新 → 0s latency
+        self.agent_start_time = Some(start_time);
+        self.agent_input = Some(input.to_string());
     }
 
     /// 对话轮次结束：更新 agent-run Observation 输出和结束时间，并强制 flush。
@@ -289,6 +273,10 @@ impl LangfuseTracer {
 
         self.sampling.cleanup_turn(&self.trace_id);
 
+        // 取出推迟到现在的 start_time 和 input（on_turn_start 时存储）
+        let agent_start_time = self.agent_start_time.take();
+        let agent_input = self.agent_input.take();
+
         tokio::spawn(async move {
             let end_time = now_rfc3339();
 
@@ -297,19 +285,21 @@ impl LangfuseTracer {
                 trace_id: Some(trace_id.clone()),
                 r#type: ObservationType::Agent,
                 name: Some("agent-run".to_string()),
-                output: Some(serde_json::json!(output)),
+                start_time: agent_start_time,
                 end_time: Some(end_time.clone()),
+                input: agent_input.map(|s| serde_json::json!(s)),
+                output: Some(serde_json::json!(output)),
                 version: Some(VERSION.to_string()),
                 ..Default::default()
             };
-            let obs_event = IngestionEvent::ObservationUpdate {
+            let obs_event = IngestionEvent::ObservationCreate {
                 id: new_uuid(),
                 timestamp: end_time,
                 body: obs_body,
                 metadata: None,
             };
             if let Err(e) = session.try_add(obs_event) {
-                tracing::warn!(error = %e, trace_id = %trace_id, obs_id = %agent_observation_id, "langfuse: agent-run observation 更新失败");
+                tracing::warn!(error = %e, trace_id = %trace_id, obs_id = %agent_observation_id, "langfuse: agent-run observation 创建失败");
             }
             if let Err(e) = session.flush().await {
                 tracing::warn!(error = %e, trace_id = %trace_id, "langfuse: session flush 失败");
@@ -371,6 +361,20 @@ impl LangfuseTracer {
                     "total".to_string(),
                     serde_json::json!(u.input_tokens + u.output_tokens),
                 );
+                // 缓存 token 必须加入 usage map，否则 OTEL 转换后
+                // langfuse.observation.usage_details 不含 cache，Tokens 面板不显示
+                if let Some(cache_read) = u.cache_read_input_tokens {
+                    map.insert(
+                        "cache_read_input_tokens".to_string(),
+                        serde_json::json!(cache_read),
+                    );
+                }
+                if let Some(cache_create) = u.cache_creation_input_tokens {
+                    map.insert(
+                        "cache_creation_input_tokens".to_string(),
+                        serde_json::json!(cache_create),
+                    );
+                }
                 map
             });
 
@@ -523,6 +527,7 @@ impl LangfuseTracer {
                     metadata: None,
                     model: None,
                     model_parameters: None,
+                    usage: None,
                     level: None,
                     status_message: None,
                     version: Some(VERSION.to_string()),
@@ -556,6 +561,7 @@ impl LangfuseTracer {
         let strategy = CompactStrategy::Full;
         let trigger = CompactTrigger::Auto;
         let _start = self.compact.on_start(strategy, trigger);
+        self.compact_work_done = true;
         // SpanCreate 延迟到 on_compact_end：仅在 duration > 0 时发送
     }
 
@@ -663,6 +669,13 @@ impl LangfuseTracer {
             let flush = self.tool_batch.flush();
             self.emit_tools_flush(flush);
         }
+
+        // Compact stage：仅在实际执行了 micro/full compact 时才上报 span，
+        // 否则跳过空 compact 阶段（无意义的 ~20ms span）
+        if handle.stage == Stage::Compact && !self.compact_work_done {
+            return;
+        }
+        self.compact_work_done = false;
 
         let end_time = now_rfc3339();
         let duration_ms = calculate_duration_ms(&handle.start_time, &end_time);
@@ -951,6 +964,7 @@ impl LangfuseTracer {
                 metadata: None,
                 model: None,
                 model_parameters: None,
+                usage: None,
                 level,
                 status_message: None,
                 version: Some(VERSION.to_string()),
