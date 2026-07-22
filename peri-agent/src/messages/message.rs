@@ -265,22 +265,63 @@ impl BaseMessage {
 
     /// 为 Micro Compact 截断场景生成截断后消息
     ///
-    /// 保留前 `max_chars` 字符 + truncation note。
-    /// 若内容为纯文本且长度超过阈值则返回截断后消息，否则返回 `None`。
+    /// 对于 Ai 消息：截断 tool_calls 中过大的 arguments。
+    /// 对于其他消息：截断超长的文本内容（保留前 `max_chars` 字符 + truncation note）。
+    /// 若不需要截断则返回 `None`。
     pub fn truncated_content(&self, max_chars: usize) -> Option<BaseMessage> {
         let text = match self.message_content() {
             MessageContent::Text(t) => t.clone(),
             _ => return None,
         };
-        if text.chars().count() <= max_chars {
+        let text_chars = text.chars().count();
+        let text_needs_truncation = text_chars > max_chars;
+
+        // 检查 tool_calls 是否需要截断（Ai 消息）
+        let tool_calls_need_truncation = match self {
+            BaseMessage::Ai { tool_calls, .. } => tool_calls.iter().any(|tc| {
+                let args_str = serde_json::to_string(&tc.arguments).unwrap_or_default();
+                args_str.chars().count() > max_chars
+            }),
+            _ => false,
+        };
+
+        if !text_needs_truncation && !tool_calls_need_truncation {
             return None;
         }
-        let truncated: String = text.chars().take(max_chars).collect();
-        let truncated_with_note = format!(
-            "{}\n\n[truncated: content shortened by Micro Compact]",
-            truncated
-        );
-        Some(self.clone_with_content(MessageContent::Text(truncated_with_note)))
+
+        // 截断文本（需要时）
+        let new_content = if text_needs_truncation {
+            let truncated: String = text.chars().take(max_chars).collect();
+            MessageContent::Text(format!(
+                "{}\n\n[truncated: content shortened by Micro Compact]",
+                truncated
+            ))
+        } else {
+            MessageContent::Text(text)
+        };
+
+        let mut msg = self.clone_with_content(new_content);
+
+        // 截断 tool_calls arguments（需要时）
+        if tool_calls_need_truncation {
+            if let BaseMessage::Ai {
+                ref mut tool_calls, ..
+            } = &mut msg
+            {
+                for tc in tool_calls.iter_mut() {
+                    let args_str = serde_json::to_string(&tc.arguments).unwrap_or_default();
+                    if args_str.chars().count() > max_chars {
+                        let truncated: String = args_str.chars().take(max_chars).collect();
+                        tc.arguments = serde_json::Value::String(format!(
+                            "{}\n\n[truncated: tool input shortened by Micro Compact]",
+                            truncated
+                        ));
+                    }
+                }
+            }
+        }
+
+        Some(msg)
     }
 }
 
