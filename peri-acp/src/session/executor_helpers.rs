@@ -593,7 +593,7 @@ pub(super) async fn build_and_execute_agent_v2(
             {
                 if let Some(tx) = event_tx.lock().as_ref() {
                     let _ = tx.send(ExecutorEvent::AgentExecutionFailed {
-                        message: e.to_string(),
+                        message: e.user_facing_message(),
                     });
                 }
             }

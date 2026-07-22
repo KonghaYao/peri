@@ -182,3 +182,18 @@ async fn test_zero_retries_single_attempt() {
     let result = retry.generate_reasoning(&[], &[], None).await;
     assert!(result.is_ok(), "max_retries=0 时应直接返回结果");
 }
+
+/// 验证取消令牌可中断重试循环
+#[tokio::test]
+async fn test_cancel_token_interrupts_retry() {
+    let mock = MockLLM::new(vec![http_error(503), http_error(503), ok_reasoning()]);
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    let config = RetryConfig::default().with_base_delay_ms(1);
+    let retry = RetryableLLM::new(mock, config).with_cancel_token(token);
+    let result = retry.generate_reasoning(&[], &[], None).await;
+    assert!(
+        matches!(result, Err(AgentError::Interrupted)),
+        "已取消的 token 应立即使 retry 返回 Interrupted"
+    );
+}

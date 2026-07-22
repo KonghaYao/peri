@@ -18,6 +18,7 @@ pub mod token;
 
 #[doc(hidden)]
 pub use compact_v2::CompactConfig;
+#[doc(hidden)]
 pub use events::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent, FnEventHandler};
 // P5.5：v1 executor/ 已物理删除。AgentCancellationToken 保留为 tokio_util alias，
 // 众多模块（ACP / SubAgent / Workflow）依赖此类型名。

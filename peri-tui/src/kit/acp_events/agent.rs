@@ -6,7 +6,7 @@ use crate::kit::tui_render_unit::TuiNoteLevel;
 use fluent_bundle::FluentValue;
 
 pub(super) fn handle_agent_execution_failed(state: &mut BridgeState, message: &str) {
-    tracing::error!(message, "bridge: AgentExecutionFailed");
+    tracing::error!("bridge: AgentExecutionFailed");
     let text = i18n::tr_args(
         "app-note-agent-failed",
         &[("message".into(), FluentValue::from(message))],

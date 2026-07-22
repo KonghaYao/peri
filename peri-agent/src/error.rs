@@ -64,6 +64,22 @@ impl AgentError {
             _ => false,
         }
     }
+
+    /// 返回用户可见的错误描述（脱敏后的消息）
+    /// 对 Other/LlmError/LlmHttpError/SerializationError 返回通用描述
+    pub fn user_facing_message(&self) -> String {
+        match self {
+            Self::Other(_) => "An internal error occurred. Check logs for details.".to_string(),
+            Self::LlmError(_) => "LLM call failed. Check logs for details.".to_string(),
+            Self::LlmHttpError { status, .. } => {
+                format!("LLM HTTP error ({status})")
+            }
+            Self::SerializationError(_) => {
+                "Serialization error. Check logs for details.".to_string()
+            }
+            other => other.to_string(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -5,11 +5,18 @@ use std::path::Path;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 
+/// TracingGuard 在 Drop 时保证日志被 flush。
+///
+/// 当前版本 `tracing` 0.1.x 的 `set_global_default` 不返回 guard，
+/// 因此 TracingGuard 作为生命周期标记存在，真正的 flush 由
+/// `RollingFileAppender` 的 Drop（程序退出时 OS 回收文件句柄）保证。
 pub struct TracingGuard;
 
 impl Drop for TracingGuard {
     fn drop(&mut self) {
-        // 无需特殊清理逻辑
+        // tracing 0.1.x global subscriber 无法被替换/清理；
+        // RollingFileAppender 在程序退出时由 OS 关闭文件句柄，
+        // 阻塞式同步写入确保日志不丢失。
     }
 }
 

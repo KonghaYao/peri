@@ -2,10 +2,10 @@
 //!
 //! 根据 ContextBudget 计算使用率，调用 `compact_v2::run_compact`：
 //! - budget < 0.75：跳过
-//! - budget ≥ 0.75：Micro Compact（标记 truncated）
-//!   - affected_count >= 5 → Micro 有效，budget ≥ 0.95 时叠加 Full
-//!   - affected_count < 5 → Micro 无效，升级为 Full
-//! - force=true：直接 Full（跳过 Micro）
+//! - budget ≥ 0.75：Smart Compact（规则驱动保留关键消息）或 Micro Compact（按 round 截断）
+//!   - affected_count >= micro_min_affected → 有效，budget ≥ 0.95 时叠加 Full
+//!   - affected_count < micro_min_affected → 无效，升级为 Full
+//! - force=true：直接 Full（跳过 Micro/Smart）
 //!
 //! Full Compact 失败时 `consecutive_failures` 累加，达上限后降级跳过。
 
@@ -72,8 +72,13 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
         // 在 emit CompactStarted 前估算策略
         // determine_compact_action 判定 Skip/Micro/Smart；Full 由 run_compact 内部动态决策。
         // 此处 event 的策略字段用于观测。
-        let _compact_action = crate::agent::compact_v2::determine_compact_action(pct, config);
-        let compact_strategy = crate::agent::events::CompactStrategy::Micro;
+        let compact_action = crate::agent::compact_v2::determine_compact_action(pct, config);
+        let compact_strategy = match compact_action {
+            crate::agent::compact_v2::CompactAction::Smart => {
+                crate::agent::events::CompactStrategy::Smart
+            }
+            _ => crate::agent::events::CompactStrategy::Micro,
+        };
 
         tracing::trace!(step, budget_pct = %pct, "Compact 预算检查");
 
