@@ -33,8 +33,8 @@ fn test_unknown_tool_deferred() {
 }
 
 #[test]
-fn test_core_tools_sorted_csv_includes_all_12_tools() {
-    // P1-1: 动态生成必须覆盖全部 12 个 Core 工具（含 folder_operations）
+fn test_core_tools_sorted_csv_includes_all_13_tools() {
+    // P1-1: 动态生成必须覆盖全部 13 个 Core 工具（含 folder_operations, Skill）
     let csv = core_tools_sorted_csv();
     for tool in [
         TOOL_READ,
@@ -49,6 +49,7 @@ fn test_core_tools_sorted_csv_includes_all_12_tools() {
         TOOL_AGENT,
         TOOL_ASK_USER,
         TOOL_TODO,
+        TOOL_SKILL,
     ] {
         assert!(
             csv.contains(tool),

@@ -16,18 +16,19 @@
 3.  PluginMiddleware         ← 插件兼容性校验（before_agent），加载状态门控后续插件相关中间件
 4.  SkillsMiddleware         ← Skills 摘要注入（含插件 plugin_roots）
 5.  SkillPreloadMiddleware   ← #skill-name 全文注入
-6.  AtMentionMiddleware      ← @path 解析，注入 Read 工具调用
-7.  FilesystemMiddleware     ← 6 个文件系统工具
-8.  GitAttributionMiddleware ← before_tool/after_tool 追踪 Write/Edit 贡献字符数
-9.  TerminalMiddleware       ← Bash
-10. WebMiddleware            ← WebFetch/WebSearch
-11. TodoMiddleware           ← after_tool 解析 TodoWrite
-12. CronMiddleware           ← Cron 调度
-13. HookMiddleware           ← hooks 事件拦截（多组实例）
-14. HumanInTheLoopMiddleware ← before_tool 拦截
-15. SubAgentMiddleware       ← Agent 工具
-16. McpMiddleware            ← MCP 工具和资源（pool 成功时注册）
-17. WorkflowMiddleware       ← WorkflowTool（条件注册，deferred tool）
+6.  SkillToolMiddleware      ← Skill Core Tool 注册（LLM 可主动调用）
+7.  AtMentionMiddleware      ← @path 解析，注入 Read 工具调用
+8.  FilesystemMiddleware     ← 6 个文件系统工具
+9.  GitAttributionMiddleware ← before_tool/after_tool 追踪 Write/Edit 贡献字符数
+10. TerminalMiddleware       ← Bash
+11. WebMiddleware            ← WebFetch/WebSearch
+12. TodoMiddleware           ← after_tool 解析 TodoWrite
+13. CronMiddleware           ← Cron 调度
+14. HookMiddleware           ← hooks 事件拦截（多组实例）
+15. HumanInTheLoopMiddleware ← before_tool 拦截
+16. SubAgentMiddleware       ← Agent 工具
+17. McpMiddleware            ← MCP 工具和资源（pool 成功时注册）
+18. WorkflowMiddleware       ← WorkflowTool（条件注册，deferred tool）
 18. ToolSearchMiddleware     ← SearchExtraTools/ExecuteExtraTool 代理
 19. LspMiddleware            ← LSP 工具 + after_tool 文件变更同步
 20. GoalMiddleware           ← after_agent 注入递增紧迫感 steering + 设 block_continue 自驱循环（链最后）

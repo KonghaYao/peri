@@ -43,7 +43,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 15 基础 + 5 条件（Hook/MCP/Workflow/LSP/Goal），链末尾 `with_system_prompt()` prepend。顺序不可重排。
 
 ### Tool Search
-三层：Core（12，始终可见）/ Meta（2，SearchExtraTools/ExecuteExtraTool）/ Deferred（Cron/MCP/LspTool 等）
+三层：Core（13，始终可见）/ Meta（2，SearchExtraTools/ExecuteExtraTool）/ Deferred（Cron/MCP/LspTool 等）
 
 ## 模块索引
 
@@ -393,6 +393,7 @@ push_event / push_done / replay / notify 等发送点读取 → if caps.xxx { ..
 - **批量机械替换用 perl**：超过 10 个文件的模式替换（重命名、import 路径等），用 `perl -i -pe`/`find ... -exec sed` 脚本，禁止逐个 Edit 或委托 coder subagent
 - **bg agent 构建检查**：后台 agent 完成后必须 `cargo build` 验证。失败则 `git checkout -- <modified files>` 恢复文件，切换到手动模式
 - **AgentResult 禁止轮询**：后台任务结果通过 system-reminder 自动推送。禁止调用 `AgentResult()` 轮询——浪费 token 且结果会重复推送
+- **禁止 shell sleep 等待异步结果**：后台 subagent / workflow 结果通过 system-reminder 自动推送并唤醒 agent。禁止用 `bash sleep N`/`timeout`/轮询循环等待——sleep 会错过通知窗口、浪费 token。派发异步任务后立即停止，等系统唤醒即可
 
 ### Rust / 编码
 - **rustfmt import**：`use crate::module::*` 通配导入排在单类型之前；跨 crate 同理
