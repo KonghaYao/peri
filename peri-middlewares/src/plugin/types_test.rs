@@ -349,3 +349,74 @@ fn test_skills_field_absent() {
     let manifest: PluginManifest = serde_json::from_str(json).unwrap();
     assert!(manifest.skills.is_none());
 }
+
+// === PluginOrigin 测试 ===
+
+#[test]
+fn test_plugin_origin_default() {
+    assert_eq!(PluginOrigin::default(), PluginOrigin::PeriInstalled);
+}
+
+#[test]
+fn test_plugin_origin_is_external() {
+    // Peri 安装的不是外部
+    assert!(!PluginOrigin::PeriInstalled.is_external());
+    // Claude Code 相关的是外部
+    assert!(PluginOrigin::ClaudeCodeInstalled.is_external());
+    assert!(PluginOrigin::UserClaude.is_external());
+    assert!(PluginOrigin::ProjectClaude.is_external());
+}
+
+#[test]
+fn test_plugin_origin_serde_roundtrip() {
+    // PeriInstalled (default) — 不写入 serde 输出
+    let origin = PluginOrigin::PeriInstalled;
+    let json = serde_json::to_string(&origin).unwrap();
+    // default 序列化后可以反序列化回来
+    let back: PluginOrigin = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, PluginOrigin::PeriInstalled);
+
+    // ClaudeCodeInstalled
+    let json = r#""claude-installed""#;
+    let origin: PluginOrigin = serde_json::from_str(json).unwrap();
+    assert_eq!(origin, PluginOrigin::ClaudeCodeInstalled);
+    let back = serde_json::to_string(&origin).unwrap();
+    assert_eq!(back, r#""claude-installed""#);
+
+    // UserClaude
+    let json = r#""claude-user""#;
+    let origin: PluginOrigin = serde_json::from_str(json).unwrap();
+    assert_eq!(origin, PluginOrigin::UserClaude);
+
+    // ProjectClaude
+    let json = r#""claude-project""#;
+    let origin: PluginOrigin = serde_json::from_str(json).unwrap();
+    assert_eq!(origin, PluginOrigin::ProjectClaude);
+}
+
+#[test]
+fn test_installed_plugin_deserialize_missing_origin() {
+    // 旧 JSON 缺 origin 字段 → default PeriInstalled
+    let json = r#"{
+        "id": "test@mkt",
+        "name": "test",
+        "version": "1.0.0",
+        "marketplace": "mkt",
+        "install_path": "/tmp/test",
+        "scope": "User"
+    }"#;
+    let plugin: InstalledPlugin = serde_json::from_str(json).unwrap();
+    assert_eq!(plugin.origin, PluginOrigin::PeriInstalled);
+}
+
+#[test]
+fn test_claude_code_format_deserialize_sets_origin() {
+    // Claude Code 对象格式 JSON 解析出来的 origin == ClaudeCodeInstalled
+    let json = r#"{"version":2,"plugins":{"p@mkt":[{"scope":"user","installPath":"/tmp/p","version":"1.0.0"}]}}"#;
+    let installed: InstalledPlugins = serde_json::from_str(json).unwrap();
+    assert_eq!(installed.plugins.len(), 1);
+    assert_eq!(
+        installed.plugins[0].origin,
+        PluginOrigin::ClaudeCodeInstalled
+    );
+}

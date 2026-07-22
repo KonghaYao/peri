@@ -1,7 +1,9 @@
 use tempfile::tempdir;
 
 use super::*;
-use crate::plugin::types::{InstallScope, InstalledPlugin, KnownMarketplace, MarketplaceSource};
+use crate::plugin::types::{
+    InstallScope, InstalledPlugin, KnownMarketplace, MarketplaceSource, PluginOrigin,
+};
 
 #[test]
 fn test_load_installed_plugins_nonexistent() {
@@ -26,6 +28,7 @@ fn test_save_and_load_installed_plugins() {
             install_path: "/tmp/test".into(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     };
     save_installed_plugins(&plugins, Some(&path)).unwrap();

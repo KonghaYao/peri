@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use peri_agent::{
     error::AgentResult,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::{state::MiddlewareState, r#trait::Middleware},
 };
 
 use crate::parse_agent_file;
@@ -19,6 +19,8 @@ pub struct AgentOverrides {
     pub tone: Option<String>,
     /// 主动性（替换 `{{proactiveness}}`）
     pub proactiveness: Option<String>,
+    /// agent.md frontmatter 中 prompt_mode 的值："extend"|"full"，默认 extend
+    pub mode: Option<String>,
 }
 
 impl AgentOverrides {
@@ -109,6 +111,7 @@ impl AgentDefineMiddleware {
                 persona,
                 tone: agent.frontmatter.tone,
                 proactiveness: agent.frontmatter.proactiveness,
+                mode: agent.frontmatter.prompt_mode,
             };
             if overrides.is_empty() {
                 return None;

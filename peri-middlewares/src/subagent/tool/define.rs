@@ -13,12 +13,12 @@ use tokio_util::sync::CancellationToken as AgentCancellationToken;
 use super::{
     build_agent::CancelPolicy,
     fire_subagent_lifecycle_hooks_static, format_subagent_result,
-    lifecycle::{on_subagent_stop_handler, DeregisterGuard},
+    lifecycle::{DeregisterGuard, on_subagent_stop_handler},
 };
 use crate::tool_search::core_tools::TOOL_AGENT;
 use crate::{
     agent_define::{AgentDefineMiddleware, AgentOverrides},
-    claude_agent_parser::{parse_agent_file, ClaudeAgent, ToolsValue},
+    claude_agent_parser::{ClaudeAgent, ToolsValue, parse_agent_file},
     hooks::types::{HookEvent, RegisteredHook},
     subagent::{background::BackgroundTaskRegistry, built_in_agents::get_built_in_agent},
 };
@@ -243,8 +243,9 @@ impl SubAgentTool {
         system_prompt: &str,
         tone: &Option<String>,
         proactiveness: &Option<String>,
+        mode: &Option<String>,
     ) -> Option<AgentOverrides> {
-        crate::subagent::fork::overrides_from_agent_def(system_prompt, tone, proactiveness)
+        crate::subagent::fork::overrides_from_agent_def(system_prompt, tone, proactiveness, mode)
     }
 
     pub(crate) async fn fire_subagent_lifecycle_hook(

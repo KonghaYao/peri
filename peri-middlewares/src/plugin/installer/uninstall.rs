@@ -33,6 +33,7 @@ pub async fn uninstall_plugin(
 
     let install_path = entry.install_path.clone();
     let scope = entry.scope;
+    let is_external = entry.origin.is_external();
 
     let is_last_scope = !installed.plugins.iter().any(|p| {
         p.id == plugin_id
@@ -48,15 +49,18 @@ pub async fn uninstall_plugin(
     remove_from_enabled_plugins(plugin_id, &scope, claude_dir, project_dir)?;
 
     if is_last_scope {
-        let sanitized_id = sanitize_plugin_id(plugin_id);
-        let data_dir = claude_dir.join("plugins").join("data").join(&sanitized_id);
-        if data_dir.exists() {
-            tokio::fs::remove_dir_all(&data_dir).await.ok();
+        // 仅 Peri 安装的插件才执行文件清理；外部插件跳过
+        if !is_external {
+            let sanitized_id = sanitize_plugin_id(plugin_id);
+            let data_dir = claude_dir.join("plugins").join("data").join(&sanitized_id);
+            if data_dir.exists() {
+                tokio::fs::remove_dir_all(&data_dir).await.ok();
+            }
+
+            remove_plugin_options(plugin_id, claude_dir)?;
+
+            let _ = mark_orphaned(&install_path).await;
         }
-
-        remove_plugin_options(plugin_id, claude_dir)?;
-
-        let _ = mark_orphaned(&install_path).await;
     }
 
     Ok(())

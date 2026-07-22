@@ -2,7 +2,7 @@ use tempfile::tempdir;
 
 use super::*;
 use crate::plugin::types::{
-    InstallScope, InstalledPlugin, PluginAgent, PluginCommand, PluginCommandEntry,
+    InstallScope, InstalledPlugin, PluginAgent, PluginCommand, PluginCommandEntry, PluginOrigin,
 };
 
 pub(crate) fn make_manifest_with_commands(commands: Vec<PluginCommand>) -> PluginManifest {
@@ -550,6 +550,7 @@ fn test_load_plugins_success() {
             install_path: plugin_dir,
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     };
 
@@ -578,6 +579,7 @@ fn test_load_plugins_invalid_manifest() {
             install_path: dir.path().join("empty"),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     };
 
@@ -661,6 +663,7 @@ fn test_load_enabled_plugins() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     })
     .unwrap();
@@ -691,6 +694,7 @@ fn test_load_enabled_plugins_disabled() {
             install_path: dir.path().join("fake"),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     })
     .unwrap();
@@ -803,6 +807,7 @@ fn test_load_enabled_plugins_aggregated() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     })
     .unwrap();
@@ -848,6 +853,7 @@ fn test_load_plugin_skill_dirs_aggregated() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     })
     .unwrap();

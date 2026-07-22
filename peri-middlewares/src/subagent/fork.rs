@@ -116,6 +116,7 @@ pub fn overrides_from_agent_def(
     system_prompt: &str,
     tone: &Option<String>,
     proactiveness: &Option<String>,
+    mode: &Option<String>,
 ) -> Option<AgentOverrides> {
     let persona = if system_prompt.is_empty() {
         None
@@ -126,6 +127,7 @@ pub fn overrides_from_agent_def(
         persona,
         tone: tone.clone(),
         proactiveness: proactiveness.clone(),
+        mode: mode.clone(),
     };
     if overrides.is_empty() {
         None

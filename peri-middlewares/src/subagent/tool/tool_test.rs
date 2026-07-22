@@ -3,8 +3,8 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use peri_agent::{
     agent::{
-        react::{ReactLLM, Reasoning},
         AgentCancellationToken,
+        react::{ReactLLM, Reasoning},
     },
     messages::BaseMessage,
     tools::BaseTool,
@@ -628,6 +628,7 @@ fn test_overrides_from_agent_def_with_all_fields() {
         "You are a reviewer.",
         &Some("Be thorough.".to_string()),
         &Some("Proactively suggest.".to_string()),
+        &None,
     );
     let ov = ov.unwrap();
     assert_eq!(ov.persona.as_deref().unwrap(), "You are a reviewer.");
@@ -637,13 +638,13 @@ fn test_overrides_from_agent_def_with_all_fields() {
 
 #[test]
 fn test_overrides_from_agent_def_empty() {
-    let ov = SubAgentTool::overrides_from_agent_def("", &None, &None);
+    let ov = SubAgentTool::overrides_from_agent_def("", &None, &None, &None);
     assert!(ov.is_none(), "All-empty fields should return None");
 }
 
 #[test]
 fn test_overrides_from_agent_def_persona_only() {
-    let ov = SubAgentTool::overrides_from_agent_def("I am a helper.", &None, &None);
+    let ov = SubAgentTool::overrides_from_agent_def("I am a helper.", &None, &None, &None);
     let ov = ov.unwrap();
     assert_eq!(ov.persona.as_deref().unwrap(), "I am a helper.");
     assert!(ov.tone.is_none());
@@ -998,7 +999,7 @@ async fn test_fork_directive_includes_rules() {
 
 // ─── build_subagent_middlewares 单元测试 ───────────────────────────────────
 
-use super::{build_subagent_middlewares, SubAgentMiddlewareConfig};
+use super::{SubAgentMiddlewareConfig, build_subagent_middlewares};
 
 #[test]
 fn test_build_middleware_fork_config_无_skill_preload() {
@@ -1016,9 +1017,11 @@ fn test_build_middleware_agent_def_空技能_无_skill_preload() {
     let middlewares =
         build_subagent_middlewares(SubAgentMiddlewareConfig::for_agent_def(vec![], "/tmp"));
     assert_eq!(middlewares.len(), 3);
-    assert!(!middlewares
-        .iter()
-        .any(|m| m.name() == "SkillPreloadMiddleware"));
+    assert!(
+        !middlewares
+            .iter()
+            .any(|m| m.name() == "SkillPreloadMiddleware")
+    );
 }
 
 #[test]

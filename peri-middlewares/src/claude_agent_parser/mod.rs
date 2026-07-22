@@ -60,6 +60,9 @@ pub struct ClaudeAgentFrontmatter {
     /// 是否始终在后台运行
     #[serde(default)]
     pub background: bool,
+    /// prompt 模式："extend"（默认）或 "full"
+    #[serde(default)]
+    pub prompt_mode: Option<String>,
     /// Git worktree 隔离模式
     #[serde(default)]
     pub isolation: Option<String>,
