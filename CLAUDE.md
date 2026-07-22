@@ -376,7 +376,8 @@ push_event / push_done / replay / notify 等发送点读取 → if caps.xxx { ..
 - **BRIDGE_RESET_COUNTER**：/clear 和 thread 切换前必须递增，仅 atom 重置不足
 - **overlay 空态**：返回 `Positioned(width:0, height:0)`，不要 `View()`/`Fragment` → 白屏
 - **事件边界**：消息区只处理鼠标滚轮，编辑区只处理键盘
-- **committed push**：所有需时序定位的消息须先 flush current_turn → committed 再 push（flush-then-push 模式）。禁止直接 push committed 绕过 TurnSegment（[issue](spec/archive-issues/2026-07-16-system-note-cache-warning-position-wrong.md)）
+- **committed push**：所有需时序定位的消息须先 flush current_turn → committed 再 push（flush-then-push 模式）。禁止直接 push committed 绕过 TurnSegment（SystemNote 除外，见下条）（[issue](spec/archive-issues/2026-07-16-system-note-cache-warning-position-wrong.md)）
+- **SystemNote 注入**：所有 SystemNote（CompactCompleted/CompactError/AgentExecutionFailed/BudgetWarning/SystemNotification）必须通过 `BridgeState::inject_system_note(text, level)` 统一入口注入，禁止直接 `committed.push_back(TuiSystemNote{...})` 或手工 `push_system_note() + push_view_models + push_acp_state`。`inject_system_note` 封装三步操作，确保 SystemNote 按时序出现在 current_turn 内部。这是第三次同类回归（2026-07-16 → 2026-07-20 → 2026-07-22），新增 handler 时务必遵守此规则（[issue](spec/issues/2026-07-20-cache-warning-systemnote-position-regression.md)）
 - **增量缓存 can_reuse**：条件须覆盖 block 类型变更场景——输入前缀可能导致 pulldown-cmark 重解析出不同 block 类型时，缓存必须失效全量重跑（[issue](spec/archive-issues/2026-07-15-markdown-table-raw-text-streaming.md)）
 - **面板交互规范**：选中 tab 用反色（accent 底色+surface 字色），禁止 `[ ]` 包裹。面板内禁止单字母快捷键（j/k/q 等），仅允许方向键 + Tab + Esc + Enter。文本输入用 `TextAreaState`，禁止手工键盘事件处理
 - **ratatui-kit 迁移回归**：UI 框架迁移需要系统性功能回归清单——状态栏上下文消耗显示和缓存命中率警告在 ratatui-kit 迁移后丢失（详见 spec/global/domains/tui.md#issue_2026-07-13-statusbar-context-cache-display-regression）

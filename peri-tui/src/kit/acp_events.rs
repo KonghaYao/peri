@@ -7,9 +7,7 @@ use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, CurrentTurn, ToolCardAccumulator};
 use crate::kit::atoms::*;
 use crate::kit::submit_request::SubmitRequest;
-use crate::kit::tui_render_unit::{
-    TuiNoteLevel, TuiRenderUnit, TuiSystemNote, TuiUserBubble, tui_hash_str,
-};
+use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit, TuiUserBubble, tui_hash_str};
 use agent_client_protocol::schema::v1::{Plan, PlanEntryStatus};
 use fluent_bundle::FluentValue;
 use std::time::{Duration, Instant};
@@ -175,14 +173,17 @@ pub struct BridgeState {
 impl BridgeState {
     /// 将 current_turn 已产出内容 flush 到 committed，然后 reset。
     ///
-    /// 用于 BudgetWarning / SystemNotification / BgCallbackBubble / TurnDone
-    /// 四个需要保证时序正确性的位置：在注入中间事件或结束当前 turn 之前，
-    /// 必须先将已产出的 AI 内容归档到 committed，确保消息流时间顺序一致。
+    /// 用于 BgCallbackBubble / TurnDone 两个需要保证时序正确性的位置：
+    /// 在 push 中间气泡或结束当前 turn 之前，必须先将已产出的 AI 内容归档到
+    /// committed，确保消息流时间顺序一致。
     ///
     /// 安全守卫：如果 current_turn 中存在正在运行的 SubAgentAccumulator，
     /// 跳过 flush 以避免清除容器——否则后续工具事件无法路由到已清除的容器，
     /// 造成 SubAgentGroup 内部卡片空白（具体现象：外壳可见但内部工具条目缺失）。
-    /// 回归参考：与 SystemNotification/BudgetWarning 的时序竞态。
+    ///
+    /// 注意：SystemNote（BudgetWarning/SystemNotification/CompactCompleted/
+    /// CompactError/AgentExecutionFailed）不再通过 flush-then-push 模式，
+    /// 改为 inject_system_note() 统一注入 current_turn 内部 segment。
     fn flush_current_turn(&mut self) {
         if !self.current_turn.committed && !self.current_turn.is_empty() {
             let has_running_subagent = self.current_turn.subagents.iter().any(|s| s.is_running);
@@ -203,6 +204,23 @@ impl BridgeState {
             }
         }
         self.current_turn.reset();
+    }
+
+    /// SystemNote 统一注入入口。封装 push_system_note → push_view_models → push_acp_state
+    /// 三步操作，确保 SystemNote 按时序出现在 current_turn 内部。
+    ///
+    /// 所有 handler（CompactCompleted/CompactError/AgentExecutionFailed/BudgetWarning/
+    /// SystemNotification）必须通过此方法注入 SystemNote，禁止直接 push committed。
+    ///
+    /// 【回归陷阱】这是第三次同类回归（2026-07-16 → 2026-07-20 → 2026-07-22）。
+    /// 如果未来新增 handler 需要 SystemNote，务必使用此入口，
+    /// 不可绕过往 committed 直接 push_back。本方法为 `pub` 以便跨模块发现。
+    pub fn inject_system_note(&mut self, text: String, level: TuiNoteLevel) {
+        let content_hash = tui_hash_str(&text);
+        self.current_turn
+            .push_system_note(text, level, content_hash);
+        push_view_models(self);
+        push_acp_state(self);
     }
 }
 
@@ -594,31 +612,17 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                     ("limit".into(), FluentValue::from(limit_display.as_str())),
                 ],
             );
-            let content_hash = tui_hash_str(&text);
-            state
-                .current_turn
-                .push_system_note(text, TuiNoteLevel::Warning, content_hash);
-            push_view_models(state);
-            push_acp_state(state);
+            state.inject_system_note(text, TuiNoteLevel::Warning);
         }
         SystemNotification(sn) => {
-            // 系统通知（如 cache 命中率警告）——注入 TuiSystemNote 到 current_turn 内部。
-            // 先 flush 挂起的 text segment，再将 SystemNote 作为独立 segment 追加到
-            // current_turn，而非 push 到 committed。
-            // 这样 SystemNote 天然位于其出现时刻的时序位置（已产出内容之后、
-            // 后续内容之前），不再依赖 flush_current_turn() 及其
-            // has_running_subagent 守卫。
+            // 系统通知（如 cache 命中率警告）——通过 inject_system_note 注入
+            // current_turn 内部，天然位于其时序位置（已产出内容之后、后续内容之前）。
             let level = match sn.level.as_str() {
                 "warning" => TuiNoteLevel::Warning,
                 "error" => TuiNoteLevel::Error,
                 _ => TuiNoteLevel::Info,
             };
-            let content_hash = tui_hash_str(&format!("{}|{:?}", sn.text, level));
-            state
-                .current_turn
-                .push_system_note(sn.text.clone(), level, content_hash);
-            push_view_models(state);
-            push_acp_state(state);
+            state.inject_system_note(sn.text.clone(), level);
         }
 
         // ── §4.4 Input assist ──
@@ -810,64 +814,53 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             // 手动 /compact 路径由 push_done → TurnDone 兜底清除。
             // 全量压缩和有效微压缩都注入消息流通知
             // strategy 字段由 compact 引擎提供，准确区分 Micro/Full/Smart
-            {
-                let mut parts = vec![];
-                let file_count = files.len();
-                let skill_count = skills.len();
-                let compact_type = match strategy.as_str() {
-                    "micro" => i18n::tr("app-note-compact-type-micro"),
-                    _ => i18n::tr("app-note-compact-type-full"), // "full" | "smart" → Full label
-                };
-                if file_count > 0 {
-                    parts.push(format!("{file_count} 文件"));
-                }
-                if skill_count > 0 {
-                    parts.push(format!("{skill_count} skills"));
-                }
-                let detail = if parts.is_empty() {
-                    String::new()
-                } else {
-                    format!("（{}）", parts.join("，"))
-                };
-                let text = if summary.is_empty() {
-                    i18n::tr_args(
-                        "app-note-compact-completed",
-                        &[
-                            ("detail".into(), FluentValue::from(detail.as_str())),
-                            ("type".into(), FluentValue::from(compact_type.as_str())),
-                        ],
-                    )
-                } else {
-                    let brief: String = summary.chars().take(60).collect();
-                    let suffix = if summary.chars().count() > 60 {
-                        "…"
-                    } else {
-                        ""
-                    };
-                    let summary_display = format!("{brief}{suffix}");
-                    i18n::tr_args(
-                        "app-note-compact-completed-summary",
-                        &[
-                            ("detail".into(), FluentValue::from(detail.as_str())),
-                            (
-                                "summary".into(),
-                                FluentValue::from(summary_display.as_str()),
-                            ),
-                            ("type".into(), FluentValue::from(compact_type.as_str())),
-                        ],
-                    )
-                };
-                let content_hash = tui_hash_str(&text);
-                state
-                    .committed
-                    .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
-                        text,
-                        level: TuiNoteLevel::Warning,
-                        content_hash,
-                    }));
-                push_view_models(state);
+            let mut parts = vec![];
+            let file_count = files.len();
+            let skill_count = skills.len();
+            let compact_type = match strategy.as_str() {
+                "micro" => i18n::tr("app-note-compact-type-micro"),
+                _ => i18n::tr("app-note-compact-type-full"), // "full" | "smart" → Full label
+            };
+            if file_count > 0 {
+                parts.push(format!("{file_count} 文件"));
             }
-            push_acp_state(state);
+            if skill_count > 0 {
+                parts.push(format!("{skill_count} skills"));
+            }
+            let detail = if parts.is_empty() {
+                String::new()
+            } else {
+                format!("（{}）", parts.join("，"))
+            };
+            let text = if summary.is_empty() {
+                i18n::tr_args(
+                    "app-note-compact-completed",
+                    &[
+                        ("detail".into(), FluentValue::from(detail.as_str())),
+                        ("type".into(), FluentValue::from(compact_type.as_str())),
+                    ],
+                )
+            } else {
+                let brief: String = summary.chars().take(60).collect();
+                let suffix = if summary.chars().count() > 60 {
+                    "…"
+                } else {
+                    ""
+                };
+                let summary_display = format!("{brief}{suffix}");
+                i18n::tr_args(
+                    "app-note-compact-completed-summary",
+                    &[
+                        ("detail".into(), FluentValue::from(detail.as_str())),
+                        (
+                            "summary".into(),
+                            FluentValue::from(summary_display.as_str()),
+                        ),
+                        ("type".into(), FluentValue::from(compact_type.as_str())),
+                    ],
+                )
+            };
+            state.inject_system_note(text, TuiNoteLevel::Warning);
         }
         CompactError { message } => {
             tracing::warn!(message, "bridge: CompactError");
@@ -875,16 +868,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 "app-note-compact-error",
                 &[("message".into(), FluentValue::from(message.as_str()))],
             );
-            let content_hash = tui_hash_str(&text);
-            state
-                .committed
-                .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
-                    text,
-                    level: TuiNoteLevel::Warning,
-                    content_hash,
-                }));
+            state.inject_system_note(text, TuiNoteLevel::Warning);
             state.phase = SessionPhase::Idle;
-            push_view_models(state);
             push_acp_state(state);
         }
         BackgroundTaskCompleted {
@@ -917,16 +902,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
                 "app-note-agent-failed",
                 &[("message".into(), FluentValue::from(message.as_str()))],
             );
-            let content_hash = tui_hash_str(&text);
-            state
-                .committed
-                .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
-                    text,
-                    level: TuiNoteLevel::Error,
-                    content_hash,
-                }));
+            state.inject_system_note(text, TuiNoteLevel::Error);
             state.phase = SessionPhase::Idle;
-            push_view_models(state);
             push_acp_state(state);
         }
         WorkflowProgress {
