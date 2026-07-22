@@ -135,7 +135,7 @@ async fn test_not_found_with_suggestions() {
 
     let tool = SkillTool::new(dir.path().to_str().unwrap(), vec![], false);
     let result = tool
-        .invoke(serde_json::json!({"skill": "auto-zz-fixer"}), make_ctx())
+        .invoke(serde_json::json!({"skill": "auto-iss-fixer"}), make_ctx())
         .await;
 
     assert!(result.is_err(), "不存在的 skill 应返回 Err");

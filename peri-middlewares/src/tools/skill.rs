@@ -11,9 +11,9 @@ use peri_agent::{
 use serde_json::Value;
 
 use crate::skills::{
-    builtin::BUILTIN_SKILLS,
+    loader,
     loader::{resolve_skill_roots, scan_skill_roots},
-    SkillRoot, SkillSource,
+    SkillMetadata, SkillRoot, SkillSource,
 };
 
 /// 工具描述（中文，仿 Claude Code SkillTool prompt）
@@ -42,28 +42,15 @@ impl SkillTool {
         }
     }
 
-    /// 按名称查找 skill 并返回 SKILL.md 内容。
-    /// 查找顺序：filesystem skills → builtin skills（内置 skill 最低优先级）。
-    fn find_skill_content(&self, skill_name: &str) -> Option<String> {
-        let roots = resolve_skill_roots(&self.cwd, self.plugin_roots.clone(), self.disable_bundled);
-        let skills = scan_skill_roots(&roots);
-
-        // 大小写无关精确匹配
-        let name_lower = skill_name.to_lowercase();
-        let found = skills
-            .iter()
-            .find(|s| s.name.to_lowercase() == name_lower)?;
-
-        if matches!(found.source, SkillSource::Builtin) {
-            // 内置 skill：从编译期嵌入数组中读取
-            BUILTIN_SKILLS
-                .iter()
-                .find(|bs| bs.name == found.name)
-                .map(|bs| bs.content.to_string())
-        } else {
-            // 文件系统 skill：读取磁盘文件
-            std::fs::read_to_string(&found.path).ok()
-        }
+    /// 按名称查找 skill 并返回 SKILL.md 内容（含路径前缀）。
+    /// 委托给 `skills::loader::find_skill_content` 公共函数。
+    fn lookup_skill(&self, skill_name: &str) -> Option<(SkillMetadata, String)> {
+        loader::find_skill_content(
+            &self.cwd,
+            self.plugin_roots.clone(),
+            self.disable_bundled,
+            skill_name,
+        )
     }
 
     /// 模糊匹配建议（复用 skim matcher 基础设施）
@@ -111,10 +98,22 @@ impl BaseTool for SkillTool {
         let skill_name = input["skill"].as_str().ok_or("参数 'skill' 为必填项")?;
         let args = input["args"].as_str();
 
-        // 2. 按名称查找 skill 内容
-        match self.find_skill_content(skill_name) {
-            Some(content) => {
-                let mut result = content;
+        // 2. 按名称查找 skill 内容（含 metadata）
+        match self.lookup_skill(skill_name) {
+            Some((meta, content)) => {
+                // 路径前缀：帮助 agent 解析 skill 引用的相对路径文件
+                let mut result = match meta.source {
+                    SkillSource::Builtin => String::new(),
+                    _ => {
+                        let parent = meta
+                            .path
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default();
+                        format!("[Skill 路径: {}]\n\n", parent)
+                    }
+                };
+                result.push_str(&content);
                 if let Some(a) = args {
                     result.push_str(&format!("\n\n[调用参数: {}]\n", a));
                 }
