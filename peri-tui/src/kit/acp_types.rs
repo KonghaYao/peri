@@ -826,6 +826,8 @@ pub enum AcpEventData {
         skills: Vec<String>,
         micro_cleared: usize,
         messages_json: String,
+        /// 压缩策略: "micro" | "full" | "smart"
+        strategy: String,
     },
 
     /// `"compact-error"` — 上下文压缩失败。

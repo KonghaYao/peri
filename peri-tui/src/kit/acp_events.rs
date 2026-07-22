@@ -796,12 +796,12 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             summary,
             files,
             skills,
-            micro_cleared,
+            strategy,
             ..
         } => {
             tracing::info!(
                 summary_len = summary.len(),
-                micro_cleared,
+                %strategy,
                 "bridge: CompactCompleted"
             );
             state.compact_just_completed = true;
@@ -809,16 +809,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             // loading 由流式事件（TextChunk/ToolStarted）和 TurnDone 管理。
             // 手动 /compact 路径由 push_done → TurnDone 兜底清除。
             // 全量压缩和有效微压缩都注入消息流通知
-            // micro_cleared == 0: 完整压缩（总是显示），或 no-op 微压缩（罕见，无害）
-            // micro_cleared > 0: 微压缩且有实质性清理
+            // strategy 字段由 compact 引擎提供，准确区分 Micro/Full/Smart
             {
                 let mut parts = vec![];
                 let file_count = files.len();
                 let skill_count = skills.len();
-                let compact_type = if *micro_cleared > 0 {
-                    i18n::tr("app-note-compact-type-micro")
-                } else {
-                    i18n::tr("app-note-compact-type-full")
+                let compact_type = match strategy.as_str() {
+                    "micro" => i18n::tr("app-note-compact-type-micro"),
+                    _ => i18n::tr("app-note-compact-type-full"), // "full" | "smart" → Full label
                 };
                 if file_count > 0 {
                     parts.push(format!("{file_count} 文件"));

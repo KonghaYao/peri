@@ -87,6 +87,8 @@ pub enum AcpEvent {
         micro_cleared: usize,
         /// JSON-serialized `Vec<BaseMessage>` (the new message list after compact)
         messages_json: String,
+        /// 压缩策略: "micro" | "full" | "smart"
+        strategy: String,
     },
     /// Context compaction failed
     CompactError { message: String },

@@ -17,7 +17,9 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, error};
 
-use crate::{event::map_event, event::AcpEvent, transport::AcpTransport};
+use crate::{
+    event::map_event, event::AcpEvent, event::CompactFileInfoDto, transport::AcpTransport,
+};
 
 /// Receives [`ExecutorEvent`]s produced during agent execution and routes them
 /// to the appropriate transport.
@@ -185,6 +187,38 @@ impl EventSink for TransportEventSink {
                     is_error: *is_error,
                     instance_id: instance_id.clone(),
                 }),
+                ExecutorEvent::CompactCompleted {
+                    summary,
+                    files,
+                    skills,
+                    micro_cleared,
+                    messages,
+                    strategy,
+                    ..
+                } => {
+                    let messages_json = match serde_json::to_string(messages) {
+                        Ok(json) => json,
+                        Err(e) => {
+                            error!(error = %e, "EventSink: serialize CompactCompleted messages failed");
+                            return;
+                        }
+                    };
+                    let strategy_str = format!("{:?}", strategy).to_lowercase();
+                    Some(AcpEvent::CompactCompleted {
+                        summary: summary.clone(),
+                        files: files
+                            .iter()
+                            .map(|f| CompactFileInfoDto {
+                                path: f.path.clone(),
+                                lines: f.lines,
+                            })
+                            .collect(),
+                        skills: skills.clone(),
+                        micro_cleared: *micro_cleared,
+                        messages_json,
+                        strategy: strategy_str,
+                    })
+                }
                 _ => None,
             };
             if let Some(acp_event) = acp_event {

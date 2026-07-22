@@ -112,9 +112,11 @@ fn v2_event_to_acp_event_data(event: V2Event) -> Option<AcpEventData> {
                 before_count,
                 after_count,
                 messages,
+                strategy,
                 ..
             } => {
                 let messages_json = serde_json::to_string(&messages).ok()?;
+                let strategy_str = format!("{:?}", strategy).to_lowercase();
                 Some(AcpEventData::CompactCompleted {
                     summary,
                     files: files
@@ -124,6 +126,7 @@ fn v2_event_to_acp_event_data(event: V2Event) -> Option<AcpEventData> {
                     skills,
                     micro_cleared: before_count.saturating_sub(after_count),
                     messages_json,
+                    strategy: strategy_str,
                 })
             }
             ObserveEvent::TurnError { message, .. } => {
