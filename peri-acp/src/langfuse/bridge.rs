@@ -10,7 +10,9 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use peri_agent::agent::events::{ExecutorEvent, MiddlewareHook, Stage, StageStatus};
+use peri_agent::agent::events::{
+    CompactStrategy, CompactTrigger, ExecutorEvent, MiddlewareHook, Stage, StageStatus,
+};
 use peri_agent::agent::events_v2::{ObserveEvent, RenderEvent};
 use peri_agent::llm::types::TokenUsage;
 use peri_agent::messages::BaseMessage;
@@ -67,8 +69,11 @@ pub enum UnifiedLangfuseEvent {
         output: String,
         is_error: bool,
     },
-    /// Compact 阶段开始
-    CompactStarted,
+    /// Compact 阶段开始（含真实策略和触发方式）
+    CompactStarted {
+        strategy: CompactStrategy,
+        trigger: CompactTrigger,
+    },
     /// Compact 阶段结束（成功或失败）
     CompactEnded {
         summary: String,
@@ -200,7 +205,9 @@ impl UnifiedLangfuseEvent {
                 output,
                 is_error,
             }),
-            ExecutorEvent::CompactStarted { .. } => Some(UnifiedLangfuseEvent::CompactStarted),
+            ExecutorEvent::CompactStarted {
+                strategy, trigger, ..
+            } => Some(UnifiedLangfuseEvent::CompactStarted { strategy, trigger }),
             ExecutorEvent::CompactCompleted {
                 summary,
                 files,
@@ -385,7 +392,12 @@ impl UnifiedLangfuseEvent {
             ObserveEvent::LlmRequestPayload { step, body, .. } => {
                 Some(UnifiedLangfuseEvent::LlmRequestPayload { step, body })
             }
-            ObserveEvent::CompactStarted { .. } => Some(UnifiedLangfuseEvent::CompactStarted),
+            ObserveEvent::CompactStarted { strategy, .. } => {
+                Some(UnifiedLangfuseEvent::CompactStarted {
+                    strategy,
+                    trigger: CompactTrigger::Auto, // v2 自动触发
+                })
+            }
             ObserveEvent::MessagesCompacted {
                 summary,
                 files,
@@ -511,8 +523,8 @@ impl LangfuseBridge {
             } => {
                 t.on_tool_end(tool_call_id, output, *is_error);
             }
-            UnifiedLangfuseEvent::CompactStarted => {
-                t.on_compact_start();
+            UnifiedLangfuseEvent::CompactStarted { strategy, trigger } => {
+                t.on_compact_start(*strategy, *trigger);
             }
             UnifiedLangfuseEvent::CompactEnded {
                 summary,

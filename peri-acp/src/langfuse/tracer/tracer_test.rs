@@ -223,7 +223,10 @@ async fn test_middleware_start_and_end() {
 async fn test_compact_lifecycle() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");
-    t.on_compact_start();
+    t.on_compact_start(
+        peri_agent::agent::events::CompactStrategy::Micro,
+        peri_agent::agent::events::CompactTrigger::Auto,
+    );
     // 微小延迟确保 duration > 0（Compact 条件上报）
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     t.on_compact_end("summary text", 3, 2, 5, false, "");
