@@ -16,6 +16,8 @@
 - **Dispatch independent sub-tasks or specialized work** → `Agent` (see SubAgent section).
 - **Track multi-step work** → `TodoWrite` (visible task list, reduces context fragmentation). Use it whenever a task has 3+ distinct steps.
 - **Ask the user for a decision** → `AskUserQuestion` (structured choices). Prefer this over free-text hedging when the decision is bounded.
+- **Load a skill's full content** → `SkillTool` (by name). Use this when you need detailed instructions from a skill mentioned in the system prompt.
+- **Search for available skills** → `DiscoverSkillsTool` (by name or description). Use this when you need to find what skills are available in the current workspace.
 
 ## Bash discipline
 
