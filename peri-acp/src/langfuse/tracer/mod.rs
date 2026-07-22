@@ -32,6 +32,7 @@ mod usage;
 use super::config::LangfuseConfig;
 use super::session_like::LangfuseSessionLike;
 use event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
+use langfuse_client::types::session::SessionBody;
 use langfuse_client::types::{ObservationLevel, TraceBody};
 use langfuse_client::{GenerationBody, IngestionEvent, ObservationBody, ObservationType, SpanBody};
 use peri_agent::agent::events::{
@@ -119,8 +120,8 @@ impl LangfuseTracer {
 
     // ── Turn 生命周期 ──────────────────────────────────────────────────────
 
-    /// 对话轮次开始：创建 agent-run Observation（根 observation）。
-    /// 如有 user_id 配置，先发 TraceCreate 设置 user 维度。
+    /// 对话轮次开始：创建 Trace 根 span + Session + 推迟 agent-run Observation。
+    /// 如有 user_id 配置，在 TraceCreate/SessionCreate 中设置 user 维度。
     pub fn on_turn_start(&mut self, input: &str) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
@@ -133,29 +134,47 @@ impl LangfuseTracer {
             "langfuse: on_trace_start called"
         );
 
-        // 有条件地发送 TraceCreate 以设置 user_id
-        if let Some(ref uid) = self.user_id {
-            let trace_body = TraceBody {
-                id: Some(self.trace_id.clone()),
-                user_id: Some(uid.clone()),
-                name: Some(format!("turn {}", self.trace_id)),
-                session_id: Some(self.session_id.clone()),
-                version: Some(VERSION.to_string()),
-                ..Default::default()
-            };
-            let trace_event = IngestionEvent::TraceCreate {
-                id: new_uuid(),
-                timestamp: now_rfc3339(),
-                body: trace_body,
-                metadata: None,
-            };
-            try_add_or_warn_via_session(
-                &*self.session,
-                trace_event,
-                &self.trace_id,
-                "turn TraceCreate (user_id)",
-            );
-        }
+        // 始终发送 TraceCreate 作为 OTEL 根 span（agent-run 将挂在此 span 下）
+        let trace_body = TraceBody {
+            id: Some(self.trace_id.clone()),
+            user_id: self.user_id.clone(),
+            name: Some(format!("turn {}", self.trace_id)),
+            session_id: Some(self.session_id.clone()),
+            version: Some(VERSION.to_string()),
+            ..Default::default()
+        };
+        let trace_event = IngestionEvent::TraceCreate {
+            id: new_uuid(),
+            timestamp: now_rfc3339(),
+            body: trace_body,
+            metadata: None,
+        };
+        try_add_or_warn_via_session(
+            &*self.session,
+            trace_event,
+            &self.trace_id,
+            "turn TraceCreate",
+        );
+
+        // 显式创建 session（Langfuse UI 按 session 分组）
+        let session_body = SessionBody {
+            id: self.session_id.clone(),
+            user_id: self.user_id.clone(),
+            version: Some(VERSION.to_string()),
+            ..Default::default()
+        };
+        let session_event = IngestionEvent::SessionCreate {
+            id: new_uuid(),
+            timestamp: now_rfc3339(),
+            body: session_body,
+            metadata: None,
+        };
+        try_add_or_warn_via_session(
+            &*self.session,
+            session_event,
+            &self.trace_id,
+            "SessionCreate",
+        );
 
         // 推迟 agent-run ObservationCreate 到 on_turn_end，
         // 避免 OTEL span 不可变导致 end_time 无法更新 → 0s latency
@@ -289,6 +308,7 @@ impl LangfuseTracer {
                 end_time: Some(end_time.clone()),
                 input: agent_input.map(|s| serde_json::json!(s)),
                 output: Some(serde_json::json!(output)),
+                parent_observation_id: Some(trace_id.clone()),
                 version: Some(VERSION.to_string()),
                 ..Default::default()
             };
