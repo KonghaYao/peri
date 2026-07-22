@@ -1,11 +1,64 @@
 use std::{fs, path::Path};
 
 use crate::{
-    hooks::types::{HooksConfig, RegisteredHook},
+    hooks::types::{HookEvent, HookMatchRule, HooksConfig, RegisteredHook},
     plugin::types::PluginManifest,
 };
 
-/// Extract hooks config from a plugin.
+/// 宽松解析 hooks JSON 对象。
+///
+/// 逐事件遍历，跳过格式错误或未知的事件 key。
+/// 与 `serde_json::from_value::<HooksConfig>` 的全量反序列化不同：
+/// - 单个事件 key 未知 → 跳过该事件，其余保留
+/// - 单个事件 rules 格式错误（非数组）→ 跳过该事件，其余保留
+///
+/// 返回: Vec<(HookEvent, Vec<HookMatchRule>)>，空 Vec 表示无有效事件。
+fn parse_hooks_value_tolerant(
+    hooks_value: &serde_json::Value,
+    settings_path: &Path,
+) -> Vec<(HookEvent, Vec<HookMatchRule>)> {
+    let obj = match hooks_value.as_object() {
+        Some(obj) => obj,
+        None => return Vec::new(),
+    };
+
+    let mut result = Vec::new();
+    for (event_key, rules_value) in obj {
+        // 逐事件 key 匹配已知事件名，跳过未知事件
+        let event = match HookEvent::from_str(event_key) {
+            Some(e) => e,
+            None => {
+                tracing::warn!(
+                    "Unknown hook event '{}' in {}, skipping",
+                    event_key,
+                    settings_path.display()
+                );
+                continue;
+            }
+        };
+
+        // 逐事件解析规则数组
+        match serde_json::from_value::<Vec<HookMatchRule>>(rules_value.clone()) {
+            Ok(rules) => {
+                if !rules.is_empty() {
+                    result.push((event, rules));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to parse rules for event '{}' in {}: {}, skipping (1 event lost)",
+                    event_key,
+                    settings_path.display(),
+                    e
+                );
+                continue;
+            }
+        }
+    }
+
+    result
+}
+
 ///
 /// Priority:
 /// 1. `hooks/hooks.json` file in plugin install directory
@@ -84,22 +137,13 @@ pub fn load_global_settings_hooks() -> Vec<RegisteredHook> {
         }
     };
 
-    let hooks_config: HooksConfig = match serde_json::from_value(hooks_value.clone()) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                "Failed to parse hooks config from {}: {}",
-                settings_path.display(),
-                e
-            );
-            return Vec::new();
-        }
-    };
+    let event_rules = parse_hooks_value_tolerant(hooks_value, &settings_path);
+    let event_count = event_rules.len();
 
     let mut hooks = Vec::new();
-    for (event, rules) in &hooks_config {
+    for (event, rules) in event_rules {
         for rule in rules {
-            for hook_def in &rule.hooks {
+            for hook_def in rule.hooks {
                 hooks.push(RegisteredHook {
                     hook: hook_def.clone(),
                     event: event.clone(),
@@ -120,7 +164,7 @@ pub fn load_global_settings_hooks() -> Vec<RegisteredHook> {
     tracing::info!(
         "Loaded {} hooks from ~/.claude/settings.json ({} events)",
         hooks.len(),
-        hooks_config.len()
+        event_count
     );
 
     hooks
@@ -158,22 +202,13 @@ pub fn load_settings_local_hooks(cwd: &str) -> Vec<RegisteredHook> {
         _ => return Vec::new(),
     };
 
-    let hooks_config: HooksConfig = match serde_json::from_value(hooks_value.clone()) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                "Failed to parse hooks config from {}: {}",
-                settings_path.display(),
-                e
-            );
-            return Vec::new();
-        }
-    };
+    let event_rules = parse_hooks_value_tolerant(hooks_value, &settings_path);
+    let event_count = event_rules.len();
 
     let mut hooks = Vec::new();
-    for (event, rules) in &hooks_config {
+    for (event, rules) in event_rules {
         for rule in rules {
-            for hook_def in &rule.hooks {
+            for hook_def in rule.hooks {
                 hooks.push(RegisteredHook {
                     hook: hook_def.clone(),
                     event: event.clone(),
@@ -194,7 +229,7 @@ pub fn load_settings_local_hooks(cwd: &str) -> Vec<RegisteredHook> {
     tracing::info!(
         "Loaded {} hooks from settings.local.json ({} events)",
         hooks.len(),
-        hooks_config.len()
+        event_count
     );
 
     hooks
@@ -232,22 +267,13 @@ pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
         _ => return Vec::new(),
     };
 
-    let hooks_config: HooksConfig = match serde_json::from_value(hooks_value.clone()) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                "Failed to parse hooks config from {}: {}",
-                settings_path.display(),
-                e
-            );
-            return Vec::new();
-        }
-    };
+    let event_rules = parse_hooks_value_tolerant(hooks_value, &settings_path);
+    let event_count = event_rules.len();
 
     let mut hooks = Vec::new();
-    for (event, rules) in &hooks_config {
+    for (event, rules) in event_rules {
         for rule in rules {
-            for hook_def in &rule.hooks {
+            for hook_def in rule.hooks {
                 hooks.push(RegisteredHook {
                     hook: hook_def.clone(),
                     event: event.clone(),
@@ -268,7 +294,7 @@ pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
     tracing::info!(
         "Loaded {} hooks from project settings.json ({} events)",
         hooks.len(),
-        hooks_config.len()
+        event_count
     );
 
     hooks

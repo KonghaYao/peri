@@ -55,6 +55,31 @@ impl Serialize for HookEvent {
     }
 }
 
+impl HookEvent {
+    /// 宽松解析 hook 事件名，仅返回已知事件。
+    /// 未知事件返回 `None`（应在调用侧跳过并记录 warn 日志）。
+    pub fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "PreToolUse" => HookEvent::PreToolUse,
+            "PostToolUse" => HookEvent::PostToolUse,
+            "PostToolUseFailure" => HookEvent::PostToolUseFailure,
+            "PermissionRequest" => HookEvent::PermissionRequest,
+            "UserPromptSubmit" => HookEvent::UserPromptSubmit,
+            "SessionStart" => HookEvent::SessionStart,
+            "SessionEnd" => HookEvent::SessionEnd,
+            "Stop" => HookEvent::Stop,
+            "StopFailure" => HookEvent::StopFailure,
+            "PostToolBatch" => HookEvent::PostToolBatch,
+            "SubagentStart" => HookEvent::SubagentStart,
+            "SubagentStop" => HookEvent::SubagentStop,
+            "PreCompact" => HookEvent::PreCompact,
+            "PostCompact" => HookEvent::PostCompact,
+            "Notification" => HookEvent::Notification,
+            _ => return None,
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for HookEvent {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

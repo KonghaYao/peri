@@ -179,7 +179,7 @@ fn test_load_settings_local_hooks_with_matcher() {
 
     let settings = serde_json::json!({
         "hooks": {
-            "FileChanged": [
+            "PermissionRequest": [
                 {
                     "matcher": ".env|.env.local",
                     "hooks": [
@@ -372,7 +372,7 @@ fn test_load_settings_project_hooks_with_matcher() {
 
     let settings = serde_json::json!({
         "hooks": {
-            "FileChanged": [
+            "PermissionRequest": [
                 {
                     "matcher": ".env|.env.local",
                     "hooks": [
@@ -391,4 +391,154 @@ fn test_load_settings_project_hooks_with_matcher() {
     let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
     assert_eq!(hooks.len(), 1);
     assert_eq!(hooks[0].matcher.as_deref(), Some(".env|.env.local"));
+}
+
+// ===== 宽松解析测试 (P0-2) =====
+
+#[test]
+fn test_tolerant_mixed_valid_and_invalid_events() {
+    // 场景：部分事件有效、部分无效，有效的事件应保留
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+
+    let settings = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": "echo valid"}
+                    ]
+                }
+            ],
+            "UnknownEvent": [  // 未知事件，应被跳过
+                {
+                    "hooks": [
+                        {"type": "command", "command": "echo unknown"}
+                    ]
+                }
+            ],
+            "Notification": "not-an-array"  // 值不是数组，应被跳过
+        }
+    });
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    // 只有 PreToolUse 有效
+    assert_eq!(hooks.len(), 1);
+    assert!(matches!(&hooks[0].event, HookEvent::PreToolUse));
+}
+
+#[test]
+fn test_tolerant_unknown_event_skipped() {
+    // 场景：hooks 中所有 key 都是未知事件，应返回空
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+
+    let settings = serde_json::json!({
+        "hooks": {
+            "FileChanged": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": "echo changed"}
+                    ]
+                }
+            ],
+            "Setup": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": "echo setup"}
+                    ]
+                }
+            ]
+        }
+    });
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    assert!(hooks.is_empty(), "unknown events should be skipped");
+}
+
+#[test]
+fn test_tolerant_non_array_rules_skipped() {
+    // 场景：事件 key 已知，但值不是数组（如字符串），应跳过该事件
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+
+    let settings = serde_json::json!({
+        "hooks": {
+            "PreToolUse": "this-is-not-an-array",
+            "Notification": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": "echo valid"}
+                    ]
+                }
+            ]
+        }
+    });
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    // 只有 Notification 有效
+    assert_eq!(hooks.len(), 1);
+    assert!(matches!(&hooks[0].event, HookEvent::Notification));
+}
+
+#[test]
+fn test_tolerant_all_invalid_returns_empty() {
+    // 场景：所有事件的 rules 格式都错误，应返回空列表（不 panic）
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+
+    let settings = serde_json::json!({
+        "hooks": {
+            "PreToolUse": 42,
+            "PostToolUse": null,
+            "Notification": true
+        }
+    });
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    assert!(hooks.is_empty());
+}
+
+#[test]
+fn test_tolerant_hooks_not_object_returns_empty() {
+    // 场景：hooks 字段不是 object（如数组），应返回空
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+
+    let settings = serde_json::json!({
+        "hooks": ["this-is-an-array-not-object"]
+    });
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    assert!(hooks.is_empty());
 }
