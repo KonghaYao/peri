@@ -1,6 +1,6 @@
 # 实现 Skill Core Tool——LLM 可主动调用 skill 加载 SKILL.md 内容
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-07-22
 **类型**：新功能
@@ -27,6 +27,13 @@
 | LLM 能否自行选择 skill | 否 | 是 |
 
 **参考 Claude Code SkillTool**：`/Users/konghayao/code/ai/claude-code` 的 `packages/builtin-tools/src/tools/SkillTool/SkillTool.ts`
+
+## 修复记录
+
+### 修复 #1（2026-07-22）
+- **操作人**：agent
+- **commit**：`b80dfed9 feat(skill-tool): add Skill Core Tool for dynamic skill loading by LLM`
+- **修复内容**：实现 Skill Core Tool，LLM 可通过工具调用动态加载 SKILL.md
 
 ## 涉及文件
 

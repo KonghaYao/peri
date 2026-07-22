@@ -1,5 +1,7 @@
 # peri-agent 残留代码清理报告
 
+> **状态更新（2026-07-22）**：22 项中已有 5+ 项通过后续 commits 处理（AcpAgentConfig 删除、退化模块清理、SubAgent EventBus 死代码清理、Langfuse v1/v2 统一路由、transport pending map 统一）。详见 git log `c5431160`、`fdb56164`、`5c1a29bc`、`48ebfed6`、`a6153771`。
+
 **扫描日期**: 2026-07-18  
 **目标 crate**: `peri-agent/src/` (90 个 .rs 源文件)  
 **扫描维度**: 死代码 / 废弃模式 / 编码规范 / TODO&债务

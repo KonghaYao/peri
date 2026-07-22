@@ -152,6 +152,8 @@ pub struct ObservationBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_parameters: Option<HashMap<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<IngestionUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<ObservationLevel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_message: Option<String>,

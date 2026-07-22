@@ -35,6 +35,7 @@ fn make_observation_body() -> ObservationBody {
         metadata: None,
         model: None,
         model_parameters: None,
+        usage: None,
         level: None,
         status_message: None,
         version: None,

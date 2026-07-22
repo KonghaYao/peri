@@ -25,6 +25,7 @@ fn make_tracer(
         error_span_always: true,
         batch_max_events: 50,
         batch_flush_interval_secs: 10,
+        user_id: None,
     };
     let t = LangfuseTracer::new(session.clone(), "sess_smoke".to_string(), config);
     (t, session)
@@ -222,7 +223,10 @@ async fn test_middleware_start_and_end() {
 async fn test_compact_lifecycle() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");
-    t.on_compact_start();
+    t.on_compact_start(
+        peri_agent::agent::events::CompactStrategy::Micro,
+        peri_agent::agent::events::CompactTrigger::Auto,
+    );
     // 微小延迟确保 duration > 0（Compact 条件上报）
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     t.on_compact_end("summary text", 3, 2, 5, false, "");

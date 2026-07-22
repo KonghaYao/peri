@@ -12,6 +12,8 @@ pub struct LangfuseConfig {
     pub batch_max_events: usize,
     /// Batcher 自动 flush 间隔（秒）
     pub batch_flush_interval_secs: u64,
+    /// 自定义 user 维度（LANGFUSE_USER_ID 环境变量），None 表示不设置
+    pub user_id: Option<String>,
 }
 
 impl Default for LangfuseConfig {
@@ -24,6 +26,7 @@ impl Default for LangfuseConfig {
             error_span_always: true,
             batch_max_events: 50,
             batch_flush_interval_secs: 10,
+            user_id: None,
         }
     }
 }
@@ -39,6 +42,7 @@ impl LangfuseConfig {
     ///   LANGFUSE_ERROR_SPAN_ALWAYS   - 可选，默认 true
     ///   LANGFUSE_BATCH_MAX_EVENTS    - 可选，默认 50
     ///   LANGFUSE_BATCH_FLUSH_INTERVAL - 可选，默认 10
+    ///   LANGFUSE_USER_ID             - 可选，自定义 user 维度标识
     pub fn from_env() -> Option<Self> {
         let public_key = std::env::var("LANGFUSE_PUBLIC_KEY").ok()?;
         let secret_key = std::env::var("LANGFUSE_SECRET_KEY").ok()?;
@@ -61,6 +65,7 @@ impl LangfuseConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(10);
+        let user_id = std::env::var("LANGFUSE_USER_ID").ok();
         Some(Self {
             public_key: Some(public_key),
             secret_key: Some(secret_key),
@@ -69,6 +74,7 @@ impl LangfuseConfig {
             error_span_always,
             batch_max_events,
             batch_flush_interval_secs,
+            user_id,
         })
     }
 
@@ -130,6 +136,9 @@ impl LangfuseConfig {
             if let Ok(n) = v.parse::<u64>() {
                 cfg.batch_flush_interval_secs = n;
             }
+        }
+        if let Ok(v) = std::env::var("LANGFUSE_USER_ID") {
+            cfg.user_id = Some(v);
         }
 
         cfg

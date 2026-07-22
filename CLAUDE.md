@@ -208,7 +208,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 - [ ] 回归修复 → `/// [回归测试]` 注释 + 历史背景
 
 ### 环境变量
-`~/.peri/settings.json` env 字段注入。Provider：`ANTHROPIC_*`/`OPENAI_*`。行为：`DISABLE_COMPACT`。权限：`PermissionMode`（通过 `--approve`/`--permission-mode`/`--skip-permissions` CLI 或 `Shift+Tab` 切换）。遥测：`LANGFUSE_*`。
+`~/.peri/settings.json` env 字段注入。Provider：`ANTHROPIC_*`/`OPENAI_*`。行为：`DISABLE_COMPACT`。权限：`PermissionMode`（通过 `--approve`/`--permission-mode`/`--skip-permissions` CLI 或 `Shift+Tab` 切换）。遥测：`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL`（必填/可选，`from_env()` 静默启用）。可选：`LANGFUSE_TRACE_SAMPLING`（0.0-1.0）、`LANGFUSE_USER_ID`（自定义 user 维度，仅环境变量，不支持 settings.json）。
 
 ### Theme
 颜色从 `peri-theme` 三 Atom（`THEME_ATOM`/`PALETTE_ATOM`/`PERI_COLORS_ATOM`）获取，禁止硬编码色值。`#[component]` 用 `hooks.use_atom`，非 component 两步绑定防悬垂引用。
@@ -418,6 +418,7 @@ push_event / push_done / replay / notify 等发送点读取 → if caps.xxx { ..
 ### Langfuse 监控 v2
 - **trace_id = turn_id**：tracer.new() 由 caller 传入 turn_id，禁止自生成。trace_id 不可变。
 - **sampled=false 时 silently no-op**：每个 on_* 入口检查 sampling，未采样时直接返回。caller 不感知。
+- **user_id 定制**：通过 `LANGFUSE_USER_ID` 环境变量设置（仅环境变量，不读 settings.json）。有值时 `on_turn_start` 先发 TraceCreate 设置 user 维度，无值则为 None。
 - **新增 ExecutorEvent 变体**：必须同步 (1) peri-acp/event/mapper.rs (2) peri-tui/kit/acp_events.rs (3) variant_coverage_test.rs，缺一会漏掉监控数据。
 - **ErrorSpan 兜底**：错误 turn 强制发 ErrorSpan 挂同 turn（trace_id = turn_id，不破坏契约）。
 - **子对象方法签名禁止接收 `&mut LangfuseTracer`**：否则破坏 disjoint borrow。
