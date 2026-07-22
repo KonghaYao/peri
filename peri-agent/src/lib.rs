@@ -18,7 +18,7 @@
 //! - `peri-middlewares`：可依赖 `stable` + `internal`
 //! - `peri-acp`：可依赖所有层级
 //!
-//! 后续计划：正式引入 `#[doc(hidden)]` / feature gates 做编译期 enforcement。
+//! 已部分实施（`#[doc(hidden)]`），后续计划：引入 feature gates 做进一步的编译期 enforcement。
 
 pub mod agent;
 pub mod ask_user;

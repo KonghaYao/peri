@@ -1,4 +1,4 @@
-# 状态栏模型名称字段显示短别名且样式分离，不符合 TUI-PAGE 第 4 节设计规范
+# 状态栏模型名称字段显示短别名且样式分离，不符合 spec/global/domains/tui/tui-rendering.md §4 设计规范
 
 
 > 归档于 2026-07-20，原路径 spec/issues/2026-07-04-statusbar-model-name-alias-instead-of-model-id.md
@@ -8,21 +8,21 @@
 
 ## 问题描述
 
-状态栏第一行的 provider/model 字段存在两个与 TUI-PAGE 第 4 节设计规范不符的问题：
+状态栏第一行的 provider/model 字段存在两个与 spec/global/domains/tui/tui-rendering.md §4 设计规范不符的问题：
 
-1. **字段值**：使用短别名 `model_alias`（如 `sonnet`）而非完整模型标识，TUI-PAGE 设计示例为 `claude-code-sonnet`
+1. **字段值**：使用短别名 `model_alias`（如 `sonnet`）而非完整模型标识，设计示例为 `claude-code-sonnet`
 2. **样式**：`provider`、`/`、`model` 拆成三种不同颜色渲染（muted/dim/text），而规范中 `anthropic/claude-code-sonnet` 表现为一个整体
 
 ## 症状详情
 
-| 维度 | TUI-PAGE 设计规范 | 当前实际表现 |
+| 维度 | spec/global/domains/tui/tui-rendering.md §4 设计规范 | 当前实际表现 |
 |------|-------------------|--------------|
 | 模型字段 | `anthropic/claude-code-sonnet`（完整模型名） | `anthropic/sonnet`（短别名） |
 | 样式 | 整体文本 | provider 用 muted 色、`/` 用 dim 色、model 用 text 色，视觉上不是统一单元 |
 
 ### 设计规范引用
 
-TUI-PAGE.md 第 4 节 StatusBar 区域组件，设计图及能力说明：
+spec/global/domains/tui/tui-index.md 第 4 节 StatusBar 区域组件，设计图及能力说明：
 
 > 第 1 行显示 permission mode、cwd basename、provider/model、CPU、MEM。
 

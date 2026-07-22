@@ -436,7 +436,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
         }
         let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> = Box::new(
             RetryableLLM::new(base_llm, RetryConfig::default())
-                .with_event_handler(Arc::clone(&event_handler)),
+                .with_event_handler(Arc::clone(&event_handler))
+                .with_cancel_token(cancel_token.clone()),
         );
 
         // error_suggest wiring（与 SubAgentBuilder.with_error_suggest() 等价）

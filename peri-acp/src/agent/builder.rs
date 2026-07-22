@@ -267,6 +267,7 @@ pub(crate) fn build_agent(
     let session_id_for_factory = session_id.clone();
     let pool_for_subagent = Arc::clone(pool);
     #[allow(clippy::type_complexity)]
+    let llm_factory_cancel = cancel.clone();
     let llm_factory: Arc<
         dyn Fn(Option<&str>) -> Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>
             + Send
@@ -305,10 +306,10 @@ pub(crate) fn build_agent(
         if let Some(s) = sid {
             llm = llm.with_session_id(s);
         }
-        Box::new(peri_agent::llm::RetryableLLM::new(
-            llm,
-            peri_agent::llm::RetryConfig::default(),
-        ))
+        Box::new(
+            peri_agent::llm::RetryableLLM::new(llm, peri_agent::llm::RetryConfig::default())
+                .with_cancel_token(llm_factory_cancel.clone()),
+        )
     });
 
     // 系统提示构建器
@@ -634,7 +635,8 @@ pub(crate) fn build_agent(
     }
     let model =
         peri_agent::llm::RetryableLLM::new(base_llm, peri_agent::llm::RetryConfig::default())
-            .with_event_handler(Arc::clone(&event_handler));
+            .with_event_handler(Arc::clone(&event_handler))
+            .with_cancel_token(cancel.clone());
 
     // 构建 CachedLlmInstances 供跨 prompt 复用
     let new_cache = auxiliary_model_for_cache.map(|model| CachedLlmInstances {

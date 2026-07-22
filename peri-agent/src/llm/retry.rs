@@ -2,13 +2,14 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use rand::RngExt;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     agent::{
         events::{AgentEventHandler, ExecutorEvent},
         react::{ReactLLM, Reasoning},
     },
-    error::AgentResult,
+    error::{AgentError, AgentResult},
     messages::BaseMessage,
     tools::BaseTool,
 };
@@ -64,6 +65,8 @@ pub struct RetryableLLM<L: ReactLLM> {
     inner: L,
     config: RetryConfig,
     event_handler: Option<Arc<dyn AgentEventHandler>>,
+    /// 用于在重试循环中检查用户取消信号
+    cancel_token: Option<Arc<CancellationToken>>,
 }
 
 impl<L: ReactLLM> RetryableLLM<L> {
@@ -72,11 +75,18 @@ impl<L: ReactLLM> RetryableLLM<L> {
             inner,
             config,
             event_handler: None,
+            cancel_token: None,
         }
     }
 
     pub fn with_event_handler(mut self, handler: Arc<dyn AgentEventHandler>) -> Self {
         self.event_handler = Some(handler);
+        self
+    }
+
+    /// 设置 cancel token，用于在重试循环中感知用户取消信号
+    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.cancel_token = Some(Arc::new(token));
         self
     }
 
@@ -97,6 +107,15 @@ impl<L: ReactLLM> ReactLLM for RetryableLLM<L> {
     ) -> AgentResult<Reasoning> {
         // 重试循环：attempt 0..max_retries，每次失败若可重试则延迟后继续
         for attempt in 0..self.config.max_retries {
+            // 检查取消信号（用户按 Esc 中断时提前退出重试）
+            if self
+                .cancel_token
+                .as_ref()
+                .map(|c| c.is_cancelled())
+                .unwrap_or(false)
+            {
+                return Err(AgentError::Interrupted);
+            }
             // 仅首次尝试透传 streaming，重试时传 None 防止同一 message_id 双重发射
             let retry_streaming = if attempt == 0 {
                 streaming.clone()

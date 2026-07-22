@@ -2,11 +2,12 @@
 //!
 //! 触发流程：
 //! - budget < 0.75：跳过
-//! - budget ≥ 0.75：Micro Compact（标记 truncated）
-//!   - affected_count ≥ micro_min_affected → Micro 有效，budget ≥ 0.95 时叠加 Full
-//!   - affected_count < micro_min_affected → Micro 无效，升级为 Full
-//! - force=true：直接 Full（跳过 Micro）
-//! - **Smart**（未实现）：LLM 决策保留 id + 未选中标 `excluded` + 追加 system-reminder
+//! - budget ≥ 0.75：Micro Compact 或 Smart Compact（根据配置选择）
+//!   - Micro：按 round 分组，旧轮次的工具消息标 truncated
+//!   - Smart：保留最近 N 条 Human/Ai + 最近 M 个 Tool 结果 + 所有错误消息，其余标 truncated
+//!   - affected_count ≥ micro_min_affected → 有效，budget ≥ 0.95 时叠加 Full
+//!   - affected_count < micro_min_affected → 无效，升级为 Full
+//! - force=true：直接 Full（跳过 Micro/Smart）
 //!
 //! 与 v1 的区别：v2 基于 `MessageTranscript` 标记 API，不修改消息本体，
 //! 旧消息标 `excluded` 后 `visible_messages()` 自动过滤。
@@ -43,7 +44,7 @@ pub struct CompactResult {
     pub before_len: usize,
     /// 操作后可见消息数量
     pub after_visible_len: usize,
-    /// Full Compact 生成的摘要（Micro 时为 None）
+    /// Full Compact 生成的摘要（Micro/Smart 时为 None）
     pub summary: Option<String>,
 }
 
@@ -56,18 +57,25 @@ pub enum CompactAction {
     Skip,
     /// 执行 Micro Compact
     Micro,
+    /// 执行 Smart Compact（规则驱动，保留关键消息）
+    Smart,
 }
 
-/// 检查是否应执行 Micro Compact。
+/// 根据 budget 和配置决定 Compact 动作。
 ///
 /// 返回 `Skip` 表示预算未到 75%，跳过 compact。
-/// 返回 `Micro` 表示预算 ≥ 75%，应执行 Micro。
+/// 返回 `Smart` 表示启用 Smart Compact 且预算 ≥ 75%。
+/// 返回 `Micro` 表示未启用 Smart Compact 且预算 ≥ 75%。
 ///
-/// Full Compact 的触发不在本函数内判定——由 run_compact 在 Micro 执行后
+/// Full Compact 的触发不在本函数内判定——由 run_compact 在执行后
 /// 根据 affected_count 和 budget 动态决策。
-pub fn should_micro_compact(budget: f64, config: &CompactConfig) -> CompactAction {
+pub fn determine_compact_action(budget: f64, config: &CompactConfig) -> CompactAction {
     if budget >= config.micro_compact_threshold {
-        CompactAction::Micro
+        if config.smart_compact_enabled {
+            CompactAction::Smart
+        } else {
+            CompactAction::Micro
+        }
     } else {
         CompactAction::Skip
     }
@@ -77,10 +85,12 @@ pub fn should_micro_compact(budget: f64, config: &CompactConfig) -> CompactActio
 ///
 /// 触发流程：
 /// - budget < 0.75：跳过
-/// - budget ≥ 0.75：Micro Compact（标记 truncated）
-///   - affected_count ≥ micro_min_affected → Micro 有效，budget ≥ 0.95 时叠加 Full
-///   - affected_count < micro_min_affected → Micro 无效，升级为 Full
-/// - force=true：直接 Full（跳过 Micro）
+/// - budget ≥ 0.75：
+///   - smart_compact_enabled=true → Smart Compact（规则驱动保留关键消息）
+///   - smart_compact_enabled=false → Micro Compact（按 round 分组截断）
+///   - affected_count ≥ micro_min_affected → 有效，budget ≥ 0.95 时叠加 Full
+///   - affected_count < micro_min_affected → 无效，升级为 Full
+/// - force=true：直接 Full（跳过 Micro/Smart）
 /// - 连续失败超过 max_consecutive_failures 次时降级跳过
 pub async fn run_compact(
     transcript: &mut MessageTranscript,
@@ -118,8 +128,8 @@ pub async fn run_compact(
         .await;
     }
 
-    // 检查 Micro 触发条件
-    match should_micro_compact(budget, config) {
+    // 检查 Compact 触发条件
+    match determine_compact_action(budget, config) {
         CompactAction::Skip => CompactResult {
             strategy: CompactStrategy::Micro,
             affected_count: 0,
@@ -135,7 +145,6 @@ pub async fn run_compact(
             if affected >= config.micro_min_affected {
                 // Micro 有效
                 if budget >= config.auto_compact_threshold {
-                    // budget 高位 → 叠加 Full
                     debug!(affected, budget, "Micro 有效 + budget 高位 → 叠加 Full");
                     run_full_or_degrade(
                         transcript,
@@ -147,7 +156,6 @@ pub async fn run_compact(
                     )
                     .await
                 } else {
-                    // Micro 够了
                     CompactResult {
                         strategy: CompactStrategy::Micro,
                         affected_count: affected,
@@ -157,8 +165,48 @@ pub async fn run_compact(
                     }
                 }
             } else {
-                // Micro 无效 → 升级 Full
                 debug!(affected, budget, "Micro 无效 → 升级为 Full");
+                run_full_or_degrade(
+                    transcript,
+                    llm,
+                    config,
+                    before_len,
+                    consecutive_failures,
+                    cwd,
+                )
+                .await
+            }
+        }
+        CompactAction::Smart => {
+            // 执行 Smart Compact（规则驱动，不调用 LLM）
+            let affected = smart::smart_compact(transcript, config);
+            *consecutive_failures = 0;
+
+            if affected >= config.micro_min_affected {
+                // Smart 有效
+                if budget >= config.auto_compact_threshold {
+                    debug!(affected, budget, "Smart 有效 + budget 高位 → 叠加 Full");
+                    run_full_or_degrade(
+                        transcript,
+                        llm,
+                        config,
+                        before_len,
+                        consecutive_failures,
+                        cwd,
+                    )
+                    .await
+                } else {
+                    CompactResult {
+                        strategy: CompactStrategy::Smart,
+                        affected_count: affected,
+                        before_len,
+                        after_visible_len: transcript.visible_messages().len(),
+                        summary: None,
+                    }
+                }
+            } else {
+                // Smart 无效 → 升级为 Full
+                debug!(affected, budget, "Smart 无效 → 升级为 Full");
                 run_full_or_degrade(
                     transcript,
                     llm,

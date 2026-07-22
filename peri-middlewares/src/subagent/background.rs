@@ -14,6 +14,12 @@ pub enum BackgroundRegistryError {
     ConcurrentLimit(usize),
     #[error("Task {0} not found")]
     TaskNotFound(String),
+    #[error("Kind concurrent limit reached: {kind} ({current}/{limit})")]
+    KindConcurrentLimit {
+        kind: String,
+        current: usize,
+        limit: usize,
+    },
 }
 
 /// 后台任务类型
@@ -184,7 +190,7 @@ impl BackgroundTaskRegistry {
     }
 
     /// 按类型注册新任务（独立上限）
-    pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), String> {
+    pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
         let limit = match task.kind {
             BgTaskKind::Shell => Self::SHELL_LIMIT,
             BgTaskKind::Agent => Self::AGENT_LIMIT,
@@ -201,16 +207,16 @@ impl BackgroundTaskRegistry {
             .filter(|t| matches!(t.status, BackgroundTaskStatus::Running) && t.kind == kind)
             .count();
         if current >= limit {
-            return Err(format!(
-                "已达 {} 并发上限 ({}/{})，请等待现有任务完成或取消其中一个",
-                match kind {
-                    BgTaskKind::Shell => "shell",
-                    BgTaskKind::Agent => "agent",
-                    BgTaskKind::Workflow => "workflow",
-                },
+            let kind_str = match kind {
+                BgTaskKind::Shell => "shell",
+                BgTaskKind::Agent => "agent",
+                BgTaskKind::Workflow => "workflow",
+            };
+            return Err(BackgroundRegistryError::KindConcurrentLimit {
+                kind: kind_str.to_string(),
                 current,
-                limit
-            ));
+                limit,
+            });
         }
 
         tasks.insert(task.id.clone(), task);

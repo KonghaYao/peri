@@ -20,3 +20,10 @@ pre-commit:
 
     typos:
       run: typos
+
+    doc-tests:
+      run: cargo test --workspace --doc
+
+    # security-audit:
+    #   run: cargo audit
+    #   未安装则运行: cargo install cargo-audit && cargo audit

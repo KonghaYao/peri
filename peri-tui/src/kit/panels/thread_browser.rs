@@ -1,4 +1,4 @@
-//! Thread Browser 面板（TUI-PAGE §6.6）
+//! Thread Browser 面板（spec/global/domains/tui/tui-panels.md §6.6）
 //!
 //! S6c：thread 列表从 `THREAD_LIST` atom 读取（由 `service_snapshot` 后台任务
 //! 周期性从 ServiceRegistry.thread_store 派生）。Enter 切换 thread 操作 S11

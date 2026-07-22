@@ -349,6 +349,10 @@ pub enum ExecutorEvent {
     CompactError {
         message: String,
     },
+    /// Agent 执行失败（LLM API 错误等致命错误，TUI 显示红色 SystemNote）
+    AgentExecutionFailed {
+        message: String,
+    },
     /// Todo 列表更新
     TodoUpdate(Vec<TodoEntry>),
     /// LSP 诊断更新

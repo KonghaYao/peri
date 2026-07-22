@@ -294,7 +294,8 @@ impl UnifiedLangfuseEvent {
             | ExecutorEvent::TodoUpdate(_)
             | ExecutorEvent::LspDiagnostics { .. }
             | ExecutorEvent::BgToolStep { .. }
-            | ExecutorEvent::WorkflowProgress(_) => None,
+            | ExecutorEvent::WorkflowProgress(_)
+            | ExecutorEvent::AgentExecutionFailed { .. } => None,
         }
     }
 

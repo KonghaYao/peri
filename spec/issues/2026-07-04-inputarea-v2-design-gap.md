@@ -1,4 +1,4 @@
-# InputArea 设计规范 v2 补全——对照 TUI-PAGE 第 3 节
+# InputArea 设计规范 v2 补全——对照 TUI 设计文档第 3 节
 
 **状态**：Open
 **优先级**：中
@@ -6,7 +6,7 @@
 
 ## 问题描述
 
-TUI-PAGE.md 第 3 节（InputArea）已更新为详细设计规范，但当前 `peri-tui/src/kit/` 中部分能力尚未实现或不完整。需逐项对齐。
+spec/global/domains/tui/tui-index.md 第 3 节（InputArea）已更新为详细设计规范，但当前 `peri-tui/src/kit/` 中部分能力尚未实现或不完整。需逐项对齐。
 
 ## 症状详情
 

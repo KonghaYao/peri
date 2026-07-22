@@ -219,6 +219,11 @@ impl EventSink for TransportEventSink {
                         strategy: strategy_str,
                     })
                 }
+                ExecutorEvent::AgentExecutionFailed { message } => {
+                    Some(AcpEvent::AgentExecutionFailed {
+                        message: message.clone(),
+                    })
+                }
                 _ => None,
             };
             if let Some(acp_event) = acp_event {

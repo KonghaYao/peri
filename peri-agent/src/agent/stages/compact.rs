@@ -69,10 +69,10 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             None => break 'compact_core Ok(CompactOutput { compacted: false }),
         };
 
-        // 在 emit CompactStarted 前估算策略（P1-5: 使用 compact_v2 的统一策略函数）
-        // should_micro_compact 仅判定 Skip/Micro；Full 由 run_compact 内部动态决策。
-        // 此处 event 的策略字段用于观测，Micro 为合理的向前估算值。
-        let _micro_action = crate::agent::compact_v2::should_micro_compact(pct, config);
+        // 在 emit CompactStarted 前估算策略
+        // determine_compact_action 判定 Skip/Micro/Smart；Full 由 run_compact 内部动态决策。
+        // 此处 event 的策略字段用于观测。
+        let _compact_action = crate::agent::compact_v2::determine_compact_action(pct, config);
         let compact_strategy = crate::agent::events::CompactStrategy::Micro;
 
         tracing::trace!(step, budget_pct = %pct, "Compact 预算检查");

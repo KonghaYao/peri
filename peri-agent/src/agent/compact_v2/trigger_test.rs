@@ -1,7 +1,7 @@
 //! run_compact 新触发流程测试
 
 use crate::agent::compact_v2::config::CompactConfig;
-use crate::agent::compact_v2::{run_compact, should_micro_compact, CompactAction};
+use crate::agent::compact_v2::{determine_compact_action, run_compact, CompactAction};
 use crate::agent::events::CompactStrategy;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::transcript::MessageTranscript;
@@ -28,18 +28,34 @@ fn make_tool_result(tool_call_id: &str, text: &str) -> BaseMessage {
     )
 }
 
-// ── should_micro_compact 测试 ──────────────────────────────────────────
+// ── determine_compact_action 测试 ──────────────────────────────────────
 
 #[test]
-fn test_should_micro_compact_below_threshold() {
+fn test_determine_compact_action_below_threshold() {
     let config = CompactConfig::default();
-    assert_eq!(should_micro_compact(0.50, &config), CompactAction::Skip);
+    assert_eq!(determine_compact_action(0.50, &config), CompactAction::Skip);
 }
 
 #[test]
-fn test_should_micro_compact_above_threshold() {
+fn test_determine_compact_action_above_threshold() {
     let config = CompactConfig::default();
-    assert_eq!(should_micro_compact(0.80, &config), CompactAction::Micro);
+    // 默认 smart_compact_enabled = false → 应返回 Micro
+    assert_eq!(
+        determine_compact_action(0.80, &config),
+        CompactAction::Micro
+    );
+}
+
+#[test]
+fn test_determine_compact_action_smart_enabled() {
+    let config = CompactConfig {
+        smart_compact_enabled: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        determine_compact_action(0.80, &config),
+        CompactAction::Smart
+    );
 }
 
 // ── run_compact 触发流程测试（无 LLM） ─────────────────────────────────

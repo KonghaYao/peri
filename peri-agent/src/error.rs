@@ -30,6 +30,12 @@ pub enum AgentError {
     #[error("Interrupted by user")]
     Interrupted,
 
+    #[error("Full Compact requires LLM instance")]
+    CompactNoLlm,
+
+    #[error("Full Compact failed: LLM returned empty summary")]
+    CompactEmptyResponse,
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

@@ -10,7 +10,6 @@
 
 use std::path::Path;
 
-use anyhow::anyhow;
 use tracing::{debug, warn};
 
 use crate::agent::{
@@ -50,8 +49,7 @@ pub(super) async fn full_compact_inner(
     let before_len = transcript.len();
 
     // 无 LLM 时降级为 Micro
-    let llm =
-        llm.ok_or_else(|| crate::error::AgentError::Other(anyhow!("Full Compact 需要 LLM 实例")))?;
+    let llm = llm.ok_or(crate::error::AgentError::CompactNoLlm)?;
 
     // 收集可见消息用于预处理
     let visible: Vec<&BaseMessage> = transcript.visible_messages();
@@ -108,9 +106,7 @@ pub(super) async fn full_compact_inner(
     let raw_summary = response.message.content();
 
     if raw_summary.trim().is_empty() {
-        return Err(crate::error::AgentError::Other(anyhow!(
-            "Full Compact 失败：LLM 返回空摘要"
-        )));
+        return Err(crate::error::AgentError::CompactEmptyResponse);
     }
 
     // 4. 后处理摘要
