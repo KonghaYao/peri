@@ -97,7 +97,5 @@ impl BaseTool for ExecuteExtraTool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("execute_tool_test.rs");
-}
+#[path = "execute_tool_test.rs"]
+mod tests;

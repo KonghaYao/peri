@@ -31,7 +31,5 @@ pub fn format_tokens(count: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("animation_test.rs");
-}
+#[path = "animation_test.rs"]
+mod tests;

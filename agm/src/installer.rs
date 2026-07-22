@@ -612,6 +612,5 @@ fn extract_tarball(tarball_path: &Path, dest: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    include!("installer_test.rs");
-}
+#[path = "installer_test.rs"]
+mod tests;

@@ -324,10 +324,40 @@ pub fn resolve_skill_roots(
     roots
 }
 
-#[cfg(test)]
-mod tests {
-    use tempfile::tempdir;
+/// 公共 skill 内容查找函数 —— 统一入口，供 SkillTool 和 SkillPreloadMiddleware 复用。
+///
+/// 按 skill 名称查找（大小写无关精确匹配），返回 `(SkillMetadata, 文件内容)`。
+/// 查找范围由 `resolve_skill_roots` 决定：User → Global → Project → Plugin → Builtin。
+///
+/// # 返回值
+/// - `Some((metadata, content))` — 找到 skill，metadata.path 为 SKILL.md 绝对路径
+/// - `None` — 未找到匹配的 skill
+pub fn find_skill_content(
+    cwd: &str,
+    plugin_roots: Vec<SkillRoot>,
+    disable_bundled: bool,
+    skill_name: &str,
+) -> Option<(SkillMetadata, String)> {
+    let roots = resolve_skill_roots(cwd, plugin_roots, disable_bundled);
+    let skills = scan_skill_roots(&roots);
 
-    use super::*;
-    include!("loader_test.rs");
+    let name_lower = skill_name.to_lowercase();
+    let found = skills
+        .iter()
+        .find(|s| s.name.to_lowercase() == name_lower)?;
+
+    let content = if matches!(found.source, SkillSource::Builtin) {
+        crate::skills::builtin::BUILTIN_SKILLS
+            .iter()
+            .find(|bs| bs.name == found.name)
+            .map(|bs| bs.content.to_string())?
+    } else {
+        std::fs::read_to_string(&found.path).ok()?
+    };
+
+    Some((found.clone(), content))
 }
+
+#[cfg(test)]
+#[path = "loader_test.rs"]
+mod tests;

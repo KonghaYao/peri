@@ -123,7 +123,5 @@ pub fn initialize_params(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("requests_test.rs");
-}
+#[path = "requests_test.rs"]
+mod tests;

@@ -469,6 +469,12 @@ pub(crate) fn build_agent(
         SkillPreloadMiddleware::new(preload_skills, &cwd)
             .with_plugin_roots(plugin_skill_roots.clone()),
     ));
+    chain.add(Box::new({
+        let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
+        peri_middlewares::SkillToolMiddleware::new()
+            .with_plugin_roots(plugin_skill_roots.clone())
+            .with_disable_bundled(disable_bundled)
+    }));
     chain.add(Box::new(peri_middlewares::AtMentionMiddleware::new(
         cwd.clone().into(),
     )));

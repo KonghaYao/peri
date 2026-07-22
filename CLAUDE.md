@@ -15,7 +15,7 @@ peri-acp-types（协议类型）  peri-workflow（Workflow CLI，独立构建）
 ### ReAct 循环
 ```
 before_agent → loop(500):
-  Compact（ContextBudget: 0.70 micro / 0.85 full）
+  Compact（ContextBudget: 0.75 micro / 0.95 full）
   → Receive → Reason → Act（3 阶段工具分发） → End（检查 MessageQueue 续跑）
 ```
 
@@ -43,7 +43,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 15 基础 + 5 条件（Hook/MCP/Workflow/LSP/Goal），链末尾 `with_system_prompt()` prepend。顺序不可重排。
 
 ### Tool Search
-三层：Core（12，始终可见）/ Meta（2，SearchExtraTools/ExecuteExtraTool）/ Deferred（Cron/MCP/LspTool 等）
+三层：Core（13，始终可见）/ Meta（2，SearchExtraTools/ExecuteExtraTool）/ Deferred（Cron/MCP/LspTool 等）
 
 ## 模块索引
 
@@ -169,7 +169,7 @@ SP 结构不可变（破坏 prompt cache）。`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY_
 | 类型 | 位置 | 条件 |
 |------|------|------|
 | 单元测试 | 同目录 `_test.rs` | 测试代码 ≥ 30 行 |
-| 单元测试 | 同文件 `#[cfg(test)] mod tests` | 测试代码 < 30 行 |
+| 单元测试 | 同文件 `#[cfg(test)] mod tests` |  永远不允许文件内联测试 |
 | 集成测试 | crate 根 `tests/` | 跨模块端到端，只访问 `pub` API |
 
 #### 优先级
@@ -316,6 +316,7 @@ const result = await judge({
 - **Goal 续跑**：注入控制消息时需理解 MessageKind 语义——Info（不唤醒）vs Defer（唤醒续跑）。ActOutput 须保留 `block_continue` 字段，否则中间件设置的续跑信号在 act 阶段被吞掉（详见 spec/global/domains/agent.md#issue_2026-07-15-goal-continuation-loop-broken-in-v2）
 - **Compact 标记持久化**：持久化标记（truncated/excluded）须独立于内容字段存储和恢复。cached_context 缓存命中时跳过 DB 查询会漏掉标记；v2 路径 `persist_tx=None` 导致 compact flags 全丢（详见 spec/global/domains/agent.md#issue_2026-07-17-compact-flags-lost-on-session-restore）（详见 spec/global/domains/agent.md#issue_2026-07-18-compact-effect-lost-between-prompts-v2）
 - **or_insert_with 复用陷阱**：`or_insert_with` 不适合需要每 turn 重建的有状态对象（含 channel/sender）。SubAgentTool 实例的 `event_tx` 在第二 turn 时可能已被 close，所有 SubagentStarted 事件静默丢弃（详见 spec/global/domains/agent.md#issue_2026-07-13-sync-agent-tool-cards-not-showing）
+- **AskUserQuestion 参数序列化**：`questions` 数组参数用 Python dict 字面量格式（单引号键值），避免嵌套 JSON 双引号转义不一致。如遇 `missing field 'questions'` 错误，优先检查 JSON 引号转义而非字段缺失。示例：`{"questions": [{"question": "...", "header": "...", "options": [{"label": "..."}]}]}`（详见 spec/archive-issues/2026-07-19-ask-user-question-param-parse-fail.md）
 
 ### ACP/TUI 分层
 - **execute_prompt**：Agent 构建统一入口，禁止 TUI 直连运行时
@@ -376,7 +377,9 @@ push_event / push_done / replay / notify 等发送点读取 → if caps.xxx { ..
 - **BRIDGE_RESET_COUNTER**：/clear 和 thread 切换前必须递增，仅 atom 重置不足
 - **overlay 空态**：返回 `Positioned(width:0, height:0)`，不要 `View()`/`Fragment` → 白屏
 - **事件边界**：消息区只处理鼠标滚轮，编辑区只处理键盘
-- **committed push**：所有需时序定位的消息须先 flush current_turn → committed 再 push（flush-then-push 模式）。禁止直接 push committed 绕过 TurnSegment（[issue](spec/archive-issues/2026-07-16-system-note-cache-warning-position-wrong.md)）
+- **committed push**：所有需时序定位的消息须先 flush current_turn → committed 再 push（flush-then-push 模式）。禁止直接 push committed 绕过 TurnSegment（SystemNote 除外，见下条）（[issue](spec/archive-issues/2026-07-16-system-note-cache-warning-position-wrong.md)）
+- **SystemNote 注入**：所有 SystemNote（CompactCompleted/CompactError/AgentExecutionFailed/BudgetWarning/SystemNotification）必须通过 `BridgeState::inject_system_note(text, level)` 统一入口注入，禁止直接 `committed.push_back(TuiSystemNote{...})` 或手工 `push_system_note() + push_view_models + push_acp_state`。`inject_system_note` 封装三步操作，确保 SystemNote 按时序出现在 current_turn 内部。这是第三次同类回归（2026-07-16 → 2026-07-20 → 2026-07-22），新增 handler 时务必遵守此规则（[issue](spec/issues/2026-07-20-cache-warning-systemnote-position-regression.md)）
+- **渲染异常优先检查事件注入**：消息区内容跳变/布局异常时，优先排查是否有 SystemNote/cache 警告/其他事件在流中插入了额外内容，再检查布局计算。事件注入是 3 次同类回归的根因——2026-07-18 滚动跳变诊断中 agent 在布局方向浪费 ~90 分钟才找到真正根因（详见 spec/global/domains/tui.md#issue_2026-07-18-scroll-jump-event-injection）
 - **增量缓存 can_reuse**：条件须覆盖 block 类型变更场景——输入前缀可能导致 pulldown-cmark 重解析出不同 block 类型时，缓存必须失效全量重跑（[issue](spec/archive-issues/2026-07-15-markdown-table-raw-text-streaming.md)）
 - **面板交互规范**：选中 tab 用反色（accent 底色+surface 字色），禁止 `[ ]` 包裹。面板内禁止单字母快捷键（j/k/q 等），仅允许方向键 + Tab + Esc + Enter。文本输入用 `TextAreaState`，禁止手工键盘事件处理
 - **ratatui-kit 迁移回归**：UI 框架迁移需要系统性功能回归清单——状态栏上下文消耗显示和缓存命中率警告在 ratatui-kit 迁移后丢失（详见 spec/global/domains/tui.md#issue_2026-07-13-statusbar-context-cache-display-regression）
@@ -387,11 +390,13 @@ push_event / push_done / replay / notify 等发送点读取 → if caps.xxx { ..
 
 ### SubAgent / Worktree
 - **coder cwd**：不遵守 `Agent(cwd=...)`，prompt 中必须用绝对路径。push 前 `git diff --stat` 确认
-- **文件白名单**：coding prompt 必须列文件白名单 + `DO NOT modify:` 禁止清单
+- **文件白名单**：coding prompt 必须列文件白名单 + `DO NOT modify:` 禁止清单。
 - **Agent 任务粒度**：单次 Agent 调用最多处理 8 个文件，超过则拆分批次
 - **批量机械替换用 perl**：超过 10 个文件的模式替换（重命名、import 路径等），用 `perl -i -pe`/`find ... -exec sed` 脚本，禁止逐个 Edit 或委托 coder subagent
 - **bg agent 构建检查**：后台 agent 完成后必须 `cargo build` 验证。失败则 `git checkout -- <modified files>` 恢复文件，切换到手动模式
 - **AgentResult 禁止轮询**：后台任务结果通过 system-reminder 自动推送。禁止调用 `AgentResult()` 轮询——浪费 token 且结果会重复推送
+- **禁止 shell sleep 等待异步结果**：后台 subagent / workflow 结果通过 system-reminder 自动推送并唤醒 agent。禁止用 `bash sleep N`/`timeout`/轮询循环等待——sleep 会错过通知窗口、浪费 token。派发异步任务后立即停止，等系统唤醒即可
+- **Workflow inline script 反引号冲突**：JS 模板字面量（`` `...` ``）会与 workflow inline script 的字符串定界符冲突。在 inline script 中避免使用模板字面量，改用字符串拼接（`'str' + var`）
 
 ### Rust / 编码
 - **rustfmt import**：`use crate::module::*` 通配导入排在单类型之前；跨 crate 同理
@@ -403,6 +408,8 @@ push_event / push_done / replay / notify 等发送点读取 → if caps.xxx { ..
 - **鼠标 Drag 事件**：高频 Drag(Left) 必须在入口处及早 Ignored（与 Moved 同级过滤），否则穿透触发 state 读写 → 组件重渲染 → CPU 暴涨（[issue](spec/archive-issues/2026-07-11-message-area-mouse-selection-regression.md)）
 - **Theme 悬垂引用**：`&THEME_ATOM.state().read().xxx` 崩，须两步绑定；`theme_def.semantic` 不能直接访问，须 `theme_def.read().semantic`
 - **Edit 前必 Read**：连续编辑同一文件时，每次 Edit 前必须 Read 确认 old_string 匹配当前文件状态。同文件修改超过 3 处，用 Write 整体重写替代逐块 Edit
+- **首次访问 Glob 确认路径**：不确定文件确切位置时，先用 `Glob("**/<filename>")` 确认完整路径再 Read/Edit。避免凭记忆猜测路径结构（如 `acp_client.rs` vs `src/acp_client/client.rs`、已删除文件仍被引用）
+- **跨项目操作确认 pwd**：修改非当前项目目录的文件前，显式确认 `pwd`。若发现误操作，用 `git checkout --` 恢复并切换正确目录
 - **commit 消息特殊字符**：含 `{}`、`\`` 等 shell 特殊字符时，用 `git commit -F /tmp/msg.txt` 而非 `-m`。提交前 `git diff --cached --stat` 确认 scope
 - **cargo fmt 参数**：`cargo fmt -- -p peri-tui`（注意 `--`），非 `cargo fmt -p peri-tui`
 - **let-chains + rustfmt 不兼容**：peri-tui/peri-theme edition=2024 的 let chains 语法导致 `cargo fmt` 报错。提交时若卡 fmt 可 `--no-verify` 跳过

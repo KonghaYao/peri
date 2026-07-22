@@ -68,9 +68,5 @@ pub async fn decode_message(
 }
 
 #[cfg(test)]
-mod tests {
-    use tokio::io::{BufReader, BufWriter};
-
-    use super::*;
-    include!("codec_test.rs");
-}
+#[path = "codec_test.rs"]
+mod tests;

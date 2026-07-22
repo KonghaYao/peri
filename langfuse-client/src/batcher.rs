@@ -226,10 +226,5 @@ impl Drop for Batcher {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-    use crate::types::TraceBody;
-    include!("batcher_test.rs");
-}
+#[path = "batcher_test.rs"]
+mod tests;

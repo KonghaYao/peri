@@ -103,13 +103,28 @@ type AgentRunRequestParams = AgentRunParams & {
 const rl = readline.createInterface({ input: process.stdin })
 
 let reqId = 100
+
+let _msgSeq = 0
+
 const pending = new Map<
   JsonRpcId,
   { resolve: (value: unknown) => void; reject: (error: unknown) => void }
 >()
 
 function send(msg: JsonRpcMessage): void {
+  _msgSeq++
   process.stdout.write(JSON.stringify(msg) + '\n')
+}
+
+// 等待 stdout 排空——使用 Node.js 内置 writableNeedDrain 避免竞态
+function waitDrain(): Promise<void> {
+  return new Promise((resolve) => {
+    if ((process.stdout as NodeJS.WritableStream).writableNeedDrain) {
+      process.stdout.once('drain', resolve)
+    } else {
+      resolve()
+    }
+  })
 }
 
 function rpcRequest(method: string, params: unknown): Promise<unknown> {
@@ -278,12 +293,14 @@ async function handleRequest(msg: JsonRpcRequest): Promise<void> {
         result: { ok: true },
       })
 
-      runWorkflowAsync(p).catch((err: unknown) => {
+      runWorkflowAsync(p).catch(async (err: unknown) => {
+        await waitDrain()
         rpcNotify('workflow/done', {
           runId: p.runId,
           status: 'failed' as const,
           error: String(err),
         })
+        await waitDrain()
         process.exit(1)
       })
       return
@@ -336,12 +353,19 @@ async function runWorkflowAsync({
     resume: !!currentResumeJournal,
   })
 
+  // 排空 stdout 后再发送终态通知
+  await waitDrain()
+  
   rpcNotify('workflow/done', {
     runId,
     status: result.status,
     returnValue: result.returnValue,
     error: result.error,
   })
+
+  // 确保 workflow/done 消息被写入后再退出
+  await waitDrain()
+  
   process.exit(0)
 }
 

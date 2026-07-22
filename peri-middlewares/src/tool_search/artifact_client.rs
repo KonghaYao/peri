@@ -99,7 +99,5 @@ impl Default for ArtifactClient {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("artifact_client_test.rs");
-}
+#[path = "artifact_client_test.rs"]
+mod tests;

@@ -297,7 +297,6 @@ impl BaseTool for WorkflowTool {
 
         // Notification task: wait for completion → registry.complete()
         let registry_for_complete = Arc::clone(&self.registry);
-        let bg_for_complete = self.bg_registry.clone();
         let notify_name = workflow_name.clone();
         let notify_started = started_at;
         let notify_run_id = run_id.clone();
@@ -327,9 +326,8 @@ impl BaseTool for WorkflowTool {
                         phase_summaries,
                     },
                 );
-                if let Some(ref bg) = bg_for_complete {
-                    bg.complete_workflow(&notify_run_id, false, String::new(), duration);
-                }
+                // bg.complete_workflow() 已移至 executor.rs 的 broadcast consumer 中
+                // （在 Defer 入队之后调用），消除 active_count 提前归零的竞态窗口
                 return;
             }
             let result = done_rx
@@ -363,18 +361,8 @@ impl BaseTool for WorkflowTool {
                     phase_summaries,
                 },
             );
-            if let Some(ref bg) = bg_for_complete {
-                let output = result
-                    .return_value
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "completed".to_string());
-                bg.complete_workflow(
-                    &notify_run_id,
-                    success,
-                    output,
-                    notify_started.elapsed().as_millis() as u64,
-                );
-            }
+            // bg.complete_workflow() 已移至 executor.rs 的 broadcast consumer 中
+            // （在 Defer 入队之后调用），消除 active_count 提前归零的竞态窗口
         });
 
         Ok(format!(

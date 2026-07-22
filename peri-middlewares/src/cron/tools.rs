@@ -184,9 +184,5 @@ impl BaseTool for CronRemoveTool {
 }
 
 #[cfg(test)]
-mod tests {
-    use tokio::sync::mpsc;
-
-    use super::*;
-    include!("tools_test.rs");
-}
+#[path = "tools_test.rs"]
+mod tests;

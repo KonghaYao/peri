@@ -303,16 +303,5 @@ impl Middleware for SkillsMiddleware {
 }
 
 #[cfg(test)]
-mod tests {
-    use peri_agent::{agent::state::AgentState, middleware::r#trait::Middleware};
-    use tempfile::tempdir;
-
-    use super::*;
-
-    /// Helper: call prompt_contribution with concrete State type for testing.
-    fn contribution(mw: &SkillsMiddleware) -> Option<String> {
-        Middleware::prompt_contribution(mw)
-    }
-
-    include!("mod_test.rs");
-}
+#[path = "mod_test.rs"]
+mod tests;

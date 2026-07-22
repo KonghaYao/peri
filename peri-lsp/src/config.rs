@@ -176,7 +176,5 @@ pub fn lsp_config_from_plugin(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("config_test.rs");
-}
+#[path = "config_test.rs"]
+mod tests;

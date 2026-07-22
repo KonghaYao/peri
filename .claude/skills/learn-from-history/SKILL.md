@@ -53,7 +53,7 @@ python3 .claude/skills/learn-from-history/scripts/extract_range.py --query-activ
 **跨项目模式**（如用户明确要求分析所有项目）：
 
 ```bash
-python3 scripts/extract_range.py --query-active-days --days 7 --all
+python3 .claude/skills/learn-from-history/scripts/extract_range.py --query-active-days --days 7 --all
 ```
 
 **边界处理**：
@@ -75,7 +75,7 @@ python3 .claude/skills/learn-from-history/scripts/extract_range.py <开始日期
 **默认按当前项目目录过滤**（agent 从 env 的 Working directory 获取并显式传入 `--cwd`）。如需不限项目：
 
 ```bash
-python3 scripts/extract_range.py <开始日期> <结束日期> --all
+python3 .claude/skills/learn-from-history/scripts/extract_range.py <开始日期> <结束日期> --all
 ```
 
 提取脚本会自动：
@@ -236,6 +236,6 @@ Top 发现:
 
 ## 资源文件
 
-- `scripts/extract_range.py` — 时间段批量提取脚本（推荐使用），支持 `--query-active-days`（替代 SQL）、`--cwd` 过滤、`--all` 全项目
-- `scripts/extract_daily.py` — 单天提取脚本（extract_range 的底层），同样支持 cwd 过滤
+- `.claude/skills/learn-from-history/scripts/extract_range.py` — 时间段批量提取脚本（推荐使用），支持 `--query-active-days`（替代 SQL）、`--cwd` 过滤、`--all` 全项目
+- `.claude/skills/learn-from-history/scripts/extract_daily.py` — 单天提取脚本（extract_range 的底层），同样支持 cwd 过滤
 - `references/analysis-template.md` — agent 分析模板

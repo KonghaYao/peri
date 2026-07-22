@@ -142,7 +142,5 @@ pub fn format_install_count(count: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("install_counts_test.rs");
-}
+#[path = "install_counts_test.rs"]
+mod tests;

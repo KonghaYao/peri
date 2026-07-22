@@ -2,25 +2,23 @@ use std::env;
 
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_COMPACTABLE_TOOLS: &[&str] = &["Bash", "Read", "Glob", "Grep", "Write", "Edit"];
-
 fn default_true() -> bool {
     true
 }
-fn default_threshold_085() -> f64 {
-    0.85
+fn default_threshold_095() -> f64 {
+    0.95
 }
-fn default_threshold_070() -> f64 {
-    0.70
+fn default_threshold_075() -> f64 {
+    0.75
 }
 fn default_stale_steps() -> usize {
     5
 }
-fn default_compactable_tools() -> Vec<String> {
-    DEFAULT_COMPACTABLE_TOOLS
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+fn default_excluded_tools() -> Vec<String> {
+    vec![]
+}
+fn default_micro_min_affected() -> usize {
+    5
 }
 fn default_summary_max_tokens() -> u32 {
     16000
@@ -48,14 +46,18 @@ fn default_ptl_max_retries() -> u32 {
 pub struct CompactConfig {
     #[serde(default = "default_true")]
     pub auto_compact_enabled: bool,
-    #[serde(default = "default_threshold_085")]
+    #[serde(default = "default_threshold_095")]
     pub auto_compact_threshold: f64,
-    #[serde(default = "default_threshold_070")]
+    #[serde(default = "default_threshold_075")]
     pub micro_compact_threshold: f64,
     #[serde(default = "default_stale_steps")]
     pub micro_compact_stale_steps: usize,
-    #[serde(default = "default_compactable_tools")]
-    pub micro_compactable_tools: Vec<String>,
+    /// 黑名单工具——这些工具的消息（输入+输出）不参与 Micro 截断。默认空，即截断所有工具。
+    #[serde(default = "default_excluded_tools")]
+    pub micro_excluded_tools: Vec<String>,
+    /// Micro 压缩量下限——affected_count 低于此值时判定 Micro 无效，升级为 Full。
+    #[serde(default = "default_micro_min_affected")]
+    pub micro_min_affected: usize,
     #[serde(default = "default_summary_max_tokens")]
     pub summary_max_tokens: u32,
     #[serde(default = "default_re_inject_max_files")]
@@ -76,10 +78,11 @@ impl Default for CompactConfig {
     fn default() -> Self {
         Self {
             auto_compact_enabled: default_true(),
-            auto_compact_threshold: default_threshold_085(),
-            micro_compact_threshold: default_threshold_070(),
+            auto_compact_threshold: default_threshold_095(),
+            micro_compact_threshold: default_threshold_075(),
             micro_compact_stale_steps: default_stale_steps(),
-            micro_compactable_tools: default_compactable_tools(),
+            micro_excluded_tools: default_excluded_tools(),
+            micro_min_affected: default_micro_min_affected(),
             summary_max_tokens: default_summary_max_tokens(),
             re_inject_max_files: default_re_inject_max_files(),
             re_inject_max_tokens_per_file: default_re_inject_max_tokens_per_file(),

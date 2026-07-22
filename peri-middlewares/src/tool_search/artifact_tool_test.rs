@@ -1,5 +1,6 @@
-// 测试通过 include! 嵌入 artifact_tool.rs 的 #[cfg(test)] mod tests 块，
-// tests 块有 `use super::*;`，因此 ArtifactTool 等类型已自动导入。
+//! Tests for artifact_tool
+
+use super::*;
 
 #[test]
 fn test_artifact_tool_name() {
@@ -32,27 +33,21 @@ fn test_artifact_tool_parameters_schema() {
         .any(|v| v.as_str() == Some("file_path")));
     // ttl 可选，默认 7d
     assert_eq!(params["properties"]["ttl"]["type"], "string");
-    assert!(params["properties"]["ttl"]["enum"]
-        .as_array()
-        .unwrap()
-        .len()
-        >= 2);
+    assert!(
+        params["properties"]["ttl"]["enum"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 2
+    );
 }
 
 #[test]
 fn test_is_markdown() {
-    assert!(ArtifactTool::is_markdown(std::path::Path::new(
-        "doc.md"
-    )));
-    assert!(ArtifactTool::is_markdown(std::path::Path::new(
-        "DOC.MD"
-    )));
-    assert!(!ArtifactTool::is_markdown(std::path::Path::new(
-        "doc.html"
-    )));
-    assert!(!ArtifactTool::is_markdown(std::path::Path::new(
-        "doc.txt"
-    )));
+    assert!(ArtifactTool::is_markdown(std::path::Path::new("doc.md")));
+    assert!(ArtifactTool::is_markdown(std::path::Path::new("DOC.MD")));
+    assert!(!ArtifactTool::is_markdown(std::path::Path::new("doc.html")));
+    assert!(!ArtifactTool::is_markdown(std::path::Path::new("doc.txt")));
 }
 
 #[test]
@@ -88,7 +83,10 @@ fn test_md_to_html_code_block() {
 async fn test_invoke_file_not_found() {
     let tool = ArtifactTool::new("/tmp".into());
     let result = tool
-        .invoke(serde_json::json!({"file_path": "/nonexistent/file.html", "ttl": "7d"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": "/nonexistent/file.html", "ttl": "7d"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -105,7 +103,10 @@ async fn test_invoke_non_html_extension() {
 
     let tool = ArtifactTool::new(dir.path().to_string_lossy().to_string());
     let result = tool
-        .invoke(serde_json::json!({"file_path": file_path.to_string_lossy(), "ttl": "7d"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": file_path.to_string_lossy(), "ttl": "7d"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -126,7 +127,10 @@ async fn test_invoke_file_too_large() {
 
     let tool = ArtifactTool::new(dir.path().to_string_lossy().to_string());
     let result = tool
-        .invoke(serde_json::json!({"file_path": file_path.to_string_lossy(), "ttl": "7d"}), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            serde_json::json!({"file_path": file_path.to_string_lossy(), "ttl": "7d"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -144,7 +148,11 @@ fn test_validate_md_extension_allowed() {
     let tool = ArtifactTool::new(dir.path().to_string_lossy().to_string());
     // .md 扩展名应通过校验
     let result = tool.validate_file(&file_path);
-    assert!(result.is_ok(), ".md 文件应通过扩展名校验，实际: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        ".md 文件应通过扩展名校验，实际: {:?}",
+        result.err()
+    );
 }
 
 #[test]

@@ -60,10 +60,10 @@ async fn test_run_compact_micro_threshold() {
 
     let config = CompactConfig::default();
     let mut failures = 0u32;
-    // budget = 0.75 → micro 范围
-    let result = run_compact(&mut t, None, &config, 0.75, false, &mut failures, "/tmp").await;
+    // budget = 0.80 → ≥ 0.75 → Micro
+    let result = run_compact(&mut t, None, &config, 0.80, false, &mut failures, "/tmp").await;
     assert_eq!(result.strategy, CompactStrategy::Micro);
-    assert!(result.affected_count > 0, "应有消息被标 truncated");
+    assert!(result.affected_count >= 5, "Micro 有效，不应升级 Full");
 }
 
 #[tokio::test]
@@ -104,7 +104,7 @@ async fn test_run_compact_micro_resets_failures() {
 
     let config = CompactConfig::default();
     let mut failures = 2u32;
-    let result = run_compact(&mut t, None, &config, 0.75, false, &mut failures, "/tmp").await;
+    let result = run_compact(&mut t, None, &config, 0.80, false, &mut failures, "/tmp").await;
     assert_eq!(result.strategy, CompactStrategy::Micro);
     assert_eq!(failures, 0, "成功后应重置失败计数");
 }

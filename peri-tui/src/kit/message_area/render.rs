@@ -727,6 +727,5 @@ pub(super) fn with_message_spacing(mut lines: Vec<Line<'static>>) -> Vec<Line<'s
 }
 
 #[cfg(test)]
-mod tests {
-    include!("render_test.rs");
-}
+#[path = "render_test.rs"]
+mod tests;

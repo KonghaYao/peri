@@ -1,9 +1,11 @@
 //! Compact 阶段 — 上下文压缩
 //!
 //! 根据 ContextBudget 计算使用率，调用 `compact_v2::run_compact`：
-//! - budget < 0.70：跳过（无操作）
-//! - 0.70 ≤ budget < 0.85：Micro Compact（标记 truncated）
-//! - budget ≥ 0.85：Full Compact（LLM 摘要 + excluded 标记）
+//! - budget < 0.75：跳过
+//! - budget ≥ 0.75：Micro Compact（标记 truncated）
+//!   - affected_count >= 5 → Micro 有效，budget ≥ 0.95 时叠加 Full
+//!   - affected_count < 5 → Micro 无效，升级为 Full
+//! - force=true：直接 Full（跳过 Micro）
 //!
 //! Full Compact 失败时 `consecutive_failures` 累加，达上限后降级跳过。
 
@@ -68,10 +70,10 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
         };
 
         // 在 emit CompactStarted 前估算策略（P1-5: 使用 compact_v2 的统一策略函数）
-        let compact_strategy = crate::agent::compact_v2::determine_compact_strategy(
-            pct, config, false, // force 恒为 false（自动触发路径）
-        )
-        .unwrap_or(crate::agent::events::CompactStrategy::Micro);
+        // should_micro_compact 仅判定 Skip/Micro；Full 由 run_compact 内部动态决策。
+        // 此处 event 的策略字段用于观测，Micro 为合理的向前估算值。
+        let _micro_action = crate::agent::compact_v2::should_micro_compact(pct, config);
+        let compact_strategy = crate::agent::events::CompactStrategy::Micro;
 
         tracing::trace!(step, budget_pct = %pct, "Compact 预算检查");
 
@@ -211,30 +213,5 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::stages::StageContext;
-    use crate::session::store::FrozenContext;
-    use crate::session::Session;
-    use std::sync::Arc;
-
-    fn make_context() -> StageContext {
-        let cwd: Arc<str> = Arc::from("/tmp/test");
-        let frozen = FrozenContext::builder().build();
-        let session = Session::new(cwd, frozen, None);
-        let turn = session.start_turn();
-        StageContext::new(turn, session.transcript(), session.queue().clone())
-    }
-
-    #[tokio::test]
-    async fn test_compact_without_budget_skips() {
-        // 无 context_budget → 跳过
-        let ctx = make_context();
-        let input = CompactInput {
-            context: ctx,
-            has_tool_calls: false,
-        };
-        let output = run_compact(input).await.unwrap();
-        assert!(!output.compacted);
-    }
-}
+#[path = "compact_test.rs"]
+mod tests;

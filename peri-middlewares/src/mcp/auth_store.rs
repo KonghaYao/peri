@@ -212,7 +212,5 @@ impl CredentialStore for PerServerCredentialStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("auth_store_test.rs");
-}
+#[path = "auth_store_test.rs"]
+mod tests;

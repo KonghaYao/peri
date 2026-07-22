@@ -87,9 +87,5 @@ impl BatcherConfig {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-    include!("config_test.rs");
-}
+#[path = "config_test.rs"]
+mod tests;

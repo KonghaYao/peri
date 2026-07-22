@@ -305,13 +305,20 @@ pub fn spawn_stdout_reader(
     tokio::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
+        let mut line_count: usize = 0;
         while let Ok(Some(line)) = lines.next_line().await {
+            line_count += 1;
             if let Some(msg) = channel.handle_incoming(&line) {
                 if sender.send(msg).await.is_err() {
                     break; // 接收端已关闭
                 }
             }
         }
+        tracing::info!(
+            target: "workflow",
+            total_lines = line_count,
+            "stdout reader exited (stdout closed or read error)"
+        );
         // stdout 关闭 → Node 进程已退出 → 排空 pending requests 防止挂起
         channel.drain_pending("node process exited");
     });

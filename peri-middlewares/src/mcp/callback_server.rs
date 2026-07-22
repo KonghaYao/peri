@@ -8,6 +8,8 @@ use tokio::{
 use tracing::{info, warn};
 
 const CALLBACK_TIMEOUT_SECS: u64 = 120;
+const OAUTH_SUCCESS_BODY: &str = include_str!("descriptions/oauth_success.html");
+const OAUTH_FAILURE_BODY: &str = include_str!("descriptions/oauth_failure.html");
 
 #[derive(Debug, Error)]
 pub enum CallbackError {
@@ -83,11 +85,17 @@ impl OAuthCallbackServer {
         let response = match &callback_result {
             Ok((code, _)) => {
                 info!(code = %code, "OAuth 回调成功");
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><h1>OAuth 授权成功</h1><p>您可以关闭此窗口并返回终端。</p></body></html>"
+                &format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+                    OAUTH_SUCCESS_BODY
+                )[..]
             }
             Err(e) => {
                 warn!(error = %e, "OAuth 回调处理失败");
-                &format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><h1>OAuth 授权失败</h1><p>{}</p></body></html>", e)[..]
+                &format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+                    OAUTH_FAILURE_BODY.replace("{error}", &e.to_string())
+                )[..]
             }
         };
 

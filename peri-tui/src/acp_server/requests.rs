@@ -34,6 +34,50 @@ fn persist_config(cfg: &AcpServerConfig) {
     }
 }
 
+/// 创建 session 级 WorkflowMiddleware。
+fn create_session_workflow_middleware(
+    cfg: &AcpServerConfig,
+    cwd: &str,
+    session_id: &str,
+    frozen_data: &peri_acp::session::executor::FrozenSessionData,
+) -> Option<Arc<peri_middlewares::workflow::WorkflowMiddleware>> {
+    let mut compact_config = peri_agent::agent::CompactConfig::default();
+    compact_config.apply_env_overrides();
+    let (progress_tx, progress_rx) =
+        tokio::sync::mpsc::unbounded_channel::<peri_workflow::protocol::ProgressEvent>();
+    let wf_executor = peri_acp::agent::workflow_agent::create_executor(
+        peri_acp::agent::workflow_agent::WorkflowAgentContext {
+            provider: Arc::clone(&cfg.provider),
+            cwd: cwd.to_string(),
+            frozen_claude_md: frozen_data.claude_md().map(|s| s.to_string()),
+            frozen_claude_local_md: frozen_data.claude_local_md().map(|s| s.to_string()),
+            frozen_skill_summary: frozen_data.skill_summary().map(|s| s.to_string()),
+            session_id: Some(session_id.to_string()),
+            compact_config: Some(compact_config),
+            cancel: None,
+            system_prompt: Some(frozen_data.system_prompt().to_string()),
+            broker: None,
+            permission_mode: None,
+            frozen_date: Some(frozen_data.date().to_string()),
+            frozen_language: frozen_data.language().map(|s| s.to_string()),
+            agent_pool: None,
+            langfuse_session: None,
+            thread_store: None,
+            peri_config: Some(Arc::new(cfg.peri_config.read().clone())),
+            progress_tx: Some(progress_tx),
+        },
+    );
+    let (notification_tx, _) = tokio::sync::broadcast::channel(32);
+    Some(Arc::new(
+        peri_middlewares::workflow::WorkflowMiddleware::new(
+            wf_executor,
+            cwd,
+            notification_tx,
+            Some(progress_rx),
+        ),
+    ))
+}
+
 pub(crate) async fn handle_request(
     method: &str,
     params: &Value,
@@ -91,46 +135,8 @@ pub(crate) async fn handle_request(
             );
 
             // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
-            let workflow_middleware = {
-                let mut compact_config = peri_agent::agent::CompactConfig::default();
-                compact_config.apply_env_overrides();
-                let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel::<
-                    peri_workflow::protocol::ProgressEvent,
-                >();
-                let wf_executor = peri_acp::agent::workflow_agent::create_executor(
-                    peri_acp::agent::workflow_agent::WorkflowAgentContext {
-                        provider: Arc::clone(&cfg.provider),
-                        cwd: cwd.clone(),
-                        frozen_claude_md: frozen_data.claude_md().map(|s| s.to_string()),
-                        frozen_claude_local_md: frozen_data
-                            .claude_local_md()
-                            .map(|s| s.to_string()),
-                        frozen_skill_summary: frozen_data.skill_summary().map(|s| s.to_string()),
-                        session_id: Some(session_id.clone()),
-                        compact_config: Some(compact_config),
-                        cancel: None,
-                        system_prompt: Some(frozen_data.system_prompt().to_string()),
-                        broker: None,
-                        permission_mode: None,
-                        frozen_date: Some(frozen_data.date().to_string()),
-                        frozen_language: frozen_data.language().map(|s| s.to_string()),
-                        agent_pool: None,
-                        langfuse_session: None,
-                        thread_store: None,
-                        peri_config: Some(Arc::new(cfg.peri_config.read().clone())),
-                        progress_tx: Some(progress_tx),
-                    },
-                );
-                let (notification_tx, _) = tokio::sync::broadcast::channel(32);
-                Some(Arc::new(
-                    peri_middlewares::workflow::WorkflowMiddleware::new(
-                        wf_executor,
-                        &cwd,
-                        notification_tx,
-                        Some(progress_rx),
-                    ),
-                ))
-            };
+            let workflow_middleware =
+                create_session_workflow_middleware(cfg, &cwd, &session_id, &frozen_data);
 
             sessions.insert(
                 session_id.clone(),
@@ -277,10 +283,27 @@ pub(crate) async fn handle_request(
             let history =
                 dispatch::load_session_messages(cfg.thread_store.as_ref(), req_session_id).await;
 
+            // ── 先构建 frozen + workflow_middleware，再插入 session ──
+            cfg.session_manager.ensure_session(req_session_id, cwd);
+            let caps = cfg.session_manager.ensure_session_caps(req_session_id);
+            let frozen_data = cfg.session_manager.build_frozen_data(
+                cwd,
+                &cfg.plugin_skill_roots,
+                &cfg.plugin_agent_dirs,
+            );
+            let workflow_middleware =
+                create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
+
             // Insert into sessions if not already present
             if let Some(state) = sessions.get_mut(req_session_id) {
                 if state.history.is_empty() {
                     state.history = history;
+                }
+                if state.frozen.is_none() {
+                    state.frozen = Some(frozen_data);
+                }
+                if state.workflow_middleware.is_none() {
+                    state.workflow_middleware = workflow_middleware;
                 }
             } else {
                 sessions.insert(
@@ -291,25 +314,12 @@ pub(crate) async fn handle_request(
                         cwd: cwd.to_string(),
                         history,
                         cancel_token: None,
-                        frozen: None,
+                        frozen: Some(frozen_data),
                         recall_items: Vec::new(),
                         agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
-                        workflow_middleware: None,
+                        workflow_middleware,
                     },
                 );
-            }
-
-            // ── Freeze session data at load time ──
-            cfg.session_manager.ensure_session(req_session_id, cwd);
-            // 确保 caps 已在 registry 中注册（MpscTransport 无 initialize，默认全 true）
-            let caps = cfg.session_manager.ensure_session_caps(req_session_id);
-            let frozen_data = cfg.session_manager.build_frozen_data(
-                cwd,
-                &cfg.plugin_skill_roots,
-                &cfg.plugin_agent_dirs,
-            );
-            if let Some(s) = sessions.get_mut(req_session_id) {
-                s.frozen = Some(frozen_data);
             }
 
             // ── ACP v1 spec: replay history via session/update BEFORE responding ──
@@ -527,6 +537,17 @@ pub(crate) async fn handle_request(
             let history =
                 dispatch::load_session_messages(cfg.thread_store.as_ref(), req_session_id).await;
 
+            // ── 先构建 frozen + workflow_middleware ──
+            cfg.session_manager.ensure_session(req_session_id, cwd);
+            cfg.session_manager.ensure_session_caps(req_session_id);
+            let frozen_data = cfg.session_manager.build_frozen_data(
+                cwd,
+                &cfg.plugin_skill_roots,
+                &cfg.plugin_agent_dirs,
+            );
+            let workflow_middleware =
+                create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
+
             if !sessions.contains_key(req_session_id) {
                 sessions.insert(
                     req_session_id.to_string(),
@@ -536,34 +557,27 @@ pub(crate) async fn handle_request(
                         cwd: cwd.to_string(),
                         history,
                         cancel_token: None,
-                        frozen: None,
+                        frozen: Some(frozen_data),
                         recall_items: Vec::new(),
                         agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
-                        workflow_middleware: None,
+                        workflow_middleware,
                     },
                 );
                 info!(session_id = %req_session_id, "Session resumed (new)");
             } else {
-                // Existing session: if history still empty, populate from ThreadStore
-                if let Some(s) = sessions.get_mut(req_session_id)
-                    && s.history.is_empty()
-                {
-                    s.history = history;
+                // Existing session: populate missing fields
+                if let Some(s) = sessions.get_mut(req_session_id) {
+                    if s.history.is_empty() {
+                        s.history = history;
+                    }
+                    if s.frozen.is_none() {
+                        s.frozen = Some(frozen_data);
+                    }
+                    if s.workflow_middleware.is_none() {
+                        s.workflow_middleware = workflow_middleware;
+                    }
                 }
                 info!(session_id = %req_session_id, "Session resumed (existing)");
-            }
-
-            // ── Freeze session data at resume time ──
-            cfg.session_manager.ensure_session(req_session_id, cwd);
-            // 确保 caps 已在 registry 中注册（MpscTransport 无 initialize，默认全 true）
-            cfg.session_manager.ensure_session_caps(req_session_id);
-            let frozen_data = cfg.session_manager.build_frozen_data(
-                cwd,
-                &cfg.plugin_skill_roots,
-                &cfg.plugin_agent_dirs,
-            );
-            if let Some(s) = sessions.get_mut(req_session_id) {
-                s.frozen = Some(frozen_data);
             }
 
             let resp = ResumeSessionResponse::new();
@@ -591,6 +605,18 @@ pub(crate) async fn handle_request(
                     .map_err(|e| AcpError::new(-32603, format!("{e}")))?;
 
             let new_session_id = new_thread_id.clone();
+
+            // ── 先构建 frozen + workflow_middleware ──
+            cfg.session_manager.ensure_session(&new_session_id, cwd);
+            cfg.session_manager.ensure_session_caps(&new_session_id);
+            let frozen_data = cfg.session_manager.build_frozen_data(
+                cwd,
+                &cfg.plugin_skill_roots,
+                &cfg.plugin_agent_dirs,
+            );
+            let workflow_middleware =
+                create_session_workflow_middleware(cfg, cwd, &new_session_id, &frozen_data);
+
             sessions.insert(
                 new_session_id.clone(),
                 SessionState {
@@ -599,25 +625,12 @@ pub(crate) async fn handle_request(
                     cwd: cwd.to_string(),
                     history: copied_history,
                     cancel_token: None,
-                    frozen: None,
+                    frozen: Some(frozen_data),
                     recall_items: Vec::new(),
                     agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
-                    workflow_middleware: None,
+                    workflow_middleware,
                 },
             );
-
-            // ── Freeze session data at fork time ──
-            cfg.session_manager.ensure_session(&new_session_id, cwd);
-            // 确保 caps 已在 registry 中注册（MpscTransport 无 initialize，默认全 true）
-            cfg.session_manager.ensure_session_caps(&new_session_id);
-            let frozen_data = cfg.session_manager.build_frozen_data(
-                cwd,
-                &cfg.plugin_skill_roots,
-                &cfg.plugin_agent_dirs,
-            );
-            if let Some(s) = sessions.get_mut(&new_session_id) {
-                s.frozen = Some(frozen_data);
-            }
 
             info!(source = %source_id, new = %new_session_id, "Session forked");
             let resp = ForkSessionResponse::new(SessionId::new(new_session_id));
@@ -885,6 +898,33 @@ pub(crate) async fn handle_request(
                     "marketplace": r.marketplace,
                 })
             }).collect::<Vec<_>>() }))
+        }
+
+        "session/rename" => {
+            let session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+            let title = params
+                .get("title")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing title"))?;
+
+            cfg.thread_store
+                .update_title(&session_id.to_string(), title)
+                .await
+                .map_err(|e| AcpError::new(-32603, format!("Failed to rename session: {e}")))?;
+
+            // 通过 session/update 通知推送新的标题给外部客户端
+            super::notify::send_session_info_update_with_title(transport, session_id, Some(title))
+                .await;
+
+            info!(session_id = %session_id, title = %title, "Session renamed");
+
+            Ok(serde_json::json!({
+                "sessionId": session_id,
+                "title": title,
+            }))
         }
 
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),

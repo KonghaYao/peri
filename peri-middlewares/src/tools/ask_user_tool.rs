@@ -138,9 +138,5 @@ impl BaseTool for AskUserTool {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::*;
-    include!("ask_user_tool_test.rs");
-}
+#[path = "ask_user_tool_test.rs"]
+mod tests;

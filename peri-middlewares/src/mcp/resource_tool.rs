@@ -181,7 +181,5 @@ impl BaseTool for McpResourceTool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("resource_tool_test.rs");
-}
+#[path = "resource_tool_test.rs"]
+mod tests;

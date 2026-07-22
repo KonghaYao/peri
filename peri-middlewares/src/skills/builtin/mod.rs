@@ -60,6 +60,5 @@ pub fn parse_builtin_frontmatter(content: &str) -> Option<(String, String)> {
 }
 
 #[cfg(test)]
-mod tests {
-    include!("../builtin_test.rs");
-}
+#[path = "mod_test.rs"]
+mod tests;

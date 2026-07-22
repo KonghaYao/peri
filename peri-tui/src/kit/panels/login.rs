@@ -1136,4 +1136,5 @@ fn provider_type_label(provider_type: &str) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {}
+#[path = "login_test.rs"]
+mod tests;

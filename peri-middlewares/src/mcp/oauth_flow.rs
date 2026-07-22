@@ -234,7 +234,5 @@ impl OAuthFlowManager {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("oauth_flow_test.rs");
-}
+#[path = "oauth_flow_test.rs"]
+mod tests;

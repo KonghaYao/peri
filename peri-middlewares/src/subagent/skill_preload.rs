@@ -5,7 +5,7 @@ use peri_agent::{
     middleware::{r#trait::Middleware, state::MiddlewareState},
 };
 
-use crate::skills::{loader::resolve_skill_roots, scan_skill_roots, SkillRoot};
+use crate::skills::SkillRoot;
 
 /// 从文本中提取 `/skill-name` 模式的 skill 名称
 ///
@@ -113,36 +113,35 @@ impl Middleware for SkillPreloadMiddleware {
             return Ok(());
         }
 
-        let roots = resolve_skill_roots(&self.cwd, self.plugin_roots.clone(), self.disable_bundled);
+        let cwd = self.cwd.clone();
+        let plugin_roots = self.plugin_roots.clone();
+        let disable_bundled = self.disable_bundled;
         let names_lower: Vec<String> = skill_names.iter().map(|s| s.to_lowercase()).collect();
 
-        // 在 blocking 线程中扫描目录 + 读取文件内容
+        // 在 blocking 线程中查找并读取 skill 内容
+        // 委托给 skills::loader::find_skill_content 公共函数，避免重复实现。
         let skill_contents = tokio::task::spawn_blocking(move || {
-            let all_skills = scan_skill_roots(&roots);
-            all_skills
-                .into_iter()
-                .filter(|s| {
-                    let skill_name_lower = s.name.to_lowercase();
-                    names_lower.iter().any(|name| {
-                        // 精确匹配（/plan）
-                        skill_name_lower == *name
-                        // 或去掉命名空间前缀后匹配（/ecc:plan → plan）
-                        || name.rsplit_once(':').map(|(_, n)| n.to_lowercase()).as_deref() == Some(&skill_name_lower)
+            names_lower
+                .iter()
+                .filter_map(|name| {
+                    // 精确匹配优先，再用命名空间后缀匹配（/ecc:plan → plan）
+                    crate::skills::loader::find_skill_content(
+                        &cwd,
+                        plugin_roots.clone(),
+                        disable_bundled,
+                        name,
+                    )
+                    .or_else(|| {
+                        name.rsplit_once(':').and_then(|(_, suffix)| {
+                            crate::skills::loader::find_skill_content(
+                                &cwd,
+                                plugin_roots.clone(),
+                                disable_bundled,
+                                suffix,
+                            )
+                        })
                     })
-                })
-                .filter_map(|s| {
-                    // Builtin source 走常量数组查找（虚拟路径无文件），其他 source 走磁盘读取
-                    // 注意：本文件在 peri-middlewares crate 内部，必须用 crate:: 路径
-                    // （不能用 peri_middlewares::，否则编译失败）
-                    let content = if matches!(s.source, crate::skills::SkillSource::Builtin) {
-                        crate::skills::builtin::BUILTIN_SKILLS
-                            .iter()
-                            .find(|bs| bs.name == s.name)
-                            .map(|bs| bs.content.to_string())
-                    } else {
-                        std::fs::read_to_string(&s.path).ok()
-                    };
-                    content.map(|c| (s.path.to_string_lossy().to_string(), c))
+                    .map(|(meta, content)| (meta.path.to_string_lossy().to_string(), content))
                 })
                 .collect::<Vec<_>>()
         })
@@ -183,10 +182,5 @@ impl Middleware for SkillPreloadMiddleware {
 }
 
 #[cfg(test)]
-mod tests {
-    use peri_agent::{agent::state::AgentState, middleware::r#trait::Middleware};
-    use tempfile::tempdir;
-
-    use super::*;
-    include!("skill_preload_test.rs");
-}
+#[path = "skill_preload_test.rs"]
+mod tests;

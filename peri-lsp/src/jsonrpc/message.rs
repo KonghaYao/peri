@@ -71,7 +71,5 @@ impl JsonRpcNotification {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("message_test.rs");
-}
+#[path = "message_test.rs"]
+mod tests;

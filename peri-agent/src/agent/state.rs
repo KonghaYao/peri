@@ -264,7 +264,5 @@ impl AgentState {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("state_test.rs");
-}
+#[path = "state_test.rs"]
+mod tests;

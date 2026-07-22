@@ -258,7 +258,5 @@ impl ReactLLM for BaseModelReactLLM {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("react_adapter_test.rs");
-}
+#[path = "react_adapter_test.rs"]
+mod tests;

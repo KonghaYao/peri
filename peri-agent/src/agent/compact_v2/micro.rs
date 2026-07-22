@@ -23,6 +23,11 @@ use crate::session::transcript::{MessageTranscript, TranscriptEntry};
 ///
 /// 返回被标记的消息数量。
 pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig) -> usize {
+    /// 检查工具名是否应被截断（不在黑名单中）
+    fn tool_should_truncate(tool_name: &str, excluded: &[String]) -> bool {
+        !excluded.iter().any(|e| e.eq_ignore_ascii_case(tool_name))
+    }
+
     let ancestor_len = transcript.ancestor_len();
     let entries = transcript.entries();
     if entries.len() <= ancestor_len {
@@ -70,21 +75,26 @@ pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig)
         }
 
         let should_truncate = match msg {
-            // Tool 消息：白名单工具 + 非错误
+            // Tool 消息（tool_result 输出）→ 工具名不在黑名单则截断
             BaseMessage::Tool {
                 tool_call_id,
                 is_error,
                 ..
             } => {
                 if *is_error {
-                    false
+                    false // 错误输出不截断，保留诊断信息
                 } else {
-                    find_tool_name_in_entries(own_entries, tool_call_id)
-                        .map(|name| config.micro_compactable_tools.contains(&name))
+                    let tool_name = find_tool_name_for_result(own_entries, i, tool_call_id);
+                    tool_name
+                        .map(|n| tool_should_truncate(&n, &config.micro_excluded_tools))
                         .unwrap_or(false)
                 }
             }
-            // 非 Tool 消息：检查是否含 Image/Document
+            // Ai 消息（tool_use 输入 arguments）→ 任一 tool_call 不在黑名单则截断
+            BaseMessage::Ai { tool_calls, .. } => tool_calls
+                .iter()
+                .any(|tc| tool_should_truncate(&tc.name, &config.micro_excluded_tools)),
+            // 其他消息：检查 Image/Document 块
             _ => {
                 let blocks = msg.message_content().content_blocks();
                 blocks.iter().any(|b| {
@@ -114,9 +124,25 @@ pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig)
     affected
 }
 
-/// 在条目列表中查找 Tool 消息对应的工具调用名称
-fn find_tool_name_in_entries(entries: &[TranscriptEntry], tool_call_id: &str) -> Option<String> {
-    for entry in entries.iter().rev() {
+/// 在 0..pos 范围内向前查找 tool_call_id 对应的工具名称。
+fn find_tool_name_for_result(
+    entries: &[TranscriptEntry],
+    result_pos: usize,
+    tool_call_id: &str,
+) -> Option<String> {
+    // 就近查找：Ai 消息通常在 tool_result 之前 1-2 条
+    let _start = result_pos.saturating_sub(5);
+    for entry in entries[..result_pos].iter().rev().take(5) {
+        if let BaseMessage::Ai { tool_calls, .. } = &entry.message {
+            for tc in tool_calls {
+                if tc.id == tool_call_id {
+                    return Some(tc.name.clone());
+                }
+            }
+        }
+    }
+    // 全范围回退（兼容异常排序）
+    for entry in entries[..result_pos].iter().rev() {
         if let BaseMessage::Ai { tool_calls, .. } = &entry.message {
             for tc in tool_calls {
                 if tc.id == tool_call_id {
@@ -162,126 +188,5 @@ fn compute_round_starts(entries: &[TranscriptEntry]) -> Vec<usize> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::compact_v2::config::CompactConfig;
-    use crate::messages::{BaseMessage, MessageContent};
-    use crate::session::transcript::MessageTranscript;
-
-    fn make_human(text: &str) -> BaseMessage {
-        BaseMessage::human(MessageContent::text(text.to_string()))
-    }
-
-    fn make_ai_with_tool(text: &str, tool_name: &str, tool_id: &str) -> BaseMessage {
-        BaseMessage::ai_with_tool_calls(
-            MessageContent::text(text.to_string()),
-            vec![crate::messages::ToolCallRequest::new(
-                tool_id,
-                tool_name,
-                serde_json::json!({}),
-            )],
-        )
-    }
-
-    fn make_tool_result(tool_call_id: &str, text: &str) -> BaseMessage {
-        BaseMessage::tool_result(
-            tool_call_id.to_string(),
-            MessageContent::text(text.to_string()),
-        )
-    }
-
-    // ── Micro Compact 测试 ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_micro_compact_empty_transcript() {
-        let mut t = MessageTranscript::new();
-        let config = CompactConfig::default();
-        let affected = micro_compact(&mut t, &config);
-        assert_eq!(affected, 0);
-    }
-
-    #[test]
-    fn test_micro_compact_all_within_stale_window() {
-        let mut t = MessageTranscript::new();
-        t.append(make_human("user question"));
-        let _id = t.append(make_tool_result("call_1", "large output here"));
-        let config = CompactConfig::default();
-        // 只有 1 轮，stale_steps 默认 5，全部在窗口内 → 不截断
-        let affected = micro_compact(&mut t, &config);
-        assert_eq!(affected, 0);
-    }
-
-    #[test]
-    fn test_micro_compact_marks_old_tool_results() {
-        let mut t = MessageTranscript::new();
-        // 构造 6 轮对话（stale_steps=5，第 0 轮应被截断）
-        for i in 0..6 {
-            t.append(make_human(&format!("question {}", i)));
-            let ai_id = format!("call_{}", i);
-            t.append(make_ai_with_tool("thinking...", "Bash", &ai_id));
-            t.append(make_tool_result(&ai_id, &format!("output {}", i)));
-        }
-
-        let config = CompactConfig::default();
-        let affected = micro_compact(&mut t, &config);
-        // 第 0 轮的 Bash tool result 应被标 truncated
-        assert!(affected > 0, "应有消息被标 truncated");
-    }
-
-    #[test]
-    fn test_micro_compact_skips_error_tool_results() {
-        let mut t = MessageTranscript::new();
-        t.append(make_human("user question"));
-        t.append(make_ai_with_tool("thinking...", "Bash", "call_1"));
-        let err_result =
-            BaseMessage::tool_result("call_1".to_string(), MessageContent::text("error output"));
-        // BaseMessage::tool_result 没有 is_error 参数，需手动构造
-        t.append(err_result.clone());
-
-        let config = CompactConfig::default();
-        let affected = micro_compact(&mut t, &config);
-        assert_eq!(affected, 0, "错误 tool result 不应被截断");
-    }
-
-    #[test]
-    fn test_micro_compact_respects_ancestor_boundary() {
-        let ancestor = make_human("ancestor message");
-        let mut t = MessageTranscript::new().with_ancestor(vec![ancestor]);
-        t.append(make_human("own message"));
-
-        let config = CompactConfig::default();
-        let affected = micro_compact(&mut t, &config);
-        assert_eq!(affected, 0, "ancestor 消息不应被截断");
-        // ancestor 消息不应被标 truncated
-        let ancestor_id = t.entries()[0].message.id();
-        assert!(!t.flags(ancestor_id).truncated);
-    }
-
-    #[test]
-    fn test_micro_compact_no_duplicate_truncation() {
-        let mut t = MessageTranscript::new();
-        // 构造足够多的轮次
-        for i in 0..7 {
-            t.append(make_human(&format!("q {}", i)));
-            t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
-            t.append(make_tool_result(&format!("c_{}", i), &format!("out {}", i)));
-        }
-
-        let config = CompactConfig::default();
-        let first = micro_compact(&mut t, &config);
-        let second = micro_compact(&mut t, &config);
-        assert_eq!(second, 0, "重复调用不应增加标记");
-        assert_eq!(first, second + first.saturating_sub(0));
-    }
-
-    #[test]
-    fn test_micro_compact_truncated_still_visible() {
-        let mut t = MessageTranscript::new();
-        let id = t.append(make_human("some message"));
-        t.set_truncated(id, true);
-
-        let visible = t.visible_messages();
-        assert_eq!(visible.len(), 1, "truncated 消息仍然可见");
-        assert_eq!(visible[0].id(), id);
-    }
-}
+#[path = "micro_test.rs"]
+mod tests;

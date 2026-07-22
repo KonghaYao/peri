@@ -348,7 +348,5 @@ impl BackgroundTaskRegistry {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("background_test.rs");
-}
+#[path = "background_test.rs"]
+mod tests;

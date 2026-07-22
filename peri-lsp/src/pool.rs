@@ -291,8 +291,5 @@ impl LspServerPool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::LspServerConfig;
-    include!("pool_test.rs");
-}
+#[path = "pool_test.rs"]
+mod tests;

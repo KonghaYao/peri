@@ -325,6 +325,12 @@ impl AgentExecutor for WorkflowAgentExecutor {
             FilesystemMiddleware::build_tools(&self.ctx.cwd);
         tools.extend(TerminalMiddleware::build_tools(&self.ctx.cwd));
         tools.extend(WebMiddleware::build_tools());
+        // Workflow agent 无 plugin_skill_roots，仅 project-level skill 可用
+        tools.push(Box::new(peri_middlewares::SkillTool::new(
+            self.ctx.cwd.clone(),
+            vec![],
+            false,
+        )));
 
         // 3. allowedTools 过滤
         if let Some(ref allowed) = params.allowed_tools {
