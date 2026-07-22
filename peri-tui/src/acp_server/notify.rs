@@ -170,13 +170,27 @@ pub(crate) async fn send_available_commands_update(
     let _ = transport.send_notification("session/update", payload).await;
 }
 
-/// Push a `SessionInfoUpdate` notification after prompt/compact completes.
+/// Push a `SessionInfoUpdate` notification after prompt/compact completes,
+/// or after a session rename.
 pub(crate) async fn send_session_info_update(
     transport: &dyn peri_acp::transport::AcpTransport,
     session_id: &str,
 ) {
+    send_session_info_update_with_title(transport, session_id, None).await;
+}
+
+/// Push a `SessionInfoUpdate` notification with an optional title override.
+/// Called from the `session/rename` handler.
+pub(crate) async fn send_session_info_update_with_title(
+    transport: &dyn peri_acp::transport::AcpTransport,
+    session_id: &str,
+    title: Option<&str>,
+) {
     use agent_client_protocol::schema::v1::SessionInfoUpdate;
-    let info = SessionInfoUpdate::new().updated_at(chrono::Utc::now().to_rfc3339());
+    let mut info = SessionInfoUpdate::new().updated_at(chrono::Utc::now().to_rfc3339());
+    if let Some(t) = title {
+        info = info.title(t.to_string());
+    }
     let update = SessionUpdate::SessionInfoUpdate(info);
     let update_value = match serde_json::to_value(&update) {
         Ok(p) => p,

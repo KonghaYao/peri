@@ -553,7 +553,7 @@ fn handle_session_update(
                 .to_string();
             Some(AcpEventData::LocalUserBubble { text })
         }
-        _ => None, // unknown tags
+        _ => None, // unknown tags, including session_info_update (metadata-only, no stream event)
     }
 }
 

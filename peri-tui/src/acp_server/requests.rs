@@ -900,6 +900,33 @@ pub(crate) async fn handle_request(
             }).collect::<Vec<_>>() }))
         }
 
+        "session/rename" => {
+            let session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+            let title = params
+                .get("title")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing title"))?;
+
+            cfg.thread_store
+                .update_title(&session_id.to_string(), title)
+                .await
+                .map_err(|e| AcpError::new(-32603, format!("Failed to rename session: {e}")))?;
+
+            // 通过 session/update 通知推送新的标题给外部客户端
+            super::notify::send_session_info_update_with_title(transport, session_id, Some(title))
+                .await;
+
+            info!(session_id = %session_id, title = %title, "Session renamed");
+
+            Ok(serde_json::json!({
+                "sessionId": session_id,
+                "title": title,
+            }))
+        }
+
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),
     }
 }
