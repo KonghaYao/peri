@@ -61,11 +61,35 @@ pub fn spawn_subagent_event_forwarder(
             "forwarder spawned"
         );
         loop {
-            // biased + render 优先：保证同一 ReAct 迭代的 Render 事件在 State 事件
+            // biased + observe 优先：确保 StageStarted 先于 ToolStarted 到达 tracer，
+            // 避免 active_stage=None 时工具 parent 错误回落到主 agent。
+            // render 优先于 state：保证同一 ReAct 迭代的 Render 事件在 State 事件
             // 之前被消费，避免 commit_iteration 与残留 Render 事件乱序导致的 partial 污染。
-            // 虽然子 Agent 的 TurnCompleted 已被过滤不转发，biased 仍是防御性时序保证。
             tokio::select! {
                 biased;
+                ev_res = handles.observe_rx.recv() => {
+                    match ev_res {
+                        Ok(ev) => {
+                            // Langfuse bridge 调用必须在 ev 被 observe_event_to_executor move 之前
+                            if let Some(ref b) = bridge {
+                                b.process_observe_event(&ev);
+                            }
+                            if let Some(mut exec_ev) = observe_event_to_executor(ev) {
+                                set_source_agent_id(&mut exec_ev, &child_thread_id);
+                                if let Some(h) = &event_handler {
+                                    h.on_event(exec_ev);
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(
+                                n,
+                                "[subagent-forwarder] observe_rx lagged, events dropped"
+                            );
+                        }
+                    }
+                }
                 Some(ev) = handles.render_rx.recv() => {
                     // 过滤：子 Agent 的 TurnCommitted / HitlPending 不应转发到父 Agent
                     // （TurnCompleted 已迁移到 RenderEvent；HitlPending 由父 Agent
@@ -111,29 +135,6 @@ pub fn spawn_subagent_event_forwarder(
                             if let Some(h) = &event_handler {
                                 h.on_event(exec_ev);
                             }
-                        }
-                    }
-                }
-                ev_res = handles.observe_rx.recv() => {
-                    match ev_res {
-                        Ok(ev) => {
-                            // Langfuse bridge 调用必须在 ev 被 observe_event_to_executor move 之前
-                            if let Some(ref b) = bridge {
-                                b.process_observe_event(&ev);
-                            }
-                            if let Some(mut exec_ev) = observe_event_to_executor(ev) {
-                                set_source_agent_id(&mut exec_ev, &child_thread_id);
-                                if let Some(h) = &event_handler {
-                                    h.on_event(exec_ev);
-                                }
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!(
-                                n,
-                                "[subagent-forwarder] observe_rx lagged, events dropped"
-                            );
                         }
                     }
                 }

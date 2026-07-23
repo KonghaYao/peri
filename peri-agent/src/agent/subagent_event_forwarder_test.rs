@@ -472,3 +472,77 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
         events[2]
     );
 }
+
+/// 回归测试：biased select! 保证 Observe 事件先于 Render 事件被消费。
+///
+/// BUG 1 修复：observe_rx 的分支现在在 render_rx 之前，确保 StageStarted（来自
+/// observe_rx）在 ToolStarted（来自 render_rx）之前到达 tracer，避免
+/// active_stage=None 时工具 parent 错误回落到主 agent。
+///
+/// 场景模拟：
+/// 1. SubagentStart    ─── Observe（observe_rx → 先消费）
+/// 2. ToolStarted(Read) ─── Render  （render_rx → 后消费）
+///
+/// 关键不变量：当 render 和 observe 事件同时 ready 时，biased 应优先消费 observe。
+#[tokio::test]
+async fn test_forwarder_observes_before_render_when_both_ready() {
+    let (bus, handles) = EventBus::new(EventBusConfig::default());
+    let captured: Arc<Mutex<Vec<ExecutorEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let handler = Arc::new(CapturingHandler {
+        events: Arc::clone(&captured),
+    });
+
+    let _forwarder =
+        spawn_subagent_event_forwarder(handles, Some(handler), None, "test".to_string());
+
+    // 给 forwarder 一点启动时间
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let (turn_id, agent_id) = ids();
+
+    // 同步 emit：先 emit render（ToolStarted），再 emit observe（SubagentStart）
+    // 由于 biased select observe_rx 在前，observe 事件应先被消费
+    bus.emit_render(RenderEvent::ToolStarted {
+        turn_id,
+        agent_id,
+        tool_call_id: "tc_1".to_string(),
+        name: "Read".to_string(),
+        input: serde_json::Value::Null,
+    });
+    bus.emit_observe(ObserveEvent::SubagentStart {
+        turn_id,
+        agent_id,
+        child_agent_id: AgentId::new(),
+        agent_name: "explore".to_string(),
+        is_background: false,
+    });
+
+    wait_for_event_count(&captured, 2).await;
+
+    let events: Vec<ExecutorEvent> = captured.lock().clone();
+    assert_eq!(
+        events.len(),
+        2,
+        "应有 2 个事件（1 observe + 1 render）：{:?}",
+        events
+    );
+
+    // 第 1 个应为 Observe 事件（SubagentStarted）
+    assert!(
+        matches!(events[0], ExecutorEvent::SubagentStarted { ref agent_name, .. } if agent_name == "explore"),
+        "第 1 个应为 SubagentStarted（observe 优先消费），实际：{:?}",
+        events[0]
+    );
+
+    // 第 2 个应为 Render 事件（ToolStart）
+    assert!(
+        matches!(
+            &events[1],
+            ExecutorEvent::ToolStart {
+                tool_call_id, name, ..
+            } if tool_call_id == "tc_1" && name == "Read"
+        ),
+        "第 2 个应为 ToolStart(Read)（render 后消费），实际：{:?}",
+        events[1]
+    );
+}
