@@ -26,14 +26,20 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) {
         state.phase = SessionPhase::PromptRunning;
         let should_push = match super::current_streaming_mode() {
             super::StreamingMode::Streaming => true,
-            super::StreamingMode::Block => super::has_md_block_boundary_since(
-                &state.current_turn.text,
-                state.last_pushed_text_len,
-            ),
+            super::StreamingMode::Block => {
+                if super::has_md_block_boundary_since(
+                    &state.current_turn.text,
+                    state.last_pushed_text_len,
+                ) {
+                    state.last_pushed_text_len = state.current_turn.text.chars().count();
+                    true
+                } else {
+                    false
+                }
+            }
             super::StreamingMode::None => false,
         };
         if should_push {
-            state.last_pushed_text_len = state.current_turn.text.chars().count();
             super::render::push_view_models(state);
         }
     }
@@ -69,14 +75,20 @@ pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningC
         state.phase = SessionPhase::PromptRunning;
         let should_push = match super::current_streaming_mode() {
             super::StreamingMode::Streaming => true,
-            super::StreamingMode::Block => super::has_md_block_boundary_since(
-                &state.current_turn.reasoning,
-                state.last_pushed_reasoning_len,
-            ),
+            super::StreamingMode::Block => {
+                if super::has_md_block_boundary_since(
+                    &state.current_turn.reasoning,
+                    state.last_pushed_reasoning_len,
+                ) {
+                    state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+                    true
+                } else {
+                    false
+                }
+            }
             super::StreamingMode::None => false,
         };
         if should_push {
-            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
             super::render::push_view_models(state);
         }
     }
