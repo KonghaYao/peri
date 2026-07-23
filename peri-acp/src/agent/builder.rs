@@ -459,13 +459,13 @@ pub(crate) fn build_agent(
     chain.add(Box::new(peri_middlewares::PluginMiddleware::new(
         plugin_loaded,
     )));
-    chain.add(Box::new({
-        let mut mw = SkillsMiddleware::new().with_plugin_roots(plugin_skill_roots.clone());
-        if let Some(summary) = frozen_skill_summary {
-            mw = mw.with_frozen_summary(summary);
-        }
-        mw
-    }));
+    // 构造 SkillsMiddleware 并提取 skills 缓存 Arc，供 SkillToolMiddleware 共享
+    let mut skills_mw = SkillsMiddleware::new().with_plugin_roots(plugin_skill_roots.clone());
+    if let Some(summary) = frozen_skill_summary {
+        skills_mw = skills_mw.with_frozen_summary(summary);
+    }
+    let skills_cache = skills_mw.skills_cache();
+    chain.add(Box::new(skills_mw));
     chain.add(Box::new(
         SkillPreloadMiddleware::new(preload_skills, &cwd)
             .with_plugin_roots(plugin_skill_roots.clone()),
@@ -475,6 +475,8 @@ pub(crate) fn build_agent(
         peri_middlewares::SkillToolMiddleware::new()
             .with_plugin_roots(plugin_skill_roots.clone())
             .with_disable_bundled(disable_bundled)
+            // 共享 SkillsMiddleware 的 skills 缓存，避免工具调用时重复磁盘扫描
+            .with_cached_skills(skills_cache)
     }));
     chain.add(Box::new(peri_middlewares::AtMentionMiddleware::new(
         cwd.clone().into(),

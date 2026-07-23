@@ -9,8 +9,9 @@ use std::{
 
 use async_trait::async_trait;
 pub use loader::{
-    list_skills, load_skill_metadata, resolve_skill_roots, scan_skill_roots, SkillMetadata,
-    SkillRoot, SkillSource, MAX_SCAN_DEPTH, MAX_SKILLS_DIRS_PER_ROOT,
+    find_skill_content, find_skill_in_list, list_skills, load_skill_metadata, resolve_skill_roots,
+    scan_skill_roots, SkillMetadata, SkillRoot, SkillSource, MAX_SCAN_DEPTH,
+    MAX_SKILLS_DIRS_PER_ROOT,
 };
 use peri_agent::{
     error::AgentResult,
@@ -90,6 +91,9 @@ pub struct SkillsMiddleware {
     disable_bundled: bool,
     /// Cached prompt contribution (populated in before_agent, returned by prompt_contribution).
     cached_contribution: Arc<RwLock<Option<String>>>,
+    /// Session 级 skills 列表缓存：非 frozen 路径由 before_agent 填充，
+    /// frozen 路径由工具首次调用时惰性扫描并写入。
+    cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
 }
 
 impl SkillsMiddleware {
@@ -102,6 +106,7 @@ impl SkillsMiddleware {
             frozen_summary: None,
             disable_bundled: false,
             cached_contribution: Arc::new(RwLock::new(None)),
+            cached_skills: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -149,6 +154,11 @@ impl SkillsMiddleware {
             *self.cached_contribution.write().unwrap() = Some(summary);
         }
         self
+    }
+
+    /// 获取 skills 缓存的 Arc 引用，供其他中间件（如 SkillToolMiddleware）共享。
+    pub fn skills_cache(&self) -> Arc<RwLock<Option<Vec<SkillMetadata>>>> {
+        Arc::clone(&self.cached_skills)
     }
 
     /// 设置是否禁用 builtin skill（默认 false）
@@ -280,16 +290,18 @@ impl Middleware for SkillsMiddleware {
             Box::new(tools::SkillTool::new(
                 plugin_roots.clone(),
                 self.disable_bundled,
+                Arc::clone(&self.cached_skills),
             )),
             Box::new(tools::DiscoverSkillsTool::new(
                 plugin_roots,
                 self.disable_bundled,
+                Arc::clone(&self.cached_skills),
             )),
         ]
     }
 
     async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
-        // 使用冻结摘要时跳过所有磁盘 I/O
+        // 使用冻结摘要时跳过所有磁盘 I/O（cached_skills 由工具首次调用时惰性填充）
         if let Some(ref summary) = self.frozen_summary {
             if !summary.trim().is_empty() {
                 *self.cached_contribution.write().unwrap() = Some(summary.clone());
@@ -309,11 +321,14 @@ impl Middleware for SkillsMiddleware {
 
         if skills.is_empty() {
             *self.cached_contribution.write().unwrap() = None;
+            *self.cached_skills.write().unwrap() = None;
             return Ok(());
         }
 
         let summary = Self::build_summary(&skills);
         *self.cached_contribution.write().unwrap() = Some(summary);
+        // 缓存 skills 列表，后续工具调用无需重复扫描磁盘
+        *self.cached_skills.write().unwrap() = Some(skills);
         Ok(())
     }
 }

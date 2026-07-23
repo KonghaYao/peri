@@ -30,7 +30,12 @@ async fn test_finds_project_skill() {
     let skills_dir = dir.path().join(".claude").join("skills");
     write_skill(&skills_dir, "auto-issue-fixer", "Issue lifecycle manager");
 
-    let tool = SkillTool::new(dir.path().to_str().unwrap(), vec![], false);
+    let tool = SkillTool::new(
+        dir.path().to_str().unwrap(),
+        vec![],
+        false,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    );
     let result = tool
         .invoke(serde_json::json!({"skill": "auto-issue-fixer"}), make_ctx())
         .await
@@ -46,7 +51,12 @@ async fn test_finds_project_skill() {
 async fn test_finds_builtin_skill() {
     // builtin skill（use-artifacts）应可被查找到
     let dir = tempfile::tempdir().unwrap();
-    let tool = SkillTool::new(dir.path().to_str().unwrap(), vec![], false);
+    let tool = SkillTool::new(
+        dir.path().to_str().unwrap(),
+        vec![],
+        false,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    );
     let result = tool
         .invoke(serde_json::json!({"skill": "use-artifacts"}), make_ctx())
         .await
@@ -64,7 +74,12 @@ async fn test_case_insensitive_match() {
     let skills_dir = dir.path().join(".claude").join("skills");
     write_skill(&skills_dir, "my-skill", "Test skill");
 
-    let tool = SkillTool::new(dir.path().to_str().unwrap(), vec![], false);
+    let tool = SkillTool::new(
+        dir.path().to_str().unwrap(),
+        vec![],
+        false,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    );
     let result = tool
         .invoke(serde_json::json!({"skill": "My-Skill"}), make_ctx())
         .await
@@ -82,7 +97,12 @@ async fn test_args_passthrough() {
     let skills_dir = dir.path().join(".claude").join("skills");
     write_skill(&skills_dir, "test-skill", "Test");
 
-    let tool = SkillTool::new(dir.path().to_str().unwrap(), vec![], false);
+    let tool = SkillTool::new(
+        dir.path().to_str().unwrap(),
+        vec![],
+        false,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    );
     let result = tool
         .invoke(
             serde_json::json!({"skill": "test-skill", "args": "--verbose"}),
@@ -105,7 +125,12 @@ async fn test_project_skill_overrides_builtin() {
     let skills_dir = dir.path().join(".claude").join("skills");
     write_skill(&skills_dir, "use-artifacts", "Custom project version");
 
-    let tool = SkillTool::new(dir.path().to_str().unwrap(), vec![], false);
+    let tool = SkillTool::new(
+        dir.path().to_str().unwrap(),
+        vec![],
+        false,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    );
     let result = tool
         .invoke(serde_json::json!({"skill": "use-artifacts"}), make_ctx())
         .await
@@ -133,7 +158,12 @@ async fn test_not_found_with_suggestions() {
     write_skill(&skills_dir, "auto-issue-fixer", "Issue lifecycle");
     write_skill(&skills_dir, "blog-writer", "Blog writing");
 
-    let tool = SkillTool::new(dir.path().to_str().unwrap(), vec![], false);
+    let tool = SkillTool::new(
+        dir.path().to_str().unwrap(),
+        vec![],
+        false,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    );
     let result = tool
         .invoke(serde_json::json!({"skill": "auto-iss-fixer"}), make_ctx())
         .await;
@@ -155,7 +185,12 @@ async fn test_not_found_with_suggestions() {
 #[tokio::test]
 async fn test_not_found_no_skills_available() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = SkillTool::new(dir.path().to_str().unwrap(), vec![], true); // disable_bundled=true
+    let tool = SkillTool::new(
+        dir.path().to_str().unwrap(),
+        vec![],
+        true,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    ); // disable_bundled=true
     let result = tool
         .invoke(serde_json::json!({"skill": "nonexistent"}), make_ctx())
         .await;
@@ -172,7 +207,12 @@ async fn test_not_found_no_skills_available() {
 #[tokio::test]
 async fn test_missing_skill_param() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = SkillTool::new(dir.path().to_str().unwrap(), vec![], false);
+    let tool = SkillTool::new(
+        dir.path().to_str().unwrap(),
+        vec![],
+        false,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    );
     let result = tool.invoke(serde_json::json!({}), make_ctx()).await;
 
     assert!(result.is_err(), "缺少 skill 参数应返回 Err");
@@ -184,7 +224,12 @@ async fn test_missing_skill_param() {
 async fn test_disable_bundled_excludes_builtin() {
     let dir = tempfile::tempdir().unwrap();
     // disable_bundled=true 时，builtin skill 不在查找范围内
-    let tool = SkillTool::new(dir.path().to_str().unwrap(), vec![], true);
+    let tool = SkillTool::new(
+        dir.path().to_str().unwrap(),
+        vec![],
+        true,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    );
     let result = tool
         .invoke(serde_json::json!({"skill": "use-artifacts"}), make_ctx())
         .await;
@@ -206,14 +251,24 @@ async fn test_disable_bundled_excludes_builtin() {
 #[test]
 fn test_tool_name_is_skill() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = SkillTool::new(dir.path().to_str().unwrap(), vec![], false);
+    let tool = SkillTool::new(
+        dir.path().to_str().unwrap(),
+        vec![],
+        false,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    );
     assert_eq!(tool.name(), "Skill");
 }
 
 #[test]
 fn test_tool_parameters_require_skill() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = SkillTool::new(dir.path().to_str().unwrap(), vec![], false);
+    let tool = SkillTool::new(
+        dir.path().to_str().unwrap(),
+        vec![],
+        false,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    );
     let params = tool.parameters();
     let required = params["required"].as_array().unwrap();
     let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();

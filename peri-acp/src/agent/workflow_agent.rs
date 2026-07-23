@@ -330,6 +330,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             self.ctx.cwd.clone(),
             vec![],
             false,
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
         )));
 
         // 3. allowedTools 过滤

@@ -358,6 +358,31 @@ pub fn find_skill_content(
     Some((found.clone(), content))
 }
 
+/// 在预扫描的 skills 列表中查找并加载 skill 内容（避免重复磁盘扫描）。
+///
+/// 与 [`find_skill_content`] 功能相同，但接受已扫描的 `Vec<SkillMetadata>`
+/// 而非自行调用 `scan_skill_roots`。调用方需自行维护缓存生命周期。
+pub fn find_skill_in_list(
+    skills: &[SkillMetadata],
+    skill_name: &str,
+) -> Option<(SkillMetadata, String)> {
+    let name_lower = skill_name.to_lowercase();
+    let found = skills
+        .iter()
+        .find(|s| s.name.to_lowercase() == name_lower)?;
+
+    let content = if matches!(found.source, SkillSource::Builtin) {
+        crate::skills::builtin::BUILTIN_SKILLS
+            .iter()
+            .find(|bs| bs.name == found.name)
+            .map(|bs| bs.content.to_string())?
+    } else {
+        std::fs::read_to_string(&found.path).ok()?
+    };
+
+    Some((found.clone(), content))
+}
+
 #[cfg(test)]
 #[path = "loader_test.rs"]
 mod tests;

@@ -3,6 +3,8 @@
 //! 仿照 Claude Code SkillTool，默认 inline 模式：工具按 skill 名称查找，
 //! 返回 SKILL.md 全文，LLM 按 skill 指导自行执行。
 
+use std::sync::{Arc, RwLock};
+
 use async_trait::async_trait;
 use peri_agent::{
     middleware::r#trait::Middleware,
@@ -27,6 +29,9 @@ pub struct SkillTool {
     cwd: String,
     plugin_roots: Vec<SkillRoot>,
     disable_bundled: bool,
+    /// SkillsMiddleware 在 before_agent 时预扫描的 skills 列表缓存。
+    /// 由 SkillToolMiddleware 在 collect_tools 时注入。
+    cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
 }
 
 impl SkillTool {
@@ -34,30 +39,46 @@ impl SkillTool {
         cwd: impl Into<String>,
         plugin_roots: Vec<SkillRoot>,
         disable_bundled: bool,
+        cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
     ) -> Self {
         Self {
             cwd: cwd.into(),
             plugin_roots,
             disable_bundled,
+            cached_skills,
         }
     }
 
     /// 按名称查找 skill 并返回 SKILL.md 内容（含路径前缀）。
-    /// 委托给 `skills::loader::find_skill_content` 公共函数。
+    /// 优先使用缓存的 skills 列表，避免重复磁盘扫描。
+    /// 缓存未命中时惰性扫描并写入（只在对话的第一次工具调用时发生）。
     fn lookup_skill(&self, skill_name: &str) -> Option<(SkillMetadata, String)> {
-        loader::find_skill_content(
-            &self.cwd,
-            self.plugin_roots.clone(),
-            self.disable_bundled,
-            skill_name,
-        )
+        // 优先使用缓存
+        if let Some(ref cached) = *self.cached_skills.read().unwrap() {
+            return loader::find_skill_in_list(cached, skill_name);
+        }
+        // fallback: 扫描磁盘，写入缓存，再查找
+        let roots = resolve_skill_roots(&self.cwd, self.plugin_roots.clone(), self.disable_bundled);
+        let skills = scan_skill_roots(&roots);
+        let result = loader::find_skill_in_list(&skills, skill_name);
+        *self.cached_skills.write().unwrap() = Some(skills);
+        result
     }
 
     /// 模糊匹配建议（复用 skim matcher 基础设施）
     fn fuzzy_suggest(&self, skill_name: &str) -> Vec<String> {
-        let roots = resolve_skill_roots(&self.cwd, self.plugin_roots.clone(), self.disable_bundled);
-        let skills = scan_skill_roots(&roots);
-        let candidate_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+        let candidate_names: Vec<String> =
+            if let Some(ref cached) = *self.cached_skills.read().unwrap() {
+                cached.iter().map(|s| s.name.clone()).collect()
+            } else {
+                let roots =
+                    resolve_skill_roots(&self.cwd, self.plugin_roots.clone(), self.disable_bundled);
+                let skills = scan_skill_roots(&roots);
+                let names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+                // 写入缓存供后续调用复用
+                *self.cached_skills.write().unwrap() = Some(skills);
+                names
+            };
         peri_agent::error_suggest::matcher::fuzzy_filter(&candidate_names, skill_name)
     }
 }
@@ -157,9 +178,14 @@ impl BaseTool for SkillTool {
 /// 职责单一：通过 `collect_tools` 提供 [`SkillTool`]。
 /// 与 [`SkillsMiddleware`]（摘要注入）和 [`SkillPreloadMiddleware`]（用户 /skill-name 触发）
 /// 职责分离，互不影响。
+///
+/// v2：接收共享的 `cached_skills` Arc，避免工具调用时重复磁盘扫描。
 pub struct SkillToolMiddleware {
     plugin_roots: Vec<SkillRoot>,
     disable_bundled: bool,
+    /// SkillsMiddleware 在 before_agent 时预扫描的 skills 列表缓存。
+    /// 由 builder 层从 SkillsMiddleware 获取后传入。
+    cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
 }
 
 impl SkillToolMiddleware {
@@ -167,6 +193,7 @@ impl SkillToolMiddleware {
         Self {
             plugin_roots: Vec::new(),
             disable_bundled: false,
+            cached_skills: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -177,6 +204,13 @@ impl SkillToolMiddleware {
 
     pub fn with_disable_bundled(mut self, disable: bool) -> Self {
         self.disable_bundled = disable;
+        self
+    }
+
+    /// 注入共享的 skills 缓存（由 SkillsMiddleware 预填充）。
+    /// 若未设置，工具首次调用时会自行扫描磁盘（fallback）。
+    pub fn with_cached_skills(mut self, cached: Arc<RwLock<Option<Vec<SkillMetadata>>>>) -> Self {
+        self.cached_skills = cached;
         self
     }
 }
@@ -198,6 +232,7 @@ impl Middleware for SkillToolMiddleware {
             cwd.to_string(),
             self.plugin_roots.clone(),
             self.disable_bundled,
+            Arc::clone(&self.cached_skills),
         ))]
     }
 }
