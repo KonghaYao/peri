@@ -657,14 +657,14 @@ impl peri_agent::agent::LangfuseBridgeLike for LangfuseBridge {
     fn process_render_event(&self, ev: &RenderEvent) {
         if let Some(u) = UnifiedLangfuseEvent::from_render_event(ev.clone()) {
             let mut guard = self.active_stage.lock();
-            self.process_event(&u, &mut *guard);
+            self.process_event(&u, &mut guard);
         }
     }
 
     fn process_observe_event(&self, ev: &ObserveEvent) {
         if let Some(u) = UnifiedLangfuseEvent::from_observe_event(ev.clone()) {
             let mut guard = self.active_stage.lock();
-            self.process_event(&u, &mut *guard);
+            self.process_event(&u, &mut guard);
         }
     }
 }

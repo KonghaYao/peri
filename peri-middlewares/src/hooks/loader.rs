@@ -25,7 +25,7 @@ fn parse_hooks_value_tolerant(
     let mut result = Vec::new();
     for (event_key, rules_value) in obj {
         // 逐事件 key 匹配已知事件名，跳过未知事件
-        let event = match HookEvent::from_str(event_key) {
+        let event = match HookEvent::parse(event_key) {
             Some(e) => e,
             None => {
                 tracing::warn!(
