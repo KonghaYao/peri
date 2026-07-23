@@ -325,10 +325,24 @@ impl AgentExecutor for WorkflowAgentExecutor {
             FilesystemMiddleware::build_tools(&self.ctx.cwd);
         tools.extend(TerminalMiddleware::build_tools(&self.ctx.cwd));
         tools.extend(WebMiddleware::build_tools());
-        // Workflow agent 无 plugin_skill_roots，仅 project-level skill 可用
-        tools.push(Box::new(peri_middlewares::SkillTool::new(
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-        )));
+        // Workflow agent 无 plugin_skill_roots，仅 project-level skill 可用。
+        // 在注册工具前扫描 project skills，预填充缓存（SkillTool 无懒扫描回退）。
+        let project_skills_root = std::path::PathBuf::from(&self.ctx.cwd)
+            .join(".claude")
+            .join("skills");
+        let skills = peri_middlewares::skills::loader::scan_skill_roots(&[
+            peri_middlewares::skills::SkillRoot {
+                path: project_skills_root,
+                source: peri_middlewares::skills::SkillSource::Project,
+                plugin_name: None,
+            },
+        ]);
+        let cached = std::sync::Arc::new(std::sync::RwLock::new(if skills.is_empty() {
+            None
+        } else {
+            Some(skills)
+        }));
+        tools.push(Box::new(peri_middlewares::SkillTool::new(cached)));
 
         // 3. allowedTools 过滤
         if let Some(ref allowed) = params.allowed_tools {

@@ -471,10 +471,7 @@ pub(crate) fn build_agent(
             .with_plugin_roots(plugin_skill_roots.clone()),
     ));
     chain.add(Box::new({
-        let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
         peri_middlewares::SkillToolMiddleware::new()
-            .with_plugin_roots(plugin_skill_roots.clone())
-            .with_disable_bundled(disable_bundled)
             // 共享 SkillsMiddleware 的 skills 缓存，避免工具调用时重复磁盘扫描
             .with_cached_skills(skills_cache)
     }));

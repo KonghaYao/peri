@@ -56,7 +56,7 @@ const SKIP_DIR_NAMES: &[&str] = &[
 ];
 
 fn should_skip_dir(dir_name: &str) -> bool {
-    SKIP_DIR_NAMES.contains(&dir_name) || (dir_name.starts_with('.') && dir_name.len() > 1)
+    SKIP_DIR_NAMES.contains(&dir_name)
 }
 
 /// Skill 元数据（来自 SKILL.md frontmatter）

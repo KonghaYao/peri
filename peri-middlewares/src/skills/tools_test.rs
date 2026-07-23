@@ -24,7 +24,7 @@ fn make_discover_tool_with_cache(roots: &[SkillRoot]) -> DiscoverSkillsTool {
     let cached = Arc::new(RwLock::new(Some(skills)));
     DiscoverSkillsTool::new(cached)
 }
-fn make_skill_tool_with_cache(plugin_roots: Vec<SkillRoot>, _disable_bundled: bool) -> SkillTool {
+fn make_skill_tool_with_cache(plugin_roots: Vec<SkillRoot>) -> SkillTool {
     let skills = scan_skill_roots(&plugin_roots);
     let cached = Arc::new(RwLock::new(Some(skills)));
     SkillTool::new(cached)
@@ -34,7 +34,7 @@ fn make_skill_tool_with_cache(plugin_roots: Vec<SkillRoot>, _disable_bundled: bo
 
 #[test]
 fn test_skill_tool_name_and_description() {
-    let tool = make_skill_tool_with_cache(vec![], false);
+    let tool = make_skill_tool_with_cache(vec![]);
     assert_eq!(tool.name(), "SkillTool");
     // description 应包含关键信息
     assert!(tool.description().contains("Load the full content"));
@@ -43,7 +43,7 @@ fn test_skill_tool_name_and_description() {
 
 #[test]
 fn test_skill_tool_parameters() {
-    let tool = make_skill_tool_with_cache(vec![], false);
+    let tool = make_skill_tool_with_cache(vec![]);
     let params = tool.parameters();
     assert_eq!(params["type"], "object");
     // skill_name 应为必填字段
@@ -65,7 +65,7 @@ async fn test_skill_tool_missing_skill_name() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_skill_tool_with_cache(vec![root], true);
+    let tool = make_skill_tool_with_cache(vec![root]);
     let input = json!({});
     let cwd = skill_dir.parent().unwrap().to_str().unwrap();
 
@@ -86,7 +86,7 @@ async fn test_skill_tool_loads_disk_skill() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_skill_tool_with_cache(vec![root], true);
+    let tool = make_skill_tool_with_cache(vec![root]);
     let input = json!({"skill_name": "test-skill"});
     let cwd = skill_dir.parent().unwrap().to_str().unwrap();
 
@@ -109,7 +109,7 @@ async fn test_skill_tool_case_insensitive_match() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_skill_tool_with_cache(vec![root], true);
+    let tool = make_skill_tool_with_cache(vec![root]);
     let cwd = skill_dir.parent().unwrap().to_str().unwrap();
 
     // Act: 大小写不一致
@@ -133,7 +133,7 @@ async fn test_skill_tool_skill_not_found() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_skill_tool_with_cache(vec![root], true);
+    let tool = make_skill_tool_with_cache(vec![root]);
     let cwd = skill_dir.parent().unwrap().to_str().unwrap();
 
     // Act: 不存在的 skill
@@ -160,7 +160,7 @@ async fn test_skill_tool_namespace_prefix_match() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_skill_tool_with_cache(vec![root], true);
+    let tool = make_skill_tool_with_cache(vec![root]);
     let cwd = skill_dir.parent().unwrap().to_str().unwrap();
 
     // Act: 带命名空间前缀 `ns:test-skill`
@@ -173,6 +173,26 @@ async fn test_skill_tool_namespace_prefix_match() {
 
     // Assert: 去掉前缀后应匹配成功
     assert!(result.is_ok(), "去命名空间前缀后应匹配成功");
+}
+
+#[tokio::test]
+async fn test_skill_tool_empty_cache_returns_error() {
+    // 构造一个缓存为 None 的工具，模拟 before_agent 未运行的场景
+    let tool = SkillTool::new(Arc::new(RwLock::new(None)));
+    let result = tool
+        .invoke(
+            json!({"skill_name": "any-skill"}),
+            ToolContext::new(&[], ""),
+        )
+        .await;
+
+    // 缓存为空时应返回明确错误，而非 panic
+    assert!(result.is_err(), "空缓存应返回错误而非 panic");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("cache is empty") || err.contains("before_agent"),
+        "错误应提示缓存为空原因，实际: {err}"
+    );
 }
 
 // ─── DiscoverSkillsTool 测试 ─────────────────────────────────────────────────

@@ -148,6 +148,10 @@ impl SkillsMiddleware {
     ///
     /// v2：构造时即填充 cached_contribution，使 prompt_contribution 立即可用，
     /// 无需 before_agent 触发（builder 在 before_agent 前收集 prompt_contribution）。
+    ///
+    /// 注意：仅填充 cached_contribution，不填充 cached_skills。
+    /// cached_skills 由 before_agent 在 frozen/non-frozen 两条路径中统一填充，
+    /// 调用方不能在 before_agent 之前读取 cached_skills（此时为 None）。
     pub fn with_frozen_summary(mut self, summary: String) -> Self {
         self.frozen_summary = Some(summary.clone());
         if !summary.trim().is_empty() {

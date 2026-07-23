@@ -12,7 +12,7 @@ use peri_agent::{
 };
 use serde_json::Value;
 
-use crate::skills::{loader, SkillMetadata, SkillRoot, SkillSource};
+use crate::skills::{loader, SkillMetadata, SkillSource};
 
 /// 工具描述（中文，仿 Claude Code SkillTool prompt）
 const SKILL_TOOL_DESCRIPTION: &str = include_str!("descriptions/skill.md");
@@ -153,8 +153,6 @@ impl BaseTool for SkillTool {
 ///
 /// v2：接收共享的 `cached_skills` Arc，避免工具调用时重复磁盘扫描。
 pub struct SkillToolMiddleware {
-    plugin_roots: Vec<SkillRoot>,
-    disable_bundled: bool,
     /// SkillsMiddleware 在 before_agent 时预扫描的 skills 列表缓存。
     /// 由 builder 层从 SkillsMiddleware 获取后传入。
     cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
@@ -163,24 +161,11 @@ pub struct SkillToolMiddleware {
 impl SkillToolMiddleware {
     pub fn new() -> Self {
         Self {
-            plugin_roots: Vec::new(),
-            disable_bundled: false,
             cached_skills: Arc::new(RwLock::new(None)),
         }
     }
 
-    pub fn with_plugin_roots(mut self, roots: Vec<SkillRoot>) -> Self {
-        self.plugin_roots = roots;
-        self
-    }
-
-    pub fn with_disable_bundled(mut self, disable: bool) -> Self {
-        self.disable_bundled = disable;
-        self
-    }
-
     /// 注入共享的 skills 缓存（由 SkillsMiddleware 预填充）。
-    /// 若未设置，工具首次调用时会自行扫描磁盘（fallback）。
     pub fn with_cached_skills(mut self, cached: Arc<RwLock<Option<Vec<SkillMetadata>>>>) -> Self {
         self.cached_skills = cached;
         self
