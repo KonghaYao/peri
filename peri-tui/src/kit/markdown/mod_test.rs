@@ -745,6 +745,43 @@ fn test_cached_table_rows_grow_correctly() {
     );
 }
 
+/// [回归测试] 流式列表项增量渲染时，尾部 EmptyParagraph 移位导致中间项丢失。
+///
+/// ratatui-kit-markdown 解析器在列表开始/结束时插入 EmptyParagraph 作为分隔符。
+/// 当流式文本逐帧到达时（如 "• A\n" → "• A\n• B\n"），缓存的
+/// processed_block_count 包含尾部 EmptyParagraph，下一帧解析时 EmptyParagraph
+/// 位置后移，导致新列表项被错误跳过——典型表现为 "B 选项消失"。
+///
+/// 场景：
+///   "- A\n" 解析为 [Empty, ListItem(A), Empty]，processed_block_count=3。
+///   "- A\n- B\n" 解析为 [Empty, ListItem(A), ListItem(B), Empty]。
+///   缓存复用 → 跳过前 3 block → B（block[2]）被跳过！
+#[test]
+fn test_cached_list_items_no_disappearing() {
+    let mut cache = MarkdownRenderCache::default();
+
+    // Step 1: 一个列表项（以 \n 结尾，触发持久化）
+    let t1 = "- A\n";
+    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let text1 = segments_to_text(&r1);
+    assert!(text1.contains("A"), "t1 应含 A，实际: {text1:?}");
+    // cache 已持久化
+    assert!(cache.stable_text_len() > 0, "t1 以 \\n 结尾，应触发持久化");
+
+    // Step 2: 追加第二个列表项（最关键的回归断言）
+    let t2 = "- A\n- B\n";
+    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let text2 = segments_to_text(&r2);
+    let full_text2 = segments_to_text(&full2);
+
+    assert!(
+        text2.contains("B"),
+        "[回归] 续跑后应含 B（EmptyParagraph 移位导致 B 被跳过），实际: {text2:?}"
+    );
+    assert_eq!(text2, full_text2, "续跑输出应与全量一致");
+}
+
 /// [回归测试] 流式场景：表头先到达（无分隔符），分隔符+数据后到达。
 ///
 /// 当表头 `| a | b |\n` 先单独到达时，pulldown-cmark 将其识别为 Paragraph

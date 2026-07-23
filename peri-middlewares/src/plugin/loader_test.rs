@@ -2,7 +2,7 @@ use tempfile::tempdir;
 
 use super::*;
 use crate::plugin::types::{
-    InstallScope, InstalledPlugin, PluginAgent, PluginCommand, PluginCommandEntry,
+    InstallScope, InstalledPlugin, PluginAgent, PluginCommand, PluginCommandEntry, PluginOrigin,
 };
 
 pub(crate) fn make_manifest_with_commands(commands: Vec<PluginCommand>) -> PluginManifest {
@@ -27,6 +27,7 @@ pub(crate) fn make_manifest_with_commands(commands: Vec<PluginCommand>) -> Plugi
         channels: None,
         options: None,
         settings: None,
+        extra: serde_json::json!({}),
     }
 }
 
@@ -550,6 +551,7 @@ fn test_load_plugins_success() {
             install_path: plugin_dir,
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     };
 
@@ -578,6 +580,7 @@ fn test_load_plugins_invalid_manifest() {
             install_path: dir.path().join("empty"),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     };
 
@@ -661,6 +664,7 @@ fn test_load_enabled_plugins() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     })
     .unwrap();
@@ -673,7 +677,7 @@ fn test_load_enabled_plugins() {
     let settings = r#"{"enabledPlugins":["my-plugin@test"]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
 
-    let loaded = load_enabled_plugins(dir.path()).unwrap();
+    let loaded = load_enabled_plugins(dir.path(), None).unwrap();
     assert_eq!(loaded.len(), 1);
 }
 
@@ -691,6 +695,7 @@ fn test_load_enabled_plugins_disabled() {
             install_path: dir.path().join("fake"),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     })
     .unwrap();
@@ -703,7 +708,7 @@ fn test_load_enabled_plugins_disabled() {
     let settings = r#"{"enabledPlugins":[]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
 
-    let loaded = load_enabled_plugins(dir.path()).unwrap();
+    let loaded = load_enabled_plugins(dir.path(), None).unwrap();
     assert!(loaded.is_empty());
 }
 
@@ -772,7 +777,7 @@ fn test_plugin_command_provider_multiple() {
 
 #[test]
 fn test_load_no_plugins_aggregated() {
-    let result = load_enabled_plugins_aggregated(Path::new("/nonexistent/path"));
+    let result = load_enabled_plugins_aggregated(Path::new("/nonexistent/path"), None);
     assert!(result.plugins.is_empty());
     assert!(result.all_skill_roots.is_empty());
     assert!(result.all_mcp_servers.is_empty());
@@ -803,6 +808,7 @@ fn test_load_enabled_plugins_aggregated() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     })
     .unwrap();
@@ -815,7 +821,7 @@ fn test_load_enabled_plugins_aggregated() {
     let settings = r#"{"enabledPlugins":["my-plugin@test"]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
 
-    let result = load_enabled_plugins_aggregated(dir.path());
+    let result = load_enabled_plugins_aggregated(dir.path(), None);
     assert_eq!(result.plugins.len(), 1);
     assert_eq!(result.plugins[0].name, "my-plugin");
 }
@@ -848,6 +854,7 @@ fn test_load_plugin_skill_dirs_aggregated() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     })
     .unwrap();
@@ -860,7 +867,7 @@ fn test_load_plugin_skill_dirs_aggregated() {
     let settings = r#"{"enabledPlugins":["skill-plugin@test"]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
 
-    let result = load_enabled_plugins_aggregated(dir.path());
+    let result = load_enabled_plugins_aggregated(dir.path(), None);
     assert_eq!(result.all_skill_roots.len(), 1);
     assert!(result.all_skill_roots[0].path.ends_with("my-skill"));
 }
@@ -917,4 +924,234 @@ fn test_extract_commands_string_single_file() {
     let entries = extract_commands(&manifest, dir.path(), "p");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "p:standalone");
+}
+
+// ===== 项目级插件发现测试 =====
+
+#[test]
+fn test_load_enabled_plugins_with_project_settings() {
+    // 场景：项目 settings 有 ["a"]，用户 settings 有 ["b"]，只启用 "a"（项目替换用户）
+    let dir = tempdir().unwrap();
+    let plugin_a_dir = dir.path().join("plugin-a");
+    let plugin_b_dir = dir.path().join("plugin-b");
+    std::fs::create_dir_all(plugin_a_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_a_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"plugin-a","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(plugin_b_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_b_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"plugin-b","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    // 用户级 settings.json (claude_dir)
+    let claude_dir = dir.path().join("claude");
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+    let installed_json = serde_json::to_string(&InstalledPlugins {
+        version: 2,
+        plugins: vec![
+            InstalledPlugin {
+                id: "plugin-a@test".into(),
+                name: "plugin-a".into(),
+                version: "1.0.0".into(),
+                marketplace: "test".into(),
+                install_path: plugin_a_dir.clone(),
+                scope: InstallScope::User,
+                project_path: None,
+                origin: PluginOrigin::PeriInstalled,
+            },
+            InstalledPlugin {
+                id: "plugin-b@test".into(),
+                name: "plugin-b".into(),
+                version: "1.0.0".into(),
+                marketplace: "test".into(),
+                install_path: plugin_b_dir.clone(),
+                scope: InstallScope::User,
+                project_path: None,
+                origin: PluginOrigin::PeriInstalled,
+            },
+        ],
+    })
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("plugins").join("installed_plugins.json"),
+        installed_json,
+    )
+    .unwrap();
+    // 用户级启用 "plugin-b@test"
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"enabledPlugins":["plugin-b@test"]}"#,
+    )
+    .unwrap();
+
+    // 项目级 settings.json (cwd/.claude/settings.json)
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+    std::fs::write(
+        cwd.join(".claude").join("settings.json"),
+        r#"{"enabledPlugins":["plugin-a@test"]}"#,
+    )
+    .unwrap();
+
+    let loaded = load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
+    assert_eq!(loaded.len(), 1, "项目级替换用户级，只应启用 plugin-a");
+    assert_eq!(loaded[0].name, "plugin-a");
+}
+
+#[test]
+fn test_load_enabled_plugins_project_fallback_to_user() {
+    // 场景：项目 settings 存在但无 enabledPlugins 字段，回退用户级
+    let dir = tempdir().unwrap();
+    let plugin_dir = dir.path().join("my-plugin");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"my-plugin","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    let claude_dir = dir.path().join("claude");
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+    let installed_json = serde_json::to_string(&InstalledPlugins {
+        version: 2,
+        plugins: vec![InstalledPlugin {
+            id: "my-plugin@test".into(),
+            name: "my-plugin".into(),
+            version: "1.0.0".into(),
+            marketplace: "test".into(),
+            install_path: plugin_dir.clone(),
+            scope: InstallScope::User,
+            project_path: None,
+            origin: PluginOrigin::PeriInstalled,
+        }],
+    })
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("plugins").join("installed_plugins.json"),
+        installed_json,
+    )
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"enabledPlugins":["my-plugin@test"]}"#,
+    )
+    .unwrap();
+
+    // 项目级 settings 存在但没有 enabledPlugins 字段
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+    std::fs::write(
+        cwd.join(".claude").join("settings.json"),
+        r#"{"hooks": {}}"#,
+    )
+    .unwrap();
+
+    let loaded = load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
+    assert_eq!(loaded.len(), 1, "项目级无 enabledPlugins 应回退用户级");
+    assert_eq!(loaded[0].name, "my-plugin");
+}
+
+#[test]
+fn test_load_enabled_plugins_project_empty_enabled() {
+    // 场景：项目 settings enabledPlugins 为空数组，回退用户级
+    let dir = tempdir().unwrap();
+    let plugin_dir = dir.path().join("my-plugin");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"my-plugin","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    let claude_dir = dir.path().join("claude");
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+    let installed_json = serde_json::to_string(&InstalledPlugins {
+        version: 2,
+        plugins: vec![InstalledPlugin {
+            id: "my-plugin@test".into(),
+            name: "my-plugin".into(),
+            version: "1.0.0".into(),
+            marketplace: "test".into(),
+            install_path: plugin_dir.clone(),
+            scope: InstallScope::User,
+            project_path: None,
+            origin: PluginOrigin::PeriInstalled,
+        }],
+    })
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("plugins").join("installed_plugins.json"),
+        installed_json,
+    )
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"enabledPlugins":["my-plugin@test"]}"#,
+    )
+    .unwrap();
+
+    // 项目级 settings 有 enabledPlugins 但为空数组
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+    std::fs::write(
+        cwd.join(".claude").join("settings.json"),
+        r#"{"enabledPlugins":[]}"#,
+    )
+    .unwrap();
+
+    let loaded = load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
+    assert_eq!(
+        loaded.len(),
+        1,
+        "项目级 enabledPlugins 为空数组应回退用户级"
+    );
+    assert_eq!(loaded[0].name, "my-plugin");
+}
+
+#[test]
+fn test_load_enabled_plugins_missing_project() {
+    // 场景：cwd=None，仅读用户级 settings（向后兼容）
+    let dir = tempdir().unwrap();
+    let plugin_dir = dir.path().join("my-plugin");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"my-plugin","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    let claude_dir = dir.path().join("claude");
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+    let installed_json = serde_json::to_string(&InstalledPlugins {
+        version: 2,
+        plugins: vec![InstalledPlugin {
+            id: "my-plugin@test".into(),
+            name: "my-plugin".into(),
+            version: "1.0.0".into(),
+            marketplace: "test".into(),
+            install_path: plugin_dir.clone(),
+            scope: InstallScope::User,
+            project_path: None,
+            origin: PluginOrigin::PeriInstalled,
+        }],
+    })
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("plugins").join("installed_plugins.json"),
+        installed_json,
+    )
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"enabledPlugins":["my-plugin@test"]}"#,
+    )
+    .unwrap();
+
+    let loaded = load_enabled_plugins(&claude_dir, None).unwrap();
+    assert_eq!(loaded.len(), 1, "cwd=None 时行为不变，仅读用户 settings");
+    assert_eq!(loaded[0].name, "my-plugin");
 }

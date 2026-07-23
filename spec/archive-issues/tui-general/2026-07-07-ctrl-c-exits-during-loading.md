@@ -35,7 +35,7 @@
 
 - `peri-tui/src/kit/event_handlers.rs` —— TUI 全局键盘事件处理，包含 `Ctrl+C` 行为分支与退出提示状态。
 - `peri-tui/src/kit/focus_router.rs` —— 全局快捷键分类，将 `Ctrl+C` 识别为 `GlobalShortcut::Quit`。
-- `TUI-PAGE.md` —— 文档中记录了预期行为：`Ctrl+C` 在 loading 中应打断 Agent，空闲时才双击退出。
+- `spec/global/domains/tui/tui-index.md` —— 文档中记录了预期行为：`Ctrl+C` 在 loading 中应打断 Agent，空闲时才双击退出。
 - `peri-tui-refactor-manual-checklist.md` —— 手动检查清单记录了 `Ctrl+C` 的预期优先级：有文本时清空、loading 中打断 Agent、空闲双击退出。
 
 ## 状态变更记录

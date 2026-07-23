@@ -174,6 +174,29 @@ pub fn parse_markdown_cached(
     // 仍保持完整。否则跳过持久化，下次 parse 仍可命中旧 stable_text（如果
     // sanitized 仍以 stable_text 为前缀）。
     if sanitized.ends_with('\n') {
+        // [回归修复] 剔除尾部 EmptyParagraph 对 processed_block_count 的贡献。
+        // ratatui-kit-markdown 在列表/段落结束时插入 EmptyParagraph 作为分隔
+        // 符。这些尾部空块在追加内容后会移位，若将其计入 processed_block_count，
+        // 下一帧续跑时会错误跳过新内容（典型表现：列表 B 选项消失）。
+        // 只剔除**连续尾部**空段落；列表中间的空段落仍计入（用于 spacing 决策）。
+        let trailing_empties = parsed
+            .blocks
+            .iter()
+            .rev()
+            .take_while(|b| matches!(b, ratatui_kit_markdown::ParsedBlock::Paragraph(lines) if lines.is_empty()))
+            .count();
+        if trailing_empties > 0 {
+            state.processed_block_count =
+                state.processed_block_count.saturating_sub(trailing_empties);
+            // 同步修正 prev_was_list_item：反映最后一个**有意义**的 block 类型
+            if state.processed_block_count > 0 {
+                let last_meaningful_idx = state.processed_block_count - 1;
+                state.prev_was_list_item = matches!(
+                    parsed.blocks[last_meaningful_idx],
+                    ratatui_kit_markdown::ParsedBlock::ListItem(_)
+                );
+            }
+        }
         cache.stable_text = sanitized.clone();
         cache.stable_width = max_width as u16;
         cache.stable_palette = palette;

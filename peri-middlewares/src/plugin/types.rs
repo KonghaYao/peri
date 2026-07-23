@@ -169,6 +169,10 @@ pub struct PluginManifest {
     pub channels: Option<Vec<PluginChannel>>,
     pub options: Option<Vec<PluginOption>>,
     pub settings: Option<serde_json::Value>,
+    /// 保留 plugin.json 中未声明的字段，确保前向兼容（read→write roundtrip 不丢字段）。
+    /// 参考：MarketplacePlugin.extra（同一文件 line 192-193）。
+    #[serde(flatten)]
+    pub extra: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +230,33 @@ pub enum InstallScope {
     Local,
 }
 
+/// 插件来源路径/机制
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum PluginOrigin {
+    /// Peri 从 marketplace 安装的（默认）
+    #[default]
+    PeriInstalled,
+    /// Claude Code CLI 原生安装的（通过 migration backfill 发现或直接读取）
+    #[serde(rename = "claude-installed")]
+    ClaudeCodeInstalled,
+    /// 用户级 ~/.claude/plugins/（CLI 安装）
+    #[serde(rename = "claude-user")]
+    UserClaude,
+    /// 项目级 <project>/.claude/plugins/（CLI 安装）
+    #[serde(rename = "claude-project")]
+    ProjectClaude,
+}
+
+impl PluginOrigin {
+    /// 是否由外部工具（Claude Code）安装，非 Peri 管理
+    pub fn is_external(&self) -> bool {
+        matches!(
+            self,
+            Self::ClaudeCodeInstalled | Self::UserClaude | Self::ProjectClaude
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledPlugin {
     pub id: String,
@@ -238,6 +269,9 @@ pub struct InstalledPlugin {
     /// 项目路径 (仅用于 project/local scope)
     #[serde(default, rename = "projectPath")]
     pub project_path: Option<String>,
+    /// 插件来源（Peri 安装 vs Claude Code CLI 安装）
+    #[serde(default)]
+    pub origin: PluginOrigin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +334,7 @@ where
                     install_path: PathBuf::from(&record.install_path),
                     scope,
                     project_path: record.project_path,
+                    origin: PluginOrigin::ClaudeCodeInstalled,
                 });
             }
             Ok(plugins)

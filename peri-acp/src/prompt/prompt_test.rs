@@ -53,6 +53,7 @@ fn test_with_overrides_uses_override_block() {
         persona: Some("test persona".into()),
         tone: None,
         proactiveness: None,
+        mode: None,
     };
     let result = build_system_prompt(
         Some(&overrides),
@@ -266,6 +267,7 @@ fn test_overrides_after_boundary_marker() {
         persona: Some("test persona".into()),
         tone: Some("concise".into()),
         proactiveness: None,
+        mode: None,
     };
     let result = build_system_prompt(
         Some(&overrides),
@@ -504,11 +506,13 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
         persona: Some("You are a test bot".into()),
         tone: Some("Be concise".into()),
         proactiveness: Some("Ask before acting".into()),
+        mode: None,
     };
     let empty_overrides = AgentOverrides {
         persona: None,
         tone: None,
         proactiveness: None,
+        mode: None,
     };
 
     // 覆盖多种 features 组合
@@ -628,5 +632,111 @@ fn test_template_boundary_position_identical() {
     assert_eq!(
         old_boundary, new_boundary,
         "boundary offset must be identical for Anthropic cache hit"
+    );
+}
+
+// ─── prompt_mode full / extend tests ─────────────────────────────────────
+
+/// 验证 full 模式下跳过静态段（01-06, 16），不包含静态段中的特征文本
+#[test]
+fn test_render_full_mode_skips_static() {
+    let overrides = AgentOverrides {
+        persona: Some("You are a custom full-mode agent.".into()),
+        tone: None,
+        proactiveness: None,
+        mode: Some("full".into()),
+    };
+    let result = build_system_prompt(
+        Some(&overrides),
+        "/tmp",
+        PromptFeatures::none(),
+        &[],
+        Some("2026-01-01"),
+        None,
+    );
+    // 静态段中的特征文本不应出现
+    assert!(
+        !result.contains("Following conventions"),
+        "full 模式不应包含 02_system 的 'Following conventions' 段落"
+    );
+    assert!(
+        !result.contains("Doing tasks"),
+        "full 模式不应包含 03_doing_tasks 的 'Doing tasks' 段落"
+    );
+    // full_body 内容应出现
+    assert!(
+        result.contains("You are a custom full-mode agent."),
+        "full 模式应包含 persona 作为 prompt 主体"
+    );
+}
+
+/// 验证 full 模式下保留 env 动态段（07）
+#[test]
+fn test_render_full_mode_keeps_env() {
+    let overrides = AgentOverrides {
+        persona: Some("You are a custom full-mode agent.".into()),
+        tone: None,
+        proactiveness: None,
+        mode: Some("full".into()),
+    };
+    let result = build_system_prompt(
+        Some(&overrides),
+        "/custom/project",
+        PromptFeatures::none(),
+        &[],
+        Some("2026-01-01"),
+        None,
+    );
+    // 动态段 env (07) 应保留
+    assert!(
+        result.contains("<env>"),
+        "full 模式应保留 07_env 环境信息段落"
+    );
+    assert!(
+        result.contains("/custom/project"),
+        "full 模式下 cwd 占位符应被替换"
+    );
+}
+
+/// 验证 extend 模式（mode=None 与 mode=Some("extend")）行为一致，输出完全相同
+#[test]
+fn test_render_extend_mode_unchanged() {
+    let overrides_none = AgentOverrides {
+        persona: Some("You are a test agent.".into()),
+        tone: Some("Be concise".into()),
+        proactiveness: None,
+        mode: None,
+    };
+    let overrides_extend = AgentOverrides {
+        persona: Some("You are a test agent.".into()),
+        tone: Some("Be concise".into()),
+        proactiveness: None,
+        mode: Some("extend".into()),
+    };
+    let result_none = build_system_prompt(
+        Some(&overrides_none),
+        "/tmp",
+        PromptFeatures::none(),
+        &[],
+        Some("2026-01-01"),
+        None,
+    );
+    let result_extend = build_system_prompt(
+        Some(&overrides_extend),
+        "/tmp",
+        PromptFeatures::none(),
+        &[],
+        Some("2026-01-01"),
+        None,
+    );
+    // 两种方式输出应完全一致
+    assert_eq!(
+        result_none, result_extend,
+        "extend 模式下 mode=None 与 mode=Some(\"extend\") 应产生相同输出"
+    );
+    // 静态段应包含
+    assert!(
+        result_none.contains("Following conventions"),
+        "extend 模式应包含静态段"
     );
 }

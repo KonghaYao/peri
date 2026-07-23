@@ -4,7 +4,7 @@
 //! question/options/multi_select）。Tab 键在问题间切换（tab 风格），↑/↓ 导航选项，
 //! Space 选择/取消，Enter 提交，Esc 取消。
 //!
-//! 对齐 TUI-PAGE.md §7.2 AskUser Popup 规范：
+//! 对齐 spec/global/domains/tui/tui-popups.md §7.2 AskUser Popup 规范：
 //! - 只使用上下边框（popup_text_shell! TOP | BOTTOM）
 //! - 多问题时顶部 tab 行：`[header]` 标记当前，` header ` 标记其他
 //! - ●/○ 单选项（单选）/ ☑/☐ 多选项

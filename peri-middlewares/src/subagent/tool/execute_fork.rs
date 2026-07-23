@@ -146,6 +146,7 @@ impl super::SubAgentTool {
             peri_agent::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
                 v2_ctx.event_handles,
                 self.event_handler.clone(),
+                self.langfuse_bridge.clone(),
                 child_thread_id.clone(),
             );
 

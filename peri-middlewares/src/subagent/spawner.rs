@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use peri_agent::agent::LangfuseBridgeLike;
 use peri_agent::{
     agent::{
         events::ExecutorEvent,
@@ -90,6 +91,8 @@ pub struct BgForkConfig {
     pub frozen_skill_summary: Option<Arc<String>>,
     /// Frozen system prompt（fork 路径复用以避免重建）。
     pub frozen_system_prompt: Option<Arc<String>>,
+    /// Langfuse bridge for subagent trace（None 表示遥测禁用）
+    pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
 }
 
 /// 后台 fork agent spawn 结果
@@ -243,12 +246,32 @@ pub async fn spawn_background_fork(
     let prompt_summary_clone = prompt_summary.clone();
     let cwd_clone = cwd.clone();
     let max_iterations = config.max_iterations;
+    let event_handles = v2_ctx.event_handles;
+    let langfuse_bridge = config.langfuse_bridge;
 
     // 12. tokio::spawn 执行
     let join_handle = tokio::spawn(async move {
         let started_at = std::time::Instant::now();
         let context = v2_ctx.context;
         let session = v2_ctx.session;
+
+        // 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
+        // 后转发到 bg_event_sender。同时桥接 Langfuse trace。
+        let bg_sender_for_forwarder = bg_event_sender.clone();
+        let bg_forwarder_handler: Option<Arc<dyn peri_agent::agent::events::AgentEventHandler>> =
+            Some(Arc::new(peri_agent::agent::events::FnEventHandler(
+                move |ev: ExecutorEvent| {
+                    let _ = bg_sender_for_forwarder.send(ev);
+                },
+            ))
+                as Arc<dyn peri_agent::agent::events::AgentEventHandler>);
+        let _forwarder_handle =
+            peri_agent::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
+                event_handles,
+                bg_forwarder_handler,
+                langfuse_bridge,
+                child_thread_id_clone.clone(),
+            );
 
         // run before_agent middleware hooks
         if let Err(e) =

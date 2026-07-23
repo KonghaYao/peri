@@ -196,6 +196,10 @@ const GATED_SECTIONS: [(&str, FeatureGate); 5] = [
 pub struct PromptTemplate {
     /// 预计算的 AgentOverrides 块（空字符串 = 无 overrides）
     overrides_block: String,
+    /// prompt_mode = "full" 时，存储 agent body 作为 prompt 主体；
+    /// 渲染时跳过 STATIC_SECTIONS，以 boundary + full_body + 动态段 拼接。
+    /// 注意：full 模式下 Anthropic 前缀缓存必然 miss——这是用户显式选择的代价。
+    full_body: Option<String>,
 }
 
 impl PromptTemplate {
@@ -203,6 +207,7 @@ impl PromptTemplate {
     pub fn new() -> Self {
         Self {
             overrides_block: String::new(),
+            full_body: None,
         }
     }
 
@@ -211,18 +216,31 @@ impl PromptTemplate {
     /// 用于 SubAgent define 路径：无需重建 section 结构，仅预计算 overrides 文本。
     /// 调用 `build_agent_overrides_block()`（与当前 build_system_prompt 使用同一函数）。
     pub fn with_overrides(overrides: &AgentOverrides) -> Self {
+        let is_full_mode = overrides.mode.as_deref() == Some("full");
+        let full_body = if is_full_mode {
+            overrides.persona.clone()
+        } else {
+            None
+        };
+        // full 模式下 overrides_block 不拼接（body 直接作为 prompt 主体）
+        let overrides_block = if is_full_mode {
+            String::new()
+        } else {
+            build_agent_overrides_block(overrides)
+        };
         Self {
-            overrides_block: build_agent_overrides_block(overrides),
+            overrides_block,
+            full_body,
         }
     }
 
     /// 渲染完整系统提示词
     ///
-    /// 拼接顺序与 `build_system_prompt()` 完全一致：
-    ///   静态段(01-06,16) → BOUNDARY → [overrides] → 动态段(07,14) → 门控段(10-15) → [Language]
+    /// 拼接顺序：
+    ///   extend 模式：静态段(01-06,16) → BOUNDARY → [overrides] → 动态段(07,14) → 门控段(10-15) → [Language]
+    ///   full 模式：BOUNDARY → full_body → 动态段(07,14) → 门控段(10-15) → [Language]
     ///
     /// 之后应用占位符替换（cwd, is_git_repo, platform, os_version, date, available_agents）。
-    /// 保证与当前 `build_system_prompt()` 输出字节完全一致。
     pub fn render(
         &self,
         env: &PromptEnv,
@@ -233,19 +251,32 @@ impl PromptTemplate {
         use std::fmt::Write;
         let mut result = String::new();
 
-        // 静态段（01 → 02 → ... → 06 → 16）
-        for (i, section) in STATIC_SECTIONS.iter().enumerate() {
-            if i > 0 {
-                result.push_str("\n\n");
+        let is_full = self.full_body.is_some();
+
+        // 静态段（01 → 02 → ... → 06 → 16）— full 模式跳过
+        if !is_full {
+            for (i, section) in STATIC_SECTIONS.iter().enumerate() {
+                if i > 0 {
+                    result.push_str("\n\n");
+                }
+                result.push_str(section);
             }
-            result.push_str(section);
         }
 
         // 边界标记
-        result.push_str("\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__");
+        if !is_full {
+            result.push_str("\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__");
+        } else {
+            result.push_str("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__");
+        }
 
-        // Agent overrides 块（边界之后，非空时插入）
-        if !self.overrides_block.is_empty() {
+        // Agent overrides 块 / full_body（边界之后）
+        if is_full {
+            if let Some(ref body) = self.full_body {
+                result.push_str("\n\n");
+                result.push_str(body.trim());
+            }
+        } else if !self.overrides_block.is_empty() {
             result.push_str("\n\n");
             result.push_str(&self.overrides_block);
         }

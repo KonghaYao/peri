@@ -102,6 +102,7 @@ pub(crate) async fn handle_prompt(
     let ctx_for_task = Arc::clone(ctx);
     let cx_for_task = cx.clone();
     let session_id = req.session_id.clone();
+    let peri_caps = ctx.session_manager.get_caps(&sid);
 
     // Spawn the heavy work to keep the event loop responsive.
     // responder is moved into the task; the response is sent
@@ -122,6 +123,7 @@ pub(crate) async fn handle_prompt(
             pool: pool_arc,
             thread_id,
             responder,
+            peri_caps,
         };
         prompt_exec::run(params).await;
     });

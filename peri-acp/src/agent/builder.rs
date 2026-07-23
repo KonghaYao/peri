@@ -46,6 +46,8 @@ use peri_middlewares::{
     tools::{AskUserTool, TodoItem},
 };
 
+use crate::langfuse::bridge::LangfuseBridge;
+use crate::langfuse::tracer::LangfuseTracer;
 use crate::{
     provider::LlmProvider,
     session::agent_pool::{fingerprint, CachedLlmInstances},
@@ -139,6 +141,7 @@ pub(crate) fn build_agent(
     background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
     on_bg_complete: Option<OnBgCompleteFn>,
     cached_llm: Option<&CachedLlmInstances>,
+    langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
 ) -> (AcpAgentOutput, Option<CachedLlmInstances>) {
     let FrozenData {
         claude_md: frozen_claude_md,
@@ -266,6 +269,7 @@ pub(crate) fn build_agent(
     let config_for_factory = peri_config.clone();
     let session_id_for_factory = session_id.clone();
     let pool_for_subagent = Arc::clone(pool);
+    let llm_factory_cancel = cancel.clone();
     #[allow(clippy::type_complexity)]
     let llm_factory: Arc<
         dyn Fn(Option<&str>) -> Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>
@@ -305,10 +309,10 @@ pub(crate) fn build_agent(
         if let Some(s) = sid {
             llm = llm.with_session_id(s);
         }
-        Box::new(peri_agent::llm::RetryableLLM::new(
-            llm,
-            peri_agent::llm::RetryConfig::default(),
-        ))
+        Box::new(
+            peri_agent::llm::RetryableLLM::new(llm, peri_agent::llm::RetryConfig::default())
+                .with_cancel_token(llm_factory_cancel.clone()),
+        )
     });
 
     // 系统提示构建器
@@ -423,6 +427,18 @@ pub(crate) fn build_agent(
         subagent = subagent.with_deregister_runtime(deregister);
     }
 
+    // SubAgent Langfuse bridge：复用父 agent 的 LangfuseTracer，
+    // 构造独立 LangfuseBridge 实例供 SubAgent forwarder 使用。
+    // 采样决策继承自父 agent（bridge 内部调用 tracer.on_* 方法时，
+    // 各方法已内置 sampling.should_emit() 检查）。
+    if let Some(ref tracer) = langfuse_tracer {
+        let bridge =
+            LangfuseBridge::new(Arc::clone(tracer), ctx.provider.display_name().to_string());
+        subagent = subagent.with_langfuse_bridge(
+            Arc::new(bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>
+        );
+    }
+
     // 上下文预算
     let mut context_window = context_window_raw;
     let context_1m = peri_config.config.context_1m.unwrap_or(false);
@@ -458,22 +474,21 @@ pub(crate) fn build_agent(
     chain.add(Box::new(peri_middlewares::PluginMiddleware::new(
         plugin_loaded,
     )));
-    chain.add(Box::new({
-        let mut mw = SkillsMiddleware::new().with_plugin_roots(plugin_skill_roots.clone());
-        if let Some(summary) = frozen_skill_summary {
-            mw = mw.with_frozen_summary(summary);
-        }
-        mw
-    }));
+    // 构造 SkillsMiddleware 并提取 skills 缓存 Arc，供 SkillToolMiddleware 共享
+    let mut skills_mw = SkillsMiddleware::new().with_plugin_roots(plugin_skill_roots.clone());
+    if let Some(summary) = frozen_skill_summary {
+        skills_mw = skills_mw.with_frozen_summary(summary);
+    }
+    let skills_cache = skills_mw.skills_cache();
+    chain.add(Box::new(skills_mw));
     chain.add(Box::new(
         SkillPreloadMiddleware::new(preload_skills, &cwd)
             .with_plugin_roots(plugin_skill_roots.clone()),
     ));
     chain.add(Box::new({
-        let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
         peri_middlewares::SkillToolMiddleware::new()
-            .with_plugin_roots(plugin_skill_roots.clone())
-            .with_disable_bundled(disable_bundled)
+            // 共享 SkillsMiddleware 的 skills 缓存，避免工具调用时重复磁盘扫描
+            .with_cached_skills(skills_cache)
     }));
     chain.add(Box::new(peri_middlewares::AtMentionMiddleware::new(
         cwd.clone().into(),
@@ -634,7 +649,8 @@ pub(crate) fn build_agent(
     }
     let model =
         peri_agent::llm::RetryableLLM::new(base_llm, peri_agent::llm::RetryConfig::default())
-            .with_event_handler(Arc::clone(&event_handler));
+            .with_event_handler(Arc::clone(&event_handler))
+            .with_cancel_token(cancel.clone());
 
     // 构建 CachedLlmInstances 供跨 prompt 复用
     let new_cache = auxiliary_model_for_cache.map(|model| CachedLlmInstances {
@@ -741,6 +757,7 @@ pub(crate) fn build_stage_context(
     goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>>,
     background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
     on_bg_complete: Option<OnBgCompleteFn>,
+    langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
 ) -> (V2AgentOutput, Option<CachedLlmInstances>) {
     // 提取 LLM 用字段（在 cfg 被 build_agent 消费前）
     let cwd = ctx.cwd.clone();
@@ -800,6 +817,7 @@ pub(crate) fn build_stage_context(
         background_registry,
         on_bg_complete,
         cached_llm,
+        langfuse_tracer,
     );
 
     // 直接消费 AgentComponents

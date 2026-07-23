@@ -15,7 +15,7 @@ use ratatui_kit::{
         layout::{Alignment, Constraint, Direction, Flex},
         style::{Modifier, Style, Stylize},
         text::{Line, Span},
-        widgets::Paragraph,
+        widgets::{Paragraph, Wrap},
     },
 };
 use std::time::{Duration, Instant};
@@ -144,13 +144,20 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ));
     }
 
+    // 根据可用宽度动态决定是否需要折行（单行 → 双行）
+    let total_width = Line::from(spans.clone()).width() as u16;
+    let prev_size = hooks.use_previous_size();
+    // 首帧 use_previous_size 返回 width=0，退守单行；后续帧宽度超过才启用双行折行
+    let needs_wrap = prev_size.width > 0 && total_width > prev_size.width;
+    let row_height: u16 = if needs_wrap { 2 } else { 1 };
+
     element!(
         View(
             flex_direction: Direction::Horizontal,
             width: Constraint::Fill(1),
-            height: Constraint::Length(1),
+            height: Constraint::Length(row_height),
         ) {
-            Text(text: Paragraph::new(Line::from(spans)))
+            Text(text: Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }))
         }
     )
 }
@@ -291,7 +298,7 @@ pub fn StatusBar(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             { notif_line }
             StatusBarRow1()
             StatusBarRow2()
-            // 第 4 行留空（视觉缓冲）
+            // 第 4 行留空（视觉缓冲，Row1 折行为双行时自动压缩此区域）
             Text(text: Paragraph::new(Line::from("")))
         }
     )

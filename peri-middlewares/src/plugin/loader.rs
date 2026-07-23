@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -15,7 +15,7 @@ use crate::{
     plugin::{
         config::{
             load_claude_settings, load_installed_plugins, load_plugin_manifest,
-            marketplaces_cache_dir,
+            marketplaces_cache_dir, ClaudeSettings,
         },
         installer::generate_synthetic_manifest,
         marketplace::read_manifest_from_path,
@@ -489,23 +489,51 @@ pub fn load_plugins(installed: &InstalledPlugins) -> Result<Vec<LoadedPlugin>, L
     Ok(result)
 }
 
-pub fn load_enabled_plugins(claude_dir: &Path) -> Result<Vec<LoadedPlugin>, LoaderError> {
+/// 合并用户级和项目级的 enabledPlugins
+///
+/// 规则：
+/// 1. 项目级不存在 → 用用户级
+/// 2. 项目级 enabledPlugins 为空 → 沿用用户级
+/// 3. 项目级非空 → 以项目为准（完全替换，与 Claude Code 行为一致）
+fn merge_enabled_plugins(
+    user: &ClaudeSettings,
+    project: Option<&ClaudeSettings>,
+) -> HashSet<String> {
+    let Some(project) = project else {
+        return user.enabled_plugins.iter().cloned().collect();
+    };
+
+    // 项目级 enabledPlugins 为空 → 沿用用户级
+    if project.enabled_plugins.is_empty() {
+        return user.enabled_plugins.iter().cloned().collect();
+    }
+
+    // 项目级非空 → 完全替换
+    project.enabled_plugins.iter().cloned().collect()
+}
+
+pub fn load_enabled_plugins(
+    claude_dir: &Path,
+    cwd: Option<&Path>,
+) -> Result<Vec<LoadedPlugin>, LoaderError> {
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let settings_path = claude_dir.join("settings.json");
 
     let installed = load_installed_plugins(Some(&plugins_path))?;
-    let settings = load_claude_settings(Some(&settings_path))?;
+    let user_settings = load_claude_settings(Some(&settings_path))?;
 
-    let enabled_ids: std::collections::HashSet<&str> = settings
-        .enabled_plugins
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
+    // 尝试加载项目级 settings.json（与 P0-1 hooks 加载一致）
+    let project_settings = cwd
+        .map(|p| p.join(".claude").join("settings.json"))
+        .filter(|p| p.exists())
+        .and_then(|p| load_claude_settings(Some(&p)).ok());
+
+    let enabled_ids = merge_enabled_plugins(&user_settings, project_settings.as_ref());
 
     let filtered: Vec<_> = installed
         .plugins
         .into_iter()
-        .filter(|p| enabled_ids.contains(p.id.as_str()))
+        .filter(|p| enabled_ids.contains(&p.id))
         .collect();
 
     let filtered_installed = InstalledPlugins {
@@ -559,8 +587,11 @@ pub struct PluginLoadResult {
 }
 
 /// 加载所有已启用插件，返回聚合结果（skills 路径、MCP 服务器、agent 路径、命令列表）
-pub fn load_enabled_plugins_aggregated(claude_dir: &Path) -> PluginLoadResult {
-    let plugins = match load_enabled_plugins(claude_dir) {
+///
+/// `cwd`：项目工作目录，用于发现项目级 `.claude/settings.json` 的 `enabledPlugins`。
+/// 传 `None` 时仅读取用户级 `~/.claude/settings.json`。
+pub fn load_enabled_plugins_aggregated(claude_dir: &Path, cwd: Option<&Path>) -> PluginLoadResult {
+    let plugins = match load_enabled_plugins(claude_dir, cwd) {
         Ok(p) => p,
         Err(_) => {
             // 静默失败，避免在 TUI 上打印错误日志

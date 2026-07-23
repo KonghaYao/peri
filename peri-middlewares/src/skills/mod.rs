@@ -1,5 +1,6 @@
 pub mod builtin;
 pub mod loader;
+pub mod tools;
 
 use std::{
     path::PathBuf,
@@ -8,12 +9,14 @@ use std::{
 
 use async_trait::async_trait;
 pub use loader::{
-    list_skills, load_skill_metadata, resolve_skill_roots, scan_skill_roots, SkillMetadata,
-    SkillRoot, SkillSource, MAX_SCAN_DEPTH, MAX_SKILLS_DIRS_PER_ROOT,
+    find_skill_content, find_skill_in_list, list_skills, load_skill_metadata, resolve_skill_roots,
+    scan_skill_roots, SkillMetadata, SkillRoot, SkillSource, MAX_SCAN_DEPTH,
+    MAX_SKILLS_DIRS_PER_ROOT,
 };
 use peri_agent::{
     error::AgentResult,
     middleware::{r#trait::Middleware, state::MiddlewareState},
+    tools::BaseTool,
 };
 
 /// 全局配置文件路径：~/.peri/settings.json
@@ -88,6 +91,9 @@ pub struct SkillsMiddleware {
     disable_bundled: bool,
     /// Cached prompt contribution (populated in before_agent, returned by prompt_contribution).
     cached_contribution: Arc<RwLock<Option<String>>>,
+    /// Session 级 skills 列表缓存：非 frozen 路径由 before_agent 填充，
+    /// frozen 路径由工具首次调用时惰性扫描并写入。
+    cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
 }
 
 impl SkillsMiddleware {
@@ -100,6 +106,7 @@ impl SkillsMiddleware {
             frozen_summary: None,
             disable_bundled: false,
             cached_contribution: Arc::new(RwLock::new(None)),
+            cached_skills: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -141,12 +148,21 @@ impl SkillsMiddleware {
     ///
     /// v2：构造时即填充 cached_contribution，使 prompt_contribution 立即可用，
     /// 无需 before_agent 触发（builder 在 before_agent 前收集 prompt_contribution）。
+    ///
+    /// 注意：仅填充 cached_contribution，不填充 cached_skills。
+    /// cached_skills 由 before_agent 在 frozen/non-frozen 两条路径中统一填充，
+    /// 调用方不能在 before_agent 之前读取 cached_skills（此时为 None）。
     pub fn with_frozen_summary(mut self, summary: String) -> Self {
         self.frozen_summary = Some(summary.clone());
         if !summary.trim().is_empty() {
             *self.cached_contribution.write().unwrap() = Some(summary);
         }
         self
+    }
+
+    /// 获取 skills 缓存的 Arc 引用，供其他中间件（如 SkillToolMiddleware）共享。
+    pub fn skills_cache(&self) -> Arc<RwLock<Option<Vec<SkillMetadata>>>> {
+        Arc::clone(&self.cached_skills)
     }
 
     /// 设置是否禁用 builtin skill（默认 false）
@@ -272,8 +288,31 @@ impl Middleware for SkillsMiddleware {
         self.cached_contribution.read().unwrap().clone()
     }
 
+    fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
+        vec![
+            Box::new(tools::SkillTool::new(Arc::clone(&self.cached_skills))),
+            Box::new(tools::DiscoverSkillsTool::new(Arc::clone(
+                &self.cached_skills,
+            ))),
+        ]
+    }
+
     async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
-        // 使用冻结摘要时跳过所有磁盘 I/O
+        // 扫描 skills 并缓存 structured metadata（frozen/non-frozen 两条路径都需要，避免工具调用时懒扫描）
+        let roots = self.resolve_roots(state.cwd());
+        let skills = tokio::task::spawn_blocking(move || scan_skill_roots(&roots))
+            .await
+            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+                middleware: "SkillsMiddleware".to_string(),
+                reason: format!("spawn_blocking 失败: {e}"),
+            })?;
+        *self.cached_skills.write().unwrap() = if skills.is_empty() {
+            None
+        } else {
+            Some(skills)
+        };
+
+        // frozen 路径：使用已冻结的摘要文本作为 prompt contribution，不重新生成
         if let Some(ref summary) = self.frozen_summary {
             if !summary.trim().is_empty() {
                 *self.cached_contribution.write().unwrap() = Some(summary.clone());
@@ -283,21 +322,17 @@ impl Middleware for SkillsMiddleware {
             return Ok(());
         }
 
-        let roots = self.resolve_roots(state.cwd());
-        let skills = tokio::task::spawn_blocking(move || scan_skill_roots(&roots))
-            .await
-            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                middleware: "SkillsMiddleware".to_string(),
-                reason: format!("spawn_blocking 失败: {e}"),
-            })?;
-
-        if skills.is_empty() {
-            *self.cached_contribution.write().unwrap() = None;
-            return Ok(());
+        // non-frozen 路径：根据扫描结果生成摘要并缓存
+        let skills_ref = self.cached_skills.read().unwrap();
+        match skills_ref.as_ref() {
+            Some(skills_list) if !skills_list.is_empty() => {
+                let summary = Self::build_summary(skills_list);
+                *self.cached_contribution.write().unwrap() = Some(summary);
+            }
+            _ => {
+                *self.cached_contribution.write().unwrap() = None;
+            }
         }
-
-        let summary = Self::build_summary(&skills);
-        *self.cached_contribution.write().unwrap() = Some(summary);
         Ok(())
     }
 }

@@ -1,4 +1,4 @@
-# Workflow Panel 看板形态未按 TUI-PAGE.md 6.14 实现
+# Workflow Panel 看板形态未按 spec/global/domains/tui/tui-index.md 6.14 实现
 
 
 > 归档于 2026-07-20，原路径 spec/issues/2026-07-13-workflow-panel-kanban-mismatch.md
@@ -12,11 +12,11 @@
 
 ## Problem Statement
 
-Workflow Panel（`peri-tui/src/kit/panels/workflow.rs`）当前是一个**静态信息型面板**，展示固定行（engine、binary、subagent count、self-check）和操作说明文本，完全不看 workflow 运行时数据。这与 `TUI-PAGE.md` §6.14 定义的设计严重不符。
+Workflow Panel（`peri-tui/src/kit/panels/workflow.rs`）当前是一个**静态信息型面板**，展示固定行（engine、binary、subagent count、self-check）和操作说明文本，完全不看 workflow 运行时数据。这与 `spec/global/domains/tui/tui-index.md` §6.14 定义的设计严重不符。
 
 ### 当前实现 vs 设计对比
 
-| 维度 | 设计 (TUI-PAGE.md §6.14) | 当前实现 | 差距 |
+| 维度 | 设计 (spec/global/domains/tui/tui-index.md §6.14) | 当前实现 | 差距 |
 |------|--------------------------|---------|------|
 | **顶部 Tabs** | 多个 workflow run 可切换，状态 emoji 前缀 | 无 | 完全缺失 |
 | **左右分栏** | Phase 列（左 2）+ Agents 列（右 8） | 单列扁平列表 | 完全缺失 |
@@ -90,7 +90,7 @@ Workflow Panel（`peri-tui/src/kit/panels/workflow.rs`）当前是一个**静态
 
 ## Affected Files
 
-- `TUI-PAGE.md`：§6.14 为参考设计，不修改
+- `spec/global/domains/tui/tui-index.md`：§6.14 为参考设计，不修改
 - `peri-tui/src/kit/panels/workflow.rs`：**主改造文件**——从静态信息型面板重写为看板型
 - `peri-tui/src/kit/atoms.rs`：新增 `WORKFLOW_SNAPSHOT_ATOM` 全局状态
 - `peri-tui/src/kit/acp_events.rs` / `acp_notifier.rs`：接入 `workflow-snapshot` 事件

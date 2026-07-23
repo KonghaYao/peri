@@ -202,6 +202,8 @@ settings.json
 !.claude/skills/start-devflow/
 !.claude/skills/auto-issue-fixer/**
 !.claude/skills/auto-issue-fixer/
+!.claude/skills/project-maturity/**
+!.claude/skills/project-maturity/
 !.claude/agents/
 !.claude/agents/coder.md
 .qoder/**/*

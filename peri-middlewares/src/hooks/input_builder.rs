@@ -43,6 +43,7 @@ pub fn post_tool_batch(
         subagent_name: None,
         subagent_result: None,
         message_count: Some(message_count),
+        additional_data: None,
     }
 }
 
@@ -79,6 +80,7 @@ pub fn stop(
         subagent_name: None,
         subagent_result: Some(output.text.chars().take(500).collect::<String>()),
         message_count: None,
+        additional_data: None,
     }
 }
 
@@ -109,6 +111,7 @@ pub fn stop_failure(
         subagent_name: None,
         subagent_result: None,
         message_count: None,
+        additional_data: None,
     }
 }
 
@@ -138,6 +141,7 @@ pub fn session_end_standalone(
         subagent_name: None,
         subagent_result: None,
         message_count: None,
+        additional_data: None,
     }
 }
 
@@ -166,5 +170,188 @@ pub fn notification_standalone(
         subagent_name: None,
         subagent_result: None,
         message_count: None,
+        additional_data: None,
+    }
+}
+
+// === P1-5 新增 standalone 构造函数 ===
+
+/// 构造 standalone 路径 Setup 的 `HookInput`，session 初始化时触发。
+pub fn setup_standalone(
+    session_id: &str,
+    transcript_path: &str,
+    cwd: &str,
+    current_model: &str,
+) -> HookInput {
+    HookInput {
+        session_id: session_id.to_string(),
+        transcript_path: transcript_path.to_string(),
+        cwd: cwd.to_string(),
+        permission_mode: None,
+        agent_id: None,
+        agent_type: None,
+        hook_event_name: HookEvent::Setup,
+        tool_name: None,
+        tool_input: None,
+        tool_use_id: None,
+        tool_output: None,
+        prompt: None,
+        source: None,
+        model: Some(current_model.to_string()),
+        subagent_name: None,
+        subagent_result: None,
+        message_count: None,
+        additional_data: None,
+    }
+}
+
+/// 构造 standalone 路径 InstructionsLoaded 的 `HookInput`，
+/// 每次 user prompt 时规则/skill 已加载。
+pub fn instructions_loaded_standalone(
+    session_id: &str,
+    transcript_path: &str,
+    cwd: &str,
+    current_model: &str,
+) -> HookInput {
+    HookInput {
+        session_id: session_id.to_string(),
+        transcript_path: transcript_path.to_string(),
+        cwd: cwd.to_string(),
+        permission_mode: None,
+        agent_id: None,
+        agent_type: None,
+        hook_event_name: HookEvent::InstructionsLoaded,
+        tool_name: None,
+        tool_input: None,
+        tool_use_id: None,
+        tool_output: None,
+        prompt: None,
+        source: None,
+        model: Some(current_model.to_string()),
+        subagent_name: None,
+        subagent_result: None,
+        message_count: None,
+        additional_data: None,
+    }
+}
+
+/// 构造 standalone 路径 ConfigChange 的 `HookInput`。
+pub fn config_change_standalone(
+    session_id: &str,
+    transcript_path: &str,
+    cwd: &str,
+    current_model: &str,
+    config_key: &str,
+) -> HookInput {
+    HookInput {
+        session_id: session_id.to_string(),
+        transcript_path: transcript_path.to_string(),
+        cwd: cwd.to_string(),
+        permission_mode: None,
+        agent_id: None,
+        agent_type: None,
+        hook_event_name: HookEvent::ConfigChange,
+        tool_name: Some(config_key.to_string()),
+        tool_input: None,
+        tool_use_id: None,
+        tool_output: None,
+        prompt: None,
+        source: None,
+        model: Some(current_model.to_string()),
+        subagent_name: None,
+        subagent_result: None,
+        message_count: None,
+        additional_data: None,
+    }
+}
+
+/// 构造 standalone 路径 WorktreeCreate 的 `HookInput`。
+pub fn worktree_create_standalone(
+    session_id: &str,
+    transcript_path: &str,
+    cwd: &str,
+    current_model: &str,
+    worktree_path: &str,
+) -> HookInput {
+    HookInput {
+        session_id: session_id.to_string(),
+        transcript_path: transcript_path.to_string(),
+        cwd: cwd.to_string(),
+        permission_mode: None,
+        agent_id: None,
+        agent_type: None,
+        hook_event_name: HookEvent::WorktreeCreate,
+        tool_name: Some(worktree_path.to_string()),
+        tool_input: None,
+        tool_use_id: None,
+        tool_output: None,
+        prompt: None,
+        source: None,
+        model: Some(current_model.to_string()),
+        subagent_name: None,
+        subagent_result: None,
+        message_count: None,
+        additional_data: None,
+    }
+}
+
+/// 构造 standalone 路径 WorktreeRemove 的 `HookInput`。
+pub fn worktree_remove_standalone(
+    session_id: &str,
+    transcript_path: &str,
+    cwd: &str,
+    current_model: &str,
+    worktree_path: &str,
+) -> HookInput {
+    HookInput {
+        session_id: session_id.to_string(),
+        transcript_path: transcript_path.to_string(),
+        cwd: cwd.to_string(),
+        permission_mode: None,
+        agent_id: None,
+        agent_type: None,
+        hook_event_name: HookEvent::WorktreeRemove,
+        tool_name: Some(worktree_path.to_string()),
+        tool_input: None,
+        tool_use_id: None,
+        tool_output: None,
+        prompt: None,
+        source: None,
+        model: Some(current_model.to_string()),
+        subagent_name: None,
+        subagent_result: None,
+        message_count: None,
+        additional_data: None,
+    }
+}
+
+/// 构造 standalone 路径 CwdChanged 的 `HookInput`。
+/// old_cwd 记录变更前的工作目录。
+pub fn cwd_changed_standalone(
+    session_id: &str,
+    transcript_path: &str,
+    cwd: &str,
+    current_model: &str,
+    old_cwd: &str,
+) -> HookInput {
+    HookInput {
+        session_id: session_id.to_string(),
+        transcript_path: transcript_path.to_string(),
+        cwd: cwd.to_string(),
+        permission_mode: None,
+        agent_id: None,
+        agent_type: None,
+        hook_event_name: HookEvent::CwdChanged,
+        tool_name: Some(old_cwd.to_string()),
+        tool_input: None,
+        tool_use_id: None,
+        tool_output: None,
+        prompt: None,
+        source: None,
+        model: Some(current_model.to_string()),
+        subagent_name: None,
+        subagent_result: None,
+        message_count: None,
+        additional_data: None,
     }
 }

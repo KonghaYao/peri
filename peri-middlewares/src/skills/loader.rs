@@ -36,6 +36,29 @@ pub const MAX_SCAN_DEPTH: usize = 6;
 /// 单 root 目录数上限
 pub const MAX_SKILLS_DIRS_PER_ROOT: usize = 1000;
 
+/// 永远不会包含 SKILL.md 的目录名（跳过以加速扫描，避免递归进入无关子目录）
+const SKIP_DIR_NAMES: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "__pycache__",
+    ".tox",
+    ".venv",
+    "venv",
+    ".idea",
+    ".vscode",
+    "outputs",
+    "old_skill",
+];
+
+fn should_skip_dir(dir_name: &str) -> bool {
+    SKIP_DIR_NAMES.contains(&dir_name)
+}
+
 /// Skill 元数据（来自 SKILL.md frontmatter）
 #[derive(Debug, Clone)]
 pub struct SkillMetadata {
@@ -187,6 +210,16 @@ fn scan_dir_recursive(
     }
     if *dir_count >= max_dirs {
         return;
+    }
+
+    // 跳过不可能包含 SKILL.md 的子目录（.git, node_modules, target, dist, outputs 等）。
+    // 仅 depth > 0 时生效：根目录（depth=0）不跳过，避免 TempDir 的 `.tmp...` 被误判。
+    if depth > 0 {
+        if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+            if should_skip_dir(name) {
+                return;
+            }
+        }
     }
 
     // 防环：canonicalize 后入 visited（失败时回退到原 path）
@@ -341,6 +374,31 @@ pub fn find_skill_content(
     let roots = resolve_skill_roots(cwd, plugin_roots, disable_bundled);
     let skills = scan_skill_roots(&roots);
 
+    let name_lower = skill_name.to_lowercase();
+    let found = skills
+        .iter()
+        .find(|s| s.name.to_lowercase() == name_lower)?;
+
+    let content = if matches!(found.source, SkillSource::Builtin) {
+        crate::skills::builtin::BUILTIN_SKILLS
+            .iter()
+            .find(|bs| bs.name == found.name)
+            .map(|bs| bs.content.to_string())?
+    } else {
+        std::fs::read_to_string(&found.path).ok()?
+    };
+
+    Some((found.clone(), content))
+}
+
+/// 在预扫描的 skills 列表中查找并加载 skill 内容（避免重复磁盘扫描）。
+///
+/// 与 [`find_skill_content`] 功能相同，但接受已扫描的 `Vec<SkillMetadata>`
+/// 而非自行调用 `scan_skill_roots`。调用方需自行维护缓存生命周期。
+pub fn find_skill_in_list(
+    skills: &[SkillMetadata],
+    skill_name: &str,
+) -> Option<(SkillMetadata, String)> {
     let name_lower = skill_name.to_lowercase();
     let found = skills
         .iter()

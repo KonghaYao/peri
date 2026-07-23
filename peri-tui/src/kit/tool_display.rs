@@ -1,6 +1,6 @@
 //! 工具显示名与参数摘要格式化。
 //!
-//! 对应 TUI-PAGE.md §2.4.2 的工具名映射表和参数摘要规则。
+//! 对应 spec/global/domains/tui/tui-rendering.md §2.4.2 的工具名映射表和参数摘要规则。
 
 use crate::i18n;
 
@@ -15,7 +15,7 @@ pub fn format_tool_name(raw: &str) -> String {
 
 /// 从工具参数 JSON 值中提取显示摘要（按 tool_name 选择关键字段）。
 ///
-/// 对应 TUI-PAGE.md §2.4.2 的 `format_tool_args` 规则。
+/// 对应 spec/global/domains/tui/tui-rendering.md §2.4.2 的 `format_tool_args` 规则。
 /// 当 ACP view_mapper 已将 args 预摘要为 `input_summary` 字符串时，
 /// 优先使用预摘要；本函数用于需要从原始 args 提取的场合。
 pub fn format_tool_args(tool_name: &str, args: &serde_json::Value) -> String {

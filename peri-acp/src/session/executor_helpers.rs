@@ -382,6 +382,7 @@ pub(super) async fn build_and_execute_agent_v2(
         goal_controller,
         background_registry,
         on_bg_complete,
+        langfuse_tracer.clone(),
     );
     if let Some(cache) = new_cache {
         ctx.pool.lock().store_llm(cache);
@@ -585,6 +586,18 @@ pub(super) async fn build_and_execute_agent_v2(
         LoopResult::Interrupted => (false, PromptStopReason::Cancelled),
         LoopResult::Error(ref e) => {
             error!(session_id = %ctx.session_id, error = %e, "[v2] loop failed");
+            // 对非 Interrupted/MaxIterations 的致命错误，通知 TUI 显示红色错误提示
+            // issue: spec/issues/2026-07-22-llm-api-error-silently-swallowed-in-tui.md
+            if !matches!(e, AgentError::Interrupted)
+                && !matches!(e, AgentError::MaxIterationsExceeded(_))
+                && !ctx.cancel.is_cancelled()
+            {
+                if let Some(tx) = event_tx.lock().as_ref() {
+                    let _ = tx.send(ExecutorEvent::AgentExecutionFailed {
+                        message: e.user_facing_message(),
+                    });
+                }
+            }
             let reason = if ctx.cancel.is_cancelled() || matches!(e, AgentError::Interrupted) {
                 PromptStopReason::Cancelled
             } else if matches!(e, AgentError::MaxIterationsExceeded(_)) {

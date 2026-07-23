@@ -379,14 +379,14 @@ push_event / push_done / replay / notify 等发送点读取 → if caps.xxx { ..
 - **事件边界**：消息区只处理鼠标滚轮，编辑区只处理键盘
 - **committed push**：所有需时序定位的消息须先 flush current_turn → committed 再 push（flush-then-push 模式）。禁止直接 push committed 绕过 TurnSegment（SystemNote 除外，见下条）（[issue](spec/archive-issues/2026-07-16-system-note-cache-warning-position-wrong.md)）
 - **SystemNote 注入**：所有 SystemNote（CompactCompleted/CompactError/AgentExecutionFailed/BudgetWarning/SystemNotification）必须通过 `BridgeState::inject_system_note(text, level)` 统一入口注入，禁止直接 `committed.push_back(TuiSystemNote{...})` 或手工 `push_system_note() + push_view_models + push_acp_state`。`inject_system_note` 封装三步操作，确保 SystemNote 按时序出现在 current_turn 内部。这是第三次同类回归（2026-07-16 → 2026-07-20 → 2026-07-22），新增 handler 时务必遵守此规则（[issue](spec/issues/2026-07-20-cache-warning-systemnote-position-regression.md)）
-- **渲染异常优先检查事件注入**：消息区内容跳变/布局异常时，优先排查是否有 SystemNote/cache 警告/其他事件在流中插入了额外内容，再检查布局计算。事件注入是 3 次同类回归的根因——2026-07-18 滚动跳变诊断中 agent 在布局方向浪费 ~90 分钟才找到真正根因（详见 spec/global/domains/tui.md#issue_2026-07-18-scroll-jump-event-injection）
+- **渲染异常优先检查事件注入**：消息区内容跳变/布局异常时，优先排查是否有 SystemNote/cache 警告/其他事件在流中插入了额外内容，再检查布局计算。事件注入是 3 次同类回归的根因——2026-07-18 滚动跳变诊断中 agent 在布局方向浪费 ~90 分钟才找到真正根因（详见 spec/global/domains/tui/tui-rendering.md#issue_2026-07-18-scroll-jump-event-injection）
 - **增量缓存 can_reuse**：条件须覆盖 block 类型变更场景——输入前缀可能导致 pulldown-cmark 重解析出不同 block 类型时，缓存必须失效全量重跑（[issue](spec/archive-issues/2026-07-15-markdown-table-raw-text-streaming.md)）
 - **面板交互规范**：选中 tab 用反色（accent 底色+surface 字色），禁止 `[ ]` 包裹。面板内禁止单字母快捷键（j/k/q 等），仅允许方向键 + Tab + Esc + Enter。文本输入用 `TextAreaState`，禁止手工键盘事件处理
-- **ratatui-kit 迁移回归**：UI 框架迁移需要系统性功能回归清单——状态栏上下文消耗显示和缓存命中率警告在 ratatui-kit 迁移后丢失（详见 spec/global/domains/tui.md#issue_2026-07-13-statusbar-context-cache-display-regression）
-- **Loading 状态**：loading 应由"是否有活跃流式 agent"决定，而非"是否有 SubagentStopped 事件"。bg agent 完成时 SubagentStopped 无条件设 `phase=PromptRunning` 覆盖了之前 TurnDone 清除的 loading（详见 spec/global/domains/tui.md#issue_2026-07-13-main-agent-done-loading-persists-bg-still-running）
-- **滚动性能**：高频事件 handler 内状态修改合并为单次 `write_no_update()`，不触发多次原子通知→render loop。ScrollThrottle 16ms 节流，tmux 下 PTY 开销放大（详见 spec/global/domains/tui.md#issue_2026-07-05-scroll-performance-lag）
-- **ESC 事件优先级**：面板/弹窗的 ESC 处理应使用 `EventPriority::High`，确保先于全局 handler 执行。否则全局 ESC 截断面板 handler，`cancel_ask_user()` 不调用→agent 永久挂起（详见 spec/global/domains/tui.md#issue_2026-07-13-ask-user-esc-freeze-reject）
-- **History 恢复滚动**：初始加载/恢复场景需"强制吸底窗口"（如 20 帧=333ms），覆盖所有批次到达。`scroll_to_bottom` 过早执行时 ScrollViewState.size=None→offset 无效，后续因 proximity guard 永不滚底（详见 spec/global/domains/tui.md#issue_2026-07-11-history-replay-scroll-too-early）
+- **ratatui-kit 迁移回归**：UI 框架迁移需要系统性功能回归清单——状态栏上下文消耗显示和缓存命中率警告在 ratatui-kit 迁移后丢失（详见 spec/global/domains/tui/tui-rendering.md#issue_2026-07-13-statusbar-context-cache-display-regression）
+- **Loading 状态**：loading 应由"是否有活跃流式 agent"决定，而非"是否有 SubagentStopped 事件"。bg agent 完成时 SubagentStopped 无条件设 `phase=PromptRunning` 覆盖了之前 TurnDone 清除的 loading（详见 spec/global/domains/tui/tui-rendering.md#issue_2026-07-13-main-agent-done-loading-persists-bg-still-running）
+- **滚动性能**：高频事件 handler 内状态修改合并为单次 `write_no_update()`，不触发多次原子通知→render loop。ScrollThrottle 16ms 节流，tmux 下 PTY 开销放大（详见 spec/global/domains/tui/tui-rendering.md#issue_2026-07-05-scroll-performance-lag）
+- **ESC 事件优先级**：面板/弹窗的 ESC 处理应使用 `EventPriority::High`，确保先于全局 handler 执行。否则全局 ESC 截断面板 handler，`cancel_ask_user()` 不调用→agent 永久挂起（详见 spec/global/domains/tui/tui-popups.md#issue_2026-07-13-ask-user-esc-freeze-reject）
+- **History 恢复滚动**：初始加载/恢复场景需"强制吸底窗口"（如 20 帧=333ms），覆盖所有批次到达。`scroll_to_bottom` 过早执行时 ScrollViewState.size=None→offset 无效，后续因 proximity guard 永不滚底（详见 spec/global/domains/tui/tui-rendering.md#issue_2026-07-11-history-replay-scroll-too-early）
 
 ### SubAgent / Worktree
 - **coder cwd**：不遵守 `Agent(cwd=...)`，prompt 中必须用绝对路径。push 前 `git diff --stat` 确认

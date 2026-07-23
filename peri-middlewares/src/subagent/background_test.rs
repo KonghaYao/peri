@@ -38,7 +38,10 @@ async fn test_max_concurrent_limit() {
 
     let result = registry.register_with_kind(make_task("bg-4"));
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("已达 agent 并发上限"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Kind concurrent limit reached"));
 }
 
 #[tokio::test]
@@ -168,7 +171,10 @@ async fn test_register_with_kind_shell_limit() {
     task.kind = BgTaskKind::Shell;
     let result = registry.register_with_kind(task);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("已达 shell 并发上限"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Kind concurrent limit reached"));
 }
 
 #[tokio::test]
@@ -185,7 +191,10 @@ async fn test_register_with_kind_agent_limit() {
     task.kind = BgTaskKind::Agent;
     let result = registry.register_with_kind(task);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("已达 agent 并发上限"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Kind concurrent limit reached"));
 }
 
 #[tokio::test]

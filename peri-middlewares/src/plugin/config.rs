@@ -230,7 +230,9 @@ pub fn load_installed_plugins(
 
                         if !missing_ids.is_empty() {
                             // 创建回填条目（从缓存目录查找实际安装路径）
-                            use crate::plugin::types::{InstallScope, InstalledPlugin};
+                            use crate::plugin::types::{
+                                InstallScope, InstalledPlugin, PluginOrigin,
+                            };
                             let plugins_cache = plugin_cache_dir();
                             let mut migrated_plugins = Vec::new();
 
@@ -297,6 +299,7 @@ pub fn load_installed_plugins(
                                             install_path,
                                             scope: InstallScope::User,
                                             project_path: None,
+                                            origin: PluginOrigin::ClaudeCodeInstalled,
                                         });
                                     }
                                 }

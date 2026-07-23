@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
+use super::langfuse_bridge::LangfuseBridgeLike;
 use crate::agent::events::AgentEventHandler;
 use crate::agent::events::ExecutorEvent;
 use crate::agent::events_v2::EventHandles;
@@ -38,6 +39,7 @@ use crate::agent::events_v2_mapper::{
 ///
 /// - `handles`：SubAgent v2 `EventHandles`（从 `V2SubagentContext.event_handles` 取出）
 /// - `event_handler`：父 Agent 的事件处理器（`SubAgentTool.event_handler` clone）
+/// - `bridge`：Langfuse 桥接器（None 表示遥测禁用）
 /// - `child_thread_id`：与 `SubagentStarted { instance_id }` 一致的 UUID 字符串
 ///
 /// # 返回
@@ -47,6 +49,7 @@ use crate::agent::events_v2_mapper::{
 pub fn spawn_subagent_event_forwarder(
     mut handles: EventHandles,
     event_handler: Option<Arc<dyn AgentEventHandler>>,
+    bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     child_thread_id: String,
 ) -> JoinHandle<()> {
     let has_handler = event_handler.is_some();
@@ -73,6 +76,10 @@ pub fn spawn_subagent_event_forwarder(
                         | crate::agent::events_v2::RenderEvent::HitlPending { .. }
                     );
                     if should_forward {
+                        // Langfuse bridge 调用必须在 ev 被 render_event_to_executor move 之前
+                        if let Some(ref b) = bridge {
+                            b.process_render_event(&ev);
+                        }
                         if let Some(mut exec_ev) = render_event_to_executor(ev) {
                             tracing::trace!(
                                 target: "agent.subagent_forwarder",
@@ -110,6 +117,10 @@ pub fn spawn_subagent_event_forwarder(
                 ev_res = handles.observe_rx.recv() => {
                     match ev_res {
                         Ok(ev) => {
+                            // Langfuse bridge 调用必须在 ev 被 observe_event_to_executor move 之前
+                            if let Some(ref b) = bridge {
+                                b.process_observe_event(&ev);
+                            }
                             if let Some(mut exec_ev) = observe_event_to_executor(ev) {
                                 set_source_agent_id(&mut exec_ev, &child_thread_id);
                                 if let Some(h) = &event_handler {

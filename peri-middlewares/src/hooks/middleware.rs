@@ -248,6 +248,35 @@ impl Middleware for HookMiddleware {
             "Hook prevented continuation",
         )?;
 
+        // P1-5: InstructionsLoaded —— 每次 user prompt 时规则/skill 已加载
+        let instructions_input = HookInput {
+            session_id: self.session_id.clone(),
+            transcript_path: self.transcript_path.clone(),
+            cwd: self.cwd.clone(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            hook_event_name: HookEvent::InstructionsLoaded,
+            tool_name: None,
+            tool_input: None,
+            tool_use_id: None,
+            tool_output: None,
+            prompt: Some(prompt),
+            source: None,
+            model: Some(self.current_model.clone()),
+            subagent_name: None,
+            subagent_result: None,
+            message_count: None,
+            additional_data: None,
+        };
+        self.fire_event(
+            HookEvent::InstructionsLoaded,
+            &instructions_input,
+            None,
+            None,
+        )
+        .await;
+
         Ok(())
     }
 
@@ -316,6 +345,19 @@ impl Middleware for HookMiddleware {
                     Some(&tool_call.input),
                 )
                 .await;
+
+            // P1-5: PermissionDenied —— 当 hook 拒绝权限时触发
+            let is_denied = matches!(&action, HookAction::Block { .. })
+                || matches!(&action, HookAction::PreventContinuation { .. });
+            if is_denied {
+                self.fire_event(
+                    HookEvent::PermissionDenied,
+                    &input,
+                    Some(&tool_call.name),
+                    Some(&tool_call.input),
+                )
+                .await;
+            }
 
             // Fire Notification (agent is waiting for user permission)
             self.fire_event(

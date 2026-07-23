@@ -1,0 +1,69 @@
+# Subagent Langfuse trace 缺少完整的 trace 结构——与主 agent 不等价
+
+**状态**：Fixed
+**优先级**：中
+**创建日期**：2026-07-23
+**类型**：技术债
+
+## 问题描述
+
+Subagent 在 Langfuse 上的 trace 结构与主 agent 不等价。主 agent 有完整的 turn → stage span → tool observation / generation 层级，但 subagent 仅产生一条父 agent 的 Agent 工具 observation——subagent 内部的 Read/Write/Bash 等工具调用、LLM 调用、compact 阶段在 Langfuse 上完全不可见。
+
+## 现状
+
+**主 agent trace 结构**（`executor_helpers.rs:459`）：
+```
+trace
+ ├─ stage-compact span（CompactStarted/Completed）
+ ├─ stage-reason span（Reason）
+ │   └─ generation（LlmCallStart/End → token 统计）
+ ├─ stage-act span（Act）
+ │   ├─ tool-Bash observation（input/output/耗时）
+ │   ├─ tool-Read observation
+ │   └─ tool-Agent observation（→ subagent，仅 input/output，无内部结构）
+ └─ stage-end span
+```
+
+**Subagent trace 结构**（`execute_fork.rs:146`）：
+```
+（空——没有任何 Langfuse trace 产出）
+```
+
+父 agent 通过 `tracer.on_tool_start/on_tool_end` 嗅探 Agent/Task 工具名来间接记录 subagent 的 start/stop 边界，但这只产生一条工具级 observation，无法展开 subagent 内部细节。
+
+## 涉及文件
+
+- `peri-agent/src/agent/subagent_event_forwarder.rs` —— subagent 专用事件转发器，消费 render/state/observe 三通道但**无 LangfuseBridge 参数**，只做 TUI 转发
+- `peri-acp/src/event/forwarder.rs` —— `spawn_eventbus_forwarder` 是主 agent 的转发器，**有 LangfuseBridge 参数**，forwarder loop 内对每类事件调 `bridge.process_event()`
+- `peri-middlewares/src/subagent/tool/execute_fork.rs:146` —— fork subagent 调用 `spawn_subagent_event_forwarder`（无 Langfuse 能力）
+- `peri-middlewares/src/subagent/tool/execute_bg.rs` —— bg subagent 同上
+- `peri-acp/src/langfuse/bridge.rs:640-642` —— `SubagentStart/SubagentStop` 在 bridge 中被显式跳过（"暂无 Langfuse 映射，静默跳过"）
+- `peri-acp/src/langfuse/tracer/subagent.rs` —— `SubagentStack` 已存在，但仅用于父 agent 工具嗅探压栈，无法承载独立 trace
+
+## 期望改进方向
+
+Subagent 的 `spawn_subagent_event_forwarder` 对齐 `spawn_eventbus_forwarder`，增加 `bridge: Option<LangfuseBridge>` 参数，在 forward loop 内对 render/observe 事件调用 `bridge.process_event()`。这样 subagent 能自动获得与主 agent 相同的 trace 结构：stage span → tool observation / generation → compact span。
+
+## 状态变更记录
+
+| 日期 | 从 | 到 | 操作人 | 说明 |
+|------|-----|-----|--------|------|
+| 2026-07-23 | — | Open | agent | 创建——分析 subagent Langfuse trace 缺口时发现 |
+| 2026-07-23 | Open | Fixed | agent | 修复：subagent forwarder 增加 LangfuseBridge 支持，11 文件 115+ 行 |
+
+## 修复记录
+
+### 修复 #1（2026-07-23）
+
+- **操作人**：agent（auto-devflow: explore → plan → code → review）
+- **用户原意**：subagent 和主 agent 拥有同样的 Langfuse trace 结构
+- **修复内容**：
+  - 新建 `peri-agent/src/agent/langfuse_bridge.rs`：定义 `LangfuseBridgeLike` trait（解耦 peri-agent 与 peri-acp 的跨层依赖）
+  - 修改 `spawn_subagent_event_forwarder`：增加 `bridge: Option<Arc<dyn LangfuseBridgeLike>>` 参数，render/observe 分支在 ev 被 move 前调用 bridge
+  - 修改 `peri-acp/src/langfuse/bridge.rs`：`LangfuseBridge` impl trait，`active_stage` 内部化管理（`Arc<Mutex<Option<StageHandle>>>`），`StageStarted` 的 `parent_observation_id` 走 `current_agent_id()`
+  - 修改 `SubAgentTool` + `SubAgentMiddleware`：增加 `langfuse_bridge` 字段 + builder + `build_tool()` 透传
+  - 修改 5 个调用点（fork/bg/define/spawner/bg_command）：传递 bridge
+  - 修改 `builder.rs`：从 `langfuse_tracer` 构造 `LangfuseBridge` 注入 `SubAgentMiddleware`
+- **涉及文件**：11 个（+1 新建）
+- **验证状态**：已验证（build ✅ / peri-agent 635 ✅ / peri-acp 299 ✅ / peri-middlewares 1059 ✅）
+- **审查结论**：PASS——架构正确，向后兼容。已知限制：并发 bg subagent 共享 `active_stage`（stage span 交错可能覆盖，后续优化）

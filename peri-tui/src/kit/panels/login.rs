@@ -348,7 +348,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     match *mode.read() {
         LoginPanelMode::Browse => {
-            // S16：TUI-PAGE.md §6.2 样式——Enter::select · Esc::close
+            // S16：spec/global/domains/tui/tui-panels.md §6.2 样式——Enter::select · Esc::close
             lines.push(Line::from(vec![Span::styled(
                 format!("  {} providers configured", count),
                 Style::new().fg(text_color).bold(),

@@ -1,6 +1,7 @@
 use tempfile::NamedTempFile;
 
 use super::*;
+use crate::plugin::PluginOrigin;
 
 #[test]
 fn test_load_from_nonexistent_path() {
@@ -403,6 +404,7 @@ fn test_load_merged_config_full_with_plugin() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     };
     std::fs::write(
@@ -503,6 +505,7 @@ fn test_load_merged_config_full_multiple_plugins() {
                 install_path: plugin_a_dir.clone(),
                 scope: InstallScope::User,
                 project_path: None,
+                origin: PluginOrigin::PeriInstalled,
             },
             InstalledPlugin {
                 id: "pb@beta".into(),
@@ -512,6 +515,7 @@ fn test_load_merged_config_full_multiple_plugins() {
                 install_path: plugin_b_dir.clone(),
                 scope: InstallScope::User,
                 project_path: None,
+                origin: PluginOrigin::PeriInstalled,
             },
         ],
     };
@@ -593,6 +597,7 @@ fn test_load_merged_config_full_plugin_env_preserves_existing() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     };
     std::fs::write(

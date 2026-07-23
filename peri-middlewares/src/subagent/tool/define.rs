@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use peri_agent::agent::LangfuseBridgeLike;
 use peri_agent::{
     agent::{events::AgentEventHandler, react::ReactLLM},
     messages::BaseMessage,
@@ -78,6 +79,8 @@ pub struct SubAgentTool {
     /// bg 完成时的同步回调：在 invoke_background 路径调用 registry.complete() 之前执行
     pub(crate) on_bg_complete:
         Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
+    /// Langfuse bridge for subagent trace（None 表示遥测禁用）
+    pub(crate) langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
 }
 
 impl SubAgentTool {
@@ -109,6 +112,7 @@ impl SubAgentTool {
             frozen_skill_summary: None,
             frozen_system_prompt: None,
             on_bg_complete: None,
+            langfuse_bridge: None,
         }
     }
 
@@ -213,6 +217,12 @@ impl SubAgentTool {
         self
     }
 
+    /// 设置 Langfuse 桥接器，用于 SubAgent 的完整 Langfuse trace。
+    pub fn with_langfuse_bridge(mut self, bridge: Arc<dyn LangfuseBridgeLike>) -> Self {
+        self.langfuse_bridge = Some(bridge);
+        self
+    }
+
     pub(crate) fn load_agent_def(&self, agent_id: &str, cwd: &str) -> Result<ClaudeAgent, String> {
         let agent_path = AgentDefineMiddleware::candidate_paths(cwd, agent_id)
             .into_iter()
@@ -243,8 +253,9 @@ impl SubAgentTool {
         system_prompt: &str,
         tone: &Option<String>,
         proactiveness: &Option<String>,
+        mode: &Option<String>,
     ) -> Option<AgentOverrides> {
-        crate::subagent::fork::overrides_from_agent_def(system_prompt, tone, proactiveness)
+        crate::subagent::fork::overrides_from_agent_def(system_prompt, tone, proactiveness, mode)
     }
 
     pub(crate) async fn fire_subagent_lifecycle_hook(
@@ -483,6 +494,7 @@ impl BaseTool for SubAgentTool {
             peri_agent::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
                 v2_ctx.event_handles,
                 self.event_handler.clone(),
+                self.langfuse_bridge.clone(),
                 child_thread_id.clone(),
             );
 

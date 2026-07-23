@@ -51,7 +51,7 @@ async fn test_forwarder_injects_source_agent_id_for_tool_events() {
     let child_thread_id = "subagent_test_id_123".to_string();
 
     let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), child_thread_id.clone());
+        spawn_subagent_event_forwarder(handles, Some(handler), None, child_thread_id.clone());
 
     // emit ToolStarted（注意 v2 agent_id 与 child_thread_id 不同）
     let (turn_id, agent_id) = ids();
@@ -95,7 +95,7 @@ async fn test_forwarder_injects_source_agent_id_for_text_chunk() {
     });
 
     let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), "child_abc".to_string());
+        spawn_subagent_event_forwarder(handles, Some(handler), None, "child_abc".to_string());
 
     let (turn_id, agent_id) = ids();
     bus.emit_render(RenderEvent::TextChunk {
@@ -130,7 +130,7 @@ async fn test_forwarder_injects_source_agent_id_for_reasoning_chunk() {
     });
 
     let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), "child_reasoning".to_string());
+        spawn_subagent_event_forwarder(handles, Some(handler), None, "child_reasoning".to_string());
 
     let (turn_id, agent_id) = ids();
     bus.emit_render(RenderEvent::ThinkingChunk {
@@ -164,7 +164,8 @@ async fn test_forwarder_propagates_all_event_layers() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder = spawn_subagent_event_forwarder(handles, Some(handler), "test_id".to_string());
+    let _forwarder =
+        spawn_subagent_event_forwarder(handles, Some(handler), None, "test_id".to_string());
 
     // Render layer
     let (turn_id, agent_id) = ids();
@@ -225,7 +226,7 @@ async fn test_forwarder_exits_when_channels_closed() {
     let (_bus, handles) = EventBus::new(EventBusConfig::default());
     let handler: Option<Arc<dyn AgentEventHandler>> = None;
 
-    let forwarder = spawn_subagent_event_forwarder(handles, handler, "test".to_string());
+    let forwarder = spawn_subagent_event_forwarder(handles, handler, None, "test".to_string());
 
     // _bus drop 后，render/state tx 关闭；observe_rx 没有 sender 也无法 recv
     // 由于 select! else 分支处理 None，task 应该退出
@@ -256,6 +257,7 @@ async fn test_forwarder_handles_observe_lagged() {
     let _forwarder = spawn_subagent_event_forwarder(
         handles,
         Some(handler as Arc<dyn AgentEventHandler>),
+        None,
         "test".to_string(),
     );
 
@@ -292,7 +294,7 @@ async fn test_forwarder_no_handler_does_not_panic() {
     // event_handler = None 时不应该 panic，事件被消费后丢弃
     let (bus, handles) = EventBus::new(EventBusConfig::default());
 
-    let _forwarder = spawn_subagent_event_forwarder(handles, None, "test".to_string());
+    let _forwarder = spawn_subagent_event_forwarder(handles, None, None, "test".to_string());
 
     let (turn_id, agent_id) = ids();
     bus.emit_render(RenderEvent::ToolStarted {
@@ -320,7 +322,8 @@ async fn test_forwarder_filters_turn_committed() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder = spawn_subagent_event_forwarder(handles, Some(handler), "test".to_string());
+    let _forwarder =
+        spawn_subagent_event_forwarder(handles, Some(handler), None, "test".to_string());
 
     // 发送 TurnCompleted（在 Render 层）→ 应被过滤
     let (turn_id, agent_id) = ids();
@@ -393,7 +396,8 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder = spawn_subagent_event_forwarder(handles, Some(handler), "test".to_string());
+    let _forwarder =
+        spawn_subagent_event_forwarder(handles, Some(handler), None, "test".to_string());
 
     // 给 forwarder 一点启动时间
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;

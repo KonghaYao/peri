@@ -11,7 +11,7 @@ Peri TUI 的 MessageArea 在空态（无消息、无 loading、无 todo）时，
 
 ## 症状详情
 
-根据 TUI-PAGE.md 设计规范第 400 行：
+根据 spec/global/domains/tui/tui-index.md 设计规范第 400 行：
 ```
 │ │ │ │ - 空态时保留「✻ Brewed for Xm Xs」（灰色 MUTED）                    │ │ │ │
 ```

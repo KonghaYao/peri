@@ -22,7 +22,7 @@
 | 16 | 2026-07-13 | [Login 面板 Enter 选择 provider 后不关闭面板](2026-07-13-login-panel-enter-does-not-close.md) | Fixed |
 | 17 | 2026-07-13 | [Model/Login 面板切换后重启配置丢失 + 状态栏更新延迟](2026-07-13-model-login-panel-persistence-lost.md) | Fixed |
 | 18 | 2026-07-13 | [Plugin 面板 ←/→ 切换 Tab 导致 UI 卡死](2026-07-13-plugin-panel-left-right-freeze.md) | Fixed |
-| 19 | 2026-07-13 | [Workflow Panel 看板形态未按 TUI-PAGE.md 6.14 实现](2026-07-13-workflow-panel-kanban-mismatch.md) | Fixed |
+| 19 | 2026-07-13 | [Workflow Panel 看板形态未按 spec/global/domains/tui/tui-index.md 6.14 实现](2026-07-13-workflow-panel-kanban-mismatch.md) | Fixed |
 | 20 | 2026-07-14 | [新增 Nord 暗色主题（用户 JSON）](2026-07-14-nord-dark-theme-json.md) | Done |
 | 21 | 2026-07-15 | [下载完成后 Theme 面板未刷新新增主题](2026-07-15-theme-panel-not-refreshed-after-download.md) | Fixed |
 | 22 | 2026-07-16 | [/login 和 /model 面板切换后不立即生效，需重启](2026-07-16-model-login-switch-not-effective-until-restart.md) | Fixed |

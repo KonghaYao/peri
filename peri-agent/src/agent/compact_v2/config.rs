@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 fn default_true() -> bool {
     true
 }
+fn default_false() -> bool {
+    false
+}
 fn default_threshold_095() -> f64 {
     0.95
 }
@@ -41,6 +44,12 @@ fn default_max_consecutive_failures() -> u32 {
 fn default_ptl_max_retries() -> u32 {
     3
 }
+fn default_smart_keep_recent_msgs() -> usize {
+    5
+}
+fn default_smart_keep_recent_tools() -> usize {
+    3
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactConfig {
@@ -72,6 +81,17 @@ pub struct CompactConfig {
     pub max_consecutive_failures: u32,
     #[serde(default = "default_ptl_max_retries")]
     pub ptl_max_retries: u32,
+
+    // ── Smart Compact 配置 ──────────────────────────────────────────────
+    /// 是否启用 Smart Compact 策略（替代 Micro Compact），默认 false
+    #[serde(default = "default_false")]
+    pub smart_compact_enabled: bool,
+    /// Smart Compact：保留最近 N 条 User/Assistant 对话消息
+    #[serde(default = "default_smart_keep_recent_msgs")]
+    pub smart_keep_recent_msgs: usize,
+    /// Smart Compact：保留最近 M 个工具调用结果
+    #[serde(default = "default_smart_keep_recent_tools")]
+    pub smart_keep_recent_tools: usize,
 }
 
 impl Default for CompactConfig {
@@ -90,6 +110,9 @@ impl Default for CompactConfig {
             re_inject_skills_budget: default_re_inject_skills_budget(),
             max_consecutive_failures: default_max_consecutive_failures(),
             ptl_max_retries: default_ptl_max_retries(),
+            smart_compact_enabled: default_false(),
+            smart_keep_recent_msgs: default_smart_keep_recent_msgs(),
+            smart_keep_recent_tools: default_smart_keep_recent_tools(),
         }
     }
 }

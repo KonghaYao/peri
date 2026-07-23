@@ -265,6 +265,44 @@ pub async fn fire_standalone_lifecycle_hooks(
             event.clone(),
             message_count.unwrap_or(0),
         ),
+        // === P1-5 新增 standalone 事件分支 ===
+        HookEvent::Setup => {
+            input_builder::setup_standalone(session_id, transcript_path, cwd, current_model)
+        }
+        HookEvent::InstructionsLoaded => input_builder::instructions_loaded_standalone(
+            session_id,
+            transcript_path,
+            cwd,
+            current_model,
+        ),
+        HookEvent::ConfigChange => input_builder::config_change_standalone(
+            session_id,
+            transcript_path,
+            cwd,
+            current_model,
+            "unknown",
+        ),
+        HookEvent::WorktreeCreate => input_builder::worktree_create_standalone(
+            session_id,
+            transcript_path,
+            cwd,
+            current_model,
+            "unknown",
+        ),
+        HookEvent::WorktreeRemove => input_builder::worktree_remove_standalone(
+            session_id,
+            transcript_path,
+            cwd,
+            current_model,
+            "unknown",
+        ),
+        HookEvent::CwdChanged => input_builder::cwd_changed_standalone(
+            session_id,
+            transcript_path,
+            cwd,
+            current_model,
+            "unknown",
+        ),
         HookEvent::Notification => {
             input_builder::notification_standalone(session_id, transcript_path, cwd, current_model)
         }
