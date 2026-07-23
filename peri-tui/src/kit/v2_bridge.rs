@@ -104,39 +104,20 @@ fn v2_event_to_acp_event_data(event: V2Event) -> Option<AcpEventData> {
             StateEvent::TurnSuspended { .. } => Some(AcpEventData::TurnSuspended),
         },
         V2Event::Observe(ev) => match ev {
-            ObserveEvent::CompactStarted { .. } => Some(AcpEventData::CompactStarted),
-            ObserveEvent::MessagesCompacted {
-                summary,
-                files,
-                skills,
-                before_count,
-                after_count,
-                messages,
-                strategy,
-                ..
-            } => {
-                let messages_json = serde_json::to_string(&messages).ok()?;
-                let strategy_str = format!("{:?}", strategy).to_lowercase();
-                Some(AcpEventData::CompactCompleted {
-                    summary,
-                    files: files
-                        .into_iter()
-                        .filter_map(|f| serde_json::to_value(f).ok())
-                        .collect(),
-                    skills,
-                    micro_cleared: before_count.saturating_sub(after_count),
-                    messages_json,
-                    strategy: strategy_str,
-                })
-            }
             ObserveEvent::TurnError { message, .. } => {
                 Some(AcpEventData::AgentExecutionFailed { message })
             }
-            // SubAgent 生命周期事件 — 不走 v2_bridge。
-            // 活跃路径: handler.on_event → event_sink → peri/agent_event → acp_notifier → bridge_tx。
-            // ObserveEvent::SubagentStart / SubagentStop 在生产代码中从不被 emit；
-            // 此处返回 None 作为防御性兜底，防止 forwarder.rs 未来启用发射后造成双重发送。
-            ObserveEvent::SubagentStart { .. }
+            // 不走 v2_bridge 的事件（由 on_event → event_sink → acp_notifier → bridge_tx 路径覆盖）
+            //
+            // Compact 生命周期事件：[Fix] forwarder.rs 对 observe 事件做 v2_tx + on_event
+            // 双路扇出，v2_bridge 再处理 CompactStarted / MessagesCompacted 会导致同一条紧凑
+            // 通知被注入两次。render 事件已有相同修复（forwarder.rs:65-69），本处对齐一致。
+            //
+            // SubAgent 生命周期事件：ObserveEvent::SubagentStart / SubagentStop 在生产代码中
+            // 从不被 emit；此处返回 None 作为防御性兜底，防止 forwarder.rs 未来启用发射后造成双重发送。
+            ObserveEvent::CompactStarted { .. }
+            | ObserveEvent::MessagesCompacted { .. }
+            | ObserveEvent::SubagentStart { .. }
             | ObserveEvent::SubagentStop { .. }
             // Langfuse/Tracer-only events — not rendered in TUI
             | ObserveEvent::LlmCallStart { .. }
