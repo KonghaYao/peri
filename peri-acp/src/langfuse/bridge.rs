@@ -447,12 +447,15 @@ impl UnifiedLangfuseEvent {
 /// 统一 Langfuse 事件桥接器。
 ///
 /// 持有 `LangfuseTracer` 的共享引用，提供 `process_event` 单一入口。
-/// `active_stage` 不在桥接器内部存储——由调用方（`spawn_eventbus_forwarder`）
-/// 传入可变引用管理生命周期。
+/// `active_stage` 由桥接器内部管理（`parking_lot::Mutex<Option<StageHandle>>`），
+/// 调用方无需关心 Stage 生命周期。
 #[derive(Clone)]
 pub struct LangfuseBridge {
     tracer: Arc<Mutex<LangfuseTracer>>,
     provider_display_name: String,
+    /// 活跃的 Stage Span 句柄（StageStarted→StageEnded 间持有）。
+    /// 仅在 spawn_eventbus_forwarder 或 SubAgent forwarder 的 render/observe 分支中使用。
+    active_stage: Arc<Mutex<Option<StageHandle>>>,
 }
 
 impl LangfuseBridge {
@@ -461,6 +464,7 @@ impl LangfuseBridge {
         Self {
             tracer,
             provider_display_name,
+            active_stage: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -558,11 +562,14 @@ impl LangfuseBridge {
                 );
             }
             UnifiedLangfuseEvent::StageStarted { stage, turn_id } => {
-                // 需要先释放 MutexGuard 再获取 trace_id/agent_observation_id
+                // 需要先释放 MutexGuard 再获取 trace_id/agent_observation_id。
+                // SubAgent 活跃时，stage span 的父节点使用 SubAgent 的 observation_id；
+                // 否则回退到主 Agent 的 observation_id。
                 drop(t);
                 let (trace_id, agent_observation_id) = {
                     let t2 = self.tracer.lock();
-                    (t2.trace_id.clone(), t2.agent_observation_id.clone())
+                    let obs_id = t2.subagent.current_agent_id(&t2.agent_observation_id);
+                    (t2.trace_id.clone(), obs_id)
                 };
                 let mut t2 = self.tracer.lock();
                 let handle = t2.stages.on_stage_start(
@@ -640,6 +647,24 @@ impl LangfuseBridge {
             // SubagentStart/SubagentStop 暂无 Langfuse 映射，静默跳过
             UnifiedLangfuseEvent::SubagentStart { .. }
             | UnifiedLangfuseEvent::SubagentStop { .. } => {}
+        }
+    }
+}
+
+// ── LangfuseBridge impl LangfuseBridgeLike ───────────────────────────────────
+
+impl peri_agent::agent::LangfuseBridgeLike for LangfuseBridge {
+    fn process_render_event(&self, ev: &RenderEvent) {
+        if let Some(u) = UnifiedLangfuseEvent::from_render_event(ev.clone()) {
+            let mut guard = self.active_stage.lock();
+            self.process_event(&u, &mut *guard);
+        }
+    }
+
+    fn process_observe_event(&self, ev: &ObserveEvent) {
+        if let Some(u) = UnifiedLangfuseEvent::from_observe_event(ev.clone()) {
+            let mut guard = self.active_stage.lock();
+            self.process_event(&u, &mut *guard);
         }
     }
 }

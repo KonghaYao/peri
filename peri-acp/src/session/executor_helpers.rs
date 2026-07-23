@@ -382,6 +382,7 @@ pub(super) async fn build_and_execute_agent_v2(
         goal_controller,
         background_registry,
         on_bg_complete,
+        langfuse_tracer.clone(),
     );
     if let Some(cache) = new_cache {
         ctx.pool.lock().store_llm(cache);

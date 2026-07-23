@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use peri_agent::agent::LangfuseBridgeLike;
 use peri_agent::thread::ThreadStore;
 use peri_agent::{
     agent::{events::AgentEventHandler, react::ReactLLM, AgentCancellationToken},
@@ -187,6 +188,8 @@ pub struct SubAgentMiddleware {
     /// bg 完成时的同步回调
     on_bg_complete:
         Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
+    /// Langfuse bridge（from peri-acp，用于 SubAgent 完整 trace）
+    langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
 }
 
 impl SubAgentMiddleware {
@@ -220,6 +223,7 @@ impl SubAgentMiddleware {
             frozen_skill_summary: None,
             frozen_system_prompt: None,
             on_bg_complete: None,
+            langfuse_bridge: None,
         }
     }
 
@@ -291,6 +295,12 @@ impl SubAgentMiddleware {
         cb: Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>,
     ) -> Self {
         self.on_bg_complete = Some(cb);
+        self
+    }
+
+    /// 设置 Langfuse 桥接器，用于 SubAgent 的完整 Langfuse trace。
+    pub fn with_langfuse_bridge(mut self, bridge: Arc<dyn LangfuseBridgeLike>) -> Self {
+        self.langfuse_bridge = Some(bridge);
         self
     }
 
@@ -399,6 +409,9 @@ impl SubAgentMiddleware {
         }
         if let Some(ref sp) = self.frozen_system_prompt {
             tool = tool.with_frozen_system_prompt(Arc::clone(sp));
+        }
+        if let Some(ref bridge) = self.langfuse_bridge {
+            tool = tool.with_langfuse_bridge(Arc::clone(bridge));
         }
         tool
     }

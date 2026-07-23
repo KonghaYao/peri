@@ -171,6 +171,7 @@ impl super::SubAgentTool {
         let deregister_runtime = self.deregister_runtime.clone();
         let bg_event_sender = self.bg_event_sender.clone();
         let on_bg_complete = self.on_bg_complete.clone();
+        let langfuse_bridge = self.langfuse_bridge.clone();
         let registry_spawn = Arc::clone(registry);
         let task_id_clone = task_id.clone();
         let child_thread_id_clone = child_thread_id.clone();
@@ -203,6 +204,7 @@ impl super::SubAgentTool {
                 peri_agent::agent::subagent_event_forwarder::spawn_subagent_event_forwarder(
                     v2_ctx.event_handles,
                     bg_forwarder_handler,
+                    langfuse_bridge,
                     child_thread_id_clone.clone(),
                 );
 
@@ -413,6 +415,7 @@ impl super::SubAgentTool {
             frozen_claude_local_md: self.frozen_claude_local_md.clone(),
             frozen_skill_summary: self.frozen_skill_summary.clone(),
             frozen_system_prompt: self.frozen_system_prompt.clone(),
+            langfuse_bridge: self.langfuse_bridge.clone(),
         };
 
         let spawned = crate::subagent::spawner::spawn_background_fork(config).await?;

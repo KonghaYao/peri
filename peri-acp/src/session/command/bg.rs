@@ -116,6 +116,7 @@ impl AgentCommand for BgCommand {
                 frozen_claude_local_md: ctx.frozen_claude_local_md.clone(),
                 frozen_skill_summary: ctx.frozen_skill_summary.clone(),
                 frozen_system_prompt: ctx.frozen_system_prompt.clone(),
+                langfuse_bridge: None, // /bg 命令无 Langfuse tracer
             },
         )
         .await

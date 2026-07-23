@@ -46,6 +46,8 @@ use peri_middlewares::{
     tools::{AskUserTool, TodoItem},
 };
 
+use crate::langfuse::bridge::LangfuseBridge;
+use crate::langfuse::tracer::LangfuseTracer;
 use crate::{
     provider::LlmProvider,
     session::agent_pool::{fingerprint, CachedLlmInstances},
@@ -139,6 +141,7 @@ pub(crate) fn build_agent(
     background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
     on_bg_complete: Option<OnBgCompleteFn>,
     cached_llm: Option<&CachedLlmInstances>,
+    langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
 ) -> (AcpAgentOutput, Option<CachedLlmInstances>) {
     let FrozenData {
         claude_md: frozen_claude_md,
@@ -422,6 +425,18 @@ pub(crate) fn build_agent(
     }
     if let Some(deregister) = deregister_runtime {
         subagent = subagent.with_deregister_runtime(deregister);
+    }
+
+    // SubAgent Langfuse bridge：复用父 agent 的 LangfuseTracer，
+    // 构造独立 LangfuseBridge 实例供 SubAgent forwarder 使用。
+    // 采样决策继承自父 agent（bridge 内部调用 tracer.on_* 方法时，
+    // 各方法已内置 sampling.should_emit() 检查）。
+    if let Some(ref tracer) = langfuse_tracer {
+        let bridge =
+            LangfuseBridge::new(Arc::clone(tracer), ctx.provider.display_name().to_string());
+        subagent = subagent.with_langfuse_bridge(
+            Arc::new(bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>
+        );
     }
 
     // 上下文预算
@@ -742,6 +757,7 @@ pub(crate) fn build_stage_context(
     goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>>,
     background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
     on_bg_complete: Option<OnBgCompleteFn>,
+    langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
 ) -> (V2AgentOutput, Option<CachedLlmInstances>) {
     // 提取 LLM 用字段（在 cfg 被 build_agent 消费前）
     let cwd = ctx.cwd.clone();
@@ -801,6 +817,7 @@ pub(crate) fn build_stage_context(
         background_registry,
         on_bg_complete,
         cached_llm,
+        langfuse_tracer,
     );
 
     // 直接消费 AgentComponents
