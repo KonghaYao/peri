@@ -285,23 +285,30 @@ impl Middleware for SkillsMiddleware {
     }
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        let plugin_roots = Arc::new(self.plugin_roots.clone());
         vec![
-            Box::new(tools::SkillTool::new(
-                plugin_roots.clone(),
-                self.disable_bundled,
-                Arc::clone(&self.cached_skills),
-            )),
-            Box::new(tools::DiscoverSkillsTool::new(
-                plugin_roots,
-                self.disable_bundled,
-                Arc::clone(&self.cached_skills),
-            )),
+            Box::new(tools::SkillTool::new(Arc::clone(&self.cached_skills))),
+            Box::new(tools::DiscoverSkillsTool::new(Arc::clone(
+                &self.cached_skills,
+            ))),
         ]
     }
 
     async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
-        // 使用冻结摘要时跳过所有磁盘 I/O（cached_skills 由工具首次调用时惰性填充）
+        // 扫描 skills 并缓存 structured metadata（frozen/non-frozen 两条路径都需要，避免工具调用时懒扫描）
+        let roots = self.resolve_roots(state.cwd());
+        let skills = tokio::task::spawn_blocking(move || scan_skill_roots(&roots))
+            .await
+            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+                middleware: "SkillsMiddleware".to_string(),
+                reason: format!("spawn_blocking 失败: {e}"),
+            })?;
+        *self.cached_skills.write().unwrap() = if skills.is_empty() {
+            None
+        } else {
+            Some(skills)
+        };
+
+        // frozen 路径：使用已冻结的摘要文本作为 prompt contribution，不重新生成
         if let Some(ref summary) = self.frozen_summary {
             if !summary.trim().is_empty() {
                 *self.cached_contribution.write().unwrap() = Some(summary.clone());
@@ -311,24 +318,17 @@ impl Middleware for SkillsMiddleware {
             return Ok(());
         }
 
-        let roots = self.resolve_roots(state.cwd());
-        let skills = tokio::task::spawn_blocking(move || scan_skill_roots(&roots))
-            .await
-            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                middleware: "SkillsMiddleware".to_string(),
-                reason: format!("spawn_blocking 失败: {e}"),
-            })?;
-
-        if skills.is_empty() {
-            *self.cached_contribution.write().unwrap() = None;
-            *self.cached_skills.write().unwrap() = None;
-            return Ok(());
+        // non-frozen 路径：根据扫描结果生成摘要并缓存
+        let skills_ref = self.cached_skills.read().unwrap();
+        match skills_ref.as_ref() {
+            Some(skills_list) if !skills_list.is_empty() => {
+                let summary = Self::build_summary(skills_list);
+                *self.cached_contribution.write().unwrap() = Some(summary);
+            }
+            _ => {
+                *self.cached_contribution.write().unwrap() = None;
+            }
         }
-
-        let summary = Self::build_summary(&skills);
-        *self.cached_contribution.write().unwrap() = Some(summary);
-        // 缓存 skills 列表，后续工具调用无需重复扫描磁盘
-        *self.cached_skills.write().unwrap() = Some(skills);
         Ok(())
     }
 }

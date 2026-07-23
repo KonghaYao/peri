@@ -4,8 +4,9 @@
 //! 写入测试 SKILL.md 文件，验证工具的正常路径和错误路径。
 
 use super::*;
-use crate::skills::{SkillRoot, SkillSource};
+use crate::skills::{scan_skill_roots, SkillRoot, SkillSource};
 use serde_json::json;
+use std::sync::{Arc, RwLock};
 
 /// 创建一个包含简单 SKILL.md 的临时 skill 目录
 fn setup_temp_skill_dir() -> (tempfile::TempDir, PathBuf, String) {
@@ -17,11 +18,23 @@ fn setup_temp_skill_dir() -> (tempfile::TempDir, PathBuf, String) {
     (temp, skill_dir, content.to_string())
 }
 
+/// 创建预填充缓存的 DiscoverSkillsTool
+fn make_discover_tool_with_cache(roots: &[SkillRoot]) -> DiscoverSkillsTool {
+    let skills = scan_skill_roots(roots);
+    let cached = Arc::new(RwLock::new(Some(skills)));
+    DiscoverSkillsTool::new(cached)
+}
+fn make_skill_tool_with_cache(plugin_roots: Vec<SkillRoot>, _disable_bundled: bool) -> SkillTool {
+    let skills = scan_skill_roots(&plugin_roots);
+    let cached = Arc::new(RwLock::new(Some(skills)));
+    SkillTool::new(cached)
+}
+
 // ─── SkillTool 测试 ──────────────────────────────────────────────────────────
 
 #[test]
 fn test_skill_tool_name_and_description() {
-    let tool = make_skill_tool(vec![], false);
+    let tool = make_skill_tool_with_cache(vec![], false);
     assert_eq!(tool.name(), "SkillTool");
     // description 应包含关键信息
     assert!(tool.description().contains("Load the full content"));
@@ -30,7 +43,7 @@ fn test_skill_tool_name_and_description() {
 
 #[test]
 fn test_skill_tool_parameters() {
-    let tool = make_skill_tool(vec![], false);
+    let tool = make_skill_tool_with_cache(vec![], false);
     let params = tool.parameters();
     assert_eq!(params["type"], "object");
     // skill_name 应为必填字段
@@ -52,7 +65,7 @@ async fn test_skill_tool_missing_skill_name() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_skill_tool(vec![root], true);
+    let tool = make_skill_tool_with_cache(vec![root], true);
     let input = json!({});
     let cwd = skill_dir.parent().unwrap().to_str().unwrap();
 
@@ -73,7 +86,7 @@ async fn test_skill_tool_loads_disk_skill() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_skill_tool(vec![root], true);
+    let tool = make_skill_tool_with_cache(vec![root], true);
     let input = json!({"skill_name": "test-skill"});
     let cwd = skill_dir.parent().unwrap().to_str().unwrap();
 
@@ -96,7 +109,7 @@ async fn test_skill_tool_case_insensitive_match() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_skill_tool(vec![root], true);
+    let tool = make_skill_tool_with_cache(vec![root], true);
     let cwd = skill_dir.parent().unwrap().to_str().unwrap();
 
     // Act: 大小写不一致
@@ -120,7 +133,7 @@ async fn test_skill_tool_skill_not_found() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_skill_tool(vec![root], true);
+    let tool = make_skill_tool_with_cache(vec![root], true);
     let cwd = skill_dir.parent().unwrap().to_str().unwrap();
 
     // Act: 不存在的 skill
@@ -147,7 +160,7 @@ async fn test_skill_tool_namespace_prefix_match() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_skill_tool(vec![root], true);
+    let tool = make_skill_tool_with_cache(vec![root], true);
     let cwd = skill_dir.parent().unwrap().to_str().unwrap();
 
     // Act: 带命名空间前缀 `ns:test-skill`
@@ -166,7 +179,12 @@ async fn test_skill_tool_namespace_prefix_match() {
 
 #[test]
 fn test_discover_skills_name_and_description() {
-    let tool = make_discover_tool(vec![], false);
+    let root = SkillRoot {
+        path: PathBuf::new(),
+        source: SkillSource::Project,
+        plugin_name: None,
+    };
+    let tool = make_discover_tool_with_cache(&[root]);
     assert_eq!(tool.name(), "DiscoverSkillsTool");
     assert!(tool.description().contains("Search for available skills"));
     assert!(tool.description().contains("JSON array"));
@@ -174,7 +192,12 @@ fn test_discover_skills_name_and_description() {
 
 #[test]
 fn test_discover_skills_parameters() {
-    let tool = make_discover_tool(vec![], false);
+    let root = SkillRoot {
+        path: PathBuf::new(),
+        source: SkillSource::Project,
+        plugin_name: None,
+    };
+    let tool = make_discover_tool_with_cache(&[root]);
     let params = tool.parameters();
     assert_eq!(params["type"], "object");
     // query 不是必填
@@ -206,7 +229,7 @@ async fn test_discover_skills_returns_all_without_query() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_discover_tool(vec![root], true);
+    let tool = make_discover_tool_with_cache(&[root]);
     let cwd = temp.path().to_str().unwrap();
 
     // Act: 无 query
@@ -244,7 +267,7 @@ async fn test_discover_skills_filters_by_query() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_discover_tool(vec![root], true);
+    let tool = make_discover_tool_with_cache(&[root]);
     let cwd = temp.path().to_str().unwrap();
 
     // Act: 按名称筛选
@@ -276,7 +299,7 @@ async fn test_discover_skills_case_insensitive_filter() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_discover_tool(vec![root], true);
+    let tool = make_discover_tool_with_cache(&[root]);
     let cwd = temp.path().to_str().unwrap();
 
     // Act: 小写 query 筛选大写名称
@@ -307,7 +330,7 @@ async fn test_discover_skills_empty_result() {
         source: SkillSource::Project,
         plugin_name: None,
     };
-    let tool = make_discover_tool(vec![root], true);
+    let tool = make_discover_tool_with_cache(&[root]);
     let cwd = temp.path().to_str().unwrap();
 
     // Act: 不匹配的 query

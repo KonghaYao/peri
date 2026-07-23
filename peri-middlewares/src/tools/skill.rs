@@ -12,11 +12,7 @@ use peri_agent::{
 };
 use serde_json::Value;
 
-use crate::skills::{
-    loader,
-    loader::{resolve_skill_roots, scan_skill_roots},
-    SkillMetadata, SkillRoot, SkillSource,
-};
+use crate::skills::{loader, SkillMetadata, SkillRoot, SkillSource};
 
 /// 工具描述（中文，仿 Claude Code SkillTool prompt）
 const SKILL_TOOL_DESCRIPTION: &str = include_str!("descriptions/skill.md");
@@ -26,59 +22,35 @@ const OUTPUT_CHAR_LIMIT: usize = 5000;
 
 /// SkillTool —— LLM 可主动调用以加载 Skill 的完整 SKILL.md 内容
 pub struct SkillTool {
-    cwd: String,
-    plugin_roots: Vec<SkillRoot>,
-    disable_bundled: bool,
     /// SkillsMiddleware 在 before_agent 时预扫描的 skills 列表缓存。
     /// 由 SkillToolMiddleware 在 collect_tools 时注入。
     cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
 }
 
 impl SkillTool {
-    pub fn new(
-        cwd: impl Into<String>,
-        plugin_roots: Vec<SkillRoot>,
-        disable_bundled: bool,
-        cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
-    ) -> Self {
-        Self {
-            cwd: cwd.into(),
-            plugin_roots,
-            disable_bundled,
-            cached_skills,
-        }
+    pub fn new(cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>) -> Self {
+        Self { cached_skills }
     }
 
-    /// 按名称查找 skill 并返回 SKILL.md 内容（含路径前缀）。
-    /// 优先使用缓存的 skills 列表，避免重复磁盘扫描。
-    /// 缓存未命中时惰性扫描并写入（只在对话的第一次工具调用时发生）。
+    /// 按名称查找 skill 并返回 SKILL.md 内容。
+    /// 缓存由 SkillsMiddleware::before_agent 保证填充（frozen/non-frozen 两条路径都填充），
+    /// 此方法不再做懒扫描回退。
     fn lookup_skill(&self, skill_name: &str) -> Option<(SkillMetadata, String)> {
-        // 优先使用缓存
-        if let Some(ref cached) = *self.cached_skills.read().unwrap() {
-            return loader::find_skill_in_list(cached, skill_name);
-        }
-        // fallback: 扫描磁盘，写入缓存，再查找
-        let roots = resolve_skill_roots(&self.cwd, self.plugin_roots.clone(), self.disable_bundled);
-        let skills = scan_skill_roots(&roots);
-        let result = loader::find_skill_in_list(&skills, skill_name);
-        *self.cached_skills.write().unwrap() = Some(skills);
-        result
+        let cached = self.cached_skills.read().unwrap();
+        let skills = cached.as_ref()?;
+        loader::find_skill_in_list(skills, skill_name)
     }
 
     /// 模糊匹配建议（复用 skim matcher 基础设施）
     fn fuzzy_suggest(&self, skill_name: &str) -> Vec<String> {
-        let candidate_names: Vec<String> =
-            if let Some(ref cached) = *self.cached_skills.read().unwrap() {
-                cached.iter().map(|s| s.name.clone()).collect()
-            } else {
-                let roots =
-                    resolve_skill_roots(&self.cwd, self.plugin_roots.clone(), self.disable_bundled);
-                let skills = scan_skill_roots(&roots);
-                let names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
-                // 写入缓存供后续调用复用
-                *self.cached_skills.write().unwrap() = Some(skills);
-                names
-            };
+        let cached = self.cached_skills.read().unwrap();
+        let candidate_names: Vec<String> = match cached.as_ref() {
+            Some(skills) => skills.iter().map(|s| s.name.clone()).collect(),
+            None => {
+                tracing::warn!(target: "skills", "SkillTool::fuzzy_suggest: cached_skills is None (likely before_agent not run)");
+                return vec![];
+            }
+        };
         peri_agent::error_suggest::matcher::fuzzy_filter(&candidate_names, skill_name)
     }
 }
@@ -227,13 +199,8 @@ impl Middleware for SkillToolMiddleware {
         "SkillToolMiddleware"
     }
 
-    fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        vec![Box::new(SkillTool::new(
-            cwd.to_string(),
-            self.plugin_roots.clone(),
-            self.disable_bundled,
-            Arc::clone(&self.cached_skills),
-        ))]
+    fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
+        vec![Box::new(SkillTool::new(Arc::clone(&self.cached_skills)))]
     }
 }
 

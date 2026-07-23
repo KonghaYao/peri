@@ -36,6 +36,29 @@ pub const MAX_SCAN_DEPTH: usize = 6;
 /// 单 root 目录数上限
 pub const MAX_SKILLS_DIRS_PER_ROOT: usize = 1000;
 
+/// 永远不会包含 SKILL.md 的目录名（跳过以加速扫描，避免递归进入无关子目录）
+const SKIP_DIR_NAMES: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "__pycache__",
+    ".tox",
+    ".venv",
+    "venv",
+    ".idea",
+    ".vscode",
+    "outputs",
+    "old_skill",
+];
+
+fn should_skip_dir(dir_name: &str) -> bool {
+    SKIP_DIR_NAMES.contains(&dir_name) || (dir_name.starts_with('.') && dir_name.len() > 1)
+}
+
 /// Skill 元数据（来自 SKILL.md frontmatter）
 #[derive(Debug, Clone)]
 pub struct SkillMetadata {
@@ -187,6 +210,16 @@ fn scan_dir_recursive(
     }
     if *dir_count >= max_dirs {
         return;
+    }
+
+    // 跳过不可能包含 SKILL.md 的子目录（.git, node_modules, target, dist, outputs 等）。
+    // 仅 depth > 0 时生效：根目录（depth=0）不跳过，避免 TempDir 的 `.tmp...` 被误判。
+    if depth > 0 {
+        if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+            if should_skip_dir(name) {
+                return;
+            }
+        }
     }
 
     // 防环：canonicalize 后入 visited（失败时回退到原 path）

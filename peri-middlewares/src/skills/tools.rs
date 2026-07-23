@@ -13,7 +13,6 @@ use async_trait::async_trait;
 use peri_agent::tools::{BaseTool, ToolContext};
 use serde_json::{json, Value};
 
-use super::loader::{resolve_skill_roots, scan_skill_roots, SkillRoot};
 use super::SkillMetadata;
 
 const SKILL_TOOL_NAME: &str = "SkillTool";
@@ -26,26 +25,13 @@ const DISCOVER_SKILLS_TOOL_NAME: &str = "DiscoverSkillsTool";
 /// LLM 在推理过程中通过此工具按需加载 skill，获取其完整 frontmatter + body，
 /// 无需用户手动输入 `/skill-name`。
 pub struct SkillTool {
-    /// SkillsMiddleware 冻结时传入的插件根列表
-    plugin_roots: Arc<Vec<SkillRoot>>,
-    /// 是否禁用 builtin skill
-    disable_bundled: bool,
     /// SkillsMiddleware 在 before_agent 时预扫描的 skills 列表缓存。
-    /// `None` 表示还未扫描（fallback 到直接扫描）。
     cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
 }
 
 impl SkillTool {
-    pub fn new(
-        plugin_roots: Arc<Vec<SkillRoot>>,
-        disable_bundled: bool,
-        cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
-    ) -> Self {
-        Self {
-            plugin_roots,
-            disable_bundled,
-            cached_skills,
-        }
+    pub fn new(cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>) -> Self {
+        Self { cached_skills }
     }
 }
 
@@ -75,25 +61,21 @@ impl BaseTool for SkillTool {
     async fn invoke(
         &self,
         input: Value,
-        ctx: ToolContext<'_>,
+        _ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let skill_name = input["skill_name"]
             .as_str()
             .ok_or("SkillTool: missing required parameter 'skill_name'")?;
 
-        // 优先使用 SkillsMiddleware 缓存的 skills 列表，避免重复磁盘扫描
-        // 缓存未命中时惰性扫描并写入（只在对话的第一次工具调用时发生）
-        let skills = match self.cached_skills.read().unwrap().as_ref() {
-            Some(cached) => cached.clone(),
+        // 缓存由 SkillsMiddleware::before_agent 保证填充，不再做懒扫描回退
+        let cached = self.cached_skills.read().unwrap();
+        let skills = match cached.as_ref() {
+            Some(s) => s.clone(),
             None => {
-                let roots = resolve_skill_roots(
-                    ctx.cwd,
-                    self.plugin_roots.as_ref().clone(),
-                    self.disable_bundled,
-                );
-                let scanned = scan_skill_roots(&roots);
-                *self.cached_skills.write().unwrap() = Some(scanned.clone());
-                scanned
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Skills cache is empty — before_agent may not have run",
+                )));
             }
         };
         let content = find_and_load_skill(&skills, skill_name)?;
@@ -108,26 +90,13 @@ impl BaseTool for SkillTool {
 /// LLM 通过此工具发现当前环境中可用的所有 skill，按名称或描述筛选。
 /// 结果以 JSON 数组返回，包含 name、description、source 字段。
 pub struct DiscoverSkillsTool {
-    /// SkillsMiddleware 冻结时传入的插件根列表
-    plugin_roots: Arc<Vec<SkillRoot>>,
-    /// 是否禁用 builtin skill
-    disable_bundled: bool,
     /// SkillsMiddleware 在 before_agent 时预扫描的 skills 列表缓存。
-    /// `None` 表示还未扫描（fallback 到直接扫描）。
     cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
 }
 
 impl DiscoverSkillsTool {
-    pub fn new(
-        plugin_roots: Arc<Vec<SkillRoot>>,
-        disable_bundled: bool,
-        cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
-    ) -> Self {
-        Self {
-            plugin_roots,
-            disable_bundled,
-            cached_skills,
-        }
+    pub fn new(cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>) -> Self {
+        Self { cached_skills }
     }
 }
 
@@ -157,21 +126,17 @@ impl BaseTool for DiscoverSkillsTool {
     async fn invoke(
         &self,
         input: Value,
-        ctx: ToolContext<'_>,
+        _ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // 优先使用 SkillsMiddleware 缓存的 skills 列表，避免重复磁盘扫描
-        // 缓存未命中时惰性扫描并写入（只在对话的第一次工具调用时发生）
-        let skills = match self.cached_skills.read().unwrap().as_ref() {
-            Some(cached) => cached.clone(),
+        // 缓存由 SkillsMiddleware::before_agent 保证填充，不再做懒扫描回退
+        let cached = self.cached_skills.read().unwrap();
+        let skills = match cached.as_ref() {
+            Some(s) => s.clone(),
             None => {
-                let roots = resolve_skill_roots(
-                    ctx.cwd,
-                    self.plugin_roots.as_ref().clone(),
-                    self.disable_bundled,
-                );
-                let scanned = scan_skill_roots(&roots);
-                *self.cached_skills.write().unwrap() = Some(scanned.clone());
-                scanned
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Skills cache is empty — before_agent may not have run",
+                )));
             }
         };
 
@@ -265,31 +230,6 @@ fn skill_to_json(skill: &SkillMetadata) -> serde_json::Value {
         "description": skill.description,
         "source": source_str,
     })
-}
-
-// ─── 测试用辅助 ──────────────────────────────────────────────────────────────
-
-/// 测试注入入口：直接构造 SkillTool 并调用 invoke（需要 cwd）
-#[cfg(test)]
-pub(crate) fn make_skill_tool(plugin_roots: Vec<SkillRoot>, disable_bundled: bool) -> SkillTool {
-    SkillTool::new(
-        Arc::new(plugin_roots),
-        disable_bundled,
-        Arc::new(RwLock::new(None)),
-    )
-}
-
-/// 测试注入入口：直接构造 DiscoverSkillsTool 并调用 invoke（需要 cwd）
-#[cfg(test)]
-pub(crate) fn make_discover_tool(
-    plugin_roots: Vec<SkillRoot>,
-    disable_bundled: bool,
-) -> DiscoverSkillsTool {
-    DiscoverSkillsTool::new(
-        Arc::new(plugin_roots),
-        disable_bundled,
-        Arc::new(RwLock::new(None)),
-    )
 }
 
 #[cfg(test)]

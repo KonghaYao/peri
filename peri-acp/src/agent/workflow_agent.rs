@@ -327,9 +327,6 @@ impl AgentExecutor for WorkflowAgentExecutor {
         tools.extend(WebMiddleware::build_tools());
         // Workflow agent 无 plugin_skill_roots，仅 project-level skill 可用
         tools.push(Box::new(peri_middlewares::SkillTool::new(
-            self.ctx.cwd.clone(),
-            vec![],
-            false,
             std::sync::Arc::new(std::sync::RwLock::new(None)),
         )));
 
