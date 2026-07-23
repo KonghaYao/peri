@@ -192,9 +192,9 @@ fn test_tool_name_is_Bash() {
 }
 
 #[tokio::test]
-async fn test_bash_default_timeout_is_120_seconds() {
+async fn test_bash_default_timeout_is_15_seconds() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
-    // 不传 timeout → 默认 120000ms = 120s
+    // 不传 timeout → 默认 15000ms = 15s
     let result = tool
         .invoke(
             serde_json::json!({"command": "echo ok"}),

@@ -9,7 +9,7 @@ Usage:
   - Read files: Use Read (NOT cat/head/tail)
   - Edit files: Use Edit (NOT sed/awk)
   - Write files: Use Write (NOT echo/cat with redirect)
-- You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). Default is 120000ms (2 minutes)
+- You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). Default is 15000ms (15 seconds). The short default encourages efficient commands — for long-running tasks (builds, installs), set a higher timeout or use run_in_background
 - When issuing multiple commands, use && to chain them together rather than using separate tool calls if the commands depend on each other
 - For long running commands, consider using a timeout to avoid waiting indefinitely
 

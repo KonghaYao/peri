@@ -107,7 +107,7 @@ impl BaseTool for BashTool {
                 },
                 "timeout": {
                     "type": "number",
-                    "description": "Optional timeout in milliseconds (default 120000, max 600000). If the command takes longer than this, it will be killed and a timeout error returned"
+                    "description": "Optional timeout in milliseconds (default 15000, max 600000). If the command takes longer than this, it will be killed and a timeout error returned. The default is deliberately short — prefer targeted commands. For long-running tasks (builds, installs), set a higher timeout or use run_in_background."
                 },
                 "run_in_background": {
                     "type": "boolean",
@@ -281,7 +281,7 @@ impl BaseTool for BashTool {
         // ── 同步执行路径（现有逻辑不变） ──
         let timeout_ms = input["timeout"]
             .as_u64()
-            .unwrap_or(120_000)
+            .unwrap_or(15_000)
             .clamp(if cfg!(target_os = "windows") { 5000 } else { 1 }, 600_000);
 
         let result = timeout(Duration::from_millis(timeout_ms), {
@@ -298,7 +298,12 @@ impl BaseTool for BashTool {
 
         match result {
             Err(_) => Err(format!(
-                "Error: Command timed out after {} seconds.\nCommand: {command}",
+                "Command timed out after {}s. The default timeout is deliberately short (15s) to encourage efficient commands.\n\
+                 Options:\n\
+                 - Optimize the command: avoid scanning large directories (e.g. use `find . -maxdepth 3` instead of `find /Users/...`), add `| head`, or use fd/rg instead of find/grep.\n\
+                 - Increase timeout: set `timeout` parameter to a larger value (e.g. `timeout: 120000` for 2 minutes).\n\
+                 - Use background mode: set `run_in_background: true` for long-running servers/builds/installs.\n\
+                 Command that timed out: {command}",
                 timeout_ms as f64 / 1000.0
             )
             .into()),
