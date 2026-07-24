@@ -16,8 +16,9 @@ pub use install_counts::{
     fetch_install_counts, format_install_count, is_install_counts_cache_valid, load_install_counts,
 };
 pub use installer::{
-    check_updates, cleanup_orphaned_plugins, install_plugin, remove_from_enabled_plugins,
-    uninstall_plugin, update_enabled_plugins, update_plugin, InstallerError, PluginUpdateInfo,
+    check_updates, cleanup_orphaned_plugins, find_plugin_in_marketplaces, install_plugin,
+    remove_from_enabled_plugins, uninstall_plugin, update_enabled_plugins, update_plugin,
+    InstallerError, PluginUpdateInfo,
 };
 pub use loader::{
     load_enabled_plugins, load_enabled_plugins_aggregated, CommandEntry, CommandProvider,

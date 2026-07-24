@@ -5,7 +5,8 @@ use chrono::Local;
 
 use crate::cli_args::PluginScope;
 use peri_middlewares::plugin::{
-    KnownMarketplace, MarketplaceManager, MarketplaceSource, load_known_marketplaces,
+    KnownMarketplace, MarketplaceSource, load_known_marketplaces,
+    marketplace::{MarketplaceManager, refresh_marketplace},
     parse_marketplace_input, save_known_marketplaces,
 };
 
@@ -86,13 +87,18 @@ pub async fn run_plugin_install(plugin_name: &str, scope_str: &str) -> Result<()
         .join(".claude");
     let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
 
-    let (name, marketplace) = plugin_name
-        .split_once('@')
-        .unwrap_or((plugin_name, "claude-plugins-official"));
+    let (name, marketplace) = if let Some((name, mkt)) = plugin_name.split_once('@') {
+        (name, mkt.to_string())
+    } else {
+        // 遍历所有已知 marketplace 搜索插件
+        let found = peri_middlewares::plugin::find_plugin_in_marketplaces(plugin_name, &cache_dir)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        (plugin_name, found)
+    };
 
     let result = peri_middlewares::plugin::install_plugin(
         name,
-        marketplace,
+        &marketplace,
         scope.into(),
         &cache_dir,
         &claude_dir,
@@ -121,7 +127,7 @@ pub async fn run_plugin_uninstall(plugin_id: &str, _scope_str: Option<&str>) -> 
     Ok(())
 }
 
-pub fn run_marketplace_add(source: &str) -> Result<()> {
+pub async fn run_marketplace_add(source: &str) -> Result<()> {
     let marketplace_source = parse_marketplace_input(source)
         .map_err(|e| anyhow::anyhow!("无效的 marketplace source: {e}"))?;
 
@@ -130,16 +136,32 @@ pub fn run_marketplace_add(source: &str) -> Result<()> {
     let mut marketplaces =
         load_known_marketplaces(None).map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
 
-    for mkt in &marketplaces {
-        if MarketplaceManager::extract_name(&mkt.source) == name {
-            anyhow::bail!("marketplace \"{}\" 已存在", name);
+    // 检查是否已存在：如果已有 valid install_location 则真重复，否则是旧残留（需刷新）
+    if let Some(existing) = marketplaces
+        .iter()
+        .position(|mkt| MarketplaceManager::extract_name(&mkt.source) == name)
+    {
+        let old = &marketplaces[existing];
+        if !old.install_location.is_empty() {
+            println!("marketplace \"{}\" 已存在，跳过", name);
+            return Ok(());
         }
+        // 旧残留（install_location 为空），删除后重新添加
+        marketplaces.remove(existing);
     }
+
+    // 立即 clone/fetch marketplace，不等到下次启动
+    let (manifest, install_location) = refresh_marketplace(&marketplace_source, &name)
+        .await
+        .map_err(|e| anyhow::anyhow!("无法拉取 marketplace: {e}"))?;
+
+    // 用 manifest 里的 name 覆盖从 source 提取的名称
+    let actual_name = manifest.name;
 
     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     marketplaces.push(KnownMarketplace {
         source: marketplace_source,
-        install_location: String::new(),
+        install_location,
         auto_update: false,
         last_updated: now,
     });
@@ -147,7 +169,7 @@ pub fn run_marketplace_add(source: &str) -> Result<()> {
     save_known_marketplaces(&marketplaces, None)
         .map_err(|e| anyhow::anyhow!("保存 marketplace 失败: {e}"))?;
 
-    println!("已添加 marketplace: {}", name);
+    println!("已添加 marketplace: {}", actual_name);
     Ok(())
 }
 

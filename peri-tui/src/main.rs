@@ -353,9 +353,13 @@ fn main() -> Result<()> {
     peri_tui::alloc_config::init_alloc_conf();
 
     // 最先注入环境变量（进程环境变量优先）
-    // 优先级：进程环境 > Peri 配置 > Claude Code 配置
-    inject_env_from_settings();
-    inject_env_from_claude_settings();
+    // 优先级：进程环境 > 项目本地配置 > Peri 全局配置 > Claude Code 配置
+    // 项目本地配置（./.peri/settings.json），项目覆盖全局
+    if let Some(path) = peri_tui::config::workspace_config_path() {
+        inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
+    }
+    inject_env_from_settings(); // ~/.peri/settings.json
+    inject_env_from_claude_settings(); // ~/.claude/settings.json
 
     let cli = Cli::parse();
 
@@ -446,7 +450,7 @@ fn main() -> Result<()> {
                     }
                     PluginAction::Marketplace { action } => match action {
                         MarketplaceAction::Add { source } => {
-                            cli_plugin::run_marketplace_add(&source)
+                            cli_plugin::run_marketplace_add(&source).await
                         }
                         MarketplaceAction::List => cli_plugin::run_marketplace_list(),
                         MarketplaceAction::Remove { name } => {
