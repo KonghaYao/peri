@@ -815,6 +815,12 @@ panel-plugin-tab-errors = 错误
 # ---- Plugin Panel Discover ----
 panel-plugin-discover-coming = 探索 — Phase 2 即将推出
 panel-plugin-discover-hint = 从市场中搜索和安装插件
+panel-plugin-discover-install-user = 安装（用户级）
+panel-plugin-discover-install-project = 安装（项目级）
+panel-plugin-discover-field-version = 版本
+panel-plugin-discover-field-marketplace = 市场
+panel-plugin-discover-field-author = 作者
+panel-plugin-discover-field-description = 描述
 
 # ---- Plugin Panel Marketplaces ----
 panel-plugin-marketplaces-coming = 市场 — Phase 2 即将推出
@@ -836,7 +842,9 @@ panel-plugin-detail-error = 加载错误
 panel-plugin-action-disable = 禁用插件
 panel-plugin-action-enable = 启用插件
 panel-plugin-action-uninstall = 卸载
+panel-plugin-action-update = 更新
 panel-plugin-action-back = 返回插件列表
+panel-plugin-detail-actions = 操作
 
 # ---- Plugin Panel Fields ----
 panel-plugin-field-skills = Skills
@@ -850,6 +858,7 @@ panel-plugin-discover-empty = 未找到结果
 
 # ---- Plugin Panel Marketplaces ----
 panel-plugin-marketplaces-add = 添加市场...
+panel-plugin-marketplace-add-label = 添加:
 panel-plugin-marketplaces-delete = 删除
 panel-plugin-marketplaces-empty = 未配置市场
 
@@ -870,9 +879,12 @@ panel-plugin-confirm-hint = Enter: 确认  Esc: 取消
 panel-plugin-marketplaces-online = 在线
 panel-plugin-marketplaces-offline = 离线
 panel-plugin-marketplace-refreshing = 刷新中...
-panel-plugin-marketplace-hint-keys = Enter: 刷新  |  d: 删除  |  a: 添加
+panel-plugin-marketplace-hint-keys = Enter: 详情/添加  |  ↑/↓: 导航  |  Esc: 关闭
 panel-plugin-marketplace-add-url-hint = 输入 URL (github.com/org/repo, /path/to/dir, 等)
 panel-plugin-marketplace-add-input-footer = Enter: 保存  Esc: 取消
+panel-plugin-marketplace-action-refresh = 刷新
+panel-plugin-marketplace-action-delete = 删除
+panel-plugin-marketplace-detail-hint = ↑/↓: 选择  |  Enter: 执行  |  Esc: 返回
 
 # ---- Plugin Panel Search ----
 panel-plugin-discover-input = 输入以搜索...
