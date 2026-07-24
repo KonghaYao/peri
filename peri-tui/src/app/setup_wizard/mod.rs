@@ -431,19 +431,29 @@ pub fn migrate_from_claude_code(
     let claude_dir = home.join(".claude");
     let settings_path = claude_dir.join("settings.json");
     if !settings_path.exists() {
+        tracing::warn!("setup wizard: ~/.claude/settings.json 不存在，跳过 Claude Code 迁移");
         return false;
     }
     let content = match std::fs::read_to_string(&settings_path) {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(e) => {
+            tracing::warn!("setup wizard: 无法读取 ~/.claude/settings.json: {e}");
+            return false;
+        }
     };
     let val: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return false,
+        Err(e) => {
+            tracing::warn!("setup wizard: ~/.claude/settings.json JSON 解析失败: {e}");
+            return false;
+        }
     };
     let env = match val.get("env").and_then(|e| e.as_object()) {
         Some(e) => e,
-        None => return false,
+        None => {
+            tracing::warn!("setup wizard: ~/.claude/settings.json 中缺少 env 字段");
+            return false;
+        }
     };
 
     let mut detected: Vec<MigratedProvider> = Vec::new();
@@ -511,9 +521,16 @@ pub fn migrate_from_claude_code(
     }
 
     if detected.is_empty() {
+        tracing::warn!(
+            "setup wizard: ~/.claude/settings.json env 中未检测到任何已知 Provider 的 API Key"
+        );
         return false;
     }
 
+    tracing::info!(
+        "setup wizard: 从 Claude Code 成功迁移 {} 个 Provider",
+        detected.len()
+    );
     state.providers = detected;
     state.active_provider = 0;
     state.browse_cursor = 0;

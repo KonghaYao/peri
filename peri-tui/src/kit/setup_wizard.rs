@@ -175,8 +175,12 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 渲染内容
     let (title, lines) = match step {
-        SetupStep::Language => render_language_step(&state, dim, accent, cursor_color, text_color),
-        SetupStep::Choose => render_choose_step(&state, dim, accent, cursor_color, text_color),
+        SetupStep::Language => {
+            render_language_step(&state, dim, accent, cursor_color, text_color)
+        }
+        SetupStep::Choose => {
+            render_choose_step(&state, dim, accent, cursor_color, text_color, error_color)
+        }
         SetupStep::Form => render_form_step(
             &state,
             dim,
@@ -270,6 +274,7 @@ fn render_choose_step(
     accent: Color,
     cursor_color: Color,
     text_color: Color,
+    error_color: Color,
 ) -> (String, Vec<Line<'static>>) {
     let mut lines = vec![
         Line::from(""),
@@ -291,6 +296,15 @@ fn render_choose_step(
         text_color,
         dim,
     ));
+
+    // 迁移失败错误提示
+    if let Some(ref err) = state.submit_error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  ⚠ {}", err),
+            Style::default().fg(error_color),
+        )));
+    }
 
     lines.push(Line::from(""));
     lines.push(make_hint_line(
@@ -800,19 +814,26 @@ fn handle_choose_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
     use KeyCode::*;
     match key.code {
         Up => {
+            state.submit_error = None;
             state.choose_cursor =
                 (state.choose_cursor + SetupSource::ALL.len() - 1) % SetupSource::ALL.len();
             state.source = SetupSource::ALL[state.choose_cursor];
         }
         Down => {
+            state.submit_error = None;
             state.choose_cursor = (state.choose_cursor + 1) % SetupSource::ALL.len();
             state.source = SetupSource::ALL[state.choose_cursor];
         }
         Enter | Char(' ') => {
+            state.submit_error = None;
             if state.source == SetupSource::MigrateClaudeCode {
                 if !migrate_from_claude_code(state, None) {
                     state.source = SetupSource::CustomApi;
                     state.choose_cursor = 0;
+                    state.submit_error = Some(
+                        "迁移失败：未在 ~/.claude/settings.json 中找到有效的 Provider 配置。请确保文件中有 env.ANTHROPIC_API_KEY 或 env.OPENAI_API_KEY。"
+                            .into(),
+                    );
                     return;
                 }
             } else {
@@ -825,6 +846,7 @@ fn handle_choose_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
             state.form_focus = FormField::ProviderType;
         }
         Esc => {
+            state.submit_error = None;
             state.step = SetupStep::Language;
         }
         _ => {}
