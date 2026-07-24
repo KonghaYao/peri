@@ -15,6 +15,35 @@ mod uninstall;
 pub use install::{install_plugin, update_plugin};
 pub use uninstall::{check_updates, cleanup_orphaned_plugins, uninstall_plugin};
 
+// ─── Plugin Discovery ──────────────────────────────────────────────────
+
+/// 在所有已知 marketplace 中查找插件，返回找到的 marketplace 名称。
+///
+/// 当 `plugin install <name>` 未指定 @marketplace 时使用此函数进行自动发现。
+pub fn find_plugin_in_marketplaces(
+    plugin_name: &str,
+    marketplace_cache_dir: &Path,
+) -> Result<String, InstallerError> {
+    let known = crate::plugin::config::load_known_marketplaces(None)
+        .map_err(|e| InstallerError::SettingsError(e.to_string()))?;
+
+    for mkt in &known {
+        let mkt_name = crate::plugin::marketplace::MarketplaceManager::extract_name(&mkt.source);
+        match get_marketplace_manifest(&mkt_name, marketplace_cache_dir) {
+            Ok(manifest) => {
+                if manifest.plugins.iter().any(|p| p.name == plugin_name) {
+                    return Ok(mkt_name);
+                }
+            }
+            Err(_) => continue, // 该 marketplace 不可用，跳过
+        }
+    }
+    Err(InstallerError::PluginNotFound {
+        name: plugin_name.into(),
+        marketplace: "所有已配置的 marketplace".into(),
+    })
+}
+
 // ─── Error & Types ────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]

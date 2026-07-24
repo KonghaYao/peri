@@ -446,7 +446,7 @@ fn main() -> Result<()> {
                     }
                     PluginAction::Marketplace { action } => match action {
                         MarketplaceAction::Add { source } => {
-                            cli_plugin::run_marketplace_add(&source)
+                            cli_plugin::run_marketplace_add(&source).await
                         }
                         MarketplaceAction::List => cli_plugin::run_marketplace_list(),
                         MarketplaceAction::Remove { name } => {
