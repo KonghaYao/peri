@@ -17,8 +17,19 @@ fn default_threshold_075() -> f64 {
 fn default_stale_steps() -> usize {
     5
 }
+/// Micro Compact 黑名单默认值——这些工具的消息不被截断。
+///
+/// │ 工具             │ 理由                                          │
+/// │──────────────────│───────────────────────────────────────────────│
+/// │ AskUserQuestion  │ 用户答案不可恢复，丢失=对话断裂               │
+/// │ goal             │ 长期目标状态，丢失=agent 漂移方向             │
+/// │ TodoWrite        │ 任务列表结构，丢失=agent 工作记忆重置         │
 fn default_excluded_tools() -> Vec<String> {
-    vec![]
+    vec![
+        "AskUserQuestion".to_string(),
+        "goal".to_string(),
+        "TodoWrite".to_string(),
+    ]
 }
 fn default_micro_min_affected() -> usize {
     5
@@ -61,7 +72,8 @@ pub struct CompactConfig {
     pub micro_compact_threshold: f64,
     #[serde(default = "default_stale_steps")]
     pub micro_compact_stale_steps: usize,
-    /// 黑名单工具——这些工具的消息（输入+输出）不参与 Micro 截断。默认空，即截断所有工具。
+    /// 黑名单工具——这些工具的消息（输入+输出）不参与 Micro 截断。
+    /// 默认保留 AskUserQuestion、goal、TodoWrite（对话/任务状态不可恢复），其余工具全部截断。
     #[serde(default = "default_excluded_tools")]
     pub micro_excluded_tools: Vec<String>,
     /// Micro 压缩量下限——affected_count 低于此值时判定 Micro 无效，升级为 Full。

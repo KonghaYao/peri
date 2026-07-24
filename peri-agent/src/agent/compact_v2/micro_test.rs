@@ -219,3 +219,46 @@ fn test_micro_compact_low_affected_does_not_break_transcript() {
     let visible = t.visible_messages();
     assert_eq!(visible.len(), 9, "truncated 消息仍应全部可见");
 }
+
+#[test]
+fn test_micro_compact_ask_user_question_preserved_by_default() {
+    // 默认黑名单包含 AskUserQuestion，其 tool_result 和纯 AskUserQuestion 的 Ai 消息应被保留
+    let config = CompactConfig::default();
+
+    let mut t = MessageTranscript::new();
+    for i in 0..7 {
+        t.append(make_human(&format!("q {}", i)));
+        // 每个 Ai 消息只含 AskUserQuestion 一个 tool_call
+        t.append(make_ai_with_tool(
+            "let me ask",
+            "AskUserQuestion",
+            &format!("au_{}", i),
+        ));
+        t.append(make_tool_result(
+            &format!("au_{}", i),
+            &format!("user answer {}", i),
+        ));
+    }
+
+    let affected = micro_compact(&mut t, &config);
+    assert_eq!(
+        affected, 0,
+        "AskUserQuestion 在黑名单中，所有消息不应被截断"
+    );
+}
+
+#[test]
+fn test_micro_compact_todo_write_preserved_by_default() {
+    // TodoWrite 也在默认黑名单中
+    let config = CompactConfig::default();
+
+    let mut t = MessageTranscript::new();
+    for i in 0..7 {
+        t.append(make_human(&format!("q {}", i)));
+        t.append(make_ai_with_tool("", "TodoWrite", &format!("td_{}", i)));
+        t.append(make_tool_result(&format!("td_{}", i), "todo updated"));
+    }
+
+    let affected = micro_compact(&mut t, &config);
+    assert_eq!(affected, 0, "TodoWrite 在黑名单中，不应被截断");
+}
