@@ -144,3 +144,16 @@ fn test_e2e_top_level_env_to_provider() {
         }
     }
 }
+
+/// [回归测试] 验证项目本地 ./.peri/settings.json 的 config.env 能被正常注入。
+/// 修复：2026-07-24，此前 inject_env_from_settings 仅读取 ~/.peri/settings.json。
+#[test]
+fn test_project_local_settings_env_injection() {
+    // 模拟项目本地 .peri/settings.json 的 config.env 标准格式
+    let path = make_temp_file(r#"{"config": {"env": {"PRJ_LOCAL_KEY": "from_project"}}}"#);
+    inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
+    assert_eq!(std::env::var("PRJ_LOCAL_KEY").unwrap(), "from_project");
+    unsafe {
+        std::env::remove_var("PRJ_LOCAL_KEY");
+    }
+}
