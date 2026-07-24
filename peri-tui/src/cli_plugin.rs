@@ -401,7 +401,7 @@ pub fn run_plugin_info(plugin_id: &str) -> Result<()> {
                         .map(|obj| obj.contains_key(&target.id))
                         .or_else(|| {
                             ep.as_array().map(|arr| {
-                                arr.iter().any(|v| v.as_str().map_or(false, |s| s == target.id))
+                                arr.iter().any(|v| v.as_str().is_some_and(|s| s == target.id))
                             })
                         })
                 })
