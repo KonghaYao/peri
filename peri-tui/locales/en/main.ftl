@@ -816,6 +816,12 @@ panel-plugin-tab-errors = Errors
 # ---- Plugin Panel Discover ----
 panel-plugin-discover-coming = Discover — coming in Phase 2
 panel-plugin-discover-hint = Search and install plugins from marketplaces
+panel-plugin-discover-install-user = Install (User scope)
+panel-plugin-discover-install-project = Install (Project scope)
+panel-plugin-discover-field-version = Version
+panel-plugin-discover-field-marketplace = Marketplace
+panel-plugin-discover-field-author = Author
+panel-plugin-discover-field-description = Description
 
 # ---- Plugin Panel Marketplaces ----
 panel-plugin-marketplaces-coming = Marketplaces — coming in Phase 2
@@ -837,7 +843,9 @@ panel-plugin-detail-error = load error
 panel-plugin-action-disable = Disable plugin
 panel-plugin-action-enable = Enable plugin
 panel-plugin-action-uninstall = Uninstall
+panel-plugin-action-update = Update
 panel-plugin-action-back = Back to plugin list
+panel-plugin-detail-actions = Actions
 
 # ---- Plugin Panel Fields ----
 panel-plugin-field-skills = Skills
@@ -851,6 +859,7 @@ panel-plugin-discover-empty = No results found
 
 # ---- Plugin Panel Marketplaces ----
 panel-plugin-marketplaces-add = Add marketplace...
+panel-plugin-marketplace-add-label = Add:
 panel-plugin-marketplaces-delete = Delete
 panel-plugin-marketplaces-empty = No marketplaces configured
 
@@ -871,9 +880,12 @@ panel-plugin-confirm-hint = Enter: confirm  Esc: cancel
 panel-plugin-marketplaces-online = online
 panel-plugin-marketplaces-offline = offline
 panel-plugin-marketplace-refreshing = Refreshing...
-panel-plugin-marketplace-hint-keys = Enter: refresh  |  d: delete  |  a: add
+panel-plugin-marketplace-hint-keys = Enter: detail/add  |  ↑/↓: navigate  |  Esc: close
 panel-plugin-marketplace-add-url-hint = Enter URL (github.com/org/repo, /path/to/dir, etc.)
 panel-plugin-marketplace-add-input-footer = Enter: save  Esc: cancel
+panel-plugin-marketplace-action-refresh = Refresh
+panel-plugin-marketplace-action-delete = Delete
+panel-plugin-marketplace-detail-hint = ↑/↓: select  |  Enter: execute  |  Esc: back
 
 # ---- Plugin Panel Search ----
 panel-plugin-discover-input = Type to search...

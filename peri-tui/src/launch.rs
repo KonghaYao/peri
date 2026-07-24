@@ -120,6 +120,16 @@ pub async fn build_app_and_acp(
         ));
         // (S13c-4b) plugin_commands + plugin_skills 注入已随 command/ 删除——
         // 插件技能/命令注册由 ACP server 侧 SkillsMiddleware + PluginMiddleware + HookMiddleware 负责。
+
+        // E2: 启动时清理孤儿插件文件
+        let claude_dir_clone = claude_dir.clone();
+        tokio::spawn(async move {
+            if let Err(e) = peri_middlewares::plugin::cleanup_orphaned_plugins(&claude_dir_clone).await {
+                tracing::warn!(target: "peri", error = %e, "启动时清理孤儿插件文件失败");
+            } else {
+                tracing::info!(target: "peri", "启动时清理孤儿插件文件完成");
+            }
+        });
     }
 
     // ── ACP Server + Client ─────────────────────────────────────────────

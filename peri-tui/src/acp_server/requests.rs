@@ -900,6 +900,55 @@ pub(crate) async fn handle_request(
             }).collect::<Vec<_>>() }))
         }
 
+        "plugin/update" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'pluginId'"))?;
+            let session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let claude_dir = dirs_next::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".claude");
+            let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
+
+            let caps = cfg.session_manager.get_caps(session_id);
+
+            match peri_middlewares::plugin::update_plugin(
+                plugin_id,
+                &cache_dir,
+                &claude_dir,
+                None,
+            )
+            .await
+            {
+                Ok(updated) => {
+                    let _ = push_plugin_action_result(
+                        transport, session_id, "update", plugin_id, true, None, &caps,
+                    )
+                    .await;
+                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir, &caps).await;
+                    Ok(serde_json::json!({ "success": true, "plugin": updated.id }))
+                }
+                Err(e) => {
+                    let _ = push_plugin_action_result(
+                        transport,
+                        session_id,
+                        "update",
+                        plugin_id,
+                        false,
+                        Some(&e.to_string()),
+                        &caps,
+                    )
+                    .await;
+                    Err(AcpError::new(-32603, e.to_string()))
+                }
+            }
+        }
+
         "session/rename" => {
             let session_id = params
                 .get("sessionId")
@@ -925,6 +974,33 @@ pub(crate) async fn handle_request(
                 "sessionId": session_id,
                 "title": title,
             }))
+        }
+
+        "marketplace/refresh" => {
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'name'"))?;
+            // 从 known_marketplaces.json 查找 source
+            let kms = peri_middlewares::plugin::load_known_marketplaces(None)
+                .map_err(|e| AcpError::new(-32603, format!("Failed to load marketplaces: {e}")))?;
+            let km = kms
+                .iter()
+                .find(|km| {
+                    peri_middlewares::plugin::MarketplaceManager::extract_name(&km.source) == name
+                })
+                .ok_or_else(|| {
+                    AcpError::new(-32602, format!("marketplace not found: {name}"))
+                })?;
+
+            match peri_middlewares::plugin::marketplace::refresh_marketplace(&km.source, name).await
+            {
+                Ok((manifest, _install_location)) => {
+                    let plugin_count = manifest.plugins.len();
+                    Ok(serde_json::json!({ "success": true, "pluginCount": plugin_count }))
+                }
+                Err(e) => Err(AcpError::new(-32603, e.to_string())),
+            }
         }
 
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),

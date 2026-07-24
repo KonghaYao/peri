@@ -544,7 +544,9 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             let idx = *selected.read();
                             if let Some(name) = themes_for_closure.get(idx) {
                                 switch_theme_atoms(name);
-                                persist_theme(name);
+                                // 将同步写盘移到独立线程，避免阻塞 TUI 主事件循环
+                                let owned = name.to_string();
+                                std::thread::spawn(move || persist_theme(&owned));
                             }
                         }
                         return EventResult::Consumed;
@@ -555,7 +557,8 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     _ if key.modifiers == KeyModifiers::CONTROL => match key.code {
                         KeyCode::Char('t') | KeyCode::Char('T') => {
-                            toggle_daily_color();
+                            // 将同步写盘移到独立线程，避免阻塞 TUI 主事件循环
+                            std::thread::spawn(toggle_daily_color);
                             return EventResult::Consumed;
                         }
                         KeyCode::Char('d') | KeyCode::Char('D') => {
