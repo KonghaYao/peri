@@ -253,3 +253,261 @@ async fn test_compact_lifecycle() {
     });
     assert!(!has_compact_update, "v2 条件上报不应发 compact SpanUpdate");
 }
+
+/// 回归测试：当 `stages.active_handle()` 返回 None 但 subagent stack 非空时，
+/// `on_tool_start` 的 parent_id 应 fallback 到 subagent 的 observation_id，
+/// 而非主 agent 的 agent_observation_id。
+///
+/// BUG 1 修复：这是 belts-and-suspenders 安全网，应对 biased select 重排
+/// 外仍可能出现的时序问题。配合 forwarder 重排后，正常流程中此 fallback 不应触发。
+///
+/// BUG 3 注意：subagent 活跃时工具路由到 subagent 的 tool_batch。
+#[test]
+fn test_on_tool_start_fallback_to_subagent_when_stage_not_started() {
+    let (mut t, _session) = make_tracer(1.0);
+    t.on_turn_start("turn_fallback_test");
+
+    // 手动压入 subagent 上下文（模拟 SubAgent 已启动但 StageStarted 尚未到达）
+    t.begin_subagent(&serde_json::json!({"agent": "explore", "description": "test"}));
+
+    // 确认 subagent 栈非空
+    assert_eq!(t.subagent.depth(), 1, "subagent 栈应有 1 层");
+
+    // 获取预期的 fallback parent_id（subagent 的 observation_id）
+    let expected_parent = t.subagent.current_agent_id(&t.agent_observation_id);
+    assert_ne!(
+        expected_parent, t.agent_observation_id,
+        "subagent observation_id 应不同于主 agent observation_id"
+    );
+
+    // 在没有 stage 的情况下调用 on_tool_start（active_handle() 返回 None）
+    // parent_id 应 fallback 到 subagent 的 observation_id
+    t.on_tool_start(
+        "tc_fallback",
+        "Read",
+        &serde_json::json!({"path": "test.txt"}),
+    );
+    t.on_tool_end("tc_fallback", "file content", false);
+
+    // BUG 3: 工具已路由到 subagent 的 tool_batch，需从中 flush
+    let flushes = t.subagent.flush_all_subagent_tool_batches();
+    assert_eq!(flushes.len(), 1, "应有 1 个 subagent tool_batch flush");
+    let flush = &flushes[0];
+    assert_eq!(
+        flush.parent_observation_id, expected_parent,
+        "parent_observation_id 应 fallback 到 subagent 的 observation_id，而非主 agent"
+    );
+    assert_ne!(
+        flush.parent_observation_id, t.agent_observation_id,
+        "parent_observation_id 不应回落到主 agent 的 agent_observation_id"
+    );
+}
+
+// ── BUG 2: bg subagent 栈时序测试 ─────────────────────────────────────────
+
+/// 模拟 bg subagent 场景：on_tool_end 在 subagent 启动前到达，
+/// 此时 has_started=false，不应弹栈。
+#[test]
+fn test_bg_subagent_deferred_pop_preserves_stack() {
+    let (mut t, _session) = make_tracer(1.0);
+    t.on_turn_start("turn_bg_test");
+
+    // 模拟 Agent 工具调用开始（压入 subagent 栈，has_started=false）
+    t.on_tool_start(
+        "tc_bg",
+        "Agent",
+        &serde_json::json!({"subagent_name": "bg_agent"}),
+    );
+    assert_eq!(t.subagent.depth(), 1, "Agent 工具应压入 subagent 栈");
+
+    // 确认 has_started 为 false（尚未收到 StageStarted）
+    assert!(
+        !t.subagent.top_has_started(),
+        "尚未收到 subagent 事件时 has_started 应为 false"
+    );
+
+    // Agent 工具结束：因为 has_started=false（bg 场景），不应弹栈
+    t.on_tool_end("tc_bg", "bg agent spawned, will run later", false);
+    assert_eq!(
+        t.subagent.depth(),
+        1,
+        "bg subagent：on_tool_end 时 has_started=false，不应弹栈"
+    );
+}
+
+/// 模拟 fork subagent 场景：on_tool_end 在 subagent 事件之后到达，
+/// 此时 has_started=true，应正常弹栈。
+#[test]
+fn test_fork_subagent_pops_on_tool_end() {
+    let (mut t, _session) = make_tracer(1.0);
+    t.on_turn_start("turn_fork_test");
+
+    // 模拟 fork Agent 工具调用开始
+    t.on_tool_start(
+        "tc_fork",
+        "Agent",
+        &serde_json::json!({"subagent_name": "fork_agent"}),
+    );
+    assert_eq!(t.subagent.depth(), 1);
+
+    // 模拟 subagent 已启动（StageStarted 到达 → mark_top_started）
+    t.subagent.mark_top_started();
+    assert!(
+        t.subagent.top_has_started(),
+        "mark_top_started 后 has_started 应为 true"
+    );
+
+    // Agent 工具结束：has_started=true，应正常弹栈
+    t.on_tool_end("tc_fork", "fork agent completed", false);
+    assert_eq!(
+        t.subagent.depth(),
+        0,
+        "fork subagent：on_tool_end 时 has_started=true，应弹栈"
+    );
+}
+
+/// 模拟 ActiveHandle 调用链：bg subagent 的 StageStarted 到达后
+/// 应标记 has_started=true，恢复子 agent 活跃状态。
+#[test]
+fn test_bg_subagent_stage_started_marks_started() {
+    let (mut t, _session) = make_tracer(1.0);
+    t.on_turn_start("turn_bg_stage");
+
+    // 1. 创建 bg subagent（压栈，has_started=false）
+    t.on_tool_start(
+        "tc_bg",
+        "Agent",
+        &serde_json::json!({"subagent_name": "bg_agent"}),
+    );
+    assert_eq!(t.subagent.depth(), 1);
+    assert!(!t.subagent.top_has_started());
+
+    // 2. bg subagent 的 on_tool_end 到达（不弹栈）
+    t.on_tool_end("tc_bg", "spawned", false);
+    assert_eq!(t.subagent.depth(), 1, "bg 场景不应弹栈");
+
+    // 3. bg subagent 的 StageStarted 到达 → mark_started
+    t.on_stage_start(Stage::Act, "turn_bg_stage");
+    assert!(
+        t.subagent.top_has_started(),
+        "StageStarted 后 has_started 应为 true"
+    );
+
+    // 4. 现在栈顶的 has_started=true，如果再有 agent tool end 会正常弹栈
+    assert_eq!(t.subagent.depth(), 1);
+}
+
+// ── BUG 3: subagent 工具路由到正确的 ToolBatch ──────────────────────────
+
+/// 验证 subagent 活跃时，工具写入 subagent 的 ToolBatch 而非主 agent 的。
+#[test]
+fn test_subagent_tool_routed_to_subagent_tool_batch() {
+    let (mut t, _session) = make_tracer(1.0);
+    t.on_turn_start("turn_sub_route");
+
+    // 1. Agent 工具启动：压入 subagent 栈，Agent 工具写入 subagent 的 tool_batch
+    t.on_tool_start(
+        "tc_agent",
+        "Agent",
+        &serde_json::json!({"subagent_name": "explore"}),
+    );
+    assert_eq!(t.subagent.depth(), 1);
+
+    // 2. 主 agent 的 tool_batch 应为空（Agent 工具已路由到 subagent 的）
+    let main_flush = t.tool_batch.flush();
+    assert!(
+        main_flush.tools.is_empty(),
+        "主 agent 的 tool_batch 应为空，Agent 工具已路由到 subagent 的 tool_batch"
+    );
+
+    // 3. subagent 内的普通工具：应写入 subagent 的 tool_batch
+    t.on_tool_start("tc_read", "Read", &serde_json::json!({"path": "test.txt"}));
+    t.on_tool_end("tc_read", "file content", false);
+
+    // 4. 主 agent 的 tool_batch 仍应为空
+    let main_flush2 = t.tool_batch.flush();
+    assert!(
+        main_flush2.tools.is_empty(),
+        "subagent 活跃时，普通工具不应写入主 agent 的 tool_batch"
+    );
+}
+
+/// 验证栈空时，工具仍写入主 ToolBatch（向后兼容）。
+#[test]
+fn test_main_agent_tool_not_routed_to_subagent_batch() {
+    let (mut t, _session) = make_tracer(1.0);
+    t.on_turn_start("turn_main_only");
+
+    // 栈空时，工具应写入主 agent 的 tool_batch
+    t.on_tool_start("tc_read", "Read", &serde_json::json!({"path": "test.txt"}));
+    t.on_tool_end("tc_read", "file content", false);
+
+    // 主 agent 的 tool_batch 应有该工具
+    let main_flush = t.tool_batch.flush();
+    assert_eq!(
+        main_flush.tools.len(),
+        1,
+        "栈空时，工具应写入主 agent 的 tool_batch"
+    );
+    assert_eq!(main_flush.tools[0].name, "Read");
+}
+
+/// 验证 fork subagent：on_tool_end 时 flush subagent tool_batch 后再弹栈。
+#[test]
+fn test_fork_subagent_flushes_tool_batch_before_pop() {
+    let (mut t, _session) = make_tracer(1.0);
+    t.on_turn_start("turn_fork_flush");
+
+    // 1. Agent 工具启动 → 压栈 + 写入 subagent 的 tool_batch
+    t.on_tool_start(
+        "tc_agent",
+        "Agent",
+        &serde_json::json!({"subagent_name": "fork"}),
+    );
+    assert_eq!(t.subagent.depth(), 1);
+
+    // 2. 模拟 subagent 已启动
+    t.subagent.mark_top_started();
+    assert!(t.subagent.top_has_started());
+
+    // 3. Agent 工具结束：flush → 弹栈
+    t.on_tool_end("tc_agent", "fork completed", false);
+    assert_eq!(t.subagent.depth(), 0, "fork 场景应弹栈");
+
+    // 4. 弹栈后主 tool_batch 仍为空（工具在 subagent 的 tool_batch 中被 flush 掉了）
+    let main_flush = t.tool_batch.flush();
+    assert!(
+        main_flush.tools.is_empty(),
+        "fork 后主 tool_batch 不应有 subagent 的工具"
+    );
+}
+
+/// 验证 bg subagent：turn_end 时所有 subagent tool_batch 被 flush。
+#[test]
+fn test_bg_subagent_tool_batch_flushed_on_turn_end() {
+    let (mut t, _session) = make_tracer(1.0);
+    t.on_turn_start("turn_bg_flush");
+
+    // 1. 创建 bg subagent（Agent 工具写入 subagent 的 tool_batch）
+    t.on_tool_start(
+        "tc_bg",
+        "Agent",
+        &serde_json::json!({"subagent_name": "bg"}),
+    );
+    assert_eq!(t.subagent.depth(), 1);
+
+    // 2. bg subagent 内工具
+    t.on_tool_start("tc_bash", "Bash", &serde_json::json!({"cmd": "ls"}));
+    t.on_tool_end("tc_bash", "file list", false);
+
+    // 3. bg subagent 未启动，Agent 工具结束时不应弹栈
+    assert!(!t.subagent.top_has_started());
+    t.on_tool_end("tc_bg", "spawned", false);
+    assert_eq!(t.subagent.depth(), 1, "bg 场景不应弹栈");
+
+    // 4. turn_end：flush_all_subagent_tool_batches 应工作
+    // 手动测试 flush_all 方法
+    let flushes = t.subagent.flush_all_subagent_tool_batches();
+    let total_tools: usize = flushes.iter().map(|f| f.tools.len()).sum();
+    assert_eq!(total_tools, 2, "bg subagent 的 tool_batch 应包含 2 个工具");
+}

@@ -338,6 +338,9 @@ async fn dispatch_concurrent(
         Arc::new(msgs)
     };
     let cwd_snapshot = ctx.cwd().to_owned();
+    let turn_id = ctx.turn_id();
+    let agent_id = ctx.session.agent_id;
+    let event_bus = Arc::clone(&ctx.runtime.event_bus);
 
     let futures: Vec<_> = ready_calls
         .iter()
@@ -349,6 +352,7 @@ async fn dispatch_concurrent(
             let cancel = cancel.clone();
             let messages = Arc::clone(&messages_snapshot);
             let cwd = cwd_snapshot.clone();
+            let event_bus = Arc::clone(&event_bus);
             async move {
                 let span = tracing::info_span!(
                     "agent.tool_call",
@@ -369,11 +373,11 @@ async fn dispatch_concurrent(
                         None => Err(AgentError::ToolNotFound(tool_name.clone())),
                     }
                 };
-                tokio::select! {
+                let result = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
                         Err(AgentError::ToolExecutionFailed {
-                            tool: tool_name,
+                            tool: tool_name.clone(),
                             reason: "interrupted by user".to_string(),
                         })
                     }
@@ -390,23 +394,38 @@ async fn dispatch_concurrent(
                                 // 安全：Err 分支仅在 timeout_opt 为 Some 时可达
                                 let secs = timeout_opt.unwrap().as_secs();
                                 Err(AgentError::ToolExecutionFailed {
-                                    tool: tool_name,
+                                    tool: tool_name.clone(),
                                     reason: format!("tool call timed out after {}s", secs),
                                 })
                             }
                         }
                     }
-                }
+                };
+                // 工具完成即刻 emit ToolEnded，不等 join_all 返回
+                // 快速工具的 Langfuse observation endTime 不再被慢工具拖高
+                let (output, is_error) = match &result {
+                    Ok(o) => (o.clone(), false),
+                    Err(e) => (e.to_string(), true),
+                };
+                event_bus.emit_render(RenderEvent::ToolEnded {
+                    turn_id,
+                    agent_id,
+                    tool_call_id: call_id,
+                    name: tool_name,
+                    output,
+                    is_error,
+                });
+                result
             }
         })
         .collect();
     futures::future::join_all(futures).await
 }
 
-/// 阶段三：串行处理结果 + emit ToolEnd + after_tool + error_suggest + 截断 + 聚合。
+/// 阶段三：串行处理结果（ToolEnd 已在 dispatch_concurrent 中 emit）
+/// + after_tool + error_suggest + 截断 + 聚合。
 ///
 /// 不变量：deferred_error 取首个 after_tool 错误，后续错误不覆盖。
-/// ToolEnd emit 在 error_suggest 注入之前。
 async fn settle_results(
     ctx: &StageContext,
     approval: ApprovalOutcome,
@@ -414,8 +433,6 @@ async fn settle_results(
     was_cancelled: bool,
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
 ) -> CollectOutcome {
-    let turn_id = ctx.turn_id();
-    let agent_id = ctx.session.agent_id;
     let all_tools_ref = all_tools;
 
     let ApprovalOutcome {
@@ -478,15 +495,8 @@ async fn settle_results(
             );
         }
 
-        // ToolEnd emit 在 error_suggest 注入之前
-        ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
-            turn_id,
-            agent_id,
-            tool_call_id: modified_call.id.clone(),
-            name: modified_call.name.clone(),
-            output: result.output.clone(),
-            is_error: result.is_error,
-        });
+        // ToolEnd 已在 dispatch_concurrent 中 emit（工具完成即刻发射）
+        // 此处仅处理 after_tool + error_suggest 等后处理逻辑
 
         if let Err(e) = run_after_tool(ctx, &modified_call, &result).await {
             let _ = run_on_error(ctx, &e).await;

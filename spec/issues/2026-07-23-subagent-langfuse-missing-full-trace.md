@@ -50,6 +50,8 @@ Subagent 的 `spawn_subagent_event_forwarder` 对齐 `spawn_eventbus_forwarder`�
 |------|-----|-----|--------|------|
 | 2026-07-23 | — | Open | agent | 创建——分析 subagent Langfuse trace 缺口时发现 |
 | 2026-07-23 | Open | Fixed | agent | 修复：subagent forwarder 增加 LangfuseBridge 支持，11 文件 115+ 行 |
+| 2026-07-23 | Fixed | Reopen | agent | 线上验证：14 个 subagent observation 均为 0 子节点，修复未生效。Langfuse OTLP 手工测试确认 API 侧完全支持嵌套 AGENT 结构，问题在 peri 代码侧 |
+| 2026-07-23 | Reopen | Fixed | agent | 修复 3 个 P0 BUG：(1) biased select! 时序 (2) bg subagent 栈时序 (3) 共享 tool_batch。共 9 文件、16 个新测试，951 tests pass |
 
 ## 修复记录
 
@@ -67,3 +69,28 @@ Subagent 的 `spawn_subagent_event_forwarder` 对齐 `spawn_eventbus_forwarder`�
 - **涉及文件**：11 个（+1 新建）
 - **验证状态**：已验证（build ✅ / peri-agent 635 ✅ / peri-acp 299 ✅ / peri-middlewares 1059 ✅）
 - **审查结论**：PASS——架构正确，向后兼容。已知限制：并发 bg subagent 共享 `active_stage`（stage span 交错可能覆盖，后续优化）
+
+### 验证 #1（2026-07-23）—— Reopen
+
+**线上数据验证**（2026-07-23 12:29~13:00）：
+- 搜索 Langfuse 项目 `cmqjich7n004cad0dkd1xf942` 中最近 3 天全部 14 个 subagent observation
+- **所有 14 个 subagent 均为 0 子节点**（包括 11 个后台 + 3 个同步）
+- subagent 的 thread session 均有 0 个 trace
+- 主 agent 的 `agent-run` 正常工作（32 个子节点）
+
+**Langfuse API 能力验证**（OTLP 手工测试）：
+- 通过 OTLP 端点手工注入嵌套 AGENT 结构
+- 3 层 AGENT 嵌套（agent-run → subagent → sub-subagent）全部正常
+- subagent 下挂载所有类型节点（SPAN/GENERATION/EVENT/TOOL/COMPACT）全部正确
+- 结论：**Langfuse OTLP 完全支持嵌套 AGENT 结构，问题 100% 在 peri 代码侧**
+
+**关键对比**：
+
+| 项目 | 手工 OTLP 测试 | 真实 peri 数据 |
+|------|:---:|:---:|
+| agent-run 类型 | AGENT ✅ | AGENT ✅ |
+| agent-run 子节点 | 4 ✅ | 32 ✅ |
+| subagent 类型 | AGENT ✅ | AGENT ✅ |
+| subagent 子节点 | **2** ✅ | **0** ❌ |
+
+**注意**：OTLP `langfuse.observation.type` 必须用小写（`"agent"`），大写会被 Langfuse 默认为 SPAN（`conversion.rs:306-308` 做了 `to_lowercase()`）。
