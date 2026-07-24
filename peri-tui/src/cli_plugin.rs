@@ -136,10 +136,18 @@ pub async fn run_marketplace_add(source: &str) -> Result<()> {
     let mut marketplaces =
         load_known_marketplaces(None).map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
 
-    for mkt in &marketplaces {
-        if MarketplaceManager::extract_name(&mkt.source) == name {
-            anyhow::bail!("marketplace \"{}\" 已存在", name);
+    // 检查是否已存在：如果已有 valid install_location 则真重复，否则是旧残留（需刷新）
+    if let Some(existing) = marketplaces
+        .iter()
+        .position(|mkt| MarketplaceManager::extract_name(&mkt.source) == name)
+    {
+        let old = &marketplaces[existing];
+        if !old.install_location.is_empty() {
+            println!("marketplace \"{}\" 已存在，跳过", name);
+            return Ok(());
         }
+        // 旧残留（install_location 为空），删除后重新添加
+        marketplaces.remove(existing);
     }
 
     // 立即 clone/fetch marketplace，不等到下次启动
