@@ -917,13 +917,8 @@ pub(crate) async fn handle_request(
 
             let caps = cfg.session_manager.get_caps(session_id);
 
-            match peri_middlewares::plugin::update_plugin(
-                plugin_id,
-                &cache_dir,
-                &claude_dir,
-                None,
-            )
-            .await
+            match peri_middlewares::plugin::update_plugin(plugin_id, &cache_dir, &claude_dir, None)
+                .await
             {
                 Ok(updated) => {
                     let _ = push_plugin_action_result(
@@ -989,9 +984,7 @@ pub(crate) async fn handle_request(
                 .find(|km| {
                     peri_middlewares::plugin::MarketplaceManager::extract_name(&km.source) == name
                 })
-                .ok_or_else(|| {
-                    AcpError::new(-32602, format!("marketplace not found: {name}"))
-                })?;
+                .ok_or_else(|| AcpError::new(-32602, format!("marketplace not found: {name}")))?;
 
             match peri_middlewares::plugin::marketplace::refresh_marketplace(&km.source, name).await
             {

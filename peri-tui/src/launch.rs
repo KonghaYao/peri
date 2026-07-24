@@ -124,7 +124,9 @@ pub async fn build_app_and_acp(
         // E2: 启动时清理孤儿插件文件
         let claude_dir_clone = claude_dir.clone();
         tokio::spawn(async move {
-            if let Err(e) = peri_middlewares::plugin::cleanup_orphaned_plugins(&claude_dir_clone).await {
+            if let Err(e) =
+                peri_middlewares::plugin::cleanup_orphaned_plugins(&claude_dir_clone).await
+            {
                 tracing::warn!(target: "peri", error = %e, "启动时清理孤儿插件文件失败");
             } else {
                 tracing::info!(target: "peri", "启动时清理孤儿插件文件完成");
