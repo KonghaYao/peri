@@ -127,7 +127,7 @@ mod tests {
             .iter()
             .filter(|e| {
                 matches!(e, IngestionEvent::ObservationCreate { body, .. }
-                    if body.name.as_deref().map_or(false, |n| n.starts_with("subagent-")))
+                    if body.name.as_deref().is_some_and(|n| n.starts_with("subagent-")))
             })
             .collect();
         assert_eq!(
@@ -192,7 +192,7 @@ mod tests {
             let events_before_sa = session.events_snapshot();
             let has_sa_early = events_before_sa.iter().any(|e| {
                 matches!(e, IngestionEvent::ObservationCreate { body, .. }
-                    if body.name.as_deref().map_or(false, |n| n.starts_with("subagent-")))
+                    if body.name.as_deref().is_some_and(|n| n.starts_with("subagent-")))
             });
             assert!(
                 !has_sa_early,
@@ -225,7 +225,7 @@ mod tests {
             .iter()
             .filter(|e| {
                 matches!(e, IngestionEvent::ObservationCreate { body, .. }
-                    if body.name.as_deref().map_or(false, |n| n.starts_with("subagent-")))
+                    if body.name.as_deref().is_some_and(|n| n.starts_with("subagent-")))
             })
             .collect();
         assert_eq!(
@@ -314,7 +314,7 @@ mod tests {
             .iter()
             .find(|e| {
                 matches!(e, IngestionEvent::ObservationCreate { body, .. }
-                    if body.name.as_deref().map_or(false, |n| n.starts_with("subagent-")))
+                    if body.name.as_deref().is_some_and(|n| n.starts_with("subagent-")))
             })
             .expect("应有子 agent ObservationCreate");
 
