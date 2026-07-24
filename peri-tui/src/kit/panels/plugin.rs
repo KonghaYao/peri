@@ -4,7 +4,6 @@
 //! ←/→ 切换视图，↑/↓ 导航，Enter 进详情/执行操作，Esc 返回列表。
 //! 无 ScrollView——避免其内置 handler 与自定义 ↑/↓ 冲突。
 
-use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use crate::app::panel_types::PanelKind;
@@ -14,6 +13,7 @@ use crate::kit::atoms::{
     PluginViewTab, RENDER_HEARTBEAT,
 };
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
+use crate::components::textarea::TextAreaState;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
@@ -29,23 +29,65 @@ use ratatui_kit::{
 // ── Discover cache (non-reactive, safe in render body) ────────────────
 
 /// Discover 插件列表缓存——避免 render body 中同步读盘。
-/// 首次访问时从 marketplace cache 加载，后续读取不触发磁盘 I/O。
-/// `clear()` / `set()` 用于刷新（安装/添加 marketplace 后）。
-static DISCOVER_CACHE: OnceLock<parking_lot::Mutex<Vec<PluginSearchResultItem>>> = OnceLock::new();
+/// 使用 Option<Vec<T>>：None = 未初始化，Some(vec) = 已填充（可能为空）。
+/// 避免用 is_empty() 判断初始化状态——空数据集与未初始化无法区分。
+static DISCOVER_CACHE: OnceLock<parking_lot::Mutex<Option<Vec<PluginSearchResultItem>>>> = OnceLock::new();
 
 fn get_discover_cache() -> Vec<PluginSearchResultItem> {
-    let cache = DISCOVER_CACHE.get_or_init(|| parking_lot::Mutex::new(Vec::new()));
-    let mut guard = cache.lock();
-    if guard.is_empty() {
-        *guard = load_discover_plugins_from_disk();
+    let cache = DISCOVER_CACHE.get_or_init(|| parking_lot::Mutex::new(None));
+    {
+        let guard = cache.lock();
+        if let Some(ref data) = *guard {
+            return data.clone();
+        }
     }
-    guard.clone()
+    // 锁外执行磁盘 I/O，避免 render body 阻塞在锁上
+    let data = load_discover_plugins_from_disk();
+    let mut guard = cache.lock();
+    if guard.is_none() {
+        *guard = Some(data);
+    }
+    guard.as_ref().unwrap().clone()
 }
 
 fn refresh_discover_cache() {
+    // 先在锁外执行磁盘 I/O，再拿锁替换数据
+    let data = load_discover_plugins_from_disk();
     if let Some(cache) = DISCOVER_CACHE.get() {
         let mut guard = cache.lock();
-        *guard = load_discover_plugins_from_disk();
+        *guard = Some(data);
+    }
+}
+
+// ── Marketplace cache (non-reactive, safe in render body) ─────────────
+
+/// Marketplace 数据缓存——避免 render_marketplaces 每帧同步读盘。
+/// 使用 Option<Vec<T>>：None = 未初始化，Some(vec) = 已填充（可能为空）。
+static MARKETPLACE_CACHE: OnceLock<parking_lot::Mutex<Option<Vec<MsEntry>>>> = OnceLock::new();
+
+fn get_marketplace_cache() -> Vec<MsEntry> {
+    let cache = MARKETPLACE_CACHE.get_or_init(|| parking_lot::Mutex::new(None));
+    {
+        let guard = cache.lock();
+        if let Some(ref data) = *guard {
+            return data.clone();
+        }
+    }
+    // 锁外执行磁盘 I/O，避免 render body 阻塞在锁上
+    let data = load_marketplace_data();
+    let mut guard = cache.lock();
+    if guard.is_none() {
+        *guard = Some(data);
+    }
+    guard.as_ref().unwrap().clone()
+}
+
+fn refresh_marketplace_cache() {
+    // 先在锁外执行磁盘 I/O，再拿锁替换数据
+    let data = load_marketplace_data();
+    if let Some(cache) = MARKETPLACE_CACHE.get() {
+        let mut guard = cache.lock();
+        *guard = Some(data);
     }
 }
 
@@ -74,11 +116,11 @@ impl DiscoverDetailAction {
         DiscoverDetailAction::BackToList,
     ];
 
-    fn label(&self) -> &'static str {
+    fn label(&self) -> String {
         match self {
-            Self::InstallUser => "Install (User scope)",
-            Self::InstallProject => "Install (Project scope)",
-            Self::BackToList => "Back to list",
+            Self::InstallUser => i18n::tr("panel-plugin-discover-install-user"),
+            Self::InstallProject => i18n::tr("panel-plugin-discover-install-project"),
+            Self::BackToList => i18n::tr("panel-plugin-action-back"),
         }
     }
 }
@@ -149,19 +191,21 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let confirm_action = hooks.use_state(|| Option::<String>::None);
     let cursor_visible = hooks.use_state(|| true);
     let cursor_last_toggle = hooks.use_state(std::time::Instant::now);
-    let search_text = hooks.use_state(String::new);
+    let search_text = hooks.use_state(TextAreaState::default);
     let search_focus = hooks.use_state(|| false);
     let search_state = hooks.use_state(|| SearchState::Idle);
     let operation_loading = hooks.use_state(|| Option::<String>::None);
-    let add_marketplace_input = hooks.use_state(String::new);
+    let add_marketplace_input = hooks.use_state(TextAreaState::default);
     let add_marketplace_active = hooks.use_state(|| false);
     let marketplace_refreshing = hooks.use_state(|| false);
+    // Marketplace detail state
+    let marketplace_detail = hooks.use_state(|| Option::<usize>::None);
+    let marketplace_detail_action = hooks.use_state(|| 0usize);
     // Discover list state
     let discover_cursor = hooks.use_state(|| 0usize);
     let discover_filtered = hooks.use_state(Vec::<usize>::new);
     let discover_detail_idx = hooks.use_state(|| Option::<usize>::None);
     let discover_detail_action = hooks.use_state(|| 0usize);
-    let installing = hooks.use_state(HashSet::<String>::new);
     let store = hooks.use_atom(&PLUGIN_LIST);
     let plugins: Vec<PluginSummary> = store.read().clone();
     hooks.use_atom(&LANG_VERSION);
@@ -182,64 +226,104 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if key.kind != KeyEventKind::Press {
                 return EventResult::Ignored;
             }
+
+            // ── ESC handling: detail exit / confirm cancel / close panel ──
+            if key.code == KeyCode::Esc {
+                if detail_plugin_idx.read().is_some() {
+                    *detail_plugin_idx.write() = None;
+                    return EventResult::Consumed;
+                }
+                if marketplace_detail.read().is_some() {
+                    *marketplace_detail.write() = None;
+                    *marketplace_detail_action.write() = 0;
+                    return EventResult::Consumed;
+                }
+                if confirm_action.read().is_some() {
+                    *confirm_action.write() = None;
+                    *operation_loading.write() = None;
+                    return EventResult::Consumed;
+                }
+                if discover_detail_idx.read().is_some() {
+                    // let discover detail handler manage Esc
+                    return EventResult::Ignored;
+                }
+                if *active_tab.read() == PluginViewTab::Discover {
+                    return EventResult::Ignored;
+                }
+                close_panel();
+                return EventResult::Consumed;
+            }
+
             let in_detail = detail_plugin_idx.read().is_some();
             let in_discover_detail = discover_detail_idx.read().is_some();
-            if in_detail || in_discover_detail || confirm_action.read().is_some() {
+            let in_marketplace_detail = marketplace_detail.read().is_some();
+            if in_detail || in_discover_detail || in_marketplace_detail || confirm_action.read().is_some() {
                 return EventResult::Ignored;
             }
             // marketplace add 输入模式
             if *add_marketplace_active.read() {
                 return match key.code {
                     KeyCode::Enter => {
-                        let url = add_marketplace_input.read().clone();
+                        let url = add_marketplace_input.read().text.clone();
                         if !url.is_empty() {
                             let result = peri_middlewares::plugin::parse_marketplace_input(&url);
                             match result {
                                 Ok(source) => {
-                                    let mut marketplaces = peri_middlewares::plugin::load_known_marketplaces(None).unwrap_or_default();
-                                    let _name = peri_middlewares::plugin::MarketplaceManager::extract_name(&source);
-                                    let already_exists = marketplaces.iter().any(|km| km.source == source);
-                                    if !already_exists {
-                                        marketplaces.push(peri_middlewares::plugin::KnownMarketplace {
-                                            source,
-                                            install_location: String::new(),
-                                            auto_update: false,
-                                            last_updated: String::new(),
-                                        });
-                                        let _ = peri_middlewares::plugin::save_known_marketplaces(&marketplaces, None);
-                                        refresh_discover_cache();
-                                        if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                            let client = cl.clone();
-                                            let sid = client.current_session_id().unwrap_or_default();
-                                            tokio::spawn(async move {
-                                                let _ = client.send_raw_request("plugin/search", serde_json::json!({
-                                                    "query": "",
+                                    let name = peri_middlewares::plugin::MarketplaceManager::extract_name(&source);
+                                    // 将同步磁盘 I/O 移到 dedicated blocking thread，
+                                    // 避免阻塞 TUI 主事件循环。
+                                    let source_for_blocking = source.clone();
+                                    let name_for_refresh = name.clone();
+                                    tokio::spawn(async move {
+                                        let added = tokio::task::spawn_blocking(move || {
+                                            let mut marketplaces = peri_middlewares::plugin::load_known_marketplaces(None).unwrap_or_default();
+                                            let already_exists = marketplaces.iter().any(|km| km.source == source_for_blocking);
+                                            if already_exists {
+                                                return false;
+                                            }
+                                            marketplaces.push(peri_middlewares::plugin::KnownMarketplace {
+                                                source: source_for_blocking,
+                                                install_location: String::new(),
+                                                auto_update: false,
+                                                last_updated: String::new(),
+                                            });
+                                            let _ = peri_middlewares::plugin::save_known_marketplaces(&marketplaces, None);
+                                            refresh_discover_cache();
+                                            refresh_marketplace_cache();
+                                            true
+                                        }).await.unwrap();
+                                        if added {
+                                            if let Some(cl) = ACP_CLIENT_HANDLE.get() {
+                                                let client = cl.clone();
+                                                let sid = client.current_session_id().unwrap_or_default();
+                                                let _ = client.send_raw_request("marketplace/refresh", serde_json::json!({
+                                                    "name": name_for_refresh,
                                                     "sessionId": sid,
                                                 })).await;
-                                            });
+                                            }
                                         }
-                                    }
+                                    });
                                 }
                                 Err(e) => {
                                     tracing::warn!(target: "plugin-panel", error = %e, "invalid marketplace input");
                                 }
                             }
                         }
-                        add_marketplace_input.write().clear();
+                        *add_marketplace_input.write() = TextAreaState::default();
                         *add_marketplace_active.write() = false;
                         EventResult::Consumed
                     }
                     KeyCode::Esc => {
-                        add_marketplace_input.write().clear();
+                        *add_marketplace_input.write() = TextAreaState::default();
                         *add_marketplace_active.write() = false;
                         EventResult::Consumed
                     }
                     KeyCode::Char(c) => {
-                        add_marketplace_input.write().push(c);
+                        add_marketplace_input.write().insert_char(c);
                         EventResult::Consumed
                     }
                     KeyCode::Backspace => {
-                        add_marketplace_input.write().pop();
+                        add_marketplace_input.write().backspace();
                         EventResult::Consumed
                     }
                     _ => EventResult::Ignored,
@@ -256,15 +340,15 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 _ if *search_focus.read() => match key.code {
                     KeyCode::Char(c) => {
                         let mut t = search_text.write();
-                        t.push(c);
+                        t.insert_char(c);
                         EventResult::Consumed
                     }
                     KeyCode::Backspace => {
-                        search_text.write().pop();
+                        search_text.write().backspace();
                         EventResult::Consumed
                     }
                     KeyCode::Enter => {
-                        let q = search_text.read().clone();
+                        let q = search_text.read().text.clone();
                         if !q.is_empty() {
                             *search_state.write() = SearchState::Loading;
                             PLUGIN_SEARCH_RESULTS.state().write().clear();
@@ -290,10 +374,11 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     KeyCode::Esc => {
                         let mut t = search_text.write();
-                        if t.is_empty() {
+                        if t.text.is_empty() {
                             *search_focus.write() = false;
                         } else {
-                            t.clear();
+                            t.text.clear();
+                            t.cursor = 0;
                         }
                         EventResult::Consumed
                     }
@@ -303,10 +388,10 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 },
                 // ── 未聚焦搜索框：Char/Backspace 启动实时过滤，Enter 进入详情 ──
                 KeyCode::Char(c) => {
-                    search_text.write().push(c);
+                    search_text.write().insert_char(c);
                     // 实时过滤 discover 列表
                     let items = get_discover_cache();
-                    let query = search_text.read().to_lowercase();
+                    let query = search_text.read().text.to_lowercase();
                     let filtered: Vec<usize> = items.iter().enumerate()
                         .filter(|(_, item)| {
                             item.name.to_lowercase().contains(&query)
@@ -320,9 +405,9 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     EventResult::Consumed
                 }
                 KeyCode::Backspace => {
-                    search_text.write().pop();
+                    search_text.write().backspace();
                     let items = get_discover_cache();
-                    let query = search_text.read().to_lowercase();
+                    let query = search_text.read().text.to_lowercase();
                     let filtered: Vec<usize> = if query.is_empty() {
                         (0..items.len()).collect()
                     } else {
@@ -369,11 +454,17 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
             let in_detail = detail_plugin_idx.read().is_some();
             let in_discover_detail = discover_detail_idx.read().is_some();
+            let in_marketplace_detail = marketplace_detail.read().is_some();
 
             // 任意键盘事件清除 operation_loading（操作完成后用户按任意键消除 loading 状态）
-            if operation_loading.read().is_some() {
+            // 注意：read() 可能持有读锁，write() 需要写锁——必须先将读值提取到局部变量
+            // 让读锁释放后再写，否则在 std::sync::RwLock 上触发死锁。
+            let has_loading = operation_loading.read().is_some();
+            let no_confirm = confirm_action.read().is_none();
+            if has_loading && no_confirm {
                 *operation_loading.write() = None;
-                refresh_discover_cache();
+                tokio::task::spawn_blocking(|| refresh_discover_cache());
+                return EventResult::Consumed;
             }
 
             // ── Discover detail 模式 ──
@@ -403,8 +494,6 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 if let Some(dp) = items.get(idx) {
                                     let name = dp.name.clone();
                                     let marketplace = dp.marketplace.clone();
-                                    let plugin_id = format!("{}@{}", name, marketplace);
-                                    installing.write().insert(plugin_id.clone());
                                     *operation_loading.write() = Some("install".into());
                                     if let Some(cl) = ACP_CLIENT_HANDLE.get() {
                                         let client = cl.clone();
@@ -427,8 +516,6 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 if let Some(dp) = items.get(idx) {
                                     let name = dp.name.clone();
                                     let marketplace = dp.marketplace.clone();
-                                    let plugin_id = format!("{}@{}", name, marketplace);
-                                    installing.write().insert(plugin_id.clone());
                                     *operation_loading.write() = Some("install".into());
                                     if let Some(cl) = ACP_CLIENT_HANDLE.get() {
                                         let client = cl.clone();
@@ -471,14 +558,79 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 };
             }
 
+            // ── Marketplace detail 模式 ──
+            if in_marketplace_detail {
+                return match key.code {
+                    KeyCode::Up => {
+                        let mut ma = marketplace_detail_action.write();
+                        *ma = ma.saturating_sub(1);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Down => {
+                        let mut ma = marketplace_detail_action.write();
+                        if *ma < 1 {
+                            *ma += 1;
+                        }
+                        EventResult::Consumed
+                    }
+                    KeyCode::Enter => {
+                        let s = marketplace_detail.read().unwrap_or(0);
+                        let entries = get_marketplace_cache(); // 非阻塞缓存读取
+                        if let Some(entry) = entries.get(s.saturating_sub(1)) {
+                            match *marketplace_detail_action.read() {
+                                0 => {
+                                    // Refresh
+                                    let name = entry.source_label.clone();
+                                    *marketplace_refreshing.write() = true;
+                                    if let Some(cl) = ACP_CLIENT_HANDLE.get() {
+                                        let client = cl.clone();
+                                        let sid = client.current_session_id().unwrap_or_default();
+                                        let name_for_refresh = name.clone();
+                                        tokio::spawn(async move {
+                                            let _ = client.send_raw_request("marketplace/refresh", serde_json::json!({
+                                                "name": name_for_refresh,
+                                                "sessionId": sid,
+                                            })).await;
+                                        });
+                                    }
+                                    // 将缓存刷新（同步 I/O）移到 blocking thread
+                                    tokio::task::spawn_blocking(|| {
+                                        refresh_discover_cache();
+                                        refresh_marketplace_cache();
+                                    });
+                                }
+                                _ => {
+                                    // Delete
+                                    *confirm_action.write() = Some("delete_marketplace".into());
+                                    *operation_loading.write() = Some(entry.name.clone());
+                                }
+                            }
+                        }
+                        *marketplace_detail.write() = None;
+                        *marketplace_detail_action.write() = 0;
+                        EventResult::Consumed
+                    }
+                    KeyCode::Esc => {
+                        *marketplace_detail.write() = None;
+                        *marketplace_detail_action.write() = 0;
+                        EventResult::Consumed
+                    }
+                    _ => EventResult::Consumed,
+                };
+            }
+
             match (in_detail, confirm_action.read().is_some(), key.code) {
                 // ── 确认模式优先 ──
                 (_, true, KeyCode::Enter) => {
                     let action = confirm_action.read().clone().unwrap_or_default();
-                    *confirm_action.write() = None;
-                    // Save marketplace name before overwriting operation_loading
+                    // 不在事件处理器线程内写 confirm_action：generational-box
+                    // SyncStorage 的 parking_lot::RwLock 不允许同一线程
+                    // read→write 重入，否则死锁（[回归] marketplace 删除卡死）。
+                    // 状态更新统一移到独立线程执行。
+                    // *confirm_action.write() = None;
+
                     let saved_loading = operation_loading.read().clone();
-                    *operation_loading.write() = Some(action.clone());
+                    // *operation_loading.write() = Some(action.clone());
 
                     match action.as_str() {
                         "uninstall" => {
@@ -501,34 +653,42 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 }
                             }
                             *detail_plugin_idx.write() = None;
+                            // 关闭确认弹窗（独立线程避免 RwLock 重入）
+                            std::thread::spawn(move || {
+                                *confirm_action.write() = None;
+                                *operation_loading.write() = None;
+                            });
                         }
                         "delete_marketplace" => {
                             let name = saved_loading.unwrap_or_default();
-                            let marketplaces = peri_middlewares::plugin::load_known_marketplaces(None).unwrap_or_default();
-                            let filtered: Vec<_> = marketplaces.into_iter()
-                                .filter(|km| peri_middlewares::plugin::MarketplaceManager::extract_name(&km.source) != name)
-                                .collect();
-                            let _ = peri_middlewares::plugin::save_known_marketplaces(&filtered, None);
-                            *operation_loading.write() = None;
+                            std::thread::spawn(move || {
+                                let marketplaces = peri_middlewares::plugin::load_known_marketplaces(None).unwrap_or_default();
+                                let filtered: Vec<_> = marketplaces.into_iter()
+                                    .filter(|km| peri_middlewares::plugin::MarketplaceManager::extract_name(&km.source) != name)
+                                    .collect();
+                                let _ = peri_middlewares::plugin::save_known_marketplaces(&filtered, None);
+                                refresh_discover_cache();
+                                refresh_marketplace_cache();
+                                // State 写移到独立线程，避免事件循环线程的 RwLock 重入死锁
+                                *confirm_action.write() = None;
+                                *operation_loading.write() = None;
+                            });
                         }
                         _ => {
-                            *operation_loading.write() = None;
+                            // 未知确认动作：安全起见也从独立线程写 state
+                            std::thread::spawn(move || {
+                                *confirm_action.write() = None;
+                                *operation_loading.write() = None;
+                            });
                         }
                     }
                 }
-                (_, true, KeyCode::Esc) => {
-                    *confirm_action.write() = None;
-                }
                 (_, true, _) => {
-                    *confirm_action.write() = None;
-                }
-                // ── 全局 Esc ──
-                (_, false, KeyCode::Esc) => {
-                    if detail_plugin_idx.read().is_some() {
-                        *detail_plugin_idx.write() = None;
-                    } else {
-                        close_panel();
-                    }
+                    // 任意非 Enter 键关闭确认弹窗（独立线程避免 RwLock 重入）
+                    std::thread::spawn(move || {
+                        *confirm_action.write() = None;
+                        *operation_loading.write() = None;
+                    });
                 }
                 // ── Tab/Shift+Tab 切换视图 ──
                 (false, false, KeyCode::Tab) => {
@@ -542,41 +702,6 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     *tab = cycle_backward(*tab);
                     *selected.write() = 0;
                     *discover_cursor.write() = 0;
-                }
-                // ── Installed list: Space → toggle enable/disable ──
-                (false, false, KeyCode::Char(' ')) if *active_tab.read() == PluginViewTab::Installed => {
-                    let s = *selected.read();
-                    let store = PLUGIN_LIST.state();
-                    let guard = store.read();
-                    if let Some(p) = guard.get(s) {
-                        let enable = !p.enabled;
-                        let plugin_id = if p.marketplace.is_empty() {
-                            p.name.clone()
-                        } else {
-                            format!("{}@{}", p.name, p.marketplace)
-                        };
-                        let scope = p.install_scope.clone();
-                        drop(guard);
-                        // 通过 ACP toggle
-                        if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                            let client = cl.clone();
-                            let sid = client.current_session_id().unwrap_or_default();
-                            let pid = plugin_id.clone();
-                            tokio::spawn(async move {
-                                let _ = client.send_raw_request("plugin/toggle", serde_json::json!({
-                                    "pluginId": pid,
-                                    "enable": enable,
-                                    "scope": scope,
-                                    "sessionId": sid,
-                                })).await;
-                            });
-                        }
-                        // 立即持久化 enabled 状态
-                        let _ = peri_middlewares::plugin::save_claude_settings_enabled_plugins(
-                            &[(plugin_id, enable)],
-                            None,
-                        );
-                    }
                 }
                 // ── List: Enter → 进入详情 / 删除 marketplace / discover detail ──
                 (false, false, KeyCode::Enter) => {
@@ -592,38 +717,20 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         // Fall through for Discover tab
                     } else if *active_tab.read() == PluginViewTab::Marketplaces {
                         let s = *selected.read();
-                        let entries = load_marketplace_data();
+                        let entries = get_marketplace_cache(); // 非阻塞缓存读取
                         if s == 0 {
                             // "Add Marketplace" — activate text input
                             *add_marketplace_active.write() = true;
-                            add_marketplace_input.write().clear();
-                        } else if let Some(entry) = entries.get(s.saturating_sub(1)) {
-                            // Refresh marketplace
-                            let source_label = entry.source_label.clone();
-                            *marketplace_refreshing.write() = true;
-                            if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                let client = cl.clone();
-                                let sid = client.current_session_id().unwrap_or_default();
-                                tokio::spawn(async move {
-                                    let _ = client.send_raw_request("plugin/search", serde_json::json!({
-                                        "query": "",
-                                        "sessionId": sid,
-                                    })).await;
-                                });
-                                let _ = source_label;
-                            }
+                            *add_marketplace_input.write() = TextAreaState::default();
+                        } else if entries.get(s.saturating_sub(1)).is_some() {
+                            // Enter marketplace detail
+                            *marketplace_detail.write() = Some(s);
+                            *marketplace_detail_action.write() = 0;
                         }
-                    }
-                }
-                // ── Marketplaces tab: 'd' → delete ──
-                (false, false, KeyCode::Char('d')) if *active_tab.read() == PluginViewTab::Marketplaces => {
-                    let s = *selected.read();
-                    if s > 0 {
-                        let entries = load_marketplace_data();
-                        if let Some(entry) = entries.get(s.saturating_sub(1)) {
-                            *confirm_action.write() = Some("delete_marketplace".into());
-                            *operation_loading.write() = Some(entry.name.clone());
-                        }
+                    } else if *active_tab.read() == PluginViewTab::Errors {
+                        let mut tab = active_tab.write();
+                        *tab = PluginViewTab::Installed;
+                        *selected.write() = 0;
                     }
                 }
                 // ── Detail: Enter → 执行操作 ──
@@ -665,11 +772,36 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                                 })).await;
                                             });
                                         }
-                                        // Also persist directly for immediate feedback
-                                        let _ = peri_middlewares::plugin::save_claude_settings_enabled_plugins(
-                                            &[(plugin_id_for_persist, enable)],
-                                            None,
-                                        );
+                                        // 将同步写盘移到 blocking thread，避免阻塞 TUI 主事件循环
+                                        tokio::task::spawn_blocking(move || {
+                                            let _ = peri_middlewares::plugin::save_claude_settings_enabled_plugins(
+                                                &[(plugin_id_for_persist, enable)],
+                                                None,
+                                            );
+                                        });
+                                    }
+                                    *detail_plugin_idx.write() = None;
+                                }
+                                "update" => {
+                                    *operation_loading.write() = Some("update".into());
+                                    let idx = detail_plugin_idx.read().unwrap_or(0);
+                                    let p = PLUGIN_LIST.state().read().get(idx).cloned();
+                                    if let Some(p) = p {
+                                        let plugin_id = if p.marketplace.is_empty() {
+                                            p.name.clone()
+                                        } else {
+                                            format!("{}@{}", p.name, p.marketplace)
+                                        };
+                                        if let Some(cl) = ACP_CLIENT_HANDLE.get() {
+                                            let client = cl.clone();
+                                            let sid = client.current_session_id().unwrap_or_default();
+                                            tokio::spawn(async move {
+                                                let _ = client.send_raw_request("plugin/update", serde_json::json!({
+                                                    "pluginId": plugin_id,
+                                                    "sessionId": sid,
+                                                })).await;
+                                            });
+                                        }
                                     }
                                     *detail_plugin_idx.write() = None;
                                 }
@@ -740,7 +872,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     } else if *active_tab.read() == PluginViewTab::Discover {
                         let items = get_discover_cache();
                         let filtered = discover_filtered.read().clone();
-                        let count = if search_text.read().is_empty() {
+                        let count = if search_text.read().text.is_empty() {
                             items.len()
                         } else {
                             filtered.len()
@@ -751,7 +883,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     } else if *active_tab.read() == PluginViewTab::Marketplaces {
                         let mut s = selected.write();
-                        let c = load_marketplace_data().len() + 1; // +1 for Add
+                        let c = get_marketplace_cache().len() + 1; // +1 for Add，非阻塞缓存读取
                         if c > 0 {
                             *s = next_selection(*s, c);
                         }
@@ -774,9 +906,9 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // cursor blink toggle for Discover search box
     let show_cursor = {
         let now = std::time::Instant::now();
-        let mut last = cursor_last_toggle.write();
+        let mut last = cursor_last_toggle.write_no_update();
         if now.duration_since(*last).as_millis() >= 500 {
-            let mut v = cursor_visible.write();
+            let mut v = cursor_visible.write_no_update();
             *v = !*v;
             *last = now;
         }
@@ -856,6 +988,40 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 title_style,
             );
         }
+    } else if let Some(mp_sel) = *marketplace_detail.read() {
+        let entries = get_marketplace_cache();
+        if let Some(entry) = entries.get(mp_sel.saturating_sub(1)) {
+            let ma = *marketplace_detail_action.read();
+            // Title
+            lines.push(Line::from(vec![Span::styled(
+                i18n::tr_args(
+                    "panel-plugin-detail-title",
+                    &[("name".into(), FluentValue::from(entry.name.clone()))],
+                ),
+                bold_style,
+            )]));
+            lines.push(Line::from(""));
+            // Source
+            let source_display: String = entry.source_label.chars().take(60).collect();
+            lines.push(Line::from(vec![
+                Span::styled(format!("    {}: ", i18n::tr("panel-plugin-discover-field-marketplace")), muted_style),
+                Span::styled(source_display, dim_style),
+            ]));
+            lines.push(Line::from(""));
+            // Actions
+            lines.push(Line::from(vec![Span::styled(format!("  {}", i18n::tr("panel-plugin-detail-actions")), bold_style)]));
+            lines.push(Line::from(""));
+            let actions: [String; 2] = [i18n::tr("panel-plugin-marketplace-action-refresh"), i18n::tr("panel-plugin-marketplace-action-delete")];
+            for (i, action_label) in actions.iter().enumerate() {
+                let is_selected = i == ma;
+                let cursor = if is_selected { ">" } else { " " };
+                let style = if is_selected { title_style } else { primary_style };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{} ", cursor), Style::new().fg(title_color)),
+                    Span::styled(format!("    {}", action_label), style),
+                ]));
+            }
+        }
     } else if let Some(di) = detail_idx {
         if let Some(p) = plugins.get(di) {
             let confirm_text = confirm_action.read().clone();
@@ -895,15 +1061,44 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             ),
             PluginViewTab::Discover => {
                 // Discover list: show cached marketplace plugins with real-time filtering
-                let items = get_discover_cache();
-                let query = search_text.read().to_lowercase();
-                let filtered_items: Vec<&PluginSearchResultItem> = if query.is_empty() {
-                    items.iter().collect()
+                // 当有搜索文本且远程搜索结果不为空时，使用远程结果；否则使用本地 cache
+                let query = search_text.read().text.to_lowercase();
+                let search_state_guard = PLUGIN_SEARCH_RESULTS.state();
+                let search_results = search_state_guard.read();
+                let remote_items: Vec<PluginSearchResultItem> = if !query.is_empty()
+                    && !search_results.is_empty()
+                {
+                    search_results
+                        .iter()
+                        .map(|p| PluginSearchResultItem {
+                            name: p.name.clone(),
+                            version: p.version.clone(),
+                            marketplace: p.marketplace.clone(),
+                            description: p.description.clone(),
+                            author: p.author.clone(),
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                drop(search_results);
+
+                let use_remote = !remote_items.is_empty();
+                let local_items = get_discover_cache();
+                let display_items: Vec<PluginSearchResultItem> = if use_remote {
+                    remote_items
+                } else {
+                    local_items
+                };
+
+                let filtered_items: Vec<&PluginSearchResultItem> = if use_remote || query.is_empty()
+                {
+                    display_items.iter().collect()
                 } else {
                     let filtered_indices = discover_filtered.read().clone();
                     if filtered_indices.is_empty() {
                         // 刚切换过来，初始化过滤
-                        items
+                        display_items
                             .iter()
                             .enumerate()
                             .filter(|(_, item)| {
@@ -916,7 +1111,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     } else {
                         filtered_indices
                             .iter()
-                            .filter_map(|&i| items.get(i))
+                            .filter_map(|&i| display_items.get(i))
                             .collect()
                     }
                 };
@@ -925,8 +1120,9 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     scroll_start_for_selected(disc_sel, filtered_items.len(), VISIBLE_ITEMS);
                 render_discover_list(
                     &mut lines,
-                    &search_text.read(),
+                    search_text.read().text.as_str(),
                     show_cursor,
+                    &*search_state.read(),
                     &filtered_items,
                     disc_sel,
                     disc_scroll,
@@ -951,7 +1147,9 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 error_style,
                 *marketplace_refreshing.read(),
                 *add_marketplace_active.read(),
-                &add_marketplace_input.read(),
+                add_marketplace_input.read().text.as_str(),
+                confirm_action.read().clone().as_deref(),
+                operation_loading.read().clone().as_deref(),
             ),
             PluginViewTab::Errors => render_errors(
                 &mut lines,
@@ -973,6 +1171,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             "enable" => format!("{}...", i18n::tr("panel-plugin-action-enable")),
             "disable" => format!("{}...", i18n::tr("panel-plugin-action-disable")),
             "install" => format!("{}...", i18n::tr("panel-plugin-action-install")),
+            "update" => format!("{}...", i18n::tr("panel-plugin-action-update")),
             _ => format!("{}...", op),
         }
     } else if confirm_action.read().is_some() {
@@ -981,6 +1180,8 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         i18n::tr("common-nav-enter-close")
     } else if detail_idx.is_some() {
         i18n::tr("common-nav-enter-close")
+    } else if marketplace_detail.read().is_some() {
+        i18n::tr("panel-plugin-marketplace-detail-hint")
     } else {
         i18n::tr("common-nav-tab-close")
     };
@@ -1005,6 +1206,7 @@ fn action_list(enabled: bool) -> Vec<&'static str> {
         actions.push("enable");
     }
     actions.push("uninstall");
+    actions.push("update");
     actions.push("back");
     actions
 }
@@ -1014,6 +1216,7 @@ fn action_label(action: &str) -> String {
         "disable" => i18n::tr("panel-plugin-action-disable"),
         "enable" => i18n::tr("panel-plugin-action-enable"),
         "uninstall" => i18n::tr("panel-plugin-action-uninstall"),
+        "update" => i18n::tr("panel-plugin-action-update"),
         "back" => i18n::tr("panel-plugin-action-back"),
         _ => action.to_string(),
     }
@@ -1247,7 +1450,7 @@ fn render_detail(
 
     // Action menu
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled("  Actions", bold_style)]));
+    lines.push(Line::from(vec![Span::styled(format!("  {}", i18n::tr("panel-plugin-detail-actions")), bold_style)]));
     lines.push(Line::from(""));
 
     // Confirm hint (if in confirm mode)
@@ -1287,6 +1490,7 @@ fn render_discover_list(
     lines: &mut Vec<Line<'_>>,
     search_text: &str,
     show_cursor: bool,
+    search_state: &SearchState,
     items: &[&PluginSearchResultItem],
     sel: usize,
     scroll_start: usize,
@@ -1300,6 +1504,32 @@ fn render_discover_list(
     title_color: Color,
     title_style: Style,
 ) {
+    // Early return for search state
+    match search_state {
+        SearchState::Loading => {
+            lines.push(Line::from(vec![Span::styled("  Discover", bold_style)]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                i18n::tr("panel-plugin-search-loading"),
+                muted_style,
+            )]));
+            return;
+        }
+        SearchState::Error(msg) => {
+            lines.push(Line::from(vec![Span::styled("  Discover", bold_style)]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                i18n::tr_args(
+                    "panel-plugin-search-error",
+                    &[("error".into(), FluentValue::from(msg.clone()))],
+                ),
+                _error_style,
+            )]));
+            return;
+        }
+        SearchState::Idle => {}
+    }
+
     lines.push(Line::from(vec![Span::styled("  Discover", bold_style)]));
     lines.push(Line::from(""));
 
@@ -1308,9 +1538,9 @@ fn render_discover_list(
         let display: String = search_text.chars().collect();
         let cursor = if show_cursor { "▌" } else { " " };
         let placeholder = if display.is_empty() {
-            "  type to filter..."
+            i18n::tr("panel-plugin-discover-input")
         } else {
-            ""
+            "".to_string()
         };
         lines.push(Line::from(vec![Span::styled(
             format!("  > {}{}{}", display, cursor, placeholder),
@@ -1396,36 +1626,41 @@ fn render_discover_detail(
 ) {
     // Title
     lines.push(Line::from(vec![Span::styled(
-        format!("  Discover: {}", dp.name),
+        i18n::tr_args(
+            "panel-plugin-detail-title",
+            &[("name".into(), FluentValue::from(dp.name.clone()))],
+        ),
         bold_style,
     )]));
     lines.push(Line::from(""));
 
     // Fields
-    let fields: [(&str, &str); 4] = [
-        ("Version", &dp.version),
-        ("Marketplace", &dp.marketplace),
-        ("Author", dp.author.as_deref().unwrap_or("—")),
-        (
-            "Description",
-            if dp.description.is_empty() {
-                "—"
-            } else {
-                &dp.description
-            },
-        ),
-    ];
-    for (label, value) in &fields {
-        let truncated: String = value.chars().take(60).collect();
-        lines.push(Line::from(vec![
-            Span::styled(format!("    {}: ", label), muted_style),
-            Span::styled(truncated, dim_style),
-        ]));
+    {
+        let fields: [(&str, &str); 4] = [
+            ("panel-plugin-discover-field-version", &dp.version),
+            ("panel-plugin-discover-field-marketplace", &dp.marketplace),
+            ("panel-plugin-discover-field-author", dp.author.as_deref().unwrap_or("—")),
+            (
+                "panel-plugin-discover-field-description",
+                if dp.description.is_empty() {
+                    "—"
+                } else {
+                    &dp.description
+                },
+            ),
+        ];
+        for (label_key, value) in &fields {
+            let truncated: String = value.chars().take(60).collect();
+            lines.push(Line::from(vec![
+                Span::styled(format!("    {}: ", i18n::tr(label_key)), muted_style),
+                Span::styled(truncated, dim_style),
+            ]));
+        }
     }
     lines.push(Line::from(""));
 
     // Action menu
-    lines.push(Line::from(vec![Span::styled("  Actions", bold_style)]));
+    lines.push(Line::from(vec![Span::styled(format!("  {}", i18n::tr("panel-plugin-detail-actions")), bold_style)]));
     lines.push(Line::from(""));
 
     for (i, action) in DiscoverDetailAction::ALL.iter().enumerate() {
@@ -1459,11 +1694,26 @@ fn render_marketplaces(
     refreshing: bool,
     add_active: bool,
     add_input: &str,
+    confirm_action_text: Option<&str>,
+    operation_name: Option<&str>,
 ) {
+    // Show confirmation dialog for marketplace delete
+    if let Some(action) = confirm_action_text {
+        if action == "delete_marketplace" {
+            let name = operation_name.unwrap_or_default();
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {}: {}", i18n::tr("panel-plugin-confirm-delete-mp"), name),
+                Style::new().fg(warning_color),
+            )]));
+            lines.push(Line::from(""));
+            return;
+        }
+    }
+
     lines.push(Line::from(vec![Span::styled("  Marketplaces", bold_style)]));
     lines.push(Line::from(""));
 
-    let entries = load_marketplace_data();
+    let entries = get_marketplace_cache();
     let dim_color = muted_style.fg.unwrap_or_default();
 
     // Add Marketplace 行 (item 0)
@@ -1471,7 +1721,7 @@ fn render_marketplaces(
         let display: String = add_input.chars().take(40).collect();
         lines.push(Line::from(vec![
             Span::styled("  > ", bold_style),
-            Span::styled(format!("Add: {}", display), bold_style),
+            Span::styled(format!("{} {}", i18n::tr("panel-plugin-marketplace-add-label"), display), bold_style),
         ]));
         lines.push(Line::from(vec![Span::styled(
             i18n::tr("panel-plugin-marketplace-add-url-hint"),
@@ -1483,7 +1733,7 @@ fn render_marketplaces(
         let style = if is_sel { bold_style } else { muted_style };
         lines.push(Line::from(vec![
             Span::styled(format!(" {} ", cursor), style),
-            Span::styled("+ Add Marketplace...", style),
+            Span::styled(format!("+ {}", i18n::tr("panel-plugin-marketplaces-add")), style),
         ]));
     }
     lines.push(Line::from(""));
@@ -1612,7 +1862,7 @@ fn load_marketplace_data() -> Vec<MsEntry> {
             // 确定状态
             let cache_path = cache_dir.join(&name);
             let manifest_path = marketplace::find_marketplace_json(&cache_path);
-            let status = if km.install_location.is_empty() {
+            let mut status = if km.install_location.is_empty() {
                 MsStatus::NotFound
             } else if manifest_path.is_none() {
                 MsStatus::NotFound
@@ -1620,7 +1870,23 @@ fn load_marketplace_data() -> Vec<MsEntry> {
                 MsStatus::Cached
             };
 
+            // B3: 检查 manifest mtime，超过 24h 标记为 Stale
+            if status == MsStatus::Cached {
+                if let Some(ref path) = manifest_path {
+                    if let Ok(meta) = std::fs::metadata(path) {
+                        if let Ok(mtime) = meta.modified()
+                            && let Ok(elapsed) = mtime.elapsed()
+                        {
+                            if elapsed.as_secs() > 24 * 3600 {
+                                status = MsStatus::Stale;
+                            }
+                        }
+                    }
+                }
+            }
+
             // 从 cached manifest 统计插件数
+            let mut manifest_parse_failed = false;
             let plugin_count = match manifest_path.as_ref() {
                 Some(path) => {
                     if let Ok(content) = std::fs::read_to_string(path) {
@@ -1631,14 +1897,20 @@ fn load_marketplace_data() -> Vec<MsEntry> {
                                 .map(|a| a.len())
                                 .unwrap_or(0)
                         } else {
+                            manifest_parse_failed = true;
                             0
                         }
                     } else {
+                        manifest_parse_failed = true;
                         0
                     }
                 }
                 None => 0,
             };
+
+            if manifest_parse_failed {
+                status = MsStatus::Failed;
+            }
 
             // 统计已安装的插件数（来自此 marketplace）
             let installed_count = installed
