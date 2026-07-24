@@ -214,6 +214,42 @@ enum PluginAction {
         #[command(subcommand)]
         action: MarketplaceAction,
     },
+    /// 启用插件
+    Enable {
+        /// 插件 ID（格式: name@marketplace）
+        plugin: String,
+        /// 作用范围：user / project / local
+        #[arg(long, short)]
+        scope: Option<String>,
+    },
+    /// 禁用插件
+    Disable {
+        /// 插件 ID（格式: name@marketplace）
+        plugin: String,
+        /// 作用范围：user / project / local
+        #[arg(long, short)]
+        scope: Option<String>,
+    },
+    /// 更新已安装的插件
+    Update {
+        /// 插件名称（格式: name@marketplace）
+        plugin: String,
+        /// 安装范围：user / project / local
+        #[arg(long, short)]
+        scope: Option<String>,
+    },
+    /// 查看插件详细信息
+    Info {
+        /// 插件 ID（格式: name@marketplace）
+        plugin: String,
+    },
+    /// 搜索 marketplace 插件
+    Search {
+        /// 搜索关键词
+        query: String,
+    },
+    /// 清理 7 天未使用的孤儿插件文件
+    Cleanup,
 }
 
 #[derive(Subcommand)]
@@ -227,6 +263,11 @@ enum MarketplaceAction {
     List,
     /// 删除一个 marketplace
     Remove {
+        /// marketplace 名称
+        name: String,
+    },
+    /// 更新 marketplace 缓存
+    Update {
         /// marketplace 名称
         name: String,
     },
@@ -448,6 +489,26 @@ fn main() -> Result<()> {
                     PluginAction::Uninstall { plugin, scope } => {
                         cli_plugin::run_plugin_uninstall(&plugin, scope.as_deref()).await
                     }
+                    PluginAction::Enable { plugin, scope } => {
+                        let scope = scope.as_deref().unwrap_or("user");
+                        cli_plugin::run_plugin_enable(&plugin, scope)
+                    }
+                    PluginAction::Disable { plugin, scope } => {
+                        let scope = scope.as_deref().unwrap_or("user");
+                        cli_plugin::run_plugin_disable(&plugin, scope)
+                    }
+                    PluginAction::Update { plugin, scope } => {
+                        let scope = scope.as_deref().unwrap_or("user");
+                        cli_plugin::run_plugin_update(&plugin, scope).await
+                    }
+                    PluginAction::Info { plugin } => cli_plugin::run_plugin_info(&plugin),
+                    PluginAction::Search { query } => cli_plugin::run_plugin_search(&query),
+                    PluginAction::Cleanup => {
+                        let claude_dir = dirs_next::home_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join(".claude");
+                        cli_plugin::run_plugin_cleanup(&claude_dir).await
+                    }
                     PluginAction::Marketplace { action } => match action {
                         MarketplaceAction::Add { source } => {
                             cli_plugin::run_marketplace_add(&source).await
@@ -455,6 +516,9 @@ fn main() -> Result<()> {
                         MarketplaceAction::List => cli_plugin::run_marketplace_list(),
                         MarketplaceAction::Remove { name } => {
                             cli_plugin::run_marketplace_remove(&name)
+                        }
+                        MarketplaceAction::Update { name } => {
+                            cli_plugin::run_marketplace_update(&name).await
                         }
                     },
                 }
