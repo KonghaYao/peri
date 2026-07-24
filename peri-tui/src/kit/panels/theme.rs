@@ -558,7 +558,7 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     _ if key.modifiers == KeyModifiers::CONTROL => match key.code {
                         KeyCode::Char('t') | KeyCode::Char('T') => {
                             // 将同步写盘移到独立线程，避免阻塞 TUI 主事件循环
-                            std::thread::spawn(|| toggle_daily_color());
+                            std::thread::spawn(toggle_daily_color);
                             return EventResult::Consumed;
                         }
                         KeyCode::Char('d') | KeyCode::Char('D') => {

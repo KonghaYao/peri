@@ -292,15 +292,15 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                             refresh_marketplace_cache();
                                             true
                                         }).await.unwrap();
-                                        if added {
-                                            if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                                let client = cl.clone();
-                                                let sid = client.current_session_id().unwrap_or_default();
-                                                let _ = client.send_raw_request("marketplace/refresh", serde_json::json!({
-                                                    "name": name_for_refresh,
-                                                    "sessionId": sid,
-                                                })).await;
-                                            }
+                                        if added
+                                            && let Some(cl) = ACP_CLIENT_HANDLE.get()
+                                        {
+                                            let client = cl.clone();
+                                            let sid = client.current_session_id().unwrap_or_default();
+                                            let _ = client.send_raw_request("marketplace/refresh", serde_json::json!({
+                                                "name": name_for_refresh,
+                                                "sessionId": sid,
+                                            })).await;
                                         }
                                     });
                                 }
@@ -463,7 +463,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let no_confirm = confirm_action.read().is_none();
             if has_loading && no_confirm {
                 *operation_loading.write() = None;
-                tokio::task::spawn_blocking(|| refresh_discover_cache());
+                tokio::task::spawn_blocking(refresh_discover_cache);
                 return EventResult::Consumed;
             }
 
@@ -1122,7 +1122,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     &mut lines,
                     search_text.read().text.as_str(),
                     show_cursor,
-                    &*search_state.read(),
+                    &search_state.read(),
                     &filtered_items,
                     disc_sel,
                     disc_scroll,
@@ -1698,16 +1698,16 @@ fn render_marketplaces(
     operation_name: Option<&str>,
 ) {
     // Show confirmation dialog for marketplace delete
-    if let Some(action) = confirm_action_text {
-        if action == "delete_marketplace" {
-            let name = operation_name.unwrap_or_default();
-            lines.push(Line::from(vec![Span::styled(
-                format!("  {}: {}", i18n::tr("panel-plugin-confirm-delete-mp"), name),
-                Style::new().fg(warning_color),
-            )]));
-            lines.push(Line::from(""));
-            return;
-        }
+    if let Some(action) = confirm_action_text
+        && action == "delete_marketplace"
+    {
+        let name = operation_name.unwrap_or_default();
+        lines.push(Line::from(vec![Span::styled(
+            format!("  {}: {}", i18n::tr("panel-plugin-confirm-delete-mp"), name),
+            Style::new().fg(warning_color),
+        )]));
+        lines.push(Line::from(""));
+        return;
     }
 
     lines.push(Line::from(vec![Span::styled("  Marketplaces", bold_style)]));
@@ -1871,18 +1871,14 @@ fn load_marketplace_data() -> Vec<MsEntry> {
             };
 
             // B3: 检查 manifest mtime，超过 24h 标记为 Stale
-            if status == MsStatus::Cached {
-                if let Some(ref path) = manifest_path {
-                    if let Ok(meta) = std::fs::metadata(path) {
-                        if let Ok(mtime) = meta.modified()
-                            && let Ok(elapsed) = mtime.elapsed()
-                        {
-                            if elapsed.as_secs() > 24 * 3600 {
-                                status = MsStatus::Stale;
-                            }
-                        }
-                    }
-                }
+            if status == MsStatus::Cached
+                && let Some(ref path) = manifest_path
+                && let Ok(meta) = std::fs::metadata(path)
+                && let Ok(mtime) = meta.modified()
+                && let Ok(elapsed) = mtime.elapsed()
+                && elapsed.as_secs() > 24 * 3600
+            {
+                status = MsStatus::Stale;
             }
 
             // 从 cached manifest 统计插件数
