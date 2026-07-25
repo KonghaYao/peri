@@ -81,9 +81,11 @@ pub(super) async fn full_compact_inner(
         return Ok(super::CompactResult {
             strategy: CompactStrategy::Full,
             affected_count: before_len,
-            before_len,
+            estimated_tokens_saved: 0,
+            before_visible_len: before_len,
             after_visible_len: transcript.visible_messages().len(),
             summary: Some(fallback_summary),
+            full_escalation_reason: None,
         });
     }
 
@@ -149,9 +151,11 @@ pub(super) async fn full_compact_inner(
     Ok(super::CompactResult {
         strategy: CompactStrategy::Full,
         affected_count: before_len,
-        before_len,
+        estimated_tokens_saved: 0,
+        before_visible_len: before_len,
         after_visible_len: after_visible,
         summary: Some(summary),
+        full_escalation_reason: None,
     })
 }
 

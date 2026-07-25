@@ -82,6 +82,11 @@ pub enum UnifiedLangfuseEvent {
         micro_cleared: usize,
         is_error: bool,
         error_message: String,
+        estimated_tokens_saved: u64,
+        estimated_tokens_before: u64,
+        estimated_tokens_after: u64,
+        cache_hit_rate_before: f64,
+        full_escalation_reason: Option<String>,
     },
     /// 上下文窗口预算警告
     BudgetWarning {
@@ -213,6 +218,11 @@ impl UnifiedLangfuseEvent {
                 files,
                 skills,
                 micro_cleared,
+                estimated_tokens_saved,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                cache_hit_rate_before,
+                full_escalation_reason,
                 ..
             } => Some(UnifiedLangfuseEvent::CompactEnded {
                 summary,
@@ -221,6 +231,11 @@ impl UnifiedLangfuseEvent {
                 micro_cleared,
                 is_error: false,
                 error_message: String::new(),
+                estimated_tokens_saved,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                cache_hit_rate_before,
+                full_escalation_reason: full_escalation_reason.map(|r| format!("{:?}", r)),
             }),
             ExecutorEvent::CompactError { message } => Some(UnifiedLangfuseEvent::CompactEnded {
                 summary: String::new(),
@@ -229,6 +244,11 @@ impl UnifiedLangfuseEvent {
                 micro_cleared: 0,
                 is_error: true,
                 error_message: message,
+                estimated_tokens_saved: 0,
+                estimated_tokens_before: 0,
+                estimated_tokens_after: 0,
+                cache_hit_rate_before: 0.0,
+                full_escalation_reason: None,
             }),
             ExecutorEvent::SessionStarted { frozen_summary, .. } => {
                 Some(UnifiedLangfuseEvent::SessionStarted { frozen_summary })
@@ -403,6 +423,11 @@ impl UnifiedLangfuseEvent {
                 summary,
                 files,
                 skills,
+                estimated_tokens_saved,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                cache_hit_rate_before,
+                full_escalation_reason,
                 ..
             } => Some(UnifiedLangfuseEvent::CompactEnded {
                 summary,
@@ -411,6 +436,11 @@ impl UnifiedLangfuseEvent {
                 micro_cleared: 0, // v2 无此字段
                 is_error: false,
                 error_message: String::new(),
+                estimated_tokens_saved,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                cache_hit_rate_before,
+                full_escalation_reason: full_escalation_reason.map(|r| format!("{:?}", r)),
             }),
             ObserveEvent::StageStarted { stage, turn_id, .. } => {
                 Some(UnifiedLangfuseEvent::StageStarted {
@@ -538,7 +568,22 @@ impl LangfuseBridge {
                 micro_cleared,
                 is_error,
                 error_message,
+                estimated_tokens_saved,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                cache_hit_rate_before,
+                full_escalation_reason,
             } => {
+                tracing::info!(
+                    estimated_tokens_saved,
+                    estimated_tokens_before,
+                    estimated_tokens_after,
+                    cache_hit_rate_before,
+                    full_escalation_reason = ?full_escalation_reason,
+                    files_count,
+                    skills_count,
+                    "CompactCompleted"
+                );
                 t.on_compact_end(
                     summary,
                     *files_count,

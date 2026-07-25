@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::env;
 
 use serde::{Deserialize, Serialize};
+
+use crate::tools::ContextRetention;
 
 fn default_true() -> bool {
     true
@@ -61,6 +64,12 @@ fn default_smart_keep_recent_msgs() -> usize {
 fn default_smart_keep_recent_tools() -> usize {
     3
 }
+fn default_headroom_tokens() -> u64 {
+    8192
+}
+fn default_tool_result_keep_chars() -> usize {
+    2000
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactConfig {
@@ -104,6 +113,27 @@ pub struct CompactConfig {
     /// Smart Compact：保留最近 M 个工具调用结果
     #[serde(default = "default_smart_keep_recent_tools")]
     pub smart_keep_recent_tools: usize,
+
+    // ── 投影与压力控制 ──────────────────────────────────────────────────
+    /// 目标上下文余量 token 数（用于 ContextPressure 计算）
+    #[serde(default = "default_headroom_tokens")]
+    pub target_headroom_tokens: u64,
+    /// 工具结果保留的最小字符数
+    #[serde(default = "default_tool_result_keep_chars")]
+    pub tool_result_keep_chars: usize,
+    /// Shadow mode：只估算不应用
+    #[serde(default)]
+    pub shadow_mode_enabled: bool,
+    /// Cache-aware 策略：高缓存命中时延迟清理
+    #[serde(default)]
+    pub cache_aware_enabled: bool,
+
+    // ── Retention Metadata ──────────────────────────────────────────────
+    /// 工具 retention 映射（工具名小写 → retention 分类）
+    /// 优先于 micro_excluded_tools，为空时使用后者。
+    /// planner 使用此映射而非直接访问 BaseTool 实例。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tool_retention_map: HashMap<String, ContextRetention>,
 }
 
 impl Default for CompactConfig {
@@ -125,6 +155,11 @@ impl Default for CompactConfig {
             smart_compact_enabled: default_false(),
             smart_keep_recent_msgs: default_smart_keep_recent_msgs(),
             smart_keep_recent_tools: default_smart_keep_recent_tools(),
+            target_headroom_tokens: default_headroom_tokens(),
+            tool_result_keep_chars: default_tool_result_keep_chars(),
+            shadow_mode_enabled: false,
+            cache_aware_enabled: false,
+            tool_retention_map: HashMap::new(),
         }
     }
 }

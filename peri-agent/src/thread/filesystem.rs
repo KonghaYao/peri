@@ -258,12 +258,11 @@ impl ThreadStore for FilesystemThreadStore {
     async fn update_message_flags(
         &self,
         _message_id: &crate::messages::MessageId,
-        _truncated: bool,
-        _excluded: bool,
+        _flags: &crate::session::MessageFlags,
     ) -> Result<()> {
-        // FilesystemThreadStore 仅用于测试，未持久化 truncated/excluded 标记
+        // FilesystemThreadStore 仅用于测试，未持久化 truncated/excluded/projection 标记
         // （JSONL 行为纯 BaseMessage，无 flags envelope）。
-        // 生产路径走 SqliteThreadStore（独立 truncated/excluded 列）。
+        // 生产路径走 SqliteThreadStore（独立 truncated/excluded/projection 列）。
         // 此处保留 no-op 以满足 ThreadStore 契约；测试若需断言标记落库请改用
         // in-memory SqliteThreadStore。
         Ok(())

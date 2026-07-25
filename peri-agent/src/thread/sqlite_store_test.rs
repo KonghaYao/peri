@@ -419,11 +419,11 @@ async fn test_update_and_load_message_flags() {
 
     // Set flags: msg1 truncated, msg2 excluded, msg3 no flags
     store
-        .update_message_flags(&msgs[0].id(), true, false)
+        .update_message_flags(&msgs[0].id(), &MessageFlags { truncated: true, excluded: false, projection: None })
         .await
         .unwrap();
     store
-        .update_message_flags(&msgs[1].id(), false, true)
+        .update_message_flags(&msgs[1].id(), &MessageFlags { truncated: false, excluded: true, projection: None })
         .await
         .unwrap();
 
@@ -452,4 +452,119 @@ async fn test_load_message_flags_empty_when_no_flags() {
 
     let flags = store.load_message_flags(&id).await.unwrap();
     assert!(flags.is_empty(), "no flags set, should return empty map");
+}
+
+// ── 特征化测试：UpdateFlags 持久化后可恢复 ───────────────────────────────
+
+#[tokio::test]
+async fn test_update_message_flags_persists() {
+    // UpdateFlags 写入 DB 后，通过新 store 实例可恢复
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("persist_test.db");
+
+    // 第一步：创建 store，写消息，设 flags
+    let msg_id = {
+        let store = SqliteThreadStore::new(db_path.clone()).await.unwrap();
+        let meta = ThreadMeta::new("/tmp");
+        let tid = store.create_thread(meta).await.unwrap();
+
+        let msgs = vec![
+            BaseMessage::human("hello"),
+            BaseMessage::ai("world"),
+            BaseMessage::human("howdy"),
+        ];
+        store.append_messages(&tid, &msgs).await.unwrap();
+
+        // 标记 msg0 truncated, msg1 excluded
+        store
+            .update_message_flags(&msgs[0].id(), &MessageFlags { truncated: true, excluded: false, projection: None })
+            .await
+            .unwrap();
+        store
+            .update_message_flags(&msgs[1].id(), &MessageFlags { truncated: false, excluded: true, projection: None })
+            .await
+            .unwrap();
+
+        // 记录 msg0 id 和 thread id 用于后续验证
+        let id = msgs[0].id();
+        (id, msgs[1].id(), tid)
+    }; // store dropped here, DB connection closed
+
+    // 第二步：用新 store 重新打开同一 DB，验证 flags 持久化
+    {
+        let store = SqliteThreadStore::new(db_path).await.unwrap();
+        let tid = &msg_id.2;
+
+        let flags = store.load_message_flags(tid).await.unwrap();
+        assert_eq!(flags.len(), 2, "持久化后应有 2 条非默认 flag");
+
+        // msg0: truncated=true, excluded=false
+        assert!(flags[&msg_id.0].truncated, "msg0 应是 truncated");
+        assert!(!flags[&msg_id.0].excluded, "msg0 不应是 excluded");
+
+        // msg1: truncated=false, excluded=true
+        assert!(!flags[&msg_id.1].truncated, "msg1 不应是 truncated");
+        assert!(flags[&msg_id.1].excluded, "msg1 应是 excluded");
+    }
+}
+
+/// 特征化测试：projection JSON 跨 store 实例恢复
+#[tokio::test]
+async fn test_update_message_flags_persists_projection() {
+    use crate::agent::compact_v2::projection::{
+        MessageProjectionDirective, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
+    };
+
+    // 构造一个含有 projection directive 的 MessageFlags
+    let directive = MessageProjectionDirective {
+        policy_version: 1,
+        entries: vec![ProjectionActionEntry {
+            message_id: crate::messages::MessageId::new(),
+            target: ProjectionTarget::Message,
+            action: ProjectionAction::Exclude,
+        }],
+    };
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("proj_test.db");
+
+    // 第一步：写入 projection flag
+    let (msg_id, tid) = {
+        let store = SqliteThreadStore::new(db_path.clone()).await.unwrap();
+        let meta = ThreadMeta::new("/tmp");
+        let tid = store.create_thread(meta).await.unwrap();
+
+        let msgs = vec![BaseMessage::human("projected message")];
+        store.append_messages(&tid, &msgs).await.unwrap();
+
+        let mid = msgs[0].id();
+        store
+            .update_message_flags(
+                &mid,
+                &MessageFlags {
+                    truncated: true,
+                    excluded: false,
+                    projection: Some(directive.clone()),
+                },
+            )
+            .await
+            .unwrap();
+
+        (mid, tid)
+    }; // store dropped
+
+    // 第二步：新 store 恢复
+    {
+        let store = SqliteThreadStore::new(db_path).await.unwrap();
+        let flags = store.load_message_flags(&tid).await.unwrap();
+        assert_eq!(flags.len(), 1, "应有 1 条非默认 flag");
+        let flag = &flags[&msg_id];
+        assert!(flag.truncated, "truncated 应为 true");
+        assert!(!flag.excluded, "excluded 应为 false");
+        assert!(flag.projection.is_some(), "projection 应不为 None");
+        let restored = flag.projection.as_ref().unwrap();
+        assert_eq!(restored.policy_version, 1);
+        assert_eq!(restored.entries.len(), 1);
+        assert_eq!(restored.entries[0].action, ProjectionAction::Exclude);
+    }
 }

@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::agent::compact_v2::config::CompactConfig;
-use crate::messages::{BaseMessage, MessageContent};
+use crate::agent::compact_v2::{determine_compact_action, CompactAction};
+use crate::messages::{BaseMessage, ContentBlock, MessageContent};
 use crate::session::transcript::MessageTranscript;
 
 fn make_human(text: &str) -> BaseMessage {
@@ -247,6 +248,128 @@ fn test_micro_compact_ask_user_question_preserved_by_default() {
     );
 }
 
+// ── 特征化测试：现有行为基线 ───────────────────────────────────────────────
+
+#[test]
+fn test_low_budget_skips_micro() {
+    // budget < 0.75 → determine_compact_action 返回 Skip
+    let config = CompactConfig::default();
+    assert_eq!(determine_compact_action(0.50, &config), CompactAction::Skip);
+    assert_eq!(determine_compact_action(0.74, &config), CompactAction::Skip);
+    assert_eq!(
+        determine_compact_action(0.74999, &config),
+        CompactAction::Skip,
+        "边界值：budget < 0.75 应 Skip"
+    );
+}
+
+#[test]
+fn test_protected_tools_not_selected() {
+    // 默认黑名单中的工具（AskUserQuestion/goal/TodoWrite）不被选中截断
+    let mut t = MessageTranscript::new();
+    for i in 0..7 {
+        t.append(make_human(&format!("q {}", i)));
+        // 混用受保护和不受保护的工具
+        t.append(BaseMessage::ai_with_tool_calls(
+            MessageContent::text("using tools"),
+            vec![
+                crate::messages::ToolCallRequest::new(
+                    format!("call_{}", i),
+                    "goal",
+                    serde_json::json!({}),
+                ),
+                crate::messages::ToolCallRequest::new(
+                    format!("call_bash_{}", i),
+                    "Bash",
+                    serde_json::json!({}),
+                ),
+            ],
+        ));
+        t.append(make_tool_result(&format!("call_{}", i), "goal ok"));
+        t.append(make_tool_result(&format!("call_bash_{}", i), "bash ok"));
+    }
+
+    let config = CompactConfig::default();
+    let affected = micro_compact(&mut t, &config);
+    // 受保护的 goal tool_call 存在 → Ai 消息仍被截断（因为 Bash 也在其中）
+    // 但 goal 的 tool_result 不应被截断
+    assert!(affected > 0, "Bash tool 应被截断");
+
+    // 验证 goal 的 tool_result 未被截断
+    for entry in t.entries() {
+        if let BaseMessage::Tool { tool_call_id, .. } = &entry.message {
+            if tool_call_id.starts_with("call_") && !tool_call_id.contains("bash") {
+                assert!(
+                    !t.flags(entry.message.id()).truncated,
+                    "受保护工具 goal 的 tool_result 不应被截断"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_error_tool_result_not_selected() {
+    // 错误 ToolResult（is_error=true）不被截断，保留诊断信息
+    let mut t = MessageTranscript::new();
+    for i in 0..7 {
+        t.append(make_human(&format!("q {}", i)));
+        t.append(make_ai_with_tool("run command", "Bash", &format!("bash_{}", i)));
+        // 错误工具结果
+        t.append(BaseMessage::tool_error(
+            format!("bash_{}", i),
+            MessageContent::text(format!("error output {}", i)),
+        ));
+    }
+
+    let config = CompactConfig::default();
+    let affected = micro_compact(&mut t, &config);
+    // 错误 tool_result 不被截断 → 没有 Tool 消息会被标记
+    // 但 Ai 消息（含 Bash tool_use）仍可能被截断
+    // 验证所有错误 tool_result 未被截断
+    for entry in t.entries() {
+        if let BaseMessage::Tool { is_error, .. } = &entry.message {
+            if *is_error {
+                assert!(
+                    !t.flags(entry.message.id()).truncated,
+                    "错误 ToolResult 不应被截断"
+                );
+            }
+        }
+    }
+    assert!(affected > 0, "至少 Ai 消息应被截断");
+}
+
+#[test]
+fn test_ancestor_never_selected() {
+    // ancestor_len 之前的消息（祖先区域）永不被标记截断
+    let mut t = MessageTranscript::new().with_ancestor(vec![
+        make_human("ancestor question"),
+        make_ai_with_tool("ancestor tool call", "Bash", "anc_call_0"),
+        make_tool_result("anc_call_0", "ancestor output"),
+    ]);
+    // 祖先区域有 3 条，ancestor_len = 3
+
+    // 追加足够多的自有消息让第 0 轮进入 stale 窗口
+    for i in 0..7 {
+        t.append(make_human(&format!("q {}", i)));
+        t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
+        t.append(make_tool_result(&format!("c_{}", i), &format!("out {}", i)));
+    }
+
+    let config = CompactConfig::default();
+    let affected = micro_compact(&mut t, &config);
+    assert!(affected > 0, "自有消息应被截断");
+
+    // 祖先区域消息不应有任何标记
+    for entry in t.entries().iter().take(3) {
+        assert!(
+            !t.flags(entry.message.id()).truncated,
+            "祖先消息不应被截断"
+        );
+    }
+}
+
 #[test]
 fn test_micro_compact_todo_write_preserved_by_default() {
     // TodoWrite 也在默认黑名单中
@@ -261,4 +384,80 @@ fn test_micro_compact_todo_write_preserved_by_default() {
 
     let affected = micro_compact(&mut t, &config);
     assert_eq!(affected, 0, "TodoWrite 在黑名单中，不应被截断");
+}
+
+#[test]
+fn test_protected_by_retention_map_not_selected() {
+    // retention_map 保护生效：Preserve 工具不被截断
+    use std::collections::HashMap;
+    use crate::tools::ContextRetention;
+
+    let mut retention_map = HashMap::new();
+    retention_map.insert("mycustomtool".to_string(), ContextRetention::Preserve);
+
+    let config = CompactConfig {
+        tool_retention_map: retention_map,
+        micro_excluded_tools: vec![], // 黑名单为空，完全依赖 retention_map
+        ..Default::default()
+    };
+
+    let mut t = MessageTranscript::new();
+    for i in 0..7 {
+        t.append(make_human(&format!("q {}", i)));
+        t.append(make_ai_with_tool(
+            "using custom tool",
+            "MyCustomTool",
+            &format!("ct_{}", i),
+        ));
+        t.append(make_tool_result(
+            &format!("ct_{}", i),
+            &format!("custom output {}", i),
+        ));
+    }
+
+    let affected = micro_compact(&mut t, &config);
+    assert_eq!(
+        affected, 0,
+        "retention_map 中 Preserve 工具不应被截断"
+    );
+}
+
+// ── 工厂函数：供后续测试复用 ──────────────────────────────────────────────
+
+#[allow(dead_code)]
+fn make_text_tool_result(id: &str, name: &str, output: &str) -> BaseMessage {
+    // name 参数供上层语义匹配，BaseMessage::Tool 内部不存储工具名
+    let _ = name;
+    BaseMessage::tool_result(id.to_string(), MessageContent::text(output.to_string()))
+}
+
+#[allow(dead_code)]
+fn make_blocks_message(blocks: Vec<ContentBlock>) -> BaseMessage {
+    BaseMessage::ai(MessageContent::blocks(blocks))
+}
+
+#[allow(dead_code)]
+fn make_image_block() -> ContentBlock {
+    ContentBlock::Image {
+        source: crate::messages::ImageSource::Base64 {
+            media_type: "image/png".to_string(),
+            data: "fake_base64".to_string(),
+        },
+    }
+}
+
+#[allow(dead_code)]
+fn make_document_block() -> ContentBlock {
+    ContentBlock::Document {
+        source: crate::messages::DocumentSource::Base64 {
+            media_type: "text/plain".to_string(),
+            data: "fake_base64".to_string(),
+        },
+        title: None,
+    }
+}
+
+#[allow(dead_code)]
+fn make_ai_with_tool_calls_vec(tool_calls: Vec<crate::messages::ToolCallRequest>) -> BaseMessage {
+    BaseMessage::ai_with_tool_calls(MessageContent::text("".to_string()), tool_calls)
 }

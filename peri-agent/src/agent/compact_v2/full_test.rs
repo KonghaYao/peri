@@ -155,12 +155,15 @@ fn test_compact_result_fields() {
     let result = crate::agent::compact_v2::CompactResult {
         strategy: CompactStrategy::Micro,
         affected_count: 3,
-        before_len: 10,
+        estimated_tokens_saved: 1500,
+        before_visible_len: 10,
         after_visible_len: 7,
         summary: None,
+        full_escalation_reason: None,
     };
     assert_eq!(result.strategy, CompactStrategy::Micro);
     assert_eq!(result.affected_count, 3);
+    assert_eq!(result.estimated_tokens_saved, 1500);
     assert!(result.summary.is_none());
 }
 

@@ -186,6 +186,10 @@ impl<L: ReactLLM> ReactLLM for RetryableLLM<L> {
     ) -> Option<serde_json::Value> {
         self.inner.build_provider_request_body(messages, tools)
     }
+
+    fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
+        self.inner.provider_capabilities()
+    }
 }
 
 #[cfg(test)]

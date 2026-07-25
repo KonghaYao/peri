@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use super::BaseModel;
 use crate::{
+    agent::compact_v2::projection::ProviderCapabilities,
     agent::react::{ReactLLM, Reasoning, ToolCall},
     error::AgentResult,
     llm::types::{LlmRequest, StopReason, StreamingContext},
@@ -254,6 +255,10 @@ impl ReactLLM for BaseModelReactLLM {
         // 实际 invoke 请求体完全一致（含 system / tools / session_id 同源）。
         let request = self.build_full_llm_request(messages, tools);
         self.model.build_request_body(&request)
+    }
+
+    fn provider_capabilities(&self) -> ProviderCapabilities {
+        self.model.provider_capabilities()
     }
 }
 

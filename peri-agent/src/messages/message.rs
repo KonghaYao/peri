@@ -268,6 +268,7 @@ impl BaseMessage {
     /// 对于 Ai 消息：截断 tool_calls 中过大的 arguments。
     /// 对于其他消息：截断超长的文本内容（保留前 `max_chars` 字符 + truncation note）。
     /// 若不需要截断则返回 `None`。
+    #[deprecated(note = "使用 projection::render_llm_view 替代")]
     pub fn truncated_content(&self, max_chars: usize) -> Option<BaseMessage> {
         let text = match self.message_content() {
             MessageContent::Text(t) => t.clone(),

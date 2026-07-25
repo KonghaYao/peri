@@ -13,6 +13,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 
+use crate::agent::compact_v2::projection::MessageProjectionDirective;
 use crate::messages::{BaseMessage, MessageId};
 use crate::thread::{ThreadId, ThreadStore};
 
@@ -30,10 +31,16 @@ pub struct TranscriptEntry {
 ///
 /// - `truncated`：Micro compact 标记，LLM 请求时截断该消息输出
 /// - `excluded`：Full / Smart compact 标记，LLM 请求时跳过该消息
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// - `projection`：投影指令（v2）。None 表示旧版 flag 或未 compact。
+///   旧 JSON（无此字段）反序列化后为 None。
+#[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageFlags {
     pub truncated: bool,
     pub excluded: bool,
+    /// 投影指令（v2）。None 表示旧版 flag 或未 compact。
+    /// 旧 JSON（无此字段）反序列化后为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<MessageProjectionDirective>,
 }
 
 // ─── StagedData ───────────────────────────────────────────────────────────────
@@ -59,6 +66,10 @@ pub enum PersistOp {
     RewindTo(MessageId),
     /// 更新消息标记
     UpdateFlags(MessageId, MessageFlags),
+    /// 批量应用 compaction（将来实现）
+    ApplyCompactionBatch {
+        updates: Vec<(MessageId, MessageFlags)>,
+    },
 }
 
 // ─── MessageTranscript ────────────────────────────────────────────────────────
@@ -159,13 +170,21 @@ impl MessageTranscript {
                     PersistOp::Append(msg) => store.append_message(&tid, msg).await,
                     PersistOp::RewindTo(id) => store.delete_messages_since(&tid, &id).await,
                     PersistOp::UpdateFlags(id, flags) => {
-                        let res = store
-                            .update_message_flags(&id, flags.truncated, flags.excluded)
-                            .await;
-                        if res.is_ok() {
+                        store.update_message_flags(&id, &flags).await
+                    }
+                    PersistOp::ApplyCompactionBatch { updates } => {
+                        let mut last_err = Ok(());
+                        for (id, flags) in &updates {
+                            let res = store.update_message_flags(id, flags).await;
+                            if res.is_err() {
+                                last_err = res;
+                            }
+                        }
+                        // 仅一次 cache invalidation（P2-1 修复）
+                        if last_err.is_ok() {
                             let _ = store.invalidate_context_cache(&tid).await;
                         }
-                        res
+                        last_err
                     }
                 };
                 if let Err(e) = result {
@@ -239,7 +258,7 @@ impl MessageTranscript {
 
     /// 获取消息标记（无标记时返回默认值）
     pub fn flags(&self, id: MessageId) -> MessageFlags {
-        self.flags.get(&id).copied().unwrap_or_default()
+        self.flags.get(&id).cloned().unwrap_or_default()
     }
 
     /// 按 id 获取消息标记，消息不存在时返回 None
@@ -363,14 +382,14 @@ impl MessageTranscript {
     /// 设置 truncated 标记（Micro compact）
     pub fn set_truncated(&mut self, id: MessageId, value: bool) {
         self.flags.entry(id).or_default().truncated = value;
-        let flags = self.flags[&id];
+        let flags = self.flags[&id].clone();
         self.send_persist(PersistOp::UpdateFlags(id, flags));
     }
 
     /// 设置 excluded 标记（Full / Smart compact）
     pub fn set_excluded(&mut self, id: MessageId, value: bool) {
         self.flags.entry(id).or_default().excluded = value;
-        let flags = self.flags[&id];
+        let flags = self.flags[&id].clone();
         self.send_persist(PersistOp::UpdateFlags(id, flags));
     }
 

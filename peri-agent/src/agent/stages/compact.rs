@@ -11,6 +11,7 @@
 
 use super::{CompactInput, CompactOutput};
 use crate::agent::compact_v2::config::CompactConfig;
+use crate::agent::compact_v2::planner::ContextPressure;
 
 /// 运行 Compact 阶段
 pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<CompactOutput> {
@@ -57,16 +58,25 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             break 'compact_core Ok(CompactOutput { compacted: false });
         }
 
-        // 读 token_tracker（只读操作，无需 drain recall）
+        // 构建 ContextPressure（从 token_tracker 和 context_budget 中提取字段）
         // P1-3: 直接读 StageContext.token_tracker，无需经过 AgentContext 适配层
-        let budget_pct = {
+        let pressure = {
             let tracker = ctx.compact.token_tracker.read();
-            tracker.context_usage_percent(budget.context_window)
+            ContextPressure {
+                estimated_tokens: tracker.estimated_context_tokens().unwrap_or(0),
+                context_window: budget.context_window,
+                output_reserve: budget.output_reserve,
+                predicted_tool_growth: tracker.estimated_tool_tokens_since_last_llm as u32,
+                safety_buffer: 5000,
+                cache_hit_rate: tracker.cache_hit_rate(),
+            }
         };
 
-        let pct = match budget_pct {
-            Some(p) => p / 100.0,
-            None => break 'compact_core Ok(CompactOutput { compacted: false }),
+        // 从 pressure 计算 budget 百分比（供 determine_compact_action 使用）
+        let pct = if pressure.context_window > 0 {
+            pressure.estimated_tokens as f64 / pressure.context_window as f64
+        } else {
+            0.0
         };
 
         // 在 emit CompactStarted 前估算策略
@@ -126,7 +136,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 &mut transcript_owned,
                 compact_llm_ref,
                 &config_clone,
-                pct,
+                &pressure,
                 false, // force=false（自动触发）
                 &mut consecutive,
                 ctx.cwd(),
@@ -149,7 +159,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                     step,
                     strategy = ?r.strategy,
                     affected = r.affected_count,
-                    before = r.before_len,
+                    before = r.before_visible_len,
                     after_visible = r.after_visible_len,
                     "Compact 完成"
                 );
@@ -182,7 +192,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                     crate::agent::events_v2::ObserveEvent::MessagesCompacted {
                         turn_id: ctx.turn_id(),
                         agent_id: ctx.session.agent_id,
-                        before_count: r.before_len,
+                        before_count: r.before_visible_len,
                         after_count: r.after_visible_len,
                         summary: r.summary.clone().unwrap_or_default(),
                         messages: messages_snapshot,
@@ -190,6 +200,17 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                         skills,
                         re_inject_count: 0,
                         strategy: r.strategy,
+                        affected_count: r.affected_count,
+                        estimated_tokens_saved: r.estimated_tokens_saved,
+                        estimated_tokens_before: pressure.estimated_tokens,
+                        estimated_tokens_after: pressure
+                            .estimated_tokens
+                            .saturating_sub(r.estimated_tokens_saved),
+                        changed_messages: r.affected_count,
+                        changed_fields: r.affected_count,
+                        no_op_candidates: 0,
+                        full_escalation_reason: r.full_escalation_reason.clone(),
+                        cache_hit_rate_before: pressure.cache_hit_rate,
                     },
                 );
                 true

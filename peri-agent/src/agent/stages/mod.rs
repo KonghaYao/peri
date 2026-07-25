@@ -266,6 +266,10 @@ impl ReactLLM for NullReactLLM {
     fn model_name(&self) -> String {
         "null".to_string()
     }
+
+    fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
+        crate::agent::compact_v2::projection::ProviderCapabilities::default()
+    }
 }
 
 // ─── StageContextBuilder ────────────────────────────────────────────────────

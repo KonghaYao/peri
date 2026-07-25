@@ -60,14 +60,13 @@ pub trait ThreadStore: Send + Sync {
     /// 按 message_id 列表精确删除消息，并刷新 cached_context。
     async fn delete_messages(&self, thread_id: &ThreadId, message_ids: &[MessageId]) -> Result<()>;
 
-    /// 更新消息的 compact 标记（truncated / excluded）
+    /// 更新消息的 compact 标记（truncated / excluded / projection directive）
     async fn update_message_flags(
         &self,
         message_id: &MessageId,
-        truncated: bool,
-        excluded: bool,
+        flags: &MessageFlags,
     ) -> Result<()> {
-        let _ = (message_id, truncated, excluded);
+        let _ = (message_id, flags);
         Ok(()) // 默认 no-op
     }
 

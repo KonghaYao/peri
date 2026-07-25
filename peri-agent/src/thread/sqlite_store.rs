@@ -113,6 +113,7 @@ impl SqliteThreadStore {
             "ALTER TABLE threads ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'active'",
             "ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE messages ADD COLUMN projection TEXT",
         ];
         for sql in &alter_columns {
             // SQLite 返回 "duplicate column name" 时忽略
@@ -653,16 +654,23 @@ impl ThreadStore for SqliteThreadStore {
     async fn update_message_flags(
         &self,
         message_id: &crate::messages::MessageId,
-        truncated: bool,
-        excluded: bool,
+        flags: &MessageFlags,
     ) -> Result<()> {
         let id_str = message_id.as_uuid().to_string();
-        sqlx::query("UPDATE messages SET truncated = ?, excluded = ? WHERE message_id = ?")
-            .bind(truncated)
-            .bind(excluded)
-            .bind(&id_str)
-            .execute(&self.pool)
-            .await?;
+        let projection_json = if let Some(ref directive) = flags.projection {
+            Some(serde_json::to_string(directive)?)
+        } else {
+            None
+        };
+        sqlx::query(
+            "UPDATE messages SET truncated = ?, excluded = ?, projection = ? WHERE message_id = ?",
+        )
+        .bind(flags.truncated)
+        .bind(flags.excluded)
+        .bind(&projection_json)
+        .bind(&id_str)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -670,22 +678,25 @@ impl ThreadStore for SqliteThreadStore {
         &self,
         thread_id: &ThreadId,
     ) -> Result<HashMap<crate::messages::MessageId, MessageFlags>> {
-        let rows: Vec<(String, bool, bool)> = sqlx::query_as(
-            "SELECT message_id, truncated, excluded FROM messages \
-             WHERE thread_id = ?1 AND (truncated = 1 OR excluded = 1)",
+        let rows: Vec<(String, bool, bool, Option<String>)> = sqlx::query_as(
+            "SELECT message_id, truncated, excluded, projection FROM messages \
+             WHERE thread_id = ?1 AND (truncated = 1 OR excluded = 1 OR projection IS NOT NULL)",
         )
         .bind(thread_id.as_str())
         .fetch_all(&self.pool)
         .await?;
 
         let mut flags = HashMap::with_capacity(rows.len());
-        for (id_str, truncated, excluded) in rows {
+        for (id_str, truncated, excluded, projection_json) in rows {
             if let Ok(uid) = uuid::Uuid::parse_str(&id_str) {
+                let projection = projection_json
+                    .and_then(|json| serde_json::from_str(&json).ok());
                 flags.insert(
                     uid.into(),
                     MessageFlags {
                         truncated,
                         excluded,
+                        projection,
                     },
                 );
             }

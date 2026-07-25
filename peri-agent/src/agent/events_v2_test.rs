@@ -244,6 +244,15 @@ fn test_observe_event_messages_compacted_id_extraction() {
         skills: vec![],
         re_inject_count: 0,
         strategy: crate::agent::events::CompactStrategy::Full,
+        affected_count: 0,
+        estimated_tokens_saved: 0,
+        estimated_tokens_before: 0,
+        estimated_tokens_after: 0,
+        changed_messages: 0,
+        changed_fields: 0,
+        no_op_candidates: 0,
+        full_escalation_reason: None,
+        cache_hit_rate_before: 0.0,
     };
     assert_eq!(event.turn_id(), turn_id);
     assert_eq!(event.agent_id(), agent_id);
@@ -476,6 +485,15 @@ async fn test_event_bus_subscribe_observe_shares_channel() {
         skills: vec![],
         re_inject_count: 0,
         strategy: crate::agent::events::CompactStrategy::Full,
+        affected_count: 0,
+        estimated_tokens_saved: 0,
+        estimated_tokens_before: 0,
+        estimated_tokens_after: 0,
+        changed_messages: 0,
+        changed_fields: 0,
+        no_op_candidates: 0,
+        full_escalation_reason: None,
+        cache_hit_rate_before: 0.0,
     });
 
     // 两个接收者都能收到

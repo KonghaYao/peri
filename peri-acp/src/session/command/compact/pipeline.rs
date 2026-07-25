@@ -184,7 +184,14 @@ async fn run_v2_compact_with_cancel(
             transcript,
             Some(model),
             config,
-            1.0, // budget=1.0 + force=true → 强制 Full Compact
+            &compact_v2::ContextPressure {
+                estimated_tokens: 0,
+                context_window: u32::MAX,
+                output_reserve: 0,
+                predicted_tool_growth: 0,
+                safety_buffer: 0,
+                cache_hit_rate: 0.0,
+            }, // force=true 时直接走 Full 路径，pressure 可填占位值
             true,
             consecutive_failures,
             cwd,

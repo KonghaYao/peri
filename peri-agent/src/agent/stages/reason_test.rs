@@ -155,3 +155,34 @@ async fn test_run_reason_emits_turn_error_on_llm_failure() {
     assert!(found_turn_error, "应在 LLM 失败时 emit TurnError");
     assert!(found_llm_call_end, "应同时 emit LlmCallEnd（现有行为）");
 }
+
+// ── 特征化测试：truncated_content 行为基线 ───────────────────────────────
+
+#[test]
+#[allow(deprecated)]
+fn test_truncated_content_on_text_message() {
+    // 超长文本消息被截断到 ~100 字符 + truncation note
+    let long_text = "a".repeat(200);
+    let msg = BaseMessage::human(MessageContent::text(long_text.clone()));
+
+    let result = msg.truncated_content(100);
+    assert!(result.is_some(), "超长文本应返回截断后结果");
+
+    let truncated_msg = result.unwrap();
+    let content = match truncated_msg.message_content() {
+        MessageContent::Text(t) => t,
+        other => panic!("截断后仍应是 Text 内容，实际: {:?}", other),
+    };
+
+    // 验证截断后内容：前 100 字符 + truncation note
+    assert!(content.contains("a"), "截断后应有原始内容");
+    assert!(
+        content.contains("[truncated: content shortened by Micro Compact]"),
+        "截断后应有 truncation note"
+    );
+    // 原始 200 字符不应完整存在
+    assert!(
+        !content.starts_with(&long_text),
+        "原始完整文本不应出现在截断后内容中"
+    );
+}

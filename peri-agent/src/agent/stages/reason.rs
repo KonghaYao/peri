@@ -68,23 +68,44 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     run_before_model(ctx).await?;
 
     // 取出 messages 快照（避免跨 await 持有 RwLockReadGuard）
-    let mut messages_snapshot: Vec<crate::messages::BaseMessage> = ctx.visible_messages();
-    // Micro Compact 标记为 truncated 的消息需截断输出内容，而非完整发送给 LLM。
-    // 截断策略：只保留前 100 字符 + "[truncated]" 标记。
-    for msg in &mut messages_snapshot {
-        let is_truncated = {
-            let guard = ctx.session.transcript.read();
-            guard
-                .get_flags(msg.id())
-                .map(|f| f.truncated)
-                .unwrap_or(false)
-        };
-        if is_truncated {
-            if let Some(truncated_text) = msg.truncated_content(100) {
-                *msg = truncated_text;
+    let messages_snapshot: Vec<crate::messages::BaseMessage> = {
+        let guard = ctx.session.transcript.read();
+        let visible: Vec<crate::messages::BaseMessage> =
+            guard.visible_messages().into_iter().cloned().collect();
+
+        // 如果有 compact config，生成 plan 并渲染投影视图
+        // 替代旧的 truncated_content(100) 截断循环
+        if let Some(ref config) = ctx.compact.compact_config {
+            let plan = crate::agent::compact_v2::planner::plan_micro(&guard, config);
+            if plan.has_changes() {
+                let caps = ctx.runtime.llm.provider_capabilities();
+                match crate::agent::compact_v2::projection::render_llm_view(
+                    &guard, &plan, &caps,
+                ) {
+                    Ok(view) => {
+                        tracing::debug!(
+                            action_count = plan.actions.len(),
+                            messages_before = visible.len(),
+                            messages_after = view.len(),
+                            "render_llm_view: 投影后消息数"
+                        );
+                        view
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "render_llm_view 失败，fallback 到原始可见消息"
+                        );
+                        visible
+                    }
+                }
+            } else {
+                visible
             }
+        } else {
+            visible
         }
-    }
+    };
 
     // 取出 tools 的 Arc clone（避免跨 await 持有 RwLockReadGuard）
     let tools_owned: Vec<std::sync::Arc<dyn crate::tools::BaseTool>> = {

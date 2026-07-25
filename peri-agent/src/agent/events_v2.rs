@@ -310,6 +310,24 @@ pub enum ObserveEvent {
         re_inject_count: usize,
         /// 压缩策略（Micro / Full / Smart）
         strategy: crate::agent::events::CompactStrategy,
+        /// 受影响的消息数量（v2 compact 操作计数）
+        affected_count: usize,
+        /// 估算节省的 token 数量（v2 compact projection 估算）
+        estimated_tokens_saved: u64,
+        /// 压缩前估算 token 数（ContextPressure.estimated_tokens）
+        estimated_tokens_before: u64,
+        /// 压缩后估算 token 数（estimated_tokens_before - estimated_tokens_saved）
+        estimated_tokens_after: u64,
+        /// 被修改的消息数量（v2 projection 变更计数）
+        changed_messages: usize,
+        /// 被修改的字段数量（v2 projection 字段级变更计数）
+        changed_fields: usize,
+        /// 无操作候选数量（projection 判定无需变更的消息数）
+        no_op_candidates: usize,
+        /// 升级到 Full Compact 的原因（Micro/Smart 时为 None）
+        full_escalation_reason: Option<crate::agent::compact_v2::planner::FullEscalationReason>,
+        /// 压缩前缓存命中率（0.0-1.0）
+        cache_hit_rate_before: f64,
     },
     /// Turn 异常中止
     TurnError {

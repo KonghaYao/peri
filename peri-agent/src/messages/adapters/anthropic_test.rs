@@ -159,3 +159,81 @@ fn test_tool_results_order_preserved() {
     assert_eq!(results[0]["tool_use_id"], "t1");
     assert_eq!(results[1]["tool_use_id"], "t2");
 }
+
+/// 投影后的内容（Image→Text 占位符）在 Anthropic 适配器中正确序列化
+#[test]
+fn test_projected_content_with_placeholder_serializes() {
+    // 模拟 render_llm_view 投影后的 Human 消息：
+    // 原始 Image block 被 ReplaceMedia 转为 Text 占位块
+    let projected = BaseMessage::human(MessageContent::Blocks(vec![
+        ContentBlock::text("What's in this image?"),
+        ContentBlock::text("[图片已压缩: image]"),
+    ]));
+    let val = AnthropicAdapter::from_base_messages(&[projected]);
+    let arr = val.as_array().unwrap();
+    assert_eq!(arr[0]["role"], "user");
+
+    let content = arr[0]["content"].as_array().expect("content 应为 array");
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], "[图片已压缩: image]");
+
+    // 验证不含任何 base64 image source
+    let has_image_src = content.iter().any(|b| {
+        b["source"].as_object()
+            .map(|s| s.get("type").and_then(|v| v.as_str()) == Some("base64"))
+            .unwrap_or(false)
+    });
+    assert!(!has_image_src, "投影后 content 不应包含 base64 image source");
+}
+
+/// 投影后的 ToolResult（CompactToolResult head/tail 截断）正确序列化
+#[test]
+fn test_compacted_tool_result_serializes() {
+    let msgs = vec![
+        BaseMessage::ai_with_tool_calls(
+            "",
+            vec![ToolCallRequest::new("tc_1", "Bash", json!({"command": "ls"}))],
+        ),
+        BaseMessage::tool_result(
+            "tc_1",
+            "AAAA".repeat(50) + "\n... [字符已省略] ...\n" + &"BBBB".repeat(25),
+        ),
+    ];
+    let val = AnthropicAdapter::from_base_messages(&msgs);
+    let arr = val.as_array().unwrap();
+
+    // tool result 应合并到 user 消息
+    let user_content = arr[1]["content"].as_array().unwrap();
+    let tool_result = user_content.iter().find(|b| b["type"] == "tool_result").unwrap();
+    assert_eq!(tool_result["tool_use_id"], "tc_1");
+    assert!(!tool_result["is_error"].as_bool().unwrap());
+
+    // content 包含截断文本（可能是字符串或数组）
+    let result_text = if tool_result["content"].is_string() {
+        tool_result["content"].as_str().unwrap().to_string()
+    } else if tool_result["content"].is_array() {
+        let arr = tool_result["content"].as_array().unwrap();
+        arr[0]["text"].as_str().unwrap().to_string()
+    } else {
+        panic!("unexpected content type");
+    };
+    assert!(result_text.contains("字符已省略"), "应包含截断标记，实际: {}", result_text);
+}
+
+/// 带签名 reasoning 在 Anthropic 适配器中保留 signature 字段
+#[test]
+fn test_signed_reasoning_preserves_signature() {
+    let msg = BaseMessage::ai_from_blocks(vec![
+        ContentBlock::reasoning_with_signature("thinking process", "sig_abc123"),
+        ContentBlock::text("final answer"),
+    ]);
+    let val = AnthropicAdapter::from_base_messages(&[msg]);
+    let arr = val.as_array().unwrap();
+    let content = arr[0]["content"].as_array().unwrap();
+
+    let thinking_block = content.iter().find(|b| b["type"] == "thinking").unwrap();
+    assert_eq!(thinking_block["signature"], "sig_abc123");
+    assert_eq!(thinking_block["thinking"], "thinking process");
+}
