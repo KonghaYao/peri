@@ -840,17 +840,13 @@ impl LangfuseTracer {
         }
         self.stages.on_stage_end(handle, status);
 
-        // Act stage 结束时自动 flush 工具批次（确保工具挂在正确的 act 下，
-        // 而非全部堆在第一个 act 中）
-        // Fix C: subagent 栈非空时 flush subagent 的 tool_batch（parent 正确指向 sub agent act span），
-        // 栈空时 flush 主 batch（行为不变）。第二次 flush 安全：batch_span_id 已被 take，emit_tools_flush 为 no-op。
-        if handle.stage == Stage::Act {
-            let flush = if !self.subagent.is_empty() {
-                let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
-                tb_ref.flush()
-            } else {
-                self.tool_batch.flush()
-            };
+        // Act stage 结束时自动 flush 主 agent 工具批次（确保工具挂在正确的 act 下，
+        // 而非全部堆在第一个 act 中）。仅当子 agent 栈为空时 flush——子 agent Act 结束
+        // 不应影响主 batch（主 batch 中的 Agent 工具可能尚未结束，flush() 的
+        // pending_tools.clear() 会导致丢失）。
+        // 子 agent 的工具批次由 on_tool_end("Agent") fork 路径独立 flush（top_has_started 守卫）。
+        if handle.stage == Stage::Act && self.subagent.is_empty() {
+            let flush = self.tool_batch.flush();
             self.emit_tools_flush(flush);
         }
 

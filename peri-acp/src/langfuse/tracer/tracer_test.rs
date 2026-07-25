@@ -606,9 +606,10 @@ fn test_subagent_tool_batch_parent_is_subagent_act_span() {
     );
 }
 
-/// Fix C: on_stage_end(Act) flushes subagent batch when subagent stack non-empty.
+/// Fix C reverted: on_stage_end(Act) 只 flush 主 batch，不 flush 子 batch。
+/// 子 batch 的 flush 由 on_tool_end("Agent") fork 路径负责（top_has_started 守卫）。
 #[test]
-fn test_on_stage_end_act_flushes_subagent_batch() {
+fn test_on_stage_end_act_does_not_flush_subagent_batch() {
     let (mut t, _session) = make_tracer(1.0);
     t.on_turn_start("turn_stage_flush");
 
@@ -639,23 +640,30 @@ fn test_on_stage_end_act_flushes_subagent_batch() {
     t.on_tool_start("tc_bash", "Bash", &serde_json::json!({"cmd": "ls"}));
     t.on_tool_end("tc_bash", "ok", false);
 
-    // Act stage end (Fix C): since stack non-empty, flushes sub batch
+    // Act stage end: 只 flush 主 batch（但有活跃子 agent，跳过）
     t.on_stage_end(&sub_act, StageStatus::Done);
 
-    // Sub batch should now be empty (flushed)
+    // 子 batch 应仍包含 tools（Bash 在子 batch，未被 on_stage_end 影响）
     let sub_flushes = t.subagent.flush_all_subagent_tool_batches();
     let total_tools: usize = sub_flushes.iter().map(|f| f.tools.len()).sum();
-    assert_eq!(
-        total_tools, 0,
-        "sub batch should be empty after on_stage_end flush"
-    );
+    assert_eq!(total_tools, 1);
+    assert_eq!(sub_flushes[0].tools[0].name, "Bash");
 
-    // End Agent tool (moves to completed_tools for flush visibility)
-    // top_has_started() is true → fork path: flushes sub batch (already flushed, no-op) + pops stack
+    // End Agent tool（Fix B 路由到主 batch）
     t.on_tool_end("tc_agent", "subagent done", false);
 
-    // Main batch still has Agent tool
+    // 子 batch 已空（Agent tool 的 fork 路径 flush 了子 batch）
+    let sub_flushes2 = t.subagent.flush_all_subagent_tool_batches();
+    assert_eq!(sub_flushes2.iter().map(|f| f.tools.len()).sum::<usize>(), 0);
+
+    // Main batch — Agent tool 应该在主 batch 中（Fix A 写入主 batch，
+    // Fix B on_tool_end 路由到主 batch，on_stage_end 因 subagent.is_empty()=false 未 flush）
     let main_flush = t.tool_batch.flush();
     assert_eq!(main_flush.tools.len(), 1);
     assert_eq!(main_flush.tools[0].name, "Agent");
+    // batch span 应在（主 batch 未被 on_stage_end 提前 flush）
+    assert!(
+        main_flush.batch.is_some(),
+        "batch span should exist — stage end skipped flush"
+    );
 }
