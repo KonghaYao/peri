@@ -1,0 +1,137 @@
+{
+  "name": "vesper",
+  "mode": "dark",
+  "palette": {
+    "base": {
+      "bg": "#101010",
+      "fg": "$semantic.text.primary"
+    },
+    "brand": {
+      "primary": "$semantic.accent"
+    },
+    "gray": {
+      "bright": "$semantic.text.primary",
+      "muted": "$semantic.text.muted",
+      "dim": "$semantic.text.dim",
+      "dark": "$semantic.border.dim"
+    },
+    "accent": {
+      "primary": "$semantic.accent"
+    },
+    "success": {
+      "primary": "#99FFE4"
+    },
+    "warning": {
+      "primary": "#FFC799"
+    },
+    "danger": {
+      "primary": "#FF8080"
+    },
+    "info": {
+      "primary": "$semantic.loading"
+    },
+    "diff": {
+      "add": "#99FFE4",
+      "remove": "#FF8080",
+      "hunk": "$semantic.thinking",
+      "add_bg": "#163A2E",
+      "remove_bg": "#3A1A1E",
+      "add_word_bg": "#1E4A3A",
+      "remove_word_bg": "#4A2228"
+    }
+  },
+  "semantic": {
+    "accent": "#FFC799",
+    "text": {
+      "primary": "#FFFFFF",
+      "muted": "#A0A0A0",
+      "dim": "#505050"
+    },
+    "border": {
+      "default": "#343434",
+      "active": "$semantic.accent",
+      "dim": "#232323"
+    },
+    "status": {
+      "running": "#FFC799",
+      "success": "#99FFE4",
+      "warning": "#FFC799",
+      "error": "#FF8080"
+    },
+    "surface": {
+      "default": "#101010",
+      "user": "#161616",
+      "popup": "#101010",
+      "selection": "#232323",
+      "cursor": "#1C1C1C"
+    },
+    "diff": {
+      "add": "#99FFE4",
+      "remove": "#FF8080",
+      "hunk": "$semantic.thinking",
+      "add_bg": "#163A2E",
+      "remove_bg": "#3A1A1E",
+      "add_word_bg": "#1E4A3A",
+      "remove_word_bg": "#4A2228"
+    },
+    "loading": "#FFC799",
+    "thinking": "#A0A0A0",
+    "model_info": "#99FFE4",
+    "bash_border": "#FF8080",
+    "selected_fg": "#FFFFFF"
+  },
+  "component": {
+    "message": {
+      "user_bg": "#161616",
+      "ai_prefix": "$semantic.text.primary",
+      "tool_indicator": "#99FFE4",
+      "reasoning": "$semantic.thinking"
+    },
+    "input": {
+      "border": "$semantic.text.muted",
+      "border_loading": "$semantic.text.muted",
+      "cursor_fg": "#101010",
+      "cursor_bg": "$semantic.text.primary",
+      "prompt": "$semantic.text.muted",
+      "prompt_loading": "$semantic.text.muted",
+      "continuation": "$semantic.text.dim",
+      "placeholder": "$semantic.text.muted"
+    },
+    "panel": {
+      "border": "$semantic.accent",
+      "title": "$semantic.text.primary",
+      "row_selected": "$semantic.selected_fg",
+      "min_height": "8",
+      "max_height": "28"
+    },
+    "popup": {
+      "bg": "#101010",
+      "border": "$semantic.thinking",
+      "action_primary": "$semantic.accent",
+      "selected_fg": "$semantic.selected_fg",
+      "modal_max_width": "90",
+      "modal_max_height": "28",
+      "inline_height": "10"
+    },
+    "statusbar": {
+      "text": "$semantic.text.primary",
+      "muted": "$semantic.text.muted",
+      "dim": "$semantic.text.dim",
+      "mode_accept_edit": "$semantic.thinking",
+      "mode_auto": "#FFC799",
+      "mode_bypass": "#FF8080",
+      "resource_good": "#99FFE4",
+      "resource_warn": "#FFC799",
+      "resource_bad": "#FF8080"
+    },
+    "markdown": {
+      "text": "$semantic.text.primary",
+      "code": "#FFC799",
+      "quote": "$semantic.text.muted"
+    },
+    "scrollbar": {
+      "thumb": "$semantic.text.muted",
+      "track": "$semantic.text.dim"
+    }
+  }
+}
