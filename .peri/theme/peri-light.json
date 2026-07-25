@@ -43,8 +43,8 @@
   "semantic": {
     "accent": "#d97757",
     "text": {
-      "primary": "#141413",
-      "muted": "#3d3d3a",
+      "primary": "#3f3e3a",
+      "muted": "#6b6a64",
       "dim": "#9c9a92"
     },
     "border": {

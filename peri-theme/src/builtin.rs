@@ -177,7 +177,7 @@ pub fn dark_theme() -> ThemeDefinition {
 pub fn light_theme() -> ThemeDefinition {
     // Light 主题使用浅色背景、深色文字，保留品牌色基调。
     let light_bg = Color::Rgb(250, 250, 250); // #FAFAFA 暖白背景
-    let light_text = Color::Rgb(30, 30, 30); // #1E1E1E 深灰文字
+    let light_text = Color::Rgb(46, 46, 42); // #2E2E2A 柔和深灰
     let light_muted = Color::Rgb(120, 120, 120); // #787878
     let light_dim = Color::Rgb(200, 200, 200); // #C8C8C8
     let light_border = Color::Rgb(180, 180, 180); // #B4B4B4
