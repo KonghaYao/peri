@@ -314,7 +314,11 @@ fn test_error_tool_result_not_selected() {
     let mut t = MessageTranscript::new();
     for i in 0..7 {
         t.append(make_human(&format!("q {}", i)));
-        t.append(make_ai_with_tool("run command", "Bash", &format!("bash_{}", i)));
+        t.append(make_ai_with_tool(
+            "run command",
+            "Bash",
+            &format!("bash_{}", i),
+        ));
         // 错误工具结果
         t.append(BaseMessage::tool_error(
             format!("bash_{}", i),
@@ -345,8 +349,8 @@ fn test_ancestor_never_selected() {
     // ancestor_len 之前的消息（祖先区域）永不被标记截断
     let mut t = MessageTranscript::new().with_ancestor(vec![
         make_human("ancestor question"),
-        make_ai_with_tool("ancestor tool call", "Bash", "anc_call_0"),
-        make_tool_result("anc_call_0", "ancestor output"),
+        make_ai_with_tool("ancestor tool call", "Bash", "acall_0"),
+        make_tool_result("acall_0", "ancestor output"),
     ]);
     // 祖先区域有 3 条，ancestor_len = 3
 
@@ -363,10 +367,7 @@ fn test_ancestor_never_selected() {
 
     // 祖先区域消息不应有任何标记
     for entry in t.entries().iter().take(3) {
-        assert!(
-            !t.flags(entry.message.id()).truncated,
-            "祖先消息不应被截断"
-        );
+        assert!(!t.flags(entry.message.id()).truncated, "祖先消息不应被截断");
     }
 }
 
@@ -389,8 +390,8 @@ fn test_micro_compact_todo_write_preserved_by_default() {
 #[test]
 fn test_protected_by_retention_map_not_selected() {
     // retention_map 保护生效：Preserve 工具不被截断
-    use std::collections::HashMap;
     use crate::tools::ContextRetention;
+    use std::collections::HashMap;
 
     let mut retention_map = HashMap::new();
     retention_map.insert("mycustomtool".to_string(), ContextRetention::Preserve);
@@ -416,10 +417,7 @@ fn test_protected_by_retention_map_not_selected() {
     }
 
     let affected = micro_compact(&mut t, &config);
-    assert_eq!(
-        affected, 0,
-        "retention_map 中 Preserve 工具不应被截断"
-    );
+    assert_eq!(affected, 0, "retention_map 中 Preserve 工具不应被截断");
 }
 
 // ── 工厂函数：供后续测试复用 ──────────────────────────────────────────────

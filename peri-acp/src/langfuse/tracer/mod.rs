@@ -629,16 +629,22 @@ impl LangfuseTracer {
                 }
             })
             .unwrap_or_else(|| self.agent_observation_id.clone());
-        // Agent 工具：先 push subagent context
-        // （在路由前，使 subsequent subagent 工具调用能正确路由到 subagent 的 tool_batch）
+        // Agent 工具：先写入主 agent 的 ToolBatch，再 push subagent context。
+        // Fix A: 这样 Agent 工具的 parent_observation_id 正确指向主 agent 的 act span，
+        // 后续 subagent 工具会创建新的 sub batch，parent 指向 subagent 的 act span。
+        // WARNING: Fix B（on_tool_end 路由）必须同时应用，否则 Agent 工具完成记录会静默丢失。
         let is_agent_tool = name == "Agent" || name == "Task";
         if is_agent_tool {
+            // Fix A: Write Agent/Task tool to MAIN's ToolBatch BEFORE begin_subagent.
+            let _record =
+                self.tool_batch
+                    .on_tool_start(tool_call_id, name, input.clone(), &parent_id);
             self.subagent.begin_subagent(input);
+        } else {
+            // 非 Agent 工具：路由到正确的 ToolBatch（subagent 栈非空时写入 subagent 的）
+            let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
+            let _record = tb_ref.on_tool_start(tool_call_id, name, input.clone(), &parent_id);
         }
-
-        // 路由到正确的 ToolBatch：subagent 栈非空时写入 subagent 的 tool_batch
-        let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
-        let _record = tb_ref.on_tool_start(tool_call_id, name, input.clone(), &parent_id);
     }
 
     /// 工具调用结束：同步创建 tool observation
@@ -653,9 +659,14 @@ impl LangfuseTracer {
 
         // 路由到正确的 ToolBatch 结束工具记录
         // （必须在 subagent 弹栈之前完成，避免工具数据丢失）
+        // Fix B: Agent 工具写入主 batch，必须路由到主 batch 完成；非 Agent 工具走栈路由。
         {
-            let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
-            let _pending = tb_ref.on_tool_end(tool_call_id, output, is_error);
+            if is_agent {
+                let _pending = self.tool_batch.on_tool_end(tool_call_id, output, is_error);
+            } else {
+                let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
+                let _pending = tb_ref.on_tool_end(tool_call_id, output, is_error);
+            }
         }
 
         if is_agent {
@@ -831,8 +842,15 @@ impl LangfuseTracer {
 
         // Act stage 结束时自动 flush 工具批次（确保工具挂在正确的 act 下，
         // 而非全部堆在第一个 act 中）
+        // Fix C: subagent 栈非空时 flush subagent 的 tool_batch（parent 正确指向 sub agent act span），
+        // 栈空时 flush 主 batch（行为不变）。第二次 flush 安全：batch_span_id 已被 take，emit_tools_flush 为 no-op。
         if handle.stage == Stage::Act {
-            let flush = self.tool_batch.flush();
+            let flush = if !self.subagent.is_empty() {
+                let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
+                tb_ref.flush()
+            } else {
+                self.tool_batch.flush()
+            };
             self.emit_tools_flush(flush);
         }
 

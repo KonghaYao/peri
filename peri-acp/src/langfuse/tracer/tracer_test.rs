@@ -399,13 +399,13 @@ fn test_bg_subagent_stage_started_marks_started() {
 
 // ── BUG 3: subagent 工具路由到正确的 ToolBatch ──────────────────────────
 
-/// 验证 subagent 活跃时，工具写入 subagent 的 ToolBatch 而非主 agent 的。
+/// 验证 subagent 活跃时，Agent 工具写入主 ToolBatch（Fix A），普通工具写入 subagent 的 ToolBatch。
 #[test]
 fn test_subagent_tool_routed_to_subagent_tool_batch() {
     let (mut t, _session) = make_tracer(1.0);
     t.on_turn_start("turn_sub_route");
 
-    // 1. Agent 工具启动：压入 subagent 栈，Agent 工具写入 subagent 的 tool_batch
+    // 1. Agent 工具启动：先写入主 batch，再压入 subagent 栈
     t.on_tool_start(
         "tc_agent",
         "Agent",
@@ -413,23 +413,35 @@ fn test_subagent_tool_routed_to_subagent_tool_batch() {
     );
     assert_eq!(t.subagent.depth(), 1);
 
-    // 2. 主 agent 的 tool_batch 应为空（Agent 工具已路由到 subagent 的）
-    let main_flush = t.tool_batch.flush();
-    assert!(
-        main_flush.tools.is_empty(),
-        "主 agent 的 tool_batch 应为空，Agent 工具已路由到 subagent 的 tool_batch"
+    // 1b. 结束 Agent 工具：Fix B 路由到主 batch，top_has_started=false → bg 路径不弹栈
+    t.on_tool_end("tc_agent", "subagent dispatched", false);
+    assert_eq!(
+        t.subagent.depth(),
+        1,
+        "bg subagent 不应在工具结束时弹栈（未启动）"
     );
 
-    // 3. subagent 内的普通工具：应写入 subagent 的 tool_batch
+    // 2. Agent 工具应写入主 agent 的 tool_batch
+    let main_flush = t.tool_batch.flush();
+    assert_eq!(
+        main_flush.tools.len(),
+        1,
+        "Agent 工具应在主 agent 的 tool_batch"
+    );
+    assert_eq!(main_flush.tools[0].name, "Agent");
+
+    // 3. subagent 内的普通工具：应写入 subagent 的 tool_batch（栈非空时路由到 Sub）
     t.on_tool_start("tc_read", "Read", &serde_json::json!({"path": "test.txt"}));
     t.on_tool_end("tc_read", "file content", false);
 
-    // 4. 主 agent 的 tool_batch 仍应为空
+    // 4. 主 agent 的 tool_batch 只有 Agent 工具（已 flush），不应有 subagent 工具
+    //    验证后 subagent 仍活跃（未 flush sub batch）
     let main_flush2 = t.tool_batch.flush();
     assert!(
         main_flush2.tools.is_empty(),
         "subagent 活跃时，普通工具不应写入主 agent 的 tool_batch"
     );
+    assert_eq!(t.subagent.depth(), 1, "subagent 栈应仍活跃");
 }
 
 /// 验证栈空时，工具仍写入主 ToolBatch（向后兼容）。
@@ -453,12 +465,13 @@ fn test_main_agent_tool_not_routed_to_subagent_batch() {
 }
 
 /// 验证 fork subagent：on_tool_end 时 flush subagent tool_batch 后再弹栈。
+/// Agent 工具现在写入主 batch（Fix A），subagent 工具在 sub batch 中被 flush。
 #[test]
 fn test_fork_subagent_flushes_tool_batch_before_pop() {
     let (mut t, _session) = make_tracer(1.0);
     t.on_turn_start("turn_fork_flush");
 
-    // 1. Agent 工具启动 → 压栈 + 写入 subagent 的 tool_batch
+    // 1. Agent 工具启动 → 写入主 batch + 压栈
     t.on_tool_start(
         "tc_agent",
         "Agent",
@@ -470,25 +483,24 @@ fn test_fork_subagent_flushes_tool_batch_before_pop() {
     t.subagent.mark_top_started();
     assert!(t.subagent.top_has_started());
 
-    // 3. Agent 工具结束：flush → 弹栈
+    // 3. Agent 工具结束：flush sub batch → 弹栈
     t.on_tool_end("tc_agent", "fork completed", false);
     assert_eq!(t.subagent.depth(), 0, "fork 场景应弹栈");
 
-    // 4. 弹栈后主 tool_batch 仍为空（工具在 subagent 的 tool_batch 中被 flush 掉了）
+    // 4. 弹栈后主 tool_batch 包含 Agent 工具（已完成，尚未 flush）
     let main_flush = t.tool_batch.flush();
-    assert!(
-        main_flush.tools.is_empty(),
-        "fork 后主 tool_batch 不应有 subagent 的工具"
-    );
+    assert_eq!(main_flush.tools.len(), 1, "主 tool_batch 应含 Agent 工具");
+    assert_eq!(main_flush.tools[0].name, "Agent");
 }
 
 /// 验证 bg subagent：turn_end 时所有 subagent tool_batch 被 flush。
+/// Agent 工具现在在主 batch（Fix A），subagent 工具在 sub batch。
 #[test]
 fn test_bg_subagent_tool_batch_flushed_on_turn_end() {
     let (mut t, _session) = make_tracer(1.0);
     t.on_turn_start("turn_bg_flush");
 
-    // 1. 创建 bg subagent（Agent 工具写入 subagent 的 tool_batch）
+    // 1. 创建 bg subagent（Agent 工具写入主 batch）
     t.on_tool_start(
         "tc_bg",
         "Agent",
@@ -496,7 +508,7 @@ fn test_bg_subagent_tool_batch_flushed_on_turn_end() {
     );
     assert_eq!(t.subagent.depth(), 1);
 
-    // 2. bg subagent 内工具
+    // 2. bg subagent 内工具（写入 sub batch）
     t.on_tool_start("tc_bash", "Bash", &serde_json::json!({"cmd": "ls"}));
     t.on_tool_end("tc_bash", "file list", false);
 
@@ -509,5 +521,141 @@ fn test_bg_subagent_tool_batch_flushed_on_turn_end() {
     // 手动测试 flush_all 方法
     let flushes = t.subagent.flush_all_subagent_tool_batches();
     let total_tools: usize = flushes.iter().map(|f| f.tools.len()).sum();
-    assert_eq!(total_tools, 2, "bg subagent 的 tool_batch 应包含 2 个工具");
+    assert_eq!(
+        total_tools, 1,
+        "subagent tool_batch 只应包含 Bash 工具（Agent 在主 batch）"
+    );
+    assert_eq!(flushes[0].tools[0].name, "Bash");
+
+    // 5. 验证 Agent 工具在主 tool_batch 中
+    let main_flush = t.tool_batch.flush();
+    assert_eq!(main_flush.tools.len(), 1);
+    assert_eq!(main_flush.tools[0].name, "Agent");
+}
+
+/// Fix A+B+C regression: subagent tools flush with subagent act span as parent.
+/// 本测试直接调用 `t.stages.on_stage_start` + `t.subagent.mark_top_started()`
+/// 来模拟子 agent stage 创建流程（与生产路径 `t.on_stage_start` 等效）。
+#[test]
+fn test_subagent_tool_batch_parent_is_subagent_act_span() {
+    let (mut t, _session) = make_tracer(1.0);
+    t.on_turn_start("turn_parent_fix");
+
+    // Start main agent's Act stage (for active_handle to return main span)
+    let main_act = t.stages.on_stage_start(
+        Stage::Act,
+        &t.trace_id,
+        "turn_parent_fix",
+        &t.agent_observation_id,
+    );
+    let main_act_span_id = main_act.span_id.clone();
+
+    // Agent tool start → main batch + begin_subagent
+    t.on_tool_start(
+        "tc_agent",
+        "Agent",
+        &serde_json::json!({"subagent_name": "test"}),
+    );
+    assert_eq!(t.subagent.depth(), 1);
+
+    // Simulate subagent Act stage start (changes active_handle to subagent's span)
+    let sub_act = t.stages.on_stage_start(
+        Stage::Act,
+        &t.trace_id,
+        "turn_parent_fix",
+        &t.agent_observation_id,
+    );
+    let sub_act_span_id = sub_act.span_id.clone();
+    t.subagent.mark_top_started();
+
+    // Subagent tool → routes to sub batch with sub act span as parent
+    t.on_tool_start("tc_grep", "Grep", &serde_json::json!({"pattern": "test"}));
+    t.on_tool_end("tc_grep", "found matches", false);
+
+    // Flush subagent batch and verify parent
+    let sub_flushes = t.subagent.flush_all_subagent_tool_batches();
+    assert_eq!(sub_flushes.len(), 1);
+    let sub_flush = &sub_flushes[0];
+    assert_eq!(
+        sub_flush.tools.len(),
+        1,
+        "subagent flush should have 1 tool (Grep)"
+    );
+    assert_eq!(sub_flush.tools[0].name, "Grep");
+    // Key assertion: parent is subagent's act span, not main's
+    assert_eq!(
+        sub_flush.parent_observation_id, sub_act_span_id,
+        "subagent tool batch parent should be subagent's act span, not main's"
+    );
+    assert_ne!(
+        sub_flush.parent_observation_id, main_act_span_id,
+        "subagent tool batch parent should NOT be main agent's act span"
+    );
+
+    // End Agent tool (moves to completed_tools for flush visibility)
+    // top_has_started() is true → fork path: flushes sub batch (already flushed, no-op) + pops stack
+    t.on_tool_end("tc_agent", "subagent done", false);
+
+    // Main batch contains Agent tool
+    let main_flush = t.tool_batch.flush();
+    assert_eq!(main_flush.tools.len(), 1);
+    assert_eq!(main_flush.tools[0].name, "Agent");
+    assert_eq!(
+        main_flush.parent_observation_id, main_act_span_id,
+        "main tool batch parent should be main agent's act span"
+    );
+}
+
+/// Fix C: on_stage_end(Act) flushes subagent batch when subagent stack non-empty.
+#[test]
+fn test_on_stage_end_act_flushes_subagent_batch() {
+    let (mut t, _session) = make_tracer(1.0);
+    t.on_turn_start("turn_stage_flush");
+
+    let _main_act = t.stages.on_stage_start(
+        Stage::Act,
+        &t.trace_id,
+        "turn_stage_flush",
+        &t.agent_observation_id,
+    );
+
+    // Agent → push subagent
+    t.on_tool_start(
+        "tc_agent",
+        "Agent",
+        &serde_json::json!({"subagent_name": "test"}),
+    );
+
+    // Mock subagent Act stage (mark_started is done via on_stage_start in real flow)
+    let sub_act = t.stages.on_stage_start(
+        Stage::Act,
+        &t.trace_id,
+        "turn_stage_flush",
+        &t.agent_observation_id,
+    );
+    t.subagent.mark_top_started();
+
+    // Subagent tool
+    t.on_tool_start("tc_bash", "Bash", &serde_json::json!({"cmd": "ls"}));
+    t.on_tool_end("tc_bash", "ok", false);
+
+    // Act stage end (Fix C): since stack non-empty, flushes sub batch
+    t.on_stage_end(&sub_act, StageStatus::Done);
+
+    // Sub batch should now be empty (flushed)
+    let sub_flushes = t.subagent.flush_all_subagent_tool_batches();
+    let total_tools: usize = sub_flushes.iter().map(|f| f.tools.len()).sum();
+    assert_eq!(
+        total_tools, 0,
+        "sub batch should be empty after on_stage_end flush"
+    );
+
+    // End Agent tool (moves to completed_tools for flush visibility)
+    // top_has_started() is true → fork path: flushes sub batch (already flushed, no-op) + pops stack
+    t.on_tool_end("tc_agent", "subagent done", false);
+
+    // Main batch still has Agent tool
+    let main_flush = t.tool_batch.flush();
+    assert_eq!(main_flush.tools.len(), 1);
+    assert_eq!(main_flush.tools[0].name, "Agent");
 }
