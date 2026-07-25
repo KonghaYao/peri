@@ -273,3 +273,104 @@ fn test_fallback_to_excluded_tools_when_map_empty() {
         "空 retention_map 时应 fallback 到 micro_excluded_tools 黑名单"
     );
 }
+
+/// 核心回归测试：Reason 阶段（skip=false）应对已 truncated 的消息生成非空 plan
+#[test]
+fn test_plan_micro_skip_false_includes_truncated_messages() {
+    use crate::messages::{BaseMessage, MessageContent, ToolCallRequest};
+
+    let mut t = MessageTranscript::new();
+    // 构造 10 轮对话，每轮包含 Read 工具调用
+    for i in 0..10 {
+        t.append(make_human(&format!("q {}", i)));
+        t.append(BaseMessage::ai_with_tool_calls(
+            MessageContent::text("thinking".to_string()),
+            vec![ToolCallRequest::new(
+                &format!("call_{}", i),
+                "Read",
+                serde_json::json!({"file_path": format!("/f/{}", i)}),
+            )],
+        ));
+        t.append(BaseMessage::tool_result(
+            format!("call_{}", i),
+            MessageContent::text(&format!(
+                "file {} contains a lot of content: {}",
+                i,
+                "x".repeat(200)
+            )),
+        ));
+    }
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 2, // 仅保留最近 2 轮
+        ..CompactConfig::default()
+    };
+
+    // Step 1: Compact 阶段（skip=true）— 生成 plan 并打 truncated
+    let compact_plan = plan_micro(&t, &config, true);
+    let action_ids: Vec<_> = compact_plan.actions.iter().map(|a| a.message_id).collect();
+    assert!(
+        !action_ids.is_empty(),
+        "Compact 阶段 (skip=true) 应对未标记消息生成 action"
+    );
+    for id in &action_ids {
+        t.set_truncated(*id, true);
+    }
+
+    // Step 2: Reason 阶段（skip=false）— 应对已 truncated 消息生成非空 plan
+    let reason_plan = plan_micro(&t, &config, false);
+    assert!(
+        reason_plan.actions.len() > 0,
+        "Reason 阶段 (skip=false) 应对已 truncated 消息生成投影 action"
+    );
+    assert!(
+        reason_plan.has_changes(),
+        "Reason 阶段 plan 应有 has_changes()=true，避免 fallback 到完整原文"
+    );
+}
+
+/// 对称测试：Compact 阶段（skip=true）应跳过已有 truncated 的消息
+#[test]
+fn test_plan_micro_skip_true_excludes_already_truncated() {
+    use crate::messages::{BaseMessage, MessageContent, ToolCallRequest};
+
+    let mut t = MessageTranscript::new();
+    for i in 0..10 {
+        t.append(make_human(&format!("q {}", i)));
+        t.append(BaseMessage::ai_with_tool_calls(
+            MessageContent::text("thinking".to_string()),
+            vec![ToolCallRequest::new(
+                &format!("call_{}", i),
+                "Read",
+                serde_json::json!({"file_path": format!("/f/{}", i)}),
+            )],
+        ));
+        t.append(BaseMessage::tool_result(
+            format!("call_{}", i),
+            MessageContent::text(&format!(
+                "file {} contains a lot of content: {}",
+                i,
+                "x".repeat(200)
+            )),
+        ));
+    }
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 2,
+        ..CompactConfig::default()
+    };
+
+    // 预标记所有消息为 truncated
+    let ids: Vec<_> = t.entries().iter().map(|e| e.message.id()).collect();
+    for id in &ids {
+        t.set_truncated(*id, true);
+    }
+
+    // Compact 阶段应跳过所有消息 → plan 为空
+    let plan = plan_micro(&t, &config, true);
+    assert_eq!(
+        plan.actions.len(),
+        0,
+        "Compact 阶段 (skip=true) 应跳过所有已 truncated 消息"
+    );
+}
