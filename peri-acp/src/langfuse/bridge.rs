@@ -618,6 +618,10 @@ impl LangfuseBridge {
                     (t2.trace_id.clone(), obs_id)
                 };
                 let mut t2 = self.tracer.lock();
+                // SubAgent 栈非空时标记栈顶已启动。对齐 on_stage_start() 中 mark_top_started 行为，
+                // 确保 fork subagent 的 on_tool_end("Agent") 能正确走 fork 清理路径（flush + emit ObservationCreate）。
+                // 桥路径绕过了 tracer.on_stage_start()，所以必须在此处补调 mark_top_started。
+                t2.subagent.mark_top_started();
                 let handle = t2.stages.on_stage_start(
                     *stage,
                     &trace_id,
