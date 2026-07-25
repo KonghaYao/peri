@@ -189,7 +189,7 @@ side-projects/site-project/workspace.json
 .wrangler.worktrees/
 .worktrees/
 
-.peri
+.peri/*
 node_modules
 dist
 settings.json
