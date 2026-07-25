@@ -18,7 +18,7 @@ fn default_threshold_075() -> f64 {
     0.75
 }
 fn default_stale_steps() -> usize {
-    5
+    3
 }
 /// Micro Compact 黑名单默认值——这些工具的消息不被截断。
 ///

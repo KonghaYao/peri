@@ -102,7 +102,7 @@ mod tests {
         t.append(make_tool_result("call_1", "output"));
 
         let config = CompactConfig::default();
-        // 只有 1 轮，stale_steps=5 → 全在窗口内
+        // 只有 1 轮，stale_steps=3 → 全在窗口内
         let (affected, _saved) = smart_compact(&mut t, &config);
         assert_eq!(affected, 0, "消息在 stale 窗口内，不应被标记");
     }
@@ -121,10 +121,10 @@ mod tests {
 
         let config = CompactConfig::default();
         let (affected, _saved) = smart_compact(&mut t, &config);
-        // stale_steps=5 → 7-5=2 轮 stale（round 0,1），每轮 2 个 action
+        // stale_steps=3 → 7-3=4 轮 stale（round 0-3），每轮 2 个 action
         assert_eq!(
-            affected, 4,
-            "2 stale rounds × 2 actions = 4，实际: {}",
+            affected, 8,
+            "4 stale rounds × 2 actions = 8，实际: {}",
             affected
         );
     }
@@ -148,9 +148,9 @@ mod tests {
 
         let config = CompactConfig::default();
         let (affected, _saved) = smart_compact(&mut t, &config);
-        // 2 stale rounds: tool_use 被压缩（CompactToolInput），error tool_result 不被压缩
+        // 4 stale rounds: tool_use 被压缩（CompactToolInput），error tool_result 不被压缩
         assert_eq!(
-            affected, 2,
+            affected, 4,
             "只有 tool_use 被标记，错误 tool_result 保留，实际: {}",
             affected
         );

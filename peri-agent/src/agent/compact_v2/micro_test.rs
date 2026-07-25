@@ -44,7 +44,7 @@ fn test_micro_compact_all_within_stale_window() {
     t.append(make_human("user question"));
     let _id = t.append(make_tool_result("call_1", "large output here"));
     let config = CompactConfig::default();
-    // 只有 1 轮，stale_steps 默认 5，全部在窗口内 → 不截断
+    // 只有 1 轮，stale_steps 默认 3，全部在窗口内 → 不截断
     let affected = micro_compact(&mut t, &config);
     assert_eq!(affected, 0);
 }
@@ -76,7 +76,7 @@ fn test_micro_compact_skips_error_tool_results() {
     t.append(make_ai_with_tool("thinking...", "Bash", "call_1"));
     t.append(make_tool_result("call_1", "error output"));
 
-    // 只有 1 轮，stale_steps=5 → 所有消息在窗口内，affected=0
+    // 只有 1 轮，stale_steps=3 → 所有消息在窗口内，affected=0
     let config = CompactConfig::default();
     let affected = micro_compact(&mut t, &config);
     assert_eq!(affected, 0, "只有 1 轮，全在 stale 窗口内");

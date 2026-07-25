@@ -190,6 +190,20 @@ pub async fn run_compact(
             // Dry-run：先用 plan_micro 估算效果（无副作用）
             let plan = plan_micro(transcript, config, true);
 
+            // 空 plan → 无可 compact 消息，提前返回 Skip 避免反复触发
+            if plan.actions.is_empty() {
+                debug!("Micro Compact: plan 为空，无消息可 compact，跳过");
+                return CompactResult {
+                    strategy: CompactStrategy::Skip,
+                    affected_count: 0,
+                    estimated_tokens_saved: 0,
+                    before_visible_len,
+                    after_visible_len: before_visible_len,
+                    summary: None,
+                    full_escalation_reason: None,
+                };
+            }
+
             // Shadow mode：只估算不应用
             if config.shadow_mode_enabled {
                 info!(
@@ -270,9 +284,24 @@ pub async fn run_compact(
         CompactAction::Smart => {
             // 执行 Smart Compact（规则驱动，不调用 LLM）
             let (affected, estimated_tokens_saved) = smart::smart_compact(transcript, config);
-            *consecutive_failures = 0;
+
+            // 空结果 → 无可 compact 消息，提前返回 Skip 避免反复触发
+            if affected == 0 {
+                debug!("Smart Compact: 无消息可 compact，跳过");
+                *consecutive_failures = 0;
+                return CompactResult {
+                    strategy: CompactStrategy::Skip,
+                    affected_count: 0,
+                    estimated_tokens_saved: 0,
+                    before_visible_len,
+                    after_visible_len: before_visible_len,
+                    summary: None,
+                    full_escalation_reason: None,
+                };
+            }
 
             // 用 estimated_tokens_saved 替代 affected 做有效性判定（P0-2）
+            *consecutive_failures = 0;
             if estimated_tokens_saved >= reclaim_target {
                 if budget_pct >= config.auto_compact_threshold {
                     debug!(affected, budget_pct, "Smart 有效 + budget 高位 → 叠加 Full");

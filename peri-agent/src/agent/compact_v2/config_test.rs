@@ -10,7 +10,7 @@ fn test_default_values() {
     assert!(config.auto_compact_enabled);
     assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
     assert!((config.micro_compact_threshold - 0.75).abs() < 0.001);
-    assert_eq!(config.micro_compact_stale_steps, 5);
+    assert_eq!(config.micro_compact_stale_steps, 3);
     assert_eq!(
         config.micro_excluded_tools.len(),
         3,
