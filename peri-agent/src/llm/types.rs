@@ -59,6 +59,10 @@ pub struct TokenUsage {
     pub cache_read_input_tokens: Option<u32>,
     /// API 提供商返回的请求 ID
     pub request_id: Option<String>,
+    /// 首 token 时间（RFC3339 格式，流式调用时记录）
+    /// 非流式调用时为 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_token_time: Option<String>,
 }
 
 /// LLM 响应

@@ -239,11 +239,41 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             )
         })
         .unwrap_or((0, 0, 0, 0, None));
-    // output 与 v1 llm_step.rs:92-93 对齐：优先 final_answer，否则回退到 thought
-    let llm_output = reasoning
-        .final_answer
-        .clone()
-        .unwrap_or_else(|| reasoning.thought.clone());
+    // output 改为结构化 JSON：包含 text、thinking、tool_calls、stop_reason
+    // 与 v1 llm_step.rs:92-93 对齐：优先 final_answer，否则回退到 thought 作为 text
+    let llm_output = {
+        let text = reasoning
+            .final_answer
+            .clone()
+            .unwrap_or_else(|| reasoning.thought.clone());
+        // thinking 从 source_message 的 Reasoning block 提取，fallback 到 reasoning.thought
+        let thinking = reasoning
+            .source_message
+            .as_ref()
+            .and_then(|msg| {
+                msg.content_blocks()
+                    .iter()
+                    .find_map(|b| b.as_reasoning().map(|s| s.to_string()))
+            })
+            .unwrap_or_else(|| reasoning.thought.clone());
+        let output_value = serde_json::json!({
+            "text": text,
+            "thinking": thinking,
+            "tool_calls": reasoning.tool_calls.iter().map(|tc| serde_json::json!({
+                "id": tc.id,
+                "name": tc.name,
+                "input": tc.input,
+            })).collect::<Vec<_>>(),
+            "stop_reason": reasoning.stop_reason.to_string(),
+        });
+        serde_json::to_string(&output_value).unwrap_or_else(|_| {
+            // fallback: 保留纯文本行为
+            reasoning
+                .final_answer
+                .clone()
+                .unwrap_or_else(|| reasoning.thought.clone())
+        })
+    };
     ctx.runtime
         .event_bus
         .emit_observe(ObserveEvent::LlmCallEnd {

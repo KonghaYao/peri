@@ -79,6 +79,7 @@ pub(super) async fn do_invoke_streaming(
     let mut finish_reason: Option<String> = None;
     let mut final_usage: Option<Value> = None;
     let mut stream_request_id: Option<String> = None;
+    let mut first_token_time: Option<String> = None;
 
     loop {
         let chunk = tokio::select! {
@@ -136,6 +137,9 @@ pub(super) async fn do_invoke_streaming(
                 .or_else(|| delta["reasoning"].as_str())
             {
                 if !r.is_empty() {
+                    if first_token_time.is_none() {
+                        first_token_time = Some(chrono::Utc::now().to_rfc3339());
+                    }
                     ctx.event_handler.on_event(ExecutorEvent::AiReasoning {
                         text: r.to_string(),
                         source_agent_id: None,
@@ -147,6 +151,9 @@ pub(super) async fn do_invoke_streaming(
             // Text delta
             if let Some(c) = delta["content"].as_str() {
                 if !c.is_empty() {
+                    if first_token_time.is_none() {
+                        first_token_time = Some(chrono::Utc::now().to_rfc3339());
+                    }
                     ctx.event_handler.on_event(ExecutorEvent::TextChunk {
                         message_id: ctx.message_id,
                         chunk: c.to_string(),
@@ -168,6 +175,9 @@ pub(super) async fn do_invoke_streaming(
                             arguments_fragments: Vec::new(),
                         });
                     if let Some(id) = tc["id"].as_str() {
+                        if first_token_time.is_none() {
+                            first_token_time = Some(chrono::Utc::now().to_rfc3339());
+                        }
                         acc.id = Some(id.to_string());
                     }
                     if let Some(name) = tc["function"]["name"].as_str() {
@@ -219,6 +229,7 @@ pub(super) async fn do_invoke_streaming(
         stop_reason,
         usage,
         stream_request_id,
+        first_token_time,
     ))
 }
 
@@ -230,11 +241,17 @@ pub(super) fn build_stream_response(
     stop_reason: crate::llm::types::StopReason,
     usage: Option<crate::llm::types::TokenUsage>,
     request_id: Option<String>,
+    first_token_time: Option<String>,
 ) -> crate::llm::types::LlmResponse {
     use crate::{
         llm::types::StopReason,
         messages::{BaseMessage, ContentBlock, MessageContent},
     };
+
+    let usage = usage.map(|mut u| {
+        u.first_token_time = first_token_time;
+        u
+    });
 
     let mut blocks: Vec<ContentBlock> = Vec::new();
     if !reasoning_text.is_empty() {

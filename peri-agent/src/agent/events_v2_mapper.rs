@@ -150,6 +150,7 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
                     None
                 },
                 request_id,
+                first_token_time: None,
             }),
             stop_reason: None,
         }),

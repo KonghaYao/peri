@@ -402,6 +402,7 @@ impl UnifiedLangfuseEvent {
                         None
                     },
                     request_id,
+                    first_token_time: None,
                 };
                 Some(UnifiedLangfuseEvent::LlmCallEnd {
                     step,

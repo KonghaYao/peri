@@ -525,6 +525,7 @@ fn extract_openai_usage_inner(usage_val: &Value, request_id: Option<String>) -> 
             cache_creation_input_tokens: None,
             cache_read_input_tokens: cache_read,
             request_id,
+            first_token_time: None,
         }),
         _ => None,
     }

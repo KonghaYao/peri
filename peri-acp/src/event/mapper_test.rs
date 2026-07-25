@@ -21,6 +21,7 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
             cache_creation_input_tokens: Some(10),
             cache_read_input_tokens: Some(200),
             request_id: Some("req-123".to_string()),
+            first_token_time: None,
         }),
         stop_reason: Some(StopReason::EndTurn),
     };
@@ -66,6 +67,7 @@ fn test_llm_call_end_no_optional_fields() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             request_id: None,
+            first_token_time: None,
         }),
         stop_reason: None,
     };
