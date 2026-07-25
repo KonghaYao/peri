@@ -248,9 +248,8 @@ pub async fn run_compact(
                 // 因此先执行 micro_compact 再叠加 Full——即使 Full 失败，Micro 的截断仍然生效。
                 // Smart 路径（`mod.rs:304`）有相同模式：先 Smart 再 Full，Full 失败不影响 Smart 结果。
                 let micro_affected = micro::micro_compact(transcript, config);
-                *consecutive_failures = 0; // Micro 从不会失败（纯规则操作）
-                                           // 注意：estimated_tokens_saved 使用 dry-run 估计
-                                           // 实际 micro 应用后的节省可能略有不同，但 plan 是最佳可用近似
+                // 注意：estimated_tokens_saved 使用 dry-run 估计
+                // 实际 micro 应用后的节省可能略有不同，但 plan 是最佳可用近似
                 debug!(
                     saved = plan.estimated_tokens_saved,
                     target = reclaim_target,
@@ -314,7 +313,6 @@ pub async fn run_compact(
             }
 
             // 用 estimated_tokens_saved 替代 affected 做有效性判定（P0-2）
-            *consecutive_failures = 0;
             if estimated_tokens_saved >= reclaim_target {
                 if budget_pct >= config.auto_compact_threshold {
                     debug!(affected, budget_pct, "Smart 有效 + budget 高位 → 叠加 Full");
