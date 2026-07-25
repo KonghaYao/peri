@@ -202,13 +202,6 @@ async fn test_derive_provider_and_model_no_models_fallback() {
 }
 
 #[test]
-fn test_initial_acp_state_default() {
-    let state = initial_acp_state();
-    assert_eq!(state.variant, 0);
-    assert!(!state.is_loading);
-}
-
-#[test]
 fn test_chrono_datetime_conversion() {
     // 验证 chrono::DateTime<chrono::Utc> 与 ThreadMeta.updated_at 类型一致
     let now = Utc::now();

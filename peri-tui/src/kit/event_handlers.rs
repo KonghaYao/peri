@@ -190,7 +190,7 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                         }
                         FocusLayer::InlineCompletion => return EventResult::Ignored,
                         FocusLayer::Panel => {
-                            // 防御性 guard：如果活跃面板是 AskUser，先通过 cancel_ask_user() 发送 Cancel
+                            // 防御性 guard：如果活跃面板是 AskUser，发送 Cancel 响应
                             // 防止因优先级回归导致 agent 永久挂起。正常情况下此分支不会执行
                             // （AskUserPanel handler 使用 High 优先级，会先消费 ESC）。
                             if *ACTIVE_PANEL.state().read() == Some(PanelKind::AskUser)

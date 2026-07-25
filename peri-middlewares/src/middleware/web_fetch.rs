@@ -26,15 +26,11 @@ struct TavilyExtractResponse {
 
 #[derive(Deserialize)]
 struct TavilyExtractItem {
-    #[allow(dead_code)]
-    url: String,
     raw_content: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct TavilyExtractFailure {
-    #[allow(dead_code)]
-    url: String,
     error: Option<String>,
 }
 

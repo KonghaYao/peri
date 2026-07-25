@@ -21,7 +21,6 @@
 //! 已部分实施（`#[doc(hidden)]`），后续计划：引入 feature gates 做进一步的编译期 enforcement。
 
 pub mod agent;
-pub mod ask_user;
 pub mod error;
 pub mod error_suggest;
 pub mod goal;

@@ -78,20 +78,6 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         *session_fingerprint.write() = current_fingerprint;
     }
 
-    #[allow(dead_code)]
-    fn cancel_ask_user() {
-        if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
-            && let Some(tx) = ASK_USER_RESPONSE_TX.get()
-        {
-            let _ = tx.send(AskUserResponseAction::Cancel {
-                request_id_str: id_str,
-            });
-        }
-        panel_registry::close_panel(PanelKind::AskUser);
-        *ASK_USER_PENDING.state().write() = None;
-        *ASK_USER_REQUEST_ID.state().write() = None;
-    }
-
     let pending_for_closure = pending.clone();
 
     // ── 事件处理 ────────────────────────────────────────────────────────────

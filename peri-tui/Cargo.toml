@@ -12,13 +12,6 @@ path = "src/lib.rs"
 name = "peri"
 path = "src/main.rs"
 
-[features]
-headless = []
-# S12 起 use-kit 成为默认路径。Legacy runtime/state_machine/ui/panel 代码
-# 仍保留编译能力（通过 --no-default-features 启用），便于 S13 渐进删除。
-default = ["use-kit"]
-use-kit = []
-
 [dev-dependencies]
 tempfile.workspace = true
 serial_test.workspace = true
