@@ -61,6 +61,10 @@ impl BaseTool for SkillTool {
         "Skill"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         SKILL_TOOL_DESCRIPTION
     }

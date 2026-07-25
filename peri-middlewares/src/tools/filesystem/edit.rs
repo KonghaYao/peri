@@ -87,6 +87,10 @@ impl BaseTool for EditFileTool {
         "Edit"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         EDIT_FILE_DESCRIPTION
     }

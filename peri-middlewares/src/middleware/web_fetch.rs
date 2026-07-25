@@ -96,6 +96,10 @@ impl BaseTool for WebFetchTool {
         "WebFetch"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         WEB_FETCH_DESCRIPTION
     }

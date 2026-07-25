@@ -37,6 +37,10 @@ impl BaseTool for SearchExtraTools {
         SEARCH_EXTRA_TOOLS_NAME
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         &self.description
     }

@@ -106,6 +106,10 @@ impl BaseTool for ArtifactTool {
         "artifact"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         "Upload an HTML or Markdown file to a public URL with automatic expiry. \
          Markdown files (.md) are automatically converted to a styled HTML page \

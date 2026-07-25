@@ -110,8 +110,11 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         let guard = ctx.runtime.tools.read();
         guard.values().cloned().collect()
     };
-    let tool_refs: Vec<&dyn crate::tools::BaseTool> =
-        tools_owned.iter().map(|t| t.as_ref()).collect();
+    let tool_refs: Vec<&dyn crate::tools::BaseTool> = tools_owned
+        .iter()
+        .filter(|t| t.is_direct())
+        .map(|t| t.as_ref())
+        .collect();
     // 调试日志：确认工具数量与名称（排查 v2 工具丢失问题）
     tracing::info!(
         step,

@@ -73,7 +73,7 @@ impl Middleware for GoalMiddleware {
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn peri_agent::tools::BaseTool>> {
         // Goal 工具通过 collect_tools 注册到 shared_tools（executor 每轮 clear + repopulate）
-        // is_deferred_tool 过滤器会将其从 LLM 可见列表移除，仅通过 SearchExtraTools → ExecuteExtraTool 访问
+        // is_direct() 默认为 false，该工具不会直接出现在 LLM 工具列表中，仅通过 SearchExtraTools → ExecuteExtraTool 访问
         vec![Box::new(GoalTool::new(
             Arc::clone(&self.controller),
             self.auxiliary_model.clone(),

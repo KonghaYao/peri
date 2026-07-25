@@ -73,6 +73,10 @@ impl BaseTool for WebSearchTool {
         "WebSearch"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         WEBSEARCH_DESCRIPTION
     }

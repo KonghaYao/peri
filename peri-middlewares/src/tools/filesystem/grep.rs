@@ -226,6 +226,10 @@ impl BaseTool for GrepTool {
         "Grep"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         GREP_DESCRIPTION
     }

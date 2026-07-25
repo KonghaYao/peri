@@ -93,6 +93,10 @@ impl BaseTool for BashTool {
         "Bash"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         BASH_DESCRIPTION
     }

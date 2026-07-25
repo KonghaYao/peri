@@ -104,6 +104,10 @@ impl BaseTool for TodoWriteTool {
         "TodoWrite"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         TODO_WRITE_DESCRIPTION
     }

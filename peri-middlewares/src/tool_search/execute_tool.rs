@@ -41,6 +41,10 @@ impl BaseTool for ExecuteExtraTool {
         EXECUTE_EXTRA_TOOL_NAME
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         &self.description
     }

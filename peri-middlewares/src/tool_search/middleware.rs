@@ -66,10 +66,7 @@ impl Middleware for ToolSearchMiddleware {
         let tools = self.shared_tools.read();
         let deferred_arcs: Vec<Arc<dyn BaseTool>> = tools
             .iter()
-            .filter(|(name, _)| {
-                !super::core_tools::CORE_TOOLS.contains(name.as_str())
-                    && !super::core_tools::META_TOOLS.contains(name.as_str())
-            })
+            .filter(|(_, tool)| !tool.is_direct())
             .map(|(_, tool)| Arc::clone(tool))
             .collect();
         drop(tools);

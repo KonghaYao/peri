@@ -41,6 +41,10 @@ impl BaseTool for SkillTool {
         SKILL_TOOL_NAME
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         "Load the full content of a skill by name. Use this tool when you need to know the detailed instructions of a skill mentioned in the system prompt. The skill name is case-insensitive and supports namespace prefix (e.g. 'ecc:plan' matches skill 'plan'). Returns the full SKILL.md content including frontmatter headers."
     }
@@ -104,6 +108,10 @@ impl DiscoverSkillsTool {
 impl BaseTool for DiscoverSkillsTool {
     fn name(&self) -> &str {
         DISCOVER_SKILLS_TOOL_NAME
+    }
+
+    fn is_direct(&self) -> bool {
+        true
     }
 
     fn description(&self) -> &str {

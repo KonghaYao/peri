@@ -93,4 +93,10 @@ pub trait BaseTool: Send + Sync {
     fn context_retention(&self) -> ContextRetention {
         ContextRetention::Preserve
     }
+
+    /// 是否直接出现在 LLM 的 tools 参数中（无需经过 SearchExtraTools 发现）。
+    /// 默认 `false`（安全默认值：新工具默认为 deferred）。
+    fn is_direct(&self) -> bool {
+        false
+    }
 }
