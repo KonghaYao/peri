@@ -124,9 +124,9 @@ impl MicroCompactPlan {
         self.estimated_tokens_saved >= self.target_reclaim_tokens
     }
 
-    /// 是否有任何实际改变
+    /// 是否有投影 action 需要应用（有 action 即有意义，不依赖 token 估算）
     pub fn has_changes(&self) -> bool {
-        self.estimated_tokens_saved > 0
+        !self.actions.is_empty()
     }
 }
 

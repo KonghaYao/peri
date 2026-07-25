@@ -35,9 +35,13 @@ impl ContextPressure {
         self.context_window.saturating_sub(reserve as u32) as u64
     }
 
-    /// 需要回收的 token 数量（饱和减法，不溢出）
+    /// 需要回收的 token 数量（饱和减法，不溢出）。
+    ///
+    /// 为防止 reclaim_target=0 阻断 Full 升级，加 5% 窗口最小值。
     pub fn target_reclaim_tokens(&self) -> u64 {
-        self.estimated_tokens.saturating_sub(self.target_tokens())
+        let raw = self.estimated_tokens.saturating_sub(self.target_tokens());
+        let min_floor = (self.context_window as u64 * 5) / 100;
+        raw.max(min_floor)
     }
 }
 
@@ -333,7 +337,7 @@ fn estimate_tokens(
 
         if has_action {
             // 有 action → 投影后减少
-            let projected_chars = (chars / 3).max(50); // 粗略估计：保留约 1/3
+            let projected_chars = (chars / 3).min(chars); // 投影不应比原文大
             before += chars;
             after += projected_chars;
         }

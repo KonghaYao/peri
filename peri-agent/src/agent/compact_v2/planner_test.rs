@@ -1,8 +1,11 @@
 //! Tests for planner — 计划器单元测试
 
 use super::planner::plan_micro;
+use super::ContextPressure;
 use crate::agent::compact_v2::config::CompactConfig;
-use crate::agent::compact_v2::projection::MicroCompactPlan;
+use crate::agent::compact_v2::projection::{
+    MicroCompactPlan, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
+};
 use crate::session::transcript::MessageTranscript;
 
 #[test]
@@ -17,7 +20,7 @@ fn test_context_pressure_target_tokens() {
         cache_hit_rate: 0.5,
     };
     assert_eq!(p.target_tokens(), 186_000);
-    assert_eq!(p.target_reclaim_tokens(), 0);
+    assert_eq!(p.target_reclaim_tokens(), 10_000, "5% floor 生效");
 }
 
 #[test]
@@ -25,7 +28,15 @@ fn test_micro_compact_plan_meets_target() {
     let plan = MicroCompactPlan {
         policy_version: 1,
         target_reclaim_tokens: 5000,
-        actions: vec![],
+        actions: vec![ProjectionActionEntry {
+            message_id: crate::messages::MessageId::new(),
+            target: ProjectionTarget::Message,
+            action: ProjectionAction::CompactToolResult {
+                keep_head: 100,
+                keep_tail: 200,
+                preserve_recovery_handle: true,
+            },
+        }],
         estimated_before_tokens: 10000,
         estimated_after_tokens: 4000,
         estimated_tokens_saved: 6000,
@@ -136,8 +147,8 @@ fn test_context_pressure_target_reclaim_within_window() {
     };
     // target_tokens = 200000 - 8000 - 4000 - 5000 = 183000
     assert_eq!(p.target_tokens(), 183_000);
-    // 180k < 183k → reclaim = 0
-    assert_eq!(p.target_reclaim_tokens(), 0);
+    // 180k < 183k 原为 0，现 floor = 10_000
+    assert_eq!(p.target_reclaim_tokens(), 10_000);
 
     // 场景：195k / 200k → 需要回收
     let p2 = ContextPressure {
@@ -373,4 +384,124 @@ fn test_plan_micro_skip_true_excludes_already_truncated() {
         0,
         "Compact 阶段 (skip=true) 应跳过所有已 truncated 消息"
     );
+}
+
+// ── 验证实验：has_changes() 缺陷 ────────────────────────────────────────
+
+/// 【实验 1】has_changes() 对短消息场景返回 false，即使有实际 action
+///
+/// 根因：has_changes() = estimated_tokens_saved > 0，而短消息 (<150 chars)
+/// 的投影后字符数 (.max(50)) 大于原文，导致 saved=0。
+/// 后果：Reason 阶段跳过 render_llm_view → LLM 看到完整未压缩内容。
+#[test]
+fn test_has_changes_returns_false_for_short_messages_even_with_actions() {
+    let entry = ProjectionActionEntry {
+        message_id: crate::messages::MessageId::new(),
+        target: ProjectionTarget::Message,
+        action: ProjectionAction::CompactToolResult {
+            keep_head: 100,
+            keep_tail: 200,
+            preserve_recovery_handle: true,
+        },
+    };
+    let plan = MicroCompactPlan {
+        policy_version: 1,
+        target_reclaim_tokens: 0,
+        actions: std::iter::repeat(entry).take(10).collect(),
+        estimated_before_tokens: 1, // 短消息：chars=5, /4 = 1
+        estimated_after_tokens: 12, // projected_chars=50, /4 = 12
+        estimated_tokens_saved: 0,  // saturating_sub(1, 12) = 0
+    };
+    // 修复后：有 10 个 action → has_changes() 应为 true
+    assert!(plan.has_changes(), "有 action 就应该有变化");
+}
+
+/// 【实验 2】reclaim_target 在 budget 75%-93.5% 区间恒为 0
+///
+/// 根因：target_tokens = context_window - reserves ≈ 93.5% 窗口
+/// reclaim = estimated_tokens.saturating_sub(target_tokens)
+/// budget=80% 时 reclaim = 0，阻断了 "Upgrade to Full" 路径。
+#[test]
+fn test_reclaim_target_zero_for_mid_range_budgets() {
+    // 200K 窗口，默认 reserves
+    let p_50 = ContextPressure {
+        estimated_tokens: 100_000,
+        context_window: 200_000,
+        output_reserve: 8000,
+        predicted_tool_growth: 0,
+        safety_buffer: 5000,
+        cache_hit_rate: 0.0,
+    };
+    assert_eq!(
+        p_50.target_reclaim_tokens(),
+        10_000,
+        "50% 时 floor=10K（原为 0）"
+    );
+
+    let p_75 = ContextPressure {
+        estimated_tokens: 150_000,
+        ..p_50
+    };
+    assert_eq!(
+        p_75.target_reclaim_tokens(),
+        10_000,
+        "75% 时 floor=10K → Full 升级路径可用"
+    );
+
+    let p_85 = ContextPressure {
+        estimated_tokens: 170_000,
+        ..p_50
+    };
+    assert_eq!(p_85.target_reclaim_tokens(), 10_000, "85% 时 floor=10K");
+
+    let p_95 = ContextPressure {
+        estimated_tokens: 190_000,
+        ..p_50
+    };
+    assert!(
+        p_95.target_reclaim_tokens() >= 10_000,
+        "95% 时 raw=3K 不足 floor → floor=10K"
+    );
+}
+
+/// 【实验 3】estimate_tokens 的 .max(50) 造成短消息 saved=0
+///
+/// 根因：projected_chars = (chars / 3).max(50)，对任何 < 150 chars 的消息，
+/// projected (50) > 原文，导致 after > before → saved = 0。
+#[test]
+fn test_estimate_tokens_inflates_after_for_short_messages() {
+    use crate::agent::compact_v2::planner::plan_micro;
+    use crate::messages::{BaseMessage, MessageContent, ToolCallRequest};
+    let mut t = MessageTranscript::new();
+    for i in 0..8 {
+        t.append(make_human(&format!("q {}", i)));
+        t.append(BaseMessage::ai_with_tool_calls(
+            MessageContent::text("thinking"),
+            vec![ToolCallRequest::new(
+                &format!("c_{}", i),
+                "Bash",
+                serde_json::json!({}),
+            )],
+        ));
+        t.append(BaseMessage::tool_result(
+            format!("c_{}", i),
+            MessageContent::text(&format!("out {}", i)),
+        ));
+    }
+    let config = CompactConfig {
+        micro_compact_stale_steps: 1,
+        ..CompactConfig::default()
+    };
+    let plan = plan_micro(&t, &config, true);
+    assert!(!plan.actions.is_empty(), "至少有一些 stale 轮次被选中");
+    // BUG：即使有 action，saved 也可能为 0
+    eprintln!(
+        "actions={}, before={}, after={}, saved={}",
+        plan.actions.len(),
+        plan.estimated_before_tokens,
+        plan.estimated_after_tokens,
+        plan.estimated_tokens_saved
+    );
+    // 当前缺陷：短消息 saved 恒为 0
+    // 修复后应：estimated_tokens_saved > 0 || 投影不应比原文大
 }
