@@ -20,7 +20,7 @@ fn test_context_pressure_target_tokens() {
         cache_hit_rate: 0.5,
     };
     assert_eq!(p.target_tokens(), 186_000);
-    assert_eq!(p.target_reclaim_tokens(), 10_000, "5% floor 生效");
+    assert_eq!(p.target_reclaim_tokens(), 4_000, "2% floor 生效");
 }
 
 #[test]
@@ -147,8 +147,8 @@ fn test_context_pressure_target_reclaim_within_window() {
     };
     // target_tokens = 200000 - 8000 - 4000 - 5000 = 183000
     assert_eq!(p.target_tokens(), 183_000);
-    // 180k < 183k 原为 0，现 floor = 10_000
-    assert_eq!(p.target_reclaim_tokens(), 10_000);
+    // 180k < 183k 原为 0，现 floor = 4_000
+    assert_eq!(p.target_reclaim_tokens(), 4_000);
 
     // 场景：195k / 200k → 需要回收
     let p2 = ContextPressure {
@@ -434,8 +434,8 @@ fn test_reclaim_target_zero_for_mid_range_budgets() {
     };
     assert_eq!(
         p_50.target_reclaim_tokens(),
-        10_000,
-        "50% 时 floor=10K（原为 0）"
+        4_000,
+        "50% 时 floor=4K（原为 0）"
     );
 
     let p_75 = ContextPressure {
@@ -444,23 +444,23 @@ fn test_reclaim_target_zero_for_mid_range_budgets() {
     };
     assert_eq!(
         p_75.target_reclaim_tokens(),
-        10_000,
-        "75% 时 floor=10K → Full 升级路径可用"
+        4_000,
+        "75% 时 floor=4K → Full 升级路径可用"
     );
 
     let p_85 = ContextPressure {
         estimated_tokens: 170_000,
         ..p_50
     };
-    assert_eq!(p_85.target_reclaim_tokens(), 10_000, "85% 时 floor=10K");
+    assert_eq!(p_85.target_reclaim_tokens(), 4_000, "85% 时 floor=4K");
 
     let p_95 = ContextPressure {
         estimated_tokens: 190_000,
         ..p_50
     };
     assert!(
-        p_95.target_reclaim_tokens() >= 10_000,
-        "95% 时 raw=3K 不足 floor → floor=10K"
+        p_95.target_reclaim_tokens() >= 4_000,
+        "95% 时 raw=3K 不足 floor → floor=4K"
     );
 }
 

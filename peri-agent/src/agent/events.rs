@@ -242,7 +242,7 @@ pub enum ExecutorEvent {
         total_tokens: u64,
         /// 当前 ReAct 步数
         current_step: usize,
-        /// 连续工具/compact 失败次数
+        /// 连续工具失败次数
         consecutive_failures: u32,
         /// 上下文窗口使用率（0.0-1.0），None 表示无 context_budget
         budget_pct: Option<f64>,

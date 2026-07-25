@@ -3,11 +3,12 @@
 //! 根据 ContextBudget 计算使用率，调用 `compact_v2::run_compact`：
 //! - budget < 0.75：跳过
 //! - budget ≥ 0.75：Smart Compact（规则驱动保留关键消息）或 Micro Compact（按 round 截断）
-//!   - affected_count >= micro_min_affected → 有效，budget ≥ 0.95 时叠加 Full
-//!   - affected_count < micro_min_affected → 无效，升级为 Full
+//!   - Micro/Smart 始终先执行应用（标记 truncated）
+//!   - budget ≥ 0.95 时叠加 Full Compact（不跳过 Micro/Smart）
+//!   - 决策指标：estimated_tokens_saved >= reclaim_target
 //! - force=true：直接 Full（跳过 Micro/Smart）
 //!
-//! Full Compact 失败时 `consecutive_failures` 累加，达上限后降级跳过。
+//! Full Compact 失败时 `compact_consecutive_failures` 累加，达上限后降级跳过。
 
 use super::{CompactInput, CompactOutput};
 use crate::agent::compact_v2::config::CompactConfig;
@@ -118,7 +119,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
 
         let mut consecutive = ctx
             .compact
-            .consecutive_failures
+            .compact_consecutive_failures
             .load(std::sync::atomic::Ordering::Relaxed);
 
         // emit CompactStarted 观测事件（Start→End 成对原则，修复 Langfuse compact_span 断裂）
@@ -140,7 +141,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 // 把 transcript 放回 RwLock（与正常路径一致，避免遗失消息）
                 *ctx.session.transcript.write() = transcript_owned;
                 ctx.compact
-                    .consecutive_failures
+                    .compact_consecutive_failures
                     .store(consecutive, std::sync::atomic::Ordering::Relaxed);
                 break 'compact_core Err(crate::error::AgentError::Interrupted);
             }
@@ -155,9 +156,9 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             ) => r,
         };
 
-        // 写回 consecutive_failures
+        // 写回 compact_consecutive_failures
         ctx.compact
-            .consecutive_failures
+            .compact_consecutive_failures
             .store(consecutive, std::sync::atomic::Ordering::Relaxed);
 
         // 把 transcript 放回 RwLock

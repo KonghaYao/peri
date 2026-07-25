@@ -96,8 +96,10 @@ pub struct CompactContext {
     pub compact_post_hook: Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
     /// 会话级 Token 追踪器（Compact 写 reset/estimated_tokens，Act 读用于 StateSnapshot）
     pub token_tracker: Arc<RwLock<crate::agent::token::TokenTracker>>,
-    /// 连续失败计数（tool_dispatch 递增/重置，Compact 读用于降级跳过，Act 读用于 StateSnapshot）
+    /// 连续工具失败计数（tool_dispatch 递增/重置，Act 读用于 StateSnapshot）
     pub consecutive_failures: Arc<AtomicU32>,
+    /// Compact 连续失败计数（run_compact 内部递增/重置，仅用于 Compact 降级跳过决策）
+    pub compact_consecutive_failures: Arc<AtomicU32>,
 }
 
 /// 异步传输控制（仅 run_react_loop idle 路径）
@@ -145,7 +147,8 @@ impl StageContext {
         let ttracker = Arc::new(parking_lot::RwLock::new(
             crate::agent::token::TokenTracker::default(),
         ));
-        let cfail = Arc::new(AtomicU32::new(0));
+        let tool_fail = Arc::new(AtomicU32::new(0));
+        let compact_fail = Arc::new(AtomicU32::new(0));
         let sctx = Arc::new(RwLock::new(std::collections::HashMap::new()));
         let rbuf = Arc::new(RwLock::new(Vec::new()));
         let tool_snapshot = Arc::new(ToolRegistrySnapshot::default());
@@ -173,7 +176,8 @@ impl StageContext {
                 compact_pre_hook: None,
                 compact_post_hook: None,
                 token_tracker: ttracker,
-                consecutive_failures: cfail,
+                consecutive_failures: tool_fail,
+                compact_consecutive_failures: compact_fail,
             },
             async_ctx: AsyncContext {
                 idle_inbox: None,
@@ -216,6 +220,7 @@ impl StageContext {
                     crate::agent::token::TokenTracker::default(),
                 )),
                 consecutive_failures: Arc::new(AtomicU32::new(0)),
+                compact_consecutive_failures: Arc::new(AtomicU32::new(0)),
             },
             async_ctx: AsyncContext {
                 idle_inbox: None,

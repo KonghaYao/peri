@@ -37,10 +37,10 @@ impl ContextPressure {
 
     /// 需要回收的 token 数量（饱和减法，不溢出）。
     ///
-    /// 为防止 reclaim_target=0 阻断 Full 升级，加 5% 窗口最小值。
+    /// 为防止 reclaim_target=0 阻断 Full 升级，加 2% 窗口最小值。
     pub fn target_reclaim_tokens(&self) -> u64 {
         let raw = self.estimated_tokens.saturating_sub(self.target_tokens());
-        let min_floor = (self.context_window as u64 * 5) / 100;
+        let min_floor = (self.context_window as u64 * 2) / 100;
         raw.max(min_floor)
     }
 }

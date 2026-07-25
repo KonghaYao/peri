@@ -2,11 +2,11 @@
 //!
 //! 触发流程：
 //! - budget < 0.75：跳过
-//! - budget ≥ 0.75：Micro Compact 或 Smart Compact（根据配置选择）
-//!   - Micro：按 round 分组，旧轮次的工具消息标 truncated
-//!   - Smart：保留最近 N 条 Human/Ai + 最近 M 个 Tool 结果 + 所有错误消息，其余标 truncated
-//!   - affected_count ≥ micro_min_affected → 有效，budget ≥ 0.95 时叠加 Full
-//!   - affected_count < micro_min_affected → 无效，升级为 Full
+//! - budget ≥ 0.75：Micro Compact 或 Smart Compact（根据 Smart 开关选择）
+//!   - Micro/Smart 始终先执行并应用（标记 truncated）
+//!   - 若 budget ≥ 0.95 且 reclaim_target > 0：Micro/Smart 后叠加 Full Compact
+//!   - 若 budget < 0.95：仅 Micro/Smart，不触发 Full
+//!   - 决策指标：estimated_tokens_saved >= reclaim_target（非 micro_min_affected）
 //! - force=true：直接 Full（跳过 Micro/Smart）
 //!
 //! 与 v1 的区别：v2 基于 `MessageTranscript` 标记 API，不修改消息本体，
@@ -243,14 +243,22 @@ pub async fn run_compact(
                     full_escalation_reason: None,
                 }
             } else if budget_pct >= config.auto_compact_threshold && reclaim_target > 0 {
-                // 不足且达到 Full 阈值 → 跳过 Micro apply，直接 Full
+                // Micro 回收不足 + budget 高位 → 先应用 Micro，再叠加 Full
+                // 设计决策：Micro 每轮都提供实际收益（truncated 标记持久化到 transcript），
+                // 因此先执行 micro_compact 再叠加 Full——即使 Full 失败，Micro 的截断仍然生效。
+                // Smart 路径（`mod.rs:304`）有相同模式：先 Smart 再 Full，Full 失败不影响 Smart 结果。
+                let micro_affected = micro::micro_compact(transcript, config);
+                *consecutive_failures = 0; // Micro 从不会失败（纯规则操作）
+                                           // 注意：estimated_tokens_saved 使用 dry-run 估计
+                                           // 实际 micro 应用后的节省可能略有不同，但 plan 是最佳可用近似
                 debug!(
                     saved = plan.estimated_tokens_saved,
                     target = reclaim_target,
                     budget_pct,
-                    "Micro 回收不足 + budget 高位 → 跳过 Micro apply，直接 Full"
+                    micro_affected,
+                    "Micro 回收不足 + budget 高位 → 先应用 Micro，再叠加 Full"
                 );
-                run_full_or_degrade(
+                let mut full_result = run_full_or_degrade(
                     transcript,
                     llm,
                     config,
@@ -259,7 +267,12 @@ pub async fn run_compact(
                     cwd,
                     FullEscalationReason::InsufficientReclaim,
                 )
-                .await
+                .await;
+                // 合并 Micro 的 affected_count（即使 Full 失败，Micro 的截断已持久化）
+                full_result.affected_count += micro_affected;
+                // estimated_tokens_saved 也需要累加 Micro 的贡献
+                full_result.estimated_tokens_saved += plan.estimated_tokens_saved;
+                full_result
             } else {
                 // 不足但未达 Full 阈值 → 应用 Micro（部分收益也好）
                 let affected = micro::micro_compact(transcript, config);

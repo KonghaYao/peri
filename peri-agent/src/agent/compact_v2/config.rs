@@ -86,6 +86,10 @@ pub struct CompactConfig {
     #[serde(default = "default_excluded_tools")]
     pub micro_excluded_tools: Vec<String>,
     /// Micro 压缩量下限——affected_count 低于此值时判定 Micro 无效，升级为 Full。
+    ///
+    /// **注意**：此字段当前未接入运行时逻辑。决策使用 `estimated_tokens_saved >= reclaim_target`。
+    /// 保留此字段用于未来决策路径切换，避免 breaking API 删除。
+    #[allow(dead_code)]
     #[serde(default = "default_micro_min_affected")]
     pub micro_min_affected: usize,
     #[serde(default = "default_summary_max_tokens")]
