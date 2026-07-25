@@ -1,6 +1,6 @@
 # Langfuse Agent-run Observation 显示 0s Latency
 
-**状态**：Fixed
+**状态**：Archived
 **优先级**：中
 **类型**：Bug
 **创建日期**：2026-07-22
@@ -36,6 +36,7 @@ Langfuse UI 中 agent-run observation 的 Latency 始终显示为 0s（startTime
 |------|-----|-----|--------|------|
 | 2026-07-22 | — | Open | agent | 创建：e2e 测试后查询 Langfuse API 发现 agent-run latency 为 0s |
 | 2026-07-22 | Open | Fixed | agent | 修复：将 agent-run ObservationCreate 从 on_turn_start 推迟到 on_turn_end |
+| 2026-07-25 | — | Archived | agent | 归档
 
 ## 修复记录
 

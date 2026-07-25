@@ -1,6 +1,6 @@
 # 项目本地 ./.peri/settings.json 的 config.env 不生效
 
-**状态**：Fixed
+**状态**：Archived
 **优先级**：中
 **创建日期**：2026-07-24
 
@@ -38,6 +38,7 @@
 |------|-----|-----|--------|------|
 | 2026-07-24 | — | Open | agent | 创建 |
 | 2026-07-24 | Open | Fixed | agent | 修复：inject_env_from_settings 前插入项目本地注入 |
+| 2026-07-25 | — | Archived | agent | 归档
 
 ## 修复记录
 

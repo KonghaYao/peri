@@ -53,13 +53,14 @@ Micro Compact 黑名单（`micro_excluded_tools`）默认为空，导致所有�
 
 中
 
-**状态**：Fixed
+**状态**：Archived
 
 ## 状态变更记录
 
 | 日期 | 原状态 | 新状态 | 操作人 | 操作说明 |
 |------|--------|--------|--------|----------|
 | 2026-07-25 | 创建 | Fixed | agent | 修改默认黑名单为 3 类不可恢复工具的保守值 |
+| 2026-07-25 | — | Archived | agent | 归档：移动到 spec/archive-issues/agent-core/ |
 
 ## 修复记录
 

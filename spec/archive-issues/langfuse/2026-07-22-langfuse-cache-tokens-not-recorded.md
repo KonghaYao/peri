@@ -1,6 +1,6 @@
 # Langfuse 提示词缓存量（10k+）未记录
 
-**状态**：Fixed
+**状态**：Archived
 **优先级**：高
 **类型**：Bug
 **创建日期**：2026-07-22
@@ -47,6 +47,7 @@
 |------|-----|-----|--------|------|
 | 2026-07-22 | — | Open | agent | 创建，静态分析确认代码路径正确，待运行时诊断 |
 | 2026-07-22 | Open | Fixed | agent | 修复：usage_map（→ body.usage → OTEL langfuse.observation.usage_details）补充 cache_read/cache_creation |
+| 2026-07-25 | — | Archived | agent | 归档
 
 ## 修复记录
 

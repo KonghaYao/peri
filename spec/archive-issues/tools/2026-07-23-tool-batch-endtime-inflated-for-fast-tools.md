@@ -1,6 +1,6 @@
 # Tool Batch 中快速工具的 Langfuse Latency 被慢工具拖高
 
-- **状态**：Fixed
+- **状态**：Archived
 - **类型**：Bug（Langfuse 观测数据不准）
 - **优先级**：中
 - **创建时间**：2026-07-23
@@ -58,6 +58,7 @@ Langfuse tracer 的 `ToolBatch::on_tool_end()` 用 `chrono::Utc::now()` 记录 e
 |------|--------|--------|--------|------|
 | 2026-07-23 | - | Open | agent | 初始创建 |
 | 2026-07-23 | Open | Fixed | agent | 修复：dispatch_concurrent 内 emit ToolEnded，#636 tests pass |
+| 2026-07-25 | — | Archived | agent | 归档：移动到 spec/archive-issues/tools/ |
 
 ## 修复记录
 

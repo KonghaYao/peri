@@ -1,6 +1,6 @@
 # TUI 中出现连续两条重复的 Micro compaction 完成通知
 
-**状态**：Fixed
+**状态**：Archived
 **优先级**：中
 **创建日期**：2026-07-23
 **类型**：Bug
@@ -43,6 +43,7 @@ Micro compaction completed（5 文件）
 |------|-----|-----|--------|------|
 | 2026-07-23 | — | Open | agent | 创建——排查 Micro Compact 重复通知时发现 |
 | 2026-07-23 | Open | Fixed | agent | 修复：移除 v2_bridge 中 CompactStarted/MessagesCompacted 的双轨映射 |
+| 2026-07-25 | — | Archived | agent | 归档
 
 ## 修复记录
 

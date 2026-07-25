@@ -1,7 +1,7 @@
 
 # Langfuse trace 数据质量——GENERATION 缺 thinking output、缺 TTFB、tool-batch 空字段
 
-**状态**：Fixed
+**状态**：Archived
 **优先级**：中
 **创建日期**：2026-07-25
 **类型**：技术债
@@ -75,6 +75,7 @@ child_thread_id: 019f9818-debb-7e92-bebd-ab59a40da6ae
 |------|-----|-----|--------|------|
 | 2026-07-25 | — | Open | agent | 创建——trace 019f9818d3a17ea2b4c1ba64623d7683 分析发现 |
 | 2026-07-25 | Open | Fixed | agent | 修复：4 个症状全部修复，12 个文件，+166/-18 行，1005 tests pass |
+| 2026-07-25 | — | Archived | agent | 归档
 
 ## 修复记录
 

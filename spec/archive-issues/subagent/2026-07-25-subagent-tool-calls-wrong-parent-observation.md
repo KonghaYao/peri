@@ -1,6 +1,6 @@
 # Subagent 工具调用挂载到错误的父 Observation——主 agent 层级而非子 agent 层级
 
-**状态**：Fixed
+**状态**：Archived
 **优先级**：中
 **创建日期**：2026-07-25
 **类型**：Bug
@@ -90,6 +90,7 @@ agent-run (AGENT)
 |------|-----|-----|--------|------|
 | 2026-07-25 | — | Open | agent | 创建——Langfuse trace 019f92db... 分析发现子 agent 工具调用挂载错误 |
 | 2026-07-25 | Open | Fixed | agent | 修复：3 个 Fix (A/B/C) 在 mod.rs，+188/-26 行，317 tests pass |
+| 2026-07-25 | — | Archived | agent | 归档
 
 ## 修复记录
 

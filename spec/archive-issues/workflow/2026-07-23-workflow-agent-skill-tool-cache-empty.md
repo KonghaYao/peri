@@ -1,6 +1,6 @@
 # Workflow Agent 中 SkillTool 缓存永远为空，Skill 不可用
 
-**状态**：Fixed
+**状态**：Archived
 **优先级**：中
 **创建日期**：2026-07-23
 **类型**：Bug
@@ -40,6 +40,7 @@
 |------|-----|-----|--------|------|
 | 2026-07-23 | — | Open | agent | code review 发现 |
 | 2026-07-23 | Open | Fixed | agent | 修复：注册前扫描 project skills |
+| 2026-07-25 | — | Archived | agent | 归档
 
 ## 修复记录
 

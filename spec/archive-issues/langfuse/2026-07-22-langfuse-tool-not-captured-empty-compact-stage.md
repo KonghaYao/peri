@@ -1,6 +1,6 @@
 # Langfuse 工具调用全量丢失 + stage-compact 空阶段始终上报
 
-**状态**：Fixed
+**状态**：Archived
 **优先级**：高
 **类型**：Bug
 **创建日期**：2026-07-22
@@ -57,6 +57,7 @@ v2 架构中工具事件（`ToolStarted`/`ToolEnded`）属于 `RenderEvent`。fo
 |------|-----|-----|--------|------|
 | 2026-07-22 | — | Open | agent | 创建 |
 | 2026-07-22 | Open | Fixed | agent | 修复：bridge.rs 补 ToolStarted/ToolEnded 映射；tracer/mod.rs 加 compact_work_done 条件跳过 |
+| 2026-07-25 | — | Archived | agent | 归档
 
 ## 修复记录
 

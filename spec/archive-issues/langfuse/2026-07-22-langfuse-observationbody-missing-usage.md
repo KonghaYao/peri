@@ -1,6 +1,6 @@
 # Langfuse ObservationBody 缺少 `usage` 字段
 
-**状态**：Fixed
+**状态**：Archived
 **优先级**：中
 **类型**：Bug
 **创建日期**：2026-07-22
@@ -44,6 +44,7 @@ Usage:
 |------|-----|-----|--------|------|
 | 2026-07-22 | — | Open | agent | 创建：对 OpenAPI spec 发现 ObservationBody 缺 usage 字段 |
 | 2026-07-22 | Open | Fixed | agent | 修复：ObservationBody 新增 usage 字段，同步补全 3 处构造点 |
+| 2026-07-25 | — | Archived | agent | 归档
 
 ## 附注
 
