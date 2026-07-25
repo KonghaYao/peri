@@ -76,7 +76,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         // 如果有 compact config，生成 plan 并渲染投影视图
         // 替代旧的 truncated_content(100) 截断循环
         if let Some(ref config) = ctx.compact.compact_config {
-            let plan = crate::agent::compact_v2::planner::plan_micro(&guard, config);
+            let plan = crate::agent::compact_v2::planner::plan_micro(&guard, config, false);
             if plan.has_changes() {
                 let caps = ctx.runtime.llm.provider_capabilities();
                 match crate::agent::compact_v2::projection::render_llm_view(&guard, &plan, &caps) {

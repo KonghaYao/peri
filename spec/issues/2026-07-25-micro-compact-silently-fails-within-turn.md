@@ -1,6 +1,6 @@
 # Micro Compact 同 turn 内静默失效
 
-> 状态：待修复 | 优先级：P0 | 日期：2026-07-25
+> 状态：Fixed | 优先级：P0 | 日期：2026-07-25
 
 ## 现象
 
@@ -103,3 +103,19 @@ Compact 阶段生成 MicroCompactPlan 后缓存起来，Reason 阶段直接使�
 2. **跨 turn Micro → Reason**：上一 turn 打完 truncated → 下一 turn Reason 阶段 LLM 看到的仍是压缩后内容
 3. **空 transcript**：无 truncated 标记时 Reason 正常走 `plan_micro` 路径
 4. **compact 连续两轮**：第一轮 Micro 有效 → 第二轮 Micro 不应重复标记已有 truncated 的消息
+
+## 修复记录
+
+### 修复 #1（2026-07-25）
+
+- **操作人**：agent
+- **用户原意**：修复 Micro/Smart Compact 同 turn 内完全失效的 P0 bug——truncated 标记从未被任何代码路径读取用于截断
+- **修复内容**：采用方案 A，给 `plan_micro()` 加 `skip_existing_truncated: bool` 参数。Compact 阶段传 `true`（跳过已有 truncated，防止重复标记），Reason 阶段传 `false`（为已有 truncated 消息生成完整投影计划）。涉及 7 个文件（planner.rs、mod.rs、micro.rs、smart.rs、reason.rs、planner_test.rs、_test.rs）
+- **涉及 commit**：待提交
+- **验证状态**：已验证（686 tests pass）
+
+## 状态变更记录
+
+| 日期 | 原状态 | 新状态 | 操作人 | 操作说明 |
+|------|--------|--------|--------|----------|
+| 2026-07-25 | 待修复 | Fixed | agent | 方案 A：plan_micro 加 skip_existing_truncated 参数 |

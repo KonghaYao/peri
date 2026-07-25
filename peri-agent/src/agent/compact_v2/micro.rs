@@ -19,7 +19,7 @@ use super::projection::ProjectionTarget;
 ///
 /// 返回被标记的消息数量。
 pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig) -> usize {
-    let plan = super::planner::plan_micro(transcript, config);
+    let plan = super::planner::plan_micro(transcript, config, true);
     let affected = plan.actions.len();
 
     for action in &plan.actions {

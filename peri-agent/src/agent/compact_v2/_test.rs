@@ -355,7 +355,7 @@ fn test_compact_plan_empty_no_projection_side_effects() {
     t.append(make_human("hello"));
 
     let config = CompactConfig::default();
-    let plan = plan_micro(&t, &config);
+    let plan = plan_micro(&t, &config, false);
 
     assert!(!plan.has_changes(), "单消息 transcript 的 plan 应为空");
     assert_eq!(plan.estimated_tokens_saved, 0, "空 plan 不应有 token 节省");
@@ -382,7 +382,7 @@ fn test_compact_plan_has_changes_with_enough_rounds() {
         micro_compact_stale_steps: 1,
         ..Default::default()
     };
-    let plan = plan_micro(&t, &config);
+    let plan = plan_micro(&t, &config, false);
 
     assert!(plan.has_changes(), "多轮 transcript 应有非空 plan");
     assert!(plan.estimated_tokens_saved > 0, "应估算非零 token 节省");

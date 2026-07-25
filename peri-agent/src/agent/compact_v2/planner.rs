@@ -216,11 +216,15 @@ fn should_preserve_tool(tool_name: &str, config: &CompactConfig) -> bool {
 ///
 /// # 规则
 /// - 跳过最近 N 轮（`stale_steps`）
-/// - 已 truncated 的消息 → 跳过
+/// - 已 truncated 的消息 → 当 `skip_existing_truncated` 时跳过
 /// - 受保护工具（`micro_excluded_tools`）→ 跳过
 /// - 错误 ToolResult → 跳过 ToolResult 的 compact，但 tool_use 仍可压缩
 /// - 安全可压缩的工具 → CompactToolInput（per tool_call_id）+ CompactToolResult
-pub fn plan_micro(transcript: &MessageTranscript, config: &CompactConfig) -> MicroCompactPlan {
+pub fn plan_micro(
+    transcript: &MessageTranscript,
+    config: &CompactConfig,
+    skip_existing_truncated: bool,
+) -> MicroCompactPlan {
     let ancestor_len = transcript.ancestor_len();
     let entries = transcript.entries();
     let groups = TurnGroup::collect(entries, ancestor_len);
@@ -238,10 +242,11 @@ pub fn plan_micro(transcript: &MessageTranscript, config: &CompactConfig) -> Mic
 
         for exchange in group.tool_exchanges() {
             // 跳过已有 truncated flag 的消息（避免重复）
-            if transcript.flags(exchange.ai_message_id).truncated {
+            // 仅在 Compact 阶段跳过（skip_existing_truncated=true），
+            // Reason 阶段（skip_existing_truncated=false）需要为已标记消息生成完整投影
+            if skip_existing_truncated && transcript.flags(exchange.ai_message_id).truncated {
                 continue;
             }
-
             // 受保护工具 → 跳过（per-call 粒度）
             // 优先使用 retention_map（新），fallback 到 micro_excluded_tools（旧）
             let is_protected = should_preserve_tool(&exchange.tool_name, config);
@@ -270,7 +275,9 @@ pub fn plan_micro(transcript: &MessageTranscript, config: &CompactConfig) -> Mic
             // 成功的 ToolResult → CompactToolResult（错误结果保留诊断信息）
             if !has_error {
                 for (_, result_entry) in &exchange.tool_result_entries {
-                    if transcript.flags(result_entry.message.id()).truncated {
+                    if skip_existing_truncated
+                        && transcript.flags(result_entry.message.id()).truncated
+                    {
                         continue;
                     }
                     actions.push(ProjectionActionEntry {

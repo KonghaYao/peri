@@ -188,7 +188,7 @@ pub async fn run_compact(
             }
 
             // Dry-run：先用 plan_micro 估算效果（无副作用）
-            let plan = plan_micro(transcript, config);
+            let plan = plan_micro(transcript, config, true);
 
             // Shadow mode：只估算不应用
             if config.shadow_mode_enabled {

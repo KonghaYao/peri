@@ -51,7 +51,7 @@ fn test_micro_compact_plan_no_changes() {
 fn test_plan_micro_empty_transcript() {
     let t = MessageTranscript::new();
     let config = CompactConfig::default();
-    let plan = plan_micro(&t, &config);
+    let plan = plan_micro(&t, &config, false);
     assert_eq!(plan.actions.len(), 0);
     assert!(!plan.has_changes());
 }
@@ -89,7 +89,7 @@ fn test_token_estimation_produces_nonzero_savings() {
         micro_compact_stale_steps: 1,
         ..CompactConfig::default()
     };
-    let plan = plan_micro(&t, &config);
+    let plan = plan_micro(&t, &config, false);
     assert!(!plan.actions.is_empty(), "应有 actions");
     assert!(
         plan.estimated_tokens_saved > 0,
@@ -114,7 +114,7 @@ fn test_token_estimation_no_actions_saves_zero() {
         micro_compact_stale_steps: 0, // 所有轮次都 stale
         ..CompactConfig::default()
     };
-    let plan = plan_micro(&t, &config);
+    let plan = plan_micro(&t, &config, false);
     // Human 消息不生成 tool exchange → actions 为 0
     assert_eq!(plan.actions.len(), 0, "Human-only 消息不应有 actions");
     assert_eq!(plan.estimated_tokens_saved, 0, "无 action 时节省应为 0");
@@ -193,7 +193,7 @@ fn test_retention_map_preserve_blocks_compact() {
         ..CompactConfig::default()
     };
 
-    let plan = plan_micro(&t, &config);
+    let plan = plan_micro(&t, &config, false);
     assert_eq!(
         plan.actions.len(),
         0,
@@ -234,7 +234,7 @@ fn test_retention_map_recomputable_allows_compact() {
         ..CompactConfig::default()
     };
 
-    let plan = plan_micro(&t, &config);
+    let plan = plan_micro(&t, &config, false);
     assert!(!plan.actions.is_empty(), "Recomputable 工具应产生 action");
 }
 
@@ -266,7 +266,7 @@ fn test_fallback_to_excluded_tools_when_map_empty() {
         ..CompactConfig::default()
     };
 
-    let plan = plan_micro(&t, &config);
+    let plan = plan_micro(&t, &config, false);
     assert_eq!(
         plan.actions.len(),
         0,
