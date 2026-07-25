@@ -81,16 +81,28 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
 
         // 在 emit CompactStarted 前估算策略
         // determine_compact_action 判定 Skip/Micro/Smart；Full 由 run_compact 内部动态决策。
-        // 此处 event 的策略字段用于观测。
+        // Skip 时不 emit CompactStarted——避免成对事件不对称（Start emit 了但 End 因
+        // affected_count==0 不触发，导致 Langfuse compact span 始终缺失）。
         let compact_action = crate::agent::compact_v2::determine_compact_action(pct, config);
+        if matches!(
+            compact_action,
+            crate::agent::compact_v2::CompactAction::Skip
+        ) {
+            break 'compact_core Ok(CompactOutput { compacted: false });
+        }
         let compact_strategy = match compact_action {
             crate::agent::compact_v2::CompactAction::Smart => {
                 crate::agent::events::CompactStrategy::Smart
             }
-            _ => crate::agent::events::CompactStrategy::Micro,
+            crate::agent::compact_v2::CompactAction::Micro => {
+                crate::agent::events::CompactStrategy::Micro
+            }
+            crate::agent::compact_v2::CompactAction::Skip => {
+                unreachable!("Skip 已在上方 break，不会进入此分支")
+            }
         };
 
-        tracing::trace!(step, budget_pct = %pct, "Compact 预算检查");
+        tracing::trace!(step, budget_pct = %pct, action = ?compact_action, "Compact 预算检查");
 
         // 调用 compact_v2：取出 transcript 所有权，运行后放回（避免跨 await 持锁）
         let compact_llm_ref: Option<&dyn crate::llm::BaseModel> = ctx
@@ -154,7 +166,9 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
         let compacted = {
             let r = result; // compact_v2::run_compact 直接返回 CompactResult
             affected_count = r.affected_count;
-            if r.affected_count > 0 {
+            let did_compact = r.affected_count > 0;
+
+            if did_compact {
                 tracing::info!(
                     step,
                     strategy = ?r.strategy,
@@ -163,60 +177,63 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                     after_visible = r.after_visible_len,
                     "Compact 完成"
                 );
-                // 取出 visible_messages 快照供 TUI 重建（必须在 transcript 还在 owned 时读）
-                // 注：run_compact 内部已把 transcript_owned 还给 ctx.session.transcript.write()，
-                // 此处从 ctx 重新读
-                let (messages_snapshot, files, skills) = {
-                    let guard = ctx.session.transcript.read();
-                    let visible: Vec<crate::messages::BaseMessage> =
-                        guard.visible_messages().into_iter().cloned().collect();
-                    // 从最后几条消息提取 re_inject 元信息（CompactFileInfo / Skills 名称）
-                    // 注：run_compact 内 re_inject_v2 已把 [最近读取的文件: ...] / [激活的 Skill 指令: ...]
-                    // 追加到 transcript 末尾，可直接用 extract_file_info / extract_skill_names 解析
-                    let combined_files = crate::agent::compact_v2::extract_file_info(&visible);
-                    let combined_skills = crate::agent::compact_v2::extract_skill_names(&visible);
-                    (visible, combined_files, combined_skills)
-                };
-
-                // Full Compact 后必须 reset token_tracker——否则下轮 budget 计算会基于
-                // compact 前的累积 token 数，导致每轮都触发 compact
-                // 注：与 v1 CompactMiddleware 行为对齐（v1 已删除）
-                if r.strategy == crate::agent::events::CompactStrategy::Full {
-                    // P1-3: 直接操作 StageContext.token_tracker
-                    ctx.compact.token_tracker.write().reset();
-                    // 注：token_tracker reset 为只读 token 操作，无需 drain recall
-                }
-
-                // emit 观测事件（携带 messages 快照供 TUI 重建 pipeline）
-                ctx.runtime.event_bus.emit_observe(
-                    crate::agent::events_v2::ObserveEvent::MessagesCompacted {
-                        turn_id: ctx.turn_id(),
-                        agent_id: ctx.session.agent_id,
-                        before_count: r.before_visible_len,
-                        after_count: r.after_visible_len,
-                        summary: r.summary.clone().unwrap_or_default(),
-                        messages: messages_snapshot,
-                        files,
-                        skills,
-                        re_inject_count: 0,
-                        strategy: r.strategy,
-                        affected_count: r.affected_count,
-                        estimated_tokens_saved: r.estimated_tokens_saved,
-                        estimated_tokens_before: pressure.estimated_tokens,
-                        estimated_tokens_after: pressure
-                            .estimated_tokens
-                            .saturating_sub(r.estimated_tokens_saved),
-                        changed_messages: r.affected_count,
-                        changed_fields: r.affected_count,
-                        no_op_candidates: 0,
-                        full_escalation_reason: r.full_escalation_reason.clone(),
-                        cache_hit_rate_before: pressure.cache_hit_rate,
-                    },
-                );
-                true
-            } else {
-                false
             }
+            // 取出 visible_messages 快照供 TUI 重建（必须在 transcript 还在 owned 时读）
+            // 注：run_compact 内部已把 transcript_owned 还给 ctx.session.transcript.write()，
+            // 此处从 ctx 重新读
+            let (messages_snapshot, files, skills) = if did_compact {
+                let guard = ctx.session.transcript.read();
+                let visible: Vec<crate::messages::BaseMessage> =
+                    guard.visible_messages().into_iter().cloned().collect();
+                // 从最后几条消息提取 re_inject 元信息（CompactFileInfo / Skills 名称）
+                // 注：run_compact 内 re_inject_v2 已把 [最近读取的文件: ...] / [激活的 Skill 指令: ...]
+                // 追加到 transcript 末尾，可直接用 extract_file_info / extract_skill_names 解析
+                let combined_files = crate::agent::compact_v2::extract_file_info(&visible);
+                let combined_skills = crate::agent::compact_v2::extract_skill_names(&visible);
+                (visible, combined_files, combined_skills)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
+
+            // Full Compact 后必须 reset token_tracker——否则下轮 budget 计算会基于
+            // compact 前的累积 token 数，导致每轮都触发 compact
+            // 注：与 v1 CompactMiddleware 行为对齐（v1 已删除）
+            if did_compact && r.strategy == crate::agent::events::CompactStrategy::Full {
+                // P1-3: 直接操作 StageContext.token_tracker
+                ctx.compact.token_tracker.write().reset();
+                // 注：token_tracker reset 为只读 token 操作，无需 drain recall
+            }
+
+            // emit 观测事件（携带 messages 快照供 TUI 重建 pipeline）
+            // CompactStarted → MessagesCompacted 成对原则：无论 affected_count 是否为 0，
+            // 只要 CompactStarted 已 emit，就必须 emit MessagesCompacted 作为结束事件。
+            // 否则 Langfuse tracer 的 on_compact_end 永不调用，compact_span 始终缺失。
+            ctx.runtime.event_bus.emit_observe(
+                crate::agent::events_v2::ObserveEvent::MessagesCompacted {
+                    turn_id: ctx.turn_id(),
+                    agent_id: ctx.session.agent_id,
+                    before_count: r.before_visible_len,
+                    after_count: r.after_visible_len,
+                    summary: r.summary.clone().unwrap_or_default(),
+                    messages: messages_snapshot,
+                    files,
+                    skills,
+                    re_inject_count: 0,
+                    strategy: r.strategy,
+                    affected_count: r.affected_count,
+                    estimated_tokens_saved: r.estimated_tokens_saved,
+                    estimated_tokens_before: pressure.estimated_tokens,
+                    estimated_tokens_after: pressure
+                        .estimated_tokens
+                        .saturating_sub(r.estimated_tokens_saved),
+                    changed_messages: r.affected_count,
+                    changed_fields: r.affected_count,
+                    no_op_candidates: 0,
+                    full_escalation_reason: r.full_escalation_reason.clone(),
+                    cache_hit_rate_before: pressure.cache_hit_rate,
+                },
+            );
+            did_compact
         };
 
         break 'compact_core Ok(CompactOutput { compacted });
