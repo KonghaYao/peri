@@ -34,7 +34,10 @@ pub fn smart_compact(transcript: &mut MessageTranscript, config: &CompactConfig)
     }
 
     if affected > 0 {
-        debug!(affected, "Smart Compact (via plan_micro): 标记 truncated 消息");
+        debug!(
+            affected,
+            "Smart Compact (via plan_micro): 标记 truncated 消息"
+        );
     }
 
     (affected, saved)
@@ -110,13 +113,20 @@ mod tests {
         for i in 0..7 {
             t.append(make_human(&format!("question {}", i)));
             t.append(make_ai_with_tool("think", "Bash", &format!("call_{}", i)));
-            t.append(make_tool_result(&format!("call_{}", i), &format!("output {}", i)));
+            t.append(make_tool_result(
+                &format!("call_{}", i),
+                &format!("output {}", i),
+            ));
         }
 
         let config = CompactConfig::default();
         let (affected, _saved) = smart_compact(&mut t, &config);
         // stale_steps=5 → 7-5=2 轮 stale（round 0,1），每轮 2 个 action
-        assert_eq!(affected, 4, "2 stale rounds × 2 actions = 4，实际: {}", affected);
+        assert_eq!(
+            affected, 4,
+            "2 stale rounds × 2 actions = 4，实际: {}",
+            affected
+        );
     }
 
     #[test]
@@ -125,7 +135,11 @@ mod tests {
         // 构造足够多轮次，让第 0 轮进入 stale 窗口
         for i in 0..7 {
             t.append(make_human(&format!("q {}", i)));
-            t.append(make_ai_with_tool("run command", "Bash", &format!("bash_{}", i)));
+            t.append(make_ai_with_tool(
+                "run command",
+                "Bash",
+                &format!("bash_{}", i),
+            ));
             t.append(make_error_tool_result(
                 &format!("bash_{}", i),
                 &format!("error output {}", i),
@@ -135,7 +149,11 @@ mod tests {
         let config = CompactConfig::default();
         let (affected, _saved) = smart_compact(&mut t, &config);
         // 2 stale rounds: tool_use 被压缩（CompactToolInput），error tool_result 不被压缩
-        assert_eq!(affected, 2, "只有 tool_use 被标记，错误 tool_result 保留，实际: {}", affected);
+        assert_eq!(
+            affected, 2,
+            "只有 tool_use 被标记，错误 tool_result 保留，实际: {}",
+            affected
+        );
 
         // 验证所有错误 tool_result 未被 truncated
         for entry in t.entries() {
@@ -226,8 +244,14 @@ mod tests {
         let error_tool_id = entries[entries.len() - 5].message.id();
 
         // 最近消息（在 stale 窗口内）应保留
-        assert!(!t.flags(recent_human_id).truncated, "最近 Human 应保留（不是工具消息）");
-        assert!(!t.flags(recent_tool_id).truncated, "最近 Tool 结果应保留（在窗口内）");
+        assert!(
+            !t.flags(recent_human_id).truncated,
+            "最近 Human 应保留（不是工具消息）"
+        );
+        assert!(
+            !t.flags(recent_tool_id).truncated,
+            "最近 Tool 结果应保留（在窗口内）"
+        );
         // 错误消息应保留
         assert!(!t.flags(error_tool_id).truncated, "错误 Tool 应保留");
         // 旧消息应被标记
@@ -248,7 +272,10 @@ mod tests {
 
         let entries = t.entries();
         let system_flags = t.flags(entries[0].message.id());
-        assert!(!system_flags.truncated, "System 消息应保留（非工具，不被选中）");
+        assert!(
+            !system_flags.truncated,
+            "System 消息应保留（非工具，不被选中）"
+        );
         assert_eq!(affected, 0, "无工具调用，plan_micro 不产生 action");
     }
 }

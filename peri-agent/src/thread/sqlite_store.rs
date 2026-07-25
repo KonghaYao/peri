@@ -689,8 +689,7 @@ impl ThreadStore for SqliteThreadStore {
         let mut flags = HashMap::with_capacity(rows.len());
         for (id_str, truncated, excluded, projection_json) in rows {
             if let Ok(uid) = uuid::Uuid::parse_str(&id_str) {
-                let projection = projection_json
-                    .and_then(|json| serde_json::from_str(&json).ok());
+                let projection = projection_json.and_then(|json| serde_json::from_str(&json).ok());
                 flags.insert(
                     uid.into(),
                     MessageFlags {

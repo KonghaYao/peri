@@ -28,7 +28,9 @@ pub enum ProjectionTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProjectionAction {
     Keep,
-    CompactText { max_chars: usize },
+    CompactText {
+        max_chars: usize,
+    },
     CompactToolResult {
         keep_head: usize,
         keep_tail: usize,
@@ -38,7 +40,9 @@ pub enum ProjectionAction {
         fields: Vec<String>,
         preserve_shape: bool,
     },
-    ReplaceMedia { placeholder: String },
+    ReplaceMedia {
+        placeholder: String,
+    },
     Exclude,
 }
 
@@ -242,7 +246,8 @@ fn project_message(
                 .collect();
 
             // 投影 content blocks，同时将 ToolUse blocks 与 projected tool_calls 同步
-            let projected_content = project_ai_content(content, &block_actions, &tool_call_lookup, caps);
+            let projected_content =
+                project_ai_content(content, &block_actions, &tool_call_lookup, caps);
 
             BaseMessage::Ai {
                 id: *id,
@@ -477,14 +482,9 @@ fn project_block(
 // ─── project_tool_input ───────────────────────────────────────────────────────
 
 /// 投影 tool input：保持 JSON object 根类型
-fn project_tool_input(
-    tc: &ToolCallRequest,
-    action: &ProjectionActionEntry,
-) -> ToolCallRequest {
+fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> ToolCallRequest {
     match &action.action {
-        ProjectionAction::CompactToolInput {
-            preserve_shape, ..
-        } => {
+        ProjectionAction::CompactToolInput { preserve_shape, .. } => {
             if *preserve_shape && tc.arguments.is_object() {
                 // 保留 object 根，替换为 minimal 占位
                 let mut minimal = serde_json::Map::new();
@@ -509,10 +509,7 @@ fn project_tool_input(
                 ToolCallRequest {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
-                    arguments: serde_json::Value::String(format!(
-                        "{}\n[内容已压缩]",
-                        truncated
-                    )),
+                    arguments: serde_json::Value::String(format!("{}\n[内容已压缩]", truncated)),
                 }
             } else {
                 tc.clone()
@@ -535,10 +532,7 @@ fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> String {
     let tail: String = chars[chars.len() - tail_chars..].iter().collect();
     let skipped = chars.len() - head_chars - tail_chars;
 
-    format!(
-        "{}\n... [{} 字符已省略] ...\n{}",
-        head, skipped, tail
-    )
+    format!("{}\n... [{} 字符已省略] ...\n{}", head, skipped, tail)
 }
 
 // ─── validate_projected_view ──────────────────────────────────────────────────

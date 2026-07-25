@@ -419,11 +419,25 @@ async fn test_update_and_load_message_flags() {
 
     // Set flags: msg1 truncated, msg2 excluded, msg3 no flags
     store
-        .update_message_flags(&msgs[0].id(), &MessageFlags { truncated: true, excluded: false, projection: None })
+        .update_message_flags(
+            &msgs[0].id(),
+            &MessageFlags {
+                truncated: true,
+                excluded: false,
+                projection: None,
+            },
+        )
         .await
         .unwrap();
     store
-        .update_message_flags(&msgs[1].id(), &MessageFlags { truncated: false, excluded: true, projection: None })
+        .update_message_flags(
+            &msgs[1].id(),
+            &MessageFlags {
+                truncated: false,
+                excluded: true,
+                projection: None,
+            },
+        )
         .await
         .unwrap();
 
@@ -477,11 +491,25 @@ async fn test_update_message_flags_persists() {
 
         // 标记 msg0 truncated, msg1 excluded
         store
-            .update_message_flags(&msgs[0].id(), &MessageFlags { truncated: true, excluded: false, projection: None })
+            .update_message_flags(
+                &msgs[0].id(),
+                &MessageFlags {
+                    truncated: true,
+                    excluded: false,
+                    projection: None,
+                },
+            )
             .await
             .unwrap();
         store
-            .update_message_flags(&msgs[1].id(), &MessageFlags { truncated: false, excluded: true, projection: None })
+            .update_message_flags(
+                &msgs[1].id(),
+                &MessageFlags {
+                    truncated: false,
+                    excluded: true,
+                    projection: None,
+                },
+            )
             .await
             .unwrap();
 

@@ -76,8 +76,7 @@ fn test_projection_directive_serde_roundtrip() {
         }],
     };
     let json = serde_json::to_string(&directive).expect("序列化失败");
-    let restored: MessageProjectionDirective =
-        serde_json::from_str(&json).expect("反序列化失败");
+    let restored: MessageProjectionDirective = serde_json::from_str(&json).expect("反序列化失败");
     assert_eq!(restored, directive);
 }
 
@@ -89,7 +88,10 @@ fn test_legacy_message_flags_deserialize_without_directive() {
     let flags: MessageFlags = serde_json::from_str(legacy_json).expect("旧 JSON 反序列化失败");
     assert!(flags.truncated);
     assert!(!flags.excluded);
-    assert!(flags.projection.is_none(), "旧 JSON 反序列化后 projection 应为 None");
+    assert!(
+        flags.projection.is_none(),
+        "旧 JSON 反序列化后 projection 应为 None"
+    );
 }
 
 #[test]
@@ -176,23 +178,25 @@ fn test_blocks_image_projection_removes_base64() {
     // 投影后不应含 Base64 payload
     let blocks = projected[0].content_blocks();
     let has_base64 = blocks.iter().any(|b| {
-        matches!(b, ContentBlock::Image {
-            source: crate::messages::ImageSource::Base64 { .. }
-        })
+        matches!(
+            b,
+            ContentBlock::Image {
+                source: crate::messages::ImageSource::Base64 { .. }
+            }
+        )
     });
     assert!(!has_base64, "投影后不应包含 Base64 Image block");
 
     // 图片 block 应变成 Text 占位符
-    let has_placeholder = blocks.iter().any(|b| {
-        matches!(b, ContentBlock::Text { text } if text.contains("图片已压缩"))
-    });
+    let has_placeholder = blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("图片已压缩")));
     assert!(has_placeholder, "投影后应包含图片占位文本");
 }
 
 #[test]
 fn test_blocks_document_projection_removes_base64() {
-    let transcript =
-        transcript_with_document(Some("report.pdf"), "AAAApdfbase64payload==");
+    let transcript = transcript_with_document(Some("report.pdf"), "AAAApdfbase64payload==");
     let visible = transcript.visible_messages();
     let msg_id = visible[0].id();
 
@@ -216,16 +220,20 @@ fn test_blocks_document_projection_removes_base64() {
 
     let blocks = projected[0].content_blocks();
     let has_doc_base64 = blocks.iter().any(|b| {
-        matches!(b, ContentBlock::Document {
-            source: crate::messages::DocumentSource::Base64 { .. }, ..
-        })
+        matches!(
+            b,
+            ContentBlock::Document {
+                source: crate::messages::DocumentSource::Base64 { .. },
+                ..
+            }
+        )
     });
     assert!(!has_doc_base64, "投影后不应包含 Base64 Document block");
 
     // 标题应保留在占位文本中
-    let has_title = blocks.iter().any(|b| {
-        matches!(b, ContentBlock::Text { text } if text.contains("report.pdf"))
-    });
+    let has_title = blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("report.pdf")));
     assert!(has_title, "投影后占位文本应包含文档标题");
 }
 
@@ -270,9 +278,7 @@ fn test_tool_input_projection_preserves_object_root() {
             tc.arguments
         );
         assert!(
-            tc.arguments
-                .get("_compact_note")
-                .and_then(|v| v.as_str())
+            tc.arguments.get("_compact_note").and_then(|v| v.as_str())
                 == Some("tool input compacted"),
             "应有 _compact_note 标记"
         );
@@ -317,14 +323,8 @@ fn test_tool_result_projection_keeps_head_tail() {
     if let BaseMessage::Tool { content, .. } = &projected[1] {
         let text = content.text_content();
         assert!(text.len() < long_result.len(), "截断后应更短");
-        assert!(
-            text.contains("AAAA"),
-            "截断后应保留头部内容"
-        );
-        assert!(
-            text.contains("字符已省略"),
-            "截断后应包含省略标记"
-        );
+        assert!(text.contains("AAAA"), "截断后应保留头部内容");
+        assert!(text.contains("字符已省略"), "截断后应包含省略标记");
     } else {
         panic!("第二条消息应为 Tool 消息");
     }
@@ -369,10 +369,7 @@ fn test_error_tool_result_is_unchanged() {
     {
         assert!(is_error, "错误消息 is_error 应为 true");
         let text = content.text_content();
-        assert_eq!(
-            text, error_text,
-            "错误 ToolResult 内容不应被截断"
-        );
+        assert_eq!(text, error_text, "错误 ToolResult 内容不应被截断");
     } else {
         panic!("第二条消息应为 Tool 消息");
     }
@@ -381,12 +378,8 @@ fn test_error_tool_result_is_unchanged() {
 #[test]
 fn test_cjk_projection_uses_character_boundary() {
     let cjk_text = "你好世界".repeat(600); // 2400 CJK 字符
-    let transcript = transcript_with_tool_exchange(
-        "tc_1",
-        serde_json::json!({"cmd": "test"}),
-        &cjk_text,
-        false,
-    );
+    let transcript =
+        transcript_with_tool_exchange("tc_1", serde_json::json!({"cmd": "test"}), &cjk_text, false);
     let visible = transcript.visible_messages();
     let result_msg_id = visible[1].id();
 
@@ -414,10 +407,7 @@ fn test_cjk_projection_uses_character_boundary() {
         let text = content.text_content();
         assert!(text.len() < cjk_text.len(), "CJK 截断后应更短");
         // 不应出现字节切片错误（如乱码字符）
-        assert!(
-            text.contains('你'),
-            "截断后应包含原始 CJK 字符"
-        );
+        assert!(text.contains('你'), "截断后应包含原始 CJK 字符");
     } else {
         panic!("第二条消息应为 Tool 消息");
     }

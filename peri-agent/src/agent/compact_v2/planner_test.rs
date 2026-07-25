@@ -66,7 +66,10 @@ fn test_token_estimation_produces_nonzero_savings() {
     let mut t = MessageTranscript::new();
     // 添加多轮对话 + tool calls 触发 Micro action
     for i in 0..8 {
-        t.append(BaseMessage::human(MessageContent::text(format!("question {}", i))));
+        t.append(BaseMessage::human(MessageContent::text(format!(
+            "question {}",
+            i
+        ))));
         t.append(BaseMessage::ai_with_tool_calls(
             MessageContent::text(format!("thinking {}", i)),
             vec![ToolCallRequest::new(
@@ -88,8 +91,14 @@ fn test_token_estimation_produces_nonzero_savings() {
     };
     let plan = plan_micro(&t, &config);
     assert!(!plan.actions.is_empty(), "应有 actions");
-    assert!(plan.estimated_tokens_saved > 0, "有 action 时估算节省应 > 0");
-    assert!(plan.estimated_before_tokens > plan.estimated_after_tokens, "投影后应减少");
+    assert!(
+        plan.estimated_tokens_saved > 0,
+        "有 action 时估算节省应 > 0"
+    );
+    assert!(
+        plan.estimated_before_tokens > plan.estimated_after_tokens,
+        "投影后应减少"
+    );
 }
 
 #[test]
@@ -226,10 +235,7 @@ fn test_retention_map_recomputable_allows_compact() {
     };
 
     let plan = plan_micro(&t, &config);
-    assert!(
-        !plan.actions.is_empty(),
-        "Recomputable 工具应产生 action"
-    );
+    assert!(!plan.actions.is_empty(), "Recomputable 工具应产生 action");
 }
 
 #[test]

@@ -11,7 +11,9 @@ use crate::session::transcript::{MessageTranscript, TranscriptEntry};
 use crate::tools::ContextRetention;
 
 use super::config::CompactConfig;
-use super::projection::{MicroCompactPlan, ProjectionAction, ProjectionActionEntry, ProjectionTarget};
+use super::projection::{
+    MicroCompactPlan, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
+};
 
 /// 上下文压力 — 用于决定是否需要 compact 及回收目标
 #[derive(Debug, Clone)]
@@ -183,10 +185,7 @@ impl TurnGroup {
 /// 1. 先查 `config.tool_retention_map`（新 metadata-based 方法）
 /// 2. Fallback 到 `config.micro_excluded_tools`（旧黑名单）
 /// 3. 默认：非 Preserve → 可压缩
-fn should_preserve_tool(
-    tool_name: &str,
-    config: &CompactConfig,
-) -> bool {
+fn should_preserve_tool(tool_name: &str, config: &CompactConfig) -> bool {
     // 1. 先查 retention_map
     let name_lower = tool_name.to_lowercase();
     if let Some(retention) = config.tool_retention_map.get(&name_lower) {
@@ -221,10 +220,7 @@ fn should_preserve_tool(
 /// - 受保护工具（`micro_excluded_tools`）→ 跳过
 /// - 错误 ToolResult → 跳过 ToolResult 的 compact，但 tool_use 仍可压缩
 /// - 安全可压缩的工具 → CompactToolInput（per tool_call_id）+ CompactToolResult
-pub fn plan_micro(
-    transcript: &MessageTranscript,
-    config: &CompactConfig,
-) -> MicroCompactPlan {
+pub fn plan_micro(transcript: &MessageTranscript, config: &CompactConfig) -> MicroCompactPlan {
     let ancestor_len = transcript.ancestor_len();
     let entries = transcript.entries();
     let groups = TurnGroup::collect(entries, ancestor_len);

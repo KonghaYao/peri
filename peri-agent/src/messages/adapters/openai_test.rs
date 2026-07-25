@@ -211,7 +211,10 @@ fn test_projected_content_with_placeholder_serializes() {
 /// 投影后的 ToolResult（CompactToolResult head/tail 截断）正确序列化
 #[test]
 fn test_compacted_tool_result_serializes() {
-    let msg = BaseMessage::tool_result("tc_1", "AAAA".repeat(50) + "\n... [字符已省略] ...\n" + &"BBBB".repeat(25));
+    let msg = BaseMessage::tool_result(
+        "tc_1",
+        "AAAA".repeat(50) + "\n... [字符已省略] ...\n" + &"BBBB".repeat(25),
+    );
     let val = OpenAiAdapter::from_base_messages(&[msg]);
     let arr = val.as_array().unwrap();
     assert_eq!(arr[0]["role"], "tool");

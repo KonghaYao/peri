@@ -32,12 +32,10 @@ pub mod smart;
 pub use config::{CompactConfig, CONTINUATION_HINT};
 pub use full::{extract_file_info, extract_skill_names, re_inject_v2, ReInjectResult};
 pub use micro::micro_compact;
+pub use planner::{plan_micro, ApplyReport, CompactPolicy, ContextPressure, FullEscalationReason};
 pub use projection::{
-    MessageProjectionDirective, MicroCompactPlan, ProjectionAction, ProjectionActionEntry,
-    ProjectionTarget, ProviderCapabilities, ProviderProtocol, render_llm_view,
-};
-pub use planner::{
-    plan_micro, ApplyReport, CompactPolicy, ContextPressure, FullEscalationReason,
+    render_llm_view, MessageProjectionDirective, MicroCompactPlan, ProjectionAction,
+    ProjectionActionEntry, ProjectionTarget, ProviderCapabilities, ProviderProtocol,
 };
 
 // ─── CompactResult ───────────────────────────────────────────────────────────────
@@ -230,9 +228,7 @@ pub async fn run_compact(
                     summary: None,
                     full_escalation_reason: None,
                 }
-            } else if budget_pct >= config.auto_compact_threshold
-                && reclaim_target > 0
-            {
+            } else if budget_pct >= config.auto_compact_threshold && reclaim_target > 0 {
                 // 不足且达到 Full 阈值 → 跳过 Micro apply，直接 Full
                 debug!(
                     saved = plan.estimated_tokens_saved,

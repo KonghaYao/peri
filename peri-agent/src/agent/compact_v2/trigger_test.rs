@@ -87,7 +87,16 @@ async fn test_micro_effective_no_full_overlay() {
     let config = CompactConfig::default();
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(&mut t, None, &config, &pressure, false, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        false,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
     assert_eq!(result.strategy, CompactStrategy::Micro, "应走 Micro");
     assert!(result.affected_count >= 5, "Micro 有效，不应升级 Full");
     assert!(result.summary.is_none(), "Micro 无摘要");
@@ -111,7 +120,16 @@ async fn test_micro_invalid_upgrades_to_full() {
     let mut failures = 0u32;
     // budget=0.80 (< 0.95) → Micro 应用（部分收益），不升级 Full
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(&mut t, None, &config, &pressure, false, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        false,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
     // budget=0.80 < threshold=0.95 → 走 "不足但未达 Full 阈值" 路径 → 应用 Micro
     assert_eq!(
         result.strategy,
@@ -135,7 +153,16 @@ async fn test_micro_effective_full_overlay() {
     let mut failures = 0u32;
     // budget=0.98 (196000 tokens) → 远高于 threshold → 直接 Full（无 LLM 降级）
     let pressure = pressure_from_budget(0.98);
-    let result = run_compact(&mut t, None, &config, &pressure, false, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        false,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
     // Full → 无 LLM 降级
     assert_eq!(
         result.strategy,
@@ -155,7 +182,16 @@ async fn test_force_triggers_full_directly() {
     let mut failures = 0u32;
     // force=true + 无 LLM → Full 降级
     let pressure = pressure_from_budget(0.50);
-    let result = run_compact(&mut t, None, &config, &pressure, true, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        true,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
     assert_eq!(result.strategy, CompactStrategy::Full);
     assert_eq!(failures, 1);
 }
@@ -176,7 +212,16 @@ async fn test_full_without_llm_fails_no_panic() {
     let mut failures = 0u32;
     // budget=0.80 → Micro 执行，不升级 Full（因为 budget < threshold）
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(&mut t, None, &config, &pressure, false, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        false,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
     // budget=0.80 → Micro → 满足 target → 只走 Micro
     assert!(
         matches!(result.strategy, CompactStrategy::Micro),
@@ -210,7 +255,16 @@ async fn test_estimated_tokens_saved_reflected_in_result() {
     };
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(&mut t, None, &config, &pressure, false, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        false,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
 
     assert_eq!(result.strategy, CompactStrategy::Micro);
     assert!(
@@ -249,9 +303,17 @@ async fn test_estimated_tokens_saved_increases_with_more_rounds() {
         };
         let mut failures = 0u32;
         let pressure = pressure_from_budget(0.80);
-        run_compact(&mut t, None, &config, &pressure, false, &mut failures, "/tmp")
-            .await
-            .estimated_tokens_saved
+        run_compact(
+            &mut t,
+            None,
+            &config,
+            &pressure,
+            false,
+            &mut failures,
+            "/tmp",
+        )
+        .await
+        .estimated_tokens_saved
     }
 
     let saved_6 = make_and_compact(6, &long_output).await;

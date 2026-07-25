@@ -59,7 +59,16 @@ async fn test_run_compact_low_budget_skips() {
     let config = CompactConfig::default();
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.5);
-    let result = run_compact(&mut t, None, &config, &pressure, false, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        false,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
     assert_eq!(result.affected_count, 0, "低预算应跳过");
 }
 
@@ -77,7 +86,16 @@ async fn test_run_compact_micro_threshold() {
     let mut failures = 0u32;
     // budget = 0.80 → ≥ 0.75 → Micro
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(&mut t, None, &config, &pressure, false, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        false,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
     assert_eq!(result.strategy, CompactStrategy::Micro);
     assert!(result.affected_count >= 5, "Micro 有效，不应升级 Full");
 }
@@ -92,7 +110,16 @@ async fn test_run_compact_full_no_llm_fails_gracefully() {
     let mut failures = 0u32;
     // force=true 但无 LLM → 失败降级
     let pressure = pressure_from_budget(0.5);
-    let result = run_compact(&mut t, None, &config, &pressure, true, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        true,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
     assert_eq!(result.strategy, CompactStrategy::Full);
     assert_eq!(result.affected_count, 0, "失败时应无变更");
     assert_eq!(failures, 1, "失败计数应递增");
@@ -106,7 +133,16 @@ async fn test_run_compact_consecutive_failure_degradation() {
     let config = CompactConfig::default();
     let mut failures = config.max_consecutive_failures; // 已达上限
     let pressure = pressure_from_budget(0.95);
-    let result = run_compact(&mut t, None, &config, &pressure, true, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        true,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
     assert_eq!(result.affected_count, 0, "连续失败超限应跳过");
 }
 
@@ -123,7 +159,16 @@ async fn test_run_compact_micro_resets_failures() {
     let config = CompactConfig::default();
     let mut failures = 2u32;
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(&mut t, None, &config, &pressure, false, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        false,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
     assert_eq!(result.strategy, CompactStrategy::Micro);
     assert_eq!(failures, 0, "成功后应重置失败计数");
 }
@@ -146,7 +191,16 @@ async fn test_run_compact_rerun_clears_stale_excluded_flags() {
                              // force=true 触发 Full，但 consecutive_failures>0，应先清除 excluded
                              // 然后无 LLM 调用 full_compact_inner 会失败（但清除已发生）
     let pressure = pressure_from_budget(0.5);
-    let result = run_compact(&mut t, None, &config, &pressure, true, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        true,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
 
     assert_eq!(result.strategy, CompactStrategy::Full);
     assert!(!t.flags(id1).excluded, "上轮 excluded 标记应被清除");
@@ -166,7 +220,16 @@ async fn test_run_compact_first_run_does_not_clear_flags() {
     let config = CompactConfig::default();
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.5);
-    let _ = run_compact(&mut t, None, &config, &pressure, true, &mut failures, "/tmp").await;
+    let _ = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        true,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
 
     // 首次运行不应清除（虽然 full_compact_inner 失败，但清除逻辑未触发）
     assert!(t.flags(id1).excluded, "首次运行不应清除 excluded");
@@ -188,7 +251,16 @@ async fn test_run_compact_rerun_only_clears_excluded_not_truncated() {
     let config = CompactConfig::default();
     let mut failures = 1u32;
     let pressure = pressure_from_budget(0.5);
-    let _ = run_compact(&mut t, None, &config, &pressure, true, &mut failures, "/tmp").await;
+    let _ = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        true,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
 
     // 重跑后 excluded 被清除，但 truncated 保留
     assert!(!t.flags(id1).excluded, "重跑应清除 excluded");
@@ -224,7 +296,16 @@ async fn test_compact_result_economy_fields_populated() {
     };
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(&mut t, None, &config, &pressure, false, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        false,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
 
     assert_eq!(result.strategy, CompactStrategy::Micro);
     assert!(result.affected_count > 0, "Micro 应标记消息");
@@ -247,7 +328,16 @@ async fn test_full_compact_escalation_reason_preserved() {
     let config = CompactConfig::default();
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.5);
-    let result = run_compact(&mut t, None, &config, &pressure, true, &mut failures, "/tmp").await;
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        true,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
 
     assert_eq!(result.strategy, CompactStrategy::Full);
     assert_eq!(

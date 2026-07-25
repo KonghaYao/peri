@@ -181,11 +181,15 @@ fn test_projected_content_with_placeholder_serializes() {
 
     // 验证不含任何 base64 image source
     let has_image_src = content.iter().any(|b| {
-        b["source"].as_object()
+        b["source"]
+            .as_object()
             .map(|s| s.get("type").and_then(|v| v.as_str()) == Some("base64"))
             .unwrap_or(false)
     });
-    assert!(!has_image_src, "投影后 content 不应包含 base64 image source");
+    assert!(
+        !has_image_src,
+        "投影后 content 不应包含 base64 image source"
+    );
 }
 
 /// 投影后的 ToolResult（CompactToolResult head/tail 截断）正确序列化
@@ -194,7 +198,11 @@ fn test_compacted_tool_result_serializes() {
     let msgs = vec![
         BaseMessage::ai_with_tool_calls(
             "",
-            vec![ToolCallRequest::new("tc_1", "Bash", json!({"command": "ls"}))],
+            vec![ToolCallRequest::new(
+                "tc_1",
+                "Bash",
+                json!({"command": "ls"}),
+            )],
         ),
         BaseMessage::tool_result(
             "tc_1",
@@ -206,7 +214,10 @@ fn test_compacted_tool_result_serializes() {
 
     // tool result 应合并到 user 消息
     let user_content = arr[1]["content"].as_array().unwrap();
-    let tool_result = user_content.iter().find(|b| b["type"] == "tool_result").unwrap();
+    let tool_result = user_content
+        .iter()
+        .find(|b| b["type"] == "tool_result")
+        .unwrap();
     assert_eq!(tool_result["tool_use_id"], "tc_1");
     assert!(!tool_result["is_error"].as_bool().unwrap());
 
@@ -219,7 +230,11 @@ fn test_compacted_tool_result_serializes() {
     } else {
         panic!("unexpected content type");
     };
-    assert!(result_text.contains("字符已省略"), "应包含截断标记，实际: {}", result_text);
+    assert!(
+        result_text.contains("字符已省略"),
+        "应包含截断标记，实际: {}",
+        result_text
+    );
 }
 
 /// 带签名 reasoning 在 Anthropic 适配器中保留 signature 字段

@@ -79,9 +79,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             let plan = crate::agent::compact_v2::planner::plan_micro(&guard, config);
             if plan.has_changes() {
                 let caps = ctx.runtime.llm.provider_capabilities();
-                match crate::agent::compact_v2::projection::render_llm_view(
-                    &guard, &plan, &caps,
-                ) {
+                match crate::agent::compact_v2::projection::render_llm_view(&guard, &plan, &caps) {
                     Ok(view) => {
                         tracing::debug!(
                             action_count = plan.actions.len(),

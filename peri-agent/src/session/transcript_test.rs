@@ -497,10 +497,7 @@ fn test_projection_directive_persists_roundtrip() {
     let flags2 = t2.flags(id);
     assert!(flags2.truncated);
     assert!(flags2.projection.is_some(), "rebuild 后 projection 应保留");
-    assert_eq!(
-        flags2.projection.as_ref().unwrap().policy_version,
-        2
-    );
+    assert_eq!(flags2.projection.as_ref().unwrap().policy_version, 2);
 }
 
 #[test]
@@ -518,5 +515,8 @@ fn test_projection_directive_none_when_not_set() {
 
     // 序列化为 JSON 验证向后兼容
     let json = serde_json::to_string(&flags).unwrap();
-    assert!(!json.contains("projection"), "JSON 应不含 projection 字段（skip_serializing_if）");
+    assert!(
+        !json.contains("projection"),
+        "JSON 应不含 projection 字段（skip_serializing_if）"
+    );
 }
