@@ -77,46 +77,37 @@ describe("workflow: run and observe", () => {
       expect(doneCapture.text.length).toBeGreaterThan(100);
 
       // Judge: 启动阶段
-      try {
-        const r = await judge({
-          ansiRaw: launchCapture.raw,
-          criteria: [
-            "agent 应已响应了 workflow 请求，消息区中有 workflow 相关输出（如工具卡片或启动通知）",
-          ],
-        });
-        console.log("Judge (launch):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: launchCapture.raw,
+        criteria: [
+          "agent 应已响应了 workflow 请求，消息区中有 workflow 相关输出（如工具卡片或启动通知）",
+        ],
+      });
+      console.log("Judge (launch):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
 
       // Judge: 面板 running 阶段——workflow 正在运行，但面板结果列表尚未更新
       // 实际运行状态在 BgTaskArea 和状态栏中可见
-      try {
-        const r = await judge({
-          ansiRaw: runningCapture.raw,
-          criteria: [
-            "Workflow 面板已打开，标题栏显示 'Workflow'",
-            "虽面板显示 '当前会话无工作流运行'，但状态栏或下方任务区应显示 '1 workflow' 或 '◎ workflow' 表示正在运行",
-          ],
-        });
-        console.log("Judge (running):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r2 = await judge({
+        ansiRaw: runningCapture.raw,
+        criteria: [
+          "Workflow 面板已打开，标题栏显示 'Workflow'",
+          "虽面板显示 '当前会话无工作流运行'，但状态栏或下方任务区应显示 '1 workflow' 或 '◎ workflow' 表示正在运行",
+        ],
+      });
+      console.log("Judge (running):", JSON.stringify(r2, null, 2));
+      expect(r2.pass).toBe(true);
 
       // Judge: 面板完成态
-      try {
-        const r = await judge({
-          ansiRaw: doneCapture.raw,
-          criteria: [
-            "Workflow 面板应显示已完成的任务（可能显示 ✓ 或 completed 标记）",
-            "面板中应有任务的执行结果或统计信息（如 agent 数量、耗时、输出摘要）",
-          ],
-        });
-        console.log("Judge (done):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r3 = await judge({
+        ansiRaw: doneCapture.raw,
+        criteria: [
+          "Workflow 面板应显示已完成的任务（可能显示 ✓ 或 completed 标记）",
+          "面板中应有任务的执行结果或统计信息（如 agent 数量、耗时、输出摘要）",
+        ],
+      });
+      console.log("Judge (done):", JSON.stringify(r3, null, 2));
+      expect(r3.pass).toBe(true);
     },
   );
 });

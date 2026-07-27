@@ -48,20 +48,17 @@ describe("tool-card: error no header suffix", () => {
       expect(capture.text.length).toBeGreaterThan(50);
 
       // Judge: 验证错误态
-      try {
-        const r = await judge({
-          ansiRaw: capture.raw,
-          criteria: [
-            "屏幕上应出现 Read 工具调用的痕迹",
-            "Read 工具的头行应只包含文件名参数（如 'Read (/tmp/nonexistent...)'），不应有 '— N lines' 等后缀",
-            "错误详细信息应在独立的输出行中可见（如 'Error:' 或 'not found' 或 'Tool execution failed'）",
-            "错误信息不应该压缩消失，应该清晰展示失败原因",
-          ],
-        });
-        console.log("Judge:", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: capture.raw,
+        criteria: [
+          "屏幕上应出现 Read 工具调用的痕迹",
+          "Read 工具的头行应只包含文件名参数（如 'Read (/tmp/nonexistent...)'），不应有 '— N lines' 等后缀",
+          "错误详细信息应在独立的输出行中可见（如 'Error:' 或 'not found' 或 'Tool execution failed'）",
+          "错误信息不应该压缩消失，应该清晰展示失败原因",
+        ],
+      });
+      console.log("Judge:", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
     },
   );
 });

@@ -49,34 +49,28 @@ describe("subagent: sync agents", () => {
       expect(doneCapture.text.length).toBeGreaterThan(100);
 
       // Judge: running 态（Agent 已派发，subagent 正在执行中）
-      try {
-        const r = await judge({
-          ansiRaw: runningCapture.raw,
-          criteria: [
-            "消息区应有 Agent 工具调用卡片（● Agent + 任务描述，如 'sleep 10s then echo hello'）",
-            "Agent 卡片内部应有 SubAgent 执行的工具调用卡片（如 ● Bash 或 ● Shell，包含命令参数），而非仅展示空的卡片容器",
-            "系统应处于处理中状态（如底部有加载指示器或 Spinner），表明 subagent 仍在运行",
-          ],
-        });
-        console.log("Judge (running):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: runningCapture.raw,
+        criteria: [
+          "消息区应有 Agent 工具调用卡片（● Agent + 任务描述，如 'sleep 10s then echo hello'）",
+          "Agent 卡片内部应有 SubAgent 执行的工具调用卡片（如 ● Bash 或 ● Shell，包含命令参数），而非仅展示空的卡片容器",
+          "系统应处于处理中状态（如底部有加载指示器或 Spinner），表明 subagent 仍在运行",
+        ],
+      });
+      console.log("Judge (running):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
 
       // Judge: 完成态
-      try {
-        const r = await judge({
-          ansiRaw: doneCapture.raw,
-          criteria: [
-            "Agent 工具卡片应已完成执行（✅ 完成标记或绿色 ●，不再显示 running/⏳ 状态）",
-            "Agent 卡片区域内应保留 SubAgent 内部工具调用的痕迹（如 Bash/Shell 工具条目），而非完成后变成完全空白的卡片",
-            "消息区应包含 SubAgent 的执行结果（如 Shell 的 'hello' 输出或完成摘要）",
-          ],
-        });
-        console.log("Judge (done):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r2 = await judge({
+        ansiRaw: doneCapture.raw,
+        criteria: [
+          "Agent 工具卡片应已完成执行（✅ 完成标记或绿色 ●，不再显示 running/⏳ 状态）",
+          "Agent 卡片区域内应保留 SubAgent 内部工具调用的痕迹（如 Bash/Shell 工具条目），而非完成后变成完全空白的卡片",
+          "消息区应包含 SubAgent 的执行结果（如 Shell 的 'hello' 输出或完成摘要）",
+        ],
+      });
+      console.log("Judge (done):", JSON.stringify(r2, null, 2));
+      expect(r2.pass).toBe(true);
     },
   );
 });

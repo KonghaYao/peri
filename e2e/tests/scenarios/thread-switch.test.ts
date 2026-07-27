@@ -55,32 +55,26 @@ describe("scenarios: thread switch", () => {
       expect(capture.text.length).toBeGreaterThan(50);
 
       // LLM judge: 面板阶段
-      try {
-        const panelResult = await judge({
-          ansiRaw: panelCapture.raw,
-          criteria: [
-            "屏幕中应有 Threads 面板，显示历史线程列表（含线程标题和消息计数）",
-            "面板中应有可选的线程条目，当前选中项应有视觉提示（如高亮、> 符号）",
-          ],
-        });
-        console.log("Judge (panel):", JSON.stringify(panelResult, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const panelResult = await judge({
+        ansiRaw: panelCapture.raw,
+        criteria: [
+          "屏幕中应有 Threads 面板，显示历史线程列表（含线程标题和消息计数）",
+          "面板中应有可选的线程条目，当前选中项应有视觉提示（如高亮、> 符号）",
+        ],
+      });
+      console.log("Judge (panel):", JSON.stringify(panelResult, null, 2));
+      expect(panelResult.pass).toBe(true);
 
       // LLM judge: 切换后验证
-      try {
-        const doneResult = await judge({
-          ansiRaw: capture.raw,
-          criteria: [
-            "Threads 面板应已关闭，消息区显示了切换后线程的历史内容（不是空白页或 Welcome 页）",
-            "消息区中应有对话内容（如用户气泡或 AI 回复），表明线程切换成功",
-          ],
-        });
-        console.log("Judge (done):", JSON.stringify(doneResult, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const doneResult = await judge({
+        ansiRaw: capture.raw,
+        criteria: [
+          "Threads 面板应已关闭，消息区显示了切换后线程的历史内容（不是空白页或 Welcome 页）",
+          "消息区中应有对话内容（如用户气泡或 AI 回复），表明线程切换成功",
+        ],
+      });
+      console.log("Judge (done):", JSON.stringify(doneResult, null, 2));
+      expect(doneResult.pass).toBe(true);
     },
   );
 });

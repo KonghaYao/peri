@@ -47,19 +47,16 @@ describe("Skill 工具", () => {
       expect(capture.text.length).toBeGreaterThan(50);
 
       // Judge 验证
-      try {
-        const r = await judge({
-          ansiRaw: capture.raw,
-          criteria: [
-            "agent 成功加载了 use-artifacts skill 的内容：回复中应提到 artifact 工具、上传 HTML/Markdown 文件等功能，这些信息来自 SKILL.md 而非 agent 自行编造",
-            "不应出现任何 skill 相关的错误信息，如 'Unknown skill'、'cache is empty'、'before_agent may not have run' 等",
-            "整体执行速度正常——状态栏显示耗时在合理范围内（≤30s），无长时间卡顿",
-          ],
-        });
-        console.log("Judge:", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 调用失败（不影响测试结果）:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: capture.raw,
+        criteria: [
+          "agent 成功加载了 use-artifacts skill 的内容：回复中应提到 artifact 工具、上传 HTML/Markdown 文件等功能，这些信息来自 SKILL.md 而非 agent 自行编造",
+          "不应出现任何 skill 相关的错误信息，如 'Unknown skill'、'cache is empty'、'before_agent may not have run' 等",
+          "整体执行速度正常——状态栏显示耗时在合理范围内（≤30s），无长时间卡顿",
+        ],
+      });
+      console.log("Judge:", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
     },
   );
 });

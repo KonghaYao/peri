@@ -478,6 +478,8 @@ pub fn append_messages_to_transcript(
 struct LoopState {
     /// 上一轮 Act 是否产出了 tool_calls
     has_tool_calls: bool,
+    /// before_agent hooks 是否已执行（首次 Receive 后执行一次）
+    before_agent_has_run: bool,
 }
 
 /// 运行 ReAct v2 四阶段循环（RCRA）
@@ -580,6 +582,18 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 "run_react_loop: exit (queue empty, no idle wait)"
             );
             return LoopResult::Completed;
+        }
+
+        // ── before_agent hooks（首次 Receive 后执行一次）──
+        // RCRA 下 Receive 是唯一队列消费点，消息已通过 drain_all() 写入 transcript，
+        // 此时 before_agent 钩子（SkillPreloadMiddleware / AtMentionMiddleware 等）
+        // 可通过 state.messages() 读取用户输入。
+        // 替代原来在 run_react_loop 外部的 Phase 6.7 调用。
+        if !loop_state.before_agent_has_run {
+            loop_state.before_agent_has_run = true;
+            if let Err(e) = middleware_runner::run_before_agent(&context).await {
+                tracing::warn!(error = %e, "[v2] before_agent hook failed");
+            }
         }
 
         // ── Compact ──

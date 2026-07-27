@@ -63,19 +63,16 @@ describe("workflow: panel columns", () => {
       expect(panelCapture.text.length).toBeGreaterThan(50);
 
       // Judge: panel 内容
-      try {
-        const r = await judge({
-          ansiRaw: panelCapture.raw,
-          criteria: [
-            "Workflow 面板应打开（标题为 'Workflow' 或包含 workflow 列表）",
-            "已完成 workflow 的 agent 列表中应显示至少一个 agent 条目",
-            "agent 条目旁边应有数值列（token 数和工具调用数），可以是 0 但列结构应存在",
-          ],
-        });
-        console.log("Judge (panel):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: panelCapture.raw,
+        criteria: [
+          "Workflow 面板应打开（标题为 'Workflow' 或包含 workflow 列表）",
+          "已完成 workflow 的 agent 列表中应显示至少一个 agent 条目",
+          "agent 条目旁边应有数值列（token 数和工具调用数），可以是 0 但列结构应存在",
+        ],
+      });
+      console.log("Judge (panel):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
     },
   );
 });

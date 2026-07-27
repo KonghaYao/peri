@@ -80,18 +80,15 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       expect(capture1.text.length).toBeGreaterThan(50);
 
       // 断言 A1: 第一个 SubAgent 运行时有内部工具卡片
-      try {
-        const r = await judge({
-          ansiRaw: capture1.raw,
-          criteria: [
-            "消息区应出现第一个 Agent 卡片（标题包含 'Agent'），其内部（缩进或子行）包含至少一个工具调用卡片",
-            "工具调用卡片应显示具体工具名（如 ● Grep / ● Glob / ● Read），不是空白或只有容器边框",
-          ],
-        });
-        console.log("Judge (phase1):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge phase1 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: capture1.raw,
+        criteria: [
+          "消息区应出现第一个 Agent 卡片（标题包含 'Agent'），其内部（缩进或子行）包含至少一个工具调用卡片",
+          "工具调用卡片应显示具体工具名（如 ● Grep / ● Glob / ● Read），不是空白或只有容器边框",
+        ],
+      });
+      console.log("Judge (phase1):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
 
       // ── Phase 2: 等第二个 SubAgent 开始运行 ──
       // 第一个 SubAgent 会在 ~30s 内完成，第二个会在完成后启动
@@ -111,22 +108,19 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       expect(capture2.text.length).toBeGreaterThan(50);
 
       // 断言 A2: 第二个 SubAgent 运行时/完成后也有工具调用 —— 核心断言
-      try {
-        const r = await judge({
-          ansiRaw: capture2.raw,
-          criteria: [
-            // 核心: 第二个 Agent 卡片内也要有工具调用条目
-            "消息区中应出现第二个 Agent 工具调用卡片，且其内部应有具体工具调用卡片（如 ● Grep 或 ● Glob）",
-            // 防御: 不应出现空的外壳——Agent 卡片的标签行下方应有实质内容
-            "如果 Agent 卡片显示 'running' 或 'Finished' 状态，其内部区域不应为空——至少有一个工具条目或工具计数说明",
-            // 防混淆
-            "第二个 SubAgent 的工具卡片不应出现在第一个 Agent 卡片区域内",
-          ],
-        });
-        console.log("Judge (phase2):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge phase2 失败:", err.message);
-      }
+      const r2 = await judge({
+        ansiRaw: capture2.raw,
+        criteria: [
+          // 核心: 第二个 Agent 卡片内也要有工具调用条目
+          "消息区中应出现第二个 Agent 工具调用卡片，且其内部应有具体工具调用卡片（如 ● Grep 或 ● Glob）",
+          // 防御: 不应出现空的外壳——Agent 卡片的标签行下方应有实质内容
+          "如果 Agent 卡片显示 'running' 或 'Finished' 状态，其内部区域不应为空——至少有一个工具条目或工具计数说明",
+          // 防混淆
+          "第二个 SubAgent 的工具卡片不应出现在第一个 Agent 卡片区域内",
+        ],
+      });
+      console.log("Judge (phase2):", JSON.stringify(r2, null, 2));
+      expect(r2.pass).toBe(true);
 
       // ── Phase 3: 等全部完成 ──
       await tester.sleep(30000);
@@ -137,18 +131,15 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       expect(capture3.text.length).toBeGreaterThan(50);
 
       // 断言 A3: 完成后两个 SubAgent 的痕迹都保留
-      try {
-        const r = await judge({
-          ansiRaw: capture3.raw,
-          criteria: [
-            "完成后消息区应保留两个 Agent 工具调用入口（两个 ● Agent 条目），各自显示完成状态",
-            "两个 Agent 卡片完成后的输出区域都应包含工具调用结果摘要",
-          ],
-        });
-        console.log("Judge (phase3):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge phase3 失败:", err.message);
-      }
+      const r3 = await judge({
+        ansiRaw: capture3.raw,
+        criteria: [
+          "完成后消息区应保留两个 Agent 工具调用入口（两个 ● Agent 条目），各自显示完成状态",
+          "两个 Agent 卡片完成后的输出区域都应包含工具调用结果摘要",
+        ],
+      });
+      console.log("Judge (phase3):", JSON.stringify(r3, null, 2));
+      expect(r3.pass).toBe(true);
 
       // ── 断言 B: 日志诊断 ──
       const notRoutedAfter = countNotRoutedInLog();

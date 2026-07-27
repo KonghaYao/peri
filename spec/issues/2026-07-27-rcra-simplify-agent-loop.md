@@ -75,6 +75,22 @@ run_react_loop {
 
 错误退出沿用现有 `?` 传播机制，不在 RCRA 改动范围。
 
+## E2E 测试回归结果
+
+### 修复前（Phase 6.6 预消费 bug，`123c1add`）
+
+| 测试文件 | 失败信息 |
+|----------|---------|
+| `tests/scenarios/ask-user-question.test.ts` | `Error: Text "Ask User" not found (timeout: 60000ms)` |
+| `tests/scenarios/goal-continuation.test.ts` | 等待数字 1-10 超时 |
+| `tests/scenarios/hitl-approval.test.ts` | 等待 HITL 审批弹窗超时 |
+
+通过的 8 个：`basic-question` `model-switch` `plugin` `clear-chat` `compact-command` `streaming-tool-interleave` `thread-switch` `user-bubble-scrollbar`
+
+### 修复后（Phase 6.6 移除）
+
+待回归。上述 3 个失败很可能同根因（agent loop 立即退出无输出）。
+
 ## 状态变更记录
 
 | 日期 | 从 | 到 | 操作人 | 说明 |
@@ -83,4 +99,13 @@ run_react_loop {
 
 ## 修复记录
 
-（由 auto-issue-fixer 修复阶段追加，创建时留空）
+### 修复 #1（2026-07-27）
+
+- **操作人**：agent
+- **问题现象**：RCRA 重构后 agent loop 对任何用户输入均立即返回 0s，不执行 Reason/Act 阶段
+- **根因**：Phase 6.6（在 `run_react_loop` 之外通过 `drain_for_receive()` 预消费队列）与 RCRA 的 Receive 退出判断冲突。CRRAE 时代 Receive 不做退出判断（退出在 End），预消费兼容；RCRA 中 Receive 用 `consumed_count == 0` 判断退出，预消费使队列变空 → 循环立即退出
+- **修复内容**：
+  - `peri-agent/src/agent/stages/mod.rs`：`run_react_loop` 内首次 Receive 后执行 `before_agent` middleware hooks（替代外部 Phase 6.7）
+  - `peri-acp/src/session/executor_helpers.rs`：移除 Phase 6.6（预 drain+append）和 Phase 6.7（hooks 调用），改为由 loop 内部处理
+  - `peri-acp/src/agent/workflow_agent.rs`：同上
+- **验证状态**：单元测试全部通过（46 个 stages 测试 + 8 个 queue 测试 + 317 个 peri-acp 测试），clippy 零告警。E2E 测试待回归。

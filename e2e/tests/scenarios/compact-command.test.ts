@@ -65,19 +65,16 @@ describe("scenarios: /compact 命令", () => {
       expect(afterCompact.text.length).toBeGreaterThan(0);
 
       // LLM judge
-      try {
-        const result = await judge({
-          ansiRaw: afterCompact.raw,
-          criteria: [
-            "状态栏应显示上下文消耗百分比（格式如 'NN% NNNk'），百分比数值应合理（>0% 且 <=100%）",
-            "消息区域不应出现渲染异常（如文字覆盖、布局错位、空白闪烁残留）",
-            "界面底部输入框应仍然可见可用",
-          ],
-        });
-        console.log("Judge (/compact):", JSON.stringify(result, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const result = await judge({
+        ansiRaw: afterCompact.raw,
+        criteria: [
+          "状态栏应显示上下文消耗百分比（格式如 'NN% NNNk'），百分比数值应合理（>0% 且 <=100%）",
+          "消息区域不应出现渲染异常（如文字覆盖、布局错位、空白闪烁残留）",
+          "界面底部输入框应仍然可见可用",
+        ],
+      });
+      console.log("Judge (/compact):", JSON.stringify(result, null, 2));
+      expect(result.pass).toBe(true);
     },
   );
 });

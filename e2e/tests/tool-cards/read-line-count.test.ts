@@ -47,19 +47,16 @@ describe("tool-card: read line count", () => {
       expect(capture.text.length).toBeGreaterThan(50);
 
       // Judge: Read 头行后缀
-      try {
-        const r = await judge({
-          ansiRaw: capture.raw,
-          criteria: [
-            "屏幕上应出现 Read 工具调用的痕迹",
-            "Read 工具的头行应包含文件路径和行数摘要，格式如 'Read (Cargo.toml) — N lines'",
-            "行数 N 应是一个合理的正整数（> 0），函数调用应成功读取并显示文件行数",
-          ],
-        });
-        console.log("Judge:", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: capture.raw,
+        criteria: [
+          "屏幕上应出现 Read 工具调用的痕迹",
+          "Read 工具的头行应包含文件路径和行数摘要，格式如 'Read (Cargo.toml) — N lines'",
+          "行数 N 应是一个合理的正整数（> 0），函数调用应成功读取并显示文件行数",
+        ],
+      });
+      console.log("Judge:", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
     },
   );
 });

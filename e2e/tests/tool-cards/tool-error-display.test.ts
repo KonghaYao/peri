@@ -48,32 +48,26 @@ describe("tool-card: error display", () => {
       expect(afterCapture.text.length).toBeGreaterThan(50);
 
       // Judge: 错误态
-      try {
-        const r = await judge({
-          ansiRaw: errorCapture.raw,
-          criteria: [
-            "屏幕上应出现 Read 工具调用的痕迹（如 'Read' 或 'read' 字样）",
-            "agent 应感知到文件不存在（如 'not found'、'不存在'、'no such file' 等错误提示）",
-          ],
-        });
-        console.log("Judge (error):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: errorCapture.raw,
+        criteria: [
+          "屏幕上应出现 Read 工具调用的痕迹（如 'Read' 或 'read' 字样）",
+          "agent 应感知到文件不存在（如 'not found'、'不存在'、'no such file' 等错误提示）",
+        ],
+      });
+      console.log("Judge (error):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
 
       // Judge: agent 调整策略
-      try {
-        const r = await judge({
-          ansiRaw: afterCapture.raw,
-          criteria: [
-            "agent 应承认文件不存在这一事实，未继续尝试读取该文件",
-            "agent 的回复应包含对错误的说明或替代建议",
-          ],
-        });
-        console.log("Judge (after):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r2 = await judge({
+        ansiRaw: afterCapture.raw,
+        criteria: [
+          "agent 应承认文件不存在这一事实，未继续尝试读取该文件",
+          "agent 的回复应包含对错误的说明或替代建议",
+        ],
+      });
+      console.log("Judge (after):", JSON.stringify(r2, null, 2));
+      expect(r2.pass).toBe(true);
     },
   );
 });

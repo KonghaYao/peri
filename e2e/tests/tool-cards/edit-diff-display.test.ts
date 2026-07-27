@@ -58,33 +58,27 @@ describe("tool-card: edit diff display", () => {
       expect(doneCapture.text.length).toBeGreaterThan(50);
 
       // Judge: Edit 阶段
-      try {
-        const r = await judge({
-          ansiRaw: editCapture.raw,
-          criteria: [
-            "屏幕上应出现 Write 和 Edit 工具调用的痕迹",
-            "Edit 工具的头行应显示变更摘要（如 '— N lines changed · +N · -N' 或 '— Replaced text' 格式）",
-            "agent 应执行了文件编辑操作，而非跳过或用其他方式替代",
-          ],
-        });
-        console.log("Judge (edit):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: editCapture.raw,
+        criteria: [
+          "屏幕上应出现 Write 和 Edit 工具调用的痕迹",
+          "Edit 工具的头行应显示变更摘要（如 '— N lines changed · +N · -N' 或 '— Replaced text' 格式）",
+          "agent 应执行了文件编辑操作，而非跳过或用其他方式替代",
+        ],
+      });
+      console.log("Judge (edit):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
 
       // Judge: 完成阶段
-      try {
-        const r = await judge({
-          ansiRaw: doneCapture.raw,
-          criteria: [
-            "agent 应确认文件编辑操作已完成",
-            "屏幕上应包含编辑后的内容或编辑成功的确认信息",
-          ],
-        });
-        console.log("Judge (done):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r2 = await judge({
+        ansiRaw: doneCapture.raw,
+        criteria: [
+          "agent 应确认文件编辑操作已完成",
+          "屏幕上应包含编辑后的内容或编辑成功的确认信息",
+        ],
+      });
+      console.log("Judge (done):", JSON.stringify(r2, null, 2));
+      expect(r2.pass).toBe(true);
     },
   );
 });

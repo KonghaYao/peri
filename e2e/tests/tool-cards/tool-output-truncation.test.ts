@@ -56,33 +56,27 @@ describe("tool-card: output truncation", () => {
       expect(afterCapture.text.length).toBeGreaterThan(50);
 
       // Judge: Read 阶段
-      try {
-        const r = await judge({
-          ansiRaw: readCapture.raw,
-          criteria: [
-            "屏幕上应出现 Read 工具调用的痕迹（如 'Read' 字样）",
-            "Read 工具的头行应显示行数摘要（如 '— N lines' 格式），表明文件已被读取",
-            "输出应被截断——不应显示完整的 Cargo.lock（该文件通常 5000+ 行）",
-          ],
-        });
-        console.log("Judge (read):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: readCapture.raw,
+        criteria: [
+          "屏幕上应出现 Read 工具调用的痕迹（如 'Read' 字样）",
+          "Read 工具的头行应显示行数摘要（如 '— N lines' 格式），表明文件已被读取",
+          "输出应被截断——不应显示完整的 Cargo.lock（该文件通常 5000+ 行）",
+        ],
+      });
+      console.log("Judge (read):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
 
       // Judge: 完成阶段
-      try {
-        const r = await judge({
-          ansiRaw: afterCapture.raw,
-          criteria: [
-            "agent 应基于读取的内容给出分析或总结",
-            "agent 能基于可见内容给出有价值的分析，即使提到了截断也不影响分析质量",
-          ],
-        });
-        console.log("Judge (after):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r2 = await judge({
+        ansiRaw: afterCapture.raw,
+        criteria: [
+          "agent 应基于读取的内容给出分析或总结",
+          "agent 能基于可见内容给出有价值的分析，即使提到了截断也不影响分析质量",
+        ],
+      });
+      console.log("Judge (after):", JSON.stringify(r2, null, 2));
+      expect(r2.pass).toBe(true);
     },
   );
 });

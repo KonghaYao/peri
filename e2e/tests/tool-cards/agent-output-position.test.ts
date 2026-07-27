@@ -65,34 +65,28 @@ describe("tool-card: agent output and nested position", () => {
       expect(doneCapture.text.length).toBeGreaterThan(50);
 
       // Judge: 运行中 —— 子工具位置检查
-      try {
-        const r = await judge({
-          ansiRaw: runningCapture.raw,
-          criteria: [
-            "屏幕应显示 SubAgent 正在工作的痕迹（如工具调用卡片或加载指示器）",
-            "Agent 卡片内部应有具体的工具调用条目（如 ● Grep 或 ● Read，包含工具名称），而非仅展示空的 Agent 卡片外壳",
-            "SubAgent 相关的内容（工具调用或状态信息）应出现在 Agent 卡片下方，而非上方历史消息中",
-          ],
-        });
-        console.log("Judge (running):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: runningCapture.raw,
+        criteria: [
+          "屏幕应显示 SubAgent 正在工作的痕迹（如工具调用卡片或加载指示器）",
+          "Agent 卡片内部应有具体的工具调用条目（如 ● Grep 或 ● Read，包含工具名称），而非仅展示空的 Agent 卡片外壳",
+          "SubAgent 相关的内容（工具调用或状态信息）应出现在 Agent 卡片下方，而非上方历史消息中",
+        ],
+      });
+      console.log("Judge (running):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
 
       // Judge: 完成 —— Agent 输出 + 位置
-      try {
-        const r = await judge({
-          ansiRaw: doneCapture.raw,
-          criteria: [
-            "Agent 工具卡片下方应有非空的输出摘要（output_summary），即 SubAgent 完成后的回复或搜索结论应可见",
-            "如果 SubAgent 已完成，应有关于 TODO 搜索结果的文字说明——而非空白内容",
-            "消息区中不应出现子工具调用卡片飘到 Agent 卡片上方、混入更早历史消息的情况",
-          ],
-        });
-        console.log("Judge (done):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r2 = await judge({
+        ansiRaw: doneCapture.raw,
+        criteria: [
+          "Agent 工具卡片下方应有非空的输出摘要（output_summary），即 SubAgent 完成后的回复或搜索结论应可见",
+          "如果 SubAgent 已完成，应有关于 TODO 搜索结果的文字说明——而非空白内容",
+          "消息区中不应出现子工具调用卡片飘到 Agent 卡片上方、混入更早历史消息的情况",
+        ],
+      });
+      console.log("Judge (done):", JSON.stringify(r2, null, 2));
+      expect(r2.pass).toBe(true);
     },
   );
 });
