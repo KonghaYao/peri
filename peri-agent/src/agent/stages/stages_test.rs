@@ -282,7 +282,7 @@ fn test_append_messages_defer_wrapped_in_reminder() {
 }
 
 #[tokio::test]
-async fn test_rcra_defer_consumed_in_receive() {
+async fn test_e2e_defer_consumed_in_receive() {
     // RCRA：push Defer → run_react_loop → 第一轮 Receive 消费 Defer（drain_all）
     // → Compact → Reason → Act → Receive（空→退出）→ Completed。
     //

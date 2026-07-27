@@ -13,11 +13,12 @@
 //! ## Invariants
 //!
 //! 1. `await_wake` is **non-destructive** — it does NOT drain. `stages/receive.rs`
-//!    `drain_all` / `drain_for_receive` / `drain_for_end` still do the actual draining.
+//!    uses `drain_all` in the loop body; `drain_for_receive` and `drain_for_end`
+//!    remain as public APIs for external flush paths (executor helpers, tests).
 //! 2. Pushers from Agent/ACP layer use `InboxHandle` (cloneable, `Send + Sync`).
-//! 3. TUI should NOT have access to `InboxHandle` — TUI loses its `drain_for_end`
-//!    responsibility. All async events (cron/channel/workflow/bg_results) flow through
-//!    Agent/ACP layer → `InboxHandle::push` → `MessageQueue` → `await_wake` / `drain_for_end`.
+//! 3. TUI should NOT have access to `InboxHandle` — all async events
+//!    (cron/channel/workflow/bg_results) flow through Agent/ACP layer →
+//!    `InboxHandle::push` → `MessageQueue` → `await_wake` → Receive's `drain_all`.
 //!
 //! ## Two-phase async loop
 //!
@@ -27,6 +28,7 @@
 //!
 //! Agent idle (loading=false):
 //!   async event → push to queue → await_wake returns → run_session_loop starts new turn
+//!    → Receive stage drain_all consumes the message
 //! ```
 
 use std::sync::Arc;
@@ -68,7 +70,8 @@ impl SessionInbox {
     /// ## Non-destructive
     ///
     /// This method does NOT drain any messages. The actual consumption happens in
-    /// `stages/receive.rs` via `drain_all` or `stages/receive.rs` via `drain_for_receive`.
+    /// `stages/receive.rs` via `drain_all`; `drain_for_receive` and `drain_for_end`
+    /// remain available for external flush callers.
     ///
     /// ## Spurious wakeup guard
     ///
@@ -132,8 +135,8 @@ pub struct InboxHandle {
 impl InboxHandle {
     /// Push a Prompt message (user input or external request) and wake the executor.
     ///
-    /// Prompt messages are consumed by `drain_all` during the next Receive stage
-    /// and can wake the loop via `drain_for_end`.
+    /// Prompt messages are consumed by `drain_all` during the Receive stage
+    /// and wake the loop.
     pub fn push_prompt(&self, source: MessageSource, message: BaseMessage) {
         self.queue.push(QueuedMessage::prompt(source, message));
         self.wake.notify_one();
@@ -150,7 +153,8 @@ impl InboxHandle {
 
     /// Push an Info message (system reminder, hook injection) — does NOT wake.
     ///
-    /// Info messages are consumed by `drain_for_receive` but never wake the loop.
+    /// Info messages are consumed by `drain_all` (in the loop) or `drain_for_receive`
+    /// (external flush paths), but never wake the loop.
     /// They must be carried out by a Prompt message arriving later.
     pub fn push_info(&self, source: MessageSource, message: BaseMessage) {
         // Intentionally no wake.notify_one() — Info does not wake the loop
