@@ -532,8 +532,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             Err(e) => return LoopResult::Error(e),
         };
 
-        // 退出判断：队列为空 → 检查是否该退出
-        if receive_out.consumed_count == 0 {
+        // 退出判断：队列为空且上一轮无工具调用 → 检查是否该退出。
+        // 工具调用结果写入 transcript 而非队列：has_tool_calls=true 时
+        // consumed_count=0 是正常状态——继续循环让 LLM 处理工具结果。
+        if receive_out.consumed_count == 0 && !loop_state.has_tool_calls {
             // 竞态保护：退出前再检查一次队列是否有新消息到达
             if context.session.queue.has_wake_up() {
                 tracing::debug!("Receive: consumed=0 but queue has wake-up, continue");
