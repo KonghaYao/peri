@@ -5,7 +5,7 @@
 //! calls [`await_wake`](SessionInbox::await_wake) which blocks until a new Prompt/Defer
 //! is enqueued, then the loop resumes.
 //!
-//! During the ReAct loop itself, `stages/end.rs` calls `drain_for_end` / `drain_for_receive`
+//! During the ReAct loop itself, `stages/receive.rs` calls `drain_all`
 //! to consume pending messages — no wake needed (loop is already spinning).
 //!
 //! Pushers from Agent/ACP layers use [`InboxHandle`] (cloneable). The TUI should NOT have

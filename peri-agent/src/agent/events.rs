@@ -94,7 +94,7 @@ pub struct WorkflowProgressPayload {
     pub message: Option<String>,
 }
 
-/// ReAct 循环 5 阶段
+/// ReAct 循环 4 阶段
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
@@ -102,7 +102,6 @@ pub enum Stage {
     Receive,
     Reason,
     Act,
-    End,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

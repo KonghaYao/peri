@@ -60,13 +60,6 @@ async fn test_smoke_complete_turn_sequence() {
     );
     t.on_stage_end(&reason_handle, StageStatus::Done);
 
-    // Stage: End
-    t.on_stage_start(Stage::End, "turn_1");
-    let end_handle =
-        t.stages
-            .on_stage_start(Stage::End, &t.trace_id, "turn_1", &t.agent_observation_id);
-    t.on_stage_end(&end_handle, StageStatus::Done);
-
     let _handle = t.on_turn_end(None);
     // 等待 flush async 任务完成（FakeLangfuseSession 的 flush 是同步的，但 spawn 需要运行）
     tokio::task::yield_now().await;

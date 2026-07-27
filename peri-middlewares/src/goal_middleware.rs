@@ -53,7 +53,9 @@ impl GoalMiddleware {
             2 => {
                 "The goal is not yet complete. You must call goal(complete) or goal(block) to end, or continue with the next step."
             }
-            _ => "Attention: the goal is still not complete. Decide immediately — keep working or declare a terminal state.",
+            _ => {
+                "Attention: the goal is still not complete. Decide immediately — keep working or declare a terminal state."
+            }
         };
         format!(
             "<goal-message>\n\
@@ -105,7 +107,7 @@ impl Middleware for GoalMiddleware {
         // [TRAP] 必须用 Human + <system-reminder> 注入，禁止 BaseMessage::system。
         // System 消息会被 invoke hoist 到 system prompt 顶部，污染 frozen_system_prompt。
         // （与 hooks/middleware.rs stop_hook_feedback、compact_v2.rs::re_inject_v2 注入路径一致）
-        // 走 v2 MessageQueue Defer kind → End 阶段 drain_for_end 唤醒新 turn。
+        // 走 v2 MessageQueue Defer kind → Receive 阶段 drain_all 消费。
         let reminder = format!("<system-reminder>\n{}\n</system-reminder>", template);
         state.v2_queue().push(QueuedMessage::new(
             MessageKind::Defer,

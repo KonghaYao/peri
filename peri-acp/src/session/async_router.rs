@@ -10,8 +10,8 @@
 //! - **Workflow events** (`route_workflow_event`): completion notifications from
 //!   the workflow middleware subscriber, pushed as `Defer` + `MessageSource::WorkflowComplete`.
 //!
-//! Both use `Defer` semantics: preserved in queue during `drain_for_receive`, consumed
-//! + woken by `drain_for_end` when the loop reaches the End stage.
+//! Both use `Defer` semantics: consumed by `drain_all` during the Receive stage
+//! (RCRA), or detectable by `drain_for_end` for external callers.
 
 use peri_agent::agent::events::BackgroundTaskResult;
 use peri_agent::agent::session::inbox::InboxHandle;

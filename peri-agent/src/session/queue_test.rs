@@ -38,6 +38,31 @@ fn test_drain_for_receive_consumes_prompt_info_keeps_defer() {
 }
 
 #[test]
+fn test_drain_all_consumes_all_message_types() {
+    // RCRA：drain_all 消费全部消息类型（Prompt + Info + Defer）
+    let q = MessageQueue::new();
+    q.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        make_msg("p1"),
+    ));
+    q.push(QueuedMessage::defer(
+        MessageSource::SubAgentComplete,
+        make_msg("d1"),
+    ));
+    q.push(QueuedMessage::info(
+        MessageSource::SystemInjected,
+        make_msg("i1"),
+    ));
+
+    let consumed = q.drain_all();
+    assert_eq!(consumed.len(), 3, "drain_all 应消费全部三种类型");
+    assert_eq!(consumed[0].message.content(), "p1");
+    assert_eq!(consumed[1].message.content(), "d1");
+    assert_eq!(consumed[2].message.content(), "i1");
+    assert!(q.is_empty(), "队列应完全排空");
+}
+
+#[test]
 fn test_drain_for_end_returns_none_when_only_info() {
     let q = MessageQueue::new();
     q.push(QueuedMessage::info(

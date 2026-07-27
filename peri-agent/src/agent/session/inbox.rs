@@ -12,8 +12,8 @@
 //!
 //! ## Invariants
 //!
-//! 1. `await_wake` is **non-destructive** — it does NOT drain. `stages/end.rs`
-//!    `drain_for_receive` / `drain_for_end` still do the actual draining.
+//! 1. `await_wake` is **non-destructive** — it does NOT drain. `stages/receive.rs`
+//!    `drain_all` / `drain_for_receive` / `drain_for_end` still do the actual draining.
 //! 2. Pushers from Agent/ACP layer use `InboxHandle` (cloneable, `Send + Sync`).
 //! 3. TUI should NOT have access to `InboxHandle` — TUI loses its `drain_for_end`
 //!    responsibility. All async events (cron/channel/workflow/bg_results) flow through
@@ -23,7 +23,7 @@
 //!
 //! ```text
 //! Agent running (loading=true):
-//!   async event → push to queue → stages/end.rs drain_for_end → next turn
+//!   async event → push to queue → stages/receive.rs drain_all → current/next turn
 //!
 //! Agent idle (loading=false):
 //!   async event → push to queue → await_wake returns → run_session_loop starts new turn
@@ -36,7 +36,7 @@ use crate::session::{MessageQueue, MessageSource, QueuedMessage};
 
 /// Wraps the existing v2 MessageQueue with an async await-wake mechanism.
 ///
-/// During ReAct loop, `stages/end.rs` calls `drain_for_end` / `drain_for_receive`
+/// During ReAct loop, `stages/receive.rs` calls `drain_all`
 /// to consume pending messages — no wake needed (loop is already spinning).
 ///
 /// During IDLE (between ReAct loops), the ACP executor calls [`await_wake`](Self::await_wake)
@@ -68,7 +68,7 @@ impl SessionInbox {
     /// ## Non-destructive
     ///
     /// This method does NOT drain any messages. The actual consumption happens in
-    /// `stages/end.rs` via `drain_for_end` or `stages/receive.rs` via `drain_for_receive`.
+    /// `stages/receive.rs` via `drain_all` or `stages/receive.rs` via `drain_for_receive`.
     ///
     /// ## Spurious wakeup guard
     ///
@@ -132,7 +132,7 @@ pub struct InboxHandle {
 impl InboxHandle {
     /// Push a Prompt message (user input or external request) and wake the executor.
     ///
-    /// Prompt messages are consumed by `drain_for_receive` during the next turn
+    /// Prompt messages are consumed by `drain_all` during the next Receive stage
     /// and can wake the loop via `drain_for_end`.
     pub fn push_prompt(&self, source: MessageSource, message: BaseMessage) {
         self.queue.push(QueuedMessage::prompt(source, message));
@@ -141,8 +141,8 @@ impl InboxHandle {
 
     /// Push a Defer message (SubAgent complete, Cron trigger, bg result) and wake.
     ///
-    /// Defer messages are skipped by `drain_for_receive` (preserved in queue)
-    /// and consumed + woken by `drain_for_end` when the loop reaches the End stage.
+    /// In RCRA, Defer messages are consumed by `drain_all` during the Receive stage.
+    /// They are also detectable via `drain_for_end` for external callers.
     pub fn push_defer(&self, source: MessageSource, message: BaseMessage) {
         self.queue.push(QueuedMessage::defer(source, message));
         self.wake.notify_one();
