@@ -413,11 +413,7 @@ impl MessageTranscript {
     /// 与 `set_truncated` 配合使用：Micro compact 完成后，将 planner 生成的
     /// per-message directive 持久化到 flags，避免后续每 turn 重新规划。
     /// 设置 projection 的同时也会设置 truncated=true。
-    pub fn set_flags_projection(
-        &mut self,
-        id: MessageId,
-        directive: MessageProjectionDirective,
-    ) {
+    pub fn set_flags_projection(&mut self, id: MessageId, directive: MessageProjectionDirective) {
         let entry = self.flags.entry(id).or_default();
         entry.truncated = true;
         entry.projection = Some(directive);

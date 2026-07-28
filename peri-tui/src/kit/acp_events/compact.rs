@@ -36,7 +36,7 @@ pub(super) fn handle_compact_completed(
         "smart_applied" => i18n::tr("app-note-compact-type-smart"),
         "full_applied" => i18n::tr("app-note-compact-type-full"),
         "full_failed" => return, // FullFailed: SystemNote 不显示，静默跳过
-        "shadowed" => return, // Shadowed: 不显示 SystemNote
+        "shadowed" => return,    // Shadowed: 不显示 SystemNote
         "micro_applied_then_full_failed" => return, // 微压缩已应用但全量失败，静默跳过
         "smart_applied_then_full_failed" => return, // Smart 已应用但 Full 失败，静默跳过
         "interrupted_after_commit" => return, // commit 已发生但流程被中断，由流式事件恢复展示，不注入 SystemNote

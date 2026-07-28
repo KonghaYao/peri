@@ -116,12 +116,9 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                         visible
                     } else {
                         // 无持久化 directive → fallback 到 planner
-                        tracing::debug!(
-                            "无持久化 directive，fallback 到 plan_micro"
-                        );
-                        let plan = crate::agent::compact_v2::planner::plan_micro(
-                            &guard, config, false,
-                        );
+                        tracing::debug!("无持久化 directive，fallback 到 plan_micro");
+                        let plan =
+                            crate::agent::compact_v2::planner::plan_micro(&guard, config, false);
                         if plan.has_changes() {
                             match crate::agent::compact_v2::projection::render_llm_view(
                                 &guard, &plan, &caps,

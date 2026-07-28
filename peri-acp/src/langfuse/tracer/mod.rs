@@ -851,6 +851,23 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
+        // 在 on_stage_end 清空 active 前捕获 Receive 阶段的 mq_counts，
+        // 否则 span body 构造时 active 已为 None，排空计数全部丢失。
+        let receive_input = if handle.stage == Stage::Receive {
+            self.stages.mq_counts().map(|(prompt, defer, info)| {
+                serde_json::json!({
+                    "messages_drained": {
+                        "prompt": prompt,
+                        "defer": defer,
+                        "info": info,
+                        "total": prompt + defer + info,
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
         self.stages.on_stage_end(handle, status);
 
         // Act stage 结束时自动 flush 主 agent 工具批次（确保工具挂在正确的 act 下，
@@ -889,7 +906,7 @@ impl LangfuseTracer {
             name: Some(format!("stage-{:?}", handle.stage).to_lowercase()),
             start_time: Some(handle.start_time.clone()),
             end_time: Some(end_time.clone()),
-            input: None,
+            input: receive_input,
             output: Some(serde_json::json!({
                 "status": format!("{:?}", status),
                 "duration_ms": duration_ms,

@@ -553,7 +553,10 @@ fn test_plan_from_persisted_directives_empty_transcript() {
     let result = super::projection::plan_from_persisted_directives(&transcript, 1);
     assert!(result.is_err(), "无 directive 的 transcript 应返回错误");
     assert!(
-        result.unwrap_err().to_string().contains(super::projection::NO_PERSISTED_DIRECTIVES),
+        result
+            .unwrap_err()
+            .to_string()
+            .contains(super::projection::NO_PERSISTED_DIRECTIVES),
         "错误消息应包含 NO_PERSISTED_DIRECTIVES"
     );
 }
@@ -578,10 +581,7 @@ fn test_plan_from_persisted_directives_version_mismatch_errors() {
     );
 
     let result = super::projection::plan_from_persisted_directives(&t, 1);
-    assert!(
-        result.is_err(),
-        "policy_version 不匹配应返回错误"
-    );
+    assert!(result.is_err(), "policy_version 不匹配应返回错误");
     assert!(
         result
             .unwrap_err()
@@ -607,7 +607,10 @@ fn test_plan_from_persisted_directives_legacy_truncated_passthrough() {
         "旧 truncated 标记（无 directive）应返回 CORRUPTED_PROJECTION 错误"
     );
     assert!(
-        result.unwrap_err().to_string().contains(super::projection::CORRUPTED_PROJECTION),
+        result
+            .unwrap_err()
+            .to_string()
+            .contains(super::projection::CORRUPTED_PROJECTION),
         "应报告 CORRUPTED_PROJECTION"
     );
 }
@@ -662,7 +665,10 @@ fn test_plan_from_persisted_directives_stale_config_still_renders() {
     );
 
     let result = super::projection::plan_from_persisted_directives(&t, 1);
-    assert!(result.is_ok(), "持久化 directive 应在 stale config 下仍有效");
+    assert!(
+        result.is_ok(),
+        "持久化 directive 应在 stale config 下仍有效"
+    );
     let plan = result.unwrap();
     assert_eq!(plan.actions.len(), 2, "应有 2 条 action entries");
 }

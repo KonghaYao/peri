@@ -468,8 +468,15 @@ fn test_micro_compact_writes_projection_directives() {
     let mut t = MessageTranscript::new();
     for i in 0..7 {
         t.append(make_human(&format!("question {}", i)));
-        t.append(make_ai_with_tool("thinking...", "Bash", &format!("call_{}", i)));
-        t.append(make_tool_result(&format!("call_{}", i), &format!("output {}", i)));
+        t.append(make_ai_with_tool(
+            "thinking...",
+            "Bash",
+            &format!("call_{}", i),
+        ));
+        t.append(make_tool_result(
+            &format!("call_{}", i),
+            &format!("output {}", i),
+        ));
     }
 
     let config = CompactConfig::default();
@@ -487,14 +494,8 @@ fn test_micro_compact_writes_projection_directives() {
                 entry.message.id()
             );
             let directive = flags.projection.as_ref().unwrap();
-            assert_eq!(
-                directive.policy_version, 1,
-                "policy_version 应为 1"
-            );
-            assert!(
-                !directive.entries.is_empty(),
-                "directive entries 不应为空"
-            );
+            assert_eq!(directive.policy_version, 1, "policy_version 应为 1");
+            assert!(!directive.entries.is_empty(), "directive entries 不应为空");
             found_directive = true;
         }
     }

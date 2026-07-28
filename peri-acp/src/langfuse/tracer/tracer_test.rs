@@ -660,3 +660,113 @@ fn test_on_stage_end_act_does_not_flush_subagent_batch() {
         "batch span should exist — stage end skipped flush"
     );
 }
+
+/// 回归测试：Receive stage span 的 input 应包含 mq_counts 排空数据。
+/// bug: stages.on_stage_end() 在 span body 构造前清空 active → mq_counts 丢失，
+/// 导致 Receive span 的 input 始终为 None。
+/// 修复：在 stages.on_stage_end() 之前捕获 mq_counts，填入 span body 的 input 字段。
+#[test]
+fn test_receive_stage_span_includes_mq_counts_in_input() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_mq");
+
+    // 1. 开始 Receive 阶段 → mq_counts 初始化为 (0,0,0)
+    t.on_stage_start(Stage::Receive, "turn_mq");
+
+    // 2. 模拟 MQ 排空：1 条 prompt + 2 条 defer + 0 条 info = 共 3 条
+    t.on_mq_drained(1, 2, 0);
+
+    // 3. 确保 stage 持续 ≥ 2ms，避免 duration_ms==0 导致 span 被条件跳过
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    // 4. 获取 active handle（on_stage_start 返回的是忽略的，从 stages 拿实际 handle）
+    let handle = t
+        .stages
+        .active_handle()
+        .expect("Receive stage 应为 active")
+        .clone();
+
+    // 5. 结束 Receive 阶段
+    t.on_stage_end(&handle, StageStatus::Done);
+
+    // 6. 验证：发出的 SpanCreate 事件中 input 应包含 mq_counts
+    let events = session.events_snapshot();
+    let span_creates: Vec<_> = events
+        .iter()
+        .filter_map(|e| {
+            if let IngestionEvent::SpanCreate { body, .. } = e {
+                if body.name.as_deref() == Some("stage-receive") {
+                    Some(body)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        span_creates.len(),
+        1,
+        "应有恰好 1 个 stage-receive SpanCreate 事件"
+    );
+
+    let span = &span_creates[0];
+    let input = span
+        .input
+        .as_ref()
+        .expect("Receive span 的 input 不应为 None");
+    let mq = input
+        .get("messages_drained")
+        .expect("input 应包含 messages_drained 字段");
+
+    assert_eq!(mq["prompt"], serde_json::json!(1), "prompt 计数应为 1");
+    assert_eq!(mq["defer"], serde_json::json!(2), "defer 计数应为 2");
+    assert_eq!(mq["info"], serde_json::json!(0), "info 计数应为 0");
+    assert_eq!(mq["total"], serde_json::json!(3), "total 应为 1+2+0 = 3");
+}
+
+/// 非 Receive 阶段的 span input 应保持 None，不应误填充。
+#[test]
+fn test_non_receive_stage_span_input_is_none() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_reason");
+
+    // Reason 阶段
+    t.on_stage_start(Stage::Reason, "turn_reason");
+    // 确保 stage 持续 ≥ 2ms，避免 duration_ms==0 导致 span 被条件跳过
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let handle = t
+        .stages
+        .active_handle()
+        .expect("Reason stage 应为 active")
+        .clone();
+    t.on_stage_end(&handle, StageStatus::Done);
+
+    let events = session.events_snapshot();
+    let reason_spans: Vec<_> = events
+        .iter()
+        .filter_map(|e| {
+            if let IngestionEvent::SpanCreate { body, .. } = e {
+                if body.name.as_deref() == Some("stage-reason") {
+                    Some(body)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        reason_spans.len(),
+        1,
+        "应有恰好 1 个 stage-reason SpanCreate"
+    );
+    assert!(
+        reason_spans[0].input.is_none(),
+        "非 Receive 阶段的 input 应为 None，不应误填入 mq_counts"
+    );
+}

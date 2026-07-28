@@ -47,7 +47,10 @@ pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig)
     }
 
     if affected > 0 {
-        debug!(affected, "Micro Compact: 持久化 projection directive + truncated 标记");
+        debug!(
+            affected,
+            "Micro Compact: 持久化 projection directive + truncated 标记"
+        );
     }
 
     affected

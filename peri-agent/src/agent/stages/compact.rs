@@ -224,8 +224,14 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
 
             if did_apply {
                 // G6: 发射配对事件，防止 Langfuse span 孤立
-                let visible: Vec<crate::messages::BaseMessage> = ctx.session.transcript.read()
-                    .visible_messages().into_iter().cloned().collect();
+                let visible: Vec<crate::messages::BaseMessage> = ctx
+                    .session
+                    .transcript
+                    .read()
+                    .visible_messages()
+                    .into_iter()
+                    .cloned()
+                    .collect();
                 ctx.runtime.event_bus.emit_observe(
                     crate::agent::events_v2::ObserveEvent::MessagesCompacted {
                         turn_id: ctx.turn_id(),

@@ -553,9 +553,7 @@ async fn test_smart_then_full_success_aggregates_metrics() {
             .expect("创建 SQLite store 失败"),
     );
     let thread_id = store
-        .create_thread(crate::thread::ThreadMeta::new(
-            "/tmp".to_string(),
-        ))
+        .create_thread(crate::thread::ThreadMeta::new("/tmp".to_string()))
         .await
         .expect("创建 thread 失败");
 
@@ -588,7 +586,10 @@ async fn test_smart_then_full_success_aggregates_metrics() {
     assert_eq!(result.outcome(), CompactOutcome::FullApplied);
     // 注意：Full Compact 成功时 affected_count 仅包含 Full 的 excluded 消息数
     // （Smart 的实际标记在 transcript 中生效，但 affected_count 由 Full 的 lifecycle 计算）
-    assert!(result.affected_count > 0, "Full 成功应包含被 excluded 的消息");
+    assert!(
+        result.affected_count > 0,
+        "Full 成功应包含被 excluded 的消息"
+    );
     assert!(
         result.estimated_tokens_saved > 0,
         "Full 本身当前不估算节省量，结果仍必须保留 Smart 的节省量"

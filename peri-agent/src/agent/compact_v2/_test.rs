@@ -429,10 +429,22 @@ async fn test_run_compact_preserves_ancestor_flags_after_micro() {
     assert!(result.affected_count > 0, "Micro 应标记自有消息");
 
     // 验证：compact 后 ancestor flags 不得改变
-    assert!(!t.flags(ancestor_id_0).truncated, "ancestor[0] 不得被 truncated");
-    assert!(!t.flags(ancestor_id_0).excluded, "ancestor[0] 不得被 excluded");
-    assert!(!t.flags(ancestor_id_1).truncated, "ancestor[1] 不得被 truncated");
-    assert!(!t.flags(ancestor_id_1).excluded, "ancestor[1] 不得被 excluded");
+    assert!(
+        !t.flags(ancestor_id_0).truncated,
+        "ancestor[0] 不得被 truncated"
+    );
+    assert!(
+        !t.flags(ancestor_id_0).excluded,
+        "ancestor[0] 不得被 excluded"
+    );
+    assert!(
+        !t.flags(ancestor_id_1).truncated,
+        "ancestor[1] 不得被 truncated"
+    );
+    assert!(
+        !t.flags(ancestor_id_1).excluded,
+        "ancestor[1] 不得被 excluded"
+    );
 
     // 模拟 ACP selector 恢复路径：visible_messages() 应包含 ancestor 消息
     let visible = t.visible_messages();

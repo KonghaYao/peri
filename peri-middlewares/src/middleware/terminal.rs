@@ -22,8 +22,7 @@ pub struct BashTool {
     /// 后台任务注册表（用于 run_in_background 模式）
     pub bg_registry: Option<Arc<BackgroundTaskRegistry>>,
     /// bg shell 完成时的同步回调（在 registry.complete() 之前调用）
-    pub on_bg_complete:
-        Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    pub on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
 }
 
 impl BashTool {
@@ -154,11 +153,9 @@ impl BaseTool for BashTool {
         // ── 后台执行路径 ──
         let run_in_background = input["run_in_background"].as_bool().unwrap_or(false);
         if run_in_background {
-            let registry = Arc::clone(
-                self.bg_registry
-                    .as_ref()
-                    .ok_or("run_in_background is not available: no background task registry configured")?,
-            );
+            let registry = Arc::clone(self.bg_registry.as_ref().ok_or(
+                "run_in_background is not available: no background task registry configured",
+            )?);
 
             // timeout 参数解析（与同步 Bash 对齐，含 clamp）
             let timeout_ms: u64 = input["timeout"]
@@ -234,11 +231,7 @@ impl BaseTool for BashTool {
                     // 无超时：兼容长期运行的服务器/构建场景
                     wait_future.await.map(Some)
                 } else {
-                    match tokio::time::timeout(
-                        Duration::from_millis(timeout_ms),
-                        wait_future,
-                    )
-                    .await
+                    match tokio::time::timeout(Duration::from_millis(timeout_ms), wait_future).await
                     {
                         Ok(output_result) => output_result.map(Some),
                         Err(_elapsed) => {
@@ -275,9 +268,9 @@ impl BaseTool for BashTool {
                                 started_at: std::time::Instant::now(),
                                 chrono_started_at: chrono::Utc::now(),
                                 kind: BgTaskKind::Shell,
-                                cancel_handle: BgCancelHandle::Pid(
-                        pid.expect("bg shell: child.id() returned None after successful spawn"),
-                    ),
+                                cancel_handle: BgCancelHandle::Pid(pid.expect(
+                                    "bg shell: child.id() returned None after successful spawn",
+                                )),
                                 pid,
                                 output_preview: None,
                             };
@@ -449,8 +442,7 @@ impl BaseTool for BashTool {
 /// TerminalMiddleware - 与 TypeScript TerminalMiddleware 对齐
 pub struct TerminalMiddleware {
     bg_registry: Option<Arc<BackgroundTaskRegistry>>,
-    on_bg_complete:
-        Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
 }
 
 impl TerminalMiddleware {
