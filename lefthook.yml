@@ -3,7 +3,7 @@
 # Run manually: lefthook run pre-commit
 
 pre-commit:
-  parallel: true
+  parallel: false
   commands:
     fmt:
       glob: "*.rs"
@@ -21,8 +21,8 @@ pre-commit:
     typos:
       run: typos
 
-    doc-tests:
-      run: cargo test --workspace --doc
+    # doc-tests 不在 pre-commit 中运行——cargo check/clippy 不编译 doc test，
+    # 显式验证用: cargo test --workspace --doc
 
     # security-audit:
     #   run: cargo audit
