@@ -89,6 +89,7 @@ pub async fn execute_command(
         ));
     }
 
+    let cancel_history = session_history.clone();
     let ctx = CommandContext {
         session_id: session_id.clone(),
         history: session_history,
@@ -113,10 +114,7 @@ pub async fn execute_command(
         _ = cancel_token.cancelled() => {
             tracing::info!(session_id = %session_id, "execute_command: cancelled");
             CommandResult {
-                // history was already moved into ctx, so we cannot return it here.
-                // The cancellation semantics mirror intercept_immediate_command:
-                // the caller is expected to keep a copy of history if needed.
-                messages: Vec::new(),
+                messages: cancel_history,
                 stop_reason: PromptStopReason::Cancelled,
             }
         }
