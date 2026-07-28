@@ -49,6 +49,8 @@ pub struct BackgroundTask {
     pub prompt_summary: String,
     pub status: BackgroundTaskStatus,
     pub started_at: std::time::Instant,
+    /// 任务创建时间（chrono UTC），用于 list_tasks_full().started_at 返回真实时间
+    pub chrono_started_at: chrono::DateTime<chrono::Utc>,
     /// 任务类型
     pub kind: BgTaskKind,
     /// 按 kind 分发的取消句柄
@@ -264,7 +266,7 @@ impl BackgroundTaskRegistry {
                 kind: t.kind,
                 summary: t.prompt_summary.clone(),
                 status: t.status.clone(),
-                started_at: chrono::Utc::now().to_rfc3339(),
+                started_at: t.chrono_started_at.to_rfc3339(),
                 duration_ms: t.started_at.elapsed().as_millis() as u64,
                 pid: t.pid,
                 output_preview: t.output_preview.clone(),
@@ -290,11 +292,19 @@ impl BackgroundTaskRegistry {
                     );
                 }
                 BgCancelHandle::Pid(pid) => {
-                    // 通过 kill 命令发送 SIGTERM（跨平台 Unix）
-                    let _ = std::process::Command::new("kill")
-                        .arg("-TERM")
-                        .arg(pid.to_string())
-                        .spawn();
+                    if pid == 0 {
+                        // 防御性守卫：Pid(0) 会导致 kill -TERM 0 波及当前进程组
+                        warn!(
+                            task_id = %task_id,
+                            "bg task cancel: pid is 0 (spawn likely failed), skipping kill"
+                        );
+                    } else {
+                        // 通过 kill 命令发送 SIGTERM（跨平台 Unix）
+                        let _ = std::process::Command::new("kill")
+                            .arg("-TERM")
+                            .arg(pid.to_string())
+                            .spawn();
+                    }
                 }
             }
             drop(tasks);

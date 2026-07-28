@@ -351,6 +351,7 @@ impl super::SubAgentTool {
             prompt_summary,
             status: BackgroundTaskStatus::Running,
             started_at: std::time::Instant::now(),
+            chrono_started_at: chrono::Utc::now(),
             kind: BgTaskKind::Agent,
             cancel_handle: BgCancelHandle::Abort(join_handle.abort_handle()),
             pid: None,
