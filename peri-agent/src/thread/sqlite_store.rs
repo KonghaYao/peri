@@ -475,14 +475,17 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn load_context(&self, thread_id: &ThreadId) -> Result<Vec<BaseMessage>> {
-        // 先尝试从 cached_context 读取
-        let cache_row: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT cached_context FROM threads WHERE id = ?1")
+        // 先尝试从 cached_context 读取。
+        // context_cache_epoch 在此处仅做双重保障读取：
+        // commit_compaction_lifecycle 已将 cached_context 设为 NULL 并递增 epoch，
+        // 因此若 cached_context 非空即代表 epoch 未被后续 commit 更改——缓存有效。
+        let cache_row: Option<(Option<String>, i64)> =
+            sqlx::query_as("SELECT cached_context, context_cache_epoch FROM threads WHERE id = ?1")
                 .bind(thread_id.as_str())
                 .fetch_optional(&self.pool)
                 .await?;
 
-        let cached = cache_row.and_then(|(c,)| c);
+        let cached = cache_row.and_then(|(c, _epoch)| c);
 
         if let Some(json) = cached {
             let mut cached_msgs: Vec<BaseMessage> = serde_json::from_str(&json)?;
@@ -682,6 +685,17 @@ impl ThreadStore for SqliteThreadStore {
         .bind(&id_str)
         .execute(&self.pool)
         .await?;
+
+        // 消息可见性变更（truncation/excluded/projection）影响上下文视图，失效 cached_context
+        let thread_id: Option<(String,)> =
+            sqlx::query_as("SELECT thread_id FROM messages WHERE message_id = ?1")
+                .bind(&id_str)
+                .fetch_optional(&self.pool)
+                .await?;
+        if let Some((tid,)) = thread_id {
+            self.invalidate_context_cache(&tid).await?;
+        }
+
         Ok(())
     }
 
