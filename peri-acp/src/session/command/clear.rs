@@ -55,6 +55,7 @@ impl AgentCommand for ClearCommand {
                     no_op_candidates: 0,
                     full_escalation_reason: None,
                     cache_hit_rate_before: 0.0,
+                    outcome: peri_agent::agent::compact_v2::CompactOutcome::Skipped,
                 },
                 0,
             )

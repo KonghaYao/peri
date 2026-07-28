@@ -34,9 +34,6 @@ fn default_excluded_tools() -> Vec<String> {
         "TodoWrite".to_string(),
     ]
 }
-fn default_micro_min_affected() -> usize {
-    5
-}
 fn default_summary_max_tokens() -> u32 {
     16000
 }
@@ -85,13 +82,6 @@ pub struct CompactConfig {
     /// 默认保留 AskUserQuestion、goal、TodoWrite（对话/任务状态不可恢复），其余工具全部截断。
     #[serde(default = "default_excluded_tools")]
     pub micro_excluded_tools: Vec<String>,
-    /// Micro 压缩量下限——affected_count 低于此值时判定 Micro 无效，升级为 Full。
-    ///
-    /// **注意**：此字段当前未接入运行时逻辑。决策使用 `estimated_tokens_saved >= reclaim_target`。
-    /// 保留此字段用于未来决策路径切换，避免 breaking API 删除。
-    #[allow(dead_code)]
-    #[serde(default = "default_micro_min_affected")]
-    pub micro_min_affected: usize,
     #[serde(default = "default_summary_max_tokens")]
     pub summary_max_tokens: u32,
     #[serde(default = "default_re_inject_max_files")]
@@ -108,7 +98,8 @@ pub struct CompactConfig {
     pub ptl_max_retries: u32,
 
     // ── Smart Compact 配置 ──────────────────────────────────────────────
-    /// 是否启用 Smart Compact 策略（替代 Micro Compact），默认 false
+    /// [DEPRECATED] 不再使用。Smart Compact 已计划废弃并收敛为 Micro Compact。
+    /// 当前仅保留字段以兼容旧配置，但运行时始终按 false 处理。
     #[serde(default = "default_false")]
     pub smart_compact_enabled: bool,
     /// Smart Compact：保留最近 N 条 User/Assistant 对话消息
@@ -148,7 +139,6 @@ impl Default for CompactConfig {
             micro_compact_threshold: default_threshold_075(),
             micro_compact_stale_steps: default_stale_steps(),
             micro_excluded_tools: default_excluded_tools(),
-            micro_min_affected: default_micro_min_affected(),
             summary_max_tokens: default_summary_max_tokens(),
             re_inject_max_files: default_re_inject_max_files(),
             re_inject_max_tokens_per_file: default_re_inject_max_tokens_per_file(),

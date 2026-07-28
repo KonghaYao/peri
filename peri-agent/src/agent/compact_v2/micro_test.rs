@@ -459,3 +459,92 @@ fn make_document_block() -> ContentBlock {
 fn make_ai_with_tool_calls_vec(tool_calls: Vec<crate::messages::ToolCallRequest>) -> BaseMessage {
     BaseMessage::ai_with_tool_calls(MessageContent::text("".to_string()), tool_calls)
 }
+
+// ─── 持久化 projection directive 测试 ───────────────────────────────────────
+
+#[test]
+fn test_micro_compact_writes_projection_directives() {
+    // 验证 micro_compact 不仅标记 truncated，还将完整的投影指令写入 flags.projection
+    let mut t = MessageTranscript::new();
+    for i in 0..7 {
+        t.append(make_human(&format!("question {}", i)));
+        t.append(make_ai_with_tool("thinking...", "Bash", &format!("call_{}", i)));
+        t.append(make_tool_result(&format!("call_{}", i), &format!("output {}", i)));
+    }
+
+    let config = CompactConfig::default();
+    let affected = micro_compact(&mut t, &config);
+    assert!(affected > 0, "应有消息被标记");
+
+    // 检查受影响消息的 flags.projection 非空
+    let mut found_directive = false;
+    for entry in t.entries() {
+        let flags = t.flags(entry.message.id());
+        if flags.truncated {
+            assert!(
+                flags.projection.is_some(),
+                "truncated 消息应含 projection directive，msg_id={:?}",
+                entry.message.id()
+            );
+            let directive = flags.projection.as_ref().unwrap();
+            assert_eq!(
+                directive.policy_version, 1,
+                "policy_version 应为 1"
+            );
+            assert!(
+                !directive.entries.is_empty(),
+                "directive entries 不应为空"
+            );
+            found_directive = true;
+        }
+    }
+    assert!(found_directive, "至少一条消息应含 projection directive");
+}
+
+#[test]
+fn test_micro_compact_projection_entries_match_plan_actions() {
+    // 验证 directive entries 与 plan.plan_micro 的输出一致
+    let mut t = MessageTranscript::new();
+    for i in 0..7 {
+        t.append(make_human(&format!("q {}", i)));
+        t.append(make_ai_with_tool("tool", "Bash", &format!("c_{}", i)));
+        t.append(make_tool_result(&format!("c_{}", i), &format!("out {}", i)));
+    }
+
+    let config = CompactConfig::default();
+    // 先调用 plan_micro 获取预期的 actions
+    let plan_without_skip = crate::agent::compact_v2::planner::plan_micro(&t, &config, false);
+    // micro_compact 内部用 skip_existing_truncated=true
+    micro_compact(&mut t, &config);
+
+    // 收集所有 directive entries (owned)
+    let mut directive_entries: Vec<crate::agent::compact_v2::projection::ProjectionActionEntry> =
+        Vec::new();
+    for entry in t.entries() {
+        let flags = t.flags(entry.message.id());
+        if let Some(ref directive) = flags.projection {
+            directive_entries.extend(directive.entries.iter().cloned());
+        }
+    }
+
+    // 验证数量：plan（skip_truncated=false）应 >= directive entries（skip_truncated=true）
+    assert!(
+        plan_without_skip.actions.len() >= directive_entries.len(),
+        "plan_micro 的 actions({}) 不应少于 directive entries({})",
+        plan_without_skip.actions.len(),
+        directive_entries.len()
+    );
+
+    // 验证每条 directive entry 都对应 plan 中的 action（message_id + target 匹配）
+    for entry in &directive_entries {
+        let found = plan_without_skip
+            .actions
+            .iter()
+            .any(|a| a.message_id == entry.message_id && a.target == entry.target);
+        assert!(
+            found,
+            "directive entry 应能在 plan actions 中找到对应项: {:?}",
+            entry.target
+        );
+    }
+}

@@ -365,6 +365,7 @@ fn test_observe_messages_compacted_maps() {
         no_op_candidates: 0,
         full_escalation_reason: None,
         cache_hit_rate_before: 0.0,
+        outcome: crate::agent::compact_v2::CompactOutcome::MicroApplied,
     };
     match observe_event_to_executor(o).unwrap() {
         ExecutorEvent::CompactCompleted {

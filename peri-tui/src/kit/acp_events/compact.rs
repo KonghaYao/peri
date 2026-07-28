@@ -17,25 +17,40 @@ pub(super) fn handle_compact_completed(
     files: &[serde_json::Value],
     skills: &[String],
     strategy: &str,
+    outcome: &str,
 ) {
     tracing::info!(
         summary_len = summary.len(),
         %strategy,
+        %outcome,
         "bridge: CompactCompleted"
     );
     state.compact_just_completed = true;
     // 不重置 phase——auto compact 后 ReAct 循环继续运行，
     // loading 由流式事件（TextChunk/ToolStarted）和 TurnDone 管理。
     // 手动 /compact 路径由 push_done → TurnDone 兜底清除。
-    // 全量压缩和有效微压缩都注入消息流通知
-    // strategy 字段由 compact 引擎提供，准确区分 Micro/Full/Smart
+
+    // 根据 outcome 做精确展示
+    let compact_type = match outcome {
+        "micro_applied" => i18n::tr("app-note-compact-type-micro"),
+        "smart_applied" => i18n::tr("app-note-compact-type-smart"),
+        "full_applied" => i18n::tr("app-note-compact-type-full"),
+        "full_failed" => return, // FullFailed: SystemNote 不显示，静默跳过
+        "shadowed" => return, // Shadowed: 不显示 SystemNote
+        "micro_applied_then_full_failed" => return, // 微压缩已应用但全量失败，静默跳过
+        "smart_applied_then_full_failed" => return, // Smart 已应用但 Full 失败，静默跳过
+        _ => {
+            // fallback: 按 strategy 判断
+            match strategy {
+                "micro" => i18n::tr("app-note-compact-type-micro"),
+                _ => i18n::tr("app-note-compact-type-full"),
+            }
+        }
+    };
+
     let mut parts = vec![];
     let file_count = files.len();
     let skill_count = skills.len();
-    let compact_type = match strategy {
-        "micro" => i18n::tr("app-note-compact-type-micro"),
-        _ => i18n::tr("app-note-compact-type-full"), // "full" | "smart" → Full label
-    };
     if file_count > 0 {
         parts.push(format!("{file_count} 文件"));
     }

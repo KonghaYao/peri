@@ -49,8 +49,8 @@ pub async fn emit_compact_started(sink: &Arc<dyn EventSink>, session_id: &str) {
             turn_id: String::new(),
             agent_id: String::new(),
             step: 0,
-            strategy: CompactStrategy::Smart,
-            trigger: CompactTrigger::Auto,
+            strategy: CompactStrategy::Full,
+            trigger: CompactTrigger::Manual,
         },
         COMPACT_CONTEXT_WINDOW,
     )
@@ -70,6 +70,10 @@ pub async fn emit_compact_completed(
     skills: Vec<String>,
     micro_cleared: usize,
     messages: Vec<BaseMessage>,
+    strategy: CompactStrategy,
+    outcome: peri_agent::agent::compact_v2::CompactOutcome,
+    estimated_tokens_saved: u64,
+    affected_count: usize,
 ) {
     sink.push_event(
         session_id,
@@ -81,9 +85,9 @@ pub async fn emit_compact_completed(
             messages,
             token_before: 0,
             token_after: 0,
-            strategy: CompactStrategy::Smart,
-            affected_count: 0,
-            estimated_tokens_saved: 0,
+            strategy,
+            affected_count,
+            estimated_tokens_saved,
             estimated_tokens_before: 0,
             estimated_tokens_after: 0,
             changed_messages: 0,
@@ -91,6 +95,7 @@ pub async fn emit_compact_completed(
             no_op_candidates: 0,
             full_escalation_reason: None,
             cache_hit_rate_before: 0.0,
+            outcome,
         },
         COMPACT_CONTEXT_WINDOW,
     )

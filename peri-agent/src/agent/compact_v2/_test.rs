@@ -175,21 +175,20 @@ async fn test_run_compact_micro_resets_failures() {
 
 #[tokio::test]
 async fn test_run_compact_rerun_clears_stale_excluded_flags() {
-    // 上轮 Full Compact 失败留下 excluded 标记，本轮重跑前应清除
+    // 连续失败超限后 skip 而非强制重跑——已在上层消除 stale flag 清除逻辑
+    // （v2 lifecycle commit 模式下，Full 以原子事务覆盖全部标记，不再分步清除）
     let mut t = MessageTranscript::new();
     let id1 = t.append(make_human("question 1"));
     let id2 = t.append(make_ai("answer 1"));
 
-    // 模拟上轮失败：手动标记 excluded
+    // 模拟上轮失败留下的标记
     t.set_excluded(id1, true);
     t.set_excluded(id2, true);
     assert!(t.flags(id1).excluded);
     assert!(t.flags(id2).excluded);
 
     let config = CompactConfig::default();
-    let mut failures = 1u32; // 上轮失败一次
-                             // force=true 触发 Full，但 consecutive_failures>0，应先清除 excluded
-                             // 然后无 LLM 调用 full_compact_inner 会失败（但清除已发生）
+    let mut failures = config.max_consecutive_failures; // 已达到上限
     let pressure = pressure_from_budget(0.5);
     let result = run_compact(
         &mut t,
@@ -202,9 +201,9 @@ async fn test_run_compact_rerun_clears_stale_excluded_flags() {
     )
     .await;
 
-    assert_eq!(result.strategy, CompactStrategy::Full);
-    assert!(!t.flags(id1).excluded, "上轮 excluded 标记应被清除");
-    assert!(!t.flags(id2).excluded, "上轮 excluded 标记应被清除");
+    assert_eq!(result.strategy, CompactStrategy::Skip, "连续失败超限应跳过");
+    assert!(t.flags(id1).excluded, "excluded 标记不再在 skip 时自动清除");
+    assert!(t.flags(id2).excluded, "excluded 标记不再在 skip 时自动清除");
 }
 
 #[tokio::test]
@@ -237,7 +236,8 @@ async fn test_run_compact_first_run_does_not_clear_flags() {
 
 #[tokio::test]
 async fn test_run_compact_rerun_only_clears_excluded_not_truncated() {
-    // 重跑时应清除 excluded，但保留 truncated（属 Micro Compact）
+    // 连续失败超限后 skip——不会主动清除任何 flag。
+    // v2 lifecycle commit 模式下，Compact 以原子事务管理全部标记，不再针对 excluded/truncated 做分步清除。
     let mut t = MessageTranscript::new();
     let id1 = t.append(make_human("q"));
     t.append(make_ai("a"));
@@ -249,7 +249,7 @@ async fn test_run_compact_rerun_only_clears_excluded_not_truncated() {
     assert!(t.flags(id1).excluded);
 
     let config = CompactConfig::default();
-    let mut failures = 1u32;
+    let mut failures = config.max_consecutive_failures;
     let pressure = pressure_from_budget(0.5);
     let _ = run_compact(
         &mut t,
@@ -262,12 +262,9 @@ async fn test_run_compact_rerun_only_clears_excluded_not_truncated() {
     )
     .await;
 
-    // 重跑后 excluded 被清除，但 truncated 保留
-    assert!(!t.flags(id1).excluded, "重跑应清除 excluded");
-    assert!(
-        t.flags(id1).truncated,
-        "重跑不应清除 truncated（属 Micro Compact 状态）"
-    );
+    // skip 后所有标记原样保留
+    assert!(t.flags(id1).excluded, "skip 不清除 excluded");
+    assert!(t.flags(id1).truncated, "skip 不清除 truncated");
 }
 
 // ── Task 6: 端到端 economy 字段 + projection 测试 ────────────────────────
@@ -387,4 +384,76 @@ fn test_compact_plan_has_changes_with_enough_rounds() {
     assert!(plan.has_changes(), "多轮 transcript 应有非空 plan");
     assert!(plan.estimated_tokens_saved > 0, "应估算非零 token 节省");
     assert!(!plan.actions.is_empty(), "应有至少一个 action");
+}
+
+// ── Ancestor 恢复测试：compact 后 ancestor flags 正确保留 ─────────────────
+
+#[tokio::test]
+async fn test_run_compact_preserves_ancestor_flags_after_micro() {
+    // compact 后通过 selector 恢复路径（visible_messages）确认 ancestor flags 不变
+    let ancestor1 = make_human("ancestor question");
+    let ancestor2 = make_ai("ancestor answer");
+    let mut t = MessageTranscript::new().with_ancestor(vec![ancestor1, ancestor2]);
+
+    // 添加自有消息构成足够轮次触发 micro
+    for i in 0..8 {
+        t.append(make_human(&format!("own q {}", i)));
+        t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
+        t.append(make_tool_result(&format!("c_{}", i), &format!("out {}", i)));
+    }
+
+    let entries = t.entries();
+    let ancestor_id_0 = entries[0].message.id();
+    let ancestor_id_1 = entries[1].message.id();
+    // 确认 compact 前 ancestor 无任何标记
+    assert!(!t.flags(ancestor_id_0).truncated);
+    assert!(!t.flags(ancestor_id_0).excluded);
+    assert!(!t.flags(ancestor_id_1).truncated);
+    assert!(!t.flags(ancestor_id_1).excluded);
+
+    let config = CompactConfig::default();
+    let mut failures = 0u32;
+    let pressure = pressure_from_budget(0.80);
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        false,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
+
+    assert_eq!(result.strategy, CompactStrategy::Micro);
+    assert!(result.affected_count > 0, "Micro 应标记自有消息");
+
+    // 验证：compact 后 ancestor flags 不得改变
+    assert!(!t.flags(ancestor_id_0).truncated, "ancestor[0] 不得被 truncated");
+    assert!(!t.flags(ancestor_id_0).excluded, "ancestor[0] 不得被 excluded");
+    assert!(!t.flags(ancestor_id_1).truncated, "ancestor[1] 不得被 truncated");
+    assert!(!t.flags(ancestor_id_1).excluded, "ancestor[1] 不得被 excluded");
+
+    // 模拟 ACP selector 恢复路径：visible_messages() 应包含 ancestor 消息
+    let visible = t.visible_messages();
+    let visible_ids: Vec<_> = visible.iter().map(|m| m.id()).collect();
+    assert!(
+        visible_ids.contains(&ancestor_id_0),
+        "visible_messages 应包含 ancestor[0]"
+    );
+    assert!(
+        visible_ids.contains(&ancestor_id_1),
+        "visible_messages 应包含 ancestor[1]"
+    );
+
+    // Micro compact 使用 truncated 标记（不影响可见性），自有消息中应有 truncated
+    let entries_after = t.entries();
+    let any_own_truncated = entries_after
+        .iter()
+        .skip(2) // 跳过 2 条 ancestor
+        .any(|e| t.flags(e.message.id()).truncated);
+    assert!(
+        any_own_truncated,
+        "compact 后至少一条自有消息应有 truncated 标记"
+    );
 }

@@ -253,6 +253,7 @@ fn test_observe_event_messages_compacted_id_extraction() {
         no_op_candidates: 0,
         full_escalation_reason: None,
         cache_hit_rate_before: 0.0,
+        outcome: crate::agent::compact_v2::CompactOutcome::FullApplied,
     };
     assert_eq!(event.turn_id(), turn_id);
     assert_eq!(event.agent_id(), agent_id);
@@ -494,6 +495,7 @@ async fn test_event_bus_subscribe_observe_shares_channel() {
         no_op_candidates: 0,
         full_escalation_reason: None,
         cache_hit_rate_before: 0.0,
+        outcome: crate::agent::compact_v2::CompactOutcome::FullApplied,
     });
 
     // 两个接收者都能收到

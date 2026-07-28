@@ -147,6 +147,7 @@ fn test_compact_completed_serde_roundtrip() {
         no_op_candidates: 0,
         full_escalation_reason: None,
         cache_hit_rate_before: 0.0,
+        outcome: crate::agent::compact_v2::CompactOutcome::SmartApplied,
     };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(json.contains(r#""type":"compact_completed""#));
@@ -196,6 +197,7 @@ fn test_compact_completed_micro_serde() {
         no_op_candidates: 0,
         full_escalation_reason: None,
         cache_hit_rate_before: 0.0,
+        outcome: crate::agent::compact_v2::CompactOutcome::MicroApplied,
     };
     let json = serde_json::to_string(&ev).unwrap();
     let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();

@@ -328,6 +328,8 @@ pub enum ObserveEvent {
         full_escalation_reason: Option<crate::agent::compact_v2::planner::FullEscalationReason>,
         /// 压缩前缓存命中率（0.0-1.0）
         cache_hit_rate_before: f64,
+        /// Compact 执行的语义结果（MicroApplied / FullApplied / FullFailed / ...）
+        outcome: crate::agent::compact_v2::CompactOutcome,
     },
     /// Turn 异常中止
     TurnError {

@@ -133,16 +133,73 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             });
 
         let config_clone: CompactConfig = config.clone();
+
+        // G6: 记录 compact 前的 flag 计数，用于 cancel arm 检测是否已提交变更
+        let pre_compact_flagged = transcript_owned
+            .entries()
+            .iter()
+            .filter(|e| {
+                let f = transcript_owned.flags(e.message.id());
+                f.truncated || f.excluded || f.projection.is_some()
+            })
+            .count();
+
+        // G6: 记录 compact 前的可见消息数，供 cancel arm 发射 MessagesCompacted 事件使用
+        let before_visible_len = transcript_owned.visible_messages().len();
+
         // 包在 select! biased 中：cancel 优先，避免 Full Compact 的长 LLM 调用阻塞中断。
         // 注：run_compact 内部不感知 turn cancel_token，必须在此层显式 select。
         let result = tokio::select! {
             biased;
             _ = ctx.session.turn.cancel_token.cancelled() => {
+                // G6: 检查 compact 是否在 cancel 前已提交变更（通过 flag 计数对比）。
+                // transcript_owned 已通过 &mut 被 run_compact 修改，变更已持久化在内存中。
+                let post_compact_flagged = transcript_owned
+                    .entries()
+                    .iter()
+                    .filter(|e| {
+                        let f = transcript_owned.flags(e.message.id());
+                        f.truncated || f.excluded || f.projection.is_some()
+                    })
+                    .count();
+
                 // 把 transcript 放回 RwLock（与正常路径一致，避免遗失消息）
                 *ctx.session.transcript.write() = transcript_owned;
                 ctx.compact
                     .compact_consecutive_failures
                     .store(consecutive, std::sync::atomic::Ordering::Relaxed);
+
+                if post_compact_flagged > pre_compact_flagged {
+                    // G6: 发射配对事件，防止 Langfuse span 孤立
+                    let visible: Vec<crate::messages::BaseMessage> = ctx.session.transcript.read()
+                        .visible_messages().into_iter().cloned().collect();
+                    ctx.runtime.event_bus.emit_observe(
+                        crate::agent::events_v2::ObserveEvent::MessagesCompacted {
+                            turn_id: ctx.turn_id(),
+                            agent_id: ctx.session.agent_id,
+                            before_count: before_visible_len,
+                            after_count: visible.len(),
+                            summary: String::new(),
+                            messages: visible,
+                            files: vec![],
+                            skills: vec![],
+                            re_inject_count: 0,
+                            strategy: compact_strategy,
+                            affected_count: post_compact_flagged - pre_compact_flagged,
+                            estimated_tokens_saved: 0,
+                            estimated_tokens_before: pressure.estimated_tokens,
+                            estimated_tokens_after: pressure.estimated_tokens,
+                            changed_messages: post_compact_flagged - pre_compact_flagged,
+                            changed_fields: post_compact_flagged - pre_compact_flagged,
+                            no_op_candidates: 0,
+                            full_escalation_reason: None,
+                            cache_hit_rate_before: pressure.cache_hit_rate,
+                            outcome: crate::agent::compact_v2::CompactOutcome::InterruptedAfterCommit,
+                        },
+                    );
+                    affected_count = post_compact_flagged - pre_compact_flagged;
+                    break 'compact_core Ok(CompactOutput { compacted: true });
+                }
                 break 'compact_core Err(crate::error::AgentError::Interrupted);
             }
             r = crate::agent::compact_v2::run_compact(
@@ -156,6 +213,53 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             ) => r,
         };
 
+        // G6: 检查是否在 compact 执行期间被取消（r arm 胜出但 cancel 已被触发）
+        if ctx.session.turn.cancel_token.is_cancelled() {
+            let did_apply = result.outcome().has_applied_change();
+            // 把 transcript 放回 RwLock（transcript 已在 run_compact 中修改）
+            *ctx.session.transcript.write() = transcript_owned;
+            ctx.compact
+                .compact_consecutive_failures
+                .store(consecutive, std::sync::atomic::Ordering::Relaxed);
+
+            if did_apply {
+                // G6: 发射配对事件，防止 Langfuse span 孤立
+                let visible: Vec<crate::messages::BaseMessage> = ctx.session.transcript.read()
+                    .visible_messages().into_iter().cloned().collect();
+                ctx.runtime.event_bus.emit_observe(
+                    crate::agent::events_v2::ObserveEvent::MessagesCompacted {
+                        turn_id: ctx.turn_id(),
+                        agent_id: ctx.session.agent_id,
+                        before_count: result.before_visible_len,
+                        after_count: result.after_visible_len,
+                        summary: result.summary.clone().unwrap_or_default(),
+                        messages: visible,
+                        files: vec![],
+                        skills: vec![],
+                        re_inject_count: 0,
+                        strategy: result.strategy,
+                        affected_count: result.affected_count,
+                        estimated_tokens_saved: result.estimated_tokens_saved,
+                        estimated_tokens_before: pressure.estimated_tokens,
+                        estimated_tokens_after: pressure
+                            .estimated_tokens
+                            .saturating_sub(result.estimated_tokens_saved),
+                        changed_messages: result.affected_count,
+                        changed_fields: result.affected_count,
+                        no_op_candidates: 0,
+                        full_escalation_reason: result.full_escalation_reason.clone(),
+                        cache_hit_rate_before: pressure.cache_hit_rate,
+                        outcome: crate::agent::compact_v2::CompactOutcome::InterruptedAfterCommit,
+                    },
+                );
+                affected_count = result.affected_count;
+                break 'compact_core Ok(CompactOutput { compacted: true });
+            } else {
+                // 未提交变更 → 正常回滚
+                break 'compact_core Err(crate::error::AgentError::Interrupted);
+            }
+        }
+
         // 写回 compact_consecutive_failures
         ctx.compact
             .compact_consecutive_failures
@@ -167,7 +271,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
         let compacted = {
             let r = result; // compact_v2::run_compact 直接返回 CompactResult
             affected_count = r.affected_count;
-            let did_compact = r.affected_count > 0;
+            let did_compact = r.outcome().has_applied_change();
 
             if did_compact {
                 tracing::info!(
@@ -199,41 +303,42 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             // Full Compact 后必须 reset token_tracker——否则下轮 budget 计算会基于
             // compact 前的累积 token 数，导致每轮都触发 compact
             // 注：与 v1 CompactMiddleware 行为对齐（v1 已删除）
-            if did_compact && r.strategy == crate::agent::events::CompactStrategy::Full {
+            if did_compact && r.outcome().is_full_applied() {
                 // P1-3: 直接操作 StageContext.token_tracker
                 ctx.compact.token_tracker.write().reset();
                 // 注：token_tracker reset 为只读 token 操作，无需 drain recall
             }
 
-            // emit 观测事件（携带 messages 快照供 TUI 重建 pipeline）
-            // CompactStarted → MessagesCompacted 成对原则：无论 affected_count 是否为 0，
-            // 只要 CompactStarted 已 emit，就必须 emit MessagesCompacted 作为结束事件。
-            // 否则 Langfuse tracer 的 on_compact_end 永不调用，compact_span 始终缺失。
-            ctx.runtime.event_bus.emit_observe(
-                crate::agent::events_v2::ObserveEvent::MessagesCompacted {
-                    turn_id: ctx.turn_id(),
-                    agent_id: ctx.session.agent_id,
-                    before_count: r.before_visible_len,
-                    after_count: r.after_visible_len,
-                    summary: r.summary.clone().unwrap_or_default(),
-                    messages: messages_snapshot,
-                    files,
-                    skills,
-                    re_inject_count: 0,
-                    strategy: r.strategy,
-                    affected_count: r.affected_count,
-                    estimated_tokens_saved: r.estimated_tokens_saved,
-                    estimated_tokens_before: pressure.estimated_tokens,
-                    estimated_tokens_after: pressure
-                        .estimated_tokens
-                        .saturating_sub(r.estimated_tokens_saved),
-                    changed_messages: r.affected_count,
-                    changed_fields: r.affected_count,
-                    no_op_candidates: 0,
-                    full_escalation_reason: r.full_escalation_reason.clone(),
-                    cache_hit_rate_before: pressure.cache_hit_rate,
-                },
-            );
+            // `MessagesCompacted` 仅表示确有 Compact mutation；未应用 outcome
+            // 仅保留 `CompactStarted` 作为 begin 观测，完整 outcome transport 留待后续切片。
+            if did_compact {
+                ctx.runtime.event_bus.emit_observe(
+                    crate::agent::events_v2::ObserveEvent::MessagesCompacted {
+                        turn_id: ctx.turn_id(),
+                        agent_id: ctx.session.agent_id,
+                        before_count: r.before_visible_len,
+                        after_count: r.after_visible_len,
+                        summary: r.summary.clone().unwrap_or_default(),
+                        messages: messages_snapshot,
+                        files,
+                        skills,
+                        re_inject_count: 0,
+                        strategy: r.strategy,
+                        affected_count: r.affected_count,
+                        estimated_tokens_saved: r.estimated_tokens_saved,
+                        estimated_tokens_before: pressure.estimated_tokens,
+                        estimated_tokens_after: pressure
+                            .estimated_tokens
+                            .saturating_sub(r.estimated_tokens_saved),
+                        changed_messages: r.affected_count,
+                        changed_fields: r.affected_count,
+                        no_op_candidates: 0,
+                        full_escalation_reason: r.full_escalation_reason.clone(),
+                        cache_hit_rate_before: pressure.cache_hit_rate,
+                        outcome: r.outcome,
+                    },
+                );
+            }
             did_compact
         };
 

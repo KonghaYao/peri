@@ -19,6 +19,7 @@ use super::projection::ProjectionTarget;
 /// # 返回
 /// (被标记消息数量, 估算 token 节省量)
 pub fn smart_compact(transcript: &mut MessageTranscript, config: &CompactConfig) -> (usize, u64) {
+    tracing::warn!("Smart Compact is deprecated and will be removed. Converging to Micro Compact.");
     let plan = super::planner::plan_micro(transcript, config, true);
     let affected = plan.actions.len();
     let saved = plan.estimated_tokens_saved;

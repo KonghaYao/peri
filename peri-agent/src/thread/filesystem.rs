@@ -8,7 +8,7 @@ use tokio::{fs, io::AsyncWriteExt};
 
 use crate::{
     messages::BaseMessage,
-    thread::{AgentStatus, ThreadId, ThreadMeta, ThreadStore},
+    thread::{AgentStatus, CompactionLifecycle, ThreadId, ThreadMeta, ThreadStore},
 };
 
 /// 基于文件系统的 ThreadStore 实现
@@ -266,6 +266,17 @@ impl ThreadStore for FilesystemThreadStore {
         // 此处保留 no-op 以满足 ThreadStore 契约；测试若需断言标记落库请改用
         // in-memory SqliteThreadStore。
         Ok(())
+    }
+
+    async fn commit_compaction_lifecycle(
+        &self,
+        thread_id: &ThreadId,
+        lifecycle: &CompactionLifecycle,
+    ) -> Result<()> {
+        let _ = (thread_id, lifecycle);
+        anyhow::bail!(
+            "Filesystem store does not support compaction lifecycle. Please use SqliteThreadStore."
+        )
     }
 
     async fn delete_messages_since(

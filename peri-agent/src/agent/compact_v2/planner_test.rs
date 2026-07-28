@@ -388,13 +388,11 @@ fn test_plan_micro_skip_true_excludes_already_truncated() {
 
 // ── 验证实验：has_changes() 缺陷 ────────────────────────────────────────
 
-/// 【实验 1】has_changes() 对短消息场景返回 false，即使有实际 action
+/// 【实验 1】has_changes() 对短消息场景返回 true，因为有实际 action
 ///
-/// 根因：has_changes() = estimated_tokens_saved > 0，而短消息 (<150 chars)
-/// 的投影后字符数 (.max(50)) 大于原文，导致 saved=0。
-/// 后果：Reason 阶段跳过 render_llm_view → LLM 看到完整未压缩内容。
+/// 修复后 has_changes() = !actions.is_empty()，不依赖 token 估算。
 #[test]
-fn test_has_changes_returns_false_for_short_messages_even_with_actions() {
+fn test_has_changes_returns_true_for_short_messages_with_actions() {
     let entry = ProjectionActionEntry {
         message_id: crate::messages::MessageId::new(),
         target: ProjectionTarget::Message,
@@ -464,12 +462,11 @@ fn test_reclaim_target_zero_for_mid_range_budgets() {
     );
 }
 
-/// 【实验 3】estimate_tokens 的 .max(50) 造成短消息 saved=0
+/// 【实验 3】estimate_tokens 的 .max(1) 防止短消息 saved=0
 ///
-/// 根因：projected_chars = (chars / 3).max(50)，对任何 < 150 chars 的消息，
-/// projected (50) > 原文，导致 after > before → saved = 0。
+/// 修复后 projected_chars = (chars / 3).max(1)，短消息不会膨胀 projected。
 #[test]
-fn test_estimate_tokens_inflates_after_for_short_messages() {
+fn test_estimate_tokens_max_1_for_short_messages() {
     use crate::agent::compact_v2::planner::plan_micro;
     use crate::messages::{BaseMessage, MessageContent, ToolCallRequest};
     let mut t = MessageTranscript::new();
@@ -494,14 +491,5 @@ fn test_estimate_tokens_inflates_after_for_short_messages() {
     };
     let plan = plan_micro(&t, &config, true);
     assert!(!plan.actions.is_empty(), "至少有一些 stale 轮次被选中");
-    // BUG：即使有 action，saved 也可能为 0
-    eprintln!(
-        "actions={}, before={}, after={}, saved={}",
-        plan.actions.len(),
-        plan.estimated_before_tokens,
-        plan.estimated_after_tokens,
-        plan.estimated_tokens_saved
-    );
-    // 当前缺陷：短消息 saved 恒为 0
-    // 修复后应：estimated_tokens_saved > 0 || 投影不应比原文大
+    assert!(plan.estimated_tokens_saved > 0, "有 action 时 saved 应 > 0");
 }

@@ -299,8 +299,9 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             files,
             skills,
             strategy,
+            outcome,
             ..
-        } => compact::handle_compact_completed(state, summary, files, skills, strategy),
+        } => compact::handle_compact_completed(state, summary, files, skills, strategy, outcome),
         CompactError { message } => compact::handle_compact_error(state, message),
         BackgroundTaskCompleted {
             task_id,

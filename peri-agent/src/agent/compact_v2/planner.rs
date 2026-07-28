@@ -337,7 +337,7 @@ fn estimate_tokens(
 
         if has_action {
             // 有 action → 投影后减少
-            let projected_chars = (chars / 3).min(chars); // 投影不应比原文大
+            let projected_chars = (chars / 3).max(1);
             before += chars;
             after += projected_chars;
         }

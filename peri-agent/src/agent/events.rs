@@ -365,6 +365,8 @@ pub enum ExecutorEvent {
         /// 压缩前缓存命中率（0.0-1.0）
         #[serde(default)]
         cache_hit_rate_before: f64,
+        /// Compact 执行的语义结果
+        outcome: crate::agent::compact_v2::CompactOutcome,
     },
     /// 对话回退完成（rewind 命令，移除目标用户消息及其之后的所有消息）
     RewindCompleted {

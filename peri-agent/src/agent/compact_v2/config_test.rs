@@ -16,7 +16,6 @@ fn test_default_values() {
         3,
         "黑名单默认 3 个工具（AskUserQuestion/goal/TodoWrite）"
     );
-    assert_eq!(config.micro_min_affected, 5);
     assert_eq!(config.summary_max_tokens, 16000);
     assert_eq!(config.re_inject_max_files, 5);
     assert_eq!(config.re_inject_max_tokens_per_file, 5000);

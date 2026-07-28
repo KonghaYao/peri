@@ -124,10 +124,129 @@ impl MicroCompactPlan {
         self.estimated_tokens_saved >= self.target_reclaim_tokens
     }
 
-    /// 是否有投影 action 需要应用（有 action 即有意义，不依赖 token 估算）
+    /// 投影是否有实际 action 需要应用
     pub fn has_changes(&self) -> bool {
         !self.actions.is_empty()
     }
+}
+
+// ─── plan_from_persisted_directives ───────────────────────────────────────────
+
+/// 错误信息常量：transcript 中无可用持久化 directive。
+///
+/// 调用方应识别此特定消息并回退到 `plan_micro`。
+pub const NO_PERSISTED_DIRECTIVES: &str = "no persisted directives in transcript";
+
+/// 错误信息常量：持久化 directive 的 policy_version 与当前不匹配。
+pub const DIRECTIVE_VERSION_MISMATCH: &str = "persisted directive version mismatch";
+
+/// 错误信息常量：消息被标记 truncated 但缺少 projection directive（G1 fail-closed）。
+pub const CORRUPTED_PROJECTION: &str = "message truncated without projection directive";
+
+/// 从 transcript 中已持久化的 projection directive 重建 MicroCompactPlan。
+///
+/// 遍历全部可见消息，检查 `MessageFlags.projection`：
+/// - `projection = Some(d)` 且 `d.policy_version == expected_version` → 收集 entries
+/// - `projection = Some(d)` 但版本不匹配 → 立即返回错误
+/// - `projection = None`（含旧 truncated 标记）→ 跳过（不生产伪 action）
+///
+/// # Returns
+/// - `Ok(plan)`：至少一条消息有有效 directive
+/// - `Err(msg)`：无有效 directive（caller 应 fallback 到 `plan_micro`）或版本不匹配
+pub fn plan_from_persisted_directives(
+    transcript: &MessageTranscript,
+    expected_version: u32,
+) -> AgentResult<MicroCompactPlan> {
+    let visible = transcript.visible_messages();
+    let mut actions = Vec::new();
+    let mut has_any_directive = false;
+
+    for msg in &visible {
+        let id = msg.id();
+        let flags = transcript.flags(id);
+
+        match flags.projection {
+            Some(ref directive) => {
+                has_any_directive = true;
+                if directive.policy_version != expected_version {
+                    return Err(crate::error::AgentError::Other(anyhow::anyhow!(
+                        "{}: expected {}, got {} (msg {:?})",
+                        DIRECTIVE_VERSION_MISMATCH,
+                        expected_version,
+                        directive.policy_version,
+                        id
+                    )));
+                }
+                // 验证 directive entries 的 message_id 与当前消息一致
+                for entry in &directive.entries {
+                    if entry.message_id != id {
+                        return Err(crate::error::AgentError::Other(anyhow::anyhow!(
+                            "directive entry references wrong message: entry.msg_id={:?} != msg.id={:?}",
+                            entry.message_id, id
+                        )));
+                    }
+                }
+                actions.extend(directive.entries.clone());
+            }
+            None => {
+                // G1: fail-closed on unknown directives
+                // truncated=true + projection=None + not excluded = corrupted state
+                // （visible_messages() 已过滤 excluded，此处消息必然非 excluded）
+                if flags.truncated {
+                    return Err(crate::error::AgentError::Other(anyhow::anyhow!(
+                        "{}: msg {:?} is truncated but lacks projection directive",
+                        CORRUPTED_PROJECTION,
+                        id
+                    )));
+                }
+                // 无 truncated 标记 → 正常跳过，不生成投影 action
+            }
+        }
+    }
+
+    if !has_any_directive {
+        return Err(crate::error::AgentError::Other(anyhow::anyhow!(
+            "{}",
+            NO_PERSISTED_DIRECTIVES
+        )));
+    }
+
+    // 估算 token（与 plan_micro 保持一致）
+    let (before, after) = estimate_tokens_for_actions(transcript, &actions);
+
+    Ok(MicroCompactPlan {
+        policy_version: expected_version,
+        target_reclaim_tokens: 0, // 持久化 directive 不依赖 dynamic config target
+        actions,
+        estimated_before_tokens: before,
+        estimated_after_tokens: after,
+        estimated_tokens_saved: before.saturating_sub(after),
+    })
+}
+
+/// 对指定 actions 列表做 token 估算（用于 plan_from_persisted_directives）
+fn estimate_tokens_for_actions(
+    transcript: &MessageTranscript,
+    actions: &[ProjectionActionEntry],
+) -> (u64, u64) {
+    let mut before = 0u64;
+    let mut after = 0u64;
+
+    let entries = transcript.entries();
+    for entry in entries {
+        let id = entry.message.id();
+        let content_str = entry.message.message_content().text_content();
+        let chars = content_str.chars().count() as u64;
+
+        let has_action = actions.iter().any(|a| a.message_id == id);
+        if has_action {
+            let projected_chars = (chars / 3).min(chars);
+            before += chars;
+            after += projected_chars;
+        }
+    }
+
+    (before / 4, after / 4)
 }
 
 // ─── render_llm_view ──────────────────────────────────────────────────────────

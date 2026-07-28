@@ -75,29 +75,79 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
 
         // 如果有 compact config，生成 plan 并渲染投影视图
         if let Some(ref config) = ctx.compact.compact_config {
-            let plan = crate::agent::compact_v2::planner::plan_micro(&guard, config, false);
-            if plan.has_changes() {
-                let caps = ctx.runtime.llm.provider_capabilities();
-                match crate::agent::compact_v2::projection::render_llm_view(&guard, &plan, &caps) {
-                    Ok(view) => {
-                        tracing::debug!(
-                            action_count = plan.actions.len(),
-                            messages_before = visible.len(),
-                            messages_after = view.len(),
-                            "render_llm_view: 投影后消息数"
-                        );
-                        view
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "render_llm_view 失败，fallback 到原始可见消息"
-                        );
-                        visible
+            let caps = ctx.runtime.llm.provider_capabilities();
+            // 优先使用持久化 directive，避免每 turn 重新规划
+            match crate::agent::compact_v2::projection::plan_from_persisted_directives(
+                &guard, 1, // policy_version
+            ) {
+                Ok(plan) => {
+                    // 持久化 directive 有效 → 直接渲染
+                    match crate::agent::compact_v2::projection::render_llm_view(
+                        &guard, &plan, &caps,
+                    ) {
+                        Ok(view) => {
+                            tracing::debug!(
+                                action_count = plan.actions.len(),
+                                messages_before = visible.len(),
+                                messages_after = view.len(),
+                                "render_llm_view (persisted directives): 投影后消息数"
+                            );
+                            view
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "render_llm_view (persisted) 失败，fallback 到原始可见消息"
+                            );
+                            visible
+                        }
                     }
                 }
-            } else {
-                visible
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if err_msg
+                        .contains(crate::agent::compact_v2::projection::DIRECTIVE_VERSION_MISMATCH)
+                    {
+                        // 版本不匹配 → 安全回退到原始消息（不重新规划，避免 risk）
+                        tracing::warn!(
+                            error = %e,
+                            "持久化 directive 版本不匹配，使用原始可见消息"
+                        );
+                        visible
+                    } else {
+                        // 无持久化 directive → fallback 到 planner
+                        tracing::debug!(
+                            "无持久化 directive，fallback 到 plan_micro"
+                        );
+                        let plan = crate::agent::compact_v2::planner::plan_micro(
+                            &guard, config, false,
+                        );
+                        if plan.has_changes() {
+                            match crate::agent::compact_v2::projection::render_llm_view(
+                                &guard, &plan, &caps,
+                            ) {
+                                Ok(view) => {
+                                    tracing::debug!(
+                                        action_count = plan.actions.len(),
+                                        messages_before = visible.len(),
+                                        messages_after = view.len(),
+                                        "render_llm_view (planner): 投影后消息数"
+                                    );
+                                    view
+                                }
+                                Err(render_err) => {
+                                    tracing::warn!(
+                                        error = %render_err,
+                                        "render_llm_view (planner) 失败，fallback 到原始可见消息"
+                                    );
+                                    visible
+                                }
+                            }
+                        } else {
+                            visible
+                        }
+                    }
+                }
             }
         } else {
             visible

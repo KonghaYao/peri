@@ -828,6 +828,8 @@ pub enum AcpEventData {
         messages_json: String,
         /// 压缩策略: "micro" | "full" | "smart"
         strategy: String,
+        /// Compact 执行的语义结果
+        outcome: String,
     },
 
     /// `"compact-error"` — 上下文压缩失败。

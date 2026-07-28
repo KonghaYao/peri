@@ -1009,5 +1009,6 @@ app-note-compact-completed-summary = { $type }完成{ $detail } —— { $summar
 app-note-compact-error = 上下文压缩失败: { $message }
 app-note-compact-type-full = 完整压缩
 app-note-compact-type-micro = 微压缩
+app-note-compact-type-smart = 智能压缩
 app-note-agent-failed = Agent 执行失败: { $message }
 app-note-cache-hit-low = Prompt cache 命中率 {$pct}% < 80%（req: { $req_id }）

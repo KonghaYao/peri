@@ -482,6 +482,7 @@ fn test_compact_completed_no_session_update() {
             no_op_candidates: 0,
             full_escalation_reason: None,
             cache_hit_rate_before: 0.0,
+            outcome: peri_agent::agent::compact_v2::CompactOutcome::FullApplied,
         },
         "CompactCompleted",
     );

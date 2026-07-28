@@ -87,6 +87,8 @@ pub enum UnifiedLangfuseEvent {
         estimated_tokens_after: u64,
         cache_hit_rate_before: f64,
         full_escalation_reason: Option<String>,
+        /// Compact 执行的语义结果（CompactOutcome 的 Display 表示）
+        outcome: Option<String>,
     },
     /// 上下文窗口预算警告
     BudgetWarning {
@@ -223,6 +225,7 @@ impl UnifiedLangfuseEvent {
                 estimated_tokens_after,
                 cache_hit_rate_before,
                 full_escalation_reason,
+                outcome,
                 ..
             } => Some(UnifiedLangfuseEvent::CompactEnded {
                 summary,
@@ -236,6 +239,7 @@ impl UnifiedLangfuseEvent {
                 estimated_tokens_after,
                 cache_hit_rate_before,
                 full_escalation_reason: full_escalation_reason.map(|r| format!("{:?}", r)),
+                outcome: Some(format!("{:?}", outcome)),
             }),
             ExecutorEvent::CompactError { message } => Some(UnifiedLangfuseEvent::CompactEnded {
                 summary: String::new(),
@@ -249,6 +253,7 @@ impl UnifiedLangfuseEvent {
                 estimated_tokens_after: 0,
                 cache_hit_rate_before: 0.0,
                 full_escalation_reason: None,
+                outcome: None,
             }),
             ExecutorEvent::SessionStarted { frozen_summary, .. } => {
                 Some(UnifiedLangfuseEvent::SessionStarted { frozen_summary })
@@ -429,6 +434,7 @@ impl UnifiedLangfuseEvent {
                 estimated_tokens_after,
                 cache_hit_rate_before,
                 full_escalation_reason,
+                outcome,
                 ..
             } => Some(UnifiedLangfuseEvent::CompactEnded {
                 summary,
@@ -442,6 +448,7 @@ impl UnifiedLangfuseEvent {
                 estimated_tokens_after,
                 cache_hit_rate_before,
                 full_escalation_reason: full_escalation_reason.map(|r| format!("{:?}", r)),
+                outcome: Some(format!("{:?}", outcome)),
             }),
             ObserveEvent::StageStarted { stage, turn_id, .. } => {
                 Some(UnifiedLangfuseEvent::StageStarted {
@@ -574,6 +581,7 @@ impl LangfuseBridge {
                 estimated_tokens_after,
                 cache_hit_rate_before,
                 full_escalation_reason,
+                outcome,
             } => {
                 tracing::info!(
                     estimated_tokens_saved,
@@ -581,6 +589,7 @@ impl LangfuseBridge {
                     estimated_tokens_after,
                     cache_hit_rate_before,
                     full_escalation_reason = ?full_escalation_reason,
+                    outcome = ?outcome,
                     files_count,
                     skills_count,
                     "CompactCompleted"

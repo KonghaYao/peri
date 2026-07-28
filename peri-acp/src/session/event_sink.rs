@@ -194,6 +194,7 @@ impl EventSink for TransportEventSink {
                     micro_cleared,
                     messages,
                     strategy,
+                    outcome,
                     ..
                 } => {
                     let messages_json = match serde_json::to_string(messages) {
@@ -204,6 +205,7 @@ impl EventSink for TransportEventSink {
                         }
                     };
                     let strategy_str = format!("{:?}", strategy).to_lowercase();
+                    let outcome_str = format!("{:?}", outcome).to_lowercase();
                     Some(AcpEvent::CompactCompleted {
                         summary: summary.clone(),
                         files: files
@@ -217,6 +219,7 @@ impl EventSink for TransportEventSink {
                         micro_cleared: *micro_cleared,
                         messages_json,
                         strategy: strategy_str,
+                        outcome: outcome_str,
                     })
                 }
                 ExecutorEvent::AgentExecutionFailed { message } => {

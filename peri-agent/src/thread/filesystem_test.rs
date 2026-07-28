@@ -1,10 +1,37 @@
 //! Tests for filesystem_th
 
+use std::sync::Arc;
+
 use super::*;
+use crate::session::MessageTranscript;
+use crate::thread::CompactionLifecycle;
 use tempfile::tempdir;
 
 fn make_meta(cwd: &str) -> ThreadMeta {
     ThreadMeta::new(cwd)
+}
+
+fn make_persistent_transcript(
+    store: Arc<dyn ThreadStore>,
+    thread_id: ThreadId,
+) -> MessageTranscript {
+    MessageTranscript::new().with_persistence(store, thread_id)
+}
+
+#[tokio::test]
+async fn test_filesystem_store_flush_persistence_makes_append_visible() {
+    let dir = tempdir().unwrap();
+    let store: Arc<dyn ThreadStore> = Arc::new(FilesystemThreadStore::new(dir.path()));
+    let thread_id = store.create_thread(make_meta("/test")).await.unwrap();
+    let mut transcript = make_persistent_transcript(store.clone(), thread_id.clone());
+
+    let message_id = transcript.append(BaseMessage::human("durable filesystem message"));
+    transcript.flush_persistence().await.unwrap();
+
+    let messages = store.load_messages(&thread_id).await.unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id(), message_id);
+    assert_eq!(messages[0].content(), "durable filesystem message");
 }
 
 #[tokio::test]
@@ -219,4 +246,52 @@ async fn test_delete_messages_since_unknown_id_is_noop() {
 
     let loaded = store.load_messages(&id).await.unwrap();
     assert_eq!(loaded.len(), 1, "未知 message_id 应为 no-op");
+}
+
+#[tokio::test]
+async fn test_commit_compaction_lifecycle_is_explicitly_unsupported_without_mutating_filesystem() {
+    let dir = tempdir().unwrap();
+    let store = FilesystemThreadStore::new(dir.path());
+    let thread_id = store.create_thread(make_meta("/test")).await.unwrap();
+    let original_messages = vec![
+        BaseMessage::human("文件系统原始用户消息"),
+        BaseMessage::ai("文件系统原始助手回复"),
+    ];
+    store
+        .append_messages(&thread_id, &original_messages)
+        .await
+        .unwrap();
+
+    let summary = BaseMessage::human("文件系统不应追加的摘要");
+    let lifecycle = CompactionLifecycle {
+        flag_updates: vec![(
+            original_messages[0].id(),
+            crate::session::MessageFlags {
+                excluded: true,
+                ..Default::default()
+            },
+        )],
+        appended_messages: vec![summary.clone()],
+    };
+
+    let error = store
+        .commit_compaction_lifecycle(&thread_id, &lifecycle)
+        .await
+        .unwrap_err();
+    let error_message = error.to_string().to_lowercase();
+    assert!(
+        error_message.contains("filesystem") || error_message.contains("sqltiethreadstore"),
+        "文件系统 store 必须明确拒绝 compact lifecycle，而非 no-op Ok: {error}"
+    );
+
+    let messages = store.load_messages(&thread_id).await.unwrap();
+    assert_eq!(messages.len(), 2, "失败后原始消息必须保留");
+    assert_eq!(messages[0].id(), original_messages[0].id());
+    assert_eq!(messages[1].id(), original_messages[1].id());
+    assert!(
+        messages.iter().all(|message| message.id() != summary.id()),
+        "失败后摘要不得写入文件系统"
+    );
+    let flags = store.load_message_flags(&thread_id).await.unwrap();
+    assert!(flags.is_empty(), "失败后文件系统 flags 必须为空");
 }

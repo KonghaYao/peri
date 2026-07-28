@@ -7,6 +7,12 @@ use super::types::{ThreadId, ThreadMeta};
 use crate::messages::{BaseMessage, MessageId};
 use crate::session::MessageFlags;
 
+#[derive(Clone, Debug)]
+pub struct CompactionLifecycle {
+    pub flag_updates: Vec<(MessageId, MessageFlags)>,
+    pub appended_messages: Vec<BaseMessage>,
+}
+
 #[async_trait]
 pub trait ThreadStore: Send + Sync {
     /// 创建新 thread，返回分配的 ThreadId
@@ -70,6 +76,21 @@ pub trait ThreadStore: Send + Sync {
         Ok(()) // 默认 no-op
     }
 
+    /// 返回后端是否支持原子 compact lifecycle 提交。
+    fn supports_compaction_lifecycle(&self) -> bool {
+        false
+    }
+
+    /// 原子持久化压缩生命周期的消息标记和追加消息。
+    async fn commit_compaction_lifecycle(
+        &self,
+        thread_id: &ThreadId,
+        lifecycle: &CompactionLifecycle,
+    ) -> Result<()> {
+        let _ = (thread_id, lifecycle);
+        anyhow::bail!("unsupported compact lifecycle persistence")
+    }
+
     /// 加载 thread 中所有非默认 compact 标记
     async fn load_message_flags(
         &self,
@@ -89,5 +110,12 @@ pub trait ThreadStore: Send + Sync {
     ) -> Result<()> {
         let _ = (thread_id, message_id);
         Ok(()) // 默认 no-op
+    }
+
+    /// H6: 获取 context cache epoch 值。
+    ///
+    /// 每次 compact 提交后递增，用于检测 context_cache 是否因 compact 变更而失效。
+    async fn get_context_cache_epoch(&self, _thread_id: &ThreadId) -> Result<u64> {
+        Ok(0) // 默认无 epoch 支持
     }
 }

@@ -34,8 +34,9 @@ pub use full::{extract_file_info, extract_skill_names, re_inject_v2, ReInjectRes
 pub use micro::micro_compact;
 pub use planner::{plan_micro, ApplyReport, CompactPolicy, ContextPressure, FullEscalationReason};
 pub use projection::{
-    render_llm_view, MessageProjectionDirective, MicroCompactPlan, ProjectionAction,
-    ProjectionActionEntry, ProjectionTarget, ProviderCapabilities, ProviderProtocol,
+    plan_from_persisted_directives, render_llm_view, MessageProjectionDirective, MicroCompactPlan,
+    ProjectionAction, ProjectionActionEntry, ProjectionTarget, ProviderCapabilities,
+    ProviderProtocol, CORRUPTED_PROJECTION, DIRECTIVE_VERSION_MISMATCH, NO_PERSISTED_DIRECTIVES,
 };
 
 // ─── CompactResult ───────────────────────────────────────────────────────────────
@@ -57,6 +58,62 @@ pub struct CompactResult {
     pub summary: Option<String>,
     /// 升级到 Full 的原因（Micro/Smart 时为 None）
     pub full_escalation_reason: Option<FullEscalationReason>,
+    /// 本轮 Compact 的实际语义结果。
+    pub outcome: CompactOutcome,
+}
+
+/// Compact 执行的语义结果。
+///
+/// `strategy` 暂时仍是对外兼容的有效策略视图；调用方应通过本枚举判断
+/// Full Compact 是否真正完成。后续可将此查询结果提升为持久化的完整 outcome。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactOutcome {
+    /// 本轮未应用 Compact。
+    Skipped,
+    /// 已应用 Micro Compact。
+    MicroApplied,
+    /// 已应用 Smart Compact。
+    SmartApplied,
+    /// 已成功应用 Full Compact。
+    FullApplied,
+    /// Full Compact 未成功应用。
+    FullFailed,
+    /// 仅估算了 Compact 收益，未修改 transcript。
+    Shadowed,
+    /// 已应用 Micro Compact，但后续 Full Compact 失败。
+    MicroAppliedThenFullFailed,
+    /// 已应用 Smart Compact，但后续 Full Compact 失败。
+    SmartAppliedThenFullFailed,
+    /// Compact 已提交（transcript 已修改），但在事件发送前被取消（G6）。
+    InterruptedAfterCommit,
+}
+
+impl CompactOutcome {
+    /// 是否已在 transcript 中应用 Compact 变更。
+    pub fn has_applied_change(self) -> bool {
+        matches!(
+            self,
+            Self::MicroApplied
+                | Self::SmartApplied
+                | Self::FullApplied
+                | Self::MicroAppliedThenFullFailed
+                | Self::SmartAppliedThenFullFailed
+                | Self::InterruptedAfterCommit
+        )
+    }
+
+    /// 是否已成功应用 Full Compact。
+    pub fn is_full_applied(self) -> bool {
+        matches!(self, Self::FullApplied)
+    }
+}
+
+impl CompactResult {
+    /// 返回本轮 Compact 的语义结果。
+    pub fn outcome(&self) -> CompactOutcome {
+        self.outcome
+    }
 }
 
 // ─── 顶层入口 ───────────────────────────────────────────────────────────────────
@@ -118,13 +175,14 @@ pub async fn run_compact(
     if *consecutive_failures >= config.max_consecutive_failures {
         debug!(consecutive_failures, "Compact 降级：连续失败超限，跳过本轮");
         return CompactResult {
-            strategy: CompactStrategy::Micro,
+            strategy: CompactStrategy::Skip,
             affected_count: 0,
             estimated_tokens_saved: 0,
             before_visible_len,
             after_visible_len: before_visible_len,
             summary: None,
             full_escalation_reason: None,
+            outcome: CompactOutcome::Skipped,
         };
     }
 
@@ -162,6 +220,7 @@ pub async fn run_compact(
             after_visible_len: before_visible_len,
             summary: None,
             full_escalation_reason: None,
+            outcome: CompactOutcome::Skipped,
         },
         CompactAction::Micro => {
             // Cache-aware：高缓存命中 + headroom 足够时，延迟 compact
@@ -183,6 +242,7 @@ pub async fn run_compact(
                         after_visible_len: before_visible_len,
                         summary: None,
                         full_escalation_reason: None,
+                        outcome: CompactOutcome::Skipped,
                     };
                 }
             }
@@ -201,6 +261,7 @@ pub async fn run_compact(
                     after_visible_len: before_visible_len,
                     summary: None,
                     full_escalation_reason: None,
+                    outcome: CompactOutcome::Skipped,
                 };
             }
 
@@ -213,13 +274,14 @@ pub async fn run_compact(
                     "Shadow mode: 估算 compact 收益（未应用）"
                 );
                 return CompactResult {
-                    strategy: CompactStrategy::Micro,
-                    affected_count: plan.actions.len(),
+                    strategy: CompactStrategy::Skip,
+                    affected_count: 0,
                     estimated_tokens_saved: plan.estimated_tokens_saved,
                     before_visible_len,
-                    after_visible_len: before_visible_len, // 实际未改变
+                    after_visible_len: before_visible_len,
                     summary: None,
                     full_escalation_reason: None,
+                    outcome: CompactOutcome::Shadowed,
                 };
             }
 
@@ -241,6 +303,7 @@ pub async fn run_compact(
                     after_visible_len: transcript.visible_messages().len(),
                     summary: None,
                     full_escalation_reason: None,
+                    outcome: CompactOutcome::MicroApplied,
                 }
             } else if budget_pct >= config.auto_compact_threshold && reclaim_target > 0 {
                 // Micro 回收不足 + budget 高位 → 先应用 Micro，再叠加 Full
@@ -271,6 +334,11 @@ pub async fn run_compact(
                 full_result.affected_count += micro_affected;
                 // estimated_tokens_saved 也需要累加 Micro 的贡献
                 full_result.estimated_tokens_saved += plan.estimated_tokens_saved;
+                if micro_affected > 0 && !full_result.outcome().is_full_applied() {
+                    // Full 未完成时，对外兼容策略必须反映实际已生效的 Micro。
+                    full_result.strategy = CompactStrategy::Micro;
+                    full_result.outcome = CompactOutcome::MicroAppliedThenFullFailed;
+                }
                 full_result
             } else {
                 // 不足但未达 Full 阈值 → 应用 Micro（部分收益也好）
@@ -290,12 +358,36 @@ pub async fn run_compact(
                     after_visible_len: transcript.visible_messages().len(),
                     summary: None,
                     full_escalation_reason: None,
+                    outcome: CompactOutcome::MicroApplied,
                 }
             }
         }
         CompactAction::Smart => {
-            // 执行 Smart Compact（规则驱动，不调用 LLM）
-            let (affected, estimated_tokens_saved) = smart::smart_compact(transcript, config);
+            if config.shadow_mode_enabled {
+                let plan = plan_micro(transcript, config, true);
+                info!(
+                    estimated_saved = plan.estimated_tokens_saved,
+                    actions_count = plan.actions.len(),
+                    shadow = true,
+                    "Shadow mode: 估算 Smart Compact 收益（未应用）"
+                );
+                return CompactResult {
+                    strategy: CompactStrategy::Skip,
+                    affected_count: 0,
+                    estimated_tokens_saved: plan.estimated_tokens_saved,
+                    before_visible_len,
+                    after_visible_len: before_visible_len,
+                    summary: None,
+                    full_escalation_reason: None,
+                    outcome: CompactOutcome::Shadowed,
+                };
+            }
+
+            // Smart Compact 已废弃，委托给 Micro Compact
+            tracing::warn!("Smart Compact is deprecated, falling back to Micro Compact");
+            let plan = plan_micro(transcript, config, true);
+            let affected = micro::micro_compact(transcript, config);
+            let estimated_tokens_saved = plan.estimated_tokens_saved;
 
             // 空结果 → 无可 compact 消息，提前返回 Skip 避免反复触发
             if affected == 0 {
@@ -309,6 +401,7 @@ pub async fn run_compact(
                     after_visible_len: before_visible_len,
                     summary: None,
                     full_escalation_reason: None,
+                    outcome: CompactOutcome::Skipped,
                 };
             }
 
@@ -316,7 +409,7 @@ pub async fn run_compact(
             if estimated_tokens_saved >= reclaim_target {
                 if budget_pct >= config.auto_compact_threshold {
                     debug!(affected, budget_pct, "Smart 有效 + budget 高位 → 叠加 Full");
-                    run_full_or_degrade(
+                    let mut full_result = run_full_or_degrade(
                         transcript,
                         llm,
                         config,
@@ -325,7 +418,16 @@ pub async fn run_compact(
                         cwd,
                         FullEscalationReason::ForceThresholdExceeded,
                     )
-                    .await
+                    .await;
+                    // Smart 已在 Full 前实际应用；无论 Full 成功与否，指标都必须
+                    // 表示本轮 Smart + Full 的总变更（与 Micro 路径保持一致）。
+                    full_result.affected_count += affected;
+                    full_result.estimated_tokens_saved += estimated_tokens_saved;
+                    if !full_result.outcome().is_full_applied() {
+                        full_result.strategy = CompactStrategy::Smart;
+                        full_result.outcome = CompactOutcome::SmartAppliedThenFullFailed;
+                    }
+                    full_result
                 } else {
                     CompactResult {
                         strategy: CompactStrategy::Smart,
@@ -335,12 +437,13 @@ pub async fn run_compact(
                         after_visible_len: transcript.visible_messages().len(),
                         summary: None,
                         full_escalation_reason: None,
+                        outcome: CompactOutcome::SmartApplied,
                     }
                 }
             } else {
                 // Smart 无效 → 升级为 Full
                 debug!(affected, budget_pct, "Smart 无效 → 升级为 Full");
-                run_full_or_degrade(
+                let mut full_result = run_full_or_degrade(
                     transcript,
                     llm,
                     config,
@@ -349,7 +452,16 @@ pub async fn run_compact(
                     cwd,
                     FullEscalationReason::InsufficientReclaim,
                 )
-                .await
+                .await;
+                // Smart 已在 Full 前实际应用；无论 Full 成功与否，指标都必须
+                // 表示本轮 Smart + Full 的总变更（与 Micro 路径保持一致）。
+                full_result.affected_count += affected;
+                full_result.estimated_tokens_saved += estimated_tokens_saved;
+                if !full_result.outcome().is_full_applied() {
+                    full_result.strategy = CompactStrategy::Smart;
+                    full_result.outcome = CompactOutcome::SmartAppliedThenFullFailed;
+                }
+                full_result
             }
         }
     }
@@ -365,22 +477,6 @@ async fn run_full_or_degrade(
     cwd: &str,
     escalation_reason: FullEscalationReason,
 ) -> CompactResult {
-    // 重跑保护：清除上轮残留 excluded 标记
-    if *consecutive_failures > 0 {
-        let stale_ids: Vec<_> = transcript
-            .entries()
-            .iter()
-            .filter(|e| transcript.flags(e.message.id()).excluded)
-            .map(|e| e.message.id())
-            .collect();
-        for id in &stale_ids {
-            transcript.set_excluded(*id, false);
-        }
-        if !stale_ids.is_empty() {
-            debug!(count = stale_ids.len(), "清除上轮残留 excluded 标记");
-        }
-    }
-
     match full::full_compact_inner(transcript, llm, config, cwd).await {
         Ok(mut result) => {
             *consecutive_failures = 0;
@@ -398,6 +494,7 @@ async fn run_full_or_degrade(
                 after_visible_len: transcript.visible_messages().len(),
                 summary: None,
                 full_escalation_reason: Some(escalation_reason),
+                outcome: CompactOutcome::FullFailed,
             }
         }
     }

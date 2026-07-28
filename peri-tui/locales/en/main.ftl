@@ -1010,5 +1010,6 @@ app-note-compact-completed-summary = { $type } completed{ $detail } — { $summa
 app-note-compact-error = Context compaction failed: { $message }
 app-note-compact-type-full = Full compaction
 app-note-compact-type-micro = Micro compaction
+app-note-compact-type-smart = Smart compaction
 app-note-agent-failed = Agent execution failed: { $message }
 app-note-cache-hit-low = Prompt cache hit rate {$pct}% < 80% (req: { $req_id })
