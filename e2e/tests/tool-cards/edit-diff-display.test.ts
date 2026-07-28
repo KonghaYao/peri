@@ -11,6 +11,38 @@ import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js"
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
+const promptMarker = "❯ 请分两步操作：第一步：用 Write 工具创建文件";
+
+interface EditTurn {
+  section: string;
+  completed: boolean;
+}
+
+function currentEditTurn(screen: string): EditTurn | undefined {
+  const promptStart = screen.lastIndexOf(promptMarker);
+  const writeStart =
+    promptStart >= 0 ? screen.indexOf("● Write (", promptStart) : -1;
+  if (writeStart < 0) {
+    return undefined;
+  }
+
+  const turnEnd = screen.indexOf("处理耗时", writeStart);
+  return {
+    section: screen.slice(writeStart, turnEnd >= writeStart ? turnEnd : undefined),
+    completed: turnEnd >= writeStart,
+  };
+}
+
+function hasWriteSummary(section: string): boolean {
+  return /^\s*● Write \([^\n]+\) — Wrote \d+ lines?/m.test(section);
+}
+
+function hasEditSummary(section: string): boolean {
+  return /^\s*● Edit \([^\n]+\) — (?:Replaced text|\d+ lines changed)/m.test(
+    section,
+  );
+}
+
 describe("tool-card: edit diff display", () => {
   let tester: TmuxTester;
 
@@ -34,24 +66,54 @@ describe("tool-card: edit diff display", () => {
           "注意第二步必须用 Edit 工具（不能用 Write）",
       );
 
-      // 等待 Write 工具开始执行
-      await tester.waitForText("Write", {
-        timeout: 60_000,
-        interval: 1000,
-      });
+      // 等待当前 prompt 对应的 Write 卡片实际出现，避免命中 prompt / reasoning 文本。
+      await tester.waitFor(
+        (screen) => {
+          const turn = currentEditTurn(screen);
+          return turn !== undefined && hasWriteSummary(turn.section);
+        },
+        {
+          timeout: 60_000,
+          interval: 1000,
+          message: "等待当前 Edit 测试 turn 的 Write 摘要超时",
+        },
+      );
 
-      // 等待 Edit 工具出现并完成（头行后缀格式如 "— Replaced text"）
-      await tester.waitForText("Edit", {
-        timeout: 60_000,
-        interval: 1000,
-      });
-      // 等 Edit 完成——等待头行后缀出现（"Replaced" 或 "lines changed"）
-      await tester.sleep(8000);
+      // 等待同一当前 turn 的 Edit 工具卡片和其变更摘要。不能把不同区域的 Edit、
+      // Write 摘要或 Reasoning 文本拼接为成功条件。
+      await tester.waitFor(
+        (screen) => {
+          const turn = currentEditTurn(screen);
+          return turn !== undefined && hasWriteSummary(turn.section) && hasEditSummary(turn.section);
+        },
+        {
+          timeout: 90_000,
+          interval: 1000,
+          message: "等待 Edit 工具变更摘要超时",
+        },
+      );
+      await tester.sleep(1000);
 
       const editCapture = await takePeriSnapshot(tester, "edit-diff");
 
-      // 等待 agent 处理完 Edit 结果
-      await tester.sleep(5000);
+      // 只有当前 Edit turn 完成后才验证 agent 对编辑结果的最终确认。
+      await tester.waitFor(
+        (screen) => {
+          const turn = currentEditTurn(screen);
+          return (
+            turn !== undefined &&
+            turn.completed &&
+            hasWriteSummary(turn.section) &&
+            hasEditSummary(turn.section)
+          );
+        },
+        {
+          timeout: 90_000,
+          interval: 1000,
+          message: "等待 Edit 后主 turn 完成超时",
+        },
+      );
+      await tester.sleep(1000);
       const doneCapture = await takePeriSnapshot(tester, "edit-done");
 
       expect(editCapture.text.length).toBeGreaterThan(50);

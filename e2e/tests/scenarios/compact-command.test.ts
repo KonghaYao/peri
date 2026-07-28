@@ -24,17 +24,14 @@ describe("scenarios: /compact 命令", () => {
       tester = await launchPeri();
 
       // 积累几轮对话，充实消息历史
+      // 注意：tmux viewport ≈40 行，超过 2 轮会滚出屏幕
       const base = await tester.getScreenText();
       await sendPrompt(tester, "用中文简短回复: 今天天气不错");
       await waitForStableScreen(tester, 120_000, base);
 
       const r2 = await tester.getScreenText();
-      await sendPrompt(tester, "用中文简短回复: 明天可能下雨");
-      await waitForStableScreen(tester, 120_000, r2);
-
-      const r3 = await tester.getScreenText();
       await sendPrompt(tester, "用中文简短回复: 后天转晴");
-      await waitForStableScreen(tester, 120_000, r3);
+      await waitForStableScreen(tester, 120_000, r2);
 
       // 记录 compact 前的状态
       const beforeCompact = await takePeriSnapshot(tester, "compact-before");

@@ -10,6 +10,40 @@ import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js"
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
+const promptMarker = "❯ 请使用同步 subagent";
+
+interface AgentTurn {
+  section: string;
+  completed: boolean;
+}
+
+function currentAgentTurn(screen: string): AgentTurn | undefined {
+  const promptStart = screen.lastIndexOf(promptMarker);
+  const agentStart =
+    promptStart >= 0 ? screen.indexOf("● Agent (", promptStart) : -1;
+  if (agentStart < 0) {
+    return undefined;
+  }
+
+  const turnEnd = screen.indexOf("处理耗时", agentStart);
+  return {
+    section: screen.slice(agentStart, turnEnd >= agentStart ? turnEnd : undefined),
+    completed: turnEnd >= agentStart,
+  };
+}
+
+function hasRunningNestedShell(section: string): boolean {
+  return /^\s*● (?:Bash|Shell) \([^\n]+\)\s*\n\s*⎿ Running \(\d+s\)/m.test(
+    section,
+  );
+}
+
+function hasCompletedNestedShell(section: string): boolean {
+  return /^\s*● (?:Bash|Shell) \([^\n]+\)\s*\n\s*⎿ (?:hello|\[Command completed with exit code 0\])\s*$/m.test(
+    section,
+  );
+}
+
 describe("subagent: sync agents", () => {
   let tester: TmuxTester;
 
@@ -31,18 +65,37 @@ describe("subagent: sync agents", () => {
         "请使用同步 subagent 用 shell say hello，但是它要先 sleep 10s",
       );
 
-      // 等待 Agent 工具卡片出现（格式：● Agent task_description）
-      await tester.waitForText("Agent", {
-        timeout: 90_000,
-        interval: 1000,
-      });
-
-      // 等 4s 让 subagent 开始 sleep（屏幕上会出现 running 状态）
-      await tester.sleep(4000);
+      // 等待当前 prompt 对应的 Agent turn 内嵌 Shell/Bash 卡片真正进入 Running。
+      await tester.waitFor(
+        (screen) => {
+          const turn = currentAgentTurn(screen);
+          return turn !== undefined && !turn.completed && hasRunningNestedShell(turn.section);
+        },
+        {
+          timeout: 120_000,
+          interval: 1000,
+          message: "等待同步 subagent 的嵌套工具进入运行态超时",
+        },
+      );
       const runningCapture = await takePeriSnapshot(tester, "sync-subagent-running");
 
-      // 等待 subagent 执行完成（sleep 10s + shell echo + 开销 ≈ 15s）
-      await tester.sleep(15000);
+      // 完成态必须属于当前 prompt 对应的 Agent turn，且该 turn 内的 Shell/Bash 已完成。
+      await tester.waitFor(
+        (screen) => {
+          const turn = currentAgentTurn(screen);
+          return (
+            turn !== undefined &&
+            turn.completed &&
+            hasCompletedNestedShell(turn.section)
+          );
+        },
+        {
+          timeout: 120_000,
+          interval: 1000,
+          message: "等待同步 subagent 和主 turn 完成超时",
+        },
+      );
+      await tester.sleep(1000);
       const doneCapture = await takePeriSnapshot(tester, "sync-subagent-done");
 
       expect(runningCapture.text.length).toBeGreaterThan(100);
@@ -54,7 +107,7 @@ describe("subagent: sync agents", () => {
         criteria: [
           "消息区应有 Agent 工具调用卡片（● Agent + 任务描述，如 'sleep 10s then echo hello'）",
           "Agent 卡片内部应有 SubAgent 执行的工具调用卡片（如 ● Bash 或 ● Shell，包含命令参数），而非仅展示空的卡片容器",
-          "系统应处于处理中状态（如底部有加载指示器或 Spinner），表明 subagent 仍在运行",
+          "系统应处于处理中状态（如 Shell 卡片显示 'Running'、底部有 Spinner 或加载指示器），表明 subagent 仍在运行",
         ],
       });
       console.log("Judge (running):", JSON.stringify(r, null, 2));
