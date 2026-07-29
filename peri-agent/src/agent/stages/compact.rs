@@ -250,9 +250,9 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                         estimated_tokens_after: pressure
                             .estimated_tokens
                             .saturating_sub(result.estimated_tokens_saved),
-                        changed_messages: result.affected_count,
-                        changed_fields: result.affected_count,
-                        no_op_candidates: 0,
+                        changed_messages: result.changed_messages,
+                        changed_fields: result.changed_fields,
+                        no_op_candidates: result.no_op_candidates,
                         full_escalation_reason: result.full_escalation_reason.clone(),
                         cache_hit_rate_before: pressure.cache_hit_rate,
                         outcome: crate::agent::compact_v2::CompactOutcome::InterruptedAfterCommit,
@@ -336,9 +336,9 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                         estimated_tokens_after: pressure
                             .estimated_tokens
                             .saturating_sub(r.estimated_tokens_saved),
-                        changed_messages: r.affected_count,
-                        changed_fields: r.affected_count,
-                        no_op_candidates: 0,
+                        changed_messages: r.changed_messages,
+                        changed_fields: r.changed_fields,
+                        no_op_candidates: r.no_op_candidates,
                         full_escalation_reason: r.full_escalation_reason.clone(),
                         cache_hit_rate_before: pressure.cache_hit_rate,
                         outcome: r.outcome,
