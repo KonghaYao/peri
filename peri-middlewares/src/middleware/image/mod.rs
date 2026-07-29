@@ -1,6 +1,6 @@
 mod compressor;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use async_trait::async_trait;
 use peri_agent::error::AgentResult;
@@ -24,15 +24,13 @@ const SUPPORTED_MIME: &[(&str, &str)] = &[
 /// 读取对应图片文件，base64 编码后替换为 `ContentBlock::Image`。
 /// 压缩管线为预留切面，MVP 为空——不对图片做任何压缩处理。
 pub struct ImageMiddleware {
-    image_dir: PathBuf,
     max_size: usize,
     compressors: CompressorPipeline,
 }
 
 impl ImageMiddleware {
-    pub fn new(image_dir: PathBuf) -> Self {
+    pub fn new() -> Self {
         Self {
-            image_dir,
             max_size: 20 * 1024 * 1024, // 默认 20MB 上限
             compressors: CompressorPipeline::new(),
         }
@@ -48,6 +46,12 @@ impl ImageMiddleware {
     pub fn with_compressor(mut self, compressor: Box<dyn ImageCompressor>) -> Self {
         self.compressors.add(compressor);
         self
+    }
+}
+
+impl Default for ImageMiddleware {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

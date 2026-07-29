@@ -8,6 +8,7 @@ pub(crate) mod web_fetch;
 pub(crate) mod web_search;
 
 pub use filesystem::FilesystemMiddleware;
+pub use image::ImageMiddleware;
 pub use terminal::TerminalMiddleware;
 pub use todo::TodoMiddleware;
 pub use web::WebMiddleware;
