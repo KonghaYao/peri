@@ -420,9 +420,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                                         .unwrap_or_else(|| std::path::PathBuf::from("."))
                                         .join(".peri")
                                         .join("images");
-                                    if std::fs::create_dir_all(&img_dir).is_err() {
-                                        return;
-                                    }
+                                    let _ = std::fs::create_dir_all(&img_dir);
 
                                     let file_name = format!("{}_{}.png", timestamp, &hash[..8]);
                                     let file_path = img_dir.join(&file_name);
@@ -431,12 +429,12 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                                         Ok(()) => {
                                             let at_text = format!("@image {}", file_path.display());
                                             state_clone.write().insert_str(&at_text);
+                                            return;
                                         }
                                         Err(_) => {
                                             // PNG 编码失败，静默回退到文本粘贴
                                         }
                                     }
-                                    return;
                                 }
                             }
 
