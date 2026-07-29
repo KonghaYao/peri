@@ -2,6 +2,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use peri_agent::{
     agent::events::BackgroundTaskResult, middleware::r#trait::Middleware, tools::BaseTool,
 };
@@ -177,16 +178,19 @@ impl BaseTool for BashTool {
             let task_id_for_return = task_id.clone();
 
             tokio::spawn(async move {
+                // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
+                // 防止 bg shell 任務殘留在狀態欄。
                 let started = std::time::Instant::now();
-                let mut cmd = crate::process::shell_command(&command_owned, &[]);
-                cmd.current_dir(&cwd)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .kill_on_drop(true);
-                #[cfg(unix)]
-                cmd.process_group(0);
+                let result = std::panic::AssertUnwindSafe(async {
+                    let mut cmd = crate::process::shell_command(&command_owned, &[]);
+                    cmd.current_dir(&cwd)
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .kill_on_drop(true);
+                    #[cfg(unix)]
+                    cmd.process_group(0);
 
-                let child = cmd.spawn();
+                    let child = cmd.spawn();
                 let child = match child {
                     Ok(c) => c,
                     Err(e) => {
@@ -357,14 +361,50 @@ impl BaseTool for BashTool {
                     pid,
                     output_preview: None,
                 };
+                // register 失败时仍需调 complete()，确保 bg-task-completed 事件推送到 TUI，
+                // 否则任务会残留在状态栏。complete() 在 task 未注册时也能安全处理（仅 push_event）。
                 if let Err(e) = registry.register_with_kind(bg_task) {
-                    // register 失败时仅回调已完成，不再调 complete()（review M-4:
-                    // complete() 的 registry 状态更新是 no-op，语义模糊，回调已正确触发）
                     warn!(error = %e, task_id = %output.task_id, "bg shell: register_with_kind failed (callback already fired)");
-                    return;
                 }
                 let complete_task_id = output.task_id.clone();
                 registry.complete(&complete_task_id, output);
+                }).catch_unwind().await;
+                if let Err(panic_err) = result {
+                    // spawn 閉包內部 panic：嘗試用現有 task_id 發送失敗事件
+                    let panic_msg = if let Some(s) = panic_err.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic_err.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    let fallback = BackgroundTaskResult {
+                        task_id: task_id.clone(),
+                        agent_name: "bg-shell".to_string(),
+                        prompt_summary: command_owned.chars().take(80).collect(),
+                        success: false,
+                        output: format!("Background shell task panicked: {}", panic_msg),
+                        tool_calls_count: 0,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                        child_thread_id: None,
+                    };
+                    // 嘗試註冊 + 完成（即使 register 失敗也調 complete，發送 cleanup 事件到 TUI）
+                    let bg_task = BackgroundTask {
+                        id: fallback.task_id.clone(),
+                        agent_name: "bg-shell".to_string(),
+                        prompt_summary: command_owned.chars().take(80).collect(),
+                        status: BackgroundTaskStatus::Running,
+                        started_at: std::time::Instant::now(),
+                        chrono_started_at: chrono::Utc::now(),
+                        kind: BgTaskKind::Shell,
+                        cancel_handle: BgCancelHandle::Kill(None),
+                        pid: None,
+                        output_preview: None,
+                    };
+                    let _ = registry.register_with_kind(bg_task);
+                    let complete_task_id = fallback.task_id.clone();
+                    registry.complete(&complete_task_id, fallback);
+                }
             });
 
             return Ok(format!(

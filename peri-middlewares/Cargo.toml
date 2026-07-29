@@ -12,6 +12,7 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+futures.workspace = true
 tokio = { workspace = true, features = ["process"] }
 # P5.1: SubAgent stub 需要 tokio_util::sync::CancellationToken（原 v1 AgentCancellationToken 别名）。
 # 与 peri-agent 共享同一 tokio-util 依赖（feature unification 自动合并 sync feature）。
