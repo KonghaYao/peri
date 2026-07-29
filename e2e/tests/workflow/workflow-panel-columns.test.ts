@@ -50,7 +50,7 @@ describe("workflow: panel columns", () => {
       await tester.sleep(3000);
 
       // 打开 workflow 面板
-      await tester.sendText("/workflow");
+      await tester.sendText("/workflows");
       await tester.sleep(500);
       await tester.sendKey("Enter");
       await tester.sleep(2000);

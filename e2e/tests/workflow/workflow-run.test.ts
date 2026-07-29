@@ -1,7 +1,7 @@
 /**
  * 场景测试: Workflow 运行 → 面板观察 → 结果查看
  *
- * 验证触发 workflow 后，/workflow 面板显示运行中任务，
+ * 验证触发 workflow 后，/workflows 面板显示运行中任务，
  * 完成后面板中可见完成状态和结果。
  */
 import { describe, it, expect, afterEach } from "vitest";
@@ -19,7 +19,7 @@ describe("workflow: run and observe", () => {
   });
 
   it(
-    "触发 workflow → /workflow 面板观察运行态 → 查看完成结果",
+    "触发 workflow → /workflows 面板观察运行态 → 查看完成结果",
     { timeout: 300_000 },
     async () => {
       tester = await launchPeri();
@@ -44,8 +44,8 @@ describe("workflow: run and observe", () => {
 
       const launchCapture = await takePeriSnapshot(tester, "workflow-launched");
 
-      // 阶段 2：打开 /workflow 面板观察运行态
-      await sendPrompt(tester, "/workflow");
+      // 阶段 2：打开 /workflows 面板观察运行态
+      await sendPrompt(tester, "/workflows");
 
       await tester.waitForText("Workflow", {
         timeout: 10_000,
@@ -61,9 +61,12 @@ describe("workflow: run and observe", () => {
 
       // 阶段 3：等待 workflow 完成
       await waitForStableScreen(tester, 120_000, base);
+      await tester.sleep(2000);
 
-      // 再次打开 /workflow 面板查看完成结果
-      await sendPrompt(tester, "/workflow");
+      // 再次打开 /workflows 面板查看完成结果
+      await tester.sendText("/workflows");
+      await tester.sleep(500);
+      await tester.sendKey("Enter");
       await tester.waitForText("Workflow", {
         timeout: 10_000,
         interval: 500,
