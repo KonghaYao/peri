@@ -516,6 +516,7 @@ fn test_human_and_system_are_unchanged() {
 // ─── plan_from_persisted_directives 测试 ────────────────────────────────────
 
 /// 构造一个已设置 projection directive 的 transcript
+#[allow(dead_code)]
 fn transcript_with_directives(
     entries_data: Vec<(&str, Vec<(ProjectionTarget, ProjectionAction)>)>,
 ) -> MessageTranscript {
@@ -680,7 +681,7 @@ fn test_plan_from_persisted_directives_collects_all_directives() {
     let mut expected_count = 0u32;
 
     for i in 0..3 {
-        let msg = BaseMessage::human(MessageContent::text(&format!("msg {}", i)));
+        let msg = BaseMessage::human(MessageContent::text(format!("msg {}", i)));
         let msg_id = msg.id();
         t.append(msg);
 

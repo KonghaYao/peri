@@ -472,7 +472,7 @@ fn project_ai_content(
         let action_opt = block_actions.get(&i).map(|a| &a.action);
 
         match block {
-            ContentBlock::ToolUse { id, name: _, .. } => {
+            ContentBlock::ToolUse { id, .. } => {
                 // 从 projected tool_calls 查找对应的投影版本
                 if let Some(projected_tc) = tool_call_lookup.get(id.as_str()) {
                     projected_blocks.push(ContentBlock::ToolUse {

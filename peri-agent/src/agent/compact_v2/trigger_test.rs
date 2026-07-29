@@ -9,7 +9,7 @@ use crate::agent::events::CompactStrategy;
 use crate::llm::{BaseModel, LlmRequest, LlmResponse, StopReason};
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::transcript::MessageTranscript;
-use crate::thread::{FilesystemThreadStore, SqliteThreadStore, ThreadMeta, ThreadStore};
+use crate::thread::{FilesystemThreadStore, ThreadMeta, ThreadStore};
 use std::sync::Arc;
 
 fn make_human(text: &str) -> BaseMessage {

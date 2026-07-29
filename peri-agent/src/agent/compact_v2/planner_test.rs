@@ -84,7 +84,7 @@ fn test_token_estimation_produces_nonzero_savings() {
         t.append(BaseMessage::ai_with_tool_calls(
             MessageContent::text(format!("thinking {}", i)),
             vec![ToolCallRequest::new(
-                &format!("call_{}", i),
+                format!("call_{}", i),
                 "Bash",
                 serde_json::json!({"cmd": format!("echo {}", i)}),
             )],
@@ -184,7 +184,7 @@ fn test_retention_map_preserve_blocks_compact() {
         t.append(BaseMessage::ai_with_tool_calls(
             MessageContent::text("thinking".to_string()),
             vec![ToolCallRequest::new(
-                &format!("call_{}", i),
+                format!("call_{}", i),
                 "MyTool",
                 serde_json::json!({}),
             )],
@@ -225,7 +225,7 @@ fn test_retention_map_recomputable_allows_compact() {
         t.append(BaseMessage::ai_with_tool_calls(
             MessageContent::text("thinking".to_string()),
             vec![ToolCallRequest::new(
-                &format!("call_{}", i),
+                format!("call_{}", i),
                 "ReadTool",
                 serde_json::json!({}),
             )],
@@ -260,7 +260,7 @@ fn test_fallback_to_excluded_tools_when_map_empty() {
         t.append(BaseMessage::ai_with_tool_calls(
             MessageContent::text("thinking".to_string()),
             vec![ToolCallRequest::new(
-                &format!("call_{}", i),
+                format!("call_{}", i),
                 "AskUserQuestion",
                 serde_json::json!({}),
             )],
@@ -297,14 +297,14 @@ fn test_plan_micro_skip_false_includes_truncated_messages() {
         t.append(BaseMessage::ai_with_tool_calls(
             MessageContent::text("thinking".to_string()),
             vec![ToolCallRequest::new(
-                &format!("call_{}", i),
+                format!("call_{}", i),
                 "Read",
                 serde_json::json!({"file_path": format!("/f/{}", i)}),
             )],
         ));
         t.append(BaseMessage::tool_result(
             format!("call_{}", i),
-            MessageContent::text(&format!(
+            MessageContent::text(format!(
                 "file {} contains a lot of content: {}",
                 i,
                 "x".repeat(200)
@@ -331,7 +331,7 @@ fn test_plan_micro_skip_false_includes_truncated_messages() {
     // Step 2: Reason 阶段（skip=false）— 应对已 truncated 消息生成非空 plan
     let reason_plan = plan_micro(&t, &config, false);
     assert!(
-        reason_plan.actions.len() > 0,
+        !reason_plan.actions.is_empty(),
         "Reason 阶段 (skip=false) 应对已 truncated 消息生成投影 action"
     );
     assert!(
@@ -351,14 +351,14 @@ fn test_plan_micro_skip_true_excludes_already_truncated() {
         t.append(BaseMessage::ai_with_tool_calls(
             MessageContent::text("thinking".to_string()),
             vec![ToolCallRequest::new(
-                &format!("call_{}", i),
+                format!("call_{}", i),
                 "Read",
                 serde_json::json!({"file_path": format!("/f/{}", i)}),
             )],
         ));
         t.append(BaseMessage::tool_result(
             format!("call_{}", i),
-            MessageContent::text(&format!(
+            MessageContent::text(format!(
                 "file {} contains a lot of content: {}",
                 i,
                 "x".repeat(200)
@@ -405,7 +405,7 @@ fn test_has_changes_returns_true_for_short_messages_with_actions() {
     let plan = MicroCompactPlan {
         policy_version: 1,
         target_reclaim_tokens: 0,
-        actions: std::iter::repeat(entry).take(10).collect(),
+        actions: std::iter::repeat_n(entry, 10).collect(),
         estimated_before_tokens: 1, // 短消息：chars=5, /4 = 1
         estimated_after_tokens: 12, // projected_chars=50, /4 = 12
         estimated_tokens_saved: 0,  // saturating_sub(1, 12) = 0
@@ -475,14 +475,14 @@ fn test_estimate_tokens_max_1_for_short_messages() {
         t.append(BaseMessage::ai_with_tool_calls(
             MessageContent::text("thinking"),
             vec![ToolCallRequest::new(
-                &format!("c_{}", i),
+                format!("c_{}", i),
                 "Bash",
                 serde_json::json!({}),
             )],
         ));
         t.append(BaseMessage::tool_result(
             format!("c_{}", i),
-            MessageContent::text(&format!("out {}", i)),
+            MessageContent::text(format!("out {}", i)),
         ));
     }
     let config = CompactConfig {
