@@ -1,233 +1,60 @@
 # peri-tui
 
-TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTransport`（in-memory channel pair）与 ACP Server 通信，不直接依赖 `peri-agent`/`peri-middlewares` 的运行时路径（仅作为类型依赖）。
+## Scope
 
-## 开发命令
+`peri-tui` 是基于 ratatui-kit 的终端客户端。用户交互主路径经 ACP transport；crate 当前仍直接依赖 `peri-agent`、`peri-middlewares` 等 crate 的类型、配置和桥接代码。TUI 不得直接驱动 agent loop，Agent 执行入口保持在 ACP 会话执行路径。
 
-- `cargo run -p peri-tui`：启动 TUI
-- `cargo run -p peri-tui -- -a`：HITL 审批模式
-- `scripts/start-tui.sh`：启动（RELAY_PORT=3001）
-- `cargo test -p peri-tui --lib`：运行 TUI 测试
-- `cargo build -p peri-tui`：构建
+## 数据流/架构
 
-## 当前架构（ratatui-kit 单路径，S1–S13 完成，I14–I23 增量 + 渲染管道重写）
-
-**单一路径**：`use-kit` feature 默认 ON。`main.rs` 调用 `kit::entry::run_kit_fullscreen(opts, panic_notify_rx)`，legacy `runtime/main_loop` / `state_machine` / `command/` / `panel/` / `ui/` / `render/` / `event/` 已全部物理删除（净减 ~18000 行）。
-
-### kit 四链路（spawn 于 entry::run_kit_fullscreen）
-
-```
-1. spawn_kit_notifier     : AcpNotification → AcpEventData → bridge_tx
-2. spawn_acp_bridge       : bridge_rx → BridgeState → Atom 写入（VIEW_MODELS / ACP_STATE / POPUP_KIND ...）
-3. spawn_submit_consumer  : SUBMIT_TX (String) → acp_client.prompt()
-4. spawn_cancel_consumer  : CANCEL_TX → 清理 + BRIDGE_RESET_COUNTER 递增
-
-附加：
-- spawn_service_snapshot    : 2s tick → SERVICE_SNAPSHOT / THREAD_LIST / CRON_JOBS / FILE_LIST atoms
-- spawn_rewind_consumer     : REWIND_ACTION_TX → session/execute-command ("/rewind")
-- spawn_ask_user_consumer   : ASK_USER_TX → session/execute-command (AskUser 回答)
-- spawn_hitl_response_consumer : HITL_RESPONSE_TX → session/execute-command (HITL 审批)
-- spawn_thread_load_consumer : THREAD_LOAD_TX → acp_client.load_session(thread_id)
+```text
+ACP notification → acp_notifier → acp_bridge / BridgeState
+                 → VIEW_MODELS + atoms → components
 ```
 
-### 全局状态（atoms.rs，OnceLock 延迟初始化）
+用户提交、取消、会话加载及交互响应经 ACP client/transport 发送；通知在 `kit/acp_notifier.rs` 解码并进入 bridge，`kit/acp_bridge.rs` 维护 `BridgeState` 并发布渲染状态。组件只订阅和渲染状态，不能在 render 中驱动 Agent。
 
-类型别名：`pub type Atom<T> = ratatui_kit::prelude::StoreState<T>`。
+## 任务路由
 
-| Atom | 用途 |
-|------|------|
-| `VIEW_MODELS` | `ViewModelsSnapshot { items: im::Vector<TuiRenderUnit>, generation: u64 }` —— 消息流单一数据源 |
-| `ACP_STATE` | `AcpStateSnapshot { variant, is_loading, ... }` —— popup_active 已退役，弹窗状态走 POPUP_KIND.is_some() |
-| `SERVICE_SNAPSHOT` | CPU/MEM/MCP/Cron/provider/model_name/permission_mode/cwd 投影 |
-| `THREAD_LIST` / `CRON_JOBS` / `FILE_LIST` | Thread / Cron / cwd 文件列表 |
-| `HOOK_LIST` / `PLUGIN_LIST` / `MCP_SERVERS` / `PROVIDER_LIST` | Hook / Plugin / MCP / Provider 列表（供面板渲染） |
-| `SUBAGENT_LIST` / `MEMORY_LIST` | SubAgent 运行时状态 / Memory 文件条目 |
-| `TODO_ITEMS` | `Vec<TodoItem>` —— ACP SessionUpdate::Plan 下发的 Todo 列表 |
-| `OPEN_PANELS` / `ACTIVE_PANEL` / `POPUP_KIND` | 当前面板栈 + 激活面板 + 激活弹窗 |
-| `INPUT_HISTORY` / `INPUT_HISTORY_INDEX` / `DRAFT` | 输入历史栈 + 浏览指针 + 浏览前草稿保存（容量 1000） |
-| `INPUT_BUFFER` | agent loading 时缓存的待提交输入队列（上限 32） |
-| `HITL_PENDING` / `ASK_USER_PENDING` / `OAUTH_INFO` | 3 popup 的真实 payload（由 dispatch_and_notify 写入，close_popup 统一清空） |
-| `REWIND_PREVIEW` / `LAST_ESC_TIME` | Rewind 弹窗数据 + 双击 Esc 检测（500ms 窗口） |
-| `PREDICTION` | `PredictionState { text, received_at }` —— agent 预测文本（灰色占位，Tab 接受） |
-| `AT_MENTION_ACTIVE` / `MENTION_PREFIX` / `MENTION_SELECTED_INDEX` | @mention 状态 + SkimMatcherV2 模糊匹配 |
-| `SLASH_HINT_ACTIVE` / `SLASH_PREFIX` / `SLASH_SELECTED_INDEX` | slash 补全状态 |
-| `AVAILABLE_SLASH_COMMANDS` / `ACP_COMMANDS` / `SKILL_NAMES` | ACP 下发的命令/skill 列表 |
-| `MODEL_HIGHLIGHT_UNTIL` / `PROVIDER_HIGHLIGHT_UNTIL` / `MODE_HIGHLIGHT_UNTIL` | Status bar 瞬时高亮（1.5s） |
-| `COPY_CHAR_COUNT` / `COPY_MESSAGE_UNTIL` | 文本选中复制提示（"已复制 N 字符"，2s 消失） |
-| `WIZARD_ACTIVE` / `QUIT_PENDING_SINCE` | SetupWizard 激活 / 双击 q 退出 |
-| `INPUT_AREA_ESC_PREFIX` | Esc 清空输入提示前缀 |
-| `PENDING_ATTACHMENTS` | 待粘贴附件队列 |
+| 任务 | 首选位置 |
+| --- | --- |
+| 入口、任务启动、ACP client 生命周期 | `src/kit/entry.rs`、`src/acp_client/` |
+| ACP notification 解码与状态发布 | `src/kit/acp_notifier.rs`、`src/kit/acp_bridge.rs`、`src/kit/acp_events/` |
+| 全局状态与 ViewModel | `src/kit/atoms.rs`、`src/kit/acp_types.rs` |
+| 输入、提交、历史、@mention、slash | `src/kit/input_area.rs`、`src/kit/input_history.rs`、`src/kit/submit_consumer.rs` |
+| 消息渲染、滚动、选择 | `src/kit/message_area/`、`src/kit/markdown/`、`src/kit/text_selection.rs` |
+| 键盘、鼠标、焦点与事件优先级 | `src/kit/event_handlers.rs`、`src/kit/focus_router.rs` |
+| 面板、弹窗与确认交互 | `src/kit/panels/`、`src/kit/popups/`、`src/kit/panel_overlay.rs` |
+| 国际化与主题 | `src/i18n/`、`locales/`、`peri-theme` atoms |
+| 测试 | 与目标模块同目录的 `*_test.rs` 或 `#[cfg(test)]` 模块 |
 
-**Channels（OnceLock<UnboundedSender>）**：
-- `SUBMIT_TX: String` —— InputArea Enter → submit_consumer
-- `REWIND_ACTION_TX: RewindAction` —— RewindPopup → rewind_consumer
-- `THREAD_LOAD_TX: String` —— ThreadBrowser Enter → thread_load_consumer
+输入历史持久化由 `src/kit/input_history.rs` 管理，路径为 `~/.peri/input-history.json`；不要另建平行存储。
 
-**非 atom 全局句柄**：
-- `PERI_CONFIG_HANDLE: Arc<RwLock<PeriConfig>>` —— ModelPanel / LoginPanel / ConfigPanel 直接 write；ACP server 持同一 Arc，立即生效
-- `PERMISSION_MODE_HANDLE: Arc<SharedPermissionMode>` —— ConfigPanel 切换 permission_mode 直接 store
-- `CRON_SCHEDULER_HANDLE: Arc<Mutex<CronScheduler>>` —— CronPanel 直接 toggle/remove；service_snapshot 下次 tick 自动刷新 CRON_JOBS atom
+## 稳定不变量
 
-## 输入框（InputArea，kit/input_area.rs）
+- ACP 是交互与 Agent 执行的边界；新增请求、通知或终止事件须覆盖 ACP 映射、bridge 和组件消费，终止事件必须离开 loading 状态。
+- `BridgeState` 是 ACP 事件到 `VIEW_MODELS` 与 atoms 的状态边界。切换会话或重置时，必须过滤陈旧 session 事件并清理旧会话状态。
+- render body 不写 atom；render 内派生缓存使用既有无通知写入模式，副作用放在事件或 effect 边界。
+- `#[component]` 的 hooks 必须在所有条件分支、`match` 与提前返回前按稳定顺序调用。
+- 交互事件按焦点和优先级分发：消息区只处理滚轮，编辑区处理键盘，面板/弹窗的局部取消不得被全局 handler 截断。
+- 用户可见文本使用 i18n；新增 key 同步更新 `locales/en/main.ftl` 和 `locales/zh-CN/main.ftl`。主题从 `peri-theme` atoms 获取，不硬编码颜色。
+- 文本编辑、截断与坐标按 Unicode 字符边界和终端显示宽度处理；不得用字节长度替代显示宽度。
 
-`#[component]` 组件，自管 EditorState（text + cursor）。完整功能：
+## 目标命令
 
-- **多行**：Shift/Alt+Enter 换行；高度动态（3~12 行）
-- **history**：Up/Down 浏览 `INPUT_HISTORY`（容量 1000，磁盘持久化 `~/.peri/input_history.json`）；进入历史模式时 `DRAFT` atom 保存当前草稿，Esc 或回到底部恢复
-- **prediction**：agent 预测文本以灰色占位符显示在光标后，Tab 键接受预测，Esc 或继续输入清除
-- **@mention**：`@` 触发 → MentionPopup 显示 `FILE_LIST`，`SkimMatcherV2` 模糊匹配过滤（大小写不敏感）
-- **slash 补全**：行首 `/` 触发 → SlashCompletion 显示 `AVAILABLE_SLASH_COMMANDS`（ACP 下发 + 内置 33 条静态命令）
-- **编辑快捷键**：Ctrl+W（删词）/ Ctrl+U（清空）/ Ctrl+Left/Right（跳词）/ Home/End / Backspace
-- **粘贴**：Event::Paste 整段插入；Ctrl+V 粘贴剪贴板
-- **macOS Option 键**：Option+Left/Right/Up/Down 映射为 Ctrl+ 对应功能（Alt 键兼容）
-- **提交**：Enter 检查 `ACP_STATE.is_loading`：
-  - **非 loading** → SUBMIT_TX.send(text)
-  - **loading 中** → push 到 `INPUT_BUFFER`（上限 32，FIFO），TurnDone 时 `drain_input_buffer()` 顺序重新提交
-- **slash Enter**：替换 editor 为命令并提交（同样检查 loading 入 buffer）
+从仓库根目录执行：
 
-## 消息渲染（kit/message_area.rs）
-
-### 渲染管道（当前，render_bridge 已退役）
-
-```
-ACP 事件 → VIEW_MODELS atom 写入
-              ↓
-message_area 直接消费 VIEW_MODELS：
-  ├─ vm_to_lines: TuiRenderUnit → Vec<Line>
-  ├─ wrap_map_cache: 视觉行 → 渲染行映射（仅内容变化时重建）
-  ├─ total_rows_cache: O(N·W) line_count 结果缓存（key 变化时重算，write_no_update）
-  ├─ 视口裁剪：只 clone + highlight + 渲染视口内 ~60 行
-  ├─ ScrollThrottle: 鼠标滚轮 16ms 节流（≈60fps），键盘不节流
-  ├─ 智能跟随：VIEW_MODELS 变化时自动滚到底，用户主动上滚时不抢夺滚动位
-  ├─ Todo 渲染：TODO_ITEMS atom → 图标 + 状态行
-  └─ Sticky Header + 滚动按钮
+```bash
+cargo run -p peri-tui
+cargo run -p peri-tui -- -a
+./dev.sh
+cargo build -p peri-tui
+cargo check -p peri-tui
+cargo test -p peri-tui --lib
 ```
 
-### ViewModel 变体
+## 按需引用 / Verify
 
-7 种变体（UserBubble / AssistantBubble / ToolCard / SystemNote / SubAgentGroup / CollapsedGroup / ReasoningBlock），外加 AskUserBlock、DiffBlock、DividerData 子类型。
-
-- **ToolCard**：format_tool_name 映射（Bash→Shell、folder_operations→Folder，其余原样透传），format_tool_args 参数摘要提取，工具折叠/展开逻辑
-- **SubAgentGroup**：prefix ◆→❯，final_result→⎿
-- **CollapsedGroup**：折叠/展开切换
-- **SystemNote**：Info/Warning/Error 三级
-
-### 文本选中复制（kit/text_selection.rs）
-
-鼠标 Drag → 选区高亮（selection_bg 主题色） → 松开自动复制到剪贴板（arboard）。通过 `MsgAreaTracker` Hook 记录消息区外边界，`mouse_visual_position` 将终端坐标转为视觉坐标，`extract_selected_text` 提取纯文本。
-
-## 16 面板（kit/panels/，PanelKind 枚举）
-
-| Panel | 数据源 | 切换功能 |
-|-------|--------|----------|
-| **Model** | SERVICE_SNAPSHOT + 静态 MODEL_ALIASES | ✅ Enter 修改 `PERI_CONFIG_HANDLE.active_alias` |
-| **Login** | PROVIDER_LIST atom（H1f） | ✅ Enter 切换 `active_provider_id` + 持久化 |
-| **Agent** | SERVICE_SNAPSHOT + PERI_CONFIG_HANDLE + VIEW_MODELS（H1e） | 只读 |
-| **Hooks** | HOOK_LIST atom（H1b） | 只读 |
-| **Config** | PERI_CONFIG_HANDLE + PERMISSION_MODE_HANDLE（H1a） | ✅ 切换 + 持久化到 settings.json |
-| **ThreadBrowser** | THREAD_LIST atom | ✅ Enter 通过 THREAD_LOAD_TX 调用 `load_session` |
-| **Mcp** | MCP_SERVERS + SERVICE_SNAPSHOT.mcp（H1d） | 只读 |
-| **Plugin** | PLUGIN_LIST atom（H1c） | 只读 |
-| **Cron** | CRON_JOBS atom + CRON_SCHEDULER_HANDLE（H1g+） | ✅ Enter toggle / d+Enter delete |
-| **Tasks** | CRON_JOBS + VIEW_MODELS SubAgentGroup（H1g） | 只读总览 |
-| **Status** | SERVICE_SNAPSHOT + VIEW_MODELS 派生（H1a+） | 只读，Service + Context 双 Tab |
-| **Memory** | MEMORY_LIST atom（H1h） | ✅ Enter 调用 `$EDITOR` 打开文件 |
-| **Betas** | 构建期 feature flags | 只读 |
-| **Workflow** | VIEW_MODELS SubAgent 计数 + 外部 CLI 说明 | 只读 |
-| **AskUser** | ASK_USER_PENDING（内联渲染 + Confirm 二次确认） | 表单填写 |
-| **Theme** | THEME_ATOM/PALETTE_ATOM/PERI_COLORS_ATOM | ✅ Enter 应用+持久化；Tab 切 Dark/Light；触发 Download 弹窗下载主题 |
-| **SetupWizard**（非 PanelKind） | App.global_ui | 配置向导（首次启动触发，独立流程） |
-
-面板栈互斥组（MutexGroup）：Settings / Agent / Tools / Info / Thread。打开新面板按栈压入；关闭弹栈。
-
-## 6 弹窗（kit/popups/）
-
-由 ACP 事件触发，统一通过 `POPUP_KIND` atom 路由。dispatch_and_notify 在写入
-`POPUP_KIND` 的同时把完整 payload 写入对应 atom（I20-D / I21-A / I21-B）；
-`close_popup()` 关闭时根据 kind 统一清空 payload atom，避免陈旧数据残留（I21-C）。
-
-| Popup | 触发源 | payload atom | 功能 |
-|-------|--------|--------------|------|
-| **HITL** | `AcpEventData::HitlPending` | `HITL_PENDING: Option<HitlPending>` | 显示真实 tool_name + tool_input + batch；Enter approve / Esc reject（I21-A） |
-| **AskUser** | `AcpEventData::AskUser` | `ASK_USER_PENDING: Option<AskUser>` | Panel 内联渲染；Tab 切问题、↑↓ 导航、Space 选、Enter 下一题/提交、Esc 取消 |
-| **Rewind** | `AcpEventData::RewindPreview` 或双击 Esc | `REWIND_PREVIEW: Option<RewindPreview>` | 回退预览 + 确认；REWIND_ACTION_TX → /rewind RPC |
-| **OAuth** | `AcpEventData::OauthNeeded` | `OAUTH_INFO: Option<OauthNeeded>` | 显示真实 server_name + auth_url；Ctrl+O 开浏览器、Enter 关闭（I20-D） |
-| **Confirm** | AskUser Panel 内 Elicitation 二次确认 / ThreadBrowser 切线程 | `CONFIRM_PAYLOAD: Option<ConfirmPayload>` | 通用确认对话框；Enter/Esc 通过 consumer 回发 ACP 响应 |
-| **Download** | Theme Panel 下载主题 | 文件下载状态枚举 | 显示下载进度 + 完成提示 |
-
-## Status Bar（kit/status_bar.rs）
-
-双行布局：
-- 第一行：权限模式 → cwd → model alias → CPU% → MEM → context
-- 第二行：瞬时状态（复制提示 "已复制 N 字符" /MCP/LSP）→ 快捷键 hints
-
-瞬时高亮通过 `MODEL_HIGHLIGHT_UNTIL` 等 atom + Instant 控制 1.5s 消失。复制提示通过 `COPY_CHAR_COUNT` + `COPY_MESSAGE_UNTIL` 控制 2s 消失。
-
-## ACP 数据流
-
-```
-用户 Enter → InputArea → SUBMIT_TX
-                            ↓
-            spawn_submit_consumer → acp_client.prompt()
-                            ↓
-                MpscClientTransport.send_request()
-                            ↓
-            ACP Server (tokio::spawn) → ExecutorEvent
-                            ↓
-                TransportEventSink.push_event()
-                            ↓
-            AcpTuiClient.pump_notifications() → AcpNotification
-                            ↓
-            spawn_kit_notifier → AcpEventData::decode
-                            ↓
-                bridge_tx → spawn_acp_bridge
-                            ↓
-            dispatch_and_notify → BridgeState → Atom 写入
-                            ↓
-            ratatui-kit 组件 use_store → 自动重渲染
-```
-
-**[TRAP]** TUI 层数据必须通过 ACP 协议到达 ACP 层，禁止直连 peri-agent / peri-middlewares 运行时。本地状态变更（如 ModelPanel 切 alias）通过共享 `Arc<RwLock<PeriConfig>>` 直接 write，ACP server 持同一 Arc。
-
-## Rewind 完整路径
-
-1. 双击 Esc（500ms 内）或 ACP `RewindPreview` 事件 → 设置 `REWIND_PREVIEW` + `POPUP_KIND = Rewind`
-2. RewindPopup 渲染预览：消息列表 / 文件改动（Tab 切换视图）
-3. Enter → `REWIND_ACTION_TX.send(Confirm { target_message_id, revert_files })`
-4. `spawn_rewind_consumer` → `acp_client.send_raw_request("session/execute-command", { command: "/rewind", args: {...} })`
-5. ACP server RewindCommand 完成 → 推送 `ExecutorEvent::RewindCompleted` → kit_notifier → ViewCommit → VIEW_MODELS 刷新
-
-## 关键 [TRAP]
-
-- **绝不推远程** —— 见 `~/.claude/projects/-Users-konghayao-code-ai-perihelion/memory/never-push-remote.md`
-- **`AcpNotification::AgentEvent` 暂忽略** —— 携带的 AcpEvent DTO（TurnCommitted/StateSnapshotMeta/CompactCompleted）属于低频 v2 事件，kit 以 UnstableEvent 为主通道
-- **SUBMIT_TX / REWIND_ACTION_TX / THREAD_LOAD_TX 必须 OnceLock 而非 lazy** —— rx 端在 entry::run_kit_fullscreen 中 spawn 任务，必须在 build_app_and_acp 完成后由 entry 显式 `set(tx)`
-- **`ACP_STATE.is_loading` 是 InputArea 判断 loading 的唯一来源** —— 不能依赖 `props.loading`（渲染时快照，事件触发时可能已变化）
-- **PERI_CONFIG_HANDLE 共享 Arc** —— ACP server 持同一 Arc，write 后立即可见；service_snapshot 2s 内捕获变化刷新 SERVICE_SNAPSHOT
-- **drain_input_buffer 必须在 TurnDone 而非 TurnInterrupted** —— Interrupted 表示用户主动打断，不应自动续跑
-- **FILE_LIST 扫描深度=2** —— 浅扫避免 node_modules / target 等大目录爆栈；MAX_FILES=500 上限
-- **`scan_cwd_files_shallow` 必须 spawn_blocking 包裹** —— std::fs 同步操作阻塞 async runtime
-- **ModelPanel 切换不立即触发 status bar 刷新** —— 依赖 service_snapshot 2s tick；如需立即刷新可手动改 SERVICE_SNAPSHOT atom
-- **ThreadBrowser Enter 后必须手动关闭面板** —— load_session 的 ViewCommit 通知不会自动关面板
-- **process_resource_monitor 独立新建** —— service_snapshot 不复用 ServiceRegistry.resource_monitor（非 Arc），新建实例采样进程级数据不影响正确性
-- **面板 Up 键 deadlock 已修复** —— ReactiveHandle read/write 不能在同一个表达式中自死锁（bdf7bb55）
-
-## 测试风格
-
-- `kit::input_area::tests` —— EditorState / 多行渲染 / @mention 触发 / slash 触发 / 文件过滤
-- `kit::acp_events::tests` —— drain_input_buffer 顺序 / 空队列 / SUBMIT_TX 缺失安全性
-- `kit::service_snapshot::tests` —— tick_once / 派生 provider+model / cwd 文件扫描 / MAX_FILES 上限
-- `kit::submit_consumer::tests` —— 空文本跳过 / 首次创建 session / shutdown / dropped tx
-- `kit::thread_load_consumer::tests` —— 空 thread_id 跳过 / shutdown / dropped tx
-- `kit::rewind_action::tests` —— /rewind RPC payload / has_session 检查 / 双击 Esc 时序
-
-`#[serial]` 用于依赖全局 atom 的并发敏感测试。
-
-## 编码规范
-
-- `#![allow(clippy::needless_update)]` —— ratatui-kit element! 宏展开触发，模块级抑制
-- 字符串截断用 `chars().take(N)`（CJK 安全）
-- 终端列宽用 `unicode-width`
-- 快捷键：禁止 `Shift+字母`；优先 `Ctrl+字母`；不用 PageUp/Down
-- 测试隔离：`App::save_config(cfg, self.config_path_override.as_deref())`
-- `std::sync::RwLockReadGuard` 不是 Send → async 跨 `.await` 用 `parking_lot::RwLock`
+- 稳定 UI 规则：`../docs/standards/tui.md`。
+- 跨模块边界、事件与冻结数据：`../docs/standards/architecture-contracts.md`，重点遵守 `ARC-BOUNDARY-001` 与 `ARC-EVENT-001`。
+- 修改 ACP 数据流时，核对 `src/kit/acp_notifier.rs`、`src/kit/acp_bridge.rs` 和对应组件；修改用户界面文本时核对两份 FTL。
+- 完成后运行相关 `cargo test -p peri-tui --lib`，并运行 `git diff --check`。不得把密钥、token、密码或连接串写入界面、日志、错误或测试 fixture。
