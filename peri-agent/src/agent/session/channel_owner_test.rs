@@ -42,11 +42,8 @@ async fn test_channel_owner_forwards_notification_to_inbox() {
     // Should have one defer message in the queue
     assert_eq!(inbox.queue().len(), 1);
 
-    // Verify it's a ChannelMessage defer (drain_for_end returns Prompt + Defer)
-    let msgs = inbox
-        .queue()
-        .drain_for_end()
-        .expect("should have wake-up messages");
+    // Verify it's a ChannelMessage defer
+    let msgs = inbox.queue().drain_all();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, MessageSource::ChannelMessage);
 
@@ -122,10 +119,7 @@ async fn test_channel_owner_notification_format() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let msgs = inbox
-        .queue()
-        .drain_for_end()
-        .expect("should have wake-up messages");
+    let msgs = inbox.queue().drain_all();
     assert_eq!(msgs.len(), 1);
     let content = msgs[0].message.content();
     assert!(content.contains("plugin:weixin:weixin"));

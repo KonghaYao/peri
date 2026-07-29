@@ -27,13 +27,10 @@ async fn test_cron_owner_forwards_trigger_to_inbox() {
     // Should have one defer message in the queue
     assert_eq!(inbox.queue().len(), 1);
 
-    // Verify it's a CronTrigger defer (drain_for_end returns Some when Defer present)
-    let drained = inbox
-        .queue()
-        .drain_for_end()
-        .expect("Defer should wake drain_for_end");
-    let msg = drained.into_iter().next().unwrap();
-    assert_eq!(msg.source, MessageSource::CronTrigger);
+    // Verify it's a CronTrigger defer
+    let drained = inbox.queue().drain_all();
+    assert_eq!(drained.len(), 1, "应有一条消息");
+    assert_eq!(drained[0].source, MessageSource::CronTrigger);
 
     shutdown.cancel();
     owner.shutdown();

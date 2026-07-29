@@ -91,13 +91,8 @@ async fn test_after_agent_goal_active_注入_steering_并设_block_continue() {
     assert_eq!(result.block_continue.as_deref(), Some("goal_active"));
 
     // 注入路径：v2 MessageQueue 应收到 1 条 Defer（GoalSteering）
-    // Defer 在 Receive 阶段保留在队列，需用 drain_for_end 验证
-    let drained = state.v2_queue().drain_for_end();
-    assert_eq!(
-        drained.unwrap_or_default().len(),
-        1,
-        "应 push 1 条 goal steering Defer 消息"
-    );
+    let drained = state.v2_queue().drain_all();
+    assert_eq!(drained.len(), 1, "应 push 1 条 goal steering Defer 消息");
 }
 
 #[tokio::test]
@@ -118,7 +113,7 @@ async fn test_after_agent_no_goal_放行_不注入() {
         "无 goal 时不应设 block_continue"
     );
     // 无 goal 时 queue 应为空
-    let drained = state.v2_queue().drain_for_receive();
+    let drained = state.v2_queue().drain_all();
     assert!(drained.is_empty(), "无 goal 时不应 push 任何消息");
 }
 
@@ -144,7 +139,7 @@ async fn test_after_agent_existing_block_continue_不干预() {
         "已有 block_continue 应保留原值，不被 goal_active 覆盖"
     );
     // 不干预时 queue 应为空
-    let drained = state.v2_queue().drain_for_receive();
+    let drained = state.v2_queue().drain_all();
     assert!(
         drained.is_empty(),
         "已有 block_continue 时不应 push steering"
@@ -200,10 +195,9 @@ async fn test_after_agent_terminal_重置_pending_rounds() {
     );
 
     // 验证 queue 累积：两次 active（r1 / r3）各 push 1 条 Defer，r2 终态不 push
-    // Defer 在 Receive 阶段保留在队列，需用 drain_for_end 验证
-    let drained_msg = state.v2_queue().drain_for_end();
+    let drained_msg = state.v2_queue().drain_all();
     assert_eq!(
-        drained_msg.unwrap_or_default().len(),
+        drained_msg.len(),
         2,
         "应累积 2 条 goal steering Defer（两次 active），终态 r2 不 push"
     );

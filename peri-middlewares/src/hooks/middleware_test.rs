@@ -825,7 +825,7 @@ async fn test_stop_block_continue_sets_block_continue_field() {
             // Either outcome is valid depending on the hook executor behavior
             if o.block_continue.is_some() {
                 // Stop hook block → 应通过 v2 queue push 1 条 Info（StopHookFeedback）
-                let drained = state.v2_queue().drain_for_receive();
+                let drained = state.v2_queue().drain_all();
                 assert_eq!(
                     drained.len(),
                     1,

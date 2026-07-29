@@ -4,14 +4,15 @@
 //!
 //! ## 消息分三类（控制循环唤醒和消费行为）
 //!
-//! | Kind | 来源 | Receive（RCRA）行为 | 唤醒新 turn |
-//! |------|------|---------------------|------------|
-//! | `Prompt` | 外部用户输入、外部主动请求 | 消费（写入 Transcript） | ✅ |
-//! | `Defer` | SubAgent 完成、Cron 触发、延迟结果 | 消费（写入 Transcript） | ✅ |
-//! | `Info` | SystemReminder、Hook 注入 | 消费（写入 Transcript） | ❌ |
+//! | Kind | 来源 | RCRA Receive 行为 | 唤醒新 turn |
+//! |------|------|-------------------|------------|
+//! | `Prompt` | 外部用户输入、外部主动请求 | drain_all 消费 | ✅ |
+//! | `Defer` | SubAgent/Cron/Channel/Workflow 完成 | drain_all 消费 | ✅ |
+//! | `Info` | SystemReminder、Hook 注入 | drain_all 消费 | ❌ |
 //!
-//! ReAct 循环退出后，若队列新到达 Prompt 或 Defer，重新激活新 turn；
-//! 仅有 Info 不激活（Info 必须被 Prompt 带出或单独消费）。
+//! RCRA 循环的 Receive 阶段通过 [`drain_all`] 一次性消费全部三类消息。
+//! 循环退出后，若队列新到达 Prompt 或 Defer，通过 [`has_wake_up`] 检测并重新激活新 turn；
+//! 仅有 Info 不激活。
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -23,15 +24,15 @@ use crate::messages::BaseMessage;
 
 // ─── MessageKind ─────────────────────────────────────────────────────────────
 
-/// 消息 Kind — 控制循环唤醒和消费行为
+/// 消息 Kind — 控制循环唤醒行为
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageKind {
-    /// 外部主动请求 — Receive 消费，End 可唤醒，循环结束后到达同样激活
+    /// 外部主动请求 — drain_all 消费，循环结束后到达同样激活
     Prompt,
-    /// 延迟到达的结果 — Receive 跳过，End 可唤醒，循环结束后到达同样激活
+    /// 延迟到达的结果 — drain_all 消费，循环结束后到达同样激活
     Defer,
-    /// 通知性数据 — 仅 Receive 消费，永不唤醒循环
+    /// 通知性数据 — drain_all 消费，永不唤醒循环
     Info,
 }
 
@@ -73,7 +74,7 @@ pub enum MessageSource {
 /// 一条待投递的消息（v2 富类型）
 #[derive(Debug, Clone)]
 pub struct QueuedMessage {
-    /// 消息 Kind（决定消费行为）
+    /// 消息 Kind（决定唤醒行为）
     pub kind: MessageKind,
     /// 消息来源
     pub source: MessageSource,
@@ -95,12 +96,12 @@ impl QueuedMessage {
         Self::new(MessageKind::Prompt, source, message)
     }
 
-    /// 快速构造 Defer 消息（SubAgent 完成、Cron 触发）
+    /// 快速构造 Defer 消息（SubAgent/Cron/Channel/Workflow 延迟结果）
     pub fn defer(source: MessageSource, message: BaseMessage) -> Self {
         Self::new(MessageKind::Defer, source, message)
     }
 
-    /// 快速构造 Info 消息（SystemReminder）
+    /// 快速构造 Info 消息（SystemReminder/Hook 注入，不唤醒循环）
     pub fn info(source: MessageSource, message: BaseMessage) -> Self {
         Self::new(MessageKind::Info, source, message)
     }
@@ -111,10 +112,9 @@ impl QueuedMessage {
 /// 会话级临时收件箱（v2）
 ///
 /// 内部用 `Arc<Mutex<VecDeque>>` 保证线程安全。`Notify` 用于异步等待新消息。
-/// 与 v1 的区别：
-/// - 消息带 Kind（Prompt/Defer/Info），控制循环唤醒
-/// - 接受 `BaseMessage` 而非 `String`，富类型
-/// - 提供 `drain_for_receive` / `drain_for_end` 两套排空 API
+///
+/// RCRA 循环中 Receive 阶段通过 [`drain_all`] 一次性消费全部三类消息；
+/// 循环退出后通过 [`has_wake_up`] 检测是否需重新激活。
 #[derive(Debug, Clone)]
 pub struct MessageQueue {
     inner: Arc<Mutex<VecDeque<QueuedMessage>>>,
@@ -157,65 +157,15 @@ impl MessageQueue {
         self.notify.notify_one();
     }
 
-    /// 取出并消费所有 Prompt + Info，Defer 保留在队列中。
+    /// 排空队列中的全部消息（Prompt + Info + Defer）
     ///
-    /// 返回的 Vec 按 push 顺序排列。Defer 消息留在队列里，等待后续消费。
-    ///
-    /// 此方法保留为公共 API（executor helpers / workflow agent 等外部 flush 路径使用）。
-    /// RCRA 循环的 Receive 阶段使用 [`drain_all`] 消费全部类型。
-    pub fn drain_for_receive(&self) -> Vec<QueuedMessage> {
+    /// RCRA 循环的 Receive 阶段调用，一次性消费全部类型。
+    pub fn drain_all(&self) -> Vec<QueuedMessage> {
         let mut inner = self.inner.lock();
-        let mut consumed = Vec::new();
-        let mut deferred = VecDeque::new();
-
-        while let Some(msg) = inner.pop_front() {
-            match msg.kind {
-                MessageKind::Defer => deferred.push_back(msg),
-                MessageKind::Prompt | MessageKind::Info => consumed.push(msg),
-            }
-        }
-
-        // Defer 放回队列尾部（保持原相对顺序）
-        *inner = deferred;
-        consumed
-    }
-
-    /// 检查队列是否有 Prompt 或 Defer，有则取出。
-    ///
-    /// - 有 → 取出全部 Prompt + Defer，返回 `Some(messages)`
-    /// - 无（队列空或仅有 Info）→ 返回 `None`
-    ///
-    /// 注意：Info 永远不会被本方法单独消费——必须被 Prompt 带出。
-    /// 此方法保留为公共 API（外部测试和 post-wake 路径使用）。
-    /// RCRA 循环内不再调用本方法——Receive 阶段使用 [`drain_all`]。
-    pub fn drain_for_end(&self) -> Option<Vec<QueuedMessage>> {
-        let mut inner = self.inner.lock();
-        let has_wake = inner.iter().any(|m| m.kind.wakes_up());
-
-        if !has_wake {
-            return None;
-        }
-
-        // 取出 Prompt + Defer，保留 Info
-        let mut consumed = Vec::new();
-        let mut retained = VecDeque::new();
-
-        while let Some(msg) = inner.pop_front() {
-            match msg.kind {
-                MessageKind::Info => retained.push_back(msg),
-                MessageKind::Prompt | MessageKind::Defer => consumed.push(msg),
-            }
-        }
-
-        *inner = retained;
-        Some(consumed)
-    }
-
-    /// 异步等待新消息到达（用于循环退出后阻塞）
-    ///
-    /// 与 `drain_for_end` 配合：先 drain_for_end，None 则 wait_for_message。
-    pub async fn wait_for_message(&self) {
-        self.notify.notified().await;
+        let drained: Vec<_> = std::mem::take(&mut *inner).into();
+        drop(inner);
+        self.notify.notify_one();
+        drained
     }
 
     /// 是否有能唤醒循环的消息（Prompt 或 Defer）
@@ -231,23 +181,6 @@ impl MessageQueue {
     /// 队列长度
     pub fn len(&self) -> usize {
         self.inner.lock().len()
-    }
-
-    /// 获取 Notify 的克隆（用于自定义等待逻辑）
-    pub fn notifier(&self) -> Arc<tokio::sync::Notify> {
-        Arc::clone(&self.notify)
-    }
-
-    /// 排空队列中的全部消息（Prompt + Info + Defer）
-    ///
-    /// 供 RCRA 循环的 Receive 阶段使用（原 CRRAE 中 Receive 跳过 Defer、End 消费 Defer，
-    /// 合并后的 RCRA 由本方法一次性消费所有类型）。
-    pub fn drain_all(&self) -> Vec<QueuedMessage> {
-        let mut inner = self.inner.lock();
-        let drained: Vec<_> = std::mem::take(&mut *inner).into();
-        drop(inner);
-        self.notify.notify_one();
-        drained
     }
 
     /// 清空队列（rewind 操作时调用）

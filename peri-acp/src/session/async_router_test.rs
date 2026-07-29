@@ -44,7 +44,7 @@ fn test_route_bg_result_uses_subagent_complete_source() {
 
     router.route_bg_result(&result);
 
-    let msgs = inbox.queue().drain_for_end().unwrap();
+    let msgs = inbox.queue().drain_all();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, MessageSource::SubAgentComplete);
 }
@@ -57,7 +57,7 @@ fn test_route_bg_result_notification_text_contains_task_info() {
 
     router.route_bg_result(&result);
 
-    let msgs = inbox.queue().drain_for_end().unwrap();
+    let msgs = inbox.queue().drain_all();
     let text = msgs[0].message.content();
     assert!(text.contains("task-12"), "should contain short task_id");
     assert!(text.contains("my-agent"), "should contain agent_name");
@@ -82,7 +82,7 @@ fn test_route_workflow_event_uses_workflow_complete_source() {
 
     router.route_workflow_event("wf-run-999", "deploy-pipeline", 5000, 4, 12, &[]);
 
-    let msgs = inbox.queue().drain_for_end().unwrap();
+    let msgs = inbox.queue().drain_all();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, MessageSource::WorkflowComplete);
 }
@@ -94,7 +94,7 @@ fn test_route_workflow_event_notification_format() {
 
     router.route_workflow_event("wf-run-999", "deploy-pipeline", 5000, 4, 12, &[]);
 
-    let msgs = inbox.queue().drain_for_end().unwrap();
+    let msgs = inbox.queue().drain_all();
     let text = msgs[0].message.content();
     assert!(text.contains("wf-run-"), "should contain short run_id");
     assert!(
@@ -122,7 +122,7 @@ fn test_multiple_routes_accumulate_in_queue() {
 
     assert_eq!(inbox.queue().len(), 3);
 
-    let msgs = inbox.queue().drain_for_end().unwrap();
+    let msgs = inbox.queue().drain_all();
     assert_eq!(msgs[0].source, MessageSource::SubAgentComplete);
     assert_eq!(msgs[1].source, MessageSource::WorkflowComplete);
     assert_eq!(msgs[2].source, MessageSource::SubAgentComplete);
