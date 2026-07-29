@@ -398,6 +398,49 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                             let Ok(mut cb) = arboard::Clipboard::new() else {
                                 return;
                             };
+                            // ── 图片粘贴分支 ──
+                            // arboard 的 get_image() 需要新的 Clipboard 实例（之前的 cb 可能已被消费）
+                            if let Some(arboard::ImageData {
+                                bytes: image_bytes,
+                                width,
+                                height,
+                            }) = arboard::Clipboard::new()
+                                .ok()
+                                .and_then(|mut cb2| cb2.get_image().ok())
+                            {
+                                let img_bytes = image_bytes.to_vec();
+                                if !img_bytes.is_empty() {
+                                    use std::hash::{DefaultHasher, Hash, Hasher};
+                                    let mut hasher = DefaultHasher::new();
+                                    img_bytes.hash(&mut hasher);
+                                    let hash = format!("{:016x}", hasher.finish());
+                                    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+
+                                    let img_dir = dirs_next::home_dir()
+                                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                                        .join(".peri")
+                                        .join("images");
+                                    if std::fs::create_dir_all(&img_dir).is_err() {
+                                        return;
+                                    }
+
+                                    let file_name = format!("{}_{}.png", timestamp, &hash[..8]);
+                                    let file_path = img_dir.join(&file_name);
+
+                                    match png_encode(&img_bytes, width, height, &file_path) {
+                                        Ok(()) => {
+                                            let at_text = format!("@image {}", file_path.display());
+                                            state_clone.write().insert_str(&at_text);
+                                        }
+                                        Err(_) => {
+                                            // PNG 编码失败，静默回退到文本粘贴
+                                        }
+                                    }
+                                    return;
+                                }
+                            }
+
+                            // ── 文本粘贴分支（原有逻辑）──
                             let Ok(text) = cb.get_text() else {
                                 return;
                             };
@@ -1092,6 +1135,24 @@ fn render_multiline_with_cursor_for_themed(
         loading,
         show_cursor,
     )
+}
+
+/// 将 RGBA 字节数组编码为 PNG 文件
+pub(crate) fn png_encode(
+    rgba_bytes: &[u8],
+    width: usize,
+    height: usize,
+    output_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = std::fs::File::create(output_path)?;
+    let mut w = std::io::BufWriter::new(file);
+    let mut encoder = png::Encoder::new(&mut w, width as u32, height as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(rgba_bytes)?;
+    writer.finish()?;
+    Ok(())
 }
 
 #[cfg(test)]
