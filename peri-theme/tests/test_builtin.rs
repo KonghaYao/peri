@@ -60,8 +60,8 @@ fn test_light_theme_fields() {
 
     // 浅色背景
     assert_eq!(theme.palette.base.bg, Color::Rgb(250, 250, 250));
-    assert_eq!(theme.palette.base.fg, Color::Rgb(30, 30, 30));
-    assert_eq!(theme.semantic.text.primary, Color::Rgb(30, 30, 30));
+    assert_eq!(theme.palette.base.fg, Color::Rgb(46, 46, 42));
+    assert_eq!(theme.semantic.text.primary, Color::Rgb(46, 46, 42));
     assert_eq!(theme.semantic.surface.default, Color::Rgb(245, 245, 248));
     assert_eq!(theme.component.message.user_bg, Color::Rgb(230, 230, 235));
 }
