@@ -12,21 +12,23 @@
 //!
 //! ## Invariants
 //!
-//! 1. `await_wake` is **non-destructive** — it does NOT drain. `stages/end.rs`
-//!    `drain_for_receive` / `drain_for_end` still do the actual draining.
+//! 1. `await_wake` is **non-destructive** — it does NOT drain. `stages/receive.rs`
+//!    uses `drain_all` in the loop body; `drain_for_receive` and `drain_for_end`
+//!    remain as public APIs for external flush paths (executor helpers, tests).
 //! 2. Pushers from Agent/ACP layer use `InboxHandle` (cloneable, `Send + Sync`).
-//! 3. TUI should NOT have access to `InboxHandle` — TUI loses its `drain_for_end`
-//!    responsibility. All async events (cron/channel/workflow/bg_results) flow through
-//!    Agent/ACP layer → `InboxHandle::push` → `MessageQueue` → `await_wake` / `drain_for_end`.
+//! 3. TUI should NOT have access to `InboxHandle` — all async events
+//!    (cron/channel/workflow/bg_results) flow through Agent/ACP layer →
+//!    `InboxHandle::push` → `MessageQueue` → `await_wake` → Receive's `drain_all`.
 //!
 //! ## Two-phase async loop
 //!
 //! ```text
 //! Agent running (loading=true):
-//!   async event → push to queue → stages/end.rs drain_for_end → next turn
+//!   async event → push to queue → stages/receive.rs drain_all → current/next turn
 //!
 //! Agent idle (loading=false):
 //!   async event → push to queue → await_wake returns → run_session_loop starts new turn
+//!    → Receive stage drain_all consumes the message
 //! ```
 
 use std::sync::Arc;
@@ -36,7 +38,7 @@ use crate::session::{MessageQueue, MessageSource, QueuedMessage};
 
 /// Wraps the existing v2 MessageQueue with an async await-wake mechanism.
 ///
-/// During ReAct loop, `stages/end.rs` calls `drain_for_end` / `drain_for_receive`
+/// During ReAct loop, `stages/receive.rs` calls `drain_all`
 /// to consume pending messages — no wake needed (loop is already spinning).
 ///
 /// During IDLE (between ReAct loops), the ACP executor calls [`await_wake`](Self::await_wake)
@@ -68,7 +70,8 @@ impl SessionInbox {
     /// ## Non-destructive
     ///
     /// This method does NOT drain any messages. The actual consumption happens in
-    /// `stages/end.rs` via `drain_for_end` or `stages/receive.rs` via `drain_for_receive`.
+    /// `stages/receive.rs` via `drain_all`; `drain_for_receive` and `drain_for_end`
+    /// remain available for external flush callers.
     ///
     /// ## Spurious wakeup guard
     ///
@@ -132,8 +135,8 @@ pub struct InboxHandle {
 impl InboxHandle {
     /// Push a Prompt message (user input or external request) and wake the executor.
     ///
-    /// Prompt messages are consumed by `drain_for_receive` during the next turn
-    /// and can wake the loop via `drain_for_end`.
+    /// Prompt messages are consumed by `drain_all` during the Receive stage
+    /// and wake the loop.
     pub fn push_prompt(&self, source: MessageSource, message: BaseMessage) {
         self.queue.push(QueuedMessage::prompt(source, message));
         self.wake.notify_one();
@@ -141,8 +144,8 @@ impl InboxHandle {
 
     /// Push a Defer message (SubAgent complete, Cron trigger, bg result) and wake.
     ///
-    /// Defer messages are skipped by `drain_for_receive` (preserved in queue)
-    /// and consumed + woken by `drain_for_end` when the loop reaches the End stage.
+    /// In RCRA, Defer messages are consumed by `drain_all` during the Receive stage.
+    /// They are also detectable via `drain_for_end` for external callers.
     pub fn push_defer(&self, source: MessageSource, message: BaseMessage) {
         self.queue.push(QueuedMessage::defer(source, message));
         self.wake.notify_one();
@@ -150,7 +153,8 @@ impl InboxHandle {
 
     /// Push an Info message (system reminder, hook injection) — does NOT wake.
     ///
-    /// Info messages are consumed by `drain_for_receive` but never wake the loop.
+    /// Info messages are consumed by `drain_all` (in the loop) or `drain_for_receive`
+    /// (external flush paths), but never wake the loop.
     /// They must be carried out by a Prompt message arriving later.
     pub fn push_info(&self, source: MessageSource, message: BaseMessage) {
         // Intentionally no wake.notify_one() — Info does not wake the loop

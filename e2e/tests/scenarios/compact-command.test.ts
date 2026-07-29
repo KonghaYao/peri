@@ -24,17 +24,14 @@ describe("scenarios: /compact 命令", () => {
       tester = await launchPeri();
 
       // 积累几轮对话，充实消息历史
+      // 注意：tmux viewport ≈40 行，超过 2 轮会滚出屏幕
       const base = await tester.getScreenText();
       await sendPrompt(tester, "用中文简短回复: 今天天气不错");
       await waitForStableScreen(tester, 120_000, base);
 
       const r2 = await tester.getScreenText();
-      await sendPrompt(tester, "用中文简短回复: 明天可能下雨");
-      await waitForStableScreen(tester, 120_000, r2);
-
-      const r3 = await tester.getScreenText();
       await sendPrompt(tester, "用中文简短回复: 后天转晴");
-      await waitForStableScreen(tester, 120_000, r3);
+      await waitForStableScreen(tester, 120_000, r2);
 
       // 记录 compact 前的状态
       const beforeCompact = await takePeriSnapshot(tester, "compact-before");
@@ -65,19 +62,16 @@ describe("scenarios: /compact 命令", () => {
       expect(afterCompact.text.length).toBeGreaterThan(0);
 
       // LLM judge
-      try {
-        const result = await judge({
-          ansiRaw: afterCompact.raw,
-          criteria: [
-            "状态栏应显示上下文消耗百分比（格式如 'NN% NNNk'），百分比数值应合理（>0% 且 <=100%）",
-            "消息区域不应出现渲染异常（如文字覆盖、布局错位、空白闪烁残留）",
-            "界面底部输入框应仍然可见可用",
-          ],
-        });
-        console.log("Judge (/compact):", JSON.stringify(result, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const result = await judge({
+        ansiRaw: afterCompact.raw,
+        criteria: [
+          "状态栏应显示上下文消耗百分比（格式如 'NN% NNNk'），百分比数值应合理（>0% 且 <=100%）",
+          "消息区域不应出现渲染异常（如文字覆盖、布局错位、空白闪烁残留）",
+          "界面底部输入框应仍然可见可用",
+        ],
+      });
+      console.log("Judge (/compact):", JSON.stringify(result, null, 2));
+      expect(result.pass).toBe(true);
     },
   );
 });

@@ -83,6 +83,10 @@ impl BaseTool for AskUserTool {
         "AskUserQuestion"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         ask_user_tool_definition().description.leak()
     }

@@ -502,6 +502,9 @@ pub(crate) fn build_agent(
     chain.add(Box::new({
         let mut tm = TerminalMiddleware::new();
         tm = tm.with_registry(Arc::clone(&background_registry));
+        if let Some(ref cb) = on_bg_complete {
+            tm = tm.with_on_bg_complete(Arc::clone(cb));
+        }
         tm
     }));
     chain.add(Box::new(WebMiddleware::new()));

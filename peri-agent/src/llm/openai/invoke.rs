@@ -48,4 +48,8 @@ impl BaseModel for super::ChatOpenAI {
     fn build_request_body(&self, request: &LlmRequest) -> Option<serde_json::Value> {
         Some(self.adapter.build_request_body(request, false))
     }
+
+    fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
+        crate::agent::compact_v2::projection::ProviderCapabilities::openai()
+    }
 }

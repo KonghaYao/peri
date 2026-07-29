@@ -33,6 +33,10 @@ impl BaseTool for BoxToolWrapper {
         self.0.name()
     }
 
+    fn is_direct(&self) -> bool {
+        self.0.is_direct()
+    }
+
     fn description(&self) -> &str {
         self.0.description()
     }
@@ -62,6 +66,10 @@ impl BaseTool for BoxToolWrapper {
 impl BaseTool for ArcToolWrapper {
     fn name(&self) -> &str {
         self.0.name()
+    }
+
+    fn is_direct(&self) -> bool {
+        self.0.is_direct()
     }
 
     fn description(&self) -> &str {

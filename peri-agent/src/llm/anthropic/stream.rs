@@ -81,6 +81,7 @@ pub(super) async fn do_invoke_streaming(
     let mut output_tokens: u32 = 0;
     let mut stop_reason_str: String = "end_turn".to_string();
     let mut stream_request_id: Option<String> = None;
+    let mut first_token_time: Option<String> = None;
 
     loop {
         // 在接收每个 SSE chunk 前检查取消（支持 Ctrl+C 中断长时间 LLM 调用）
@@ -152,6 +153,9 @@ pub(super) async fn do_invoke_streaming(
                         "thinking_delta" => {
                             if let Some(t) = delta["thinking"].as_str() {
                                 if !t.is_empty() {
+                                    if first_token_time.is_none() {
+                                        first_token_time = Some(chrono::Utc::now().to_rfc3339());
+                                    }
                                     ctx.event_handler.on_event(ExecutorEvent::AiReasoning {
                                         text: t.to_string(),
                                         source_agent_id: None,
@@ -163,6 +167,9 @@ pub(super) async fn do_invoke_streaming(
                         "text_delta" => {
                             if let Some(t) = delta["text"].as_str() {
                                 if !t.is_empty() {
+                                    if first_token_time.is_none() {
+                                        first_token_time = Some(chrono::Utc::now().to_rfc3339());
+                                    }
                                     ctx.event_handler.on_event(ExecutorEvent::TextChunk {
                                         message_id: ctx.message_id,
                                         chunk: t.to_string(),
@@ -174,6 +181,9 @@ pub(super) async fn do_invoke_streaming(
                         }
                         "input_json_delta" => {
                             if let Some(json_part) = delta["partial_json"].as_str() {
+                                if first_token_time.is_none() {
+                                    first_token_time = Some(chrono::Utc::now().to_rfc3339());
+                                }
                                 tool_input_fragments.push_str(json_part);
                             }
                         }
@@ -264,6 +274,7 @@ pub(super) async fn do_invoke_streaming(
         cache_creation_input_tokens: Some(cache_creation_input_tokens),
         cache_read_input_tokens: Some(cache_read_input_tokens),
         request_id: stream_request_id.clone(),
+        first_token_time,
     });
 
     tracing::info!(

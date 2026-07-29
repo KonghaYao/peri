@@ -175,9 +175,7 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 渲染内容
     let (title, lines) = match step {
-        SetupStep::Language => {
-            render_language_step(&state, dim, accent, cursor_color, text_color)
-        }
+        SetupStep::Language => render_language_step(&state, dim, accent, cursor_color, text_color),
         SetupStep::Choose => {
             render_choose_step(&state, dim, accent, cursor_color, text_color, error_color)
         }

@@ -47,32 +47,26 @@ describe("panels: model switch", () => {
       expect(capture.text.length).toBeGreaterThan(50);
 
       // LLM judge: 面板阶段
-      try {
-        const panelResult = await judge({
-          ansiRaw: panelCapture.raw,
-          criteria: [
-            "屏幕中应有 Model 面板，包含可选的模型别名（如 Opus、Sonnet、Haiku）",
-            "面板中应有指示当前选中项的标记（如 > 光标或 ✔ 选中标识）",
-          ],
-        });
-        console.log("Judge (panel):", JSON.stringify(panelResult, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const panelResult = await judge({
+        ansiRaw: panelCapture.raw,
+        criteria: [
+          "屏幕中应有 Model 面板，包含可选的模型别名（如 Opus、Sonnet、Haiku）",
+          "面板中应有指示当前选中项的标记（如 > 光标或 ✔ 选中标识）",
+        ],
+      });
+      console.log("Judge (panel):", JSON.stringify(panelResult, null, 2));
+      expect(panelResult.pass).toBe(true);
 
       // LLM judge: 切换后状态栏验证
-      try {
-        const doneResult = await judge({
-          ansiRaw: capture.raw,
-          criteria: [
-            "Model 面板应已关闭，屏幕底部状态栏应显示 provider/model 信息（如 'openai/xxx' 或 'anthropic/xxx' 格式）",
-            "状态栏的 model 部分应与切换后的模型一致，不应仍是默认值",
-          ],
-        });
-        console.log("Judge (done):", JSON.stringify(doneResult, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const doneResult = await judge({
+        ansiRaw: capture.raw,
+        criteria: [
+          "Model 面板应已关闭，屏幕底部状态栏应显示 provider/model 信息（如 'openai/xxx' 或 'anthropic/xxx' 格式）",
+          "状态栏的 model 部分应与切换后的模型一致，不应仍是默认值",
+        ],
+      });
+      console.log("Judge (done):", JSON.stringify(doneResult, null, 2));
+      expect(doneResult.pass).toBe(true);
     },
   );
 });

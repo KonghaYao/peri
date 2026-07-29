@@ -21,6 +21,7 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
             cache_creation_input_tokens: Some(10),
             cache_read_input_tokens: Some(200),
             request_id: Some("req-123".to_string()),
+            first_token_time: None,
         }),
         stop_reason: Some(StopReason::EndTurn),
     };
@@ -66,6 +67,7 @@ fn test_llm_call_end_no_optional_fields() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             request_id: None,
+            first_token_time: None,
         }),
         stop_reason: None,
     };
@@ -471,6 +473,16 @@ fn test_compact_completed_no_session_update() {
             token_before: 0,
             token_after: 0,
             strategy: CompactStrategy::Smart,
+            affected_count: 0,
+            estimated_tokens_saved: 0,
+            estimated_tokens_before: 0,
+            estimated_tokens_after: 0,
+            changed_messages: 0,
+            changed_fields: 0,
+            no_op_candidates: 0,
+            full_escalation_reason: None,
+            cache_hit_rate_before: 0.0,
+            outcome: peri_agent::agent::compact_v2::CompactOutcome::FullApplied,
         },
         "CompactCompleted",
     );

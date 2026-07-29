@@ -43,6 +43,7 @@ fn test_token_tracker_accumulate() {
         cache_creation_input_tokens: Some(30),
         cache_read_input_tokens: None,
         request_id: None,
+        first_token_time: None,
     });
     assert_eq!(state.token_tracker().total_input_tokens, 100);
     assert_eq!(state.token_tracker().llm_call_count, 1);

@@ -14,6 +14,7 @@ use async_trait::async_trait;
 pub use self::react_adapter::BaseModelReactLLM;
 pub use self::retry::{RetryConfig, RetryableLLM};
 pub use self::types::{LlmRequest, LlmResponse, StopReason, StreamingContext};
+use crate::agent::compact_v2::projection::ProviderCapabilities;
 use crate::error::AgentResult;
 
 /// BaseModel trait - 统一 LLM 接口，对齐 LangChain Python BaseModel
@@ -69,6 +70,12 @@ pub trait BaseModel: Send + Sync {
     /// 仅用于 body 结构中是否含 `stream` 字段——该字段不影响 Generation input 可读性）。
     fn build_request_body(&self, _request: &LlmRequest) -> Option<serde_json::Value> {
         None
+    }
+
+    /// 返回 Provider 能力（消息协议类型、签名 reasoning 处理规则）。
+    /// 默认返回 Generic 安全保守值。
+    fn provider_capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
     }
 }
 

@@ -7,13 +7,13 @@
 use std::sync::OnceLock;
 
 use crate::app::panel_types::PanelKind;
+use crate::components::textarea::TextAreaState;
 use crate::i18n;
 use crate::kit::atoms::{
     ACP_CLIENT_HANDLE, LANG_VERSION, PLUGIN_LIST, PLUGIN_SEARCH_RESULTS, PluginSummary,
     PluginViewTab, RENDER_HEARTBEAT,
 };
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
-use crate::components::textarea::TextAreaState;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
@@ -31,7 +31,8 @@ use ratatui_kit::{
 /// Discover 插件列表缓存——避免 render body 中同步读盘。
 /// 使用 Option<Vec<T>>：None = 未初始化，Some(vec) = 已填充（可能为空）。
 /// 避免用 is_empty() 判断初始化状态——空数据集与未初始化无法区分。
-static DISCOVER_CACHE: OnceLock<parking_lot::Mutex<Option<Vec<PluginSearchResultItem>>>> = OnceLock::new();
+static DISCOVER_CACHE: OnceLock<parking_lot::Mutex<Option<Vec<PluginSearchResultItem>>>> =
+    OnceLock::new();
 
 fn get_discover_cache() -> Vec<PluginSearchResultItem> {
     let cache = DISCOVER_CACHE.get_or_init(|| parking_lot::Mutex::new(None));
@@ -1004,18 +1005,34 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Source
             let source_display: String = entry.source_label.chars().take(60).collect();
             lines.push(Line::from(vec![
-                Span::styled(format!("    {}: ", i18n::tr("panel-plugin-discover-field-marketplace")), muted_style),
+                Span::styled(
+                    format!(
+                        "    {}: ",
+                        i18n::tr("panel-plugin-discover-field-marketplace")
+                    ),
+                    muted_style,
+                ),
                 Span::styled(source_display, dim_style),
             ]));
             lines.push(Line::from(""));
             // Actions
-            lines.push(Line::from(vec![Span::styled(format!("  {}", i18n::tr("panel-plugin-detail-actions")), bold_style)]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {}", i18n::tr("panel-plugin-detail-actions")),
+                bold_style,
+            )]));
             lines.push(Line::from(""));
-            let actions: [String; 2] = [i18n::tr("panel-plugin-marketplace-action-refresh"), i18n::tr("panel-plugin-marketplace-action-delete")];
+            let actions: [String; 2] = [
+                i18n::tr("panel-plugin-marketplace-action-refresh"),
+                i18n::tr("panel-plugin-marketplace-action-delete"),
+            ];
             for (i, action_label) in actions.iter().enumerate() {
                 let is_selected = i == ma;
                 let cursor = if is_selected { ">" } else { " " };
-                let style = if is_selected { title_style } else { primary_style };
+                let style = if is_selected {
+                    title_style
+                } else {
+                    primary_style
+                };
                 lines.push(Line::from(vec![
                     Span::styled(format!("{} ", cursor), Style::new().fg(title_color)),
                     Span::styled(format!("    {}", action_label), style),
@@ -1065,22 +1082,21 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 let query = search_text.read().text.to_lowercase();
                 let search_state_guard = PLUGIN_SEARCH_RESULTS.state();
                 let search_results = search_state_guard.read();
-                let remote_items: Vec<PluginSearchResultItem> = if !query.is_empty()
-                    && !search_results.is_empty()
-                {
-                    search_results
-                        .iter()
-                        .map(|p| PluginSearchResultItem {
-                            name: p.name.clone(),
-                            version: p.version.clone(),
-                            marketplace: p.marketplace.clone(),
-                            description: p.description.clone(),
-                            author: p.author.clone(),
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                let remote_items: Vec<PluginSearchResultItem> =
+                    if !query.is_empty() && !search_results.is_empty() {
+                        search_results
+                            .iter()
+                            .map(|p| PluginSearchResultItem {
+                                name: p.name.clone(),
+                                version: p.version.clone(),
+                                marketplace: p.marketplace.clone(),
+                                description: p.description.clone(),
+                                author: p.author.clone(),
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                 drop(search_results);
 
                 let use_remote = !remote_items.is_empty();
@@ -1450,7 +1466,10 @@ fn render_detail(
 
     // Action menu
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled(format!("  {}", i18n::tr("panel-plugin-detail-actions")), bold_style)]));
+    lines.push(Line::from(vec![Span::styled(
+        format!("  {}", i18n::tr("panel-plugin-detail-actions")),
+        bold_style,
+    )]));
     lines.push(Line::from(""));
 
     // Confirm hint (if in confirm mode)
@@ -1639,7 +1658,10 @@ fn render_discover_detail(
         let fields: [(&str, &str); 4] = [
             ("panel-plugin-discover-field-version", &dp.version),
             ("panel-plugin-discover-field-marketplace", &dp.marketplace),
-            ("panel-plugin-discover-field-author", dp.author.as_deref().unwrap_or("—")),
+            (
+                "panel-plugin-discover-field-author",
+                dp.author.as_deref().unwrap_or("—"),
+            ),
             (
                 "panel-plugin-discover-field-description",
                 if dp.description.is_empty() {
@@ -1660,7 +1682,10 @@ fn render_discover_detail(
     lines.push(Line::from(""));
 
     // Action menu
-    lines.push(Line::from(vec![Span::styled(format!("  {}", i18n::tr("panel-plugin-detail-actions")), bold_style)]));
+    lines.push(Line::from(vec![Span::styled(
+        format!("  {}", i18n::tr("panel-plugin-detail-actions")),
+        bold_style,
+    )]));
     lines.push(Line::from(""));
 
     for (i, action) in DiscoverDetailAction::ALL.iter().enumerate() {
@@ -1721,7 +1746,14 @@ fn render_marketplaces(
         let display: String = add_input.chars().take(40).collect();
         lines.push(Line::from(vec![
             Span::styled("  > ", bold_style),
-            Span::styled(format!("{} {}", i18n::tr("panel-plugin-marketplace-add-label"), display), bold_style),
+            Span::styled(
+                format!(
+                    "{} {}",
+                    i18n::tr("panel-plugin-marketplace-add-label"),
+                    display
+                ),
+                bold_style,
+            ),
         ]));
         lines.push(Line::from(vec![Span::styled(
             i18n::tr("panel-plugin-marketplace-add-url-hint"),
@@ -1733,7 +1765,10 @@ fn render_marketplaces(
         let style = if is_sel { bold_style } else { muted_style };
         lines.push(Line::from(vec![
             Span::styled(format!(" {} ", cursor), style),
-            Span::styled(format!("+ {}", i18n::tr("panel-plugin-marketplaces-add")), style),
+            Span::styled(
+                format!("+ {}", i18n::tr("panel-plugin-marketplaces-add")),
+                style,
+            ),
         ]));
     }
     lines.push(Line::from(""));

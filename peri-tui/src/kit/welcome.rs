@@ -83,7 +83,7 @@ fn logo_row_to_spans(row: &str, color: Color) -> Vec<Span<'static>> {
     spans
 }
 
-const NARROW_THRESHOLD: usize = 50;
+const NARROW_THRESHOLD: usize = 40;
 
 #[derive(Default, Props)]
 pub struct WelcomeProps {

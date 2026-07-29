@@ -85,6 +85,10 @@ impl BaseTool for GlobFilesTool {
         "Glob"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         GLOB_FILES_DESCRIPTION
     }

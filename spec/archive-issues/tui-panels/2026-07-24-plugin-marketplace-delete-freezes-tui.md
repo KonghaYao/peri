@@ -1,10 +1,11 @@
-> **状态**：Closed
+> **状态**：Archived
 > **创建时间**：2026-07-24
 > **关闭时间**：2026-07-24
 > **类型**：Bug
 > **优先级**：紧急
 > **标签**：plugin, marketplace, TUI, deadlock
 > **修复 commit**：`0fd2d187`
+> **归档时间**：2026-07-25
 
 # Marketplace 删除操作导致 TUI 完全卡死
 

@@ -26,15 +26,11 @@ struct TavilyExtractResponse {
 
 #[derive(Deserialize)]
 struct TavilyExtractItem {
-    #[allow(dead_code)]
-    url: String,
     raw_content: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct TavilyExtractFailure {
-    #[allow(dead_code)]
-    url: String,
     error: Option<String>,
 }
 
@@ -94,6 +90,10 @@ fn truncate_content(content: &str, max_lines: usize) -> String {
 impl BaseTool for WebFetchTool {
     fn name(&self) -> &str {
         "WebFetch"
+    }
+
+    fn is_direct(&self) -> bool {
+        true
     }
 
     fn description(&self) -> &str {

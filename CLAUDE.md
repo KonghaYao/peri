@@ -1,3 +1,15 @@
+<!--
+  NAVIGATION ONLY — This file is the Claude/Peri adapter.
+  It provides module maps and task entry points for Claude.
+  Engineering MUST rules → docs/standards/
+  Definition of Done → docs/standards/70-acceptance.md
+  Change requirements → spec/
+  Machine policy → policy/
+  Agent safety + navigation → AGENTS.md
+  Human contribution flow → CONTRIBUTING.md
+  Do NOT duplicate engineering rules here. Cite standards by path + section.
+-->
+
 # CLAUDE.md — Perihelion（perī）
 
 终端 AI 编程助手。v2 单路径，`build_and_execute_agent_v2` → `run_react_loop`。

@@ -13,7 +13,7 @@ use sqlx::{
 use crate::{
     messages::BaseMessage,
     session::MessageFlags,
-    thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta, ThreadStore},
+    thread::{AgentStatus, CancelPolicy, CompactionLifecycle, ThreadId, ThreadMeta, ThreadStore},
 };
 
 /// SELECT 所有 thread 列的统一常量（含 cached_context，仅 load_context 等需要完整数据的场景使用）
@@ -113,6 +113,9 @@ impl SqliteThreadStore {
             "ALTER TABLE threads ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'active'",
             "ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE messages ADD COLUMN projection TEXT",
+            // H6: context cache 纪元，每次 compact 提交后递增
+            "ALTER TABLE threads ADD COLUMN context_cache_epoch INTEGER NOT NULL DEFAULT 0",
         ];
         for sql in &alter_columns {
             // SQLite 返回 "duplicate column name" 时忽略
@@ -290,8 +293,8 @@ impl ThreadStore for SqliteThreadStore {
         let id = meta.id.clone();
         sqlx::query(
             "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
-                parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context, agent_status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context, agent_status, context_cache_epoch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0)",
         )
         .bind(&meta.id)
         .bind(&meta.title)
@@ -472,14 +475,17 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn load_context(&self, thread_id: &ThreadId) -> Result<Vec<BaseMessage>> {
-        // 先尝试从 cached_context 读取
-        let cache_row: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT cached_context FROM threads WHERE id = ?1")
+        // 先尝试从 cached_context 读取。
+        // context_cache_epoch 在此处仅做双重保障读取：
+        // commit_compaction_lifecycle 已将 cached_context 设为 NULL 并递增 epoch，
+        // 因此若 cached_context 非空即代表 epoch 未被后续 commit 更改——缓存有效。
+        let cache_row: Option<(Option<String>, i64)> =
+            sqlx::query_as("SELECT cached_context, context_cache_epoch FROM threads WHERE id = ?1")
                 .bind(thread_id.as_str())
                 .fetch_optional(&self.pool)
                 .await?;
 
-        let cached = cache_row.and_then(|(c,)| c);
+        let cached = cache_row.and_then(|(c, _epoch)| c);
 
         if let Some(json) = cached {
             let mut cached_msgs: Vec<BaseMessage> = serde_json::from_str(&json)?;
@@ -618,6 +624,15 @@ impl ThreadStore for SqliteThreadStore {
         Ok(())
     }
 
+    async fn get_context_cache_epoch(&self, thread_id: &ThreadId) -> Result<u64> {
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT context_cache_epoch FROM threads WHERE id = ?1")
+                .bind(thread_id.as_str())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(e,)| e as u64).unwrap_or(0))
+    }
+
     async fn delete_messages(
         &self,
         thread_id: &ThreadId,
@@ -653,16 +668,104 @@ impl ThreadStore for SqliteThreadStore {
     async fn update_message_flags(
         &self,
         message_id: &crate::messages::MessageId,
-        truncated: bool,
-        excluded: bool,
+        flags: &MessageFlags,
     ) -> Result<()> {
         let id_str = message_id.as_uuid().to_string();
-        sqlx::query("UPDATE messages SET truncated = ?, excluded = ? WHERE message_id = ?")
-            .bind(truncated)
-            .bind(excluded)
-            .bind(&id_str)
-            .execute(&self.pool)
+        let projection_json = if let Some(ref directive) = flags.projection {
+            Some(serde_json::to_string(directive)?)
+        } else {
+            None
+        };
+        sqlx::query(
+            "UPDATE messages SET truncated = ?, excluded = ?, projection = ? WHERE message_id = ?",
+        )
+        .bind(flags.truncated)
+        .bind(flags.excluded)
+        .bind(&projection_json)
+        .bind(&id_str)
+        .execute(&self.pool)
+        .await?;
+
+        // 消息可见性变更（truncation/excluded/projection）影响上下文视图，失效 cached_context
+        let thread_id: Option<(String,)> =
+            sqlx::query_as("SELECT thread_id FROM messages WHERE message_id = ?1")
+                .bind(&id_str)
+                .fetch_optional(&self.pool)
+                .await?;
+        if let Some((tid,)) = thread_id {
+            self.invalidate_context_cache(&tid).await?;
+        }
+
+        Ok(())
+    }
+
+    fn supports_compaction_lifecycle(&self) -> bool {
+        true
+    }
+
+    async fn commit_compaction_lifecycle(
+        &self,
+        thread_id: &ThreadId,
+        lifecycle: &CompactionLifecycle,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+
+        for (message_id, flags) in &lifecycle.flag_updates {
+            let projection_json = flags
+                .projection
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
+            let result = sqlx::query(
+                "UPDATE messages
+                 SET truncated = ?1, excluded = ?2, projection = ?3
+                 WHERE message_id = ?4 AND thread_id = ?5",
+            )
+            .bind(flags.truncated)
+            .bind(flags.excluded)
+            .bind(&projection_json)
+            .bind(message_id.as_uuid().to_string())
+            .bind(thread_id.as_str())
+            .execute(&mut *tx)
             .await?;
+            anyhow::ensure!(
+                result.rows_affected() == 1,
+                "message {} not found in thread {}",
+                message_id.as_uuid(),
+                thread_id.as_str()
+            );
+        }
+
+        for message in &lifecycle.appended_messages {
+            let message_id = message.id().as_uuid().to_string();
+            let content = serde_json::to_string(message)?;
+            sqlx::query(
+                "INSERT INTO messages (message_id, thread_id, role, content)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(&message_id)
+            .bind(thread_id.as_str())
+            .bind(role_of(message))
+            .bind(&content)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE threads
+             SET updated_at = ?1,
+                 message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2),
+                 cached_context = NULL,
+                 context_cache_epoch = context_cache_epoch + 1
+             WHERE id = ?2",
+        )
+        .bind(&now)
+        .bind(thread_id.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -670,22 +773,24 @@ impl ThreadStore for SqliteThreadStore {
         &self,
         thread_id: &ThreadId,
     ) -> Result<HashMap<crate::messages::MessageId, MessageFlags>> {
-        let rows: Vec<(String, bool, bool)> = sqlx::query_as(
-            "SELECT message_id, truncated, excluded FROM messages \
-             WHERE thread_id = ?1 AND (truncated = 1 OR excluded = 1)",
+        let rows: Vec<(String, bool, bool, Option<String>)> = sqlx::query_as(
+            "SELECT message_id, truncated, excluded, projection FROM messages \
+             WHERE thread_id = ?1 AND (truncated = 1 OR excluded = 1 OR projection IS NOT NULL)",
         )
         .bind(thread_id.as_str())
         .fetch_all(&self.pool)
         .await?;
 
         let mut flags = HashMap::with_capacity(rows.len());
-        for (id_str, truncated, excluded) in rows {
+        for (id_str, truncated, excluded, projection_json) in rows {
             if let Ok(uid) = uuid::Uuid::parse_str(&id_str) {
+                let projection = projection_json.and_then(|json| serde_json::from_str(&json).ok());
                 flags.insert(
                     uid.into(),
                     MessageFlags {
                         truncated,
                         excluded,
+                        projection,
                     },
                 );
             }

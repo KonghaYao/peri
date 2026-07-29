@@ -281,6 +281,10 @@ impl BaseTool for FolderOperationsTool {
         "folder_operations"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         FOLDER_OPERATIONS_DESCRIPTION
     }

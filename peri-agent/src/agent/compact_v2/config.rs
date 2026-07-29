@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::env;
 
 use serde::{Deserialize, Serialize};
+
+use crate::tools::ContextRetention;
 
 fn default_true() -> bool {
     true
@@ -15,13 +18,21 @@ fn default_threshold_075() -> f64 {
     0.75
 }
 fn default_stale_steps() -> usize {
-    5
+    3
 }
+/// Micro Compact 黑名单默认值——这些工具的消息不被截断。
+///
+/// │ 工具             │ 理由                                          │
+/// │──────────────────│───────────────────────────────────────────────│
+/// │ AskUserQuestion  │ 用户答案不可恢复，丢失=对话断裂               │
+/// │ goal             │ 长期目标状态，丢失=agent 漂移方向             │
+/// │ TodoWrite        │ 任务列表结构，丢失=agent 工作记忆重置         │
 fn default_excluded_tools() -> Vec<String> {
-    vec![]
-}
-fn default_micro_min_affected() -> usize {
-    5
+    vec![
+        "AskUserQuestion".to_string(),
+        "goal".to_string(),
+        "TodoWrite".to_string(),
+    ]
 }
 fn default_summary_max_tokens() -> u32 {
     16000
@@ -50,6 +61,12 @@ fn default_smart_keep_recent_msgs() -> usize {
 fn default_smart_keep_recent_tools() -> usize {
     3
 }
+fn default_headroom_tokens() -> u64 {
+    8192
+}
+fn default_tool_result_keep_chars() -> usize {
+    2000
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactConfig {
@@ -61,12 +78,10 @@ pub struct CompactConfig {
     pub micro_compact_threshold: f64,
     #[serde(default = "default_stale_steps")]
     pub micro_compact_stale_steps: usize,
-    /// 黑名单工具——这些工具的消息（输入+输出）不参与 Micro 截断。默认空，即截断所有工具。
+    /// 黑名单工具——这些工具的消息（输入+输出）不参与 Micro 截断。
+    /// 默认保留 AskUserQuestion、goal、TodoWrite（对话/任务状态不可恢复），其余工具全部截断。
     #[serde(default = "default_excluded_tools")]
     pub micro_excluded_tools: Vec<String>,
-    /// Micro 压缩量下限——affected_count 低于此值时判定 Micro 无效，升级为 Full。
-    #[serde(default = "default_micro_min_affected")]
-    pub micro_min_affected: usize,
     #[serde(default = "default_summary_max_tokens")]
     pub summary_max_tokens: u32,
     #[serde(default = "default_re_inject_max_files")]
@@ -83,7 +98,8 @@ pub struct CompactConfig {
     pub ptl_max_retries: u32,
 
     // ── Smart Compact 配置 ──────────────────────────────────────────────
-    /// 是否启用 Smart Compact 策略（替代 Micro Compact），默认 false
+    /// [DEPRECATED] 不再使用。Smart Compact 已计划废弃并收敛为 Micro Compact。
+    /// 当前仅保留字段以兼容旧配置，但运行时始终按 false 处理。
     #[serde(default = "default_false")]
     pub smart_compact_enabled: bool,
     /// Smart Compact：保留最近 N 条 User/Assistant 对话消息
@@ -92,6 +108,27 @@ pub struct CompactConfig {
     /// Smart Compact：保留最近 M 个工具调用结果
     #[serde(default = "default_smart_keep_recent_tools")]
     pub smart_keep_recent_tools: usize,
+
+    // ── 投影与压力控制 ──────────────────────────────────────────────────
+    /// 目标上下文余量 token 数（用于 ContextPressure 计算）
+    #[serde(default = "default_headroom_tokens")]
+    pub target_headroom_tokens: u64,
+    /// 工具结果保留的最小字符数
+    #[serde(default = "default_tool_result_keep_chars")]
+    pub tool_result_keep_chars: usize,
+    /// Shadow mode：只估算不应用
+    #[serde(default)]
+    pub shadow_mode_enabled: bool,
+    /// Cache-aware 策略：高缓存命中时延迟清理
+    #[serde(default)]
+    pub cache_aware_enabled: bool,
+
+    // ── Retention Metadata ──────────────────────────────────────────────
+    /// 工具 retention 映射（工具名小写 → retention 分类）
+    /// 优先于 micro_excluded_tools，为空时使用后者。
+    /// planner 使用此映射而非直接访问 BaseTool 实例。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tool_retention_map: HashMap<String, ContextRetention>,
 }
 
 impl Default for CompactConfig {
@@ -102,7 +139,6 @@ impl Default for CompactConfig {
             micro_compact_threshold: default_threshold_075(),
             micro_compact_stale_steps: default_stale_steps(),
             micro_excluded_tools: default_excluded_tools(),
-            micro_min_affected: default_micro_min_affected(),
             summary_max_tokens: default_summary_max_tokens(),
             re_inject_max_files: default_re_inject_max_files(),
             re_inject_max_tokens_per_file: default_re_inject_max_tokens_per_file(),
@@ -113,6 +149,11 @@ impl Default for CompactConfig {
             smart_compact_enabled: default_false(),
             smart_keep_recent_msgs: default_smart_keep_recent_msgs(),
             smart_keep_recent_tools: default_smart_keep_recent_tools(),
+            target_headroom_tokens: default_headroom_tokens(),
+            tool_result_keep_chars: default_tool_result_keep_chars(),
+            shadow_mode_enabled: false,
+            cache_aware_enabled: false,
+            tool_retention_map: HashMap::new(),
         }
     }
 }

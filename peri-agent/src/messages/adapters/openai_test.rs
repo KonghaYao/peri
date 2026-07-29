@@ -183,3 +183,41 @@ fn test_no_reasoning_empty_reasoning_content() {
     // reasoning_content 应为空字符串
     assert_eq!(assistant["reasoning_content"], "");
 }
+
+/// 投影后的内容（Image→Text 占位符）在 OpenAI 适配器中正确序列化
+#[test]
+fn test_projected_content_with_placeholder_serializes() {
+    // 模拟 render_llm_view 投影后的 Human 消息：
+    // 原始 Image block 被 ReplaceMedia 转为 Text 占位块
+    let projected = BaseMessage::human(MessageContent::Blocks(vec![
+        ContentBlock::text("What's in this image?"),
+        ContentBlock::text("[图片已压缩: image]"),
+    ]));
+    let val = OpenAiAdapter::from_base_messages(&[projected]);
+    let arr = val.as_array().unwrap();
+    assert_eq!(arr[0]["role"], "user");
+
+    let content = arr[0]["content"].as_array().expect("content 应为 array");
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], "[图片已压缩: image]");
+
+    // 验证不含任何 Base64 / image_url 类型
+    let has_image = content.iter().any(|b| b["type"] == "image_url");
+    assert!(!has_image, "投影后 content 不应包含 image_url");
+}
+
+/// 投影后的 ToolResult（CompactToolResult head/tail 截断）正确序列化
+#[test]
+fn test_compacted_tool_result_serializes() {
+    let msg = BaseMessage::tool_result(
+        "tc_1",
+        "AAAA".repeat(50) + "\n... [字符已省略] ...\n" + &"BBBB".repeat(25),
+    );
+    let val = OpenAiAdapter::from_base_messages(&[msg]);
+    let arr = val.as_array().unwrap();
+    assert_eq!(arr[0]["role"], "tool");
+    assert_eq!(arr[0]["tool_call_id"], "tc_1");
+    assert!(arr[0]["content"].as_str().unwrap().contains("字符已省略"));
+}

@@ -42,34 +42,31 @@ describe("peri e2e smoke", () => {
       expect(capture.text.length).toBeGreaterThan(100);
 
       // LLM judge
-      try {
-        const judgeResult = await judge({
-          ansiRaw: capture.raw,
-          criteria: [
-            "消息区域应该有 AI 的回复内容（不只是空白或加载状态）",
-            "界面底部应该有输入框区域",
-          ],
-        });
+      const judgeResult = await judge({
+        ansiRaw: capture.raw,
+        criteria: [
+          "消息区域应该有 AI 的回复内容（不只是空白或加载状态）",
+          "界面底部应该有输入框区域",
+        ],
+      });
 
-        await updateJudgeResult(
-          "启动后提问并验证回答",
-          1,
-          judgeResult.pass ? "pass" : "fail",
-          judgeResult.checks,
-          judgeResult.duration_ms,
+      await updateJudgeResult(
+        "启动后提问并验证回答",
+        1,
+        judgeResult.pass ? "pass" : "fail",
+        judgeResult.checks,
+        judgeResult.duration_ms,
+      );
+
+      console.log("Judge 结果:", JSON.stringify(judgeResult, null, 2));
+
+      if (!judgeResult.pass) {
+        console.warn(
+          "⚠ LLM judge 判定不通过:",
+          judgeResult.checks.filter((c) => !c.pass).map((c) => c.detail).join("; "),
         );
-
-        console.log("Judge 结果:", JSON.stringify(judgeResult, null, 2));
-
-        if (!judgeResult.pass) {
-          console.warn(
-            "⚠ LLM judge 判定不通过:",
-            judgeResult.checks.filter((c) => !c.pass).map((c) => c.detail).join("; "),
-          );
-        }
-      } catch (err: any) {
-        console.warn("⚠ LLM judge 调用失败（不影响测试结果）:", err.message);
       }
+      expect(judgeResult.pass).toBe(true);
     },
   );
 });

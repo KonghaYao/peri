@@ -57,20 +57,17 @@ describe("tool-card: edit write diff summary", () => {
       expect(capture.text.length).toBeGreaterThan(50);
 
       // Judge: 验证头行后缀格式
-      try {
-        const r = await judge({
-          ansiRaw: capture.raw,
-          criteria: [
-            "屏幕上应出现 Write 和 Edit 两个工具调用的痕迹",
-            "Write 工具头行应包含变更摘要（如 '— Wrote N line(s)' 或 '— N lines changed'）",
-            "Edit 工具头行应包含 diff 增减统计或变更摘要（如 '— N lines changed · +N · -N' 或 '— Replaced text'）",
-            "Write 和 Edit 头行的变更信息清晰可见，用于替代旧的独立输出行",
-          ],
-        });
-        console.log("Judge:", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: capture.raw,
+        criteria: [
+          "屏幕上应出现 Write 和 Edit 两个工具调用的痕迹",
+          "Write 工具头行应包含变更摘要（如 '— Wrote N line(s)' 或 '— N lines changed'）",
+          "Edit 工具头行应包含 diff 增减统计或变更摘要（如 '— N lines changed · +N · -N' 或 '— Replaced text'）",
+          "Write 和 Edit 头行的变更信息清晰可见，用于替代旧的独立输出行",
+        ],
+      });
+      console.log("Judge:", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
     },
   );
 });

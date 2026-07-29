@@ -80,36 +80,6 @@ fn test_act_input_output_contract() {
 }
 
 #[test]
-fn test_end_input_output_contract() {
-    let ctx = make_stage_context();
-    let _input = EndInput { context: ctx };
-
-    let output_continue = EndOutput {
-        should_continue: true,
-        awakened_messages: vec![],
-    };
-    assert!(output_continue.should_continue);
-
-    let output_stop = EndOutput {
-        should_continue: false,
-        awakened_messages: vec![],
-    };
-    assert!(!output_stop.should_continue);
-}
-
-#[test]
-fn test_loop_action_and_result_types() {
-    // LoopAction
-    assert_eq!(LoopAction::NextStep, LoopAction::NextStep);
-    assert_ne!(LoopAction::NextStep, LoopAction::CheckEnd);
-
-    // LoopResult
-    let _ = LoopResult::Completed;
-    let _ = LoopResult::Interrupted;
-    let _ = LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(0));
-}
-
-#[test]
 fn test_stage_context_construction() {
     let ctx = make_stage_context();
     assert_eq!(&*ctx.session.turn.cwd, "/tmp/test");
@@ -127,52 +97,6 @@ fn test_stage_context_builder_default() {
     let turn = session.start_turn();
     let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone()).build();
     assert_eq!(ctx.runtime.llm.model_name(), "null");
-}
-
-#[tokio::test]
-async fn test_end_stage_no_messages_stops() {
-    // 队列为空 → should_continue = false
-    let ctx = make_stage_context();
-    let end_out = end::run_end(EndInput { context: ctx });
-    assert!(!end_out.should_continue);
-    assert!(end_out.awakened_messages.is_empty());
-}
-
-#[tokio::test]
-async fn test_end_stage_prompt_wakes() {
-    // 队列有 Prompt → should_continue = true
-    let ctx = make_stage_context();
-    ctx.session.queue.push(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human(MessageContent::text("new question")),
-    ));
-    let end_out = end::run_end(EndInput { context: ctx });
-    assert!(end_out.should_continue);
-    assert_eq!(end_out.awakened_messages.len(), 1);
-}
-
-#[tokio::test]
-async fn test_end_stage_defer_wakes() {
-    // 队列有 Defer → should_continue = true
-    let ctx = make_stage_context();
-    ctx.session.queue.push(QueuedMessage::defer(
-        MessageSource::SubAgentComplete,
-        BaseMessage::human(MessageContent::text("deferred result")),
-    ));
-    let end_out = end::run_end(EndInput { context: ctx });
-    assert!(end_out.should_continue);
-}
-
-#[tokio::test]
-async fn test_end_stage_info_does_not_wake() {
-    // 队列仅有 Info → should_continue = false
-    let ctx = make_stage_context();
-    ctx.session.queue.push(QueuedMessage::info(
-        MessageSource::SystemInjected,
-        BaseMessage::human(MessageContent::text("info only")),
-    ));
-    let end_out = end::run_end(EndInput { context: ctx });
-    assert!(!end_out.should_continue);
 }
 
 // ── e2e 集成测试（验证完整 v2 ReAct 循环）──
@@ -264,8 +188,7 @@ async fn test_e2e_cancel_before_loop() {
 
 #[tokio::test]
 async fn test_e2e_empty_queue_completes_immediately() {
-    // e2e：无 Prompt 推入 → End 阶段 should_continue=false → Completed
-    // 注意：第一轮仍会调用 LLM（无 tool_calls 时进入 End）
+    // e2e：无 Prompt 推入 → Receive 阶段 consumed=0 → Completed
     let cwd: Arc<str> = Arc::from("/tmp/e2e-empty");
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
@@ -274,7 +197,7 @@ async fn test_e2e_empty_queue_completes_immediately() {
         .with_llm(Arc::new(FinalAnswerLLM { answer: "answer" }))
         .build();
 
-    // 不推入 Prompt，直接跑循环（首轮 Receive 阶段会消费空队列）
+    // 不推入 Prompt，直接跑循环（首轮 Receive consumed=0 → 直接退出）
     let result = run_react_loop(ctx.clone(), 10).await;
     assert!(
         matches!(result, LoopResult::Completed),
@@ -282,12 +205,11 @@ async fn test_e2e_empty_queue_completes_immediately() {
         result
     );
 
-    // transcript 应只有 ai 回答（无 user prompt）
+    // RCRA：空队列立即退出，不会进入 Reason/Act，transcript 为空
     let transcript = ctx.session.transcript.read();
-    let visible: Vec<_> = transcript.visible_messages().into_iter().collect();
     assert!(
-        visible.iter().any(|m| matches!(m, BaseMessage::Ai { .. })),
-        "expected at least one AI message"
+        transcript.is_empty(),
+        "expected empty transcript on immediate exit"
     );
 }
 
@@ -360,13 +282,13 @@ fn test_append_messages_defer_wrapped_in_reminder() {
 }
 
 #[tokio::test]
-async fn test_e2e_defer_written_to_transcript_when_end_awakens() {
-    // e2e：push Defer → run_react_loop → 第一轮 End drain Defer →
-    // mod.rs:520-528 把 awakened_messages 写入 transcript（reminder 包裹）→
-    // 第二轮循环正常退出。
+async fn test_e2e_defer_consumed_in_receive() {
+    // RCRA：push Defer → run_react_loop → 第一轮 Receive 消费 Defer（drain_all）
+    // → Compact → Reason → Act → Receive（空→退出）→ Completed。
     //
-    // 回归保护：修复前 awakened_messages 被 drop，Defer 内容物理丢失。
-    let cwd: Arc<str> = Arc::from("/tmp/e2e-defer");
+    // 迁移自原 test_e2e_defer_written_to_transcript_when_end_awakens，
+    // 验证 Defer 在 RCRA 的 Receive 阶段被正确消费和写入 transcript。
+    let cwd: Arc<str> = Arc::from("/tmp/rcra-defer");
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
@@ -386,7 +308,7 @@ async fn test_e2e_defer_written_to_transcript_when_end_awakens() {
         result
     );
 
-    // transcript 应包含 Defer 内容（reminder 包裹）
+    // transcript 应包含 Defer 内容（reminder 包裹，由 Receive 阶段写入）
     let transcript = ctx.session.transcript.read();
     let combined: String = transcript
         .visible_messages()

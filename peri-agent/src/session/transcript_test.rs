@@ -1,5 +1,141 @@
 use super::*;
+use std::sync::{Arc, Mutex};
+
 use crate::messages::MessageContent;
+use crate::thread::{
+    CompactionLifecycle, FilesystemThreadStore, SqliteThreadStore, ThreadId, ThreadMeta,
+    ThreadStore,
+};
+use anyhow::Result;
+use async_trait::async_trait;
+use tempfile::tempdir;
+
+struct FaultInjectingStore {
+    fail_on: Vec<usize>,
+    fail_flag_on: Vec<usize>,
+    fail_invalidation: bool,
+    append_count: Mutex<usize>,
+    flag_count: Mutex<usize>,
+    invalidation_count: Mutex<usize>,
+    messages: Mutex<Vec<BaseMessage>>,
+}
+
+impl FaultInjectingStore {
+    fn new(fail_on: impl IntoIterator<Item = usize>) -> Self {
+        Self::with_failures(fail_on, [], false)
+    }
+
+    fn with_failures(
+        fail_on: impl IntoIterator<Item = usize>,
+        fail_flag_on: impl IntoIterator<Item = usize>,
+        fail_invalidation: bool,
+    ) -> Self {
+        Self {
+            fail_on: fail_on.into_iter().collect(),
+            fail_flag_on: fail_flag_on.into_iter().collect(),
+            fail_invalidation,
+            append_count: Mutex::new(0),
+            flag_count: Mutex::new(0),
+            invalidation_count: Mutex::new(0),
+            messages: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn messages(&self) -> Vec<BaseMessage> {
+        self.messages.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ThreadStore for FaultInjectingStore {
+    async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId> {
+        Ok(meta.id)
+    }
+
+    async fn append_messages(&self, _id: &ThreadId, msgs: &[BaseMessage]) -> Result<()> {
+        for message in msgs {
+            let mut append_count = self.append_count.lock().unwrap();
+            *append_count += 1;
+            if self.fail_on.contains(&*append_count) {
+                anyhow::bail!("deterministic injected error on append {}", *append_count);
+            }
+            self.messages.lock().unwrap().push(message.clone());
+        }
+        Ok(())
+    }
+
+    async fn load_messages(&self, _id: &ThreadId) -> Result<Vec<BaseMessage>> {
+        Ok(self.messages())
+    }
+
+    async fn load_meta(&self, _id: &ThreadId) -> Result<ThreadMeta> {
+        Ok(ThreadMeta::new("/test"))
+    }
+
+    async fn update_meta(&self, _id: &ThreadId, _meta: ThreadMeta) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_threads(&self) -> Result<Vec<ThreadMeta>> {
+        Ok(Vec::new())
+    }
+
+    async fn delete_thread(&self, _id: &ThreadId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn load_context(&self, _thread_id: &ThreadId) -> Result<Vec<BaseMessage>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_child_threads(&self, _parent_id: &ThreadId) -> Result<Vec<ThreadMeta>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_session_threads(&self, _root_id: &ThreadId) -> Result<Vec<ThreadMeta>> {
+        Ok(Vec::new())
+    }
+
+    async fn update_thread_status(&self, _id: &ThreadId, _status: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn invalidate_context_cache(&self, _thread_id: &ThreadId) -> Result<()> {
+        let mut invalidation_count = self.invalidation_count.lock().unwrap();
+        *invalidation_count += 1;
+        if self.fail_invalidation {
+            anyhow::bail!(
+                "deterministic injected error on cache invalidation {}",
+                *invalidation_count
+            );
+        }
+        Ok(())
+    }
+
+    async fn update_message_flags(
+        &self,
+        _message_id: &MessageId,
+        _flags: &MessageFlags,
+    ) -> Result<()> {
+        let mut flag_count = self.flag_count.lock().unwrap();
+        *flag_count += 1;
+        if self.fail_flag_on.contains(&*flag_count) {
+            anyhow::bail!(
+                "deterministic injected error on flag update {}",
+                *flag_count
+            );
+        }
+        Ok(())
+    }
+
+    async fn delete_messages(
+        &self,
+        _thread_id: &ThreadId,
+        _message_ids: &[MessageId],
+    ) -> Result<()> {
+        Ok(())
+    }
+}
 
 fn make_human(text: &str) -> BaseMessage {
     BaseMessage::human(MessageContent::text(text.to_string()))
@@ -14,6 +150,317 @@ fn make_tool_result(tool_call_id: &str, text: &str) -> BaseMessage {
         tool_call_id.to_string(),
         MessageContent::text(text.to_string()),
     )
+}
+
+// ── Compaction lifecycle 原子提交 ───────────────────────────────────────────
+
+#[tokio::test]
+async fn test_commit_compaction_lifecycle_sqlite_updates_memory_and_store_atomically() {
+    let dir = tempdir().unwrap();
+    let store = SqliteThreadStore::new(dir.path().join("transcript-lifecycle.db"))
+        .await
+        .unwrap();
+    let thread_id = store.create_thread(ThreadMeta::new("/test")).await.unwrap();
+    let store: Arc<dyn ThreadStore> = Arc::new(store);
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), thread_id.clone());
+
+    let first_id = transcript.append(make_human("原始用户消息"));
+    let second_id = transcript.append(make_ai("原始助手回复"));
+    transcript.flush_persistence().await.unwrap();
+
+    let summary = make_human("压缩摘要");
+    let reinject = make_human("重新注入的用户上下文");
+    let summary_id = summary.id();
+    let reinject_id = reinject.id();
+    transcript
+        .commit_compaction_lifecycle(CompactionLifecycle {
+            flag_updates: vec![
+                (
+                    first_id,
+                    MessageFlags {
+                        excluded: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    second_id,
+                    MessageFlags {
+                        excluded: true,
+                        ..Default::default()
+                    },
+                ),
+            ],
+            appended_messages: vec![summary, reinject],
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(transcript.entries().len(), 4);
+    let visible = transcript.visible_messages();
+    assert_eq!(visible.len(), 2);
+    assert_eq!(visible[0].id(), summary_id);
+    assert_eq!(visible[1].id(), reinject_id);
+    assert!(transcript.flags(first_id).excluded);
+    assert!(transcript.flags(second_id).excluded);
+
+    let messages = store.load_messages(&thread_id).await.unwrap();
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[0].id(), first_id);
+    assert_eq!(messages[1].id(), second_id);
+    assert_eq!(messages[2].id(), summary_id);
+    assert_eq!(messages[3].id(), reinject_id);
+    let flags = store.load_message_flags(&thread_id).await.unwrap();
+    assert!(flags[&first_id].excluded);
+    assert!(flags[&second_id].excluded);
+}
+
+#[tokio::test]
+async fn test_commit_compaction_lifecycle_waits_for_pending_sqlite_appends_in_fifo_order() {
+    let dir = tempdir().unwrap();
+    let store = SqliteThreadStore::new(dir.path().join("transcript-lifecycle-fifo.db"))
+        .await
+        .unwrap();
+    let thread_id = store.create_thread(ThreadMeta::new("/test")).await.unwrap();
+    let store: Arc<dyn ThreadStore> = Arc::new(store);
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), thread_id.clone());
+
+    let first_id = transcript.append(make_human("FIFO 原始用户消息"));
+    let second_id = transcript.append(make_ai("FIFO 原始助手回复"));
+
+    let summary = make_human("FIFO 压缩摘要");
+    let summary_id = summary.id();
+    transcript
+        .commit_compaction_lifecycle(CompactionLifecycle {
+            flag_updates: vec![
+                (
+                    first_id,
+                    MessageFlags {
+                        excluded: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    second_id,
+                    MessageFlags {
+                        excluded: true,
+                        ..Default::default()
+                    },
+                ),
+            ],
+            appended_messages: vec![summary],
+        })
+        .await
+        .unwrap();
+
+    let messages = store.load_messages(&thread_id).await.unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0].id(), first_id);
+    assert_eq!(messages[1].id(), second_id);
+    assert_eq!(messages[2].id(), summary_id);
+    let flags = store.load_message_flags(&thread_id).await.unwrap();
+    assert!(flags[&first_id].excluded);
+    assert!(flags[&second_id].excluded);
+
+    assert_eq!(transcript.entries().len(), 3);
+    assert!(transcript.flags(first_id).excluded);
+    assert!(transcript.flags(second_id).excluded);
+    let visible = transcript.visible_messages();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id(), summary_id);
+}
+
+#[tokio::test]
+async fn test_commit_compaction_lifecycle_filesystem_failure_leaves_memory_and_store_unchanged() {
+    let dir = tempdir().unwrap();
+    let store: Arc<dyn ThreadStore> = Arc::new(FilesystemThreadStore::new(dir.path()));
+    let thread_id = store.create_thread(ThreadMeta::new("/test")).await.unwrap();
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), thread_id.clone());
+
+    let first_id = transcript.append(make_human("文件系统原始用户消息"));
+    let second_id = transcript.append(make_ai("文件系统原始助手回复"));
+    transcript.flush_persistence().await.unwrap();
+
+    let summary = make_human("文件系统不应追加的摘要");
+    let summary_id = summary.id();
+    let error = transcript
+        .commit_compaction_lifecycle(CompactionLifecycle {
+            flag_updates: vec![
+                (
+                    first_id,
+                    MessageFlags {
+                        excluded: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    second_id,
+                    MessageFlags {
+                        excluded: true,
+                        ..Default::default()
+                    },
+                ),
+            ],
+            appended_messages: vec![summary],
+        })
+        .await
+        .unwrap_err();
+    let error_message = error.to_string().to_lowercase();
+    assert!(
+        error_message.contains("filesystem") || error_message.contains("sqltiethreadstore"),
+        "文件系统 store 必须明确拒绝 compact lifecycle: {error}"
+    );
+
+    assert_eq!(transcript.entries().len(), 2);
+    let visible = transcript.visible_messages();
+    assert_eq!(visible.len(), 2);
+    assert_eq!(visible[0].id(), first_id);
+    assert_eq!(visible[1].id(), second_id);
+    assert_eq!(transcript.flags(first_id), MessageFlags::default());
+    assert_eq!(transcript.flags(second_id), MessageFlags::default());
+
+    let messages = store.load_messages(&thread_id).await.unwrap();
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|message| message.id() != summary_id));
+    let flags = store.load_message_flags(&thread_id).await.unwrap();
+    assert!(flags.is_empty());
+}
+
+// ── 持久化 flush/barrier ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_message_transcript_flush_persistence_makes_appends_visible() {
+    let store = Arc::new(FaultInjectingStore::new([]));
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), "flush-visible".to_string());
+
+    transcript.append(make_human("persisted message"));
+    transcript.flush_persistence().await.unwrap();
+
+    let messages = store.messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content(), "persisted message");
+}
+
+#[tokio::test]
+async fn test_message_transcript_flush_persistence_returns_error_once_and_recovers() {
+    let store = Arc::new(FaultInjectingStore::new([2]));
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), "flush-error".to_string());
+
+    transcript.append(make_human("first"));
+    transcript.append(make_human("second"));
+
+    let error = transcript.flush_persistence().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("deterministic injected error on append 2"),
+        "flush 应返回 barrier 后首个写入错误: {error}"
+    );
+    assert_eq!(store.messages().len(), 1, "失败写入不应伪装为成功");
+
+    transcript.flush_persistence().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_message_transcript_rebuild_keeps_persistence_writer_alive() {
+    let store = Arc::new(FaultInjectingStore::new([]));
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), "rebuild-writer".to_string());
+
+    transcript.append(make_human("rebuild 前消息"));
+    transcript.flush_persistence().await.unwrap();
+
+    let entries: Vec<(BaseMessage, MessageFlags)> = transcript
+        .entries()
+        .iter()
+        .map(|entry| (entry.message.clone(), transcript.flags(entry.message.id())))
+        .collect();
+    let mut rebuilt = transcript.rebuild(entries);
+
+    rebuilt.append(make_human("rebuild 后消息"));
+    rebuilt.flush_persistence().await.unwrap();
+
+    let messages = store.messages();
+    assert_eq!(messages.len(), 2, "rebuild 后追加的消息必须持久化");
+    assert_eq!(messages[1].content(), "rebuild 后消息");
+}
+
+#[tokio::test]
+async fn test_message_transcript_flush_persistence_returns_first_of_multiple_errors() {
+    let store = Arc::new(FaultInjectingStore::new([2, 3]));
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), "multiple-errors".to_string());
+
+    transcript.append(make_human("first"));
+    transcript.append(make_human("second"));
+    transcript.append(make_human("third"));
+
+    let error = transcript.flush_persistence().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("deterministic injected error on append 2"),
+        "同一 barrier 前的多个写入失败必须返回第一个错误: {error}"
+    );
+    assert_eq!(store.messages().len(), 1, "两个失败写入都不应伪装为成功");
+
+    transcript.flush_persistence().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_apply_compaction_batch_returns_first_flag_error_and_invalidates_cache() {
+    let store = Arc::new(FaultInjectingStore::with_failures([], [1, 2], false));
+    let transcript = MessageTranscript::new()
+        .with_persistence(store.clone(), "batch-first-flag-error".to_string());
+
+    transcript.send_persist(PersistOp::ApplyCompactionBatch {
+        updates: vec![
+            (MessageId::new(), MessageFlags::default()),
+            (MessageId::new(), MessageFlags::default()),
+        ],
+    });
+
+    let error = transcript.flush_persistence().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("deterministic injected error on flag update 1"),
+        "batch 必须向 barrier 暴露第一个 flag 更新失败: {error}"
+    );
+    assert_eq!(*store.flag_count.lock().unwrap(), 2, "后续更新仍应执行");
+    assert_eq!(
+        *store.invalidation_count.lock().unwrap(),
+        1,
+        "batch 必须只失效一次缓存"
+    );
+}
+
+#[tokio::test]
+async fn test_apply_compaction_batch_returns_cache_invalidation_error() {
+    let store = Arc::new(FaultInjectingStore::with_failures([], [], true));
+    let transcript =
+        MessageTranscript::new().with_persistence(store, "batch-invalidation-error".to_string());
+
+    transcript.send_persist(PersistOp::ApplyCompactionBatch {
+        updates: vec![(MessageId::new(), MessageFlags::default())],
+    });
+
+    let error = transcript.flush_persistence().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("deterministic injected error on cache invalidation 1"),
+        "cache invalidation 失败必须向 barrier 暴露: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_message_transcript_flush_persistence_without_backend_is_ok() {
+    MessageTranscript::new().flush_persistence().await.unwrap();
 }
 
 // ── 基础构造 ──────────────────────────────────────────────────────────────
@@ -230,6 +677,33 @@ fn test_visible_messages_keeps_truncated() {
     assert_eq!(visible.len(), 1, "truncated 消息仍然可见");
 }
 
+// ── 特征化测试：visible_messages 过滤 excluded ──────────────────────────
+
+#[test]
+fn test_visible_messages_filters_excluded() {
+    // visible_messages() 过滤 excluded=true 的消息，保留 truncated/excluded=false
+    let mut t = MessageTranscript::new();
+    let id1 = t.append(make_human("visible human"));
+    let id2 = t.append(make_ai("excluded ai"));
+    let id3 = t.append(make_tool_result("call_1", "excluded tool result"));
+    let id4 = t.append(make_human("visible again"));
+
+    // 标记 id2 和 id3 为 excluded
+    t.set_excluded(id2, true);
+    t.set_excluded(id3, true);
+
+    let visible = t.visible_messages();
+    assert_eq!(visible.len(), 2, "excluded 消息被过滤，只保留 2 条");
+    assert_eq!(visible[0].id(), id1, "第 1 条应是 visible human");
+    assert_eq!(visible[1].id(), id4, "第 2 条应是 visible again");
+
+    // 取消 excluded 后恢复可见
+    t.set_excluded(id2, false);
+    t.set_excluded(id3, false);
+    let visible2 = t.visible_messages();
+    assert_eq!(visible2.len(), 4, "取消 excluded 后所有消息应恢复可见");
+}
+
 // ── Ancestor 边界 ──────────────────────────────────────────────────────────
 
 #[test]
@@ -363,6 +837,7 @@ fn test_set_flags_batch() {
         MessageFlags {
             truncated: true,
             excluded: false,
+            ..Default::default()
         },
     );
     batch.insert(
@@ -370,6 +845,7 @@ fn test_set_flags_batch() {
         MessageFlags {
             truncated: false,
             excluded: true,
+            ..Default::default()
         },
     );
     batch.insert(
@@ -377,6 +853,7 @@ fn test_set_flags_batch() {
         MessageFlags {
             truncated: true,
             excluded: true,
+            ..Default::default()
         },
     );
 
@@ -402,4 +879,91 @@ fn test_set_flags_batch_ignores_default() {
 
     // Default flags should not be stored; flags() returns default
     assert_eq!(t.flags(id), MessageFlags::default());
+}
+
+/// 特征化测试：projection directive 通过 MessageFlags 持久化后恢复一致
+#[test]
+fn test_projection_directive_persists_roundtrip() {
+    use crate::agent::compact_v2::projection::{
+        MessageProjectionDirective, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
+    };
+    use std::collections::HashMap;
+
+    let mut t = MessageTranscript::new();
+    let id = t.append(make_human("message with projection"));
+
+    // 设置 projection directive（通过 set_flags_batch 批量设置）
+    let directive = MessageProjectionDirective {
+        policy_version: 2,
+        entries: vec![ProjectionActionEntry {
+            message_id: id,
+            target: ProjectionTarget::Message,
+            action: ProjectionAction::CompactText { max_chars: 100 },
+        }],
+    };
+
+    let mut batch = HashMap::new();
+    batch.insert(
+        id,
+        MessageFlags {
+            truncated: true,
+            excluded: false,
+            projection: Some(directive.clone()),
+        },
+    );
+    t.set_flags_batch(batch);
+
+    // 验证内存状态
+    let flags = t.flags(id);
+    assert!(flags.truncated);
+    assert!(!flags.excluded);
+    assert!(flags.projection.is_some(), "projection 应被设置");
+    let proj = flags.projection.as_ref().unwrap();
+    assert_eq!(proj.policy_version, 2);
+    assert_eq!(proj.entries.len(), 1);
+    assert_eq!(
+        proj.entries[0].action,
+        ProjectionAction::CompactText { max_chars: 100 }
+    );
+
+    // 验证 rebuild 保留 projection
+    let entries: Vec<(BaseMessage, MessageFlags)> = t
+        .entries()
+        .iter()
+        .map(|e| {
+            let fid = e.message.id();
+            let mut flags = t.flags(fid);
+            if fid == id {
+                flags.projection = Some(directive.clone());
+            }
+            (e.message.clone(), flags)
+        })
+        .collect();
+
+    let t2 = t.rebuild(entries);
+    let flags2 = t2.flags(id);
+    assert!(flags2.truncated);
+    assert!(flags2.projection.is_some(), "rebuild 后 projection 应保留");
+    assert_eq!(flags2.projection.as_ref().unwrap().policy_version, 2);
+}
+
+#[test]
+fn test_projection_directive_none_when_not_set() {
+    // 旧行为：不设置 projection 应为 None
+    let mut t = MessageTranscript::new();
+    let id = t.append(make_human("plain message"));
+
+    t.set_truncated(id, true);
+
+    let flags = t.flags(id);
+    assert!(flags.truncated);
+    assert!(!flags.excluded);
+    assert!(flags.projection.is_none(), "未设置 projection 应为 None");
+
+    // 序列化为 JSON 验证向后兼容
+    let json = serde_json::to_string(&flags).unwrap();
+    assert!(
+        !json.contains("projection"),
+        "JSON 应不含 projection 字段（skip_serializing_if）"
+    );
 }

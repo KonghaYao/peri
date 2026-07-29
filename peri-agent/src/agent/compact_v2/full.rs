@@ -13,13 +13,14 @@ use std::path::Path;
 use tracing::{debug, warn};
 
 use crate::agent::{
-    compact_v2::config::CompactConfig,
+    compact_v2::{config::CompactConfig, CompactOutcome},
     events::{CompactFileInfo, CompactStrategy},
 };
 use crate::error::AgentResult;
 use crate::llm::{types::LlmRequest, BaseModel};
 use crate::messages::{BaseMessage, ContentBlock, MessageContent};
-use crate::session::transcript::MessageTranscript;
+use crate::session::transcript::{MessageFlags, MessageTranscript};
+use crate::thread::CompactionLifecycle;
 
 // ─── 公共常量 ──────────────────────────────────────────────────────────────────
 
@@ -64,26 +65,24 @@ pub(super) async fn full_compact_inner(
         //   即使全 System history，compact 输出仍以 Human(fallback 摘要) 开头
         // 详见 peri-acp/src/session/command/compact_test.rs::test_contract_all_system_history_still_human_first
         let fallback_summary = "No conversation history to compact.".to_string();
-        let old_ids: Vec<_> = transcript
-            .entries()
-            .iter()
-            .map(|e| e.message.id())
-            .collect();
-        for id in &old_ids {
-            transcript.set_excluded(*id, true);
-        }
-        let hint_text = format!(
-            "<system-reminder>\n{}\n\n{}\n</system-reminder>",
-            crate::agent::compact_v2::CONTINUATION_HINT,
-            fallback_summary
-        );
-        transcript.append(BaseMessage::human(hint_text));
+        let summary_message = build_summary_message(&fallback_summary);
+        transcript
+            .commit_compaction_lifecycle(CompactionLifecycle {
+                flag_updates: Vec::new(),
+                appended_messages: vec![summary_message],
+            })
+            .await?;
+        let after_visible = transcript.visible_messages().len();
+
         return Ok(super::CompactResult {
             strategy: CompactStrategy::Full,
             affected_count: before_len,
-            before_len,
-            after_visible_len: transcript.visible_messages().len(),
+            estimated_tokens_saved: 0,
+            before_visible_len: before_len,
+            after_visible_len: after_visible,
             summary: Some(fallback_summary),
+            full_escalation_reason: None,
+            outcome: CompactOutcome::FullApplied,
         });
     }
 
@@ -112,32 +111,40 @@ pub(super) async fn full_compact_inner(
     // 4. 后处理摘要
     let summary = postprocess_summary(&raw_summary);
 
-    // 5. 所有旧消息标 excluded（先收集 id，避免借用冲突）
-    let old_ids: Vec<_> = transcript
+    // 5. 构造原子生命周期：仅排除 own region 中的非 System 原消息。
+    //    不根据 visible filter 丢失已被排除的原文。
+    let flag_updates = transcript
         .entries()
         .iter()
-        .map(|e| e.message.id())
+        .skip(transcript.ancestor_len())
+        .filter(|entry| !matches!(entry.message, BaseMessage::System { .. }))
+        .map(|entry| {
+            (
+                entry.message.id(),
+                MessageFlags {
+                    excluded: true,
+                    ..Default::default()
+                },
+            )
+        })
         .collect();
-    for id in &old_ids {
-        transcript.set_excluded(*id, true);
-    }
 
-    // 6. 追加 Human 摘要消息（使用 v1 统一常量，wrap 在 <system-reminder> 中以触发 TUI 折叠）
-    let hint_text = format!(
-        "<system-reminder>\n{}\n\n{}\n</system-reminder>",
-        crate::agent::compact_v2::CONTINUATION_HINT,
-        summary
-    );
-    transcript.append(BaseMessage::human(hint_text));
-
-    // 7. Re-inject 关键文件 + Skills（在摘要消息之后）
-    //    使用相对路径解析需要 cwd，注入失败仅 warn 不影响 compact 主流程
-    let re_inject_result = re_inject_v2(transcript, config, cwd).await;
+    // 6. 先收集 re-inject 消息，随后和摘要一次性提交。
+    let re_inject_result = collect_reinject_v2(transcript, config, cwd).await;
     debug!(
         files_injected = re_inject_result.files_injected,
         skills_injected = re_inject_result.skills_injected,
         "Full Compact: re-inject 完成"
     );
+
+    let mut appended_messages = vec![build_summary_message(&summary)];
+    appended_messages.extend(re_inject_result.messages);
+    transcript
+        .commit_compaction_lifecycle(CompactionLifecycle {
+            flag_updates,
+            appended_messages,
+        })
+        .await?;
 
     let after_visible = transcript.visible_messages().len();
 
@@ -149,10 +156,23 @@ pub(super) async fn full_compact_inner(
     Ok(super::CompactResult {
         strategy: CompactStrategy::Full,
         affected_count: before_len,
-        before_len,
+        estimated_tokens_saved: 0,
+        before_visible_len: before_len,
         after_visible_len: after_visible,
         summary: Some(summary),
+        full_escalation_reason: None,
+        outcome: CompactOutcome::FullApplied,
     })
+}
+
+/// 构造 Full Compact 的 Human 摘要消息。
+fn build_summary_message(summary: &str) -> BaseMessage {
+    let hint_text = format!(
+        "<system-reminder>\n{}\n\n{}\n</system-reminder>",
+        crate::agent::compact_v2::CONTINUATION_HINT,
+        summary
+    );
+    BaseMessage::human(hint_text)
 }
 
 /// 预处理消息为文本行（供 LLM 摘要使用）
@@ -487,16 +507,28 @@ fn resolve_path(path: &str, cwd: &str) -> String {
     }
 }
 
-/// Full Compact 后重新注入关键信息（文件 + Skills）
+/// Full Compact 后重新注入关键信息（文件 + Skills）。
+///
+/// 保留既有公共行为：收集消息后普通追加到 transcript 末尾。
+pub async fn re_inject_v2(
+    transcript: &mut MessageTranscript,
+    config: &CompactConfig,
+    cwd: &str,
+) -> ReInjectResult {
+    let result = collect_reinject_v2(transcript, config, cwd).await;
+    for message in &result.messages {
+        transcript.append(message.clone());
+    }
+    result
+}
+
+/// 收集 Full Compact 后需要重新注入的关键信息（文件 + Skills）。
 ///
 /// 从 transcript 全部 entries（含已标 excluded 的旧消息）中提取：
 /// 1. 最近 Read 的非 Skills 文件 → 注入为消息
 /// 2. SkillPreloadMiddleware 注入的 Skills 路径 → 注入为消息
-///
-/// 注入的消息会追加到 transcript 末尾（在 Full Compact 摘要消息之后）。
-/// 返回 ReInjectResult 供调用方 emit CompactCompleted 事件。
-pub async fn re_inject_v2(
-    transcript: &mut MessageTranscript,
+async fn collect_reinject_v2(
+    transcript: &MessageTranscript,
     config: &CompactConfig,
     cwd: &str,
 ) -> ReInjectResult {
@@ -591,11 +623,6 @@ pub async fn re_inject_v2(
         total_messages = result_messages.len(),
         "v2 重新注入完成"
     );
-
-    // 追加到 transcript
-    for msg in &result_messages {
-        transcript.append(msg.clone());
-    }
 
     ReInjectResult {
         messages: result_messages,

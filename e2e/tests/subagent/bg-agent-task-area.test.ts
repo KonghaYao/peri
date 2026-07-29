@@ -57,32 +57,26 @@ describe("subagent: bg agent task area", () => {
       expect(doneCapture.text.length).toBeGreaterThan(50);
 
       // Judge: running 态（agent 正在处理派发 bg subagent 请求）
-      try {
-        const r = await judge({
-          ansiRaw: runningCapture.raw,
-          criteria: [
-            "系统应处于处理中状态：应有思考块（如 '思考了 N 字符'）或底部有加载指示器",
-            "输入提示应已提交（屏幕显示用户 prompt），agent 在准备或启动后台任务",
-          ],
-        });
-        console.log("Judge (running):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: runningCapture.raw,
+        criteria: [
+          "系统应处于处理中状态：应有思考块（如 '思考了 N 字符'）或底部有加载指示器",
+          "输入提示应已提交（屏幕显示用户 prompt），agent 在准备或启动后台任务",
+        ],
+      });
+      console.log("Judge (running):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
 
       // Judge: 完成态
-      try {
-        const r = await judge({
-          ansiRaw: doneCapture.raw,
-          criteria: [
-            "后台 agent 应已完成（✔ 标记、完成通知或状态栏 agent 计数归零）",
-            "消息区应包含 SubAgent 的完成通知或执行结果",
-          ],
-        });
-        console.log("Judge (done):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r2 = await judge({
+        ansiRaw: doneCapture.raw,
+        criteria: [
+          "后台 agent 应已完成（✔ 标记、完成通知或状态栏 agent 计数归零）",
+          "消息区应包含 SubAgent 的完成通知或执行结果",
+        ],
+      });
+      console.log("Judge (done):", JSON.stringify(r2, null, 2));
+      expect(r2.pass).toBe(true);
     },
   );
 });

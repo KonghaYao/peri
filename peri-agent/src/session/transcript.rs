@@ -13,6 +13,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 
+use crate::agent::compact_v2::projection::MessageProjectionDirective;
 use crate::messages::{BaseMessage, MessageId};
 use crate::thread::{ThreadId, ThreadStore};
 
@@ -30,10 +31,16 @@ pub struct TranscriptEntry {
 ///
 /// - `truncated`：Micro compact 标记，LLM 请求时截断该消息输出
 /// - `excluded`：Full / Smart compact 标记，LLM 请求时跳过该消息
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// - `projection`：投影指令（v2）。None 表示旧版 flag 或未 compact。
+///   旧 JSON（无此字段）反序列化后为 None。
+#[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageFlags {
     pub truncated: bool,
     pub excluded: bool,
+    /// 投影指令（v2）。None 表示旧版 flag 或未 compact。
+    /// 旧 JSON（无此字段）反序列化后为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<MessageProjectionDirective>,
 }
 
 // ─── StagedData ───────────────────────────────────────────────────────────────
@@ -51,7 +58,7 @@ pub struct StagedData {
 // ─── PersistOp ────────────────────────────────────────────────────────────────
 
 /// 持久化操作 — 通过异步通道传递富操作给 writer task
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum PersistOp {
     /// 追加新消息
     Append(BaseMessage),
@@ -59,6 +66,12 @@ pub enum PersistOp {
     RewindTo(MessageId),
     /// 更新消息标记
     UpdateFlags(MessageId, MessageFlags),
+    /// 批量应用 compaction（将来实现）
+    ApplyCompactionBatch {
+        updates: Vec<(MessageId, MessageFlags)>,
+    },
+    /// 确认此前所有持久化操作均已实际调用 store
+    Barrier(tokio::sync::oneshot::Sender<anyhow::Result<()>>),
 }
 
 // ─── MessageTranscript ────────────────────────────────────────────────────────
@@ -154,22 +167,43 @@ impl MessageTranscript {
         let handle = tokio::spawn(async move {
             let mut processed: u64 = 0;
             let mut last_warn_at: u64 = 0;
+            let mut barrier_error = None;
             while let Some(op) = rx.recv().await {
+                if let PersistOp::Barrier(ack) = op {
+                    let _ = ack.send(barrier_error.take().map_or(Ok(()), Err));
+                    continue;
+                }
+
                 let result = match op {
                     PersistOp::Append(msg) => store.append_message(&tid, msg).await,
                     PersistOp::RewindTo(id) => store.delete_messages_since(&tid, &id).await,
                     PersistOp::UpdateFlags(id, flags) => {
-                        let res = store
-                            .update_message_flags(&id, flags.truncated, flags.excluded)
-                            .await;
-                        if res.is_ok() {
-                            let _ = store.invalidate_context_cache(&tid).await;
-                        }
-                        res
+                        store.update_message_flags(&id, &flags).await
                     }
+                    PersistOp::ApplyCompactionBatch { updates } => {
+                        let mut first_err = None;
+                        for (id, flags) in &updates {
+                            if let Err(err) = store.update_message_flags(id, flags).await {
+                                if first_err.is_none() {
+                                    first_err = Some(err);
+                                }
+                            }
+                        }
+                        // 无论标记更新是否部分失败，均需使缓存失效。
+                        if let Err(err) = store.invalidate_context_cache(&tid).await {
+                            if first_err.is_none() {
+                                first_err = Some(err);
+                            }
+                        }
+                        first_err.map_or(Ok(()), Err)
+                    }
+                    PersistOp::Barrier(_) => unreachable!("barrier handled before store operation"),
                 };
                 if let Err(e) = result {
                     tracing::warn!("transcript persist failed: {e}");
+                    if barrier_error.is_none() {
+                        barrier_error = Some(e);
+                    }
                 }
                 processed = processed.saturating_add(1);
                 let bucket = processed / 1000;
@@ -239,7 +273,7 @@ impl MessageTranscript {
 
     /// 获取消息标记（无标记时返回默认值）
     pub fn flags(&self, id: MessageId) -> MessageFlags {
-        self.flags.get(&id).copied().unwrap_or_default()
+        self.flags.get(&id).cloned().unwrap_or_default()
     }
 
     /// 按 id 获取消息标记，消息不存在时返回 None
@@ -363,14 +397,27 @@ impl MessageTranscript {
     /// 设置 truncated 标记（Micro compact）
     pub fn set_truncated(&mut self, id: MessageId, value: bool) {
         self.flags.entry(id).or_default().truncated = value;
-        let flags = self.flags[&id];
+        let flags = self.flags[&id].clone();
         self.send_persist(PersistOp::UpdateFlags(id, flags));
     }
 
     /// 设置 excluded 标记（Full / Smart compact）
     pub fn set_excluded(&mut self, id: MessageId, value: bool) {
         self.flags.entry(id).or_default().excluded = value;
-        let flags = self.flags[&id];
+        let flags = self.flags[&id].clone();
+        self.send_persist(PersistOp::UpdateFlags(id, flags));
+    }
+
+    /// 设置 projection directive（Micro compact）
+    ///
+    /// 与 `set_truncated` 配合使用：Micro compact 完成后，将 planner 生成的
+    /// per-message directive 持久化到 flags，避免后续每 turn 重新规划。
+    /// 设置 projection 的同时也会设置 truncated=true。
+    pub fn set_flags_projection(&mut self, id: MessageId, directive: MessageProjectionDirective) {
+        let entry = self.flags.entry(id).or_default();
+        entry.truncated = true;
+        entry.projection = Some(directive);
+        let flags = self.flags[&id].clone();
         self.send_persist(PersistOp::UpdateFlags(id, flags));
     }
 
@@ -391,13 +438,76 @@ impl MessageTranscript {
         }
     }
 
+    /// 原子提交 compaction 生命周期到持久化存储及内存 transcript。
+    ///
+    /// 仅在 store 事务成功后更新内存；事务已经持久化全部变更，不能再排队普通 PersistOp。
+    pub async fn commit_compaction_lifecycle(
+        &mut self,
+        lifecycle: crate::thread::CompactionLifecycle,
+    ) -> anyhow::Result<()> {
+        self.flush_persistence().await?;
+
+        let (store, thread_id) = match (&self.store, &self.thread_id) {
+            (Some(store), Some(thread_id)) => (store.clone(), thread_id.clone()),
+            _ => return Err(anyhow!("compact lifecycle requires persistence")),
+        };
+
+        for (id, _) in &lifecycle.flag_updates {
+            if !self.id_index.contains_key(id) {
+                return Err(anyhow!(
+                    "compact lifecycle flag target id {id:?} not found in transcript"
+                ));
+            }
+        }
+
+        let mut appended_ids = std::collections::HashSet::new();
+        for message in &lifecycle.appended_messages {
+            let id = message.id();
+            if self.id_index.contains_key(&id) || !appended_ids.insert(id) {
+                return Err(anyhow!(
+                    "compact lifecycle appended message id {id:?} already exists in transcript"
+                ));
+            }
+        }
+
+        store
+            .commit_compaction_lifecycle(&thread_id, &lifecycle)
+            .await?;
+        self.apply_compaction_lifecycle_memory(&lifecycle);
+
+        Ok(())
+    }
+
+    /// 应用已成功持久化的 compaction lifecycle，不发送普通 PersistOp。
+    fn apply_compaction_lifecycle_memory(
+        &mut self,
+        lifecycle: &crate::thread::CompactionLifecycle,
+    ) {
+        for (id, flags) in &lifecycle.flag_updates {
+            if *flags == MessageFlags::default() {
+                self.flags.remove(id);
+            } else {
+                self.flags.insert(*id, flags.clone());
+            }
+        }
+
+        for message in &lifecycle.appended_messages {
+            let id = message.id();
+            let idx = self.entries.len();
+            self.id_index.insert(id, idx);
+            self.entries.push(TranscriptEntry {
+                message: message.clone(),
+            });
+        }
+    }
+
     // ── 重建 ──────────────────────────────────────────────────────────────────
 
     /// 用新消息列表替换内部状态（Compact 专用）
     ///
     /// 消费 self，返回新 Transcript。保留 `ancestor_len`、持久化绑定等配置。
     /// `entries` 参数为 `(BaseMessage, MessageFlags)` 对，保留标记。
-    pub fn rebuild(self, entries: Vec<(BaseMessage, MessageFlags)>) -> Self {
+    pub fn rebuild(mut self, entries: Vec<(BaseMessage, MessageFlags)>) -> Self {
         let mut new_entries = Vec::with_capacity(entries.len());
         let mut new_index = HashMap::with_capacity(entries.len());
         let mut new_flags = HashMap::with_capacity(entries.len());
@@ -418,10 +528,10 @@ impl MessageTranscript {
             flags: new_flags,
             ancestor_len: self.ancestor_len,
             staged: None,
-            persist_tx: self.persist_tx.clone(),
-            persist_handle: self.persist_handle.clone(),
-            thread_id: self.thread_id.clone(),
-            store: self.store.clone(),
+            persist_tx: self.persist_tx.take(),
+            persist_handle: self.persist_handle.take(),
+            thread_id: self.thread_id.take(),
+            store: self.store.take(),
         }
     }
 
@@ -472,6 +582,23 @@ impl MessageTranscript {
     }
 
     // ── 内部辅助 ────────────────────────────────────────────────────────────────
+
+    /// 等待此前已排队的持久化操作完成。
+    ///
+    /// 同一 writer 按 FIFO 处理 barrier，因此收到确认时，所有此前操作都已调用 store。
+    /// 返回并消费自上个 barrier 以来的第一个持久化错误。
+    pub async fn flush_persistence(&self) -> anyhow::Result<()> {
+        let Some(tx) = &self.persist_tx else {
+            return Ok(());
+        };
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(PersistOp::Barrier(ack_tx))
+            .map_err(|_| anyhow!("transcript persistence writer channel closed"))?;
+        ack_rx
+            .await
+            .map_err(|_| anyhow!("transcript persistence writer dropped barrier acknowledgement"))?
+    }
 
     /// 发送持久化操作到 writer task
     fn send_persist(&self, op: PersistOp) {

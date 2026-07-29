@@ -16,6 +16,7 @@ fn test_build_stream_response_tooluse_preserves_text() {
         StopReason::ToolUse,
         None, // usage
         None, // request_id
+        None, // first_token_time
     );
 
     let blocks = response.message.content_blocks();
@@ -52,6 +53,7 @@ fn test_build_stream_response_tooluse_empty_text() {
         StopReason::ToolUse,
         None,
         None,
+        None, // first_token_time
     );
 
     let blocks = response.message.content_blocks();
@@ -78,6 +80,7 @@ fn test_build_stream_response_tooluse_with_reasoning() {
         StopReason::ToolUse,
         None,
         None,
+        None, // first_token_time
     );
 
     let blocks = response.message.content_blocks();

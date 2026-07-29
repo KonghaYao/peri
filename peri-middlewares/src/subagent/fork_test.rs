@@ -16,6 +16,9 @@ fn make_tool(name: &'static str) -> Arc<dyn BaseTool> {
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({})
         }
+        fn is_direct(&self) -> bool {
+            true
+        }
         async fn invoke(
             &self,
             _input: serde_json::Value,

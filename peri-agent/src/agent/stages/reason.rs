@@ -68,31 +68,99 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     run_before_model(ctx).await?;
 
     // 取出 messages 快照（避免跨 await 持有 RwLockReadGuard）
-    let mut messages_snapshot: Vec<crate::messages::BaseMessage> = ctx.visible_messages();
-    // Micro Compact 标记为 truncated 的消息需截断输出内容，而非完整发送给 LLM。
-    // 截断策略：只保留前 100 字符 + "[truncated]" 标记。
-    for msg in &mut messages_snapshot {
-        let is_truncated = {
-            let guard = ctx.session.transcript.read();
-            guard
-                .get_flags(msg.id())
-                .map(|f| f.truncated)
-                .unwrap_or(false)
-        };
-        if is_truncated {
-            if let Some(truncated_text) = msg.truncated_content(100) {
-                *msg = truncated_text;
+    let messages_snapshot: Vec<crate::messages::BaseMessage> = {
+        let guard = ctx.session.transcript.read();
+        let visible: Vec<crate::messages::BaseMessage> =
+            guard.visible_messages().into_iter().cloned().collect();
+
+        // 如果有 compact config，生成 plan 并渲染投影视图
+        if let Some(ref config) = ctx.compact.compact_config {
+            let caps = ctx.runtime.llm.provider_capabilities();
+            // 优先使用持久化 directive，避免每 turn 重新规划
+            match crate::agent::compact_v2::projection::plan_from_persisted_directives(
+                &guard, 1, // policy_version
+            ) {
+                Ok(plan) => {
+                    // 持久化 directive 有效 → 直接渲染
+                    match crate::agent::compact_v2::projection::render_llm_view(
+                        &guard, &plan, &caps,
+                    ) {
+                        Ok(view) => {
+                            tracing::debug!(
+                                action_count = plan.actions.len(),
+                                messages_before = visible.len(),
+                                messages_after = view.len(),
+                                "render_llm_view (persisted directives): 投影后消息数"
+                            );
+                            view
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "render_llm_view (persisted) 失败，fallback 到原始可见消息"
+                            );
+                            visible
+                        }
+                    }
+                }
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if err_msg
+                        .contains(crate::agent::compact_v2::projection::DIRECTIVE_VERSION_MISMATCH)
+                    {
+                        // 版本不匹配 → 安全回退到原始消息（不重新规划，避免 risk）
+                        tracing::warn!(
+                            error = %e,
+                            "持久化 directive 版本不匹配，使用原始可见消息"
+                        );
+                        visible
+                    } else {
+                        // 无持久化 directive → fallback 到 planner
+                        tracing::debug!("无持久化 directive，fallback 到 plan_micro");
+                        let plan =
+                            crate::agent::compact_v2::planner::plan_micro(&guard, config, false);
+                        if plan.has_changes() {
+                            match crate::agent::compact_v2::projection::render_llm_view(
+                                &guard, &plan, &caps,
+                            ) {
+                                Ok(view) => {
+                                    tracing::debug!(
+                                        action_count = plan.actions.len(),
+                                        messages_before = visible.len(),
+                                        messages_after = view.len(),
+                                        "render_llm_view (planner): 投影后消息数"
+                                    );
+                                    view
+                                }
+                                Err(render_err) => {
+                                    tracing::warn!(
+                                        error = %render_err,
+                                        "render_llm_view (planner) 失败，fallback 到原始可见消息"
+                                    );
+                                    visible
+                                }
+                            }
+                        } else {
+                            visible
+                        }
+                    }
+                }
             }
+        } else {
+            visible
         }
-    }
+    };
 
     // 取出 tools 的 Arc clone（避免跨 await 持有 RwLockReadGuard）
     let tools_owned: Vec<std::sync::Arc<dyn crate::tools::BaseTool>> = {
         let guard = ctx.runtime.tools.read();
         guard.values().cloned().collect()
     };
-    let tool_refs: Vec<&dyn crate::tools::BaseTool> =
-        tools_owned.iter().map(|t| t.as_ref()).collect();
+    let tool_refs: Vec<&dyn crate::tools::BaseTool> = tools_owned
+        .iter()
+        .filter(|t| t.is_direct())
+        .map(|t| t.as_ref())
+        .collect();
     // 调试日志：确认工具数量与名称（排查 v2 工具丢失问题）
     tracing::info!(
         step,
@@ -220,11 +288,41 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             )
         })
         .unwrap_or((0, 0, 0, 0, None));
-    // output 与 v1 llm_step.rs:92-93 对齐：优先 final_answer，否则回退到 thought
-    let llm_output = reasoning
-        .final_answer
-        .clone()
-        .unwrap_or_else(|| reasoning.thought.clone());
+    // output 改为结构化 JSON：包含 text、thinking、tool_calls、stop_reason
+    // 与 v1 llm_step.rs:92-93 对齐：优先 final_answer，否则回退到 thought 作为 text
+    let llm_output = {
+        let text = reasoning
+            .final_answer
+            .clone()
+            .unwrap_or_else(|| reasoning.thought.clone());
+        // thinking 从 source_message 的 Reasoning block 提取，fallback 到 reasoning.thought
+        let thinking = reasoning
+            .source_message
+            .as_ref()
+            .and_then(|msg| {
+                msg.content_blocks()
+                    .iter()
+                    .find_map(|b| b.as_reasoning().map(|s| s.to_string()))
+            })
+            .unwrap_or_else(|| reasoning.thought.clone());
+        let output_value = serde_json::json!({
+            "text": text,
+            "thinking": thinking,
+            "tool_calls": reasoning.tool_calls.iter().map(|tc| serde_json::json!({
+                "id": tc.id,
+                "name": tc.name,
+                "input": tc.input,
+            })).collect::<Vec<_>>(),
+            "stop_reason": reasoning.stop_reason.to_string(),
+        });
+        serde_json::to_string(&output_value).unwrap_or_else(|_| {
+            // fallback: 保留纯文本行为
+            reasoning
+                .final_answer
+                .clone()
+                .unwrap_or_else(|| reasoning.thought.clone())
+        })
+    };
     ctx.runtime
         .event_bus
         .emit_observe(ObserveEvent::LlmCallEnd {

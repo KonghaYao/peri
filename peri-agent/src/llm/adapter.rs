@@ -64,6 +64,10 @@ impl ReactLLM for MockLLM {
             .unwrap_or_else(|| Reasoning::with_answer("(no more script)", "Done"));
         Ok(reasoning)
     }
+
+    fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
+        crate::agent::compact_v2::projection::ProviderCapabilities::default()
+    }
 }
 
 #[cfg(test)]

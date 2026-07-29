@@ -49,6 +49,8 @@ pub struct BackgroundTask {
     pub prompt_summary: String,
     pub status: BackgroundTaskStatus,
     pub started_at: std::time::Instant,
+    /// 任务创建时间（chrono UTC），用于 list_tasks_full().started_at 返回真实时间
+    pub chrono_started_at: chrono::DateTime<chrono::Utc>,
     /// 任务类型
     pub kind: BgTaskKind,
     /// 按 kind 分发的取消句柄
@@ -107,7 +109,6 @@ pub enum BgRegistryEvent {
 /// 后台任务注册中心
 pub struct BackgroundTaskRegistry {
     tasks: parking_lot::Mutex<HashMap<String, BackgroundTask>>,
-    max_concurrent: usize,
     /// ACP 事件推送通道（由 executor 在 run_session_loop 注入）
     event_sender: parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>>>,
     session_id: parking_lot::RwLock<String>,
@@ -127,7 +128,6 @@ impl BackgroundTaskRegistry {
     pub fn new() -> Self {
         Self {
             tasks: parking_lot::Mutex::new(HashMap::new()),
-            max_concurrent: 3,
             event_sender: parking_lot::RwLock::new(None),
             session_id: parking_lot::RwLock::new(String::new()),
         }
@@ -165,28 +165,6 @@ impl BackgroundTaskRegistry {
             .values()
             .filter(|t| matches!(t.status, BackgroundTaskStatus::Running) && t.kind == kind)
             .count()
-    }
-
-    /// 注册新任务（保留旧 API 兼容，仍用 max_concurrent 全局上限）
-    ///
-    /// P1-12: 已废弃，请使用 register_with_kind() 以支持按类型独立上限。
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use register_with_kind() for per-kind concurrency limits"
-    )]
-    pub fn register(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
-        let mut tasks = self.tasks.lock();
-        let active = tasks
-            .values()
-            .filter(|t| matches!(t.status, BackgroundTaskStatus::Running))
-            .count();
-        if active >= self.max_concurrent {
-            return Err(BackgroundRegistryError::ConcurrentLimit(
-                self.max_concurrent,
-            ));
-        }
-        tasks.insert(task.id.clone(), task);
-        Ok(())
     }
 
     /// 按类型注册新任务（独立上限）
@@ -288,7 +266,7 @@ impl BackgroundTaskRegistry {
                 kind: t.kind,
                 summary: t.prompt_summary.clone(),
                 status: t.status.clone(),
-                started_at: chrono::Utc::now().to_rfc3339(),
+                started_at: t.chrono_started_at.to_rfc3339(),
                 duration_ms: t.started_at.elapsed().as_millis() as u64,
                 pid: t.pid,
                 output_preview: t.output_preview.clone(),
@@ -314,11 +292,19 @@ impl BackgroundTaskRegistry {
                     );
                 }
                 BgCancelHandle::Pid(pid) => {
-                    // 通过 kill 命令发送 SIGTERM（跨平台 Unix）
-                    let _ = std::process::Command::new("kill")
-                        .arg("-TERM")
-                        .arg(pid.to_string())
-                        .spawn();
+                    if pid == 0 {
+                        // 防御性守卫：Pid(0) 会导致 kill -TERM 0 波及当前进程组
+                        warn!(
+                            task_id = %task_id,
+                            "bg task cancel: pid is 0 (spawn likely failed), skipping kill"
+                        );
+                    } else {
+                        // 通过 kill 命令发送 SIGTERM（跨平台 Unix）
+                        let _ = std::process::Command::new("kill")
+                            .arg("-TERM")
+                            .arg(pid.to_string())
+                            .spawn();
+                    }
                 }
             }
             drop(tasks);

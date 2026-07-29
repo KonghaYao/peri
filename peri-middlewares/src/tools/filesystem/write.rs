@@ -23,6 +23,10 @@ impl BaseTool for WriteFileTool {
         "Write"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         WRITE_FILE_DESCRIPTION
     }

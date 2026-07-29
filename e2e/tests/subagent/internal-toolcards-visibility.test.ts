@@ -66,39 +66,33 @@ describe("subagent: internal tool cards visibility (regression)", () => {
       expect(doneCapture.text.length).toBeGreaterThan(50);
 
       // Judge: 运行中 —— 内部工具调用卡片可见
-      try {
-        const r = await judge({
-          ansiRaw: runningCapture.raw,
-          criteria: [
-            // 核心断言：内部工具卡片非空壳
-            "消息区中应出现 SubAgent 内部工具调用的具体卡片（如 ● Grep 或 ● Read 或 ● Glob），包含工具名称和参数摘要",
-            "内部工具卡片不应只是空的 Agent 外壳——Agent 卡片区域内应有具体的工具条目（每行以 ● 开头、后跟工具名）",
-            // 辅助断言：位置正确
-            "这些内部工具卡片应出现在 Agent 卡片区域内部，而非散落在消息区其他位置",
-          ],
-        });
-        console.log("Judge (running internal toolcards):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: runningCapture.raw,
+        criteria: [
+          // 核心断言：内部工具卡片非空壳
+          "消息区中应出现 SubAgent 内部工具调用的具体卡片（如 ● Grep 或 ● Read 或 ● Glob），包含工具名称和参数摘要",
+          "内部工具卡片不应只是空的 Agent 外壳——Agent 卡片区域内应有具体的工具条目（每行以 ● 开头、后跟工具名）",
+          // 辅助断言：位置正确
+          "这些内部工具卡片应出现在 Agent 卡片区域内部，而非散落在消息区其他位置",
+        ],
+      });
+      console.log("Judge (running internal toolcards):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
 
       // Judge: 完成 —— 工具卡片痕迹保留 + 结果可见
-      try {
-        const r = await judge({
-          ansiRaw: doneCapture.raw,
-          criteria: [
-            // 核心断言：完成后工具卡片痕迹仍存在
-            "SubAgent 完成后，Agent 卡片区域内仍应保留工具调用的痕迹（如工具名称、执行计数、或 ● 标记），而非完全是空白的卡片容器",
-            // 结果可见
-            "Agent 工具卡片下方应有 SubAgent 完成后的输出摘要（如搜索结果总结、文件列表等），而非空白行",
-            // 无飘移
-            "不应出现子工具调用卡片飘到 Agent 卡片上方或混入历史消息的情况",
-          ],
-        });
-        console.log("Judge (done internal toolcards):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r2 = await judge({
+        ansiRaw: doneCapture.raw,
+        criteria: [
+          // 核心断言：完成后工具卡片痕迹仍存在
+          "SubAgent 完成后，Agent 卡片区域内仍应保留工具调用的痕迹（如工具名称、执行计数、或 ● 标记），而非完全是空白的卡片容器",
+          // 结果可见
+          "Agent 工具卡片下方应有 SubAgent 完成后的输出摘要（如搜索结果总结、文件列表等），而非空白行",
+          // 无飘移
+          "不应出现子工具调用卡片飘到 Agent 卡片上方或混入历史消息的情况",
+        ],
+      });
+      console.log("Judge (done internal toolcards):", JSON.stringify(r2, null, 2));
+      expect(r2.pass).toBe(true);
     },
   );
 });

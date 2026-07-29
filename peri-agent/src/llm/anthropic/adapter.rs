@@ -382,6 +382,7 @@ impl ProviderAdapter for AnthropicAdapter {
                 cache_creation_input_tokens: Some(cache_creation),
                 cache_read_input_tokens: Some(cache_read),
                 request_id: request_id.clone(),
+                first_token_time: None,
             }),
             _ => None,
         }

@@ -143,6 +143,8 @@ pub struct ContextBudget {
     pub auto_compact_threshold: f64,
     /// 警告阈值（百分比，0.0-1.0）
     pub warning_threshold: f64,
+    /// 为模型输出预留的 token 数（默认 8192）
+    pub output_reserve: u32,
 }
 
 impl ContextBudget {
@@ -155,6 +157,7 @@ impl ContextBudget {
             context_window,
             auto_compact_threshold: Self::DEFAULT_AUTO_COMPACT_THRESHOLD,
             warning_threshold: Self::DEFAULT_WARNING_THRESHOLD,
+            output_reserve: context_window / 25, // ~4% 预留
         }
     }
 

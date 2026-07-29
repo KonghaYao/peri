@@ -55,20 +55,17 @@ describe("tool-card: glob grep match count", () => {
       expect(capture.text.length).toBeGreaterThan(50);
 
       // Judge: 验证头行后缀格式
-      try {
-        const r = await judge({
-          ansiRaw: capture.raw,
-          criteria: [
-            "屏幕上应出现 Glob 和 Grep 两个工具调用的痕迹",
-            "Glob 工具头行应包含匹配数后缀，格式如 'Glob (pattern: ...) — N matches'",
-            "Grep 工具头行应包含匹配数后缀，格式如 'Grep (pattern: ...) — N matches'",
-            "匹配数 N 应为至少为 1 的正整数，格式正确即可，不要求特定数量",
-          ],
-        });
-        console.log("Judge:", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: capture.raw,
+        criteria: [
+          "屏幕上应出现 Glob 和 Grep 两个工具调用的痕迹",
+          "Glob 工具头行应包含匹配数后缀，格式如 'Glob (pattern: ...) — N matches'",
+          "Grep 工具头行应包含匹配数后缀，格式如 'Grep (pattern: ...) — N matches'",
+          "匹配数 N 应为至少为 1 的正整数，格式正确即可，不要求特定数量",
+        ],
+      });
+      console.log("Judge:", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
     },
   );
 });

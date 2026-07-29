@@ -107,18 +107,6 @@ pub fn reset_history_cursor() {
     *HISTORY_DRAFT.state().write() = None;
 }
 
-/// 当前历史浏览位置（如有）。
-#[allow(dead_code)]
-pub fn current_index() -> Option<usize> {
-    *INPUT_HISTORY_INDEX.state().read()
-}
-
-/// 历史条目数（测试 / 状态显示用）。
-#[allow(dead_code)]
-pub fn history_len() -> usize {
-    INPUT_HISTORY.state().read().len()
-}
-
 /// ~/.peri/input-history.json
 fn history_path() -> PathBuf {
     let home = std::env::var("HOME")

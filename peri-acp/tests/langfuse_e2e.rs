@@ -37,7 +37,6 @@ mod tests {
         tracer.on_stage_start(Stage::Reason, "turn_e2e");
         tracer.on_llm_start(0, &[], &[]);
         tracer.on_llm_end(0, "claude-sonnet-4", "anthropic", "hello world", None);
-        tracer.on_stage_start(Stage::End, "turn_e2e");
         let _handle = tracer.on_turn_end(None);
 
         tokio::task::yield_now().await;
@@ -117,7 +116,6 @@ mod tests {
         tracer.on_tool_end("call_fork", "子 agent 执行完毕", false);
 
         // 主 agent 收尾
-        tracer.on_stage_start(Stage::End, "turn_fork");
         let _handle = tracer.on_turn_end(None);
 
         let events = session.events_snapshot();
@@ -213,7 +211,6 @@ mod tests {
         );
 
         // Turn 结束——应清理 bg 子 agent 残留栈
-        tracer.on_stage_start(Stage::End, "turn_bg");
         let _handle = tracer.on_turn_end(None);
         // agent-run ObservationCreate 在 tokio::spawn 中异步创建，需 yield
         tokio::task::yield_now().await;
@@ -290,7 +287,6 @@ mod tests {
         tracer.on_tool_end("sub_bash", "file1 file2", false);
         tracer.on_tool_end("call_parent", "子 agent 完成", false);
 
-        tracer.on_stage_start(Stage::End, "turn_parent");
         let _handle = tracer.on_turn_end(None);
         // agent-run ObservationCreate 在 tokio::spawn 中异步创建，需 yield
         tokio::task::yield_now().await;

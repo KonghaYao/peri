@@ -1,5 +1,9 @@
 //! Tests for sqlite_store
 
+use std::sync::Arc;
+
+use crate::session::MessageTranscript;
+use crate::thread::CompactionLifecycle;
 use tempfile::tempdir;
 
 use super::*;
@@ -10,6 +14,35 @@ async fn make_store() -> (SqliteThreadStore, tempfile::TempDir) {
         .await
         .unwrap();
     (store, dir)
+}
+
+fn make_persistent_transcript(
+    store: Arc<dyn ThreadStore>,
+    thread_id: ThreadId,
+) -> MessageTranscript {
+    MessageTranscript::new().with_persistence(store, thread_id)
+}
+
+#[tokio::test]
+async fn test_sqlite_store_flush_persistence_makes_messages_and_flags_readable() {
+    let (store, _dir) = make_store().await;
+    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let store: Arc<dyn ThreadStore> = Arc::new(store);
+    let mut transcript = make_persistent_transcript(store.clone(), thread_id.clone());
+
+    let message_id = transcript.append(BaseMessage::human("durable message"));
+    transcript.set_truncated(message_id, true);
+    transcript.set_excluded(message_id, true);
+    transcript.flush_persistence().await.unwrap();
+
+    let messages = store.load_messages(&thread_id).await.unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id(), message_id);
+    assert_eq!(messages[0].content(), "durable message");
+
+    let flags = store.load_message_flags(&thread_id).await.unwrap();
+    assert!(flags[&message_id].truncated);
+    assert!(flags[&message_id].excluded);
 }
 
 #[tokio::test]
@@ -419,11 +452,25 @@ async fn test_update_and_load_message_flags() {
 
     // Set flags: msg1 truncated, msg2 excluded, msg3 no flags
     store
-        .update_message_flags(&msgs[0].id(), true, false)
+        .update_message_flags(
+            &msgs[0].id(),
+            &MessageFlags {
+                truncated: true,
+                excluded: false,
+                projection: None,
+            },
+        )
         .await
         .unwrap();
     store
-        .update_message_flags(&msgs[1].id(), false, true)
+        .update_message_flags(
+            &msgs[1].id(),
+            &MessageFlags {
+                truncated: false,
+                excluded: true,
+                projection: None,
+            },
+        )
         .await
         .unwrap();
 
@@ -452,4 +499,264 @@ async fn test_load_message_flags_empty_when_no_flags() {
 
     let flags = store.load_message_flags(&id).await.unwrap();
     assert!(flags.is_empty(), "no flags set, should return empty map");
+}
+
+// ── 特征化测试：UpdateFlags 持久化后可恢复 ───────────────────────────────
+
+#[tokio::test]
+async fn test_update_message_flags_persists() {
+    // UpdateFlags 写入 DB 后，通过新 store 实例可恢复
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("persist_test.db");
+
+    // 第一步：创建 store，写消息，设 flags
+    let msg_id = {
+        let store = SqliteThreadStore::new(db_path.clone()).await.unwrap();
+        let meta = ThreadMeta::new("/tmp");
+        let tid = store.create_thread(meta).await.unwrap();
+
+        let msgs = vec![
+            BaseMessage::human("hello"),
+            BaseMessage::ai("world"),
+            BaseMessage::human("howdy"),
+        ];
+        store.append_messages(&tid, &msgs).await.unwrap();
+
+        // 标记 msg0 truncated, msg1 excluded
+        store
+            .update_message_flags(
+                &msgs[0].id(),
+                &MessageFlags {
+                    truncated: true,
+                    excluded: false,
+                    projection: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .update_message_flags(
+                &msgs[1].id(),
+                &MessageFlags {
+                    truncated: false,
+                    excluded: true,
+                    projection: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // 记录 msg0 id 和 thread id 用于后续验证
+        let id = msgs[0].id();
+        (id, msgs[1].id(), tid)
+    }; // store dropped here, DB connection closed
+
+    // 第二步：用新 store 重新打开同一 DB，验证 flags 持久化
+    {
+        let store = SqliteThreadStore::new(db_path).await.unwrap();
+        let tid = &msg_id.2;
+
+        let flags = store.load_message_flags(tid).await.unwrap();
+        assert_eq!(flags.len(), 2, "持久化后应有 2 条非默认 flag");
+
+        // msg0: truncated=true, excluded=false
+        assert!(flags[&msg_id.0].truncated, "msg0 应是 truncated");
+        assert!(!flags[&msg_id.0].excluded, "msg0 不应是 excluded");
+
+        // msg1: truncated=false, excluded=true
+        assert!(!flags[&msg_id.1].truncated, "msg1 不应是 truncated");
+        assert!(flags[&msg_id.1].excluded, "msg1 应是 excluded");
+    }
+}
+
+/// 特征化测试：projection JSON 跨 store 实例恢复
+#[tokio::test]
+async fn test_update_message_flags_persists_projection() {
+    use crate::agent::compact_v2::projection::{
+        MessageProjectionDirective, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
+    };
+
+    // 构造一个含有 projection directive 的 MessageFlags
+    let directive = MessageProjectionDirective {
+        policy_version: 1,
+        entries: vec![ProjectionActionEntry {
+            message_id: crate::messages::MessageId::new(),
+            target: ProjectionTarget::Message,
+            action: ProjectionAction::Exclude,
+        }],
+    };
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("proj_test.db");
+
+    // 第一步：写入 projection flag
+    let (msg_id, tid) = {
+        let store = SqliteThreadStore::new(db_path.clone()).await.unwrap();
+        let meta = ThreadMeta::new("/tmp");
+        let tid = store.create_thread(meta).await.unwrap();
+
+        let msgs = vec![BaseMessage::human("projected message")];
+        store.append_messages(&tid, &msgs).await.unwrap();
+
+        let mid = msgs[0].id();
+        store
+            .update_message_flags(
+                &mid,
+                &MessageFlags {
+                    truncated: true,
+                    excluded: false,
+                    projection: Some(directive.clone()),
+                },
+            )
+            .await
+            .unwrap();
+
+        (mid, tid)
+    }; // store dropped
+
+    // 第二步：新 store 恢复
+    {
+        let store = SqliteThreadStore::new(db_path).await.unwrap();
+        let flags = store.load_message_flags(&tid).await.unwrap();
+        assert_eq!(flags.len(), 1, "应有 1 条非默认 flag");
+        let flag = &flags[&msg_id];
+        assert!(flag.truncated, "truncated 应为 true");
+        assert!(!flag.excluded, "excluded 应为 false");
+        assert!(flag.projection.is_some(), "projection 应不为 None");
+        let restored = flag.projection.as_ref().unwrap();
+        assert_eq!(restored.policy_version, 1);
+        assert_eq!(restored.entries.len(), 1);
+        assert_eq!(restored.entries[0].action, ProjectionAction::Exclude);
+    }
+}
+
+#[tokio::test]
+async fn test_commit_compaction_lifecycle_persists_flags_and_appended_messages_in_order() {
+    let (store, _dir) = make_store().await;
+    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let original_messages = vec![
+        BaseMessage::human("原始用户消息"),
+        BaseMessage::ai("原始助手回复"),
+    ];
+    store
+        .append_messages(&thread_id, &original_messages)
+        .await
+        .unwrap();
+
+    let summary = BaseMessage::human("压缩摘要");
+    let reinject = BaseMessage::human("重新注入的用户上下文");
+    let lifecycle = CompactionLifecycle {
+        flag_updates: vec![
+            (
+                original_messages[0].id(),
+                MessageFlags {
+                    excluded: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                original_messages[1].id(),
+                MessageFlags {
+                    excluded: true,
+                    ..Default::default()
+                },
+            ),
+        ],
+        appended_messages: vec![summary.clone(), reinject.clone()],
+    };
+
+    store
+        .commit_compaction_lifecycle(&thread_id, &lifecycle)
+        .await
+        .unwrap();
+
+    let messages = store.load_messages(&thread_id).await.unwrap();
+    assert_eq!(
+        messages.len(),
+        4,
+        "生命周期提交应持久化原始与追加的全部消息"
+    );
+    assert_eq!(
+        messages[0].id(),
+        original_messages[0].id(),
+        "原始第一条消息顺序不变"
+    );
+    assert_eq!(
+        messages[1].id(),
+        original_messages[1].id(),
+        "原始第二条消息顺序不变"
+    );
+    assert_eq!(messages[2].id(), summary.id(), "摘要应在原始消息之后追加");
+    assert_eq!(
+        messages[3].id(),
+        reinject.id(),
+        "重新注入消息应紧随摘要追加"
+    );
+
+    let flags = store.load_message_flags(&thread_id).await.unwrap();
+    assert_eq!(flags.len(), 2, "两条 excluded 标记都应落库");
+    assert!(
+        flags[&original_messages[0].id()].excluded,
+        "第一条原始消息应被 excluded"
+    );
+    assert!(
+        flags[&original_messages[1].id()].excluded,
+        "第二条原始消息应被 excluded"
+    );
+}
+
+#[tokio::test]
+async fn test_commit_compaction_lifecycle_rolls_back_flags_and_appends_when_message_is_missing() {
+    let (store, _dir) = make_store().await;
+    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let original_messages = vec![
+        BaseMessage::human("回滚前的用户消息"),
+        BaseMessage::ai("回滚前的助手回复"),
+    ];
+    store
+        .append_messages(&thread_id, &original_messages)
+        .await
+        .unwrap();
+
+    let summary = BaseMessage::human("不应落库的压缩摘要");
+    let lifecycle = CompactionLifecycle {
+        flag_updates: vec![
+            (
+                original_messages[0].id(),
+                MessageFlags {
+                    excluded: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                crate::messages::MessageId::new(),
+                MessageFlags {
+                    excluded: true,
+                    ..Default::default()
+                },
+            ),
+        ],
+        appended_messages: vec![summary.clone()],
+    };
+
+    let error = store
+        .commit_compaction_lifecycle(&thread_id, &lifecycle)
+        .await
+        .unwrap_err();
+    assert!(
+        !error.to_string().is_empty(),
+        "不存在的 MessageId 必须使整个生命周期提交失败"
+    );
+
+    let flags = store.load_message_flags(&thread_id).await.unwrap();
+    assert!(
+        !flags.contains_key(&original_messages[0].id()),
+        "事务回滚后有效消息必须保持 default flags"
+    );
+    let messages = store.load_messages(&thread_id).await.unwrap();
+    assert_eq!(messages.len(), 2, "事务回滚后不应追加摘要");
+    assert!(
+        messages.iter().all(|message| message.id() != summary.id()),
+        "事务回滚后摘要不得出现"
+    );
 }

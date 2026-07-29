@@ -82,6 +82,13 @@ pub enum UnifiedLangfuseEvent {
         micro_cleared: usize,
         is_error: bool,
         error_message: String,
+        estimated_tokens_saved: u64,
+        estimated_tokens_before: u64,
+        estimated_tokens_after: u64,
+        cache_hit_rate_before: f64,
+        full_escalation_reason: Option<String>,
+        /// Compact 执行的语义结果（CompactOutcome 的 Display 表示）
+        outcome: Option<String>,
     },
     /// 上下文窗口预算警告
     BudgetWarning {
@@ -213,6 +220,12 @@ impl UnifiedLangfuseEvent {
                 files,
                 skills,
                 micro_cleared,
+                estimated_tokens_saved,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                cache_hit_rate_before,
+                full_escalation_reason,
+                outcome,
                 ..
             } => Some(UnifiedLangfuseEvent::CompactEnded {
                 summary,
@@ -221,6 +234,12 @@ impl UnifiedLangfuseEvent {
                 micro_cleared,
                 is_error: false,
                 error_message: String::new(),
+                estimated_tokens_saved,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                cache_hit_rate_before,
+                full_escalation_reason: full_escalation_reason.map(|r| format!("{:?}", r)),
+                outcome: Some(format!("{:?}", outcome)),
             }),
             ExecutorEvent::CompactError { message } => Some(UnifiedLangfuseEvent::CompactEnded {
                 summary: String::new(),
@@ -229,6 +248,12 @@ impl UnifiedLangfuseEvent {
                 micro_cleared: 0,
                 is_error: true,
                 error_message: message,
+                estimated_tokens_saved: 0,
+                estimated_tokens_before: 0,
+                estimated_tokens_after: 0,
+                cache_hit_rate_before: 0.0,
+                full_escalation_reason: None,
+                outcome: None,
             }),
             ExecutorEvent::SessionStarted { frozen_summary, .. } => {
                 Some(UnifiedLangfuseEvent::SessionStarted { frozen_summary })
@@ -382,6 +407,7 @@ impl UnifiedLangfuseEvent {
                         None
                     },
                     request_id,
+                    first_token_time: None,
                 };
                 Some(UnifiedLangfuseEvent::LlmCallEnd {
                     step,
@@ -403,6 +429,12 @@ impl UnifiedLangfuseEvent {
                 summary,
                 files,
                 skills,
+                estimated_tokens_saved,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                cache_hit_rate_before,
+                full_escalation_reason,
+                outcome,
                 ..
             } => Some(UnifiedLangfuseEvent::CompactEnded {
                 summary,
@@ -411,6 +443,12 @@ impl UnifiedLangfuseEvent {
                 micro_cleared: 0, // v2 无此字段
                 is_error: false,
                 error_message: String::new(),
+                estimated_tokens_saved,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                cache_hit_rate_before,
+                full_escalation_reason: full_escalation_reason.map(|r| format!("{:?}", r)),
+                outcome: Some(format!("{:?}", outcome)),
             }),
             ObserveEvent::StageStarted { stage, turn_id, .. } => {
                 Some(UnifiedLangfuseEvent::StageStarted {
@@ -538,7 +576,24 @@ impl LangfuseBridge {
                 micro_cleared,
                 is_error,
                 error_message,
+                estimated_tokens_saved,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                cache_hit_rate_before,
+                full_escalation_reason,
+                outcome,
             } => {
+                tracing::info!(
+                    estimated_tokens_saved,
+                    estimated_tokens_before,
+                    estimated_tokens_after,
+                    cache_hit_rate_before,
+                    full_escalation_reason = ?full_escalation_reason,
+                    outcome = ?outcome,
+                    files_count,
+                    skills_count,
+                    "CompactCompleted"
+                );
                 t.on_compact_end(
                     summary,
                     *files_count,
@@ -572,6 +627,10 @@ impl LangfuseBridge {
                     (t2.trace_id.clone(), obs_id)
                 };
                 let mut t2 = self.tracer.lock();
+                // SubAgent 栈非空时标记栈顶已启动。对齐 on_stage_start() 中 mark_top_started 行为，
+                // 确保 fork subagent 的 on_tool_end("Agent") 能正确走 fork 清理路径（flush + emit ObservationCreate）。
+                // 桥路径绕过了 tracer.on_stage_start()，所以必须在此处补调 mark_top_started。
+                t2.subagent.mark_top_started();
                 let handle = t2.stages.on_stage_start(
                     *stage,
                     &trace_id,

@@ -216,7 +216,7 @@ impl LangfuseTracer {
                 completion_start_time: None,
                 parent_observation_id: Some(self.agent_observation_id.clone()),
                 input: Some(end.input),
-                output: Some(serde_json::json!(output_str)),
+                output: Some(serde_json::json!(strip_child_thread_id(&output_str))),
                 metadata: None,
                 model: None,
                 model_parameters: None,
@@ -484,6 +484,19 @@ impl LangfuseTracer {
                     "total_tokens".to_string(),
                     serde_json::json!(u.input_tokens + u.output_tokens),
                 );
+                // 计算首 token 延迟（仅在流式调用且 first_token_time 存在时）
+                if let Some(ref ft_time) = u.first_token_time {
+                    if let Ok(ft) = chrono::DateTime::parse_from_rfc3339(ft_time) {
+                        if let Ok(st) = chrono::DateTime::parse_from_rfc3339(&gen_end.start_time) {
+                            let ttfb_ms =
+                                ft.signed_duration_since(st).num_milliseconds().max(0) as u64;
+                            obj.insert(
+                                "time_to_first_token_ms".to_string(),
+                                serde_json::json!(ttfb_ms),
+                            );
+                        }
+                    }
+                }
             }
         } else if let Some(obj) = meta_obj {
             obj.insert("model".to_string(), serde_json::json!(model));
@@ -496,14 +509,14 @@ impl LangfuseTracer {
             start_time: Some(gen_end.start_time),
             end_time: Some(end_time.clone()),
             input: Some(gen_end.input_json),
-            output: Some(serde_json::json!(output)),
+            output: Some(parse_output(output)),
             metadata: Some(meta),
             level: None,
             status_message: None,
             parent_observation_id: Some(parent_id),
             version: Some(VERSION.to_string()),
             environment: None,
-            completion_start_time: None,
+            completion_start_time: usage.and_then(|u| u.first_token_time.clone()),
             model: Some(model.to_string()),
             model_parameters: None,
             usage_details,
@@ -629,16 +642,22 @@ impl LangfuseTracer {
                 }
             })
             .unwrap_or_else(|| self.agent_observation_id.clone());
-        // Agent 工具：先 push subagent context
-        // （在路由前，使 subsequent subagent 工具调用能正确路由到 subagent 的 tool_batch）
+        // Agent 工具：先写入主 agent 的 ToolBatch，再 push subagent context。
+        // Fix A: 这样 Agent 工具的 parent_observation_id 正确指向主 agent 的 act span，
+        // 后续 subagent 工具会创建新的 sub batch，parent 指向 subagent 的 act span。
+        // WARNING: Fix B（on_tool_end 路由）必须同时应用，否则 Agent 工具完成记录会静默丢失。
         let is_agent_tool = name == "Agent" || name == "Task";
         if is_agent_tool {
+            // Fix A: Write Agent/Task tool to MAIN's ToolBatch BEFORE begin_subagent.
+            let _record =
+                self.tool_batch
+                    .on_tool_start(tool_call_id, name, input.clone(), &parent_id);
             self.subagent.begin_subagent(input);
+        } else {
+            // 非 Agent 工具：路由到正确的 ToolBatch（subagent 栈非空时写入 subagent 的）
+            let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
+            let _record = tb_ref.on_tool_start(tool_call_id, name, input.clone(), &parent_id);
         }
-
-        // 路由到正确的 ToolBatch：subagent 栈非空时写入 subagent 的 tool_batch
-        let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
-        let _record = tb_ref.on_tool_start(tool_call_id, name, input.clone(), &parent_id);
     }
 
     /// 工具调用结束：同步创建 tool observation
@@ -653,9 +672,14 @@ impl LangfuseTracer {
 
         // 路由到正确的 ToolBatch 结束工具记录
         // （必须在 subagent 弹栈之前完成，避免工具数据丢失）
+        // Fix B: Agent 工具写入主 batch，必须路由到主 batch 完成；非 Agent 工具走栈路由。
         {
-            let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
-            let _pending = tb_ref.on_tool_end(tool_call_id, output, is_error);
+            if is_agent {
+                let _pending = self.tool_batch.on_tool_end(tool_call_id, output, is_error);
+            } else {
+                let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
+                let _pending = tb_ref.on_tool_end(tool_call_id, output, is_error);
+            }
         }
 
         if is_agent {
@@ -683,7 +707,7 @@ impl LangfuseTracer {
                                 .unwrap_or_else(|| self.agent_observation_id.clone()),
                         ),
                         input: Some(end.input),
-                        output: Some(serde_json::json!(output)),
+                        output: Some(serde_json::json!(strip_child_thread_id(output))),
                         metadata: None,
                         model: None,
                         model_parameters: None,
@@ -827,11 +851,31 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
+        // 在 on_stage_end 清空 active 前捕获 Receive 阶段的 mq_counts，
+        // 否则 span body 构造时 active 已为 None，排空计数全部丢失。
+        let receive_input = if handle.stage == Stage::Receive {
+            self.stages.mq_counts().map(|(prompt, defer, info)| {
+                serde_json::json!({
+                    "messages_drained": {
+                        "prompt": prompt,
+                        "defer": defer,
+                        "info": info,
+                        "total": prompt + defer + info,
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
         self.stages.on_stage_end(handle, status);
 
-        // Act stage 结束时自动 flush 工具批次（确保工具挂在正确的 act 下，
-        // 而非全部堆在第一个 act 中）
-        if handle.stage == Stage::Act {
+        // Act stage 结束时自动 flush 主 agent 工具批次（确保工具挂在正确的 act 下，
+        // 而非全部堆在第一个 act 中）。仅当子 agent 栈为空时 flush——子 agent Act 结束
+        // 不应影响主 batch（主 batch 中的 Agent 工具可能尚未结束，flush() 的
+        // pending_tools.clear() 会导致丢失）。
+        // 子 agent 的工具批次由 on_tool_end("Agent") fork 路径独立 flush（top_has_started 守卫）。
+        if handle.stage == Stage::Act && self.subagent.is_empty() {
             let flush = self.tool_batch.flush();
             self.emit_tools_flush(flush);
         }
@@ -862,7 +906,7 @@ impl LangfuseTracer {
             name: Some(format!("stage-{:?}", handle.stage).to_lowercase()),
             start_time: Some(handle.start_time.clone()),
             end_time: Some(end_time.clone()),
-            input: None,
+            input: receive_input,
             output: Some(serde_json::json!({
                 "status": format!("{:?}", status),
                 "duration_ms": duration_ms,
@@ -1152,7 +1196,7 @@ impl LangfuseTracer {
                 completion_start_time: None,
                 parent_observation_id: Some(self.agent_observation_id.clone()),
                 input: Some(end.input),
-                output: Some(serde_json::json!(result)),
+                output: Some(serde_json::json!(strip_child_thread_id(result))),
                 metadata: None,
                 model: None,
                 model_parameters: None,
@@ -1190,6 +1234,38 @@ impl LangfuseTracer {
         if let Some(ref batch) = flush.batch {
             // 使用 on_tool_start 时捕获的 stage span_id（而非运行时动态查找）
             let parent_id = &flush.parent_observation_id;
+
+            // 构建 batch span 的 input（工具名称列表和数量）
+            let batch_input = serde_json::json!({
+                "tool_count": flush.tools.len(),
+                "tools": flush.tools.iter().map(|t| &t.name).collect::<Vec<_>>(),
+            });
+
+            // 构建 batch span 的 output（汇总各工具执行结果）
+            let batch_output = {
+                let start_ms = chrono::DateTime::parse_from_rfc3339(&batch.batch_start_time).ok();
+                let end_ms = chrono::DateTime::parse_from_rfc3339(&batch.batch_end_time).ok();
+                let duration_ms = match (start_ms, end_ms) {
+                    (Some(s), Some(e)) => {
+                        e.signed_duration_since(s).num_milliseconds().max(0) as u64
+                    }
+                    _ => 0,
+                };
+                serde_json::json!({
+                    "duration_ms": duration_ms,
+                    "tool_results": flush.tools.iter().map(|t| serde_json::json!({
+                        "name": t.name,
+                        "is_error": t.is_error,
+                        "output_preview": if t.output.len() > 200 {
+                            let preview: String = t.output.chars().take(200).collect();
+                            format!("{}...", preview)
+                        } else {
+                            t.output.clone()
+                        },
+                    })).collect::<Vec<_>>(),
+                })
+            };
+
             // 批量工具父 span（tool-batch）
             let batch_body = SpanBody {
                 id: Some(batch.batch_span_id.clone()),
@@ -1197,6 +1273,8 @@ impl LangfuseTracer {
                 name: Some("tool-batch".to_string()),
                 start_time: Some(batch.batch_start_time.clone()),
                 end_time: Some(batch.batch_end_time.clone()),
+                input: Some(batch_input),
+                output: Some(batch_output),
                 parent_observation_id: Some(parent_id.clone()),
                 version: Some(VERSION.to_string()),
                 session_id: Some(self.session_id.clone()),
@@ -1264,6 +1342,33 @@ fn calculate_duration_ms(start: &str, end: &str) -> u64 {
         .unwrap_or_else(|_| chrono::Utc.timestamp_opt(0, 0).unwrap().into());
     let dur = e.signed_duration_since(s);
     dur.num_milliseconds().max(0) as u64
+}
+
+/// 解析 LlmCallEnd output 为 JSON Value。
+/// 若 output 是合法 JSON object，返回解析后的 Value（保持结构化）；
+/// 否则包装为 `{"text": output}` 纯文本（向后兼容非结构化旧数据）。
+fn parse_output(output: &str) -> serde_json::Value {
+    // 尝试解析为 JSON Value
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(output) {
+        if val.is_object() {
+            return val;
+        }
+    }
+    // fallback: 将纯文本包装为 {text: ...}
+    serde_json::json!({"text": output})
+}
+
+/// 从 subagent 输出文本中剥离 `child_thread_id: <uuid>\n` 前缀。
+/// 若输出以前缀开头，返回剥离后的剩余内容；否则返回原输出。
+fn strip_child_thread_id(output: &str) -> &str {
+    // 匹配模式: "child_thread_id: <uuid>\n"
+    if let Some(rest) = output.strip_prefix("child_thread_id: ") {
+        // 找到第一个换行符后的内容
+        if let Some(newline_pos) = rest.find('\n') {
+            return &rest[newline_pos + 1..];
+        }
+    }
+    output
 }
 
 #[cfg(test)]

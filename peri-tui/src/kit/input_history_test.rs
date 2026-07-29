@@ -18,7 +18,7 @@ fn test_push_history_grows_stack() {
     setup();
     push_history("hello");
     push_history("world");
-    assert_eq!(history_len(), 2);
+    assert_eq!(INPUT_HISTORY.state().read().len(), 2);
 }
 
 #[test]
@@ -27,7 +27,7 @@ fn test_push_history_ignores_empty() {
     setup();
     push_history("   ");
     push_history("");
-    assert_eq!(history_len(), 0);
+    assert_eq!(INPUT_HISTORY.state().read().len(), 0);
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn test_push_history_dedup_consecutive() {
     setup();
     push_history("hello");
     push_history("hello"); // 重复不入栈
-    assert_eq!(history_len(), 1);
+    assert_eq!(INPUT_HISTORY.state().read().len(), 1);
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn test_push_history_dedup_consecutive() {
 fn test_push_history_trims_whitespace() {
     setup();
     push_history("  hello  ");
-    assert_eq!(history_len(), 1);
+    assert_eq!(INPUT_HISTORY.state().read().len(), 1);
     let stored: VecDeque<String> = INPUT_HISTORY.state().read().clone();
     assert_eq!(stored[0], "hello");
 }
@@ -78,7 +78,7 @@ fn test_history_down_restores_empty_draft_at_bottom() {
     history_up(None); // → a
     assert_eq!(history_down().as_deref(), Some("b"));
     assert_eq!(history_down().as_deref(), Some(""));
-    assert_eq!(current_index(), None);
+    assert_eq!(*INPUT_HISTORY_INDEX.state().read(), None);
 }
 
 #[test]
@@ -87,9 +87,9 @@ fn test_reset_history_cursor() {
     setup();
     push_history("x");
     history_up(None);
-    assert!(current_index().is_some());
+    assert!(INPUT_HISTORY_INDEX.state().read().is_some());
     reset_history_cursor();
-    assert!(current_index().is_none());
+    assert!(INPUT_HISTORY_INDEX.state().read().is_none());
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn test_max_history_capacity() {
     for i in 0..1050 {
         push_history(&format!("cmd-{}", i));
     }
-    assert_eq!(history_len(), MAX_HISTORY);
+    assert_eq!(INPUT_HISTORY.state().read().len(), MAX_HISTORY);
     let stored: VecDeque<String> = INPUT_HISTORY.state().read().clone();
     assert_eq!(stored.front().map(String::as_str), Some("cmd-50"));
     assert_eq!(stored.back().map(String::as_str), Some("cmd-1049"));

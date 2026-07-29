@@ -68,6 +68,8 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         auxiliary_model,
         event_sink,
         cancel_token,
+        thread_store,
+        thread_id,
         ..
     } = ctx;
 
@@ -99,14 +101,113 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         }
     };
 
-    // 阶段 4: 发出 CompactStarted 事件
-    emit_compact_started(&event_sink, &session_id).await;
+    // 阶段 4: 手动 compact 必须绑定持久化 transcript，保证 Full lifecycle 可原子提交。
+    let (thread_store, thread_id) = match (thread_store, thread_id) {
+        (Some(store), Some(thread_id)) => (store, thread_id),
+        _ => {
+            warn!("compact: persistence is unavailable");
+            emit_compact_error(
+                &event_sink,
+                &session_id,
+                "compact persistence is unavailable",
+            )
+            .await;
+            return PipelineOutcome::EarlyReturn {
+                history,
+                stop_reason: PromptStopReason::EndTurn,
+            };
+        }
+    };
 
-    // 阶段 5: 加载 history 进临时 transcript 并运行 v2 compact（force=true 触发 Full）
-    let mut transcript = MessageTranscript::new();
-    for msg in &history {
-        transcript.append(msg.clone());
+    if !thread_store.supports_compaction_lifecycle() {
+        warn!("compact: persistence backend does not support lifecycle commits");
+        emit_compact_error(
+            &event_sink,
+            &session_id,
+            "compact lifecycle persistence is unavailable",
+        )
+        .await;
+        return PipelineOutcome::EarlyReturn {
+            history,
+            stop_reason: PromptStopReason::EndTurn,
+        };
     }
+
+    // 阶段 5: 已存在的 thread 从完整消息和 flags 重建。命令输入是可见视图，
+    // 因此不能将物理存储中的 excluded 原文直接与其比较。
+    let persisted_history = match thread_store.load_messages(&thread_id).await {
+        Ok(messages) => messages,
+        Err(_) => {
+            warn!("compact: failed to load persisted history");
+            emit_compact_error(&event_sink, &session_id, "compact persistence failed").await;
+            return PipelineOutcome::EarlyReturn {
+                history,
+                stop_reason: PromptStopReason::EndTurn,
+            };
+        }
+    };
+    let mut transcript = MessageTranscript::new();
+    if persisted_history.is_empty() {
+        transcript = transcript.with_persistence(thread_store, thread_id);
+        for message in &history {
+            transcript.append(message.clone());
+        }
+        if transcript.flush_persistence().await.is_err() {
+            warn!("compact: failed to persist initial history");
+            emit_compact_error(&event_sink, &session_id, "compact persistence failed").await;
+            return PipelineOutcome::EarlyReturn {
+                history,
+                stop_reason: PromptStopReason::EndTurn,
+            };
+        }
+    } else {
+        let persisted_flags = match thread_store.load_message_flags(&thread_id).await {
+            Ok(flags) => flags,
+            Err(_) => {
+                warn!("compact: failed to load persisted flags");
+                emit_compact_error(&event_sink, &session_id, "compact persistence failed").await;
+                return PipelineOutcome::EarlyReturn {
+                    history,
+                    stop_reason: PromptStopReason::EndTurn,
+                };
+            }
+        };
+        for message in &persisted_history {
+            transcript.append(message.clone());
+        }
+        transcript.set_flags_batch(persisted_flags);
+        let expected_history = if transcript
+            .entries()
+            .iter()
+            .any(|entry| transcript.flags(entry.message.id()).excluded)
+        {
+            assemble_compact_messages(&transcript, &None).messages
+        } else {
+            transcript.visible_messages().into_iter().cloned().collect()
+        };
+        let visible_matches = expected_history.len() == history.len()
+            && expected_history
+                .iter()
+                .zip(&history)
+                .all(|(persisted, incoming)| persisted.id() == incoming.id());
+        if !visible_matches {
+            warn!("compact: persisted visible history does not match command history");
+            emit_compact_error(
+                &event_sink,
+                &session_id,
+                "compact persistence context mismatch",
+            )
+            .await;
+            return PipelineOutcome::EarlyReturn {
+                history,
+                stop_reason: PromptStopReason::EndTurn,
+            };
+        }
+        transcript = transcript.with_persistence(thread_store, thread_id);
+    }
+
+    // 阶段 6: 发出 CompactStarted 事件
+    emit_compact_started(&event_sink, &session_id).await;
 
     let mut consecutive_failures = 0u32;
     let compact_result = match run_v2_compact_with_cancel(
@@ -151,6 +252,10 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         assembled.skills.clone(),
         FULL_COMPACT_MICRO_CLEARED,
         assembled.messages.clone(),
+        compact_result.strategy,
+        compact_result.outcome,
+        compact_result.estimated_tokens_saved,
+        compact_result.affected_count,
     )
     .await;
 
@@ -184,7 +289,14 @@ async fn run_v2_compact_with_cancel(
             transcript,
             Some(model),
             config,
-            1.0, // budget=1.0 + force=true → 强制 Full Compact
+            &compact_v2::ContextPressure {
+                estimated_tokens: 0,
+                context_window: u32::MAX,
+                output_reserve: 0,
+                predicted_tool_growth: 0,
+                safety_buffer: 0,
+                cache_hit_rate: 0.0,
+            }, // force=true 时直接走 Full 路径，pressure 可填占位值
             true,
             consecutive_failures,
             cwd,
@@ -215,7 +327,21 @@ pub fn assemble_compact_messages(
     transcript: &MessageTranscript,
     _summary: &Option<String>,
 ) -> AssembledMessages {
-    let messages: Vec<BaseMessage> = transcript.visible_messages().into_iter().cloned().collect();
+    let mut messages: Vec<BaseMessage> = transcript
+        .visible_messages()
+        .into_iter()
+        .filter(|message| !matches!(message, BaseMessage::System { .. }))
+        .cloned()
+        .collect();
+    // Full Compact 保留 System 在 transcript 中，但命令重建 payload 不包含它们，
+    // 且必须以 continuation summary 的 Human 消息开头。
+    if let Some(summary_index) = messages.iter().position(|message| {
+        matches!(message, BaseMessage::Human { .. })
+            && message.content().contains(compact_v2::CONTINUATION_HINT)
+    }) {
+        let summary = messages.remove(summary_index);
+        messages.insert(0, summary);
+    }
 
     let files = compact_v2::extract_file_info(&messages);
     let skills = compact_v2::extract_skill_names(&messages);

@@ -94,7 +94,7 @@ pub struct WorkflowProgressPayload {
     pub message: Option<String>,
 }
 
-/// ReAct 循环 5 阶段
+/// ReAct 循环 4 阶段
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
@@ -102,7 +102,6 @@ pub enum Stage {
     Receive,
     Reason,
     Act,
-    End,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -135,6 +134,8 @@ pub enum TurnErrorKind {
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactStrategy {
+    /// 跳过 compact（cache-aware delay 或预算充足）
+    Skip,
     Micro,
     Full,
     Smart,
@@ -240,7 +241,7 @@ pub enum ExecutorEvent {
         total_tokens: u64,
         /// 当前 ReAct 步数
         current_step: usize,
-        /// 连续工具/compact 失败次数
+        /// 连续工具失败次数
         consecutive_failures: u32,
         /// 上下文窗口使用率（0.0-1.0），None 表示无 context_budget
         budget_pct: Option<f64>,
@@ -337,6 +338,35 @@ pub enum ExecutorEvent {
         token_after: u64,
         /// 本次使用的压缩策略
         strategy: CompactStrategy,
+        /// 受影响的消息数量（v2 compact 操作计数）
+        #[serde(default)]
+        affected_count: usize,
+        /// 估算节省的 token 数量（v2 compact projection 估算）
+        #[serde(default)]
+        estimated_tokens_saved: u64,
+        /// 压缩前估算 token 数（ContextPressure.estimated_tokens）
+        #[serde(default)]
+        estimated_tokens_before: u64,
+        /// 压缩后估算 token 数（estimated_tokens_before - estimated_tokens_saved）
+        #[serde(default)]
+        estimated_tokens_after: u64,
+        /// 被修改的消息数量（v2 projection 变更计数）
+        #[serde(default)]
+        changed_messages: usize,
+        /// 被修改的字段数量（v2 projection 字段级变更计数）
+        #[serde(default)]
+        changed_fields: usize,
+        /// 无操作候选数量（projection 判定无需变更的消息数）
+        #[serde(default)]
+        no_op_candidates: usize,
+        /// 升级到 Full Compact 的原因（Micro/Smart 时为 None）
+        #[serde(default)]
+        full_escalation_reason: Option<crate::agent::compact_v2::planner::FullEscalationReason>,
+        /// 压缩前缓存命中率（0.0-1.0）
+        #[serde(default)]
+        cache_hit_rate_before: f64,
+        /// Compact 执行的语义结果
+        outcome: crate::agent::compact_v2::CompactOutcome,
     },
     /// 对话回退完成（rewind 命令，移除目标用户消息及其之后的所有消息）
     RewindCompleted {

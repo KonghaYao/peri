@@ -66,34 +66,28 @@ describe("scenario: hitl approval", () => {
       expect(doneCapture.text.length).toBeGreaterThan(50);
 
       // Judge: 弹窗阶段
-      try {
-        const r = await judge({
-          ansiRaw: popupCapture.raw,
-          criteria: [
-            "应出现审批弹窗（如 '审批请求' 或 'Approval Required' 标题）",
-            "弹窗中应显示待审批工具的信息（如 'Bash' 或 'Shell'）",
-            "弹窗中应有操作提示（如 'Enter: 批准' 或 'Enter: approve'）",
-          ],
-        });
-        console.log("Judge (popup):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: popupCapture.raw,
+        criteria: [
+          "应出现审批弹窗（如 '审批请求' 或 'Approval Required' 标题）",
+          "弹窗中应显示待审批工具的信息（如 'Bash' 或 'Shell'）",
+          "弹窗中应有操作提示（如 'Enter: 批准' 或 'Enter: approve'）",
+        ],
+      });
+      console.log("Judge (popup):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
 
       // Judge: 完成阶段
-      try {
-        const r = await judge({
-          ansiRaw: doneCapture.raw,
-          criteria: [
-            "审批弹窗应已关闭（不再显示 '审批请求' 标题）",
-            "Bash 工具应已执行完毕（消息区出现 'hitl_test_success' 输出）",
-            "agent 的回复应引用工具执行结果",
-          ],
-        });
-        console.log("Judge (done):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r2 = await judge({
+        ansiRaw: doneCapture.raw,
+        criteria: [
+          "审批弹窗应已关闭（不再显示 '审批请求' 标题）",
+          "Bash 工具应已执行完毕（消息区出现 'hitl_test_success' 输出）",
+          "agent 的回复应引用工具执行结果",
+        ],
+      });
+      console.log("Judge (done):", JSON.stringify(r2, null, 2));
+      expect(r2.pass).toBe(true);
     },
   );
 });

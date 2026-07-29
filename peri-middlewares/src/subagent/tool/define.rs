@@ -290,6 +290,10 @@ impl BaseTool for SubAgentTool {
         TOOL_AGENT
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         AGENT_DESCRIPTION
     }

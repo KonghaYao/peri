@@ -101,6 +101,7 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             micro_cleared,
             messages_json,
             strategy,
+            outcome,
         } => {
             let files_json: Vec<serde_json::Value> = files
                 .into_iter()
@@ -113,6 +114,7 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
                 micro_cleared,
                 messages_json,
                 strategy,
+                outcome,
             })
         }
         AcpEvent::CompactError { message } => Some(AcpEventData::CompactError { message }),

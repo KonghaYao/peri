@@ -138,6 +138,16 @@ fn test_compact_completed_serde_roundtrip() {
         token_before: 0,
         token_after: 0,
         strategy: CompactStrategy::Smart,
+        affected_count: 0,
+        estimated_tokens_saved: 0,
+        estimated_tokens_before: 0,
+        estimated_tokens_after: 0,
+        changed_messages: 0,
+        changed_fields: 0,
+        no_op_candidates: 0,
+        full_escalation_reason: None,
+        cache_hit_rate_before: 0.0,
+        outcome: crate::agent::compact_v2::CompactOutcome::SmartApplied,
     };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(json.contains(r#""type":"compact_completed""#));
@@ -178,6 +188,16 @@ fn test_compact_completed_micro_serde() {
         token_before: 0,
         token_after: 0,
         strategy: CompactStrategy::Smart,
+        affected_count: 0,
+        estimated_tokens_saved: 0,
+        estimated_tokens_before: 0,
+        estimated_tokens_after: 0,
+        changed_messages: 0,
+        changed_fields: 0,
+        no_op_candidates: 0,
+        full_escalation_reason: None,
+        cache_hit_rate_before: 0.0,
+        outcome: crate::agent::compact_v2::CompactOutcome::MicroApplied,
     };
     let json = serde_json::to_string(&ev).unwrap();
     let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();

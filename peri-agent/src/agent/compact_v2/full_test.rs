@@ -1,9 +1,15 @@
 //! Tests for full
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
 use super::*;
 use crate::agent::compact_v2::config::CompactConfig;
+use crate::llm::{BaseModel, LlmRequest, LlmResponse, StopReason};
 use crate::messages::{BaseMessage, ContentBlock, ImageSource, MessageContent};
 use crate::session::transcript::MessageTranscript;
+use crate::thread::{FilesystemThreadStore, SqliteThreadStore, ThreadMeta, ThreadStore};
 
 fn make_human(text: &str) -> BaseMessage {
     BaseMessage::human(MessageContent::text(text.to_string()))
@@ -11,6 +17,39 @@ fn make_human(text: &str) -> BaseMessage {
 
 fn make_ai(text: &str) -> BaseMessage {
     BaseMessage::ai(MessageContent::text(text.to_string()))
+}
+
+fn make_ai_with_read_tool(file_path: &str) -> BaseMessage {
+    BaseMessage::ai_with_tool_calls(
+        MessageContent::text("read the file"),
+        vec![crate::messages::ToolCallRequest::new(
+            "full-lifecycle-read",
+            "Read",
+            serde_json::json!({ "file_path": file_path }),
+        )],
+    )
+}
+
+struct FullLifecycleModel;
+
+#[async_trait]
+impl BaseModel for FullLifecycleModel {
+    async fn invoke(&self, _request: LlmRequest) -> crate::error::AgentResult<LlmResponse> {
+        Ok(LlmResponse {
+            message: BaseMessage::ai("<summary>FULL_SUMMARY_MARKER</summary>"),
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+            request_id: None,
+        })
+    }
+
+    fn provider_name(&self) -> &str {
+        "full-lifecycle-test"
+    }
+
+    fn model_id(&self) -> &str {
+        "full-lifecycle-test-model"
+    }
 }
 
 // ── Full Compact 测试 ──────────────────────────────────────────────────────
@@ -24,6 +63,199 @@ async fn test_full_compact_no_llm_returns_error() {
     let config = CompactConfig::default();
     let result = full_compact_inner(&mut t, None, &config, "/tmp").await;
     assert!(result.is_err(), "无 LLM 应返回错误");
+}
+
+#[tokio::test]
+async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_system() {
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let file_path = dir.path().join("full-lifecycle.rs");
+    std::fs::write(&file_path, "pub const FULL_LIFECYCLE: bool = true;\n")
+        .expect("写入重新注入文件失败");
+
+    let store: Arc<dyn ThreadStore> = Arc::new(
+        SqliteThreadStore::new(dir.path().join("full-lifecycle.db"))
+            .await
+            .expect("创建 SQLite store 失败"),
+    );
+    let thread_id = store
+        .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
+        .await
+        .expect("创建 thread 失败");
+
+    let ancestor = BaseMessage::human("ancestor conversation");
+    store
+        .append_message(&thread_id, ancestor.clone())
+        .await
+        .expect("持久化 ancestor 失败");
+
+    let mut transcript = MessageTranscript::new()
+        .with_ancestor(vec![ancestor.clone()])
+        .with_persistence(store.clone(), thread_id.clone());
+    let own_system = transcript.append(BaseMessage::system("own system prompt"));
+    let own_human = transcript.append(make_human("own user question"));
+    let own_ai = transcript.append(make_ai_with_read_tool(&file_path.to_string_lossy()));
+    transcript
+        .flush_persistence()
+        .await
+        .expect("Full compact 前应完成持久化");
+
+    let result = full_compact_inner(
+        &mut transcript,
+        Some(&FullLifecycleModel),
+        &CompactConfig::default(),
+        &dir.path().to_string_lossy(),
+    )
+    .await
+    .expect("SQLite lifecycle 应成功");
+    transcript
+        .flush_persistence()
+        .await
+        .expect("Full compact 后应完成持久化");
+
+    assert_eq!(result.outcome, CompactOutcome::FullApplied);
+    assert!(
+        !transcript.flags(ancestor.id()).excluded,
+        "ancestor 不得被排除"
+    );
+    assert!(!transcript.flags(own_system).excluded, "System 不得被排除");
+    assert!(transcript.flags(own_human).excluded, "own Human 必须被排除");
+    assert!(transcript.flags(own_ai).excluded, "own AI 必须被排除");
+
+    let summary = transcript
+        .entries()
+        .iter()
+        .find(|entry| entry.message.content().contains("FULL_SUMMARY_MARKER"))
+        .expect("应追加 summary")
+        .message
+        .clone();
+    let reinject = transcript
+        .entries()
+        .iter()
+        .find(|entry| entry.message.content().contains("[最近读取的文件:"))
+        .expect("应追加重新注入的文件")
+        .message
+        .clone();
+
+    let stored_messages = store
+        .load_messages(&thread_id)
+        .await
+        .expect("加载 SQLite history 失败");
+    assert_eq!(
+        stored_messages
+            .iter()
+            .map(BaseMessage::id)
+            .collect::<Vec<_>>(),
+        transcript
+            .entries()
+            .iter()
+            .map(|entry| entry.message.id())
+            .collect::<Vec<_>>(),
+        "内存与 SQLite history 必须一致"
+    );
+    assert!(stored_messages
+        .iter()
+        .any(|message| message.id() == summary.id()));
+    assert!(stored_messages
+        .iter()
+        .any(|message| message.id() == reinject.id()));
+
+    let stored_flags = store
+        .load_message_flags(&thread_id)
+        .await
+        .expect("加载 SQLite flags 失败");
+    assert!(!stored_flags.contains_key(&ancestor.id()));
+    assert!(!stored_flags.contains_key(&own_system));
+    assert!(stored_flags[&own_human].excluded);
+    assert!(stored_flags[&own_ai].excluded);
+}
+
+#[tokio::test]
+async fn test_full_compact_filesystem_unsupported_lifecycle_leaves_memory_and_store_unchanged() {
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let file_path = dir.path().join("full-lifecycle.rs");
+    std::fs::write(&file_path, "pub const FULL_LIFECYCLE: bool = true;\n")
+        .expect("写入重新注入文件失败");
+
+    let store: Arc<dyn ThreadStore> =
+        Arc::new(FilesystemThreadStore::new(dir.path().join("threads")));
+    let thread_id = store
+        .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
+        .await
+        .expect("创建 thread 失败");
+
+    let ancestor = BaseMessage::human("ancestor conversation");
+    store
+        .append_message(&thread_id, ancestor.clone())
+        .await
+        .expect("持久化 ancestor 失败");
+
+    let mut transcript = MessageTranscript::new()
+        .with_ancestor(vec![ancestor.clone()])
+        .with_persistence(store.clone(), thread_id.clone());
+    let own_system = transcript.append(BaseMessage::system("own system prompt"));
+    let own_human = transcript.append(make_human("own user question"));
+    let own_ai = transcript.append(make_ai_with_read_tool(&file_path.to_string_lossy()));
+    transcript
+        .flush_persistence()
+        .await
+        .expect("Full compact 前应完成持久化");
+    let before_entries = transcript
+        .entries()
+        .iter()
+        .map(|entry| entry.message.id())
+        .collect::<Vec<_>>();
+    let before_store = store
+        .load_messages(&thread_id)
+        .await
+        .expect("加载初始 Filesystem history 失败");
+
+    let error = full_compact_inner(
+        &mut transcript,
+        Some(&FullLifecycleModel),
+        &CompactConfig::default(),
+        &dir.path().to_string_lossy(),
+    )
+    .await
+    .expect_err("Filesystem lifecycle 必须明确不受支持");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Filesystem store does not support compaction lifecycle"),
+        "应返回 lifecycle 不受支持错误，实际: {error}"
+    );
+    assert_eq!(
+        transcript
+            .entries()
+            .iter()
+            .map(|entry| entry.message.id())
+            .collect::<Vec<_>>(),
+        before_entries,
+        "失败后内存 entries 必须原样"
+    );
+    assert!(!transcript.flags(ancestor.id()).excluded);
+    assert!(!transcript.flags(own_system).excluded);
+    assert!(!transcript.flags(own_human).excluded);
+    assert!(!transcript.flags(own_ai).excluded);
+    assert_eq!(
+        store
+            .load_messages(&thread_id)
+            .await
+            .expect("加载 Filesystem history 失败")
+            .iter()
+            .map(BaseMessage::id)
+            .collect::<Vec<_>>(),
+        before_store.iter().map(BaseMessage::id).collect::<Vec<_>>(),
+        "失败后 store history 必须原样"
+    );
+    assert!(
+        store
+            .load_message_flags(&thread_id)
+            .await
+            .expect("加载 Filesystem flags 失败")
+            .is_empty(),
+        "失败后 store flags 必须原样"
+    );
 }
 
 #[tokio::test]
@@ -155,12 +387,16 @@ fn test_compact_result_fields() {
     let result = crate::agent::compact_v2::CompactResult {
         strategy: CompactStrategy::Micro,
         affected_count: 3,
-        before_len: 10,
+        estimated_tokens_saved: 1500,
+        before_visible_len: 10,
         after_visible_len: 7,
         summary: None,
+        full_escalation_reason: None,
+        outcome: crate::agent::compact_v2::CompactOutcome::MicroApplied,
     };
     assert_eq!(result.strategy, CompactStrategy::Micro);
     assert_eq!(result.affected_count, 3);
+    assert_eq!(result.estimated_tokens_saved, 1500);
     assert!(result.summary.is_none());
 }
 

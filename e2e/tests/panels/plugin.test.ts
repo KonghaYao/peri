@@ -70,57 +70,45 @@ describe("panels: plugin", () => {
       expect(marketplacesCapture.text.length).toBeGreaterThan(30);
 
       // ── LLM judge：面板打开阶段 ──
-      try {
-        const openResult = await judge({
-          ansiRaw: panelOpenCapture.raw,
-          criteria: [
-            "屏幕中应显示 Plugin 面板，包含四个 Tab 标签：已安装、探索、市场、错误",
-          ],
-        });
-        console.log("Judge (panel-open):", JSON.stringify(openResult, null, 2));
-      } catch (err: any) {
-        console.warn("Judge (panel-open) 失败:", err.message);
-      }
+      const openResult = await judge({
+        ansiRaw: panelOpenCapture.raw,
+        criteria: [
+          "屏幕中应显示 Plugin 面板，包含四个 Tab 标签：已安装、探索、市场、错误",
+        ],
+      });
+      console.log("Judge (panel-open):", JSON.stringify(openResult, null, 2));
+      expect(openResult.pass).toBe(true);
 
       // ── LLM judge：Marketplaces tab ──
-      try {
-        const mpResult = await judge({
-          ansiRaw: marketplacesCapture.raw,
-          criteria: [
-            "市场 Tab 应为当前激活的 Tab（高亮/反色样式）",
-            "内容区域应列出至少一个 marketplace 来源（如 claude-plugins-official），含来源类型标签（如 GitHub/Git/URL）和插件数量",
-          ],
-        });
-        console.log("Judge (marketplaces):", JSON.stringify(mpResult, null, 2));
-      } catch (err: any) {
-        console.warn("Judge (marketplaces) 失败:", err.message);
-      }
+      const mpResult = await judge({
+        ansiRaw: marketplacesCapture.raw,
+        criteria: [
+          "市场 Tab 应为当前激活的 Tab（高亮/反色样式）",
+          "内容区域应列出至少一个 marketplace 来源（如 claude-plugins-official），含来源类型标签（如 GitHub/Git/URL）和插件数量",
+        ],
+      });
+      console.log("Judge (marketplaces):", JSON.stringify(mpResult, null, 2));
+      expect(mpResult.pass).toBe(true);
 
       // ── LLM judge：Errors tab ──
-      try {
-        const errResult = await judge({
-          ansiRaw: errorsTabCapture.raw,
-          criteria: [
-            "错误 Tab 标签应处于激活状态（高亮/反色样式），下方内容区域显示加载错误列表（当前为空 '加载错误 (0)'）",
-          ],
-        });
-        console.log("Judge (errors):", JSON.stringify(errResult, null, 2));
-      } catch (err: any) {
-        console.warn("Judge (errors) 失败:", err.message);
-      }
+      const errResult = await judge({
+        ansiRaw: errorsTabCapture.raw,
+        criteria: [
+          "错误 Tab 标签应处于激活状态（高亮/反色样式），下方内容区域显示加载错误列表（当前为空 '加载错误 (0)'）",
+        ],
+      });
+      console.log("Judge (errors):", JSON.stringify(errResult, null, 2));
+      expect(errResult.pass).toBe(true);
 
       // ── LLM judge：面板关闭 ──
-      try {
-        const closedResult = await judge({
-          ansiRaw: panelClosedCapture.raw,
-          criteria: [
-            "Plugin 面板应已关闭，不再显示 已安装/探索/市场/错误 等 Tab 标签",
-          ],
-        });
-        console.log("Judge (closed):", JSON.stringify(closedResult, null, 2));
-      } catch (err: any) {
-        console.warn("Judge (closed) 失败:", err.message);
-      }
+      const closedResult = await judge({
+        ansiRaw: panelClosedCapture.raw,
+        criteria: [
+          "Plugin 面板应已关闭，不再显示 已安装/探索/市场/错误 等 Tab 标签",
+        ],
+      });
+      console.log("Judge (closed):", JSON.stringify(closedResult, null, 2));
+      expect(closedResult.pass).toBe(true);
     },
   );
 });

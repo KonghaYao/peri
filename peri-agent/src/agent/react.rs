@@ -221,6 +221,12 @@ pub trait ReactLLM: Send + Sync {
     ) -> Option<serde_json::Value> {
         None
     }
+
+    /// 返回 Provider 能力（消息协议类型、签名 reasoning 处理规则）。
+    /// 默认返回 Generic 安全保守值。
+    fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
+        crate::agent::compact_v2::projection::ProviderCapabilities::default()
+    }
 }
 
 /// Blanket impl：允许将 Box<dyn ReactLLM + Send + Sync> 直接用于 v2 stages
@@ -258,5 +264,9 @@ impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
         tools: &[&dyn BaseTool],
     ) -> Option<serde_json::Value> {
         (**self).build_provider_request_body(messages, tools)
+    }
+
+    fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
+        (**self).provider_capabilities()
     }
 }

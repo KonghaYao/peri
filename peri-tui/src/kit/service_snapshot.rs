@@ -31,10 +31,9 @@ use tracing::{debug, warn};
 
 use crate::app::service_registry::{ProcessResourceMonitor, SharedPeriConfig};
 use crate::kit::atoms::{
-    AcpStateSnapshot, CRON_JOBS, CronJobSummary, FILE_LIST, HOOK_LIST, Handle, HookSummary,
-    MCP_SERVERS, MEMORY_LIST, McpInitPhase, McpServerSummary, McpStatusSnapshot, MemoryEntry,
-    PLUGIN_LIST, PROVIDER_LIST, PluginSummary, ProviderSummary, SERVICE_SNAPSHOT, ServiceSnapshot,
-    THREAD_LIST, ThreadSummary,
+    CRON_JOBS, CronJobSummary, FILE_LIST, HOOK_LIST, Handle, HookSummary, MCP_SERVERS, MEMORY_LIST,
+    McpInitPhase, McpServerSummary, McpStatusSnapshot, MemoryEntry, PLUGIN_LIST, PROVIDER_LIST,
+    PluginSummary, ProviderSummary, SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST, ThreadSummary,
 };
 use crate::thread::ThreadStore;
 
@@ -549,13 +548,6 @@ fn derive_mcp_status(
         total,
         connected,
     }
-}
-
-/// 同步派生 ACP state 投影的辅助函数——保留供 entry.rs 在 build_app_and_acp 后调用，
-/// 让 ACP_STATE atom 首帧就有合理值（avoid 初始 0/Empty UI 闪动）。
-#[allow(dead_code)]
-pub fn initial_acp_state() -> AcpStateSnapshot {
-    AcpStateSnapshot::default()
 }
 
 #[cfg(test)]

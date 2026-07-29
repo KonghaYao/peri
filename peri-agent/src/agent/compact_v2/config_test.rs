@@ -10,9 +10,12 @@ fn test_default_values() {
     assert!(config.auto_compact_enabled);
     assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
     assert!((config.micro_compact_threshold - 0.75).abs() < 0.001);
-    assert_eq!(config.micro_compact_stale_steps, 5);
-    assert_eq!(config.micro_excluded_tools.len(), 0, "黑名单默认空");
-    assert_eq!(config.micro_min_affected, 5);
+    assert_eq!(config.micro_compact_stale_steps, 3);
+    assert_eq!(
+        config.micro_excluded_tools.len(),
+        3,
+        "黑名单默认 3 个工具（AskUserQuestion/goal/TodoWrite）"
+    );
     assert_eq!(config.summary_max_tokens, 16000);
     assert_eq!(config.re_inject_max_files, 5);
     assert_eq!(config.re_inject_max_tokens_per_file, 5000);
@@ -71,7 +74,26 @@ fn test_apply_env_overrides_on_custom_config() {
 }
 
 #[test]
-fn test_excluded_tools_default_empty() {
+fn test_excluded_tools_default_non_empty() {
     let config = CompactConfig::default();
-    assert!(config.micro_excluded_tools.is_empty(), "黑名单默认应为空");
+    assert!(
+        !config.micro_excluded_tools.is_empty(),
+        "黑名单默认应包含 AskUserQuestion/goal/TodoWrite"
+    );
+    assert!(
+        config
+            .micro_excluded_tools
+            .contains(&"AskUserQuestion".to_string()),
+        "默认应包含 AskUserQuestion"
+    );
+    assert!(
+        config.micro_excluded_tools.contains(&"goal".to_string()),
+        "默认应包含 goal"
+    );
+    assert!(
+        config
+            .micro_excluded_tools
+            .contains(&"TodoWrite".to_string()),
+        "默认应包含 TodoWrite"
+    );
 }

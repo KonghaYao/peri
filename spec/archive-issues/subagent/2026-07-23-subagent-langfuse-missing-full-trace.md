@@ -1,6 +1,6 @@
 # Subagent Langfuse trace 缺少完整的 trace 结构——与主 agent 不等价
 
-**状态**：Fixed
+**状态**：Archived
 **优先级**：中
 **创建日期**：2026-07-23
 **类型**：技术债
@@ -52,6 +52,7 @@ Subagent 的 `spawn_subagent_event_forwarder` 对齐 `spawn_eventbus_forwarder`�
 | 2026-07-23 | Open | Fixed | agent | 修复：subagent forwarder 增加 LangfuseBridge 支持，11 文件 115+ 行 |
 | 2026-07-23 | Fixed | Reopen | agent | 线上验证：14 个 subagent observation 均为 0 子节点，修复未生效。Langfuse OTLP 手工测试确认 API 侧完全支持嵌套 AGENT 结构，问题在 peri 代码侧 |
 | 2026-07-23 | Reopen | Fixed | agent | 修复 3 个 P0 BUG：(1) biased select! 时序 (2) bg subagent 栈时序 (3) 共享 tool_batch。共 9 文件、16 个新测试，951 tests pass |
+| 2026-07-25 | — | Archived | agent | 归档
 
 ## 修复记录
 

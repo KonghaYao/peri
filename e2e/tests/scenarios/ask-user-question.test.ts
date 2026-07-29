@@ -62,32 +62,26 @@ describe("scenarios: ask user question", () => {
       expect(capture.text.length).toBeGreaterThan(100);
 
       // LLM judge: 面板阶段
-      try {
-        const panelResult = await judge({
-          ansiRaw: panelCapture.raw,
-          criteria: [
-            "屏幕上应有 Ask User 内联面板，包含题目文本和选项列表",
-            "面板中应有可选选项（如 ●/○ 单选标记或 ☑/☐ 多选标记）",
-          ],
-        });
-        console.log("Judge (panel):", JSON.stringify(panelResult, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const panelResult = await judge({
+        ansiRaw: panelCapture.raw,
+        criteria: [
+          "屏幕上应有 Ask User 内联面板，包含题目文本和选项列表",
+          "面板中应有可选选项（如 ●/○ 单选标记或 ☑/☐ 多选标记）",
+        ],
+      });
+      console.log("Judge (panel):", JSON.stringify(panelResult, null, 2));
+      expect(panelResult.pass).toBe(true);
 
       // LLM judge: 交互完成阶段——agent 收到答案后继续执行，输出总结
-      try {
-        const doneResult = await judge({
-          ansiRaw: capture.raw,
-          criteria: [
-            "agent 应已完成了对 AskUserQuestion 工具的测试，输出了总结（如包含表格或结构化的测试结果）",
-            "消息区应包含 agent 对用户回答内容的引用，表明 agent 确实收到了用户在面板中的选择",
-          ],
-        });
-        console.log("Judge (done):", JSON.stringify(doneResult, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const doneResult = await judge({
+        ansiRaw: capture.raw,
+        criteria: [
+          "agent 应已完成了对 AskUserQuestion 工具的测试，输出了总结（如包含表格或结构化的测试结果）",
+          "消息区应包含 agent 对用户回答内容的引用，表明 agent 确实收到了用户在面板中的选择",
+        ],
+      });
+      console.log("Judge (done):", JSON.stringify(doneResult, null, 2));
+      expect(doneResult.pass).toBe(true);
     },
   );
 });

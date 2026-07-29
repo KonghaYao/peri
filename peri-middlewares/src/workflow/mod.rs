@@ -41,6 +41,7 @@ impl peri_workflow::tool::BgTaskRegistry for BackgroundTaskRegistry {
             prompt_summary: summary,
             status: BackgroundTaskStatus::Running,
             started_at: std::time::Instant::now(),
+            chrono_started_at: chrono::Utc::now(),
             kind: BgTaskKind::Workflow,
             cancel_handle: BgCancelHandle::Kill(None),
             pid: None,

@@ -356,6 +356,16 @@ fn test_observe_messages_compacted_maps() {
         skills: vec![],
         re_inject_count: 0,
         strategy: crate::agent::events::CompactStrategy::Micro,
+        affected_count: 0,
+        estimated_tokens_saved: 0,
+        estimated_tokens_before: 0,
+        estimated_tokens_after: 0,
+        changed_messages: 0,
+        changed_fields: 0,
+        no_op_candidates: 0,
+        full_escalation_reason: None,
+        cache_hit_rate_before: 0.0,
+        outcome: crate::agent::compact_v2::CompactOutcome::MicroApplied,
     };
     match observe_event_to_executor(o).unwrap() {
         ExecutorEvent::CompactCompleted {

@@ -53,7 +53,9 @@ impl GoalMiddleware {
             2 => {
                 "The goal is not yet complete. You must call goal(complete) or goal(block) to end, or continue with the next step."
             }
-            _ => "Attention: the goal is still not complete. Decide immediately — keep working or declare a terminal state.",
+            _ => {
+                "Attention: the goal is still not complete. Decide immediately — keep working or declare a terminal state."
+            }
         };
         format!(
             "<goal-message>\n\
@@ -73,7 +75,7 @@ impl Middleware for GoalMiddleware {
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn peri_agent::tools::BaseTool>> {
         // Goal 工具通过 collect_tools 注册到 shared_tools（executor 每轮 clear + repopulate）
-        // is_deferred_tool 过滤器会将其从 LLM 可见列表移除，仅通过 SearchExtraTools → ExecuteExtraTool 访问
+        // is_direct() 默认为 false，该工具不会直接出现在 LLM 工具列表中，仅通过 SearchExtraTools → ExecuteExtraTool 访问
         vec![Box::new(GoalTool::new(
             Arc::clone(&self.controller),
             self.auxiliary_model.clone(),
@@ -105,7 +107,7 @@ impl Middleware for GoalMiddleware {
         // [TRAP] 必须用 Human + <system-reminder> 注入，禁止 BaseMessage::system。
         // System 消息会被 invoke hoist 到 system prompt 顶部，污染 frozen_system_prompt。
         // （与 hooks/middleware.rs stop_hook_feedback、compact_v2.rs::re_inject_v2 注入路径一致）
-        // 走 v2 MessageQueue Defer kind → End 阶段 drain_for_end 唤醒新 turn。
+        // 走 v2 MessageQueue Defer kind → Receive 阶段 drain_all 消费。
         let reminder = format!("<system-reminder>\n{}\n</system-reminder>", template);
         state.v2_queue().push(QueuedMessage::new(
             MessageKind::Defer,

@@ -53,32 +53,26 @@ describe("subagent: fork bg callback", () => {
       expect(doneCapture.text.length).toBeGreaterThan(50);
 
       // Judge: running 态（agent 正在处理派发 fork bg subagent 请求）
-      try {
-        const r = await judge({
-          ansiRaw: runningCapture.raw,
-          criteria: [
-            "系统应处于处理中状态：应有思考块（如 '思考了 N 字符'）或底部有加载指示器",
-            "输入提示应已提交（屏幕显示用户 prompt），agent 在准备或启动后台 fork 任务",
-          ],
-        });
-        console.log("Judge (running):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: runningCapture.raw,
+        criteria: [
+          "系统应处于处理中状态：应有思考块（如 '思考了 N 字符'）或底部有加载指示器",
+          "输入提示应已提交（屏幕显示用户 prompt），agent 在准备或启动后台 fork 任务",
+        ],
+      });
+      console.log("Judge (running):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
 
       // Judge: 完成态 + 回调
-      try {
-        const r = await judge({
-          ansiRaw: doneCapture.raw,
-          criteria: [
-            "后台 agent 应已完成（✔ 标记、完成通知或状态栏 agent 计数归零）",
-            "消息区应出现 SubAgent 完成后的回调通知或结果（如 'hello' 或完成摘要）",
-          ],
-        });
-        console.log("Judge (done):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r2 = await judge({
+        ansiRaw: doneCapture.raw,
+        criteria: [
+          "后台 agent 应已完成（✔ 标记、完成通知或状态栏 agent 计数归零）",
+          "消息区应出现 SubAgent 完成后的回调通知或结果（如 'hello' 或完成摘要）",
+        ],
+      });
+      console.log("Judge (done):", JSON.stringify(r2, null, 2));
+      expect(r2.pass).toBe(true);
     },
   );
 });

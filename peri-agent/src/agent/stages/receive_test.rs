@@ -67,7 +67,8 @@ async fn test_receive_consumes_info_wrapped_in_reminder() {
 }
 
 #[tokio::test]
-async fn test_receive_keeps_defer() {
+async fn test_receive_consumes_defer() {
+    // RCRA：Receive 消费 Defer（不再保留）
     let ctx = make_context();
     ctx.session.queue.push(QueuedMessage::defer(
         MessageSource::SubAgentComplete,
@@ -82,8 +83,44 @@ async fn test_receive_keeps_defer() {
         context: ctx.clone(),
     };
     let output = run_receive(input).await.unwrap();
-    // 只消费 Prompt，Defer 保留
-    assert_eq!(output.consumed_count, 1);
-    assert_eq!(ctx.session.queue.len(), 1, "Defer 应保留在队列");
-    assert_eq!(ctx.session.transcript.read().len(), 1);
+    // 消费全部（Prompt + Defer）
+    assert_eq!(output.consumed_count, 2);
+    assert!(ctx.session.queue.is_empty(), "队列应完全排空");
+    assert_eq!(ctx.session.transcript.read().len(), 2);
+}
+
+#[tokio::test]
+async fn test_receive_consumes_prompt_defer_and_info_together() {
+    // RCRA：混合队列应全部消费
+    let ctx = make_context();
+    ctx.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human(MessageContent::text("p")),
+    ));
+    ctx.session.queue.push(QueuedMessage::defer(
+        MessageSource::SubAgentComplete,
+        BaseMessage::human(MessageContent::text("d")),
+    ));
+    ctx.session.queue.push(QueuedMessage::info(
+        MessageSource::SystemInjected,
+        BaseMessage::human(MessageContent::text("i")),
+    ));
+
+    let input = ReceiveInput {
+        context: ctx.clone(),
+    };
+    let output = run_receive(input).await.unwrap();
+    assert_eq!(output.consumed_count, 3);
+    assert!(ctx.session.queue.is_empty());
+}
+
+#[tokio::test]
+async fn test_receive_exit_on_empty_queue() {
+    // RCRA：空队列 → consumed=0 → 退出判断触发
+    let ctx = make_context();
+    let input = ReceiveInput {
+        context: ctx.clone(),
+    };
+    let output = run_receive(input).await.unwrap();
+    assert_eq!(output.consumed_count, 0);
 }

@@ -252,10 +252,9 @@ pub async fn run_marketplace_update(name: &str) -> Result<()> {
     };
 
     let entry = &marketplaces[entry_index];
-    let (manifest, install_location) =
-        refresh_marketplace(&entry.source, name)
-            .await
-            .map_err(|e| anyhow::anyhow!("无法刷新 marketplace: {e}"))?;
+    let (manifest, install_location) = refresh_marketplace(&entry.source, name)
+        .await
+        .map_err(|e| anyhow::anyhow!("无法刷新 marketplace: {e}"))?;
 
     let mut updated = marketplaces;
     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -325,10 +324,7 @@ pub async fn run_plugin_update(plugin_id: &str, scope_str: &str) -> Result<()> {
 
     match update_plugin(plugin_id, &cache_dir, &claude_dir, None).await {
         Ok(installed) => {
-            println!(
-                "已更新插件: {} v{}",
-                installed.id, installed.version
-            );
+            println!("已更新插件: {} v{}", installed.id, installed.version);
         }
         Err(e) => {
             // Check if already up-to-date
@@ -350,9 +346,8 @@ pub fn run_plugin_info(plugin_id: &str) -> Result<()> {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
-    let installed =
-        peri_middlewares::plugin::config::load_installed_plugins(Some(&plugins_path))
-            .unwrap_or_default();
+    let installed = peri_middlewares::plugin::config::load_installed_plugins(Some(&plugins_path))
+        .unwrap_or_default();
 
     let target = installed
         .plugins
@@ -369,10 +364,7 @@ pub fn run_plugin_info(plugin_id: &str) -> Result<()> {
     println!("ID:          {}", target.id);
     println!("版本:        {}", target.version);
     println!("Marketplace: {}", target.marketplace);
-    println!(
-        "安装路径:    {}",
-        target.install_path.display()
-    );
+    println!("安装路径:    {}", target.install_path.display());
     println!(
         "Scope:       {}",
         match target.scope {
@@ -401,7 +393,8 @@ pub fn run_plugin_info(plugin_id: &str) -> Result<()> {
                         .map(|obj| obj.contains_key(&target.id))
                         .or_else(|| {
                             ep.as_array().map(|arr| {
-                                arr.iter().any(|v| v.as_str().is_some_and(|s| s == target.id))
+                                arr.iter()
+                                    .any(|v| v.as_str().is_some_and(|s| s == target.id))
                             })
                         })
                 })
@@ -462,7 +455,12 @@ pub fn run_plugin_search(query: &str) -> Result<()> {
                     if name.to_lowercase().contains(&query_lower)
                         || desc.to_lowercase().contains(&query_lower)
                     {
-                        found.push((name.to_string(), version.to_string(), mp_name.clone(), desc.to_string()));
+                        found.push((
+                            name.to_string(),
+                            version.to_string(),
+                            mp_name.clone(),
+                            desc.to_string(),
+                        ));
                     }
                 }
             }
@@ -475,10 +473,7 @@ pub fn run_plugin_search(query: &str) -> Result<()> {
         println!("{:<40} {:<12} {:<20} 描述", "名称", "版本", "市场");
         println!("{}", "-".repeat(100));
         for (name, version, mp, desc) in &found {
-            println!(
-                "{:<40} {:<12} {:<20} {}",
-                name, version, mp, desc,
-            );
+            println!("{:<40} {:<12} {:<20} {}", name, version, mp, desc,);
         }
     }
     Ok(())

@@ -56,32 +56,26 @@ describe("tool-card: bash running duration", () => {
       expect(doneCapture.text.length).toBeGreaterThan(50);
 
       // Judge: 运行中
-      try {
-        const r = await judge({
-          ansiRaw: runningCapture.raw,
-          criteria: [
-            "屏幕上应出现 Bash 或 Shell 工具调用的痕迹",
-            "Bash 工具应处于运行中状态（可能有时长指示器如 'Running' 或时长数字）",
-          ],
-        });
-        console.log("Judge (running):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r = await judge({
+        ansiRaw: runningCapture.raw,
+        criteria: [
+          "屏幕上应出现 Bash 或 Shell 工具调用的痕迹",
+          "Bash 工具应处于运行中状态（可能有时长指示器如 'Running' 或时长数字）",
+        ],
+      });
+      console.log("Judge (running):", JSON.stringify(r, null, 2));
+      expect(r.pass).toBe(true);
 
       // Judge: 完成阶段
-      try {
-        const r = await judge({
-          ansiRaw: doneCapture.raw,
-          criteria: [
-            "Bash 工具应已完成——不应再显示 'Running' 状态",
-            "agent 应已收到工具结果并给出后续回复或总结",
-          ],
-        });
-        console.log("Judge (done):", JSON.stringify(r, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const r2 = await judge({
+        ansiRaw: doneCapture.raw,
+        criteria: [
+          "Bash 工具应已完成——不应再显示 'Running' 状态",
+          "agent 应已收到工具结果并给出后续回复或总结",
+        ],
+      });
+      console.log("Judge (done):", JSON.stringify(r2, null, 2));
+      expect(r2.pass).toBe(true);
     },
   );
 });

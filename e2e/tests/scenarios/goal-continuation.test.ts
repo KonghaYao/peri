@@ -54,18 +54,15 @@ describe("scenarios: goal continuation", () => {
       expect(capture.text.length).toBeGreaterThan(100);
 
       // LLM judge
-      try {
-        const result = await judge({
-          ansiRaw: capture.raw,
-          criteria: [
-            "消息区应最终包含数字 10（或表明计数到达了 10）",
-            "agent 应完成了 counting 任务，而非中途放弃",
-          ],
-        });
-        console.log("Judge:", JSON.stringify(result, null, 2));
-      } catch (err: any) {
-        console.warn("Judge 失败:", err.message);
-      }
+      const result = await judge({
+        ansiRaw: capture.raw,
+        criteria: [
+          "消息区应最终包含数字 10（或表明计数到达了 10）",
+          "agent 应完成了 counting 任务，而非中途放弃",
+        ],
+      });
+      console.log("Judge:", JSON.stringify(result, null, 2));
+      expect(result.pass).toBe(true);
     },
   );
 });

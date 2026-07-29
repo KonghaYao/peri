@@ -13,8 +13,8 @@ pub mod search_tool;
 pub mod tool_index;
 
 pub use core_tools::{
-    is_deferred_tool, resolve_effective_tool_name, CORE_TOOLS, EXECUTE_EXTRA_TOOL_NAME,
-    EXTRA_TOOL_NAME_FIELD, EXTRA_TOOL_PARAMS_FIELD, META_TOOLS, SEARCH_EXTRA_TOOLS_NAME,
+    resolve_effective_tool_name, EXECUTE_EXTRA_TOOL_NAME, EXTRA_TOOL_NAME_FIELD,
+    EXTRA_TOOL_PARAMS_FIELD, SEARCH_EXTRA_TOOLS_NAME,
 };
 pub use execute_tool::ExecuteExtraTool;
 pub use middleware::ToolSearchMiddleware;

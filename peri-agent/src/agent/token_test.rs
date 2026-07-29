@@ -12,6 +12,7 @@ fn make_usage(
         cache_creation_input_tokens: cache_creation,
         cache_read_input_tokens: cache_read,
         request_id: None,
+        first_token_time: None,
     }
 }
 
@@ -326,6 +327,7 @@ fn test_accumulate_records_request_id() {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
         request_id: Some("req_01ABC".to_string()),
+        first_token_time: None,
     };
     tracker.accumulate(&usage);
     assert_eq!(tracker.last_request_id.as_deref(), Some("req_01ABC"));
@@ -340,6 +342,7 @@ fn test_accumulate_overwrites_request_id() {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
         request_id: Some("req_01ABC".to_string()),
+        first_token_time: None,
     };
     tracker.accumulate(&usage1);
     let usage2 = TokenUsage {
@@ -348,6 +351,7 @@ fn test_accumulate_overwrites_request_id() {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
         request_id: Some("req_02DEF".to_string()),
+        first_token_time: None,
     };
     tracker.accumulate(&usage2);
     assert_eq!(tracker.last_request_id.as_deref(), Some("req_02DEF"));
@@ -362,6 +366,7 @@ fn test_accumulate_none_request_id() {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
         request_id: None,
+        first_token_time: None,
     };
     tracker.accumulate(&usage);
     assert!(tracker.last_request_id.is_none());
@@ -376,6 +381,7 @@ fn test_reset_clears_request_id() {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
         request_id: Some("req_01ABC".to_string()),
+        first_token_time: None,
     };
     tracker.accumulate(&usage);
     tracker.reset();
@@ -390,6 +396,7 @@ fn test_request_record_from_usage() {
         cache_creation_input_tokens: Some(8000),
         cache_read_input_tokens: Some(0),
         request_id: Some("req_01".to_string()),
+        first_token_time: None,
     };
     let record = RequestRecord::from_usage(&usage);
     assert_eq!(record.input_tokens, 8500);
