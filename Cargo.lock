@@ -2439,10 +2439,23 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6970fe7a5300b4b42e62c52efa0187540a5bef546c60edaf554ef595d2e6f0b"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
 ]
 
 [[package]]
@@ -3401,6 +3414,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "croner",
  "dirs-next",
@@ -3411,6 +3425,7 @@ dependencies = [
  "gray_matter",
  "grep",
  "ignore",
+ "image",
  "ipnet",
  "lsp-types",
  "num_cpus",

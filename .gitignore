@@ -211,3 +211,4 @@ settings.json
 skills-lock.json
 .agents
 !.peri/theme/
+e2e/results

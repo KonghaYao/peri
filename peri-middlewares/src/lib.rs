@@ -66,6 +66,7 @@ pub use hitl::{
     SharedPermissionMode,
 };
 pub use lsp::{LspMiddleware, LspTool};
+pub use middleware::image::ImageMiddleware;
 pub use skills::{
     list_skills, load_global_skills_dir, load_skill_metadata, SkillMetadata, SkillsMiddleware,
 };
