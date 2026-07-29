@@ -41,6 +41,7 @@ pub mod submit_request;
 pub mod text_selection;
 pub mod thread_load_consumer;
 pub mod tool_display;
+pub mod tool_semantics;
 pub mod tui_render_unit;
 pub mod v2_bridge;
 pub mod welcome;

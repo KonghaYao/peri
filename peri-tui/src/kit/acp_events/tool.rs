@@ -9,6 +9,9 @@ use crate::kit::stream_data::{TuiToolEnded, TuiToolStarted};
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiToolCard, tui_hash_str};
 
 pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) {
+    if ts.tool_name == "TodoWrite" {
+        state.record_todo_started(ts.tool_id.clone(), ts.raw_input.clone());
+    }
     if let Some(agent_id) = ts.agent_id.as_deref() {
         // bg sub-agent: TurnSuspended 后 SubAgentAccumulator 已被清除，
         // 后续 bg 工具事件仅更新 BG_DISPLAY，不走 start_subagent_tool
@@ -32,10 +35,12 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             // 同步 sub-agent: 路由到 SubAgentAccumulator
             let routed = state.current_turn.start_subagent_tool(
                 agent_id,
-                ToolCardAccumulator::new(
+                ToolCardAccumulator::with_input(
                     ts.tool_id.clone(),
                     ts.tool_name.clone(),
                     ts.input_summary.clone(),
+                    ts.raw_input.clone(),
+                    state.last_successful_todos.as_ref(),
                 ),
             );
             if !routed {
@@ -53,63 +58,15 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
                 );
                 // [修复] 兜底：路由失败时将工具卡作为普通 ToolCard 展示，
                 // 确保第二个 SubAgent 的工具调用不会完全丢失
-                state.current_turn.start_tool(ToolCardAccumulator::new(
-                    ts.tool_id.clone(),
-                    ts.tool_name.clone(),
-                    ts.input_summary.clone(),
-                ));
-            }
-            state.variant = 1;
-            state.phase = SessionPhase::PromptRunning;
-            super::render::push_view_models(state);
-            state.last_pushed_text_len = state.current_turn.text.chars().count();
-            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
-        }
-    } else {
-        state.current_turn.start_tool(ToolCardAccumulator::new(
-            ts.tool_id.clone(),
-            ts.tool_name.clone(),
-            ts.input_summary.clone(),
-        ));
-        state.variant = 1;
-        state.phase = SessionPhase::PromptRunning;
-        super::render::push_view_models(state);
-        state.last_pushed_text_len = state.current_turn.text.chars().count();
-        state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
-    }
-    super::render::push_acp_state(state);
-}
-
-pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
-    if let Some(agent_id) = te.agent_id.as_deref() {
-        // bg sub-agent: TurnSuspended 后 SubAgentAccumulator 已被清除，
-        // 后续 bg 工具事件仅更新 BG_DISPLAY，不走 end_subagent_tool
-        if BG_AGENT_IDS.state().read().contains(agent_id) {
-            if let Some(entry) = BG_DISPLAY
-                .state()
-                .write()
-                .iter_mut()
-                .find(|e| e.id == agent_id)
-            {
-                entry.current_tool = None;
-                entry.tool_count += 1;
-            }
-            state.variant = 1;
-            state.phase = SessionPhase::PromptRunning;
-            super::render::push_view_models(state);
-            state.last_pushed_text_len = state.current_turn.text.chars().count();
-            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
-        } else {
-            let routed = state.current_turn.end_subagent_tool(
-                agent_id,
-                &te.tool_id,
-                te.output_summary.clone(),
-                te.is_error,
-            );
-            if !routed {
                 state
                     .current_turn
-                    .end_tool(&te.tool_id, te.output_summary.clone(), te.is_error);
+                    .start_tool(ToolCardAccumulator::with_input(
+                        ts.tool_id.clone(),
+                        ts.tool_name.clone(),
+                        ts.input_summary.clone(),
+                        ts.raw_input.clone(),
+                        state.last_successful_todos.as_ref(),
+                    ));
             }
             state.variant = 1;
             state.phase = SessionPhase::PromptRunning;
@@ -120,13 +77,72 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
     } else {
         state
             .current_turn
-            .end_tool(&te.tool_id, te.output_summary.clone(), te.is_error);
+            .start_tool(ToolCardAccumulator::with_input(
+                ts.tool_id.clone(),
+                ts.tool_name.clone(),
+                ts.input_summary.clone(),
+                ts.raw_input.clone(),
+                state.last_successful_todos.as_ref(),
+            ));
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
         super::render::push_view_models(state);
         state.last_pushed_text_len = state.current_turn.text.chars().count();
         state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
     }
+    super::render::push_acp_state(state);
+}
+
+pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
+    let _todo_advanced = if let Some(agent_id) = te.agent_id.as_deref() {
+        // bg sub-agent 不生成消息卡片，但仍需在成功结束时推进 Todo 基线。
+        if BG_AGENT_IDS.state().read().contains(agent_id) {
+            if let Some(entry) = BG_DISPLAY
+                .state()
+                .write()
+                .iter_mut()
+                .find(|entry| entry.id == agent_id)
+            {
+                entry.current_tool = None;
+                entry.tool_count += 1;
+            }
+            state.variant = 1;
+            state.phase = SessionPhase::PromptRunning;
+            super::render::push_view_models(state);
+            state.last_pushed_text_len = state.current_turn.text.chars().count();
+            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+            state.complete_todo_if_current(&te.tool_id, te.is_error)
+        } else {
+            let ended = state.current_turn.end_subagent_tool(
+                agent_id,
+                &te.tool_id,
+                te.output_summary.clone(),
+                te.is_error,
+            ) || state.current_turn.end_tool(
+                &te.tool_id,
+                te.output_summary.clone(),
+                te.is_error,
+            );
+            state.variant = 1;
+            state.phase = SessionPhase::PromptRunning;
+            super::render::push_view_models(state);
+            state.last_pushed_text_len = state.current_turn.text.chars().count();
+            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+            ended && state.complete_todo_if_current(&te.tool_id, te.is_error)
+        }
+    } else {
+        let ended =
+            state
+                .current_turn
+                .end_tool(&te.tool_id, te.output_summary.clone(), te.is_error);
+        state.variant = 1;
+        state.phase = SessionPhase::PromptRunning;
+        super::render::push_view_models(state);
+        state.last_pushed_text_len = state.current_turn.text.chars().count();
+        state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+        ended && state.complete_todo_if_current(&te.tool_id, te.is_error)
+    };
+
     super::render::push_acp_state(state);
 }
 
@@ -143,7 +159,16 @@ pub(super) fn handle_replay_tool_started(
     tool_id: &str,
     tool_name: &str,
     input_summary: &str,
+    raw_input: &serde_json::Value,
 ) {
+    if tool_name == "TodoWrite" {
+        state.record_todo_started(tool_id.to_string(), raw_input.clone());
+    }
+    let presentation = crate::kit::tool_semantics::presentation_for(
+        tool_name,
+        raw_input,
+        state.last_successful_todos.as_ref(),
+    );
     let card = TuiToolCard {
         tool_id: tool_id.to_string(),
         tool_name: tool_name.to_string(),
@@ -153,10 +178,11 @@ pub(super) fn handle_replay_tool_started(
         is_running: true,
         running_duration_ms: None,
         diff: None,
+        presentation: presentation.clone(),
         tool_calls_count: 0,
         content_hash: tui_hash_str(&format!(
-            "{}|{}|{}||false|true",
-            tool_id, tool_name, input_summary
+            "{}|{}|{}||false|true|{:?}",
+            tool_id, tool_name, input_summary, presentation
         )),
     };
     state.committed.push_back(TuiRenderUnit::TuiToolCard(card));
@@ -170,7 +196,9 @@ pub(super) fn handle_replay_tool_ended(
     output_summary: &str,
     is_error: bool,
 ) {
-    update_committed_tool_card(state, tool_id, output_summary, is_error);
+    if update_committed_tool_card(state, tool_id, output_summary, is_error) {
+        state.complete_todo_if_current(tool_id, is_error);
+    }
     super::render::push_view_models(state);
     super::render::push_acp_state(state);
 }
@@ -185,7 +213,7 @@ fn update_committed_tool_card(
     tool_id: &str,
     output_summary: &str,
     is_error: bool,
-) {
+) -> bool {
     for i in 0..state.committed.len() {
         if let TuiRenderUnit::TuiToolCard(card) = &state.committed[i]
             && card.tool_id == tool_id
@@ -200,16 +228,22 @@ fn update_committed_tool_card(
                 is_running: false,
                 running_duration_ms: None,
                 diff: card.diff.clone(),
+                presentation: card.presentation.clone(),
                 tool_calls_count: card.tool_calls_count,
                 content_hash: tui_hash_str(&format!(
-                    "{}|{}|{}|{}|{is_error}|false",
-                    card.tool_id, card.tool_name, card.input_summary, output_summary,
+                    "{}|{}|{}|{}|{is_error}|false|{:?}",
+                    card.tool_id,
+                    card.tool_name,
+                    card.input_summary,
+                    output_summary,
+                    card.presentation,
                 )),
             };
             state.committed = state
                 .committed
                 .update(i, TuiRenderUnit::TuiToolCard(updated));
-            return;
+            return true;
         }
     }
+    false
 }

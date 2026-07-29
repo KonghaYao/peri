@@ -2,6 +2,8 @@
 //!
 //! Phase 0: 从 `peri-acp-types/src/event_data.rs` §4.1 内部化，消除跨 crate 共享。
 
+use serde_json::Value;
+
 /// `"text-chunk"` — 增量文本块。
 #[derive(Debug, Clone)]
 pub struct TuiTextChunk {
@@ -30,6 +32,8 @@ pub struct TuiToolStarted {
     pub tool_id: String,
     pub tool_name: String,
     pub input_summary: String,
+    /// 原始结构化输入；仅供专属语义卡片消费，禁止从工具输出反推。
+    pub raw_input: Value,
     /// 当事件来自子 agent 时存在。
     pub agent_id: Option<String>,
 }

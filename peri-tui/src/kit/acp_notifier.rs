@@ -442,17 +442,20 @@ fn handle_session_update(
                 let raw_input = update.get("rawInput").unwrap_or(&Value::Null);
                 summarize_input(&tool_name, raw_input)
             };
+            let raw_input = update.get("rawInput").cloned().unwrap_or(Value::Null);
             if is_session_replay {
                 Some(AcpEventData::ReplayToolStarted {
                     tool_id,
                     tool_name,
                     input_summary,
+                    raw_input,
                 })
             } else {
                 let tool_started = crate::kit::stream_data::TuiToolStarted {
                     tool_id,
                     tool_name,
                     input_summary,
+                    raw_input,
                     agent_id,
                 };
                 Some(AcpEventData::ToolStarted(tool_started))
@@ -472,12 +475,15 @@ fn handle_session_update(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let is_error = update
+            let status = update
                 .get("status")
                 .or_else(|| update.get("fields").and_then(|f| f.get("status")))
-                .and_then(|v| v.as_str())
-                .map(|s| s == "failed")
-                .unwrap_or(false);
+                .and_then(|v| v.as_str());
+            let Some(status) = status.filter(|status| matches!(*status, "completed" | "failed"))
+            else {
+                return None;
+            };
+            let is_error = status == "failed";
             if is_session_replay {
                 Some(AcpEventData::ReplayToolEnded {
                     tool_id,

@@ -1,1127 +1,534 @@
-# Perihelion TUI 工具调用 & 后台显示区域设计
+# TUI 工具调用语义卡片设计
 
-> 版本: 2.0 | 日期: 2026-07-06
-> 对应代码: `peri-tui/src/kit/view_render.rs` · `tool_display.rs` · `peri-acp-types/src/view_model.rs`
-> 架构: v2 ratatui-kit 单路径
-
----
-
-## 1. 设计总览
-
-工具卡片由三元素构成：**状态指示器** + **工具名** + **参数摘要**，统一格式为：
-
-```
-● ToolName (参数一行摘要)        ← 头行
-  ⎿ 输出行 1                     ← 可展开/折叠
-  ⎿ 输出行 2
-```
-
-### 1.1 状态指示器
-
-| 状态 | 图标 | 颜色 | 触发条件 |
-|------|------|------|----------|
-| 运行中 | `●`（800ms 闪烁） | 白色 | `is_running=true`, `is_error=false` |
-| 完成 | `●` | 绿色 | `is_running=false`, `is_error=false` |
-| 失败 | `●` | 红色 | `is_error=true` |
-
-运行中闪烁机制：每约 50ms `RENDER_CALL_COUNT += 1`，以 `(count / 16) % 2 == 0` 判定可见/隐藏，周期约 800ms。
-
-### 1.2 输出行
-
-- 前缀 `⎿` 缩进 2 空格
-- 正常完成：`muted` 色
-- 执行失败：`error` 色
-- 折叠态仍显示 **1 行**摘要（如 Read 的 "47 lines"），展开后最多展示 **4 行**，每行截断 **400 字符**，超出显示 `… N more lines`
-
-### 1.3 折叠策略总表
-
-| 工具 | 默认状态 | 何时展开 |
-|------|---------|----------|
-| **Read** | 折叠 | 头行后缀 |
-| **Edit** | 折叠 | 头行后缀 |
-| **Write** | 折叠 | 头行后缀 |
-| **Glob** | 折叠 | 头行后缀 |
-| **Grep** | 折叠 | 头行后缀 |
-| **AskUserQuestion** | 折叠 | 用户按 Enter |
-| **Bash** | 折叠 | 用户按 Enter |
-| **TodoWrite** | 展开 | 始终 |
-| **AgentResult** | 展开 | 始终（自动） |
-| **ExecuteExtraTool** | 展开 | 始终（自动） |
-| **任何 is_error** | 展开 | 始终（强制，错误必须可见） |
-
-### 1.4 显示名映射
-
-TUI 内部通过 `format_tool_name()` 做少量名称简化：
-
-| 内部名 | 显示名 | 说明 |
-|--------|--------|------|
-| Bash | Shell | 终端语境 |
-| folder_operations | Folder | 简化 |
-| 其他 | 原样 | 保留原始工具名 |
-
-> **更新 (2026-07-06)**：已移除 TodoWrite→Todo、AskUserQuestion→Ask、WebSearch→Research、
-> WebFetch→Browse、AgentResult→SubAgent、artifact→ArtUp 等多余映射。
-> 大部分工具直接显示原始名称，代码更直观。
+> 状态：首版已实现并验证
+> 范围：`SkillTool`、`TodoWrite` 及通用 ToolCard 的摘要、展开和错误呈现
+> 实现边界：复用标准 ACP `ToolCall.rawInput`，不新增 ACP 私有事件、DTO 或 capability；成功卡片紧凑呈现，失败回退通用错误卡片。
 
 ---
 
-## 2. 各工具完整显示效果
+## 1. 背景与问题
 
-### 2.1 Read — 文件读取
+当前消息流把所有工具调用都当作“工具名 + 原始参数 + 原始文本输出”来显示。这对文件读取、命令执行等低层操作有用，但对 `SkillTool` 和 `TodoWrite` 产生了错误的信息层级：
 
-#### 运行中
+```text
+● SkillTool (skill_name: using-superpowers)
+  ⎿ ---
+  ⎿ name: using-superpowers
+  ⎿ description: ...
+  ⎿ … 79 more lines
 
-```
-● Read (src/main.rs)
-```
-
-#### 完成
-
-```
-● Read (src/main.rs) — 47 lines
-```
-
-**设计要点**：
-- 参数摘要提取 `file_path`，不截断
-- 头行后缀显示行数（"— N lines"），无独立输出行
-- 行数从 `output_summary`（原始文件内容）动态计算非空行数
-
-#### 错误
-
-```
-● Read (nonexistent.txt)
-  ⎿ Error: No such file or directory (os error 2)
+● TodoWrite
+  ⎿ +[0],[1],[2],[3],[4]
 ```
 
-**设计要点**：错误状态**不折叠**，第一行输出摘要用 error 色。
+问题：
+
+1. **用户目标不可见**：用户真正需要知道的是“正在使用哪个 skill、它的用途是什么”，而不是 `SKILL.md` 的 YAML 或全文行数。
+2. **任务状态不可见**：`TodoWrite` 返回的是完整快照，但现有摘要把结构化变化退化为数组下标，用户无法知道当前在做什么、完成了多少。
+3. **信息密度失衡**：成功调用也保留大段低价值输出，挤占 assistant 回复和正在执行动作的空间。
+4. **工具模型泄漏**：工具实现、参数格式和原始输出成为主视觉对象，而不是用户可理解的活动。
+5. **错误与成功未区分**：失败需要上下文以便排查，成功通常只需要可信的结果摘要；两者不应采用同一默认展开策略。
+
+本设计采用**语义卡片**：保留 ToolCard 作为统一渲染容器，但通过类型化的语义摘要，让特定工具以用户目标而不是底层协议呈现。
 
 ---
 
-### 2.2 Write — 文件写入
+## 2. 设计目标与非目标
 
-#### 运行中
+### 2.1 目标
 
-```
-● Write (src/new_module.rs)
-```
+- 让用户在不展开卡片时回答三个问题：**做了什么、当前/最终状态、结果是否可信**。
+- 成功操作采用渐进披露：头行提供高价值摘要，原始详情按需查看。
+- `SkillTool` 用“使用 skill”的语义展示，默认隐藏 frontmatter、正文和工具参数。
+- `TodoWrite` 用任务状态差分展示，默认隐藏不变项目和内部数组索引。
+- 错误强制展开，保留足够的失败原因与可操作上下文。
+- 保持通用 ToolCard 对未识别工具、旧服务端和第三方工具的兼容性。
+- 文本、截断、颜色和交互遵循现有 TUI/i18n/theme 约束；不在渲染路径写入 atom。
 
-#### 完成
+### 2.2 非目标
 
-```
-● Write (src/new_module.rs) — 12 lines changed · +12
-```
-
-**设计要点**：
-- 头行后缀显示变更摘要，与 Edit 一致
-- 摘要从 `output_summary` 计算，≤3 行原样截断，>3 行显示 "N lines changed"
-- diff 增减统计通过 `diff_change_summary` 追加在摘要后
-
-#### 错误
-
-```
-● Write (src/main.rs)
-  ⎿ Error: Permission denied (os error 13)
-```
+- 不改变 tool 的执行顺序、权限、注册方式或 Agent 行为。
+- 不把完整工具输出永久复制到消息流；详情仍以现有可展开模型呈现。
+- 不在本轮把所有工具都改成专属组件。优先覆盖 `SkillTool` 与 `TodoWrite`，普通工具保留通用语义。
+- 不把 Todo 变成可编辑的 TUI 面板；消息卡片只负责呈现本次更新。
+- 不以 TUI 从 `peri-agent` 直接读取内部状态；跨层数据仍经 ACP DTO 与事件链传递。
 
 ---
 
-### 2.3 Edit — 文件编辑
+## 3. 设计原则
 
-#### 运行中
+### 3.1 从用户意图到执行细节逐层展开
 
+每个工具卡片有三层信息：
+
+| 层级 | 内容 | 默认可见性 | 用途 |
+| --- | --- | --- | --- |
+| 意图 | 用户可理解的动作，例如“使用 skill”“更新任务” | 始终 | 快速扫描活动流 |
+| 结果 | 状态、进度、计数、简短结论 | 始终 | 判断是否成功、是否需要关注 |
+| 详情 | 原始参数、结构化条目、截断后的工具输出 | 成功时折叠；失败时展开 | 追溯与排错 |
+
+摘要不得只反映 transport 或序列化细节，例如 JSON 数组下标、YAML 分隔线、`more lines`。除非用户主动展开，原始信息不应取代意图和结果。
+
+### 3.2 状态比装饰优先
+
+状态必须同时通过图标、文本和主题语义色传达，不能只依赖颜色。建议状态如下：
+
+| 状态 | 图标 | 文本语义 | 默认展开 |
+| --- | --- | --- | --- |
+| 运行中 | `◌` 或现有 spinner | 正在执行 | 否 |
+| 成功 | `✓` | 已完成 | 否 |
+| 等待用户 | `?` | 等待回答/确认 | 是，仅交互内容 |
+| 失败 | `×` | 失败 | 是，强制 |
+| 取消 | `—` | 已取消 | 否，除非有诊断详情 |
+
+实现使用已有主题的 success/warning/error/muted/primary 语义色，不新增硬编码色值。
+
+### 3.3 保持时间线可扫描
+
+一屏内优先呈现：仍在运行的动作、失败动作、每次 Todo 的状态变化和已完成调用的单行结果。成功卡片不应因为原始输出而显著高于相邻 assistant 文本。
+
+### 3.4 结构化数据先于启发式解析
+
+如果调用方已经拥有 Todo 项、skill 名称或描述，应通过 ACP 以结构化字段传递。TUI 不应依赖 YAML 文本、数组索引或面向日志的字符串来重建语义。
+
+若旧端点暂时只能提供文本输出，TUI 可使用保守的降级摘要，但不得假设任意文本均可解析；解析失败时显示通用 ToolCard。
+
+---
+
+## 4. 统一卡片模型
+
+### 4.1 语义摘要
+
+渲染输入应在通用 ToolCard 数据之外引入可选的 `semantic_summary`。这是面向 UI 的稳定 DTO，而非携带完整原始输出的另一份副本。
+
+概念模型：
+
+```text
+ToolCard
+├── tool_id / tool_name / lifecycle
+├── input_summary                 # 通用工具参数摘要，兼容既有路径
+├── output_summary                # 安全、截断后的通用结果文本
+├── error_summary                 # 失败时的诊断摘要
+└── semantic_summary?             # 已识别工具的用户语义
+    ├── title                     # 例如“使用 skill”或“更新任务”
+    ├── subject?                  # 例如 skill 名称
+    ├── status_text?              # 例如“已加载”“等待用户”
+    ├── result_text?              # 一行高价值结果
+    ├── details                   # 结构化、可按需展开的详情
+    └── presentation_kind         # skill / todo / generic
 ```
-● Edit (src/main.rs)
+
+约束：
+
+- `semantic_summary` 缺失时必须保持当前通用 ToolCard 的可用渲染。
+- `error_summary` 优先于成功结果；失败卡片不得被语义化隐藏错误。
+- `input_summary`、`output_summary` 和语义详情都不得包含 secret、token、密码、私钥或完整认证信息。
+- 所有摘要均必须可在窄终端按 Unicode 显示宽度截断。
+
+### 4.2 通用头行语法
+
+```text
+<状态图标> <语义标题> [· <主体>] [· <状态或结果>]
 ```
 
-#### 完成
+示例：
 
+```text
+◌ 使用 skill · using-superpowers
+✓ 使用 skill · using-superpowers · 已加载
+◌ 更新任务 · 1/5 完成
+✓ 更新任务 · 1/5 完成 · 4 项变更
+× 更新任务 · 未能保存任务清单
 ```
-● Edit (config.toml) — 3 lines changed · +3 · -2
+
+标题、状态文本和单位使用 i18n key。skill 名称、文件路径、命令、错误原文等标识符保持原样。
+
+### 4.3 展开策略
+
+| 情况 | 默认展示 | 展开规则 |
+| --- | --- | --- |
+| 运行中 | 头行 + 必要进度 | 默认收起；当前可见进度直接在头行显示 |
+| 成功且有语义摘要 | 头行 | 默认收起；用户可展开查看详情 |
+| 成功但无语义摘要 | 现有通用摘要 | 延续既有工具的折叠策略 |
+| 等待用户 | 交互提示或表单 | 展开，不隐藏可执行选择 |
+| 失败 | 头行 + 首条错误 | 强制展开，展示安全诊断详情 |
+| 取消 | 头行 + 已取消 | 默认收起 |
+
+卡片可复用现有键盘/鼠标折叠机制。折叠控制应有可见 affordance，并在可访问文本中表达“可展开/已展开”。
+
+---
+
+## 5. `SkillTool` 语义卡片
+
+### 5.1 用户模型
+
+`SkillTool` 的语义不是“读取一个 markdown 文件”，而是“为当前工作流启用/加载某项操作指南”。用户关心：名称、用途、加载状态，以及必要时的执行约束；不关心完整 skill 正文被逐行回放。
+
+### 5.2 运行中与成功状态
+
+```text
+◌ 使用 skill · using-superpowers
+
+✓ 使用 skill · using-superpowers · 已加载
 ```
 
-**设计要点**：
-- 头行后缀显示变更摘要（"— N lines changed"），有 diff 则追加增减统计
-- 摘要从 `output_summary` 计算，≤3 行原样截断，>3 行显示 "N lines changed"
-- diff 增减统计通过 `diff_change_summary` 从 hunk 统计，追加在摘要后
+如果服务端有稳定的简短描述，可在成功头行使用描述作为结果；若没有，则只显示“已加载”。例如：
 
-#### 错误
-
+```text
+✓ 使用 skill · using-superpowers · 建立会话工作流约束
 ```
-● Edit (config.toml)
+
+结果描述的优先级：
+
+1. 结构化的、显式标记为 UI 安全的 `purpose`；
+2. skill frontmatter 的单行 `description`，经服务端清理和截断；
+3. 本地化的“已加载”。
+
+不得把 raw `SKILL.md` 正文、frontmatter 分隔符、工具调用参数或“`… N more lines`”作为默认成功结果。
+
+### 5.3 展开详情
+
+用户展开成功卡片后可看到紧凑详情：
+
+```text
+✓ 使用 skill · using-superpowers · 已加载
+  ⎿ 用途：建立会话工作流约束
+  ⎿ 来源：项目 skill
+  ⎿ 说明已加载，可在后续操作中生效
+```
+
+详情限制：
+
+- 最多三条 UI 字段；每条一行，超长按显示宽度截断。
+- `source` 只显示用户可理解的来源类别（项目、用户、全局、插件、内置）；不显示本机绝对路径，除非用户明确查看诊断信息。
+- 不显示 skill 正文。若以后需要浏览 skill 内容，应使用独立的只读查看交互，而不是扩大消息卡片。
+- 失败时可增加安全错误信息，例如“未找到 skill”或“skill 内容无法读取”；绝对路径和底层错误仅在诊断详情中按现有安全策略展示。
+
+### 5.4 结构化载荷
+
+建议 ACP 在 `SkillTool` 调用开始或完成时提供：
+
+```text
+SkillSummary
+├── name: String                  # 必填，例如 using-superpowers
+├── purpose: Option<String>       # 已清理的单行说明
+├── source: Option<SkillSource>   # project/user/global/plugin/builtin
+└── loaded: bool                  # 完成时为 true
+```
+
+`purpose` 由加载 skill 的边界生成，TUI 只消费，不解析 YAML。为向后兼容，未提供载荷时 TUI 从 `skill_name` 参数生成标题，完成态仅显示“已加载”。
+
+### 5.5 错误示例
+
+```text
+× 使用 skill · using-superpowers · 加载失败
+  ⎿ 未能读取 skill 内容
+  ⎿ 重新检查 skill 是否可用，或选择其他工作流
+```
+
+错误文本应保留用户可操作的信息；不回显敏感路径、环境变量或 credential 内容。
+
+---
+
+## 6. `TodoWrite` 语义卡片
+
+### 6.1 用户模型
+
+`TodoWrite` 是用一份完整任务快照更新计划。消息流应展示**本次更新带来的变化**，而非把整个快照反复渲染，也不能仅显示数组下标。
+
+头行使用当前快照的状态汇总：
+
+```text
+◌ 更新任务 · 正在保存
+✓ 更新任务 · 1/5 完成 · 4 项变更
+✓ 更新任务 · 3/3 完成 · 任务已完成
+```
+
+计数格式为 `已完成/总数`。空任务清单显示：
+
+```text
+✓ 更新任务 · 已清空任务清单
+```
+
+### 6.2 差分规则
+
+对同一会话内相邻两次成功的 Todo 快照计算差分。每个 Todo 项的匹配键按下列优先级确定：
+
+1. 协议未来提供的稳定 `id`；
+2. 在当前兼容阶段，以完整 `content` 字符串作为键；
+3. 同文案重复时，以输入顺序进行稳定的一对一匹配。
+
+`active_form` 只是进行中描述，不作为匹配键。若同一 `content` 的语义被重写，视为“移除旧项 + 新增新项”，而不猜测重命名。
+
+差分类型：
+
+| 类型 | 条件 | 行前缀 |
+| --- | --- | --- |
+| 新增 | 当前快照存在、前一快照不存在 | `+` |
+| 开始 | `pending → in_progress` | `↻` |
+| 完成 | `pending/in_progress → completed` | `✓` |
+| 重新打开 | `completed → pending/in_progress` | `↺` |
+| 描述更新 | 匹配项 `active_form` 变化 | `~` |
+| 移除 | 前一快照存在、当前快照不存在 | `−` |
+
+状态展示优先使用 `active_form`（例如“正在了解现有 TUI 工具调用渲染”）；无 `active_form` 时回退到 `content`。`content` 仍是任务的稳定、可复制描述，应在展开详情中可见。
+
+### 6.3 首次快照与正常更新
+
+首次收到 Todo 快照没有前态，默认展示当前的非 completed 项；若项目数过多，展示最多三项并给出剩余数量：
+
+```text
+✓ 更新任务 · 0/4 完成 · 已建立任务计划
+  + 了解现有 TUI 工具调用渲染
+  + 澄清显示设计目标
+  + 比较显示设计方案
+  ⎿ 另有 1 项待处理
+```
+
+后续更新只显示变化：
+
+```text
+✓ 更新任务 · 1/4 完成 · 2 项变更
+  ✓ 了解现有 TUI 工具调用渲染
+  ↻ 正在澄清显示设计目标
+```
+
+全量完成：
+
+```text
+✓ 更新任务 · 4/4 完成 · 任务已完成
+  ✓ 编写设计文档
+```
+
+若快照完全相同，显示不超过一行，避免制造虚假的“更新”：
+
+```text
+✓ 更新任务 · 1/4 完成 · 无状态变化
+```
+
+### 6.4 变更数量与详情上限
+
+- 头行显示总变更数，统计新增、状态变化、描述更新和移除。
+- 默认详情最多展示三项变化；其余显示“另有 N 项变更”。
+- 完成、失败和当前 `in_progress` 项优先于 pending 新增项。
+- 用户展开时展示本次全部变更，以及一份紧凑的当前任务清单；当前清单最多显示十项，再提供余量提示。
+- 不在每个历史 Todo 卡片中重复渲染完整清单。
+
+展开示例：
+
+```text
+✓ 更新任务 · 1/5 完成 · 4 项变更
+  ✓ 探索现有 TUI、工具调用与任务状态的渲染约定
+  ↻ 正在确认日志展示的受众、折叠交互、状态密度和兼容约束
+  ○ 提出可选的信息层级与状态呈现方案
+  ⎿ 当前任务：1 完成 · 1 进行中 · 3 待处理
+```
+
+### 6.5 结构化载荷与状态归属
+
+建议 ACP 为 Todo 工具结果提供：
+
+```text
+TodoSnapshot
+├── items: Vec<TodoItem>
+│   ├── id: Option<String>        # 后续协议扩展，优先用于匹配
+│   ├── content: String
+│   ├── active_form: Option<String>
+│   └── status: pending | in_progress | completed
+└── revision: Option<u64>         # 可选，仅用于诊断与去重
+```
+
+TUI 的会话状态维护最近一次**成功应用的完整快照**，用于将下一快照计算为差分。该缓存是 ACP 事件到 ViewModel 的派生状态，必须在会话切换、重置、回放边界变化时清理，避免跨会话串联。
+
+Todo 工具失败时不得覆盖最近成功快照：
+
+```text
+× 更新任务 · 未能保存任务清单
+  ⎿ 任务状态没有变更
+  ⎿ <安全的错误摘要>
+```
+
+如果 ACP 未提供 `TodoSnapshot`，TUI 不解析 `+[0]` 一类文本。它显示通用安全结果：
+
+```text
+✓ 更新任务 · 已提交任务更新
+```
+
+并保留原始结果在用户展开的通用详情中，直到服务端完成结构化迁移。
+
+---
+
+## 7. 通用工具卡片与兼容性
+
+### 7.1 未识别工具
+
+未知工具继续使用通用模型：
+
+```text
+✓ Read · peri-tui/src/kit/tool_display.rs · 95 行
+✓ Shell · cargo test -p peri-tui --lib
+× Edit · config.toml
   ⎿ old_string not found in file
 ```
 
----
+既有的名称映射、参数摘要和输出摘要可以继续存在；专属语义摘要仅覆盖已经有明确用户模型的工具。
 
-### 2.5 Glob — 文件匹配
+### 7.2 迁移顺序
 
-#### 运行中
+1. 定义通用 `semantic_summary` 及 `SkillSummary`、`TodoSnapshot` DTO。
+2. 在 ACP 事件映射中生成并转发载荷，保持没有该载荷的客户端可工作。
+3. 在 TUI bridge/ViewModel 中维护最近 Todo 快照，生成 Todo 差分 ViewModel。
+4. 在消息区为 `skill` 和 `todo` 增加专属渲染分支；未识别变体回退通用 ToolCard。
+5. 更新交互、i18n、主题和测试；完成后再考虑其他具备稳定语义的工具。
 
-```
-● Glob (pattern: "**/*.rs")
-```
+迁移不得修改工具注册、工具可见性或中间件顺序。所有新增事件字段必须覆盖 Agent 发射、ACP 映射/能力门控（如适用）、TUI 消费和终止状态。
 
-#### 完成
+### 7.3 回放与幂等性
 
-```
-● Glob (pattern: "**/*.rs") — 23 matches
-```
+- 同一 `tool_id` 的重复完成事件不得重复追加 Todo 差分。
+- 回放模式应使用事件顺序重建 Todo 快照；缺失前态时按“首次快照”渲染。
+- 迟到、属于旧会话或已被重置的事件必须被 bridge 忽略，不能影响当前任务计数。
+- 若 `revision` 可用，TUI 可拒绝落后的 Todo 快照；无 `revision` 时以会话内已接收完成事件顺序为准。
 
-**设计要点**：头行后缀显示匹配数量（"— N matches"），从输出非空行数动态计算。
+### 7.4 `Agent` 内部子工具调用
 
-#### 错误
+#### 已观察到的回归（2026-07-29）
 
-```
-● Glob (pattern: "**[invalid")
-  ⎿ Error: Invalid glob pattern
-```
+当顶层 `Agent` 工具执行时，消息区仅显示其头行，例如：
 
-**设计要点**：参数摘要提取 `pattern`，截断 200 字符。
-
----
-
-### 2.6 Grep — 内容搜索
-
-#### 运行中
-
-```
-● Grep (pattern: "fn render_tool")
+```text
+● Agent (cwd: /Users/konghayao/code/ai/perihelion)
 ```
 
-#### 完成
+其内部发起的 `Read`、`Grep`、`Bash` 等子工具调用完全不显示；该现象当前为必现。它不同于 Agent 最终返回文本缺失：本问题中，内部工具调用本身没有进入用户可见的消息时间线。
 
-```
-● Grep (pattern: "fn render_tool") — 8 matches
-```
+期望 `Agent` 卡片按实际调用顺序呈现完整的子工具调用及其生命周期（开始、完成或失败），并可沿用通用 ToolCard 的展开、错误和安全输出规则。顶层 `Agent` 及其子调用必须以稳定的父子关系关联，避免与同一 turn 的其他工具调用混排或重复。
 
-**设计要点**：头行后缀显示匹配数量（"— N matches"），从输出非空行数动态计算。
+建议跨层明确传递以下最小关联信息：
 
-#### 错误
-
----
-
-### 2.7 folder_operations — 目录操作
-
-#### 运行中
-
-```
-● Folder (list · /tmp/workdir)
+```text
+NestedToolCall
+├── tool_id
+├── parent_tool_id                # 顶层 Agent 工具调用 ID
+├── tool_name / lifecycle
+├── input_summary / output_summary / error_summary
+└── sequence                       # 父 Agent 内的稳定调用顺序
 ```
 
-#### 完成（展开）
+约束：
 
-```
-● Folder (create · /tmp/workdir)
-```
-
-#### 错误
-
-```
-● Folder (create · /root/secret)
-  ⎿ Error: Permission denied
-```
-
-**设计要点**：参数摘要提取 `operation` + `folder_path`。目录操作通常无复杂输出，显示名映射为 "Folder"。
+- 不通过解析 Agent 的最终文本或工具原始输出重建子调用。
+- 事件必须覆盖 Agent 发射、ACP 映射及能力门控（如适用）、TUI bridge 和终止状态；任一层丢失关联均视为缺陷。
+- 成功子调用可以折叠，但不得完全省略；失败子调用必须自动展开。
+- 继续执行现有 secret 过滤、Unicode 截断和会话隔离规则。
 
 ---
 
-### 2.8 Bash — Shell 执行
+## 8. 交互、布局与可访问性
 
-#### 运行中
+### 8.1 折叠交互
 
-需要计算时间的功能
+- 成功卡片默认折叠，焦点到达后可用现有 Enter/Space 或鼠标点击切换。
+- 失败卡片初始展开，但用户仍可在阅读后折叠。
+- 等待用户的表单和可操作控件必须保持可见，不受成功卡片折叠规则影响。
+- 展开状态按 tool call 实例保存，不能因列表重新渲染而丢失。
 
-```
-● Shell (cargo build --release)
-  ⎿  Running (1min)
-```
+### 8.2 窄终端
 
-#### 完成
+- 标题、主体和结果按 Unicode 显示宽度截断，不按字节长度截断。
+- 保留状态图标和语义标题；优先截断结果，再截断主体。
+- 宽度不足时头行换为两行，而不是挤压成无法辨认的缩写：
 
-```
-● Shell (cargo build -p peri-tui)
-  ⎿    Compiling peri-tui v0.1.0
-  ⎿    Compiling peri-acp v0.1.0
-  ⎿    Finished dev [unoptimized + debuginfo] in 3.45s
-  ⎿
-```
-
-**设计要点**：
-- 参数摘要提取 `command`，截断 400 字符
-- 默认折叠（Shell 输出可能极长）
-- 展开后最多 4 行 × 400 字符
-
-#### 错误（非零退出码）
-
-```
-● Shell (rm -rf /protected)
-  ⎿ rm: cannot remove '/protected': Permission denied
+```text
+✓ 更新任务 · 1/5 完成
+  4 项变更
 ```
 
-#### 超时
+- 所有详细行遵循消息区已有换行和滚动规则。
 
+### 8.3 本地化
+
+新增用户可见文案必须在 `peri-tui/locales/en/main.ftl` 与 `peri-tui/locales/zh-CN/main.ftl` 同步定义。建议包含：
+
+```text
+工具动作：使用 skill、更新任务
+状态：已加载、加载失败、正在保存、任务已完成、已清空任务清单、无状态变化
+单位：项变更、另有 N 项变更、当前任务、完成、进行中、待处理
+Todo 差分：新增、开始、完成、重新打开、更新、移除
 ```
-● Shell (sleep 999)
-  ⎿ Command timed out after 120s
-```
+
+Skill 名、任务正文、工具名、路径和错误原文不是翻译资源。
 
 ---
 
-### 2.9 WebSearch — 网页搜索
+## 9. 安全与数据处理
 
-#### 运行中
-
-```
-● WebSearch (query: "rust async best")
-```
-
-#### 完成（折叠）
-
-```
-● WebSearch (query: "rust async best")
-```
-
-#### 完成（展开）
-
-```
-● WebSearch (query: "rust async best practices")
-  ⎿ 1. Async Programming in Rust | Official Docs
-  ⎿ 2. Tokio Tutorial - Asynchronous Rust
-  ⎿ 3. Rust Async Book - Comprehensive Guide
-  ⎿ 4. Comparing async patterns in Rust vs Go
-  ⎿ … 6 more results
-```
-
-#### 错误
-
-```
-● WebSearch (query: "")
-  ⎿ Search query cannot be empty
-```
-
-**设计要点**：参数 `query` 截断 60 字符。显示名 "WebSearch"。
+- 摘要生成边界必须过滤/避免输出 secret。不能因为语义卡片而复制原始输入或完整输出到更多位置。
+- `SkillSummary.purpose` 仅使用公开 frontmatter 的单行描述或经过明确清理的服务端字段；不显示正文中可能存在的本地路径、命令或凭据示例。
+- Todo `content` 与 `active_form` 是用户/agent 文本，应沿用既有消息安全策略；不得额外记录到 tracing 或遥测。
+- 错误卡片提供可行动的安全上下文，不应回显认证字段、环境变量值、完整连接串或私有文件内容。
 
 ---
 
-### 2.10 WebFetch — 网页抓取
+## 10. 验收标准与测试矩阵
 
-#### 运行中
+### 10.1 `SkillTool`
 
-```
-● WebFetch (url: https://docs.rs/tokio/latest/tokio/)
-```
+| 场景 | 期望 |
+| --- | --- |
+| 调用开始 | 显示“使用 skill · <name>”，无 YAML/正文 |
+| 成功且有 purpose | 显示“已加载”及一行 purpose，默认折叠 |
+| 成功但缺少结构化摘要 | 使用 `skill_name`，显示“已加载”，不失败 |
+| 展开 | 最多三条紧凑详情，不显示全文 |
+| 失败 | 自动展开，显示安全错误和可操作提示 |
+| 窄终端 | 正确按显示宽度截断/换行，无 Unicode 断裂 |
 
-#### 完成（展开）
+### 10.2 `TodoWrite`
 
-```
-● WebFetch (url: https://docs.rs/tokio/latest/tokio/)
-  ⎿ Tokio - An asynchronous runtime for Rust
-  ⎿ The Tokio runtime provides I/O, networking,
-  ⎿ scheduling, timers, and more. It is the
-  ⎿ foundation for many async applications...
-  ⎿ … 142 more lines
-```
+| 场景 | 期望 |
+| --- | --- |
+| 首次快照 | 显示计划已建立、汇总和至多三项当前待办 |
+| pending → in_progress | 显示 `↻` 与 `active_form` |
+| in_progress → completed | 显示 `✓` 与任务描述 |
+| 多项变化 | 头行给出总数，默认详情至多三项并显示余量 |
+| 无变化快照 | 不显示数组下标，只显示“无状态变化” |
+| 清空快照 | 显示“已清空任务清单” |
+| 工具失败 | 不覆盖上一次成功快照，错误自动展开 |
+| 会话切换/重置 | 不与旧会话快照计算差分 |
+| 重放重复事件 | 不重复产生变更卡片 |
 
-#### 完成（截断，>2000 行）
+### 10.3 `Agent` 内部子工具调用
 
-```
-● WebFetch (url: https://example.com/large-doc)
-  ⎿ [Content truncated: 2340 lines total]
-  ⎿ First few lines of content here...
-  ⎿ ...
-  ⎿ Last line of visible content...
-```
+| 场景 | 期望 |
+| --- | --- |
+| Agent 发起子工具 | 子工具在对应 Agent 卡片内按 `sequence` 出现，不仅显示顶层 Agent 头行 |
+| 子工具完成 | 显示通用 ToolCard 的安全摘要；成功时允许折叠但不能省略 |
+| 子工具失败 | 显示失败状态和安全诊断详情，并自动展开 |
+| 多个子工具 | 按父 Agent 内调用顺序呈现，不与顶层或其他 Agent 的工具混排 |
+| 事件重放或重复送达 | 同一 `tool_id` 不重复渲染，且仍保留正确父子关系 |
+| 会话切换或重置 | 迟到的子调用事件不进入当前会话或挂接到错误的 Agent |
 
-#### 错误
+### 10.4 回归验证
 
-```
-● WebFetch (url: https://invalid.domain/nonexistent)
-  ⎿ DNS error: no such host
-```
-
-#### 超时
-
-```
-● WebFetch (url: https://slow-server.example.com)
-  ⎿ Request timeout after 30s
-```
-
-**设计要点**：参数 `url` 不截断。显示名 "WebFetch"。
-
----
-
-### 2.11 TodoWrite — 任务清单
-
-#### 运行中
-
-```
-● TodoWrite
-```
-
-#### 完成（展开）
-
-```
-● TodoWrite
-  ⎿ ☐ 实现登录模块 — pending
-  ⎿ ☑ 添加单元测试 — completed
-  ⎿ ☐ 编写 API 文档 — pending
-  ⎿ [*] 代码审查 — in_progress
-```
-
-**设计要点**：
-- 始终展开（用户需要看到任务列表）
-- 各状态图标：`☐` pending / `[*]` in_progress / `☑` completed
-- 显示名 "TodoWrite"（原样）
-
-#### 空清单（所有任务完成后）
-
-```
-● TodoWrite
-  ⎿ (无待办项)
-```
+- 通用工具在缺少 `semantic_summary` 时继续遵守当前折叠和错误规则。
+- `cargo test -p peri-tui --lib` 覆盖渲染、截断、状态与会话重置。
+- `cargo test -p peri-acp --lib mapper` 覆盖新增/变更事件的映射。
+- 若 DTO 有序列化变更，增加 JSON round-trip 与缺失字段兼容测试。
+- 手工验证运行中、成功、失败、窄终端、折叠/展开、会话切换和 replay。
+- 完成时运行 `git diff --check`，并确认新增 UI 文案在中英文 FTL 中齐全。
 
 ---
 
-### 2.12 AskUserQuestion — 用户问答
-
-AskUserQuestion 使用 `AskUserBlock` ViewModel（非 ToolCard），渲染逻辑独立。
-
-#### 问题展示
-
-```
-● User answered Peri's questions:
-  ⎿ 部署方式 → Docker
-  ⎿ 环境 → Production
-```
-
-#### 未回答时（运行中）
-
-```
-● AskUserQuestion选择部署方式)
-  After choosing, the answer will appear here.
-```
-
-**设计要点**：
-- 仅问题已回答后转换到 `AskUserBlock`，ToolCard 折叠态显示参数摘要
-- 展开后每个 item 显示 `header → answer`
-
----
-
-### 2.13 Agent — SubAgent 派发
-
-SubAgent 使用 `SubAgentGroup` ViewModel，渲染逻辑独立于 ToolCard。
-
-#### 运行中
-
-```
-❯ Agent(sub-search) 搜索 rust 异步模式… · ⏳ 5 步
-    ● Read (src/search.rs)
-      ⎿ pub fn search(query: &str) -> Vec<Result> { ... }
-      ⎿ … 23 more lines
-    ● Grep (pattern: "async fn")
-      ⎿ src/search.rs:12
-      ⎿ src/search.rs:45
-    ● Shell (cargo test search -- --nocapture)
-    … 2 more tools
-```
-
-#### 完成
-
-```
-❯ Agent(sub-search) 搜索 rust 异步模式… ✅
-    ● Read (src/search.rs)
-    ● Grep (pattern: "async fn")
-    ● Shell (cargo test search -- --nocapture)
-    ⎿ 搜索完成：在 3 个文件中找到 12 个异步函数
-```
-
-**状态指示器**：
-| 状态 | 图标 |
-|------|------|
-| 运行中 | ⏳ + 步数 |
-| 完成 | ✅ |
-| 失败 | ❌ |
-
-#### 折叠态
-
-```
-❯ Agent(sub-search) 搜索 rust 异步模式… ⏳ 5 步
-```
-
-#### 设计要点
-
-- 嵌套 ToolCard 最多保留 **最后 5 个**
-- 跳过内部 `AssistantBubble`
-- 子消息缩进 **2 空格**
-- 完成后显示 `final_result` 摘要（前 3 行，每行 80 字符）
-- 折叠时运行中仍显示步数标签；完成后仅显示 ✅
-
-#### 失败
-
-```
-❯ Agent(sub-search) 搜索 rust 异步模式… ❌
-    ● Bash (cargo build)
-      ⎿ error[E0432]: unresolved import `foo`
-```
-
----
-
-### 2.14 AgentResult — SubAgent 结果回传
-
-#### 完成（自动展开）
-
-```
-● AgentResulttask_a1b2c3)
-  ⎿ SubAgent subtask completed: 5 tool calls, 2 errors
-  ⎿ Final output: The implementation is ready for review
-```
-
-#### 错误
-
-```
-● AgentResulttask_a1b2c3)
-  ⎿ SubAgent subtask failed: context budget exceeded
-```
-
-**设计要点**：
-- 自动展开（`AUTO_EXPAND`）
-- 参数摘要提取 `task_id`，截断 12 字符
-- 显示名原样（当前为 "AgentResult"）
-
----
-
-### 2.15 ExecuteExtraTool — 延迟工具代理
-
-#### 2.15.1 artifact — 工件上传
-
-##### 运行中
-
-```
-● artifact (index.html)
-```
-
-##### 完成
-
-```
-● artifact (index.html)
-  ⎿ Uploaded to https://artup.example.com/abc123
-  ⎿ Expires in 7 days
-```
-
-##### 错误
-
-```
-● artifact (/invalid/path.html)
-  ⎿ Error: file not found or not accessible
-```
-
-**设计要点**：参数摘要提取 `file_path`，不截断。显示名 "artifact"。
-
----
-
-#### 2.15.2 LSP — 语言服务
-
-##### 运行中
-
-```
-● LSP (hover)
-```
-
-##### 完成
-
-```
-● LSP (hover)
-  ⎿ pub fn render_tool_card(data: &ToolCardData, ...) -> Vec<Line>
-  ⎿ Renders a tool call card with status indicator,
-  ⎿ parameter summary, and output block.
-  ⎿ … 3 more lines
-```
-
-##### 错误
-
-```
-● LSP (hover)
-  ⎿ LSP server not responding
-```
-
-**设计要点**：参数摘要提取 `operation`，截断 40 字符。LSP 操作（hover/definition/completion 等）的语义由 LLM 理解，渲染层不区分。
-
----
-
-#### 2.15.3 MCP 工具
-
-```
-● github (search_repos)
-  ⎿ Found 42 repositories matching "rust async"
-  ⎿ 1. tokio-rs/tokio ★12.3k
-  ⎿ 2. async-rs/async-std ★3.8k
-  ⎿
-  ⎿ … 40 more results
-```
-
-**设计要点**：显示名使用 MCP 服务名（如 `github`），参数提取 `tool_name`。
-
----
-
-#### 2.15.4 Cron 工具
-
-##### 运行中
-
-```
-● CronRegister (*/5 * * * *)
-```
-
-##### 完成
-
-```
-● CronRegister (*/5 * * * *)
-  ⎿ Scheduled: health_check every 5 minutes
-```
-
-##### 错误
-
-```
-● CronList
-  ⎿ Cron service not available
-```
-
-**设计要点**：Cron 系列工具（CronRegister/CronList/CronRemove）统一走 ExecuteExtraTool 分发。
-
----
-
-**总设计要点**：
-- 自动展开（`AUTO_EXPAND`）
-- 参数提取：`ExecuteExtraTool` → `tool_name`（40 字符），`SearchExtraTools` → `query`（40 字符）
-- 显示名：Bash → Shell，folder_operations → Folder，其余工具保留原始名称
-
----
-
-### 2.16 SearchExtraTools — 工具搜索
-
-```
-● SearchExtraTools (query: "slack send")
-  ⎿ Found 2 matching tools:
-  ⎿   · slack.send_message
-  ⎿   · slack.send_direct
-```
-
-**设计要点**：Meta 工具，LLM 不可直接看见；结果自动展开。
-
----
-
-## 3. Diff 块渲染（已废弃）
-
-> **更新 (2026-07-06)**：diff 块渲染已从 TUI 中完全移除。`render_diff_block()` 函数已删除，
-> `Ctrl+O` 切换 diff 的功能已移除。Write/Edit 工具现在直接显示 output_summary
-> （如 "12 lines changed"），不再展示 diff 内容。
->
-> ACP 层 (`view_mapper.rs`) 仍在构建 `DiffBlock` 数据（供 IDE 等外部 consumer 使用），
-> 但 TUI 渲染管道不再消费该字段。
-
----
-
-## 4. SystemNote — 系统通知
-
-非工具调用，但常与工具结果联动展示。
-
-```
-✻ System note (Info)
-· This is a regular note line
-· ⚠ 已中断 — Agent stopped by user
-· ❌ Session failed to initialize
-⎿ This line starts with ⎿ prefix
-  ⎿ Error summary line — error colored
-```
-
-**规则**：
-| 行前缀 | 颜色 | 说明 |
-|--------|------|------|
-| `✻` | `dim` | 元信息 |
-| `⎿`（行首） | `muted` | 结果引用 |
-| `  ⎿`（缩进） | `error` | 错误摘要 |
-| 其他 | 行内容检测 | 含 `❌`/`失败`/`error` → error；`⚠`/`已中断` → warning；否则 muted |
-
----
-
-## 5. CollapsedGroup — 聚合折叠组
-
-```
-┌ 5 tool calls collapsed ────────────────┐
-│ [内部可包含多个 ToolCard]               │
-└────────────────────────────────────────┘
-```
-
-**设计要点**：标题 `"N tool calls collapsed"`，内部保留完整的 `view_models`。
-
----
-
-## 6. Divider — 回合分隔线
-
-```
-─────────────────── Turn 3 ───────────────────
-```
-
-**设计要点**：`label: Option<String>`，无 label 时纯分隔线。
-
----
-
-## 7. 数据模型参考
-
-### 7.1 ToolCardData
-
-```rust
-pub struct ToolCardData {
-    pub tool_id: String,          // 与 AI 消息中 tool_use 的 id 配对
-    pub tool_name: String,        // 原始工具名（Bash/Read/Write/Edit/...）
-    pub input_summary: String,    // ACP 层预摘要的参数文本
-    pub output_summary: String,   // 工具执行结果文本
-    pub is_error: bool,           // 执行失败标志
-    pub is_running: bool,         // 流式进行中（default false）
-    pub diff: Option<DiffBlock>,  // Write/Edit 的结构化 diff（TUI 不再消费，仅 IDE 使用）
-    pub content_hash: u64,        // #[serde(skip)] 增量渲染缓存键
-}
-```
-
-### 7.2 DiffBlock
-
-```rust
-pub struct DiffBlock {
-    pub path: String,
-    pub hunks: Vec<Hunk>,
-    pub is_binary: bool,
-    pub is_too_large: bool,
-    pub is_new_file: bool,
-}
-
-pub struct Hunk {
-    pub old_range: String,    // e.g. "1,3"
-    pub new_range: String,    // e.g. "1,4"
-    pub lines: Vec<HunkLine>,
-}
-
-pub struct HunkLine {
-    pub kind: HunkLineKind,   // Add / Del / Context
-    pub text: String,
-    pub old_no: Option<u32>,
-    pub new_no: Option<u32>,
-}
-```
-
-### 7.3 SubAgentGroupData
-
-```rust
-pub struct SubAgentGroupData {
-    pub agent_id: String,
-    pub agent_name: String,
-    pub view_models: Vec<ViewModel>,  // 嵌套子 ViewModel
-    pub collapsed: bool,
-    pub is_running: bool,
-    pub content_hash: u64,
-}
-```
-
----
-
-## 8. 渲染管道
-
-```
-ExecutorEvent (ToolStart / ToolEnd)
-        │
-        ▼
-event/mapper.rs   ─── map_event() → SessionUpdate (ACP 标准协议)
-        │
-        ▼
-event/router.rs   ─── route() → peri/agent_event (TUI 专属通道)
-        │
-        ▼
-acp_bridge.rs     ─── dispatch_and_notify() → VIEW_MODELS atom
-        │
-        ▼
-view_mapper.rs    ─── BaseMessage → ViewModel 转换（增量缓存）
-    ├─ Human        → UserBubble / SystemNote
-    ├─ Ai           → AssistantBubble（+ tool_card_ids）
-    ├─ Tool(Agent)  → SubAgentGroup
-    ├─ Tool(Ask)    → AskUserBlock
-    ├─ Tool(其他)   → ToolCard
-    └─ System       → SystemNote
-        │
-        ▼
-render_bridge.rs  ─── 独立 tokio task
-    ├─ 监听 ACP 事件 + 宽度变更
-    ├─ content_hash 增量检测 → 跳过未变更的 ViewModel
-    ├─ render_v2_vm() 逐条转 Line<'static>
-    ├─ 构建 cumulative_heights + wrap_map
-    └─ 写入 RENDER_CACHE atom
-        │
-        ▼
-message_area.rs   ─── ratatui-kit ScrollView
-    ├─ 从 RENDER_CACHE 读取 Vec<Line<'static>>
-    ├─ viewport_clip() 二分查找可见范围
-    └─ Paragraph + Wrap 渲染
-```
-
-### 8.1 关键常量
-
-| 常量 | 值 | 位置 |
-|------|----|------|
-| 输出最大行数 | 4 | `compact_output_lines` |
-| 每行最大字符 | 400 | `compact_output_lines` |
-| 参数摘要最大字符 | 工具相关 | `format_tool_args` |
-| 闪烁周期 | ~800ms | `RENDER_CALL_COUNT / 16` |
-| 子 Agent 工具上限 | 5 | `render_subagent_group` |
-
----
-
-## 9. 设计原则
-
-1. **信息密度优先** — 默认折叠低价值结果（Read/Glob/Grep），展开高价值改动（Write/Edit 显示 output_summary）
-2. **错误必须可见** — 任何 `is_error=true` 强制展开，红色 `●` 醒目标识
-3. **增量渲染** — `content_hash` 跳过未变更项，避免全量重建
-4. **统一状态语言** — 三种状态（运行中/完成/失败），统一 `●` 图标，三套颜色（白/绿/红）
-5. **参数一行摘要** — 每工具定制关键字段提取 + 独立截断长度
-6. **流式友好** — `is_running` 支持逐行追加，指示器 800ms 闪烁
-7. **折叠独立** — 工具卡片折叠仅由 tool_name + is_running/is_error 决定，不再区分 diff 可见性
-8. **SubAgent 隔离** — 嵌套消息缩进处理，最多 5 个 ToolCard，跳过 AssistantBubble
-
-
----
-
-## 10. 后台显示区域 (BgTaskArea)
-
-> 版本: 1.0 | 日期: 2026-07-10
-> 对应代码: `peri-tui/src/kit/bg_task_area.rs` · `app_shell.rs` · `acp_events.rs` · `atoms.rs`
-> 架构: v2 ratatui-kit 单路径
-
-### 10.1 设计总览
-
-后台显示区域位于 AppShell 根层，在 StatusBar **下方**，屏幕最底部。仅显示**后台异步任务**（bg subagent / bg shell / workflow），同步 Agent 工具调用不进入此区域。
-
-```
-┌─────────────────────────────────────────────────┐
-│  AppShell (Vertical, fill)                       │
-│                                                  │
-│  SessionColumn (fill)                            │
-│    MessageArea · PanelOverlay · InputArea        │
-│                                                  │
-│  StatusBar (height: 4)                           │
-│    yolo  peri   claude-4.5  CPU12%  MEM2G        │
-│    Ctrl+C Exit  Ctrl+N New  Ctrl+S Submit        │
-│                                                  │
-│  ┌────────────────────────────────────────────┐  │
-│  │ ★ 后台显示区域 (height: dynamic, max 5)    │  │  ← 新区域
-│  │   ● explorer  searching codebase  Grep · 3  │  │
-│  │   ◎ coder     waiting for LLM              │  │
-│  │   ✔ workflow  build pipeline    · 12        │  │
-│  │   … 2 more                                 │  │
-│  └────────────────────────────────────────────┘  │
-│                                                  │
-│  PopupOverlay (independent layer)                │
-└─────────────────────────────────────────────────┘
-```
-
-#### 关键约束
-
-| 约束 | 值 |
-|------|-----|
-| 位置 | AppShell 根层，StatusBar 下方 |
-| 仅显示 | 后台异步任务（is_background=true） |
-| 最大行数 | 5 行，超出显示 `… N more` |
-| 交互 | 纯展示，不响应键盘/鼠标 |
-| 消失行为 | 完成后保留 3 秒，到期直接移除 |
-
-### 10.2 单行格式
-
-```
-● explorer  searching codebase  Grep · 3 tools
-◎ coder     thinking            —
-✔ workflow  build completed     · 12 tools
-✗ bg-shell  npm install         · 0 tools
-```
-
-格式：**`状态符号 agent_type  desc  current_tool · N tools`**
-
-| 列 | 说明 | 截断 |
-|----|------|------|
-| 状态符号 | 见 §10.3 | — |
-| agent_type | 任务类型标签（bg_task.kind 或 subagent_type） | 不截断 |
-| desc | 任务描述（`BgTaskEntry.summary`） | 弹性，尾部 `…` |
-| current_tool | 当前执行的工具名，**空闲时不显示** | 不截断 |
-| tool_count | 已完成的工具调用计数 | `· N tools` |
-
-#### 空闲态（无工具在执行）
-
-当任务已启动但当前未执行工具（等待 LLM 响应），`current_tool` 列完全不渲染：
-
-```
-◎ coder  refactoring module
-```
-
-### 10.3 状态符号
-
-| 状态 | 符号 | 颜色 | 触发条件 |
-|------|------|------|----------|
-| 空闲 | `◎` | 黄色 (Yellow) | 已启动，未执行工具 |
-| 运行中 | `●` | 白色闪烁 (800ms) | 工具执行中 (current_tool 非空) |
-| 完成 | `✔` | 绿色 (Green) | 任务结束，3 秒倒计时中 |
-| 失败 | `✗` | 红色 (Red) | 任务失败 |
-
-运行中闪烁机制复用工具卡片逻辑：每约 50ms `RENDER_CALL_COUNT += 1`，以 `(count / 16) % 2 == 0` 判定可见/隐藏，周期约 800ms。
-
-**状态转换图**：
-
-```
-BgTaskStarted ──→ ◎ 空闲
-                    │
-      ToolStarted ──┘
-                    │
-                    ▼
-                  ● 运行中 (current_tool=Read)
-                    │
-      ToolEnded ────┘
-                    │
-                    ▼
-                  ◎ 空闲 (current_tool=None, tool_count+=1)
-                    │
-                    │ (下一次 ToolStarted)
-                    │
-                    ▼
-                  ● 运行中 (current_tool=Bash)
-                    │
-      BgTaskCompleted ──┘
-                    │
-                    ▼
-                  ✔ 完成 (3 秒倒计时 → 消失)
-
-      BgTaskCompleted(success=false) ──→ ✗ 失败 (3 秒倒计时 → 消失)
-```
-
-### 10.4 完成/失败后 3 秒倒计时
-
-- 完成瞬间切换符号为 `✔`（绿色）或 `✗`（红色）
-- `is_active=false`，启动 3 秒 timer
-- 3 秒期满，从 atom 中移除条目
-- 无渐变、无淡出——直接消失
-- timer 由渲染层或独立 tick 驱动，不阻塞渲染帧
-- 实现方案：`BgDisplayEntry` 存储 `completed_at: Instant`，每次 render 检查 `elapsed > 3s` 则移除
-
-### 10.5 溢出行为
-
-最多显示 5 行（5 条活跃/缓冲中的任务）。超出时最后一行替换为：
-
-```
-… 3 more
-```
-
-muted 色，不可交互。排序规则：**活跃任务在前（运行中 + 空闲），完成/失败缓冲任务在后**。
-
-### 10.6 布局计算
-
-BackgroundTaskArea 高度由内容决定：
-
-```
-height = min(active_entries, 5)
-```
-
-- 0 条任务 → 高度 0，不占屏幕空间
-- 1-5 条 → 高度 = 条目数
-- 6+ 条 → 高度 = 5（最后一行显示 `… N more`）
-
-AppShell 根层 flex 不变，BackgroundTaskArea 在 StatusBar 下方独立渲染，不参与 SessionColumn 高度竞争。
-
-### 10.7 数据模型
-
-#### 10.7.1 TUI 侧原子
-
-```rust
-// peri-tui/src/kit/atoms.rs
-
-/// 后台显示区域条目
-#[derive(Debug, Clone)]
-pub struct BgDisplayEntry {
-    pub id: String,              // task_id 或 agent_id，唯一标识
-    pub agent_type: String,      // "explorer" / "coder" / "bg-shell" / "workflow"
-    pub desc: String,            // 任务描述（来自 BgTaskEntry.summary）
-    pub current_tool: Option<String>,  // 当前工具名（None 为空闲态）
-    pub tool_count: u32,         // 已完成工具调用计数
-    pub is_active: bool,         // false → 3s 倒计时中
-    pub is_error: bool,          // 失败标志
-    pub completed_at: Option<Instant>,  // 完成时间（3s 倒计时起点）
-}
-
-/// 后台显示区域原子
-pub static BG_DISPLAY: AtomStatic<Vec<BgDisplayEntry>> = AtomStatic::new(|| Vec::new());
-
-/// 后台 agent_id 集合——用于判断 tool 事件是否属于后台任务
-pub static BG_AGENT_IDS: AtomStatic<HashSet<String>> = AtomStatic::new(|| HashSet::new());
-```
-
-#### 10.7.2 agent_type 值来源
-
-| 数据源 | kind 字段 | agent_type 显示 | desc 来源 |
-|--------|----------|----------------|-----------|
-| bg fork subagent | Agent | agent_def 的 type 名（如 `coder`、`explorer`） | `BgTaskEntry.summary` |
-| bg shell | Shell | `"bg-shell"` | 命令摘要（如 `"npm install"`） |
-| workflow | Workflow | `"workflow"` | workflow 名称 |
-
-### 10.8 事件写入路径
-
-所有写入集中在 `dispatch_and_notify` 中，分三类事件：
-
-#### 10.8.1 任务启动
-
-```rust
-// BgTaskStarted → 创建新条目
-BgTaskStarted(task) => {
-    // 现有逻辑：写入 BG_TASKS
-    BG_TASKS.state().write().push(task.clone());
-    // 新逻辑：写入 BG_DISPLAY
-    BG_DISPLAY.state().write().push(BgDisplayEntry {
-        id: task.task_id.clone(),
-        agent_type: task.kind.clone(),  // "Agent" / "Shell" / "Workflow"
-        desc: task.summary.clone(),
-        current_tool: None,   // 初始空闲
-        tool_count: 0,
-        is_active: true,
-        is_error: false,
-        completed_at: None,
-    });
-}
-```
-
-#### 10.8.2 工具事件（仅后台任务）
-
-```rust
-// SubagentStarted(is_background=true) → 注册 agent_id 到 BG_AGENT_IDS
-SubagentStarted(ss) if ss.is_background => {
-    BG_AGENT_IDS.state().write().insert(ss.instance_id.clone());
-}
-
-// ToolStarted → 更新对应后台条目的 current_tool
-ToolStarted(ts) if agent_id in BG_AGENT_IDS => {
-    if let Some(entry) = BG_DISPLAY.find_mut_by_id(agent_id) {
-        entry.current_tool = Some(ts.tool_name.clone());
-    }
-}
-
-// ToolEnded → 清除 current_tool，递增 tool_count
-ToolEnded(te) if agent_id in BG_AGENT_IDS => {
-    if let Some(entry) = BG_DISPLAY.find_mut_by_id(agent_id) {
-        entry.current_tool = None;      // 回空闲
-        entry.tool_count += 1;
-    }
-}
-```
-
-#### 10.8.3 任务完成/取消
-
-```rust
-// BgTaskCompleted → 标记完成，启动 3s 倒计时
-BgTaskCompleted { task_id, success, .. } => {
-    // 现有逻辑：从 BG_TASKS 移除
-    BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
-    // 新逻辑：标记完成
-    if let Some(entry) = BG_DISPLAY.find_mut_by_id(task_id) {
-        entry.is_active = false;
-        entry.is_error = !success;
-        entry.completed_at = Some(Instant::now());
-    }
-}
-
-// BgTaskCancelled → 同完成，标记为失败
-BgTaskCancelled { task_id, .. } => {
-    BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
-    if let Some(entry) = BG_DISPLAY.find_mut_by_id(task_id) {
-        entry.is_active = false;
-        entry.is_error = true;
-        entry.completed_at = Some(Instant::now());
-    }
-}
-
-// SubagentStopped → 清理 agent_id
-SubagentStopped(ss) => {
-    BG_AGENT_IDS.state().write().remove(&ss.instance_id);
-}
-```
-
-#### 事件路由决策表
-
-| AcpEventData | 写入 BG_DISPLAY? | 条件 |
-|-------------|-----------------|------|
-| BgTaskStarted | ✅ push | 无 |
-| BgTaskCompleted | ✅ mutate | 标记 done |
-| BgTaskCancelled | ✅ mutate | 标记 error |
-| BgTaskSnapshot | ✅ replace | 全量替换（session/load 场景） |
-| SubagentStarted | ❌ 仅注册 ID | is_background=true |
-| SubagentStopped | ❌ 仅清理 ID | — |
-| ToolStarted | ✅ mutate | agent_id ∈ BG_AGENT_IDS |
-| ToolEnded | ✅ mutate | agent_id ∈ BG_AGENT_IDS |
-
-### 10.9 渲染组件
-
-```
-BgTaskArea (ratatui-kit 函数组件)
-  ├── 从 BG_DISPLAY atom 读取条目
-  ├── 按 (is_active, completed_at) 排序
-  ├── 过滤：is_active==false 且 elapsed > 3s → 移除
-  ├── 限制最多 5 行
-  └── 逐行渲染：
-        [状态符号] [agent_type]  [desc (弹性)]  [current_tool · N tools]
-```
-
-**状态符号颜色**：
-- `◎` 空闲 → `Style::new().yellow()`
-- `●` 运行 → `Style::new().white()` + 闪烁（复用 `RENDER_CALL_COUNT`）
-- `✔` 完成 → `Style::new().green()`
-- `✗` 失败 → `Style::new().red()`
-
-**agent_type 列**：dim 色，固定宽度（最长类型 + 1 空格 padding）
-
-**desc 列**：弹性宽度，占满剩余空间，超出截断 `…`
-
-**tool_call 列**：右对齐或不显示。格式 `{name} · {N} tools`
-
-**溢出行**：`muted` 色，居中 `… N more`
-
-### 10.10 Session 切换 / 清空行为
-
-| 操作 | BG_DISPLAY 行为 |
-|------|----------------|
-| `/clear` | 清空（与 BRIDGE_RESET_COUNTER 递增同步） |
-| session 切换 | 清空（新 session 发送 BgTaskSnapshot） |
-| session/load (history replay) | BgTaskSnapshot → 全量替换 |
-
-### 10.11 与现有系统的关系
-
-| 系统 | 关系 | 说明 |
-|------|------|------|
-| BG_TASKS atom | 独立共存 | BG_DISPLAY 是追加层，BG_TASKS 继续维护（StatusBar bg 计数 + Tasks 面板） |
-| StatusBar bg 计数 | 不变 | StatusBarRow1 的 `N shell N agent N workflow` 继续显示 |
-| VIEW_MODELS | 无关 | 后台显示区域不读 VIEW_MODELS |
-| SubAgentGroup 气泡 | 互不干扰 | 消息区的 SubAgentGroup 继续渲染（含同步和异步 subagent），后台区域仅显示异步的 |
-| Tasks 面板 | 独立 | Tasks 面板继续显示详细列表，后台区域是一行摘要 |
-
-### 10.12 涉及文件清单（预估）
-
-| 文件 | 变更 |
-|------|------|
-| `peri-tui/src/kit/app_shell.rs` | 在 StatusBar 下方插入 BgTaskArea 组件 |
-| `peri-tui/src/kit/bg_task_area.rs` | **新文件**：BgTaskArea 组件 + render 逻辑 |
-| `peri-tui/src/kit/atoms.rs` | 新增 `BG_DISPLAY` + `BG_AGENT_IDS` atom |
-| `peri-tui/src/kit/acp_events.rs` | `dispatch_and_notify` 中追加 BG_DISPLAY 写入路径 |
-| `peri-tui/src/kit/acp_types.rs` | 可能需要：`SubagentStarted` 中补充 `is_background` 解析（如缺失） |
-| `peri-tui/src/kit/acp_bridge.rs` | 3 秒 timer 清理逻辑（或放在 render 层惰性清理） |
-
-### 10.13 设计决策汇总
-
-| 决策 | 选定 | 备选 |
-|------|------|------|
-| 位置 | StatusBar 下方（屏幕最底部） | StatusBar 上方 |
-| 范围 | 仅后台任务 | 含同步 subagent |
-| 最大行数 | 5（超出 `… N more`） | 3 行截断 / 无上限滚动 |
-| 完成后保留 | 3 秒后直接消失 | 逐秒变暗 |
-| 状态指示器 | `◎`/`●`/`✔`/`✗` 四态 | 三态（空闲复用完成色） |
-| 空闲时 tool_call | 不显示 | 显示占位符 `—` |
-| tool_call 格式 | `Read · 12 tools` | — |
-| desc 截断 | 弹性 + 尾部 `…` | 固定宽度 |
-| 交互 | 纯展示 | 可选中等 |
-| 数据源 | 独立 `BG_DISPLAY` atom + `dispatch_and_notify` 写入 | 从 VIEW_MODELS 派生 |
+## 11. 实施边界与决策记录
+
+| 决策 | 结论 | 原因 |
+| --- | --- | --- |
+| 默认信息密度 | 渐进披露 | 时间线优先服务当前任务，而非原始日志 |
+| Skill 标题 | 用户语义化 | “使用 skill”比“SkillTool (skill_name: …)”可理解 |
+| Todo 历史 | 展示变更集 | 避免完整快照重复与数组下标泄漏 |
+| 成功态 | 默认收起 | 一行结果足以建立信心，详情按需可得 |
+| 错误态 | 强制展开 | 排查需要原因与上下文，不能被摘要隐藏 |
+| 语义来源 | ACP 结构化载荷优先 | TUI 不应解析 YAML/日志格式来推断业务语义 |
+| 兼容方案 | 通用 ToolCard 兜底 | 允许新旧服务端、第三方工具与渐进迁移共存 |
+
+本设计只指定 UI 语义与跨层数据需求。具体 DTO 命名、事件变体和组件拆分应遵循现有代码邻域及 ACP/TUI 架构契约，并在实现前根据实际事件模型细化。

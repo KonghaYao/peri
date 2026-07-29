@@ -11,8 +11,10 @@
 //! - **零运行时依赖**：无 terminal / network / IO，可独立测试
 
 use crate::kit::stream_data::*;
-use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit};
+use crate::kit::tool_semantics::{TodoSnapshot, presentation_for};
+use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit, TuiToolPresentation};
 use peri_acp_types::event_data::*;
+use serde_json::Value;
 use std::time::Instant;
 
 // ---------------------------------------------------------------------------
@@ -184,15 +186,22 @@ impl CurrentTurn {
         self.invalidate_cache();
     }
 
-    /// Finalise an existing tool card from `"tool-ended"`.
+    /// Finalise an existing running tool card from `"tool-ended"`.
     ///
-    /// No-op if `tool_id` does not match any open card.
-    pub fn end_tool(&mut self, tool_id: &str, output: String, is_error: bool) {
-        if let Some(t) = self.tool_cards.iter_mut().find(|t| t.tool_id == tool_id) {
-            t.output_summary = Some(output);
-            t.is_error = is_error;
-            self.invalidate_cache();
-        }
+    /// Returns `true` only when this call transitions the matching card from running
+    /// to finished. Unknown and duplicate end events are no-ops.
+    pub fn end_tool(&mut self, tool_id: &str, output: String, is_error: bool) -> bool {
+        let Some(t) = self
+            .tool_cards
+            .iter_mut()
+            .find(|t| t.tool_id == tool_id && t.output_summary.is_none())
+        else {
+            return false;
+        };
+        t.output_summary = Some(output);
+        t.is_error = is_error;
+        self.invalidate_cache();
+        true
     }
 
     /// Begin a new sub-agent group from `"subagent-started"`.
@@ -318,10 +327,12 @@ impl CurrentTurn {
         is_error: bool,
     ) -> bool {
         if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
-            s.end_tool(tool_id, output, is_error);
-            self.active = true;
-            self.invalidate_cache();
-            true
+            let ended = s.end_tool(tool_id, output, is_error);
+            if ended {
+                self.active = true;
+                self.invalidate_cache();
+            }
+            ended
         } else {
             false
         }
@@ -450,9 +461,10 @@ impl CurrentTurn {
                             is_running,
                             running_duration_ms,
                             diff: None,
+                            presentation: t.presentation.clone(),
                             tool_calls_count: 0,
                             content_hash: tui_hash_str(&format!(
-                                "{}|{}|{}|{}|{}|{}|{:?}",
+                                "{}|{}|{}|{}|{}|{}|{:?}|{:?}",
                                 t.tool_id,
                                 t.tool_name,
                                 t.input_summary,
@@ -460,6 +472,7 @@ impl CurrentTurn {
                                 t.is_error,
                                 is_running,
                                 duration_secs,
+                                t.presentation,
                             )),
                         }));
                     }
@@ -541,6 +554,10 @@ pub struct ToolCardAccumulator {
     pub tool_name: String,
     /// Short summary of the tool's input arguments.
     pub input_summary: String,
+    /// 原始结构化输入；仅供专属语义展示生成，绝不从输出推导。
+    pub raw_input: Value,
+    /// 专属工具卡片的用户语义展示；未知工具保持通用卡片。
+    pub presentation: TuiToolPresentation,
     /// Short summary of the tool's output (filled by `"tool-ended"`).
     pub output_summary: Option<String>,
     /// Whether the tool returned an error.
@@ -553,12 +570,26 @@ pub struct ToolCardAccumulator {
 }
 
 impl ToolCardAccumulator {
-    /// Create a new in-progress tool card from a `"tool-started"` payload.
+    /// Create a generic in-progress tool card from a replay or legacy event.
     pub fn new(tool_id: String, tool_name: String, input_summary: String) -> Self {
+        Self::with_input(tool_id, tool_name, input_summary, Value::Null, None)
+    }
+
+    /// Create an in-progress card while retaining the structured input for semantic rendering.
+    pub(crate) fn with_input(
+        tool_id: String,
+        tool_name: String,
+        input_summary: String,
+        raw_input: Value,
+        previous_todos: Option<&TodoSnapshot>,
+    ) -> Self {
+        let presentation = presentation_for(&tool_name, &raw_input, previous_todos);
         Self {
             tool_id,
             tool_name,
             input_summary,
+            raw_input,
+            presentation,
             output_summary: None,
             is_error: false,
             started_at: Instant::now(),
@@ -604,9 +635,12 @@ impl SubAgentAccumulator {
         self.cached_view_model.replace(None);
     }
 
-    fn end_tool(&mut self, tool_id: &str, output: String, is_error: bool) {
-        self.child_turn.end_tool(tool_id, output, is_error);
-        self.cached_view_model.replace(None);
+    fn end_tool(&mut self, tool_id: &str, output: String, is_error: bool) -> bool {
+        let ended = self.child_turn.end_tool(tool_id, output, is_error);
+        if ended {
+            self.cached_view_model.replace(None);
+        }
+        ended
     }
 
     pub(crate) fn view_model(&self) -> TuiRenderUnit {
@@ -728,6 +762,7 @@ pub enum AcpEventData {
         tool_id: String,
         tool_name: String,
         input_summary: String,
+        raw_input: Value,
     },
 
     /// replay 工具调用结束——更新 committed 中对应 tool_id 的 TuiToolCard。
