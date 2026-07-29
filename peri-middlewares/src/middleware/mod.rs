@@ -1,4 +1,5 @@
 pub mod filesystem;
+pub mod image;
 pub mod terminal;
 pub mod todo;
 pub mod web;
