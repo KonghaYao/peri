@@ -37,6 +37,7 @@ pub use projection::{
     plan_from_persisted_directives, render_llm_view, MessageProjectionDirective, MicroCompactPlan,
     ProjectionAction, ProjectionActionEntry, ProjectionTarget, ProviderCapabilities,
     ProviderProtocol, CORRUPTED_PROJECTION, DIRECTIVE_VERSION_MISMATCH, NO_PERSISTED_DIRECTIVES,
+    PROJECTION_POLICY_VERSION,
 };
 
 // ─── CompactResult ───────────────────────────────────────────────────────────────
@@ -60,6 +61,12 @@ pub struct CompactResult {
     pub full_escalation_reason: Option<FullEscalationReason>,
     /// 本轮 Compact 的实际语义结果。
     pub outcome: CompactOutcome,
+    /// 去重 message_id 数量（Micro 投影变更计数）
+    pub changed_messages: usize,
+    /// CompactToolInput 中的所有字段总数
+    pub changed_fields: usize,
+    /// 通过 stale/retention 筛选但无内容的候选数
+    pub no_op_candidates: usize,
 }
 
 /// Compact 执行的语义结果。
@@ -183,6 +190,9 @@ pub async fn run_compact(
             summary: None,
             full_escalation_reason: None,
             outcome: CompactOutcome::Skipped,
+            changed_messages: 0,
+            changed_fields: 0,
+            no_op_candidates: 0,
         };
     }
 
@@ -221,6 +231,9 @@ pub async fn run_compact(
             summary: None,
             full_escalation_reason: None,
             outcome: CompactOutcome::Skipped,
+            changed_messages: 0,
+            changed_fields: 0,
+            no_op_candidates: 0,
         },
         CompactAction::Micro => {
             // Cache-aware：高缓存命中 + headroom 足够时，延迟 compact
@@ -243,6 +256,9 @@ pub async fn run_compact(
                         summary: None,
                         full_escalation_reason: None,
                         outcome: CompactOutcome::Skipped,
+                        changed_messages: 0,
+                        changed_fields: 0,
+                        no_op_candidates: 0,
                     };
                 }
             }
@@ -262,6 +278,9 @@ pub async fn run_compact(
                     summary: None,
                     full_escalation_reason: None,
                     outcome: CompactOutcome::Skipped,
+                    changed_messages: 0,
+                    changed_fields: 0,
+                    no_op_candidates: 0,
                 };
             }
 
@@ -282,6 +301,9 @@ pub async fn run_compact(
                     summary: None,
                     full_escalation_reason: None,
                     outcome: CompactOutcome::Shadowed,
+                    changed_messages: 0,
+                    changed_fields: 0,
+                    no_op_candidates: plan.no_op_candidates,
                 };
             }
 
@@ -304,6 +326,9 @@ pub async fn run_compact(
                     summary: None,
                     full_escalation_reason: None,
                     outcome: CompactOutcome::MicroApplied,
+                    changed_messages: plan.changed_messages,
+                    changed_fields: plan.changed_fields,
+                    no_op_candidates: plan.no_op_candidates,
                 }
             } else if budget_pct >= config.auto_compact_threshold && reclaim_target > 0 {
                 // Micro 回收不足 + budget 高位 → 先应用 Micro，再叠加 Full
@@ -334,6 +359,10 @@ pub async fn run_compact(
                 full_result.affected_count += micro_affected;
                 // estimated_tokens_saved 也需要累加 Micro 的贡献
                 full_result.estimated_tokens_saved += plan.estimated_tokens_saved;
+                // 从 Micro plan 填充统计字段
+                full_result.changed_messages = plan.changed_messages;
+                full_result.changed_fields = plan.changed_fields;
+                full_result.no_op_candidates = plan.no_op_candidates;
                 if micro_affected > 0 && !full_result.outcome().is_full_applied() {
                     // Full 未完成时，对外兼容策略必须反映实际已生效的 Micro。
                     full_result.strategy = CompactStrategy::Micro;
@@ -359,6 +388,9 @@ pub async fn run_compact(
                     summary: None,
                     full_escalation_reason: None,
                     outcome: CompactOutcome::MicroApplied,
+                    changed_messages: plan.changed_messages,
+                    changed_fields: plan.changed_fields,
+                    no_op_candidates: plan.no_op_candidates,
                 }
             }
         }
@@ -380,6 +412,9 @@ pub async fn run_compact(
                     summary: None,
                     full_escalation_reason: None,
                     outcome: CompactOutcome::Shadowed,
+                    changed_messages: 0,
+                    changed_fields: 0,
+                    no_op_candidates: plan.no_op_candidates,
                 };
             }
 
@@ -402,6 +437,9 @@ pub async fn run_compact(
                     summary: None,
                     full_escalation_reason: None,
                     outcome: CompactOutcome::Skipped,
+                    changed_messages: 0,
+                    changed_fields: 0,
+                    no_op_candidates: 0,
                 };
             }
 
@@ -423,6 +461,9 @@ pub async fn run_compact(
                     // 表示本轮 Smart + Full 的总变更（与 Micro 路径保持一致）。
                     full_result.affected_count += affected;
                     full_result.estimated_tokens_saved += estimated_tokens_saved;
+                    full_result.changed_messages = plan.changed_messages;
+                    full_result.changed_fields = plan.changed_fields;
+                    full_result.no_op_candidates = plan.no_op_candidates;
                     if !full_result.outcome().is_full_applied() {
                         full_result.strategy = CompactStrategy::Smart;
                         full_result.outcome = CompactOutcome::SmartAppliedThenFullFailed;
@@ -438,6 +479,9 @@ pub async fn run_compact(
                         summary: None,
                         full_escalation_reason: None,
                         outcome: CompactOutcome::SmartApplied,
+                        changed_messages: plan.changed_messages,
+                        changed_fields: plan.changed_fields,
+                        no_op_candidates: plan.no_op_candidates,
                     }
                 }
             } else {
@@ -457,6 +501,9 @@ pub async fn run_compact(
                 // 表示本轮 Smart + Full 的总变更（与 Micro 路径保持一致）。
                 full_result.affected_count += affected;
                 full_result.estimated_tokens_saved += estimated_tokens_saved;
+                full_result.changed_messages = plan.changed_messages;
+                full_result.changed_fields = plan.changed_fields;
+                full_result.no_op_candidates = plan.no_op_candidates;
                 if !full_result.outcome().is_full_applied() {
                     full_result.strategy = CompactStrategy::Smart;
                     full_result.outcome = CompactOutcome::SmartAppliedThenFullFailed;
@@ -495,6 +542,9 @@ async fn run_full_or_degrade(
                 summary: None,
                 full_escalation_reason: Some(escalation_reason),
                 outcome: CompactOutcome::FullFailed,
+                changed_messages: 0,
+                changed_fields: 0,
+                no_op_candidates: 0,
             }
         }
     }

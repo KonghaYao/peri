@@ -29,7 +29,13 @@ pub fn smart_compact(transcript: &mut MessageTranscript, config: &CompactConfig)
             ProjectionTarget::Message
             | ProjectionTarget::ContentBlock { .. }
             | ProjectionTarget::ToolCall { .. } => {
-                transcript.set_truncated(action.message_id, true);
+                // 统一使用 set_flags_projection 持久化 directive（与 micro_compact 一致）
+                // set_flags_projection 同时设置 truncated=true + projection directive
+                let directive = crate::agent::compact_v2::projection::MessageProjectionDirective {
+                    policy_version: crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION,
+                    entries: vec![action.clone()],
+                };
+                transcript.set_flags_projection(action.message_id, directive);
             }
         }
     }
@@ -66,15 +72,15 @@ mod tests {
             vec![crate::messages::ToolCallRequest::new(
                 tool_id,
                 tool_name,
-                serde_json::json!({}),
+                serde_json::json!({"content": "x".repeat(501)}),
             )],
         )
     }
 
-    fn make_tool_result(tool_call_id: &str, text: &str) -> BaseMessage {
+    fn make_tool_result(tool_call_id: &str, _text: &str) -> BaseMessage {
         BaseMessage::tool_result(
             tool_call_id.to_string(),
-            MessageContent::text(text.to_string()),
+            MessageContent::text("x".repeat(501)),
         )
     }
 
@@ -122,12 +128,17 @@ mod tests {
 
         let config = CompactConfig::default();
         let (affected, _saved) = smart_compact(&mut t, &config);
-        // stale_steps=3 → 7-3=4 轮 stale（round 0-3），每轮 2 个 action
+        let marked_messages = t
+            .entries()
+            .iter()
+            .filter(|entry| t.flags(entry.message.id()).truncated)
+            .count();
         assert_eq!(
-            affected, 8,
-            "4 stale rounds × 2 actions = 8，实际: {}",
-            affected
+            affected, marked_messages,
+            "affected 应等于实际被标记的消息数，实际 affected={}, marked={}",
+            affected, marked_messages
         );
+        assert!(marked_messages > 0, "过期 tool exchange 应产生消息级标记");
     }
 
     #[test]

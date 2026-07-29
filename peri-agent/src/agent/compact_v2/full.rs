@@ -83,6 +83,9 @@ pub(super) async fn full_compact_inner(
             summary: Some(fallback_summary),
             full_escalation_reason: None,
             outcome: CompactOutcome::FullApplied,
+            changed_messages: 0,
+            changed_fields: 0,
+            no_op_candidates: 0,
         });
     }
 
@@ -162,6 +165,9 @@ pub(super) async fn full_compact_inner(
         summary: Some(summary),
         full_escalation_reason: None,
         outcome: CompactOutcome::FullApplied,
+        changed_messages: 0,
+        changed_fields: 0,
+        no_op_candidates: 0,
     })
 }
 

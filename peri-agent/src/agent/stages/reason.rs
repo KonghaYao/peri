@@ -78,7 +78,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             let caps = ctx.runtime.llm.provider_capabilities();
             // 优先使用持久化 directive，避免每 turn 重新规划
             match crate::agent::compact_v2::projection::plan_from_persisted_directives(
-                &guard, 1, // policy_version
+                &guard,
+                crate::agent::compact_v2::PROJECTION_POLICY_VERSION,
             ) {
                 Ok(plan) => {
                     // 持久化 directive 有效 → 直接渲染
@@ -108,12 +109,30 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                     if err_msg
                         .contains(crate::agent::compact_v2::projection::DIRECTIVE_VERSION_MISMATCH)
                     {
-                        // 版本不匹配 → 安全回退到原始消息（不重新规划，避免 risk）
-                        tracing::warn!(
+                        // 版本不匹配 → 重新规划为 v2 directive（skip=false 纳入旧 truncated 消息）
+                        // 新 plan 在下次 Compact 阶段持久化后覆盖旧 directive
+                        tracing::info!(
                             error = %e,
-                            "持久化 directive 版本不匹配，使用原始可见消息"
+                            "持久化 directive 版本不匹配，重新规划为 v2"
                         );
-                        visible
+                        let plan =
+                            crate::agent::compact_v2::planner::plan_micro(&guard, config, false);
+                        if plan.has_changes() {
+                            match crate::agent::compact_v2::projection::render_llm_view(
+                                &guard, &plan, &caps,
+                            ) {
+                                Ok(view) => view,
+                                Err(render_err) => {
+                                    tracing::warn!(
+                                        error = %render_err,
+                                        "render_llm_view (v2 re-plan) 失败，fallback 原始消息"
+                                    );
+                                    visible
+                                }
+                            }
+                        } else {
+                            visible
+                        }
                     } else {
                         // 无持久化 directive → fallback 到 planner
                         tracing::debug!("无持久化 directive，fallback 到 plan_micro");

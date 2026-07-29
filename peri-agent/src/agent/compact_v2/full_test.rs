@@ -393,6 +393,9 @@ fn test_compact_result_fields() {
         summary: None,
         full_escalation_reason: None,
         outcome: crate::agent::compact_v2::CompactOutcome::MicroApplied,
+        changed_messages: 0,
+        changed_fields: 0,
+        no_op_candidates: 0,
     };
     assert_eq!(result.strategy, CompactStrategy::Micro);
     assert_eq!(result.affected_count, 3);

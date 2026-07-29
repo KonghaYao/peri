@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::agent::compact_v2::config::CompactConfig;
+use crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION;
 use crate::agent::compact_v2::{determine_compact_action, CompactAction};
 use crate::messages::{BaseMessage, ContentBlock, MessageContent};
 use crate::session::transcript::MessageTranscript;
@@ -16,15 +17,15 @@ fn make_ai_with_tool(text: &str, tool_name: &str, tool_id: &str) -> BaseMessage 
         vec![crate::messages::ToolCallRequest::new(
             tool_id,
             tool_name,
-            serde_json::json!({}),
+            serde_json::json!({"content": "x".repeat(501)}),
         )],
     )
 }
 
-fn make_tool_result(tool_call_id: &str, text: &str) -> BaseMessage {
+fn make_tool_result(tool_call_id: &str, _text: &str) -> BaseMessage {
     BaseMessage::tool_result(
         tool_call_id.to_string(),
-        MessageContent::text(text.to_string()),
+        MessageContent::text("x".repeat(501)),
     )
 }
 
@@ -135,7 +136,7 @@ fn test_micro_compact_truncates_tool_use_arguments() {
             vec![crate::messages::ToolCallRequest::new(
                 format!("call_{}", i),
                 "Write",
-                serde_json::json!({"file_path": "/tmp/test.txt", "content": "very long content here"}),
+                serde_json::json!({"file_path": "/tmp/test.txt", "content": "x".repeat(501)}),
             )],
         ));
         t.append(make_tool_result(&format!("call_{}", i), "Wrote file"));
@@ -276,12 +277,12 @@ fn test_protected_tools_not_selected() {
                 crate::messages::ToolCallRequest::new(
                     format!("call_{}", i),
                     "goal",
-                    serde_json::json!({}),
+                    serde_json::json!({"content": "x".repeat(501)}),
                 ),
                 crate::messages::ToolCallRequest::new(
                     format!("call_bash_{}", i),
                     "Bash",
-                    serde_json::json!({}),
+                    serde_json::json!({"content": "x".repeat(501)}),
                 ),
             ],
         ));
@@ -494,7 +495,10 @@ fn test_micro_compact_writes_projection_directives() {
                 entry.message.id()
             );
             let directive = flags.projection.as_ref().unwrap();
-            assert_eq!(directive.policy_version, 1, "policy_version 应为 1");
+            assert_eq!(
+                directive.policy_version, PROJECTION_POLICY_VERSION,
+                "policy_version 应为当前版本"
+            );
             assert!(!directive.entries.is_empty(), "directive entries 不应为空");
             found_directive = true;
         }

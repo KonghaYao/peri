@@ -23,15 +23,15 @@ fn make_ai_with_tool(text: &str, tool_name: &str, tool_id: &str) -> BaseMessage 
         vec![crate::messages::ToolCallRequest::new(
             tool_id,
             tool_name,
-            serde_json::json!({}),
+            serde_json::json!({"content": "x".repeat(501)}),
         )],
     )
 }
 
-fn make_tool_result(tool_call_id: &str, text: &str) -> BaseMessage {
+fn make_tool_result(tool_call_id: &str, _text: &str) -> BaseMessage {
     BaseMessage::tool_result(
         tool_call_id.to_string(),
-        MessageContent::text(text.to_string()),
+        MessageContent::text("x".repeat(501)),
     )
 }
 

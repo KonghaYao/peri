@@ -1,16 +1,16 @@
 //! Tests for planner — 计划器单元测试
 
-use super::planner::plan_micro;
+use super::plan_micro;
 use super::ContextPressure;
 use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::compact_v2::projection::{
     MicroCompactPlan, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
 };
+use crate::messages::BaseMessage;
 use crate::session::transcript::MessageTranscript;
 
 #[test]
 fn test_context_pressure_target_tokens() {
-    use super::planner::ContextPressure;
     let p = ContextPressure {
         estimated_tokens: 100_000,
         context_window: 200_000,
@@ -40,6 +40,7 @@ fn test_micro_compact_plan_meets_target() {
         estimated_before_tokens: 10000,
         estimated_after_tokens: 4000,
         estimated_tokens_saved: 6000,
+        ..Default::default()
     };
     assert!(plan.meets_target());
     assert!(plan.has_changes());
@@ -54,6 +55,7 @@ fn test_micro_compact_plan_no_changes() {
         estimated_before_tokens: 10000,
         estimated_after_tokens: 10000,
         estimated_tokens_saved: 0,
+        ..Default::default()
     };
     assert!(!plan.has_changes());
 }
@@ -134,7 +136,6 @@ fn test_token_estimation_no_actions_saves_zero() {
 #[test]
 fn test_context_pressure_target_reclaim_within_window() {
     // 确认回收目标计算正确
-    use super::planner::ContextPressure;
 
     // 场景：180k / 200k → 已用很多，需要回收
     let p = ContextPressure {
@@ -227,12 +228,12 @@ fn test_retention_map_recomputable_allows_compact() {
             vec![ToolCallRequest::new(
                 format!("call_{}", i),
                 "ReadTool",
-                serde_json::json!({}),
+                serde_json::json!({"prompt": "x".repeat(501)}),
             )],
         ));
         t.append(BaseMessage::tool_result(
             format!("call_{}", i),
-            MessageContent::text("output"),
+            MessageContent::text("x".repeat(501)),
         ));
     }
 
@@ -299,7 +300,7 @@ fn test_plan_micro_skip_false_includes_truncated_messages() {
             vec![ToolCallRequest::new(
                 format!("call_{}", i),
                 "Read",
-                serde_json::json!({"file_path": format!("/f/{}", i)}),
+                serde_json::json!({"file_path": format!("/f/{}", i), "prompt": "x".repeat(501)}),
             )],
         ));
         t.append(BaseMessage::tool_result(
@@ -353,7 +354,7 @@ fn test_plan_micro_skip_true_excludes_already_truncated() {
             vec![ToolCallRequest::new(
                 format!("call_{}", i),
                 "Read",
-                serde_json::json!({"file_path": format!("/f/{}", i)}),
+                serde_json::json!({"file_path": format!("/f/{}", i), "prompt": "x".repeat(501)}),
             )],
         ));
         t.append(BaseMessage::tool_result(
@@ -371,10 +372,19 @@ fn test_plan_micro_skip_true_excludes_already_truncated() {
         ..CompactConfig::default()
     };
 
-    // 预标记所有消息为 truncated
+    // 预标记所有消息为 truncated（使用 v2 projection directive 模拟 compact 后状态）
     let ids: Vec<_> = t.entries().iter().map(|e| e.message.id()).collect();
+    use crate::agent::compact_v2::projection::{
+        MessageProjectionDirective, PROJECTION_POLICY_VERSION,
+    };
     for id in &ids {
-        t.set_truncated(*id, true);
+        t.set_flags_projection(
+            *id,
+            MessageProjectionDirective {
+                policy_version: PROJECTION_POLICY_VERSION,
+                entries: vec![],
+            },
+        );
     }
 
     // Compact 阶段应跳过所有消息 → plan 为空
@@ -409,6 +419,7 @@ fn test_has_changes_returns_true_for_short_messages_with_actions() {
         estimated_before_tokens: 1, // 短消息：chars=5, /4 = 1
         estimated_after_tokens: 12, // projected_chars=50, /4 = 12
         estimated_tokens_saved: 0,  // saturating_sub(1, 12) = 0
+        ..Default::default()
     };
     // 修复后：有 10 个 action → has_changes() 应为 true
     assert!(plan.has_changes(), "有 action 就应该有变化");
@@ -477,12 +488,12 @@ fn test_estimate_tokens_max_1_for_short_messages() {
             vec![ToolCallRequest::new(
                 format!("c_{}", i),
                 "Bash",
-                serde_json::json!({}),
+                serde_json::json!({"command": "x".repeat(501)}),
             )],
         ));
         t.append(BaseMessage::tool_result(
             format!("c_{}", i),
-            MessageContent::text(format!("out {}", i)),
+            MessageContent::text("x".repeat(501)),
         ));
     }
     let config = CompactConfig {
@@ -492,4 +503,382 @@ fn test_estimate_tokens_max_1_for_short_messages() {
     let plan = plan_micro(&t, &config, true);
     assert!(!plan.actions.is_empty(), "至少有一些 stale 轮次被选中");
     assert!(plan.estimated_tokens_saved > 0, "有 action 时 saved 应 > 0");
+}
+
+fn plan_for_tool_call(
+    tool_name: &str,
+    arguments: serde_json::Value,
+    result: BaseMessage,
+    config: &CompactConfig,
+) -> MicroCompactPlan {
+    use crate::messages::{BaseMessage, MessageContent, ToolCallRequest};
+
+    let mut transcript = MessageTranscript::new();
+    transcript.append(make_human("question"));
+    transcript.append(BaseMessage::ai_with_tool_calls(
+        MessageContent::text("thinking"),
+        vec![ToolCallRequest::new("call", tool_name, arguments)],
+    ));
+    transcript.append(result);
+    plan_micro(&transcript, config, false)
+}
+
+#[test]
+fn test_plan_micro_input_savings_uses_character_difference() {
+    use crate::messages::{BaseMessage, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..CompactConfig::default()
+    };
+    let plan = plan_for_tool_call(
+        "Read",
+        serde_json::json!({"prompt": "x".repeat(501)}),
+        BaseMessage::tool_result("call", MessageContent::text("ok")),
+        &config,
+    );
+
+    assert!(matches!(
+        &plan.actions[..],
+        [ProjectionActionEntry {
+            action: ProjectionAction::CompactToolInput { fields, .. },
+            ..
+        }] if fields == &["prompt"]
+    ));
+    assert_eq!(plan.estimated_before_tokens, 125);
+    assert_eq!(plan.estimated_after_tokens, 117);
+    assert_eq!(plan.estimated_tokens_saved, 7);
+}
+
+#[test]
+fn test_plan_micro_compacts_only_long_top_level_string_fields() {
+    use crate::messages::{BaseMessage, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..CompactConfig::default()
+    };
+    let plan = plan_for_tool_call(
+        "Agent",
+        serde_json::json!({
+            "z_short": "short",
+            "prompt": "x".repeat(501),
+            "nested": {"description": "x".repeat(501)},
+            "items": ["x".repeat(501)],
+        }),
+        BaseMessage::tool_result("call", MessageContent::text("ok")),
+        &config,
+    );
+
+    assert_eq!(plan.actions.len(), 1, "Agent 不应有特殊保护");
+    assert!(matches!(
+        &plan.actions[0].action,
+        ProjectionAction::CompactToolInput {
+            fields,
+            keep_head: 350,
+            keep_tail: 100,
+        } if fields == &["prompt"]
+    ));
+}
+
+#[test]
+fn test_plan_micro_enforces_input_threshold_boundary() {
+    use crate::messages::{BaseMessage, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..CompactConfig::default()
+    };
+    let exact_limit = plan_for_tool_call(
+        "Read",
+        serde_json::json!({"prompt": "x".repeat(500)}),
+        BaseMessage::tool_result("call", MessageContent::text("ok")),
+        &config,
+    );
+    let over_limit = plan_for_tool_call(
+        "Read",
+        serde_json::json!({"prompt": "x".repeat(501)}),
+        BaseMessage::tool_result("call", MessageContent::text("ok")),
+        &config,
+    );
+
+    assert!(exact_limit.actions.is_empty());
+    assert!(matches!(
+        &over_limit.actions[..],
+        [ProjectionActionEntry {
+            action: ProjectionAction::CompactToolInput { fields, .. },
+            ..
+        }] if fields == &["prompt"]
+    ));
+}
+
+#[test]
+fn test_plan_micro_ignores_nested_and_array_input_values() {
+    use crate::messages::{BaseMessage, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..CompactConfig::default()
+    };
+    let plan = plan_for_tool_call(
+        "Read",
+        serde_json::json!({
+            "nested": {"prompt": "x".repeat(501)},
+            "items": ["x".repeat(501)],
+        }),
+        BaseMessage::tool_result("call", MessageContent::text("ok")),
+        &config,
+    );
+
+    assert!(plan.actions.is_empty());
+
+    let array_root_plan = plan_for_tool_call(
+        "Read",
+        serde_json::json!(["x".repeat(501)]),
+        BaseMessage::tool_result("call", MessageContent::text("ok")),
+        &config,
+    );
+    assert!(array_root_plan.actions.is_empty());
+}
+
+#[test]
+fn test_plan_micro_ignores_non_string_top_level_input_values() {
+    use crate::messages::{BaseMessage, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..CompactConfig::default()
+    };
+    let plan = plan_for_tool_call(
+        "Read",
+        serde_json::json!({
+            "number": 123,
+            "enabled": true,
+            "empty": null,
+            "nested": {"prompt": "x".repeat(501)},
+        }),
+        BaseMessage::tool_result("call", MessageContent::text("ok")),
+        &config,
+    );
+
+    assert!(
+        plan.actions
+            .iter()
+            .all(|entry| !matches!(&entry.action, ProjectionAction::CompactToolInput { .. })),
+        "顶层非字符串字段不应生成 CompactToolInput"
+    );
+}
+
+#[test]
+fn test_plan_micro_ignores_non_object_input_roots() {
+    use crate::messages::{BaseMessage, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..CompactConfig::default()
+    };
+    let cases = [
+        ("string", serde_json::json!("x".repeat(501))),
+        ("number", serde_json::json!(123)),
+        ("null", serde_json::json!(null)),
+    ];
+
+    for (root_kind, arguments) in cases {
+        let plan = plan_for_tool_call(
+            "Read",
+            arguments,
+            BaseMessage::tool_result("call", MessageContent::text("ok")),
+            &config,
+        );
+
+        assert!(
+            plan.actions.is_empty(),
+            "{root_kind} root 不应生成 CompactToolInput"
+        );
+    }
+}
+
+#[test]
+fn test_plan_micro_sorts_compactable_input_fields() {
+    use crate::messages::{BaseMessage, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..CompactConfig::default()
+    };
+    let plan = plan_for_tool_call(
+        "Read",
+        serde_json::json!({"zeta": "x".repeat(501), "alpha": "x".repeat(501)}),
+        BaseMessage::tool_result("call", MessageContent::text("ok")),
+        &config,
+    );
+
+    assert!(matches!(
+        &plan.actions[..],
+        [ProjectionActionEntry {
+            action: ProjectionAction::CompactToolInput { fields, .. },
+            ..
+        }] if fields == &["alpha", "zeta"]
+    ));
+}
+
+#[test]
+fn test_plan_micro_compacts_multi_block_result_by_total_text_length() {
+    use crate::messages::{BaseMessage, ContentBlock, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..CompactConfig::default()
+    };
+    let over_limit = plan_for_tool_call(
+        "Read",
+        serde_json::json!({}),
+        BaseMessage::tool_result(
+            "call",
+            MessageContent::Blocks(vec![
+                ContentBlock::text("A".repeat(300)),
+                ContentBlock::text("B".repeat(300)),
+            ]),
+        ),
+        &config,
+    );
+    let at_limit = plan_for_tool_call(
+        "Read",
+        serde_json::json!({}),
+        BaseMessage::tool_result(
+            "call",
+            MessageContent::Blocks(vec![
+                ContentBlock::text("A".repeat(250)),
+                ContentBlock::text("B".repeat(250)),
+            ]),
+        ),
+        &config,
+    );
+
+    assert!(matches!(
+        &over_limit.actions[..],
+        [ProjectionActionEntry {
+            action: ProjectionAction::CompactToolResult { .. },
+            ..
+        }]
+    ));
+    assert!(at_limit.actions.is_empty());
+}
+
+#[test]
+fn test_plan_micro_compacts_only_successful_results_over_threshold() {
+    use crate::messages::{BaseMessage, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..CompactConfig::default()
+    };
+    let exact_limit = plan_for_tool_call(
+        "Read",
+        serde_json::json!({}),
+        BaseMessage::tool_result("call", MessageContent::text("x".repeat(500))),
+        &config,
+    );
+    let over_limit = plan_for_tool_call(
+        "Read",
+        serde_json::json!({}),
+        BaseMessage::tool_result("call", MessageContent::text("x".repeat(501))),
+        &config,
+    );
+
+    assert!(exact_limit.actions.is_empty());
+    assert!(matches!(
+        &over_limit.actions[..],
+        [ProjectionActionEntry {
+            action: ProjectionAction::CompactToolResult {
+                keep_head: 350,
+                keep_tail: 100,
+                preserve_recovery_handle: true,
+            },
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn test_plan_micro_never_compacts_error_results() {
+    use crate::messages::{BaseMessage, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..CompactConfig::default()
+    };
+    let plan = plan_for_tool_call(
+        "Read",
+        serde_json::json!({}),
+        BaseMessage::tool_error("call", MessageContent::text("x".repeat(501))),
+        &config,
+    );
+
+    assert!(plan.actions.is_empty());
+}
+
+#[test]
+fn test_plan_micro_skips_actions_when_field_limits_are_invalid() {
+    use crate::messages::{BaseMessage, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        micro_field_keep_head_chars: 400,
+        micro_field_keep_tail_chars: 100,
+        ..CompactConfig::default()
+    };
+    let plan = plan_for_tool_call(
+        "Read",
+        serde_json::json!({"prompt": "x".repeat(501)}),
+        BaseMessage::tool_result("call", MessageContent::text("x".repeat(501))),
+        &config,
+    );
+
+    assert!(plan.actions.is_empty());
+}
+
+#[test]
+fn test_plan_micro_blacklisted_tool_has_no_actions_for_long_input_or_result() {
+    use crate::messages::{BaseMessage, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..CompactConfig::default()
+    };
+    let plan = plan_for_tool_call(
+        "AskUserQuestion",
+        serde_json::json!({"prompt": "x".repeat(501)}),
+        BaseMessage::tool_result("call", MessageContent::text("x".repeat(501))),
+        &config,
+    );
+
+    assert!(plan.actions.is_empty());
+}
+
+#[test]
+fn regression_agent_short_prompt_survives_micro_compact() {
+    // 回归验证：Agent 短 prompt 不因 micro compact 丢失
+    // 原始报错：{"_compact_note":"tool input compacted"} → missing required parameter prompt
+    use crate::messages::{BaseMessage, MessageContent};
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..CompactConfig::default()
+    };
+    let plan = plan_for_tool_call(
+        "Agent",
+        serde_json::json!({
+            "prompt": "定位 compact 错误的根源",
+            "subagent_type": "explorer",
+            "description": "定位 compact",
+            "fork": false,
+        }),
+        BaseMessage::tool_result("call", MessageContent::text("ok")),
+        &config,
+    );
+    assert!(
+        plan.actions.is_empty(),
+        "Agent 短 prompt（<500 chars）不应产生任何 projection action"
+    );
 }
