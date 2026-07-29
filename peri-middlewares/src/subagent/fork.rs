@@ -13,7 +13,8 @@ use crate::{agent_define::AgentOverrides, claude_agent_parser::ToolsValue, tools
 /// Filter tools from parent set based on agent definition's tools/disallowedTools fields.
 ///
 /// Rules:
-/// - `tools` is `Empty` -> inherit all parent tools (but always exclude `Agent` itself to prevent recursion)
+/// - `tools` is omitted -> inherit all parent tools (but always exclude `Agent` itself to prevent recursion)
+/// - `tools: []` -> inherit no parent tools
 /// - `tools` has value -> only keep tools in the list (also exclude `Agent`)
 /// - then remove tools listed in `disallowed_tools` from the result
 ///
@@ -23,9 +24,7 @@ pub fn filter_tools(
     allowed: &ToolsValue,
     disallowed: &ToolsValue,
 ) -> Vec<Box<dyn BaseTool>> {
-    let allowed_list = allowed.to_vec();
     let disallowed_list = disallowed.to_vec();
-    let is_wildcard = allowed_list.len() == 1 && allowed_list[0] == "*";
 
     parent_tools
         .iter()
@@ -35,10 +34,15 @@ pub fn filter_tools(
             if name == TOOL_AGENT {
                 return false;
             }
-            if !is_wildcard
-                && !allowed_list.is_empty()
-                && !allowed_list.iter().any(|n| n.to_lowercase() == name_lower)
-            {
+            let is_allowed = match allowed {
+                ToolsValue::Empty => true,
+                ToolsValue::NoTools => false,
+                ToolsValue::List(allowed_list) => {
+                    allowed_list.len() == 1 && allowed_list[0] == "*"
+                        || allowed_list.iter().any(|n| n.to_lowercase() == name_lower)
+                }
+            };
+            if !is_allowed {
                 return false;
             }
             if disallowed_list
@@ -51,6 +55,12 @@ pub fn filter_tools(
         })
         .map(|tool| Box::new(ArcToolWrapper(Arc::clone(tool))) as Box<dyn BaseTool>)
         .collect()
+}
+
+/// Whether an agent declaration permits tools injected outside parent-tool inheritance.
+/// Explicit `tools: []` is a strict zero-tool boundary.
+pub(crate) fn allows_injected_tools(allowed: &ToolsValue) -> bool {
+    !matches!(allowed, ToolsValue::NoTools)
 }
 
 /// Build fork directive message for fork mode.

@@ -44,6 +44,31 @@ fn test_filter_inherit_all() {
     assert!(!names.contains(&"Agent"), "Agent should not be inherited");
 }
 
+/// [回归测试] 显式 `tools: []` 必须阻止所有父工具继承。
+///
+/// 历史背景：空数组曾与省略 `tools` 使用相同的空 Vec 表示，导致无工具 advisor
+/// 错误继承父 agent 的 Read、Write 与 Bash 等工具。
+#[test]
+fn test_filter_explicit_zero_tools() {
+    let parent_tools = vec![make_tool("Read"), make_tool("Write"), make_tool("Bash")];
+
+    let filtered = filter_tools(&parent_tools, &ToolsValue::NoTools, &ToolsValue::Empty);
+
+    assert!(
+        filtered.is_empty(),
+        "tools: [] must not inherit parent tools"
+    );
+}
+
+/// [回归测试] 显式 `tools: []` 也必须禁止 build_agent_from_def 后注入的工具。
+///
+/// 历史背景：WriteSandbox 不走父工具继承；若它在零工具 agent 上仍被注入，
+/// `tools: []` 就不再代表严格的零工具边界。
+#[test]
+fn test_explicit_zero_tools_rejects_injected_tools() {
+    assert!(!allows_injected_tools(&ToolsValue::NoTools));
+}
+
 #[test]
 fn test_filter_allowlist() {
     let parent_tools = vec![make_tool("Read"), make_tool("Write"), make_tool("Glob")];
