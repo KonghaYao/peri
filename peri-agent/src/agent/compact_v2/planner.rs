@@ -290,7 +290,7 @@ pub fn plan_micro(
                 && transcript
                     .get_flags(exchange.ai_message_id)
                     .and_then(|f| f.projection)
-                    .map_or(false, |d| {
+                    .is_some_and(|d| {
                         d.policy_version == super::projection::PROJECTION_POLICY_VERSION
                     })
             {
@@ -329,7 +329,7 @@ pub fn plan_micro(
                         && transcript
                             .get_flags(result_entry.message.id())
                             .and_then(|f| f.projection)
-                            .map_or(false, |d| {
+                            .is_some_and(|d| {
                                 d.policy_version == super::projection::PROJECTION_POLICY_VERSION
                             })
                     {
