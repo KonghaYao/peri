@@ -47,21 +47,19 @@ impl DirectToolInvocationResolver {
     ) -> AgentResult<Arc<dyn BaseTool>> {
         let mut candidates: Vec<Arc<dyn BaseTool>> = Vec::new();
         for (key, tool) in tools {
-            if key == name
+            if (key == name
                 || tool.name() == name
                 || key.eq_ignore_ascii_case(name)
                 || tool.name().eq_ignore_ascii_case(name)
                 || tool
                     .aliases()
                     .iter()
-                    .any(|alias| alias.eq_ignore_ascii_case(name))
-            {
-                if !candidates
+                    .any(|alias| alias.eq_ignore_ascii_case(name)))
+                && !candidates
                     .iter()
                     .any(|candidate| Arc::ptr_eq(candidate, tool))
-                {
-                    candidates.push(Arc::clone(tool));
-                }
+            {
+                candidates.push(Arc::clone(tool));
             }
         }
 

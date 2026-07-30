@@ -128,11 +128,13 @@ async fn wrapper_policy_is_canonical_while_event_and_transcript_stay_raw() {
         .await
         .unwrap();
 
-    let policy_calls = policy.lock();
-    assert_eq!(policy_calls.len(), 1);
-    assert_eq!(policy_calls[0].id, "call-1");
-    assert_eq!(policy_calls[0].name, "Write");
-    assert_eq!(policy_calls[0].input, json!({"file_path": "/tmp/a"}));
+    {
+        let policy_calls = policy.lock();
+        assert_eq!(policy_calls.len(), 1);
+        assert_eq!(policy_calls[0].id, "call-1");
+        assert_eq!(policy_calls[0].name, "Write");
+        assert_eq!(policy_calls[0].input, json!({"file_path": "/tmp/a"}));
+    }
     assert_eq!(*invoked.lock(), vec![json!({"file_path": "/tmp/a"})]);
     assert_eq!(outcome.results[0].1.tool_name, "Write");
     let started = events.render_rx.recv().await.unwrap();
