@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+pub mod invocation;
+pub use invocation::{
+    normalize_params, CanonicalToolInvocation, DirectToolInvocationResolver, ToolInvocationResolver,
+};
+
 /// 工具上下文保留策略（用于 Compact 决策）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextRetention {

@@ -3,6 +3,19 @@
 use super::*;
 
 #[test]
+fn test_parse_extra_tool_call_requires_nonempty_name_and_object_params() {
+    assert_eq!(
+        parse_extra_tool_call(&serde_json::json!({"tool_name": "CronRegister", "params": {}}))
+            .unwrap(),
+        ("CronRegister".to_string(), serde_json::json!({}))
+    );
+    assert!(parse_extra_tool_call(&serde_json::json!({"tool_name": "", "params": {}})).is_err());
+    assert!(
+        parse_extra_tool_call(&serde_json::json!({"tool_name": "CronRegister", "params": []}))
+            .is_err()
+    );
+}
+#[test]
 fn test_core_tools_sorted_csv_includes_all_14_tools() {
     // P1-3: 动态生成必须覆盖全部 14 个 Core 工具（含 SkillTool / DiscoverSkillsTool）
     let csv = core_tools_sorted_csv();

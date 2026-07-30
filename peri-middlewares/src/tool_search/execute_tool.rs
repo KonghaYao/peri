@@ -4,12 +4,65 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use peri_agent::tools::BaseTool;
+use peri_agent::tools::{BaseTool, DirectToolInvocationResolver};
+use peri_agent::{
+    agent::react::ToolCall,
+    error::{AgentError, AgentResult},
+    tools::{CanonicalToolInvocation, ToolInvocationResolver},
+};
 use serde_json::{json, Value};
 
-use super::core_tools::{
-    core_tools_sorted_csv, EXECUTE_EXTRA_TOOL_NAME, EXTRA_TOOL_NAME_FIELD, EXTRA_TOOL_PARAMS_FIELD,
-};
+use super::core_tools::{core_tools_sorted_csv, parse_extra_tool_call, EXECUTE_EXTRA_TOOL_NAME};
+
+pub struct ExecuteExtraToolResolver {
+    direct: DirectToolInvocationResolver,
+}
+
+impl Default for ExecuteExtraToolResolver {
+    fn default() -> Self {
+        Self {
+            direct: DirectToolInvocationResolver,
+        }
+    }
+}
+
+fn resolve_extra_tool_target(
+    input: &Value,
+    tools: &BTreeMap<String, Arc<dyn BaseTool>>,
+) -> AgentResult<(Arc<dyn BaseTool>, Value)> {
+    let (target_name, params) =
+        parse_extra_tool_call(input).map_err(|reason| AgentError::ToolExecutionFailed {
+            tool: EXECUTE_EXTRA_TOOL_NAME.to_string(),
+            reason,
+        })?;
+    let target = DirectToolInvocationResolver.resolve_target(&target_name, tools)?;
+    Ok((target, peri_agent::tools::normalize_params(params)))
+}
+
+impl ToolInvocationResolver for ExecuteExtraToolResolver {
+    fn resolve(
+        &self,
+        raw_call: &ToolCall,
+        tools: &BTreeMap<String, Arc<dyn BaseTool>>,
+    ) -> AgentResult<CanonicalToolInvocation> {
+        let outer = self.direct.resolve(raw_call, tools)?;
+        if outer.target.name() != EXECUTE_EXTRA_TOOL_NAME {
+            return Ok(outer);
+        }
+
+        let (target, params) = resolve_extra_tool_target(&raw_call.input, tools)?;
+        Ok(CanonicalToolInvocation {
+            raw_call: raw_call.clone(),
+            policy_call: ToolCall::new(
+                raw_call.id.clone(),
+                target.name().to_string(),
+                peri_agent::tools::normalize_params(params),
+            ),
+            target,
+            wrapper_name: Some(outer.target.name().to_string()),
+        })
+    }
+}
 
 /// 代理执行延迟加载工具的元工具
 ///
@@ -55,7 +108,7 @@ impl BaseTool for ExecuteExtraTool {
             "properties": {
                 "tool_name": {
                     "type": "string",
-                    "description": "The exact name of the target tool to execute (e.g., \"CronCreate\", \"mcp__server__action\")"
+                    "description": "A registered target tool name, case variation, or declared alias (e.g., \"CronCreate\", \"mcp__server__action\")"
                 },
                 "params": {
                     "type": "object",
@@ -71,28 +124,9 @@ impl BaseTool for ExecuteExtraTool {
         input: Value,
         ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let tool_name = input
-            .get(EXTRA_TOOL_NAME_FIELD)
-            .and_then(|v| v.as_str())
-            .ok_or(format!(
-                "{}: missing required '{}' parameter",
-                EXECUTE_EXTRA_TOOL_NAME, EXTRA_TOOL_NAME_FIELD
-            ))?;
-
-        let params = input
-            .get(EXTRA_TOOL_PARAMS_FIELD)
-            .ok_or(format!(
-                "{}: missing required '{}' parameter",
-                EXECUTE_EXTRA_TOOL_NAME, EXTRA_TOOL_PARAMS_FIELD
-            ))?
-            .clone();
-
-        let tool = {
+        let (tool, params) = {
             let tools = self.shared_tools.read();
-            tools.get(tool_name).cloned().ok_or(format!(
-                "{}: tool '{}' not found or not registered as a deferred tool",
-                EXECUTE_EXTRA_TOOL_NAME, tool_name
-            ))?
+            resolve_extra_tool_target(&input, &tools).map_err(|error| error.to_string())?
         };
 
         let result = tool.invoke(params, ctx).await?;
