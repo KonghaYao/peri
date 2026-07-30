@@ -715,11 +715,18 @@ use peri_agent::{
         events_v2::{EventBus, EventBusConfig, EventHandles},
         react::ReactLLM,
         session::{cron_owner::CronOwner, inbox::SessionInbox},
-        stages::{SharedToolMap, StageContext},
+        stages::{SharedToolMap, StageContext, StageContextBuilder},
     },
     group::pipeline::AgentId,
     session::Session as V2Session,
 };
+
+/// 为 ACP 生产 StageContext 安装 wrapper-aware canonical invocation resolver。
+fn install_tool_invocation_resolver(builder: StageContextBuilder) -> StageContextBuilder {
+    builder.with_tool_invocation_resolver(Arc::new(
+        peri_middlewares::ExecuteExtraToolResolver::default(),
+    ))
+}
 
 /// v2 builder 产物
 pub(crate) struct V2AgentOutput {
@@ -940,14 +947,16 @@ pub(crate) fn build_stage_context(
     let react_llm: Arc<dyn ReactLLM + Send + Sync> = Arc::new(llm);
 
     // 构造 StageContext
-    let mut builder = StageContext::builder(turn, transcript, queue)
-        .with_agent_id(AgentId::new())
-        .with_llm(react_llm)
-        .with_tools(shared_tools)
-        .with_middleware_chain(Arc::new(chain))
-        .with_event_bus(Arc::new(event_bus))
-        .with_session_context(session_context)
-        .with_tool_registry_snapshot((*tool_registry_snapshot).clone());
+    let mut builder = install_tool_invocation_resolver(
+        StageContext::builder(turn, transcript, queue)
+            .with_agent_id(AgentId::new())
+            .with_llm(react_llm)
+            .with_tools(shared_tools),
+    )
+    .with_middleware_chain(Arc::new(chain))
+    .with_event_bus(Arc::new(event_bus))
+    .with_session_context(session_context)
+    .with_tool_registry_snapshot((*tool_registry_snapshot).clone());
 
     if let Some(reg) = error_suggest_registry {
         builder = builder.with_error_suggest_registry(reg);
@@ -1033,6 +1042,71 @@ pub(crate) fn build_stage_context(
 mod builder_v2_tests {
     use super::*;
 
+    #[test]
+    fn test_stage_context_builder_installs_execute_extra_tool_resolver() {
+        use peri_agent::{
+            agent::react::ToolCall,
+            session::{FrozenContext, Session},
+            tools::BaseTool,
+        };
+        use serde_json::json;
+
+        struct Stub;
+        #[async_trait::async_trait]
+        impl BaseTool for Stub {
+            fn name(&self) -> &str {
+                "Write"
+            }
+            fn description(&self) -> &str {
+                ""
+            }
+            fn parameters(&self) -> serde_json::Value {
+                json!({})
+            }
+            async fn invoke(
+                &self,
+                _input: serde_json::Value,
+                _ctx: peri_agent::tools::ToolContext<'_>,
+            ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+                Ok(String::new())
+            }
+        }
+
+        let session = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
+        let turn = session.start_turn();
+        let target: Arc<dyn BaseTool> = Arc::new(Stub);
+        let tools = Arc::new(RwLock::new(std::collections::BTreeMap::from([(
+            "Write".to_string(),
+            Arc::clone(&target),
+        )])));
+        tools.write().insert(
+            peri_middlewares::EXECUTE_EXTRA_TOOL_NAME.to_string(),
+            Arc::new(peri_middlewares::tool_search::ExecuteExtraTool::new(
+                Arc::clone(&tools),
+            )),
+        );
+        let context = install_tool_invocation_resolver(
+            StageContext::builder(turn, session.transcript(), session.queue().clone())
+                .with_tools(tools),
+        )
+        .build();
+        let snapshot = context.runtime.tools.read().clone();
+        let invocation = context
+            .runtime
+            .tool_invocation_resolver
+            .resolve(
+                &ToolCall::new(
+                    "call-1",
+                    peri_middlewares::EXECUTE_EXTRA_TOOL_NAME,
+                    json!({"tool_name": "Write", "params": {}}),
+                ),
+                &snapshot,
+            )
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&invocation.target, &target));
+        assert_eq!(invocation.policy_call.name, "Write");
+    }
     #[test]
     fn test_v2_context_has_null_llm_by_default() {
         let cwd: Arc<str> = Arc::from("/tmp");

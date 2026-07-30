@@ -114,6 +114,10 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
 
     assert_eq!(result.outcome, CompactOutcome::FullApplied);
     assert!(
+        transcript.full_compaction_committed(),
+        "成功提交的 Full Compact 必须标记为 history replacement"
+    );
+    assert!(
         !transcript.flags(ancestor.id()).excluded,
         "ancestor 不得被排除"
     );

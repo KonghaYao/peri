@@ -1,6 +1,8 @@
+> 归档于 2026-07-30，原路径 spec/issues/2026-07-04-inputarea-v2-design-gap.md
+
 # InputArea 设计规范 v2 补全——对照 TUI 设计文档第 3 节
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-07-04
 

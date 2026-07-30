@@ -17,8 +17,8 @@ fn test_default_values() {
     assert!(config.has_valid_micro_field_limits());
     assert_eq!(
         config.micro_excluded_tools.len(),
-        3,
-        "黑名单默认 3 个工具（AskUserQuestion/goal/TodoWrite）"
+        4,
+        "黑名单默认 4 个工具（Agent/AskUserQuestion/goal/TodoWrite）"
     );
     assert_eq!(config.summary_max_tokens, 16000);
     assert_eq!(config.re_inject_max_files, 5);
@@ -105,7 +105,11 @@ fn test_excluded_tools_default_non_empty() {
     let config = CompactConfig::default();
     assert!(
         !config.micro_excluded_tools.is_empty(),
-        "黑名单默认应包含 AskUserQuestion/goal/TodoWrite"
+        "黑名单默认应包含 Agent/AskUserQuestion/goal/TodoWrite"
+    );
+    assert!(
+        config.micro_excluded_tools.contains(&"Agent".to_string()),
+        "默认应包含 Agent"
     );
     assert!(
         config
@@ -123,4 +127,44 @@ fn test_excluded_tools_default_non_empty() {
             .contains(&"TodoWrite".to_string()),
         "默认应包含 TodoWrite"
     );
+}
+
+#[test]
+fn test_auto_compact_threshold_clamps_out_of_range() {
+    // 超出 1.0 → clamp 到 1.0
+    let json = r#"{"auto_compact_threshold": 1.5}"#;
+    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    assert!((config.auto_compact_threshold - 1.0).abs() < 0.001);
+
+    // 负数 → clamp 到 0.0
+    let json = r#"{"auto_compact_threshold": -0.5}"#;
+    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    assert!((config.auto_compact_threshold - 0.0).abs() < 0.001);
+}
+
+#[test]
+fn test_auto_compact_threshold_normal_values_unchanged() {
+    // 合法范围内的值保持不变
+    let json = r#"{"auto_compact_threshold": 0.80}"#;
+    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    assert!((config.auto_compact_threshold - 0.80).abs() < 0.001);
+
+    let json = r#"{"auto_compact_threshold": 0.95}"#;
+    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
+
+    let json = r#"{"auto_compact_threshold": 0.0}"#;
+    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    assert!((config.auto_compact_threshold - 0.0).abs() < 0.001);
+
+    let json = r#"{"auto_compact_threshold": 1.0}"#;
+    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    assert!((config.auto_compact_threshold - 1.0).abs() < 0.001);
+}
+
+#[test]
+fn test_auto_compact_threshold_default_is_valid() {
+    let config = CompactConfig::default();
+    assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
+    assert!(config.auto_compact_threshold >= 0.0 && config.auto_compact_threshold <= 1.0);
 }

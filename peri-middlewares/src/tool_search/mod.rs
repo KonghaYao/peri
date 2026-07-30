@@ -16,7 +16,7 @@ pub use core_tools::{
     resolve_effective_tool_name, EXECUTE_EXTRA_TOOL_NAME, EXTRA_TOOL_NAME_FIELD,
     EXTRA_TOOL_PARAMS_FIELD, SEARCH_EXTRA_TOOLS_NAME,
 };
-pub use execute_tool::ExecuteExtraTool;
+pub use execute_tool::{ExecuteExtraTool, ExecuteExtraToolResolver};
 pub use middleware::ToolSearchMiddleware;
 pub use search_tool::SearchExtraTools;
 pub use tool_index::{SearchResult, ToolSearchIndex};

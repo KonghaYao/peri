@@ -100,6 +100,8 @@ pub struct PromptResult {
     pub ok: bool,
     /// Why the prompt execution stopped.
     pub stop_reason: PromptStopReason,
+    /// Whether a Full Compact committed during this turn replaced the prior visible history.
+    pub history_replaced_by_compaction: bool,
     /// Recall items collected during execution (for next turn injection).
     pub recall_items: Vec<String>,
 }
@@ -657,6 +659,8 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
 struct ExecOutcome {
     ok: bool,
     stop_reason: PromptStopReason,
+    /// A Full Compact committed during this turn and replaced prior visible history.
+    history_replaced_by_compaction: bool,
     agent_state: AgentState,
 }
 

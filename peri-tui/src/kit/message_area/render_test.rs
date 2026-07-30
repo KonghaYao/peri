@@ -249,6 +249,8 @@ fn skill_card_hides_raw_skill_output() {
         .flat_map(|line| line.spans.iter())
         .map(|span| span.content.as_ref())
         .collect::<String>();
+    assert!(text.contains("Skill"));
+    assert!(text.contains("✓"));
     assert!(text.contains("using-superpowers"));
     assert!(!text.contains("full SKILL.md body"));
     assert!(!text.contains("---"));
@@ -289,7 +291,9 @@ fn todo_card_renders_progress_and_changes_without_raw_output() {
         .flat_map(|line| line.spans.iter())
         .map(|span| span.content.as_ref())
         .collect::<String>();
+    assert!(text.contains("TodoUpdate"));
     assert!(text.contains("1/1"));
+    assert!(text.contains("✓"));
     assert!(text.contains("实现语义卡片"));
     assert!(!text.contains("+[0],[1]"));
 }
@@ -384,7 +388,7 @@ fn skill_card_hides_raw_output_when_name_is_missing_or_call_failed() {
         .flat_map(|line| line.spans.iter())
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    assert!(text.contains("Failed"));
+    assert!(text.contains("✗"));
     assert!(!text.contains("full SKILL.md body"));
     assert!(!text.contains("---"));
 }

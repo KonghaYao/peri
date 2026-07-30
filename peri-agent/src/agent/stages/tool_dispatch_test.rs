@@ -3,6 +3,7 @@ use super::*;
 use serde_json::json;
 
 use crate::messages::MessageContent;
+use crate::middleware::{r#trait::Middleware, MiddlewareChain};
 use crate::session::queue::MessageQueue;
 use crate::session::transcript::MessageTranscript;
 use crate::session::turn::TurnContext;
@@ -190,9 +191,148 @@ fn test_resolve_tool_self_declared_alias() {
     assert!(tool.is_none(), "未声明名称不应匹配");
 }
 
-// ── dispatch_concurrent / settle_results / post_process_result / handle_consecutive_failures ──
+#[test]
+fn test_canonical_resolver_normalizes_alias_and_params() {
+    use std::collections::BTreeMap;
 
-/// 可返回自定义输出的测试工具
+    use crate::tools::{DirectToolInvocationResolver, ToolInvocationResolver};
+
+    struct AliasTool;
+    #[async_trait::async_trait]
+    impl BaseTool for AliasTool {
+        fn name(&self) -> &str {
+            "Bash"
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({})
+        }
+        fn aliases(&self) -> &[&str] {
+            &["Shell"]
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(String::new())
+        }
+    }
+
+    let mut tools: BTreeMap<String, Arc<dyn BaseTool>> = BTreeMap::new();
+    tools.insert("Bash".to_string(), Arc::new(AliasTool));
+
+    let invocation = DirectToolInvocationResolver
+        .resolve(
+            &ToolCall::new("call_1", "SHELL", json!({"path": "/tmp/x"})),
+            &tools,
+        )
+        .expect("alias should resolve");
+
+    assert_eq!(invocation.raw_call.name, "SHELL");
+    assert_eq!(invocation.policy_call.name, "Bash");
+    assert_eq!(invocation.policy_call.input, json!({"file_path": "/tmp/x"}));
+}
+
+#[tokio::test]
+async fn test_dispatch_rejects_duplicate_and_empty_ids_before_policy_or_invoke() {
+    struct CountingTool {
+        name: &'static str,
+        invoked: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl BaseTool for CountingTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({})
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            self.invoked
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(self.name.to_string())
+        }
+    }
+
+    struct CountingMiddleware(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl Middleware for CountingMiddleware {
+        fn name(&self) -> &str {
+            "CountingMiddleware"
+        }
+        async fn before_tools_batch(
+            &self,
+            _state: &mut dyn crate::middleware::state::MiddlewareState,
+            calls: &[ToolCall],
+        ) -> Vec<crate::error::AgentResult<ToolCall>> {
+            self.0
+                .fetch_add(calls.len(), std::sync::atomic::Ordering::Relaxed);
+            calls.iter().cloned().map(Ok).collect()
+        }
+    }
+
+    let invoked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let policy_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut tools = BTreeMap::new();
+    tools.insert(
+        "Read".to_string(),
+        Arc::new(CountingTool {
+            name: "Read",
+            invoked: Arc::clone(&invoked),
+        }) as Arc<dyn BaseTool>,
+    );
+    tools.insert(
+        "Bash".to_string(),
+        Arc::new(CountingTool {
+            name: "Bash",
+            invoked: Arc::clone(&invoked),
+        }) as Arc<dyn BaseTool>,
+    );
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(CountingMiddleware(Arc::clone(&policy_calls))));
+
+    let mut ctx = make_test_ctx();
+    ctx.runtime.tools.write().extend(tools);
+    ctx.runtime.middleware_chain = Arc::new(chain);
+    let reasoning = Reasoning::with_tools(
+        "",
+        vec![
+            ToolCall::new("same", "Read", json!({})),
+            ToolCall::new("same", "Bash", json!({})),
+            ToolCall::new("", "Read", json!({})),
+        ],
+    );
+
+    let outcome = dispatch_tools(&ctx, &reasoning, &CancellationToken::new())
+        .await
+        .expect("malformed calls should settle as tool errors");
+
+    assert_eq!(policy_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(invoked.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(outcome.results.len(), 3);
+    assert!(outcome.results.iter().all(|(_, result)| result.is_error));
+    assert_eq!(
+        outcome
+            .results
+            .iter()
+            .map(|(call, _)| call.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Read", "Bash", "Read"]
+    );
+}
+
 struct OutputTool {
     name: String,
     output: String,
@@ -244,7 +384,21 @@ async fn test_dispatch_concurrent_single_tool_succeeds() {
         name: "Read".to_string(),
         input: serde_json::json!({"file_path": "/tmp/test.txt"}),
     }];
-    let results = dispatch_concurrent(&ctx, &ready_calls, &all_tools, &cancel, &ai_msg).await;
+    let mut target_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
+    target_tools.insert(
+        "call_1".to_string(),
+        Arc::clone(all_tools.get("Read").unwrap()),
+    );
+    let raw_calls = HashMap::new();
+    let results = dispatch_concurrent(
+        &ctx,
+        &ready_calls,
+        &raw_calls,
+        &target_tools,
+        &cancel,
+        &ai_msg,
+    )
+    .await;
     assert_eq!(results.len(), 1);
     assert!(results[0].is_ok(), "工具应成功执行");
     assert_eq!(results[0].as_ref().unwrap(), "ok");
@@ -267,7 +421,21 @@ async fn test_dispatch_concurrent_cancelled() {
         name: "Read".to_string(),
         input: serde_json::json!({}),
     }];
-    let results = dispatch_concurrent(&ctx, &ready_calls, &all_tools, &cancel, &ai_msg).await;
+    let mut target_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
+    target_tools.insert(
+        "call_1".to_string(),
+        Arc::clone(all_tools.get("Read").unwrap()),
+    );
+    let raw_calls = HashMap::new();
+    let results = dispatch_concurrent(
+        &ctx,
+        &ready_calls,
+        &raw_calls,
+        &target_tools,
+        &cancel,
+        &ai_msg,
+    )
+    .await;
     assert_eq!(results.len(), 1);
     assert!(results[0].is_err(), "取消后应返回错误");
     let err = results[0].as_ref().unwrap_err().to_string();

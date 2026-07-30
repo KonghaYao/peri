@@ -28,6 +28,22 @@ pub const TOOL_TODO: &str = "TodoWrite";
 pub const TOOL_SKILL: &str = "SkillTool";
 pub const TOOL_DISCOVER_SKILLS: &str = "DiscoverSkillsTool";
 
+pub fn parse_extra_tool_call(
+    input: &serde_json::Value,
+) -> Result<(String, serde_json::Value), String> {
+    let tool_name = input
+        .get(EXTRA_TOOL_NAME_FIELD)
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "malformed ExecuteExtraTool invocation".to_string())?;
+    let params = input
+        .get(EXTRA_TOOL_PARAMS_FIELD)
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| "malformed ExecuteExtraTool invocation".to_string())?;
+    Ok((tool_name.to_string(), params))
+}
+
 /// 解析有效的工具名称
 ///
 /// 当 tool_name 为 [`EXECUTE_EXTRA_TOOL_NAME`] 时，从 `input[EXTRA_TOOL_NAME_FIELD]` 提取目标工具名，

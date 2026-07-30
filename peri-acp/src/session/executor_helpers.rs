@@ -153,6 +153,7 @@ pub(super) async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Op
         messages: result.messages,
         ok: true,
         stop_reason: result.stop_reason,
+        history_replaced_by_compaction: false,
         recall_items: Vec::new(),
     })
 }
@@ -302,6 +303,7 @@ pub(super) async fn collect_result(req: CollectRequest<'_>) -> PromptResult {
         messages: exec_outcome.agent_state.into_messages(),
         ok: exec_outcome.ok,
         stop_reason: exec_outcome.stop_reason,
+        history_replaced_by_compaction: exec_outcome.history_replaced_by_compaction,
         recall_items,
     }
 }
@@ -526,14 +528,12 @@ pub(super) async fn build_and_execute_agent_v2(
     let loop_result = run_react_loop(v2_out.context, 500).await;
 
     // Phase 8: 从 transcript 提取最终消息列表，构造 AgentState（兼容下游 PromptResult）
-    let messages: Vec<BaseMessage> = v2_out
-        .session
-        .transcript()
-        .read()
-        .visible_messages()
-        .into_iter()
-        .cloned()
-        .collect();
+    let (messages, history_replaced_by_compaction) = {
+        let transcript = v2_out.session.transcript();
+        let transcript = transcript.read();
+        let messages = transcript.visible_messages().into_iter().cloned().collect();
+        (messages, transcript.full_compaction_committed())
+    };
     let mut agent_state = AgentState::with_messages(ctx.cwd.clone(), messages);
     agent_state.set_context("session_id", &ctx.session_id);
     agent_state.set_context("run_id", uuid::Uuid::now_v7().to_string());
@@ -620,6 +620,7 @@ pub(super) async fn build_and_execute_agent_v2(
     ExecOutcome {
         ok,
         stop_reason,
+        history_replaced_by_compaction,
         agent_state,
     }
 }

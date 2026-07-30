@@ -570,15 +570,7 @@ fn test_plan_micro_compacts_only_long_top_level_string_fields() {
         &config,
     );
 
-    assert_eq!(plan.actions.len(), 1, "Agent 不应有特殊保护");
-    assert!(matches!(
-        &plan.actions[0].action,
-        ProjectionAction::CompactToolInput {
-            fields,
-            keep_head: 350,
-            keep_tail: 100,
-        } if fields == &["prompt"]
-    ));
+    assert_eq!(plan.actions.len(), 0, "Agent 应受保护，不在黑名单外被压缩");
 }
 
 #[test]

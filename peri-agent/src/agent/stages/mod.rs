@@ -31,7 +31,7 @@ use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::turn::TurnContext;
 use crate::session::{MessageQueue, MessageTranscript, QueuedMessage};
-use crate::tools::BaseTool;
+use crate::tools::{BaseTool, DirectToolInvocationResolver, ToolInvocationResolver};
 
 /// 共享工具注册表类型别名（避免 clippy::type_complexity）
 pub type SharedToolMap = Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>;
@@ -68,6 +68,8 @@ pub struct RuntimeServices {
     pub llm: Arc<dyn ReactLLM + Send + Sync>,
     /// LLM 可见 + 可执行的工具（Reason 读列表传 LLM，tool_dispatch 按名执行）
     pub tools: SharedToolMap,
+    /// 每个 dispatch 使用其工具表 snapshot 的 canonical invocation resolver。
+    pub tool_invocation_resolver: Arc<dyn ToolInvocationResolver>,
     pub middleware_chain: Arc<MiddlewareChain>,
     pub event_bus: Arc<EventBus>,
     /// Deferred tools 外部注册表（ExecuteExtraTool 代理执行用）
@@ -153,6 +155,7 @@ impl StageContext {
             runtime: RuntimeServices {
                 llm: Arc::new(NullReactLLM),
                 tools: tools_map,
+                tool_invocation_resolver: Arc::new(DirectToolInvocationResolver),
                 middleware_chain: mw_chain,
                 event_bus: ebus,
                 shared_tools: None,
@@ -194,6 +197,7 @@ impl StageContext {
             runtime: RuntimeServices {
                 llm: Arc::new(NullReactLLM),
                 tools: Arc::new(RwLock::new(BTreeMap::new())),
+                tool_invocation_resolver: Arc::new(DirectToolInvocationResolver),
                 middleware_chain: Arc::new(MiddlewareChain::new()),
                 event_bus: Arc::new(EventBus::new(Default::default()).0),
                 shared_tools: None,
@@ -288,6 +292,14 @@ impl StageContextBuilder {
 
     pub fn with_tools(mut self, tools: SharedToolMap) -> Self {
         self.runtime.tools = tools;
+        self
+    }
+
+    pub fn with_tool_invocation_resolver(
+        mut self,
+        resolver: Arc<dyn ToolInvocationResolver>,
+    ) -> Self {
+        self.runtime.tool_invocation_resolver = resolver;
         self
     }
 

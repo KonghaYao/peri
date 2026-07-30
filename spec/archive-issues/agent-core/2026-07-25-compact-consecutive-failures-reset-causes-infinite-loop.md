@@ -1,3 +1,5 @@
+> 归档于 2026-07-30，原路径 spec/issues/2026-07-25-compact-consecutive-failures-reset-causes-infinite-loop.md
+
 # Compact 死机开关失效——修复引入 `consecutive_failures` 提前清零导致无限 Full 重试
 
 > **状态**：Fixed | **优先级**：P0 | **类型**：Bug | **日期**：2026-07-25 | **来源**：/systematic-debugging（5 个子代理独立验证）

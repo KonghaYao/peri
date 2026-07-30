@@ -1014,17 +1014,4 @@ app-note-agent-failed = Agent 执行失败: { $message }
 app-note-cache-hit-low = Prompt cache 命中率 {$pct}% < 80%（req: { $req_id }）
 
 # ---- 语义工具卡片 ----
-tool-skill-title = 使用 skill · { $name }
-tool-skill-loading = 正在加载
-tool-skill-loaded = 已加载
-tool-todo-title = 任务已更新
-tool-todo-progress = 已完成 { $completed }/{ $total }
-tool-todo-added = 已新增 · { $content }
-tool-todo-started = 开始执行 · { $content }
-tool-todo-completed = 已完成 · { $content }
-tool-todo-reopened = 重新打开 · { $content }
-tool-todo-active-form-updated = 已更新 · { $content }
-tool-todo-removed = 已移除 · { $content }
-
-tool-skill-failed = 加载失败
 tool-todo-failed = 更新失败

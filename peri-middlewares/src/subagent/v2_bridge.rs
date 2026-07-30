@@ -127,6 +127,9 @@ pub fn build_v2_subagent_context(
         .with_agent_id(AgentId::new())
         .with_llm(v2_llm)
         .with_tools(combined_shared_tools)
+        .with_tool_invocation_resolver(Arc::new(
+            crate::tool_search::ExecuteExtraToolResolver::default(),
+        ))
         .with_middleware_chain(Arc::new(chain))
         .with_event_bus(Arc::new(event_bus))
         .with_session_context(session_context)
@@ -154,5 +157,115 @@ pub fn build_v2_subagent_context(
         context,
         session,
         event_handles,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    use async_trait::async_trait;
+    use peri_agent::{
+        agent::{
+            react::{Reasoning, ToolCall},
+            stages::tool_dispatch::dispatch_tools,
+        },
+        tools::ToolContext,
+    };
+    use serde_json::json;
+
+    struct SnapshotTool {
+        name: &'static str,
+        output: &'static str,
+        limit: Option<usize>,
+        invoked: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl BaseTool for SnapshotTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "snapshot test tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({})
+        }
+
+        fn output_char_limit(&self) -> Option<usize> {
+            self.limit
+        }
+
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            *self.invoked.lock().unwrap() += 1;
+            Ok(self.output.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn combined_stage_context_snapshot_owns_wrapper_target_resolution() {
+        let local_invoked = Arc::new(Mutex::new(0));
+        let external_invoked = Arc::new(Mutex::new(0));
+        let local: Arc<dyn BaseTool> = Arc::new(SnapshotTool {
+            name: "DeferredTarget",
+            output: "local-output",
+            limit: Some(5),
+            invoked: Arc::clone(&local_invoked),
+        });
+        let external: Arc<dyn BaseTool> = Arc::new(SnapshotTool {
+            name: "DeferredTarget",
+            output: "external-output",
+            limit: None,
+            invoked: Arc::clone(&external_invoked),
+        });
+        let external_tools = Arc::new(RwLock::new(BTreeMap::from([(
+            "DeferredTarget".to_string(),
+            external,
+        )])));
+        let wrapper: Arc<dyn BaseTool> = Arc::new(crate::tool_search::ExecuteExtraTool::new(
+            Arc::clone(&external_tools),
+        ));
+        let built = build_v2_subagent_context(
+            Box::new(peri_agent::agent::stages::NullReactLLM),
+            MiddlewareChain::new(),
+            vec![local, wrapper],
+            "/tmp",
+            CancellationToken::new(),
+            Vec::new(),
+            None,
+            Some(external_tools),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let reasoning = Reasoning::with_tools(
+            "",
+            vec![ToolCall::new(
+                "call-1",
+                crate::tool_search::EXECUTE_EXTRA_TOOL_NAME,
+                json!({"tool_name": "DeferredTarget", "params": {}}),
+            )],
+        );
+
+        let outcome = dispatch_tools(&built.context, &reasoning, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(*local_invoked.lock().unwrap(), 1);
+        assert_eq!(*external_invoked.lock().unwrap(), 0);
+        assert_eq!(
+            outcome.results[0].1.output,
+            "local\n\n[Output truncated at 5 chars]"
+        );
     }
 }

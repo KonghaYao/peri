@@ -42,6 +42,7 @@ cargo test -p <crate> --lib -- <test_name>
 cargo test --workspace --doc
 cargo run -p peri-tui -- -a
 lefthook run pre-commit
+cargo clippy --workspace --all-targets -- -D warnings # 非常重要
 ```
 
 E2E 命令只在 `e2e/CLAUDE.md` 维护。

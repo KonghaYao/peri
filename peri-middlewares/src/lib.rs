@@ -77,8 +77,9 @@ pub use subagent::{
     SubAgentTool,
 };
 pub use tool_search::{
-    resolve_effective_tool_name, ToolSearchMiddleware, EXECUTE_EXTRA_TOOL_NAME,
-    EXTRA_TOOL_NAME_FIELD, EXTRA_TOOL_PARAMS_FIELD, SEARCH_EXTRA_TOOLS_NAME,
+    resolve_effective_tool_name, ExecuteExtraToolResolver, ToolSearchMiddleware,
+    EXECUTE_EXTRA_TOOL_NAME, EXTRA_TOOL_NAME_FIELD, EXTRA_TOOL_PARAMS_FIELD,
+    SEARCH_EXTRA_TOOLS_NAME,
 };
 pub use tools::skill::SkillTool;
 pub use tools::skill::SkillToolMiddleware;

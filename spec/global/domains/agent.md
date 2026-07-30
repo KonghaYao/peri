@@ -323,3 +323,73 @@ Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、Su
 **通用模式:** 核心编排函数必须有集成测试。事件 enum 和 SQLite schema 需要语义化版本号（如 `V1_Event` vs `V2_Event`）。用 feature flag 分离编译依赖。单函数超过 150 行需拆分为步骤级函数
 **涉及文件:** peri-agent/src/, peri-acp/src/
 **CLAUDE.md 链接:** false
+
+### issue_2026-07-25-compact-consecutive-failures-reset-causes-infinite-loop
+**摘要:** Compact 死机开关失效——`consecutive_failures` 提前清零导致无限 Full 重试
+**状态:** Fixed
+**归档日期:** 2026-07-30
+**关键词:** compact, consecutive_failures, 死循环, 计数器管理
+**问题本质:** Micro+Full 分支在 Full 调用前提前清零 consecutive_failures，导致振荡在 0↔1 永不触达 max=3
+**通用模式:** 计数器管理只能在一个地方做——run_full_or_degrade 内部已正确管理（成功清零/失败+1），外部不应干预。修正的同时需连根删掉已失效的过期 excluded 标记清除死代码
+**涉及文件:** peri-agent/src/agent/compact_v2/mod.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-29-micro-compact-loses-agent-tool-context
+**摘要:** Micro Compact 整体替换 tool input 导致 Agent 必填参数缺失
+**状态:** Fixed
+**归档日期:** 2026-07-30
+**关键词:** micro compact, tool input, 字段级压缩, Agent 工具
+**问题本质:** Micro Compact 将历史 tool input 整体替换为 `{"_compact_note":"tool input compacted"}`，删除了 `prompt` 等必填字段
+**通用模式:** Micro Compact 只应收窄为回收明显偏长的 payload（chars > 500 的顶层字符串字段做 head/tail 截断），短内容和 JSON 结构原样保留。语义总结属于 Full Compact 职责。Planner 决定压缩对象，Projection 仅执行持久化计划
+**涉及文件:** peri-agent/src/agent/compact_v2/（config, projection, planner）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-30-cancel-loses-agent-loop-context
+**摘要:** 取消后下一轮 Agent loop 丢失全部前文
+**状态:** Fixed
+**归档日期:** 2026-07-30
+**关键词:** cancel, transcript, ThreadStore, history replacement
+**问题本质:** Cancel 触发的不完整 transcript 被写回 ThreadStore，后续 turn 读到的 history 为空
+**通用模式:** Full Compact 事务提交成功后在 MessageTranscript 标记 history replacement；TUI 据此接受 compact 摘要快照。不完整取消结果不写回 ThreadStore
+**涉及文件:** peri-agent/src/agent/, peri-acp/src/session/
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-16-p1-1-stagecontext-split
+**摘要:** StageContext 22 字段 god object 拆分为 SessionHandle + RuntimeServices + CompactContext + AsyncContext
+**状态:** Fixed
+**归档日期:** 2026-07-30
+**关键词:** StageContext, god object, 职责边界, 子结构分组
+**问题本质:** 22 字段全平铺在 StageContext，缺少职责边界，新字段加入时难以判断归属
+**通用模式:** 按生命周期分组：会话级实体→运行时服务→Compact 系统上下文→异步传输控制。聚合根 4 个子结构，阶段函数隐式依赖变为显式访问
+**涉及文件:** peri-agent/src/agent/stages/mod.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-16-p1-4-compact-v2-split
+**摘要:** compact_v2.rs ~900 行拆分为 micro.rs / full.rs / smart.rs + mod.rs 入口
+**状态:** Fixed
+**归档日期:** 2026-07-30
+**关键词:** compact_v2, 文件拆分, 策略独立, 模块化
+**问题本质:** 单一文件含 3 种 Compact 策略，共用部分仅 CompactResult
+**通用模式:** 按策略独立拆分子模块，公开辅助函数用 pub use 重导出保持调用路径不变
+**涉及文件:** peri-agent/src/agent/compact_v2/
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-29-micro-compact-field-level-design
+**摘要:** Micro Compact 字段级压缩设计——Planner/Projection 阶段分离、Unicode 安全截断
+**状态:** Approved
+**归档日期:** 2026-07-30
+**关键词:** micro compact, 字段级压缩, 设计文档, Planner, Projection
+**问题本质:** Micro Compact 从整体替换改为字段级 head/tail 截断，Planner 决定压缩对象，Projection 执行持久化
+**通用模式:** 默认阈值 500 chars，保留头 350 + 尾 100。截断用 Unicode scalar value 计数。ToolResult 错误完整保留，成功结果超阈值才截断。工具保护名单不受影响
+**涉及文件:** peri-agent/src/agent/compact_v2/
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-16-architecture-upgrade-checklist
+**摘要:** 架构升级总清单——三维护审视识别 35 个待升级点
+**状态:** Fixed
+**归档日期:** 2026-07-30
+**关键词:** 架构审视, 跨 crate, god object, SubAgent 事件, 技术债
+**问题本质:** 三维审视系统性盘点技术债，P0 项已拆分为独立 sub-issue 并修复
+**通用模式:** 定期架构审视应成为 release 前的标准流程
+**涉及文件:** 全 workspace
+**CLAUDE.md 链接:** false

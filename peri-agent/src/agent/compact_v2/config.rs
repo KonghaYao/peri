@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::env;
 
 use serde::{Deserialize, Serialize};
+use tracing;
 
 use crate::tools::ContextRetention;
 
@@ -24,11 +25,14 @@ fn default_stale_steps() -> usize {
 ///
 /// │ 工具             │ 理由                                          │
 /// │──────────────────│───────────────────────────────────────────────│
+/// │ Agent            │ 子任务描述（prompt）等结构化参数不可恢复，     │
+/// │                  │ 丢失=子 agent 调度失败，必填字段缺失           │
 /// │ AskUserQuestion  │ 用户答案不可恢复，丢失=对话断裂               │
 /// │ goal             │ 长期目标状态，丢失=agent 漂移方向             │
 /// │ TodoWrite        │ 任务列表结构，丢失=agent 工作记忆重置         │
 fn default_excluded_tools() -> Vec<String> {
     vec![
+        "Agent".to_string(),
         "AskUserQuestion".to_string(),
         "goal".to_string(),
         "TodoWrite".to_string(),
@@ -76,12 +80,40 @@ fn default_micro_field_keep_head_chars() -> usize {
 fn default_micro_field_keep_tail_chars() -> usize {
     100
 }
+/// serde 反序列化时校验 compact 阈值在 [0.0, 1.0] 范围内，
+/// 超出则 clamp 并发出警告。防止配置错误导致 compact 的 Full 升级路径
+/// 被静默绕过（如 auto_compact_threshold 误设为 1.2 时 budget_pct 永不满足条件）。
+fn deserialize_threshold_range<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = f64::deserialize(deserializer)?;
+    if !val.is_finite() || val < 0.0 {
+        tracing::warn!(
+            "compact_v2 配置: auto_compact_threshold={val} 无效（非正数或非有限），已 clamp 到 0.0"
+        );
+        return Ok(0.0);
+    }
+    if val > 1.0 {
+        tracing::warn!(
+            "compact_v2 配置: auto_compact_threshold={val} 超出合法范围 (0.0..=1.0)，已 clamp 到 1.0"
+        );
+        return Ok(1.0);
+    }
+    Ok(val)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactConfig {
     #[serde(default = "default_true")]
     pub auto_compact_enabled: bool,
-    #[serde(default = "default_threshold_095")]
+    /// Full Compact 自动触发阈值（百分比，0.0–1.0）。
+    /// 反序列化时自动 clamp 到 [0.0, 1.0] 并 warn，防止配置错误导致
+    /// budget 检查被静默绕过。
+    #[serde(
+        default = "default_threshold_095",
+        deserialize_with = "deserialize_threshold_range"
+    )]
     pub auto_compact_threshold: f64,
     #[serde(default = "default_threshold_075")]
     pub micro_compact_threshold: f64,

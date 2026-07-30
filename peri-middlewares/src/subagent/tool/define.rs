@@ -513,13 +513,6 @@ impl BaseTool for SubAgentTool {
                 BaseMessage::human(prompt.to_string()),
             ));
 
-        // 运行 before_agent middleware hooks
-        if let Err(e) =
-            peri_agent::agent::stages::middleware_runner::run_before_agent(&v2_ctx.context).await
-        {
-            tracing::warn!(error = %e, "[subagent:define] before_agent hook failed");
-        }
-
         // 运行 v2 ReAct 循环
         let loop_result =
             peri_agent::agent::stages::run_react_loop(v2_ctx.context, max_iterations).await;

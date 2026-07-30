@@ -273,13 +273,6 @@ pub async fn spawn_background_fork(
                 child_thread_id_clone.clone(),
             );
 
-        // run before_agent middleware hooks
-        if let Err(e) =
-            peri_agent::agent::stages::middleware_runner::run_before_agent(&context).await
-        {
-            tracing::warn!(error = %e, "[subagent:spawner] before_agent hook failed");
-        }
-
         let loop_result = run_react_loop(context, max_iterations).await;
 
         let (final_text, interrupted) = match loop_result {

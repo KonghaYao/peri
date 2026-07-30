@@ -234,7 +234,9 @@ pub(crate) async fn run_prompt(
                     }
                 }
                 state.history = result.messages;
-            } else if result.messages.len() > history_len + 1 {
+            } else if result.history_replaced_by_compaction
+                || result.messages.len() > history_len + 1
+            {
                 // Error/cancel but agent made progress (user msg + AI/tool messages beyond
                 // just the user message). Preserve history so the agent remembers the
                 // interrupted round's context on the next prompt. Covers all error paths:
@@ -243,23 +245,37 @@ pub(crate) async fn run_prompt(
                 //
                 // NOTE: execute() skips cleanup_prepended on error paths (? propagation),
                 // so result.messages may contain leaked system prepends at the beginning.
-                // Strip them by locating where the original history starts (ID matching).
-                let cleaned = strip_leaked_prepends(&result.messages, first_history_id);
-                let new_count = cleaned.len().saturating_sub(history_len);
-                // Persist newly added messages to ThreadStore
-                if new_count > 0 && history_len < cleaned.len() {
-                    let new_msgs = &cleaned[history_len..];
-                    if let Err(e) = thread_store.append_messages(&thread_id, new_msgs).await {
-                        tracing::warn!(error = %e, "Failed to persist cancelled-round messages");
+                // A committed Full Compact intentionally removes prior visible IDs and appends
+                // its summary to ThreadStore. Only that explicit executor signal may replace
+                // history without its original first message; other partial results are rejected.
+                if let Some(cleaned) = strip_leaked_prepends(
+                    &result.messages,
+                    first_history_id,
+                    result.history_replaced_by_compaction,
+                ) {
+                    let new_count = cleaned.len().saturating_sub(history_len);
+                    // Persist newly added messages to ThreadStore
+                    if new_count > 0 && history_len < cleaned.len() {
+                        let new_msgs = &cleaned[history_len..];
+                        if let Err(e) = thread_store.append_messages(&thread_id, new_msgs).await {
+                            tracing::warn!(error = %e, "Failed to persist cancelled-round messages");
+                        }
                     }
+                    state.history = cleaned;
+                    info!(
+                        session_id = %session_id,
+                        history_len,
+                        new_count,
+                        "Agent cancelled with progress, preserving history"
+                    );
+                } else {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        history_len,
+                        result_messages = result.messages.len(),
+                        "Cancelled result omitted existing history; preserving prior in-memory history"
+                    );
                 }
-                state.history = cleaned;
-                info!(
-                    session_id = %session_id,
-                    history_len,
-                    new_count,
-                    "Agent cancelled with progress, preserving history"
-                );
             } else {
                 // Execution failed, cancelled early (no AI output), or MaxIterationsExceeded.
                 // Roll back LLM-side history to pre-submit state.
@@ -284,35 +300,39 @@ pub(crate) async fn run_prompt(
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-/// Strip leaked system prepend messages from the agent's result messages.
-///
-/// When `execute()` returns via `?` propagation (cancel/error), `cleanup_prepended` is
-/// not called, leaving system messages (from `before_agent` + `with_system_prompt`) at
-/// the head of the message list. This function finds where the original history begins
-/// (by matching the first message ID) and returns messages from that point onward.
+/// Returns `None` when a partial result omits existing history. A committed Full Compact
+/// explicitly replaces prior visible messages with its persisted summary, so it is accepted.
 fn strip_leaked_prepends(
     result_messages: &[peri_agent::messages::BaseMessage],
     first_history_id: Option<peri_agent::messages::MessageId>,
-) -> Vec<peri_agent::messages::BaseMessage> {
+    full_compaction_committed: bool,
+) -> Option<Vec<peri_agent::messages::BaseMessage>> {
     match first_history_id {
         Some(first_id) => {
-            // Find where original history starts in result (skip leaked prepends)
-            match result_messages.iter().position(|m| m.id() == first_id) {
-                Some(start) => result_messages[start..].to_vec(),
-                None => {
-                    // Original history not found — compact may have replaced messages.
-                    // Return as-is (no stripping).
-                    result_messages.to_vec()
-                }
+            // Find where original history starts in result (skip leaked prepends).
+            if let Some(start) = result_messages.iter().position(|m| m.id() == first_id) {
+                Some(result_messages[start..].to_vec())
+            } else if full_compaction_committed {
+                Some(
+                    result_messages
+                        .iter()
+                        .skip_while(|m| m.is_system())
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                None
             }
         }
         None => {
-            // Original history was empty — strip leading system messages (all prepends)
-            result_messages
-                .iter()
-                .skip_while(|m| m.is_system())
-                .cloned()
-                .collect()
+            // Original history was empty — strip leading system messages (all prepends).
+            Some(
+                result_messages
+                    .iter()
+                    .skip_while(|m| m.is_system())
+                    .cloned()
+                    .collect(),
+            )
         }
     }
 }

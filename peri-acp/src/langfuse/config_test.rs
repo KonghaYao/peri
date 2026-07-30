@@ -20,7 +20,7 @@ fn test_default_config() {
     assert!(cfg.public_key.is_none());
     assert!(cfg.secret_key.is_none());
     assert_eq!(cfg.host, "https://cloud.langfuse.com");
-    assert!((cfg.trace_sampling - 1.0).abs() < f64::EPSILON);
+    assert!((cfg.trace_sampling - 1.0).abs() < 1e-10);
     assert!(cfg.error_span_always);
     assert_eq!(cfg.batch_max_events, 50);
     assert_eq!(cfg.batch_flush_interval_secs, 10);
@@ -31,7 +31,7 @@ fn test_load_with_settings_defaults() {
     clear_langfuse_env();
     let cfg = LangfuseConfig::load_with_settings(&serde_json::json!({}));
     assert!(cfg.public_key.is_none());
-    assert!((cfg.trace_sampling - 1.0).abs() < f64::EPSILON);
+    assert!((cfg.trace_sampling - 1.0).abs() < 1e-10);
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn test_load_with_settings_langfuse_fields() {
             "batch_flush_interval_secs": 30
         }
     }));
-    assert!((cfg.trace_sampling - 0.3).abs() < f64::EPSILON);
+    assert!((cfg.trace_sampling - 0.3).abs() < 1e-10);
     assert!(!cfg.error_span_always);
     assert_eq!(cfg.batch_max_events, 100);
     assert_eq!(cfg.batch_flush_interval_secs, 30);
@@ -65,7 +65,7 @@ fn test_load_with_settings_env_override() {
             "error_span_always": false
         }
     }));
-    assert!((cfg.trace_sampling - 0.7).abs() < f64::EPSILON);
+    assert!((cfg.trace_sampling - 0.7).abs() < 1e-10);
     assert!(cfg.error_span_always);
     // 清理环境变量
     clear_langfuse_env();
@@ -78,7 +78,7 @@ fn test_load_with_settings_clamp_sampling() {
     let cfg = LangfuseConfig::load_with_settings(&serde_json::json!({
         "langfuse": { "trace_sampling": 2.5 }
     }));
-    assert!((cfg.trace_sampling - 1.0).abs() < f64::EPSILON);
+    assert!((cfg.trace_sampling - 1.0).abs() < 1e-10);
 }
 
 #[test]

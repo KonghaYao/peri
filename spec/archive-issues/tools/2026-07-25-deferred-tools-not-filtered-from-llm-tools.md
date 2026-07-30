@@ -1,3 +1,5 @@
+> 归档于 2026-07-30，原路径 spec/issues/2026-07-25-deferred-tools-not-filtered-from-llm-tools.md
+
 # Deferred Tools 未向 LLM 过滤——根因：缺少工具自声明的层级标记
 
 **状态**：Fixed

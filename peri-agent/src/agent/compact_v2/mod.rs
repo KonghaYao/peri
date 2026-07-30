@@ -266,9 +266,56 @@ pub async fn run_compact(
             // Dry-run：先用 plan_micro 估算效果（无副作用）
             let plan = plan_micro(transcript, config, true);
 
-            // 空 plan → 无可 compact 消息，提前返回 Skip 避免反复触发
+            // 空 plan → 无可 compact 消息
+            // 但如果 budget 已超过 Full 阈值，直接尝试 Full Compact
+            // 否则纯对话场景下 context 会持续膨胀到远超 100% 而永远不 compact
+            //
+            // 安全性：Full Compact 依赖 compact_llm 生成摘要；若 llm 为 None，
+            // Full 必然失败（CompactNoLlm），不应在此路径触发——否则每轮都
+            // consecutive_failures++ 最终达到 max_consecutive_failures 上限，
+            // 导致 compact 被永久静默禁用。
             if plan.actions.is_empty() {
+                if budget_pct >= config.auto_compact_threshold {
+                    if llm.is_none() {
+                        warn!(
+                            "Micro Compact: plan 为空且 budget 高位({:.1}%)，但 compact_llm 未配置，无法执行 Full Compact。请配置 compact_llm 或启用 Micro Compact 可用工具。",
+                            budget_pct * 100.0
+                        );
+                        return CompactResult {
+                            strategy: CompactStrategy::Skip,
+                            affected_count: 0,
+                            estimated_tokens_saved: 0,
+                            before_visible_len,
+                            after_visible_len: before_visible_len,
+                            summary: None,
+                            full_escalation_reason: Some(
+                                FullEscalationReason::ForceThresholdExceeded,
+                            ),
+                            outcome: CompactOutcome::Skipped,
+                            changed_messages: 0,
+                            changed_fields: 0,
+                            no_op_candidates: 0,
+                        };
+                    }
+                    debug!(
+                        "Micro Compact: plan 为空但 budget 高位({:.1}%)，直接尝试 Full",
+                        budget_pct * 100.0
+                    );
+                    return run_full_or_degrade(
+                        transcript,
+                        llm,
+                        config,
+                        before_visible_len,
+                        consecutive_failures,
+                        cwd,
+                        FullEscalationReason::ForceThresholdExceeded,
+                    )
+                    .await;
+                }
                 debug!("Micro Compact: plan 为空，无消息可 compact，跳过");
+                // "无事可做"不是失败，清除历史失败计数避免误触发
+                // max_consecutive_failures 守卫
+                *consecutive_failures = 0;
                 return CompactResult {
                     strategy: CompactStrategy::Skip,
                     affected_count: 0,
@@ -424,8 +471,49 @@ pub async fn run_compact(
             let affected = micro::micro_compact(transcript, config);
             let estimated_tokens_saved = plan.estimated_tokens_saved;
 
-            // 空结果 → 无可 compact 消息，提前返回 Skip 避免反复触发
+            // 空结果 → 无可 compact 消息
+            // 但如果 budget 已超过 Full 阈值，直接尝试 Full Compact
+            //
+            // 安全性：Full Compact 依赖 compact_llm；若 llm 为 None，不应在此路径
+            // 触发，避免 consecutive_failures 无意义增长到上限。
             if affected == 0 {
+                if budget_pct >= config.auto_compact_threshold {
+                    if llm.is_none() {
+                        warn!(
+                            "Smart Compact: 无消息可 compact 且 budget 高位({:.1}%)，但 compact_llm 未配置，无法执行 Full Compact。",
+                            budget_pct * 100.0
+                        );
+                        return CompactResult {
+                            strategy: CompactStrategy::Skip,
+                            affected_count: 0,
+                            estimated_tokens_saved: 0,
+                            before_visible_len,
+                            after_visible_len: before_visible_len,
+                            summary: None,
+                            full_escalation_reason: Some(
+                                FullEscalationReason::ForceThresholdExceeded,
+                            ),
+                            outcome: CompactOutcome::Skipped,
+                            changed_messages: 0,
+                            changed_fields: 0,
+                            no_op_candidates: 0,
+                        };
+                    }
+                    debug!(
+                        "Smart Compact: 无消息可 compact 但 budget 高位({:.1}%)，直接尝试 Full",
+                        budget_pct * 100.0
+                    );
+                    return run_full_or_degrade(
+                        transcript,
+                        llm,
+                        config,
+                        before_visible_len,
+                        consecutive_failures,
+                        cwd,
+                        FullEscalationReason::ForceThresholdExceeded,
+                    )
+                    .await;
+                }
                 debug!("Smart Compact: 无消息可 compact，跳过");
                 *consecutive_failures = 0;
                 return CompactResult {
@@ -470,6 +558,9 @@ pub async fn run_compact(
                     }
                     full_result
                 } else {
+                    // Smart 有效但未达 Full 阈值 → 清除历史失败计数
+                    // 与 Micro 路径（line 355/417）行为对齐
+                    *consecutive_failures = 0;
                     CompactResult {
                         strategy: CompactStrategy::Smart,
                         affected_count: affected,

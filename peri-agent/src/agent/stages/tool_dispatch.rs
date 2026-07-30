@@ -12,7 +12,7 @@
 //! - **error_suggest 注入**：在 run_after_tool 之后、写 transcript 之前；只修改 output 文本
 //! - **ToolEnd emit 时机**：在 error_suggest 注入之前 emit
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -25,7 +25,7 @@ use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{Reasoning, ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{message::MessageId, BaseMessage, ToolCallRequest};
-use crate::tools::BaseTool;
+use crate::tools::{BaseTool, CanonicalToolInvocation};
 
 /// 连续失败检测阈值
 const CONSECUTIVE_FAILURE_THRESHOLD: u32 = 5;
@@ -54,6 +54,7 @@ fn normalize_params(input: serde_json::Value) -> serde_json::Value {
 }
 
 /// 工具名解析：精确匹配 → 大小写无关匹配 → 工具自声明别名。
+#[cfg(test)]
 fn resolve_tool<'a>(
     name: &str,
     all_tools: &'a HashMap<String, Arc<dyn BaseTool>>,
@@ -115,19 +116,89 @@ pub async fn dispatch_tools(
         });
     }
 
-    let all_tools: HashMap<String, Arc<dyn BaseTool>> = {
+    let all_tools: BTreeMap<String, Arc<dyn BaseTool>> = {
         let tools_guard = ctx.runtime.tools.read();
         tools_guard
             .iter()
             .map(|(k, v)| (k.clone(), Arc::clone(v)))
             .collect()
     };
+    let invalid_ids: std::collections::HashSet<&str> = reasoning
+        .tool_calls
+        .iter()
+        .map(|call| call.id.as_str())
+        .filter(|id| id.is_empty())
+        .collect();
+    let duplicate_ids: std::collections::HashSet<&str> = reasoning
+        .tool_calls
+        .iter()
+        .filter_map(|call| {
+            let count = reasoning
+                .tool_calls
+                .iter()
+                .filter(|other| other.id == call.id)
+                .count();
+            (count > 1).then_some(call.id.as_str())
+        })
+        .collect();
+    let malformed_ids: std::collections::HashSet<&str> =
+        invalid_ids.union(&duplicate_ids).copied().collect();
+
+    let mut invocations = Vec::<CanonicalToolInvocation>::new();
+    let mut resolution_errors = Vec::<(ToolCall, ToolResult)>::new();
+    for call in &reasoning.tool_calls {
+        if malformed_ids.contains(call.id.as_str()) {
+            resolution_errors.push((
+                call.clone(),
+                ToolResult::error(
+                    &call.id,
+                    &call.name,
+                    "malformed tool call id: ids must be non-empty and unique within a batch",
+                ),
+            ));
+            continue;
+        }
+        match ctx
+            .runtime
+            .tool_invocation_resolver
+            .resolve(call, &all_tools)
+        {
+            Ok(invocation) => invocations.push(invocation),
+            Err(error) => resolution_errors.push((
+                call.clone(),
+                ToolResult::error(&call.id, &call.name, error.to_string()),
+            )),
+        }
+    }
+    let raw_calls: HashMap<String, ToolCall> = invocations
+        .iter()
+        .map(|invocation| {
+            (
+                invocation.policy_call.id.clone(),
+                invocation.raw_call.clone(),
+            )
+        })
+        .collect();
+    let policy_calls: Vec<ToolCall> = invocations
+        .iter()
+        .map(|invocation| invocation.policy_call.clone())
+        .collect();
+    let target_tools: HashMap<String, Arc<dyn BaseTool>> = invocations
+        .iter()
+        .map(|invocation| {
+            (
+                invocation.policy_call.id.clone(),
+                Arc::clone(&invocation.target),
+            )
+        })
+        .collect();
 
     // 阶段 A：收集所有工具调用结果（不写 transcript）
-    let collect_outcome = collect_tool_results(
+    let mut collect_outcome = collect_tool_results(
         ctx,
-        reasoning.tool_calls.clone(),
-        &all_tools,
+        policy_calls,
+        &raw_calls,
+        &target_tools,
         cancel,
         ai_msg_id,
         &ai_msg,
@@ -146,11 +217,19 @@ pub async fn dispatch_tools(
             };
             tx.stage_tool_result(tool_msg);
         }
+        for (_, result) in &resolution_errors {
+            tx.stage_tool_result(BaseMessage::tool_error(
+                &result.tool_call_id,
+                result.output.as_str(),
+            ));
+        }
         tx.commit_staged();
     }
 
-    // 阶段 C：触发 after_tools_batch（写入完成后）
+    // 阶段 C：仅已进入 policy 的调用触发 after_tools_batch。
+    // Resolution 错误在 middleware 前结算，不能产生任何 hook 副作用。
     run_after_tools_batch(ctx, &collect_outcome.results).await?;
+    collect_outcome.results.extend(resolution_errors);
 
     // 连续失败追踪 + ToolFailureWarning 注入
     handle_consecutive_failures(ctx, &collect_outcome.results);
@@ -193,6 +272,7 @@ struct ApprovalOutcome {
 async fn collect_tool_results(
     ctx: &StageContext,
     original_calls: Vec<ToolCall>,
+    raw_calls: &HashMap<String, ToolCall>,
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
     cancel: &CancellationToken,
     // ai_msg_id 保留为 API 契约（未来 ToolEnd 事件可携带 message_id）
@@ -202,7 +282,7 @@ async fn collect_tool_results(
     let _ = ai_msg_id;
 
     // 阶段一：批量 before_tool 审批
-    let approval = run_before_tool_approvals(ctx, original_calls, cancel).await?;
+    let approval = run_before_tool_approvals(ctx, original_calls, raw_calls, cancel).await?;
 
     // yield 使 EventBus forwarder task 排空 render_tx 中由阶段一 emit 的
     // ToolStarted 事件（转发到 event_tx），保证在 SubAgent 工具 invoke 内部
@@ -213,8 +293,15 @@ async fn collect_tool_results(
     tokio::task::yield_now().await;
 
     // 阶段二：并发执行（snapshot messages + ai_msg 只读视图）
-    let tool_results =
-        dispatch_concurrent(ctx, &approval.ready_calls, all_tools, cancel, ai_msg).await;
+    let tool_results = dispatch_concurrent(
+        ctx,
+        &approval.ready_calls,
+        raw_calls,
+        all_tools,
+        cancel,
+        ai_msg,
+    )
+    .await;
 
     // 阶段三：聚合 + 错误延迟
     Ok(settle_results(
@@ -238,6 +325,7 @@ async fn collect_tool_results(
 async fn run_before_tool_approvals(
     ctx: &StageContext,
     original_calls: Vec<ToolCall>,
+    raw_calls: &HashMap<String, ToolCall>,
     cancel: &CancellationToken,
 ) -> AgentResult<ApprovalOutcome> {
     let turn_id = ctx.turn_id();
@@ -252,11 +340,12 @@ async fn run_before_tool_approvals(
         if cancel.is_cancelled() {
             // 为已 emit ToolStart 的 ready_calls 补发 ToolEnd
             for tc in &ready_calls {
+                let raw_call = raw_calls.get(&tc.id).unwrap_or(tc);
                 ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
                     turn_id,
                     agent_id,
-                    tool_call_id: tc.id.clone(),
-                    name: tc.name.clone(),
+                    tool_call_id: raw_call.id.clone(),
+                    name: raw_call.name.clone(),
                     output: "interrupted by user".to_string(),
                     is_error: true,
                 });
@@ -265,30 +354,39 @@ async fn run_before_tool_approvals(
         }
         match before_result {
             Ok(modified_call) => {
+                if modified_call.id != tool_call.id || modified_call.name != tool_call.name {
+                    let reason = "middleware cannot modify tool call id or name".to_string();
+                    let raw_call = raw_calls.get(&tool_call.id).unwrap_or(tool_call);
+                    let rejection_result = ToolResult::error(&raw_call.id, &tool_call.name, reason);
+                    settled_results.push((raw_call.clone(), rejection_result));
+                    continue;
+                }
+                let raw_call = raw_calls.get(&tool_call.id).unwrap_or(tool_call);
                 ctx.runtime.event_bus.emit_render(RenderEvent::ToolStarted {
                     turn_id,
                     agent_id,
-                    tool_call_id: modified_call.id.clone(),
-                    name: modified_call.name.clone(),
-                    input: modified_call.input.clone(),
+                    tool_call_id: raw_call.id.clone(),
+                    name: raw_call.name.clone(),
+                    input: raw_call.input.clone(),
                 });
                 ready_calls.push(modified_call);
             }
             Err(AgentError::ToolRejected { ref reason, .. }) => {
+                let raw_call = raw_calls.get(&tool_call.id).unwrap_or(tool_call);
                 let rejection_result =
                     ToolResult::error(&tool_call.id, &tool_call.name, reason.clone());
                 ctx.runtime.event_bus.emit_render(RenderEvent::ToolStarted {
                     turn_id,
                     agent_id,
-                    tool_call_id: tool_call.id.clone(),
-                    name: tool_call.name.clone(),
-                    input: tool_call.input.clone(),
+                    tool_call_id: raw_call.id.clone(),
+                    name: raw_call.name.clone(),
+                    input: raw_call.input.clone(),
                 });
                 ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
                     turn_id,
                     agent_id,
-                    tool_call_id: tool_call.id.clone(),
-                    name: tool_call.name.clone(),
+                    tool_call_id: raw_call.id.clone(),
+                    name: raw_call.name.clone(),
                     output: rejection_result.output.clone(),
                     is_error: true,
                 });
@@ -324,6 +422,7 @@ async fn run_before_tool_approvals(
 async fn dispatch_concurrent(
     ctx: &StageContext,
     ready_calls: &[ToolCall],
+    raw_calls: &HashMap<String, ToolCall>,
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
     cancel: &CancellationToken,
     ai_msg: &BaseMessage,
@@ -347,8 +446,12 @@ async fn dispatch_concurrent(
         .map(|call| {
             let tool_name = call.name.clone();
             let call_id = call.id.clone();
+            let raw_call = raw_calls
+                .get(&call.id)
+                .cloned()
+                .unwrap_or_else(|| call.clone());
             let input = normalize_params(call.input.clone());
-            let tool = resolve_tool(&call.name, all_tools).cloned();
+            let tool = all_tools.get(&call.id).cloned();
             let cancel = cancel.clone();
             let messages = Arc::clone(&messages_snapshot);
             let cwd = cwd_snapshot.clone();
@@ -410,8 +513,8 @@ async fn dispatch_concurrent(
                 event_bus.emit_render(RenderEvent::ToolEnded {
                     turn_id,
                     agent_id,
-                    tool_call_id: call_id,
-                    name: tool_name,
+                    tool_call_id: raw_call.id.clone(),
+                    name: raw_call.name.clone(),
                     output,
                     is_error,
                 });
@@ -544,8 +647,8 @@ fn post_process_result(
         }
     }
 
-    // output_char_limit 截断：工具声明输出上限时按字符截断
-    if let Some(tool) = all_tools.get(&modified_call.name) {
+    // output_char_limit 截断：已经解析完成的 target 工具声明输出上限时按字符截断
+    if let Some(tool) = all_tools.get(&modified_call.id) {
         if let Some(limit) = tool.output_char_limit() {
             if result.output.chars().count() > limit {
                 let truncated: String = result.output.chars().take(limit).collect();
