@@ -375,19 +375,6 @@ fn render_skill_tool_card_lines(
     width: usize,
 ) -> Vec<Line<'static>> {
     let semantic = THEME_ATOM.state().read().semantic;
-    let title = i18n::tr_args(
-        "tool-skill-title",
-        &[("name".into(), FluentValue::from(name))],
-    );
-    let title_width = width.saturating_sub(2).max(1);
-    let status_width = width.saturating_sub(5).max(1);
-    let status = if data.is_error {
-        i18n::tr("tool-skill-failed")
-    } else if data.is_running {
-        i18n::tr("tool-skill-loading")
-    } else {
-        i18n::tr("tool-skill-loaded")
-    };
     let indicator_color = if data.is_error {
         semantic.status.error
     } else if data.is_running {
@@ -395,6 +382,39 @@ fn render_skill_tool_card_lines(
     } else {
         semantic.status.success
     };
+
+    if data.is_running {
+        let title = format!("Skill ({})", name);
+        let title_width = width.saturating_sub(2).max(1);
+        if width < 5 {
+            return with_message_spacing(vec![Line::from(Span::styled(
+                truncate_to_width(&title, width),
+                Style::default()
+                    .fg(semantic.text.primary)
+                    .add_modifier(Modifier::BOLD),
+            ))]);
+        }
+        return with_message_spacing(vec![
+            Line::from(vec![
+                Span::styled("●", Style::default().fg(indicator_color)),
+                Span::raw(" "),
+                Span::styled(
+                    truncate_to_width(&title, title_width),
+                    Style::default()
+                        .fg(semantic.text.primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![Span::styled(
+                "  ◌ Loading",
+                Style::default().fg(semantic.text.muted),
+            )]),
+        ]);
+    }
+
+    let status = if data.is_error { "✗" } else { "✓" };
+    let title = format!("Skill ({}) - {}", name, status);
+    let title_width = width.saturating_sub(2).max(1);
     if width < 5 {
         return with_message_spacing(vec![Line::from(Span::styled(
             truncate_to_width(&title, width),
@@ -403,25 +423,16 @@ fn render_skill_tool_card_lines(
                 .add_modifier(Modifier::BOLD),
         ))]);
     }
-    with_message_spacing(vec![
-        Line::from(vec![
-            Span::styled("●", Style::default().fg(indicator_color)),
-            Span::raw(" "),
-            Span::styled(
-                truncate_to_width(&title, title_width),
-                Style::default()
-                    .fg(semantic.text.primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  ⏿ ", Style::default().fg(semantic.text.dim)),
-            Span::styled(
-                truncate_to_width(&status, status_width),
-                Style::default().fg(semantic.text.muted),
-            ),
-        ]),
-    ])
+    with_message_spacing(vec![Line::from(vec![
+        Span::styled("●", Style::default().fg(indicator_color)),
+        Span::raw(" "),
+        Span::styled(
+            truncate_to_width(&title, title_width),
+            Style::default()
+                .fg(semantic.text.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])])
 }
 
 fn render_todo_tool_card_lines(
@@ -430,7 +441,7 @@ fn render_todo_tool_card_lines(
     width: usize,
 ) -> Vec<Line<'static>> {
     let semantic = THEME_ATOM.state().read().semantic;
-    let content_width = width.saturating_sub(5).max(1);
+    let content_width = width.saturating_sub(4).max(1);
     let header_width = width.saturating_sub(2).max(1);
     let indicator_color = if data.is_error {
         semantic.status.error
@@ -439,30 +450,16 @@ fn render_todo_tool_card_lines(
     } else {
         semantic.status.success
     };
-    let title = if data.is_error {
-        i18n::tr("tool-todo-failed")
-    } else {
-        i18n::tr("tool-todo-title")
-    };
-    let progress = i18n::tr_args(
-        "tool-todo-progress",
-        &[
-            (
-                "completed".into(),
-                FluentValue::from(todo.completed_count as u64),
-            ),
-            ("total".into(), FluentValue::from(todo.total_count as u64)),
-        ],
-    );
-    if width < 5 {
-        return with_message_spacing(vec![Line::from(Span::styled(
-            truncate_to_width(&title, width),
-            Style::default()
-                .fg(semantic.text.primary)
-                .add_modifier(Modifier::BOLD),
-        ))]);
-    }
     if data.is_error {
+        let title = i18n::tr("tool-todo-failed");
+        if width < 5 {
+            return with_message_spacing(vec![Line::from(Span::styled(
+                truncate_to_width(&title, width),
+                Style::default()
+                    .fg(semantic.text.primary)
+                    .add_modifier(Modifier::BOLD),
+            ))]);
+        }
         return with_message_spacing(vec![
             Line::from(vec![
                 Span::styled("●", Style::default().fg(indicator_color)),
@@ -483,43 +480,40 @@ fn render_todo_tool_card_lines(
             ]),
         ]);
     }
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("●", Style::default().fg(indicator_color)),
-            Span::raw(" "),
-            Span::styled(
-                truncate_to_width(&title, header_width),
-                Style::default()
-                    .fg(semantic.text.primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  ⏿ ", Style::default().fg(semantic.text.dim)),
-            Span::styled(
-                truncate_to_width(&progress, content_width),
-                Style::default().fg(semantic.text.muted),
-            ),
-        ]),
-    ];
+    let title = format!("TodoUpdate ({}/{})", todo.completed_count, todo.total_count);
+    if width < 5 {
+        return with_message_spacing(vec![Line::from(Span::styled(
+            truncate_to_width(&title, width),
+            Style::default()
+                .fg(semantic.text.primary)
+                .add_modifier(Modifier::BOLD),
+        ))]);
+    }
+    let mut lines = vec![Line::from(vec![
+        Span::styled("●", Style::default().fg(indicator_color)),
+        Span::raw(" "),
+        Span::styled(
+            truncate_to_width(&title, header_width),
+            Style::default()
+                .fg(semantic.text.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
 
     for change in &todo.changes {
-        let key = match change.kind {
-            TuiTodoChangeKind::Added => "tool-todo-added",
-            TuiTodoChangeKind::Started => "tool-todo-started",
-            TuiTodoChangeKind::Completed => "tool-todo-completed",
-            TuiTodoChangeKind::Reopened => "tool-todo-reopened",
-            TuiTodoChangeKind::ActiveFormUpdated => "tool-todo-active-form-updated",
-            TuiTodoChangeKind::Removed => "tool-todo-removed",
+        let (icon, color) = match change.kind {
+            TuiTodoChangeKind::Completed => ("✓", semantic.status.success),
+            TuiTodoChangeKind::Added => ("+", semantic.status.success),
+            TuiTodoChangeKind::Removed => ("-", semantic.text.muted),
+            TuiTodoChangeKind::Started => ("▶", semantic.status.success),
+            TuiTodoChangeKind::Reopened => ("↻", semantic.status.success),
+            TuiTodoChangeKind::ActiveFormUpdated => ("✎", semantic.status.success),
         };
-        let text = i18n::tr_args(
-            key,
-            &[("content".into(), FluentValue::from(change.content.as_str()))],
-        );
+        let prefix = format!("  {} ", icon);
         lines.push(Line::from(vec![
-            Span::styled("  ⏿ ", Style::default().fg(semantic.text.dim)),
+            Span::styled(prefix, Style::default().fg(color)),
             Span::styled(
-                truncate_to_width(&text, content_width),
+                truncate_to_width(&change.content, content_width),
                 Style::default().fg(semantic.text.muted),
             ),
         ]));

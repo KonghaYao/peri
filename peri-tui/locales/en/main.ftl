@@ -1015,17 +1015,4 @@ app-note-agent-failed = Agent execution failed: { $message }
 app-note-cache-hit-low = Prompt cache hit rate {$pct}% < 80% (req: { $req_id })
 
 # ---- Semantic tool cards ----
-tool-skill-title = Use skill · { $name }
-tool-skill-loading = Loading
-tool-skill-loaded = Loaded
-tool-todo-title = Tasks updated
-tool-todo-progress = { $completed }/{ $total } completed
-tool-todo-added = Added · { $content }
-tool-todo-started = Started · { $content }
-tool-todo-completed = Completed · { $content }
-tool-todo-reopened = Reopened · { $content }
-tool-todo-active-form-updated = Updated · { $content }
-tool-todo-removed = Removed · { $content }
-
-tool-skill-failed = Failed
 tool-todo-failed = Update failed
