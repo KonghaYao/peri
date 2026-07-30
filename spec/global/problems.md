@@ -853,6 +853,43 @@
 
 - [issue_2026-07-11-message-area-mouse-selection-regression 消息区鼠标拖拽选中因重构回归 + CPU 暴涨](domains/tui/tui-rendering.md#issue_2026-07-11-message-area-mouse-selection-regression) — tui
 
+### bg shell 超时/回调
+
+- [bg shell 缺少超时机制、完成回调未注入 Agent inbox、并发竞态](domains/agent.md#issue_2026-07-28-bg-shell-no-timeout-no-callback-to-agent) — tools
+
+### cancel 丢失前文
+
+- [取消后下一轮 Agent loop 丢失全部前文——不完整 transcript 被写回 ThreadStore](domains/agent.md#issue_2026-07-30-cancel-loses-agent-loop-context) — agent
+
+### compact 死循环
+
+- [consecutive_failures 提前清零导致死机开关失效、无限 Full 重试](domains/agent.md#issue_2026-07-25-compact-consecutive-failures-reset-causes-infinite-loop) — compact
+
+### compact_v2 拆分
+
+- [compact_v2.rs ~900 行拆分为 micro.rs / full.rs / smart.rs](domains/agent.md#issue_2026-07-16-p1-4-compact-v2-split) — agent
+
+### deferred tools 过滤
+
+- [BaseTool::is_direct() 自声明层级替代集中式白名单](domains/agent.md#issue_2026-07-25-deferred-tools-not-filtered-from-llm-tools) — tools
+
+### micro compact 字段级
+
+- [Micro Compact 整体替换导致 Agent 必填参数缺失](domains/agent.md#issue_2026-07-29-micro-compact-loses-agent-tool-context) — compact
+- [Micro Compact 字段级压缩设计——Planner/Projection 分离、Unicode 安全截断](domains/agent.md#issue_2026-07-29-micro-compact-field-level-design) — compact
+
+### StageContext 拆分
+
+- [StageContext 22 字段 god object 拆分为 SessionHandle + RuntimeServices + CompactContext + AsyncContext](domains/agent.md#issue_2026-07-16-p1-1-stagecontext-split) — agent
+
+### subagent orphan spans
+
+- [Fork subagent 的 ObservationCreate 缺失导致 152 个 orphan observation 父链断裂](domains/agent.md#issue_2026-07-25-subagent-orphan-spans-dangling-parent-observation) — subagent
+
+### 架构升级清单
+
+- [三维护审视识别 35 个待升级点（4 P0 + 13 P1 + 18 P2）](domains/agent.md#issue_2026-07-16-architecture-upgrade-checklist) — architecture
+
 ## 更新记录
 
 - 2026-07-06: 首次创建，归档 8 个 issue
@@ -860,3 +897,4 @@
 - 2026-07-10: 归档 13 个 issue，新增 agent 领域，新增 24 个关键词
 - 2026-07-17: 归档 16 个 issue，新增 35 个关键词
 - 2026-07-18: 归档 37 个 issue
+- 2026-07-30: 归档 15 个 issue，新增 9 个关键词，agent 领域新增 8 条经验

@@ -1,3 +1,5 @@
+> 归档于 2026-07-30，原路径 spec/issues/2026-07-29-micro-compact-loses-agent-tool-context.md
+
 # 自动 micro compact 后 Agent 工具上下文丢失并持续失忆
 
 **状态**：Fixed

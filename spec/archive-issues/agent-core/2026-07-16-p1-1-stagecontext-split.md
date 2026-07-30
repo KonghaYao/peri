@@ -1,6 +1,8 @@
+> 归档于 2026-07-30，原路径 spec/issues/2026-07-16-p1-1-stagecontext-split.md
+
 # P1-1：StageContext 22 字段 god object 拆分
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：高
 **类型**：架构改进
 **创建日期**：2026-07-16

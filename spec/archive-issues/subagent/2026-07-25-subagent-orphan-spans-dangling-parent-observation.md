@@ -1,3 +1,5 @@
+> 归档于 2026-07-30，原路径 spec/issues/2026-07-25-subagent-orphan-spans-dangling-parent-observation.md
+
 # Subagent span 父链断裂——49 个工具调用和 34 个推理步骤指向不存在的 parent_observation_id
 
 **状态**：Verified

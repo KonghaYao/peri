@@ -1,3 +1,5 @@
+> 归档于 2026-07-30，原路径 spec/issues/2026-07-30-cancel-loses-agent-loop-context.md
+
 # 取消后下一轮 Agent loop 丢失全部前文
 
 **状态**：Fixed

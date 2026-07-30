@@ -1,3 +1,5 @@
+> 归档于 2026-07-30，原路径 spec/issues/2026-07-29-micro-compact-field-level-design.md
+
 # Micro Compact 字段级压缩设计
 
 **状态**：Approved

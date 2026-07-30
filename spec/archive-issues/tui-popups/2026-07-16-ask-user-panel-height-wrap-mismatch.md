@@ -1,6 +1,8 @@
+> 归档于 2026-07-30，原路径 spec/issues/2026-07-16-ask-user-panel-height-wrap-mismatch.md
+
 # AskUserQuestion 面板：高度固定 18 行导致底部内容截断 + description 提前换行
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-07-16
 

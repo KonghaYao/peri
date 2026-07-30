@@ -1,3 +1,5 @@
+> 归档于 2026-07-30，原路径 spec/issues/2026-07-29-tui-skill-todo-semantic-cards.md
+
 # TUI 工具调用未以用户语义呈现 skill 与任务更新
 
 **状态**：Fixed

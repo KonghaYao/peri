@@ -1,3 +1,5 @@
+> 归档于 2026-07-30，原路径 spec/issues/2026-07-28-bg-shell-no-timeout-no-callback-to-agent.md
+
 # bg shell 缺少超时机制、完成回调未注入 Agent inbox、并发检查存在竞态
 
 **状态**：Fixed

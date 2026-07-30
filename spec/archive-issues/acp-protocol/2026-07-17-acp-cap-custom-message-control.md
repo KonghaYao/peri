@@ -1,6 +1,8 @@
+> 归档于 2026-07-30，原路径 spec/issues/2026-07-17-acp-cap-custom-message-control.md
+
 # ACP Cap 管控自定义信息传递
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-07-17
 
