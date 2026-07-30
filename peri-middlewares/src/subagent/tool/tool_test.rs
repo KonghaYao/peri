@@ -548,8 +548,12 @@ async fn test_skill_preload_registered() {
         )
         .unwrap();
 
-    // LLM searches all messages for skill content in tool results
-    struct SkillPreloadCheckLLM;
+    // LLM 验证 prompt 已由 Receive 写入、并精确统计显式 skill 的 fake ToolResult。
+    let preload_count: Arc<std::sync::Mutex<usize>> = Arc::new(std::sync::Mutex::new(0));
+    let preload_count_clone = Arc::clone(&preload_count);
+    struct SkillPreloadCheckLLM {
+        preload_count: Arc<std::sync::Mutex<usize>>,
+    }
     #[async_trait::async_trait]
     impl ReactLLM for SkillPreloadCheckLLM {
         async fn generate_reasoning(
@@ -558,23 +562,31 @@ async fn test_skill_preload_registered() {
             _tools: &[&dyn BaseTool],
             _streaming: Option<peri_agent::llm::types::StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
-            let found = messages.iter().any(|m| m.content().contains("Test Skill"));
-            Ok(Reasoning::with_answer(
-                "",
-                if found {
-                    "skill_preload_found"
-                } else {
-                    "skill_preload_not_found"
-                },
-            ))
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.content().contains("test task")),
+                "before_agent must run after Receive has appended the prompt"
+            );
+            *self.preload_count.lock().unwrap() = messages
+                .iter()
+                .filter(|message| {
+                    message
+                        .content()
+                        .contains("This is the test skill content.")
+                })
+                .count();
+            Ok(Reasoning::with_answer("", "skill_preload_found"))
         }
     }
 
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| {
-            Box::new(SkillPreloadCheckLLM) as Box<dyn ReactLLM + Send + Sync>
+        Arc::new(move |_: Option<&str>| {
+            Box::new(SkillPreloadCheckLLM {
+                preload_count: Arc::clone(&preload_count_clone),
+            }) as Box<dyn ReactLLM + Send + Sync>
         }),
         dir.path().to_str().unwrap().to_string(),
     );
@@ -595,6 +607,11 @@ async fn test_skill_preload_registered() {
         result.contains("skill_preload_found"),
         "LLM should receive message containing 'preloaded skill file', actual result: {}",
         result
+    );
+    assert_eq!(
+        *preload_count.lock().unwrap(),
+        1,
+        "the explicit skill must inject exactly one ToolResult sequence"
     );
 }
 
@@ -1737,17 +1754,134 @@ async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
         result
     );
 
-    // Assert 2: LLM 没有被无限调用（cancel 阻止了循环）
-    // 注：cancel 在 run_react_loop 入口前触发，LLM 最多被调用 0-1 次
+    // Assert 2: cancel 在 loop 入口前阻断 LLM。
     let final_count = llm_call_count.load(std::sync::atomic::Ordering::SeqCst);
-    assert!(
-        final_count <= 1,
-        "LLM should not be called repeatedly after cancel (got {} calls)",
+    assert_eq!(
+        final_count, 0,
+        "pre-cancelled Cascade child must not call the LLM (got {} calls)",
         final_count
     );
 }
 
-/// 场景 4（fork + background 优先级）：当 `fork: true` 与 `run_in_background: true` 同时设置时，
+/// P0-2：background non-fork 必须通过实际 `invoke_background` 路径，由 loop 在
+/// Receive 后唯一执行 before_agent。测试使用 registry 和 bg event sender，不轮询或 sleep。
+#[tokio::test]
+async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+    use peri_agent::agent::events::ExecutorEvent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::mpsc;
+
+    let dir = tempdir().unwrap();
+    let agents_dir = dir.path().join(".claude").join("agents");
+    let skills_dir = dir.path().join(".claude").join("skills").join("p0-2-skill");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("p0-2-bg.md"),
+        "---\nname: p0-2-bg\ndescription: P0-2 background agent\nskills:\n  - p0-2-skill\n---\n\nRun the task.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        skills_dir.join("SKILL.md"),
+        "---\nname: p0-2-skill\ndescription: P0-2 skill\n---\n\nP0-2 BACKGROUND SKILL MARKER\n",
+    )
+    .unwrap();
+
+    let llm_calls = Arc::new(AtomicUsize::new(0));
+    let preload_count = Arc::new(std::sync::Mutex::new(0));
+    let llm_calls_clone = Arc::clone(&llm_calls);
+    let preload_count_clone = Arc::clone(&preload_count);
+    struct BackgroundSkillLLM {
+        calls: Arc<AtomicUsize>,
+        preload_count: Arc<std::sync::Mutex<usize>>,
+    }
+    #[async_trait::async_trait]
+    impl ReactLLM for BackgroundSkillLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.content().contains("p0-2 background prompt")),
+                "before_agent must observe the prompt only after Receive"
+            );
+            *self.preload_count.lock().unwrap() = messages
+                .iter()
+                .filter(|message| message.content().contains("P0-2 BACKGROUND SKILL MARKER"))
+                .count();
+            Ok(Reasoning::with_answer("", "p0-2 background done"))
+        }
+    }
+
+    let parent_cancel = AgentCancellationToken::new();
+    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new());
+    let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
+    let tool = SubAgentTool::new(
+        Arc::new(vec![]),
+        None,
+        Arc::new(move |_: Option<&str>| {
+            Box::new(BackgroundSkillLLM {
+                calls: Arc::clone(&llm_calls_clone),
+                preload_count: Arc::clone(&preload_count_clone),
+            }) as Box<dyn ReactLLM + Send + Sync>
+        }),
+        dir.path().to_str().unwrap().to_string(),
+    )
+    .with_cancel(parent_cancel.clone())
+    .with_background_registry(registry)
+    .with_bg_event_sender(bg_tx);
+
+    let started = tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "p0-2-bg",
+                "run_in_background": true,
+                "prompt": "p0-2 background prompt",
+                "cwd": dir.path().to_str().unwrap(),
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect("background defined subagent should start");
+    assert!(started.contains("Background task"));
+    parent_cancel.cancel();
+
+    let mut lifecycle = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = bg_rx.recv().await {
+            match event {
+                ExecutorEvent::SubagentStarted { is_background, .. } => {
+                    assert!(is_background);
+                    lifecycle.push("started");
+                }
+                ExecutorEvent::SubagentStopped { .. } => lifecycle.push("stopped"),
+                ExecutorEvent::BackgroundTaskCompleted(result) => {
+                    assert!(result.success);
+                    assert!(result.output.contains("p0-2 background done"));
+                    lifecycle.push("completed");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("background defined subagent must complete within the bounded receiver timeout");
+
+    assert_eq!(lifecycle, ["started", "stopped", "completed"]);
+    assert_eq!(llm_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *preload_count.lock().unwrap(),
+        1,
+        "explicit skill preload must occur exactly once on execute_bg.rs"
+    );
+}
+
 /// 验证语义优先级（define.rs:399-403 的逻辑：background 优先 → 走 invoke_background_fork）。
 ///
 /// 关键断言：

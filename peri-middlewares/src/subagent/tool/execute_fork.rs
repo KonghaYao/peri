@@ -164,14 +164,7 @@ impl super::SubAgentTool {
                 BaseMessage::human(fork_directive),
             ));
 
-        // 11. 运行 before_agent middleware hooks
-        if let Err(e) =
-            peri_agent::agent::stages::middleware_runner::run_before_agent(&v2_ctx.context).await
-        {
-            tracing::warn!(error = %e, "[subagent:fork] before_agent hook failed");
-        }
-
-        // 12. 运行 v2 ReAct 循环
+        // 11. 运行 v2 ReAct 循环
         let max_iterations = 200;
         let loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
 
