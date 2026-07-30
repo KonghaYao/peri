@@ -66,6 +66,15 @@ pub async fn run_before_agent(ctx: &StageContext) -> crate::error::AgentResult<(
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
     }
+    // Sync messages_cache modifications back to transcript.
+    // AgentContext::messages_mut() only modifies the in-memory cache;
+    // Reason stage reads from the authoritative transcript, so
+    // middleware that modify existing messages (e.g. ImageMiddleware)
+    // must have their changes written through.
+    if cx.messages_modified() {
+        let mut transcript = ctx.session.transcript.write();
+        cx.reconcile_to_transcript(&mut transcript);
+    }
     result
 }
 

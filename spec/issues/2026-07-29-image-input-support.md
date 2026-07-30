@@ -1,8 +1,8 @@
 # Agent 图片输入支持
 
-**状态**：Open
-**优先级**：中
-**类型**：Feature
+**状态**：Fixed
+**优先级**：高
+**类型**：Bug
 **创建日期**：2026-07-29
 
 ## 问题描述
@@ -148,3 +148,43 @@ MVP 阶段不实现任何压缩器，管道留空。后续可接入尺寸缩放�
 - [ ] 非图片文件显示 `[Not an image: ...]`
 - [ ] 超限文件显示 `[Image too large: ...]`
 - [ ] 现有工具注册测试和对 Compact 测试不受影响
+
+## 症状详情
+
+### 2026-07-30：图片识别完全无效
+
+用户 @image 粘贴 PNG 后发送消息：
+
+```text
+@image /Users/konghayao/.peri/images/20260730-124853_e7605bf9.png 这个是什么
+```
+
+**实际行为**：Agent 调用 `Read` 工具试图以文本方式读取 PNG 文件，返回少量二进制行，随后回复"我目前只能确认这是一个 PNG 图片文件，无法直接看到其中的画面内容"。
+
+**症状特征**：
+- `@image <path>` 未被 ImageMiddleware 转换为 `ContentBlock::Image`
+- 用户消息原文（含 @image 前缀）直接发送到模型
+- 模型将路径视为本地文件，用 Read 工具打开
+- 剪贴板粘贴和手动 @image 路径都无效
+
+**根因推测**：ImageMiddleware 未注册/未生效，或 before_agent 钩子未执行 @image → ContentBlock::Image 的转换。
+
+## 状态变更记录
+
+| 日期 | 旧状态 | 新状态 | 操作人 | 备注 |
+|------|--------|--------|--------|------|
+| 2026-07-30 | Open | Reopen | agent | 用户反馈图片识别完全无效，@image 未被转换 |
+| 2026-07-30 | Reopen | Fixed | agent | 修复 messages_mut() 不同步到 transcript 的桥接问题 |
+
+## 修复记录
+
+### 修复 #1（2026-07-30）
+
+- **操作人**：agent
+- **用户原意**：@image 粘贴图片后 Agent 应能识别图片内容
+- **修复内容**：
+  1. `peri-agent/src/session/transcript.rs`：新增 `replace_by_id()` 方法，支持按 MessageId 替换条目
+  2. `peri-agent/src/agent/agent_context.rs`：新增 `messages_cache()`、`messages_modified()`、`reconcile_to_transcript()` 方法；`messages_mut()` 设置脏标记
+  3. `peri-agent/src/agent/stages/middleware_runner.rs`：`run_before_agent()` 执行后调用 `reconcile_to_transcript()` 将缓存变更同步到 transcript
+- **涉及 commit**：待提交
+- **验证状态**：待验证

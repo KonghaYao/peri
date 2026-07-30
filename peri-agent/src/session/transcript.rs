@@ -346,6 +346,16 @@ impl MessageTranscript {
         ids
     }
 
+    /// 按 MessageId 替换消息内容（in-place，不改变 id_index）
+    ///
+    /// 仅更新 `entries` 中的消息本体。ID 不存在时 no-op。
+    /// 不触发异步持久化（假设调用方会在后续正常写入路径中持久化）。
+    pub fn replace_by_id(&mut self, message: BaseMessage) {
+        if let Some(&idx) = self.id_index.get(&message.id()) {
+            self.entries[idx] = TranscriptEntry { message };
+        }
+    }
+
     // ── Staging ────────────────────────────────────────────────────────────────
 
     /// 暂存 AI 消息（含 tool_calls），不写入主列表
