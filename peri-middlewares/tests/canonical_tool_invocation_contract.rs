@@ -1,8 +1,7 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
+
+#[cfg(unix)]
+use std::{collections::HashMap, path::PathBuf};
 
 use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
@@ -15,6 +14,7 @@ use peri_agent::{
     session::{FrozenContext, Session},
     tools::{BaseTool, ToolContext},
 };
+#[cfg(unix)]
 use peri_middlewares::hooks::{HookEvent, HookMiddleware, HookType, RegisteredHook};
 use peri_middlewares::{
     hitl::{
