@@ -124,3 +124,43 @@ fn test_excluded_tools_default_non_empty() {
         "默认应包含 TodoWrite"
     );
 }
+
+#[test]
+fn test_auto_compact_threshold_clamps_out_of_range() {
+    // 超出 1.0 → clamp 到 1.0
+    let json = r#"{"auto_compact_threshold": 1.5}"#;
+    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    assert!((config.auto_compact_threshold - 1.0).abs() < 0.001);
+
+    // 负数 → clamp 到 0.0
+    let json = r#"{"auto_compact_threshold": -0.5}"#;
+    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    assert!((config.auto_compact_threshold - 0.0).abs() < 0.001);
+}
+
+#[test]
+fn test_auto_compact_threshold_normal_values_unchanged() {
+    // 合法范围内的值保持不变
+    let json = r#"{"auto_compact_threshold": 0.80}"#;
+    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    assert!((config.auto_compact_threshold - 0.80).abs() < 0.001);
+
+    let json = r#"{"auto_compact_threshold": 0.95}"#;
+    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
+
+    let json = r#"{"auto_compact_threshold": 0.0}"#;
+    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    assert!((config.auto_compact_threshold - 0.0).abs() < 0.001);
+
+    let json = r#"{"auto_compact_threshold": 1.0}"#;
+    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    assert!((config.auto_compact_threshold - 1.0).abs() < 0.001);
+}
+
+#[test]
+fn test_auto_compact_threshold_default_is_valid() {
+    let config = CompactConfig::default();
+    assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
+    assert!(config.auto_compact_threshold >= 0.0 && config.auto_compact_threshold <= 1.0);
+}
