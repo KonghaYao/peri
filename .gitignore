@@ -204,6 +204,8 @@ settings.json
 !.claude/skills/auto-issue-fixer/
 !.claude/skills/project-maturity/**
 !.claude/skills/project-maturity/
+!.claude/skills/advisor-consultation/**
+!.claude/skills/advisor-consultation/
 !.claude/agents/
 !.claude/agents/coder.md
 .qoder/**/*
@@ -211,3 +213,4 @@ settings.json
 skills-lock.json
 .agents
 !.peri/theme/
+e2e/results

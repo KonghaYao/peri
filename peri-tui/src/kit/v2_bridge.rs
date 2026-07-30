@@ -54,6 +54,7 @@ fn v2_event_to_acp_event_data(event: V2Event) -> Option<AcpEventData> {
                         tool_id: tool_call_id,
                         tool_name: name,
                         input_summary,
+                        raw_input: input,
                         agent_id: None,
                     },
                 ))

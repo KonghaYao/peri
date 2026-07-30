@@ -67,6 +67,15 @@ fn default_headroom_tokens() -> u64 {
 fn default_tool_result_keep_chars() -> usize {
     2000
 }
+fn default_micro_field_threshold_chars() -> usize {
+    500
+}
+fn default_micro_field_keep_head_chars() -> usize {
+    350
+}
+fn default_micro_field_keep_tail_chars() -> usize {
+    100
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactConfig {
@@ -116,6 +125,15 @@ pub struct CompactConfig {
     /// 工具结果保留的最小字符数
     #[serde(default = "default_tool_result_keep_chars")]
     pub tool_result_keep_chars: usize,
+    /// 单个工具输入字段触发截断的字符阈值。
+    #[serde(default = "default_micro_field_threshold_chars")]
+    pub micro_field_threshold_chars: usize,
+    /// 单个工具输入字段截断时保留的头部字符数。
+    #[serde(default = "default_micro_field_keep_head_chars")]
+    pub micro_field_keep_head_chars: usize,
+    /// 单个工具输入字段截断时保留的尾部字符数。
+    #[serde(default = "default_micro_field_keep_tail_chars")]
+    pub micro_field_keep_tail_chars: usize,
     /// Shadow mode：只估算不应用
     #[serde(default)]
     pub shadow_mode_enabled: bool,
@@ -151,6 +169,9 @@ impl Default for CompactConfig {
             smart_keep_recent_tools: default_smart_keep_recent_tools(),
             target_headroom_tokens: default_headroom_tokens(),
             tool_result_keep_chars: default_tool_result_keep_chars(),
+            micro_field_threshold_chars: default_micro_field_threshold_chars(),
+            micro_field_keep_head_chars: default_micro_field_keep_head_chars(),
+            micro_field_keep_tail_chars: default_micro_field_keep_tail_chars(),
             shadow_mode_enabled: false,
             cache_aware_enabled: false,
             tool_retention_map: HashMap::new(),
@@ -159,6 +180,14 @@ impl Default for CompactConfig {
 }
 
 impl CompactConfig {
+    pub fn has_valid_micro_field_limits(&self) -> bool {
+        self.micro_field_threshold_chars > 0
+            && self
+                .micro_field_keep_head_chars
+                .saturating_add(self.micro_field_keep_tail_chars)
+                < self.micro_field_threshold_chars
+    }
+
     /// 在已有配置基础上应用环境变量覆盖
     pub fn apply_env_overrides(&mut self) {
         if env::var("DISABLE_COMPACT").is_ok() {

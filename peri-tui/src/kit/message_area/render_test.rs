@@ -3,8 +3,11 @@ use super::*;
 use crate::kit::message_area::selection::build_wrap_map;
 use crate::kit::tui_render_unit::{
     TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDivider, TuiNoteLevel,
-    TuiRenderUnit, TuiSubAgentGroup, TuiSystemNote, TuiToolCard,
+    TuiRenderUnit, TuiSkillPresentation, TuiSubAgentGroup, TuiSystemNote, TuiTodoChange,
+    TuiTodoChangeKind, TuiTodoItem, TuiTodoPresentation, TuiTodoStatus, TuiToolCard,
+    TuiToolPresentation,
 };
+use unicode_width::UnicodeWidthStr;
 
 /// 宽度为 1 时，所有 VM 变体的 vm_to_lines 不应 panic。
 /// [回归测试] 快速缩小终端到极小宽度时程序崩溃。
@@ -64,6 +67,7 @@ fn test_vm_to_lines_all_variants_width_1() {
             is_running: false,
             running_duration_ms: None,
             diff: None,
+            presentation: TuiToolPresentation::Generic,
             content_hash: 100,
             tool_calls_count: 0,
         })]),
@@ -219,4 +223,238 @@ fn test_reasoning_truncate_no_wrap() {
         "截断后仍被 Paragraph 换行:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn skill_card_hides_raw_skill_output() {
+    crate::i18n::init(Some("en"));
+    let card = TuiToolCard {
+        tool_id: "skill-1".into(),
+        tool_name: "Skill".into(),
+        input_summary: "skill: using-superpowers".into(),
+        output_summary: "---\nname: using-superpowers\n---\nfull SKILL.md body".into(),
+        is_error: false,
+        is_running: false,
+        running_duration_ms: None,
+        diff: None,
+        presentation: TuiToolPresentation::Skill(TuiSkillPresentation {
+            name: "using-superpowers".into(),
+        }),
+        content_hash: 1,
+        tool_calls_count: 0,
+    };
+
+    let text = vm_to_lines(&TuiRenderUnit::TuiToolCard(card), 80)
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("using-superpowers"));
+    assert!(!text.contains("full SKILL.md body"));
+    assert!(!text.contains("---"));
+}
+
+#[test]
+fn todo_card_renders_progress_and_changes_without_raw_output() {
+    crate::i18n::init(Some("en"));
+    let card = TuiToolCard {
+        tool_id: "todo-1".into(),
+        tool_name: "TodoWrite".into(),
+        input_summary: "todos: 2".into(),
+        output_summary: "+[0],[1]".into(),
+        is_error: false,
+        is_running: false,
+        running_duration_ms: None,
+        diff: None,
+        presentation: TuiToolPresentation::Todo(TuiTodoPresentation {
+            current_items: vec![TuiTodoItem {
+                content: "实现语义卡片".into(),
+                active_form: None,
+                status: TuiTodoStatus::Completed,
+            }],
+            changes: vec![TuiTodoChange {
+                kind: TuiTodoChangeKind::Completed,
+                content: "实现语义卡片".into(),
+            }],
+            is_initial: false,
+            completed_count: 1,
+            total_count: 1,
+        }),
+        content_hash: 2,
+        tool_calls_count: 0,
+    };
+
+    let text = vm_to_lines(&TuiRenderUnit::TuiToolCard(card), 80)
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("1/1"));
+    assert!(text.contains("实现语义卡片"));
+    assert!(!text.contains("+[0],[1]"));
+}
+
+#[test]
+fn semantic_tool_card_respects_narrow_display_width() {
+    crate::i18n::init(Some("zh-CN"));
+    let card = TuiToolCard {
+        tool_id: "todo-narrow".into(),
+        tool_name: "TodoWrite".into(),
+        input_summary: String::new(),
+        output_summary: "+[0]".into(),
+        is_error: false,
+        is_running: false,
+        running_duration_ms: None,
+        diff: None,
+        presentation: TuiToolPresentation::Todo(TuiTodoPresentation {
+            current_items: vec![],
+            changes: vec![TuiTodoChange {
+                kind: TuiTodoChangeKind::Added,
+                content: "这是一个足够长的任务标题，用于验证窄终端截断行为".into(),
+            }],
+            is_initial: true,
+            completed_count: 0,
+            total_count: 1,
+        }),
+        content_hash: 3,
+        tool_calls_count: 0,
+    };
+    let lines = vm_to_lines(&TuiRenderUnit::TuiToolCard(card), 12);
+    for width in 1..=4 {
+        let narrow_lines = vm_to_lines(
+            &TuiRenderUnit::TuiToolCard(TuiToolCard {
+                tool_id: format!("todo-narrow-{width}"),
+                tool_name: "TodoWrite".into(),
+                input_summary: String::new(),
+                output_summary: String::new(),
+                is_error: false,
+                is_running: false,
+                running_duration_ms: None,
+                diff: None,
+                presentation: TuiToolPresentation::Todo(TuiTodoPresentation {
+                    current_items: vec![],
+                    changes: vec![],
+                    is_initial: true,
+                    completed_count: 0,
+                    total_count: 1,
+                }),
+                content_hash: width as u64,
+                tool_calls_count: 0,
+            }),
+            width,
+        );
+        assert!(narrow_lines.iter().all(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.width())
+                .sum::<usize>()
+                <= width
+        }));
+    }
+    assert!(lines.iter().all(|line| {
+        line.spans
+            .iter()
+            .map(|span| span.content.width())
+            .sum::<usize>()
+            <= 12
+    }));
+}
+
+#[test]
+fn skill_card_hides_raw_output_when_name_is_missing_or_call_failed() {
+    crate::i18n::init(Some("en"));
+    let card = TuiToolCard {
+        tool_id: "skill-failed".into(),
+        tool_name: "Skill".into(),
+        input_summary: String::new(),
+        output_summary: "---\nname: secret-skill\n---\nfull SKILL.md body".into(),
+        is_error: true,
+        is_running: false,
+        running_duration_ms: None,
+        diff: None,
+        presentation: TuiToolPresentation::Skill(TuiSkillPresentation {
+            name: "unknown".into(),
+        }),
+        content_hash: 4,
+        tool_calls_count: 0,
+    };
+
+    let text = vm_to_lines(&TuiRenderUnit::TuiToolCard(card), 80)
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("Failed"));
+    assert!(!text.contains("full SKILL.md body"));
+    assert!(!text.contains("---"));
+}
+
+#[test]
+fn failed_semantic_cards_respect_extreme_narrow_widths() {
+    crate::i18n::init(Some("en"));
+    for width in 1..=4 {
+        let card = TuiToolCard {
+            tool_id: format!("skill-error-{width}"),
+            tool_name: "Skill".into(),
+            input_summary: "long raw input".into(),
+            output_summary: "long raw SKILL.md body".into(),
+            is_error: true,
+            is_running: false,
+            running_duration_ms: None,
+            diff: None,
+            presentation: TuiToolPresentation::Skill(TuiSkillPresentation {
+                name: "using-superpowers".into(),
+            }),
+            content_hash: width as u64,
+            tool_calls_count: 0,
+        };
+        let lines = vm_to_lines(&TuiRenderUnit::TuiToolCard(card), width);
+        assert!(lines.iter().all(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.width())
+                .sum::<usize>()
+                <= width
+        }));
+    }
+}
+
+#[test]
+fn nested_semantic_cards_respect_extreme_narrow_widths() {
+    crate::i18n::init(Some("en"));
+    for is_error in [false, true] {
+        for width in 1..=4 {
+            let card = TuiToolCard {
+                tool_id: format!("nested-skill-{is_error}-{width}"),
+                tool_name: "Skill".into(),
+                input_summary: "raw input".into(),
+                output_summary: "raw SKILL.md output".into(),
+                is_error,
+                is_running: false,
+                running_duration_ms: None,
+                diff: None,
+                presentation: TuiToolPresentation::Skill(TuiSkillPresentation {
+                    name: "using-superpowers".into(),
+                }),
+                content_hash: width as u64,
+                tool_calls_count: 0,
+            };
+            let group = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
+                agent_id: "nested-agent".into(),
+                agent_name: "nested".into(),
+                view_models: im::Vector::from(vec![TuiRenderUnit::TuiToolCard(card)]),
+                collapsed: false,
+                is_running: false,
+                content_hash: width as u64,
+            });
+            let lines = vm_to_lines(&group, width);
+            assert!(lines.iter().all(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.width())
+                    .sum::<usize>()
+                    <= width
+            }));
+        }
+    }
 }

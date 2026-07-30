@@ -493,6 +493,8 @@ pub(crate) fn build_agent(
     chain.add(Box::new(peri_middlewares::AtMentionMiddleware::new(
         cwd.clone().into(),
     )));
+    // 新增：图片附件处理（在 @mention 之后，将 @image <path> 转换为 ContentBlock::Image）
+    chain.add(Box::new(peri_middlewares::ImageMiddleware::new()));
 
     // ── 第二组：文件/终端/Web 工具提供器 ──
     chain.add(Box::new(filesystem_middleware));

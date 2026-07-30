@@ -478,3 +478,58 @@ async fn test_request_permission_forwards_hitl_pending_event() {
 
     shutdown.cancel();
 }
+
+#[tokio::test]
+async fn test_session_replay_tool_call_retains_raw_input_for_semantic_card() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+    let raw_input = json!({"skill": "using-superpowers"});
+    notif_tx
+        .send(AcpNotification::SessionUpdate {
+            session_id: "s1".into(),
+            params: json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "skill-1",
+                    "title": "Skill",
+                    "rawInput": raw_input,
+                    "_meta": {"periReplay": true}
+                }
+            }),
+        })
+        .unwrap();
+
+    let event = bridge_rx.recv().await.expect("expected replay event");
+    match event.event {
+        AcpEventData::ReplayToolStarted { raw_input, .. } => {
+            assert_eq!(raw_input, json!({"skill": "using-superpowers"}));
+        }
+        other => panic!("expected ReplayToolStarted, got {other:?}"),
+    }
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn test_non_terminal_tool_update_is_not_forwarded_as_tool_end() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+    notif_tx
+        .send(AcpNotification::SessionUpdate {
+            session_id: "s1".into(),
+            params: json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "todo-1",
+                    "status": "in_progress"
+                }
+            }),
+        })
+        .unwrap();
+
+    let result = tokio::time::timeout(std::time::Duration::from_millis(50), bridge_rx.recv()).await;
+    assert!(
+        result.is_err(),
+        "non-terminal update must not end a tool: {result:?}"
+    );
+    shutdown.cancel();
+}

@@ -46,6 +46,7 @@ fn test_content_hash_returns_inner_field_for_each_variant() {
         is_running: false,
         running_duration_ms: None,
         diff: None,
+        presentation: TuiToolPresentation::Generic,
         tool_calls_count: 0,
         content_hash: 33,
     });
@@ -204,6 +205,7 @@ fn test_tool_card_partial_eq_ignores_content_hash() {
         is_running: false,
         running_duration_ms: None,
         diff: None,
+        presentation: TuiToolPresentation::Generic,
         tool_calls_count: 0,
         content_hash: 1,
     };

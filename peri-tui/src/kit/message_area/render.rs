@@ -3,7 +3,8 @@
 use crate::i18n;
 use crate::kit::tui_render_unit::{
     TuiAskUserBlock, TuiCollapsedGroup, TuiDivider, TuiHunkLineKind, TuiNoteLevel, TuiRenderUnit,
-    TuiSubAgentGroup, TuiSystemNote, TuiToolCard,
+    TuiSubAgentGroup, TuiSystemNote, TuiTodoChangeKind, TuiTodoPresentation, TuiToolCard,
+    TuiToolPresentation,
 };
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
@@ -261,7 +262,7 @@ pub(super) fn vm_to_lines_cached(
             }
             lines
         }
-        TuiRenderUnit::TuiToolCard(data) => render_tool_card_lines(data),
+        TuiRenderUnit::TuiToolCard(data) => render_tool_card_lines(data, width),
         TuiRenderUnit::TuiSystemNote(data) => render_system_note_lines(data),
         TuiRenderUnit::TuiSubAgentGroup(data) => render_subagent_group_lines(data, width),
         TuiRenderUnit::TuiCollapsedGroup(data) => render_collapsed_group_lines(data),
@@ -354,7 +355,179 @@ fn render_reminder_condensed(
     lines
 }
 
-fn render_tool_card_lines(data: &TuiToolCard) -> Vec<Line<'static>> {
+fn render_tool_card_lines(data: &TuiToolCard, width: usize) -> Vec<Line<'static>> {
+    match &data.presentation {
+        TuiToolPresentation::Skill(skill) => {
+            return render_skill_tool_card_lines(data, &skill.name, width);
+        }
+        TuiToolPresentation::Todo(todo) => {
+            return render_todo_tool_card_lines(data, todo, width);
+        }
+        TuiToolPresentation::Generic => {}
+    }
+
+    render_generic_tool_card_lines(data)
+}
+
+fn render_skill_tool_card_lines(
+    data: &TuiToolCard,
+    name: &str,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let semantic = THEME_ATOM.state().read().semantic;
+    let title = i18n::tr_args(
+        "tool-skill-title",
+        &[("name".into(), FluentValue::from(name))],
+    );
+    let title_width = width.saturating_sub(2).max(1);
+    let status_width = width.saturating_sub(5).max(1);
+    let status = if data.is_error {
+        i18n::tr("tool-skill-failed")
+    } else if data.is_running {
+        i18n::tr("tool-skill-loading")
+    } else {
+        i18n::tr("tool-skill-loaded")
+    };
+    let indicator_color = if data.is_error {
+        semantic.status.error
+    } else if data.is_running {
+        semantic.status.running
+    } else {
+        semantic.status.success
+    };
+    if width < 5 {
+        return with_message_spacing(vec![Line::from(Span::styled(
+            truncate_to_width(&title, width),
+            Style::default()
+                .fg(semantic.text.primary)
+                .add_modifier(Modifier::BOLD),
+        ))]);
+    }
+    with_message_spacing(vec![
+        Line::from(vec![
+            Span::styled("●", Style::default().fg(indicator_color)),
+            Span::raw(" "),
+            Span::styled(
+                truncate_to_width(&title, title_width),
+                Style::default()
+                    .fg(semantic.text.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  ⏿ ", Style::default().fg(semantic.text.dim)),
+            Span::styled(
+                truncate_to_width(&status, status_width),
+                Style::default().fg(semantic.text.muted),
+            ),
+        ]),
+    ])
+}
+
+fn render_todo_tool_card_lines(
+    data: &TuiToolCard,
+    todo: &TuiTodoPresentation,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let semantic = THEME_ATOM.state().read().semantic;
+    let content_width = width.saturating_sub(5).max(1);
+    let header_width = width.saturating_sub(2).max(1);
+    let indicator_color = if data.is_error {
+        semantic.status.error
+    } else if data.is_running {
+        semantic.status.running
+    } else {
+        semantic.status.success
+    };
+    let title = if data.is_error {
+        i18n::tr("tool-todo-failed")
+    } else {
+        i18n::tr("tool-todo-title")
+    };
+    let progress = i18n::tr_args(
+        "tool-todo-progress",
+        &[
+            (
+                "completed".into(),
+                FluentValue::from(todo.completed_count as u64),
+            ),
+            ("total".into(), FluentValue::from(todo.total_count as u64)),
+        ],
+    );
+    if width < 5 {
+        return with_message_spacing(vec![Line::from(Span::styled(
+            truncate_to_width(&title, width),
+            Style::default()
+                .fg(semantic.text.primary)
+                .add_modifier(Modifier::BOLD),
+        ))]);
+    }
+    if data.is_error {
+        return with_message_spacing(vec![
+            Line::from(vec![
+                Span::styled("●", Style::default().fg(indicator_color)),
+                Span::raw(" "),
+                Span::styled(
+                    truncate_to_width(&title, header_width),
+                    Style::default()
+                        .fg(semantic.text.primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  ⏿ ", Style::default().fg(semantic.text.dim)),
+                Span::styled(
+                    truncate_to_width(&data.output_summary, content_width),
+                    Style::default().fg(semantic.status.error),
+                ),
+            ]),
+        ]);
+    }
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("●", Style::default().fg(indicator_color)),
+            Span::raw(" "),
+            Span::styled(
+                truncate_to_width(&title, header_width),
+                Style::default()
+                    .fg(semantic.text.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  ⏿ ", Style::default().fg(semantic.text.dim)),
+            Span::styled(
+                truncate_to_width(&progress, content_width),
+                Style::default().fg(semantic.text.muted),
+            ),
+        ]),
+    ];
+
+    for change in &todo.changes {
+        let key = match change.kind {
+            TuiTodoChangeKind::Added => "tool-todo-added",
+            TuiTodoChangeKind::Started => "tool-todo-started",
+            TuiTodoChangeKind::Completed => "tool-todo-completed",
+            TuiTodoChangeKind::Reopened => "tool-todo-reopened",
+            TuiTodoChangeKind::ActiveFormUpdated => "tool-todo-active-form-updated",
+            TuiTodoChangeKind::Removed => "tool-todo-removed",
+        };
+        let text = i18n::tr_args(
+            key,
+            &[("content".into(), FluentValue::from(change.content.as_str()))],
+        );
+        lines.push(Line::from(vec![
+            Span::styled("  ⏿ ", Style::default().fg(semantic.text.dim)),
+            Span::styled(
+                truncate_to_width(&text, content_width),
+                Style::default().fg(semantic.text.muted),
+            ),
+        ]));
+    }
+    with_message_spacing(lines)
+}
+
+fn render_generic_tool_card_lines(data: &TuiToolCard) -> Vec<Line<'static>> {
     let semantic = THEME_ATOM.state().read().semantic;
     let display_name = crate::kit::tool_display::format_tool_name(&data.tool_name);
 
@@ -594,6 +767,8 @@ fn render_subagent_group_lines(data: &TuiSubAgentGroup, width: usize) -> Vec<Lin
     let semantic = THEME_ATOM.state().read().semantic;
 
     let children: Vec<TuiRenderUnit> = data.view_models.iter().cloned().collect();
+    let child_indent = (width >= 2).then_some("  ");
+    let child_width = width.saturating_sub(child_indent.map_or(0, |indent| indent.width()));
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // 折叠摘要
@@ -624,7 +799,7 @@ fn render_subagent_group_lines(data: &TuiSubAgentGroup, width: usize) -> Vec<Lin
                 continue;
             }
         }
-        let inner_lines = vm_to_lines(inner_vm, width);
+        let inner_lines = vm_to_lines(inner_vm, child_width);
         if inner_lines.is_empty() {
             continue;
         }
@@ -640,7 +815,9 @@ fn render_subagent_group_lines(data: &TuiSubAgentGroup, width: usize) -> Vec<Lin
             .unwrap_or(0);
         let trimmed = &inner_lines[start..end];
         for line in trimmed {
-            let mut new_spans = vec![Span::raw("  ")];
+            let mut new_spans = child_indent
+                .map(|indent| vec![Span::raw(indent)])
+                .unwrap_or_default();
             new_spans.extend(line.spans.iter().cloned());
             lines.push(Line::from(new_spans));
         }

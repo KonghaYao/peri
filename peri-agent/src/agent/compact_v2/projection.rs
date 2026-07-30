@@ -16,6 +16,16 @@ use crate::error::AgentResult;
 use crate::messages::{BaseMessage, ContentBlock, MessageContent, MessageId, ToolCallRequest};
 use crate::session::transcript::MessageTranscript;
 
+pub const PROJECTION_POLICY_VERSION: u32 = 2;
+
+const fn default_compact_tool_input_keep_head() -> usize {
+    350
+}
+
+const fn default_compact_tool_input_keep_tail() -> usize {
+    100
+}
+
 /// 投影目标（消息、块或工具调用）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProjectionTarget {
@@ -36,9 +46,16 @@ pub enum ProjectionAction {
         keep_tail: usize,
         preserve_recovery_handle: bool,
     },
+    /// 按字典序持久化的 root JSON object 顶层 key。
+    ///
+    /// 未知字段、非 string 值及非 object 根类型均安全地不执行任何操作；不支持嵌套路径、
+    /// JSON Pointer 或数组索引。
     CompactToolInput {
         fields: Vec<String>,
-        preserve_shape: bool,
+        #[serde(default = "default_compact_tool_input_keep_head")]
+        keep_head: usize,
+        #[serde(default = "default_compact_tool_input_keep_tail")]
+        keep_tail: usize,
     },
     ReplaceMedia {
         placeholder: String,
@@ -116,6 +133,12 @@ pub struct MicroCompactPlan {
     pub estimated_before_tokens: u64,
     pub estimated_after_tokens: u64,
     pub estimated_tokens_saved: u64,
+    /// 去重 message_id 数量
+    pub changed_messages: usize,
+    /// CompactToolInput 中的所有字段总数
+    pub changed_fields: usize,
+    /// 通过 stale/retention 筛选但无内容的候选数
+    pub no_op_candidates: usize,
 }
 
 impl MicroCompactPlan {
@@ -182,7 +205,8 @@ pub fn plan_from_persisted_directives(
                     if entry.message_id != id {
                         return Err(crate::error::AgentError::Other(anyhow::anyhow!(
                             "directive entry references wrong message: entry.msg_id={:?} != msg.id={:?}",
-                            entry.message_id, id
+                            entry.message_id,
+                            id
                         )));
                     }
                 }
@@ -211,8 +235,28 @@ pub fn plan_from_persisted_directives(
         )));
     }
 
+    // 统计：去重 message_id 数量
+    let changed_messages: usize = actions
+        .iter()
+        .map(|a| a.message_id)
+        .collect::<HashSet<_>>()
+        .len();
+    // 统计：CompactToolInput 中的所有字段总数
+    let changed_fields: usize = actions
+        .iter()
+        .filter_map(|a| match &a.action {
+            ProjectionAction::CompactToolInput { fields, .. } => Some(fields.len()),
+            _ => None,
+        })
+        .sum();
+    // 持久化 directive 无 stale/retention 筛选 → no_op_candidates = 0
+    let no_op_candidates = 0;
+
     // 估算 token（与 plan_micro 保持一致）
-    let (before, after) = estimate_tokens_for_actions(transcript, &actions);
+    let (before_chars, after_chars) = estimate_projection_chars(transcript, &actions);
+    let before = before_chars / 4;
+    let after = after_chars / 4;
+    let estimated_tokens_saved = before_chars.saturating_sub(after_chars) / 4;
 
     Ok(MicroCompactPlan {
         policy_version: expected_version,
@@ -220,33 +264,88 @@ pub fn plan_from_persisted_directives(
         actions,
         estimated_before_tokens: before,
         estimated_after_tokens: after,
-        estimated_tokens_saved: before.saturating_sub(after),
+        estimated_tokens_saved,
+        changed_messages,
+        changed_fields,
+        no_op_candidates,
     })
 }
 
-/// 对指定 actions 列表做 token 估算（用于 plan_from_persisted_directives）
-fn estimate_tokens_for_actions(
+/// 对指定 actions 列表估算实际会被投影的字符数。
+///
+/// 仅统计 `CompactToolInput` 指定的顶层 string 字段，以及成功 `ToolResult` 的 text；
+/// 找不到目标、不符合类型或 helper 不会缩短时均不计入。
+pub(crate) fn estimate_projection_chars(
     transcript: &MessageTranscript,
     actions: &[ProjectionActionEntry],
 ) -> (u64, u64) {
     let mut before = 0u64;
     let mut after = 0u64;
 
-    let entries = transcript.entries();
-    for entry in entries {
-        let id = entry.message.id();
-        let content_str = entry.message.message_content().text_content();
-        let chars = content_str.chars().count() as u64;
+    for action in actions {
+        let Some(message) = transcript
+            .entries()
+            .iter()
+            .find(|entry| entry.message.id() == action.message_id)
+            .map(|entry| &entry.message)
+        else {
+            continue;
+        };
 
-        let has_action = actions.iter().any(|a| a.message_id == id);
-        if has_action {
-            let projected_chars = (chars / 3).min(chars);
-            before += chars;
-            after += projected_chars;
+        match (&action.target, &action.action, message) {
+            (
+                ProjectionTarget::ToolCall { tool_call_id },
+                ProjectionAction::CompactToolInput {
+                    fields,
+                    keep_head,
+                    keep_tail,
+                },
+                BaseMessage::Ai { tool_calls, .. },
+            ) => {
+                let Some(tool_call) = tool_calls.iter().find(|tc| tc.id == *tool_call_id) else {
+                    continue;
+                };
+                let Some(arguments) = tool_call.arguments.as_object() else {
+                    continue;
+                };
+
+                let mut seen_fields = HashSet::new();
+                for field in fields {
+                    if !seen_fields.insert(field) {
+                        continue;
+                    }
+                    let Some(text) = arguments.get(field).and_then(serde_json::Value::as_str)
+                    else {
+                        continue;
+                    };
+                    if let Some(projected) = apply_head_tail(text, *keep_head, *keep_tail) {
+                        before += text.chars().count() as u64;
+                        after += projected.chars().count() as u64;
+                    }
+                }
+            }
+            (
+                ProjectionTarget::Message | ProjectionTarget::ContentBlock { index: 0 },
+                ProjectionAction::CompactToolResult {
+                    keep_head,
+                    keep_tail,
+                    ..
+                },
+                BaseMessage::Tool {
+                    content, is_error, ..
+                },
+            ) if !is_error => {
+                let text = content.text_content();
+                if let Some(projected) = apply_head_tail(&text, *keep_head, *keep_tail) {
+                    before += text.chars().count() as u64;
+                    after += projected.chars().count() as u64;
+                }
+            }
+            _ => {}
         }
     }
 
-    (before / 4, after / 4)
+    (before, after)
 }
 
 // ─── render_llm_view ──────────────────────────────────────────────────────────
@@ -397,7 +496,7 @@ fn project_message(
             };
 
             // 投影 tool result content
-            let projected_content = project_tool_result_content(content, content_action, caps);
+            let projected_content = project_tool_result_content(content, content_action);
 
             BaseMessage::Tool {
                 id: *id,
@@ -508,31 +607,24 @@ fn project_ai_content(
     }
 }
 
-/// 对 tool result 内容应用 CompactToolResult action
+/// 对 tool result 的完整文本流应用 CompactToolResult action。
 fn project_tool_result_content(
     content: &MessageContent,
     action: &ProjectionAction,
-    caps: &ProviderCapabilities,
 ) -> MessageContent {
-    let blocks = content.content_blocks();
-    let mut projected_blocks = Vec::with_capacity(blocks.len());
+    let ProjectionAction::CompactToolResult {
+        keep_head,
+        keep_tail,
+        ..
+    } = action
+    else {
+        return content.clone();
+    };
 
-    for block in &blocks {
-        projected_blocks.push(project_block(block, Some(action), caps));
-    }
-
-    match content {
-        MessageContent::Text(_) => {
-            if projected_blocks.len() == 1 {
-                if let ContentBlock::Text { ref text } = projected_blocks[0] {
-                    return MessageContent::text(text.clone());
-                }
-            }
-            MessageContent::Blocks(projected_blocks)
-        }
-        MessageContent::Blocks(_) => MessageContent::Blocks(projected_blocks),
-        MessageContent::Raw(_) => content.clone(),
-    }
+    let text = content.text_content();
+    apply_head_tail(&text, *keep_head, *keep_tail)
+        .map(MessageContent::text)
+        .unwrap_or_else(|| content.clone())
 }
 
 // ─── project_block ────────────────────────────────────────────────────────────
@@ -568,10 +660,9 @@ fn project_block(
             keep_tail,
             ..
         }) => match block {
-            ContentBlock::Text { text } => {
-                let truncated = apply_head_tail(text, *keep_head, *keep_tail);
-                ContentBlock::Text { text: truncated }
-            }
+            ContentBlock::Text { text } => apply_head_tail(text, *keep_head, *keep_tail)
+                .map(|text| ContentBlock::Text { text })
+                .unwrap_or_else(|| block.clone()),
             // Image/Document 在 tool result 中不常见，保留原样
             _ => block.clone(),
         },
@@ -594,27 +685,57 @@ fn project_block(
             _ => block.clone(),
         },
 
-        _ => block.clone(),
+        _ => {
+            if let ContentBlock::Reasoning {
+                ref signature,
+                ref text,
+            } = block
+            {
+                if signature.is_some() {
+                    tracing::warn!(
+                        len = text.chars().count(),
+                        "Reasoning block with signature received projection action; \
+                         block preserved unchanged because signed reasoning must remain whole"
+                    );
+                }
+            }
+            block.clone()
+        }
     }
 }
 
 // ─── project_tool_input ───────────────────────────────────────────────────────
 
-/// 投影 tool input：保持 JSON object 根类型
+/// 投影 tool input
 fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> ToolCallRequest {
     match &action.action {
-        ProjectionAction::CompactToolInput { preserve_shape, .. } => {
-            if *preserve_shape && tc.arguments.is_object() {
-                // 保留 object 根，替换为 minimal 占位
-                let mut minimal = serde_json::Map::new();
-                minimal.insert(
-                    "_compact_note".to_string(),
-                    serde_json::Value::String("tool input compacted".to_string()),
-                );
+        ProjectionAction::CompactToolInput {
+            fields,
+            keep_head,
+            keep_tail,
+        } => {
+            let Some(arguments) = tc.arguments.as_object() else {
+                return tc.clone();
+            };
+            let mut projected_arguments = arguments.clone();
+            let mut changed = false;
+
+            for field in fields {
+                let Some(text) = arguments.get(field).and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                let Some(truncated) = apply_head_tail(text, *keep_head, *keep_tail) else {
+                    continue;
+                };
+                projected_arguments.insert(field.clone(), serde_json::Value::String(truncated));
+                changed = true;
+            }
+
+            if changed {
                 ToolCallRequest {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
-                    arguments: serde_json::Value::Object(minimal),
+                    arguments: serde_json::Value::Object(projected_arguments),
                 }
             } else {
                 tc.clone()
@@ -640,18 +761,28 @@ fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> T
 
 // ─── apply_head_tail ──────────────────────────────────────────────────────────
 
-/// 安全的 head/tail 截断（CJK 安全）
-fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= head_chars + tail_chars {
-        return text.to_string();
+/// 安全的 head/tail 截断（CJK 安全）。
+///
+/// 仅当截断后的文本确实更短时返回 Some，避免省略标记使短文本膨胀。
+fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> Option<String> {
+    let total: usize = text.chars().count();
+    if total <= head_chars.saturating_add(tail_chars) {
+        return None;
     }
 
-    let head: String = chars[..head_chars].iter().collect();
-    let tail: String = chars[chars.len() - tail_chars..].iter().collect();
-    let skipped = chars.len() - head_chars - tail_chars;
+    let head: String = text.chars().take(head_chars).collect();
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let skipped = total.saturating_sub(head_chars + tail_chars);
+    let projected = format!("{}\n... [{} 字符已省略] ...\n{}", head, skipped, tail);
 
-    format!("{}\n... [{} 字符已省略] ...\n{}", head, skipped, tail)
+    (projected.chars().count() < total).then_some(projected)
 }
 
 // ─── validate_projected_view ──────────────────────────────────────────────────
@@ -711,9 +842,15 @@ fn validate_projected_view(
         for msg in messages {
             let blocks = msg.message_content().content_blocks();
             for block in blocks {
-                if let ContentBlock::Reasoning { signature, .. } = block {
+                if let ContentBlock::Reasoning { signature, text } = block {
                     if signature.is_some() {
-                        // 有签名的 reasoning 存在 → OK（没有被局部截断）
+                        // 验证策略：project_block（见下文）对 reasoning 块的非 Keep 动作
+                        // 会静默 fallthrough 到 _ => block.clone()，因此此处只做防御性日志；
+                        // 实际安全由 provider adapter 的签名校验保证。
+                        tracing::debug!(
+                            len = text.chars().count(),
+                            "已投影视图中出现带签名的 reasoning block"
+                        );
                     }
                 }
             }

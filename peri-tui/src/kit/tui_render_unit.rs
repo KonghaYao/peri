@@ -181,6 +181,61 @@ impl TuiAssistantBubble {
 tui_impl_partial_eq!(TuiAssistantBubble: text, reasoning);
 
 /// Tool invocation card -- name, summaries, optional diff.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TuiToolPresentation {
+    #[default]
+    Generic,
+    Skill(TuiSkillPresentation),
+    Todo(TuiTodoPresentation),
+}
+
+/// User-facing information for a successfully loaded skill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiSkillPresentation {
+    pub name: String,
+}
+
+/// User-facing TodoWrite snapshot and the changes from its previous successful call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiTodoPresentation {
+    pub current_items: Vec<TuiTodoItem>,
+    pub changes: Vec<TuiTodoChange>,
+    pub is_initial: bool,
+    pub completed_count: usize,
+    pub total_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiTodoItem {
+    pub content: String,
+    pub active_form: Option<String>,
+    pub status: TuiTodoStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiTodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiTodoChange {
+    pub kind: TuiTodoChangeKind,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiTodoChangeKind {
+    Added,
+    Started,
+    Completed,
+    Reopened,
+    ActiveFormUpdated,
+    Removed,
+}
+
+/// Tool invocation card -- name, summaries, optional diff.
 #[derive(Debug, Clone)]
 pub struct TuiToolCard {
     /// Stable identifier for this tool call.
@@ -199,13 +254,15 @@ pub struct TuiToolCard {
     pub running_duration_ms: Option<u64>,
     /// Inline diff preview (Write / Edit tools).
     pub diff: Option<TuiDiffBlock>,
+    /// 专属工具的用户语义展示；默认保持通用工具卡片。
+    pub presentation: TuiToolPresentation,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
     /// Agent 工具专用的子工具调用计数（由 build_view_models 后处理配对填充）。
     pub tool_calls_count: usize,
 }
 
-tui_impl_partial_eq!(TuiToolCard: tool_id, tool_name, input_summary, output_summary, is_error, is_running, running_duration_ms, diff);
+tui_impl_partial_eq!(TuiToolCard: tool_id, tool_name, input_summary, output_summary, is_error, is_running, running_duration_ms, diff, presentation);
 
 /// System notification -- centered banner for model switches, compact, etc.
 #[derive(Debug, Clone)]

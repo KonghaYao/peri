@@ -21,6 +21,16 @@ use crate::{
     event::map_event, event::AcpEvent, event::CompactFileInfoDto, transport::AcpTransport,
 };
 
+/// Serializes a serde `Serialize` value into its serde snake_case string
+/// representation. Used for CompactStrategy/CompactOutcome enum variants
+/// so TUI string matching works correctly.
+fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_string()
+}
+
 /// Receives [`ExecutorEvent`]s produced during agent execution and routes them
 /// to the appropriate transport.
 #[async_trait]
@@ -204,8 +214,8 @@ impl EventSink for TransportEventSink {
                             return;
                         }
                     };
-                    let strategy_str = format!("{:?}", strategy).to_lowercase();
-                    let outcome_str = format!("{:?}", outcome).to_lowercase();
+                    let strategy_str = to_serde_str(strategy);
+                    let outcome_str = to_serde_str(outcome);
                     Some(AcpEvent::CompactCompleted {
                         summary: summary.clone(),
                         files: files

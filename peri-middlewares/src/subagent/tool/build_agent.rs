@@ -10,6 +10,7 @@ use peri_agent::{
 };
 use tokio_util::sync::CancellationToken;
 
+use super::super::fork::allows_injected_tools;
 use super::build_subagent_middlewares;
 use crate::{
     claude_agent_parser::ClaudeAgent, hooks::types::HookEvent, subagent::SubAgentMiddlewareConfig,
@@ -89,9 +90,9 @@ impl super::SubAgentTool {
             &agent_def.frontmatter.disallowed_tools,
         );
 
-        // 注入 SandboxWrite（per-agent 实例，不走父工具继承）
+        // 显式 `tools: []` 是严格的零工具边界，禁止 WriteSandbox 等后注入工具。
         let allowed_write_dirs = &agent_def.frontmatter.allowed_write_dirs;
-        if !allowed_write_dirs.is_empty() {
+        if allows_injected_tools(&agent_def.frontmatter.tools) && !allowed_write_dirs.is_empty() {
             let disallowed_list = agent_def.frontmatter.disallowed_tools.to_vec();
             let is_disallowed = disallowed_list.iter().any(|n| {
                 let n = n.to_lowercase();

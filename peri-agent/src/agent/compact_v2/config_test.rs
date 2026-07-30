@@ -11,6 +11,10 @@ fn test_default_values() {
     assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
     assert!((config.micro_compact_threshold - 0.75).abs() < 0.001);
     assert_eq!(config.micro_compact_stale_steps, 3);
+    assert_eq!(config.micro_field_threshold_chars, 500);
+    assert_eq!(config.micro_field_keep_head_chars, 350);
+    assert_eq!(config.micro_field_keep_tail_chars, 100);
+    assert!(config.has_valid_micro_field_limits());
     assert_eq!(
         config.micro_excluded_tools.len(),
         3,
@@ -30,6 +34,9 @@ fn test_serde_roundtrip() {
     let config = CompactConfig {
         auto_compact_threshold: 0.90,
         micro_compact_stale_steps: 10,
+        micro_field_threshold_chars: 900,
+        micro_field_keep_head_chars: 600,
+        micro_field_keep_tail_chars: 200,
         summary_max_tokens: 8000,
         ..Default::default()
     };
@@ -37,8 +44,28 @@ fn test_serde_roundtrip() {
     let deserialized: CompactConfig = serde_json::from_str(&json).unwrap();
     assert!((deserialized.auto_compact_threshold - 0.90).abs() < 0.001);
     assert_eq!(deserialized.micro_compact_stale_steps, 10);
+    assert_eq!(deserialized.micro_field_threshold_chars, 900);
+    assert_eq!(deserialized.micro_field_keep_head_chars, 600);
+    assert_eq!(deserialized.micro_field_keep_tail_chars, 200);
+    assert!(deserialized.has_valid_micro_field_limits());
     assert_eq!(deserialized.summary_max_tokens, 8000);
     assert!((deserialized.micro_compact_threshold - 0.75).abs() < 0.001);
+}
+
+#[test]
+fn test_micro_field_limits_reject_zero_threshold_and_non_shrinking_values() {
+    let zero_threshold = CompactConfig {
+        micro_field_threshold_chars: 0,
+        ..Default::default()
+    };
+    let non_shrinking = CompactConfig {
+        micro_field_threshold_chars: 500,
+        micro_field_keep_head_chars: 350,
+        micro_field_keep_tail_chars: 150,
+        ..Default::default()
+    };
+    assert!(!zero_threshold.has_valid_micro_field_limits());
+    assert!(!non_shrinking.has_valid_micro_field_limits());
 }
 
 #[test]

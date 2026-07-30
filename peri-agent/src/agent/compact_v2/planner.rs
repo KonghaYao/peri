@@ -4,7 +4,7 @@
 //! set_truncated、set_excluded、send_persist、invalidate_context_cache 或 provider。
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::messages::{BaseMessage, MessageId};
 use crate::session::transcript::{MessageTranscript, TranscriptEntry};
@@ -12,7 +12,8 @@ use crate::tools::ContextRetention;
 
 use super::config::CompactConfig;
 use super::projection::{
-    MicroCompactPlan, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
+    estimate_projection_chars, MicroCompactPlan, ProjectionAction, ProjectionActionEntry,
+    ProjectionTarget, PROJECTION_POLICY_VERSION,
 };
 
 /// 上下文压力 — 用于决定是否需要 compact 及回收目标
@@ -109,6 +110,7 @@ pub struct TurnGroup {
 pub struct ToolExchange {
     pub tool_call_id: String,
     pub tool_name: String,
+    pub tool_input: serde_json::Value,
     pub ai_message_id: MessageId,
     pub tool_result_entries: Vec<(usize, TranscriptEntry)>,
 }
@@ -171,6 +173,7 @@ impl TurnGroup {
                     exchanges.push(ToolExchange {
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
+                        tool_input: tc.arguments.clone(),
                         ai_message_id: ai_entry.message.id(),
                         tool_result_entries: result_entries,
                     });
@@ -213,6 +216,38 @@ fn should_preserve_tool(tool_name: &str, config: &CompactConfig) -> bool {
     false
 }
 
+/// 返回需要压缩的顶层字符串字段名。
+fn compactable_top_level_string_fields(
+    input: &serde_json::Value,
+    config: &CompactConfig,
+) -> Vec<String> {
+    if !config.has_valid_micro_field_limits() {
+        tracing::warn!(
+            threshold = config.micro_field_threshold_chars,
+            keep_head = config.micro_field_keep_head_chars,
+            keep_tail = config.micro_field_keep_tail_chars,
+            "invalid micro compact field limits"
+        );
+        return vec![];
+    }
+
+    let Some(object) = input.as_object() else {
+        return vec![];
+    };
+
+    let mut fields: Vec<_> = object
+        .iter()
+        .filter_map(|(key, value)| {
+            value
+                .as_str()
+                .filter(|text| text.chars().count() > config.micro_field_threshold_chars)
+                .map(|_| key.clone())
+        })
+        .collect();
+    fields.sort();
+    fields
+}
+
 /// 生成 Micro Compact 计划（纯数据，零副作用）
 ///
 /// 遍历 TurnGroup，跳过最近 `micro_compact_stale_steps` 轮，对每个 tool exchange
@@ -237,6 +272,7 @@ pub fn plan_micro(
     let stale_limit = total_groups.saturating_sub(config.micro_compact_stale_steps);
 
     let mut actions = Vec::new();
+    let mut no_op_candidates: usize = 0;
 
     for (gi, group) in groups.iter().enumerate() {
         // 跳过最近 N 轮
@@ -245,10 +281,19 @@ pub fn plan_micro(
         }
 
         for exchange in group.tool_exchanges() {
-            // 跳过已有 truncated flag 的消息（避免重复）
+            // 跳过已有 truncated flag 且 directive 版本一致的消息（避免重复）
             // 仅在 Compact 阶段跳过（skip_existing_truncated=true），
             // Reason 阶段（skip_existing_truncated=false）需要为已标记消息生成完整投影
-            if skip_existing_truncated && transcript.flags(exchange.ai_message_id).truncated {
+            // v1 directive 被视为脏数据，不跳过，允许重新规划为 v2
+            if skip_existing_truncated
+                && transcript.flags(exchange.ai_message_id).truncated
+                && transcript
+                    .get_flags(exchange.ai_message_id)
+                    .and_then(|f| f.projection)
+                    .is_some_and(|d| {
+                        d.policy_version == super::projection::PROJECTION_POLICY_VERSION
+                    })
+            {
                 continue;
             }
             // 受保护工具 → 跳过（per-call 粒度）
@@ -258,92 +303,122 @@ pub fn plan_micro(
                 continue;
             }
 
-            // 检查是否有错误 ToolResult
-            let has_error = exchange
-                .tool_result_entries
-                .iter()
-                .any(|(_, e)| matches!(&e.message, BaseMessage::Tool { is_error: true, .. }));
+            let mut has_any_action = false;
 
-            // tool_use 输入 → CompactToolInput（per tool_call_id 粒度，不误伤同消息其他调用）
-            actions.push(ProjectionActionEntry {
-                message_id: exchange.ai_message_id,
-                target: ProjectionTarget::ToolCall {
-                    tool_call_id: exchange.tool_call_id.clone(),
-                },
-                action: ProjectionAction::CompactToolInput {
-                    fields: vec![],
-                    preserve_shape: true,
-                },
-            });
+            let fields = compactable_top_level_string_fields(&exchange.tool_input, config);
+            if !fields.is_empty() {
+                has_any_action = true;
+                actions.push(ProjectionActionEntry {
+                    message_id: exchange.ai_message_id,
+                    target: ProjectionTarget::ToolCall {
+                        tool_call_id: exchange.tool_call_id.clone(),
+                    },
+                    action: ProjectionAction::CompactToolInput {
+                        fields,
+                        keep_head: config.micro_field_keep_head_chars,
+                        keep_tail: config.micro_field_keep_tail_chars,
+                    },
+                });
+            }
 
-            // 成功的 ToolResult → CompactToolResult（错误结果保留诊断信息）
-            if !has_error {
+            // 仅压缩超过阈值的成功 ToolResult；错误结果保留诊断信息。
+            if config.has_valid_micro_field_limits() {
                 for (_, result_entry) in &exchange.tool_result_entries {
                     if skip_existing_truncated
                         && transcript.flags(result_entry.message.id()).truncated
+                        && transcript
+                            .get_flags(result_entry.message.id())
+                            .and_then(|f| f.projection)
+                            .is_some_and(|d| {
+                                d.policy_version == super::projection::PROJECTION_POLICY_VERSION
+                            })
                     {
                         continue;
                     }
+                    let BaseMessage::Tool {
+                        content, is_error, ..
+                    } = &result_entry.message
+                    else {
+                        continue;
+                    };
+                    if *is_error
+                        || content.text_content().chars().count()
+                            <= config.micro_field_threshold_chars
+                    {
+                        continue;
+                    }
+                    has_any_action = true;
                     actions.push(ProjectionActionEntry {
                         message_id: result_entry.message.id(),
                         target: ProjectionTarget::Message,
                         action: ProjectionAction::CompactToolResult {
-                            keep_head: config.tool_result_keep_chars,
-                            keep_tail: 200,
+                            keep_head: config.micro_field_keep_head_chars,
+                            keep_tail: config.micro_field_keep_tail_chars,
                             preserve_recovery_handle: true,
                         },
                     });
                 }
             }
+
+            if !has_any_action {
+                no_op_candidates += 1;
+            }
         }
     }
 
+    // 无 action → 提前返回，避免不必要的 token 估算
+    if actions.is_empty() {
+        return MicroCompactPlan {
+            policy_version: PROJECTION_POLICY_VERSION,
+            target_reclaim_tokens: config.target_headroom_tokens,
+            actions,
+            estimated_before_tokens: 0,
+            estimated_after_tokens: 0,
+            estimated_tokens_saved: 0,
+            changed_messages: 0,
+            changed_fields: 0,
+            no_op_candidates,
+        };
+    }
+
+    // 统计：去重 message_id 数量
+    let changed_messages: usize = actions
+        .iter()
+        .map(|a| a.message_id)
+        .collect::<HashSet<_>>()
+        .len();
+    // 统计：CompactToolInput 中的所有字段总数
+    let changed_fields: usize = actions
+        .iter()
+        .filter_map(|a| match &a.action {
+            ProjectionAction::CompactToolInput { fields, .. } => Some(fields.len()),
+            _ => None,
+        })
+        .sum();
+
     // 估算投影前后 token 数量
-    let (before, after) = estimate_tokens(transcript, &actions);
-    let estimated_tokens_saved = before.saturating_sub(after);
+    let (before_chars, after_chars) = estimate_projection_chars(transcript, &actions);
+    debug_assert!(
+        after_chars <= before_chars,
+        "投影后字符数不应大于投影前: after={after_chars} > before={before_chars}"
+    );
+    let before = before_chars / 4;
+    let after = after_chars / 4;
+    let estimated_tokens_saved = before_chars.saturating_sub(after_chars) / 4;
 
     MicroCompactPlan {
-        policy_version: 1,
+        policy_version: PROJECTION_POLICY_VERSION,
         target_reclaim_tokens: config.target_headroom_tokens,
         actions,
         estimated_before_tokens: before,
         estimated_after_tokens: after,
         estimated_tokens_saved,
+        changed_messages,
+        changed_fields,
+        no_op_candidates,
     }
 }
 
-// ─── estimate_tokens ────────────────────────────────────────────────────────────
-
-/// 简单 token 估算：对 transcript 中指定消息的原始/投影内容做字符计数估算
-///
-/// 使用 chars / 4 的粗略估算（与 TokenTracker 保持一致），
-/// 后续 Phase 7 shadow mode 会用真实 input_tokens 校准。
-fn estimate_tokens(
-    transcript: &MessageTranscript,
-    actions: &[ProjectionActionEntry],
-) -> (u64, u64) {
-    let mut before = 0u64;
-    let mut after = 0u64;
-
-    let entries = transcript.entries();
-
-    for entry in entries {
-        let id = entry.message.id();
-        let content_str = entry.message.message_content().text_content();
-        let chars = content_str.chars().count() as u64;
-
-        // 检查是否有针对此消息的 action
-        let has_action = actions.iter().any(|a| a.message_id == id);
-
-        if has_action {
-            // 有 action → 投影后减少
-            let projected_chars = (chars / 3).max(1);
-            before += chars;
-            after += projected_chars;
-        }
-        // 无 action 的消息不计入节省量（它们不变）
-    }
-
-    // 除以 4 转换为 token 估算
-    (before / 4, after / 4)
-}
+#[cfg(test)]
+#[path = "planner_test.rs"]
+mod tests;

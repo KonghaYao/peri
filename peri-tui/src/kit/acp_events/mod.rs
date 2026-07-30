@@ -26,6 +26,7 @@ pub use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit, TuiUser
 use crate::kit::acp_types::{AcpEventData, CurrentTurn};
 use crate::kit::atoms::*;
 use crate::kit::tui_render_unit::{TuiNoteLevel, tui_hash_str};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // StreamingMode — 流式渲染模式控制
@@ -183,6 +184,14 @@ pub struct BridgeState {
     pub last_pushed_text_len: usize,
     /// streaming_mode=block 时追踪上次推送后主 agent 推理的字符数。
     pub last_pushed_reasoning_len: usize,
+    /// 当前会话最近一次成功 TodoWrite 的完整快照；仅用于下一张 Todo 卡片的变更集。
+    pub(crate) last_successful_todos: Option<crate::kit::tool_semantics::TodoSnapshot>,
+    /// 当前基线对应 TodoWrite 的启动序号，用于拒绝较旧调用的乱序成功结束事件。
+    pub(crate) last_successful_todo_sequence: Option<u64>,
+    /// 单调递增的 TodoWrite 启动序号。
+    pub(crate) next_todo_sequence: u64,
+    /// 所有未结束 TodoWrite 的启动序号与原始输入，涵盖主 agent、子 agent 和回放。
+    pub(crate) todo_call_inputs: HashMap<String, (u64, serde_json::Value)>,
 }
 
 impl BridgeState {
@@ -232,6 +241,33 @@ impl BridgeState {
             .push_system_note(text, level, content_hash);
         render::push_view_models(self);
         render::push_acp_state(self);
+    }
+
+    /// 记录 TodoWrite 启动并返回其会话内单调序号。
+    pub(crate) fn record_todo_started(&mut self, tool_id: String, raw_input: serde_json::Value) {
+        let sequence = self.next_todo_sequence;
+        self.next_todo_sequence = self.next_todo_sequence.wrapping_add(1);
+        self.todo_call_inputs.insert(tool_id, (sequence, raw_input));
+    }
+
+    /// 仅当完成调用不早于当前成功基线时才推进 Todo 快照。
+    pub(crate) fn complete_todo_if_current(&mut self, tool_id: &str, is_error: bool) -> bool {
+        let Some((sequence, raw_input)) = self.todo_call_inputs.remove(tool_id) else {
+            return false;
+        };
+        if is_error
+            || self
+                .last_successful_todo_sequence
+                .is_some_and(|current| sequence < current)
+        {
+            return false;
+        }
+        if let Some(snapshot) = crate::kit::tool_semantics::TodoSnapshot::parse(&raw_input) {
+            self.last_successful_todos = Some(snapshot);
+            self.last_successful_todo_sequence = Some(sequence);
+            return true;
+        }
+        false
     }
 }
 
@@ -335,7 +371,8 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             tool_id,
             tool_name,
             input_summary,
-        } => tool::handle_replay_tool_started(state, tool_id, tool_name, input_summary),
+            raw_input,
+        } => tool::handle_replay_tool_started(state, tool_id, tool_name, input_summary, raw_input),
         ReplayToolEnded {
             tool_id,
             output_summary,

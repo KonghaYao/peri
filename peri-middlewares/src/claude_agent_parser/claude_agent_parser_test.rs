@@ -152,16 +152,79 @@ prompt"#;
     assert_eq!(agent.tools(), vec!["Read", "Glob"]);
 }
 
+/// [回归测试] 显式 `tools: []` 必须保留为零工具声明，不能与省略字段混同。
+///
+/// 历史背景：空数组被解析为空 Vec，工具过滤器把它当成“未配置工具”并继承父工具，
+/// 导致声明为无工具的 advisor 实际获得 Read、Bash 等工具。
 #[test]
-fn test_tools_value_empty_string() {
+fn test_tools_value_explicit_empty_array_preserves_zero_tools_intent() {
+    let content = r#"---
+name: advisor
+description: no tools
+tools: []
+---
+prompt"#;
+
+    let agent = parse_agent_file(content).unwrap();
+
+    assert_eq!(agent.frontmatter.tools, ToolsValue::NoTools);
+}
+
+#[test]
+fn test_tools_value_empty_string_preserves_zero_tools_intent() {
     let content = r#"---
 name: test
 description: test
 tools: ""
 ---
 prompt"#;
+
     let agent = parse_agent_file(content).unwrap();
-    assert!(agent.tools().is_empty());
+
+    assert_eq!(agent.frontmatter.tools, ToolsValue::NoTools);
+}
+
+/// [回归测试] 显式 `tools: null` 不能与缺失字段混同并继承父工具。
+#[test]
+fn test_tools_value_null_preserves_zero_tools_intent() {
+    let content = r#"---
+name: test
+description: test
+tools: null
+---
+prompt"#;
+
+    let agent = parse_agent_file(content).unwrap();
+
+    assert_eq!(agent.frontmatter.tools, ToolsValue::NoTools);
+}
+
+/// [回归测试] `tools` 字段存在但类型无效时不得回退为继承父工具。
+///
+/// 历史背景：安全敏感 agent 配置误写为对象会被静默解析成 Empty，因而获得全部父工具。
+#[test]
+fn test_tools_value_invalid_type_rejects_agent_file() {
+    let content = r#"---
+name: advisor
+description: no tools
+tools: {}
+---
+prompt"#;
+
+    assert!(parse_agent_file(content).is_none());
+}
+
+/// [回归测试] `tools` 数组不能静默丢弃非字符串元素。
+#[test]
+fn test_tools_value_array_with_non_string_rejects_agent_file() {
+    let content = r#"---
+name: advisor
+description: no tools
+tools: [Read, 42]
+---
+prompt"#;
+
+    assert!(parse_agent_file(content).is_none());
 }
 
 /// [回归测试] allowedWriteDirs roundtrip——plan agent 声明沙箱目录
