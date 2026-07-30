@@ -72,6 +72,7 @@ pub(super) async fn full_compact_inner(
                 appended_messages: vec![summary_message],
             })
             .await?;
+        transcript.mark_full_compaction_committed();
         let after_visible = transcript.visible_messages().len();
 
         return Ok(super::CompactResult {
@@ -148,6 +149,7 @@ pub(super) async fn full_compact_inner(
             appended_messages,
         })
         .await?;
+    transcript.mark_full_compaction_committed();
 
     let after_visible = transcript.visible_messages().len();
 

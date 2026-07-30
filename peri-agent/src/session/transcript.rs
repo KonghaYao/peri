@@ -97,6 +97,11 @@ pub struct MessageTranscript {
     persist_handle: Option<tokio::task::AbortHandle>,
     /// 持久化目标 thread id
     thread_id: Option<ThreadId>,
+    /// 当前执行期间是否已提交 Full Compact。
+    ///
+    /// 此标记不持久化；executor 用它区分 Full Compact 的合法可见快照和
+    /// 取消后可能不完整的临时 transcript。
+    full_compaction_committed: bool,
     /// 持久化后端引用（保留 Arc 让 store 在 transcript 存活期间不被释放，
     /// spawned writer task 持有独立 clone）
     store: Option<Arc<dyn ThreadStore>>,
@@ -133,6 +138,7 @@ impl MessageTranscript {
             persist_tx: None,
             persist_handle: None,
             thread_id: None,
+            full_compaction_committed: false,
             store: None,
         }
     }
@@ -264,6 +270,16 @@ impl MessageTranscript {
             .map(|entry| entry.message.clone())
             .collect();
         Arc::new(filtered)
+    }
+
+    /// 当前执行期间是否已提交 Full Compact。
+    pub fn full_compaction_committed(&self) -> bool {
+        self.full_compaction_committed
+    }
+
+    /// 标记 Full Compact 已成功写入持久化存储和内存 transcript。
+    pub fn mark_full_compaction_committed(&mut self) {
+        self.full_compaction_committed = true;
     }
 
     /// 按 id 获取条目（O(1)）
@@ -531,6 +547,7 @@ impl MessageTranscript {
             persist_tx: self.persist_tx.take(),
             persist_handle: self.persist_handle.take(),
             thread_id: self.thread_id.take(),
+            full_compaction_committed: self.full_compaction_committed,
             store: self.store.take(),
         }
     }
