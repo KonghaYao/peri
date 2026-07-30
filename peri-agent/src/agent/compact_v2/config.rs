@@ -25,11 +25,14 @@ fn default_stale_steps() -> usize {
 ///
 /// │ 工具             │ 理由                                          │
 /// │──────────────────│───────────────────────────────────────────────│
+/// │ Agent            │ 子任务描述（prompt）等结构化参数不可恢复，     │
+/// │                  │ 丢失=子 agent 调度失败，必填字段缺失           │
 /// │ AskUserQuestion  │ 用户答案不可恢复，丢失=对话断裂               │
 /// │ goal             │ 长期目标状态，丢失=agent 漂移方向             │
 /// │ TodoWrite        │ 任务列表结构，丢失=agent 工作记忆重置         │
 fn default_excluded_tools() -> Vec<String> {
     vec![
+        "Agent".to_string(),
         "AskUserQuestion".to_string(),
         "goal".to_string(),
         "TodoWrite".to_string(),

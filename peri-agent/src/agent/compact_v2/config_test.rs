@@ -17,8 +17,8 @@ fn test_default_values() {
     assert!(config.has_valid_micro_field_limits());
     assert_eq!(
         config.micro_excluded_tools.len(),
-        3,
-        "黑名单默认 3 个工具（AskUserQuestion/goal/TodoWrite）"
+        4,
+        "黑名单默认 4 个工具（Agent/AskUserQuestion/goal/TodoWrite）"
     );
     assert_eq!(config.summary_max_tokens, 16000);
     assert_eq!(config.re_inject_max_files, 5);
@@ -105,7 +105,11 @@ fn test_excluded_tools_default_non_empty() {
     let config = CompactConfig::default();
     assert!(
         !config.micro_excluded_tools.is_empty(),
-        "黑名单默认应包含 AskUserQuestion/goal/TodoWrite"
+        "黑名单默认应包含 Agent/AskUserQuestion/goal/TodoWrite"
+    );
+    assert!(
+        config.micro_excluded_tools.contains(&"Agent".to_string()),
+        "默认应包含 Agent"
     );
     assert!(
         config

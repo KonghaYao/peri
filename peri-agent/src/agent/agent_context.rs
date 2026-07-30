@@ -43,6 +43,9 @@ pub struct AgentContext<'a> {
     /// 从 transcript.visible_messages() 克隆的消息缓存
     messages_cache: Vec<BaseMessage>,
 
+    /// 标记 messages_mut() 是否被调用（用于 runner reconcile）
+    messages_modified: bool,
+
     /// 内部 recall 缓冲区，每个 hook 执行后 drain 到 ctx.recall_buffer
     recall_buffer: Vec<String>,
 
@@ -75,10 +78,34 @@ impl<'a> AgentContext<'a> {
         Self {
             ctx,
             messages_cache,
+            messages_modified: false,
             recall_buffer: Vec::new(),
             token_tracker: ctx.compact.token_tracker.read().clone(),
             ancestor_len: 0,
             session_context,
+        }
+    }
+
+    /// 获取消息缓存快照（供 runner reconcile 到 transcript 使用）
+    pub fn messages_cache(&self) -> &[BaseMessage] {
+        &self.messages_cache
+    }
+
+    /// messages_mut() 是否被调用过（供 runner 决定是否需要 reconcile）
+    pub fn messages_modified(&self) -> bool {
+        self.messages_modified
+    }
+
+    /// 将缓存变更同步回 transcript（调用 replace_by_id 逐条更新）
+    pub fn reconcile_to_transcript(
+        &self,
+        transcript: &mut crate::session::transcript::MessageTranscript,
+    ) {
+        if !self.messages_modified {
+            return;
+        }
+        for msg in &self.messages_cache {
+            transcript.replace_by_id(msg.clone());
         }
     }
 }
@@ -114,9 +141,9 @@ impl MiddlewareState for AgentContext<'_> {
     }
 
     /// 发出 warn 日志，返回 cache 可变引用（不触及 transcript）。
-    /// 此 API 在生产环境零调用。
+    /// 调用方负责在 hook 执行后通过 runner 将变更 reconcile 到 transcript。
     fn messages_mut(&mut self) -> &mut Vec<BaseMessage> {
-        tracing::warn!("AgentContext::messages_mut called — changes NOT reflected in transcript");
+        self.messages_modified = true;
         &mut self.messages_cache
     }
 
