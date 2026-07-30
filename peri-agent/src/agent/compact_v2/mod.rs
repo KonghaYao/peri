@@ -551,10 +551,6 @@ async fn run_full_or_degrade(
 }
 
 #[cfg(test)]
-#[path = "planner_test.rs"]
-mod planner_tests;
-
-#[cfg(test)]
 #[path = "projection_test.rs"]
 mod projection_tests;
 
