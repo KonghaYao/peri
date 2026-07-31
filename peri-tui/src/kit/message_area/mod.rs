@@ -316,20 +316,24 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         )),
     );
 
-    // ── 总视觉行数 = core + footer ──
-    // [Why] 分片缓存命中后 core_total_visual_rows 已是 sum(slot.visual_rows)，无需 line_count。
-    // footer 通常几行，单独 build_wrap_map 成本可忽略。
+    // ── 总视觉行数 = core only；footer 作为固定区域不参与滚动 ──
+    // [Why] footer（spinner/todo/summary）应作为固定子区域渲染在 ScrollView 之外，
+    // 不计入可滚动内容高度，避免 spinner 吃掉消息区域可视行数。
+    // 分片缓存命中后 core_total_visual_rows 已是 sum(slot.visual_rows)，无需 line_count。
     let footer_visual_rows: usize = if !empty && !footer_lines.is_empty() {
         let (_, footer_map) = build_wrap_map(&footer_lines, vis_width);
         footer_map.last().map(|e| e.visual_end).unwrap_or(0)
     } else {
         0
     };
-    let total_visual_rows: u16 = if core_total_visual_rows == 0 && footer_visual_rows == 0 {
-        if is_loading { 1 } else { 0 }
+    let total_visual_rows: u16 = if core_total_visual_rows == 0 && !is_loading {
+        0
     } else {
-        (core_total_visual_rows + footer_visual_rows).min(u16::MAX as usize) as u16
+        core_total_visual_rows.min(u16::MAX as usize) as u16
     };
+
+    // 有效可滚动视口高度：full area height 减去固定 footer 区域
+    let vp_height: u16 = vis_height.saturating_sub(footer_visual_rows as u16).max(1);
 
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
@@ -373,7 +377,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             move || {
                 scroll::run_auto_follow(&scroll::AutoFollowCtx {
                     total_visual_rows,
-                    vis_height,
+                    vis_height: vp_height,
                     scroll_state,
                     prev_items_len,
                     last_scrolled_at,
@@ -436,7 +440,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .unwrap_or(false);
 
     // clamp scroll_y 不超过 max_scroll（替代 ScrollView 渲染时的 clamp）
-    let max_scroll = (total_visual_rows as usize).saturating_sub(vis_height as usize);
+    let max_scroll = (total_visual_rows as usize).saturating_sub(vp_height as usize);
     let scroll_y_raw = scroll_state.read().offset().y as usize;
     let scroll_y = scroll_y_raw.min(max_scroll);
 
@@ -467,10 +471,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         g.position = (scroll_y * (total_visual_rows as usize - 1))
             .checked_div(max_scroll)
             .unwrap_or(0);
-        g.viewport_length = vis_height as usize;
+        g.viewport_length = vp_height as usize;
     }
-
-    let vp_height = vis_height as usize;
 
     // core_total_visual_rows 在前面拼接 wrap_map 时算出，直接复用。
 
@@ -506,23 +508,17 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 视口对应的 core 逻辑行范围 + 首行视觉偏移
     let (vp_core_start, vp_core_end, vp_first_offset): (usize, usize, u16) =
         if scroll_y < core_total_visual_rows && total_logical_lines > 0 {
-            viewport_logical_range(&concat_wrap_map_arc, scroll_y, vp_height).unwrap_or((0, 0, 0))
+            viewport_logical_range(&concat_wrap_map_arc, scroll_y, vp_height as usize)
+                .unwrap_or((0, 0, 0))
         } else {
-            // 视口完全在 footer 内（footer 占据末尾几行）
             (0, 0, 0)
         };
 
-    // 视口是否包含 footer（视口末尾超出 core 总视觉行数）
-    let viewport_has_footer =
-        !empty && !footer_lines.is_empty() && scroll_y + vp_height > core_total_visual_rows;
-
-    // 构建 viewport_lines：clone + highlight 视口内的 core 行，必要时附加 footer
+    // 构建 viewport_lines：clone + highlight 视口内的 core 行。footer 不再附加（作为固定元素单独渲染）
     let sel_bg = THEME_ATOM.state().read().semantic.surface.selection;
     let core_len = total_logical_lines;
     let mut viewport_lines: Vec<Line<'static>> = Vec::with_capacity(
-        (vp_core_end.saturating_sub(vp_core_start) + 1)
-            .min(vp_height + 2)
-            .saturating_add(footer_lines.len()),
+        (vp_core_end.saturating_sub(vp_core_start) + 1).min(vp_height as usize + 2),
     );
 
     if scroll_y < core_total_visual_rows && vp_core_start <= vp_core_end && core_len > 0 {
@@ -549,9 +545,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     }
 
-    if viewport_has_footer {
-        viewport_lines.extend(footer_lines.iter().cloned());
-    }
     // [PERI_RENDER_TIMING] 视口裁剪耗时
     let t_viewport = Instant::now();
     trace_phase(
@@ -561,12 +554,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     );
 
     // Paragraph::scroll 偏移：core 内的偏移 = vp_first_offset
-    // 视口完全在 footer 内时（scroll_y >= core_total_visual_rows），按 footer 内偏移
-    let scroll_offset_y: u16 = if scroll_y >= core_total_visual_rows && core_total_visual_rows > 0 {
-        (scroll_y - core_total_visual_rows) as u16
-    } else {
-        vp_first_offset
-    };
+    let scroll_offset_y: u16 = vp_first_offset;
 
     // [Why] View 必须保持 `Fill(1)`——ScrollbarHook 在 MessageArea 的 drawer.area
     // 最右 1 列渲染滚动条 thumb。若 View 改为 `Max(vis_width)`，View 自身 area 缩到
@@ -584,19 +572,46 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         frame_t0.unwrap_or(t_viewport),
         Some(&format!("gen={vm_generation}")),
     );
-    element!(
-        View(
-            flex_direction: Direction::Vertical,
-            width: Constraint::Fill(1),
-            height: Constraint::Fill(1),
-        ) {
-            Text(text: Paragraph::new(RatText::from(viewport_lines))
-                .wrap(Wrap { trim: false })
-                .block(Block::default().padding(Padding::new(0, 1, 0, 0)))
-                .scroll((scroll_offset_y, 0)))
-        }
-    )
-    .into_any()
+    // [Fix] Footer（spinner/todo/summary）作为固定子区域渲染在 ScrollView 之外，
+    // 不参与滚动，始终可见。当不存在 footer 时退化为原来的单一 View + Text 结构。
+    if footer_visual_rows > 0 {
+        let footer_rows_u16 = footer_visual_rows
+            .min((vis_height.saturating_sub(1)) as usize)
+            .max(1) as u16;
+        element!(
+            View(
+                flex_direction: Direction::Vertical,
+                width: Constraint::Fill(1),
+                height: Constraint::Fill(1),
+            ) {
+                View(height: Constraint::Fill(1)) {
+                    Text(text: Paragraph::new(RatText::from(viewport_lines))
+                        .wrap(Wrap { trim: false })
+                        .block(Block::default().padding(Padding::new(0, 1, 0, 0)))
+                        .scroll((scroll_offset_y, 0)))
+                }
+                View(height: Constraint::Length(footer_rows_u16)) {
+                    Text(text: Paragraph::new(RatText::from(footer_lines))
+                        .block(Block::default().padding(Padding::new(0, 1, 0, 0))))
+                }
+            }
+        )
+        .into_any()
+    } else {
+        element!(
+            View(
+                flex_direction: Direction::Vertical,
+                width: Constraint::Fill(1),
+                height: Constraint::Fill(1),
+            ) {
+                Text(text: Paragraph::new(RatText::from(viewport_lines))
+                    .wrap(Wrap { trim: false })
+                    .block(Block::default().padding(Padding::new(0, 1, 0, 0)))
+                    .scroll((scroll_offset_y, 0)))
+            }
+        )
+        .into_any()
+    }
 }
 
 #[cfg(test)]
