@@ -8,51 +8,21 @@
  *   bun .claude/skills/langfuse/scripts/analyze.ts --tools [数量]   # 工具调用专项分析
  *   bun .claude/skills/langfuse/scripts/analyze.ts --growth [数量]  # 上下文涨幅分析
  *   bun .claude/skills/langfuse/scripts/analyze.ts --report [数量]  # 完整分析报告(全部维度)
+ *
+ * 过滤（适用于除 --trace-id 以外的模式）:
+ *   --from <ISO> --to <ISO> --days <N>
+ *   --tag <tag> --user <id> --session <id> --name <str>
  */
 
-const BASE_URL = (process.env.LANGFUSE_HOST || process.env.LANGFUSE_BASE_URL || "").replace(/\/$/, "");
-const PUBLIC_KEY = process.env.LANGFUSE_PUBLIC_KEY || "";
-const SECRET_KEY = process.env.LANGFUSE_SECRET_KEY || "";
+import {
+  api, fetchObservations, fetchTracesFiltered,
+  parseFilterArgs, parseTimeWindow,
+  summarizeTokens, genTokens, estimateCost, fmtCost,
+  detectAnomalies, fmt, pct, ms, isoToLocal, bar,
+} from "./lib.ts";
 
-if (!BASE_URL || !PUBLIC_KEY || !SECRET_KEY) {
-  console.error("Missing LANGFUSE_HOST/PUBLIC_KEY/SECRET_KEY env vars");
-  process.exit(1);
-}
-
-const authHeader = `Basic ${btoa(`${PUBLIC_KEY}:${SECRET_KEY}`)}`;
-
-async function api(path: string) {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { Authorization: authHeader, "Content-Type": "application/json" },
-  });
-  if (!res.ok) throw new Error(`API ${path}: ${res.status} ${await res.text()}`);
-  return res.json();
-}
-
-// ════════════════��══════════════════════════════════════════════
-// Data fetching
-// ═══════════════════════════════════════════════════════════════
-
-async function fetchTraces(limit: number) {
-  const data = await api(`/api/public/traces?limit=${limit}`);
-  return (data.data || []) as any[];
-}
-
-async function fetchObservations(traceId: string) {
-  const all: any[] = [];
-  let page = 1;
-  while (true) {
-    const data = await api(
-      `/api/public/observations?traceId=${traceId}&limit=100&page=${page}`
-    );
-    const items = data.data || [];
-    all.push(...items);
-    const meta = data.meta || {};
-    if (page >= (meta.totalPages || 1)) break;
-    page++;
-  }
-  return all;
-}
+// Backward-compat aliases for existing section code
+const FMT = fmt, PCT = pct, BAR = bar;
 
 async function fetchAllObservations(traces: any[]) {
   const map = new Map<string, any[]>();
@@ -108,15 +78,6 @@ interface TraceAnalysis {
 
 // ═══════════════════════════════════════════════════════════════
 // Helpers
-// ═══════════════════════════════════════════════════════════════
-
-const FMT = (n: number) => n.toLocaleString();
-const PCT = (n: number, d: number) => (d > 0 ? ((n / d) * 100).toFixed(1) : "0.0");
-const BAR = (pct: number, width = 20) => {
-  const filled = Math.round((pct / 100) * width);
-  return "\u2588".repeat(filled) + "\u2591".repeat(width - filled);
-};
-
 // ═══════════════════════════════════════════════════════════════
 // Analysis functions
 // ═══════════════════════════════════════════════════════════════
@@ -475,7 +436,7 @@ function sectionSummary(traces: TraceAnalysis[]) {
 
 type Mode = "overview" | "tools" | "growth" | "report";
 
-async function run(mode: Mode, limit: number, singleTraceId?: string) {
+async function run(mode: Mode, limit: number, singleTraceId?: string, filters?: ReturnType<typeof parseFilterArgs>) {
   let traces: TraceAnalysis[];
 
   if (singleTraceId) {
@@ -485,8 +446,20 @@ async function run(mode: Mode, limit: number, singleTraceId?: string) {
     ]);
     traces = [analyzeTrace(trace, obs)];
   } else {
-    console.log(`Fetching latest ${limit} traces...\n`);
-    const raw = await fetchTraces(limit);
+    const { traces: raw } = await fetchTracesFiltered({
+      limit,
+      fromTimestamp: filters?.time.from,
+      toTimestamp: filters?.time.to,
+      tags: filters?.tag ? [filters.tag] : undefined,
+      userId: filters?.userId,
+      sessionId: filters?.sessionId,
+      name: filters?.name,
+    });
+    if (raw.length === 0) {
+      console.log("No traces found.");
+      process.exit(0);
+    }
+    console.log(`Analyzing ${raw.length} traces...\n`);
     const obsMap = await fetchAllObservations(raw);
     traces = raw.map((t: any) => analyzeTrace(t, obsMap.get(t.id) || []));
   }
@@ -533,11 +506,18 @@ async function main() {
       case "--tools": mode = "tools"; break;
       case "--growth": mode = "growth"; break;
       case "--report": mode = "report"; break;
-      default: limit = parseInt(args[i]) || 10;
+      default: {
+        const n = parseInt(args[i]);
+        if (!isNaN(n) && n > 0) limit = n;
+      }
     }
   }
 
-  await run(mode, limit, singleTraceId || undefined);
+  const filters = singleTraceId ? undefined : parseFilterArgs(args);
+  if (filters?.time.from) {
+    console.error(`Time range: ${filters.time.from} → ${filters.time.to || "now"}`);
+  }
+  await run(mode, limit, singleTraceId || undefined, filters);
 }
 
 main().catch((e) => {
