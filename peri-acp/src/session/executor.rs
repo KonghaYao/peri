@@ -422,7 +422,15 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         cached_llm
             .as_ref()
             .map(|c| c.auxiliary_model.clone())
-            .or_else(|| Some(ctx.provider.clone().into_model().into()))
+            .or_else(|| {
+                // 转发器从 session 级 AgentPool 取：fresh 模型烘焙的 observer 会随
+                // CachedLlmInstances 跨 turn 复用，必须指向 session 级转发器。
+                let provider = ctx
+                    .provider
+                    .clone()
+                    .with_retry_observer(Some(ctx.pool.lock().retry_events.as_retry_observer()));
+                Some(provider.into_model().into())
+            })
     };
 
     // Context window (前置计算，供 bg event pump 和 compact 使用)
@@ -653,6 +661,11 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         exec_outcome,
     })
     .await;
+
+    // turn 收尾：转发器是 session 级（挂 AgentPool），turn 间不清理、不重建，
+    // 靠下一 turn `build_agent` 覆盖式 `set` 当前 handler。残留 handler 指向
+    // 已 close 的 event_tx 时，`FnEventHandler` 消费端检查 `tx.lock().as_ref()`
+    // 为空则无害丢弃（已核实 executor 与 builder 两侧的 handler 消费路径）。
 
     result
 }

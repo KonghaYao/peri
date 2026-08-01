@@ -6,6 +6,8 @@
 pub mod config;
 pub mod store;
 
+use std::sync::Arc;
+
 pub use config::{AppConfig, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels};
 use peri_model::{AnthropicConfig, AnthropicModel, OpenAiConfig, OpenAiModel};
 pub use store::{config_path, load, load_from, save, save_to, workspace_config_path};
@@ -22,6 +24,7 @@ pub enum LlmProvider {
         effort: Option<String>,
         max_tokens: u32,
         context_1m: bool,
+        retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
     },
     Anthropic {
         api_key: String,
@@ -30,6 +33,7 @@ pub enum LlmProvider {
         effort: Option<String>,
         max_tokens: u32,
         context_1m: bool,
+        retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
     },
 }
 
@@ -50,6 +54,7 @@ impl LlmProvider {
                     effort: None,
                     max_tokens: 32000,
                     context_1m: false,
+                    retry_observer: None,
                 })
             }
             "openai" | "" => {
@@ -65,6 +70,7 @@ impl LlmProvider {
                             effort: None,
                             max_tokens: 32000,
                             context_1m: false,
+                            retry_observer: None,
                         });
                     }
                 }
@@ -80,6 +86,7 @@ impl LlmProvider {
                     effort: None,
                     max_tokens: 32000,
                     context_1m: false,
+                    retry_observer: None,
                 })
             }
             _ => {
@@ -95,6 +102,7 @@ impl LlmProvider {
                     effort: None,
                     max_tokens: 32000,
                     context_1m: false,
+                    retry_observer: None,
                 })
             }
         }
@@ -133,6 +141,7 @@ impl LlmProvider {
                 effort,
                 max_tokens,
                 context_1m,
+                retry_observer: None,
             }),
             _ => Some(Self::OpenAi {
                 api_key: provider.api_key.clone(),
@@ -145,6 +154,7 @@ impl LlmProvider {
                 effort,
                 max_tokens,
                 context_1m,
+                retry_observer: None,
             }),
         }
     }
@@ -189,6 +199,19 @@ impl LlmProvider {
         clone
     }
 
+    /// 绑定 retry observer；`into_model()` 构造模型时注入 runtime。
+    pub fn with_retry_observer(
+        mut self,
+        observer: Option<Arc<dyn peri_model::RetryObserver>>,
+    ) -> Self {
+        match &mut self {
+            Self::OpenAi { retry_observer, .. } | Self::Anthropic { retry_observer, .. } => {
+                *retry_observer = observer;
+            }
+        }
+        self
+    }
+
     /// 获取模型的上下文窗口大小（不消费 self）。
     ///
     /// 历史实现通过 `into_model().context_window()` 取值，OpenAI 与 Anthropic
@@ -206,6 +229,7 @@ impl LlmProvider {
                 model,
                 effort,
                 max_tokens,
+                retry_observer,
                 ..
             } => {
                 let endpoint =
@@ -216,6 +240,11 @@ impl LlmProvider {
                     config = config.with_thinking_enabled(true);
                 }
                 config = config.with_max_tokens(max_tokens);
+                if let Some(observer) = retry_observer {
+                    config = config.with_runtime(
+                        peri_model::ModelRuntimeConfig::default().with_retry_observer(observer),
+                    );
+                }
                 Box::new(OpenAiModel::new(config))
             }
             Self::Anthropic {
@@ -224,6 +253,7 @@ impl LlmProvider {
                 base_url,
                 effort,
                 max_tokens,
+                retry_observer,
                 ..
             } => {
                 let endpoint = match base_url {
@@ -238,6 +268,11 @@ impl LlmProvider {
                     config = config.with_extended_thinking(max_tokens, e);
                 }
                 config = config.with_max_tokens(max_tokens);
+                if let Some(observer) = retry_observer {
+                    config = config.with_runtime(
+                        peri_model::ModelRuntimeConfig::default().with_retry_observer(observer),
+                    );
+                }
                 Box::new(AnthropicModel::new(config))
             }
         }

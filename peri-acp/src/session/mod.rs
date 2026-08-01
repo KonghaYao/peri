@@ -14,7 +14,10 @@ pub mod command;
 pub mod event_sink;
 pub mod executor;
 pub mod goal_state;
+pub mod retry_events;
 pub mod state_builders;
+
+pub use retry_events::RetryEventForwarder;
 
 use std::{collections::HashMap, sync::Arc};
 

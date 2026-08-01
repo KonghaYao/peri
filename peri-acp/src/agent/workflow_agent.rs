@@ -300,12 +300,24 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 .with_auto_compact_threshold(cc.auto_compact_threshold)
                 .with_warning_threshold(cc.micro_compact_threshold)
         });
+        // 本 run 的 retry observer：重试观测直接翻译为 LlmRetrying 交给本地 handler。
+        let retry_observer =
+            crate::session::retry_events::retry_observer_for(Arc::clone(&event_handler));
+
         let compact_llm: Option<Arc<dyn peri_model::Model>> = if compact_config.is_some() {
-            Some(Arc::from(effective_provider.clone().into_model()))
+            Some(Arc::from(
+                effective_provider
+                    .clone()
+                    .with_retry_observer(Some(retry_observer.clone()))
+                    .into_model(),
+            ))
         } else {
             None
         };
 
+        // 前置条件（未文档化契约）：`ctx.agent_pool` 与主 builder 的 `ctx.pool` 必须是
+        // 同一 `Arc<Mutex<AgentPool>>`——池化模型烘焙的 observer 才会与主链路共享同一
+        // 转发器。当前 4 处入口均传 `agent_pool: None`（死路径），未来接线时须保证同源。
         let base_model: Arc<dyn peri_model::Model> = if let Some(ref pool) = self.ctx.agent_pool {
             let fp = format!(
                 "{}:{}",
@@ -313,10 +325,19 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 effective_provider.model_name()
             );
             AgentPool::get_or_create_subagent_llm(pool, &fp, || {
-                effective_provider.clone().into_model()
+                // 池化分支：烘焙 session 级转发器的 observer（从 AgentPool 取值）。
+                // 池化模型跨 run/跨 turn 存活，不能绑定 per-run 的本地 observer。
+                effective_provider
+                    .clone()
+                    .with_retry_observer(Some(pool.lock().retry_events.as_retry_observer()))
+                    .into_model()
             })
         } else {
-            Arc::from(effective_provider.into_model())
+            Arc::from(
+                effective_provider
+                    .with_retry_observer(Some(retry_observer))
+                    .into_model(),
+            )
         };
 
         // 2. 注册工具

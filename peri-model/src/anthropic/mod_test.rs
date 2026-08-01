@@ -15,8 +15,8 @@ use url::Url;
 use crate::{
     transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport},
     ContentBlock, JsonObject, Model, ModelError, ModelMessage, ModelRequest, ModelResult,
-    ModelRuntimeConfig, ModelStreamEvent, RetryConfig, StopReason, ToolCall, ToolDefinition,
-    ToolResult, TransportErrorKind,
+    ModelRuntimeConfig, ModelStreamEvent, RetryConfig, RetryableErrorClasses, StopReason, ToolCall,
+    ToolDefinition, ToolResult, TransportErrorKind,
 };
 
 use super::{request::body_for_test, AnthropicConfig, AnthropicModel};
@@ -107,6 +107,27 @@ fn config_with_retry(max_attempts: u32) -> AnthropicConfig {
                 .with_max_attempts(max_attempts)
                 .with_base_delay(Duration::ZERO)
                 .with_jitter(false),
+        ),
+    )
+}
+
+/// 关闭 Protocol 分类重试的配置，用于 fail-closed 分类断言（保留原始协议错误而非
+/// `RetryExhausted(Protocol)`）。
+fn config_without_protocol_retry() -> AnthropicConfig {
+    AnthropicConfig::new(
+        Url::parse("https://proxy.example.test/custom/").expect("valid endpoint"),
+        "test-credential",
+        "claude-test",
+    )
+    .with_runtime(
+        ModelRuntimeConfig::default().with_retry(
+            RetryConfig::default()
+                .with_max_attempts(1)
+                .with_base_delay(Duration::ZERO)
+                .with_jitter(false)
+                .with_retryable_error_classes(
+                    RetryableErrorClasses::default().with_protocol(false),
+                ),
         ),
     )
 }
@@ -455,7 +476,7 @@ async fn anthropic_requires_message_start_and_message_delta_payloads() {
             request_id: None,
             body: FakeBody::Chunks(vec![Ok(sequence.as_bytes().to_vec())]),
         }));
-        let events = AnthropicModel::with_transport(config(), transport)
+        let events = AnthropicModel::with_transport(config_without_protocol_retry(), transport)
             .stream(
                 ModelRequest::new(vec![ModelMessage::user_text("go")]),
                 CancellationToken::new(),
@@ -489,7 +510,7 @@ async fn anthropic_message_stop_requires_message_delta() {
         .as_bytes()
         .to_vec())]),
     }));
-    let events = AnthropicModel::with_transport(config(), transport)
+    let events = AnthropicModel::with_transport(config_without_protocol_retry(), transport)
         .stream(
             ModelRequest::new(vec![ModelMessage::user_text("go")]),
             CancellationToken::new(),
@@ -521,7 +542,7 @@ async fn anthropic_rejects_non_string_payload_type() {
                 .to_vec(),
         )]),
     }));
-    let events = AnthropicModel::with_transport(config(), transport)
+    let events = AnthropicModel::with_transport(config_without_protocol_retry(), transport)
         .stream(
             ModelRequest::new(vec![ModelMessage::user_text("go")]),
             CancellationToken::new(),
@@ -559,7 +580,7 @@ async fn anthropic_completed_phase_rejects_repeated_or_conflicting_events() {
             request_id: None,
             body: FakeBody::Chunks(vec![Ok(sequence.as_bytes().to_vec())]),
         }));
-        let events = AnthropicModel::with_transport(config(), transport)
+        let events = AnthropicModel::with_transport(config_without_protocol_retry(), transport)
             .stream(
                 ModelRequest::new(vec![ModelMessage::user_text("go")]),
                 CancellationToken::new(),
@@ -645,6 +666,39 @@ async fn message_start_then_transport_failure_retries_with_fresh_anthropic_decod
     assert_eq!(transport.calls(), 2);
 }
 
+#[tokio::test]
+async fn malformed_stream_retries_then_exhausts_with_protocol_kind() {
+    let malformed = concat!(
+        "event: message_start\ndata: {\"message\":{\"id\":\"body-id\"}}\n\n",
+        "event: message_stop\ndata: {}\n\n"
+    );
+    let transport = Arc::new(FakeTransport::with_responses(vec![
+        FakeResponse {
+            status: 200,
+            request_id: None,
+            body: FakeBody::Chunks(vec![Ok(malformed.as_bytes().to_vec())]),
+        },
+        FakeResponse {
+            status: 200,
+            request_id: None,
+            body: FakeBody::Chunks(vec![Ok(malformed.as_bytes().to_vec())]),
+        },
+    ]));
+    let events = AnthropicModel::with_transport(config_with_retry(2), transport.clone())
+        .stream(
+            ModelRequest::new(vec![ModelMessage::user_text("go")]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("stream")
+        .collect::<Vec<_>>()
+        .await;
+    assert!(
+        matches!(events.last(), Some(Err(error)) if error.retry_error_kind() == Some(crate::RetryErrorKind::Protocol))
+    );
+    assert_eq!(transport.calls(), 2);
+}
+
 /// [回归测试] Anthropic 事件必须从唯一的 message_start 开始，block index 必须连续递增。
 ///
 /// 历史背景：早期 decoder 仅校验 active block 的局部 index，允许没有 message_start 的
@@ -673,7 +727,7 @@ async fn anthropic_lifecycle_requires_message_start_and_contiguous_block_indexes
             request_id: None,
             body: FakeBody::Chunks(vec![Ok(sequence.as_bytes().to_vec())]),
         }));
-        let events = AnthropicModel::with_transport(config(), transport)
+        let events = AnthropicModel::with_transport(config_without_protocol_retry(), transport)
             .stream(
                 ModelRequest::new(vec![ModelMessage::user_text("go")]),
                 CancellationToken::new(),
@@ -705,7 +759,7 @@ async fn anthropic_total_input_usage_overflow_is_provider_error_without_complete
         .as_bytes()
         .to_vec())]),
     }));
-    let events = AnthropicModel::with_transport(config(), transport)
+    let events = AnthropicModel::with_transport(config_without_protocol_retry(), transport)
         .stream(
             ModelRequest::new(vec![ModelMessage::user_text("go")]),
             CancellationToken::new(),
@@ -749,7 +803,7 @@ async fn malformed_content_block_sequences_are_provider_errors_without_completed
             request_id: None,
             body: FakeBody::Chunks(vec![Ok(sequence.as_bytes().to_vec())]),
         }));
-        let model = AnthropicModel::with_transport(config(), transport);
+        let model = AnthropicModel::with_transport(config_without_protocol_retry(), transport);
         let events = model
             .stream(
                 ModelRequest::new(vec![ModelMessage::user_text("go")]),
@@ -790,7 +844,7 @@ async fn out_of_range_anthropic_usage_is_a_provider_error_without_completed() {
             request_id: None,
             body: FakeBody::Chunks(vec![Ok(events_data.into_bytes())]),
         }));
-        let model = AnthropicModel::with_transport(config(), transport);
+        let model = AnthropicModel::with_transport(config_without_protocol_retry(), transport);
         let events = model
             .stream(
                 ModelRequest::new(vec![ModelMessage::user_text("go")]),
