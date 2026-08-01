@@ -230,11 +230,17 @@ async fn fake_http_sse_chain_retries_before_decoded_delta() {
 }
 
 #[tokio::test]
-async fn fake_http_sse_chain_reports_invalid_utf8_as_provider_protocol_error() {
-    let transport = Arc::new(FakeTransport::new(vec![Response::Ready {
-        status: 200,
-        chunks: vec![Ok(b"data: \xff\n\n".to_vec())],
-    }]));
+async fn fake_http_sse_chain_retries_invalid_utf8_before_decoded_delta() {
+    let transport = Arc::new(FakeTransport::new(vec![
+        Response::Ready {
+            status: 200,
+            chunks: vec![Ok(b"data: \xff\n\n".to_vec())],
+        },
+        Response::Ready {
+            status: 200,
+            chunks: vec![Ok(b"data: hello\n\n".to_vec())],
+        },
+    ]));
     let mut stream = Box::pin(stream_for(
         transport.clone(),
         CancellationToken::new(),
@@ -243,12 +249,9 @@ async fn fake_http_sse_chain_reports_invalid_utf8_as_provider_protocol_error() {
 
     assert!(matches!(
         stream.next().await,
-        Some(Err(error))
-            if error.protocol_error().map(|error| error.kind())
-                == Some(crate::ProtocolErrorKind::Provider)
+        Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "hello"
     ));
-    assert!(stream.next().await.is_none());
-    assert_eq!(transport.calls(), 1);
+    assert_eq!(transport.calls(), 2);
 }
 
 #[tokio::test]

@@ -13,6 +13,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::provider::LlmProvider;
+use crate::session::retry_events::RetryEventForwarder;
 
 /// Session-scoped cached LLM instances.
 ///
@@ -43,6 +44,12 @@ pub struct AgentPool {
     /// Each entry holds an `Arc<dyn Model>` with a shared `reqwest::Client`.
     /// Avoids creating a new HTTP client per SubAgent invocation.
     pub(crate) subagent_llm_cache: HashMap<String, Arc<dyn peri_model::Model>>,
+    /// Session 级 retry 事件转发器（值字段，非 Arc）。
+    ///
+    /// 池化模型（subagent_llm_cache / cached_llm）跨 turn 存活时烘焙本转发器
+    /// 的 observer；每 turn `build_agent` 覆盖式 `set` 当前 handler。
+    /// `invalidate()` 不重置——转发器与 provider 缓存无关，跨 turn 观测状态应保留。
+    pub(crate) retry_events: RetryEventForwarder,
 }
 
 impl Default for AgentPool {
@@ -57,6 +64,7 @@ impl AgentPool {
             cached_llm: None,
             fingerprint: String::new(),
             subagent_llm_cache: HashMap::new(),
+            retry_events: RetryEventForwarder::new(),
         }
     }
 

@@ -7,6 +7,7 @@ fn make_openai_provider(model: &str) -> LlmProvider {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        retry_observer: None,
     }
 }
 
@@ -18,6 +19,7 @@ fn make_anthropic_provider(model: &str) -> LlmProvider {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        retry_observer: None,
     }
 }
 
@@ -154,6 +156,7 @@ fn test_fingerprint_includes_effort() {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        retry_observer: None,
     };
     let provider_low = LlmProvider::Anthropic {
         api_key: "k".into(),
@@ -162,6 +165,7 @@ fn test_fingerprint_includes_effort() {
         effort: Some("low".to_string()),
         max_tokens: 32000,
         context_1m: false,
+        retry_observer: None,
     };
     let provider_high = LlmProvider::Anthropic {
         api_key: "k".into(),
@@ -170,6 +174,7 @@ fn test_fingerprint_includes_effort() {
         effort: Some("high".to_string()),
         max_tokens: 32000,
         context_1m: false,
+        retry_observer: None,
     };
 
     let fp_none = fingerprint(&provider_no_effort);
@@ -200,6 +205,7 @@ fn test_fingerprint_same_effort_stable() {
         effort: Some("medium".to_string()),
         max_tokens: 32000,
         context_1m: false,
+        retry_observer: None,
     };
     let b = LlmProvider::Anthropic {
         api_key: "k2".into(), // 不同 api_key，fingerprint 应相同
@@ -208,6 +214,7 @@ fn test_fingerprint_same_effort_stable() {
         effort: Some("medium".to_string()),
         max_tokens: 32000,
         context_1m: false,
+        retry_observer: None,
     };
     assert_eq!(fingerprint(&a), fingerprint(&b));
 }
@@ -222,6 +229,7 @@ fn test_fingerprint_no_effort_distinct() {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        retry_observer: None,
     };
     let low = LlmProvider::Anthropic {
         api_key: "k".into(),
@@ -230,8 +238,75 @@ fn test_fingerprint_no_effort_distinct() {
         effort: Some("low".to_string()),
         max_tokens: 32000,
         context_1m: false,
+        retry_observer: None,
     };
     assert_ne!(fingerprint(&none), fingerprint(&low));
+}
+
+/// 跨 turn 新鲜度回归测试：转发器挂 AgentPool（session 级），
+/// 池化模型烘焙的 observer 在 turn 2 仍能把事件送达 turn 2 的 handler。
+///
+/// turn 1 `set(handler1)` → 烘焙的 observer 收到事件；
+/// turn 2 复用同一 pool（转发器不重建）`set(handler2)` →
+/// 同一 observer（模拟缓存命中的池化模型）收到 turn 2 事件。
+#[test]
+fn test_retry_events_forwarder_survives_across_turns() {
+    use peri_agent::agent::events::{AgentEventHandler, ExecutorEvent, FnEventHandler};
+    use std::sync::Mutex;
+
+    fn capturing_handler(captured: &Arc<Mutex<Vec<String>>>) -> Arc<dyn AgentEventHandler> {
+        let captured = Arc::clone(captured);
+        Arc::new(FnEventHandler(move |event: ExecutorEvent| {
+            if let ExecutorEvent::LlmRetrying { error, .. } = event {
+                captured.lock().unwrap().push(error);
+            }
+        }))
+    }
+
+    let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
+
+    // 模拟池化模型 create 时烘焙的 observer（缓存命中后跨 turn 复用同一 observer）。
+    let observer = pool.lock().retry_events.as_retry_observer();
+
+    // ── turn 1 ──
+    let captured1: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    pool.lock()
+        .retry_events
+        .set(Some(capturing_handler(&captured1)));
+    observer.on_retry(peri_model::RetryObservation::new(
+        1,
+        3,
+        std::time::Duration::from_millis(500),
+        peri_model::RetryErrorKind::Transport,
+    ));
+    assert_eq!(
+        *captured1.lock().unwrap(),
+        vec!["transport".to_string()],
+        "turn 1: observer 应把事件送达 handler1"
+    );
+
+    // ── turn 2：同一 pool，覆盖式 set handler2（转发器不重建）──
+    let captured2: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    pool.lock()
+        .retry_events
+        .set(Some(capturing_handler(&captured2)));
+    observer.on_retry(peri_model::RetryObservation::new(
+        2,
+        3,
+        std::time::Duration::from_millis(1000),
+        peri_model::RetryErrorKind::Protocol,
+    ));
+    assert_eq!(
+        *captured2.lock().unwrap(),
+        vec!["protocol".to_string()],
+        "turn 2: 同一 observer 应读到 handler2 并送达事件（跨 turn 新鲜度）"
+    );
+    // handler1 已被覆盖式替换，不应再收到 turn 2 事件（仍只有 turn 1 的事件）。
+    assert_eq!(
+        *captured1.lock().unwrap(),
+        vec!["transport".to_string()],
+        "turn 1 handler 不应收到 turn 2 事件"
+    );
 }
 
 // 简单的 mock Model 用于测试

@@ -12,7 +12,8 @@ use url::Url;
 use crate::{
     transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport},
     ContentBlock, JsonObject, Model, ModelMessage, ModelRequest, ModelResult, ModelRuntimeConfig,
-    ModelStreamEvent, RetryConfig, StopReason, ToolCall, ToolDefinition, ToolResult,
+    ModelStreamEvent, RetryConfig, RetryableErrorClasses, StopReason, ToolCall, ToolDefinition,
+    ToolResult,
 };
 
 use super::{request::body_for_test, OpenAiConfig, OpenAiModel};
@@ -82,6 +83,27 @@ fn config(model: &str) -> OpenAiConfig {
                 .with_max_attempts(1)
                 .with_base_delay(Duration::ZERO)
                 .with_jitter(false),
+        ),
+    )
+}
+
+/// 关闭 Protocol 分类重试的配置，用于 fail-closed 分类断言（保留原始协议错误而非
+/// `RetryExhausted(Protocol)`）。
+fn config_without_protocol_retry(model: &str) -> OpenAiConfig {
+    OpenAiConfig::new(
+        Url::parse("https://proxy.example.test/v1/").expect("valid endpoint"),
+        "test-credential",
+        model,
+    )
+    .with_runtime(
+        ModelRuntimeConfig::default().with_retry(
+            RetryConfig::default()
+                .with_max_attempts(1)
+                .with_base_delay(Duration::ZERO)
+                .with_jitter(false)
+                .with_retryable_error_classes(
+                    RetryableErrorClasses::default().with_protocol(false),
+                ),
         ),
     )
 }
@@ -315,7 +337,8 @@ async fn stream_invalid_utf8_is_provider_protocol_error_without_completed() {
         request_id: None,
         chunks: vec![Ok(b"data: \xff\n\n".to_vec())],
     }));
-    let model = OpenAiModel::with_transport(config("gpt-4o"), transport.clone());
+    let model =
+        OpenAiModel::with_transport(config_without_protocol_retry("gpt-4o"), transport.clone());
     let events = model
         .stream(
             ModelRequest::new(vec![ModelMessage::user_text("go")]),

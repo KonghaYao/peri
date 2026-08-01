@@ -14,6 +14,7 @@ pub struct RetryableErrorClasses {
     request_timeout: bool,
     rate_limited: bool,
     server_error: bool,
+    protocol: bool,
 }
 
 impl Default for RetryableErrorClasses {
@@ -23,6 +24,7 @@ impl Default for RetryableErrorClasses {
             request_timeout: true,
             rate_limited: true,
             server_error: true,
+            protocol: true,
         }
     }
 }
@@ -48,16 +50,36 @@ impl RetryableErrorClasses {
         self
     }
 
+    pub fn with_protocol(mut self, enabled: bool) -> Self {
+        self.protocol = enabled;
+        self
+    }
+
     fn matches(self, error: &ModelError) -> Option<RetryErrorKind> {
         if self.transport && error.transport_kind().is_some() {
             return Some(RetryErrorKind::Transport);
         }
         match error.http_status_code() {
-            Some(408) if self.request_timeout => Some(RetryErrorKind::HttpStatus),
-            Some(429) if self.rate_limited => Some(RetryErrorKind::HttpStatus),
-            Some(500..=599) if self.server_error => Some(RetryErrorKind::HttpStatus),
-            _ => None,
+            Some(408) if self.request_timeout => return Some(RetryErrorKind::HttpStatus),
+            Some(429) if self.rate_limited => return Some(RetryErrorKind::HttpStatus),
+            Some(500..=599) if self.server_error => return Some(RetryErrorKind::HttpStatus),
+            _ => {}
         }
+        if self.protocol {
+            // 瞬态集合；ToolCallMissingId/Name/InvalidArguments、AssistantMessageRequired、
+            // InvalidEndpoint、Other 保持不重试。
+            if let Some(protocol) = error.protocol_error() {
+                if matches!(
+                    protocol.kind(),
+                    crate::ProtocolErrorKind::Provider
+                        | crate::ProtocolErrorKind::InvalidJsonObject
+                        | crate::ProtocolErrorKind::StreamEndedWithoutCompleted
+                ) {
+                    return Some(RetryErrorKind::Protocol);
+                }
+            }
+        }
+        None
     }
 }
 
@@ -142,6 +164,20 @@ pub struct RetryObservation {
 }
 
 impl RetryObservation {
+    pub fn new(
+        attempt: u32,
+        max_attempts: u32,
+        delay: Duration,
+        error_kind: RetryErrorKind,
+    ) -> Self {
+        Self {
+            attempt,
+            max_attempts,
+            delay,
+            error_kind,
+        }
+    }
+
     pub fn attempt(&self) -> u32 {
         self.attempt
     }
@@ -322,15 +358,19 @@ async fn run_retrying_stream(
                     return;
                 }
                 None => {
-                    let _ = send_event(
-                        &sender,
+                    if !retry_or_finish(
+                        &config,
                         &cancellation,
-                        Err(ModelError::protocol(
-                            crate::ProtocolErrorKind::StreamEndedWithoutCompleted,
-                        )),
+                        observer.as_ref(),
+                        &sender,
+                        attempt_number,
+                        ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted),
                     )
-                    .await;
-                    return;
+                    .await
+                    {
+                        return;
+                    }
+                    break;
                 }
             }
         }

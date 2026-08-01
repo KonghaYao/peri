@@ -14,6 +14,7 @@ fn openai_provider(model: &str) -> LlmProvider {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        retry_observer: None,
     }
 }
 
@@ -25,6 +26,7 @@ fn anthropic_provider(model: &str) -> LlmProvider {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        retry_observer: None,
     }
 }
 
@@ -82,6 +84,7 @@ fn into_model_thinking_config_applies_max_tokens() {
         effort: Some("medium".to_string()),
         max_tokens: 16384,
         context_1m: false,
+        retry_observer: None,
     };
     let body = provider_with_think
         .into_model()
@@ -105,6 +108,7 @@ fn into_model_anthropic_extended_thinking_applied() {
         effort: Some("high".to_string()),
         max_tokens: 64000,
         context_1m: false,
+        retry_observer: None,
     };
     let body = provider
         .into_model()
@@ -136,6 +140,7 @@ fn into_model_invalid_base_url_falls_back_without_panic() {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        retry_observer: None,
     };
     let model = provider.into_model();
     let prepared = model

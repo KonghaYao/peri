@@ -180,6 +180,12 @@ pub(crate) fn build_agent(
     let mw_auxiliary_model = auxiliary_model;
     let pool = &ctx.pool;
 
+    // Retry observer 转发器（session 级，挂 AgentPool）：本 turn 的 event_handler
+    // 在构造模型前覆盖式 set，池化模型烘焙转发器引用，发射时读取当前 turn 的
+    // 最新 handler——跨 turn 不陈旧。
+    let retry_events = ctx.pool.lock().retry_events.clone();
+    retry_events.set(Some(Arc::clone(&event_handler)));
+
     // Capture system_prompt before it may be overridden below (for SubAgent fork reuse).
     let system_prompt_for_sub = system_prompt.clone();
 
@@ -201,7 +207,11 @@ pub(crate) fn build_agent(
     // 提前提取模型实例（chain 构建完成后才组装 AgentModelBridge，
     // 以便收集中间件 prompt_contribution 合并到 system prompt）。
     let context_window_raw = ctx.provider.context_window();
-    let base_model: Arc<dyn peri_model::Model> = Arc::from(provider.into_model());
+    let base_model: Arc<dyn peri_model::Model> = Arc::from(
+        provider
+            .with_retry_observer(Some(retry_events.as_retry_observer()))
+            .into_model(),
+    );
 
     // Todo channel
     let (todo_tx, todo_rx) = tokio::sync::mpsc::channel::<Vec<TodoItem>>(8);
@@ -211,7 +221,10 @@ pub(crate) fn build_agent(
         .map(|c| c.auto_classifier_model.clone())
         .unwrap_or_else(|| {
             Arc::new(tokio::sync::Mutex::new(
-                provider_for_factory.clone().into_model(),
+                provider_for_factory
+                    .clone()
+                    .with_retry_observer(Some(retry_events.as_retry_observer()))
+                    .into_model(),
             ))
         });
     let auto_classifier: Option<Arc<dyn AutoClassifier>> = Some(Arc::new(LlmAutoClassifier::new(
@@ -298,8 +311,14 @@ pub(crate) fn build_agent(
                 &pool_for_subagent,
                 &fp,
                 || match &p {
-                    Some(provider) => provider.clone().into_model(),
-                    None => provider_clone.clone().into_model(),
+                    Some(provider) => provider
+                        .clone()
+                        .with_retry_observer(Some(retry_events.as_retry_observer()))
+                        .into_model(),
+                    None => provider_clone
+                        .clone()
+                        .with_retry_observer(Some(retry_events.as_retry_observer()))
+                        .into_model(),
                 },
             );
 

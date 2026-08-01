@@ -350,26 +350,210 @@ async fn usage_after_visible_event_maps_transport_error_to_stream_interrupted() 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-/// [回归测试] Usage 后未收到 Completed 的 EOF 必须保留缺少完成事件的协议语义。
+/// [回归测试] Usage 后未收到 Completed 的 EOF 必须保留缺少完成事件的协议语义，并在
+/// 首可见事件前按 Protocol 分类重试。
 ///
 /// 历史背景：retry 层曾将 Usage 后 EOF 与可见内容后的中断混为一谈，错误报告为
 /// StreamInterrupted，掩盖了 provider 没有发出完成事件的协议错误。
 #[tokio::test]
-async fn usage_then_eof_is_stream_ended_without_completed_without_retry() {
+async fn usage_then_eof_retries_stream_ended_without_completed() {
     let calls = Arc::new(AtomicUsize::new(0));
     let attempt = scripted_attempt(
-        vec![Ok(vec![Ok(ModelStreamEvent::Usage(
-            crate::TokenUsage::new(1, 0),
-        ))])],
+        vec![
+            Ok(vec![Ok(ModelStreamEvent::Usage(crate::TokenUsage::new(
+                1, 0,
+            )))]),
+            Ok(vec![Ok(ModelStreamEvent::Completed(completed()))]),
+        ],
         calls.clone(),
     );
     let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
         .collect::<Vec<_>>()
         .await;
+    assert!(events.iter().all(ModelResult::is_ok));
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, Ok(ModelStreamEvent::Usage(_)))));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Ok(ModelStreamEvent::Completed(_)))));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn retries_protocol_provider_error_before_visible_event() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let attempt = scripted_attempt(
+        vec![
+            Err(ModelError::protocol(crate::ProtocolErrorKind::Provider)),
+            Ok(vec![Ok(ModelStreamEvent::Completed(completed()))]),
+        ],
+        calls.clone(),
+    );
+    let mut stream = Box::pin(retrying_stream(
+        config(),
+        CancellationToken::new(),
+        None,
+        attempt,
+    ));
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::Completed(_)))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn retries_invalid_json_object_error() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let attempt = scripted_attempt(
+        vec![
+            Err(ModelError::protocol(
+                crate::ProtocolErrorKind::InvalidJsonObject,
+            )),
+            Ok(vec![Ok(ModelStreamEvent::Completed(completed()))]),
+        ],
+        calls.clone(),
+    );
+    let mut stream = Box::pin(retrying_stream(
+        config(),
+        CancellationToken::new(),
+        None,
+        attempt,
+    ));
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::Completed(_)))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn retries_stream_ended_without_completed_via_eof() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let attempt = scripted_attempt(
+        vec![
+            Ok(vec![]),
+            Ok(vec![Ok(ModelStreamEvent::Completed(completed()))]),
+        ],
+        calls.clone(),
+    );
+    let mut stream = Box::pin(retrying_stream(
+        config(),
+        CancellationToken::new(),
+        None,
+        attempt,
+    ));
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::Completed(_)))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn does_not_retry_non_transient_protocol_errors() {
+    for kind in [
+        crate::ProtocolErrorKind::ToolCallMissingId,
+        crate::ProtocolErrorKind::ToolCallMissingName,
+        crate::ProtocolErrorKind::ToolCallInvalidArguments,
+        crate::ProtocolErrorKind::AssistantMessageRequired,
+        crate::ProtocolErrorKind::InvalidEndpoint,
+        crate::ProtocolErrorKind::Other,
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let attempt = scripted_attempt(vec![Err(ModelError::protocol(kind))], calls.clone());
+        let mut stream = Box::pin(retrying_stream(
+            config(),
+            CancellationToken::new(),
+            None,
+            attempt,
+        ));
+        assert!(
+            matches!(stream.next().await, Some(Err(error)) if error.protocol_error().map(|protocol| protocol.kind()) == Some(kind))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn configured_retry_class_can_disable_protocol_retries() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let attempt = scripted_attempt(
+        vec![Err(ModelError::protocol(
+            crate::ProtocolErrorKind::Provider,
+        ))],
+        calls.clone(),
+    );
+    let config = config()
+        .with_retryable_error_classes(RetryableErrorClasses::default().with_protocol(false));
+    let mut stream = Box::pin(retrying_stream(
+        config,
+        CancellationToken::new(),
+        None,
+        attempt,
+    ));
     assert!(
-        matches!(events.last(), Some(Err(error)) if error.protocol_error().map(|protocol| protocol.kind()) == Some(crate::ProtocolErrorKind::StreamEndedWithoutCompleted))
+        matches!(stream.next().await, Some(Err(error)) if error.protocol_error().map(|protocol| protocol.kind()) == Some(crate::ProtocolErrorKind::Provider))
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn retry_exhausted_reports_protocol_kind() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let attempt = scripted_attempt(
+        vec![
+            Err(ModelError::protocol(crate::ProtocolErrorKind::Provider)),
+            Err(ModelError::protocol(crate::ProtocolErrorKind::Provider)),
+            Err(ModelError::protocol(crate::ProtocolErrorKind::Provider)),
+        ],
+        calls.clone(),
+    );
+    let mut stream = Box::pin(retrying_stream(
+        config(),
+        CancellationToken::new(),
+        None,
+        attempt,
+    ));
+    assert!(
+        matches!(stream.next().await, Some(Err(error)) if error.retry_error_kind() == Some(crate::RetryErrorKind::Protocol))
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn retry_observation_reports_protocol_kind() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let attempt = scripted_attempt(
+        vec![
+            Err(ModelError::protocol(crate::ProtocolErrorKind::Provider)),
+            Ok(vec![Ok(ModelStreamEvent::Completed(completed()))]),
+        ],
+        calls,
+    );
+    let observer = {
+        let observed = observed.clone();
+        Arc::new(move |observation: RetryObservation| {
+            observed.lock().expect("observation lock").push(observation);
+        })
+    };
+    let mut stream = Box::pin(retrying_stream(
+        config(),
+        CancellationToken::new(),
+        Some(observer),
+        attempt,
+    ));
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::Completed(_)))
+    ));
+    let observed = observed.lock().expect("observation lock");
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].attempt(), 1);
+    assert_eq!(observed[0].max_attempts(), 3);
+    assert_eq!(observed[0].error_kind(), crate::RetryErrorKind::Protocol);
 }
 
 #[tokio::test]
