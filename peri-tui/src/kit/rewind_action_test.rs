@@ -3,6 +3,7 @@
 use super::*;
 use peri_acp::transport::mpsc::{MpscClientTransport, MpscServerTransport, mpsc_transport_pair};
 use serde_json::json;
+use serial_test::serial;
 
 /// 用真实 mpsc transport 对创建 AcpTuiClient（不启动 pump）。
 fn make_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
@@ -141,7 +142,9 @@ fn test_build_execute_params_includes_revert_files() {
 }
 
 /// P1：执行失败后弹窗回到候选视图并展示错误（不再静默）。
+/// serial：操作全局 atom，与 acp_events 的 serial 测试互斥，避免并行踩踏。
 #[test]
+#[serial]
 fn test_on_action_failed_writes_query_error() {
     crate::kit::atoms::init_atoms();
     *REWIND_TARGET_TEXT.state().write() = Some("target".to_string());
