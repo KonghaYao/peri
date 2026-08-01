@@ -131,12 +131,14 @@ pub(super) fn build_footer_lines(
     }
     if is_loading {
         let token_count = crate::kit::atoms::SPINNER_TOKEN_COUNT.get();
+        let summary = crate::kit::atoms::PREDICTION.state().read().summary.clone();
         lines.extend(spinner_state.read().render_to_lines(
             semantic.accent,
             semantic.text.muted,
             true,
             true,
             token_count,
+            summary.as_deref(),
         ));
     } else if has_summary {
         let elapsed =

@@ -99,6 +99,7 @@ impl SpinnerState {
     /// 与 WidgetRef::render_ref 渲染逻辑一致，但不依赖 Buffer——产出纯数据 Line。
     ///
     /// `token_count` 由调用方从外部 atom（如 SPINNER_TOKEN_COUNT）读取后传入。
+    /// `verb_override` 优先于内置 verb/名言显示（prediction 摘要注入点）。
     /// 本方法完全无副作用——frame 索引基于 `start_time.elapsed()` 纯计算，
     /// 不读取也不写入任何动画驱动 state，可在 render body 中安全调用。
     pub fn render_to_lines(
@@ -108,6 +109,7 @@ impl SpinnerState {
         show_elapsed: bool,
         show_tokens: bool,
         token_count: usize,
+        verb_override: Option<&str>,
     ) -> Vec<Line<'static>> {
         // 帧索引纯计算：50ms 一个 raw tick，每 2 raw tick 推进一帧。
         // 保留原 advance_tick 节奏（每帧 ~100ms）。
@@ -121,10 +123,8 @@ impl SpinnerState {
             format!("{} ", frame),
             Style::default().fg(primary),
         ));
-        spans.push(Span::styled(
-            self.verb().to_string(),
-            Style::default().fg(primary),
-        ));
+        let verb = verb_override.unwrap_or_else(|| self.verb());
+        spans.push(Span::styled(verb.to_string(), Style::default().fg(primary)));
 
         let mut suffix_parts = Vec::new();
         if show_elapsed {
