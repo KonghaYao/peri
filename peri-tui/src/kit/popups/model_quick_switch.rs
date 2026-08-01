@@ -31,8 +31,11 @@ use ratatui_kit::{
     },
 };
 
-use crate::kit::atoms::{LANG_VERSION, MODEL_SWITCH_ANCHOR, PERI_CONFIG_HANDLE};
+use crate::kit::atoms::{
+    LANG_VERSION, MODEL_SWITCH_ANCHOR, PERI_CONFIG_HANDLE, POPUP_KIND, PopupKind,
+};
 use crate::kit::list_nav::{ListNavAction, classify_list_nav, next_selection, previous_selection};
+use crate::kit::mouse_router;
 use crate::kit::panels::model::{PROFILE_KEYS, switch_active_alias};
 use crate::kit::popup_overlay::close_popup;
 use peri_theme::atoms::THEME_ATOM;
@@ -200,6 +203,17 @@ pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     // 见 spec/archive-issues/tui-message-area/2026-07-05-mouse-move-cpu-spike）。
     hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
         if let Event::Mouse(mouse) = event {
+            // 被其他前景层遮挡时让路（防御性：遮挡判定集中见 kit/mouse_router.rs）。
+            // 自身不算遮挡——POPUP_KIND 是单值，本弹窗渲染期间恒为自己的 kind，
+            // 直接 is_occluded() 会恒真导致自身鼠标功能失效。
+            if mouse_router::is_occluded()
+                && !matches!(
+                    POPUP_KIND.state().read().as_ref(),
+                    Some(PopupKind::ModelQuickSwitch)
+                )
+            {
+                return EventResult::Ignored;
+            }
             match mouse.kind {
                 MouseEventKind::Moved => {
                     if let Some(idx) = row_index_at(mouse.row, mouse.column, &area) {
