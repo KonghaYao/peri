@@ -523,14 +523,17 @@ fn test_rewind_completed_replaces_committed() {
 
     // H4: REWIND_PREVIEW 应重建为回滚后的消息列表（id/role/preview），
     // 保证连续第二次回滚的目标 id 有效。
+    // P1：重建只含 user 消息、最新在前（与 rewind-candidates 口径一致）
     let preview = crate::kit::atoms::REWIND_PREVIEW.state().read().clone();
     let preview = preview.expect("rewind 后 REWIND_PREVIEW 应被重建");
-    assert_eq!(preview.messages.len(), 2, "preview 应含 2 条候选消息");
+    assert_eq!(
+        preview.messages.len(),
+        1,
+        "preview 只含 user 候选（assistant 被过滤）"
+    );
     assert_eq!(preview.messages[0].id, "msg-1");
     assert_eq!(preview.messages[0].role, "user");
     assert_eq!(preview.messages[0].preview, "rewound user msg");
-    assert_eq!(preview.messages[1].id, "msg-2");
-    assert_eq!(preview.messages[1].role, "assistant");
 }
 
 /// RewindCompleted 后：目标文本回填输入框（INPUT_RESTORE_TEXT）并触发心跳。

@@ -16,8 +16,9 @@ fn test_candidates_extracts_only_user_messages() {
     let messages = result["messages"].as_array().unwrap();
 
     assert_eq!(messages.len(), 2, "只提取 user 消息");
-    assert_eq!(messages[0]["preview"], "第一轮用户问题");
-    assert_eq!(messages[1]["preview"], "第二轮用户问题");
+    // P1：最新在前（弹窗第一条 = 最近一次 user 消息 = 回退一步）
+    assert_eq!(messages[0]["preview"], "第二轮用户问题");
+    assert_eq!(messages[1]["preview"], "第一轮用户问题");
     assert!(
         messages[0]["id"].as_str().unwrap().len() >= 8,
         "携带服务端权威消息 id"
@@ -52,4 +53,19 @@ fn test_candidates_preview_truncated_to_200_chars() {
     let result = rewind_candidates(&history).unwrap();
     let preview = result["messages"][0]["preview"].as_str().unwrap();
     assert_eq!(preview.chars().count(), 200);
+}
+
+/// P1：候选按时间逆序返回——弹窗第一条 = 最近一次 user 消息 = 回退一步。
+#[test]
+fn test_candidates_newest_first() {
+    let history = vec![
+        BaseMessage::human("第一轮问题"),
+        BaseMessage::ai("第一轮回答"),
+        BaseMessage::human("第二轮问题"),
+    ];
+    let result = rewind_candidates(&history).unwrap();
+    let messages = result["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["preview"], "第二轮问题", "最新在前");
+    assert_eq!(messages[1]["preview"], "第一轮问题");
 }

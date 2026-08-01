@@ -131,10 +131,13 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
             // 消息 id 已从服务端 history 删除——不重建会导致连续第二次回滚
             // 时 target 找不到（服务端 emit_rewind_not_found）。从回滚后的
             // 消息 JSON 直接提取 id/role/preview，保证候选列表与消息区一致。
+            // P1：只保留 user 消息且排除系统注入（与 rewind-candidates 口径
+            // 一致），并逆序（最新在前）——弹窗第一条 = 回退一步。
             let preview = RewindPreview {
                 files: vec![],
                 messages: msgs
                     .iter()
+                    .rev()
                     .filter_map(|msg| {
                         let id = msg.get("id").and_then(|v| v.as_str())?.to_string();
                         let role = msg
@@ -143,6 +146,9 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
                             .unwrap_or("")
                             .to_string();
                         let text = super::extract_message_text(msg);
+                        if role != "user" || text.contains("<system-reminder>") {
+                            return None;
+                        }
                         Some(RewindMessage {
                             id,
                             role,

@@ -14,6 +14,7 @@ use crate::transport::types::AcpError;
 pub fn rewind_candidates(session_history: &[BaseMessage]) -> Result<Value, AcpError> {
     let messages: Vec<Value> = session_history
         .iter()
+        .rev() // P1：最新在前——弹窗第一条 = 最近一次 user 消息 = 回退一步
         .filter(|m| matches!(m, BaseMessage::Human { .. }))
         .filter(|m| !m.content().contains("<system-reminder>"))
         .map(|m| {
