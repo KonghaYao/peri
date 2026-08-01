@@ -1099,6 +1099,23 @@ pub(crate) async fn handle_request(
                 None, // frozen_*：RewindCommand 不使用
             )
             .await
+            .map(|resp| {
+                // P1：回写截断后的 history——SessionState.history 是后续
+                // session/rewind-candidates 与 session/rewind-preview 的数据源，
+                // 必须与 RewindCompleted 事件中的结果一致。
+                if let Some(h) = resp.get("history").and_then(|v| v.as_array()) {
+                    let h = h.clone();
+                    if let Ok(msgs) = serde_json::from_value::<
+                        Vec<peri_agent::messages::BaseMessage>,
+                    >(serde_json::Value::Array(h))
+                    {
+                        if let Some(s) = sessions.get_mut(&session_id) {
+                            s.history = msgs;
+                        }
+                    }
+                }
+                resp
+            })
         }
 
         "marketplace/refresh" => {

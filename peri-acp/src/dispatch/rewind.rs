@@ -157,7 +157,13 @@ pub async fn rewind_execute(
         return Err(AcpError::new(-32603, "rewind cancelled"));
     }
 
-    Ok(json!({ "status": "executed" }))
+    let history = result.messages;
+    Ok(json!({
+        "status": "executed",
+        // P1：携带截断后的 history，调用方（TUI 进程内 ACP server）回写
+        // SessionState.history，保证后续候选/预算查询与事件一致。
+        "history": history,
+    }))
 }
 
 #[cfg(test)]
