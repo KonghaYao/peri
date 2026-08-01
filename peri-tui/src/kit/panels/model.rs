@@ -50,7 +50,8 @@ const FIELD_MAX_TOKENS: usize = 3;
 const FIELD_CONTEXT_1M: usize = 4;
 const FIELD_COUNT: usize = 5;
 
-/// 右侧 K/V 值右边缘列——所有行的值右对齐到该列（key 宽度不同也能对齐）
+/// 右侧 K/V 值右边缘目标列——所有行的值右对齐到该列（key 宽度不同也能对齐）。
+/// 宽屏目标值；窄屏时按右列可用宽度收缩（见渲染处 `right_w` 计算）。
 const VALUE_ALIGN_COL: usize = 40;
 
 #[component]
@@ -257,6 +258,16 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         })
         .unwrap_or_else(|| (String::new(), active_alias.clone()));
 
+    // ── 响应式右列宽度：窄屏时 VALUE_ALIGN_COL 收缩，避免值被截断 ──
+    // 首帧 use_previous_size 返回 width=0，退守 80 列（宽屏对齐），下一帧修正。
+    let prev_size = hooks.use_previous_size();
+    let panel_w = if prev_size.width > 0 {
+        prev_size.width as usize
+    } else {
+        80
+    };
+    let align = right_align_col(panel_w);
+
     let rows: Vec<(&str, String)> = vec![
         ("Provider", provider_label),
         ("Model", model_label),
@@ -273,8 +284,8 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let key_span = format!(" {} {} ", mark, k);
         let key_len = UnicodeWidthStr::width(key_span.as_str());
         let value_len = UnicodeWidthStr::width(v.as_str());
-        // key 宽度 + 填充 + 值宽度 = VALUE_ALIGN_COL，值右边缘对齐到同一列
-        let pad = VALUE_ALIGN_COL.saturating_sub(key_len + value_len);
+        // key 宽度 + 填充 + 值宽度 = align，值右边缘对齐到同一列
+        let pad = align.saturating_sub(key_len + value_len);
         right_lines.push(Line::from(vec![
             Span::styled(
                 key_span,
@@ -622,5 +633,54 @@ fn notify_save_result(result: Result<(), anyhow::Error>) {
                 until: Instant::now() + Duration::from_secs(2),
             });
         }
+    }
+}
+
+/// 右侧 K/V 行对齐列：宽屏保持 VALUE_ALIGN_COL 右对齐；窄屏收缩到右列可容纳的最大宽度。
+///
+/// 布局为 `Percentage(45) | Length(1) | Fill(1)`，右列宽 = 面板宽 - 45% - 1。
+/// 行总宽 = key_span + pad + value = align，故 align 上限为右列宽 - 4（mark + 两侧空格余量），
+/// 保证窄屏下行宽不超过右列可视区域，值不被截断。
+fn right_align_col(panel_width: usize) -> usize {
+    let right_w = panel_width.saturating_sub(panel_width * 45 / 100 + 1);
+    VALUE_ALIGN_COL.min(right_w.saturating_sub(4))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn right_align_col_keeps_wide_screen_value() {
+        // 宽屏（≥100 列）：保持 40 列右对齐目标
+        assert_eq!(right_align_col(100), 40);
+        assert_eq!(right_align_col(120), 40);
+    }
+
+    #[test]
+    fn right_align_col_shrinks_on_narrow_screen() {
+        // 窄屏：收缩到右列可容纳宽度（面板 - 45% 左列 - 分隔线 - 4 余量）
+        assert_eq!(right_align_col(80), 39); // 80-36-1-4
+        assert_eq!(right_align_col(60), 28); // 60-27-1-4
+        assert_eq!(right_align_col(50), 23); // 50-22-1-4
+        assert_eq!(right_align_col(40), 17); // 40-18-1-4
+    }
+
+    #[test]
+    fn right_align_col_never_underflows() {
+        // 极窄：saturating 保证不为负
+        assert_eq!(right_align_col(10), 1); // 10-4-1-4
+        assert_eq!(right_align_col(0), 0); // 0*45/100=0 → 0-0-1 saturating → 0
+    }
+
+    #[test]
+    fn pad_fits_align_column() {
+        // pad + key + value = align（值右边缘对齐），且 pad 不为负
+        let align = right_align_col(60);
+        let key_len = 9; // "    Model "
+        let value_len = 12; // "gpt-5.6-luna"
+        let pad = align.saturating_sub(key_len + value_len);
+        assert_eq!(pad + key_len + value_len, align);
+        assert!(pad < 32, "行宽应不超过右列可视宽度");
     }
 }
