@@ -103,12 +103,40 @@ fn test_merge_json_workspace_overrides_single_field() {
     let workspace: AppConfig = serde_json::from_str(json).unwrap();
     global.merge_overrides(workspace);
     assert_eq!(global.active_alias, "haiku");
-    // show_cache_warning defaults to false in both global and workspace,
-    // so merge retains false (no unintended override from default deserialization)
-    assert!(!global.show_cache_warning);
+    // show_cache_warning: workspace 未显式设置（None）→ 保留全局值，不被默认覆盖
+    assert_eq!(global.show_cache_warning, None);
     // Other fields preserved from global
     assert_eq!(global.providers.len(), 1);
     assert_eq!(global.profiles.sonnet.effort, "medium");
+}
+
+#[test]
+fn test_merge_workspace_not_set_preserves_global_cache_warning() {
+    let mut global = make_global();
+    global.show_cache_warning = Some(true);
+    // workspace 只设置 active_alias，未写 show_cache_warning
+    let json = r#"{"active_alias":"haiku"}"#;
+    let workspace: AppConfig = serde_json::from_str(json).unwrap();
+    global.merge_overrides(workspace);
+    assert_eq!(
+        global.show_cache_warning,
+        Some(true),
+        "workspace 未设置时不应覆盖全局 true"
+    );
+}
+
+#[test]
+fn test_merge_workspace_explicit_false_overrides_global_true() {
+    let mut global = make_global();
+    global.show_cache_warning = Some(true);
+    let json = r#"{"show_cache_warning":false}"#;
+    let workspace: AppConfig = serde_json::from_str(json).unwrap();
+    global.merge_overrides(workspace);
+    assert_eq!(
+        global.show_cache_warning,
+        Some(false),
+        "workspace 显式 false 应覆盖全局 true"
+    );
 }
 
 #[test]

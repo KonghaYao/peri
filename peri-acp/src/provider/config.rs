@@ -168,19 +168,16 @@ pub struct AppConfig {
     /// 主动性级别
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proactiveness: Option<String>,
-    /// 是否在消息流中显示缓存命中率过低警告
-    #[serde(default = "default_show_cache_warning")]
-    pub show_cache_warning: bool,
+    /// 是否在消息流中显示缓存命中率过低警告。
+    /// Option<bool>：None=未设置（merge 时保留全局值），Some=显式开/关。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_cache_warning: Option<bool>,
     /// Beta 功能开关
     #[serde(default)]
     pub betas: BetasConfig,
     /// 保留未知字段（旧 thinking/active_provider_id/context_1m 会被吸收到此，不回写）
     #[serde(flatten)]
     pub extra: Map<String, Value>,
-}
-
-fn default_show_cache_warning() -> bool {
-    false
 }
 
 impl AppConfig {
@@ -231,8 +228,10 @@ impl AppConfig {
         if workspace.proactiveness.is_some() {
             self.proactiveness = workspace.proactiveness;
         }
-        // show_cache_warning: bool 直接覆盖
-        self.show_cache_warning = workspace.show_cache_warning;
+        // show_cache_warning: 仅当 workspace 显式设置时才覆盖（避免默认 false 冲掉全局开启）
+        if workspace.show_cache_warning.is_some() {
+            self.show_cache_warning = workspace.show_cache_warning;
+        }
         // 保留未知字段
         self.extra.extend(workspace.extra);
     }
@@ -252,7 +251,7 @@ impl Default for AppConfig {
             tone: None,
             proactiveness: None,
             claude_md_excludes: None,
-            show_cache_warning: false,
+            show_cache_warning: None,
             betas: BetasConfig::default(),
             extra: serde_json::Map::new(),
         }

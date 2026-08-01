@@ -22,8 +22,11 @@ fn test_apply_toggle_row_cache_warn_flips() {
     let mut cfg = PeriConfig::default();
     let initial = cfg.config.show_cache_warning;
     let new = apply_toggle_row(&mut cfg, ROW_CACHE_WARN);
-    assert_eq!(new, Some(!initial));
-    assert_eq!(cfg.config.show_cache_warning, !initial);
+    assert_eq!(new, Some(!initial.unwrap_or(false)));
+    assert_eq!(
+        cfg.config.show_cache_warning,
+        Some(!initial.unwrap_or(false))
+    );
 }
 
 #[test]

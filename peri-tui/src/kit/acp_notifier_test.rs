@@ -382,6 +382,37 @@ fn test_handle_session_update_skips_non_command_update() {
     assert_eq!(entries.len(), 0, "非 commands update 不应写入 atom");
 }
 
+/// 缓存命中率警告受 show_cache_warning 控制：handle 未初始化（默认关闭）时
+/// 即使命中率低于 80% 也不推送 SystemNotification。
+#[test]
+#[serial]
+fn test_usage_update_cache_warning_suppressed_when_disabled() {
+    crate::kit::atoms::init_atoms();
+    assert!(
+        PERI_CONFIG_HANDLE.get().is_none(),
+        "测试环境 handle 未初始化，应走默认关闭路径"
+    );
+    let payload = json!({
+        "sessionId": "s1",
+        "update": {
+            "sessionUpdate": "usage_update",
+            "_meta": {
+                "inputTokens": 20000,
+                "outputTokens": 100,
+                "cacheReadTokens": 2000,
+                "requestId": "req-1"
+            }
+        }
+    });
+    let (dummy_tx, mut dummy_rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = handle_session_update(payload, &dummy_tx, "test");
+    assert!(result.is_none(), "开关关闭时 usage_update 不应产出事件");
+    assert!(
+        dummy_rx.try_recv().is_err(),
+        "开关关闭时不应推送缓存命中率警告"
+    );
+}
+
 /// 验证 handle_session_update 能正确解析 plan update 并写入 TODO_ITEMS atom。
 #[test]
 #[serial]

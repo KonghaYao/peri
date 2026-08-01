@@ -245,7 +245,7 @@ fn read_toggle(row: usize) -> bool {
             .unwrap_or(false),
         ROW_CACHE_WARN => PERI_CONFIG_HANDLE
             .get()
-            .map(|h| h.read().config.show_cache_warning)
+            .map(|h| h.read().config.show_cache_warning.unwrap_or(false))
             .unwrap_or(false),
         ROW_1M_CONTEXT => PERI_CONFIG_HANDLE
             .get()
@@ -364,7 +364,10 @@ fn activate_row(row: usize, forward: bool) {
                     }
                     return;
                 }
-                ROW_CACHE_WARN => cfg.config.show_cache_warning = !cfg.config.show_cache_warning,
+                ROW_CACHE_WARN => {
+                    let cur = cfg.config.show_cache_warning.unwrap_or(false);
+                    cfg.config.show_cache_warning = Some(!cur);
+                }
                 ROW_1M_CONTEXT => {
                     let alias = cfg.config.active_alias.clone();
                     if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
@@ -580,8 +583,9 @@ fn permission_mode_label(m: PermissionMode) -> &'static str {
 fn apply_toggle_row(cfg: &mut crate::config::PeriConfig, row: usize) -> Option<bool> {
     let new_val = match row {
         ROW_CACHE_WARN => {
-            cfg.config.show_cache_warning = !cfg.config.show_cache_warning;
-            cfg.config.show_cache_warning
+            let cur = cfg.config.show_cache_warning.unwrap_or(false);
+            cfg.config.show_cache_warning = Some(!cur);
+            !cur
         }
         ROW_1M_CONTEXT => {
             let alias = cfg.config.active_alias.clone();
