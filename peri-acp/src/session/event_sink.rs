@@ -237,6 +237,22 @@ impl EventSink for TransportEventSink {
                         message: message.clone(),
                     })
                 }
+                // Rewind v2：RewindCompleted 经 peri/agent_event 通道送达 TUI，
+                // TUI 侧 acp_notifier 转换为 AcpEventData::RewindCompleted 驱动
+                // 弹窗关闭 + 消息区重建 + 输入框回填。
+                ExecutorEvent::RewindCompleted { summary, messages } => {
+                    let messages_json = match serde_json::to_string(messages) {
+                        Ok(json) => json,
+                        Err(e) => {
+                            error!(error = %e, "EventSink: serialize RewindCompleted messages failed");
+                            return;
+                        }
+                    };
+                    Some(AcpEvent::RewindCompleted {
+                        summary: summary.clone(),
+                        messages_json,
+                    })
+                }
                 _ => None,
             };
             if let Some(acp_event) = acp_event {
@@ -385,5 +401,117 @@ impl EventSink for StdioEventSink {
 
     async fn push_done(&self, _session_id: &str, _stop_reason: &str) {
         // No explicit done signal in standard ACP protocol.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::types::{AcpError, IncomingMessage, RequestId};
+    use peri_agent::messages::{BaseMessage, MessageContent, MessageId};
+    use serde_json::Value;
+    use std::sync::Mutex;
+
+    /// Mock transport：记录 send_notification 调用，供断言。
+    #[derive(Debug, Default)]
+    struct MockTransport {
+        notifications: Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    #[async_trait]
+    impl AcpTransport for MockTransport {
+        async fn send_request(&self, _method: &str, _params: Value) -> Result<Value, AcpError> {
+            Ok(Value::Null)
+        }
+        async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {
+            self.notifications
+                .lock()
+                .unwrap()
+                .push((method.to_string(), params));
+            Ok(())
+        }
+        async fn recv(&self) -> Option<IncomingMessage> {
+            None
+        }
+        async fn send_response(
+            &self,
+            _id: RequestId,
+            _result: Result<Value, AcpError>,
+        ) -> Result<(), AcpError> {
+            Ok(())
+        }
+    }
+
+    fn msg() -> BaseMessage {
+        BaseMessage::Human {
+            id: MessageId::new(),
+            content: MessageContent::Text("hi".to_string()),
+        }
+    }
+
+    /// 回归测试：RewindCompleted 必须经 peri/agent_event 通道送达 TUI。
+    /// 缺失此映射时事件被 `_ => None` 静默丢弃，TUI 弹窗卡在执行中态。
+    #[tokio::test]
+    async fn push_event_forwards_rewind_completed() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert("s1".to_string(), PeriCaps::all_enabled());
+        let sink = TransportEventSink::new(transport.clone(), caps);
+
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::RewindCompleted {
+                summary: "已回滚 2 条消息".to_string(),
+                messages: vec![msg()],
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(
+            notifications.len(),
+            1,
+            "应发出恰好 1 条通知: {:?}",
+            notifications
+        );
+        let (method, params) = &notifications[0];
+        assert_eq!(method, "peri/agent_event");
+
+        let event_json = params
+            .get("event_json")
+            .and_then(|v| v.as_str())
+            .expect("event_json 缺失");
+        let parsed: serde_json::Value = serde_json::from_str(event_json).unwrap();
+        // AcpEvent 是 internally-tagged 枚举：{"type":"rewind_completed","value":{...}}
+        let value = parsed.get("value").unwrap();
+        assert_eq!(value.get("summary").unwrap(), "已回滚 2 条消息");
+        let messages_json = value.get("messages_json").and_then(|v| v.as_str()).unwrap();
+        let msgs: Vec<BaseMessage> = serde_json::from_str(messages_json).unwrap();
+        assert_eq!(msgs.len(), 1, "messages_json 应可反序列化回 BaseMessage");
+    }
+
+    /// 能力未声明（agent_event=false）时事件不发出。
+    #[tokio::test]
+    async fn push_event_drops_rewind_completed_without_cap() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert("s1".to_string(), PeriCaps::default());
+        let sink = TransportEventSink::new(transport.clone(), caps);
+
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::RewindCompleted {
+                summary: "s".to_string(),
+                messages: vec![],
+            },
+            0,
+        )
+        .await;
+
+        assert!(
+            transport.notifications.lock().unwrap().is_empty(),
+            "未声明 agent_event cap 时不应发出通知"
+        );
     }
 }
