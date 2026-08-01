@@ -133,7 +133,10 @@ async fn handle_clear_submit(
     // 防止旧 session 残留阻塞新会话。close_popup 在无弹窗时是 no-op，安全；
     // TODO_ITEMS 会在新 session 的 SessionUpdate::Plan 事件到来时重新填充；
     // reset_history_cursor 仅清浏览指针与草稿，INPUT_HISTORY 栈保留。
+    // REWIND_PREVIEW 跟随会话生命周期：clear 后旧消息 id 已失效，必须清空，
+    // 否则双击 Esc 会看到已删除的候选（服务端 rewind 报 not found）。
     crate::kit::popup_overlay::close_popup();
+    *crate::kit::atoms::REWIND_PREVIEW.state().write() = None;
     *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
     crate::kit::input_history::reset_history_cursor();
 

@@ -473,7 +473,8 @@ fn test_prediction_writes_prediction_atom() {
     assert!(pred.received_at.is_some(), "received_at 应被设置");
 }
 
-/// H3: RewindCompleted 反序列化 messages_json 替换 state.committed。
+/// H3: RewindCompleted 反序列化 messages_json 替换 state.committed，
+/// 并同步重建 REWIND_PREVIEW（支持 rewind 后连续回滚）。
 #[test]
 #[serial]
 fn test_rewind_completed_replaces_committed() {
@@ -502,8 +503,8 @@ fn test_rewind_completed_replaces_committed() {
     };
 
     let messages_json = serde_json::json!([
-        {"role": "user", "content": "rewound user msg"},
-        {"role": "assistant", "content": [{"type": "text", "text": "rewound assistant"}]}
+        {"role": "user", "id": "msg-1", "content": "rewound user msg"},
+        {"role": "assistant", "id": "msg-2", "content": [{"type": "text", "text": "rewound assistant"}]}
     ])
     .to_string();
 
@@ -519,6 +520,64 @@ fn test_rewind_completed_replaces_committed() {
         TuiRenderUnit::TuiAssistantBubble(d) => assert_eq!(d.text, "rewound assistant"),
         other => panic!("expected TuiAssistantBubble, got {other:?}"),
     }
+
+    // H4: REWIND_PREVIEW 应重建为回滚后的消息列表（id/role/preview），
+    // 保证连续第二次回滚的目标 id 有效。
+    let preview = crate::kit::atoms::REWIND_PREVIEW.state().read().clone();
+    let preview = preview.expect("rewind 后 REWIND_PREVIEW 应被重建");
+    assert_eq!(preview.messages.len(), 2, "preview 应含 2 条候选消息");
+    assert_eq!(preview.messages[0].id, "msg-1");
+    assert_eq!(preview.messages[0].role, "user");
+    assert_eq!(preview.messages[0].preview, "rewound user msg");
+    assert_eq!(preview.messages[1].id, "msg-2");
+    assert_eq!(preview.messages[1].role, "assistant");
+}
+
+/// 回归（2026-08-01）：handle_rewind_preview 只写 REWIND_PREVIEW atom，
+/// 不再自动打开 popup——弹窗由用户双击 Esc 触发（服务端每个 turn 完成后
+/// 推送 preview，若自动弹窗则每轮对话结束都会弹出回滚选择器）。
+#[test]
+#[serial]
+fn test_rewind_preview_does_not_open_popup() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = BridgeState {
+        variant: 1,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+    };
+
+    use peri_acp_types::event_data::{RewindMessage, RewindPreview};
+    let preview = RewindPreview {
+        files: vec![],
+        messages: vec![RewindMessage {
+            id: "m1".into(),
+            role: "user".into(),
+            preview: "hi".into(),
+        }],
+    };
+    dispatch_and_notify(&mut state, &AcpEventData::RewindPreview(preview));
+
+    assert!(
+        state.popup_kind.is_none(),
+        "rewind-preview 事件不应自动打开 popup"
+    );
+    assert!(
+        crate::kit::atoms::REWIND_PREVIEW.state().read().is_some(),
+        "REWIND_PREVIEW atom 应被写入"
+    );
 }
 
 /// 跨 turn 场景：第一轮 reasoning 在 committed 中保留，第二轮为最后一个展开。

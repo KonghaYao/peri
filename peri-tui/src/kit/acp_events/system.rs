@@ -15,7 +15,7 @@ use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit};
 use fluent_bundle::FluentValue;
 use peri_acp_types::event_data::{
     AskUser, BudgetWarning, HitlPending, OauthNeeded, PluginActionResult, PluginSearchResult,
-    PluginSnapshot, Prediction, PredictionAction, RewindPreview, SystemNotification,
+    PluginSnapshot, Prediction, PredictionAction, RewindMessage, RewindPreview, SystemNotification,
 };
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -97,12 +97,12 @@ pub(super) fn handle_ask_user(state: &mut BridgeState, au: &AskUser) {
 }
 
 pub(super) fn handle_rewind_preview(state: &mut BridgeState, rp: &RewindPreview) {
-    // S10：保存 payload 到 REWIND_PREVIEW atom，供 RewindPopup 读取真实数据
+    // S10：保存 payload 到 REWIND_PREVIEW atom，供 RewindPopup 读取真实数据。
+    // 修复（2026-08-01）：不再自动打开 popup——preview 由服务端在每个 turn
+    // 完成后推送，弹窗只在用户双击 Esc 时由 event_handlers 打开，避免每轮
+    // 对话结束后回滚弹窗自动弹出。
     *crate::kit::atoms::REWIND_PREVIEW.state().write() = Some(rp.clone());
-    state.popup_kind = Some(crate::kit::atoms::PopupKind::Rewind);
-    state.variant = 2;
-    super::render::push_popup_kind(state);
-    super::render::push_acp_state(state);
+    let _ = state;
 }
 
 pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &str) {
@@ -136,6 +136,31 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
                     _ => {}
                 }
             }
+            // 同步重建 REWIND_PREVIEW：rewind 后消息列表已变，旧 preview 中的
+            // 消息 id 已从服务端 history 删除——不重建会导致连续第二次回滚
+            // 时 target 找不到（服务端 emit_rewind_not_found）。从回滚后的
+            // 消息 JSON 直接提取 id/role/preview，保证候选列表与消息区一致。
+            let preview = RewindPreview {
+                files: vec![],
+                messages: msgs
+                    .iter()
+                    .filter_map(|msg| {
+                        let id = msg.get("id").and_then(|v| v.as_str())?.to_string();
+                        let role = msg
+                            .get("role")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let text = super::extract_message_text(msg);
+                        Some(RewindMessage {
+                            id,
+                            role,
+                            preview: text.chars().take(200).collect(),
+                        })
+                    })
+                    .collect(),
+            };
+            *crate::kit::atoms::REWIND_PREVIEW.state().write() = Some(preview);
         }
         Err(e) => {
             tracing::warn!(

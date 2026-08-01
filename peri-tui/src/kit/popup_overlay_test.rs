@@ -108,8 +108,10 @@ fn test_close_popup_clears_payload_atoms() {
     open_popup(PopupKind::Rewind);
     close_popup();
     assert!(
-        atoms::REWIND_PREVIEW.state().read().is_none(),
-        "REWIND_PREVIEW should be cleared after close_popup"
+        atoms::REWIND_PREVIEW.state().read().is_some(),
+        "REWIND_PREVIEW should NOT be cleared after close_popup — preview is a \
+         session-scoped message snapshot (rewind 候选跟随会话生命周期，不随弹窗 \
+         开关丢失；/clear 与 thread 切换由消费者显式清空)"
     );
 
     open_popup(PopupKind::OAuth);

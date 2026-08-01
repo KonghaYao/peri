@@ -30,6 +30,7 @@
 // 其余外部依赖（peri_agent / crate::*）单独 use。
 use std::sync::Arc;
 
+use peri_acp_types::event_data::{RewindMessage, RewindPreview};
 use peri_agent::{
     agent::{
         events::{
@@ -530,12 +531,29 @@ pub(super) async fn build_and_execute_agent_v2(
     let (messages, history_replaced_by_compaction) = {
         let transcript = v2_out.session.transcript();
         let transcript = transcript.read();
-        let messages = transcript.visible_messages().into_iter().cloned().collect();
+        let messages: Vec<BaseMessage> =
+            transcript.visible_messages().into_iter().cloned().collect();
         (messages, transcript.full_compaction_committed())
     };
+    // Phase 8.7: 推送 rewind 预览——TUI 双击 Esc 弹窗的数据源。
+    // 修复（2026-08-01）：v1 ExecutorEvent 全量下线时 router.rs 被物理删除，
+    // "rewind-preview" 事件失去唯一发送方，TUI 的 REWIND_PREVIEW atom 永远为空，
+    // 导致 RewindPopup 永远显示"无可回退"。本处每个 turn 完成后推送当前完整
+    // 消息列表（含消息 id），让弹窗候选始终与消息区同步。
+    let rewind_preview_payload = build_rewind_preview_payload(&messages);
     let mut agent_state = AgentState::with_messages(ctx.cwd.clone(), messages);
     agent_state.set_context("session_id", &ctx.session_id);
     agent_state.set_context("run_id", uuid::Uuid::now_v7().to_string());
+
+    if let Some(payload) = rewind_preview_payload {
+        event_sink
+            .push_unstable_event(
+                &ctx.session_id,
+                "rewind-preview".to_string(),
+                serde_json::to_value(&payload).unwrap_or_default(),
+            )
+            .await;
+    }
 
     // Phase 8.5: 把 v2 recall_buffer（middleware hook 期间累积）灌入 agent_state。
     // 下游 collect_result() 调用 agent_state.drain_recall() 取出 recall_items，
@@ -622,4 +640,32 @@ pub(super) async fn build_and_execute_agent_v2(
         history_replaced_by_compaction,
         agent_state,
     }
+}
+
+/// 从消息列表构造 `rewind-preview` 事件 payload。
+///
+/// 每个 `RewindMessage` 携带服务端权威的消息 id（TUI 双击 Esc 确认时回传，
+/// 服务端按 id 截断 history）。preview 截断到 200 字符——仅供弹窗显示，
+/// 完整内容保存在服务端 transcript 中。
+pub(super) fn build_rewind_preview_payload(messages: &[BaseMessage]) -> Option<RewindPreview> {
+    if messages.is_empty() {
+        return None;
+    }
+    let preview = RewindPreview {
+        files: vec![],
+        messages: messages
+            .iter()
+            .map(|m| RewindMessage {
+                id: m.id().as_uuid().to_string(),
+                role: match m {
+                    BaseMessage::Human { .. } => "user".to_string(),
+                    BaseMessage::Ai { .. } => "assistant".to_string(),
+                    BaseMessage::System { .. } => "system".to_string(),
+                    BaseMessage::Tool { .. } => "tool".to_string(),
+                },
+                preview: m.content().chars().take(200).collect(),
+            })
+            .collect(),
+    };
+    Some(preview)
 }

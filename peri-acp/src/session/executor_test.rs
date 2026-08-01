@@ -452,3 +452,55 @@ async fn test_intercept_immediate_ok_always_true() {
         "Immediate 命令拦截后 ok 必须为 true（命令成功 = agent 不构建）"
     );
 }
+
+// ── build_rewind_preview_payload: rewind 预览 payload 构造 ──────────────────
+
+/// 修复回归（2026-08-01）：turn 完成后推送 rewind-preview 的 payload 构造。
+/// 每个候选必须携带服务端权威的消息 id（TUI 确认时回传定位截断点）。
+#[test]
+fn test_build_rewind_preview_payload_carries_message_ids_and_roles() {
+    use super::build_rewind_preview_payload;
+    use peri_acp_types::event_data::RewindPreview;
+
+    let human = BaseMessage::human("第一轮用户问题");
+    let ai = BaseMessage::ai("第一轮回答");
+    let messages = vec![human.clone(), ai.clone()];
+
+    let payload: RewindPreview = build_rewind_preview_payload(&messages).unwrap();
+
+    assert!(payload.files.is_empty(), "preview 不携带文件变更");
+    assert_eq!(payload.messages.len(), 2);
+    assert_eq!(
+        payload.messages[0].id,
+        human.id().as_uuid().to_string(),
+        "候选 id 必须是服务端权威消息 id"
+    );
+    assert_eq!(payload.messages[0].role, "user");
+    assert_eq!(payload.messages[0].preview, "第一轮用户问题");
+    assert_eq!(payload.messages[1].id, ai.id().as_uuid().to_string());
+    assert_eq!(payload.messages[1].role, "assistant");
+    assert_eq!(payload.messages[1].preview, "第一轮回答");
+}
+
+/// 空消息列表返回 None——没有可回滚内容时不推送 preview。
+#[test]
+fn test_build_rewind_preview_payload_empty_returns_none() {
+    use super::build_rewind_preview_payload;
+
+    assert!(
+        build_rewind_preview_payload(&[]).is_none(),
+        "空 history 不应生成 preview payload"
+    );
+}
+
+/// 超长消息的 preview 截断到 200 字符（弹窗显示用，完整内容在服务端）。
+#[test]
+fn test_build_rewind_preview_payload_truncates_preview() {
+    use super::build_rewind_preview_payload;
+
+    let long_text = "x".repeat(500);
+    let messages = vec![BaseMessage::human(long_text)];
+    let payload = build_rewind_preview_payload(&messages).unwrap();
+
+    assert_eq!(payload.messages[0].preview.chars().count(), 200);
+}
