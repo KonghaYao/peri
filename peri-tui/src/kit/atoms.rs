@@ -185,6 +185,8 @@ pub struct MemoryEntry {
 #[derive(Debug, Clone, Default)]
 pub struct PredictionState {
     pub text: String,
+    /// 最近一次预测的会话摘要（spinner 名言位优先显示）
+    pub summary: Option<String>,
     pub received_at: Option<Instant>,
 }
 

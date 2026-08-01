@@ -451,16 +451,25 @@ fn test_prediction_writes_prediction_atom() {
         todo_call_inputs: std::collections::HashMap::new(),
     };
 
-    use peri_acp_types::event_data::Prediction;
+    use peri_acp_types::event_data::{Prediction, PredictionAction};
     dispatch_and_notify(
         &mut state,
         &AcpEventData::Prediction(Prediction {
             text: "type this".into(),
+            actions: vec![
+                PredictionAction::Placeholder {
+                    text: "type this".into(),
+                },
+                PredictionAction::Summary {
+                    text: "修复了认证问题".into(),
+                },
+            ],
         }),
     );
 
     let pred = PREDICTION.state().read().clone();
     assert_eq!(pred.text, "type this");
+    assert_eq!(pred.summary.as_deref(), Some("修复了认证问题"));
     assert!(pred.received_at.is_some(), "received_at 应被设置");
 }
 

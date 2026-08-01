@@ -15,7 +15,7 @@ use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit};
 use fluent_bundle::FluentValue;
 use peri_acp_types::event_data::{
     AskUser, BudgetWarning, HitlPending, OauthNeeded, PluginActionResult, PluginSearchResult,
-    PluginSnapshot, Prediction, RewindPreview, SystemNotification,
+    PluginSnapshot, Prediction, PredictionAction, RewindPreview, SystemNotification,
 };
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -60,8 +60,18 @@ pub(super) fn handle_system_notification(state: &mut BridgeState, sn: &SystemNot
 }
 
 pub(super) fn handle_prediction(p: &Prediction) {
+    let mut summary = None;
+    let mut text = p.text.clone();
+    for action in &p.actions {
+        match action {
+            PredictionAction::Placeholder { text: t } => text = t.clone(),
+            PredictionAction::Summary { text: t } => summary = Some(t.clone()),
+            _ => {} // SetTitle / AddTag 由 acp_server 执行写入，此处仅展示
+        }
+    }
     *PREDICTION.state().write() = crate::kit::atoms::PredictionState {
-        text: p.text.clone(),
+        text,
+        summary,
         received_at: Some(Instant::now()),
     };
 }
