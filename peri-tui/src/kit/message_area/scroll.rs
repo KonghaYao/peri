@@ -254,7 +254,6 @@ pub(super) fn handle_event(
         if matches!(mouse.kind, MouseEventKind::Moved) {
             return EventResult::Ignored;
         }
-
         if let Some(area) = area_rect {
             let in_area = mouse_in_area(mouse.row, mouse.column, area);
 

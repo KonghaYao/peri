@@ -538,7 +538,14 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         let ov_h = *overlay_height_cl.lock();
                         let composer_top = outer.y.saturating_add(ov_h).saturating_add(1);
                         let text_x = outer.x.saturating_add(3);
-                        if mouse.row >= composer_top && mouse.column >= text_x {
+                        // [FIX] 必须加上界：composer 下方是状态栏/通知行，行号同样 >= composer_top。
+                        // 长文本（wrap > 10 行，editor_rows clamp 到 10）时 composer_height 不再
+                        // 随文本增长，click_visual_row 可能落入 total_visual_rows 范围 → 误把
+                        // 状态栏点击当作 composer 点击消费，status_bar 模型切换弹窗收不到事件。
+                        if mouse.row >= composer_top
+                            && mouse.row < outer.y.saturating_add(outer.height)
+                            && mouse.column >= text_x
+                        {
                             let click_visual_row = mouse.row.saturating_sub(composer_top) as usize;
                             let click_display_col = mouse.column.saturating_sub(text_x) as usize;
                             let s = state_cl.read();
